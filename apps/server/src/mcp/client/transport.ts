@@ -24,6 +24,13 @@ import type { McpServerConfig, McpValueSource } from "../config.js";
 const STDIO_MAX_BUFFER_BYTES = 32 * 1024 * 1024;
 
 /**
+ * Deadline on the DELETE that ends a streamable-HTTP session. Healthy servers
+ * answer in well under a second; a longer wait means the peer is gone, and
+ * closing the connection should not wait on it.
+ */
+const TERMINATE_SESSION_TIMEOUT_MS = 2_000;
+
+/**
  * Construct an SDK `Transport` from a server config + the secrets store
  * (resolves `SecretRef` env / header values to plaintext at construction).
  *
@@ -65,6 +72,7 @@ export async function createTransport(
       // `sessionId?: string` — incompatible under `exactOptionalPropertyTypes`.
       return new StreamableHTTPClientTransport(new URL(config.url), {
         requestInit: { headers },
+        fetch: fetchWithSessionDeadline,
       }) as Transport;
     }
     case "sse":
@@ -72,6 +80,21 @@ export async function createTransport(
         `MCP sse transport is not supported; use transport: "http" for remote servers (Streamable HTTP)`,
       );
   }
+}
+
+/**
+ * `fetch` for a streamable-HTTP transport. `terminateSession()` takes no
+ * signal: it sends its DELETE under the transport's own, which aborts only on
+ * close, and undici sets no request timeout. The SDK sends a DELETE for
+ * nothing else, so that request alone also gets a deadline.
+ */
+function fetchWithSessionDeadline(url: string | URL, init?: RequestInit): Promise<Response> {
+  if (init?.method !== "DELETE") return fetch(url, init);
+  const deadline = AbortSignal.timeout(TERMINATE_SESSION_TIMEOUT_MS);
+  return fetch(url, {
+    ...init,
+    signal: init.signal ? AbortSignal.any([init.signal, deadline]) : deadline,
+  });
 }
 
 async function resolveVarMap(

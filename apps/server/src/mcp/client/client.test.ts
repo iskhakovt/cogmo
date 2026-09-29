@@ -205,30 +205,6 @@ describe("SdkMcpConnection", () => {
     expect(order).toEqual(["terminate", "close"]);
   });
 
-  it("bounds terminateSession with a timeout so a hung peer doesn't block close", async () => {
-    vi.useFakeTimers();
-    try {
-      const { client, httpTransport } = setupHttpConn();
-      // Simulate a server that accepts the DELETE but never responds —
-      // exactly the half-open / hung-peer scenario the timeout exists for.
-      vi.spyOn(httpTransport, "terminateSession").mockImplementation(() => new Promise(() => {}));
-      vi.spyOn(httpTransport, "close").mockImplementation(async () => {
-        httpTransport.onclose?.();
-      });
-
-      const conn = new SdkMcpConnection(client, httpTransport as unknown as Transport, SERVER_NAME);
-      await conn.connect();
-
-      const closePromise = conn.close();
-      // Advance past the 2s cap; close must complete after the race resolves.
-      await vi.advanceTimersByTimeAsync(2_000);
-      await expect(closePromise).resolves.toBeUndefined();
-      expect(client.close).toHaveBeenCalledOnce();
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
   it("swallows terminateSession errors so close still completes", async () => {
     const { client, httpTransport } = setupHttpConn();
     vi.spyOn(httpTransport, "terminateSession").mockRejectedValue(new Error("server gone"));

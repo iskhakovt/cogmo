@@ -6,7 +6,7 @@ import {
   ReadBuffer,
   STDIO_DEFAULT_MAX_BUFFER_SIZE,
 } from "@modelcontextprotocol/sdk/shared/stdio.js";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Transaction, Transactor } from "../../db/index.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
@@ -167,6 +167,73 @@ async function serverReplyingWith(contentType: string): Promise<{ url: string; s
   const { port } = address satisfies AddressInfo;
   return { url: `http://127.0.0.1:${port}/mcp`, server };
 }
+
+/**
+ * A local server that opens a session on POST and never answers the DELETE
+ * that ends it: a peer gone quiet.
+ */
+async function serverHangingOnDelete(): Promise<{ url: string; server: Server }> {
+  const server = createServer((req, res) => {
+    if (req.method === "DELETE") return;
+    if (req.method !== "POST") {
+      res.writeHead(405).end();
+      return;
+    }
+    let body = "";
+    req.on("data", (chunk: Buffer) => {
+      body += chunk.toString("utf8");
+    });
+    req.on("end", () => {
+      const id = (JSON.parse(body) as { id: number }).id;
+      res.writeHead(200, { "content-type": "application/json", "mcp-session-id": "s-1" });
+      res.end(JSON.stringify({ jsonrpc: "2.0", id, result: {} }));
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (address === null || typeof address === "string") {
+    throw new Error("expected a TCP address for the probe server");
+  }
+  return { url: `http://127.0.0.1:${address.port}/mcp`, server };
+}
+
+describe("createTransport — streamable-http session end", () => {
+  let running: Server | undefined;
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    const server = running;
+    running = undefined;
+    if (server) {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("puts a deadline on the DELETE that ends the session, and on nothing else", async () => {
+    const probe = await serverHangingOnDelete();
+    running = probe.server;
+    const deadline = new AbortController();
+    const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(deadline.signal);
+    const transport = await createTransport(
+      { transport: "http", url: probe.url, headers: {} },
+      mock<SecretsStore>(),
+      fakeRunInTx,
+    );
+    if (!(transport instanceof StreamableHTTPClientTransport)) {
+      throw new Error("expected a streamable-http transport");
+    }
+    await transport.start();
+    await transport.send({ jsonrpc: "2.0", id: 1, method: "ping" });
+    expect(timeout).not.toHaveBeenCalled();
+
+    const ending = transport.terminateSession();
+    await vi.waitFor(() => expect(timeout).toHaveBeenCalledWith(2_000));
+    deadline.abort(new DOMException("deadline passed", "TimeoutError"));
+    await expect(ending).rejects.toThrow(/deadline passed/);
+    await transport.close();
+  });
+});
 
 /**
  * The SDK matches a response's media type exactly, so a server whose header
