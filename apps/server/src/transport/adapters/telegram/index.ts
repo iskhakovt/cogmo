@@ -273,11 +273,20 @@ class TelegramAdapter implements Adapter, StreamingAdapter {
   }
 
   async stop(): Promise<void> {
-    this.#bot.stop();
+    // `bot.stop()` aborts the pending long poll, then confirms the last
+    // update's offset with one more `getUpdates` so Telegram doesn't
+    // redeliver the batch. Call it before awaiting the polling loop, which
+    // only ends once that abort lands.
+    const confirmed = this.#bot
+      .stop()
+      .catch((err: unknown) =>
+        logger.warn({ err }, "telegram: confirming the update offset on stop failed"),
+      );
     // Drain the polling loop so any in-flight retry-backoff abort rejects
     // before this process exits — otherwise the unhandled rejection lands
     // on the runtime/test harness instead of being swallowed in attachPolling.
     if (this.#polling) await this.#polling;
+    await confirmed;
   }
 }
 

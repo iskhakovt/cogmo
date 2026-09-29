@@ -125,7 +125,7 @@ Keys don't close every route — see `DEPLOYMENT.md` → Securing internal servi
 On `SIGTERM` or `SIGINT`, once the Inngest connection closes, `cogmo serve` tears down in this order (`src/shutdown.ts`):
 
 1. **Web server.** Abort the server-lifetime signal, which ends every chat stream cleanly so the browser reconnects to the next process, then `close()`, which refuses new connections and reaps idle keep-alive ones. A request still in flight after 3 s has its connection closed (`closeAllConnections()`, called after `close()` as Node's docs recommend).
-2. **Channel adapters**, concurrently.
+2. **Channel adapters**, concurrently. Telegram confirms its last update offset, so the batch isn't redelivered on restart.
 3. **MCP** connection pool.
 4. **Sandbox.** On local-Docker this closes the socket proxy, which ends every connection a task opened through it, hijacked streams included.
 5. **Instance row.** Sets `cogmo_instances.stopped_at` ([sandbox.md → Data Model](sandbox.md#data-model-confirmed)).

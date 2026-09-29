@@ -4,8 +4,9 @@ import { PLAN_CALLBACK_REGEX } from "../../../agent/coding/plan-keyboard.js";
 import { PIPELINE_GATE_CALLBACK_REGEX } from "../../../agent/pipeline/gate-keyboard.js";
 import type { BoundaryResolvedData } from "../../../inngest/events.js";
 import { boundaryResolvedEvent, pipelineGatePending } from "../../../inngest/events.js";
+import { logger } from "../../../logger.js";
 import { SKILLS_APPROVAL_CALLBACK_REGEX } from "../../../skills/skills-keyboard.js";
-import { asBatchAdapter, expectDefined } from "../../../test/assertions.js";
+import { asBatchAdapter, expectDefined, resolvesWithin } from "../../../test/assertions.js";
 import {
   fakeRunInTx,
   mockAttachmentStore,
@@ -32,6 +33,15 @@ const mockBotApi = {
   setMyCommands: vi.fn().mockResolvedValue(true),
 };
 
+/**
+ * What the mocked `bot.start()` (the polling loop) and `bot.stop()` (the
+ * offset confirmation) return. Reset before each test.
+ */
+const botLifecycle = vi.hoisted(() => ({
+  polling: (): Promise<void> => Promise.resolve(),
+  stop: (): Promise<void> => Promise.resolve(),
+}));
+
 vi.mock("grammy", () => {
   // Grammy's InputFile wraps a Buffer — the test captures it so assertions can
   // inspect the payload without needing the real grammy implementation.
@@ -56,9 +66,9 @@ vi.mock("grammy", () => {
     // properties of undefined (reading 'catch')".
     start = vi.fn(({ onStart }: any = {}) => {
       onStart?.();
-      return Promise.resolve();
+      return botLifecycle.polling();
     });
-    stop = vi.fn();
+    stop = vi.fn(() => botLifecycle.stop());
   }
   return { Bot: MockBot, InputFile };
 });
@@ -150,6 +160,8 @@ describe("telegram adapter", () => {
   beforeEach(() => {
     handlers.clear();
     vi.clearAllMocks();
+    botLifecycle.polling = () => Promise.resolve();
+    botLifecycle.stop = () => Promise.resolve();
   });
 
   async function createAdapter(transportOverrides?: Partial<ReturnType<typeof mockTransport>>) {
@@ -221,6 +233,57 @@ describe("telegram adapter", () => {
       expect(c.command).toMatch(/^[a-z0-9_]{1,32}$/);
       expect(c.description.length).toBeGreaterThan(0);
     }
+  });
+
+  describe("stop", () => {
+    it("waits for the update offset to be confirmed", async () => {
+      const confirmed = Promise.withResolvers<void>();
+      botLifecycle.stop = () => confirmed.promise;
+      const { adapter } = await createAdapter();
+      let stopped = false;
+
+      const stopping = adapter.stop().then(() => {
+        stopped = true;
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(stopped).toBe(false);
+      confirmed.resolve();
+      await stopping;
+      expect(stopped).toBe(true);
+    });
+
+    it("logs a failed confirmation instead of throwing", async () => {
+      const failure = new Error("network down");
+      botLifecycle.stop = () => Promise.reject(failure);
+      const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+      try {
+        const { adapter } = await createAdapter();
+
+        await expect(adapter.stop()).resolves.toBeUndefined();
+        expect(warn).toHaveBeenCalledWith({ err: failure }, expect.any(String));
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it("stops polling, then drains the loop", async () => {
+      // As in grammY, the polling loop ends only once `stop()` has aborted it.
+      const loopEnded = Promise.withResolvers<void>();
+      let drained = false;
+      botLifecycle.polling = () =>
+        loopEnded.promise.then(() => {
+          drained = true;
+        });
+      botLifecycle.stop = async () => {
+        setImmediate(() => loopEnded.resolve());
+      };
+      const { adapter } = await createAdapter();
+
+      await resolvesWithin(adapter.stop(), 1_000, "stop");
+
+      expect(drained).toBe(true);
+    });
   });
 
   it("emits via transport on text message", async () => {
