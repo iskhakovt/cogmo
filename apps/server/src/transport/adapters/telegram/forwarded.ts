@@ -1,6 +1,16 @@
+import { type Composer, type Context, matchFilter } from "grammy";
 import type { Chat, MessageOrigin } from "grammy/types";
 import { match } from "ts-pattern";
 import type { ForwardedOrigin, InboundTextBlock } from "../../content.js";
+
+/**
+ * The part of `bot` commands register on: every update except a forwarded
+ * message. A forwarded `/cmd` keeps its `bot_command` entity, but it's someone
+ * else's text, so it passes on to the message handlers as forwarded content.
+ */
+export function commandComposer<C extends Context>(bot: Composer<C>): Composer<C> {
+  return bot.drop(matchFilter(":forward_origin"));
+}
 
 /**
  * A message's text or caption as an inbound text block, marked `forwarded`

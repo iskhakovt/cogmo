@@ -49,6 +49,10 @@ vi.mock("grammy", () => {
     callbackQuery = vi.fn((pattern: RegExp, handler: any) =>
       handlers.set(`callbackQuery:${pattern.source}`, handler),
     );
+    // Commands register on `bot.drop(...)`. The mock hands back the bot, so they
+    // land in `handlers` too; grammY's routing of forwarded messages past them
+    // is covered by forwarded.test.ts.
+    drop = vi.fn(() => this);
     catch = vi.fn();
     // Real grammY returns a Promise<void> that resolves when bot.stop() is
     // called. The adapter awaits it on stop() to drain — without the
@@ -60,7 +64,7 @@ vi.mock("grammy", () => {
     });
     stop = vi.fn();
   }
-  return { Bot: MockBot, InputFile };
+  return { Bot: MockBot, InputFile, matchFilter: vi.fn() };
 });
 
 function makeCtx(fromId: number, text = "hello", chatId = 42) {

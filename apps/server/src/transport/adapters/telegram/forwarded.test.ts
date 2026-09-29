@@ -1,9 +1,74 @@
-import type { MessageOrigin } from "grammy/types";
-import { describe, expect, it } from "vitest";
-import { inboundTextBlock } from "./forwarded.js";
+import { Api, Composer, Context } from "grammy";
+import type { MessageOrigin, UserFromGetMe } from "grammy/types";
+import { describe, expect, it, vi } from "vitest";
+import { commandComposer, inboundTextBlock } from "./forwarded.js";
 
 const DATE = 1700000000;
 const SENT_AT = "2023-11-14T22:13:20.000Z";
+
+describe("commandComposer", () => {
+  const me: UserFromGetMe = {
+    id: 1,
+    is_bot: true,
+    first_name: "Cogmo",
+    username: "cogmo_bot",
+    can_join_groups: false,
+    can_read_all_group_messages: false,
+    supports_inline_queries: false,
+    can_connect_to_business: false,
+    has_main_web_app: false,
+    has_topics_enabled: false,
+    allows_users_to_create_topics: false,
+    can_manage_bots: false,
+    supports_join_request_queries: false,
+  };
+  const user = { id: 42, is_bot: false, first_name: "Timur" };
+
+  /** Routes a `/new` message through commands on `commandComposer` and a text handler after them. */
+  async function route(origin: MessageOrigin | undefined) {
+    const composer = new Composer<Context>();
+    const command = vi.fn();
+    const text = vi.fn();
+    commandComposer(composer).command("new", command);
+    composer.on("message:text", text);
+    const ctx = new Context(
+      {
+        update_id: 1,
+        message: {
+          message_id: 1,
+          date: DATE,
+          chat: { id: 42, type: "private", first_name: "Timur" },
+          from: user,
+          text: "/new work",
+          entities: [{ type: "bot_command", offset: 0, length: 4 }],
+          ...(origin !== undefined && { forward_origin: origin }),
+        },
+      },
+      new Api("test-token"),
+      me,
+    );
+    await composer.middleware()(ctx, () => Promise.resolve());
+    return { command, text };
+  }
+
+  it("runs a command the user sent", async () => {
+    const { command, text } = await route(undefined);
+
+    expect(command).toHaveBeenCalledOnce();
+    expect(text).not.toHaveBeenCalled();
+  });
+
+  it("passes a forwarded command to the text handler instead of running it", async () => {
+    const { command, text } = await route({
+      type: "hidden_user",
+      date: DATE,
+      sender_user_name: "Bob",
+    });
+
+    expect(command).not.toHaveBeenCalled();
+    expect(text).toHaveBeenCalledOnce();
+  });
+});
 
 describe("inboundTextBlock", () => {
   it("leaves text that wasn't forwarded unmarked", () => {
