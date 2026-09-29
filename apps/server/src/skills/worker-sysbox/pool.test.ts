@@ -915,6 +915,21 @@ describe("SysboxWorkerPool", () => {
     await pool.dispose();
   });
 
+  it("replaces a worker that dies after a failed replacement at once", async () => {
+    const h = buildPoolHarness({ spawnFails: [2], poolOptions: { min: 2, max: 2 } });
+    const pool = await h.pool;
+    expectDefined(h.spawned[0], "first worker").die("supervisor exited");
+    // Its replacement was tried, and failed.
+    await vi.waitFor(() => expect(h.spawnCount()).toBe(3));
+    await new Promise<void>((r) => setTimeout(r, 0));
+    expect(pool.stats().total).toBe(1);
+
+    expectDefined(h.spawned[1], "second worker").die("supervisor exited");
+
+    await vi.waitFor(() => expect(pool.stats()).toMatchObject({ total: 2, idle: 2 }));
+    await pool.dispose();
+  });
+
   it("keeps `min` warm — sweep never drains below it", async () => {
     const h = buildPoolHarness({
       poolOptions: {

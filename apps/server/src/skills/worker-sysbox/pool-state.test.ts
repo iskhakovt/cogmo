@@ -55,8 +55,10 @@ const STATES = {
   full: { ...EMPTY, workers: [at(W1, "leased"), at(W2, "leased")], spawning: 1, queue: ["q1"] },
   /** W1 died under its task, which still holds it; its replacement is under way. */
   dying: { ...EMPTY, workers: [at(W1, "dead")], spawning: 1 },
-  /** A replacement failed: below `min` until the sweep. */
+  /** A replacement failed: below `min` until a death or the sweep. */
   spawn_failed: { ...EMPTY, spawnFailed: true },
+  /** At `min`, after a spawn for a waiter another worker served failed. */
+  warm_spawn_failed: { ...EMPTY, workers: [at(W1, "idle")], spawnFailed: true },
   looping: {
     ...EMPTY,
     earlyDeaths: CRASH_LOOP_DEATHS,
@@ -171,6 +173,7 @@ const TABLE: ReadonlyArray<Row> = [
   ["dying", "disposable", ["teardown"], "- | q[] | s1 | e0"],
   ["spawn_failed", "acquire", ["spawn"], "- | q[q2] | s1 | e0 | spawn failed"],
   ["spawn_failed", "sweep", ["spawn"], "- | q[] | s1 | e0"],
+  ["warm_spawn_failed", "died_early", ["log", "spawn"], "w1:dead | q[] | s1 | e1"],
   ["looping", "acquire", [], "w1:leased | q[q1 q2] | s0 | e3"],
   ["looping", "returned", ["release", "grant"], "w1:leased+ | q[] | s0 | e0"],
   ["looping", "returned_dead", ["release", "reject"], "w1:dead+ | q[] | s0 | e3"],

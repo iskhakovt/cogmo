@@ -7,7 +7,7 @@ import type { Death } from "../worker-state.js";
  * The warm pool's bookkeeping as a pure state machine. `transition` takes an
  * event and returns the next state and the effects to carry out;
  * `SysboxWorkerPool` feeds it and executes them. See `design/skills.md` →
- * Warm pool.
+ * Pool lifecycle.
  *
  * Every transition ends in `reconcile`, which reads only the state: it
  * grants idle workers to the head of the queue, then spawns for every
@@ -72,9 +72,9 @@ export interface PoolState<W extends WorkerRef, Q> {
   /** Early deaths in a row; see `CRASH_LOOP_DEATHS`. */
   readonly earlyDeaths: number;
   /**
-   * A spawn failed since the last spawn that succeeded and the last sweep:
-   * only waiters spawn, so a sandbox that fails every spawn is retried for
-   * `min` once per sweep, not in a loop.
+   * A spawn failed, and since then no spawn has succeeded, no worker has
+   * died and no sweep has run: only waiters spawn, so a sandbox that fails
+   * every spawn is retried for `min` once per death or sweep, not in a loop.
    */
   readonly spawnFailed: boolean;
 }
@@ -244,7 +244,7 @@ function onSpawnFailed<W extends WorkerRef, Q>(
   const [waiter, ...queue] = state.queue;
   if (waiter === undefined) {
     return step(next, [
-      log("warn", "worker spawn failed; the pool stays below min until the next sweep", {
+      log("warn", "worker spawn failed; the pool stays below min until a death or the sweep", {
         err: describeError(error),
       }),
     ]);
@@ -266,7 +266,9 @@ function onDied<W extends WorkerRef, Q>(
     !entry.served &&
     ageMs < CRASH_LOOP_WINDOW_MS;
   const earlyDeaths = early ? state.earlyDeaths + 1 : state.earlyDeaths;
-  return step({ ...state, earlyDeaths, workers: markDead(state.workers, worker) }, [
+  // A death is replaced at once, even after a failed spawn.
+  const workers = markDead(state.workers, worker);
+  return step({ ...state, earlyDeaths, spawnFailed: false, workers }, [
     log("debug", "worker died", { workerId: worker.workerId, ...death }),
     ...(early && earlyDeaths === CRASH_LOOP_DEATHS
       ? [

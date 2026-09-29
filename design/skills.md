@@ -128,7 +128,7 @@ The worker needs a stdin-attached exec that streams both ways. Daytona's PTY exe
 
 | Piece | Responsibility |
 |-|-|
-| **Pool manager** (`SysboxWorkerPool`) | Lease idle workers to tasks; queue beyond `max`. Scale between `min` and `max` on demand. Replace a dead worker at once, back up to `min`. Retire workers after N tasks or T ms age. Sweep idle workers above `min`. |
+| **Pool manager** (`SysboxWorkerPool`) | Lease idle workers to tasks; queue beyond `max`. Scale between `min` and `max` on demand. Replace a dead worker at once, back up to `min`. Retire workers after N tasks or T ms age. Sweep idle workers above `min`. The shell around a pure state machine; see [Pool lifecycle](#pool-lifecycle-confirmed). |
 | **Worker** (`SysboxSkillWorker`) | One sysbox container with a `SandboxSession`, reused across many tasks. Spawns the python supervisor process ONCE at create-time via `session.execStreaming` and refuses it unless it announces the host's protocol version. `invoke()` returns once the supervisor's `task_exited` confirms the task's processes are gone, or the worker dies. |
 | **Supervisor** (`supervisor.py`) | Long-lived python process inside the container; it holds the host channel but never reads it. Per task it forks a **relay**, which forks the **task process** before reading anything from the host; see [State reset between tasks](#state-reset-between-tasks-confirmed). After the relay exits it kills and reaps its whole subtree, then sends `task_exited`. EOF on stdin = clean shutdown. |
 | **Dispatcher** | The shell around a worker's state machine; see [Host-side worker lifecycle](#host-side-worker-lifecycle-confirmed). One per worker (NOT per task), reused across the worker's lifetime. Per-task `CtxHandler` is supplied at each `invoke()` call so the run id, manifest, and audit hooks scope to that task; a ctx call is served only by the handler of the running task that issued it. |
@@ -184,7 +184,30 @@ Each worker channel, in both tiers, is one pure state machine (`src/skills/worke
 - A transport exposes the worker's frames as `messages(): AsyncIterable<WorkerFrame>`: each a validated worker message, or a malformed frame, which the handshake refuses and a live worker logs and ignores. The stream ending or failing is the worker going away. Tier 2 reads NDJSON from the supervisor's stdout. Tier 1 reads the thread's `MessagePort`; its stream fails when the thread errors or exits, and yields a `task_exited` after each `task_result`, since the thread never outlives its one task.
 - `invoke()` resolves the task's outcome: its result, or why it has none, and its exit (`confirmed`, or `unconfirmed` with a reason). A result delivered before the worker died is kept; the worker is reusable only on a confirmed exit.
 - The handshake timeout and the task deadline (wall clock plus a grace) are `AbortSignal`s that feed events in; a deadline for a task already settled is ignored.
-- The pool subscribes to each worker's `dead` and `disposable` as it spawns it. It replaces a dead worker at once, back up to `min`, and removes the worker and tears its container down once it is disposable — at once, or once the task holding it returns; until then it counts toward `max`. A container still tearing down does not count, so while teardowns run the sandbox can hold more than `max`. A freed slot goes to a queued acquirer first, and a spawn that fails fails one acquire — its own, or the head of the queue — and spawns for the next queued one. A death is early when the worker dies on its own, never leased, within a minute of its handshake; after three early deaths in a row, only the sweep replaces dead workers, and a queued acquirer waits for a busy worker or fails if there is none. A task that returns with its worker alive clears the count. Disposing the pool aborts one signal: a live worker's channel closes on it, and a spawn stops at its next step. It returns once every container is gone, those already tearing down included.
+- `dead` resolves with who ended the worker: `host` when the host closed its channel, `worker` for everything else — the channel ending or failing, a refused or missed handshake, a passed deadline, a frame naming another task.
+
+### Pool lifecycle `[confirmed]`
+
+The pool's bookkeeping is a second pure state machine (`src/skills/worker-sysbox/pool-state.ts`) over `{ phase, workers, spawning, queue, earlyDeaths, spawnFailed }`, each worker `idle`, `leased` or `dead` as the pool last heard. `transition(state, event)` returns the next state and the effects to carry out — spawn, grant, reject, retire, release, tear down, log — and `SysboxWorkerPool` is its shell.
+
+| Event | From |
+|-|-|
+| `acquire` | `invoke()` |
+| `spawned`, `spawn_failed` | a spawn settling |
+| `grant_refused` | a worker refusing a grant: it died before the pool heard |
+| `died`, `disposable` | a worker's `dead` (with its cause and age) and `disposable` |
+| `task_returned` | a task giving its worker back: alive (task count and age), dead, or `invoke` threw |
+| `sweep` | the interval, with each worker's idle time |
+| `dispose` | `dispose()` |
+
+- Every transition ends in `reconcile`, which reads only the state: it grants idle workers to the oldest waiters, then spawns for every waiter and every worker still short of `min` — a waiter's worker counts toward `min` once granted — less the spawns under way, room permitting. A waiter always has a spawn under way or a full pool to wait on, whichever event queued it.
+- The worker stays authoritative for leases: the shell grants with `tryAcquire`, and a refusal comes back as `grant_refused`, which marks the worker dead and puts the waiter back at the head of the queue.
+- A dead worker counts toward `max` until it is disposable — at once, or once the task holding it returns — and its container is then torn down. A container tearing down does not count, so while teardowns run the sandbox can hold more than `max`.
+- A task that returns with its worker alive clears the early deaths, and the worker is retired first at `recycleAfterTasks` or `recycleAfterMs`. A worker whose `invoke` threw is retired.
+- A failed spawn fails the oldest waiter, and `reconcile` spawns for the next. Until a spawn succeeds, a worker dies or the sweep runs, only waiters spawn, so a sandbox that fails every spawn is not retried for `min` in a loop.
+- A death is early when the worker died on its own (`worker`, not `host`), never leased, within a minute of its handshake. After three early deaths in a row nothing spawns but one worker toward `min` per sweep, and a waiter waits for a busy worker or fails if none is busy.
+- The sweep retires idle workers above `min` that have sat past `idleShutdownMs`.
+- `dispose()` aborts the signal every worker was created with — a live worker's channel closes, a spawn stops at its next step — rejects every waiter, and tears down every worker, held ones included. A worker that spawns afterwards is torn down; `dispose()` returns once no spawn or teardown is left.
 
 ### State reset between tasks `[confirmed]`
 
