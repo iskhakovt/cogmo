@@ -3,7 +3,7 @@ import type http from "node:http";
 import { basename, join } from "node:path";
 import { type ChatCompletionRequest, LLMock } from "@copilotkit/aimock";
 import { HAPPENED_IN_RE, normalizeHappenedIn } from "../src/test/llmock-happened-in.js";
-import { type CassetteFixture, describeMiss } from "../src/test/llmock-miss.js";
+import { type CassetteFixture, describeMiss, narrowModelMatch } from "../src/test/llmock-miss.js";
 import { normalizeTurnContext } from "../src/test/llmock-turn-context.js";
 
 /**
@@ -181,10 +181,9 @@ function loadCassette(mock: LLMock, dir: string): CassetteFixture[] {
     .flatMap((file) => {
       const before = mock.getFixtures().length;
       mock.loadFixtureFile(join(dir, file));
-      return mock
-        .getFixtures()
-        .slice(before)
-        .map((fixture) => ({ fixture, file }));
+      const loaded = mock.getFixtures().slice(before);
+      loaded.forEach(narrowModelMatch);
+      return loaded.map((fixture) => ({ fixture, file }));
     });
 }
 

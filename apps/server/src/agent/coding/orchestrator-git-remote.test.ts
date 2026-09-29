@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, type Readable } from "node:stream";
 import type { Octokit } from "@octokit/rest";
+import { ok } from "neverthrow";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Database, Transactor } from "../../db/index.js";
@@ -187,6 +188,7 @@ function noopExec(result: FakeExecResult = {}): ExecStreamingHandle {
   return {
     stdout: out as Readable,
     stderr: err as Readable,
+    exited: Promise.resolve(ok({ exitCode: result.exitCode ?? 0 })),
     wait: async () => ({ exitCode: result.exitCode ?? 0 }),
     dispose: async () => {},
   };

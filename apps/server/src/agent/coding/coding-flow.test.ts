@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { ok } from "neverthrow";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
 import {
@@ -146,6 +147,7 @@ function fakeSandbox(): {
   const exec = (): ExecStreamingHandle => ({
     stdout: process.stdin,
     stderr: process.stdin,
+    exited: Promise.resolve(ok({ exitCode: 0 })),
     wait: async () => ({ exitCode: 0 }),
     dispose: async () => {},
   });

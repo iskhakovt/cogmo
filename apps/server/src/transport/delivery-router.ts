@@ -1,6 +1,8 @@
+import { err, ok, type Result } from "neverthrow";
 import type { Transactor } from "../db/index.js";
 import type { StreamEvent } from "../llm/types.js";
 import { logger } from "../logger.js";
+import { describeError } from "../util/describe-error.js";
 import type {
   OutboundDocument,
   OutboundImage,
@@ -43,16 +45,35 @@ export interface RoutingContext {
   streamOpts?: StreamOpts;
 }
 
+/** A stream target a fan-out could not reach. */
+export interface StreamFailure {
+  sessionId: string;
+  reason: string;
+}
+
+/** The stream targets a fan-out could not reach, each with its reason. */
+export class StreamDeliveryError extends Error {
+  readonly failures: ReadonlyArray<StreamFailure>;
+  constructor(failures: ReadonlyArray<StreamFailure>) {
+    super(`stream delivery failed: ${failures.map((f) => f.reason).join("; ")}`);
+    this.name = "StreamDeliveryError";
+    this.failures = failures;
+  }
+}
+
 /**
  * Handle to an in-progress delivery — fans out to both streaming and batch targets.
  *
  * The orchestrator calls push() during streaming, finish()/abort() at the end,
  * and deliverBatch() after persisting the final message.
+ *
+ * `push`, `finish` and `abort` reach every stream target, concurrently,
+ * whichever of them fail; they err with every target that failed.
  */
 export interface DeliveryHandle {
-  push(event: StreamEvent): Promise<void>;
-  finish(): Promise<void>;
-  abort(error: string): Promise<void>;
+  push(event: StreamEvent): Promise<Result<void, StreamDeliveryError>>;
+  finish(): Promise<Result<void, StreamDeliveryError>>;
+  abort(error: string): Promise<Result<void, StreamDeliveryError>>;
   /**
    * Whether this delivery has any non-streaming targets.
    *
@@ -71,6 +92,15 @@ export interface DeliveryHandle {
     images?: readonly OutboundImage[],
     documents?: readonly OutboundDocument[],
   ): Promise<void>;
+  /**
+   * Deliver the reply to sessions whose stream failed at finish, through
+   * their adapter's batch `deliver`, after persist. Such a stream may have
+   * shown nothing (append-only mode writes only at chunk boundaries and at
+   * finish) or a cut-short preview. Media went out mid-stream, so only the
+   * text goes. A session whose adapter has no `deliver` is skipped. Rejects
+   * once every session has been tried, if any delivery failed.
+   */
+  deliverUnstreamed(sessionIds: ReadonlyArray<string>, content: string): Promise<void>;
   /**
    * Whether any active routing target supports voice delivery. Lets the
    * orchestrator skip TTS work entirely when no session can render voice
@@ -159,7 +189,7 @@ export function createDeliveryRouter(deps: DeliveryRouterDeps): DeliveryRouter {
         logger.warn({ conversationId: ctx.conversationId }, "no routing targets found");
       }
 
-      const streamHandles: StreamHandle[] = [];
+      const streamTargets: StreamTarget[] = [];
       const batchTargets: Array<{
         platformAddress: string;
         adapter: Adapter;
@@ -184,7 +214,12 @@ export function createDeliveryRouter(deps: DeliveryRouterDeps): DeliveryRouter {
             ctx.runId,
             ctx.streamOpts,
           );
-          streamHandles.push(handle);
+          streamTargets.push({
+            sessionId: session.id,
+            platformAddress: session.platformAddress,
+            entry,
+            handle,
+          });
         } else {
           batchTargets.push({
             platformAddress: session.platformAddress,
@@ -205,20 +240,28 @@ export function createDeliveryRouter(deps: DeliveryRouterDeps): DeliveryRouter {
       // share session state with prepare(), since failure notification can
       // arrive long after the turn that triggered it.)
       return {
-        async push(event: StreamEvent): Promise<void> {
-          for (const handle of streamHandles) {
-            await handle.push(event);
-          }
-        },
-        async finish(): Promise<void> {
-          for (const handle of streamHandles) {
-            await handle.finish();
-          }
-        },
-        async abort(error: string): Promise<void> {
-          for (const handle of streamHandles) {
-            await handle.abort(error);
-          }
+        push: (event) => fanOut(streamTargets, (handle) => handle.push(event)),
+        finish: () => fanOut(streamTargets, (handle) => handle.finish()),
+        abort: (error) => fanOut(streamTargets, (handle) => handle.abort(error)),
+        async deliverUnstreamed(sessionIds, content): Promise<void> {
+          const targets = streamTargets.filter((target) => sessionIds.includes(target.sessionId));
+          const settled = await Promise.allSettled(
+            targets.map(async ({ sessionId, platformAddress, entry }) => {
+              if (!hasDeliver(entry.adapter)) {
+                logger.warn({ sessionId }, "deliverUnstreamed: adapter has no batch deliver");
+                return;
+              }
+              await entry.adapter.deliver(
+                platformAddress,
+                entry.renderOutput ? entry.renderOutput(content) : content,
+              );
+            }),
+          );
+          const rejected = settled.flatMap((outcome) =>
+            outcome.status === "rejected" ? [outcome.reason] : [],
+          );
+          if (rejected.length === 1) throw rejected[0];
+          if (rejected.length > 1) throw new AggregateError(rejected, "deliverUnstreamed failed");
         },
         hasBatchTargets(): boolean {
           return batchTargets.length > 0;
@@ -299,6 +342,43 @@ export function createDeliveryRouter(deps: DeliveryRouterDeps): DeliveryRouter {
       }
     },
   };
+}
+
+/**
+ * Push `event`, throwing when a target failed. Inside a step, that fails the
+ * step, and the step's retry reopens the streams: the failed handle has left
+ * its adapter, so the retry streams into a fresh one.
+ */
+export async function pushOrThrow(delivery: DeliveryHandle, event: StreamEvent): Promise<void> {
+  const pushed = await delivery.push(event);
+  if (pushed.isErr()) throw pushed.error;
+}
+
+/** An open stream, and the session and adapter it delivers to. */
+interface StreamTarget {
+  sessionId: string;
+  platformAddress: string;
+  entry: AdapterEntry;
+  handle: StreamHandle;
+}
+
+/**
+ * Call every handle at once and collect the failures. A handle that rejects
+ * rather than returning its failure counts as failed all the same.
+ */
+async function fanOut(
+  targets: ReadonlyArray<StreamTarget>,
+  call: (handle: StreamHandle) => Promise<Result<void, string>>,
+): Promise<Result<void, StreamDeliveryError>> {
+  const settled = await Promise.allSettled(targets.map(({ handle }) => call(handle)));
+  const failures = settled.flatMap((outcome, i): StreamFailure[] => {
+    const sessionId = targets[i]?.sessionId ?? "";
+    if (outcome.status === "rejected") {
+      return [{ sessionId, reason: describeError(outcome.reason) }];
+    }
+    return outcome.value.isErr() ? [{ sessionId, reason: outcome.value.error }] : [];
+  });
+  return failures.length === 0 ? ok(undefined) : err(new StreamDeliveryError(failures));
 }
 
 function hasDeliver(adapter: AdapterEntry["adapter"]): adapter is Adapter {

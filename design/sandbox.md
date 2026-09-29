@@ -134,40 +134,34 @@ type ExecResult = {
 
 /**
  * Streaming exec handle. `stdout` / `stderr` are demultiplexed Node
- * `Readable`s — backends produce them via the appropriate transport
- * (dockerode demux for Local-Docker, session-logs WS + manual demux for
- * Daytona). Awaiting `wait()` resolves with the exit code once the
- * backend reports the process finished.
+ * `Readable`s, per-chunk rather than per-line. They end when the exec
+ * settles, and fail with the transport's error only when it breaks while
+ * output is flowing; `exited` reports the outcome either way.
  *
- * `dispose()` aborts the exec by tearing down the backend's transport
- * (Docker exec API has no direct kill — closing the hijacked socket
- * lets the daemon reap the process; Daytona's only kill primitive is
- * `deleteSession`). It does NOT send signals; backends that grow
- * signal support may upgrade the implementation but not the contract.
- * Idempotent. After `dispose()`, the streams emit EOF (no error on
- * `stdout` / `stderr`) and `wait()` rejects with `DisposedError` —
- * callers racing dispose against natural exit must check for that.
+ * `exited` settles once and never rejects. `wait()` is its throwing form:
+ * `ExecTimeoutError`, `ExecDisposedError`, the transport's own error, or
+ * an `Error` naming why there is no exit code.
  *
- * `ExecOptions.timeoutMs` (total wall-clock) and
- * `ExecOptions.idleTimeoutMs` (no-byte-flow watchdog) cap `wait()` on
- * the caller's behalf. On expiry the backend runs the same cleanup
- * `dispose()` would (close socket / `deleteSession`) and rejects
- * `wait()` with `ExecTimeoutError`. `ExecTimeoutError` is a distinct
- * sentinel from `DisposedError` so consumers branching on outcome can
- * separate "we hit the cap" from "we cancelled." See "Wall-clock and
- * idle timeouts" below.
- *
- * Consumers wanting line semantics do their own line splitter
- * (`split2` etc.) on the `Readable`s — backends emit per-chunk, not
- * per-line.
+ * `dispose()` tears the exec down. Local-Docker stops the command's process
+ * group (TERM, then KILL) from a second exec and closes the attach socket;
+ * the Daytona PTY kills its process; a Daytona session command has its
+ * session deleted. Idempotent. Resolves once every teardown it caused has
+ * finished or given up.
  */
 interface ExecStreamingHandle {
   stdin?: Writable;
   stdout: Readable;
   stderr: Readable;
+  readonly exited: Promise<Result<{ exitCode: number }, ExecFailure>>;
   wait(): Promise<{ exitCode: number }>;
   dispose(): Promise<void>;
 }
+
+type ExecFailure =
+  | { kind: "timed_out"; deadline: "total" | "idle"; timeoutMs: number }
+  | { kind: "disposed" } // dispose(), or ExecOptions.signal aborted
+  | { kind: "transport_failed"; error: Error }
+  | { kind: "no_exit_code"; reason: string };
 ```
 
 ### Wall-clock and idle timeouts `[confirmed]`
@@ -176,14 +170,32 @@ Streaming-exec callers pass two independent timeouts on `ExecOptions`:
 
 | Field | Triggers when |
 |-|-|
-| `timeoutMs` | total wall-clock since `execStreaming()` resolved |
-| `idleTimeoutMs` | no stdout/stderr chunk has arrived for `idleTimeoutMs` |
+| `timeoutMs` | total wall-clock since `execStreaming()` was called, start included |
+| `idleTimeoutMs` | no stdout/stderr chunk for `idleTimeoutMs` once the command runs; restarted once more when the output ends, to bound fetching the exit code |
 
-Both default off (no cap). The interface accepts them on every backend; backend implementations clear both timers on natural exit (stream `end`/WS close) and dispose, reset the idle timer on every chunk, and on timer fire run the same teardown `dispose()` would (Local-Docker: `stream.destroy()`; Daytona: `deleteSession`) then reject `wait()` with `ExecTimeoutError`. Idempotent: a timer firing after a natural exit is a no-op.
+Both default off (no cap). Either settles the exec as `timed_out` at once and tears it down after (see Exec lifecycle below); a deadline that fires once the exec has settled does nothing. `ExecOptions.signal` is the caller's own cancellation: aborting it disposes the exec.
 
 Why two, not one. The Daytona wedge incident (4-day stuck task, run id `01KRM7A886F293XVTJPVB9CZ91`) was a transient WS hang on `getSessionCommandLogs`: the underlying WebSocket held open silently, the daemon never sent close, and `await handle.wait()` blocked forever. A single total-deadline cap would have caught it, but the cap that fits one workload (e.g. `git checkout` 60s) is wrong for another (`claude -p` streaming for tens of minutes). Splitting into total + idle lets `claude` opt into "stream as long as you want, but never go silent for >N minutes" while keeping `git` calls bounded by their natural wall-clock. This is the same shape e2b ships ([e2b-dev/E2B #1128](https://github.com/e2b-dev/E2B/issues/1128) — streaming calls only honored connect timeout, not read), Modal exposes ([`Sandbox.create(timeout=..., idle_timeout=...)`](https://modal.com/docs/guide/timeouts)), and WebSocket best practice recommends as the "75% rule" — ping at 0.75× the shortest proxy idle. Daytona's own [#2510](https://github.com/daytonaio/daytona/issues/2510) describes the stream-doesn't-close bug; [#2513](https://github.com/daytonaio/daytona/issues/2513) the missing async completion API. Both are upstream limitations the timeout pair routes around.
 
-Per-callsite defaults are owned by the caller, not the backend — see [coding-delegation.md → Per-callsite exec timeouts](coding-delegation.md#per-callsite-exec-timeouts-confirmed). Backends never inject a default; passing nothing means no cap (preserves the pre-timeout behaviour for skills tier-2 and any future caller that genuinely wants unbounded exec).
+Per-callsite defaults are owned by the caller, not the backend — see [coding-delegation.md → Per-callsite exec timeouts](coding-delegation.md#per-callsite-exec-timeouts-confirmed). Backends never inject a default; passing nothing means no cap (skills tier-2, and any caller that genuinely wants an unbounded exec).
+
+### Exec lifecycle `[confirmed]`
+
+Every backend runs its execs through one lifecycle: a pure transition table (`src/sandbox/exec-state.ts`, effects as data) driven by `runExec` (`src/sandbox/exec-run.ts`). A backend is an `ExecBackend` adapter with three operations: `start` (launch the command, deliver its output and the end or failure of its output stream), `fetchExit` (the exit code, or why there is none) and `teardown` (release what `start` acquired).
+
+```
+awaiting_stdin ─stdin_ended─► starting ─started─► running ─stream_ended─► draining ─exit_code─► settled
+any live state ─ deadline · dispose · start_failed · stream_failed ─► settled
+```
+
+`awaiting_stdin` exists only for a backend that needs the caller's whole stdin before it can start (the Daytona PTY). `draining` fetches the exit code, and the PTY's stderr tmpfile with it.
+
+- **Settlement never waits on teardown.** A deadline, `dispose()` or an aborted `signal` settles `exited` at once; teardown is an effect of settling, bounded by its own timeout. A transport that cannot be torn down (a `deleteSession` that fails, a WebSocket that never closes) leaves a logged failure, not a hung caller.
+- **What a teardown stops.** Local-Docker: the Engine API has no exec kill, and closing the attach socket leaves the process running, so each command runs under a `sh` wrapper that records its process group, and teardown signals the group (TERM, then KILL) from a second exec. Daytona PTY: `kill()`. Daytona session: `deleteSession`, which the SDK does not document as stopping the command's processes.
+- **The exit code is fetched before teardown,** which can erase it (Daytona's `getSessionCommand` 404s once the session is deleted). Local-Docker re-inspects until the daemon has reaped the exec, since its attach stream can end while `ExitCode` is still null, and reports `no_exit_code` if it never is.
+- **Deadlines bound the whole exec,** start included: an upload, `createPty` or `sendInput` that never returns settles as `timed_out`. A start still in flight sees the settlement on its `AbortSignal` and stops before its next remote step; whatever it acquires late is torn down again.
+- **The first settling event wins.** Output after settlement is dropped and restarts nothing; only output while `running` restarts the idle deadline. What the transport reports while the start is in flight is delivered after the start's own outcome, so the order never depends on microtask timing.
+- **A failed teardown is retried** by the next `dispose()`, or by one that arrived while it ran, and changes no outcome. `dispose()` resolves once the teardowns it caused, retries and a late start's included, have finished or given up.
 
 ### Discriminated options and state
 
@@ -392,8 +404,9 @@ Task startup:
 Task teardown:
 
 1. Supervisor triggers root-task cascade.
-2. Closes and removes the socket file.
-3. Removes socket entry from proxy's map.
+2. Removes the socket's entry from the proxy's map.
+3. Ends every connection made through the socket and its upstream leg to the daemon — hijacked streams (`logs -f`, `events`, attach) included, so teardown never waits on a running container.
+4. Closes the socket's listener and removes the socket file.
 
 ### Crash Recovery `[confirmed]`
 
@@ -551,7 +564,7 @@ The slice-4 PR namespace `cogmo/<idShort>` (different namespace from `cogmo/run/
 
 ### Streaming exec `[confirmed]`
 
-Two backends share the `ExecStreamingHandle` contract, selected per call by `opts.attachStdin`. Output-only execs (`attachStdin: false` or omitted) take the **session-logs WebSocket** path; execs that need real stdin (`attachStdin: true`) take the **PTY** path. Downstream code stays backend-agnostic — both paths expose the same `Readable`-stream + `wait()` + `dispose()` shape.
+Two backends share the `ExecStreamingHandle` contract, selected per call by `opts.attachStdin`. Output-only execs (`attachStdin: false` or omitted) take the **session-logs WebSocket** path; execs that need real stdin (`attachStdin: true`) take the **PTY** path. Downstream code stays backend-agnostic — both are `ExecBackend` adapters on the shared [Exec lifecycle](#exec-lifecycle-confirmed).
 
 **Output-only (session-logs WS, `exec-streaming.ts`).** `executeSessionCommand({ runAsync: true })` returns a command id, then `getSessionCommandLogs(sessionId, commandId, onStdout, onStderr)` opens a WS with separated stdout/stderr callbacks. This is the right path for pure-output commands because (a) the WS provides demuxed streams, matching the local-Docker dockerode shape downstream code depends on, and (b) session commands are cheaper than PTY sessions.
 
@@ -561,16 +574,17 @@ Two backends share the `ExecStreamingHandle` contract, selected per call by `opt
 - Sends one shell line into the PTY: `exec bash --norc --noprofile -c 'cat <stdinPath> | exec <argv> 2> <stderrPath>'`. The outer `bash --norc --noprofile -c` swap replaces Daytona's default interactive shell atomically with a non-interactive bash — no readline, no `PROMPT_COMMAND`, so the OSC title / mode-reset chain bash normally emits when transitioning out of interactive mode doesn't pollute stdout. The inner `cat <stdinPath> | exec <argv>` pipes stdin: claude 2.1.138 silently exits 0 with no output when stream-json input arrives via a regular file FD (`cmd < file`), so the `cat | exec` pattern hands the CLI a real pipe FD whose EOF arrives when `cat` drains. `exec` replaces the inner bash with the target binary so PTY exit = target binary exit, no marker parsing.
 - Sets `NO_COLOR=1` in the PTY's env block to suppress ANSI escapes on stdout (PTY's stdout is still a TTY for the child).
 - Redirects child stderr to `/tmp/cogmo-pty-stderr-<uuid>.log` so the PTY's combined onData channel carries clean stdout JSONL; the wrapper downloads + emits the stderr file via the stderr `Readable` after the PTY exits.
-- Cleans up both tmpfiles via `fs.deleteFile` on settle (best-effort; sandbox teardown sweeps `/tmp` anyway).
+- On teardown, kills the PTY unless it reported an exit code, disconnects, and deletes both tmpfiles via `fs.deleteFile` (best-effort; sandbox teardown sweeps `/tmp` anyway).
+- Registers `PtyHandle.wait()` as soon as the PTY exists. In `@daytona/sdk` 0.214 it settles on the `exited` control frame or on the WS closing: a normal close (1000) with no parseable reason reads as exit 0; an abnormal close (1006) resolves it with no exit code, which the exec reports as `no_exit_code` and still kills the PTY, since the remote command may run on; and a `wait()` first called after such a close never settles. `kill()` sets no exit code either, and one that 404s finds the PTY gone.
 
 WS reality the wrapper hides:
 
 - **Callbacks are per-chunk, not per-line.** Consumers wanting lines do their own splitter (`split2` etc.) on the returned `Readable`.
-- **Exit code arrives separately.** The WS closes when the command exits; the wrapper then fetches `getSessionCommand(sessionId, commandId)` to read the exit code.
-- **No per-command kill.** `dispose()` calls `deleteSession(sessionId)`, which tears down everything in that session. To keep dispose semantics clean, the wrapper allocates **one Daytona session per `execStreaming()` call**.
+- **Exit code arrives separately.** The WS closes when the command exits; the wrapper then fetches `getSessionCommand(sessionId, commandId)` to read the exit code, before deleting the session, after which it 404s.
+- **No per-command kill.** `dispose()` calls `deleteSession(sessionId)`. So that it touches no other command, the wrapper allocates **one Daytona session per `execStreaming()` call**.
 - **No WS heartbeat.** The wrapper relies on the client's per-sandbox `refreshActivity()` ticker (see Authentication & deployment) to keep the sandbox alive across long execs.
 - **Command completion fires on the session shell's exit.** Daytona detects "the command finished" by the session's bash process exiting; it doesn't poll the target binary directly. `buildShellCommand` therefore invokes the argv as a normal child of bash (`cd <wd> && env K=V <argv>`) — never via bash's `exec` builtin, which would replace the shell process and prevent the completion event from firing. Daytona [#2513](https://github.com/daytonaio/daytona/issues/2513) tracks the missing async-exit notification; running the target as a shell child gives the shell a clean exit to report.
-- **WS close is the only completion signal, and it isn't reliable.** Daytona [#2513](https://github.com/daytonaio/daytona/issues/2513) calls this out explicitly — there is no promise-based exit notification today; the WS closing is what tells the wrapper the command finished. Daytona [#2510](https://github.com/daytonaio/daytona/issues/2510) shows the WS sometimes fails to close. Without an upper bound, `wait()` can block forever. The total + idle timeout pair on `ExecOptions` (see [Wall-clock and idle timeouts](#wall-clock-and-idle-timeouts-confirmed) above) is the upper bound. On timer fire the wrapper runs `cleanupSession()` (= `deleteSession`, the same teardown `dispose()` uses — Daytona [#2510](https://github.com/daytonaio/daytona/issues/2510)'s recommended explicit-cleanup path) and rejects `wait()` with `ExecTimeoutError`.
+- **WS close is the only completion signal, and it isn't reliable.** Daytona [#2513](https://github.com/daytonaio/daytona/issues/2513) calls this out explicitly — there is no promise-based exit notification today; the WS closing is what tells the wrapper the command finished. Daytona [#2510](https://github.com/daytonaio/daytona/issues/2510) shows the WS sometimes fails to close. The total + idle timeout pair on `ExecOptions` (see [Wall-clock and idle timeouts](#wall-clock-and-idle-timeouts-confirmed) above) is the upper bound: a deadline settles the exec as `timed_out` without waiting for the WS, then tears it down with `deleteSession` (Daytona [#2510](https://github.com/daytonaio/daytona/issues/2510)'s recommended explicit-cleanup path). A `deleteSession` that fails leaves the WS open and is logged; it never holds the exec.
 
 `claude` is wrapped by `stdbuf -oL -eL` inside the sandbox to defeat its block-buffering bug ([anthropics/claude-code#25670](https://github.com/anthropics/claude-code/issues/25670)). `stdbuf` is in coreutils on every reasonable base image. If a future image lacks it, fall back to `script -qfc 'claude …' /dev/null`.
 

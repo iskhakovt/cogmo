@@ -29,6 +29,10 @@ import { createHandleMessage } from "./agent/handle-message.js";
 import { createIdleTimer } from "./agent/idle-timer.js";
 import { ImageToolsLoader } from "./agent/image-tools-loader.js";
 import { runStreamingAgentLoop } from "./agent/loop.js";
+import { loadModelCatalog } from "./agent/model-catalog/load-model-catalog.js";
+import { createModelCatalogRefresh } from "./agent/model-catalog/refresh-function.js";
+import { refreshModelCatalog } from "./agent/model-catalog/refresh-model-catalog.js";
+import { DrizzleModelCatalogStore } from "./agent/model-catalog/store/index.js";
 import { createPipelineGateResolver } from "./agent/pipeline/gate-resolver.js";
 import { createPipelineGateWaiter } from "./agent/pipeline/gate-waiter.js";
 import { runAgenticStage } from "./agent/pipeline/run-agentic-stage.js";
@@ -63,6 +67,7 @@ import { type BootstrapLock, bootstrapLock } from "./db/bootstrap-lock.js";
 import { type Database, db, type Transactor, transactor } from "./db/index.js";
 import { env } from "./env.js";
 import { inboundArrived, inngest } from "./inngest/index.js";
+import { bundledSnapshot, installLiveCatalog } from "./llm/litellm-data.js";
 import type { LlmProvider } from "./llm/provider.js";
 import {
   constantResolver,
@@ -201,6 +206,7 @@ export interface CoreDeps {
   transportStore: DrizzleTransportStore;
   sandboxStore: DrizzleSandboxStore;
   codingStore: DrizzleCodingStore;
+  modelCatalogStore: DrizzleModelCatalogStore;
   pipelineStore: DrizzlePipelineStore;
   pipelineRunStore: DrizzlePipelineRunStore;
   mcpStore: DrizzleMcpStore;
@@ -331,6 +337,7 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
   const transportStore = new DrizzleTransportStore();
   const sandboxStore = new DrizzleSandboxStore();
   const codingStore = new DrizzleCodingStore();
+  const modelCatalogStore = new DrizzleModelCatalogStore();
   const pipelineStore = new DrizzlePipelineStore();
   const pipelineRunStore = new DrizzlePipelineRunStore();
   const mcpStore = new DrizzleMcpStore();
@@ -433,6 +440,7 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
     transportStore,
     sandboxStore,
     codingStore,
+    modelCatalogStore,
     pipelineStore,
     pipelineRunStore,
     mcpStore,
@@ -749,6 +757,13 @@ export async function bootstrapRuntime(
   skillRunner: SkillRunnerImpl,
   opts: BootstrapOptions = {},
 ): Promise<RuntimeDeps> {
+  // Before the channels start, so their first turns resolve limits from it.
+  await loadModelCatalog({
+    runInTx: core.runInTx,
+    modelCatalogStore: core.modelCatalogStore,
+    installCatalog: installLiveCatalog,
+    catalogUrl: env.MODEL_CATALOG_URL,
+  });
   const codingBackend = new ClaudeCodeBackend();
   const codingStreamingRegistry = new CodingStreamingRegistry();
   const codingServiceFactory = (conversationId: string) =>
@@ -982,7 +997,6 @@ export async function bootstrapRuntime(
     runner: new McpHostRunner(),
     callTimeoutMs: env.MCP_CALL_TIMEOUT_MS,
     idleEvictionMs: env.MCP_IDLE_EVICTION_MS,
-    evictionIntervalMs: env.MCP_EVICTION_INTERVAL_MS,
     toolBudget: env.MCP_TOOL_BUDGET,
   });
   await mcpRegistry.start();
@@ -1097,6 +1111,24 @@ export async function bootstrapRuntime(
     defaultProfileId: core.profile.id,
     gracePeriodMs: env.BOUNDARY_PROMPT_TIMEOUT_SECONDS * 2 * 1000,
   });
+  const catalogUrl = env.MODEL_CATALOG_URL;
+  const modelCatalogFunctions =
+    catalogUrl === "off"
+      ? []
+      : [
+          createModelCatalogRefresh(
+            () =>
+              refreshModelCatalog({
+                runInTx: core.runInTx,
+                modelCatalogStore: core.modelCatalogStore,
+                url: catalogUrl,
+                fetch: globalThis.fetch,
+                installCatalog: installLiveCatalog,
+                bundled: bundledSnapshot(),
+              }),
+            inngest,
+          ),
+        ];
 
   // Voice — lazy per-turn resolver. Reads `voice_config` + decrypts both
   // secrets per call (sub-ms each), caches constructed providers by content
@@ -1280,6 +1312,7 @@ export async function bootstrapRuntime(
     ...debounceFunctions,
     ...channelFunctions,
     ...codingFunctions,
+    ...modelCatalogFunctions,
   ];
 
   return { functions, adapters, mcpRegistry, webTransport, webStreamRegistry };

@@ -6,7 +6,6 @@
  * catch wiring bugs (env threading, branch flow, status transitions).
  */
 
-import { PassThrough, type Readable } from "node:stream";
 import type { Octokit } from "@octokit/rest";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
@@ -24,6 +23,7 @@ import {
   serializeGitHubIdentity,
 } from "../../secrets/github.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
+import { fakeExecHandle } from "../../test/coding-fixtures.js";
 import { makeStepRun, makeStepSendEvent } from "../../test/factories.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { type CodingBackend, DrizzleCodingStore } from "./store/index.js";
@@ -53,21 +53,12 @@ interface FakeExecResult {
   stdout?: string;
   stderr?: string;
   exitCode?: number;
+  /** The transport fails: both streams fail with this error, and so does the exec. */
+  transportError?: Error;
 }
 
 function fakeExec(result: FakeExecResult): ExecStreamingHandle {
-  const stdout = new PassThrough();
-  const stderr = new PassThrough();
-  if (result.stdout) stdout.write(result.stdout);
-  if (result.stderr) stderr.write(result.stderr);
-  stdout.end();
-  stderr.end();
-  return {
-    stdout: stdout as Readable,
-    stderr: stderr as Readable,
-    wait: vi.fn(async () => ({ exitCode: result.exitCode ?? 0 })),
-    dispose: vi.fn(async () => {}),
-  };
+  return fakeExecHandle({ ...result, dispose: vi.fn(async () => {}) });
 }
 
 interface FakeContainerScript {
@@ -305,6 +296,44 @@ describe("runCodingVerify", () => {
     });
     // Ready-for-review PR — no draft flag in the request.
     expect(create.mock.calls[0]?.[0]).not.toHaveProperty("draft");
+  });
+
+  it("a transport failure reading HEAD on a clean tree fails the task without an unhandled rejection", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const handle = fakeContainerHandle({
+        verify: { stdout: "PASS\n", exitCode: 0 },
+        git: {
+          status: { stdout: "", exitCode: 0 },
+          "rev-parse": { transportError: new Error("hijacked socket reset") },
+        },
+      });
+      const deps = makeDeps(handle);
+      const inngest = { send: vi.fn().mockResolvedValue(undefined) } as unknown as Pick<
+        import("inngest").Inngest,
+        "send"
+      >;
+      const { taskId } = await seedTask();
+      const result = await runCodingVerify({
+        taskId,
+        runId: "run-test",
+        deps,
+        stepRun,
+        stepSendEvent: makeStepSendEvent(inngest),
+        inngest,
+      });
+
+      expect(result.status).toBe("failed");
+      // Node reports an unhandled rejection once the microtask queue drains.
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
   });
 
   it("verify failure → status=failed, no commit/push attempted", async () => {

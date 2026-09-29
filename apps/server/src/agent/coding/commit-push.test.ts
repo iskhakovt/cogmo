@@ -1,4 +1,3 @@
-import { PassThrough, type Readable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import type {
   ExecOptions,
@@ -6,27 +5,19 @@ import type {
   LocalDockerSessionState,
   SandboxSession,
 } from "../../sandbox/index.js";
+import { fakeExecHandle } from "../../test/coding-fixtures.js";
 import { runCommitAndPush } from "./commit-push.js";
 
 interface FakeExecResult {
   stdout?: string;
   stderr?: string;
   exitCode?: number;
+  /** The transport fails: both streams fail with this error, and so does the exec. */
+  transportError?: Error;
 }
 
 function fakeExec(result: FakeExecResult): ExecStreamingHandle {
-  const stdout = new PassThrough();
-  const stderr = new PassThrough();
-  if (result.stdout) stdout.write(result.stdout);
-  if (result.stderr) stderr.write(result.stderr);
-  stdout.end();
-  stderr.end();
-  return {
-    stdout: stdout as Readable,
-    stderr: stderr as Readable,
-    wait: vi.fn(async () => ({ exitCode: result.exitCode ?? 0 })),
-    dispose: vi.fn(async () => {}),
-  };
+  return fakeExecHandle({ ...result, dispose: vi.fn(async () => {}) });
 }
 
 interface RecordedCall {
@@ -234,6 +225,34 @@ describe("runCommitAndPush", () => {
     expect(result.kind).toBe("failed");
     if (result.kind === "failed") {
       expect(result.output).toMatch(/cannot run gpg/);
+    }
+  });
+
+  it("throws a transport failure without leaving a stream reader's rejection unhandled", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const transportError = new Error("hijacked socket reset");
+      const { container } = fakeContainer({ status: { transportError } });
+      await expect(
+        runCommitAndPush({
+          container,
+          worktreeDir: "/workspace",
+          branch: "cogmo/abc",
+          commitMessage: "goal",
+          signingKeyPath: "/tmp/cogmo-askpass/signing-key",
+          askpassEnv: {},
+          author: { name: "a", email: "a@example.com" },
+        }),
+      ).rejects.toBe(transportError);
+      // Node reports an unhandled rejection once the microtask queue drains.
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
     }
   });
 

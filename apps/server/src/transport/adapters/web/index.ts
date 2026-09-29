@@ -1,3 +1,4 @@
+import { ok, type Result } from "neverthrow";
 import type { StreamEvent } from "../../../llm/types.js";
 import type { AdapterModule } from "../../adapter-module.js";
 import type { StreamHandle, StreamingAdapter } from "../../types.js";
@@ -38,11 +39,12 @@ class WebStreamHandle implements StreamHandle {
     this.#finishTurn = finishTurn;
   }
 
-  async push(event: StreamEvent): Promise<void> {
+  async push(event: StreamEvent): Promise<Result<void, string>> {
     this.#registry.send(this.#platformAddress, { data: JSON.stringify(event) });
+    return ok(undefined);
   }
 
-  async finish(): Promise<void> {
+  async finish(): Promise<Result<void, string>> {
     // Turn-end emission is owned by the adapter (see #finishTurn): exactly
     // one DELIVERED turn-end frame per (runId, tab), with the boundary
     // re-invocations' phantom finishes doubling as retries while the tab
@@ -50,14 +52,16 @@ class WebStreamHandle implements StreamHandle {
     // reset the tab's UI.
     this.#finishTurn();
     this.#onClose();
+    return ok(undefined);
   }
 
-  async abort(error: string): Promise<void> {
+  async abort(error: string): Promise<Result<void, string>> {
     this.#registry.send(this.#platformAddress, {
       event: TURN_ABORT,
       data: JSON.stringify({ message: error }),
     });
     this.#onClose();
+    return ok(undefined);
   }
 }
 

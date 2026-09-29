@@ -5,15 +5,17 @@
  * stub proxy to verify the supervisor calls the proxy in the right order
  * and bind-mounts the returned socket path.
  */
-import type { PassThrough } from "node:stream";
+import { PassThrough, type Writable } from "node:stream";
 import type { ContainerInfo } from "dockerode";
+import { err, ok } from "neverthrow";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { mock, mockDeep } from "vitest-mock-extended";
 import type { Database, Transactor } from "../db/index.js";
 import { expectDefined } from "../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
-import type { DockerContainer, DockerFacade, DockerImage } from "./docker-facade.js";
-import { LocalDockerSandboxClient } from "./index.js";
+import type { DockerContainer, DockerFacade, DockerImage, ExecInspect } from "./docker-facade.js";
+import type { ExecOutcome } from "./exec-state.js";
+import { ExecTimeoutError, LocalDockerSandboxClient } from "./index.js";
 import type { CogmoSocketProxy } from "./proxy/index.js";
 import type { TaskScope } from "./proxy/types.js";
 import { DrizzleSandboxStore } from "./store/index.js";
@@ -136,6 +138,19 @@ function mockDockerFacade(): {
   container.inspect.mockResolvedValue({ State: { Status: "running" }, HostConfig: {} });
   docker.getContainer.mockReturnValue(container);
   return { docker, container };
+}
+
+/**
+ * `container.exec` for a stubbed container: the kill exec a teardown runs
+ * ends at once, and every other exec is `exec`.
+ */
+function stubContainerExec<E>(exec: E) {
+  return vi.fn(async (opts: { Cmd: string[] }) => {
+    if (!opts.Cmd.includes("cogmo-exec-kill")) return exec;
+    const ended = new PassThrough();
+    ended.end();
+    return { start: vi.fn(async () => ended), inspect: vi.fn() };
+  });
 }
 
 /** Stub proxy that records register/unregister calls. */
@@ -650,13 +665,10 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
 
 describe("LocalDockerSandboxClient — execStreaming.dispose()", () => {
   /**
-   * Regression test for the dispose-hang bug: a bare `stream.destroy()`
-   * emits only `'close'`, neither `'end'` nor `'error'`. The exit
-   * promise listens on the latter two; if dispose closes the stream
-   * without an error, the promise never settles and `dispose()` waits
-   * forever. Fix: pass an error so the `'error'` handler fires.
+   * A stream that never ends on its own: `dispose()` settles the exec,
+   * stops the command's process group through a second exec, and resolves.
    */
-  it("resolves promptly when called on a stream that won't end naturally", async () => {
+  it("dispose() stops the command through a kill exec, then resolves", async () => {
     const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
 
     // Hijacked stream that never emits 'end' or 'error' on its own —
@@ -668,7 +680,7 @@ describe("LocalDockerSandboxClient — execStreaming.dispose()", () => {
       inspect: vi.fn(async () => ({ ExitCode: 137 })),
     };
     const containerObj = {
-      exec: vi.fn(async () => execObj),
+      exec: stubContainerExec(execObj),
       inspect: vi.fn(async () => ({ State: { Status: "running" }, HostConfig: {} })),
       kill: vi.fn(),
       remove: vi.fn(),
@@ -703,17 +715,18 @@ describe("LocalDockerSandboxClient — execStreaming.dispose()", () => {
     });
     const handle = await session.execStreaming(["sleep", "infinity"]);
 
-    // Race dispose against a short timeout. Pre-fix this race was lost
-    // (dispose hung); post-fix it resolves in milliseconds.
-    const TIMEOUT_MS = 500;
-    let timeoutHandle: NodeJS.Timeout | undefined;
-    const timeout = new Promise<"timeout">((resolve) => {
-      timeoutHandle = setTimeout(() => resolve("timeout"), TIMEOUT_MS);
-    });
-    const winner = await Promise.race([handle.dispose().then(() => "done" as const), timeout]);
-    if (timeoutHandle) clearTimeout(timeoutHandle);
+    await handle.dispose();
 
-    expect(winner).toBe("done");
+    expect(await handle.exited).toEqual(err({ kind: "disposed" }));
+    const cmds = containerObj.exec.mock.calls.map(([opts]) => opts.Cmd);
+    expect(cmds).toHaveLength(2);
+    const [run, kill] = cmds;
+    // The command records its group in a file; the kill exec reads the same file.
+    expect(run?.slice(0, 2)).toEqual(["sh", "-c"]);
+    expect(run?.slice(4)).toEqual(["sleep", "infinity"]);
+    expect(kill?.slice(0, 2)).toEqual(["sh", "-c"]);
+    expect(kill?.slice(3)).toEqual(["cogmo-exec-kill", run?.[3]]);
+    expect(hijack.destroyed).toBe(true);
   });
 
   // Per-callsite timeoutMs cap: the hijacked socket might hold half-open
@@ -731,7 +744,7 @@ describe("LocalDockerSandboxClient — execStreaming.dispose()", () => {
       inspect: vi.fn(async () => ({ ExitCode: 137 })),
     };
     const containerObj = {
-      exec: vi.fn(async () => execObj),
+      exec: stubContainerExec(execObj),
       inspect: vi.fn(async () => ({ State: { Status: "running" }, HostConfig: {} })),
       kill: vi.fn(),
       remove: vi.fn(),
@@ -774,28 +787,33 @@ describe("LocalDockerSandboxClient — execStreaming.dispose()", () => {
   /**
    * Builds a Local-Docker sandbox session against a stub Docker facade
    * whose `demuxStream` we control. Returns the underlying hijack
-   * `PassThrough` so the caller can synthesise upstream bytes
-   * directly, plus the writable PassThroughs `demuxStream` was
-   * passed for stdout/stderr — driven by the test rather than by a
-   * real Docker frame parser.
+   * `PassThrough`, whose end is the exec's, plus the Writables
+   * `demuxStream` was passed for stdout/stderr — driven by the test
+   * rather than by a real Docker frame parser.
    */
-  async function makeSessionWithDemux(taskId: string): Promise<{
+  async function makeSessionWithDemux(
+    taskId: string,
+    inspect: () => Promise<ExecInspect> = async () => ({ Running: false, ExitCode: 0 }),
+  ): Promise<{
     session: Awaited<ReturnType<LocalDockerSandboxClient["create"]>>;
     hijack: PassThrough;
-    demuxStdout: () => PassThrough;
-    demuxStderr: () => PassThrough;
+    demuxStdout: () => Writable;
+    demuxStderr: () => Writable;
+    execInspect: ReturnType<typeof vi.fn<() => Promise<ExecInspect>>>;
+    execStart: ReturnType<typeof vi.fn<() => Promise<PassThrough>>>;
+    containerExec: ReturnType<typeof stubContainerExec>;
   }> {
     const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const { PassThrough } = await import("node:stream");
     const hijack = new PassThrough();
-    let outSink: PassThrough | undefined;
-    let errSink: PassThrough | undefined;
+    let outSink: Writable | undefined;
+    let errSink: Writable | undefined;
     const execObj = {
       start: vi.fn(async () => hijack),
-      inspect: vi.fn(async () => ({ ExitCode: 0 })),
+      inspect: vi.fn(inspect),
     };
     const containerObj = {
-      exec: vi.fn(async () => execObj),
+      exec: stubContainerExec(execObj),
       inspect: vi.fn(async () => ({ State: { Status: "running" }, HostConfig: {} })),
       kill: vi.fn(),
       remove: vi.fn(),
@@ -811,9 +829,11 @@ describe("LocalDockerSandboxClient — execStreaming.dispose()", () => {
       getContainer: vi.fn(() => containerObj),
       listContainers: vi.fn(async () => []),
       modem: {
-        demuxStream: vi.fn((_s: PassThrough, out: PassThrough, err: PassThrough) => {
+        demuxStream: vi.fn((s: PassThrough, out: Writable, err: Writable) => {
           outSink = out;
           errSink = err;
+          // A real demuxer reads the hijacked stream, which is what lets it end.
+          s.resume();
         }),
       },
     } as unknown as DockerFacade;
@@ -835,8 +855,162 @@ describe("LocalDockerSandboxClient — execStreaming.dispose()", () => {
       hijack,
       demuxStdout: () => expectDefined(outSink, "demuxStream stdout sink not captured yet"),
       demuxStderr: () => expectDefined(errSink, "demuxStream stderr sink not captured yet"),
+      execInspect: execObj.inspect,
+      execStart: execObj.start,
+      containerExec: containerObj.exec,
     };
   }
+
+  it("starts nothing for an exec the deadline settled while it was being created", async () => {
+    const { session, containerExec, execStart } = await makeSessionWithDemux(
+      "019d0000-0000-7000-8000-00000000d15b",
+    );
+    const created = Promise.withResolvers<void>();
+    const createExec = containerExec.getMockImplementation();
+    containerExec.mockImplementationOnce(async (opts) => {
+      await created.promise;
+      return expectDefined(createExec, "container.exec")(opts);
+    });
+    vi.useFakeTimers();
+    try {
+      const opening = session.execStreaming(["sleep", "infinity"], { timeoutMs: 100 });
+      const failure = opening.catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(await failure).toBeInstanceOf(ExecTimeoutError);
+
+      created.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(execStart).not.toHaveBeenCalled();
+      // Nothing ran, so there is no group to kill.
+      expect(containerExec).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  describe("exit code", () => {
+    it("reads it from an inspect that reports the exec exited", async () => {
+      const { session, hijack, execInspect, containerExec } = await makeSessionWithDemux(
+        "019d0000-0000-7000-8000-00000000d155",
+        async () => ({ Running: false, ExitCode: 7 }),
+      );
+      const handle = await session.execStreaming(["false"]);
+      hijack.end();
+      expect(await handle.exited).toEqual(ok({ exitCode: 7 }));
+      expect(execInspect).toHaveBeenCalledTimes(1);
+      // A reaped command has nothing left to stop: no kill exec.
+      await handle.dispose();
+      expect(containerExec).toHaveBeenCalledTimes(1);
+    });
+
+    it("waits for an exec whose output ended before its process was reaped", async () => {
+      const { session, hijack } = await makeSessionWithDemux(
+        "019d0000-0000-7000-8000-00000000d156",
+        vi
+          .fn<() => Promise<ExecInspect>>()
+          .mockResolvedValueOnce({ Running: true, ExitCode: null })
+          .mockResolvedValue({ Running: false, ExitCode: 3 }),
+      );
+      const handle = await session.execStreaming(["sh", "-c", "exit 3"]);
+      hijack.end();
+      expect(await handle.exited).toEqual(ok({ exitCode: 3 }));
+    });
+
+    it("reads no exit code off an exec that still reports Running", async () => {
+      const { session, hijack } = await makeSessionWithDemux(
+        "019d0000-0000-7000-8000-00000000d158",
+        vi
+          .fn<() => Promise<ExecInspect>>()
+          .mockResolvedValueOnce({ Running: true, ExitCode: 0 })
+          .mockResolvedValue({ Running: false, ExitCode: 3 }),
+      );
+      const handle = await session.execStreaming(["sh", "-c", "exit 3"]);
+      hijack.end();
+      expect(await handle.exited).toEqual(ok({ exitCode: 3 }));
+    });
+
+    it("stops re-inspecting once the idle deadline settles the run", async () => {
+      const { session, hijack, execInspect } = await makeSessionWithDemux(
+        "019d0000-0000-7000-8000-00000000d159",
+        async () => ({ Running: true, ExitCode: null }),
+      );
+      vi.useFakeTimers();
+      try {
+        const handle = await session.execStreaming(["sleep", "infinity"], { idleTimeoutMs: 100 });
+        hijack.end();
+        await vi.advanceTimersByTimeAsync(100);
+        expect(await handle.exited).toEqual(
+          err({ kind: "timed_out", deadline: "idle", timeoutMs: 100 }),
+        );
+        const inspects = execInspect.mock.calls.length;
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(execInspect).toHaveBeenCalledTimes(inspects);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("re-inspects after 20 ms, doubling the wait up to 250 ms, and gives up after 2 s", async () => {
+      const inspectedAt: number[] = [];
+      const { session, hijack } = await makeSessionWithDemux(
+        "019d0000-0000-7000-8000-00000000d15c",
+        async () => {
+          inspectedAt.push(Date.now());
+          return { Running: true, ExitCode: null };
+        },
+      );
+      vi.useFakeTimers();
+      try {
+        const handle = await session.execStreaming(["sleep", "infinity"]);
+        let outcome: ExecOutcome | undefined;
+        void handle.exited.then((o) => {
+          outcome = o;
+        });
+        const endedAt = Date.now();
+        hijack.end();
+        await vi.advanceTimersByTimeAsync(2_050);
+
+        expect(inspectedAt.map((t) => t - endedAt)).toEqual([
+          0, 20, 60, 140, 300, 550, 800, 1_050, 1_300, 1_550, 1_800, 2_050,
+        ]);
+        expect(outcome?.isErr() && outcome.error).toEqual({
+          kind: "no_exit_code",
+          reason: expect.stringContaining("after 2050ms"),
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    // A running exec, and one the daemon never started, both report a null code.
+    for (const [taskSuffix, inspect] of [
+      ["157", { Running: true, ExitCode: null }],
+      ["15a", { Running: false, ExitCode: null }],
+    ] as const) {
+      it(`settles no_exit_code, within the idle deadline, when the exit code never appears (Running: ${inspect.Running})`, async () => {
+        const { session, hijack } = await makeSessionWithDemux(
+          `019d0000-0000-7000-8000-00000000d${taskSuffix}`,
+          async () => inspect,
+        );
+        vi.useFakeTimers();
+        try {
+          const handle = await session.execStreaming(["sleep", "infinity"], {
+            idleTimeoutMs: 30_000,
+          });
+          let outcome: ExecOutcome | undefined;
+          void handle.exited.then((o) => {
+            outcome = o;
+          });
+          hijack.end();
+
+          await vi.advanceTimersByTimeAsync(29_999);
+          expect(outcome?.isErr() && outcome.error.kind).toBe("no_exit_code");
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+    }
+  });
 
   // Parity with the Daytona idle-cap test in
   // `daytona/exec-streaming.test.ts`. The watchdog must fire when the
@@ -862,7 +1036,7 @@ describe("LocalDockerSandboxClient — execStreaming.dispose()", () => {
   // attached to the PassThrough at exec setup, the stream goes into
   // flowing mode and chunks are dropped — this test holds the line.
   it("late consumer: chunks demuxed before for-await attach are still delivered to the consumer", async () => {
-    const { session, demuxStdout } = await makeSessionWithDemux(
+    const { session, hijack, demuxStdout } = await makeSessionWithDemux(
       "019d0000-0000-7000-8000-00000000d153",
     );
     const handle = await session.execStreaming(["echo", "hi"], {
@@ -872,7 +1046,7 @@ describe("LocalDockerSandboxClient — execStreaming.dispose()", () => {
     const out = demuxStdout();
     out.write("first-chunk\n");
     out.write("second-chunk\n");
-    out.end();
+    hijack.end();
 
     const collected: string[] = [];
     for await (const c of handle.stdout) {
@@ -882,28 +1056,30 @@ describe("LocalDockerSandboxClient — execStreaming.dispose()", () => {
     expect(collected.join("")).toBe("first-chunk\nsecond-chunk\n");
   });
 
-  // The watchdog must reset on raw bytes from the upstream hijacked
-  // stream, regardless of whether the demuxed PassThroughs have a
-  // consumer attached yet. Drip-feeds upstream bytes under the idle
-  // window WITHOUT consuming the PassThroughs.
-  it("late consumer: upstream chunk emits reset the idle watchdog even before the PassThrough has a consumer", async () => {
-    const { session, hijack } = await makeSessionWithDemux("019d0000-0000-7000-8000-00000000d154");
-    const handle = await session.execStreaming(["yes"], {
-      idleTimeoutMs: 100,
-    });
-    handle.stdout.on("error", () => {});
-    handle.stderr.on("error", () => {});
+  // The watchdog resets as output arrives, whether or not the caller's
+  // streams have a consumer yet. Drip-feeds demuxed chunks under the idle
+  // window WITHOUT consuming the caller's streams.
+  it("late consumer: arriving output resets the idle watchdog even before the stream has a consumer", async () => {
+    const { session, hijack, demuxStdout } = await makeSessionWithDemux(
+      "019d0000-0000-7000-8000-00000000d154",
+    );
+    vi.useFakeTimers();
+    try {
+      const handle = await session.execStreaming(["yes"], {
+        idleTimeoutMs: 100,
+      });
 
-    // Total elapsed exceeds the 100ms cap but no single gap does.
-    for (let i = 0; i < 4; i++) {
-      await new Promise<void>((resolve) => setTimeout(resolve, 40));
-      hijack.emit("data", Buffer.from(`tick${i}\n`));
+      // Total elapsed exceeds the 100ms cap but no single gap does.
+      for (let i = 0; i < 4; i++) {
+        await vi.advanceTimersByTimeAsync(90);
+        demuxStdout().write(`tick${i}\n`);
+      }
+      hijack.end();
+
+      expect(await handle.exited).toEqual(ok({ exitCode: 0 }));
+    } finally {
+      vi.useRealTimers();
     }
-    hijack.end();
-
-    const { ExecTimeoutError } = await import("./index.js");
-    const result = await handle.wait().catch((e: Error) => e);
-    expect(result).not.toBeInstanceOf(ExecTimeoutError);
   });
 });
 

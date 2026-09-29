@@ -100,7 +100,6 @@ beforeAll(async () => {
     runner: new HostRunner(),
     callTimeoutMs: 30_000,
     idleEvictionMs: 60_000,
-    evictionIntervalMs: 0,
     toolBudget: 50,
   });
   await registry.start();

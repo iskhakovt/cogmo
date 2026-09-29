@@ -20,6 +20,7 @@ import type { Transaction } from "../../db/index.js";
 import type { CacheDialect } from "../../llm/cache-dialect.js";
 import type { ContentBlock, Message } from "../../llm/types.js";
 import { skills } from "../../skills/store/schema.js";
+import { previewInboundText } from "../../transport/content.js";
 import { inboundMessages } from "../../transport/store/schema.js";
 import { truncate } from "../../util/string.js";
 import { IDENTITY_BLOCK_KEY, type ScopedCoreMemoryBlock } from "../core-memory/scope.js";
@@ -245,6 +246,9 @@ export interface ProfileClass {
   createdAt: Date;
 }
 
+/** What `upsertCoreMemoryBlock` did to the block. */
+export type CoreMemoryUpsertOutcome = "created" | "updated" | "unchanged";
+
 /**
  * Per-user registry row for a custom compartment. `description` is loaded
  * by the Observer on each fire and templated into the classifier prompt
@@ -369,10 +373,10 @@ function isTextBlock(b: unknown): b is { type: "text"; text: string } {
 
 /** Extract a short preview string from a `messages.content` jsonb value. */
 function previewFromContent(content: unknown): string {
-  if (typeof content === "string") return truncate(content, PREVIEW_MAX_CHARS);
+  if (typeof content === "string") return truncate(previewInboundText(content), PREVIEW_MAX_CHARS);
   if (!Array.isArray(content)) return "";
   const block = R.find(content, isTextBlock);
-  return block ? truncate(block.text, PREVIEW_MAX_CHARS) : "";
+  return block ? truncate(previewInboundText(block.text), PREVIEW_MAX_CHARS) : "";
 }
 
 /**
@@ -852,17 +856,20 @@ export interface AgentStore {
     profileClass: string | null,
   ): Promise<ReadonlyArray<ScopedCoreMemoryBlock>>;
 
-  /** Create or replace the block at `(userId, profileClass, key)`. */
+  /**
+   * Create or replace the block at `(userId, profileClass, key)`. Writing the
+   * content it already holds leaves the row, `updated_at` included, as it was.
+   */
   upsertCoreMemoryBlock(
     tx: Transaction,
     params: { userId: string; profileClass: string | null; key: string; content: string },
-  ): Promise<void>;
+  ): Promise<CoreMemoryUpsertOutcome>;
 
-  /** Delete the block at `(userId, profileClass, key)`, if any. */
+  /** Delete the block at `(userId, profileClass, key)`, if any; true when one was deleted. */
   deleteCoreMemoryBlock(
     tx: Transaction,
     params: { userId: string; profileClass: string; key: string },
-  ): Promise<void>;
+  ): Promise<boolean>;
 
   /** When each of the user's core memory blocks last changed, in every scope. */
   getCoreMemoryUpdateTimes(
@@ -2430,22 +2437,26 @@ export class DrizzleAgentStore implements AgentStore {
   async upsertCoreMemoryBlock(
     tx: Transaction,
     params: { userId: string; profileClass: string | null; key: string; content: string },
-  ): Promise<void> {
-    await tx
+  ): Promise<CoreMemoryUpsertOutcome> {
+    const [row] = await tx
       .insert(coreMemoryBlocks)
       .values(params)
       .onConflictDoUpdate({
         target: [coreMemoryBlocks.userId, coreMemoryBlocks.profileClass, coreMemoryBlocks.key],
         // The database clock, which also times snapshots and turn contexts.
         set: { content: params.content, updatedAt: sql`now()` },
-      });
+        setWhere: ne(coreMemoryBlocks.content, params.content),
+      })
+      .returning({ inserted: sql<boolean>`(xmax = 0)` });
+    if (row === undefined) return "unchanged";
+    return row.inserted ? "created" : "updated";
   }
 
   async deleteCoreMemoryBlock(
     tx: Transaction,
     params: { userId: string; profileClass: string; key: string },
-  ): Promise<void> {
-    await tx
+  ): Promise<boolean> {
+    const deleted = await tx
       .delete(coreMemoryBlocks)
       .where(
         and(
@@ -2453,7 +2464,9 @@ export class DrizzleAgentStore implements AgentStore {
           eq(coreMemoryBlocks.profileClass, params.profileClass),
           eq(coreMemoryBlocks.key, params.key),
         ),
-      );
+      )
+      .returning({ id: coreMemoryBlocks.id });
+    return deleted.length > 0;
   }
 
   async getCoreMemoryUpdateTimes(

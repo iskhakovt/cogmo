@@ -60,6 +60,27 @@ export function assertKind<U extends { kind: string }, K extends U["kind"]>(
 }
 
 /**
+ * Await `promise`, throwing if it is still pending after `ms` — for a wait
+ * whose failure mode is hanging forever. A rejection propagates. Real timers
+ * only.
+ */
+export async function resolvesWithin<T>(
+  promise: Promise<T>,
+  ms: number,
+  label: string,
+): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`expected ${label} within ${ms}ms`)), ms);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * Run a `@clack/prompts` string `validate` option. The option is a union of a
  * validator function, which may return a promise, and a Standard Schema object;
  * wizard prompts always pass a synchronous function, so this narrows to it

@@ -1,5 +1,6 @@
 import { PassThrough, type Readable } from "node:stream";
 import type { Sandbox as DaytonaSdkSandbox, Process } from "@daytona/sdk";
+import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { DaytonaSessionState, ExecStreamingHandle } from "../index.js";
@@ -113,6 +114,7 @@ describe("DaytonaSandboxSession.exec", () => {
     const handle: ExecStreamingHandle = {
       stdout: stdout as Readable,
       stderr: stderr as Readable,
+      exited: Promise.resolve(ok({ exitCode: 0 })),
       wait,
       dispose,
     };
@@ -144,6 +146,7 @@ describe("DaytonaSandboxSession.exec", () => {
     const fakeHandle: ExecStreamingHandle = {
       stdout: new PassThrough() as Readable,
       stderr: new PassThrough() as Readable,
+      exited: Promise.resolve(ok({ exitCode: 0 })),
       wait: vi.fn(async () => ({ exitCode: 0 })),
       dispose,
     };
@@ -162,6 +165,9 @@ describe("DaytonaSandboxSession.exec", () => {
     const fakeHandle: ExecStreamingHandle = {
       stdout: new PassThrough() as Readable,
       stderr: new PassThrough() as Readable,
+      exited: Promise.resolve(
+        err({ kind: "transport_failed", error: new Error("upstream WS dropped") }),
+      ),
       wait: vi.fn(async () => {
         throw new Error("upstream WS dropped");
       }),

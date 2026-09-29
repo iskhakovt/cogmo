@@ -41,7 +41,8 @@ src/mcp/
   client/
     transport.ts         # transport factory (stdio | http | sse)
     client.ts            # thin wrapper over @modelcontextprotocol/sdk Client
-    pool.ts              # process-scoped connection pool, idle eviction, reconnect
+    pool-state.ts        # per-server pool entry as a pure state machine
+    pool.ts              # process-scoped connection pool: drives the machine, carries out its effects
     runner.ts            # subprocess runner — host or sysbox
   registry.ts            # McpRegistry: facade consumed by handle-message
   adapter.ts             # McpToolAdapter: ToolSpec → MCP callTool
@@ -185,6 +186,7 @@ interface McpConnection {
   callTool(name: string, input: unknown, opts: { timeoutMs: number }): Promise<unknown>;
   listTools(): Promise<readonly McpToolDescriptor[]>;
   onToolsChanged(cb: () => void): () => void;
+  onClose(cb: () => void): () => void;
   close(): Promise<void>;
 }
 ```
@@ -209,7 +211,8 @@ On first call to a server's tool:
 ### Tool dispatch
 
 - Per-call timeout (default **30s** — Claude Code's #1 failure mode is the missing timeout, [issue #15945](https://github.com/anthropics/claude-code/issues/15945)).
-- On timeout or transport close: close connection, return tool error to the agent loop, attempt **one** reconnect on next call (Cursor pattern). Second failure: mark server unhealthy, surface to user.
+- On timeout: the SDK sends `notifications/cancelled` and stops waiting, as the MCP spec directs; the connection stays open and the agent loop gets a tool error.
+- On transport close, the in-flight call fails with a tool error and the next call reconnects; two failed connects in a row mark the server unhealthy.
 - All MCP tool calls set `durable: true` on the adapted `ToolSpec` → wrapped in Inngest `step.run()`. Step memoization is correct because the MCP server is non-deterministic; retry of `handle-message` reuses the recorded tool result.
 
 ### Hot reload
@@ -218,9 +221,28 @@ Adding / disabling / editing a server invalidates the pool entry. Next call resp
 - Config change (command, env) → restart subprocess.
 - Toggle / approval / timeout change → no restart.
 
+### Connection pool `[confirmed]`
+
+One entry per server, driven by a pure `transition(entry, event)` in `pool-state.ts` that returns the next entry and its effects as data; `McpConnectionPool` feeds it, supplying the `AbortController` a connect runs under, and carries them out. Same shape as the skills worker machine ([skills.md](../skills.md) → Host-side worker lifecycle).
+
+| Entry | Meaning |
+|-|-|
+| none | Nothing open |
+| `connecting` | One connect in flight, under its own `AbortController`; concurrent `getConnection` calls wait on it |
+| `live` | A connection, watched for its transport closing and for idling out |
+| `closed` | The transport closed, or the last connect failed; the next call reconnects |
+| `unhealthy` | Two connects in a row failed; calls fail fast until `reset` (`/mcp approve`) |
+
+Events: `get`, `spawned`, `spawn_failed`, `transport_closed`, `evict`, `reset`, `idle`, `pool_closed`. A connect that fails looking up its server spends no attempt.
+
+- **Teardown.** `evict` (server removed) and `close` (shutdown) fail an in-flight connect's waiters, abort it, close any connection it still yields, and resolve once the server's connections are closed. `removeServer` deletes the row first, so a connect after the delete finds no server, and none spawns a process for it.
+- **Abort.** The MCP spec forbids cancelling `initialize`, so the SDK never sees the signal. While the handshake runs, the runner answers an abort by closing the connection, and rejects once it is closed, which for stdio is once the server process has exited. A spawn that has resolved ignores the signal, so a live connection keeps its connect's controller, aborted when it leaves the entry, which unsubscribes from its close and disarms its idle timer.
+- **Stale events.** `spawned`, `spawn_failed`, `transport_closed` and `idle` count only for the entry's own connect or connection; a connection from any other connect is closed.
+- **Bookkeeping.** `last_connected_at` and `last_error` are written after the caller has its outcome, so a slow `last_error` write for one connect can land after a quick retry's `last_connected_at`, leaving a stale error beside a newer connect time. Accepted: both columns are observability, and the next connect or failure rewrites them.
+
 ### Idle eviction
 
-Connections idle > **10 min** torn down. Re-spawn on next demand. Bounds container / process count.
+A live connection unused for `MCP_IDLE_EVICTION_MS` (default **10 min**) is closed; the next call respawns it. Bounds container / process count. Each live connection has one unref'd timer; when it fires on a connection used since, it re-arms for the rest of the period, so a call costs no timer work. Nothing runs while no connection is live. To keep connections open indefinitely, set a very large value: a delay past Node's timer ceiling (~24.8 days) is capped there and re-armed.
 
 ## Trust & sandboxing
 
@@ -255,7 +277,7 @@ Docker's research found 43% of public MCP servers have command-injection flaws (
 
 ## Auth & secrets
 
-**Phases A / C — manual tokens.** `env` vars (stdio) and HTTP headers (streamable-http) carry secret references resolved at spawn / request time from the encrypted secrets table. Typed `SecretRef` instead of string interpolation. Header values are resolved once at transport construction and passed via `requestInit.headers` — the SDK merges them with per-request `accept`, `content-type`, and `mcp-session-id` automatically. `transport.terminateSession()` runs on close so server-side session state (Linear, Notion, Atlassian all keep state keyed by `Mcp-Session-Id`) is released cleanly; the call is best-effort, errors are logged at debug.
+**Phases A / C — manual tokens.** `env` vars (stdio) and HTTP headers (streamable-http) carry secret references resolved at spawn / request time from the encrypted secrets table. Typed `SecretRef` instead of string interpolation. Header values are resolved once at transport construction and passed via `requestInit.headers` — the SDK merges them with per-request `accept`, `content-type`, and `mcp-session-id` automatically. `transport.terminateSession()` runs on close so server-side session state (Linear, Notion, Atlassian all keep state keyed by `Mcp-Session-Id`) is released cleanly; the call is best-effort. It takes no signal and undici sets no request timeout, so the transport's `fetch` puts an `AbortSignal.timeout` (2s) on the session's DELETE, the only DELETE the SDK sends. A failed DELETE, a missed deadline included, is logged twice: at warn through the transport's `onerror` (`MCP transport error`), and at debug by the close that continues past it.
 
 **Secret rotation cadence.** Resolved plaintext (env vars for stdio, header values for streamable-http) is captured at transport construction and held for the lifetime of the connection. A rotated secret is **not** picked up until the connection is evicted (idle eviction at 10min, explicit `/mcp` admin action, or process restart). This matches every consumer's mental model of "edit secret → restart" but is worth being explicit about — there is no per-request re-read of the secrets table.
 
@@ -267,7 +289,7 @@ Docker's research found 43% of public MCP servers have command-injection flaws (
 
 | Failure | Mitigation |
 |-|-|
-| Tool hang | 30s per-call timeout; close connection on timeout |
+| Tool hang | 30s per-call timeout; the SDK cancels the request |
 | Transport drop (`-32000 Connection closed`) | Auto-reconnect once on next call; second failure marks server unhealthy |
 | Schema rug-pull | SHA256 pin per tool; mismatch → `needs_reapproval`; tool calls fail until re-approved |
 | Stdout pollution | Stdio strictly through SDK transport; server stderr → structured log |

@@ -1,4 +1,5 @@
 import { PassThrough, type Readable, type Writable } from "node:stream";
+import { ok } from "neverthrow";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   type ExecStreamingHandle,
@@ -37,6 +38,7 @@ function buildFakeSandbox(): FakeSandboxBundle {
     stdin: stdin as unknown as Writable,
     stdout: stdout as unknown as Readable,
     stderr: stderr as unknown as Readable,
+    exited: Promise.resolve(ok({ exitCode: 0 })),
     wait: async () => ({ exitCode: 0 }),
     dispose: async () => {
       calls.push("exec.dispose");

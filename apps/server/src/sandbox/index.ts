@@ -1,9 +1,17 @@
-import type { Readable, Writable } from "node:stream";
 import { z } from "zod";
 import type { DockerFacade } from "./docker-facade.js";
+import type { ExecOptions, ExecResult, ExecStreamingHandle } from "./exec.js";
 import type { SandboxStore } from "./store/index.js";
 import type { ResourceLimits } from "./types.js";
 
+export type {
+  ExecExit,
+  ExecFailure,
+  ExecOptions,
+  ExecResult,
+  ExecStreamingHandle,
+} from "./exec.js";
+export { ExecDisposedError, ExecTimeoutError, execFailureError, unwrapExit } from "./exec.js";
 export type { SandboxRuntime } from "./runtime.js";
 export type { ContainerRow, ContainerRuntime, ContainerStatus } from "./store/index.js";
 export type { ContainerLabels, ResourceLimits } from "./types.js";
@@ -118,96 +126,6 @@ export interface SessionSpec {
    * container's process env only; nothing is written to the home volume.
    */
   env?: Readonly<Record<string, string>>;
-}
-
-export interface ExecOptions {
-  workingDir?: string;
-  user?: string;
-  env?: Readonly<Record<string, string>>;
-  /** When true, `stdin` is exposed on the returned streaming handle. */
-  attachStdin?: boolean;
-  /**
-   * Total wall-clock cap. If `wait()` hasn't settled by `timeoutMs` after the
-   * exec started, the backend runs the same teardown `dispose()` would (close
-   * hijacked socket / `deleteSession`) and rejects `wait()` with
-   * `ExecTimeoutError`. Omitted = no cap. See design/sandbox.md →
-   * Wall-clock and idle timeouts.
-   */
-  timeoutMs?: number;
-  /**
-   * No-byte-flow watchdog. Resets on every stdout/stderr chunk; if it fires
-   * before the next chunk or natural exit, same cleanup + `ExecTimeoutError`
-   * path as `timeoutMs`. Catches "WS holds open but sends nothing" — the
-   * failure mode `timeoutMs` alone misses when the underlying transport
-   * doesn't propagate close on a remote stall. Omitted = no idle cap.
-   */
-  idleTimeoutMs?: number;
-}
-
-/**
- * Thrown by `wait()` when `ExecOptions.timeoutMs` or
- * `ExecOptions.idleTimeoutMs` fires. Distinct sentinel from `DisposedError`
- * so consumers branching on exit outcome can separate "we hit the cap" from
- * "we explicitly cancelled."
- *
- * `kind` carries which cap fired; `timeoutMs` is the configured limit.
- * Backends are expected to throw this exact shape — Local-Docker and Daytona
- * import from here rather than defining their own.
- */
-export class ExecTimeoutError extends Error {
-  readonly kind: "total" | "idle";
-  readonly timeoutMs: number;
-  constructor(kind: "total" | "idle", timeoutMs: number) {
-    super(
-      kind === "total"
-        ? `exec exceeded wall-clock timeout ${timeoutMs}ms`
-        : `exec exceeded idle timeout ${timeoutMs}ms with no stdout/stderr activity`,
-    );
-    this.name = "ExecTimeoutError";
-    this.kind = kind;
-    this.timeoutMs = timeoutMs;
-  }
-}
-
-/**
- * Buffered exec result. `stdout` / `stderr` are read fully into memory —
- * intended for short, bounded commands. Backends cap buffered output at
- * `SANDBOX_EXEC_BUFFER_LIMIT` (default 1 MiB per stream); when a command
- * exceeds the cap, `truncated` is set and the stream contents are clipped
- * to the cap. Consumers expecting larger output use `execStreaming`.
- */
-export interface ExecResult {
-  stdout: string;
-  stderr: string;
-  exitCode: number;
-  wallTimeSeconds: number;
-  truncated: boolean;
-}
-
-/**
- * Streaming exec handle. `stdout` / `stderr` are demultiplexed Readables
- * (no inline framing). `wait()` resolves with the exit code once the
- * backend reports the process finished.
- *
- * `dispose()` aborts the exec by tearing down the backend's transport
- * (Docker exec API has no direct kill — closing the hijacked socket
- * lets the daemon reap the process). It does NOT send signals; backends
- * that grow signal support (e.g. a future Daytona impl with a kill
- * endpoint) may upgrade the implementation but not the contract.
- * Idempotent. After `dispose()` the streams emit EOF (no error on
- * `stdout`/`stderr`) and `wait()` rejects with `DisposedError` —
- * callers that race dispose against natural exit must check for that.
- *
- * The caller is responsible for either consuming `stdout`/`stderr` to
- * EOF or calling `dispose()`; otherwise the backend may hold the
- * connection open.
- */
-export interface ExecStreamingHandle {
-  stdin?: Writable;
-  stdout: Readable;
-  stderr: Readable;
-  wait(): Promise<{ exitCode: number }>;
-  dispose(): Promise<void>;
 }
 
 /**

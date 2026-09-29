@@ -463,6 +463,13 @@
       "when": 1790592895617,
       "tag": "0065_pending_memories_skill_name_check",
       "breakpoints": true
+    },
+    {
+      "idx": 66,
+      "version": "7",
+      "when": 1790633923634,
+      "tag": "0066_model_catalogs",
+      "breakpoints": true
     }
   ]
 }

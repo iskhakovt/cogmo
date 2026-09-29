@@ -1,3 +1,4 @@
+import { ok } from "neverthrow";
 import { describe, expect, it } from "vitest";
 import { WebUiAdapter } from "./index.js";
 import type { SseFrame } from "./stream-registry.js";
@@ -169,6 +170,6 @@ describe("WebUiAdapter", () => {
   it("drops frames when the tab has no live connection", async () => {
     const { adapter } = setup(); // no connect()
     const handle = await adapter.openStream("ghost", "run-1");
-    await expect(handle.push({ type: "text_delta", text: "x" })).resolves.toBeUndefined();
+    await expect(handle.push({ type: "text_delta", text: "x" })).resolves.toEqual(ok(undefined));
   });
 });

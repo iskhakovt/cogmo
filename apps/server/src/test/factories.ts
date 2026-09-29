@@ -15,6 +15,13 @@ import type { Transactor } from "../db/transactor.js";
 import type { StepRun, StepSendEvent } from "../inngest/index.js";
 import type { LlmProvider } from "../llm/provider.js";
 import { constantResolver, type LlmProviderResolver } from "../llm/resolver.js";
+import type {
+  ChatStreamFrame,
+  ContentFrame,
+  ResponseMeta,
+  StopReason,
+  Usage,
+} from "../llm/types.js";
 import type { MemoryProvider } from "../memory/provider.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import type { AttachmentStore } from "../transport/attachment-store.js";
@@ -143,8 +150,8 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
     getMessage: vi.fn().mockResolvedValue({ id: "msg-1", role: "assistant", content: "test" }),
     getCoreMemoryBlocks: vi.fn().mockResolvedValue([]),
     getCoreMemoryUpdateTimes: vi.fn().mockResolvedValue([]),
-    upsertCoreMemoryBlock: vi.fn().mockResolvedValue(undefined),
-    deleteCoreMemoryBlock: vi.fn().mockResolvedValue(undefined),
+    upsertCoreMemoryBlock: vi.fn().mockResolvedValue("created"),
+    deleteCoreMemoryBlock: vi.fn().mockResolvedValue(false),
     listCoreMemoryKeys: vi.fn().mockResolvedValue([]),
     getLastMessageTime: vi.fn().mockResolvedValue(null),
     getLastTokens: vi.fn().mockResolvedValue(null),
@@ -737,6 +744,33 @@ export function mockProvider(overrides?: Partial<LlmProvider>): LlmProvider {
   };
 }
 
+/** The `done` frame a scripted provider stream ends with. */
+export function doneFrame(stopReason: StopReason, usage: Usage): ChatStreamFrame {
+  return { type: "done", meta: { stopReason, model: "mock-model", usage } };
+}
+
+/** A scripted provider stream: `frames`, then `done`. */
+export async function* scriptedStream(
+  frames: ReadonlyArray<ContentFrame>,
+  done: ChatStreamFrame,
+): AsyncGenerator<ChatStreamFrame> {
+  yield* frames;
+  yield done;
+}
+
+/** Read a provider stream to its end: its content frames, and the `done` frame's metadata. */
+export async function drainFrames(
+  stream: AsyncIterable<ChatStreamFrame>,
+): Promise<{ frames: ContentFrame[]; meta: ResponseMeta }> {
+  const frames: ContentFrame[] = [];
+  let meta: ResponseMeta | undefined;
+  for await (const frame of stream) {
+    if (frame.type === "done") meta = frame.meta;
+    else frames.push(frame);
+  }
+  return { frames, meta: expectDefined(meta, "done frame") };
+}
+
 /**
  * Convenience wrapper for `HandleMessageDeps.resolveProvider` /
  * `ObserverDeps.resolveProvider` injection. Two shapes:
@@ -782,9 +816,9 @@ function isReadonlyMap<K, V>(x: unknown): x is ReadonlyMap<K, V> {
 
 export function mockStreamHandle(overrides?: Partial<StreamHandle>): StreamHandle {
   return {
-    push: vi.fn().mockResolvedValue(undefined),
-    finish: vi.fn().mockResolvedValue(undefined),
-    abort: vi.fn().mockResolvedValue(undefined),
+    push: vi.fn().mockResolvedValue(ok(undefined)),
+    finish: vi.fn().mockResolvedValue(ok(undefined)),
+    abort: vi.fn().mockResolvedValue(ok(undefined)),
     ...overrides,
   };
 }
@@ -799,11 +833,12 @@ export function mockStreamingAdapter(overrides?: Partial<StreamingAdapter>): Str
 
 export function mockDeliveryHandle(overrides?: Partial<DeliveryHandle>): DeliveryHandle {
   return {
-    push: vi.fn().mockResolvedValue(undefined),
-    finish: vi.fn().mockResolvedValue(undefined),
-    abort: vi.fn().mockResolvedValue(undefined),
+    push: vi.fn().mockResolvedValue(ok(undefined)),
+    finish: vi.fn().mockResolvedValue(ok(undefined)),
+    abort: vi.fn().mockResolvedValue(ok(undefined)),
     hasBatchTargets: vi.fn().mockReturnValue(true),
     deliverBatch: vi.fn().mockResolvedValue(undefined),
+    deliverUnstreamed: vi.fn().mockResolvedValue(undefined),
     canDeliverVoice: vi.fn().mockReturnValue(false),
     deliverVoice: vi.fn().mockResolvedValue(undefined),
     ...overrides,

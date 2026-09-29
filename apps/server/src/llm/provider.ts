@@ -1,4 +1,10 @@
-import type { ChatParams, ChatStreamResult, CountTokensParams, LlmResponse } from "./types.js";
+import type {
+  ChatOptions,
+  ChatParams,
+  ChatStreamFrame,
+  CountTokensParams,
+  LlmResponse,
+} from "./types.js";
 
 /**
  * Provider-agnostic LLM interface.
@@ -8,7 +14,12 @@ import type { ChatParams, ChatStreamResult, CountTokensParams, LlmResponse } fro
  */
 export interface LlmProvider {
   readonly name: string;
-  chat(params: ChatParams): Promise<LlmResponse>;
-  chatStream(params: ChatParams): ChatStreamResult;
+  chat(params: ChatParams, options?: ChatOptions): Promise<LlmResponse>;
+  /**
+   * Stream one response as {@link ChatStreamFrame}s, ending in a `done`
+   * frame. A consumer that stops early (`break`, a throw in its loop body)
+   * returns the iterator, which aborts the request.
+   */
+  chatStream(params: ChatParams, options?: ChatOptions): AsyncIterable<ChatStreamFrame>;
   countTokens(params: CountTokensParams): Promise<number>;
 }

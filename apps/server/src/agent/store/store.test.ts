@@ -9,8 +9,9 @@ import { DrizzleSecretsStore } from "../../secrets/store/index.js";
 import { skills } from "../../skills/store/schema.js";
 import { expectDefined } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
+import { renderInboundText } from "../../transport/content.js";
 import { inboundMessages } from "../../transport/store/schema.js";
-import { DrizzleAgentStore } from "./index.js";
+import { type CoreMemoryUpsertOutcome, DrizzleAgentStore } from "./index.js";
 import {
   conversationSummaries,
   coreMemoryBlocks,
@@ -1426,8 +1427,8 @@ describe("DrizzleAgentStore", () => {
       profileClass: string | null,
       key: string,
       content: string,
-    ): Promise<void> {
-      await tx((trx) => store.upsertCoreMemoryBlock(trx, { userId, profileClass, key, content }));
+    ): Promise<CoreMemoryUpsertOutcome> {
+      return tx((trx) => store.upsertCoreMemoryBlock(trx, { userId, profileClass, key, content }));
     }
 
     async function seedClass(userId: string, name: string): Promise<void> {
@@ -1456,6 +1457,31 @@ describe("DrizzleAgentStore", () => {
         .from(coreMemoryBlocks)
         .where(eq(coreMemoryBlocks.userId, userId));
       expect(rows).toHaveLength(1);
+    });
+
+    it("upsert reports whether it created the block, changed it or left it as it was", async () => {
+      const userId = await seedUser();
+      await seedClass(userId, "game");
+
+      expect(await upsert(userId, null, "identity", "Name: Tim")).toBe("created");
+      expect(await upsert(userId, null, "identity", "Name: Tim\nHome: Lisbon")).toBe("updated");
+      expect(await upsert(userId, null, "identity", "Name: Tim\nHome: Lisbon")).toBe("unchanged");
+      expect(await upsert(userId, "game", "identity", "Name: Tim\nHome: Lisbon")).toBe("created");
+    });
+
+    it("an upsert that leaves the content as it was keeps the block's updated_at", async () => {
+      const userId = await seedUser();
+      await upsert(userId, null, "identity", "Name: Tim");
+      const past = new Date("2026-01-01T00:00:00Z");
+      await db
+        .update(coreMemoryBlocks)
+        .set({ updatedAt: past })
+        .where(eq(coreMemoryBlocks.userId, userId));
+
+      await upsert(userId, null, "identity", "Name: Tim");
+
+      const times = await tx((trx) => store.getCoreMemoryUpdateTimes(trx, userId));
+      expect(times.map((t) => t.updatedAt)).toEqual([past]);
     });
 
     it("an unclassed read returns every NULL-class block in key order, identity included", async () => {
@@ -1541,9 +1567,12 @@ describe("DrizzleAgentStore", () => {
       await upsert(userId, "game", "identity", "Name: Thorin");
       await upsert(userId, "game", "preferences", "Dice");
 
-      await tx((trx) =>
-        store.deleteCoreMemoryBlock(trx, { userId, profileClass: "game", key: "identity" }),
-      );
+      const remove = () =>
+        tx((trx) =>
+          store.deleteCoreMemoryBlock(trx, { userId, profileClass: "game", key: "identity" }),
+        );
+      expect(await remove()).toBe(true);
+      expect(await remove()).toBe(false);
 
       const blocks = await tx((trx) => store.getCoreMemoryBlocks(trx, userId, "game"));
       expect(blocks).toEqual([
@@ -2434,6 +2463,27 @@ describe("DrizzleAgentStore", () => {
       expect(list[0]!.lastMessageAt).toBeInstanceOf(Date);
       // Also verify profileId from seedConversation was the one linked
       expect(profileId).toBeDefined();
+    });
+
+    it("listConversationsForUser previews a forwarded last message as its sender and body", async () => {
+      const { userId, conversationId, stamp } = await seedConversation();
+      const forwarded = {
+        origin: "user",
+        from: "Alice",
+        sentAt: "2023-11-14T22:13:20.000Z",
+      } as const;
+      await tx((trx) =>
+        store.insertMessage(trx, {
+          conversationId,
+          role: "user",
+          content: renderInboundText("see you at 8", forwarded),
+          lastInboundMessageId: "019d0000-0000-7000-8000-000000000001",
+          ...stamp,
+        }),
+      );
+
+      const [conversation] = await tx((trx) => store.listConversationsForUser(trx, userId));
+      expect(conversation?.lastMessagePreview).toBe("Fwd from Alice: see you at 8");
     });
 
     it("listConversationsForUser excludes conversations from other users", async () => {

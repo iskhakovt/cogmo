@@ -7,14 +7,6 @@ import { logger } from "../../logger.js";
 import type { McpToolDescriptor } from "../config.js";
 
 /**
- * Upper bound on the streamable-HTTP `terminateSession` DELETE. Healthy
- * servers reply in <1s; a longer hang means the peer is gone or the
- * network is wedged, in which case we'd rather skip cleanup than block
- * shutdown / pool eviction.
- */
-const TERMINATE_SESSION_TIMEOUT_MS = 2_000;
-
-/**
  * The connection-shape the rest of the MCP module depends on. Decoupled
  * from the SDK so the pool / adapter / registry can be unit-tested with a
  * fake `McpConnection` (no subprocess required).
@@ -40,6 +32,7 @@ export class SdkMcpConnection implements McpConnection {
   #transport: Transport;
   #serverName: string;
   #closed = false;
+  #closing: Promise<void> | undefined;
   #closeListeners = new Set<() => void>();
   #toolsChangedListeners = new Set<() => void>();
 
@@ -49,6 +42,10 @@ export class SdkMcpConnection implements McpConnection {
     this.#serverName = serverName;
   }
 
+  /**
+   * Run the `initialize` handshake. It takes no signal: the MCP spec forbids
+   * cancelling `initialize`, so a caller abandons it by calling `close()`.
+   */
   async connect(): Promise<void> {
     // Wire transport-close before connect — connect() can fail and close in
     // the same tick; we want the callback registered first. The handler is
@@ -129,32 +126,22 @@ export class SdkMcpConnection implements McpConnection {
     };
   }
 
-  async close(): Promise<void> {
+  /** Every call shares one teardown, and resolves once it is done. */
+  close(): Promise<void> {
+    this.#closing ??= this.#close();
+    return this.#closing;
+  }
+
+  async #close(): Promise<void> {
     if (this.#closed) return;
     // Streamable-HTTP servers (Linear, Notion, Atlassian) keep per-session
-    // state keyed by `Mcp-Session-Id`. Explicit DELETE before tearing down
-    // the transport tells the server to release that state — without it,
-    // sessions linger until server-side expiry. Best-effort: server may
-    // respond 405 (per spec), already be gone, or be unreachable. Stdio /
-    // other transports don't have the method; the instanceof check keeps
-    // the abstraction.
-    //
-    // The SDK calls `fetch(url, init)` with only its own internal SSE
-    // abort signal, and undici has no default request timeout — a hung
-    // peer could block the DELETE for ~300s (body timeout). Race against
-    // a short timer so shutdown / eviction stays bounded.
+    // state keyed by `Mcp-Session-Id`; the DELETE tells the server to release
+    // it rather than hold it until server-side expiry. Best-effort: the server
+    // may answer 405 (per spec), be gone, or miss the deadline `createTransport`
+    // puts on the request. Other transports have no session to end.
     if (this.#transport instanceof StreamableHTTPClientTransport) {
-      const transport = this.#transport;
       try {
-        await Promise.race([
-          transport.terminateSession(),
-          new Promise<void>((_, reject) =>
-            setTimeout(
-              () => reject(new Error("terminateSession timeout")),
-              TERMINATE_SESSION_TIMEOUT_MS,
-            ).unref(),
-          ),
-        ]);
+        await this.#transport.terminateSession();
       } catch (err) {
         logger.debug({ err }, "MCP streamable-http terminateSession failed; continuing close");
       }

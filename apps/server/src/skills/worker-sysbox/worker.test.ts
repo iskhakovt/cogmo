@@ -1,4 +1,5 @@
 import { PassThrough } from "node:stream";
+import { ok } from "neverthrow";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import {
@@ -8,6 +9,7 @@ import {
   type SandboxClient,
   type SandboxSession,
 } from "../../sandbox/index.js";
+import { fakeExecHandle } from "../../test/coding-fixtures.js";
 import type { CtxHandler } from "../dispatcher.js";
 import { type TaskInvoke, TaskInvokeSchema } from "../protocol.js";
 import { type InvokeParams, SysboxSkillWorker } from "./worker.js";
@@ -41,6 +43,7 @@ function buildFakeSandbox(): FakeSandboxBundle {
     stdin: stdin,
     stdout: stdout,
     stderr: stderr,
+    exited: Promise.resolve(ok({ exitCode: 0 })),
     wait: async () => ({ exitCode: 0 }),
     dispose: async () => {
       execDisposeCalls.count += 1;
@@ -246,6 +249,7 @@ describe("SysboxSkillWorker", () => {
         stdin: bundle.stdin,
         stdout: bundle.stdout,
         stderr: new PassThrough(),
+        exited: Promise.resolve(ok({ exitCode: 0 })),
         wait: async () => ({ exitCode: 0 }),
         dispose: async () => {
           bundle.execDisposeCalls.count += 1;
@@ -491,6 +495,7 @@ describe("SysboxSkillWorker", () => {
             stdin: new PassThrough(),
             stdout: new PassThrough(),
             stderr: populateStderr,
+            exited: Promise.resolve(ok({ exitCode: 0 })),
             wait: async () => ({ exitCode: 0 }),
             dispose: async () => {},
           };
@@ -501,6 +506,7 @@ describe("SysboxSkillWorker", () => {
           stdin: bundle.stdin,
           stdout: bundle.stdout,
           stderr: new PassThrough(),
+          exited: Promise.resolve(ok({ exitCode: 0 })),
           wait: async () => ({ exitCode: 0 }),
           dispose: async () => {
             bundle.execDisposeCalls.count += 1;
@@ -545,36 +551,23 @@ describe("SysboxSkillWorker", () => {
       const bundle = buildFakeSandbox();
       vi.mocked(bundle.session.execStreaming).mockImplementation(async (cmd) => {
         if (cmd[3] === "populate") {
-          // Populate exec — emit a hash-mismatch stderr and exit 1.
-          // The stderr listener attaches synchronously after the handle
-          // is returned; we hold `wait()` until the next microtask so
-          // the listener observes the bytes before the result settles.
-          const populateStderr = new PassThrough();
-          populateStderr.write("error: hash mismatch on httpx-0.27.0\n");
-          populateStderr.end();
-          return {
+          // Populate exec — emit a hash-mismatch stderr and exit 1. The
+          // stderr listener attaches once the handle is returned; the exit
+          // waits a macrotask, so the listener has the bytes by then.
+          return fakeExecHandle({
             stdin: new PassThrough(),
-            stdout: new PassThrough(),
-            stderr: populateStderr,
-            wait: async () => {
-              // Drain the stderr stream's queued chunks into the
-              // listener before resolving. One macrotask is enough.
-              await new Promise<void>((r) => setImmediate(r));
-              return { exitCode: 1 };
-            },
-            dispose: async () => {},
-          };
+            stderr: "error: hash mismatch on httpx-0.27.0\n",
+            exited: new Promise((resolve) => setImmediate(() => resolve(ok({ exitCode: 1 })))),
+          });
         }
         bundle.stdout.write(`${SUPERVISOR_READY}\n`);
-        return {
+        return fakeExecHandle({
           stdin: bundle.stdin,
           stdout: bundle.stdout,
-          stderr: new PassThrough(),
-          wait: async () => ({ exitCode: 0 }),
           dispose: async () => {
             bundle.execDisposeCalls.count += 1;
           },
-        };
+        });
       });
 
       // Track any task_invoke — should NOT see one when populate fails.
@@ -636,27 +629,15 @@ describe("SysboxSkillWorker", () => {
       const bundle = buildFakeSandbox();
       vi.mocked(bundle.session.execStreaming).mockImplementation(async (cmd) => {
         if (cmd[3] === "populate") {
-          return {
+          // The supervisor dies while uv pip sync runs.
+          bundle.stdout.end();
+          return fakeExecHandle({
             stdin: new PassThrough(),
-            stdout: new PassThrough(),
-            stderr: new PassThrough(),
-            wait: async () => {
-              // The supervisor dies while uv pip sync runs.
-              bundle.stdout.end();
-              await new Promise<void>((r) => setImmediate(r));
-              return { exitCode: 0 };
-            },
-            dispose: async () => {},
-          };
+            exited: new Promise((resolve) => setImmediate(() => resolve(ok({ exitCode: 0 })))),
+          });
         }
         bundle.stdout.write(`${SUPERVISOR_READY}\n`);
-        return {
-          stdin: bundle.stdin,
-          stdout: bundle.stdout,
-          stderr: new PassThrough(),
-          wait: async () => ({ exitCode: 0 }),
-          dispose: async () => {},
-        };
+        return fakeExecHandle({ stdin: bundle.stdin, stdout: bundle.stdout });
       });
       const w = await SysboxSkillWorker.create({
         workerId: "w-venv-death",
@@ -927,6 +908,7 @@ describe("SysboxSkillWorker", () => {
         stdin: new PassThrough(),
         stdout: failingStdout,
         stderr: new PassThrough(),
+        exited: Promise.resolve(ok({ exitCode: 0 })),
         wait: async () => ({ exitCode: 0 }),
         dispose: async () => {
           throw new Error("exec dispose failed");

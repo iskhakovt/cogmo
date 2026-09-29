@@ -38,6 +38,8 @@ The minimum useful system: talk to it, it remembers things.
 - [x] Post-conversation Observer — Inngest function triggered by `conversation/idle` event (Stage 1 evolution)
 - [x] Instruction file (Stage 1 evolution) — correction extraction via chatTyped(), persisted to steeringRules with graduation + consolidation
 - [x] Steering rules table in PostgreSQL — injected into system prompt per invocation
+- [ ] Explicit instructions as rules — `rule_set` / `rule_remove`, per-user ownership, `/rules` and `cogmo rules` ([design/evolution.md](design/evolution.md) → Explicit Instructions)
+- [ ] Append-only transcript — history append-only within an epoch, checked by a transcript head ([design/prompt-caching.md](design/prompt-caching.md) → Append-only Transcript)
 - [x] ~~Internal tag stripping~~ — removed; native thinking blocks + tool calls cover the use cases
 - [x] Crash recovery — handled by Inngest durable steps (automatic resume from last checkpoint); summarization LLM call wrapped in `step.run`, replay test via `@inngest/test`, contract documented in `design/crash-recovery.md`
 - [x] Session lifecycle — Inngest idle timer, resolveSession staleness, `/new` command, debounce wiring
@@ -71,7 +73,7 @@ The minimum useful system: talk to it, it remembers things.
 
 The agent does things on its own, not just when you talk to it.
 
-Phase 2 is anchored on one new primitive — **user/agent-defined scheduled tasks** — that subsumes "morning briefing", ingestion polling, and any "remind me at X" surface. Static Inngest crons stay for genuinely system-wide jobs (memory consolidation). See [scheduling.md](design/scheduling.md) → Agent Self-Scheduling.
+Phase 2 is anchored on one new primitive — **user/agent-defined scheduled tasks** — that subsumes "morning briefing", ingestion polling, and any "remind me at X" surface. Static Inngest crons stay for system-wide maintenance (reapers, cleanup). See [scheduling.md](design/scheduling.md) → Agent Self-Scheduling.
 
 - [x] Post-conversation extraction — Observer on `conversation/idle` (shipped in Phase 1, runs delayed via `step.sleep("wait-for-silence", "5m")`)
 - [x] Human-in-the-loop — Telegram callback buttons over DB-parked state (shipped via coding slice 2 plan approval + slice 3 tool gate; reusable primitive). Plan approval parks the task at `awaiting_approval`; the tap's event resumes it in a separate function (`coding-task-execute`).
@@ -81,7 +83,6 @@ Phase 2 is anchored on one new primitive — **user/agent-defined scheduled task
 - [x] Synthetic conversation turn on fire — the fire handler reuses the engaged conversation or rotates onto a fresh one, persists a `source='scheduled'` inbound carrying the scheduled-for timestamp (so the model is self-aware about catch-up), and re-enters `handle-message` via `inbound/arrived`
 - [ ] Wizard recurring-tasks step — optional, opt-in flow for "morning briefing at 7:30am" and similar; writes one `scheduled_tasks` row; re-runnable, removable via `/schedules`. Morning briefing is one *instance* of the primitive, not a special-cased function.
 - [x] `/schedules` channel command — view enabled + disabled, disable/enable/delete; identity-checked transport entry point (mirrors `/skills`)
-- [ ] Memory consolidation — daily `reflect()` via static Inngest cron (genuinely system-wide, not user-defined)
 - [ ] First ingestion agent: Gmail (MCP) — depends on MCP client Phase D (OAuth 2.1 + DCR, see todo); polling cadence is itself a `scheduled_tasks` row that runs an ingestion prompt
 - [ ] First ingestion agent: Google Calendar (MCP) — same shape as Gmail
 - [ ] Dual-mode monitoring for ingestion — embedding scan first, LLM only when relevant
