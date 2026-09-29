@@ -2,6 +2,7 @@ import { err, ok } from "neverthrow";
 import { describe, expect, it } from "vitest";
 import type { StreamOpts } from "../../types.js";
 import {
+  classifyWriteError,
   EDIT_INTERVAL_MS,
   type Effect,
   findTelegramSplitBoundary,
@@ -325,6 +326,51 @@ describe("telegram stream state", () => {
       ]);
 
       expect(writes(effects)).toHaveLength(1);
+    });
+  });
+
+  describe("classifyWriteError", () => {
+    /** Shaped as grammY's `GrammyError`. */
+    function telegramError(code: number, description: string, parameters: object = {}): Error {
+      return Object.assign(
+        new Error(`Call to 'editMessageText' failed! (${code}: ${description})`),
+        {
+          error_code: code,
+          description,
+          parameters,
+        },
+      );
+    }
+
+    it.each([
+      [
+        "an unmodified edit",
+        telegramError(400, "Bad Request: message is not modified"),
+        { kind: "not_modified" },
+      ],
+      [
+        "an HTML parse failure",
+        telegramError(400, "Bad Request: can't parse entities"),
+        { kind: "unparseable", reason: expect.stringContaining("can't parse entities") },
+      ],
+      [
+        "a flood wait",
+        telegramError(429, "Too Many Requests: retry after 7", { retry_after: 7 }),
+        { kind: "rate_limited", retryAfterMs: 7000, reason: expect.stringContaining("429") },
+      ],
+      [
+        "a 429 without retry_after",
+        telegramError(429, "Too Many Requests"),
+        { kind: "rejected", reason: expect.stringContaining("429") },
+      ],
+      [
+        "any other API error",
+        telegramError(403, "Forbidden: bot was blocked by the user"),
+        { kind: "rejected", reason: expect.stringContaining("bot was blocked") },
+      ],
+      ["a network error", new Error("fetch failed"), { kind: "rejected", reason: "fetch failed" }],
+    ])("classifies %s", (_, error, expected) => {
+      expect(classifyWriteError(error)).toEqual(expected);
     });
   });
 

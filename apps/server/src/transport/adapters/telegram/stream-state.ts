@@ -15,10 +15,12 @@ import { renderTelegramHtml } from "./render.js";
  *
  * ```
  *  idle ─push─► streaming ─finish · abort─► finalizing ─last write lands─► done
- *   │               │                            │
- *   │               └──── a write fails ─────────┴──────────────────────► failed
- *   └─finish─► done        (abort from idle writes the error alone)
+ *   │                │                           │
+ *   │                └──── a write fails ────────┴──────────────────────► failed
+ *   └─finish─► done
  * ```
+ *
+ * An abort from `idle` enters `finalizing` too, to write the error alone.
  *
  * Invariants the table enforces:
  *  - at most one write is in flight, and none starts while Telegram's
@@ -31,7 +33,7 @@ import { renderTelegramHtml } from "./render.js";
  */
 
 /** Telegram's cap on one message's text. */
-export const TELEGRAM_MAX_MESSAGE_LENGTH = 4096;
+const TELEGRAM_MAX_MESSAGE_LENGTH = 4096;
 /** Minimum time between two previews of the live message. */
 export const EDIT_INTERVAL_MS = 500;
 /**
@@ -59,7 +61,7 @@ const TELEGRAM_MIN_HEAD_CHARS = 500;
  * "this was already flushed into its own message" — one wants a partial cut,
  * the other wants none.
  */
-export type BufferSegment =
+type BufferSegment =
   | { kind: "text"; text: string }
   | { kind: "tool"; toolUseId: string; toolName: string; text: string }
   | { kind: "status"; text: string };

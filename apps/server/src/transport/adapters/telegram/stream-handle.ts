@@ -59,6 +59,12 @@ function mediaOf(event: MediaResult): Media | null {
   return document && { kind: "document", path: document.path, filename: document.name };
 }
 
+/** A stream handle that tells when it has settled. */
+export interface SettlingStreamHandle extends StreamHandle {
+  /** Resolves once the stream is done, or with why it failed. */
+  readonly done: Promise<Result<void, string>>;
+}
+
 /**
  * One turn's stream into one Telegram chat. Drives the machine in
  * `stream-state.ts`: puts every push, lifecycle call and write result to
@@ -73,7 +79,7 @@ function mediaOf(event: MediaResult): Media | null {
  * `sendDocument`, once per path: a push that repeats one — an Inngest retry
  * re-emitting it — sends nothing.
  */
-export class TelegramStreamHandle implements StreamHandle {
+export class TelegramStreamHandle implements SettlingStreamHandle {
   readonly #bot: Bot;
   readonly #attachments: AttachmentStore;
   readonly #chatId: number;
@@ -81,7 +87,6 @@ export class TelegramStreamHandle implements StreamHandle {
   readonly #log: typeof logger;
   #state: StreamState = { kind: "idle" };
   readonly #settled = Promise.withResolvers<Result<void, string>>();
-  /** Resolves once the stream is done, or with why it failed. */
   readonly done: Promise<Result<void, string>> = this.#settled.promise;
   /** Aborted once the stream takes no more content; the typing heartbeat stops with it. */
   readonly #live = new AbortController();
@@ -119,12 +124,12 @@ export class TelegramStreamHandle implements StreamHandle {
     return this.#outcome();
   }
 
-  finish(): Promise<Result<void, string>> {
+  async finish(): Promise<Result<void, string>> {
     this.#input({ type: "finish", now: Date.now() });
     return this.done;
   }
 
-  abort(error: string): Promise<Result<void, string>> {
+  async abort(error: string): Promise<Result<void, string>> {
     this.#input({ type: "abort", error, now: Date.now() });
     return this.done;
   }
@@ -226,10 +231,11 @@ export class TelegramStreamHandle implements StreamHandle {
       const file = new InputFile(await this.#attachments.download(media.path), media.filename);
       if (media.kind === "photo") await this.#bot.api.sendPhoto(this.#chatId, file);
       else await this.#bot.api.sendDocument(this.#chatId, file);
-      this.#sentMedia.add(media.path);
-      this.#input({ type: "media_sent", toolName: event.name });
     } catch (err) {
       this.#log.error({ err, path: media.path }, `telegram: failed to deliver ${event.name}`);
+      return;
     }
+    this.#sentMedia.add(media.path);
+    this.#input({ type: "media_sent", toolName: event.name });
   }
 }
