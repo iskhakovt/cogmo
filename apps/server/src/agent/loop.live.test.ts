@@ -28,6 +28,7 @@ import { mock } from "vitest-mock-extended";
 import { z } from "zod";
 import { AnthropicProvider } from "../llm/anthropic.js";
 import { logger } from "../logger.js";
+import { DEFAULT_PROFILE_MODEL } from "../setup/seed.js";
 import { expectDefined } from "../test/assertions.js";
 import { createWireRecorder, type WireResponse } from "../test/wire-recorder.js";
 import { runStreamingAgentLoop } from "./loop.js";
@@ -37,9 +38,9 @@ import { defineTool, ToolRegistry } from "./tools.js";
 // An empty `ANTHROPIC_API_KEY=` line in `.env` counts as unset.
 const API_KEY = (process.env.LIVE === "1" && process.env.ANTHROPIC_API_KEY) || undefined;
 
-const MODELS = (process.env.LIVE_MODELS ?? "claude-sonnet-5").split(",").map((m) => m.trim());
+const MODELS = (process.env.LIVE_MODELS ?? DEFAULT_PROFILE_MODEL).split(",").map((m) => m.trim());
 
-/** Above the largest minimum cacheable prefix among the models run (Sonnet 5: 1,024). */
+/** Above the largest minimum cacheable prefix among the models run (Sonnet 5.5: 512, Sonnet 5: 1,024). */
 const MIN_CACHEABLE_TOKENS = 1024;
 
 /** The chain the model walks: each result names the next key, the last holds the answer. */
