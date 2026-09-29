@@ -1,6 +1,5 @@
 import { z } from "zod";
 import type { ContentBlock } from "../llm/types.js";
-import { escapeClosingTags } from "../util/string.js";
 
 /**
  * Where forwarded text came from: the kind of sender, its display name (a
@@ -206,8 +205,18 @@ export function renderInboundText(text: string, forwarded: ForwardedOrigin | und
     `sent="${attributeValue(forwarded.sentAt)}"`,
   ].join(" ");
   // Empty for captionless forwarded media, where the element only names the sender.
-  const body = text === "" ? "" : `\n${escapeClosingTags(text, ["forwarded_message"])}\n`;
+  const body = text === "" ? "" : `\n${escapeForwardedTags(text)}\n`;
   return `<forwarded_message ${attributes}>${body}</forwarded_message>`;
+}
+
+/**
+ * `text` with the `<` of every `forwarded_message` tag a lenient reader would
+ * honour, opener or closer, as `&lt;`: any case, with whitespace, slashes or
+ * backslashes before the name. The body can then neither close its element
+ * nor open another.
+ */
+function escapeForwardedTags(text: string): string {
+  return text.replace(/<(?=[\s\\/]*forwarded_message)/gi, "&lt;");
 }
 
 /** `value` inside a double-quoted attribute: markup characters as entities, whitespace runs as one space. */

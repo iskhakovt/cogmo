@@ -162,6 +162,19 @@ describe("splitForwarded", () => {
     ]);
   });
 
+  it("decodes the forwarded_message tags the server escaped in the body, and nothing else", () => {
+    const text = `${open}\nsee &lt;/forwarded_message> &lt;\\/forwarded_message> &lt;b>\n</forwarded_message>`;
+
+    expect(splitForwarded(text)).toEqual([
+      {
+        kind: "forwarded",
+        from: "Alice Smith",
+        body: "see </forwarded_message> <\\/forwarded_message> &lt;b>",
+        at: 0,
+      },
+    ]);
+  });
+
   it("decodes the entities in the sender's name", () => {
     const text =
       '<forwarded_message from="Eve &quot;the &lt;b&gt;&quot; &amp; co" origin="chat" ' +

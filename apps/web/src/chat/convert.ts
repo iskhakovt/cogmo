@@ -45,7 +45,7 @@ export function splitForwarded(text: string): UserTextSegment[] {
     segments.push({
       kind: "forwarded",
       from: decodeEntities(match[1] ?? ""),
-      body: match[2] ?? "",
+      body: decodeForwardedTags(match[2] ?? ""),
       at: match.index,
     });
     at = match.index + match[0].length;
@@ -58,6 +58,11 @@ export function splitForwarded(text: string): UserTextSegment[] {
 function ownText(slice: string, at: number): UserTextSegment[] {
   const text = slice.replace(/^\n+|\n+$/g, "");
   return text === "" ? [] : [{ kind: "text", text, at }];
+}
+
+/** A body with the `forwarded_message` tags the server escaped as `&lt;` shown as written. */
+function decodeForwardedTags(body: string): string {
+  return body.replace(/&lt;(?=[\s\\/]*forwarded_message)/gi, "<");
 }
 
 function decodeEntities(value: string): string {
