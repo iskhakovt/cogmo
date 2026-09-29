@@ -1,9 +1,8 @@
 import type { PtyHandle, PtyResult } from "@daytona/sdk";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
-import { ExecTimeoutError } from "../index.js";
+import { ExecDisposedError, ExecTimeoutError } from "../index.js";
 import { type PtyFileSystemClient, type PtyProcessClient, startExecPty } from "./exec-pty.js";
-import { DisposedError } from "./exec-streaming.js";
 
 /**
  * PTY stub. Tests need to (a) trigger `onData` from outside (to drive
@@ -372,6 +371,140 @@ describe("startExecPty", () => {
     }
   });
 
+  describe("the total deadline bounds every remote step", () => {
+    const never = <T>(): Promise<T> => new Promise<T>(() => {});
+    const hangs: ReadonlyArray<{
+      step: string;
+      hang: (pty: FakePtyControl, fs: FakeFsControl, proc: FakeProcessControl) => void;
+    }> = [
+      {
+        step: "fs.uploadFile",
+        hang: (_pty, fs) => vi.mocked(fs.fs.uploadFile).mockImplementation(never),
+      },
+      {
+        step: "createPty",
+        hang: (_pty, _fs, proc) => vi.mocked(proc.process.createPty).mockImplementation(never),
+      },
+      {
+        step: "waitForConnection",
+        hang: (pty) => vi.mocked(pty.pty.waitForConnection).mockImplementation(never),
+      },
+      {
+        step: "sendInput",
+        hang: (pty) => vi.mocked(pty.pty.sendInput).mockImplementation(never),
+      },
+      {
+        step: "the stderr download after exit",
+        hang: (pty, fs) => {
+          vi.mocked(fs.fs.downloadFile).mockImplementation(never);
+          pty.resolveWait({ exitCode: 0 });
+        },
+      },
+    ];
+
+    for (const { step, hang } of hangs) {
+      it(`settles with ExecTimeoutError when ${step} never returns`, async () => {
+        vi.useFakeTimers();
+        try {
+          const ptyCtrl = fakePty();
+          const fsCtrl = fakeFs();
+          const procCtrl = fakeProcess(ptyCtrl);
+          hang(ptyCtrl, fsCtrl, procCtrl);
+
+          const handle = await startExecPty({
+            process: procCtrl.process,
+            fs: fsCtrl.fs,
+            sessionIdPrefix: "p",
+            cmd: ["true"],
+            opts: { attachStdin: true, timeoutMs: 1_000 },
+            random: deterministicRandom(),
+          });
+          let settled: unknown;
+          handle.wait().then(
+            (exit) => {
+              settled = exit;
+            },
+            (e: unknown) => {
+              settled = e;
+            },
+          );
+          handle.stdin?.end();
+
+          await vi.advanceTimersByTimeAsync(1_001);
+
+          expect(settled).toBeInstanceOf(ExecTimeoutError);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+    }
+  });
+
+  it("reports the exit code even when pty.disconnect() never returns", async () => {
+    vi.useFakeTimers();
+    try {
+      const ptyCtrl = fakePty();
+      vi.mocked(ptyCtrl.pty.disconnect).mockImplementation(() => new Promise<void>(() => {}));
+      const fsCtrl = fakeFs();
+      const procCtrl = fakeProcess(ptyCtrl);
+      const handle = await startExecPty({
+        process: procCtrl.process,
+        fs: fsCtrl.fs,
+        sessionIdPrefix: "p",
+        cmd: ["true"],
+        opts: { attachStdin: true },
+        random: deterministicRandom(),
+      });
+      let settled: unknown;
+      handle.wait().then(
+        (exit) => {
+          settled = exit;
+        },
+        (e: unknown) => {
+          settled = e;
+        },
+      );
+      handle.stdin?.end();
+      await vi.advanceTimersByTimeAsync(0);
+      ptyCtrl.resolveWait({ exitCode: 3 });
+
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(settled).toEqual({ exitCode: 3 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("output after the exit does not re-arm the idle deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const ptyCtrl = fakePty();
+      const fsCtrl = fakeFs();
+      const procCtrl = fakeProcess(ptyCtrl);
+      const handle = await startExecPty({
+        process: procCtrl.process,
+        fs: fsCtrl.fs,
+        sessionIdPrefix: "p",
+        cmd: ["true"],
+        opts: { attachStdin: true, idleTimeoutMs: 5_000 },
+        random: deterministicRandom(),
+      });
+      handle.stdin?.end();
+      await vi.advanceTimersByTimeAsync(0);
+      ptyCtrl.resolveWait({ exitCode: 0 });
+      await expect(handle.wait()).resolves.toEqual({ exitCode: 0 });
+
+      ptyCtrl.emitData("late\n");
+      await vi.advanceTimersByTimeAsync(5_001);
+
+      expect(ptyCtrl.pty.kill).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("calls pty.disconnect() on natural exit", async () => {
     const ptyCtrl = fakePty();
     const fsCtrl = fakeFs();
@@ -542,10 +675,10 @@ describe("startExecPty", () => {
     await handle.dispose();
     expect(ptyCtrl.killed).toBe(true);
     const err = await failure;
-    expect(err).toBeInstanceOf(DisposedError);
+    expect(err).toBeInstanceOf(ExecDisposedError);
   });
 
-  it("dispose() before exit rejects wait() with DisposedError and kills the PTY", async () => {
+  it("dispose() before exit rejects wait() with ExecDisposedError and kills the PTY", async () => {
     const ptyCtrl = fakePty();
     const fsCtrl = fakeFs();
     const procCtrl = fakeProcess(ptyCtrl);
@@ -567,7 +700,7 @@ describe("startExecPty", () => {
     expect(ptyCtrl.killed).toBe(true);
 
     const err = await failure;
-    expect(err).toBeInstanceOf(DisposedError);
+    expect(err).toBeInstanceOf(ExecDisposedError);
   });
 
   it("dispose() mid-upload kills the PTY once it lands, doesn't run the exec to completion", async () => {
@@ -606,7 +739,7 @@ describe("startExecPty", () => {
     await disposed;
 
     const err = await failure;
-    expect(err).toBeInstanceOf(DisposedError);
+    expect(err).toBeInstanceOf(ExecDisposedError);
     // PTY was never created (disposed check fires before createPty).
     expect(procCtrl.process.createPty).not.toHaveBeenCalled();
     expect(ptyCtrl.killed).toBe(false);
@@ -652,7 +785,7 @@ describe("startExecPty", () => {
     await disposed;
 
     const err = await failure;
-    expect(err).toBeInstanceOf(DisposedError);
+    expect(err).toBeInstanceOf(ExecDisposedError);
     // PTY was created, then immediately killed by the post-createPty
     // disposed check in startPty.
     expect(proc.createPty).toHaveBeenCalledTimes(1);
@@ -660,7 +793,7 @@ describe("startExecPty", () => {
     expect(ptyCtrl.sendInputs).toHaveLength(0);
   });
 
-  it("dispose() before stdin.end() rejects wait() with DisposedError", async () => {
+  it("dispose() before stdin.end() rejects wait() with ExecDisposedError", async () => {
     const ptyCtrl = fakePty();
     const fsCtrl = fakeFs();
     const procCtrl = fakeProcess(ptyCtrl);
@@ -678,7 +811,7 @@ describe("startExecPty", () => {
     await handle.dispose();
 
     const err = await failure;
-    expect(err).toBeInstanceOf(DisposedError);
+    expect(err).toBeInstanceOf(ExecDisposedError);
     // PTY was never created — no kill to perform.
     expect(ptyCtrl.killed).toBe(false);
     // Nothing to upload either, since startPty was bypassed.

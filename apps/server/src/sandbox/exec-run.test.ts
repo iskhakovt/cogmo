@@ -192,6 +192,18 @@ describe("runExec", () => {
     expect(handle.stderr.destroyed).toBe(true);
   });
 
+  it("reports a transport that fails while the start returns through `exited`, not the start", async () => {
+    const f = fakeBackend();
+    const failure = new Error("ws dropped");
+    f.backend.start.mockImplementation(async (sink) => {
+      sink.output("stdout", Buffer.from("partial"));
+      sink.failed(failure);
+      return {};
+    });
+    const handle = await runExec(f.backend, {});
+    expect(await handle.exited).toEqual(err({ kind: "transport_failed", error: failure }));
+  });
+
   it("drops output that arrives after settlement", async () => {
     const f = fakeBackend();
     f.started.resolve({});

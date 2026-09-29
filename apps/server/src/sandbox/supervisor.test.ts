@@ -5,7 +5,7 @@
  * stub proxy to verify the supervisor calls the proxy in the right order
  * and bind-mounts the returned socket path.
  */
-import type { PassThrough } from "node:stream";
+import type { PassThrough, Writable } from "node:stream";
 import type { ContainerInfo } from "dockerode";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { mock, mockDeep } from "vitest-mock-extended";
@@ -774,22 +774,21 @@ describe("LocalDockerSandboxClient — execStreaming.dispose()", () => {
   /**
    * Builds a Local-Docker sandbox session against a stub Docker facade
    * whose `demuxStream` we control. Returns the underlying hijack
-   * `PassThrough` so the caller can synthesise upstream bytes
-   * directly, plus the writable PassThroughs `demuxStream` was
-   * passed for stdout/stderr — driven by the test rather than by a
-   * real Docker frame parser.
+   * `PassThrough`, whose end is the exec's, plus the Writables
+   * `demuxStream` was passed for stdout/stderr — driven by the test
+   * rather than by a real Docker frame parser.
    */
   async function makeSessionWithDemux(taskId: string): Promise<{
     session: Awaited<ReturnType<LocalDockerSandboxClient["create"]>>;
     hijack: PassThrough;
-    demuxStdout: () => PassThrough;
-    demuxStderr: () => PassThrough;
+    demuxStdout: () => Writable;
+    demuxStderr: () => Writable;
   }> {
     const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const { PassThrough } = await import("node:stream");
     const hijack = new PassThrough();
-    let outSink: PassThrough | undefined;
-    let errSink: PassThrough | undefined;
+    let outSink: Writable | undefined;
+    let errSink: Writable | undefined;
     const execObj = {
       start: vi.fn(async () => hijack),
       inspect: vi.fn(async () => ({ ExitCode: 0 })),
@@ -811,9 +810,11 @@ describe("LocalDockerSandboxClient — execStreaming.dispose()", () => {
       getContainer: vi.fn(() => containerObj),
       listContainers: vi.fn(async () => []),
       modem: {
-        demuxStream: vi.fn((_s: PassThrough, out: PassThrough, err: PassThrough) => {
+        demuxStream: vi.fn((s: PassThrough, out: Writable, err: Writable) => {
           outSink = out;
           errSink = err;
+          // A real demuxer reads the hijacked stream, which is what lets it end.
+          s.resume();
         }),
       },
     } as unknown as DockerFacade;
@@ -862,7 +863,7 @@ describe("LocalDockerSandboxClient — execStreaming.dispose()", () => {
   // attached to the PassThrough at exec setup, the stream goes into
   // flowing mode and chunks are dropped — this test holds the line.
   it("late consumer: chunks demuxed before for-await attach are still delivered to the consumer", async () => {
-    const { session, demuxStdout } = await makeSessionWithDemux(
+    const { session, hijack, demuxStdout } = await makeSessionWithDemux(
       "019d0000-0000-7000-8000-00000000d153",
     );
     const handle = await session.execStreaming(["echo", "hi"], {
@@ -872,7 +873,7 @@ describe("LocalDockerSandboxClient — execStreaming.dispose()", () => {
     const out = demuxStdout();
     out.write("first-chunk\n");
     out.write("second-chunk\n");
-    out.end();
+    hijack.end();
 
     const collected: string[] = [];
     for await (const c of handle.stdout) {
@@ -882,22 +883,21 @@ describe("LocalDockerSandboxClient — execStreaming.dispose()", () => {
     expect(collected.join("")).toBe("first-chunk\nsecond-chunk\n");
   });
 
-  // The watchdog must reset on raw bytes from the upstream hijacked
-  // stream, regardless of whether the demuxed PassThroughs have a
-  // consumer attached yet. Drip-feeds upstream bytes under the idle
-  // window WITHOUT consuming the PassThroughs.
-  it("late consumer: upstream chunk emits reset the idle watchdog even before the PassThrough has a consumer", async () => {
-    const { session, hijack } = await makeSessionWithDemux("019d0000-0000-7000-8000-00000000d154");
+  // The watchdog resets as output arrives, whether or not the caller's
+  // streams have a consumer yet. Drip-feeds demuxed chunks under the idle
+  // window WITHOUT consuming the caller's streams.
+  it("late consumer: arriving output resets the idle watchdog even before the stream has a consumer", async () => {
+    const { session, hijack, demuxStdout } = await makeSessionWithDemux(
+      "019d0000-0000-7000-8000-00000000d154",
+    );
     const handle = await session.execStreaming(["yes"], {
       idleTimeoutMs: 100,
     });
-    handle.stdout.on("error", () => {});
-    handle.stderr.on("error", () => {});
 
     // Total elapsed exceeds the 100ms cap but no single gap does.
     for (let i = 0; i < 4; i++) {
       await new Promise<void>((resolve) => setTimeout(resolve, 40));
-      hijack.emit("data", Buffer.from(`tick${i}\n`));
+      demuxStdout().write(`tick${i}\n`);
     }
     hijack.end();
 

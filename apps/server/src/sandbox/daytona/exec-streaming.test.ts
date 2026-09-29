@@ -1,7 +1,7 @@
 import { DaytonaNotFoundError, type Process } from "@daytona/sdk";
 import { describe, expect, it, vi } from "vitest";
-import { ExecTimeoutError } from "../index.js";
-import { DisposedError, startExecStreaming } from "./exec-streaming.js";
+import { ExecDisposedError, ExecTimeoutError } from "../index.js";
+import { startExecStreaming } from "./exec-streaming.js";
 
 /**
  * Minimal `Process` stub. Each test scripts its own behaviour via the
@@ -198,7 +198,7 @@ describe("startExecStreaming", () => {
     expect(command).toBe("cd '/workspace' && 'git' 'checkout' '-B' 'feature'");
   });
 
-  it("dispose() calls deleteSession and rejects wait() with DisposedError", async () => {
+  it("dispose() calls deleteSession and rejects wait() with ExecDisposedError", async () => {
     // Per the `ExecStreamingHandle` contract, `wait()` must REJECT
     // (not resolve with a sentinel exit code) after `dispose()` so
     // backend-agnostic consumers can branch on the dispose path
@@ -244,7 +244,7 @@ describe("startExecStreaming", () => {
 
     expect(winner).toBe("disposed");
     expect(proc.deleteSession).toHaveBeenCalled();
-    await expect(handle.wait()).rejects.toBeInstanceOf(DisposedError);
+    await expect(handle.wait()).rejects.toBeInstanceOf(ExecDisposedError);
   });
 
   it("rejects opts.user as Phase-3a-unsupported (matches LocalDocker silently honoring; loud diff is better)", async () => {
@@ -262,12 +262,12 @@ describe("startExecStreaming", () => {
     expect(proc.createSession).not.toHaveBeenCalled();
   });
 
-  it("dispose() racing in-flight getSessionCommand rejects with DisposedError, not the raw 404", async () => {
+  it("dispose() racing in-flight getSessionCommand rejects with ExecDisposedError, not the raw 404", async () => {
     // Race window: WS resolves naturally, the success-path
     // `getSessionCommand` is in flight, consumer calls dispose() which
     // deletes the session. The in-flight fetch then 404s. Per the
     // ExecStreamingHandle contract, consumers branching on outcome
-    // must see `DisposedError`, not the raw SDK NotFound. Mirrors the
+    // must see `ExecDisposedError`, not the raw SDK NotFound. Mirrors the
     // .catch branch's mapping.
     const proc = fakeProcess({ wsResolve: {} });
     let resolveFetch!: (v: Awaited<ReturnType<Process["getSessionCommand"]>>) => void;
@@ -298,7 +298,7 @@ describe("startExecStreaming", () => {
     rejectFetch(new DaytonaNotFoundError("session not found", 404));
     await disposing;
 
-    await expect(handle.wait()).rejects.toBeInstanceOf(DisposedError);
+    await expect(handle.wait()).rejects.toBeInstanceOf(ExecDisposedError);
     // Suppress the unused `resolveFetch` lint signal — kept for symmetry
     // so readers see both halves of the gate.
     void resolveFetch;
@@ -523,22 +523,8 @@ describe("startExecStreaming", () => {
     expect(proc.deleteSession).toHaveBeenCalledTimes(2);
   });
 
-  it("concurrent callers don't return without retrying when the first attempt fails", async () => {
-    // The leak scenario: dispose() fires deleteSession (caller A);
-    // while A is in flight, the WS rejects for an unrelated reason
-    // (idle timeout, server blip), triggering the WS-error cleanup
-    // path (caller B). B awaits A's `inFlight`. A fails. Without
-    // the retry-on-failure loop, B returns — session leaks. The
-    // loop has B fall through and fire its own attempt.
+  it("a WS failure after dispose neither changes the outcome nor deletes the session again", async () => {
     const proc = fakeProcess({ wsResolve: {}, exitCode: 0 });
-    const attempts: Array<{ resolve: () => void; reject: (err: Error) => void }> = [];
-    vi.mocked(proc.deleteSession).mockImplementation(() => {
-      return new Promise<void>((resolve, reject) => {
-        attempts.push({ resolve, reject });
-      });
-    });
-
-    // Hold the WS open so we orchestrate the race manually.
     let rejectWs: ((err: Error) => void) | undefined;
     vi.mocked(proc.getSessionCommandLogs).mockImplementation(
       () =>
@@ -546,37 +532,45 @@ describe("startExecStreaming", () => {
           rejectWs = reject;
         }),
     );
-
     const handle = await startExecStreaming({
       process: proc,
       sessionIdPrefix: "p",
       cmd: ["sleep", "infinity"],
       opts: {},
     });
-    // Suppress the (eventual) wait() rejection — we don't await it.
-    handle.wait().catch(() => undefined);
 
-    // dispose() fires cleanupSession (caller A).
-    const disposeP = handle.dispose();
-    await vi.waitUntil(() => attempts.length === 1, { timeout: 200 });
-
-    // While A is in flight, the WS rejects — the WS-error path
-    // chains its own cleanupSession call (caller B). B enters the
-    // `while (inFlight)` loop, awaiting A.
+    await handle.dispose();
     rejectWs?.(new Error("ws dropped"));
     await new Promise<void>((resolve) => setImmediate(resolve));
 
-    // A fails.
-    attempts[0]?.reject(new Error("transient delete failure"));
+    await expect(handle.wait()).rejects.toBeInstanceOf(ExecDisposedError);
+    expect(proc.deleteSession).toHaveBeenCalledTimes(1);
+  });
 
-    // Without the retry loop, B would return here without firing a
-    // second deleteSession. With the loop, B falls through and fires
-    // its own attempt → attempts.length becomes 2.
-    await vi.waitUntil(() => attempts.length === 2, { timeout: 500 });
-    attempts[1]?.resolve();
+  it("a start that returns after the deadline has its session deleted and its command never logged", async () => {
+    vi.useFakeTimers();
+    try {
+      const proc = fakeProcess({ wsResolve: {} });
+      const created = Promise.withResolvers<void>();
+      vi.mocked(proc.createSession).mockImplementation(() => created.promise);
+      const opening = startExecStreaming({
+        process: proc,
+        sessionIdPrefix: "p",
+        cmd: ["true"],
+        opts: { timeoutMs: 1_000 },
+      }).catch((e: unknown) => e);
 
-    await disposeP;
-    expect(proc.deleteSession).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(await opening).toBeInstanceOf(ExecTimeoutError);
+      expect(proc.deleteSession).not.toHaveBeenCalled();
+
+      created.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(proc.executeSessionCommand).not.toHaveBeenCalled();
+      expect(proc.deleteSession).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   // ── Wall-clock and idle timeouts ──
@@ -697,6 +691,37 @@ describe("startExecStreaming", () => {
     expect(exitCode).toBe(0);
     // Cleanup still runs on natural-exit.
     expect(proc.deleteSession).toHaveBeenCalled();
+  });
+
+  it("settles on the total deadline even when deleteSession fails and the WS never closes", async () => {
+    vi.useFakeTimers();
+    try {
+      const proc = fakeProcess({ wsResolve: {} });
+      vi.mocked(proc.getSessionCommandLogs).mockImplementation(() => new Promise<void>(() => {}));
+      vi.mocked(proc.deleteSession).mockRejectedValue(new Error("daemon unreachable"));
+      const handle = await startExecStreaming({
+        process: proc,
+        sessionIdPrefix: "p",
+        cmd: ["sleep", "infinity"],
+        opts: { timeoutMs: 1_000 },
+      });
+      let settled: unknown;
+      handle.wait().then(
+        (exit) => {
+          settled = exit;
+        },
+        (e: unknown) => {
+          settled = e;
+        },
+      );
+
+      await vi.advanceTimersByTimeAsync(1_001);
+
+      expect(settled).toBeInstanceOf(ExecTimeoutError);
+      expect(proc.deleteSession).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("natural-exit clears timers — a slow exec that finishes under the cap doesn't accidentally fire the timeout after", async () => {

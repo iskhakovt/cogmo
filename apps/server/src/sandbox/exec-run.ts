@@ -28,6 +28,11 @@ export interface ExecSink {
   failed(error: unknown): void;
 }
 
+/** A started command: its stdin, on a backend that streams one. */
+export interface ExecStarted {
+  stdin?: Writable;
+}
+
 /**
  * One exec on one backend: how to start the command, read its exit code and
  * release what it holds. `ExecRun` decides when each runs. A backend is
@@ -49,11 +54,7 @@ export interface ExecBackend {
    * when `buffersStdin`. `signal` aborts once the run has settled: a start
    * still in flight stops before its next remote step.
    */
-  start(
-    sink: ExecSink,
-    stdin: Buffer | undefined,
-    signal: AbortSignal,
-  ): Promise<{ stdin?: Writable }>;
+  start(sink: ExecSink, stdin: Buffer | undefined, signal: AbortSignal): Promise<ExecStarted>;
   /** Once the output has ended: the exit code, or why there is none. */
   fetchExit(): Promise<Result<number, string>>;
   /**
@@ -225,20 +226,35 @@ class ExecRun {
       .exhaustive();
   }
 
+  /**
+   * What the transport reports while the start is in flight is held until
+   * the start's own outcome is in, so which of the two arrives first never
+   * depends on microtask order.
+   */
   #start(): void {
     const stdin = this.#backend.buffersStdin ? Buffer.concat(this.#stdinChunks) : undefined;
     this.#stdinChunks = [];
+    let held: ExecEvent[] | undefined = [];
+    const deliver = (event: ExecEvent): void => {
+      if (held) held.push(event);
+      else this.#observe(event);
+    };
+    const release = (outcome: ExecEvent): void => {
+      const events = [outcome, ...(held ?? [])];
+      held = undefined;
+      for (const event of events) this.#observe(event);
+    };
     const sink: ExecSink = {
-      output: (stream, chunk) => this.#observe({ type: "output", stream, chunk }),
-      ended: () => this.#observe({ type: "stream_ended" }),
-      failed: (e) => this.#observe({ type: "stream_failed", error: toError(e) }),
+      output: (stream, chunk) => deliver({ type: "output", stream, chunk }),
+      ended: () => deliver({ type: "stream_ended" }),
+      failed: (e) => deliver({ type: "stream_failed", error: toError(e) }),
     };
     this.#backend.start(sink, stdin, this.#settled.signal).then(
       (started) => {
         if (started.stdin !== undefined) this.#stdin ??= started.stdin;
-        this.#observe({ type: "started" });
+        release({ type: "started" });
       },
-      (e: unknown) => this.#observe({ type: "start_failed", error: toError(e) }),
+      (e: unknown) => release({ type: "start_failed", error: toError(e) }),
     );
   }
 

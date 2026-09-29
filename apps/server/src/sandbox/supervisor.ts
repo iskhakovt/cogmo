@@ -1,25 +1,22 @@
-import { PassThrough, type Readable, type Writable } from "node:stream";
+import { type Duplex, Writable } from "node:stream";
 import type Docker from "dockerode";
+import { ok, type Result } from "neverthrow";
 import type { Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
 import { cleanupAskpass } from "./askpass.js";
 import { taskSliceName } from "./cgroup-parent.js";
-import type { DockerContainer, DockerFacade } from "./docker-facade.js";
+import type { DockerContainer, DockerExec, DockerFacade } from "./docker-facade.js";
+import type { ExecOptions, ExecResult, ExecStreamingHandle } from "./exec.js";
+import { type ExecBackend, type ExecSink, type ExecStarted, runExec } from "./exec-run.js";
+import type { ExecStreamName } from "./exec-state.js";
 import type {
-  ExecOptions,
-  ExecResult,
-  ExecStreamingHandle,
   LocalDockerSessionState,
   SandboxCapabilities,
   SandboxClient,
   SandboxSession,
   SessionSpec,
 } from "./index.js";
-import {
-  DEPS_CACHE_VOLUME_TARGET,
-  ExecTimeoutError,
-  LocalDockerSessionStateSchema,
-} from "./index.js";
+import { DEPS_CACHE_VOLUME_TARGET, LocalDockerSessionStateSchema } from "./index.js";
 import type { CogmoSocketProxy } from "./proxy/index.js";
 import { assertRuntimeAvailable, dockerRuntimeName, type SandboxRuntime } from "./runtime.js";
 import type { SandboxStore } from "./store/index.js";
@@ -41,14 +38,6 @@ export const LABEL_DEPTH = "cogmo.depth";
 
 /** Buffered-exec output cap per stream. Configurable via env later if needed. */
 const EXEC_BUFFER_LIMIT_BYTES = 1024 * 1024;
-
-/** Thrown by `dispose()` to settle the exit promise via the stream `'error'` channel. */
-class DisposedError extends Error {
-  constructor() {
-    super("execStreaming dispose called");
-    this.name = "DisposedError";
-  }
-}
 
 interface CreateOptions {
   docker: DockerFacade;
@@ -577,166 +566,91 @@ class BoundedBuffer {
   }
 }
 
-async function execStreaming(
+function execStreaming(
   docker: DockerFacade,
   dockerId: string,
   cmd: readonly string[],
   opts: ExecOptions = {},
 ): Promise<ExecStreamingHandle> {
-  const container = docker.getContainer(dockerId);
-  const env = opts.env ? Object.entries(opts.env).map(([k, v]) => `${k}=${v}`) : undefined;
-  const exec = await container.exec({
-    Cmd: [...cmd],
-    AttachStdout: true,
-    AttachStderr: true,
-    AttachStdin: opts.attachStdin === true,
-    Tty: false,
-    WorkingDir: opts.workingDir,
-    User: opts.user,
-    Env: env,
-  });
-  const stream = await exec.start({
-    hijack: true,
-    stdin: opts.attachStdin === true,
-  });
+  return runExec(new DockerExecBackend(docker, dockerId, cmd, opts), opts);
+}
 
-  // Per-call timeout state — same shape as the Daytona backend. The
-  // total timer caps wall-clock from now; the idle timer resets on
-  // every demuxed chunk (we tap stdout/stderr below). Whichever fires
-  // first stores its sentinel in `timedOut` and forces the hijacked
-  // socket closed via `DisposedError` — the stream's `'error'` handler
-  // then sees `timedOut` set and rejects `exitPromise` with the
-  // timeout error rather than the underlying `DisposedError`. See
-  // design/sandbox.md → Wall-clock and idle timeouts.
-  let timedOut: ExecTimeoutError | null = null;
-  let totalTimer: NodeJS.Timeout | null = null;
-  let idleTimer: NodeJS.Timeout | null = null;
-  const clearTimers = (): void => {
-    if (totalTimer) {
-      clearTimeout(totalTimer);
-      totalTimer = null;
-    }
-    if (idleTimer) {
-      clearTimeout(idleTimer);
-      idleTimer = null;
-    }
-  };
-  const fireTimeout = (kind: "total" | "idle", limit: number): void => {
-    if (timedOut) return;
-    timedOut = new ExecTimeoutError(kind, limit);
-    // Closing the hijacked stream is the same teardown `dispose()` runs.
-    // The stream's `'error'` handler picks up `timedOut` and rejects
-    // with the timeout sentinel.
-    stream.destroy(new DisposedError());
-  };
-  const resetIdle = (): void => {
-    if (idleTimer) clearTimeout(idleTimer);
-    if (opts.idleTimeoutMs !== undefined && !timedOut) {
-      idleTimer = setTimeout(() => {
-        idleTimer = null;
-        fireTimeout("idle", opts.idleTimeoutMs ?? 0);
-      }, opts.idleTimeoutMs);
-    }
-  };
+/**
+ * One `docker exec` over the hijacked attach socket. Docker's exec API has
+ * no kill: closing the socket is the documented teardown, and the daemon
+ * reaps the process.
+ */
+class DockerExecBackend implements ExecBackend {
+  readonly buffersStdin = false;
+  readonly logFields: Record<string, unknown>;
+  #docker: DockerFacade;
+  #dockerId: string;
+  #cmd: readonly string[];
+  #opts: ExecOptions;
+  #exec: DockerExec | undefined;
+  #stream: Duplex | undefined;
 
-  const stdout = new PassThrough();
-  const stderr = new PassThrough();
-  // Watchdog registers on the upstream stream BEFORE demuxStream so
-  // both data listeners are attached before the first chunk fires.
-  // PassThroughs stay paused until the caller's consumer attaches.
-  stream.on("data", resetIdle);
-  docker.modem.demuxStream(stream, stdout, stderr);
-
-  if (opts.timeoutMs !== undefined) {
-    totalTimer = setTimeout(() => {
-      totalTimer = null;
-      fireTimeout("total", opts.timeoutMs ?? 0);
-    }, opts.timeoutMs);
+  constructor(docker: DockerFacade, dockerId: string, cmd: readonly string[], opts: ExecOptions) {
+    this.#docker = docker;
+    this.#dockerId = dockerId;
+    this.#cmd = cmd;
+    this.#opts = opts;
+    this.logFields = { dockerId, cmd: cmd[0] };
   }
-  resetIdle();
 
-  // Capture the exit eagerly — listeners attached after `'end'` already
-  // fired wouldn't trigger, which deadlocks any caller that reads stdout
-  // before calling wait().
-  const exitPromise = new Promise<{ exitCode: number }>((resolve, reject) => {
-    stream.on("end", async () => {
-      clearTimers();
-      stdout.end();
-      stderr.end();
-      if (timedOut) {
-        // Timer-fire raced the natural exit — the cap is the
-        // operative outcome from the caller's perspective.
-        reject(timedOut);
-        return;
-      }
-      try {
-        const info = await exec.inspect();
-        resolve({ exitCode: info.ExitCode ?? 0 });
-      } catch (err) {
-        reject(err as Error);
-      }
+  async start(
+    sink: ExecSink,
+    _stdin: Buffer | undefined,
+    signal: AbortSignal,
+  ): Promise<ExecStarted> {
+    const attachStdin = this.#opts.attachStdin === true;
+    const env = this.#opts.env
+      ? Object.entries(this.#opts.env).map(([k, v]) => `${k}=${v}`)
+      : undefined;
+    const exec = await this.#docker.getContainer(this.#dockerId).exec({
+      Cmd: [...this.#cmd],
+      AttachStdout: true,
+      AttachStderr: true,
+      AttachStdin: attachStdin,
+      Tty: false,
+      WorkingDir: this.#opts.workingDir,
+      User: this.#opts.user,
+      Env: env,
     });
-    stream.on("error", (err: Error) => {
-      clearTimers();
-      if (timedOut) {
-        // Timer fired and we tore down the socket; surface the
-        // timeout, not the resulting `DisposedError`.
-        stdout.end();
-        stderr.end();
-        reject(timedOut);
-        return;
-      }
-      if (err instanceof DisposedError) {
-        // Intentional teardown via `dispose()` — close downstream
-        // streams peacefully so consumers see EOF, not an error. The
-        // upstream socket is already gone by the time we get here.
-        stdout.end();
-        stderr.end();
-      } else {
-        // Real upstream error — forward so consumers reading the
-        // demuxed PassThroughs see the same failure.
-        stdout.destroy(err);
-        stderr.destroy(err);
-      }
-      reject(err);
-    });
+    signal.throwIfAborted();
+    const stream = await exec.start({ hijack: true, stdin: attachStdin });
+    this.#exec = exec;
+    this.#stream = stream;
+    stream.on("end", () => sink.ended());
+    stream.on("error", (e: Error) => sink.failed(e));
+    this.#docker.modem.demuxStream(
+      stream,
+      sinkWritable(sink, "stdout"),
+      sinkWritable(sink, "stderr"),
+    );
+    return attachStdin ? { stdin: stream } : {};
+  }
+
+  async fetchExit(): Promise<Result<number, string>> {
+    if (!this.#exec) throw new Error("docker exec output ended before it started");
+    // `null` while the exec runs. The attach stream ends only once it has
+    // exited, so read it as 0, as the Docker CLI does.
+    return ok((await this.#exec.inspect()).ExitCode ?? 0);
+  }
+
+  async teardown(): Promise<void> {
+    this.#stream?.destroy();
+  }
+}
+
+/** A Writable `demuxStream` can write one stream's chunks into. */
+function sinkWritable(sink: ExecSink, stream: ExecStreamName): Writable {
+  return new Writable({
+    write(chunk: Buffer, _encoding, callback): void {
+      sink.output(stream, chunk);
+      callback();
+    },
   });
-  // Suppress Node's unhandled-rejection process crash if the caller
-  // never awaits wait() (e.g. exec started but caller bailed before
-  // processing events). The error stays observable through wait() and
-  // through the destroyed stdout/stderr streams.
-  exitPromise.catch(() => {});
-
-  let disposed = false;
-  const dispose = async (): Promise<void> => {
-    if (disposed) return;
-    disposed = true;
-    clearTimers();
-    // Closing the hijacked stream causes the daemon to reap the exec
-    // process. Docker's exec API doesn't expose a direct kill, but
-    // socket close is the documented teardown path. Pass an error so
-    // the stream's `'error'` handler fires and `exitPromise` settles —
-    // a bare `destroy()` would emit only `'close'`, leaving the promise
-    // pending and `dispose()` awaiting forever.
-    stream.destroy(new DisposedError());
-    // Wait for the exit channel to settle (success or error) — keeps
-    // disposers idempotent and prevents callers seeing pending Promises.
-    await exitPromise.catch(() => {
-      /* errors during dispose are expected — caller already gave up */
-    });
-  };
-
-  const handle: ExecStreamingHandle = {
-    stdout: stdout as Readable,
-    stderr: stderr as Readable,
-    wait: () => exitPromise,
-    dispose,
-  };
-  // dockerode's hijacked exec stream is bidirectional and structurally a
-  // Writable, but @types/dockerode types it as a generic Duplex.
-  // biome-ignore lint/plugin/no-unsafe-cast: @types/dockerode types hijacked stream as Duplex; runtime is Writable.
-  if (opts.attachStdin === true) handle.stdin = stream as unknown as Writable;
-  return handle;
 }
 
 /**

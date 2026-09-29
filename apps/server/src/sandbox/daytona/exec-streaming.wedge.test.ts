@@ -243,9 +243,10 @@ describe("startExecStreaming wedge regression (real @daytona/sdk + real ws)", ()
     expect(elapsed).toBeGreaterThanOrEqual(150);
     expect(elapsed).toBeLessThan(2_000);
 
-    // The whole point: the cleanup DELETE fired. Daytona [#2510]
-    // recommends explicit `deleteSession` to tear down the stuck WS
-    // server-side. Without this, the per-call session leaks.
+    // The timeout settled without waiting on the teardown; `dispose()`
+    // waits for it. Daytona [#2510] recommends an explicit `deleteSession`
+    // to tear the stuck WS down server-side.
+    await handle.dispose();
     expect(stub.deletedSessions).toHaveLength(1);
     expect(stub.deletedSessions[0]).toMatch(/^wedge-test-/);
   });
@@ -265,6 +266,7 @@ describe("startExecStreaming wedge regression (real @daytona/sdk + real ws)", ()
     const err = await handle.wait().catch((e: Error) => e);
     expect(err).toBeInstanceOf(ExecTimeoutError);
     expect((err as ExecTimeoutError).kind).toBe("idle");
+    await handle.dispose();
     expect(stub.deletedSessions).toHaveLength(1);
     expect(stub.deletedSessions[0]).toMatch(/^wedge-idle-/);
   });

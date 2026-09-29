@@ -1,4 +1,5 @@
 import { PassThrough, type Readable } from "node:stream";
+import { ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import type {
   ExecOptions,
@@ -24,6 +25,7 @@ function fakeExec(result: FakeExecResult): ExecStreamingHandle {
   return {
     stdout: stdout as Readable,
     stderr: stderr as Readable,
+    exited: Promise.resolve(ok({ exitCode: result.exitCode ?? 0 })),
     wait: vi.fn(async () => ({ exitCode: result.exitCode ?? 0 })),
     dispose: vi.fn(async () => {}),
   };

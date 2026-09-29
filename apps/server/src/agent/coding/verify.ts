@@ -12,14 +12,17 @@
  * push + PR (4.0f / 4.0g); fail → task is marked failed with the captured
  * output as the failure reason.
  *
- * Timeout: a single wall-clock cap (`coding_repos.verify_timeout_seconds`).
- * On expiry the runner returns `{ ok: false, exitCode: TIMEOUT_EXIT_CODE,
- * timedOut: true }` and the orchestrator's outer `stopTask` call kills the
- * actual process inside the container — we don't try to send a signal to
- * the in-container process from here, which keeps the runner pure I/O.
+ * Timeout: a single wall-clock cap (`coding_repos.verify_timeout_seconds`),
+ * the exec's own `timeoutMs`, so the backend tears the command down when it
+ * passes. The runner then returns `{ ok: false, exitCode: TIMEOUT_EXIT_CODE,
+ * timedOut: true }`.
  */
 
-import type { SandboxSession } from "../../sandbox/index.js";
+import {
+  type ExecStreamingHandle,
+  execFailureError,
+  type SandboxSession,
+} from "../../sandbox/index.js";
 import type { ExecuteStreamHandle } from "./orchestrator.js";
 
 /** Cap for the persisted verify output (8 KiB). Streamed text is unaffected
@@ -53,13 +56,29 @@ export interface VerifyResult {
 }
 
 /**
- * Run the verify command. Blocking until exit, timeout, or stream end.
+ * Run the verify command until it exits or times out. Any other failure
+ * (the transport broke, the exec was disposed) throws, once both output
+ * streams have been drained.
  */
 export async function runVerifyStreaming(params: VerifyParams): Promise<VerifyResult> {
   const { container, verifyCommand, timeoutSeconds, executeStream } = params;
   const start = Date.now();
 
-  const handle = await container.execStreaming(["bash", "-lc", verifyCommand]);
+  const handle = await container.execStreaming(["bash", "-lc", verifyCommand], {
+    timeoutMs: Math.max(1, timeoutSeconds * 1000),
+  });
+  try {
+    return await captureVerify(handle, { timeoutSeconds, start, executeStream });
+  } finally {
+    await handle.dispose();
+  }
+}
+
+async function captureVerify(
+  handle: ExecStreamingHandle,
+  opts: { timeoutSeconds: number; start: number; executeStream: ExecuteStreamHandle | undefined },
+): Promise<VerifyResult> {
+  const { timeoutSeconds, start, executeStream } = opts;
 
   // One decoder per stream — TextDecoder carries streaming state for
   // multi-byte UTF-8 sequences split across chunk boundaries. Sharing one
@@ -87,59 +106,38 @@ export async function runVerifyStreaming(params: VerifyParams): Promise<VerifyRe
 
   // Pipe both streams in parallel: capture into the buffer + forward to the
   // executeStream's appendText so the operator sees `pnpm test` output live.
-  const stdoutDone = pumpStream(handle.stdout, async (chunk: Buffer) => {
-    const text = stdoutDecoder.decode(chunk, { stream: true });
-    record(text);
-    if (executeStream) {
-      await executeStream.appendText(text).catch(() => {});
-    }
-  });
-  const stderrDone = pumpStream(handle.stderr, async (chunk: Buffer) => {
-    const text = stderrDecoder.decode(chunk, { stream: true });
-    record(text);
-    if (executeStream) {
-      await executeStream.appendText(text).catch(() => {});
-    }
-  });
+  // The streams end, or fail with the transport, once the exec settles; the
+  // pumps are settled either way, so the tail of the output lands in the
+  // capture and a failed stream is observed as soon as it fails.
+  const pumped = Promise.allSettled([
+    pumpStream(handle.stdout, async (chunk: Buffer) => {
+      const text = stdoutDecoder.decode(chunk, { stream: true });
+      record(text);
+      if (executeStream) {
+        await executeStream.appendText(text).catch(() => {});
+      }
+    }),
+    pumpStream(handle.stderr, async (chunk: Buffer) => {
+      const text = stderrDecoder.decode(chunk, { stream: true });
+      record(text);
+      if (executeStream) {
+        await executeStream.appendText(text).catch(() => {});
+      }
+    }),
+  ]);
 
-  let timeoutHandle: NodeJS.Timeout | undefined;
-  const timeoutPromise = new Promise<{ kind: "timeout" }>((resolve) => {
-    timeoutHandle = setTimeout(
-      () => resolve({ kind: "timeout" }),
-      Math.max(1, timeoutSeconds * 1000),
-    );
-  });
-
-  const waitPromise = handle.wait().then((r) => ({ kind: "exit" as const, exitCode: r.exitCode }));
-
-  const winner = await Promise.race([waitPromise, timeoutPromise]);
-  if (timeoutHandle) clearTimeout(timeoutHandle);
-
-  // Drain logic differs by branch:
-  // - On normal exit, wait for both pumps to finish so the tail of the
-  //   verify output (especially a large final write that docker hasn't
-  //   yet flushed through the PassThroughs) lands in the captured buffer.
-  //   Slow CI hosts can take longer than any fixed cap to drain.
-  // - On timeout, the process is still running — the streams may never
-  //   end on their own. Cap the drain at 250 ms; the orchestrator's outer
-  //   `stopTask` cascades the kill.
-  if (winner.kind === "exit") {
-    await Promise.all([stdoutDone, stderrDone]);
-  } else {
-    await Promise.race([
-      Promise.all([stdoutDone, stderrDone]),
-      new Promise<void>((resolve) => setTimeout(resolve, 250)),
-    ]);
-  }
+  const exited = await handle.exited;
+  await pumped;
 
   const durationMs = Date.now() - start;
-  if (winner.kind === "timeout") {
+  if (exited.isErr()) {
+    if (exited.error.kind !== "timed_out") throw execFailureError(exited.error);
     const note = `\n\n[verify timed out after ${timeoutSeconds}s]`;
     const output = appendNote(captured, note, truncated);
     return { ok: false, exitCode: TIMEOUT_EXIT_CODE, output, durationMs, timedOut: true };
   }
 
-  const exitCode = winner.exitCode;
+  const exitCode = exited.value.exitCode;
   return {
     ok: exitCode === 0,
     exitCode,

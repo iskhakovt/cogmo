@@ -1,4 +1,5 @@
 import { PassThrough } from "node:stream";
+import { ok } from "neverthrow";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import {
@@ -41,6 +42,7 @@ function buildFakeSandbox(): FakeSandboxBundle {
     stdin: stdin,
     stdout: stdout,
     stderr: stderr,
+    exited: Promise.resolve(ok({ exitCode: 0 })),
     wait: async () => ({ exitCode: 0 }),
     dispose: async () => {
       execDisposeCalls.count += 1;
@@ -246,6 +248,7 @@ describe("SysboxSkillWorker", () => {
         stdin: bundle.stdin,
         stdout: bundle.stdout,
         stderr: new PassThrough(),
+        exited: Promise.resolve(ok({ exitCode: 0 })),
         wait: async () => ({ exitCode: 0 }),
         dispose: async () => {
           bundle.execDisposeCalls.count += 1;
@@ -491,6 +494,7 @@ describe("SysboxSkillWorker", () => {
             stdin: new PassThrough(),
             stdout: new PassThrough(),
             stderr: populateStderr,
+            exited: Promise.resolve(ok({ exitCode: 0 })),
             wait: async () => ({ exitCode: 0 }),
             dispose: async () => {},
           };
@@ -501,6 +505,7 @@ describe("SysboxSkillWorker", () => {
           stdin: bundle.stdin,
           stdout: bundle.stdout,
           stderr: new PassThrough(),
+          exited: Promise.resolve(ok({ exitCode: 0 })),
           wait: async () => ({ exitCode: 0 }),
           dispose: async () => {
             bundle.execDisposeCalls.count += 1;
@@ -556,6 +561,7 @@ describe("SysboxSkillWorker", () => {
             stdin: new PassThrough(),
             stdout: new PassThrough(),
             stderr: populateStderr,
+            exited: Promise.resolve(ok({ exitCode: 1 })),
             wait: async () => {
               // Drain the stderr stream's queued chunks into the
               // listener before resolving. One macrotask is enough.
@@ -570,6 +576,7 @@ describe("SysboxSkillWorker", () => {
           stdin: bundle.stdin,
           stdout: bundle.stdout,
           stderr: new PassThrough(),
+          exited: Promise.resolve(ok({ exitCode: 0 })),
           wait: async () => ({ exitCode: 0 }),
           dispose: async () => {
             bundle.execDisposeCalls.count += 1;
@@ -640,6 +647,7 @@ describe("SysboxSkillWorker", () => {
             stdin: new PassThrough(),
             stdout: new PassThrough(),
             stderr: new PassThrough(),
+            exited: Promise.resolve(ok({ exitCode: 0 })),
             wait: async () => {
               // The supervisor dies while uv pip sync runs.
               bundle.stdout.end();
@@ -654,6 +662,7 @@ describe("SysboxSkillWorker", () => {
           stdin: bundle.stdin,
           stdout: bundle.stdout,
           stderr: new PassThrough(),
+          exited: Promise.resolve(ok({ exitCode: 0 })),
           wait: async () => ({ exitCode: 0 }),
           dispose: async () => {},
         };
@@ -927,6 +936,7 @@ describe("SysboxSkillWorker", () => {
         stdin: new PassThrough(),
         stdout: failingStdout,
         stderr: new PassThrough(),
+        exited: Promise.resolve(ok({ exitCode: 0 })),
         wait: async () => ({ exitCode: 0 }),
         dispose: async () => {
           throw new Error("exec dispose failed");

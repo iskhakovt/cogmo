@@ -8,6 +8,7 @@
 
 import { PassThrough, type Readable } from "node:stream";
 import type { Octokit } from "@octokit/rest";
+import { ok } from "neverthrow";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
 import {
@@ -65,6 +66,7 @@ function fakeExec(result: FakeExecResult): ExecStreamingHandle {
   return {
     stdout: stdout as Readable,
     stderr: stderr as Readable,
+    exited: Promise.resolve(ok({ exitCode: result.exitCode ?? 0 })),
     wait: vi.fn(async () => ({ exitCode: result.exitCode ?? 0 })),
     dispose: vi.fn(async () => {}),
   };

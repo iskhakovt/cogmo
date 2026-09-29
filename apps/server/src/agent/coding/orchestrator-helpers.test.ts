@@ -1,4 +1,5 @@
 import { Readable } from "node:stream";
+import { ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import type { ExecStreamingHandle, SandboxSession } from "../../sandbox/index.js";
 import { buildWorktreeSpec, checkoutFeatureBranchInSandbox } from "./orchestrator.js";
@@ -120,6 +121,7 @@ function fakeSession(opts: { exitCode: number; stdoutText?: string; stderrText?:
   const handle: ExecStreamingHandle = {
     stdout: streamFromString(opts.stdoutText ?? ""),
     stderr: streamFromString(opts.stderrText ?? ""),
+    exited: Promise.resolve(ok({ exitCode: opts.exitCode })),
     wait: async () => ({ exitCode: opts.exitCode }),
     dispose: async () => {},
   };

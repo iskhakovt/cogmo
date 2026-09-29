@@ -9,6 +9,7 @@
  */
 
 import { PassThrough } from "node:stream";
+import { ok } from "neverthrow";
 import { vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { CodingRepoRow, CodingStore, CodingTaskRow } from "../agent/coding/store/index.js";
@@ -171,6 +172,7 @@ export function fakeExecHandle(result: {
   return {
     stdout,
     stderr,
+    exited: Promise.resolve(ok({ exitCode: result.exitCode ?? 0 })),
     wait: async () => ({ exitCode: result.exitCode ?? 0 }),
     dispose: async () => {},
   };

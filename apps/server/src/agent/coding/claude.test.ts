@@ -1,4 +1,5 @@
 import { PassThrough, type Readable, type Writable } from "node:stream";
+import { ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import type {
@@ -56,6 +57,7 @@ function fakeContainer(
       stdin,
       stdout: stdout as Readable,
       stderr: stderr as Readable,
+      exited: Promise.resolve(ok({ exitCode })),
       wait: async () => ({ exitCode }),
       dispose: async () => {},
     };
