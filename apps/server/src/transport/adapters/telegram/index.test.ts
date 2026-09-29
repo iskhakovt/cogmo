@@ -1340,6 +1340,81 @@ describe("telegram adapter", () => {
       expect(mockBotApi.editMessageText).toHaveBeenCalledTimes(attempts);
     });
 
+    /** A Bot API 5xx, shaped as grammY's `GrammyError` carries it. */
+    function serverError(code: number): Error {
+      return Object.assign(
+        new Error(`Call to 'editMessageText' failed! (${code}: Internal Server Error)`),
+        { error_code: code, parameters: {} },
+      );
+    }
+
+    /** A failed request, shaped as grammY's `HttpError`. */
+    function networkError(): Error {
+      return Object.assign(new Error("Network request for 'editMessageText' failed!"), {
+        name: "HttpError",
+      });
+    }
+
+    it("retries a final write after a 5xx, then lands it", async () => {
+      const handle = await (await createStreamingAdapter()).openStream("42", "run-1");
+      await handle.push(text("done"));
+      mockBotApi.editMessageText.mockRejectedValueOnce(serverError(502));
+
+      const finishing = handle.finish();
+      await vi.advanceTimersByTimeAsync(999);
+      expect(mockBotApi.editMessageText).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await finishing).toEqual(ok(undefined));
+      expect(mockBotApi.editMessageText).toHaveBeenCalledTimes(2);
+      expect(mockBotApi.editMessageText).toHaveBeenLastCalledWith(42, 100, "done", {
+        parse_mode: "HTML",
+      });
+    });
+
+    it("fails the handle when 5xx outlast its retries", async () => {
+      const handle = await (await createStreamingAdapter()).openStream("42", "run-1");
+      await handle.push(text("done"));
+      mockBotApi.editMessageText.mockRejectedValue(serverError(500));
+
+      const finishing = handle.finish();
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      expect(await finishing).toEqual(err(expect.stringContaining("500")));
+      expect(mockBotApi.editMessageText).toHaveBeenCalledTimes(5);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(mockBotApi.editMessageText).toHaveBeenCalledTimes(5);
+    });
+
+    it("retries a final write after a network error", async () => {
+      const handle = await (await createStreamingAdapter()).openStream("42", "run-1");
+      await handle.push(text("done"));
+      mockBotApi.editMessageText.mockRejectedValueOnce(networkError());
+
+      const finishing = handle.finish();
+      await vi.advanceTimersByTimeAsync(1000);
+
+      expect(await finishing).toEqual(ok(undefined));
+      expect(mockBotApi.editMessageText).toHaveBeenCalledTimes(2);
+    });
+
+    it("waits out a 5xx on a streaming edit, then writes the latest text", async () => {
+      const handle = await (await createStreamingAdapter()).openStream("42", "run-1");
+      await handle.push(text("Hello"));
+
+      mockBotApi.editMessageText.mockRejectedValueOnce(serverError(502));
+      await vi.advanceTimersByTimeAsync(600);
+      expect(await handle.push(text(" world"))).toEqual(ok(undefined));
+
+      await vi.advanceTimersByTimeAsync(500);
+      expect(await handle.push(text("!"))).toEqual(ok(undefined));
+      expect(mockBotApi.editMessageText).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(500);
+      expect(mockBotApi.editMessageText).toHaveBeenCalledTimes(2);
+      expect(mockBotApi.editMessageText).toHaveBeenLastCalledWith(42, 100, "Hello world!");
+    });
+
     it("fails on a rejected write and leaves the run, so a retry opens a fresh handle", async () => {
       const adapter = await createStreamingAdapter();
       const handle = await adapter.openStream("42", "run-1");

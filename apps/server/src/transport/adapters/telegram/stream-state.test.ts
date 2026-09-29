@@ -6,8 +6,8 @@ import {
   EDIT_INTERVAL_MS,
   type Effect,
   findTelegramSplitBoundary,
-  MAX_RATE_LIMITED_WRITES,
-  MAX_RETRY_AFTER_MS,
+  MAX_FAILURES_IN_A_ROW,
+  MAX_WAIT_MS,
   rebalanceCodeFence,
   type StreamInput,
   type StreamState,
@@ -60,6 +60,15 @@ function rateLimited(seconds: number, now: number): StreamInput {
 
 function elapsed(now: number): StreamInput {
   return { type: "throttle_elapsed", now };
+}
+
+/** A 5xx or a network error: grammY's auto-retry treats both as transient. */
+function transient(now: number): StreamInput {
+  return {
+    type: "api_failed",
+    failure: { kind: "transient", reason: "Call to 'editMessageText' failed! (502: Bad Gateway)" },
+    now,
+  };
 }
 
 const finish: StreamInput = { type: "finish", now: T0 };
@@ -142,7 +151,7 @@ describe("telegram stream state", () => {
     it("fails rather than wait longer than it will", () => {
       const { state, effects } = drive(EDITS, [
         text("Hello"),
-        rateLimited(MAX_RETRY_AFTER_MS / 1000 + 1, T0),
+        rateLimited(MAX_WAIT_MS / 1000 + 1, T0),
       ]);
 
       expect(state.kind).toBe("failed");
@@ -155,7 +164,7 @@ describe("telegram stream state", () => {
     });
 
     it("fails once Telegram has rate-limited writes too many times in a row", () => {
-      const limits = Array.from({ length: MAX_RATE_LIMITED_WRITES }, (_, i) => [
+      const limits = Array.from({ length: MAX_FAILURES_IN_A_ROW }, (_, i) => [
         rateLimited(1, T0 + i * 1000),
         elapsed(T0 + (i + 1) * 1000),
       ]).flat();
@@ -165,7 +174,7 @@ describe("telegram stream state", () => {
     });
 
     it("resets the count once a write lands", () => {
-      const limits = Array.from({ length: MAX_RATE_LIMITED_WRITES - 1 }, (_, i) => [
+      const limits = Array.from({ length: MAX_FAILURES_IN_A_ROW - 1 }, (_, i) => [
         rateLimited(1, T0 + i * 1000),
         elapsed(T0 + (i + 1) * 1000),
       ]).flat();
@@ -177,7 +186,69 @@ describe("telegram stream state", () => {
         rateLimited(1, T0 + 20_000),
       ]);
 
-      expect(state).toMatchObject({ kind: "streaming", rateLimited: 1, waiting: true });
+      expect(state).toMatchObject({ kind: "streaming", failedInARow: 1, waiting: true });
+    });
+  });
+
+  describe("transient failures", () => {
+    it("retries a chunk after a 5xx, backing off from 1s", () => {
+      const waited = drive(EDITS, [text("done"), landed(T0, 100), finish, transient(T0)]);
+      expect(waited.state.kind).toBe("finalizing");
+      expect(waited.effects).toContainEqual({ type: "wait", ms: 1000 });
+      const chunk = writes(waited.effects).at(-1);
+
+      const resumed = drive(EDITS, [elapsed(T0 + 1000), landed(T0 + 1000)], waited.state);
+      expect(writes(resumed.effects)).toEqual([chunk]);
+      expect(resumed.state).toEqual({ kind: "done" });
+    });
+
+    it("doubles the backoff, and fails on the fifth failure in a row", () => {
+      const failures = [0, 1, 2, 3].flatMap((i) => [transient(T0 + i), elapsed(T0 + i)]);
+      const retried = drive(EDITS, [text("done"), landed(T0, 100), finish, ...failures]);
+      expect(retried.effects.filter((e) => e.type === "wait")).toEqual([
+        { type: "wait", ms: 1000 },
+        { type: "wait", ms: 2000 },
+        { type: "wait", ms: 4000 },
+        { type: "wait", ms: 8000 },
+      ]);
+      expect(retried.state.kind).toBe("finalizing");
+
+      const failed = drive(EDITS, [transient(T0 + 10)], retried.state);
+      expect(failed.state).toEqual({ kind: "failed", reason: expect.stringContaining("502") });
+      expect(failed.effects).not.toContainEqual(expect.objectContaining({ type: "wait" }));
+    });
+
+    it("counts rate limits and transient failures against one cap", () => {
+      const failures = [0, 1, 2, 3].flatMap((i) => [
+        i % 2 === 0 ? transient(T0 + i) : rateLimited(1, T0 + i),
+        elapsed(T0 + i),
+      ]);
+      const { state } = drive(EDITS, [
+        text("done"),
+        landed(T0, 100),
+        finish,
+        ...failures,
+        transient(T0 + 9),
+      ]);
+
+      expect(state.kind).toBe("failed");
+    });
+
+    it("waits out a transient failure on a preview, then previews the latest text", () => {
+      const waited = drive(EDITS, [
+        text("Hello"),
+        landed(T0, 100),
+        text(" world", T0 + 600),
+        transient(T0 + 600),
+        text("!", T0 + 1200),
+      ]);
+      expect(waited.effects).toContainEqual({ type: "wait", ms: 1000 });
+      expect(writes(waited.effects)).toHaveLength(2);
+
+      const resumed = drive(EDITS, [elapsed(T0 + 1600)], waited.state);
+      expect(writes(resumed.effects)).toEqual([
+        { role: "preview", messageId: 100, text: "Hello world!", html: false },
+      ]);
     });
   });
 
@@ -368,7 +439,23 @@ describe("telegram stream state", () => {
         telegramError(403, "Forbidden: bot was blocked by the user"),
         { kind: "rejected", reason: expect.stringContaining("bot was blocked") },
       ],
-      ["a network error", new Error("fetch failed"), { kind: "rejected", reason: "fetch failed" }],
+      [
+        "a 5xx",
+        telegramError(502, "Bad Gateway"),
+        { kind: "transient", reason: expect.stringContaining("502") },
+      ],
+      [
+        "a network error",
+        Object.assign(new Error("Network request for 'editMessageText' failed!"), {
+          name: "HttpError",
+        }),
+        { kind: "transient", reason: "Network request for 'editMessageText' failed!" },
+      ],
+      [
+        "an error grammY did not raise",
+        new Error("fetch failed"),
+        { kind: "rejected", reason: "fetch failed" },
+      ],
     ])("classifies %s", (_, error, expected) => {
       expect(classifyWriteError(error)).toEqual(expected);
     });

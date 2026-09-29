@@ -27,8 +27,8 @@ import { renderTelegramHtml } from "./render.js";
  *    `retry_after` runs;
  *  - chunks are written in the order they were cut, each ahead of any later text;
  *  - a write that must land — a chunk, the abort's error tail — is retried
- *    after a rate limit, and falls back to plain text when Telegram rejects its
- *    HTML; any other failure fails the handle;
+ *    after a rate limit or a transient failure, and falls back to plain text
+ *    when Telegram rejects its HTML; any other failure fails the handle;
  *  - `done` and `failed` are final and ignore every input.
  */
 
@@ -37,12 +37,14 @@ const TELEGRAM_MAX_MESSAGE_LENGTH = 4096;
 /** Minimum time between two previews of the live message. */
 export const EDIT_INTERVAL_MS = 500;
 /**
- * Longest `retry_after` the handle waits out. Past it the handle fails
- * rather than hold its turn open.
+ * Longest wait before a retry. Past it the handle fails rather than hold its
+ * turn open.
  */
-export const MAX_RETRY_AFTER_MS = 30_000;
-/** Consecutive rate-limited writes after which the handle fails. */
-export const MAX_RATE_LIMITED_WRITES = 5;
+export const MAX_WAIT_MS = 30_000;
+/** Failed writes in a row, rate limits and transient failures alike, at which the handle fails. */
+export const MAX_FAILURES_IN_A_ROW = 5;
+/** Wait after a first transient failure; each further one in a row doubles it. */
+export const TRANSIENT_BACKOFF_MS = 1000;
 /**
  * Floor on the head of a split: anything shorter makes a sliver of a message,
  * so the split cuts later in the source instead. About 3-4 lines in the mobile
@@ -107,8 +109,8 @@ interface Live {
   inFlight: Write | null;
   /** Telegram asked the handle to wait: nothing is written until `throttle_elapsed`. */
   waiting: boolean;
-  /** Writes Telegram has rate-limited in a row. */
-  rateLimited: number;
+  /** Writes that have failed in a row and been waited out. */
+  failedInARow: number;
 }
 
 /** How the stream closes. An abort's error tail is already in the buffer. */
@@ -130,6 +132,8 @@ export type WriteFailure =
   /** Telegram could not parse the HTML. */
   | { kind: "unparseable"; reason: string }
   | { kind: "rate_limited"; retryAfterMs: number; reason: string }
+  /** A 5xx, or a request that never got an answer. */
+  | { kind: "transient"; reason: string }
   | { kind: "rejected"; reason: string };
 
 /** A stream event the machine renders; retractions and media have inputs of their own. */
@@ -226,25 +230,32 @@ export function transition(state: StreamState, input: StreamInput, opts: StreamO
 }
 
 /**
- * Classify a failed Bot API call. grammY's `GrammyError` carries Telegram's
- * `error_code` and `parameters.retry_after`; everything else, network errors
- * included, is a rejection.
+ * Classify a failed Bot API call the way grammY's auto-retry plugin does: an
+ * answer carrying `retry_after` is a rate limit; a `GrammyError` with a 5xx
+ * `error_code`, or an `HttpError` (the request got no answer), is transient.
+ * Anything else is a rejection.
  */
 export function classifyWriteError(error: unknown): WriteFailure {
   const reason = describeError(error);
   if (reason.includes("message is not modified")) return { kind: "not_modified" };
   if (reason.includes("can't parse entities")) return { kind: "unparseable", reason };
-  const flood = FloodWaitSchema.safeParse(error);
-  if (flood.success) {
-    return { kind: "rate_limited", retryAfterMs: flood.data.parameters.retry_after * 1000, reason };
-  }
+  const answer = BotApiErrorSchema.safeParse(error);
+  const retryAfter = answer.success ? answer.data.parameters?.retry_after : undefined;
+  if (retryAfter !== undefined)
+    return { kind: "rate_limited", retryAfterMs: retryAfter * 1000, reason };
+  if (answer.success && answer.data.error_code >= 500) return { kind: "transient", reason };
+  if (HttpErrorSchema.safeParse(error).success) return { kind: "transient", reason };
   return { kind: "rejected", reason };
 }
 
-const FloodWaitSchema = z.object({
-  error_code: z.literal(429),
-  parameters: z.object({ retry_after: z.number().nonnegative() }),
+/** The fields of grammY's `GrammyError` the classification reads. */
+const BotApiErrorSchema = z.object({
+  error_code: z.number(),
+  parameters: z.object({ retry_after: z.number().nonnegative().optional() }).optional(),
 });
+
+/** grammY's `HttpError`, which names itself. */
+const HttpErrorSchema = z.object({ name: z.literal("HttpError") });
 
 /**
  * If `head` ends inside an open fenced code block, close the fence at the
@@ -361,7 +372,7 @@ function onWritten(
 ): Transition {
   const write = state.inFlight;
   if (write === null) return stayAndLog(state, "warn", "write result with no write in flight", {});
-  const landed = { ...state, inFlight: null, rateLimited: 0 };
+  const landed = { ...state, inFlight: null, failedInARow: 0 };
   const next = match(write.role)
     .returnType<Open>()
     .with("preview", () => ({
@@ -412,26 +423,36 @@ function onWriteFailed(
         [logEffect("warn", "telegram: chunk HTML parse failed, retrying as plain text", {})],
       );
     })
-    .with({ kind: "rate_limited" }, ({ retryAfterMs, reason }) => {
-      if (retryAfterMs > MAX_RETRY_AFTER_MS) {
-        return fail(state, `Telegram asked to wait longer than the stream waits: ${reason}`);
-      }
-      const rateLimited = state.rateLimited + 1;
-      if (rateLimited >= MAX_RATE_LIMITED_WRITES) {
-        return fail(state, `Telegram rate-limited ${rateLimited} writes in a row: ${reason}`);
-      }
-      // A preview is not repeated: the next one after the wait carries the
-      // latest text. A chunk or tail stays due and goes again.
-      return step({ ...state, inFlight: null, waiting: true, rateLimited }, [
-        { type: "wait", ms: retryAfterMs },
-        logEffect("debug", "telegram: write rate-limited, waiting", {
-          role: write.role,
-          retryAfterMs,
-        }),
-      ]);
-    })
+    .with({ kind: "rate_limited" }, ({ retryAfterMs, reason }) =>
+      waitToRetry(state, write, retryAfterMs, reason),
+    )
+    .with({ kind: "transient" }, ({ reason }) =>
+      waitToRetry(state, write, TRANSIENT_BACKOFF_MS * 2 ** state.failedInARow, reason),
+    )
     .with({ kind: "rejected" }, ({ reason }) => fail(state, reason))
     .exhaustive();
+}
+
+/**
+ * Wait `ms`, then carry on: a preview is not repeated, since the next one
+ * after the wait carries the latest text, while a chunk or tail stays due and
+ * goes again. Fails instead past the longest wait or the failures in a row.
+ */
+function waitToRetry(state: Open, write: Write, ms: number, reason: string): Transition {
+  if (ms > MAX_WAIT_MS)
+    return fail(state, `a ${ms}ms wait is longer than the stream waits: ${reason}`);
+  const failedInARow = state.failedInARow + 1;
+  if (failedInARow >= MAX_FAILURES_IN_A_ROW) {
+    return fail(state, `${failedInARow} writes failed in a row: ${reason}`);
+  }
+  return step({ ...state, inFlight: null, waiting: true, failedInARow }, [
+    { type: "wait", ms },
+    logEffect("debug", "telegram: write failed, waiting to retry", {
+      role: write.role,
+      ms,
+      reason,
+    }),
+  ]);
 }
 
 // --- deciding the next write ---
@@ -629,7 +650,7 @@ function open(): Extract<StreamState, { kind: "streaming" }> {
     shown: "",
     inFlight: null,
     waiting: false,
-    rateLimited: 0,
+    failedInARow: 0,
   };
 }
 
