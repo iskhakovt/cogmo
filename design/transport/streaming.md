@@ -386,6 +386,8 @@ async function runStreamingAgentLoop(params: {
 
 Rate limits: Telegram allows ~30 messages/sec globally and about one per second in one chat; edits count. grammY's guidance ([flood limits](https://grammy.dev/advanced/flood), [auto-retry](https://grammy.dev/plugins/auto-retry)) is not to throttle ahead of the limits, and on a 429 to wait `retry_after` seconds and retry. The handle coalesces previews to one per 500ms, which spares Telegram edits the next one would supersede, and otherwise follows that guidance itself rather than through the auto-retry transformer: a retry that waits without bound would hold the turn open, and a preview needs no retry at all.
 
+`classifyWriteError` sorts failures as the auto-retry plugin does: an answer carrying `retry_after` is a rate limit; a `GrammyError` with a 5xx `error_code`, or an `HttpError` (the request got no answer), is transient — the errors the plugin retries unless `rethrowInternalServerErrors` or `rethrowHttpErrors` is set. It adds the Bot API descriptions the handle answers specially: `message is not modified`, `can't parse entities`, and an edit whose message is gone (`message to edit not found`, `message can't be edited`, `MESSAGE_ID_INVALID`).
+
 `TelegramStreamHandle` (`stream-handle.ts`) drives a pure machine (`stream-state.ts`): `transition(state, input, opts)` returns the next state and its effects as data, and the handle carries them out.
 
 ```
@@ -405,9 +407,11 @@ Each failure has one answer:
 | Failure | Preview | Chunk or error tail |
 |-|-|-|
 | `message is not modified` | Landed | Landed |
-| 429 with `retry_after` ≤ 30s | Wait; the first preview after it carries the latest text | Wait, then write it again |
-| 429 the fifth time in a row, or `retry_after` > 30s | Fail | Fail |
+| Rate limit: wait `retry_after` | Wait; the first preview after it carries the latest text | Wait, then write it again |
+| Transient: wait 1s, doubling with each further failure in a row | Wait; the first preview after it carries the latest text | Wait, then write it again |
+| The fifth rate-limited or transient failure in a row, or a wait over 30s | Fail | Fail |
 | `can't parse entities` | — (previews are plain) | Write the source as plain text; fail if that is rejected too |
+| Edit target gone | Fail; the step's retry re-streams | Send it as a new message, so the user never keeps a cut-short reply the turn persists in full. That is a send, which can't fail this way, so it happens once; fail if it is rejected |
 | Anything else | Fail | Fail |
 
 A failed handle settles `done` with the reason, stops the typing heartbeat, leaves `#activeStreams`, and answers every later call with its failure without writing. The heartbeat is bound to the handle's `AbortSignal`, which aborts once the stream takes no more content, and its interval is unref'd.
