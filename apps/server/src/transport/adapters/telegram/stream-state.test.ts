@@ -1,8 +1,10 @@
 import { err, ok } from "neverthrow";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { StreamOpts } from "../../types.js";
+import { renderTelegramHtml } from "./render.js";
 import {
   classifyWriteError,
+  crashed,
   EDIT_INTERVAL_MS,
   type Effect,
   findTelegramSplitBoundary,
@@ -14,6 +16,11 @@ import {
   transition,
   type Write,
 } from "./stream-state.js";
+
+vi.mock("./render.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./render.js")>();
+  return { ...actual, renderTelegramHtml: vi.fn(actual.renderTelegramHtml) };
+});
 
 const EDITS: StreamOpts = { chunkChars: 4000, allowEdits: true };
 const APPEND_ONLY: StreamOpts = { chunkChars: 4000, allowEdits: false };
@@ -377,6 +384,25 @@ describe("telegram stream state", () => {
       ]);
     });
 
+    it("writes a chunk as plain text when rendering it throws", () => {
+      vi.mocked(renderTelegramHtml).mockImplementationOnce(() => {
+        throw new Error("marked blew up");
+      });
+
+      const { state, effects } = drive(EDITS, [text("**done**"), landed(T0, 100), finish]);
+
+      expect(writes(effects).at(-1)).toEqual({
+        role: "chunk",
+        messageId: 100,
+        text: "**done**",
+        html: false,
+      });
+      expect(state).toMatchObject({ kind: "finalizing" });
+      expect(effects).toContainEqual(
+        expect.objectContaining({ type: "log", fields: { reason: "marked blew up" } }),
+      );
+    });
+
     it("fails when the plain fallback is rejected too", () => {
       const { state } = drive(EDITS, [
         text("**done**"),
@@ -506,6 +532,31 @@ describe("telegram stream state", () => {
       ]);
 
       expect(writes(effects)).toHaveLength(1);
+    });
+  });
+
+  describe("crashed", () => {
+    it("fails a streaming handle, stopping it", () => {
+      const { state } = drive(EDITS, [text("Hello")]);
+
+      expect(crashed(state, "boom")).toEqual({
+        state: { kind: "failed", reason: "stream state machine threw: boom" },
+        effects: [
+          expect.objectContaining({ type: "log", level: "error" }),
+          { type: "stopped" },
+          { type: "settled", outcome: err("stream state machine threw: boom") },
+        ],
+      });
+    });
+
+    it("fails a closing handle, which has already stopped", () => {
+      const { state } = drive(EDITS, [text("Hello"), finish]);
+
+      expect(crashed(state, "boom").effects).not.toContainEqual({ type: "stopped" });
+    });
+
+    it("leaves a settled handle as it is", () => {
+      expect(crashed({ kind: "done" }, "boom")).toEqual({ state: { kind: "done" }, effects: [] });
     });
   });
 

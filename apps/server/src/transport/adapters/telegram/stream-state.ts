@@ -3,6 +3,7 @@ import { match, P } from "ts-pattern";
 import { z } from "zod";
 import type { StreamEvent } from "../../../llm/types.js";
 import { describeError } from "../../../util/describe-error.js";
+import type { RenderedMessage } from "../../adapter-module.js";
 import type { StreamOpts } from "../../types.js";
 import { renderTelegramHtml } from "./render.js";
 
@@ -165,7 +166,12 @@ export type Effect =
   | { type: "stopped" }
   /** Entered `done` or `failed`. Emitted once. */
   | { type: "settled"; outcome: Result<void, string> }
-  | { type: "log"; level: "warn" | "debug"; message: string; fields: Record<string, unknown> };
+  | {
+      type: "log";
+      level: "error" | "warn" | "debug";
+      message: string;
+      fields: Record<string, unknown>;
+    };
 
 export interface Transition {
   state: StreamState;
@@ -231,6 +237,18 @@ export function transition(state: StreamState, input: StreamInput, opts: StreamO
       )
       .exhaustive()
   );
+}
+
+/**
+ * The machine threw on an input — a bug. Fail the handle rather than leave it
+ * waiting on a write whose result the machine never took.
+ */
+export function crashed(state: StreamState, reason: string): Transition {
+  if (state.kind === "done" || state.kind === "failed") return stay(state);
+  const failure = `stream state machine threw: ${reason}`;
+  return settle({ kind: "failed", reason: failure }, err(failure), state.kind !== "finalizing", [
+    logEffect("error", "telegram: stream state machine threw — the handle stops", { reason }),
+  ]);
 }
 
 /**
@@ -513,7 +531,10 @@ function advance(
 ): Transition {
   if (state.inFlight !== null || state.waiting) return step(state, effects);
   const [chunk] = state.chunks;
-  if (chunk !== undefined) return writing(state, chunkWrite(state.messageId, chunk), effects);
+  if (chunk !== undefined) {
+    const rendered = chunkWrite(state.messageId, chunk);
+    return writing(state, rendered.write, [...effects, ...rendered.effects]);
+  }
   const text = textOf(state.segments);
   if (state.kind === "finalizing") {
     if (text === "") return settle({ kind: "done" }, ok(undefined), false, effects);
@@ -532,15 +553,35 @@ function advance(
   );
 }
 
-/** A chunk's write: rendered to Telegram's HTML when that fits, its source otherwise. */
-function chunkWrite(messageId: number | undefined, chunk: Chunk): Write {
-  if (!chunk.plain) {
-    const rendered = renderTelegramHtml(chunk.source);
-    if (rendered.parseMode !== undefined && rendered.text.length <= TELEGRAM_MAX_MESSAGE_LENGTH) {
-      return { role: "chunk", messageId, text: rendered.text, html: true };
-    }
+/**
+ * A chunk's write: rendered to Telegram's HTML when that fits, its source
+ * otherwise. A render that throws gets the source too, as one Telegram can't
+ * parse does.
+ */
+function chunkWrite(
+  messageId: number | undefined,
+  chunk: Chunk,
+): { write: Write; effects: ReadonlyArray<Effect> } {
+  const plain: Write = { role: "chunk", messageId, text: chunk.source, html: false };
+  if (chunk.plain) return { write: plain, effects: [] };
+  let rendered: RenderedMessage;
+  try {
+    rendered = renderTelegramHtml(chunk.source);
+  } catch (e) {
+    const reason = describeError(e);
+    return {
+      write: plain,
+      effects: [
+        logEffect("warn", "telegram: chunk HTML render failed, writing plain text", { reason }),
+      ],
+    };
   }
-  return { role: "chunk", messageId, text: chunk.source, html: false };
+  const fits =
+    rendered.parseMode !== undefined && rendered.text.length <= TELEGRAM_MAX_MESSAGE_LENGTH;
+  return {
+    write: fits ? { role: "chunk", messageId, text: rendered.text, html: true } : plain,
+    effects: [],
+  };
 }
 
 // --- the buffer ---
@@ -730,17 +771,19 @@ function stay(state: StreamState): Transition {
 
 function stayAndLog(
   state: StreamState,
-  level: "warn" | "debug",
+  level: LogEffect["level"],
   message: string,
   fields: Record<string, unknown>,
 ): Transition {
   return step(state, [logEffect(level, message, fields)]);
 }
 
+type LogEffect = Extract<Effect, { type: "log" }>;
+
 function logEffect(
-  level: "warn" | "debug",
+  level: LogEffect["level"],
   message: string,
   fields: Record<string, unknown>,
-): Extract<Effect, { type: "log" }> {
+): LogEffect {
   return { type: "log", level, message, fields };
 }

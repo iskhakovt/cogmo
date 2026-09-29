@@ -5,13 +5,16 @@ import { parseGeneratedDocumentPayload } from "../../../agent/document-tools.js"
 import { parseGeneratedImagePayload } from "../../../agent/image-tools.js";
 import type { StreamEvent } from "../../../llm/types.js";
 import { logger } from "../../../logger.js";
+import { describeError } from "../../../util/describe-error.js";
 import { type AttachmentStore, mediaTypeToExt } from "../../attachment-store.js";
 import type { StreamHandle, StreamOpts } from "../../types.js";
 import {
   classifyWriteError,
+  crashed,
   type Effect,
   type StreamInput,
   type StreamState,
+  type Transition,
   transition,
   type Write,
 } from "./stream-state.js";
@@ -150,7 +153,12 @@ export class TelegramStreamHandle implements SettlingStreamHandle {
   }
 
   #input(input: StreamInput): void {
-    const next = transition(this.#state, input, this.#opts);
+    let next: Transition;
+    try {
+      next = transition(this.#state, input, this.#opts);
+    } catch (e) {
+      next = crashed(this.#state, describeError(e));
+    }
     this.#state = next.state;
     for (const effect of next.effects) this.#execute(effect);
   }
