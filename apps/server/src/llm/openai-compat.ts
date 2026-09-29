@@ -3,7 +3,7 @@ import { getEncoding, type Tiktoken } from "js-tiktoken";
 import OpenAI from "openai";
 import * as R from "remeda";
 import { logger } from "../logger.js";
-import { abortable, abortReasonOr } from "./abort.js";
+import { abortReasonOr } from "./abort.js";
 import type { CacheDialect } from "./cache-dialect.js";
 import { cacheMarker } from "./cache-marker.js";
 import { ProviderProtocolError, parseToolArgs, ToolArgsCutOffError } from "./errors.js";
@@ -123,9 +123,9 @@ export class OpenAICompatibleProvider implements LlmProvider {
         };
       }
 
-      const response = await abortable(
-        this.#client.chat.completions.create(createParams, requestOptions(hints, signal)),
-        signal,
+      const response = await this.#client.chat.completions.create(
+        createParams,
+        requestOptions(hints, signal),
       );
 
       const choice = response.choices[0];
@@ -170,8 +170,8 @@ export class OpenAICompatibleProvider implements LlmProvider {
         // before they propagate to FallbackLlmProvider. `.catch()` keeps the
         // narrow Stream<...> type from the streaming overload — a try/catch
         // would widen `stream` to the ChatCompletion|Stream union.
-        const stream = await abortable(
-          client.chat.completions.create(
+        const stream = await client.chat.completions
+          .create(
             {
               model: params.model,
               ...modelFamilyParams(params.model, params),
@@ -182,11 +182,10 @@ export class OpenAICompatibleProvider implements LlmProvider {
               stream_options: { include_usage: true },
             },
             requestOptions(hints, signal),
-          ),
-          signal,
-        ).catch((err: unknown) => {
-          throw toRefusalErrorIfMatches(err) ?? err;
-        });
+          )
+          .catch((err: unknown) => {
+            throw toRefusalErrorIfMatches(err) ?? err;
+          });
 
         let model = params.model;
         let usage: Usage = { inputTokens: 0, outputTokens: 0 };

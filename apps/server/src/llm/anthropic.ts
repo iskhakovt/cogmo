@@ -1,7 +1,7 @@
 import Anthropic, { BadRequestError } from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { logger } from "../logger.js";
-import { abortable, abortReasonOr } from "./abort.js";
+import { abortReasonOr } from "./abort.js";
 import {
   hasOpenObject,
   hasRecursiveRef,
@@ -77,9 +77,9 @@ export class AnthropicProvider implements LlmProvider {
       const span = startChatSpan(providerName, params.model);
       let completed = false;
       try {
-        const stream = await abortable(
-          client.messages.create({ ...anthropicParams, stream: true }, { signal }),
-          signal,
+        const stream = await client.messages.create(
+          { ...anthropicParams, stream: true },
+          { signal },
         );
 
         // Track tool_use blocks by index for input accumulation
@@ -296,10 +296,7 @@ export class AnthropicProvider implements LlmProvider {
     signal: AbortSignal | undefined,
   ): Promise<{ response: Anthropic.Message; toolPath: boolean }> {
     const send = (toolPath: boolean): Promise<Anthropic.Message> =>
-      abortable(
-        this.#client.messages.create(buildCreateParams(params, toolPath), { signal }),
-        signal,
-      );
+      this.#client.messages.create(buildCreateParams(params, toolPath), { signal });
     const toolPath = takesToolPath(params);
     try {
       return { response: await send(toolPath), toolPath };

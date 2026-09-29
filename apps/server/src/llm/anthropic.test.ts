@@ -866,10 +866,12 @@ describe("AnthropicProvider", () => {
       messages: [{ role: "user" as const, content: "hi" }],
     };
 
-    /** An SDK call that settles only by rejecting, once `signal` fires, as the SDK's own abort does. */
-    function pendingUntilAborted(signal: AbortSignal): Promise<never> {
+    /** An SDK call that, like the SDK's own, rejects with `APIUserAbortError` once its signal fires. */
+    function sdkCallUntilAborted(_body: unknown, options: { signal: AbortSignal }): Promise<never> {
       return new Promise((_resolve, reject) => {
-        signal.addEventListener("abort", () => reject(new APIUserAbortError()), { once: true });
+        const abort = (): void => reject(new APIUserAbortError());
+        if (options.signal.aborted) abort();
+        else options.signal.addEventListener("abort", abort, { once: true });
       });
     }
 
@@ -902,11 +904,11 @@ describe("AnthropicProvider", () => {
       expect(mockCreate.mock.calls.map((call) => call[1])).toEqual([{ signal }, { signal }]);
     });
 
-    it("rejects chat with the signal's reason when it fires", async () => {
+    it("rejects chat with the signal's reason, not the SDK's abort error", async () => {
       const provider = createProvider();
       const controller = new AbortController();
       const reason = new Error("cancelled");
-      mockCreate.mockReturnValueOnce(pendingUntilAborted(controller.signal));
+      mockCreate.mockImplementationOnce(sdkCallUntilAborted);
 
       const call = provider.chat(params, { signal: controller.signal });
       controller.abort(reason);
@@ -914,28 +916,13 @@ describe("AnthropicProvider", () => {
       await expect(call).rejects.toBe(reason);
     });
 
-    it("rejects chat as soon as the signal fires, while the SDK is still waiting", async () => {
-      // The SDK checks the signal only after a retry's backoff.
+    it("throws the signal's reason, not the SDK's abort error, from a stream not yet open", async () => {
       const provider = createProvider();
       const controller = new AbortController();
       const reason = new Error("cancelled");
-      mockCreate.mockReturnValueOnce(new Promise(() => {}));
-
-      const call = provider.chat(params, { signal: controller.signal });
-      controller.abort(reason);
-
-      await expect(call).rejects.toBe(reason);
-    });
-
-    it("throws the signal's reason from a stream the SDK has not opened yet", async () => {
-      const provider = createProvider();
-      const controller = new AbortController();
-      const reason = new Error("cancelled");
-      mockCreate.mockReturnValueOnce(new Promise(() => {}));
+      mockCreate.mockImplementationOnce(sdkCallUntilAborted);
 
       const drained = drainFrames(provider.chatStream(params, { signal: controller.signal }));
-      // Let the stream reach the SDK call before the signal fires.
-      await vi.waitFor(() => expect(mockCreate).toHaveBeenCalledOnce());
       controller.abort(reason);
 
       await expect(drained).rejects.toBe(reason);

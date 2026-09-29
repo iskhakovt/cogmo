@@ -31,11 +31,10 @@ interface LlmProvider {
 
 One iterable with a terminal frame, not a stream plus a `response` promise: the agent loop, the only consumer, drains every frame anyway, while a separate promise has to be settled on every path (a failure, an abandoned stream, a stream never iterated) and caught wherever nothing awaits it. It is the provider-level shape of the Vercel AI SDK (`doStream`, whose last part is `finish`) and of OpenAI's final usage chunk.
 
-`ChatOptions.signal` cancels a call: the request is aborted, and the call rejects or the stream throws with `signal.reason` as soon as the signal fires. Both SDKs take the signal as a request option, and the adapters (`src/llm/abort.ts`) close three gaps in how they honour it:
+`ChatOptions.signal` cancels a call: the request is aborted, and the call rejects or the stream throws with `signal.reason` as soon as the signal fires. Both SDKs take the signal as a request option and abort the request when it fires, a retry's backoff included. The adapters close two gaps in how they report it:
 
-- They throw their own `APIUserAbortError`; the adapter throws the reason instead.
+- They throw their own `APIUserAbortError`; the adapter throws the reason instead (`src/llm/abort.ts`).
 - They end an aborted stream quietly, as if it had finished. The adapter checks the signal after the SDK's stream and throws, rather than yielding `done` for a cut-off response.
-- They check the signal only between retries, sleeping through the backoff, which a `retry-after` header can stretch to a minute or more. The adapter settles the call when the signal fires; the SDK still sends no further attempt.
 
 The degraded-reply synthesis is the one caller that passes a signal: its 5-second cap (see [agent-resilience.md](agent-resilience.md) → Tools-free synthesis on degrade).
 

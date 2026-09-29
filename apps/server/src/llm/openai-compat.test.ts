@@ -31,6 +31,8 @@ vi.mock("openai", () => {
     },
   };
 });
+// The mock replaces the whole module; abort tests reject with the SDK's real error class.
+const { APIUserAbortError } = await vi.importActual<typeof import("openai")>("openai");
 
 // What the provider passes to openai.chat.completions.create. We assert on
 // shape (messages array, tools array, etc.) — fields are kept loose because
@@ -1035,6 +1037,15 @@ describe("OpenAICompatibleProvider", () => {
       messages: [{ role: "user", content: "hi" }],
     };
 
+    /** An SDK call that, like the SDK's own, rejects with `APIUserAbortError` once its signal fires. */
+    function sdkCallUntilAborted(_body: unknown, options: { signal: AbortSignal }): Promise<never> {
+      return new Promise((_resolve, reject) => {
+        const abort = (): void => reject(new APIUserAbortError());
+        if (options.signal.aborted) abort();
+        else options.signal.addEventListener("abort", abort, { once: true });
+      });
+    }
+
     it("hands the signal to the SDK", async () => {
       const provider = createProvider();
       const signal = new AbortController().signal;
@@ -1053,16 +1064,28 @@ describe("OpenAICompatibleProvider", () => {
       expect(mockCreate.mock.calls.map((call) => call[1])).toEqual([{ signal }, { signal }]);
     });
 
-    it("rejects chat with the signal's reason as soon as it fires", async () => {
+    it("rejects chat with the signal's reason, not the SDK's abort error", async () => {
       const provider = createProvider();
       const controller = new AbortController();
       const reason = new Error("cancelled");
-      mockCreate.mockReturnValueOnce(new Promise(() => {}));
+      mockCreate.mockImplementationOnce(sdkCallUntilAborted);
 
       const call = provider.chat(params, { signal: controller.signal });
       controller.abort(reason);
 
       await expect(call).rejects.toBe(reason);
+    });
+
+    it("throws the signal's reason, not the SDK's abort error, from a stream not yet open", async () => {
+      const provider = createProvider();
+      const controller = new AbortController();
+      const reason = new Error("cancelled");
+      mockCreate.mockImplementationOnce(sdkCallUntilAborted);
+
+      const drained = drainFrames(provider.chatStream(params, { signal: controller.signal }));
+      controller.abort(reason);
+
+      await expect(drained).rejects.toBe(reason);
     });
 
     it("throws the signal's reason, not a partial tool call, when the SDK ends an aborted stream", async () => {
