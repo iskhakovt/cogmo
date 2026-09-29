@@ -120,6 +120,18 @@ Keys don't close every route — see `DEPLOYMENT.md` → Securing internal servi
 
 **Principle.** Block on what the first request needs and what a healthy dependency answers in well under a second; a dependency that is down or undecided holds boot for about one probe deadline before boot fails. Defer the rest with a `Promise<void>` that logs on both fulfilment and rejection (structured, includes the subsystem label) and clears any in-flight cache on rejection so the next caller retries instead of inheriting a poisoned state. Never silently swallow a deferred failure — operators read logs to discover state.
 
+## Shutdown `[confirmed]`
+
+On `SIGTERM` or `SIGINT`, once the Inngest connection closes, `cogmo serve` tears down in this order (`src/shutdown.ts`):
+
+1. **Web server.** Abort the server-lifetime signal, which ends every chat stream cleanly so the browser reconnects to the next process, then `close()`, which refuses new connections and reaps idle keep-alive ones. A request still in flight after 3 s has its connection closed (`closeAllConnections()`, called after `close()` as Node's docs recommend).
+2. **Channel adapters**, concurrently.
+3. **MCP** connection pool.
+4. **Sandbox.** On local-Docker this closes the socket proxy, which ends every connection a task opened through it, hijacked streams included.
+5. **Instance row.** Sets `cogmo_instances.stopped_at` ([sandbox.md → Data Model](sandbox.md#data-model-confirmed)).
+
+The web server goes first so no request reaches a stopped dependency. Every other step is capped at 5 s; one that overruns or throws is logged and the next step still runs, so a hung dependency costs its cap, not the rest of the teardown.
+
 ## Deployment `[proposed]`
 
 Build TypeScript -> `dist/`. Deploy however suits the host — systemd service, Docker, etc. The app is a standard Node.js process with no special requirements beyond PostgreSQL and Redis.

@@ -186,6 +186,7 @@ async function serve(): Promise<number> {
   const { startWebServer } = await import("./web/server.js");
   const { verifyWebLoginToken } = await import("./web/auth/login-token.js");
   const { logger } = await import("./logger.js");
+  const { SERVE_SHUTDOWN_BOUNDS, shutdownServe } = await import("./shutdown.js");
 
   const {
     inngest,
@@ -243,23 +244,19 @@ async function serve(): Promise<number> {
       await connection.closed;
     }
   } finally {
-    // Drain HTTP first — stop accepting requests before the Transport and
-    // stores the oRPC layer depends on are torn down. The abort ends open chat
-    // streams; `closeIdleConnections` drops idle keep-alive sockets; in-flight
-    // requests still drain.
-    webShutdown.abort();
-    await new Promise<void>((resolve) => {
-      webServer.close(() => resolve());
-      webServer.closeIdleConnections();
-    });
-    for (const adapter of adapters) {
-      await adapter.stop();
-    }
-    if (mcpRegistry) await mcpRegistry.stop();
-    if (sandbox) await sandbox.shutdown();
-    if (sandboxInstanceId) {
-      await runInTx((tx) => sandboxStore.closeInstance(tx, sandboxInstanceId));
-    }
+    await shutdownServe(
+      {
+        webShutdown,
+        webServer,
+        adapters,
+        mcpRegistry,
+        sandbox,
+        closeInstance: sandboxInstanceId
+          ? () => runInTx((tx) => sandboxStore.closeInstance(tx, sandboxInstanceId))
+          : null,
+      },
+      SERVE_SHUTDOWN_BOUNDS,
+    );
   }
 
   logger.info("cogmo stopped");
