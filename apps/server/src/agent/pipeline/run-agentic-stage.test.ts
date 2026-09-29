@@ -1,4 +1,5 @@
 import { NonRetriableError } from "inngest";
+import { err } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { z } from "zod";
@@ -17,6 +18,7 @@ import {
   mockMemoryProvider,
   mockTransportStore,
 } from "../../test/factories.js";
+import { StreamDeliveryError } from "../../transport/delivery-router.js";
 import { canonicalKeyOrder } from "../../util/canonical-key-order.js";
 import type { AgentLoopResult, StepRunner } from "../loop.js";
 import { defineTool, ToolRegistry } from "../tools.js";
@@ -672,5 +674,32 @@ describe("runAgenticStage", () => {
     );
     expect(h.delivery.abort).toHaveBeenCalledWith("stream reset");
     expect(h.agentStore.insertMessages).not.toHaveBeenCalled();
+  });
+
+  describe("stream delivery failures", () => {
+    const deliveryFailed = new StreamDeliveryError(["telegram: chat not found"]);
+
+    it("keeps a deterministic loop error non-retriable when the abort fails", async () => {
+      const h = await harness();
+      const badRequest = Object.assign(new Error("Bad Request"), { status: 400 });
+      h.runStreamingAgentLoop.mockRejectedValue(badRequest);
+      vi.mocked(h.delivery.abort).mockResolvedValue(err(deliveryFailed));
+
+      const failure = runAgenticStage(h.deps, stageArgs(), recordingSteps().steps, log);
+
+      await expect(failure).rejects.toBeInstanceOf(NonRetriableError);
+      await expect(failure).rejects.toHaveProperty("cause", badRequest);
+    });
+
+    it("persists the stage's reply when a stream target fails at finish", async () => {
+      const h = await harness();
+      vi.mocked(h.delivery.finish).mockResolvedValue(err(deliveryFailed));
+
+      const outcome = await runAgenticStage(h.deps, stageArgs(), recordingSteps().steps, log);
+
+      expect(outcome.kind).toBe("completed");
+      expect(h.delivery.abort).not.toHaveBeenCalled();
+      expect(h.agentStore.insertMessages).toHaveBeenCalled();
+    });
   });
 });

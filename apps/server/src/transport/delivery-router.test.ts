@@ -11,6 +11,7 @@ import {
 import {
   type AdapterEntry,
   createDeliveryRouter,
+  pushOrThrow,
   type RoutingContext,
   StreamDeliveryError,
 } from "./delivery-router.js";
@@ -725,6 +726,17 @@ describe("createDeliveryRouter", () => {
 
       expect(healthy.push).toHaveBeenCalledWith(textDelta);
       expect(pushed).toEqual(err(new StreamDeliveryError(["bot was blocked by the user"])));
+    });
+
+    it("pushOrThrow throws the fan-out's failure after every handle has the event", async () => {
+      const { delivery, healthy } = await prepareWith(
+        mockStreamHandle({ push: vi.fn().mockResolvedValue(err("chat not found")) }),
+      );
+
+      await expect(pushOrThrow(delivery, textDelta)).rejects.toEqual(
+        new StreamDeliveryError(["chat not found"]),
+      );
+      expect(healthy.push).toHaveBeenCalledWith(textDelta);
     });
 
     it("reports success when every handle succeeds", async () => {
