@@ -1,10 +1,12 @@
 import { APIError, APIUserAbortError } from "@anthropic-ai/sdk";
-import { describe, expect, it, vi } from "vitest";
+import { SpanStatusCode } from "@opentelemetry/api";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { CorrectionExtractionSchema } from "../agent/evolution/extraction-schema.js";
 import { logger } from "../logger.js";
 import { expectDefined } from "../test/assertions.js";
 import { drainFrames } from "../test/factories.js";
+import { type OtelHarness, setupOtelHarness } from "../test/otel-harness.js";
 import { AnthropicProvider } from "./anthropic.js";
 import { extractText } from "./content.js";
 import { MissingToolCallError, ProviderProtocolError, ToolArgsCutOffError } from "./errors.js";
@@ -995,6 +997,76 @@ describe("AnthropicProvider", () => {
 
       await expect(drained).rejects.toBe(reason);
       expect(collected).toEqual([{ type: "text_delta", text: "Hel" }]);
+    });
+  });
+
+  describe("abandoned stream", () => {
+    let harness: OtelHarness;
+
+    beforeAll(() => {
+      harness = setupOtelHarness();
+    });
+
+    beforeEach(async () => {
+      await harness.reset();
+    });
+
+    afterAll(async () => {
+      await harness.shutdown();
+    });
+
+    const params = {
+      model: "claude-sonnet-5",
+      system: "sys",
+      messages: [{ role: "user" as const, content: "hi" }],
+    };
+
+    it("returns the SDK stream, which aborts the request, and fails the span", async () => {
+      const provider = createProvider();
+      const returned = vi.fn();
+      async function* sdkStream(): AsyncGenerator<unknown> {
+        try {
+          yield {
+            type: "message_start",
+            message: { model: "claude-sonnet-5", usage: { input_tokens: 5, output_tokens: 0 } },
+          };
+          yield {
+            type: "content_block_start",
+            index: 0,
+            content_block: { type: "text", text: "" },
+          };
+          yield {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "text_delta", text: "Hel" },
+          };
+          yield {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "text_delta", text: "lo" },
+          };
+        } finally {
+          // Where the SDK's stream aborts its request when returned early.
+          returned();
+        }
+      }
+      mockCreate.mockResolvedValueOnce(sdkStream());
+
+      for await (const _ of provider.chatStream(params)) break;
+
+      expect(returned).toHaveBeenCalledOnce();
+      const span = expectDefined(harness.getSpans()[0], "chat span");
+      expect(harness.getSpans()).toHaveLength(1);
+      expect(span.status.code).toBe(SpanStatusCode.ERROR);
+    });
+
+    it("starts no request and no span for a stream never read", () => {
+      const provider = createProvider();
+
+      provider.chatStream(params);
+
+      expect(mockCreate).not.toHaveBeenCalled();
+      expect(harness.startedSpanCount()).toBe(0);
     });
   });
 

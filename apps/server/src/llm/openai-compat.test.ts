@@ -1,10 +1,12 @@
+import { SpanStatusCode } from "@opentelemetry/api";
 import { getEncoding } from "js-tiktoken";
-import { describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { PipelineDefinitionSchema } from "../agent/pipeline/types.js";
 import { logger } from "../logger.js";
 import { expectDefined } from "../test/assertions.js";
 import { drainFrames } from "../test/factories.js";
+import { type OtelHarness, setupOtelHarness } from "../test/otel-harness.js";
 import type { CacheDialect } from "./cache-dialect.js";
 import { ProviderProtocolError, ToolArgsCutOffError } from "./errors.js";
 import { isRetriableProviderError, RefusalError } from "./fallback.js";
@@ -1147,6 +1149,60 @@ describe("OpenAICompatibleProvider", () => {
 
       await expect(drained).rejects.toBe(reason);
       expect(collected).toEqual([]);
+    });
+  });
+
+  describe("abandoned stream", () => {
+    let harness: OtelHarness;
+
+    beforeAll(() => {
+      harness = setupOtelHarness();
+    });
+
+    beforeEach(async () => {
+      await harness.reset();
+    });
+
+    afterAll(async () => {
+      await harness.shutdown();
+    });
+
+    const params: ChatParams = {
+      model: "m",
+      system: "sys",
+      messages: [{ role: "user", content: "hi" }],
+    };
+
+    it("returns the SDK stream, which aborts the request, and fails the span", async () => {
+      const provider = createProvider();
+      const returned = vi.fn();
+      async function* sdkStream(): AsyncGenerator<unknown> {
+        try {
+          for (const text of ["Hel", "lo"]) {
+            yield { model: "m", choices: [{ delta: { content: text }, finish_reason: null }] };
+          }
+        } finally {
+          // Where the SDK's stream aborts its request when returned early.
+          returned();
+        }
+      }
+      mockCreate.mockResolvedValueOnce(sdkStream());
+
+      for await (const _ of provider.chatStream(params)) break;
+
+      expect(returned).toHaveBeenCalledOnce();
+      const span = expectDefined(harness.getSpans()[0], "chat span");
+      expect(harness.getSpans()).toHaveLength(1);
+      expect(span.status.code).toBe(SpanStatusCode.ERROR);
+    });
+
+    it("starts no request and no span for a stream never read", () => {
+      const provider = createProvider();
+
+      provider.chatStream(params);
+
+      expect(mockCreate).not.toHaveBeenCalled();
+      expect(harness.startedSpanCount()).toBe(0);
     });
   });
 
