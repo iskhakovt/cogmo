@@ -695,7 +695,15 @@
     "contextWindow": 128000,
     "maxOutputTokens": 16384
   },
+  "azure/gpt-audio": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 16384
+  },
   "azure/gpt-audio-2025-08-28": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 16384
+  },
+  "azure/gpt-audio-1.5": {
     "contextWindow": 128000,
     "maxOutputTokens": 16384
   },
@@ -731,7 +739,15 @@
     "contextWindow": 128000,
     "maxOutputTokens": 4096
   },
+  "azure/gpt-realtime": {
+    "contextWindow": 32000,
+    "maxOutputTokens": 4096
+  },
   "azure/gpt-realtime-2025-08-28": {
+    "contextWindow": 32000,
+    "maxOutputTokens": 4096
+  },
+  "azure/gpt-realtime-1.5": {
     "contextWindow": 32000,
     "maxOutputTokens": 4096
   },
@@ -822,6 +838,54 @@
   "azure/gpt-5.1": {
     "contextWindow": 272000,
     "maxOutputTokens": 64000
+  },
+  "azure/gpt-5-chat": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 16384
+  },
+  "azure/gpt-5.1-chat": {
+    "contextWindow": 111616,
+    "maxOutputTokens": 16384
+  },
+  "azure/gpt-5.2-chat": {
+    "contextWindow": 111616,
+    "maxOutputTokens": 16384
+  },
+  "azure/gpt-5.3-chat": {
+    "contextWindow": 111616,
+    "maxOutputTokens": 16384
+  },
+  "azure/us/gpt-5.1-chat": {
+    "contextWindow": 111616,
+    "maxOutputTokens": 16384
+  },
+  "azure/us/gpt-5.2-chat": {
+    "contextWindow": 111616,
+    "maxOutputTokens": 16384
+  },
+  "azure/us/gpt-5.3-chat": {
+    "contextWindow": 111616,
+    "maxOutputTokens": 16384
+  },
+  "azure/eu/gpt-5.1-chat": {
+    "contextWindow": 111616,
+    "maxOutputTokens": 16384
+  },
+  "azure/eu/gpt-5.2-chat": {
+    "contextWindow": 111616,
+    "maxOutputTokens": 16384
+  },
+  "azure/eu/gpt-5.3-chat": {
+    "contextWindow": 111616,
+    "maxOutputTokens": 16384
+  },
+  "azure/us/o1-preview": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 32000
+  },
+  "azure/eu/o1-preview": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 32000
   },
   "azure/gpt-5.1-codex": {
     "contextWindow": 272000,
@@ -1269,7 +1333,7 @@
   },
   "azure_ai/Llama-3.3-70B-Instruct": {
     "contextWindow": 128000,
-    "maxOutputTokens": 2048
+    "maxOutputTokens": 8192
   },
   "azure_ai/Llama-4-Maverick-17B-128E-Instruct-FP8": {
     "contextWindow": 1000000,
@@ -1348,8 +1412,8 @@
     "maxOutputTokens": 40960
   },
   "azure_ai/deepseek-v3.2-speciale": {
-    "contextWindow": 163840,
-    "maxOutputTokens": 40960
+    "contextWindow": 128000,
+    "maxOutputTokens": 32000
   },
   "azure_ai/deepseek-v3": {
     "contextWindow": 128000,
@@ -1373,11 +1437,11 @@
   },
   "azure_ai/grok-4": {
     "contextWindow": 131072,
-    "maxOutputTokens": 32768
+    "maxOutputTokens": 8192
   },
   "azure_ai/grok-4.3": {
     "contextWindow": 200000,
-    "maxOutputTokens": 50000
+    "maxOutputTokens": 8192
   },
   "azure_ai/grok-4.6": {
     "contextWindow": 200000,
@@ -1401,7 +1465,7 @@
   },
   "azure_ai/grok-code-fast-1": {
     "contextWindow": 131072,
-    "maxOutputTokens": 32768
+    "maxOutputTokens": 8192
   },
   "azure_ai/jamba-instruct": {
     "contextWindow": 70000,
@@ -1995,6 +2059,10 @@
     "contextWindow": 1000000,
     "maxOutputTokens": 64000
   },
+  "claude-sonnet-5-5": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
   "claude-sonnet-4-6": {
     "contextWindow": 1000000,
     "maxOutputTokens": 64000
@@ -2170,6 +2238,10 @@
   "command-a-03-2025": {
     "contextWindow": 256000,
     "maxOutputTokens": 8000
+  },
+  "c4ai-aya-expanse-32b": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 4000
   },
   "command-a-plus-05-2026": {
     "contextWindow": 128000,
@@ -2743,6 +2815,10 @@
     "contextWindow": 1000000,
     "maxOutputTokens": 64000
   },
+  "databricks/databricks-claude-opus-5-5": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
   "databricks/databricks-claude-sonnet-4": {
     "contextWindow": 200000,
     "maxOutputTokens": 50000
@@ -3231,6 +3307,54 @@
     "contextWindow": 229376,
     "maxOutputTokens": 32768
   },
+  "sail/moonshotai/Kimi-K3": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "sail/zai-org/GLM-5.3": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "sail/zai-org/GLM-5.3-Flash": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "sail/deepseek-ai/DeepSeek-V4-Pro-0813": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "sail/deepseek-ai/DeepSeek-V4-Flash-0731": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "sail/deepseek-ai/DeepSeek-V4.1-Flash": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "sail/moonshotai/Kimi-K2.6": {
+    "contextWindow": 262144,
+    "maxOutputTokens": 64000
+  },
+  "sail/google/gemma-4-31B-it": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 64000
+  },
+  "sail/nvidia/Gemma-4-31B-IT-NVFP4": {
+    "contextWindow": 262144,
+    "maxOutputTokens": 64000
+  },
+  "sail/google/gemma-4-12B-it": {
+    "contextWindow": 16384,
+    "maxOutputTokens": 4096
+  },
+  "sail/openai/gpt-oss-120b": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 32768
+  },
+  "sail/Qwen/Qwen3.6-35B-A3B": {
+    "contextWindow": 262144,
+    "maxOutputTokens": 64000
+  },
   "eu.amazon.nova-lite-v1:0": {
     "contextWindow": 300000,
     "maxOutputTokens": 10000
@@ -3699,6 +3823,14 @@
     "contextWindow": 1048576,
     "maxOutputTokens": 64000
   },
+  "vertex_ai/gemini-3.8-flash-cyber": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "vertex_ai/gemini-3.8-live": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 32768
+  },
   "vertex_ai/gemini-3.1-pro-preview": {
     "contextWindow": 1048576,
     "maxOutputTokens": 64000
@@ -3726,6 +3858,26 @@
   "gemini-flash-experimental": {
     "contextWindow": 1000000,
     "maxOutputTokens": 8192
+  },
+  "gemini/gemini-3-pro-image-preview": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 32768
+  },
+  "gemini/gemini-3.1-flash-image-preview": {
+    "contextWindow": 65536,
+    "maxOutputTokens": 16384
+  },
+  "gemini/gemini-3.1-flash-lite-preview": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "gemini/deep-research-preview-04-2026": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 32768
+  },
+  "gemini/deep-research-max-preview-04-2026": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 32768
   },
   "gemini/gemini-2.5-flash": {
     "contextWindow": 1048576,
@@ -3836,6 +3988,10 @@
     "maxOutputTokens": 64000
   },
   "gemini-3.8-flash": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "gemini-3.8-flash-cyber": {
     "contextWindow": 1048576,
     "maxOutputTokens": 64000
   },
@@ -4279,9 +4435,29 @@
     "contextWindow": 272000,
     "maxOutputTokens": 64000
   },
+  "gpt-5-codex": {
+    "contextWindow": 272000,
+    "maxOutputTokens": 64000
+  },
   "gpt-5.1": {
     "contextWindow": 272000,
     "maxOutputTokens": 64000
+  },
+  "gpt-5.1-codex-mini": {
+    "contextWindow": 400000,
+    "maxOutputTokens": 64000
+  },
+  "gpt-5.1-codex-max": {
+    "contextWindow": 400000,
+    "maxOutputTokens": 64000
+  },
+  "gpt-5.1-codex": {
+    "contextWindow": 400000,
+    "maxOutputTokens": 64000
+  },
+  "gpt-5.1-chat-latest": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 16384
   },
   "gpt-5.1-2025-11-13": {
     "contextWindow": 272000,
@@ -4290,6 +4466,14 @@
   "gpt-5.2": {
     "contextWindow": 272000,
     "maxOutputTokens": 64000
+  },
+  "gpt-5.2-codex": {
+    "contextWindow": 272000,
+    "maxOutputTokens": 64000
+  },
+  "gpt-5.2-chat-latest": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 16384
   },
   "gpt-5.2-2025-12-11": {
     "contextWindow": 272000,
@@ -4419,9 +4603,17 @@
     "contextWindow": 128000,
     "maxOutputTokens": 16384
   },
+  "gpt-5-chat-latest": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 16384
+  },
   "gpt-5.3-codex": {
     "contextWindow": 272000,
     "maxOutputTokens": 64000
+  },
+  "gpt-5.3-chat-latest": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 16384
   },
   "gpt-5-mini": {
     "contextWindow": 272000,
@@ -5295,6 +5487,10 @@
     "contextWindow": 1048576,
     "maxOutputTokens": 64000
   },
+  "nebius/deepseek-ai/DeepSeek-V4.1-Flash": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
   "nebius/MiniMaxAI/MiniMax-M2.5": {
     "contextWindow": 196608,
     "maxOutputTokens": 49152
@@ -5439,6 +5635,10 @@
     "contextWindow": 200000,
     "maxOutputTokens": 50000
   },
+  "o3-deep-research": {
+    "contextWindow": 200000,
+    "maxOutputTokens": 50000
+  },
   "o3-2025-04-16": {
     "contextWindow": 200000,
     "maxOutputTokens": 50000
@@ -5460,6 +5660,10 @@
     "maxOutputTokens": 50000
   },
   "o4-mini": {
+    "contextWindow": 200000,
+    "maxOutputTokens": 50000
+  },
+  "o4-mini-deep-research": {
     "contextWindow": 200000,
     "maxOutputTokens": 50000
   },
@@ -5779,6 +5983,10 @@
     "contextWindow": 1048576,
     "maxOutputTokens": 64000
   },
+  "openrouter/fireworks/ember-1": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
   "openrouter/google/gemini-2.5-flash": {
     "contextWindow": 1048576,
     "maxOutputTokens": 64000
@@ -5932,6 +6140,10 @@
     "maxOutputTokens": 64000
   },
   "openrouter/openai/gpt-oss-120b": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 32768
+  },
+  "openrouter/openai/gpt-oss-120b:batch": {
     "contextWindow": 131072,
     "maxOutputTokens": 32768
   },
@@ -8764,7 +8976,7 @@
     "maxOutputTokens": 8192
   },
   "gemini-2.5-flash-native-audio-latest": {
-    "contextWindow": 1048576,
+    "contextWindow": 131072,
     "maxOutputTokens": 8192
   },
   "gemini-2.5-flash-native-audio-preview-09-2025": {
@@ -8788,7 +9000,7 @@
     "maxOutputTokens": 32768
   },
   "gemini/gemini-2.5-flash-native-audio-latest": {
-    "contextWindow": 1048576,
+    "contextWindow": 131072,
     "maxOutputTokens": 8192
   },
   "gemini/gemini-2.5-flash-native-audio-preview-09-2025": {
@@ -8887,6 +9099,22 @@
     "contextWindow": 1000000,
     "maxOutputTokens": 64000
   },
+  "us.openai.gpt-5.4": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "global.openai.gpt-5.4": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "us.openai.gpt-5.5": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "global.openai.gpt-5.5": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
   "global.openai.gpt-5.6-luna": {
     "contextWindow": 1000000,
     "maxOutputTokens": 64000
@@ -8919,7 +9147,15 @@
     "contextWindow": 1050000,
     "maxOutputTokens": 64000
   },
+  "openai.gpt-6-sol": {
+    "contextWindow": 1050000,
+    "maxOutputTokens": 64000
+  },
   "global.openai.gpt-6-sol": {
+    "contextWindow": 1050000,
+    "maxOutputTokens": 64000
+  },
+  "openai.gpt-6-luna": {
     "contextWindow": 1050000,
     "maxOutputTokens": 64000
   },
@@ -9243,6 +9479,10 @@
     "contextWindow": 1048576,
     "maxOutputTokens": 64000
   },
+  "fireworks_ai/accounts/fireworks/routers/deepseek-v4p1-flash-us": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
   "fireworks_ai/accounts/fireworks/models/deepseek-v4-flash-vision-exp": {
     "contextWindow": 1048576,
     "maxOutputTokens": 64000
@@ -9256,6 +9496,10 @@
     "maxOutputTokens": 64000
   },
   "fireworks_ai/deepseek-v4p1-flash": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "fireworks_ai/deepseek-v4p1-flash-us": {
     "contextWindow": 1048576,
     "maxOutputTokens": 64000
   },
@@ -9935,7 +10179,15 @@
     "contextWindow": 1048576,
     "maxOutputTokens": 64000
   },
+  "fireworks_ai/accounts/fireworks/routers/glm-5p3-us": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
   "fireworks_ai/glm-5p3": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "fireworks_ai/glm-5p3-us": {
     "contextWindow": 1048576,
     "maxOutputTokens": 64000
   },
@@ -9951,7 +10203,15 @@
     "contextWindow": 1048576,
     "maxOutputTokens": 64000
   },
+  "fireworks_ai/accounts/fireworks/routers/glm-5p3-flash-us": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
   "fireworks_ai/glm-5p3-flash": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "fireworks_ai/glm-5p3-flash-us": {
     "contextWindow": 1048576,
     "maxOutputTokens": 64000
   },
@@ -9986,6 +10246,38 @@
   "azure_ai/kimi-k2.7-code": {
     "contextWindow": 262144,
     "maxOutputTokens": 64000
+  },
+  "azure_ai/deepseek-v4.1-flash": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "azure_ai/FW-DeepSeek-V4.1-Flash": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "azure_ai/FW-DeepSeek-V4-Flash": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "azure_ai/FW-GLM-5.3": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "azure_ai/FW-GLM-5.3-Flash": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "azure_ai/FW-GPT-OSS-120B": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 32768
+  },
+  "azure_ai/Cohere-command-a-plus-05-2026": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 32000
+  },
+  "azure_ai/mistral-medium-3-5": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 32000
   },
   "bedrock/us-gov-west-1/nvidia.nemotron-nano-3-30b": {
     "contextWindow": 262144,
@@ -10131,6 +10423,38 @@
     "contextWindow": 131072,
     "maxOutputTokens": 32768
   },
+  "bedrock_mantle/deepseek.v3.1": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/moonshotai.kimi-k2-thinking": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/qwen.qwen3-235b-a22b-2507": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/qwen.qwen3-32b": {
+    "contextWindow": 32000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/qwen.qwen3-coder-30b-a3b-instruct": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/qwen.qwen3-coder-480b-a35b-instruct": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 16000
+  },
+  "bedrock_mantle/qwen.qwen3-next-80b-a3b-instruct": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
+  "bedrock_mantle/qwen.qwen3-vl-235b-a22b-instruct": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 8000
+  },
   "azure/us-gov/gpt-5.1": {
     "contextWindow": 272000,
     "maxOutputTokens": 64000
@@ -10148,6 +10472,10 @@
     "maxOutputTokens": 8192
   },
   "gemini/lyria-3.5": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "gemini/lyria-realtime-exp": {
     "contextWindow": 1048576,
     "maxOutputTokens": 64000
   },
@@ -10271,6 +10599,10 @@
     "contextWindow": 1048576,
     "maxOutputTokens": 64000
   },
+  "baseten/zai-org/GLM-5.3-Fast": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
   "openrouter/minimax/minimax-m3": {
     "contextWindow": 1048576,
     "maxOutputTokens": 64000
@@ -10320,6 +10652,10 @@
     "maxOutputTokens": 64000
   },
   "openrouter/qwen/qwen3.8-max-0902": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "openrouter/qwen/qwen3.8-max-prime": {
     "contextWindow": 1000000,
     "maxOutputTokens": 64000
   },
@@ -10577,7 +10913,7 @@
   },
   "openrouter/qwen/qwen3-vl-30b-a3b-instruct": {
     "contextWindow": 262144,
-    "maxOutputTokens": 32768
+    "maxOutputTokens": 16384
   },
   "openrouter/openai/gpt-5-pro": {
     "contextWindow": 400000,
@@ -10609,7 +10945,7 @@
   },
   "openrouter/qwen/qwen3-next-80b-a3b-instruct": {
     "contextWindow": 262144,
-    "maxOutputTokens": 16384
+    "maxOutputTokens": 64000
   },
   "openrouter/qwen/qwen-plus-2025-07-28": {
     "contextWindow": 1000000,
@@ -10641,7 +10977,7 @@
   },
   "openrouter/qwen/qwen3-30b-a3b-instruct-2507": {
     "contextWindow": 262144,
-    "maxOutputTokens": 32000
+    "maxOutputTokens": 64000
   },
   "openrouter/z-ai/glm-4.5": {
     "contextWindow": 131072,
@@ -10681,7 +11017,7 @@
   },
   "openrouter/qwen/qwen3-30b-a3b": {
     "contextWindow": 131072,
-    "maxOutputTokens": 16384
+    "maxOutputTokens": 8192
   },
   "openrouter/qwen/qwen3-8b": {
     "contextWindow": 131072,
@@ -10803,9 +11139,177 @@
     "contextWindow": 128000,
     "maxOutputTokens": 4096
   },
+  "together_ai/arcee-ai/trinity-mini": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 32000
+  },
   "vertex_ai/gemini-omni-1.1-flash-preview": {
     "contextWindow": 57920,
     "maxOutputTokens": 14480
+  },
+  "together_ai/meta-llama/Llama-3.2-1B-Instruct": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 32768
+  },
+  "together_ai/meta-llama/Llama-3.2-3B-Instruct": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 32768
+  },
+  "together_ai/Qwen/Qwen2-1.5B-Instruct": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "together_ai/Qwen/Qwen2.5-14B-Instruct": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "together_ai/Qwen/Qwen2.5-72B-Instruct": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "together_ai/meta-llama/Meta-Llama-3.1-8B": {
+    "contextWindow": 16384,
+    "maxOutputTokens": 4096
+  },
+  "together_ai/NousResearch/Nous-Hermes-2-Mixtral-8x7B-DPO": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "together_ai/Qwen/QwQ-32B": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 32768
+  },
+  "together_ai/Qwen/Qwen2-72B-Instruct": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "together_ai/Qwen/Qwen2-VL-72B-Instruct": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "together_ai/Qwen/Qwen2.5-72B-Instruct-Turbo": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 32768
+  },
+  "together_ai/Qwen/Qwen2.5-Coder-32B-Instruct": {
+    "contextWindow": 16384,
+    "maxOutputTokens": 4096
+  },
+  "together_ai/Qwen/Qwen2.5-VL-72B-Instruct": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "together_ai/Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8": {
+    "contextWindow": 262144,
+    "maxOutputTokens": 64000
+  },
+  "together_ai/Qwen/Qwen3-Coder-Next-FP8": {
+    "contextWindow": 262144,
+    "maxOutputTokens": 64000
+  },
+  "together_ai/Qwen/Qwen3-Next-80B-A3B-Instruct": {
+    "contextWindow": 262144,
+    "maxOutputTokens": 64000
+  },
+  "together_ai/Qwen/Qwen3-Next-80B-A3B-Thinking": {
+    "contextWindow": 262144,
+    "maxOutputTokens": 64000
+  },
+  "together_ai/Qwen/Qwen3-VL-32B-Instruct": {
+    "contextWindow": 262144,
+    "maxOutputTokens": 64000
+  },
+  "together_ai/Qwen/Qwen3-VL-8B-Instruct": {
+    "contextWindow": 262144,
+    "maxOutputTokens": 64000
+  },
+  "together_ai/Qwen/Qwen3.5-397B-A17B": {
+    "contextWindow": 262144,
+    "maxOutputTokens": 64000
+  },
+  "together_ai/deepseek-ai/DeepSeek-R1-Distill-Llama-70B": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 32768
+  },
+  "together_ai/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 32768
+  },
+  "together_ai/deepseek-ai/DeepSeek-R1-Distill-Qwen-14B": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 32768
+  },
+  "together_ai/deepseek-ai/DeepSeek-V3.1": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 32768
+  },
+  "together_ai/deepseek-ai/deepseek-coder-33b-instruct": {
+    "contextWindow": 16384,
+    "maxOutputTokens": 4096
+  },
+  "together_ai/google/gemma-4-31B-it": {
+    "contextWindow": 262144,
+    "maxOutputTokens": 64000
+  },
+  "together_ai/meta-llama/Llama-4-Scout-17B-16E-Instruct": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "together_ai/meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 32768
+  },
+  "together_ai/meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 32768
+  },
+  "together_ai/mistralai/Mistral-7B-Instruct-v0.1": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "together_ai/mistralai/Mistral-Small-24B-Instruct-2501": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "together_ai/mistralai/Mixtral-8x7B-Instruct-v0.1": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "together_ai/moonshotai/Kimi-K2.6": {
+    "contextWindow": 262144,
+    "maxOutputTokens": 64000
+  },
+  "together_ai/moonshotai/Kimi-K2.7-Code": {
+    "contextWindow": 262144,
+    "maxOutputTokens": 64000
+  },
+  "together_ai/nvidia/Llama-3.1-Nemotron-70B-Instruct-HF": {
+    "contextWindow": 32768,
+    "maxOutputTokens": 8192
+  },
+  "together_ai/nvidia/nemotron-3-ultra-550b-a55b": {
+    "contextWindow": 512288,
+    "maxOutputTokens": 64000
+  },
+  "together_ai/openai/gpt-oss-20b": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 32768
+  },
+  "together_ai/zai-org/GLM-4.5-Air-FP8": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 32768
+  },
+  "together_ai/zai-org/GLM-4.7": {
+    "contextWindow": 202752,
+    "maxOutputTokens": 50688
+  },
+  "together_ai/zai-org/GLM-5": {
+    "contextWindow": 202752,
+    "maxOutputTokens": 50688
+  },
+  "together_ai/zai-org/GLM-5.1": {
+    "contextWindow": 202752,
+    "maxOutputTokens": 50688
   },
   "azure/eu/gpt-6-luna": {
     "contextWindow": 922000,
@@ -10822,6 +11326,18 @@
   "gemini/gemini-3.8-live-extended-thinking": {
     "contextWindow": 131072,
     "maxOutputTokens": 32768
+  },
+  "azure/gpt-realtime-2": {
+    "contextWindow": 32000,
+    "maxOutputTokens": 4096
+  },
+  "azure/gpt-live-transcribe": {
+    "contextWindow": 32000,
+    "maxOutputTokens": 4096
+  },
+  "azure/gpt-realtime-translate": {
+    "contextWindow": 32000,
+    "maxOutputTokens": 4096
   },
   "aihubmix/agnes-2.5-flash": {
     "contextWindow": 512000,
@@ -11086,6 +11602,18 @@
   "openrouter/typesafe/jev-1.13": {
     "contextWindow": 32000,
     "maxOutputTokens": 8000
+  },
+  "openrouter/typesafe/jev-router": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "wandb/deepseek-ai/DeepSeek-V4.1-Flash": {
+    "contextWindow": 1049000,
+    "maxOutputTokens": 64000
+  },
+  "wandb/google/gemma-4-26B-A4B-it": {
+    "contextWindow": 262000,
+    "maxOutputTokens": 64000
   },
   "openrouter/~anthropic/claude-fable-latest": {
     "contextWindow": 1000000,
@@ -11459,6 +11987,10 @@
     "contextWindow": 262144,
     "maxOutputTokens": 64000
   },
+  "openrouter/mistralai/mistral-large-2512": {
+    "contextWindow": 262144,
+    "maxOutputTokens": 64000
+  },
   "openrouter/mistralai/mistral-large-2512:batch": {
     "contextWindow": 262144,
     "maxOutputTokens": 64000
@@ -11819,6 +12351,10 @@
     "contextWindow": 262144,
     "maxOutputTokens": 32768
   },
+  "openrouter/z-ai/glm-5.3-prime": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
   "openrouter/z-ai/glm-5.3-flashx": {
     "contextWindow": 1048576,
     "maxOutputTokens": 64000
@@ -12007,6 +12543,14 @@
     "contextWindow": 256000,
     "maxOutputTokens": 64000
   },
+  "fireworks_ai/accounts/fireworks/models/deepseek-v4-pro": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
+  },
+  "fireworks_ai/accounts/fireworks/models/minimax-m2p7": {
+    "contextWindow": 196608,
+    "maxOutputTokens": 49152
+  },
   "openrouter/anthropic/claude-opus-5.5:batch": {
     "contextWindow": 1000000,
     "maxOutputTokens": 64000
@@ -12043,7 +12587,143 @@
     "contextWindow": 1000000,
     "maxOutputTokens": 64000
   },
+  "openrouter/perceptron/perceptron-mk1.5": {
+    "contextWindow": 36864,
+    "maxOutputTokens": 8192
+  },
   "vertex_ai/zai-org/glm-5.2-maas": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "vertex_ai/meta/llama-3.3-70b-instruct-maas": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8192
+  },
+  "anthropic.claude-mythos-5-1": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "global.anthropic.claude-mythos-5-1": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "us.anthropic.claude-mythos-5-1": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "us.anthropic.claude-mythos-5": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "apac.anthropic.claude-fable-5": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "au.anthropic.claude-fable-5": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "apac.anthropic.claude-opus-4-7": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "apac.anthropic.claude-opus-4-8": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "apac.anthropic.claude-opus-5": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "apac.anthropic.claude-opus-5-5": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "apac.anthropic.claude-sonnet-4-6": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "apac.anthropic.claude-sonnet-5": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "us.anthropic.claude-mythos-preview": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "apac.anthropic.claude-mythos-preview": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "au.anthropic.claude-mythos-preview": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "deepseek.r1-v1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 8192
+  },
+  "mistral.pixtral-large-2502-v1:0": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 16384
+  },
+  "azure_ai/MAI-Cyber-1-Flash": {
+    "contextWindow": 256000,
+    "maxOutputTokens": 64000
+  },
+  "anthropic.claude-sonnet-5-5": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "apac.anthropic.claude-sonnet-5-5": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "au.anthropic.claude-sonnet-5-5": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "azure_ai/claude-sonnet-5-5": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/us-gov-east-1/anthropic.claude-sonnet-5-5": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock/us-gov-west-1/anthropic.claude-sonnet-5-5": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "eu.anthropic.claude-sonnet-5-5": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "global.anthropic.claude-sonnet-5-5": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "jp.anthropic.claude-sonnet-5-5": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "openrouter/anthropic/claude-sonnet-5.5": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "us-gov.anthropic.claude-sonnet-5-5": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "us.anthropic.claude-sonnet-5-5": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "vertex_ai/claude-sonnet-5-5": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "vertex_ai/claude-sonnet-5-5@default": {
     "contextWindow": 1000000,
     "maxOutputTokens": 64000
   }

@@ -29,7 +29,7 @@ The last two look like configuration but aren't all rare: the agent edits core m
 
 **It is not Anthropic-specific.** OpenAI, xAI and OpenRouter's non-Claude routes cache the longest matching prefix automatically, so per-turn state in the system message would end their cached prefix where the transcript starts too.
 
-**It breaks preserved thinking.** On Claude Opus 5.5 and Fable 5.1, a thinking block's signature binds the top-level `system` prompt, the tool set and every earlier message; replaying the block after any of them changed is a 400 for accounts created on or after 2026-08-31 (older accounts opt in). A system prompt that changes every turn is that edit, on every turn after the first.
+**It breaks preserved thinking.** On Claude Opus 5.5, Sonnet 5.5 and Fable 5.1, a thinking block's signature binds the top-level `system` prompt, the tool set and every earlier message; replaying the block after any of them changed is a 400 for accounts created on or after 2026-08-31 (older accounts opt in). A system prompt that changes every turn is that edit, on every turn after the first.
 
 **Caching the transcript would break compaction's fast path.** Anthropic's `usage.input_tokens` counts only the tokens after the last breakpoint. The loop sums it across iterations and persists it as `lastMessageInputTokens`, which `shouldSkipCounting` (`src/agent/context.ts`) reads to decide whether compaction Strategies 1–3 run. With the transcript cached, the value collapses to the uncached tail, the fast path skips the budget strategies, and the conversation grows until the API rejects it. The adapters already disagree: the OpenAI-compatible adapter reports `prompt_tokens`, which includes cached tokens.
 
@@ -46,7 +46,7 @@ Surveyed September 2026.
 | Top-level `cache_control` ("automatic caching") places the breakpoint on the last cacheable block and moves it forward as the conversation grows; accepts `ttl: "1h"`; uses one of the four breakpoint slots; available on every platform except legacy Bedrock. | Anthropic prompt-caching docs |
 | A breakpoint walks back at most 20 positions looking for a prior write; a run of `tool_use` blocks and a run of `tool_result` blocks each count as one position. | Anthropic prompt-caching docs |
 | Longer TTLs must precede shorter ones in a request. Writes cost 1.25× (5 min) or 2× (1 h); reads 0.1×, 0.05× on Opus 5.5, 0.025× on Fable 5.1 and Mythos 5.1. A read refreshes the entry at no cost. The TTL runs from the start of the request. | Anthropic prompt-caching docs |
-| Minimum cacheable prefix: 512 tokens on Opus 5.5 and Opus 5, 1,024 on Sonnet 5, 4,096 on Haiku 4.5. It counts the whole prefix, tools and system included. | Anthropic prompt-caching docs |
+| Minimum cacheable prefix: 512 tokens on Opus 5.5, Opus 5 and Sonnet 5.5, 1,024 on Sonnet 5, 4,096 on Haiku 4.5. It counts the whole prefix, tools and system included. | Anthropic prompt-caching docs |
 | Use the 1-hour TTL "when storing a long chat conversation where the user may not respond within 5 minutes." | Anthropic prompt-caching docs |
 | Anthropic `input_tokens` is only the tokens after the last breakpoint; total = `input_tokens + cache_creation_input_tokens + cache_read_input_tokens`. | Anthropic prompt-caching docs |
 | `gen_ai.usage.input_tokens` "SHOULD include all types of input tokens, including cached tokens"; the Anthropic mapping sums the three fields. `cache_creation` was renamed `cache_write` (Development stability). | OpenTelemetry GenAI semantic conventions |
@@ -187,7 +187,7 @@ Either is small next to re-reading the transcript itself — about $0.012 per tu
 
 The deciding factor is the first: the persisted layout's costs are soft and bounded by deduplication and compaction, while the trailing layout fails hard the moment the preserved-thinking check applies.
 
-**A later path to both** `[research]`. On Opus 5, Opus 5.5 and Fable, a turn-scoped mid-conversation system message (`clear_at: "next_user_message"`, beta `mid-conversation-system-clear-at-2026-08-21`) renders for one turn and then stays in the transcript cleared, costing no input tokens. That is a trailing block without the history edit and without accumulation. It is not available on Sonnet 5, where mid-conversation system messages don't exist at all; it can't carry `cache_control`, so the breakpoint goes on the preceding user turn; and it gives recalled memories operator authority, which widens the injection surface of stored text that originated in web pages or tool output.
+**A later path to both** `[research]`. On Opus 5, Opus 5.5, Sonnet 5.5 and Fable, a turn-scoped mid-conversation system message (`clear_at: "next_user_message"`, beta `mid-conversation-system-clear-at-2026-08-21`) renders for one turn and then stays in the transcript cleared, costing no input tokens. That is a trailing block without the history edit and without accumulation. It is not available on Sonnet 5, where mid-conversation system messages don't exist at all; it can't carry `cache_control`, so the breakpoint goes on the preceding user turn; and it gives recalled memories operator authority, which widens the injection surface of stored text that originated in web pages or tool output.
 
 ## System Prompt Snapshot `[confirmed]`
 
@@ -230,7 +230,7 @@ system_prompt_snapshots
 
 `opened_by` alone identifies an epoch, since a message belongs to one conversation; pairing it with the conversation makes the unique both the insert's conflict target and the read path for the current epoch, the snapshot opened latest in the transcript. Rows are immutable. Owned by `agent/store/`.
 
-On Opus 5, 5.5 and Fable, a rule change could instead be a mid-conversation `role: "system"` message, which has operator authority and avoids the rewrite. Sonnet 5 has none, so an epoch is the one path that works on every model.
+On Opus 5, 5.5, Sonnet 5.5 and Fable, a rule change could instead be a mid-conversation `role: "system"` message, which has operator authority and avoids the rewrite. Sonnet 5 has none, so an epoch is the one path that works on every model.
 
 ## One Prefix per Conversation `[proposed]`
 
@@ -240,7 +240,7 @@ Stage turns instead send the conversation's snapshot and the same frozen tool de
 
 Keeping every tool in every request and restricting at dispatch is what Claude Code (plan mode as tools), Manus ("mask, don't remove"), OpenAI (`allowed_tools`) and Anthropic's guidance describe ([Research Base](#research-base-research)).
 
-Anthropic has no per-request `allowed_tools`, and changing `tool_choice` invalidates the messages cache. Its append-only alternative is mid-conversation tool changes: `tool_addition` / `tool_removal` blocks in a `role: "system"` message withdraw or re-offer a declared tool without touching the cached prefix (beta `inline-tools-2026-09-15`; the older `mid-conversation-tool-changes-2026-07-01` still works by reference). They exist only on models with mid-conversation system messages, not Sonnet 5, so dispatch enforcement is the portable path; on Opus 5, 5.5 and Fable a stage turn can also withdraw its disallowed tools this way. On OpenAI routes the adapter can send `allowed_tools` as well.
+Anthropic has no per-request `allowed_tools`, and changing `tool_choice` invalidates the messages cache. Its append-only alternative is mid-conversation tool changes: `tool_addition` / `tool_removal` blocks in a `role: "system"` message withdraw or re-offer a declared tool without touching the cached prefix (beta `inline-tools-2026-09-15`; the older `mid-conversation-tool-changes-2026-07-01` still works by reference). They exist only on models with mid-conversation system messages, not Sonnet 5, so dispatch enforcement is the portable path; on Opus 5, 5.5, Sonnet 5.5 and Fable a stage turn can also withdraw its disallowed tools this way. On OpenAI routes the adapter can send `allowed_tools` as well.
 
 ## Canonical Tool Inputs `[confirmed]`
 

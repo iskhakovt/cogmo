@@ -55,6 +55,19 @@ describe("lookupLitellm", () => {
     expect(hit?.maxOutputTokens).toBeGreaterThan(0);
   });
 
+  // Anthropic's current lineup, plus Sonnet 5, which existing installs'
+  // default profiles still run. A missing id falls to the 128k/4k default and
+  // compacts a 1M-context model at an eighth of its window.
+  it.each([
+    ["claude-fable-5-1", 1_000_000, 64_000],
+    ["claude-opus-5-5", 1_000_000, 64_000],
+    ["claude-sonnet-5-5", 1_000_000, 64_000],
+    ["claude-sonnet-5", 1_000_000, 64_000],
+    ["claude-haiku-4-5", 200_000, 50_000],
+  ])("resolves %s's limits", (model, contextWindow, maxOutputTokens) => {
+    expect(lookupLitellm(model)).toEqual({ contextWindow, maxOutputTokens });
+  });
+
   it("returns undefined for a fully unknown model id", () => {
     expect(lookupLitellm("totally-made-up-model-xyz-2099")).toBeUndefined();
   });
