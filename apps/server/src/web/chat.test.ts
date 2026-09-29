@@ -8,11 +8,9 @@ import { mock } from "vitest-mock-extended";
 import { expectDefined } from "../test/assertions.js";
 import { mockTransportDeep } from "../test/factories.js";
 import { WebStreamRegistry } from "../transport/adapters/web/stream-registry.js";
-import { handleChat, serializeFrame } from "./chat.js";
+import { type ChatRouteDeps, handleChat, SessionCloses, serializeFrame } from "./chat.js";
 
 const OWNER = "web-owner";
-/** For the cases that never open a stream. */
-const NO_SHUTDOWN = new AbortController().signal;
 
 /** A minimal GET-stream request; `destroyed` simulates a disconnect during the resume await. */
 function streamReq(destroyed = false): IncomingMessage {
@@ -23,22 +21,42 @@ function streamReq(destroyed = false): IncomingMessage {
   });
 }
 
+/** A live response: `end()` on the mock emits no `close`. */
+function liveRes() {
+  return mock<ServerResponse>({ destroyed: false, writableEnded: false });
+}
+
+/** Route deps with a never-aborted shutdown signal unless overridden. */
+function routeDeps(overrides: Partial<ChatRouteDeps> = {}): ChatRouteDeps {
+  return {
+    transport: mockTransportDeep({}), // resumeConversation default -> ok, id "session-resumed"
+    registry: new WebStreamRegistry(),
+    ownerHandle: OWNER,
+    shutdownSignal: new AbortController().signal,
+    sessionCloses: new SessionCloses(),
+    ...overrides,
+  };
+}
+
+/** The listener the stream route registered for the response's `close`. */
+function closeListener(res: ReturnType<typeof liveRes>): () => void {
+  const [, listener] = expectDefined(
+    res.on.mock.calls.find(([event]) => event === "close"),
+    "close listener",
+  );
+  return listener;
+}
+
 describe("handleChat — stream route", () => {
   it("closes the session and skips the stream when the client vanished mid-resume", async () => {
-    const registry = new WebStreamRegistry();
-    const transport = mockTransportDeep({}); // resumeConversation default -> ok, id "session-resumed"
+    const deps = routeDeps();
     const res = mock<ServerResponse>();
 
-    await handleChat(streamReq(true), res, "/api/chat/conv-1/stream", {
-      transport,
-      registry,
-      ownerHandle: OWNER,
-      shutdownSignal: NO_SHUTDOWN,
-    });
+    await handleChat(streamReq(true), res, "/api/chat/conv-1/stream", deps);
 
-    expect(transport.closeSession).toHaveBeenCalledWith("session-resumed");
+    expect(deps.transport.closeSession).toHaveBeenCalledWith("session-resumed");
     expect(res.writeHead).not.toHaveBeenCalled(); // never opened the stream
-    expect(registry.size).toBe(0);
+    expect(deps.registry.size).toBe(0);
   });
 
   it("maps a not-found conversation to 404", async () => {
@@ -48,12 +66,7 @@ describe("handleChat — stream route", () => {
         .fn()
         .mockResolvedValue(err({ code: "conversation_not_found" as const })),
     });
-    await handleChat(streamReq(), res, "/api/chat/conv-1/stream", {
-      transport,
-      registry: new WebStreamRegistry(),
-      ownerHandle: OWNER,
-      shutdownSignal: NO_SHUTDOWN,
-    });
+    await handleChat(streamReq(), res, "/api/chat/conv-1/stream", routeDeps({ transport }));
     expect(res.writeHead).toHaveBeenCalledWith(404, expect.anything());
   });
 
@@ -64,37 +77,27 @@ describe("handleChat — stream route", () => {
         .fn()
         .mockResolvedValue(err({ code: "access_denied" as const, reason: "not owned" })),
     });
-    await handleChat(streamReq(), res, "/api/chat/conv-1/stream", {
-      transport,
-      registry: new WebStreamRegistry(),
-      ownerHandle: OWNER,
-      shutdownSignal: NO_SHUTDOWN,
-    });
+    await handleChat(streamReq(), res, "/api/chat/conv-1/stream", routeDeps({ transport }));
     expect(res.writeHead).toHaveBeenCalledWith(403, expect.anything());
   });
 
-  it("ends the stream, stops the heartbeat and closes the session on shutdown", async () => {
+  it("ends the stream, stops the heartbeat and closes the session once on shutdown", async () => {
     vi.useFakeTimers();
     try {
-      const registry = new WebStreamRegistry();
-      const transport = mockTransportDeep({});
-      // A live response: `end()` on the mock emits no `close`, so the shutdown
-      // path has to tear down on its own.
-      const res = mock<ServerResponse>({ destroyed: false, writableEnded: false });
       const shutdown = new AbortController();
-      await handleChat(streamReq(), res, "/api/chat/conv-1/stream", {
-        transport,
-        registry,
-        ownerHandle: OWNER,
-        shutdownSignal: shutdown.signal,
-      });
-      expect(registry.size).toBe(1);
+      const deps = routeDeps({ shutdownSignal: shutdown.signal });
+      const res = liveRes();
+      await handleChat(streamReq(), res, "/api/chat/conv-1/stream", deps);
+      expect(deps.registry.size).toBe(1);
 
       shutdown.abort();
+      // A real response emits `close` once `end()` completes.
+      closeListener(res)();
 
       expect(res.end).toHaveBeenCalledTimes(1);
-      expect(registry.size).toBe(0);
-      expect(transport.closeSession).toHaveBeenCalledWith("session-resumed");
+      expect(deps.registry.size).toBe(0);
+      expect(deps.transport.closeSession).toHaveBeenCalledTimes(1);
+      expect(deps.transport.closeSession).toHaveBeenCalledWith("session-resumed");
       res.write.mockClear();
       vi.advanceTimersByTime(60_000);
       expect(res.write).not.toHaveBeenCalled();
@@ -104,44 +107,53 @@ describe("handleChat — stream route", () => {
   });
 
   it("refuses a stream that resumes after shutdown began", async () => {
-    const registry = new WebStreamRegistry();
-    const transport = mockTransportDeep({});
-    const res = mock<ServerResponse>({ destroyed: false, writableEnded: false });
+    const deps = routeDeps({ shutdownSignal: AbortSignal.abort() });
+    const res = liveRes();
 
-    await handleChat(streamReq(), res, "/api/chat/conv-1/stream", {
-      transport,
-      registry,
-      ownerHandle: OWNER,
-      shutdownSignal: AbortSignal.abort(),
-    });
+    await handleChat(streamReq(), res, "/api/chat/conv-1/stream", deps);
 
     expect(res.writeHead).toHaveBeenCalledWith(503, expect.anything());
-    expect(transport.closeSession).toHaveBeenCalledWith("session-resumed");
-    expect(registry.size).toBe(0);
+    expect(deps.transport.closeSession).toHaveBeenCalledWith("session-resumed");
+    expect(deps.registry.size).toBe(0);
   });
 
   it("stops listening for shutdown once the client disconnects", async () => {
-    const registry = new WebStreamRegistry();
-    const transport = mockTransportDeep({});
-    const res = mock<ServerResponse>({ destroyed: false, writableEnded: false });
     const shutdown = new AbortController();
-    await handleChat(streamReq(), res, "/api/chat/conv-1/stream", {
-      transport,
-      registry,
-      ownerHandle: OWNER,
-      shutdownSignal: shutdown.signal,
-    });
-    const [, onClose] = expectDefined(
-      res.on.mock.calls.find(([event]) => event === "close"),
-      "close listener",
-    );
+    const deps = routeDeps({ shutdownSignal: shutdown.signal });
+    const res = liveRes();
+    await handleChat(streamReq(), res, "/api/chat/conv-1/stream", deps);
 
-    onClose();
+    closeListener(res)();
     shutdown.abort();
 
     expect(res.end).not.toHaveBeenCalled();
-    expect(transport.closeSession).toHaveBeenCalledTimes(1);
-    expect(registry.size).toBe(0);
+    expect(deps.transport.closeSession).toHaveBeenCalledTimes(1);
+    expect(deps.registry.size).toBe(0);
+  });
+});
+
+describe("SessionCloses", () => {
+  it("settles once every close in flight has, a failed one included", async () => {
+    const first = Promise.withResolvers<void>();
+    const second = Promise.withResolvers<void>();
+    const transport = mockTransportDeep({
+      closeSession: vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise),
+    });
+    const closes = new SessionCloses();
+    closes.start(transport, "session-a");
+    closes.start(transport, "session-b");
+    let settled = false;
+
+    const settling = closes.settled().then(() => {
+      settled = true;
+    });
+    first.resolve();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(settled).toBe(false);
+    second.reject(new Error("db gone"));
+
+    await settling;
+    expect(settled).toBe(true);
   });
 });
 

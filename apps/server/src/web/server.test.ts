@@ -460,7 +460,31 @@ describe("web chat routes", () => {
     let chunk = await reader.read();
     while (!chunk.done) chunk = await reader.read();
     expect(chatRegistry.size).toBe(0);
+    expect(transport.closeSession).toHaveBeenCalledTimes(1);
     expect(transport.closeSession).toHaveBeenCalledWith("session-resumed");
+  });
+
+  it("close() waits for the session closes of the streams it ends", async () => {
+    const sessionClosed = Promise.withResolvers<void>();
+    await start({ closeSession: vi.fn(() => sessionClosed.promise) });
+    const cookie = await login();
+    const res = await fetch(`${chatBase}/api/chat/conv-1/stream?tab=tab-1`, {
+      headers: { cookie, "sec-fetch-site": "same-origin" },
+    });
+    await expectDefined(res.body, "sse body").getReader().read();
+    let closed = false;
+
+    const closing = chatWeb.close(3_000).then(() => {
+      closed = true;
+    });
+    await vi.waitFor(() => expect(chatServer.listening).toBe(false));
+    // Well past the server closing, which takes one reap interval.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+
+    expect(transport.closeSession).toHaveBeenCalledWith("session-resumed");
+    expect(closed).toBe(false);
+    sessionClosed.resolve();
+    await resolvesWithin(closing, 2_500, "close");
   });
 
   it("close() returns once a request that finishes during the drain has answered", async () => {

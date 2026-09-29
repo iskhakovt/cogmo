@@ -13,7 +13,7 @@ import {
 } from "./auth/cookies.js";
 import { type AuthStrategy, authenticate, cookieStrategy, csrfReject } from "./auth/gate.js";
 import { readJsonBody, sendBodyError } from "./body.js";
-import { handleChat } from "./chat.js";
+import { handleChat, SessionCloses } from "./chat.js";
 import { writeHealth } from "./health-route.js";
 import { OWNER_HANDLE } from "./rpc/context.js";
 import { handleRpc } from "./rpc/handler.js";
@@ -96,6 +96,7 @@ const LoginBody = z.object({ token: z.string() });
 export function createWebServer(deps: CreateWebServerDeps): WebServer {
   // Aborted by `close()`: ends the chat streams, which never end on their own.
   const shutdown = new AbortController();
+  const sessionCloses = new SessionCloses();
   const cookieName = sessionCookieName(deps.cookieSecure);
   const serveStatic = createStaticHandler(deps.staticRoot);
 
@@ -236,6 +237,7 @@ export function createWebServer(deps: CreateWebServerDeps): WebServer {
           registry: deps.webStreamRegistry,
           ownerHandle: identity.platformUserHandle,
           shutdownSignal: shutdown.signal,
+          sessionCloses,
         });
         return;
       }
@@ -262,7 +264,15 @@ export function createWebServer(deps: CreateWebServerDeps): WebServer {
       else res.end();
     });
   });
-  return { server, close: (drainMs) => closeWebServer(server, shutdown, drainMs) };
+  return {
+    server,
+    async close(drainMs) {
+      shutdown.abort();
+      await drain(server, drainMs);
+      // Ending the streams started their session closes; so may the drained requests.
+      await sessionCloses.settled();
+    },
+  };
 }
 
 /** How often the drain closes connections whose request has finished. */
@@ -272,17 +282,11 @@ const DRAIN_REAP_INTERVAL_MS = 50;
  * `close()` refuses new connections and closes the idle ones, but only those
  * idle when it is called: a connection whose request finishes during the
  * drain stays open until its keep-alive timeout. So the drain calls
- * `closeIdleConnections()` on an interval. The abort ends the chat streams
- * first; a request still open after `drainMs` has its connection closed,
- * with `closeAllConnections()` called after `close()` as Node's docs
- * recommend.
+ * `closeIdleConnections()` on an interval. A request still open after
+ * `drainMs` has its connection closed, with `closeAllConnections()` called
+ * after `close()` as Node's docs recommend.
  */
-async function closeWebServer(
-  server: Server,
-  shutdown: AbortController,
-  drainMs: number,
-): Promise<void> {
-  shutdown.abort();
+async function drain(server: Server, drainMs: number): Promise<void> {
   const closed = new Promise<void>((resolve) => server.close(() => resolve()));
   const reaper = setInterval(() => server.closeIdleConnections(), DRAIN_REAP_INTERVAL_MS);
   try {
