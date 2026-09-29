@@ -5,6 +5,7 @@ import { mock } from "vitest-mock-extended";
 import { expectDefined } from "../test/assertions.js";
 import { ExecDisposedError, ExecTimeoutError } from "./exec.js";
 import { type ExecBackend, type ExecSink, runExec, TEARDOWN_TIMEOUT_MS } from "./exec-run.js";
+import type { ExecOutcome } from "./exec-state.js";
 
 /**
  * A backend the test drives: `start`, `fetchExit` and `teardown` each wait
@@ -244,6 +245,10 @@ describe("runExec", () => {
     f.started.resolve({});
     const handle = await runExec(f.backend, { idleTimeoutMs: 100 });
     handle.stderr.resume();
+    let outcome: ExecOutcome | undefined;
+    void handle.exited.then((o) => {
+      outcome = o;
+    });
     f.sink().ended();
     // Draining: the backend writes what it drains (the PTY's stderr) with
     // no idle restart, so the fetch keeps one idle window.
@@ -252,9 +257,7 @@ describe("runExec", () => {
       f.sink().output("stderr", Buffer.from("drained"));
     }
     await vi.advanceTimersByTimeAsync(0);
-    expect(await handle.exited).toEqual(
-      err({ kind: "timed_out", deadline: "idle", timeoutMs: 100 }),
-    );
+    expect(outcome).toEqual(err({ kind: "timed_out", deadline: "idle", timeoutMs: 100 }));
   });
 
   it("restarts the idle deadline on every chunk", async () => {
@@ -291,6 +294,8 @@ describe("runExec", () => {
 
   it("never starts for a signal that aborted already", async () => {
     const f = fakeBackend();
+    // A start, were one made, would hand over a handle at once.
+    f.started.resolve({});
     const controller = new AbortController();
     controller.abort();
     await expect(runExec(f.backend, { signal: controller.signal })).rejects.toBeInstanceOf(

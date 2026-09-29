@@ -516,7 +516,7 @@ describe("startExecPty", () => {
   });
 
   describe("an abnormal (1006) close", () => {
-    async function startedPty(ptyCtrl: FakePtyControl) {
+    async function startedPty(ptyCtrl: FakePtyControl, opts: { timeoutMs?: number } = {}) {
       const fsCtrl = fakeFs();
       const procCtrl = fakeProcess(ptyCtrl);
       const handle = await startExecPty({
@@ -524,7 +524,7 @@ describe("startExecPty", () => {
         fs: fsCtrl.fs,
         sessionIdPrefix: "p",
         cmd: ["sleep", "999"],
-        opts: { attachStdin: true },
+        opts: { attachStdin: true, ...opts },
         random: deterministicRandom(),
       });
       handle.stdin?.end();
@@ -536,7 +536,8 @@ describe("startExecPty", () => {
       vi.mocked(ptyCtrl.pty.sendInput).mockImplementation(async () => {
         ptyCtrl.closeAbnormally();
       });
-      const handle = await startedPty(ptyCtrl);
+      // A `wait()` that never settles would leave only the deadline.
+      const handle = await startedPty(ptyCtrl, { timeoutMs: 1_000 });
       const exited = await handle.exited;
       expect(exited.isErr() && exited.error.kind).toBe("no_exit_code");
     });
