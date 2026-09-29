@@ -337,7 +337,7 @@ A digest chain runs over the provider-neutral request with `harness` removed, so
   - `base` is `h₀`, the prompt and tools the head was built under.
   - `historyStart` is the first message after the summary the view started from.
   - The digest is the memoized head of the row's request, extended by every message the loop appended after that request, the row included.
-  - `status` is `intact`; `compacted` when the turn's own Strategy 3 or unstored summary rewrote its view; or `diverged` when the turn saw an in-turn difference or a server-reported mismatch. The adapter surfaces `input_transformations` on the response; `llm-iter<N>` counts them in its body and returns them in its outcome with the head, and `persist-new-messages` sets `diverged` from the outcomes.
+  - `status` is `intact`; `compacted` when the turn's own Strategy 3 or unstored summary rewrote its view; or `diverged` when the turn saw an in-turn difference or a server-reported mismatch. A turn that is both is `compacted`, as the epoch rule records `compaction` before `prefix_violation`; its divergence was already counted where it was seen. The adapter surfaces `input_transformations` on the response; `llm-iter<N>` counts them in its body and returns them in its outcome with the head, and `persist-new-messages` sets `diverged` from the outcomes.
 
   `load-turn-transcript` returns the latest head.
 - **What the check compares.** The turn renders the history it loaded, before its own compaction, under the current epoch's prompt and render state (the thinking strip, and the attachment cutoff once Rollout step 4 lands), and the frozen tools. When the head's `base` and `historyStart` equal the turn's and its status is `intact`, the chain at position `length` must equal `digest`.
