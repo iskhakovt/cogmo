@@ -3302,6 +3302,93 @@ describe("createHandleMessage", () => {
 
       expect(content).toBe(wrapped);
     });
+
+    async function runTurn(content: InboundContent, overrides: Partial<HandleMessageDeps> = {}) {
+      const memory = mockMemoryProvider();
+      const deps = mockDeps({
+        memory,
+        transportStore: mockTransportStore({
+          getUnbatchedInbound: vi.fn().mockResolvedValue([{ id: "inbound-1", content }]),
+        }),
+        ...overrides,
+      });
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+      return { memory, deps };
+    }
+
+    it("recalls on forwarded text's body, not its element", async () => {
+      const { memory } = await runTurn([
+        { type: "text", text: "meet at 8", forwarded },
+        { type: "text", text: "is this right?" },
+      ]);
+
+      expect(memory.recall).toHaveBeenCalledWith("user-1", "meet at 8\nis this right?", {
+        maxTokens: 2000,
+      });
+    });
+
+    it("recalls on a forwarded voice note's transcript, not its element", async () => {
+      const stt = { name: "openai", stt: vi.fn().mockResolvedValue({ text: "meet at 8" }) };
+      const { memory } = await runTurn(
+        [{ type: "voice", path: "inbound/v.ogg", mediaType: "audio/ogg", forwarded }],
+        {
+          voiceResolver: mockVoiceResolver(mockVoiceBundle({ stt })),
+          attachments: {
+            upload: vi.fn().mockResolvedValue("inbound/x"),
+            download: vi.fn().mockResolvedValue(Buffer.from("ogg-bytes")),
+          },
+        },
+      );
+
+      expect(memory.recall).toHaveBeenCalledWith("user-1", "meet at 8", { maxTokens: 2000 });
+    });
+
+    it("skips recall for a captionless forward, even when the profile always recalls", async () => {
+      const { memory, deps } = await runTurn(
+        [
+          { type: "text", text: "", forwarded },
+          { type: "image", path: "inbound/a.jpg", mediaType: "image/jpeg" },
+        ],
+        {
+          agentStore: mockAgentStore({
+            getProfile: vi.fn().mockResolvedValue({
+              id: "profile-1",
+              userId: null,
+              name: "default",
+              basePrompt: "test",
+              model: "claude-sonnet-4-6",
+              summarizationModel: null,
+              extractionModel: null,
+              autoRecall: "always" as const,
+              toolSet: [],
+              memoryScope: null,
+            }),
+          }),
+        },
+      );
+
+      expect(memory.recall).not.toHaveBeenCalled();
+      // Non-vacuity: the turn ran.
+      expect(deps.runStreamingAgentLoop).toHaveBeenCalled();
+    });
+
+    it("hands the model a forwarded caption inside its element", async () => {
+      const { deps } = await runTurn([
+        { type: "text", text: "meet at 8", forwarded },
+        { type: "image", path: "inbound/a.jpg", mediaType: "image/jpeg" },
+      ]);
+
+      const [loopArgs] = expectDefined(
+        vi.mocked(deps.runStreamingAgentLoop).mock.calls[0],
+        "runStreamingAgentLoop call",
+      );
+      const lastMsg = expectDefined(loopArgs.messages.at(-1), "last message");
+      expect(lastMsg.content).toContainEqual({ type: "text", text: wrapped });
+    });
   });
 
   describe("auto-recall failure", () => {

@@ -466,42 +466,48 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           : [];
 
       // Single source of truth for "what does each inbound row look like
-      // after voice transcription, with forwarded text inside its
-      // `<forwarded_message>` element?". Both consumers below
-      // (userContentText for persistence; resolvedBlocks for the LLM call)
-      // derive from this — eliminates the parallel-cursor pattern that was
-      // fragile under walk-order changes. Cursor advances across rows in the
-      // same order `transcripts` was produced (inboundMessages.flatMap order,
-      // voice refs only).
+      // after voice transcription?". A forwarded clip's transcript keeps the
+      // clip's `forwarded` marking, as forwarded text does. Every consumer
+      // below derives from this — userContentText for persistence and
+      // resolvedBlocks for the LLM call render the marking into its
+      // `<forwarded_message>` element; the recall query reads the bare text —
+      // eliminating the parallel-cursor pattern that was fragile under
+      // walk-order changes. Cursor advances across rows in the same order
+      // `transcripts` was produced (inboundMessages.flatMap order, voice refs
+      // only).
       const substitutedMessages = ((): ReadonlyArray<{ content: InboundContent }> => {
         let cursor = 0;
         return inboundMessages.map((m) => {
           if (typeof m.content === "string") return { content: m.content };
           const blocks = m.content.map((b) => {
-            if (b.type === "voice") {
-              const transcript = transcripts[cursor++] ?? "";
-              return { type: "text", text: renderInboundText(transcript, b.forwarded) } as const;
-            }
-            if (b.type === "text") {
-              return { type: "text", text: renderInboundText(b.text, b.forwarded) } as const;
-            }
-            return b;
+            if (b.type !== "voice") return b;
+            const text = transcripts[cursor++] ?? "";
+            return {
+              type: "text",
+              text,
+              ...(b.forwarded !== undefined && { forwarded: b.forwarded }),
+            } as const;
           });
           return { content: blocks };
         });
       })();
 
-      // Per-row text serialization for `messages.content`. After voice→text
-      // substitution above, a text-only row joins on newline, so it loads
-      // back cleanly as history; a row that still carries image or document
-      // blocks is JSON-stringified.
+      // Per-row text serialization for `messages.content`, forwarded text
+      // inside its element. After voice→text substitution above, a text-only
+      // row joins on newline, so it loads back cleanly as history; a row that
+      // still carries image or document blocks is JSON-stringified.
       const userContentText = substitutedMessages
         .map(({ content }) => {
           if (typeof content === "string") return content;
-          if (content.every((b) => b.type === "text")) {
-            return content.map((b) => b.text).join("\n");
+          const rendered = content.map((b) =>
+            b.type === "text"
+              ? ({ type: "text", text: renderInboundText(b.text, b.forwarded) } as const)
+              : b,
+          );
+          if (rendered.every((b) => b.type === "text")) {
+            return rendered.map((b) => b.text).join("\n");
           }
-          return JSON.stringify(content);
+          return JSON.stringify(rendered);
         })
         .join("\n");
 
