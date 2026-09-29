@@ -62,6 +62,15 @@ function elapsed(now: number): StreamInput {
   return { type: "throttle_elapsed", now };
 }
 
+/** The message a write edits is gone, or can no longer be edited. */
+function editGone(now: number): StreamInput {
+  return {
+    type: "api_failed",
+    failure: { kind: "edit_target_gone", reason: "Bad Request: message to edit not found" },
+    now,
+  };
+}
+
 /** A 5xx or a network error: grammY's auto-retry treats both as transient. */
 function transient(now: number): StreamInput {
   return {
@@ -252,6 +261,82 @@ describe("telegram stream state", () => {
     });
   });
 
+  describe("edit target gone", () => {
+    const rejected: StreamInput = {
+      type: "api_failed",
+      failure: { kind: "rejected", reason: "Forbidden: bot was blocked by the user" },
+      now: T0,
+    };
+
+    it("sends a chunk whose message is gone as a new message", () => {
+      const { state, effects } = drive(EDITS, [
+        text("done"),
+        landed(T0, 100),
+        finish,
+        editGone(T0),
+        landed(T0, 101),
+      ]);
+
+      expect(writes(effects).slice(-2)).toEqual([
+        { role: "chunk", messageId: 100, text: "done", html: true },
+        { role: "chunk", messageId: undefined, text: "done", html: true },
+      ]);
+      expect(state).toEqual({ kind: "done" });
+    });
+
+    it("sends the abort's tail as a new message when its message is gone", () => {
+      const { effects } = drive(EDITS, [
+        text("partial"),
+        landed(T0, 100),
+        { type: "abort", error: "LLM failed", now: T0 },
+        editGone(T0),
+      ]);
+
+      expect(writes(effects).at(-1)).toEqual({
+        role: "tail",
+        messageId: undefined,
+        text: "partial\n\n⚠️ LLM failed",
+        html: false,
+      });
+    });
+
+    it("fails when the resend fails too", () => {
+      const { state } = drive(EDITS, [
+        text("done"),
+        landed(T0, 100),
+        finish,
+        editGone(T0),
+        rejected,
+      ]);
+
+      expect(state).toEqual({ kind: "failed", reason: "Forbidden: bot was blocked by the user" });
+    });
+
+    it("fails when a send reports its target gone, so the resend happens once", () => {
+      const { state, effects } = drive(EDITS, [
+        text("done"),
+        landed(T0, 100),
+        finish,
+        editGone(T0),
+        editGone(T0),
+      ]);
+
+      expect(writes(effects)).toHaveLength(3);
+      expect(state).toEqual({ kind: "failed", reason: expect.stringContaining("not found") });
+    });
+
+    it("fails on a preview whose message is gone", () => {
+      const { state } = drive(EDITS, [
+        text("Hello"),
+        landed(T0, 100),
+        text(" world", T0 + 600),
+        editGone(T0 + 600),
+      ]);
+
+      expect(state.kind).toBe("failed");
+    });
+  });
+
   describe("failures", () => {
     const unparseable: StreamInput = {
       type: "api_failed",
@@ -438,6 +523,21 @@ describe("telegram stream state", () => {
         "any other API error",
         telegramError(403, "Forbidden: bot was blocked by the user"),
         { kind: "rejected", reason: expect.stringContaining("bot was blocked") },
+      ],
+      [
+        "an edit whose message is gone",
+        telegramError(400, "Bad Request: message to edit not found"),
+        { kind: "edit_target_gone", reason: expect.stringContaining("not found") },
+      ],
+      [
+        "an edit of a message that can't be edited",
+        telegramError(400, "Bad Request: message can't be edited"),
+        { kind: "edit_target_gone", reason: expect.stringContaining("can't be edited") },
+      ],
+      [
+        "an edit naming an invalid message id",
+        telegramError(400, "Bad Request: MESSAGE_ID_INVALID"),
+        { kind: "edit_target_gone", reason: expect.stringContaining("MESSAGE_ID_INVALID") },
       ],
       [
         "a 5xx",

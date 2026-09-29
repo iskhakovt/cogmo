@@ -27,8 +27,9 @@ import { renderTelegramHtml } from "./render.js";
  *    `retry_after` runs;
  *  - chunks are written in the order they were cut, each ahead of any later text;
  *  - a write that must land — a chunk, the abort's error tail — is retried
- *    after a rate limit or a transient failure, and falls back to plain text
- *    when Telegram rejects its HTML; any other failure fails the handle;
+ *    after a rate limit or a transient failure, falls back to plain text when
+ *    Telegram rejects its HTML, and goes out as a new message when the message
+ *    it edits is gone; any other failure fails the handle;
  *  - `done` and `failed` are final and ignore every input.
  */
 
@@ -134,6 +135,8 @@ export type WriteFailure =
   | { kind: "rate_limited"; retryAfterMs: number; reason: string }
   /** A 5xx, or a request that never got an answer. */
   | { kind: "transient"; reason: string }
+  /** The message an edit names is gone, or can no longer be edited. */
+  | { kind: "edit_target_gone"; reason: string }
   | { kind: "rejected"; reason: string };
 
 /** A stream event the machine renders; retractions and media have inputs of their own. */
@@ -239,6 +242,9 @@ export function classifyWriteError(error: unknown): WriteFailure {
   const reason = describeError(error);
   if (reason.includes("message is not modified")) return { kind: "not_modified" };
   if (reason.includes("can't parse entities")) return { kind: "unparseable", reason };
+  if (EDIT_TARGET_GONE.some((description) => reason.includes(description))) {
+    return { kind: "edit_target_gone", reason };
+  }
   const answer = BotApiErrorSchema.safeParse(error);
   const retryAfter = answer.success ? answer.data.parameters?.retry_after : undefined;
   if (retryAfter !== undefined)
@@ -247,6 +253,13 @@ export function classifyWriteError(error: unknown): WriteFailure {
   if (HttpErrorSchema.safeParse(error).success) return { kind: "transient", reason };
   return { kind: "rejected", reason };
 }
+
+/** Bot API descriptions of an edit whose message is gone or no longer editable. */
+const EDIT_TARGET_GONE = [
+  "message to edit not found",
+  "message can't be edited",
+  "MESSAGE_ID_INVALID",
+] as const;
 
 /** The fields of grammY's `GrammyError` the classification reads. */
 const BotApiErrorSchema = z.object({
@@ -429,6 +442,18 @@ function onWriteFailed(
     .with({ kind: "transient" }, ({ reason }) =>
       waitToRetry(state, write, TRANSIENT_BACKOFF_MS * 2 ** state.failedInARow, reason),
     )
+    .with({ kind: "edit_target_gone" }, ({ reason }) => {
+      // The write stays due and goes out as a new message, so the user is
+      // left with the whole reply rather than a cut-short preview. That is a
+      // send, which can't fail this way, so it happens once. A preview fails:
+      // the handle's failure fails the push, and the retry re-streams.
+      if (write.role === "preview" || write.messageId === undefined) return fail(state, reason);
+      return advance({ ...state, inFlight: null, messageId: undefined }, opts, now, [
+        logEffect("warn", "telegram: message to edit is gone, sending the rest as a new one", {
+          reason,
+        }),
+      ]);
+    })
     .with({ kind: "rejected" }, ({ reason }) => fail(state, reason))
     .exhaustive();
 }

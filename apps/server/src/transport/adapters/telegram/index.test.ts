@@ -1398,6 +1398,39 @@ describe("telegram adapter", () => {
       expect(mockBotApi.editMessageText).toHaveBeenCalledTimes(2);
     });
 
+    /** Telegram's answer to an edit of a message that is gone. */
+    function messageToEditNotFound(): Error {
+      return Object.assign(
+        new Error(
+          "Call to 'editMessageText' failed! (400: Bad Request: message to edit not found)",
+        ),
+        { error_code: 400, parameters: {} },
+      );
+    }
+
+    it("sends the final text as a new message when the message to edit is gone", async () => {
+      const handle = await (await createStreamingAdapter()).openStream("42", "run-1");
+      await handle.push(text("done"));
+      mockBotApi.editMessageText.mockRejectedValueOnce(messageToEditNotFound());
+
+      expect(await handle.finish()).toEqual(ok(undefined));
+      expect(mockBotApi.editMessageText).toHaveBeenCalledTimes(1);
+      expect(mockBotApi.sendMessage).toHaveBeenCalledTimes(2);
+      expect(mockBotApi.sendMessage).toHaveBeenLastCalledWith(42, "done", { parse_mode: "HTML" });
+    });
+
+    it("fails the handle when the new message fails too", async () => {
+      const handle = await (await createStreamingAdapter()).openStream("42", "run-1");
+      await handle.push(text("done"));
+      mockBotApi.editMessageText.mockRejectedValueOnce(messageToEditNotFound());
+      mockBotApi.sendMessage.mockRejectedValueOnce(
+        new Error("Call to 'sendMessage' failed! (403: Forbidden: bot was blocked by the user)"),
+      );
+
+      expect(await handle.finish()).toEqual(err(expect.stringContaining("bot was blocked")));
+      expect(mockBotApi.sendMessage).toHaveBeenCalledTimes(2);
+    });
+
     it("waits out a 5xx on a streaming edit, then writes the latest text", async () => {
       const handle = await (await createStreamingAdapter()).openStream("42", "run-1");
       await handle.push(text("Hello"));
