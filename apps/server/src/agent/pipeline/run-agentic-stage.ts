@@ -321,7 +321,11 @@ export async function runAgenticStage(
   });
 
   const { provider, limits: rowLimits } = await resolveOrFail(deps.resolveProvider, ctx.model);
-  const limits = resolveLimits(ctx.model, rowLimits);
+  // Frozen for the run: a catalog refresh can swap the in-process catalog
+  // between invocations, and the budget decides which compaction steps exist.
+  const limits = await steps.stepRun("freeze-model-limits", async () =>
+    resolveLimits(ctx.model, rowLimits),
+  );
   const budget = computeBudget(limits);
 
   // Frozen for the run: the persist step below rewrites the row this reads.

@@ -6,8 +6,9 @@ import { ProviderProtocolError, ToolArgsCutOffError } from "../llm/errors.js";
 import { RefusalError } from "../llm/fallback.js";
 import type { LlmProvider } from "../llm/provider.js";
 import type {
-  ChatStreamResult,
+  ChatStreamFrame,
   ContentBlock,
+  ContentFrame,
   LlmResponse,
   Message,
   StopReason,
@@ -16,7 +17,7 @@ import type {
 } from "../llm/types.js";
 import { logger } from "../logger.js";
 import { expectDefined } from "../test/assertions.js";
-import { mockFilesService } from "../test/factories.js";
+import { doneFrame, mockFilesService, scriptedStream } from "../test/factories.js";
 import type {
   AgentLoopParams,
   AgentLoopResult,
@@ -669,24 +670,23 @@ describe("runAgentLoop", () => {
 // --- Streaming agent loop tests ---
 
 interface MockStreamTurn {
-  events: StreamEvent[];
+  events: ContentFrame[];
   stopReason: StopReason;
   usage?: Usage;
+}
+
+/** A provider stream that yields the turn's events, then its `done` frame. */
+function turnStream(turn: MockStreamTurn): AsyncGenerator<ChatStreamFrame> {
+  return scriptedStream(
+    turn.events,
+    doneFrame(turn.stopReason, turn.usage ?? { inputTokens: 10, outputTokens: 5 }),
+  );
 }
 
 function mockStreamProvider(turns: MockStreamTurn[]): LlmProvider {
   const chatStream = vi.fn();
   for (const turn of turns) {
-    chatStream.mockReturnValueOnce({
-      events: (async function* () {
-        for (const e of turn.events) yield e;
-      })(),
-      response: Promise.resolve({
-        stopReason: turn.stopReason,
-        model: "mock-model",
-        usage: turn.usage ?? { inputTokens: 10, outputTokens: 5 },
-      }),
-    } satisfies ChatStreamResult);
+    chatStream.mockReturnValueOnce(turnStream(turn));
   }
   return {
     name: "mock-stream",
@@ -1274,58 +1274,110 @@ describe("runStreamingAgentLoop", () => {
     });
   });
 
-  it("propagates a mid-stream provider error without leaking an unhandledRejection", async () => {
-    // The streaming adapters reject both the events iterator AND their
-    // `response` promise on a stream-level failure. The loop awaits
-    // `response` only on success, so without an upfront `.catch()` the
-    // dangling rejection would crash the Node process under
-    // `--unhandled-rejections=throw` (Node ≥ 15 default).
-    const failure = new Error("upstream 502");
-    (failure as Error & { status?: number }).status = 502;
-
+  it("propagates a mid-stream provider error", async () => {
+    const failure = Object.assign(new Error("upstream 502"), { status: 502 });
+    async function* failing(): AsyncGenerator<ChatStreamFrame> {
+      yield { type: "text_delta", text: "partial" };
+      throw failure;
+    }
     const provider: LlmProvider = {
-      name: "leaky-stream",
+      name: "failing-stream",
       chat: vi.fn(),
       countTokens: vi.fn(),
-      chatStream() {
-        const events: AsyncIterable<StreamEvent> = {
-          [Symbol.asyncIterator]() {
-            return {
-              async next(): Promise<IteratorResult<StreamEvent>> {
-                throw failure;
-              },
-            };
-          },
-        };
-        // Bare rejected promise — no pre-attached `.catch`. The loop must
-        // attach one itself; if it doesn't, vitest reports an unhandled
-        // rejection and the test fails.
-        return { events, response: Promise.reject(failure) };
-      },
+      chatStream: () => failing(),
     };
 
-    const unhandled: unknown[] = [];
-    const listener = (reason: unknown): void => {
-      unhandled.push(reason);
-    };
-    process.on("unhandledRejection", listener);
-    try {
-      await expect(
-        testRunStreamingAgentLoop({
-          provider,
-          messages: [{ role: "user", content: "hi" }],
-          tools: new ToolRegistry(),
-          onEvent: async () => {},
-        }),
-      ).rejects.toBe(failure);
+    await expect(
+      testRunStreamingAgentLoop({
+        provider,
+        messages: [{ role: "user", content: "hi" }],
+        tools: new ToolRegistry(),
+        onEvent: async () => {},
+      }),
+    ).rejects.toBe(failure);
+  });
 
-      // Flush microtasks + macrotasks so any pending `unhandledRejection`
-      // signal has fired before we assert.
-      await new Promise((r) => setImmediate(r));
-      expect(unhandled).toEqual([]);
-    } finally {
-      process.off("unhandledRejection", listener);
+  it("returns the provider stream when a delivery push throws, so the request is aborted", async () => {
+    const cleanup = vi.fn();
+    async function* stream(): AsyncGenerator<ChatStreamFrame> {
+      try {
+        yield { type: "text_delta", text: "one" };
+        yield { type: "text_delta", text: "two" };
+        yield doneFrame("end_turn", { inputTokens: 1, outputTokens: 1 });
+      } finally {
+        cleanup();
+      }
     }
+    const provider: LlmProvider = {
+      name: "mock-stream",
+      chat: vi.fn(),
+      countTokens: vi.fn(),
+      chatStream: () => stream(),
+    };
+    const pushFailed = new Error("push failed");
+
+    await expect(
+      testRunStreamingAgentLoop({
+        provider,
+        messages: [{ role: "user", content: "hi" }],
+        tools: new ToolRegistry(),
+        onEvent: async () => {
+          throw pushFailed;
+        },
+      }),
+    ).rejects.toBe(pushFailed);
+    expect(cleanup).toHaveBeenCalledOnce();
+  });
+
+  it("fails an iteration whose stream ends without a done frame", async () => {
+    async function* truncated(): AsyncGenerator<ChatStreamFrame> {
+      yield { type: "text_delta", text: "partial" };
+    }
+    const provider: LlmProvider = {
+      name: "truncated-stream",
+      chat: vi.fn(),
+      countTokens: vi.fn(),
+      chatStream: () => truncated(),
+    };
+
+    await expect(
+      testRunStreamingAgentLoop({
+        provider,
+        messages: [{ role: "user", content: "hi" }],
+        tools: new ToolRegistry(),
+        onEvent: async () => {},
+      }),
+    ).rejects.toThrow("truncated-stream stream ended without a done frame");
+  });
+
+  it.each<[string, ChatStreamFrame]>([
+    ["content", { type: "text_delta", text: "more" }],
+    ["another done frame", doneFrame("end_turn", { inputTokens: 2, outputTokens: 2 })],
+  ])("fails an iteration whose stream sends %s after its done frame", async (_label, late) => {
+    async function* overrun(): AsyncGenerator<ChatStreamFrame> {
+      yield { type: "text_delta", text: "reply" };
+      yield doneFrame("end_turn", { inputTokens: 1, outputTokens: 1 });
+      yield late;
+    }
+    const collected: StreamEvent[] = [];
+    const provider: LlmProvider = {
+      name: "overrun-stream",
+      chat: vi.fn(),
+      countTokens: vi.fn(),
+      chatStream: () => overrun(),
+    };
+
+    await expect(
+      testRunStreamingAgentLoop({
+        provider,
+        messages: [{ role: "user", content: "hi" }],
+        tools: new ToolRegistry(),
+        onEvent: async (e) => {
+          collected.push(e);
+        },
+      }),
+    ).rejects.toThrow("overrun-stream stream sent a frame after its done frame");
+    expect(collected).toEqual([{ type: "text_delta", text: "reply" }]);
   });
 
   it("captures thinking_delta into content blocks but does not forward to onEvent", async () => {
@@ -2667,14 +2719,13 @@ describe("turnLogger plumbing", () => {
 
 // --- Class C in-loop repair ---
 //
-// Each iteration's stream produces (events, response) — repair-test
-// scenarios need both the stream content and the post-stream `stopReason`
-// the classifier reads, plus the option to make a stream throw before
-// completion. `repairStreamProvider` exposes that surface as a small
+// Repair-test scenarios need both the stream content and the `done` frame's
+// `stopReason` the classifier reads, plus the option to make a stream throw
+// before completion. `repairStreamProvider` exposes that surface as a small
 // builder so tests stay declarative.
 
 type RepairTurn =
-  | { kind: "stream"; events: StreamEvent[]; stopReason: StopReason }
+  | { kind: "stream"; events: ContentFrame[]; stopReason: StopReason }
   | { kind: "throw"; error: unknown };
 
 function repairStreamProvider(turns: ReadonlyArray<RepairTurn>): {
@@ -2695,24 +2746,13 @@ function repairStreamProvider(turns: ReadonlyArray<RepairTurn>): {
     if (!turn) throw new Error(`repairStreamProvider: ran out of turns (cursor=${cursor})`);
     if (turn.kind === "throw") {
       const err = turn.error;
-      // Generator throws on first `next()` instead of yielding — symmetric
-      // with the success branch's `async function*` form below.
+      // Generator throws on first `next()` instead of yielding.
       // biome-ignore lint/correctness/useYield: intentional throw-only generator
-      const events = (async function* (): AsyncGenerator<StreamEvent> {
+      return (async function* (): AsyncGenerator<ChatStreamFrame> {
         throw err;
       })();
-      return { events, response: Promise.reject(err) };
     }
-    return {
-      events: (async function* () {
-        for (const e of turn.events) yield e;
-      })(),
-      response: Promise.resolve({
-        stopReason: turn.stopReason,
-        model: "mock-model",
-        usage: { inputTokens: 10, outputTokens: 5 },
-      }),
-    } satisfies ChatStreamResult;
+    return turnStream(turn);
   });
   const chat = vi.fn(async (params: Parameters<LlmProvider["chat"]>[0]) => {
     chatCalls.push(params);

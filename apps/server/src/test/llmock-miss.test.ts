@@ -1,6 +1,9 @@
-import type { ChatCompletionRequest, Fixture } from "@copilotkit/aimock";
-import { describe, expect, it } from "vitest";
-import { type CassetteFixture, describeMiss } from "./llmock-miss.js";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { type ChatCompletionRequest, type Fixture, LLMock } from "@copilotkit/aimock";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { type CassetteFixture, describeMiss, narrowModelMatch } from "./llmock-miss.js";
 
 function chat(text: string, extra: Partial<ChatCompletionRequest> = {}): ChatCompletionRequest {
   return { model: "claude-sonnet-5", messages: [{ role: "user", content: text }], ...extra };
@@ -85,6 +88,13 @@ describe("describeMiss", () => {
     expect(describeMiss(req, cassette).split("\n")[2]).toBe("  haiku.json: no difference found");
   });
 
+  it("names the model when the request's id only extends the recorded one", () => {
+    const req = chat("ping", { model: "claude-sonnet-5-5" });
+    const cassette = [recorded("sonnet.json", { userMessage: "ping", model: "claude-sonnet-5" })];
+
+    expect(describeMiss(req, cassette).split("\n")[2]).toBe("  sonnet.json: model claude-sonnet-5");
+  });
+
   it("keys an embedding request on its input", () => {
     const req = chat("", {
       model: "text-embedding-3-small",
@@ -116,5 +126,57 @@ describe("describeMiss", () => {
       "closest of 1 in the cassette:",
       "  no fixture in the cassette is keyed on text",
     ]);
+  });
+});
+
+describe("narrowModelMatch", () => {
+  let dir: string;
+  let mock: LLMock;
+  let url: string;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), "cassette-"));
+    const file = join(dir, "ping.json");
+    writeFileSync(
+      file,
+      JSON.stringify({
+        fixtures: [
+          {
+            match: { userMessage: "ping", model: "claude-sonnet-5" },
+            response: { content: "pong" },
+          },
+        ],
+      }),
+    );
+    mock = new LLMock({ port: 0, logLevel: "silent", strict: true });
+    mock.loadFixtureFile(file);
+    mock.getFixtures().forEach(narrowModelMatch);
+    url = await mock.start();
+  });
+
+  afterAll(async () => {
+    await mock.stop();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  async function answered(model: string): Promise<boolean> {
+    const res = await fetch(`${url}/v1/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "anthropic-version": "2023-06-01" },
+      body: JSON.stringify({
+        model,
+        max_tokens: 16,
+        messages: [{ role: "user", content: "ping" }],
+      }),
+    });
+    return res.ok;
+  }
+
+  it.each([
+    ["the recorded model", "claude-sonnet-5", true],
+    ["its dated snapshot", "claude-sonnet-5-20260101", true],
+    ["a later model whose id extends it", "claude-sonnet-5-5", false],
+  ])("answers %s (%s): %s", async (_label, model, ok) => {
+    expect(await answered(model)).toBe(ok);
   });
 });

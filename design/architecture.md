@@ -71,7 +71,7 @@ INGESTION (scheduled, headless)              RETRIEVAL (interactive)
 
 ## Multi-Agent Memory Consistency `[proposed]`
 
-Additive-only writes. Never fail a write. Post-conversation dedup via Hindsight's `reflect()` or periodic Claude pass running async.
+Additive-only writes. Never fail a write. Hindsight consolidates each `retain()` into existing observations ([memory.md](memory.md)).
 
 ## Component Map `[proposed]`
 

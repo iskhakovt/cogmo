@@ -69,7 +69,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { Daytona, Image } from "@daytona/sdk";
 import { Octokit } from "@octokit/rest";
-import { and, desc, eq, isNull, ne } from "drizzle-orm";
+import { and, desc, eq, ne } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { connect } from "inngest/connect";
 import { ok } from "neverthrow";
@@ -88,7 +88,7 @@ import { bootstrapSkillsRepo } from "../skills/repo.js";
 import { skillRuns, skills } from "../skills/store/schema.js";
 import { channelSessions, channels, inboundMessages } from "../transport/store/schema.js";
 import { expectDefined } from "./assertions.js";
-import { CASSETTE_CHAT_MODEL } from "./cassette-model.js";
+import { CASSETTE_CHAT_MODEL, pinOrgProfileToCassetteModel } from "./cassette-model.js";
 import { DaytonaMock, type DaytonaMockOptions } from "./daytona-mock.js";
 import { fileDatabaseUrl, fileDefaultUserId, fileLlmockUrl } from "./integration-file.js";
 import { repoRoot } from "./repo-root.js";
@@ -306,7 +306,7 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
     if (RECORDABLE && mock) await mock.endScenario();
     if (connection) await connection.close();
     if (bootstrapResult) {
-      for (const adapter of bootstrapResult.adapters) await adapter.stop();
+      for (const { adapter } of bootstrapResult.adapters) await adapter.stop();
       await bootstrapResult.skillRunner.shutdown();
       await bootstrapResult.mcpRegistry.stop();
       if (bootstrapResult.sandbox) await bootstrapResult.sandbox.shutdown();
@@ -954,15 +954,9 @@ async function seedSecretsAndProvider(opts: {
       .returning({ id: llmProviders.id });
     if (!provider) throw new Error("llm_providers insert returned no row");
 
-    // Point the seeded org profile, which `bootstrap()` resolves as the
-    // default, at the cassette's model and route that, so the host agent
-    // loop replays against the recorded fixtures.
-    const updated = await tx
-      .update(profiles)
-      .set({ model: CASSETTE_CHAT_MODEL })
-      .where(isNull(profiles.userId))
-      .returning({ id: profiles.id });
-    expectDefined(updated[0], "Default profile not found");
+    // Route the cassette's model, so the host agent loop replays against
+    // the recorded fixtures.
+    await pinOrgProfileToCassetteModel(tx);
     await tx
       .insert(modelProviders)
       .values({

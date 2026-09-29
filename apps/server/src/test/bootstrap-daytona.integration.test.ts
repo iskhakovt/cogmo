@@ -63,7 +63,7 @@ afterAll(async () => {
   // skill runner (holds the sandbox via its lazy pool), MCP
   // registry, sandbox handle, then the temp dir backing the fake.
   if (bootstrapResult) {
-    for (const adapter of bootstrapResult.adapters) {
+    for (const { adapter } of bootstrapResult.adapters) {
       await adapter.stop();
     }
     await bootstrapResult.skillRunner.shutdown();

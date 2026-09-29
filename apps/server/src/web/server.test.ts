@@ -1,4 +1,4 @@
-import { createServer } from "node:http";
+import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { createORPCClient } from "@orpc/client";
 import { RPCLink } from "@orpc/client/fetch";
@@ -7,12 +7,13 @@ import { err } from "neverthrow";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { DrizzleAgentStore } from "../agent/store/index.js";
 import type { Database, Transactor } from "../db/index.js";
-import { expectDefined } from "../test/assertions.js";
+import { logger } from "../logger.js";
+import { expectDefined, resolvesWithin } from "../test/assertions.js";
 import { mockTransportDeep } from "../test/factories.js";
 import { createTestDatabase } from "../test/pglite.js";
 import { WebStreamRegistry } from "../transport/adapters/web/stream-registry.js";
 import type { webRouter } from "./rpc/router.js";
-import { createWebServer, startWebServer } from "./server.js";
+import { createWebServer, startWebServer, type WebServer } from "./server.js";
 import { hashSessionToken } from "./session/token.js";
 import { DrizzleWebSessionStore } from "./store/index.js";
 import { webSessions } from "./store/schema.js";
@@ -22,7 +23,7 @@ const VALID_TOKEN = "secret-token";
 let db: Database;
 let tx: Transactor;
 let close: () => Promise<void>;
-let server: ReturnType<typeof createWebServer>;
+let server: Server;
 let base: string;
 let ownerUserId: string;
 
@@ -31,7 +32,7 @@ beforeAll(async () => {
   const agentStore = new DrizzleAgentStore();
   ownerUserId = await tx(async (trx) => (await agentStore.createUser(trx)).id);
 
-  server = createWebServer({
+  ({ server } = createWebServer({
     webTransport: mockTransportDeep({ models: { list: async () => ["gpt", "claude"] } }),
     webSessionStore: new DrizzleWebSessionStore(),
     webStreamRegistry: new WebStreamRegistry(),
@@ -42,7 +43,7 @@ beforeAll(async () => {
     cookieSecure: true,
     staticRoot: "/nonexistent-cogmo-dist",
     webDevAllowOrigin: null,
-  });
+  }));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
@@ -188,7 +189,7 @@ describe("web server", () => {
 
     it("503s behind a valid cookie when the web channel isn't provisioned", async () => {
       // Separate server with no web-scoped Transport (web channel unprovisioned).
-      const server503 = createWebServer({
+      const { server: server503 } = createWebServer({
         webTransport: null,
         webSessionStore: new DrizzleWebSessionStore(),
         webStreamRegistry: new WebStreamRegistry(),
@@ -275,7 +276,8 @@ describe("web server", () => {
 });
 
 describe("web chat routes", () => {
-  let chatServer: ReturnType<typeof createWebServer>;
+  let chatWeb: WebServer;
+  let chatServer: Server;
   let chatBase: string;
   let chatRegistry: WebStreamRegistry;
   let transport: ReturnType<typeof mockTransportDeep>;
@@ -293,7 +295,7 @@ describe("web chat routes", () => {
   async function start(overrides: Parameters<typeof mockTransportDeep>[0] = {}): Promise<void> {
     chatRegistry = new WebStreamRegistry();
     transport = mockTransportDeep(overrides);
-    chatServer = createWebServer({
+    chatWeb = createWebServer({
       webTransport: transport,
       webSessionStore: new DrizzleWebSessionStore(),
       webStreamRegistry: chatRegistry,
@@ -305,17 +307,18 @@ describe("web chat routes", () => {
       staticRoot: "/nonexistent-cogmo-dist",
       webDevAllowOrigin: null,
     });
+    chatServer = chatWeb.server;
     await new Promise<void>((resolve) => chatServer.listen(0, "127.0.0.1", resolve));
     chatBase = `http://127.0.0.1:${(chatServer.address() as AddressInfo).port}`;
   }
 
   afterEach(async () => {
-    if (chatServer?.listening) {
-      await new Promise<void>((resolve) => {
-        chatServer.closeIdleConnections();
-        chatServer.close(() => resolve());
-      });
-    }
+    if (!chatServer) return;
+    const closing = chatServer.listening
+      ? new Promise<void>((resolve) => chatServer.close(() => resolve()))
+      : Promise.resolve();
+    chatServer.closeAllConnections();
+    await closing;
   });
 
   it("creates a conversation and returns its id", async () => {
@@ -441,6 +444,93 @@ describe("web chat routes", () => {
     });
   });
 
+  it("close() ends open streams instead of waiting out the drain", async () => {
+    await start();
+    const cookie = await login();
+    const res = await fetch(`${chatBase}/api/chat/conv-1/stream?tab=tab-1`, {
+      headers: { cookie, "sec-fetch-site": "same-origin" },
+    });
+    const reader = expectDefined(res.body, "sse body").getReader();
+    await reader.read(); // stream established + tab registered
+
+    await resolvesWithin(chatWeb.close(10_000), 2_500, "the server to close");
+
+    // A clean end, not a reset: eventsource-client reconnects after either,
+    // but a reset surfaces as a network error.
+    let chunk = await reader.read();
+    while (!chunk.done) chunk = await reader.read();
+    expect(chatRegistry.size).toBe(0);
+    expect(transport.closeSession).toHaveBeenCalledTimes(1);
+    expect(transport.closeSession).toHaveBeenCalledWith("session-resumed");
+  });
+
+  it("close() waits for the session closes of the streams it ends", async () => {
+    const sessionClosed = Promise.withResolvers<void>();
+    await start({ closeSession: vi.fn(() => sessionClosed.promise) });
+    const cookie = await login();
+    const res = await fetch(`${chatBase}/api/chat/conv-1/stream?tab=tab-1`, {
+      headers: { cookie, "sec-fetch-site": "same-origin" },
+    });
+    await expectDefined(res.body, "sse body").getReader().read();
+    let closed = false;
+
+    const closing = chatWeb.close(3_000).then(() => {
+      closed = true;
+    });
+    await vi.waitFor(() => expect(chatServer.listening).toBe(false));
+    // Well past the server closing, which takes one reap interval.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+
+    expect(transport.closeSession).toHaveBeenCalledWith("session-resumed");
+    expect(closed).toBe(false);
+    sessionClosed.resolve();
+    await resolvesWithin(closing, 2_500, "close");
+  });
+
+  it("close() returns once a request that finishes during the drain has answered", async () => {
+    // Answers 404 about 100 ms into the drain, leaving an idle keep-alive connection.
+    await start({
+      resumeConversation: vi.fn(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        return err({ code: "conversation_not_found" as const });
+      }),
+    });
+    const cookie = await login();
+    const answered = fetch(`${chatBase}/api/chat/conv-1/stream?tab=tab-1`, {
+      headers: { cookie, "sec-fetch-site": "same-origin" },
+    }).then((res) => res.status);
+    await vi.waitFor(() => expect(transport.resumeConversation).toHaveBeenCalled());
+    const warn = vi.spyOn(logger, "warn");
+    try {
+      const started = performance.now();
+      await chatWeb.close(3_000);
+      const elapsed = performance.now() - started;
+
+      expect(await answered).toBe(404);
+      expect(elapsed).toBeLessThan(1_000);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("close() closes the connection of a request that outlives the drain", async () => {
+    // The stream route waits on the resume before it answers.
+    await start({ resumeConversation: vi.fn(() => new Promise<never>(() => {})) });
+    const cookie = await login();
+    const hung = fetch(`${chatBase}/api/chat/conv-1/stream?tab=tab-1`, {
+      headers: { cookie, "sec-fetch-site": "same-origin" },
+    }).then(
+      () => "answered",
+      () => "reset",
+    );
+    await vi.waitFor(() => expect(transport.resumeConversation).toHaveBeenCalled());
+
+    await resolvesWithin(chatWeb.close(100), 2_500, "the server to close");
+
+    expect(await hung).toBe("reset");
+  });
+
   it("401s the stream without a session cookie (fail-closed)", async () => {
     await start();
     const res = await fetch(`${chatBase}/api/chat/conv-1/stream?tab=tab-1`, {
@@ -462,11 +552,11 @@ describe("web chat routes", () => {
 
 describe("dev CORS (WEB_DEV_ALLOW_ORIGIN)", () => {
   const DEV_ORIGIN = "http://localhost:5173";
-  let corsServer: ReturnType<typeof createWebServer>;
+  let corsServer: Server;
   let corsBase: string;
 
   beforeAll(async () => {
-    corsServer = createWebServer({
+    ({ server: corsServer } = createWebServer({
       webTransport: mockTransportDeep(),
       webSessionStore: new DrizzleWebSessionStore(),
       webStreamRegistry: new WebStreamRegistry(),
@@ -477,7 +567,7 @@ describe("dev CORS (WEB_DEV_ALLOW_ORIGIN)", () => {
       cookieSecure: true,
       staticRoot: "/nonexistent-cogmo-dist",
       webDevAllowOrigin: DEV_ORIGIN,
-    });
+    }));
     await new Promise<void>((resolve) => corsServer.listen(0, "127.0.0.1", resolve));
     corsBase = `http://127.0.0.1:${(corsServer.address() as AddressInfo).port}`;
   });
@@ -535,7 +625,7 @@ describe("dev CORS (WEB_DEV_ALLOW_ORIGIN)", () => {
   });
 
   it("tolerates a trailing slash in the configured origin", async () => {
-    const slashServer = createWebServer({
+    const { server: slashServer } = createWebServer({
       webTransport: mockTransportDeep(),
       webSessionStore: new DrizzleWebSessionStore(),
       webStreamRegistry: new WebStreamRegistry(),

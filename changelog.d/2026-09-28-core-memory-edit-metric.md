@@ -1,0 +1,1 @@
+A `cogmo.core_memory.edits` counter (labels `key`, `target`, `change`) counts core-memory writes that change a block, to size what the system-prompt snapshot saves. Writing a block's existing content leaves its `updated_at`, so the next turn doesn't announce it.

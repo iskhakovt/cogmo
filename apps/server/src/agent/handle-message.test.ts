@@ -6,13 +6,7 @@ import type { z } from "zod";
 import { conversationTurnConcurrency } from "../inngest/concurrency.js";
 import type { inboundReady } from "../inngest/events.js";
 import { ProviderConfigError } from "../llm/resolver.js";
-import type {
-  ChatParams,
-  ChatStreamResult,
-  Message,
-  StopReason,
-  StreamEvent,
-} from "../llm/types.js";
+import type { ChatParams, ChatStreamFrame, Message, StopReason } from "../llm/types.js";
 import { logger } from "../logger.js";
 import type { McpRegistry } from "../mcp/registry.js";
 import { memoryRecallFailures } from "../metrics.js";
@@ -20,6 +14,7 @@ import type { SkillRunner } from "../skills/runner.js";
 import { expectDefined } from "../test/assertions.js";
 import {
   directStep,
+  doneFrame,
   fakeRunInTx,
   invokeInngestFn,
   invokeInngestOnFailure,
@@ -37,6 +32,7 @@ import {
   mockTransportStore,
   mockVoiceBundle,
   mockVoiceResolver,
+  scriptedStream,
   turnContextSent,
 } from "../test/factories.js";
 import type { InboundContent } from "../transport/content.js";
@@ -1925,22 +1921,15 @@ describe("createHandleMessage", () => {
       // such skill. The model is still offered it, and its call gets the
       // same kind of result as any other failed tool.
       const requests: ChatParams[] = [];
-      const chatStream = vi.fn((params: ChatParams): ChatStreamResult => {
+      const chatStream = vi.fn((params: ChatParams): AsyncIterable<ChatStreamFrame> => {
         requests.push(structuredClone(params));
-        const events: StreamEvent[] =
-          requests.length === 1
-            ? [{ type: "tool_start", id: "t1", name: "echo", input: { n: 1 } }]
-            : [{ type: "text_delta", text: "done" }];
-        return {
-          events: (async function* () {
-            yield* events;
-          })(),
-          response: Promise.resolve({
-            stopReason: requests.length === 1 ? "tool_use" : "end_turn",
-            model: "mock-model",
-            usage: { inputTokens: 10, outputTokens: 5 },
-          }),
-        };
+        const usage = { inputTokens: 10, outputTokens: 5 };
+        return requests.length === 1
+          ? scriptedStream(
+              [{ type: "tool_start", id: "t1", name: "echo", input: { n: 1 } }],
+              doneFrame("tool_use", usage),
+            )
+          : scriptedStream([{ type: "text_delta", text: "done" }], doneFrame("end_turn", usage));
       });
       const echo = {
         name: "echo",

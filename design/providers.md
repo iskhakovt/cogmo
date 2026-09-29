@@ -17,6 +17,27 @@ Two provider adapters exist:
 
 Both implement `LlmProvider` — the agent loop and orchestrator are provider-agnostic.
 
+### Call contract
+
+```typescript
+interface LlmProvider {
+  chat(params: ChatParams, options?: ChatOptions): Promise<LlmResponse>;
+  chatStream(params: ChatParams, options?: ChatOptions): AsyncIterable<ChatStreamFrame>;
+  countTokens(params: CountTokensParams): Promise<number>;
+}
+```
+
+`chatStream` yields content frames (`text_delta`, `thinking_delta`, and `tool_start` with complete parsed input), then one `done` frame carrying `{ stopReason, model, usage }`. A failure throws from the iterator. A consumer that stops early, by `break` or a throw in its loop body, returns the iterator: the adapter's generator leaves the SDK stream's loop, which aborts the request, and ends the span.
+
+The metadata rides in the stream because the agent loop, the only consumer, drains every frame anyway: one iterable settles on every path by construction, and the fallback wrapper passes it through with `for await`. It is the provider-level shape of the Vercel AI SDK (`doStream`, whose last part is `finish`) and of OpenAI's final usage chunk. The loop fails an iteration whose stream ends without `done` or sends anything after it.
+
+`ChatOptions.signal` cancels a call: the request is aborted, and the call rejects or the stream throws with `signal.reason` as soon as the signal fires. Both SDKs take the signal as a request option and abort the request when it fires, a retry's backoff included. The adapters close two gaps in how they report it:
+
+- They throw their own `APIUserAbortError`; the adapter throws the reason instead (`src/llm/abort.ts`).
+- They end an aborted stream quietly, as if it had finished, and the Anthropic SDK first yields the events it had buffered from the current network chunk (the OpenAI SDK checks the signal between lines). The adapters check the signal after the SDK's last event, and the Anthropic adapter before each one, so nothing past the abort is yielded, a `done` frame for the cut-off response included.
+
+The degraded-reply synthesis is the one caller that passes a signal: its 5-second cap (see [agent-resilience.md](agent-resilience.md) → Tools-free synthesis on degrade).
+
 `OpenAICompatibleProvider` maps three request parameters by OpenAI model family, matched by bare or fine-tuned model id on any host (`modelFamilyParams`):
 
 - **Output cap.** OpenAI's reasoning models (the o-series, GPT-5 onward and the `chat-latest` ids) take it as `max_completion_tokens`; every other id as `max_tokens`.
@@ -54,7 +75,7 @@ llm_providers (
 
 **`secret_id`** references the `secrets` table (see [infrastructure.md](infrastructure.md) → Secrets). Decoupled from the provider row so the same key can serve multiple providers (e.g., one OpenRouter key for both Claude-via-OpenRouter and GPT-via-OpenRouter).
 
-**`attrs`** JSONB for provider-specific config (`ProviderAttrsSchema`): `cacheDialect`, `headers`. `cacheDialect` (`openrouter` \| `openai` \| `xai` \| `none`) says which caching and routing hints an OpenAI-compatible endpoint takes for a cache intent. The `openrouter` provider type sets `openrouter`, and `addProvider` derives it from the base URL's host when the caller names none; absent reads as `none`, and Anthropic rows carry none. See [prompt-caching.md](prompt-caching.md) → Adapter mapping.
+**`attrs`** JSONB for provider-specific config (`ProviderAttrsSchema`): `cacheDialect`, `headers`. `cacheDialect` (`openrouter` \| `openai` \| `xai` \| `none`) says which caching and routing hints an OpenAI-compatible endpoint takes for a cache intent. The `openrouter` provider type sets `openrouter`, and `addProvider` derives it from the base URL's host when the caller names none; absent reads as `none`, and Anthropic rows carry none. See [prompt-caching.md](prompt-caching.md) → Adapter mapping. `[confirmed]` An Anthropic row's `prefixMismatchBehavior` (`drop_block` \| `error`), which ships unset with Append-only step 1, goes out as `thinking.block_binding.prefix_mismatch_behavior` to the models on the adapter's preserved-thinking list; absent sends no field and keeps the account's default ([prompt-caching.md](prompt-caching.md#server-side-controls-confirmed) → Server-side controls).
 
 ### Model → Provider routing
 
@@ -182,6 +203,8 @@ Errors are classified by duck-typing a numeric `status` field on the thrown `Err
 
 Non-Error throws (strings, objects) are treated as **permanent** — the caller is misusing the SDK. The classifier (`isRetriableProviderError`) is a pure function and is covered by a table-driven test.
 
+A call whose abort signal has fired propagates its error whatever the class: the caller cancelled it, and an abort error carries no status, so it would otherwise read as transient.
+
 Permanent errors are propagated immediately because retrying a 401 against the next provider rarely helps and burns quota — each provider has its own credential. Authentication, validation, and invalid-request errors are bugs in configuration or code, not transient infrastructure problems.
 
 ### Ordering
@@ -190,13 +213,13 @@ Every candidate in `listProvidersForModel(model)` is tried in position-ASC order
 
 ### Streaming
 
-Streaming fallback applies **only to pre-stream failures**. The wrapper establishes the candidate's stream and pulls the first event inside a try/catch — if that fails with a transient error, we move to the next candidate. Once the first byte has been yielded to the consumer, we are committed: mid-stream errors propagate and the partial output stays in history.
+Streaming fallback applies **only to pre-stream failures**. The wrapper iterates the candidate's stream with `for await` inside a try/catch — if it fails with a transient error before its first frame is forwarded, we move to the next candidate. Once a frame has been yielded to the consumer, we are committed: mid-stream errors propagate and the partial output stays in history. A consumer that stops early returns the wrapper's stream, and `for await` returns the candidate's in turn, so the candidate's request is aborted.
 
 This rule avoids two failure modes: yielding duplicated content (the agent sees the primary's tokens then restarts on the fallback), and losing context mid-turn (a tool call emitted by the primary, then a different model continuing from where it didn't start). Pre-stream recovery is safe because nothing has been committed yet.
 
 ### Observability
 
-- `logger.warn` per fallback transition — fields: `fromProvider`, `toProvider`, `errClass`, `errMessage`. One line per hop, easy to grep.
+- `logger.warn` per fallback transition — fields: `op`, `fromProvider`, `toProvider`, `errClass`, `errMessage`. One line per hop, easy to grep.
 - `logger.error` when the chain exhausts — fields: `op`, ordered `attempts` list with provider names and error descriptions.
 - `AllProvidersFailedError.attempts` carries the same list for programmatic inspection.
 
@@ -211,7 +234,7 @@ The wrapper does not deduplicate requests, rate-limit transitions, or track heal
 | Anthropic | Structured outputs (`output_config.format`), which constrain decoding to the schema. `src/llm/anthropic-output-schema.ts` keeps what Anthropic's JSON Schema limitations list as supported, `enum` and `const` included, closes every object and turns `oneOf` into `anyOf`; every other constraint, such as numeric and length bounds, moves into its node's description. The grammar doesn't guarantee `enum` and `const` casing, so a reply string matching exactly one member case-insensitively, and none exactly, takes that member's casing. A schema the grammar can't express, with an open object (`z.record`, as in a pipeline stage's JSON output schema), an untyped node (`z.unknown()`), a recursive `$ref` (a Zod schema nested in itself) or a tuple (`z.tuple`: the transform keeps only `items`, so a rest schema constrains every position and a plain tuple's `items: false` admits anything), takes the tool path: one synthetic tool carrying the schema and its definitions, left unforced (`tool_choice: auto`) and named in a system block, since forcing it is a 400 on Opus 5.5 and Fable 5.1. `chat` re-sends a schema past the grammar's compile limits (24 optional or 16 union-typed parameters, an internal grammar size, a costly `pattern`) once on the tool path, matching the 400 by message. A reply that makes no call (`MissingToolCallError`) spends `chatTyped`'s feedback retry on a re-ask repeating that instruction, as Anthropic advises for an unforced tool. |
 | OpenAI-compatible | `response_format: { type: "json_schema" }` with the schema as given. `strict: true` only when the schema fits the subset OpenAI's strict mode takes (`src/llm/openai-output-schema.ts`): every object closed and every property required, no `oneOf`, `allOf` or untyped node, listed formats only. Otherwise `strict: false`, which takes any schema as unenforced guidance; `chatTyped` validates the reply. Pipeline compilation (an open stage-output object, `oneOf`), correction extraction (`oneOf`) and memory extraction (an optional property) fall outside the subset. |
 
-Models that think by default (adaptive on Sonnet 5, always on Opus 5.5 and Fable 5.1) think on these calls too, and the thinking counts toward `max_tokens`.
+Models that think by default (adaptive on Sonnet 5 and Sonnet 5.5, always on Opus 5.5 and Fable 5.1) think on these calls too, and the thinking counts toward `max_tokens`.
 
 ## Validation
 
@@ -224,12 +247,16 @@ Validation status is tracked on the **secret** (`secrets.validated_at`), not on 
 Model limits (context window + max output tokens) come from a three-layer resolver in `src/llm/models.ts:resolveLimits(model, rowLimits)`. Layers, in priority order:
 
 1. **DB row override.** `model_providers.context_window` and `model_providers.max_output_tokens` (nullable). Set by the setup wizard or `cogmo model add` when an operator wants to pin explicit limits. Layered per-column: a row that sets only `max_output_tokens` still falls through to the next layer for `context_window`.
-2. **Bundled LiteLLM snapshot.** `data/litellm-models.json`, refreshed manually via `pnpm tsx scripts/refresh-litellm-models.ts`. Pruned to the two fields we consume; ~2,200 models covered. The loader (`src/llm/litellm-data.ts`) normalizes lookup keys through a small alias ladder — `x-ai/grok-4.3` finds `xai/grok-4.3`, `openrouter/<x>` strips the prefix, etc. — so OpenRouter slugs resolve against vendor-direct entries.
+2. **LiteLLM catalog.** LiteLLM's community registry pruned to the two fields we consume (`src/llm/litellm-upstream.ts`), ~3,200 models. It has two copies, consulted in order:
+   - **Live.** The `model-catalog-refresh` Inngest function (`src/agent/model-catalog/`) fetches the registry every six hours and on `model-catalog/refresh.requested`, which `cogmo model refresh` sends. It stores the result as the one `model_catalogs` row and installs it in the process that ran the refresh; `cogmo serve` loads the stored row at boot, before its channels start, and `cogmo model list` / `add` load it before reporting limits. A model that ships between releases therefore resolves at the next refresh. A failed fetch retries three times. A registry that isn't a JSON object, or that prunes to under half the bundled snapshot's entries, is rejected without retrying, and the stored catalog stays. `MODEL_CATALOG_URL` points the fetch at an http(s) mirror, or `off` disables both the refresh and the boot-time load. Values apply as upstream publishes them; a limit pinned on the routing row still wins.
+   - **Bundled.** `data/litellm-models.json`, regenerated with `pnpm tsx scripts/refresh-litellm-models.ts` and shipped with each release. It answers before the first refresh, when the refresh is off, and for ids the live copy lacks (retired or dropped upstream).
+
+   The loader (`src/llm/litellm-data.ts`) normalizes lookup keys through a small alias ladder — `x-ai/grok-4.3` finds `xai/grok-4.3`, `openrouter/<x>` strips the prefix, etc. — so OpenRouter slugs resolve against vendor-direct entries. The whole ladder runs against the live copy before the bundled one, so a live entry under any alias beats a bundled one.
 3. **Conservative default.** 128k context / 4k max output, with a one-time `WARN` log per unknown model. Compaction errs on the side of firing too early rather than overrunning the upstream's real limit.
 
 `resolveLimits` never throws — unknown models silently fall to the default. `getModelLimits` no longer exists; callers receive limits as a `ResolvedLlm` from `LlmProviderResolver` (the resolver loads `model_providers` once per turn and surfaces the primary row's columns alongside the adapter).
 
-`cogmo model list` prints each routing row's effective limits with the source (`db`/`litellm`/`default`) so operators can see why compaction behaves the way it does. Re-record the LiteLLM snapshot when a new flagship lands by running the refresh script and committing the diff.
+`cogmo model list` prints each routing row's effective limits with the source (`db`/`litellm`/`default`), so operators can see why compaction behaves the way it does. On stderr, it says whether `litellm` read a live catalog and when that catalog was fetched, or that the refresh is off.
 
 ## Ecosystem context
 

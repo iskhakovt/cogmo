@@ -891,9 +891,13 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // — no point burning retries on a misconfiguration. See
       // design/providers.md → Provider dispatch.
       const { provider, limits: rowLimits } = await resolveOrFail(resolveProvider, model);
-      // Layered limits: row override → bundled LiteLLM snapshot → conservative
-      // default. Always returns a value; never throws on unknown models.
-      const limits = resolveLimits(model, rowLimits);
+      // Layered limits: row override → LiteLLM catalog → conservative
+      // default. Durable: a catalog refresh landing between invocations
+      // swaps the in-process catalog, and `budget` decides which
+      // compaction steps the run plans.
+      const limits = await stepRun("freeze-model-limits", async () =>
+        resolveLimits(model, rowLimits),
+      );
       const budget = computeBudget(limits);
       const summarizationModel = snapshot.summarizationModel;
 

@@ -324,14 +324,14 @@ A handle leaves the map once it settles — finished, aborted, or failed. A fail
 ```typescript
 interface LlmProvider {
   readonly name: string;
-  chat(params: ChatParams): Promise<LlmResponse>;
-  chatStream(params: ChatParams): AsyncIterable<StreamEvent>;
+  chat(params: ChatParams, options?: ChatOptions): Promise<LlmResponse>;
+  chatStream(params: ChatParams, options?: ChatOptions): AsyncIterable<ChatStreamFrame>;
 }
 ```
 
-Each provider adapter translates native stream events to canonical `StreamEvent`. **The adapter accumulates tool input internally** — raw APIs stream tool input as JSON deltas (`input_json_delta`), but `chatStream()` yields a single `tool_start` with complete parsed input after the content block finishes. This is industry standard — Anthropic SDK, OpenAI SDK, LangChain, and Vercel AI SDK all accumulate tool calls before surfacing them.
+Each provider adapter translates native stream events to canonical `ChatStreamFrame`s — the `text_delta`, `thinking_delta` and `tool_start` members of `StreamEvent` — and ends the stream with a `done` frame carrying the stop reason and usage ([providers.md](../providers.md) → Call contract). **The adapter accumulates tool input internally** — raw APIs stream tool input as JSON deltas (`input_json_delta`), but `chatStream()` yields a single `tool_start` with complete parsed input after the content block finishes. This is industry standard — Anthropic SDK, OpenAI SDK, LangChain, and Vercel AI SDK all accumulate tool calls before surfacing them.
 
-| Provider event | StreamEvent | Notes |
+| Provider event | ChatStreamFrame | Notes |
 |-|-|-|
 | Anthropic `content_block_delta` (text) | `text_delta` | Yielded immediately |
 | Anthropic `input_json_delta` | (buffered) | Accumulated internally |
@@ -361,22 +361,27 @@ async function runStreamingAgentLoop(params: {
 
   while (true) {
     const toolDefs = tools.definitions();
+    let stopReason: StopReason | undefined;
 
-    for await (const event of provider.chatStream({ model, system: systemPrompt, messages, tools: toolDefs })) {
-      await onEvent(event);
+    for await (const frame of provider.chatStream({ model, system: systemPrompt, messages, tools: toolDefs })) {
+      if (frame.type === "done") {
+        stopReason = frame.meta.stopReason;
+        continue;
+      }
+      await onEvent(frame);
 
-      if (event.type === "tool_start") {
+      if (frame.type === "tool_start") {
         // Execute tool, emit result
-        const result = await tools.execute(event.name, event.input, service);
-        await onEvent({ type: "tool_result", name: event.name, output: result.output, isError: result.isError });
+        const result = await tools.execute(frame.name, frame.input, service);
+        await onEvent({ type: "tool_result", name: frame.name, output: result.output, isError: result.isError });
 
         // Append tool use + result to messages for next LLM call
-        messages = appendToolRoundtrip(messages, event, result);
+        messages = appendToolRoundtrip(messages, frame, result);
       }
     }
 
-    // Check if last event was end_turn (no more tool calls)
-    if (lastStopReason === "end_turn" || lastStopReason === "max_tokens") {
+    // No more tool calls
+    if (stopReason === "end_turn" || stopReason === "max_tokens") {
       break;
     }
   }
@@ -479,5 +484,5 @@ The per-channel `createRespond()` Inngest functions are eliminated.
 | `StreamEvent` type | `src/llm/types.ts` | Nothing |
 | `StreamingAdapter`, `StreamHandle` | `src/transport/types.ts` | `StreamEvent` |
 | `DeliveryRouter`, `DeliveryHandle` | `src/transport/` | `StreamingAdapter`, `Adapter`, routing logic |
-| `chatStream()` on `LlmProvider` | `src/llm/provider.ts` | `StreamEvent` |
+| `chatStream()` on `LlmProvider` | `src/llm/provider.ts` | `ChatStreamFrame` |
 | Orchestrator changes | `src/agent/handle-message.ts` | `DeliveryRouter` |

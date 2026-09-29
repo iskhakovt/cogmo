@@ -27,11 +27,12 @@ import { mock } from "vitest-mock-extended";
 import { z } from "zod";
 import { inngest } from "../inngest/client.js";
 import { AnthropicProvider } from "../llm/anthropic.js";
-import type { ChatParams, ChatStreamResult, StreamEvent, ToolDefinition } from "../llm/types.js";
+import type { ChatParams, ChatStreamFrame, ContentFrame, ToolDefinition } from "../llm/types.js";
 import { agentIterations, memoryRecallFailures } from "../metrics.js";
 import type { SkillRunner } from "../skills/runner.js";
 import { expectDefined } from "../test/assertions.js";
 import {
+  doneFrame,
   fakeRunInTx,
   MOCK_MESSAGE_CREATED_AT,
   mockAgentStore,
@@ -45,6 +46,7 @@ import {
   mockTransportStore,
   mockVoiceBundle,
   mockVoiceResolver,
+  scriptedStream,
   spyOnInngestSend,
   turnContextSent,
 } from "../test/factories.js";
@@ -990,6 +992,7 @@ describe("handle-message — replay equality", () => {
     "freeze-turn-inputs",
     "load-system-prompt",
     "auto-recall",
+    "freeze-model-limits",
     "load-last-tokens",
     "count-tokens-1",
     "open-system-prompt-epoch",
@@ -1107,17 +1110,11 @@ describe("handle-message — turn inputs frozen across re-invocations", () => {
     };
   }
 
-  function stream(events: StreamEvent[], stopReason: "tool_use" | "end_turn"): ChatStreamResult {
-    return {
-      events: (async function* () {
-        yield* events;
-      })(),
-      response: Promise.resolve({
-        stopReason,
-        model: "mock-model",
-        usage: { inputTokens: 10, outputTokens: 5 },
-      }),
-    };
+  function stream(
+    events: ContentFrame[],
+    stopReason: "tool_use" | "end_turn",
+  ): AsyncGenerator<ChatStreamFrame> {
+    return scriptedStream(events, doneFrame(stopReason, { inputTokens: 10, outputTokens: 5 }));
   }
 
   it("sends the same tools on every iteration when a skill stops loading mid-turn", async () => {
@@ -1372,6 +1369,7 @@ describe("handle-message — core-memory scope frozen across re-invocations", ()
     "freeze-core-memory-scope",
     "freeze-turn-inputs",
     "load-system-prompt",
+    "freeze-model-limits",
     "load-last-tokens",
     "open-system-prompt-epoch",
     "render-turn-context",
