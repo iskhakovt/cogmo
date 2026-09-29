@@ -80,10 +80,16 @@ export interface RegistryDeps {
   webStream?: WebStreamRegistry;
 }
 
+/** A started channel's adapter and the channel type it serves. */
+export interface ChannelAdapter {
+  channelType: string;
+  adapter: Adapter | StreamingAdapter;
+}
+
 export interface RegistryResult {
   // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
   functions: any[];
-  adapters: Array<Adapter | StreamingAdapter>;
+  adapters: ChannelAdapter[];
   adapterMap: Map<string, AdapterEntry>;
 }
 
@@ -98,7 +104,7 @@ export async function startChannels(deps: RegistryDeps): Promise<RegistryResult>
   const { transportStore, agentStore } = deps;
   // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
   const functions: any[] = [];
-  const adapters: Array<Adapter | StreamingAdapter> = [];
+  const adapters: ChannelAdapter[] = [];
   const adapterMap = new Map<string, AdapterEntry>();
 
   const channels = await deps.runInTx((tx) => transportStore.getAllChannels(tx));
@@ -170,7 +176,7 @@ export async function startChannels(deps: RegistryDeps): Promise<RegistryResult>
       ...(deps.webStream && { webStream: deps.webStream }),
     });
 
-    adapters.push(result.adapter);
+    adapters.push({ channelType: channel.type, adapter: result.adapter });
     adapterMap.set(channel.id, {
       adapter: result.adapter,
       renderOutput: mod.renderOutput,

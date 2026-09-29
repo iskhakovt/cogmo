@@ -173,10 +173,21 @@ class TelegramAdapter implements Adapter, StreamingAdapter {
   #attachments: AttachmentStore;
   #activeStreams = new Map<string, TelegramStreamHandle>();
   #polling: Promise<void> | undefined;
+  /** Highest update id whose middleware has run to completion. */
+  #lastHandledUpdateId: number | undefined;
 
   constructor(bot: Bot, attachments: AttachmentStore) {
     this.#bot = bot;
     this.#attachments = attachments;
+    // Registered before `setup` adds any handler, so it wraps them all. A
+    // handler that throws still counts: grammY treats its update as done.
+    bot.use(async (ctx, next) => {
+      try {
+        await next();
+      } finally {
+        this.#lastHandledUpdateId = Math.max(this.#lastHandledUpdateId ?? 0, ctx.update.update_id);
+      }
+    });
   }
 
   /**
@@ -274,11 +285,29 @@ class TelegramAdapter implements Adapter, StreamingAdapter {
   }
 
   async stop(): Promise<void> {
-    this.#bot.stop();
+    // `bot.stop()` aborts the pending long poll, then confirms the offset
+    // past the update being handled, with one more `getUpdates`. Call it
+    // before awaiting the polling loop, which only ends once that abort lands.
+    const confirmed = this.#bot
+      .stop()
+      .catch((err: unknown) =>
+        logger.warn({ err }, "telegram: confirming the update offset on stop failed"),
+      );
     // Drain the polling loop so any in-flight retry-backoff abort rejects
     // before this process exits — otherwise the unhandled rejection lands
     // on the runtime/test harness instead of being swallowed in attachPolling.
     if (this.#polling) await this.#polling;
+    await confirmed;
+    // grammY fixed that offset before the loop finished the batch, so the
+    // updates handled since would be redelivered on restart. Confirm past
+    // them, after grammY's call settles: concurrent `getUpdates` conflict.
+    if (this.#lastHandledUpdateId !== undefined) {
+      await this.#bot.api
+        .getUpdates({ offset: this.#lastHandledUpdateId + 1, limit: 1, timeout: 0 })
+        .catch((err: unknown) =>
+          logger.warn({ err }, "telegram: confirming the handled updates on stop failed"),
+        );
+    }
   }
 }
 

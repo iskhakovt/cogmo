@@ -6,6 +6,14 @@ import type { AgentStore } from "../store/index.js";
 /** The one key a classed profile shares with every persona. */
 export const IDENTITY_BLOCK_KEY = "identity";
 
+/** The keys `core_memory_update` names; the model may pick any other. */
+export const DOCUMENTED_BLOCK_KEYS: ReadonlyArray<string> = [
+  IDENTITY_BLOCK_KEY,
+  "user_profile",
+  "active_projects",
+  "preferences",
+];
+
 /** A stored block with its scope: `profileClass` is null for the shared block and the unclassed bucket. */
 export interface ScopedCoreMemoryBlock {
   profileClass: string | null;

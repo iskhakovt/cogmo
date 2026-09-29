@@ -11,7 +11,7 @@ import { expectDefined } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { renderInboundText } from "../../transport/content.js";
 import { inboundMessages } from "../../transport/store/schema.js";
-import { DrizzleAgentStore } from "./index.js";
+import { type CoreMemoryUpsertOutcome, DrizzleAgentStore } from "./index.js";
 import {
   conversationSummaries,
   coreMemoryBlocks,
@@ -1427,8 +1427,8 @@ describe("DrizzleAgentStore", () => {
       profileClass: string | null,
       key: string,
       content: string,
-    ): Promise<void> {
-      await tx((trx) => store.upsertCoreMemoryBlock(trx, { userId, profileClass, key, content }));
+    ): Promise<CoreMemoryUpsertOutcome> {
+      return tx((trx) => store.upsertCoreMemoryBlock(trx, { userId, profileClass, key, content }));
     }
 
     async function seedClass(userId: string, name: string): Promise<void> {
@@ -1457,6 +1457,31 @@ describe("DrizzleAgentStore", () => {
         .from(coreMemoryBlocks)
         .where(eq(coreMemoryBlocks.userId, userId));
       expect(rows).toHaveLength(1);
+    });
+
+    it("upsert reports whether it created the block, changed it or left it as it was", async () => {
+      const userId = await seedUser();
+      await seedClass(userId, "game");
+
+      expect(await upsert(userId, null, "identity", "Name: Tim")).toBe("created");
+      expect(await upsert(userId, null, "identity", "Name: Tim\nHome: Lisbon")).toBe("updated");
+      expect(await upsert(userId, null, "identity", "Name: Tim\nHome: Lisbon")).toBe("unchanged");
+      expect(await upsert(userId, "game", "identity", "Name: Tim\nHome: Lisbon")).toBe("created");
+    });
+
+    it("an upsert that leaves the content as it was keeps the block's updated_at", async () => {
+      const userId = await seedUser();
+      await upsert(userId, null, "identity", "Name: Tim");
+      const past = new Date("2026-01-01T00:00:00Z");
+      await db
+        .update(coreMemoryBlocks)
+        .set({ updatedAt: past })
+        .where(eq(coreMemoryBlocks.userId, userId));
+
+      await upsert(userId, null, "identity", "Name: Tim");
+
+      const times = await tx((trx) => store.getCoreMemoryUpdateTimes(trx, userId));
+      expect(times.map((t) => t.updatedAt)).toEqual([past]);
     });
 
     it("an unclassed read returns every NULL-class block in key order, identity included", async () => {
@@ -1542,9 +1567,12 @@ describe("DrizzleAgentStore", () => {
       await upsert(userId, "game", "identity", "Name: Thorin");
       await upsert(userId, "game", "preferences", "Dice");
 
-      await tx((trx) =>
-        store.deleteCoreMemoryBlock(trx, { userId, profileClass: "game", key: "identity" }),
-      );
+      const remove = () =>
+        tx((trx) =>
+          store.deleteCoreMemoryBlock(trx, { userId, profileClass: "game", key: "identity" }),
+        );
+      expect(await remove()).toBe(true);
+      expect(await remove()).toBe(false);
 
       const blocks = await tx((trx) => store.getCoreMemoryBlocks(trx, userId, "game"));
       expect(blocks).toEqual([
