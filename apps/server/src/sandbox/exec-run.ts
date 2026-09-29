@@ -79,6 +79,8 @@ export function runExec(backend: ExecBackend, opts: ExecOptions): Promise<ExecSt
 class ExecRun {
   #backend: ExecBackend;
   #opts: ExecOptions;
+  /** Where the run begins; `open()` enters it. */
+  #begin: ExecTransition;
   #state: ExecRunState;
   #log: typeof log;
   #stdout = new PassThrough();
@@ -101,7 +103,8 @@ class ExecRun {
     this.#backend = backend;
     this.#opts = opts;
     this.#log = log.child(backend.logFields);
-    this.#state = begin(backend.buffersStdin).state;
+    this.#begin = begin(backend.buffersStdin);
+    this.#state = this.#begin.state;
     // A failed exec fails both streams; the failure is reported by `exited`
     // too, so an unread stream must not crash the process.
     this.#stdout.on("error", () => {});
@@ -117,9 +120,7 @@ class ExecRun {
         totalMs,
       ).unref();
     }
-    this.#run(() => {
-      for (const effect of begin(this.#backend.buffersStdin).effects) this.#execute(effect);
-    });
+    this.#run(() => this.#enter(this.#begin));
     const signal = this.#opts.signal;
     if (signal?.aborted) this.#observe({ type: "dispose" });
     else {

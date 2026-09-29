@@ -37,8 +37,6 @@ export type ExecRunState =
   /** Final. `teardownFailed` while the last teardown failed. */
   | { kind: "settled"; outcome: ExecOutcome; teardownFailed: boolean };
 
-export type ExecRunStateKind = ExecRunState["kind"];
-
 export type ExecEvent =
   | { type: "stdin_ended" }
   | { type: "started" }
