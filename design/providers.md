@@ -29,12 +29,12 @@ interface LlmProvider {
 
 `chatStream` yields content frames (`text_delta`, `thinking_delta`, and `tool_start` with complete parsed input), then one `done` frame carrying `{ stopReason, model, usage }`. A failure throws from the iterator. A consumer that stops early, by `break` or a throw in its loop body, returns the iterator: the adapter's generator leaves the SDK stream's loop, which aborts the request, and ends the span.
 
-One iterable with a terminal frame, not a stream plus a `response` promise: the agent loop, the only consumer, drains every frame anyway, while a separate promise has to be settled on every path (a failure, an abandoned stream, a stream never iterated) and caught wherever nothing awaits it. It is the provider-level shape of the Vercel AI SDK (`doStream`, whose last part is `finish`) and of OpenAI's final usage chunk.
+The metadata rides in the stream because the agent loop, the only consumer, drains every frame anyway: one iterable settles on every path by construction, and the fallback wrapper passes it through with `for await`. It is the provider-level shape of the Vercel AI SDK (`doStream`, whose last part is `finish`) and of OpenAI's final usage chunk. The loop fails an iteration whose stream ends without `done` or sends anything after it.
 
 `ChatOptions.signal` cancels a call: the request is aborted, and the call rejects or the stream throws with `signal.reason` as soon as the signal fires. Both SDKs take the signal as a request option and abort the request when it fires, a retry's backoff included. The adapters close two gaps in how they report it:
 
 - They throw their own `APIUserAbortError`; the adapter throws the reason instead (`src/llm/abort.ts`).
-- They end an aborted stream quietly, as if it had finished, and the Anthropic SDK first yields the events it had buffered from the current network chunk. The adapter checks the signal before each SDK event and after the last, and throws rather than yield anything past the abort, a `done` frame for the cut-off response included.
+- They end an aborted stream quietly, as if it had finished, and the Anthropic SDK first yields the events it had buffered from the current network chunk (the OpenAI SDK checks the signal between lines). The adapters check the signal after the SDK's last event, and the Anthropic adapter before each one, so nothing past the abort is yielded, a `done` frame for the cut-off response included.
 
 The degraded-reply synthesis is the one caller that passes a signal: its 5-second cap (see [agent-resilience.md](agent-resilience.md) → Tools-free synthesis on degrade).
 
@@ -219,7 +219,7 @@ This rule avoids two failure modes: yielding duplicated content (the agent sees 
 
 ### Observability
 
-- `logger.warn` per fallback transition — fields: `fromProvider`, `toProvider`, `errClass`, `errMessage`. One line per hop, easy to grep.
+- `logger.warn` per fallback transition — fields: `op`, `fromProvider`, `toProvider`, `errClass`, `errMessage`. One line per hop, easy to grep.
 - `logger.error` when the chain exhausts — fields: `op`, ordered `attempts` list with provider names and error descriptions.
 - `AllProvidersFailedError.attempts` carries the same list for programmatic inspection.
 
