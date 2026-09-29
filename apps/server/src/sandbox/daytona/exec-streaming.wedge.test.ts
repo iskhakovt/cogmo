@@ -219,9 +219,9 @@ describe("startExecStreaming wedge regression (real @daytona/sdk + real ws)", ()
   // returned a Promise that never settled — the WS held open without a
   // close frame. Without `timeoutMs`, `await handle.wait()` blocked
   // indefinitely. With the timeout, the cap rejects within `timeoutMs`
-  // and our `cleanupSession` path runs `deleteSession` — Daytona [#2510]'s
+  // and the teardown runs `deleteSession` — Daytona [#2510]'s
   // recommended explicit-cleanup workaround for the WS-doesn't-close bug.
-  it("total timeoutMs fires + cleanupSession runs when the log-stream WS holds open silently", async () => {
+  it("total timeoutMs fires + deleteSession runs when the log-stream WS holds open silently", async () => {
     const sandbox = await daytona.get(SANDBOX_ID);
     const handle = await startExecStreaming({
       process: sandbox.process,
@@ -251,7 +251,7 @@ describe("startExecStreaming wedge regression (real @daytona/sdk + real ws)", ()
     expect(stub.deletedSessions[0]).toMatch(/^wedge-test-/);
   });
 
-  it("idleTimeoutMs fires + cleanupSession runs when WS opens but never emits a byte", async () => {
+  it("idleTimeoutMs fires + deleteSession runs when WS opens but never emits a byte", async () => {
     const sandbox = await daytona.get(SANDBOX_ID);
     stub.deletedSessions.length = 0;
     const handle = await startExecStreaming({

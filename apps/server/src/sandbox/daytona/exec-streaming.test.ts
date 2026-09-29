@@ -307,10 +307,9 @@ describe("startExecStreaming", () => {
   it("rejects wait() when getSessionCommand throws post-WS-resolve (network blip on exit-code fetch)", async () => {
     // Race window: WS closes naturally, then the follow-up
     // `getSessionCommand` HTTP fetch fails (transient daemon error,
-    // rate limit, network drop). The natural-exit branch in
-    // exec-streaming.ts catches the throw, runs `cleanupSession`, and
-    // forwards the error to wait()'s reject — consumers must NOT see
-    // a phantom exitCode=0.
+    // rate limit, network drop). The exec settles as a transport failure
+    // and still deletes its session — consumers must NOT see a phantom
+    // exitCode=0.
     const proc = fakeProcess({ wsResolve: {} });
     const fetchErr = new Error("503 Service Unavailable");
     vi.mocked(proc.getSessionCommand).mockRejectedValue(fetchErr);
