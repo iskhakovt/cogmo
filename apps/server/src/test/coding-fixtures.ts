@@ -8,8 +8,8 @@
  * `mockResolvedValue` would hide that entirely.
  */
 
-import { PassThrough } from "node:stream";
-import { ok } from "neverthrow";
+import { PassThrough, type Readable, type Writable } from "node:stream";
+import { err, ok } from "neverthrow";
 import { vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { CodingRepoRow, CodingStore, CodingTaskRow } from "../agent/coding/store/index.js";
@@ -19,6 +19,7 @@ import {
   LocalDockerSessionStateSchema,
   type SandboxClient,
   type SandboxSession,
+  unwrapExit,
 } from "../sandbox/index.js";
 
 export const FIXTURE_TASK_ID = "01a02000-0000-7000-8000-00000000ta5c";
@@ -159,23 +160,46 @@ export function statefulCodingStore(
   return { store, current: () => task };
 }
 
-/** Immediately-closed exec handle scripted with fixed output + exit code. */
-export function fakeExecHandle(result: {
-  stdout?: string;
+export interface FakeExecScript {
+  stdin?: Writable;
+  /** Text is written and the stream ended at once; a stream is the caller's to drive. */
+  stdout?: string | Readable;
+  stderr?: string | Readable;
+  /** The outcome; defaults to an exit with `exitCode` (0), or `transportError`'s failure. */
+  exited?: ExecStreamingHandle["exited"];
   exitCode?: number;
-}): ExecStreamingHandle {
-  const stdout = new PassThrough();
-  const stderr = new PassThrough();
-  if (result.stdout) stdout.write(result.stdout);
-  stdout.end();
-  stderr.end();
+  /** The transport fails: text streams fail with this error once written, and so does the exec. */
+  transportError?: Error;
+  dispose?: () => Promise<void>;
+}
+
+/** A scripted exec handle whose `wait()` is `exited` unwrapped, as on a real one. */
+export function fakeExecHandle(script: FakeExecScript): ExecStreamingHandle {
+  const { transportError } = script;
+  const exited =
+    script.exited ??
+    Promise.resolve(
+      transportError
+        ? err({ kind: "transport_failed" as const, error: transportError })
+        : ok({ exitCode: script.exitCode ?? 0 }),
+    );
   return {
-    stdout,
-    stderr,
-    exited: Promise.resolve(ok({ exitCode: result.exitCode ?? 0 })),
-    wait: async () => ({ exitCode: result.exitCode ?? 0 }),
-    dispose: async () => {},
+    ...(script.stdin !== undefined && { stdin: script.stdin }),
+    stdout: scriptedStream(script.stdout, transportError),
+    stderr: scriptedStream(script.stderr, transportError),
+    exited,
+    wait: () => exited.then(unwrapExit),
+    dispose: script.dispose ?? (async () => {}),
   };
+}
+
+function scriptedStream(content: string | Readable | undefined, failure?: Error): Readable {
+  if (content !== undefined && typeof content !== "string") return content;
+  const stream = new PassThrough();
+  if (content) stream.write(content);
+  if (failure) stream.destroy(failure);
+  else stream.end();
+  return stream;
 }
 
 export interface FakeCodingSandbox {

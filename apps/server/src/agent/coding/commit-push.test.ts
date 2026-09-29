@@ -1,13 +1,11 @@
-import { PassThrough, type Readable } from "node:stream";
-import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
-import {
-  type ExecOptions,
-  type ExecStreamingHandle,
-  type LocalDockerSessionState,
-  type SandboxSession,
-  unwrapExit,
+import type {
+  ExecOptions,
+  ExecStreamingHandle,
+  LocalDockerSessionState,
+  SandboxSession,
 } from "../../sandbox/index.js";
+import { fakeExecHandle } from "../../test/coding-fixtures.js";
 import { runCommitAndPush } from "./commit-push.js";
 
 interface FakeExecResult {
@@ -19,34 +17,7 @@ interface FakeExecResult {
 }
 
 function fakeExec(result: FakeExecResult): ExecStreamingHandle {
-  const stdout = new PassThrough();
-  const stderr = new PassThrough();
-  if (result.stdout) stdout.write(result.stdout);
-  if (result.stderr) stderr.write(result.stderr);
-  const transportError = result.transportError;
-  if (transportError) {
-    stdout.destroy(transportError);
-    stderr.destroy(transportError);
-    const exited = Promise.resolve(
-      err({ kind: "transport_failed" as const, error: transportError }),
-    );
-    return {
-      stdout: stdout as Readable,
-      stderr: stderr as Readable,
-      exited,
-      wait: () => exited.then(unwrapExit),
-      dispose: vi.fn(async () => {}),
-    };
-  }
-  stdout.end();
-  stderr.end();
-  return {
-    stdout: stdout as Readable,
-    stderr: stderr as Readable,
-    exited: Promise.resolve(ok({ exitCode: result.exitCode ?? 0 })),
-    wait: vi.fn(async () => ({ exitCode: result.exitCode ?? 0 })),
-    dispose: vi.fn(async () => {}),
-  };
+  return fakeExecHandle({ ...result, dispose: vi.fn(async () => {}) });
 }
 
 interface RecordedCall {

@@ -6,9 +6,7 @@
  * catch wiring bugs (env threading, branch flow, status transitions).
  */
 
-import { PassThrough, type Readable } from "node:stream";
 import type { Octokit } from "@octokit/rest";
-import { err, ok } from "neverthrow";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
 import {
@@ -18,7 +16,6 @@ import {
   LocalDockerSessionStateSchema,
   type SandboxClient,
   type SandboxSession,
-  unwrapExit,
 } from "../../sandbox/index.js";
 import {
   type GitHubIdentity,
@@ -26,6 +23,7 @@ import {
   serializeGitHubIdentity,
 } from "../../secrets/github.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
+import { fakeExecHandle } from "../../test/coding-fixtures.js";
 import { makeStepRun, makeStepSendEvent } from "../../test/factories.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { type CodingBackend, DrizzleCodingStore } from "./store/index.js";
@@ -60,34 +58,7 @@ interface FakeExecResult {
 }
 
 function fakeExec(result: FakeExecResult): ExecStreamingHandle {
-  const stdout = new PassThrough();
-  const stderr = new PassThrough();
-  if (result.stdout) stdout.write(result.stdout);
-  if (result.stderr) stderr.write(result.stderr);
-  const transportError = result.transportError;
-  if (transportError) {
-    stdout.destroy(transportError);
-    stderr.destroy(transportError);
-    const exited = Promise.resolve(
-      err({ kind: "transport_failed" as const, error: transportError }),
-    );
-    return {
-      stdout: stdout as Readable,
-      stderr: stderr as Readable,
-      exited,
-      wait: () => exited.then(unwrapExit),
-      dispose: vi.fn(async () => {}),
-    };
-  }
-  stdout.end();
-  stderr.end();
-  return {
-    stdout: stdout as Readable,
-    stderr: stderr as Readable,
-    exited: Promise.resolve(ok({ exitCode: result.exitCode ?? 0 })),
-    wait: vi.fn(async () => ({ exitCode: result.exitCode ?? 0 })),
-    dispose: vi.fn(async () => {}),
-  };
+  return fakeExecHandle({ ...result, dispose: vi.fn(async () => {}) });
 }
 
 interface FakeContainerScript {
