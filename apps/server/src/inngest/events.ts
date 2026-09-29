@@ -600,6 +600,14 @@ export const skillsDeployApprovalRequested = eventType("skills/deploy/approval-r
 });
 
 /**
+ * Run the model catalog refresh (`src/agent/model-catalog/refresh-function.ts`)
+ * now rather than at its next scheduled tick. Sent by `cogmo model refresh`.
+ */
+export const modelCatalogRefreshRequested = eventType("model-catalog/refresh.requested", {
+  schema: z.object({}),
+});
+
+/**
  * One fire of a user/agent-defined scheduled task. Emitted by the
  * `scheduled-task-ticker` (1-min cron) for each row whose `next_run_at`
  * has passed and is still enabled. The fire handler builds a synthetic

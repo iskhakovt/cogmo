@@ -18,6 +18,7 @@ import { randomUUID } from "node:crypto";
 import * as R from "remeda";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
+import { DEFAULT_PROFILE_MODEL } from "../setup/seed.js";
 import { expectDefined } from "../test/assertions.js";
 import { createWireRecorder, type WireResponse } from "../test/wire-recorder.js";
 import { AnthropicProvider } from "./anthropic.js";
@@ -27,9 +28,9 @@ import type { Message, ToolDefinition, Usage } from "./types.js";
 const API_KEY = (process.env.LIVE === "1" && process.env.ANTHROPIC_API_KEY) || undefined;
 
 /** The production chat model. */
-const MODEL = "claude-sonnet-5";
+const MODEL = DEFAULT_PROFILE_MODEL;
 
-/** Sonnet 5's minimum cacheable prefix, tools and system included. */
+/** Above the model's minimum cacheable prefix (Sonnet 5.5: 512, Sonnet 5: 1,024), tools and system included. */
 const MIN_CACHEABLE_TOKENS = 1024;
 
 const PROMPTS = [

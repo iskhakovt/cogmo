@@ -4,6 +4,7 @@ import { command, flag, subcommands } from "cmd-ts";
 import { choice, optionalOption } from "./cli/args.js";
 import type { MigrationCliDeps } from "./cli/memory-migrations.js";
 import type { MigrateSkillsRemoteCliDeps } from "./cli/migrate-skills-remote.js";
+import type { ModelCliDeps } from "./cli/model.js";
 import { CONSOLE_IO, type CommandTree, loadCommandGroups, runCli } from "./cli/run.js";
 import type { SkillsCliDeps } from "./cli/skills.js";
 import { RESET_SCOPES, type ResetScope } from "./setup/reset-scopes.js";
@@ -56,7 +57,7 @@ const BUILT_INS = {
 /** Command groups whose modules import the domain layer, imported on demand. */
 const GROUPS: Record<string, () => Promise<CommandTree>> = {
   provider: async () => (await import("./cli/provider.js")).providerCli(CONSOLE_IO, loadCore),
-  model: async () => (await import("./cli/model.js")).modelCli(CONSOLE_IO, loadCore),
+  model: async () => (await import("./cli/model.js")).modelCli(CONSOLE_IO, loadModelDeps),
   subagent: async () => (await import("./cli/subagent.js")).subAgentCli(CONSOLE_IO, loadCore),
   "image-provider": async () =>
     (await import("./cli/image-provider.js")).imageProviderCli(CONSOLE_IO, loadCore),
@@ -85,6 +86,34 @@ process.exit(await runCli(cogmo, argv, CONSOLE_IO));
 async function loadCore() {
   const { bootstrapCore } = await import("./index.js");
   return bootstrapCore();
+}
+
+async function loadModelDeps(): Promise<ModelCliDeps> {
+  const { env } = await import("./env.js");
+  const { runInTx, agentStore, modelCatalogStore } = await loadCore();
+  return {
+    runInTx,
+    agentStore,
+    loadLiveCatalog: async () => {
+      const { loadModelCatalog } = await import("./agent/model-catalog/load-model-catalog.js");
+      const { installLiveCatalog } = await import("./llm/litellm-data.js");
+      await loadModelCatalog({
+        runInTx,
+        modelCatalogStore,
+        installCatalog: installLiveCatalog,
+        catalogUrl: env.MODEL_CATALOG_URL,
+      });
+    },
+    // The only `model` command that needs Inngest keys, so the client loads here.
+    requestCatalogRefresh:
+      env.MODEL_CATALOG_URL === "off"
+        ? null
+        : async () => {
+            const { inngest } = await import("./inngest/client.js");
+            const { modelCatalogRefreshRequested } = await import("./inngest/events.js");
+            await inngest.send(modelCatalogRefreshRequested.create({}));
+          },
+  };
 }
 
 async function loadSkillsDeps(): Promise<SkillsCliDeps> {
