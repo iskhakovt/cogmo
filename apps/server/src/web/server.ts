@@ -4,6 +4,7 @@ import type { Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
 import type { WebStreamRegistry } from "../transport/adapters/web/stream-registry.js";
 import type { Transport } from "../transport/transport.js";
+import { finishesWithin } from "../util/finishes-within.js";
 import {
   buildClearCookie,
   buildSessionCookie,
@@ -33,11 +34,6 @@ export interface CreateWebServerDeps {
   webSessionStore: WebSessionStore;
   /** SSE bridge the chat routes register tab connections on; the WebUiAdapter writes through it. */
   webStreamRegistry: WebStreamRegistry;
-  /**
-   * Aborted at shutdown, before `close()`: ends every open chat stream, which
-   * `close()` would otherwise wait on forever.
-   */
-  shutdownSignal: AbortSignal;
   runInTx: Transactor;
   /** Constant-time compare of a presented bootstrap token to the derived one. */
   verifyLoginToken: (candidate: string) => boolean;
@@ -59,6 +55,16 @@ export interface CreateWebServerDeps {
 export interface StartWebServerDeps extends CreateWebServerDeps {
   host: string;
   port: number;
+}
+
+export interface WebServer {
+  /** The underlying server: `listen` it (tests) or read its address. */
+  server: Server;
+  /**
+   * Shut down: end every open chat stream, stop accepting connections, give
+   * requests in flight `drainMs` to finish, then close their connections.
+   */
+  close(drainMs: number): Promise<void>;
 }
 
 function send(res: ServerResponse, status: number, message: string): void {
@@ -87,7 +93,9 @@ const LoginBody = z.object({ token: z.string() });
  * `GET /*` (sirv SPA fallback). Fail-closed: anything gated without a valid
  * session is 401.
  */
-export function createWebServer(deps: CreateWebServerDeps): Server {
+export function createWebServer(deps: CreateWebServerDeps): WebServer {
+  // Aborted by `close()`: ends the chat streams, which never end on their own.
+  const shutdown = new AbortController();
   const cookieName = sessionCookieName(deps.cookieSecure);
   const serveStatic = createStaticHandler(deps.staticRoot);
 
@@ -227,7 +235,7 @@ export function createWebServer(deps: CreateWebServerDeps): Server {
           transport: deps.webTransport,
           registry: deps.webStreamRegistry,
           ownerHandle: identity.platformUserHandle,
-          shutdownSignal: deps.shutdownSignal,
+          shutdownSignal: shutdown.signal,
         });
         return;
       }
@@ -247,18 +255,40 @@ export function createWebServer(deps: CreateWebServerDeps): Server {
     send(res, 404, "Not Found");
   }
 
-  return createServer((req, res) => {
+  const server = createServer((req, res) => {
     handle(req, res).catch((err) => {
       logger.error({ err, url: req.url }, "web request handler failed");
       if (!res.headersSent) send(res, 500, "Internal Server Error");
       else res.end();
     });
   });
+  return { server, close: (drainMs) => closeWebServer(server, shutdown, drainMs) };
 }
 
-/** Start the web server on `host:port`. Returns the node `Server` for shutdown. */
-export function startWebServer(deps: StartWebServerDeps): Promise<Server> {
-  const server = createWebServer(deps);
+/**
+ * `close()` refuses new connections and reaps idle keep-alive ones, but
+ * waits on any with a response in flight. The abort ends the chat streams
+ * first; a request still open after `drainMs` has its connection closed,
+ * with `closeAllConnections()` called after `close()` as Node's docs
+ * recommend.
+ */
+async function closeWebServer(
+  server: Server,
+  shutdown: AbortController,
+  drainMs: number,
+): Promise<void> {
+  shutdown.abort();
+  const closed = new Promise<void>((resolve) => server.close(() => resolve()));
+  if (await finishesWithin(closed, drainMs)) return;
+  logger.warn({ drainMs }, "web requests outlived the drain; closing their connections");
+  server.closeAllConnections();
+  await closed;
+}
+
+/** Start the web server on `host:port`. */
+export function startWebServer(deps: StartWebServerDeps): Promise<WebServer> {
+  const web = createWebServer(deps);
+  const { server } = web;
   return new Promise((resolve, reject) => {
     // Surface a bind failure (EADDRINUSE / EACCES) as a rejected promise; without
     // this the 'error' event is unhandled (uncaught exception) and the await never
@@ -268,7 +298,7 @@ export function startWebServer(deps: StartWebServerDeps): Promise<Server> {
     server.listen(deps.port, deps.host, () => {
       server.removeListener("error", reject);
       logger.info({ host: deps.host, port: deps.port }, "web server listening");
-      resolve(server);
+      resolve(web);
     });
   });
 }

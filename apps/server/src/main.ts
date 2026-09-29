@@ -203,12 +203,10 @@ async function serve(): Promise<number> {
     webLoginToken,
     user,
   } = await bootstrap();
-  const webShutdown = new AbortController();
-  const webServer = await startWebServer({
+  const web = await startWebServer({
     webTransport,
     webSessionStore,
     webStreamRegistry,
-    shutdownSignal: webShutdown.signal,
     runInTx,
     verifyLoginToken: (candidate) => verifyWebLoginToken(candidate, webLoginToken),
     ownerUserId: user.id,
@@ -246,8 +244,7 @@ async function serve(): Promise<number> {
   } finally {
     await shutdownServe(
       {
-        webShutdown,
-        webServer,
+        web,
         adapters,
         mcpRegistry,
         sandbox,

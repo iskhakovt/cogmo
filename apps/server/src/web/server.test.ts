@@ -1,4 +1,4 @@
-import { createServer } from "node:http";
+import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { createORPCClient } from "@orpc/client";
 import { RPCLink } from "@orpc/client/fetch";
@@ -12,19 +12,17 @@ import { mockTransportDeep } from "../test/factories.js";
 import { createTestDatabase } from "../test/pglite.js";
 import { WebStreamRegistry } from "../transport/adapters/web/stream-registry.js";
 import type { webRouter } from "./rpc/router.js";
-import { createWebServer, startWebServer } from "./server.js";
+import { createWebServer, startWebServer, type WebServer } from "./server.js";
 import { hashSessionToken } from "./session/token.js";
 import { DrizzleWebSessionStore } from "./store/index.js";
 import { webSessions } from "./store/schema.js";
 
 const VALID_TOKEN = "secret-token";
-/** For the servers whose tests never shut down a stream. */
-const NO_SHUTDOWN = new AbortController().signal;
 
 let db: Database;
 let tx: Transactor;
 let close: () => Promise<void>;
-let server: ReturnType<typeof createWebServer>;
+let server: Server;
 let base: string;
 let ownerUserId: string;
 
@@ -33,11 +31,10 @@ beforeAll(async () => {
   const agentStore = new DrizzleAgentStore();
   ownerUserId = await tx(async (trx) => (await agentStore.createUser(trx)).id);
 
-  server = createWebServer({
+  ({ server } = createWebServer({
     webTransport: mockTransportDeep({ models: { list: async () => ["gpt", "claude"] } }),
     webSessionStore: new DrizzleWebSessionStore(),
     webStreamRegistry: new WebStreamRegistry(),
-    shutdownSignal: NO_SHUTDOWN,
     runInTx: tx,
     verifyLoginToken: (candidate) => candidate === VALID_TOKEN,
     ownerUserId,
@@ -45,7 +42,7 @@ beforeAll(async () => {
     cookieSecure: true,
     staticRoot: "/nonexistent-cogmo-dist",
     webDevAllowOrigin: null,
-  });
+  }));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
@@ -191,11 +188,10 @@ describe("web server", () => {
 
     it("503s behind a valid cookie when the web channel isn't provisioned", async () => {
       // Separate server with no web-scoped Transport (web channel unprovisioned).
-      const server503 = createWebServer({
+      const { server: server503 } = createWebServer({
         webTransport: null,
         webSessionStore: new DrizzleWebSessionStore(),
         webStreamRegistry: new WebStreamRegistry(),
-        shutdownSignal: NO_SHUTDOWN,
         runInTx: tx,
         verifyLoginToken: (candidate) => candidate === VALID_TOKEN,
         ownerUserId,
@@ -261,7 +257,6 @@ describe("web server", () => {
           webTransport: null,
           webSessionStore: new DrizzleWebSessionStore(),
           webStreamRegistry: new WebStreamRegistry(),
-          shutdownSignal: NO_SHUTDOWN,
           runInTx: tx,
           verifyLoginToken: () => false,
           ownerUserId,
@@ -280,10 +275,10 @@ describe("web server", () => {
 });
 
 describe("web chat routes", () => {
-  let chatServer: ReturnType<typeof createWebServer>;
+  let chatWeb: WebServer;
+  let chatServer: Server;
   let chatBase: string;
   let chatRegistry: WebStreamRegistry;
-  let chatShutdown: AbortController;
   let transport: ReturnType<typeof mockTransportDeep>;
 
   const session = {
@@ -298,13 +293,11 @@ describe("web chat routes", () => {
   /** Start a chat server with a fresh registry + transport mock (default or overridden). */
   async function start(overrides: Parameters<typeof mockTransportDeep>[0] = {}): Promise<void> {
     chatRegistry = new WebStreamRegistry();
-    chatShutdown = new AbortController();
     transport = mockTransportDeep(overrides);
-    chatServer = createWebServer({
+    chatWeb = createWebServer({
       webTransport: transport,
       webSessionStore: new DrizzleWebSessionStore(),
       webStreamRegistry: chatRegistry,
-      shutdownSignal: chatShutdown.signal,
       runInTx: tx,
       verifyLoginToken: (candidate) => candidate === VALID_TOKEN,
       ownerUserId,
@@ -313,6 +306,7 @@ describe("web chat routes", () => {
       staticRoot: "/nonexistent-cogmo-dist",
       webDevAllowOrigin: null,
     });
+    chatServer = chatWeb.server;
     await new Promise<void>((resolve) => chatServer.listen(0, "127.0.0.1", resolve));
     chatBase = `http://127.0.0.1:${(chatServer.address() as AddressInfo).port}`;
   }
@@ -449,7 +443,7 @@ describe("web chat routes", () => {
     });
   });
 
-  it("ends open streams on shutdown so close() drains", async () => {
+  it("close() ends open streams instead of waiting out the drain", async () => {
     await start();
     const cookie = await login();
     const res = await fetch(`${chatBase}/api/chat/conv-1/stream?tab=tab-1`, {
@@ -458,15 +452,31 @@ describe("web chat routes", () => {
     const reader = expectDefined(res.body, "sse body").getReader();
     await reader.read(); // stream established + tab registered
 
-    chatShutdown.abort();
-    const closed = new Promise<void>((resolve) => chatServer.close(() => resolve()));
+    await resolvesWithin(chatWeb.close(10_000), 2_500, "the server to close");
 
-    await resolvesWithin(closed, 2_000, "the server to close");
-    // A clean end of stream, not a reset: the client reconnects instead of erroring.
+    // A clean end, not a reset: eventsource-client reconnects after either,
+    // but a reset surfaces as a network error.
     let chunk = await reader.read();
     while (!chunk.done) chunk = await reader.read();
     expect(chatRegistry.size).toBe(0);
     expect(transport.closeSession).toHaveBeenCalledWith("session-resumed");
+  });
+
+  it("close() closes the connection of a request that outlives the drain", async () => {
+    // The stream route waits on the resume before it answers.
+    await start({ resumeConversation: vi.fn(() => new Promise<never>(() => {})) });
+    const cookie = await login();
+    const hung = fetch(`${chatBase}/api/chat/conv-1/stream?tab=tab-1`, {
+      headers: { cookie, "sec-fetch-site": "same-origin" },
+    }).then(
+      () => "answered",
+      () => "reset",
+    );
+    await vi.waitFor(() => expect(transport.resumeConversation).toHaveBeenCalled());
+
+    await resolvesWithin(chatWeb.close(100), 2_500, "the server to close");
+
+    expect(await hung).toBe("reset");
   });
 
   it("401s the stream without a session cookie (fail-closed)", async () => {
@@ -490,15 +500,14 @@ describe("web chat routes", () => {
 
 describe("dev CORS (WEB_DEV_ALLOW_ORIGIN)", () => {
   const DEV_ORIGIN = "http://localhost:5173";
-  let corsServer: ReturnType<typeof createWebServer>;
+  let corsServer: Server;
   let corsBase: string;
 
   beforeAll(async () => {
-    corsServer = createWebServer({
+    ({ server: corsServer } = createWebServer({
       webTransport: mockTransportDeep(),
       webSessionStore: new DrizzleWebSessionStore(),
       webStreamRegistry: new WebStreamRegistry(),
-      shutdownSignal: NO_SHUTDOWN,
       runInTx: tx,
       verifyLoginToken: (candidate) => candidate === VALID_TOKEN,
       ownerUserId,
@@ -506,7 +515,7 @@ describe("dev CORS (WEB_DEV_ALLOW_ORIGIN)", () => {
       cookieSecure: true,
       staticRoot: "/nonexistent-cogmo-dist",
       webDevAllowOrigin: DEV_ORIGIN,
-    });
+    }));
     await new Promise<void>((resolve) => corsServer.listen(0, "127.0.0.1", resolve));
     corsBase = `http://127.0.0.1:${(corsServer.address() as AddressInfo).port}`;
   });
@@ -564,11 +573,10 @@ describe("dev CORS (WEB_DEV_ALLOW_ORIGIN)", () => {
   });
 
   it("tolerates a trailing slash in the configured origin", async () => {
-    const slashServer = createWebServer({
+    const { server: slashServer } = createWebServer({
       webTransport: mockTransportDeep(),
       webSessionStore: new DrizzleWebSessionStore(),
       webStreamRegistry: new WebStreamRegistry(),
-      shutdownSignal: NO_SHUTDOWN,
       runInTx: tx,
       verifyLoginToken: (candidate) => candidate === VALID_TOKEN,
       ownerUserId,

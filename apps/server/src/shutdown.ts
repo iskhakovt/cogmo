@@ -1,13 +1,12 @@
-import type { Server } from "node:http";
 import { logger } from "./logger.js";
+import { finishesWithin } from "./util/finishes-within.js";
 
 const log = logger.child({ component: "shutdown" });
 
 /** What `cogmo serve` tears down on exit. */
 export interface ServeResources {
-  /** The web server's `shutdownSignal` controller; aborting it ends open chat streams. */
-  webShutdown: AbortController;
-  webServer: Server;
+  /** Ends open chat streams, then drains requests for up to `drainMs`. */
+  web: { close(drainMs: number): Promise<void> };
   adapters: ReadonlyArray<{ stop(): Promise<void> }>;
   mcpRegistry: { stop(): Promise<void> };
   sandbox: { shutdown(): Promise<void> } | null;
@@ -34,9 +33,9 @@ export async function shutdownServe(
   resources: ServeResources,
   bounds: ShutdownBounds,
 ): Promise<void> {
-  const { webShutdown, webServer, adapters, mcpRegistry, sandbox, closeInstance } = resources;
+  const { web, adapters, mcpRegistry, sandbox, closeInstance } = resources;
   await bounded("web server", bounds.webDrainMs + bounds.stepMs, () =>
-    closeWebServer(webShutdown, webServer, bounds.webDrainMs),
+    web.close(bounds.webDrainMs),
   );
   await Promise.all(
     adapters.map((adapter, index) =>
@@ -48,45 +47,12 @@ export async function shutdownServe(
   if (closeInstance) await bounded("sandbox instance", bounds.stepMs, closeInstance);
 }
 
-/**
- * `close()` stops accepting and reaps idle keep-alive connections, but waits
- * on any with a response in flight. The abort ends the chat streams, which
- * never finish on their own; a request still open after `drainMs` has its
- * connection closed, calling `closeAllConnections()` after `close()` as
- * Node's docs recommend.
- */
-async function closeWebServer(
-  webShutdown: AbortController,
-  server: Server,
-  drainMs: number,
-): Promise<void> {
-  webShutdown.abort();
-  const closed = new Promise<void>((resolve) => server.close(() => resolve()));
-  if (await within(closed, drainMs)) return;
-  log.warn({ drainMs }, "web requests outlived the drain; closing their connections");
-  server.closeAllConnections();
-  await closed;
-}
-
 async function bounded(step: string, ms: number, run: () => Promise<void>): Promise<void> {
   try {
-    if (!(await within(Promise.try(run), ms))) {
+    if (!(await finishesWithin(Promise.try(run), ms))) {
       log.warn({ step, ms }, "shutdown step timed out; continuing");
     }
   } catch (err) {
     log.error({ err, step }, "shutdown step failed; continuing");
-  }
-}
-
-/** `true` if `work` resolves within `ms`, `false` if not; a rejection propagates. */
-async function within(work: Promise<void>, ms: number): Promise<boolean> {
-  let timer: NodeJS.Timeout | undefined;
-  const expired = new Promise<false>((resolve) => {
-    timer = setTimeout(() => resolve(false), ms);
-  });
-  try {
-    return await Promise.race([work.then(() => true), expired]);
-  } finally {
-    clearTimeout(timer);
   }
 }
