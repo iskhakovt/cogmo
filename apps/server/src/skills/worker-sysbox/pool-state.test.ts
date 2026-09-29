@@ -102,6 +102,13 @@ const STATES = {
     spawning: 1,
     queue: ["q1"],
   },
+  /** That spawn landed and refused the waiter's grant, which waits for the busy worker. */
+  looping_busy_refused: {
+    ...EMPTY,
+    earlyDeaths: CRASH_LOOP_DEATHS,
+    workers: [at(W1, "refused"), at(W2, "leased")],
+    queue: ["q1"],
+  },
   disposed: { ...EMPTY, phase: "disposed", spawning: 1 },
 } satisfies Record<string, State>;
 
@@ -237,6 +244,7 @@ const TABLE: ReadonlyArray<Row> = [
   ["probe_refused", "died_early", ["log", "reject"], "w1:dead | q[] | s0 | e4"],
   ["probe_refused", "died_late", ["log", "spawn"], "w1:dead | q[q1] | s1 | e3"],
   ["looping_busy_spawning", "spawn_failed", ["log"], "w1:leased | q[q1] | s0 | e3 | spawn failed"],
+  ["looping_busy_refused", "died_early", ["log"], "w1:dead w2:leased | q[q1] | s0 | e4"],
   ["disposed", "acquire", ["reject"], "- | q[] | s1 | e0 | disposed"],
   ["disposed", "grant_refused", ["reject"], "- | q[] | s1 | e0 | disposed"],
   ["disposed", "spawned", ["teardown"], "- | q[] | s0 | e0 | disposed"],
