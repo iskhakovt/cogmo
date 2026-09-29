@@ -53,7 +53,6 @@ function makeRegistry(runner: Runner, toolBudget = 25) {
     runner,
     callTimeoutMs: 30_000,
     idleEvictionMs: 60_000,
-    evictionIntervalMs: 0,
     toolBudget,
   });
 }
@@ -310,6 +309,39 @@ describe("McpRegistryImpl.removeServer", () => {
     await reg.approveServer(server.id);
     await reg.removeServer(server.id);
     expect(await tx((trx) => store.getServerById(trx, server.id))).toBeUndefined();
+    await reg.stop();
+  });
+
+  it("closes the connection of a connect in flight before returning", async () => {
+    const server = await tx((trx) =>
+      store.addServer(trx, { name: "github", config: stdioConfig, enabled: true }),
+    );
+    const spawned = Promise.withResolvers<McpConnection>();
+    const spawn = vi.fn<Runner["spawn"]>(() => spawned.promise);
+    const close = vi.fn(async () => {});
+    const reg = makeRegistry({ spawn });
+    const approving = reg.approveServer(server.id);
+    await vi.waitFor(() => expect(spawn).toHaveBeenCalledOnce());
+
+    const outcome = approving.then(
+      () => "approved",
+      (e: unknown) => e,
+    );
+    const removing = reg.removeServer(server.id);
+    await vi.waitFor(async () =>
+      expect(await tx((trx) => store.getServerById(trx, server.id))).toBeUndefined(),
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    spawned.resolve({
+      callTool: vi.fn(),
+      listTools: vi.fn(async () => []),
+      onToolsChanged: vi.fn(() => () => {}),
+      onClose: vi.fn(() => () => {}),
+      close,
+    });
+    await removing;
+    expect(close).toHaveBeenCalledOnce();
+    expect(await outcome).toMatchObject({ code: "evicted" });
     await reg.stop();
   });
 });

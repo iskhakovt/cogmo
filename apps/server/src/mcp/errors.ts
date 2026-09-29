@@ -14,6 +14,18 @@ export class McpServerNotFoundError extends Error {
   }
 }
 
+export type McpPoolErrorCode = "server_not_found" | "server_unhealthy" | "evicted" | "pool_closed";
+
+/** Why the connection pool gave a caller no connection. */
+export class McpPoolError extends Error {
+  readonly code: McpPoolErrorCode;
+  constructor(code: McpPoolErrorCode, message?: string) {
+    super(message ?? code);
+    this.code = code;
+    this.name = "McpPoolError";
+  }
+}
+
 export class McpInvalidServerNameError extends Error {
   readonly invalidName: string;
   constructor(invalidName: string, message: string) {

@@ -58,6 +58,7 @@ import {
   handleVoice,
   type TelegramCommandContext,
 } from "./commands.js";
+import { commandComposer, forwardedFrom, inboundTextBlock, othersOrigin } from "./forwarded.js";
 import { postPipelineGateKeyboard } from "./pipeline-gate-poster.js";
 import { ProfileDialogs } from "./profile-dialog.js";
 import { renderTelegramHtml, stripHtmlTags } from "./render.js";
@@ -342,8 +343,10 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   const adapter = new TelegramAdapter(bot, attachments);
   const profileDialogs = new ProfileDialogs();
   const repoDialogs = new RepoDialogs();
+  // Forwarded messages never run commands; they reach the message handlers below.
+  const commands = commandComposer(bot);
 
-  bot.command("start", async (ctx) => {
+  commands.command("start", async (ctx) => {
     await ctx.reply(
       [
         "Cogmo ready. Send a message to start chatting.",
@@ -386,34 +389,34 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   // Admin commands — each delegates to a pure handler in commands.ts.
   // grammY's ctx is ducktyped to `TelegramCommandContext` at call time; `ctx.match` holds
   // the trailing text after the command word (empty string for bare `/profile`).
-  bot.command("new", (ctx) => handleNew(transport, toCmdCtx(ctx)));
-  bot.command("sessions", (ctx) => handleSessions(transport, toCmdCtx(ctx)));
-  bot.command("resume", (ctx) => handleResume(transport, toCmdCtx(ctx)));
-  bot.command("name", (ctx) => handleName(transport, toCmdCtx(ctx)));
-  bot.command("end", (ctx) => handleEnd(transport, toCmdCtx(ctx)));
-  bot.command("compact", (ctx) => handleCompact(transport, toCmdCtx(ctx)));
-  bot.command("profile", (ctx) => handleProfile(transport, toCmdCtx(ctx), profileDialogs));
-  bot.command("classes", (ctx) => handleClasses(transport, toCmdCtx(ctx)));
-  bot.command("compartments", (ctx) => handleCompartments(transport, toCmdCtx(ctx)));
-  bot.command("model", (ctx) => handleModel(transport, toCmdCtx(ctx)));
-  bot.command("repo", (ctx) => handleRepo(transport, toCmdCtx(ctx), repoDialogs));
-  bot.command("mcp", (ctx) => handleMcp(transport, toCmdCtx(ctx)));
-  bot.command("repair", (ctx) => handleRepair(transport, toCmdCtx(ctx)));
-  bot.command("voice", (ctx) => handleVoice(transport, toCmdCtx(ctx)));
-  bot.command("status", (ctx) => handleStatus(transport, toCmdCtx(ctx)));
-  bot.command("skills", (ctx) => handleSkills(transport, toCmdCtx(ctx)));
-  bot.command("disable", (ctx) => handleDisable(transport, toCmdCtx(ctx)));
-  bot.command("enable", (ctx) => handleEnable(transport, toCmdCtx(ctx)));
-  bot.command("schedules", (ctx) => handleSchedules(transport, toCmdCtx(ctx)));
-  bot.command("learned", (ctx) => handleLearned(transport, toCmdCtx(ctx)));
-  bot.command("reflect", (ctx) => handleReflect(transport, toCmdCtx(ctx)));
+  commands.command("new", (ctx) => handleNew(transport, toCmdCtx(ctx)));
+  commands.command("sessions", (ctx) => handleSessions(transport, toCmdCtx(ctx)));
+  commands.command("resume", (ctx) => handleResume(transport, toCmdCtx(ctx)));
+  commands.command("name", (ctx) => handleName(transport, toCmdCtx(ctx)));
+  commands.command("end", (ctx) => handleEnd(transport, toCmdCtx(ctx)));
+  commands.command("compact", (ctx) => handleCompact(transport, toCmdCtx(ctx)));
+  commands.command("profile", (ctx) => handleProfile(transport, toCmdCtx(ctx), profileDialogs));
+  commands.command("classes", (ctx) => handleClasses(transport, toCmdCtx(ctx)));
+  commands.command("compartments", (ctx) => handleCompartments(transport, toCmdCtx(ctx)));
+  commands.command("model", (ctx) => handleModel(transport, toCmdCtx(ctx)));
+  commands.command("repo", (ctx) => handleRepo(transport, toCmdCtx(ctx), repoDialogs));
+  commands.command("mcp", (ctx) => handleMcp(transport, toCmdCtx(ctx)));
+  commands.command("repair", (ctx) => handleRepair(transport, toCmdCtx(ctx)));
+  commands.command("voice", (ctx) => handleVoice(transport, toCmdCtx(ctx)));
+  commands.command("status", (ctx) => handleStatus(transport, toCmdCtx(ctx)));
+  commands.command("skills", (ctx) => handleSkills(transport, toCmdCtx(ctx)));
+  commands.command("disable", (ctx) => handleDisable(transport, toCmdCtx(ctx)));
+  commands.command("enable", (ctx) => handleEnable(transport, toCmdCtx(ctx)));
+  commands.command("schedules", (ctx) => handleSchedules(transport, toCmdCtx(ctx)));
+  commands.command("learned", (ctx) => handleLearned(transport, toCmdCtx(ctx)));
+  commands.command("reflect", (ctx) => handleReflect(transport, toCmdCtx(ctx)));
 
   // Mid-dialog abort for /profile new|edit and /repo add flows. Evaluate
   // both branches (no `||` short-circuit) so a hypothetical "both dialogs
   // simultaneously active" state — possible only if a future code path
   // forgets to clear one before opening the other — gets fully torn down
   // rather than leaving the second FSM live.
-  bot.command("cancel", async (ctx) => {
+  commands.command("cancel", async (ctx) => {
     const cancelledProfile = profileDialogs.cancel(ctx.chat.id);
     const cancelledRepo = repoDialogs.cancel(ctx.chat.id);
     if (cancelledProfile || cancelledRepo) {
@@ -750,8 +753,12 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
     const addr = String(ctx.chat.id);
     const handle = String(ctx.from.id);
     const platformTs = new Date(ctx.message.date * 1000);
+    // Forwarded text is packed as a marked block; the user's own stays a bare string.
+    const origin = othersOrigin(ctx.message.forward_origin, ctx.from.id);
+    const content: InboundContent =
+      origin === undefined ? ctx.message.text : [inboundTextBlock(ctx.message.text, origin)];
 
-    await dispatchInbound(ctx, addr, handle, ctx.message.text, platformTs);
+    await dispatchInbound(ctx, addr, handle, content, platformTs);
   });
 
   bot.on("message:photo", async (ctx) => {
@@ -770,9 +777,11 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
 
       const path = await transport.uploadAttachment(buffer, "image/jpeg");
       const caption = ctx.message.caption ?? "";
+      const origin = othersOrigin(ctx.message.forward_origin, ctx.from.id);
 
+      // Forwarded without a caption, the marked block is empty and names the sender.
       const content: InboundContent = [];
-      if (caption) content.push({ type: "text", text: caption });
+      if (caption || origin !== undefined) content.push(inboundTextBlock(caption, origin));
       content.push({ type: "image", path, mediaType: "image/jpeg" });
 
       await dispatchInbound(ctx, addr, handle, content, platformTs);
@@ -806,9 +815,11 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
       // — Anthropic's `document` content block doesn't accept image media
       // types and would 400-fail.
       const isImage = mediaType.startsWith("image/");
+      const origin = othersOrigin(ctx.message.forward_origin, ctx.from.id);
 
+      // Forwarded without a caption, the marked block is empty and names the sender.
       const content: InboundContent = [];
-      if (caption) content.push({ type: "text", text: caption });
+      if (caption || origin !== undefined) content.push(inboundTextBlock(caption, origin));
       if (isImage) {
         content.push({ type: "image", path, mediaType });
       } else {
@@ -847,14 +858,18 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
       const path = await transport.uploadAttachment(buffer, mediaType);
       const caption = ctx.message.caption ?? "";
       const durationMs = voice.duration ? voice.duration * 1000 : undefined;
+      const origin = othersOrigin(ctx.message.forward_origin, ctx.from.id);
 
+      // A forwarded clip is marked on its own block, so its transcript names
+      // the sender whether or not there is a caption.
       const content: InboundContent = [];
-      if (caption) content.push({ type: "text", text: caption });
+      if (caption) content.push(inboundTextBlock(caption, origin));
       content.push({
         type: "voice",
         path,
         mediaType,
         ...(durationMs !== undefined && { durationMs }),
+        ...(origin !== undefined && { forwarded: forwardedFrom(origin) }),
       });
 
       await dispatchInbound(ctx, addr, handle, content, platformTs);

@@ -18,6 +18,61 @@ export interface UiMessage {
   tools: UiToolCall[];
 }
 
+/**
+ * A run of a user message's text: the user's own, or a message they forwarded.
+ * `at` is where the run starts in the text, a stable key.
+ */
+export type UserTextSegment =
+  | { kind: "text"; text: string; at: number }
+  | { kind: "forwarded"; from: string; body: string; at: number };
+
+/**
+ * The exact element the server wraps forwarded text in: attribute values with
+ * `& " < >` as entities, and the body on its own lines unless it's empty.
+ */
+const FORWARDED_MESSAGE =
+  /<forwarded_message from="([^"<>]*)" origin="(?:user|hidden_user|chat|channel)" sent="[^"<>]*">(?:\n([\s\S]*?)\n)?<\/forwarded_message>/g;
+
+/**
+ * A user message's text split around its forwarded messages, so each renders
+ * as a quote naming its sender. Anything but the exact element stays text.
+ */
+export function splitForwarded(text: string): UserTextSegment[] {
+  const segments: UserTextSegment[] = [];
+  let at = 0;
+  for (const match of text.matchAll(FORWARDED_MESSAGE)) {
+    segments.push(...ownText(text.slice(at, match.index), at));
+    segments.push({
+      kind: "forwarded",
+      from: decodeEntities(match[1] ?? ""),
+      body: decodeForwardedTags(match[2] ?? ""),
+      at: match.index,
+    });
+    at = match.index + match[0].length;
+  }
+  if (segments.length === 0) return [{ kind: "text", text, at: 0 }];
+  return [...segments, ...ownText(text.slice(at), at)];
+}
+
+/** Text beside a forwarded message, without the line breaks that separate it from the quote. */
+function ownText(slice: string, at: number): UserTextSegment[] {
+  const text = slice.replace(/^\n+|\n+$/g, "");
+  return text === "" ? [] : [{ kind: "text", text, at }];
+}
+
+/** A body with the `forwarded_message` tags the server escaped as `&lt;` shown as written. */
+function decodeForwardedTags(body: string): string {
+  return body.replace(/&lt;(?=[\s\\/]*forwarded_message)/gi, "<");
+}
+
+function decodeEntities(value: string): string {
+  return value
+    .replace(/&quot;/g, '"')
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+}
+
 /** Map a persisted history turn into the live message model (text only — no tool history). */
 export function historyToUi(message: ChatHistoryMessage): UiMessage {
   return { id: message.id, role: message.role, text: message.text, tools: [] };

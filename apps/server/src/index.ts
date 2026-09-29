@@ -997,7 +997,6 @@ export async function bootstrapRuntime(
     runner: new McpHostRunner(),
     callTimeoutMs: env.MCP_CALL_TIMEOUT_MS,
     idleEvictionMs: env.MCP_IDLE_EVICTION_MS,
-    evictionIntervalMs: env.MCP_EVICTION_INTERVAL_MS,
     toolBudget: env.MCP_TOOL_BUDGET,
   });
   await mcpRegistry.start();
