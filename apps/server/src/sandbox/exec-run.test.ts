@@ -149,10 +149,16 @@ describe("runExec", () => {
     f.started.resolve({});
     const handle = await runExec(f.backend, { idleTimeoutMs: 100 });
     handle.stdout.resume();
+    let settled = false;
+    void handle.exited.then(() => {
+      settled = true;
+    });
     for (let i = 0; i < 5; i++) {
       await vi.advanceTimersByTimeAsync(90);
       f.sink().output("stdout", Buffer.from("tick"));
     }
+    await flush();
+    expect(settled).toBe(false);
     await vi.advanceTimersByTimeAsync(100);
     expect(await handle.exited).toEqual(
       err({ kind: "timed_out", deadline: "idle", timeoutMs: 100 }),

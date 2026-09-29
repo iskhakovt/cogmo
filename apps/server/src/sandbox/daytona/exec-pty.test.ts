@@ -496,10 +496,11 @@ describe("startExecPty", () => {
       await expect(handle.wait()).resolves.toEqual({ exitCode: 0 });
 
       ptyCtrl.emitData("late\n");
-      await vi.advanceTimersByTimeAsync(5_001);
-
-      expect(ptyCtrl.pty.kill).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(0);
       expect(vi.getTimerCount()).toBe(0);
+
+      await vi.advanceTimersByTimeAsync(5_001);
+      expect(ptyCtrl.pty.kill).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }
