@@ -19,6 +19,8 @@ Implements `AdapterModule` contract (`channelType` + `setup()`). Token extracted
 2. Send `sendChatAction("typing")` immediately
 3. Call `transport.emit(session.id, content)`
 
+Photos, documents and voice notes upload their original bytes through `transport.uploadAttachment` and emit a block carrying the path; `create-user-message` normalizes the images and checks the documents ([attachments.md](attachments.md), `[proposed]`).
+
 **Platform address:** `String(ctx.chat.id)` — delivery target for `sendMessage`. In DMs, equals the user's Telegram ID. In groups, a separate group ID.
 
 **Platform user handle:** `String(ctx.from.id)` — the user's Telegram ID, passed to transport for identity resolution.

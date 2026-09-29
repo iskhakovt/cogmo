@@ -120,6 +120,16 @@ Keys don't close every route — see `DEPLOYMENT.md` → Securing internal servi
 
 **Principle.** Block on what the first request needs and what a healthy dependency answers in well under a second; a dependency that is down or undecided holds boot for about one probe deadline before boot fails. Defer the rest with a `Promise<void>` that logs on both fulfilment and rejection (structured, includes the subsystem label) and clears any in-flight cache on rejection so the next caller retries instead of inheriting a poisoned state. Never silently swallow a deferred failure — operators read logs to discover state.
 
+## Image processing `[proposed]`
+
+`sharp` 0.35.5 normalizes inbound images ([transport/attachments.md](transport/attachments.md)). It is a runtime dependency with native code: libvips 8.18.7 and its codecs ship as prebuilt binaries in `@img/sharp-linux-{x64,arm64}` and `@img/sharp-libvips-linux-{x64,arm64}`. They suit `node:24-trixie-slim` on both platforms the runtime image builds for: glibc 2.28 or later, and SSE4.2 on x64. No Debian package is added. Loaded, it costs about 20 MB on disk and 24 MB of resident memory (measured).
+
+- **`--no-optional` drops it.** The runtime stage's `pnpm deploy --prod --no-optional` skips sharp's platform packages, which are optional dependencies, and sharp then fails to load with `ERR_DLOPEN_FAILED: libvips-cpp.so.8.18.7` (measured, pnpm 11.21). Declaring them as direct dependencies doesn't help, because the binary finds libvips through its own optional dependency. The build needs optional dependencies back for sharp, and the optional peers `--no-optional` exists to drop excluded another way, such as `ignoredOptionalDependencies`. The implementation PR picks the mechanism and checks the built image.
+- **Boot check.** `bootstrapCore` loads sharp, applies the loader allowlist and round-trips a 1 × 1 JPEG, so an image without the binary fails its first boot, not its first photo.
+- **Allocator.** The runtime image sets `MALLOC_ARENA_MAX=2`, which sharp recommends on glibc without jemalloc to limit fragmentation.
+
+How the codecs are patched and confined: [transport/attachments.md](transport/attachments.md#security-proposed) → Security.
+
 ## Deployment `[proposed]`
 
 Build TypeScript -> `dist/`. Deploy however suits the host — systemd service, Docker, etc. The app is a standard Node.js process with no special requirements beyond PostgreSQL and Redis.

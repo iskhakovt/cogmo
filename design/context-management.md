@@ -25,7 +25,13 @@ These mean compaction can be more aggressive than a system without external memo
 
 **Why not optional / heuristic-only:** Heuristic estimation (chars/4) has 20-40% error depending on content type. Tool definitions, images, and structured content skew heavily. Inaccurate counting leads to either premature compaction (wasted cost, cache invalidation) or late compaction (API rejection, degraded quality). Both providers have accurate, free counting methods — use them.
 
-**Images on OpenAI-compatible routes** `[proposed]`. `countTokens` estimates each image from its dimensions with OpenAI's tile formula, or conservatively when they are unknown. A fixed low-detail figure would undercount: from Append-only step 4 every earlier image is in view ([prompt-caching.md](prompt-caching.md#sources-and-fixes) → source (d)).
+**Images on OpenAI-compatible routes** `[proposed]`. The adapter can't tell which model a route reaches, so `countTokens` estimates each image from the dimensions its ref carries as the largest of three counts, from each vendor's vision docs ([transport/attachments.md](transport/attachments.md#sources)):
+
+- Claude's high-resolution tier: ⌈w/28⌉ × ⌈h/28⌉, at most 4,784.
+- OpenAI's patches: ⌈w/32⌉ × ⌈h/32⌉, at most 2,500, times the highest model multiplier (1.62).
+- Gemini's tiles: ⌈w/u⌉ × ⌈h/u⌉ tiles of 258 tokens, where u = ⌊min(w, h) / 1.5⌋, so a narrow image costs the most here.
+
+A fixed low-detail figure (85 tokens) would undercount, since from Append-only step 4 every earlier image is in view ([prompt-caching.md](prompt-caching.md#sources-and-fixes) → source (d)). The Anthropic count is exact, since the endpoint receives the images.
 
 **Why js-tiktoken over alternatives:** `@anthropic-ai/tokenizer` is dead (last update 2023, Claude 1/2 only — Anthropic hasn't published the Claude 3+ tokenizer). `gpt-tokenizer` is 53MB vs js-tiktoken's 22MB at identical accuracy. `tiktoken` (WASM variant) has runtime compatibility concerns. For Claude models, no local tokenizer works — the API is the only accurate option.
 
@@ -85,7 +91,7 @@ The table is **append-only**. Re-compaction inserts a new row summarizing the pr
 
 `/compact` forces Strategy 2 immediately, regardless of budget pressure, and stores the result. The next turn then starts from a summary it did not have to wait for. `src/agent/conversation/compact-conversation.ts` drives it synchronously — the same trade-off `/reflect` makes: the user is waiting on the reply, single-user scale means no concurrent fire to race, and errors surface to the caller instead of a retry log.
 
-It picks the same split the budget-triggered path would (`DEFAULT_KEEP_TURNS`). `[confirmed]` It renders the prefix through the one renderer, `[proposed]` every attachment as a placeholder naming the file, as in the turn-time fork. `[confirmed]` It carries that fork's Strategy 1 intent, triggered at the summarization model's budget, so a prefix that fits is summarized from the full tool results ([Strategy 2](#strategy-2-summarize-trigger-80) → Cleared results in the fork). Outside a turn there is no frozen tool table, so it strips every thinking block from its request ([prompt-caching.md](prompt-caching.md#sources-and-fixes) → source (h)).
+It picks the same split the budget-triggered path would (`DEFAULT_KEEP_TURNS`). `[confirmed]` It renders the prefix through the one renderer, `[proposed]` with its attachments under the conversation's cutoff and the summarization route's budget, as in the turn-time fork. `[confirmed]` It carries that fork's Strategy 1 intent, triggered at the summarization model's budget, so a prefix that fits is summarized from the full tool results ([Strategy 2](#strategy-2-summarize-trigger-80) → Cleared results in the fork). Outside a turn there is no frozen tool table, so it strips every thinking block from its request ([prompt-caching.md](prompt-caching.md#sources-and-fixes) → source (h)).
 
 Because there is no budget gate, the manual path carries a floor the automatic one does not need: below `MIN_MESSAGES_TO_COMPACT` **real messages** outside the retain window it returns `too_short` rather than paying for a call. Reaching 80% of the window on that few messages means they are individually enormous and worth summarizing; asking by hand on a short conversation is not. The floor counts messages rather than compaction-view entries, so a re-compaction can't clear it on the strength of the previous summary occupying a slot.
 
@@ -158,7 +164,7 @@ The summarization call receives the system prompt (or at minimum the core memory
 
 **Iterative compaction:** On subsequent compactions, the conversation starts with the previous summary message + newer turns. The summarization re-summarizes everything (previous summary + accumulated turns) into a fresh summary. Quality degrades compoundingly — Factory.ai data shows multi-session retention drops to ~37% after multiple compactions. Mitigation: the summarization prompt explicitly instructs verbatim preservation of key details, and Hindsight provides a recovery path for facts that drift out of the summary over time.
 
-**Images:** `ImageBlock`s in the summarized prefix are lost — images can't be meaningfully summarized into text. If the model needs to reference an earlier image, it would need to be re-sent. This is an accepted tradeoff; images in old turns are rarely referenced again, and the alternative (carrying all images forward) defeats the purpose of compaction. `[proposed]` The summarization fork receives the span's attachments as placeholders naming the file. It renders its span from `load-turn-transcript`'s rows under that policy, over the view's index range, since nothing before Strategy 2 changes the array's length ([Durable summaries](#durable-summaries-confirmed) → Cutoff derivation): the view's resolved `image` and `document` blocks carry no path to name.
+**Images:** A summary replaces the images in its span with text; if the model needs an earlier image again, the user re-sends it. `[proposed]` The summarization fork sends the span's attachments as the turn's view renders them, so the summary can describe them. Normalized images fit every route, so the fork differs only where the summarization route's budget is smaller than the turn's: there it advances its own cutoff over the span, rendering those attachments as placeholders, and strips its request's thinking ([prompt-caching.md](prompt-caching.md#sources-and-fixes) → source (h)). It renders its span from `load-turn-transcript`'s rows over the view's index range, since nothing before Strategy 2 changes the array's length ([Durable summaries](#durable-summaries-confirmed) → Cutoff derivation): a placeholder needs the ref's name, which the view's resolved blocks don't carry.
 
 **Failure handling:** If the summarization LLM call fails (timeout, rate limit, malformed output), fall through to strategy 3 (truncation). Summarization failure should not block the conversation. Nothing is stored on that path, so the next turn re-attempts rather than inheriting a partial result.
 
@@ -187,7 +193,7 @@ Anthropic requires every `tool_result` block (on a user message) to have a match
 ## Pipeline Execution
 
 ```
-cutoff = attachmentCutoff(epoch, sizes)                      # [proposed] before counting: fits attachments to their budget
+cutoff = attachmentCutoff(epoch, refSizes, limits)           # [proposed] before counting: fits attachments to their budget
 messages = render(rows, cutoff)                              # attachments up to the cutoff as placeholders
 edit = clearToolResults(trigger = budget * 0.60, keep = 5)   # Strategy 1: an intent every request carries
 
@@ -213,7 +219,7 @@ Before the next turn, estimate: `lastInputTokens + lastOutputTokens + newContent
 
 Both terms matter. The starting input for turn `N+1` is turn `N`'s input **plus** turn `N`'s output — the assistant's reply is persisted into history and becomes part of next turn's context. Tracking input alone underestimates by one response worth of tokens, which is enough to slip past the 50% threshold and skip counting when the conversation is actually close to the limit.
 
-The estimate for new user content can use chars/4 — it only needs to be conservative enough to avoid skipping counting when the conversation is actually near the limit. New content is the user's text plus the turn's context block, recalled memories included, which no earlier request carried.
+The estimate for new user content can use chars/4 — it only needs to be conservative enough to avoid skipping counting when the conversation is actually near the limit. New content is the user's text plus the turn's context block, recalled memories included, which no earlier request carried. `[proposed]` It also includes the turn's images, each at the OpenAI-compatible estimate above.
 
 The estimate needs `inputTokens` to be the total prompt size. Anthropic's `input_tokens` counts only tokens after the last cache breakpoint, so once the transcript is cached the adapter must add the cache reads and writes back in, or the fast path sees a near-empty conversation and skips the budget strategies — see [prompt-caching.md](prompt-caching.md) → Usage Accounting.
 
