@@ -1158,6 +1158,8 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       historyMessages = replaceTurnContext(historyMessages, turnPosition, renderedTurnContext);
 
       let result: AgentLoopResult;
+      // Sessions whose stream failed at finish; the reply goes to them again once persisted.
+      let unstreamed: ReadonlyArray<string> = [];
       try {
         result = await runStreamingAgentLoop({
           provider,
@@ -1260,13 +1262,18 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             ],
           };
         }
-        // A target that fails here has already shown every token it could;
-        // the loop replays from its step cache without re-emitting, so a retry
-        // would deliver nothing more. The reply persists either way.
-        const finished = await delivery.finish();
-        if (finished.isErr()) {
+        // A step, so the sessions whose stream failed are known on every
+        // later invocation. Such a stream may have shown the user nothing:
+        // append-only mode writes only at chunk boundaries and at finish. A
+        // retry of the turn wouldn't help, since replayed iterations re-emit
+        // nothing, so the reply reaches those sessions through batch delivery
+        // once it is persisted.
+        unstreamed = await step.run("finish-stream", async () => {
+          const finished = await delivery.finish();
+          if (finished.isOk()) return [];
           turnLogger.warn({ err: finished.error }, "stream delivery failed at finish");
-        }
+          return finished.error.failures.map((failure) => failure.sessionId);
+        });
       } catch (err) {
         // The loop's error decides the retry, so a failed abort is only logged.
         const aborted = await delivery.abort(err instanceof Error ? err.message : "Unknown error");
@@ -1469,6 +1476,18 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             documentsDelivered: fulfilledDocs.length,
             documentsFailed: docSettled.length - fulfilledDocs.length,
           };
+        });
+      }
+
+      // ──── DURABLE: redeliver to streams that failed at finish ────
+      //
+      // Through the target's batch `deliver`, in a step whose retries can
+      // outlast a Telegram wait the stream handle gave up on.
+      if (unstreamed.length > 0 && result.text.length > 0) {
+        const sessions = unstreamed;
+        await step.run("redeliver-unstreamed", async () => {
+          await delivery.deliverUnstreamed(sessions, result.text);
+          return { sessions: sessions.length };
         });
       }
 

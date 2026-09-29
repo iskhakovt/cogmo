@@ -64,6 +64,7 @@ import { renderTelegramHtml, stripHtmlTags } from "./render.js";
 import { RepoDialogs } from "./repo-dialog.js";
 import { postSkillsApprovalKeyboard } from "./skills-approval-poster.js";
 import { TelegramStreamHandle } from "./stream-handle.js";
+import { splitAtCap } from "./stream-state.js";
 
 export const channelType = "telegram";
 
@@ -124,18 +125,10 @@ class TelegramAdapter implements Adapter, StreamingAdapter {
   async deliver(platformAddress: string, content: RenderedMessage | JsonValue): Promise<void> {
     const chatId = Number(platformAddress);
     if (isRenderedMessage(content)) {
-      try {
-        await this.#bot.api.sendMessage(chatId, content.text, {
-          ...(content.parseMode && { parse_mode: content.parseMode }),
-        });
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "";
-        if (msg.includes("can't parse entities")) {
-          logger.warn("telegram: HTML parse failed, falling back to plain text");
-          await this.#bot.api.sendMessage(chatId, stripHtmlTags(content.text));
-        } else {
-          throw err;
-        }
+      // A reply past Telegram's cap goes out as several messages. A split can
+      // cut through a tag pair, which the parse fallback turns into plain text.
+      for (const part of splitAtCap(content.text)) {
+        await this.#sendRendered(chatId, part, content.parseMode);
       }
       // Send any attached images as separate photo messages after the text.
       for (const img of content.images ?? []) {
@@ -151,6 +144,24 @@ class TelegramAdapter implements Adapter, StreamingAdapter {
     } else {
       const text = typeof content === "string" ? content : JSON.stringify(content);
       await this.#bot.api.sendMessage(chatId, text);
+    }
+  }
+
+  /** Send one message, as plain text when Telegram can't parse its markup. */
+  async #sendRendered(
+    chatId: number,
+    text: string,
+    parseMode: RenderedMessage["parseMode"],
+  ): Promise<void> {
+    try {
+      await this.#bot.api.sendMessage(chatId, text, {
+        ...(parseMode && { parse_mode: parseMode }),
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "";
+      if (!msg.includes("can't parse entities")) throw err;
+      logger.warn("telegram: HTML parse failed, falling back to plain text");
+      await this.#bot.api.sendMessage(chatId, stripHtmlTags(text));
     }
   }
 

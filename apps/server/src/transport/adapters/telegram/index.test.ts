@@ -1490,6 +1490,20 @@ describe("telegram adapter", () => {
       expect(mockBotApi.sendMessage).toHaveBeenLastCalledWith(42, "Hello");
     });
 
+    it("reports an append-only reply its finish could not send, which it never showed", async () => {
+      const handle = await (await createStreamingAdapter()).openStream("42", "run-1", {
+        chunkChars: 4000,
+        allowEdits: false,
+      });
+      await handle.push(text("the whole reply"));
+      mockBotApi.sendMessage.mockRejectedValueOnce(
+        new Error("Call to 'sendMessage' failed! (400: Bad Request: chat not found)"),
+      );
+
+      expect(await handle.finish()).toEqual(err(expect.stringContaining("chat not found")));
+      expect(mockBotApi.editMessageText).not.toHaveBeenCalled();
+    });
+
     describe("media across a run's handles", () => {
       const image = {
         type: "tool_result",
@@ -2024,6 +2038,43 @@ describe("telegram adapter", () => {
       ).resolves.not.toThrow();
 
       expect(transport.emit).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe("deliver over Telegram's message cap", () => {
+    it("splits a long reply into messages that each fit", async () => {
+      const { adapter } = await createAdapter();
+      const paragraph = `<b>${"x".repeat(1000)}</b>`;
+      const text = Array.from({ length: 9 }, () => paragraph).join("\n\n");
+
+      await adapter.deliver("42", { text, parseMode: "HTML" });
+
+      const bodies = mockBotApi.sendMessage.mock.calls.map((call) => String(call[1]));
+      expect(bodies.length).toBeGreaterThan(1);
+      for (const body of bodies) expect(body.length).toBeLessThanOrEqual(4096);
+      expect(bodies.join("\n\n")).toBe(text);
+      for (const call of mockBotApi.sendMessage.mock.calls) {
+        expect(call[2]).toEqual({ parse_mode: "HTML" });
+      }
+    });
+
+    it("falls back to plain text for a part whose HTML the split broke", async () => {
+      const { adapter } = await createAdapter();
+      const text = `${"a".repeat(3000)}\n\n<pre>${"b".repeat(2000)}\n\n${"c".repeat(2000)}</pre>`;
+      mockBotApi.sendMessage.mockImplementation(
+        async (_chat: number, body: string, opts?: object) => {
+          if (opts !== undefined && body.split("<pre>").length !== body.split("</pre>").length) {
+            throw new Error("Bad Request: can't parse entities: unclosed tag");
+          }
+          return { message_id: 100 };
+        },
+      );
+
+      await adapter.deliver("42", { text, parseMode: "HTML" });
+
+      const sent = mockBotApi.sendMessage.mock.calls.map((call) => String(call[1]));
+      expect(sent.join("")).toContain("c".repeat(2000));
+      mockBotApi.sendMessage.mockReset().mockResolvedValue({ message_id: 100 });
     });
   });
 

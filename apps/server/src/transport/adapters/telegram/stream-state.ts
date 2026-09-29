@@ -330,6 +330,22 @@ export function findTelegramSplitBoundary(text: string, target: number): number 
   return idx;
 }
 
+/**
+ * Split `text` into parts that each fit one Telegram message, at the
+ * cleanest breaks `findTelegramSplitBoundary` finds. The break's whitespace
+ * ends its part and is trimmed off.
+ */
+export function splitAtCap(text: string): ReadonlyArray<string> {
+  const parts: string[] = [];
+  let rest = text;
+  while (rest.length > TELEGRAM_MAX_MESSAGE_LENGTH) {
+    const splitIdx = findTelegramSplitBoundary(rest, TELEGRAM_MAX_MESSAGE_LENGTH);
+    parts.push(rest.slice(0, splitIdx).trimEnd());
+    rest = rest.slice(splitIdx);
+  }
+  return [...parts, rest];
+}
+
 // --- inputs ---
 
 function onPush(

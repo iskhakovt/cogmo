@@ -804,6 +804,7 @@ export function mockDeliveryHandle(overrides?: Partial<DeliveryHandle>): Deliver
     abort: vi.fn().mockResolvedValue(ok(undefined)),
     hasBatchTargets: vi.fn().mockReturnValue(true),
     deliverBatch: vi.fn().mockResolvedValue(undefined),
+    deliverUnstreamed: vi.fn().mockResolvedValue(undefined),
     canDeliverVoice: vi.fn().mockReturnValue(false),
     deliverVoice: vi.fn().mockResolvedValue(undefined),
     ...overrides,

@@ -3993,7 +3993,9 @@ describe("createHandleMessage", () => {
   });
 
   describe("stream delivery failures", () => {
-    const deliveryFailed = new StreamDeliveryError(["telegram: chat not found"]);
+    const deliveryFailed = new StreamDeliveryError([
+      { sessionId: "session-tg", reason: "telegram: chat not found" },
+    ]);
 
     async function runTurn(deps: HandleMessageDeps): Promise<unknown> {
       return invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
@@ -4032,18 +4034,46 @@ describe("createHandleMessage", () => {
       expect(await runTurn(deps)).toBe(transient);
     });
 
-    it("persists the reply when a stream target fails at finish", async () => {
-      // Every token already went out live, and a retry replays the loop from
-      // its step cache without re-emitting, so failing the turn here would
-      // deliver nothing more.
+    it("delivers the persisted reply through a durable step when a stream fails at finish", async () => {
+      // An append-only stream shows nothing before its finish, so the reply
+      // goes out again through the target's batch delivery, in a step whose
+      // retries can outlast a long wait.
       const handle = mockDeliveryHandle({ finish: vi.fn().mockResolvedValue(err(deliveryFailed)) });
+      const deps = mockDeps({
+        deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+      });
+      const step = mockStep();
+
+      const caught = await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+        event: testEvent,
+        step,
+        runId: testRunId,
+      }).then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+
+      expect(caught).toBeUndefined();
+      expect(handle.abort).not.toHaveBeenCalled();
+      expect(handle.deliverUnstreamed).toHaveBeenCalledExactlyOnceWith(
+        ["session-tg"],
+        "Hello from assistant",
+      );
+      const stepIds = step.run.mock.calls.map((call) => String(call[0]));
+      expect(stepIds.indexOf("finish-stream")).toBeGreaterThan(-1);
+      expect(stepIds.indexOf("redeliver-unstreamed")).toBeGreaterThan(
+        stepIds.indexOf("persist-new-messages"),
+      );
+    });
+
+    it("redelivers nothing when every stream finished", async () => {
+      const handle = mockDeliveryHandle();
       const deps = mockDeps({
         deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
       });
 
       expect(await runTurn(deps)).toBeUndefined();
-      expect(handle.abort).not.toHaveBeenCalled();
-      expect(deps.agentStore.insertMessages).toHaveBeenCalled();
+      expect(handle.deliverUnstreamed).not.toHaveBeenCalled();
     });
 
     it("fails the streaming step when a push fails, so its retry reopens the streams", async () => {

@@ -208,8 +208,10 @@ inngest.createFunction({
       provider, model, systemPrompt, history, tools, service,
       onEvent: (event) => pushOrThrow(delivery, event),
     });
-    const finished = await delivery.finish();
-    if (finished.isErr()) log.warn({ err: finished.error }, "stream delivery failed at finish");
+    unstreamed = await step.run("finish-stream", async () => {
+      const finished = await delivery.finish();
+      return finished.isOk() ? [] : finished.error.failures.map((f) => f.sessionId);
+    });
   } catch (err) {
     const aborted = await delivery.abort(err instanceof Error ? err.message : "Unknown error");
     if (aborted.isErr()) log.warn({ err: aborted.error }, "stream delivery failed at abort");
@@ -222,7 +224,7 @@ A delivery failure is handled by where it happens:
 | Call | On a failed target | Why |
 |-|-|-|
 | `push` | `pushOrThrow` throws, failing the step that pushed | The step's retry re-streams the iteration into a fresh handle. |
-| `finish` | Logged; the reply persists | Every token already went out live, and replayed iterations re-emit nothing, so a retry delivers nothing more. |
+| `finish` | Logged; once persisted, the reply goes to those sessions through their adapter's batch `deliver`, in the `redeliver-unstreamed` step | The stream may have shown nothing (append-only mode writes only at chunk boundaries and at finish) or a cut-short preview, and replayed iterations re-emit nothing, so a retry of the turn wouldn't deliver it. The step's own retries can outlast a wait the handle gave up on. |
 | `abort` | Logged; the loop's error is rethrown with its classification | A delivery failure must not turn a deterministic 4xx retriable, or the reverse. |
 
 **Crash behavior:** If the process crashes mid-stream, the `llm-iter<N>` step never completed, so the retry re-runs that iteration's body and re-streams it from the top; completed iterations replay from cache without re-emitting. The adapter deduplicates the handle via `runId` — see Retry Deduplication below.

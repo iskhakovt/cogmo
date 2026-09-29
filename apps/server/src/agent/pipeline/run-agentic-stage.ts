@@ -446,6 +446,8 @@ export async function runAgenticStage(
   });
 
   let result: AgentLoopResult;
+  // Sessions whose stream failed at finish; the reply goes to them again once persisted.
+  let unstreamed: ReadonlyArray<string> = [];
   try {
     result = await deps.runStreamingAgentLoop({
       provider,
@@ -475,10 +477,16 @@ export async function runAgenticStage(
         return null;
       });
     }
-    // Every token already went out live, and a retry would re-emit none of
-    // them, so a target failing here fails nothing but itself.
-    const finished = await delivery.finish();
-    if (finished.isErr()) log.warn({ err: finished.error }, "stream delivery failed at finish");
+    // A step, so the sessions whose stream failed are known on every later
+    // invocation: such a stream may have shown nothing, and replayed
+    // iterations re-emit nothing, so the reply reaches them through batch
+    // delivery once it is persisted.
+    unstreamed = await steps.run("finish-stream", async () => {
+      const finished = await delivery.finish();
+      if (finished.isOk()) return [];
+      log.warn({ err: finished.error }, "stream delivery failed at finish");
+      return finished.error.failures.map((failure) => failure.sessionId);
+    });
   } catch (err) {
     // The loop's error decides the retry, so a failed abort is only logged.
     const aborted = await delivery.abort(err instanceof Error ? err.message : "Unknown error");
@@ -510,6 +518,16 @@ export async function runAgenticStage(
     if (!result.degraded && delivery.hasBatchTargets()) await delivery.deliverBatch(result.text);
     return null;
   });
+
+  // Through the target's batch `deliver`, in a step whose retries can outlast
+  // a Telegram wait the stream handle gave up on.
+  if (!result.degraded && unstreamed.length > 0 && result.text.length > 0) {
+    const sessions = unstreamed;
+    await steps.run("redeliver-unstreamed", async () => {
+      await delivery.deliverUnstreamed(sessions, result.text);
+      return null;
+    });
+  }
 
   if (result.degraded) {
     return {

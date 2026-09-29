@@ -33,14 +33,16 @@ The bug class to catch is #2 — and to catch it you have to **count boundaries,
 | Compact | `persist-summary` (conditional) | `agentStore.insertOrRecoverSummary` — stores what `summarize-prefix-outcome` produced; failures degrade inside the body | **DB write** | ✓ |
 | Context | `open-system-prompt-epoch` (conditional — the turn doesn't continue the epoch) | `openSystemPromptEpoch` — renders the system prompt again and `insertOrRecoverSystemPromptSnapshot`s it, keyed on the turn's row; returns the epoch | **DB write** | ✓ |
 | Context | `render-turn-context` | `storeTurnContext` — renders the turn context with the memories and core-memory changes no surviving turn context shows, and the delivery channels, and `insertOrRecoverTurnContext`s it; returns the stored text, which replaces the provisional block | **DB write** | ✓ |
-| **Streaming glue** | *(none — runs on every invocation)* | image resolution, `getProfile`, `deliveryRouter.prepare`, the live tool catalog and its binding to the frozen table, the provisional turn context and its swap, the epoch decision and thinking-block stripping, `compactMessages` orchestration, the loop's control flow, `delivery.finish` | cheap reads + deterministic assembly | ✗ |
+| **Streaming glue** | *(none — runs on every invocation)* | image resolution, `getProfile`, `deliveryRouter.prepare`, the live tool catalog and its binding to the frozen table, the provisional turn context and its swap, the epoch decision and thinking-block stripping, `compactMessages` orchestration, the loop's control flow | cheap reads + deterministic assembly | ✗ |
 | Loop | `llm-iter<N>` (one per iteration) | stream drain + in-step Class C repair; tokens stream to the delivery layer live from inside the body | **LLM stream + emission** | ✓ |
 | Loop | `tool-iter<N>-<P>` (per durable tool call) | the tool handler | **tool side effect** | ✓ |
 | Loop | `emit-tool-results-iter<N>` (per tool-bearing iteration) | push the iteration's `tool_result` events to the delivery layer | **stream pushes (media cards)** | ✓ |
 | Loop | `truncation-notice-iter<N>` (conditional — final iteration stopped at `max_tokens` with text) | push the truncation notice after the partial reply | **stream push** | ✓ |
 | Degrade | `degraded-reply` (conditional) | `synthesizeDegradedReply` + retract/apology pushes; returns the apology text | **LLM call + stream pushes** | ✓ |
+| Close | `finish-stream` | `delivery.finish`; returns the sessions whose stream failed | **stream writes** | ✓ |
 | Persist | `persist-new-messages` | `agentStore.insertMessages` (batch INSERT: intermediate tool turns + final assistant, single transaction) | **DB write** | ✓ |
 | Deliver | `batch-delivery` (conditional) | image resolution via `Promise.allSettled` + `delivery.deliverBatch` | **S3 GET + network send to batch adapters** | ✓ |
+| Deliver | `redeliver-unstreamed` (conditional — a stream failed at finish) | `delivery.deliverUnstreamed`: the reply's text through those sessions' batch `deliver` | **network send** | ✓ |
 | Notify | `send-response` | `step.sendEvent("response/ready")` | Inngest event | ✓ |
 | Resume | `flush` (conditional) | `step.sendEvent("inbound/ready")` | Inngest event | ✓ |
 

@@ -703,7 +703,9 @@ describe("createDeliveryRouter", () => {
       const aborted = await outcome(delivery.abort("LLM failed"));
 
       expect(healthy.abort).toHaveBeenCalledWith("LLM failed");
-      expect(aborted).toEqual(err(new StreamDeliveryError(["telegram down"])));
+      expect(aborted).toEqual(
+        err(new StreamDeliveryError([{ sessionId: "s1", reason: "telegram down" }])),
+      );
     });
 
     it("finishes every handle when one reports a failure", async () => {
@@ -714,7 +716,9 @@ describe("createDeliveryRouter", () => {
       const finished = await outcome(delivery.finish());
 
       expect(healthy.finish).toHaveBeenCalled();
-      expect(finished).toEqual(err(new StreamDeliveryError(["chat not found"])));
+      expect(finished).toEqual(
+        err(new StreamDeliveryError([{ sessionId: "s1", reason: "chat not found" }])),
+      );
     });
 
     it("pushes to every handle when one reports a failure", async () => {
@@ -725,7 +729,9 @@ describe("createDeliveryRouter", () => {
       const pushed = await outcome(delivery.push(textDelta));
 
       expect(healthy.push).toHaveBeenCalledWith(textDelta);
-      expect(pushed).toEqual(err(new StreamDeliveryError(["bot was blocked by the user"])));
+      expect(pushed).toEqual(
+        err(new StreamDeliveryError([{ sessionId: "s1", reason: "bot was blocked by the user" }])),
+      );
     });
 
     it("pushOrThrow throws the fan-out's failure after every handle has the event", async () => {
@@ -734,7 +740,7 @@ describe("createDeliveryRouter", () => {
       );
 
       await expect(pushOrThrow(delivery, textDelta)).rejects.toEqual(
-        new StreamDeliveryError(["chat not found"]),
+        new StreamDeliveryError([{ sessionId: "s1", reason: "chat not found" }]),
       );
       expect(healthy.push).toHaveBeenCalledWith(textDelta);
     });
@@ -745,6 +751,68 @@ describe("createDeliveryRouter", () => {
       expect(await delivery.push(textDelta)).toEqual(ok(undefined));
       expect(await delivery.finish()).toEqual(ok(undefined));
       expect(await delivery.abort("x")).toEqual(ok(undefined));
+    });
+  });
+
+  describe("a reply whose stream failed to finish", () => {
+    /** A Telegram-shaped target that streams and delivers, then a web-shaped one that only streams. */
+    async function prepareWithFailedFinish(deliver = vi.fn().mockResolvedValue(undefined)) {
+      const failing = mockStreamHandle({
+        finish: vi.fn().mockResolvedValue(err("chat not found")),
+      });
+      const telegram = {
+        ...mockStreamingAdapter({ openStream: vi.fn().mockResolvedValue(failing) }),
+        deliver,
+      };
+      const adapters = new Map<string, AdapterEntry>([
+        [
+          "ch-tg",
+          {
+            adapter: telegram,
+            renderOutput: (markdown: string) => ({ text: `<b>${markdown}</b>`, parseMode: "HTML" }),
+          },
+        ],
+        ["ch-web", { adapter: mockStreamingAdapter() }],
+      ]);
+      const transportStore = mockTransportStore({
+        getSourceSessions: vi
+          .fn()
+          .mockResolvedValue([session("s1", "ch-tg"), session("s2", "ch-web")]),
+      });
+      const router = createDeliveryRouter({ runInTx: fakeRunInTx, adapters, transportStore });
+      return { delivery: await router.prepare(ctx()), deliver };
+    }
+
+    it("delivers the reply, rendered and without media, through the target's batch deliver", async () => {
+      const { delivery, deliver } = await prepareWithFailedFinish();
+
+      const finished = await delivery.finish();
+      expect(finished).toEqual(
+        err(new StreamDeliveryError([{ sessionId: "s1", reason: "chat not found" }])),
+      );
+      await delivery.deliverUnstreamed(["s1"], "the reply");
+
+      expect(deliver).toHaveBeenCalledExactlyOnceWith("addr-s1", {
+        text: "<b>the reply</b>",
+        parseMode: "HTML",
+      });
+    });
+
+    it("skips a session whose adapter has no batch deliver", async () => {
+      const { delivery, deliver } = await prepareWithFailedFinish();
+
+      await expect(delivery.deliverUnstreamed(["s2"], "the reply")).resolves.toBeUndefined();
+      expect(deliver).not.toHaveBeenCalled();
+    });
+
+    it("rejects when the delivery fails, so its step retries", async () => {
+      const { delivery } = await prepareWithFailedFinish(
+        vi.fn().mockRejectedValue(new Error("Too Many Requests: retry after 40")),
+      );
+
+      await expect(delivery.deliverUnstreamed(["s1"], "the reply")).rejects.toThrow(
+        "retry after 40",
+      );
     });
   });
 

@@ -677,7 +677,9 @@ describe("runAgenticStage", () => {
   });
 
   describe("stream delivery failures", () => {
-    const deliveryFailed = new StreamDeliveryError(["telegram: chat not found"]);
+    const deliveryFailed = new StreamDeliveryError([
+      { sessionId: "session-tg", reason: "telegram: chat not found" },
+    ]);
 
     it("keeps a deterministic loop error non-retriable when the abort fails", async () => {
       const h = await harness();
@@ -691,15 +693,32 @@ describe("runAgenticStage", () => {
       await expect(failure).rejects.toHaveProperty("cause", badRequest);
     });
 
-    it("persists the stage's reply when a stream target fails at finish", async () => {
+    it("delivers the stage's persisted reply through a durable step when a stream fails at finish", async () => {
       const h = await harness();
       vi.mocked(h.delivery.finish).mockResolvedValue(err(deliveryFailed));
+      const { steps, ids } = recordingSteps();
 
-      const outcome = await runAgenticStage(h.deps, stageArgs(), recordingSteps().steps, log);
+      const outcome = await runAgenticStage(h.deps, stageArgs(), steps, log);
 
       expect(outcome.kind).toBe("completed");
       expect(h.delivery.abort).not.toHaveBeenCalled();
       expect(h.agentStore.insertMessages).toHaveBeenCalled();
+      expect(h.delivery.deliverUnstreamed).toHaveBeenCalledExactlyOnceWith(
+        ["session-tg"],
+        loopResult().text,
+      );
+      expect(ids).toContain("finish-stream");
+      expect(ids.indexOf("redeliver-unstreamed")).toBeGreaterThan(
+        ids.indexOf("persist-new-messages"),
+      );
+    });
+
+    it("redelivers nothing when every stream finished", async () => {
+      const h = await harness();
+
+      await runAgenticStage(h.deps, stageArgs(), recordingSteps().steps, log);
+
+      expect(h.delivery.deliverUnstreamed).not.toHaveBeenCalled();
     });
   });
 });
