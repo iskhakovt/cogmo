@@ -96,6 +96,9 @@ export class AnthropicProvider implements LlmProvider {
         let unparsed: ProviderProtocolError | undefined;
 
         for await (const event of stream) {
+          // Once the signal fires, the SDK still yields the events it had
+          // buffered from the current network chunk, then ends quietly.
+          signal?.throwIfAborted();
           if (unparsed !== undefined) {
             if (event.type === "message_delta") {
               const cutOff = fromAnthropicStopReason(event.delta.stop_reason) === "max_tokens";
@@ -192,7 +195,6 @@ export class AnthropicProvider implements LlmProvider {
           }
         }
 
-        // The SDK ends its stream quietly when the signal fires.
         signal?.throwIfAborted();
         if (unparsed !== undefined) throw unparsed;
         recordChatUsage(span, providerName, model, usage, stopReason);

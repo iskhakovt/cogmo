@@ -954,6 +954,48 @@ describe("AnthropicProvider", () => {
       await expect(drained).rejects.toBe(reason);
       expect(collected).toEqual([{ type: "text_delta", text: "Hel" }]);
     });
+
+    it("yields none of the events the SDK had buffered when the signal fired", async () => {
+      // The SDK yields every event already parsed from the current network
+      // chunk before its read of the next one sees the abort.
+      const provider = createProvider();
+      const controller = new AbortController();
+      const reason = new Error("cancelled");
+      mockCreate.mockResolvedValueOnce(
+        mockStream([
+          {
+            type: "message_start",
+            message: { model: "claude-sonnet-5", usage: { input_tokens: 5, output_tokens: 0 } },
+          },
+          { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+          { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Hel" } },
+          { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "lo" } },
+          { type: "content_block_stop", index: 0 },
+          {
+            type: "content_block_start",
+            index: 1,
+            content_block: { type: "tool_use", id: "tu_1", name: "search" },
+          },
+          {
+            type: "content_block_delta",
+            index: 1,
+            delta: { type: "input_json_delta", partial_json: '{"q":"x"}' },
+          },
+          { type: "content_block_stop", index: 1 },
+        ]),
+      );
+
+      const collected: ChatStreamFrame[] = [];
+      const drained = (async () => {
+        for await (const frame of provider.chatStream(params, { signal: controller.signal })) {
+          collected.push(frame);
+          controller.abort(reason);
+        }
+      })();
+
+      await expect(drained).rejects.toBe(reason);
+      expect(collected).toEqual([{ type: "text_delta", text: "Hel" }]);
+    });
   });
 
   describe("prompt caching", () => {

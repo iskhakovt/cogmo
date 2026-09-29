@@ -34,7 +34,7 @@ One iterable with a terminal frame, not a stream plus a `response` promise: the 
 `ChatOptions.signal` cancels a call: the request is aborted, and the call rejects or the stream throws with `signal.reason` as soon as the signal fires. Both SDKs take the signal as a request option and abort the request when it fires, a retry's backoff included. The adapters close two gaps in how they report it:
 
 - They throw their own `APIUserAbortError`; the adapter throws the reason instead (`src/llm/abort.ts`).
-- They end an aborted stream quietly, as if it had finished. The adapter checks the signal after the SDK's stream and throws, rather than yielding `done` for a cut-off response.
+- They end an aborted stream quietly, as if it had finished, and the Anthropic SDK first yields the events it had buffered from the current network chunk. The adapter checks the signal before each SDK event and after the last, and throws rather than yield anything past the abort, a `done` frame for the cut-off response included.
 
 The degraded-reply synthesis is the one caller that passes a signal: its 5-second cap (see [agent-resilience.md](agent-resilience.md) → Tools-free synthesis on degrade).
 

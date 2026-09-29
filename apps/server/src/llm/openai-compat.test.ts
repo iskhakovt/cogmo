@@ -1088,6 +1088,32 @@ describe("OpenAICompatibleProvider", () => {
       await expect(drained).rejects.toBe(reason);
     });
 
+    it("yields nothing after the signal fires mid-stream", async () => {
+      // The SDK checks its signal before each line it yields, then ends quietly.
+      const provider = createProvider();
+      const controller = new AbortController();
+      const reason = new Error("cancelled");
+      mockCreate.mockImplementationOnce(async (_body: unknown, options: { signal: AbortSignal }) =>
+        (async function* () {
+          for (const text of ["Hel", "lo", ", world"]) {
+            if (options.signal.aborted) return;
+            yield { model: "m", choices: [{ delta: { content: text }, finish_reason: null }] };
+          }
+        })(),
+      );
+
+      const collected: ChatStreamFrame[] = [];
+      const drained = (async () => {
+        for await (const frame of provider.chatStream(params, { signal: controller.signal })) {
+          collected.push(frame);
+          controller.abort(reason);
+        }
+      })();
+
+      await expect(drained).rejects.toBe(reason);
+      expect(collected).toEqual([{ type: "text_delta", text: "Hel" }]);
+    });
+
     it("throws the signal's reason, not a partial tool call, when the SDK ends an aborted stream", async () => {
       const provider = createProvider();
       const controller = new AbortController();
