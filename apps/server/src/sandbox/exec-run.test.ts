@@ -155,11 +155,20 @@ describe("runExec", () => {
   it("a single dispose retries the teardown it arrived during, when that one fails", async () => {
     const f = fakeBackend();
     f.started.resolve({});
+    let retried = false;
     f.backend.teardown
       .mockImplementationOnce(
         () => new Promise((_, reject) => setTimeout(() => reject(new Error("flaky")), 20)),
       )
-      .mockResolvedValueOnce(undefined);
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) =>
+            setTimeout(() => {
+              retried = true;
+              resolve();
+            }, 20),
+          ),
+      );
     const handle = await runExec(f.backend, {});
     f.sink().ended();
     f.exit.resolve(ok(0));
@@ -171,6 +180,8 @@ describe("runExec", () => {
     }
 
     expect(f.backend.teardown).toHaveBeenCalledTimes(2);
+    // `dispose()` waited for the retry too.
+    expect(retried).toBe(true);
   });
 
   it("dispose() from a data handler resolves only after the teardown it caused", async () => {

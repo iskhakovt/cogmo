@@ -103,8 +103,7 @@ class ExecRun {
   /** Every teardown so far. */
   #teardowns: Promise<void> = Promise.resolve();
   #queue: ExecEvent[] = [];
-  /** Set while the queue is being drained; resolves when it has. */
-  #draining: PromiseWithResolvers<void> | undefined;
+  #processing = false;
 
   constructor(backend: ExecBackend, opts: ExecOptions) {
     this.#backend = backend;
@@ -158,13 +157,13 @@ class ExecRun {
   }
 
   /**
-   * Once everything a dispose can have set off is done: the event queue has
-   * drained, a start in flight has settled (or `TEARDOWN_TIMEOUT_MS` passed
-   * waiting for it), and every teardown so far, retries included, has
-   * finished or given up.
+   * Once everything a dispose can have set off is done: a start in flight
+   * has settled (or `TEARDOWN_TIMEOUT_MS` passed waiting for it), and every
+   * teardown so far, retries included, has finished or given up. Nothing is
+   * read before the first `await`: a dispose raised while effects run is
+   * only queued, and the queue drains synchronously before it resumes.
    */
   async #quiesced(): Promise<void> {
-    await this.#draining?.promise;
     await settledWithin(this.#starting, TEARDOWN_TIMEOUT_MS);
     for (let seen = this.#teardowns; ; seen = this.#teardowns) {
       await seen;
@@ -198,17 +197,15 @@ class ExecRun {
 
   /** Run `work`, then every queued event in order, unless a run is already under way. */
   #run(work: () => void): void {
-    if (this.#draining) return;
-    const draining = Promise.withResolvers<void>();
-    this.#draining = draining;
+    if (this.#processing) return;
+    this.#processing = true;
     try {
       work();
       for (let next = this.#queue.shift(); next; next = this.#queue.shift()) {
         this.#enter(transition(this.#state, next));
       }
     } finally {
-      this.#draining = undefined;
-      draining.resolve();
+      this.#processing = false;
     }
   }
 
