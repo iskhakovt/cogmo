@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { applyStreamEvent, convertMessage, historyToUi, type UiMessage } from "./convert.js";
+import {
+  applyStreamEvent,
+  convertMessage,
+  historyToUi,
+  splitForwarded,
+  type UiMessage,
+} from "./convert.js";
 
 const assistant: UiMessage = { id: "a1", role: "assistant", text: "", tools: [] };
 
@@ -130,5 +136,55 @@ describe("historyToUi", () => {
       text: "hi",
       tools: [],
     });
+  });
+});
+
+describe("splitForwarded", () => {
+  const open =
+    '<forwarded_message from="Alice Smith" origin="user" sent="2023-11-14T22:13:20.000Z">';
+
+  it("keeps a message with no forwarded element as one text run", () => {
+    expect(splitForwarded("hello\n")).toEqual([{ kind: "text", text: "hello\n", at: 0 }]);
+  });
+
+  it("splits a forwarded message from the user's own text around it", () => {
+    const text = `${open}\nsee you at 8\nbring snacks\n</forwarded_message>\nis this right?`;
+
+    expect(splitForwarded(text)).toEqual([
+      { kind: "forwarded", from: "Alice Smith", body: "see you at 8\nbring snacks", at: 0 },
+      { kind: "text", text: "is this right?", at: text.indexOf("\nis this") },
+    ]);
+  });
+
+  it("reads an empty element as a forward with no body", () => {
+    expect(splitForwarded(`${open}</forwarded_message>`)).toEqual([
+      { kind: "forwarded", from: "Alice Smith", body: "", at: 0 },
+    ]);
+  });
+
+  it("decodes the entities in the sender's name", () => {
+    const text =
+      '<forwarded_message from="Eve &quot;the &lt;b&gt;&quot; &amp; co" origin="chat" ' +
+      'sent="2023-11-14T22:13:20.000Z">\nhi\n</forwarded_message>';
+
+    expect(splitForwarded(text)).toEqual([
+      { kind: "forwarded", from: 'Eve "the <b>" & co', body: "hi", at: 0 },
+    ]);
+  });
+
+  it.each([
+    [
+      "an unknown origin",
+      '<forwarded_message from="A" origin="bot" sent="x">\nhi\n</forwarded_message>',
+    ],
+    ["a missing attribute", '<forwarded_message from="A" origin="user">\nhi\n</forwarded_message>'],
+    ["no newlines around the body", `${open}hi</forwarded_message>`],
+    ["no closing tag", `${open}\nhi\n`],
+    [
+      "the JSON form of a turn with an attachment",
+      JSON.stringify([{ type: "text", text: `${open}\nhi\n</forwarded_message>` }]),
+    ],
+  ])("leaves %s as plain text", (_label, text) => {
+    expect(splitForwarded(text)).toEqual([{ kind: "text", text, at: 0 }]);
   });
 });
