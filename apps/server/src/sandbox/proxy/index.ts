@@ -105,6 +105,9 @@ export class CogmoSocketProxy {
    * with a placeholder parent docker id and updates after `createContainer`
    * doesn't disrupt connections in flight). Returns the same path either
    * way so callers can store it once at first register.
+   *
+   * Rejects if the socket can't be bound, and with the abort reason when
+   * `unregisterTask` or `close` runs before the bind completes.
    */
   async registerTask(scope: TaskScope): Promise<string> {
     if (this.#closed) throw new Error("proxy is closed");
@@ -158,11 +161,7 @@ export class CogmoSocketProxy {
     const controller = new AbortController();
     const { signal } = controller;
     const server = net.createServer((socket) => {
-      // Accepted between the abort and the listener's close.
-      if (signal.aborted) {
-        socket.destroy();
-        return;
-      }
+      // Destroys the socket at once if it was accepted after the abort.
       addAbortSignal(signal, socket);
       CONNECTION_TASK.set(socket, { taskId, signal });
       this.#httpServer.emit("connection", socket);
@@ -211,7 +210,10 @@ export class CogmoSocketProxy {
     const { signal } = connection;
     if (route.kind === "policy" && route.subject === "container_create") {
       this.#handleContainerCreate(req, res, scope, signal).catch((err: unknown) => {
-        log.error({ err, taskId: scope.taskId }, "container_create policy failed");
+        // An unregister mid-read resets the body stream: teardown, not a fault.
+        if (!signal.aborted) {
+          log.error({ err, taskId: scope.taskId }, "container_create policy failed");
+        }
         if (!res.headersSent) {
           respondJson(res, 500, { message: `Cogmo proxy: ${(err as Error).message}` });
         }
