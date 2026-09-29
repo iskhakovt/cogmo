@@ -59,6 +59,15 @@ function mediaOf(event: MediaResult): Media | null {
   return document && { kind: "document", path: document.path, filename: document.name };
 }
 
+/**
+ * The media paths a run has delivered. Every handle the run opens shares it,
+ * so the one replacing a failed handle doesn't send them again.
+ */
+export interface SentMedia {
+  has(path: string): boolean;
+  add(path: string): void;
+}
+
 /** A stream handle that tells when it has settled. */
 export interface SettlingStreamHandle extends StreamHandle {
   /** Resolves once the stream is done, or with why it failed. */
@@ -76,8 +85,9 @@ export interface SettlingStreamHandle extends StreamHandle {
  * failed. `finish` and `abort` resolve with `done`.
  *
  * Generated images and documents go out mid-stream via `sendPhoto` /
- * `sendDocument`, once per path: a push that repeats one — an Inngest retry
- * re-emitting it — sends nothing.
+ * `sendDocument`, once per path across the run: a push that repeats one — an
+ * Inngest retry re-emitting it, on this handle or its replacement — sends
+ * nothing.
  */
 export class TelegramStreamHandle implements SettlingStreamHandle {
   readonly #bot: Bot;
@@ -94,8 +104,7 @@ export class TelegramStreamHandle implements SettlingStreamHandle {
   #inFlight: Promise<void> | null = null;
   /** The pending `retry_after` wait. */
   #wait: ReturnType<typeof setTimeout> | null = null;
-  /** Paths of media already delivered. */
-  readonly #sentMedia = new Set<string>();
+  readonly #sentMedia: SentMedia;
 
   constructor(
     bot: Bot,
@@ -103,7 +112,9 @@ export class TelegramStreamHandle implements SettlingStreamHandle {
     chatId: number,
     runId: string,
     opts: StreamOpts,
+    sentMedia: SentMedia,
   ) {
+    this.#sentMedia = sentMedia;
     this.#bot = bot;
     this.#attachments = attachments;
     this.#chatId = chatId;

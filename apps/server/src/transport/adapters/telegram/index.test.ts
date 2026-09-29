@@ -1490,6 +1490,44 @@ describe("telegram adapter", () => {
       expect(mockBotApi.sendMessage).toHaveBeenLastCalledWith(42, "Hello");
     });
 
+    describe("media across a run's handles", () => {
+      const image = {
+        type: "tool_result",
+        name: "generate_image",
+        output: JSON.stringify({ path: "generated/a.jpg", mediaType: "image/jpeg" }),
+      } as const;
+
+      it("does not resend a photo from the handle that replaces a failed one", async () => {
+        const adapter = await createStreamingAdapter();
+        const first = await adapter.openStream("42", "run-1");
+        await first.push(text("Drawing"));
+        await first.push(image);
+        mockBotApi.editMessageText.mockRejectedValueOnce(
+          new Error("Call to 'editMessageText' failed! (400: Bad Request: chat not found)"),
+        );
+        await vi.advanceTimersByTimeAsync(600);
+        expect(await first.push(text("…"))).toEqual(err(expect.stringContaining("chat not found")));
+
+        const retry = await adapter.openStream("42", "run-1");
+        expect(retry).not.toBe(first);
+        await retry.push(text("Drawing"));
+        await retry.push(image);
+
+        expect(mockBotApi.sendPhoto).toHaveBeenCalledTimes(1);
+      });
+
+      it("forgets a run's media once its stream finishes", async () => {
+        const adapter = await createStreamingAdapter();
+        const first = await adapter.openStream("42", "run-1");
+        await first.push(image);
+        expect(await first.finish()).toEqual(ok(undefined));
+
+        await (await adapter.openStream("42", "run-1")).push(image);
+
+        expect(mockBotApi.sendPhoto).toHaveBeenCalledTimes(2);
+      });
+    });
+
     it("keeps the handle for the run while a rate-limited write waits", async () => {
       // A retry that reopens the stream mid-wait joins the same live message.
       const adapter = await createStreamingAdapter();
