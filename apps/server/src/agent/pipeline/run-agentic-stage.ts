@@ -37,7 +37,7 @@ import type { MemoryProvider } from "../../memory/provider.js";
 import type { SkillRunner } from "../../skills/runner.js";
 import { buildSkillTools, composeTurnTools } from "../../skills/skill-tool-builder.js";
 import { createSkillsService } from "../../skills/skills-service.js";
-import type { DeliveryRouter } from "../../transport/delivery-router.js";
+import { type DeliveryRouter, pushOrThrow } from "../../transport/delivery-router.js";
 import type { TransportStore } from "../../transport/store/index.js";
 import type { CodingService } from "../coding/service.js";
 import {
@@ -455,7 +455,7 @@ export async function runAgenticStage(
       tools: stageTools,
       service,
       maxTokens: limits.maxOutputTokens,
-      onEvent: (event) => delivery.push(event),
+      onEvent: (event) => pushOrThrow(delivery, event),
       stepRun: steps.stepRun,
       turnKey: inboundId,
       cache: turnCacheIntent(conversationId, "stage"),
@@ -471,13 +471,18 @@ export async function runAgenticStage(
       : null;
     if (retraction) {
       await steps.run("retract-degraded-output", async () => {
-        await delivery.push({ type: "retract", ...retraction });
+        await pushOrThrow(delivery, { type: "retract", ...retraction });
         return null;
       });
     }
-    await delivery.finish();
+    // Every token already went out live, and a retry would re-emit none of
+    // them, so a target failing here fails nothing but itself.
+    const finished = await delivery.finish();
+    if (finished.isErr()) log.warn({ err: finished.error }, "stream delivery failed at finish");
   } catch (err) {
-    await delivery.abort(err instanceof Error ? err.message : "Unknown error");
+    // The loop's error decides the retry, so a failed abort is only logged.
+    const aborted = await delivery.abort(err instanceof Error ? err.message : "Unknown error");
+    if (aborted.isErr()) log.warn({ err: aborted.error }, "stream delivery failed at abort");
     if (!isRetriableProviderError(err)) throw asNonRetriable(err);
     // Rethrown unwrapped: a permanently failed step surfaces as Inngest's
     // StepError, whose identity the engine's non-retriable detection needs.

@@ -1,6 +1,8 @@
+import { err, ok, type Result } from "neverthrow";
 import type { Transactor } from "../db/index.js";
 import type { StreamEvent } from "../llm/types.js";
 import { logger } from "../logger.js";
+import { describeError } from "../util/describe-error.js";
 import type {
   OutboundDocument,
   OutboundImage,
@@ -43,16 +45,29 @@ export interface RoutingContext {
   streamOpts?: StreamOpts;
 }
 
+/** The stream targets a fan-out could not reach, each with its reason. */
+export class StreamDeliveryError extends Error {
+  readonly failures: ReadonlyArray<string>;
+  constructor(failures: ReadonlyArray<string>) {
+    super(`stream delivery failed: ${failures.join("; ")}`);
+    this.name = "StreamDeliveryError";
+    this.failures = failures;
+  }
+}
+
 /**
  * Handle to an in-progress delivery — fans out to both streaming and batch targets.
  *
  * The orchestrator calls push() during streaming, finish()/abort() at the end,
  * and deliverBatch() after persisting the final message.
+ *
+ * `push`, `finish` and `abort` reach every stream target, concurrently,
+ * whichever of them fail; they err with every target that failed.
  */
 export interface DeliveryHandle {
-  push(event: StreamEvent): Promise<void>;
-  finish(): Promise<void>;
-  abort(error: string): Promise<void>;
+  push(event: StreamEvent): Promise<Result<void, StreamDeliveryError>>;
+  finish(): Promise<Result<void, StreamDeliveryError>>;
+  abort(error: string): Promise<Result<void, StreamDeliveryError>>;
   /**
    * Whether this delivery has any non-streaming targets.
    *
@@ -205,21 +220,9 @@ export function createDeliveryRouter(deps: DeliveryRouterDeps): DeliveryRouter {
       // share session state with prepare(), since failure notification can
       // arrive long after the turn that triggered it.)
       return {
-        async push(event: StreamEvent): Promise<void> {
-          for (const handle of streamHandles) {
-            await handle.push(event);
-          }
-        },
-        async finish(): Promise<void> {
-          for (const handle of streamHandles) {
-            await handle.finish();
-          }
-        },
-        async abort(error: string): Promise<void> {
-          for (const handle of streamHandles) {
-            await handle.abort(error);
-          }
-        },
+        push: (event) => fanOut(streamHandles, (handle) => handle.push(event)),
+        finish: () => fanOut(streamHandles, (handle) => handle.finish()),
+        abort: (error) => fanOut(streamHandles, (handle) => handle.abort(error)),
         hasBatchTargets(): boolean {
           return batchTargets.length > 0;
         },
@@ -299,6 +302,32 @@ export function createDeliveryRouter(deps: DeliveryRouterDeps): DeliveryRouter {
       }
     },
   };
+}
+
+/**
+ * Push `event`, throwing when a target failed. Inside a step, that fails the
+ * step, and the step's retry reopens the streams: the failed handle has left
+ * its adapter, so the retry streams into a fresh one.
+ */
+export async function pushOrThrow(delivery: DeliveryHandle, event: StreamEvent): Promise<void> {
+  const pushed = await delivery.push(event);
+  if (pushed.isErr()) throw pushed.error;
+}
+
+/**
+ * Call every handle at once and collect the failures. A handle that rejects
+ * rather than returning its failure counts as failed all the same.
+ */
+async function fanOut(
+  handles: ReadonlyArray<StreamHandle>,
+  call: (handle: StreamHandle) => Promise<Result<void, string>>,
+): Promise<Result<void, StreamDeliveryError>> {
+  const settled = await Promise.allSettled(handles.map(call));
+  const failures = settled.flatMap((outcome) => {
+    if (outcome.status === "rejected") return [describeError(outcome.reason)];
+    return outcome.value.isErr() ? [outcome.value.error] : [];
+  });
+  return failures.length === 0 ? ok(undefined) : err(new StreamDeliveryError(failures));
 }
 
 function hasDeliver(adapter: AdapterEntry["adapter"]): adapter is Adapter {

@@ -1,3 +1,4 @@
+import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import type { StreamEvent } from "../llm/types.js";
 import {
@@ -7,9 +8,15 @@ import {
   mockStreamingAdapter,
   mockTransportStore,
 } from "../test/factories.js";
-import { type AdapterEntry, createDeliveryRouter, type RoutingContext } from "./delivery-router.js";
+import {
+  type AdapterEntry,
+  createDeliveryRouter,
+  type RoutingContext,
+  StreamDeliveryError,
+} from "./delivery-router.js";
 import type { Session } from "./store/index.js";
 import type { ChannelSessionReceive } from "./store/schema.js";
+import type { StreamHandle } from "./types.js";
 
 const textDelta: StreamEvent = { type: "text_delta", text: "hello" };
 
@@ -653,6 +660,79 @@ describe("createDeliveryRouter", () => {
       await delivery.deliverVoice(audio);
 
       expect(ok.sendVoice).toHaveBeenCalledWith("addr-s2", audio);
+    });
+  });
+
+  describe("stream fan-out when a handle fails", () => {
+    /** A failing Telegram-like handle first, a healthy web-like one second. */
+    async function prepareWith(failing: StreamHandle) {
+      const healthy = mockStreamHandle();
+      const adapters = new Map<string, AdapterEntry>([
+        [
+          "ch-tg",
+          { adapter: mockStreamingAdapter({ openStream: vi.fn().mockResolvedValue(failing) }) },
+        ],
+        [
+          "ch-web",
+          { adapter: mockStreamingAdapter({ openStream: vi.fn().mockResolvedValue(healthy) }) },
+        ],
+      ]);
+      const transportStore = mockTransportStore({
+        getSourceSessions: vi
+          .fn()
+          .mockResolvedValue([session("s1", "ch-tg"), session("s2", "ch-web")]),
+      });
+      const router = createDeliveryRouter({ runInTx: fakeRunInTx, adapters, transportStore });
+      return { delivery: await router.prepare(ctx()), healthy };
+    }
+
+    /** The failure a fan-out reported, whether it came back as a value or a rejection. */
+    async function outcome(call: Promise<unknown>): Promise<unknown> {
+      return call.then(
+        (result) => result,
+        (e: unknown) => e,
+      );
+    }
+
+    it("aborts every handle when one rejects, and reports the one that failed", async () => {
+      const { delivery, healthy } = await prepareWith(
+        mockStreamHandle({ abort: vi.fn().mockRejectedValue(new Error("telegram down")) }),
+      );
+
+      const aborted = await outcome(delivery.abort("LLM failed"));
+
+      expect(healthy.abort).toHaveBeenCalledWith("LLM failed");
+      expect(aborted).toEqual(err(new StreamDeliveryError(["telegram down"])));
+    });
+
+    it("finishes every handle when one reports a failure", async () => {
+      const { delivery, healthy } = await prepareWith(
+        mockStreamHandle({ finish: vi.fn().mockResolvedValue(err("chat not found")) }),
+      );
+
+      const finished = await outcome(delivery.finish());
+
+      expect(healthy.finish).toHaveBeenCalled();
+      expect(finished).toEqual(err(new StreamDeliveryError(["chat not found"])));
+    });
+
+    it("pushes to every handle when one reports a failure", async () => {
+      const { delivery, healthy } = await prepareWith(
+        mockStreamHandle({ push: vi.fn().mockResolvedValue(err("bot was blocked by the user")) }),
+      );
+
+      const pushed = await outcome(delivery.push(textDelta));
+
+      expect(healthy.push).toHaveBeenCalledWith(textDelta);
+      expect(pushed).toEqual(err(new StreamDeliveryError(["bot was blocked by the user"])));
+    });
+
+    it("reports success when every handle succeeds", async () => {
+      const { delivery } = await prepareWith(mockStreamHandle());
+
+      expect(await delivery.push(textDelta)).toEqual(ok(undefined));
+      expect(await delivery.finish()).toEqual(ok(undefined));
+      expect(await delivery.abort("x")).toEqual(ok(undefined));
     });
   });
 

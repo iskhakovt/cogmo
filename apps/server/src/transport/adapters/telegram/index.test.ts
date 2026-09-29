@@ -1,5 +1,5 @@
 import { err, ok } from "neverthrow";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PLAN_CALLBACK_REGEX } from "../../../agent/coding/plan-keyboard.js";
 import { PIPELINE_GATE_CALLBACK_REGEX } from "../../../agent/pipeline/gate-keyboard.js";
 import type { BoundaryResolvedData } from "../../../inngest/events.js";
@@ -14,7 +14,7 @@ import {
   mockTransportStore,
 } from "../../../test/factories.js";
 import type { StreamingAdapter } from "../../types.js";
-import { findTelegramSplitBoundary, rebalanceCodeFence, setup } from "./index.js";
+import { setup } from "./index.js";
 
 // Mock grammy
 const handlers = new Map<string, any>();
@@ -781,7 +781,7 @@ describe("telegram adapter", () => {
         .mockRejectedValueOnce(new Error("message is not modified"))
         .mockResolvedValue(true);
 
-      await expect(handle.finish()).resolves.toBeUndefined();
+      await expect(handle.finish()).resolves.toEqual(ok(undefined));
     });
 
     it("abort appends error to message", async () => {
@@ -1094,63 +1094,6 @@ describe("telegram adapter", () => {
         }
       });
 
-      it("findTelegramSplitBoundary prefers high-quality breaks", () => {
-        // Paragraph break wins over later line breaks / spaces.
-        const a = `${"a".repeat(2000)}\n\n${"b".repeat(1000)}\n${"c".repeat(1000)}`;
-        expect(findTelegramSplitBoundary(a, 3500)).toBe(2002);
-
-        // No paragraph break — falls through to single line break.
-        const b = `${"a".repeat(2000)}\n${"b".repeat(2500)}`;
-        expect(findTelegramSplitBoundary(b, 3500)).toBe(2001);
-
-        // No newline — sentence boundary.
-        const c = `${"a".repeat(1500)}. ${"b".repeat(2500)}`;
-        expect(findTelegramSplitBoundary(c, 3500)).toBe(1502);
-
-        // No natural break in the acceptable window → hard split at target.
-        const d = "x".repeat(5000);
-        expect(findTelegramSplitBoundary(d, 3500)).toBe(3500);
-
-        // Text shorter than target — no split.
-        expect(findTelegramSplitBoundary("short", 3500)).toBe(5);
-
-        // Hard split must not land between halves of a surrogate pair —
-        // 😀 (U+1F600) is two UTF-16 code units. Cutting at `target` would
-        // split it; the helper backs off by one to keep the pair intact.
-        const emoji = "😀"; // length 2 in UTF-16
-        const e = "x".repeat(99) + emoji + "y".repeat(100);
-        // No natural breaks → hard split. target=100 falls on the high
-        // surrogate (index 99); helper returns 99 instead.
-        expect(findTelegramSplitBoundary(e, 100)).toBe(99);
-      });
-
-      it("rebalanceCodeFence closes an open fence on head and reopens on tail", () => {
-        // Split lands inside an open fenced block: close + reopen with lang.
-        const head = "Here is the code:\n\n```python\ndef foo():\n  return 1";
-        const tail = "\nx = foo()\n```\nDone.";
-        const out = rebalanceCodeFence(head, tail);
-        expect(out.head).toBe(`${head}\n\`\`\``);
-        expect(out.tail).toBe(`\`\`\`python\n${tail}`);
-
-        // Already balanced — passthrough.
-        const balancedHead = "Code:\n\n```\nx\n```\n\nMore prose.";
-        const balancedTail = "Next paragraph.";
-        expect(rebalanceCodeFence(balancedHead, balancedTail)).toEqual({
-          head: balancedHead,
-          tail: balancedTail,
-        });
-
-        // No code in head at all — passthrough.
-        expect(rebalanceCodeFence("just text", " more")).toEqual({
-          head: "just text",
-          tail: " more",
-        });
-
-        // Fence without a language tag — reopen as bare ```.
-        const noLangHead = "```\nplain code\nmore";
-        expect(rebalanceCodeFence(noLangHead, "\nstill code").tail).toBe("```\n\nstill code");
-      });
-
       it("a long code block split mid-fence renders every chunk inside <pre>", async () => {
         // The bug without rebalancing: head ends inside an open fence; tail
         // starts with raw body text (no opening fence). marked auto-closes
@@ -1301,6 +1244,150 @@ describe("telegram adapter", () => {
         expect(mockBotApi.sendMessage.mock.calls.length).toBeGreaterThanOrEqual(2);
         expect(mockBotApi.editMessageText).not.toHaveBeenCalled();
       });
+    });
+  });
+
+  describe("stream write failures", () => {
+    beforeEach(() => {
+      mockBotApi.sendMessage.mockReset().mockResolvedValue({ message_id: 100 });
+      mockBotApi.editMessageText.mockReset().mockResolvedValue({});
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    async function createStreamingAdapter(): Promise<StreamingAdapter> {
+      const { adapter } = await createAdapter();
+      return adapter as unknown as StreamingAdapter;
+    }
+
+    /** Telegram's flood-wait answer, shaped as grammY's `GrammyError` carries it. */
+    function tooManyRequests(retryAfterSeconds: number): Error {
+      return Object.assign(
+        new Error(
+          `Call to 'editMessageText' failed! (429: Too Many Requests: retry after ${retryAfterSeconds})`,
+        ),
+        { error_code: 429, parameters: { retry_after: retryAfterSeconds } },
+      );
+    }
+
+    const text = (t: string) => ({ type: "text_delta", text: t }) as const;
+
+    it("waits out a 429 on a streaming edit, then writes the latest text", async () => {
+      const handle = await (await createStreamingAdapter()).openStream("42", "run-1");
+      expect(await handle.push(text("Hello"))).toEqual(ok(undefined));
+
+      mockBotApi.editMessageText.mockRejectedValueOnce(tooManyRequests(3));
+      await vi.advanceTimersByTimeAsync(600);
+      expect(await handle.push(text(" world"))).toEqual(ok(undefined));
+      expect(mockBotApi.editMessageText).toHaveBeenCalledTimes(1);
+
+      // Inside the wait nothing is written, however long past the edit interval.
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(await handle.push(text("!"))).toEqual(ok(undefined));
+      expect(mockBotApi.editMessageText).toHaveBeenCalledTimes(1);
+
+      // Once retry_after has passed, the live message catches up unprompted.
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(mockBotApi.editMessageText).toHaveBeenCalledTimes(2);
+      expect(mockBotApi.editMessageText).toHaveBeenLastCalledWith(42, 100, "Hello world!");
+
+      expect(await handle.finish()).toEqual(ok(undefined));
+      expect(mockBotApi.editMessageText).toHaveBeenLastCalledWith(42, 100, "Hello world!", {
+        parse_mode: "HTML",
+      });
+    });
+
+    it("retries a rate-limited final write once retry_after has passed", async () => {
+      const handle = await (await createStreamingAdapter()).openStream("42", "run-1");
+      await handle.push(text("done"));
+      mockBotApi.editMessageText.mockRejectedValueOnce(tooManyRequests(2));
+
+      const finishing = handle.finish();
+      await vi.advanceTimersByTimeAsync(1999);
+      expect(mockBotApi.editMessageText).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await finishing).toEqual(ok(undefined));
+      expect(mockBotApi.editMessageText).toHaveBeenCalledTimes(2);
+      expect(mockBotApi.editMessageText).toHaveBeenLastCalledWith(42, 100, "done", {
+        parse_mode: "HTML",
+      });
+    });
+
+    it("fails the handle when retry_after exceeds the wait it will take", async () => {
+      const handle = await (await createStreamingAdapter()).openStream("42", "run-1");
+      await handle.push(text("done"));
+      mockBotApi.editMessageText.mockRejectedValueOnce(tooManyRequests(3600));
+
+      expect(await handle.finish()).toEqual(err(expect.stringContaining("retry after 3600")));
+      expect(mockBotApi.editMessageText).toHaveBeenCalledTimes(1);
+    });
+
+    it("fails the handle when Telegram keeps rate-limiting a write", async () => {
+      const handle = await (await createStreamingAdapter()).openStream("42", "run-1");
+      await handle.push(text("done"));
+      mockBotApi.editMessageText.mockRejectedValue(tooManyRequests(1));
+
+      const finishing = handle.finish();
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      expect(await finishing).toEqual(err(expect.stringContaining("429")));
+      const attempts = mockBotApi.editMessageText.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(mockBotApi.editMessageText).toHaveBeenCalledTimes(attempts);
+    });
+
+    it("fails on a rejected write and leaves the run, so a retry opens a fresh handle", async () => {
+      const adapter = await createStreamingAdapter();
+      const handle = await adapter.openStream("42", "run-1");
+      mockBotApi.sendMessage.mockRejectedValueOnce(
+        new Error("Call to 'sendMessage' failed! (403: Forbidden: bot was blocked by the user)"),
+      );
+
+      const blocked = err(expect.stringContaining("bot was blocked by the user"));
+      expect(await handle.push(text("Hello"))).toEqual(blocked);
+      // A failed handle reports its failure and writes nothing more.
+      expect(await handle.push(text(" again"))).toEqual(blocked);
+      expect(await handle.finish()).toEqual(blocked);
+      expect(await handle.abort("LLM failed")).toEqual(blocked);
+      expect(mockBotApi.sendMessage).toHaveBeenCalledTimes(1);
+      expect(mockBotApi.editMessageText).not.toHaveBeenCalled();
+
+      const retry = await adapter.openStream("42", "run-1");
+      expect(retry).not.toBe(handle);
+      expect(await retry.push(text("Hello"))).toEqual(ok(undefined));
+      expect(mockBotApi.sendMessage).toHaveBeenLastCalledWith(42, "Hello");
+    });
+
+    it("keeps the handle for the run while a rate-limited write waits", async () => {
+      // A retry that reopens the stream mid-wait joins the same live message.
+      const adapter = await createStreamingAdapter();
+      const handle = await adapter.openStream("42", "run-1");
+      await handle.push(text("Hello"));
+      mockBotApi.editMessageText.mockRejectedValueOnce(tooManyRequests(3));
+      await vi.advanceTimersByTimeAsync(600);
+      await handle.push(text(" world"));
+
+      expect(await adapter.openStream("42", "run-1")).toBe(handle);
+    });
+
+    it("stops the typing heartbeat when the handle fails mid-stream", async () => {
+      const handle = await (await createStreamingAdapter()).openStream("42", "run-1", {
+        chunkChars: 100,
+        allowEdits: false,
+      });
+      mockBotApi.sendMessage.mockRejectedValueOnce(new Error("Bad Request: chat not found"));
+
+      const para = "a".repeat(80);
+      expect(await handle.push(text(`${para}\n\n${para}`))).toEqual(
+        err(expect.stringContaining("chat not found")),
+      );
+      const kicks = mockBotApi.sendChatAction.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(mockBotApi.sendChatAction).toHaveBeenCalledTimes(kicks);
     });
   });
 

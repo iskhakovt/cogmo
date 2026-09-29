@@ -27,7 +27,7 @@ import { buildSkillTools, composeTurnTools } from "../skills/skill-tool-builder.
 import { createSkillsService } from "../skills/skills-service.js";
 import type { AttachmentStore } from "../transport/attachment-store.js";
 import { contentToBlocks, type InboundContent } from "../transport/content.js";
-import type { DeliveryRouter } from "../transport/delivery-router.js";
+import { type DeliveryRouter, pushOrThrow } from "../transport/delivery-router.js";
 import type { TransportStore } from "../transport/store/index.js";
 import { resolveVoiceMode } from "../voice/mode.js";
 import type { VoiceProviderResolver } from "../voice/resolver.js";
@@ -994,7 +994,10 @@ export function createHandleMessage(deps: HandleMessageDeps) {
               // invocation, and a bare-body push would re-append the banner
               // (or open a stray message on a post-finish replay handle)
               // each time.
-              await delivery.push({ type: "status", message: "Summarizing conversation..." });
+              await pushOrThrow(delivery, {
+                type: "status",
+                message: "Summarizing conversation...",
+              });
               const response = await summarizationProvider.chat(
                 summarizationRequest({
                   model: summarizationModel,
@@ -1169,7 +1172,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           // the loop caps every one, so a long tool-using turn can still
           // outgrow the window and degrade to `context_overflow`.
           maxTokens: limits.maxOutputTokens,
-          onEvent: (event: StreamEvent) => delivery.push(event),
+          onEvent: (event: StreamEvent) => pushOrThrow(delivery, event),
           // Durable boundaries inside the loop: each streaming LLM
           // iteration runs in a `llm-iter<N>` step (tokens reach the
           // delivery layer live from inside the step body; a memoized
@@ -1243,9 +1246,9 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             // iteration-cap degrade that persists every iteration) means
             // no event at all.
             if (retraction) {
-              await delivery.push({ type: "retract", ...retraction });
+              await pushOrThrow(delivery, { type: "retract", ...retraction });
             }
-            await delivery.push({ type: "text_delta", text });
+            await pushOrThrow(delivery, { type: "text_delta", text });
             return text;
           });
           result = {
@@ -1257,9 +1260,19 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             ],
           };
         }
-        await delivery.finish();
+        // A target that fails here has already shown every token it could;
+        // the loop replays from its step cache without re-emitting, so a retry
+        // would deliver nothing more. The reply persists either way.
+        const finished = await delivery.finish();
+        if (finished.isErr()) {
+          turnLogger.warn({ err: finished.error }, "stream delivery failed at finish");
+        }
       } catch (err) {
-        await delivery.abort(err instanceof Error ? err.message : "Unknown error");
+        // The loop's error decides the retry, so a failed abort is only logged.
+        const aborted = await delivery.abort(err instanceof Error ? err.message : "Unknown error");
+        if (aborted.isErr()) {
+          turnLogger.warn({ err: aborted.error }, "stream delivery failed at abort");
+        }
         // Translate provider classification into Inngest's retry decision.
         // 4xx that aren't 408/425/429 are deterministic client errors — the
         // same payload will fail every retry. Wrap in NonRetriableError so
