@@ -23,7 +23,7 @@ import postgres from "postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Database } from "../../db/index.js";
 import type { LlmProvider } from "../../llm/provider.js";
-import type { ChatParams, ChatStreamResult, LlmResponse } from "../../llm/types.js";
+import type { ChatParams, ChatStreamFrame, LlmResponse } from "../../llm/types.js";
 import type { MemoryProvider, RetainBatchItem } from "../../memory/provider.js";
 import { expectDefined } from "../../test/assertions.js";
 import { fileDatabaseUrl } from "../../test/integration-file.js";
@@ -262,7 +262,7 @@ function buildStubProvider(opts: {
         usage: { inputTokens: 10, outputTokens: 5 },
       };
     },
-    chatStream(_params: ChatParams): ChatStreamResult {
+    chatStream(_params: ChatParams): AsyncIterable<ChatStreamFrame> {
       throw new Error("stub provider: chatStream not used in observer tests");
     },
     async countTokens(): Promise<number> {
@@ -738,7 +738,7 @@ describe("runObserver — real PG + recording memory mock", () => {
         }
         throw new Error(`stub: unexpected prompt: "${sys.slice(0, 60)}"`);
       },
-      chatStream(): ChatStreamResult {
+      chatStream(): AsyncIterable<ChatStreamFrame> {
         throw new Error("not used");
       },
       async countTokens(): Promise<number> {
@@ -819,7 +819,7 @@ describe("runObserver — real PG + recording memory mock", () => {
         }
         throw new Error(`stub: unexpected prompt: "${sys.slice(0, 60)}"`);
       },
-      chatStream(): ChatStreamResult {
+      chatStream(): AsyncIterable<ChatStreamFrame> {
         throw new Error("not used");
       },
       async countTokens(): Promise<number> {

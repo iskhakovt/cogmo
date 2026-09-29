@@ -19,9 +19,9 @@ const tracer = trace.getTracer("cogmo.llm");
 /**
  * Open a `chat` span for an LLM call, tagged with the GenAI semantic
  * conventions (`gen_ai.*`). The caller is responsible for calling
- * `recordChatUsage` and `endChatSpan` once usage data is available — for
- * non-streaming `chat()` immediately after the response, for `chatStream()`
- * inside the generator just before resolving the response promise.
+ * `recordChatUsage` once usage data is available — for non-streaming
+ * `chat()` immediately after the response, for `chatStream()` inside the
+ * generator just before the `done` frame — and for ending the span.
  */
 export function startChatSpan(provider: string, model: string): Span {
   return tracer.startSpan("chat", {

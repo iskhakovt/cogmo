@@ -9,7 +9,14 @@ import { ProviderProtocolError, ToolArgsCutOffError } from "./errors.js";
 import { isRetriableProviderError, RefusalError } from "./fallback.js";
 import { toObjectJsonSchema } from "./json-schema.js";
 import { modelFamilyParams, OpenAICompatibleProvider } from "./openai-compat.js";
-import type { CacheIntent, ChatParams, ImageBlock, StreamEvent, ToolDefinition } from "./types.js";
+import type {
+  CacheIntent,
+  ChatParams,
+  ChatStreamFrame,
+  ImageBlock,
+  ResponseMeta,
+  ToolDefinition,
+} from "./types.js";
 
 const mockCreate = vi.fn();
 // Constructor options each client was built with, newest last.
@@ -88,6 +95,21 @@ function mockStream(chunks: unknown[]): AsyncIterable<unknown> {
       };
     },
   };
+}
+
+type ContentFrame = Exclude<ChatStreamFrame, { type: "done" }>;
+
+/** Drain a provider stream: its content frames, and the `done` frame's metadata. */
+async function drain(
+  stream: AsyncIterable<ChatStreamFrame>,
+): Promise<{ frames: ContentFrame[]; meta: ResponseMeta }> {
+  const frames: ContentFrame[] = [];
+  let meta: ResponseMeta | undefined;
+  for await (const frame of stream) {
+    if (frame.type === "done") meta = frame.meta;
+    else frames.push(frame);
+  }
+  return { frames, meta: expectDefined(meta, "done frame") };
 }
 
 describe("OpenAICompatibleProvider", () => {
@@ -423,21 +445,19 @@ describe("OpenAICompatibleProvider", () => {
         ]),
       );
 
-      const { events, response } = provider.chatStream({
-        model: "gpt-5-nano",
-        system: "sys",
-        messages: [{ role: "user", content: "hi" }],
-      });
+      const { frames, meta } = await drain(
+        provider.chatStream({
+          model: "gpt-5-nano",
+          system: "sys",
+          messages: [{ role: "user", content: "hi" }],
+        }),
+      );
 
-      const collected: StreamEvent[] = [];
-      for await (const event of events) collected.push(event);
-
-      expect(collected).toEqual([
+      expect(frames).toEqual([
         { type: "text_delta", text: "Hello" },
         { type: "text_delta", text: " world" },
       ]);
 
-      const meta = await response;
       expect(meta.stopReason).toBe("end_turn");
       expect(meta.usage).toEqual({ inputTokens: 10, outputTokens: 5 });
     });
@@ -465,15 +485,14 @@ describe("OpenAICompatibleProvider", () => {
           },
         ]),
       );
-      const { events, response } = provider.chatStream({
-        model: "m",
-        system: "sys",
-        messages: [{ role: "user", content: "time" }],
-      });
-      const collected: StreamEvent[] = [];
-      for await (const event of events) collected.push(event);
-      expect(collected).toEqual([{ type: "tool_start", id: "call_zero", name: "now", input: {} }]);
-      const meta = await response;
+      const { frames, meta } = await drain(
+        provider.chatStream({
+          model: "m",
+          system: "sys",
+          messages: [{ role: "user", content: "time" }],
+        }),
+      );
+      expect(frames).toEqual([{ type: "tool_start", id: "call_zero", name: "now", input: {} }]);
       expect(meta.stopReason).toBe("tool_use");
     });
 
@@ -515,20 +534,18 @@ describe("OpenAICompatibleProvider", () => {
         ]),
       );
 
-      const { events, response } = provider.chatStream({
-        model: "m",
-        system: "sys",
-        messages: [{ role: "user", content: "search" }],
-      });
+      const { frames, meta } = await drain(
+        provider.chatStream({
+          model: "m",
+          system: "sys",
+          messages: [{ role: "user", content: "search" }],
+        }),
+      );
 
-      const collected: StreamEvent[] = [];
-      for await (const event of events) collected.push(event);
-
-      expect(collected).toEqual([
+      expect(frames).toEqual([
         { type: "tool_start", id: "call_1", name: "search", input: { q: "test" } },
       ]);
 
-      const meta = await response;
       expect(meta.stopReason).toBe("tool_use");
     });
 
@@ -544,14 +561,13 @@ describe("OpenAICompatibleProvider", () => {
         ]),
       );
 
-      const { events } = provider.chatStream({
-        model: "m",
-        system: "sys",
-        messages: [{ role: "user", content: "hi" }],
-      });
-      for await (const _ of events) {
-        /* drain */
-      }
+      await drain(
+        provider.chatStream({
+          model: "m",
+          system: "sys",
+          messages: [{ role: "user", content: "hi" }],
+        }),
+      );
 
       const args = firstCreateArgs();
       expect(args.stream).toBe(true);
@@ -560,11 +576,10 @@ describe("OpenAICompatibleProvider", () => {
     // OpenAI-compatible upstreams surface stream failures one of two ways:
     // an `APIError`-shaped object before the first chunk (5xx with body) or
     // an `APIConnectionError`-shaped throw while iterating chunks (no
-    // `.status`). Both cases must (a) reject the iterator, (b) reject the
-    // `response` promise, and (c) propagate the original shape so
-    // `isRetriableProviderError` (which keys off `.status` presence) makes
+    // `.status`). Both cases must reject the iterator with the original shape
+    // so `isRetriableProviderError` (which keys off `.status` presence) makes
     // the right call upstream of `FallbackLlmProvider`.
-    it("propagates a pre-stream 502 with a numeric status on both events and response", async () => {
+    it("propagates a pre-stream 502 with a numeric status", async () => {
       const provider = createProvider();
       const upstream = Object.assign(new Error("Bad gateway"), {
         name: "APIError",
@@ -572,18 +587,17 @@ describe("OpenAICompatibleProvider", () => {
       });
       mockCreate.mockRejectedValueOnce(upstream);
 
-      const { events, response } = provider.chatStream({
+      const stream = provider.chatStream({
         model: "anthropic/claude-sonnet-4",
         system: "sys",
         messages: [{ role: "user", content: "hi" }],
       });
 
-      const iter = events[Symbol.asyncIterator]();
+      const iter = stream[Symbol.asyncIterator]();
       await expect(iter.next()).rejects.toMatchObject({ status: 502 });
-      await expect(response).rejects.toMatchObject({ status: 502 });
     });
 
-    it("propagates a mid-stream connection drop on both events and response", async () => {
+    it("propagates a mid-stream connection drop", async () => {
       const provider = createProvider();
       const drop = Object.assign(new Error("connection reset"), {
         name: "APIConnectionError",
@@ -613,17 +627,16 @@ describe("OpenAICompatibleProvider", () => {
         },
       });
 
-      const { events, response } = provider.chatStream({
+      const stream = provider.chatStream({
         model: "m",
         system: "sys",
         messages: [{ role: "user", content: "hi" }],
       });
 
-      const iter = events[Symbol.asyncIterator]();
+      const iter = stream[Symbol.asyncIterator]();
       const first = await iter.next();
       expect(first.value).toEqual({ type: "text_delta", text: "partial" });
       await expect(iter.next()).rejects.toBe(drop);
-      await expect(response).rejects.toBe(drop);
     });
 
     it("repairs trailing-comma JSON in tool args via jsonrepair before declaring failure (OpenAI-compat stream)", async () => {
@@ -668,19 +681,18 @@ describe("OpenAICompatibleProvider", () => {
         ]),
       );
 
-      const { events, response } = provider.chatStream({
-        model: "m",
-        system: "sys",
-        messages: [{ role: "user", content: "search" }],
-      });
+      const { frames, meta } = await drain(
+        provider.chatStream({
+          model: "m",
+          system: "sys",
+          messages: [{ role: "user", content: "search" }],
+        }),
+      );
 
-      const collected: StreamEvent[] = [];
-      for await (const event of events) collected.push(event);
-
-      expect(collected).toEqual([
+      expect(frames).toEqual([
         { type: "tool_start", id: "call_1", name: "search", input: { query: "weather" } },
       ]);
-      await expect(response).resolves.toMatchObject({ stopReason: "tool_use" });
+      expect(meta.stopReason).toBe("tool_use");
     });
 
     it("throws ProviderProtocolError on tool-arg JSON unrepairable by jsonrepair (OpenAI-compat stream)", async () => {
@@ -713,20 +725,15 @@ describe("OpenAICompatibleProvider", () => {
         ]),
       );
 
-      const { events, response } = provider.chatStream({
-        model: "m",
-        system: "sys",
-        messages: [{ role: "user", content: "search" }],
-      });
-
-      const collect = async (): Promise<StreamEvent[]> => {
-        const out: StreamEvent[] = [];
-        for await (const event of events) out.push(event);
-        return out;
-      };
-
-      await expect(collect()).rejects.toBeInstanceOf(ProviderProtocolError);
-      await expect(response).rejects.toBeInstanceOf(ProviderProtocolError);
+      await expect(
+        drain(
+          provider.chatStream({
+            model: "m",
+            system: "sys",
+            messages: [{ role: "user", content: "search" }],
+          }),
+        ),
+      ).rejects.toBeInstanceOf(ProviderProtocolError);
     });
 
     // `length` means the cap cut the response off, so the unparseable final
@@ -781,24 +788,18 @@ describe("OpenAICompatibleProvider", () => {
           ]),
         );
 
-        const { events, response } = provider.chatStream({
-          model: "m",
-          system: "sys",
-          messages: [{ role: "user", content: "go" }],
-        });
-        const drained = (async () => {
-          for await (const _event of events) {
-            // drain
-          }
-        })();
-
-        const error = await drained.then(
+        const error = await drain(
+          provider.chatStream({
+            model: "m",
+            system: "sys",
+            messages: [{ role: "user", content: "go" }],
+          }),
+        ).then(
           () => undefined,
           (err: unknown) => err,
         );
         expect(error).toBeInstanceOf(ProviderProtocolError);
         expect(error instanceof ToolArgsCutOffError).toBe(cutOff);
-        await expect(response).rejects.toBe(error);
       },
     );
 
@@ -915,16 +916,13 @@ describe("OpenAICompatibleProvider", () => {
         ]),
       );
 
-      const { events, response } = provider.chatStream({
-        model: "gpt-5-nano",
-        system: "sys",
-        messages: [{ role: "user", content: "disallowed request" }],
-      });
-      for await (const _ of events) {
-        /* drain */
-      }
-
-      const meta = await response;
+      const { meta } = await drain(
+        provider.chatStream({
+          model: "gpt-5-nano",
+          system: "sys",
+          messages: [{ role: "user", content: "disallowed request" }],
+        }),
+      );
       expect(meta.stopReason).toBe("refusal");
     });
 
@@ -1027,15 +1025,87 @@ describe("OpenAICompatibleProvider", () => {
       );
       mockCreate.mockRejectedValueOnce(upstream);
 
-      const { events, response } = provider.chatStream({
+      const stream = provider.chatStream({
         model: "gpt-5-nano",
         system: "sys",
         messages: [{ role: "user", content: "disallowed request" }],
       });
 
-      const iter = events[Symbol.asyncIterator]();
+      const iter = stream[Symbol.asyncIterator]();
       await expect(iter.next()).rejects.toBeInstanceOf(RefusalError);
-      await expect(response).rejects.toBeInstanceOf(RefusalError);
+    });
+
+    describe("abort signal", () => {
+      const params: ChatParams = {
+        model: "m",
+        system: "sys",
+        messages: [{ role: "user", content: "hi" }],
+      };
+
+      it("hands the signal to the SDK", async () => {
+        const provider = createProvider();
+        const signal = new AbortController().signal;
+        mockCreate.mockResolvedValueOnce({
+          choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+          model: "m",
+          usage: { prompt_tokens: 5, completion_tokens: 1 },
+        });
+        mockCreate.mockResolvedValueOnce(
+          mockStream([{ model: "m", choices: [{ delta: {}, finish_reason: "stop" }] }]),
+        );
+
+        await provider.chat(params, { signal });
+        await drain(provider.chatStream(params, { signal }));
+
+        expect(mockCreate.mock.calls.map((call) => call[1])).toEqual([{ signal }, { signal }]);
+      });
+
+      it("rejects chat with the signal's reason as soon as it fires", async () => {
+        const provider = createProvider();
+        const controller = new AbortController();
+        const reason = new Error("cancelled");
+        mockCreate.mockReturnValueOnce(new Promise(() => {}));
+
+        const call = provider.chat(params, { signal: controller.signal });
+        controller.abort(reason);
+
+        await expect(call).rejects.toBe(reason);
+      });
+
+      it("throws the signal's reason, not a partial tool call, when the SDK ends an aborted stream", async () => {
+        const provider = createProvider();
+        const controller = new AbortController();
+        const reason = new Error("cancelled");
+        async function* sdkStream(): AsyncGenerator<unknown> {
+          yield {
+            model: "m",
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    { index: 0, id: "call_1", function: { name: "search", arguments: '{"q":' } },
+                  ],
+                },
+                finish_reason: null,
+              },
+            ],
+            usage: null,
+          };
+          // The SDK's stream ends quietly once its signal fires.
+          controller.abort(reason);
+        }
+        mockCreate.mockResolvedValueOnce(sdkStream());
+
+        const collected: ChatStreamFrame[] = [];
+        const drained = (async () => {
+          for await (const frame of provider.chatStream(params, { signal: controller.signal })) {
+            collected.push(frame);
+          }
+        })();
+
+        await expect(drained).rejects.toBe(reason);
+        expect(collected).toEqual([]);
+      });
     });
 
     it("RefusalError is non-retriable", () => {
@@ -1117,16 +1187,15 @@ describe("OpenAICompatibleProvider", () => {
         ]),
       );
 
-      const { events, response } = provider.chatStream({
-        model: "anthropic/claude-sonnet-5",
-        system: "sys",
-        messages: [{ role: "user", content: "hi" }],
-      });
-      for await (const _ of events) {
-        // drain
-      }
+      const { meta } = await drain(
+        provider.chatStream({
+          model: "anthropic/claude-sonnet-5",
+          system: "sys",
+          messages: [{ role: "user", content: "hi" }],
+        }),
+      );
 
-      expect((await response).usage).toEqual({
+      expect(meta.usage).toEqual({
         inputTokens: 7500,
         outputTokens: 12,
         cacheReadTokens: 7360,
@@ -1167,16 +1236,15 @@ describe("OpenAICompatibleProvider", () => {
         ]),
       );
 
-      const { events, response } = provider.chatStream({
-        model: "local-model",
-        system: "sys",
-        messages: [{ role: "user", content: "hi" }],
-      });
-      for await (const _ of events) {
-        // drain
-      }
+      const { meta } = await drain(
+        provider.chatStream({
+          model: "local-model",
+          system: "sys",
+          messages: [{ role: "user", content: "hi" }],
+        }),
+      );
 
-      expect((await response).usage).toEqual({ inputTokens: 0, outputTokens: 3 });
+      expect(meta.usage).toEqual({ inputTokens: 0, outputTokens: 3 });
     });
   });
 
@@ -1451,15 +1519,14 @@ describe("OpenAICompatibleProvider", () => {
           ]),
         );
 
-        const { events } = provider.chatStream({
-          model,
-          system: "sys",
-          messages: TRANSCRIPT,
-          cache: INTENT,
-        });
-        for await (const _ of events) {
-          /* drain */
-        }
+        await drain(
+          provider.chatStream({
+            model,
+            system: "sys",
+            messages: TRANSCRIPT,
+            cache: INTENT,
+          }),
+        );
 
         const { body, options } = sent();
         expect(body.stream).toBe(true);
@@ -1514,10 +1581,7 @@ describe("OpenAICompatibleProvider", () => {
       mockCreate.mockResolvedValueOnce(
         mockStream([{ model, choices: [{ delta: {}, finish_reason: "stop" }] }]),
       );
-      const { events } = provider.chatStream(params);
-      for await (const _ of events) {
-        /* drain */
-      }
+      await drain(provider.chatStream(params));
     }
     const call = expectDefined(mockCreate.mock.calls[0], "create call");
     return z.record(z.string(), z.unknown()).parse(call[0]);

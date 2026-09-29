@@ -154,11 +154,15 @@ export interface Usage {
   cacheCreationTokens?: number;
 }
 
-export interface LlmResponse {
-  content: ContentBlock[];
+/** How a response ended, and what it cost. */
+export interface ResponseMeta {
   stopReason: StopReason;
   model: string;
   usage: Usage;
+}
+
+export interface LlmResponse extends ResponseMeta {
+  content: ContentBlock[];
 }
 
 // --- Stream events ---
@@ -196,18 +200,17 @@ export type StreamEvent =
   | { type: "retract"; text: string; toolUseIds: ReadonlyArray<string> };
 
 /**
- * Result of a streaming LLM call.
+ * One frame of a provider stream (`LlmProvider.chatStream`): content events
+ * as they arrive, then one `done` frame carrying the response's
+ * {@link ResponseMeta}. A stream that fails throws from the iterator
+ * instead, so a stream that ends without `done` broke the contract.
  *
- * `events` yields stream events as they arrive (text deltas, tool starts).
- * `response` resolves after the stream completes with final metadata.
- *
- * The provider adapter accumulates tool input deltas internally —
- * `tool_start` events always contain complete parsed input.
+ * The adapter accumulates tool input deltas internally — `tool_start`
+ * always carries complete parsed input.
  */
-export interface ChatStreamResult {
-  events: AsyncIterable<StreamEvent>;
-  response: Promise<{ stopReason: StopReason; model: string; usage: Usage }>;
-}
+export type ChatStreamFrame =
+  | Extract<StreamEvent, { type: "text_delta" | "thinking_delta" | "tool_start" }>
+  | { type: "done"; meta: ResponseMeta };
 
 // --- Structured output ---
 
@@ -263,6 +266,15 @@ export interface ChatParams {
   temperature?: number;
   /** Cache the transcript for the next request. Adapters without a mapping ignore it. */
   cache?: CacheIntent;
+}
+
+/** How a call runs, as opposed to what it asks the model ({@link ChatParams}). */
+export interface ChatOptions {
+  /**
+   * Cancels the call. The request is aborted, and the call rejects or the
+   * stream throws with `signal.reason` as soon as the signal fires.
+   */
+  signal?: AbortSignal;
 }
 
 // --- Token counting ---

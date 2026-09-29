@@ -316,12 +316,12 @@ Clean up: remove entries from `#activeStreams` after `finish()` or `abort()` to 
 ```typescript
 interface LlmProvider {
   readonly name: string;
-  chat(params: ChatParams): Promise<LlmResponse>;
-  chatStream(params: ChatParams): AsyncIterable<StreamEvent>;
+  chat(params: ChatParams, options?: ChatOptions): Promise<LlmResponse>;
+  chatStream(params: ChatParams, options?: ChatOptions): AsyncIterable<ChatStreamFrame>;
 }
 ```
 
-Each provider adapter translates native stream events to canonical `StreamEvent`. **The adapter accumulates tool input internally** — raw APIs stream tool input as JSON deltas (`input_json_delta`), but `chatStream()` yields a single `tool_start` with complete parsed input after the content block finishes. This is industry standard — Anthropic SDK, OpenAI SDK, LangChain, and Vercel AI SDK all accumulate tool calls before surfacing them.
+Each provider adapter translates native stream events to canonical `StreamEvent`s, and ends the stream with a `done` frame carrying the stop reason and usage ([providers.md](../providers.md) → Call contract). **The adapter accumulates tool input internally** — raw APIs stream tool input as JSON deltas (`input_json_delta`), but `chatStream()` yields a single `tool_start` with complete parsed input after the content block finishes. This is industry standard — Anthropic SDK, OpenAI SDK, LangChain, and Vercel AI SDK all accumulate tool calls before surfacing them.
 
 | Provider event | StreamEvent | Notes |
 |-|-|-|

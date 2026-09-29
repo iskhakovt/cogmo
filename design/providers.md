@@ -17,6 +17,28 @@ Two provider adapters exist:
 
 Both implement `LlmProvider` — the agent loop and orchestrator are provider-agnostic.
 
+### Call contract
+
+```typescript
+interface LlmProvider {
+  chat(params: ChatParams, options?: ChatOptions): Promise<LlmResponse>;
+  chatStream(params: ChatParams, options?: ChatOptions): AsyncIterable<ChatStreamFrame>;
+  countTokens(params: CountTokensParams): Promise<number>;
+}
+```
+
+`chatStream` yields content frames (`text_delta`, `thinking_delta`, and `tool_start` with complete parsed input), then one `done` frame carrying `{ stopReason, model, usage }`. A failure throws from the iterator. A consumer that stops early, by `break` or a throw in its loop body, returns the iterator: the adapter's generator leaves the SDK stream's loop, which aborts the request, and ends the span.
+
+One iterable with a terminal frame, not a stream plus a `response` promise: the agent loop, the only consumer, drains every frame anyway, while a separate promise has to be settled on every path (a failure, an abandoned stream, a stream never iterated) and caught wherever nothing awaits it. It is the provider-level shape of the Vercel AI SDK (`doStream`, whose last part is `finish`) and of OpenAI's final usage chunk.
+
+`ChatOptions.signal` cancels a call: the request is aborted, and the call rejects or the stream throws with `signal.reason` as soon as the signal fires. Both SDKs take the signal as a request option, and the adapters (`src/llm/abort.ts`) close three gaps in how they honour it:
+
+- They throw their own `APIUserAbortError`; the adapter throws the reason instead.
+- They end an aborted stream quietly, as if it had finished. The adapter checks the signal after the SDK's stream and throws, rather than yielding `done` for a cut-off response.
+- They check the signal only between retries, sleeping through the backoff, which a `retry-after` header can stretch to a minute or more. The adapter settles the call when the signal fires; the SDK still sends no further attempt.
+
+The degraded-reply synthesis is the one caller that passes a signal: its 5-second cap (see [agent-resilience.md](agent-resilience.md) → Tools-free synthesis on degrade).
+
 `OpenAICompatibleProvider` maps three request parameters by OpenAI model family, matched by bare or fine-tuned model id on any host (`modelFamilyParams`):
 
 - **Output cap.** OpenAI's reasoning models (the o-series, GPT-5 onward and the `chat-latest` ids) take it as `max_completion_tokens`; every other id as `max_tokens`.
@@ -182,6 +204,8 @@ Errors are classified by duck-typing a numeric `status` field on the thrown `Err
 
 Non-Error throws (strings, objects) are treated as **permanent** — the caller is misusing the SDK. The classifier (`isRetriableProviderError`) is a pure function and is covered by a table-driven test.
 
+A call whose abort signal has fired propagates its error whatever the class: the caller cancelled it, and an abort error carries no status, so it would otherwise read as transient.
+
 Permanent errors are propagated immediately because retrying a 401 against the next provider rarely helps and burns quota — each provider has its own credential. Authentication, validation, and invalid-request errors are bugs in configuration or code, not transient infrastructure problems.
 
 ### Ordering
@@ -190,7 +214,7 @@ Every candidate in `listProvidersForModel(model)` is tried in position-ASC order
 
 ### Streaming
 
-Streaming fallback applies **only to pre-stream failures**. The wrapper establishes the candidate's stream and pulls the first event inside a try/catch — if that fails with a transient error, we move to the next candidate. Once the first byte has been yielded to the consumer, we are committed: mid-stream errors propagate and the partial output stays in history.
+Streaming fallback applies **only to pre-stream failures**. The wrapper iterates the candidate's stream with `for await` inside a try/catch — if it fails with a transient error before its first frame is forwarded, we move to the next candidate. Once a frame has been yielded to the consumer, we are committed: mid-stream errors propagate and the partial output stays in history. A consumer that stops early returns the wrapper's stream, and `for await` returns the candidate's in turn, so the candidate's request is aborted.
 
 This rule avoids two failure modes: yielding duplicated content (the agent sees the primary's tokens then restarts on the fallback), and losing context mid-turn (a tool call emitted by the primary, then a different model continuing from where it didn't start). Pre-stream recovery is safe because nothing has been committed yet.
 

@@ -1,4 +1,4 @@
-import { APIError } from "@anthropic-ai/sdk";
+import { APIError, APIUserAbortError } from "@anthropic-ai/sdk";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { CorrectionExtractionSchema } from "../agent/evolution/extraction-schema.js";
@@ -8,7 +8,13 @@ import { AnthropicProvider } from "./anthropic.js";
 import { extractText } from "./content.js";
 import { MissingToolCallError, ProviderProtocolError, ToolArgsCutOffError } from "./errors.js";
 import { toObjectJsonSchema } from "./json-schema.js";
-import type { CacheIntent, ResponseFormat, StreamEvent, ToolDefinition } from "./types.js";
+import type {
+  CacheIntent,
+  ChatStreamFrame,
+  ResponseFormat,
+  ResponseMeta,
+  ToolDefinition,
+} from "./types.js";
 
 // Mock the Anthropic client — use a class so `new Anthropic()` works — and
 // keep the SDK's error classes.
@@ -39,6 +45,21 @@ function mockStream(events: unknown[]): AsyncIterable<unknown> {
       };
     },
   };
+}
+
+type ContentFrame = Exclude<ChatStreamFrame, { type: "done" }>;
+
+/** Drain a provider stream: its content frames, and the `done` frame's metadata. */
+async function drain(
+  stream: AsyncIterable<ChatStreamFrame>,
+): Promise<{ frames: ContentFrame[]; meta: ResponseMeta }> {
+  const frames: ContentFrame[] = [];
+  let meta: ResponseMeta | undefined;
+  for await (const frame of stream) {
+    if (frame.type === "done") meta = frame.meta;
+    else frames.push(frame);
+  }
+  return { frames, meta: expectDefined(meta, "done frame") };
 }
 
 function createProvider(): AnthropicProvider {
@@ -403,16 +424,13 @@ describe("AnthropicProvider", () => {
       ]),
     );
 
-    const { events, response } = provider.chatStream({
-      model: "claude-sonnet-4-6",
-      system: "sys",
-      messages: [{ role: "user", content: "a very long conversation" }],
-    });
-    for await (const _ of events) {
-      /* drain */
-    }
-
-    const meta = await response;
+    const { meta } = await drain(
+      provider.chatStream({
+        model: "claude-sonnet-4-6",
+        system: "sys",
+        messages: [{ role: "user", content: "a very long conversation" }],
+      }),
+    );
     expect(meta.stopReason).toBe("context_overflow");
   });
 
@@ -490,16 +508,13 @@ describe("AnthropicProvider", () => {
       ]),
     );
 
-    const { events, response } = provider.chatStream({
-      model: "claude-sonnet-4-6",
-      system: "sys",
-      messages: [{ role: "user", content: "do something disallowed" }],
-    });
-    for await (const _ of events) {
-      /* drain */
-    }
-
-    const meta = await response;
+    const { meta } = await drain(
+      provider.chatStream({
+        model: "claude-sonnet-4-6",
+        system: "sys",
+        messages: [{ role: "user", content: "do something disallowed" }],
+      }),
+    );
     expect(meta.stopReason).toBe("refusal");
   });
 
@@ -534,18 +549,13 @@ describe("AnthropicProvider", () => {
         ]),
       );
 
-      const { events, response } = provider.chatStream(defaultParams);
-      const collected: StreamEvent[] = [];
-      for await (const event of events) {
-        collected.push(event);
-      }
+      const { frames, meta } = await drain(provider.chatStream(defaultParams));
 
-      expect(collected).toEqual([
+      expect(frames).toEqual([
         { type: "text_delta", text: "Hello" },
         { type: "text_delta", text: " world" },
       ]);
 
-      const meta = await response;
       expect(meta.stopReason).toBe("end_turn");
       expect(meta.model).toBe("claude-sonnet-4-6");
       expect(meta.usage).toEqual({ inputTokens: 10, outputTokens: 5 });
@@ -580,15 +590,8 @@ describe("AnthropicProvider", () => {
           { type: "message_stop" },
         ]),
       );
-      const { events, response } = provider.chatStream(defaultParams);
-      const collected: StreamEvent[] = [];
-      for await (const event of events) {
-        collected.push(event);
-      }
-      expect(collected).toEqual([
-        { type: "tool_start", id: "tu_zero", name: "btc_spot", input: {} },
-      ]);
-      const meta = await response;
+      const { frames, meta } = await drain(provider.chatStream(defaultParams));
+      expect(frames).toEqual([{ type: "tool_start", id: "tu_zero", name: "btc_spot", input: {} }]);
       expect(meta.stopReason).toBe("tool_use");
     });
 
@@ -628,17 +631,12 @@ describe("AnthropicProvider", () => {
         ]),
       );
 
-      const { events, response } = provider.chatStream(defaultParams);
-      const collected: StreamEvent[] = [];
-      for await (const event of events) {
-        collected.push(event);
-      }
+      const { frames, meta } = await drain(provider.chatStream(defaultParams));
 
-      expect(collected).toEqual([
+      expect(frames).toEqual([
         { type: "tool_start", id: "tu_1", name: "web_search", input: { query: "weather" } },
       ]);
 
-      const meta = await response;
       expect(meta.stopReason).toBe("tool_use");
     });
 
@@ -680,13 +678,9 @@ describe("AnthropicProvider", () => {
         ]),
       );
 
-      const { events } = provider.chatStream(defaultParams);
-      const types: string[] = [];
-      for await (const event of events) {
-        types.push(event.type);
-      }
+      const { frames } = await drain(provider.chatStream(defaultParams));
 
-      expect(types).toEqual(["text_delta", "tool_start"]);
+      expect(frames.map((frame) => frame.type)).toEqual(["text_delta", "tool_start"]);
     });
 
     it("passes stream: true to the API", async () => {
@@ -709,11 +703,7 @@ describe("AnthropicProvider", () => {
         ]),
       );
 
-      const { events } = provider.chatStream(defaultParams);
-      // Drain the iterator
-      for await (const _ of events) {
-        /* noop */
-      }
+      await drain(provider.chatStream(defaultParams));
 
       const callArgs = mockCreate.mock.calls[0]![0];
       expect(callArgs.stream).toBe(true);
@@ -757,14 +747,12 @@ describe("AnthropicProvider", () => {
         ]),
       );
 
-      const { events, response } = provider.chatStream(defaultParams);
-      const collected: StreamEvent[] = [];
-      for await (const event of events) collected.push(event);
+      const { frames, meta } = await drain(provider.chatStream(defaultParams));
 
-      expect(collected).toEqual([
+      expect(frames).toEqual([
         { type: "tool_start", id: "tu_1", name: "web_search", input: { query: "weather" } },
       ]);
-      await expect(response).resolves.toMatchObject({ stopReason: "tool_use" });
+      expect(meta.stopReason).toBe("tool_use");
     });
 
     it("throws ProviderProtocolError on tool-arg JSON unrepairable by jsonrepair (Anthropic stream)", async () => {
@@ -802,16 +790,9 @@ describe("AnthropicProvider", () => {
         ]),
       );
 
-      const { events, response } = provider.chatStream(defaultParams);
-      const collect = async (): Promise<StreamEvent[]> => {
-        const out: StreamEvent[] = [];
-        for await (const event of events) out.push(event);
-        return out;
-      };
-
-      await expect(collect()).rejects.toBeInstanceOf(ProviderProtocolError);
-      // Avoid an unhandled rejection from the parallel response promise.
-      await expect(response).rejects.toBeInstanceOf(ProviderProtocolError);
+      await expect(drain(provider.chatStream(defaultParams))).rejects.toBeInstanceOf(
+        ProviderProtocolError,
+      );
     });
 
     // The parse failure is held until the stream says whether the cap cut the
@@ -881,10 +862,9 @@ describe("AnthropicProvider", () => {
           ]),
         );
 
-        const { events, response } = provider.chatStream(defaultParams);
-        const collected: StreamEvent[] = [];
+        const collected: ChatStreamFrame[] = [];
         const drained = (async () => {
-          for await (const event of events) collected.push(event);
+          for await (const frame of provider.chatStream(defaultParams)) collected.push(frame);
         })();
 
         const error = await drained.then(
@@ -895,9 +875,118 @@ describe("AnthropicProvider", () => {
         expect(error instanceof ToolArgsCutOffError).toBe(cutOff);
         // Nothing from the failed block or after it reaches the consumer.
         expect(collected).toEqual([]);
-        await expect(response).rejects.toBe(error);
       },
     );
+  });
+
+  describe("abort signal", () => {
+    const params = {
+      model: "claude-sonnet-5",
+      system: "sys",
+      messages: [{ role: "user" as const, content: "hi" }],
+    };
+
+    /** An SDK call that settles only by rejecting, once `signal` fires, as the SDK's own abort does. */
+    function pendingUntilAborted(signal: AbortSignal): Promise<never> {
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(new APIUserAbortError()), { once: true });
+      });
+    }
+
+    it("hands the signal to the SDK", async () => {
+      const provider = createProvider();
+      const signal = new AbortController().signal;
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: "ok", citations: null }],
+        stop_reason: "end_turn",
+        model: "claude-sonnet-5",
+        usage: { input_tokens: 5, output_tokens: 1 },
+      });
+      mockCreate.mockResolvedValueOnce(
+        mockStream([
+          {
+            type: "message_start",
+            message: { model: "claude-sonnet-5", usage: { input_tokens: 5, output_tokens: 0 } },
+          },
+          {
+            type: "message_delta",
+            delta: { stop_reason: "end_turn" },
+            usage: { output_tokens: 1 },
+          },
+        ]),
+      );
+
+      await provider.chat(params, { signal });
+      await drain(provider.chatStream(params, { signal }));
+
+      expect(mockCreate.mock.calls.map((call) => call[1])).toEqual([{ signal }, { signal }]);
+    });
+
+    it("rejects chat with the signal's reason when it fires", async () => {
+      const provider = createProvider();
+      const controller = new AbortController();
+      const reason = new Error("cancelled");
+      mockCreate.mockReturnValueOnce(pendingUntilAborted(controller.signal));
+
+      const call = provider.chat(params, { signal: controller.signal });
+      controller.abort(reason);
+
+      await expect(call).rejects.toBe(reason);
+    });
+
+    it("rejects chat as soon as the signal fires, while the SDK is still waiting", async () => {
+      // The SDK checks the signal only after a retry's backoff.
+      const provider = createProvider();
+      const controller = new AbortController();
+      const reason = new Error("cancelled");
+      mockCreate.mockReturnValueOnce(new Promise(() => {}));
+
+      const call = provider.chat(params, { signal: controller.signal });
+      controller.abort(reason);
+
+      await expect(call).rejects.toBe(reason);
+    });
+
+    it("throws the signal's reason from a stream the SDK has not opened yet", async () => {
+      const provider = createProvider();
+      const controller = new AbortController();
+      const reason = new Error("cancelled");
+      mockCreate.mockReturnValueOnce(new Promise(() => {}));
+
+      const drained = drain(provider.chatStream(params, { signal: controller.signal }));
+      // Let the stream reach the SDK call before the signal fires.
+      await vi.waitFor(() => expect(mockCreate).toHaveBeenCalledOnce());
+      controller.abort(reason);
+
+      await expect(drained).rejects.toBe(reason);
+    });
+
+    it("throws the signal's reason, not a done frame, when the SDK ends an aborted stream", async () => {
+      const provider = createProvider();
+      const controller = new AbortController();
+      const reason = new Error("cancelled");
+      async function* sdkStream(): AsyncGenerator<unknown> {
+        yield {
+          type: "message_start",
+          message: { model: "claude-sonnet-5", usage: { input_tokens: 5, output_tokens: 0 } },
+        };
+        yield { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } };
+        yield { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Hel" } };
+        // The SDK's stream ends quietly once its signal fires.
+        controller.abort(reason);
+      }
+      mockCreate.mockResolvedValueOnce(sdkStream());
+
+      const collected: ChatStreamFrame[] = [];
+      const drained = (async () => {
+        for await (const frame of provider.chatStream(params, { signal: controller.signal })) {
+          collected.push(frame);
+        }
+      })();
+
+      await expect(drained).rejects.toBe(reason);
+      expect(collected).toEqual([{ type: "text_delta", text: "Hel" }]);
+    });
   });
 
   describe("prompt caching", () => {
@@ -1028,16 +1117,15 @@ describe("AnthropicProvider", () => {
         ]),
       );
 
-      const { events, response } = provider.chatStream({
-        model: "claude-sonnet-5",
-        system: "sys",
-        messages: [{ role: "user", content: "hi" }],
-      });
-      for await (const _ of events) {
-        // drain
-      }
+      const { meta } = await drain(
+        provider.chatStream({
+          model: "claude-sonnet-5",
+          system: "sys",
+          messages: [{ role: "user", content: "hi" }],
+        }),
+      );
 
-      expect((await response).usage).toEqual({
+      expect(meta.usage).toEqual({
         inputTokens: 7440,
         outputTokens: 9,
         cacheReadTokens: 7360,
@@ -1163,16 +1251,15 @@ describe("AnthropicProvider", () => {
         ]),
       );
 
-      const { events } = provider.chatStream({
-        model: "claude-sonnet-5",
-        system: "sys",
-        messages: [{ role: "user", content: "hi" }],
-        tools: TOOLS,
-        cache: { key: "conv-1", retention: "long" },
-      });
-      for await (const _ of events) {
-        // drain
-      }
+      await drain(
+        provider.chatStream({
+          model: "claude-sonnet-5",
+          system: "sys",
+          messages: [{ role: "user", content: "hi" }],
+          tools: TOOLS,
+          cache: { key: "conv-1", retention: "long" },
+        }),
+      );
 
       const body = expectDefined(mockCreate.mock.calls[0], "create call")[0];
       expect(body.stream).toBe(true);
@@ -1403,16 +1490,15 @@ describe("AnthropicProvider", () => {
         ]),
       );
 
-      const { events } = provider.chatStream({
-        model: "claude-sonnet-5",
-        system: "sys",
-        messages: [{ role: "user", content: "think" }],
-      });
+      const { frames } = await drain(
+        provider.chatStream({
+          model: "claude-sonnet-5",
+          system: "sys",
+          messages: [{ role: "user", content: "think" }],
+        }),
+      );
 
-      const collected: StreamEvent[] = [];
-      for await (const event of events) collected.push(event);
-
-      expect(collected).toEqual([
+      expect(frames).toEqual([
         { type: "thinking_delta", thinking: "reasoning", signature: "real-sig" },
       ]);
     });
@@ -1444,18 +1530,15 @@ describe("AnthropicProvider", () => {
         ]),
       );
 
-      const { events } = provider.chatStream({
-        model: "claude-sonnet-5",
-        system: "sys",
-        messages: [{ role: "user", content: "think" }],
-      });
+      const { frames } = await drain(
+        provider.chatStream({
+          model: "claude-sonnet-5",
+          system: "sys",
+          messages: [{ role: "user", content: "think" }],
+        }),
+      );
 
-      const collected: StreamEvent[] = [];
-      for await (const event of events) collected.push(event);
-
-      expect(collected).toEqual([
-        { type: "thinking_delta", thinking: "", signature: "sig-no-text" },
-      ]);
+      expect(frames).toEqual([{ type: "thinking_delta", thinking: "", signature: "sig-no-text" }]);
     });
 
     it("accumulates thinking in stream and emits as thinking_delta", async () => {
@@ -1504,21 +1587,19 @@ describe("AnthropicProvider", () => {
         ]),
       );
 
-      const { events, response } = provider.chatStream({
-        model: "claude-sonnet-4-6",
-        system: "sys",
-        messages: [{ role: "user", content: "think" }],
-      });
+      const { frames, meta } = await drain(
+        provider.chatStream({
+          model: "claude-sonnet-4-6",
+          system: "sys",
+          messages: [{ role: "user", content: "think" }],
+        }),
+      );
 
-      const collected: StreamEvent[] = [];
-      for await (const event of events) collected.push(event);
-
-      expect(collected).toEqual([
+      expect(frames).toEqual([
         { type: "thinking_delta", thinking: "Step 1: analyze.", signature: "sig-stream" },
         { type: "text_delta", text: "Answer" },
       ]);
 
-      const meta = await response;
       expect(meta.stopReason).toBe("end_turn");
     });
   });
@@ -1688,16 +1769,14 @@ describe("AnthropicProvider", () => {
         ]),
       );
 
-      const { events, response } = provider.chatStream({
-        model: "claude-sonnet-5",
-        system: "sys",
-        messages: [{ role: "user", content: "hi" }],
-        maxTokens: 64_000,
-      });
-      for await (const _ of events) {
-        // drain
-      }
-      await response;
+      await drain(
+        provider.chatStream({
+          model: "claude-sonnet-5",
+          system: "sys",
+          messages: [{ role: "user", content: "hi" }],
+          maxTokens: 64_000,
+        }),
+      );
 
       expect(mockCreate.mock.calls[0]![0].max_tokens).toBe(64_000);
     });

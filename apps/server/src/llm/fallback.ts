@@ -23,28 +23,25 @@
  * | permanent   | 400/401/403/404/409/422 + other 4xx             | propagate (no fallback) |
  *
  * Non-Error throws (strings, objects) are treated as permanent — the caller
- * is misusing the SDK.
+ * is misusing the SDK. A call whose abort signal has fired propagates its
+ * error whatever the class: the caller cancelled it.
  *
  * ## Streaming semantics
  *
  * Streaming fallback applies **only to pre-stream failures**. Once the
- * first event has been handed to the consumer, mid-stream errors propagate
- * — we cannot recover partial output. We implement this by pulling the
- * first event inside the try/catch used for candidate selection, then
- * wiring the remaining events through without further interception.
+ * first frame has been handed to the consumer, mid-stream errors propagate
+ * — we cannot recover partial output.
  */
 
 import { logger } from "../logger.js";
 import { ProviderProtocolError } from "./errors.js";
 import type { LlmProvider } from "./provider.js";
 import type {
+  ChatOptions,
   ChatParams,
-  ChatStreamResult,
+  ChatStreamFrame,
   CountTokensParams,
   LlmResponse,
-  StopReason,
-  StreamEvent,
-  Usage,
 } from "./types.js";
 
 /**
@@ -131,8 +128,6 @@ export function extractStatus(err: Error): number | undefined {
   return typeof err.status === "number" ? err.status : undefined;
 }
 
-function noop(): void {}
-
 function describeError(err: unknown): string {
   if (err instanceof Error) {
     const status = extractStatus(err);
@@ -162,181 +157,87 @@ export class FallbackLlmProvider implements LlmProvider {
         : `fallback(${providers.map((p) => p.name).join(",")})`;
   }
 
-  async chat(params: ChatParams): Promise<LlmResponse> {
-    return this.#runWithFallback("chat", (p) => p.chat(params));
+  async chat(params: ChatParams, options?: ChatOptions): Promise<LlmResponse> {
+    return this.#runWithFallback("chat", options?.signal, (p) => p.chat(params, options));
   }
 
   async countTokens(params: CountTokensParams): Promise<number> {
-    return this.#runWithFallback("countTokens", (p) => p.countTokens(params));
+    return this.#runWithFallback("countTokens", undefined, (p) => p.countTokens(params));
   }
 
-  chatStream(params: ChatParams): ChatStreamResult {
-    const providers = this.#providers;
-
-    let resolveResponse: (v: { stopReason: StopReason; model: string; usage: Usage }) => void;
-    let rejectResponse: (err: unknown) => void;
-    const response = new Promise<{ stopReason: StopReason; model: string; usage: Usage }>(
-      (resolve, reject) => {
-        resolveResponse = resolve;
-        rejectResponse = reject;
-      },
-    );
-
-    async function* generateEvents(): AsyncIterable<StreamEvent> {
-      const attempts: FallbackAttempt[] = [];
-
-      // Try each candidate in order. Fallback applies only before the first
-      // event is yielded downstream — once we yield, the consumer has
-      // committed to a model and mid-stream errors must propagate.
-      for (let i = 0; i < providers.length; i++) {
-        const provider = providers[i];
-        if (!provider) continue;
-
-        let result: ChatStreamResult | undefined;
-        let iterator: AsyncIterator<StreamEvent> | undefined;
-        let firstEvent: IteratorResult<StreamEvent> | undefined;
-
-        try {
-          result = provider.chatStream(params);
-          iterator = result.events[Symbol.asyncIterator]();
-          // Pull the first event inside the try/catch. If the SDK throws
-          // during stream establishment (auth, invalid request, connection
-          // refused), this is where we detect it — before yielding anything
-          // to the consumer.
-          firstEvent = await iterator.next();
-        } catch (err) {
-          // If provider.chatStream() returned but iterator.next() rejected,
-          // the adapter's own `response` promise is still live and will
-          // typically settle with the same error. Detach a noop catcher so
-          // it doesn't surface as an unhandled rejection once we move on.
-          if (result) result.response.catch(noop);
-          attempts.push({ provider: provider.name, error: err });
-          if (isRetriableProviderError(err) && i < providers.length - 1) {
-            const next = providers[i + 1];
-            logger.warn(
-              {
-                fromProvider: provider.name,
-                toProvider: next?.name,
-                errClass: err instanceof Error ? err.name : typeof err,
-                errMessage: err instanceof Error ? err.message : String(err),
-              },
-              "llm provider failed, falling back (stream)",
-            );
-            continue;
-          }
-          // Permanent or last candidate — propagate.
-          if (!isRetriableProviderError(err)) {
-            rejectResponse(err);
-            throw err;
-          }
-          const exhaustion = new AllProvidersFailedError(attempts);
-          logger.error(
-            {
-              attempts: attempts.map((a) => ({
-                provider: a.provider,
-                err: describeError(a.error),
-              })),
-            },
-            "all llm providers failed (stream)",
-          );
-          rejectResponse(exhaustion);
-          throw exhaustion;
-        }
-
-        // Narrow locals — every catch path above exits the iteration, so
-        // reaching here guarantees all three were assigned.
-        if (!result || !iterator || !firstEvent) {
-          throw new Error("unreachable: stream setup succeeded without assigning locals");
-        }
-        const activeResult = result;
-        const activeIterator = iterator;
-        const activeFirstEvent = firstEvent;
-
-        // Successfully established the stream. Forward the first event and
-        // then drain the iterator. Any further errors propagate — fallback
-        // is no longer an option.
-        let drained = false;
-        try {
-          if (!activeFirstEvent.done) {
-            yield activeFirstEvent.value;
-            for (;;) {
-              const next = await activeIterator.next();
-              if (next.done) break;
-              yield next.value;
-            }
-          }
-          drained = true;
-          const meta = await activeResult.response;
-          resolveResponse(meta);
-          return;
-        } catch (err) {
-          // Mid-stream drain failed. `activeResult.response` is still
-          // dangling (we only await it on the success path above); detach
-          // so the adapter's independent rejection doesn't leak.
-          drained = true;
-          activeResult.response.catch(noop);
-          rejectResponse(err);
-          throw err;
-        } finally {
-          if (!drained) {
-            // The consumer abandoned the stream: return the candidate's
-            // iterator so its cleanup runs (SDK request abort, span end).
-            activeResult.response.catch(noop);
-            rejectResponse(new Error("chatStream consumer abandoned the stream"));
-            await activeIterator.return?.();
-          }
-        }
-      }
-
-      // Unreachable — empty providers list is rejected in the constructor.
-      const empty = new AllProvidersFailedError(attempts);
-      rejectResponse(empty);
-      throw empty;
-    }
-
-    return { events: generateEvents(), response };
-  }
-
-  async #runWithFallback<T>(op: string, run: (p: LlmProvider) => Promise<T>): Promise<T> {
+  /**
+   * Fallback applies only until a candidate's first frame is forwarded: from
+   * then on the consumer has committed to that model, and a mid-stream error
+   * propagates. `for await` returns the candidate's stream when the consumer
+   * stops early, so the candidate's cleanup (request abort, span end) runs.
+   */
+  async *chatStream(params: ChatParams, options?: ChatOptions): AsyncGenerator<ChatStreamFrame> {
     const attempts: FallbackAttempt[] = [];
-    for (let i = 0; i < this.#providers.length; i++) {
-      const provider = this.#providers[i];
-      if (!provider) continue;
+    for (const [index, provider] of this.#providers.entries()) {
+      let forwarded = false;
+      try {
+        for await (const frame of provider.chatStream(params, options)) {
+          forwarded = true;
+          yield frame;
+        }
+        return;
+      } catch (err) {
+        if (forwarded || options?.signal?.aborted) throw err;
+        this.#fallBackOrThrow("chatStream", index, err, attempts);
+      }
+    }
+    // Unreachable: the last candidate's failure always throws.
+    throw new AllProvidersFailedError(attempts);
+  }
+
+  async #runWithFallback<T>(
+    op: string,
+    signal: AbortSignal | undefined,
+    run: (p: LlmProvider) => Promise<T>,
+  ): Promise<T> {
+    const attempts: FallbackAttempt[] = [];
+    for (const [index, provider] of this.#providers.entries()) {
       try {
         return await run(provider);
       } catch (err) {
-        attempts.push({ provider: provider.name, error: err });
-        if (!isRetriableProviderError(err)) {
-          throw err;
-        }
-        const next = this.#providers[i + 1];
-        if (!next) {
-          const exhaustion = new AllProvidersFailedError(attempts);
-          logger.error(
-            {
-              op,
-              attempts: attempts.map((a) => ({
-                provider: a.provider,
-                err: describeError(a.error),
-              })),
-            },
-            "all llm providers failed",
-          );
-          throw exhaustion;
-        }
-        logger.warn(
-          {
-            op,
-            fromProvider: provider.name,
-            toProvider: next.name,
-            errClass: err instanceof Error ? err.name : typeof err,
-            errMessage: err instanceof Error ? err.message : String(err),
-          },
-          "llm provider failed, falling back",
-        );
+        if (signal?.aborted) throw err;
+        this.#fallBackOrThrow(op, index, err, attempts);
       }
     }
-    // Unreachable — empty providers list is rejected in the constructor.
+    // Unreachable: the last candidate's failure always throws.
     throw new AllProvidersFailedError(attempts);
+  }
+
+  /**
+   * Record candidate `index`'s failure, then return to try the next
+   * candidate, or throw: the error itself when it is permanent,
+   * {@link AllProvidersFailedError} when no candidate is left.
+   */
+  #fallBackOrThrow(op: string, index: number, err: unknown, attempts: FallbackAttempt[]): void {
+    const provider = this.#providers[index];
+    if (!provider) throw new Error(`unreachable: no provider at index ${index}`);
+    attempts.push({ provider: provider.name, error: err });
+    if (!isRetriableProviderError(err)) throw err;
+    const next = this.#providers[index + 1];
+    if (!next) {
+      logger.error(
+        {
+          op,
+          attempts: attempts.map((a) => ({ provider: a.provider, err: describeError(a.error) })),
+        },
+        "all llm providers failed",
+      );
+      throw new AllProvidersFailedError(attempts);
+    }
+    logger.warn(
+      {
+        op,
+        fromProvider: provider.name,
+        toProvider: next.name,
+        errClass: err instanceof Error ? err.name : typeof err,
+        errMessage: err instanceof Error ? err.message : String(err),
+      },
+      "llm provider failed, falling back",
+    );
   }
 }

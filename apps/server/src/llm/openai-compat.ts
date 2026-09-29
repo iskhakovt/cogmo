@@ -3,6 +3,7 @@ import { getEncoding, type Tiktoken } from "js-tiktoken";
 import OpenAI from "openai";
 import * as R from "remeda";
 import { logger } from "../logger.js";
+import { abortable, abortReasonOr } from "./abort.js";
 import type { CacheDialect } from "./cache-dialect.js";
 import { cacheMarker } from "./cache-marker.js";
 import { ProviderProtocolError, parseToolArgs, ToolArgsCutOffError } from "./errors.js";
@@ -13,15 +14,15 @@ import { failChatSpan, recordChatUsage, startChatSpan } from "./otel.js";
 import type { LlmProvider } from "./provider.js";
 import {
   type CacheIntent,
+  type ChatOptions,
   type ChatParams,
-  type ChatStreamResult,
+  type ChatStreamFrame,
   type ContentBlock,
   type CountTokensParams,
   DEFAULT_MAX_TOKENS,
   type LlmResponse,
   type Message,
   type StopReason,
-  type StreamEvent,
   type TextBlock,
   type ToolDefinition,
   type Usage,
@@ -89,12 +90,13 @@ export class OpenAICompatibleProvider implements LlmProvider {
     );
   }
 
-  async chat(params: ChatParams): Promise<LlmResponse> {
+  async chat(params: ChatParams, options?: ChatOptions): Promise<LlmResponse> {
     if (params.responseFormat && params.tools?.length) {
       throw new Error("responseFormat and tools are mutually exclusive");
     }
 
     const hints = cacheHints(this.#cacheDialect, params);
+    const signal = options?.signal;
     const span = startChatSpan(this.name, params.model);
     try {
       const createParams: OpenAI.ChatCompletionCreateParamsNonStreaming & CacheHintFields = {
@@ -121,9 +123,9 @@ export class OpenAICompatibleProvider implements LlmProvider {
         };
       }
 
-      const response = await this.#client.chat.completions.create(
-        createParams,
-        requestOptions(hints),
+      const response = await abortable(
+        this.#client.chat.completions.create(createParams, requestOptions(hints, signal)),
+        signal,
       );
 
       const choice = response.choices[0];
@@ -142,7 +144,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
         usage,
       };
     } catch (err) {
-      const mapped = toRefusalErrorIfMatches(err) ?? err;
+      const mapped = abortReasonOr(toRefusalErrorIfMatches(err) ?? err, signal);
       failChatSpan(span, mapped);
       throw mapped;
     } finally {
@@ -150,34 +152,26 @@ export class OpenAICompatibleProvider implements LlmProvider {
     }
   }
 
-  chatStream(params: ChatParams): ChatStreamResult {
+  chatStream(params: ChatParams, options?: ChatOptions): AsyncIterable<ChatStreamFrame> {
     if (params.responseFormat && params.tools?.length) {
       throw new Error("responseFormat and tools are mutually exclusive");
     }
 
-    let resolveResponse: (v: { stopReason: StopReason; model: string; usage: Usage }) => void;
-    let rejectResponse: (err: unknown) => void;
-    const response = new Promise<{ stopReason: StopReason; model: string; usage: Usage }>(
-      (resolve, reject) => {
-        resolveResponse = resolve;
-        rejectResponse = reject;
-      },
-    );
-
     const client = this.#client;
     const hints = cacheHints(this.#cacheDialect, params);
     const providerName = this.name;
-    const span = startChatSpan(providerName, params.model);
+    const signal = options?.signal;
 
-    async function* generateEvents(): AsyncIterable<StreamEvent> {
+    async function* generateFrames(): AsyncGenerator<ChatStreamFrame> {
+      const span = startChatSpan(providerName, params.model);
       let completed = false;
       try {
         // Map content-policy 400s to RefusalError at the create-time boundary
         // before they propagate to FallbackLlmProvider. `.catch()` keeps the
         // narrow Stream<...> type from the streaming overload — a try/catch
         // would widen `stream` to the ChatCompletion|Stream union.
-        const stream = await client.chat.completions
-          .create(
+        const stream = await abortable(
+          client.chat.completions.create(
             {
               model: params.model,
               ...modelFamilyParams(params.model, params),
@@ -187,11 +181,12 @@ export class OpenAICompatibleProvider implements LlmProvider {
               stream: true,
               stream_options: { include_usage: true },
             },
-            requestOptions(hints),
-          )
-          .catch((err: unknown) => {
-            throw toRefusalErrorIfMatches(err) ?? err;
-          });
+            requestOptions(hints, signal),
+          ),
+          signal,
+        ).catch((err: unknown) => {
+          throw toRefusalErrorIfMatches(err) ?? err;
+        });
 
         let model = params.model;
         let usage: Usage = { inputTokens: 0, outputTokens: 0 };
@@ -243,6 +238,9 @@ export class OpenAICompatibleProvider implements LlmProvider {
           }
         }
 
+        // The SDK ends its stream quietly when the signal fires.
+        signal?.throwIfAborted();
+
         // Yield accumulated tool calls as complete tool_start events.
         const calls = [...toolCalls.entries()].sort(([a], [b]) => a - b).map(([, call]) => call);
         for (const [position, call] of calls.entries()) {
@@ -257,23 +255,21 @@ export class OpenAICompatibleProvider implements LlmProvider {
 
         recordChatUsage(span, providerName, model, usage, finishReason);
         completed = true;
-        resolveResponse({ stopReason: finishReason, model, usage });
+        yield { type: "done", meta: { stopReason: finishReason, model, usage } };
       } catch (err) {
         completed = true;
-        failChatSpan(span, err);
-        rejectResponse(err);
-        throw err;
+        const cause = abortReasonOr(err, signal);
+        failChatSpan(span, cause);
+        throw cause;
       } finally {
-        if (!completed) {
-          const abortErr = new Error("chatStream consumer abandoned the stream");
-          failChatSpan(span, abortErr);
-          rejectResponse(abortErr);
-        }
+        // Returned before completing: the consumer stopped early. Mid-SDK
+        // stream, leaving its loop above aborted the request.
+        if (!completed) failChatSpan(span, new Error("chatStream consumer abandoned the stream"));
         span.end();
       }
     }
 
-    return { events: generateEvents(), response };
+    return generateFrames();
   }
 }
 
@@ -423,8 +419,9 @@ function markerFamily(model: string): "anthropic" | "google" | "qwen" | undefine
   return undefined;
 }
 
-function requestOptions(hints: CacheHints): OpenAI.RequestOptions | undefined {
-  return hints.headers && { headers: hints.headers };
+/** The request's cache headers and the caller's abort signal. */
+function requestOptions(hints: CacheHints, signal: AbortSignal | undefined): OpenAI.RequestOptions {
+  return { ...(hints.headers && { headers: hints.headers }), signal };
 }
 
 // --- Token estimation ---

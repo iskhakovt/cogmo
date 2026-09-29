@@ -112,19 +112,20 @@ describe.skipIf(API_KEY === undefined)("AnthropicProvider prompt caching (live)"
     const measured: Measured[] = [];
     for (const prompt of PROMPTS) {
       messages.push({ role: "user", content: prompt });
-      const { events, response } = provider.chatStream({
+      let text = "";
+      let done: Usage | undefined;
+      for await (const frame of provider.chatStream({
         model: MODEL,
         system,
         messages: [...messages],
         tools: TOOLS,
         maxTokens: 300,
         cache: { key: nonce, retention: "long" },
-      });
-      let text = "";
-      for await (const event of events) {
-        if (event.type === "text_delta") text += event.text;
+      })) {
+        if (frame.type === "text_delta") text += frame.text;
+        if (frame.type === "done") done = frame.meta.usage;
       }
-      const { usage: reported } = await response;
+      const reported = expectDefined(done, "done frame");
 
       // The SDK retries overloads, rate limits and dropped connections; each
       // attempt is its own exchange, and the one that counts is the last to

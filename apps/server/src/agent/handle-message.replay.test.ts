@@ -27,7 +27,7 @@ import { mock } from "vitest-mock-extended";
 import { z } from "zod";
 import { inngest } from "../inngest/client.js";
 import { AnthropicProvider } from "../llm/anthropic.js";
-import type { ChatParams, ChatStreamResult, StreamEvent, ToolDefinition } from "../llm/types.js";
+import type { ChatParams, ChatStreamFrame, ToolDefinition } from "../llm/types.js";
 import { agentIterations, memoryRecallFailures } from "../metrics.js";
 import type { SkillRunner } from "../skills/runner.js";
 import { expectDefined } from "../test/assertions.js";
@@ -1107,16 +1107,14 @@ describe("handle-message — turn inputs frozen across re-invocations", () => {
     };
   }
 
-  function stream(events: StreamEvent[], stopReason: "tool_use" | "end_turn"): ChatStreamResult {
-    return {
-      events: (async function* () {
-        yield* events;
-      })(),
-      response: Promise.resolve({
-        stopReason,
-        model: "mock-model",
-        usage: { inputTokens: 10, outputTokens: 5 },
-      }),
+  async function* stream(
+    events: Exclude<ChatStreamFrame, { type: "done" }>[],
+    stopReason: "tool_use" | "end_turn",
+  ): AsyncGenerator<ChatStreamFrame> {
+    yield* events;
+    yield {
+      type: "done",
+      meta: { stopReason, model: "mock-model", usage: { inputTokens: 10, outputTokens: 5 } },
     };
   }
 

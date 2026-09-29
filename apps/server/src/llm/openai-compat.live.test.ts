@@ -106,14 +106,12 @@ async function send(
   params: ChatParams,
 ): Promise<{ measured: Measured; text: string }> {
   const before = recorder.exchanges.length;
-  const { events, response } = provider.chatStream(params);
-  // A failed request rejects both; the events loop is the one that throws.
-  response.catch(() => {});
   let text = "";
-  for await (const event of events) {
-    if (event.type === "text_delta") text += event.text;
+  let reported: Usage | undefined;
+  for await (const frame of provider.chatStream(params)) {
+    if (frame.type === "text_delta") text += frame.text;
+    if (frame.type === "done") reported = frame.meta.usage;
   }
-  const { usage: reported } = await response;
 
   // An attempt that failed below HTTP rejects its exchange; the SDK retried it.
   const attempts = recorder.exchanges.slice(before);
@@ -133,7 +131,7 @@ async function send(
       prompt: usage.prompt_tokens,
       cached: usage.prompt_tokens_details?.cached_tokens ?? 0,
       written: usage.prompt_tokens_details?.cache_write_tokens ?? 0,
-      reported,
+      reported: expectDefined(reported, "done frame"),
     },
   };
 }

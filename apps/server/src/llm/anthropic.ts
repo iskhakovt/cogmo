@@ -1,6 +1,7 @@
 import Anthropic, { BadRequestError } from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { logger } from "../logger.js";
+import { abortable, abortReasonOr } from "./abort.js";
 import {
   hasOpenObject,
   hasRecursiveRef,
@@ -21,8 +22,9 @@ import { withFailureLogging } from "./logging-fetch.js";
 import { failChatSpan, recordChatUsage, startChatSpan } from "./otel.js";
 import type { LlmProvider } from "./provider.js";
 import {
+  type ChatOptions,
   type ChatParams,
-  type ChatStreamResult,
+  type ChatStreamFrame,
   type ContentBlock,
   type CountTokensParams,
   DEFAULT_MAX_TOKENS,
@@ -30,7 +32,6 @@ import {
   type Message,
   type ResponseFormat,
   type StopReason,
-  type StreamEvent,
   type ToolDefinition,
   type Usage,
 } from "./types.js";
@@ -62,29 +63,24 @@ export class AnthropicProvider implements LlmProvider {
     });
   }
 
-  chatStream(params: ChatParams): ChatStreamResult {
+  chatStream(params: ChatParams, options?: ChatOptions): AsyncIterable<ChatStreamFrame> {
     if (params.responseFormat && params.tools?.length) {
       throw new Error("responseFormat and tools are mutually exclusive");
     }
 
     const anthropicParams = buildCreateParams(params, takesToolPath(params));
-    let resolveResponse: (v: { stopReason: StopReason; model: string; usage: Usage }) => void;
-    let rejectResponse: (err: unknown) => void;
-    const response = new Promise<{ stopReason: StopReason; model: string; usage: Usage }>(
-      (resolve, reject) => {
-        resolveResponse = resolve;
-        rejectResponse = reject;
-      },
-    );
-
     const client = this.#client;
     const providerName = this.name;
-    const span = startChatSpan(providerName, params.model);
+    const signal = options?.signal;
 
-    async function* generateEvents(): AsyncIterable<StreamEvent> {
+    async function* generateFrames(): AsyncGenerator<ChatStreamFrame> {
+      const span = startChatSpan(providerName, params.model);
       let completed = false;
       try {
-        const stream = await client.messages.create({ ...anthropicParams, stream: true });
+        const stream = await abortable(
+          client.messages.create({ ...anthropicParams, stream: true }, { signal }),
+          signal,
+        );
 
         // Track tool_use blocks by index for input accumulation
         const toolBlocks = new Map<number, { id: string; name: string; jsonChunks: string[] }>();
@@ -196,29 +192,26 @@ export class AnthropicProvider implements LlmProvider {
           }
         }
 
+        // The SDK ends its stream quietly when the signal fires.
+        signal?.throwIfAborted();
         if (unparsed !== undefined) throw unparsed;
         recordChatUsage(span, providerName, model, usage, stopReason);
         completed = true;
-        resolveResponse({ stopReason, model, usage });
+        yield { type: "done", meta: { stopReason, model, usage } };
       } catch (err) {
         completed = true;
-        failChatSpan(span, err);
-        rejectResponse(err);
-        throw err;
+        const cause = abortReasonOr(err, signal);
+        failChatSpan(span, cause);
+        throw cause;
       } finally {
-        if (!completed) {
-          // Generator was returned early (consumer broke out of for-await
-          // without an exception). Reject the response promise so awaiters
-          // don't hang and mark the span as incomplete.
-          const abortErr = new Error("chatStream consumer abandoned the stream");
-          failChatSpan(span, abortErr);
-          rejectResponse(abortErr);
-        }
+        // Returned before completing: the consumer stopped early, and
+        // leaving the SDK stream's loop above aborted the request.
+        if (!completed) failChatSpan(span, new Error("chatStream consumer abandoned the stream"));
         span.end();
       }
     }
 
-    return { events: generateEvents(), response };
+    return generateFrames();
   }
 
   async countTokens(params: CountTokensParams): Promise<number> {
@@ -234,14 +227,15 @@ export class AnthropicProvider implements LlmProvider {
     return result.input_tokens;
   }
 
-  async chat(params: ChatParams): Promise<LlmResponse> {
+  async chat(params: ChatParams, options?: ChatOptions): Promise<LlmResponse> {
     if (params.responseFormat && params.tools?.length) {
       throw new Error("responseFormat and tools are mutually exclusive");
     }
 
+    const signal = options?.signal;
     const span = startChatSpan(this.name, params.model);
     try {
-      const { response, toolPath } = await this.#create(clampForNonStreaming(params));
+      const { response, toolPath } = await this.#create(clampForNonStreaming(params), signal);
 
       const usage = fromAnthropicUsage(response.usage);
 
@@ -284,8 +278,9 @@ export class AnthropicProvider implements LlmProvider {
         usage,
       };
     } catch (err) {
-      failChatSpan(span, err);
-      throw err;
+      const cause = abortReasonOr(err, signal);
+      failChatSpan(span, cause);
+      throw cause;
     } finally {
       span.end();
     }
@@ -296,19 +291,25 @@ export class AnthropicProvider implements LlmProvider {
    * grammar's compile limits ({@link isGrammarLimitError}) goes once more on
    * the tool path: a pre-check can't foresee the internal grammar-size limit.
    */
-  async #create(params: ChatParams): Promise<{ response: Anthropic.Message; toolPath: boolean }> {
+  async #create(
+    params: ChatParams,
+    signal: AbortSignal | undefined,
+  ): Promise<{ response: Anthropic.Message; toolPath: boolean }> {
+    const send = (toolPath: boolean): Promise<Anthropic.Message> =>
+      abortable(
+        this.#client.messages.create(buildCreateParams(params, toolPath), { signal }),
+        signal,
+      );
     const toolPath = takesToolPath(params);
     try {
-      const response = await this.#client.messages.create(buildCreateParams(params, toolPath));
-      return { response, toolPath };
+      return { response: await send(toolPath), toolPath };
     } catch (err) {
       if (toolPath || params.responseFormat === undefined || !isGrammarLimitError(err)) throw err;
       logger.warn(
         { model: params.model, format: params.responseFormat.name, err },
         "structured output can't compile the schema, retrying on the tool path",
       );
-      const response = await this.#client.messages.create(buildCreateParams(params, true));
-      return { response, toolPath: true };
+      return { response: await send(true), toolPath: true };
     }
   }
 }

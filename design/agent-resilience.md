@@ -270,7 +270,7 @@ Synthesis call shape:
 
 - **Tools disabled at the API level** (`tools: []`), not via prompt — belt-and-braces against a model that "helpfully" tries to call a tool from a stale system instruction.
 - **Single attempt, no Class C repair on this call.** If it fails for any reason, fall back to the fixed string above and emit `agent.degrade.synthesis` with `ok: false`. Don't degrade-the-degrade — the user has waited long enough.
-- **Wall-clock cap of 5s** — tighter than the normal request budget. The user is already waiting on a failed turn.
+- **Wall-clock cap of 5s** — tighter than the normal request budget. The user is already waiting on a failed turn. The cap is the call's abort signal, so the request stops when it fires.
 - **`temperature: 0`** — predictability matters more than variety on a failure reply. Best-effort: the Anthropic adapter drops it (the Messages API rejects sampling parameters on current models), as the OpenAI-compatible adapter does for OpenAI's reasoning models without a `none` effort, each with a once-per-model warning. Those with one run at `none` to keep it, which also keeps the reply inside the 5s cap (see [providers.md](providers.md) → Architecture); other OpenAI-compatible models honour it. The reply is 1–3 sentences either way.
 - **System prompt names the stop reason and asks for 1–3 sentences** covering: what was attempted, what went wrong, one concrete next step (rephrase, switch model, try later, etc.). No verbose apology.
 

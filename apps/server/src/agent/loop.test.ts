@@ -6,7 +6,7 @@ import { ProviderProtocolError, ToolArgsCutOffError } from "../llm/errors.js";
 import { RefusalError } from "../llm/fallback.js";
 import type { LlmProvider } from "../llm/provider.js";
 import type {
-  ChatStreamResult,
+  ChatStreamFrame,
   ContentBlock,
   LlmResponse,
   Message,
@@ -668,25 +668,31 @@ describe("runAgentLoop", () => {
 
 // --- Streaming agent loop tests ---
 
+type ContentFrame = Exclude<ChatStreamFrame, { type: "done" }>;
+
 interface MockStreamTurn {
-  events: StreamEvent[];
+  events: ContentFrame[];
   stopReason: StopReason;
   usage?: Usage;
+}
+
+/** A provider stream that yields the turn's events, then its `done` frame. */
+async function* scriptedStream(turn: MockStreamTurn): AsyncGenerator<ChatStreamFrame> {
+  yield* turn.events;
+  yield {
+    type: "done",
+    meta: {
+      stopReason: turn.stopReason,
+      model: "mock-model",
+      usage: turn.usage ?? { inputTokens: 10, outputTokens: 5 },
+    },
+  };
 }
 
 function mockStreamProvider(turns: MockStreamTurn[]): LlmProvider {
   const chatStream = vi.fn();
   for (const turn of turns) {
-    chatStream.mockReturnValueOnce({
-      events: (async function* () {
-        for (const e of turn.events) yield e;
-      })(),
-      response: Promise.resolve({
-        stopReason: turn.stopReason,
-        model: "mock-model",
-        usage: turn.usage ?? { inputTokens: 10, outputTokens: 5 },
-      }),
-    } satisfies ChatStreamResult);
+    chatStream.mockReturnValueOnce(scriptedStream(turn));
   }
   return {
     name: "mock-stream",
@@ -1274,58 +1280,87 @@ describe("runStreamingAgentLoop", () => {
     });
   });
 
-  it("propagates a mid-stream provider error without leaking an unhandledRejection", async () => {
-    // The streaming adapters reject both the events iterator AND their
-    // `response` promise on a stream-level failure. The loop awaits
-    // `response` only on success, so without an upfront `.catch()` the
-    // dangling rejection would crash the Node process under
-    // `--unhandled-rejections=throw` (Node ≥ 15 default).
-    const failure = new Error("upstream 502");
-    (failure as Error & { status?: number }).status = 502;
-
+  it("propagates a mid-stream provider error", async () => {
+    const failure = Object.assign(new Error("upstream 502"), { status: 502 });
+    async function* failing(): AsyncGenerator<ChatStreamFrame> {
+      yield { type: "text_delta", text: "partial" };
+      throw failure;
+    }
     const provider: LlmProvider = {
-      name: "leaky-stream",
+      name: "failing-stream",
       chat: vi.fn(),
       countTokens: vi.fn(),
-      chatStream() {
-        const events: AsyncIterable<StreamEvent> = {
-          [Symbol.asyncIterator]() {
-            return {
-              async next(): Promise<IteratorResult<StreamEvent>> {
-                throw failure;
-              },
-            };
+      chatStream: () => failing(),
+    };
+
+    await expect(
+      testRunStreamingAgentLoop({
+        provider,
+        messages: [{ role: "user", content: "hi" }],
+        tools: new ToolRegistry(),
+        onEvent: async () => {},
+      }),
+    ).rejects.toBe(failure);
+  });
+
+  it("returns the provider stream when a delivery push throws, so the request is aborted", async () => {
+    const cleanup = vi.fn();
+    async function* stream(): AsyncGenerator<ChatStreamFrame> {
+      try {
+        yield { type: "text_delta", text: "one" };
+        yield { type: "text_delta", text: "two" };
+        yield {
+          type: "done",
+          meta: {
+            stopReason: "end_turn",
+            model: "mock-model",
+            usage: { inputTokens: 1, outputTokens: 1 },
           },
         };
-        // Bare rejected promise — no pre-attached `.catch`. The loop must
-        // attach one itself; if it doesn't, vitest reports an unhandled
-        // rejection and the test fails.
-        return { events, response: Promise.reject(failure) };
-      },
-    };
-
-    const unhandled: unknown[] = [];
-    const listener = (reason: unknown): void => {
-      unhandled.push(reason);
-    };
-    process.on("unhandledRejection", listener);
-    try {
-      await expect(
-        testRunStreamingAgentLoop({
-          provider,
-          messages: [{ role: "user", content: "hi" }],
-          tools: new ToolRegistry(),
-          onEvent: async () => {},
-        }),
-      ).rejects.toBe(failure);
-
-      // Flush microtasks + macrotasks so any pending `unhandledRejection`
-      // signal has fired before we assert.
-      await new Promise((r) => setImmediate(r));
-      expect(unhandled).toEqual([]);
-    } finally {
-      process.off("unhandledRejection", listener);
+      } finally {
+        cleanup();
+      }
     }
+    const provider: LlmProvider = {
+      name: "mock-stream",
+      chat: vi.fn(),
+      countTokens: vi.fn(),
+      chatStream: () => stream(),
+    };
+    const pushFailed = new Error("push failed");
+
+    await expect(
+      testRunStreamingAgentLoop({
+        provider,
+        messages: [{ role: "user", content: "hi" }],
+        tools: new ToolRegistry(),
+        onEvent: async () => {
+          throw pushFailed;
+        },
+      }),
+    ).rejects.toBe(pushFailed);
+    expect(cleanup).toHaveBeenCalledOnce();
+  });
+
+  it("fails an iteration whose stream ends without a done frame", async () => {
+    async function* truncated(): AsyncGenerator<ChatStreamFrame> {
+      yield { type: "text_delta", text: "partial" };
+    }
+    const provider: LlmProvider = {
+      name: "truncated-stream",
+      chat: vi.fn(),
+      countTokens: vi.fn(),
+      chatStream: () => truncated(),
+    };
+
+    await expect(
+      testRunStreamingAgentLoop({
+        provider,
+        messages: [{ role: "user", content: "hi" }],
+        tools: new ToolRegistry(),
+        onEvent: async () => {},
+      }),
+    ).rejects.toThrow("truncated-stream stream ended without a done frame");
   });
 
   it("captures thinking_delta into content blocks but does not forward to onEvent", async () => {
@@ -2667,14 +2702,13 @@ describe("turnLogger plumbing", () => {
 
 // --- Class C in-loop repair ---
 //
-// Each iteration's stream produces (events, response) — repair-test
-// scenarios need both the stream content and the post-stream `stopReason`
-// the classifier reads, plus the option to make a stream throw before
-// completion. `repairStreamProvider` exposes that surface as a small
+// Repair-test scenarios need both the stream content and the `done` frame's
+// `stopReason` the classifier reads, plus the option to make a stream throw
+// before completion. `repairStreamProvider` exposes that surface as a small
 // builder so tests stay declarative.
 
 type RepairTurn =
-  | { kind: "stream"; events: StreamEvent[]; stopReason: StopReason }
+  | { kind: "stream"; events: ContentFrame[]; stopReason: StopReason }
   | { kind: "throw"; error: unknown };
 
 function repairStreamProvider(turns: ReadonlyArray<RepairTurn>): {
@@ -2695,24 +2729,13 @@ function repairStreamProvider(turns: ReadonlyArray<RepairTurn>): {
     if (!turn) throw new Error(`repairStreamProvider: ran out of turns (cursor=${cursor})`);
     if (turn.kind === "throw") {
       const err = turn.error;
-      // Generator throws on first `next()` instead of yielding — symmetric
-      // with the success branch's `async function*` form below.
+      // Generator throws on first `next()` instead of yielding.
       // biome-ignore lint/correctness/useYield: intentional throw-only generator
-      const events = (async function* (): AsyncGenerator<StreamEvent> {
+      return (async function* (): AsyncGenerator<ChatStreamFrame> {
         throw err;
       })();
-      return { events, response: Promise.reject(err) };
     }
-    return {
-      events: (async function* () {
-        for (const e of turn.events) yield e;
-      })(),
-      response: Promise.resolve({
-        stopReason: turn.stopReason,
-        model: "mock-model",
-        usage: { inputTokens: 10, outputTokens: 5 },
-      }),
-    } satisfies ChatStreamResult;
+    return scriptedStream(turn);
   });
   const chat = vi.fn(async (params: Parameters<LlmProvider["chat"]>[0]) => {
     chatCalls.push(params);

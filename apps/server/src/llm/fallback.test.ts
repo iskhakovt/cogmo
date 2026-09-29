@@ -8,7 +8,7 @@ import {
   RefusalError,
 } from "./fallback.js";
 import type { LlmProvider } from "./provider.js";
-import type { ChatParams, ChatStreamResult, LlmResponse, StreamEvent } from "./types.js";
+import type { ChatParams, ChatStreamFrame, LlmResponse } from "./types.js";
 
 // --- Error construction helpers ---
 
@@ -31,61 +31,62 @@ function networkError(message = "ECONNREFUSED"): Error {
 
 // --- Stream helpers ---
 
-/** Build a ChatStreamResult from a list of events. Success path. */
-function streamOf(events: StreamEvent[]): ChatStreamResult {
-  async function* gen(): AsyncIterable<StreamEvent> {
-    for (const e of events) yield e;
-  }
-  return {
-    events: gen(),
-    response: Promise.resolve({
-      stopReason: "end_turn",
-      model: "mock-model",
-      usage: { inputTokens: 1, outputTokens: 1 },
-    }),
-  };
+type ContentFrame = Exclude<ChatStreamFrame, { type: "done" }>;
+
+const DONE: ChatStreamFrame = {
+  type: "done",
+  meta: { stopReason: "end_turn", model: "mock-model", usage: { inputTokens: 1, outputTokens: 1 } },
+};
+
+/** A candidate stream that yields `frames`, then `done`. */
+async function* streamOf(frames: ContentFrame[]): AsyncGenerator<ChatStreamFrame> {
+  yield* frames;
+  yield DONE;
 }
 
-// `response` is returned as a bare rejected promise (no pre-attached `.catch`).
-// FallbackLlmProvider is expected to detach any abandoned `response` promise
-// itself — if it doesn't, vitest flags the unhandled rejection and the test fails.
-
 /**
- * Build a ChatStreamResult that throws on first `events.next()` — simulates
- * the SDK failing while establishing the stream (pre-stream failure).
+ * A candidate stream that throws on its first pull — the SDK failing while
+ * establishing the stream (pre-stream failure).
  */
-function streamFailsBeforeFirstEvent(err: unknown): ChatStreamResult {
+function streamFailsBeforeFirstFrame(err: unknown): AsyncIterable<ChatStreamFrame> {
   // Plain async iterable — no generator function, so biome's `useYield` rule
-  // doesn't fire on a generator that only throws. The pre-stream failure
-  // surfaces from the very first `next()` call as an awaited rejection.
-  const events: AsyncIterable<StreamEvent> = {
+  // doesn't fire on a generator that only throws.
+  return {
     [Symbol.asyncIterator]() {
       return {
-        async next(): Promise<IteratorResult<StreamEvent>> {
+        async next(): Promise<IteratorResult<ChatStreamFrame>> {
           throw err;
         },
       };
     },
   };
-  return {
-    events,
-    response: Promise.reject(err),
-  };
 }
 
 /**
- * Build a ChatStreamResult that yields one event then throws — simulates a
- * mid-stream failure after we've already handed bytes to the consumer.
+ * A candidate stream that yields one frame, then throws — a mid-stream
+ * failure after the consumer has seen output.
  */
-function streamFailsMidStream(err: unknown): ChatStreamResult {
-  async function* gen(): AsyncIterable<StreamEvent> {
-    yield { type: "text_delta", text: "partial" };
-    throw err;
+async function* streamFailsMidStream(err: unknown): AsyncGenerator<ChatStreamFrame> {
+  yield { type: "text_delta", text: "partial" };
+  throw err;
+}
+
+/** A candidate stream that records when its cleanup runs. */
+async function* streamWithCleanup(cleanup: () => void): AsyncGenerator<ChatStreamFrame> {
+  try {
+    yield { type: "text_delta", text: "one" };
+    yield { type: "text_delta", text: "two" };
+    yield DONE;
+  } finally {
+    cleanup();
   }
-  return {
-    events: gen(),
-    response: Promise.reject(err),
-  };
+}
+
+/** The error an SDK throws for an aborted request: no status, so it would classify as transient. */
+function userAbortError(): Error {
+  const err = new Error("Request was aborted.");
+  err.name = "APIUserAbortError";
+  return err;
 }
 
 const chatParams: ChatParams = {
@@ -249,6 +250,29 @@ describe("FallbackLlmProvider.chat", () => {
     await expect(fb.chat(chatParams)).rejects.toBe("string-throw");
     expect(secondary.chat).not.toHaveBeenCalled();
   });
+
+  it("passes the call options to the candidate", async () => {
+    const primary = mockProvider({ chat: vi.fn().mockResolvedValue(sampleResponse) });
+    const options = { signal: new AbortController().signal };
+
+    await new FallbackLlmProvider([primary]).chat(chatParams, options);
+
+    expect(primary.chat).toHaveBeenCalledWith(chatParams, options);
+  });
+
+  it("propagates a failure after the signal fires without trying the secondary", async () => {
+    const aborted = userAbortError();
+    const primary = mockProvider({ name: "primary", chat: vi.fn().mockRejectedValue(aborted) });
+    const secondary = mockProvider({
+      name: "secondary",
+      chat: vi.fn().mockResolvedValue(sampleResponse),
+    });
+
+    const fb = new FallbackLlmProvider([primary, secondary]);
+
+    await expect(fb.chat(chatParams, { signal: AbortSignal.abort() })).rejects.toBe(aborted);
+    expect(secondary.chat).not.toHaveBeenCalled();
+  });
 });
 
 // --- countTokens() ---
@@ -272,33 +296,35 @@ describe("FallbackLlmProvider.countTokens", () => {
 // --- chatStream() ---
 
 describe("FallbackLlmProvider.chatStream", () => {
-  async function collect(events: AsyncIterable<StreamEvent>): Promise<StreamEvent[]> {
-    const out: StreamEvent[] = [];
-    for await (const e of events) out.push(e);
+  async function collect(frames: AsyncIterable<ChatStreamFrame>): Promise<ChatStreamFrame[]> {
+    const out: ChatStreamFrame[] = [];
+    for await (const frame of frames) out.push(frame);
     return out;
   }
 
-  it("yields primary's events when primary succeeds", async () => {
+  it("yields the primary's frames when the primary succeeds", async () => {
     const primary = mockProvider({
       name: "primary",
       chatStream: vi.fn().mockReturnValue(streamOf([{ type: "text_delta", text: "from-primary" }])),
     });
     const secondaryStream = vi.fn();
     const secondary = mockProvider({ name: "secondary", chatStream: secondaryStream });
+    const options = { signal: new AbortController().signal };
 
     const fb = new FallbackLlmProvider([primary, secondary]);
-    const handle = fb.chatStream(chatParams);
 
-    const events = await collect(handle.events);
-    expect(events).toEqual([{ type: "text_delta", text: "from-primary" }]);
+    expect(await collect(fb.chatStream(chatParams, options))).toEqual([
+      { type: "text_delta", text: "from-primary" },
+      DONE,
+    ]);
+    expect(primary.chatStream).toHaveBeenCalledWith(chatParams, options);
     expect(secondaryStream).not.toHaveBeenCalled();
-    await expect(handle.response).resolves.toMatchObject({ stopReason: "end_turn" });
   });
 
-  it("falls back on pre-stream failure and the consumer sees the secondary's events", async () => {
+  it("falls back on pre-stream failure and the consumer sees the secondary's frames", async () => {
     const primary = mockProvider({
       name: "primary",
-      chatStream: vi.fn().mockReturnValue(streamFailsBeforeFirstEvent(apiError(503))),
+      chatStream: vi.fn().mockReturnValue(streamFailsBeforeFirstFrame(apiError(503))),
     });
     const secondary = mockProvider({
       name: "secondary",
@@ -308,19 +334,19 @@ describe("FallbackLlmProvider.chatStream", () => {
     });
 
     const fb = new FallbackLlmProvider([primary, secondary]);
-    const handle = fb.chatStream(chatParams);
 
-    const events = await collect(handle.events);
-    expect(events).toEqual([{ type: "text_delta", text: "from-secondary" }]);
+    expect(await collect(fb.chatStream(chatParams))).toEqual([
+      { type: "text_delta", text: "from-secondary" },
+      DONE,
+    ]);
     expect(primary.chatStream).toHaveBeenCalledOnce();
     expect(secondary.chatStream).toHaveBeenCalledOnce();
-    await expect(handle.response).resolves.toMatchObject({ stopReason: "end_turn" });
   });
 
   it("does NOT fall back on a pre-stream permanent error — propagates to consumer", async () => {
     const primary = mockProvider({
       name: "primary",
-      chatStream: vi.fn().mockReturnValue(streamFailsBeforeFirstEvent(apiError(401))),
+      chatStream: vi.fn().mockReturnValue(streamFailsBeforeFirstFrame(apiError(401))),
     });
     const secondary = mockProvider({
       name: "secondary",
@@ -328,10 +354,8 @@ describe("FallbackLlmProvider.chatStream", () => {
     });
 
     const fb = new FallbackLlmProvider([primary, secondary]);
-    const handle = fb.chatStream(chatParams);
 
-    await expect(collect(handle.events)).rejects.toMatchObject({ status: 401 });
-    await expect(handle.response).rejects.toMatchObject({ status: 401 });
+    await expect(collect(fb.chatStream(chatParams))).rejects.toMatchObject({ status: 401 });
     expect(secondary.chatStream).not.toHaveBeenCalled();
   });
 
@@ -349,16 +373,12 @@ describe("FallbackLlmProvider.chatStream", () => {
     });
 
     const fb = new FallbackLlmProvider([primary, secondary]);
-    const handle = fb.chatStream(chatParams);
 
-    const iter = handle.events[Symbol.asyncIterator]();
+    const iter = fb.chatStream(chatParams)[Symbol.asyncIterator]();
     const first = await iter.next();
     expect(first.value).toEqual({ type: "text_delta", text: "partial" });
-    // Next pull re-raises the mid-stream error — consumer has already seen
-    // bytes, so fallback is no longer an option.
+    // The consumer has seen output, so fallback is no longer an option.
     await expect(iter.next()).rejects.toBe(midErr);
-    // Response also rejects with the same mid-stream error.
-    await expect(handle.response).rejects.toBe(midErr);
     expect(secondary.chatStream).not.toHaveBeenCalled();
   });
 
@@ -367,48 +387,71 @@ describe("FallbackLlmProvider.chatStream", () => {
     const e2 = networkError();
     const p1 = mockProvider({
       name: "p1",
-      chatStream: vi.fn().mockReturnValue(streamFailsBeforeFirstEvent(e1)),
+      chatStream: vi.fn().mockReturnValue(streamFailsBeforeFirstFrame(e1)),
     });
     const p2 = mockProvider({
       name: "p2",
-      chatStream: vi.fn().mockReturnValue(streamFailsBeforeFirstEvent(e2)),
+      chatStream: vi.fn().mockReturnValue(streamFailsBeforeFirstFrame(e2)),
     });
 
     const fb = new FallbackLlmProvider([p1, p2]);
-    const handle = fb.chatStream(chatParams);
 
-    const caught: unknown = await collect(handle.events).catch((e) => e);
+    const caught: unknown = await collect(fb.chatStream(chatParams)).catch((e) => e);
     expect(caught).toBeInstanceOf(AllProvidersFailedError);
     expect((caught as AllProvidersFailedError).attempts.map((a) => a.provider)).toEqual([
       "p1",
       "p2",
     ]);
-    await expect(handle.response).rejects.toBeInstanceOf(AllProvidersFailedError);
   });
 
-  it("returns the candidate's stream when the consumer abandons it", async () => {
-    const cleanup = vi.fn();
-    async function* gen(): AsyncIterable<StreamEvent> {
-      try {
-        yield { type: "text_delta", text: "one" };
-        yield { type: "text_delta", text: "two" };
-      } finally {
-        cleanup();
-      }
-    }
+  it("propagates a pre-stream failure after the signal fires without trying the secondary", async () => {
+    const aborted = userAbortError();
     const primary = mockProvider({
       name: "primary",
-      chatStream: vi.fn().mockReturnValue({
-        events: gen(),
-        response: new Promise(() => {}),
-      }),
+      chatStream: vi.fn().mockReturnValue(streamFailsBeforeFirstFrame(aborted)),
+    });
+    const secondary = mockProvider({
+      name: "secondary",
+      chatStream: vi.fn().mockReturnValue(streamOf([{ type: "text_delta", text: "unused" }])),
     });
 
-    const handle = new FallbackLlmProvider([primary]).chatStream(chatParams);
-    for await (const _ of handle.events) break;
+    const fb = new FallbackLlmProvider([primary, secondary]);
+
+    await expect(collect(fb.chatStream(chatParams, { signal: AbortSignal.abort() }))).rejects.toBe(
+      aborted,
+    );
+    expect(secondary.chatStream).not.toHaveBeenCalled();
+  });
+
+  it("returns the candidate's stream when the consumer stops early", async () => {
+    const cleanup = vi.fn();
+    const primary = mockProvider({
+      name: "primary",
+      chatStream: vi.fn().mockReturnValue(streamWithCleanup(cleanup)),
+    });
+
+    for await (const _ of new FallbackLlmProvider([primary]).chatStream(chatParams)) break;
 
     expect(cleanup).toHaveBeenCalledOnce();
-    await expect(handle.response).rejects.toThrow(/abandoned/);
+  });
+
+  it("returns the candidate's stream when the consumer's loop body throws", async () => {
+    // The agent loop's delivery push failing mid-stream.
+    const cleanup = vi.fn();
+    const primary = mockProvider({
+      name: "primary",
+      chatStream: vi.fn().mockReturnValue(streamWithCleanup(cleanup)),
+    });
+    const pushFailed = new Error("push failed");
+
+    await expect(
+      (async () => {
+        for await (const _ of new FallbackLlmProvider([primary]).chatStream(chatParams)) {
+          throw pushFailed;
+        }
+      })(),
+    ).rejects.toBe(pushFailed);
+    expect(cleanup).toHaveBeenCalledOnce();
   });
 
   it("exposes the underlying provider when the list contains a single entry", () => {
