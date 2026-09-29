@@ -1351,6 +1351,11 @@ describe("telegram adapter", () => {
       expect(await handle.push(text("Hello"))).toEqual(blocked);
       // A failed handle reports its failure and writes nothing more.
       expect(await handle.push(text(" again"))).toEqual(blocked);
+      const image = JSON.stringify({ path: "generated/a.jpg", mediaType: "image/jpeg" });
+      expect(
+        await handle.push({ type: "tool_result", name: "generate_image", output: image }),
+      ).toEqual(blocked);
+      expect(mockBotApi.sendPhoto).not.toHaveBeenCalled();
       expect(await handle.finish()).toEqual(blocked);
       expect(await handle.abort("LLM failed")).toEqual(blocked);
       expect(mockBotApi.sendMessage).toHaveBeenCalledTimes(1);
