@@ -570,6 +570,28 @@ describe("startExecStreaming", () => {
     }
   });
 
+  it("a command that starts after dispose never has its logs opened, and its session is deleted", async () => {
+    const proc = fakeProcess({ wsResolve: {} });
+    const executed = Promise.withResolvers<Awaited<ReturnType<Process["executeSessionCommand"]>>>();
+    vi.mocked(proc.executeSessionCommand).mockImplementation(() => executed.promise);
+    const controller = new AbortController();
+    const opening = startExecStreaming({
+      process: proc,
+      sessionIdPrefix: "p",
+      cmd: ["true"],
+      opts: { signal: controller.signal },
+    }).catch((e: unknown) => e);
+    await vi.waitFor(() => expect(proc.executeSessionCommand).toHaveBeenCalled());
+
+    controller.abort();
+    expect(await opening).toBeInstanceOf(ExecDisposedError);
+    executed.resolve({ cmdId: "cmd-late" });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(proc.getSessionCommandLogs).not.toHaveBeenCalled();
+    expect(proc.deleteSession).toHaveBeenCalledTimes(1);
+  });
+
   // ── Wall-clock and idle timeouts ──
   //
   // The wedge that motivated these (4-day stuck task on run id

@@ -15,7 +15,7 @@ import { expectDefined } from "../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import type { DockerContainer, DockerFacade, DockerImage, ExecInspect } from "./docker-facade.js";
 import type { ExecOutcome } from "./exec-state.js";
-import { LocalDockerSandboxClient } from "./index.js";
+import { ExecTimeoutError, LocalDockerSandboxClient } from "./index.js";
 import type { CogmoSocketProxy } from "./proxy/index.js";
 import type { TaskScope } from "./proxy/types.js";
 import { DrizzleSandboxStore } from "./store/index.js";
@@ -800,6 +800,7 @@ describe("LocalDockerSandboxClient — execStreaming.dispose()", () => {
     demuxStdout: () => Writable;
     demuxStderr: () => Writable;
     execInspect: ReturnType<typeof vi.fn<() => Promise<ExecInspect>>>;
+    execStart: ReturnType<typeof vi.fn<() => Promise<PassThrough>>>;
     containerExec: ReturnType<typeof stubContainerExec>;
   }> {
     const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
@@ -855,9 +856,37 @@ describe("LocalDockerSandboxClient — execStreaming.dispose()", () => {
       demuxStdout: () => expectDefined(outSink, "demuxStream stdout sink not captured yet"),
       demuxStderr: () => expectDefined(errSink, "demuxStream stderr sink not captured yet"),
       execInspect: execObj.inspect,
+      execStart: execObj.start,
       containerExec: containerObj.exec,
     };
   }
+
+  it("starts nothing for an exec the deadline settled while it was being created", async () => {
+    const { session, containerExec, execStart } = await makeSessionWithDemux(
+      "019d0000-0000-7000-8000-00000000d15b",
+    );
+    const created = Promise.withResolvers<void>();
+    const createExec = containerExec.getMockImplementation();
+    containerExec.mockImplementationOnce(async (opts) => {
+      await created.promise;
+      return expectDefined(createExec, "container.exec")(opts);
+    });
+    vi.useFakeTimers();
+    try {
+      const opening = session.execStreaming(["sleep", "infinity"], { timeoutMs: 100 });
+      const failure = opening.catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(await failure).toBeInstanceOf(ExecTimeoutError);
+
+      created.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(execStart).not.toHaveBeenCalled();
+      // Nothing ran, so there is no group to kill.
+      expect(containerExec).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   describe("exit code", () => {
     it("reads it from an inspect that reports the exec exited", async () => {

@@ -94,6 +94,7 @@ class DaytonaSessionBackend implements ExecBackend {
       command: this.#command,
       runAsync: true,
     });
+    signal.throwIfAborted();
     if (!started.cmdId) throw new Error("daytona executeSessionCommand returned no cmdId");
     const commandId = started.cmdId;
     this.#commandId = commandId;
