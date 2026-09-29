@@ -17,7 +17,7 @@ import {
 
 const log = logger.child({ component: "sandbox.exec" });
 
-/** How long a teardown may take before the run gives up on it. */
+/** How long a teardown, or a start `dispose()` waits out, may take before the run gives up on it. */
 export const TEARDOWN_TIMEOUT_MS = 10_000;
 
 /** Where a backend delivers what its transport carries. */
@@ -63,8 +63,8 @@ export interface ExecBackend {
   fetchExit(signal: AbortSignal): Promise<Result<number, string>>;
   /**
    * Release what `start` acquired so far. Runs when the run settles, and
-   * again for a start that finishes after it. Aborting `signal` means the
-   * run has stopped waiting for it.
+   * again for a start that finishes after it or a dispose that retries it.
+   * Aborting `signal` means the run has stopped waiting for it.
    */
   teardown(signal: AbortSignal): Promise<void>;
 }
@@ -94,20 +94,26 @@ class ExecRun {
   #stdinChunks: Buffer[] = [];
   #exited = Promise.withResolvers<ExecOutcome>();
   #launched = Promise.withResolvers<Result<void, ExecFailure>>();
-  /** Aborted on settlement: stops a start in flight and drops the `signal` listener. */
+  /** Aborted on settlement: stops a start or fetch in flight and drops the `signal` listener. */
   #settled = new AbortController();
   #totalTimer: NodeJS.Timeout | undefined;
   #idleTimer: NodeJS.Timeout | undefined;
-  /** Every teardown so far; `dispose()` waits for them. */
+  /** Settles once the start in flight has and its outcome has been fed to the machine. */
+  #starting: Promise<void> = Promise.resolve();
+  /** Every teardown so far. */
   #teardowns: Promise<void> = Promise.resolve();
   #queue: ExecEvent[] = [];
-  #processing = false;
+  /** Set while the queue is being drained; resolves when it has. */
+  #draining: PromiseWithResolvers<void> | undefined;
 
   constructor(backend: ExecBackend, opts: ExecOptions) {
     this.#backend = backend;
     this.#opts = opts;
     this.#log = log.child(backend.logFields);
-    this.#begin = begin(backend.buffersStdin);
+    this.#begin = begin({
+      buffersStdin: backend.buffersStdin,
+      aborted: opts.signal?.aborted === true,
+    });
     this.#state = this.#begin.state;
     // A failed exec fails both streams; the failure is reported by `exited`
     // too, so an unread stream must not crash the process.
@@ -125,14 +131,10 @@ class ExecRun {
       ).unref();
     }
     this.#run(() => this.#enter(this.#begin));
-    const signal = this.#opts.signal;
-    if (signal?.aborted) this.#observe({ type: "dispose" });
-    else {
-      signal?.addEventListener("abort", () => this.#observe({ type: "dispose" }), {
-        once: true,
-        signal: this.#settled.signal,
-      });
-    }
+    this.#opts.signal?.addEventListener("abort", () => this.#observe({ type: "dispose" }), {
+      once: true,
+      signal: this.#settled.signal,
+    });
     if (!this.#backend.buffersStdin) {
       const launched = await this.#launched.promise;
       if (launched.isErr()) throw execFailureError(launched.error);
@@ -150,9 +152,24 @@ class ExecRun {
       wait: () => exited.then(unwrapExit),
       dispose: async () => {
         this.#observe({ type: "dispose" });
-        await this.#teardowns;
+        await this.#quiesced();
       },
     };
+  }
+
+  /**
+   * Once everything a dispose can have set off is done: the event queue has
+   * drained, a start in flight has settled (or `TEARDOWN_TIMEOUT_MS` passed
+   * waiting for it), and every teardown so far, retries included, has
+   * finished or given up.
+   */
+  async #quiesced(): Promise<void> {
+    await this.#draining?.promise;
+    await settledWithin(this.#starting, TEARDOWN_TIMEOUT_MS);
+    for (let seen = this.#teardowns; ; seen = this.#teardowns) {
+      await seen;
+      if (seen === this.#teardowns) return;
+    }
   }
 
   /** Stdin a backend needs whole before it starts: kept in memory until the caller ends it. */
@@ -164,7 +181,7 @@ class ExecRun {
       },
     });
     finished(stdin, (e) => {
-      this.#observe(e ? { type: "stream_failed", error: toError(e) } : { type: "stdin_ended" });
+      this.#observe(e ? { type: "stdin_failed", error: toError(e) } : { type: "stdin_ended" });
     });
     return stdin;
   }
@@ -181,15 +198,17 @@ class ExecRun {
 
   /** Run `work`, then every queued event in order, unless a run is already under way. */
   #run(work: () => void): void {
-    if (this.#processing) return;
-    this.#processing = true;
+    if (this.#draining) return;
+    const draining = Promise.withResolvers<void>();
+    this.#draining = draining;
     try {
       work();
       for (let next = this.#queue.shift(); next; next = this.#queue.shift()) {
         this.#enter(transition(this.#state, next));
       }
     } finally {
-      this.#processing = false;
+      this.#draining = undefined;
+      draining.resolve();
     }
   }
 
@@ -231,35 +250,20 @@ class ExecRun {
       .exhaustive();
   }
 
-  /**
-   * What the transport reports while the start is in flight is held until
-   * the start's own outcome is in, so which of the two arrives first never
-   * depends on microtask order.
-   */
   #start(): void {
     const stdin = this.#backend.buffersStdin ? Buffer.concat(this.#stdinChunks) : undefined;
     this.#stdinChunks = [];
-    let held: ExecEvent[] | undefined = [];
-    const deliver = (event: ExecEvent): void => {
-      if (held) held.push(event);
-      else this.#observe(event);
-    };
-    const release = (outcome: ExecEvent): void => {
-      const events = [outcome, ...(held ?? [])];
-      held = undefined;
-      for (const event of events) this.#observe(event);
-    };
     const sink: ExecSink = {
-      output: (stream, chunk) => deliver({ type: "output", stream, chunk }),
-      ended: () => deliver({ type: "stream_ended" }),
-      failed: (e) => deliver({ type: "stream_failed", error: toError(e) }),
+      output: (stream, chunk) => this.#observe({ type: "output", stream, chunk }),
+      ended: () => this.#observe({ type: "stream_ended" }),
+      failed: (e) => this.#observe({ type: "stream_failed", error: toError(e) }),
     };
-    this.#backend.start(sink, stdin, this.#settled.signal).then(
+    this.#starting = this.#backend.start(sink, stdin, this.#settled.signal).then(
       (started) => {
         if (started.stdin !== undefined) this.#stdin ??= started.stdin;
-        release({ type: "started" });
+        this.#observe({ type: "started" });
       },
-      (e: unknown) => release({ type: "start_failed", error: toError(e) }),
+      (e: unknown) => this.#observe({ type: "start_failed", error: toError(e) }),
     );
   }
 
@@ -282,7 +286,7 @@ class ExecRun {
             (reason) => ({ type: "exit_code_missing", reason }),
           ),
         ),
-      (e: unknown) => this.#observe({ type: "stream_failed", error: toError(e) }),
+      (e: unknown) => this.#observe({ type: "fetch_failed", error: toError(e) }),
     );
   }
 
@@ -305,6 +309,7 @@ class ExecRun {
     ).unref();
     try {
       await untilAborted(this.#backend.teardown(deadline.signal), deadline.signal);
+      this.#observe({ type: "torn_down" });
     } catch (e) {
       this.#observe({ type: "teardown_failed", error: toError(e) });
     } finally {
@@ -319,6 +324,22 @@ function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
     const onAbort = (): void => reject(signal.reason);
     signal.addEventListener("abort", onAbort, { once: true });
     promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
+}
+
+/** Resolves once `promise` settles or `ms` passes, whichever is first. Never rejects. */
+function settledWithin(promise: Promise<unknown>, ms: number): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, ms).unref();
+    promise
+      .then(
+        () => undefined,
+        () => undefined,
+      )
+      .finally(() => {
+        clearTimeout(timer);
+        resolve();
+      });
   });
 }
 

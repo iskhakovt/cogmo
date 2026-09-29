@@ -107,26 +107,19 @@ describe("runExec", () => {
     const f = fakeBackend();
     f.started.resolve({});
     const handle = await runExec(f.backend, { timeoutMs: 1_000 });
-    const teardown = f.holdTeardown();
-    let disposed = false;
+    f.holdTeardown();
 
     await vi.advanceTimersByTimeAsync(1_000);
     expect(await handle.exited).toEqual(
       err({ kind: "timed_out", deadline: "total", timeoutMs: 1_000 }),
     );
-    void handle.dispose().then(() => {
-      disposed = true;
-    });
-    await flush();
-    expect(disposed).toBe(false);
-
+    const teardownSignal = expectDefined(f.backend.teardown.mock.calls[0], "teardown")[0];
+    expect(teardownSignal.aborted).toBe(false);
     await vi.advanceTimersByTimeAsync(TEARDOWN_TIMEOUT_MS);
-    expect(disposed).toBe(true);
-    expect(expectDefined(f.backend.teardown.mock.calls[0], "teardown")[0].aborted).toBe(true);
-    teardown.resolve();
+    expect(teardownSignal.aborted).toBe(true);
   });
 
-  it("retries a teardown that failed on the next dispose", async () => {
+  it("retries a teardown that failed on the next dispose, and only then", async () => {
     const f = fakeBackend();
     f.started.resolve({});
     const handle = await runExec(f.backend, {});
@@ -134,13 +127,123 @@ describe("runExec", () => {
     f.sink().ended();
     f.exit.resolve(ok(0));
     await handle.exited;
-    await handle.dispose();
+    // Let the failed teardown report back before disposing.
+    await new Promise<void>((resolve) => setImmediate(resolve));
     expect(f.backend.teardown).toHaveBeenCalledTimes(1);
 
     await handle.dispose();
     expect(f.backend.teardown).toHaveBeenCalledTimes(2);
     await handle.dispose();
     expect(f.backend.teardown).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries a teardown that timed out on the next dispose", async () => {
+    vi.useFakeTimers();
+    const f = fakeBackend();
+    f.started.resolve({});
+    const handle = await runExec(f.backend, { timeoutMs: 1_000 });
+    f.holdTeardown();
+    await vi.advanceTimersByTimeAsync(1_000 + TEARDOWN_TIMEOUT_MS);
+    expect(f.backend.teardown).toHaveBeenCalledTimes(1);
+
+    void handle.dispose();
+    await flush();
+    expect(f.backend.teardown).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(TEARDOWN_TIMEOUT_MS);
+  });
+
+  it("a single dispose retries the teardown it arrived during, when that one fails", async () => {
+    const f = fakeBackend();
+    f.started.resolve({});
+    f.backend.teardown
+      .mockImplementationOnce(
+        () => new Promise((_, reject) => setTimeout(() => reject(new Error("flaky")), 20)),
+      )
+      .mockResolvedValueOnce(undefined);
+    const handle = await runExec(f.backend, {});
+    f.sink().ended();
+    f.exit.resolve(ok(0));
+
+    try {
+      await handle.wait();
+    } finally {
+      await handle.dispose();
+    }
+
+    expect(f.backend.teardown).toHaveBeenCalledTimes(2);
+  });
+
+  it("dispose() from a data handler resolves only after the teardown it caused", async () => {
+    vi.useFakeTimers();
+    const f = fakeBackend();
+    f.started.resolve({});
+    const handle = await runExec(f.backend, {});
+    const teardown = f.holdTeardown();
+    let disposed = false;
+    handle.stdout.on("data", () => {
+      void handle.dispose().then(() => {
+        disposed = true;
+      });
+    });
+
+    f.sink().output("stdout", Buffer.from("x"));
+    await flush();
+    expect(f.backend.teardown).toHaveBeenCalledTimes(1);
+    expect(disposed).toBe(false);
+
+    teardown.resolve();
+    await flush();
+    expect(disposed).toBe(true);
+  });
+
+  it("dispose() while the start is in flight resolves only after the late start's teardown", async () => {
+    vi.useFakeTimers();
+    const f = fakeBackend({ buffersStdin: true });
+    const handle = await runExec(f.backend, {});
+    expectDefined(handle.stdin, "stdin").end();
+    await vi.waitFor(() => expect(f.backend.start).toHaveBeenCalled());
+    let disposed = false;
+    void handle.dispose().then(() => {
+      disposed = true;
+    });
+    await flush();
+    expect(f.backend.teardown).toHaveBeenCalledTimes(1);
+    expect(disposed).toBe(false);
+
+    f.started.resolve({});
+    await flush();
+    expect(f.backend.teardown).toHaveBeenCalledTimes(2);
+    expect(disposed).toBe(true);
+  });
+
+  it("clears the total deadline when the run settles", async () => {
+    vi.useFakeTimers();
+    const f = fakeBackend();
+    f.started.resolve({});
+    const handle = await runExec(f.backend, { timeoutMs: 60_000 });
+    f.sink().ended();
+    f.exit.resolve(ok(0));
+    await handle.dispose();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("restarts the idle deadline on output, not on every write", async () => {
+    vi.useFakeTimers();
+    const f = fakeBackend();
+    f.started.resolve({});
+    const handle = await runExec(f.backend, { idleTimeoutMs: 100 });
+    handle.stderr.resume();
+    f.sink().ended();
+    // Draining: the backend writes what it drains (the PTY's stderr) with
+    // no idle restart, so the fetch keeps one idle window.
+    for (let i = 0; i < 3; i++) {
+      await vi.advanceTimersByTimeAsync(40);
+      f.sink().output("stderr", Buffer.from("drained"));
+    }
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await handle.exited).toEqual(
+      err({ kind: "timed_out", deadline: "idle", timeoutMs: 100 }),
+    );
   });
 
   it("restarts the idle deadline on every chunk", async () => {
@@ -182,7 +285,8 @@ describe("runExec", () => {
     await expect(runExec(f.backend, { signal: controller.signal })).rejects.toBeInstanceOf(
       ExecDisposedError,
     );
-    expect(f.startSignal().aborted).toBe(true);
+    expect(f.backend.start).not.toHaveBeenCalled();
+    expect(f.backend.teardown).not.toHaveBeenCalled();
   });
 
   it("fails both streams on a transport failure without crashing an unread one", async () => {
