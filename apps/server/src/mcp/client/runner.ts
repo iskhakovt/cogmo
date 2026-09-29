@@ -1,5 +1,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { Transactor } from "../../db/index.js";
+import { logger } from "../../logger.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import type { McpServer } from "../config.js";
 import { type McpConnection, SdkMcpConnection } from "./client.js";
@@ -12,7 +13,11 @@ import { createTransport } from "./transport.js";
  * a code-level trust allowlist.
  */
 export interface Runner {
-  /** Aborting `signal` abandons the connect: a spawn still under way rejects, and what it started is shut down. */
+  /**
+   * Aborting `signal` abandons a spawn still under way: it closes what it
+   * started and rejects once that is closed. After it resolves, the signal is
+   * ignored.
+   */
   spawn(
     server: McpServer,
     secrets: SecretsStore,
@@ -40,12 +45,26 @@ export class HostRunner implements Runner {
     signal.throwIfAborted();
     const client = new Client(CLIENT_INFO);
     const connection = new SdkMcpConnection(client, transport, server.name);
+    // The MCP spec forbids cancelling `initialize`, so an abort closes the
+    // connection, which fails the handshake, rather than reaching the SDK.
+    const abandon = () => {
+      connection.close().catch(() => {}); // awaited, and its failure logged, below
+    };
+    signal.addEventListener("abort", abandon, { once: true });
     try {
-      await connection.connect(signal);
+      await connection.connect();
     } catch (err) {
-      // If connect() failed, the transport may be half-open. Best effort cleanup.
-      await connection.close().catch(() => {});
+      // A failed or abandoned handshake may leave the transport half-open.
+      await connection.close().catch((closeErr: unknown) => {
+        logger.debug(
+          { err: closeErr, mcpServer: server.name },
+          "MCP close after a failed connect failed",
+        );
+      });
+      signal.throwIfAborted();
       throw err;
+    } finally {
+      signal.removeEventListener("abort", abandon);
     }
     return connection;
   }

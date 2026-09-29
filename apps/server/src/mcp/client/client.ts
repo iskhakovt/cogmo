@@ -32,6 +32,7 @@ export class SdkMcpConnection implements McpConnection {
   #transport: Transport;
   #serverName: string;
   #closed = false;
+  #closing: Promise<void> | undefined;
   #closeListeners = new Set<() => void>();
   #toolsChangedListeners = new Set<() => void>();
 
@@ -41,8 +42,11 @@ export class SdkMcpConnection implements McpConnection {
     this.#serverName = serverName;
   }
 
-  /** Aborting `signal` fails the `initialize` handshake. */
-  async connect(signal?: AbortSignal): Promise<void> {
+  /**
+   * Run the `initialize` handshake. It takes no signal: the MCP spec forbids
+   * cancelling `initialize`, so a caller abandons it by calling `close()`.
+   */
+  async connect(): Promise<void> {
     // Wire transport-close before connect — connect() can fail and close in
     // the same tick; we want the callback registered first. The handler is
     // the SINGLE place that flips `#closed` and notifies listeners — both
@@ -65,7 +69,7 @@ export class SdkMcpConnection implements McpConnection {
     this.#transport.onerror = (err) => {
       logger.warn({ err, mcpServer: this.#serverName }, "MCP transport error");
     };
-    await this.#client.connect(this.#transport, signal && { signal });
+    await this.#client.connect(this.#transport);
 
     this.#client.setNotificationHandler(ToolListChangedNotificationSchema, () => {
       for (const cb of this.#toolsChangedListeners) cb();
@@ -122,7 +126,13 @@ export class SdkMcpConnection implements McpConnection {
     };
   }
 
-  async close(): Promise<void> {
+  /** Every call shares one teardown, and resolves once it is done. */
+  close(): Promise<void> {
+    this.#closing ??= this.#close();
+    return this.#closing;
+  }
+
+  async #close(): Promise<void> {
     if (this.#closed) return;
     // Streamable-HTTP servers (Linear, Notion, Atlassian) keep per-session
     // state keyed by `Mcp-Session-Id`; the DELETE tells the server to release

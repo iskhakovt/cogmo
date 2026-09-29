@@ -164,13 +164,26 @@ describe("SdkMcpConnection", () => {
     expect(onErrorAtConnect).toBeTypeOf("function");
   });
 
-  it("hands its signal to the SDK's connect, which aborts the initialize request with it", async () => {
+  it("shares one teardown between close calls, each resolving once it is done", async () => {
     const client = fakeClient();
     const transport = fakeTransport();
-    const signal = new AbortController().signal;
+    const teardown = Promise.withResolvers<void>();
+    vi.mocked(client.close).mockImplementation(async () => {
+      await teardown.promise;
+      await transport.close();
+    });
     const conn = new SdkMcpConnection(client as unknown as Client, transport, SERVER_NAME);
-    await conn.connect(signal);
-    expect(client.connect).toHaveBeenCalledWith(transport, { signal });
+    await conn.connect();
+
+    let settled = 0;
+    const first = conn.close().then(() => settled++);
+    const second = conn.close().then(() => settled++);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(settled).toBe(0);
+
+    teardown.resolve();
+    await Promise.all([first, second]);
+    expect(client.close).toHaveBeenCalledOnce();
   });
 
   it("rejects callTool / listTools after close", async () => {

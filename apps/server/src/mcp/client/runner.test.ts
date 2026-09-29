@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Transactor } from "../../db/index.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
@@ -20,30 +23,76 @@ function stdioServer(command: string, args: string[]): McpServer {
   };
 }
 
+/**
+ * A server that answers nothing: it appends every line it reads to the file
+ * named by its first argument, then `exit` once its stdin closes and it exits.
+ */
+const SILENT_SERVER = `
+const fs = require("node:fs");
+const log = process.argv[1];
+process.on("exit", () => fs.appendFileSync(log, "exit\\n"));
+const lines = require("node:readline").createInterface({ input: process.stdin });
+lines.on("line", (line) => fs.appendFileSync(log, line + "\\n"));
+lines.on("close", () => process.exit(0));
+`;
+
 describe("HostRunner.spawn", () => {
-  it("abandons a connect whose server never answers once its signal aborts", async () => {
-    // Answers nothing, so `initialize` would wait out the SDK's own timeout; exits once its stdin closes.
-    const silent = stdioServer(process.execPath, [
-      "-e",
-      'process.stdin.resume(); process.stdin.on("end", () => process.exit(0));',
-    ]);
+  const dirs: string[] = [];
+
+  afterEach(() => {
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  function logFile(): { path: string; lines: () => string[] } {
+    const dir = mkdtempSync(join(tmpdir(), "cogmo-mcp-runner-"));
+    dirs.push(dir);
+    const path = join(dir, "stdin.log");
+    return {
+      path,
+      lines: () => {
+        try {
+          return readFileSync(path, "utf8").split("\n").filter(Boolean);
+        } catch {
+          return [];
+        }
+      },
+    };
+  }
+
+  it("abandons initialize by closing the connection, never cancelling it, and rejects once the server exits", async () => {
+    const log = logFile();
     const abort = new AbortController();
     const spawning = new HostRunner().spawn(
-      silent,
+      stdioServer(process.execPath, ["-e", SILENT_SERVER, log.path]),
       mock<SecretsStore>(),
       fakeRunInTx,
       abort.signal,
     );
-    setTimeout(() => abort.abort(new Error("evicted")), 200);
-    await expect(spawning).rejects.toThrow(/evicted/);
+    const outcome = spawning.then(
+      () => "connected",
+      (e: unknown) => e,
+    );
+    await vi.waitFor(() => expect(log.lines().join("\n")).toContain('"method":"initialize"'), {
+      timeout: 5_000,
+    });
+
+    abort.abort();
+
+    const result = await outcome;
+    const exitedBeforeRejecting = log.lines().at(-1) === "exit";
+    await vi.waitFor(() => expect(log.lines()).toContain("exit"), { timeout: 5_000 });
+    // The MCP spec forbids cancelling `initialize`.
+    expect(log.lines().filter((line) => line.includes("notifications/cancelled"))).toEqual([]);
+    expect(exitedBeforeRejecting).toBe(true);
+    expect(result).toMatchObject({ name: "AbortError" });
   });
 
   it("starts nothing under a signal that has already aborted", async () => {
     const missing = stdioServer("/nonexistent/cogmo-mcp-server", []);
     const abort = new AbortController();
-    abort.abort(new Error("evicted"));
+    abort.abort();
     await expect(
       new HostRunner().spawn(missing, mock<SecretsStore>(), fakeRunInTx, abort.signal),
-    ).rejects.toThrow("evicted");
+    ).rejects.toMatchObject({ name: "AbortError" });
   });
 });
