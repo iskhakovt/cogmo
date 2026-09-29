@@ -193,6 +193,19 @@ describe("isVoiceContent", () => {
     expect(isVoiceContent([{ type: "voice", path: "p", mediaType: "audio/ogg" }])).toBe(true);
   });
 
+  it("returns false for a forwarded voice note, which the user didn't record", () => {
+    expect(
+      isVoiceContent([
+        {
+          type: "voice",
+          path: "p",
+          mediaType: "audio/ogg",
+          forwarded: { origin: "user", from: "Alice", sentAt: "2023-11-14T22:13:20.000Z" },
+        },
+      ]),
+    ).toBe(false);
+  });
+
   it("returns true when voice is mixed with text", () => {
     expect(
       isVoiceContent([

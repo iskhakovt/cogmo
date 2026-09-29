@@ -252,11 +252,11 @@ function attributeValue(value: string): string {
 }
 
 /**
- * Was the most recent inbound row a voice message? Used by the orchestrator
- * to resolve `auto` voice mode (mirror inbound modality). Returns true iff
- * any block in the content is a voice block.
+ * Did the user speak this row? Used by the orchestrator to resolve `auto`
+ * voice mode (mirror inbound modality). True iff the content carries a voice
+ * block the user recorded: a forwarded clip is someone else speaking.
  */
 export function isVoiceContent(content: InboundContent): boolean {
   if (typeof content === "string") return false;
-  return content.some((b) => b.type === "voice");
+  return content.some((b) => b.type === "voice" && b.forwarded === undefined);
 }

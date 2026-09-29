@@ -2745,6 +2745,68 @@ describe("createHandleMessage", () => {
       });
     });
 
+    it("auto + a forwarded voice note → no TTS (the user didn't speak)", async () => {
+      const ttsProvider = {
+        name: "openai",
+        tts: vi.fn().mockResolvedValue({ audio: Buffer.from("ogg"), mediaType: "audio/ogg" }),
+      };
+      const sttProvider = { name: "openai", stt: vi.fn().mockResolvedValue({ text: "hi" }) };
+      const handle = mockDeliveryHandle({
+        canDeliverVoice: vi.fn().mockReturnValue(true),
+        hasBatchTargets: vi.fn().mockReturnValue(false),
+      });
+      const deps = mockDeps({
+        voiceResolver: mockVoiceResolver(mockVoiceBundle({ tts: ttsProvider, stt: sttProvider })),
+        agentStore: mockAgentStore({
+          getProfile: vi.fn().mockResolvedValue({
+            id: "profile-1",
+            userId: null,
+            name: "x",
+            basePrompt: "x",
+            model: "claude-sonnet-4-6",
+            summarizationModel: null,
+            extractionModel: null,
+            autoRecall: "heuristic",
+            voiceMode: "auto",
+            toolSet: [],
+            memoryScope: null,
+          }),
+        }),
+        attachments: {
+          upload: vi.fn().mockResolvedValue("inbound/x"),
+          download: vi.fn().mockResolvedValue(Buffer.from("ogg-bytes")),
+        },
+        deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+        transportStore: mockTransportStore({
+          getUnbatchedInbound: vi.fn().mockResolvedValue([
+            {
+              id: "inbound-1",
+              content: [
+                {
+                  type: "voice",
+                  path: "inbound/v.ogg",
+                  mediaType: "audio/ogg",
+                  forwarded: { origin: "user", from: "Alice", sentAt: "2020-09-13T12:26:40.000Z" },
+                },
+              ],
+            },
+          ]),
+          getVoiceMaxReplyChars: vi.fn().mockResolvedValue(700),
+        }),
+      });
+
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      // Transcribed, but answered in text.
+      expect(sttProvider.stt).toHaveBeenCalled();
+      expect(ttsProvider.tts).not.toHaveBeenCalled();
+      expect(handle.deliverVoice).not.toHaveBeenCalled();
+    });
+
     it("auto + batch [voice, text] → no TTS (user typed last)", async () => {
       // Debounced batch where the user dictated, then typed a follow-up.
       // Their most recent intent is text — shouldn't get a voice reply
