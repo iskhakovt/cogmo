@@ -1,0 +1,389 @@
+import { err, ok } from "neverthrow";
+import { describe, expect, it } from "vitest";
+import type { StreamOpts } from "../../types.js";
+import {
+  EDIT_INTERVAL_MS,
+  type Effect,
+  findTelegramSplitBoundary,
+  MAX_RATE_LIMITED_WRITES,
+  MAX_RETRY_AFTER_MS,
+  rebalanceCodeFence,
+  type StreamInput,
+  type StreamState,
+  transition,
+  type Write,
+} from "./stream-state.js";
+
+const EDITS: StreamOpts = { chunkChars: 4000, allowEdits: true };
+const APPEND_ONLY: StreamOpts = { chunkChars: 4000, allowEdits: false };
+const T0 = 1_000_000;
+
+/** Feed `inputs` in order: the final state, and every effect along the way. */
+function drive(
+  opts: StreamOpts,
+  inputs: ReadonlyArray<StreamInput>,
+  from: StreamState = { kind: "idle" },
+): { state: StreamState; effects: Effect[] } {
+  return inputs.reduce<{ state: StreamState; effects: Effect[] }>(
+    (acc, input) => {
+      const next = transition(acc.state, input, opts);
+      return { state: next.state, effects: [...acc.effects, ...next.effects] };
+    },
+    { state: from, effects: [] },
+  );
+}
+
+function writes(effects: ReadonlyArray<Effect>): Write[] {
+  return effects.flatMap((effect) => (effect.type === "write" ? [effect.write] : []));
+}
+
+function text(t: string, now = T0): StreamInput {
+  return { type: "push", event: { type: "text_delta", text: t }, now };
+}
+
+function landed(now: number, messageId?: number): StreamInput {
+  return { type: "api_ok", messageId, now };
+}
+
+function rateLimited(seconds: number, now: number): StreamInput {
+  return {
+    type: "api_failed",
+    failure: {
+      kind: "rate_limited",
+      retryAfterMs: seconds * 1000,
+      reason: `retry after ${seconds}`,
+    },
+    now,
+  };
+}
+
+function elapsed(now: number): StreamInput {
+  return { type: "throttle_elapsed", now };
+}
+
+const finish: StreamInput = { type: "finish", now: T0 };
+
+describe("telegram stream state", () => {
+  describe("previews", () => {
+    it("sends the first push as a new message and edits it once the interval passes", () => {
+      const { state, effects } = drive(EDITS, [
+        text("Hello"),
+        landed(T0, 100),
+        text(" world", T0 + EDIT_INTERVAL_MS - 1),
+        text("!", T0 + EDIT_INTERVAL_MS),
+      ]);
+
+      expect(writes(effects)).toEqual([
+        { role: "preview", messageId: undefined, text: "Hello", html: false },
+        { role: "preview", messageId: 100, text: "Hello world!", html: false },
+      ]);
+      expect(state.kind).toBe("streaming");
+    });
+
+    it("starts no write while one is in flight", () => {
+      const { effects } = drive(EDITS, [text("Hello"), text(" world", T0 + 10_000)]);
+
+      expect(writes(effects)).toHaveLength(1);
+    });
+
+    it("takes an edit Telegram calls unmodified as landed", () => {
+      const { state } = drive(EDITS, [
+        text("Hello"),
+        { type: "api_failed", failure: { kind: "not_modified" }, now: T0 },
+      ]);
+
+      expect(state).toMatchObject({ kind: "streaming", shown: "Hello", inFlight: null });
+    });
+
+    it("writes nothing in append-only mode until a chunk is due, and starts typing once", () => {
+      const { effects } = drive(APPEND_ONLY, [
+        text("Hello"),
+        text(" world", T0 + 10_000),
+        {
+          type: "push",
+          event: { type: "tool_start", id: "t1", name: "search", input: {} },
+          now: T0 + 20_000,
+        },
+      ]);
+
+      expect(writes(effects)).toEqual([]);
+      expect(effects.filter((e) => e.type === "start_typing")).toHaveLength(1);
+    });
+  });
+
+  describe("rate limits", () => {
+    it("waits out retry_after on a preview, then previews the latest text", () => {
+      const waited = drive(EDITS, [
+        text("Hello"),
+        landed(T0, 100),
+        text(" world", T0 + 600),
+        rateLimited(3, T0 + 600),
+        text("!", T0 + 2000),
+      ]);
+      expect(waited.effects).toContainEqual({ type: "wait", ms: 3000 });
+      expect(writes(waited.effects)).toHaveLength(2);
+
+      const resumed = drive(EDITS, [elapsed(T0 + 3600)], waited.state);
+      expect(writes(resumed.effects)).toEqual([
+        { role: "preview", messageId: 100, text: "Hello world!", html: false },
+      ]);
+    });
+
+    it("repeats a rate-limited chunk after the wait", () => {
+      const waited = drive(EDITS, [text("done"), landed(T0, 100), finish, rateLimited(2, T0)]);
+      const chunk = writes(waited.effects).at(-1);
+      expect(chunk).toEqual({ role: "chunk", messageId: 100, text: "done", html: true });
+
+      const resumed = drive(EDITS, [elapsed(T0 + 2000)], waited.state);
+      expect(writes(resumed.effects)).toEqual([chunk]);
+    });
+
+    it("fails rather than wait longer than it will", () => {
+      const { state, effects } = drive(EDITS, [
+        text("Hello"),
+        rateLimited(MAX_RETRY_AFTER_MS / 1000 + 1, T0),
+      ]);
+
+      expect(state.kind).toBe("failed");
+      expect(effects).not.toContainEqual(expect.objectContaining({ type: "wait" }));
+      expect(effects).toContainEqual({ type: "stopped" });
+      expect(effects).toContainEqual({
+        type: "settled",
+        outcome: err(expect.stringContaining("retry after")),
+      });
+    });
+
+    it("fails once Telegram has rate-limited writes too many times in a row", () => {
+      const limits = Array.from({ length: MAX_RATE_LIMITED_WRITES }, (_, i) => [
+        rateLimited(1, T0 + i * 1000),
+        elapsed(T0 + (i + 1) * 1000),
+      ]).flat();
+      const { state } = drive(EDITS, [text("Hello"), ...limits]);
+
+      expect(state).toEqual({ kind: "failed", reason: expect.stringContaining("in a row") });
+    });
+
+    it("resets the count once a write lands", () => {
+      const limits = Array.from({ length: MAX_RATE_LIMITED_WRITES - 1 }, (_, i) => [
+        rateLimited(1, T0 + i * 1000),
+        elapsed(T0 + (i + 1) * 1000),
+      ]).flat();
+      const { state } = drive(EDITS, [
+        text("Hello"),
+        ...limits,
+        landed(T0 + 10_000, 100),
+        text(" world", T0 + 20_000),
+        rateLimited(1, T0 + 20_000),
+      ]);
+
+      expect(state).toMatchObject({ kind: "streaming", rateLimited: 1, waiting: true });
+    });
+  });
+
+  describe("failures", () => {
+    const unparseable: StreamInput = {
+      type: "api_failed",
+      failure: { kind: "unparseable", reason: "can't parse entities" },
+      now: T0,
+    };
+
+    it("falls back to the plain source when Telegram rejects a chunk's HTML", () => {
+      const { effects } = drive(EDITS, [text("**done**"), landed(T0, 100), finish, unparseable]);
+
+      expect(writes(effects).slice(-2)).toEqual([
+        { role: "chunk", messageId: 100, text: "<b>done</b>", html: true },
+        { role: "chunk", messageId: 100, text: "**done**", html: false },
+      ]);
+    });
+
+    it("fails when the plain fallback is rejected too", () => {
+      const { state } = drive(EDITS, [
+        text("**done**"),
+        landed(T0, 100),
+        finish,
+        unparseable,
+        unparseable,
+      ]);
+
+      expect(state).toEqual({ kind: "failed", reason: "can't parse entities" });
+    });
+
+    it("fails on a rejected write, and ignores every input after", () => {
+      const rejected: StreamInput = {
+        type: "api_failed",
+        failure: { kind: "rejected", reason: "bot was blocked by the user" },
+        now: T0,
+      };
+      const failed = drive(EDITS, [text("Hello"), rejected]);
+      expect(failed.state).toEqual({ kind: "failed", reason: "bot was blocked by the user" });
+      expect(failed.effects).toContainEqual({
+        type: "settled",
+        outcome: err("bot was blocked by the user"),
+      });
+
+      const after = drive(
+        EDITS,
+        [text("more", T0 + 10_000), finish, { type: "abort", error: "x", now: T0 }],
+        failed.state,
+      );
+      expect(after).toEqual({ state: failed.state, effects: [] });
+    });
+  });
+
+  describe("closing", () => {
+    it("settles at once when finished before any push", () => {
+      expect(drive(EDITS, [finish])).toEqual({
+        state: { kind: "done" },
+        effects: [{ type: "stopped" }, { type: "settled", outcome: ok(undefined) }],
+      });
+    });
+
+    it("writes the buffer as a rendered chunk, then settles", () => {
+      const { state, effects } = drive(EDITS, [text("Hello"), landed(T0, 100), finish, landed(T0)]);
+
+      expect(writes(effects).at(-1)).toEqual({
+        role: "chunk",
+        messageId: 100,
+        text: "Hello",
+        html: true,
+      });
+      expect(state).toEqual({ kind: "done" });
+      expect(effects.at(-1)).toEqual({ type: "settled", outcome: ok(undefined) });
+    });
+
+    it("waits for the write in flight before closing", () => {
+      const { state, effects } = drive(EDITS, [text("Hello"), finish]);
+
+      expect(writes(effects)).toHaveLength(1);
+      expect(state).toMatchObject({ kind: "finalizing", closing: "finish" });
+    });
+
+    it("appends the error to the live message on abort, in plain text", () => {
+      const { effects } = drive(EDITS, [
+        text("partial"),
+        landed(T0, 100),
+        { type: "abort", error: "LLM failed", now: T0 },
+      ]);
+
+      expect(writes(effects).at(-1)).toEqual({
+        role: "tail",
+        messageId: 100,
+        text: "partial\n\n⚠️ LLM failed",
+        html: false,
+      });
+    });
+
+    it("sends the abort's tail as a chunk of its own in append-only mode", () => {
+      const { effects } = drive(APPEND_ONLY, [
+        text("partial"),
+        { type: "abort", error: "LLM failed", now: T0 },
+      ]);
+
+      expect(writes(effects)).toEqual([
+        {
+          role: "chunk",
+          messageId: undefined,
+          text: expect.stringContaining("LLM failed"),
+          html: true,
+        },
+      ]);
+    });
+
+    it("takes no content and no second close once closing", () => {
+      const closing = drive(EDITS, [text("Hello"), finish]);
+      const after = drive(
+        EDITS,
+        [text("late"), { type: "abort", error: "x", now: T0 }, finish],
+        closing.state,
+      );
+
+      expect(after).toEqual({ state: closing.state, effects: [] });
+    });
+  });
+
+  describe("chunks", () => {
+    it("writes an overflowing head first, then previews the rest on a new message", () => {
+      const opts: StreamOpts = { chunkChars: 150, allowEdits: true };
+      const para = "a".repeat(120);
+      const { effects } = drive(opts, [
+        text("start"),
+        landed(T0, 100),
+        text(`\n\n${para}\n\n${para}`, T0 + 10),
+        landed(T0 + 20),
+      ]);
+
+      const [, head, rest] = writes(effects);
+      expect(head).toMatchObject({ role: "chunk", messageId: 100, html: true });
+      expect(rest).toEqual({ role: "preview", messageId: undefined, text: para, html: false });
+    });
+
+    it("writes nothing for a retraction", () => {
+      const { effects } = drive(EDITS, [
+        text("fragment"),
+        landed(T0, 100),
+        { type: "retract", text: "fragment", toolUseIds: [] },
+      ]);
+
+      expect(writes(effects)).toHaveLength(1);
+    });
+  });
+
+  describe("chunk splitting", () => {
+    it("findTelegramSplitBoundary prefers high-quality breaks", () => {
+      // Paragraph break wins over later line breaks / spaces.
+      const a = `${"a".repeat(2000)}\n\n${"b".repeat(1000)}\n${"c".repeat(1000)}`;
+      expect(findTelegramSplitBoundary(a, 3500)).toBe(2002);
+
+      // No paragraph break — falls through to single line break.
+      const b = `${"a".repeat(2000)}\n${"b".repeat(2500)}`;
+      expect(findTelegramSplitBoundary(b, 3500)).toBe(2001);
+
+      // No newline — sentence boundary.
+      const c = `${"a".repeat(1500)}. ${"b".repeat(2500)}`;
+      expect(findTelegramSplitBoundary(c, 3500)).toBe(1502);
+
+      // No natural break in the acceptable window → hard split at target.
+      const d = "x".repeat(5000);
+      expect(findTelegramSplitBoundary(d, 3500)).toBe(3500);
+
+      // Text shorter than target — no split.
+      expect(findTelegramSplitBoundary("short", 3500)).toBe(5);
+
+      // Hard split must not land between halves of a surrogate pair —
+      // 😀 (U+1F600) is two UTF-16 code units. Cutting at `target` would
+      // split it; the helper backs off by one to keep the pair intact.
+      const emoji = "😀"; // length 2 in UTF-16
+      const e = "x".repeat(99) + emoji + "y".repeat(100);
+      // No natural breaks → hard split. target=100 falls on the high
+      // surrogate (index 99); helper returns 99 instead.
+      expect(findTelegramSplitBoundary(e, 100)).toBe(99);
+    });
+
+    it("rebalanceCodeFence closes an open fence on head and reopens on tail", () => {
+      // Split lands inside an open fenced block: close + reopen with lang.
+      const head = "Here is the code:\n\n```python\ndef foo():\n  return 1";
+      const tail = "\nx = foo()\n```\nDone.";
+      const out = rebalanceCodeFence(head, tail);
+      expect(out.head).toBe(`${head}\n\`\`\``);
+      expect(out.tail).toBe(`\`\`\`python\n${tail}`);
+
+      // Already balanced — passthrough.
+      const balancedHead = "Code:\n\n```\nx\n```\n\nMore prose.";
+      const balancedTail = "Next paragraph.";
+      expect(rebalanceCodeFence(balancedHead, balancedTail)).toEqual({
+        head: balancedHead,
+        tail: balancedTail,
+      });
+
+      // No code in head at all — passthrough.
+      expect(rebalanceCodeFence("just text", " more")).toEqual({
+        head: "just text",
+        tail: " more",
+      });
+
+      // Fence without a language tag — reopen as bare ```.
+      const noLangHead = "```\nplain code\nmore";
+      expect(rebalanceCodeFence(noLangHead, "\nstill code").tail).toBe("```\n\nstill code");
+    });
+  });
+});
