@@ -102,13 +102,11 @@ export const memoryRecallFailures = {
 
 /**
  * `core_memory_update` writes that changed a block, labeled by `key` (a
- * documented key, or `other`), `target` (`shared` | `unclassed` | `class` |
- * `override`: the group of `# User` the block is in) and `change` (`created` |
- * `updated` | `deleted`). Each is announced in the next turn, except an
- * override created or deleted, which opens an epoch (design/prompt-caching.md
- * → Open questions). Operator deletes (`/classes unrestrict`, deleting a
- * class) aren't counted. Incremented once the write's transaction commits,
- * inside the tool's step.
+ * documented key, or `other`), `target` (the scope the write targets:
+ * `shared` | `unclassed` | `class` | `override`) and `change` (`created` |
+ * `updated` | `deleted`). Counted after the write commits, at most once.
+ * Which edits are announced: design/prompt-caching.md → System Prompt
+ * Snapshot → An epoch opens.
  */
 export const coreMemoryEdits = {
   add(value: number, attrs?: MetricAttributes): void {
