@@ -7,6 +7,7 @@ import { err } from "neverthrow";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { DrizzleAgentStore } from "../agent/store/index.js";
 import type { Database, Transactor } from "../db/index.js";
+import { logger } from "../logger.js";
 import { expectDefined, resolvesWithin } from "../test/assertions.js";
 import { mockTransportDeep } from "../test/factories.js";
 import { createTestDatabase } from "../test/pglite.js";
@@ -460,6 +461,33 @@ describe("web chat routes", () => {
     while (!chunk.done) chunk = await reader.read();
     expect(chatRegistry.size).toBe(0);
     expect(transport.closeSession).toHaveBeenCalledWith("session-resumed");
+  });
+
+  it("close() returns once a request that finishes during the drain has answered", async () => {
+    // Answers 404 about 100 ms into the drain, leaving an idle keep-alive connection.
+    await start({
+      resumeConversation: vi.fn(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        return err({ code: "conversation_not_found" as const });
+      }),
+    });
+    const cookie = await login();
+    const answered = fetch(`${chatBase}/api/chat/conv-1/stream?tab=tab-1`, {
+      headers: { cookie, "sec-fetch-site": "same-origin" },
+    }).then((res) => res.status);
+    await vi.waitFor(() => expect(transport.resumeConversation).toHaveBeenCalled());
+    const warn = vi.spyOn(logger, "warn");
+    try {
+      const started = performance.now();
+      await chatWeb.close(3_000);
+      const elapsed = performance.now() - started;
+
+      expect(await answered).toBe(404);
+      expect(elapsed).toBeLessThan(1_000);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("close() closes the connection of a request that outlives the drain", async () => {

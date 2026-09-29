@@ -265,9 +265,14 @@ export function createWebServer(deps: CreateWebServerDeps): WebServer {
   return { server, close: (drainMs) => closeWebServer(server, shutdown, drainMs) };
 }
 
+/** How often the drain closes connections whose request has finished. */
+const DRAIN_REAP_INTERVAL_MS = 50;
+
 /**
- * `close()` refuses new connections and reaps idle keep-alive ones, but
- * waits on any with a response in flight. The abort ends the chat streams
+ * `close()` refuses new connections and closes the idle ones, but only those
+ * idle when it is called: a connection whose request finishes during the
+ * drain stays open until its keep-alive timeout. So the drain calls
+ * `closeIdleConnections()` on an interval. The abort ends the chat streams
  * first; a request still open after `drainMs` has its connection closed,
  * with `closeAllConnections()` called after `close()` as Node's docs
  * recommend.
@@ -279,10 +284,15 @@ async function closeWebServer(
 ): Promise<void> {
   shutdown.abort();
   const closed = new Promise<void>((resolve) => server.close(() => resolve()));
-  if (await finishesWithin(closed, drainMs)) return;
-  logger.warn({ drainMs }, "web requests outlived the drain; closing their connections");
-  server.closeAllConnections();
-  await closed;
+  const reaper = setInterval(() => server.closeIdleConnections(), DRAIN_REAP_INTERVAL_MS);
+  try {
+    if (await finishesWithin(closed, drainMs)) return;
+    logger.warn({ drainMs }, "web requests outlived the drain; closing their connections");
+    server.closeAllConnections();
+    await closed;
+  } finally {
+    clearInterval(reaper);
+  }
 }
 
 /** Start the web server on `host:port`. */
