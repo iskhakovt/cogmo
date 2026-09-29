@@ -1,3 +1,4 @@
+import { matchFilter } from "grammy";
 import { err, ok } from "neverthrow";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PLAN_CALLBACK_REGEX } from "../../../agent/coding/plan-keyboard.js";
@@ -32,6 +33,16 @@ const mockBotApi = {
   getFile: vi.fn().mockResolvedValue({ file_path: "photos/file_1.jpg" }),
   setMyCommands: vi.fn().mockResolvedValue(true),
   getUpdates: vi.fn().mockResolvedValue([]),
+};
+
+// Commands belong on the composer `bot.drop(matchFilter(":forward_origin"))`
+// returns, which records them under `command:<name>`. The bot refuses a
+// command, and `drop` any other predicate, so a command a forwarded `/cmd`
+// could run fails setup. grammY's routing past the composer is covered by
+// forwarded.test.ts.
+const forwardFilter = (): boolean => false;
+const commandComposer = {
+  command: vi.fn((cmd: string, handler: any) => handlers.set(`command:${cmd}`, handler)),
 };
 
 type UpdateMiddleware = (
@@ -72,11 +83,17 @@ vi.mock("grammy", () => {
   }
   class MockBot {
     api = mockBotApi;
-    command = vi.fn((cmd: string, handler: any) => handlers.set(`command:${cmd}`, handler));
+    command = vi.fn((cmd: string) => {
+      throw new Error(`/${cmd} registered on the bot, where a forwarded /${cmd} would run it`);
+    });
     on = vi.fn((filter: string, handler: any) => handlers.set(`on:${filter}`, handler));
     callbackQuery = vi.fn((pattern: RegExp, handler: any) =>
       handlers.set(`callbackQuery:${pattern.source}`, handler),
     );
+    drop = vi.fn((predicate: unknown) => {
+      if (predicate !== forwardFilter) throw new Error("drop expects the forward_origin filter");
+      return commandComposer;
+    });
     catch = vi.fn();
     use = vi.fn((middleware: UpdateMiddleware) => botLifecycle.middleware.push(middleware));
     // Real grammY returns a Promise<void> that resolves when bot.stop() is
@@ -89,7 +106,7 @@ vi.mock("grammy", () => {
     });
     stop = vi.fn(() => botLifecycle.stop());
   }
-  return { Bot: MockBot, InputFile };
+  return { Bot: MockBot, InputFile, matchFilter: vi.fn(() => forwardFilter) };
 });
 
 function makeCtx(fromId: number, text = "hello", chatId = 42) {
@@ -791,6 +808,237 @@ describe("telegram adapter", () => {
 
       expect(transport.uploadAttachment).not.toHaveBeenCalled();
       expect(transport.emit).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("forwarded messages", () => {
+    const forwardOrigin = {
+      type: "user",
+      date: 1600000000,
+      sender_user: { id: 7, is_bot: false, first_name: "Alice" },
+    };
+    const forwarded = { origin: "user", from: "Alice", sentAt: "2020-09-13T12:26:40.000Z" };
+
+    function asForwarded<C extends { message: object }>(ctx: C): C {
+      return { ...ctx, message: { ...ctx.message, forward_origin: forwardOrigin } };
+    }
+
+    beforeEach(() => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
+        }),
+      );
+    });
+
+    it("registers every command on the composer that drops forwarded messages", async () => {
+      await createAdapter();
+
+      expect(matchFilter).toHaveBeenCalledWith(":forward_origin");
+      const registered = commandComposer.command.mock.calls.map(([cmd]) => cmd);
+      const [menu] = expectDefined(mockBotApi.setMyCommands.mock.calls[0], "setMyCommands call");
+      const menuCommands = (menu as Array<{ command: string }>).map((c) => c.command);
+      expect(registered).toEqual(expect.arrayContaining(["start", ...menuCommands]));
+    });
+
+    it("gives a forwarded message to an open dialog as its input", async () => {
+      const { transport } = await createAdapter({
+        profiles: {
+          list: vi.fn().mockResolvedValue(ok([])),
+          create: vi.fn().mockResolvedValue(ok({} as never)),
+          update: vi.fn().mockResolvedValue(ok({} as never)),
+          delete: vi.fn().mockResolvedValue(ok(undefined)),
+          setClass: vi.fn().mockResolvedValue(ok(undefined)),
+        },
+      });
+      await handlers.get("command:profile")!({ ...makeCtx(111, "", 42), match: "new coder" });
+
+      const ctx = asForwarded(makeCtx(111, "You are a coder", 42));
+      await handlers.get("on:message:text")!(ctx);
+
+      expect(transport.emit).not.toHaveBeenCalled();
+      expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("Step 2/3"), undefined);
+    });
+
+    it("packs forwarded text as a marked text block", async () => {
+      const { transport } = await createAdapter();
+      await handlers.get("on:message:text")!(asForwarded(makeCtx(111, "meet at 8", 42)));
+
+      expect(transport.emit).toHaveBeenCalledWith(
+        "session-1",
+        [{ type: "text", text: "meet at 8", forwarded }],
+        expect.any(Date),
+      );
+    });
+
+    it("marks a forwarded photo's caption", async () => {
+      const { transport } = await createAdapter();
+      await handlers.get("on:message:photo")!(asForwarded(makePhotoCtx(111, "Look at this!")));
+
+      expect(transport.emit).toHaveBeenCalledWith(
+        "session-1",
+        [
+          { type: "text", text: "Look at this!", forwarded },
+          { type: "image", path: "inbound/test.jpg", mediaType: "image/jpeg" },
+        ],
+        expect.any(Date),
+      );
+    });
+
+    it("puts an empty forwarded text block ahead of a captionless forwarded photo", async () => {
+      const { transport } = await createAdapter();
+      await handlers.get("on:message:photo")!(asForwarded(makePhotoCtx(111)));
+
+      expect(transport.emit).toHaveBeenCalledWith(
+        "session-1",
+        [
+          { type: "text", text: "", forwarded },
+          { type: "image", path: "inbound/test.jpg", mediaType: "image/jpeg" },
+        ],
+        expect.any(Date),
+      );
+    });
+
+    it("puts an empty forwarded text block ahead of a captionless forwarded document", async () => {
+      const { transport } = await createAdapter();
+      const ctx = makeDocumentCtx(111, { file_name: "x.pdf", mime_type: "application/pdf" });
+      await handlers.get("on:message:document")!(asForwarded(ctx));
+
+      expect(transport.emit).toHaveBeenCalledWith(
+        "session-1",
+        [
+          { type: "text", text: "", forwarded },
+          {
+            type: "document",
+            path: "inbound/test.jpg",
+            mediaType: "application/pdf",
+            name: "x.pdf",
+          },
+        ],
+        expect.any(Date),
+      );
+    });
+
+    it("marks a forwarded document's caption", async () => {
+      const { transport } = await createAdapter();
+      const ctx = makeDocumentCtx(111, { file_name: "x.txt", mime_type: "text/plain" }, "notes");
+      await handlers.get("on:message:document")!(asForwarded(ctx));
+
+      expect(transport.emit).toHaveBeenCalledWith(
+        "session-1",
+        [
+          { type: "text", text: "notes", forwarded },
+          { type: "document", path: "inbound/test.jpg", mediaType: "text/plain", name: "x.txt" },
+        ],
+        expect.any(Date),
+      );
+    });
+
+    it("marks a forwarded voice note and its caption", async () => {
+      const { transport } = await createAdapter();
+      const ctx = makeVoiceCtx(111, { duration: 3 }, "listen up");
+      await handlers.get("on:message:voice")!(asForwarded(ctx));
+
+      expect(transport.emit).toHaveBeenCalledWith(
+        "session-1",
+        [
+          { type: "text", text: "listen up", forwarded },
+          {
+            type: "voice",
+            path: "inbound/test.jpg",
+            mediaType: "audio/ogg",
+            durationMs: 3000,
+            forwarded,
+          },
+        ],
+        expect.any(Date),
+      );
+    });
+
+    it("marks a captionless forwarded voice note on the voice block alone", async () => {
+      const { transport } = await createAdapter();
+      await handlers.get("on:message:voice")!(asForwarded(makeVoiceCtx(111, { duration: 3 })));
+
+      expect(transport.emit).toHaveBeenCalledWith(
+        "session-1",
+        [
+          {
+            type: "voice",
+            path: "inbound/test.jpg",
+            mediaType: "audio/ogg",
+            durationMs: 3000,
+            forwarded,
+          },
+        ],
+        expect.any(Date),
+      );
+    });
+
+    describe("from the user themselves", () => {
+      // The sender (makeCtx's fromId, 111) forwarding their own earlier message.
+      function asSelfForwarded<C extends { message: object }>(ctx: C): C {
+        const origin = {
+          type: "user",
+          date: 1600000000,
+          sender_user: { id: 111, is_bot: false, first_name: "Timur" },
+        };
+        return { ...ctx, message: { ...ctx.message, forward_origin: origin } };
+      }
+
+      it("keeps text the bare string of the user's own words", async () => {
+        const { transport } = await createAdapter();
+        await handlers.get("on:message:text")!(asSelfForwarded(makeCtx(111, "note to self", 42)));
+
+        expect(transport.emit).toHaveBeenCalledWith("session-1", "note to self", expect.any(Date));
+      });
+
+      it("leaves a photo's caption unmarked, and adds no empty block without one", async () => {
+        const { transport } = await createAdapter();
+        await handlers.get("on:message:photo")!(asSelfForwarded(makePhotoCtx(111, "mine")));
+        await handlers.get("on:message:photo")!(asSelfForwarded(makePhotoCtx(111)));
+
+        const image = { type: "image", path: "inbound/test.jpg", mediaType: "image/jpeg" };
+        expect(vi.mocked(transport.emit).mock.calls.map(([, content]) => content)).toEqual([
+          [{ type: "text", text: "mine" }, image],
+          [image],
+        ]);
+      });
+
+      it("leaves a document unmarked", async () => {
+        const { transport } = await createAdapter();
+        const ctx = makeDocumentCtx(111, { file_name: "x.pdf", mime_type: "application/pdf" });
+        await handlers.get("on:message:document")!(asSelfForwarded(ctx));
+
+        expect(transport.emit).toHaveBeenCalledWith(
+          "session-1",
+          [
+            {
+              type: "document",
+              path: "inbound/test.jpg",
+              mediaType: "application/pdf",
+              name: "x.pdf",
+            },
+          ],
+          expect.any(Date),
+        );
+      });
+
+      it("leaves a voice note unmarked", async () => {
+        const { transport } = await createAdapter();
+        await handlers.get("on:message:voice")!(
+          asSelfForwarded(makeVoiceCtx(111, { duration: 3 })),
+        );
+
+        expect(transport.emit).toHaveBeenCalledWith(
+          "session-1",
+          [{ type: "voice", path: "inbound/test.jpg", mediaType: "audio/ogg", durationMs: 3000 }],
+          expect.any(Date),
+        );
+      });
     });
   });
 

@@ -9,6 +9,7 @@ import { DrizzleSecretsStore } from "../../secrets/store/index.js";
 import { skills } from "../../skills/store/schema.js";
 import { expectDefined } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
+import { renderInboundText } from "../../transport/content.js";
 import { inboundMessages } from "../../transport/store/schema.js";
 import { type CoreMemoryUpsertOutcome, DrizzleAgentStore } from "./index.js";
 import {
@@ -2462,6 +2463,27 @@ describe("DrizzleAgentStore", () => {
       expect(list[0]!.lastMessageAt).toBeInstanceOf(Date);
       // Also verify profileId from seedConversation was the one linked
       expect(profileId).toBeDefined();
+    });
+
+    it("listConversationsForUser previews a forwarded last message as its sender and body", async () => {
+      const { userId, conversationId, stamp } = await seedConversation();
+      const forwarded = {
+        origin: "user",
+        from: "Alice",
+        sentAt: "2023-11-14T22:13:20.000Z",
+      } as const;
+      await tx((trx) =>
+        store.insertMessage(trx, {
+          conversationId,
+          role: "user",
+          content: renderInboundText("see you at 8", forwarded),
+          lastInboundMessageId: "019d0000-0000-7000-8000-000000000001",
+          ...stamp,
+        }),
+      );
+
+      const [conversation] = await tx((trx) => store.listConversationsForUser(trx, userId));
+      expect(conversation?.lastMessagePreview).toBe("Fwd from Alice: see you at 8");
     });
 
     it("listConversationsForUser excludes conversations from other users", async () => {

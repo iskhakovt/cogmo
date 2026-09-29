@@ -2734,6 +2734,68 @@ describe("createHandleMessage", () => {
       });
     });
 
+    it("auto + a forwarded voice note → no TTS (the user didn't speak)", async () => {
+      const ttsProvider = {
+        name: "openai",
+        tts: vi.fn().mockResolvedValue({ audio: Buffer.from("ogg"), mediaType: "audio/ogg" }),
+      };
+      const sttProvider = { name: "openai", stt: vi.fn().mockResolvedValue({ text: "hi" }) };
+      const handle = mockDeliveryHandle({
+        canDeliverVoice: vi.fn().mockReturnValue(true),
+        hasBatchTargets: vi.fn().mockReturnValue(false),
+      });
+      const deps = mockDeps({
+        voiceResolver: mockVoiceResolver(mockVoiceBundle({ tts: ttsProvider, stt: sttProvider })),
+        agentStore: mockAgentStore({
+          getProfile: vi.fn().mockResolvedValue({
+            id: "profile-1",
+            userId: null,
+            name: "x",
+            basePrompt: "x",
+            model: "claude-sonnet-4-6",
+            summarizationModel: null,
+            extractionModel: null,
+            autoRecall: "heuristic",
+            voiceMode: "auto",
+            toolSet: [],
+            memoryScope: null,
+          }),
+        }),
+        attachments: {
+          upload: vi.fn().mockResolvedValue("inbound/x"),
+          download: vi.fn().mockResolvedValue(Buffer.from("ogg-bytes")),
+        },
+        deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+        transportStore: mockTransportStore({
+          getUnbatchedInbound: vi.fn().mockResolvedValue([
+            {
+              id: "inbound-1",
+              content: [
+                {
+                  type: "voice",
+                  path: "inbound/v.ogg",
+                  mediaType: "audio/ogg",
+                  forwarded: { origin: "user", from: "Alice", sentAt: "2020-09-13T12:26:40.000Z" },
+                },
+              ],
+            },
+          ]),
+          getVoiceMaxReplyChars: vi.fn().mockResolvedValue(700),
+        }),
+      });
+
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      // Transcribed, but answered in text.
+      expect(sttProvider.stt).toHaveBeenCalled();
+      expect(ttsProvider.tts).not.toHaveBeenCalled();
+      expect(handle.deliverVoice).not.toHaveBeenCalled();
+    });
+
     it("auto + batch [voice, text] → no TTS (user typed last)", async () => {
       // Debounced batch where the user dictated, then typed a follow-up.
       // Their most recent intent is text — shouldn't get a voice reply
@@ -3221,6 +3283,162 @@ describe("createHandleMessage", () => {
       expect(memory.recall).not.toHaveBeenCalled();
       // Non-vacuity: the turn ran.
       expect(deps.runStreamingAgentLoop).toHaveBeenCalled();
+    });
+  });
+
+  describe("forwarded text", () => {
+    const forwarded = {
+      origin: "user",
+      from: "Alice",
+      sentAt: "2020-09-13T12:26:40.000Z",
+    } as const;
+    const wrapped =
+      '<forwarded_message from="Alice" origin="user" sent="2020-09-13T12:26:40.000Z">\n' +
+      "meet at 8\n</forwarded_message>";
+
+    async function persistedUserContent(
+      content: InboundContent,
+      overrides: Partial<HandleMessageDeps> = {},
+    ): Promise<unknown> {
+      const deps = mockDeps({
+        transportStore: mockTransportStore({
+          getUnbatchedInbound: vi.fn().mockResolvedValue([{ id: "inbound-1", content }]),
+        }),
+        ...overrides,
+      });
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+      const [, message] = expectDefined(vi.mocked(deps.agentStore.insertMessage).mock.calls[0]);
+      return message.content;
+    }
+
+    it("persists forwarded text inside its element", async () => {
+      const content = await persistedUserContent([
+        { type: "text", text: "meet at 8", forwarded },
+        { type: "text", text: "is this right?" },
+      ]);
+
+      expect(content).toBe(`${wrapped}\nis this right?`);
+    });
+
+    it("persists a forwarded caption beside an attachment inside its element", async () => {
+      const content = await persistedUserContent([
+        { type: "text", text: "meet at 8", forwarded },
+        { type: "image", path: "inbound/a.jpg", mediaType: "image/jpeg" },
+      ]);
+
+      expect(content).toBe(
+        JSON.stringify([
+          { type: "text", text: wrapped },
+          { type: "image", path: "inbound/a.jpg", mediaType: "image/jpeg" },
+        ]),
+      );
+    });
+
+    it("persists a forwarded voice note's transcript inside its element", async () => {
+      const stt = { name: "openai", stt: vi.fn().mockResolvedValue({ text: "meet at 8" }) };
+      const content = await persistedUserContent(
+        [{ type: "voice", path: "inbound/v.ogg", mediaType: "audio/ogg", forwarded }],
+        {
+          voiceResolver: mockVoiceResolver(mockVoiceBundle({ stt })),
+          attachments: {
+            upload: vi.fn().mockResolvedValue("inbound/x"),
+            download: vi.fn().mockResolvedValue(Buffer.from("ogg-bytes")),
+          },
+        },
+      );
+
+      expect(content).toBe(wrapped);
+    });
+
+    async function runTurn(content: InboundContent, overrides: Partial<HandleMessageDeps> = {}) {
+      const memory = mockMemoryProvider();
+      const deps = mockDeps({
+        memory,
+        transportStore: mockTransportStore({
+          getUnbatchedInbound: vi.fn().mockResolvedValue([{ id: "inbound-1", content }]),
+        }),
+        ...overrides,
+      });
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+      return { memory, deps };
+    }
+
+    it("recalls on forwarded text's body, not its element", async () => {
+      const { memory } = await runTurn([
+        { type: "text", text: "meet at 8", forwarded },
+        { type: "text", text: "is this right?" },
+      ]);
+
+      expect(memory.recall).toHaveBeenCalledWith("user-1", "meet at 8\nis this right?", {
+        maxTokens: 2000,
+      });
+    });
+
+    it("recalls on a forwarded voice note's transcript, not its element", async () => {
+      const stt = { name: "openai", stt: vi.fn().mockResolvedValue({ text: "meet at 8" }) };
+      const { memory } = await runTurn(
+        [{ type: "voice", path: "inbound/v.ogg", mediaType: "audio/ogg", forwarded }],
+        {
+          voiceResolver: mockVoiceResolver(mockVoiceBundle({ stt })),
+          attachments: {
+            upload: vi.fn().mockResolvedValue("inbound/x"),
+            download: vi.fn().mockResolvedValue(Buffer.from("ogg-bytes")),
+          },
+        },
+      );
+
+      expect(memory.recall).toHaveBeenCalledWith("user-1", "meet at 8", { maxTokens: 2000 });
+    });
+
+    it("skips recall for a captionless forward, even when the profile always recalls", async () => {
+      const { memory, deps } = await runTurn(
+        [
+          { type: "text", text: "", forwarded },
+          { type: "image", path: "inbound/a.jpg", mediaType: "image/jpeg" },
+        ],
+        {
+          agentStore: mockAgentStore({
+            getProfile: vi.fn().mockResolvedValue({
+              id: "profile-1",
+              userId: null,
+              name: "default",
+              basePrompt: "test",
+              model: "claude-sonnet-4-6",
+              summarizationModel: null,
+              extractionModel: null,
+              autoRecall: "always" as const,
+              toolSet: [],
+              memoryScope: null,
+            }),
+          }),
+        },
+      );
+
+      expect(memory.recall).not.toHaveBeenCalled();
+      // Non-vacuity: the turn ran.
+      expect(deps.runStreamingAgentLoop).toHaveBeenCalled();
+    });
+
+    it("hands the model a forwarded caption inside its element", async () => {
+      const { deps } = await runTurn([
+        { type: "text", text: "meet at 8", forwarded },
+        { type: "image", path: "inbound/a.jpg", mediaType: "image/jpeg" },
+      ]);
+
+      const [loopArgs] = expectDefined(
+        vi.mocked(deps.runStreamingAgentLoop).mock.calls[0],
+        "runStreamingAgentLoop call",
+      );
+      const lastMsg = expectDefined(loopArgs.messages.at(-1), "last message");
+      expect(lastMsg.content).toContainEqual({ type: "text", text: wrapped });
     });
   });
 

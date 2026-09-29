@@ -26,7 +26,12 @@ import type { SkillRunner } from "../skills/runner.js";
 import { buildSkillTools, composeTurnTools } from "../skills/skill-tool-builder.js";
 import { createSkillsService } from "../skills/skills-service.js";
 import type { AttachmentStore } from "../transport/attachment-store.js";
-import { contentToBlocks, type InboundContent } from "../transport/content.js";
+import {
+  contentToBlocks,
+  type InboundContent,
+  isVoiceContent,
+  renderInboundText,
+} from "../transport/content.js";
 import type { DeliveryRouter } from "../transport/delivery-router.js";
 import type { TransportStore } from "../transport/store/index.js";
 import { resolveVoiceMode } from "../voice/mode.js";
@@ -465,35 +470,45 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             })
           : [];
 
-      // Single source of truth for "what does each inbound row look like
-      // after voice transcription?". Both consumers below (userContentText
-      // for persistence; resolvedBlocks for the LLM call) derive from this
-      // — eliminates the parallel-cursor pattern that was fragile under
-      // walk-order changes. Cursor advances across rows in the same order
-      // `transcripts` was produced (inboundMessages.flatMap order, voice
-      // refs only).
+      // Each inbound row after voice transcription: every consumer below
+      // derives from this. A forwarded clip's transcript keeps the clip's
+      // `forwarded` marking, as forwarded text does; userContentText and
+      // resolvedBlocks render it into its `<forwarded_message>` element, and
+      // the recall query reads the bare text. The cursor walks `transcripts`
+      // in the order they were produced: voice blocks, in inbound order.
       const substitutedMessages = ((): ReadonlyArray<{ content: InboundContent }> => {
         let cursor = 0;
         return inboundMessages.map((m) => {
           if (typeof m.content === "string") return { content: m.content };
-          const blocks = m.content.map((b) =>
-            b.type === "voice" ? ({ type: "text", text: transcripts[cursor++] ?? "" } as const) : b,
-          );
+          const blocks = m.content.map((b) => {
+            if (b.type !== "voice") return b;
+            const text = transcripts[cursor++] ?? "";
+            return {
+              type: "text",
+              text,
+              ...(b.forwarded !== undefined && { forwarded: b.forwarded }),
+            } as const;
+          });
           return { content: blocks };
         });
       })();
 
-      // Per-row text serialization for `messages.content`. After voice→text
-      // substitution above, a text-only row joins on newline, so it loads
-      // back cleanly as history; a row that still carries image or document
-      // blocks is JSON-stringified.
+      // Per-row text serialization for `messages.content`, forwarded text
+      // inside its element. After voice→text substitution above, a text-only
+      // row joins on newline, so it loads back cleanly as history; a row that
+      // still carries image or document blocks is JSON-stringified.
       const userContentText = substitutedMessages
         .map(({ content }) => {
           if (typeof content === "string") return content;
-          if (content.every((b) => b.type === "text")) {
-            return content.map((b) => b.text).join("\n");
+          const rendered = content.map((b) =>
+            b.type === "text"
+              ? ({ type: "text", text: renderInboundText(b.text, b.forwarded) } as const)
+              : b,
+          );
+          if (rendered.every((b) => b.type === "text")) {
+            return rendered.map((b) => b.text).join("\n");
           }
-          return JSON.stringify(content);
+          return JSON.stringify(rendered);
         })
         .join("\n");
 
@@ -626,10 +641,8 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           // (user dictated, then typed a follow-up), they're at the keyboard
           // now and shouldn't get a voice reply just because the batch
           // started with voice. Symmetrically, [text, voice] correctly
-          // mirrors voice.
-          lastInboundWasVoice: contentToBlocks(inboundMessages.at(-1)?.content ?? "").some(
-            (b) => b.type === "voice_ref",
-          ),
+          // mirrors voice. A forwarded voice note isn't the user speaking.
+          lastInboundWasVoice: isVoiceContent(inboundMessages.at(-1)?.content ?? ""),
         }),
         // Gates `batch-delivery`, so the step exists on every invocation that
         // reaches it or on none.

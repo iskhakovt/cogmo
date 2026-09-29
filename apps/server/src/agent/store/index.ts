@@ -20,6 +20,7 @@ import type { Transaction } from "../../db/index.js";
 import type { CacheDialect } from "../../llm/cache-dialect.js";
 import type { ContentBlock, Message } from "../../llm/types.js";
 import { skills } from "../../skills/store/schema.js";
+import { previewInboundText } from "../../transport/content.js";
 import { inboundMessages } from "../../transport/store/schema.js";
 import { truncate } from "../../util/string.js";
 import { IDENTITY_BLOCK_KEY, type ScopedCoreMemoryBlock } from "../core-memory/scope.js";
@@ -372,10 +373,10 @@ function isTextBlock(b: unknown): b is { type: "text"; text: string } {
 
 /** Extract a short preview string from a `messages.content` jsonb value. */
 function previewFromContent(content: unknown): string {
-  if (typeof content === "string") return truncate(content, PREVIEW_MAX_CHARS);
+  if (typeof content === "string") return truncate(previewInboundText(content), PREVIEW_MAX_CHARS);
   if (!Array.isArray(content)) return "";
   const block = R.find(content, isTextBlock);
-  return block ? truncate(block.text, PREVIEW_MAX_CHARS) : "";
+  return block ? truncate(previewInboundText(block.text), PREVIEW_MAX_CHARS) : "";
 }
 
 /**

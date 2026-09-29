@@ -3,6 +3,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { DrizzleAgentStore } from "../../agent/store/index.js";
 import type { Database, Transactor } from "../../db/index.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
+import { renderInboundText } from "../content.js";
 import { DrizzleTransportStore } from "./index.js";
 import { inboundMessages as inboundMessagesTable } from "./schema.js";
 
@@ -1348,6 +1349,33 @@ describe("DrizzleTransportStore", () => {
         store.peekPriorClosedConversation(trx, channelId, "never-used", 3, 25),
       );
       expect(peek).toBeUndefined();
+    });
+
+    it("shows a forwarded opening message as its sender and body", async () => {
+      const channelId = await seedChannel();
+      const { profileId, conversationId } = await seedConversation();
+      const sessionId = await seedSession(channelId, conversationId, "chat-F");
+      const forwarded = {
+        origin: "user",
+        from: "Alice",
+        sentAt: "2023-11-14T22:13:20.000Z",
+      } as const;
+      // 2ms apart so uuidv7 ids sort by insertion order.
+      await seedUserMessage(
+        conversationId,
+        profileId,
+        renderInboundText("see you at 8", forwarded),
+      );
+      await new Promise((r) => setTimeout(r, 2));
+      await seedUserMessage(conversationId, profileId, "two");
+      await new Promise((r) => setTimeout(r, 2));
+      await seedUserMessage(conversationId, profileId, "three");
+      await tx((trx) => store.closeSession(trx, sessionId));
+
+      const peek = await tx((trx) =>
+        store.peekPriorClosedConversation(trx, channelId, "chat-F", 3, 40),
+      );
+      expect(peek?.firstUserSnippet).toBe("Fwd from Alice: see you at 8");
     });
 
     it("truncates the snippet at snippetMaxChars", async () => {
