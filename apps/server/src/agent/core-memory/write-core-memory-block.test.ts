@@ -87,22 +87,73 @@ describe("writeCoreMemoryBlock: the edit counter", () => {
   async function writeWith(
     scope: CoreMemoryScope,
     key: string,
-    store: {
+    setup: {
       upsert?: CoreMemoryUpsertOutcome;
       deleted?: boolean;
       rows?: ReadonlyArray<ScopedCoreMemoryBlock>;
+      runInTx?: Transactor;
     },
   ) {
     const agentStore = mockAgentStore({
-      getCoreMemoryBlocks: vi.fn().mockResolvedValue(store.rows ?? []),
-      upsertCoreMemoryBlock: vi.fn().mockResolvedValue(store.upsert ?? "created"),
-      deleteCoreMemoryBlock: vi.fn().mockResolvedValue(store.deleted ?? false),
+      getCoreMemoryBlocks: vi.fn().mockResolvedValue(setup.rows ?? []),
+      upsertCoreMemoryBlock: vi.fn().mockResolvedValue(setup.upsert ?? "created"),
+      deleteCoreMemoryBlock: vi.fn().mockResolvedValue(setup.deleted ?? false),
     });
     return writeCoreMemoryBlock(
-      { runInTx: fakeRunInTx, agentStore },
+      { runInTx: setup.runInTx ?? fakeRunInTx, agentStore },
       { userId: "user-1", scope, key, content: "Name: Sam" },
     );
   }
+
+  /** A 40001 retry: the callback runs twice, and only the second attempt commits. */
+  const retried: Transactor = async (cb) => {
+    await fakeRunInTx(cb);
+    return fakeRunInTx(cb);
+  };
+
+  /** The callback completes, then the commit fails. */
+  const commitFails: Transactor = async (cb) => {
+    await fakeRunInTx(cb);
+    throw new Error("commit failed");
+  };
+
+  it.each(["identity", "user_profile", "active_projects", "preferences"])(
+    "records the documented key %s as itself",
+    async (key) => {
+      await writeWith(UNCLASSED, key, { upsert: "created" });
+
+      expect(add).toHaveBeenCalledWith(1, expect.objectContaining({ key }));
+    },
+  );
+
+  it.each(["work_hours", "Identity", "Name: Samuel Carter, Lisbon"])(
+    "records any other key, %s, as other",
+    async (key) => {
+      await writeWith(UNCLASSED, key, { upsert: "created" });
+
+      expect(add).toHaveBeenCalledWith(1, { key: "other", target: "unclassed", change: "created" });
+    },
+  );
+
+  it.each<[string, CoreMemoryScope]>([
+    ["a block", UNCLASSED],
+    ["an override", RESTRICTED],
+  ])("counts %s once when the transaction retries its callback", async (_name, scope) => {
+    await writeWith(scope, "identity", { upsert: "updated", runInTx: retried });
+
+    expect(add).toHaveBeenCalledTimes(1);
+  });
+
+  it.each<[string, CoreMemoryScope]>([
+    ["a block", UNCLASSED],
+    ["an override", RESTRICTED],
+  ])("does not count %s whose commit fails", async (_name, scope) => {
+    await expect(
+      writeWith(scope, "identity", { upsert: "updated", runInTx: commitFails }),
+    ).rejects.toThrow("commit failed");
+
+    expect(add).not.toHaveBeenCalled();
+  });
 
   it.each<[string, CoreMemoryScope, string, CoreMemoryUpsertOutcome, Record<string, string>]>([
     [
