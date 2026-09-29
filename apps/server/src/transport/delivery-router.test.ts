@@ -1,4 +1,4 @@
-import { err, ok } from "neverthrow";
+import { err, ok, type Result } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import type { StreamEvent } from "../llm/types.js";
 import {
@@ -743,6 +743,60 @@ describe("createDeliveryRouter", () => {
         new StreamDeliveryError([{ sessionId: "s1", reason: "chat not found" }]),
       );
       expect(healthy.push).toHaveBeenCalledWith(textDelta);
+    });
+
+    it("reports every failing handle, having called them all at once", async () => {
+      const telegram = Promise.withResolvers<Result<void, string>>();
+      const web = Promise.withResolvers<Result<void, string>>();
+      const webPush = vi.fn().mockReturnValue(web.promise);
+      const adapters = new Map<string, AdapterEntry>([
+        [
+          "ch-tg",
+          {
+            adapter: mockStreamingAdapter({
+              openStream: vi
+                .fn()
+                .mockResolvedValue(
+                  mockStreamHandle({ push: vi.fn().mockReturnValue(telegram.promise) }),
+                ),
+            }),
+          },
+        ],
+        [
+          "ch-web",
+          {
+            adapter: mockStreamingAdapter({
+              openStream: vi.fn().mockResolvedValue(mockStreamHandle({ push: webPush })),
+            }),
+          },
+        ],
+      ]);
+      const transportStore = mockTransportStore({
+        getSourceSessions: vi
+          .fn()
+          .mockResolvedValue([session("s1", "ch-tg"), session("s2", "ch-web")]),
+      });
+      const delivery = await createDeliveryRouter({
+        runInTx: fakeRunInTx,
+        adapters,
+        transportStore,
+      }).prepare(ctx());
+
+      const pushed = delivery.push(textDelta);
+      // The second handle has the event while the first is still out.
+      await Promise.resolve();
+      expect(webPush).toHaveBeenCalledWith(textDelta);
+      web.resolve(err("tab gone"));
+      telegram.resolve(err("chat not found"));
+
+      expect(await pushed).toEqual(
+        err(
+          new StreamDeliveryError([
+            { sessionId: "s1", reason: "chat not found" },
+            { sessionId: "s2", reason: "tab gone" },
+          ]),
+        ),
+      );
     });
 
     it("reports success when every handle succeeds", async () => {

@@ -1,5 +1,5 @@
 import type { Bot } from "grammy";
-import { err } from "neverthrow";
+import { err, ok } from "neverthrow";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mockAttachmentStore } from "../../../test/factories.js";
 import { TelegramStreamHandle } from "./stream-handle.js";
@@ -24,15 +24,8 @@ function fakeBot() {
   return { bot: { api } as unknown as Bot, api };
 }
 
-function openHandle(bot: Bot): TelegramStreamHandle {
-  return new TelegramStreamHandle(
-    bot,
-    mockAttachmentStore(),
-    42,
-    "run-1",
-    { chunkChars: 4000, allowEdits: true },
-    new Set(),
-  );
+function openHandle(bot: Bot, opts = { chunkChars: 4000, allowEdits: true }): TelegramStreamHandle {
+  return new TelegramStreamHandle(bot, mockAttachmentStore(), 42, "run-1", opts, new Set());
 }
 
 /** Make the machine throw on the first input of `type`. */
@@ -58,6 +51,53 @@ async function orHung<T>(promise: Promise<T>): Promise<T | "hung"> {
 describe("TelegramStreamHandle", () => {
   afterEach(() => {
     vi.mocked(transition).mockImplementation(actual.transition);
+    vi.useRealTimers();
+  });
+
+  it("resolves a push only once every write it set off has landed", async () => {
+    const { bot, api } = fakeBot();
+    const handle = openHandle(bot, { chunkChars: 150, allowEdits: true });
+    await handle.push({ type: "text_delta", text: "start" });
+    const rest = Promise.withResolvers<{ message_id: number }>();
+    api.sendMessage.mockReturnValueOnce(rest.promise);
+
+    let settled = false;
+    const para = "a".repeat(120);
+    const pushing = handle.push({ type: "text_delta", text: `\n\n${para}\n\n${para}` });
+    void pushing.then(() => {
+      settled = true;
+    });
+    // The overflowing head lands as an edit; the rest's send is still out.
+    await vi.waitFor(() => expect(api.sendMessage).toHaveBeenCalledTimes(2));
+    expect(api.editMessageText).toHaveBeenCalledTimes(1);
+    expect(settled).toBe(false);
+
+    rest.resolve({ message_id: 200 });
+    expect(await pushing).toEqual(ok(undefined));
+  });
+
+  it("sends no media once the stream has finished", async () => {
+    const { bot, api } = fakeBot();
+    const handle = openHandle(bot);
+    expect(await handle.finish()).toEqual(ok(undefined));
+
+    const image = JSON.stringify({ path: "generated/a.jpg", mediaType: "image/jpeg" });
+    await handle.push({ type: "tool_result", name: "generate_image", output: image });
+
+    expect(api.sendPhoto).not.toHaveBeenCalled();
+  });
+
+  it("stops the typing heartbeat once an append-only stream aborts", async () => {
+    vi.useFakeTimers();
+    const { bot, api } = fakeBot();
+    const handle = openHandle(bot, { chunkChars: 4000, allowEdits: false });
+    await handle.push({ type: "text_delta", text: "partial" });
+    expect(api.sendChatAction).toHaveBeenCalledTimes(1);
+
+    expect(await handle.abort("LLM failed")).toEqual(ok(undefined));
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(api.sendChatAction).toHaveBeenCalledTimes(1);
   });
 
   describe("a throw inside the machine", () => {

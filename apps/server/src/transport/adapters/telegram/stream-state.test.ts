@@ -1,3 +1,4 @@
+import { GrammyError, HttpError } from "grammy";
 import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import type { StreamOpts } from "../../types.js";
@@ -106,6 +107,20 @@ describe("telegram stream state", () => {
       expect(state.kind).toBe("streaming");
     });
 
+    it("skips a preview that would show what the message already shows", () => {
+      const { effects } = drive(EDITS, [
+        text("Hello"),
+        landed(T0, 100),
+        {
+          type: "push",
+          event: { type: "tool_result", name: "web_search", output: "{}" },
+          now: T0 + 10_000,
+        },
+      ]);
+
+      expect(writes(effects)).toHaveLength(1);
+    });
+
     it("starts no write while one is in flight", () => {
       const { effects } = drive(EDITS, [text("Hello"), text(" world", T0 + 10_000)]);
 
@@ -162,6 +177,12 @@ describe("telegram stream state", () => {
 
       const resumed = drive(EDITS, [elapsed(T0 + 2000)], waited.state);
       expect(writes(resumed.effects)).toEqual([chunk]);
+    });
+
+    it("waits exactly the longest wait", () => {
+      const { state } = drive(EDITS, [text("Hello"), rateLimited(MAX_WAIT_MS / 1000, T0)]);
+
+      expect(state).toMatchObject({ kind: "streaming", waiting: true });
     });
 
     it("fails rather than wait longer than it will", () => {
@@ -227,6 +248,20 @@ describe("telegram stream state", () => {
       expect(state).toEqual({ kind: "failed", reason: expect.stringContaining("60000ms") });
     });
 
+    it("bounds an abort's close too", () => {
+      const { state } = drive(threeChunks, [
+        text(reply),
+        { type: "abort", error: "LLM failed", now: T0 },
+        landed(T0),
+        rateLimited(30, T0),
+        elapsed(T0 + 30_000),
+        landed(T0 + 30_000),
+        rateLimited(30, T0 + 31_000),
+      ]);
+
+      expect(state).toEqual({ kind: "failed", reason: expect.stringContaining("60000ms") });
+    });
+
     it("lets a closing stream wait right up to the budget", () => {
       const { state } = drive(threeChunks, [
         text(reply),
@@ -282,6 +317,21 @@ describe("telegram stream state", () => {
       const failed = drive(EDITS, [transient(T0 + 10)], retried.state);
       expect(failed.state).toEqual({ kind: "failed", reason: expect.stringContaining("502") });
       expect(failed.effects).not.toContainEqual(expect.objectContaining({ type: "wait" }));
+    });
+
+    it("starts the count again once a chunk lands", () => {
+      const reply = Array.from({ length: 2 }, () => "a".repeat(120)).join("\n\n");
+      const opts: StreamOpts = { chunkChars: 150, allowEdits: false };
+      const failures = [0, 1, 2, 3].flatMap((i) => [transient(T0 + i), elapsed(T0 + i)]);
+      const { state } = drive(opts, [
+        text(reply),
+        { type: "finish", now: T0 },
+        ...failures,
+        landed(T0 + 10),
+        transient(T0 + 10),
+      ]);
+
+      expect(state).toMatchObject({ kind: "finalizing", failedInARow: 1, waiting: true });
     });
 
     it("counts rate limits and transient failures against one cap", () => {
@@ -530,6 +580,18 @@ describe("telegram stream state", () => {
       });
     });
 
+    it("stops the stream on abort, once", () => {
+      const fromStreaming = drive(APPEND_ONLY, [
+        text("partial"),
+        { type: "abort", error: "x", now: T0 },
+      ]);
+      const fromIdle = drive(APPEND_ONLY, [{ type: "abort", error: "x", now: T0 }]);
+
+      for (const { effects } of [fromStreaming, fromIdle]) {
+        expect(effects.filter((e) => e.type === "stopped")).toEqual([{ type: "stopped" }]);
+      }
+    });
+
     it("sends the abort's tail as a chunk of its own in append-only mode", () => {
       const { effects } = drive(APPEND_ONLY, [
         text("partial"),
@@ -612,14 +674,16 @@ describe("telegram stream state", () => {
 
   describe("classifyWriteError", () => {
     /** Shaped as grammY's `GrammyError`. */
-    function telegramError(code: number, description: string, parameters: object = {}): Error {
-      return Object.assign(
-        new Error(`Call to 'editMessageText' failed! (${code}: ${description})`),
-        {
-          error_code: code,
-          description,
-          parameters,
-        },
+    function telegramError(
+      code: number,
+      description: string,
+      parameters: { retry_after?: number } = {},
+    ): GrammyError {
+      return new GrammyError(
+        "Call to 'editMessageText' failed!",
+        { ok: false, error_code: code, description, parameters },
+        "editMessageText",
+        {},
       );
     }
 
@@ -671,9 +735,7 @@ describe("telegram stream state", () => {
       ],
       [
         "a network error",
-        Object.assign(new Error("Network request for 'editMessageText' failed!"), {
-          name: "HttpError",
-        }),
+        new HttpError("Network request for 'editMessageText' failed!", new Error("ECONNRESET")),
         { kind: "transient", reason: "Network request for 'editMessageText' failed!" },
       ],
       [
