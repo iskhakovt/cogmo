@@ -59,7 +59,7 @@ The threshold is a constant in the adapter (start with `10`, tune by feel).
 
 ## Forwarded Messages
 
-Forwarded text is someone else's words, never the user's: not their statements, not their instructions. When a message carries `forward_origin`, its text, or its caption on a photo, document or voice note, is packed as a text block carrying `forwarded` (`ForwardedOriginSchema` in `src/transport/content.ts`):
+Forwarded text is someone else's words, never the user's: not their statements, not their instructions. When a message carries `forward_origin`, the adapter marks what it packs with `forwarded` (`ForwardedOriginSchema` in `src/transport/content.ts`):
 
 | Field | Value |
 |-|-|
@@ -67,9 +67,15 @@ Forwarded text is someone else's words, never the user's: not their statements, 
 | `from` | The sender's name, the hidden user's name, or the chat or channel title, followed by ` (signature)` when the post carries an author signature |
 | `sentAt` | When the original was sent, ISO 8601 |
 
+| Forwarded | Marked |
+|-|-|
+| Text, or a caption on a photo, document or voice note | The text block |
+| A photo or document with no caption | An empty text block ahead of the attachment, so the model knows who sent it |
+| A voice note | The voice block, so its transcript is forwarded text |
+
 The user's own text keeps its bare-string form.
 
-The turn renders the block once, when it becomes the user message, into an element the model reads as quoted material:
+The turn renders each marked text or transcript once, when it becomes the user message, into an element the model reads as quoted material:
 
 ```
 <forwarded_message from="Alice Smith" origin="user" sent="2023-11-14T22:13:20.000Z">
@@ -77,9 +83,9 @@ see you at 8
 </forwarded_message>
 ```
 
-Attribute values carry `&`, `"`, `<` and `>` as entities and whitespace runs as one space. A closing `forwarded_message` tag in the body, in any case and with whitespace at the slash, is backslash-escaped, as the turn context escapes its own. The rendering is a pure function of the block, so the stored `messages.content` is byte-stable across turns ([prompt-caching.md](../prompt-caching.md) → Append-only Transcript), and the Observer, the web transcript and conversation previews read the element as stored.
+An empty block renders as an empty element, `<forwarded_message …></forwarded_message>`. Attribute values carry `&`, `"`, `<` and `>` as entities and whitespace runs as one space. A closing `forwarded_message` tag in the body, in any case and with whitespace at the slash, is backslash-escaped, as the turn context escapes its own. The rendering is a pure function of the block, so the stored `messages.content` is byte-stable across turns ([prompt-caching.md](../prompt-caching.md) → Append-only Transcript), and the Observer and conversation previews read the element as stored. The web chat parses this exact element and shows it as a quote headed "Forwarded from {from}"; anything else stays plain text.
 
-Only text is marked: a forwarded photo with no caption carries no marking, and a forwarded voice note's transcript reads as the user's. A forwarded message that arrives while a `/profile` or `/repo` dialog is open is dialog input like any other text.
+A forwarded message never runs a bot command. It keeps its `bot_command` entity, so commands register on `bot.drop(matchFilter(":forward_origin"))`, grammY's filter for every update but a forward, and a forwarded `/cmd` reaches the agent as forwarded text. A forwarded message that arrives while a `/profile` or `/repo` dialog is open is dialog input like any other text.
 
 ## Typing Indicator
 
@@ -94,7 +100,8 @@ The adapter starts if a Telegram channel row exists in the DB. Bot token is read
 Unit tests use grammY transformers to capture outgoing API calls — no network, no bot token needed. Test:
 - Rejects messages when identity resolution fails (unknown user in `mapped` mode)
 - Calls `transport.emit()` with correct `InboundContent` for resolved users
-- Packs forwarded text and captions as `forwarded` text blocks
+- Marks forwarded text, captions, captionless media and voice notes with `forwarded`
+- Routes a forwarded `/cmd` past the command handlers (real grammY `Composer`)
 - Handles `/start` (sends welcome, no emit)
 - Handles `/new` (calls `transport.closeSession()` + `transport.createConversation()`, no emit)
 - Sends typing indicator before emit

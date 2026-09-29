@@ -171,6 +171,7 @@ const InboundVoiceBlockSchema = z.object({
   path: z.string(),               // AttachmentStore key; OGG/Opus from Telegram
   mediaType: z.string(),          // 'audio/ogg' typically
   durationMs: z.number().int().optional(),  // when adapter knows it
+  forwarded: ForwardedOriginSchema.optional(), // someone else's clip
 });
 ```
 
@@ -187,7 +188,7 @@ interface VoiceRef {
 }
 ```
 
-The orchestrator resolves `voice_ref` blocks to text via `step.run("transcribe-voice")` (see below) and replaces them with `text` blocks before passing to the LLM. The LLM never sees raw audio or a "voice block" — just plain text from transcription, like any other user input.
+The orchestrator resolves `voice_ref` blocks to text via `step.run("transcribe-voice")` (see below) and replaces them with `text` blocks before passing to the LLM. The LLM never sees raw audio or a "voice block" — just plain text from transcription, like any other user input. A forwarded clip's transcript is forwarded text ([transport/telegram.md](transport/telegram.md#forwarded-messages)).
 
 **Modality detection** for `auto` mode is purely structural: the orchestrator scans the most recent inbound row's content; presence of a voice block = `lastInboundWasVoice = true`.
 
