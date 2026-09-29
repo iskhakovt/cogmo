@@ -115,9 +115,12 @@ export interface ExecResult {
  * effect that runs after, and never delays it. `wait()` is its throwing form
  * (see `unwrapExit`).
  *
- * `dispose()` tears the exec down by closing its transport (Docker: the
- * hijacked socket; Daytona: `deleteSession` / the PTY kill); it sends no
- * signal. Idempotent. Resolves once the teardown has finished or given up.
+ * `dispose()` tears the exec down. Local-Docker stops the command's process
+ * group (TERM, then KILL) from a second exec and closes the attach socket;
+ * the Daytona PTY kills its process; a Daytona session command has its
+ * session deleted, which the SDK does not document as stopping the
+ * command's processes. Idempotent. Resolves once every teardown it caused
+ * has finished or given up.
  *
  * The caller either consumes `stdout`/`stderr` to EOF or calls `dispose()`;
  * otherwise the backend may hold the connection open.

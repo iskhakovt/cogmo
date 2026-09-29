@@ -13,9 +13,10 @@
  * output as the failure reason.
  *
  * Timeout: a single wall-clock cap (`coding_repos.verify_timeout_seconds`),
- * the exec's own `timeoutMs`, so the backend tears the command down when it
- * passes. The runner then returns `{ ok: false, exitCode: TIMEOUT_EXIT_CODE,
- * timedOut: true }`.
+ * the exec's own `timeoutMs`. When it passes the exec settles at once and
+ * its teardown stops the command as far as the backend can (see
+ * `ExecStreamingHandle.dispose`); the runner returns `{ ok: false,
+ * exitCode: TIMEOUT_EXIT_CODE, timedOut: true }`.
  */
 
 import {

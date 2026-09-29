@@ -5,7 +5,7 @@
  * stub proxy to verify the supervisor calls the proxy in the right order
  * and bind-mounts the returned socket path.
  */
-import type { PassThrough, Writable } from "node:stream";
+import { PassThrough, type Writable } from "node:stream";
 import type { ContainerInfo } from "dockerode";
 import { err, ok } from "neverthrow";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -138,6 +138,19 @@ function mockDockerFacade(): {
   container.inspect.mockResolvedValue({ State: { Status: "running" }, HostConfig: {} });
   docker.getContainer.mockReturnValue(container);
   return { docker, container };
+}
+
+/**
+ * `container.exec` for a stubbed container: the kill exec a teardown runs
+ * ends at once, and every other exec is `exec`.
+ */
+function stubContainerExec<E>(exec: E) {
+  return vi.fn(async (opts: { Cmd: string[] }) => {
+    if (!opts.Cmd.includes("cogmo-exec-kill")) return exec;
+    const ended = new PassThrough();
+    ended.end();
+    return { start: vi.fn(async () => ended), inspect: vi.fn() };
+  });
 }
 
 /** Stub proxy that records register/unregister calls. */
@@ -652,13 +665,10 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
 
 describe("LocalDockerSandboxClient — execStreaming.dispose()", () => {
   /**
-   * Regression test for the dispose-hang bug: a bare `stream.destroy()`
-   * emits only `'close'`, neither `'end'` nor `'error'`. The exit
-   * promise listens on the latter two; if dispose closes the stream
-   * without an error, the promise never settles and `dispose()` waits
-   * forever. Fix: pass an error so the `'error'` handler fires.
+   * A stream that never ends on its own: `dispose()` settles the exec,
+   * stops the command's process group through a second exec, and resolves.
    */
-  it("resolves promptly when called on a stream that won't end naturally", async () => {
+  it("dispose() stops the command through a kill exec, then resolves", async () => {
     const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
 
     // Hijacked stream that never emits 'end' or 'error' on its own —
@@ -670,7 +680,7 @@ describe("LocalDockerSandboxClient — execStreaming.dispose()", () => {
       inspect: vi.fn(async () => ({ ExitCode: 137 })),
     };
     const containerObj = {
-      exec: vi.fn(async () => execObj),
+      exec: stubContainerExec(execObj),
       inspect: vi.fn(async () => ({ State: { Status: "running" }, HostConfig: {} })),
       kill: vi.fn(),
       remove: vi.fn(),
@@ -705,17 +715,18 @@ describe("LocalDockerSandboxClient — execStreaming.dispose()", () => {
     });
     const handle = await session.execStreaming(["sleep", "infinity"]);
 
-    // Race dispose against a short timeout. Pre-fix this race was lost
-    // (dispose hung); post-fix it resolves in milliseconds.
-    const TIMEOUT_MS = 500;
-    let timeoutHandle: NodeJS.Timeout | undefined;
-    const timeout = new Promise<"timeout">((resolve) => {
-      timeoutHandle = setTimeout(() => resolve("timeout"), TIMEOUT_MS);
-    });
-    const winner = await Promise.race([handle.dispose().then(() => "done" as const), timeout]);
-    if (timeoutHandle) clearTimeout(timeoutHandle);
+    await handle.dispose();
 
-    expect(winner).toBe("done");
+    expect(await handle.exited).toEqual(err({ kind: "disposed" }));
+    const cmds = containerObj.exec.mock.calls.map(([opts]) => opts.Cmd);
+    expect(cmds).toHaveLength(2);
+    const [run, kill] = cmds;
+    // The command records its group in a file; the kill exec reads the same file.
+    expect(run?.slice(0, 2)).toEqual(["sh", "-c"]);
+    expect(run?.slice(4)).toEqual(["sleep", "infinity"]);
+    expect(kill?.slice(0, 2)).toEqual(["sh", "-c"]);
+    expect(kill?.slice(3)).toEqual(["cogmo-exec-kill", run?.[3]]);
+    expect(hijack.destroyed).toBe(true);
   });
 
   // Per-callsite timeoutMs cap: the hijacked socket might hold half-open
@@ -733,7 +744,7 @@ describe("LocalDockerSandboxClient — execStreaming.dispose()", () => {
       inspect: vi.fn(async () => ({ ExitCode: 137 })),
     };
     const containerObj = {
-      exec: vi.fn(async () => execObj),
+      exec: stubContainerExec(execObj),
       inspect: vi.fn(async () => ({ State: { Status: "running" }, HostConfig: {} })),
       kill: vi.fn(),
       remove: vi.fn(),
@@ -789,6 +800,7 @@ describe("LocalDockerSandboxClient — execStreaming.dispose()", () => {
     demuxStdout: () => Writable;
     demuxStderr: () => Writable;
     execInspect: ReturnType<typeof vi.fn<() => Promise<ExecInspect>>>;
+    containerExec: ReturnType<typeof stubContainerExec>;
   }> {
     const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const { PassThrough } = await import("node:stream");
@@ -800,7 +812,7 @@ describe("LocalDockerSandboxClient — execStreaming.dispose()", () => {
       inspect: vi.fn(inspect),
     };
     const containerObj = {
-      exec: vi.fn(async () => execObj),
+      exec: stubContainerExec(execObj),
       inspect: vi.fn(async () => ({ State: { Status: "running" }, HostConfig: {} })),
       kill: vi.fn(),
       remove: vi.fn(),
@@ -843,12 +855,13 @@ describe("LocalDockerSandboxClient — execStreaming.dispose()", () => {
       demuxStdout: () => expectDefined(outSink, "demuxStream stdout sink not captured yet"),
       demuxStderr: () => expectDefined(errSink, "demuxStream stderr sink not captured yet"),
       execInspect: execObj.inspect,
+      containerExec: containerObj.exec,
     };
   }
 
   describe("exit code", () => {
     it("reads it from an inspect that reports the exec exited", async () => {
-      const { session, hijack, execInspect } = await makeSessionWithDemux(
+      const { session, hijack, execInspect, containerExec } = await makeSessionWithDemux(
         "019d0000-0000-7000-8000-00000000d155",
         async () => ({ Running: false, ExitCode: 7 }),
       );
@@ -856,6 +869,9 @@ describe("LocalDockerSandboxClient — execStreaming.dispose()", () => {
       hijack.end();
       expect(await handle.exited).toEqual(ok({ exitCode: 7 }));
       expect(execInspect).toHaveBeenCalledTimes(1);
+      // A reaped command has nothing left to stop: no kill exec.
+      await handle.dispose();
+      expect(containerExec).toHaveBeenCalledTimes(1);
     });
 
     it("waits for an exec whose output ended before its process was reaped", async () => {

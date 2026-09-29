@@ -1,4 +1,6 @@
+import { randomUUID } from "node:crypto";
 import { type Duplex, Writable } from "node:stream";
+import { finished } from "node:stream/promises";
 import type Docker from "dockerode";
 import { err, ok, type Result } from "neverthrow";
 import type { Transactor } from "../db/index.js";
@@ -581,9 +583,33 @@ function execStreaming(
 }
 
 /**
- * One `docker exec` over the hijacked attach socket. Docker's exec API has
- * no kill: closing the socket is the documented teardown, and the daemon
- * reaps the process.
+ * Runs the command under `sh`, which first records its own PID in the file
+ * named by `$0`. A `docker exec` process leads its own session and process
+ * group, so that PID is the group the command and its children run in. `sh`
+ * removes the file once the command exits, and exits with its status.
+ */
+const RECORD_GROUP = 'echo $$ > "$0" 2>/dev/null; "$@"; s=$?; rm -f "$0"; exit $s';
+
+/**
+ * Stops the group recorded in the file named by `$1`: waits up to 1 s for a
+ * command that has not recorded it yet, sends TERM, and once the group's
+ * leader has gone (2 s at most) sends KILL to whatever of the group is left.
+ */
+const KILL_GROUP = [
+  'p=$1; n=0; while [ ! -s "$p" ] && [ "$n" -lt 10 ]; do sleep 0.1; n=$((n + 1)); done',
+  'g=$(cat "$p" 2>/dev/null) || exit 0; [ -n "$g" ] || exit 0',
+  'kill -TERM -- "-$g" 2>/dev/null || kill -TERM "$g" 2>/dev/null',
+  'n=0; while kill -0 "$g" 2>/dev/null && [ "$n" -lt 20 ]; do sleep 0.1; n=$((n + 1)); done',
+  'kill -KILL -- "-$g" 2>/dev/null || kill -KILL "$g" 2>/dev/null',
+  'rm -f "$p"; exit 0',
+].join("\n");
+
+/**
+ * One `docker exec` over the hijacked attach socket. The Engine API has no
+ * exec kill, and closing the socket ends only the attachment (the daemon
+ * runs the exec detached from the client's request), so the command runs
+ * under `RECORD_GROUP` and a teardown stops it with `KILL_GROUP` in a
+ * second exec, then closes the socket.
  */
 class DockerExecBackend implements ExecBackend {
   readonly buffersStdin = false;
@@ -592,8 +618,11 @@ class DockerExecBackend implements ExecBackend {
   #dockerId: string;
   #cmd: readonly string[];
   #opts: ExecOptions;
+  #groupFile = `/tmp/cogmo-exec-${randomUUID()}.pid`;
   #exec: DockerExec | undefined;
   #stream: Duplex | undefined;
+  /** Whether the daemon has reaped the command, so nothing is left to stop. */
+  #reaped = false;
 
   constructor(docker: DockerFacade, dockerId: string, cmd: readonly string[], opts: ExecOptions) {
     this.#docker = docker;
@@ -613,7 +642,7 @@ class DockerExecBackend implements ExecBackend {
       ? Object.entries(this.#opts.env).map(([k, v]) => `${k}=${v}`)
       : undefined;
     const exec = await this.#docker.getContainer(this.#dockerId).exec({
-      Cmd: [...this.#cmd],
+      Cmd: ["sh", "-c", RECORD_GROUP, this.#groupFile, ...this.#cmd],
       AttachStdout: true,
       AttachStderr: true,
       AttachStdin: attachStdin,
@@ -650,7 +679,10 @@ class DockerExecBackend implements ExecBackend {
     let delay = EXIT_POLL_FIRST_DELAY_MS;
     for (;;) {
       const info = await exec.inspect();
-      if (!info.Running && info.ExitCode !== null) return ok(info.ExitCode);
+      if (!info.Running && info.ExitCode !== null) {
+        this.#reaped = true;
+        return ok(info.ExitCode);
+      }
       if (waited >= EXIT_POLL_BUDGET_MS) {
         return err(
           `docker exec in ${this.#dockerId} ended its output but reported no exit code after ${waited}ms (Running: ${info.Running})`,
@@ -662,8 +694,29 @@ class DockerExecBackend implements ExecBackend {
     }
   }
 
-  async teardown(): Promise<void> {
-    this.#stream?.destroy();
+  /** Stop the command's process group unless it has been reaped, then close the socket. */
+  async teardown(signal: AbortSignal): Promise<void> {
+    try {
+      if (this.#exec && !this.#reaped) await this.#killGroup(signal);
+    } finally {
+      this.#stream?.destroy();
+    }
+  }
+
+  async #killGroup(signal: AbortSignal): Promise<void> {
+    const killer = await this.#docker.getContainer(this.#dockerId).exec({
+      Cmd: ["sh", "-c", KILL_GROUP, "cogmo-exec-kill", this.#groupFile],
+      AttachStdout: true,
+      AttachStderr: true,
+      User: this.#opts.user,
+    });
+    const stream = await killer.start({ hijack: true, stdin: false });
+    stream.resume();
+    try {
+      await finished(stream, { writable: false, signal });
+    } finally {
+      stream.destroy();
+    }
   }
 }
 

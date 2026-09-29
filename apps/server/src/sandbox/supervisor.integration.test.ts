@@ -119,6 +119,70 @@ async function readToEnd(stream: NodeJS.ReadableStream): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
+describe("LocalDockerSandboxClient exec teardown (real Docker, runc runtime)", () => {
+  /** How many of the command's two `sleep`s are still running in the container. */
+  async function runningSleeps(
+    session: Awaited<ReturnType<LocalDockerSandboxClient["create"]>>,
+  ): Promise<number> {
+    const ps = await session.exec(["sh", "-c", "ps -o args | grep -cE '^sleep 30[01]$' || true"]);
+    return Number(ps.stdout.trim());
+  }
+
+  const settleBy = [
+    { how: "dispose()", opts: {} },
+    { how: "the total deadline", opts: { timeoutMs: 1_500 } },
+  ] as const;
+
+  for (const { how, opts } of settleBy) {
+    it(`stops the command and its children once ${how} settles the exec`, async () => {
+      const { sandbox } = await bootSandbox();
+      const taskId = `019d0000-0000-7000-8000-0000000${how === "dispose()" ? "1d15" : "1d16"}0`;
+      const session = await sandbox.create({
+        taskId,
+        image: TEST_IMAGE,
+        resourceLimits: RESOURCE_LIMITS,
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+      try {
+        const handle = await session.execStreaming(["sh", "-c", "sleep 300 & sleep 301"], opts);
+        await expect.poll(() => runningSleeps(session), { timeout: 5_000 }).toBe(2);
+
+        if (how === "dispose()") await handle.dispose();
+        const exited = await handle.exited;
+        expect(exited.isErr() && exited.error.kind).toBe(
+          how === "dispose()" ? "disposed" : "timed_out",
+        );
+        // `dispose()` resolves once the teardown has run.
+        await handle.dispose();
+
+        expect(await runningSleeps(session)).toBe(0);
+      } finally {
+        await sandbox.deleteByTaskId(taskId);
+      }
+    }, 30_000);
+  }
+
+  it("keeps the command's exit status and leaves no group file behind", async () => {
+    const { sandbox } = await bootSandbox();
+    const taskId = "019d0000-0000-7000-8000-00000001d170";
+    const session = await sandbox.create({
+      taskId,
+      image: TEST_IMAGE,
+      resourceLimits: RESOURCE_LIMITS,
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    try {
+      const result = await session.exec(["sh", "-c", "echo out; exit 3"]);
+      expect(result).toMatchObject({ stdout: "out\n", exitCode: 3 });
+      const left = await session.exec(["sh", "-c", "ls /tmp | grep -c '^cogmo-exec-' || true"]);
+      // Only the listing exec's own file, which it removes once it exits.
+      expect(left.stdout.trim()).toBe("1");
+    } finally {
+      await sandbox.deleteByTaskId(taskId);
+    }
+  }, 30_000);
+});
+
 describe("LocalDockerSandboxClient (real Docker, runc runtime)", () => {
   it("healthCheck passes when the configured runtime is registered", async () => {
     const { sandbox } = await bootSandbox();
