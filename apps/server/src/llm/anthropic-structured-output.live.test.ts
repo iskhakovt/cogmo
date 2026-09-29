@@ -54,7 +54,7 @@ async function extract<T>(model: string, name: string, schema: z.ZodType<T>): Pr
 }
 
 describe.skipIf(API_KEY === undefined)("AnthropicProvider structured output (live)", () => {
-  it.each(["claude-opus-5-5", "claude-sonnet-5"])(
+  it.each(["claude-opus-5-5", "claude-sonnet-5-5", "claude-sonnet-5"])(
     "%s returns a closed schema's JSON through structured outputs",
     async (model) => {
       const person = await extract(model, "person", PersonSchema);

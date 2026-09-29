@@ -16,6 +16,7 @@ import { createAttachmentStore } from "../transport/attachment-store.js";
 import { channelSessions, channels, inboundMessages } from "../transport/store/schema.js";
 import { OpenAIVoiceProvider } from "../voice/openai.js";
 import { expectDefined } from "./assertions.js";
+import { pinOrgProfileToCassetteModel } from "./cassette-model.js";
 import { createFalFetch } from "./fal-mock.js";
 import { fileDefaultUserId, fileLlmockUrl } from "./integration-file.js";
 import { createOpenAIVoiceFetch } from "./openai-voice-mock.js";
@@ -81,6 +82,7 @@ beforeAll(async () => {
   // exactly once at boot to construct the OpenAIVoiceProvider. Inserting
   // afterwards has no effect on the running pipeline.
   await seedVoiceConfig();
+  await transactor(db)(pinOrgProfileToCassetteModel);
 
   const { inngest, functions, profile } = await bootstrap({
     providerOverride: provider,
