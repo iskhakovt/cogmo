@@ -68,16 +68,21 @@ export class McpConnectionPool {
   async getConnection(serverId: string): Promise<McpConnection> {
     if (this.#closed) throw new McpPoolError("pool_closed");
     const outcome = Promise.withResolvers<Result<McpConnection, Error>>();
-    this.#feed(serverId, { type: "get", waiter: outcome.resolve, at: Date.now() });
+    this.#feed(serverId, {
+      type: "get",
+      waiter: outcome.resolve,
+      at: Date.now(),
+      abort: new AbortController(),
+    });
     const result = await outcome.promise;
     if (result.isErr()) throw result.error;
     return result.value;
   }
 
   /**
-   * Forget a removed or reconfigured server: close its live connection, or
-   * abort its connect, whose waiters fail with `evicted` and whose connection
-   * is closed if it still arrives. Resolves once they are closed.
+   * Forget a removed server: close its live connection, or abort its connect,
+   * whose waiters fail with `evicted` and whose connection is closed if it
+   * still arrives. Resolves once they are closed.
    */
   async evict(serverId: string): Promise<void> {
     const running = [...(this.#work.get(serverId) ?? [])];
@@ -154,8 +159,8 @@ export class McpConnectionPool {
           ),
         ),
       ])
-      .with({ type: "log" }, ({ level, message, fields }) => {
-        log[level]({ ...fields, serverId }, message);
+      .with({ type: "log" }, ({ message }) => {
+        log.debug({ serverId }, message);
         return [];
       })
       .exhaustive();

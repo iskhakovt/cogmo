@@ -6,9 +6,9 @@ import type { McpConnection } from "./client.js";
 /**
  * One MCP server's entry in the connection pool, as a pure state machine.
  * `transition` takes every event in every state and returns the next entry
- * and the effects to carry out; `McpConnectionPool` feeds it and carries
- * them out; beyond allocating the controllers it hands out, a transition
- * does nothing. No entry (`undefined`) is a server with nothing open. See
+ * and the effects to carry out; `McpConnectionPool` feeds it, supplying the
+ * controller a connect runs under, and carries them out. No entry
+ * (`undefined`) is a server with nothing open. See
  * `design/integrations/mcp.md` → Connection pool.
  *
  * ```
@@ -29,8 +29,8 @@ import type { McpConnection } from "./client.js";
  *  - a live connection is closed as it leaves the entry, unless its own
  *    transport closing is why it left;
  *  - every waiter is settled exactly once;
- *  - a connect's controller is aborted only to abandon it in flight, and a
- *    live connection's exactly when it leaves the entry.
+ *  - the entry's controller is aborted exactly when a connect in flight or a
+ *    live connection leaves it.
  */
 
 /** Connects in a row before a server is `unhealthy`: the first, and one reconnect. */
@@ -42,13 +42,15 @@ export type Waiter = (result: Result<McpConnection, Error>) => void;
 export type EntryState =
   /**
    * A connect is in flight; `attempt` counts it among the connects in a row.
-   * Aborting `abort` abandons it. The runner hands its signal to the SDK,
-   * which sends a cancellation on abort even after the request has settled,
-   * so it is aborted for nothing else.
+   * Aborting `abort` abandons it.
    */
   | { kind: "connecting"; abort: AbortController; attempt: number; waiters: ReadonlyArray<Waiter> }
-  /** Aborting `watch` ends the watch on `connection`: its close subscription and idle timer. */
-  | { kind: "live"; connection: McpConnection; watch: AbortController; lastUsedAt: number }
+  /**
+   * `abort` is the controller its connect ran under, which the runner ignores
+   * once it has yielded the connection. Aborting it ends the watch on
+   * `connection`: its close subscription and idle timer.
+   */
+  | { kind: "live"; connection: McpConnection; abort: AbortController; lastUsedAt: number }
   /** The transport closed, or the last `failedAttempts` connects failed. */
   | { kind: "closed"; failedAttempts: number }
   /** `MAX_CONNECT_ATTEMPTS` connects in a row failed: every `get` fails fast until a `reset`. */
@@ -62,8 +64,11 @@ const ANY_ENTRY = P.union(undefined, {
 });
 
 export type PoolEvent =
-  /** A caller wants the connection; `at` is when, in epoch ms. */
-  | { type: "get"; waiter: Waiter; at: number }
+  /**
+   * A caller wants the connection; `at` is when, in epoch ms. `abort` is a
+   * fresh controller for the connect this call starts, if it starts one.
+   */
+  | { type: "get"; waiter: Waiter; at: number; abort: AbortController }
   /** The connect running under `signal` yielded `connection`. */
   | { type: "spawned"; signal: AbortSignal; connection: McpConnection; at: number }
   /**
@@ -72,7 +77,7 @@ export type PoolEvent =
    */
   | { type: "spawn_failed"; signal: AbortSignal; error: Error; spent: boolean }
   | { type: "transport_closed"; connection: McpConnection }
-  /** The server was removed or reconfigured. */
+  /** The server was removed. */
   | { type: "evict" }
   /** The operator asked to retry an unhealthy server. */
   | { type: "reset" }
@@ -96,7 +101,8 @@ export type PoolEffect =
   | { type: "arm_idle"; connection: McpConnection; signal: AbortSignal; delayMs: number }
   | { type: "record_connected" }
   | { type: "record_error"; message: string }
-  | { type: "log"; level: "warn" | "debug"; message: string; fields: Record<string, unknown> };
+  /** A debug log line. */
+  | { type: "log"; message: string };
 
 export interface Transition {
   entry: EntryState | undefined;
@@ -106,7 +112,7 @@ export interface Transition {
 /** Take in an event: the next entry and its effects. */
 export function transition(entry: EntryState | undefined, event: PoolEvent): Transition {
   return match<PoolEvent, Transition>(event)
-    .with({ type: "get" }, ({ waiter, at }) => onGet(entry, waiter, at))
+    .with({ type: "get" }, (e) => onGet(entry, e))
     .with({ type: "spawned" }, (e) => onSpawned(entry, e))
     .with({ type: "spawn_failed" }, (e) => onSpawnFailed(entry, e))
     .with({ type: "transport_closed" }, ({ connection }) => onTransportClosed(entry, connection))
@@ -117,10 +123,13 @@ export function transition(entry: EntryState | undefined, event: PoolEvent): Tra
     .exhaustive();
 }
 
-function onGet(entry: EntryState | undefined, waiter: Waiter, at: number): Transition {
+function onGet(
+  entry: EntryState | undefined,
+  { waiter, at, abort }: Extract<PoolEvent, { type: "get" }>,
+): Transition {
   return match<EntryState | undefined, Transition>(entry)
-    .with(undefined, () => connect(1, waiter))
-    .with({ kind: "closed" }, (s) => connect(s.failedAttempts + 1, waiter))
+    .with(undefined, () => connect(abort, 1, waiter))
+    .with({ kind: "closed" }, (s) => connect(abort, s.failedAttempts + 1, waiter))
     .with({ kind: "connecting" }, (s) => step({ ...s, waiters: [...s.waiters, waiter] }, []))
     .with({ kind: "live" }, (s) =>
       step({ ...s, lastUsedAt: at }, [settle([waiter], ok(s.connection))]),
@@ -140,19 +149,17 @@ function onSpawned(
     .with(
       { kind: "connecting" },
       (s) => s.abort.signal === signal,
-      (s) => {
-        const watch = new AbortController();
-        return step({ kind: "live", connection, watch, lastUsedAt: at }, [
+      (s) =>
+        step({ kind: "live", connection, abort: s.abort, lastUsedAt: at }, [
           settle(s.waiters, ok(connection)),
-          { type: "watch", connection, signal: watch.signal },
+          { type: "watch", connection, signal },
           { type: "record_connected" },
-        ]);
-      },
+        ]),
     )
     .with(ANY_ENTRY, (s) =>
       step(s, [
         { type: "close", connection },
-        logEffect("debug", "closing a connection from an abandoned connect", {}),
+        logEffect("closing a connection from an abandoned connect"),
       ]),
     )
     .exhaustive();
@@ -191,7 +198,7 @@ function onTransportClosed(entry: EntryState | undefined, connection: McpConnect
     .with(
       { kind: "live" },
       (s) => s.connection === connection,
-      (s) => step({ kind: "closed", failedAttempts: 0 }, [abortEffect(s.watch)]),
+      (s) => step({ kind: "closed", failedAttempts: 0 }, [abortEffect(s.abort)]),
     )
     .with(ANY_ENTRY, (s) => step(s, []))
     .exhaustive();
@@ -220,15 +227,15 @@ function onIdle(
       (s) =>
         s.lastUsedAt <= cutoff
           ? step(undefined, [
-              abortEffect(s.watch),
+              abortEffect(s.abort),
               { type: "close", connection },
-              logEffect("debug", "closing an idle MCP connection", {}),
+              logEffect("closing an idle MCP connection"),
             ])
           : step(s, [
               {
                 type: "arm_idle",
                 connection,
-                signal: s.watch.signal,
+                signal: s.abort.signal,
                 delayMs: s.lastUsedAt - cutoff,
               },
             ]),
@@ -247,7 +254,7 @@ function end(entry: EntryState | undefined, code: McpPoolErrorCode): Transition 
       step(undefined, [abortEffect(s.abort), settle(s.waiters, err(new McpPoolError(code)))]),
     )
     .with({ kind: "live" }, (s) =>
-      step(undefined, [abortEffect(s.watch), { type: "close", connection: s.connection }]),
+      step(undefined, [abortEffect(s.abort), { type: "close", connection: s.connection }]),
     )
     .with(P.union(undefined, { kind: P.union("closed", "unhealthy") }), () => step(undefined, []))
     .exhaustive();
@@ -255,8 +262,7 @@ function end(entry: EntryState | undefined, code: McpPoolErrorCode): Transition 
 
 // --- helpers ---
 
-function connect(attempt: number, waiter: Waiter): Transition {
-  const abort = new AbortController();
+function connect(abort: AbortController, attempt: number, waiter: Waiter): Transition {
   return step({ kind: "connecting", abort, attempt, waiters: [waiter] }, [
     { type: "connect", signal: abort.signal },
   ]);
@@ -275,12 +281,8 @@ function abortEffect(controller: AbortController): PoolEffect {
   return { type: "abort", controller };
 }
 
-function logEffect(
-  level: "warn" | "debug",
-  message: string,
-  fields: Record<string, unknown>,
-): PoolEffect {
-  return { type: "log", level, message, fields };
+function logEffect(message: string): PoolEffect {
+  return { type: "log", message };
 }
 
 function step(entry: EntryState | undefined, effects: ReadonlyArray<PoolEffect>): Transition {

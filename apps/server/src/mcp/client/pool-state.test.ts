@@ -13,12 +13,12 @@ import {
   type Waiter,
 } from "./pool-state.js";
 
-/** The entry's own connect. */
+/** The entry's own connect, which its live connection keeps. */
 const OWN = new AbortController();
 /** An abandoned connect. */
 const STALE = new AbortController();
-/** The watch on the entry's live connection. */
-const WATCH = new AbortController();
+/** The controller a `get` supplies for a connect it starts. */
+const FRESH = new AbortController();
 /** The entry's live connection. */
 const LIVE = mock<McpConnection>();
 /** What a connect yields. */
@@ -33,14 +33,14 @@ const STATES = {
   none: undefined,
   connecting: { kind: "connecting", abort: OWN, attempt: 1, waiters: [WAITING] },
   reconnecting: { kind: "connecting", abort: OWN, attempt: 2, waiters: [WAITING] },
-  live: { kind: "live", connection: LIVE, watch: WATCH, lastUsedAt: USED_AT },
+  live: { kind: "live", connection: LIVE, abort: OWN, lastUsedAt: USED_AT },
   closed: { kind: "closed", failedAttempts: 0 },
   failed_once: { kind: "closed", failedAttempts: 1 },
   unhealthy: { kind: "unhealthy", lastError: "boom" },
 } satisfies Record<string, EntryState | undefined>;
 
 const EVENTS = {
-  get: { type: "get", waiter: CALLER, at: USED_AT + 50 },
+  get: { type: "get", waiter: CALLER, at: USED_AT + 50, abort: FRESH },
   spawned_own: { type: "spawned", signal: OWN.signal, connection: ARRIVING, at: USED_AT + 50 },
   spawned_stale: { type: "spawned", signal: STALE.signal, connection: ARRIVING, at: USED_AT + 50 },
   failed_own: { type: "spawn_failed", signal: OWN.signal, error: BOOM, spent: true },
@@ -59,9 +59,15 @@ const EVENTS = {
 type StateName = keyof typeof STATES;
 type EventName = keyof typeof EVENTS;
 
-/** Compiles only when every event type has a fixture — checked by typecheck, not at runtime. */
-type Uncovered = Exclude<PoolEvent["type"], (typeof EVENTS)[EventName]["type"]>;
-const EVERY_EVENT_COVERED: [Uncovered] extends [never] ? true : never = true;
+/** Compiles only when `T` is `never`. */
+type AssertNever<T extends never> = T;
+/** Typecheck fails when an event type or an entry kind has no fixture. */
+type _EveryEventCovered = AssertNever<
+  Exclude<PoolEvent["type"], (typeof EVENTS)[EventName]["type"]>
+>;
+type _EveryKindCovered = AssertNever<
+  Exclude<EntryKind, NonNullable<(typeof STATES)[StateName]>["kind"]>
+>;
 
 type EffectType = PoolEffect["type"];
 /** The next entry's kind (`none` for no entry) and the effects, in order. */
@@ -217,19 +223,17 @@ function kindOf(entry: EntryState | undefined): EntryKind | "none" {
   return entry?.kind ?? "none";
 }
 
-/** The controller an entry holds: its connect's, or its live connection's watch. */
+/** The controller an entry holds, while a connect or a live connection is in it. */
 function controllerOf(entry: EntryState | undefined): AbortController | undefined {
-  if (entry?.kind === "connecting") return entry.abort;
-  if (entry?.kind === "live") return entry.watch;
-  return undefined;
+  return entry?.kind === "connecting" || entry?.kind === "live" ? entry.abort : undefined;
+}
+
+/** The settle effects of a transition. */
+function settles(t: Transition): Array<Extract<PoolEffect, { type: "settle" }>> {
+  return t.effects.filter((e): e is Extract<PoolEffect, { type: "settle" }> => e.type === "settle");
 }
 
 describe("the pool entry machine", () => {
-  it("has a fixture for every event type", () => {
-    // `EVERY_EVENT_COVERED` fails typecheck, not this assertion, when an event type has no fixture.
-    expect(EVERY_EVENT_COVERED).toBe(true);
-  });
-
   it.each(PAIRS)("$stateName × $eventName", ({ stateName, eventName, after }) => {
     const [next, effects] = TABLE[stateName][eventName];
     expect(kindOf(after.entry)).toBe(next);
@@ -248,7 +252,8 @@ describe("the pool entry machine", () => {
         (state) => {
           const { entry, effects } = transition(state, EVENTS.get);
           if (entry?.kind !== "connecting") throw new Error("expected a connect");
-          expect(effects).toEqual([{ type: "connect", signal: entry.abort.signal }]);
+          expect(entry.abort).toBe(FRESH);
+          expect(effects).toEqual([{ type: "connect", signal: FRESH.signal }]);
           expect(entry.waiters).toEqual([CALLER]);
           return entry.attempt;
         },
@@ -288,7 +293,7 @@ describe("the pool entry machine", () => {
       }
     });
 
-    it("aborts a connect only to abandon it, and a live connection's watch when it leaves", () => {
+    it("aborts the entry's controller exactly when a connect in flight or a live connection leaves", () => {
       expect(pairsWhere((p) => effectsOf(p, "abort").length > 0)).toEqual([
         ["connecting", "evict"],
         ["connecting", "pool_closed"],
@@ -327,12 +332,9 @@ describe("the pool entry machine", () => {
         ["connecting", "pool_closed", "pool_closed"],
         ["reconnecting", "evict", "evicted"],
       ] as const) {
-        const [settled] = transition(STATES[stateName], EVENTS[eventName]).effects.filter(
-          (e) => e.type === "settle",
-        );
-        expect(settled).toMatchObject({ waiters: [WAITING] });
-        const result = settled?.type === "settle" ? settled.result : undefined;
-        expect(result?._unsafeUnwrapErr()).toMatchObject({ code });
+        const [settled] = settles(transition(STATES[stateName], EVENTS[eventName]));
+        expect(settled?.waiters).toEqual([WAITING]);
+        expect(settled?.result._unsafeUnwrapErr()).toMatchObject({ code });
       }
     });
 
@@ -388,29 +390,41 @@ describe("the pool entry machine", () => {
     });
 
     it("fails a caller fast on an unhealthy server", () => {
-      const [settled] = transition(STATES.unhealthy, EVENTS.get).effects;
-      const result = settled?.type === "settle" ? settled.result : undefined;
-      expect(result?._unsafeUnwrapErr()).toMatchObject({
+      const [settled] = settles(transition(STATES.unhealthy, EVENTS.get));
+      expect(settled?.result._unsafeUnwrapErr()).toMatchObject({
         code: "server_unhealthy",
         message: "boom",
       });
     });
 
-    it("goes live on its own connect's connection and watches it under a new controller", () => {
+    it("hands the waiters the connection its own connect yields", () => {
+      const [settled] = settles(transition(STATES.connecting, EVENTS.spawned_own));
+      expect(settled?.waiters).toEqual([WAITING]);
+      expect(settled?.result._unsafeUnwrap()).toBe(ARRIVING);
+    });
+
+    it("fails the waiters with the error their connect failed with", () => {
+      for (const eventName of ["failed_own", "failed_own_unspent"] as const) {
+        const [settled] = settles(transition(STATES.connecting, EVENTS[eventName]));
+        expect(settled?.waiters).toEqual([WAITING]);
+        expect(settled?.result._unsafeUnwrapErr()).toBe(EVENTS[eventName].error);
+      }
+    });
+
+    it("goes live on its own connect's connection and watches it under the connect's controller", () => {
       const { entry, effects } = transition(STATES.connecting, EVENTS.spawned_own);
-      if (entry?.kind !== "live") throw new Error("expected live");
-      expect(entry).toMatchObject({ connection: ARRIVING, lastUsedAt: EVENTS.spawned_own.at });
-      expect(entry.watch).not.toBe(OWN);
-      expect(effects).toContainEqual({
-        type: "watch",
+      expect(entry).toEqual({
+        kind: "live",
         connection: ARRIVING,
-        signal: entry.watch.signal,
+        abort: OWN,
+        lastUsedAt: EVENTS.spawned_own.at,
       });
+      expect(effects).toContainEqual({ type: "watch", connection: ARRIVING, signal: OWN.signal });
     });
 
     it("re-arms the idle timer for the rest of the idle period of a connection used since", () => {
       expect(transition(STATES.live, EVENTS.idle_used).effects).toEqual([
-        { type: "arm_idle", connection: LIVE, signal: WATCH.signal, delayMs: 100 },
+        { type: "arm_idle", connection: LIVE, signal: OWN.signal, delayMs: 100 },
       ]);
     });
   });
