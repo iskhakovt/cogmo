@@ -9,6 +9,7 @@ import type {
   CacheIntent,
   ContentBlock,
   Message,
+  ResponseMeta,
   StopReason,
   StreamEvent,
   ToolUseBlock,
@@ -1267,32 +1268,30 @@ interface DrainedStream {
 }
 
 /**
- * Drain the event stream into reconstructed content blocks plus the
- * final metadata. Extracted from the loop body so the catch-on-throw
- * classifier path stays tight. Errors propagate to the caller; the
- * adapter's `response` rejection is suppressed locally so the unhandled-
- * rejection signal doesn't fire on a stream that the loop already
- * intends to classify.
+ * Drain the provider stream into reconstructed content blocks plus the
+ * `done` frame's metadata. Extracted from the loop body so the
+ * catch-on-throw classifier path stays tight. Errors propagate to the
+ * caller; a throwing `onEvent` returns the stream, aborting the request.
+ * A stream that breaks the frame contract (no `done`, or anything after it)
+ * throws.
  */
 async function drainStream(
   provider: LlmProvider,
   chatParams: Parameters<LlmProvider["chat"]>[0],
   onEvent: (event: StreamEvent) => Promise<void>,
 ): Promise<DrainedStream> {
-  const { events, response } = provider.chatStream(chatParams);
-  // Adapters reject `response` independently when the events stream
-  // throws (anthropic.ts, openai-compat.ts, and fallback.ts all do this).
-  // The success path below awaits `response` after draining `events`, but
-  // a `for await` throw skips that await — leaving the parallel rejection
-  // dangling. Node's default `unhandledRejection=throw` then terminates
-  // the process. The noop suppresses the unhandled-rejection signal; an
-  // `await response` later still surfaces the same error normally.
-  response.catch(() => {});
-
   const contentBlocks: ContentBlock[] = [];
   let currentText = "";
+  let meta: ResponseMeta | undefined;
 
-  for await (const event of events) {
+  for await (const event of provider.chatStream(chatParams)) {
+    if (meta !== undefined) {
+      throw new Error(`${provider.name} stream sent a frame after its done frame`);
+    }
+    if (event.type === "done") {
+      meta = event.meta;
+      continue;
+    }
     // Don't forward thinking events to the delivery layer — they're internal
     if (event.type !== "thinking_delta") {
       await onEvent(event);
@@ -1331,7 +1330,7 @@ async function drainStream(
     contentBlocks.push({ type: "text", text: currentText });
   }
 
-  const meta = await response;
+  if (meta === undefined) throw new Error(`${provider.name} stream ended without a done frame`);
   return {
     content: contentBlocks,
     stopReason: meta.stopReason,

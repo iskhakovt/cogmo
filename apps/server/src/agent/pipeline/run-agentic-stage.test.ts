@@ -1,7 +1,9 @@
 import { NonRetriableError } from "inngest";
+import { err } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { z } from "zod";
+import { installLiveCatalog } from "../../llm/litellm-data.js";
 import type { LlmProvider } from "../../llm/provider.js";
 import type { ToolDefinition } from "../../llm/types.js";
 import { logger } from "../../logger.js";
@@ -17,6 +19,7 @@ import {
   mockMemoryProvider,
   mockTransportStore,
 } from "../../test/factories.js";
+import { StreamDeliveryError } from "../../transport/delivery-router.js";
 import { canonicalKeyOrder } from "../../util/canonical-key-order.js";
 import type { AgentLoopResult, StepRunner } from "../loop.js";
 import { defineTool, ToolRegistry } from "../tools.js";
@@ -386,6 +389,7 @@ describe("runAgenticStage", () => {
         "freeze-core-memory-scope",
         "freeze-turn-inputs",
         "assemble-prompt",
+        "freeze-model-limits",
         "load-last-tokens",
         "render-turn-context",
         "persist-new-messages",
@@ -421,6 +425,25 @@ describe("runAgenticStage", () => {
       key: "preferences",
       content: "Dice",
     });
+  });
+
+  it("keeps the limits it froze when a catalog refresh lands between invocations", async () => {
+    const h = await harness();
+    const { steps } = memoizingSteps();
+    await runAgenticStage(h.deps, stageArgs(), steps, log);
+
+    installLiveCatalog({
+      entries: { "claude-sonnet-4-6": { contextWindow: 200_000, maxOutputTokens: 1_234 } },
+      fetchedAt: new Date("2026-09-28T06:17:00.000Z"),
+    });
+    try {
+      await runAgenticStage(h.deps, stageArgs(), steps, log);
+    } finally {
+      installLiveCatalog(null);
+    }
+
+    const maxTokens = h.runStreamingAgentLoop.mock.calls.map(([params]) => params.maxTokens);
+    expect(maxTokens).toEqual([64_000, 64_000]);
   });
 
   it("offers no core-memory tools in a stage without core memory", async () => {
@@ -672,5 +695,51 @@ describe("runAgenticStage", () => {
     );
     expect(h.delivery.abort).toHaveBeenCalledWith("stream reset");
     expect(h.agentStore.insertMessages).not.toHaveBeenCalled();
+  });
+
+  describe("stream delivery failures", () => {
+    const deliveryFailed = new StreamDeliveryError([
+      { sessionId: "session-tg", reason: "telegram: chat not found" },
+    ]);
+
+    it("keeps a deterministic loop error non-retriable when the abort fails", async () => {
+      const h = await harness();
+      const badRequest = Object.assign(new Error("Bad Request"), { status: 400 });
+      h.runStreamingAgentLoop.mockRejectedValue(badRequest);
+      vi.mocked(h.delivery.abort).mockResolvedValue(err(deliveryFailed));
+
+      const failure = runAgenticStage(h.deps, stageArgs(), recordingSteps().steps, log);
+
+      await expect(failure).rejects.toBeInstanceOf(NonRetriableError);
+      await expect(failure).rejects.toHaveProperty("cause", badRequest);
+    });
+
+    it("delivers the stage's persisted reply through a durable step when a stream fails at finish", async () => {
+      const h = await harness();
+      vi.mocked(h.delivery.finish).mockResolvedValue(err(deliveryFailed));
+      const { steps, ids } = recordingSteps();
+
+      const outcome = await runAgenticStage(h.deps, stageArgs(), steps, log);
+
+      expect(outcome.kind).toBe("completed");
+      expect(h.delivery.abort).not.toHaveBeenCalled();
+      expect(h.agentStore.insertMessages).toHaveBeenCalled();
+      expect(h.delivery.deliverUnstreamed).toHaveBeenCalledExactlyOnceWith(
+        ["session-tg"],
+        loopResult().text,
+      );
+      expect(ids).toContain("finish-stream");
+      expect(ids.indexOf("redeliver-unstreamed")).toBeGreaterThan(
+        ids.indexOf("persist-new-messages"),
+      );
+    });
+
+    it("redelivers nothing when every stream finished", async () => {
+      const h = await harness();
+
+      await runAgenticStage(h.deps, stageArgs(), recordingSteps().steps, log);
+
+      expect(h.delivery.deliverUnstreamed).not.toHaveBeenCalled();
+    });
   });
 });

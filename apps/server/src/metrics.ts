@@ -15,6 +15,7 @@ interface Instruments {
   debounceWaitMs: Histogram;
   agentIterations: Histogram;
   memoryRecallFailures: Counter;
+  coreMemoryEdits: Counter;
 }
 
 let cached: Instruments | null = null;
@@ -37,6 +38,10 @@ function instruments(): Instruments {
     memoryRecallFailures: meter.createCounter("cogmo.memory.recall.failures", {
       description: "Auto-recall calls that failed and left the turn without recalled context",
       unit: "{failure}",
+    }),
+    coreMemoryEdits: meter.createCounter("cogmo.core_memory.edits", {
+      description: "core_memory_update writes that changed a block",
+      unit: "{edit}",
     }),
   };
   return cached;
@@ -92,6 +97,20 @@ export const agentIterations = {
 export const memoryRecallFailures = {
   add(value: number, attrs?: MetricAttributes): void {
     instruments().memoryRecallFailures.add(value, attrs);
+  },
+};
+
+/**
+ * `core_memory_update` writes that changed a block, labeled by `key` (a
+ * documented key, or `other`), `target` (the scope the write targets:
+ * `shared` | `unclassed` | `class` | `override`) and `change` (`created` |
+ * `updated` | `deleted`). Counted after the write commits, at most once.
+ * Which edits are announced: design/prompt-caching.md → System Prompt
+ * Snapshot → An epoch opens.
+ */
+export const coreMemoryEdits = {
+  add(value: number, attrs?: MetricAttributes): void {
+    instruments().coreMemoryEdits.add(value, attrs);
   },
 };
 

@@ -1,9 +1,11 @@
 import {
   ComposerPrimitive,
   MessagePrimitive,
+  type TextMessagePartComponent,
   ThreadPrimitive,
   type ToolCallMessagePartComponent,
 } from "@assistant-ui/react";
+import { splitForwarded } from "./convert.js";
 
 /** Renders a streamed tool call as a small mono card; results stream in after the call. */
 const ToolCall: ToolCallMessagePartComponent = ({ toolName, result, isError }) => {
@@ -28,11 +30,27 @@ const ToolCall: ToolCallMessagePartComponent = ({ toolName, result, isError }) =
 const bubble =
   "max-w-[min(46rem,85%)] whitespace-pre-wrap break-words rounded-lg px-3.5 py-2.5 leading-relaxed";
 
+/** A user message's text, each message they forwarded shown as a quote naming its sender. */
+const UserText: TextMessagePartComponent = ({ text }) => (
+  <>
+    {splitForwarded(text).map((segment) =>
+      segment.kind === "text" ? (
+        <p key={segment.at}>{segment.text}</p>
+      ) : (
+        <blockquote key={segment.at} className="my-1 border-l-2 border-current pl-2.5">
+          <p className="text-xs opacity-75">Forwarded from {segment.from}</p>
+          {segment.body.length > 0 && <p>{segment.body}</p>}
+        </blockquote>
+      ),
+    )}
+  </>
+);
+
 function UserMessage() {
   return (
     <MessagePrimitive.Root className="flex justify-end">
       <div className={`${bubble} bg-accent text-on-accent`}>
-        <MessagePrimitive.Parts />
+        <MessagePrimitive.Parts components={{ Text: UserText }} />
       </div>
     </MessagePrimitive.Root>
   );

@@ -11,6 +11,7 @@ import {
   InMemorySpanExporter,
   type ReadableSpan,
   SimpleSpanProcessor,
+  type SpanProcessor,
 } from "@opentelemetry/sdk-trace-base";
 import { __resetMetricsForTests } from "../metrics.js";
 
@@ -29,10 +30,12 @@ import { __resetMetricsForTests } from "../metrics.js";
  * and subsequent tests see stale spans/meters.
  *
  * Use `harness.getSpans()` and `harness.collectMetrics()` to inspect emitted
- * telemetry.
+ * telemetry, and `harness.startedSpanCount()` to count spans started,
+ * whether or not they ended.
  */
 export interface OtelHarness {
   getSpans(): ReadonlyArray<ReadableSpan>;
+  startedSpanCount(): number;
   collectMetrics(): Promise<ResourceMetrics>;
   reset(): Promise<void>;
   shutdown(): Promise<void>;
@@ -40,8 +43,17 @@ export interface OtelHarness {
 
 export function setupOtelHarness(): OtelHarness {
   const spanExporter = new InMemorySpanExporter();
+  let started = 0;
+  const startCounter: SpanProcessor = {
+    onStart: () => {
+      started++;
+    },
+    onEnd: () => {},
+    forceFlush: async () => {},
+    shutdown: async () => {},
+  };
   const tracerProvider = new BasicTracerProvider({
-    spanProcessors: [new SimpleSpanProcessor(spanExporter)],
+    spanProcessors: [new SimpleSpanProcessor(spanExporter), startCounter],
   });
   trace.setGlobalTracerProvider(tracerProvider);
 
@@ -64,12 +76,16 @@ export function setupOtelHarness(): OtelHarness {
       // their list cleared out from underneath them.
       return [...spanExporter.getFinishedSpans()];
     },
+    startedSpanCount() {
+      return started;
+    },
     async collectMetrics() {
       const result = await metricReader.collect();
       return result.resourceMetrics;
     },
     async reset() {
       spanExporter.reset();
+      started = 0;
       // Drain the SDK's internal accumulator so the next collect only sees
       // measurements made in the new test. Without this, DELTA exports stack
       // across tests because the counter remembers the previous data points.

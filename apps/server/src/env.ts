@@ -1,5 +1,6 @@
 import { createEnv } from "@t3-oss/env-core";
 import { z } from "zod";
+import { LITELLM_REGISTRY_URL } from "./llm/litellm-registry-url.js";
 import { resolveEnvFile } from "./secrets/env-file.js";
 
 /**
@@ -66,6 +67,17 @@ export const ServiceUrlSchema = z
  * doesn't crash logging before the real error can surface — symmetric
  * across both leaves.
  */
+/** Where the model catalog refresh fetches from: an http(s) service URL, or `off`. */
+export const ModelCatalogUrlSchema = z.union([
+  z.literal("off"),
+  ServiceUrlSchema.refine(
+    (value) => !URL.canParse(value) || /^https?:$/.test(new URL(value).protocol),
+    {
+      message: "must be an http(s) URL",
+    },
+  ),
+]);
+
 export const env = createEnv({
   server: {
     NODE_ENV: z.enum(["development", "production", "test"]),
@@ -148,6 +160,12 @@ export const env = createEnv({
     OPENROUTER_API_KEY: z.string().optional(),
     FAL_API_KEY: z.string().optional(),
     USER_TIMEZONE: z.string().default("UTC"),
+    /**
+     * Where the model catalog refresh fetches LiteLLM's registry, or `off`
+     * to resolve limits from the bundled snapshot alone (air-gapped hosts,
+     * and the integration and e2e tiers, which must not reach GitHub).
+     */
+    MODEL_CATALOG_URL: ModelCatalogUrlSchema.default(LITELLM_REGISTRY_URL),
     S3_ENDPOINT: z.string().optional(),
     S3_BUCKET: z.string().default("cogmo-files"),
     S3_ACCESS_KEY: z.string().optional(),
@@ -323,14 +341,12 @@ export const env = createEnv({
     MCP_TOOL_BUDGET: z.coerce.number().int().positive().default(25),
     /** Per-call timeout for MCP tool dispatch (ms). */
     MCP_CALL_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
-    /** MCP connection pool: idle threshold after which a live connection is closed. */
+    /** MCP connection pool: a live connection unused this long is closed. */
     MCP_IDLE_EVICTION_MS: z.coerce
       .number()
       .int()
       .positive()
       .default(10 * 60_000),
-    /** MCP connection pool: how often the idle sweep runs. Set 0 to disable. */
-    MCP_EVICTION_INTERVAL_MS: z.coerce.number().int().nonnegative().default(60_000),
   },
   runtimeEnv: resolved,
   emptyStringAsUndefined: true,

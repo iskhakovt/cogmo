@@ -1,17 +1,12 @@
 import { NonRetriableError } from "inngest";
+import { err } from "neverthrow";
 import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { z } from "zod";
 import { conversationTurnConcurrency } from "../inngest/concurrency.js";
 import type { inboundReady } from "../inngest/events.js";
 import { ProviderConfigError } from "../llm/resolver.js";
-import type {
-  ChatParams,
-  ChatStreamResult,
-  Message,
-  StopReason,
-  StreamEvent,
-} from "../llm/types.js";
+import type { ChatParams, ChatStreamFrame, Message, StopReason } from "../llm/types.js";
 import { logger } from "../logger.js";
 import type { McpRegistry } from "../mcp/registry.js";
 import { memoryRecallFailures } from "../metrics.js";
@@ -19,6 +14,7 @@ import type { SkillRunner } from "../skills/runner.js";
 import { expectDefined } from "../test/assertions.js";
 import {
   directStep,
+  doneFrame,
   fakeRunInTx,
   invokeInngestFn,
   invokeInngestOnFailure,
@@ -36,9 +32,11 @@ import {
   mockTransportStore,
   mockVoiceBundle,
   mockVoiceResolver,
+  scriptedStream,
   turnContextSent,
 } from "../test/factories.js";
 import type { InboundContent } from "../transport/content.js";
+import { StreamDeliveryError } from "../transport/delivery-router.js";
 import { coreMemoryTools } from "./core-memory-tools.js";
 import type { HandleMessageDeps } from "./handle-message.js";
 import { createHandleMessage } from "./handle-message.js";
@@ -1923,22 +1921,15 @@ describe("createHandleMessage", () => {
       // such skill. The model is still offered it, and its call gets the
       // same kind of result as any other failed tool.
       const requests: ChatParams[] = [];
-      const chatStream = vi.fn((params: ChatParams): ChatStreamResult => {
+      const chatStream = vi.fn((params: ChatParams): AsyncIterable<ChatStreamFrame> => {
         requests.push(structuredClone(params));
-        const events: StreamEvent[] =
-          requests.length === 1
-            ? [{ type: "tool_start", id: "t1", name: "echo", input: { n: 1 } }]
-            : [{ type: "text_delta", text: "done" }];
-        return {
-          events: (async function* () {
-            yield* events;
-          })(),
-          response: Promise.resolve({
-            stopReason: requests.length === 1 ? "tool_use" : "end_turn",
-            model: "mock-model",
-            usage: { inputTokens: 10, outputTokens: 5 },
-          }),
-        };
+        const usage = { inputTokens: 10, outputTokens: 5 };
+        return requests.length === 1
+          ? scriptedStream(
+              [{ type: "tool_start", id: "t1", name: "echo", input: { n: 1 } }],
+              doneFrame("tool_use", usage),
+            )
+          : scriptedStream([{ type: "text_delta", text: "done" }], doneFrame("end_turn", usage));
       });
       const echo = {
         name: "echo",
@@ -2745,6 +2736,68 @@ describe("createHandleMessage", () => {
       });
     });
 
+    it("auto + a forwarded voice note → no TTS (the user didn't speak)", async () => {
+      const ttsProvider = {
+        name: "openai",
+        tts: vi.fn().mockResolvedValue({ audio: Buffer.from("ogg"), mediaType: "audio/ogg" }),
+      };
+      const sttProvider = { name: "openai", stt: vi.fn().mockResolvedValue({ text: "hi" }) };
+      const handle = mockDeliveryHandle({
+        canDeliverVoice: vi.fn().mockReturnValue(true),
+        hasBatchTargets: vi.fn().mockReturnValue(false),
+      });
+      const deps = mockDeps({
+        voiceResolver: mockVoiceResolver(mockVoiceBundle({ tts: ttsProvider, stt: sttProvider })),
+        agentStore: mockAgentStore({
+          getProfile: vi.fn().mockResolvedValue({
+            id: "profile-1",
+            userId: null,
+            name: "x",
+            basePrompt: "x",
+            model: "claude-sonnet-4-6",
+            summarizationModel: null,
+            extractionModel: null,
+            autoRecall: "heuristic",
+            voiceMode: "auto",
+            toolSet: [],
+            memoryScope: null,
+          }),
+        }),
+        attachments: {
+          upload: vi.fn().mockResolvedValue("inbound/x"),
+          download: vi.fn().mockResolvedValue(Buffer.from("ogg-bytes")),
+        },
+        deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+        transportStore: mockTransportStore({
+          getUnbatchedInbound: vi.fn().mockResolvedValue([
+            {
+              id: "inbound-1",
+              content: [
+                {
+                  type: "voice",
+                  path: "inbound/v.ogg",
+                  mediaType: "audio/ogg",
+                  forwarded: { origin: "user", from: "Alice", sentAt: "2020-09-13T12:26:40.000Z" },
+                },
+              ],
+            },
+          ]),
+          getVoiceMaxReplyChars: vi.fn().mockResolvedValue(700),
+        }),
+      });
+
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      // Transcribed, but answered in text.
+      expect(sttProvider.stt).toHaveBeenCalled();
+      expect(ttsProvider.tts).not.toHaveBeenCalled();
+      expect(handle.deliverVoice).not.toHaveBeenCalled();
+    });
+
     it("auto + batch [voice, text] → no TTS (user typed last)", async () => {
       // Debounced batch where the user dictated, then typed a follow-up.
       // Their most recent intent is text — shouldn't get a voice reply
@@ -3232,6 +3285,162 @@ describe("createHandleMessage", () => {
       expect(memory.recall).not.toHaveBeenCalled();
       // Non-vacuity: the turn ran.
       expect(deps.runStreamingAgentLoop).toHaveBeenCalled();
+    });
+  });
+
+  describe("forwarded text", () => {
+    const forwarded = {
+      origin: "user",
+      from: "Alice",
+      sentAt: "2020-09-13T12:26:40.000Z",
+    } as const;
+    const wrapped =
+      '<forwarded_message from="Alice" origin="user" sent="2020-09-13T12:26:40.000Z">\n' +
+      "meet at 8\n</forwarded_message>";
+
+    async function persistedUserContent(
+      content: InboundContent,
+      overrides: Partial<HandleMessageDeps> = {},
+    ): Promise<unknown> {
+      const deps = mockDeps({
+        transportStore: mockTransportStore({
+          getUnbatchedInbound: vi.fn().mockResolvedValue([{ id: "inbound-1", content }]),
+        }),
+        ...overrides,
+      });
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+      const [, message] = expectDefined(vi.mocked(deps.agentStore.insertMessage).mock.calls[0]);
+      return message.content;
+    }
+
+    it("persists forwarded text inside its element", async () => {
+      const content = await persistedUserContent([
+        { type: "text", text: "meet at 8", forwarded },
+        { type: "text", text: "is this right?" },
+      ]);
+
+      expect(content).toBe(`${wrapped}\nis this right?`);
+    });
+
+    it("persists a forwarded caption beside an attachment inside its element", async () => {
+      const content = await persistedUserContent([
+        { type: "text", text: "meet at 8", forwarded },
+        { type: "image", path: "inbound/a.jpg", mediaType: "image/jpeg" },
+      ]);
+
+      expect(content).toBe(
+        JSON.stringify([
+          { type: "text", text: wrapped },
+          { type: "image", path: "inbound/a.jpg", mediaType: "image/jpeg" },
+        ]),
+      );
+    });
+
+    it("persists a forwarded voice note's transcript inside its element", async () => {
+      const stt = { name: "openai", stt: vi.fn().mockResolvedValue({ text: "meet at 8" }) };
+      const content = await persistedUserContent(
+        [{ type: "voice", path: "inbound/v.ogg", mediaType: "audio/ogg", forwarded }],
+        {
+          voiceResolver: mockVoiceResolver(mockVoiceBundle({ stt })),
+          attachments: {
+            upload: vi.fn().mockResolvedValue("inbound/x"),
+            download: vi.fn().mockResolvedValue(Buffer.from("ogg-bytes")),
+          },
+        },
+      );
+
+      expect(content).toBe(wrapped);
+    });
+
+    async function runTurn(content: InboundContent, overrides: Partial<HandleMessageDeps> = {}) {
+      const memory = mockMemoryProvider();
+      const deps = mockDeps({
+        memory,
+        transportStore: mockTransportStore({
+          getUnbatchedInbound: vi.fn().mockResolvedValue([{ id: "inbound-1", content }]),
+        }),
+        ...overrides,
+      });
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+      return { memory, deps };
+    }
+
+    it("recalls on forwarded text's body, not its element", async () => {
+      const { memory } = await runTurn([
+        { type: "text", text: "meet at 8", forwarded },
+        { type: "text", text: "is this right?" },
+      ]);
+
+      expect(memory.recall).toHaveBeenCalledWith("user-1", "meet at 8\nis this right?", {
+        maxTokens: 2000,
+      });
+    });
+
+    it("recalls on a forwarded voice note's transcript, not its element", async () => {
+      const stt = { name: "openai", stt: vi.fn().mockResolvedValue({ text: "meet at 8" }) };
+      const { memory } = await runTurn(
+        [{ type: "voice", path: "inbound/v.ogg", mediaType: "audio/ogg", forwarded }],
+        {
+          voiceResolver: mockVoiceResolver(mockVoiceBundle({ stt })),
+          attachments: {
+            upload: vi.fn().mockResolvedValue("inbound/x"),
+            download: vi.fn().mockResolvedValue(Buffer.from("ogg-bytes")),
+          },
+        },
+      );
+
+      expect(memory.recall).toHaveBeenCalledWith("user-1", "meet at 8", { maxTokens: 2000 });
+    });
+
+    it("skips recall for a captionless forward, even when the profile always recalls", async () => {
+      const { memory, deps } = await runTurn(
+        [
+          { type: "text", text: "", forwarded },
+          { type: "image", path: "inbound/a.jpg", mediaType: "image/jpeg" },
+        ],
+        {
+          agentStore: mockAgentStore({
+            getProfile: vi.fn().mockResolvedValue({
+              id: "profile-1",
+              userId: null,
+              name: "default",
+              basePrompt: "test",
+              model: "claude-sonnet-4-6",
+              summarizationModel: null,
+              extractionModel: null,
+              autoRecall: "always" as const,
+              toolSet: [],
+              memoryScope: null,
+            }),
+          }),
+        },
+      );
+
+      expect(memory.recall).not.toHaveBeenCalled();
+      // Non-vacuity: the turn ran.
+      expect(deps.runStreamingAgentLoop).toHaveBeenCalled();
+    });
+
+    it("hands the model a forwarded caption inside its element", async () => {
+      const { deps } = await runTurn([
+        { type: "text", text: "meet at 8", forwarded },
+        { type: "image", path: "inbound/a.jpg", mediaType: "image/jpeg" },
+      ]);
+
+      const [loopArgs] = expectDefined(
+        vi.mocked(deps.runStreamingAgentLoop).mock.calls[0],
+        "runStreamingAgentLoop call",
+      );
+      const lastMsg = expectDefined(loopArgs.messages.at(-1), "last message");
+      expect(lastMsg.content).toContainEqual({ type: "text", text: wrapped });
     });
   });
 
@@ -3987,6 +4196,109 @@ describe("createHandleMessage", () => {
       }
       expect(caught).toBeInstanceOf(NonRetriableError);
       expect((caught as NonRetriableError).cause).toBe(badRequest);
+    });
+  });
+
+  describe("stream delivery failures", () => {
+    const deliveryFailed = new StreamDeliveryError([
+      { sessionId: "session-tg", reason: "telegram: chat not found" },
+    ]);
+
+    async function runTurn(deps: HandleMessageDeps): Promise<unknown> {
+      return invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      }).then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+    }
+
+    it("keeps a deterministic loop error non-retriable when the abort fails", async () => {
+      const badRequest = Object.assign(new Error("Bad Request"), { status: 400 });
+      const handle = mockDeliveryHandle({ abort: vi.fn().mockResolvedValue(err(deliveryFailed)) });
+      const deps = mockDeps({
+        deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+        runStreamingAgentLoop: vi.fn().mockRejectedValue(badRequest),
+      });
+
+      const caught = await runTurn(deps);
+
+      expect(handle.abort).toHaveBeenCalledWith("Bad Request");
+      expect(caught).toBeInstanceOf(NonRetriableError);
+      expect((caught as NonRetriableError).cause).toBe(badRequest);
+    });
+
+    it("rethrows a retriable loop error as itself when the abort fails", async () => {
+      const transient = new Error("socket hang up");
+      const handle = mockDeliveryHandle({ abort: vi.fn().mockResolvedValue(err(deliveryFailed)) });
+      const deps = mockDeps({
+        deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+        runStreamingAgentLoop: vi.fn().mockRejectedValue(transient),
+      });
+
+      expect(await runTurn(deps)).toBe(transient);
+    });
+
+    it("delivers the persisted reply through a durable step when a stream fails at finish", async () => {
+      // An append-only stream shows nothing before its finish, so the reply
+      // goes out again through the target's batch delivery, in a step whose
+      // retries can outlast a long wait.
+      const handle = mockDeliveryHandle({ finish: vi.fn().mockResolvedValue(err(deliveryFailed)) });
+      const deps = mockDeps({
+        deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+      });
+      const step = mockStep();
+
+      const caught = await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+        event: testEvent,
+        step,
+        runId: testRunId,
+      }).then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+
+      expect(caught).toBeUndefined();
+      expect(handle.abort).not.toHaveBeenCalled();
+      expect(handle.deliverUnstreamed).toHaveBeenCalledExactlyOnceWith(
+        ["session-tg"],
+        "Hello from assistant",
+      );
+      const stepIds = step.run.mock.calls.map((call) => String(call[0]));
+      expect(stepIds.indexOf("finish-stream")).toBeGreaterThan(-1);
+      expect(stepIds.indexOf("redeliver-unstreamed")).toBeGreaterThan(
+        stepIds.indexOf("persist-new-messages"),
+      );
+    });
+
+    it("redelivers nothing when every stream finished", async () => {
+      const handle = mockDeliveryHandle();
+      const deps = mockDeps({
+        deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+      });
+
+      expect(await runTurn(deps)).toBeUndefined();
+      expect(handle.deliverUnstreamed).not.toHaveBeenCalled();
+    });
+
+    it("fails the streaming step when a push fails, so its retry reopens the streams", async () => {
+      let pushOutcome: unknown;
+      const handle = mockDeliveryHandle({ push: vi.fn().mockResolvedValue(err(deliveryFailed)) });
+      const deps = mockDeps({
+        deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+        runStreamingAgentLoop: vi.fn().mockImplementation(async (params) => {
+          pushOutcome = await params.onEvent({ type: "text_delta", text: "hi" }).then(
+            () => "resolved",
+            (e: unknown) => e,
+          );
+          throw pushOutcome;
+        }),
+      });
+
+      expect(await runTurn(deps)).toBe(deliveryFailed);
+      expect(pushOutcome).toBe(deliveryFailed);
     });
   });
 });

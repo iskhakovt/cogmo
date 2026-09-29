@@ -4,6 +4,7 @@ import type { Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
 import type { WebStreamRegistry } from "../transport/adapters/web/stream-registry.js";
 import type { Transport } from "../transport/transport.js";
+import { finishesWithin } from "../util/finishes-within.js";
 import {
   buildClearCookie,
   buildSessionCookie,
@@ -12,7 +13,7 @@ import {
 } from "./auth/cookies.js";
 import { type AuthStrategy, authenticate, cookieStrategy, csrfReject } from "./auth/gate.js";
 import { readJsonBody, sendBodyError } from "./body.js";
-import { handleChat } from "./chat.js";
+import { handleChat, SessionCloses } from "./chat.js";
 import { writeHealth } from "./health-route.js";
 import { OWNER_HANDLE } from "./rpc/context.js";
 import { handleRpc } from "./rpc/handler.js";
@@ -56,6 +57,16 @@ export interface StartWebServerDeps extends CreateWebServerDeps {
   port: number;
 }
 
+export interface WebServer {
+  /** The underlying server: `listen` it (tests) or read its address. */
+  server: Server;
+  /**
+   * Shut down: end every open chat stream, stop accepting connections, give
+   * requests in flight `drainMs` to finish, then close their connections.
+   */
+  close(drainMs: number): Promise<void>;
+}
+
 function send(res: ServerResponse, status: number, message: string): void {
   res.writeHead(status, { "Content-Type": "text/plain" });
   res.end(message);
@@ -82,7 +93,10 @@ const LoginBody = z.object({ token: z.string() });
  * `GET /*` (sirv SPA fallback). Fail-closed: anything gated without a valid
  * session is 401.
  */
-export function createWebServer(deps: CreateWebServerDeps): Server {
+export function createWebServer(deps: CreateWebServerDeps): WebServer {
+  // Aborted by `close()`: ends the chat streams, which never end on their own.
+  const shutdown = new AbortController();
+  const sessionCloses = new SessionCloses();
   const cookieName = sessionCookieName(deps.cookieSecure);
   const serveStatic = createStaticHandler(deps.staticRoot);
 
@@ -222,6 +236,8 @@ export function createWebServer(deps: CreateWebServerDeps): Server {
           transport: deps.webTransport,
           registry: deps.webStreamRegistry,
           ownerHandle: identity.platformUserHandle,
+          shutdownSignal: shutdown.signal,
+          sessionCloses,
         });
         return;
       }
@@ -241,18 +257,52 @@ export function createWebServer(deps: CreateWebServerDeps): Server {
     send(res, 404, "Not Found");
   }
 
-  return createServer((req, res) => {
+  const server = createServer((req, res) => {
     handle(req, res).catch((err) => {
       logger.error({ err, url: req.url }, "web request handler failed");
       if (!res.headersSent) send(res, 500, "Internal Server Error");
       else res.end();
     });
   });
+  return {
+    server,
+    async close(drainMs) {
+      shutdown.abort();
+      await drain(server, drainMs);
+      // Ending the streams started their session closes; so may the drained requests.
+      await sessionCloses.settled();
+    },
+  };
 }
 
-/** Start the web server on `host:port`. Returns the node `Server` for shutdown. */
-export function startWebServer(deps: StartWebServerDeps): Promise<Server> {
-  const server = createWebServer(deps);
+/** How often the drain closes connections whose request has finished. */
+const DRAIN_REAP_INTERVAL_MS = 50;
+
+/**
+ * `close()` refuses new connections and closes the idle ones, but only those
+ * idle when it is called: a connection whose request finishes during the
+ * drain stays open until its keep-alive timeout. So the drain calls
+ * `closeIdleConnections()` on an interval. A request still open after
+ * `drainMs` has its connection closed, with `closeAllConnections()` called
+ * after `close()` as Node's docs recommend.
+ */
+async function drain(server: Server, drainMs: number): Promise<void> {
+  const closed = new Promise<void>((resolve) => server.close(() => resolve()));
+  const reaper = setInterval(() => server.closeIdleConnections(), DRAIN_REAP_INTERVAL_MS);
+  try {
+    if (await finishesWithin(closed, drainMs)) return;
+    logger.warn({ drainMs }, "web requests outlived the drain; closing their connections");
+    server.closeAllConnections();
+    await closed;
+  } finally {
+    clearInterval(reaper);
+  }
+}
+
+/** Start the web server on `host:port`. */
+export function startWebServer(deps: StartWebServerDeps): Promise<WebServer> {
+  const web = createWebServer(deps);
+  const { server } = web;
   return new Promise((resolve, reject) => {
     // Surface a bind failure (EADDRINUSE / EACCES) as a rejected promise; without
     // this the 'error' event is unhandled (uncaught exception) and the await never
@@ -262,7 +312,7 @@ export function startWebServer(deps: StartWebServerDeps): Promise<Server> {
     server.listen(deps.port, deps.host, () => {
       server.removeListener("error", reject);
       logger.info({ host: deps.host, port: deps.port }, "web server listening");
-      resolve(server);
+      resolve(web);
     });
   });
 }

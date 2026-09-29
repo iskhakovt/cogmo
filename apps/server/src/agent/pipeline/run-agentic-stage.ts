@@ -37,7 +37,7 @@ import type { MemoryProvider } from "../../memory/provider.js";
 import type { SkillRunner } from "../../skills/runner.js";
 import { buildSkillTools, composeTurnTools } from "../../skills/skill-tool-builder.js";
 import { createSkillsService } from "../../skills/skills-service.js";
-import type { DeliveryRouter } from "../../transport/delivery-router.js";
+import { type DeliveryRouter, pushOrThrow } from "../../transport/delivery-router.js";
 import type { TransportStore } from "../../transport/store/index.js";
 import type { CodingService } from "../coding/service.js";
 import {
@@ -321,7 +321,11 @@ export async function runAgenticStage(
   });
 
   const { provider, limits: rowLimits } = await resolveOrFail(deps.resolveProvider, ctx.model);
-  const limits = resolveLimits(ctx.model, rowLimits);
+  // Frozen for the run: a catalog refresh can swap the in-process catalog
+  // between invocations, and the budget decides which compaction steps exist.
+  const limits = await steps.stepRun("freeze-model-limits", async () =>
+    resolveLimits(ctx.model, rowLimits),
+  );
   const budget = computeBudget(limits);
 
   // Frozen for the run: the persist step below rewrites the row this reads.
@@ -446,6 +450,8 @@ export async function runAgenticStage(
   });
 
   let result: AgentLoopResult;
+  // Sessions whose stream failed at finish; the reply goes to them again once persisted.
+  let unstreamed: ReadonlyArray<string> = [];
   try {
     result = await deps.runStreamingAgentLoop({
       provider,
@@ -455,7 +461,7 @@ export async function runAgenticStage(
       tools: stageTools,
       service,
       maxTokens: limits.maxOutputTokens,
-      onEvent: (event) => delivery.push(event),
+      onEvent: (event) => pushOrThrow(delivery, event),
       stepRun: steps.stepRun,
       turnKey: inboundId,
       cache: turnCacheIntent(conversationId, "stage"),
@@ -471,13 +477,24 @@ export async function runAgenticStage(
       : null;
     if (retraction) {
       await steps.run("retract-degraded-output", async () => {
-        await delivery.push({ type: "retract", ...retraction });
+        await pushOrThrow(delivery, { type: "retract", ...retraction });
         return null;
       });
     }
-    await delivery.finish();
+    // A step, so the sessions whose stream failed are known on every later
+    // invocation: such a stream may have shown nothing, and replayed
+    // iterations re-emit nothing, so the reply reaches them through batch
+    // delivery once it is persisted.
+    unstreamed = await steps.run("finish-stream", async () => {
+      const finished = await delivery.finish();
+      if (finished.isOk()) return [];
+      log.warn({ err: finished.error }, "stream delivery failed at finish");
+      return finished.error.failures.map((failure) => failure.sessionId);
+    });
   } catch (err) {
-    await delivery.abort(err instanceof Error ? err.message : "Unknown error");
+    // The loop's error decides the retry, so a failed abort is only logged.
+    const aborted = await delivery.abort(err instanceof Error ? err.message : "Unknown error");
+    if (aborted.isErr()) log.warn({ err: aborted.error }, "stream delivery failed at abort");
     if (!isRetriableProviderError(err)) throw asNonRetriable(err);
     // Rethrown unwrapped: a permanently failed step surfaces as Inngest's
     // StepError, whose identity the engine's non-retriable detection needs.
@@ -505,6 +522,16 @@ export async function runAgenticStage(
     if (!result.degraded && delivery.hasBatchTargets()) await delivery.deliverBatch(result.text);
     return null;
   });
+
+  // Through the target's batch `deliver`, in a step whose retries can outlast
+  // a Telegram wait the stream handle gave up on.
+  if (!result.degraded && unstreamed.length > 0 && result.text.length > 0) {
+    const sessions = unstreamed;
+    await steps.run("redeliver-unstreamed", async () => {
+      await delivery.deliverUnstreamed(sessions, result.text);
+      return null;
+    });
+  }
 
   if (result.degraded) {
     return {

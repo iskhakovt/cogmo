@@ -26,8 +26,13 @@ import type { SkillRunner } from "../skills/runner.js";
 import { buildSkillTools, composeTurnTools } from "../skills/skill-tool-builder.js";
 import { createSkillsService } from "../skills/skills-service.js";
 import type { AttachmentStore } from "../transport/attachment-store.js";
-import { contentToBlocks, type InboundContent } from "../transport/content.js";
-import type { DeliveryRouter } from "../transport/delivery-router.js";
+import {
+  contentToBlocks,
+  type InboundContent,
+  isVoiceContent,
+  renderInboundText,
+} from "../transport/content.js";
+import { type DeliveryRouter, pushOrThrow } from "../transport/delivery-router.js";
 import type { TransportStore } from "../transport/store/index.js";
 import { resolveVoiceMode } from "../voice/mode.js";
 import type { VoiceProviderResolver } from "../voice/resolver.js";
@@ -465,35 +470,45 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             })
           : [];
 
-      // Single source of truth for "what does each inbound row look like
-      // after voice transcription?". Both consumers below (userContentText
-      // for persistence; resolvedBlocks for the LLM call) derive from this
-      // — eliminates the parallel-cursor pattern that was fragile under
-      // walk-order changes. Cursor advances across rows in the same order
-      // `transcripts` was produced (inboundMessages.flatMap order, voice
-      // refs only).
+      // Each inbound row after voice transcription: every consumer below
+      // derives from this. A forwarded clip's transcript keeps the clip's
+      // `forwarded` marking, as forwarded text does; userContentText and
+      // resolvedBlocks render it into its `<forwarded_message>` element, and
+      // the recall query reads the bare text. The cursor walks `transcripts`
+      // in the order they were produced: voice blocks, in inbound order.
       const substitutedMessages = ((): ReadonlyArray<{ content: InboundContent }> => {
         let cursor = 0;
         return inboundMessages.map((m) => {
           if (typeof m.content === "string") return { content: m.content };
-          const blocks = m.content.map((b) =>
-            b.type === "voice" ? ({ type: "text", text: transcripts[cursor++] ?? "" } as const) : b,
-          );
+          const blocks = m.content.map((b) => {
+            if (b.type !== "voice") return b;
+            const text = transcripts[cursor++] ?? "";
+            return {
+              type: "text",
+              text,
+              ...(b.forwarded !== undefined && { forwarded: b.forwarded }),
+            } as const;
+          });
           return { content: blocks };
         });
       })();
 
-      // Per-row text serialization for `messages.content`. After voice→text
-      // substitution above, a text-only row joins on newline, so it loads
-      // back cleanly as history; a row that still carries image or document
-      // blocks is JSON-stringified.
+      // Per-row text serialization for `messages.content`, forwarded text
+      // inside its element. After voice→text substitution above, a text-only
+      // row joins on newline, so it loads back cleanly as history; a row that
+      // still carries image or document blocks is JSON-stringified.
       const userContentText = substitutedMessages
         .map(({ content }) => {
           if (typeof content === "string") return content;
-          if (content.every((b) => b.type === "text")) {
-            return content.map((b) => b.text).join("\n");
+          const rendered = content.map((b) =>
+            b.type === "text"
+              ? ({ type: "text", text: renderInboundText(b.text, b.forwarded) } as const)
+              : b,
+          );
+          if (rendered.every((b) => b.type === "text")) {
+            return rendered.map((b) => b.text).join("\n");
           }
-          return JSON.stringify(content);
+          return JSON.stringify(rendered);
         })
         .join("\n");
 
@@ -626,10 +641,8 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           // (user dictated, then typed a follow-up), they're at the keyboard
           // now and shouldn't get a voice reply just because the batch
           // started with voice. Symmetrically, [text, voice] correctly
-          // mirrors voice.
-          lastInboundWasVoice: contentToBlocks(inboundMessages.at(-1)?.content ?? "").some(
-            (b) => b.type === "voice_ref",
-          ),
+          // mirrors voice. A forwarded voice note isn't the user speaking.
+          lastInboundWasVoice: isVoiceContent(inboundMessages.at(-1)?.content ?? ""),
         }),
         // Gates `batch-delivery`, so the step exists on every invocation that
         // reaches it or on none.
@@ -891,9 +904,13 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // — no point burning retries on a misconfiguration. See
       // design/providers.md → Provider dispatch.
       const { provider, limits: rowLimits } = await resolveOrFail(resolveProvider, model);
-      // Layered limits: row override → bundled LiteLLM snapshot → conservative
-      // default. Always returns a value; never throws on unknown models.
-      const limits = resolveLimits(model, rowLimits);
+      // Layered limits: row override → LiteLLM catalog → conservative
+      // default. Durable: a catalog refresh landing between invocations
+      // swaps the in-process catalog, and `budget` decides which
+      // compaction steps the run plans.
+      const limits = await stepRun("freeze-model-limits", async () =>
+        resolveLimits(model, rowLimits),
+      );
       const budget = computeBudget(limits);
       const summarizationModel = snapshot.summarizationModel;
 
@@ -994,7 +1011,10 @@ export function createHandleMessage(deps: HandleMessageDeps) {
               // invocation, and a bare-body push would re-append the banner
               // (or open a stray message on a post-finish replay handle)
               // each time.
-              await delivery.push({ type: "status", message: "Summarizing conversation..." });
+              await pushOrThrow(delivery, {
+                type: "status",
+                message: "Summarizing conversation...",
+              });
               const response = await summarizationProvider.chat(
                 summarizationRequest({
                   model: summarizationModel,
@@ -1155,6 +1175,8 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       historyMessages = replaceTurnContext(historyMessages, turnPosition, renderedTurnContext);
 
       let result: AgentLoopResult;
+      // Sessions whose stream failed at finish; the reply goes to them again once persisted.
+      let unstreamed: ReadonlyArray<string> = [];
       try {
         result = await runStreamingAgentLoop({
           provider,
@@ -1169,7 +1191,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           // the loop caps every one, so a long tool-using turn can still
           // outgrow the window and degrade to `context_overflow`.
           maxTokens: limits.maxOutputTokens,
-          onEvent: (event: StreamEvent) => delivery.push(event),
+          onEvent: (event: StreamEvent) => pushOrThrow(delivery, event),
           // Durable boundaries inside the loop: each streaming LLM
           // iteration runs in a `llm-iter<N>` step (tokens reach the
           // delivery layer live from inside the step body; a memoized
@@ -1243,9 +1265,9 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             // iteration-cap degrade that persists every iteration) means
             // no event at all.
             if (retraction) {
-              await delivery.push({ type: "retract", ...retraction });
+              await pushOrThrow(delivery, { type: "retract", ...retraction });
             }
-            await delivery.push({ type: "text_delta", text });
+            await pushOrThrow(delivery, { type: "text_delta", text });
             return text;
           });
           result = {
@@ -1257,9 +1279,24 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             ],
           };
         }
-        await delivery.finish();
+        // A step, so the sessions whose stream failed are known on every
+        // later invocation. Such a stream may have shown the user nothing:
+        // append-only mode writes only at chunk boundaries and at finish. A
+        // retry of the turn wouldn't help, since replayed iterations re-emit
+        // nothing, so the reply reaches those sessions through batch delivery
+        // once it is persisted.
+        unstreamed = await step.run("finish-stream", async () => {
+          const finished = await delivery.finish();
+          if (finished.isOk()) return [];
+          turnLogger.warn({ err: finished.error }, "stream delivery failed at finish");
+          return finished.error.failures.map((failure) => failure.sessionId);
+        });
       } catch (err) {
-        await delivery.abort(err instanceof Error ? err.message : "Unknown error");
+        // The loop's error decides the retry, so a failed abort is only logged.
+        const aborted = await delivery.abort(err instanceof Error ? err.message : "Unknown error");
+        if (aborted.isErr()) {
+          turnLogger.warn({ err: aborted.error }, "stream delivery failed at abort");
+        }
         // Translate provider classification into Inngest's retry decision.
         // 4xx that aren't 408/425/429 are deterministic client errors — the
         // same payload will fail every retry. Wrap in NonRetriableError so
@@ -1456,6 +1493,18 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             documentsDelivered: fulfilledDocs.length,
             documentsFailed: docSettled.length - fulfilledDocs.length,
           };
+        });
+      }
+
+      // ──── DURABLE: redeliver to streams that failed at finish ────
+      //
+      // Through the target's batch `deliver`, in a step whose retries can
+      // outlast a Telegram wait the stream handle gave up on.
+      if (unstreamed.length > 0 && result.text.length > 0) {
+        const sessions = unstreamed;
+        await step.run("redeliver-unstreamed", async () => {
+          await delivery.deliverUnstreamed(sessions, result.text);
+          return { sessions: sessions.length };
         });
       }
 

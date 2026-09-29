@@ -2,9 +2,22 @@ import { z } from "zod";
 import type { ContentBlock } from "../llm/types.js";
 
 /**
+ * Where forwarded text came from: the kind of sender, its display name (a
+ * person's name, or a chat or channel title with the author's signature when
+ * there is one) and when the original was sent.
+ */
+const ForwardedOriginSchema = z.object({
+  origin: z.enum(["user", "hidden_user", "chat", "channel"]),
+  from: z.string(),
+  sentAt: z.string().datetime(),
+});
+export type ForwardedOrigin = z.infer<typeof ForwardedOriginSchema>;
+
+/**
  * Inbound block shapes — what adapters pack into `inbound_messages.content`.
- * `text` is a plain text run; `image` carries either an S3 path (after
- * `uploadAttachment`) or inline base64/url data.
+ * `text` is a plain text run, carrying `forwarded` when someone other than the
+ * user wrote it; `image` carries either an S3 path (after `uploadAttachment`)
+ * or inline base64/url data.
  *
  * The two image variants share `type: "image"`, so they live in a single
  * object schema with `path` and `data` both optional and a `refine` that
@@ -15,7 +28,9 @@ import type { ContentBlock } from "../llm/types.js";
 const InboundTextBlockSchema = z.object({
   type: z.literal("text"),
   text: z.string(),
+  forwarded: ForwardedOriginSchema.optional(),
 });
+export type InboundTextBlock = z.infer<typeof InboundTextBlockSchema>;
 
 const InboundImageBlockSchema = z
   .object({
@@ -48,12 +63,15 @@ const InboundDocumentBlockSchema = z
  * orchestrator transcribes inside a durable `step.run("transcribe-voice")`.
  * Storing the OGG persistently allows future re-transcription with a better
  * model and downstream observability of voice fraction. See design/voice.md.
+ * `forwarded` marks a clip someone other than the user recorded; its
+ * transcript renders as forwarded text.
  */
 const InboundVoiceBlockSchema = z.object({
   type: z.literal("voice"),
   path: z.string(),
   mediaType: z.string(),
   durationMs: z.number().int().nonnegative().optional(),
+  forwarded: ForwardedOriginSchema.optional(),
 });
 
 const InboundBlockSchema = z.union([
@@ -118,7 +136,7 @@ export function contentToBlocks(content: InboundContent): InboundBlock[] {
 
   return content.flatMap<InboundBlock>((block) => {
     if (block.type === "text") {
-      return [{ type: "text", text: block.text }];
+      return [{ type: "text", text: renderInboundText(block.text, block.forwarded) }];
     }
     if (block.type === "image") {
       if (block.path != null) {
@@ -173,11 +191,72 @@ export function contentToBlocks(content: InboundContent): InboundBlock[] {
 }
 
 /**
- * Was the most recent inbound row a voice message? Used by the orchestrator
- * to resolve `auto` voice mode (mirror inbound modality). Returns true iff
- * any block in the content is a voice block.
+ * Inbound text — a text block's, or a voice clip's transcript — as the
+ * transcript carries it: as it is, or when `forwarded` inside a
+ * `<forwarded_message>` element naming its sender, so the model never reads it
+ * as the user's words. A pure function of its inputs, so every render of the
+ * row gives the same bytes.
+ */
+export function renderInboundText(text: string, forwarded: ForwardedOrigin | undefined): string {
+  if (forwarded === undefined) return text;
+  const attributes = [
+    `from="${attributeValue(forwarded.from)}"`,
+    `origin="${attributeValue(forwarded.origin)}"`,
+    `sent="${attributeValue(forwarded.sentAt)}"`,
+  ].join(" ");
+  // Empty for captionless forwarded media, where the element only names the sender.
+  const body = text === "" ? "" : `\n${escapeForwardedTags(text)}\n`;
+  return `<forwarded_message ${attributes}>${body}</forwarded_message>`;
+}
+
+/**
+ * `text` with the `<` of every `forwarded_message` tag a lenient reader would
+ * honour, opener or closer, as `&lt;`: any case, with whitespace, slashes or
+ * backslashes before the name. The body can then neither close its element
+ * nor open another.
+ */
+function escapeForwardedTags(text: string): string {
+  return text.replace(/<(?=[\s\\/]*forwarded_message)/gi, "&lt;");
+}
+
+/** A leading element exactly as `renderInboundText` writes it. */
+const LEADING_FORWARDED_MESSAGE =
+  /^<forwarded_message from="([^"<>]*)" origin="[a-z_]+" sent="[^"<>]*">(?:\n([\s\S]*?)\n)?<\/forwarded_message>/;
+
+/**
+ * Stored user text for a one-line label: a leading `<forwarded_message>`
+ * element as `Fwd from {from}: {body}`, so a short snippet shows the message
+ * rather than markup. Anything else comes back as it is.
+ */
+export function previewInboundText(text: string): string {
+  const match = LEADING_FORWARDED_MESSAGE.exec(text);
+  if (match === null) return text;
+  const from = (match[1] ?? "")
+    .replace(/&quot;/g, '"')
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+  const body = match[2] ?? "";
+  const rest = text.slice(match[0].length);
+  return `${body === "" ? `Fwd from ${from}` : `Fwd from ${from}: ${body}`}${rest}`;
+}
+
+/** `value` inside a double-quoted attribute: markup characters as entities, whitespace runs as one space. */
+function attributeValue(value: string): string {
+  return value
+    .replace(/\s+/g, " ")
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+/**
+ * Did the user speak this row? Used by the orchestrator to resolve `auto`
+ * voice mode (mirror inbound modality). True iff the content carries a voice
+ * block the user recorded: a forwarded clip is someone else speaking.
  */
 export function isVoiceContent(content: InboundContent): boolean {
   if (typeof content === "string") return false;
-  return content.some((b) => b.type === "voice");
+  return content.some((b) => b.type === "voice" && b.forwarded === undefined);
 }

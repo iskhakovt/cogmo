@@ -1,15 +1,24 @@
+import { SpanStatusCode } from "@opentelemetry/api";
 import { getEncoding } from "js-tiktoken";
-import { describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { PipelineDefinitionSchema } from "../agent/pipeline/types.js";
 import { logger } from "../logger.js";
 import { expectDefined } from "../test/assertions.js";
+import { drainFrames } from "../test/factories.js";
+import { type OtelHarness, setupOtelHarness } from "../test/otel-harness.js";
 import type { CacheDialect } from "./cache-dialect.js";
 import { ProviderProtocolError, ToolArgsCutOffError } from "./errors.js";
 import { isRetriableProviderError, RefusalError } from "./fallback.js";
 import { toObjectJsonSchema } from "./json-schema.js";
 import { modelFamilyParams, OpenAICompatibleProvider } from "./openai-compat.js";
-import type { CacheIntent, ChatParams, ImageBlock, StreamEvent, ToolDefinition } from "./types.js";
+import type {
+  CacheIntent,
+  ChatParams,
+  ChatStreamFrame,
+  ImageBlock,
+  ToolDefinition,
+} from "./types.js";
 
 const mockCreate = vi.fn();
 // Constructor options each client was built with, newest last.
@@ -24,6 +33,8 @@ vi.mock("openai", () => {
     },
   };
 });
+// The mock replaces the whole module; abort tests reject with the SDK's real error class.
+const { APIUserAbortError } = await vi.importActual<typeof import("openai")>("openai");
 
 // What the provider passes to openai.chat.completions.create. We assert on
 // shape (messages array, tools array, etc.) — fields are kept loose because
@@ -423,21 +434,19 @@ describe("OpenAICompatibleProvider", () => {
         ]),
       );
 
-      const { events, response } = provider.chatStream({
-        model: "gpt-5-nano",
-        system: "sys",
-        messages: [{ role: "user", content: "hi" }],
-      });
+      const { frames, meta } = await drainFrames(
+        provider.chatStream({
+          model: "gpt-5-nano",
+          system: "sys",
+          messages: [{ role: "user", content: "hi" }],
+        }),
+      );
 
-      const collected: StreamEvent[] = [];
-      for await (const event of events) collected.push(event);
-
-      expect(collected).toEqual([
+      expect(frames).toEqual([
         { type: "text_delta", text: "Hello" },
         { type: "text_delta", text: " world" },
       ]);
 
-      const meta = await response;
       expect(meta.stopReason).toBe("end_turn");
       expect(meta.usage).toEqual({ inputTokens: 10, outputTokens: 5 });
     });
@@ -465,15 +474,14 @@ describe("OpenAICompatibleProvider", () => {
           },
         ]),
       );
-      const { events, response } = provider.chatStream({
-        model: "m",
-        system: "sys",
-        messages: [{ role: "user", content: "time" }],
-      });
-      const collected: StreamEvent[] = [];
-      for await (const event of events) collected.push(event);
-      expect(collected).toEqual([{ type: "tool_start", id: "call_zero", name: "now", input: {} }]);
-      const meta = await response;
+      const { frames, meta } = await drainFrames(
+        provider.chatStream({
+          model: "m",
+          system: "sys",
+          messages: [{ role: "user", content: "time" }],
+        }),
+      );
+      expect(frames).toEqual([{ type: "tool_start", id: "call_zero", name: "now", input: {} }]);
       expect(meta.stopReason).toBe("tool_use");
     });
 
@@ -515,20 +523,18 @@ describe("OpenAICompatibleProvider", () => {
         ]),
       );
 
-      const { events, response } = provider.chatStream({
-        model: "m",
-        system: "sys",
-        messages: [{ role: "user", content: "search" }],
-      });
+      const { frames, meta } = await drainFrames(
+        provider.chatStream({
+          model: "m",
+          system: "sys",
+          messages: [{ role: "user", content: "search" }],
+        }),
+      );
 
-      const collected: StreamEvent[] = [];
-      for await (const event of events) collected.push(event);
-
-      expect(collected).toEqual([
+      expect(frames).toEqual([
         { type: "tool_start", id: "call_1", name: "search", input: { q: "test" } },
       ]);
 
-      const meta = await response;
       expect(meta.stopReason).toBe("tool_use");
     });
 
@@ -544,14 +550,13 @@ describe("OpenAICompatibleProvider", () => {
         ]),
       );
 
-      const { events } = provider.chatStream({
-        model: "m",
-        system: "sys",
-        messages: [{ role: "user", content: "hi" }],
-      });
-      for await (const _ of events) {
-        /* drain */
-      }
+      await drainFrames(
+        provider.chatStream({
+          model: "m",
+          system: "sys",
+          messages: [{ role: "user", content: "hi" }],
+        }),
+      );
 
       const args = firstCreateArgs();
       expect(args.stream).toBe(true);
@@ -560,11 +565,10 @@ describe("OpenAICompatibleProvider", () => {
     // OpenAI-compatible upstreams surface stream failures one of two ways:
     // an `APIError`-shaped object before the first chunk (5xx with body) or
     // an `APIConnectionError`-shaped throw while iterating chunks (no
-    // `.status`). Both cases must (a) reject the iterator, (b) reject the
-    // `response` promise, and (c) propagate the original shape so
-    // `isRetriableProviderError` (which keys off `.status` presence) makes
+    // `.status`). Both cases must reject the iterator with the original shape
+    // so `isRetriableProviderError` (which keys off `.status` presence) makes
     // the right call upstream of `FallbackLlmProvider`.
-    it("propagates a pre-stream 502 with a numeric status on both events and response", async () => {
+    it("propagates a pre-stream 502 with a numeric status", async () => {
       const provider = createProvider();
       const upstream = Object.assign(new Error("Bad gateway"), {
         name: "APIError",
@@ -572,18 +576,17 @@ describe("OpenAICompatibleProvider", () => {
       });
       mockCreate.mockRejectedValueOnce(upstream);
 
-      const { events, response } = provider.chatStream({
+      const stream = provider.chatStream({
         model: "anthropic/claude-sonnet-4",
         system: "sys",
         messages: [{ role: "user", content: "hi" }],
       });
 
-      const iter = events[Symbol.asyncIterator]();
+      const iter = stream[Symbol.asyncIterator]();
       await expect(iter.next()).rejects.toMatchObject({ status: 502 });
-      await expect(response).rejects.toMatchObject({ status: 502 });
     });
 
-    it("propagates a mid-stream connection drop on both events and response", async () => {
+    it("propagates a mid-stream connection drop", async () => {
       const provider = createProvider();
       const drop = Object.assign(new Error("connection reset"), {
         name: "APIConnectionError",
@@ -613,17 +616,16 @@ describe("OpenAICompatibleProvider", () => {
         },
       });
 
-      const { events, response } = provider.chatStream({
+      const stream = provider.chatStream({
         model: "m",
         system: "sys",
         messages: [{ role: "user", content: "hi" }],
       });
 
-      const iter = events[Symbol.asyncIterator]();
+      const iter = stream[Symbol.asyncIterator]();
       const first = await iter.next();
       expect(first.value).toEqual({ type: "text_delta", text: "partial" });
       await expect(iter.next()).rejects.toBe(drop);
-      await expect(response).rejects.toBe(drop);
     });
 
     it("repairs trailing-comma JSON in tool args via jsonrepair before declaring failure (OpenAI-compat stream)", async () => {
@@ -668,19 +670,18 @@ describe("OpenAICompatibleProvider", () => {
         ]),
       );
 
-      const { events, response } = provider.chatStream({
-        model: "m",
-        system: "sys",
-        messages: [{ role: "user", content: "search" }],
-      });
+      const { frames, meta } = await drainFrames(
+        provider.chatStream({
+          model: "m",
+          system: "sys",
+          messages: [{ role: "user", content: "search" }],
+        }),
+      );
 
-      const collected: StreamEvent[] = [];
-      for await (const event of events) collected.push(event);
-
-      expect(collected).toEqual([
+      expect(frames).toEqual([
         { type: "tool_start", id: "call_1", name: "search", input: { query: "weather" } },
       ]);
-      await expect(response).resolves.toMatchObject({ stopReason: "tool_use" });
+      expect(meta.stopReason).toBe("tool_use");
     });
 
     it("throws ProviderProtocolError on tool-arg JSON unrepairable by jsonrepair (OpenAI-compat stream)", async () => {
@@ -713,20 +714,15 @@ describe("OpenAICompatibleProvider", () => {
         ]),
       );
 
-      const { events, response } = provider.chatStream({
-        model: "m",
-        system: "sys",
-        messages: [{ role: "user", content: "search" }],
-      });
-
-      const collect = async (): Promise<StreamEvent[]> => {
-        const out: StreamEvent[] = [];
-        for await (const event of events) out.push(event);
-        return out;
-      };
-
-      await expect(collect()).rejects.toBeInstanceOf(ProviderProtocolError);
-      await expect(response).rejects.toBeInstanceOf(ProviderProtocolError);
+      await expect(
+        drainFrames(
+          provider.chatStream({
+            model: "m",
+            system: "sys",
+            messages: [{ role: "user", content: "search" }],
+          }),
+        ),
+      ).rejects.toBeInstanceOf(ProviderProtocolError);
     });
 
     // `length` means the cap cut the response off, so the unparseable final
@@ -781,24 +777,18 @@ describe("OpenAICompatibleProvider", () => {
           ]),
         );
 
-        const { events, response } = provider.chatStream({
-          model: "m",
-          system: "sys",
-          messages: [{ role: "user", content: "go" }],
-        });
-        const drained = (async () => {
-          for await (const _event of events) {
-            // drain
-          }
-        })();
-
-        const error = await drained.then(
+        const error = await drainFrames(
+          provider.chatStream({
+            model: "m",
+            system: "sys",
+            messages: [{ role: "user", content: "go" }],
+          }),
+        ).then(
           () => undefined,
           (err: unknown) => err,
         );
         expect(error).toBeInstanceOf(ProviderProtocolError);
         expect(error instanceof ToolArgsCutOffError).toBe(cutOff);
-        await expect(response).rejects.toBe(error);
       },
     );
 
@@ -915,16 +905,13 @@ describe("OpenAICompatibleProvider", () => {
         ]),
       );
 
-      const { events, response } = provider.chatStream({
-        model: "gpt-5-nano",
-        system: "sys",
-        messages: [{ role: "user", content: "disallowed request" }],
-      });
-      for await (const _ of events) {
-        /* drain */
-      }
-
-      const meta = await response;
+      const { meta } = await drainFrames(
+        provider.chatStream({
+          model: "gpt-5-nano",
+          system: "sys",
+          messages: [{ role: "user", content: "disallowed request" }],
+        }),
+      );
       expect(meta.stopReason).toBe("refusal");
     });
 
@@ -1027,15 +1014,14 @@ describe("OpenAICompatibleProvider", () => {
       );
       mockCreate.mockRejectedValueOnce(upstream);
 
-      const { events, response } = provider.chatStream({
+      const stream = provider.chatStream({
         model: "gpt-5-nano",
         system: "sys",
         messages: [{ role: "user", content: "disallowed request" }],
       });
 
-      const iter = events[Symbol.asyncIterator]();
+      const iter = stream[Symbol.asyncIterator]();
       await expect(iter.next()).rejects.toBeInstanceOf(RefusalError);
-      await expect(response).rejects.toBeInstanceOf(RefusalError);
     });
 
     it("RefusalError is non-retriable", () => {
@@ -1043,6 +1029,180 @@ describe("OpenAICompatibleProvider", () => {
       // the next candidate. The classification predicate stays binary; the
       // RefusalError instance check rides in front of the status-based rules.
       expect(isRetriableProviderError(new RefusalError("refused"))).toBe(false);
+    });
+  });
+
+  describe("abort signal", () => {
+    const params: ChatParams = {
+      model: "m",
+      system: "sys",
+      messages: [{ role: "user", content: "hi" }],
+    };
+
+    /** An SDK call that, like the SDK's own, rejects with `APIUserAbortError` once its signal fires. */
+    function sdkCallUntilAborted(_body: unknown, options: { signal: AbortSignal }): Promise<never> {
+      return new Promise((_resolve, reject) => {
+        const abort = (): void => reject(new APIUserAbortError());
+        if (options.signal.aborted) abort();
+        else options.signal.addEventListener("abort", abort, { once: true });
+      });
+    }
+
+    it("hands the signal to the SDK", async () => {
+      const provider = createProvider();
+      const signal = new AbortController().signal;
+      mockCreate.mockResolvedValueOnce({
+        choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+        model: "m",
+        usage: { prompt_tokens: 5, completion_tokens: 1 },
+      });
+      mockCreate.mockResolvedValueOnce(
+        mockStream([{ model: "m", choices: [{ delta: {}, finish_reason: "stop" }] }]),
+      );
+
+      await provider.chat(params, { signal });
+      await drainFrames(provider.chatStream(params, { signal }));
+
+      expect(mockCreate.mock.calls.map((call) => call[1])).toEqual([{ signal }, { signal }]);
+    });
+
+    it("rejects chat with the signal's reason, not the SDK's abort error", async () => {
+      const provider = createProvider();
+      const controller = new AbortController();
+      const reason = new Error("cancelled");
+      mockCreate.mockImplementationOnce(sdkCallUntilAborted);
+
+      const call = provider.chat(params, { signal: controller.signal });
+      controller.abort(reason);
+
+      await expect(call).rejects.toBe(reason);
+    });
+
+    it("throws the signal's reason, not the SDK's abort error, from a stream not yet open", async () => {
+      const provider = createProvider();
+      const controller = new AbortController();
+      const reason = new Error("cancelled");
+      mockCreate.mockImplementationOnce(sdkCallUntilAborted);
+
+      const drained = drainFrames(provider.chatStream(params, { signal: controller.signal }));
+      controller.abort(reason);
+
+      await expect(drained).rejects.toBe(reason);
+    });
+
+    it("yields nothing after the signal fires mid-stream", async () => {
+      // The SDK checks its signal before each line it yields, then ends quietly.
+      const provider = createProvider();
+      const controller = new AbortController();
+      const reason = new Error("cancelled");
+      mockCreate.mockImplementationOnce(async (_body: unknown, options: { signal: AbortSignal }) =>
+        (async function* () {
+          for (const text of ["Hel", "lo", ", world"]) {
+            if (options.signal.aborted) return;
+            yield { model: "m", choices: [{ delta: { content: text }, finish_reason: null }] };
+          }
+        })(),
+      );
+
+      const collected: ChatStreamFrame[] = [];
+      const drained = (async () => {
+        for await (const frame of provider.chatStream(params, { signal: controller.signal })) {
+          collected.push(frame);
+          controller.abort(reason);
+        }
+      })();
+
+      await expect(drained).rejects.toBe(reason);
+      expect(collected).toEqual([{ type: "text_delta", text: "Hel" }]);
+    });
+
+    it("throws the signal's reason, not a partial tool call, when the SDK ends an aborted stream", async () => {
+      const provider = createProvider();
+      const controller = new AbortController();
+      const reason = new Error("cancelled");
+      async function* sdkStream(): AsyncGenerator<unknown> {
+        yield {
+          model: "m",
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  { index: 0, id: "call_1", function: { name: "search", arguments: '{"q":' } },
+                ],
+              },
+              finish_reason: null,
+            },
+          ],
+          usage: null,
+        };
+        // The SDK's stream ends quietly once its signal fires.
+        controller.abort(reason);
+      }
+      mockCreate.mockResolvedValueOnce(sdkStream());
+
+      const collected: ChatStreamFrame[] = [];
+      const drained = (async () => {
+        for await (const frame of provider.chatStream(params, { signal: controller.signal })) {
+          collected.push(frame);
+        }
+      })();
+
+      await expect(drained).rejects.toBe(reason);
+      expect(collected).toEqual([]);
+    });
+  });
+
+  describe("abandoned stream", () => {
+    let harness: OtelHarness;
+
+    beforeAll(() => {
+      harness = setupOtelHarness();
+    });
+
+    beforeEach(async () => {
+      await harness.reset();
+    });
+
+    afterAll(async () => {
+      await harness.shutdown();
+    });
+
+    const params: ChatParams = {
+      model: "m",
+      system: "sys",
+      messages: [{ role: "user", content: "hi" }],
+    };
+
+    it("returns the SDK stream, which aborts the request, and fails the span", async () => {
+      const provider = createProvider();
+      const returned = vi.fn();
+      async function* sdkStream(): AsyncGenerator<unknown> {
+        try {
+          for (const text of ["Hel", "lo"]) {
+            yield { model: "m", choices: [{ delta: { content: text }, finish_reason: null }] };
+          }
+        } finally {
+          // Where the SDK's stream aborts its request when returned early.
+          returned();
+        }
+      }
+      mockCreate.mockResolvedValueOnce(sdkStream());
+
+      for await (const _ of provider.chatStream(params)) break;
+
+      expect(returned).toHaveBeenCalledOnce();
+      const span = expectDefined(harness.getSpans()[0], "chat span");
+      expect(harness.getSpans()).toHaveLength(1);
+      expect(span.status.code).toBe(SpanStatusCode.ERROR);
+    });
+
+    it("starts no request and no span for a stream never read", () => {
+      const provider = createProvider();
+
+      provider.chatStream(params);
+
+      expect(mockCreate).not.toHaveBeenCalled();
+      expect(harness.startedSpanCount()).toBe(0);
     });
   });
 
@@ -1117,16 +1277,15 @@ describe("OpenAICompatibleProvider", () => {
         ]),
       );
 
-      const { events, response } = provider.chatStream({
-        model: "anthropic/claude-sonnet-5",
-        system: "sys",
-        messages: [{ role: "user", content: "hi" }],
-      });
-      for await (const _ of events) {
-        // drain
-      }
+      const { meta } = await drainFrames(
+        provider.chatStream({
+          model: "anthropic/claude-sonnet-5",
+          system: "sys",
+          messages: [{ role: "user", content: "hi" }],
+        }),
+      );
 
-      expect((await response).usage).toEqual({
+      expect(meta.usage).toEqual({
         inputTokens: 7500,
         outputTokens: 12,
         cacheReadTokens: 7360,
@@ -1167,16 +1326,15 @@ describe("OpenAICompatibleProvider", () => {
         ]),
       );
 
-      const { events, response } = provider.chatStream({
-        model: "local-model",
-        system: "sys",
-        messages: [{ role: "user", content: "hi" }],
-      });
-      for await (const _ of events) {
-        // drain
-      }
+      const { meta } = await drainFrames(
+        provider.chatStream({
+          model: "local-model",
+          system: "sys",
+          messages: [{ role: "user", content: "hi" }],
+        }),
+      );
 
-      expect((await response).usage).toEqual({ inputTokens: 0, outputTokens: 3 });
+      expect(meta.usage).toEqual({ inputTokens: 0, outputTokens: 3 });
     });
   });
 
@@ -1229,9 +1387,9 @@ describe("OpenAICompatibleProvider", () => {
       };
     }
 
-    const RequestOptionsSchema = z
-      .object({ headers: z.record(z.string(), z.string()).optional() })
-      .optional();
+    const RequestOptionsSchema = z.object({
+      headers: z.record(z.string(), z.string()).optional(),
+    });
 
     interface Sent {
       body: Record<string, unknown>;
@@ -1304,7 +1462,7 @@ describe("OpenAICompatibleProvider", () => {
           // Two breakpoints at one TTL: a longer TTL after a shorter one is a 400.
           expect(breakpoints(body)).toEqual([marker, marker]);
           expect(hintFields(body)).toEqual(["session_id", "cache_control"]);
-          expect(options?.headers).toBeUndefined();
+          expect(options.headers).toBeUndefined();
         },
       );
 
@@ -1357,7 +1515,7 @@ describe("OpenAICompatibleProvider", () => {
         expect(breakpoints(body)).toEqual([]);
         expect(systemContent(body)).toBe("sys");
         expect(hintFields(body)).toEqual(["session_id"]);
-        expect(options?.headers).toBeUndefined();
+        expect(options.headers).toBeUndefined();
       });
 
       it("sends nothing to any other model without an intent", async () => {
@@ -1378,7 +1536,7 @@ describe("OpenAICompatibleProvider", () => {
         expect(body.prompt_cache_key).toBe("conv-1");
         expect(hintFields(body)).toEqual(["prompt_cache_key"]);
         expect(breakpoints(body)).toEqual([]);
-        expect(options?.headers).toBeUndefined();
+        expect(options.headers).toBeUndefined();
       });
 
       it("sends nothing without an intent", async () => {
@@ -1392,7 +1550,7 @@ describe("OpenAICompatibleProvider", () => {
       it("sends the intent's key as the x-grok-conv-id header, and nothing in the body", async () => {
         const { body, options } = await chatWith("xai", { model: "grok-4.3", cache: INTENT });
 
-        expect(options?.headers).toEqual({ "x-grok-conv-id": "conv-1" });
+        expect(options.headers).toEqual({ "x-grok-conv-id": "conv-1" });
         expect(hintFields(body)).toEqual([]);
         expect(breakpoints(body)).toEqual([]);
       });
@@ -1400,7 +1558,7 @@ describe("OpenAICompatibleProvider", () => {
       it("sends no header without an intent", async () => {
         const { options } = await chatWith("xai", { model: "grok-4.3" });
 
-        expect(options?.headers).toBeUndefined();
+        expect(options.headers).toBeUndefined();
       });
     });
 
@@ -1413,7 +1571,7 @@ describe("OpenAICompatibleProvider", () => {
       expect(hintFields(body)).toEqual([]);
       expect(breakpoints(body)).toEqual([]);
       expect(systemContent(body)).toBe("sys");
-      expect(options?.headers).toBeUndefined();
+      expect(options.headers).toBeUndefined();
     });
 
     it.each(["openrouter", "openai", "xai"] as const)(
@@ -1430,7 +1588,7 @@ describe("OpenAICompatibleProvider", () => {
         // intent: only the default system marker OpenRouter sends Claude.
         expect(hintFields(body)).toEqual([]);
         expect(breakpoints(body)).toEqual(dialect === "openrouter" ? [{ type: "ephemeral" }] : []);
-        expect(options?.headers).toBeUndefined();
+        expect(options.headers).toBeUndefined();
       },
     );
 
@@ -1451,15 +1609,14 @@ describe("OpenAICompatibleProvider", () => {
           ]),
         );
 
-        const { events } = provider.chatStream({
-          model,
-          system: "sys",
-          messages: TRANSCRIPT,
-          cache: INTENT,
-        });
-        for await (const _ of events) {
-          /* drain */
-        }
+        await drainFrames(
+          provider.chatStream({
+            model,
+            system: "sys",
+            messages: TRANSCRIPT,
+            cache: INTENT,
+          }),
+        );
 
         const { body, options } = sent();
         expect(body.stream).toBe(true);
@@ -1470,7 +1627,7 @@ describe("OpenAICompatibleProvider", () => {
             { type: "ephemeral", ttl: "1h" },
           ]);
         } else {
-          expect(options?.headers).toEqual({ "x-grok-conv-id": "conv-1" });
+          expect(options.headers).toEqual({ "x-grok-conv-id": "conv-1" });
         }
       },
     );
@@ -1514,10 +1671,7 @@ describe("OpenAICompatibleProvider", () => {
       mockCreate.mockResolvedValueOnce(
         mockStream([{ model, choices: [{ delta: {}, finish_reason: "stop" }] }]),
       );
-      const { events } = provider.chatStream(params);
-      for await (const _ of events) {
-        /* drain */
-      }
+      await drainFrames(provider.chatStream(params));
     }
     const call = expectDefined(mockCreate.mock.calls[0], "create call");
     return z.record(z.string(), z.unknown()).parse(call[0]);
