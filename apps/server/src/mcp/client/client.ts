@@ -49,7 +49,8 @@ export class SdkMcpConnection implements McpConnection {
     this.#serverName = serverName;
   }
 
-  async connect(): Promise<void> {
+  /** Aborting `signal` fails the `initialize` handshake. */
+  async connect(signal?: AbortSignal): Promise<void> {
     // Wire transport-close before connect — connect() can fail and close in
     // the same tick; we want the callback registered first. The handler is
     // the SINGLE place that flips `#closed` and notifies listeners — both
@@ -72,7 +73,7 @@ export class SdkMcpConnection implements McpConnection {
     this.#transport.onerror = (err) => {
       logger.warn({ err, mcpServer: this.#serverName }, "MCP transport error");
     };
-    await this.#client.connect(this.#transport);
+    await this.#client.connect(this.#transport, signal && { signal });
 
     this.#client.setNotificationHandler(ToolListChangedNotificationSchema, () => {
       for (const cb of this.#toolsChangedListeners) cb();

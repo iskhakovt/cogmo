@@ -41,7 +41,8 @@ src/mcp/
   client/
     transport.ts         # transport factory (stdio | http | sse)
     client.ts            # thin wrapper over @modelcontextprotocol/sdk Client
-    pool.ts              # process-scoped connection pool, idle eviction, reconnect
+    pool-state.ts        # per-server pool entry as a pure state machine
+    pool.ts              # process-scoped connection pool: drives the machine, carries out its effects
     runner.ts            # subprocess runner — host or sysbox
   registry.ts            # McpRegistry: facade consumed by handle-message
   adapter.ts             # McpToolAdapter: ToolSpec → MCP callTool
@@ -185,6 +186,7 @@ interface McpConnection {
   callTool(name: string, input: unknown, opts: { timeoutMs: number }): Promise<unknown>;
   listTools(): Promise<readonly McpToolDescriptor[]>;
   onToolsChanged(cb: () => void): () => void;
+  onClose(cb: () => void): () => void;
   close(): Promise<void>;
 }
 ```
@@ -218,9 +220,27 @@ Adding / disabling / editing a server invalidates the pool entry. Next call resp
 - Config change (command, env) → restart subprocess.
 - Toggle / approval / timeout change → no restart.
 
+### Connection pool `[confirmed]`
+
+One entry per server, driven by a pure `transition(entry, event)` in `pool-state.ts` that returns the next entry and its effects as data; `McpConnectionPool` feeds it and carries them out. Same shape as the skills worker machine ([skills.md](../skills.md) → Host-side worker lifecycle).
+
+| Entry | Meaning |
+|-|-|
+| none | Nothing open |
+| `connecting` | One connect in flight, under its own `AbortController`; concurrent `getConnection` calls wait on it |
+| `live` | A connection, watched for its transport closing and for idling out |
+| `closed` | The transport closed, or the last connect failed; the next call reconnects |
+| `unhealthy` | Two connects in a row failed; calls fail fast until `reset` (`/mcp approve`) |
+
+Events: `get`, `spawned`, `spawn_failed`, `transport_closed`, `evict`, `reset`, `idle`, `pool_closed`. A connect that fails looking up its server spends no attempt.
+
+- **Teardown.** `evict` (server removed or reconfigured) and `close` (shutdown) fail an in-flight connect's waiters, abort it, close any connection it still yields, and resolve once the server's connections are closed. `removeServer` deletes the row first, so no connect can start for the server after the eviction.
+- **Abort.** The runner hands the connect's signal to the SDK's `initialize` request. That signal is aborted only to abandon the connect: the SDK acts on it even after the request settles. A live connection's watch has its own controller, aborted when it leaves the entry, which unsubscribes from its close and disarms its idle timer.
+- **Stale events.** `spawned`, `spawn_failed`, `transport_closed` and `idle` count only for the entry's own connect or connection; a connection from any other connect is closed.
+
 ### Idle eviction
 
-Connections idle > **10 min** torn down. Re-spawn on next demand. Bounds container / process count.
+A live connection unused for `MCP_IDLE_EVICTION_MS` (default **10 min**) is closed; the next call respawns it. Bounds container / process count. Each live connection has one unref'd timer; when it fires on a connection used since, it re-arms for the rest of the period, so a call costs no timer work. Nothing runs while no connection is live.
 
 ## Trust & sandboxing
 

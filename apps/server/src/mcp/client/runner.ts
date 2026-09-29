@@ -12,7 +12,13 @@ import { createTransport } from "./transport.js";
  * a code-level trust allowlist.
  */
 export interface Runner {
-  spawn(server: McpServer, secrets: SecretsStore, runInTx: Transactor): Promise<McpConnection>;
+  /** Aborting `signal` abandons the connect: a spawn still under way rejects, and what it started is shut down. */
+  spawn(
+    server: McpServer,
+    secrets: SecretsStore,
+    runInTx: Transactor,
+    signal: AbortSignal,
+  ): Promise<McpConnection>;
 }
 
 const CLIENT_INFO = { name: "cogmo", version: "0.1.0" } as const;
@@ -28,12 +34,14 @@ export class HostRunner implements Runner {
     server: McpServer,
     secrets: SecretsStore,
     runInTx: Transactor,
+    signal: AbortSignal,
   ): Promise<McpConnection> {
     const transport = await createTransport(server.config, secrets, runInTx);
+    signal.throwIfAborted();
     const client = new Client(CLIENT_INFO);
     const connection = new SdkMcpConnection(client, transport, server.name);
     try {
-      await connection.connect();
+      await connection.connect(signal);
     } catch (err) {
       // If connect() failed, the transport may be half-open. Best effort cleanup.
       await connection.close().catch(() => {});

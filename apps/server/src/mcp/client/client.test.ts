@@ -164,6 +164,15 @@ describe("SdkMcpConnection", () => {
     expect(onErrorAtConnect).toBeTypeOf("function");
   });
 
+  it("hands its signal to the SDK's connect, which aborts the initialize request with it", async () => {
+    const client = fakeClient();
+    const transport = fakeTransport();
+    const signal = new AbortController().signal;
+    const conn = new SdkMcpConnection(client as unknown as Client, transport, SERVER_NAME);
+    await conn.connect(signal);
+    expect(client.connect).toHaveBeenCalledWith(transport, { signal });
+  });
+
   it("rejects callTool / listTools after close", async () => {
     const client = fakeClient();
     const transport = fakeTransport();

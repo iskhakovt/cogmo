@@ -75,8 +75,6 @@ export interface McpRegistryOptions {
   callTimeoutMs: number;
   /** Idle eviction threshold (ms) — live connections idle longer get closed. */
   idleEvictionMs: number;
-  /** How often the idle sweep runs (ms). Set to 0 to disable. */
-  evictionIntervalMs: number;
   /** Maximum MCP tools surfaced per `resolveTools` call. */
   toolBudget: number;
 }
@@ -99,7 +97,6 @@ export class McpRegistryImpl implements McpRegistry {
       runInTx: opts.runInTx,
       runner: opts.runner,
       idleEvictionMs: opts.idleEvictionMs,
-      evictionIntervalMs: opts.evictionIntervalMs,
     });
   }
 
@@ -161,9 +158,13 @@ export class McpRegistryImpl implements McpRegistry {
     return this.#runInTx((tx) => this.#store.addServer(tx, spec));
   }
 
+  /**
+   * The row goes first: a connect that starts after it finds no server, and
+   * the eviction then ends the one in flight or live.
+   */
   async removeServer(id: string): Promise<void> {
-    await this.#pool.evict(id);
     await this.#runInTx((tx) => this.#store.removeServer(tx, id));
+    await this.#pool.evict(id);
   }
 
   async listServers(): Promise<readonly McpServerStatus[]> {

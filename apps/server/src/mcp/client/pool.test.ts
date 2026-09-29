@@ -1,10 +1,12 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Transactor } from "../../db/index.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
+import { expectDefined } from "../../test/assertions.js";
 import type { McpServer } from "../config.js";
+import { McpPoolError } from "../errors.js";
 import type { McpStore } from "../store/index.js";
 import type { McpConnection } from "./client.js";
-import { McpConnectionPool, McpPoolError } from "./pool.js";
+import { McpConnectionPool } from "./pool.js";
 import type { Runner } from "./runner.js";
 
 const FAKE_TX = { __mockTx: true } as never;
@@ -27,6 +29,7 @@ function makeServer(id: string, name = "github"): McpServer {
 
 interface FakeConnection extends McpConnection {
   triggerClose(): void;
+  closeListenerCount(): number;
 }
 
 function fakeConnection(): FakeConnection {
@@ -54,7 +57,22 @@ function fakeConnection(): FakeConnection {
       for (const cb of closeListeners) cb();
       closeListeners.clear();
     },
+    closeListenerCount: () => closeListeners.size,
   };
+}
+
+/** Whether `promise` has settled yet, readable synchronously. */
+function settledFlag(promise: Promise<void>): { promise: Promise<void>; settled: boolean } {
+  const flag = { promise, settled: false };
+  void promise.finally(() => {
+    flag.settled = true;
+  });
+  return flag;
+}
+
+/** Let every pending promise callback run. */
+function flush(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
 }
 
 function makeStore(servers: McpServer[]): McpStore {
@@ -69,12 +87,21 @@ function makeStore(servers: McpServer[]): McpStore {
 
 const dummySecrets = {} as SecretsStore;
 
-// --- Tests ---
+function makePool(
+  runner: Runner,
+  store: McpStore = makeStore([makeServer("s1")]),
+  idleEvictionMs = 60_000,
+): McpConnectionPool {
+  return new McpConnectionPool({
+    store,
+    secrets: dummySecrets,
+    runInTx: fakeRunInTx,
+    runner,
+    idleEvictionMs,
+  });
+}
 
-let now = 1_000_000;
-beforeEach(() => {
-  now = 1_000_000;
-});
+// --- Tests ---
 
 afterEach(() => {
   vi.useRealTimers();
@@ -84,15 +111,7 @@ describe("McpConnectionPool.getConnection", () => {
   it("lazy-spawns on first call, reuses on second", async () => {
     const conn = fakeConnection();
     const runner: Runner = { spawn: vi.fn(async () => conn) };
-    const pool = new McpConnectionPool({
-      store: makeStore([makeServer("s1")]),
-      secrets: dummySecrets,
-      runInTx: fakeRunInTx,
-      runner,
-      idleEvictionMs: 60_000,
-      evictionIntervalMs: 0,
-      now: () => now,
-    });
+    const pool = makePool(runner);
 
     const a = await pool.getConnection("s1");
     const b = await pool.getConnection("s1");
@@ -109,15 +128,7 @@ describe("McpConnectionPool.getConnection", () => {
     const conn = fakeConnection();
     const runner: Runner = { spawn: vi.fn(() => spawnPromise) };
 
-    const pool = new McpConnectionPool({
-      store: makeStore([makeServer("s1")]),
-      secrets: dummySecrets,
-      runInTx: fakeRunInTx,
-      runner,
-      idleEvictionMs: 60_000,
-      evictionIntervalMs: 0,
-      now: () => now,
-    });
+    const pool = makePool(runner);
 
     const p1 = pool.getConnection("s1");
     const p2 = pool.getConnection("s1");
@@ -131,15 +142,7 @@ describe("McpConnectionPool.getConnection", () => {
 
   it("throws server_not_found for an unknown id", async () => {
     const runner: Runner = { spawn: vi.fn() };
-    const pool = new McpConnectionPool({
-      store: makeStore([]),
-      secrets: dummySecrets,
-      runInTx: fakeRunInTx,
-      runner,
-      idleEvictionMs: 60_000,
-      evictionIntervalMs: 0,
-      now: () => now,
-    });
+    const pool = makePool(runner, makeStore([]));
     await expect(pool.getConnection("missing")).rejects.toBeInstanceOf(McpPoolError);
     await expect(pool.getConnection("missing")).rejects.toMatchObject({ code: "server_not_found" });
   });
@@ -147,19 +150,11 @@ describe("McpConnectionPool.getConnection", () => {
   it("flips entry to 'closed' when transport closes mid-session", async () => {
     const conn = fakeConnection();
     const runner: Runner = { spawn: vi.fn(async () => conn) };
-    const pool = new McpConnectionPool({
-      store: makeStore([makeServer("s1")]),
-      secrets: dummySecrets,
-      runInTx: fakeRunInTx,
-      runner,
-      idleEvictionMs: 60_000,
-      evictionIntervalMs: 0,
-      now: () => now,
-    });
+    const pool = makePool(runner);
 
     await pool.getConnection("s1");
     conn.triggerClose();
-    expect(pool.__getEntryState("s1")).toEqual({ kind: "closed", reconnectAttempts: 0 });
+    expect(pool.__getEntryState("s1")).toEqual({ kind: "closed", failedAttempts: 0 });
     await pool.close();
   });
 
@@ -170,15 +165,7 @@ describe("McpConnectionPool.getConnection", () => {
       .fn<Runner["spawn"]>()
       .mockResolvedValueOnce(conn1)
       .mockResolvedValueOnce(conn2);
-    const pool = new McpConnectionPool({
-      store: makeStore([makeServer("s1")]),
-      secrets: dummySecrets,
-      runInTx: fakeRunInTx,
-      runner: { spawn },
-      idleEvictionMs: 60_000,
-      evictionIntervalMs: 0,
-      now: () => now,
-    });
+    const pool = makePool({ spawn });
 
     await pool.getConnection("s1");
     conn1.triggerClose();
@@ -195,15 +182,7 @@ describe("McpConnectionPool.getConnection", () => {
       .mockResolvedValueOnce(conn1)
       .mockRejectedValueOnce(new Error("boom-1"))
       .mockRejectedValueOnce(new Error("boom-2"));
-    const pool = new McpConnectionPool({
-      store: makeStore([makeServer("s1")]),
-      secrets: dummySecrets,
-      runInTx: fakeRunInTx,
-      runner: { spawn },
-      idleEvictionMs: 60_000,
-      evictionIntervalMs: 0,
-      now: () => now,
-    });
+    const pool = makePool({ spawn });
 
     await pool.getConnection("s1");
     conn1.triggerClose();
@@ -223,15 +202,7 @@ describe("McpConnectionPool.getConnection", () => {
       .mockRejectedValueOnce(new Error("boom-1"))
       .mockRejectedValueOnce(new Error("boom-2"))
       .mockResolvedValueOnce(fakeConnection());
-    const pool = new McpConnectionPool({
-      store: makeStore([makeServer("s1")]),
-      secrets: dummySecrets,
-      runInTx: fakeRunInTx,
-      runner: { spawn },
-      idleEvictionMs: 60_000,
-      evictionIntervalMs: 0,
-      now: () => now,
-    });
+    const pool = makePool({ spawn });
 
     await expect(pool.getConnection("s1")).rejects.toThrow();
     await expect(pool.getConnection("s1")).rejects.toThrow();
@@ -251,61 +222,17 @@ describe("McpConnectionPool.getConnection", () => {
       }),
       recordLastError: vi.fn(async () => {}),
     } as unknown as McpStore;
-    const pool = new McpConnectionPool({
-      store,
-      secrets: dummySecrets,
-      runInTx: fakeRunInTx,
-      runner: { spawn: vi.fn(async () => conn) },
-      idleEvictionMs: 60_000,
-      evictionIntervalMs: 0,
-      now: () => now,
-    });
+    const pool = makePool({ spawn: vi.fn(async () => conn) }, store);
     const c = await pool.getConnection("s1");
     expect(c).toBe(conn);
     expect(pool.__getEntryState("s1")?.kind).toBe("live");
     await pool.close();
   });
 
-  it("closes the spawned connection if the pool was closed during spawn", async () => {
-    let resolveSpawn!: (c: McpConnection) => void;
-    const spawnPromise = new Promise<McpConnection>((r) => {
-      resolveSpawn = r;
-    });
-    const conn = fakeConnection();
-    const closeSpy = vi.spyOn(conn, "close");
-    const pool = new McpConnectionPool({
-      store: makeStore([makeServer("s1")]),
-      secrets: dummySecrets,
-      runInTx: fakeRunInTx,
-      runner: { spawn: vi.fn(() => spawnPromise) },
-      idleEvictionMs: 60_000,
-      evictionIntervalMs: 0,
-      now: () => now,
-    });
-
-    const pending = pool.getConnection("s1");
-    // Close the pool while the spawn is in flight.
-    const closing = pool.close();
-    resolveSpawn(conn);
-    await closing;
-    await expect(pending).rejects.toMatchObject({ code: "pool_closed" });
-    // The just-spawned connection was torn down rather than orphaned.
-    expect(closeSpy).toHaveBeenCalled();
-    expect(pool.__getEntryState("s1")).toBeUndefined();
-  });
-
   it("reset is a no-op on a live entry — does not orphan the connection", async () => {
     const conn = fakeConnection();
     const closeSpy = vi.spyOn(conn, "close");
-    const pool = new McpConnectionPool({
-      store: makeStore([makeServer("s1")]),
-      secrets: dummySecrets,
-      runInTx: fakeRunInTx,
-      runner: { spawn: vi.fn(async () => conn) },
-      idleEvictionMs: 60_000,
-      evictionIntervalMs: 0,
-      now: () => now,
-    });
+    const pool = makePool({ spawn: vi.fn(async () => conn) });
     await pool.getConnection("s1");
     pool.reset("s1");
     // Live entry preserved; subprocess not orphaned.
@@ -319,15 +246,7 @@ describe("McpConnectionPool.getConnection", () => {
       .fn<Runner["spawn"]>()
       .mockRejectedValueOnce(new Error("boom-1"))
       .mockRejectedValueOnce(new Error("boom-2"));
-    const pool = new McpConnectionPool({
-      store: makeStore([makeServer("s1")]),
-      secrets: dummySecrets,
-      runInTx: fakeRunInTx,
-      runner: { spawn },
-      idleEvictionMs: 60_000,
-      evictionIntervalMs: 0,
-      now: () => now,
-    });
+    const pool = makePool({ spawn });
     await expect(pool.getConnection("s1")).rejects.toThrow();
     await expect(pool.getConnection("s1")).rejects.toThrow();
     expect(pool.__getEntryState("s1")?.kind).toBe("unhealthy");
@@ -339,15 +258,7 @@ describe("McpConnectionPool.getConnection", () => {
   it("records last_connected_at on success and last_error on failure", async () => {
     const conn = fakeConnection();
     const store = makeStore([makeServer("s1")]);
-    const pool = new McpConnectionPool({
-      store,
-      secrets: dummySecrets,
-      runInTx: fakeRunInTx,
-      runner: { spawn: vi.fn(async () => conn) },
-      idleEvictionMs: 60_000,
-      evictionIntervalMs: 0,
-      now: () => now,
-    });
+    const pool = makePool({ spawn: vi.fn(async () => conn) }, store);
     await pool.getConnection("s1");
     expect(store.recordLastConnected).toHaveBeenCalledWith(
       expect.anything(),
@@ -356,19 +267,14 @@ describe("McpConnectionPool.getConnection", () => {
     );
     await pool.close();
 
-    const failingPool = new McpConnectionPool({
-      store,
-      secrets: dummySecrets,
-      runInTx: fakeRunInTx,
-      runner: {
+    const failingPool = makePool(
+      {
         spawn: vi.fn(async () => {
           throw new Error("nope");
         }),
       },
-      idleEvictionMs: 60_000,
-      evictionIntervalMs: 0,
-      now: () => now,
-    });
+      store,
+    );
     await expect(failingPool.getConnection("s1")).rejects.toThrow();
     expect(store.recordLastError).toHaveBeenCalledWith(expect.anything(), "s1", "nope");
     await failingPool.close();
@@ -379,15 +285,7 @@ describe("McpConnectionPool.evict / close", () => {
   it("evict closes a live connection and forgets the entry", async () => {
     const conn = fakeConnection();
     const closeSpy = vi.spyOn(conn, "close");
-    const pool = new McpConnectionPool({
-      store: makeStore([makeServer("s1")]),
-      secrets: dummySecrets,
-      runInTx: fakeRunInTx,
-      runner: { spawn: vi.fn(async () => conn) },
-      idleEvictionMs: 60_000,
-      evictionIntervalMs: 0,
-      now: () => now,
-    });
+    const pool = makePool({ spawn: vi.fn(async () => conn) });
     await pool.getConnection("s1");
     await pool.evict("s1");
     expect(closeSpy).toHaveBeenCalled();
@@ -395,72 +293,144 @@ describe("McpConnectionPool.evict / close", () => {
     await pool.close();
   });
 
+  it("evict during a spawn fails the waiting call and closes the connection when it arrives", async () => {
+    const spawned = Promise.withResolvers<McpConnection>();
+    const spawn = vi.fn<Runner["spawn"]>(() => spawned.promise);
+    const conn = fakeConnection();
+    const closeSpy = vi.spyOn(conn, "close");
+    const pool = makePool({ spawn });
+    const pending = pool.getConnection("s1");
+    const outcome = pending.then(
+      () => "connected",
+      (e: unknown) => e,
+    );
+    await vi.waitFor(() => expect(spawn).toHaveBeenCalledOnce());
+
+    const evicted = pool.evict("s1");
+    spawned.resolve(conn);
+    await evicted;
+
+    expect(closeSpy).toHaveBeenCalledOnce();
+    expect(pool.__getEntryState("s1")).toBeUndefined();
+    expect(await outcome).toMatchObject({ code: "evicted" });
+  });
+
+  it("evict aborts an in-flight spawn and waits for the connection it still yields", async () => {
+    const spawned = Promise.withResolvers<McpConnection>();
+    const spawn = vi.fn<Runner["spawn"]>(() => spawned.promise);
+    const conn = fakeConnection();
+    const closeSpy = vi.spyOn(conn, "close");
+    const pool = makePool({ spawn });
+    const pending = pool.getConnection("s1");
+    await vi.waitFor(() => expect(spawn).toHaveBeenCalledOnce());
+
+    const evicted = settledFlag(pool.evict("s1"));
+    await flush();
+    expect(evicted.settled).toBe(false);
+    expect(expectDefined(spawn.mock.calls[0], "spawn call")[3].aborted).toBe(true);
+    await expect(pending).rejects.toMatchObject({ code: "evicted" });
+
+    spawned.resolve(conn);
+    await evicted.promise;
+    expect(closeSpy).toHaveBeenCalledOnce();
+  });
+
+  it("close waits for an in-flight connect and closes the connection it yields", async () => {
+    const spawned = Promise.withResolvers<McpConnection>();
+    const spawn = vi.fn<Runner["spawn"]>(() => spawned.promise);
+    const conn = fakeConnection();
+    const closeSpy = vi.spyOn(conn, "close");
+    const pool = makePool({ spawn });
+    const pending = pool.getConnection("s1");
+    await vi.waitFor(() => expect(spawn).toHaveBeenCalledOnce());
+
+    const closing = settledFlag(pool.close());
+    await flush();
+    expect(closing.settled).toBe(false);
+    await expect(pending).rejects.toMatchObject({ code: "pool_closed" });
+
+    spawned.resolve(conn);
+    await closing.promise;
+    expect(closeSpy).toHaveBeenCalledOnce();
+    expect(pool.__getEntryState("s1")).toBeUndefined();
+  });
+
+  it("stops listening for a connection's close once it leaves the pool, even when closing it fails", async () => {
+    const conn = fakeConnection();
+    vi.spyOn(conn, "close").mockRejectedValue(new Error("close failed"));
+    const pool = makePool({ spawn: vi.fn(async () => conn) });
+    await pool.getConnection("s1");
+    expect(conn.closeListenerCount()).toBe(1);
+
+    await pool.evict("s1");
+    expect(conn.closeListenerCount()).toBe(0);
+    await pool.close();
+  });
+
   it("close throws on subsequent getConnection", async () => {
-    const pool = new McpConnectionPool({
-      store: makeStore([makeServer("s1")]),
-      secrets: dummySecrets,
-      runInTx: fakeRunInTx,
-      runner: { spawn: vi.fn(async () => fakeConnection()) },
-      idleEvictionMs: 60_000,
-      evictionIntervalMs: 0,
-      now: () => now,
-    });
+    const pool = makePool({ spawn: vi.fn(async () => fakeConnection()) });
     await pool.close();
     await expect(pool.getConnection("s1")).rejects.toMatchObject({ code: "pool_closed" });
   });
 });
 
 describe("McpConnectionPool idle eviction", () => {
-  it("evicts a live connection whose lastUsedAt is older than the threshold", async () => {
+  const IDLE_MS = 1_000;
+
+  it("closes a live connection once it has gone the idle period unused", async () => {
     vi.useFakeTimers();
     const conn = fakeConnection();
     const closeSpy = vi.spyOn(conn, "close");
-    const pool = new McpConnectionPool({
-      store: makeStore([makeServer("s1")]),
-      secrets: dummySecrets,
-      runInTx: fakeRunInTx,
-      runner: { spawn: vi.fn(async () => conn) },
-      idleEvictionMs: 1_000,
-      evictionIntervalMs: 100,
-      now: () => now,
-    });
-
+    const pool = makePool({ spawn: vi.fn(async () => conn) }, undefined, IDLE_MS);
     await pool.getConnection("s1");
+
+    await vi.advanceTimersByTimeAsync(IDLE_MS - 1);
     expect(pool.__getEntryState("s1")?.kind).toBe("live");
-
-    // Advance the injected clock past the eviction threshold.
-    now += 2_000;
-    vi.advanceTimersByTime(150);
-    // close() runs async via .catch fallthrough; flush microtasks
-    await Promise.resolve();
-    expect(closeSpy).toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(closeSpy).toHaveBeenCalledOnce();
     expect(pool.__getEntryState("s1")).toBeUndefined();
-
-    await pool.close();
+    expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("leaves a recently-used connection alone", async () => {
+  it("counts the idle period from the last use", async () => {
     vi.useFakeTimers();
     const conn = fakeConnection();
     const closeSpy = vi.spyOn(conn, "close");
-    const pool = new McpConnectionPool({
-      store: makeStore([makeServer("s1")]),
-      secrets: dummySecrets,
-      runInTx: fakeRunInTx,
-      runner: { spawn: vi.fn(async () => conn) },
-      idleEvictionMs: 1_000,
-      evictionIntervalMs: 100,
-      now: () => now,
-    });
-
+    const pool = makePool({ spawn: vi.fn(async () => conn) }, undefined, IDLE_MS);
     await pool.getConnection("s1");
-    now += 500;
-    await pool.getConnection("s1"); // refreshes lastUsedAt
-    now += 700; // total since first call: 1200ms; since last touch: 700ms
-    vi.advanceTimersByTime(150);
-    await Promise.resolve();
-    expect(closeSpy).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(600);
+    await pool.getConnection("s1");
 
+    // The first timer fires 400ms after the last use and re-arms for the rest.
+    await vi.advanceTimersByTimeAsync(IDLE_MS - 1);
+    expect(closeSpy).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(closeSpy).toHaveBeenCalledOnce();
+    expect(pool.__getEntryState("s1")).toBeUndefined();
+  });
+
+  it("disarms the idle timer when the connection leaves the pool", async () => {
+    vi.useFakeTimers();
+    const closing = fakeConnection();
+    const dropping = fakeConnection();
+    const pool = makePool(
+      {
+        spawn: vi
+          .fn<Runner["spawn"]>()
+          .mockResolvedValueOnce(closing)
+          .mockResolvedValueOnce(dropping),
+      },
+      makeStore([makeServer("s1"), makeServer("s2")]),
+      IDLE_MS,
+    );
+    await pool.getConnection("s1");
+    await pool.getConnection("s2");
+    expect(vi.getTimerCount()).toBe(2);
+
+    await pool.evict("s1");
+    expect(vi.getTimerCount()).toBe(1);
+    dropping.triggerClose();
+    expect(vi.getTimerCount()).toBe(0);
     await pool.close();
   });
 });

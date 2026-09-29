@@ -1,51 +1,50 @@
-import type { Transactor } from "../../db/index.js";
+import { err, ok, type Result } from "neverthrow";
+import { match } from "ts-pattern";
+import type { Transaction, Transactor } from "../../db/index.js";
 import { logger } from "../../logger.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
+import { describeError } from "../../util/describe-error.js";
+import type { McpServer } from "../config.js";
+import { McpPoolError } from "../errors.js";
 import type { McpStore } from "../store/index.js";
 import type { McpConnection } from "./client.js";
+import { type EntryState, type PoolEffect, type PoolEvent, transition } from "./pool-state.js";
 import type { Runner } from "./runner.js";
 
-export type McpPoolErrorCode = "server_not_found" | "server_unhealthy" | "pool_closed";
+const log = logger.child({ component: "mcp.pool" });
 
-export class McpPoolError extends Error {
-  readonly code: McpPoolErrorCode;
-  constructor(code: McpPoolErrorCode, message?: string) {
-    super(message ?? code);
-    this.code = code;
-    this.name = "McpPoolError";
-  }
-}
-
-type EntryState =
-  | { kind: "live"; connection: McpConnection; lastUsedAt: number }
-  | { kind: "closed"; reconnectAttempts: number }
-  | { kind: "unhealthy"; lastError: string };
+/** Node's timer ceiling; a longer delay would fire at once. An idle timer re-arms past it. */
+const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
 
 export interface McpConnectionPoolOptions {
   store: McpStore;
   secrets: SecretsStore;
   runInTx: Transactor;
   runner: Runner;
-  /** ms; live connections idle longer than this are evicted on the next sweep. */
+  /** ms; a live connection unused this long is closed. */
   idleEvictionMs: number;
-  /** ms; how often the idle sweep runs. Set to 0 to disable. */
-  evictionIntervalMs: number;
-  /** Clock injection — tests pass a fake now. */
-  now?: () => number;
+}
+
+/** Why a connect produced no connection, and whether it spent an attempt. */
+interface ConnectFailure {
+  error: Error;
+  spent: boolean;
 }
 
 /**
- * Process-singleton connection pool for MCP servers.
+ * Process-singleton connection pool for MCP servers. Each server's entry is
+ * the machine in `pool-state.ts`; the pool feeds it events and carries out
+ * the effects it returns.
  *
- * - **Lazy connect.** A subprocess is spawned only on the first `getConnection`.
- * - **Reconnect-once.** When a transport closes mid-session, the next
- *   `getConnection` attempts a single reconnect. A second consecutive failure
- *   parks the entry in `unhealthy`; subsequent calls fail fast until the
- *   operator runs `reset(serverId)`.
- * - **Per-server connect mutex.** Concurrent `getConnection` calls for the
- *   same server share the in-flight spawn; only one subprocess starts.
- * - **Idle eviction.** A periodic sweep closes connections whose
- *   `lastUsedAt` is older than `idleEvictionMs`.
+ * - **Lazy connect.** A server is spawned on the first `getConnection`, and
+ *   concurrent calls share the one connect.
+ * - **Reconnect once.** After the transport closes, the next call reconnects;
+ *   a second failed connect in a row leaves the server unhealthy, failing
+ *   fast until `reset`.
+ * - **Idle eviction.** Each live connection has a timer, closing it once it
+ *   has gone `idleEvictionMs` unused.
+ * - **Teardown.** `evict` and `close` abort an in-flight connect, close what
+ *   it still yields, and resolve once the connections are closed.
  */
 export class McpConnectionPool {
   #store: McpStore;
@@ -53,10 +52,9 @@ export class McpConnectionPool {
   #runInTx: Transactor;
   #runner: Runner;
   #idleEvictionMs: number;
-  #now: () => number;
   #entries = new Map<string, EntryState>();
-  #connecting = new Map<string, Promise<McpConnection>>();
-  #evictionTimer: ReturnType<typeof setInterval> | null = null;
+  /** Effects still running per server: connects, closes and store writes. */
+  #work = new Map<string, Set<Promise<void>>>();
   #closed = false;
 
   constructor(opts: McpConnectionPoolOptions) {
@@ -65,165 +63,40 @@ export class McpConnectionPool {
     this.#runInTx = opts.runInTx;
     this.#runner = opts.runner;
     this.#idleEvictionMs = opts.idleEvictionMs;
-    this.#now = opts.now ?? Date.now;
-    if (opts.evictionIntervalMs > 0) {
-      this.#evictionTimer = setInterval(() => this.#sweepIdle(), opts.evictionIntervalMs);
-      // Don't keep the process alive just for this sweep timer.
-      this.#evictionTimer.unref?.();
-    }
   }
 
   async getConnection(serverId: string): Promise<McpConnection> {
     if (this.#closed) throw new McpPoolError("pool_closed");
-
-    const state = this.#entries.get(serverId);
-    if (state?.kind === "live") {
-      state.lastUsedAt = this.#now();
-      return state.connection;
-    }
-    if (state?.kind === "unhealthy") {
-      throw new McpPoolError("server_unhealthy", state.lastError);
-    }
-
-    let pending = this.#connecting.get(serverId);
-    if (!pending) {
-      pending = this.#doConnect(serverId, state);
-      this.#connecting.set(serverId, pending);
-      // Eviction from the in-flight map happens regardless of success.
-      // The `.catch(() => {})` is on the chained promise so the cleanup
-      // chain doesn't surface an unhandled rejection — the caller awaits
-      // `pending` directly and handles the original rejection there.
-      pending
-        .finally(() => {
-          if (this.#connecting.get(serverId) === pending) {
-            this.#connecting.delete(serverId);
-          }
-        })
-        .catch(() => {});
-    }
-    return pending;
-  }
-
-  async #doConnect(serverId: string, prev: EntryState | undefined): Promise<McpConnection> {
-    const server = await this.#runInTx((tx) => this.#store.getServerById(tx, serverId));
-    if (!server) throw new McpPoolError("server_not_found");
-
-    try {
-      const connection = await this.#runner.spawn(server, this.#secrets, this.#runInTx);
-
-      // The pool may have been closed *during* this spawn. If so, tear down
-      // the just-spawned connection rather than stuffing it into the now-empty
-      // entry map (where nothing would ever close it).
-      if (this.#closed) {
-        await connection.close().catch(() => {});
-        throw new McpPoolError("pool_closed");
-      }
-
-      // Wire transport-close to flip our state — but only if THIS connection is
-      // still the one the entry references (don't downgrade a fresh reconnect).
-      connection.onClose(() => {
-        const cur = this.#entries.get(serverId);
-        if (cur?.kind === "live" && cur.connection === connection) {
-          this.#entries.set(serverId, { kind: "closed", reconnectAttempts: 0 });
-        }
-      });
-      this.#entries.set(serverId, { kind: "live", connection, lastUsedAt: this.#now() });
-      // Persistence failure here must not abandon the connection: it's already
-      // live in the map, will be returned to the caller, and is recoverable.
-      // Log and move on instead of rejecting (which would leak the entry).
-      try {
-        await this.#runInTx((tx) => this.#store.recordLastConnected(tx, serverId, new Date()));
-      } catch (err) {
-        logger.warn(
-          { err, serverId },
-          "MCP pool: recordLastConnected failed; connection still live",
-        );
-      }
-      return connection;
-    } catch (err) {
-      // Pool was closed during spawn — propagate the failure without
-      // repopulating the entry map (the close already cleared it).
-      if (this.#closed) throw err;
-      const message = err instanceof Error ? err.message : String(err);
-      // `recordLastError` is best-effort observability — don't let a DB
-      // blip mask the original spawn error or skip the reconnect-state
-      // bookkeeping below. Log and continue.
-      try {
-        await this.#runInTx((tx) => this.#store.recordLastError(tx, serverId, message));
-      } catch (recordErr) {
-        logger.warn(
-          { err: recordErr, serverId },
-          "failed to record mcp connection error — continuing with reconnect bookkeeping",
-        );
-      }
-      // Reconnect counter invariant: only the failed-spawn path increments
-      // `reconnectAttempts`. A successful spawn writes `live` (no counter),
-      // and the transport-close handler writes `closed` with attempts=0 —
-      // so a healthy reconnect after a transport drop sees prev.kind ===
-      // "closed" with attempts=0 and starts at 1, while a second-attempt
-      // failure sees attempts=1 and goes unhealthy. Live → closed → live
-      // implicitly resets the counter because the success-path overwrites
-      // the entry without reading the prior value.
-      const attempts = prev?.kind === "closed" ? prev.reconnectAttempts + 1 : 1;
-      if (attempts >= 2) {
-        this.#entries.set(serverId, { kind: "unhealthy", lastError: message });
-      } else {
-        this.#entries.set(serverId, { kind: "closed", reconnectAttempts: attempts });
-      }
-      throw err;
-    }
-  }
-
-  /** Close any live connection and forget the entry. Used on remove / config-change. */
-  async evict(serverId: string): Promise<void> {
-    const state = this.#entries.get(serverId);
-    this.#entries.delete(serverId);
-    if (state?.kind === "live") {
-      try {
-        await state.connection.close();
-      } catch (err) {
-        logger.warn({ err, serverId }, "MCP pool: close on evict failed");
-      }
-    }
+    const outcome = Promise.withResolvers<Result<McpConnection, Error>>();
+    this.#feed(serverId, { type: "get", waiter: outcome.resolve, at: Date.now() });
+    const result = await outcome.promise;
+    if (result.isErr()) throw result.error;
+    return result.value;
   }
 
   /**
-   * Clear an `unhealthy` entry so the next `getConnection` retries from
-   * scratch. Live entries are deliberately left alone — dropping the map
-   * reference without `close()`-ing would orphan the running subprocess.
-   * Closed entries are also left alone; the next `getConnection` already
-   * retries them via the reconnect-once policy. Use `evict(id)` to
-   * forcefully tear down a live connection.
+   * Forget a removed or reconfigured server: close its live connection, or
+   * abort its connect, whose waiters fail with `evicted` and whose connection
+   * is closed if it still arrives. Resolves once they are closed.
    */
+  async evict(serverId: string): Promise<void> {
+    const running = [...(this.#work.get(serverId) ?? [])];
+    await Promise.all([...this.#feed(serverId, { type: "evict" }), ...running]);
+  }
+
+  /** Let an unhealthy server's next `getConnection` connect afresh. Any other entry is untouched. */
   reset(serverId: string): void {
-    const state = this.#entries.get(serverId);
-    if (state?.kind === "unhealthy") {
-      this.#entries.delete(serverId);
-    }
+    this.#feed(serverId, { type: "reset" });
   }
 
+  /** Close every connection, including those in-flight connects still yield, and wait for it. */
   async close(): Promise<void> {
-    if (this.#closed) return;
     this.#closed = true;
-    if (this.#evictionTimer) {
-      clearInterval(this.#evictionTimer);
-      this.#evictionTimer = null;
+    for (const serverId of [...this.#entries.keys()]) {
+      this.#feed(serverId, { type: "pool_closed" });
     }
-    const live = [...this.#entries.values()].filter((s) => s.kind === "live");
-    await Promise.allSettled(live.map((s) => s.connection.close()));
-    this.#entries.clear();
-  }
-
-  #sweepIdle(): void {
-    if (this.#closed) return;
-    const cutoff = this.#now() - this.#idleEvictionMs;
-    for (const [id, state] of this.#entries) {
-      if (state.kind === "live" && state.lastUsedAt < cutoff) {
-        this.#entries.delete(id);
-        state.connection.close().catch((err) => {
-          logger.warn({ err, serverId: id }, "MCP pool: close on idle eviction failed");
-        });
-      }
+    while (this.#work.size > 0) {
+      await Promise.all([...this.#work.values()].flatMap((running) => [...running]));
     }
   }
 
@@ -231,4 +104,159 @@ export class McpConnectionPool {
   __getEntryState(serverId: string): EntryState | undefined {
     return this.#entries.get(serverId);
   }
+
+  /** Move the server's entry on `event` and carry out the effects; resolves with the ones still running. */
+  #feed(serverId: string, event: PoolEvent): ReadonlyArray<Promise<void>> {
+    const next = transition(this.#entries.get(serverId), event);
+    if (next.entry === undefined) this.#entries.delete(serverId);
+    else this.#entries.set(serverId, next.entry);
+    return next.effects.flatMap((effect) => this.#execute(serverId, effect));
+  }
+
+  #execute(serverId: string, effect: PoolEffect): ReadonlyArray<Promise<void>> {
+    return match(effect)
+      .returnType<ReadonlyArray<Promise<void>>>()
+      .with({ type: "connect" }, ({ signal }) => [
+        this.#track(serverId, this.#connect(serverId, signal)),
+      ])
+      .with({ type: "abort" }, ({ controller }) => {
+        controller.abort();
+        return [];
+      })
+      .with({ type: "settle" }, ({ waiters, result }) => {
+        for (const waiter of waiters) waiter(result);
+        return [];
+      })
+      .with({ type: "close" }, ({ connection }) => [
+        this.#track(serverId, this.#closeConnection(serverId, connection)),
+      ])
+      .with({ type: "watch" }, ({ connection, signal }) => {
+        this.#watch(serverId, connection, signal);
+        return [];
+      })
+      .with({ type: "arm_idle" }, ({ connection, signal, delayMs }) => {
+        this.#armIdle(serverId, connection, signal, delayMs);
+        return [];
+      })
+      .with({ type: "record_connected" }, () => [
+        this.#track(
+          serverId,
+          this.#record(serverId, "recordLastConnected", (tx) =>
+            this.#store.recordLastConnected(tx, serverId, new Date()),
+          ),
+        ),
+      ])
+      .with({ type: "record_error" }, ({ message }) => [
+        this.#track(
+          serverId,
+          this.#record(serverId, "recordLastError", (tx) =>
+            this.#store.recordLastError(tx, serverId, message),
+          ),
+        ),
+      ])
+      .with({ type: "log" }, ({ level, message, fields }) => {
+        log[level]({ ...fields, serverId }, message);
+        return [];
+      })
+      .exhaustive();
+  }
+
+  /** Resolves once its outcome is fed and the effects that set off are done. */
+  async #connect(serverId: string, signal: AbortSignal): Promise<void> {
+    const spawned = await this.#spawn(serverId, signal);
+    const event = spawned.match<PoolEvent>(
+      (connection) => ({ type: "spawned", signal, connection, at: Date.now() }),
+      ({ error, spent }) => ({ type: "spawn_failed", signal, error, spent }),
+    );
+    await Promise.all(this.#feed(serverId, event));
+  }
+
+  async #spawn(
+    serverId: string,
+    signal: AbortSignal,
+  ): Promise<Result<McpConnection, ConnectFailure>> {
+    const found: Result<McpServer, Error> = await this.#runInTx((tx) =>
+      this.#store.getServerById(tx, serverId),
+    ).then(
+      (server) => (server ? ok(server) : err(new McpPoolError("server_not_found"))),
+      (e: unknown) => err(asError(e)),
+    );
+    if (found.isErr()) return err({ error: found.error, spent: false });
+    try {
+      signal.throwIfAborted();
+      return ok(await this.#runner.spawn(found.value, this.#secrets, this.#runInTx, signal));
+    } catch (e) {
+      return err({ error: asError(e), spent: true });
+    }
+  }
+
+  /** Until `signal` aborts: feed the transport closing, and arm the idle timer. */
+  #watch(serverId: string, connection: McpConnection, signal: AbortSignal): void {
+    const unsubscribe = connection.onClose(() => {
+      this.#feed(serverId, { type: "transport_closed", connection });
+    });
+    if (signal.aborted) unsubscribe();
+    else signal.addEventListener("abort", unsubscribe, { once: true });
+    this.#armIdle(serverId, connection, signal, this.#idleEvictionMs);
+  }
+
+  #armIdle(
+    serverId: string,
+    connection: McpConnection,
+    signal: AbortSignal,
+    delayMs: number,
+  ): void {
+    if (signal.aborted) return;
+    const timer = setTimeout(
+      () => {
+        signal.removeEventListener("abort", disarm);
+        this.#feed(serverId, {
+          type: "idle",
+          connection,
+          cutoff: Date.now() - this.#idleEvictionMs,
+        });
+      },
+      Math.min(delayMs, MAX_TIMER_DELAY_MS),
+    );
+    timer.unref();
+    const disarm = () => clearTimeout(timer);
+    signal.addEventListener("abort", disarm, { once: true });
+  }
+
+  async #closeConnection(serverId: string, connection: McpConnection): Promise<void> {
+    try {
+      await connection.close();
+    } catch (e) {
+      log.warn({ err: e, serverId }, "closing an MCP connection failed");
+    }
+  }
+
+  /** Best-effort bookkeeping: a failed write is logged and changes nothing. */
+  async #record(
+    serverId: string,
+    what: string,
+    write: (tx: Transaction) => Promise<unknown>,
+  ): Promise<void> {
+    try {
+      await this.#runInTx(write);
+    } catch (e) {
+      log.warn({ err: e, serverId }, `${what} failed`);
+    }
+  }
+
+  /** Effects catch their own failures, so a tracked one never rejects. */
+  #track(serverId: string, work: Promise<void>): Promise<void> {
+    const running = this.#work.get(serverId) ?? new Set();
+    this.#work.set(serverId, running);
+    running.add(work);
+    void work.finally(() => {
+      running.delete(work);
+      if (running.size === 0) this.#work.delete(serverId);
+    });
+    return work;
+  }
+}
+
+function asError(e: unknown): Error {
+  return e instanceof Error ? e : new Error(describeError(e));
 }

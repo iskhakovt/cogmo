@@ -323,14 +323,12 @@ export const env = createEnv({
     MCP_TOOL_BUDGET: z.coerce.number().int().positive().default(25),
     /** Per-call timeout for MCP tool dispatch (ms). */
     MCP_CALL_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
-    /** MCP connection pool: idle threshold after which a live connection is closed. */
+    /** MCP connection pool: a live connection unused this long is closed. */
     MCP_IDLE_EVICTION_MS: z.coerce
       .number()
       .int()
       .positive()
       .default(10 * 60_000),
-    /** MCP connection pool: how often the idle sweep runs. Set 0 to disable. */
-    MCP_EVICTION_INTERVAL_MS: z.coerce.number().int().nonnegative().default(60_000),
   },
   runtimeEnv: resolved,
   emptyStringAsUndefined: true,
