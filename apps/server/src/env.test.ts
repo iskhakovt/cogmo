@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ServiceUrlSchema } from "./env.js";
+import { ModelCatalogUrlSchema, ServiceUrlSchema } from "./env.js";
 
 describe("ServiceUrlSchema", () => {
   it.each([
@@ -25,5 +25,22 @@ describe("ServiceUrlSchema", () => {
 
   it("still rejects a value that isn't a URL", () => {
     expect(ServiceUrlSchema.safeParse("not a url").success).toBe(false);
+  });
+});
+
+describe("ModelCatalogUrlSchema", () => {
+  it.each(["off", "https://mirror.test/models.json", "http://10.0.0.5:8080/models.json"])(
+    "accepts %s",
+    (value) => {
+      expect(ModelCatalogUrlSchema.safeParse(value).success).toBe(true);
+    },
+  );
+
+  it.each([
+    ["a file URL, which fetch can't read", "file:///data/models.json"],
+    ["embedded credentials", "https://user:token@mirror.test/models.json"],
+    ["something that isn't a URL", "not a url"],
+  ])("rejects %s", (_label, value) => {
+    expect(ModelCatalogUrlSchema.safeParse(value).success).toBe(false);
   });
 });

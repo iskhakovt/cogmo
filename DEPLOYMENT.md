@@ -150,7 +150,7 @@ Defaults below match the in-image expectations: every host-state path sits under
 
 | Variable | Default | Purpose |
 |-|-|-|
-| `MODEL_CATALOG_URL` | LiteLLM's `model_prices_and_context_window.json` on `raw.githubusercontent.com` | Where the six-hourly refresh fetches each model's context window and output limit, so a model released since the last cogmo release gets real limits. `off` disables it; limits then come from the snapshot bundled with the release. Needs egress to the URL's host; a URL with embedded credentials is refused. |
+| `MODEL_CATALOG_URL` | LiteLLM's `model_prices_and_context_window.json` on `raw.githubusercontent.com` | Where the six-hourly refresh fetches each model's context window and output limit (an http(s) URL), so a model released since the last cogmo release gets real limits. `off` disables it; limits then come from the snapshot bundled with the release. Needs egress to the URL's host; a URL with embedded credentials is refused. |
 
 #### Memory (Hindsight)
 

@@ -62,7 +62,9 @@ function makeDeps(
   return {
     runInTx: fakeRunInTx,
     agentStore,
-    requestCatalogRefresh: opts.requestCatalogRefresh ?? null,
+    requestCatalogRefresh:
+      opts.requestCatalogRefresh === undefined ? vi.fn(async () => {}) : opts.requestCatalogRefresh,
+    loadLiveCatalog: vi.fn(async () => {}),
   };
 }
 
@@ -234,6 +236,28 @@ describe("cogmo model list", () => {
       ]);
     });
 
+    it("says the refresh is off rather than pointing at `cogmo model refresh`", async () => {
+      const { io, err } = captureIo();
+      await run(
+        ["list"],
+        makeDeps({
+          rowsByModel: { "claude-sonnet-4-6": [routingRow("r1", "anthropic", 0)] },
+          requestCatalogRefresh: null,
+        }),
+        io,
+      );
+      expect(err).toEqual([
+        "litellm: bundled snapshot only; the catalog refresh is off (MODEL_CATALOG_URL=off)",
+      ]);
+    });
+
+    it("loads the stored catalog before resolving limits", async () => {
+      const d = deps();
+      const { io } = captureIo();
+      await run(["list"], d, io);
+      expect(d.loadLiveCatalog).toHaveBeenCalledTimes(1);
+    });
+
     it("names the live catalog's fetch time and size once one is installed", async () => {
       installLiveCatalog({
         entries: { "claude-sonnet-4-6": { contextWindow: 1_000_000, maxOutputTokens: 64_000 } },
@@ -353,7 +377,7 @@ describe("cogmo model refresh", () => {
   it("exits 1 when the refresh is off", async () => {
     const { io, out, err } = captureIo();
 
-    const code = await run(["refresh"], makeDeps(), io);
+    const code = await run(["refresh"], makeDeps({ requestCatalogRefresh: null }), io);
 
     expect(code).toBe(1);
     expect(err.join("\n")).toMatch(/MODEL_CATALOG_URL=off/);

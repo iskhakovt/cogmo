@@ -91,15 +91,19 @@ async function loadCore() {
 async function loadModelDeps(): Promise<ModelCliDeps> {
   const { env } = await import("./env.js");
   const { runInTx, agentStore, modelCatalogStore } = await loadCore();
-  // `list` and `add` report limits the way `cogmo serve` resolves them.
-  if (env.MODEL_CATALOG_URL !== "off") {
-    const { loadModelCatalog } = await import("./agent/model-catalog/load-model-catalog.js");
-    const { installLiveCatalog } = await import("./llm/litellm-data.js");
-    await loadModelCatalog({ runInTx, modelCatalogStore, installCatalog: installLiveCatalog });
-  }
   return {
     runInTx,
     agentStore,
+    loadLiveCatalog: async () => {
+      const { loadModelCatalog } = await import("./agent/model-catalog/load-model-catalog.js");
+      const { installLiveCatalog } = await import("./llm/litellm-data.js");
+      await loadModelCatalog({
+        runInTx,
+        modelCatalogStore,
+        installCatalog: installLiveCatalog,
+        catalogUrl: env.MODEL_CATALOG_URL,
+      });
+    },
     // The only `model` command that needs Inngest keys, so the client loads here.
     requestCatalogRefresh:
       env.MODEL_CATALOG_URL === "off"

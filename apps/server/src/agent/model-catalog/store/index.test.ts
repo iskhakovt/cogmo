@@ -76,6 +76,21 @@ describe("DrizzleModelCatalogStore", () => {
     expect(ids?.toSorted()).toEqual(["claude-sonnet-5", "claude-sonnet-5-5"]);
   });
 
+  it("lists no ids for a row whose entries aren't an object", async () => {
+    await db.execute(sql`INSERT INTO model_catalogs (entries) VALUES ('[1, 2]'::jsonb)`);
+    expect(await tx((trx) => store.latestModelIds(trx))).toBeNull();
+  });
+
+  it("replaces a row that no longer parses", async () => {
+    await db.execute(
+      sql`INSERT INTO model_catalogs (entries) VALUES (${JSON.stringify({ m: { contextWindow: "big" } })}::jsonb)`,
+    );
+    await tx((trx) => store.replace(trx, first));
+    const latest = expectDefined(await tx((trx) => store.latest(trx)), "latest");
+    expect(latest.entries).toEqual(first);
+    expect(await rowCount()).toBe(1);
+  });
+
   it("fails the read when a stored row no longer parses, while its ids still list", async () => {
     // Bypasses the write-side parse: a row written under an older schema.
     await db.execute(

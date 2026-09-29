@@ -50,7 +50,10 @@ export async function refreshModelCatalog(
   let raw: unknown;
   try {
     const res = await deps.fetch(deps.url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
-    if (!res.ok) return err({ kind: "unavailable", message: `${source} returned ${res.status}` });
+    if (!res.ok) {
+      await res.body?.cancel();
+      return err({ kind: "unavailable", message: `${source} returned ${res.status}` });
+    }
     raw = await res.json();
   } catch (e) {
     return err({ kind: "unavailable", message: `fetching ${source}: ${describeError(e)}` });

@@ -65,6 +65,15 @@ describe("DrizzleModelCatalogStore (real Postgres)", () => {
     expect(await tx((trx) => store.latestModelIds(trx))).toEqual(["b"]);
   });
 
+  it("lists no ids for a row whose entries aren't an object, and replaces it", async () => {
+    await db.execute(rawSql`INSERT INTO model_catalogs (entries) VALUES ('[1, 2]'::jsonb)`);
+    expect(await tx((trx) => store.latestModelIds(trx))).toBeNull();
+
+    const catalog = { a: { contextWindow: 100_000, maxOutputTokens: 4_096 } };
+    await tx((trx) => store.replace(trx, catalog));
+    expect(expectDefined(await tx((trx) => store.latest(trx)), "latest").entries).toEqual(catalog);
+  });
+
   it("lists the ids of a row that no longer parses", async () => {
     // Written under an older schema, bypassing the store's write-side parse.
     await db.execute(

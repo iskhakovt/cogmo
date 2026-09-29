@@ -17,8 +17,10 @@ export interface ModelCatalogStore {
   latest(tx: Transaction): Promise<StoredModelCatalog | null>;
 
   /**
-   * The model ids in the newest catalog, or `null` before the first refresh.
-   * Reads the keys only, so a row that no longer parses still answers.
+   * The model ids in the newest catalog, or `null` before the first refresh
+   * and when that row's `entries` isn't a JSON object. Reads the keys through
+   * SQL rather than the column's `LitellmCatalogSchema`, so a row an older
+   * schema wrote still answers and the refresh that replaces it can run.
    */
   latestModelIds(tx: Transaction): Promise<string[] | null>;
 
@@ -40,11 +42,15 @@ export class DrizzleModelCatalogStore implements ModelCatalogStore {
 
   async latestModelIds(tx: Transaction): Promise<string[] | null> {
     const [newest] = await tx
-      .select({ id: modelCatalogs.id })
+      .select({
+        id: modelCatalogs.id,
+        type: sql<string>`jsonb_typeof(${modelCatalogs.entries})`,
+      })
       .from(modelCatalogs)
       .orderBy(desc(modelCatalogs.createdAt), desc(modelCatalogs.id))
       .limit(1);
-    if (!newest) return null;
+    // `jsonb_object_keys` raises on anything but an object.
+    if (newest?.type !== "object") return null;
     const rows = await tx
       .select({ modelId: sql<string>`jsonb_object_keys(${modelCatalogs.entries})` })
       .from(modelCatalogs)

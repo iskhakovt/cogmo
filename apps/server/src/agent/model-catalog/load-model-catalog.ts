@@ -14,6 +14,12 @@ export interface LoadModelCatalogDeps {
   runInTx: Transactor;
   modelCatalogStore: ModelCatalogStore;
   installCatalog: (catalog: LiveCatalog) => void;
+  /**
+   * `MODEL_CATALOG_URL`. At `off` nothing loads, so limits come from the
+   * bundled snapshot alone and a row stored before the refresh was turned off
+   * stays unread.
+   */
+  catalogUrl: string;
 }
 
 /**
@@ -23,6 +29,7 @@ export interface LoadModelCatalogDeps {
  * worth refusing to boot over.
  */
 export async function loadModelCatalog(deps: LoadModelCatalogDeps): Promise<void> {
+  if (deps.catalogUrl === "off") return;
   let stored: StoredModelCatalog | null;
   try {
     stored = await deps.runInTx((tx) => deps.modelCatalogStore.latest(tx));

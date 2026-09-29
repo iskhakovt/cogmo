@@ -6,13 +6,14 @@ import { fakeRunInTx } from "../../test/factories.js";
 import { loadModelCatalog } from "./load-model-catalog.js";
 import type { ModelCatalogStore } from "./store/index.js";
 
-function setup() {
+function setup(catalogUrl = "https://registry.test/models.json") {
   const store = mock<ModelCatalogStore>();
   const installed: LiveCatalog[] = [];
   const deps = {
     runInTx: fakeRunInTx,
     modelCatalogStore: store,
     installCatalog: (catalog: LiveCatalog) => installed.push(catalog),
+    catalogUrl,
   };
   return { deps, store, installed };
 }
@@ -27,6 +28,15 @@ describe("loadModelCatalog", () => {
     await loadModelCatalog(deps);
 
     expect(installed).toEqual([{ entries, fetchedAt: createdAt }]);
+  });
+
+  it("reads nothing when the refresh is off", async () => {
+    const { deps, store, installed } = setup("off");
+
+    await loadModelCatalog(deps);
+
+    expect(store.latest).not.toHaveBeenCalled();
+    expect(installed).toEqual([]);
   });
 
   it("installs nothing before the first refresh", async () => {

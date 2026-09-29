@@ -757,6 +757,13 @@ export async function bootstrapRuntime(
   skillRunner: SkillRunnerImpl,
   opts: BootstrapOptions = {},
 ): Promise<RuntimeDeps> {
+  // Before the channels start, so their first turns resolve limits from it.
+  await loadModelCatalog({
+    runInTx: core.runInTx,
+    modelCatalogStore: core.modelCatalogStore,
+    installCatalog: installLiveCatalog,
+    catalogUrl: env.MODEL_CATALOG_URL,
+  });
   const codingBackend = new ClaudeCodeBackend();
   const codingStreamingRegistry = new CodingStreamingRegistry();
   const codingServiceFactory = (conversationId: string) =>
@@ -1105,16 +1112,7 @@ export async function bootstrapRuntime(
     defaultProfileId: core.profile.id,
     gracePeriodMs: env.BOUNDARY_PROMPT_TIMEOUT_SECONDS * 2 * 1000,
   });
-  // With the refresh off, limits come from the bundled snapshot alone: a
-  // catalog stored before it was turned off stays in the table, unread.
   const catalogUrl = env.MODEL_CATALOG_URL;
-  if (catalogUrl !== "off") {
-    await loadModelCatalog({
-      runInTx: core.runInTx,
-      modelCatalogStore: core.modelCatalogStore,
-      installCatalog: installLiveCatalog,
-    });
-  }
   const modelCatalogFunctions =
     catalogUrl === "off"
       ? []

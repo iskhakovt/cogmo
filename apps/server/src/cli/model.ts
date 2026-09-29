@@ -23,6 +23,8 @@ export interface ModelCliDeps {
   agentStore: AgentStore;
   /** Sends `model-catalog/refresh.requested`; `null` when `MODEL_CATALOG_URL=off`. */
   requestCatalogRefresh: (() => Promise<void>) | null;
+  /** Installs the stored catalog, so reported limits match what `cogmo serve` resolves. */
+  loadLiveCatalog: () => Promise<void>;
 }
 
 export function modelCli(io: CliIo, loadDeps: LoadDeps<ModelCliDeps>) {
@@ -152,6 +154,7 @@ async function addModelCmd(args: AddArgs, deps: ModelCliDeps, io: CliIo): Promis
 
   // Show what the resolver will see, so the operator knows whether their
   // --context / --max-output landed or LiteLLM / the default is doing the work.
+  await deps.loadLiveCatalog();
   const limits = resolveLimits(model, {
     contextWindow: contextWindow ?? null,
     maxOutputTokens: maxOutputTokens ?? null,
@@ -186,6 +189,7 @@ async function listModels(args: ListArgs, deps: ModelCliDeps, io: CliIo): Promis
     return 0;
   }
 
+  await deps.loadLiveCatalog();
   io.out("model\tprovider\tposition\tcontext\tmax_output\tsource");
   for (const row of filtered) {
     const limits = resolveLimits(row.model, {
@@ -209,13 +213,15 @@ async function listModels(args: ListArgs, deps: ModelCliDeps, io: CliIo): Promis
       ].join("\t"),
     );
   }
-  // stderr keeps stdout to the rows, for anything reading them.
-  io.err(describeCatalog());
+  // On stderr, so the catalog line isn't read as a row.
+  io.err(describeCatalog(deps.requestCatalogRefresh === null));
   return 0;
 }
 
 /** Where the `litellm` source reads from: the live catalog, or only the bundled snapshot. */
-function describeCatalog(): string {
+function describeCatalog(refreshOff: boolean): string {
+  if (refreshOff)
+    return "litellm: bundled snapshot only; the catalog refresh is off (MODEL_CATALOG_URL=off)";
   const live = liveCatalogStatus();
   if (!live) {
     return "litellm: bundled snapshot only; no catalog refresh has run (`cogmo model refresh`)";

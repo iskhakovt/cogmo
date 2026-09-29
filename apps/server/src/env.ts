@@ -67,6 +67,17 @@ export const ServiceUrlSchema = z
  * doesn't crash logging before the real error can surface — symmetric
  * across both leaves.
  */
+/** Where the model catalog refresh fetches from: an http(s) service URL, or `off`. */
+export const ModelCatalogUrlSchema = z.union([
+  z.literal("off"),
+  ServiceUrlSchema.refine(
+    (value) => !URL.canParse(value) || /^https?:$/.test(new URL(value).protocol),
+    {
+      message: "must be an http(s) URL",
+    },
+  ),
+]);
+
 export const env = createEnv({
   server: {
     NODE_ENV: z.enum(["development", "production", "test"]),
@@ -154,7 +165,7 @@ export const env = createEnv({
      * to resolve limits from the bundled snapshot alone (air-gapped hosts,
      * and the integration and e2e tiers, which must not reach GitHub).
      */
-    MODEL_CATALOG_URL: z.union([z.literal("off"), ServiceUrlSchema]).default(LITELLM_REGISTRY_URL),
+    MODEL_CATALOG_URL: ModelCatalogUrlSchema.default(LITELLM_REGISTRY_URL),
     S3_ENDPOINT: z.string().optional(),
     S3_BUCKET: z.string().default("cogmo-files"),
     S3_ACCESS_KEY: z.string().optional(),

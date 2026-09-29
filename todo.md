@@ -211,6 +211,7 @@
 
 ### CLI & developer experience
 
+- [ ] `p3` Send CLI logs to stderr. pino writes to stdout, so every `cogmo` command that boots the data layer prints `database migrations applied` (JSON in production, pino-pretty in dev) ahead of its output, and `cogmo model list | cut -f1` reads it as a row. Point the logger at `pino.destination(2)` when running as a CLI rather than `serve`; `src/logger.ts` is a leaf imported everywhere, so decide the mode from the entrypoint rather than the env.
 - [ ] `p3` `pnpm console` exits before the assistant reply lands when stdin is piped — readline's `close` event fires the moment EOF is seen, racing the in-flight `waitForResponse` poll loop and printing `Bye.` mid-wait. Fine for interactive use but breaks one-shot CLI usage like `echo "msg" | pnpm console`. Fix: defer the `close` handler until any pending `waitForResponse` settles (or delivery times out). Workaround today: `(sleep 1 && echo msg && sleep 35) | pnpm console`.
 - [ ] `p3` Consider dropping Inngest serve mode — only connect mode is used (tests, production, local dev)
 - [ ] `p3` Point `pnpm db:migrate` at the per-file migrator. It runs `drizzle-kit migrate`, which applies every pending file in one transaction and so rejects an `ALTER TYPE … ADD VALUE` split pair; design/data-model.md and design/tooling.md still name it as the migration path, while boot runs `migratePerFile`.
