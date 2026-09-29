@@ -379,12 +379,12 @@ export function createUsageMeter(): UsageMeter {
     },
     metered: (provider) => ({
       name: provider.name,
-      chat: async (params) => {
-        const response = await provider.chat(params);
+      chat: async (params, options) => {
+        const response = await provider.chat(params, options);
         meter.add(response.usage);
         return response;
       },
-      chatStream: (params) => provider.chatStream(params),
+      chatStream: (params, options) => provider.chatStream(params, options),
       countTokens: (params) => provider.countTokens(params),
     }),
     summary: () =>

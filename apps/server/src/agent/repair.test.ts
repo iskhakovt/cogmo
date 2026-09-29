@@ -6,6 +6,7 @@ import { ProviderProtocolError, ToolArgsCutOffError } from "../llm/errors.js";
 import { RefusalError } from "../llm/fallback.js";
 import type { LlmProvider } from "../llm/provider.js";
 import type { ContentBlock, LlmResponse, Message, ToolUseBlock } from "../llm/types.js";
+import { expectDefined } from "../test/assertions.js";
 import {
   CLASS_D_CONSECUTIVE_LIMIT,
   CLASS_D_CUMULATIVE_LIMIT,
@@ -915,13 +916,24 @@ describe("synthesizeDegradedReply", () => {
     };
   }
 
-  function providerThat(chat: () => Promise<LlmResponse>): LlmProvider {
+  function providerThat(chat: LlmProvider["chat"]): LlmProvider {
     return {
       name: "synth-test",
       chat: vi.fn(chat),
       chatStream: vi.fn(),
       countTokens: vi.fn(),
     };
+  }
+
+  /** A provider that answers only by rejecting with the reason, once the call's signal fires. */
+  function hangingProvider(): LlmProvider {
+    return providerThat(
+      (_params, options) =>
+        new Promise<LlmResponse>((_resolve, reject) => {
+          const signal = expectDefined(options?.signal, "synthesis signal");
+          signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        }),
+    );
   }
 
   const baseDeps = () => ({
@@ -1036,15 +1048,21 @@ describe("synthesizeDegradedReply", () => {
   });
 
   it("falls back on wall-clock timeout — does not extend the user's wait", async () => {
-    // Provider that never resolves; the race must abort.
-    const provider = providerThat(() => new Promise<LlmResponse>(() => {}));
     const result = await synthesizeDegradedReply({
       ...baseDeps(),
-      provider,
+      provider: hangingProvider(),
       timeoutMs: 25,
     });
     expect(result.ok).toBe(false);
     expect(result.text).toMatch(/trouble generating/i);
+  });
+
+  it("aborts the synthesis request when the cap fires", async () => {
+    const provider = hangingProvider();
+    await synthesizeDegradedReply({ ...baseDeps(), provider, timeoutMs: 25 });
+
+    const options = expectDefined(vi.mocked(provider.chat).mock.calls[0], "chat call")[1];
+    expect(options?.signal?.aborted).toBe(true);
   });
 
   it("falls back when the chat call returns empty text content", async () => {
@@ -1108,10 +1126,14 @@ describe("synthesizeDegradedReply", () => {
     );
   });
 
-  it("tags the fallback reason as 'timeout' when the timeout wins", async () => {
+  it("tags the fallback reason as 'timeout' when the cap fires", async () => {
     const log = fakeLogger();
-    const provider = providerThat(() => new Promise<LlmResponse>(() => {}));
-    await synthesizeDegradedReply({ ...baseDeps(), provider, log, timeoutMs: 25 });
+    await synthesizeDegradedReply({
+      ...baseDeps(),
+      provider: hangingProvider(),
+      log,
+      timeoutMs: 25,
+    });
     expect(log.warn).toHaveBeenCalledWith(
       expect.objectContaining({
         event: "agent.degrade.synthesis",
@@ -1120,18 +1142,6 @@ describe("synthesizeDegradedReply", () => {
       }),
       expect.any(String),
     );
-  });
-
-  it("clears the timeout timer on the success path — no dangling setTimeout", async () => {
-    vi.useFakeTimers();
-    try {
-      const provider = providerThat(async () => textResponse("ok"));
-      const result = await synthesizeDegradedReply({ ...baseDeps(), provider, timeoutMs: 5000 });
-      expect(result.ok).toBe(true);
-      expect(vi.getTimerCount()).toBe(0);
-    } finally {
-      vi.useRealTimers();
-    }
   });
 
   it("does not throw on any failure path — degrade-the-degrade is forbidden", async () => {

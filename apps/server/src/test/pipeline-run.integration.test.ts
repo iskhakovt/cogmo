@@ -91,14 +91,9 @@ const stubProvider: LlmProvider = {
       usage,
     };
   },
-  chatStream(params) {
-    const text = respond(params);
-    return {
-      events: (async function* () {
-        yield { type: "text_delta" as const, text: await text };
-      })(),
-      response: text.then(() => ({ stopReason: "end_turn" as const, model: params.model, usage })),
-    };
+  async *chatStream(params) {
+    yield { type: "text_delta", text: await respond(params) };
+    yield { type: "done", meta: { stopReason: "end_turn", model: params.model, usage } };
   },
   async countTokens() {
     return 100;
