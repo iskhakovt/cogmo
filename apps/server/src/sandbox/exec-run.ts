@@ -55,8 +55,12 @@ export interface ExecBackend {
    * still in flight stops before its next remote step.
    */
   start(sink: ExecSink, stdin: Buffer | undefined, signal: AbortSignal): Promise<ExecStarted>;
-  /** Once the output has ended: the exit code, or why there is none. */
-  fetchExit(): Promise<Result<number, string>>;
+  /**
+   * Once the output has ended: the exit code, or why there is none.
+   * `signal` aborts once the run has settled without it (a deadline or
+   * dispose), and a fetch that retries stops then.
+   */
+  fetchExit(signal: AbortSignal): Promise<Result<number, string>>;
   /**
    * Release what `start` acquired so far. Runs when the run settles, and
    * again for a start that finishes after it. Aborting `signal` means the
@@ -270,7 +274,7 @@ class ExecRun {
   }
 
   #fetchExit(): void {
-    this.#backend.fetchExit().then(
+    this.#backend.fetchExit(this.#settled.signal).then(
       (exit) =>
         this.#observe(
           exit.match<ExecEvent>(

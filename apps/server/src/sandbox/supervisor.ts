@@ -1,6 +1,6 @@
 import { type Duplex, Writable } from "node:stream";
 import type Docker from "dockerode";
-import { ok, type Result } from "neverthrow";
+import { err, ok, type Result } from "neverthrow";
 import type { Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
 import { cleanupAskpass } from "./askpass.js";
@@ -38,6 +38,11 @@ export const LABEL_DEPTH = "cogmo.depth";
 
 /** Buffered-exec output cap per stream. Configurable via env later if needed. */
 const EXEC_BUFFER_LIMIT_BYTES = 1024 * 1024;
+
+/** How long an exec whose output ended may take to be reaped before it has no exit code. */
+const EXIT_POLL_BUDGET_MS = 2_000;
+const EXIT_POLL_FIRST_DELAY_MS = 20;
+const EXIT_POLL_MAX_DELAY_MS = 250;
 
 interface CreateOptions {
   docker: DockerFacade;
@@ -631,16 +636,54 @@ class DockerExecBackend implements ExecBackend {
     return attachStdin ? { stdin: stream } : {};
   }
 
-  async fetchExit(): Promise<Result<number, string>> {
-    if (!this.#exec) throw new Error("docker exec output ended before it started");
-    // `null` while the exec runs. The attach stream ends only once it has
-    // exited, so read it as 0, as the Docker CLI does.
-    return ok((await this.#exec.inspect()).ExitCode ?? 0);
+  /**
+   * The attach stream can end before the daemon has reaped the process: the
+   * inspect then reports `Running: true` and a null `ExitCode`, which is no
+   * exit status at all. Re-inspect with a backoff until there is one, for
+   * `EXIT_POLL_BUDGET_MS` at most; a deadline that settles the run first
+   * stops it sooner.
+   */
+  async fetchExit(signal: AbortSignal): Promise<Result<number, string>> {
+    const exec = this.#exec;
+    if (!exec) throw new Error("docker exec output ended before it started");
+    let waited = 0;
+    let delay = EXIT_POLL_FIRST_DELAY_MS;
+    for (;;) {
+      const info = await exec.inspect();
+      if (!info.Running && info.ExitCode !== null) return ok(info.ExitCode);
+      if (waited >= EXIT_POLL_BUDGET_MS) {
+        return err(
+          `docker exec in ${this.#dockerId} ended its output but reported no exit code after ${waited}ms (Running: ${info.Running})`,
+        );
+      }
+      await abortableDelay(delay, signal);
+      waited += delay;
+      delay = Math.min(delay * 2, EXIT_POLL_MAX_DELAY_MS);
+    }
   }
 
   async teardown(): Promise<void> {
     this.#stream?.destroy();
   }
+}
+
+/** Resolves after `ms`, or rejects with `signal`'s reason once it aborts first. */
+function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 /** A Writable `demuxStream` can write one stream's chunks into. */

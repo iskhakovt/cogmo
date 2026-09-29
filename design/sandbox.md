@@ -190,7 +190,7 @@ any live state ─ deadline · dispose · start_failed · stream_failed ─► s
 `awaiting_stdin` exists only for a backend that needs the caller's whole stdin before it can start (the Daytona PTY). `draining` fetches the exit code, and the PTY's stderr tmpfile with it.
 
 - **Settlement never waits on teardown.** A deadline, `dispose()` or an aborted `signal` settles `exited` at once; teardown is an effect of settling, bounded by its own timeout. A transport that cannot be torn down (a `deleteSession` that fails, a WebSocket that never closes) leaves a logged failure, not a hung caller.
-- **The exit code is fetched before teardown,** which can erase it (Daytona's `getSessionCommand` 404s once the session is deleted).
+- **The exit code is fetched before teardown,** which can erase it (Daytona's `getSessionCommand` 404s once the session is deleted). Local-Docker re-inspects until the daemon has reaped the exec, since its attach stream can end while `ExitCode` is still null, and reports `no_exit_code` if it never is.
 - **Deadlines bound the whole exec,** start included: an upload, `createPty` or `sendInput` that never returns settles as `timed_out`. A start still in flight sees the settlement on its `AbortSignal` and stops before its next remote step; whatever it acquires late is torn down again.
 - **The first settling event wins.** Output after settlement is dropped and restarts nothing; only output while `running` restarts the idle deadline. What the transport reports while the start is in flight is delivered after the start's own outcome, so the order never depends on microtask timing.
 - **A failed teardown is retried by the next `dispose()`,** and changes no outcome.
