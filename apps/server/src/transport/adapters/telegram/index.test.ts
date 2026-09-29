@@ -1419,6 +1419,21 @@ describe("telegram adapter", () => {
       expect(mockBotApi.sendMessage).toHaveBeenLastCalledWith(42, "done", { parse_mode: "HTML" });
     });
 
+    it("moves the stream to a new message when a preview finds its message gone", async () => {
+      const handle = await (await createStreamingAdapter()).openStream("42", "run-1");
+      await handle.push(text("Hello"));
+      mockBotApi.sendMessage.mockResolvedValueOnce({ message_id: 200 });
+      mockBotApi.editMessageText.mockRejectedValueOnce(messageToEditNotFound());
+      await vi.advanceTimersByTimeAsync(600);
+
+      expect(await handle.push(text(" world"))).toEqual(ok(undefined));
+      expect(mockBotApi.sendMessage).toHaveBeenLastCalledWith(42, "Hello world");
+      expect(await handle.finish()).toEqual(ok(undefined));
+      expect(mockBotApi.editMessageText).toHaveBeenLastCalledWith(42, 200, "Hello world", {
+        parse_mode: "HTML",
+      });
+    });
+
     it("fails the handle when the new message fails too", async () => {
       const handle = await (await createStreamingAdapter()).openStream("42", "run-1");
       await handle.push(text("done"));

@@ -325,15 +325,39 @@ describe("telegram stream state", () => {
       expect(state).toEqual({ kind: "failed", reason: expect.stringContaining("not found") });
     });
 
-    it("fails on a preview whose message is gone", () => {
-      const { state } = drive(EDITS, [
+    it("moves a preview whose message is gone to a new message, mid-stream", () => {
+      const { state, effects } = drive(EDITS, [
         text("Hello"),
         landed(T0, 100),
         text(" world", T0 + 600),
         editGone(T0 + 600),
       ]);
 
-      expect(state.kind).toBe("failed");
+      expect(state.kind).toBe("streaming");
+      expect(writes(effects).at(-1)).toEqual({
+        role: "preview",
+        messageId: undefined,
+        text: "Hello world",
+        html: false,
+      });
+    });
+
+    it("still writes the final text as a new message when a preview finds its message gone while closing", () => {
+      const { state, effects } = drive(EDITS, [
+        text("Hello"),
+        landed(T0, 100),
+        text(" world", T0 + 600),
+        finish,
+        editGone(T0 + 600),
+      ]);
+
+      expect(writes(effects).at(-1)).toEqual({
+        role: "chunk",
+        messageId: undefined,
+        text: "Hello world",
+        html: true,
+      });
+      expect(state).toMatchObject({ kind: "finalizing" });
     });
   });
 
