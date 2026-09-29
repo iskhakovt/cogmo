@@ -99,6 +99,7 @@ When you bind-mount a host directory over `/var/lib/cogmo`, the host directory's
 sudo install -d -o 1000 -g 1000 /var/lib/cogmo
 
 docker run -d \
+  --stop-timeout 60 \
   -v /var/lib/cogmo:/var/lib/cogmo \
   ghcr.io/iskhakovt/cogmo:<version>
 ```
@@ -313,6 +314,7 @@ Neither is probed by Cogmo, so key them yourself:
    ```bash
    docker run -d \
      --restart=unless-stopped \
+     --stop-timeout 60 \
      -e DATABASE_URL=postgresql://... \
      -e COGMO_MASTER_KEY=... \
      -e HINDSIGHT_URL=http://hindsight:8888 \
@@ -342,6 +344,12 @@ The image entrypoint dispatches based on the first arg:
 ## Health check
 
 `GET /health` on port 9090 returns 200 with an `application/health+json` body (IETF draft schema: `status`, `version`, `releaseId`, `description`, `notes`). Liveness only — a Postgres blip will not flap the container. Wire it to your supervisor (Docker `HEALTHCHECK`, k8s `livenessProbe`, systemd, etc.).
+
+## Stopping
+
+On `SIGTERM`, `serve` first waits for the Inngest function runs in flight, with no deadline, then tears down its own connections in at most 28 s ([`design/infrastructure.md` → Shutdown](design/infrastructure.md#shutdown-confirmed)). Docker's default stop grace is 10 s before `SIGKILL`, which can cut that teardown short and have Telegram redeliver the last batch of messages. Give the container 60 s with `--stop-timeout 60` on `docker run`, `stop_grace_period: 60s` in compose, `terminationGracePeriodSeconds: 60` in Kubernetes, or `TimeoutStopSec=60` for a systemd unit.
+
+A step that fails is logged and the rest still run; the exit code stays 0.
 
 ## Observability
 
@@ -386,6 +394,7 @@ docker run -d --name lgtm \
 
 docker run -d --name cogmo \
   --restart=unless-stopped \
+  --stop-timeout 60 \
   -e DATABASE_URL=postgresql://... \
   -e COGMO_MASTER_KEY=... \
   -e HINDSIGHT_URL=http://hindsight:8888 \
@@ -412,6 +421,7 @@ Grafana Cloud's OTLP gateway accepts HTTP/protobuf only. Get the endpoint, insta
 ```bash
 docker run -d --name cogmo \
   --restart=unless-stopped \
+  --stop-timeout 60 \
   -e DATABASE_URL=postgresql://... \
   -e COGMO_MASTER_KEY=... \
   -e HINDSIGHT_URL=http://hindsight:8888 \

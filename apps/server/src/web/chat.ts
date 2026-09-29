@@ -41,6 +41,33 @@ export interface ChatRouteDeps {
   registry: WebStreamRegistry;
   /** Owner handle resolved by the gate — passed to identity-checked Transport calls. */
   ownerHandle: string;
+  /** Server-lifetime signal; aborting it ends every open stream. */
+  shutdownSignal: AbortSignal;
+  sessionCloses: SessionCloses;
+}
+
+/**
+ * Session closes in flight. Each is best-effort — a failure is logged, since
+ * the tab is gone — but shutdown waits for them so the process doesn't exit
+ * mid-write.
+ */
+export class SessionCloses {
+  #pending = new Set<Promise<void>>();
+
+  start(transport: Transport, sessionId: string): void {
+    const closing: Promise<void> = transport
+      .closeSession(sessionId)
+      .catch((err: unknown) =>
+        logger.debug({ err, sessionId }, "web chat: closeSession on disconnect failed"),
+      )
+      .finally(() => this.#pending.delete(closing));
+    this.#pending.add(closing);
+  }
+
+  /** Resolves once every close started so far has settled. */
+  async settled(): Promise<void> {
+    await Promise.all(this.#pending);
+  }
 }
 
 /** SSE response headers — disable caching + proxy buffering so frames flush immediately. */
@@ -65,7 +92,7 @@ function sseConnection(res: ServerResponse): SseConnection {
   return {
     send(frame) {
       // `destroyed` is the precise "socket gone" signal — `writableEnded` only
-      // flips on our own `end()`, which never happens for a long-lived stream.
+      // flips on our own `end()`, at shutdown.
       // Reported back to the caller: this connection stays registered until
       // the response's `close` handler runs a tick later, so a dropped frame
       // here is invisible to the registry's "is anyone registered" check.
@@ -166,7 +193,7 @@ async function handleCreate(
   // (`resumeConversation`) is the real session owner. Close the one we just
   // opened so a create-without-streaming doesn't orphan a `receive:"all"`
   // session until the idle timer reclaims it; the stream open mints a fresh one.
-  closeSessionBestEffort(deps.transport, result.value.id);
+  deps.sessionCloses.start(deps.transport, result.value.id);
   sendJson(res, 200, { conversationId: result.value.conversationId });
 }
 
@@ -197,7 +224,14 @@ async function handleStream(
   // listener registered now would never run, leaking the heartbeat + the open
   // session. Bail with cleanup instead of opening a stream nothing is attached to.
   if (req.destroyed) {
-    closeSessionBestEffort(deps.transport, sessionId);
+    deps.sessionCloses.start(deps.transport, sessionId);
+    return;
+  }
+  // Shutdown began during the resume: its abort has already fired, so a
+  // stream opened now would never be ended.
+  if (deps.shutdownSignal.aborted) {
+    deps.sessionCloses.start(deps.transport, sessionId);
+    sendText(res, 503, "shutting down");
     return;
   }
 
@@ -210,25 +244,30 @@ async function handleStream(
     if (!res.destroyed && !res.writableEnded) res.write(": ping\n\n");
   }, HEARTBEAT_MS);
 
-  // Anchor disconnect cleanup on the long-lived RESPONSE stream: we never call
-  // `res.end()`, so `res` `close` fires only when the connection drops. (`req`
-  // `close` is ambiguous for a bodyless GET — it can also signal that the
-  // request was fully received.) Closing the session keeps abandoned tabs from
-  // accumulating `receive:"all"` sessions; a reconnect resumes a fresh one.
-  res.on("close", () => {
+  // Runs once, whichever ends the stream first: the connection dropping or
+  // shutdown. Closing the session keeps abandoned tabs from accumulating
+  // `receive:"all"` sessions; a reconnect resumes a fresh one.
+  let open = true;
+  const teardown = () => {
+    if (!open) return;
+    open = false;
     clearInterval(heartbeat);
     deregister();
-    closeSessionBestEffort(deps.transport, sessionId);
-  });
-}
-
-/** Fire-and-forget session close — a failed close is logged, not surfaced (the socket is gone). */
-function closeSessionBestEffort(transport: Transport, sessionId: string): void {
-  void transport
-    .closeSession(sessionId)
-    .catch((err) =>
-      logger.debug({ err, sessionId }, "web chat: closeSession on disconnect failed"),
-    );
+    deps.shutdownSignal.removeEventListener("abort", onShutdown);
+    deps.sessionCloses.start(deps.transport, sessionId);
+  };
+  // A clean end, not a reset: eventsource-client reconnects after either,
+  // but a reset surfaces as a network error.
+  const onShutdown = () => {
+    teardown();
+    res.end();
+  };
+  deps.shutdownSignal.addEventListener("abort", onShutdown, { once: true });
+  // Anchor disconnect cleanup on the long-lived RESPONSE stream: `res` `close`
+  // fires when the connection drops or after `onShutdown` ends it. (`req`
+  // `close` is ambiguous for a bodyless GET — it can also signal that the
+  // request was fully received.)
+  res.on("close", teardown);
 }
 
 async function handleSend(

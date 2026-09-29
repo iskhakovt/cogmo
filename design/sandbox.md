@@ -392,8 +392,9 @@ Task startup:
 Task teardown:
 
 1. Supervisor triggers root-task cascade.
-2. Closes and removes the socket file.
-3. Removes socket entry from proxy's map.
+2. Removes the socket's entry from the proxy's map.
+3. Ends every connection made through the socket and its upstream leg to the daemon — hijacked streams (`logs -f`, `events`, attach) included, so teardown never waits on a running container.
+4. Closes the socket's listener and removes the socket file.
 
 ### Crash Recovery `[confirmed]`
 
