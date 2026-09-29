@@ -94,7 +94,7 @@ class TelegramAdapter implements Adapter, StreamingAdapter {
   #bot: Bot;
   #attachments: AttachmentStore;
   #activeStreams = new Map<string, TelegramStreamHandle>();
-  /** Each run's delivered media, kept past a failed handle for the one replacing it. */
+  /** Each run's delivered media paths, kept past a failed handle for the one replacing it. */
   #sentMedia = new Map<string, Set<string>>();
   #polling: Promise<void> | undefined;
 
@@ -179,8 +179,6 @@ class TelegramAdapter implements Adapter, StreamingAdapter {
     const existing = this.#activeStreams.get(runId);
     if (existing) return existing;
 
-    const sentMedia = this.#sentMedia.get(runId) ?? new Set<string>();
-    this.#sentMedia.set(runId, sentMedia);
     const handle = new TelegramStreamHandle(
       this.#bot,
       this.#attachments,
@@ -190,13 +188,19 @@ class TelegramAdapter implements Adapter, StreamingAdapter {
         chunkChars: opts?.chunkChars ?? TELEGRAM_CHUNK_TARGET_DEFAULT,
         allowEdits: opts?.allowEdits ?? true,
       },
-      sentMedia,
+      {
+        has: (path) => this.#sentMedia.get(runId)?.has(path) ?? false,
+        add: (path) => {
+          const paths = this.#sentMedia.get(runId) ?? new Set<string>();
+          this.#sentMedia.set(runId, paths.add(path));
+        },
+      },
     );
     this.#activeStreams.set(runId, handle);
     void handle.done.then((outcome) => {
       if (this.#activeStreams.get(runId) === handle) this.#activeStreams.delete(runId);
-      // A stream that settled ok leaves nothing to resend; an empty ledger guards nothing.
-      if (outcome.isOk() || sentMedia.size === 0) this.#sentMedia.delete(runId);
+      // Kept after a failure: the run's retry opens a fresh handle, which must not resend.
+      if (outcome.isOk()) this.#sentMedia.delete(runId);
     });
     return handle;
   }

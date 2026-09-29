@@ -497,7 +497,7 @@ function onWriteFailed(
       // the whole reply rather than a cut-short one. A send can't fail this
       // way, so each lost message costs one resend.
       if (write.messageId === undefined) return fail(state, reason);
-      return advance({ ...state, inFlight: null, messageId: undefined, shown: "" }, opts, now, [
+      return advance({ ...state, inFlight: null, messageId: undefined }, opts, now, [
         logEffect("warn", "telegram: message to edit is gone, sending the rest as a new one", {
           reason,
         }),
