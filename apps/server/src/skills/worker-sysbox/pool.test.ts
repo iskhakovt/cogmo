@@ -612,17 +612,18 @@ describe("SysboxWorkerPool", () => {
     }
 
     it.each([1, 2])(
-      "stop being replaced at once from the third in a row, with max %i, and are left to the sweep",
+      "stop being replaced at once from the third in a row, with max %i",
       async (max) => {
         const h = crashing({ min: 1, max, dies: () => true });
         const pool = await h.pool;
         await vi.waitFor(() => expect(h.spawned).toHaveLength(3));
         await settle();
         expect(h.spawned).toHaveLength(3);
-        // An acquirer fails rather than waits on an image that cannot run.
+        // An acquirer waits on one probe, and fails when it dies too.
         await expect(pool.invoke(invokeParams("t-1"))).rejects.toThrow(
           /keep dying before their first task/,
         );
+        expect(h.spawned).toHaveLength(4);
 
         const before = h.spawned.length;
         h.sweep();
@@ -685,6 +686,67 @@ describe("SysboxWorkerPool", () => {
 
       await expect(first).resolves.toMatchObject({ ok: true });
       await expect(second).resolves.toMatchObject({ ok: true });
+      await pool.dispose();
+    });
+
+    it("stop failing acquires once workers live again, with min 0", async () => {
+      // Spawns 1–4 die; from spawn 5 on, workers live.
+      const h = crashing({ min: 0, max: 3, dies: (n) => n <= 4 });
+      const pool = await h.pool;
+      await expect(pool.invoke(invokeParams("t-1"))).rejects.toThrow(
+        /keep dying before their first task/,
+      );
+      await vi.waitFor(() => expect(h.spawned).toHaveLength(4));
+      await settle();
+
+      await expect(pool.invoke(invokeParams("t-2"))).resolves.toMatchObject({ ok: true });
+      await pool.dispose();
+    });
+
+    it("serve the next acquire once workers live again, with min 1 and no sweep", async () => {
+      const h = crashing({ min: 1, max: 2, dies: (n) => n <= 3 });
+      const pool = await h.pool;
+      await vi.waitFor(() => expect(h.spawned).toHaveLength(3));
+      await settle();
+
+      await expect(pool.invoke(invokeParams("t-1"))).resolves.toMatchObject({ ok: true });
+      expect(h.spawned).toHaveLength(4);
+      await pool.dispose();
+    });
+
+    it("probe with one spawn at a time, one per queued acquire", async () => {
+      let spawns = 0;
+      let creating = 0;
+      let most = 0;
+      const pool = await poolWith({
+        min: 0,
+        max: 3,
+        createWorker: async ({ workerId }) => {
+          spawns += 1;
+          creating += 1;
+          most = Math.max(most, creating);
+          await new Promise<void>((r) => setImmediate(r));
+          creating -= 1;
+          const w = fakeWorker(workerId);
+          queueMicrotask(() => w.die("supervisor exited"));
+          return w;
+        },
+      }).pool;
+      await expect(pool.invoke(invokeParams("t-0"))).rejects.toThrow(
+        /keep dying before their first task/,
+      );
+      await vi.waitFor(() => expect(creating).toBe(0));
+      await settle();
+      const before = spawns;
+      most = 0;
+
+      const failed = ["t-1", "t-2", "t-3", "t-4"].map((id) =>
+        expect(pool.invoke(invokeParams(id))).rejects.toThrow(/keep dying before their first task/),
+      );
+      await Promise.all(failed);
+
+      expect(most).toBe(1);
+      expect(spawns - before).toBe(4);
       await pool.dispose();
     });
 
@@ -1302,10 +1364,10 @@ describe("SysboxWorkerPool under random deaths and spawn failures", () => {
    * Run one seeded schedule against a pool and return every invariant it
    * broke. Tasks arrive over time while workers die (idle, under a task,
    * or right after their handshake), spawns fail and sweeps run. Some
-   * schedules pass through a crash loop, every new worker dying at once,
-   * and recover from it. Some dispose the pool midway, a few microtasks
-   * after a spawn or a task completes. Workers honour the pool's signal as
-   * the real one does.
+   * schedules pass through a crash loop, every new worker dying at once.
+   * Once the faults clear, a last task must run. Some dispose the pool
+   * midway, a few microtasks after a spawn or a task completes. Workers
+   * honour the pool's signal as the real one does.
    */
   async function fuzzPool(seed: number): Promise<ReadonlyArray<string>> {
     const random = seededRandom(seed);
@@ -1325,6 +1387,8 @@ describe("SysboxWorkerPool under random deaths and spawn failures", () => {
     let creating = 0;
     let booted = false;
     let crashLoop = false;
+    /** The fault has cleared: spawns land, and workers and tasks live. */
+    let healthy = false;
     let now = 0;
     let pool: SysboxWorkerPool | undefined;
     let disposeCalled = false;
@@ -1356,13 +1420,15 @@ describe("SysboxWorkerPool under random deaths and spawn failures", () => {
         try {
           await ticks(upTo(2));
           signal.throwIfAborted();
-          if (booted && chance(0.15)) throw new Error("spawn failed");
+          const faulty = booted && !healthy;
+          if (faulty && chance(0.15)) throw new Error("spawn failed");
           const w: FakeWorker = fakeWorker(workerId, {
             now: () => now,
             invoke: async () => {
               running.add(w);
               try {
                 await ticks(upTo(3));
+                if (healthy) return succeed();
                 if (chance(0.1)) w.die("supervisor exited");
                 return chance(0.1)
                   ? { ok: false, error: "wall_clock_exceeded", workerReusable: false }
@@ -1381,7 +1447,7 @@ describe("SysboxWorkerPool under random deaths and spawn failures", () => {
           });
           workers.push(w);
           signal.addEventListener("abort", () => w.retire(), { once: true });
-          if (booted && (crashLoop || chance(0.1))) {
+          if (faulty && (crashLoop || chance(0.1))) {
             queueMicrotask(() => w.die("supervisor exited"));
           }
           fireDispose();
@@ -1419,6 +1485,25 @@ describe("SysboxWorkerPool under random deaths and spawn failures", () => {
     const hung = settled.filter((s) => !s).length;
     if (hung > 0) violations.push(`${hung} task(s) never settled; ${JSON.stringify(pool.stats())}`);
 
+    // Once workers stop failing, a task runs, with no sweep and no restart.
+    if (!disposeCalled) {
+      armed = undefined;
+      healthy = true;
+      let recovered: string | undefined;
+      void pool.invoke(invokeParams("t-recovery")).then(
+        (r) => {
+          recovered = r.ok ? "ok" : `failed: ${r.error}`;
+        },
+        (e: unknown) => {
+          recovered = `rejected: ${e instanceof Error ? e.message : String(e)}`;
+        },
+      );
+      for (let i = 0; i < 1000 && recovered === undefined; i++) await ticks(1);
+      if (recovered !== "ok") {
+        violations.push(`no recovery (${recovered ?? "pending"}); ${JSON.stringify(pool.stats())}`);
+      }
+    }
+
     // A second caller of `dispose()` waits for the first one's teardowns.
     disposeCalled = true;
     disposing ??= pool.dispose();
@@ -1429,7 +1514,7 @@ describe("SysboxWorkerPool under random deaths and spawn failures", () => {
     return violations.map((v) => `seed ${seed} (min ${min}, max ${max}): ${v}`);
   }
 
-  it("settles every task, never creates past `max` and leaks no container", async () => {
+  it("settles every task, never creates past `max`, leaks no container and recovers", async () => {
     const violations: string[] = [];
     for (let seed = 1; seed <= 1000; seed++) violations.push(...(await fuzzPool(seed)));
     expect(violations).toEqual([]);

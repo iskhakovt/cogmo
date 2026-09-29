@@ -66,6 +66,23 @@ const STATES = {
     queue: ["q1"],
   },
   looping_empty: { ...EMPTY, earlyDeaths: CRASH_LOOP_DEATHS },
+  /** A probe under way for the waiter. */
+  probing: { ...EMPTY, earlyDeaths: CRASH_LOOP_DEATHS, spawning: 1, queue: ["q1"] },
+  /** The probe refused the waiter's grant: its death is on the way. */
+  probe_refused: {
+    ...EMPTY,
+    earlyDeaths: CRASH_LOOP_DEATHS,
+    workers: [at(W1, "refused")],
+    queue: ["q1"],
+  },
+  /** A spawn under way while the waiter waits for a busy worker. */
+  looping_busy_spawning: {
+    ...EMPTY,
+    earlyDeaths: CRASH_LOOP_DEATHS,
+    workers: [at(W1, "leased")],
+    spawning: 1,
+    queue: ["q1"],
+  },
   disposed: { ...EMPTY, phase: "disposed", spawning: 1 },
 } satisfies Record<string, State>;
 
@@ -143,7 +160,7 @@ const TABLE: ReadonlyArray<Row> = [
   ["nearly_looping", "died_early", ["log", "log"], "w1:dead | q[] | s0 | e3"],
   ["busy", "acquire", ["spawn"], "w1:leased | q[q2] | s1 | e0"],
   ["busy", "died_early", ["log", "spawn"], "w1:dead | q[] | s1 | e0"],
-  ["busy", "grant_refused", ["spawn"], "w1:dead | q[q2] | s1 | e0"],
+  ["busy", "grant_refused", ["spawn"], "w1:refused | q[q2] | s1 | e0"],
   ["busy", "returned", ["release"], "w1:idle+ | q[] | s0 | e0"],
   [
     "busy",
@@ -176,11 +193,17 @@ const TABLE: ReadonlyArray<Row> = [
   ["warm_spawn_failed", "died_early", ["log", "spawn"], "w1:dead | q[] | s1 | e1"],
   ["looping", "acquire", [], "w1:leased | q[q1 q2] | s0 | e3"],
   ["looping", "returned", ["release", "grant"], "w1:leased+ | q[] | s0 | e0"],
-  ["looping", "returned_dead", ["release", "reject"], "w1:dead+ | q[] | s0 | e3"],
+  ["looping", "returned_dead", ["release", "spawn"], "w1:dead+ | q[q1] | s1 | e3"],
   ["looping", "sweep", [], "w1:leased | q[q1] | s0 | e3"],
-  ["looping_empty", "acquire", ["reject"], "- | q[] | s0 | e3"],
+  ["looping_empty", "acquire", ["spawn"], "- | q[q2] | s1 | e3"],
   ["looping_empty", "sweep", ["spawn"], "- | q[] | s1 | e3"],
   ["looping_empty", "died_early", [], "- | q[] | s0 | e3"],
+  ["probing", "acquire", [], "- | q[q1 q2] | s1 | e3"],
+  ["probing", "spawned", ["grant"], "w3:leased | q[] | s0 | e3"],
+  ["probing", "spawn_failed", ["reject"], "- | q[] | s0 | e3 | spawn failed"],
+  ["probe_refused", "acquire", [], "w1:refused | q[q1 q2] | s0 | e3"],
+  ["probe_refused", "died_early", ["log", "reject"], "w1:dead | q[] | s0 | e4"],
+  ["probe_refused", "died_late", ["log", "spawn"], "w1:dead | q[q1] | s1 | e3"],
   ["disposed", "acquire", ["reject"], "- | q[] | s1 | e0 | disposed"],
   ["disposed", "grant_refused", ["reject"], "- | q[] | s1 | e0 | disposed"],
   ["disposed", "spawned", ["teardown"], "- | q[] | s0 | e0 | disposed"],
@@ -243,15 +266,16 @@ describe("the pool machine", () => {
       expect(next.state.queue).toEqual(["q2"]);
     });
 
-    it("fails the queue as a crash loop once no busy worker is left to wait for", () => {
+    it("fails one waiter per probe that dies early, and probes for the next", () => {
       const next = transition<WorkerRef, Waiter>(
-        { ...STATES.looping, queue: ["q1", "q2"] },
-        EVENTS.returned_dead,
+        { ...STATES.probe_refused, queue: ["q1", "q2"] },
+        EVENTS.died_early,
       );
-      expect(next.effects.filter((e) => e.type === "reject")).toEqual([
+      expect(next.effects.filter((e) => e.type !== "log")).toEqual([
         { type: "reject", waiter: "q1", rejection: { kind: "crash_loop" } },
-        { type: "reject", waiter: "q2", rejection: { kind: "crash_loop" } },
+        { type: "spawn" },
       ]);
+      expect(next.state.queue).toEqual(["q2"]);
     });
 
     it("does not count a death as early once a task the worker held has returned", () => {
@@ -284,6 +308,7 @@ type Property =
   | "never more than max workers plus spawns"
   | "no teardown of a held worker"
   | "every waiter settles once workers and spawns do"
+  | "a waiter is served once workers live again"
   | "the pool's view matches its workers";
 
 interface World {
@@ -381,12 +406,15 @@ function check(world: World): void {
   const at = `${summary(state)} (max ${state.sizing.max}, min ${state.sizing.min})`;
   if (room < 0) breaks(world, "never more than max workers plus spawns", at);
   if (state.queue.length > 0) {
+    // While the crash-loop cap holds, a waiter may also wait for a busy
+    // worker, or for the death of a probe that refused its grant.
     const looping = state.earlyDeaths >= CRASH_LOOP_DEATHS;
+    const waitsOnAWorker = state.workers.some(
+      (w) => w.status === "leased" || w.status === "refused",
+    );
     const waitsOnNothing =
       state.workers.some((w) => w.status === "idle") ||
-      (looping
-        ? !state.workers.some((w) => w.status === "leased")
-        : room > 0 && state.spawning === 0);
+      (room > 0 && state.spawning === 0 && !(looping && waitsOnAWorker));
     if (waitsOnNothing) {
       breaks(world, "no waiter pending while there is room and nothing spawning", at);
     }
@@ -512,13 +540,17 @@ function walk(seed: number): World {
     check(world);
   }
 
-  for (let i = 0; i < 10_000; i++) {
-    if (world.inbox.length > 0) deliver(0);
-    else if (world.spawns > 0) land(false, false);
-    else if (world.tasks.length > 0) finish(0, true);
-    else break;
-    check(world);
-  }
+  const settle = (): void => {
+    for (let i = 0; i < 10_000; i++) {
+      if (world.inbox.length > 0) deliver(0);
+      else if (world.spawns > 0) land(false, false);
+      else if (world.tasks.length > 0) finish(0, true);
+      else break;
+      check(world);
+    }
+  };
+
+  settle();
   const waiting = [...world.waiters].filter(([, s]) => s === "waiting").map(([q]) => q);
   if (waiting.length > 0) {
     breaks(
@@ -526,6 +558,16 @@ function walk(seed: number): World {
       "every waiter settles once workers and spawns do",
       `${waiting.join(", ")} in ${summary(world.state)}`,
     );
+  }
+
+  if (world.state.phase === "running") {
+    const before = summary(world.state);
+    world.waiters.set("q-recovery", "waiting");
+    feed(world, { type: "acquire", waiter: "q-recovery" });
+    settle();
+    if (world.waiters.get("q-recovery") !== "granted") {
+      breaks(world, "a waiter is served once workers live again", before);
+    }
   }
   return world;
 }
@@ -547,6 +589,7 @@ describe("the pool machine over random schedules", () => {
     "never more than max workers plus spawns",
     "no teardown of a held worker",
     "every waiter settles once workers and spawns do",
+    "a waiter is served once workers live again",
     "the pool's view matches its workers",
   ])("%s", (property) => {
     expect(broken.get(property)?.slice(0, 3) ?? []).toEqual([]);

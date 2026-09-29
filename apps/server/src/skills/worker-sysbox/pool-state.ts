@@ -13,8 +13,9 @@ import type { Death } from "../worker-state.js";
  * grants idle workers to the head of the queue, then spawns for every
  * waiter and every worker short of `min`, less the spawns under way, room
  * permitting. No waiter is left waiting on nothing, whichever event queued
- * it: it has a spawn under way, a full pool to wait on, or — while the
- * crash-loop cap holds — a busy worker; failing that it is rejected.
+ * it: it has a spawn under way or a full pool to wait on, or — while the
+ * crash-loop cap holds — a busy worker, a probe under way, or the death of
+ * a probe that refused its grant.
  *
  * The workers stay authoritative: a `grant` holds only if the worker takes
  * the lease, and `died` and `disposable` are the worker's own report.
@@ -24,8 +25,9 @@ import type { Death } from "../worker-state.js";
  * Early deaths in a row after which a dead worker is no longer replaced at
  * once. A death is early when the worker dies on its own, never leased,
  * within `CRASH_LOOP_WINDOW_MS` of its handshake. An image whose supervisor
- * cannot run would otherwise create and delete containers back to back; the
- * sweep still tries one spawn per interval. A task that returns with its
+ * cannot run would otherwise create and delete containers back to back.
+ * Instead, waiters with no busy worker to wait for probe one spawn at a
+ * time, and the sweep spawns one toward `min`. A task that returns with its
  * worker alive clears the count.
  */
 export const CRASH_LOOP_DEATHS = 3;
@@ -53,8 +55,12 @@ export interface PoolSizing {
 /** One worker in the pool. A dead one counts toward `max` until it is disposable. */
 export interface PoolWorker<W extends WorkerRef> {
   readonly worker: W;
-  /** `idle` can be granted; `leased` is held by a task; `dead` runs nothing more. */
-  readonly status: "idle" | "leased" | "dead";
+  /**
+   * `idle` can be granted; `leased` is held by a task; `refused` refused a
+   * grant, so it has died and its `died` is on the way; `dead` runs nothing
+   * more.
+   */
+  readonly status: "idle" | "leased" | "refused" | "dead";
   /** A task it held has returned. */
   readonly served: boolean;
 }
@@ -150,15 +156,15 @@ export function transition<W extends WorkerRef, Q>(
 
 /**
  * Bring the pool to rest: grant idle workers to the head of the queue, then
- * spawn for the rest, or — while the crash-loop cap holds — fail the queue
- * if no busy worker is left to wait for. Level-triggered: it reads only the
- * state, so it is idempotent.
+ * spawn for the rest, or — while the crash-loop cap holds — probe for the
+ * queue one spawn at a time. Level-triggered: it reads only the state, so it
+ * is idempotent.
  */
 export function reconcile<W extends WorkerRef, Q>(state: PoolState<W, Q>): PoolTransition<W, Q> {
   if (state.phase === "disposed") return step(state, []);
   const granted = grantIdle(state);
   const next = crashLooping(granted.state)
-    ? holdOrFail(granted.state)
+    ? waitOrProbe(granted.state)
     : spawnForDemand(granted.state);
   return step(next.state, [...granted.effects, ...next.effects]);
 }
@@ -185,7 +191,11 @@ function onEvent<W extends WorkerRef, Q>(
     .with({ type: "spawn_failed" }, ({ error }) => onSpawnFailed(state, error))
     .with({ type: "grant_refused" }, ({ worker, waiter }) =>
       step(
-        { ...state, workers: markDead(state.workers, worker), queue: [waiter, ...state.queue] },
+        {
+          ...state,
+          workers: withStatus(state.workers, worker, "refused"),
+          queue: [waiter, ...state.queue],
+        },
         [],
       ),
     )
@@ -252,6 +262,12 @@ function onSpawnFailed<W extends WorkerRef, Q>(
   return step({ ...next, queue }, [reject(waiter, { kind: "spawn_failed", error })]);
 }
 
+/**
+ * A worker died. A death is replaced at once, even after a failed spawn. An
+ * early death while the crash-loop cap holds, with no busy worker to wait
+ * for, is the head waiter's probe dying: it fails that waiter, and
+ * `reconcile` probes for the next.
+ */
 function onDied<W extends WorkerRef, Q>(
   state: PoolState<W, Q>,
   worker: W,
@@ -265,24 +281,28 @@ function onDied<W extends WorkerRef, Q>(
     entry.status !== "leased" &&
     !entry.served &&
     ageMs < CRASH_LOOP_WINDOW_MS;
-  const earlyDeaths = early ? state.earlyDeaths + 1 : state.earlyDeaths;
-  // A death is replaced at once, even after a failed spawn.
-  const workers = markDead(state.workers, worker);
-  return step({ ...state, earlyDeaths, spawnFailed: false, workers }, [
+  const next = {
+    ...state,
+    earlyDeaths: early ? state.earlyDeaths + 1 : state.earlyDeaths,
+    spawnFailed: false,
+    workers: markDead(state.workers, worker),
+  };
+  const logs = [
     log("debug", "worker died", { workerId: worker.workerId, ...death }),
-    ...(early && earlyDeaths === CRASH_LOOP_DEATHS
+    ...(early && next.earlyDeaths === CRASH_LOOP_DEATHS
       ? [
-          log(
-            "warn",
-            "workers keep dying before their first task — replacing them on the sweep only",
-            {
-              deaths: earlyDeaths,
-              reason: death.reason,
-            },
-          ),
+          log("warn", "workers keep dying before their first task — probing one spawn at a time", {
+            deaths: next.earlyDeaths,
+            reason: death.reason,
+          }),
         ]
       : []),
-  ]);
+  ];
+  const [waiter, ...queue] = next.queue;
+  if (!early || !crashLooping(next) || busy(next) || waiter === undefined) {
+    return step(next, logs);
+  }
+  return step({ ...next, queue }, [...logs, reject(waiter, { kind: "crash_loop" })]);
 }
 
 /**
@@ -338,8 +358,8 @@ function onTaskReturned<W extends WorkerRef, Q>(
 /**
  * Retire idle workers above `min` that have sat past `idleShutdownMs`, and
  * lift a failed spawn's hold on replacing workers up to `min`. While the
- * crash-loop cap holds, spawn one worker toward `min`: the sweep is the only
- * replacement then.
+ * crash-loop cap holds and nothing is spawning, spawn one worker toward
+ * `min`: the sweep is the only replacement then.
  */
 function onSweep<W extends WorkerRef, Q>(
   state: PoolState<W, Q>,
@@ -355,7 +375,8 @@ function onSweep<W extends WorkerRef, Q>(
     spawnFailed: false,
     workers: R.reduce(swept, (workers, worker) => markDead(workers, worker), state.workers),
   };
-  const probe = crashLooping(retired) && deficit(retired) > retired.spawning && room(retired) > 0;
+  const probe =
+    crashLooping(retired) && deficit(retired) > 0 && retired.spawning === 0 && room(retired) > 0;
   return step(probe ? { ...retired, spawning: retired.spawning + 1 } : retired, [
     ...swept.flatMap(
       (worker): ReadonlyArray<PoolEffect<W, Q>> => [
@@ -402,18 +423,19 @@ function spawnForDemand<W extends WorkerRef, Q>(state: PoolState<W, Q>): PoolTra
 }
 
 /**
- * While the crash-loop cap holds, nothing spawns for a waiter, since a spawn
- * would only die too: the queue waits for a busy worker, or fails if none is
- * busy.
+ * While the crash-loop cap holds, the queue waits for a busy worker. With
+ * none, it waits on one probe spawn at a time, which the head takes: a probe
+ * that lives serves it, one that dies fails it (`onDied`), so a spawn that
+ * would only die too costs one waiter, not a container per event.
  */
-function holdOrFail<W extends WorkerRef, Q>(state: PoolState<W, Q>): PoolTransition<W, Q> {
-  if (state.queue.length === 0 || state.workers.some((w) => w.status === "leased")) {
-    return step(state, []);
-  }
-  return step(
-    { ...state, queue: [] },
-    state.queue.map((waiter) => reject(waiter, { kind: "crash_loop" })),
-  );
+function waitOrProbe<W extends WorkerRef, Q>(state: PoolState<W, Q>): PoolTransition<W, Q> {
+  const probe =
+    state.queue.length > 0 &&
+    !busy(state) &&
+    !state.workers.some((w) => w.status === "refused") &&
+    state.spawning === 0 &&
+    room(state) > 0;
+  return probe ? step({ ...state, spawning: 1 }, [SPAWN]) : step(state, []);
 }
 
 // --- helpers ---
@@ -422,9 +444,14 @@ function crashLooping<W extends WorkerRef, Q>(state: PoolState<W, Q>): boolean {
   return state.earlyDeaths >= CRASH_LOOP_DEATHS;
 }
 
+/** A task holds a live worker. */
+function busy<W extends WorkerRef, Q>(state: PoolState<W, Q>): boolean {
+  return state.workers.some((w) => w.status === "leased");
+}
+
 /** Workers short of `min`, counting the live ones and one per waiter. */
 function deficit<W extends WorkerRef, Q>(state: PoolState<W, Q>): number {
-  const live = state.workers.filter((w) => w.status !== "dead").length;
+  const live = state.workers.filter((w) => w.status === "idle" || w.status === "leased").length;
   return Math.max(0, state.sizing.min - live - state.queue.length);
 }
 
@@ -433,14 +460,22 @@ function room<W extends WorkerRef, Q>(state: PoolState<W, Q>): number {
   return state.sizing.max - state.workers.length - state.spawning;
 }
 
+function withStatus<W extends WorkerRef>(
+  workers: ReadonlyArray<PoolWorker<W>>,
+  worker: W,
+  status: PoolWorker<W>["status"],
+): ReadonlyArray<PoolWorker<W>> {
+  return workers.map((w) => (w.worker === worker ? { ...w, status } : w));
+}
+
 function markDead<W extends WorkerRef>(
   workers: ReadonlyArray<PoolWorker<W>>,
   worker: W,
 ): ReadonlyArray<PoolWorker<W>> {
-  return workers.map((w) => (w.worker === worker ? { ...w, status: "dead" } : w));
+  return withStatus(workers, worker, "dead");
 }
 
-/** The worker's task returned: it goes `status`, unless it is dead already. */
+/** The worker's task returned: it goes `status`, unless it has died meanwhile. */
 function returnedTo<W extends WorkerRef>(
   workers: ReadonlyArray<PoolWorker<W>>,
   worker: W,
@@ -448,7 +483,7 @@ function returnedTo<W extends WorkerRef>(
 ): ReadonlyArray<PoolWorker<W>> {
   return workers.map((w) =>
     w.worker === worker
-      ? { worker, status: w.status === "dead" ? "dead" : status, served: true }
+      ? { worker, status: w.status === "leased" ? status : w.status, served: true }
       : w,
   );
 }

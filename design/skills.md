@@ -188,7 +188,7 @@ Each worker channel, in both tiers, is one pure state machine (`src/skills/worke
 
 ### Pool lifecycle `[confirmed]`
 
-The pool's bookkeeping is a second pure state machine (`src/skills/worker-sysbox/pool-state.ts`) over `{ phase, workers, spawning, queue, earlyDeaths, spawnFailed }`, each worker `idle`, `leased` or `dead` as the pool last heard. `transition(state, event)` returns the next state and the effects to carry out — spawn, grant, reject, retire, release, tear down, log — and `SysboxWorkerPool` is its shell.
+The pool's bookkeeping is a second pure state machine (`src/skills/worker-sysbox/pool-state.ts`) over `{ phase, workers, spawning, queue, earlyDeaths, spawnFailed }`, each worker `idle`, `leased`, `refused` (it refused a grant; its `died` is on the way) or `dead` as the pool last heard. `transition(state, event)` returns the next state and the effects to carry out — spawn, grant, reject, retire, release, tear down, log — and `SysboxWorkerPool` is its shell.
 
 | Event | From |
 |-|-|
@@ -200,12 +200,12 @@ The pool's bookkeeping is a second pure state machine (`src/skills/worker-sysbox
 | `sweep` | the interval, with each worker's idle time |
 | `dispose` | `dispose()` |
 
-- Every transition ends in `reconcile`, which reads only the state: it grants idle workers to the oldest waiters, then spawns for every waiter and every worker still short of `min` — a waiter's worker counts toward `min` once granted — less the spawns under way, room permitting. A waiter always has a spawn under way or a full pool to wait on, whichever event queued it.
-- The worker stays authoritative for leases: the shell grants with `tryAcquire`, and a refusal comes back as `grant_refused`, which marks the worker dead and puts the waiter back at the head of the queue.
+- Every transition ends in `reconcile`, which reads only the state: it grants idle workers to the oldest waiters, then spawns for every waiter and every worker still short of `min` — a waiter's worker counts toward `min` once granted — less the spawns under way, room permitting. Whichever event queued it, a waiter has something to wait on: a spawn under way or a full pool, or, while the crash-loop cap holds, a busy worker, a probe under way, or the death of a probe that refused its grant.
+- The worker stays authoritative for leases: the shell grants with `tryAcquire`, and a refusal comes back as `grant_refused`, which marks the worker `refused` and puts the waiter back at the head of the queue.
 - A dead worker counts toward `max` until it is disposable — at once, or once the task holding it returns — and its container is then torn down. A container tearing down does not count, so while teardowns run the sandbox can hold more than `max`.
 - A task that returns with its worker alive clears the early deaths, and the worker is retired first at `recycleAfterTasks` or `recycleAfterMs`. A worker whose `invoke` threw is retired.
 - A failed spawn fails the oldest waiter, and `reconcile` spawns for the next. Until a spawn succeeds, a worker dies or the sweep runs, only waiters spawn, so a sandbox that fails every spawn is not retried for `min` in a loop.
-- A death is early when the worker died on its own (`worker`, not `host`), never leased, within a minute of its handshake. After three early deaths in a row nothing spawns but one worker toward `min` per sweep, and a waiter waits for a busy worker or fails if none is busy.
+- A death is early when the worker died on its own (`worker`, not `host`), never leased, within a minute of its handshake. After three early deaths in a row, a dead worker is not replaced at once. A waiter waits for a busy worker; with none, the queue probes one spawn at a time, once any refused probe's death is heard. The head waiter takes the probe: one that lives serves it, one that dies early fails it, and the next waiter probes again. The sweep spawns one worker toward `min` when nothing is spawning. Whatever `min` is, an acquire after the fault clears is served without a sweep or a restart.
 - The sweep retires idle workers above `min` that have sat past `idleShutdownMs`.
 - `dispose()` aborts the signal every worker was created with — a live worker's channel closes, a spawn stops at its next step — rejects every waiter, and tears down every worker, held ones included. A worker that spawns afterwards is torn down; `dispose()` returns once no spawn or teardown is left.
 
