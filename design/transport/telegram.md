@@ -19,7 +19,7 @@ Implements `AdapterModule` contract (`channelType` + `setup()`). Token extracted
 2. Send `sendChatAction("typing")` immediately
 3. Call `transport.emit(session.id, content)`
 
-Photos, documents and voice notes upload their original bytes through `transport.uploadAttachment` and emit a block carrying the path; `create-user-message` normalizes the images and checks the documents ([attachments.md](attachments.md), `[proposed]`).
+Photos, documents and voice notes upload their original bytes through `transport.uploadAttachment` and emit a block carrying the path; `create-user-message` normalizes the images and checks the documents ([attachments.md](attachments.md), `[proposed]`). `[proposed]` A document's block, an `image/*` one included, carries its `file_name` as `name`. A file whose `file_size` exceeds the Bot API's 20 MB download limit, which `getFile` refuses, is emitted as a block naming the file and its size, with no path, so the user gets the too-large placeholder rather than silence.
 
 **Platform address:** `String(ctx.chat.id)` — delivery target for `sendMessage`. In DMs, equals the user's Telegram ID. In groups, a separate group ID.
 
