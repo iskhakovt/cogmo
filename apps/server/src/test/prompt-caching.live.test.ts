@@ -28,16 +28,16 @@ import {
 import { AnthropicProvider } from "../llm/anthropic.js";
 import { type Message, MessageContentSchema } from "../llm/types.js";
 import { logger } from "../logger.js";
-import { DEFAULT_BASE_PROMPT } from "../setup/seed.js";
+import { DEFAULT_BASE_PROMPT, DEFAULT_PROFILE_MODEL } from "../setup/seed.js";
 import { expectDefined } from "./assertions.js";
 import { createWireRecorder, type WireRequestInit, type WireResponse } from "./wire-recorder.js";
 
 // An empty `ANTHROPIC_API_KEY=` line in `.env` counts as unset.
 const API_KEY = (process.env.LIVE === "1" && process.env.ANTHROPIC_API_KEY) || undefined;
 
-const CHAT_MODEL = "claude-sonnet-5";
+const CHAT_MODEL = DEFAULT_PROFILE_MODEL;
 const ENFORCED_MODEL = "claude-opus-5-5";
-/** Sonnet 5's minimum cacheable prefix, the larger of the two models'. */
+/** Sonnet 5's minimum cacheable prefix, at or above every current chat model's (Sonnet 5.5 and Opus 5.5: 512). */
 const MIN_CACHEABLE_TOKENS = 1024;
 const TIMEZONE = "Europe/London";
 const FACT = "The user runs a three-node Proxmox cluster in their homelab.";
