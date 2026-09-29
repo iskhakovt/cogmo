@@ -190,7 +190,7 @@ interface VoiceRef {
 
 The orchestrator resolves `voice_ref` blocks to text via `step.run("transcribe-voice")` (see below) and replaces them with `text` blocks before passing to the LLM. The LLM never sees raw audio or a "voice block" — just plain text from transcription, like any other user input. A forwarded clip's transcript is forwarded text ([transport/telegram.md](transport/telegram.md#forwarded-messages)).
 
-**Modality detection** for `auto` mode is purely structural: the orchestrator scans the most recent inbound row's content; presence of a voice block = `lastInboundWasVoice = true`.
+**Modality detection** for `auto` mode is purely structural: the orchestrator scans the most recent inbound row's content; presence of a voice block the user recorded = `lastInboundWasVoice = true`. A forwarded voice block doesn't count (`isVoiceContent`).
 
 ### Inbound flow (Telegram voice → text)
 

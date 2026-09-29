@@ -194,8 +194,8 @@ export function contentToBlocks(content: InboundContent): InboundBlock[] {
  * Inbound text — a text block's, or a voice clip's transcript — as the
  * transcript carries it: as it is, or when `forwarded` inside a
  * `<forwarded_message>` element naming its sender, so the model never reads it
- * as the user's words. A pure function of its inputs, so the user message it
- * lands in stores the same bytes on every turn.
+ * as the user's words. A pure function of its inputs, so every render of the
+ * row gives the same bytes.
  */
 export function renderInboundText(text: string, forwarded: ForwardedOrigin | undefined): string {
   if (forwarded === undefined) return text;

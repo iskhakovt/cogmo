@@ -470,16 +470,12 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             })
           : [];
 
-      // Single source of truth for "what does each inbound row look like
-      // after voice transcription?". A forwarded clip's transcript keeps the
-      // clip's `forwarded` marking, as forwarded text does. Every consumer
-      // below derives from this — userContentText for persistence and
-      // resolvedBlocks for the LLM call render the marking into its
-      // `<forwarded_message>` element; the recall query reads the bare text —
-      // eliminating the parallel-cursor pattern that was fragile under
-      // walk-order changes. Cursor advances across rows in the same order
-      // `transcripts` was produced (inboundMessages.flatMap order, voice refs
-      // only).
+      // Each inbound row after voice transcription: every consumer below
+      // derives from this. A forwarded clip's transcript keeps the clip's
+      // `forwarded` marking, as forwarded text does; userContentText and
+      // resolvedBlocks render it into its `<forwarded_message>` element, and
+      // the recall query reads the bare text. The cursor walks `transcripts`
+      // in the order they were produced: voice blocks, in inbound order.
       const substitutedMessages = ((): ReadonlyArray<{ content: InboundContent }> => {
         let cursor = 0;
         return inboundMessages.map((m) => {
