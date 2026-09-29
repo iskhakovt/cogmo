@@ -299,22 +299,25 @@ Inngest re-invokes the function at every step boundary (and on retries), and `de
 
 ```typescript
 // Inside TelegramAdapter
-#activeStreams = new Map<string, TelegramStreamHandle>();
+#activeStreams = new Map<string, SettlingStreamHandle>();
 
 async openStream(platformAddress: string, runId: string, opts?: StreamOpts): Promise<StreamHandle> {
   const existing = this.#activeStreams.get(runId);
   if (existing) return existing; // re-invocation — keep writing the same message
 
-  const handle = new TelegramStreamHandle(this.#bot, this.#attachments, chatId, runId, opts);
+  const handle = new TelegramStreamHandle(bot, attachments, chatId, runId, opts, sentMediaOf(runId));
   this.#activeStreams.set(runId, handle);
-  void handle.done.then(() => this.#activeStreams.delete(runId));
+  void handle.done.then((outcome) => {
+    if (this.#activeStreams.get(runId) === handle) this.#activeStreams.delete(runId);
+    if (outcome.isOk()) this.#sentMedia.delete(runId);
+  });
   return handle;
 }
 ```
 
 This works because Inngest connect mode runs in a long-lived process — the in-memory map survives across retries. If the process itself crashes, the map is lost but the old Telegram message is also unreachable (we don't know its ID), so creating a new one is correct.
 
-A handle leaves the map once it settles — finished, aborted, or failed. A failed handle leaving is what lets a retry recover: the retry of the step whose push failed opens a fresh handle and streams into a new message.
+A handle leaves the map once it settles — finished, aborted, or failed. A failed handle leaving is what lets a retry recover: the retry of the step whose push failed opens a fresh handle and streams into a new message. The media a run has sent is recorded per run, not per handle, so the fresh handle doesn't send a photo again; the record goes once a handle settles ok.
 
 ## LLM Provider: `chatStream()`
 
@@ -412,11 +415,19 @@ Each failure has one answer:
 | Rate limit: wait `retry_after` | Wait; the first preview after it carries the latest text | Wait, then write it again |
 | Transient: wait 1s, doubling with each further failure in a row | Wait; the first preview after it carries the latest text | Wait, then write it again |
 | The fifth rate-limited or transient failure in a row, or a wait over 30s | Fail | Fail |
+| A wait that would end more than 60s after `finish` or `abort` | — (previews don't wait on a close) | Fail; the reply goes out again through `redeliver-unstreamed` |
 | `can't parse entities` | — (previews are plain) | Write the source as plain text; fail if that is rejected too |
-| Edit target gone | Fail; the step's retry re-streams | Send it as a new message, so the user never keeps a cut-short reply the turn persists in full. That is a send, which can't fail this way, so it happens once; fail if it is rejected |
+| Edit target gone | The stream carries on in a new message: the next preview is a send | Send it as a new message, so the user never keeps a cut-short reply the turn persists in full |
 | Anything else | Fail | Fail |
 
-A failed handle settles `done` with the reason, stops the typing heartbeat, leaves `#activeStreams`, and answers every later call with its failure without writing. The heartbeat is bound to the handle's `AbortSignal`, which aborts once the stream takes no more content, and its interval is unref'd.
+A send can't find its edit target gone, so a lost message costs one resend. The 60s close budget is two of the longest waits, or a whole transient backoff with room for the writes; waits while streaming don't count against it, since nothing awaits them. A throw inside `transition` fails the handle rather than leave a write it thinks is in flight, and a chunk whose HTML render throws is written as plain text.
+
+A failed handle resolves `done` with `err(reason)`, stops the typing heartbeat, leaves `#activeStreams`, and answers every later call with its failure without writing. The heartbeat is bound to the handle's `AbortSignal`, which aborts once the stream takes no more content, and its interval is unref'd.
+
+Accepted:
+
+- **At-least-once writes.** A 5xx or `HttpError` on a send that in fact landed is sent again, so the user can see a message twice.
+- **Media order on failure paths.** Photos and files go out when their tool result arrives, so a chunk still waiting on a retry can land after a photo that followed it.
 
 ## Routing
 
