@@ -204,6 +204,7 @@ const TABLE: ReadonlyArray<Row> = [
   ["probe_refused", "acquire", [], "w1:refused | q[q1 q2] | s0 | e3"],
   ["probe_refused", "died_early", ["log", "reject"], "w1:dead | q[] | s0 | e4"],
   ["probe_refused", "died_late", ["log", "spawn"], "w1:dead | q[q1] | s1 | e3"],
+  ["looping_busy_spawning", "spawn_failed", ["log"], "w1:leased | q[q1] | s0 | e3 | spawn failed"],
   ["disposed", "acquire", ["reject"], "- | q[] | s1 | e0 | disposed"],
   ["disposed", "grant_refused", ["reject"], "- | q[] | s1 | e0 | disposed"],
   ["disposed", "spawned", ["teardown"], "- | q[] | s0 | e0 | disposed"],

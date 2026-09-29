@@ -245,6 +245,8 @@ function afterDisposal<W extends WorkerRef, Q>(
 /**
  * A failed spawn fails the head of the queue, which would otherwise wait on
  * a worker that is never coming; `reconcile` then spawns for the next one.
+ * While the crash-loop cap holds, a waiter waits for a busy worker, not a
+ * spawn, so with one busy the failure fails no one.
  */
 function onSpawnFailed<W extends WorkerRef, Q>(
   state: PoolState<W, Q>,
@@ -252,7 +254,7 @@ function onSpawnFailed<W extends WorkerRef, Q>(
 ): PoolTransition<W, Q> {
   const next = { ...state, spawning: state.spawning - 1, spawnFailed: true };
   const [waiter, ...queue] = state.queue;
-  if (waiter === undefined) {
+  if (waiter === undefined || (crashLooping(state) && busy(state))) {
     return step(next, [
       log("warn", "worker spawn failed; the pool stays below min until a death or the sweep", {
         err: describeError(error),
