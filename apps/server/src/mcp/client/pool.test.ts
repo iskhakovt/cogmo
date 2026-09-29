@@ -324,11 +324,13 @@ describe("McpConnectionPool.evict / close", () => {
     const pending = pool.getConnection("s1");
     await vi.waitFor(() => expect(spawn).toHaveBeenCalledOnce());
 
+    // Attached before the evict, which fails the call as it runs.
+    const failed = expect(pending).rejects.toMatchObject({ code: "evicted" });
     const evicted = settledFlag(pool.evict("s1"));
+    await failed;
     await flush();
     expect(evicted.settled).toBe(false);
     expect(expectDefined(spawn.mock.calls[0], "spawn call")[3].aborted).toBe(true);
-    await expect(pending).rejects.toMatchObject({ code: "evicted" });
 
     spawned.resolve(conn);
     await evicted.promise;
@@ -344,10 +346,12 @@ describe("McpConnectionPool.evict / close", () => {
     const pending = pool.getConnection("s1");
     await vi.waitFor(() => expect(spawn).toHaveBeenCalledOnce());
 
+    // Attached before the close, which fails the call as it runs.
+    const failed = expect(pending).rejects.toMatchObject({ code: "pool_closed" });
     const closing = settledFlag(pool.close());
+    await failed;
     await flush();
     expect(closing.settled).toBe(false);
-    await expect(pending).rejects.toMatchObject({ code: "pool_closed" });
 
     spawned.resolve(conn);
     await closing.promise;
