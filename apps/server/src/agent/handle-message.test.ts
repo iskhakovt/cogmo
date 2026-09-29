@@ -1,4 +1,5 @@
 import { NonRetriableError } from "inngest";
+import { err } from "neverthrow";
 import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { z } from "zod";
@@ -35,6 +36,7 @@ import {
   turnContextSent,
 } from "../test/factories.js";
 import type { InboundContent } from "../transport/content.js";
+import { StreamDeliveryError } from "../transport/delivery-router.js";
 import { coreMemoryTools } from "./core-memory-tools.js";
 import type { HandleMessageDeps } from "./handle-message.js";
 import { createHandleMessage } from "./handle-message.js";
@@ -4194,6 +4196,109 @@ describe("createHandleMessage", () => {
       }
       expect(caught).toBeInstanceOf(NonRetriableError);
       expect((caught as NonRetriableError).cause).toBe(badRequest);
+    });
+  });
+
+  describe("stream delivery failures", () => {
+    const deliveryFailed = new StreamDeliveryError([
+      { sessionId: "session-tg", reason: "telegram: chat not found" },
+    ]);
+
+    async function runTurn(deps: HandleMessageDeps): Promise<unknown> {
+      return invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      }).then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+    }
+
+    it("keeps a deterministic loop error non-retriable when the abort fails", async () => {
+      const badRequest = Object.assign(new Error("Bad Request"), { status: 400 });
+      const handle = mockDeliveryHandle({ abort: vi.fn().mockResolvedValue(err(deliveryFailed)) });
+      const deps = mockDeps({
+        deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+        runStreamingAgentLoop: vi.fn().mockRejectedValue(badRequest),
+      });
+
+      const caught = await runTurn(deps);
+
+      expect(handle.abort).toHaveBeenCalledWith("Bad Request");
+      expect(caught).toBeInstanceOf(NonRetriableError);
+      expect((caught as NonRetriableError).cause).toBe(badRequest);
+    });
+
+    it("rethrows a retriable loop error as itself when the abort fails", async () => {
+      const transient = new Error("socket hang up");
+      const handle = mockDeliveryHandle({ abort: vi.fn().mockResolvedValue(err(deliveryFailed)) });
+      const deps = mockDeps({
+        deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+        runStreamingAgentLoop: vi.fn().mockRejectedValue(transient),
+      });
+
+      expect(await runTurn(deps)).toBe(transient);
+    });
+
+    it("delivers the persisted reply through a durable step when a stream fails at finish", async () => {
+      // An append-only stream shows nothing before its finish, so the reply
+      // goes out again through the target's batch delivery, in a step whose
+      // retries can outlast a long wait.
+      const handle = mockDeliveryHandle({ finish: vi.fn().mockResolvedValue(err(deliveryFailed)) });
+      const deps = mockDeps({
+        deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+      });
+      const step = mockStep();
+
+      const caught = await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+        event: testEvent,
+        step,
+        runId: testRunId,
+      }).then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+
+      expect(caught).toBeUndefined();
+      expect(handle.abort).not.toHaveBeenCalled();
+      expect(handle.deliverUnstreamed).toHaveBeenCalledExactlyOnceWith(
+        ["session-tg"],
+        "Hello from assistant",
+      );
+      const stepIds = step.run.mock.calls.map((call) => String(call[0]));
+      expect(stepIds.indexOf("finish-stream")).toBeGreaterThan(-1);
+      expect(stepIds.indexOf("redeliver-unstreamed")).toBeGreaterThan(
+        stepIds.indexOf("persist-new-messages"),
+      );
+    });
+
+    it("redelivers nothing when every stream finished", async () => {
+      const handle = mockDeliveryHandle();
+      const deps = mockDeps({
+        deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+      });
+
+      expect(await runTurn(deps)).toBeUndefined();
+      expect(handle.deliverUnstreamed).not.toHaveBeenCalled();
+    });
+
+    it("fails the streaming step when a push fails, so its retry reopens the streams", async () => {
+      let pushOutcome: unknown;
+      const handle = mockDeliveryHandle({ push: vi.fn().mockResolvedValue(err(deliveryFailed)) });
+      const deps = mockDeps({
+        deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+        runStreamingAgentLoop: vi.fn().mockImplementation(async (params) => {
+          pushOutcome = await params.onEvent({ type: "text_delta", text: "hi" }).then(
+            () => "resolved",
+            (e: unknown) => e,
+          );
+          throw pushOutcome;
+        }),
+      });
+
+      expect(await runTurn(deps)).toBe(deliveryFailed);
+      expect(pushOutcome).toBe(deliveryFailed);
     });
   });
 });

@@ -1,3 +1,4 @@
+import type { Result } from "neverthrow";
 import type { JsonValue } from "type-fest";
 import type { StreamEvent } from "../llm/types.js";
 import type { OutboundVoice, RenderedMessage } from "./adapter-module.js";
@@ -51,11 +52,17 @@ export interface StreamOpts {
 /**
  * Handle to an in-progress stream delivery.
  * The adapter is a renderer — it decides how to display each StreamEvent.
+ *
+ * Delivery failures come back as values, never as rejections. A handle that
+ * fails stops writing: every later call errs with the same reason, and the
+ * adapter's next `openStream` for the run returns a fresh handle.
  */
 export interface StreamHandle {
-  push(event: StreamEvent): Promise<void>;
-  finish(): Promise<void>;
-  abort(error: string): Promise<void>;
+  push(event: StreamEvent): Promise<Result<void, string>>;
+  /** Write out what remains; resolves once the stream has settled. */
+  finish(): Promise<Result<void, string>>;
+  /** Close the stream showing `error`; resolves once the stream has settled. */
+  abort(error: string): Promise<Result<void, string>>;
 }
 
 export function isStreamingAdapter(

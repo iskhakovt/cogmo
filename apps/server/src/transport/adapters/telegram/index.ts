@@ -2,8 +2,6 @@ import { Bot, InputFile } from "grammy";
 import type { JsonValue } from "type-fest";
 import { PLAN_CALLBACK_REGEX, parsePlanCallback } from "../../../agent/coding/plan-keyboard.js";
 import { startCodingProgressSubscriber } from "../../../agent/coding/progress-subscriber.js";
-import { parseGeneratedDocumentPayload } from "../../../agent/document-tools.js";
-import { parseGeneratedImagePayload } from "../../../agent/image-tools.js";
 import {
   PIPELINE_GATE_CALLBACK_REGEX,
   parsePipelineGateCallback,
@@ -14,7 +12,6 @@ import {
   pipelineGatePending,
   skillsDeployApprovalRequested,
 } from "../../../inngest/events.js";
-import type { StreamEvent } from "../../../llm/types.js";
 import { logger } from "../../../logger.js";
 import {
   parseSkillsApprovalCallback,
@@ -67,27 +64,12 @@ import { ProfileDialogs } from "./profile-dialog.js";
 import { renderTelegramHtml, stripHtmlTags } from "./render.js";
 import { RepoDialogs } from "./repo-dialog.js";
 import { postSkillsApprovalKeyboard } from "./skills-approval-poster.js";
+import { type SettlingStreamHandle, TelegramStreamHandle } from "./stream-handle.js";
+import { splitAtCap } from "./stream-state.js";
 
 export const channelType = "telegram";
 
-// Telegram caps a single text message at 4096 chars. Streaming edits that
-// crossed this cap previously raised MESSAGE_TOO_LONG, killing the conversation
-// at the boundary. Per-profile `streamChunkChars` rotates earlier (down to
-// 100); the hard 4096 cap below stays as the HTML fallback threshold. Chunks
-// whose HTML render still exceeds the cap fall back to plain text.
-const TELEGRAM_MAX_MESSAGE_LENGTH = 4096;
 const TELEGRAM_CHUNK_TARGET_DEFAULT = 4000;
-// Anything smaller than this in the head produces a sliver of a message; we'd
-// rather hard-cut later in the source than emit a sub-half-screen first chunk.
-// Empirical choice — fits a short Telegram message bubble (~3-4 lines of text
-// in the standard mobile UI). Used as the floor for `findTelegramSplitBoundary`
-// at the default target; at low per-profile targets the boundary-finder picks
-// a proportional floor (target/4) instead.
-const TELEGRAM_MIN_HEAD_CHARS = 500;
-// Refresh interval for the `sendChatAction("typing")` heartbeat used in
-// append-only mode. Telegram's typing action auto-clears after ~5s, so we
-// refresh inside that window. 3500ms leaves a small overlap.
-const TELEGRAM_TYPING_REFRESH_MS = 3500;
 
 /**
  * Max characters in the first-user-message snippet used for the "↶ Resume X"
@@ -109,69 +91,12 @@ const BOUNDARY_SNIPPET_MAX_CHARS = 25;
  */
 const BOUNDARY_CALLBACK_REGEX = /^boundary:([0-9a-f-]{36}):(resume|fresh)$/;
 
-/**
- * If `head` ends inside an open fenced code block, close the fence at the
- * end of `head` and re-open it at the start of `tail` with the same language
- * tag. Otherwise return the pair unchanged. Indented (non-fenced) code
- * blocks need no rebalancing — they have no delimiters.
- *
- * Scope: backtick fences only, recognised on a line with no leading indent.
- * Tilde fences (~~~) and indented fences (up to 3 leading spaces under
- * CommonMark) aren't handled — they're vanishingly rare in LLM output. The
- * state machine toggles on each fence line, which matches CommonMark when
- * the document only uses 3-backtick fences. Inline single-backtick code
- * spans (\`like this\`) are also out of scope — a split inside one leaks a
- * literal backtick at the boundary.
- */
-export function rebalanceCodeFence(head: string, tail: string): { head: string; tail: string } {
-  const fenceLineRe = /^(?:`{3,})(\w*)/;
-  let inFence = false;
-  let fenceLang = "";
-  for (const line of head.split("\n")) {
-    const m = line.match(fenceLineRe);
-    if (!m) continue;
-    if (!inFence) {
-      inFence = true;
-      fenceLang = m[1] ?? "";
-    } else {
-      inFence = false;
-      fenceLang = "";
-    }
-  }
-  if (!inFence) return { head, tail };
-  const closedHead = head.endsWith("\n") ? `${head}\`\`\`` : `${head}\n\`\`\``;
-  const opener = fenceLang ? `\`\`\`${fenceLang}\n` : "```\n";
-  const openedTail = `${opener}${tail}`;
-  return { head: closedHead, tail: openedTail };
-}
-
-/**
- * Find a clean split point in `text` no later than `target`. Prefers higher-
- * quality boundaries (paragraph > line > sentence > word) and falls back to a
- * hard char split if no break exists in [TELEGRAM_MIN_HEAD_CHARS, target].
- * The returned index is the slice point — `text.slice(0, idx)` is the head,
- * the rest is the tail.
- */
-export function findTelegramSplitBoundary(text: string, target: number): number {
-  if (text.length <= target) return text.length;
-  const minIdx = Math.min(TELEGRAM_MIN_HEAD_CHARS, Math.floor(target * 0.25));
-  for (const sep of ["\n\n", "\n", ". ", "! ", "? ", " "]) {
-    const idx = text.lastIndexOf(sep, target - sep.length);
-    if (idx >= minIdx) return idx + sep.length;
-  }
-  // No natural break — hard cut. JS strings index UTF-16 code units; never
-  // slice between the two halves of a surrogate pair, or Telegram receives
-  // malformed UTF-8 and rejects the message.
-  let idx = target;
-  const code = text.charCodeAt(idx - 1);
-  if (code >= 0xd800 && code <= 0xdbff) idx -= 1;
-  return idx;
-}
-
 class TelegramAdapter implements Adapter, StreamingAdapter {
   #bot: Bot;
   #attachments: AttachmentStore;
-  #activeStreams = new Map<string, TelegramStreamHandle>();
+  #activeStreams = new Map<string, SettlingStreamHandle>();
+  /** Each run's delivered media paths, kept past a failed handle for the one replacing it. */
+  #sentMedia = new Map<string, Set<string>>();
   #polling: Promise<void> | undefined;
   /** Highest update id whose middleware has run to completion. */
   #lastHandledUpdateId: number | undefined;
@@ -212,18 +137,10 @@ class TelegramAdapter implements Adapter, StreamingAdapter {
   async deliver(platformAddress: string, content: RenderedMessage | JsonValue): Promise<void> {
     const chatId = Number(platformAddress);
     if (isRenderedMessage(content)) {
-      try {
-        await this.#bot.api.sendMessage(chatId, content.text, {
-          ...(content.parseMode && { parse_mode: content.parseMode }),
-        });
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "";
-        if (msg.includes("can't parse entities")) {
-          logger.warn("telegram: HTML parse failed, falling back to plain text");
-          await this.#bot.api.sendMessage(chatId, stripHtmlTags(content.text));
-        } else {
-          throw err;
-        }
+      // A reply past Telegram's cap goes out as several messages. A split can
+      // cut through a tag pair, which the parse fallback turns into plain text.
+      for (const part of splitAtCap(content.text)) {
+        await this.#sendRendered(chatId, part, content.parseMode);
       }
       // Send any attached images as separate photo messages after the text.
       for (const img of content.images ?? []) {
@@ -242,6 +159,30 @@ class TelegramAdapter implements Adapter, StreamingAdapter {
     }
   }
 
+  /** Send one message, as plain text when Telegram can't parse its markup. */
+  async #sendRendered(
+    chatId: number,
+    text: string,
+    parseMode: RenderedMessage["parseMode"],
+  ): Promise<void> {
+    try {
+      await this.#bot.api.sendMessage(chatId, text, {
+        ...(parseMode && { parse_mode: parseMode }),
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "";
+      if (!msg.includes("can't parse entities")) throw err;
+      logger.warn("telegram: HTML parse failed, falling back to plain text");
+      await this.#bot.api.sendMessage(chatId, stripHtmlTags(text));
+    }
+  }
+
+  /**
+   * Open the run's stream, or hand back the one already open: Inngest
+   * re-invokes the turn at every step boundary, and each invocation opens
+   * again. A handle leaves the run once it settles, so an open after a
+   * failure — the retry of the step it failed — starts a fresh one.
+   */
   async openStream(
     platformAddress: string,
     runId: string,
@@ -255,12 +196,24 @@ class TelegramAdapter implements Adapter, StreamingAdapter {
       this.#attachments,
       Number(platformAddress),
       runId,
-      () => {
-        this.#activeStreams.delete(runId);
+      {
+        chunkChars: opts?.chunkChars ?? TELEGRAM_CHUNK_TARGET_DEFAULT,
+        allowEdits: opts?.allowEdits ?? true,
       },
-      opts,
+      {
+        has: (path) => this.#sentMedia.get(runId)?.has(path) ?? false,
+        add: (path) => {
+          const paths = this.#sentMedia.get(runId) ?? new Set<string>();
+          this.#sentMedia.set(runId, paths.add(path));
+        },
+      },
     );
     this.#activeStreams.set(runId, handle);
+    void handle.done.then((outcome) => {
+      if (this.#activeStreams.get(runId) === handle) this.#activeStreams.delete(runId);
+      // Kept after a failure: the run's retry opens a fresh handle, which must not resend.
+      if (outcome.isOk()) this.#sentMedia.delete(runId);
+    });
     return handle;
   }
 
@@ -308,446 +261,6 @@ class TelegramAdapter implements Adapter, StreamingAdapter {
           logger.warn({ err }, "telegram: confirming the handled updates on stop failed"),
         );
     }
-  }
-}
-
-/**
- * Stream handle for Telegram — sends an initial message on first push,
- * then edits it progressively with throttling to respect rate limits.
- *
- * Generated images (`tool_result` from `generate_image`) are delivered
- * mid-stream via `sendPhoto`. Dedup is keyed on `runId + path` so Inngest
- * retries of the same handle never send the image twice.
- */
-/**
- * One appended piece of the live message, tagged with where it came from.
- *
- * The buffer is a list rather than a string because a retraction names an
- * iteration's text and its tool calls, and that text is not contiguous in the
- * rendered message: a tool banner sits between the deltas that came before the
- * call and the ones after it. Searching the rendered string for the named text
- * finds nothing in that case, and cannot tell "this was interleaved" apart from
- * "this was already flushed into its own message" — one wants a partial cut,
- * the other wants none.
- */
-type BufferSegment =
-  | { kind: "text"; text: string }
-  | { kind: "tool"; toolUseId: string; toolName: string; text: string }
-  | { kind: "status"; text: string };
-
-class TelegramStreamHandle implements StreamHandle {
-  #bot: Bot;
-  #attachments: AttachmentStore;
-  #chatId: number;
-  #runId: string;
-  #messageId: number | null = null;
-  #segments: BufferSegment[] = [];
-  #lastEditTime = 0;
-  #editInterval = 500; // ms between edits
-  #sentImages = new Set<string>();
-  #sentDocuments = new Set<string>();
-  #onDone: () => void;
-  #pending: Promise<void> = Promise.resolve();
-  #chunkTarget: number;
-  #allowEdits: boolean;
-  // Append-only mode runs a `sendChatAction("typing")` heartbeat in place of
-  // the visible-banner UX. null when the timer isn't active (edits-allowed
-  // mode, or stream already finished/aborted).
-  #typingTimer: ReturnType<typeof setInterval> | null = null;
-
-  constructor(
-    bot: Bot,
-    attachments: AttachmentStore,
-    chatId: number,
-    runId: string,
-    onDone: () => void,
-    opts?: StreamOpts,
-  ) {
-    this.#bot = bot;
-    this.#attachments = attachments;
-    this.#chatId = chatId;
-    this.#runId = runId;
-    this.#onDone = onDone;
-    this.#chunkTarget = opts?.chunkChars ?? TELEGRAM_CHUNK_TARGET_DEFAULT;
-    this.#allowEdits = opts?.allowEdits ?? true;
-  }
-
-  async push(event: StreamEvent): Promise<void> {
-    if (event.type === "retract") {
-      // Cut the retracted text — and everything the buffer holds after it —
-      // out of the live message's body. The event names only the output the
-      // turn won't persist, which is always the tail of the stream, so the
-      // trailing tool / status banners belong to that same un-persisted
-      // iteration and go with it; text from earlier iterations is persisted
-      // and stays visible. An empty `text` (a degrade that streamed no prose)
-      // leaves the buffer alone.
-      //
-      // `#messageId` is deliberately kept: the next push writes the degraded
-      // reply into the same message via `#edit`, replacing the fragment the
-      // user can see rather than leaving it above a second message. When the
-      // retracted text is no longer in the buffer — `#finalizeChunk` already
-      // flushed part of it into its own message, which Telegram gives no
-      // handle to edit back — the whole editable remainder is that text's
-      // suffix, so the buffer clears and the already-sent chunk stays.
-      // Nothing is emitted here: Telegram rejects an empty message body, so
-      // there is no "blank it now" call to make.
-      this.#retract(event.text, new Set(event.toolUseIds));
-      return;
-    }
-    if (event.type === "text_delta") {
-      this.#append({ kind: "text", text: event.text });
-    } else if (event.type === "tool_start") {
-      // Append-only mode drops in-message banners (they'd land mid-paragraph
-      // at the next chunk boundary, post-hoc and stale). The typing
-      // heartbeat carries progress instead.
-      if (this.#allowEdits) {
-        this.#append({
-          kind: "tool",
-          toolUseId: event.id,
-          toolName: event.name,
-          text: `\n🔍 ${event.name}...\n`,
-        });
-      }
-    } else if (event.type === "status") {
-      if (this.#allowEdits) this.#append({ kind: "status", text: `\n⏳ ${event.message}\n` });
-    } else if (event.type === "tool_result" && event.name === "generate_image" && !event.isError) {
-      await this.#sendGeneratedImage(event.output);
-      return;
-    } else if (event.type === "tool_result" && event.name === "send_document" && !event.isError) {
-      await this.#sendGeneratedDocument(event.output);
-      return;
-    }
-    // other tool_results: skip — LLM will summarize
-
-    if (!this.#allowEdits) {
-      // Kick the typing heartbeat on the first push that accumulates text or
-      // an in-message banner. Image / document dispatches early-return above
-      // and intentionally skip this: Telegram already renders its native
-      // "sending photo…" indicator while `sendPhoto` / `sendDocument` is in
-      // flight, and once text resumes the next push picks up the heartbeat.
-      // Idempotent via the null guard — double-pushing won't stack timers.
-      this.#startTypingHeartbeat();
-    }
-
-    // Drain any overflow eagerly, bypassing the throttle — once accumulated
-    // crosses the chunk target, further edits to the same message would 400.
-    await this.#drainOverflow();
-    if (this.#allowEdits) await this.#throttledEdit();
-  }
-
-  /** The live message as Telegram will see it. */
-  #buffered(): string {
-    return this.#segments.map((segment) => segment.text).join("");
-  }
-
-  #append(segment: BufferSegment): void {
-    if (segment.text.length > 0) this.#segments.push(segment);
-  }
-
-  /** Drop the first `count` characters, splitting whichever segment straddles them. */
-  #consumePrefix(count: number): void {
-    let remaining = count;
-    while (remaining > 0) {
-      const first = this.#segments[0];
-      if (first === undefined) return;
-      if (first.text.length <= remaining) {
-        remaining -= first.text.length;
-        this.#segments.shift();
-      } else {
-        this.#segments[0] = { ...first, text: first.text.slice(remaining) };
-        return;
-      }
-    }
-  }
-
-  /** Drop a tool's banner once its result has been delivered another way. */
-  #removeToolBanner(toolName: string): void {
-    this.#segments = this.#segments.filter(
-      (segment) => !(segment.kind === "tool" && segment.toolName === toolName),
-    );
-  }
-
-  /**
-   * Remove the named text and tool banners, plus everything the buffer holds
-   * after them.
-   *
-   * A retraction always names the tail of the stream — the iteration the turn
-   * won't persist — so the cut is the earliest point that iteration touched:
-   * whichever comes first, its first named tool banner or the start of its
-   * text. Everything from there is that same iteration's, banners included.
-   * Content before the cut belongs to iterations that are persisted and stays.
-   *
-   * When the named text is longer than what the buffer still holds, the rest
-   * has already been flushed into its own message, which Telegram gives no
-   * handle to edit back: the editable remainder is entirely retracted content,
-   * so the buffer empties and the flushed message stands.
-   */
-  #retract(text: string, toolUseIds: ReadonlySet<string>): void {
-    const namedBanner = this.#segments.findIndex(
-      (segment) => segment.kind === "tool" && toolUseIds.has(segment.toolUseId),
-    );
-
-    let remaining = text.length;
-    let textCut = this.#segments.length;
-    let keptPrefix: string | null = null;
-    for (let i = this.#segments.length - 1; i >= 0 && remaining > 0; i--) {
-      const segment = this.#segments[i];
-      if (segment === undefined) continue;
-      if (segment.kind !== "text") {
-        // A banner between two of the retracted iteration's deltas. It isn't
-        // part of the named text, but it is inside the region being cut.
-        textCut = i;
-        continue;
-      }
-      if (segment.text.length <= remaining) {
-        remaining -= segment.text.length;
-        textCut = i;
-      } else {
-        keptPrefix = segment.text.slice(0, segment.text.length - remaining);
-        textCut = i;
-        remaining = 0;
-      }
-    }
-
-    const cut = namedBanner === -1 ? textCut : Math.min(namedBanner, textCut);
-    const kept = this.#segments.slice(0, cut);
-    // The partial segment is only half-retracted, so its surviving prefix goes
-    // back — unless a named banner cut earlier still, which puts the whole
-    // segment inside the retracted region.
-    if (keptPrefix !== null && textCut === cut) kept.push({ kind: "text", text: keptPrefix });
-    this.#segments = kept;
-  }
-
-  #startTypingHeartbeat(): void {
-    if (this.#typingTimer !== null) return;
-    // Fire immediately so the indicator shows up on first push, not after one
-    // refresh interval. Errors are logged but don't propagate — typing is a
-    // hint, not load-bearing; a transient API failure shouldn't kill the
-    // stream. `debug` rather than `warn` because a busy Bot API will produce
-    // these in bursts on rate-limit edges and we don't want to spam.
-    const kick = (): Promise<void> =>
-      this.#bot.api
-        .sendChatAction(this.#chatId, "typing")
-        .then(() => {})
-        .catch((err: unknown) => {
-          logger.debug(
-            { err, runId: this.#runId },
-            "telegram: sendChatAction(typing) failed; heartbeat continues",
-          );
-        });
-    void kick();
-    this.#typingTimer = setInterval(() => void kick(), TELEGRAM_TYPING_REFRESH_MS);
-  }
-
-  #stopTypingHeartbeat(): void {
-    if (this.#typingTimer === null) return;
-    clearInterval(this.#typingTimer);
-    this.#typingTimer = null;
-  }
-
-  async #sendGeneratedImage(output: string): Promise<void> {
-    const payload = parseGeneratedImagePayload(output);
-    if (!payload) {
-      logger.warn(
-        { runId: this.#runId },
-        "telegram: generate_image tool_result didn't match expected payload shape",
-      );
-      return;
-    }
-    const { path, mediaType } = payload;
-
-    // Dedup across Inngest retries — same run + path = already delivered.
-    // Only mark as sent AFTER successful delivery so a transient S3/Telegram
-    // failure leaves room for the next retry to succeed.
-    const dedupKey = `${this.#runId}:${path}`;
-    if (this.#sentImages.has(dedupKey)) return;
-
-    try {
-      const bytes = await this.#attachments.download(path);
-      await this.#bot.api.sendPhoto(
-        this.#chatId,
-        new InputFile(bytes, `image.${mediaTypeToExt(mediaType)}`),
-      );
-      this.#sentImages.add(dedupKey);
-      // Strip the "🔍 generate_image..." placeholder from the accumulated
-      // text now that the photo has been delivered. Otherwise the placeholder
-      // lingers in the final edited message alongside the image.
-      this.#removeToolBanner("generate_image");
-    } catch (err) {
-      // Don't crash the stream on a single image failure — user still gets the text.
-      // dedupKey is intentionally NOT added so the next Inngest retry can try again.
-      logger.error({ err, path, runId: this.#runId }, "telegram: failed to send generated image");
-    }
-  }
-
-  async #sendGeneratedDocument(output: string): Promise<void> {
-    const payload = parseGeneratedDocumentPayload(output);
-    if (!payload) {
-      logger.warn(
-        { runId: this.#runId },
-        "telegram: send_document tool_result didn't match expected payload shape",
-      );
-      return;
-    }
-    const { path, name } = payload;
-
-    const dedupKey = `${this.#runId}:${path}`;
-    if (this.#sentDocuments.has(dedupKey)) return;
-
-    try {
-      const bytes = await this.#attachments.download(path);
-      await this.#bot.api.sendDocument(this.#chatId, new InputFile(bytes, name));
-      this.#sentDocuments.add(dedupKey);
-      this.#removeToolBanner("send_document");
-    } catch (err) {
-      logger.error(
-        { err, path, runId: this.#runId },
-        "telegram: failed to send generated document",
-      );
-    }
-  }
-
-  async finish(): Promise<void> {
-    this.#stopTypingHeartbeat();
-    await this.#pending;
-    await this.#drainOverflow();
-    const buffered = this.#buffered();
-    if (buffered) {
-      await this.#finalizeChunk(buffered);
-      this.#segments = [];
-    }
-    this.#onDone();
-  }
-
-  async abort(error: string): Promise<void> {
-    this.#stopTypingHeartbeat();
-    await this.#pending;
-    // Drain any mid-stream overflow first so the error tail lands on the last
-    // partial chunk, not floating in its own message.
-    await this.#drainOverflow();
-    const buffered = this.#buffered();
-    const text = buffered ? `${buffered}\n\n⚠️ ${error}` : `⚠️ ${error}`;
-    this.#segments = [{ kind: "text", text }];
-    // Appending the tail may push us back over the cap — drain once more,
-    // then emit whatever remains as plain text (no HTML render on errors).
-    await this.#drainOverflow();
-    const remainder = this.#buffered();
-    if (remainder) {
-      // Append-only mode never edits a message, so emit the error tail as a
-      // fresh chunk too — `#edit` would silently no-op into nothing.
-      if (this.#allowEdits) {
-        await this.#edit(remainder);
-      } else {
-        await this.#finalizeChunk(remainder);
-      }
-      this.#segments = [];
-    }
-    this.#onDone();
-  }
-
-  async #throttledEdit(): Promise<void> {
-    const now = Date.now();
-    if (now - this.#lastEditTime < this.#editInterval) return;
-    await this.#edit(this.#buffered());
-  }
-
-  async #edit(text: string): Promise<void> {
-    if (!text) return;
-    // Serialize edits — no two in flight at once
-    this.#pending = this.#pending.then(async () => {
-      try {
-        if (!this.#messageId) {
-          const msg = await this.#bot.api.sendMessage(this.#chatId, text);
-          this.#messageId = msg.message_id;
-        } else {
-          await this.#bot.api.editMessageText(this.#chatId, this.#messageId, text);
-        }
-        this.#lastEditTime = Date.now();
-      } catch (err: unknown) {
-        // Telegram returns 400 "message is not modified" for no-op edits — ignore
-        const msg = err instanceof Error ? err.message : "";
-        if (!msg.includes("message is not modified")) throw err;
-      }
-    });
-    await this.#pending;
-  }
-
-  /**
-   * Split the buffer into Telegram-sized chunks. Each head is finalized
-   * (HTML-rendered into its own message) and `#messageId` is reset so the
-   * tail starts a fresh message. Repeats until what remains fits.
-   */
-  async #drainOverflow(): Promise<void> {
-    while (this.#buffered().length > this.#chunkTarget) {
-      const buffered = this.#buffered();
-      const splitIdx = findTelegramSplitBoundary(buffered, this.#chunkTarget);
-      const rawHead = buffered.slice(0, splitIdx);
-      const rawTail = buffered.slice(splitIdx);
-      const { head, tail } = rebalanceCodeFence(rawHead, rawTail);
-      this.#consumePrefix(splitIdx);
-      // Rebalancing only ever prepends a re-opening fence to the tail, so the
-      // difference is a new head for the buffer rather than an edit inside it.
-      const reopened = tail.slice(0, tail.length - rawTail.length);
-      if (reopened) this.#segments.unshift({ kind: "text", text: reopened });
-      await this.#finalizeChunk(head);
-    }
-  }
-
-  /**
-   * Send/edit one finalized message with HTML rendering, then freeze it by
-   * clearing `#messageId`. Falls back to plain text if the rendered output
-   * exceeds Telegram's char cap or fails entity parsing.
-   */
-  async #finalizeChunk(text: string): Promise<void> {
-    if (!text) return;
-    this.#pending = this.#pending.then(async () => {
-      const rendered = renderTelegramHtml(text);
-      const useHtml =
-        rendered.parseMode != null && rendered.text.length <= TELEGRAM_MAX_MESSAGE_LENGTH;
-      const body = useHtml ? rendered.text : text;
-      const opts = useHtml && rendered.parseMode ? { parse_mode: rendered.parseMode } : undefined;
-      try {
-        // grammY accepts `undefined` for the optional `other` parameter, so
-        // pass `opts` directly — when no HTML formatting applies it's just
-        // undefined. The send-path return is discarded: this chunk is final
-        // and the next chunk creates a fresh message.
-        if (this.#messageId == null) {
-          await this.#bot.api.sendMessage(this.#chatId, body, opts);
-        } else {
-          await this.#bot.api.editMessageText(this.#chatId, this.#messageId, body, opts);
-        }
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "";
-        if (msg.includes("can't parse entities")) {
-          logger.warn("telegram: chunk HTML parse failed, retrying as plain text");
-          // Put the plain body on the surface on both paths. The edit path
-          // can't lean on "the throttled edits already left this text there":
-          // a retraction cuts the body those edits wrote out of the chunk, so
-          // skipping the retry would leave the user looking at retracted text
-          // with the reply nowhere. Telegram answers a genuinely redundant
-          // edit with "message is not modified", which is the intended no-op.
-          try {
-            if (this.#messageId == null) {
-              await this.#bot.api.sendMessage(this.#chatId, text);
-            } else {
-              await this.#bot.api.editMessageText(this.#chatId, this.#messageId, text);
-            }
-          } catch (plainErr: unknown) {
-            const plainMsg = plainErr instanceof Error ? plainErr.message : "";
-            if (!plainMsg.includes("message is not modified")) throw plainErr;
-          }
-        } else if (!msg.includes("message is not modified")) {
-          throw err;
-        }
-      } finally {
-        this.#messageId = null;
-        // Reset the throttle clock so the first edit on the new message
-        // fires immediately — finalize is a transition, not a rate-limited
-        // operation.
-        this.#lastEditTime = 0;
-      }
-    });
-    await this.#pending;
   }
 }
 

@@ -816,9 +816,9 @@ function isReadonlyMap<K, V>(x: unknown): x is ReadonlyMap<K, V> {
 
 export function mockStreamHandle(overrides?: Partial<StreamHandle>): StreamHandle {
   return {
-    push: vi.fn().mockResolvedValue(undefined),
-    finish: vi.fn().mockResolvedValue(undefined),
-    abort: vi.fn().mockResolvedValue(undefined),
+    push: vi.fn().mockResolvedValue(ok(undefined)),
+    finish: vi.fn().mockResolvedValue(ok(undefined)),
+    abort: vi.fn().mockResolvedValue(ok(undefined)),
     ...overrides,
   };
 }
@@ -833,11 +833,12 @@ export function mockStreamingAdapter(overrides?: Partial<StreamingAdapter>): Str
 
 export function mockDeliveryHandle(overrides?: Partial<DeliveryHandle>): DeliveryHandle {
   return {
-    push: vi.fn().mockResolvedValue(undefined),
-    finish: vi.fn().mockResolvedValue(undefined),
-    abort: vi.fn().mockResolvedValue(undefined),
+    push: vi.fn().mockResolvedValue(ok(undefined)),
+    finish: vi.fn().mockResolvedValue(ok(undefined)),
+    abort: vi.fn().mockResolvedValue(ok(undefined)),
     hasBatchTargets: vi.fn().mockReturnValue(true),
     deliverBatch: vi.fn().mockResolvedValue(undefined),
+    deliverUnstreamed: vi.fn().mockResolvedValue(undefined),
     canDeliverVoice: vi.fn().mockReturnValue(false),
     deliverVoice: vi.fn().mockResolvedValue(undefined),
     ...overrides,

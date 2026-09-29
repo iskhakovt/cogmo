@@ -36,14 +36,16 @@ The bug class to catch is #2 — and to catch it you have to **count boundaries,
 | Compact | `persist-summary` (conditional) | `agentStore.insertOrRecoverSummary` — stores what `summarize-prefix-outcome` produced; failures degrade inside the body | **DB write** | ✓ |
 | Context | `open-system-prompt-epoch` (conditional — the turn doesn't continue the epoch) | `openSystemPromptEpoch` — renders the system prompt again and `insertOrRecoverSystemPromptSnapshot`s it with the turn's attachment cutoff (`[proposed]`), keyed on the turn's row; returns the epoch. `[confirmed]` Counts an across-turn prefix violation (`site: "turn"`) | **DB write** | ✓ |
 | Context | `render-turn-context` | `storeTurnContext` — renders the turn context with the memories and core-memory changes no surviving turn context shows, and the delivery channels, and `insertOrRecoverTurnContext`s it; returns the stored text, which replaces the provisional block | **DB write** | ✓ |
-| **Streaming glue** | *(none — runs on every invocation)* | image resolution, `getProfile`, `deliveryRouter.prepare`, the live tool catalog and its binding to the frozen table, the provisional turn context and its swap, the epoch decision and thinking-block stripping, the head checks (`[confirmed]`), `compactMessages` orchestration, the loop's control flow, `delivery.finish` | cheap reads + deterministic assembly | ✗ |
+| **Streaming glue** | *(none — runs on every invocation)* | image resolution, `getProfile`, `deliveryRouter.prepare`, the live tool catalog and its binding to the frozen table, the provisional turn context and its swap, the epoch decision and thinking-block stripping, the head checks (`[confirmed]`), `compactMessages` orchestration, the loop's control flow | cheap reads + deterministic assembly | ✗ |
 | Loop | `llm-iter<N>` (one per iteration) | stream drain + in-step Class C repair; tokens stream to the delivery layer live from inside the body. `[confirmed]` Also returns the head of the request it sent and the `input_transformations` the adapter surfaced, which it counts in the body ([prompt-caching.md](prompt-caching.md#head-check-confirmed) → Head check); every invocation compares the head with the request it rebuilds | **LLM stream + emission** | ✓ |
 | Loop | `tool-iter<N>-<P>` (per durable tool call) | the tool handler | **tool side effect** | ✓ |
 | Loop | `emit-tool-results-iter<N>` (per tool-bearing iteration) | push the iteration's `tool_result` events to the delivery layer | **stream pushes (media cards)** | ✓ |
 | Loop | `truncation-notice-iter<N>` (conditional — final iteration stopped at `max_tokens` with text) | push the truncation notice after the partial reply | **stream push** | ✓ |
 | Degrade | `degraded-reply` (conditional) | `synthesizeDegradedReply` + retract/apology pushes; returns the apology text | **LLM call + stream pushes** | ✓ |
+| Close | `finish-stream` | `delivery.finish`; returns the sessions whose stream failed | **stream writes** | ✓ |
 | Persist | `persist-new-messages` | `agentStore.insertMessages` (batch INSERT: intermediate tool turns + final assistant, single transaction). `[confirmed]` Each assistant row carries its `transcript_head`, whose status comes from the iteration outcomes; an in-turn divergence is counted here (`site: "iteration"`) | **DB write** | ✓ |
 | Deliver | `batch-delivery` (conditional) | image resolution via `Promise.allSettled` + `delivery.deliverBatch` | **S3 GET + network send to batch adapters** | ✓ |
+| Deliver | `redeliver-unstreamed` (conditional — a stream failed at finish) | `delivery.deliverUnstreamed`: the reply's text through those sessions' batch `deliver` | **network send** | ✓ |
 | Notify | `send-response` | `step.sendEvent("response/ready")` | Inngest event | ✓ |
 | Resume | `flush` (conditional) | `step.sendEvent("inbound/ready")` | Inngest event | ✓ |
 
@@ -56,7 +58,7 @@ The non-durable regions are:
 
 - The frozen table and the base prompt can come from profile reads in different invocations if a settings change lands between them. `# Tools` and `tools` always match.
 - A tool edited mid-turn keeps its frozen definition while the live handler serves the call.
-- On a deploy that adds a step (`freeze-turn-inputs`, `load-turn-transcript`, `render-turn-context`, `freeze-core-memory-scope`, `load-system-prompt`, `open-system-prompt-epoch`, `freeze-model-limits`), an in-flight run whose later steps are requested by name (it has planned a parallel tool group) reaches the unrun step. The SDK neither runs nor reports a new step while another is requested, so after its 10-second step timeout it answers `step-not-found` and that attempt fails. Other in-flight runs execute the step once.
+- On a deploy that adds a step (`freeze-turn-inputs`, `load-turn-transcript`, `render-turn-context`, `freeze-core-memory-scope`, `load-system-prompt`, `open-system-prompt-epoch`, `freeze-model-limits`, `finish-stream`, `redeliver-unstreamed`), an in-flight run whose later steps are requested by name (it has planned a parallel tool group) reaches the unrun step. The SDK neither runs nor reports a new step while another is requested, so after its 10-second step timeout it answers `step-not-found` and that attempt fails. Other in-flight runs execute the step once.
 - A run in flight across the deploy that adds `freeze-core-memory-scope` keeps the unscoped prompt and tool table it memoized, while its reads and writes follow the scope the new step records: a third-party profile's turn can offer the core-memory tools, and the Service refuses its writes.
 - A run in flight across the deploy that adds the snapshot steps runs them once, and its turn opens the conversation's first epoch. Iterations it memoized before were sent the prompt `assemble-prompt` built, so the turn's thinking blocks from them sit after the epoch's opening row and replay on every turn of that epoch: a cache miss on the turn's next request, and where preserved thinking is enforced, a mismatch on every later turn until the next epoch opens.
 
@@ -206,7 +208,7 @@ async openStream(platformAddress, runId) {
 }
 ```
 
-The map lives in memory in the long-running Inngest connect-mode worker, so it survives within-process retries. See [transport/streaming.md](transport/streaming.md) → "Retry Deduplication".
+The map lives in memory in the long-running Inngest connect-mode worker, so it survives within-process retries. A handle leaves it once it settles, failure included, so the retry of a step whose push failed streams into a fresh handle. See [transport/streaming.md](transport/streaming.md) → "Retry Deduplication".
 
 ### Process death
 
