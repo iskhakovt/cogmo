@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { SandboxClient } from "../../sandbox/index.js";
 import { expectDefined } from "../../test/assertions.js";
+import { seededRandom } from "../../test/seeded-random.js";
 import type { CtxHandler } from "../dispatcher.js";
 import type { Death } from "../worker-state.js";
 import {
@@ -1272,17 +1273,6 @@ describe("SysboxWorkerPool", () => {
 });
 
 describe("SysboxWorkerPool under random deaths and spawn failures", () => {
-  /** mulberry32: a seeded PRNG, so a failing seed replays exactly. */
-  function seeded(seed: number): () => number {
-    let a = seed;
-    return () => {
-      a = (a + 0x6d2b79f5) | 0;
-      let t = Math.imul(a ^ (a >>> 15), 1 | a);
-      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-    };
-  }
-
   async function ticks(n: number): Promise<void> {
     for (let i = 0; i < n; i++) await new Promise<void>((r) => setImmediate(r));
   }
@@ -1301,7 +1291,7 @@ describe("SysboxWorkerPool under random deaths and spawn failures", () => {
    * the real one does.
    */
   async function fuzzPool(seed: number): Promise<ReadonlyArray<string>> {
-    const random = seeded(seed);
+    const random = seededRandom(seed);
     const chance = (p: number): boolean => random() < p;
     const upTo = (n: number): number => Math.floor(random() * (n + 1));
     const max = 1 + upTo(3);
