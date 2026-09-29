@@ -950,6 +950,38 @@ describe("LocalDockerSandboxClient — execStreaming.dispose()", () => {
       }
     });
 
+    it("re-inspects after 20 ms, doubling the wait up to 250 ms, and gives up after 2 s", async () => {
+      const inspectedAt: number[] = [];
+      const { session, hijack } = await makeSessionWithDemux(
+        "019d0000-0000-7000-8000-00000000d15c",
+        async () => {
+          inspectedAt.push(Date.now());
+          return { Running: true, ExitCode: null };
+        },
+      );
+      vi.useFakeTimers();
+      try {
+        const handle = await session.execStreaming(["sleep", "infinity"]);
+        let outcome: ExecOutcome | undefined;
+        void handle.exited.then((o) => {
+          outcome = o;
+        });
+        const endedAt = Date.now();
+        hijack.end();
+        await vi.advanceTimersByTimeAsync(2_050);
+
+        expect(inspectedAt.map((t) => t - endedAt)).toEqual([
+          0, 20, 60, 140, 300, 550, 800, 1_050, 1_300, 1_550, 1_800, 2_050,
+        ]);
+        expect(outcome?.isErr() && outcome.error).toEqual({
+          kind: "no_exit_code",
+          reason: expect.stringContaining("after 2050ms"),
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     // A running exec, and one the daemon never started, both report a null code.
     for (const [taskSuffix, inspect] of [
       ["157", { Running: true, ExitCode: null }],
@@ -1031,20 +1063,23 @@ describe("LocalDockerSandboxClient — execStreaming.dispose()", () => {
     const { session, hijack, demuxStdout } = await makeSessionWithDemux(
       "019d0000-0000-7000-8000-00000000d154",
     );
-    const handle = await session.execStreaming(["yes"], {
-      idleTimeoutMs: 100,
-    });
+    vi.useFakeTimers();
+    try {
+      const handle = await session.execStreaming(["yes"], {
+        idleTimeoutMs: 100,
+      });
 
-    // Total elapsed exceeds the 100ms cap but no single gap does.
-    for (let i = 0; i < 4; i++) {
-      await new Promise<void>((resolve) => setTimeout(resolve, 40));
-      demuxStdout().write(`tick${i}\n`);
+      // Total elapsed exceeds the 100ms cap but no single gap does.
+      for (let i = 0; i < 4; i++) {
+        await vi.advanceTimersByTimeAsync(90);
+        demuxStdout().write(`tick${i}\n`);
+      }
+      hijack.end();
+
+      expect(await handle.exited).toEqual(ok({ exitCode: 0 }));
+    } finally {
+      vi.useRealTimers();
     }
-    hijack.end();
-
-    const { ExecTimeoutError } = await import("./index.js");
-    const result = await handle.wait().catch((e: Error) => e);
-    expect(result).not.toBeInstanceOf(ExecTimeoutError);
   });
 });
 
