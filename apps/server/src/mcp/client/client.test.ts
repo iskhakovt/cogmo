@@ -164,6 +164,28 @@ describe("SdkMcpConnection", () => {
     expect(onErrorAtConnect).toBeTypeOf("function");
   });
 
+  it("shares one teardown between close calls, each resolving once it is done", async () => {
+    const client = fakeClient();
+    const transport = fakeTransport();
+    const teardown = Promise.withResolvers<void>();
+    vi.mocked(client.close).mockImplementation(async () => {
+      await teardown.promise;
+      await transport.close();
+    });
+    const conn = new SdkMcpConnection(client as unknown as Client, transport, SERVER_NAME);
+    await conn.connect();
+
+    let settled = 0;
+    const first = conn.close().then(() => settled++);
+    const second = conn.close().then(() => settled++);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(settled).toBe(0);
+
+    teardown.resolve();
+    await Promise.all([first, second]);
+    expect(client.close).toHaveBeenCalledOnce();
+  });
+
   it("rejects callTool / listTools after close", async () => {
     const client = fakeClient();
     const transport = fakeTransport();
@@ -194,30 +216,6 @@ describe("SdkMcpConnection", () => {
     expect(terminateSession).toHaveBeenCalledOnce();
     expect(transportClose).toHaveBeenCalledOnce();
     expect(order).toEqual(["terminate", "close"]);
-  });
-
-  it("bounds terminateSession with a timeout so a hung peer doesn't block close", async () => {
-    vi.useFakeTimers();
-    try {
-      const { client, httpTransport } = setupHttpConn();
-      // Simulate a server that accepts the DELETE but never responds —
-      // exactly the half-open / hung-peer scenario the timeout exists for.
-      vi.spyOn(httpTransport, "terminateSession").mockImplementation(() => new Promise(() => {}));
-      vi.spyOn(httpTransport, "close").mockImplementation(async () => {
-        httpTransport.onclose?.();
-      });
-
-      const conn = new SdkMcpConnection(client, httpTransport as unknown as Transport, SERVER_NAME);
-      await conn.connect();
-
-      const closePromise = conn.close();
-      // Advance past the 2s cap; close must complete after the race resolves.
-      await vi.advanceTimersByTimeAsync(2_000);
-      await expect(closePromise).resolves.toBeUndefined();
-      expect(client.close).toHaveBeenCalledOnce();
-    } finally {
-      vi.useRealTimers();
-    }
   });
 
   it("swallows terminateSession errors so close still completes", async () => {

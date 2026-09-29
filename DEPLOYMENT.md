@@ -217,8 +217,7 @@ See [`design/skills.md`](design/skills.md) for two-tier (Pyodide + sysbox) execu
 |-|-|-|
 | `MCP_TOOL_BUDGET` | `25` | Maximum MCP tools surfaced to the LLM per turn after profile-glob filtering. Cap exists because LLM tool-selection accuracy degrades past ~30 tools and each tool definition costs ~250-400 prompt tokens. Native and skill tools don't count against this budget. |
 | `MCP_CALL_TIMEOUT_MS` | `30000` | Per-call timeout for MCP tool dispatch. |
-| `MCP_IDLE_EVICTION_MS` | `600000` (10 min) | Idle threshold after which a live MCP connection is closed. |
-| `MCP_EVICTION_INTERVAL_MS` | `60000` | How often the idle-eviction sweep runs. Set `0` to disable. |
+| `MCP_IDLE_EVICTION_MS` | `600000` (10 min) | A live MCP connection unused this long is closed. To keep connections open indefinitely, set a very large value, e.g. `31536000000` (a year). |
 
 LLM provider keys, Telegram bot tokens, Tavily/fal.ai keys, and similar credentials are **not** env vars — they live encrypted in the DB after `cogmo setup`. Putting secrets in env files is explicitly discouraged; use host secret management ([sops-nix](https://github.com/Mic92/sops-nix), [Vault](https://www.vaultproject.io/), systemd `LoadCredential`, Docker secrets via `_FILE`, etc.) for `COGMO_MASTER_KEY`, `DATABASE_URL`, `HINDSIGHT_API_KEY`, `INNGEST_EVENT_KEY` and `INNGEST_SIGNING_KEY` — each accepts a `_FILE` variant.
 

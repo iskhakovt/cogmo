@@ -6,7 +6,7 @@ import {
   ReadBuffer,
   STDIO_DEFAULT_MAX_BUFFER_SIZE,
 } from "@modelcontextprotocol/sdk/shared/stdio.js";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Transaction, Transactor } from "../../db/index.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
@@ -137,14 +137,28 @@ describe("createTransport", () => {
   });
 });
 
+interface ProbeOptions {
+  /** The `Content-Type` of every POST reply. */
+  contentType: string;
+  /**
+   * Open a session with this `Mcp-Session-Id`, and leave the DELETE that
+   * ends it unanswered: a peer gone quiet.
+   */
+  hangingSession?: string;
+}
+
 /**
  * A local server that answers the transport's POST with a fixed
  * `Content-Type`, so the SDK's own matching decides the outcome rather than
  * a stub of it. GET is refused with 405, which is how a server without an
  * SSE stream declines the optional one the transport may open.
  */
-async function serverReplyingWith(contentType: string): Promise<{ url: string; server: Server }> {
+async function probeServer({
+  contentType,
+  hangingSession,
+}: ProbeOptions): Promise<{ url: string; server: Server }> {
   const server = createServer((req, res) => {
+    if (req.method === "DELETE" && hangingSession !== undefined) return;
     if (req.method !== "POST") {
       res.writeHead(405).end();
       return;
@@ -155,7 +169,10 @@ async function serverReplyingWith(contentType: string): Promise<{ url: string; s
     });
     req.on("end", () => {
       const id = (JSON.parse(body) as { id: number }).id;
-      res.writeHead(200, { "content-type": contentType });
+      res.writeHead(200, {
+        "content-type": contentType,
+        ...(hangingSession !== undefined && { "mcp-session-id": hangingSession }),
+      });
       res.end(JSON.stringify({ jsonrpc: "2.0", id, result: {} }));
     });
   });
@@ -167,6 +184,60 @@ async function serverReplyingWith(contentType: string): Promise<{ url: string; s
   const { port } = address satisfies AddressInfo;
   return { url: `http://127.0.0.1:${port}/mcp`, server };
 }
+
+describe("createTransport — streamable-http session end", () => {
+  let running: Server | undefined;
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    const server = running;
+    running = undefined;
+    if (server) {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  /** A transport with a session open against a server that never answers its DELETE. */
+  async function hungSession(): Promise<StreamableHTTPClientTransport> {
+    const probe = await probeServer({ contentType: "application/json", hangingSession: "s-1" });
+    running = probe.server;
+    const transport = await createTransport(
+      { transport: "http", url: probe.url, headers: {} },
+      mock<SecretsStore>(),
+      fakeRunInTx,
+    );
+    if (!(transport instanceof StreamableHTTPClientTransport)) {
+      throw new Error("expected a streamable-http transport");
+    }
+    await transport.start();
+    await transport.send({ jsonrpc: "2.0", id: 1, method: "ping" });
+    return transport;
+  }
+
+  it("puts a deadline on the DELETE that ends the session, and on nothing else", async () => {
+    const deadline = new AbortController();
+    const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(deadline.signal);
+    const transport = await hungSession();
+    expect(timeout).not.toHaveBeenCalled();
+
+    const ending = transport.terminateSession();
+    await vi.waitFor(() => expect(timeout).toHaveBeenCalledWith(2_000));
+    deadline.abort(new DOMException("deadline passed", "TimeoutError"));
+    await expect(ending).rejects.toThrow(/deadline passed/);
+    await transport.close();
+  });
+
+  it("ends a hung DELETE when the transport closes, before the deadline", async () => {
+    const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(new AbortController().signal);
+    const transport = await hungSession();
+
+    const ending = transport.terminateSession();
+    await vi.waitFor(() => expect(timeout).toHaveBeenCalledOnce());
+    await transport.close();
+    await expect(ending).rejects.toMatchObject({ name: "AbortError" });
+  });
+});
 
 /**
  * The SDK matches a response's media type exactly, so a server whose header
@@ -189,7 +260,7 @@ describe("createTransport — streamable-http response content types", () => {
   });
 
   async function send(contentType: string): Promise<void> {
-    const probe = await serverReplyingWith(contentType);
+    const probe = await probeServer({ contentType });
     running = probe.server;
     const transport = await createTransport(
       { transport: "http", url: probe.url, headers: {} },
