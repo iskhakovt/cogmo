@@ -5863,14 +5863,6 @@
     "contextWindow": 262144,
     "maxOutputTokens": 64000
   },
-  "omni-moderation-2024-09-26": {
-    "contextWindow": 32768,
-    "maxOutputTokens": 0
-  },
-  "omni-moderation-latest": {
-    "contextWindow": 32768,
-    "maxOutputTokens": 0
-  },
   "openai.gpt-oss-120b-1:0": {
     "contextWindow": 128000,
     "maxOutputTokens": 32000
