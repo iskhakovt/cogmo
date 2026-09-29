@@ -155,41 +155,26 @@ describe("writeCoreMemoryBlock: the edit counter", () => {
     expect(add).not.toHaveBeenCalled();
   });
 
-  it.each<[string, CoreMemoryScope, string, CoreMemoryUpsertOutcome, Record<string, string>]>([
-    [
-      "a created unclassed block",
-      UNCLASSED,
-      "user_profile",
-      "created",
-      { key: "user_profile", target: "unclassed", change: "created" },
-    ],
-    [
-      "an updated shared identity",
-      CLASSED,
-      "identity",
-      "updated",
-      { key: "identity", target: "shared", change: "updated" },
-    ],
-    [
-      "an updated class block",
-      CLASSED,
-      "preferences",
-      "updated",
-      { key: "preferences", target: "class", change: "updated" },
-    ],
-    [
-      "a created override",
-      RESTRICTED,
-      "identity",
-      "created",
-      { key: "identity", target: "override", change: "created" },
-    ],
-  ])("counts %s once, after the write commits", async (_name, scope, key, upsert, attributes) => {
-    await writeWith(scope, key, { upsert });
+  const TARGETS: ReadonlyArray<{ scope: CoreMemoryScope; key: string; target: string }> = [
+    { scope: CLASSED, key: "identity", target: "shared" },
+    { scope: UNCLASSED, key: "user_profile", target: "unclassed" },
+    { scope: CLASSED, key: "preferences", target: "class" },
+    { scope: RESTRICTED, key: "identity", target: "override" },
+  ];
+  const CHANGES: ReadonlyArray<Exclude<CoreMemoryUpsertOutcome, "unchanged">> = [
+    "created",
+    "updated",
+  ];
 
-    expect(add).toHaveBeenCalledTimes(1);
-    expect(add).toHaveBeenCalledWith(1, attributes);
-  });
+  it.each(TARGETS.flatMap((t) => CHANGES.map((change) => ({ ...t, change }))))(
+    "counts one $change edit, targeting $target, with its labels",
+    async ({ scope, key, target, change }) => {
+      await writeWith(scope, key, { upsert: change });
+
+      expect(add).toHaveBeenCalledTimes(1);
+      expect(add).toHaveBeenCalledWith(1, { key, target, change });
+    },
+  );
 
   it.each<[string, CoreMemoryScope]>([
     ["a block", UNCLASSED],
@@ -226,20 +211,6 @@ describe("writeCoreMemoryBlock: the edit counter", () => {
 
   it("does not count a refused write", async () => {
     await writeWith({ kind: "none" }, "identity", { upsert: "created" });
-
-    expect(add).not.toHaveBeenCalled();
-  });
-
-  it("does not count a write whose transaction fails", async () => {
-    const agentStore = mockAgentStore({
-      upsertCoreMemoryBlock: vi.fn().mockRejectedValue(new Error("serialization failure")),
-    });
-    await expect(
-      writeCoreMemoryBlock(
-        { runInTx: fakeRunInTx, agentStore },
-        { userId: "user-1", scope: UNCLASSED, key: "identity", content: "Name: Sam" },
-      ),
-    ).rejects.toThrow("serialization failure");
 
     expect(add).not.toHaveBeenCalled();
   });

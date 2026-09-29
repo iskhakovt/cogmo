@@ -50,7 +50,11 @@ describe("metrics", () => {
         .find((m) => m.descriptor.name === "cogmo.core_memory.edits"),
       "cogmo.core_memory.edits",
     );
-    expect(metric).toMatchObject({ dataPointType: DataPointType.SUM, isMonotonic: true });
+    expect(metric).toMatchObject({
+      descriptor: { unit: "{edit}" },
+      dataPointType: DataPointType.SUM,
+      isMonotonic: true,
+    });
     expect(metric.dataPoints.map((p) => [p.attributes, p.value])).toEqual(
       expect.arrayContaining([
         [{ key: "identity", target: "shared", change: "updated" }, 2],
