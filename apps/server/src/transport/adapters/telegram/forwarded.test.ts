@@ -1,7 +1,7 @@
 import { Api, Composer, Context } from "grammy";
 import type { MessageOrigin, UserFromGetMe } from "grammy/types";
 import { describe, expect, it, vi } from "vitest";
-import { commandComposer, inboundTextBlock } from "./forwarded.js";
+import { commandComposer, inboundTextBlock, othersOrigin } from "./forwarded.js";
 
 const DATE = 1700000000;
 const SENT_AT = "2023-11-14T22:13:20.000Z";
@@ -67,6 +67,42 @@ describe("commandComposer", () => {
 
     expect(command).not.toHaveBeenCalled();
     expect(text).toHaveBeenCalledOnce();
+  });
+});
+
+describe("othersOrigin", () => {
+  const SENDER = 42;
+
+  it("drops the origin of the user's own message, forwarded back", () => {
+    const own: MessageOrigin = {
+      type: "user",
+      date: DATE,
+      sender_user: { id: SENDER, is_bot: false, first_name: "Timur" },
+    };
+    expect(othersOrigin(own, SENDER)).toBeUndefined();
+  });
+
+  it.each<[string, MessageOrigin]>([
+    [
+      "another user",
+      { type: "user", date: DATE, sender_user: { id: 7, is_bot: false, first_name: "Alice" } },
+    ],
+    ["a hidden user", { type: "hidden_user", date: DATE, sender_user_name: "Timur" }],
+    [
+      "a channel",
+      {
+        type: "channel",
+        date: DATE,
+        chat: { id: SENDER, type: "channel", title: "Mine" },
+        message_id: 1,
+      },
+    ],
+  ])("keeps the origin of %s", (_label, origin) => {
+    expect(othersOrigin(origin, SENDER)).toBe(origin);
+  });
+
+  it("has no origin for a message that wasn't forwarded", () => {
+    expect(othersOrigin(undefined, SENDER)).toBeUndefined();
   });
 });
 

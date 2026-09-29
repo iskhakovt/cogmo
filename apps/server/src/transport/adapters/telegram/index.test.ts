@@ -854,6 +854,69 @@ describe("telegram adapter", () => {
         expect.any(Date),
       );
     });
+
+    describe("from the user themselves", () => {
+      // The sender (makeCtx's fromId, 111) forwarding their own earlier message.
+      function asSelfForwarded<C extends { message: object }>(ctx: C): C {
+        const origin = {
+          type: "user",
+          date: 1600000000,
+          sender_user: { id: 111, is_bot: false, first_name: "Timur" },
+        };
+        return { ...ctx, message: { ...ctx.message, forward_origin: origin } };
+      }
+
+      it("keeps text the bare string of the user's own words", async () => {
+        const { transport } = await createAdapter();
+        await handlers.get("on:message:text")!(asSelfForwarded(makeCtx(111, "note to self", 42)));
+
+        expect(transport.emit).toHaveBeenCalledWith("session-1", "note to self", expect.any(Date));
+      });
+
+      it("leaves a photo's caption unmarked, and adds no empty block without one", async () => {
+        const { transport } = await createAdapter();
+        await handlers.get("on:message:photo")!(asSelfForwarded(makePhotoCtx(111, "mine")));
+        await handlers.get("on:message:photo")!(asSelfForwarded(makePhotoCtx(111)));
+
+        const image = { type: "image", path: "inbound/test.jpg", mediaType: "image/jpeg" };
+        expect(vi.mocked(transport.emit).mock.calls.map(([, content]) => content)).toEqual([
+          [{ type: "text", text: "mine" }, image],
+          [image],
+        ]);
+      });
+
+      it("leaves a document unmarked", async () => {
+        const { transport } = await createAdapter();
+        const ctx = makeDocumentCtx(111, { file_name: "x.pdf", mime_type: "application/pdf" });
+        await handlers.get("on:message:document")!(asSelfForwarded(ctx));
+
+        expect(transport.emit).toHaveBeenCalledWith(
+          "session-1",
+          [
+            {
+              type: "document",
+              path: "inbound/test.jpg",
+              mediaType: "application/pdf",
+              name: "x.pdf",
+            },
+          ],
+          expect.any(Date),
+        );
+      });
+
+      it("leaves a voice note unmarked", async () => {
+        const { transport } = await createAdapter();
+        await handlers.get("on:message:voice")!(
+          asSelfForwarded(makeVoiceCtx(111, { duration: 3 })),
+        );
+
+        expect(transport.emit).toHaveBeenCalledWith(
+          "session-1",
+          [{ type: "voice", path: "inbound/test.jpg", mediaType: "audio/ogg", durationMs: 3000 }],
+          expect.any(Date),
+        );
+      });
+    });
   });
 
   describe("streaming", () => {

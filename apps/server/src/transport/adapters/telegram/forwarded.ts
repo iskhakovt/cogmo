@@ -13,6 +13,18 @@ export function commandComposer<C extends Context>(bot: Composer<C>): Composer<C
 }
 
 /**
+ * A message's `forward_origin` unless the user forwarded their own message
+ * (from Saved Messages, or an earlier message of theirs): those are the
+ * user's own words, so they stay unmarked.
+ */
+export function othersOrigin(
+  origin: MessageOrigin | undefined,
+  senderId: number,
+): MessageOrigin | undefined {
+  return origin?.type === "user" && origin.sender_user.id === senderId ? undefined : origin;
+}
+
+/**
  * A message's text or caption as an inbound text block, marked `forwarded`
  * when Telegram reports the message's `forward_origin`.
  */

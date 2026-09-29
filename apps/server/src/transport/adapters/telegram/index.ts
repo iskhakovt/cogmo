@@ -61,7 +61,7 @@ import {
   handleVoice,
   type TelegramCommandContext,
 } from "./commands.js";
-import { commandComposer, forwardedFrom, inboundTextBlock } from "./forwarded.js";
+import { commandComposer, forwardedFrom, inboundTextBlock, othersOrigin } from "./forwarded.js";
 import { postPipelineGateKeyboard } from "./pipeline-gate-poster.js";
 import { ProfileDialogs } from "./profile-dialog.js";
 import { renderTelegramHtml, stripHtmlTags } from "./render.js";
@@ -1212,7 +1212,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
     const handle = String(ctx.from.id);
     const platformTs = new Date(ctx.message.date * 1000);
     // Forwarded text is packed as a marked block; the user's own stays a bare string.
-    const origin = ctx.message.forward_origin;
+    const origin = othersOrigin(ctx.message.forward_origin, ctx.from.id);
     const content: InboundContent =
       origin === undefined ? ctx.message.text : [inboundTextBlock(ctx.message.text, origin)];
 
@@ -1235,7 +1235,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
 
       const path = await transport.uploadAttachment(buffer, "image/jpeg");
       const caption = ctx.message.caption ?? "";
-      const origin = ctx.message.forward_origin;
+      const origin = othersOrigin(ctx.message.forward_origin, ctx.from.id);
 
       // Forwarded without a caption, the marked block is empty and names the sender.
       const content: InboundContent = [];
@@ -1273,7 +1273,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
       // — Anthropic's `document` content block doesn't accept image media
       // types and would 400-fail.
       const isImage = mediaType.startsWith("image/");
-      const origin = ctx.message.forward_origin;
+      const origin = othersOrigin(ctx.message.forward_origin, ctx.from.id);
 
       // Forwarded without a caption, the marked block is empty and names the sender.
       const content: InboundContent = [];
@@ -1316,7 +1316,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
       const path = await transport.uploadAttachment(buffer, mediaType);
       const caption = ctx.message.caption ?? "";
       const durationMs = voice.duration ? voice.duration * 1000 : undefined;
-      const origin = ctx.message.forward_origin;
+      const origin = othersOrigin(ctx.message.forward_origin, ctx.from.id);
 
       // A forwarded clip is marked on its own block, so its transcript names
       // the sender whether or not there is a caption.
