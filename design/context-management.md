@@ -91,7 +91,11 @@ The table is **append-only**. Re-compaction inserts a new row summarizing the pr
 
 `/compact` forces Strategy 2 immediately, regardless of budget pressure, and stores the result. The next turn then starts from a summary it did not have to wait for. `src/agent/conversation/compact-conversation.ts` drives it synchronously — the same trade-off `/reflect` makes: the user is waiting on the reply, single-user scale means no concurrent fire to race, and errors surface to the caller instead of a retry log.
 
+<<<<<<< HEAD
 It picks the same split the budget-triggered path would (`DEFAULT_KEEP_TURNS`). `[confirmed]` It renders the prefix through the one renderer, `[proposed]` with its attachments under the conversation's cutoff and the summarization route's budget, as in the turn-time fork. `[confirmed]` It carries that fork's Strategy 1 intent, triggered at the summarization model's budget, so a prefix that fits is summarized from the full tool results ([Strategy 2](#strategy-2-summarize-trigger-80) → Cleared results in the fork). Outside a turn there is no frozen tool table, so it strips every thinking block from its request ([prompt-caching.md](prompt-caching.md#sources-and-fixes) → source (h)).
+=======
+It picks the same split the budget-triggered path would (`DEFAULT_KEEP_TURNS`). `[confirmed]` It renders the prefix through the one renderer and carries that fork's Strategy 1 intent, triggered at the summarization model's budget, so a prefix that fits is summarized from the full tool results ([Strategy 2](#strategy-2-summarize-trigger-80) → Cleared results in the fork). Outside a turn there is no frozen tool table, so it strips every thinking block from its request ([prompt-caching.md](prompt-caching.md#sources-and-fixes) → source (h)). `[proposed]` Attachments render as placeholders naming the file.
+>>>>>>> origin/docs/memory-caching-release-design
 
 Because there is no budget gate, the manual path carries a floor the automatic one does not need: below `MIN_MESSAGES_TO_COMPACT` **real messages** outside the retain window it returns `too_short` rather than paying for a call. Reaching 80% of the window on that few messages means they are individually enormous and worth summarizing; asking by hand on a short conversation is not. The floor counts messages rather than compaction-view entries, so a re-compaction can't clear it on the strength of the previous summary occupying a slot.
 
@@ -193,8 +197,13 @@ Anthropic requires every `tool_result` block (on a user message) to have a match
 ## Pipeline Execution
 
 ```
+<<<<<<< HEAD
 cutoff = attachmentCutoff(epoch, refSizes, limits)           # [proposed] before counting: fits attachments to their budget
 messages = render(rows, cutoff)                              # attachments up to the cutoff as placeholders
+=======
+cutoff = attachmentCutoff(epoch, sizes)                      # [proposed] before counting: fits attachments to their budget
+messages = render(rows, cutoff)                              # [proposed] attachments up to the cutoff as placeholders
+>>>>>>> origin/docs/memory-caching-release-design
 edit = clearToolResults(trigger = budget * 0.60, keep = 5)   # Strategy 1: an intent every request carries
 
 count = countTokens(system, messages, tools, edit)           # after clearing

@@ -65,7 +65,7 @@ messages (
   id                       UUID v7 PK,
   conversation_id          UUID FK → conversations NOT NULL,
   role                     TEXT NOT NULL,        -- 'user' | 'assistant'
-  content                  JSONB NOT NULL,       -- ContentBlock[] with attachment refs. See prompt-caching.md → Stored shapes.
+  content                  JSONB NOT NULL,       -- ContentBlock[]; attachment refs [proposed]. See prompt-caching.md → Stored shapes.
   profile_id               UUID FK → profiles NOT NULL,  -- active profile for the turn this row belongs to
   model                    TEXT NOT NULL,        -- model active for the turn; legacy backfill = '<legacy>' sentinel
   last_inbound_message_id  UUID NOT NULL,        -- attribution cursor. See debounce.md.
