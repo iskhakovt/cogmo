@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { once } from "node:events";
 import {
   chmodSync,
   existsSync,
@@ -11,7 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DaytonaSessionState, SessionSpec } from "../sandbox/index.js";
 import { FakeDaytonaSandboxClient } from "./daytona-sandbox-fake.js";
 
@@ -84,6 +85,16 @@ afterEach(() => {
 afterAll(() => {
   rmSync(baseRoot, { recursive: true, force: true });
 });
+
+/** Whether `pid` names a live process (a zombie counts until it is reaped). */
+function isRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function makeSpec(overrides: Partial<SessionSpec> = {}): SessionSpec {
   return {
@@ -420,6 +431,27 @@ describe("FakeDaytonaSandboxClient — execStreaming", () => {
     handle.stderr.resume();
     await handle.dispose();
     await expect(handle.wait()).rejects.toThrow(/disposed/i);
+  });
+
+  it("dispose() stops the host process", async () => {
+    const session = await client.create(
+      makeSpec({
+        worktree: {
+          type: "git-remote",
+          url: `file://${sourceRepo}`,
+          branch: "cogmo/run/test-task",
+          auth: { username: "x-access-token", password: "ghp_test" },
+        },
+      }),
+    );
+    const handle = await session.execStreaming(["sh", "-c", "echo $$; exec sleep 30"]);
+    handle.stderr.resume();
+    const [pidLine] = await once(handle.stdout, "data");
+    const pid = Number(String(pidLine).trim());
+    expect(isRunning(pid)).toBe(true);
+
+    await handle.dispose();
+    await vi.waitFor(() => expect(isRunning(pid)).toBe(false));
   });
 
   it("dispose() is idempotent — second call is a no-op", async () => {
