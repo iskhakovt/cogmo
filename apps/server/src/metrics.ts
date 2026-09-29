@@ -40,7 +40,7 @@ function instruments(): Instruments {
       unit: "{failure}",
     }),
     coreMemoryEdits: meter.createCounter("cogmo.core_memory.edits", {
-      description: "Core memory writes that created, changed or deleted a block",
+      description: "core_memory_update writes that changed a block",
       unit: "{edit}",
     }),
   };
@@ -101,13 +101,14 @@ export const memoryRecallFailures = {
 };
 
 /**
- * Core-memory edits, labeled by `key`, `target` (`shared` | `unclassed` |
- * `class` | `override`: the group of `# User` the block is in) and `change`
- * (`created` | `updated` | `deleted`). A write that leaves the block as it was
- * is not counted. Each edit is announced in the next turn rather than
- * re-rendering the system prompt, so the rate sizes what the snapshot saves
- * (design/prompt-caching.md → Open questions). Incremented after the write's
- * transaction commits, inside the `core_memory_update` tool's step.
+ * `core_memory_update` writes that changed a block, labeled by `key` (a
+ * documented key, or `other`), `target` (`shared` | `unclassed` | `class` |
+ * `override`: the group of `# User` the block is in) and `change` (`created` |
+ * `updated` | `deleted`). Each is announced in the next turn, except an
+ * override created or deleted, which opens an epoch (design/prompt-caching.md
+ * → Open questions). Operator deletes (`/classes unrestrict`, deleting a
+ * class) aren't counted. Incremented once the write's transaction commits,
+ * inside the tool's step.
  */
 export const coreMemoryEdits = {
   add(value: number, attrs?: MetricAttributes): void {
