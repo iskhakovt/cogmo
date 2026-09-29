@@ -1350,6 +1350,36 @@ describe("runStreamingAgentLoop", () => {
     ).rejects.toThrow("truncated-stream stream ended without a done frame");
   });
 
+  it.each<[string, ChatStreamFrame]>([
+    ["content", { type: "text_delta", text: "more" }],
+    ["another done frame", doneFrame("end_turn", { inputTokens: 2, outputTokens: 2 })],
+  ])("fails an iteration whose stream sends %s after its done frame", async (_label, late) => {
+    async function* overrun(): AsyncGenerator<ChatStreamFrame> {
+      yield { type: "text_delta", text: "reply" };
+      yield doneFrame("end_turn", { inputTokens: 1, outputTokens: 1 });
+      yield late;
+    }
+    const collected: StreamEvent[] = [];
+    const provider: LlmProvider = {
+      name: "overrun-stream",
+      chat: vi.fn(),
+      countTokens: vi.fn(),
+      chatStream: () => overrun(),
+    };
+
+    await expect(
+      testRunStreamingAgentLoop({
+        provider,
+        messages: [{ role: "user", content: "hi" }],
+        tools: new ToolRegistry(),
+        onEvent: async (e) => {
+          collected.push(e);
+        },
+      }),
+    ).rejects.toThrow("overrun-stream stream sent a frame after its done frame");
+    expect(collected).toEqual([{ type: "text_delta", text: "reply" }]);
+  });
+
   it("captures thinking_delta into content blocks but does not forward to onEvent", async () => {
     const provider = mockStreamProvider([
       {

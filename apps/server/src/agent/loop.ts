@@ -1272,6 +1272,8 @@ interface DrainedStream {
  * `done` frame's metadata. Extracted from the loop body so the
  * catch-on-throw classifier path stays tight. Errors propagate to the
  * caller; a throwing `onEvent` returns the stream, aborting the request.
+ * A stream that breaks the frame contract (no `done`, or anything after it)
+ * throws.
  */
 async function drainStream(
   provider: LlmProvider,
@@ -1283,6 +1285,9 @@ async function drainStream(
   let meta: ResponseMeta | undefined;
 
   for await (const event of provider.chatStream(chatParams)) {
+    if (meta !== undefined) {
+      throw new Error(`${provider.name} stream sent a frame after its done frame`);
+    }
     if (event.type === "done") {
       meta = event.meta;
       continue;
