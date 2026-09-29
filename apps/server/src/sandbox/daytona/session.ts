@@ -58,11 +58,8 @@ export class DaytonaSandboxSession implements SandboxSession<DaytonaSessionState
         truncated: stdoutBuf.truncated || stderrBuf.truncated,
       };
     } finally {
-      // Defensive: the streaming wrapper deletes its per-call Daytona
-      // session on natural exit too, so this is usually a no-op. But
-      // if `wait()` threw before the WS resolve fired (mid-stream
-      // error path), the cleanup hadn't run yet — `dispose()` here
-      // makes sure we never leak a session.
+      // The exec deletes its per-call session once it settles; `dispose()`
+      // waits for that teardown, and retries it if it failed.
       await handle.dispose();
     }
   }

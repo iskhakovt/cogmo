@@ -28,14 +28,15 @@
  *   - Image-pull / snapshot-build error paths.
  */
 
-import { execFile, spawn } from "node:child_process";
+import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { err, ok, type Result } from "neverthrow";
 import { logger } from "../logger.js";
 import { CONTAINER_ASKPASS_DIR as ASKPASS_CONTAINER_DIR } from "../sandbox/askpass.js";
-import { DisposedError } from "../sandbox/daytona/exec-streaming.js";
+import { type ExecBackend, type ExecSink, type ExecStarted, runExec } from "../sandbox/exec-run.js";
 import {
   type DaytonaSessionState,
   DaytonaSessionStateSchema,
@@ -47,7 +48,6 @@ import {
   type SandboxSession,
   type SessionSpec,
 } from "../sandbox/index.js";
-import { expectDefined } from "./assertions.js";
 
 const execFileP = promisify(execFile);
 const log = logger.child({ component: "sandbox.daytona.fake" });
@@ -352,75 +352,7 @@ class FakeDaytonaSandboxSession implements SandboxSession<DaytonaSessionState> {
     if (cmd.length === 0) {
       throw new Error("execStreaming: empty command");
     }
-    const prepared = this.#prepare(cmd, opts);
-    // True streaming: `spawn` returns immediately with live stdout /
-    // stderr `Readable`s; the caller consumes (or `dispose`s) them
-    // while the process runs. `wait()` resolves when the process
-    // closes — `close` (not `exit`) so EOF on stdout/stderr has
-    // already been delivered, matching the real ExecStreamingHandle
-    // contract.
-    const child = spawn(prepared.argv[0] ?? "", prepared.argv.slice(1), {
-      cwd: prepared.cwd,
-      env: prepared.env,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    let settled = false;
-    let resolveExit!: (value: { exitCode: number }) => void;
-    let rejectExit!: (err: Error) => void;
-    const exitPromise = new Promise<{ exitCode: number }>((resolve, reject) => {
-      resolveExit = resolve;
-      rejectExit = reject;
-    });
-    // Pre-attach a silent catch so a caller that disposes without
-    // observing `wait()` doesn't trip Node's unhandledRejection
-    // detector — `wait()` returns the original promise, so callers
-    // that DO observe still see the rejection.
-    exitPromise.catch(() => {});
-    child.on("error", (err) => {
-      if (settled) return;
-      settled = true;
-      rejectExit(err);
-    });
-    child.on("close", (code) => {
-      if (settled) return;
-      settled = true;
-      resolveExit({ exitCode: typeof code === "number" ? code : 1 });
-    });
-
-    // ChildProcess.stdout/stderr are `Readable | null`; with
-    // `stdio: ["ignore", "pipe", "pipe"]` they're guaranteed non-null
-    // but TS can't narrow that based on the stdio config. expectDefined
-    // does the runtime narrowing without a cast.
-    const stdout = expectDefined(child.stdout, "child.stdout");
-    const stderr = expectDefined(child.stderr, "child.stderr");
-
-    let disposed = false;
-    return {
-      stdout,
-      stderr,
-      wait: () => exitPromise,
-      dispose: async () => {
-        if (disposed) return;
-        disposed = true;
-        // Match the documented `ExecStreamingHandle` contract: after
-        // dispose(), wait() rejects with `DisposedError`. The real
-        // Daytona backend's exec-streaming wrapper rejects the same
-        // way; the local-Docker dockerode adapter does too. Surface it
-        // before SIGTERM so a caller racing dispose against natural
-        // exit can rely on the rejection regardless of timing.
-        if (!settled) {
-          settled = true;
-          rejectExit(new DisposedError());
-        }
-        try {
-          child.kill("SIGTERM");
-        } catch {
-          // Already exited between the settled-check and the kill —
-          // ignore. Idempotent.
-        }
-      },
-    };
+    return runExec(new HostProcessBackend(this.#prepare(cmd, opts)), opts ?? {});
   }
 
   #prepare(
@@ -436,6 +368,50 @@ class FakeDaytonaSandboxSession implements SandboxSession<DaytonaSessionState> {
     const askpassMirror = this.#record.askpass?.hostMirrorDir;
     const argv = askpassMirror ? cmd.map((a) => rewriteAskpass(a, askpassMirror)) : [...cmd];
     return { argv, cwd, env };
+  }
+}
+
+/**
+ * Runs the command as a host process. `runExec` gives it the lifecycle the
+ * real backends have: deadlines, `signal`, dispose, `exited`.
+ */
+class HostProcessBackend implements ExecBackend {
+  readonly buffersStdin = false;
+  readonly logFields: Record<string, unknown>;
+  #prepared: { argv: string[]; cwd: string; env: Record<string, string> };
+  #child: ChildProcess | undefined;
+  #exitCode: number | undefined;
+
+  constructor(prepared: { argv: string[]; cwd: string; env: Record<string, string> }) {
+    this.#prepared = prepared;
+    this.logFields = { cmd: prepared.argv[0] };
+  }
+
+  async start(sink: ExecSink): Promise<ExecStarted> {
+    const { argv, cwd, env } = this.#prepared;
+    const child = spawn(argv[0] ?? "", argv.slice(1), {
+      cwd,
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    this.#child = child;
+    child.stdout.on("data", (chunk: Buffer) => sink.output("stdout", chunk));
+    child.stderr.on("data", (chunk: Buffer) => sink.output("stderr", chunk));
+    child.on("error", (e) => sink.failed(e));
+    // `close`, not `exit`: stdout and stderr have been delivered by then.
+    child.on("close", (code) => {
+      this.#exitCode = code ?? 1;
+      sink.ended();
+    });
+    return {};
+  }
+
+  async fetchExit(): Promise<Result<number, string>> {
+    return this.#exitCode === undefined ? err("host process never closed") : ok(this.#exitCode);
+  }
+
+  async teardown(): Promise<void> {
+    this.#child?.kill("SIGTERM");
   }
 }
 

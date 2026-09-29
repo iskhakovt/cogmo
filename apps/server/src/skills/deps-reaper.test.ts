@@ -1,4 +1,5 @@
 import { PassThrough, type Readable, type Writable } from "node:stream";
+import { ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { ExecStreamingHandle, SandboxClient, SandboxSession } from "../sandbox/index.js";
@@ -25,6 +26,7 @@ function makeFakeExec(): FakeExec {
     stdin: stdinSink as unknown as Writable,
     stdout: stdoutSource as unknown as Readable,
     stderr: stderrSource as unknown as Readable,
+    exited: waitPromise.then((exit) => ok(exit)),
     wait: () => waitPromise,
     dispose: async () => {
       stdoutSource.end();

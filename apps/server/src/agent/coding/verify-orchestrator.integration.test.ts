@@ -32,6 +32,7 @@ import { join } from "node:path";
 import { Readable } from "node:stream";
 import { promisify } from "node:util";
 import type { Octokit } from "@octokit/rest";
+import { ok } from "neverthrow";
 import { GenericContainer, type StartedTestContainer, Wait } from "testcontainers";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
@@ -286,6 +287,7 @@ function fakeSandbox(opts: { worktreePath: string }): {
       const result: ExecStreamingHandle = {
         stdout: stdoutStream,
         stderr: stderrStream,
+        exited: Promise.resolve(ok({ exitCode })),
         wait: async () => ({ exitCode }),
         dispose: async () => {},
       };

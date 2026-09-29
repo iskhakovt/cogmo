@@ -50,9 +50,11 @@ export interface ContainerInspect {
 }
 
 /**
- * Narrow shape for `exec.inspect()` — we only read `ExitCode`.
+ * Narrow shape for `exec.inspect()`. `ExitCode` is null until the daemon
+ * has reaped the exec's process, and `Running` is true until then.
  */
 export interface ExecInspect {
+  Running: boolean;
   ExitCode: number | null;
 }
 

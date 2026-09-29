@@ -28,7 +28,7 @@
  * code so the operator sees a clear message instead of generic git output.
  */
 
-import type { SandboxSession } from "../../sandbox/index.js";
+import { type SandboxSession, unwrapExit } from "../../sandbox/index.js";
 import type { GitHubIdentity } from "../../secrets/github.js";
 import { NO_BACKGROUND_MAINTENANCE_FLAGS } from "./git-maintenance.js";
 
@@ -232,19 +232,24 @@ async function runGit(
   const stdoutChunks: Buffer[] = [];
   const stderrChunks: Buffer[] = [];
 
-  const stdoutDone = (async () => {
-    for await (const c of handle.stdout) {
-      stdoutChunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c as string));
-    }
-  })();
-  const stderrDone = (async () => {
-    for await (const c of handle.stderr) {
-      stderrChunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c as string));
-    }
-  })();
+  // Settled from the start: a stream fails along with its exec, which
+  // `exited` reports, and must not surface as an unhandled rejection.
+  const drained = Promise.allSettled([
+    (async () => {
+      for await (const c of handle.stdout) {
+        stdoutChunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c as string));
+      }
+    })(),
+    (async () => {
+      for await (const c of handle.stderr) {
+        stderrChunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c as string));
+      }
+    })(),
+  ]);
 
-  const wait = await handle.wait();
-  await Promise.all([stdoutDone, stderrDone]);
+  const exited = await handle.exited;
+  await drained;
+  const wait = unwrapExit(exited);
 
   return {
     exitCode: wait.exitCode,
