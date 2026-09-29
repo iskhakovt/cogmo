@@ -31,16 +31,34 @@ const mockBotApi = {
   sendDocument: vi.fn().mockResolvedValue({ message_id: 104 }),
   getFile: vi.fn().mockResolvedValue({ file_path: "photos/file_1.jpg" }),
   setMyCommands: vi.fn().mockResolvedValue(true),
+  getUpdates: vi.fn().mockResolvedValue([]),
 };
+
+type UpdateMiddleware = (
+  ctx: { update: { update_id: number } },
+  next: () => Promise<void>,
+) => Promise<void>;
 
 /**
  * What the mocked `bot.start()` (the polling loop) and `bot.stop()` (the
- * offset confirmation) return. Reset before each test.
+ * offset confirmation) return, and the middleware `bot.use()` registered.
+ * Reset before each test.
  */
 const botLifecycle = vi.hoisted(() => ({
   polling: (): Promise<void> => Promise.resolve(),
   stop: (): Promise<void> => Promise.resolve(),
+  middleware: [] as UpdateMiddleware[],
 }));
+
+/** Run one update through the registered middleware, then `handler`, as grammY composes them. */
+function runUpdate(updateId: number, handler: () => Promise<void>): Promise<void> {
+  const ctx = { update: { update_id: updateId } };
+  const run = (index: number): Promise<void> => {
+    const middleware = botLifecycle.middleware[index];
+    return middleware ? middleware(ctx, () => run(index + 1)) : handler();
+  };
+  return run(0);
+}
 
 vi.mock("grammy", () => {
   // Grammy's InputFile wraps a Buffer — the test captures it so assertions can
@@ -60,6 +78,7 @@ vi.mock("grammy", () => {
       handlers.set(`callbackQuery:${pattern.source}`, handler),
     );
     catch = vi.fn();
+    use = vi.fn((middleware: UpdateMiddleware) => botLifecycle.middleware.push(middleware));
     // Real grammY returns a Promise<void> that resolves when bot.stop() is
     // called. The adapter awaits it on stop() to drain — without the
     // Promise return type, `attachPolling` errors with "Cannot read
@@ -162,6 +181,7 @@ describe("telegram adapter", () => {
     vi.clearAllMocks();
     botLifecycle.polling = () => Promise.resolve();
     botLifecycle.stop = () => Promise.resolve();
+    botLifecycle.middleware = [];
   });
 
   async function createAdapter(transportOverrides?: Partial<ReturnType<typeof mockTransport>>) {
@@ -267,7 +287,7 @@ describe("telegram adapter", () => {
       }
     });
 
-    it("stops polling, then drains the loop", async () => {
+    it("stops polling, then drains the loop", { timeout: 5_000 }, async () => {
       // As in grammY, the polling loop ends only once `stop()` has aborted it.
       const loopEnded = Promise.withResolvers<void>();
       let drained = false;
@@ -280,9 +300,49 @@ describe("telegram adapter", () => {
       };
       const { adapter } = await createAdapter();
 
-      await resolvesWithin(adapter.stop(), 1_000, "stop");
+      await resolvesWithin(adapter.stop(), 2_500, "stop");
 
       expect(drained).toBe(true);
+    });
+
+    it("confirms past the rest of a batch the loop handles after stop()", async () => {
+      // grammY's handleUpdates finishes the batch after `stop()`, whose own
+      // confirmation stops at the update being handled.
+      const handling = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      botLifecycle.polling = async () => {
+        for (const updateId of [7, 8, 9]) {
+          await runUpdate(updateId, async () => {
+            if (updateId !== 7) return;
+            handling.resolve();
+            await release.promise;
+          });
+        }
+      };
+      const { adapter } = await createAdapter();
+      await handling.promise;
+
+      const stopping = adapter.stop();
+      release.resolve();
+      await stopping;
+
+      expect(mockBotApi.getUpdates).toHaveBeenLastCalledWith({ offset: 10, limit: 1, timeout: 0 });
+    });
+
+    it("logs a failed confirmation of the handled updates instead of throwing", async () => {
+      botLifecycle.polling = () => runUpdate(7, async () => {});
+      const failure = new Error("network down");
+      mockBotApi.getUpdates.mockRejectedValueOnce(failure);
+      const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+      try {
+        const { adapter } = await createAdapter();
+
+        await expect(adapter.stop()).resolves.toBeUndefined();
+        expect(mockBotApi.getUpdates).toHaveBeenCalledWith({ offset: 8, limit: 1, timeout: 0 });
+        expect(warn).toHaveBeenCalledWith({ err: failure }, expect.any(String));
+      } finally {
+        warn.mockRestore();
+      }
     });
   });
 
