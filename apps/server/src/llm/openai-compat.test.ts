@@ -4,6 +4,7 @@ import { z } from "zod";
 import { PipelineDefinitionSchema } from "../agent/pipeline/types.js";
 import { logger } from "../logger.js";
 import { expectDefined } from "../test/assertions.js";
+import { drainFrames } from "../test/factories.js";
 import type { CacheDialect } from "./cache-dialect.js";
 import { ProviderProtocolError, ToolArgsCutOffError } from "./errors.js";
 import { isRetriableProviderError, RefusalError } from "./fallback.js";
@@ -14,7 +15,6 @@ import type {
   ChatParams,
   ChatStreamFrame,
   ImageBlock,
-  ResponseMeta,
   ToolDefinition,
 } from "./types.js";
 
@@ -95,21 +95,6 @@ function mockStream(chunks: unknown[]): AsyncIterable<unknown> {
       };
     },
   };
-}
-
-type ContentFrame = Exclude<ChatStreamFrame, { type: "done" }>;
-
-/** Drain a provider stream: its content frames, and the `done` frame's metadata. */
-async function drain(
-  stream: AsyncIterable<ChatStreamFrame>,
-): Promise<{ frames: ContentFrame[]; meta: ResponseMeta }> {
-  const frames: ContentFrame[] = [];
-  let meta: ResponseMeta | undefined;
-  for await (const frame of stream) {
-    if (frame.type === "done") meta = frame.meta;
-    else frames.push(frame);
-  }
-  return { frames, meta: expectDefined(meta, "done frame") };
 }
 
 describe("OpenAICompatibleProvider", () => {
@@ -445,7 +430,7 @@ describe("OpenAICompatibleProvider", () => {
         ]),
       );
 
-      const { frames, meta } = await drain(
+      const { frames, meta } = await drainFrames(
         provider.chatStream({
           model: "gpt-5-nano",
           system: "sys",
@@ -485,7 +470,7 @@ describe("OpenAICompatibleProvider", () => {
           },
         ]),
       );
-      const { frames, meta } = await drain(
+      const { frames, meta } = await drainFrames(
         provider.chatStream({
           model: "m",
           system: "sys",
@@ -534,7 +519,7 @@ describe("OpenAICompatibleProvider", () => {
         ]),
       );
 
-      const { frames, meta } = await drain(
+      const { frames, meta } = await drainFrames(
         provider.chatStream({
           model: "m",
           system: "sys",
@@ -561,7 +546,7 @@ describe("OpenAICompatibleProvider", () => {
         ]),
       );
 
-      await drain(
+      await drainFrames(
         provider.chatStream({
           model: "m",
           system: "sys",
@@ -681,7 +666,7 @@ describe("OpenAICompatibleProvider", () => {
         ]),
       );
 
-      const { frames, meta } = await drain(
+      const { frames, meta } = await drainFrames(
         provider.chatStream({
           model: "m",
           system: "sys",
@@ -726,7 +711,7 @@ describe("OpenAICompatibleProvider", () => {
       );
 
       await expect(
-        drain(
+        drainFrames(
           provider.chatStream({
             model: "m",
             system: "sys",
@@ -788,7 +773,7 @@ describe("OpenAICompatibleProvider", () => {
           ]),
         );
 
-        const error = await drain(
+        const error = await drainFrames(
           provider.chatStream({
             model: "m",
             system: "sys",
@@ -916,7 +901,7 @@ describe("OpenAICompatibleProvider", () => {
         ]),
       );
 
-      const { meta } = await drain(
+      const { meta } = await drainFrames(
         provider.chatStream({
           model: "gpt-5-nano",
           system: "sys",
@@ -1035,84 +1020,84 @@ describe("OpenAICompatibleProvider", () => {
       await expect(iter.next()).rejects.toBeInstanceOf(RefusalError);
     });
 
-    describe("abort signal", () => {
-      const params: ChatParams = {
-        model: "m",
-        system: "sys",
-        messages: [{ role: "user", content: "hi" }],
-      };
-
-      it("hands the signal to the SDK", async () => {
-        const provider = createProvider();
-        const signal = new AbortController().signal;
-        mockCreate.mockResolvedValueOnce({
-          choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
-          model: "m",
-          usage: { prompt_tokens: 5, completion_tokens: 1 },
-        });
-        mockCreate.mockResolvedValueOnce(
-          mockStream([{ model: "m", choices: [{ delta: {}, finish_reason: "stop" }] }]),
-        );
-
-        await provider.chat(params, { signal });
-        await drain(provider.chatStream(params, { signal }));
-
-        expect(mockCreate.mock.calls.map((call) => call[1])).toEqual([{ signal }, { signal }]);
-      });
-
-      it("rejects chat with the signal's reason as soon as it fires", async () => {
-        const provider = createProvider();
-        const controller = new AbortController();
-        const reason = new Error("cancelled");
-        mockCreate.mockReturnValueOnce(new Promise(() => {}));
-
-        const call = provider.chat(params, { signal: controller.signal });
-        controller.abort(reason);
-
-        await expect(call).rejects.toBe(reason);
-      });
-
-      it("throws the signal's reason, not a partial tool call, when the SDK ends an aborted stream", async () => {
-        const provider = createProvider();
-        const controller = new AbortController();
-        const reason = new Error("cancelled");
-        async function* sdkStream(): AsyncGenerator<unknown> {
-          yield {
-            model: "m",
-            choices: [
-              {
-                delta: {
-                  tool_calls: [
-                    { index: 0, id: "call_1", function: { name: "search", arguments: '{"q":' } },
-                  ],
-                },
-                finish_reason: null,
-              },
-            ],
-            usage: null,
-          };
-          // The SDK's stream ends quietly once its signal fires.
-          controller.abort(reason);
-        }
-        mockCreate.mockResolvedValueOnce(sdkStream());
-
-        const collected: ChatStreamFrame[] = [];
-        const drained = (async () => {
-          for await (const frame of provider.chatStream(params, { signal: controller.signal })) {
-            collected.push(frame);
-          }
-        })();
-
-        await expect(drained).rejects.toBe(reason);
-        expect(collected).toEqual([]);
-      });
-    });
-
     it("RefusalError is non-retriable", () => {
       // Contract: FallbackLlmProvider must propagate refusals without trying
       // the next candidate. The classification predicate stays binary; the
       // RefusalError instance check rides in front of the status-based rules.
       expect(isRetriableProviderError(new RefusalError("refused"))).toBe(false);
+    });
+  });
+
+  describe("abort signal", () => {
+    const params: ChatParams = {
+      model: "m",
+      system: "sys",
+      messages: [{ role: "user", content: "hi" }],
+    };
+
+    it("hands the signal to the SDK", async () => {
+      const provider = createProvider();
+      const signal = new AbortController().signal;
+      mockCreate.mockResolvedValueOnce({
+        choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+        model: "m",
+        usage: { prompt_tokens: 5, completion_tokens: 1 },
+      });
+      mockCreate.mockResolvedValueOnce(
+        mockStream([{ model: "m", choices: [{ delta: {}, finish_reason: "stop" }] }]),
+      );
+
+      await provider.chat(params, { signal });
+      await drainFrames(provider.chatStream(params, { signal }));
+
+      expect(mockCreate.mock.calls.map((call) => call[1])).toEqual([{ signal }, { signal }]);
+    });
+
+    it("rejects chat with the signal's reason as soon as it fires", async () => {
+      const provider = createProvider();
+      const controller = new AbortController();
+      const reason = new Error("cancelled");
+      mockCreate.mockReturnValueOnce(new Promise(() => {}));
+
+      const call = provider.chat(params, { signal: controller.signal });
+      controller.abort(reason);
+
+      await expect(call).rejects.toBe(reason);
+    });
+
+    it("throws the signal's reason, not a partial tool call, when the SDK ends an aborted stream", async () => {
+      const provider = createProvider();
+      const controller = new AbortController();
+      const reason = new Error("cancelled");
+      async function* sdkStream(): AsyncGenerator<unknown> {
+        yield {
+          model: "m",
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  { index: 0, id: "call_1", function: { name: "search", arguments: '{"q":' } },
+                ],
+              },
+              finish_reason: null,
+            },
+          ],
+          usage: null,
+        };
+        // The SDK's stream ends quietly once its signal fires.
+        controller.abort(reason);
+      }
+      mockCreate.mockResolvedValueOnce(sdkStream());
+
+      const collected: ChatStreamFrame[] = [];
+      const drained = (async () => {
+        for await (const frame of provider.chatStream(params, { signal: controller.signal })) {
+          collected.push(frame);
+        }
+      })();
+
+      await expect(drained).rejects.toBe(reason);
+      expect(collected).toEqual([]);
     });
   });
 
@@ -1187,7 +1172,7 @@ describe("OpenAICompatibleProvider", () => {
         ]),
       );
 
-      const { meta } = await drain(
+      const { meta } = await drainFrames(
         provider.chatStream({
           model: "anthropic/claude-sonnet-5",
           system: "sys",
@@ -1236,7 +1221,7 @@ describe("OpenAICompatibleProvider", () => {
         ]),
       );
 
-      const { meta } = await drain(
+      const { meta } = await drainFrames(
         provider.chatStream({
           model: "local-model",
           system: "sys",
@@ -1297,9 +1282,9 @@ describe("OpenAICompatibleProvider", () => {
       };
     }
 
-    const RequestOptionsSchema = z
-      .object({ headers: z.record(z.string(), z.string()).optional() })
-      .optional();
+    const RequestOptionsSchema = z.object({
+      headers: z.record(z.string(), z.string()).optional(),
+    });
 
     interface Sent {
       body: Record<string, unknown>;
@@ -1372,7 +1357,7 @@ describe("OpenAICompatibleProvider", () => {
           // Two breakpoints at one TTL: a longer TTL after a shorter one is a 400.
           expect(breakpoints(body)).toEqual([marker, marker]);
           expect(hintFields(body)).toEqual(["session_id", "cache_control"]);
-          expect(options?.headers).toBeUndefined();
+          expect(options.headers).toBeUndefined();
         },
       );
 
@@ -1425,7 +1410,7 @@ describe("OpenAICompatibleProvider", () => {
         expect(breakpoints(body)).toEqual([]);
         expect(systemContent(body)).toBe("sys");
         expect(hintFields(body)).toEqual(["session_id"]);
-        expect(options?.headers).toBeUndefined();
+        expect(options.headers).toBeUndefined();
       });
 
       it("sends nothing to any other model without an intent", async () => {
@@ -1446,7 +1431,7 @@ describe("OpenAICompatibleProvider", () => {
         expect(body.prompt_cache_key).toBe("conv-1");
         expect(hintFields(body)).toEqual(["prompt_cache_key"]);
         expect(breakpoints(body)).toEqual([]);
-        expect(options?.headers).toBeUndefined();
+        expect(options.headers).toBeUndefined();
       });
 
       it("sends nothing without an intent", async () => {
@@ -1460,7 +1445,7 @@ describe("OpenAICompatibleProvider", () => {
       it("sends the intent's key as the x-grok-conv-id header, and nothing in the body", async () => {
         const { body, options } = await chatWith("xai", { model: "grok-4.3", cache: INTENT });
 
-        expect(options?.headers).toEqual({ "x-grok-conv-id": "conv-1" });
+        expect(options.headers).toEqual({ "x-grok-conv-id": "conv-1" });
         expect(hintFields(body)).toEqual([]);
         expect(breakpoints(body)).toEqual([]);
       });
@@ -1468,7 +1453,7 @@ describe("OpenAICompatibleProvider", () => {
       it("sends no header without an intent", async () => {
         const { options } = await chatWith("xai", { model: "grok-4.3" });
 
-        expect(options?.headers).toBeUndefined();
+        expect(options.headers).toBeUndefined();
       });
     });
 
@@ -1481,7 +1466,7 @@ describe("OpenAICompatibleProvider", () => {
       expect(hintFields(body)).toEqual([]);
       expect(breakpoints(body)).toEqual([]);
       expect(systemContent(body)).toBe("sys");
-      expect(options?.headers).toBeUndefined();
+      expect(options.headers).toBeUndefined();
     });
 
     it.each(["openrouter", "openai", "xai"] as const)(
@@ -1498,7 +1483,7 @@ describe("OpenAICompatibleProvider", () => {
         // intent: only the default system marker OpenRouter sends Claude.
         expect(hintFields(body)).toEqual([]);
         expect(breakpoints(body)).toEqual(dialect === "openrouter" ? [{ type: "ephemeral" }] : []);
-        expect(options?.headers).toBeUndefined();
+        expect(options.headers).toBeUndefined();
       },
     );
 
@@ -1519,7 +1504,7 @@ describe("OpenAICompatibleProvider", () => {
           ]),
         );
 
-        await drain(
+        await drainFrames(
           provider.chatStream({
             model,
             system: "sys",
@@ -1537,7 +1522,7 @@ describe("OpenAICompatibleProvider", () => {
             { type: "ephemeral", ttl: "1h" },
           ]);
         } else {
-          expect(options?.headers).toEqual({ "x-grok-conv-id": "conv-1" });
+          expect(options.headers).toEqual({ "x-grok-conv-id": "conv-1" });
         }
       },
     );
@@ -1581,7 +1566,7 @@ describe("OpenAICompatibleProvider", () => {
       mockCreate.mockResolvedValueOnce(
         mockStream([{ model, choices: [{ delta: {}, finish_reason: "stop" }] }]),
       );
-      await drain(provider.chatStream(params));
+      await drainFrames(provider.chatStream(params));
     }
     const call = expectDefined(mockCreate.mock.calls[0], "create call");
     return z.record(z.string(), z.unknown()).parse(call[0]);

@@ -27,11 +27,12 @@ import { mock } from "vitest-mock-extended";
 import { z } from "zod";
 import { inngest } from "../inngest/client.js";
 import { AnthropicProvider } from "../llm/anthropic.js";
-import type { ChatParams, ChatStreamFrame, ToolDefinition } from "../llm/types.js";
+import type { ChatParams, ChatStreamFrame, ContentFrame, ToolDefinition } from "../llm/types.js";
 import { agentIterations, memoryRecallFailures } from "../metrics.js";
 import type { SkillRunner } from "../skills/runner.js";
 import { expectDefined } from "../test/assertions.js";
 import {
+  doneFrame,
   fakeRunInTx,
   MOCK_MESSAGE_CREATED_AT,
   mockAgentStore,
@@ -45,6 +46,7 @@ import {
   mockTransportStore,
   mockVoiceBundle,
   mockVoiceResolver,
+  scriptedStream,
   spyOnInngestSend,
   turnContextSent,
 } from "../test/factories.js";
@@ -1108,15 +1110,11 @@ describe("handle-message — turn inputs frozen across re-invocations", () => {
     };
   }
 
-  async function* stream(
-    events: Exclude<ChatStreamFrame, { type: "done" }>[],
+  function stream(
+    events: ContentFrame[],
     stopReason: "tool_use" | "end_turn",
   ): AsyncGenerator<ChatStreamFrame> {
-    yield* events;
-    yield {
-      type: "done",
-      meta: { stopReason, model: "mock-model", usage: { inputTokens: 10, outputTokens: 5 } },
-    };
+    return scriptedStream(events, doneFrame(stopReason, { inputTokens: 10, outputTokens: 5 }));
   }
 
   it("sends the same tools on every iteration when a skill stops loading mid-turn", async () => {

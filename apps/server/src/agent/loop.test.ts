@@ -8,6 +8,7 @@ import type { LlmProvider } from "../llm/provider.js";
 import type {
   ChatStreamFrame,
   ContentBlock,
+  ContentFrame,
   LlmResponse,
   Message,
   StopReason,
@@ -16,7 +17,7 @@ import type {
 } from "../llm/types.js";
 import { logger } from "../logger.js";
 import { expectDefined } from "../test/assertions.js";
-import { mockFilesService } from "../test/factories.js";
+import { doneFrame, mockFilesService, scriptedStream } from "../test/factories.js";
 import type {
   AgentLoopParams,
   AgentLoopResult,
@@ -668,8 +669,6 @@ describe("runAgentLoop", () => {
 
 // --- Streaming agent loop tests ---
 
-type ContentFrame = Exclude<ChatStreamFrame, { type: "done" }>;
-
 interface MockStreamTurn {
   events: ContentFrame[];
   stopReason: StopReason;
@@ -677,22 +676,17 @@ interface MockStreamTurn {
 }
 
 /** A provider stream that yields the turn's events, then its `done` frame. */
-async function* scriptedStream(turn: MockStreamTurn): AsyncGenerator<ChatStreamFrame> {
-  yield* turn.events;
-  yield {
-    type: "done",
-    meta: {
-      stopReason: turn.stopReason,
-      model: "mock-model",
-      usage: turn.usage ?? { inputTokens: 10, outputTokens: 5 },
-    },
-  };
+function turnStream(turn: MockStreamTurn): AsyncGenerator<ChatStreamFrame> {
+  return scriptedStream(
+    turn.events,
+    doneFrame(turn.stopReason, turn.usage ?? { inputTokens: 10, outputTokens: 5 }),
+  );
 }
 
 function mockStreamProvider(turns: MockStreamTurn[]): LlmProvider {
   const chatStream = vi.fn();
   for (const turn of turns) {
-    chatStream.mockReturnValueOnce(scriptedStream(turn));
+    chatStream.mockReturnValueOnce(turnStream(turn));
   }
   return {
     name: "mock-stream",
@@ -1309,14 +1303,7 @@ describe("runStreamingAgentLoop", () => {
       try {
         yield { type: "text_delta", text: "one" };
         yield { type: "text_delta", text: "two" };
-        yield {
-          type: "done",
-          meta: {
-            stopReason: "end_turn",
-            model: "mock-model",
-            usage: { inputTokens: 1, outputTokens: 1 },
-          },
-        };
+        yield doneFrame("end_turn", { inputTokens: 1, outputTokens: 1 });
       } finally {
         cleanup();
       }
@@ -2735,7 +2722,7 @@ function repairStreamProvider(turns: ReadonlyArray<RepairTurn>): {
         throw err;
       })();
     }
-    return scriptedStream(turn);
+    return turnStream(turn);
   });
   const chat = vi.fn(async (params: Parameters<LlmProvider["chat"]>[0]) => {
     chatCalls.push(params);

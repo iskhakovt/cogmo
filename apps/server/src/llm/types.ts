@@ -203,14 +203,19 @@ export type StreamEvent =
  * One frame of a provider stream (`LlmProvider.chatStream`): content events
  * as they arrive, then one `done` frame carrying the response's
  * {@link ResponseMeta}. A stream that fails throws from the iterator
- * instead, so a stream that ends without `done` broke the contract.
- *
- * The adapter accumulates tool input deltas internally — `tool_start`
- * always carries complete parsed input.
+ * instead, so a stream that ends without `done`, or goes on after it, broke
+ * the contract.
  */
-export type ChatStreamFrame =
-  | Extract<StreamEvent, { type: "text_delta" | "thinking_delta" | "tool_start" }>
-  | { type: "done"; meta: ResponseMeta };
+export type ChatStreamFrame = ContentFrame | { type: "done"; meta: ResponseMeta };
+
+/**
+ * A {@link ChatStreamFrame} carrying content. The adapter accumulates tool
+ * input deltas internally — `tool_start` always carries complete parsed input.
+ */
+export type ContentFrame = Extract<
+  StreamEvent,
+  { type: "text_delta" | "thinking_delta" | "tool_start" }
+>;
 
 // --- Structured output ---
 

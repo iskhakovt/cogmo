@@ -4,17 +4,12 @@ import { z } from "zod";
 import { CorrectionExtractionSchema } from "../agent/evolution/extraction-schema.js";
 import { logger } from "../logger.js";
 import { expectDefined } from "../test/assertions.js";
+import { drainFrames } from "../test/factories.js";
 import { AnthropicProvider } from "./anthropic.js";
 import { extractText } from "./content.js";
 import { MissingToolCallError, ProviderProtocolError, ToolArgsCutOffError } from "./errors.js";
 import { toObjectJsonSchema } from "./json-schema.js";
-import type {
-  CacheIntent,
-  ChatStreamFrame,
-  ResponseFormat,
-  ResponseMeta,
-  ToolDefinition,
-} from "./types.js";
+import type { CacheIntent, ChatStreamFrame, ResponseFormat, ToolDefinition } from "./types.js";
 
 // Mock the Anthropic client — use a class so `new Anthropic()` works — and
 // keep the SDK's error classes.
@@ -45,21 +40,6 @@ function mockStream(events: unknown[]): AsyncIterable<unknown> {
       };
     },
   };
-}
-
-type ContentFrame = Exclude<ChatStreamFrame, { type: "done" }>;
-
-/** Drain a provider stream: its content frames, and the `done` frame's metadata. */
-async function drain(
-  stream: AsyncIterable<ChatStreamFrame>,
-): Promise<{ frames: ContentFrame[]; meta: ResponseMeta }> {
-  const frames: ContentFrame[] = [];
-  let meta: ResponseMeta | undefined;
-  for await (const frame of stream) {
-    if (frame.type === "done") meta = frame.meta;
-    else frames.push(frame);
-  }
-  return { frames, meta: expectDefined(meta, "done frame") };
 }
 
 function createProvider(): AnthropicProvider {
@@ -424,7 +404,7 @@ describe("AnthropicProvider", () => {
       ]),
     );
 
-    const { meta } = await drain(
+    const { meta } = await drainFrames(
       provider.chatStream({
         model: "claude-sonnet-4-6",
         system: "sys",
@@ -508,7 +488,7 @@ describe("AnthropicProvider", () => {
       ]),
     );
 
-    const { meta } = await drain(
+    const { meta } = await drainFrames(
       provider.chatStream({
         model: "claude-sonnet-4-6",
         system: "sys",
@@ -549,7 +529,7 @@ describe("AnthropicProvider", () => {
         ]),
       );
 
-      const { frames, meta } = await drain(provider.chatStream(defaultParams));
+      const { frames, meta } = await drainFrames(provider.chatStream(defaultParams));
 
       expect(frames).toEqual([
         { type: "text_delta", text: "Hello" },
@@ -590,7 +570,7 @@ describe("AnthropicProvider", () => {
           { type: "message_stop" },
         ]),
       );
-      const { frames, meta } = await drain(provider.chatStream(defaultParams));
+      const { frames, meta } = await drainFrames(provider.chatStream(defaultParams));
       expect(frames).toEqual([{ type: "tool_start", id: "tu_zero", name: "btc_spot", input: {} }]);
       expect(meta.stopReason).toBe("tool_use");
     });
@@ -631,7 +611,7 @@ describe("AnthropicProvider", () => {
         ]),
       );
 
-      const { frames, meta } = await drain(provider.chatStream(defaultParams));
+      const { frames, meta } = await drainFrames(provider.chatStream(defaultParams));
 
       expect(frames).toEqual([
         { type: "tool_start", id: "tu_1", name: "web_search", input: { query: "weather" } },
@@ -678,7 +658,7 @@ describe("AnthropicProvider", () => {
         ]),
       );
 
-      const { frames } = await drain(provider.chatStream(defaultParams));
+      const { frames } = await drainFrames(provider.chatStream(defaultParams));
 
       expect(frames.map((frame) => frame.type)).toEqual(["text_delta", "tool_start"]);
     });
@@ -703,7 +683,7 @@ describe("AnthropicProvider", () => {
         ]),
       );
 
-      await drain(provider.chatStream(defaultParams));
+      await drainFrames(provider.chatStream(defaultParams));
 
       const callArgs = mockCreate.mock.calls[0]![0];
       expect(callArgs.stream).toBe(true);
@@ -747,7 +727,7 @@ describe("AnthropicProvider", () => {
         ]),
       );
 
-      const { frames, meta } = await drain(provider.chatStream(defaultParams));
+      const { frames, meta } = await drainFrames(provider.chatStream(defaultParams));
 
       expect(frames).toEqual([
         { type: "tool_start", id: "tu_1", name: "web_search", input: { query: "weather" } },
@@ -790,7 +770,7 @@ describe("AnthropicProvider", () => {
         ]),
       );
 
-      await expect(drain(provider.chatStream(defaultParams))).rejects.toBeInstanceOf(
+      await expect(drainFrames(provider.chatStream(defaultParams))).rejects.toBeInstanceOf(
         ProviderProtocolError,
       );
     });
@@ -917,7 +897,7 @@ describe("AnthropicProvider", () => {
       );
 
       await provider.chat(params, { signal });
-      await drain(provider.chatStream(params, { signal }));
+      await drainFrames(provider.chatStream(params, { signal }));
 
       expect(mockCreate.mock.calls.map((call) => call[1])).toEqual([{ signal }, { signal }]);
     });
@@ -953,7 +933,7 @@ describe("AnthropicProvider", () => {
       const reason = new Error("cancelled");
       mockCreate.mockReturnValueOnce(new Promise(() => {}));
 
-      const drained = drain(provider.chatStream(params, { signal: controller.signal }));
+      const drained = drainFrames(provider.chatStream(params, { signal: controller.signal }));
       // Let the stream reach the SDK call before the signal fires.
       await vi.waitFor(() => expect(mockCreate).toHaveBeenCalledOnce());
       controller.abort(reason);
@@ -1117,7 +1097,7 @@ describe("AnthropicProvider", () => {
         ]),
       );
 
-      const { meta } = await drain(
+      const { meta } = await drainFrames(
         provider.chatStream({
           model: "claude-sonnet-5",
           system: "sys",
@@ -1251,7 +1231,7 @@ describe("AnthropicProvider", () => {
         ]),
       );
 
-      await drain(
+      await drainFrames(
         provider.chatStream({
           model: "claude-sonnet-5",
           system: "sys",
@@ -1490,7 +1470,7 @@ describe("AnthropicProvider", () => {
         ]),
       );
 
-      const { frames } = await drain(
+      const { frames } = await drainFrames(
         provider.chatStream({
           model: "claude-sonnet-5",
           system: "sys",
@@ -1530,7 +1510,7 @@ describe("AnthropicProvider", () => {
         ]),
       );
 
-      const { frames } = await drain(
+      const { frames } = await drainFrames(
         provider.chatStream({
           model: "claude-sonnet-5",
           system: "sys",
@@ -1587,7 +1567,7 @@ describe("AnthropicProvider", () => {
         ]),
       );
 
-      const { frames, meta } = await drain(
+      const { frames, meta } = await drainFrames(
         provider.chatStream({
           model: "claude-sonnet-4-6",
           system: "sys",
@@ -1769,7 +1749,7 @@ describe("AnthropicProvider", () => {
         ]),
       );
 
-      await drain(
+      await drainFrames(
         provider.chatStream({
           model: "claude-sonnet-5",
           system: "sys",

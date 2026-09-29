@@ -15,6 +15,13 @@ import type { Transactor } from "../db/transactor.js";
 import type { StepRun, StepSendEvent } from "../inngest/index.js";
 import type { LlmProvider } from "../llm/provider.js";
 import { constantResolver, type LlmProviderResolver } from "../llm/resolver.js";
+import type {
+  ChatStreamFrame,
+  ContentFrame,
+  ResponseMeta,
+  StopReason,
+  Usage,
+} from "../llm/types.js";
 import type { MemoryProvider } from "../memory/provider.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import type { AttachmentStore } from "../transport/attachment-store.js";
@@ -735,6 +742,33 @@ export function mockProvider(overrides?: Partial<LlmProvider>): LlmProvider {
     countTokens: vi.fn().mockResolvedValue(100),
     ...overrides,
   };
+}
+
+/** The `done` frame a scripted provider stream ends with. */
+export function doneFrame(stopReason: StopReason, usage: Usage): ChatStreamFrame {
+  return { type: "done", meta: { stopReason, model: "mock-model", usage } };
+}
+
+/** A scripted provider stream: `frames`, then `done`. */
+export async function* scriptedStream(
+  frames: ReadonlyArray<ContentFrame>,
+  done: ChatStreamFrame,
+): AsyncGenerator<ChatStreamFrame> {
+  yield* frames;
+  yield done;
+}
+
+/** Read a provider stream to its end: its content frames, and the `done` frame's metadata. */
+export async function drainFrames(
+  stream: AsyncIterable<ChatStreamFrame>,
+): Promise<{ frames: ContentFrame[]; meta: ResponseMeta }> {
+  const frames: ContentFrame[] = [];
+  let meta: ResponseMeta | undefined;
+  for await (const frame of stream) {
+    if (frame.type === "done") meta = frame.meta;
+    else frames.push(frame);
+  }
+  return { frames, meta: expectDefined(meta, "done frame") };
 }
 
 /**

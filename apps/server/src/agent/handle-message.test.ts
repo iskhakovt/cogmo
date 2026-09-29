@@ -13,6 +13,7 @@ import type { SkillRunner } from "../skills/runner.js";
 import { expectDefined } from "../test/assertions.js";
 import {
   directStep,
+  doneFrame,
   fakeRunInTx,
   invokeInngestFn,
   invokeInngestOnFailure,
@@ -30,6 +31,7 @@ import {
   mockTransportStore,
   mockVoiceBundle,
   mockVoiceResolver,
+  scriptedStream,
   turnContextSent,
 } from "../test/factories.js";
 import type { InboundContent } from "../transport/content.js";
@@ -1919,20 +1921,13 @@ describe("createHandleMessage", () => {
       const requests: ChatParams[] = [];
       const chatStream = vi.fn((params: ChatParams): AsyncIterable<ChatStreamFrame> => {
         requests.push(structuredClone(params));
-        const first = requests.length === 1;
-        return (async function* (): AsyncGenerator<ChatStreamFrame> {
-          yield first
-            ? { type: "tool_start", id: "t1", name: "echo", input: { n: 1 } }
-            : { type: "text_delta", text: "done" };
-          yield {
-            type: "done",
-            meta: {
-              stopReason: first ? "tool_use" : "end_turn",
-              model: "mock-model",
-              usage: { inputTokens: 10, outputTokens: 5 },
-            },
-          };
-        })();
+        const usage = { inputTokens: 10, outputTokens: 5 };
+        return requests.length === 1
+          ? scriptedStream(
+              [{ type: "tool_start", id: "t1", name: "echo", input: { n: 1 } }],
+              doneFrame("tool_use", usage),
+            )
+          : scriptedStream([{ type: "text_delta", text: "done" }], doneFrame("end_turn", usage));
       });
       const echo = {
         name: "echo",

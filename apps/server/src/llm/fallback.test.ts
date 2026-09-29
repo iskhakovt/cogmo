@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { mockProvider } from "../test/factories.js";
+import { doneFrame, mockProvider, scriptedStream } from "../test/factories.js";
 import { ProviderProtocolError } from "./errors.js";
 import {
   AllProvidersFailedError,
@@ -8,7 +8,7 @@ import {
   RefusalError,
 } from "./fallback.js";
 import type { LlmProvider } from "./provider.js";
-import type { ChatParams, ChatStreamFrame, LlmResponse } from "./types.js";
+import type { ChatParams, ChatStreamFrame, ContentFrame, LlmResponse } from "./types.js";
 
 // --- Error construction helpers ---
 
@@ -31,17 +31,11 @@ function networkError(message = "ECONNREFUSED"): Error {
 
 // --- Stream helpers ---
 
-type ContentFrame = Exclude<ChatStreamFrame, { type: "done" }>;
-
-const DONE: ChatStreamFrame = {
-  type: "done",
-  meta: { stopReason: "end_turn", model: "mock-model", usage: { inputTokens: 1, outputTokens: 1 } },
-};
+const DONE = doneFrame("end_turn", { inputTokens: 1, outputTokens: 1 });
 
 /** A candidate stream that yields `frames`, then `done`. */
-async function* streamOf(frames: ContentFrame[]): AsyncGenerator<ChatStreamFrame> {
-  yield* frames;
-  yield DONE;
+function streamOf(frames: ContentFrame[]): AsyncGenerator<ChatStreamFrame> {
+  return scriptedStream(frames, DONE);
 }
 
 /**
