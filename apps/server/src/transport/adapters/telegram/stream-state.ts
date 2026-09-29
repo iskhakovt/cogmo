@@ -39,11 +39,16 @@ import { renderTelegramHtml } from "./render.js";
 const TELEGRAM_MAX_MESSAGE_LENGTH = 4096;
 /** Minimum time between two previews of the live message. */
 export const EDIT_INTERVAL_MS = 500;
-/**
- * Longest wait before a retry. Past it the handle fails rather than hold its
- * turn open.
- */
+/** Longest single wait before a retry; a longer `retry_after` fails the handle at once. */
 export const MAX_WAIT_MS = 30_000;
+/**
+ * Longest a closing stream spends, from `finish` or `abort`, before its last
+ * wait ends: a wait that would end later fails the handle instead. The close
+ * holds up the turn, and a stream that fails at finish gets its reply again
+ * through a delivery step, whose retries hold up nothing. 60s allows two of
+ * the longest waits, or a whole transient backoff with room for the writes.
+ */
+export const MAX_CLOSE_MS = 60_000;
 /** Failed writes in a row, rate limits and transient failures alike, at which the handle fails. */
 export const MAX_FAILURES_IN_A_ROW = 5;
 /** Wait after a first transient failure; each further one in a row doubles it. */
@@ -122,7 +127,7 @@ type Closing = "finish" | "abort";
 export type StreamState =
   | { kind: "idle" }
   | ({ kind: "streaming" } & Live)
-  | ({ kind: "finalizing"; closing: Closing } & Live)
+  | ({ kind: "finalizing"; closing: Closing; closedAt: number } & Live)
   | { kind: "done" }
   | { kind: "failed"; reason: string };
 
@@ -385,9 +390,12 @@ function onFinish(
   now: number,
 ): Transition {
   const cut = withOverflowCut(state, opts);
-  return advance({ ...cut, kind: "finalizing", closing: "finish", ...flushed(cut) }, opts, now, [
-    { type: "stopped" },
-  ]);
+  return advance(
+    { ...cut, kind: "finalizing", closing: "finish", closedAt: now, ...flushed(cut) },
+    opts,
+    now,
+    [{ type: "stopped" }],
+  );
 }
 
 /**
@@ -405,7 +413,13 @@ function onAbort(
   const tail = buffered ? `${buffered}\n\n⚠️ ${error}` : `⚠️ ${error}`;
   const cut = withOverflowCut({ ...state, segments: [{ kind: "text", text: tail }] }, opts);
   return advance(
-    { ...cut, kind: "finalizing", closing: "abort", ...(opts.allowEdits ? {} : flushed(cut)) },
+    {
+      ...cut,
+      kind: "finalizing",
+      closing: "abort",
+      closedAt: now,
+      ...(opts.allowEdits ? {} : flushed(cut)),
+    },
     opts,
     now,
     [{ type: "stopped" }],
@@ -472,10 +486,10 @@ function onWriteFailed(
       );
     })
     .with({ kind: "rate_limited" }, ({ retryAfterMs, reason }) =>
-      waitToRetry(state, write, retryAfterMs, reason),
+      waitToRetry(state, write, retryAfterMs, reason, now),
     )
     .with({ kind: "transient" }, ({ reason }) =>
-      waitToRetry(state, write, TRANSIENT_BACKOFF_MS * 2 ** state.failedInARow, reason),
+      waitToRetry(state, write, TRANSIENT_BACKOFF_MS * 2 ** state.failedInARow, reason, now),
     )
     .with({ kind: "edit_target_gone" }, ({ reason }) => {
       // The stream carries on in a new message: a chunk or tail stays due, and
@@ -496,11 +510,21 @@ function onWriteFailed(
 /**
  * Wait `ms`, then carry on: a preview is not repeated, since the next one
  * after the wait carries the latest text, while a chunk or tail stays due and
- * goes again. Fails instead past the longest wait or the failures in a row.
+ * goes again. Fails instead past the longest wait, the failures in a row, or
+ * a closing stream's time.
  */
-function waitToRetry(state: Open, write: Write, ms: number, reason: string): Transition {
+function waitToRetry(
+  state: Open,
+  write: Write,
+  ms: number,
+  reason: string,
+  now: number,
+): Transition {
   if (ms > MAX_WAIT_MS)
     return fail(state, `a ${ms}ms wait is longer than the stream waits: ${reason}`);
+  if (state.kind === "finalizing" && now + ms > state.closedAt + MAX_CLOSE_MS) {
+    return fail(state, `closing would take longer than ${MAX_CLOSE_MS}ms: ${reason}`);
+  }
   const failedInARow = state.failedInARow + 1;
   if (failedInARow >= MAX_FAILURES_IN_A_ROW) {
     return fail(state, `${failedInARow} writes failed in a row: ${reason}`);

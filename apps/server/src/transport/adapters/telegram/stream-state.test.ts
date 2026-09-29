@@ -206,6 +206,56 @@ describe("telegram stream state", () => {
     });
   });
 
+  describe("the close's wait budget", () => {
+    /** Three chunks to write once the stream closes. */
+    const threeChunks: StreamOpts = { chunkChars: 150, allowEdits: false };
+    const reply = Array.from({ length: 3 }, () => "a".repeat(120)).join("\n\n");
+
+    it("fails a closing stream whose next wait would pass 60s since the close", () => {
+      const { state } = drive(threeChunks, [
+        text(reply),
+        { type: "finish", now: T0 },
+        landed(T0),
+        rateLimited(25, T0),
+        elapsed(T0 + 25_000),
+        landed(T0 + 25_000),
+        rateLimited(25, T0 + 25_000),
+        elapsed(T0 + 50_000),
+        rateLimited(20, T0 + 50_000),
+      ]);
+
+      expect(state).toEqual({ kind: "failed", reason: expect.stringContaining("60000ms") });
+    });
+
+    it("lets a closing stream wait right up to the budget", () => {
+      const { state } = drive(threeChunks, [
+        text(reply),
+        { type: "finish", now: T0 },
+        landed(T0),
+        rateLimited(30, T0),
+        elapsed(T0 + 30_000),
+        rateLimited(30, T0 + 30_000),
+      ]);
+
+      expect(state).toMatchObject({ kind: "finalizing", waiting: true });
+    });
+
+    it("does not count waits while streaming, which hold nothing up", () => {
+      const waits = [0, 1, 2].flatMap((i) => {
+        const at = T0 + i * 30_000;
+        return [
+          text(String(i), at),
+          rateLimited(25, at),
+          elapsed(at + 25_000),
+          landed(at + 25_000),
+        ];
+      });
+      const { state } = drive(EDITS, [text("Hello"), landed(T0, 100), ...waits]);
+
+      expect(state.kind).toBe("streaming");
+    });
+  });
+
   describe("transient failures", () => {
     it("retries a chunk after a 5xx, backing off from 1s", () => {
       const waited = drive(EDITS, [text("done"), landed(T0, 100), finish, transient(T0)]);
