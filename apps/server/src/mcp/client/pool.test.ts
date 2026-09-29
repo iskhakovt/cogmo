@@ -1,3 +1,4 @@
+import { getEventListeners } from "node:events";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Transactor } from "../../db/index.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
@@ -29,35 +30,41 @@ function makeServer(id: string, name = "github"): McpServer {
 
 interface FakeConnection extends McpConnection {
   triggerClose(): void;
-  closeListenerCount(): number;
+  /** `onClose` subscriptions not yet released, whether or not the connection has closed. */
+  openSubscriptions(): number;
 }
 
-function fakeConnection(): FakeConnection {
+/** `closed` starts it closed: `onClose` then calls back at once, as the contract allows. */
+function fakeConnection(opts: { closed?: boolean } = {}): FakeConnection {
   const closeListeners = new Set<() => void>();
-  let closed = false;
+  let closed = opts.closed ?? false;
+  let subscriptions = 0;
+  const fireClose = () => {
+    closed = true;
+    for (const cb of closeListeners) cb();
+    closeListeners.clear();
+  };
   return {
     callTool: vi.fn(),
     listTools: vi.fn(),
     onToolsChanged: vi.fn(() => () => {}),
     onClose(cb: () => void) {
-      if (closed) {
-        cb();
-        return () => {};
-      }
-      closeListeners.add(cb);
-      return () => closeListeners.delete(cb);
+      subscriptions++;
+      let released = false;
+      if (closed) cb();
+      else closeListeners.add(cb);
+      return () => {
+        if (released) return;
+        released = true;
+        subscriptions--;
+        closeListeners.delete(cb);
+      };
     },
     async close() {
-      closed = true;
-      for (const cb of closeListeners) cb();
-      closeListeners.clear();
+      fireClose();
     },
-    triggerClose() {
-      closed = true;
-      for (const cb of closeListeners) cb();
-      closeListeners.clear();
-    },
-    closeListenerCount: () => closeListeners.size,
+    triggerClose: fireClose,
+    openSubscriptions: () => subscriptions,
   };
 }
 
@@ -140,11 +147,31 @@ describe("McpConnectionPool.getConnection", () => {
     await pool.close();
   });
 
-  it("throws server_not_found for an unknown id", async () => {
+  it("throws server_not_found for an unknown id, spending no attempt on it", async () => {
     const runner: Runner = { spawn: vi.fn() };
-    const pool = makePool(runner, makeStore([]));
+    const store = makeStore([]);
+    const pool = makePool(runner, store);
     await expect(pool.getConnection("missing")).rejects.toBeInstanceOf(McpPoolError);
-    await expect(pool.getConnection("missing")).rejects.toMatchObject({ code: "server_not_found" });
+    for (let call = 0; call < 2; call++) {
+      await expect(pool.getConnection("missing")).rejects.toMatchObject({
+        code: "server_not_found",
+      });
+    }
+    expect(runner.spawn).not.toHaveBeenCalled();
+    expect(store.recordLastError).not.toHaveBeenCalled();
+  });
+
+  it("spends no attempt on a server lookup that fails", async () => {
+    const runner: Runner = { spawn: vi.fn() };
+    const store = makeStore([makeServer("s1")]);
+    vi.mocked(store.getServerById).mockRejectedValue(new Error("db down"));
+    const pool = makePool(runner, store);
+    for (let call = 0; call < 3; call++) {
+      await expect(pool.getConnection("s1")).rejects.toThrow("db down");
+    }
+    expect(pool.__getEntryState("s1")).toBeUndefined();
+    expect(runner.spawn).not.toHaveBeenCalled();
+    expect(store.recordLastError).not.toHaveBeenCalled();
   });
 
   it("flips entry to 'closed' when transport closes mid-session", async () => {
@@ -364,17 +391,85 @@ describe("McpConnectionPool.evict / close", () => {
     vi.spyOn(conn, "close").mockRejectedValue(new Error("close failed"));
     const pool = makePool({ spawn: vi.fn(async () => conn) });
     await pool.getConnection("s1");
-    expect(conn.closeListenerCount()).toBe(1);
+    expect(conn.openSubscriptions()).toBe(1);
 
     await pool.evict("s1");
-    expect(conn.closeListenerCount()).toBe(0);
+    expect(conn.openSubscriptions()).toBe(0);
     await pool.close();
+  });
+
+  it("evict waits for an abandoned spawn to reject", async () => {
+    // As `HostRunner` does: on abort it closes what it started, and rejects once that is done.
+    const exited = Promise.withResolvers<void>();
+    const spawn = vi.fn<Runner["spawn"]>(
+      (_server, _secrets, _runInTx, signal) =>
+        new Promise((_, reject) => {
+          signal.addEventListener("abort", () => {
+            void exited.promise.then(() => reject(signal.reason));
+          });
+        }),
+    );
+    const pool = makePool({ spawn });
+    const failed = expect(pool.getConnection("s1")).rejects.toMatchObject({ code: "evicted" });
+    await vi.waitFor(() => expect(spawn).toHaveBeenCalledOnce());
+
+    const evicted = settledFlag(pool.evict("s1"));
+    await failed;
+    await flush();
+    expect(evicted.settled).toBe(false);
+
+    exited.resolve();
+    await evicted.promise;
+  });
+
+  it("starts no spawn for a connect evicted during its server lookup", async () => {
+    const lookup = Promise.withResolvers<McpServer | undefined>();
+    const store = makeStore([]);
+    vi.mocked(store.getServerById).mockReturnValueOnce(lookup.promise);
+    const spawn = vi.fn<Runner["spawn"]>();
+    const pool = makePool({ spawn }, store);
+    const failed = expect(pool.getConnection("s1")).rejects.toMatchObject({ code: "evicted" });
+    await vi.waitFor(() => expect(store.getServerById).toHaveBeenCalledOnce());
+
+    const evicted = pool.evict("s1");
+    await failed;
+    lookup.resolve(makeServer("s1"));
+    await evicted;
+    expect(spawn).not.toHaveBeenCalled();
   });
 
   it("close throws on subsequent getConnection", async () => {
     const pool = makePool({ spawn: vi.fn(async () => fakeConnection()) });
     await pool.close();
     await expect(pool.getConnection("s1")).rejects.toMatchObject({ code: "pool_closed" });
+  });
+});
+
+describe("McpConnectionPool transport close", () => {
+  it("takes a connection that closed before the pool watched it as closed, and reconnects", async () => {
+    vi.useFakeTimers();
+    const dead = fakeConnection({ closed: true });
+    const fresh = fakeConnection();
+    const spawn = vi.fn<Runner["spawn"]>().mockResolvedValueOnce(dead).mockResolvedValueOnce(fresh);
+    const pool = makePool({ spawn });
+
+    await pool.getConnection("s1");
+    expect(pool.__getEntryState("s1")).toEqual({ kind: "closed", failedAttempts: 0 });
+    expect(vi.getTimerCount()).toBe(0);
+    expect(dead.openSubscriptions()).toBe(0);
+
+    await expect(pool.getConnection("s1")).resolves.toBe(fresh);
+    expect(spawn).toHaveBeenCalledTimes(2);
+    await pool.close();
+  });
+
+  it("releases its close subscription when the transport closes", async () => {
+    const conn = fakeConnection();
+    const pool = makePool({ spawn: vi.fn(async () => conn) });
+    await pool.getConnection("s1");
+    conn.triggerClose();
+    expect(conn.openSubscriptions()).toBe(0);
+    await pool.close();
   });
 });
 
@@ -437,4 +532,46 @@ describe("McpConnectionPool idle eviction", () => {
     expect(vi.getTimerCount()).toBe(0);
     await pool.close();
   });
+
+  it("keeps one abort listener per timer across re-arms", async () => {
+    vi.useFakeTimers();
+    const pool = makePool({ spawn: vi.fn(async () => fakeConnection()) }, undefined, IDLE_MS);
+    await pool.getConnection("s1");
+    const signal = liveSignal(pool, "s1");
+    const listeners = getEventListeners(signal, "abort").length;
+
+    // Used 1ms before each check, so each check re-arms for all but 1ms of the period.
+    let untilCheck = IDLE_MS;
+    for (let check = 0; check < 3; check++) {
+      await vi.advanceTimersByTimeAsync(untilCheck - 1);
+      await pool.getConnection("s1");
+      await vi.advanceTimersByTimeAsync(1);
+      untilCheck = IDLE_MS - 1;
+    }
+    expect(pool.__getEntryState("s1")?.kind).toBe("live");
+    expect(getEventListeners(signal, "abort")).toHaveLength(listeners);
+    await pool.close();
+  });
+
+  it("waits out an idle period beyond the timer ceiling instead of checking at once", async () => {
+    vi.useFakeTimers();
+    const pool = makePool({ spawn: vi.fn(async () => fakeConnection()) }, undefined, 2 ** 31);
+    const start = Date.now();
+    await pool.getConnection("s1");
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(pool.__getEntryState("s1")?.kind).toBe("live");
+    // Node fires a longer delay after 1ms; the timer is capped at the ceiling and re-arms from there.
+    vi.advanceTimersToNextTimer();
+    expect(Date.now() - start).toBe(2 ** 31 - 1);
+    expect(pool.__getEntryState("s1")?.kind).toBe("live");
+    await pool.close();
+  });
 });
+
+/** The signal a live entry's watch runs under. */
+function liveSignal(pool: McpConnectionPool, serverId: string): AbortSignal {
+  const entry = pool.__getEntryState(serverId);
+  if (entry?.kind !== "live") throw new Error(`expected ${serverId} live, got ${entry?.kind}`);
+  return entry.abort.signal;
+}
