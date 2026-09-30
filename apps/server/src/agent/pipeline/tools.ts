@@ -105,6 +105,9 @@ export const listPipelinesTool: ToolSpec = defineTool({
   name: "list_pipelines",
   description: "List the user's pipelines with their active and latest versions.",
   schema: z.object({}),
+  // Durable: a re-list after a same-turn `define_pipeline` or
+  // `activate_pipeline` shows versions the model never saw.
+  durable: true,
   parallelSafe: true,
   sideEffectful: false,
   handler: async (_input, service) => {

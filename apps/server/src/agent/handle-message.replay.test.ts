@@ -22,6 +22,7 @@
  */
 
 import { InngestTestEngine } from "@inngest/test";
+import * as R from "remeda";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { z } from "zod";
@@ -56,7 +57,8 @@ import { canonicalKeyOrder } from "../util/canonical-key-order.js";
 import type { HandleMessageDeps } from "./handle-message.js";
 import { createHandleMessage } from "./handle-message.js";
 import { runStreamingAgentLoop } from "./loop.js";
-import { defineTool, ToolRegistry } from "./tools.js";
+import { createDefaultTools, defineTool, ToolRegistry } from "./tools.js";
+import { freezeToolTable } from "./turn-tools.js";
 
 // Stub the singleton Inngest client's private `_send` so step.sendEvent calls
 // inside the function under test don't try to reach a real Inngest dev server.
@@ -1281,6 +1283,78 @@ describe("handle-message — turn inputs frozen across re-invocations", () => {
     const schemas = expectDefined(first, "first run's tools").map((d) => d.parameters);
     expect(JSON.stringify(canonicalKeyOrder(schemas))).not.toBe(JSON.stringify(schemas));
     expect(JSON.stringify(second)).toBe(JSON.stringify(first));
+  });
+
+  describe("durable reads", () => {
+    /** Calls `get_current_time`, then answers; returns every tool result the provider was sent. */
+    function timeCallingDeps(): { deps: HandleMessageDeps; toolResults: () => unknown[] } {
+      const requests: ChatParams[] = [];
+      const chatStream = vi.fn((params: ChatParams) => {
+        requests.push(structuredClone(params));
+        return requests.length === 1
+          ? stream(
+              [{ type: "tool_start", id: "t1", name: "get_current_time", input: {} }],
+              "tool_use",
+            )
+          : stream([{ type: "text_delta", text: "done" }], "end_turn");
+      });
+      const deps = mockDeps({
+        tools: createDefaultTools(),
+        resolveProvider: mockResolver(mockProvider({ chatStream })),
+        agentStore: mockAgentStore({ getProfile: vi.fn().mockResolvedValue(profile()) }),
+        runStreamingAgentLoop,
+      });
+      const toolResults = () =>
+        requests.slice(1).map((r) => {
+          const last = r.messages.at(-1)?.content;
+          return Array.isArray(last) ? last.find((b) => b.type === "tool_result") : undefined;
+        });
+      return { deps, toolResults };
+    }
+
+    const CACHED_TIME = '{"iso":"2026-01-01T00:00:00.000Z"}';
+
+    it("sends a read's memoized output when its step is cached, without re-executing it", async () => {
+      const { deps, toolResults } = timeCallingDeps();
+
+      await new InngestTestEngine({
+        function: createHandleMessage(deps),
+        events: [event],
+        steps: [{ id: "tool-iter1-0", handler: () => CACHED_TIME }],
+      }).execute();
+
+      expect(toolResults()).toEqual([
+        { type: "tool_result", toolUseId: "t1", content: CACHED_TIME },
+      ]);
+    });
+
+    it("keeps the policy a run in flight froze: its reads run in the bare body", async () => {
+      // `freeze-turn-inputs` memoized by a build before durable reads.
+      const before = new ToolRegistry();
+      for (const spec of createDefaultTools().snapshot()) {
+        before.register(R.omit(spec, ["durable"]));
+      }
+      const frozenBefore = freezeToolTable(before);
+      expect(frozenBefore).not.toBe(freezeToolTable(createDefaultTools()));
+      const { deps, toolResults } = timeCallingDeps();
+
+      await new InngestTestEngine({
+        function: createHandleMessage(deps),
+        events: [event],
+        steps: [
+          {
+            id: "freeze-turn-inputs",
+            handler: () => ({ voiceMode: false, batchDelivery: false, tools: frozenBefore }),
+          },
+          // Never consulted: a non-durable call plans no step.
+          { id: "tool-iter1-0", handler: () => CACHED_TIME },
+        ],
+      }).execute();
+
+      const [result] = toolResults();
+      expect(result).toMatchObject({ type: "tool_result", toolUseId: "t1" });
+      expect(result).not.toMatchObject({ content: CACHED_TIME });
+    });
   });
 
   it("turns on the cached freeze-turn-inputs, not on this invocation's reads", async () => {

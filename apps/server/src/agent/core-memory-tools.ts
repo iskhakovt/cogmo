@@ -62,6 +62,9 @@ export const coreMemoryRead = defineTool({
   description:
     "Read all core memory blocks. These are already visible in your system prompt, " +
     "but use this tool if you need to inspect the raw content or check what blocks exist.",
+  // Durable: a re-read after a same-turn `core_memory_update` returns blocks
+  // the model never saw.
+  durable: true,
   parallelSafe: true,
   // Reads agent-owned state (blocks written via `core_memory_update`), not
   // external state — but a stuck loop calling this with identical args makes

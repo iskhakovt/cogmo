@@ -160,6 +160,9 @@ export const listTasks = defineTool({
     "task ids for `remove_task`, or to answer the user's 'what's scheduled?' " +
     "question. Returns a numbered list with id, schedule, prompt, next fire, " +
     "and enabled state.",
+  // Durable: a re-list after a same-turn `schedule_task` or `remove_task`, or
+  // after a tick advanced a next fire, shows tasks the model never saw.
+  durable: true,
   sideEffectful: false,
   schema: listTasksSchema,
   handler: async (_input, service) => {
