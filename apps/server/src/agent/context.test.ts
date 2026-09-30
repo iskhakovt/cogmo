@@ -1,3 +1,4 @@
+import * as R from "remeda";
 import { describe, expect, it, vi } from "vitest";
 import { MAX_REQUEST_BYTES } from "../llm/request-size.js";
 import type { ContentBlock, Message, ToolDefinition, ToolResultClearing } from "../llm/types.js";
@@ -247,9 +248,10 @@ describe("compactMessages", () => {
   });
 
   it("truncation preserves alternation — inserts synthetic user message", async () => {
+    // Old turns longer than the marker, so dropping them shrinks the view.
     const messages = [
-      msg("user", "old1"),
-      msg("assistant", "old2"),
+      msg("user", "old question ".repeat(10)),
+      msg("assistant", "old answer ".repeat(10)),
       msg("assistant", "remaining"), // would be first after truncation
       msg("user", "latest"),
     ];
@@ -422,6 +424,119 @@ describe("compactMessages", () => {
       return messages.slice(cut);
     }
 
+    /** A user message attaching `bytes` of base64. */
+    function docTurn(bytes: number, text = "What does it say?"): Message {
+      return {
+        role: "user",
+        content: [
+          {
+            type: "document",
+            source: "base64",
+            data: "A".repeat(bytes),
+            mediaType: "application/pdf",
+          },
+          { type: "text", text },
+        ],
+      };
+    }
+
+    function deps(overrides: Partial<ContextManagerDeps> = {}): ContextManagerDeps {
+      return {
+        countTokens: vi.fn().mockResolvedValue(100),
+        budget: 1_000_000,
+        clearToolResults: CLEARING,
+        maxRequestBytes: MAX_REQUEST_BYTES,
+        ...overrides,
+      };
+    }
+
+    it("summarizes history off a heavy tail over the cap, and sends the tail under it", async () => {
+      // 5 MB of tool results, then a 17 MB PDF turn: 22 MB, over the cap,
+      // with a tail no cut gets under the threshold.
+      const messages: Message[] = [
+        ...Array.from({ length: 10 }, (_, i) => [
+          msg("user", `read part ${i}`),
+          toolCallMsg(`t${i}`, "read"),
+          toolResultMsg([{ id: `t${i}`, content: "r".repeat(500_000) }]),
+          msg("assistant", `read ${i}`),
+        ]).flat(),
+        docTurn(17_000_000),
+      ];
+      const countTokens = vi.fn().mockResolvedValue(100);
+      const summarize = vi.fn().mockResolvedValue("a summary");
+
+      const result = await compactMessages(
+        "system",
+        messages,
+        undefined,
+        deps({ countTokens, summarize }),
+        true,
+      );
+
+      expect(bytesOf(messages)).toBeGreaterThan(MAX_REQUEST_BYTES);
+      expect(summarize).toHaveBeenCalledOnce();
+      expect(result.messages.at(-1)).toEqual(messages.at(-1));
+      expect(bytesOf(result.messages)).toBeLessThanOrEqual(MAX_REQUEST_BYTES);
+      expect(bytesOf(result.messages)).toBeLessThan(17_600_000);
+      // The first count is of the view that fits the cap.
+      expect(countTokens).toHaveBeenCalledOnce();
+      expect(countTokens.mock.calls[0]?.[0].messages).toEqual(result.messages);
+    });
+
+    it("cuts a first message that alone keeps the view over the cap", async () => {
+      // 10 MB, a reply, 11 MB: 21 MB. Only the marker cut gets it under.
+      const messages: Message[] = [
+        docTurn(10_000_000),
+        msg("assistant", "read it"),
+        docTurn(11_000_000),
+      ];
+
+      const result = await compactMessages("system", messages, undefined, deps(), true);
+
+      expect(result.event?.strategies).toEqual(["truncate"]);
+      expect(result.messages).toEqual([
+        { role: "user", content: "[Earlier conversation history was truncated]" },
+        messages[1],
+        messages[2],
+      ]);
+      expect(bytesOf(result.messages)).toBeLessThan(11_100_000);
+    });
+
+    it("sends the smallest view when no cut fits the cap, uncounted", async () => {
+      const messages: Message[] = [
+        msg("user", "hello ".repeat(100)),
+        msg("assistant", "hi"),
+        docTurn(21_000_000),
+      ];
+      const countTokens = vi.fn().mockResolvedValue(100);
+
+      const result = await compactMessages("system", messages, undefined, deps({ countTokens }));
+
+      expect(result.messages).toEqual(R.last(truncations(messages)));
+      expect(result.event?.tokensAfter).toBeNull();
+      expect(countTokens).not.toHaveBeenCalled();
+    });
+
+    it("does nothing at exactly the threshold", async () => {
+      const base = [msg("user", ""), msg("assistant", "a"), msg("user", "q")];
+      const maxRequestBytes = 10_000;
+      const threshold = Math.floor(maxRequestBytes * 0.8);
+      const messages = [msg("user", "x".repeat(threshold - bytesOf(base))), ...base.slice(1)];
+      expect(bytesOf(messages)).toBe(threshold);
+      const summarize = vi.fn().mockResolvedValue("a summary");
+
+      const result = await compactMessages(
+        "system",
+        messages,
+        undefined,
+        deps({ maxRequestBytes, summarize }),
+        true,
+      );
+
+      expect(result.didCompact).toBe(false);
+      expect(summarize).not.toHaveBeenCalled();
+    });
+
     /** Twenty short messages, then a turn attaching a 12.5 MB PDF (16.7 MB of base64). */
     function pdfTurn(): Message[] {
       return [
@@ -474,8 +589,52 @@ describe("compactMessages", () => {
         expect(summarize).not.toHaveBeenCalled();
         expect(result.didCompact).toBe(false);
         expect(result.messages).toEqual(messages);
+        // Under the cap, it is counted like any view, and not on the fast path.
+        expect(countTokens).toHaveBeenCalledTimes(skip ? 0 : 1);
       },
     );
+
+    it.each([
+      [[msg("user", "x".repeat(100_000)), msg("assistant", "a"), msg("user", "q")]],
+      [
+        [
+          msg("user", "x".repeat(100_000)),
+          toolCallMsg("t1", "read"),
+          toolResultMsg([{ id: "t1", content: "ok" }]),
+          msg("assistant", "a"),
+          msg("user", "q"),
+        ],
+      ],
+    ])(
+      "cuts over the budget even when the cut only puts the marker first: %#",
+      async (messages) => {
+        const result = await compactMessages("system", messages, undefined, {
+          countTokens: vi.fn().mockResolvedValue(990),
+          budget: 1000,
+          clearToolResults: CLEARING,
+          maxRequestBytes: MAX_REQUEST_BYTES,
+        });
+
+        expect(result.event?.strategies).toEqual(["truncate"]);
+        expect(result.messages[0]).toEqual({
+          role: "user",
+          content: "[Earlier conversation history was truncated]",
+        });
+        expect(result.messages).toHaveLength(messages.length);
+      },
+    );
+
+    it("records no truncation when no cut shortens the view", async () => {
+      const result = await compactMessages("system", [msg("user", "q")], undefined, {
+        countTokens: vi.fn().mockResolvedValue(990),
+        budget: 1000,
+        clearToolResults: CLEARING,
+        maxRequestBytes: MAX_REQUEST_BYTES,
+      });
+
+      expect(result.didCompact).toBe(false);
+      expect(result.messages).toEqual([msg("user", "q")]);
+    });
 
     it("cuts once for the budget, and keeps the tail, when the tail alone is past the threshold", async () => {
       const messages = pdfTurn();
@@ -614,19 +773,38 @@ describe("compactMessages", () => {
 });
 
 describe("truncations", () => {
-  it("cuts until the last exchange, which no cut shortens", () => {
-    const messages = Array.from({ length: 12 }, (_, i) =>
-      msg(i % 2 === 0 ? "user" : "assistant", `m${i}`),
+  const size = (view: ReadonlyArray<Message>) => Buffer.byteLength(JSON.stringify(view));
+
+  it("cuts, each view smaller in bytes, down to the marker and the last exchange", () => {
+    const messages = Array.from({ length: 13 }, (_, i) =>
+      msg(i % 2 === 0 ? "user" : "assistant", `message ${i} `.repeat(20)),
     );
 
     const views = truncations(messages);
 
     expect(views[0]).toEqual(messages);
     for (const [i, view] of views.entries()) {
-      if (i > 0) expect(view.length).toBeLessThan(expectDefined(views[i - 1], "previous").length);
+      if (i > 0) expect(size(view)).toBeLessThan(size(expectDefined(views[i - 1], "previous")));
     }
-    expect(views.at(-1)?.slice(-2)).toEqual(messages.slice(-2));
-    expect(views.at(-1)?.length).toBeLessThanOrEqual(3);
+    expect(R.last(views)).toEqual([
+      { role: "user", content: "[Earlier conversation history was truncated]" },
+      ...messages.slice(-2),
+    ]);
+  });
+
+  it("keeps a tool call with its result: five messages after a tool call", () => {
+    const messages: Message[] = [
+      msg("user", "x".repeat(10_000)),
+      toolCallMsg("t1", "read"),
+      toolResultMsg([{ id: "t1", content: "ok" }]),
+      msg("assistant", "done"),
+      msg("user", "thanks"),
+    ];
+
+    expect(R.last(truncations(messages))).toEqual([
+      { role: "user", content: "[Earlier conversation history was truncated]" },
+      ...messages.slice(1),
+    ]);
   });
 
   it.each([

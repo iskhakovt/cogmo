@@ -31,8 +31,9 @@ export interface ContextManagerDeps {
   budget: number;
   /**
    * The request cap, in bytes (`MAX_REQUEST_BYTES`). A view past 80% of it
-   * summarizes and truncates until it fits, unless the tail every cut keeps
-   * is past that on its own.
+   * summarizes, then takes the first cut under 80%, else under the cap, else
+   * the smallest; one under the cap whose smallest cut is still past 80% goes
+   * as it is.
    */
   maxRequestBytes: number;
   /**
@@ -235,10 +236,10 @@ export function formatSummaryMessage(summary: string): Message {
  * They also fire on size, since the server clears only after the bytes
  * arrive (design/context-management.md → Strategy 2 → Size trigger): a view
  * past 80% of `maxRequestBytes` summarizes on any path without a count, since
- * counting it sends it, and truncates until it fits if the summary fails or
- * leaves it there. Only removable bytes count: a view whose last exchange,
- * which every cut keeps, is past 80% on its own goes as it is, since
- * compaction could only drop the history it fits with.
+ * counting it sends it, then takes the first of {@link truncations} under 80%,
+ * else under the cap, else the smallest. A view under the cap whose smallest
+ * cut is still past 80% goes as it is: its bytes are in the tail, and cutting
+ * would only drop history it fits with.
  */
 export async function compactMessages(
   system: string,
@@ -248,11 +249,15 @@ export async function compactMessages(
   skipBudgetStrategies = false,
 ): Promise<CompactResult> {
   const { countTokens, budget, summarize, clearToolResults, maxRequestBytes } = deps;
-  const pastThreshold = (msgs: ReadonlyArray<Message>): boolean =>
-    requestBytes(system, msgs, tools) > maxRequestBytes * SUMMARIZE_THRESHOLD;
-  // Past the threshold, with a tail that isn't: bytes compaction can remove.
-  const oversized = (msgs: ReadonlyArray<Message>): boolean =>
-    pastThreshold(msgs) && !pastThreshold(truncations(msgs).at(-1) ?? msgs);
+  const threshold = Math.floor(maxRequestBytes * SUMMARIZE_THRESHOLD);
+  const bytes = (msgs: ReadonlyArray<Message>): number => requestBytes(system, msgs, tools);
+  // Whether the view's size needs compaction: past the threshold, unless it
+  // fits the cap and no cut gets it under the threshold anyway.
+  const oversized = (msgs: ReadonlyArray<Message>): boolean => {
+    const size = bytes(msgs);
+    if (size <= threshold) return false;
+    return size > maxRequestBytes || bytes(R.last(truncations(msgs))) <= threshold;
+  };
   if (skipBudgetStrategies && !oversized(messages)) {
     return { messages: [...messages], didCompact: false };
   }
@@ -260,7 +265,7 @@ export async function compactMessages(
   const strategies: CompactionEvent["strategies"] = [];
   let result = [...messages];
   let messagesSummarized = 0;
-  const requestBytesBefore = requestBytes(system, result, tools);
+  const requestBytesBefore = bytes(result);
 
   const count = (msgs: Message[]): Promise<number | null> =>
     oversized(msgs)
@@ -297,16 +302,20 @@ export async function compactMessages(
     }
   }
 
-  // Strategy 3: Emergency truncation at 95% of the budget, one cut; or on
-  // size, the first cut that fits, which a view past it always has
-  if (tokens === null || tokens > budget * TRUNCATE_THRESHOLD) {
-    const cuts = truncations(result).slice(1);
-    const cut = oversized(result) ? cuts.find((view) => !pastThreshold(view)) : cuts[0];
-    if (cut) {
-      result = cut;
-      strategies.push("truncate");
-      tokens = await count(result);
-    }
+  // Strategy 3: on size, the first cut under the threshold, else the first
+  // under the cap, else the smallest; on 95% of the budget, one cut
+  const views = truncations(result);
+  const cut = oversized(result)
+    ? (views.find((view) => bytes(view) <= threshold) ??
+      views.find((view) => bytes(view) <= maxRequestBytes) ??
+      R.last(views))
+    : tokens !== null && tokens > budget * TRUNCATE_THRESHOLD
+      ? views[1]
+      : undefined;
+  if (cut !== undefined && cut !== views[0]) {
+    result = cut;
+    strategies.push("truncate");
+    tokens = await count(result);
   }
 
   if (strategies.length > 0) {
@@ -336,7 +345,12 @@ function requestBytes(
   tools: ToolDefinition[] | undefined,
 ): number {
   const frame = Buffer.byteLength(JSON.stringify({ system, messages: [], tools }));
-  return frame + R.sumBy(messages, messageBytes) + Math.max(0, messages.length - 1);
+  return frame + messagesBytes(messages);
+}
+
+/** The messages' part of {@link requestBytes}: each message, and the commas between them. */
+function messagesBytes(messages: ReadonlyArray<Message>): number {
+  return R.sumBy(messages, messageBytes) + Math.max(0, messages.length - 1);
 }
 
 const messageSizes = new WeakMap<Message, number>();
@@ -422,15 +436,17 @@ async function summarizePrefix(
 
 /**
  * The views truncation reaches from `messages`, one cut at a time: `messages`
- * itself, then each cut, ending at the tail no cut shortens, the last
- * exchange.
+ * itself, then each cut with strictly fewer bytes, the one that only puts the
+ * truncation marker in place of the first message included. The last is the
+ * smallest: on plain alternation the marker and the last exchange, three
+ * messages; after a tool call, five.
  */
-export function truncations(messages: ReadonlyArray<Message>): Message[][] {
+export function truncations(messages: ReadonlyArray<Message>): [Message[], ...Message[][]] {
   let view = [...messages];
-  const views = [view];
+  const views: [Message[], ...Message[][]] = [view];
   for (;;) {
     const next = truncateOldest(view);
-    if (next.length >= view.length) return views;
+    if (messagesBytes(next) >= messagesBytes(view)) return views;
     views.push(next);
     view = next;
   }

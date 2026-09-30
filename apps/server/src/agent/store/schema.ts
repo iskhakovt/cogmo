@@ -192,8 +192,9 @@ export type SttProviderTypeValue = (typeof sttProviderType.enumValues)[number];
  * on an Anthropic row, is what the API does with a replayed thinking block
  * whose prefix changed; absent keeps the account's default, and so does a
  * value the API doesn't take, which reads as absent with a warning: it is set
- * by hand, and a typo must not fail every model routed through the row. Unknown keys are
- * dropped on read, so a stray key never fails a provider lookup.
+ * by hand, and a typo must not fail every model routed through the row.
+ * Unknown keys are dropped on read, so a stray key never fails a provider
+ * lookup.
  */
 export const ProviderAttrsSchema = z.object({
   cacheDialect: CacheDialectSchema.optional(),

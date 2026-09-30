@@ -172,8 +172,8 @@ The summarization call receives the system prompt (or at minimum the core memory
 
 **Images:** A summary replaces the images in its span with text; if the model needs an earlier image again, the user re-sends it. `[proposed]` From Append-only step 4a the summarization fork sends the span's attachments as the turn's view renders them, under the conversation's cutoff, so the summary can describe them; `/compact` renders its prefix the same way. Normalized images fit every route, so the fork differs only where the summarization route's budget is smaller than the turn's: there it advances its own cutoff over the span, rendering those attachments as placeholders, and strips every thinking block from its request, since a placeholder the turn never sent invalidates the thinking after it ([prompt-caching.md](prompt-caching.md#sources-and-fixes) → source (h)). It renders its span from `load-turn-transcript`'s rows over the view's index range, since nothing before Strategy 2 changes the array's length ([Durable summaries](#durable-summaries-confirmed) → Cutoff derivation): a placeholder needs the ref's name, which the view's resolved blocks don't carry.
 
-**Size trigger** `[confirmed]`. The server clears after the request arrives, so a request carries every result, and its bytes can reach a route's cap (Anthropic 32 MB, Bedrock 20 MB, a `413 request_too_large`) while the count after clearing is well under the budget. The window itself is checked after the edits ([measured](prompt-caching.md#validation-confirmed)), so bytes are the only limit clearing hides. A view whose raw JSON passes 80% of `MAX_REQUEST_BYTES` (20 MB, the smallest cap among the routes) summarizes on any path, the skip-counting fast path included, without a count first, since counting it sends it. A view the summary leaves past that, or one whose summary fails, truncates until it fits. Only removable bytes count: every cut keeps the last exchange, so a view whose last exchange alone passes 80% goes as it is, counted, rather than losing the history it fits with. The cap is one constant until [Append-only step 4a](prompt-caching.md#rollout) declares limits per route. Residuals:
-- An attachment turn past the cap on its own fails the request; from Append-only step 4b attachments are capped at arrival ([transport/attachments.md](transport/attachments.md)).
+**Size trigger** `[confirmed]`. The server clears after the request arrives, so a request carries every result, and its bytes can reach a route's cap (Anthropic 32 MB, Bedrock 20 MB, a `413 request_too_large`) while the count after clearing is well under the budget. The window itself is checked after the edits ([measured](prompt-caching.md#validation-confirmed)), so bytes are the only limit clearing hides. A view whose raw JSON passes 80% of `MAX_REQUEST_BYTES` (20 MB, the smallest cap among the routes) summarizes on any path, the skip-counting fast path included, without a count first, since counting it sends it, and then takes the first cut under 80%; failing that, the first under the cap; failing that, the smallest. The cuts are truncation's, each strictly smaller in bytes; the smallest keeps the truncation marker and the tail, three messages on plain alternation and five after a tool call. A view under the cap whose smallest cut is still past 80% goes as it is, counted: its bytes are in the tail, and cutting would only drop history it fits with. The cap is one constant until [Append-only step 4a](prompt-caching.md#rollout) declares limits per route. Residuals:
+- A tail past the cap on its own, such as an attachment, fails the request with a 413; from Append-only step 4b attachments are capped at arrival ([transport/attachments.md](transport/attachments.md)).
 - Only the turn's start checks bytes, so a turn's own tool results can grow its requests past the cap between iterations.
 
 **Failure handling:** If the summarization LLM call fails (timeout, rate limit, malformed output), fall through to strategy 3 (truncation). Summarization failure should not block the conversation. Nothing is stored on that path, so the next turn re-attempts rather than inheriting a partial result.
@@ -207,8 +207,9 @@ cutoff = attachmentCutoff(epoch, refSizes, limits)           # [proposed] before
 messages = render(rows, cutoff)                              # [proposed] attachments up to the cutoff as placeholders
 edit = clearToolResults(trigger = budget * 0.60, keep = 5,  # Strategy 1: an intent every request carries
                         clearAtLeast = budget * 0.10)
-past(m) = bytes(system, m, tools) > MAX_REQUEST_BYTES * 0.80
-oversized(m) = past(m) and not past(lastExchange(m))         # bytes compaction can remove
+T = MAX_REQUEST_BYTES * 0.80
+cuts(m) = [m, truncate(m), ...]                              # each strictly smaller in bytes
+oversized(m) = bytes(m) > T and (bytes(m) > MAX_REQUEST_BYTES or bytes(last(cuts(m))) <= T)
 count(m) = oversized(m) ? none : countTokens(system, m, tools, edit)   # after clearing
 
 tokens = count(messages)
@@ -217,8 +218,10 @@ if tokens is none or tokens > budget * 0.80:
   messages = summarize(messages, keep=6)
   tokens = count(messages)
 
-if tokens is none or tokens > budget * 0.95:
-  messages = truncate(messages)                              # the first cut that isn't past(), on size
+if oversized(messages):
+  messages = first(cuts(messages), <= T) ?? first(cuts(messages), <= MAX_REQUEST_BYTES) ?? last(cuts(messages))
+else if tokens > budget * 0.95:
+  messages = cuts(messages)[1]                               # one cut, if one shrinks it
 ```
 
 `[proposed]` The attachment cutoff comes first, so no count sends a view over the request cap ([prompt-caching.md](prompt-caching.md#sources-and-fixes) → source (d)). Every request carries Strategy 1's intent, the count included, and the adapter clears ([Where it runs](#strategy-1-clear-tool-results-trigger-60)). Strategy 0 is retired ([Retirement](#retirement-confirmed)).
