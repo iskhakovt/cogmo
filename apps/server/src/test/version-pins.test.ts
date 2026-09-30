@@ -1,19 +1,17 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { withArgDefaults } from "./bake.js";
 import { repoRoot } from "./repo-root.js";
 
 /**
  * Cross-file version-pin consistency guard.
  *
- * `docker-bake.hcl` is the source of truth for the task images' toolchain
- * pins and overrides them at build time. The devbase Dockerfile also carries
- * defaults (so the standalone `Image.fromDockerfile` build in
- * skill-authoring.integration.test.ts works without bake), package.json pins
- * pnpm via `packageManager`, and ci.yml pins uv for the skills-runtime job.
- * Nothing at build time forces these mirrors to agree, so this test does —
- * it would have caught the devbase pnpm pin silently drifting to 10.27.0
- * while the workspace moved to 11.x.
+ * `docker-bake.hcl` is the only copy of the task images' toolchain pins: the
+ * Dockerfiles declare their ARGs without defaults. Two pins still have a
+ * mirror bake can't feed — package.json pins pnpm via `packageManager`, and
+ * ci.yml pins uv for the skills-runtime job — so this test holds those to
+ * the bake values, and holds the Dockerfiles to taking every ARG from bake.
  */
 
 const ROOT = repoRoot();
@@ -29,7 +27,6 @@ function extract(source: string, label: string, pattern: RegExp): string {
 }
 
 const bake = read("docker-bake.hcl");
-const devbase = read("images/devbase/Dockerfile");
 const ci = read(".github/workflows/ci.yml");
 const rootPkg = JSON.parse(read("package.json")) as { packageManager: string };
 
@@ -41,8 +38,25 @@ function bakeVar(name: string): string {
   );
 }
 
-function devbaseArg(name: string): string {
-  return extract(devbase, `devbase ARG ${name}`, new RegExp(`^ARG ${name}=(\\S+)`, "m"));
+/**
+ * A bake target's `args`, with each `${VAR}` resolved to the variable's
+ * default. Only the target's own block is read — none of the task targets
+ * inherit args.
+ */
+function bakeTargetArgs(target: string): Record<string, string> {
+  const block = extract(
+    bake,
+    `bake target ${target}`,
+    new RegExp(`^target\\s+"${target}"\\s*\\{([\\s\\S]*?)^\\}`, "m"),
+  );
+  const args = extract(block, `bake target ${target} args`, /args\s*=\s*\{([\s\S]*?)^\s*\}/m);
+  return Object.fromEntries(
+    [...args.matchAll(/^\s*(\w+)\s*=\s*"([^"]*)"/gm)].flatMap(([, name, value]) =>
+      name === undefined || value === undefined
+        ? []
+        : [[name, value.replace(/\$\{(\w+)\}/g, (_, variable: string) => bakeVar(variable))]],
+    ),
+  );
 }
 
 const packageManagerPnpm = extract(
@@ -60,26 +74,31 @@ const ciUv = extract(
 );
 
 describe("task-image version pins stay in sync", () => {
-  it("uv version: bake == devbase == ci", () => {
-    expect(devbaseArg("UV_VERSION")).toBe(bakeVar("UV_VERSION"));
+  it("uv version: bake == ci", () => {
     expect(ciUv).toBe(bakeVar("UV_VERSION"));
   });
 
-  it("uv digest: bake == devbase", () => {
-    expect(devbaseArg("UV_DIGEST")).toBe(bakeVar("UV_DIGEST"));
-  });
-
-  it("npm version: bake == devbase", () => {
-    expect(devbaseArg("NPM_VERSION")).toBe(bakeVar("NPM_VERSION"));
-  });
-
-  it("pnpm version: bake == devbase == package.json packageManager", () => {
-    expect(devbaseArg("PNPM_VERSION")).toBe(bakeVar("PNPM_VERSION"));
+  it("pnpm version: bake == package.json packageManager", () => {
     expect(packageManagerPnpm).toBe(bakeVar("PNPM_VERSION"));
   });
+});
 
-  it("claude-code version: bake == devbase", () => {
-    expect(devbaseArg("CLAUDE_CODE_VERSION")).toBe(bakeVar("CLAUDE_CODE_VERSION"));
+describe.each([
+  ["devbase", "images/devbase/Dockerfile"],
+  ["skills", "images/skills/Dockerfile"],
+])("the %s Dockerfile takes its toolchain from bake", (target, dockerfilePath) => {
+  const dockerfile = read(dockerfilePath);
+
+  it("declares every ARG without a default", () => {
+    // A default is a second copy of the pin, which bake overrides and
+    // nothing else checks.
+    expect(dockerfile).not.toMatch(/^ARG[ \t]+\w+=/m);
+  });
+
+  it("is supplied a value for every ARG, and declares every arg bake passes", () => {
+    // An ARG bake doesn't pass is empty at build time, and npm installs
+    // `latest` for an empty version.
+    expect(() => withArgDefaults(dockerfile, bakeTargetArgs(target))).not.toThrow();
   });
 });
 
