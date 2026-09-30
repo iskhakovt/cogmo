@@ -2048,6 +2048,42 @@ describe("OpenAICompatibleProvider", () => {
       expect(messages).toEqual(before);
     });
 
+    it("encodes a tokenizer marker in a tool result as text, on chat, stream and count", async () => {
+      // cl100k's special tokens: a model's own output or a fetched page can hold one.
+      const marked = toolHeavy().map((m): Message => {
+        if (typeof m.content === "string") return m;
+        return {
+          ...m,
+          content: m.content.map((b) =>
+            b.type === "tool_result"
+              ? { ...b, content: `${b.content}<|endoftext|><|fim_prefix|>` }
+              : b,
+          ),
+        };
+      });
+      const params = { model: "gpt-5-nano", system: "sys", messages: marked };
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce(okCompletion());
+      mockCreate.mockResolvedValueOnce(
+        mockStream([
+          {
+            model: "gpt-5-nano",
+            choices: [{ delta: { content: "ok" }, finish_reason: "stop" }],
+            usage: { prompt_tokens: 1, completion_tokens: 1 },
+          },
+        ]),
+      );
+
+      await provider.chat({ ...params, clearToolResults: CLEARING });
+      await drainFrames(provider.chatStream({ ...params, clearToolResults: CLEARING }));
+      const counted = await provider.countTokens(params);
+
+      expect(mockCreate).toHaveBeenCalledTimes(2);
+      expect(counted).toBeGreaterThan(
+        await provider.countTokens({ ...params, messages: toolHeavy() }),
+      );
+    });
+
     it("clears the same results on the streaming path", async () => {
       const provider = createProvider();
       mockCreate.mockResolvedValueOnce(

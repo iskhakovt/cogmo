@@ -435,8 +435,13 @@ const IMAGE_TOKENS = 85;
 
 const REPLY_PRIMING_TOKENS = 3;
 
+/**
+ * Tokens in `text`, special-token markers (`<|endoftext|>`) counted as the
+ * plain text they are: js-tiktoken throws on one by default, and a tool
+ * result or a user message can carry one.
+ */
 function encodedLength(enc: Tiktoken, text: string): number {
-  return enc.encode(text).length;
+  return enc.encode(text, [], []).length;
 }
 
 /** The request's prompt tokens, as sent: its messages as they reach the wire, plus tool definitions. */
