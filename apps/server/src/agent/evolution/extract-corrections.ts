@@ -9,6 +9,7 @@
 
 import * as R from "remeda";
 import type { Transactor } from "../../db/index.js";
+import { isHarnessPrompt } from "../../llm/content.js";
 import type { LlmProvider } from "../../llm/provider.js";
 import { chatTyped } from "../../llm/typed.js";
 import type { ContentBlock, Message } from "../../llm/types.js";
@@ -288,8 +289,9 @@ function coerceChannelType(
 /**
  * Format a Message[] array into human-readable transcript text.
  *
- * Strips images and thinking blocks (not useful for correction extraction).
- * Preserves tool_use/tool_result as compact notation.
+ * Strips images, thinking blocks and the loop's harness prompts (the
+ * continuation prompt and the volume-cluster nudge), none of which the user
+ * said. Preserves tool_use/tool_result as compact notation.
  */
 export function formatTranscript(messages: ReadonlyArray<Message>): string {
   return R.pipe(
@@ -319,6 +321,7 @@ function roleLabel(role: "user" | "assistant"): string {
 }
 
 function formatBlock(block: ContentBlock): string {
+  if (isHarnessPrompt(block)) return "";
   switch (block.type) {
     case "text":
       return block.text;

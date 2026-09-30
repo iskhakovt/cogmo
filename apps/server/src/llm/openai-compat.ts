@@ -527,7 +527,39 @@ function buildMessages(
     }
   }
 
-  return [...systemMessages, ...messages.flatMap(toOpenAIMessages)];
+  return [...systemMessages, ...mergeConsecutiveUserMessages(messages.flatMap(toOpenAIMessages))];
+}
+
+/**
+ * `messages` with each run of adjacent user messages joined into one, since
+ * strict-alternation chat templates reject two in a row. The continuation
+ * prompt follows the turn's own row, and dropping a thinking-only assistant
+ * turn leaves its neighbours adjacent. Two strings join with a blank line;
+ * otherwise the parts concatenate.
+ */
+function mergeConsecutiveUserMessages(
+  messages: ReadonlyArray<OpenAI.ChatCompletionMessageParam>,
+): OpenAI.ChatCompletionMessageParam[] {
+  const out: OpenAI.ChatCompletionMessageParam[] = [];
+  for (const msg of messages) {
+    const prev = out.at(-1);
+    if (prev?.role !== "user" || msg.role !== "user") {
+      out.push(msg);
+      continue;
+    }
+    const content =
+      typeof prev.content === "string" && typeof msg.content === "string"
+        ? `${prev.content}\n\n${msg.content}`
+        : [...userParts(prev.content), ...userParts(msg.content)];
+    out[out.length - 1] = { role: "user", content };
+  }
+  return out;
+}
+
+function userParts(
+  content: OpenAI.ChatCompletionUserMessageParam["content"],
+): OpenAI.ChatCompletionContentPart[] {
+  return typeof content === "string" ? [{ type: "text", text: content }] : content;
 }
 
 /** The Chat Completions messages one canonical message becomes — none, one, or several. */

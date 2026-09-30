@@ -338,6 +338,39 @@ describe("AnthropicProvider", () => {
     expect(block).not.toHaveProperty("is_error");
   });
 
+  it("never puts a harness tag on the wire", async () => {
+    const provider = createProvider();
+    mockCreate.mockResolvedValueOnce({
+      content: [{ type: "text", text: "ok", citations: null }],
+      stop_reason: "end_turn",
+      model: "claude-sonnet-4-6",
+      usage: { input_tokens: 10, output_tokens: 5 },
+    });
+
+    await provider.chat({
+      model: "claude-sonnet-4-6",
+      system: "sys",
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: [{ type: "tool_use", id: "tu_1", name: "x", input: {} }] },
+        {
+          role: "user",
+          content: [
+            { type: "tool_result", toolUseId: "tu_1", content: "stop", harness: "volume_nudge" },
+            { type: "text", text: "Please complete your response.", harness: "continuation" },
+          ],
+        },
+      ],
+    });
+
+    const sent = mockCreate.mock.calls[0]![0].messages;
+    expect(JSON.stringify(sent)).not.toContain("harness");
+    expect(sent[2].content).toEqual([
+      { type: "tool_result", tool_use_id: "tu_1", content: "stop" },
+      { type: "text", text: "Please complete your response." },
+    ]);
+  });
+
   it("uses default max_tokens when not specified", async () => {
     const provider = createProvider();
     mockCreate.mockResolvedValueOnce({

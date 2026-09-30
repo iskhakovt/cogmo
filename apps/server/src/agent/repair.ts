@@ -136,9 +136,10 @@ export function freshBudgets(): RepairBudgets {
 /**
  * What `repairTurn` does for a given subtype.
  *
- *  - `continuation_prompt`: append a synthetic user turn to the in-memory
- *    history for the next iteration. Not persisted (synthetic / ephemeral,
- *    same convention as `validateHistory`-synthesized tool_results).
+ *  - `continuation_prompt`: append a user turn carrying `text`, tagged
+ *    `harness: "continuation"`, for the next iteration. It is persisted with
+ *    the turn: the reply's thinking is bound to it, so dropping it would
+ *    edit history the next turn replays.
  *  - `stream_replay`: replay the just-failed turn with `stream: false`.
  *    The non-streaming response should complete the partial output.
  *  - `tool_args_cut_off`: answer the named tool call — the one the output
@@ -326,9 +327,9 @@ export function formatCutOffToolArgsContent(toolName: string): string {
 /**
  * What the loop appends to a text reply that {@link classifyPostStream}
  * returned as `truncated` — streamed after the partial text and persisted as
- * a trailing text block on the same assistant message, so the live view, the
- * transcript, and the model's own history on the next turn all show that the
- * reply stops short.
+ * a trailing text block on the same assistant message, tagged
+ * `harness: "truncation_notice"`, so the live view, the transcript, and the
+ * model's own history on the next turn all show that the reply stops short.
  *
  * It sits one blank line below the text, counting newlines the reply already
  * ends with. A cut inside a fenced code block closes the fence first, at the
@@ -945,8 +946,8 @@ export function summarizeToolHistory(
   const idToName = new Map(toolUses.map((u) => [u.id, u.name] as const));
 
   // Tool_results paired back to their tool name via the tool_use id
-  // index. Excludes this tool's own prior volume-cluster nudges (see
-  // `isVolumeClusterNudge`) so the helper stays pure under recursion.
+  // index. Excludes prior volume-cluster nudges, by their harness tag, so
+  // the helper stays pure under recursion: a nudge is no outcome of its tool.
   const resultsByTool = R.pipe(
     slice,
     R.flatMap((msg) =>
@@ -956,8 +957,7 @@ export function summarizeToolHistory(
     ),
     R.flatMap((r) => {
       const name = idToName.get(r.toolUseId);
-      if (name === undefined) return [];
-      if (isVolumeClusterNudge(name, r.content)) return [];
+      if (name === undefined || r.harness === "volume_nudge") return [];
       return [{ name, result: r }];
     }),
     R.groupBy((x) => x.name),
@@ -1016,23 +1016,6 @@ function firstLineSummary(content: unknown): string | null {
 }
 
 /**
- * Common prefix every volume-cluster nudge starts with for a given
- * tool. Shared between {@link formatVolumeClusterContent} (the builder)
- * and {@link summarizeToolHistory}'s synthetic-nudge filter (which
- * drops a tool's own prior nudges from its outcome counts). Kept as
- * one function so the two callsites can't drift apart silently — if
- * the nudge format ever changes its leading clause, both ends update
- * together.
- */
-function volumeClusterNudgePrefix(toolName: string): string {
-  return `You have called \`${toolName}\` `;
-}
-
-function isVolumeClusterNudge(toolName: string, content: unknown): boolean {
-  return typeof content === "string" && content.startsWith(volumeClusterNudgePrefix(toolName));
-}
-
-/**
  * Build the synthetic `is_error: true` `tool_result` content the loop
  * appends when the volume-cluster budget for `toolName` exhausts.
  * Branches the text on outcome mix — all-fail, mixed, all-success — so
@@ -1045,7 +1028,7 @@ export function formatVolumeClusterContent(
 ): string {
   const { successes, failures, failureReasons } = outcomes;
   const reasonText = failureReasons.length > 0 ? ` Reasons: ${failureReasons.join("; ")}.` : "";
-  const prefix = volumeClusterNudgePrefix(toolName);
+  const prefix = `You have called \`${toolName}\` `;
   const stopRule =
     `Do NOT call \`${toolName}\` again this turn. ` +
     "Either reply to the user with what you have, ask a clarifying question, or use a different tool.";

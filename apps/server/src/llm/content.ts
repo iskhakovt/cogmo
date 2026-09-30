@@ -20,6 +20,19 @@ export function canonicalizeToolInputs(content: ReadonlyArray<ContentBlock>): Co
 }
 
 /**
+ * Whether `block` is a prompt the agent loop wrote to steer the model — the
+ * continuation prompt or the volume-cluster nudge. Readers of the conversation
+ * (the web history, the Observer) drop these; the truncation notice is part of
+ * the reply and stays.
+ */
+export function isHarnessPrompt(block: ContentBlock): boolean {
+  return (
+    (block.type === "text" || block.type === "tool_result") &&
+    (block.harness === "continuation" || block.harness === "volume_nudge")
+  );
+}
+
+/**
  * The prose of a message's content: a string as-is, or every `text` block
  * concatenated verbatim with no separator, so each block's own whitespace is
  * what separates it from the next. Thinking, tool calls, tool results and

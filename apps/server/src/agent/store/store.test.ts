@@ -4,6 +4,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 import type { Database, Transactor } from "../../db/index.js";
 import type { CacheDialect } from "../../llm/cache-dialect.js";
+import type { Message } from "../../llm/types.js";
 import { deriveMasterKey, generateMasterKey, parseMasterKey } from "../../secrets/encryption.js";
 import { DrizzleSecretsStore } from "../../secrets/store/index.js";
 import { skills } from "../../skills/store/schema.js";
@@ -731,6 +732,67 @@ describe("DrizzleAgentStore", () => {
         { id: first.id, role: "user", content: "Hello" },
         { id: second.id, role: "assistant", content: [{ type: "text", text: "Hi" }] },
       ]);
+    });
+
+    it("keeps harness tags through a write and a reload, and rejects an unknown one", async () => {
+      const { conversationId, stamp } = await seedConversation();
+      const inboundId = "019d0000-0000-7000-8000-000000000001";
+      const written: Message[] = [
+        { role: "user", content: "Hello" },
+        {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "t1", name: "img", input: {} }],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              toolUseId: "t1",
+              content: "stop",
+              isError: true,
+              harness: "volume_nudge",
+            },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "Please complete your response.", harness: "continuation" },
+          ],
+        },
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "Partial" },
+            { type: "text", text: "\n\n[cut]", harness: "truncation_notice" },
+          ],
+        },
+      ];
+      await tx((trx) =>
+        store.insertMessages(trx, {
+          conversationId,
+          lastInboundMessageId: inboundId,
+          ...stamp,
+          messages: written,
+          lastMessageOutputTokens: 5,
+        }),
+      );
+
+      const list = await tx((trx) => store.listMessages(trx, conversationId));
+      expect(list.map(({ role, content }) => ({ role, content }))).toEqual(written);
+
+      await expect(
+        tx((trx) =>
+          store.insertMessage(trx, {
+            conversationId,
+            role: "user",
+            content: [{ type: "text", text: "x", harness: "made_up" }] as never,
+            lastInboundMessageId: inboundId,
+            ...stamp,
+          }),
+        ),
+      ).rejects.toThrow();
     });
 
     it("getMessage returns a single message", async () => {
@@ -4813,6 +4875,57 @@ describe("turn contexts", () => {
     await expect(
       tx((trx) => store.findUserMessageByInbound(trx, conversationId, INBOUND)),
     ).resolves.toEqual({ id: second.id, createdAt: second.createdAt });
+  });
+
+  it("finds the turn row past a later continuation prompt and nudge on its cursor", async () => {
+    const { conversationId, stamp, row } = await seedUserRow();
+    await tx((trx) =>
+      store.insertMessages(trx, {
+        conversationId,
+        lastInboundMessageId: INBOUND,
+        ...stamp,
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "Please complete your response.", harness: "continuation" },
+            ],
+          },
+          {
+            role: "assistant",
+            content: [{ type: "tool_use", id: "t1", name: "img", input: {} }],
+          },
+          {
+            role: "user",
+            content: [
+              { type: "tool_result", toolUseId: "t1", content: "stop", harness: "volume_nudge" },
+            ],
+          },
+          { role: "assistant", content: "reply" },
+        ],
+        lastMessageOutputTokens: 12,
+      }),
+    );
+
+    await expect(
+      tx((trx) => store.findUserMessageByInbound(trx, conversationId, INBOUND)),
+    ).resolves.toEqual({ id: row.id, createdAt: row.createdAt });
+  });
+
+  it("finds a turn row whose content is a block array without a harness tag", async () => {
+    const { conversationId, stamp } = await seedUserRow();
+    const { id } = await tx((trx) =>
+      store.insertMessage(trx, {
+        conversationId,
+        role: "user",
+        content: [{ type: "text", text: "look at this" }],
+        lastInboundMessageId: INBOUND,
+        ...stamp,
+      }),
+    );
+
+    const found = await tx((trx) => store.findUserMessageByInbound(trx, conversationId, INBOUND));
+    expect(found?.id).toBe(id);
   });
 });
 
