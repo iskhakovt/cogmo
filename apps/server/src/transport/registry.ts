@@ -31,7 +31,7 @@ export interface RegistryDeps {
   /** Optional — when omitted, `repos.*` returns `sandbox_disabled`. */
   codingStore?: CodingStore;
   /** Optional — when omitted, adapters skip coding-progress wiring. */
-  codingStreamingRegistry?: CodingStreamingRegistry;
+  codingStreamingRegistry?: Pick<CodingStreamingRegistry, "subscribe">;
   inngest: Inngest;
   inboundArrived: typeof InboundArrivedEvent;
   attachments: AttachmentStore;

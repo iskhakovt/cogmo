@@ -8,12 +8,11 @@ import { createAutoRegisterSkillSubscriber } from "./agent/coding/auto-register-
 import { ClaudeCodeBackend } from "./agent/coding/claude.js";
 import { createOrphanRunBranchSweepFunctions } from "./agent/coding/cleanup-orphan-run-branches.js";
 import { createRunBranchCleanupSubscriber } from "./agent/coding/cleanup-run-branch.js";
+import { findEndedCodingTasks } from "./agent/coding/find-ended-coding-tasks.js";
 import {
   type CodingOrchestratorDeps,
   createCodingExecuteOrchestrator,
   createCodingOrchestrator,
-  type ExecuteStreamHandle,
-  type PlanStreamHandle,
 } from "./agent/coding/orchestrator.js";
 import { createCodingTaskReconcile } from "./agent/coding/reconcile-on-failure.js";
 import { createCodingService } from "./agent/coding/service.js";
@@ -318,6 +317,8 @@ export interface RuntimeDeps {
    * Always present (created unconditionally); empty until tabs connect.
    */
   webStreamRegistry: WebStreamRegistry;
+  /** Coding progress streams; `cogmo serve` closes their sweep on shutdown. */
+  codingStreams: Pick<CodingStreamingRegistry, "close">;
 }
 
 /**
@@ -765,7 +766,11 @@ export async function bootstrapRuntime(
     catalogUrl: env.MODEL_CATALOG_URL,
   });
   const codingBackend = new ClaudeCodeBackend();
-  const codingStreamingRegistry = new CodingStreamingRegistry();
+  const codingStreamingRegistry = CodingStreamingRegistry.create({
+    endedTasks: (taskIds) =>
+      findEndedCodingTasks({ runInTx: core.runInTx, store: core.codingStore }, taskIds),
+    sweepIntervalMs: 10 * 60 * 1000,
+  });
   const codingServiceFactory = (conversationId: string) =>
     createCodingService(
       {
@@ -801,50 +806,8 @@ export async function bootstrapRuntime(
       worktreesDir: env.COGMO_WORKTREES_DIR,
       askpassBaseDir: env.SANDBOX_ASKPASS_DIR,
       ...(opts.codingAuthOverride && { loadCodingSandboxEnv: opts.codingAuthOverride }),
-      openPlanStream: async (taskId: string): Promise<PlanStreamHandle> => ({
-        async appendText(delta) {
-          codingStreamingRegistry.publish(taskId, { kind: "text", delta });
-        },
-        async finalize(plan, opts) {
-          codingStreamingRegistry.publish(taskId, {
-            kind: "plan_finalized",
-            plan,
-            ...(opts?.autoApproved && { autoApproved: true }),
-          });
-        },
-        async fail(reason) {
-          codingStreamingRegistry.publish(taskId, { kind: "failed", reason });
-        },
-      }),
-      openExecuteStream: async (taskId: string): Promise<ExecuteStreamHandle> => ({
-        async started() {
-          codingStreamingRegistry.publish(taskId, { kind: "execute_started" });
-        },
-        async appendText(delta) {
-          codingStreamingRegistry.publish(taskId, { kind: "text", delta });
-        },
-        async toolCall(tool) {
-          codingStreamingRegistry.publish(taskId, { kind: "tool_call", tool });
-        },
-        async toolResult(tool, ok, summary) {
-          codingStreamingRegistry.publish(taskId, {
-            kind: "tool_result",
-            tool,
-            ok,
-            ...(summary !== undefined && { summary }),
-          });
-        },
-        async complete(ok, tokens) {
-          codingStreamingRegistry.publish(taskId, {
-            kind: "execute_complete",
-            ok,
-            ...(tokens !== undefined && { tokens }),
-          });
-        },
-        async fail(reason) {
-          codingStreamingRegistry.publish(taskId, { kind: "failed", reason });
-        },
-      }),
+      openPlanStream: async (taskId: string) => codingStreamingRegistry.planStream(taskId),
+      openExecuteStream: async (taskId: string) => codingStreamingRegistry.executeStream(taskId),
     };
     codingFunctions.push(createCodingOrchestrator(orchestratorDeps, inngest));
     codingFunctions.push(createCodingExecuteOrchestrator(orchestratorDeps, inngest));
@@ -859,7 +822,6 @@ export async function bootstrapRuntime(
           devbaseImage: env.COGMO_DEVBASE_IMAGE,
           defaultResourceLimits: orchestratorDeps.defaultResourceLimits,
           taskTtlMs: orchestratorDeps.taskTtlMs,
-          openExecuteStream: orchestratorDeps.openExecuteStream,
           ...(opts.codingAuthOverride && { loadCodingSandboxEnv: opts.codingAuthOverride }),
           ...(opts.octokitFactory && { octokitFactory: opts.octokitFactory }),
         },
@@ -1315,7 +1277,14 @@ export async function bootstrapRuntime(
     ...modelCatalogFunctions,
   ];
 
-  return { functions, adapters, mcpRegistry, webTransport, webStreamRegistry };
+  return {
+    functions,
+    adapters,
+    mcpRegistry,
+    webTransport,
+    webStreamRegistry,
+    codingStreams: codingStreamingRegistry,
+  };
 }
 
 /**

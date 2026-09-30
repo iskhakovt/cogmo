@@ -14,6 +14,7 @@ import {
   type SandboxSession,
 } from "../../sandbox/index.js";
 import { DrizzleSandboxStore } from "../../sandbox/store/index.js";
+import { expectDefined } from "../../test/assertions.js";
 import {
   makeStepRun,
   mockAgentStore,
@@ -24,12 +25,8 @@ import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { createTransport } from "../../transport/transport.js";
 import { DrizzleAgentStore } from "../store/index.js";
 import type { CodingBackend, CodingEvent } from "./backend.js";
-import {
-  type ExecuteStreamHandle,
-  type PlanStreamHandle,
-  runCodingExecute,
-  runCodingTask,
-} from "./orchestrator.js";
+import { findEndedCodingTasks } from "./find-ended-coding-tasks.js";
+import { runCodingExecute, runCodingTask } from "./orchestrator.js";
 import { startCodingProgressSubscriber } from "./progress-subscriber.js";
 import { createCodingService } from "./service.js";
 import { type CodingRepoRow, DrizzleCodingStore } from "./store/index.js";
@@ -232,6 +229,30 @@ function fakeSandbox(): {
   return { sandbox, createCalls, stopCalls, liveContainerDockerIds };
 }
 
+/** A registry that sweeps against the test database, on a timer the test fires. */
+function sweptRegistry(): {
+  registry: CodingStreamingRegistry;
+  sweep: () => Promise<void>;
+  /** The tasks each sweep asked the database about, in order. */
+  asked: ReadonlyArray<string>[];
+} {
+  const asked: ReadonlyArray<string>[] = [];
+  let tick: (() => Promise<void>) | undefined;
+  const registry = CodingStreamingRegistry.create({
+    endedTasks: (taskIds) => {
+      asked.push(taskIds);
+      return findEndedCodingTasks({ runInTx: tx, store }, taskIds);
+    },
+    sweepIntervalMs: 60_000,
+    setInterval: (cb) => {
+      tick = cb;
+      return "timer";
+    },
+    clearInterval: () => {},
+  });
+  return { registry, sweep: () => expectDefined(tick, "sweep timer")(), asked };
+}
+
 describe("coding flow — plan → approve → execute → pending_verify", () => {
   it("end-to-end: delegate submits, plan posts, approve fires execute, status reaches pending_verify", async () => {
     // ── Setup ──────────────────────────────────────────────────────────
@@ -241,7 +262,7 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
     const ownerUserId = "user-owner";
 
     const { sandbox, createCalls, stopCalls, liveContainerDockerIds } = fakeSandbox();
-    const registry = new CodingStreamingRegistry();
+    const { registry, sweep, asked } = sweptRegistry();
     const collected: CodingStreamEvent[] = [];
 
     // ── Step 1: delegate via Service.coding ────────────────────────────
@@ -304,12 +325,6 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
       ],
     });
 
-    const planStream: PlanStreamHandle = {
-      appendText: async (delta) => registry.publish(taskId, { kind: "text", delta }),
-      finalize: async (plan) => registry.publish(taskId, { kind: "plan_finalized", plan }),
-      fail: async (reason) => registry.publish(taskId, { kind: "failed", reason }),
-    };
-
     const planResult = await runCodingTask({
       taskId,
       runId: "run-test",
@@ -323,7 +338,7 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
         taskTtlMs: 60_000,
         worktreesDir: join(baseDir, "worktrees"),
         askpassBaseDir: join(baseDir, "askpass"),
-        openPlanStream: async () => planStream,
+        openPlanStream: async (id) => registry.planStream(id),
       },
       stepRun,
       stepSendEvent,
@@ -384,26 +399,6 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
     // ── Step 4: execute orchestrator runs (would be triggered by the event) ──
     // Container is still alive (TTL hasn't expired), so reuse path runs —
     // no second createTaskContainer call.
-    const executeStream: ExecuteStreamHandle = {
-      started: async () => registry.publish(taskId, { kind: "execute_started" }),
-      appendText: async (delta) => registry.publish(taskId, { kind: "text", delta }),
-      toolCall: async (tool) => registry.publish(taskId, { kind: "tool_call", tool }),
-      toolResult: async (tool, ok, summary) =>
-        registry.publish(taskId, {
-          kind: "tool_result",
-          tool,
-          ok,
-          ...(summary !== undefined && { summary }),
-        }),
-      complete: async (ok, tokens) =>
-        registry.publish(taskId, {
-          kind: "execute_complete",
-          ok,
-          ...(tokens !== undefined && { tokens }),
-        }),
-      fail: async (reason) => registry.publish(taskId, { kind: "failed", reason }),
-    };
-
     const executeResult = await runCodingExecute({
       taskId,
       runId: "run-test",
@@ -417,7 +412,7 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
         taskTtlMs: 60_000,
         worktreesDir: join(baseDir, "worktrees"),
         askpassBaseDir: join(baseDir, "askpass"),
-        openExecuteStream: async () => executeStream,
+        openExecuteStream: async (id) => registry.executeStream(id),
       },
       stepRun,
       stepSendEvent,
@@ -458,6 +453,10 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
       ok: true,
       tokens: { input: 250, output: 50 },
     });
+
+    // Execute ended the stream, so the registry holds nothing for a sweep to ask about.
+    await sweep();
+    expect(asked).toEqual([]);
   });
 
   it("automated trigger: plan clears the gate in-run, execute reaches pending_verify with no human tap", async () => {
@@ -590,7 +589,7 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
   });
 
   it("startCodingProgressSubscriber renders the plan + execute message lifecycle from the same registry", async () => {
-    const registry = new CodingStreamingRegistry();
+    const { registry } = sweptRegistry();
     const sent: { text: string; replyMarkup?: unknown }[] = [];
     const edits: { text: string; replyMarkup?: unknown }[] = [];
     const taskId = "019d0000-0000-7000-8000-000000000003";
@@ -599,7 +598,6 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
       taskId,
       chatId: 100,
       goal: "ship the slice",
-      channelId: "ch-1",
       bot: {
         sendMessage: vi.fn(async (_, text, opts) => {
           sent.push({
@@ -620,23 +618,18 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
       editIntervalMs: 0,
     });
 
-    // Drive the same event stream the orchestrator emits.
-    registry.publish(taskId, { kind: "text", delta: "drafting..." });
+    // Drive the handles the orchestrators publish through.
+    const plan = registry.planStream(taskId);
+    const execute = registry.executeStream(taskId);
+    await plan.appendText("drafting...");
     await tick();
-    registry.publish(taskId, {
-      kind: "plan_finalized",
-      plan: "## Plan\nedit foo",
-    });
+    await plan.finalize("## Plan\nedit foo");
     await tick();
-    registry.publish(taskId, { kind: "execute_started" });
+    await execute.started();
     await tick();
-    registry.publish(taskId, { kind: "tool_call", tool: "Edit" });
+    await execute.toolCall("Edit");
     await tick();
-    registry.publish(taskId, {
-      kind: "execute_complete",
-      ok: true,
-      tokens: { input: 100, output: 20 },
-    });
+    await execute.complete(true, { input: 100, output: 20 });
     await tick();
 
     expect(sent).toHaveLength(1); // single message, edited in place from then on
@@ -645,6 +638,82 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
     expect(final?.text).toContain("120 tokens");
     // The plan_finalized edit attached the keyboard.
     expect(edits.some((e) => Boolean(e.replyMarkup))).toBe(true);
+  });
+
+  it("a plan revised at the gate: the sweep releases its stream once the task is cancelled", async () => {
+    // Revise and Cancel end the task at `awaiting_approval`, after the plan
+    // run has returned, so no stream event says the task ended.
+    const repo = await seedRepo();
+    const conversationId = await seedConversation();
+    const task = await tx((trx) =>
+      store.insertTask(trx, {
+        repoId: repo.id,
+        conversationId,
+        goal: "g".repeat(20),
+        triggerSource: "user",
+        backend: "claude",
+        allowPrivilegedRunc: false,
+      }),
+    );
+
+    const { registry, sweep, asked } = sweptRegistry();
+    const bot = {
+      sendMessage: vi.fn(async () => ({ message_id: 7 })),
+      editMessageText: vi.fn(async () => ({})),
+    };
+    startCodingProgressSubscriber({
+      taskId: task.id,
+      chatId: 100,
+      goal: task.goal,
+      bot,
+      registry,
+      editIntervalMs: 0,
+    });
+
+    const { sandbox } = fakeSandbox();
+    const planResult = await runCodingTask({
+      taskId: task.id,
+      runId: "run-plan",
+      deps: {
+        runInTx: tx,
+        store,
+        sandbox,
+        backend: flowBackend({
+          planEvents: [
+            { kind: "session_started", sessionId: "sess-revise" },
+            { kind: "plan_ready", plan: "## Plan\n1. Edit foo.ts\n" },
+            { kind: "complete", exitCode: 0, isError: false },
+          ],
+          executeEvents: [],
+        }),
+        devbaseImage: "cogmo/devbase:test",
+        defaultResourceLimits: RESOURCE_LIMITS,
+        taskTtlMs: 60_000,
+        worktreesDir: join(baseDir, "worktrees"),
+        askpassBaseDir: join(baseDir, "askpass"),
+        openPlanStream: async (id) => registry.planStream(id),
+      },
+      stepRun,
+      stepSendEvent,
+    });
+    expect(planResult.status).toBe("awaiting_approval");
+    await tick();
+    expect(bot.sendMessage).toHaveBeenCalledTimes(1);
+
+    // Awaiting approval: the stream stays for the execute phase.
+    await sweep();
+    await sweep();
+    await tx((trx) => store.cancelTaskIfActive(trx, task.id, "user requested revisions"));
+    // Found cancelled twice, then released: the fifth sweep has nothing to ask.
+    await sweep();
+    await sweep();
+    await sweep();
+    expect(asked).toEqual([[task.id], [task.id], [task.id], [task.id]]);
+
+    await registry.executeStream(task.id).started();
+    await tick();
+    expect(bot.sendMessage).toHaveBeenCalledTimes(1);
+    expect(bot.editMessageText).not.toHaveBeenCalled();
   });
 });
 

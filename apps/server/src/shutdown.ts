@@ -5,6 +5,8 @@ export interface ServeResources {
   /** Ends open chat streams, then drains requests for up to `drainMs`. */
   web: { close(drainMs: number): Promise<void> };
   adapters: ReadonlyArray<{ channelType: string; adapter: { stop(): Promise<void> } }>;
+  /** Stops the sweep of coding progress streams. */
+  codingStreams: { close(): void };
   mcpRegistry: { stop(): Promise<void> };
   sandbox: { shutdown(): Promise<void> } | null;
   /** Marks this process's `cogmo_instances` row stopped; `null` without one. */
@@ -27,16 +29,16 @@ export type StepOutcome =
 
 /**
  * Tear down `cogmo serve`: the web server first, so no request reaches a
- * stopped dependency, then the channel adapters concurrently, MCP, the
- * sandbox, and the instance row. Each step is bounded, and one that
- * overruns or throws doesn't stop the next. Never rejects; returns each
- * step's outcome, in that order.
+ * stopped dependency, then the channel adapters concurrently, the coding
+ * streams' sweep, MCP, the sandbox, and the instance row. Each step is
+ * bounded, and one that overruns or throws doesn't stop the next. Never
+ * rejects; returns each step's outcome, in that order.
  */
 export async function shutdownServe(
   resources: ServeResources,
   bounds: ShutdownBounds,
 ): Promise<ReadonlyArray<StepOutcome>> {
-  const { web, adapters, mcpRegistry, sandbox, closeInstance } = resources;
+  const { web, adapters, codingStreams, mcpRegistry, sandbox, closeInstance } = resources;
   const { webDrainMs, stepMs } = bounds;
   const webOutcome = await bounded("web server", webDrainMs + stepMs, () => web.close(webDrainMs));
   const adapterOutcomes = await Promise.all(
@@ -44,6 +46,7 @@ export async function shutdownServe(
       bounded(`${channelType} adapter`, stepMs, () => adapter.stop()),
     ),
   );
+  const streamsOutcome = await bounded("coding streams", stepMs, async () => codingStreams.close());
   const mcpOutcome = await bounded("mcp", stepMs, () => mcpRegistry.stop());
   const sandboxOutcomes = sandbox
     ? [await bounded("sandbox", stepMs, () => sandbox.shutdown())]
@@ -51,7 +54,14 @@ export async function shutdownServe(
   const instanceOutcomes = closeInstance
     ? [await bounded("sandbox instance", stepMs, closeInstance)]
     : [];
-  return [webOutcome, ...adapterOutcomes, mcpOutcome, ...sandboxOutcomes, ...instanceOutcomes];
+  return [
+    webOutcome,
+    ...adapterOutcomes,
+    streamsOutcome,
+    mcpOutcome,
+    ...sandboxOutcomes,
+    ...instanceOutcomes,
+  ];
 }
 
 async function bounded(step: string, ms: number, run: () => Promise<void>): Promise<StepOutcome> {

@@ -23,13 +23,16 @@ import { DrizzleAgentStore } from "../store/index.js";
 import type { CodingBackend, CodingEvent } from "./backend.js";
 import {
   type CodingOrchestratorDeps,
-  type ExecuteStreamHandle,
-  NULL_EXECUTE_STREAM,
-  NULL_PLAN_STREAM,
   runCodingExecute,
   runCodingTask,
   type StepSendEvent,
 } from "./orchestrator.js";
+import {
+  type ExecuteStreamHandle,
+  NULL_EXECUTE_STREAM,
+  NULL_PLAN_STREAM,
+  type PlanStreamHandle,
+} from "./progress-stream.js";
 import { type CodingRepoRow, type CodingTaskRow, DrizzleCodingStore } from "./store/index.js";
 
 const execFileP = promisify(execFile);
@@ -288,7 +291,7 @@ interface RecordingPlanStream {
   /** `finalize`'s second argument, one entry per call. */
   finalizeOpts: ({ autoApproved?: boolean } | undefined)[];
   failed: string[];
-  handle: import("./orchestrator.js").PlanStreamHandle;
+  handle: PlanStreamHandle;
 }
 
 /** Automated task: no conversation, so no keyboard and nobody to tap it. */
@@ -846,6 +849,31 @@ describe("runCodingTask", () => {
     expect(stopCalls).toEqual([task.id]);
   });
 
+  it("a failure before the plan streams still reaches the plan stream", async () => {
+    const repo = await seedRepo();
+    const task = await seedTask(repo);
+    const { sandbox } = fakeSandbox();
+    (sandbox.create as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error("docker daemon down"),
+    );
+    const planStream = recordingPlanStream();
+
+    const result = await runCodingTask({
+      taskId: task.id,
+      runId: "run-test",
+      deps: makeDeps({
+        sandbox,
+        backend: backendYielding([]),
+        openPlanStream: async () => planStream.handle,
+      }),
+      stepRun,
+      stepSendEvent,
+    });
+
+    expect(result.status).toBe("failed");
+    expect(planStream.failed).toEqual([expect.stringMatching(/docker daemon down/)]);
+  });
+
   it("ensureImagePresent throws → status=failed, deleteByTaskId sweep still fires", async () => {
     // The `step.run("ensure-image-present")` runs one stage earlier
     // than `create-container`. A boot-warm failure that hasn't been
@@ -1152,6 +1180,7 @@ function recordingExecuteStream(): RecordingExecuteStream {
     handle: undefined!,
   };
   out.handle = {
+    started: async () => {},
     appendText: async (delta) => {
       out.text.push(delta);
     },
@@ -1609,6 +1638,38 @@ describe("runCodingExecute", () => {
     ).rejects.toThrow(/plan_approved_at/);
   });
 
+  it("a missing plan_approved_at reaches the execute stream before the throw", async () => {
+    const repo = await seedRepo();
+    const task = await seedTask(repo);
+    await tx((trx) => store.setTaskSessionId(trx, task.id, "sess-x"));
+    await tx((trx) =>
+      store.setTaskWorktreeAssignment(trx, task.id, {
+        type: "host-path",
+        branch: "cogmo/x",
+        worktreePath: join(baseDir, "wt"),
+      }),
+    );
+    await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "awaiting_approval" }));
+    const { sandbox } = fakeSandbox();
+    const stream = recordingExecuteStream();
+
+    await expect(
+      runCodingExecute({
+        taskId: task.id,
+        runId: "run-test",
+        deps: makeDeps({
+          sandbox,
+          backend: executeBackendYielding([]),
+          openExecuteStream: async () => stream.handle,
+        }),
+        stepRun,
+        stepSendEvent,
+        inngest: fakeInngest,
+      }),
+    ).rejects.toThrow(/plan_approved_at/);
+    expect(stream.failed).toEqual([expect.stringMatching(/plan_approved_at/)]);
+  });
+
   it("throws when session_id is missing (plan phase didn't capture it)", async () => {
     const repo = await seedRepo();
     const task = await seedTask(repo);
@@ -1730,6 +1791,33 @@ describe("runCodingExecute", () => {
     }
     expect(createCalls).toHaveLength(0);
     expect(stopCalls).toEqual([task.id]);
+  });
+
+  it("a failure before the CLI streams still reaches the execute stream", async () => {
+    const repo = await seedRepo();
+    const { task } = await seedExecutableTask(repo);
+    const { sandbox } = fakeSandbox();
+    (sandbox.create as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error("docker daemon down"),
+    );
+    const stream = recordingExecuteStream();
+
+    const result = await runCodingExecute({
+      taskId: task.id,
+      runId: "run-test",
+      deps: makeDeps({
+        sandbox,
+        backend: executeBackendYielding([]),
+        openExecuteStream: async () => stream.handle,
+      }),
+      stepRun,
+      stepSendEvent,
+      inngest: fakeInngest,
+    });
+
+    expect(result.status).toBe("failed");
+    expect(stream.failed).toEqual([expect.stringMatching(/docker daemon down/)]);
+    expect(stream.completed).toEqual([]);
   });
 
   // Mirror of the runCodingTask catch-path contract — emit-first

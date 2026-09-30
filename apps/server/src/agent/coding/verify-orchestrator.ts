@@ -38,12 +38,7 @@ import { loadCodingSandboxEnv } from "./auth.js";
 import { commitAuthorFor, runCommitAndPush } from "./commit-push.js";
 import { fetchFeatureBranch } from "./git-as-transport.js";
 import { parseRemoteUrl, runOpenPr } from "./open-pr.js";
-import {
-  buildWorktreeSpec,
-  checkoutFeatureBranchInSandbox,
-  type ExecuteStreamHandle,
-  NULL_EXECUTE_STREAM,
-} from "./orchestrator.js";
+import { buildWorktreeSpec, checkoutFeatureBranchInSandbox } from "./orchestrator.js";
 import type { CodingStore } from "./store/index.js";
 import { safeTeardownWorktree } from "./teardown.js";
 import type { PrMetadata } from "./types.js";
@@ -66,7 +61,6 @@ export interface VerifyOrchestratorDeps {
   devbaseImage: string;
   defaultResourceLimits: ResourceLimits;
   taskTtlMs: number;
-  openExecuteStream?: (taskId: string) => Promise<ExecuteStreamHandle>;
   /**
    * Optional Octokit factory. Tests inject a stub; production omits it
    * and `runOpenPr` constructs a real client from the resolved PAT.
@@ -135,7 +129,6 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
   const { taskId, runId, deps, stepRun, stepSendEvent, inngest } = params;
   const taskLog = log.child({ taskId, runId });
   const { runInTx, store, sandbox, secretsStore, askpassBaseDir } = deps;
-  const openExecuteStream = deps.openExecuteStream ?? (async () => NULL_EXECUTE_STREAM);
 
   const task = await runInTx((tx) => store.getTask(tx, taskId));
   if (!task) throw new Error(`coding task not found: ${taskId}`);
@@ -195,16 +188,13 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
   }
 
   /**
-   * Local helper bundling status=failed + worktree teardown + stream
-   * notification for every verify-orchestrator failure exit. Inlined as
-   * a closure (rather than a top-level function with many params)
-   * because it captures `stepRun`, `store`, `secretsStore`, `repo`,
-   * `taskId`, `worktreeAssignment` from this scope.
+   * Local helper bundling status=failed + worktree teardown for every
+   * verify-orchestrator failure exit. Inlined as a closure (rather than a
+   * top-level function with many params) because it captures `stepRun`,
+   * `store`, `secretsStore`, `repo`, `taskId`, `worktreeAssignment` from
+   * this scope.
    */
-  const failAndTeardown = async (
-    reason: string,
-    stream?: ExecuteStreamHandle | null,
-  ): Promise<VerifyOrchestratorResult> => {
+  const failAndTeardown = async (reason: string): Promise<VerifyOrchestratorResult> => {
     await stepRun("set-status-failed", () =>
       runInTx((tx) =>
         store.updateTaskStatus(tx, { id: taskId, status: "failed", failureReason: reason }),
@@ -217,9 +207,6 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
     await stepRun("teardown-worktree", () =>
       safeTeardownWorktree({ secretsStore, runInTx, repo, taskId, worktreeAssignment }),
     ).catch(() => undefined);
-    if (stream) {
-      await stream.fail(reason).catch(() => {});
-    }
     return { status: "failed", failureReason: reason };
   };
 
@@ -249,7 +236,6 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
   }
   const sandboxEnv = authResult.value;
 
-  let executeStream: ExecuteStreamHandle | null = null;
   let askpassProvisioned = false;
 
   try {
@@ -316,9 +302,6 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
       return resumed;
     };
 
-    executeStream = await openExecuteStream(taskId);
-    const stream = executeStream;
-
     // 1. Verify ───────────────────────────────────────────────────────
     // Durable: the repo's entire test suite, and `ok` selects disjoint step
     // sets downstream, so a verdict that drifted between replays would plan a
@@ -329,7 +312,6 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
         container: await container(),
         verifyCommand: repo.verifyCommand,
         timeoutSeconds: repo.verifyTimeoutSeconds,
-        executeStream: stream,
       }),
     );
     await stepRun("emit-verify-complete", () =>
@@ -351,7 +333,7 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
     );
     if (!verifyResult.ok) {
       const reason = `verify failed (exit ${verifyResult.exitCode})\n\n${verifyResult.output}`;
-      return await failAndTeardown(reason, executeStream);
+      return await failAndTeardown(reason);
     }
 
     // 2. Commit + push ────────────────────────────────────────────────
@@ -374,17 +356,15 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
     if (commitResult.kind === "branch_conflict") {
       return await failAndTeardown(
         `push rejected — branch conflict on cogmo/<idShort>:\n\n${commitResult.output}`,
-        executeStream,
       );
     }
     if (commitResult.kind === "auth_failed") {
       return await failAndTeardown(
         `push rejected — GitHub authentication failed:\n\n${commitResult.output}`,
-        executeStream,
       );
     }
     if (commitResult.kind === "failed") {
-      return await failAndTeardown(`commit+push failed:\n\n${commitResult.output}`, executeStream);
+      return await failAndTeardown(`commit+push failed:\n\n${commitResult.output}`);
     }
 
     // `nothing_to_commit` is a valid outcome — the verify passed on a
@@ -435,20 +415,16 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
     );
 
     if (prResult.kind === "auth_failed") {
-      return await failAndTeardown(`PR open failed (auth): ${prResult.message}`, executeStream);
+      return await failAndTeardown(`PR open failed (auth): ${prResult.message}`);
     }
     if (prResult.kind === "validation_failed") {
-      return await failAndTeardown(
-        `PR open failed (validation): ${prResult.message}`,
-        executeStream,
-      );
+      return await failAndTeardown(`PR open failed (validation): ${prResult.message}`);
     }
     if (prResult.kind === "failed") {
       // The branch is pushed but no PR — log + leave for retry per
-      // slice4-plan.md. Surface as failed so the operator sees it on
-      // Telegram and can re-delegate; the pushed branch is preserved
-      // upstream.
-      return await failAndTeardown(`PR open failed: ${prResult.message}`, executeStream);
+      // slice4-plan.md. Surface as failed so the operator can re-delegate;
+      // the pushed branch is preserved upstream.
+      return await failAndTeardown(`PR open failed: ${prResult.message}`);
     }
 
     const metadata: PrMetadata = {
@@ -506,12 +482,6 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
       );
     }
 
-    if (executeStream) {
-      await executeStream
-        .complete(true)
-        .catch((err) => taskLog.warn({ err }, "execute stream complete failed"));
-    }
-
     return { status: "pr_open", prUrl: prResult.url, prNumber: prResult.number };
   } catch (err) {
     const reason = (err as Error).message;
@@ -538,9 +508,6 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
       taskId,
       worktreeAssignment,
     }).catch(() => undefined);
-    if (executeStream) {
-      await executeStream.fail(reason).catch(() => {});
-    }
     return { status: "failed", failureReason: reason };
   } finally {
     // Unconditional sandbox sweep — idempotent at the label-index layer

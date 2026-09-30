@@ -8,6 +8,7 @@ function resources(steps: Partial<ServeResources> = {}): ServeResources {
   return {
     web: { close: vi.fn(async () => {}) },
     adapters: [channel("telegram", async () => {})],
+    codingStreams: { close: vi.fn() },
     mcpRegistry: { stop: vi.fn(async () => {}) },
     sandbox: { shutdown: vi.fn(async () => {}) },
     closeInstance: vi.fn(async () => {}),
@@ -54,6 +55,7 @@ describe("shutdownServe", () => {
       resources({
         web: { close: step("web") },
         adapters: [channel("telegram", step("telegram"))],
+        codingStreams: { close: () => events.push("coding streams") },
         mcpRegistry: { stop: step("mcp") },
         sandbox: { shutdown: step("sandbox") },
         closeInstance: step("instance"),
@@ -66,6 +68,7 @@ describe("shutdownServe", () => {
       "web end",
       "telegram start",
       "telegram end",
+      "coding streams",
       "mcp start",
       "mcp end",
       "sandbox start",
@@ -98,6 +101,7 @@ describe("shutdownServe", () => {
       { step: "web server", outcome: "done" },
       { step: "telegram adapter", outcome: "done" },
       { step: "web adapter", outcome: "done" },
+      { step: "coding streams", outcome: "done" },
       { step: "mcp", outcome: "done" },
       { step: "sandbox", outcome: "done" },
       { step: "sandbox instance", outcome: "done" },
@@ -157,6 +161,11 @@ describe("shutdownServe", () => {
   it("skips the sandbox steps when there is no sandbox", async () => {
     const outcomes = await shutdownServe(resources({ sandbox: null, closeInstance: null }), BOUNDS);
 
-    expect(outcomes.map(({ step }) => step)).toEqual(["web server", "telegram adapter", "mcp"]);
+    expect(outcomes.map(({ step }) => step)).toEqual([
+      "web server",
+      "telegram adapter",
+      "coding streams",
+      "mcp",
+    ]);
   });
 });

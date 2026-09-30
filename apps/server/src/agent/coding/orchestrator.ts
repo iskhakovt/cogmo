@@ -19,6 +19,12 @@ import type { BackendUsage, CodingBackend } from "./backend.js";
 import { commitAuthorFor, runCommitAndPush } from "./commit-push.js";
 import { loadIdentity, pushTaskBranchToRemote, runBranchFor } from "./git-as-transport.js";
 import { planGateEmission } from "./plan-gate.js";
+import {
+  type ExecuteStreamHandle,
+  NULL_EXECUTE_STREAM,
+  NULL_PLAN_STREAM,
+  type PlanStreamHandle,
+} from "./progress-stream.js";
 import type { CodingRepoRow, CodingStore, CodingTaskRow } from "./store/index.js";
 import { safeTeardownWorktree } from "./teardown.js";
 import type { WorktreeAssignment } from "./types.js";
@@ -27,57 +33,6 @@ import { allocateWorktree } from "./worktree.js";
 const log = logger.child({ component: "coding.orchestrator" });
 
 export type { StepRun, StepSendEvent } from "../../inngest/index.js";
-
-/**
- * Streaming surface the orchestrator writes to during the non-durable plan
- * phase. Slice 1 ships a no-op default; slice 1.0g wires this to
- * `TelegramStreamHandle` so the user sees the plan render in place.
- */
-export interface PlanStreamHandle {
-  appendText(delta: string): Promise<void>;
-  /**
-   * Finalize the plan stream. `autoApproved` tells subscribers this run
-   * clears the approval gate itself — either the profile carries
-   * `coding_autoapprove_mode = 'on'`, or the task came from an `evolution` /
-   * `signal_pipeline` trigger, which has no interactive gate. The Telegram
-   * progress renderer skips the approve/revise/cancel keyboard when it is
-   * set, since the orchestrator emits `coding/task/plan-approved` unattended
-   * in the next step.
-   */
-  finalize(plan: string, opts?: { autoApproved?: boolean }): Promise<void>;
-  fail(reason: string): Promise<void>;
-}
-
-export const NULL_PLAN_STREAM: PlanStreamHandle = {
-  async appendText() {},
-  async finalize() {},
-  async fail() {},
-};
-
-/**
- * Streaming surface for the execute phase. Adds tool-call observability and
- * a `complete` terminator so the consumer (Telegram delivery, slice 2.0g)
- * can render Claude's progress in place: text deltas grow the message body,
- * tool events update an "activity" line, and `complete` flips to a final
- * status. Failures still flow through `fail`.
- */
-export interface ExecuteStreamHandle {
-  /** Optional — bootstrap-side wiring may publish an `execute_started` event here. */
-  started?(): Promise<void>;
-  appendText(delta: string): Promise<void>;
-  toolCall(tool: string): Promise<void>;
-  toolResult(tool: string, ok: boolean, summary?: string): Promise<void>;
-  complete(ok: boolean, tokens?: { input: number; output: number }): Promise<void>;
-  fail(reason: string): Promise<void>;
-}
-
-export const NULL_EXECUTE_STREAM: ExecuteStreamHandle = {
-  async appendText() {},
-  async toolCall() {},
-  async toolResult() {},
-  async complete() {},
-  async fail() {},
-};
 
 export interface CodingOrchestratorDeps {
   runInTx: Transactor;
@@ -108,13 +63,9 @@ export interface CodingOrchestratorDeps {
    * the execute-side push.
    */
   askpassBaseDir: string;
-  /** Open a delivery channel for streaming plan text. Slice 1 default = NULL_PLAN_STREAM. */
+  /** The task's plan progress. Bootstrap passes the registry's; defaults to `NULL_PLAN_STREAM`. */
   openPlanStream?: (taskId: string) => Promise<PlanStreamHandle>;
-  /**
-   * Open a delivery channel for execute-phase progress. Default =
-   * NULL_EXECUTE_STREAM. Wired to the `CodingStreamingRegistry` in
-   * bootstrap (slice 2.0f), consumed by Telegram delivery in 2.0g.
-   */
+  /** The task's execute progress. Bootstrap passes the registry's; defaults to `NULL_EXECUTE_STREAM`. */
   openExecuteStream?: (taskId: string) => Promise<ExecuteStreamHandle>;
   /**
    * Test-only override for the in-sandbox coding-auth resolver. Threaded
@@ -269,9 +220,8 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
   // mutable so the rest of the function reads it without re-loading the row.
   // Single null check covers both fields (atomic by Zod schema).
   let assignment = task.worktreeAssignment;
-  // Hoisted out of the try block so the catch can call planStream.fail().
-  // Stays null until openPlanStream has actually returned a handle.
-  let planStream: PlanStreamHandle | null = null;
+  // Ahead of the try, so a failure before the CLI streams still reaches it.
+  const stream = await openPlanStream(taskId);
   // Hoisted so the catch can call cleanupAskpass on plan-phase failure
   // (success leaves the dir alive — execute's finally owns it once the
   // task transitions to executing).
@@ -470,11 +420,6 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
         await checkoutFeatureBranchInSandbox(session, wt.branch);
       });
     }
-
-    planStream = await openPlanStream(taskId);
-    // Capture the handle in a const so the step body below sees the
-    // non-null type — TS doesn't carry `let` narrowing across closures.
-    const stream = planStream;
 
     // Durable: a billable claude session with no `--resume` on the plan
     // flags, so a re-invocation replans from scratch and re-renders the
@@ -757,9 +702,9 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     // `create-container` step. Idempotent at the label-index layer:
     // a sandbox that never made it server-side is a no-op sweep.
     await sandbox.deleteByTaskId(taskId).catch(() => {});
-    // Notify the plan stream if it was opened. Best-effort — we're already
-    // in the catch path, don't let a delivery failure mask the original error.
-    await planStream?.fail(reason).catch(() => {});
+    // Best-effort — we're already in the catch path, don't let a delivery
+    // failure mask the original error.
+    await stream.fail(reason).catch(() => {});
     return { status: "failed", failureReason: reason };
   } finally {
     // Every exit, not just the throwing one. The plan phase has several early
@@ -998,7 +943,6 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
   // and this function never writes, so they are stable across replays.
   const sessionId = task.sessionId;
   const worktreeAssignment = task.worktreeAssignment;
-  let executeStream: ExecuteStreamHandle | null = null;
   let askpassProvisioned = false;
   // Identity + askpass live together — bundling encodes "both or
   // neither" in the type. Set only when `needsExecutePush`.
@@ -1048,17 +992,28 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
     return { status: "skipped" };
   }
 
+  // Ahead of the checks and the try, so every failure from here reaches it.
+  const stream = await openExecuteStream(taskId);
+  const failedCheck = async (message: string): Promise<Error> => {
+    await stream.fail(message).catch(() => {});
+    return new Error(message);
+  };
+
   // Below the claim on purpose: these read fields the PLAN phase owns, and a
   // throw here fails the function, which sends `coding-task-reconcile` at a
   // row that — before the claim — this run has no title to.
   if (!task.planApprovedAt) {
-    throw new Error(`coding task ${taskId} has no plan_approved_at — execute fired prematurely`);
+    throw await failedCheck(
+      `coding task ${taskId} has no plan_approved_at — execute fired prematurely`,
+    );
   }
   if (!sessionId) {
-    throw new Error(`coding task ${taskId} has no session_id — plan phase didn't capture it`);
+    throw await failedCheck(
+      `coding task ${taskId} has no session_id — plan phase didn't capture it`,
+    );
   }
   if (!worktreeAssignment) {
-    throw new Error(`coding task ${taskId} has no worktree_assignment`);
+    throw await failedCheck(`coding task ${taskId} has no worktree_assignment`);
   }
 
   try {
@@ -1217,15 +1172,12 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       return resumed;
     };
 
-    executeStream = await openExecuteStream(taskId);
-    const stream = executeStream;
-
     // Durable: a billable claude session, and `isError` selects disjoint
     // step sets below. The `started` banner and the token/tool pushes fire
     // live from inside the body and are suppressed on replay — one run's
     // worth of progress, which is what the UI wants.
     const result = await stepRun("execute-cli", async () => {
-      await stream.started?.();
+      await stream.started();
       return runExecuteStreaming({
         task,
         repo,
@@ -1433,7 +1385,7 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
     await runInTx((tx) =>
       store.setTaskSandboxDeletedAt(tx, taskId, new Date().toISOString()),
     ).catch(() => {});
-    await executeStream?.fail(reason).catch(() => {});
+    await stream.fail(reason).catch(() => {});
     return { status: "failed", failureReason: reason };
   } finally {
     if (askpassProvisioned) {

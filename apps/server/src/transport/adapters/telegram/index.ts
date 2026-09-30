@@ -958,7 +958,6 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
             taskId,
             chatId: Number(tgSession.platformAddress),
             goal: task.goal,
-            channelId,
             bot: {
               sendMessage: (chatId, text, opts) => bot.api.sendMessage(chatId, text, opts),
               editMessageText: (chatId, messageId, text, opts) =>
