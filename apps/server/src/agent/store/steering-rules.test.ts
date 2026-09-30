@@ -8,10 +8,15 @@
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
-import { assertKind, expectDefined } from "../../test/assertions.js";
+import { expectDefined } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { RuleGroupChangedError } from "./errors.js";
-import { DrizzleAgentStore, INSTRUCTION_RULE_LIMIT } from "./index.js";
+import {
+  DrizzleAgentStore,
+  INSTRUCTION_RULE_LIMIT,
+  type InstructionRuleRow,
+  type SetInstructionRuleResult,
+} from "./index.js";
 import { type SteeringRuleSourceValue, steeringRules, users } from "./schema.js";
 
 let db: Database;
@@ -108,6 +113,11 @@ function set(params: {
   );
 }
 
+/** Narrow a set's result to a rule it wrote. */
+function assertNew(result: SetInstructionRuleResult): asserts result is InstructionRuleRow {
+  if (result.kind !== "new") throw new Error(`expected a new rule, got ${result.kind}`);
+}
+
 async function rendered(scope: { profileId: string; userId: string | null }) {
   return (await tx((trx) => store.getActiveRules(trx, scope))).map((r) => r.rule);
 }
@@ -174,7 +184,7 @@ describe("setInstructionRule", () => {
       channelType: "telegram",
     });
 
-    assertKind(result, "new");
+    assertNew(result);
     const [written] = await db.select().from(steeringRules).where(eq(steeringRules.id, result.id));
     expect(written).toMatchObject({
       rule: "No bullet points.",
@@ -198,7 +208,7 @@ describe("setInstructionRule", () => {
     const first = await set({ rule: "No bullet points.", userId });
     const second = await set({ rule: "No bullet points.", userId });
 
-    assertKind(first, "new");
+    assertNew(first);
     expect(second).toEqual({ kind: "existing", id: first.id, createdAt: first.createdAt });
     expect(await db.select().from(steeringRules)).toHaveLength(1);
   });
@@ -209,7 +219,7 @@ describe("setInstructionRule", () => {
     const first = await set({ rule: "No bullet points.", userId });
     const respelled = await set({ rule: "  no BULLET\n points. ", userId });
 
-    assertKind(first, "new");
+    assertNew(first);
     expect(respelled).toMatchObject({ kind: "existing", id: first.id });
   });
 
@@ -234,7 +244,7 @@ describe("setInstructionRule", () => {
 
     const result = await set({ rule: "Be brief.", userId });
 
-    assertKind(result, "new");
+    assertNew(result);
     expect(result.id).not.toBe(retired);
   });
 
@@ -312,7 +322,7 @@ describe("setInstructionRule", () => {
       const first = await set({ rule: "One", userId });
       await fill(userId, INSTRUCTION_RULE_LIMIT - 1);
 
-      assertKind(first, "new");
+      assertNew(first);
       expect(await set({ rule: " one ", userId })).toEqual({
         kind: "existing",
         id: first.id,
@@ -377,6 +387,15 @@ describe("setInstructionRule", () => {
     expect(after?.retractedAt).toEqual(retiredAt);
   });
 
+  it("rejects an empty channel type, which the index can't tell from every channel", async () => {
+    const userId = await seedUser();
+    await set({ rule: "No emoji", userId });
+
+    await expect(set({ rule: "No emoji", userId, channelType: "" })).rejects.toThrow(
+      /channel type/,
+    );
+  });
+
   it("goes when its user is deleted", async () => {
     const userId = await seedUser();
     await set({ rule: "No emoji", userId });
@@ -422,7 +441,8 @@ describe("retireRulesByText", () => {
     expect(result.retired.map((r) => r.id).sort()).toEqual(
       [instruction, onTelegram, learned, merged].sort(),
     );
-    expect(result.kept).toEqual([]);
+    expect(result.alreadyRetired).toEqual([]);
+    expect(result.notRemovable).toEqual([]);
     for (const r of result.retired) {
       expect(r.retractedAt).toBeInstanceOf(Date);
       expect(await stateOf(r.id)).toBe("retired");
@@ -430,7 +450,7 @@ describe("retireRulesByText", () => {
     expect(await rendered({ profileId, userId })).toEqual([]);
   });
 
-  it("is idempotent: a second retire changes nothing and returns the retired rows as kept", async () => {
+  it("is idempotent: a second retire changes nothing and finds what the first retired", async () => {
     const userId = await seedUser();
     const profileId = await seedProfile();
     const id = await row({ rule: "No emoji.", source: "instruction", userId });
@@ -440,7 +460,7 @@ describe("retireRulesByText", () => {
 
     const retired = expectDefined(first.retired[0], "retired");
     expect(retired.id).toBe(id);
-    expect(second).toEqual({ retired: [], kept: [retired] });
+    expect(second).toEqual({ retired: [], alreadyRetired: [retired], notRemovable: [] });
   });
 
   it("can't retire an operator rule or a channel default", async () => {
@@ -458,7 +478,8 @@ describe("retireRulesByText", () => {
     const result = await retire({ text: "Avoid tables.", userId, profileId });
 
     expect(result.retired).toEqual([]);
-    expect(result.kept.map((r) => [r.id, r.source, r.retractedAt])).toEqual([
+    expect(result.alreadyRetired).toEqual([]);
+    expect(result.notRemovable.map((r) => [r.id, r.source, r.retractedAt])).toEqual([
       [channelDefault, "seed", null],
       [operator, "manual", null],
     ]);
@@ -486,7 +507,7 @@ describe("retireRulesByText", () => {
 
     const result = await retire({ text: "No emoji.", userId, profileId });
 
-    expect(result).toEqual({ retired: [], kept: [] });
+    expect(result).toEqual({ retired: [], alreadyRetired: [], notRemovable: [] });
     expect([await stateOf(learning), await stateOf(theirs), await stateOf(otherProfile)]).toEqual([
       "learning",
       "live",
@@ -503,7 +524,8 @@ describe("retireRulesByText", () => {
     const result = await retire({ text: "No emoji.", userId, profileId, restricted: true });
 
     expect(result.retired.map((r) => r.id)).toEqual([own]);
-    expect(result.kept.map((r) => [r.id, r.profileId, r.retractedAt])).toEqual([
+    expect(result.alreadyRetired).toEqual([]);
+    expect(result.notRemovable.map((r) => [r.id, r.profileId, r.retractedAt])).toEqual([
       [wider, null, null],
     ]);
   });

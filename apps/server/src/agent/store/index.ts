@@ -404,17 +404,21 @@ export interface InstructionRuleParams {
 }
 
 /**
- * `new`: this call wrote the rule. `existing`: a live instruction rule with
- * the same text and scope was already there, whether an earlier call or a
- * retry of this one wrote it; `createdAt` tells them apart. `at_limit`: the
- * user holds `INSTRUCTION_RULE_LIMIT` live rules and nothing was written.
+ * The live instruction rule a set wrote (`new`) or found (`existing`), whether
+ * an earlier call or a retry of this one wrote it; `createdAt` tells them apart.
+ */
+export interface InstructionRuleRow {
+  kind: "new" | "existing";
+  id: string;
+  createdAt: Date;
+}
+
+/**
+ * `at_limit`: the user holds `INSTRUCTION_RULE_LIMIT` live rules and nothing
+ * was written. A value, not a throw: `rule_set` turns it into a tool error,
+ * throwing it only to roll back its `replaces` retirements.
  */
 export type SetInstructionRuleResult = InstructionRuleRow | { kind: "at_limit"; live: number };
-
-/** The live instruction rule a set wrote or found. */
-export type InstructionRuleRow =
-  | { kind: "new"; id: string; createdAt: Date }
-  | { kind: "existing"; id: string; createdAt: Date };
 
 /** A rule whose text matched, as `retireRulesByText` returns it. */
 export interface RuleMatch {
@@ -427,14 +431,14 @@ export interface RuleMatch {
   retractedAt: Date | null;
 }
 
-/**
- * The live and retired rules visible to a scope whose text matched: those the
- * call retired, and the rest as they stand — already retired, or live but not
- * removable there.
- */
+/** The rules visible to a scope whose text matched, by what retiring did to them. */
 export interface RetireRulesResult {
+  /** Retired by this call. */
   retired: ReadonlyArray<RuleMatch>;
-  kept: ReadonlyArray<RuleMatch>;
+  /** Retired before it, so a repeat finds what the first call retired. */
+  alreadyRetired: ReadonlyArray<RuleMatch>;
+  /** Live, and not the scope's to retire: an operator rule, a channel default, or a wider rule in a restricted class. */
+  notRemovable: ReadonlyArray<RuleMatch>;
 }
 
 /** A steering rule with what review shows of it. */
@@ -497,6 +501,17 @@ function textMatches(text: string): SQL {
   return eq(normalizedRuleText(steeringRules.rule), normalizedRuleText(sql`${text}`));
 }
 
+/**
+ * `''` shares `uq_steering_rules_instruction`'s key with NULL (every channel)
+ * but matches only itself in `inScope`, so a set would answer `existing` for
+ * another scope's rule.
+ */
+function assertChannelType(channelType: string | null): void {
+  if (channelType === "") {
+    throw new Error("empty channel type: pass null for every channel");
+  }
+}
+
 /** Exactly this profile and channel scope, NULL matching NULL. */
 function inScope(profileId: string | null, channelType: string | null): SQL | undefined {
   return and(
@@ -533,7 +548,7 @@ async function upsertInstructionRule(
       RETURNING id, created_at, (xmax = 0) AS inserted
     `);
   const { inserted, ...row } = single(await tx.with(upserted).select().from(upserted));
-  return inserted ? { kind: "new", ...row } : { kind: "existing", ...row };
+  return { kind: inserted ? "new" : "existing", ...row };
 }
 
 const RULE_MATCH_COLUMNS = {
@@ -1492,8 +1507,10 @@ export interface AgentStore {
 
   /**
    * Replace a group of learned rules with one consolidated rule. Throws
-   * `RuleGroupChangedError`, rolling the transaction back, when a rule in the
-   * group is retired, gone, or not a learned rule.
+   * `RuleGroupChangedError` when a rule in the group is retired, gone, or not
+   * a learned rule. The DELETE has run by then, so the caller must let the
+   * error propagate out of the transaction, which rolls it back, and catch it
+   * outside.
    */
   replaceRules(
     tx: Transaction,
@@ -1515,7 +1532,7 @@ export interface AgentStore {
   /**
    * Set a standing instruction as a live rule, unless a live instruction rule
    * with the same text (normalized) and scope is already there, or the user
-   * holds `INSTRUCTION_RULE_LIMIT`. A set or an existing rule retires the
+   * holds `INSTRUCTION_RULE_LIMIT`. Throws on an empty `channelType`. A set or an existing rule retires the
    * unretired learned rules with the same text and scope: the instruction
    * supersedes them. Keyed on `uq_steering_rules_instruction`: a concurrent
    * identical set fails with 40001, and the transactor's retry returns the
@@ -1530,7 +1547,8 @@ export interface AgentStore {
    * Retire the live `instruction`, `correction` and `evolution` rules visible
    * to the scope whose text matches `text` (normalized); `restricted` limits
    * that to the rules scoped to `profileId`. Returns every live or retired
-   * visible match, so a repeat finds what it retired.
+   * visible match. Fits `rule_remove`; `replaces` needs its own shape
+   * (design/evolution.md → Implementation Outline, step 3).
    */
   retireRulesByText(
     tx: Transaction,
@@ -3531,6 +3549,7 @@ export class DrizzleAgentStore implements AgentStore {
     tx: Transaction,
     params: InstructionRuleParams,
   ): Promise<SetInstructionRuleResult> {
+    assertChannelType(params.channelType);
     const [held] = await tx
       .select({ value: count() })
       .from(steeringRules)
@@ -3594,7 +3613,7 @@ export class DrizzleAgentStore implements AgentStore {
       )
       .returning(RULE_MATCH_COLUMNS);
     const retiredIds = new Set(retired.map((r) => r.id));
-    const matches = await tx
+    const others = await tx
       .select(RULE_MATCH_COLUMNS)
       .from(steeringRules)
       .where(
@@ -3605,7 +3624,11 @@ export class DrizzleAgentStore implements AgentStore {
         ),
       )
       .orderBy(...RULE_ORDER);
-    return { retired, kept: matches.filter((m) => !retiredIds.has(m.id)) };
+    const [alreadyRetired, notRemovable] = R.partition(
+      others.filter((m) => !retiredIds.has(m.id)),
+      (m) => m.retractedAt !== null,
+    );
+    return { retired, alreadyRetired, notRemovable };
   }
 
   async listRules(

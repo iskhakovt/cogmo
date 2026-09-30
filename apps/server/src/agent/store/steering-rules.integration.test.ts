@@ -125,7 +125,7 @@ describe("instruction rules against a concurrent writer (real Postgres)", () => 
       (trx) => store.setInstructionRule(trx, respelled),
     );
 
-    assertKind(won, "new");
+    if (won.kind !== "new") throw new Error(`expected the winner to write, got ${won.kind}`);
     expect(lost).toEqual({
       kind: "fulfilled",
       value: { kind: "existing", id: won.id, createdAt: won.createdAt },

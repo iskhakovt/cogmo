@@ -901,9 +901,11 @@ export const INSTRUCTION_RULE_KEY: readonly [SQL, SQL, SQL, SQL] = [
 export const LIVE_INSTRUCTION_RULE: SQL = sql`source = 'instruction' AND retracted_at IS NULL`;
 
 /**
- * A live rule is active and unretired; a learning one (`correction` only) is
- * inactive and unretired; a retired one is inactive with `retracted_at` set.
- * `user_id` and `quote` belong to `instruction` rows, which never learn.
+ * A live rule is active and unretired. An inactive, unretired rule is learning
+ * when learned (`correction`, `evolution`) and switched off when an operator's
+ * or a channel default (`manual`, `seed`), which review leaves out. A retired
+ * one is inactive with `retracted_at` set. `user_id` and `quote` belong to
+ * `instruction` rows, which are never inactive unless retired.
  */
 export const steeringRules = pgTable(
   "steering_rules",
