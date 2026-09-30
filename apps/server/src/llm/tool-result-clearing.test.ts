@@ -159,6 +159,24 @@ describe("textTokens", () => {
     }
   });
 
+  it("remembers the first 4,096 pieces, and no more", () => {
+    // Seventeen letters with the space before them: one piece each.
+    const word = (i: number) =>
+      ` ${R.times(17, (k) => String.fromCharCode(97 + (Math.floor(i / 26 ** k) % 26))).join("")}`;
+    const late = word(5000);
+    const text = `${R.times(4096, word).join("")}${late}${late}`;
+    const tokens = textTokens(enc);
+    const encode = vi.spyOn(enc, "encode");
+    try {
+      [...tokens(text)];
+
+      expect(encode.mock.calls.filter(([piece]) => piece === word(0))).toHaveLength(1);
+      expect(encode.mock.calls.filter(([piece]) => piece === late)).toHaveLength(2);
+    } finally {
+      encode.mockRestore();
+    }
+  });
+
   it("looks for a space only within the slice's window", () => {
     // No spaces: a search back from each window's end would read to the start.
     const text = "字".repeat(100_000);
