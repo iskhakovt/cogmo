@@ -430,13 +430,19 @@ function promptTokens(
   enc: Tiktoken,
   params: Pick<CountTokensParams, "system" | "messages" | "tools">,
 ): number {
-  const messages = buildMessages(params.system, params.messages, undefined);
-  const toolDefinitions = R.sumBy(params.tools ?? [], (tool) =>
-    encodedLength(enc, JSON.stringify(tool)),
-  );
-  return (
-    R.sumBy(messages, (msg) => messageTokens(enc, msg)) + toolDefinitions + REPLY_PRIMING_TOKENS
-  );
+  return R.sum([...promptParts(enc, params)]);
+}
+
+/** {@link promptTokens} a part at a time, lazily: each message, each tool definition, the reply priming. */
+function* promptParts(
+  enc: Tiktoken,
+  params: Pick<CountTokensParams, "system" | "messages" | "tools">,
+): Generator<number> {
+  for (const msg of buildMessages(params.system, params.messages, undefined)) {
+    yield messageTokens(enc, msg);
+  }
+  for (const tool of params.tools ?? []) yield encodedLength(enc, JSON.stringify(tool));
+  yield REPLY_PRIMING_TOKENS;
 }
 
 // --- Tool-result clearing ---
@@ -448,7 +454,7 @@ function promptTokens(
  */
 function clearedMessages(params: CountTokensParams): Message[] {
   return withClearedToolResults(params, (messages) =>
-    promptTokens(cl100k(), { ...params, messages }),
+    promptParts(cl100k(), { ...params, messages }),
   );
 }
 
