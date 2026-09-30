@@ -115,7 +115,7 @@ export function inngest(network: StartedNetwork, opts?: { appUrl?: string }) {
   if (opts?.appUrl) {
     cmd.push("-u", opts.appUrl);
   }
-  return new GenericContainer("mirror.gcr.io/inngest/inngest:v1.44.0")
+  return new GenericContainer("mirror.gcr.io/inngest/inngest:v1.45.1")
     .withNetwork(network)
     .withNetworkAliases("inngest")
     .withExposedPorts(8288, 8289)
