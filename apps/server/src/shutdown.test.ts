@@ -151,16 +151,54 @@ describe("shutdownServe", () => {
   });
 
   it("reports a step that throws and runs the next", async () => {
-    const failure = new Error("daemon gone");
+    const failure = new Error("server gone");
     const closeInstance = vi.fn(async () => {});
 
     const outcomes = await shutdownServe(
-      resources({ sandbox: { shutdown: vi.fn().mockRejectedValue(failure) }, closeInstance }),
+      resources({ mcpRegistry: { stop: vi.fn().mockRejectedValue(failure) }, closeInstance }),
       BOUNDS,
     );
 
-    expect(outcomes).toContainEqual({ step: "sandbox", outcome: "failed", error: failure });
+    expect(outcomes).toContainEqual({ step: "mcp", outcome: "failed", error: failure });
     expect(closeInstance).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves the instance open when the skills pool overruns its bound", async () => {
+    vi.useFakeTimers();
+    const closeInstance = vi.fn(async () => {});
+
+    const shutdown = shutdownServe(
+      resources({ skills: { shutdown: never }, closeInstance }),
+      BOUNDS,
+    );
+    await vi.advanceTimersByTimeAsync(BOUNDS.stepMs);
+    const outcomes = await shutdown;
+
+    expect(closeInstance).not.toHaveBeenCalled();
+    expect(outcomes).toContainEqual({
+      step: "sandbox instance",
+      outcome: "skipped",
+      reason: expect.any(String),
+    });
+  });
+
+  it("leaves the instance open when the sandbox step fails", async () => {
+    const closeInstance = vi.fn(async () => {});
+
+    const outcomes = await shutdownServe(
+      resources({
+        sandbox: { shutdown: vi.fn().mockRejectedValue(new Error("daemon gone")) },
+        closeInstance,
+      }),
+      BOUNDS,
+    );
+
+    expect(closeInstance).not.toHaveBeenCalled();
+    expect(outcomes).toContainEqual({
+      step: "sandbox instance",
+      outcome: "skipped",
+      reason: expect.any(String),
+    });
   });
 
   it("skips the sandbox steps when there is no sandbox", async () => {

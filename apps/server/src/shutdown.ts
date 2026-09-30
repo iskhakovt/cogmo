@@ -11,7 +11,10 @@ export interface ServeResources {
   /** Disposes the skill runner's tier-2 warm pool, tearing its containers down. */
   skills: { shutdown(): Promise<void> };
   sandbox: { shutdown(): Promise<void> } | null;
-  /** Marks this process's `cogmo_instances` row stopped; `null` without one. */
+  /**
+   * Marks this process's `cogmo_instances` row stopped; `null` without one.
+   * Skipped when the skills pool or sandbox step didn't finish.
+   */
   closeInstance: (() => Promise<void>) | null;
 }
 
@@ -27,14 +30,17 @@ export const SERVE_SHUTDOWN_BOUNDS: ShutdownBounds = { webDrainMs: 3_000, stepMs
 export type StepOutcome =
   | { step: string; outcome: "done" }
   | { step: string; outcome: "timed_out"; ms: number }
-  | { step: string; outcome: "failed"; error: unknown };
+  | { step: string; outcome: "failed"; error: unknown }
+  | { step: string; outcome: "skipped"; reason: string };
 
 /**
  * Tear down `cogmo serve`: the web server first, so no request reaches a
  * stopped dependency, then the channel adapters concurrently, the coding
  * streams' sweep, MCP, the skills pool, the sandbox, and the instance row.
  * Each step is bounded, and one that overruns or throws doesn't stop the
- * next. Never rejects; returns each step's outcome, in that order.
+ * next. The instance row stays open when the skills pool or sandbox step
+ * didn't finish, so the next boot reaps the containers they left. Never
+ * rejects; returns each step's outcome, in that order.
  */
 export async function shutdownServe(
   resources: ServeResources,
@@ -54,9 +60,20 @@ export async function shutdownServe(
   const sandboxOutcomes = sandbox
     ? [await bounded("sandbox", stepMs, () => sandbox.shutdown())]
     : [];
-  const instanceOutcomes = closeInstance
-    ? [await bounded("sandbox instance", stepMs, closeInstance)]
-    : [];
+  // The next boot reaps the containers of instances never marked stopped.
+  const leftContainers = [skillsOutcome, ...sandboxOutcomes].some(
+    ({ outcome }) => outcome !== "done",
+  );
+  const instanceOutcomes: StepOutcome[] = [];
+  if (closeInstance && leftContainers) {
+    instanceOutcomes.push({
+      step: "sandbox instance",
+      outcome: "skipped",
+      reason: "a container teardown didn't finish; left open so the next boot reaps it",
+    });
+  } else if (closeInstance) {
+    instanceOutcomes.push(await bounded("sandbox instance", stepMs, closeInstance));
+  }
   return [
     webOutcome,
     ...adapterOutcomes,

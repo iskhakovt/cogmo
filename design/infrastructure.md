@@ -130,7 +130,7 @@ On `SIGTERM` or `SIGINT`, the Inngest connection closes first, waiting for every
 4. **MCP** connection pool.
 5. **Skills pool.** Disposes the tier-2 warm pool, tearing its containers down ([skills.md → Sizing](skills.md#sizing-confirmed)).
 6. **Sandbox.** On local-Docker this closes the socket proxy, which ends every connection a task opened through it, hijacked streams included.
-7. **Instance row.** Sets `cogmo_instances.stopped_at` ([sandbox.md → Data Model](sandbox.md#data-model-confirmed)).
+7. **Instance row.** Sets `cogmo_instances.stopped_at` ([sandbox.md → Data Model](sandbox.md#data-model-confirmed)). Skipped when the skills pool or sandbox step didn't finish: the next boot reaps the containers of instances never marked stopped, so it reaps what they left.
 
 The web server goes first so no request reaches a stopped dependency. It gets its 3 s drain plus 5 s; every other step is capped at 5 s. A step that overruns or throws doesn't stop the next, and `serve` logs each step's outcome and exits 0 regardless: the process did stop, and the log says what didn't.
 

@@ -298,6 +298,9 @@ async function serve(): Promise<number> {
         case "failed":
           logger.error({ step: outcome.step, err: outcome.error }, "shutdown step failed");
           break;
+        case "skipped":
+          logger.warn({ step: outcome.step, reason: outcome.reason }, "shutdown step skipped");
+          break;
       }
     }
   }
