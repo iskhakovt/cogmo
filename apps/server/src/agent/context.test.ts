@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { MAX_REQUEST_BYTES } from "../llm/request-size.js";
-import type { ContentBlock, Message, ToolResultClearing } from "../llm/types.js";
+import type { ContentBlock, Message, ToolDefinition, ToolResultClearing } from "../llm/types.js";
 import { expectDefined } from "../test/assertions.js";
 import {
   type ContextManagerDeps,
@@ -11,6 +11,7 @@ import {
   snapToPairBoundary,
   summarizationRequest,
   toolResultClearing,
+  truncations,
 } from "./context.js";
 
 /** Strategy 1's intent at a budget of 1,000 tokens. */
@@ -420,6 +421,149 @@ describe("compactMessages", () => {
       const cut = snapToPairBoundary(messages, Math.ceil(messages.length * 0.3));
       return messages.slice(cut);
     }
+
+    /** Twenty short messages, then a turn attaching a 12.5 MB PDF (16.7 MB of base64). */
+    function pdfTurn(): Message[] {
+      return [
+        ...Array.from({ length: 20 }, (_, i) =>
+          msg(
+            i % 2 === 0 ? "user" : "assistant",
+            `${i % 2 === 0 ? "question" : "answer"} ${i / 2}`,
+          ),
+        ),
+        {
+          role: "user",
+          content: [
+            {
+              type: "document",
+              source: "base64",
+              data: "A".repeat(16_666_668),
+              mediaType: "application/pdf",
+              name: "report.pdf",
+            },
+            { type: "text", text: "What does the report conclude?" },
+          ],
+        },
+      ];
+    }
+
+    it.each([false, true])(
+      "sends a view whose last exchange alone is past the threshold as it is (fast path: %s)",
+      async (skip) => {
+        // Compaction can't remove the turn's own attachment, so a summary and
+        // truncation would only throw away history the request fits with.
+        const messages = pdfTurn();
+        const countTokens = vi.fn().mockResolvedValue(100);
+        const summarize = vi.fn().mockResolvedValue("a summary");
+
+        const result = await compactMessages(
+          "system",
+          messages,
+          undefined,
+          {
+            countTokens,
+            budget: 1_000_000,
+            clearToolResults: CLEARING,
+            maxRequestBytes: MAX_REQUEST_BYTES,
+            summarize,
+          },
+          skip,
+        );
+
+        expect(bytesOf(messages)).toBeGreaterThan(MAX_REQUEST_BYTES * 0.8);
+        expect(summarize).not.toHaveBeenCalled();
+        expect(result.didCompact).toBe(false);
+        expect(result.messages).toEqual(messages);
+      },
+    );
+
+    it("cuts once for the budget, and keeps the tail, when the tail alone is past the threshold", async () => {
+      const messages = pdfTurn();
+
+      const result = await compactMessages("system", messages, undefined, {
+        // Past 95% of the budget: truncation fires on tokens.
+        countTokens: vi.fn().mockResolvedValue(990),
+        budget: 1000,
+        clearToolResults: CLEARING,
+        maxRequestBytes: MAX_REQUEST_BYTES,
+      });
+
+      expect(result.event?.strategies).toEqual(["truncate"]);
+      expect(result.messages).toEqual(truncations(messages)[1]);
+      expect(result.messages.at(-1)).toEqual(messages.at(-1));
+    });
+
+    it("cuts as many times as the view needs to fit", async () => {
+      const messages = heavy();
+      const cuts = truncations(messages);
+      // Past 80% after two cuts: the third is the first that fits.
+      const maxRequestBytes = Math.floor(bytesOf(expectDefined(cuts[2], "two cuts")) / 0.8) - 1;
+      expect(bytesOf(expectDefined(cuts[3], "three cuts"))).toBeLessThanOrEqual(
+        maxRequestBytes * 0.8,
+      );
+
+      const result = await compactMessages("system", messages, undefined, {
+        countTokens: vi.fn().mockResolvedValue(100),
+        budget: 1_000_000,
+        clearToolResults: CLEARING,
+        maxRequestBytes,
+      });
+
+      expect(result.event?.strategies).toEqual(["truncate"]);
+      expect(result.messages).toEqual(cuts[3]);
+    });
+
+    it("measures bytes, not characters", async () => {
+      // Three bytes to each of these characters in UTF-8, in history compaction can remove.
+      const messages = [msg("user", "字".repeat(3000)), ...heavy().slice(0, 8)];
+      const chars = JSON.stringify({ system: "system", messages, tools: undefined }).length;
+      // Past 80% of the cap in bytes, under it in characters.
+      const maxRequestBytes = Math.ceil(chars / 0.8) + 100;
+      expect(bytesOf(messages)).toBeGreaterThan(maxRequestBytes * 0.8);
+      const summarize = vi.fn().mockResolvedValue("a summary");
+
+      await compactMessages(
+        "system",
+        messages,
+        undefined,
+        {
+          countTokens: vi.fn().mockResolvedValue(100),
+          budget: 1_000_000,
+          clearToolResults: CLEARING,
+          maxRequestBytes,
+          summarize,
+        },
+        true,
+      );
+
+      expect(summarize).toHaveBeenCalledOnce();
+    });
+
+    it("counts the tool definitions toward the view's bytes", async () => {
+      const messages = heavy();
+      const tools: ToolDefinition[] = [
+        { name: "read", description: "x".repeat(40_000), parameters: { type: "object" } },
+      ];
+      // Past 80% of the cap with the tools, under it without them.
+      const maxRequestBytes = Math.floor((bytesOf(messages) + 20_000) / 0.8);
+      const summarize = vi.fn().mockResolvedValue("a summary");
+
+      await compactMessages(
+        "system",
+        messages,
+        tools,
+        {
+          countTokens: vi.fn().mockResolvedValue(100),
+          budget: 1_000_000,
+          clearToolResults: CLEARING,
+          maxRequestBytes,
+          summarize,
+        },
+        true,
+      );
+
+      expect(summarize).toHaveBeenCalledOnce();
+    });
   });
 
   it("leaves a same-tool cluster verbatim, on the fast path and off it", async () => {
@@ -466,6 +610,33 @@ describe("compactMessages", () => {
 
     expect(result.didCompact).toBe(false);
     expect(countTokens).not.toHaveBeenCalled();
+  });
+});
+
+describe("truncations", () => {
+  it("cuts until the last exchange, which no cut shortens", () => {
+    const messages = Array.from({ length: 12 }, (_, i) =>
+      msg(i % 2 === 0 ? "user" : "assistant", `m${i}`),
+    );
+
+    const views = truncations(messages);
+
+    expect(views[0]).toEqual(messages);
+    for (const [i, view] of views.entries()) {
+      if (i > 0) expect(view.length).toBeLessThan(expectDefined(views[i - 1], "previous").length);
+    }
+    expect(views.at(-1)?.slice(-2)).toEqual(messages.slice(-2));
+    expect(views.at(-1)?.length).toBeLessThanOrEqual(3);
+  });
+
+  it.each([
+    [[msg("user", "q"), msg("assistant", "a")]],
+    // A cut that leaves an assistant first adds the truncation marker, as long as it was.
+    [[msg("assistant", "a"), msg("user", "q")]],
+    [[msg("user", "q")]],
+    [[]],
+  ])("stops at a view no cut shortens: %j", (messages: Message[]) => {
+    expect(truncations(messages)).toEqual([messages]);
   });
 });
 

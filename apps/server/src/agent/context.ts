@@ -10,6 +10,7 @@
  * See design/context-management.md for full design.
  */
 
+import * as R from "remeda";
 import type {
   ChatParams,
   ContentBlock,
@@ -28,7 +29,11 @@ export interface ContextManagerDeps {
   countTokens: (params: CountTokensParams) => Promise<number>;
   /** Maximum input tokens before rejection (contextWindow - maxOutputTokens - safetyBuffer). */
   budget: number;
-  /** The request cap, in bytes (`MAX_REQUEST_BYTES`), that the size trigger compares with. */
+  /**
+   * The request cap, in bytes (`MAX_REQUEST_BYTES`). A view past 80% of it
+   * summarizes and truncates until it fits, unless the tail every cut keeps
+   * is past that on its own.
+   */
   maxRequestBytes: number;
   /**
    * Strategy 1, which every count carries: the intent the turn's requests
@@ -231,7 +236,9 @@ export function formatSummaryMessage(summary: string): Message {
  * arrive (design/context-management.md → Strategy 2 → Size trigger): a view
  * past 80% of `maxRequestBytes` summarizes on any path without a count, since
  * counting it sends it, and truncates until it fits if the summary fails or
- * leaves it there.
+ * leaves it there. Only removable bytes count: a view whose last exchange,
+ * which every cut keeps, is past 80% on its own goes as it is, since
+ * compaction could only drop the history it fits with.
  */
 export async function compactMessages(
   system: string,
@@ -241,8 +248,11 @@ export async function compactMessages(
   skipBudgetStrategies = false,
 ): Promise<CompactResult> {
   const { countTokens, budget, summarize, clearToolResults, maxRequestBytes } = deps;
-  const oversized = (msgs: ReadonlyArray<Message>): boolean =>
+  const pastThreshold = (msgs: ReadonlyArray<Message>): boolean =>
     requestBytes(system, msgs, tools) > maxRequestBytes * SUMMARIZE_THRESHOLD;
+  // Past the threshold, with a tail that isn't: bytes compaction can remove.
+  const oversized = (msgs: ReadonlyArray<Message>): boolean =>
+    pastThreshold(msgs) && !pastThreshold(truncations(msgs).at(-1) ?? msgs);
   if (skipBudgetStrategies && !oversized(messages)) {
     return { messages: [...messages], didCompact: false };
   }
@@ -287,16 +297,16 @@ export async function compactMessages(
     }
   }
 
-  // Strategy 3: Emergency truncation at 95% of the budget, or until the view fits the request cap
+  // Strategy 3: Emergency truncation at 95% of the budget, one cut; or on
+  // size, the first cut that fits, which a view past it always has
   if (tokens === null || tokens > budget * TRUNCATE_THRESHOLD) {
-    result = truncateOldest(result);
-    while (oversized(result)) {
-      const next = truncateOldest(result);
-      if (next.length >= result.length) break;
-      result = next;
+    const cuts = truncations(result).slice(1);
+    const cut = oversized(result) ? cuts.find((view) => !pastThreshold(view)) : cuts[0];
+    if (cut) {
+      result = cut;
+      strategies.push("truncate");
+      tokens = await count(result);
     }
-    strategies.push("truncate");
-    tokens = await count(result);
   }
 
   if (strategies.length > 0) {
@@ -316,14 +326,27 @@ export async function compactMessages(
 /**
  * The request's raw size as the view holds it: every tool result and
  * attachment, before any clearing. The adapter's wire format differs by a few
- * key names, which the 20% margin under the cap absorbs.
+ * key names, which the 20% margin under the cap absorbs. The UTF-8 bytes of
+ * `JSON.stringify({ system, messages, tools })`, summed a message at a time,
+ * so the views truncation weighs share each message's size.
  */
 function requestBytes(
   system: string,
   messages: ReadonlyArray<Message>,
   tools: ToolDefinition[] | undefined,
 ): number {
-  return Buffer.byteLength(JSON.stringify({ system, messages, tools }));
+  const frame = Buffer.byteLength(JSON.stringify({ system, messages: [], tools }));
+  return frame + R.sumBy(messages, messageBytes) + Math.max(0, messages.length - 1);
+}
+
+const messageSizes = new WeakMap<Message, number>();
+
+function messageBytes(message: Message): number {
+  const known = messageSizes.get(message);
+  if (known !== undefined) return known;
+  const size = Buffer.byteLength(JSON.stringify(message));
+  messageSizes.set(message, size);
+  return size;
 }
 
 /**
@@ -395,6 +418,22 @@ async function summarizePrefix(
     messages: [summaryMessage, ...suffix],
     summarizedCount: prefix.length,
   };
+}
+
+/**
+ * The views truncation reaches from `messages`, one cut at a time: `messages`
+ * itself, then each cut, ending at the tail no cut shortens, the last
+ * exchange.
+ */
+export function truncations(messages: ReadonlyArray<Message>): Message[][] {
+  let view = [...messages];
+  const views = [view];
+  for (;;) {
+    const next = truncateOldest(view);
+    if (next.length >= view.length) return views;
+    views.push(next);
+    view = next;
+  }
 }
 
 function truncateOldest(messages: Message[]): Message[] {
