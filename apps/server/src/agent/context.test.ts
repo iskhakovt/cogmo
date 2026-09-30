@@ -2,6 +2,7 @@ import * as R from "remeda";
 import { describe, expect, it, vi } from "vitest";
 import { MAX_REQUEST_BYTES } from "../llm/request-size.js";
 import type { ContentBlock, Message, ToolDefinition, ToolResultClearing } from "../llm/types.js";
+import { logger } from "../logger.js";
 import { expectDefined } from "../test/assertions.js";
 import {
   type ContextManagerDeps,
@@ -50,7 +51,7 @@ describe("compactMessages", () => {
       countTokens: vi.fn().mockResolvedValue(100),
       budget: 1000,
       clearToolResults: CLEARING,
-      maxRequestBytes: MAX_REQUEST_BYTES,
+      maxViewBytes: MAX_REQUEST_BYTES,
     });
 
     expect(result.didCompact).toBe(false);
@@ -74,7 +75,7 @@ describe("compactMessages", () => {
       countTokens,
       budget: 1000,
       clearToolResults: CLEARING,
-      maxRequestBytes: MAX_REQUEST_BYTES,
+      maxViewBytes: MAX_REQUEST_BYTES,
       summarize: vi.fn(),
     });
 
@@ -102,7 +103,7 @@ describe("compactMessages", () => {
       countTokens,
       budget: 1000,
       clearToolResults: CLEARING,
-      maxRequestBytes: MAX_REQUEST_BYTES,
+      maxViewBytes: MAX_REQUEST_BYTES,
       summarize: vi.fn().mockResolvedValue("a summary"),
     });
 
@@ -129,7 +130,7 @@ describe("compactMessages", () => {
       countTokens,
       budget: 1000,
       clearToolResults: CLEARING,
-      maxRequestBytes: MAX_REQUEST_BYTES,
+      maxViewBytes: MAX_REQUEST_BYTES,
       summarize,
     });
 
@@ -162,7 +163,7 @@ describe("compactMessages", () => {
       countTokens,
       budget: 1000,
       clearToolResults: CLEARING,
-      maxRequestBytes: MAX_REQUEST_BYTES,
+      maxViewBytes: MAX_REQUEST_BYTES,
       summarize,
     });
 
@@ -206,7 +207,7 @@ describe("compactMessages", () => {
       countTokens,
       budget: 1000,
       clearToolResults: CLEARING,
-      maxRequestBytes: MAX_REQUEST_BYTES,
+      maxViewBytes: MAX_REQUEST_BYTES,
       summarize,
     });
 
@@ -239,7 +240,7 @@ describe("compactMessages", () => {
       countTokens,
       budget: 1000,
       clearToolResults: CLEARING,
-      maxRequestBytes: MAX_REQUEST_BYTES,
+      maxViewBytes: MAX_REQUEST_BYTES,
       summarize,
     });
 
@@ -266,7 +267,7 @@ describe("compactMessages", () => {
       countTokens,
       budget: 1000,
       clearToolResults: CLEARING,
-      maxRequestBytes: MAX_REQUEST_BYTES,
+      maxViewBytes: MAX_REQUEST_BYTES,
     });
 
     expect(result.didCompact).toBe(true);
@@ -302,7 +303,7 @@ describe("compactMessages", () => {
       countTokens,
       budget: 1000,
       clearToolResults: CLEARING,
-      maxRequestBytes: MAX_REQUEST_BYTES,
+      maxViewBytes: MAX_REQUEST_BYTES,
       summarize: vi.fn().mockResolvedValue("   "),
     });
 
@@ -330,7 +331,7 @@ describe("compactMessages", () => {
       countTokens,
       budget: 1000,
       clearToolResults: CLEARING,
-      maxRequestBytes: MAX_REQUEST_BYTES,
+      maxViewBytes: MAX_REQUEST_BYTES,
       summarize: vi.fn().mockResolvedValue("summary"),
     });
 
@@ -365,7 +366,7 @@ describe("compactMessages", () => {
       async (skip) => {
         const messages = heavy();
         // The view is past 80% of the cap, and its count far under the budget.
-        const maxRequestBytes = Math.floor(bytesOf(messages) / 0.85);
+        const maxViewBytes = Math.floor(bytesOf(messages) / 0.85);
         const countTokens = vi.fn().mockResolvedValue(100);
         const summarize = vi.fn().mockResolvedValue("a summary");
 
@@ -377,7 +378,7 @@ describe("compactMessages", () => {
             countTokens,
             budget: 1_000_000,
             clearToolResults: CLEARING,
-            maxRequestBytes,
+            maxViewBytes,
             summarize,
           },
           skip,
@@ -393,27 +394,27 @@ describe("compactMessages", () => {
         // The one count is of the summarized view, which fits.
         expect(countTokens).toHaveBeenCalledOnce();
         expect(countTokens.mock.calls[0]?.[0].messages).toEqual(result.messages);
-        expect(bytesOf(result.messages)).toBeLessThanOrEqual(maxRequestBytes * 0.8);
+        expect(bytesOf(result.messages)).toBeLessThanOrEqual(maxViewBytes * 0.8);
       },
     );
 
     it("truncates until the view fits when the summary doesn't come", async () => {
       const messages = heavy();
       // Past 80% after a single 30% cut, so truncation has to go round again.
-      const maxRequestBytes = Math.floor(bytesOf(messages) / 1.1);
+      const maxViewBytes = Math.floor(bytesOf(messages) / 1.1);
       const countTokens = vi.fn().mockResolvedValue(100);
 
       const result = await compactMessages("system", messages, undefined, {
         countTokens,
         budget: 1_000_000,
         clearToolResults: CLEARING,
-        maxRequestBytes,
+        maxViewBytes,
         summarize: vi.fn().mockRejectedValue(new Error("413 request_too_large")),
       });
 
       expect(result.event?.strategies).toEqual(["truncate"]);
-      expect(bytesOf(result.messages)).toBeLessThanOrEqual(maxRequestBytes * 0.8);
-      expect(bytesOf(truncatedOnce(messages))).toBeGreaterThan(maxRequestBytes * 0.8);
+      expect(bytesOf(result.messages)).toBeLessThanOrEqual(maxViewBytes * 0.8);
+      expect(bytesOf(truncatedOnce(messages))).toBeGreaterThan(maxViewBytes * 0.8);
       expect(countTokens).toHaveBeenCalledOnce();
       assertNoOrphanedToolResults(result.messages);
     });
@@ -445,7 +446,7 @@ describe("compactMessages", () => {
         countTokens: vi.fn().mockResolvedValue(100),
         budget: 1_000_000,
         clearToolResults: CLEARING,
-        maxRequestBytes: MAX_REQUEST_BYTES,
+        maxViewBytes: MAX_REQUEST_BYTES,
         ...overrides,
       };
     }
@@ -525,19 +526,55 @@ describe("compactMessages", () => {
       expect(bytesOf(result.messages)).toBeLessThan(11_100_000);
     });
 
-    it("sends the smallest view when no cut fits the cap, uncounted", async () => {
+    it.each([false, true])(
+      "sends a view as it is, counted off the fast path, when no cut fits the cap (fast path: %s)",
+      async (skip) => {
+        const messages: Message[] = [
+          msg("user", "hello ".repeat(100)),
+          msg("assistant", "hi"),
+          docTurn(21_000_000),
+        ];
+        expect(bytesOf(R.last(truncations(messages)))).toBeGreaterThan(MAX_REQUEST_BYTES);
+        const countTokens = vi.fn().mockResolvedValue(100);
+        const summarize = vi.fn().mockResolvedValue("a summary");
+        const warn = vi.spyOn(logger, "warn");
+        try {
+          const result = await compactMessages(
+            "system",
+            messages,
+            undefined,
+            deps({ countTokens, summarize }),
+            skip,
+          );
+
+          expect(result.didCompact).toBe(false);
+          expect(result.messages).toEqual(messages);
+          expect(summarize).not.toHaveBeenCalled();
+          expect(countTokens).toHaveBeenCalledTimes(skip ? 0 : 1);
+          expect(warn).toHaveBeenCalledWith(
+            { requestBytes: bytesOf(messages), maxViewBytes: MAX_REQUEST_BYTES },
+            "sending a view past the request cap: no cut fits it",
+          );
+        } finally {
+          warn.mockRestore();
+        }
+      },
+    );
+
+    it("warns of nothing when the view it sends fits the cap", async () => {
       const messages: Message[] = [
-        msg("user", "hello ".repeat(100)),
-        msg("assistant", "hi"),
-        docTurn(21_000_000),
+        docTurn(10_000_000),
+        msg("assistant", "read it"),
+        docTurn(11_000_000),
       ];
-      const countTokens = vi.fn().mockResolvedValue(100);
+      const warn = vi.spyOn(logger, "warn");
+      try {
+        await compactMessages("system", messages, undefined, deps(), true);
 
-      const result = await compactMessages("system", messages, undefined, deps({ countTokens }));
-
-      expect(result.messages).toEqual(R.last(truncations(messages)));
-      expect(result.event?.tokensAfter).toBeNull();
-      expect(countTokens).not.toHaveBeenCalled();
+        expect(warn).not.toHaveBeenCalled();
+      } finally {
+        warn.mockRestore();
+      }
     });
 
     it("keeps the most history that fits the cap when no cut gets under the threshold", async () => {
@@ -566,7 +603,7 @@ describe("compactMessages", () => {
 
       expect(result.didCompact).toBe(false);
       expect(result.messages).toEqual(messages);
-      expect(countTokens).not.toHaveBeenCalled();
+      expect(countTokens).toHaveBeenCalledOnce();
     });
 
     it.each([true, false])(
@@ -576,8 +613,8 @@ describe("compactMessages", () => {
         const base = Array.from({ length: 13 }, (_, i) =>
           msg(i % 2 === 0 ? "user" : "assistant", i === 0 ? "" : `turn ${i}`),
         );
-        const maxRequestBytes = 10_000;
-        const threshold = Math.floor(maxRequestBytes * 0.8);
+        const maxViewBytes = 10_000;
+        const threshold = Math.floor(maxViewBytes * 0.8);
         const messages = [msg("user", "x".repeat(threshold - bytesOf(base))), ...base.slice(1)];
         expect(bytesOf(messages)).toBe(threshold);
         const countTokens = vi.fn().mockResolvedValue(100);
@@ -587,7 +624,7 @@ describe("compactMessages", () => {
           "system",
           messages,
           undefined,
-          deps({ maxRequestBytes, countTokens, summarize }),
+          deps({ maxViewBytes, countTokens, summarize }),
           skip,
         );
 
@@ -640,7 +677,7 @@ describe("compactMessages", () => {
             countTokens,
             budget: 1_000_000,
             clearToolResults: CLEARING,
-            maxRequestBytes: MAX_REQUEST_BYTES,
+            maxViewBytes: MAX_REQUEST_BYTES,
             summarize,
           },
           skip,
@@ -673,7 +710,7 @@ describe("compactMessages", () => {
           countTokens: vi.fn().mockResolvedValue(990),
           budget: 1000,
           clearToolResults: CLEARING,
-          maxRequestBytes: MAX_REQUEST_BYTES,
+          maxViewBytes: MAX_REQUEST_BYTES,
         });
 
         expect(result.event?.strategies).toEqual(["truncate"]);
@@ -690,7 +727,7 @@ describe("compactMessages", () => {
         countTokens: vi.fn().mockResolvedValue(990),
         budget: 1000,
         clearToolResults: CLEARING,
-        maxRequestBytes: MAX_REQUEST_BYTES,
+        maxViewBytes: MAX_REQUEST_BYTES,
       });
 
       expect(result.didCompact).toBe(false);
@@ -705,7 +742,7 @@ describe("compactMessages", () => {
         countTokens: vi.fn().mockResolvedValue(990),
         budget: 1000,
         clearToolResults: CLEARING,
-        maxRequestBytes: MAX_REQUEST_BYTES,
+        maxViewBytes: MAX_REQUEST_BYTES,
       });
 
       expect(result.event?.strategies).toEqual(["truncate"]);
@@ -717,16 +754,14 @@ describe("compactMessages", () => {
       const messages = heavy();
       const cuts = truncations(messages);
       // Past 80% after two cuts: the third is the first that fits.
-      const maxRequestBytes = Math.floor(bytesOf(expectDefined(cuts[2], "two cuts")) / 0.8) - 1;
-      expect(bytesOf(expectDefined(cuts[3], "three cuts"))).toBeLessThanOrEqual(
-        maxRequestBytes * 0.8,
-      );
+      const maxViewBytes = Math.floor(bytesOf(expectDefined(cuts[2], "two cuts")) / 0.8) - 1;
+      expect(bytesOf(expectDefined(cuts[3], "three cuts"))).toBeLessThanOrEqual(maxViewBytes * 0.8);
 
       const result = await compactMessages("system", messages, undefined, {
         countTokens: vi.fn().mockResolvedValue(100),
         budget: 1_000_000,
         clearToolResults: CLEARING,
-        maxRequestBytes,
+        maxViewBytes,
       });
 
       expect(result.event?.strategies).toEqual(["truncate"]);
@@ -738,8 +773,8 @@ describe("compactMessages", () => {
       const messages = [msg("user", "字".repeat(3000)), ...heavy().slice(0, 8)];
       const chars = JSON.stringify({ system: "system", messages, tools: undefined }).length;
       // Past 80% of the cap in bytes, under it in characters.
-      const maxRequestBytes = Math.ceil(chars / 0.8) + 100;
-      expect(bytesOf(messages)).toBeGreaterThan(maxRequestBytes * 0.8);
+      const maxViewBytes = Math.ceil(chars / 0.8) + 100;
+      expect(bytesOf(messages)).toBeGreaterThan(maxViewBytes * 0.8);
       const summarize = vi.fn().mockResolvedValue("a summary");
 
       await compactMessages(
@@ -750,7 +785,7 @@ describe("compactMessages", () => {
           countTokens: vi.fn().mockResolvedValue(100),
           budget: 1_000_000,
           clearToolResults: CLEARING,
-          maxRequestBytes,
+          maxViewBytes,
           summarize,
         },
         true,
@@ -765,7 +800,7 @@ describe("compactMessages", () => {
         { name: "read", description: "x".repeat(40_000), parameters: { type: "object" } },
       ];
       // Past 80% of the cap with the tools, under it without them.
-      const maxRequestBytes = Math.floor((bytesOf(messages) + 20_000) / 0.8);
+      const maxViewBytes = Math.floor((bytesOf(messages) + 20_000) / 0.8);
       const summarize = vi.fn().mockResolvedValue("a summary");
 
       await compactMessages(
@@ -776,7 +811,7 @@ describe("compactMessages", () => {
           countTokens: vi.fn().mockResolvedValue(100),
           budget: 1_000_000,
           clearToolResults: CLEARING,
-          maxRequestBytes,
+          maxViewBytes,
           summarize,
         },
         true,
@@ -808,7 +843,7 @@ describe("compactMessages", () => {
           countTokens: vi.fn().mockResolvedValue(100),
           budget: 1000,
           clearToolResults: CLEARING,
-          maxRequestBytes: MAX_REQUEST_BYTES,
+          maxViewBytes: MAX_REQUEST_BYTES,
         },
         skip,
       );
@@ -824,7 +859,7 @@ describe("compactMessages", () => {
       "system",
       [msg("user", "hello"), msg("assistant", "hi")],
       undefined,
-      { countTokens, budget: 1000, clearToolResults: CLEARING, maxRequestBytes: MAX_REQUEST_BYTES },
+      { countTokens, budget: 1000, clearToolResults: CLEARING, maxViewBytes: MAX_REQUEST_BYTES },
       true,
     );
 
@@ -1017,7 +1052,7 @@ describe("compactMessages — pair-aware", () => {
       countTokens,
       budget: 1000,
       clearToolResults: CLEARING,
-      maxRequestBytes: MAX_REQUEST_BYTES,
+      maxViewBytes: MAX_REQUEST_BYTES,
     });
 
     assertNoOrphanedToolResults(result.messages);
@@ -1044,7 +1079,7 @@ describe("compactMessages — pair-aware", () => {
       countTokens,
       budget: 1000,
       clearToolResults: CLEARING,
-      maxRequestBytes: MAX_REQUEST_BYTES,
+      maxViewBytes: MAX_REQUEST_BYTES,
       summarize: vi.fn().mockResolvedValue("summary of old conversation"),
     });
 
@@ -1130,7 +1165,7 @@ describe("the summarized count", () => {
         countTokens: vi.fn().mockResolvedValue(900),
         budget: 1000,
         clearToolResults: CLEARING,
-        maxRequestBytes: MAX_REQUEST_BYTES,
+        maxViewBytes: MAX_REQUEST_BYTES,
         summarize,
       },
       false,
@@ -1152,7 +1187,7 @@ describe("prefix veto", () => {
       countTokens: vi.fn().mockResolvedValue(900),
       budget: 1000,
       clearToolResults: CLEARING,
-      maxRequestBytes: MAX_REQUEST_BYTES,
+      maxViewBytes: MAX_REQUEST_BYTES,
       summarize,
     };
   }

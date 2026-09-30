@@ -26,7 +26,7 @@ import type { Transactor } from "../../db/index.js";
 import { inngest } from "../../inngest/client.js";
 import { isRetriableProviderError } from "../../llm/fallback.js";
 import { computeBudget, resolveLimits } from "../../llm/models.js";
-import { MAX_REQUEST_BYTES } from "../../llm/request-size.js";
+import { MAX_VIEW_BYTES } from "../../llm/request-size.js";
 import {
   type LlmProviderResolver,
   ProviderConfigError,
@@ -359,7 +359,7 @@ export async function runAgenticStage(
       },
       budget,
       clearToolResults,
-      maxRequestBytes: MAX_REQUEST_BYTES,
+      maxViewBytes: MAX_VIEW_BYTES,
       canSummarizePrefix: (candidate) => summarizedSpan(turnHistory.messageIds, candidate) !== null,
       summarize: async (system, msgs) => {
         const resolved =

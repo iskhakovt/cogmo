@@ -5,7 +5,7 @@ import { mock } from "vitest-mock-extended";
 import type { z } from "zod";
 import { conversationTurnConcurrency } from "../inngest/concurrency.js";
 import type { inboundReady } from "../inngest/events.js";
-import { MAX_REQUEST_BYTES } from "../llm/request-size.js";
+import { MAX_REQUEST_BYTES, MAX_VIEW_BYTES } from "../llm/request-size.js";
 import { ProviderConfigError } from "../llm/resolver.js";
 import type { ChatParams, ChatStreamFrame, Message, StopReason } from "../llm/types.js";
 import { logger } from "../logger.js";
@@ -1463,7 +1463,7 @@ describe("createHandleMessage", () => {
     );
   });
 
-  it("summarizes a view past 80% of the request cap on the fast path, without counting it", async () => {
+  it("summarizes a view past 80% of the view cap on the fast path, without counting it", async () => {
     // The last turn's usage, after clearing, is small; the history's raw bytes are not.
     const countTokens = vi.fn().mockResolvedValue(50_000);
     const chat = vi.fn().mockResolvedValue({
@@ -1472,7 +1472,9 @@ describe("createHandleMessage", () => {
       model: "mock",
       usage: { inputTokens: 10, outputTokens: 5 },
     });
-    const huge = "x".repeat(Math.ceil(MAX_REQUEST_BYTES * 0.85));
+    // Past 80% of the view cap, within 80% of the request cap it leaves the wire room under.
+    const huge = "x".repeat(Math.floor(MAX_REQUEST_BYTES * 0.8) - 20_000);
+    expect(huge.length).toBeGreaterThan(MAX_VIEW_BYTES * 0.8);
     const deps = mockDeps({
       resolveProvider: mockResolver(mockProvider({ countTokens, chat })),
       agentStore: mockAgentStore({

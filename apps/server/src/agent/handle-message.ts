@@ -12,7 +12,7 @@ import {
 } from "../inngest/events.js";
 import { isRetriableProviderError } from "../llm/fallback.js";
 import { computeBudget, resolveLimits } from "../llm/models.js";
-import { MAX_REQUEST_BYTES } from "../llm/request-size.js";
+import { MAX_VIEW_BYTES } from "../llm/request-size.js";
 import {
   type LlmProviderResolver,
   ProviderConfigError,
@@ -976,7 +976,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           })(),
           budget,
           clearToolResults,
-          maxRequestBytes: MAX_REQUEST_BYTES,
+          maxViewBytes: MAX_VIEW_BYTES,
           // Refuse a split that buys nothing durable — the shape where the
           // prefix is the previously-stored summary and nothing else.
           canSummarizePrefix: (candidate) =>

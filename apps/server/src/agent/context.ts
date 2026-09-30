@@ -30,12 +30,13 @@ export interface ContextManagerDeps {
   /** Maximum input tokens before rejection (contextWindow - maxOutputTokens - safetyBuffer). */
   budget: number;
   /**
-   * The request cap, in bytes (`MAX_REQUEST_BYTES`). A view past 80% of it
-   * summarizes, then takes the first of {@link truncations} within 80%, else
-   * within the cap, else the smallest; one within the cap whose smallest cut
-   * is still past 80% goes as it is.
+   * The most a view's canonical JSON may weigh, in bytes (`MAX_VIEW_BYTES`).
+   * A view past 80% of it summarizes, then takes the first of
+   * {@link truncations} within 80%, else the first within the cap. It goes as
+   * it is when no cut would fit it better: it is within the cap and its
+   * smallest cut is still past 80%, or its smallest cut is past the cap too.
    */
-  maxRequestBytes: number;
+  maxViewBytes: number;
   /**
    * Strategy 1, which every count carries: the intent the turn's requests
    * send, from {@link toolResultClearing}.
@@ -235,11 +236,13 @@ export function formatSummaryMessage(summary: string): Message {
  *
  * They also fire on size, since the server clears only after the bytes
  * arrive (design/context-management.md → Strategy 2 → Size trigger): a view
- * past 80% of `maxRequestBytes` summarizes on any path without a count, since
+ * past 80% of `maxViewBytes` summarizes on any path without a count, since
  * counting it sends it, then takes the first of {@link truncations} within
- * 80%, else within the cap, else the smallest. A view within the cap whose
- * smallest cut is still past 80% goes as it is: its bytes are in the tail, and
- * cutting would only drop history it fits with.
+ * 80%, else the first within the cap. A view goes as it is, counted, when
+ * its smallest cut is past 80% and it fits the cap, since its bytes are in the
+ * tail and cutting would only drop history it fits with; or when its smallest
+ * cut is past the cap too, since no cut fits a 20 MB route and a 32 MB one
+ * takes the view whole. A view past the cap logs a warning as it goes.
  */
 export async function compactMessages(
   system: string,
@@ -248,18 +251,31 @@ export async function compactMessages(
   deps: ContextManagerDeps,
   skipBudgetStrategies = false,
 ): Promise<CompactResult> {
-  const { countTokens, budget, summarize, clearToolResults, maxRequestBytes } = deps;
-  const threshold = Math.floor(maxRequestBytes * SUMMARIZE_THRESHOLD);
+  const { countTokens, budget, summarize, clearToolResults, maxViewBytes } = deps;
+  const threshold = Math.floor(maxViewBytes * SUMMARIZE_THRESHOLD);
   const bytes = (msgs: ReadonlyArray<Message>): number => requestBytes(system, msgs, tools);
-  // Whether the view's size needs compaction: past the threshold, unless it
-  // fits the cap and no cut gets it under the threshold anyway.
+  // Whether the view's size needs compaction: past the threshold, with a cut
+  // that fits the cap, unless the view fits it too and no cut gets it under
+  // the threshold anyway.
   const oversized = (msgs: ReadonlyArray<Message>): boolean => {
     const size = bytes(msgs);
     if (size <= threshold) return false;
-    return size > maxRequestBytes || bytes(R.last(truncations(msgs))) <= threshold;
+    const smallest = bytes(R.last(truncations(msgs)));
+    return smallest <= maxViewBytes && (size > maxViewBytes || smallest <= threshold);
+  };
+  // A view past the cap here is one no cut fits.
+  const sent = (compacted: CompactResult): CompactResult => {
+    const size = bytes(compacted.messages);
+    if (size > maxViewBytes) {
+      logger.warn(
+        { requestBytes: size, maxViewBytes },
+        "sending a view past the request cap: no cut fits it",
+      );
+    }
+    return compacted;
   };
   if (skipBudgetStrategies && !oversized(messages)) {
-    return { messages: [...messages], didCompact: false };
+    return sent({ messages: [...messages], didCompact: false });
   }
 
   const strategies: CompactionEvent["strategies"] = [];
@@ -302,13 +318,12 @@ export async function compactMessages(
     }
   }
 
-  // Strategy 3: on size, the first cut under the threshold, else the first
-  // under the cap, else the smallest; on 95% of the budget, one cut
+  // Strategy 3: on size, the first cut within the threshold, else the first
+  // within the cap; on 95% of the budget, one cut
   const views = truncations(result);
   const cut = oversized(result)
     ? (views.find((view) => bytes(view) <= threshold) ??
-      views.find((view) => bytes(view) <= maxRequestBytes) ??
-      R.last(views))
+      views.find((view) => bytes(view) <= maxViewBytes))
     : tokens !== null && tokens > budget * TRUNCATE_THRESHOLD
       ? views[1]
       : undefined;
@@ -327,9 +342,9 @@ export async function compactMessages(
       messagesSummarized,
     };
     logger.info(event, "context compaction applied");
-    return { messages: result, didCompact: true, event };
+    return sent({ messages: result, didCompact: true, event });
   }
-  return { messages: result, didCompact: false };
+  return sent({ messages: result, didCompact: false });
 }
 
 /**

@@ -6,7 +6,7 @@ import { z } from "zod";
 import { installLiveCatalog } from "../../llm/litellm-data.js";
 import { computeBudget, resolveLimits } from "../../llm/models.js";
 import type { LlmProvider } from "../../llm/provider.js";
-import { MAX_REQUEST_BYTES } from "../../llm/request-size.js";
+import { MAX_REQUEST_BYTES, MAX_VIEW_BYTES } from "../../llm/request-size.js";
 import type { ToolDefinition } from "../../llm/types.js";
 import { logger } from "../../logger.js";
 import type { SkillRunner } from "../../skills/runner.js";
@@ -278,9 +278,11 @@ describe("runAgenticStage", () => {
     expect(fork.clearToolResults).toBeDefined();
   });
 
-  it("summarizes a view past 80% of the request cap without counting it", async () => {
+  it("summarizes a view past 80% of the view cap without counting it", async () => {
     const h = await harness();
-    const huge = "x".repeat(Math.ceil(MAX_REQUEST_BYTES * 0.85));
+    // Past 80% of the view cap, within 80% of the request cap it leaves the wire room under.
+    const huge = "x".repeat(Math.floor(MAX_REQUEST_BYTES * 0.8) - 20_000);
+    expect(huge.length).toBeGreaterThan(MAX_VIEW_BYTES * 0.8);
     vi.mocked(h.agentStore.listMessages).mockResolvedValue([
       { id: "m1", role: "user", content: huge },
       { id: "m2", role: "assistant", content: "r1" },
