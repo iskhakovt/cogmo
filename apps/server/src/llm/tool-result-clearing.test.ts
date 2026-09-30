@@ -143,6 +143,22 @@ describe("textTokens", () => {
     }
   });
 
+  it("encodes a piece a run repeats once", () => {
+    const text = "a".repeat(100_000);
+    const tokens = textTokens(enc);
+    const encode = vi.spyOn(enc, "encode");
+    try {
+      const counted = R.sum([...tokens(text)]);
+      const pieces = encode.mock.calls.map(([piece]) => piece).filter((piece) => piece !== "");
+
+      // One 64-letter piece, and the 32 letters left over at the end.
+      expect(pieces).toEqual(["a".repeat(64), "a".repeat(32)]);
+      expect(counted).toBe(1562 * whole("a".repeat(64)) + whole("a".repeat(32)));
+    } finally {
+      encode.mockRestore();
+    }
+  });
+
   it("looks for a space only within the slice's window", () => {
     // No spaces: a search back from each window's end would read to the start.
     const text = "字".repeat(100_000);

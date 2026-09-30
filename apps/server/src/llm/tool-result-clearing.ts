@@ -31,6 +31,9 @@ const LONG_RUN = /[^\r\n\p{L}\p{N}]?\p{L}{17,}|[^\s\p{L}\p{N}]{17,}|\s{17,}/gu;
 /** The text a running sum encodes between checks, in UTF-16 code units. */
 const SLICE_CHARS = 8192;
 
+/** The most pieces of long runs one {@link textTokens} remembers the counts of. */
+const PIECE_MEMORY = 4096;
+
 /**
  * Tokens of a text, a slice at a time, lazily: a running sum that stops
  * mid-text has encoded at most one slice past the point it needed.
@@ -39,7 +42,9 @@ export type TextTokens = (text: string) => Iterable<number>;
 
 /**
  * {@link TextTokens} in cl100k, remembering each slice's count per text, so
- * two passes over one text encode it once.
+ * two passes over one text encode it once, and the counts of the first
+ * {@link PIECE_MEMORY} pieces of long runs, so a run of one character, a rule
+ * or an indent that repeats is encoded once.
  *
  * Special-token markers (`<|endoftext|>`) count as the plain text they are:
  * js-tiktoken throws on one by default, and a tool result or a user message
@@ -53,6 +58,14 @@ export type TextTokens = (text: string) => Iterable<number>;
  */
 export function textTokens(enc: Tiktoken): TextTokens {
   const known = new Map<string, number[]>();
+  const pieces = new Map<string, number>();
+  const pieceTokens = (piece: string): number => {
+    const remembered = pieces.get(piece);
+    if (remembered !== undefined) return remembered;
+    const tokens = enc.encode(piece, [], []).length;
+    if (pieces.size < PIECE_MEMORY) pieces.set(piece, tokens);
+    return tokens;
+  };
   return function* (text) {
     let counts = known.get(text);
     if (counts === undefined) {
@@ -63,7 +76,7 @@ export function textTokens(enc: Tiktoken): TextTokens {
     for (const slice of slices(text)) {
       let tokens = counts[index];
       if (tokens === undefined) {
-        tokens = sliceTokens(enc, slice);
+        tokens = sliceTokens(enc, pieceTokens, slice);
         counts.push(tokens);
       }
       yield tokens;
@@ -95,8 +108,8 @@ function isLowSurrogate(code: number): boolean {
   return code >= 0xdc00 && code <= 0xdfff;
 }
 
-function sliceTokens(enc: Tiktoken, slice: string): number {
-  const encode = (piece: string) => enc.encode(piece, [], []).length;
+function sliceTokens(enc: Tiktoken, pieceTokens: (piece: string) => number, slice: string): number {
+  const encode = (text: string) => enc.encode(text, [], []).length;
   let tokens = 0;
   let from = 0;
   for (const match of slice.matchAll(LONG_RUN)) {
@@ -106,14 +119,14 @@ function sliceTokens(enc: Tiktoken, slice: string): number {
     for (const point of match[0]) {
       const bytes = Buffer.byteLength(point);
       if (pieceBytes + bytes > MAX_PIECE_BYTES) {
-        tokens += encode(piece);
+        tokens += pieceTokens(piece);
         piece = "";
         pieceBytes = 0;
       }
       piece += point;
       pieceBytes += bytes;
     }
-    tokens += encode(piece);
+    tokens += pieceTokens(piece);
     from = match.index + match[0].length;
   }
   return tokens + encode(slice.slice(from));
