@@ -11,13 +11,19 @@ import type { CacheDialect } from "./cache-dialect.js";
 import { ProviderProtocolError, ToolArgsCutOffError } from "./errors.js";
 import { isRetriableProviderError, RefusalError } from "./fallback.js";
 import { toObjectJsonSchema } from "./json-schema.js";
-import { modelFamilyParams, OpenAICompatibleProvider } from "./openai-compat.js";
+import {
+  CLEARED_PLACEHOLDER,
+  modelFamilyParams,
+  OpenAICompatibleProvider,
+} from "./openai-compat.js";
 import type {
   CacheIntent,
   ChatParams,
   ChatStreamFrame,
   ImageBlock,
+  Message,
   ToolDefinition,
+  ToolResultClearing,
 } from "./types.js";
 
 const mockCreate = vi.fn();
@@ -1977,6 +1983,147 @@ describe("OpenAICompatibleProvider", () => {
       } finally {
         warnSpy.mockRestore();
       }
+    });
+  });
+
+  describe("tool-result clearing", () => {
+    const RESULT = "line of output from the tool\n".repeat(40);
+
+    /** Four tool calls and their results, oldest first, then a user turn. */
+    function toolHeavy(): Message[] {
+      return [
+        { role: "user", content: "read the logs" },
+        ...[1, 2, 3, 4].flatMap((n): Message[] => [
+          {
+            role: "assistant",
+            content: [{ type: "tool_use", id: `t${n}`, name: "read", input: { part: n } }],
+          },
+          {
+            role: "user",
+            content: [{ type: "tool_result", toolUseId: `t${n}`, content: `${n}: ${RESULT}` }],
+          },
+        ]),
+        { role: "user", content: "summarize" },
+      ];
+    }
+
+    const CLEARING: ToolResultClearing = { triggerTokens: 100, keep: 2, clearAtLeastTokens: 50 };
+
+    function toolContents(args: ChatCreateArgs): unknown[] {
+      return args.messages.filter((m) => m.role === "tool").map((m) => m.content);
+    }
+
+    function okCompletion(): unknown {
+      return {
+        choices: [{ message: { content: "ok", tool_calls: null }, finish_reason: "stop" }],
+        model: "gpt-5-nano",
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      };
+    }
+
+    it("clears every result but the last `keep` on the wire, past the trigger", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce(okCompletion());
+      const messages = toolHeavy();
+      const before = structuredClone(messages);
+
+      await provider.chat({
+        model: "gpt-5-nano",
+        system: "sys",
+        messages,
+        clearToolResults: CLEARING,
+      });
+
+      const args = firstCreateArgs();
+      expect(toolContents(args)).toEqual([
+        CLEARED_PLACEHOLDER,
+        CLEARED_PLACEHOLDER,
+        `3: ${RESULT}`,
+        `4: ${RESULT}`,
+      ]);
+      // The calls stay, so the model knows what was called and with what.
+      const calls = args.messages.flatMap((m) => m.tool_calls ?? []);
+      expect(calls).toHaveLength(4);
+      // The caller's transcript is left as it was.
+      expect(messages).toEqual(before);
+    });
+
+    it("clears the same results on the streaming path", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce(
+        mockStream([
+          {
+            model: "gpt-5-nano",
+            choices: [{ delta: { content: "ok" }, finish_reason: "stop" }],
+            usage: { prompt_tokens: 1, completion_tokens: 1 },
+          },
+        ]),
+      );
+
+      await drainFrames(
+        provider.chatStream({
+          model: "gpt-5-nano",
+          system: "sys",
+          messages: toolHeavy(),
+          clearToolResults: CLEARING,
+        }),
+      );
+
+      expect(toolContents(firstCreateArgs())).toEqual([
+        CLEARED_PLACEHOLDER,
+        CLEARED_PLACEHOLDER,
+        `3: ${RESULT}`,
+        `4: ${RESULT}`,
+      ]);
+    });
+
+    it.each([
+      ["under the trigger", { ...CLEARING, triggerTokens: 100_000 }],
+      [
+        "when the results would free less than clear_at_least",
+        { ...CLEARING, clearAtLeastTokens: 100_000 },
+      ],
+      ["when every result is within `keep`", { ...CLEARING, keep: 4 }],
+    ])("clears nothing %s", async (_label, clearing) => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce(okCompletion());
+
+      await provider.chat({
+        model: "gpt-5-nano",
+        system: "sys",
+        messages: toolHeavy(),
+        clearToolResults: clearing,
+      });
+
+      expect(toolContents(firstCreateArgs())).toEqual([1, 2, 3, 4].map((n) => `${n}: ${RESULT}`));
+    });
+
+    it("counts the prompt as cleared, as it goes on the wire", async () => {
+      const provider = createProvider();
+      const params = { model: "gpt-5-nano", system: "sys", messages: toolHeavy() };
+      const cleared = toolHeavy().map((m): Message => {
+        if (typeof m.content === "string") return m;
+        return {
+          ...m,
+          content: m.content.map((b) =>
+            b.type === "tool_result" && (b.toolUseId === "t1" || b.toolUseId === "t2")
+              ? { ...b, content: CLEARED_PLACEHOLDER }
+              : b,
+          ),
+        };
+      });
+
+      const uncleared = await provider.countTokens(params);
+      const withIntent = await provider.countTokens({ ...params, clearToolResults: CLEARING });
+
+      expect(withIntent).toBe(await provider.countTokens({ ...params, messages: cleared }));
+      expect(withIntent).toBeLessThan(uncleared);
+      expect(
+        await provider.countTokens({
+          ...params,
+          clearToolResults: { ...CLEARING, triggerTokens: 100_000 },
+        }),
+      ).toBe(uncleared);
     });
   });
 
