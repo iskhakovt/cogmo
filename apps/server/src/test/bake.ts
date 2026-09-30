@@ -13,6 +13,7 @@ const BakePrintSchema = z.object({
       context: z.string(),
       dockerfile: z.string(),
       args: z.record(z.string(), z.string()).optional(),
+      tags: z.array(z.string()).optional(),
     }),
   ),
 });
@@ -21,6 +22,7 @@ export interface BakeTarget {
   /** Absolute path of the target's Dockerfile. */
   dockerfilePath: string;
   args: Readonly<Record<string, string>>;
+  tags: ReadonlyArray<string>;
 }
 
 /**
@@ -38,6 +40,7 @@ export async function printBakeTarget(target: string): Promise<BakeTarget> {
   return {
     dockerfilePath: join(root, resolved.context, resolved.dockerfile),
     args: resolved.args ?? {},
+    tags: resolved.tags ?? [],
   };
 }
 
