@@ -11,10 +11,12 @@ import { AnthropicProvider, type AnthropicProviderOptions } from "./anthropic.js
 import { extractText } from "./content.js";
 import { MissingToolCallError, ProviderProtocolError, ToolArgsCutOffError } from "./errors.js";
 import { toObjectJsonSchema } from "./json-schema.js";
+import { CLEARED_PLACEHOLDER } from "./tool-result-clearing.js";
 import type {
   CacheIntent,
   ChatStreamFrame,
   CountTokensParams,
+  Message,
   ResponseFormat,
   ToolDefinition,
   ToolResultClearing,
@@ -30,8 +32,12 @@ vi.mock("@anthropic-ai/sdk", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@anthropic-ai/sdk")>()),
   default: class MockAnthropic {
     beta = { messages: { create: mockCreate, countTokens: mockCountTokens } };
-    constructor(opts: { fetch?: typeof fetch }) {
+    // As the SDK resolves it, less the `ANTHROPIC_BASE_URL` fallback, which
+    // `resolver.test.ts` covers on the real client.
+    baseURL: string;
+    constructor(opts: { fetch?: typeof fetch; baseURL?: string }) {
       clientOptions.push(opts);
+      this.baseURL = opts.baseURL || "https://api.anthropic.com";
     }
   },
 }));
@@ -1608,6 +1614,7 @@ describe("AnthropicProvider", () => {
 
     it.each([
       ["no base URL", undefined, undefined],
+      ["an empty base URL, which the SDK resolves to its own", "", undefined],
       ["Anthropic's own base URL", "https://api.anthropic.com", undefined],
       ["a base URL marked first-party", "http://127.0.0.1:4010", { firstParty: true }],
     ] as const)("sends the binding-controls header to %s", async (_label, baseURL, options) => {
@@ -1619,16 +1626,84 @@ describe("AnthropicProvider", () => {
       for (const body of Object.values(bodies)) expect(body.betas).toEqual([BINDING]);
     });
 
-    it("sends an Anthropic-compatible third-party endpoint neither the header nor block_binding", async () => {
-      const bodies = await sentBodies(
-        provider("https://openrouter.ai/api", { prefixMismatchBehavior: "drop_block" }),
-        { model: "claude-opus-5-5", ...PARAMS, clearToolResults: CLEARING },
-      );
+    it.each([
+      "https://openrouter.ai/api",
+      // Ends in `anthropic.com` without being Anthropic's API.
+      "https://api.notanthropic.com",
+    ])(
+      "sends %s no request controls: no betas, context_management or block_binding",
+      async (baseURL) => {
+        const bodies = await sentBodies(
+          provider(baseURL, { prefixMismatchBehavior: "drop_block" }),
+          { model: "claude-opus-5-5", ...PARAMS, clearToolResults: CLEARING },
+        );
 
+        for (const body of Object.values(bodies)) {
+          expect(body).not.toHaveProperty("betas");
+          expect(body).not.toHaveProperty("thinking");
+          expect(body).not.toHaveProperty("context_management");
+        }
+      },
+    );
+
+    it("clears a third-party endpoint's tool results on the wire, the same in body and count", async () => {
+      const result = "line of output from the tool\n".repeat(40);
+      const messages: Message[] = [
+        { role: "user", content: "read the logs" },
+        ...[1, 2, 3].flatMap((n): Message[] => [
+          {
+            role: "assistant",
+            content: [{ type: "tool_use", id: `t${n}`, name: "read", input: { part: n } }],
+          },
+          {
+            role: "user",
+            content: [{ type: "tool_result", toolUseId: `t${n}`, content: `${n}: ${result}` }],
+          },
+        ]),
+        { role: "user", content: "summarize" },
+      ];
+      const before = structuredClone(messages);
+
+      const bodies = await sentBodies(provider("https://openrouter.ai/api"), {
+        model: "claude-opus-5-5",
+        system: "sys",
+        messages,
+        clearToolResults: { triggerTokens: 100, keep: 1, clearAtLeastTokens: 50 },
+      });
+
+      const ResultsSchema = z.looseObject({
+        messages: z.array(
+          z.looseObject({
+            content: z.union([z.string(), z.array(z.looseObject({ type: z.string() }))]),
+          }),
+        ),
+      });
+      const results = (body: unknown) =>
+        ResultsSchema.parse(body).messages.flatMap((m) =>
+          typeof m.content === "string"
+            ? []
+            : m.content.filter((b) => b.type === "tool_result").map((b) => b.content),
+        );
       for (const body of Object.values(bodies)) {
-        expect(body.betas).toEqual([CONTEXT_MANAGEMENT]);
-        expect(body).not.toHaveProperty("thinking");
-        expect(body.context_management).toEqual(CLEAR_TOOL_USES);
+        expect(results(body)).toEqual([CLEARED_PLACEHOLDER, CLEARED_PLACEHOLDER, `3: ${result}`]);
+      }
+      expect(messages).toEqual(before);
+    });
+
+    it("warns that a third-party endpoint ignores prefixMismatchBehavior", () => {
+      const warn = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
+      try {
+        provider("https://openrouter.ai/api", { prefixMismatchBehavior: "drop_block" });
+        provider("https://openrouter.ai/api");
+        provider(undefined, { prefixMismatchBehavior: "drop_block" });
+
+        expect(warn).toHaveBeenCalledOnce();
+        expect(warn).toHaveBeenCalledWith(
+          { baseURL: "https://openrouter.ai/api", prefixMismatchBehavior: "drop_block" },
+          expect.stringContaining("ignoring prefixMismatchBehavior"),
+        );
+      } finally {
+        warn.mockRestore();
       }
     });
 

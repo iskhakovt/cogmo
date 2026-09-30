@@ -1,5 +1,5 @@
 import type Anthropic from "@anthropic-ai/sdk";
-import { getEncoding, type Tiktoken } from "js-tiktoken";
+import type { Tiktoken } from "js-tiktoken";
 import OpenAI from "openai";
 import * as R from "remeda";
 import { logger } from "../logger.js";
@@ -12,6 +12,7 @@ import { withFailureLogging } from "./logging-fetch.js";
 import { fitsStrictMode } from "./openai-output-schema.js";
 import { failChatSpan, recordChatUsage, startChatSpan } from "./otel.js";
 import type { LlmProvider } from "./provider.js";
+import { cl100k, encodedLength, withClearedToolResults } from "./tool-result-clearing.js";
 import {
   type CacheIntent,
   type ChatOptions,
@@ -35,13 +36,6 @@ import {
  * inlined verbatim — cap at the same threshold the read_file tool uses.
  */
 const MAX_INLINED_DOC_CHARS = 100_000;
-
-// Lazy-init singleton — cl100k_base covers GPT-4, GPT-4o, GPT-3.5-turbo
-let encoder: Tiktoken | null = null;
-function getEncoder(): Tiktoken {
-  if (!encoder) encoder = getEncoding("cl100k_base");
-  return encoder;
-}
 
 export interface OpenAICompatibleConfig {
   apiKey: string;
@@ -81,7 +75,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
 
   /** The request's prompt tokens, after the tool-result clearing it asks for. */
   async countTokens(params: CountTokensParams): Promise<number> {
-    return promptTokens(getEncoder(), { ...params, messages: withClearedToolResults(params) });
+    return promptTokens(cl100k(), { ...params, messages: clearedMessages(params) });
   }
 
   async chat(params: ChatParams, options?: ChatOptions): Promise<LlmResponse> {
@@ -96,7 +90,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
       const createParams: OpenAI.ChatCompletionCreateParamsNonStreaming & CacheHintFields = {
         model: params.model,
         ...modelFamilyParams(params.model, params),
-        messages: buildMessages(params.system, withClearedToolResults(params), hints.systemMarker),
+        messages: buildMessages(params.system, clearedMessages(params), hints.systemMarker),
         ...hints.fields,
       };
 
@@ -160,11 +154,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
       const span = startChatSpan(providerName, params.model);
       let completed = false;
       try {
-        const messages = buildMessages(
-          params.system,
-          withClearedToolResults(params),
-          hints.systemMarker,
-        );
+        const messages = buildMessages(params.system, clearedMessages(params), hints.systemMarker);
         // Map content-policy 400s to RefusalError at the create-time boundary
         // before they propagate to FallbackLlmProvider. `.catch()` keeps the
         // narrow Stream<...> type from the streaming overload — a try/catch
@@ -435,15 +425,6 @@ const IMAGE_TOKENS = 85;
 
 const REPLY_PRIMING_TOKENS = 3;
 
-/**
- * Tokens in `text`, special-token markers (`<|endoftext|>`) counted as the
- * plain text they are: js-tiktoken throws on one by default, and a tool
- * result or a user message can carry one.
- */
-function encodedLength(enc: Tiktoken, text: string): number {
-  return enc.encode(text, [], []).length;
-}
-
 /** The request's prompt tokens, as sent: its messages as they reach the wire, plus tool definitions. */
 function promptTokens(
   enc: Tiktoken,
@@ -460,53 +441,14 @@ function promptTokens(
 
 // --- Tool-result clearing ---
 
-/** What a cleared tool result reads as. The `tool_use` it answers stays intact. */
-export const CLEARED_PLACEHOLDER = "[Cleared — call tool again if needed]";
-
 /**
- * The request's messages with its Strategy 1 intent applied on the wire, by
- * the rule Anthropic's `clear_tool_uses_20250919` applies on its server: once
- * the prompt exceeds the trigger, every tool result but the last `keep`
- * reads as a placeholder, provided they hold at least `clearAtLeastTokens`.
- * The caller's messages stay as they are. These routes replay no reasoning,
- * so a moving cleared set costs cache hits and nothing else.
+ * The request's messages with its Strategy 1 intent applied on the wire,
+ * past the trigger by this adapter's own count. These routes replay no
+ * reasoning, so a moving cleared set costs cache hits and nothing else.
  */
-function withClearedToolResults(params: CountTokensParams): Message[] {
-  const clearing = params.clearToolResults;
-  if (!clearing) return params.messages;
-  // Every cl100k token covers at least one UTF-8 byte, so a request whose
-  // JSON fits under the trigger in bytes is under it in tokens, and needs no
-  // encoding pass.
-  const bytes = Buffer.byteLength(
-    JSON.stringify([params.system, params.messages, params.tools ?? []]),
-  );
-  if (bytes <= clearing.triggerTokens) return params.messages;
-  const enc = getEncoder();
-  if (promptTokens(enc, params) <= clearing.triggerTokens) return params.messages;
-
-  const results = params.messages.flatMap((msg, msgIdx) =>
-    typeof msg.content === "string"
-      ? []
-      : msg.content.flatMap((block, blockIdx) =>
-          block.type === "tool_result" ? [{ msgIdx, blockIdx, content: block.content }] : [],
-        ),
-  );
-  const cleared = results.slice(0, Math.max(0, results.length - clearing.keep));
-  const clearedTokens = R.sumBy(cleared, (r) => encodedLength(enc, r.content));
-  if (cleared.length === 0 || clearedTokens < clearing.clearAtLeastTokens) return params.messages;
-
-  const positions = new Set(cleared.map((r) => `${r.msgIdx}:${r.blockIdx}`));
-  return params.messages.map((msg, msgIdx) =>
-    typeof msg.content === "string"
-      ? msg
-      : {
-          ...msg,
-          content: msg.content.map((block, blockIdx) =>
-            block.type === "tool_result" && positions.has(`${msgIdx}:${blockIdx}`)
-              ? { ...block, content: CLEARED_PLACEHOLDER }
-              : block,
-          ),
-        },
+function clearedMessages(params: CountTokensParams): Message[] {
+  return withClearedToolResults(params, (messages) =>
+    promptTokens(cl100k(), { ...params, messages }),
   );
 }
 

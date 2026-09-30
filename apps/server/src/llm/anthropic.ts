@@ -22,6 +22,7 @@ import { withFailureLogging } from "./logging-fetch.js";
 import { failChatSpan, recordChatUsage, startChatSpan } from "./otel.js";
 import type { PrefixMismatchBehavior } from "./prefix-mismatch-behavior.js";
 import type { LlmProvider } from "./provider.js";
+import { canonicalPromptTokens, withClearedToolResults } from "./tool-result-clearing.js";
 import {
   type ChatOptions,
   type ChatParams,
@@ -46,11 +47,11 @@ export interface AnthropicProviderOptions {
    */
   fetch?: typeof fetch;
   /**
-   * Whether the endpoint is Anthropic's own API, which gets the
-   * binding-controls beta. Defaults to true without a base URL or on
-   * `api.anthropic.com`: an Anthropic-compatible third-party endpoint may
-   * reject an unknown beta. A test pointing at llmock, which records from
-   * Anthropic's API, sets it.
+   * Whether the endpoint is Anthropic's own API, which gets the request
+   * controls: `context_management` and the binding-controls beta. Defaults to
+   * whether the base URL the SDK resolves is `api.anthropic.com`: an
+   * Anthropic-compatible third-party endpoint may reject either. A test
+   * pointing at llmock, which records from Anthropic's API, sets it.
    */
   firstParty?: boolean;
   /**
@@ -87,10 +88,18 @@ export class AnthropicProvider implements LlmProvider {
       ...(baseURL ? { baseURL } : {}),
       fetch: withFailureLogging(options?.fetch ?? globalThis.fetch, logger, this.name),
     });
-    this.#endpoint = {
-      firstParty: options?.firstParty ?? isAnthropicApi(baseURL),
-      prefixMismatchBehavior: options?.prefixMismatchBehavior,
-    };
+    // The URL the SDK resolved, which falls back to `ANTHROPIC_BASE_URL` and
+    // then to Anthropic's own for a missing or empty base URL.
+    const firstParty = options?.firstParty ?? isAnthropicApi(this.#client.baseURL);
+    const prefixMismatchBehavior = options?.prefixMismatchBehavior;
+    if (prefixMismatchBehavior && !firstParty) {
+      logger.warn(
+        { baseURL: this.#client.baseURL, prefixMismatchBehavior },
+        "ignoring prefixMismatchBehavior: the provider's endpoint isn't Anthropic's API, which is " +
+          "the only one it goes to, so this provider keeps the endpoint's default",
+      );
+    }
+    this.#endpoint = { firstParty, prefixMismatchBehavior };
   }
 
   chatStream(params: ChatParams, options?: ChatOptions): AsyncIterable<ChatStreamFrame> {
@@ -443,8 +452,8 @@ function runsPrefixCheck(model: string): boolean {
   return PREFIX_CHECKED_MODELS.some((id) => model === id || model.startsWith(`${id}-`));
 }
 
-function isAnthropicApi(baseURL: string | undefined): boolean {
-  return baseURL === undefined || URL.parse(baseURL)?.hostname === "api.anthropic.com";
+function isAnthropicApi(baseURL: string): boolean {
+  return URL.parse(baseURL)?.hostname === "api.anthropic.com";
 }
 
 /** The fields and betas every request for `params` carries beyond the Messages request itself. */
@@ -455,27 +464,40 @@ interface RequestControls {
 }
 
 /**
- * The edit intent as `clear_tool_uses_20250919`, and the binding controls:
- * the header on every first-party request, and `block_binding` where the
- * provider row sets a behaviour and the model runs the check. `block_binding`
- * goes with `adaptive`, the configuration those models run anyway; never
- * `between_tools`, which rejects it.
+ * The request controls, which go to Anthropic's own API only: the edit intent
+ * as `clear_tool_uses_20250919`, the binding-controls header, and
+ * `block_binding` where the provider row sets a behaviour and the model runs
+ * the check. `block_binding` goes with `adaptive`, the configuration those
+ * models run anyway; never `between_tools`, which rejects it. A third-party
+ * endpoint gets none of them, and its messages are cleared on the wire
+ * instead ({@link wireMessages}).
  */
 function requestControls(params: CountTokensParams, endpoint: Endpoint): RequestControls {
+  if (!endpoint.firstParty) return {};
   const clearing = params.clearToolResults;
-  const behavior = endpoint.firstParty ? endpoint.prefixMismatchBehavior : undefined;
-  const betas = [
-    ...(clearing ? [CONTEXT_MANAGEMENT_BETA] : []),
-    ...(endpoint.firstParty ? [BINDING_CONTROLS_BETA] : []),
-  ];
+  const behavior = endpoint.prefixMismatchBehavior;
   return {
-    ...(betas.length > 0 && { betas }),
+    betas: [...(clearing ? [CONTEXT_MANAGEMENT_BETA] : []), BINDING_CONTROLS_BETA],
     ...(clearing && { context_management: { edits: [toClearToolUses(clearing)] } }),
     ...(behavior &&
       runsPrefixCheck(params.model) && {
         thinking: { type: "adaptive", block_binding: { prefix_mismatch_behavior: behavior } },
       }),
   };
+}
+
+/**
+ * The messages the request sends. Anthropic's API clears on its server, so
+ * it gets them as they are; a third-party endpoint gets Strategy 1 applied
+ * on the wire, with the OpenAI-compatible adapter's function, triggered by a
+ * local estimate. Its placeholders then rewrite earlier results as the
+ * cleared set moves, which a route that enforces preserved thinking rejects.
+ */
+function wireMessages(params: CountTokensParams, endpoint: Endpoint): Message[] {
+  if (endpoint.firstParty) return params.messages;
+  return withClearedToolResults(params, (messages) =>
+    canonicalPromptTokens({ ...params, messages }),
+  );
 }
 
 /**
@@ -505,6 +527,7 @@ function buildCreateParams(
 ): Anthropic.Beta.Messages.MessageCreateParamsNonStreaming {
   dropSamplingParams(params);
   const controls = requestControls(params, endpoint);
+  const messages = wireMessages(params, endpoint).map(toAnthropicMessage);
 
   // A structured-output call is one-shot — nothing re-sends its transcript —
   // so it keeps the default markers whatever the intent.
@@ -527,7 +550,7 @@ function buildCreateParams(
         model: params.model,
         max_tokens: maxTokens,
         ...(systemBlocks.length > 0 && { system: systemBlocks }),
-        messages: params.messages.map(toAnthropicMessage),
+        messages,
         output_config: {
           format: { type: "json_schema", schema: toStructuredOutputSchema(format.schema) },
         },
@@ -547,7 +570,7 @@ function buildCreateParams(
       model: params.model,
       max_tokens: maxTokens,
       system: [...systemBlocks, { type: "text", text: callInstruction(format.name) }],
-      messages: params.messages.map(toAnthropicMessage),
+      messages,
       tools: [syntheticTool],
       ...controls,
     };
@@ -578,7 +601,7 @@ function buildCreateParams(
     model: params.model,
     max_tokens: maxTokens,
     ...(systemBlocks.length > 0 && { system: systemBlocks }),
-    messages: params.messages.map(toAnthropicMessage),
+    messages,
     ...(tools && { tools }),
     ...(params.cache && { cache_control: marker }),
     ...controls,

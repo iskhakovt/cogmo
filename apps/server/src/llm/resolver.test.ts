@@ -224,6 +224,31 @@ describe("createDbProviderResolver — happy path", () => {
       expect(request.headers.get("anthropic-beta")).toBe("thinking-binding-controls-2026-08-01");
     });
 
+    it("follows the base URL the SDK resolves from ANTHROPIC_BASE_URL, and sends that endpoint neither", async () => {
+      vi.stubEnv("ANTHROPIC_BASE_URL", "https://openrouter.ai/api");
+      try {
+        const request = await sendThrough({ attrs: { prefixMismatchBehavior: "drop_block" } });
+
+        expect(new URL(request.url).hostname).toBe("openrouter.ai");
+        expect(await request.json()).not.toHaveProperty("thinking");
+        expect(request.headers.get("anthropic-beta")).toBeNull();
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it("treats an empty base URL as Anthropic's own, as the SDK does", async () => {
+      vi.stubEnv("ANTHROPIC_BASE_URL", "");
+      try {
+        const request = await sendThrough({ baseUrl: "" });
+
+        expect(new URL(request.url).hostname).toBe("api.anthropic.com");
+        expect(request.headers.get("anthropic-beta")).toBe("thinking-binding-controls-2026-08-01");
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
     it("sends a third-party base URL neither", async () => {
       const request = await sendThrough({
         baseUrl: "https://openrouter.ai/api",

@@ -11,11 +11,8 @@ import type { CacheDialect } from "./cache-dialect.js";
 import { ProviderProtocolError, ToolArgsCutOffError } from "./errors.js";
 import { isRetriableProviderError, RefusalError } from "./fallback.js";
 import { toObjectJsonSchema } from "./json-schema.js";
-import {
-  CLEARED_PLACEHOLDER,
-  modelFamilyParams,
-  OpenAICompatibleProvider,
-} from "./openai-compat.js";
+import { modelFamilyParams, OpenAICompatibleProvider } from "./openai-compat.js";
+import { CLEARED_PLACEHOLDER } from "./tool-result-clearing.js";
 import type {
   CacheIntent,
   ChatParams,
