@@ -51,6 +51,49 @@ describe("textTokens, summed", () => {
     expect(R.sumBy(pieces, whole)).not.toBe(R.sumBy(["—".repeat(64), "—".repeat(64)], whole));
   });
 
+  it("encodes a piece of exactly 64 bytes whole", () => {
+    // Whole, 64 `=` are one token; a seam at 63 or 65 bytes costs more.
+    expect(encodedLength("=".repeat(80))).toBe(whole("=".repeat(64)) + whole("=".repeat(16)));
+    expect(whole("=".repeat(63)) + whole("=".repeat(17))).toBeGreaterThan(
+      encodedLength("=".repeat(80)),
+    );
+    expect(whole("=".repeat(65)) + whole("=".repeat(15))).toBeGreaterThan(
+      encodedLength("=".repeat(80)),
+    );
+  });
+
+  it.each([
+    ["German", " Donaudampfschifffahrtsgesellschaftskapitänsmütze"],
+    ["Finnish", " epäjärjestelmällistyttämättömyydellänsäkäänköhän"],
+  ])("keeps a long %s word with its leading space, as one encode does", (_language, word) => {
+    // The pre-tokenizer keeps the space with the word: split apart, they cost a token more.
+    expect(whole(" ") + whole(word.trimStart())).toBeGreaterThan(whole(word));
+    const text = `It reads${word}, twice:${word}.`;
+
+    expect(encodedLength(text)).toBe(whole(text));
+  });
+
+  it("splits a run of 17 code points past 64 bytes", () => {
+    // Four bytes to each 𝐀 and three to each kana: the seam falls between
+    // か and ら, which one encode joins.
+    const run = `${"𝐀".repeat(13)}あいうから`;
+    const pieces = [`${"𝐀".repeat(13)}あいうか`, "ら"];
+
+    expect(whole(run)).toBeLessThan(R.sumBy(pieces, whole));
+    expect(encodedLength(run)).toBe(R.sumBy(pieces, whole));
+  });
+
+  it.each([
+    ["dashes", "—"],
+    ["ideographic spaces", "\u3000"],
+  ])("splits a run of thirty three-byte %s", (_kind, char) => {
+    const run = char.repeat(30);
+    const pieces = [char.repeat(21), char.repeat(9)];
+
+    expect(whole(run)).toBeLessThan(R.sumBy(pieces, whole));
+    expect(encodedLength(run)).toBe(R.sumBy(pieces, whole));
+  });
+
   it("keeps a surrogate pair whole at a seam", () => {
     // Four bytes a letter: sixteen to a piece, after the one-byte `a`.
     const run = `a${"𝐀".repeat(100)}`;
@@ -122,6 +165,16 @@ describe("textTokens", () => {
     expect(encodedLength(text)).toBe(
       encodedLength(` ${"x".repeat(8191)}`) + encodedLength("y".repeat(9000)),
     );
+  });
+
+  it("cuts a slice before a pair that the window's end would split", () => {
+    // Pairs from index 0: the 8,192nd code unit opens a pair, so the window
+    // ends between two pairs and stays as it is. A lone half of this letter
+    // counts one token, and the letter three.
+    const letter = whole("𝐀");
+    expect(whole("\ud835") + whole("\udc00")).not.toBe(letter);
+
+    expect(encodedLength("𝐀".repeat(5000))).toBe(5000 * letter);
   });
 
   it("never cuts a slice inside a surrogate pair", () => {

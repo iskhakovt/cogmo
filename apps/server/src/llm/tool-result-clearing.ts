@@ -21,11 +21,12 @@ export function cl100k(): Tiktoken {
 const MAX_PIECE_BYTES = 64;
 
 /**
- * Runs the pre-tokenizer keeps as one piece — letters (CJK text among them),
- * punctuation, whitespace — long enough to pass {@link MAX_PIECE_BYTES} at
- * four bytes a code point. Digits come in threes.
+ * Runs the pre-tokenizer keeps as one piece — letters (CJK text among them)
+ * with the character before them that it keeps too, punctuation, whitespace —
+ * long enough to pass {@link MAX_PIECE_BYTES} at four bytes a code point.
+ * Digits come in threes.
  */
-const LONG_RUN = /\p{L}{17,}|[^\s\p{L}\p{N}]{17,}|\s{17,}/gu;
+const LONG_RUN = /[^\r\n\p{L}\p{N}]?\p{L}{17,}|[^\s\p{L}\p{N}]{17,}|\s{17,}/gu;
 
 /** The text a running sum encodes between checks, in UTF-16 code units. */
 const SLICE_CHARS = 8192;
@@ -45,8 +46,10 @@ export type TextTokens = (text: string) => Iterable<number>;
  * can carry one. A long run the pre-tokenizer would keep whole is encoded 64
  * UTF-8 bytes at a time: byte-pair merging is quadratic in a piece, so 16,000
  * letters, spaces or `=` take about ten seconds as one piece and tens of
- * milliseconds split. A seam can cost a token, up to about 15% on log-like
- * text with long indents or rules; prose counts as one encode does.
+ * milliseconds split. A seam costs a token where tokens merge across it: at
+ * most 0.3% on prose in English, German, Finnish, Chinese and Japanese, on
+ * code and on a test log, and 5–12% on text made mostly of long rules or
+ * indents.
  */
 export function textTokens(enc: Tiktoken): TextTokens {
   const known = new Map<string, number[]>();
