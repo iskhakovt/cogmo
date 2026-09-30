@@ -238,7 +238,7 @@ function sweptRegistry(): {
 } {
   const asked: ReadonlyArray<string>[] = [];
   let tick: (() => Promise<void>) | undefined;
-  const registry = new CodingStreamingRegistry({
+  const registry = CodingStreamingRegistry.create({
     endedTasks: (taskIds) => {
       asked.push(taskIds);
       return findEndedCodingTasks({ runInTx: tx, store }, taskIds);
@@ -246,7 +246,9 @@ function sweptRegistry(): {
     sweepIntervalMs: 60_000,
     setInterval: (cb) => {
       tick = cb;
+      return "timer";
     },
+    clearInterval: () => {},
   });
   return { registry, sweep: () => expectDefined(tick, "sweep timer")(), asked };
 }
@@ -623,7 +625,7 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
     await tick();
     await plan.finalize("## Plan\nedit foo");
     await tick();
-    await execute.started?.();
+    await execute.started();
     await tick();
     await execute.toolCall("Edit");
     await tick();
@@ -708,7 +710,7 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
     await sweep();
     expect(asked).toEqual([[task.id], [task.id], [task.id], [task.id]]);
 
-    await registry.executeStream(task.id).started?.();
+    await registry.executeStream(task.id).started();
     await tick();
     expect(bot.sendMessage).toHaveBeenCalledTimes(1);
     expect(bot.editMessageText).not.toHaveBeenCalled();

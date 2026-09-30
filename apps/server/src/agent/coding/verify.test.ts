@@ -9,7 +9,6 @@ import {
   ExecTimeoutError,
 } from "../../sandbox/index.js";
 import { fakeExecHandle } from "../../test/coding-fixtures.js";
-import type { ExecuteStreamHandle } from "./orchestrator.js";
 import { OUTPUT_CAP_BYTES, runVerifyStreaming, TIMEOUT_EXIT_CODE } from "./verify.js";
 
 interface FakeExecOpts {
@@ -76,23 +75,6 @@ function fakeContainer(opts: FakeExecOpts = {}) {
   };
 }
 
-function fakeExecuteStream(): ExecuteStreamHandle & { capture: string } {
-  const captured: string[] = [];
-  const stream: ExecuteStreamHandle & { capture: string } = {
-    appendText: vi.fn(async (delta: string) => {
-      captured.push(delta);
-    }),
-    toolCall: vi.fn(async () => {}),
-    toolResult: vi.fn(async () => {}),
-    complete: vi.fn(async () => {}),
-    fail: vi.fn(async () => {}),
-    get capture() {
-      return captured.join("");
-    },
-  };
-  return stream;
-}
-
 beforeEach(() => {
   vi.useRealTimers();
 });
@@ -108,12 +90,10 @@ describe("runVerifyStreaming", () => {
       stderrChunks: ["warn\n"],
       exitCode: 0,
     });
-    const stream = fakeExecuteStream();
     const result = await runVerifyStreaming({
       container,
       verifyCommand: "true",
       timeoutSeconds: 60,
-      executeStream: stream,
     });
     expect(result.ok).toBe(true);
     expect(result.exitCode).toBe(0);
@@ -125,8 +105,6 @@ describe("runVerifyStreaming", () => {
     expect(result.output).toContain("hello ");
     expect(result.output).toContain("world");
     expect(result.output).toContain("warn");
-    expect(stream.capture).toContain("hello ");
-    expect(stream.capture).toContain("world");
   });
 
   it("returns ok=false on non-zero exit", async () => {
@@ -221,40 +199,6 @@ describe("runVerifyStreaming", () => {
     }
   });
 
-  it("forwards the output read before a transport failure, then throws it", async () => {
-    const transportError = new Error("hijacked socket reset");
-    const stdout = new PassThrough();
-    stdout.write("tail\n");
-    const events: string[] = [];
-    const forward = Promise.withResolvers<void>();
-    const executeStream = fakeExecuteStream();
-    vi.mocked(executeStream.appendText).mockImplementation(async (text) => {
-      await forward.promise;
-      events.push(`forwarded ${text.trim()}`);
-    });
-    const handle = fakeExecHandle({
-      stdout,
-      exited: Promise.resolve(err({ kind: "transport_failed", error: transportError })),
-    });
-
-    const verifying = runVerifyStreaming({
-      container: { execStreaming: async () => handle },
-      verifyCommand: "pnpm test",
-      timeoutSeconds: 600,
-      executeStream,
-    }).catch((e: unknown) => {
-      events.push("rejected");
-      return e;
-    });
-    // The exec has settled and the pump is forwarding the tail when the stream fails.
-    await vi.waitFor(() => expect(executeStream.appendText).toHaveBeenCalled());
-    stdout.destroy(transportError);
-    forward.resolve();
-
-    expect(await verifying).toBe(transportError);
-    expect(events).toEqual(["forwarded tail", "rejected"]);
-  });
-
   it("throws a timeout that settles the exec before its command runs", async () => {
     // The start outlasted the cap, so there is no handle and no output to judge.
     const timeout = new ExecTimeoutError("total", 60_000);
@@ -271,36 +215,18 @@ describe("runVerifyStreaming", () => {
     ).rejects.toBe(timeout);
   });
 
-  it("survives a missing executeStream (NULL stream path)", async () => {
-    const container = fakeContainer({ stdoutChunks: ["ok\n"], exitCode: 0 });
-    const result = await runVerifyStreaming({
-      container,
-      verifyCommand: "true",
-      timeoutSeconds: 60,
-    });
-    expect(result.ok).toBe(true);
-    expect(result.output).toContain("ok");
-  });
-
-  it("forwards stream chunks to the executeStream's appendText incrementally", async () => {
+  it("captures output that arrives across several chunks", async () => {
     const container = fakeContainer({
       stdoutChunks: ["one\n", "two\n", "three\n"],
       chunkDelayMs: 5,
       exitCode: 0,
     });
-    const stream = fakeExecuteStream();
-    await runVerifyStreaming({
+    const result = await runVerifyStreaming({
       container,
       verifyCommand: "echo one; echo two; echo three",
       timeoutSeconds: 60,
-      executeStream: stream,
     });
-    // Each chunk produced one appendText call (plus possibly empty trailing).
-    const calls = (stream.appendText as ReturnType<typeof vi.fn>).mock.calls;
-    expect(calls.length).toBeGreaterThanOrEqual(3);
-    expect(stream.capture).toContain("one\n");
-    expect(stream.capture).toContain("two\n");
-    expect(stream.capture).toContain("three\n");
+    expect(result.output).toBe("one\ntwo\nthree\n");
   });
 
   it("records durationMs as a non-negative number", async () => {

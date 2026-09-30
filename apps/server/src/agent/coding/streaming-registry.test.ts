@@ -6,6 +6,20 @@ const SWEEP_INTERVAL_MS = 60_000;
 
 type EndedTasks = (taskIds: ReadonlyArray<string>) => Promise<ReadonlySet<string>>;
 
+const open: CodingStreamingRegistry[] = [];
+
+afterEach(() => {
+  for (const reg of open.splice(0)) reg.close();
+  vi.useRealTimers();
+});
+
+/** A registry on its default timer, for tests that don't sweep. */
+function registry(endedTasks: EndedTasks = async () => new Set()): CodingStreamingRegistry {
+  const reg = CodingStreamingRegistry.create({ endedTasks, sweepIntervalMs: SWEEP_INTERVAL_MS });
+  open.push(reg);
+  return reg;
+}
+
 interface Harness {
   reg: CodingStreamingRegistry;
   /** The database lookup the registry sweeps with. Reports nothing ended unless a test says so. */
@@ -14,15 +28,18 @@ interface Harness {
   sweep: () => Promise<void>;
 }
 
+/** A registry whose sweeps the test runs. */
 function harness(): Harness {
   const endedTasks = vi.fn<EndedTasks>(async () => new Set());
   let tick: (() => Promise<void>) | undefined;
-  const reg = new CodingStreamingRegistry({
+  const reg = CodingStreamingRegistry.create({
     endedTasks,
     sweepIntervalMs: SWEEP_INTERVAL_MS,
     setInterval: (cb) => {
       tick = cb;
+      return "timer";
     },
+    clearInterval: () => {},
   });
   return { reg, endedTasks, sweep: () => expectDefined(tick, "sweep timer")() };
 }
@@ -33,6 +50,7 @@ function harness(): Harness {
  */
 async function held(h: Harness): Promise<ReadonlyArray<string>> {
   h.endedTasks.mockClear();
+  h.endedTasks.mockResolvedValueOnce(new Set());
   await h.sweep();
   return h.endedTasks.mock.calls[0]?.[0] ?? [];
 }
@@ -48,7 +66,7 @@ function collect(reg: CodingStreamingRegistry, taskId: string): CodingStreamEven
 describe("CodingStreamingRegistry", () => {
   describe("handles", () => {
     it("the plan handle publishes text, the finalized plan and a failure", async () => {
-      const { reg } = harness();
+      const reg = registry();
       const seen = collect(reg, "t1");
       const plan = reg.planStream("t1");
 
@@ -66,11 +84,11 @@ describe("CodingStreamingRegistry", () => {
     });
 
     it("the execute handle publishes progress, then completion", async () => {
-      const { reg } = harness();
+      const reg = registry();
       const seen = collect(reg, "t1");
       const execute = reg.executeStream("t1");
 
-      await execute.started?.();
+      await execute.started();
       await execute.appendText("editing");
       await execute.toolCall("Edit");
       await execute.toolResult("Edit", true);
@@ -89,7 +107,7 @@ describe("CodingStreamingRegistry", () => {
   });
 
   it("delivers events to every subscriber of the task, in publish order", async () => {
-    const { reg } = harness();
+    const reg = registry();
     const a = collect(reg, "t1");
     const b = collect(reg, "t1");
     const other = collect(reg, "t2");
@@ -108,7 +126,7 @@ describe("CodingStreamingRegistry", () => {
   });
 
   it("does not replay events published before a subscriber arrived", async () => {
-    const { reg } = harness();
+    const reg = registry();
     collect(reg, "t1");
     const plan = reg.planStream("t1");
     await plan.appendText("missed");
@@ -136,7 +154,7 @@ describe("CodingStreamingRegistry", () => {
       const seen = collect(h.reg, "t1");
 
       await h.reg.planStream("t1").finalize("the plan");
-      await h.reg.executeStream("t1").started?.();
+      await h.reg.executeStream("t1").started();
 
       expect(await held(h)).toEqual(["t1"]);
       expect(seen.map((e) => e.kind)).toEqual(["plan_finalized", "execute_started"]);
@@ -179,15 +197,14 @@ describe("CodingStreamingRegistry", () => {
     });
 
     it("drops a publish after the stream ended instead of re-creating the task", async () => {
-      // The verify orchestrator streams its test output after execute has
-      // ended the stream; a retried step body publishes again.
+      // A retried step body publishes again after the stream has ended.
       const h = harness();
       const seen = collect(h.reg, "t1");
       const execute = h.reg.executeStream("t1");
       await execute.complete(true);
 
-      await execute.appendText("verify output");
-      await execute.fail("verify failed (exit 1)");
+      await execute.appendText("late narration");
+      await execute.fail("late failure");
 
       expect(seen).toEqual([{ kind: "execute_complete", ok: true }]);
       expect(await held(h)).toEqual([]);
@@ -207,7 +224,7 @@ describe("CodingStreamingRegistry", () => {
 
       await h.sweep();
       expect(h.endedTasks).toHaveBeenCalledTimes(2);
-      await h.reg.executeStream("t1").started?.();
+      await h.reg.executeStream("t1").started();
       expect(seen).toEqual([]);
     });
 
@@ -220,7 +237,6 @@ describe("CodingStreamingRegistry", () => {
       await h.reg.planStream("t1").fail("claude exit code 2");
 
       expect(seen).toEqual([{ kind: "failed", reason: "claude exit code 2" }]);
-      h.endedTasks.mockResolvedValue(new Set());
       expect(await held(h)).toEqual([]);
     });
 
@@ -233,55 +249,91 @@ describe("CodingStreamingRegistry", () => {
       await h.sweep();
       await h.sweep();
 
-      h.endedTasks.mockResolvedValue(new Set());
       expect(await held(h)).toEqual(["live"]);
     });
 
-    it("a failed sweep releases nothing, and the next one asks again", async () => {
+    it("a failed sweep releases nothing and keeps the count, and the next one asks again", async () => {
       const h = harness();
       collect(h.reg, "t1");
-      h.endedTasks.mockRejectedValueOnce(new Error("connection reset"));
       h.endedTasks.mockResolvedValue(new Set(["t1"]));
 
-      await expect(h.sweep()).resolves.toBeUndefined();
       await h.sweep();
+      h.endedTasks.mockRejectedValueOnce(new Error("connection reset"));
+      await expect(h.sweep()).resolves.toBeUndefined();
       expect(h.endedTasks).toHaveBeenCalledTimes(2);
 
       await h.sweep();
-      h.endedTasks.mockResolvedValue(new Set());
+      expect(await held(h)).toEqual([]);
+    });
+
+    it("skips a task its own event released while the lookup ran", async () => {
+      const h = harness();
+      const seen = collect(h.reg, "t1");
+      const lookup = Promise.withResolvers<ReadonlySet<string>>();
+      h.endedTasks.mockReturnValueOnce(lookup.promise);
+
+      const sweeping = h.sweep();
+      await h.reg.planStream("t1").fail("claude exit code 2");
+      lookup.resolve(new Set(["t1"]));
+
+      await expect(sweeping).resolves.toBeUndefined();
+      expect(seen).toEqual([{ kind: "failed", reason: "claude exit code 2" }]);
       expect(await held(h)).toEqual([]);
     });
 
     describe("on its own timer", () => {
-      afterEach(() => {
-        vi.useRealTimers();
-      });
-
-      it("sweeps every interval, and carries on after a failed sweep", async () => {
+      it("sweeps every interval until closed, and carries on after a failed sweep", async () => {
         vi.useFakeTimers();
-        const endedTasks = vi.fn<EndedTasks>(async () => new Set(["t1"]));
+        const endedTasks = vi.fn<EndedTasks>(async () => new Set());
         endedTasks.mockRejectedValueOnce(new Error("connection reset"));
-        const reg = new CodingStreamingRegistry({ endedTasks, sweepIntervalMs: SWEEP_INTERVAL_MS });
-        const seen = collect(reg, "t1");
+        const reg = registry(endedTasks);
+        collect(reg, "t1");
 
         await vi.advanceTimersByTimeAsync(SWEEP_INTERVAL_MS - 1);
         expect(endedTasks).not.toHaveBeenCalled();
 
-        // Fails, then finds the task ended twice.
-        await vi.advanceTimersByTimeAsync(3 * SWEEP_INTERVAL_MS);
-        expect(endedTasks).toHaveBeenCalledTimes(3);
+        await vi.advanceTimersByTimeAsync(2 * SWEEP_INTERVAL_MS);
+        expect(endedTasks).toHaveBeenCalledTimes(2);
 
+        reg.close();
         await vi.advanceTimersByTimeAsync(SWEEP_INTERVAL_MS);
-        expect(endedTasks).toHaveBeenCalledTimes(3);
-        await reg.executeStream("t1").started?.();
-        expect(seen).toEqual([]);
+        expect(endedTasks).toHaveBeenCalledTimes(2);
+      });
+
+      it("never keeps the process alive", () => {
+        const timeouts = (): number =>
+          process.getActiveResourcesInfo().filter((r) => r === "Timeout").length;
+        const before = timeouts();
+        const control = setInterval(() => {}, SWEEP_INTERVAL_MS);
+        expect(timeouts()).toBe(before + 1);
+        clearInterval(control);
+
+        registry();
+
+        expect(timeouts()).toBe(before);
+      });
+
+      it("close clears the timer once", () => {
+        const clear = vi.fn();
+        const reg = CodingStreamingRegistry.create({
+          endedTasks: async () => new Set(),
+          sweepIntervalMs: SWEEP_INTERVAL_MS,
+          setInterval: () => "timer",
+          clearInterval: clear,
+        });
+
+        reg.close();
+        reg.close();
+
+        expect(clear).toHaveBeenCalledTimes(1);
+        expect(clear).toHaveBeenCalledWith("timer");
       });
     });
   });
 
   describe("isolation", () => {
     it("a throwing subscriber reaches neither the publisher nor its siblings", async () => {
-      const { reg } = harness();
+      const reg = registry();
       reg.subscribe("t1", () => {
         throw new Error("boom");
       });
@@ -293,7 +345,7 @@ describe("CodingStreamingRegistry", () => {
 
     it("a rejecting subscriber reaches neither the publisher nor its siblings", async () => {
       // An unhandled rejection fails the run, so the registry must catch it.
-      const { reg } = harness();
+      const reg = registry();
       reg.subscribe("t1", async () => {
         throw new Error("async boom");
       });
@@ -320,7 +372,7 @@ describe("CodingStreamingRegistry", () => {
     it("delivers a high-volume burst to multiple subscribers in identical order", async () => {
       // A regression that introduced async dispatch, listener reordering,
       // or per-subscriber buffering would surface as diverging arrays.
-      const { reg } = harness();
+      const reg = registry();
       const a = collect(reg, "t1");
       const b = collect(reg, "t1");
       const c = collect(reg, "t1");
@@ -341,7 +393,7 @@ describe("CodingStreamingRegistry", () => {
     it("subscribers added during a publish do NOT fire for the current event (listener-set snapshot semantics)", async () => {
       // A listener that subscribes a sibling mid-emit must not cause that
       // sibling to fire for the in-flight event — only for later ones.
-      const { reg } = harness();
+      const reg = registry();
       const late: CodingStreamEvent[] = [];
       reg.subscribe("t1", (e) => {
         if (e.kind === "text" && e.delta === "first") {
@@ -362,7 +414,7 @@ describe("CodingStreamingRegistry", () => {
     it("the event that ends a stream reaches every subscriber, and nothing published during its delivery follows it", async () => {
       // The task is released before delivery, so a publish from inside a
       // listener is dropped.
-      const { reg } = harness();
+      const reg = registry();
       reg.subscribe("t1", () => {
         void reg.executeStream("t1").appendText("after the end");
       });
@@ -378,7 +430,7 @@ describe("CodingStreamingRegistry", () => {
     it("supports re-entrant publish: a listener that publishes another event delivers it without infinite recursion", async () => {
       // The inner publish completes before the outer delivery loop advances,
       // so the listener sees the inner event during its own invocation.
-      const { reg } = harness();
+      const reg = registry();
       const seen: CodingStreamEvent[] = [];
       const execute = reg.executeStream("t1");
       let reentered = false;

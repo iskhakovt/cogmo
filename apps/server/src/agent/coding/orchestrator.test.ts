@@ -23,13 +23,16 @@ import { DrizzleAgentStore } from "../store/index.js";
 import type { CodingBackend, CodingEvent } from "./backend.js";
 import {
   type CodingOrchestratorDeps,
-  type ExecuteStreamHandle,
-  NULL_EXECUTE_STREAM,
-  NULL_PLAN_STREAM,
   runCodingExecute,
   runCodingTask,
   type StepSendEvent,
 } from "./orchestrator.js";
+import {
+  type ExecuteStreamHandle,
+  NULL_EXECUTE_STREAM,
+  NULL_PLAN_STREAM,
+  type PlanStreamHandle,
+} from "./progress-stream.js";
 import { type CodingRepoRow, type CodingTaskRow, DrizzleCodingStore } from "./store/index.js";
 
 const execFileP = promisify(execFile);
@@ -288,7 +291,7 @@ interface RecordingPlanStream {
   /** `finalize`'s second argument, one entry per call. */
   finalizeOpts: ({ autoApproved?: boolean } | undefined)[];
   failed: string[];
-  handle: import("./orchestrator.js").PlanStreamHandle;
+  handle: PlanStreamHandle;
 }
 
 /** Automated task: no conversation, so no keyboard and nobody to tap it. */
@@ -1152,6 +1155,7 @@ function recordingExecuteStream(): RecordingExecuteStream {
     handle: undefined!,
   };
   out.handle = {
+    started: async () => {},
     appendText: async (delta) => {
       out.text.push(delta);
     },

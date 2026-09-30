@@ -2,8 +2,7 @@
  * Post-hoc verify runner — slice 4.0e.
  *
  * Executes `bash -lc <verify_command>` inside the task container exactly
- * once, streams stdout+stderr to the supplied executeStream (Telegram-
- * visible), captures the combined output for storage (truncated to
+ * once, captures the combined stdout+stderr for storage (truncated to
  * `OUTPUT_CAP_BYTES`), and returns the exit code + wall time.
  *
  * No retry loop. Iterating on failure was the CLI's job during execute
@@ -24,10 +23,8 @@ import {
   execFailureError,
   type SandboxSession,
 } from "../../sandbox/index.js";
-import type { ExecuteStreamHandle } from "./orchestrator.js";
 
-/** Cap for the persisted verify output (8 KiB). Streamed text is unaffected
- * — only the captured `output` field is truncated. */
+/** Cap for the captured verify output (8 KiB). */
 export const OUTPUT_CAP_BYTES = 8 * 1024;
 
 /** Synthetic exit code returned when the verify exceeds its wall-clock budget. */
@@ -39,8 +36,6 @@ export interface VerifyParams {
   verifyCommand: string;
   /** `coding_repos.verify_timeout_seconds` — wall-clock cap. */
   timeoutSeconds: number;
-  /** Optional Telegram-visible stream. Defaults to `NULL_EXECUTE_STREAM`-equivalent. */
-  executeStream?: ExecuteStreamHandle;
 }
 
 export interface VerifyResult {
@@ -62,14 +57,14 @@ export interface VerifyResult {
  * streams have been drained.
  */
 export async function runVerifyStreaming(params: VerifyParams): Promise<VerifyResult> {
-  const { container, verifyCommand, timeoutSeconds, executeStream } = params;
+  const { container, verifyCommand, timeoutSeconds } = params;
   const start = Date.now();
 
   const handle = await container.execStreaming(["bash", "-lc", verifyCommand], {
     timeoutMs: Math.max(1, timeoutSeconds * 1000),
   });
   try {
-    return await captureVerify(handle, { timeoutSeconds, start, executeStream });
+    return await captureVerify(handle, { timeoutSeconds, start });
   } finally {
     await handle.dispose();
   }
@@ -77,9 +72,9 @@ export async function runVerifyStreaming(params: VerifyParams): Promise<VerifyRe
 
 async function captureVerify(
   handle: ExecStreamingHandle,
-  opts: { timeoutSeconds: number; start: number; executeStream: ExecuteStreamHandle | undefined },
+  opts: { timeoutSeconds: number; start: number },
 ): Promise<VerifyResult> {
-  const { timeoutSeconds, start, executeStream } = opts;
+  const { timeoutSeconds, start } = opts;
 
   // One decoder per stream — TextDecoder carries streaming state for
   // multi-byte UTF-8 sequences split across chunk boundaries. Sharing one
@@ -105,26 +100,13 @@ async function captureVerify(
     }
   }
 
-  // Pipe both streams in parallel: capture into the buffer + forward to the
-  // executeStream's appendText so the operator sees `pnpm test` output live.
-  // The streams end, or fail with the transport, once the exec settles; the
-  // pumps are settled either way, so the tail of the output lands in the
-  // capture and a failed stream is observed as soon as it fails.
+  // Capture both streams in parallel. The streams end, or fail with the
+  // transport, once the exec settles; the pumps are settled either way, so
+  // the tail of the output lands in the capture and a failed stream is
+  // observed as soon as it fails.
   const pumped = Promise.allSettled([
-    pumpStream(handle.stdout, async (chunk: Buffer) => {
-      const text = stdoutDecoder.decode(chunk, { stream: true });
-      record(text);
-      if (executeStream) {
-        await executeStream.appendText(text).catch(() => {});
-      }
-    }),
-    pumpStream(handle.stderr, async (chunk: Buffer) => {
-      const text = stderrDecoder.decode(chunk, { stream: true });
-      record(text);
-      if (executeStream) {
-        await executeStream.appendText(text).catch(() => {});
-      }
-    }),
+    pumpStream(handle.stdout, (chunk) => record(stdoutDecoder.decode(chunk, { stream: true }))),
+    pumpStream(handle.stderr, (chunk) => record(stderrDecoder.decode(chunk, { stream: true }))),
   ]);
 
   const exited = await handle.exited;
@@ -157,10 +139,9 @@ function appendNote(captured: string, note: string, truncated: boolean): string 
 
 async function pumpStream(
   stream: NodeJS.ReadableStream,
-  onChunk: (chunk: Buffer) => Promise<void>,
+  onChunk: (chunk: Buffer) => void,
 ): Promise<void> {
   for await (const chunk of stream) {
-    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string);
-    await onChunk(buf);
+    onChunk(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string));
   }
 }

@@ -21,7 +21,7 @@ export interface CodingProgressDeps {
   runInTx: Transactor;
   codingStore: CodingStore;
   transportStore: TransportStore;
-  streamingRegistry: CodingStreamingRegistry;
+  streamingRegistry: Pick<CodingStreamingRegistry, "subscribe">;
 }
 
 /**

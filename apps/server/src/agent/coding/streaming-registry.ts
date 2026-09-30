@@ -1,5 +1,5 @@
 import { logger } from "../../logger.js";
-import type { ExecuteStreamHandle, PlanStreamHandle } from "./orchestrator.js";
+import type { ExecuteStreamHandle, PlanStreamHandle } from "./progress-stream.js";
 
 const log = logger.child({ component: "coding.streaming-registry" });
 
@@ -38,8 +38,9 @@ export interface CodingStreamingRegistryOptions {
   endedTasks: (taskIds: ReadonlyArray<string>) => Promise<ReadonlySet<string>>;
   /** How often the registry asks `endedTasks` about the tasks it holds. */
   sweepIntervalMs: number;
-  /** Test seam — replace the timer. Defaults to an unref'd `setInterval`. */
-  setInterval?: (tick: () => Promise<void>, ms: number) => void;
+  /** Test seam — replace the timer. Defaults to an unref'd `setInterval` / `clearInterval`. */
+  setInterval?: (tick: () => Promise<void>, ms: number) => unknown;
+  clearInterval?: (handle: unknown) => void;
 }
 
 interface TaskStream {
@@ -49,57 +50,56 @@ interface TaskStream {
 }
 
 /**
- * In-process fan-out of each coding task's progress: the durable
- * orchestrators publish through the handles `planStream` and
- * `executeStream` return, and the delivery layer subscribes.
+ * In-process fan-out of each coding task's progress, from the orchestrators'
+ * handles to the subscribers. See design/coding-delegation.md → Progress
+ * stream.
  *
- * In-process rather than Inngest events because text deltas land at chat
- * cadence, and routing each through the bus would serialize, persist and
- * dispatch every few characters. Cogmo is single-node, so the orchestrators
- * and the Telegram adapter share a process. Inngest events carry the state
- * transitions (`task/start`, `plan-approved`, `failed`), where durability
- * matters.
- *
- * The registry holds a task only while something is subscribed to it:
- *
- * - `subscribe` opens the task's stream. A publish to a task without one is
- *   dropped, so publishing never holds state: a replayed or retried step
- *   body, or the verify phase streaming after execute ended the stream,
- *   changes nothing.
+ * - A task is held only while something is subscribed to it. A publish to a
+ *   task with no subscriber is dropped.
  * - `failed`, and an `execute_complete` reporting success, end the stream:
- *   every subscriber gets the event and the registry lets go of the task.
- *   A failed execute's `execute_complete` is followed by the `failed` that
- *   carries the reason, so it doesn't end the stream.
- * - A task can end without its stream ending: cancelled or revised at the
- *   plan gate, failed before a stream opened, or failed by reconcile after
- *   its worker died. The registry sweeps on its own timer, in the process
- *   that holds the streams, and releases a task the database reports ended
- *   at two consecutive sweeps; the second is the grace an orchestrator's
- *   final event gets after its status write.
- *
- * A task awaiting approval keeps its stream, so the execute phase edits the
- * message the plan went to. Admission caps non-terminal tasks per repo,
- * which bounds what the registry holds.
- *
- * Publishers are isolated from subscribers. A listener that throws or
- * rejects is logged, and its siblings still get the event. The registry
- * never awaits a listener, so one that hangs holds neither the orchestrator
- * nor the task. Events aren't replayed: a subscriber sees what is published
- * after it subscribes.
+ *   the registry releases the task, then delivers the event to the
+ *   subscribers it had.
+ * - A sweep releases a task the database reports ended at two consecutive
+ *   sweeps. A failed sweep changes nothing.
+ * - A listener's throw or rejection is logged, and reaches neither the
+ *   publisher nor its siblings. No listener is awaited.
  */
 export class CodingStreamingRegistry {
   readonly #streams = new Map<string, TaskStream>();
   readonly #endedTasks: CodingStreamingRegistryOptions["endedTasks"];
+  readonly #clearInterval: (handle: unknown) => void;
+  #timer: unknown = null;
+  #closed = false;
 
-  constructor(opts: CodingStreamingRegistryOptions) {
+  private constructor(opts: CodingStreamingRegistryOptions) {
     this.#endedTasks = opts.endedTasks;
-    const schedule =
+    this.#clearInterval =
+      opts.clearInterval ??
+      // Paired with the default `setInterval` in `create`, whose handle this
+      // gets back; the seam types it `unknown` so a test's timer can use any token.
+      ((handle: unknown): void => clearInterval(handle as ReturnType<typeof setInterval>));
+  }
+
+  /** A registry that sweeps every `sweepIntervalMs` until `close()`. */
+  static create(opts: CodingStreamingRegistryOptions): CodingStreamingRegistry {
+    const registry = new CodingStreamingRegistry(opts);
+    const setTimer =
       opts.setInterval ??
-      ((tick: () => Promise<void>, ms: number): void => {
+      ((tick: () => Promise<void>, ms: number): unknown => {
+        const handle = setInterval(() => void tick(), ms);
         // The sweep holds nothing that needs closing, so it never keeps the process alive.
-        setInterval(() => void tick(), ms).unref();
+        handle.unref();
+        return handle;
       });
-    schedule(() => this.#sweep(), opts.sweepIntervalMs);
+    registry.#timer = setTimer(() => registry.#sweep(), opts.sweepIntervalMs);
+    return registry;
+  }
+
+  /** Stop sweeping. Idempotent. */
+  close(): void {
+    if (this.#closed) return;
+    this.#closed = true;
+    this.#clearInterval(this.#timer);
   }
 
   /** The plan orchestrator's handle for `taskId`. */
@@ -116,7 +116,7 @@ export class CodingStreamingRegistry {
     };
   }
 
-  /** The execute and verify orchestrators' handle for `taskId`. */
+  /** The execute orchestrator's handle for `taskId`. */
   executeStream(taskId: string): ExecuteStreamHandle {
     return {
       started: async () => this.#publish(taskId, { kind: "execute_started" }),
@@ -151,8 +151,7 @@ export class CodingStreamingRegistry {
 
   /**
    * Ask the database which held tasks have ended, and release those the
-   * previous sweep also found ended. A failed lookup changes nothing; the
-   * next sweep asks again.
+   * previous sweep also found ended.
    */
   async #sweep(): Promise<void> {
     const held = [...this.#streams.keys()];
@@ -167,6 +166,7 @@ export class CodingStreamingRegistry {
     let released = 0;
     for (const taskId of ended) {
       const stream = this.#streams.get(taskId);
+      // Its own event released it while the lookup ran.
       if (!stream) continue;
       if (stream.endedAtLastSweep) {
         this.#streams.delete(taskId);

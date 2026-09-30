@@ -35,9 +35,8 @@ import {
   type CodingOrchestratorDeps,
   createCodingExecuteOrchestrator,
   createCodingOrchestrator,
-  type ExecuteStreamHandle,
-  type PlanStreamHandle,
 } from "./orchestrator.js";
+import type { ExecuteStreamHandle, PlanStreamHandle } from "./progress-stream.js";
 import type { CodingTaskRow } from "./store/index.js";
 
 const execFileP = promisify(execFile);

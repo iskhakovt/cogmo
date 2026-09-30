@@ -76,12 +76,8 @@ vi.mock("./worktree.js", () => ({
 // modules. Type imports are erased at compile time and don't trigger
 // module loading.
 import type { CodingOrchestratorDeps } from "./orchestrator.js";
-import {
-  NULL_EXECUTE_STREAM,
-  NULL_PLAN_STREAM,
-  runCodingExecute,
-  runCodingTask,
-} from "./orchestrator.js";
+import { runCodingExecute, runCodingTask } from "./orchestrator.js";
+import { NULL_EXECUTE_STREAM, NULL_PLAN_STREAM } from "./progress-stream.js";
 import { type CodingRepoRow, type CodingTaskRow, DrizzleCodingStore } from "./store/index.js";
 import { runCodingVerify, type VerifyOrchestratorDeps } from "./verify-orchestrator.js";
 

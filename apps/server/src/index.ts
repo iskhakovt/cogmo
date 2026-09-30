@@ -317,6 +317,8 @@ export interface RuntimeDeps {
    * Always present (created unconditionally); empty until tabs connect.
    */
   webStreamRegistry: WebStreamRegistry;
+  /** Coding progress streams; `cogmo serve` closes their sweep on shutdown. */
+  codingStreams: Pick<CodingStreamingRegistry, "close">;
 }
 
 /**
@@ -764,7 +766,7 @@ export async function bootstrapRuntime(
     catalogUrl: env.MODEL_CATALOG_URL,
   });
   const codingBackend = new ClaudeCodeBackend();
-  const codingStreamingRegistry = new CodingStreamingRegistry({
+  const codingStreamingRegistry = CodingStreamingRegistry.create({
     endedTasks: (taskIds) =>
       findEndedCodingTasks({ runInTx: core.runInTx, store: core.codingStore }, taskIds),
     sweepIntervalMs: 10 * 60 * 1000,
@@ -820,7 +822,6 @@ export async function bootstrapRuntime(
           devbaseImage: env.COGMO_DEVBASE_IMAGE,
           defaultResourceLimits: orchestratorDeps.defaultResourceLimits,
           taskTtlMs: orchestratorDeps.taskTtlMs,
-          openExecuteStream: orchestratorDeps.openExecuteStream,
           ...(opts.codingAuthOverride && { loadCodingSandboxEnv: opts.codingAuthOverride }),
           ...(opts.octokitFactory && { octokitFactory: opts.octokitFactory }),
         },
@@ -1276,7 +1277,14 @@ export async function bootstrapRuntime(
     ...modelCatalogFunctions,
   ];
 
-  return { functions, adapters, mcpRegistry, webTransport, webStreamRegistry };
+  return {
+    functions,
+    adapters,
+    mcpRegistry,
+    webTransport,
+    webStreamRegistry,
+    codingStreams: codingStreamingRegistry,
+  };
 }
 
 /**

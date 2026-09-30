@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { expectDefined } from "../../test/assertions.js";
-import type { ExecuteStreamHandle, PlanStreamHandle } from "./orchestrator.js";
+import type { ExecuteStreamHandle, PlanStreamHandle } from "./progress-stream.js";
 import { type ProgressBot, startCodingProgressSubscriber } from "./progress-subscriber.js";
 import { CodingStreamingRegistry } from "./streaming-registry.js";
 
@@ -42,18 +42,23 @@ function fakeBot(): FakeBotState {
   return state;
 }
 
+const registries: CodingStreamingRegistry[] = [];
+
+afterEach(() => {
+  for (const registry of registries.splice(0)) registry.close();
+});
+
 /** The orchestrators' handles for the subscribed task, and the bot it renders to. */
 function start(args?: { editIntervalMs?: number }): {
   plan: PlanStreamHandle;
   execute: ExecuteStreamHandle;
   bot: FakeBotState;
 } {
-  // The sweep never runs: these tests end streams through events.
-  const registry = new CodingStreamingRegistry({
+  const registry = CodingStreamingRegistry.create({
     endedTasks: async () => new Set(),
     sweepIntervalMs: 60_000,
-    setInterval: () => {},
   });
+  registries.push(registry);
   const bot = fakeBot();
   startCodingProgressSubscriber({
     taskId: TASK_ID,
@@ -138,7 +143,7 @@ describe("startCodingProgressSubscriber", () => {
     await plan.finalize("plan body");
     await tick();
 
-    await execute.started?.();
+    await execute.started();
     await tick();
 
     const lastEdit = bot.edits.at(-1);
@@ -148,7 +153,7 @@ describe("startCodingProgressSubscriber", () => {
 
   it("execute_complete renders pending_verify + token counter, and ends the stream", async () => {
     const { execute, bot } = start();
-    await execute.started?.();
+    await execute.started();
     await tick();
     await execute.appendText("narrating...");
     await tick();
@@ -162,9 +167,9 @@ describe("startCodingProgressSubscriber", () => {
     expect(completionEdit?.text).toContain("in 100");
     expect(completionEdit?.text).toContain("out 20");
 
-    // The verify phase streams on after this; none of it reaches the message.
+    // The stream has ended, so a late publish reaches nothing.
     const editCountAtCompletion = bot.edits.length;
-    await execute.appendText("verify output");
+    await execute.appendText("late narration");
     await tick();
     expect(bot.edits).toHaveLength(editCountAtCompletion);
   });
@@ -189,13 +194,12 @@ describe("startCodingProgressSubscriber", () => {
 
   it("an execute failure renders its reason", async () => {
     // The execute orchestrator reports a failed CLI or push as
-    // `complete(false)` and then `fail(reason)`.
+    // `complete(false)` and then, back to back, `fail(reason)`.
     const { execute, bot } = start();
-    await execute.started?.();
+    await execute.started();
     await tick();
 
     await execute.complete(false);
-    await tick();
     await execute.fail("claude exit code 1");
     await tick();
 
@@ -206,7 +210,7 @@ describe("startCodingProgressSubscriber", () => {
 
   it("tool_call / tool_result events update the activity line during execute", async () => {
     const { execute, bot } = start();
-    await execute.started?.();
+    await execute.started();
     await tick();
     await execute.toolCall("Read");
     await tick();
@@ -264,7 +268,7 @@ describe("startCodingProgressSubscriber", () => {
       await tick();
       await plan.finalize("## Plan\nfinal");
       await tick();
-      await execute.started?.();
+      await execute.started();
       await tick();
       await execute.toolCall("Read");
       await tick();
