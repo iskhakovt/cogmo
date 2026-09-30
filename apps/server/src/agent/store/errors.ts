@@ -67,6 +67,21 @@ export class UnknownProfileClassError extends Error {
 }
 
 /**
+ * Thrown by `replaceRules` when it deletes fewer rows than the group holds:
+ * a rule in it was retired or merged since consolidation read it, or isn't a
+ * learned rule. Its transaction rolls back, so the group survives unmerged.
+ */
+export class RuleGroupChangedError extends Error {
+  constructor(
+    public readonly groupSize: number,
+    public readonly deleted: number,
+  ) {
+    super(`rule group changed: deleted ${deleted} of ${groupSize} rules`);
+    this.name = "RuleGroupChangedError";
+  }
+}
+
+/**
  * Thrown by `createCustomCompartment` when the user already has the maximum
  * number of custom compartments. Cap protects classifier accuracy + prompt
  * size; >~10 compartments degrades the LLM's bucket choice.

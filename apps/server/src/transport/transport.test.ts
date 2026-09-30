@@ -996,7 +996,11 @@ describe("createTransport", () => {
         }),
         getAliasForConversation: vi.fn().mockResolvedValue("work"),
         getLastTokens: vi.fn().mockResolvedValue({ inputTokens: 12_345, outputTokens: 678 }),
-        countActiveRules: vi.fn().mockResolvedValue(3),
+        getActiveRules: vi.fn().mockResolvedValue([
+          { rule: "Operator", section: "always", channelType: null },
+          { rule: "Learned", section: "learned", channelType: null },
+          { rule: "Default", section: "channel_defaults", channelType: "telegram" },
+        ]),
         ...overrides,
       });
     }
@@ -1083,10 +1087,40 @@ describe("createTransport", () => {
         lastTurn: { inputTokens: 12_345, outputTokens: 678 },
         steeringRulesCount: 3,
       });
+      expect(agentStore.getActiveRules).toHaveBeenCalledWith(expect.anything(), {
+        profileId: "p1",
+        userId: "user-1",
+      });
       // claude-sonnet-4-6: contextWindow 1_000_000 - maxOutputTokens 64_000 - safetyBuffer 10_000
       expect(value?.contextBudget).toBe(926_000);
       // No mcpRegistry wired in setup() → mcp namespace is null.
       expect(value?.mcp).toBeNull();
+    });
+
+    it("counts the rules a third-party profile renders, without the user's instruction rules", async () => {
+      const agentStore = makeAgentStore({
+        getProfile: vi.fn().mockResolvedValue({
+          id: "p1",
+          userId: "user-1",
+          name: "plugin",
+          basePrompt: "",
+          model: "claude-sonnet-4-6",
+          summarizationModel: null,
+          extractionModel: null,
+          autoRecall: "heuristic",
+          voiceMode: "auto",
+          toolSet: [],
+          memoryScope: { compartments: ["personal"], trust: ["any"] },
+        }),
+      });
+      const { transport } = setup({ agentStore, transportStore: makeTransportStore() });
+
+      await transport.conversations.summary("handle", "addr-1");
+
+      expect(agentStore.getActiveRules).toHaveBeenCalledWith(expect.anything(), {
+        profileId: "p1",
+        userId: null,
+      });
     });
 
     it("normalizes missing last-turn tokens to null", async () => {

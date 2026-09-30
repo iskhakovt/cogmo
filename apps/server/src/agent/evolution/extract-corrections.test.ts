@@ -148,7 +148,7 @@ function mockExtractionDeps(
     store: {
       getCorrections: vi.fn().mockResolvedValue([]),
       upsertCorrection: vi.fn().mockResolvedValue({ id: "rule-1", promoted: false }),
-      countActiveRules: vi.fn().mockResolvedValue(5),
+      countActiveLearnedRules: vi.fn().mockResolvedValue(5),
       ...storeOverrides,
     },
     activeChannelTypes,
@@ -478,24 +478,59 @@ describe("extractCorrections", () => {
     expect(result.reinforced).toBe(1);
   });
 
-  it("flags consolidationNeeded when threshold exceeded", async () => {
+  it("flags consolidationNeeded once the active learned rules pass 20", async () => {
     const deps = mockExtractionDeps(
       { corrections: [] },
-      { countActiveRules: vi.fn().mockResolvedValue(31) },
+      { countActiveLearnedRules: vi.fn().mockResolvedValue(21) },
     );
 
     const result = await extractCorrections(sampleHistory, "profile-1", deps);
     expect(result.consolidationNeeded).toBe(true);
+    expect(deps.store.countActiveLearnedRules).toHaveBeenCalledWith(FAKE_TX, "profile-1");
   });
 
-  it("does not flag consolidation below threshold", async () => {
+  it("does not flag consolidation at 20", async () => {
     const deps = mockExtractionDeps(
       { corrections: [] },
-      { countActiveRules: vi.fn().mockResolvedValue(15) },
+      { countActiveLearnedRules: vi.fn().mockResolvedValue(20) },
     );
 
     const result = await extractCorrections(sampleHistory, "profile-1", deps);
     expect(result.consolidationNeeded).toBe(false);
+  });
+
+  it("skips a reinforcement whose rule was retired after the list was read", async () => {
+    const deps = mockExtractionDeps(
+      {
+        corrections: [
+          {
+            rule: "Be concise",
+            category: "style",
+            reasoning: "Said again",
+            matchedExistingRuleId: "R1",
+            action: "reinforce",
+          },
+        ],
+      },
+      {
+        getCorrections: vi.fn().mockResolvedValue([ruleRow("rule-1", "Be concise")]),
+        upsertCorrection: vi.fn().mockResolvedValue(null),
+      },
+    );
+    const warn = vi.spyOn(logger, "warn");
+
+    const result = await extractCorrections(sampleHistory, "profile-1", deps);
+
+    expect(result).toMatchObject({
+      reinforced: 0,
+      promoted: 0,
+      unknownRuleReinforcementsSkipped: 1,
+    });
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ matchedId: "rule-1" }),
+      expect.stringContaining("retired"),
+    );
+    warn.mockRestore();
   });
 
   it("handles mixed corrections in one extraction", async () => {
@@ -857,7 +892,7 @@ describe("extractCorrections", () => {
       store: {
         getCorrections: vi.fn().mockResolvedValue([]),
         upsertCorrection: vi.fn().mockResolvedValue({ id: "rule-1", promoted: false }),
-        countActiveRules: vi.fn().mockResolvedValue(5),
+        countActiveLearnedRules: vi.fn().mockResolvedValue(5),
       },
       activeChannelTypes: [],
     };
