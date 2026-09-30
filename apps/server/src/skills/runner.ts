@@ -607,7 +607,9 @@ export class SkillRunnerImpl implements SkillRunner {
     }
 
     if (opts.verifyFresh && this.#lockfileCompiler) {
-      const compiled = await this.#lockfileCompiler.compile(manifest.dependencies, opts.signal);
+      const compiled = await this.#lockfileCompiler.compile(manifest.dependencies, {
+        ...(opts.signal && { signal: opts.signal }),
+      });
       // An abort surfaces as itself, not as the compile failure it caused.
       opts.signal?.throwIfAborted();
       if (compiled.isErr()) {

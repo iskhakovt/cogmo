@@ -485,7 +485,7 @@ tier: wasm
 
         const result = await runner.register({ branch: "skill/echo-verified", origin: OWNER });
         expect(result.status).toBe("live");
-        expect(compiler.compile).toHaveBeenCalledWith(["httpx==0.27.0"], undefined);
+        expect(compiler.compile).toHaveBeenCalledWith(["httpx==0.27.0"], {});
       });
 
       it("rejects with requirements_lock_stale when the compile output differs", async () => {
@@ -545,7 +545,9 @@ tier: wasm
           }),
         ).rejects.toBe(reason);
 
-        expect(compiler.compile).toHaveBeenCalledWith(["httpx==0.27.0"], controller.signal);
+        expect(compiler.compile).toHaveBeenCalledWith(["httpx==0.27.0"], {
+          signal: controller.signal,
+        });
         expect(await tx((trx) => store.getSkillByName(trx, "echo"))).toBeUndefined();
         expect(await getMainSha(repo.bare)).toBe(mainBefore);
         // The branch is left for a retry.
