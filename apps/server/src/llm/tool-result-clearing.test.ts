@@ -100,6 +100,30 @@ describe("textTokens", () => {
     }
   });
 
+  it("looks for a space only within the slice's window", () => {
+    // No spaces: a search back from each window's end would read to the start.
+    const text = "字".repeat(100_000);
+    const search = vi.spyOn(String.prototype, "lastIndexOf");
+    try {
+      [...textTokens(enc)(text)];
+
+      expect(search).toHaveBeenCalled();
+      for (const searched of search.mock.contexts) {
+        expect(String(searched).length).toBeLessThanOrEqual(8193);
+      }
+    } finally {
+      search.mockRestore();
+    }
+  });
+
+  it("cuts a window whose only space opens it at the window's end", () => {
+    const text = ` ${"x".repeat(8191)}${"y".repeat(9000)}`;
+
+    expect(encodedLength(text)).toBe(
+      encodedLength(` ${"x".repeat(8191)}`) + encodedLength("y".repeat(9000)),
+    );
+  });
+
   it("never cuts a slice inside a surrogate pair", () => {
     // No spaces, and pairs from index 1: the 8,192nd code unit ends a pair's first half.
     const run = `a${"𝐀".repeat(5000)}`;

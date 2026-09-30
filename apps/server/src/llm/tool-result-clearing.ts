@@ -72,14 +72,15 @@ export function textTokens(enc: Tiktoken): TextTokens {
 /**
  * `text` in slices of at most {@link SLICE_CHARS}, each cut before a space
  * where the window has one, which leaves the pre-tokenizer's pieces as they
- * were, and never inside a surrogate pair.
+ * were, and never inside a surrogate pair. The search for a space reads the
+ * window and the character after it, and no further back.
  */
 function* slices(text: string): Generator<string> {
   for (let start = 0; start < text.length; ) {
     let end = Math.min(text.length, start + SLICE_CHARS);
     if (end < text.length) {
-      const space = text.lastIndexOf(" ", end);
-      if (space > start) end = space;
+      const space = text.slice(start, end + 1).lastIndexOf(" ");
+      if (space > 0) end = start + space;
       else if (isLowSurrogate(text.charCodeAt(end))) end -= 1;
     }
     yield text.slice(start, end);
