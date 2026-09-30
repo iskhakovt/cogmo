@@ -12,13 +12,12 @@ import {
   type CodingOrchestratorDeps,
   createCodingExecuteOrchestrator,
   createCodingOrchestrator,
-  type ExecuteStreamHandle,
-  type PlanStreamHandle,
 } from "./agent/coding/orchestrator.js";
 import { createCodingTaskReconcile } from "./agent/coding/reconcile-on-failure.js";
 import { createCodingService } from "./agent/coding/service.js";
 import { DrizzleCodingStore } from "./agent/coding/store/index.js";
 import { CodingStreamingRegistry } from "./agent/coding/streaming-registry.js";
+import { createCodingStreamSweep } from "./agent/coding/sweep-coding-streams.js";
 import { createCodingVerifyOrchestrator } from "./agent/coding/verify-orchestrator.js";
 import { compactConversation } from "./agent/conversation/compact-conversation.js";
 import { createDebounceFunctions, type DebounceConfig } from "./agent/debounce.js";
@@ -801,50 +800,8 @@ export async function bootstrapRuntime(
       worktreesDir: env.COGMO_WORKTREES_DIR,
       askpassBaseDir: env.SANDBOX_ASKPASS_DIR,
       ...(opts.codingAuthOverride && { loadCodingSandboxEnv: opts.codingAuthOverride }),
-      openPlanStream: async (taskId: string): Promise<PlanStreamHandle> => ({
-        async appendText(delta) {
-          codingStreamingRegistry.publish(taskId, { kind: "text", delta });
-        },
-        async finalize(plan, opts) {
-          codingStreamingRegistry.publish(taskId, {
-            kind: "plan_finalized",
-            plan,
-            ...(opts?.autoApproved && { autoApproved: true }),
-          });
-        },
-        async fail(reason) {
-          codingStreamingRegistry.publish(taskId, { kind: "failed", reason });
-        },
-      }),
-      openExecuteStream: async (taskId: string): Promise<ExecuteStreamHandle> => ({
-        async started() {
-          codingStreamingRegistry.publish(taskId, { kind: "execute_started" });
-        },
-        async appendText(delta) {
-          codingStreamingRegistry.publish(taskId, { kind: "text", delta });
-        },
-        async toolCall(tool) {
-          codingStreamingRegistry.publish(taskId, { kind: "tool_call", tool });
-        },
-        async toolResult(tool, ok, summary) {
-          codingStreamingRegistry.publish(taskId, {
-            kind: "tool_result",
-            tool,
-            ok,
-            ...(summary !== undefined && { summary }),
-          });
-        },
-        async complete(ok, tokens) {
-          codingStreamingRegistry.publish(taskId, {
-            kind: "execute_complete",
-            ok,
-            ...(tokens !== undefined && { tokens }),
-          });
-        },
-        async fail(reason) {
-          codingStreamingRegistry.publish(taskId, { kind: "failed", reason });
-        },
-      }),
+      openPlanStream: async (taskId: string) => codingStreamingRegistry.planStream(taskId),
+      openExecuteStream: async (taskId: string) => codingStreamingRegistry.executeStream(taskId),
     };
     codingFunctions.push(createCodingOrchestrator(orchestratorDeps, inngest));
     codingFunctions.push(createCodingExecuteOrchestrator(orchestratorDeps, inngest));
@@ -921,6 +878,16 @@ export async function bootstrapRuntime(
     // design/coding-delegation.md → Worker-death reconciliation.
     codingFunctions.push(
       createCodingTaskReconcile({ runInTx: core.runInTx, store: core.codingStore }, inngest),
+    );
+
+    // Releases the progress streams of tasks that ended without their
+    // stream ending — cancelled at the plan gate, failed before a stream
+    // opened, or reconciled above.
+    codingFunctions.push(
+      createCodingStreamSweep(
+        { runInTx: core.runInTx, store: core.codingStore, registry: codingStreamingRegistry },
+        inngest,
+      ),
     );
 
     // Sandbox reaper — runs every minute, kills TTL-expired containers,

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { expectDefined } from "../../test/assertions.js";
+import type { ExecuteStreamHandle, PlanStreamHandle } from "./orchestrator.js";
 import { type ProgressBot, startCodingProgressSubscriber } from "./progress-subscriber.js";
 import { CodingStreamingRegistry } from "./streaming-registry.js";
 
@@ -41,8 +42,10 @@ function fakeBot(): FakeBotState {
   return state;
 }
 
+/** The orchestrators' handles for the subscribed task, and the bot it renders to. */
 function start(args?: { editIntervalMs?: number }): {
-  registry: CodingStreamingRegistry;
+  plan: PlanStreamHandle;
+  execute: ExecuteStreamHandle;
   bot: FakeBotState;
 } {
   const registry = new CodingStreamingRegistry();
@@ -51,23 +54,30 @@ function start(args?: { editIntervalMs?: number }): {
     taskId: TASK_ID,
     chatId: 42,
     goal: "do a thing",
-    channelId: "ch-1",
     bot: bot.bot,
     registry,
     // 0 ms → no throttle, every event triggers an edit. Makes assertions
     // deterministic without needing fake timers.
     editIntervalMs: args?.editIntervalMs ?? 0,
   });
-  return { registry, bot };
+  return {
+    plan: registry.planStream(TASK_ID),
+    execute: registry.executeStream(TASK_ID),
+    bot,
+  };
+}
+
+/** Let the bot calls a publish queued run. */
+function tick(): Promise<void> {
+  return new Promise((r) => setImmediate(r));
 }
 
 describe("startCodingProgressSubscriber", () => {
   it("posts the initial message on the first event, edits subsequently", async () => {
-    const { registry, bot } = start();
+    const { plan, bot } = start();
 
-    registry.publish(TASK_ID, { kind: "text", delta: "Hello" });
-    // Wait for the queued bot.sendMessage to flush.
-    await new Promise((r) => setImmediate(r));
+    await plan.appendText("Hello");
+    await tick();
 
     expect(bot.sent).toHaveLength(1);
     const sent0 = expectDefined(bot.sent[0], "first send");
@@ -77,17 +87,17 @@ describe("startCodingProgressSubscriber", () => {
     expect(sent0.replyMarkup).toBeUndefined();
     expect(bot.edits).toHaveLength(0);
 
-    registry.publish(TASK_ID, { kind: "text", delta: " world" });
-    await new Promise((r) => setImmediate(r));
+    await plan.appendText(" world");
+    await tick();
     expect(bot.edits).toHaveLength(1);
     expect(expectDefined(bot.edits[0], "first edit").text).toContain("Hello world");
   });
 
   it("plan_finalized attaches the inline keyboard with Approve / Revise / Cancel", async () => {
-    const { registry, bot } = start();
+    const { plan, bot } = start();
 
-    registry.publish(TASK_ID, { kind: "plan_finalized", plan: "## Plan\nbody" });
-    await new Promise((r) => setImmediate(r));
+    await plan.finalize("## Plan\nbody");
+    await tick();
 
     expect(bot.sent).toHaveLength(1);
     const planSent = expectDefined(bot.sent[0], "plan sent");
@@ -107,14 +117,10 @@ describe("startCodingProgressSubscriber", () => {
     // action-at-a-distance (a stray Cancel tap mid-execute). The
     // subscriber renders the body text but no reply_markup, leaving
     // execute_started to take over the message.
-    const { registry, bot } = start();
+    const { plan, bot } = start();
 
-    registry.publish(TASK_ID, {
-      kind: "plan_finalized",
-      plan: "## Plan\nbody",
-      autoApproved: true,
-    });
-    await new Promise((r) => setImmediate(r));
+    await plan.finalize("## Plan\nbody", { autoApproved: true });
+    await tick();
 
     expect(bot.sent).toHaveLength(1);
     const planSent = expectDefined(bot.sent[0], "plan sent");
@@ -123,31 +129,26 @@ describe("startCodingProgressSubscriber", () => {
   });
 
   it("execute_started flips phase to executing and resets the body", async () => {
-    const { registry, bot } = start();
-    // Plan goes through first.
-    registry.publish(TASK_ID, { kind: "plan_finalized", plan: "plan body" });
-    await new Promise((r) => setImmediate(r));
+    const { plan, execute, bot } = start();
+    await plan.finalize("plan body");
+    await tick();
 
-    registry.publish(TASK_ID, { kind: "execute_started" });
-    await new Promise((r) => setImmediate(r));
+    await execute.started?.();
+    await tick();
 
     const lastEdit = bot.edits.at(-1);
     expect(lastEdit?.text).toContain("⚙️ Executing");
     expect(lastEdit?.text).not.toContain("plan body");
   });
 
-  it("execute_complete renders pending_verify + token counter, then unsubscribes", async () => {
-    const { registry, bot } = start();
-    registry.publish(TASK_ID, { kind: "execute_started" });
-    await new Promise((r) => setImmediate(r));
-    registry.publish(TASK_ID, { kind: "text", delta: "narrating..." });
-    await new Promise((r) => setImmediate(r));
-    registry.publish(TASK_ID, {
-      kind: "execute_complete",
-      ok: true,
-      tokens: { input: 100, output: 20 },
-    });
-    await new Promise((r) => setImmediate(r));
+  it("execute_complete renders pending_verify + token counter, and ends the stream", async () => {
+    const { execute, bot } = start();
+    await execute.started?.();
+    await tick();
+    await execute.appendText("narrating...");
+    await tick();
+    await execute.complete(true, { input: 100, output: 20 });
+    await tick();
 
     const completionEdit = bot.edits.at(-1);
     expect(completionEdit?.text).toContain("Execute done");
@@ -156,52 +157,56 @@ describe("startCodingProgressSubscriber", () => {
     expect(completionEdit?.text).toContain("in 100");
     expect(completionEdit?.text).toContain("out 20");
 
-    // Post-completion events are ignored — listener was detached.
+    // The verify phase streams on after this; none of it reaches the message.
     const editCountAtCompletion = bot.edits.length;
-    registry.publish(TASK_ID, { kind: "text", delta: "ignored" });
-    await new Promise((r) => setImmediate(r));
+    await execute.appendText("verify output");
+    await tick();
     expect(bot.edits).toHaveLength(editCountAtCompletion);
   });
 
-  it("failed event renders the failure reason and detaches", async () => {
-    const { registry, bot } = start();
-    registry.publish(TASK_ID, { kind: "text", delta: "x" });
-    await new Promise((r) => setImmediate(r));
+  it("failed event renders the failure reason and ends the stream", async () => {
+    const { plan, bot } = start();
+    await plan.appendText("x");
+    await tick();
 
-    registry.publish(TASK_ID, { kind: "failed", reason: "claude exit code 2" });
-    await new Promise((r) => setImmediate(r));
+    await plan.fail("claude exit code 2");
+    await tick();
 
     const lastEdit = bot.edits.at(-1);
     expect(lastEdit?.text).toContain("❌ Failed");
     expect(lastEdit?.text).toContain("claude exit code 2");
 
     const editCountAtFailure = bot.edits.length;
-    registry.publish(TASK_ID, { kind: "text", delta: "ignored" });
-    await new Promise((r) => setImmediate(r));
+    await plan.appendText("ignored");
+    await tick();
     expect(bot.edits).toHaveLength(editCountAtFailure);
   });
 
-  it("registers the message ref so the callback handler can edit the same message", async () => {
-    const { registry, bot } = start();
-    registry.publish(TASK_ID, { kind: "plan_finalized", plan: "p" });
-    await new Promise((r) => setImmediate(r));
+  it("an execute failure renders its reason", async () => {
+    // The execute orchestrator reports a failed CLI or push as
+    // `complete(false)` and then `fail(reason)`.
+    const { execute, bot } = start();
+    await execute.started?.();
+    await tick();
 
-    const ref = registry.getSnapshot(TASK_ID)?.progressMessageRef;
-    expect(ref).toBeDefined();
-    expect(ref?.channelId).toBe("ch-1");
-    expect(ref?.chatId).toBe("42");
-    // First sendMessage returns message_id 1001 by our fake bot's convention.
-    expect(ref?.messageId).toBe(String(1000 + bot.sent.length));
+    await execute.complete(false);
+    await tick();
+    await execute.fail("claude exit code 1");
+    await tick();
+
+    const lastEdit = bot.edits.at(-1);
+    expect(lastEdit?.text).toContain("❌ Failed");
+    expect(lastEdit?.text).toContain("claude exit code 1");
   });
 
   it("tool_call / tool_result events update the activity line during execute", async () => {
-    const { registry, bot } = start();
-    registry.publish(TASK_ID, { kind: "execute_started" });
-    await new Promise((r) => setImmediate(r));
-    registry.publish(TASK_ID, { kind: "tool_call", tool: "Read" });
-    await new Promise((r) => setImmediate(r));
-    registry.publish(TASK_ID, { kind: "tool_result", tool: "Read", ok: true, summary: "ok" });
-    await new Promise((r) => setImmediate(r));
+    const { execute, bot } = start();
+    await execute.started?.();
+    await tick();
+    await execute.toolCall("Read");
+    await tick();
+    await execute.toolResult("Read", true, "ok");
+    await tick();
 
     const edits = bot.edits.map((e) => e.text);
     expect(edits.some((t) => t.includes("Read…"))).toBe(true);
@@ -209,28 +214,28 @@ describe("startCodingProgressSubscriber", () => {
   });
 
   it("swallows 'message is not modified' edit errors silently", async () => {
-    const { registry, bot } = start();
-    registry.publish(TASK_ID, { kind: "text", delta: "x" });
-    await new Promise((r) => setImmediate(r));
+    const { plan, bot } = start();
+    await plan.appendText("x");
+    await tick();
 
     // Make the next edit throw the benign Telegram error.
     bot.bot.editMessageText = vi.fn(async () => {
       throw new Error("Bad Request: message is not modified");
     });
-    expect(() => registry.publish(TASK_ID, { kind: "text", delta: "y" })).not.toThrow();
-    await new Promise((r) => setImmediate(r));
+    await expect(plan.appendText("y")).resolves.toBeUndefined();
+    await tick();
   });
 
   describe("single-message-edit invariant", () => {
     it("uses the same telegram message_id across many text deltas", async () => {
-      const { registry, bot } = start();
+      const { plan, bot } = start();
 
       // 20 text deltas, no throttle — every one must edit the SAME message
       // returned by the initial sendMessage. The chat must never see a
       // second post.
       for (let i = 0; i < 20; i++) {
-        registry.publish(TASK_ID, { kind: "text", delta: `chunk-${i} ` });
-        await new Promise((r) => setImmediate(r));
+        await plan.appendText(`chunk-${i} `);
+        await tick();
       }
 
       expect(bot.sent).toHaveLength(1);
@@ -243,29 +248,25 @@ describe("startCodingProgressSubscriber", () => {
     });
 
     it("keeps the message_id stable across plan -> execute -> complete phases", async () => {
-      const { registry, bot } = start();
+      const { plan, execute, bot } = start();
 
       // Walk the full lifecycle: planning deltas, plan_finalized,
       // execute_started, execute deltas, execute_complete. All edits must
       // target the same message_id.
-      registry.publish(TASK_ID, { kind: "text", delta: "draft " });
-      await new Promise((r) => setImmediate(r));
-      registry.publish(TASK_ID, { kind: "text", delta: "plan body" });
-      await new Promise((r) => setImmediate(r));
-      registry.publish(TASK_ID, { kind: "plan_finalized", plan: "## Plan\nfinal" });
-      await new Promise((r) => setImmediate(r));
-      registry.publish(TASK_ID, { kind: "execute_started" });
-      await new Promise((r) => setImmediate(r));
-      registry.publish(TASK_ID, { kind: "tool_call", tool: "Read" });
-      await new Promise((r) => setImmediate(r));
-      registry.publish(TASK_ID, { kind: "tool_result", tool: "Read", ok: true });
-      await new Promise((r) => setImmediate(r));
-      registry.publish(TASK_ID, {
-        kind: "execute_complete",
-        ok: true,
-        tokens: { input: 10, output: 5 },
-      });
-      await new Promise((r) => setImmediate(r));
+      await plan.appendText("draft ");
+      await tick();
+      await plan.appendText("plan body");
+      await tick();
+      await plan.finalize("## Plan\nfinal");
+      await tick();
+      await execute.started?.();
+      await tick();
+      await execute.toolCall("Read");
+      await tick();
+      await execute.toolResult("Read", true);
+      await tick();
+      await execute.complete(true, { input: 10, output: 5 });
+      await tick();
 
       // Exactly one initial post; everything else is an in-place edit.
       expect(bot.sent).toHaveLength(1);
@@ -289,26 +290,26 @@ describe("startCodingProgressSubscriber", () => {
       vi.useFakeTimers({ toFake: ["Date"] });
       vi.setSystemTime(new Date(0));
 
-      const { registry, bot } = start({ editIntervalMs: 500 });
+      const { plan, bot } = start({ editIntervalMs: 500 });
 
       // First delta posts the message (initial post bypasses throttle).
-      registry.publish(TASK_ID, { kind: "text", delta: "a" });
-      await new Promise((r) => setImmediate(r));
+      await plan.appendText("a");
+      await tick();
       expect(bot.sent).toHaveLength(1);
       expect(bot.edits).toHaveLength(0);
 
       // 10 deltas in a tight burst inside the 500ms window. Throttle should
       // suppress all of them — Date.now() doesn't advance until we say so.
       for (let i = 0; i < 10; i++) {
-        registry.publish(TASK_ID, { kind: "text", delta: `${i}` });
-        await new Promise((r) => setImmediate(r));
+        await plan.appendText(`${i}`);
+        await tick();
       }
       expect(bot.edits).toHaveLength(0);
 
       // Cross the threshold; the next delta should produce one edit.
       vi.setSystemTime(new Date(600));
-      registry.publish(TASK_ID, { kind: "text", delta: "after" });
-      await new Promise((r) => setImmediate(r));
+      await plan.appendText("after");
+      await tick();
       expect(bot.edits).toHaveLength(1);
       expect(expectDefined(bot.edits[0], "after edit").text).toContain("after");
     });
@@ -317,25 +318,25 @@ describe("startCodingProgressSubscriber", () => {
       vi.useFakeTimers({ toFake: ["Date"] });
       vi.setSystemTime(new Date(0));
 
-      const { registry, bot } = start({ editIntervalMs: 500 });
+      const { plan, bot } = start({ editIntervalMs: 500 });
 
       // Initial post via a text delta.
-      registry.publish(TASK_ID, { kind: "text", delta: "drafting " });
-      await new Promise((r) => setImmediate(r));
+      await plan.appendText("drafting ");
+      await tick();
       expect(bot.sent).toHaveLength(1);
 
       // A second text delta inside the window is throttled away.
       vi.setSystemTime(new Date(50));
-      registry.publish(TASK_ID, { kind: "text", delta: "more" });
-      await new Promise((r) => setImmediate(r));
+      await plan.appendText("more");
+      await tick();
       expect(bot.edits).toHaveLength(0);
 
       // plan_finalized arrives while the throttle window is still open.
       // Design contract: it must force-edit so the keyboard ships with the
       // final plan body, not on a later throttled tick.
       vi.setSystemTime(new Date(100));
-      registry.publish(TASK_ID, { kind: "plan_finalized", plan: "## Plan\nbody" });
-      await new Promise((r) => setImmediate(r));
+      await plan.finalize("## Plan\nbody");
+      await tick();
 
       expect(bot.edits).toHaveLength(1);
       const planEdit = expectDefined(bot.edits[0], "plan edit");
@@ -348,17 +349,17 @@ describe("startCodingProgressSubscriber", () => {
       vi.useFakeTimers({ toFake: ["Date"] });
       vi.setSystemTime(new Date(0));
 
-      const { registry, bot } = start({ editIntervalMs: 500 });
+      const { plan, bot } = start({ editIntervalMs: 500 });
 
-      registry.publish(TASK_ID, { kind: "text", delta: "x" });
-      await new Promise((r) => setImmediate(r));
+      await plan.appendText("x");
+      await tick();
       expect(bot.sent).toHaveLength(1);
 
       // Failure arrives well inside the throttle window — must still edit
       // immediately so the user sees the failure reason without delay.
       vi.setSystemTime(new Date(20));
-      registry.publish(TASK_ID, { kind: "failed", reason: "boom" });
-      await new Promise((r) => setImmediate(r));
+      await plan.fail("boom");
+      await tick();
 
       expect(bot.edits).toHaveLength(1);
       const failEdit = expectDefined(bot.edits[0], "fail edit");
@@ -367,33 +368,32 @@ describe("startCodingProgressSubscriber", () => {
     });
 
     it("coalesces a burst of events fired at the same wall-clock tick", async () => {
-      // The registry's `publish` calls listeners synchronously but does
-      // not await the returned promise (`streaming-registry.ts:102-113`),
-      // so handlers for back-to-back events can interleave. If the
-      // throttle timestamp were only updated *after* the bot call
-      // resolved, all three events below would see stale `lastEditAt`,
-      // pass the throttle, and queue three editMessageText calls onto
-      // `pending`. The synchronous update at the top of `postOrEdit`
-      // pins the throttle so only the first event in the burst fires.
+      // The registry calls listeners synchronously but does not await the
+      // returned promise, so handlers for back-to-back events can
+      // interleave. If the throttle timestamp were only updated *after*
+      // the bot call resolved, all three events below would see stale
+      // `lastEditAt`, pass the throttle, and queue three editMessageText
+      // calls onto `pending`. The synchronous update at the top of
+      // `postOrEdit` pins the throttle so only the first event in the
+      // burst fires.
       vi.useFakeTimers({ toFake: ["Date"] });
       vi.setSystemTime(new Date(0));
 
-      const { registry, bot } = start({ editIntervalMs: 500 });
+      const { plan, bot } = start({ editIntervalMs: 500 });
 
       // Initial post lands at t=0.
-      registry.publish(TASK_ID, { kind: "text", delta: "a" });
-      await new Promise((r) => setImmediate(r));
+      await plan.appendText("a");
+      await tick();
       expect(bot.sent).toHaveLength(1);
       expect(bot.edits).toHaveLength(0);
 
-      // Cross the throttle window, then burst three events synchronously
-      // without awaiting in between — this is what registry.publish does
-      // when text deltas stream in from the orchestrator.
+      // Cross the throttle window, then burst three events synchronously —
+      // each handle call publishes before it returns.
       vi.setSystemTime(new Date(600));
-      registry.publish(TASK_ID, { kind: "text", delta: "b" });
-      registry.publish(TASK_ID, { kind: "text", delta: "c" });
-      registry.publish(TASK_ID, { kind: "text", delta: "d" });
-      await new Promise((r) => setImmediate(r));
+      void plan.appendText("b");
+      void plan.appendText("c");
+      void plan.appendText("d");
+      await tick();
 
       expect(bot.edits).toHaveLength(1);
     });

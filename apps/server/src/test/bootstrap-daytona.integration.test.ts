@@ -106,7 +106,7 @@ describe("bootstrap with sandboxClientOverride (FakeDaytonaSandboxClient)", () =
     expect(result).toEqual({ ok: true, runtime: "daytona-fake" });
   });
 
-  it("registers the coding orchestrator + verify + cleanup + orphan-sweep functions", () => {
+  it("registers the coding orchestrator + verify + cleanup + sweep functions", () => {
     const ids = functionIds(bootstrapResult.functions);
     expect(ids).toContain("coding-task-start");
     expect(ids).toContain("coding-task-execute");
@@ -114,6 +114,7 @@ describe("bootstrap with sandboxClientOverride (FakeDaytonaSandboxClient)", () =
     expect(ids).toContain("coding-cleanup-run-branch");
     expect(ids).toContain("coding-orphan-run-branch-sweep-cron");
     expect(ids).toContain("coding-orphan-run-branch-sweep-repo");
+    expect(ids).toContain("coding-stream-sweep");
   });
 
   it("does not register the local-docker sandbox-reaper (no docker handle)", () => {

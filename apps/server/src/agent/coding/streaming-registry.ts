@@ -1,22 +1,10 @@
-import { EventEmitter } from "node:events";
 import { logger } from "../../logger.js";
+import type { ExecuteStreamHandle, PlanStreamHandle } from "./orchestrator.js";
 
 const log = logger.child({ component: "coding.streaming-registry" });
 
 /**
- * Generic reference to a chat message Cogmo has already posted and edits in
- * place as the task progresses. Stringly-typed for portability — Telegram
- * uses integers, but Slack/Discord/etc. use snowflakes/timestamps; the
- * adapter coerces.
- */
-export interface ProgressMessageRef {
-  channelId: string; // cogmo `channels.id`
-  chatId: string; // platform-side chat/conversation id
-  messageId: string; // platform-side message id
-}
-
-/**
- * Events the orchestrator publishes per task while the CLI is streaming.
+ * Events the orchestrators publish per task while the CLI is streaming.
  * Mirrors the meaningful subset of `CodingEvent`, flattened for consumers
  * that just need to render progress (not parse tool-use semantics).
  */
@@ -43,151 +31,149 @@ export type CodingStreamEvent =
   | { kind: "execute_complete"; ok: boolean; tokens?: { input: number; output: number } }
   | { kind: "failed"; reason: string };
 
-/**
- * Snapshot of the per-task state the registry holds. Returned to consumers
- * so a late subscriber can render the message body it would have built had
- * it been listening from the start.
- */
-export interface CodingStreamSnapshot {
-  /** Accumulated text deltas (plan body during plan phase, narration during execute). */
-  accumulatedText: string;
-  /** Set once the Telegram (or other) adapter has posted the progress message. */
-  progressMessageRef: ProgressMessageRef | null;
+type CodingStreamListener = (event: CodingStreamEvent) => void | Promise<void>;
+
+interface TaskStream {
+  readonly listeners: Set<CodingStreamListener>;
+  /** The previous sweep found the task ended. */
+  endedAtLastSweep: boolean;
 }
 
-export type CodingStreamListener = (event: CodingStreamEvent) => void | Promise<void>;
-export type CodingStreamUnsubscribe = () => void;
-
-interface TaskState {
-  emitter: EventEmitter;
-  accumulatedText: string;
-  progressMessageRef: ProgressMessageRef | null;
-}
-
-const STREAM_EVENT = "stream";
-
 /**
- * Bridge between the durable orchestrator (publisher) and the turn-bound
- * delivery layer (subscriber).
+ * In-process fan-out of each coding task's progress: the durable
+ * orchestrators publish through the handles `planStream` and
+ * `executeStream` return, and the delivery layer subscribes.
  *
- * Why in-process and not Inngest events: text deltas land at chat-cadence
- * (one event per few characters). Routing each through a workflow event bus
- * costs serialize + persist + dispatch overhead per delta and floods the
- * Inngest dashboard. Cogmo is single-node; the orchestrator and the
- * Telegram adapter live in the same process, so a Node `EventEmitter` is
- * the right primitive — same pattern `DeliveryRouter` uses for chat
- * streaming. Inngest events stay in use for state transitions
- * (`task/start`, `plan-approved`, `completed`) where durability and
- * cross-process delivery matter.
+ * In-process rather than Inngest events because text deltas land at chat
+ * cadence, and routing each through the bus would serialize, persist and
+ * dispatch every few characters. Cogmo is single-node, so the orchestrators
+ * and the Telegram adapter share a process. Inngest events carry the state
+ * transitions (`task/start`, `plan-approved`, `failed`), where durability
+ * matters.
  *
- * Lifecycle: `getOrCreate(taskId)` is implicit on first publish/subscribe;
- * call `dispose(taskId)` once the task reaches a terminal state to free
- * the per-task state and detach all listeners. Re-publishing after dispose
- * implicitly creates a fresh state entry — the registry doesn't try to
- * prevent that, since the orchestrator is the sole authority on lifecycle.
+ * The registry holds a task only while something is subscribed to it:
  *
- * Late-subscriber semantics: events emitted before `subscribe()` are NOT
- * replayed. Consumers that need the buffered body (typical: the Telegram
- * adapter rebuilding the progress message after reconnect) should read
- * `getSnapshot()` and combine it with the live event stream.
+ * - `subscribe` opens the task's stream. A publish to a task without one is
+ *   dropped, so publishing never holds state: a replayed or retried step
+ *   body, or the verify phase streaming after execute ended the stream,
+ *   changes nothing.
+ * - `failed`, and an `execute_complete` reporting success, end the stream:
+ *   every subscriber gets the event and the registry lets go of the task.
+ *   A failed execute's `execute_complete` is followed by the `failed` that
+ *   carries the reason, so it doesn't end the stream.
+ * - A task can end without its stream ending: cancelled or revised at the
+ *   plan gate, failed before a stream opened, or failed by reconcile after
+ *   its worker died. `sweep` releases a task the database reports ended at
+ *   two consecutive sweeps; the second is the grace an orchestrator's final
+ *   event gets after its status write.
+ *
+ * A task awaiting approval keeps its stream, so the execute phase edits the
+ * message the plan went to. Admission caps non-terminal tasks per repo,
+ * which bounds what the registry holds.
+ *
+ * Publishers are isolated from subscribers. A listener that throws or
+ * rejects is logged, and its siblings still get the event. The registry
+ * never awaits a listener, so one that hangs holds neither the orchestrator
+ * nor the task. Events aren't replayed: a subscriber sees what is published
+ * after it subscribes.
  */
 export class CodingStreamingRegistry {
-  readonly #states = new Map<string, TaskState>();
+  readonly #streams = new Map<string, TaskStream>();
 
-  /**
-   * Emit `event` to all current subscribers of `taskId`. For text events,
-   * also append to the accumulated text snapshot. No-op listener invocation
-   * if no one is subscribed — but text accumulation still happens, so a
-   * subscriber that attaches mid-stream can read the buffered text via
-   * `getSnapshot()`.
-   */
-  publish(taskId: string, event: CodingStreamEvent): void {
-    const state = this.#getOrCreate(taskId);
-    if (event.kind === "text") state.accumulatedText += event.delta;
-    if (event.kind === "plan_finalized") state.accumulatedText = event.plan;
-    // Isolate publisher (orchestrator) from subscriber failures. Node's
-    // EventEmitter.emit is synchronous and propagates the FIRST listener
-    // error — without this guard a transient Telegram API error in the
-    // progress subscriber would bubble into the orchestrator's streaming
-    // loop and abort the task. We deliver each listener individually so a
-    // throwing one doesn't starve later listeners on the same event, and
-    // catch BOTH sync throws and async rejections (subscribers are
-    // typically async functions returning a promise).
-    for (const listener of state.emitter.listeners(STREAM_EVENT)) {
-      try {
-        const result = (listener as CodingStreamListener)(event);
-        if (result && typeof (result as Promise<void>).catch === "function") {
-          (result as Promise<void>).catch((err: unknown) => {
-            log.warn({ err, taskId, eventKind: event.kind }, "coding stream listener rejected");
-          });
-        }
-      } catch (err) {
-        log.warn({ err, taskId, eventKind: event.kind }, "coding stream listener threw");
-      }
-    }
-  }
-
-  /** Subscribe to live events for `taskId`. Returns an unsubscribe function. */
-  subscribe(taskId: string, listener: CodingStreamListener): CodingStreamUnsubscribe {
-    const state = this.#getOrCreate(taskId);
-    state.emitter.on(STREAM_EVENT, listener);
-    return () => state.emitter.off(STREAM_EVENT, listener);
-  }
-
-  /**
-   * Snapshot of accumulated state. Returns null if the task has no entry —
-   * either it was never started or it's been disposed. Returned object is a
-   * defensive copy; mutating it does not affect the registry.
-   */
-  getSnapshot(taskId: string): CodingStreamSnapshot | null {
-    const state = this.#states.get(taskId);
-    if (!state) return null;
+  /** The plan orchestrator's handle for `taskId`. */
+  planStream(taskId: string): PlanStreamHandle {
     return {
-      accumulatedText: state.accumulatedText,
-      progressMessageRef: state.progressMessageRef ? { ...state.progressMessageRef } : null,
+      appendText: async (delta) => this.#publish(taskId, { kind: "text", delta }),
+      finalize: async (plan, opts) =>
+        this.#publish(taskId, {
+          kind: "plan_finalized",
+          plan,
+          ...(opts?.autoApproved && { autoApproved: true }),
+        }),
+      fail: async (reason) => this.#publish(taskId, { kind: "failed", reason }),
     };
   }
 
-  /**
-   * Record the platform-side reference to the progress message once the
-   * adapter has posted it. Consumers reading `getSnapshot()` after this
-   * call see the ref; subscribers do not get a separate event.
-   */
-  setProgressMessageRef(taskId: string, ref: ProgressMessageRef): void {
-    const state = this.#getOrCreate(taskId);
-    state.progressMessageRef = { ...ref };
+  /** The execute and verify orchestrators' handle for `taskId`. */
+  executeStream(taskId: string): ExecuteStreamHandle {
+    return {
+      started: async () => this.#publish(taskId, { kind: "execute_started" }),
+      appendText: async (delta) => this.#publish(taskId, { kind: "text", delta }),
+      toolCall: async (tool) => this.#publish(taskId, { kind: "tool_call", tool }),
+      toolResult: async (tool, ok, summary) =>
+        this.#publish(taskId, {
+          kind: "tool_result",
+          tool,
+          ok,
+          ...(summary !== undefined && { summary }),
+        }),
+      complete: async (ok, tokens) =>
+        this.#publish(taskId, {
+          kind: "execute_complete",
+          ok,
+          ...(tokens !== undefined && { tokens }),
+        }),
+      fail: async (reason) => this.#publish(taskId, { kind: "failed", reason }),
+    };
   }
 
-  /**
-   * Tear down per-task state and detach every subscriber. Idempotent — a
-   * second dispose on the same taskId is a no-op.
-   */
-  dispose(taskId: string): void {
-    const state = this.#states.get(taskId);
-    if (!state) return;
-    state.emitter.removeAllListeners(STREAM_EVENT);
-    this.#states.delete(taskId);
-  }
-
-  /** Number of tasks currently held — exposed for tests + diagnostics. */
-  size(): number {
-    return this.#states.size;
-  }
-
-  #getOrCreate(taskId: string): TaskState {
-    let state = this.#states.get(taskId);
-    if (!state) {
-      state = {
-        emitter: new EventEmitter(),
-        accumulatedText: "",
-        progressMessageRef: null,
-      };
-      // Allow many subscribers without Node's "MaxListenersExceededWarning"
-      // — practically there's only ever 1 (the Telegram delivery side), but
-      // tests subscribe multiple listeners and the warning is just noise.
-      state.emitter.setMaxListeners(0);
-      this.#states.set(taskId, state);
+  /** Deliver `taskId`'s events to `listener` until its stream ends. */
+  subscribe(taskId: string, listener: CodingStreamListener): void {
+    let stream = this.#streams.get(taskId);
+    if (!stream) {
+      stream = { listeners: new Set(), endedAtLastSweep: false };
+      this.#streams.set(taskId, stream);
     }
-    return state;
+    stream.listeners.add(listener);
+  }
+
+  /** The tasks the registry holds — what a sweep asks the database about. */
+  taskIds(): ReadonlyArray<string> {
+    return [...this.#streams.keys()];
+  }
+
+  /**
+   * Release every task in `ended`, the held tasks the database reports
+   * terminal or gone, that the previous sweep also found ended. Returns how
+   * many were released.
+   */
+  sweep(ended: ReadonlySet<string>): number {
+    let released = 0;
+    for (const taskId of ended) {
+      const stream = this.#streams.get(taskId);
+      if (!stream) continue;
+      if (stream.endedAtLastSweep) {
+        this.#streams.delete(taskId);
+        released++;
+      } else {
+        stream.endedAtLastSweep = true;
+      }
+    }
+    return released;
+  }
+
+  #publish(taskId: string, event: CodingStreamEvent): void {
+    const stream = this.#streams.get(taskId);
+    if (!stream) return;
+    if (endsStream(event)) this.#streams.delete(taskId);
+    // A copy, so a listener that subscribes during delivery gets the next event, not this one.
+    for (const listener of [...stream.listeners]) deliver(listener, event, taskId);
+  }
+}
+
+function endsStream(event: CodingStreamEvent): boolean {
+  return event.kind === "failed" || (event.kind === "execute_complete" && event.ok);
+}
+
+function deliver(listener: CodingStreamListener, event: CodingStreamEvent, taskId: string): void {
+  try {
+    const result = listener(event);
+    if (result instanceof Promise) {
+      result.catch((err: unknown) => {
+        log.warn({ err, taskId, eventKind: event.kind }, "coding stream listener rejected");
+      });
+    }
+  } catch (err) {
+    log.warn({ err, taskId, eventKind: event.kind }, "coding stream listener threw");
   }
 }

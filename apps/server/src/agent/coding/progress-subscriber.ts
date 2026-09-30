@@ -34,26 +34,25 @@ export interface SubscriberArgs {
   taskId: string;
   chatId: number;
   goal: string;
-  channelId: string;
   bot: ProgressBot;
-  registry: CodingStreamingRegistry;
+  registry: Pick<CodingStreamingRegistry, "subscribe">;
   /** ms between throttled in-place edits during streaming. */
   editIntervalMs?: number;
 }
 
 /**
- * Per-task subscriber that owns the lifecycle of one Telegram message:
- * post once, edit in place as plan + execute events arrive, attach the
- * inline keyboard when the plan finalises, render the final state on
- * complete / fail.
+ * Per-task subscriber that owns one Telegram message: post once, edit in
+ * place as plan + execute events arrive, attach the inline keyboard when
+ * the plan finalises, render the final state on complete / fail. It lives
+ * as long as the task's stream in the registry, which ends it.
  *
  * Single-process by design — a process restart loses the in-memory
  * subscriber. The orchestrator keeps running (Inngest-durable) and the
- * eventual completion writes are visible in DB; the user just won't see
- * the live stream until reconnect logic lands in a later slice.
+ * eventual completion writes are visible in DB; the user doesn't see the
+ * rest of the live stream.
  */
-export function startCodingProgressSubscriber(args: SubscriberArgs): () => void {
-  const { taskId, chatId, goal, channelId, bot, registry } = args;
+export function startCodingProgressSubscriber(args: SubscriberArgs): void {
+  const { taskId, chatId, goal, bot, registry } = args;
   const editIntervalMs = args.editIntervalMs ?? 500;
 
   const state: ProgressFormatInput = { goal, phase: "planning", body: "" };
@@ -67,7 +66,7 @@ export function startCodingProgressSubscriber(args: SubscriberArgs): () => void 
   let pending: Promise<void> = Promise.resolve();
 
   async function postOrEdit(replyMarkup?: PlanInlineKeyboardMarkup): Promise<void> {
-    // Update synchronously before awaiting the bot call. Registry.publish
+    // Update synchronously before awaiting the bot call. The registry
     // doesn't await listener promises, so handlers for back-to-back events
     // interleave; the next handler's throttle check must see this bump or
     // it reads a stale timestamp and queues a redundant edit.
@@ -79,11 +78,6 @@ export function startCodingProgressSubscriber(args: SubscriberArgs): () => void 
         if (messageId === null) {
           const sent = await bot.sendMessage(chatId, text, opts);
           messageId = sent.message_id;
-          registry.setProgressMessageRef(taskId, {
-            channelId,
-            chatId: String(chatId),
-            messageId: String(sent.message_id),
-          });
         } else {
           await bot.editMessageText(chatId, messageId, text, opts);
         }
@@ -103,7 +97,7 @@ export function startCodingProgressSubscriber(args: SubscriberArgs): () => void 
     await postOrEdit();
   }
 
-  const unsubscribe = registry.subscribe(taskId, async (event) => {
+  registry.subscribe(taskId, async (event) => {
     switch (event.kind) {
       case "text":
         state.body += event.delta;
@@ -141,20 +135,14 @@ export function startCodingProgressSubscriber(args: SubscriberArgs): () => void 
         delete state.lastActivity;
         if (event.tokens) state.tokens = event.tokens;
         await postOrEdit();
-        // Once execute completes (success or fail), the subscriber is
-        // done — drop the listener to free memory.
-        unsubscribe();
         break;
       case "failed":
         state.phase = "failed";
         state.failureReason = event.reason;
         await postOrEdit();
-        unsubscribe();
         break;
     }
   });
-
-  return () => unsubscribe();
 }
 
 function setPhase(ok: boolean, ifTrue: ProgressPhase, ifFalse: ProgressPhase): ProgressPhase {

@@ -1,244 +1,270 @@
-import { describe, expect, it, vi } from "vitest";
-import {
-  type CodingStreamEvent,
-  CodingStreamingRegistry,
-  type ProgressMessageRef,
-} from "./streaming-registry.js";
+import { describe, expect, it } from "vitest";
+import { type CodingStreamEvent, CodingStreamingRegistry } from "./streaming-registry.js";
 
-const REF: ProgressMessageRef = {
-  channelId: "ch-1",
-  chatId: "chat-1",
-  messageId: "msg-1",
-};
+function collect(reg: CodingStreamingRegistry, taskId: string): CodingStreamEvent[] {
+  const seen: CodingStreamEvent[] = [];
+  reg.subscribe(taskId, (e) => {
+    seen.push(e);
+  });
+  return seen;
+}
 
 describe("CodingStreamingRegistry", () => {
-  it("delivers events to subscribers in publish order", () => {
-    const reg = new CodingStreamingRegistry();
-    const seen: CodingStreamEvent[] = [];
-    reg.subscribe("t1", (e) => {
-      seen.push(e);
+  describe("handles", () => {
+    it("the plan handle publishes text, the finalized plan and a failure", async () => {
+      const reg = new CodingStreamingRegistry();
+      const seen = collect(reg, "t1");
+      const plan = reg.planStream("t1");
+
+      await plan.appendText("## Plan\n");
+      await plan.finalize("## Plan\nbody");
+      await plan.finalize("## Plan\nbody", { autoApproved: true });
+      await plan.fail("boom");
+
+      expect(seen).toEqual([
+        { kind: "text", delta: "## Plan\n" },
+        { kind: "plan_finalized", plan: "## Plan\nbody" },
+        { kind: "plan_finalized", plan: "## Plan\nbody", autoApproved: true },
+        { kind: "failed", reason: "boom" },
+      ]);
     });
 
-    reg.publish("t1", { kind: "text", delta: "hello " });
-    reg.publish("t1", { kind: "text", delta: "world" });
-    reg.publish("t1", { kind: "tool_call", tool: "Read" });
+    it("the execute handle publishes progress, then completion", async () => {
+      const reg = new CodingStreamingRegistry();
+      const seen = collect(reg, "t1");
+      const execute = reg.executeStream("t1");
 
-    expect(seen).toEqual([
+      await execute.started?.();
+      await execute.appendText("editing");
+      await execute.toolCall("Edit");
+      await execute.toolResult("Edit", true);
+      await execute.toolResult("Edit", false, "no such file");
+      await execute.complete(true, { input: 10, output: 5 });
+
+      expect(seen).toEqual([
+        { kind: "execute_started" },
+        { kind: "text", delta: "editing" },
+        { kind: "tool_call", tool: "Edit" },
+        { kind: "tool_result", tool: "Edit", ok: true },
+        { kind: "tool_result", tool: "Edit", ok: false, summary: "no such file" },
+        { kind: "execute_complete", ok: true, tokens: { input: 10, output: 5 } },
+      ]);
+    });
+  });
+
+  it("delivers events to every subscriber of the task, in publish order", async () => {
+    const reg = new CodingStreamingRegistry();
+    const a = collect(reg, "t1");
+    const b = collect(reg, "t1");
+    const other = collect(reg, "t2");
+    const plan = reg.planStream("t1");
+
+    await plan.appendText("hello ");
+    await plan.appendText("world");
+
+    const expected = [
       { kind: "text", delta: "hello " },
       { kind: "text", delta: "world" },
-      { kind: "tool_call", tool: "Read" },
-    ]);
+    ];
+    expect(a).toEqual(expected);
+    expect(b).toEqual(expected);
+    expect(other).toEqual([]);
   });
 
-  it("accumulates text deltas into the snapshot", () => {
+  it("does not replay events published before a subscriber arrived", async () => {
     const reg = new CodingStreamingRegistry();
-    reg.publish("t1", { kind: "text", delta: "## Plan\n" });
-    reg.publish("t1", { kind: "text", delta: "1. Step\n" });
+    collect(reg, "t1");
+    const plan = reg.planStream("t1");
+    await plan.appendText("missed");
 
-    const snap = reg.getSnapshot("t1");
-    expect(snap?.accumulatedText).toBe("## Plan\n1. Step\n");
+    const late = collect(reg, "t1");
+    await plan.appendText("live");
+
+    expect(late).toEqual([{ kind: "text", delta: "live" }]);
   });
 
-  it("plan_finalized replaces the accumulated text", () => {
-    // The streamed deltas may be incomplete (e.g. the CLI emits the canonical
-    // plan body in the result event after the deltas); plan_finalized is
-    // authoritative.
-    const reg = new CodingStreamingRegistry();
-    reg.publish("t1", { kind: "text", delta: "draft" });
-    reg.publish("t1", { kind: "plan_finalized", plan: "## Final\nbody" });
+  describe("lifecycle", () => {
+    it("holds nothing for a task published to with no subscriber", async () => {
+      const reg = new CodingStreamingRegistry();
+      const plan = reg.planStream("t1");
 
-    expect(reg.getSnapshot("t1")?.accumulatedText).toBe("## Final\nbody");
-  });
+      await plan.appendText("x".repeat(10_000));
+      await plan.finalize("the plan");
 
-  it("late subscribers do NOT replay missed events but DO see the buffered text via snapshot", () => {
-    const reg = new CodingStreamingRegistry();
-    reg.publish("t1", { kind: "text", delta: "missed" });
-
-    const seen: CodingStreamEvent[] = [];
-    reg.subscribe("t1", (e) => {
-      seen.push(e);
-    });
-    expect(seen).toEqual([]);
-    expect(reg.getSnapshot("t1")?.accumulatedText).toBe("missed");
-
-    reg.publish("t1", { kind: "text", delta: "+live" });
-    expect(seen).toEqual([{ kind: "text", delta: "+live" }]);
-    expect(reg.getSnapshot("t1")?.accumulatedText).toBe("missed+live");
-  });
-
-  it("supports multiple subscribers on the same task", () => {
-    const reg = new CodingStreamingRegistry();
-    const a: CodingStreamEvent[] = [];
-    const b: CodingStreamEvent[] = [];
-    reg.subscribe("t1", (e) => {
-      a.push(e);
-    });
-    reg.subscribe("t1", (e) => {
-      b.push(e);
+      expect(reg.taskIds()).toEqual([]);
     });
 
-    reg.publish("t1", { kind: "tool_result", tool: "Read", ok: true });
+    it("holds a subscribed task across the plan gate", async () => {
+      const reg = new CodingStreamingRegistry();
+      const seen = collect(reg, "t1");
 
-    expect(a).toEqual([{ kind: "tool_result", tool: "Read", ok: true }]);
-    expect(b).toEqual([{ kind: "tool_result", tool: "Read", ok: true }]);
-  });
+      await reg.planStream("t1").finalize("the plan");
+      await reg.executeStream("t1").started?.();
 
-  it("scopes subscribers and snapshots by taskId", () => {
-    const reg = new CodingStreamingRegistry();
-    const seen: CodingStreamEvent[] = [];
-    reg.subscribe("t1", (e) => {
-      seen.push(e);
+      expect(reg.taskIds()).toEqual(["t1"]);
+      expect(seen.map((e) => e.kind)).toEqual(["plan_finalized", "execute_started"]);
     });
 
-    reg.publish("t2", { kind: "text", delta: "for-t2" });
+    it("releases a task once its stream fails", async () => {
+      const reg = new CodingStreamingRegistry();
+      const seen = collect(reg, "t1");
 
-    expect(seen).toEqual([]);
-    expect(reg.getSnapshot("t1")?.accumulatedText).toBe("");
-    expect(reg.getSnapshot("t2")?.accumulatedText).toBe("for-t2");
-  });
+      await reg.planStream("t1").fail("claude exit code 2");
 
-  it("unsubscribe stops further deliveries", () => {
-    const reg = new CodingStreamingRegistry();
-    const seen: CodingStreamEvent[] = [];
-    const unsubscribe = reg.subscribe("t1", (e) => {
-      seen.push(e);
+      expect(seen).toEqual([{ kind: "failed", reason: "claude exit code 2" }]);
+      expect(reg.taskIds()).toEqual([]);
     });
 
-    reg.publish("t1", { kind: "text", delta: "1" });
-    unsubscribe();
-    reg.publish("t1", { kind: "text", delta: "2" });
+    it("releases a task once execute reports success", async () => {
+      const reg = new CodingStreamingRegistry();
+      const seen = collect(reg, "t1");
 
-    expect(seen).toEqual([{ kind: "text", delta: "1" }]);
-    expect(reg.getSnapshot("t1")?.accumulatedText).toBe("12");
-  });
+      await reg.executeStream("t1").complete(true);
 
-  it("setProgressMessageRef stores a defensive copy and reads via snapshot", () => {
-    const reg = new CodingStreamingRegistry();
-    const ref = { ...REF };
-    reg.setProgressMessageRef("t1", ref);
-    ref.messageId = "mutated";
-
-    const snap = reg.getSnapshot("t1");
-    expect(snap?.progressMessageRef).toEqual(REF);
-  });
-
-  it("dispose clears state and detaches subscribers", () => {
-    const reg = new CodingStreamingRegistry();
-    const listener = vi.fn();
-    reg.subscribe("t1", listener);
-    reg.publish("t1", { kind: "text", delta: "x" });
-    expect(listener).toHaveBeenCalledTimes(1);
-    expect(reg.size()).toBe(1);
-
-    reg.dispose("t1");
-    expect(reg.getSnapshot("t1")).toBeNull();
-    expect(reg.size()).toBe(0);
-
-    // Re-publishing creates fresh state; the prior listener is gone.
-    reg.publish("t1", { kind: "text", delta: "y" });
-    expect(listener).toHaveBeenCalledTimes(1);
-    expect(reg.getSnapshot("t1")?.accumulatedText).toBe("y");
-  });
-
-  it("dispose is idempotent", () => {
-    const reg = new CodingStreamingRegistry();
-    reg.publish("t1", { kind: "text", delta: "x" });
-    reg.dispose("t1");
-    expect(() => reg.dispose("t1")).not.toThrow();
-    expect(reg.size()).toBe(0);
-  });
-
-  it("snapshot returns null for unknown taskId", () => {
-    const reg = new CodingStreamingRegistry();
-    expect(reg.getSnapshot("never")).toBeNull();
-  });
-
-  it("getSnapshot returns a defensive copy of progressMessageRef", () => {
-    const reg = new CodingStreamingRegistry();
-    reg.setProgressMessageRef("t1", REF);
-    const snap = reg.getSnapshot("t1");
-    if (snap?.progressMessageRef) {
-      snap.progressMessageRef.messageId = "mutated-by-consumer";
-    }
-    expect(reg.getSnapshot("t1")?.progressMessageRef?.messageId).toBe(REF.messageId);
-  });
-
-  it("isolates publisher from a throwing subscriber and still delivers to siblings", () => {
-    // Publisher (orchestrator) must not be killed by a subscriber failure
-    // — a throwing or rejecting listener (e.g. transient Telegram API
-    // error) is logged and dropped; later listeners on the same event
-    // still fire.
-    const reg = new CodingStreamingRegistry();
-    const survivor: string[] = [];
-    reg.subscribe("t1", () => {
-      throw new Error("boom");
+      expect(seen).toEqual([{ kind: "execute_complete", ok: true }]);
+      expect(reg.taskIds()).toEqual([]);
     });
-    reg.subscribe("t1", (e) => {
-      if (e.kind === "text") survivor.push(e.delta);
+
+    it("keeps a failed execute's stream open for the failure that follows", async () => {
+      const reg = new CodingStreamingRegistry();
+      const seen = collect(reg, "t1");
+      const execute = reg.executeStream("t1");
+
+      await execute.complete(false);
+      expect(reg.taskIds()).toEqual(["t1"]);
+
+      await execute.fail("claude exit code 1");
+      expect(seen).toEqual([
+        { kind: "execute_complete", ok: false },
+        { kind: "failed", reason: "claude exit code 1" },
+      ]);
+      expect(reg.taskIds()).toEqual([]);
     });
-    expect(() => reg.publish("t1", { kind: "text", delta: "x" })).not.toThrow();
-    expect(survivor).toEqual(["x"]);
+
+    it("drops a publish after the stream ended instead of re-creating the task", async () => {
+      // The verify orchestrator streams its test output after execute has
+      // ended the stream; a retried step body publishes again.
+      const reg = new CodingStreamingRegistry();
+      const seen = collect(reg, "t1");
+      const execute = reg.executeStream("t1");
+      await execute.complete(true);
+
+      await execute.appendText("verify output");
+      await execute.fail("verify failed (exit 1)");
+
+      expect(seen).toEqual([{ kind: "execute_complete", ok: true }]);
+      expect(reg.taskIds()).toEqual([]);
+    });
   });
 
-  it("isolates publisher from a rejecting async subscriber too", async () => {
-    // Subscribers are typically async; an unhandled promise rejection
-    // would crash the process under Node's --unhandled-rejections=strict.
-    // Registry catches the rejection at the boundary.
-    const reg = new CodingStreamingRegistry();
-    const survivor: string[] = [];
-    reg.subscribe("t1", async () => {
-      throw new Error("async boom");
+  describe("sweep", () => {
+    it("releases a task the database reports ended at two consecutive sweeps", async () => {
+      const reg = new CodingStreamingRegistry();
+      const seen = collect(reg, "t1");
+
+      expect(reg.sweep(new Set(["t1"]))).toBe(0);
+      expect(reg.taskIds()).toEqual(["t1"]);
+
+      expect(reg.sweep(new Set(["t1"]))).toBe(1);
+      expect(reg.taskIds()).toEqual([]);
+
+      await reg.executeStream("t1").started?.();
+      expect(seen).toEqual([]);
     });
-    reg.subscribe("t1", (e) => {
-      if (e.kind === "text") survivor.push(e.delta);
+
+    it("leaves the final event in flight after a status write to reach the subscriber", async () => {
+      const reg = new CodingStreamingRegistry();
+      const seen = collect(reg, "t1");
+
+      reg.sweep(new Set(["t1"]));
+      await reg.planStream("t1").fail("claude exit code 2");
+
+      expect(seen).toEqual([{ kind: "failed", reason: "claude exit code 2" }]);
+      expect(reg.taskIds()).toEqual([]);
     });
-    expect(() => reg.publish("t1", { kind: "text", delta: "y" })).not.toThrow();
-    // Wait a microtask so the async listener's rejection is observed.
-    await new Promise((r) => setImmediate(r));
-    expect(survivor).toEqual(["y"]);
+
+    it("keeps a task the database reports live", () => {
+      const reg = new CodingStreamingRegistry();
+      collect(reg, "live");
+      collect(reg, "ended");
+
+      reg.sweep(new Set(["ended"]));
+      reg.sweep(new Set(["ended"]));
+
+      expect(reg.taskIds()).toEqual(["live"]);
+    });
+
+    it("ignores a task it doesn't hold", () => {
+      const reg = new CodingStreamingRegistry();
+
+      expect(reg.sweep(new Set(["never-subscribed"]))).toBe(0);
+      expect(reg.sweep(new Set(["never-subscribed"]))).toBe(0);
+      expect(reg.taskIds()).toEqual([]);
+    });
+  });
+
+  describe("isolation", () => {
+    it("a throwing subscriber reaches neither the publisher nor its siblings", async () => {
+      const reg = new CodingStreamingRegistry();
+      reg.subscribe("t1", () => {
+        throw new Error("boom");
+      });
+      const survivor = collect(reg, "t1");
+
+      await expect(reg.planStream("t1").appendText("x")).resolves.toBeUndefined();
+      expect(survivor).toEqual([{ kind: "text", delta: "x" }]);
+    });
+
+    it("a rejecting subscriber reaches neither the publisher nor its siblings", async () => {
+      // An unhandled rejection fails the run, so the registry must catch it.
+      const reg = new CodingStreamingRegistry();
+      reg.subscribe("t1", async () => {
+        throw new Error("async boom");
+      });
+      const survivor = collect(reg, "t1");
+
+      await expect(reg.planStream("t1").appendText("y")).resolves.toBeUndefined();
+      await new Promise((r) => setImmediate(r));
+      expect(survivor).toEqual([{ kind: "text", delta: "y" }]);
+    });
+
+    it("a subscriber that never settles holds neither the publisher nor the task", async () => {
+      const reg = new CodingStreamingRegistry();
+      reg.subscribe("t1", () => new Promise<void>(() => {}));
+      const execute = reg.executeStream("t1");
+
+      await execute.appendText("x");
+      await execute.fail("boom");
+
+      expect(reg.taskIds()).toEqual([]);
+    });
   });
 
   describe("concurrency invariants", () => {
-    it("delivers a high-volume burst to multiple subscribers in identical order", () => {
-      // Smoke test: under a single-threaded synchronous publisher with
-      // multiple subscribers, all subscribers must observe the same event
-      // sequence. A regression that introduced async dispatch, listener
-      // reordering, or per-subscriber buffering would surface here as
-      // diverging arrays.
+    it("delivers a high-volume burst to multiple subscribers in identical order", async () => {
+      // A regression that introduced async dispatch, listener reordering,
+      // or per-subscriber buffering would surface as diverging arrays.
       const reg = new CodingStreamingRegistry();
-      const a: string[] = [];
-      const b: string[] = [];
-      const c: string[] = [];
-      reg.subscribe("t1", (e) => {
-        if (e.kind === "text") a.push(e.delta);
-      });
-      reg.subscribe("t1", (e) => {
-        if (e.kind === "text") b.push(e.delta);
-      });
-      reg.subscribe("t1", (e) => {
-        if (e.kind === "text") c.push(e.delta);
-      });
+      const a = collect(reg, "t1");
+      const b = collect(reg, "t1");
+      const c = collect(reg, "t1");
+      const execute = reg.executeStream("t1");
 
       const N = 500;
       for (let i = 0; i < N; i++) {
-        reg.publish("t1", { kind: "text", delta: String(i) });
+        await execute.appendText(String(i));
       }
 
       expect(a).toHaveLength(N);
       expect(a).toEqual(b);
       expect(b).toEqual(c);
-      expect(a[0]).toBe("0");
-      expect(a.at(-1)).toBe(String(N - 1));
+      expect(a[0]).toEqual({ kind: "text", delta: "0" });
+      expect(a.at(-1)).toEqual({ kind: "text", delta: String(N - 1) });
     });
 
-    it("subscribers added during a publish do NOT fire for the current event (listener-set snapshot semantics)", () => {
-      // The publisher iterates a snapshot of the listener array (per
-      // `state.emitter.listeners(STREAM_EVENT)`). A listener that
-      // subscribes a sibling mid-emit must not cause that sibling to
-      // fire for the in-flight event — only for subsequent ones. This
-      // pins the contract so a refactor to live-iteration would fail
-      // here instead of double-delivering text deltas to a brand-new
-      // subscriber that just happened to attach at an unlucky moment.
+    it("subscribers added during a publish do NOT fire for the current event (listener-set snapshot semantics)", async () => {
+      // A listener that subscribes a sibling mid-emit must not cause that
+      // sibling to fire for the in-flight event — only for later ones.
       const reg = new CodingStreamingRegistry();
       const late: CodingStreamEvent[] = [];
       reg.subscribe("t1", (e) => {
@@ -248,68 +274,52 @@ describe("CodingStreamingRegistry", () => {
           });
         }
       });
+      const plan = reg.planStream("t1");
 
-      reg.publish("t1", { kind: "text", delta: "first" });
-      expect(late).toEqual([]); // newly added listener missed the in-flight event
+      await plan.appendText("first");
+      expect(late).toEqual([]);
 
-      reg.publish("t1", { kind: "text", delta: "second" });
+      await plan.appendText("second");
       expect(late).toEqual([{ kind: "text", delta: "second" }]);
     });
 
-    it("self-unsubscribe inside a listener does not affect the current event's siblings", () => {
-      // A subscriber that unsubscribes itself mid-emit completes its own
-      // invocation (already in the snapshotted listener array), and
-      // every other subscriber on the same event still fires. Future
-      // publishes skip the unsubscribed listener.
+    it("the event that ends a stream reaches every subscriber, though the task is released first", async () => {
       const reg = new CodingStreamingRegistry();
-      const a: number[] = [];
-      const b: number[] = [];
-      let unsubscribeA: (() => void) | undefined;
-      unsubscribeA = reg.subscribe("t1", (e) => {
-        if (e.kind === "text") {
-          a.push(Number(e.delta));
-          if (e.delta === "1") unsubscribeA?.(); // self-detach after first event
-        }
+      const heldDuringDelivery: ReadonlyArray<string>[] = [];
+      reg.subscribe("t1", () => {
+        heldDuringDelivery.push(reg.taskIds());
       });
-      reg.subscribe("t1", (e) => {
-        if (e.kind === "text") b.push(Number(e.delta));
-      });
+      const a = collect(reg, "t1");
+      const b = collect(reg, "t1");
 
-      reg.publish("t1", { kind: "text", delta: "1" });
-      reg.publish("t1", { kind: "text", delta: "2" });
-      reg.publish("t1", { kind: "text", delta: "3" });
+      await reg.executeStream("t1").fail("boom");
 
-      expect(a).toEqual([1]); // unsubscribed itself after delta=1
-      expect(b).toEqual([1, 2, 3]); // sibling unaffected
+      expect(heldDuringDelivery).toEqual([[]]);
+      expect(a).toEqual([{ kind: "failed", reason: "boom" }]);
+      expect(b).toEqual([{ kind: "failed", reason: "boom" }]);
     });
 
-    it("supports re-entrant publish: a listener that publishes another event delivers to all subscribers without infinite recursion", () => {
-      // Use case: the orchestrator's onTextDelta handler publishes a
-      // tool_result event in response to an inline pattern match. Node's
-      // EventEmitter supports synchronous re-entrancy (the inner emit
-      // completes before the outer for-loop advances), so listeners must
-      // see the inner event mid-outer-listener.
+    it("supports re-entrant publish: a listener that publishes another event delivers it without infinite recursion", async () => {
+      // The inner publish completes before the outer delivery loop advances,
+      // so the listener sees the inner event during its own invocation.
       const reg = new CodingStreamingRegistry();
       const seen: CodingStreamEvent[] = [];
+      const execute = reg.executeStream("t1");
       let reentered = false;
       reg.subscribe("t1", (e) => {
         seen.push(e);
         if (e.kind === "text" && e.delta === "outer" && !reentered) {
           reentered = true;
-          reg.publish("t1", { kind: "tool_call", tool: "Read" });
+          void execute.toolCall("Read");
         }
       });
 
-      reg.publish("t1", { kind: "text", delta: "outer" });
+      await execute.appendText("outer");
 
-      // Outer event observed first (the listener pushed it before
-      // re-entering); inner tool_call observed during the same listener
-      // invocation; outer reaches no further listeners (only one).
       expect(seen).toEqual([
         { kind: "text", delta: "outer" },
         { kind: "tool_call", tool: "Read" },
       ]);
-      expect(reentered).toBe(true);
     });
   });
 });
