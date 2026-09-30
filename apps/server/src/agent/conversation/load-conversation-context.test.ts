@@ -56,7 +56,10 @@ describe("loadConversationContext", () => {
     });
 
     expect(agentStore.getProfile).not.toHaveBeenCalled();
-    expect(agentStore.getActiveRules).toHaveBeenCalledWith(FAKE_TX, "p1");
+    expect(agentStore.getActiveRules).toHaveBeenCalledWith(FAKE_TX, {
+      profileId: "p1",
+      userId: "u1",
+    });
     expect(agentStore.getCoreMemoryBlocks).toHaveBeenCalledWith(FAKE_TX, "u1", null);
   });
 
@@ -88,6 +91,38 @@ describe("loadConversationContext core memory scope", () => {
     );
 
     expect(agentStore.getCoreMemoryBlocks).toHaveBeenCalledWith(FAKE_TX, "u1", "coder");
+  });
+
+  it("renders the user's instruction rules in a classed scope", async () => {
+    const agentStore = mockAgentStore();
+
+    await loadConversationContext(
+      { runInTx: fakeRunInTx, agentStore },
+      {
+        userId: "u1",
+        coreMemoryScope: { kind: "classed", profileClass: "coder", restricted: true },
+        profile: profile(),
+      },
+    );
+
+    expect(agentStore.getActiveRules).toHaveBeenCalledWith(FAKE_TX, {
+      profileId: "p1",
+      userId: "u1",
+    });
+  });
+
+  it("withholds the user's instruction rules from a turn without core memory", async () => {
+    const agentStore = mockAgentStore();
+
+    await loadConversationContext(
+      { runInTx: fakeRunInTx, agentStore },
+      { userId: "u1", coreMemoryScope: { kind: "none" }, profile: profile() },
+    );
+
+    expect(agentStore.getActiveRules).toHaveBeenCalledWith(FAKE_TX, {
+      profileId: "p1",
+      userId: null,
+    });
   });
 
   it("reads no core memory for a turn without it", async () => {

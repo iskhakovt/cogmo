@@ -21,13 +21,18 @@ import {
   labelRules,
 } from "./extraction-schema.js";
 
-const CONSOLIDATION_THRESHOLD = 30;
+/**
+ * Consolidation runs once the active learned rules pass this, matching the
+ * limit on a user's instruction rules so `# Rules` stays near 45 rules
+ * (design/evolution.md → Explicit Instructions → Tools).
+ */
+const CONSOLIDATION_THRESHOLD = 20;
 
 export interface ExtractionDeps {
   provider: LlmProvider;
   model: string;
   runInTx: Transactor;
-  store: Pick<AgentStore, "getCorrections" | "upsertCorrection" | "countActiveRules">;
+  store: Pick<AgentStore, "getCorrections" | "upsertCorrection" | "countActiveLearnedRules">;
   /**
    * Distinct channel types active for the conversation when this Observer
    * fired. Threaded into the extraction prompt and used to validate the
@@ -43,6 +48,7 @@ export interface ExtractionResult {
   contradictions: number;
   promoted: number;
   outOfScopeReinforcementsSkipped: number;
+  /** Reinforcements naming no listed rule, or one retired or merged since the list was read. */
   unknownRuleReinforcementsSkipped: number;
   consolidationNeeded: boolean;
 }
@@ -158,19 +164,20 @@ export async function extractCorrections(
       deps.runInTx,
       deps.store,
     );
+    if (result === null) {
+      logger.warn(
+        { rule: correction.rule, matchedId: existingRuleId },
+        "extraction: reinforce targets a rule retired or merged since it was listed — skipping",
+      );
+      unknownRuleReinforcementsSkipped++;
+      continue;
+    }
     if (correction.action === "new") extracted++;
     if (correction.action === "reinforce") reinforced++;
     if (result.promoted) promoted++;
   }
 
-  // `countActiveRules` counts both axes (channel-scoped + global), but
-  // `consolidateRules` only merges global rows. A flood of
-  // channel-scoped rules can therefore trip the threshold even though
-  // there's nothing to merge — `consolidateRules` short-circuits at
-  // its `< 2` global-rules check, so the cost is one redundant read
-  // per Observer fire. Left as-is until the steering_rules count
-  // crosses ~30 and that read becomes worth saving.
-  const activeCount = await deps.runInTx((tx) => deps.store.countActiveRules(tx, profileId));
+  const activeCount = await deps.runInTx((tx) => deps.store.countActiveLearnedRules(tx, profileId));
   const consolidationNeeded = activeCount > CONSOLIDATION_THRESHOLD;
 
   logger.info(
@@ -200,7 +207,8 @@ export async function extractCorrections(
 
 /**
  * Delegates to the store's upsert; the caller has already gated scope and
- * resolved the model's label to `existingRuleId` (null for a new rule).
+ * resolved the model's label to `existingRuleId` (null for a new rule). Null
+ * when that rule is no longer unretired.
  */
 async function applyCorrection(
   correction: CorrectionItem,
@@ -208,7 +216,7 @@ async function applyCorrection(
   existingRuleId: string | null,
   runInTx: Transactor,
   store: Pick<AgentStore, "upsertCorrection">,
-): Promise<{ promoted: boolean }> {
+): Promise<{ promoted: boolean } | null> {
   return runInTx((tx) =>
     store.upsertCorrection(tx, {
       rule: correction.rule,

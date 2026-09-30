@@ -3,6 +3,7 @@ import type { Transactor } from "../../db/index.js";
 import { logger } from "../../logger.js";
 import { expectDefined } from "../../test/assertions.js";
 import { mockProvider } from "../../test/factories.js";
+import { RuleGroupChangedError } from "../store/errors.js";
 import { type ConsolidationDeps, consolidateRules } from "./consolidate-rules.js";
 
 const FAKE_TX = { __mockTx: true } as never;
@@ -141,6 +142,56 @@ describe("consolidateRules", () => {
         priority: 100,
         observationCount: 5, // 3 + 2
       },
+    });
+  });
+
+  describe("a group a retirement changed", () => {
+    /** Two style rules and two domain rules, labelled R1–R4 in that order. */
+    const PAIRS: CorrectionRow[] = [
+      { ...expectDefined(LABELLED_RULES[0], "a"), id: "s1", rule: "A style" },
+      { ...expectDefined(LABELLED_RULES[0], "a"), id: "s2", rule: "B style" },
+      { ...expectDefined(LABELLED_RULES[1], "b"), id: "d1", rule: "C domain" },
+      { ...expectDefined(LABELLED_RULES[1], "b"), id: "d2", rule: "D domain" },
+    ];
+    const GROUPS = {
+      groups: [
+        { originalIds: ["R1", "R2"], mergedRule: "Style", category: "style" },
+        { originalIds: ["R3", "R4"], mergedRule: "Domain", category: "domain" },
+      ],
+    };
+
+    it("is skipped, and the next group merges", async () => {
+      const replaceRules = vi
+        .fn()
+        .mockRejectedValueOnce(new RuleGroupChangedError(2, 1))
+        .mockResolvedValueOnce({ id: "merged" });
+      const deps = mockConsolidationDeps([GROUPS], {
+        getCorrections: vi.fn().mockResolvedValue(PAIRS),
+        replaceRules,
+      });
+      const warn = vi.spyOn(logger, "warn");
+
+      const result = await consolidateRules("profile-1", deps);
+
+      expect(result).toEqual({ mergedGroups: 1, rulesRemoved: 1 });
+      expect(replaceRules.mock.calls.map(([, params]) => params.oldIds)).toEqual([
+        ["s1", "s2"],
+        ["d1", "d2"],
+      ]);
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({ oldIds: ["s1", "s2"] }),
+        expect.stringContaining("retired or merged"),
+      );
+      warn.mockRestore();
+    });
+
+    it("propagates any other failure", async () => {
+      const deps = mockConsolidationDeps([GROUPS], {
+        getCorrections: vi.fn().mockResolvedValue(PAIRS),
+        replaceRules: vi.fn().mockRejectedValue(new Error("connection reset")),
+      });
+
+      await expect(consolidateRules("profile-1", deps)).rejects.toThrow("connection reset");
     });
   });
 

@@ -1172,7 +1172,7 @@ describe("DrizzleAgentStore", () => {
         },
       ]);
 
-      const rules = await tx((trx) => store.getActiveRules(trx, profileId));
+      const rules = await tx((trx) => store.getActiveRules(trx, { profileId, userId: null }));
       expect(rules).toEqual([
         { rule: "Global safety rule", section: "always", channelType: null },
         { rule: "Be concise", section: "always", channelType: null },
@@ -1181,6 +1181,7 @@ describe("DrizzleAgentStore", () => {
 
     it("sections each rule by its source", async () => {
       const profileId = await seedProfile();
+      const userId = await seedUser();
       const { steeringRules } = await import("./schema.js");
       const rule = (
         text: string,
@@ -1196,6 +1197,7 @@ describe("DrizzleAgentStore", () => {
         observationCount: 2,
         profileId: null,
         channelType,
+        ...(source === "instruction" && { userId, quote: text }),
       });
       await db
         .insert(steeringRules)
@@ -1207,7 +1209,7 @@ describe("DrizzleAgentStore", () => {
           rule("Operator", "manual", 200, null),
         ]);
 
-      const rules = await tx((trx) => store.getActiveRules(trx, profileId));
+      const rules = await tx((trx) => store.getActiveRules(trx, { profileId, userId }));
       expect(Object.fromEntries(rules.map((r) => [r.rule, r.section]))).toEqual({
         Operator: "always",
         Stated: "from_user",
@@ -1245,7 +1247,11 @@ describe("DrizzleAgentStore", () => {
           rule("This profile, on telegram", { profileId, channelType: "telegram" }, 100),
         ]);
 
-      expect((await tx((trx) => store.getActiveRules(trx, profileId))).map((r) => r.rule)).toEqual([
+      expect(
+        (await tx((trx) => store.getActiveRules(trx, { profileId, userId: null }))).map(
+          (r) => r.rule,
+        ),
+      ).toEqual([
         "This profile, on telegram",
         "This profile, all channels",
         "All profiles, on telegram",
@@ -1278,7 +1284,7 @@ describe("DrizzleAgentStore", () => {
         },
       ]);
 
-      expect(await tx((trx) => store.getActiveRules(trx, profileId))).toEqual([
+      expect(await tx((trx) => store.getActiveRules(trx, { profileId, userId: null }))).toEqual([
         { rule: "Global safety rule", section: "always", channelType: null },
         { rule: "Profile style rule", section: "always", channelType: null },
       ]);
@@ -1342,29 +1348,32 @@ describe("DrizzleAgentStore", () => {
       expect(await has()).toBe(true);
     });
 
-    it("keeps tied priorities in id order after both corrections are promoted", async () => {
+    it("keeps tied priorities newest first after both corrections are promoted", async () => {
       const profileId = await seedProfile();
       // Created and graduated the way the Observer does it: each correction is
       // inserted at the same priority, then promoted by an in-place update that
-      // moves its row in the heap. Graduating the second first leaves the rows
-      // in reverse id order on disk.
-      const observe = (rule: string, existingRuleId?: string) =>
-        tx((trx) =>
-          store.upsertCorrection(trx, {
-            rule,
-            category: "style",
-            profileId: null,
-            ...(existingRuleId !== undefined && { existingRuleId }),
-          }),
+      // moves its row in the heap. Graduating the first last leaves the rows in
+      // id order on disk, the reverse of the rendered order.
+      const observe = async (rule: string, existingRuleId?: string) =>
+        expectDefined(
+          await tx((trx) =>
+            store.upsertCorrection(trx, {
+              rule,
+              category: "style",
+              profileId: null,
+              ...(existingRuleId !== undefined && { existingRuleId }),
+            }),
+          ),
+          rule,
         );
       const first = await observe("First rule");
       const second = await observe("Second rule");
       await observe("Second rule", second.id);
       await observe("First rule", first.id);
 
-      expect(await tx((trx) => store.getActiveRules(trx, profileId))).toEqual([
-        { rule: "First rule", section: "learned", channelType: null },
+      expect(await tx((trx) => store.getActiveRules(trx, { profileId, userId: null }))).toEqual([
         { rule: "Second rule", section: "learned", channelType: null },
+        { rule: "First rule", section: "learned", channelType: null },
       ]);
       expect((await tx((trx) => store.getCorrections(trx, profileId))).map((c) => c.rule)).toEqual([
         "First rule",
@@ -1374,7 +1383,7 @@ describe("DrizzleAgentStore", () => {
 
     it("returns empty array when no active rules", async () => {
       const profileId = await seedProfile();
-      expect(await tx((trx) => store.getActiveRules(trx, profileId))).toEqual([]);
+      expect(await tx((trx) => store.getActiveRules(trx, { profileId, userId: null }))).toEqual([]);
     });
 
     it("returns every channel's rules with their channel, the narrower scope first", async () => {
@@ -1413,7 +1422,7 @@ describe("DrizzleAgentStore", () => {
         },
       ]);
 
-      expect(await tx((trx) => store.getActiveRules(trx, profileId))).toEqual([
+      expect(await tx((trx) => store.getActiveRules(trx, { profileId, userId: null }))).toEqual([
         { rule: "Telegram rule", section: "always", channelType: "telegram" },
         { rule: "Slack rule", section: "always", channelType: "slack" },
         { rule: "Global rule", section: "always", channelType: null },
@@ -2752,12 +2761,15 @@ describe("DrizzleAgentStore", () => {
     });
 
     it("upsertCorrection inserts new rule as inactive with observationCount 1", async () => {
-      const result = await tx((trx) =>
-        store.upsertCorrection(trx, {
-          rule: "Prefer bullet points",
-          category: "style",
-          profileId: null,
-        }),
+      const result = expectDefined(
+        await tx((trx) =>
+          store.upsertCorrection(trx, {
+            rule: "Prefer bullet points",
+            category: "style",
+            profileId: null,
+          }),
+        ),
+        "upsert",
       );
 
       expect(result.promoted).toBe(false);
@@ -2786,13 +2798,16 @@ describe("DrizzleAgentStore", () => {
     });
 
     it("upsertCorrection persists channelType on a new rule when supplied", async () => {
-      const result = await tx((trx) =>
-        store.upsertCorrection(trx, {
-          rule: "Skip markdown headings here",
-          category: "style",
-          profileId: null,
-          channelType: "telegram",
-        }),
+      const result = expectDefined(
+        await tx((trx) =>
+          store.upsertCorrection(trx, {
+            rule: "Skip markdown headings here",
+            category: "style",
+            profileId: null,
+            channelType: "telegram",
+          }),
+        ),
+        "upsert",
       );
 
       const { steeringRules } = await import("./schema.js");
@@ -2821,13 +2836,16 @@ describe("DrizzleAgentStore", () => {
         })
         .returning({ id: steeringRules.id });
 
-      const result = await tx((trx) =>
-        store.upsertCorrection(trx, {
-          rule: "Test rule",
-          category: "style",
-          profileId: null,
-          existingRuleId: inserted!.id,
-        }),
+      const result = expectDefined(
+        await tx((trx) =>
+          store.upsertCorrection(trx, {
+            rule: "Test rule",
+            category: "style",
+            profileId: null,
+            existingRuleId: inserted!.id,
+          }),
+        ),
+        "upsert",
       );
 
       expect(result.promoted).toBe(false);
@@ -2858,13 +2876,16 @@ describe("DrizzleAgentStore", () => {
         })
         .returning({ id: steeringRules.id });
 
-      const result = await tx((trx) =>
-        store.upsertCorrection(trx, {
-          rule: "Be concise",
-          category: "style",
-          profileId: null,
-          existingRuleId: inserted!.id,
-        }),
+      const result = expectDefined(
+        await tx((trx) =>
+          store.upsertCorrection(trx, {
+            rule: "Be concise",
+            category: "style",
+            profileId: null,
+            existingRuleId: inserted!.id,
+          }),
+        ),
+        "upsert",
       );
 
       expect(result.promoted).toBe(true);
@@ -2894,13 +2915,16 @@ describe("DrizzleAgentStore", () => {
         })
         .returning({ id: steeringRules.id });
 
-      const result = await tx((trx) =>
-        store.upsertCorrection(trx, {
-          rule: "Already active",
-          category: "domain",
-          profileId: null,
-          existingRuleId: inserted!.id,
-        }),
+      const result = expectDefined(
+        await tx((trx) =>
+          store.upsertCorrection(trx, {
+            rule: "Already active",
+            category: "domain",
+            profileId: null,
+            existingRuleId: inserted!.id,
+          }),
+        ),
+        "upsert",
       );
 
       expect(result.promoted).toBe(false);
@@ -2913,7 +2937,7 @@ describe("DrizzleAgentStore", () => {
       expect(rows[0]!.observationCount).toBe(6);
     });
 
-    it("countActiveRules counts global + profile-specific", async () => {
+    it("countActiveLearnedRules counts global + profile-specific", async () => {
       const profileId = await seedProfile();
 
       const { steeringRules } = await import("./schema.js");
@@ -2922,9 +2946,9 @@ describe("DrizzleAgentStore", () => {
           rule: "Global rule",
           category: "style",
           active: true,
-          source: "manual",
-          priority: 1,
-          observationCount: 0,
+          source: "correction",
+          priority: 100,
+          observationCount: 2,
           profileId: null,
         },
         {
@@ -2947,7 +2971,7 @@ describe("DrizzleAgentStore", () => {
         },
       ]);
 
-      expect(await tx((trx) => store.countActiveRules(trx, profileId))).toBe(2);
+      expect(await tx((trx) => store.countActiveLearnedRules(trx, profileId))).toBe(2);
     });
 
     it("replaceRules deletes old and inserts new atomically", async () => {
@@ -3107,7 +3131,7 @@ describe("DrizzleAgentStore", () => {
         }),
       );
 
-      const rules = await tx((trx) => store.getActiveRules(trx, profileId));
+      const rules = await tx((trx) => store.getActiveRules(trx, { profileId, userId: null }));
       expect(rules).toEqual([
         { rule: "New consolidated rule", section: "learned", channelType: null },
       ]);

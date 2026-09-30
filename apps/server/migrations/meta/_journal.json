@@ -470,6 +470,13 @@
       "when": 1790633923634,
       "tag": "0066_model_catalogs",
       "breakpoints": true
+    },
+    {
+      "idx": 67,
+      "version": "7",
+      "when": 1790789004213,
+      "tag": "0067_steering_rule_instructions",
+      "breakpoints": true
     }
   ]
 }
