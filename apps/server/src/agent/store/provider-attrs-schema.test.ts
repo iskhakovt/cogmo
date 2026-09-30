@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { logger } from "../../logger.js";
 import { ProviderAttrsSchema } from "./schema.js";
 
 describe("ProviderAttrsSchema", () => {
@@ -39,5 +40,22 @@ describe("ProviderAttrsSchema", () => {
     expect(
       ProviderAttrsSchema.parse({ prefixMismatchBehavior: "drop-block", headers: { a: "b" } }),
     ).toEqual({ headers: { a: "b" } });
+  });
+
+  it("warns with the value it ignores", () => {
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
+    try {
+      ProviderAttrsSchema.parse({ prefixMismatchBehavior: "drop-block" });
+      ProviderAttrsSchema.parse({ prefixMismatchBehavior: "error" });
+      ProviderAttrsSchema.parse({});
+
+      expect(warn).toHaveBeenCalledOnce();
+      expect(warn).toHaveBeenCalledWith(
+        { prefixMismatchBehavior: "drop-block" },
+        expect.stringContaining("prefixMismatchBehavior"),
+      );
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

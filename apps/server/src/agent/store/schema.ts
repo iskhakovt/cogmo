@@ -17,6 +17,7 @@ import { jsonbZod, pk, ts } from "../../db/helpers.js";
 import { CacheDialectSchema } from "../../llm/cache-dialect.js";
 import { PrefixMismatchBehaviorSchema } from "../../llm/prefix-mismatch-behavior.js";
 import { MessageContentSchema } from "../../llm/types.js";
+import { logger } from "../../logger.js";
 import { secrets } from "../../secrets/store/schema.js";
 import { EvolutionEventPayloadSchema } from "../evolution/event-schema.js";
 import {
@@ -189,14 +190,21 @@ export type SttProviderTypeValue = (typeof sttProviderType.enumValues)[number];
  * `HTTP-Referer` for OpenRouter usage attribution). `prefixMismatchBehavior`,
  * on an Anthropic row, is what the API does with a replayed thinking block
  * whose prefix changed; absent keeps the account's default, and so does a
- * value the API doesn't take, which reads as absent: it is set by hand, and a
- * typo must not fail every model routed through the row. Unknown keys are
+ * value the API doesn't take, which reads as absent with a warning: it is set
+ * by hand, and a typo must not fail every model routed through the row. Unknown keys are
  * dropped on read, so a stray key never fails a provider lookup.
  */
 export const ProviderAttrsSchema = z.object({
   cacheDialect: CacheDialectSchema.optional(),
   headers: z.record(z.string(), z.string()).optional(),
-  prefixMismatchBehavior: PrefixMismatchBehaviorSchema.optional().catch(undefined),
+  prefixMismatchBehavior: PrefixMismatchBehaviorSchema.optional().catch((ctx) => {
+    // Once per read of the row, which the provider resolver caches per model.
+    logger.warn(
+      { prefixMismatchBehavior: ctx.value },
+      "ignoring llm_providers.attrs.prefixMismatchBehavior: the API takes drop_block or error",
+    );
+    return undefined;
+  }),
 });
 export type ProviderAttrs = z.infer<typeof ProviderAttrsSchema>;
 
