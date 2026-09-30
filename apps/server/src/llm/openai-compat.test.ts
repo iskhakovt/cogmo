@@ -12,7 +12,7 @@ import { ProviderProtocolError, ToolArgsCutOffError } from "./errors.js";
 import { isRetriableProviderError, RefusalError } from "./fallback.js";
 import { toObjectJsonSchema } from "./json-schema.js";
 import { modelFamilyParams, OpenAICompatibleProvider } from "./openai-compat.js";
-import { CLEARED_PLACEHOLDER } from "./tool-result-clearing.js";
+import { CLEARED_PLACEHOLDER, cl100k } from "./tool-result-clearing.js";
 import type {
   CacheIntent,
   ChatParams,
@@ -2239,6 +2239,24 @@ describe("OpenAICompatibleProvider", () => {
       ]);
     });
 
+    it("encodes each text once across the clearing decision and the count", async () => {
+      const provider = createProvider();
+      const params = { model: "gpt-5-nano", system: "sys", messages: toolHeavy() };
+      const exact = await provider.countTokens(params);
+      // The prompt pass reads nearly all of it; nothing is cleared, so the count reads it all.
+      const clearing = { triggerTokens: exact - 20, keep: 2, clearAtLeastTokens: 1_000_000 };
+      const encode = vi.spyOn(cl100k(), "encode");
+      try {
+        const counted = await provider.countTokens({ ...params, clearToolResults: clearing });
+        const texts = encode.mock.calls.map(([text]) => text);
+
+        expect(counted).toBe(exact);
+        expect(new Set(texts).size).toBe(texts.length);
+      } finally {
+        encode.mockRestore();
+      }
+    });
+
     it("counts the prompt as cleared, as it goes on the wire", async () => {
       const provider = createProvider();
       const params = { model: "gpt-5-nano", system: "sys", messages: toolHeavy() };
@@ -2269,6 +2287,27 @@ describe("OpenAICompatibleProvider", () => {
   });
 
   describe("countTokens", () => {
+    it("stops once past `countUpTo`, with a figure past it", async () => {
+      const provider = createProvider();
+      const head: Message[] = [
+        { role: "user", content: "hello" },
+        { role: "assistant", content: "hi" },
+      ];
+      const params = {
+        model: "gpt-5-nano",
+        system: "sys",
+        messages: [...head, { role: "user", content: "word ".repeat(40_000) }] satisfies Message[],
+      };
+      const exact = await provider.countTokens(params);
+      // The sum after the reply, without the reply priming the count ends with.
+      const afterReply = (await provider.countTokens({ ...params, messages: head })) - 3;
+
+      // At the cap the count goes on, to the next message's framing.
+      expect(await provider.countTokens({ ...params, countUpTo: afterReply })).toBe(afterReply + 4);
+      expect(await provider.countTokens({ ...params, countUpTo: exact })).toBe(exact);
+      expect(exact).toBeGreaterThan(afterReply + 4);
+    });
+
     it("returns a positive token count for simple messages", async () => {
       const provider = createProvider();
       const count = await provider.countTokens({

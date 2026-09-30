@@ -853,6 +853,19 @@ describe("compactMessages", () => {
     }
   });
 
+  it("asks for counts up to the budget, past which it tells none apart", async () => {
+    const countTokens = vi.fn().mockResolvedValue(100);
+
+    await compactMessages("system", [msg("user", "hello")], undefined, {
+      countTokens,
+      budget: 1000,
+      clearToolResults: CLEARING,
+      maxViewBytes: MAX_REQUEST_BYTES,
+    });
+
+    expect(countTokens).toHaveBeenCalledWith(expect.objectContaining({ countUpTo: 1000 }));
+  });
+
   it("does not call countTokens when skipBudgetStrategies is set", async () => {
     const countTokens = vi.fn().mockResolvedValue(100);
     const result = await compactMessages(

@@ -1,6 +1,5 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
-import * as R from "remeda";
 import { logger } from "../logger.js";
 import { abortReasonOr } from "./abort.js";
 import type { CacheDialect } from "./cache-dialect.js";
@@ -77,12 +76,20 @@ export class OpenAICompatibleProvider implements LlmProvider {
     });
   }
 
-  /** The request's prompt tokens, after the tool-result clearing it asks for. */
+  /**
+   * The request's prompt tokens, after the tool-result clearing it asks for.
+   * Once the sum passes `countUpTo`, it stops and returns the sum so far.
+   */
   async countTokens(params: CountTokensParams): Promise<number> {
     // One memory for both, so the count reads the slices the clearing already encoded.
     const tokens = textTokens(cl100k());
     const messages = clearedMessages(params, tokens);
-    return R.sum([...promptParts(tokens, { ...params, messages })]);
+    let sum = 0;
+    for (const part of promptParts(tokens, { ...params, messages })) {
+      sum += part;
+      if (params.countUpTo !== undefined && sum > params.countUpTo) return sum;
+    }
+    return sum;
   }
 
   async chat(params: ChatParams, options?: ChatOptions): Promise<LlmResponse> {

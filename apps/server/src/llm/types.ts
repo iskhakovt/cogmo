@@ -309,4 +309,11 @@ export interface ChatOptions {
  * again, so it takes no cache intent. With `clearToolResults`, the count is
  * the prompt after clearing.
  */
-export type CountTokensParams = Omit<ChatParams, "maxTokens" | "cache">;
+export interface CountTokensParams extends Omit<ChatParams, "maxTokens" | "cache"> {
+  /**
+   * The largest count the caller tells apart. An adapter that counts locally
+   * stops once its sum passes this and returns that sum, a figure past it but
+   * short of the exact count; a count a server returns is exact either way.
+   */
+  countUpTo?: number;
+}

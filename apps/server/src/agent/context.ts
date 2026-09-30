@@ -25,7 +25,11 @@ import { validateHistory } from "./history-invariants.js";
 // --- Public interface ---
 
 export interface ContextManagerDeps {
-  /** Count tokens for the given request parameters, after the clearing they ask for. */
+  /**
+   * Count tokens for the given request parameters, after the clearing they ask
+   * for. Compaction tells counts apart only up to the budget, so it asks for
+   * none past it (`countUpTo`).
+   */
   countTokens: (params: CountTokensParams) => Promise<number>;
   /** Maximum input tokens before rejection (contextWindow - maxOutputTokens - safetyBuffer). */
   budget: number;
@@ -73,7 +77,8 @@ export interface ContextManagerDeps {
 
 /**
  * A compaction that rewrote the view. Counts are after Strategy 1's clearing,
- * and `null` where the view was too large in bytes to count.
+ * `null` where the view was too large in bytes to count, and, past the budget,
+ * a figure past it where the adapter counts locally.
  */
 export interface CompactionEvent {
   strategies: ("summarize" | "truncate")[];
@@ -291,6 +296,7 @@ export async function compactMessages(
           system,
           messages: msgs,
           clearToolResults,
+          countUpTo: budget,
           ...(tools && { tools }),
         });
 
