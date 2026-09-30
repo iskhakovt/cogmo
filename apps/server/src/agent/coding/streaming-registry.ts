@@ -45,8 +45,8 @@ export interface CodingStreamingRegistryOptions {
 
 interface TaskStream {
   readonly listeners: Set<CodingStreamListener>;
-  /** The previous sweep found the task ended. */
-  endedAtLastSweep: boolean;
+  /** The latest sweep found the task ended. */
+  foundEnded: boolean;
 }
 
 /**
@@ -60,7 +60,8 @@ interface TaskStream {
  *   the registry releases the task, then delivers the event to the
  *   subscribers it had.
  * - A sweep releases a task the database reports ended at two consecutive
- *   sweeps. A failed sweep changes nothing.
+ *   sweeps. A sweep that finds it live starts the count again, and a failed
+ *   one changes nothing. One sweep runs at a time.
  * - A listener's throw or rejection is logged, and reaches neither the
  *   publisher nor its siblings. No listener is awaited.
  */
@@ -70,6 +71,7 @@ export class CodingStreamingRegistry {
   readonly #clearInterval: (handle: unknown) => void;
   #timer: unknown = null;
   #closed = false;
+  #sweeping = false;
 
   private constructor(opts: CodingStreamingRegistryOptions) {
     this.#endedTasks = opts.endedTasks;
@@ -143,7 +145,7 @@ export class CodingStreamingRegistry {
   subscribe(taskId: string, listener: CodingStreamListener): void {
     let stream = this.#streams.get(taskId);
     if (!stream) {
-      stream = { listeners: new Set(), endedAtLastSweep: false };
+      stream = { listeners: new Set(), foundEnded: false };
       this.#streams.set(taskId, stream);
     }
     stream.listeners.add(listener);
@@ -154,28 +156,37 @@ export class CodingStreamingRegistry {
    * previous sweep also found ended.
    */
   async #sweep(): Promise<void> {
+    // A stalled lookup must not overlap the next sweep and cut the grace short.
+    if (this.#sweeping) return;
     const held = [...this.#streams.keys()];
     if (held.length === 0) return;
-    let ended: ReadonlySet<string>;
+    this.#sweeping = true;
     try {
-      ended = await this.#endedTasks(held);
-    } catch (err) {
-      log.warn({ err, held: held.length }, "coding stream sweep failed");
-      return;
-    }
-    let released = 0;
-    for (const taskId of ended) {
-      const stream = this.#streams.get(taskId);
-      // Its own event released it while the lookup ran.
-      if (!stream) continue;
-      if (stream.endedAtLastSweep) {
-        this.#streams.delete(taskId);
-        released++;
-      } else {
-        stream.endedAtLastSweep = true;
+      let ended: ReadonlySet<string>;
+      try {
+        ended = await this.#endedTasks(held);
+      } catch (err) {
+        log.warn({ err, held: held.length }, "coding stream sweep failed");
+        return;
       }
+      let released = 0;
+      for (const taskId of held) {
+        const stream = this.#streams.get(taskId);
+        // Its own event released it while the lookup ran.
+        if (!stream) continue;
+        if (!ended.has(taskId)) {
+          stream.foundEnded = false;
+        } else if (stream.foundEnded) {
+          this.#streams.delete(taskId);
+          released++;
+        } else {
+          stream.foundEnded = true;
+        }
+      }
+      if (released > 0) log.info({ released }, "released the streams of ended coding tasks");
+    } finally {
+      this.#sweeping = false;
     }
-    if (released > 0) log.info({ released }, "released the streams of ended coding tasks");
   }
 
   #publish(taskId: string, event: CodingStreamEvent): void {

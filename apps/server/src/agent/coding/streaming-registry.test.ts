@@ -46,7 +46,8 @@ function harness(): Harness {
 
 /**
  * The tasks the registry holds: what a sweep asks the database about. The
- * probe's sweep reports nothing ended, so it releases nothing.
+ * probe's sweep reports nothing ended, so it releases nothing, and it starts
+ * every held task's count again.
  */
 async function held(h: Harness): Promise<ReadonlyArray<string>> {
   h.endedTasks.mockClear();
@@ -228,6 +229,27 @@ describe("CodingStreamingRegistry", () => {
       expect(seen).toEqual([]);
     });
 
+    it("starts the count again when a sweep finds the task live", async () => {
+      // A terminal status can be overwritten: execute's `pending_verify`
+      // write is unconditional, so it can land over a `cancelled`.
+      const h = harness();
+      collect(h.reg, "t1");
+      h.endedTasks
+        .mockResolvedValueOnce(new Set(["t1"]))
+        .mockResolvedValueOnce(new Set())
+        .mockResolvedValueOnce(new Set(["t1"]))
+        .mockResolvedValueOnce(new Set(["t1"]));
+
+      await h.sweep();
+      await h.sweep();
+      await h.sweep();
+      await h.sweep();
+      expect(h.endedTasks).toHaveBeenCalledTimes(4);
+
+      await h.sweep();
+      expect(h.endedTasks).toHaveBeenCalledTimes(4);
+    });
+
     it("leaves the final event in flight after a status write to reach the subscriber", async () => {
       const h = harness();
       const seen = collect(h.reg, "t1");
@@ -263,6 +285,24 @@ describe("CodingStreamingRegistry", () => {
       expect(h.endedTasks).toHaveBeenCalledTimes(2);
 
       await h.sweep();
+      expect(await held(h)).toEqual([]);
+    });
+
+    it("runs one sweep at a time, so a stalled lookup doesn't cut the grace short", async () => {
+      const h = harness();
+      collect(h.reg, "t1");
+      const stalled = Promise.withResolvers<ReadonlySet<string>>();
+      h.endedTasks.mockReturnValueOnce(stalled.promise);
+      h.endedTasks.mockResolvedValue(new Set(["t1"]));
+
+      const first = h.sweep();
+      await h.sweep();
+      expect(h.endedTasks).toHaveBeenCalledTimes(1);
+
+      stalled.resolve(new Set(["t1"]));
+      await first;
+      await h.sweep();
+      expect(h.endedTasks).toHaveBeenCalledTimes(2);
       expect(await held(h)).toEqual([]);
     });
 
