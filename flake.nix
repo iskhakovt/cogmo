@@ -7,8 +7,10 @@
   # Pinned to a revision rather than a branch name: resolving `nixos-unstable`
   # costs a call to api.github.com on every fetch, and `flake.lock` pins the
   # revision regardless, so the branch buys nothing but a failure mode. Bump it
-  # with `nix flake update`.
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/b51242d7d43689db2f3be91bd05d5b24fbb469c4";
+  # by setting the revision to `nixos-unstable`'s current head
+  # (https://channels.nixos.org/nixos-unstable/git-revision) and running
+  # `nix flake lock`; `nix flake update` alone re-locks the same revision.
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/b4fd65b198c599cbe814fcb9f42d25d021595ec9";
 
   outputs =
     { self, nixpkgs }:
