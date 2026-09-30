@@ -256,6 +256,16 @@ export interface CodingStore {
   getTasksByIds(tx: Transaction, ids: ReadonlyArray<string>): Promise<readonly CodingTaskRow[]>;
 
   /**
+   * The status of each existing task among `ids`; unknown ids are dropped.
+   * Reads no JSONB column, so a row whose JSONB no longer parses still
+   * reports its status. Empty input returns an empty array (no SQL).
+   */
+  getTaskStatuses(
+    tx: Transaction,
+    ids: ReadonlyArray<string>,
+  ): Promise<ReadonlyArray<{ id: string; status: CodingTaskStatus }>>;
+
+  /**
    * Persist the worktree assignment derived by the orchestrator's
    * `allocate-worktree` step. JSONB-validated by `WorktreeAssignmentSchema`
    * on the way in. Called once per task; idempotent (a retry sees the
@@ -583,6 +593,17 @@ export class DrizzleCodingStore implements CodingStore {
     if (ids.length === 0) return [];
     return await tx
       .select()
+      .from(codingTasks)
+      .where(inArray(codingTasks.id, [...ids]));
+  }
+
+  async getTaskStatuses(
+    tx: Transaction,
+    ids: ReadonlyArray<string>,
+  ): Promise<ReadonlyArray<{ id: string; status: CodingTaskStatus }>> {
+    if (ids.length === 0) return [];
+    return await tx
+      .select({ id: codingTasks.id, status: codingTasks.status })
       .from(codingTasks)
       .where(inArray(codingTasks.id, [...ids]));
   }

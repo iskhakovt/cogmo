@@ -392,6 +392,42 @@ describe("DrizzleCodingStore", () => {
       expect(rows).toEqual([]);
     });
 
+    it("getTaskStatuses reports each known task's status, a row with unparseable JSONB included", async () => {
+      const repoId = await seedRepo();
+      const insert = () =>
+        tx((trx) =>
+          store.insertTask(trx, {
+            repoId,
+            goal: "g",
+            triggerSource: "user",
+            backend: "claude",
+            allowPrivilegedRunc: false,
+          }),
+        );
+      const queued = await insert();
+      const corrupt = await insert();
+      await tx((trx) => store.updateTaskStatus(trx, { id: corrupt.id, status: "cancelled" }));
+      // Bypass the store: a JSONB value its schema rejects on read.
+      await db.execute(
+        sql`UPDATE coding_tasks SET worktree_assignment = '{"type":"bogus"}'::jsonb WHERE id = ${corrupt.id}`,
+      );
+
+      const rows = await tx((trx) =>
+        store.getTaskStatuses(trx, [queued.id, corrupt.id, "019d0000-0000-7000-8000-000000000abc"]),
+      );
+
+      expect([...rows].sort((a, b) => a.id.localeCompare(b.id))).toEqual(
+        [
+          { id: queued.id, status: "queued" },
+          { id: corrupt.id, status: "cancelled" },
+        ].sort((a, b) => a.id.localeCompare(b.id)),
+      );
+    });
+
+    it("getTaskStatuses with empty input returns empty array", async () => {
+      expect(await tx((trx) => store.getTaskStatuses(trx, []))).toEqual([]);
+    });
+
     it("setTaskWorktreeAssignment persists branch + worktreePath atomically as JSONB", async () => {
       const repoId = await seedRepo();
       const t = await tx((trx) =>

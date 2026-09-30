@@ -11,7 +11,7 @@ export async function findEndedCodingTasks(
   deps: FindEndedCodingTasksDeps,
   taskIds: ReadonlyArray<string>,
 ): Promise<ReadonlySet<string>> {
-  const rows = await deps.runInTx((tx) => deps.store.getTasksByIds(tx, taskIds));
+  const rows = await deps.runInTx((tx) => deps.store.getTaskStatuses(tx, taskIds));
   const live = new Set(
     rows.filter((row) => !isTerminalCodingTaskStatus(row.status)).map((row) => row.id),
   );
