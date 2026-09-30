@@ -228,7 +228,7 @@ describe("runAgenticStage", () => {
     );
   });
 
-  it("sends Strategy 1's intent on its counts and every loop request", async () => {
+  it("sends Strategy 1's intent on its counts and hands it to the loop", async () => {
     const h = await harness();
     vi.mocked(h.agentStore.getLastTokens).mockResolvedValue(undefined);
     const { provider } = await h.deps.resolveProvider("claude-sonnet-4-6");
@@ -278,7 +278,7 @@ describe("runAgenticStage", () => {
     expect(fork.clearToolResults).toBeDefined();
   });
 
-  it("summarizes a view past 80% of the size cap without counting it", async () => {
+  it("summarizes a view past 80% of the request cap without counting it", async () => {
     const h = await harness();
     const huge = "x".repeat(Math.ceil(MAX_REQUEST_BYTES * 0.85));
     vi.mocked(h.agentStore.listMessages).mockResolvedValue([

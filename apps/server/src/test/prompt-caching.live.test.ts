@@ -91,9 +91,9 @@ const SAVED_WITH_LOG = `${SAVED}\nRender log:\n${Array.from(
 ).join("\n")}`;
 
 /**
- * B's Strategy 1 intent, scaled to its conversation: past a ~3k-token prompt,
- * clear every tool result, so the draw call's log is cleared from its own
- * turn's second request on.
+ * B's Strategy 1 intent, scaled to its conversation: a trigger below its
+ * ~3k-token prompt and no result kept, so the draw call's log is cleared from
+ * its own turn's second request on.
  */
 const B_CLEARING: ToolResultClearing = { triggerTokens: 1000, keep: 0, clearAtLeastTokens: 500 };
 

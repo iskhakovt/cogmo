@@ -28,11 +28,7 @@ export interface ContextManagerDeps {
   countTokens: (params: CountTokensParams) => Promise<number>;
   /** Maximum input tokens before rejection (contextWindow - maxOutputTokens - safetyBuffer). */
   budget: number;
-  /**
-   * The route's request-size cap, in bytes (`MAX_REQUEST_BYTES`). The view's
-   * raw bytes past 80% of it summarize and then truncate, whatever the count
-   * after clearing says.
-   */
+  /** The request cap, in bytes (`MAX_REQUEST_BYTES`), that the size trigger compares with. */
   maxRequestBytes: number;
   /**
    * Strategy 1, which every count carries: the intent the turn's requests
@@ -95,21 +91,17 @@ const TRUNCATE_THRESHOLD = 0.95;
 const DEFAULT_KEEP_TOOL_RESULTS = 5;
 
 /**
- * The least a clearing must free, as a fraction of the budget. Clearing
- * writes the cache again from the first result it clears, and it pays for
- * that only by postponing summarization, which fires 20% of the budget
- * later: one that can't free a tenth of the budget buys little room. The
- * context-editing docs' example asks the same of its trigger, 5,000 tokens
- * of 30,000.
+ * The least a clearing must free, as a fraction of the budget: half the room
+ * between the clearing and summarization thresholds, since a clearing writes
+ * the cache again from the first result it clears (see
+ * design/context-management.md → Strategy 1).
  */
 const CLEAR_AT_LEAST = 0.1;
 
 /**
- * Strategy 1's edit intent for a turn with `budget` input tokens: clear the
- * oldest tool results once the prompt passes 60% of the budget, keeping the
- * last five. Every request of the turn carries it, forks and counts included,
- * and the adapter clears (see `ToolResultClearing`); the transcript itself is
- * never rewritten.
+ * Strategy 1's edit intent for a turn with `budget` input tokens: once the
+ * prompt passes 60% of the budget, clear every tool result but the last five,
+ * provided they free a tenth of it. Every request of the turn carries it.
  */
 export function toolResultClearing(budget: number): ToolResultClearing {
   return {
@@ -166,10 +158,9 @@ export function summarizationRequest(params: {
   messages: ReadonlyArray<Message>;
   maxOutputTokens: number;
   /**
-   * The turn's Strategy 1 intent. The fork is its own request: the server
-   * evaluates the trigger on the fork's prompt and keeps the last results the
-   * fork sends, so the prefix is cleared by the turn's rule, not exactly as
-   * the turn's requests read it. `/compact`, outside a turn, sends none.
+   * The turn's Strategy 1 intent, which applies to the fork as a request of
+   * its own (design/context-management.md → Strategy 1). `/compact`, outside
+   * a turn, sends none.
    */
   clearToolResults?: ToolResultClearing;
 }): ChatParams {
@@ -236,11 +227,11 @@ export function formatSummaryMessage(summary: string): Message {
  * under budget (via `shouldSkipCounting`) skip the `countTokens` round-trip by
  * passing `skipBudgetStrategies`.
  *
- * They also fire on size. The server clears after the request arrives, so the
- * request carries every result and its bytes can reach the route's cap long
- * before the count after clearing reaches the budget. A view past 80% of the
- * cap summarizes on any path, without a count, since counting it sends it;
- * one the summary leaves past that, truncates until it fits.
+ * They also fire on size, since the server clears only after the bytes
+ * arrive (design/context-management.md → Strategy 2 → Size trigger): a view
+ * past 80% of `maxRequestBytes` summarizes on any path without a count, since
+ * counting it sends it, and truncates until it fits if the summary fails or
+ * leaves it there.
  */
 export async function compactMessages(
   system: string,
@@ -275,7 +266,7 @@ export async function compactMessages(
   let tokens = await count(result);
   const tokensBefore = tokens;
 
-  // Strategy 2: Summarize conversation prefix at 80%, of the budget or the size cap
+  // Strategy 2: Summarize conversation prefix at 80%, of the budget or the request cap
   if ((tokens === null || tokens > budget * SUMMARIZE_THRESHOLD) && summarize) {
     try {
       const summarized = await summarizePrefix(
@@ -296,7 +287,7 @@ export async function compactMessages(
     }
   }
 
-  // Strategy 3: Emergency truncation at 95% of the budget, or until the view fits the size cap
+  // Strategy 3: Emergency truncation at 95% of the budget, or until the view fits the request cap
   if (tokens === null || tokens > budget * TRUNCATE_THRESHOLD) {
     result = truncateOldest(result);
     while (oversized(result)) {

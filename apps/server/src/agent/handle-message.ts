@@ -914,9 +914,8 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         resolveLimits(model, rowLimits),
       );
       const budget = computeBudget(limits);
-      // Strategy 1: every request of the turn carries it — the counts, the
-      // loop's iterations and both forks — and the adapter clears. Derived
-      // from the frozen limits, so every invocation sends the same intent.
+      // Strategy 1's edit intent, on every request of the turn. Derived from
+      // the frozen limits, so every invocation sends the same intent.
       const clearToolResults = toolResultClearing(budget);
       const summarizationModel = snapshot.summarizationModel;
 
@@ -939,9 +938,8 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       );
 
       // The skip-counting decision flows in as `skipBudgetStrategies`, which
-      // gates Strategies 2 and 3 inside compactMessages so the
-      // provider.countTokens round-trip is only paid when budget pressure
-      // could matter.
+      // spares compactMessages the provider.countTokens round-trip when budget
+      // pressure can't matter; a view past the size trigger compacts anyway.
       // Set by the `summarize` callback below when Strategy 2 fires. Assigned
       // on every invocation that reaches the strategy — `summarize-prefix-outcome`
       // hands back the memoized text on a replay just as it does on the first

@@ -48,10 +48,10 @@ export interface AnthropicProviderOptions {
   fetch?: typeof fetch;
   /**
    * Whether the endpoint is Anthropic's own API, which gets the request
-   * controls: `context_management` and the binding-controls beta. Defaults to
-   * whether the base URL the SDK resolves is `api.anthropic.com`: an
-   * Anthropic-compatible third-party endpoint may reject either. A test
-   * pointing at llmock, which records from Anthropic's API, sets it.
+   * controls ({@link requestControls}). Defaults to whether the base URL the
+   * SDK resolves is `api.anthropic.com`: an Anthropic-compatible third-party
+   * endpoint may reject them. A test pointing at llmock, which records from
+   * Anthropic's API, sets it.
    */
   firstParty?: boolean;
   /**
@@ -444,7 +444,8 @@ export const BINDING_CONTROLS_BETA = "thinking-binding-controls-2026-08-01";
 /**
  * The models that run preserved thinking's prefix check, each adaptive by
  * default. Sonnet 5 accepts `block_binding` but runs no check, and Haiku 4.5
- * rejects `adaptive`, so a model missing from the list loses only the field.
+ * rejects `adaptive`, so neither is listed; a model missing from the list
+ * loses only the field.
  */
 const PREFIX_CHECKED_MODELS = ["claude-opus-5-5", "claude-fable-5-1", "claude-sonnet-5-5"];
 
@@ -489,9 +490,9 @@ function requestControls(params: CountTokensParams, endpoint: Endpoint): Request
 /**
  * The messages the request sends. Anthropic's API clears on its server, so
  * it gets them as they are; a third-party endpoint gets Strategy 1 applied
- * on the wire, with the OpenAI-compatible adapter's function, triggered by a
- * local estimate. Its placeholders then rewrite earlier results as the
- * cleared set moves, which a route that enforces preserved thinking rejects.
+ * on the wire ({@link withClearedToolResults}), triggered by a local
+ * estimate. Its placeholders then rewrite earlier results as the cleared set
+ * moves, which a route that enforces preserved thinking rejects.
  */
 function wireMessages(params: CountTokensParams, endpoint: Endpoint): Message[] {
   if (endpoint.firstParty) return params.messages;

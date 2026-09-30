@@ -1416,7 +1416,7 @@ describe("createHandleMessage", () => {
     expect(deps.runStreamingAgentLoop).toHaveBeenCalled();
   });
 
-  it("sends the turn's Strategy 1 intent on every count, every loop request and the summarization fork", async () => {
+  it("sends the turn's Strategy 1 intent on every count and the summarization fork, and hands it to the loop", async () => {
     // Over 80% of budget after clearing → summarization, then under.
     const countTokens = vi.fn().mockResolvedValueOnce(800_000).mockResolvedValueOnce(50_000);
     const chat = vi.fn().mockResolvedValue({
@@ -1463,7 +1463,7 @@ describe("createHandleMessage", () => {
     );
   });
 
-  it("summarizes a view past 80% of the size cap on the fast path, without counting it", async () => {
+  it("summarizes a view past 80% of the request cap on the fast path, without counting it", async () => {
     // The last turn's usage, after clearing, is small; the history's raw bytes are not.
     const countTokens = vi.fn().mockResolvedValue(50_000);
     const chat = vi.fn().mockResolvedValue({

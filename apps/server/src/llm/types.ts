@@ -248,8 +248,9 @@ export interface CacheIntent {
  * Clears the oldest tool results from what the model reads, leaving
  * `messages` as sent: compaction's Strategy 1 as a request-level edit (see
  * design/context-management.md → Strategy 1). Each adapter applies it the
- * same way, on the request and in its token count: Anthropic on the server
- * (`clear_tool_uses_20250919`), the OpenAI-compatible adapter on the wire.
+ * same way, on the request and in its token count: Anthropic's API on the
+ * server (`clear_tool_uses_20250919`), the OpenAI-compatible adapter and a
+ * third-party Anthropic endpoint on the wire.
  */
 export interface ToolResultClearing {
   /** Clears once the prompt, before clearing, exceeds this many input tokens. */
@@ -265,7 +266,7 @@ export interface ChatParams {
   system: string;
   messages: Message[];
   tools?: ToolDefinition[];
-  /** Strategy 1's edit intent. A count takes it too, and returns the count after clearing. */
+  /** Strategy 1's edit intent. */
   clearToolResults?: ToolResultClearing;
   maxTokens?: number;
   /**

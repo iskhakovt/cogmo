@@ -343,7 +343,7 @@ describe("compactMessages", () => {
     });
   });
 
-  describe("past the size cap", () => {
+  describe("past the request cap", () => {
     /** Eight turns, each with a large tool result. */
     function heavy(): Message[] {
       return Array.from({ length: 8 }, (_, i) => [
