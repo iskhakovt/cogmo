@@ -443,7 +443,7 @@ Failure at any stage: `status = 'failed'`, reason written, sandbox torn down, us
 
 ### Inngest step boundaries
 
-Same pattern as `handle-message` ([crash-recovery.md](crash-recovery.md)): Inngest re-invokes the whole function body at **every** step boundary, on success — not only on retry — so everything expensive, billable, or irreversible sits inside a `step.run`. The claude sessions and the verify suite included: a step body may stream to Telegram for minutes and only its small return value has to be JSON-serializable, and those live pushes are suppressed on replay, which is exactly what the progress UI wants. See [.claude/rules/inngest.md](../.claude/rules/inngest.md).
+Same pattern as `handle-message` ([crash-recovery.md](crash-recovery.md)): Inngest re-invokes the whole function body at **every** step boundary, on success — not only on retry — so everything expensive, billable, or irreversible sits inside a `step.run`. The claude sessions and the verify suite included: a step body may run for minutes, streaming to Telegram in the claude sessions' case, and only its small return value has to be JSON-serializable. Those live pushes are suppressed on replay, which is exactly what the progress UI wants. See [.claude/rules/inngest.md](../.claude/rules/inngest.md).
 
 Re-entry guards live inside a conditional-UPDATE step, never as a bare-body status read. A guard like `if (task.status !== "pending_verify") return skipped` sitting above the step that writes `verifying` self-destructs on the next boundary — the re-invoked body reads its own write and abandons the run, stranding the task in a non-terminal status with no failure event to reconcile against. All three orchestrators open with the durable form — `claim-task-planning` (`queued → planning`), `set-status-executing` (`awaiting_approval → executing`), `set-status-verifying` (`pending_verify → verifying`) — where the UPDATE fires only from the expected prior status and the body branches on the memoized result. Each sits where a lost race returns before the failure/teardown machinery, so a duplicate event can't flip a task another run owns to `failed`, and each returns `skipped` when it matches no row.
 
@@ -678,19 +678,19 @@ Diffs are not rendered in Telegram. Link to GitHub for review. GitHub Mobile (si
 
 ### Progress stream `[confirmed]`
 
-The orchestrators publish progress into `CodingStreamingRegistry` (`src/agent/coding/streaming-registry.ts`), an in-process fan-out: text deltas arrive at chat cadence, too often for the event bus, and the orchestrators and the Telegram adapter share one process. The plan orchestrator writes through `planStream(taskId)`, execute and verify through `executeStream(taskId)`. On `coding/task/start`, the Telegram adapter subscribes one renderer per task whose conversation has a session on it (`progress-subscriber.ts`).
+The orchestrators publish progress into `CodingStreamingRegistry` (`src/agent/coding/streaming-registry.ts`), an in-process fan-out: text deltas arrive at chat cadence, too often for the event bus, and the orchestrators and the Telegram adapter share one process. The plan orchestrator writes through `planStream(taskId)` and the execute orchestrator through `executeStream(taskId)` (`progress-stream.ts`), each taking its handle right after its claim, so every failure the run handles itself reaches the message. On `coding/task/start`, the Telegram adapter subscribes one renderer per task whose conversation has a session on it (`progress-subscriber.ts`). The message ends at execute: verify publishes nothing, and its outcome isn't rendered.
 
 The registry holds a task only while something is subscribed to it, and the task's status in the database is the backstop that releases it:
 
 | What arrives | What the registry does |
 |-|-|
 | A publish to a task with no subscriber | Drops it. Publishing holds nothing, so a replayed or retried step body changes nothing. |
-| `failed` | Delivers it, then releases the task. |
-| `execute_complete`, success | Delivers it, then releases the task. Verify streams its output after this, and nothing renders it. |
-| `execute_complete`, failure | Delivers it. The `failed` that follows carries the reason and ends the stream. |
-| No event: Revise or Cancel at the plan gate, a failure before the stream opened, reconcile | The registry's own sweep releases a task the database reports terminal or gone (`findEndedCodingTasks`) at two consecutive sweeps. The second sweep is the grace the orchestrator's final event gets after its status write. |
+| `failed` | Releases the task, then delivers the event to the subscribers it had. |
+| `execute_complete`, success | Releases the task, then delivers the event to the subscribers it had. |
+| `execute_complete`, failure | Delivers it. The `failed` the orchestrator publishes right after carries the reason and ends the stream. |
+| No event: Revise or Cancel at the plan gate, reconcile | The sweep releases a task the database reports terminal or gone (`findEndedCodingTasks`, which reads only id and status) at two consecutive sweeps. A sweep that finds it live starts the count again. The second sweep is the grace the orchestrator's final event gets after its status write. |
 
-The sweep runs every ten minutes on an unref'd interval the registry starts when it is constructed. It runs in the process that holds the streams, which an Inngest cron can't guarantee once two processes overlap in a rolling deploy. A sweep holding nothing skips the database. A failed lookup is logged, and the next sweep asks again. Shutdown doesn't stop the timer, because an unref'd interval holding nothing to close can't keep the process alive.
+`CodingStreamingRegistry.create` starts the sweep on an unref'd ten-minute interval, and `close()` stops it at shutdown. It runs in the process that holds the streams, which an Inngest cron can't guarantee once two processes overlap in a rolling deploy. One sweep runs at a time, a sweep holding nothing skips the database, and a failed lookup is logged and retried by the next sweep. A status written terminal by anyone but the publisher while the stream is live (a future `/cancel` during planning, say) drops the events published after the sweep's grace.
 
 A task awaiting approval keeps its stream, so the execute phase edits the message the plan went to. Admission caps non-terminal tasks per repo, which bounds what the registry holds. Events aren't replayed: a subscriber sees what is published after it subscribes. A listener that throws or rejects is logged, and its siblings still get the event. The registry never awaits a listener, so one that hangs holds neither the orchestrator nor the task. A process restart loses every subscriber: the task runs on, and its message stops updating.
 
