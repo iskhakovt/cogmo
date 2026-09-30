@@ -5,6 +5,7 @@ import { mock } from "vitest-mock-extended";
 import type { z } from "zod";
 import { conversationTurnConcurrency } from "../inngest/concurrency.js";
 import type { inboundReady } from "../inngest/events.js";
+import { MAX_REQUEST_BYTES } from "../llm/request-size.js";
 import { ProviderConfigError } from "../llm/resolver.js";
 import type { ChatParams, ChatStreamFrame, Message, StopReason } from "../llm/types.js";
 import { logger } from "../logger.js";
@@ -1460,6 +1461,45 @@ describe("createHandleMessage", () => {
     expect(expectDefined(chat.mock.calls[0], "summarization call")[0].clearToolResults).toEqual(
       clearing,
     );
+  });
+
+  it("summarizes a view past 80% of the size cap on the fast path, without counting it", async () => {
+    // The last turn's usage, after clearing, is small; the history's raw bytes are not.
+    const countTokens = vi.fn().mockResolvedValue(50_000);
+    const chat = vi.fn().mockResolvedValue({
+      content: [{ type: "text", text: "Summary of conversation" }],
+      stopReason: "end_turn",
+      model: "mock",
+      usage: { inputTokens: 10, outputTokens: 5 },
+    });
+    const huge = "x".repeat(Math.ceil(MAX_REQUEST_BYTES * 0.85));
+    const deps = mockDeps({
+      resolveProvider: mockResolver(mockProvider({ countTokens, chat })),
+      agentStore: mockAgentStore({
+        getLastTokens: vi.fn().mockResolvedValue({ inputTokens: 1000, outputTokens: 100 }),
+        listMessages: vi.fn().mockResolvedValue([
+          { id: "m1", role: "user", content: huge },
+          { id: "m2", role: "assistant", content: "r1" },
+          { id: "m3", role: "user", content: "m2" },
+          { id: "m4", role: "assistant", content: "r2" },
+          { id: "m5", role: "user", content: "m3" },
+          { id: "m6", role: "assistant", content: "r3" },
+          { id: "msg-1", role: "user", content: "m4" },
+          { id: "m8", role: "assistant", content: "r4" },
+        ]),
+      }),
+    });
+
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    expect(chat).toHaveBeenCalledOnce();
+    // Counted once, after the summary replaced the oversized message.
+    expect(countTokens).toHaveBeenCalledOnce();
+    expect(JSON.stringify(countTokens.mock.calls[0]?.[0].messages)).not.toContain(huge);
   });
 
   it("pushes status event through delivery when summarization runs", async () => {

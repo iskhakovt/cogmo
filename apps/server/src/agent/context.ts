@@ -29,6 +29,12 @@ export interface ContextManagerDeps {
   /** Maximum input tokens before rejection (contextWindow - maxOutputTokens - safetyBuffer). */
   budget: number;
   /**
+   * The route's request-size cap, in bytes (`MAX_REQUEST_BYTES`). The view's
+   * raw bytes past 80% of it summarize and then truncate, whatever the count
+   * after clearing says.
+   */
+  maxRequestBytes: number;
+  /**
    * Strategy 1, which every count carries: the intent the turn's requests
    * send, from {@link toolResultClearing}.
    */
@@ -62,11 +68,16 @@ export interface ContextManagerDeps {
   canSummarizePrefix?: (splitIdx: number) => boolean;
 }
 
-/** A compaction that rewrote the view. Counts are after Strategy 1's clearing. */
+/**
+ * A compaction that rewrote the view. Counts are after Strategy 1's clearing,
+ * and `null` where the view was too large in bytes to count.
+ */
 export interface CompactionEvent {
   strategies: ("summarize" | "truncate")[];
-  tokensBefore: number;
-  tokensAfter: number;
+  tokensBefore: number | null;
+  tokensAfter: number | null;
+  /** The view's raw size before compaction, which the size trigger compares. */
+  requestBytesBefore: number;
   messagesSummarized: number;
 }
 
@@ -219,9 +230,15 @@ export function formatSummaryMessage(summary: string): Message {
  *
  * Every count carries Strategy 1's intent, so each is the prompt after
  * clearing, and the view comes back unchanged unless Strategy 2 or 3 rewrote
- * it. Both are budget-pressure-triggered: callers that know the turn is
- * comfortably under budget (via `shouldSkipCounting`) skip the `countTokens`
- * round-trip by passing `skipBudgetStrategies`.
+ * it. Both fire on budget pressure: callers that know the turn is comfortably
+ * under budget (via `shouldSkipCounting`) skip the `countTokens` round-trip by
+ * passing `skipBudgetStrategies`.
+ *
+ * They also fire on size. The server clears after the request arrives, so the
+ * request carries every result and its bytes can reach the route's cap long
+ * before the count after clearing reaches the budget. A view past 80% of the
+ * cap summarizes on any path, without a count, since counting it sends it;
+ * one the summary leaves past that, truncates until it fits.
  */
 export async function compactMessages(
   system: string,
@@ -230,21 +247,34 @@ export async function compactMessages(
   deps: ContextManagerDeps,
   skipBudgetStrategies = false,
 ): Promise<CompactResult> {
-  const { countTokens, budget, summarize, clearToolResults } = deps;
-  if (skipBudgetStrategies) return { messages: [...messages], didCompact: false };
+  const { countTokens, budget, summarize, clearToolResults, maxRequestBytes } = deps;
+  const oversized = (msgs: ReadonlyArray<Message>): boolean =>
+    requestBytes(system, msgs, tools) > maxRequestBytes * SUMMARIZE_THRESHOLD;
+  if (skipBudgetStrategies && !oversized(messages)) {
+    return { messages: [...messages], didCompact: false };
+  }
 
   const strategies: CompactionEvent["strategies"] = [];
   let result = [...messages];
   let messagesSummarized = 0;
+  const requestBytesBefore = requestBytes(system, result, tools);
 
-  const count = (msgs: Message[]) =>
-    countTokens({ model: "", system, messages: msgs, clearToolResults, ...(tools && { tools }) });
+  const count = (msgs: Message[]): Promise<number | null> =>
+    oversized(msgs)
+      ? Promise.resolve(null)
+      : countTokens({
+          model: "",
+          system,
+          messages: msgs,
+          clearToolResults,
+          ...(tools && { tools }),
+        });
 
   let tokens = await count(result);
   const tokensBefore = tokens;
 
-  // Strategy 2: Summarize conversation prefix at 80%
-  if (tokens > budget * SUMMARIZE_THRESHOLD && summarize) {
+  // Strategy 2: Summarize conversation prefix at 80%, of the budget or the size cap
+  if ((tokens === null || tokens > budget * SUMMARIZE_THRESHOLD) && summarize) {
     try {
       const summarized = await summarizePrefix(
         result,
@@ -264,9 +294,14 @@ export async function compactMessages(
     }
   }
 
-  // Strategy 3: Emergency truncation at 95%
-  if (tokens > budget * TRUNCATE_THRESHOLD) {
+  // Strategy 3: Emergency truncation at 95% of the budget, or until the view fits the size cap
+  if (tokens === null || tokens > budget * TRUNCATE_THRESHOLD) {
     result = truncateOldest(result);
+    while (oversized(result)) {
+      const next = truncateOldest(result);
+      if (next.length >= result.length) break;
+      result = next;
+    }
     strategies.push("truncate");
     tokens = await count(result);
   }
@@ -276,12 +311,26 @@ export async function compactMessages(
       strategies,
       tokensBefore,
       tokensAfter: tokens,
+      requestBytesBefore,
       messagesSummarized,
     };
     logger.info(event, "context compaction applied");
     return { messages: result, didCompact: true, event };
   }
   return { messages: result, didCompact: false };
+}
+
+/**
+ * The request's raw size as the view holds it: every tool result and
+ * attachment, before any clearing. The adapter's wire format differs by a few
+ * key names, which the 20% margin under the cap absorbs.
+ */
+function requestBytes(
+  system: string,
+  messages: ReadonlyArray<Message>,
+  tools: ToolDefinition[] | undefined,
+): number {
+  return Buffer.byteLength(JSON.stringify({ system, messages, tools }));
 }
 
 /**
