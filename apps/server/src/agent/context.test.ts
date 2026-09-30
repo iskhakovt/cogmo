@@ -606,6 +606,101 @@ describe("compactMessages", () => {
       expect(countTokens).toHaveBeenCalledOnce();
     });
 
+    /** `view` with the message at `index` padded so the view weighs `target` bytes. */
+    function sized(view: ReadonlyArray<Message>, index: number, target: number): Message[] {
+      const role = expectDefined(view[index], "padded message").role;
+      const blank = view.with(index, msg(role, ""));
+      return view.with(index, msg(role, "x".repeat(target - bytesOf(blank))));
+    }
+
+    const MARKER = msg("user", "[Earlier conversation history was truncated]");
+
+    describe("at a 10,000-byte cap, and an 8,000-byte threshold", () => {
+      it("sends a view of exactly the cap whose smallest cut is past the threshold", async () => {
+        const messages = sized(
+          [
+            ...Array.from({ length: 11 }, (_, i) =>
+              msg(i % 2 === 0 ? "user" : "assistant", `turn ${i}`),
+            ),
+            msg("assistant", "read it"),
+            msg("user", "y".repeat(8_500)),
+          ],
+          0,
+          10_000,
+        );
+        expect(bytesOf(R.last(truncations(messages)))).toBeGreaterThan(8_000);
+        const summarize = vi.fn().mockResolvedValue("a summary");
+        const warn = vi.spyOn(logger, "warn");
+        try {
+          const result = await compactMessages(
+            "system",
+            messages,
+            undefined,
+            deps({ maxViewBytes: 10_000, summarize }),
+            true,
+          );
+
+          expect(summarize).not.toHaveBeenCalled();
+          expect(result.messages).toEqual(messages);
+          expect(warn).not.toHaveBeenCalled();
+        } finally {
+          warn.mockRestore();
+        }
+      });
+
+      it.each([
+        ["the threshold", 8_000],
+        ["the cap", 10_000],
+      ])("cuts to a smallest view of exactly %s", async (_limit, size) => {
+        const smallest = sized([MARKER, msg("assistant", "read it"), msg("user", "")], 2, size);
+        const messages = [msg("user", "x".repeat(1_000)), ...smallest.slice(1)];
+        expect(R.last(truncations(messages))).toEqual(smallest);
+
+        const result = await compactMessages(
+          "system",
+          messages,
+          undefined,
+          deps({ maxViewBytes: 10_000 }),
+          true,
+        );
+
+        expect(result.event?.strategies).toEqual(["truncate"]);
+        expect(result.messages).toEqual(smallest);
+      });
+
+      it("keeps a cut of exactly the cap when none gets under the threshold", async () => {
+        const tail = Array.from({ length: 8 }, (_, i) =>
+          msg(i % 2 === 0 ? "assistant" : "user", i === 7 ? "y".repeat(8_500) : `later ${i}`),
+        );
+        const firstCut = sized([msg("user", ""), ...tail], 0, 10_000);
+        const messages = [
+          msg("user", "h".repeat(500)),
+          msg("assistant", "a1"),
+          msg("user", "u2"),
+          msg("assistant", "a3"),
+          ...firstCut,
+        ];
+        const views = truncations(messages);
+        expect(views[1]).toEqual(firstCut);
+        expect(bytesOf(R.last(views))).toBeGreaterThan(8_000);
+        const warn = vi.spyOn(logger, "warn");
+        try {
+          const result = await compactMessages(
+            "system",
+            messages,
+            undefined,
+            deps({ maxViewBytes: 10_000 }),
+            true,
+          );
+
+          expect(result.messages).toEqual(firstCut);
+          expect(warn).not.toHaveBeenCalled();
+        } finally {
+          warn.mockRestore();
+        }
+      });
+    });
+
     it.each([true, false])(
       "does nothing at exactly the threshold (skipBudgetStrategies: %s)",
       async (skip) => {

@@ -353,6 +353,40 @@ describe("withClearedToolResults", () => {
     ];
   }
 
+  it("reads nothing when the request's bytes are exactly the trigger", () => {
+    const params = { model: "m", system: "sys", messages: longResults() };
+    const bytes = Buffer.byteLength(JSON.stringify([params.system, params.messages, []]));
+    const { tokens, read } = spying();
+
+    withClearedToolResults(
+      { ...params, clearToolResults: { triggerTokens: bytes, keep: 0, clearAtLeastTokens: 1 } },
+      (messages, sliceTokens) => canonicalPromptParts({ ...params, messages }, sliceTokens),
+      tokens,
+    );
+
+    expect(read.size).toBe(0);
+  });
+
+  it("clears results that hold no tokens when the minimum is zero", () => {
+    const params = {
+      model: "m",
+      system: "sys",
+      messages: [
+        { role: "user", content: "read it" },
+        { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "read", input: {} }] },
+        { role: "user", content: [{ type: "tool_result", toolUseId: "t1", content: "" }] },
+      ] satisfies Message[],
+    };
+
+    const cleared = withClearedToolResults(
+      { ...params, clearToolResults: { triggerTokens: 0, keep: 0, clearAtLeastTokens: 0 } },
+      (messages, sliceTokens) => canonicalPromptParts({ ...params, messages }, sliceTokens),
+      textTokens(enc),
+    );
+
+    expect(placeholders(cleared)).toBe(1);
+  });
+
   it("stops each pass within the slice that passes its threshold", () => {
     const params = {
       model: "m",
