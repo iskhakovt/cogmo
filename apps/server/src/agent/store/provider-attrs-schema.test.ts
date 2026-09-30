@@ -34,7 +34,10 @@ describe("ProviderAttrsSchema", () => {
     });
   });
 
-  it("rejects a prefix mismatch behaviour the API doesn't take", () => {
-    expect(() => ProviderAttrsSchema.parse({ prefixMismatchBehavior: "drop" })).toThrow();
+  it("ignores a prefix mismatch behaviour the API doesn't take, and reads the rest of the row", () => {
+    // A typo written in raw SQL must not fail every model routed through the row.
+    expect(
+      ProviderAttrsSchema.parse({ prefixMismatchBehavior: "drop-block", headers: { a: "b" } }),
+    ).toEqual({ headers: { a: "b" } });
   });
 });

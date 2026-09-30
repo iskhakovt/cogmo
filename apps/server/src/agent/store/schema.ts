@@ -188,13 +188,15 @@ export type SttProviderTypeValue = (typeof sttProviderType.enumValues)[number];
  * `headers` sets extra default headers on the OpenAI SDK client (e.g.
  * `HTTP-Referer` for OpenRouter usage attribution). `prefixMismatchBehavior`,
  * on an Anthropic row, is what the API does with a replayed thinking block
- * whose prefix changed; absent keeps the account's default. Unknown keys are
+ * whose prefix changed; absent keeps the account's default, and so does a
+ * value the API doesn't take, which reads as absent: it is set by hand, and a
+ * typo must not fail every model routed through the row. Unknown keys are
  * dropped on read, so a stray key never fails a provider lookup.
  */
 export const ProviderAttrsSchema = z.object({
   cacheDialect: CacheDialectSchema.optional(),
   headers: z.record(z.string(), z.string()).optional(),
-  prefixMismatchBehavior: PrefixMismatchBehaviorSchema.optional(),
+  prefixMismatchBehavior: PrefixMismatchBehaviorSchema.optional().catch(undefined),
 });
 export type ProviderAttrs = z.infer<typeof ProviderAttrsSchema>;
 
