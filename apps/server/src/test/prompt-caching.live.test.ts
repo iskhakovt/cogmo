@@ -15,6 +15,7 @@ import { describe, expect, it } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { z } from "zod";
 import { BUILT_IN_SERVICE_GUIDANCE } from "../agent/built-ins.js";
+import { toolResultClearing } from "../agent/context.js";
 import { runStreamingAgentLoop } from "../agent/loop.js";
 import { DefaultPromptSource } from "../agent/prompt.js";
 import type { Service } from "../agent/service.js";
@@ -26,7 +27,9 @@ import {
   withTurnContext,
 } from "../agent/turn-context.js";
 import { AnthropicProvider } from "../llm/anthropic.js";
-import { type Message, MessageContentSchema } from "../llm/types.js";
+import { computeBudget, resolveLimits } from "../llm/models.js";
+import type { PrefixMismatchBehavior } from "../llm/prefix-mismatch-behavior.js";
+import { type Message, MessageContentSchema, type ToolResultClearing } from "../llm/types.js";
 import { logger } from "../logger.js";
 import { DEFAULT_BASE_PROMPT, DEFAULT_PROFILE_MODEL } from "../setup/seed.js";
 import { expectDefined } from "./assertions.js";
@@ -79,7 +82,22 @@ type AnthropicUsage = z.infer<typeof AnthropicUsageSchema>;
 
 const DiagnosticsSchema = z.object({ cache_miss_reason: z.unknown().optional() }).nullish();
 
-function drawTool(): ToolRegistry {
+const SAVED = "Saved the image as lighthouse.png.";
+
+/** A render log long enough that clearing it frees more than B's `clearAtLeastTokens`. */
+const SAVED_WITH_LOG = `${SAVED}\nRender log:\n${Array.from(
+  { length: 150 },
+  (_, i) => `step ${i + 1}: denoised tile ${i % 16} of the lighthouse at dusk`,
+).join("\n")}`;
+
+/**
+ * B's Strategy 1 intent, scaled to its conversation: past a ~3k-token prompt,
+ * clear every tool result, so the draw call's log is cleared from its own
+ * turn's second request on.
+ */
+const B_CLEARING: ToolResultClearing = { triggerTokens: 1000, keep: 0, clearAtLeastTokens: 500 };
+
+function drawTool(result: string): ToolRegistry {
   const tools = new ToolRegistry();
   tools.register(
     defineTool({
@@ -89,7 +107,7 @@ function drawTool(): ToolRegistry {
         prompt: z.string().describe("What to draw."),
         model: z.enum(["flux-dev", "flux-pro"]).describe("The image model."),
       }),
-      handler: async () => "Saved the image as lighthouse.png.",
+      handler: async () => result,
     }),
   );
   return tools;
@@ -112,30 +130,26 @@ interface Request {
 
 /**
  * Run `turns` as one conversation, `beforeTurn` awaited ahead of each, and
- * return every model request that succeeded, tagged with its turn. `extra`
- * adds request fields and beta headers production doesn't send.
+ * return every model request that succeeded, tagged with its turn. The
+ * provider is configured as a provider row would configure it
+ * (`prefixMismatchBehavior`), and the loop sends `clearToolResults` as a turn
+ * does. The recorder adds only cache diagnostics, which production doesn't send.
  */
 async function converse(params: {
   model: string;
   turns: ReadonlyArray<Turn>;
-  extra?: { betas?: ReadonlyArray<string>; body?: Record<string, unknown> };
+  toolResult?: string;
+  prefixMismatchBehavior?: PrefixMismatchBehavior;
+  clearToolResults?: ToolResultClearing;
   beforeTurn?: (turn: number) => Promise<void>;
 }): Promise<Request[]> {
   const nonce = randomUUID();
   let previousMessageId: string | null = null;
   const recorder = createWireRecorder(undefined, {
-    mutate: (_url, init): WireRequestInit => {
-      const headers = new Headers(init.headers);
-      if (params.extra?.betas) headers.set("anthropic-beta", params.extra.betas.join(","));
-      return {
-        headers,
-        body: {
-          ...init.body,
-          ...params.extra?.body,
-          diagnostics: { previous_message_id: previousMessageId },
-        },
-      };
-    },
+    mutate: (_url, init): WireRequestInit => ({
+      headers: new Headers(init.headers),
+      body: { ...init.body, diagnostics: { previous_message_id: previousMessageId } },
+    }),
   });
   // The loop starts the next request once the previous stream ends, and the
   // recorder settles an exchange once it has read the whole body.
@@ -147,8 +161,9 @@ async function converse(params: {
   };
   const provider = new AnthropicProvider(expectDefined(API_KEY, "API key"), undefined, {
     fetch: diagnosedFetch,
+    ...(params.prefixMismatchBehavior && { prefixMismatchBehavior: params.prefixMismatchBehavior }),
   });
-  const tools = drawTool();
+  const tools = drawTool(params.toolResult ?? SAVED);
   const systemPrompt = await new DefaultPromptSource({
     serviceGuidance: BUILT_IN_SERVICE_GUIDANCE,
   }).assemble({
@@ -207,6 +222,7 @@ async function converse(params: {
       maxTokens: 16000,
       onEvent: async () => {},
       cache: turnCacheIntent(nonce, "chat"),
+      ...(params.clearToolResults && { clearToolResults: params.clearToolResults }),
       turnLogger: logger,
     });
     expect(result.degraded, `turn ${i + 1} degraded`).toBeUndefined();
@@ -267,7 +283,12 @@ describe.skipIf(API_KEY === undefined)("prompt caching across turns (live)", () 
   it("A: on the chat model, each request reads exactly what the one before it cached", {
     timeout: 600_000,
   }, async () => {
-    const requests = await converse({ model: CHAT_MODEL, turns: TURNS });
+    // The intent a chat turn sends, which a conversation this short never trips.
+    const requests = await converse({
+      model: CHAT_MODEL,
+      turns: TURNS,
+      clearToolResults: toolResultClearing(computeBudget(resolveLimits(CHAT_MODEL))),
+    });
 
     expect(new Set(requests.map((r) => r.turn)).size).toBe(TURNS.length);
     expect(requests.filter((r) => r.turn === 1).length).toBeGreaterThanOrEqual(2);
@@ -277,18 +298,17 @@ describe.skipIf(API_KEY === undefined)("prompt caching across turns (live)", () 
     }
   });
 
-  it("B: with preserved thinking enforced, replaying every earlier turn is never an edit", {
+  it("B: with preserved thinking enforced, replaying every earlier turn is never an edit, across server-side clearing", {
     timeout: 600_000,
   }, async () => {
+    // The provider row's setting, as production sends it: `block_binding`
+    // with the binding-controls header, so any history edit is a 400.
     const requests = await converse({
       model: ENFORCED_MODEL,
       turns: TURNS,
-      extra: {
-        betas: ["thinking-binding-controls-2026-08-01"],
-        body: {
-          thinking: { type: "adaptive", block_binding: { prefix_mismatch_behavior: "error" } },
-        },
-      },
+      toolResult: SAVED_WITH_LOG,
+      prefixMismatchBehavior: "error",
+      clearToolResults: B_CLEARING,
     });
 
     // Every request succeeded (a history edit under a thinking block is a 400)
@@ -296,11 +316,22 @@ describe.skipIf(API_KEY === undefined)("prompt caching across turns (live)", () 
     expect(new Set(requests.map((r) => r.turn)).size).toBe(TURNS.length);
     for (const [i, request] of requests.entries()) {
       expect(request.wire.inputTransformations, `request ${i + 1}`).toEqual([]);
+      expect(request.body.thinking).toEqual({
+        type: "adaptive",
+        block_binding: { prefix_mismatch_behavior: "error" },
+      });
     }
     // Non-vacuity: later requests replayed thinking blocks from earlier turns.
     const last = expectDefined(requests.at(-1), "last request");
     const replayedThinking = JSON.stringify(last.body.messages).match(/"type":"thinking"/g) ?? [];
     expect(replayedThinking.length).toBeGreaterThan(0);
+    // Non-vacuity: the server cleared the draw call's log on the requests
+    // after it, which replayed thinking produced over the cleared view.
+    const cleared = requests.filter((r) =>
+      JSON.stringify(r.wire.contextManagement ?? null).includes('"clear_tool_uses_20250919"'),
+    );
+    expect(cleared.length).toBeGreaterThan(0);
+    expect(expectDefined(cleared.at(-1), "last cleared request").turn).toBe(TURNS.length);
     console.log(
       `${ENFORCED_MODEL}: ${requests.length} requests, ${replayedThinking.length} thinking blocks replayed in the last; ` +
         `reads ${R.sumBy(requests, (r) => r.usage.cache_read_input_tokens)}, ` +

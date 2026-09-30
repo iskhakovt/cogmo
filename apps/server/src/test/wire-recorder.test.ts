@@ -163,6 +163,47 @@ describe("createWireRecorder", () => {
     });
   });
 
+  it("captures the context edits Anthropic applied, from a stream's message_delta and a JSON body", async () => {
+    const applied = {
+      applied_edits: [
+        { type: "clear_tool_uses_20250919", cleared_tool_uses: 2, cleared_input_tokens: 1200 },
+      ],
+    };
+    const recorder = createWireRecorder(
+      vi
+        .fn()
+        .mockResolvedValueOnce(
+          sse([
+            {
+              type: "message_start",
+              message: { id: "msg_s", usage: ANTHROPIC_USAGE, input_transformations: [] },
+            },
+            {
+              type: "message_delta",
+              delta: { stop_reason: "end_turn" },
+              usage: { output_tokens: 3 },
+              context_management: applied,
+            },
+            { type: "message_stop" },
+          ]),
+        )
+        .mockResolvedValueOnce(
+          json({ id: "msg_j", usage: ANTHROPIC_USAGE, context_management: applied }),
+        ),
+    );
+
+    await (await recorder.fetch("https://api.anthropic.com/v1/messages", post("{}"))).text();
+    await recorder.fetch("https://api.anthropic.com/v1/messages", post("{}"));
+
+    const [stream, body] = await Promise.all(recorder.exchanges.map((e) => e.response));
+    expect(stream).toMatchObject({
+      id: "msg_s",
+      inputTransformations: [],
+      contextManagement: applied,
+    });
+    expect(body).toMatchObject({ id: "msg_j", contextManagement: applied });
+  });
+
   it("captures the usage an OpenAI stream reports in its final chunk", async () => {
     const usage = {
       prompt_tokens: 4711,

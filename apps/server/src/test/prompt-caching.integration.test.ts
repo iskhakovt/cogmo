@@ -15,6 +15,7 @@ import { asc, desc, eq, inArray } from "drizzle-orm";
 import { connect } from "inngest/connect";
 import { afterAll, beforeAll, describe, expect, inject, it, vi } from "vitest";
 import { z } from "zod";
+import { toolResultClearing } from "../agent/context.js";
 import type { Profile } from "../agent/store/index.js";
 import {
   coreMemoryBlocks,
@@ -26,6 +27,8 @@ import { renderTurnContext } from "../agent/turn-context.js";
 import { db } from "../db/index.js";
 import { env } from "../env.js";
 import { bootstrap } from "../index.js";
+import { BINDING_CONTROLS_BETA } from "../llm/anthropic.js";
+import { computeBudget, resolveLimits } from "../llm/models.js";
 import { HindsightMemoryProvider } from "../memory/hindsight.js";
 import { DEFAULT_BASE_PROMPT } from "../setup/seed.js";
 import type { InboundContent } from "../transport/content.js";
@@ -67,8 +70,11 @@ beforeAll(async () => {
   const anthropicKey = RECORDING ? (process.env.ANTHROPIC_API_KEY ?? "test-key") : "test-key";
   recorder = createWireRecorder();
   bootstrapped = await bootstrap({
+    // llmock records from Anthropic's own API, so the provider sends what a
+    // first-party row does.
     providerOverride: new AnthropicProvider(anthropicKey, fileLlmockUrl(), {
       fetch: recorder.fetch,
+      firstParty: true,
     }),
     falFetchOverride: createFalFetch({
       mode: RECORDING ? "record" : "replay",
@@ -213,22 +219,34 @@ const LoopBodySchema = z.looseObject({
 });
 type LoopBody = z.infer<typeof LoopBodySchema>;
 
+interface LoopExchange {
+  body: LoopBody;
+  headers: Record<string, string>;
+}
+
 /**
  * The agent loop's requests for the conversation that opened with `firstText`,
- * in the order sent: those carrying a cache intent (summarization and the
- * Observer send none), whose first message is that turn.
+ * in the order sent, with their headers: those carrying a cache intent
+ * (summarization and the Observer send none), whose first message is that
+ * turn.
  */
-async function loopRequests(firstText: string): Promise<LoopBody[]> {
+async function loopExchanges(firstText: string): Promise<LoopExchange[]> {
   const settled = await Promise.all(
     recorder.exchanges.map(async (e) => ({ e, res: await e.response.catch(() => undefined) })),
   );
   return settled.flatMap(({ e, res }) => {
-    if (!e.request.url.endsWith("/v1/messages") || res?.status !== 200) return [];
+    if (new URL(e.request.url).pathname !== "/v1/messages" || res?.status !== 200) return [];
     const body = LoopBodySchema.safeParse(e.request.body);
     if (!body.success) return [];
     const first = JSON.stringify(body.data.messages[0]?.content ?? null);
-    return first.includes(JSON.stringify(firstText).slice(1, -1)) ? [body.data] : [];
+    return first.includes(JSON.stringify(firstText).slice(1, -1))
+      ? [{ body: body.data, headers: e.request.headers }]
+      : [];
   });
+}
+
+async function loopRequests(firstText: string): Promise<LoopBody[]> {
+  return (await loopExchanges(firstText)).map((e) => e.body);
 }
 
 /** Leading text of every user message led by a turn context, in order. */
@@ -339,6 +357,26 @@ describe("prompt caching", () => {
       expect(request.cache_control).toEqual(ONE_HOUR);
       expect(request.system.at(-1)?.cache_control).toEqual(ONE_HOUR);
       expect(request.tools.at(-1)?.cache_control).toEqual(ONE_HOUR);
+    }
+
+    // ── Every loop request carries Strategy 1's intent and the binding-controls
+    // header; Sonnet 5 runs no prefix check, so none carries a thinking field ──
+    const clearing = toolResultClearing(computeBudget(resolveLimits(CASSETTE_CHAT_MODEL)));
+    const exchanges = await loopExchanges(DRAW);
+    expect(exchanges).toHaveLength(requests.length);
+    for (const { body, headers } of exchanges) {
+      expect(body.context_management).toEqual({
+        edits: [
+          {
+            type: "clear_tool_uses_20250919",
+            trigger: { type: "input_tokens", value: clearing.triggerTokens },
+            keep: { type: "tool_uses", value: clearing.keep },
+            clear_at_least: { type: "input_tokens", value: clearing.clearAtLeastTokens },
+          },
+        ],
+      });
+      expect(headers["anthropic-beta"]?.split(",")).toContain(BINDING_CONTROLS_BETA);
+      expect(body).not.toHaveProperty("thinking");
     }
 
     // ── Each turn opens with its stored turn context ──
