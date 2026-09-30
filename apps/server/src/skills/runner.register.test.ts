@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -305,6 +306,25 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
     expect(result.errors?.[0]).toMatch(/non_fast_forward/);
   });
 
+  it("an aborted signal stops the deploy before it commits", async () => {
+    const runner = await makeRunner();
+    await pushFeatureBranch({
+      work: repo.work,
+      branch: "skill/echo",
+      manifest: ECHO_MANIFEST,
+      body: ECHO_BODY,
+    });
+    const mainBefore = await getMainSha(repo.bare);
+    const reason = new Error("register deadline");
+
+    await expect(
+      runner.register({ branch: "skill/echo", origin: OWNER, signal: AbortSignal.abort(reason) }),
+    ).rejects.toBe(reason);
+
+    expect(await tx((trx) => store.getSkillByName(trx, "echo"))).toBeUndefined();
+    expect(await getMainSha(repo.bare)).toBe(mainBefore);
+  });
+
   it("rejects a missing branch", async () => {
     const runner = await makeRunner();
     const result = await runner.register({ branch: "nope", origin: OWNER });
@@ -465,7 +485,7 @@ tier: wasm
 
         const result = await runner.register({ branch: "skill/echo-verified", origin: OWNER });
         expect(result.status).toBe("live");
-        expect(compiler.compile).toHaveBeenCalledWith(["httpx==0.27.0"]);
+        expect(compiler.compile).toHaveBeenCalledWith(["httpx==0.27.0"], undefined);
       });
 
       it("rejects with requirements_lock_stale when the compile output differs", async () => {
@@ -499,6 +519,43 @@ tier: wasm
         expect(result.status).toBe("rejected");
         expect(result.errors?.[0]).toMatch(/requirements_lock_resolver_failed/);
         expect(result.errors?.[0]).toMatch(/Distribution not found/);
+      });
+
+      it("an abort during the compile rejects with its reason and commits nothing", async () => {
+        const lockfile = "httpx==0.27.0 --hash=sha256:0\n";
+        const controller = new AbortController();
+        const reason = new Error("register deadline");
+        // The deadline passes while the resolver runs; the abort disposes the
+        // exec, which the compiler reports as a transport failure.
+        const compiler = {
+          compile: vi.fn(async () => {
+            controller.abort(reason);
+            return err({ kind: "transport_failed" as const, message: "exec was disposed" });
+          }),
+        };
+        const runner = await makeRunner({ lockfileCompiler: compiler });
+        const sha = await commitWithLockfile("skill/echo-aborted", lockfile);
+        const mainBefore = await getMainSha(repo.bare);
+
+        await expect(
+          runner.register({
+            branch: "skill/echo-aborted",
+            origin: OWNER,
+            signal: controller.signal,
+          }),
+        ).rejects.toBe(reason);
+
+        expect(compiler.compile).toHaveBeenCalledWith(["httpx==0.27.0"], controller.signal);
+        expect(await tx((trx) => store.getSkillByName(trx, "echo"))).toBeUndefined();
+        expect(await getMainSha(repo.bare)).toBe(mainBefore);
+        // The branch is left for a retry.
+        const { stdout } = await execFileP("git", [
+          "-C",
+          repo.bare,
+          "rev-parse",
+          "refs/heads/skill/echo-aborted",
+        ]);
+        expect(stdout.trim()).toBe(sha);
       });
 
       it("skips compile when no compiler is configured (tier-1-only deployment)", async () => {
@@ -1847,6 +1904,42 @@ effects:
         expect(result.status).toBe("live");
         expect(result.gitSha).toBe(sha);
         // Local main advanced even though remote push failed.
+        expect(await getMainSha(repoWithRemote.bare)).toBe(sha);
+      } finally {
+        await repoWithRemote.cleanup();
+      }
+    });
+
+    it("an abort after the commit cuts a stalled mirror push short and still reports live", async () => {
+      const repoWithRemote = await setupRepoWithRemote();
+      try {
+        // The remote's pre-receive hook marks that the push arrived, then stalls it.
+        const pushing = join(repoWithRemote.remote, "..", "pushing");
+        const hook = join(repoWithRemote.remote, "hooks", "pre-receive");
+        await writeFile(hook, `#!/bin/sh\ntouch '${pushing}'\nsleep 20\n`);
+        await chmod(hook, 0o755);
+        const runner = await makeRunnerForRepo(repoWithRemote.bare);
+        const sha = await pushFeatureBranch({
+          work: repoWithRemote.work,
+          branch: "skill/echo",
+          manifest: ECHO_MANIFEST,
+          body: ECHO_BODY,
+        });
+        const controller = new AbortController();
+
+        const registered = runner.register({
+          branch: "skill/echo",
+          origin: OWNER,
+          signal: controller.signal,
+        });
+        while (!existsSync(pushing)) await new Promise((r) => setTimeout(r, 20));
+        const abortedAt = Date.now();
+        controller.abort(new Error("register deadline"));
+        const result = await registered;
+
+        expect(Date.now() - abortedAt).toBeLessThan(5_000);
+        expect(result.status).toBe("live");
+        expect(result.gitSha).toBe(sha);
         expect(await getMainSha(repoWithRemote.bare)).toBe(sha);
       } finally {
         await repoWithRemote.cleanup();

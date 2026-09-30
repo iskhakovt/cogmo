@@ -229,7 +229,11 @@ describe("autoRegisterSkill", () => {
       expect(result.result).toBe(registerResult);
     }
     // No conversation on the task: the owner is the origin.
-    expect(skillRunner.register).toHaveBeenCalledWith({ branch, origin: { kind: "owner" } });
+    expect(skillRunner.register).toHaveBeenCalledWith({
+      branch,
+      origin: { kind: "owner" },
+      signal: expect.any(AbortSignal),
+    });
 
     const { stdout } = await execFileP("git", [
       "-C",
@@ -284,6 +288,7 @@ describe("autoRegisterSkill", () => {
     expect(skillRunner.register).toHaveBeenCalledWith({
       branch,
       origin: { kind: "conversation", userId: origin.userId, profileId: origin.profileId },
+      signal: expect.any(AbortSignal),
     });
   });
 
@@ -348,46 +353,40 @@ describe("autoRegisterSkill", () => {
     expect(skillRunner.register).not.toHaveBeenCalled();
   });
 
-  it("rejects when register exceeds the wall-clock cap", async () => {
-    // Simulate a hung register with a short real timer; reaches the same
-    // Promise.race path that fires at 180s in production. Fake timers
-    // collide with PGlite/git so we use a real-but-tiny timeout instead.
+  it("runs register under a 300 s deadline", async () => {
     const { taskId, branch } = await seedRepoAndTask(SKILLS_CODING_REPO_NAME);
     await pushBranchToUpstream(branch);
+    const deadline = new AbortController();
+    const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(deadline.signal);
     const skillRunner = mock<SkillRunner>();
-    let resolveHang: (() => void) | undefined;
-    skillRunner.register.mockImplementation(
-      () =>
-        new Promise<never>((_, reject) => {
-          // Keep a reference so we can settle the hung promise in the finally
-          // block — otherwise vitest reports an unhandled rejection.
-          resolveHang = () => reject(new Error("test cleanup"));
-        }),
-    );
-
-    // Stub global setTimeout for the test so the 300_000ms cap fires in ~10ms.
-    const realSetTimeout = global.setTimeout;
-    const stubbed = vi
-      .spyOn(global, "setTimeout")
-      .mockImplementation(((cb: () => void) => realSetTimeout(cb, 10)) as typeof setTimeout);
+    skillRunner.register.mockResolvedValue({
+      name: "btc-spot",
+      riskTier: "notify",
+      status: "live",
+      gitSha: "abc123",
+    });
 
     try {
-      await expect(
-        autoRegisterSkill(
-          {
-            runInTx: tx,
-            store,
-            agentStore,
-            secretsStore: fakeSecretsStore(validIdentity),
-            skillRunner,
-            skillsRepoPath: bareRepoPath,
-          },
-          { taskId },
-        ),
-      ).rejects.toThrow(/register exceeded 300000ms/);
+      await autoRegisterSkill(
+        {
+          runInTx: tx,
+          store,
+          agentStore,
+          secretsStore: fakeSecretsStore(validIdentity),
+          skillRunner,
+          skillsRepoPath: bareRepoPath,
+        },
+        { taskId },
+      );
+
+      expect(timeout).toHaveBeenCalledWith(300_000);
+      expect(skillRunner.register).toHaveBeenCalledWith({
+        branch,
+        origin: { kind: "owner" },
+        signal: deadline.signal,
+      });
     } finally {
-      stubbed.mockRestore();
-      resolveHang?.();
+      timeout.mockRestore();
     }
   });
 });

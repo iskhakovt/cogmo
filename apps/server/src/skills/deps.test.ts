@@ -341,6 +341,42 @@ describe("makeSandboxLockfileCompiler", () => {
     expect(sandbox.delete).not.toHaveBeenCalled();
   });
 
+  it("hands its signal to the exec, whose abort disposes it", async () => {
+    const h = buildCompilerHarness(makeFakeExec);
+    const compiler = makeSandboxLockfileCompiler({
+      sandbox: h.sandbox,
+      image: "cogmo-skills:test",
+    });
+    const { signal } = new AbortController();
+
+    const promise = compiler.compile(["httpx==0.27.0"], signal);
+    await new Promise((r) => setImmediate(r));
+    h.exec.waitResolve(0);
+    await promise;
+
+    expect(h.session.execStreaming).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.objectContaining({ signal }),
+    );
+  });
+
+  it("starts no session once its signal has aborted", async () => {
+    const sandbox = mock<SandboxClient>();
+    const controller = new AbortController();
+    // The deadline passes while the image is being made present.
+    sandbox.ensureImagePresent.mockImplementation(async () => controller.abort());
+    const compiler = makeSandboxLockfileCompiler({
+      sandbox,
+      image: "cogmo-skills:test",
+    });
+
+    const result = await compiler.compile(["httpx==0.27.0"], controller.signal);
+
+    expect(result.isErr()).toBe(true);
+    expect(sandbox.create).not.toHaveBeenCalled();
+    expect(sandbox.delete).not.toHaveBeenCalled();
+  });
+
   it("captures a stream 'error' event as transport_failed (no unhandled exception)", async () => {
     const h = buildCompilerHarness(makeFakeExec);
     const compiler = makeSandboxLockfileCompiler({

@@ -622,8 +622,12 @@ RPC signature:
 ```typescript
 interface SkillRunner {
   // `origin` (required) decides who a schedule the request puts live runs as —
-  // see Run-as identity.
-  register(opts: { branch: string; origin: SkillDeployOrigin }): Promise<RegisterResult>;
+  // see Run-as identity. `signal` cancels the deploy until it commits.
+  register(opts: {
+    branch: string;
+    origin: SkillDeployOrigin;
+    signal?: AbortSignal;
+  }): Promise<RegisterResult>;
   approveDeploy(opts: { pendingId: string; origin: SkillDeployOrigin }): Promise<RegisterResult>;
   denyDeploy(opts: { pendingId: string; reason?: string }): Promise<void>;
   rollback(opts: { name: string; toGitSha: string; origin: SkillDeployOrigin }): Promise<RegisterResult>;
@@ -668,6 +672,7 @@ type EnableResult =
 - **`main` is authoritative.** `refs/heads/main` in the bare repo and `skills.git_sha` in the DB always agree — both are written together inside the register transaction.
 - **No race via direct push.** Pre-receive hook rejects non-Cogmo writes to `main`; Cogmo's own registers queue on the advisory lock, with the snapshot caveat in register step 1.
 - **Idempotent.** Registering a branch whose tip is already `main` is a no-op. Safe to retry on network timeouts.
+- **Cancellable before the commit.** An abort of `register`'s `signal` before the deploy transaction starts stops the deploy: the lockfile compile's exec is disposed and its session deleted, no session starts after the abort, and `register` rejects with the signal's reason, leaving `main` and the branch untouched. An abort once the transaction has started only kills the mirror push to the remote, and the result stands. A skill-repo coding task's auto-register runs `register` under a 300 s deadline.
 - **Git push is orthogonal.** Pushing branches to a user-configured remote (backup, multi-machine) neither triggers nor depends on registration.
 
 ## Dependencies `[proposed]`

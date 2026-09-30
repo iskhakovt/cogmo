@@ -92,8 +92,14 @@ export type LockfileCompileError =
   | { kind: "transport_failed"; message: string };
 
 export interface LockfileCompiler {
-  /** Re-resolves `dependencies` via uv pip compile. Caller byte-compares against committed lockfile. */
-  compile(dependencies: ReadonlyArray<string>): Promise<Result<string, LockfileCompileError>>;
+  /**
+   * Re-resolves `dependencies` via uv pip compile. Caller byte-compares against committed lockfile.
+   * Aborting `signal` stops the compile: no session starts after it, and a running exec is disposed.
+   */
+  compile(
+    dependencies: ReadonlyArray<string>,
+    signal?: AbortSignal,
+  ): Promise<Result<string, LockfileCompileError>>;
 }
 
 const DEFAULT_COMPILE_RESOURCE_LIMITS: Required<ResourceLimits> = {
@@ -114,7 +120,7 @@ export interface SandboxLockfileCompilerOptions {
   image: string;
   /** Override per-test or per-resource-constrained host. */
   resourceLimits?: Partial<ResourceLimits>;
-  /** Override the wall-clock cap. Defaults to 60s. */
+  /** Override the wall-clock cap. Defaults to `DEFAULT_COMPILE_TIMEOUT_MS`. */
   timeoutMs?: number;
   /**
    * Optional shared deps-cache volume. When set, the compile sandbox
@@ -142,6 +148,7 @@ export function makeSandboxLockfileCompiler(
   return {
     async compile(
       dependencies: ReadonlyArray<string>,
+      signal?: AbortSignal,
     ): Promise<Result<string, LockfileCompileError>> {
       const taskId = `lockfile-compile-${randomUUID()}`;
       // Buffer for slightly longer than the exec budget so an exec
@@ -153,6 +160,7 @@ export function makeSandboxLockfileCompiler(
       let session: SandboxSession;
       try {
         await opts.sandbox.ensureImagePresent(opts.image, limits);
+        signal?.throwIfAborted();
         session = await opts.sandbox.create({
           taskId,
           image: opts.image,
@@ -179,7 +187,7 @@ export function makeSandboxLockfileCompiler(
         // the same flag — documented in `design/skills.md`.
         const handle = await session.execStreaming(
           ["uv", "pip", "compile", "--generate-hashes", "--no-header", "--quiet", "-"],
-          { attachStdin: true, timeoutMs },
+          { attachStdin: true, timeoutMs, ...(signal && { signal }) },
         );
         if (!handle.stdin) {
           await handle.dispose().catch(() => {});
@@ -206,7 +214,7 @@ export function makeSandboxLockfileCompiler(
           if (stdoutBytes + chunk.length > MAX_LOCKFILE_BYTES) {
             truncated = true;
             // Abort the exec so uv stops writing — otherwise it blocks
-            // on its pipe buffer until timeoutMs (60s) fires.
+            // on its pipe buffer until timeoutMs fires.
             handle.dispose().catch(() => {});
             return;
           }

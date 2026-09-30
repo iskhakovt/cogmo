@@ -228,8 +228,18 @@ function deployRunAs(owner: SkillRunIdentity, origin: SkillDeployOrigin): SkillR
  * tool, and dynamic-tool registrar all depend on.
  */
 export interface SkillRunner {
-  /** `origin` decides who a schedule the request puts live runs as. */
-  register(opts: { branch: string; origin: SkillDeployOrigin }): Promise<RegisterResult>;
+  /**
+   * `origin` decides who a schedule the request puts live runs as. Aborting
+   * `signal` before the deploy transaction starts stops the deploy: the
+   * lockfile compile stops, and `register` rejects with the signal's reason,
+   * leaving main and the branch as they were. Once the transaction has
+   * started, an abort only cuts the mirror push short.
+   */
+  register(opts: {
+    branch: string;
+    origin: SkillDeployOrigin;
+    signal?: AbortSignal;
+  }): Promise<RegisterResult>;
   /** A `user` origin is also recorded as the deploy's `approved_by`. */
   approveDeploy(opts: { pendingId: string; origin: SkillDeployOrigin }): Promise<RegisterResult>;
   denyDeploy(opts: { pendingId: string; reason?: string }): Promise<void>;
@@ -577,12 +587,14 @@ export class SkillRunnerImpl implements SkillRunner {
    * mode: the target lockfile was valid at deploy time, hashes are
    * still pinned, and a wheel yanked from PyPI since shouldn't block
    * the operator from rewinding to a known-good revision.
+   *
+   * Aborting `signal` stops the compile, and this throws its reason.
    */
   async #readManifestLockfile(
     repoPath: string,
     gitSha: string,
     manifest: SkillManifest,
-    opts: { verifyFresh: boolean } = { verifyFresh: true },
+    opts: { verifyFresh: boolean; signal?: AbortSignal } = { verifyFresh: true },
   ): Promise<Result<{ hash: string; contents: string } | null, string>> {
     if (manifest.dependencies.length === 0) {
       return ok(null);
@@ -595,7 +607,9 @@ export class SkillRunnerImpl implements SkillRunner {
     }
 
     if (opts.verifyFresh && this.#lockfileCompiler) {
-      const compiled = await this.#lockfileCompiler.compile(manifest.dependencies);
+      const compiled = await this.#lockfileCompiler.compile(manifest.dependencies, opts.signal);
+      // An abort surfaces as itself, not as the compile failure it caused.
+      opts.signal?.throwIfAborted();
       if (compiled.isErr()) {
         return err(`requirements_lock_${compiled.error.kind}: ${compiled.error.message}`);
       }
@@ -675,7 +689,11 @@ export class SkillRunnerImpl implements SkillRunner {
 
   // --- Deployment pipeline ---
 
-  async register(opts: { branch: string; origin: SkillDeployOrigin }): Promise<RegisterResult> {
+  async register(opts: {
+    branch: string;
+    origin: SkillDeployOrigin;
+    signal?: AbortSignal;
+  }): Promise<RegisterResult> {
     const repoPath = this.#requireRepoPath("register");
 
     // Reject branch=main at the boundary. Without this guard, the register
@@ -778,7 +796,10 @@ export class SkillRunnerImpl implements SkillRunner {
       return rejectedResult(branchSha, classifierLog.validation_errors.join("; "));
     }
 
-    const lockfileResult = await this.#readManifestLockfile(repoPath, branchSha, manifest);
+    const lockfileResult = await this.#readManifestLockfile(repoPath, branchSha, manifest, {
+      verifyFresh: true,
+      ...(opts.signal && { signal: opts.signal }),
+    });
     if (lockfileResult.isErr()) {
       return rejectedResult(branchSha, lockfileResult.error);
     }
@@ -791,6 +812,8 @@ export class SkillRunnerImpl implements SkillRunner {
       }
     }
 
+    // The last point an abort stops the deploy: the transaction moves main.
+    opts.signal?.throwIfAborted();
     const schedule = manifest.schedule ?? null;
     const result = await this.#runInTx((tx) =>
       this.#store.executeRegister(tx, {
@@ -817,7 +840,7 @@ export class SkillRunnerImpl implements SkillRunner {
     // coding task cloning from origin sees the just-registered skill. Best-
     // effort — local state is authoritative.
     if (result.kind === "live") {
-      await this.#mirrorMainToRemote(branchSha);
+      await this.#mirrorMainToRemote(branchSha, { ...(opts.signal && { signal: opts.signal }) });
     }
 
     return this.#registerResultToRpc({
@@ -1627,10 +1650,12 @@ export class SkillRunnerImpl implements SkillRunner {
    * main. `force` is opt-in for `rollback` (which intentionally rewrites
    * history); register/approve use fast-forward push which fails clearly
    * if the remote has somehow drifted.
+   *
+   * Aborting `signal` kills the push, which then fails like any other.
    */
   async #mirrorMainToRemote(
     newSha: string,
-    options?: { force: { expectedRemoteSha: string } },
+    options?: { force?: { expectedRemoteSha: string }; signal?: AbortSignal },
   ): Promise<void> {
     const repoPath = this.#requireRepoPath("mirrorMainToRemote");
 
@@ -1660,11 +1685,12 @@ export class SkillRunnerImpl implements SkillRunner {
     }
     args.push(remoteUrl, `${newSha}:refs/heads/main`);
 
+    const spawnOpts = options?.signal && { signal: options.signal };
     try {
       if (pat) {
-        await withGitAskpass(pat, (env) => runGit(args, env));
+        await withGitAskpass(pat, (env) => runGit(args, env, spawnOpts));
       } else {
-        await runGit(args);
+        await runGit(args, undefined, spawnOpts);
       }
       log.info({ newSha, remoteUrl }, "mirrored skills main to remote");
     } catch (e) {
