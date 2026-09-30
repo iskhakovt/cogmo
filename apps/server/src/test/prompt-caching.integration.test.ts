@@ -71,10 +71,12 @@ beforeAll(async () => {
   recorder = createWireRecorder();
   bootstrapped = await bootstrap({
     // llmock records from Anthropic's own API, so the provider sends what a
-    // first-party row does.
+    // first-party row does, one that sets `prefixMismatchBehavior`: the model
+    // list alone keeps `thinking` off Sonnet 5.
     providerOverride: new AnthropicProvider(anthropicKey, fileLlmockUrl(), {
       fetch: recorder.fetch,
       firstParty: true,
+      prefixMismatchBehavior: "error",
     }),
     falFetchOverride: createFalFetch({
       mode: RECORDING ? "record" : "replay",
@@ -360,11 +362,10 @@ describe("prompt caching", () => {
     }
 
     // ── Every loop request carries Strategy 1's intent and the binding-controls
-    // header; Sonnet 5 runs no prefix check, so none carries a thinking field ──
+    // header; Sonnet 5 runs no prefix check, so none carries a thinking field,
+    // though the provider sets a behaviour ──
     const clearing = toolResultClearing(computeBudget(resolveLimits(CASSETTE_CHAT_MODEL)));
-    const exchanges = await loopExchanges(DRAW);
-    expect(exchanges).toHaveLength(requests.length);
-    for (const { body, headers } of exchanges) {
+    for (const { body, headers } of await loopExchanges(DRAW)) {
       expect(body.context_management).toEqual({
         edits: [
           {

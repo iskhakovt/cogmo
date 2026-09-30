@@ -2117,6 +2117,7 @@ describe("OpenAICompatibleProvider", () => {
         { ...CLEARING, clearAtLeastTokens: 100_000 },
       ],
       ["when every result is within `keep`", { ...CLEARING, keep: 4 }],
+      ["when `keep` exceeds the results", { ...CLEARING, keep: 5 }],
     ])("clears nothing %s", async (_label, clearing) => {
       const provider = createProvider();
       mockCreate.mockResolvedValueOnce(okCompletion());
@@ -2142,6 +2143,100 @@ describe("OpenAICompatibleProvider", () => {
       await provider.chat({ ...params, clearToolResults: { ...CLEARING, triggerTokens: tokens } });
 
       expect(toolContents(firstCreateArgs())).toEqual([1, 2, 3, 4].map((n) => `${n}: ${RESULT}`));
+    });
+
+    describe("clear_at_least", () => {
+      const enc = getEncoding("cl100k_base");
+      const tokens = (n: number) => enc.encode(`${n}: ${RESULT}`, [], []).length;
+      /** What clearing the two oldest results frees. */
+      const oldestTwo = () => tokens(1) + tokens(2);
+
+      async function clearedWith(clearAtLeastTokens: number): Promise<unknown[]> {
+        const provider = createProvider();
+        mockCreate.mockResolvedValueOnce(okCompletion());
+        await provider.chat({
+          model: "gpt-5-nano",
+          system: "sys",
+          messages: toolHeavy(),
+          clearToolResults: { ...CLEARING, clearAtLeastTokens },
+        });
+        return toolContents(firstCreateArgs());
+      }
+
+      it("clears when the results it would clear hold exactly the minimum", async () => {
+        expect(await clearedWith(oldestTwo())).toEqual([
+          CLEARED_PLACEHOLDER,
+          CLEARED_PLACEHOLDER,
+          `3: ${RESULT}`,
+          `4: ${RESULT}`,
+        ]);
+      });
+
+      it("counts only the results it would clear, not the ones it keeps", async () => {
+        // More than the two oldest hold, less than all four.
+        const between = oldestTwo() + tokens(3);
+        expect(await clearedWith(between)).toEqual([1, 2, 3, 4].map((n) => `${n}: ${RESULT}`));
+      });
+    });
+
+    it("counts the tool definitions toward the trigger", async () => {
+      const provider = createProvider();
+      const tools: ToolDefinition[] = [
+        {
+          name: "read",
+          description: "Read one part of the logs. ".repeat(30),
+          parameters: { type: "object", properties: { part: { type: "integer" } } },
+        },
+      ];
+      const params = { model: "gpt-5-nano", system: "sys", messages: toolHeavy() };
+      // At the trigger without the tools, past it with them.
+      const withoutTools = await provider.countTokens(params);
+      mockCreate.mockResolvedValueOnce(okCompletion());
+
+      await provider.chat({
+        ...params,
+        tools,
+        clearToolResults: { ...CLEARING, triggerTokens: withoutTools },
+      });
+
+      expect(toolContents(firstCreateArgs()).slice(0, 2)).toEqual([
+        CLEARED_PLACEHOLDER,
+        CLEARED_PLACEHOLDER,
+      ]);
+    });
+
+    it("counts the system prompt toward the byte bound", async () => {
+      const provider = createProvider();
+      const system = "Follow the house rules. ".repeat(200);
+      // Short results, so the messages alone are small in bytes.
+      const messages = toolHeavy().map((m): Message => {
+        if (typeof m.content === "string") return m;
+        return {
+          ...m,
+          content: m.content.map((b) =>
+            b.type === "tool_result" ? { ...b, content: `result ${b.toolUseId}` } : b,
+          ),
+        };
+      });
+      const params = { model: "gpt-5-nano", system, messages };
+      const tokens = await provider.countTokens(params);
+      // The messages alone fit under the trigger in bytes; with the system
+      // prompt the request is past it in tokens.
+      const triggerTokens = Buffer.byteLength(JSON.stringify(messages)) + 1;
+      expect(tokens).toBeGreaterThan(triggerTokens);
+      mockCreate.mockResolvedValueOnce(okCompletion());
+
+      await provider.chat({
+        ...params,
+        clearToolResults: { triggerTokens, keep: 2, clearAtLeastTokens: 1 },
+      });
+
+      expect(toolContents(firstCreateArgs())).toEqual([
+        CLEARED_PLACEHOLDER,
+        CLEARED_PLACEHOLDER,
+        "result t3",
+        "result t4",
+      ]);
     });
 
     it("counts the prompt as cleared, as it goes on the wire", async () => {

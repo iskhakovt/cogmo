@@ -432,6 +432,7 @@ describe("AnthropicProvider", () => {
   it.each([
     ["stop_sequence", "end_turn"],
     ["pause_turn", "end_turn"],
+    ["compaction", "end_turn"],
   ] as const)("maps %s stop reason to %s", async (anthropicReason, expected) => {
     // These arms are named explicitly rather than left to a catch-all so the
     // switch stays exhaustive over the SDK union — the compile error on the
@@ -1511,6 +1512,7 @@ describe("AnthropicProvider", () => {
     const CONTEXT_MANAGEMENT = "context-management-2025-06-27";
 
     const BodySchema = z.looseObject({
+      tools: z.array(z.unknown()).optional(),
       betas: z.array(z.string()).optional(),
       context_management: z.unknown().optional(),
       thinking: z.unknown().optional(),
@@ -1610,6 +1612,41 @@ describe("AnthropicProvider", () => {
 
       const body = BodySchema.parse(expectDefined(mockCreate.mock.calls[0], "create call")[0]);
       expect(body.context_management).toEqual(CLEAR_TOOL_USES);
+    });
+
+    it("carries the intent and the header on the synthetic-tool path", async () => {
+      const p = provider();
+      mockCreate.mockResolvedValueOnce({
+        content: [
+          {
+            type: "tool_use",
+            id: "tu_1",
+            name: "extract",
+            input: { labels: { a: "b" } },
+            caller: { type: "direct" },
+          },
+        ],
+        stop_reason: "tool_use",
+        model: "claude-sonnet-5",
+        usage: { input_tokens: 5, output_tokens: 1 },
+      });
+
+      await p.chat({
+        model: "claude-sonnet-5",
+        ...PARAMS,
+        clearToolResults: CLEARING,
+        responseFormat: {
+          type: "json_schema",
+          name: "extract",
+          // A record is an open object, which structured outputs can't take.
+          schema: toObjectJsonSchema(z.object({ labels: z.record(z.string(), z.string()) })),
+        },
+      });
+
+      const body = BodySchema.parse(expectDefined(mockCreate.mock.calls[0], "create call")[0]);
+      expect(body.tools).toEqual([expect.objectContaining({ name: "extract" })]);
+      expect(body.context_management).toEqual(CLEAR_TOOL_USES);
+      expect(body.betas).toEqual([CONTEXT_MANAGEMENT, BINDING]);
     });
 
     it.each([

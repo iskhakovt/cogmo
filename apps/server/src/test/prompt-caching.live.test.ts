@@ -321,6 +321,10 @@ describe.skipIf(API_KEY === undefined)("prompt caching across turns (live)", () 
         block_binding: { prefix_mismatch_behavior: "error" },
       });
     }
+    // The server clears the log from its own turn's second request on, so the
+    // cleared set is fixed and every request still reads what the one before
+    // it cached.
+    expectEachReadsThePrevious(requests);
     // Non-vacuity: later requests replayed thinking blocks from earlier turns.
     const last = expectDefined(requests.at(-1), "last request");
     const replayedThinking = JSON.stringify(last.body.messages).match(/"type":"thinking"/g) ?? [];

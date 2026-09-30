@@ -4,7 +4,9 @@ import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { z } from "zod";
 import { installLiveCatalog } from "../../llm/litellm-data.js";
+import { computeBudget, resolveLimits } from "../../llm/models.js";
 import type { LlmProvider } from "../../llm/provider.js";
+import { MAX_REQUEST_BYTES } from "../../llm/request-size.js";
 import type { ToolDefinition } from "../../llm/types.js";
 import { logger } from "../../logger.js";
 import type { SkillRunner } from "../../skills/runner.js";
@@ -21,6 +23,7 @@ import {
 } from "../../test/factories.js";
 import { StreamDeliveryError } from "../../transport/delivery-router.js";
 import { canonicalKeyOrder } from "../../util/canonical-key-order.js";
+import { toolResultClearing } from "../context.js";
 import type { AgentLoopResult, StepRunner } from "../loop.js";
 import { defineTool, ToolRegistry } from "../tools.js";
 import {
@@ -234,11 +237,76 @@ describe("runAgenticStage", () => {
     await runAgenticStage(h.deps, stageArgs(), steps, log);
 
     const loopParams = expectDefined(h.runStreamingAgentLoop.mock.calls[0], "loop call")[0];
-    const clearing = expectDefined(loopParams.clearToolResults, "the loop's intent");
-    expect(clearing.keep).toBe(5);
+    // The stage's frozen limits: no row override, so the catalog's.
+    const clearing = toolResultClearing(computeBudget(resolveLimits(loopParams.model)));
+    expect(loopParams.clearToolResults).toEqual(clearing);
     const counts = vi.mocked(provider.countTokens).mock.calls;
     expect(counts.length).toBeGreaterThan(0);
     for (const [params] of counts) expect(params.clearToolResults).toEqual(clearing);
+  });
+
+  it("sends the summarization fork the stage's intent", async () => {
+    const h = await harness();
+    vi.mocked(h.agentStore.getLastTokens).mockResolvedValue(undefined);
+    vi.mocked(h.agentStore.listMessages).mockResolvedValue([
+      { id: "m1", role: "user", content: "m1" },
+      { id: "m2", role: "assistant", content: "r1" },
+      { id: "m3", role: "user", content: "m2" },
+      { id: "m4", role: "assistant", content: "r2" },
+      { id: "m5", role: "user", content: "m3" },
+      { id: "m6", role: "assistant", content: "r3" },
+      { id: "m7", role: "user", content: "m4" },
+      { id: "m8", role: "assistant", content: "r4" },
+      { id: "msg-1", role: "user", content: "Draft a plan." },
+    ]);
+    const { provider } = await h.deps.resolveProvider("claude-sonnet-4-6");
+    // Past 80% of any budget, then under it once summarized.
+    vi.mocked(provider.countTokens).mockResolvedValueOnce(100_000_000).mockResolvedValue(10);
+    vi.mocked(provider.chat).mockResolvedValueOnce({
+      content: [{ type: "text", text: "Summary of the run so far." }],
+      stopReason: "end_turn",
+      model: "claude-sonnet-4-6",
+      usage: { inputTokens: 1, outputTokens: 1 },
+    });
+    const { steps } = recordingSteps();
+
+    await runAgenticStage(h.deps, stageArgs(), steps, log);
+
+    const loopParams = expectDefined(h.runStreamingAgentLoop.mock.calls[0], "loop call")[0];
+    const fork = expectDefined(vi.mocked(provider.chat).mock.calls[0], "summarization call")[0];
+    expect(fork.clearToolResults).toEqual(loopParams.clearToolResults);
+    expect(fork.clearToolResults).toBeDefined();
+  });
+
+  it("summarizes a view past 80% of the size cap without counting it", async () => {
+    const h = await harness();
+    const huge = "x".repeat(Math.ceil(MAX_REQUEST_BYTES * 0.85));
+    vi.mocked(h.agentStore.listMessages).mockResolvedValue([
+      { id: "m1", role: "user", content: huge },
+      { id: "m2", role: "assistant", content: "r1" },
+      { id: "m3", role: "user", content: "m2" },
+      { id: "m4", role: "assistant", content: "r2" },
+      { id: "m5", role: "user", content: "m3" },
+      { id: "m6", role: "assistant", content: "r3" },
+      { id: "m7", role: "user", content: "m4" },
+      { id: "m8", role: "assistant", content: "r4" },
+      { id: "msg-1", role: "user", content: "Draft a plan." },
+    ]);
+    const { provider } = await h.deps.resolveProvider("claude-sonnet-4-6");
+    vi.mocked(provider.chat).mockResolvedValueOnce({
+      content: [{ type: "text", text: "Summary of the run so far." }],
+      stopReason: "end_turn",
+      model: "claude-sonnet-4-6",
+      usage: { inputTokens: 1, outputTokens: 1 },
+    });
+    const { steps } = recordingSteps();
+
+    await runAgenticStage(h.deps, stageArgs(), steps, log);
+
+    expect(provider.chat).toHaveBeenCalledOnce();
+    for (const [params] of vi.mocked(provider.countTokens).mock.calls) {
+      expect(JSON.stringify(params.messages)).not.toContain(huge);
+    }
   });
 
   it("renders the core memory of the run conversation's user", async () => {

@@ -4,7 +4,8 @@
  * upstream promises that ratio, so a bump could move it with no signal
  * beyond every non-streaming call starting to fail; probing the installed
  * SDK from both sides turns that into a failure here with a number to
- * update.
+ * update. It probes `client.beta.messages.create`, the path the adapter
+ * calls.
  *
  * Separate from `anthropic.test.ts`, which mocks `@anthropic-ai/sdk`
  * wholesale and so cannot see the guard. No sockets either: the injected
@@ -38,7 +39,7 @@ async function probe(maxTokens: number): Promise<{ fired: boolean; sawGuardMessa
   reachedFetch = false;
   let sawGuardMessage = false;
   try {
-    await client.messages.create({
+    await client.beta.messages.create({
       model: "claude-sonnet-5",
       max_tokens: maxTokens,
       messages: [{ role: "user", content: "hi" }],
