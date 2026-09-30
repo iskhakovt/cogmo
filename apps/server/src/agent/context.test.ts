@@ -1,23 +1,19 @@
 import { describe, expect, it, vi } from "vitest";
-import type {
-  ContentBlock,
-  Message,
-  ToolDefinition,
-  ToolResultBlock,
-  ToolUseBlock,
-} from "../llm/types.js";
+import type { ContentBlock, Message, ToolResultClearing } from "../llm/types.js";
 import { expectDefined } from "../test/assertions.js";
 import {
   type ContextManagerDeps,
   compactMessages,
-  compactSameToolClusters,
   extractSummaryText,
   SUMMARIZATION_PROMPT,
-  type SupersessionOpts,
   shouldSkipCounting,
   snapToPairBoundary,
   summarizationRequest,
+  toolResultClearing,
 } from "./context.js";
+
+/** Strategy 1's intent at a budget of 1,000 tokens. */
+const CLEARING: ToolResultClearing = { triggerTokens: 600, keep: 5, clearAtLeastTokens: 100 };
 
 /** Helper: create a simple text message. */
 function msg(role: "user" | "assistant", text: string): Message {
@@ -50,6 +46,7 @@ describe("compactMessages", () => {
     const result = await compactMessages("system", messages, undefined, {
       countTokens: vi.fn().mockResolvedValue(100),
       budget: 1000,
+      clearToolResults: CLEARING,
     });
 
     expect(result.didCompact).toBe(false);
@@ -57,11 +54,7 @@ describe("compactMessages", () => {
     expect(result.event).toBeUndefined();
   });
 
-  it("clears oldest tool results, keeps last 5", async () => {
-    // Create 7 tool result pairs — should clear 2, keep 5.
-    // Tool names vary per call so Strategy 0 (same-tool supersession,
-    // count-based) doesn't also fire — this test pins Strategy 1's
-    // budget-pressure behavior in isolation.
+  it("counts with Strategy 1's intent and leaves every tool result as it is", async () => {
     const messages: Message[] = [];
     for (let i = 0; i < 7; i++) {
       messages.push(msg("user", `query ${i}`));
@@ -69,29 +62,51 @@ describe("compactMessages", () => {
       messages.push(toolResultMsg([{ id: `t${i}`, content: `result-${i}-${"x".repeat(1000)}` }]));
       messages.push(msg("assistant", `answer ${i}`));
     }
-
-    const countTokens = vi.fn().mockResolvedValueOnce(700).mockResolvedValueOnce(400);
+    const before = structuredClone(messages);
+    // Past the clearing threshold, under the summarization one.
+    const countTokens = vi.fn().mockResolvedValue(700);
 
     const result = await compactMessages("system", messages, undefined, {
       countTokens,
       budget: 1000,
+      clearToolResults: CLEARING,
+      summarize: vi.fn(),
     });
 
-    expect(result.didCompact).toBe(true);
-    expect(result.event?.toolResultsCleared).toBe(2);
-    expect(result.event?.strategies).toEqual(["clear_tool_results"]);
-
-    // First 2 tool results should be cleared
-    const toolResults = result.messages.flatMap((m) =>
-      typeof m.content === "string" ? [] : m.content.filter((b) => b.type === "tool_result"),
+    expect(result.didCompact).toBe(false);
+    expect(result.messages).toEqual(before);
+    expect(countTokens).toHaveBeenCalledOnce();
+    expect(countTokens).toHaveBeenCalledWith(
+      expect.objectContaining({ messages: before, clearToolResults: CLEARING }),
     );
-    expect(toolResults[0]?.content).toBe("[Cleared — call tool again if needed]");
-    expect(toolResults[1]?.content).toBe("[Cleared — call tool again if needed]");
-    // Last 5 should be intact
-    expect(toolResults[2]?.content).toContain("result-2-");
   });
 
-  it("does not call summarize when tool clearing is sufficient", async () => {
+  it("carries the intent on every count, after a summary and a truncation too", async () => {
+    const messages: Message[] = [];
+    for (let i = 0; i < 8; i++) {
+      messages.push(msg("user", `q${i}`));
+      messages.push(msg("assistant", `a${i}`));
+    }
+    const countTokens = vi
+      .fn()
+      .mockResolvedValueOnce(980)
+      .mockResolvedValueOnce(960)
+      .mockResolvedValueOnce(200);
+
+    await compactMessages("system", messages, undefined, {
+      countTokens,
+      budget: 1000,
+      clearToolResults: CLEARING,
+      summarize: vi.fn().mockResolvedValue("a summary"),
+    });
+
+    expect(countTokens).toHaveBeenCalledTimes(3);
+    for (const [params] of countTokens.mock.calls) {
+      expect(params.clearToolResults).toEqual(CLEARING);
+    }
+  });
+
+  it("does not summarize when the count after clearing is under 80%", async () => {
     const messages: Message[] = [];
     for (let i = 0; i < 7; i++) {
       messages.push(msg("user", `q${i}`));
@@ -100,13 +115,14 @@ describe("compactMessages", () => {
       messages.push(msg("assistant", `a${i}`));
     }
 
-    // Over 60% initially, under 80% after clearing
-    const countTokens = vi.fn().mockResolvedValueOnce(700).mockResolvedValueOnce(500);
+    // Over 60%, which the intent clears, and under 80%.
+    const countTokens = vi.fn().mockResolvedValueOnce(700);
     const summarize = vi.fn();
 
     await compactMessages("system", messages, undefined, {
       countTokens,
       budget: 1000,
+      clearToolResults: CLEARING,
       summarize,
     });
 
@@ -129,16 +145,16 @@ describe("compactMessages", () => {
       msg("assistant", "latest answer"),
     ];
 
-    // Over 80% before and after clearing (no tool results), under after summarization
     const countTokens = vi
       .fn()
-      .mockResolvedValueOnce(900) // initial: over 60% and 80%
+      .mockResolvedValueOnce(900) // after clearing: over 80%
       .mockResolvedValueOnce(300); // after summarization: under
     const summarize = vi.fn().mockResolvedValue("Summary of old messages");
 
     const result = await compactMessages("system", messages, undefined, {
       countTokens,
       budget: 1000,
+      clearToolResults: CLEARING,
       summarize,
     });
 
@@ -160,12 +176,7 @@ describe("compactMessages", () => {
   // calls `summarize` twice (e.g., segmented summarization) would surface
   // only at runtime under specific conversation lengths. This test catches
   // it at unit-test time.
-  it("calls summarize at most once even when all three strategies fire", async () => {
-    // Build a conversation with enough tool results to clear AND enough
-    // messages to summarize a prefix.
-    // Vary tool names per call so Strategy 0 (same-tool supersession)
-    // doesn't trip — this test focuses on the budget-pressure sequence
-    // clear → summarize → truncate.
+  it("calls summarize at most once even when both rewriting strategies fire", async () => {
     const messages: Message[] = [];
     for (let i = 0; i < 8; i++) {
       messages.push(msg("user", `q${i}`));
@@ -174,12 +185,11 @@ describe("compactMessages", () => {
       messages.push(msg("assistant", `a${i}`));
     }
 
-    // Stay above the 95% truncate threshold through every strategy so all
-    // three fire in sequence: clear → summarize → truncate.
+    // Stay above the 95% truncate threshold through summarization so both
+    // fire in sequence: summarize → truncate.
     const countTokens = vi
       .fn()
       .mockResolvedValueOnce(980) // initial: over 95%
-      .mockResolvedValueOnce(970) // after clearing: still over 95%
       .mockResolvedValueOnce(960) // after summarization: still over 95%
       .mockResolvedValueOnce(200); // after truncation: under
     const summarize = vi.fn().mockResolvedValue("Summary of old messages");
@@ -187,13 +197,11 @@ describe("compactMessages", () => {
     const result = await compactMessages("system", messages, undefined, {
       countTokens,
       budget: 1000,
+      clearToolResults: CLEARING,
       summarize,
     });
 
-    // All three strategies fired ...
-    expect(result.event?.strategies).toEqual(["clear_tool_results", "summarize", "truncate"]);
-    // ... but summarize was still called exactly once.
-    expect(summarize.mock.calls.length).toBeLessThanOrEqual(1);
+    expect(result.event?.strategies).toEqual(["summarize", "truncate"]);
     expect(summarize).toHaveBeenCalledOnce();
   });
 
@@ -221,6 +229,7 @@ describe("compactMessages", () => {
     const result = await compactMessages("system", messages, undefined, {
       countTokens,
       budget: 1000,
+      clearToolResults: CLEARING,
       summarize,
     });
 
@@ -245,6 +254,7 @@ describe("compactMessages", () => {
     const result = await compactMessages("system", messages, undefined, {
       countTokens,
       budget: 1000,
+      clearToolResults: CLEARING,
     });
 
     expect(result.didCompact).toBe(true);
@@ -279,6 +289,7 @@ describe("compactMessages", () => {
     const result = await compactMessages("system", messages, undefined, {
       countTokens,
       budget: 1000,
+      clearToolResults: CLEARING,
       summarize: vi.fn().mockResolvedValue("   "),
     });
 
@@ -289,8 +300,6 @@ describe("compactMessages", () => {
   });
 
   it("reports correct CompactionEvent stats", async () => {
-    // Vary tool names so Strategy 0 doesn't trip and conflate the stats
-    // assertion — Strategy 0 has its own coverage block.
     const messages: Message[] = [];
     for (let i = 0; i < 8; i++) {
       messages.push(msg("user", `q${i}`));
@@ -301,21 +310,74 @@ describe("compactMessages", () => {
 
     const countTokens = vi
       .fn()
-      .mockResolvedValueOnce(900) // initial: over 60% and 80%
-      .mockResolvedValueOnce(850) // after clearing: still over 80%
+      .mockResolvedValueOnce(900) // after clearing: over 80%
       .mockResolvedValueOnce(400); // after summarization: under
 
     const result = await compactMessages("system", messages, undefined, {
       countTokens,
       budget: 1000,
+      clearToolResults: CLEARING,
       summarize: vi.fn().mockResolvedValue("summary"),
     });
 
-    expect(result.event).toBeDefined();
-    expect(result.event!.tokensBefore).toBe(900);
-    expect(result.event!.tokensAfter).toBe(400);
-    expect(result.event!.toolResultsCleared).toBe(3); // 8 - 5 = 3
-    expect(result.event!.strategies).toEqual(["clear_tool_results", "summarize"]);
+    expect(result.event).toEqual({
+      strategies: ["summarize"],
+      tokensBefore: 900,
+      tokensAfter: 400,
+      // 32 messages, six kept: the split at 26 lands on a tool result and snaps back to its call.
+      messagesSummarized: 25,
+    });
+  });
+
+  it("leaves a same-tool cluster verbatim, on the fast path and off it", async () => {
+    // Five `web_search` results, which Strategy 0 would have collapsed.
+    const messages: Message[] = ["alpha", "beta", "gamma", "delta", "epsilon"].flatMap(
+      (q, i): Message[] => [
+        {
+          role: "assistant",
+          content: [{ type: "tool_use", id: `t${i}`, name: "web_search", input: { query: q } }],
+        },
+        toolResultMsg([{ id: `t${i}`, content: `body-of-${q}-${"·".repeat(500)}` }]),
+      ],
+    );
+    const before = structuredClone(messages);
+
+    for (const skip of [true, false]) {
+      const result = await compactMessages(
+        "system",
+        messages,
+        undefined,
+        { countTokens: vi.fn().mockResolvedValue(100), budget: 1000, clearToolResults: CLEARING },
+        skip,
+      );
+
+      expect(result.didCompact).toBe(false);
+      expect(result.messages).toEqual(before);
+    }
+  });
+
+  it("does not call countTokens when skipBudgetStrategies is set", async () => {
+    const countTokens = vi.fn().mockResolvedValue(100);
+    const result = await compactMessages(
+      "system",
+      [msg("user", "hello"), msg("assistant", "hi")],
+      undefined,
+      { countTokens, budget: 1000, clearToolResults: CLEARING },
+      true,
+    );
+
+    expect(result.didCompact).toBe(false);
+    expect(countTokens).not.toHaveBeenCalled();
+  });
+});
+
+describe("toolResultClearing", () => {
+  it("clears past 60% of the budget, keeps five results, and frees at least a tenth", () => {
+    expect(toolResultClearing(200_000)).toEqual({
+      triggerTokens: 120_000,
+      keep: 5,
+      clearAtLeastTokens: 20_000,
+    });
   });
 });
 
@@ -424,6 +486,7 @@ describe("compactMessages — pair-aware", () => {
     const result = await compactMessages("system", msgs13, undefined, {
       countTokens,
       budget: 1000,
+      clearToolResults: CLEARING,
     });
 
     assertNoOrphanedToolResults(result.messages);
@@ -449,6 +512,7 @@ describe("compactMessages — pair-aware", () => {
     const result = await compactMessages("system", messages, undefined, {
       countTokens,
       budget: 1000,
+      clearToolResults: CLEARING,
       summarize: vi.fn().mockResolvedValue("summary of old conversation"),
     });
 
@@ -508,597 +572,16 @@ describe("shouldSkipCounting", () => {
   });
 });
 
-// --- Strategy 0: Same-Tool Supersession ---
-
-describe("compactSameToolClusters", () => {
-  // Helpers that assemble realistic message sequences. A single same-tool
-  // call lands as two messages: assistant with tool_use + user with the
-  // paired tool_result.
-  function cluster(
-    toolName: string,
-    calls: ReadonlyArray<{ id: string; input: unknown; result: string }>,
-  ): Message[] {
-    return calls.flatMap((c) => [
-      {
-        role: "assistant",
-        content: [{ type: "tool_use", id: c.id, name: toolName, input: c.input }],
-      } as Message,
-      {
-        role: "user",
-        content: [
-          {
-            type: "tool_result",
-            toolUseId: c.id,
-            // Pad the result so the per-cluster size gate (compaction
-            // must shrink the aggregate) doesn't trip on short tag
-            // strings. Real tool outputs (web_search, fetch_url, etc.)
-            // are kilobytes; the marker stays at the start so tests
-            // can assert on it via toMatch / startsWith.
-            content: padResult(c.result),
-          },
-        ],
-      } as Message,
-    ]);
-  }
-
-  function padResult(marker: string): string {
-    return marker.padEnd(400, "·");
-  }
-
-  function getToolResultContents(messages: ReadonlyArray<Message>, toolName: string): string[] {
-    // Map tool_use id -> name so we can identify which tool_results belong to this cluster.
-    // ToolResultBlock.content is statically z.string() (src/llm/types.ts), so no JSON branch needed.
-    const idsForTool = new Set(
-      messages
-        .filter((m) => m.role === "assistant" && Array.isArray(m.content))
-        .flatMap((m) => m.content as ContentBlock[])
-        .filter((b): b is ToolUseBlock => b.type === "tool_use" && b.name === toolName)
-        .map((b) => b.id),
-    );
-    return messages
-      .filter((m) => m.role === "user" && Array.isArray(m.content))
-      .flatMap((m) => m.content as ContentBlock[])
-      .filter((b): b is ToolResultBlock => b.type === "tool_result" && idsForTool.has(b.toolUseId))
-      .map((b) => b.content);
-  }
-
-  const defaultOpts: SupersessionOpts = {
-    retainRecent: 2,
-    retainFirst: 1,
-    triggerCount: 5,
-    tools: undefined,
-  };
-
-  it("passes through unchanged when no tool has hit triggerCount", () => {
-    const messages = cluster("web_search", [
-      { id: "t1", input: { query: "foo" }, result: "r1" },
-      { id: "t2", input: { query: "bar" }, result: "r2" },
-      { id: "t3", input: { query: "baz" }, result: "r3" },
-      { id: "t4", input: { query: "qux" }, result: "r4" },
-    ]);
-    const result = compactSameToolClusters(messages, defaultOpts);
-    expect(result.clusters).toBe(0);
-    expect(result.resultsCompacted).toBe(0);
-    // Result contents byte-identical to inputs (markers + padding).
-    expect(getToolResultContents(result.messages, "web_search")).toEqual([
-      padResult("r1"),
-      padResult("r2"),
-      padResult("r3"),
-      padResult("r4"),
-    ]);
-  });
-
-  it("fires at triggerCount — first fire produces [R1, S, S, R4, R5]", () => {
-    const messages = cluster("web_search", [
-      { id: "t1", input: { query: "alpha" }, result: "R1" },
-      { id: "t2", input: { query: "beta" }, result: "R2" },
-      { id: "t3", input: { query: "gamma" }, result: "R3" },
-      { id: "t4", input: { query: "delta" }, result: "R4" },
-      { id: "t5", input: { query: "epsilon" }, result: "R5" },
-    ]);
-    const result = compactSameToolClusters(messages, defaultOpts);
-    expect(result.clusters).toBe(1);
-    expect(result.resultsCompacted).toBe(2);
-    const contents = getToolResultContents(result.messages, "web_search");
-    // R1, R4, R5 verbatim; positions 1 and 2 are the compacted summary.
-    expect(contents[0]).toMatch(/^R1/);
-    expect(contents[3]).toMatch(/^R4/);
-    expect(contents[4]).toMatch(/^R5/);
-    expect(contents[1]).toMatch(/Same-tool cluster.*web_search/);
-    expect(contents[1]).toContain("beta");
-    expect(contents[1]).toContain("gamma");
-    // Same summary string on every compacted block (matches Strategy 1's
-    // placeholder pattern).
-    expect(contents[1]).toBe(contents[2]);
-  });
-
-  // Transcript inputs carry sorted keys, which puts `budget` ahead of
-  // `query`; the tool declares `query` first, and that is what tells the
-  // compacted calls apart.
-  const reflectTool: ToolDefinition = {
-    name: "memory_reflect",
-    description: "reflect",
-    parameters: {
-      type: "object",
-      properties: { query: { type: "string" }, budget: { type: "string" } },
-      required: ["query"],
-    },
-  };
-
-  function reflectCluster(): Message[] {
-    return cluster(
-      "memory_reflect",
-      ["alpha", "beta", "gamma", "delta", "epsilon"].map((query, i) => ({
-        id: `t${i + 1}`,
-        input: { budget: "mid", query },
-        result: `R${i + 1}`,
-      })),
-    );
-  }
-
-  it("names each compacted call by its first declared string argument", () => {
-    const result = compactSameToolClusters(reflectCluster(), {
-      ...defaultOpts,
-      tools: [reflectTool],
-    });
-
-    const contents = getToolResultContents(result.messages, "memory_reflect");
-    expect(contents[1]).toContain('calls: query: "beta"; query: "gamma".');
-  });
-
-  it("names a call by an undeclared argument, in input order, when no declared one is a string", () => {
-    const messages = cluster(
-      "memory_reflect",
-      ["alpha", "beta", "gamma", "delta", "epsilon"].map((note, i) => ({
-        id: `t${i + 1}`,
-        input: { budget: "", note, other: "x" },
-        result: `R${i + 1}`,
-      })),
-    );
-
-    const result = compactSameToolClusters(messages, { ...defaultOpts, tools: [reflectTool] });
-
-    const contents = getToolResultContents(result.messages, "memory_reflect");
-    expect(contents[1]).toContain('calls: note: "beta"; note: "gamma".');
-  });
-
-  it("names a call by its first string argument in input order when the tool has no definition", () => {
-    const result = compactSameToolClusters(reflectCluster(), { ...defaultOpts, tools: undefined });
-
-    const contents = getToolResultContents(result.messages, "memory_reflect");
-    expect(contents[1]).toContain('calls: budget: "mid"; budget: "mid".');
-  });
-
-  it("the first slot is sticky — its content stays byte-identical across multiple compactions", () => {
-    // Pass 1: 5 results → compact → [R1, S, S, R4, R5]
-    const pass1Input = cluster("web_search", [
-      { id: "t1", input: { query: "alpha" }, result: "FIRST_R1" },
-      { id: "t2", input: { query: "beta" }, result: "R2" },
-      { id: "t3", input: { query: "gamma" }, result: "R3" },
-      { id: "t4", input: { query: "delta" }, result: "R4" },
-      { id: "t5", input: { query: "epsilon" }, result: "R5" },
-    ]);
-    const pass1 = compactSameToolClusters(pass1Input, defaultOpts);
-    const pass1First = getToolResultContents(pass1.messages, "web_search")[0];
-    expect(pass1First).toMatch(/^FIRST_R1/);
-
-    // Pass 2: simulate "a new tool_result arrives" by appending R6 to
-    // the already-compacted array.
-    const pass2Input: Message[] = [
-      ...pass1.messages,
-      ...cluster("web_search", [{ id: "t6", input: { query: "zeta" }, result: "R6" }]),
-    ];
-    const pass2 = compactSameToolClusters(pass2Input, defaultOpts);
-    const pass2Contents = getToolResultContents(pass2.messages, "web_search");
-    // R1 is still FIRST_R1; R6 verbatim; previous middle gets re-compacted
-    // (now covering 3 results: original t2, t3, t4).
-    expect(pass2Contents[0]).toMatch(/^FIRST_R1/);
-    expect(pass2Contents[pass2Contents.length - 1]).toMatch(/^R6/);
-    expect(pass2Contents[pass2Contents.length - 2]).toMatch(/^R5/);
-  });
-
-  it("idempotent — running twice on the same input is a no-op on the second pass", () => {
-    const messages = cluster("web_search", [
-      { id: "t1", input: { query: "alpha" }, result: "R1-long-enough-result-content-XXXXX" },
-      { id: "t2", input: { query: "beta" }, result: "R2-long-enough-result-content-XXXXX" },
-      { id: "t3", input: { query: "gamma" }, result: "R3-long-enough-result-content-XXXXX" },
-      { id: "t4", input: { query: "delta" }, result: "R4-long-enough-result-content-XXXXX" },
-      { id: "t5", input: { query: "epsilon" }, result: "R5-long-enough-result-content-XXXXX" },
-    ]);
-    const pass1 = compactSameToolClusters(messages, defaultOpts);
-    expect(pass1.resultsCompacted).toBe(2); // First pass actually does work.
-
-    const pass2 = compactSameToolClusters(pass1.messages, defaultOpts);
-    // Output bytes identical to pass1.
-    expect(getToolResultContents(pass2.messages, "web_search")).toEqual(
-      getToolResultContents(pass1.messages, "web_search"),
-    );
-    // Per-block byte comparison detects the summary is already in place
-    // and skips the rewrite. resultsCompacted reflects real work, so
-    // downstream telemetry (compactMessages's didCompact flag) doesn't
-    // flip every turn after a cluster first fires.
-    expect(pass2.resultsCompacted).toBe(0);
-    expect(pass2.clusters).toBe(0);
-  });
-
-  it("size gate — skips compaction when the summary would not shrink the aggregate", () => {
-    // 5 calls returning very short content ("ok"). The summary string
-    // is ~150-250 chars; replacing 3 middle "ok"s would grow the array.
-    // Strategy 0 must skip in that case so its "doesn't increase token
-    // count" invariant holds. Inline messages (bypassing the test
-    // helper's default padding) so the actual short content reaches
-    // the size gate.
-    const messages: Message[] = [];
-    for (const c of [
-      { id: "t1", p: "a.txt" },
-      { id: "t2", p: "b.txt" },
-      { id: "t3", p: "c.txt" },
-      { id: "t4", p: "d.txt" },
-      { id: "t5", p: "e.txt" },
-    ]) {
-      messages.push({
-        role: "assistant",
-        content: [{ type: "tool_use", id: c.id, name: "delete_file", input: { path: c.p } }],
-      });
-      messages.push({
-        role: "user",
-        content: [{ type: "tool_result", toolUseId: c.id, content: "ok" }],
-      });
-    }
-    const result = compactSameToolClusters(messages, defaultOpts);
-    expect(result.clusters).toBe(0);
-    expect(result.resultsCompacted).toBe(0);
-    // Original content preserved.
-    expect(getToolResultContents(result.messages, "delete_file")).toEqual([
-      "ok",
-      "ok",
-      "ok",
-      "ok",
-      "ok",
-    ]);
-  });
-
-  it("preserves tool_use blocks intact — only tool_result content is mutated", () => {
-    const messages = cluster("web_search", [
-      { id: "t1", input: { query: "alpha" }, result: "R1" },
-      { id: "t2", input: { query: "beta" }, result: "R2" },
-      { id: "t3", input: { query: "gamma" }, result: "R3" },
-      { id: "t4", input: { query: "delta" }, result: "R4" },
-      { id: "t5", input: { query: "epsilon" }, result: "R5" },
-    ]);
-    const result = compactSameToolClusters(messages, defaultOpts);
-    // Extract every tool_use from the output; their ids + inputs must
-    // match the input exactly (no mutation, no skipped pair).
-    const toolUses = result.messages
-      .filter((m) => m.role === "assistant" && Array.isArray(m.content))
-      .flatMap((m) => m.content as ContentBlock[])
-      .filter((b) => b.type === "tool_use");
-    expect(toolUses.map((t) => t.id)).toEqual(["t1", "t2", "t3", "t4", "t5"]);
-    expect(toolUses.every((t) => t.name === "web_search")).toBe(true);
-    expect(toolUses[1]?.input).toEqual({ query: "beta" });
-  });
-
-  it("pair invariant — every tool_use still has a tool_result with matching id", () => {
-    const messages = cluster("web_search", [
-      { id: "t1", input: { query: "alpha" }, result: "R1" },
-      { id: "t2", input: { query: "beta" }, result: "R2" },
-      { id: "t3", input: { query: "gamma" }, result: "R3" },
-      { id: "t4", input: { query: "delta" }, result: "R4" },
-      { id: "t5", input: { query: "epsilon" }, result: "R5" },
-    ]);
-    const result = compactSameToolClusters(messages, defaultOpts);
-    const toolUseIds = new Set(
-      result.messages
-        .filter((m) => m.role === "assistant" && Array.isArray(m.content))
-        .flatMap((m) => m.content as ContentBlock[])
-        .filter((b) => b.type === "tool_use")
-        .map((b) => b.id),
-    );
-    const toolResultIds = new Set(
-      result.messages
-        .filter((m) => m.role === "user" && Array.isArray(m.content))
-        .flatMap((m) => m.content as ContentBlock[])
-        .filter((b) => b.type === "tool_result")
-        .map((b) => b.toolUseId),
-    );
-    expect(toolUseIds).toEqual(toolResultIds);
-  });
-
-  it("cache-prefix invariant — messages up to and including the first sticky result are byte-identical across compactions", () => {
-    const pass1Input = cluster("web_search", [
-      { id: "t1", input: { query: "alpha" }, result: "R1" },
-      { id: "t2", input: { query: "beta" }, result: "R2" },
-      { id: "t3", input: { query: "gamma" }, result: "R3" },
-      { id: "t4", input: { query: "delta" }, result: "R4" },
-      { id: "t5", input: { query: "epsilon" }, result: "R5" },
-    ]);
-    const pass1 = compactSameToolClusters(pass1Input, defaultOpts);
-    // The first tool_result lives at messages[1] (assistant tool_use is
-    // at messages[0]). Cache-prefix scope is messages[0..1] inclusive.
-    const prefixPass1 = JSON.stringify(pass1.messages.slice(0, 2));
-
-    // Simulate next turn: append R6 and compact again.
-    const pass2Input: Message[] = [
-      ...pass1.messages,
-      ...cluster("web_search", [{ id: "t6", input: { query: "zeta" }, result: "R6" }]),
-    ];
-    const pass2 = compactSameToolClusters(pass2Input, defaultOpts);
-    const prefixPass2 = JSON.stringify(pass2.messages.slice(0, 2));
-    expect(prefixPass2).toBe(prefixPass1);
-  });
-
-  it("deterministic — same input always produces the same summary content", () => {
-    const messages = cluster("web_search", [
-      { id: "t1", input: { query: "alpha" }, result: "R1" },
-      { id: "t2", input: { query: "beta" }, result: "R2" },
-      { id: "t3", input: { query: "gamma" }, result: "R3" },
-      { id: "t4", input: { query: "delta" }, result: "R4" },
-      { id: "t5", input: { query: "epsilon" }, result: "R5" },
-    ]);
-    const a = compactSameToolClusters(messages, defaultOpts);
-    const b = compactSameToolClusters(messages, defaultOpts);
-    expect(JSON.stringify(a.messages)).toBe(JSON.stringify(b.messages));
-  });
-
-  it("per-tool independence — one tool over threshold doesn't penalize another under threshold", () => {
-    const searchCalls = cluster("web_search", [
-      { id: "s1", input: { query: "a" }, result: "S1" },
-      { id: "s2", input: { query: "b" }, result: "S2" },
-      { id: "s3", input: { query: "c" }, result: "S3" },
-      { id: "s4", input: { query: "d" }, result: "S4" },
-      { id: "s5", input: { query: "e" }, result: "S5" },
-    ]);
-    const readCalls = cluster("read_file", [
-      { id: "r1", input: { path: "a.txt" }, result: "FILE_A" },
-      { id: "r2", input: { path: "b.txt" }, result: "FILE_B" },
-    ]);
-    const messages = [...searchCalls, ...readCalls];
-    const result = compactSameToolClusters(messages, defaultOpts);
-    expect(result.clusters).toBe(1);
-    // web_search cluster compacted; read_file cluster intact (padded).
-    const readContents = getToolResultContents(result.messages, "read_file");
-    expect(readContents).toEqual([padResult("FILE_A"), padResult("FILE_B")]);
-  });
-
-  it("returns a new array even when no compaction fires (defensive copy)", () => {
-    const messages = cluster("web_search", [{ id: "t1", input: { query: "alpha" }, result: "R1" }]);
-    const result = compactSameToolClusters(messages, defaultOpts);
-    expect(result.messages).not.toBe(messages);
-  });
-
-  it("ignores tool_results whose tool_use has been lost (orphaned) — they can't be classified", () => {
-    // Orphan tool_result (no matching tool_use in this slice) — should
-    // not crash, just be skipped from the cluster count.
-    const messages: Message[] = [
-      {
-        role: "user",
-        content: [{ type: "tool_result", toolUseId: "orphan", content: "stray" }],
-      },
-      ...cluster("web_search", [
-        { id: "t1", input: { query: "alpha" }, result: "R1" },
-        { id: "t2", input: { query: "beta" }, result: "R2" },
-        { id: "t3", input: { query: "gamma" }, result: "R3" },
-        { id: "t4", input: { query: "delta" }, result: "R4" },
-        { id: "t5", input: { query: "epsilon" }, result: "R5" },
-      ]),
-    ];
-    const result = compactSameToolClusters(messages, defaultOpts);
-    expect(result.clusters).toBe(1);
-    expect(result.resultsCompacted).toBe(2);
-    // Orphan untouched.
-    const orphanMsg = result.messages[0];
-    expect(orphanMsg).toEqual(messages[0]);
-  });
-});
-
-// --- Strategy 0 wired into compactMessages ---
-
-describe("compactMessages — Strategy 0 wiring", () => {
-  it("runs Strategy 0 unconditionally before the token-count threshold check", async () => {
-    // 5 web_search calls — enough to trip Strategy 0 — but total
-    // budget usage is small. Strategy 1's 60% threshold doesn't fire,
-    // but Strategy 0 should still rewrite the cluster. Result content
-    // is long enough (real-search-result sized) to clear the size
-    // gate.
-    const messages: Message[] = [];
-    for (const c of [
-      { id: "t1", q: "alpha" },
-      { id: "t2", q: "beta" },
-      { id: "t3", q: "gamma" },
-      { id: "t4", q: "delta" },
-      { id: "t5", q: "epsilon" },
-    ]) {
-      messages.push({
-        role: "assistant",
-        content: [{ type: "tool_use", id: c.id, name: "web_search", input: { query: c.q } }],
-      });
-      messages.push({
-        role: "user",
-        content: [
-          {
-            type: "tool_result",
-            toolUseId: c.id,
-            content: `body-of-${c.q}-${"·".repeat(500)}`,
-          },
-        ],
-      });
-    }
-    const result = await compactMessages("system", messages, undefined, {
-      countTokens: vi.fn().mockResolvedValue(100), // well under any threshold
-      budget: 1000,
-    });
-    expect(result.didCompact).toBe(true);
-    expect(result.event?.strategies).toEqual(["compact_same_tool_clusters"]);
-    expect(result.event?.sameToolClustersCompacted).toBe(1);
-    expect(result.event?.sameToolResultsSuperseded).toBe(2);
-  });
-
-  it("gives Strategy 0 the tool definitions, so a compacted call is named by its declared argument", async () => {
-    const messages: Message[] = ["alpha", "beta", "gamma", "delta", "epsilon"].flatMap(
-      (query, i): Message[] => [
-        {
-          role: "assistant",
-          content: [
-            {
-              type: "tool_use",
-              id: `t${i}`,
-              name: "memory_reflect",
-              input: { budget: "mid", query },
-            },
-          ],
-        },
-        {
-          role: "user",
-          content: [{ type: "tool_result", toolUseId: `t${i}`, content: "·".repeat(500) }],
-        },
-      ],
-    );
-    const tools: ToolDefinition[] = [
-      {
-        name: "memory_reflect",
-        description: "reflect",
-        parameters: {
-          type: "object",
-          properties: { query: { type: "string" }, budget: { type: "string" } },
-        },
-      },
-    ];
-
-    const result = await compactMessages(
-      "system",
-      messages,
-      tools,
-      { countTokens: vi.fn().mockResolvedValue(100), budget: 1000 },
-      true,
-    );
-
-    // Message 3 carries the second call's result, the first compacted slot.
-    const content = expectDefined(result.messages[3]).content;
-    const block = Array.isArray(content) ? content[0] : undefined;
-    if (block?.type !== "tool_result") throw new Error("expected a tool_result block");
-    expect(block.content).toContain('calls: query: "beta"; query: "gamma".');
-  });
-
-  it("does not flip didCompact when no cluster trips and budget is fine", async () => {
-    const messages: Message[] = [
-      { role: "user", content: "hello" },
-      { role: "assistant", content: "hi" },
-    ];
-    const result = await compactMessages("system", messages, undefined, {
-      countTokens: vi.fn().mockResolvedValue(100),
-      budget: 1000,
-    });
-    expect(result.didCompact).toBe(false);
-  });
-
-  // Pins issue #1's fix: Strategy 0 runs even when the budget
-  // strategies are skipped via the fast-path. Before this fix, the
-  // outer `if (!skip)` gate in handle-message bypassed compactMessages
-  // entirely whenever shouldSkipCounting said the turn was under 50%
-  // budget — exactly the scenario Strategy 0 was designed for.
-  it("Strategy 0 still runs when skipBudgetStrategies is true (fast-path skip)", async () => {
-    const messages: Message[] = [];
-    for (const c of [
-      { id: "t1", q: "alpha" },
-      { id: "t2", q: "beta" },
-      { id: "t3", q: "gamma" },
-      { id: "t4", q: "delta" },
-      { id: "t5", q: "epsilon" },
-    ]) {
-      messages.push({
-        role: "assistant",
-        content: [{ type: "tool_use", id: c.id, name: "web_search", input: { query: c.q } }],
-      });
-      messages.push({
-        role: "user",
-        content: [
-          {
-            type: "tool_result",
-            toolUseId: c.id,
-            content: `body-of-${c.q}-${"·".repeat(500)}`,
-          },
-        ],
-      });
-    }
-    const countTokens = vi.fn().mockResolvedValue(100);
-    const result = await compactMessages(
-      "system",
-      messages,
-      undefined,
-      { countTokens, budget: 1000 },
-      true, // skipBudgetStrategies
-    );
-    expect(result.didCompact).toBe(true);
-    expect(result.event?.strategies).toEqual(["compact_same_tool_clusters"]);
-    expect(result.event?.sameToolResultsSuperseded).toBe(2);
-    // countTokens is the cost of Strategies 1–3; the fast-path skip
-    // must not call it.
-    expect(countTokens).not.toHaveBeenCalled();
-  });
-
-  it("does not call countTokens or fire any strategies when skipBudgetStrategies and no cluster trips", async () => {
-    const messages: Message[] = [
-      { role: "user", content: "hello" },
-      { role: "assistant", content: "hi" },
-    ];
-    const countTokens = vi.fn().mockResolvedValue(100);
-    const result = await compactMessages(
-      "system",
-      messages,
-      undefined,
-      { countTokens, budget: 1000 },
-      true,
-    );
-    expect(result.didCompact).toBe(false);
-    expect(countTokens).not.toHaveBeenCalled();
-  });
-});
-
-describe("pre-summarize strategies preserve the array's length", () => {
+describe("the summarized count", () => {
   // Load-bearing for durable summaries: `handle-message` treats
   // `messagesSummarized` as an index into the history it loaded, mapping it to
-  // a `through_message_id`. That only holds because Strategies 0 and 1 rewrite
-  // block content in place. If either ever drops or inserts a message, the
-  // cutoff would name the wrong row and the next turn would replay a span the
-  // summary already covers.
+  // a `through_message_id`. That holds because nothing before summarization
+  // changes the array: Strategy 1 is an intent on the request.
   const cluster = (n: number): Message[] =>
     Array.from({ length: n }, (_, i) => [
       toolCallMsg(`t${i}`, "read_file"),
       toolResultMsg([{ id: `t${i}`, content: `contents of file ${i} `.repeat(40) }]),
     ]).flat();
-
-  it("Strategy 0 returns as many messages as it was given", () => {
-    const messages = cluster(6);
-    const result = compactSameToolClusters(messages, {
-      retainRecent: 2,
-      retainFirst: 1,
-      triggerCount: 5,
-      tools: undefined,
-    });
-
-    expect(result.resultsCompacted).toBeGreaterThan(0);
-    expect(result.messages).toHaveLength(messages.length);
-  });
-
-  it("Strategy 1 returns as many messages as it was given", async () => {
-    const messages = cluster(8);
-    // Over the 60% clear threshold, under the 80% summarize one. `summarize` is
-    // supplied so the threshold is what stops the ladder — omitting it would
-    // gate Strategy 2 off outright and make the assertion below vacuous.
-    const summarize = vi.fn().mockResolvedValue("unused");
-    const result = await compactMessages(
-      "system",
-      messages,
-      undefined,
-      { countTokens: vi.fn().mockResolvedValue(700), budget: 1000, summarize },
-      false,
-    );
-
-    expect(result.event?.strategies).toContain("clear_tool_results");
-    expect(result.event?.strategies).not.toContain("summarize");
-    expect(summarize).not.toHaveBeenCalled();
-    expect(result.messages).toHaveLength(messages.length);
-  });
 
   it("reports a summarized count that indexes the input array", async () => {
     const messages = [
@@ -1111,17 +594,20 @@ describe("pre-summarize strategies preserve the array's length", () => {
       "system",
       messages,
       undefined,
-      { countTokens: vi.fn().mockResolvedValue(900), budget: 1000, summarize },
+      {
+        countTokens: vi.fn().mockResolvedValue(900),
+        budget: 1000,
+        clearToolResults: CLEARING,
+        summarize,
+      },
       false,
     );
 
     const summarized = result.event?.messagesSummarized ?? 0;
     expect(summarized).toBeGreaterThan(0);
-    // The prefix handed to the summarizer is exactly `input.slice(0, count)`,
-    // message-for-message — same positions, only block content rewritten.
+    // The prefix handed to the summarizer is exactly `input.slice(0, count)`.
     const prefix: Message[] = expectDefined(summarize.mock.calls[0], "summarize call")[1];
-    expect(prefix).toHaveLength(summarized);
-    expect(prefix.map((m) => m.role)).toEqual(messages.slice(0, summarized).map((m) => m.role));
+    expect(prefix).toEqual(messages.slice(0, summarized));
   });
 });
 
@@ -1129,7 +615,12 @@ describe("prefix veto", () => {
   function summarizeDeps(
     summarize: NonNullable<ContextManagerDeps["summarize"]>,
   ): ContextManagerDeps {
-    return { countTokens: vi.fn().mockResolvedValue(900), budget: 1000, summarize };
+    return {
+      countTokens: vi.fn().mockResolvedValue(900),
+      budget: 1000,
+      clearToolResults: CLEARING,
+      summarize,
+    };
   }
 
   const sevenMessages = () =>
@@ -1240,6 +731,23 @@ describe("summarizationRequest", () => {
 
     expect(params.messages.at(-1)).toEqual({ role: "user", content: SUMMARIZATION_PROMPT });
     expect(params.messages).toHaveLength(3);
+  });
+
+  it("carries the turn's Strategy 1 intent, and none without one", () => {
+    const messages = [msg("user", "hello"), msg("assistant", "hi")];
+
+    expect(
+      summarizationRequest({
+        model: "m",
+        system: "s",
+        messages,
+        maxOutputTokens: 8192,
+        clearToolResults: CLEARING,
+      }).clearToolResults,
+    ).toEqual(CLEARING);
+    expect(
+      summarizationRequest({ model: "m", system: "s", messages, maxOutputTokens: 8192 }),
+    ).not.toHaveProperty("clearToolResults");
   });
 
   it("caps output at the model's own ceiling when it is below the default", () => {

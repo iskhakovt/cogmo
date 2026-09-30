@@ -861,7 +861,7 @@ describe("handle-message — replay equality", () => {
   function replayDeps(epoch: { configDigest: string } | null) {
     const recorder = createWireRecorder(async (input, init) => {
       const req = new Request(input, init);
-      if (req.url.endsWith("/v1/messages/count_tokens")) {
+      if (new URL(req.url).pathname === "/v1/messages/count_tokens") {
         return new Response(JSON.stringify({ input_tokens: 100 }), {
           headers: { "content-type": "application/json" },
         });
@@ -976,7 +976,7 @@ describe("handle-message — replay equality", () => {
       runStreamingAgentLoop,
     });
     const messageRequests = () =>
-      recorder.exchanges.filter((e) => e.request.url.endsWith("/v1/messages"));
+      recorder.exchanges.filter((e) => new URL(e.request.url).pathname === "/v1/messages");
     return { deps, messageRequests };
   }
 

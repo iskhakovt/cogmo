@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { LlmProvider } from "../../llm/provider.js";
 import type { Message } from "../../llm/types.js";
+import { expectDefined } from "../../test/assertions.js";
 import { fakeRunInTx, mockAgentStore, mockProvider, mockResolver } from "../../test/factories.js";
 import type { PromptSource } from "../prompt.js";
 import type { AgentStore, CompactionSummary, Profile } from "../store/index.js";
@@ -223,10 +224,9 @@ describe("compactConversation", () => {
     expect(result).toEqual({ status: "skipped", reason: "nothing_new" });
   });
 
-  it("collapses repeated same-tool results in the prefix before summarizing", async () => {
-    // Strategy 0's rung of the turn-time ladder, run unconditionally here: it is
-    // count-based, so it needs no token count, and it keeps a tool-heavy prefix
-    // from reaching the summarization model verbatim.
+  it("sends repeated same-tool results in the prefix verbatim", async () => {
+    // The summarizer reads the prefix as it was sent: no rung of compaction
+    // rewrites a tool result before summarization.
     const toolTurns = Array.from({ length: 6 }, (_, i) => [
       {
         id: `c${i}`,
@@ -250,8 +250,13 @@ describe("compactConversation", () => {
 
     await compactConversation(CONVERSATION_ID, deps({ agentStore, provider }));
 
-    const sent = JSON.stringify(vi.mocked(provider.chat).mock.calls[0]?.[0].messages);
-    expect(sent).toContain("[Same-tool cluster:");
+    const sent = expectDefined(vi.mocked(provider.chat).mock.calls[0], "summarization call")[0];
+    const results = sent.messages.flatMap((m) =>
+      typeof m.content === "string" ? [] : m.content.filter((b) => b.type === "tool_result"),
+    );
+    expect(results.map((r) => r.content)).toEqual(
+      Array.from({ length: 6 }, (_, i) => `contents of file ${i} `.repeat(40)),
+    );
   });
 
   it("re-summarizes the stored summary together with what followed it", async () => {

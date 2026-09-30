@@ -944,6 +944,7 @@ describe("synthesizeDegradedReply", () => {
     ],
     reason: "stuck_loop",
     subtype: "stuck_loop" as const,
+    clearToolResults: { triggerTokens: 120_000, keep: 5, clearAtLeastTokens: 20_000 },
     log: fakeLogger(),
   });
 
@@ -971,6 +972,15 @@ describe("synthesizeDegradedReply", () => {
     const callArgs = chatFn.mock.calls[0]?.[0];
     expect(callArgs?.tools).toEqual([]);
     expect(callArgs?.temperature).toBe(0);
+  });
+
+  it("carries the turn's Strategy 1 intent", async () => {
+    const chatFn = vi.fn<LlmProvider["chat"]>(async () => textResponse("ok"));
+    const provider = providerThat(chatFn);
+
+    await synthesizeDegradedReply({ ...baseDeps(), provider });
+
+    expect(chatFn.mock.calls[0]?.[0].clearToolResults).toEqual(baseDeps().clearToolResults);
   });
 
   it("falls back to the fixed string when the chat call rejects with an error", async () => {

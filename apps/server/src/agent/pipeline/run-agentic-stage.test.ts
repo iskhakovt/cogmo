@@ -225,6 +225,22 @@ describe("runAgenticStage", () => {
     );
   });
 
+  it("sends Strategy 1's intent on its counts and every loop request", async () => {
+    const h = await harness();
+    vi.mocked(h.agentStore.getLastTokens).mockResolvedValue(undefined);
+    const { provider } = await h.deps.resolveProvider("claude-sonnet-4-6");
+    const { steps } = recordingSteps();
+
+    await runAgenticStage(h.deps, stageArgs(), steps, log);
+
+    const loopParams = expectDefined(h.runStreamingAgentLoop.mock.calls[0], "loop call")[0];
+    const clearing = expectDefined(loopParams.clearToolResults, "the loop's intent");
+    expect(clearing.keep).toBe(5);
+    const counts = vi.mocked(provider.countTokens).mock.calls;
+    expect(counts.length).toBeGreaterThan(0);
+    for (const [params] of counts) expect(params.clearToolResults).toEqual(clearing);
+  });
+
   it("renders the core memory of the run conversation's user", async () => {
     const h = await harness();
     vi.mocked(h.agentStore.getConversation).mockResolvedValue({
