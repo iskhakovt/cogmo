@@ -8,6 +8,8 @@ export interface ServeResources {
   /** Stops the sweep of coding progress streams. */
   codingStreams: { close(): void };
   mcpRegistry: { stop(): Promise<void> };
+  /** Disposes the skill runner's tier-2 warm pool, tearing its containers down. */
+  skills: { shutdown(): Promise<void> };
   sandbox: { shutdown(): Promise<void> } | null;
   /** Marks this process's `cogmo_instances` row stopped; `null` without one. */
   closeInstance: (() => Promise<void>) | null;
@@ -30,15 +32,15 @@ export type StepOutcome =
 /**
  * Tear down `cogmo serve`: the web server first, so no request reaches a
  * stopped dependency, then the channel adapters concurrently, the coding
- * streams' sweep, MCP, the sandbox, and the instance row. Each step is
- * bounded, and one that overruns or throws doesn't stop the next. Never
- * rejects; returns each step's outcome, in that order.
+ * streams' sweep, MCP, the skills pool, the sandbox, and the instance row.
+ * Each step is bounded, and one that overruns or throws doesn't stop the
+ * next. Never rejects; returns each step's outcome, in that order.
  */
 export async function shutdownServe(
   resources: ServeResources,
   bounds: ShutdownBounds,
 ): Promise<ReadonlyArray<StepOutcome>> {
-  const { web, adapters, codingStreams, mcpRegistry, sandbox, closeInstance } = resources;
+  const { web, adapters, codingStreams, mcpRegistry, skills, sandbox, closeInstance } = resources;
   const { webDrainMs, stepMs } = bounds;
   const webOutcome = await bounded("web server", webDrainMs + stepMs, () => web.close(webDrainMs));
   const adapterOutcomes = await Promise.all(
@@ -48,6 +50,7 @@ export async function shutdownServe(
   );
   const streamsOutcome = await bounded("coding streams", stepMs, async () => codingStreams.close());
   const mcpOutcome = await bounded("mcp", stepMs, () => mcpRegistry.stop());
+  const skillsOutcome = await bounded("skills pool", stepMs, () => skills.shutdown());
   const sandboxOutcomes = sandbox
     ? [await bounded("sandbox", stepMs, () => sandbox.shutdown())]
     : [];
@@ -59,6 +62,7 @@ export async function shutdownServe(
     ...adapterOutcomes,
     streamsOutcome,
     mcpOutcome,
+    skillsOutcome,
     ...sandboxOutcomes,
     ...instanceOutcomes,
   ];

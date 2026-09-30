@@ -226,6 +226,7 @@ async function serve(): Promise<number> {
     sandboxInstanceId,
     mcpRegistry,
     codingStreams,
+    skillRunner,
     runInTx,
     webTransport,
     webSessionStore,
@@ -278,6 +279,7 @@ async function serve(): Promise<number> {
         adapters,
         codingStreams,
         mcpRegistry,
+        skills: skillRunner,
         sandbox,
         closeInstance: sandboxInstanceId
           ? () => runInTx((tx) => sandboxStore.closeInstance(tx, sandboxInstanceId))

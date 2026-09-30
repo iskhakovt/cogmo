@@ -475,26 +475,15 @@ export class SkillRunnerImpl implements SkillRunner {
   #lockfileCompiler: LockfileCompiler | undefined;
   #ctxHttp: SkillRunnerOptions["ctxHttp"];
   /**
-   * Lazily-created warm pool over `#sandbox`. Created on first tier-2
-   * invocation, not at boot — keeps cogmo serve startup independent of
-   * sandbox availability so an unreachable Daytona doesn't fail boot
-   * for deployments that may never invoke a tier-2 skill. Concurrent
-   * first-callers share `#poolPromise`; on init failure the promise
-   * clears so the next caller retries (no permanent poisoning from a
-   * transient Daytona blip).
+   * The tier-2 warm pool over `#sandbox`, created by the first tier-2 invoke
+   * rather than at boot, so boot doesn't depend on the sandbox. Concurrent
+   * first callers share `#poolPromise`; a failed start clears it, so the
+   * next invoke retries.
    */
   #pool: SysboxWorkerPool | undefined;
   #poolPromise: Promise<SysboxWorkerPool> | undefined;
   #poolOptions: SkillRunnerOptions["poolOptions"];
-  /**
-   * Set in `shutdown()` to block any subsequent `#ensurePool` from
-   * spinning up a new pool — without it, an `invoke()` racing in after
-   * shutdown completes would lazy-create a pool that no shutdown hook
-   * is left to dispose. Production wiring closes the runner on
-   * SIGTERM and the process exits, but the post-shutdown invoke is a
-   * real test surface and a real edge in any future graceful-restart
-   * path.
-   */
+  /** Set by `shutdown()`: no pool starts after it, since nothing would dispose it. */
   #disposed = false;
   #ajv: Ajv;
   /**
@@ -631,7 +620,7 @@ export class SkillRunnerImpl implements SkillRunner {
    * first-callers behind one in-flight promise. On success the pool
    * is cached on `#pool` and the promise is cleared. On failure the
    * promise is cleared so the next caller retries — keeps a transient
-   * Daytona blip from poisoning the runner permanently.
+   * sandbox failure from poisoning the runner permanently.
    */
   async #ensurePool(): Promise<SysboxWorkerPool> {
     if (this.#disposed) {
@@ -666,14 +655,10 @@ export class SkillRunnerImpl implements SkillRunner {
   }
 
   /**
-   * Tear down the warm pool. Idempotent. Bootstrap callers wire this into
-   * graceful-shutdown when they add SIGTERM handling. Leaves tier-1 (Pyodide)
-   * untouched — those workers are short-lived per-call and self-clean.
-   *
-   * After `shutdown()` returns, any `invoke()` that hits the tier-2
-   * path throws `tier-2 pool requested after shutdown` — the
-   * `#disposed` flag short-circuits `#ensurePool` so a post-shutdown
-   * invoke can't lazy-create a fresh pool that nobody's left to clean up.
+   * Dispose the warm pool; `cogmo serve` calls this on exit. Waits for a pool
+   * start in flight and disposes what it produces; afterwards a tier-2 invoke
+   * throws `tier-2 pool requested after shutdown`. Idempotent. Tier-1 workers
+   * live for one call and need nothing here.
    */
   async shutdown(): Promise<void> {
     // Set `#disposed` before awaiting in-flight init so a racing

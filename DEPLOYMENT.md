@@ -346,7 +346,7 @@ The image entrypoint dispatches based on the first arg:
 
 ## Stopping
 
-On `SIGTERM`, `serve` first waits for the Inngest function runs in flight, with no deadline, then tears down its own connections in at most 28 s ([`design/infrastructure.md` → Shutdown](design/infrastructure.md#shutdown-confirmed)). Docker's default stop grace is 10 s before `SIGKILL`, which can cut that teardown short and have Telegram redeliver the last batch of messages. Give the container 60 s with `--stop-timeout 60` on `docker run`, `stop_grace_period: 60s` in compose, `terminationGracePeriodSeconds: 60` in Kubernetes, or `TimeoutStopSec=60` for a systemd unit.
+On `SIGTERM`, `serve` first waits for the Inngest function runs in flight, with no deadline, then tears down its own connections in at most 33 s ([`design/infrastructure.md` → Shutdown](design/infrastructure.md#shutdown-confirmed)). Docker's default stop grace is 10 s before `SIGKILL`, which can cut that teardown short and have Telegram redeliver the last batch of messages. Give the container 60 s with `--stop-timeout 60` on `docker run`, `stop_grace_period: 60s` in compose, `terminationGracePeriodSeconds: 60` in Kubernetes, or `TimeoutStopSec=60` for a systemd unit.
 
 A step that fails is logged and the rest still run; the exit code stays 0.
 

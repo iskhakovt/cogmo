@@ -10,6 +10,7 @@ function resources(steps: Partial<ServeResources> = {}): ServeResources {
     adapters: [channel("telegram", async () => {})],
     codingStreams: { close: vi.fn() },
     mcpRegistry: { stop: vi.fn(async () => {}) },
+    skills: { shutdown: vi.fn(async () => {}) },
     sandbox: { shutdown: vi.fn(async () => {}) },
     closeInstance: vi.fn(async () => {}),
     ...steps,
@@ -57,6 +58,7 @@ describe("shutdownServe", () => {
         adapters: [channel("telegram", step("telegram"))],
         codingStreams: { close: () => events.push("coding streams") },
         mcpRegistry: { stop: step("mcp") },
+        skills: { shutdown: step("skills") },
         sandbox: { shutdown: step("sandbox") },
         closeInstance: step("instance"),
       }),
@@ -71,6 +73,8 @@ describe("shutdownServe", () => {
       "coding streams",
       "mcp start",
       "mcp end",
+      "skills start",
+      "skills end",
       "sandbox start",
       "sandbox end",
       "instance start",
@@ -103,6 +107,7 @@ describe("shutdownServe", () => {
       { step: "web adapter", outcome: "done" },
       { step: "coding streams", outcome: "done" },
       { step: "mcp", outcome: "done" },
+      { step: "skills pool", outcome: "done" },
       { step: "sandbox", outcome: "done" },
       { step: "sandbox instance", outcome: "done" },
     ]);
@@ -166,6 +171,7 @@ describe("shutdownServe", () => {
       "telegram adapter",
       "coding streams",
       "mcp",
+      "skills pool",
     ]);
   });
 });
