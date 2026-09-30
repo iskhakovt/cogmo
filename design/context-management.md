@@ -95,7 +95,7 @@ The table is **append-only**. Re-compaction inserts a new row summarizing the pr
 
 `/compact` forces Strategy 2 immediately, regardless of budget pressure, and stores the result. The next turn then starts from a summary it did not have to wait for. `src/agent/conversation/compact-conversation.ts` drives it synchronously — the same trade-off `/reflect` makes: the user is waiting on the reply, single-user scale means no concurrent fire to race, and errors surface to the caller instead of a retry log.
 
-It picks the same split the budget-triggered path would (`DEFAULT_KEEP_TURNS`). `[confirmed]` It renders the prefix through the one renderer and carries that fork's Strategy 1 intent, triggered at the summarization model's budget, so a prefix that fits is summarized from the full tool results ([Strategy 2](#strategy-2-summarize-trigger-80) → Cleared results in the fork). Outside a turn there is no frozen tool table, so it strips every thinking block from its request ([prompt-caching.md](prompt-caching.md#sources-and-fixes) → source (h)). `[proposed]` Its attachments: [Strategy 2](#strategy-2-summarize-trigger-80) → Images.
+It picks the same split the budget-triggered path would (`DEFAULT_KEEP_TURNS`). `[confirmed]` It renders the prefix through the one renderer and carries that fork's Strategy 1 intent, triggered at the summarization model's budget, so a prefix that fits is summarized from the full tool results ([Strategy 2](#strategy-2-summarize-trigger-80) → Cleared results in the fork). Outside a turn there is no frozen tool table, so it strips every thinking block from its request ([prompt-caching.md](prompt-caching.md#sources-and-fixes) → source (h)). Until then (Append-only step 7) it sends the raw prefix without an intent, so a prefix past the request cap fails as `compaction_failed`. `[proposed]` Its attachments: [Strategy 2](#strategy-2-summarize-trigger-80) → Images.
 
 Because there is no budget gate, the manual path carries a floor the automatic one does not need: below `MIN_MESSAGES_TO_COMPACT` **real messages** outside the retain window it returns `too_short` rather than paying for a call. Reaching 80% of the window on that few messages means they are individually enormous and worth summarizing; asking by hand on a short conversation is not. The floor counts messages rather than compaction-view entries, so a re-compaction can't clear it on the strength of the previous summary occupying a slot.
 
@@ -135,11 +135,11 @@ Replace old `tool_result` content with a placeholder. The OpenAI-compatible adap
 
 **Where it runs** `[confirmed]`. As a request-level edit intent on `ChatParams`, which leaves the transcript alone; each adapter maps the intent, as with the cache intent.
 
-`toolResultClearing(budget)` (`src/agent/context.ts`) builds the turn's intent, and every request of a chat or stage turn carries it: the counts, each loop iteration and its in-step replay, the summarization fork and the degraded-reply synthesis. It derives from the frozen model limits, so every invocation sends the same intent.
+`toolResultClearing(budget)` (`src/agent/context.ts`) builds the turn's intent, and every request of a chat or stage turn carries it: the counts, each loop iteration and its in-step replay, the summarization fork and the degraded-reply synthesis. It derives from the frozen model limits, so every invocation sends the same intent. A fork is its own request: the trigger is evaluated on the fork's prompt, and `keep` keeps the last five results the fork sends, so the summarizer reads its prefix cleared by the turn's rule, not exactly as the turn's requests read it.
 
-- **Anthropic.** The adapter sends server-side `clear_tool_uses_20250919` (beta `context-management-2025-06-27`) on every request that carries the intent, which keeps the beta set constant. Its trigger is this threshold in input tokens, `keep` is 5 tool uses, and `clear_at_least` is a tenth of the budget: a clearing writes the cache again from the first result it clears, so it has to buy at least half the room between the clearing and summarization thresholds (the docs' example asks a sixth of its trigger, the same ratio). The client keeps sending the full history, and the preserved-thinking check compares what was sent, so thinking stays valid. Clearing also runs between a turn's iterations.
-- **Token counting.** `countTokens` applies the same intent on every adapter and returns the count after clearing, which is what compaction compares with its thresholds and logs. The Anthropic endpoint clears as a message does; the OpenAI-compatible adapter clears locally exactly as it clears the wire body.
-- **OpenAI-compatible.** The adapter applies the same rule to the wire body, `[Cleared — call tool again if needed]` in place of each cleared result: past the trigger, by its own token estimate, every result but the last five, provided they hold at least `clear_at_least` tokens. The caller's messages stay as they are. Those routes replay no reasoning, so the moving cleared set costs cache only.
+- **Anthropic.** The adapter sends server-side `clear_tool_uses_20250919` (beta `context-management-2025-06-27`) on every request to Anthropic's API that carries the intent, which keeps the beta set constant. Its trigger is this threshold in input tokens, `keep` is 5 tool uses, and `clear_at_least` is a tenth of the budget: a clearing writes the cache again from the first result it clears, so it has to buy at least half the room between the clearing and summarization thresholds (the docs' example asks a sixth of its trigger, the same ratio). The client keeps sending the full history, and the preserved-thinking check compares what was sent, so thinking stays valid. Clearing also runs between a turn's iterations.
+- **Token counting.** `countTokens` applies the same intent on every adapter and returns the count after clearing, which is what compaction compares with its thresholds and logs. The Anthropic endpoint clears as a message does, and checks the context window after clearing (measured, [prompt-caching.md](prompt-caching.md#validation-confirmed)); the adapters that clear on the wire count the body they send.
+- **OpenAI-compatible, and Anthropic-compatible third-party endpoints.** The adapter applies the same rule to the wire body, `[Cleared — call tool again if needed]` in place of each cleared result: past the trigger, by a local cl100k estimate, every result but the last five, provided they hold at least `clear_at_least` tokens (`src/llm/tool-result-clearing.ts`). The caller's messages stay as they are. OpenAI-compatible routes replay no reasoning, so the moving cleared set costs cache only; a third-party Anthropic endpoint gets no request controls ([prompt-caching.md](prompt-caching.md#server-side-controls-confirmed)), and its moving set is a history edit where preserved thinking is enforced. The encode runs synchronously on each request past the byte bound, about a second per million tokens.
 
 ### Strategy 2: Summarize `[trigger: 80%]`
 
@@ -172,6 +172,8 @@ The summarization call receives the system prompt (or at minimum the core memory
 
 **Images:** A summary replaces the images in its span with text; if the model needs an earlier image again, the user re-sends it. `[proposed]` From Append-only step 4a the summarization fork sends the span's attachments as the turn's view renders them, under the conversation's cutoff, so the summary can describe them; `/compact` renders its prefix the same way. Normalized images fit every route, so the fork differs only where the summarization route's budget is smaller than the turn's: there it advances its own cutoff over the span, rendering those attachments as placeholders, and strips every thinking block from its request, since a placeholder the turn never sent invalidates the thinking after it ([prompt-caching.md](prompt-caching.md#sources-and-fixes) → source (h)). It renders its span from `load-turn-transcript`'s rows over the view's index range, since nothing before Strategy 2 changes the array's length ([Durable summaries](#durable-summaries-confirmed) → Cutoff derivation): a placeholder needs the ref's name, which the view's resolved blocks don't carry.
 
+**Size trigger** `[confirmed]`. The server clears after the request arrives, so a request carries every result, and its bytes can reach a route's cap (Anthropic 32 MB, Bedrock 20 MB, a `413 request_too_large`) while the count after clearing is well under the budget. The window itself is checked after the edits (measured), so bytes are the only limit clearing hides. A view whose raw JSON passes 80% of `MAX_REQUEST_BYTES` (20 MB, the smallest cap among the routes) summarizes on any path, the skip-counting fast path included, without a count first, since counting it sends it. A view the summary leaves past that, or one whose summary fails, truncates until it fits. The cap is one constant until [Append-only step 4a](prompt-caching.md#rollout) declares limits per route.
+
 **Failure handling:** If the summarization LLM call fails (timeout, rate limit, malformed output), fall through to strategy 3 (truncation). Summarization failure should not block the conversation. Nothing is stored on that path, so the next turn re-attempts rather than inheriting a partial result.
 
 **Durability:** the summary is persisted — see [Durable summaries](#durable-summaries-confirmed). Iterative compaction reads the stored summary back as the head of the prefix it re-summarizes, which is the same shape the in-memory path produced before the table existed.
@@ -203,15 +205,16 @@ cutoff = attachmentCutoff(epoch, refSizes, limits)           # [proposed] before
 messages = render(rows, cutoff)                              # [proposed] attachments up to the cutoff as placeholders
 edit = clearToolResults(trigger = budget * 0.60, keep = 5,  # Strategy 1: an intent every request carries
                         clearAtLeast = budget * 0.10)
+oversized = bytes(system, messages, tools) > MAX_REQUEST_BYTES * 0.80
 
-count = countTokens(system, messages, tools, edit)           # after clearing
+count = oversized ? none : countTokens(system, messages, tools, edit)   # after clearing
 
-if count > budget * 0.80:
+if oversized or count > budget * 0.80:
   messages = summarize(messages, keep=6)
-  count = countTokens(system, messages, tools, edit)
+  count = oversized ? none : countTokens(system, messages, tools, edit)
 
-if count > budget * 0.95:
-  messages = truncate(messages)
+if oversized or count > budget * 0.95:
+  messages = truncate(messages)                              # again while oversized
 ```
 
 `[proposed]` The attachment cutoff comes first, so no count sends a view over the request cap ([prompt-caching.md](prompt-caching.md#sources-and-fixes) → source (d)). Every request carries Strategy 1's intent, the count included, and the adapter clears ([Where it runs](#strategy-1-clear-tool-results-trigger-60)). Strategy 0 is retired ([Retirement](#retirement-confirmed)).
@@ -254,7 +257,7 @@ Compaction events are logged with:
 - Number of messages summarized
 - Summarization model used and its token cost
 
-Tool-result clearing happens in the provider, per request; Anthropic reports each clearing in the response's `context_management.applied_edits`. This data is essential for tuning thresholds — if summarization fires too often, lower the clearing threshold; if truncation fires at all, something is misconfigured.
+Tool-result clearing happens in the provider, per request; Anthropic reports each clearing in the response's `context_management.applied_edits`. This data is essential for tuning thresholds. If summarization fires too often, clear more: a smaller `keep`, a lower `clear_at_least`, or a higher summarization threshold. The clearing trigger doesn't matter here, since clearing is already on at 60% when the count reaches 80%. If truncation fires at all, something is misconfigured.
 
 ## What This Doesn't Cover
 

@@ -166,8 +166,10 @@ export function summarizationRequest(params: {
   messages: ReadonlyArray<Message>;
   maxOutputTokens: number;
   /**
-   * The turn's Strategy 1 intent, so the summarizer reads the prefix cleared
-   * as the turn's requests read it. `/compact`, outside a turn, sends none.
+   * The turn's Strategy 1 intent. The fork is its own request: the server
+   * evaluates the trigger on the fork's prompt and keeps the last results the
+   * fork sends, so the prefix is cleared by the turn's rule, not exactly as
+   * the turn's requests read it. `/compact`, outside a turn, sends none.
    */
   clearToolResults?: ToolResultClearing;
 }): ChatParams {

@@ -1053,9 +1053,8 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // instead of paying for it again. `messagesSummarized` is the split
       // index into the compaction input — nothing before Strategy 2 changes
       // the array, so it indexes `turnHistory.messageIds` directly. It is 0
-      // whenever the strategy
-      // no-opped (under budget, or the model returned no text), which is also
-      // the guard against storing an empty summary.
+      // whenever the strategy no-opped (under budget, or the model returned
+      // no text), which is also the guard against storing an empty summary.
       //
       // Every input here is durable or memoized, so this step is planned the
       // same way on every invocation. The (conversation, cutoff) unique makes
