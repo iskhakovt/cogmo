@@ -103,7 +103,12 @@ export const ResourceUsageSchema = z
     network_bytes: z.number().int().nonnegative().optional(),
     tokens_input: z.number().int().nonnegative().optional(),
     tokens_output: z.number().int().nonnegative().optional(),
-    /** USD spend reported by the CLI's `result` event, when available. */
+    /**
+     * USD spend reported by the CLI's `result` event, when available. It is
+     * the session's running total, and the execute run resumes the plan
+     * session, so it covers both phases; `tokens_input`/`tokens_output` are
+     * the execute run's alone.
+     */
     cost_usd: z.number().nonnegative().optional(),
     /**
      * Execute-phase sandbox lifecycle. Captured Cogmo-side, so it works

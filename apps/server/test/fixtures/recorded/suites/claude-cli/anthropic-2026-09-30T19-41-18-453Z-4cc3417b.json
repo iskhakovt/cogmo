@@ -1,0 +1,47 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "<system-reminder>\n## Exited Plan Mode\n\nYou have exited plan mode. You can now make edits, run tools, and take actions.\n</system-reminder>\n# Approved\nThe plan you proposed has been approved. Proceed with the implementation.\n\n# Reminders\n- Stay on the current branch and inside /workspace.\n- Git credentials are NOT available — do not `git push` or `gh pr create`.\n  Cogmo handles push and PR opening after verifying your work.\n- When you believe the task is done, run the verify command and report\n  the result. If it fails, iterate.\n\n# Verify command\necho verify",
+        "model": "claude-haiku-4-5",
+        "turnIndex": 4,
+        "hasToolResult": true
+      },
+      "response": {
+        "content": "Now I'll run the verify command:",
+        "toolCalls": [
+          {
+            "name": "Bash",
+            "arguments": "{\"command\": \"echo verify\"}",
+            "id": "toolu_01UfipA7befaSsS91vN7QToL"
+          }
+        ]
+      },
+      "recordedTimings": {
+        "ttftMs": 559,
+        "interChunkDelaysMs": [
+          0,
+          0,
+          0,
+          41,
+          160,
+          17,
+          0,
+          0,
+          125,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "totalDurationMs": 902
+      },
+      "metadata": {
+        "systemHash": "dce63215",
+        "toolsHash": "e3f95b91"
+      }
+    }
+  ]
+}
