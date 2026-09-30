@@ -7,7 +7,6 @@
  */
 
 import { getEncoding, type Tiktoken } from "js-tiktoken";
-import * as R from "remeda";
 import type { ContentBlock, CountTokensParams, Message } from "./types.js";
 
 let encoder: Tiktoken | null = null;
@@ -68,11 +67,6 @@ export function textTokens(enc: Tiktoken): TextTokens {
       index += 1;
     }
   };
-}
-
-/** Every token of `text`, as {@link textTokens} counts it. */
-export function encodedLength(enc: Tiktoken, text: string): number {
-  return R.sum([...textTokens(enc)(text)]);
 }
 
 /**

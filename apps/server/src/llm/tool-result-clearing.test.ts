@@ -4,7 +4,6 @@ import {
   CLEARED_PLACEHOLDER,
   canonicalPromptParts,
   cl100k,
-  encodedLength,
   type TextTokens,
   textTokens,
   withClearedToolResults,
@@ -12,8 +11,10 @@ import {
 import type { CountTokensParams, Message, ToolResultClearing } from "./types.js";
 
 const enc = cl100k();
-/** One encode of the whole text: the reference `encodedLength` slices against. */
+/** One encode of the whole text: the reference the slices are measured against. */
 const whole = (text: string) => enc.encode(text, [], []).length;
+/** Every token of `text`, as {@link textTokens} counts it. */
+const encodedLength = (text: string) => R.sum([...textTokens(enc)(text)]);
 
 function letters(n: number): string {
   let seed = 7;
@@ -23,22 +24,22 @@ function letters(n: number): string {
   }).join("");
 }
 
-describe("encodedLength", () => {
+describe("textTokens, summed", () => {
   it("counts a special-token marker as the text it is", () => {
-    expect(encodedLength(enc, "a <|endoftext|> b")).toBeGreaterThan(encodedLength(enc, "a  b"));
+    expect(encodedLength("a <|endoftext|> b")).toBeGreaterThan(encodedLength("a  b"));
   });
 
   it("counts prose as one encode does, across slices", () => {
     const prose = "The harbor lantern glowed over the granite quay at dusk. ".repeat(400);
 
     expect(prose.length).toBeGreaterThan(20_000);
-    expect(encodedLength(enc, prose)).toBe(whole(prose));
+    expect(encodedLength(prose)).toBe(whole(prose));
   });
 
   it("encodes a long run 64 UTF-8 bytes at a time, a token at each seam where tokens merge", () => {
     // Whole, 1,000 spaces are 9 tokens; in 64-byte pieces, one a piece.
     expect(whole(" ".repeat(1000))).toBe(9);
-    expect(encodedLength(enc, " ".repeat(1000))).toBe(16);
+    expect(encodedLength(" ".repeat(1000))).toBe(16);
   });
 
   it("caps a piece in bytes, not code points", () => {
@@ -46,7 +47,7 @@ describe("encodedLength", () => {
     const dashes = "—".repeat(128);
     const pieces = [...R.times(6, () => "—".repeat(21)), "—".repeat(2)];
 
-    expect(encodedLength(enc, dashes)).toBe(R.sumBy(pieces, whole));
+    expect(encodedLength(dashes)).toBe(R.sumBy(pieces, whole));
     expect(R.sumBy(pieces, whole)).not.toBe(R.sumBy(["—".repeat(64), "—".repeat(64)], whole));
   });
 
@@ -55,7 +56,7 @@ describe("encodedLength", () => {
     const run = `a${"𝐀".repeat(100)}`;
     const pieces = [`a${"𝐀".repeat(15)}`, ...R.times(5, () => "𝐀".repeat(16)), "𝐀".repeat(5)];
 
-    expect(encodedLength(enc, run)).toBe(R.sumBy(pieces, whole));
+    expect(encodedLength(run)).toBe(R.sumBy(pieces, whole));
   });
 
   it.each([
@@ -67,7 +68,7 @@ describe("encodedLength", () => {
     const text = make();
     const start = performance.now();
 
-    encodedLength(enc, text);
+    encodedLength(text);
 
     // One encode takes about ten seconds; the pieces take tens of milliseconds.
     expect(performance.now() - start).toBeLessThan(1000);
@@ -107,7 +108,7 @@ describe("textTokens", () => {
     const letter = whole("𝐀");
     expect(whole("𝐀".repeat(16))).toBe(16 * letter);
 
-    expect(encodedLength(enc, run)).toBe(whole(`a${"𝐀".repeat(15)}`) + 4985 * letter);
+    expect(encodedLength(run)).toBe(whole(`a${"𝐀".repeat(15)}`) + 4985 * letter);
   });
 });
 
