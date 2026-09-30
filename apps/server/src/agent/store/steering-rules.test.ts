@@ -12,7 +12,7 @@ import { assertKind, expectDefined } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { RuleGroupChangedError } from "./errors.js";
 import { DrizzleAgentStore, INSTRUCTION_RULE_LIMIT } from "./index.js";
-import { type SteeringRuleSourceValue, steeringRules } from "./schema.js";
+import { type SteeringRuleSourceValue, steeringRules, users } from "./schema.js";
 
 let db: Database;
 let tx: Transactor;
@@ -319,6 +319,71 @@ describe("setInstructionRule", () => {
         createdAt: first.createdAt,
       });
     });
+
+    it("answers the same text in another scope, another user's or a retired one with the limit", async () => {
+      const userId = await seedUser();
+      const otherUserId = await seedUser();
+      await fill(userId, INSTRUCTION_RULE_LIMIT - 1);
+      await set({ rule: "On Telegram", userId, channelType: "telegram" });
+      await row({ rule: "Theirs", source: "instruction", userId: otherUserId });
+      await row({ rule: "Withdrawn", source: "instruction", userId, retired: true });
+      const atLimit = { kind: "at_limit", live: INSTRUCTION_RULE_LIMIT };
+
+      expect(await set({ rule: "On Telegram", userId })).toEqual(atLimit);
+      expect(await set({ rule: "Theirs", userId })).toEqual(atLimit);
+      expect(await set({ rule: "Withdrawn", userId })).toEqual(atLimit);
+    });
+
+    it("retires a learned twin of a rule the user holds", async () => {
+      const userId = await seedUser();
+      await set({ rule: "No emoji", userId });
+      await fill(userId, INSTRUCTION_RULE_LIMIT - 1);
+      const twin = await row({ rule: "No emoji", source: "correction" });
+
+      expect(await set({ rule: "No emoji", userId })).toMatchObject({ kind: "existing" });
+      expect(await stateOf(twin)).toBe("retired");
+    });
+
+    it("leaves a learned twin live when the set is refused", async () => {
+      const userId = await seedUser();
+      await fill(userId, INSTRUCTION_RULE_LIMIT);
+      const twin = await row({ rule: "No emoji", source: "correction" });
+
+      expect(await set({ rule: "No emoji", userId })).toMatchObject({ kind: "at_limit" });
+      expect(await stateOf(twin)).toBe("live");
+    });
+  });
+
+  it("retires a learned twin of a rule already set", async () => {
+    const userId = await seedUser();
+    await set({ rule: "No emoji", userId });
+    const twin = await row({ rule: "No emoji", source: "evolution" });
+
+    expect(await set({ rule: "No emoji", userId })).toMatchObject({ kind: "existing" });
+    expect(await stateOf(twin)).toBe("retired");
+  });
+
+  it("keeps an already retired learned twin's retirement time", async () => {
+    const userId = await seedUser();
+    const retiredAt = new Date("2026-01-01T00:00:00Z");
+    const twin = await row({ rule: "No emoji", source: "correction", retired: retiredAt });
+
+    await set({ rule: "No emoji", userId });
+
+    const [after] = await db
+      .select({ retractedAt: steeringRules.retractedAt })
+      .from(steeringRules)
+      .where(eq(steeringRules.id, twin));
+    expect(after?.retractedAt).toEqual(retiredAt);
+  });
+
+  it("goes when its user is deleted", async () => {
+    const userId = await seedUser();
+    await set({ rule: "No emoji", userId });
+
+    await db.delete(users).where(eq(users.id, userId));
+
+    expect(await db.select().from(steeringRules)).toEqual([]);
   });
 });
 
@@ -456,6 +521,13 @@ describe("listRules", () => {
     await row({ rule: "Elsewhere", source: "instruction", userId, profileId: otherProfileId });
     await row({ rule: "Learned", source: "correction" });
     await row({ rule: "Learning", source: "correction", active: false, observationCount: 1 });
+    await row({
+      rule: "Learning elsewhere",
+      source: "correction",
+      active: false,
+      observationCount: 1,
+      profileId: otherProfileId,
+    });
     await row({ rule: "Switched off", source: "seed", active: false, channelType: "telegram" });
     await row({ rule: "Retired second", source: "correction", retired: new Date(2_000) });
     await row({ rule: "Retired first", source: "instruction", userId, retired: new Date(1_000) });

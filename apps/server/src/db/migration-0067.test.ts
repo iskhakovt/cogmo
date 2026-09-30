@@ -42,7 +42,9 @@ const MigratedRowsSchema = z.object({
       id: z.string(),
       rule: z.string(),
       source: z.string(),
+      category: z.string(),
       active: z.boolean(),
+      priority: z.number(),
       observation_count: z.number(),
       profile_id: z.string().nullable(),
       channel_type: z.string().nullable(),
@@ -152,7 +154,7 @@ function insertInstruction(params: {
 describe("migration 0067 — steering rule instructions", () => {
   it("keeps every existing row as it was, with no retirement, user or quote", async () => {
     const profileId = await seedProfile();
-    const labels = await insert({
+    const existing = {
       operator: legacy("Never share the user's address.", {
         source: "manual",
         category: "safety",
@@ -173,29 +175,34 @@ describe("migration 0067 — steering rule instructions", () => {
       learned: legacy("Keep it short.", {}),
       learning: legacy("Use metric units.", { active: false, observationCount: 1 }),
       merged: legacy("No emoji.", { source: "evolution", profileId }),
-    });
+    };
+    const labels = await insert(existing);
 
     await applyMigration();
 
     const { rows } = MigratedRowsSchema.parse(
       await db.execute(sql`
-        SELECT id, rule, source::text AS source, active, observation_count, profile_id,
-          channel_type, retracted_at, user_id, quote
+        SELECT id, rule, source::text AS source, category, active, priority, observation_count,
+          profile_id, channel_type, retracted_at, user_id, quote
         FROM steering_rules
       `),
     );
-    expect(
-      Object.fromEntries(
-        rows.map((r) => [expectDefined(labels.get(r.id), r.id), [r.source, r.active]]),
-      ),
-    ).toEqual({
-      operator: ["manual", true],
-      "operator, off": ["manual", false],
-      default: ["seed", true],
-      learned: ["correction", true],
-      learning: ["correction", false],
-      merged: ["evolution", true],
-    });
+    const migrated: Record<string, LegacyRule> = Object.fromEntries(
+      rows.map((r) => [
+        expectDefined(labels.get(r.id), r.id),
+        {
+          rule: r.rule,
+          source: r.source,
+          category: r.category,
+          priority: r.priority,
+          observationCount: r.observation_count,
+          active: r.active,
+          profileId: r.profile_id,
+          channelType: r.channel_type,
+        },
+      ]),
+    );
+    expect(migrated).toEqual(existing);
   });
 
   it("fails on an instruction row, which carries no user or quote to keep", async () => {
