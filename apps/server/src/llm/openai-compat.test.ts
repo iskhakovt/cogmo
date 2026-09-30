@@ -2098,6 +2098,19 @@ describe("OpenAICompatibleProvider", () => {
       expect(toolContents(firstCreateArgs())).toEqual([1, 2, 3, 4].map((n) => `${n}: ${RESULT}`));
     });
 
+    it("clears nothing at a trigger the prompt's tokens reach but don't exceed, however many bytes it has", async () => {
+      const provider = createProvider();
+      const params = { model: "gpt-5-nano", system: "sys", messages: toolHeavy() };
+      const tokens = await provider.countTokens(params);
+      // Several bytes to a token, so only the token count can keep this under the trigger.
+      expect(Buffer.byteLength(JSON.stringify(params.messages))).toBeGreaterThan(tokens * 2);
+      mockCreate.mockResolvedValueOnce(okCompletion());
+
+      await provider.chat({ ...params, clearToolResults: { ...CLEARING, triggerTokens: tokens } });
+
+      expect(toolContents(firstCreateArgs())).toEqual([1, 2, 3, 4].map((n) => `${n}: ${RESULT}`));
+    });
+
     it("counts the prompt as cleared, as it goes on the wire", async () => {
       const provider = createProvider();
       const params = { model: "gpt-5-nano", system: "sys", messages: toolHeavy() };
