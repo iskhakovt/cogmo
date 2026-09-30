@@ -517,6 +517,35 @@ describe("compactMessages", () => {
       expect(countTokens).not.toHaveBeenCalled();
     });
 
+    it("keeps the most history that fits the cap when no cut gets under the threshold", async () => {
+      // 21 MB; the first cut is 19 MB, the smallest 17 MB: both past 16 MB.
+      const messages: Message[] = [
+        docTurn(2_000_000, "first"),
+        msg("assistant", "read it"),
+        docTurn(2_000_000, "second"),
+        msg("assistant", "read it too"),
+        docTurn(17_000_000),
+      ];
+      const views = truncations(messages);
+      expect(views.length).toBeGreaterThan(2);
+
+      const result = await compactMessages("system", messages, undefined, deps(), true);
+
+      expect(result.messages).toEqual(views[1]);
+      expect(bytesOf(result.messages)).toBeLessThanOrEqual(MAX_REQUEST_BYTES);
+    });
+
+    it("records nothing for a view past the cap that no cut shrinks", async () => {
+      const messages: Message[] = [docTurn(21_000_000)];
+      const countTokens = vi.fn().mockResolvedValue(100);
+
+      const result = await compactMessages("system", messages, undefined, deps({ countTokens }));
+
+      expect(result.didCompact).toBe(false);
+      expect(result.messages).toEqual(messages);
+      expect(countTokens).not.toHaveBeenCalled();
+    });
+
     it("does nothing at exactly the threshold", async () => {
       const base = [msg("user", ""), msg("assistant", "a"), msg("user", "q")];
       const maxRequestBytes = 10_000;

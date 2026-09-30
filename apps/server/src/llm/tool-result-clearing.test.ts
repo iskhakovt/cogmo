@@ -1,5 +1,5 @@
 import * as R from "remeda";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   CLEARED_PLACEHOLDER,
   canonicalPromptParts,
@@ -83,17 +83,31 @@ describe("textTokens", () => {
     expect(R.sum(slices)).toBe(whole(text));
   });
 
-  it("encodes a text it has read once, however many passes read it", () => {
+  it("encodes a text once, however many passes read it", () => {
     const text = "word ".repeat(10_000);
     const tokens = textTokens(enc);
-    const first = tokens(text)[Symbol.iterator]();
-    first.next();
-    const start = performance.now();
-    const again = [...tokens(text)];
-    const reread = performance.now() - start;
+    const encode = vi.spyOn(enc, "encode");
+    try {
+      const first = [...tokens(text)];
+      const calls = encode.mock.calls.length;
+      const again = [...tokens(text)];
 
-    expect(R.sum(again)).toBe(whole(text));
-    expect(reread).toBeLessThan(1000);
+      expect(again).toEqual(first);
+      expect(encode.mock.calls.length).toBe(calls);
+    } finally {
+      encode.mockRestore();
+    }
+  });
+
+  it("never cuts a slice inside a surrogate pair", () => {
+    // No spaces, and pairs from index 1: the 8,192nd code unit ends a pair's first half.
+    const run = `a${"𝐀".repeat(5000)}`;
+    // This letter's tokens never merge across letters, so any cut between
+    // letters counts the same, and a cut inside one doesn't.
+    const letter = whole("𝐀");
+    expect(whole("𝐀".repeat(16))).toBe(16 * letter);
+
+    expect(encodedLength(enc, run)).toBe(whole(`a${"𝐀".repeat(15)}`) + 4985 * letter);
   });
 });
 
