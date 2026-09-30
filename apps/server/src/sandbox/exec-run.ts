@@ -2,6 +2,7 @@ import { finished, PassThrough, Writable } from "node:stream";
 import { ok, type Result } from "neverthrow";
 import { match } from "ts-pattern";
 import { logger } from "../logger.js";
+import { abortable } from "../util/abortable.js";
 import type { ExecFailure, ExecOptions, ExecStreamingHandle } from "./exec.js";
 import { execFailureError, unwrapExit } from "./exec.js";
 import {
@@ -305,7 +306,7 @@ class ExecRun {
       TEARDOWN_TIMEOUT_MS,
     ).unref();
     try {
-      await untilAborted(this.#backend.teardown(deadline.signal), deadline.signal);
+      await abortable(this.#backend.teardown(deadline.signal), deadline.signal);
       this.#observe({ type: "torn_down" });
     } catch (e) {
       this.#observe({ type: "teardown_failed", error: toError(e) });
@@ -313,15 +314,6 @@ class ExecRun {
       clearTimeout(timer);
     }
   }
-}
-
-/** `promise`, or a rejection with `signal`'s reason once it aborts first. */
-function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = (): void => reject(signal.reason);
-    signal.addEventListener("abort", onAbort, { once: true });
-    promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
-  });
 }
 
 /** Resolves once `promise` settles or `ms` passes, whichever is first. Never rejects. */

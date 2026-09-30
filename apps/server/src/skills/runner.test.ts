@@ -1167,4 +1167,23 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
     expect(shutdownResolved).toBe(true);
     expect(fakePool.dispose).toHaveBeenCalledTimes(1);
   });
+
+  it("shutdown during a pool start that fails resolves, and no pool starts after it", async () => {
+    const start = Promise.withResolvers<SysboxWorkerPool>();
+    createSpy.mockImplementation(() => start.promise);
+    const runner = await makeTier2Runner();
+
+    const inflight = runner.invoke({ name: "tier2-test", inputs: {}, runAs: runAs() });
+    inflight.catch(() => undefined); // awaited below
+    await new Promise<void>((r) => setImmediate(r));
+    const shutdown = runner.shutdown();
+    start.reject(new Error("sandbox unreachable"));
+
+    await expect(shutdown).resolves.toBeUndefined();
+    await expect(inflight).rejects.toThrow("sandbox unreachable");
+    await expect(runner.invoke({ name: "tier2-test", inputs: {}, runAs: runAs() })).rejects.toThrow(
+      /pool requested after shutdown/,
+    );
+    expect(createSpy).toHaveBeenCalledTimes(1);
+  });
 });

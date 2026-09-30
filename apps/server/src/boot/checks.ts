@@ -23,6 +23,7 @@ import { z } from "zod";
 import type { Database } from "../db/index.js";
 import { logger } from "../logger.js";
 import type { HindsightMemoryProvider } from "../memory/hindsight.js";
+import { abortable } from "../util/abortable.js";
 import { describeError } from "../util/describe-error.js";
 
 export class BootCheckError extends Error {
@@ -195,32 +196,6 @@ async function retryUntilConclusive<T>(
     }
     delay = Math.min(delay * 2, BOOT_PROBE_MAX_DELAY_MS);
   }
-}
-
-/**
- * Settle with `work`, or reject once `signal` aborts. For calls that honour
- * the signal only partly (S3 credential resolution, Hindsight request setup);
- * the abandoned call's outcome is dropped.
- */
-function abortable<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
-  if (signal.aborted) {
-    work.catch(() => undefined);
-    return Promise.reject(signal.reason);
-  }
-  return new Promise<T>((resolveWork, rejectWork) => {
-    const onAbort = () => rejectWork(signal.reason);
-    signal.addEventListener("abort", onAbort, { once: true });
-    work.then(
-      (value) => {
-        signal.removeEventListener("abort", onAbort);
-        resolveWork(value);
-      },
-      (err: unknown) => {
-        signal.removeEventListener("abort", onAbort);
-        rejectWork(err);
-      },
-    );
-  });
 }
 
 /**

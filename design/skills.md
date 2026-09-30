@@ -120,7 +120,7 @@ Overrides validated at deploy against a per-tier hard ceiling (e.g., ≤2 GB mem
 
 The container tier is warmed from day 1. A 1–2s cold start on every interactive skill invocation is user-visible latency. The dispatcher abstraction also removes the need for a sync/async tier split — one pool handles both uniformly.
 
-Implementation lives across two trees. The TypeScript host in `src/skills/worker-sysbox/` (`pool.ts` for lifecycle, `worker.ts` wraps a long-lived `SandboxSession` running the python supervisor) and the Python runtime in `images/skills/` (a real `cogmo_skills_runtime` package with `pyproject.toml`, `uv.lock`, ruff + pyrefly + pytest, multi-stage Docker build that bakes the venv into `cogmo-skills:<version>` at `/opt/cogmo-skills/.venv`). The TS worker spawns the supervisor via `python3 -u -m cogmo_skills_runtime` — `__main__.py` calls `supervisor.main()`. `SkillRunnerImpl.create` eagerly stands the pool up when a sandbox is wired; `shutdown()` tears it down.
+Implementation lives across two trees. The TypeScript host in `src/skills/worker-sysbox/` (`pool.ts` for lifecycle, `worker.ts` wraps a long-lived `SandboxSession` running the python supervisor) and the Python runtime in `images/skills/` (a real `cogmo_skills_runtime` package with `pyproject.toml`, `uv.lock`, ruff + pyrefly + pytest, multi-stage Docker build that bakes the venv into `cogmo-skills:<version>` at `/opt/cogmo-skills/.venv`). The TS worker spawns the supervisor via `python3 -u -m cogmo_skills_runtime` — `__main__.py` calls `supervisor.main()`. The runner starts the pool on the first tier-2 invoke and `shutdown()` tears it down; see [Sizing](#sizing-confirmed) → Lazy pool init.
 
 The worker needs a stdin-attached exec that streams both ways. Daytona's PTY exec buffers stdin until it ends (see [sandbox.md → Streaming exec](sandbox.md#streaming-exec-confirmed)), so the supervisor never starts there and worker creation fails at the handshake: the container tier runs on the local-Docker backend only.
 
@@ -263,7 +263,7 @@ Not covered: the container filesystem (`/tmp`, `$HOME`, the writable `/skill-ven
 | `idleShutdownMs` | 30 min | `COGMO_SKILLS_POOL_IDLE_SHUTDOWN_MS` | Idle workers above `min` get reaped. With `min=0` the pool drops to zero idle workers; useful where a warm worker is a billable sandbox. |
 | `idleSweepIntervalMs` | 1 min | — | Sweep cadence. |
 
-**Lazy pool init.** The pool itself isn't constructed until the first tier-2 invocation — `cogmo serve` boots without spinning anything up on the configured sandbox. Concurrent first-callers share one in-flight construction; an init failure (e.g. transient Daytona blip) clears the in-flight reference so the next invocation retries. This keeps an unreachable managed backend from failing boot for deployments that may never invoke a tier-2 skill.
+**Lazy pool init.** The pool itself isn't constructed until the first tier-2 invocation — `cogmo serve` boots without spinning anything up on the configured sandbox. Concurrent first-callers share one in-flight construction; an init failure clears the in-flight reference so the next invocation retries. This keeps an unreachable sandbox from failing boot for deployments that may never invoke a tier-2 skill. `SkillRunnerImpl.shutdown()` waits for a construction in flight, disposes the pool, and refuses any tier-2 invoke after it; `cogmo serve` calls it on exit, before the sandbox shuts down ([infrastructure.md → Shutdown](infrastructure.md#shutdown-confirmed)).
 
 Starting values; revisit with usage data. Skills that declare `resources.{cpu_shares,memory_mb}` overrides bypass the pool — they get a fresh, per-skill-resource-budget container, paying the cold-start every invoke. Most skills don't override and ride the warm path.
 
@@ -293,7 +293,7 @@ $COGMO_SKILLS_PATH/                # default /var/lib/cogmo/skills (configurable
   - **Use my own remote** — operator pastes a pre-created URL they've granted Cogmo's credentials access to. Validated via `git ls-remote` before persisting.
   - **Auto-provision on GitHub** — Cogmo calls `octokit.repos.createForAuthenticatedUser({ name: "cogmo-skills", private: true, auto_init: true })` and attaches the result as origin. Only available when a GitHub identity is already configured; gated to that one provider because the convenience lives in the wizard only — no permanent provider-specific surface.
   - **Skip** — defer configuration. `delegate_coding({ repo: "skills" })` fails with a clear message until the standalone `cogmo migrate-skills-remote` CLI is run.
-- The local bare repo is **authoritative** for `register` (`update-ref` writes happen here, atomically). The remote is a synchronized mirror — every successful `register` immediately pushes the new `main` SHA to the remote, so a Daytona sandbox cloning from the remote always sees the latest skill set within the latency of one push.
+- The local bare repo is **authoritative** for `register` (`update-ref` writes happen here, atomically). The remote is a synchronized mirror — every successful `register` immediately pushes the new `main` SHA to the remote, so a Daytona sandbox cloning from the remote always sees the latest skill set within the latency of one push. The push gives up after 60 s, or when the caller's signal aborts; a failed push leaves the remote behind until the next one succeeds.
 - Coding delegation operates on this repo exactly like it operates on user-registered repos — feature-branch flow over the same [sandbox.md](sandbox.md) + [coding-delegation.md](coding-delegation.md) infrastructure. The skills repo's only specialness is the post-`register` push-to-remote step.
 
 **Why local-authoritative with synchronized remote (rather than remote-authoritative):**
@@ -622,8 +622,12 @@ RPC signature:
 ```typescript
 interface SkillRunner {
   // `origin` (required) decides who a schedule the request puts live runs as —
-  // see Run-as identity.
-  register(opts: { branch: string; origin: SkillDeployOrigin }): Promise<RegisterResult>;
+  // see Run-as identity. `signal` cancels the deploy until its transaction starts.
+  register(opts: {
+    branch: string;
+    origin: SkillDeployOrigin;
+    signal?: AbortSignal;
+  }): Promise<RegisterResult>;
   approveDeploy(opts: { pendingId: string; origin: SkillDeployOrigin }): Promise<RegisterResult>;
   denyDeploy(opts: { pendingId: string; reason?: string }): Promise<void>;
   rollback(opts: { name: string; toGitSha: string; origin: SkillDeployOrigin }): Promise<RegisterResult>;
@@ -668,6 +672,7 @@ type EnableResult =
 - **`main` is authoritative.** `refs/heads/main` in the bare repo and `skills.git_sha` in the DB always agree — both are written together inside the register transaction.
 - **No race via direct push.** Pre-receive hook rejects non-Cogmo writes to `main`; Cogmo's own registers queue on the advisory lock, with the snapshot caveat in register step 1.
 - **Idempotent.** Registering a branch whose tip is already `main` is a no-op. Safe to retry on network timeouts.
+- **Cancellable until the deploy transaction starts.** `register` checks its `signal` at its start and again just before the transaction, and the lockfile compile honours it throughout: a wait for the image ends, no session starts, and a running exec is disposed before its session is deleted. An abort seen by then stops the deploy, and `register` rejects with the signal's reason, not with a rejection the abort caused, leaving `main` and the branch untouched. These are checks, not a wall-clock cap: work between them that takes no signal (local git, the classifier, the Pyodide check's PyPI lookups) runs to its end first. Once the transaction has started, its wait on the advisory lock included, an abort only kills the mirror push to the remote, and the result stands. A skill-repo coding task's auto-register runs `register` under a 300 s deadline.
 - **Git push is orthogonal.** Pushing branches to a user-configured remote (backup, multi-machine) neither triggers nor depends on registration.
 
 ## Dependencies `[proposed]`

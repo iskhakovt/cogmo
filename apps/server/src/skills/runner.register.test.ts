@@ -1,5 +1,7 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -9,6 +11,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { mock } from "vitest-mock-extended";
 import { profiles, users } from "../agent/store/schema.js";
 import type { Database, Transactor } from "../db/index.js";
+import { GitHubIdentitySchema } from "../secrets/github.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { expectDefined } from "../test/assertions.js";
 import { mockFilesService } from "../test/factories.js";
@@ -305,6 +308,71 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
     expect(result.errors?.[0]).toMatch(/non_fast_forward/);
   });
 
+  it("an aborted signal stops the deploy before it commits", async () => {
+    const runner = await makeRunner();
+    await pushFeatureBranch({
+      work: repo.work,
+      branch: "skill/echo",
+      manifest: ECHO_MANIFEST,
+      body: ECHO_BODY,
+    });
+    const mainBefore = await getMainSha(repo.bare);
+    const reason = new Error("register deadline");
+
+    await expect(
+      runner.register({ branch: "skill/echo", origin: OWNER, signal: AbortSignal.abort(reason) }),
+    ).rejects.toBe(reason);
+
+    expect(await tx((trx) => store.getSkillByName(trx, "echo"))).toBeUndefined();
+    expect(await getMainSha(repo.bare)).toBe(mainBefore);
+  });
+
+  it("an aborted signal rejects with its reason ahead of any validation", async () => {
+    const runner = await makeRunner();
+    const reason = new Error("register deadline");
+
+    await expect(
+      runner.register({ branch: "nope", origin: OWNER, signal: AbortSignal.abort(reason) }),
+    ).rejects.toBe(reason);
+  });
+
+  it("an abort once the deploy transaction has started still commits and reports live", async () => {
+    const controller = new AbortController();
+    // The deadline passes while the transaction moves main.
+    class AbortingStore extends DrizzleSkillStore {
+      override executeRegister(
+        trx: Parameters<DrizzleSkillStore["executeRegister"]>[0],
+        params: Parameters<DrizzleSkillStore["executeRegister"]>[1],
+      ) {
+        return super.executeRegister(trx, {
+          ...params,
+          applyFilesystem: async () => {
+            controller.abort(new Error("register deadline"));
+            await params.applyFilesystem();
+          },
+        });
+      }
+    }
+    const runner = await makeRunner({ store: new AbortingStore() });
+    const sha = await pushFeatureBranch({
+      work: repo.work,
+      branch: "skill/echo",
+      manifest: ECHO_MANIFEST,
+      body: ECHO_BODY,
+    });
+
+    const result = await runner.register({
+      branch: "skill/echo",
+      origin: OWNER,
+      signal: controller.signal,
+    });
+
+    expect(controller.signal.aborted).toBe(true);
+    expect(result.status).toBe("live");
+    expect(await getMainSha(repo.bare)).toBe(sha);
+    expect((await tx((trx) => store.getSkillByName(trx, "echo")))?.gitSha).toBe(sha);
+  });
+
   it("rejects a missing branch", async () => {
     const runner = await makeRunner();
     const result = await runner.register({ branch: "nope", origin: OWNER });
@@ -417,6 +485,48 @@ tier: wasm
       expect(skill?.lockfileHash).toMatch(/^[0-9a-f]{64}$/);
     });
 
+    it("an abort during the PyPI lookups rejects with its reason and commits nothing", async () => {
+      // A dependency Pyodide doesn't bundle, so the compatibility check asks PyPI.
+      const lockfile = "cogmo-unbundled==1.0.0 \\\n    --hash=sha256:0\n";
+      await writeFile(
+        join(repo.work, "SKILL.md"),
+        ECHO_WITH_DEPS.replace("httpx==0.27.0", "cogmo-unbundled==1.0.0"),
+      );
+      await writeFile(join(repo.work, "skill.py"), ECHO_BODY);
+      await writeFile(join(repo.work, "requirements.lock"), lockfile);
+      await execFileP("git", ["-C", repo.work, "add", "."]);
+      await execFileP("git", ["-C", repo.work, "commit", "-m", "unbundled dep", "--allow-empty"]);
+      await execFileP("git", [
+        "-C",
+        repo.work,
+        "push",
+        "-f",
+        "origin",
+        "HEAD:refs/heads/skill/echo-pypi",
+      ]);
+      const runner = await makeRunner();
+      const mainBefore = await getMainSha(repo.bare);
+      const controller = new AbortController();
+      const reason = new Error("register deadline");
+      const fetch = vi.fn(async () => {
+        controller.abort(reason);
+        return new Response(null, { status: 404 });
+      });
+      vi.stubGlobal("fetch", fetch);
+
+      try {
+        await expect(
+          runner.register({ branch: "skill/echo-pypi", origin: OWNER, signal: controller.signal }),
+        ).rejects.toBe(reason);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+
+      expect(fetch).toHaveBeenCalled();
+      expect(await tx((trx) => store.getSkillByName(trx, "echo"))).toBeUndefined();
+      expect(await getMainSha(repo.bare)).toBe(mainBefore);
+    });
+
     it("stores null lockfile_hash when manifest declares no deps", async () => {
       const runner = await makeRunner();
       await pushFeatureBranch({
@@ -465,7 +575,7 @@ tier: wasm
 
         const result = await runner.register({ branch: "skill/echo-verified", origin: OWNER });
         expect(result.status).toBe("live");
-        expect(compiler.compile).toHaveBeenCalledWith(["httpx==0.27.0"]);
+        expect(compiler.compile).toHaveBeenCalledWith(["httpx==0.27.0"], {});
       });
 
       it("rejects with requirements_lock_stale when the compile output differs", async () => {
@@ -499,6 +609,62 @@ tier: wasm
         expect(result.status).toBe("rejected");
         expect(result.errors?.[0]).toMatch(/requirements_lock_resolver_failed/);
         expect(result.errors?.[0]).toMatch(/Distribution not found/);
+      });
+
+      it("an abort during the compile rejects with its reason and commits nothing", async () => {
+        const lockfile = "httpx==0.27.0 --hash=sha256:0\n";
+        const controller = new AbortController();
+        const reason = new Error("register deadline");
+        // The deadline passes while the resolver runs; the abort disposes the
+        // exec, which the compiler reports as a transport failure.
+        const compiler = {
+          compile: vi.fn(async () => {
+            controller.abort(reason);
+            return err({ kind: "transport_failed" as const, message: "exec was disposed" });
+          }),
+        };
+        const runner = await makeRunner({ lockfileCompiler: compiler });
+        const sha = await commitWithLockfile("skill/echo-aborted", lockfile);
+        const mainBefore = await getMainSha(repo.bare);
+
+        await expect(
+          runner.register({
+            branch: "skill/echo-aborted",
+            origin: OWNER,
+            signal: controller.signal,
+          }),
+        ).rejects.toBe(reason);
+
+        expect(compiler.compile).toHaveBeenCalledWith(["httpx==0.27.0"], {
+          signal: controller.signal,
+        });
+        expect(await tx((trx) => store.getSkillByName(trx, "echo"))).toBeUndefined();
+        expect(await getMainSha(repo.bare)).toBe(mainBefore);
+        // The branch is left for a retry.
+        const { stdout } = await execFileP("git", [
+          "-C",
+          repo.bare,
+          "rev-parse",
+          "refs/heads/skill/echo-aborted",
+        ]);
+        expect(stdout.trim()).toBe(sha);
+      });
+
+      it("an aborted signal starts no compile", async () => {
+        const lockfile = "httpx==0.27.0 --hash=sha256:0\n";
+        const compiler = { compile: vi.fn().mockResolvedValue(ok(lockfile)) };
+        const runner = await makeRunner({ lockfileCompiler: compiler });
+        await commitWithLockfile("skill/echo-dead", lockfile);
+        const reason = new Error("register deadline");
+
+        await expect(
+          runner.register({
+            branch: "skill/echo-dead",
+            origin: OWNER,
+            signal: AbortSignal.abort(reason),
+          }),
+        ).rejects.toBe(reason);
+        expect(compiler.compile).not.toHaveBeenCalled();
       });
 
       it("skips compile when no compiler is configured (tier-1-only deployment)", async () => {
@@ -1849,6 +2015,111 @@ effects:
         // Local main advanced even though remote push failed.
         expect(await getMainSha(repoWithRemote.bare)).toBe(sha);
       } finally {
+        await repoWithRemote.cleanup();
+      }
+    });
+
+    it("an abort after the commit returns promptly from a stalled mirror push and still reports live", async () => {
+      const repoWithRemote = await setupRepoWithRemote();
+      try {
+        // The remote's pre-receive hook marks that the push arrived, then stalls it.
+        const pushing = join(repoWithRemote.remote, "..", "pushing");
+        const hook = join(repoWithRemote.remote, "hooks", "pre-receive");
+        await writeFile(hook, `#!/bin/sh\ntouch '${pushing}'\nsleep 20\n`);
+        await chmod(hook, 0o755);
+        const runner = await makeRunnerForRepo(repoWithRemote.bare);
+        const sha = await pushFeatureBranch({
+          work: repoWithRemote.work,
+          branch: "skill/echo",
+          manifest: ECHO_MANIFEST,
+          body: ECHO_BODY,
+        });
+        const controller = new AbortController();
+
+        const registered = runner.register({
+          branch: "skill/echo",
+          origin: OWNER,
+          signal: controller.signal,
+        });
+        while (!existsSync(pushing)) await new Promise((r) => setTimeout(r, 20));
+        const abortedAt = Date.now();
+        controller.abort(new Error("register deadline"));
+        const result = await registered;
+
+        expect(Date.now() - abortedAt).toBeLessThan(5_000);
+        expect(result.status).toBe("live");
+        expect(result.gitSha).toBe(sha);
+        expect(await getMainSha(repoWithRemote.bare)).toBe(sha);
+      } finally {
+        await repoWithRemote.cleanup();
+      }
+    });
+
+    it("a stalled HTTPS mirror push gives up at its own timeout and still reports live", async () => {
+      const repoWithRemote = await setupRepoWithRemote();
+      // An HTTPS remote that takes the connection and never answers, so the
+      // push goes through the PAT branch and stalls in the TLS handshake.
+      const sockets = new Set<Socket>();
+      const connected = Promise.withResolvers<void>();
+      const server = createServer((socket) => {
+        sockets.add(socket);
+        connected.resolve();
+      });
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (address === null || typeof address === "string") throw new Error("no TCP address");
+      await execFileP("git", [
+        "-C",
+        repoWithRemote.bare,
+        "remote",
+        "set-url",
+        "origin",
+        `https://127.0.0.1:${address.port}/owner/skills.git`,
+      ]);
+      const secretsStore = mock<SecretsStore>();
+      secretsStore.getSecret.mockResolvedValue(
+        JSON.stringify(
+          GitHubIdentitySchema.parse({
+            pat: "ghp_test",
+            sshPrivateKey: "-----BEGIN OPENSSH PRIVATE KEY-----",
+            sshPublicKey: "ssh-ed25519 AAAA",
+            login: "cogmo-bot",
+            id: "12345",
+          }),
+        ),
+      );
+      const pushDeadline = new AbortController();
+      const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(pushDeadline.signal);
+      try {
+        const runner = await SkillRunnerImpl.create({
+          store,
+          runInTx: tx,
+          secretsStore,
+          userTimezone: "UTC",
+          defaultRunAs: DEFAULT_RUN_AS,
+          skillsRepoPath: repoWithRemote.bare,
+        });
+        const sha = await pushFeatureBranch({
+          work: repoWithRemote.work,
+          branch: "skill/echo",
+          manifest: ECHO_MANIFEST,
+          body: ECHO_BODY,
+        });
+
+        // No caller signal, as from the CLI.
+        const registered = runner.register({ branch: "skill/echo", origin: OWNER });
+        await connected.promise;
+        pushDeadline.abort(new DOMException("push timed out", "TimeoutError"));
+        const result = await registered;
+
+        expect(timeout).toHaveBeenCalledWith(60_000);
+        expect(result.status).toBe("live");
+        expect(result.gitSha).toBe(sha);
+        expect(await getMainSha(repoWithRemote.bare)).toBe(sha);
+      } finally {
+        timeout.mockRestore();
+        for (const socket of sockets) socket.destroy();
+        server.close();
         await repoWithRemote.cleanup();
       }
     });

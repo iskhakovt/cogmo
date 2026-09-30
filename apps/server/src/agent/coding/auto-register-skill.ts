@@ -29,6 +29,15 @@ import type { CodingStore } from "./store/index.js";
 
 const log = logger.child({ component: "coding.auto-register-skill" });
 
+/**
+ * Deadline for `register`, whose abort stops the deploy until its transaction
+ * starts. `register` checks it at points rather than as a wall-clock cap, so
+ * work that takes no signal runs to its end first. Covers the lockfile
+ * compile's exec cap (`DEFAULT_COMPILE_TIMEOUT_MS`, 180 s) plus sandbox start
+ * and the classifier.
+ */
+const REGISTER_TIMEOUT_MS = 300_000;
+
 export interface AutoRegisterSkillDeps {
   runInTx: Transactor;
   store: CodingStore;
@@ -108,36 +117,24 @@ export async function autoRegisterSkill(
     await runGit(["-C", deps.skillsRepoPath, "fetch", repo.remoteUrl, `+${branch}:${branch}`], env);
   });
 
-  // KNOWN LEAK: register() has no AbortSignal — underlying call keeps running past this cap. See AbortSignal-threading p3 in todo.md.
-  // Budget covers the compile sandbox's `DEFAULT_COMPILE_TIMEOUT_MS` (240s) plus boot + classifier overhead.
-  const REGISTER_TIMEOUT_MS = 300_000;
-  let timeoutHandle: NodeJS.Timeout | undefined;
-  try {
-    const result = await Promise.race([
-      deps.skillRunner.register({ branch, origin }),
-      new Promise<never>((_, reject) => {
-        timeoutHandle = setTimeout(
-          () => reject(new Error(`register exceeded ${REGISTER_TIMEOUT_MS}ms wall-clock cap`)),
-          REGISTER_TIMEOUT_MS,
-        );
-      }),
-    ]);
-    const hasErrors = result.errors && result.errors.length > 0;
-    const logLevel = result.status === "live" && !hasErrors ? "info" : "warn";
-    log[logLevel](
-      {
-        taskId: args.taskId,
-        branch,
-        status: result.status,
-        name: result.name,
-        ...(hasErrors && { errors: result.errors }),
-      },
-      "auto-register fired",
-    );
-    return { kind: "registered", branch, result };
-  } finally {
-    if (timeoutHandle) clearTimeout(timeoutHandle);
-  }
+  const result = await deps.skillRunner.register({
+    branch,
+    origin,
+    signal: AbortSignal.timeout(REGISTER_TIMEOUT_MS),
+  });
+  const hasErrors = result.errors && result.errors.length > 0;
+  const logLevel = result.status === "live" && !hasErrors ? "info" : "warn";
+  log[logLevel](
+    {
+      taskId: args.taskId,
+      branch,
+      status: result.status,
+      name: result.name,
+      ...(hasErrors && { errors: result.errors }),
+    },
+    "auto-register fired",
+  );
+  return { kind: "registered", branch, result };
 }
 
 export function createAutoRegisterSkillSubscriber(deps: AutoRegisterSkillDeps, inngest: Inngest) {

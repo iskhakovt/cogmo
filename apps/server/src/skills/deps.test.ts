@@ -341,6 +341,104 @@ describe("makeSandboxLockfileCompiler", () => {
     expect(sandbox.delete).not.toHaveBeenCalled();
   });
 
+  it("hands its signal to the exec", async () => {
+    const h = buildCompilerHarness(makeFakeExec);
+    const compiler = makeSandboxLockfileCompiler({
+      sandbox: h.sandbox,
+      image: "cogmo-skills:test",
+    });
+    const { signal } = new AbortController();
+
+    const promise = compiler.compile(["httpx==0.27.0"], { signal });
+    await new Promise((r) => setImmediate(r));
+    h.exec.waitResolve(0);
+    await promise;
+
+    expect(h.session.execStreaming).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.objectContaining({ signal }),
+    );
+  });
+
+  it("starts nothing once its signal has aborted", async () => {
+    const h = buildCompilerHarness(makeFakeExec);
+    // An exec that would finish at once, so a compile that starts anyway returns.
+    h.exec.waitResolve(0);
+    const compiler = makeSandboxLockfileCompiler({
+      sandbox: h.sandbox,
+      image: "cogmo-skills:test",
+    });
+
+    const result = await compiler.compile(["httpx==0.27.0"], {
+      signal: AbortSignal.abort(new Error("register deadline")),
+    });
+
+    expect(result).toEqual(err({ kind: "transport_failed", message: "register deadline" }));
+    expect(h.sandbox.ensureImagePresent).not.toHaveBeenCalled();
+    expect(h.sandbox.create).not.toHaveBeenCalled();
+  });
+
+  it("starts no session once its signal aborts during the image check", async () => {
+    const h = buildCompilerHarness(makeFakeExec);
+    h.exec.waitResolve(0);
+    const controller = new AbortController();
+    h.sandbox.ensureImagePresent.mockImplementation(async () => controller.abort());
+    const compiler = makeSandboxLockfileCompiler({
+      sandbox: h.sandbox,
+      image: "cogmo-skills:test",
+    });
+
+    const result = await compiler.compile(["httpx==0.27.0"], { signal: controller.signal });
+
+    expect(h.sandbox.create).not.toHaveBeenCalled();
+    expect(result.isErr()).toBe(true);
+  });
+
+  it("stops waiting for the image once its signal aborts", async () => {
+    const h = buildCompilerHarness(makeFakeExec);
+    // A pull or snapshot build that never finishes.
+    h.sandbox.ensureImagePresent.mockReturnValue(new Promise(() => {}));
+    const compiler = makeSandboxLockfileCompiler({
+      sandbox: h.sandbox,
+      image: "cogmo-skills:test",
+    });
+    const controller = new AbortController();
+
+    const promise = compiler.compile(["httpx==0.27.0"], { signal: controller.signal });
+    await new Promise((r) => setImmediate(r));
+    controller.abort(new Error("register deadline"));
+
+    expect(await promise).toEqual(err({ kind: "transport_failed", message: "register deadline" }));
+    expect(h.sandbox.create).not.toHaveBeenCalled();
+  });
+
+  it("waits for the exec's teardown before deleting its session", async () => {
+    const h = buildCompilerHarness(makeFakeExec);
+    const teardown = Promise.withResolvers<void>();
+    const order: string[] = [];
+    h.exec.handle.dispose = vi.fn(async () => {
+      await teardown.promise;
+      order.push("exec torn down");
+    });
+    h.sandbox.delete.mockImplementation(async () => {
+      order.push("session deleted");
+    });
+    const compiler = makeSandboxLockfileCompiler({
+      sandbox: h.sandbox,
+      image: "cogmo-skills:test",
+    });
+
+    const promise = compiler.compile(["httpx==0.27.0"]);
+    await new Promise((r) => setImmediate(r));
+    h.exec.waitReject(new Error("exec was disposed"));
+    await new Promise((r) => setImmediate(r));
+    expect(order).toEqual([]);
+    teardown.resolve();
+    await promise;
+
+    expect(order).toEqual(["exec torn down", "session deleted"]);
+  });
+
   it("captures a stream 'error' event as transport_failed (no unhandled exception)", async () => {
     const h = buildCompilerHarness(makeFakeExec);
     const compiler = makeSandboxLockfileCompiler({

@@ -10,6 +10,7 @@ function resources(steps: Partial<ServeResources> = {}): ServeResources {
     adapters: [channel("telegram", async () => {})],
     codingStreams: { close: vi.fn() },
     mcpRegistry: { stop: vi.fn(async () => {}) },
+    skills: { shutdown: vi.fn(async () => {}) },
     sandbox: { shutdown: vi.fn(async () => {}) },
     closeInstance: vi.fn(async () => {}),
     ...steps,
@@ -57,6 +58,7 @@ describe("shutdownServe", () => {
         adapters: [channel("telegram", step("telegram"))],
         codingStreams: { close: () => events.push("coding streams") },
         mcpRegistry: { stop: step("mcp") },
+        skills: { shutdown: step("skills") },
         sandbox: { shutdown: step("sandbox") },
         closeInstance: step("instance"),
       }),
@@ -71,6 +73,8 @@ describe("shutdownServe", () => {
       "coding streams",
       "mcp start",
       "mcp end",
+      "skills start",
+      "skills end",
       "sandbox start",
       "sandbox end",
       "instance start",
@@ -103,6 +107,7 @@ describe("shutdownServe", () => {
       { step: "web adapter", outcome: "done" },
       { step: "coding streams", outcome: "done" },
       { step: "mcp", outcome: "done" },
+      { step: "skills pool", outcome: "done" },
       { step: "sandbox", outcome: "done" },
       { step: "sandbox instance", outcome: "done" },
     ]);
@@ -146,16 +151,54 @@ describe("shutdownServe", () => {
   });
 
   it("reports a step that throws and runs the next", async () => {
-    const failure = new Error("daemon gone");
+    const failure = new Error("server gone");
     const closeInstance = vi.fn(async () => {});
 
     const outcomes = await shutdownServe(
-      resources({ sandbox: { shutdown: vi.fn().mockRejectedValue(failure) }, closeInstance }),
+      resources({ mcpRegistry: { stop: vi.fn().mockRejectedValue(failure) }, closeInstance }),
       BOUNDS,
     );
 
-    expect(outcomes).toContainEqual({ step: "sandbox", outcome: "failed", error: failure });
+    expect(outcomes).toContainEqual({ step: "mcp", outcome: "failed", error: failure });
     expect(closeInstance).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves the instance open when the skills pool overruns its bound", async () => {
+    vi.useFakeTimers();
+    const closeInstance = vi.fn(async () => {});
+
+    const shutdown = shutdownServe(
+      resources({ skills: { shutdown: never }, closeInstance }),
+      BOUNDS,
+    );
+    await vi.advanceTimersByTimeAsync(BOUNDS.stepMs);
+    const outcomes = await shutdown;
+
+    expect(closeInstance).not.toHaveBeenCalled();
+    expect(outcomes).toContainEqual({
+      step: "sandbox instance",
+      outcome: "skipped",
+      reason: expect.any(String),
+    });
+  });
+
+  it("leaves the instance open when the sandbox step fails", async () => {
+    const closeInstance = vi.fn(async () => {});
+
+    const outcomes = await shutdownServe(
+      resources({
+        sandbox: { shutdown: vi.fn().mockRejectedValue(new Error("daemon gone")) },
+        closeInstance,
+      }),
+      BOUNDS,
+    );
+
+    expect(closeInstance).not.toHaveBeenCalled();
+    expect(outcomes).toContainEqual({
+      step: "sandbox instance",
+      outcome: "skipped",
+      reason: expect.any(String),
+    });
   });
 
   it("skips the sandbox steps when there is no sandbox", async () => {
@@ -166,6 +209,7 @@ describe("shutdownServe", () => {
       "telegram adapter",
       "coding streams",
       "mcp",
+      "skills pool",
     ]);
   });
 });

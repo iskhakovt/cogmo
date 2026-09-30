@@ -5,7 +5,7 @@ import type { Transactor } from "../db/index.js";
 import { defaultSkillsImage } from "../env.js";
 import { logger } from "../logger.js";
 import type { SandboxClient } from "../sandbox/index.js";
-import { runGit, withGitAskpass } from "../secrets/git-askpass.js";
+import { type GitEnv, runGit, withGitAskpass } from "../secrets/git-askpass.js";
 import { DEFAULT_GITHUB_IDENTITY_NAME, resolveGitHubIdentity } from "../secrets/github.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { classifyManifest, STUB_CLASSIFIER_VERSION } from "./classifier.js";
@@ -87,6 +87,12 @@ export function mapManifestResourceLimits(resources: SkillManifest["resources"] 
 const log = logger.child({ component: "skills.runner" });
 
 const ZERO_SHA = "0000000000000000000000000000000000000000";
+
+/**
+ * Cap on the mirror push: pushing one ref takes seconds, and a minute rides
+ * out a slow link while still freeing the caller from a stalled connection.
+ */
+const MIRROR_PUSH_TIMEOUT_MS = 60_000;
 
 function rowToSummary(r: SkillRow): SkillSummary {
   return {
@@ -228,8 +234,22 @@ function deployRunAs(owner: SkillRunIdentity, origin: SkillDeployOrigin): SkillR
  * tool, and dynamic-tool registrar all depend on.
  */
 export interface SkillRunner {
-  /** `origin` decides who a schedule the request puts live runs as. */
-  register(opts: { branch: string; origin: SkillDeployOrigin }): Promise<RegisterResult>;
+  /**
+   * `origin` decides who a schedule the request puts live runs as.
+   *
+   * `signal` is checked at the start and just before the deploy transaction,
+   * and the lockfile compile honours it throughout. An abort seen by then
+   * stops the deploy: `register` rejects with the signal's reason, leaving
+   * main and the branch as they were. It is not a wall-clock cap: work that
+   * takes no signal (local git, the classifier, PyPI lookups) runs to its end
+   * first. Once the transaction has started, an abort only cuts the mirror
+   * push short.
+   */
+  register(opts: {
+    branch: string;
+    origin: SkillDeployOrigin;
+    signal?: AbortSignal;
+  }): Promise<RegisterResult>;
   /** A `user` origin is also recorded as the deploy's `approved_by`. */
   approveDeploy(opts: { pendingId: string; origin: SkillDeployOrigin }): Promise<RegisterResult>;
   denyDeploy(opts: { pendingId: string; reason?: string }): Promise<void>;
@@ -448,6 +468,16 @@ interface SkillSourceCacheEntry {
   lockfile?: SkillLockfileCacheValue;
 }
 
+/** A branch that passed every check `register` makes before its transaction. */
+interface PreparedRegister {
+  branchSha: string;
+  mainSha: string | null;
+  manifest: SkillManifest;
+  body: string;
+  classifierLog: ClassifierLog;
+  lockfile: { hash: string; contents: string } | null;
+}
+
 /** Build the cohesive cache value from a lockfile snapshot. */
 function buildLockfileCacheValue(snapshot: {
   hash: string;
@@ -475,26 +505,15 @@ export class SkillRunnerImpl implements SkillRunner {
   #lockfileCompiler: LockfileCompiler | undefined;
   #ctxHttp: SkillRunnerOptions["ctxHttp"];
   /**
-   * Lazily-created warm pool over `#sandbox`. Created on first tier-2
-   * invocation, not at boot — keeps cogmo serve startup independent of
-   * sandbox availability so an unreachable Daytona doesn't fail boot
-   * for deployments that may never invoke a tier-2 skill. Concurrent
-   * first-callers share `#poolPromise`; on init failure the promise
-   * clears so the next caller retries (no permanent poisoning from a
-   * transient Daytona blip).
+   * The tier-2 warm pool over `#sandbox`, created by the first tier-2 invoke
+   * rather than at boot, so boot doesn't depend on the sandbox. Concurrent
+   * first callers share `#poolPromise`; a failed start clears it, so the
+   * next invoke retries.
    */
   #pool: SysboxWorkerPool | undefined;
   #poolPromise: Promise<SysboxWorkerPool> | undefined;
   #poolOptions: SkillRunnerOptions["poolOptions"];
-  /**
-   * Set in `shutdown()` to block any subsequent `#ensurePool` from
-   * spinning up a new pool — without it, an `invoke()` racing in after
-   * shutdown completes would lazy-create a pool that no shutdown hook
-   * is left to dispose. Production wiring closes the runner on
-   * SIGTERM and the process exits, but the post-shutdown invoke is a
-   * real test surface and a real edge in any future graceful-restart
-   * path.
-   */
+  /** Set by `shutdown()`: no pool starts after it, since nothing would dispose it. */
   #disposed = false;
   #ajv: Ajv;
   /**
@@ -588,12 +607,14 @@ export class SkillRunnerImpl implements SkillRunner {
    * mode: the target lockfile was valid at deploy time, hashes are
    * still pinned, and a wheel yanked from PyPI since shouldn't block
    * the operator from rewinding to a known-good revision.
+   *
+   * Aborting `signal` stops the compile, which then errs as `transport_failed`.
    */
   async #readManifestLockfile(
     repoPath: string,
     gitSha: string,
     manifest: SkillManifest,
-    opts: { verifyFresh: boolean } = { verifyFresh: true },
+    opts: { verifyFresh: boolean; signal?: AbortSignal } = { verifyFresh: true },
   ): Promise<Result<{ hash: string; contents: string } | null, string>> {
     if (manifest.dependencies.length === 0) {
       return ok(null);
@@ -606,7 +627,9 @@ export class SkillRunnerImpl implements SkillRunner {
     }
 
     if (opts.verifyFresh && this.#lockfileCompiler) {
-      const compiled = await this.#lockfileCompiler.compile(manifest.dependencies);
+      const compiled = await this.#lockfileCompiler.compile(manifest.dependencies, {
+        ...(opts.signal && { signal: opts.signal }),
+      });
       if (compiled.isErr()) {
         return err(`requirements_lock_${compiled.error.kind}: ${compiled.error.message}`);
       }
@@ -631,7 +654,7 @@ export class SkillRunnerImpl implements SkillRunner {
    * first-callers behind one in-flight promise. On success the pool
    * is cached on `#pool` and the promise is cleared. On failure the
    * promise is cleared so the next caller retries — keeps a transient
-   * Daytona blip from poisoning the runner permanently.
+   * sandbox failure from poisoning the runner permanently.
    */
   async #ensurePool(): Promise<SysboxWorkerPool> {
     if (this.#disposed) {
@@ -666,14 +689,10 @@ export class SkillRunnerImpl implements SkillRunner {
   }
 
   /**
-   * Tear down the warm pool. Idempotent. Bootstrap callers wire this into
-   * graceful-shutdown when they add SIGTERM handling. Leaves tier-1 (Pyodide)
-   * untouched — those workers are short-lived per-call and self-clean.
-   *
-   * After `shutdown()` returns, any `invoke()` that hits the tier-2
-   * path throws `tier-2 pool requested after shutdown` — the
-   * `#disposed` flag short-circuits `#ensurePool` so a post-shutdown
-   * invoke can't lazy-create a fresh pool that nobody's left to clean up.
+   * Dispose the warm pool; `cogmo serve` calls this on exit. Waits for a pool
+   * start in flight and disposes what it produces; afterwards a tier-2 invoke
+   * throws `tier-2 pool requested after shutdown`. Idempotent. Tier-1 workers
+   * live for one call and need nothing here.
    */
   async shutdown(): Promise<void> {
     // Set `#disposed` before awaiting in-flight init so a racing
@@ -690,121 +709,21 @@ export class SkillRunnerImpl implements SkillRunner {
 
   // --- Deployment pipeline ---
 
-  async register(opts: { branch: string; origin: SkillDeployOrigin }): Promise<RegisterResult> {
+  async register(opts: {
+    branch: string;
+    origin: SkillDeployOrigin;
+    signal?: AbortSignal;
+  }): Promise<RegisterResult> {
     const repoPath = this.#requireRepoPath("register");
 
-    // Reject branch=main at the boundary. Without this guard, the register
-    // flow would (a) "fast-forward" main onto itself (no-op) and then
-    // (b) call `deleteRef("refs/heads/main")` in the same applyFilesystem
-    // step, which would drop the only authoritative ref. The deleteRef
-    // helper now refuses too (defense in depth), but rejecting at the entry
-    // gives a clear error before any git/DB work runs.
-    if (opts.branch === "main" || opts.branch === "refs/heads/main") {
-      return rejectedResult("", "invalid_branch: cannot register from 'main' itself");
-    }
-
-    let branchSha: string;
-    try {
-      branchSha = await revParse(repoPath, `refs/heads/${opts.branch}`);
-    } catch (e) {
-      if (e instanceof GitOpsError && e.code === "ref_not_found") {
-        return rejectedResult("", `branch_not_found: ${opts.branch}`);
-      }
-      throw e;
-    }
-
-    const mainSha = await getMainSha(repoPath);
-    // Fast-forward check: feature branch must descend from current main.
-    if (mainSha && !(await isAncestor(repoPath, mainSha, branchSha))) {
-      return rejectedResult(branchSha, "non_fast_forward: rebase branch onto main and retry");
-    }
-
-    let manifestSource: string;
-    let body: string;
-    try {
-      manifestSource = await gitShow(repoPath, branchSha, "SKILL.md");
-    } catch (e) {
-      if (e instanceof GitOpsError && e.code === "file_not_found") {
-        return rejectedResult(branchSha, "missing_skill_md: SKILL.md not found at branch tip");
-      }
-      throw e;
-    }
-    try {
-      body = await gitShow(repoPath, branchSha, "skill.py");
-    } catch (e) {
-      if (e instanceof GitOpsError && e.code === "file_not_found") {
-        return rejectedResult(branchSha, "missing_skill_py: skill.py not found at branch tip");
-      }
-      throw e;
-    }
-
-    const parsed = parseManifest(manifestSource);
-    if (!parsed.isOk()) {
-      const errors =
-        parsed.error.kind === "invalid_manifest" ? parsed.error.issues : [parsed.error.message];
-      return {
-        name: "",
-        riskTier: "notify",
-        status: "rejected",
-        gitSha: branchSha,
-        errors,
-      };
-    }
-    const manifest = parsed.value.manifest;
-
-    // Compile the manifest's JSON Schemas BEFORE any filesystem / DB write.
-    // Without this, an invalid `inputs` / `outputs` schema would only surface
-    // at first invoke — by which point `update-ref refs/heads/main` has
-    // already moved main + the skills row is committed. Running ajv up-front
-    // makes "schema parses" part of the deploy contract, alongside manifest
-    // YAML and effect declarations.
-    const schemaErrors = this.#prevalidateSchemas(manifest);
-    if (schemaErrors.length > 0) {
-      return {
-        name: manifest.name,
-        riskTier: "notify",
-        status: "rejected",
-        gitSha: branchSha,
-        errors: schemaErrors,
-      };
-    }
-
-    // Tier-1 bodies get the Pyodide-compatibility scan before anything is
-    // written. Its whole purpose is turning "imports fine, dies on first
-    // invoke" into a rejection here, which only holds if it actually runs
-    // on the register path.
-    if (manifest.tier === "wasm") {
-      const lint = lintWasmCompat(body);
-      if (lint.isErr()) {
-        return rejectedResult(
-          branchSha,
-          lint.error.map((e) => `line ${e.line}: ${e.reason}`).join("; "),
-        );
-      }
-    }
-
-    const classifierLog = await classifyManifest(manifest, body);
-    if (classifierLog.validation_errors.length > 0) {
-      // Undeclared dangerous effects → reject the deploy outright with
-      // the per-effect labels surfaced to the user. Don't even insert
-      // a `denied` deploy row: the AST path is a pre-flight, not a
-      // human approval, and storing a denied row for "manifest typo"
-      // pollutes the audit log meant for real approval-gate events.
-      return rejectedResult(branchSha, classifierLog.validation_errors.join("; "));
-    }
-
-    const lockfileResult = await this.#readManifestLockfile(repoPath, branchSha, manifest);
-    if (lockfileResult.isErr()) {
-      return rejectedResult(branchSha, lockfileResult.error);
-    }
-    const lockfile = lockfileResult.value;
-
-    if (manifest.tier === "wasm" && lockfile !== null) {
-      const compat = await checkPyodideCompat(parseLockfilePackageSpecs(lockfile.contents));
-      if (compat.isErr()) {
-        return rejectedResult(branchSha, formatPyodideCompatIssues(compat.error));
-      }
-    }
+    opts.signal?.throwIfAborted();
+    const prepared = await this.#prepareRegister(repoPath, opts.branch, opts.signal);
+    // The last point an abort stops the deploy: the transaction moves main.
+    // Checked ahead of the outcome, so an abort surfaces as itself, not as a
+    // rejection it caused.
+    opts.signal?.throwIfAborted();
+    if (prepared.isErr()) return prepared.error;
+    const { branchSha, mainSha, manifest, body, classifierLog, lockfile } = prepared.value;
 
     const schedule = manifest.schedule ?? null;
     const result = await this.#runInTx((tx) =>
@@ -832,7 +751,7 @@ export class SkillRunnerImpl implements SkillRunner {
     // coding task cloning from origin sees the just-registered skill. Best-
     // effort — local state is authoritative.
     if (result.kind === "live") {
-      await this.#mirrorMainToRemote(branchSha);
+      await this.#mirrorMainToRemote(branchSha, { ...(opts.signal && { signal: opts.signal }) });
     }
 
     return this.#registerResultToRpc({
@@ -844,6 +763,137 @@ export class SkillRunnerImpl implements SkillRunner {
       body,
       lockfile,
     });
+  }
+
+  /**
+   * Every check `register` makes before its transaction: the branch, its
+   * manifest and body, the classifier, the lockfile, Pyodide compatibility.
+   * Errs with the rejection `register` returns.
+   */
+  async #prepareRegister(
+    repoPath: string,
+    branch: string,
+    signal: AbortSignal | undefined,
+  ): Promise<Result<PreparedRegister, RegisterResult>> {
+    // Reject branch=main at the boundary. Without this guard, the register
+    // flow would (a) "fast-forward" main onto itself (no-op) and then
+    // (b) call `deleteRef("refs/heads/main")` in the same applyFilesystem
+    // step, which would drop the only authoritative ref. The deleteRef
+    // helper now refuses too (defense in depth), but rejecting at the entry
+    // gives a clear error before any git/DB work runs.
+    if (branch === "main" || branch === "refs/heads/main") {
+      return err(rejectedResult("", "invalid_branch: cannot register from 'main' itself"));
+    }
+
+    let branchSha: string;
+    try {
+      branchSha = await revParse(repoPath, `refs/heads/${branch}`);
+    } catch (e) {
+      if (e instanceof GitOpsError && e.code === "ref_not_found") {
+        return err(rejectedResult("", `branch_not_found: ${branch}`));
+      }
+      throw e;
+    }
+
+    const mainSha = await getMainSha(repoPath);
+    // Fast-forward check: feature branch must descend from current main.
+    if (mainSha && !(await isAncestor(repoPath, mainSha, branchSha))) {
+      return err(rejectedResult(branchSha, "non_fast_forward: rebase branch onto main and retry"));
+    }
+
+    let manifestSource: string;
+    let body: string;
+    try {
+      manifestSource = await gitShow(repoPath, branchSha, "SKILL.md");
+    } catch (e) {
+      if (e instanceof GitOpsError && e.code === "file_not_found") {
+        return err(rejectedResult(branchSha, "missing_skill_md: SKILL.md not found at branch tip"));
+      }
+      throw e;
+    }
+    try {
+      body = await gitShow(repoPath, branchSha, "skill.py");
+    } catch (e) {
+      if (e instanceof GitOpsError && e.code === "file_not_found") {
+        return err(rejectedResult(branchSha, "missing_skill_py: skill.py not found at branch tip"));
+      }
+      throw e;
+    }
+
+    const parsed = parseManifest(manifestSource);
+    if (!parsed.isOk()) {
+      const errors =
+        parsed.error.kind === "invalid_manifest" ? parsed.error.issues : [parsed.error.message];
+      return err({
+        name: "",
+        riskTier: "notify",
+        status: "rejected",
+        gitSha: branchSha,
+        errors,
+      });
+    }
+    const manifest = parsed.value.manifest;
+
+    // Compile the manifest's JSON Schemas BEFORE any filesystem / DB write.
+    // Without this, an invalid `inputs` / `outputs` schema would only surface
+    // at first invoke — by which point `update-ref refs/heads/main` has
+    // already moved main + the skills row is committed. Running ajv up-front
+    // makes "schema parses" part of the deploy contract, alongside manifest
+    // YAML and effect declarations.
+    const schemaErrors = this.#prevalidateSchemas(manifest);
+    if (schemaErrors.length > 0) {
+      return err({
+        name: manifest.name,
+        riskTier: "notify",
+        status: "rejected",
+        gitSha: branchSha,
+        errors: schemaErrors,
+      });
+    }
+
+    // Tier-1 bodies get the Pyodide-compatibility scan before anything is
+    // written. Its whole purpose is turning "imports fine, dies on first
+    // invoke" into a rejection here, which only holds if it actually runs
+    // on the register path.
+    if (manifest.tier === "wasm") {
+      const lint = lintWasmCompat(body);
+      if (lint.isErr()) {
+        return err(
+          rejectedResult(
+            branchSha,
+            lint.error.map((e) => `line ${e.line}: ${e.reason}`).join("; "),
+          ),
+        );
+      }
+    }
+
+    const classifierLog = await classifyManifest(manifest, body);
+    if (classifierLog.validation_errors.length > 0) {
+      // Undeclared dangerous effects → reject the deploy outright with
+      // the per-effect labels surfaced to the user. Don't even insert
+      // a `denied` deploy row: the AST path is a pre-flight, not a
+      // human approval, and storing a denied row for "manifest typo"
+      // pollutes the audit log meant for real approval-gate events.
+      return err(rejectedResult(branchSha, classifierLog.validation_errors.join("; ")));
+    }
+
+    const lockfileResult = await this.#readManifestLockfile(repoPath, branchSha, manifest, {
+      verifyFresh: true,
+      ...(signal && { signal }),
+    });
+    if (lockfileResult.isErr()) {
+      return err(rejectedResult(branchSha, lockfileResult.error));
+    }
+    const lockfile = lockfileResult.value;
+
+    if (manifest.tier === "wasm" && lockfile !== null) {
+      const compat = await checkPyodideCompat(parseLockfilePackageSpecs(lockfile.contents));
+      if (compat.isErr()) {
+        return err(rejectedResult(branchSha, formatPyodideCompatIssues(compat.error)));
+      }
+    }
+
+    return ok({ branchSha, mainSha, manifest, body, classifierLog, lockfile });
   }
 
   async approveDeploy(opts: {
@@ -1642,10 +1692,13 @@ export class SkillRunnerImpl implements SkillRunner {
    * main. `force` is opt-in for `rollback` (which intentionally rewrites
    * history); register/approve use fast-forward push which fails clearly
    * if the remote has somehow drifted.
+   *
+   * The push gives up after `MIRROR_PUSH_TIMEOUT_MS`, or once `signal`
+   * aborts: git is killed, and the push fails like any other.
    */
   async #mirrorMainToRemote(
     newSha: string,
-    options?: { force: { expectedRemoteSha: string } },
+    options?: { force?: { expectedRemoteSha: string }; signal?: AbortSignal },
   ): Promise<void> {
     const repoPath = this.#requireRepoPath("mirrorMainToRemote");
 
@@ -1675,12 +1728,13 @@ export class SkillRunnerImpl implements SkillRunner {
     }
     args.push(remoteUrl, `${newSha}:refs/heads/main`);
 
+    const signal = AbortSignal.any([
+      AbortSignal.timeout(MIRROR_PUSH_TIMEOUT_MS),
+      ...(options?.signal ? [options.signal] : []),
+    ]);
+    const push = (env?: GitEnv) => runGit(args, env, { signal });
     try {
-      if (pat) {
-        await withGitAskpass(pat, (env) => runGit(args, env));
-      } else {
-        await runGit(args);
-      }
+      await (pat ? withGitAskpass(pat, push) : push());
       log.info({ newSha, remoteUrl }, "mirrored skills main to remote");
     } catch (e) {
       log.warn(
