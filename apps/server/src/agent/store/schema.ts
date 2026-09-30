@@ -15,6 +15,7 @@ import {
 import { z } from "zod";
 import { jsonbZod, pk, ts } from "../../db/helpers.js";
 import { CacheDialectSchema } from "../../llm/cache-dialect.js";
+import { PrefixMismatchBehaviorSchema } from "../../llm/prefix-mismatch-behavior.js";
 import { MessageContentSchema } from "../../llm/types.js";
 import { secrets } from "../../secrets/store/schema.js";
 import { EvolutionEventPayloadSchema } from "../evolution/event-schema.js";
@@ -181,16 +182,19 @@ export type SttProviderTypeValue = (typeof sttProviderType.enumValues)[number];
 // --- JSONB shapes ---
 
 /**
- * `llm_providers.attrs` — adapter-specific knobs, all for OpenAI-compatible
- * rows. `cacheDialect` says which caching and routing hints the endpoint takes
- * for a cache intent; absent reads as `none`, and Anthropic rows never carry
- * it. `headers` sets extra default headers on the OpenAI SDK client (e.g.
- * `HTTP-Referer` for OpenRouter usage attribution). Unknown keys are dropped
- * on read, so a stray key never fails a provider lookup.
+ * `llm_providers.attrs` — adapter-specific knobs. `cacheDialect` says which
+ * caching and routing hints an OpenAI-compatible endpoint takes for a cache
+ * intent; absent reads as `none`, and Anthropic rows never carry it.
+ * `headers` sets extra default headers on the OpenAI SDK client (e.g.
+ * `HTTP-Referer` for OpenRouter usage attribution). `prefixMismatchBehavior`,
+ * on an Anthropic row, is what the API does with a replayed thinking block
+ * whose prefix changed; absent keeps the account's default. Unknown keys are
+ * dropped on read, so a stray key never fails a provider lookup.
  */
 export const ProviderAttrsSchema = z.object({
   cacheDialect: CacheDialectSchema.optional(),
   headers: z.record(z.string(), z.string()).optional(),
+  prefixMismatchBehavior: PrefixMismatchBehaviorSchema.optional(),
 });
 export type ProviderAttrs = z.infer<typeof ProviderAttrsSchema>;
 

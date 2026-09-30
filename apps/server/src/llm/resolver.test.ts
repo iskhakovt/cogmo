@@ -170,6 +170,71 @@ describe("createDbProviderResolver — happy path", () => {
     });
   });
 
+  describe("an anthropic row's binding controls", () => {
+    /** Send one chat to Opus 5.5 through the resolved provider; return what went out. */
+    async function sendThrough(overrides: Partial<ProviderRow>): Promise<Request> {
+      const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
+        async () =>
+          new Response(
+            JSON.stringify({
+              id: "msg-1",
+              type: "message",
+              role: "assistant",
+              model: "claude-opus-5-5",
+              content: [{ type: "text", text: "ok" }],
+              stop_reason: "end_turn",
+              usage: { input_tokens: 1, output_tokens: 1 },
+            }),
+            { headers: { "content-type": "application/json" } },
+          ),
+      );
+      try {
+        const { agentStore, secretsStore } = makeDeps({ rows: [row(overrides)] });
+        const resolve = createDbProviderResolver({
+          runInTx: fakeRunInTx,
+          agentStore,
+          secretsStore,
+        });
+        const { provider } = await resolve("claude-opus-5-5");
+        await provider.chat({
+          model: "claude-opus-5-5",
+          system: "sys",
+          messages: [{ role: "user", content: "hi" }],
+        });
+        const [input, init] = expectDefined(fetchSpy.mock.calls[0], "fetch call");
+        return new Request(input, init);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    }
+
+    it("sends the row's prefixMismatchBehavior as block_binding, with the header", async () => {
+      const request = await sendThrough({ attrs: { prefixMismatchBehavior: "drop_block" } });
+
+      expect(await request.json()).toMatchObject({
+        thinking: { type: "adaptive", block_binding: { prefix_mismatch_behavior: "drop_block" } },
+      });
+      expect(request.headers.get("anthropic-beta")).toBe("thinking-binding-controls-2026-08-01");
+    });
+
+    it("sends the header and no thinking parameter when the row sets no behaviour", async () => {
+      const request = await sendThrough({});
+
+      expect(await request.json()).not.toHaveProperty("thinking");
+      expect(request.headers.get("anthropic-beta")).toBe("thinking-binding-controls-2026-08-01");
+    });
+
+    it("sends a third-party base URL neither", async () => {
+      const request = await sendThrough({
+        baseUrl: "https://openrouter.ai/api",
+        attrs: { prefixMismatchBehavior: "drop_block" },
+      });
+
+      expect(await request.json()).not.toHaveProperty("thinking");
+      expect(request.headers.get("anthropic-beta")).toBeNull();
+    });
+  });
+
   it("multi-row chains expose a composite name", async () => {
     const { agentStore, secretsStore } = makeDeps({
       rows: [

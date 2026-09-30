@@ -27,4 +27,14 @@ describe("ProviderAttrsSchema", () => {
   it("rejects a dialect it doesn't know", () => {
     expect(() => ProviderAttrsSchema.parse({ cacheDialect: "anthropic" })).toThrow();
   });
+
+  it.each(["drop_block", "error"])("accepts the %s prefix mismatch behaviour", (behavior) => {
+    expect(ProviderAttrsSchema.parse({ prefixMismatchBehavior: behavior })).toEqual({
+      prefixMismatchBehavior: behavior,
+    });
+  });
+
+  it("rejects a prefix mismatch behaviour the API doesn't take", () => {
+    expect(() => ProviderAttrsSchema.parse({ prefixMismatchBehavior: "drop" })).toThrow();
+  });
 });
