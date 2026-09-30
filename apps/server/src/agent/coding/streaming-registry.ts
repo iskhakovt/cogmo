@@ -33,6 +33,15 @@ export type CodingStreamEvent =
 
 type CodingStreamListener = (event: CodingStreamEvent) => void | Promise<void>;
 
+export interface CodingStreamingRegistryOptions {
+  /** Which of `taskIds` have ended: a terminal status, or no row. See `findEndedCodingTasks`. */
+  endedTasks: (taskIds: ReadonlyArray<string>) => Promise<ReadonlySet<string>>;
+  /** How often the registry asks `endedTasks` about the tasks it holds. */
+  sweepIntervalMs: number;
+  /** Test seam — replace the timer. Defaults to an unref'd `setInterval`. */
+  setInterval?: (tick: () => Promise<void>, ms: number) => void;
+}
+
 interface TaskStream {
   readonly listeners: Set<CodingStreamListener>;
   /** The previous sweep found the task ended. */
@@ -63,9 +72,10 @@ interface TaskStream {
  *   carries the reason, so it doesn't end the stream.
  * - A task can end without its stream ending: cancelled or revised at the
  *   plan gate, failed before a stream opened, or failed by reconcile after
- *   its worker died. `sweep` releases a task the database reports ended at
- *   two consecutive sweeps; the second is the grace an orchestrator's final
- *   event gets after its status write.
+ *   its worker died. The registry sweeps on its own timer, in the process
+ *   that holds the streams, and releases a task the database reports ended
+ *   at two consecutive sweeps; the second is the grace an orchestrator's
+ *   final event gets after its status write.
  *
  * A task awaiting approval keeps its stream, so the execute phase edits the
  * message the plan went to. Admission caps non-terminal tasks per repo,
@@ -79,6 +89,18 @@ interface TaskStream {
  */
 export class CodingStreamingRegistry {
   readonly #streams = new Map<string, TaskStream>();
+  readonly #endedTasks: CodingStreamingRegistryOptions["endedTasks"];
+
+  constructor(opts: CodingStreamingRegistryOptions) {
+    this.#endedTasks = opts.endedTasks;
+    const schedule =
+      opts.setInterval ??
+      ((tick: () => Promise<void>, ms: number): void => {
+        // The sweep holds nothing that needs closing, so it never keeps the process alive.
+        setInterval(() => void tick(), ms).unref();
+      });
+    schedule(() => this.#sweep(), opts.sweepIntervalMs);
+  }
 
   /** The plan orchestrator's handle for `taskId`. */
   planStream(taskId: string): PlanStreamHandle {
@@ -127,17 +149,21 @@ export class CodingStreamingRegistry {
     stream.listeners.add(listener);
   }
 
-  /** The tasks the registry holds — what a sweep asks the database about. */
-  taskIds(): ReadonlyArray<string> {
-    return [...this.#streams.keys()];
-  }
-
   /**
-   * Release every task in `ended`, the held tasks the database reports
-   * terminal or gone, that the previous sweep also found ended. Returns how
-   * many were released.
+   * Ask the database which held tasks have ended, and release those the
+   * previous sweep also found ended. A failed lookup changes nothing; the
+   * next sweep asks again.
    */
-  sweep(ended: ReadonlySet<string>): number {
+  async #sweep(): Promise<void> {
+    const held = [...this.#streams.keys()];
+    if (held.length === 0) return;
+    let ended: ReadonlySet<string>;
+    try {
+      ended = await this.#endedTasks(held);
+    } catch (err) {
+      log.warn({ err, held: held.length }, "coding stream sweep failed");
+      return;
+    }
     let released = 0;
     for (const taskId of ended) {
       const stream = this.#streams.get(taskId);
@@ -149,7 +175,7 @@ export class CodingStreamingRegistry {
         stream.endedAtLastSweep = true;
       }
     }
-    return released;
+    if (released > 0) log.info({ released }, "released the streams of ended coding tasks");
   }
 
   #publish(taskId: string, event: CodingStreamEvent): void {

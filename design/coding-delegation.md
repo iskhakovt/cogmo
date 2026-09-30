@@ -688,7 +688,9 @@ The registry holds a task only while something is subscribed to it, and the task
 | `failed` | Delivers it, then releases the task. |
 | `execute_complete`, success | Delivers it, then releases the task. Verify streams its output after this, and nothing renders it. |
 | `execute_complete`, failure | Delivers it. The `failed` that follows carries the reason and ends the stream. |
-| No event: Revise or Cancel at the plan gate, a failure before the stream opened, reconcile | `coding-stream-sweep` (every ten minutes) releases a task the database reports terminal or gone at two consecutive sweeps. The second sweep is the grace the orchestrator's final event gets after its status write. |
+| No event: Revise or Cancel at the plan gate, a failure before the stream opened, reconcile | The registry's own sweep releases a task the database reports terminal or gone (`findEndedCodingTasks`) at two consecutive sweeps. The second sweep is the grace the orchestrator's final event gets after its status write. |
+
+The sweep runs every ten minutes on an unref'd interval the registry starts when it is constructed. It runs in the process that holds the streams, which an Inngest cron can't guarantee once two processes overlap in a rolling deploy. A sweep holding nothing skips the database. A failed lookup is logged, and the next sweep asks again. Shutdown doesn't stop the timer, because an unref'd interval holding nothing to close can't keep the process alive.
 
 A task awaiting approval keeps its stream, so the execute phase edits the message the plan went to. Admission caps non-terminal tasks per repo, which bounds what the registry holds. Events aren't replayed: a subscriber sees what is published after it subscribes. A listener that throws or rejects is logged, and its siblings still get the event. The registry never awaits a listener, so one that hangs holds neither the orchestrator nor the task. A process restart loses every subscriber: the task runs on, and its message stops updating.
 

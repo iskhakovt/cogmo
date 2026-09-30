@@ -48,7 +48,12 @@ function start(args?: { editIntervalMs?: number }): {
   execute: ExecuteStreamHandle;
   bot: FakeBotState;
 } {
-  const registry = new CodingStreamingRegistry();
+  // The sweep never runs: these tests end streams through events.
+  const registry = new CodingStreamingRegistry({
+    endedTasks: async () => new Set(),
+    sweepIntervalMs: 60_000,
+    setInterval: () => {},
+  });
   const bot = fakeBot();
   startCodingProgressSubscriber({
     taskId: TASK_ID,

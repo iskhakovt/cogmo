@@ -1,5 +1,41 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, type Mock, vi } from "vitest";
+import { expectDefined } from "../../test/assertions.js";
 import { type CodingStreamEvent, CodingStreamingRegistry } from "./streaming-registry.js";
+
+const SWEEP_INTERVAL_MS = 60_000;
+
+type EndedTasks = (taskIds: ReadonlyArray<string>) => Promise<ReadonlySet<string>>;
+
+interface Harness {
+  reg: CodingStreamingRegistry;
+  /** The database lookup the registry sweeps with. Reports nothing ended unless a test says so. */
+  endedTasks: Mock<EndedTasks>;
+  /** Run one sweep, as the registry's timer would. */
+  sweep: () => Promise<void>;
+}
+
+function harness(): Harness {
+  const endedTasks = vi.fn<EndedTasks>(async () => new Set());
+  let tick: (() => Promise<void>) | undefined;
+  const reg = new CodingStreamingRegistry({
+    endedTasks,
+    sweepIntervalMs: SWEEP_INTERVAL_MS,
+    setInterval: (cb) => {
+      tick = cb;
+    },
+  });
+  return { reg, endedTasks, sweep: () => expectDefined(tick, "sweep timer")() };
+}
+
+/**
+ * The tasks the registry holds: what a sweep asks the database about. The
+ * probe's sweep reports nothing ended, so it releases nothing.
+ */
+async function held(h: Harness): Promise<ReadonlyArray<string>> {
+  h.endedTasks.mockClear();
+  await h.sweep();
+  return h.endedTasks.mock.calls[0]?.[0] ?? [];
+}
 
 function collect(reg: CodingStreamingRegistry, taskId: string): CodingStreamEvent[] {
   const seen: CodingStreamEvent[] = [];
@@ -12,7 +48,7 @@ function collect(reg: CodingStreamingRegistry, taskId: string): CodingStreamEven
 describe("CodingStreamingRegistry", () => {
   describe("handles", () => {
     it("the plan handle publishes text, the finalized plan and a failure", async () => {
-      const reg = new CodingStreamingRegistry();
+      const { reg } = harness();
       const seen = collect(reg, "t1");
       const plan = reg.planStream("t1");
 
@@ -30,7 +66,7 @@ describe("CodingStreamingRegistry", () => {
     });
 
     it("the execute handle publishes progress, then completion", async () => {
-      const reg = new CodingStreamingRegistry();
+      const { reg } = harness();
       const seen = collect(reg, "t1");
       const execute = reg.executeStream("t1");
 
@@ -53,7 +89,7 @@ describe("CodingStreamingRegistry", () => {
   });
 
   it("delivers events to every subscriber of the task, in publish order", async () => {
-    const reg = new CodingStreamingRegistry();
+    const { reg } = harness();
     const a = collect(reg, "t1");
     const b = collect(reg, "t1");
     const other = collect(reg, "t2");
@@ -72,7 +108,7 @@ describe("CodingStreamingRegistry", () => {
   });
 
   it("does not replay events published before a subscriber arrived", async () => {
-    const reg = new CodingStreamingRegistry();
+    const { reg } = harness();
     collect(reg, "t1");
     const plan = reg.planStream("t1");
     await plan.appendText("missed");
@@ -85,127 +121,167 @@ describe("CodingStreamingRegistry", () => {
 
   describe("lifecycle", () => {
     it("holds nothing for a task published to with no subscriber", async () => {
-      const reg = new CodingStreamingRegistry();
-      const plan = reg.planStream("t1");
+      const h = harness();
+      const plan = h.reg.planStream("t1");
 
       await plan.appendText("x".repeat(10_000));
       await plan.finalize("the plan");
 
-      expect(reg.taskIds()).toEqual([]);
+      expect(await held(h)).toEqual([]);
+      expect(h.endedTasks).not.toHaveBeenCalled();
     });
 
     it("holds a subscribed task across the plan gate", async () => {
-      const reg = new CodingStreamingRegistry();
-      const seen = collect(reg, "t1");
+      const h = harness();
+      const seen = collect(h.reg, "t1");
 
-      await reg.planStream("t1").finalize("the plan");
-      await reg.executeStream("t1").started?.();
+      await h.reg.planStream("t1").finalize("the plan");
+      await h.reg.executeStream("t1").started?.();
 
-      expect(reg.taskIds()).toEqual(["t1"]);
+      expect(await held(h)).toEqual(["t1"]);
       expect(seen.map((e) => e.kind)).toEqual(["plan_finalized", "execute_started"]);
     });
 
     it("releases a task once its stream fails", async () => {
-      const reg = new CodingStreamingRegistry();
-      const seen = collect(reg, "t1");
+      const h = harness();
+      const seen = collect(h.reg, "t1");
 
-      await reg.planStream("t1").fail("claude exit code 2");
+      await h.reg.planStream("t1").fail("claude exit code 2");
 
       expect(seen).toEqual([{ kind: "failed", reason: "claude exit code 2" }]);
-      expect(reg.taskIds()).toEqual([]);
+      expect(await held(h)).toEqual([]);
     });
 
     it("releases a task once execute reports success", async () => {
-      const reg = new CodingStreamingRegistry();
-      const seen = collect(reg, "t1");
+      const h = harness();
+      const seen = collect(h.reg, "t1");
 
-      await reg.executeStream("t1").complete(true);
+      await h.reg.executeStream("t1").complete(true);
 
       expect(seen).toEqual([{ kind: "execute_complete", ok: true }]);
-      expect(reg.taskIds()).toEqual([]);
+      expect(await held(h)).toEqual([]);
     });
 
     it("keeps a failed execute's stream open for the failure that follows", async () => {
-      const reg = new CodingStreamingRegistry();
-      const seen = collect(reg, "t1");
-      const execute = reg.executeStream("t1");
+      const h = harness();
+      const seen = collect(h.reg, "t1");
+      const execute = h.reg.executeStream("t1");
 
       await execute.complete(false);
-      expect(reg.taskIds()).toEqual(["t1"]);
+      expect(await held(h)).toEqual(["t1"]);
 
       await execute.fail("claude exit code 1");
       expect(seen).toEqual([
         { kind: "execute_complete", ok: false },
         { kind: "failed", reason: "claude exit code 1" },
       ]);
-      expect(reg.taskIds()).toEqual([]);
+      expect(await held(h)).toEqual([]);
     });
 
     it("drops a publish after the stream ended instead of re-creating the task", async () => {
       // The verify orchestrator streams its test output after execute has
       // ended the stream; a retried step body publishes again.
-      const reg = new CodingStreamingRegistry();
-      const seen = collect(reg, "t1");
-      const execute = reg.executeStream("t1");
+      const h = harness();
+      const seen = collect(h.reg, "t1");
+      const execute = h.reg.executeStream("t1");
       await execute.complete(true);
 
       await execute.appendText("verify output");
       await execute.fail("verify failed (exit 1)");
 
       expect(seen).toEqual([{ kind: "execute_complete", ok: true }]);
-      expect(reg.taskIds()).toEqual([]);
+      expect(await held(h)).toEqual([]);
     });
   });
 
   describe("sweep", () => {
     it("releases a task the database reports ended at two consecutive sweeps", async () => {
-      const reg = new CodingStreamingRegistry();
-      const seen = collect(reg, "t1");
+      const h = harness();
+      const seen = collect(h.reg, "t1");
+      h.endedTasks.mockResolvedValue(new Set(["t1"]));
 
-      expect(reg.sweep(new Set(["t1"]))).toBe(0);
-      expect(reg.taskIds()).toEqual(["t1"]);
+      await h.sweep();
+      expect(h.endedTasks).toHaveBeenLastCalledWith(["t1"]);
+      await h.sweep();
+      expect(h.endedTasks).toHaveBeenCalledTimes(2);
 
-      expect(reg.sweep(new Set(["t1"]))).toBe(1);
-      expect(reg.taskIds()).toEqual([]);
-
-      await reg.executeStream("t1").started?.();
+      await h.sweep();
+      expect(h.endedTasks).toHaveBeenCalledTimes(2);
+      await h.reg.executeStream("t1").started?.();
       expect(seen).toEqual([]);
     });
 
     it("leaves the final event in flight after a status write to reach the subscriber", async () => {
-      const reg = new CodingStreamingRegistry();
-      const seen = collect(reg, "t1");
+      const h = harness();
+      const seen = collect(h.reg, "t1");
+      h.endedTasks.mockResolvedValue(new Set(["t1"]));
 
-      reg.sweep(new Set(["t1"]));
-      await reg.planStream("t1").fail("claude exit code 2");
+      await h.sweep();
+      await h.reg.planStream("t1").fail("claude exit code 2");
 
       expect(seen).toEqual([{ kind: "failed", reason: "claude exit code 2" }]);
-      expect(reg.taskIds()).toEqual([]);
+      h.endedTasks.mockResolvedValue(new Set());
+      expect(await held(h)).toEqual([]);
     });
 
-    it("keeps a task the database reports live", () => {
-      const reg = new CodingStreamingRegistry();
-      collect(reg, "live");
-      collect(reg, "ended");
+    it("keeps a task the database reports live", async () => {
+      const h = harness();
+      collect(h.reg, "live");
+      collect(h.reg, "ended");
+      h.endedTasks.mockResolvedValue(new Set(["ended"]));
 
-      reg.sweep(new Set(["ended"]));
-      reg.sweep(new Set(["ended"]));
+      await h.sweep();
+      await h.sweep();
 
-      expect(reg.taskIds()).toEqual(["live"]);
+      h.endedTasks.mockResolvedValue(new Set());
+      expect(await held(h)).toEqual(["live"]);
     });
 
-    it("ignores a task it doesn't hold", () => {
-      const reg = new CodingStreamingRegistry();
+    it("a failed sweep releases nothing, and the next one asks again", async () => {
+      const h = harness();
+      collect(h.reg, "t1");
+      h.endedTasks.mockRejectedValueOnce(new Error("connection reset"));
+      h.endedTasks.mockResolvedValue(new Set(["t1"]));
 
-      expect(reg.sweep(new Set(["never-subscribed"]))).toBe(0);
-      expect(reg.sweep(new Set(["never-subscribed"]))).toBe(0);
-      expect(reg.taskIds()).toEqual([]);
+      await expect(h.sweep()).resolves.toBeUndefined();
+      await h.sweep();
+      expect(h.endedTasks).toHaveBeenCalledTimes(2);
+
+      await h.sweep();
+      h.endedTasks.mockResolvedValue(new Set());
+      expect(await held(h)).toEqual([]);
+    });
+
+    describe("on its own timer", () => {
+      afterEach(() => {
+        vi.useRealTimers();
+      });
+
+      it("sweeps every interval, and carries on after a failed sweep", async () => {
+        vi.useFakeTimers();
+        const endedTasks = vi.fn<EndedTasks>(async () => new Set(["t1"]));
+        endedTasks.mockRejectedValueOnce(new Error("connection reset"));
+        const reg = new CodingStreamingRegistry({ endedTasks, sweepIntervalMs: SWEEP_INTERVAL_MS });
+        const seen = collect(reg, "t1");
+
+        await vi.advanceTimersByTimeAsync(SWEEP_INTERVAL_MS - 1);
+        expect(endedTasks).not.toHaveBeenCalled();
+
+        // Fails, then finds the task ended twice.
+        await vi.advanceTimersByTimeAsync(3 * SWEEP_INTERVAL_MS);
+        expect(endedTasks).toHaveBeenCalledTimes(3);
+
+        await vi.advanceTimersByTimeAsync(SWEEP_INTERVAL_MS);
+        expect(endedTasks).toHaveBeenCalledTimes(3);
+        await reg.executeStream("t1").started?.();
+        expect(seen).toEqual([]);
+      });
     });
   });
 
   describe("isolation", () => {
     it("a throwing subscriber reaches neither the publisher nor its siblings", async () => {
-      const reg = new CodingStreamingRegistry();
+      const { reg } = harness();
       reg.subscribe("t1", () => {
         throw new Error("boom");
       });
@@ -217,7 +293,7 @@ describe("CodingStreamingRegistry", () => {
 
     it("a rejecting subscriber reaches neither the publisher nor its siblings", async () => {
       // An unhandled rejection fails the run, so the registry must catch it.
-      const reg = new CodingStreamingRegistry();
+      const { reg } = harness();
       reg.subscribe("t1", async () => {
         throw new Error("async boom");
       });
@@ -229,14 +305,14 @@ describe("CodingStreamingRegistry", () => {
     });
 
     it("a subscriber that never settles holds neither the publisher nor the task", async () => {
-      const reg = new CodingStreamingRegistry();
-      reg.subscribe("t1", () => new Promise<void>(() => {}));
-      const execute = reg.executeStream("t1");
+      const h = harness();
+      h.reg.subscribe("t1", () => new Promise<void>(() => {}));
+      const execute = h.reg.executeStream("t1");
 
       await execute.appendText("x");
       await execute.fail("boom");
 
-      expect(reg.taskIds()).toEqual([]);
+      expect(await held(h)).toEqual([]);
     });
   });
 
@@ -244,7 +320,7 @@ describe("CodingStreamingRegistry", () => {
     it("delivers a high-volume burst to multiple subscribers in identical order", async () => {
       // A regression that introduced async dispatch, listener reordering,
       // or per-subscriber buffering would surface as diverging arrays.
-      const reg = new CodingStreamingRegistry();
+      const { reg } = harness();
       const a = collect(reg, "t1");
       const b = collect(reg, "t1");
       const c = collect(reg, "t1");
@@ -265,7 +341,7 @@ describe("CodingStreamingRegistry", () => {
     it("subscribers added during a publish do NOT fire for the current event (listener-set snapshot semantics)", async () => {
       // A listener that subscribes a sibling mid-emit must not cause that
       // sibling to fire for the in-flight event — only for later ones.
-      const reg = new CodingStreamingRegistry();
+      const { reg } = harness();
       const late: CodingStreamEvent[] = [];
       reg.subscribe("t1", (e) => {
         if (e.kind === "text" && e.delta === "first") {
@@ -283,18 +359,18 @@ describe("CodingStreamingRegistry", () => {
       expect(late).toEqual([{ kind: "text", delta: "second" }]);
     });
 
-    it("the event that ends a stream reaches every subscriber, though the task is released first", async () => {
-      const reg = new CodingStreamingRegistry();
-      const heldDuringDelivery: ReadonlyArray<string>[] = [];
+    it("the event that ends a stream reaches every subscriber, and nothing published during its delivery follows it", async () => {
+      // The task is released before delivery, so a publish from inside a
+      // listener is dropped.
+      const { reg } = harness();
       reg.subscribe("t1", () => {
-        heldDuringDelivery.push(reg.taskIds());
+        void reg.executeStream("t1").appendText("after the end");
       });
       const a = collect(reg, "t1");
       const b = collect(reg, "t1");
 
       await reg.executeStream("t1").fail("boom");
 
-      expect(heldDuringDelivery).toEqual([[]]);
       expect(a).toEqual([{ kind: "failed", reason: "boom" }]);
       expect(b).toEqual([{ kind: "failed", reason: "boom" }]);
     });
@@ -302,7 +378,7 @@ describe("CodingStreamingRegistry", () => {
     it("supports re-entrant publish: a listener that publishes another event delivers it without infinite recursion", async () => {
       // The inner publish completes before the outer delivery loop advances,
       // so the listener sees the inner event during its own invocation.
-      const reg = new CodingStreamingRegistry();
+      const { reg } = harness();
       const seen: CodingStreamEvent[] = [];
       const execute = reg.executeStream("t1");
       let reentered = false;

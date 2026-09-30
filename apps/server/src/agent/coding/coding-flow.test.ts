@@ -14,6 +14,7 @@ import {
   type SandboxSession,
 } from "../../sandbox/index.js";
 import { DrizzleSandboxStore } from "../../sandbox/store/index.js";
+import { expectDefined } from "../../test/assertions.js";
 import {
   makeStepRun,
   mockAgentStore,
@@ -24,12 +25,12 @@ import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { createTransport } from "../../transport/transport.js";
 import { DrizzleAgentStore } from "../store/index.js";
 import type { CodingBackend, CodingEvent } from "./backend.js";
+import { findEndedCodingTasks } from "./find-ended-coding-tasks.js";
 import { runCodingExecute, runCodingTask } from "./orchestrator.js";
 import { startCodingProgressSubscriber } from "./progress-subscriber.js";
 import { createCodingService } from "./service.js";
 import { type CodingRepoRow, DrizzleCodingStore } from "./store/index.js";
 import { type CodingStreamEvent, CodingStreamingRegistry } from "./streaming-registry.js";
-import { sweepCodingStreams } from "./sweep-coding-streams.js";
 
 const execFileP = promisify(execFile);
 
@@ -228,6 +229,28 @@ function fakeSandbox(): {
   return { sandbox, createCalls, stopCalls, liveContainerDockerIds };
 }
 
+/** A registry that sweeps against the test database, on a timer the test fires. */
+function sweptRegistry(): {
+  registry: CodingStreamingRegistry;
+  sweep: () => Promise<void>;
+  /** The tasks each sweep asked the database about, in order. */
+  asked: ReadonlyArray<string>[];
+} {
+  const asked: ReadonlyArray<string>[] = [];
+  let tick: (() => Promise<void>) | undefined;
+  const registry = new CodingStreamingRegistry({
+    endedTasks: (taskIds) => {
+      asked.push(taskIds);
+      return findEndedCodingTasks({ runInTx: tx, store }, taskIds);
+    },
+    sweepIntervalMs: 60_000,
+    setInterval: (cb) => {
+      tick = cb;
+    },
+  });
+  return { registry, sweep: () => expectDefined(tick, "sweep timer")(), asked };
+}
+
 describe("coding flow — plan → approve → execute → pending_verify", () => {
   it("end-to-end: delegate submits, plan posts, approve fires execute, status reaches pending_verify", async () => {
     // ── Setup ──────────────────────────────────────────────────────────
@@ -237,7 +260,7 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
     const ownerUserId = "user-owner";
 
     const { sandbox, createCalls, stopCalls, liveContainerDockerIds } = fakeSandbox();
-    const registry = new CodingStreamingRegistry();
+    const { registry, sweep, asked } = sweptRegistry();
     const collected: CodingStreamEvent[] = [];
 
     // ── Step 1: delegate via Service.coding ────────────────────────────
@@ -429,8 +452,9 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
       tokens: { input: 250, output: 50 },
     });
 
-    // Execute ended the stream, so the registry holds nothing for the task.
-    expect(registry.taskIds()).toEqual([]);
+    // Execute ended the stream, so the registry holds nothing for a sweep to ask about.
+    await sweep();
+    expect(asked).toEqual([]);
   });
 
   it("automated trigger: plan clears the gate in-run, execute reaches pending_verify with no human tap", async () => {
@@ -563,7 +587,7 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
   });
 
   it("startCodingProgressSubscriber renders the plan + execute message lifecycle from the same registry", async () => {
-    const registry = new CodingStreamingRegistry();
+    const { registry } = sweptRegistry();
     const sent: { text: string; replyMarkup?: unknown }[] = [];
     const edits: { text: string; replyMarkup?: unknown }[] = [];
     const taskId = "019d0000-0000-7000-8000-000000000003";
@@ -630,7 +654,7 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
       }),
     );
 
-    const registry = new CodingStreamingRegistry();
+    const { registry, sweep, asked } = sweptRegistry();
     const bot = {
       sendMessage: vi.fn(async () => ({ message_id: 7 })),
       editMessageText: vi.fn(async () => ({})),
@@ -674,16 +698,15 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
     await tick();
     expect(bot.sendMessage).toHaveBeenCalledTimes(1);
 
-    const sweepDeps = { runInTx: tx, store, registry };
     // Awaiting approval: the stream stays for the execute phase.
-    await sweepCodingStreams(sweepDeps);
-    await sweepCodingStreams(sweepDeps);
-    expect(registry.taskIds()).toEqual([task.id]);
-
+    await sweep();
+    await sweep();
     await tx((trx) => store.cancelTaskIfActive(trx, task.id, "user requested revisions"));
-    expect(await sweepCodingStreams(sweepDeps)).toEqual({ held: 1, ended: 1, released: 0 });
-    expect(await sweepCodingStreams(sweepDeps)).toEqual({ held: 1, ended: 1, released: 1 });
-    expect(registry.taskIds()).toEqual([]);
+    // Found cancelled twice, then released: the fifth sweep has nothing to ask.
+    await sweep();
+    await sweep();
+    await sweep();
+    expect(asked).toEqual([[task.id], [task.id], [task.id], [task.id]]);
 
     await registry.executeStream(task.id).started?.();
     await tick();

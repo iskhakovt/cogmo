@@ -8,6 +8,7 @@ import { createAutoRegisterSkillSubscriber } from "./agent/coding/auto-register-
 import { ClaudeCodeBackend } from "./agent/coding/claude.js";
 import { createOrphanRunBranchSweepFunctions } from "./agent/coding/cleanup-orphan-run-branches.js";
 import { createRunBranchCleanupSubscriber } from "./agent/coding/cleanup-run-branch.js";
+import { findEndedCodingTasks } from "./agent/coding/find-ended-coding-tasks.js";
 import {
   type CodingOrchestratorDeps,
   createCodingExecuteOrchestrator,
@@ -17,7 +18,6 @@ import { createCodingTaskReconcile } from "./agent/coding/reconcile-on-failure.j
 import { createCodingService } from "./agent/coding/service.js";
 import { DrizzleCodingStore } from "./agent/coding/store/index.js";
 import { CodingStreamingRegistry } from "./agent/coding/streaming-registry.js";
-import { createCodingStreamSweep } from "./agent/coding/sweep-coding-streams.js";
 import { createCodingVerifyOrchestrator } from "./agent/coding/verify-orchestrator.js";
 import { compactConversation } from "./agent/conversation/compact-conversation.js";
 import { createDebounceFunctions, type DebounceConfig } from "./agent/debounce.js";
@@ -764,7 +764,11 @@ export async function bootstrapRuntime(
     catalogUrl: env.MODEL_CATALOG_URL,
   });
   const codingBackend = new ClaudeCodeBackend();
-  const codingStreamingRegistry = new CodingStreamingRegistry();
+  const codingStreamingRegistry = new CodingStreamingRegistry({
+    endedTasks: (taskIds) =>
+      findEndedCodingTasks({ runInTx: core.runInTx, store: core.codingStore }, taskIds),
+    sweepIntervalMs: 10 * 60 * 1000,
+  });
   const codingServiceFactory = (conversationId: string) =>
     createCodingService(
       {
@@ -878,16 +882,6 @@ export async function bootstrapRuntime(
     // design/coding-delegation.md → Worker-death reconciliation.
     codingFunctions.push(
       createCodingTaskReconcile({ runInTx: core.runInTx, store: core.codingStore }, inngest),
-    );
-
-    // Releases the progress streams of tasks that ended without their
-    // stream ending — cancelled at the plan gate, failed before a stream
-    // opened, or reconciled above.
-    codingFunctions.push(
-      createCodingStreamSweep(
-        { runInTx: core.runInTx, store: core.codingStore, registry: codingStreamingRegistry },
-        inngest,
-      ),
     );
 
     // Sandbox reaper — runs every minute, kills TTL-expired containers,
