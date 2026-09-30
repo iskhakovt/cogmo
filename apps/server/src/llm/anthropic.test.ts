@@ -1653,6 +1653,7 @@ describe("AnthropicProvider", () => {
       ["no base URL", undefined, undefined],
       ["an empty base URL, which the SDK resolves to its own", "", undefined],
       ["Anthropic's own base URL", "https://api.anthropic.com", undefined],
+      ["Anthropic's own base URL with a path", "https://api.anthropic.com/", undefined],
       ["a base URL marked first-party", "http://127.0.0.1:4010", { firstParty: true }],
     ] as const)("sends the binding-controls header to %s", async (_label, baseURL, options) => {
       const bodies = await sentBodies(provider(baseURL, options), {
