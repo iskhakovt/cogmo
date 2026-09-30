@@ -18,39 +18,107 @@ export function cl100k(): Tiktoken {
   return encoder;
 }
 
-/** The longest pre-tokenizer piece encoded in one call, in code points. */
-const MAX_PIECE = 64;
+/** The longest pre-tokenizer piece encoded in one call, in UTF-8 bytes. */
+const MAX_PIECE_BYTES = 64;
 
 /**
- * Runs the pre-tokenizer keeps as one piece when they're long: letters (CJK
- * text among them), punctuation, whitespace. Digits come in threes.
+ * Runs the pre-tokenizer keeps as one piece — letters (CJK text among them),
+ * punctuation, whitespace — long enough to pass {@link MAX_PIECE_BYTES} at
+ * four bytes a code point. Digits come in threes.
  */
-const LONG_RUN = /\p{L}{65,}|[^\s\p{L}\p{N}]{65,}|\s{65,}/gu;
+const LONG_RUN = /\p{L}{17,}|[^\s\p{L}\p{N}]{17,}|\s{17,}/gu;
+
+/** The text a running sum encodes between checks, in UTF-16 code units. */
+const SLICE_CHARS = 8192;
 
 /**
- * Tokens in `text`, special-token markers (`<|endoftext|>`) counted as the
- * plain text they are: js-tiktoken throws on one by default, and a tool
- * result or a user message can carry one.
+ * Tokens of a text, a slice at a time, lazily: a running sum that stops
+ * mid-text has encoded at most one slice past the point it needed.
+ */
+export type TextTokens = (text: string) => Iterable<number>;
+
+/**
+ * {@link TextTokens} in cl100k, remembering each slice's count per text, so
+ * two passes over one text encode it once.
  *
- * A long run the pre-tokenizer would keep whole is encoded 64 code points at
- * a time. Byte-pair merging is quadratic in a piece: 16,000 letters, spaces
- * or `=` take about ten seconds as one piece and tens of milliseconds split.
- * Each seam can cost a token, well under 1% on such a run; prose has no such
- * runs and counts as one encode does.
+ * Special-token markers (`<|endoftext|>`) count as the plain text they are:
+ * js-tiktoken throws on one by default, and a tool result or a user message
+ * can carry one. A long run the pre-tokenizer would keep whole is encoded 64
+ * UTF-8 bytes at a time: byte-pair merging is quadratic in a piece, so 16,000
+ * letters, spaces or `=` take about ten seconds as one piece and tens of
+ * milliseconds split. A seam can cost a token, up to about 15% on log-like
+ * text with long indents or rules; prose counts as one encode does.
  */
+export function textTokens(enc: Tiktoken): TextTokens {
+  const known = new Map<string, number[]>();
+  return function* (text) {
+    let counts = known.get(text);
+    if (counts === undefined) {
+      counts = [];
+      known.set(text, counts);
+    }
+    let index = 0;
+    for (const slice of slices(text)) {
+      let tokens = counts[index];
+      if (tokens === undefined) {
+        tokens = sliceTokens(enc, slice);
+        counts.push(tokens);
+      }
+      yield tokens;
+      index += 1;
+    }
+  };
+}
+
+/** Every token of `text`, as {@link textTokens} counts it. */
 export function encodedLength(enc: Tiktoken, text: string): number {
+  return R.sum([...textTokens(enc)(text)]);
+}
+
+/**
+ * `text` in slices of at most {@link SLICE_CHARS}, each cut before a space
+ * where the window has one, which leaves the pre-tokenizer's pieces as they
+ * were, and never inside a surrogate pair.
+ */
+function* slices(text: string): Generator<string> {
+  for (let start = 0; start < text.length; ) {
+    let end = Math.min(text.length, start + SLICE_CHARS);
+    if (end < text.length) {
+      const space = text.lastIndexOf(" ", end);
+      if (space > start) end = space;
+      else if (isLowSurrogate(text.charCodeAt(end))) end -= 1;
+    }
+    yield text.slice(start, end);
+    start = end;
+  }
+}
+
+function isLowSurrogate(code: number): boolean {
+  return code >= 0xdc00 && code <= 0xdfff;
+}
+
+function sliceTokens(enc: Tiktoken, slice: string): number {
   const encode = (piece: string) => enc.encode(piece, [], []).length;
   let tokens = 0;
   let from = 0;
-  for (const match of text.matchAll(LONG_RUN)) {
-    tokens += encode(text.slice(from, match.index));
-    const points = Array.from(match[0]);
-    for (let i = 0; i < points.length; i += MAX_PIECE) {
-      tokens += encode(points.slice(i, i + MAX_PIECE).join(""));
+  for (const match of slice.matchAll(LONG_RUN)) {
+    tokens += encode(slice.slice(from, match.index));
+    let piece = "";
+    let pieceBytes = 0;
+    for (const point of match[0]) {
+      const bytes = Buffer.byteLength(point);
+      if (pieceBytes + bytes > MAX_PIECE_BYTES) {
+        tokens += encode(piece);
+        piece = "";
+        pieceBytes = 0;
+      }
+      piece += point;
+      pieceBytes += bytes;
     }
+    tokens += encode(piece);
     from = match.index + match[0].length;
   }
-  return tokens + encode(text.slice(from));
+  return tokens + encode(slice.slice(from));
 }
 
 /** What a cleared tool result reads as. The `tool_use` it answers stays intact. */
@@ -63,14 +131,17 @@ export const CLEARED_PLACEHOLDER = "[Cleared — call tool again if needed]";
  * a placeholder, provided they hold at least `clearAtLeastTokens`. The
  * caller's messages stay as they are.
  *
- * `promptParts` yields the prompt's tokens a part at a time, lazily: the rule
- * asks only whether sums pass two thresholds, so each sum stops once it does,
- * and the decision encodes at most about the trigger plus `clearAtLeastTokens`
- * — 70% of the budget — whatever the prompt's size.
+ * `promptParts` yields the prompt's tokens a slice at a time through
+ * `tokens`, lazily: the rule asks only whether two sums pass their
+ * thresholds, so each pass stops within a slice of doing so. The decision
+ * encodes at most about the trigger plus `clearAtLeastTokens`, 70% of the
+ * budget, plus a slice a pass, whatever the prompt's size. A result both
+ * passes read is encoded once, through `tokens`' memory.
  */
 export function withClearedToolResults(
   params: CountTokensParams,
-  promptParts: (messages: Message[]) => Iterable<number>,
+  promptParts: (messages: Message[], tokens: TextTokens) => Iterable<number>,
+  tokens: TextTokens,
 ): Message[] {
   const clearing = params.clearToolResults;
   if (!clearing) return params.messages;
@@ -81,11 +152,10 @@ export function withClearedToolResults(
     JSON.stringify([params.system, params.messages, params.tools ?? []]),
   );
   if (bytes <= clearing.triggerTokens) return params.messages;
-  if (!sumPasses(promptParts(params.messages), (sum) => sum > clearing.triggerTokens)) {
+  if (!sumPasses(promptParts(params.messages, tokens), (sum) => sum > clearing.triggerTokens)) {
     return params.messages;
   }
 
-  const enc = cl100k();
   const results = params.messages.flatMap((msg, msgIdx) =>
     typeof msg.content === "string"
       ? []
@@ -96,7 +166,7 @@ export function withClearedToolResults(
   const cleared = results.slice(0, Math.max(0, results.length - clearing.keep));
   if (cleared.length === 0) return params.messages;
   const clearedTokens = (function* () {
-    for (const r of cleared) yield encodedLength(enc, r.content);
+    for (const r of cleared) yield* tokens(r.content);
   })();
   if (!sumPasses(clearedTokens, (sum) => sum >= clearing.clearAtLeastTokens)) {
     return params.messages;
@@ -141,38 +211,47 @@ const MESSAGE_FRAMING_TOKENS = 4;
 const ATTACHMENT_TOKENS = 85;
 
 /**
- * A cl100k estimate of a request's prompt over its canonical blocks, a part
- * at a time: the system prompt, each message, each tool definition. It is
- * what an Anthropic-compatible third-party endpoint's clearing compares with
- * its trigger, since the adapter has no local Claude tokenizer and a count
- * per request would be a round trip. Only the trigger rests on it; the count
- * compaction reads is the endpoint's own.
+ * A cl100k estimate of a request's prompt over its canonical blocks, a slice
+ * at a time: the system prompt, each message's framing and blocks, each tool
+ * definition. It is what an Anthropic-compatible third-party endpoint's
+ * clearing compares with its trigger, since the adapter has no local Claude
+ * tokenizer and a count per request would be a round trip. Only the trigger
+ * rests on it; the count compaction reads is the endpoint's own.
  */
 export function* canonicalPromptParts(
   params: Pick<CountTokensParams, "system" | "messages" | "tools">,
+  tokens: TextTokens,
 ): Generator<number> {
-  const enc = cl100k();
-  const blockTokens = (block: ContentBlock): number => {
-    switch (block.type) {
-      case "text":
-        return encodedLength(enc, block.text);
-      case "thinking":
-        return encodedLength(enc, block.thinking);
-      case "tool_use":
-        return encodedLength(enc, block.name) + encodedLength(enc, JSON.stringify(block.input));
-      case "tool_result":
-        return encodedLength(enc, block.content);
-      case "image":
-      case "document":
-        return ATTACHMENT_TOKENS;
+  yield* tokens(params.system);
+  for (const msg of params.messages) {
+    yield MESSAGE_FRAMING_TOKENS;
+    if (typeof msg.content === "string") {
+      yield* tokens(msg.content);
+      continue;
     }
-  };
-  const messageTokens = (msg: Message): number =>
-    MESSAGE_FRAMING_TOKENS +
-    (typeof msg.content === "string"
-      ? encodedLength(enc, msg.content)
-      : R.sumBy(msg.content, blockTokens));
-  yield encodedLength(enc, params.system);
-  for (const msg of params.messages) yield messageTokens(msg);
-  for (const tool of params.tools ?? []) yield encodedLength(enc, JSON.stringify(tool));
+    for (const block of msg.content) yield* blockParts(block, tokens);
+  }
+  for (const tool of params.tools ?? []) yield* tokens(JSON.stringify(tool));
+}
+
+function* blockParts(block: ContentBlock, tokens: TextTokens): Generator<number> {
+  switch (block.type) {
+    case "text":
+      yield* tokens(block.text);
+      return;
+    case "thinking":
+      yield* tokens(block.thinking);
+      return;
+    case "tool_use":
+      yield* tokens(block.name);
+      yield* tokens(JSON.stringify(block.input));
+      return;
+    case "tool_result":
+      yield* tokens(block.content);
+      return;
+    case "image":
+    case "document":
+      yield ATTACHMENT_TOKENS;
+      return;
+  }
 }

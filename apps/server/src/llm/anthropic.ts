@@ -22,7 +22,12 @@ import { withFailureLogging } from "./logging-fetch.js";
 import { failChatSpan, recordChatUsage, startChatSpan } from "./otel.js";
 import type { PrefixMismatchBehavior } from "./prefix-mismatch-behavior.js";
 import type { LlmProvider } from "./provider.js";
-import { canonicalPromptParts, withClearedToolResults } from "./tool-result-clearing.js";
+import {
+  canonicalPromptParts,
+  cl100k,
+  textTokens,
+  withClearedToolResults,
+} from "./tool-result-clearing.js";
 import {
   type ChatOptions,
   type ChatParams,
@@ -496,8 +501,10 @@ function requestControls(params: CountTokensParams, endpoint: Endpoint): Request
  */
 function wireMessages(params: CountTokensParams, endpoint: Endpoint): Message[] {
   if (endpoint.firstParty) return params.messages;
-  return withClearedToolResults(params, (messages) =>
-    canonicalPromptParts({ ...params, messages }),
+  return withClearedToolResults(
+    params,
+    (messages, tokens) => canonicalPromptParts({ ...params, messages }, tokens),
+    textTokens(cl100k()),
   );
 }
 

@@ -1,5 +1,4 @@
 import type Anthropic from "@anthropic-ai/sdk";
-import type { Tiktoken } from "js-tiktoken";
 import OpenAI from "openai";
 import * as R from "remeda";
 import { logger } from "../logger.js";
@@ -12,7 +11,12 @@ import { withFailureLogging } from "./logging-fetch.js";
 import { fitsStrictMode } from "./openai-output-schema.js";
 import { failChatSpan, recordChatUsage, startChatSpan } from "./otel.js";
 import type { LlmProvider } from "./provider.js";
-import { cl100k, encodedLength, withClearedToolResults } from "./tool-result-clearing.js";
+import {
+  cl100k,
+  type TextTokens,
+  textTokens,
+  withClearedToolResults,
+} from "./tool-result-clearing.js";
 import {
   type CacheIntent,
   type ChatOptions,
@@ -75,7 +79,10 @@ export class OpenAICompatibleProvider implements LlmProvider {
 
   /** The request's prompt tokens, after the tool-result clearing it asks for. */
   async countTokens(params: CountTokensParams): Promise<number> {
-    return promptTokens(cl100k(), { ...params, messages: clearedMessages(params) });
+    // One memory for both, so the count reads the slices the clearing already encoded.
+    const tokens = textTokens(cl100k());
+    const messages = clearedMessages(params, tokens);
+    return R.sum([...promptParts(tokens, { ...params, messages })]);
   }
 
   async chat(params: ChatParams, options?: ChatOptions): Promise<LlmResponse> {
@@ -90,7 +97,11 @@ export class OpenAICompatibleProvider implements LlmProvider {
       const createParams: OpenAI.ChatCompletionCreateParamsNonStreaming & CacheHintFields = {
         model: params.model,
         ...modelFamilyParams(params.model, params),
-        messages: buildMessages(params.system, clearedMessages(params), hints.systemMarker),
+        messages: buildMessages(
+          params.system,
+          clearedMessages(params, textTokens(cl100k())),
+          hints.systemMarker,
+        ),
         ...hints.fields,
       };
 
@@ -154,7 +165,11 @@ export class OpenAICompatibleProvider implements LlmProvider {
       const span = startChatSpan(providerName, params.model);
       let completed = false;
       try {
-        const messages = buildMessages(params.system, clearedMessages(params), hints.systemMarker);
+        const messages = buildMessages(
+          params.system,
+          clearedMessages(params, textTokens(cl100k())),
+          hints.systemMarker,
+        );
         // Map content-policy 400s to RefusalError at the create-time boundary
         // before they propagate to FallbackLlmProvider. `.catch()` keeps the
         // narrow Stream<...> type from the streaming overload — a try/catch
@@ -425,23 +440,19 @@ const IMAGE_TOKENS = 85;
 
 const REPLY_PRIMING_TOKENS = 3;
 
-/** The request's prompt tokens, as sent: its messages as they reach the wire, plus tool definitions. */
-function promptTokens(
-  enc: Tiktoken,
-  params: Pick<CountTokensParams, "system" | "messages" | "tools">,
-): number {
-  return R.sum([...promptParts(enc, params)]);
-}
-
-/** {@link promptTokens} a part at a time, lazily: each message, each tool definition, the reply priming. */
+/**
+ * The request's prompt tokens, as sent, a slice at a time: each message as it
+ * reaches the wire, with its framing, then each tool definition and the reply
+ * priming.
+ */
 function* promptParts(
-  enc: Tiktoken,
+  tokens: TextTokens,
   params: Pick<CountTokensParams, "system" | "messages" | "tools">,
 ): Generator<number> {
   for (const msg of buildMessages(params.system, params.messages, undefined)) {
-    yield messageTokens(enc, msg);
+    yield* messageParts(tokens, msg);
   }
-  for (const tool of params.tools ?? []) yield encodedLength(enc, JSON.stringify(tool));
+  for (const tool of params.tools ?? []) yield* tokens(JSON.stringify(tool));
   yield REPLY_PRIMING_TOKENS;
 }
 
@@ -452,36 +463,36 @@ function* promptParts(
  * past the trigger by this adapter's own count. These routes replay no
  * reasoning, so a moving cleared set costs cache hits and nothing else.
  */
-function clearedMessages(params: CountTokensParams): Message[] {
-  return withClearedToolResults(params, (messages) =>
-    promptParts(cl100k(), { ...params, messages }),
+function clearedMessages(params: CountTokensParams, tokens: TextTokens): Message[] {
+  return withClearedToolResults(
+    params,
+    (messages, sliceTokens) => promptParts(sliceTokens, { ...params, messages }),
+    tokens,
   );
 }
 
 /** A tool result is a `tool` message with string content, so the content term covers it. */
-function messageTokens(enc: Tiktoken, msg: OpenAI.ChatCompletionMessageParam): number {
-  const toolCalls =
-    msg.role === "assistant" && msg.tool_calls
-      ? R.sumBy(msg.tool_calls, (tc) =>
-          tc.type === "function"
-            ? encodedLength(enc, tc.function.name) + encodedLength(enc, tc.function.arguments)
-            : 0,
-        )
-      : 0;
-  return MESSAGE_FRAMING_TOKENS + contentTokens(enc, msg.content) + toolCalls;
-}
-
-function contentTokens(
-  enc: Tiktoken,
-  content: OpenAI.ChatCompletionMessageParam["content"],
-): number {
-  if (typeof content === "string") return encodedLength(enc, content);
-  if (!Array.isArray(content)) return 0;
-  return R.sumBy(content, (part) => {
-    if (part.type === "text") return encodedLength(enc, part.text);
-    if (part.type === "image_url") return IMAGE_TOKENS;
-    return 0;
-  });
+function* messageParts(
+  tokens: TextTokens,
+  msg: OpenAI.ChatCompletionMessageParam,
+): Generator<number> {
+  yield MESSAGE_FRAMING_TOKENS;
+  const content = msg.content;
+  if (typeof content === "string") {
+    yield* tokens(content);
+  } else if (Array.isArray(content)) {
+    for (const part of content) {
+      if (part.type === "text") yield* tokens(part.text);
+      else if (part.type === "image_url") yield IMAGE_TOKENS;
+    }
+  }
+  if (msg.role === "assistant" && msg.tool_calls) {
+    for (const call of msg.tool_calls) {
+      if (call.type !== "function") continue;
+      yield* tokens(call.function.name);
+      yield* tokens(call.function.arguments);
+    }
+  }
 }
 
 // --- Message building ---
