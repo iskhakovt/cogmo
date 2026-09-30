@@ -31,9 +31,9 @@ export interface ContextManagerDeps {
   budget: number;
   /**
    * The request cap, in bytes (`MAX_REQUEST_BYTES`). A view past 80% of it
-   * summarizes, then takes the first cut under 80%, else under the cap, else
-   * the smallest; one under the cap whose smallest cut is still past 80% goes
-   * as it is.
+   * summarizes, then takes the first of {@link truncations} within 80%, else
+   * within the cap, else the smallest; one within the cap whose smallest cut
+   * is still past 80% goes as it is.
    */
   maxRequestBytes: number;
   /**
@@ -236,10 +236,10 @@ export function formatSummaryMessage(summary: string): Message {
  * They also fire on size, since the server clears only after the bytes
  * arrive (design/context-management.md → Strategy 2 → Size trigger): a view
  * past 80% of `maxRequestBytes` summarizes on any path without a count, since
- * counting it sends it, then takes the first of {@link truncations} under 80%,
- * else under the cap, else the smallest. A view under the cap whose smallest
- * cut is still past 80% goes as it is: its bytes are in the tail, and cutting
- * would only drop history it fits with.
+ * counting it sends it, then takes the first of {@link truncations} within
+ * 80%, else within the cap, else the smallest. A view within the cap whose
+ * smallest cut is still past 80% goes as it is: its bytes are in the tail, and
+ * cutting would only drop history it fits with.
  */
 export async function compactMessages(
   system: string,
@@ -438,8 +438,8 @@ async function summarizePrefix(
  * The views truncation reaches from `messages`, one cut at a time: `messages`
  * itself, then each cut with strictly fewer bytes, the one that only puts the
  * truncation marker in place of the first message included. The last is the
- * smallest: on plain alternation the marker and the last exchange, three
- * messages; after a tool call, five.
+ * smallest, the marker and the tail: three messages on plain alternation, and
+ * five after a tool call (`[marker, tool_use, tool_result, reply, current]`).
  */
 export function truncations(messages: ReadonlyArray<Message>): [Message[], ...Message[][]] {
   let view = [...messages];

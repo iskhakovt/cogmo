@@ -601,7 +601,7 @@ describe("compactMessages", () => {
     }
 
     it.each([false, true])(
-      "sends a view whose last exchange alone is past the threshold as it is (fast path: %s)",
+      "sends a view whose smallest cut is still past the threshold as it is (fast path: %s)",
       async (skip) => {
         // Compaction can't remove the turn's own attachment, so a summary and
         // truncation would only throw away history the request fits with.
