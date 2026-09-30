@@ -1004,13 +1004,14 @@ export const evolutionEvents = pgTable(
  * Durable conversation summaries — the persisted output of the summarize
  * compaction strategy.
  *
- * Compaction itself stays ephemeral for Strategies 0, 1 and 3 (they rewrite
- * or drop blocks in memory at turn time). Summarization is different: it
- * costs an LLM call, so its result is written here and replayed on every
- * subsequent turn instead of being recomputed. `through_message_id` names the
- * last message the summary stands in for — the turn loader drops every
- * message up to and including it and prepends the summary as a single user
- * message. See design/context-management.md → Durable summaries.
+ * The rest of compaction stores nothing: Strategy 1 is an edit intent on the
+ * request, and Strategy 3 drops messages from the turn's view in memory.
+ * Summarization is different: it costs an LLM call, so its result is written
+ * here and replayed on every subsequent turn instead of being recomputed.
+ * `through_message_id` names the last message the summary stands in for — the
+ * turn loader drops every message up to and including it and prepends the
+ * summary as a single user message. See design/context-management.md →
+ * Durable summaries.
  *
  * The two foreign keys are independent, so the schema alone permits a row
  * pairing conversation A with a message from conversation B — a cutoff that

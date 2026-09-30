@@ -135,9 +135,11 @@ Replace old `tool_result` content with a placeholder. The OpenAI-compatible adap
 
 **Where it runs** `[confirmed]`. As a request-level edit intent on `ChatParams`, which leaves the transcript alone; each adapter maps the intent, as with the cache intent.
 
-- **Anthropic.** The adapter sends server-side `clear_tool_uses_20250919` (beta `context-management-2025-06-27`) on every request, which keeps the beta set constant. Its trigger is this threshold in input tokens, `keep` is 5 tool uses, and `clear_at_least` makes each clearing worth its cache write. The client keeps sending the full history, and the preserved-thinking check compares what was sent, so thinking stays valid. Clearing also runs between a turn's iterations.
-- **Token counting.** `countTokens` applies the same intent on every adapter. The Anthropic endpoint returns the post-clearing count, and the count before clearing in `context_management.original_input_tokens`, which compaction's telemetry logs as its "before"; the OpenAI-compatible adapter clears locally exactly as it clears the wire body.
-- **OpenAI-compatible.** The adapter applies the same clearing to the wire body. Those routes replay no reasoning, so the moving cleared set costs cache only.
+`toolResultClearing(budget)` (`src/agent/context.ts`) builds the turn's intent, and every request of a chat or stage turn carries it: the counts, each loop iteration and its in-step replay, the summarization fork and the degraded-reply synthesis. It derives from the frozen model limits, so every invocation sends the same intent.
+
+- **Anthropic.** The adapter sends server-side `clear_tool_uses_20250919` (beta `context-management-2025-06-27`) on every request that carries the intent, which keeps the beta set constant. Its trigger is this threshold in input tokens, `keep` is 5 tool uses, and `clear_at_least` is a tenth of the budget: a clearing writes the cache again from the first result it clears, so it has to buy at least half the room between the clearing and summarization thresholds (the docs' example asks a sixth of its trigger, the same ratio). The client keeps sending the full history, and the preserved-thinking check compares what was sent, so thinking stays valid. Clearing also runs between a turn's iterations.
+- **Token counting.** `countTokens` applies the same intent on every adapter and returns the count after clearing, which is what compaction compares with its thresholds and logs. The Anthropic endpoint clears as a message does; the OpenAI-compatible adapter clears locally exactly as it clears the wire body.
+- **OpenAI-compatible.** The adapter applies the same rule to the wire body, `[Cleared — call tool again if needed]` in place of each cleared result: past the trigger, by its own token estimate, every result but the last five, provided they hold at least `clear_at_least` tokens. The caller's messages stay as they are. Those routes replay no reasoning, so the moving cleared set costs cache only.
 
 ### Strategy 2: Summarize `[trigger: 80%]`
 
@@ -199,7 +201,8 @@ Anthropic requires every `tool_result` block (on a user message) to have a match
 ```
 cutoff = attachmentCutoff(epoch, refSizes, limits)           # [proposed] before counting: fits attachments to their budget
 messages = render(rows, cutoff)                              # [proposed] attachments up to the cutoff as placeholders
-edit = clearToolResults(trigger = budget * 0.60, keep = 5)   # Strategy 1: an intent every request carries
+edit = clearToolResults(trigger = budget * 0.60, keep = 5,  # Strategy 1: an intent every request carries
+                        clearAtLeast = budget * 0.10)
 
 count = countTokens(system, messages, tools, edit)           # after clearing
 
@@ -246,12 +249,12 @@ No event is emitted for tool result clearing (instant, no user-visible delay) or
 ## Observability
 
 Compaction events are logged with:
-- Which strategies fired (tool clearing, summarization, truncation)
-- Token count before and after each strategy
-- Number of tool results cleared, number of messages summarized
+- Which strategies fired (summarization, truncation)
+- Token count before and after, each after Strategy 1's clearing
+- Number of messages summarized
 - Summarization model used and its token cost
 
-This data is essential for tuning thresholds — if summarization fires too often, raise the tool-clearing threshold; if truncation fires at all, something is misconfigured.
+Tool-result clearing happens in the provider, per request; Anthropic reports each clearing in the response's `context_management.applied_edits`. This data is essential for tuning thresholds — if summarization fires too often, lower the clearing threshold; if truncation fires at all, something is misconfigured.
 
 ## What This Doesn't Cover
 

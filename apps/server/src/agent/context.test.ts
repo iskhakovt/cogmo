@@ -330,7 +330,7 @@ describe("compactMessages", () => {
   });
 
   it("leaves a same-tool cluster verbatim, on the fast path and off it", async () => {
-    // Five `web_search` results, which Strategy 0 would have collapsed.
+    // Five `web_search` results: no rung of compaction rewrites a same-tool cluster.
     const messages: Message[] = ["alpha", "beta", "gamma", "delta", "epsilon"].flatMap(
       (q, i): Message[] => [
         {
