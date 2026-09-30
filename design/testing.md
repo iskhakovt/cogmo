@@ -241,7 +241,7 @@ Reference: `src/sandbox/daytona/exec-streaming.test.ts → "timeoutMs: total wal
 
 ### Concurrency invariants
 
-For in-process pub/sub (`CodingStreamingRegistry`, `EventEmitter` wrappers): pin listener-set snapshot semantics (subscribers added mid-emit don't fire for the in-flight event), self-unsubscribe-during-emit, re-entrant publish, and burst ordering across multiple subscribers. Catches refactors that introduce async dispatch or live-iteration regressions.
+For in-process pub/sub (`CodingStreamingRegistry`, `EventEmitter` wrappers): pin listener-set snapshot semantics (subscribers added mid-emit don't fire for the in-flight event), a release during delivery (the event that ends a stream still reaches every subscriber), re-entrant publish, and burst ordering across multiple subscribers. Catches refactors that introduce async dispatch or live-iteration regressions.
 
 For SQL-level atomic operations (`approvePlanIfPending`, `transitionTaskStatus`): the atomic SQL is the contract; module tests verify the discriminated outcomes (`approved` / `already_approved` / `not_pending`). End-to-end "two concurrent Telegram callbacks" tests are deferred to the integration tier with real Postgres.
 

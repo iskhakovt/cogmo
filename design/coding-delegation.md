@@ -676,6 +676,22 @@ Editing one message keeps the chat clean and matches established patterns ([Rich
 
 Diffs are not rendered in Telegram. Link to GitHub for review. GitHub Mobile (since April 2026) natively supports reviewing Copilot cloud-agent diffs from a phone — Cogmo PRs use the same surface.
 
+### Progress stream `[confirmed]`
+
+The orchestrators publish progress into `CodingStreamingRegistry` (`src/agent/coding/streaming-registry.ts`), an in-process fan-out: text deltas arrive at chat cadence, too often for the event bus, and the orchestrators and the Telegram adapter share one process. The plan orchestrator writes through `planStream(taskId)`, execute and verify through `executeStream(taskId)`. On `coding/task/start`, the Telegram adapter subscribes one renderer per task whose conversation has a session on it (`progress-subscriber.ts`).
+
+The registry holds a task only while something is subscribed to it, and the task's status in the database is the backstop that releases it:
+
+| What arrives | What the registry does |
+|-|-|
+| A publish to a task with no subscriber | Drops it. Publishing holds nothing, so a replayed or retried step body changes nothing. |
+| `failed` | Delivers it, then releases the task. |
+| `execute_complete`, success | Delivers it, then releases the task. Verify streams its output after this, and nothing renders it. |
+| `execute_complete`, failure | Delivers it. The `failed` that follows carries the reason and ends the stream. |
+| No event: Revise or Cancel at the plan gate, a failure before the stream opened, reconcile | `coding-stream-sweep` (every ten minutes) releases a task the database reports terminal or gone at two consecutive sweeps. The second sweep is the grace the orchestrator's final event gets after its status write. |
+
+A task awaiting approval keeps its stream, so the execute phase edits the message the plan went to. Admission caps non-terminal tasks per repo, which bounds what the registry holds. Events aren't replayed: a subscriber sees what is published after it subscribes. A listener that throws or rejects is logged, and its siblings still get the event. The registry never awaits a listener, so one that hangs holds neither the orchestrator nor the task. A process restart loses every subscriber: the task runs on, and its message stops updating.
+
 ## Failure Modes `[proposed]`
 
 | Failure | Handling |
