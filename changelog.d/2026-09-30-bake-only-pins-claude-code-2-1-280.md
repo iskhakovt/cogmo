@@ -2,7 +2,7 @@
 
 **The hand-pinned dependencies are current**, each at its newest release at least seven days old, matching Dependabot's npm cooldown: `@anthropic-ai/claude-code` 2.1.280 (its `stable` dist-tag), uv 0.12.18, npm 12.1.0, pnpm 11.27.1, the skills runtime's ruff 0.16.8 / pyrefly 1.3.1 / pytest 9.1.1, and the test harness's Inngest v1.45.1, alpine 3.24.2 (3.20 is out of support) and alpine/git v2.52.0. The dev shell's nixpkgs is the current `nixos-unstable`, and the bundled LiteLLM snapshot is refreshed.
 
-Claude Code 2.1.280 changes what the CLI sends: environment and model-identity system reminders open the first user turn, and `-p` runs no longer make a background title request. The `claude-cli` cassette is recorded from scratch against it. Two behaviours change under an unchanged interface:
+Claude Code 2.1.280 changes what the CLI sends: environment and model-identity system reminders open the first user turn, and `-p` runs no longer make a background title request. The `claude-cli` cassette is recorded from scratch against it; the environment reminder names the host kernel, which `test/llmock-setup.ts` normalizes so the recording matches on any host. Two behaviours change under an unchanged interface:
 
 - A headless `--resume` carries the session's cost total forward, so the execute run's `total_cost_usd`, and with it `resource_usage.cost_usd`, covers plan and execute. `tokens_input`/`tokens_output` stay the execute run's own.
 - Opus 5.5 is the CLI's default Opus model, and Pro and Team Standard plans default to Opus. Coding tasks pass no `--model`, so they run on whatever the subscription's default is.
