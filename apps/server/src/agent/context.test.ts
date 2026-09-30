@@ -546,25 +546,34 @@ describe("compactMessages", () => {
       expect(countTokens).not.toHaveBeenCalled();
     });
 
-    it("does nothing at exactly the threshold", async () => {
-      const base = [msg("user", ""), msg("assistant", "a"), msg("user", "q")];
-      const maxRequestBytes = 10_000;
-      const threshold = Math.floor(maxRequestBytes * 0.8);
-      const messages = [msg("user", "x".repeat(threshold - bytesOf(base))), ...base.slice(1)];
-      expect(bytesOf(messages)).toBe(threshold);
-      const summarize = vi.fn().mockResolvedValue("a summary");
+    it.each([true, false])(
+      "does nothing at exactly the threshold (skipBudgetStrategies: %s)",
+      async (skip) => {
+        // Past the six kept messages, so a size trigger here would summarize.
+        const base = Array.from({ length: 13 }, (_, i) =>
+          msg(i % 2 === 0 ? "user" : "assistant", i === 0 ? "" : `turn ${i}`),
+        );
+        const maxRequestBytes = 10_000;
+        const threshold = Math.floor(maxRequestBytes * 0.8);
+        const messages = [msg("user", "x".repeat(threshold - bytesOf(base))), ...base.slice(1)];
+        expect(bytesOf(messages)).toBe(threshold);
+        const countTokens = vi.fn().mockResolvedValue(100);
+        const summarize = vi.fn().mockResolvedValue("a summary");
 
-      const result = await compactMessages(
-        "system",
-        messages,
-        undefined,
-        deps({ maxRequestBytes, summarize }),
-        true,
-      );
+        const result = await compactMessages(
+          "system",
+          messages,
+          undefined,
+          deps({ maxRequestBytes, countTokens, summarize }),
+          skip,
+        );
 
-      expect(result.didCompact).toBe(false);
-      expect(summarize).not.toHaveBeenCalled();
-    });
+        expect(result.didCompact).toBe(false);
+        expect(result.messages).toEqual(messages);
+        expect(summarize).not.toHaveBeenCalled();
+        expect(countTokens).toHaveBeenCalledTimes(skip ? 0 : 1);
+      },
+    );
 
     /** Twenty short messages, then a turn attaching a 12.5 MB PDF (16.7 MB of base64). */
     function pdfTurn(): Message[] {
