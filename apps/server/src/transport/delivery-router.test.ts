@@ -1,3 +1,4 @@
+import { err, ok, type Result } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import type { StreamEvent } from "../llm/types.js";
 import {
@@ -7,9 +8,16 @@ import {
   mockStreamingAdapter,
   mockTransportStore,
 } from "../test/factories.js";
-import { type AdapterEntry, createDeliveryRouter, type RoutingContext } from "./delivery-router.js";
+import {
+  type AdapterEntry,
+  createDeliveryRouter,
+  pushOrThrow,
+  type RoutingContext,
+  StreamDeliveryError,
+} from "./delivery-router.js";
 import type { Session } from "./store/index.js";
 import type { ChannelSessionReceive } from "./store/schema.js";
+import type { StreamHandle } from "./types.js";
 
 const textDelta: StreamEvent = { type: "text_delta", text: "hello" };
 
@@ -653,6 +661,212 @@ describe("createDeliveryRouter", () => {
       await delivery.deliverVoice(audio);
 
       expect(ok.sendVoice).toHaveBeenCalledWith("addr-s2", audio);
+    });
+  });
+
+  describe("stream fan-out when a handle fails", () => {
+    /** A failing Telegram-like handle first, a healthy web-like one second. */
+    async function prepareWith(failing: StreamHandle) {
+      const healthy = mockStreamHandle();
+      const adapters = new Map<string, AdapterEntry>([
+        [
+          "ch-tg",
+          { adapter: mockStreamingAdapter({ openStream: vi.fn().mockResolvedValue(failing) }) },
+        ],
+        [
+          "ch-web",
+          { adapter: mockStreamingAdapter({ openStream: vi.fn().mockResolvedValue(healthy) }) },
+        ],
+      ]);
+      const transportStore = mockTransportStore({
+        getSourceSessions: vi
+          .fn()
+          .mockResolvedValue([session("s1", "ch-tg"), session("s2", "ch-web")]),
+      });
+      const router = createDeliveryRouter({ runInTx: fakeRunInTx, adapters, transportStore });
+      return { delivery: await router.prepare(ctx()), healthy };
+    }
+
+    /** The failure a fan-out reported, whether it came back as a value or a rejection. */
+    async function outcome(call: Promise<unknown>): Promise<unknown> {
+      return call.then(
+        (result) => result,
+        (e: unknown) => e,
+      );
+    }
+
+    it("aborts every handle when one rejects, and reports the one that failed", async () => {
+      const { delivery, healthy } = await prepareWith(
+        mockStreamHandle({ abort: vi.fn().mockRejectedValue(new Error("telegram down")) }),
+      );
+
+      const aborted = await outcome(delivery.abort("LLM failed"));
+
+      expect(healthy.abort).toHaveBeenCalledWith("LLM failed");
+      expect(aborted).toEqual(
+        err(new StreamDeliveryError([{ sessionId: "s1", reason: "telegram down" }])),
+      );
+    });
+
+    it("finishes every handle when one reports a failure", async () => {
+      const { delivery, healthy } = await prepareWith(
+        mockStreamHandle({ finish: vi.fn().mockResolvedValue(err("chat not found")) }),
+      );
+
+      const finished = await outcome(delivery.finish());
+
+      expect(healthy.finish).toHaveBeenCalled();
+      expect(finished).toEqual(
+        err(new StreamDeliveryError([{ sessionId: "s1", reason: "chat not found" }])),
+      );
+    });
+
+    it("pushes to every handle when one reports a failure", async () => {
+      const { delivery, healthy } = await prepareWith(
+        mockStreamHandle({ push: vi.fn().mockResolvedValue(err("bot was blocked by the user")) }),
+      );
+
+      const pushed = await outcome(delivery.push(textDelta));
+
+      expect(healthy.push).toHaveBeenCalledWith(textDelta);
+      expect(pushed).toEqual(
+        err(new StreamDeliveryError([{ sessionId: "s1", reason: "bot was blocked by the user" }])),
+      );
+    });
+
+    it("pushOrThrow throws the fan-out's failure after every handle has the event", async () => {
+      const { delivery, healthy } = await prepareWith(
+        mockStreamHandle({ push: vi.fn().mockResolvedValue(err("chat not found")) }),
+      );
+
+      await expect(pushOrThrow(delivery, textDelta)).rejects.toEqual(
+        new StreamDeliveryError([{ sessionId: "s1", reason: "chat not found" }]),
+      );
+      expect(healthy.push).toHaveBeenCalledWith(textDelta);
+    });
+
+    it("reports every failing handle, having called them all at once", async () => {
+      const telegram = Promise.withResolvers<Result<void, string>>();
+      const web = Promise.withResolvers<Result<void, string>>();
+      const webPush = vi.fn().mockReturnValue(web.promise);
+      const adapters = new Map<string, AdapterEntry>([
+        [
+          "ch-tg",
+          {
+            adapter: mockStreamingAdapter({
+              openStream: vi
+                .fn()
+                .mockResolvedValue(
+                  mockStreamHandle({ push: vi.fn().mockReturnValue(telegram.promise) }),
+                ),
+            }),
+          },
+        ],
+        [
+          "ch-web",
+          {
+            adapter: mockStreamingAdapter({
+              openStream: vi.fn().mockResolvedValue(mockStreamHandle({ push: webPush })),
+            }),
+          },
+        ],
+      ]);
+      const transportStore = mockTransportStore({
+        getSourceSessions: vi
+          .fn()
+          .mockResolvedValue([session("s1", "ch-tg"), session("s2", "ch-web")]),
+      });
+      const delivery = await createDeliveryRouter({
+        runInTx: fakeRunInTx,
+        adapters,
+        transportStore,
+      }).prepare(ctx());
+
+      const pushed = delivery.push(textDelta);
+      // The second handle has the event while the first is still out.
+      await Promise.resolve();
+      expect(webPush).toHaveBeenCalledWith(textDelta);
+      web.resolve(err("tab gone"));
+      telegram.resolve(err("chat not found"));
+
+      expect(await pushed).toEqual(
+        err(
+          new StreamDeliveryError([
+            { sessionId: "s1", reason: "chat not found" },
+            { sessionId: "s2", reason: "tab gone" },
+          ]),
+        ),
+      );
+    });
+
+    it("reports success when every handle succeeds", async () => {
+      const { delivery } = await prepareWith(mockStreamHandle());
+
+      expect(await delivery.push(textDelta)).toEqual(ok(undefined));
+      expect(await delivery.finish()).toEqual(ok(undefined));
+      expect(await delivery.abort("x")).toEqual(ok(undefined));
+    });
+  });
+
+  describe("a reply whose stream failed to finish", () => {
+    /** A Telegram-shaped target that streams and delivers, then a web-shaped one that only streams. */
+    async function prepareWithFailedFinish(deliver = vi.fn().mockResolvedValue(undefined)) {
+      const failing = mockStreamHandle({
+        finish: vi.fn().mockResolvedValue(err("chat not found")),
+      });
+      const telegram = {
+        ...mockStreamingAdapter({ openStream: vi.fn().mockResolvedValue(failing) }),
+        deliver,
+      };
+      const adapters = new Map<string, AdapterEntry>([
+        [
+          "ch-tg",
+          {
+            adapter: telegram,
+            renderOutput: (markdown: string) => ({ text: `<b>${markdown}</b>`, parseMode: "HTML" }),
+          },
+        ],
+        ["ch-web", { adapter: mockStreamingAdapter() }],
+      ]);
+      const transportStore = mockTransportStore({
+        getSourceSessions: vi
+          .fn()
+          .mockResolvedValue([session("s1", "ch-tg"), session("s2", "ch-web")]),
+      });
+      const router = createDeliveryRouter({ runInTx: fakeRunInTx, adapters, transportStore });
+      return { delivery: await router.prepare(ctx()), deliver };
+    }
+
+    it("delivers the reply, rendered and without media, through the target's batch deliver", async () => {
+      const { delivery, deliver } = await prepareWithFailedFinish();
+
+      const finished = await delivery.finish();
+      expect(finished).toEqual(
+        err(new StreamDeliveryError([{ sessionId: "s1", reason: "chat not found" }])),
+      );
+      await delivery.deliverUnstreamed(["s1"], "the reply");
+
+      expect(deliver).toHaveBeenCalledExactlyOnceWith("addr-s1", {
+        text: "<b>the reply</b>",
+        parseMode: "HTML",
+      });
+    });
+
+    it("skips a session whose adapter has no batch deliver", async () => {
+      const { delivery, deliver } = await prepareWithFailedFinish();
+
+      await expect(delivery.deliverUnstreamed(["s2"], "the reply")).resolves.toBeUndefined();
+      expect(deliver).not.toHaveBeenCalled();
+    });
+
+    it("rejects when the delivery fails, so its step retries", async () => {
+      const { delivery } = await prepareWithFailedFinish(
+        vi.fn().mockRejectedValue(new Error("Too Many Requests: retry after 40")),
+      );
+
+      await expect(delivery.deliverUnstreamed(["s1"], "the reply")).rejects.toThrow(
+        "retry after 40",
+      );
     });
   });
 

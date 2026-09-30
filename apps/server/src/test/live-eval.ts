@@ -148,11 +148,14 @@ export class EvalCoreMemory implements CoreMemoryNamespace {
           getCoreMemoryBlocks: async (_tx, _userId, profileClass) => this.#read(profileClass),
           upsertCoreMemoryBlock: async (_tx, { profileClass, key, content }) => {
             const row = { profileClass, key, content };
-            this.#rows.set(EvalCoreMemory.#slot(row), row);
+            const slot = EvalCoreMemory.#slot(row);
+            const stored = this.#rows.get(slot);
+            this.#rows.set(slot, row);
+            if (stored === undefined) return "created";
+            return stored.content === content ? "unchanged" : "updated";
           },
-          deleteCoreMemoryBlock: async (_tx, { profileClass, key }) => {
-            this.#rows.delete(EvalCoreMemory.#slot({ profileClass, key }));
-          },
+          deleteCoreMemoryBlock: async (_tx, { profileClass, key }) =>
+            this.#rows.delete(EvalCoreMemory.#slot({ profileClass, key })),
         },
       },
       { userId: EVAL_USER_ID, scope },
@@ -376,12 +379,12 @@ export function createUsageMeter(): UsageMeter {
     },
     metered: (provider) => ({
       name: provider.name,
-      chat: async (params) => {
-        const response = await provider.chat(params);
+      chat: async (params, options) => {
+        const response = await provider.chat(params, options);
         meter.add(response.usage);
         return response;
       },
-      chatStream: (params) => provider.chatStream(params),
+      chatStream: (params, options) => provider.chatStream(params, options),
       countTokens: (params) => provider.countTokens(params),
     }),
     summary: () =>

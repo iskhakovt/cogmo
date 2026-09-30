@@ -382,7 +382,7 @@ describe("Dispatcher", () => {
     const d = await leased(ch);
     d.close("first");
     d.close("second");
-    expect(await d.dead).toBe("first");
+    expect(await d.dead).toEqual({ cause: "host", reason: "first" });
     expect(ch.close).toHaveBeenCalledTimes(1);
   });
 
@@ -441,7 +441,10 @@ describe("Dispatcher", () => {
     d.release();
     ch.fail(new Error("transport: worker closed its output"));
 
-    expect(await d.dead).toBe("transport: worker closed its output");
+    expect(await d.dead).toEqual({
+      cause: "worker",
+      reason: "transport: worker closed its output",
+    });
     expect(ch.close).toHaveBeenCalledTimes(1);
     expect(d.tryAcquire().isErr()).toBe(true);
   });
@@ -451,7 +454,7 @@ describe("Dispatcher", () => {
     const d = await leased(ch);
     d.close("disposed");
     await flush();
-    expect(await d.dead).toBe("disposed");
+    expect(await d.dead).toEqual({ cause: "host", reason: "disposed" });
   });
 
   it("dispatches sequential tasks on a persistent channel (per-task ctxHandler)", async () => {
@@ -846,7 +849,10 @@ describe("Dispatcher", () => {
       ch.fail(new Error("transport: worker closed its output"));
       await outcome;
       await flush();
-      expect(await d.dead).toBe("transport: worker closed its output");
+      expect(await d.dead).toEqual({
+        cause: "worker",
+        reason: "transport: worker closed its output",
+      });
       expect(disposable).toBe(false);
 
       expect(d.release().isOk()).toBe(true);
@@ -862,7 +868,7 @@ describe("Dispatcher", () => {
       const outcome = d.invoke(INVOKE, { ctxHandler: noopHandler(), deadline: NEVER });
       lifetime.abort(new Error("pool disposed"));
       expect(await outcome).toEqual(failed("pool disposed"));
-      expect(await d.dead).toBe("pool disposed");
+      expect(await d.dead).toEqual({ cause: "host", reason: "pool disposed" });
       expect(ch.close).toHaveBeenCalled();
     });
   });

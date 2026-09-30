@@ -26,6 +26,7 @@
 import { LLMock } from "@copilotkit/aimock";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { OpenAICompatibleProvider } from "../llm/openai-compat.js";
+import type { ResponseMeta } from "../llm/types.js";
 import { fileLlmockUrl } from "./integration-file.js";
 
 const PROMPT = "What is the capital of France? Answer with just the city name.";
@@ -87,42 +88,37 @@ describe("OpenAICompatibleProvider — xAI Grok 4.3 via OpenRouter (recorded)", 
     expect(response.usage.outputTokens).toBeGreaterThan(0);
   });
 
-  it.skipIf(IS_RECORD)(
-    "streams the same prompt without leaving the response promise dangling",
-    async () => {
-      // Companion to the loop-level regression in `src/agent/loop.test.ts`:
-      // exercise the actual streaming path against the recorded fixture so
-      // a refactor that breaks `chatStream` end-to-end gets caught here.
-      // Skipped during recording — the chat() call above captures the
-      // single OpenRouter response that llmock serves to both `chat` and
-      // `chatStream` on subsequent replays.
-      const provider = new OpenAICompatibleProvider("openrouter-xai-stream", {
-        apiKey: "test-key",
-        baseURL: `${fileLlmockUrl()}/v1`,
-        cacheDialect: "openrouter",
-      });
+  it.skipIf(IS_RECORD)("streams the same prompt", async () => {
+    // Exercise the streaming path against the recorded fixture so a
+    // refactor that breaks `chatStream` end-to-end gets caught here.
+    // Skipped during recording — the chat() call above captures the
+    // single OpenRouter response that llmock serves to both `chat` and
+    // `chatStream` on subsequent replays.
+    const provider = new OpenAICompatibleProvider("openrouter-xai-stream", {
+      apiKey: "test-key",
+      baseURL: `${fileLlmockUrl()}/v1`,
+      cacheDialect: "openrouter",
+    });
 
-      const { events, response } = provider.chatStream({
-        model: MODEL,
-        system: SYSTEM,
-        messages: [{ role: "user", content: PROMPT }],
-        maxTokens: 100,
-      });
+    let collected = "";
+    let meta: ResponseMeta | undefined;
+    for await (const frame of provider.chatStream({
+      model: MODEL,
+      system: SYSTEM,
+      messages: [{ role: "user", content: PROMPT }],
+      maxTokens: 100,
+    })) {
+      if (frame.type === "text_delta") collected += frame.text;
+      if (frame.type === "done") meta = frame.meta;
+    }
 
-      let collected = "";
-      for await (const event of events) {
-        if (event.type === "text_delta") collected += event.text;
-      }
-      const meta = await response;
-
-      expect(collected.toLowerCase()).toMatch(/paris/);
-      expect(meta.stopReason).toBe("end_turn");
-      // Usage in the streaming path requires the upstream to emit a final
-      // `{choices: [], usage: {...}}` chunk under `stream_options:
-      // { include_usage: true }`. Real upstreams do this; llmock's
-      // synthetic SSE stream does not surface the fixture's usage
-      // overrides on the wire. The non-streaming test above covers
-      // the usage-mapping path.
-    },
-  );
+    expect(collected.toLowerCase()).toMatch(/paris/);
+    expect(meta?.stopReason).toBe("end_turn");
+    // Usage in the streaming path requires the upstream to emit a final
+    // `{choices: [], usage: {...}}` chunk under `stream_options:
+    // { include_usage: true }`. Real upstreams do this; llmock's
+    // synthetic SSE stream does not surface the fixture's usage
+    // overrides on the wire. The non-streaming test above covers
+    // the usage-mapping path.
+  });
 });

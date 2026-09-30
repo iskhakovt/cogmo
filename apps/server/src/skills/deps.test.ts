@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { promisify } from "node:util";
+import { err, ok } from "neverthrow";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { type MockProxy, mock } from "vitest-mock-extended";
 import type { ExecStreamingHandle, SandboxClient, SandboxSession } from "../sandbox/index.js";
@@ -138,6 +139,10 @@ function makeFakeExec(): FakeExec {
     stdin: stdinSink,
     stdout: stdoutSource,
     stderr: stderrSource,
+    exited: waitPromise.then(
+      (exit) => ok(exit),
+      (error: Error) => err({ kind: "transport_failed", error }),
+    ),
     wait: () => waitPromise,
     dispose: async () => {
       stdoutSource.end();
@@ -285,6 +290,7 @@ describe("makeSandboxLockfileCompiler", () => {
     h.session.execStreaming.mockResolvedValueOnce({
       stdout: new PassThrough(),
       stderr: new PassThrough(),
+      exited: Promise.resolve(ok({ exitCode: 0 })),
       wait: vi.fn(),
       dispose: vi.fn().mockResolvedValue(undefined),
     });
@@ -590,6 +596,7 @@ describe("ensureVenvPopulated", () => {
     session.execStreaming.mockResolvedValueOnce({
       stdout: new PassThrough(),
       stderr: new PassThrough(),
+      exited: Promise.resolve(ok({ exitCode: 0 })),
       wait: vi.fn(),
       dispose: vi.fn().mockResolvedValue(undefined),
     });

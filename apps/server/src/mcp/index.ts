@@ -3,12 +3,7 @@ export { mcpDescriptorToToolSpec } from "./adapter.js";
 export type { PinDiff } from "./approval.js";
 export { diffPins, hashToolSchema } from "./approval.js";
 export type { McpConnection } from "./client/client.js";
-export {
-  McpConnectionPool,
-  type McpConnectionPoolOptions,
-  McpPoolError,
-  type McpPoolErrorCode,
-} from "./client/pool.js";
+export { McpConnectionPool, type McpConnectionPoolOptions } from "./client/pool.js";
 export { HostRunner, type Runner } from "./client/runner.js";
 export {
   assertValidServerName,
@@ -28,6 +23,7 @@ export {
   McpValueSourceSchema,
   ToolSchemaSnapshotSchema,
 } from "./config.js";
+export { McpPoolError, type McpPoolErrorCode } from "./errors.js";
 export {
   type McpRegistry,
   McpRegistryImpl,

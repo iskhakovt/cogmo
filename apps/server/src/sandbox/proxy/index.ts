@@ -2,6 +2,7 @@ import { mkdir, rm } from "node:fs/promises";
 import * as http from "node:http";
 import * as net from "node:net";
 import { join } from "node:path";
+import { addAbortSignal } from "node:stream";
 import { logger } from "../../logger.js";
 import { applyContainerCreatePolicy } from "./policy.js";
 import { classify } from "./router.js";
@@ -23,13 +24,27 @@ const DEFAULT_HOST_DOCKER_SOCKET = "/var/run/docker.sock";
 const CONTAINER_CREATE_MAX_BODY_BYTES = 1 * 1024 * 1024;
 
 /**
- * Per-connection task-id tag — set by the per-task net.Server's `connection`
+ * Per-connection task tag — set by the per-task net.Server's `connection`
  * listener. Connection handlers look up the live scope via `#scopes.get(taskId)`
  * each request, so a `registerTask` update mid-flight (e.g. once the
  * supervisor learns the parent docker id) takes effect immediately without
- * re-binding the socket.
+ * re-binding the socket. `signal` is the task's: upstream connections opened
+ * for this client are bound to it.
  */
-const TASK_ID_BY_SOCKET = new WeakMap<net.Socket, string>();
+const CONNECTION_TASK = new WeakMap<net.Socket, { taskId: string; signal: AbortSignal }>();
+
+/**
+ * A registered task's socket. `controller` aborts on `unregisterTask` and
+ * `close`, which destroys every connection accepted on the socket and every
+ * upstream connection opened for one — hijacked streams included, so the
+ * listener's `close()` never waits on a container.
+ */
+interface TaskSocket {
+  socketPath: string;
+  controller: AbortController;
+  /** Resolves once the listener is bound; rejects if binding failed. */
+  listening: Promise<net.Server>;
+}
 
 /**
  * Unix-socket Docker daemon proxy. Listens on multiple per-task socket
@@ -52,10 +67,11 @@ export class CogmoSocketProxy {
   #socketDir: string;
   /** Shared HTTP server that processes parsed requests from any task socket. */
   #httpServer: http.Server;
-  /** One per-task net.Server keyed by taskId. */
-  #taskServers = new Map<string, net.Server>();
-  /** Tracks task socket paths so we can remove them on shutdown. */
-  #socketPaths = new Map<string, string>();
+  /**
+   * One per task, keyed by taskId. Set before the listener binds, so an
+   * `unregisterTask` or `close` racing `registerTask` finds it.
+   */
+  #tasks = new Map<string, TaskSocket>();
   /** Live task scopes — looked up per-request so `registerTask` updates take effect immediately. */
   #scopes = new Map<string, TaskScope>();
   #closed = false;
@@ -71,7 +87,7 @@ export class CogmoSocketProxy {
       this.#handleUpgrade(req, socket as net.Socket, head);
     });
     this.#httpServer.on("clientError", (err, socket) => {
-      log.warn({ err: err.message }, "proxy http clientError");
+      if (!isAbortError(err)) log.warn({ err: err.message }, "proxy http clientError");
       socket.destroy();
     });
   }
@@ -89,67 +105,89 @@ export class CogmoSocketProxy {
    * with a placeholder parent docker id and updates after `createContainer`
    * doesn't disrupt connections in flight). Returns the same path either
    * way so callers can store it once at first register.
+   *
+   * Rejects if the socket can't be bound, and with the abort reason when
+   * `unregisterTask` or `close` runs before the bind completes.
    */
   async registerTask(scope: TaskScope): Promise<string> {
     if (this.#closed) throw new Error("proxy is closed");
-    this.#scopes.set(scope.taskId, scope);
+    const { taskId } = scope;
+    this.#scopes.set(taskId, scope);
 
-    const existing = this.#socketPaths.get(scope.taskId);
-    if (existing) return existing;
-
-    const socketPath = join(this.#socketDir, `${scope.taskId}.sock`);
-    await rm(socketPath, { force: true });
-    const taskId = scope.taskId;
-
-    const server = net.createServer((socket) => {
-      TASK_ID_BY_SOCKET.set(socket, taskId);
-      this.#httpServer.emit("connection", socket);
-    });
-    server.on("error", (err) => log.warn({ err: err.message, taskId }, "task socket error"));
-    await new Promise<void>((resolve, reject) => {
-      server.once("error", reject);
-      server.listen(socketPath, () => {
-        server.removeListener("error", reject);
-        resolve();
-      });
-    });
-    this.#taskServers.set(taskId, server);
-    this.#socketPaths.set(taskId, socketPath);
-    log.info({ taskId, socketPath }, "registered task proxy socket");
-    return socketPath;
+    let task = this.#tasks.get(taskId);
+    if (!task) {
+      task = this.#openTaskSocket(taskId);
+      this.#tasks.set(taskId, task);
+    }
+    try {
+      await task.listening;
+    } catch (err) {
+      if (this.#tasks.get(taskId) === task) this.#tasks.delete(taskId);
+      throw err;
+    }
+    // An unregister or close during the bind aborted the task and owns its
+    // teardown; the socket is not usable.
+    task.controller.signal.throwIfAborted();
+    return task.socketPath;
   }
 
-  /** Close and remove a task's socket. Idempotent. */
+  /**
+   * Close and remove a task's socket, ending every connection made through
+   * it. Idempotent.
+   */
   async unregisterTask(taskId: string): Promise<void> {
-    const server = this.#taskServers.get(taskId);
-    const socketPath = this.#socketPaths.get(taskId);
-    this.#taskServers.delete(taskId);
-    this.#socketPaths.delete(taskId);
+    const task = this.#tasks.get(taskId);
+    this.#tasks.delete(taskId);
     this.#scopes.delete(taskId);
-    if (server) {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-    }
-    if (socketPath) {
-      await rm(socketPath, { force: true });
-    }
+    if (!task) return;
+    task.controller.abort(new Error("task socket unregistered"));
+    const server = await task.listening.catch(() => null);
+    if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(task.socketPath, { force: true });
   }
 
   /** Tear down all task sockets and the shared HTTP server. */
   async close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
-    for (const taskId of [...this.#taskServers.keys()]) {
-      await this.unregisterTask(taskId);
-    }
+    const closed = new Error("proxy is closed");
+    for (const task of this.#tasks.values()) task.controller.abort(closed);
+    await Promise.all([...this.#tasks.keys()].map((taskId) => this.unregisterTask(taskId)));
     await new Promise<void>((resolve) => this.#httpServer.close(() => resolve()));
+  }
+
+  #openTaskSocket(taskId: string): TaskSocket {
+    const socketPath = join(this.#socketDir, `${taskId}.sock`);
+    const controller = new AbortController();
+    const { signal } = controller;
+    const server = net.createServer((socket) => {
+      // Destroys the socket at once if it was accepted after the abort.
+      addAbortSignal(signal, socket);
+      CONNECTION_TASK.set(socket, { taskId, signal });
+      this.#httpServer.emit("connection", socket);
+    });
+    server.on("error", (err) => log.warn({ err: err.message, taskId }, "task socket error"));
+    const listening = (async () => {
+      await rm(socketPath, { force: true });
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(socketPath, () => {
+          server.removeListener("error", reject);
+          resolve();
+        });
+      });
+      log.info({ taskId, socketPath }, "registered task proxy socket");
+      return server;
+    })();
+    return { socketPath, controller, listening };
   }
 
   // ── HTTP request dispatch ────────────────────────────────────────────────
 
   #handleRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
-    const taskId = TASK_ID_BY_SOCKET.get(req.socket);
-    const scope = taskId ? this.#scopes.get(taskId) : undefined;
-    if (!scope) {
+    const connection = CONNECTION_TASK.get(req.socket);
+    const scope = connection ? this.#scopes.get(connection.taskId) : undefined;
+    if (!connection || !scope) {
       // No scope tag — the connection didn't come through a registered task
       // socket, or the task was unregistered between connect and request.
       respondJson(res, 500, { message: "Cogmo proxy: connection has no task scope" });
@@ -169,9 +207,13 @@ export class CogmoSocketProxy {
       return;
     }
 
+    const { signal } = connection;
     if (route.kind === "policy" && route.subject === "container_create") {
-      this.#handleContainerCreate(req, res, scope).catch((err: unknown) => {
-        log.error({ err, taskId: scope.taskId }, "container_create policy failed");
+      this.#handleContainerCreate(req, res, scope, signal).catch((err: unknown) => {
+        // An unregister mid-read resets the body stream: teardown, not a fault.
+        if (!signal.aborted) {
+          log.error({ err, taskId: scope.taskId }, "container_create policy failed");
+        }
         if (!res.headersSent) {
           respondJson(res, 500, { message: `Cogmo proxy: ${(err as Error).message}` });
         }
@@ -180,18 +222,19 @@ export class CogmoSocketProxy {
     }
 
     if (route.kind === "hijack") {
-      this.#hijackRequest(req, res);
+      this.#hijackRequest(req, res, signal);
       return;
     }
 
     // Plain forward.
-    this.#forwardRequest(req, res);
+    this.#forwardRequest(req, res, signal);
   }
 
   async #handleContainerCreate(
     req: http.IncomingMessage,
     res: http.ServerResponse,
     scope: TaskScope,
+    signal: AbortSignal,
   ): Promise<void> {
     let body: Buffer;
     try {
@@ -220,18 +263,19 @@ export class CogmoSocketProxy {
       respondJson(res, decision.status, { message: decision.message });
       return;
     }
-    this.#forwardWithBody(req, res, decision.body);
+    this.#forwardWithBody(req, res, decision.body, signal);
   }
 
   // ── Forwarding ──────────────────────────────────────────────────────────
 
-  #forwardRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
+  #forwardRequest(req: http.IncomingMessage, res: http.ServerResponse, signal: AbortSignal): void {
     const upstream = http.request(
       {
         socketPath: this.#hostDockerSocket,
         method: req.method,
         path: req.url,
         headers: cloneHeaders(req.headers),
+        signal,
       },
       (upstreamRes) => {
         res.writeHead(upstreamRes.statusCode ?? 500, upstreamRes.headers);
@@ -239,7 +283,8 @@ export class CogmoSocketProxy {
       },
     );
     upstream.on("error", (err) => {
-      log.warn({ err: err.message, url: req.url }, "upstream forward error");
+      if (!isAbortError(err))
+        log.warn({ err: err.message, url: req.url }, "upstream forward error");
       if (!res.headersSent) {
         respondJson(res, 502, { message: `Cogmo proxy upstream error: ${err.message}` });
       } else {
@@ -249,7 +294,12 @@ export class CogmoSocketProxy {
     req.pipe(upstream);
   }
 
-  #forwardWithBody(req: http.IncomingMessage, res: http.ServerResponse, body: Buffer): void {
+  #forwardWithBody(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    body: Buffer,
+    signal: AbortSignal,
+  ): void {
     // Mutated body — strip any Content-Length / Transfer-Encoding the client
     // sent and re-supply Content-Length so the upstream sees a well-framed
     // request. Strip Expect: 100-continue too — we already consumed the body.
@@ -265,6 +315,7 @@ export class CogmoSocketProxy {
         method: req.method,
         path: req.url,
         headers,
+        signal,
       },
       (upstreamRes) => {
         res.writeHead(upstreamRes.statusCode ?? 500, upstreamRes.headers);
@@ -272,7 +323,9 @@ export class CogmoSocketProxy {
       },
     );
     upstream.on("error", (err) => {
-      log.warn({ err: err.message, url: req.url }, "upstream forward (body) error");
+      if (!isAbortError(err)) {
+        log.warn({ err: err.message, url: req.url }, "upstream forward (body) error");
+      }
       if (!res.headersSent) {
         respondJson(res, 502, { message: `Cogmo proxy upstream error: ${err.message}` });
       } else {
@@ -290,7 +343,7 @@ export class CogmoSocketProxy {
    * BuildKit `Upgrade: tcp` → HTTP/2 case — once the upgrade completes
    * we don't speak the inner protocol.
    */
-  #hijackRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
+  #hijackRequest(req: http.IncomingMessage, res: http.ServerResponse, signal: AbortSignal): void {
     const clientSocket = req.socket;
     if (!clientSocket) {
       respondJson(res, 500, { message: "Cogmo proxy: hijack without socket" });
@@ -299,7 +352,7 @@ export class CogmoSocketProxy {
     // Detach from the http response — we're going raw.
     res.detachSocket?.(clientSocket);
 
-    const upstream = net.createConnection({ path: this.#hostDockerSocket });
+    const upstream = net.createConnection({ path: this.#hostDockerSocket, signal });
     upstream.once("connect", () => {
       // Replay the request line and headers to the upstream daemon. We
       // can't use http.request here because Node's http client owns the
@@ -315,7 +368,7 @@ export class CogmoSocketProxy {
       upstream.pipe(clientSocket);
     });
     upstream.on("error", (err) => {
-      log.warn({ err: err.message, url: req.url }, "upstream hijack error");
+      if (!isAbortError(err)) log.warn({ err: err.message, url: req.url }, "upstream hijack error");
       clientSocket.destroy(err);
     });
     clientSocket.on("error", () => upstream.destroy());
@@ -331,8 +384,8 @@ export class CogmoSocketProxy {
    * `Upgrade: tcp` to `/swarm/*` would slip past the deny prefix.
    */
   #handleUpgrade(req: http.IncomingMessage, clientSocket: net.Socket, head: Buffer): void {
-    const taskId = TASK_ID_BY_SOCKET.get(req.socket);
-    if (!taskId || !this.#scopes.has(taskId)) {
+    const connection = CONNECTION_TASK.get(req.socket);
+    if (!connection || !this.#scopes.has(connection.taskId)) {
       writeRawHttpStatusAndDestroy(clientSocket, 500, "Cogmo proxy: connection has no task scope");
       return;
     }
@@ -353,7 +406,10 @@ export class CogmoSocketProxy {
       return;
     }
 
-    const upstream = net.createConnection({ path: this.#hostDockerSocket });
+    const upstream = net.createConnection({
+      path: this.#hostDockerSocket,
+      signal: connection.signal,
+    });
     upstream.once("connect", () => {
       upstream.write(buildHttpRequestPreamble(req));
       if (head.length > 0) upstream.write(head);
@@ -361,7 +417,8 @@ export class CogmoSocketProxy {
       upstream.pipe(clientSocket);
     });
     upstream.on("error", (err) => {
-      log.warn({ err: err.message, url: req.url }, "upstream upgrade error");
+      if (!isAbortError(err))
+        log.warn({ err: err.message, url: req.url }, "upstream upgrade error");
       clientSocket.destroy(err);
     });
     clientSocket.on("error", () => upstream.destroy());
@@ -414,6 +471,11 @@ function buildHttpRequestPreamble(req: http.IncomingMessage): Buffer {
   }
   lines.push("", "");
   return Buffer.from(lines.join("\r\n"), "utf8");
+}
+
+/** An abort from the task's signal: an expected teardown, not a fault to log. */
+function isAbortError(err: Error): boolean {
+  return err.name === "AbortError";
 }
 
 function cloneHeaders(h: http.IncomingHttpHeaders): Record<string, string | string[]> {

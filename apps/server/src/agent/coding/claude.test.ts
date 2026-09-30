@@ -1,4 +1,4 @@
-import { PassThrough, type Readable, type Writable } from "node:stream";
+import { PassThrough, type Writable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import type {
@@ -7,6 +7,7 @@ import type {
   SandboxSession,
 } from "../../sandbox/index.js";
 import { assertKind, expectDefined } from "../../test/assertions.js";
+import { fakeExecHandle } from "../../test/coding-fixtures.js";
 import type { CodingEvent } from "./backend.js";
 import { ClaudeCodeBackend } from "./claude.js";
 import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
@@ -52,13 +53,7 @@ function fakeContainer(
       stderr.end();
     });
 
-    return {
-      stdin,
-      stdout: stdout as Readable,
-      stderr: stderr as Readable,
-      wait: async () => ({ exitCode }),
-      dispose: async () => {},
-    };
+    return fakeExecHandle({ stdin, stdout, stderr, exitCode });
   });
   return {
     container: {

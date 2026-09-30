@@ -1,6 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from "vitest";
 import type { Transactor } from "../../db/index.js";
+import { coreMemoryEdits } from "../../metrics.js";
 import { fakeRunInTx, mockAgentStore } from "../../test/factories.js";
+import type { CoreMemoryUpsertOutcome } from "../store/index.js";
 import type { CoreMemoryScope, ScopedCoreMemoryBlock } from "./scope.js";
 import { type CoreMemoryWrite, writeCoreMemoryBlock } from "./write-core-memory-block.js";
 
@@ -70,6 +72,147 @@ describe("writeCoreMemoryBlock", () => {
     const { result } = await write(RESTRICTED, "Identity");
 
     expect(result._unsafeUnwrap()).toEqual({ kind: "class", profileClass: "game" });
+  });
+});
+
+describe("writeCoreMemoryBlock: the edit counter", () => {
+  let add: MockInstance<typeof coreMemoryEdits.add>;
+  beforeEach(() => {
+    add = vi.spyOn(coreMemoryEdits, "add");
+  });
+  afterEach(() => {
+    add.mockRestore();
+  });
+
+  async function writeWith(
+    scope: CoreMemoryScope,
+    key: string,
+    setup: {
+      upsert?: CoreMemoryUpsertOutcome;
+      deleted?: boolean;
+      rows?: ReadonlyArray<ScopedCoreMemoryBlock>;
+      runInTx?: Transactor;
+    },
+  ) {
+    const agentStore = mockAgentStore({
+      getCoreMemoryBlocks: vi.fn().mockResolvedValue(setup.rows ?? []),
+      upsertCoreMemoryBlock: vi.fn().mockResolvedValue(setup.upsert ?? "created"),
+      deleteCoreMemoryBlock: vi.fn().mockResolvedValue(setup.deleted ?? false),
+    });
+    return writeCoreMemoryBlock(
+      { runInTx: setup.runInTx ?? fakeRunInTx, agentStore },
+      { userId: "user-1", scope, key, content: "Name: Sam" },
+    );
+  }
+
+  /** A 40001 retry: the callback runs twice, and only the second attempt commits. */
+  const retried: Transactor = async (cb) => {
+    await fakeRunInTx(cb);
+    return fakeRunInTx(cb);
+  };
+
+  /** The callback completes, then the commit fails. */
+  const commitFails: Transactor = async (cb) => {
+    await fakeRunInTx(cb);
+    throw new Error("commit failed");
+  };
+
+  it.each(["identity", "user_profile", "active_projects", "preferences"])(
+    "records the documented key %s as itself",
+    async (key) => {
+      await writeWith(UNCLASSED, key, { upsert: "created" });
+
+      expect(add).toHaveBeenCalledWith(1, expect.objectContaining({ key }));
+    },
+  );
+
+  it.each(["work_hours", "Identity", "Name: Samuel Carter, Lisbon"])(
+    "records any other key, %s, as other",
+    async (key) => {
+      await writeWith(UNCLASSED, key, { upsert: "created" });
+
+      expect(add).toHaveBeenCalledWith(1, { key: "other", target: "unclassed", change: "created" });
+    },
+  );
+
+  it.each<[string, CoreMemoryScope]>([
+    ["a block", UNCLASSED],
+    ["an override", RESTRICTED],
+  ])("counts %s once when the transaction retries its callback", async (_name, scope) => {
+    await writeWith(scope, "identity", { upsert: "updated", runInTx: retried });
+
+    expect(add).toHaveBeenCalledTimes(1);
+  });
+
+  it.each<[string, CoreMemoryScope]>([
+    ["a block", UNCLASSED],
+    ["an override", RESTRICTED],
+  ])("does not count %s whose commit fails", async (_name, scope) => {
+    await expect(
+      writeWith(scope, "identity", { upsert: "updated", runInTx: commitFails }),
+    ).rejects.toThrow("commit failed");
+
+    expect(add).not.toHaveBeenCalled();
+  });
+
+  const TARGETS: ReadonlyArray<{ scope: CoreMemoryScope; key: string; target: string }> = [
+    { scope: CLASSED, key: "identity", target: "shared" },
+    { scope: UNCLASSED, key: "user_profile", target: "unclassed" },
+    { scope: CLASSED, key: "preferences", target: "class" },
+    { scope: RESTRICTED, key: "identity", target: "override" },
+  ];
+  const CHANGES: ReadonlyArray<Exclude<CoreMemoryUpsertOutcome, "unchanged">> = [
+    "created",
+    "updated",
+  ];
+
+  it.each(TARGETS.flatMap((t) => CHANGES.map((change) => ({ ...t, change }))))(
+    "counts one $change edit, targeting $target, with its labels",
+    async ({ scope, key, target, change }) => {
+      await writeWith(scope, key, { upsert: change });
+
+      expect(add).toHaveBeenCalledTimes(1);
+      expect(add).toHaveBeenCalledWith(1, { key, target, change });
+    },
+  );
+
+  it.each<[string, CoreMemoryScope]>([
+    ["a block", UNCLASSED],
+    ["an override", RESTRICTED],
+  ])("does not count a write that leaves %s as it was", async (_name, scope) => {
+    const result = await writeWith(scope, "identity", { upsert: "unchanged" });
+
+    expect(result.isOk()).toBe(true);
+    expect(add).not.toHaveBeenCalled();
+  });
+
+  it("counts deleting an override that matches the shared identity", async () => {
+    const result = await writeWith(RESTRICTED, "identity", {
+      rows: [{ profileClass: null, key: "identity", content: "Name: Sam" }],
+      deleted: true,
+    });
+
+    expect(result._unsafeUnwrap()).toEqual({
+      kind: "override-matches-shared",
+      profileClass: "game",
+    });
+    expect(add).toHaveBeenCalledTimes(1);
+    expect(add).toHaveBeenCalledWith(1, { key: "identity", target: "override", change: "deleted" });
+  });
+
+  it("does not count a delete that finds no override", async () => {
+    await writeWith(RESTRICTED, "identity", {
+      rows: [{ profileClass: null, key: "identity", content: "Name: Sam" }],
+      deleted: false,
+    });
+
+    expect(add).not.toHaveBeenCalled();
+  });
+
+  it("does not count a refused write", async () => {
+    await writeWith({ kind: "none" }, "identity", { upsert: "created" });
+
+    expect(add).not.toHaveBeenCalled();
   });
 });
 

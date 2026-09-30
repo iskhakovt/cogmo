@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { PassThrough, Writable } from "node:stream";
-import type { PtyHandle } from "@daytona/sdk";
+import { DaytonaNotFoundError, type PtyHandle, type PtyResult } from "@daytona/sdk";
+import { err, ok, type Result } from "neverthrow";
 import { logger } from "../../logger.js";
-import { type ExecOptions, type ExecStreamingHandle, ExecTimeoutError } from "../index.js";
-import { DisposedError } from "./exec-streaming.js";
+import { describeError } from "../../util/describe-error.js";
+import type { ExecOptions, ExecStreamingHandle } from "../exec.js";
+import { type ExecBackend, type ExecSink, type ExecStarted, runExec } from "../exec-run.js";
 import { shellEscape, shellEscapeArgv } from "./shell-quote.js";
 
 const log = logger.child({ component: "sandbox.daytona.exec-pty" });
@@ -38,6 +39,12 @@ export interface PtyFileSystemClient {
   deleteFile(path: string): Promise<void>;
 }
 
+const PTY_COLS = 200;
+const PTY_ROWS = 50;
+/** Cap on the stderr tmpfile drained after exit — `downloadFile` is unbounded. */
+const MAX_STDERR_BYTES = 1024 * 1024;
+const STDERR_TRUNCATED_SUFFIX = "\n[cogmo: stderr truncated]\n";
+
 /**
  * PTY-backed exec for callers that need real stdin EOF. The
  * session-command transport over HTTP holds stdin open for the lifetime
@@ -65,17 +72,11 @@ export interface PtyFileSystemClient {
  *   tolerate or filter the preamble themselves.
  * - Stderr is drained from a tmpfile after exit, capped at
  *   `MAX_STDERR_BYTES` with a truncation marker.
- * - `opts.timeoutMs` bounds the whole lifetime (pre-end wait, upload,
- *   createPty handshake, sendInput, running exec). `opts.idleTimeoutMs`
- *   only arms once `sendInput` has dispatched.
+ * - `opts.timeoutMs` bounds everything up to the exit code: the wait for
+ *   `.end()`, the upload, `createPty`, the connect, `sendInput`, the run
+ *   and the stderr download. `opts.idleTimeoutMs` arms once the command
+ *   line is sent.
  */
-const PTY_COLS = 200;
-const PTY_ROWS = 50;
-const DISPOSE_GRACE_MS = 5_000;
-/** Cap on the stderr tmpfile drained after exit — `downloadFile` is unbounded. */
-const MAX_STDERR_BYTES = 1024 * 1024;
-const STDERR_TRUNCATED_SUFFIX = "\n[cogmo: stderr truncated]\n";
-
 export async function startExecPty(args: {
   process: PtyProcessClient;
   fs: PtyFileSystemClient;
@@ -84,298 +85,177 @@ export async function startExecPty(args: {
   opts: ExecOptions;
   random?: () => string;
 }): Promise<ExecStreamingHandle> {
-  const { process: daytonaProcess, fs, sessionIdPrefix, cmd, opts } = args;
-  const random = args.random ?? randomUUID;
-
-  if (opts.user !== undefined) {
+  if (args.opts.user !== undefined) {
     throw new Error(
       "DaytonaSandboxSession.execStreaming (PTY): opts.user is not supported in Phase 3a (use `runuser` / `sudo` inside the cmd argv until upstream support lands)",
     );
   }
+  const random = args.random ?? randomUUID;
+  return runExec(
+    new DaytonaPtyBackend({
+      process: args.process,
+      fs: args.fs,
+      cmd: args.cmd,
+      opts: args.opts,
+      sessionId: `${args.sessionIdPrefix}-${random()}`,
+      stdinPath: `/tmp/cogmo-pty-stdin-${random()}.bin`,
+      stderrPath: `/tmp/cogmo-pty-stderr-${random()}.log`,
+    }),
+    args.opts,
+  );
+}
 
-  const sessionId = `${sessionIdPrefix}-${random()}`;
-  const stdinPath = `/tmp/cogmo-pty-stdin-${random()}.bin`;
-  const stderrPath = `/tmp/cogmo-pty-stderr-${random()}.log`;
+class DaytonaPtyBackend implements ExecBackend {
+  readonly buffersStdin = true;
+  readonly logFields: Record<string, unknown>;
+  #process: PtyProcessClient;
+  #fs: PtyFileSystemClient;
+  #cmd: readonly string[];
+  #opts: ExecOptions;
+  #sessionId: string;
+  #stdinPath: string;
+  #stderrPath: string;
+  #sink: ExecSink | undefined;
+  #pty: PtyHandle | undefined;
+  /** What `PtyHandle.wait()` reported, once it has. */
+  #exit: PtyResult | undefined;
 
-  const stdout = new PassThrough();
-  const stderr = new PassThrough();
-  stdout.on("error", () => {});
-  stderr.on("error", () => {});
+  constructor(args: {
+    process: PtyProcessClient;
+    fs: PtyFileSystemClient;
+    cmd: readonly string[];
+    opts: ExecOptions;
+    sessionId: string;
+    stdinPath: string;
+    stderrPath: string;
+  }) {
+    this.#process = args.process;
+    this.#fs = args.fs;
+    this.#cmd = args.cmd;
+    this.#opts = args.opts;
+    this.#sessionId = args.sessionId;
+    this.#stdinPath = args.stdinPath;
+    this.#stderrPath = args.stderrPath;
+    this.logFields = { sessionId: args.sessionId };
+  }
 
-  let timedOut: ExecTimeoutError | null = null;
-  let disposed = false;
-  let totalTimer: NodeJS.Timeout | null = null;
-  let idleTimer: NodeJS.Timeout | null = null;
-  const clearTimers = (): void => {
-    if (totalTimer) {
-      clearTimeout(totalTimer);
-      totalTimer = null;
+  async start(
+    sink: ExecSink,
+    stdin: Buffer | undefined,
+    signal: AbortSignal,
+  ): Promise<ExecStarted> {
+    this.#sink = sink;
+    await this.#fs.uploadFile(stdin ?? Buffer.alloc(0), this.#stdinPath);
+    signal.throwIfAborted();
+    const pty = await this.#process.createPty({
+      id: this.#sessionId,
+      // The PTY shell starts in `cwd`, so the `exec …` line below inherits it.
+      ...(this.#opts.workingDir !== undefined && { cwd: this.#opts.workingDir }),
+      // `PS1=""` mutes the shell prompt; `NO_COLOR=1` mutes ANSI on isatty
+      // stdout. Caller env overrides both. (Custom images that source
+      // `/etc/bash.bashrc` may still leak rc-file output here —
+      // cogmo-devbase doesn't.)
+      envs: { PS1: "", NO_COLOR: "1", ...(this.#opts.env ?? {}) },
+      // 200x50 is generous; sized for claude's wide tool output. Lift to
+      // `ExecOptions` when a binary needs explicit COLUMNS.
+      cols: PTY_COLS,
+      rows: PTY_ROWS,
+      onData: (data) => sink.output("stdout", Buffer.from(data)),
+    });
+    this.#pty = pty;
+    // `PtyHandle.wait()` (@daytona/sdk 0.214) settles on the `exited`
+    // control frame or on the WS closing. A normal close (1000) with no
+    // parseable reason reads as exit 0; an abnormal one (1006) resolves it
+    // with no exit code; and a `wait()` first called after such a close
+    // never settles, so register it before anything can close the socket.
+    // `kill()` sets no exit code either.
+    pty.wait().then(
+      (exit) => {
+        this.#exit = exit;
+        sink.ended();
+      },
+      (e: unknown) => sink.failed(e),
+    );
+    signal.throwIfAborted();
+    await pty.waitForConnection();
+    signal.throwIfAborted();
+    // `cat file | cmd` (not `cmd < file`): claude 2.1.138 silently exits 0
+    // with no output when stream-json input arrives via a regular file FD.
+    // The outer `exec bash --norc --noprofile -c` swaps the default
+    // interactive bash for a non-interactive one — no readline echo, no
+    // `PROMPT_COMMAND` OSCs after the swap.
+    const innerScript = `cat ${shellEscape(this.#stdinPath)} | exec ${shellEscapeArgv(this.#cmd)} 2> ${shellEscape(this.#stderrPath)}`;
+    await pty.sendInput(`exec bash --norc --noprofile -c ${shellEscape(innerScript)}\n`);
+    return {};
+  }
+
+  /** Drain the stderr tmpfile into the stderr stream, then report the exit the PTY gave. */
+  async fetchExit(): Promise<Result<number, string>> {
+    const exitCode = this.#exit?.exitCode;
+    await this.#drainStderr(exitCode);
+    if (exitCode === undefined) {
+      const reason = this.#exit?.error;
+      return err(
+        `Daytona PTY ${this.#sessionId} closed without an exit code${reason ? `: ${reason}` : ""}`,
+      );
     }
-    if (idleTimer) {
-      clearTimeout(idleTimer);
-      idleTimer = null;
-    }
-  };
+    return ok(exitCode);
+  }
 
-  // The SDK's PtyHandle.wait() polls `_exitCode` every 100ms and only
-  // sets it from a clean WS close (code 1000 or a parseable `{exitCode}`
-  // in event.reason). On code 1006 (abnormal) with empty reason, wait()
-  // loops forever — kill() doesn't set the exit code either. We race
-  // wait() against this signal so timer / dispose paths exit deterministically.
-  let aborted = false;
-  let rejectAbort: ((reason: Error) => void) | undefined;
-  const abortSignal = new Promise<never>((_, reject) => {
-    rejectAbort = reject;
-  });
-  // Silence the rejection when no race consumer is listening (e.g. natural
-  // exit already settled exitPromise before a timer/dispose fired).
-  abortSignal.catch(() => undefined);
-  const signalAbort = (): void => {
-    if (aborted) return;
-    aborted = true;
-    rejectAbort?.(timedOut ?? new DisposedError());
-  };
-
-  // Tmpfile cleanup is best-effort; sandbox tmpfs vanishes on teardown.
-  let cleanedUp = false;
-  const cleanupRemoteFiles = async (): Promise<void> => {
-    if (cleanedUp) return;
-    cleanedUp = true;
-    await Promise.allSettled([
-      fs.deleteFile(stdinPath).catch((err: Error) => {
-        log.warn({ err: err.message, path: stdinPath }, "deleteFile failed during cleanup");
-      }),
-      fs.deleteFile(stderrPath).catch((err: Error) => {
-        log.warn({ err: err.message, path: stderrPath }, "deleteFile failed during cleanup");
-      }),
-    ]);
-  };
-
-  let pty: PtyHandle | undefined;
-  const handleOnData = (data: Uint8Array): void => {
-    resetIdle();
-    stdout.write(Buffer.from(data));
-  };
-
-  /** Idempotent kill — silent if `pty` is undefined or the RPC races natural exit. */
-  const killPty = (): Promise<void> => pty?.kill().catch(() => undefined) ?? Promise.resolve();
-
-  // Hoisted so `handleOnData` above can reference it.
-  function resetIdle(): void {
-    if (idleTimer) clearTimeout(idleTimer);
-    if (opts.idleTimeoutMs !== undefined && !timedOut && !disposed) {
-      const idleMs = opts.idleTimeoutMs;
-      idleTimer = setTimeout(() => {
-        idleTimer = null;
-        if (timedOut || disposed) return;
-        timedOut = new ExecTimeoutError("idle", idleMs);
-        void killPty();
-        signalAbort();
-      }, idleMs);
+  /**
+   * Best effort: the child may never have written to it, so a failed
+   * download is logged, loudly only when a non-zero exit makes the tmpfile
+   * the one diagnostic of why.
+   */
+  async #drainStderr(exitCode: number | undefined): Promise<void> {
+    try {
+      const errBuf = await this.#fs.downloadFile(this.#stderrPath);
+      if (errBuf.length > MAX_STDERR_BYTES) {
+        this.#sink?.output("stderr", errBuf.subarray(0, MAX_STDERR_BYTES));
+        this.#sink?.output("stderr", Buffer.from(STDERR_TRUNCATED_SUFFIX));
+      } else if (errBuf.length > 0) {
+        this.#sink?.output("stderr", errBuf);
+      }
+    } catch (e) {
+      const level = exitCode !== undefined && exitCode !== 0 ? "warn" : "debug";
+      log[level](
+        { err: describeError(e), path: this.#stderrPath, exitCode },
+        "stderr tmpfile download failed",
+      );
     }
   }
 
-  const stdinBuffers: Buffer[] = [];
-  const stdin = new Writable({
-    write(chunk, _encoding, callback): void {
-      stdinBuffers.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-      callback();
-    },
-  });
-
-  // Total timer covers the whole lifetime — including upload,
-  // createPty, and a caller that never `.end()`s stdin.
-  if (opts.timeoutMs !== undefined) {
-    const totalMs = opts.timeoutMs;
-    totalTimer = setTimeout(() => {
-      totalTimer = null;
-      if (timedOut || disposed) return;
-      timedOut = new ExecTimeoutError("total", totalMs);
-      void killPty();
-      if (!stdin.writableEnded) stdin.destroy(timedOut);
-      signalAbort();
-    }, totalMs);
-  }
-
-  const exitPromise = new Promise<{ exitCode: number }>((resolve, reject) => {
-    // Throw the right sentinel so the catch below rejects with
-    // `DisposedError` / `ExecTimeoutError` instead of whatever
-    // downstream error a half-built exec would surface.
-    const checkAborted = (): void => {
-      if (disposed) throw new DisposedError();
-      if (timedOut) throw timedOut;
-    };
-
-    const startPty = async (): Promise<void> => {
-      const stdinPayload = Buffer.concat(stdinBuffers);
-      // Re-checked after every await so a `dispose()` or total-timer
-      // fire mid-flight doesn't end up running the exec anyway.
-      checkAborted();
-      await fs.uploadFile(stdinPayload, stdinPath);
-      checkAborted();
-
-      pty = await daytonaProcess.createPty({
-        id: sessionId,
-        // The PTY shell starts in `cwd`, so the `exec …` line below
-        // inherits it.
-        ...(opts.workingDir !== undefined && { cwd: opts.workingDir }),
-        // `PS1=""` mutes the shell prompt; `NO_COLOR=1` mutes ANSI on
-        // isatty stdout. Caller env overrides both. (Custom images
-        // that source `/etc/bash.bashrc` may still leak rc-file
-        // output here — cogmo-devbase doesn't.)
-        envs: { PS1: "", NO_COLOR: "1", ...(opts.env ?? {}) },
-        // 200x50 is generous; sized for claude's wide tool output.
-        // Lift to `ExecOptions` when a binary needs explicit COLUMNS.
-        cols: PTY_COLS,
-        rows: PTY_ROWS,
-        onData: handleOnData,
-      });
-      if (disposed || timedOut) {
-        await killPty();
-        checkAborted();
-      }
-      await pty.waitForConnection();
-      if (disposed || timedOut) {
-        await killPty();
-        checkAborted();
-      }
-
-      // Idle watchdog arms now that bytes can flow; total timer
-      // already armed at function entry.
-      resetIdle();
-
-      // `cat file | cmd` (not `cmd < file`): claude 2.1.138 silently
-      // exits 0 with no output when stream-json input arrives via a
-      // regular file FD. Outer `exec bash --norc --noprofile -c` swaps
-      // the default interactive bash for a non-interactive one — no
-      // readline echo, no `PROMPT_COMMAND` OSCs after the swap.
-      const innerScript = `cat ${shellEscape(stdinPath)} | exec ${shellEscapeArgv(cmd)} 2> ${shellEscape(stderrPath)}`;
-      const shellLine = `exec bash --norc --noprofile -c ${shellEscape(innerScript)}\n`;
-      await pty.sendInput(shellLine);
-    };
-
-    const settle = async (opts: { exitCode?: number } = {}): Promise<void> => {
-      clearTimers();
-      stdout.end();
-
-      // Drain stderr tmpfile into the stderr stream — best-effort, so
-      // a stuck download doesn't block exit reporting. The download
-      // can 404 if the child never wrote to it; that's fine.
-      // Truncate at MAX_STDERR_BYTES so a runaway binary doesn't
-      // dump unbounded bytes into orchestrator memory.
-      try {
-        const errBuf = await fs.downloadFile(stderrPath);
-        if (errBuf.length > MAX_STDERR_BYTES) {
-          stderr.write(errBuf.subarray(0, MAX_STDERR_BYTES));
-          stderr.write(STDERR_TRUNCATED_SUFFIX);
-        } else if (errBuf.length > 0) {
-          stderr.write(errBuf);
-        }
-      } catch (err) {
-        // Clean-exit (or unknown-exit) downloads default to `debug` —
-        // the common shape is a child that simply never wrote to
-        // stderr, and `warn` floods at LOG_LEVEL=info. A non-zero
-        // exit IS the rare-but-critical case where the stderr tmpfile
-        // is the only diagnostic for *why*, so promote to `warn`.
-        const failedDownloadLog =
-          opts.exitCode !== undefined && opts.exitCode !== 0 ? log.warn : log.debug;
-        failedDownloadLog.call(
-          log,
-          { err: (err as Error).message, path: stderrPath, exitCode: opts.exitCode },
-          "stderr tmpfile download failed",
-        );
-      }
-      stderr.end();
-
-      // `disconnect()` is idempotent and frees the local WS even when
-      // natural exit already closed it server-side.
-      if (pty) await pty.disconnect().catch(() => undefined);
-
-      await cleanupRemoteFiles();
-    };
-
-    (async () => {
-      try {
-        // stdin.end() is the trigger to start the exec. Wait for it.
-        await new Promise<void>((resolveEnd, rejectEnd) => {
-          stdin.once("finish", resolveEnd);
-          stdin.once("error", rejectEnd);
-        });
-        await startPty();
-      } catch (err) {
-        await settle();
-        reject(err as Error);
-        return;
-      }
-
-      const handle = pty;
-      if (!handle) {
-        await settle();
-        reject(new Error("internal: PTY handle was not initialized"));
-        return;
-      }
-
-      try {
-        const result = await Promise.race([handle.wait(), abortSignal]);
-        await settle(result.exitCode !== undefined ? { exitCode: result.exitCode } : {});
-        if (timedOut) {
-          reject(timedOut);
-          return;
-        }
-        if (disposed) {
-          reject(new DisposedError());
-          return;
-        }
-        // `result.exitCode` is undefined if the PTY closed before the
-        // child reported one (transient WS drops, daemon faults).
-        // Surface that as a clear error rather than papering over with
-        // a sentinel.
-        if (result.exitCode === undefined) {
-          reject(
-            new Error(
-              `Daytona PTY ${sessionId} closed without an exit code${result.error ? `: ${result.error}` : ""}`,
-            ),
-          );
-          return;
-        }
-        resolve({ exitCode: result.exitCode });
-      } catch (err) {
-        await settle();
-        if (timedOut) {
-          // Avoid `timedOut.cause = timedOut` when abortSignal rejected with timedOut itself.
-          if (err !== timedOut) timedOut.cause = err as Error;
-          reject(timedOut);
-        } else if (disposed) {
-          reject(new DisposedError());
-        } else {
-          reject(err as Error);
-        }
-      }
-    })();
-  });
-
-  const dispose = async (): Promise<void> => {
-    if (disposed) return;
-    disposed = true;
-    clearTimers();
+  /**
+   * Kill the PTY unless it reported an exit code, drop the local WebSocket,
+   * and delete both tmpfiles. A close with no exit code (1006) says nothing
+   * about the remote command, which may still run, so that gets the kill
+   * too; a kill that 404s finds the PTY gone already. The deletes are best
+   * effort: the sandbox's `/tmp` goes with it.
+   */
+  async teardown(): Promise<void> {
+    const pty = this.#pty;
+    const files = Promise.all(
+      [this.#stdinPath, this.#stderrPath].map((path) =>
+        this.#fs.deleteFile(path).catch((e: unknown) => {
+          log.debug({ err: describeError(e), path }, "tmpfile delete failed");
+        }),
+      ),
+    );
     if (pty) {
-      await killPty();
-    } else if (!stdin.writableEnded) {
-      // Unblock the IIFE parked on `stdin.once("finish")`.
-      stdin.destroy(new DisposedError());
+      try {
+        if (this.#exit?.exitCode === undefined) await killUnlessGone(pty);
+      } finally {
+        await pty.disconnect().catch(() => undefined);
+      }
     }
-    signalAbort();
-    await Promise.race([
-      exitPromise.catch(() => undefined),
-      new Promise<void>((resolve) => setTimeout(resolve, DISPOSE_GRACE_MS)),
-    ]);
-  };
+    await files;
+  }
+}
 
-  return {
-    stdin,
-    stdout,
-    stderr,
-    wait: () => exitPromise,
-    dispose,
-  };
+async function killUnlessGone(pty: PtyHandle): Promise<void> {
+  try {
+    await pty.kill();
+  } catch (e) {
+    if (!(e instanceof DaytonaNotFoundError)) throw e;
+  }
 }

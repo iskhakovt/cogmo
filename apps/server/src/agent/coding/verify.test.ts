@@ -1,6 +1,14 @@
-import { PassThrough, type Readable } from "node:stream";
+import { PassThrough } from "node:stream";
+import { err, ok, type Result } from "neverthrow";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ExecStreamingHandle } from "../../sandbox/index.js";
+import {
+  type ExecExit,
+  type ExecFailure,
+  type ExecOptions,
+  type ExecStreamingHandle,
+  ExecTimeoutError,
+} from "../../sandbox/index.js";
+import { fakeExecHandle } from "../../test/coding-fixtures.js";
 import type { ExecuteStreamHandle } from "./orchestrator.js";
 import { OUTPUT_CAP_BYTES, runVerifyStreaming, TIMEOUT_EXIT_CODE } from "./verify.js";
 
@@ -12,56 +20,59 @@ interface FakeExecOpts {
   chunkDelayMs?: number;
   /** Delay (ms) between streams ending and exit being reported. */
   exitDelayMs?: number;
-  /** Never resolve `wait()` — used for hard-timeout tests. */
+  /** The command never exits: the exec settles only on its `timeoutMs`, as a backend would. */
   hang?: boolean;
+  /** The transport fails: both streams fail with this error, and so does the exec. */
+  transportError?: Error;
 }
 
-function fakeExec(opts: FakeExecOpts = {}): ExecStreamingHandle {
+function fakeExec(opts: FakeExecOpts, execOpts: ExecOptions = {}): ExecStreamingHandle {
   const stdout = new PassThrough();
   const stderr = new PassThrough();
 
-  const stdoutChunks = opts.stdoutChunks ?? [];
-  const stderrChunks = opts.stderrChunks ?? [];
-
-  void (async () => {
+  const pump = async (stream: PassThrough, chunks: ReadonlyArray<string>): Promise<void> => {
     const delay = opts.chunkDelayMs ?? 0;
-    for (const c of stdoutChunks) {
+    for (const c of chunks) {
       if (delay > 0) await new Promise((r) => setTimeout(r, delay));
-      stdout.write(c);
+      stream.write(c);
     }
-    stdout.end();
-  })();
+    if (opts.transportError) stream.destroy(opts.transportError);
+    else if (!opts.hang) stream.end();
+  };
+  void pump(stdout, opts.stdoutChunks ?? []);
+  void pump(stderr, opts.stderrChunks ?? []);
 
-  void (async () => {
-    const delay = opts.chunkDelayMs ?? 0;
-    for (const c of stderrChunks) {
-      if (delay > 0) await new Promise((r) => setTimeout(r, delay));
-      stderr.write(c);
+  const exited = new Promise<Result<ExecExit, ExecFailure>>((resolve) => {
+    const transportError = opts.transportError;
+    if (transportError) {
+      setImmediate(() => resolve(err({ kind: "transport_failed", error: transportError })));
+      return;
     }
-    stderr.end();
-  })();
-
-  const wait = vi.fn(async () => {
     if (opts.hang) {
-      return new Promise<{ exitCode: number }>(() => {
-        // never resolves
-      });
+      const timeoutMs = execOpts.timeoutMs;
+      if (timeoutMs === undefined) return;
+      setTimeout(() => {
+        stdout.end();
+        stderr.end();
+        resolve(err({ kind: "timed_out", deadline: "total", timeoutMs }));
+      }, timeoutMs);
+      return;
     }
-    if (opts.exitDelayMs) await new Promise((r) => setTimeout(r, opts.exitDelayMs));
-    return { exitCode: opts.exitCode ?? 0 };
+    setTimeout(() => resolve(ok({ exitCode: opts.exitCode ?? 0 })), opts.exitDelayMs ?? 0);
   });
 
-  return {
-    stdout: stdout as Readable,
-    stderr: stderr as Readable,
-    wait,
-    dispose: vi.fn(async () => {}),
-  };
+  return fakeExecHandle({ stdout, stderr, exited, dispose: vi.fn(async () => {}) });
 }
 
 function fakeContainer(opts: FakeExecOpts = {}) {
+  const handles: ExecStreamingHandle[] = [];
   return {
-    execStreaming: vi.fn(async () => fakeExec(opts)),
+    handles,
+    execStreaming: vi.fn(async (_cmd: readonly string[], execOpts?: ExecOptions) => {
+      const handle = fakeExec(opts, execOpts);
+      handles.push(handle);
+      return handle;
+    }),
   };
 }
 
@@ -139,7 +150,10 @@ describe("runVerifyStreaming", () => {
       verifyCommand: "pnpm test && pnpm lint",
       timeoutSeconds: 60,
     });
-    expect(container.execStreaming).toHaveBeenCalledWith(["bash", "-lc", "pnpm test && pnpm lint"]);
+    expect(container.execStreaming).toHaveBeenCalledWith(
+      ["bash", "-lc", "pnpm test && pnpm lint"],
+      expect.objectContaining({ timeoutMs: 60_000 }),
+    );
   });
 
   it("truncates captured output at OUTPUT_CAP_BYTES with a marker", async () => {
@@ -178,6 +192,83 @@ describe("runVerifyStreaming", () => {
     expect(result.output).toMatch(/verify timed out after 0\.05s/);
     // Should not have waited a full second despite the streams being open.
     expect(elapsed).toBeLessThan(1500);
+    // Nothing is left running inside the container.
+    expect(container.handles[0]?.dispose).toHaveBeenCalled();
+  });
+
+  it("throws a transport failure only once both output pumps have settled, leaving no timer", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const transportError = new Error("hijacked socket reset");
+      const container = fakeContainer({ stdoutChunks: ["partial\n"], transportError });
+      await expect(
+        runVerifyStreaming({ container, verifyCommand: "pnpm test", timeoutSeconds: 600 }),
+      ).rejects.toBe(transportError);
+      const timers = vi.getTimerCount();
+      vi.useRealTimers();
+      // Node reports an unhandled rejection once the microtask queue drains.
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      expect({ timers, unhandled }).toEqual({ timers: 0, unhandled: [] });
+      expect(container.handles[0]?.dispose).toHaveBeenCalled();
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+      vi.useRealTimers();
+    }
+  });
+
+  it("forwards the output read before a transport failure, then throws it", async () => {
+    const transportError = new Error("hijacked socket reset");
+    const stdout = new PassThrough();
+    stdout.write("tail\n");
+    const events: string[] = [];
+    const forward = Promise.withResolvers<void>();
+    const executeStream = fakeExecuteStream();
+    vi.mocked(executeStream.appendText).mockImplementation(async (text) => {
+      await forward.promise;
+      events.push(`forwarded ${text.trim()}`);
+    });
+    const handle = fakeExecHandle({
+      stdout,
+      exited: Promise.resolve(err({ kind: "transport_failed", error: transportError })),
+    });
+
+    const verifying = runVerifyStreaming({
+      container: { execStreaming: async () => handle },
+      verifyCommand: "pnpm test",
+      timeoutSeconds: 600,
+      executeStream,
+    }).catch((e: unknown) => {
+      events.push("rejected");
+      return e;
+    });
+    // The exec has settled and the pump is forwarding the tail when the stream fails.
+    await vi.waitFor(() => expect(executeStream.appendText).toHaveBeenCalled());
+    stdout.destroy(transportError);
+    forward.resolve();
+
+    expect(await verifying).toBe(transportError);
+    expect(events).toEqual(["forwarded tail", "rejected"]);
+  });
+
+  it("throws a timeout that settles the exec before its command runs", async () => {
+    // The start outlasted the cap, so there is no handle and no output to judge.
+    const timeout = new ExecTimeoutError("total", 60_000);
+    await expect(
+      runVerifyStreaming({
+        container: {
+          execStreaming: async () => {
+            throw timeout;
+          },
+        },
+        verifyCommand: "pnpm test",
+        timeoutSeconds: 60,
+      }),
+    ).rejects.toBe(timeout);
   });
 
   it("survives a missing executeStream (NULL stream path)", async () => {

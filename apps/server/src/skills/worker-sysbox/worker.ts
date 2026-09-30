@@ -16,7 +16,7 @@ import {
   type TaskResult,
 } from "../protocol.js";
 import { DEFAULT_WALL_CLOCK_S, timeoutSignal } from "../wall-clock.js";
-import type { StartFailure, TaskFailure, WorkerFrame } from "../worker-state.js";
+import type { Death, StartFailure, TaskFailure, WorkerFrame } from "../worker-state.js";
 import { DEFAULT_RESOURCE_LIMITS } from "./host.js";
 import { createNdjsonTransport } from "./transport.js";
 
@@ -197,8 +197,12 @@ export interface InvokeResult {
  */
 export class SysboxSkillWorker {
   readonly workerId: string;
-  /** Resolves with the reason once the worker can run no further task. */
-  readonly dead: Promise<string>;
+  /**
+   * Resolves once the worker can run no further task: with `host` when it
+   * was retired or disposed, with `worker` when its supervisor went away,
+   * hung or broke protocol.
+   */
+  readonly dead: Promise<Death>;
   /** Resolves once the worker is dead and no caller holds it: its container can go. */
   readonly disposable: Promise<void>;
   #sandbox: SandboxClient;
@@ -449,8 +453,8 @@ export class SysboxSkillWorker {
   }
 
   /**
-   * Tear down the worker. Closes the supervisor's channel, waits briefly for
-   * the supervisor process to exit, and deletes the sandbox session.
+   * Tear down the worker. Closes the supervisor's channel, stops the
+   * supervisor's exec, and deletes the sandbox session.
    * Idempotent.
    */
   dispose(): Promise<void> {
@@ -460,10 +464,9 @@ export class SysboxSkillWorker {
 
   async #teardown(): Promise<void> {
     this.#dispatcher.close("disposed");
-    // Wait for the supervisor to actually exit so we know the python
-    // process is gone before we delete the session — otherwise the
-    // delete races teardown of an in-flight syscall. Bounded by the
-    // exec's own dispose timeout (the sandbox layer enforces ~5s).
+    // Stop the supervisor before deleting the session, so the delete does
+    // not race an in-flight syscall. `dispose()` resolves once the exec's
+    // teardown has stopped it or given up (`TEARDOWN_TIMEOUT_MS`, 10 s).
     try {
       await this.#exec.dispose();
     } catch (e) {

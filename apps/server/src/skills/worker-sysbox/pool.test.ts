@@ -3,7 +3,9 @@ import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { SandboxClient } from "../../sandbox/index.js";
 import { expectDefined } from "../../test/assertions.js";
+import { seededRandom } from "../../test/seeded-random.js";
 import type { CtxHandler } from "../dispatcher.js";
+import type { Death } from "../worker-state.js";
 import {
   DEFAULT_POOL_OPTIONS,
   SysboxWorkerPool,
@@ -33,8 +35,14 @@ function fakeWorker(workerId: string, opts: FakeWorkerOptions = {}): FakeWorker 
   let taskCount = 0;
   const createdAt = now();
   let lastUsed = createdAt;
-  const dead = Promise.withResolvers<string>();
+  const dead = Promise.withResolvers<Death>();
   const disposable = Promise.withResolvers<void>();
+  const end = (death: Death): void => {
+    if (status === "dead" || status === "disposed") return;
+    status = "dead";
+    dead.resolve(death);
+    if (!held) disposable.resolve();
+  };
 
   const worker: FakeWorker = {
     workerId,
@@ -61,13 +69,8 @@ function fakeWorker(workerId: string, opts: FakeWorkerOptions = {}): FakeWorker 
       else disposable.resolve();
       return ok(undefined);
     },
-    die: (reason) => {
-      if (status === "dead" || status === "disposed") return;
-      status = "dead";
-      dead.resolve(reason);
-      if (!held) disposable.resolve();
-    },
-    retire: () => worker.die("retired"),
+    die: (reason) => end({ cause: "worker", reason }),
+    retire: () => end({ cause: "host", reason: "retired" }),
     invoke: async (params) => {
       const result = await (opts.invoke ?? succeed)(params);
       // Counted once the task returns, as `SysboxSkillWorker` does.
@@ -77,7 +80,7 @@ function fakeWorker(workerId: string, opts: FakeWorkerOptions = {}): FakeWorker 
       return result;
     },
     dispose: async () => {
-      worker.die("disposed");
+      end({ cause: "host", reason: "disposed" });
       status = "disposed";
       await opts.onDispose?.();
     },
@@ -609,17 +612,18 @@ describe("SysboxWorkerPool", () => {
     }
 
     it.each([1, 2])(
-      "stop being replaced at once from the third in a row, with max %i, and are left to the sweep",
+      "stop being replaced at once from the third in a row, with max %i",
       async (max) => {
         const h = crashing({ min: 1, max, dies: () => true });
         const pool = await h.pool;
         await vi.waitFor(() => expect(h.spawned).toHaveLength(3));
         await settle();
         expect(h.spawned).toHaveLength(3);
-        // An acquirer fails rather than waits on an image that cannot run.
+        // An acquirer waits on one probe, and fails when it dies too.
         await expect(pool.invoke(invokeParams("t-1"))).rejects.toThrow(
           /keep dying before their first task/,
         );
+        expect(h.spawned).toHaveLength(4);
 
         const before = h.spawned.length;
         h.sweep();
@@ -685,6 +689,67 @@ describe("SysboxWorkerPool", () => {
       await pool.dispose();
     });
 
+    it("stop failing acquires once workers live again, with min 0", async () => {
+      // Spawns 1–4 die; from spawn 5 on, workers live.
+      const h = crashing({ min: 0, max: 3, dies: (n) => n <= 4 });
+      const pool = await h.pool;
+      await expect(pool.invoke(invokeParams("t-1"))).rejects.toThrow(
+        /keep dying before their first task/,
+      );
+      await vi.waitFor(() => expect(h.spawned).toHaveLength(4));
+      await settle();
+
+      await expect(pool.invoke(invokeParams("t-2"))).resolves.toMatchObject({ ok: true });
+      await pool.dispose();
+    });
+
+    it("serve the next acquire once workers live again, with min 1 and no sweep", async () => {
+      const h = crashing({ min: 1, max: 2, dies: (n) => n <= 3 });
+      const pool = await h.pool;
+      await vi.waitFor(() => expect(h.spawned).toHaveLength(3));
+      await settle();
+
+      await expect(pool.invoke(invokeParams("t-1"))).resolves.toMatchObject({ ok: true });
+      expect(h.spawned).toHaveLength(4);
+      await pool.dispose();
+    });
+
+    it("probe with one spawn at a time, one per queued acquire", async () => {
+      let spawns = 0;
+      let creating = 0;
+      let most = 0;
+      const pool = await poolWith({
+        min: 0,
+        max: 3,
+        createWorker: async ({ workerId }) => {
+          spawns += 1;
+          creating += 1;
+          most = Math.max(most, creating);
+          await new Promise<void>((r) => setImmediate(r));
+          creating -= 1;
+          const w = fakeWorker(workerId);
+          queueMicrotask(() => w.die("supervisor exited"));
+          return w;
+        },
+      }).pool;
+      await expect(pool.invoke(invokeParams("t-0"))).rejects.toThrow(
+        /keep dying before their first task/,
+      );
+      await vi.waitFor(() => expect(creating).toBe(0));
+      await settle();
+      const before = spawns;
+      most = 0;
+
+      const failed = ["t-1", "t-2", "t-3", "t-4"].map((id) =>
+        expect(pool.invoke(invokeParams(id))).rejects.toThrow(/keep dying before their first task/),
+      );
+      await Promise.all(failed);
+
+      expect(most).toBe(1);
+      expect(spawns - before).toBe(4);
+      await pool.dispose();
+    });
+
     it("do not include idle workers killed a minute or more after their handshake", async () => {
       // A Docker restart kills every idle worker at once.
       let now = 0;
@@ -726,15 +791,14 @@ describe("SysboxWorkerPool", () => {
     });
 
     it("do not include workers the pool retires itself", async () => {
-      // Five workers die under their tasks while one acquire is queued, so
-      // five spawns go out for it: it takes one, and four stay idle, never
-      // leased. The sweep retires three of them well inside a minute of their
-      // handshake.
+      // Four acquires queue behind the one warm worker, and a spawn goes out
+      // for each. The warm worker serves them all before the spawns land, so
+      // four workers come up idle and are never leased. The sweep retires
+      // three of them well inside a minute of their handshake.
       let now = 0;
       let spawns = 0;
-      const firstTasks = gate();
+      const firstTask = gate();
       const heldSpawns = gate();
-      const queuedTask = gate();
       const spawned: FakeWorker[] = [];
       const { pool: created, sweep } = poolWith({
         min: 1,
@@ -743,11 +807,11 @@ describe("SysboxWorkerPool", () => {
         now: () => now,
         createWorker: async ({ workerId }) => {
           spawns += 1;
-          if (spawns > 5) await heldSpawns.promise;
+          if (spawns > 1) await heldSpawns.promise;
           const w = fakeWorker(workerId, {
             now: () => now,
             invoke: async ({ taskId }) => {
-              await (taskId === "t-queued" ? queuedTask.promise : firstTasks.promise);
+              if (taskId === "t-1") await firstTask.promise;
               return succeed();
             },
           });
@@ -756,28 +820,24 @@ describe("SysboxWorkerPool", () => {
         },
       });
       const pool = await created;
-      const firsts = ["t-1", "t-2", "t-3", "t-4", "t-5"].map((id) => pool.invoke(invokeParams(id)));
-      await vi.waitFor(() => expect(pool.stats()).toMatchObject({ busy: 5 }));
-      const queued = pool.invoke(invokeParams("t-queued"));
-      for (const w of spawned.slice()) w.die("supervisor exited");
-      firstTasks.open();
-      await Promise.all(firsts);
-      await vi.waitFor(() => expect(spawns).toBe(10));
+      const tasks = ["t-1", "t-2", "t-3", "t-4", "t-5"].map((id) => pool.invoke(invokeParams(id)));
+      expect(spawns).toBe(5);
+      firstTask.open();
+      await Promise.all(tasks);
       heldSpawns.open();
-      await vi.waitFor(() => expect(pool.stats()).toMatchObject({ busy: 1, idle: 4 }));
+      await vi.waitFor(() => expect(pool.stats()).toMatchObject({ total: 5, idle: 5 }));
 
       now += 1500;
       sweep();
-      await vi.waitFor(() => expect(pool.stats()).toMatchObject({ total: 2 }));
+      await vi.waitFor(() => expect(pool.stats()).toMatchObject({ total: 1 }));
       // The idle worker left dies right after its handshake: the first
       // death of a run, replaced at once.
-      for (const w of spawned.filter((s) => s.state === "idle" || s.state === "busy")) {
-        w.die("supervisor exited");
-      }
+      expectDefined(
+        spawned.find((s) => s.state === "idle"),
+        "idle worker",
+      ).die("supervisor exited");
 
-      await vi.waitFor(() => expect(spawns).toBe(11));
-      queuedTask.open();
-      await queued;
+      await vi.waitFor(() => expect(spawns).toBe(6));
       await pool.dispose();
     });
   });
@@ -885,9 +945,10 @@ describe("SysboxWorkerPool", () => {
       },
     }).pool;
     const a = pool.invoke(invokeParams("t-A"));
-    // A's spawn is in flight and fills the pool's one slot, so this queues.
+    // The spawn for A fills the pool's one slot, so B waits behind A.
     const b = pool.invoke(invokeParams("t-B"));
-    expect(pool.stats().queued).toBe(1);
+    expect(pool.stats().queued).toBe(2);
+    expect(spawns).toBe(1);
 
     spawn.open();
 
@@ -913,6 +974,21 @@ describe("SysboxWorkerPool", () => {
 
     await vi.waitFor(() => expect(pool.stats()).toMatchObject({ total: 1, idle: 1 }));
     expect(h.spawnCount()).toBe(3);
+    await pool.dispose();
+  });
+
+  it("replaces a worker that dies after a failed replacement at once", async () => {
+    const h = buildPoolHarness({ spawnFails: [2], poolOptions: { min: 2, max: 2 } });
+    const pool = await h.pool;
+    expectDefined(h.spawned[0], "first worker").die("supervisor exited");
+    // Its replacement was tried, and failed.
+    await vi.waitFor(() => expect(h.spawnCount()).toBe(3));
+    await new Promise<void>((r) => setTimeout(r, 0));
+    expect(pool.stats().total).toBe(1);
+
+    expectDefined(h.spawned[1], "second worker").die("supervisor exited");
+
+    await vi.waitFor(() => expect(pool.stats()).toMatchObject({ total: 2, idle: 2 }));
     await pool.dispose();
   });
 
@@ -1079,44 +1155,90 @@ describe("SysboxWorkerPool", () => {
     expect(spawned[0]?.state).toBe("disposed");
   });
 
-  it("disposes a worker spawned mid-flight when the pool is disposed during spawn", async () => {
-    // Gate the spawn so `dispose()` runs while `createWorker` is still
-    // awaiting. Without the guard in `#admit`, the new worker
-    // would be pushed into `#workers` *after* dispose spliced it empty,
-    // and its container would never be torn down.
-    const spawnedWorkers: FakeWorker[] = [];
-    const spawn = gate();
+  it.each(["before", "after"] as const)(
+    "creates exactly `min` workers when a boot spawn fails %s another lands",
+    async (order) => {
+      const failing = gate();
+      const landing = gate();
+      const spawned: FakeWorker[] = [];
+      let spawns = 0;
+      const created = poolWith({
+        min: 2,
+        max: 3,
+        createWorker: async ({ workerId }) => {
+          spawns += 1;
+          if (spawns === 1) {
+            await failing.promise;
+            throw new Error("boot spawn failed");
+          }
+          await landing.promise;
+          const w = fakeWorker(workerId);
+          spawned.push(w);
+          return w;
+        },
+      }).pool;
+      const fails = expect(created).rejects.toThrow(/boot spawn failed/);
+      const [first, second] = order === "before" ? [failing, landing] : [landing, failing];
 
+      first.open();
+      await new Promise<void>((r) => setTimeout(r, 0));
+      second.open();
+
+      await fails;
+      expect(spawns).toBe(2);
+      expect(spawned.map((w) => w.state)).toEqual(["disposed"]);
+    },
+  );
+
+  it("tears down a worker that lands after the pool is disposed", async () => {
+    const spawned: FakeWorker[] = [];
+    const spawn = gate();
     const pool = await poolWith({
-      min: 0, // eager spawn off so we control timing precisely
+      min: 0,
       max: 1,
       createWorker: async ({ workerId }) => {
         await spawn.promise;
         const w = fakeWorker(workerId);
-        spawnedWorkers.push(w);
+        spawned.push(w);
         return w;
       },
     }).pool;
-
-    // Kick a foreground invoke that triggers a spawn (no idle worker).
-    const invokePromise = pool.invoke(invokeParams("t-1"));
-    await Promise.resolve();
-    await Promise.resolve();
-
-    // Race dispose against the spawn: dispose first, then unblock the
-    // spawn. The spawn resolves into a disposed pool — its worker must be
-    // disposed by `#admit`, not pushed into the (already-empty) `#workers`
-    // array.
-    const disposePromise = pool.dispose();
-    spawn.open();
-    await disposePromise;
-
-    await expect(invokePromise).rejects.toThrow(
-      /(disposed during worker spawn|disposed before worker available)/,
+    // No worker is idle, so this spawns one, held until the pool is disposed.
+    const fails = expect(pool.invoke(invokeParams("t-1"))).rejects.toThrow(
+      /disposed before worker available/,
     );
-    if (spawnedWorkers.length > 0) {
-      expect(spawnedWorkers[0]?.state).toBe("disposed");
-    }
+
+    const disposing = pool.dispose();
+    spawn.open();
+    await disposing;
+
+    await fails;
+    expect(spawned).toHaveLength(1);
+    expect(spawned[0]?.state).toBe("disposed");
+  });
+
+  it("carries on when a container's teardown fails", async () => {
+    let spawns = 0;
+    const pool = await poolWith({
+      min: 1,
+      max: 1,
+      createWorker: async ({ workerId }) => {
+        spawns += 1;
+        if (spawns > 1) return fakeWorker(workerId);
+        return fakeWorker(workerId, {
+          invoke: async () => ({ ok: true, output: null, workerReusable: false }),
+          onDispose: async () => {
+            throw new Error("sandbox delete failed");
+          },
+        });
+      },
+    }).pool;
+
+    await pool.invoke(invokeParams("t-1"));
+
+    await vi.waitFor(() => expect(pool.stats()).toMatchObject({ total: 1, idle: 1 }));
+    await expect(pool.invoke(invokeParams("t-2"))).resolves.toMatchObject({ ok: true });
+    await pool.dispose();
   });
 
   it("settles an acquire whose own spawn completes into a dispose, whenever it lands", async () => {
@@ -1263,28 +1385,19 @@ describe("SysboxWorkerPool", () => {
     // The eager worker is busy, so this one spawns a second.
     const second = pool.invoke(invokeParams("t-second"));
     await vi.waitFor(() => expect(signals).toHaveLength(2));
+    // Disposal fails the acquire waiting on that spawn.
+    const secondFails = expect(second).rejects.toThrow(/disposed before worker available/);
 
     const disposed = pool.dispose();
     expect(signals.map((s) => s.aborted)).toEqual([true, true]);
     spawn.open();
     await disposed;
     await first;
-    await expect(second).rejects.toThrow(/disposed during worker spawn/);
+    await secondFails;
   });
 });
 
 describe("SysboxWorkerPool under random deaths and spawn failures", () => {
-  /** mulberry32: a seeded PRNG, so a failing seed replays exactly. */
-  function seeded(seed: number): () => number {
-    let a = seed;
-    return () => {
-      a = (a + 0x6d2b79f5) | 0;
-      let t = Math.imul(a ^ (a >>> 15), 1 | a);
-      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-    };
-  }
-
   async function ticks(n: number): Promise<void> {
     for (let i = 0; i < n; i++) await new Promise<void>((r) => setImmediate(r));
   }
@@ -1297,13 +1410,13 @@ describe("SysboxWorkerPool under random deaths and spawn failures", () => {
    * Run one seeded schedule against a pool and return every invariant it
    * broke. Tasks arrive over time while workers die (idle, under a task,
    * or right after their handshake), spawns fail and sweeps run. Some
-   * schedules pass through a crash loop, every new worker dying at once,
-   * and recover from it. Some dispose the pool midway, a few microtasks
-   * after a spawn or a task completes. Workers honour the pool's signal as
-   * the real one does.
+   * schedules pass through a crash loop, every new worker dying at once.
+   * Once the faults clear, a last task must run. Some dispose the pool
+   * midway, a few microtasks after a spawn or a task completes. Workers
+   * honour the pool's signal as the real one does.
    */
   async function fuzzPool(seed: number): Promise<ReadonlyArray<string>> {
-    const random = seeded(seed);
+    const random = seededRandom(seed);
     const chance = (p: number): boolean => random() < p;
     const upTo = (n: number): number => Math.floor(random() * (n + 1));
     const max = 1 + upTo(3);
@@ -1320,6 +1433,8 @@ describe("SysboxWorkerPool under random deaths and spawn failures", () => {
     let creating = 0;
     let booted = false;
     let crashLoop = false;
+    /** The fault has cleared: spawns land, and workers and tasks live. */
+    let healthy = false;
     let now = 0;
     let pool: SysboxWorkerPool | undefined;
     let disposeCalled = false;
@@ -1351,13 +1466,15 @@ describe("SysboxWorkerPool under random deaths and spawn failures", () => {
         try {
           await ticks(upTo(2));
           signal.throwIfAborted();
-          if (booted && chance(0.15)) throw new Error("spawn failed");
+          const faulty = booted && !healthy;
+          if (faulty && chance(0.15)) throw new Error("spawn failed");
           const w: FakeWorker = fakeWorker(workerId, {
             now: () => now,
             invoke: async () => {
               running.add(w);
               try {
                 await ticks(upTo(3));
+                if (healthy) return succeed();
                 if (chance(0.1)) w.die("supervisor exited");
                 return chance(0.1)
                   ? { ok: false, error: "wall_clock_exceeded", workerReusable: false }
@@ -1375,8 +1492,8 @@ describe("SysboxWorkerPool under random deaths and spawn failures", () => {
             },
           });
           workers.push(w);
-          signal.addEventListener("abort", () => w.die("pool disposed"), { once: true });
-          if (booted && (crashLoop || chance(0.1))) {
+          signal.addEventListener("abort", () => w.retire(), { once: true });
+          if (faulty && (crashLoop || chance(0.1))) {
             queueMicrotask(() => w.die("supervisor exited"));
           }
           fireDispose();
@@ -1414,6 +1531,25 @@ describe("SysboxWorkerPool under random deaths and spawn failures", () => {
     const hung = settled.filter((s) => !s).length;
     if (hung > 0) violations.push(`${hung} task(s) never settled; ${JSON.stringify(pool.stats())}`);
 
+    // Once workers stop failing, a task runs, with no sweep and no restart.
+    if (!disposeCalled) {
+      armed = undefined;
+      healthy = true;
+      let recovered: string | undefined;
+      void pool.invoke(invokeParams("t-recovery")).then(
+        (r) => {
+          recovered = r.ok ? "ok" : `failed: ${r.error}`;
+        },
+        (e: unknown) => {
+          recovered = `rejected: ${e instanceof Error ? e.message : String(e)}`;
+        },
+      );
+      for (let i = 0; i < 1000 && recovered === undefined; i++) await ticks(1);
+      if (recovered !== "ok") {
+        violations.push(`no recovery (${recovered ?? "pending"}); ${JSON.stringify(pool.stats())}`);
+      }
+    }
+
     // A second caller of `dispose()` waits for the first one's teardowns.
     disposeCalled = true;
     disposing ??= pool.dispose();
@@ -1424,7 +1560,7 @@ describe("SysboxWorkerPool under random deaths and spawn failures", () => {
     return violations.map((v) => `seed ${seed} (min ${min}, max ${max}): ${v}`);
   }
 
-  it("settles every task, never creates past `max` and leaks no container", async () => {
+  it("settles every task, never creates past `max`, leaks no container and recovers", async () => {
     const violations: string[] = [];
     for (let seed = 1; seed <= 1000; seed++) violations.push(...(await fuzzPool(seed)));
     expect(violations).toEqual([]);

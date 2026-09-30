@@ -99,6 +99,7 @@ When you bind-mount a host directory over `/var/lib/cogmo`, the host directory's
 sudo install -d -o 1000 -g 1000 /var/lib/cogmo
 
 docker run -d \
+  --stop-timeout 60 \
   -v /var/lib/cogmo:/var/lib/cogmo \
   ghcr.io/iskhakovt/cogmo:<version>
 ```
@@ -216,8 +217,7 @@ See [`design/skills.md`](design/skills.md) for two-tier (Pyodide + sysbox) execu
 |-|-|-|
 | `MCP_TOOL_BUDGET` | `25` | Maximum MCP tools surfaced to the LLM per turn after profile-glob filtering. Cap exists because LLM tool-selection accuracy degrades past ~30 tools and each tool definition costs ~250-400 prompt tokens. Native and skill tools don't count against this budget. |
 | `MCP_CALL_TIMEOUT_MS` | `30000` | Per-call timeout for MCP tool dispatch. |
-| `MCP_IDLE_EVICTION_MS` | `600000` (10 min) | Idle threshold after which a live MCP connection is closed. |
-| `MCP_EVICTION_INTERVAL_MS` | `60000` | How often the idle-eviction sweep runs. Set `0` to disable. |
+| `MCP_IDLE_EVICTION_MS` | `600000` (10 min) | A live MCP connection unused this long is closed. To keep connections open indefinitely, set a very large value, e.g. `31536000000` (a year). |
 
 LLM provider keys, Telegram bot tokens, Tavily/fal.ai keys, and similar credentials are **not** env vars — they live encrypted in the DB after `cogmo setup`. Putting secrets in env files is explicitly discouraged; use host secret management ([sops-nix](https://github.com/Mic92/sops-nix), [Vault](https://www.vaultproject.io/), systemd `LoadCredential`, Docker secrets via `_FILE`, etc.) for `COGMO_MASTER_KEY`, `DATABASE_URL`, `HINDSIGHT_API_KEY`, `INNGEST_EVENT_KEY` and `INNGEST_SIGNING_KEY` — each accepts a `_FILE` variant.
 
@@ -313,6 +313,7 @@ Neither is probed by Cogmo, so key them yourself:
    ```bash
    docker run -d \
      --restart=unless-stopped \
+     --stop-timeout 60 \
      -e DATABASE_URL=postgresql://... \
      -e COGMO_MASTER_KEY=... \
      -e HINDSIGHT_URL=http://hindsight:8888 \
@@ -343,6 +344,12 @@ The image entrypoint dispatches based on the first arg:
 
 `GET /health` on port 9090 returns 200 with an `application/health+json` body (IETF draft schema: `status`, `version`, `releaseId`, `description`, `notes`). Liveness only — a Postgres blip will not flap the container. Wire it to your supervisor (Docker `HEALTHCHECK`, k8s `livenessProbe`, systemd, etc.).
 
+## Stopping
+
+On `SIGTERM`, `serve` first waits for the Inngest function runs in flight, with no deadline, then tears down its own connections in at most 28 s ([`design/infrastructure.md` → Shutdown](design/infrastructure.md#shutdown-confirmed)). Docker's default stop grace is 10 s before `SIGKILL`, which can cut that teardown short and have Telegram redeliver the last batch of messages. Give the container 60 s with `--stop-timeout 60` on `docker run`, `stop_grace_period: 60s` in compose, `terminationGracePeriodSeconds: 60` in Kubernetes, or `TimeoutStopSec=60` for a systemd unit.
+
+A step that fails is logged and the rest still run; the exit code stays 0.
+
 ## Observability
 
 Cogmo emits OpenTelemetry traces, metrics, and trace-correlated logs when an OTLP endpoint is configured. Telemetry is opt-in: with `OTEL_EXPORTER_OTLP_ENDPOINT` unset the SDK isn't loaded at all, so the default process stays lean.
@@ -354,7 +361,7 @@ The image entrypoint always launches with `node --import ./dist/otel.js`, which 
 | Signal | Where |
 |-|-|
 | Traces | One trace per Inngest function run. Inngest's engine unconditionally opens an `inngest.execution` root span via the active tracer provider (no middleware required), and our domain spans parent under it via standard OTel context propagation. Children: `chat` spans tagged with `gen_ai.*` semantic conventions (`provider.name`, `request.model`, `usage.input_tokens`/`output_tokens`/`cache_*`, `response.finish_reasons`; `usage.input_tokens` is the whole prompt, with the `cache_*` counts as subsets of it); `tool.execute` spans (`cogmo.tool.name`); `memory.recall`/`memory.retain` spans (`memory.hit`, `memory.count`). Auto-instrumented HTTP and undici give you outbound calls (Anthropic, OpenAI, Hindsight, fal.ai, Tavily, Telegram). |
-| Metrics | `cogmo.llm.tokens` counter (labels `type`/`model`/`provider`, where `type` ∈ `input`/`output`/`cache_read`/`cache_create`, and the four are disjoint: `input` is the uncached remainder, so the prompt's size is `input + cache_read + cache_create`. For OpenAI-compatible providers that leaves out the cached share their `prompt_tokens` includes, so a dashboard charting `input` from before cache accounting sees their series drop); `cogmo.agent.iterations` histogram (per turn, labeled by model); `cogmo.debounce.wait_ms` histogram; `cogmo.memory.recall.failures` counter (label `bank_id`) — auto-recall failures, after which the turn continues with no recalled memories in its turn context. Alert on a sustained non-zero rate: a memory outage otherwise looks like an agent that has forgotten things. A reranker failover is not counted — see [Hindsight reranker](#hindsight-reranker). |
+| Metrics | `cogmo.llm.tokens` counter (labels `type`/`model`/`provider`, where `type` ∈ `input`/`output`/`cache_read`/`cache_create`, and the four are disjoint: `input` is the uncached remainder, so the prompt's size is `input + cache_read + cache_create`. For OpenAI-compatible providers that leaves out the cached share their `prompt_tokens` includes, so a dashboard charting `input` from before cache accounting sees their series drop); `cogmo.agent.iterations` histogram (per turn, labeled by model); `cogmo.debounce.wait_ms` histogram; `cogmo.memory.recall.failures` counter (label `bank_id`) — auto-recall failures, after which the turn continues with no recalled memories in its turn context. Alert on a sustained non-zero rate: a memory outage otherwise looks like an agent that has forgotten things. A reranker failover is not counted — see [Hindsight reranker](#hindsight-reranker). `cogmo.core_memory.edits` counter (labels `key` ∈ `identity`/`user_profile`/`active_projects`/`preferences`/`other`; `target` ∈ `shared`/`unclassed`/`class`/`override`, the scope the write targets — see [design/memory.md → Core Memory Scope by Profile Class](design/memory.md#core-memory-scope-by-profile-class-confirmed); `change` ∈ `created`/`updated`/`deleted`) — `core_memory_update` writes that changed a block, counted after the write commits, at most once. Operator deletes (`/classes unrestrict`, deleting a class) aren't counted. Which edits the next turn announces, and which open an epoch instead, is in [design/prompt-caching.md → System Prompt Snapshot](design/prompt-caching.md#system-prompt-snapshot-confirmed) → An epoch opens. |
 | Logs | Pino lines automatically gain `trace_id` / `span_id` / `trace_flags` via `instrumentation-pino`, so journald correlation works without code changes. |
 
 ### Cross-function-run correlation
@@ -386,6 +393,7 @@ docker run -d --name lgtm \
 
 docker run -d --name cogmo \
   --restart=unless-stopped \
+  --stop-timeout 60 \
   -e DATABASE_URL=postgresql://... \
   -e COGMO_MASTER_KEY=... \
   -e HINDSIGHT_URL=http://hindsight:8888 \
@@ -412,6 +420,7 @@ Grafana Cloud's OTLP gateway accepts HTTP/protobuf only. Get the endpoint, insta
 ```bash
 docker run -d --name cogmo \
   --restart=unless-stopped \
+  --stop-timeout 60 \
   -e DATABASE_URL=postgresql://... \
   -e COGMO_MASTER_KEY=... \
   -e HINDSIGHT_URL=http://hindsight:8888 \

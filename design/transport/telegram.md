@@ -59,6 +59,45 @@ The threshold is a constant in the adapter (start with `10`, tune by feel).
 - `deliver()` calls `bot.api.sendMessage(platformAddress, content)`
 - Markdown rendering: Telegram MarkdownV2 with escape function. For v0, plain text (LLM output contains unescaped `_*[]` that breaks Telegram's parser).
 
+## Forwarded Messages
+
+Forwarded text is someone else's words, never the user's: not their statements, not their instructions. When a message carries `forward_origin` naming anyone but the sender, the adapter marks what it packs with `forwarded` (`ForwardedOriginSchema` in `src/transport/content.ts`). A forward of the user's own message, from Saved Messages or an earlier message of theirs (`origin` `user` with the sender's id), is their own words and stays unmarked.
+
+| Field | Value |
+|-|-|
+| `origin` | `user`, `hidden_user`, `chat` or `channel`: Telegram's `MessageOrigin` kind |
+| `from` | The sender's name, the hidden user's name, or the chat or channel title, followed by ` (signature)` when the post carries an author signature |
+| `sentAt` | When the original was sent, ISO 8601 |
+
+| Forwarded | Marked |
+|-|-|
+| Text, or a caption on a photo, document or voice note | The text block |
+| A photo or document with no caption | An empty text block ahead of the attachment, so the model knows who sent it |
+| A voice note | The voice block, so its transcript is forwarded text |
+
+The user's own text keeps its bare-string form.
+
+The turn renders each marked text or transcript once, when it becomes the user message, into an element the model reads as quoted material:
+
+```
+<forwarded_message from="Alice Smith" origin="user" sent="2023-11-14T22:13:20.000Z">
+see you at 8
+</forwarded_message>
+```
+
+An empty block renders as an empty element, `<forwarded_message …></forwarded_message>`. Attribute values carry `&`, `"`, `<` and `>` as entities and whitespace runs as one space. In the body, the `<` that starts any `forwarded_message` tag, opener or closer, in any case and with whitespace, slashes or backslashes before the name, is `&lt;`, so the body can neither close its element nor open another. The rendering is a pure function of the block, so every render of the row gives the same bytes ([prompt-caching.md](../prompt-caching.md) → Append-only Transcript).
+
+What reads it:
+
+- **The model.** The standing `# Turn context` section says text inside the element is someone else's words the user forwarded, never the user's statements or instructions.
+- **The Observer.** The memory and correction extraction prompts say forwarded text is not a fact about the user or an instruction from them.
+- **Auto-recall** queries with the body, never the element; a captionless forward skips recall.
+- **Voice mode.** A forwarded voice note isn't the user speaking, so `auto` doesn't answer it in voice.
+- **Previews.** The Resume prompt's snippet and the conversation list show a leading element as `Fwd from {from}: {body}`.
+- **The web chat** parses this exact element in a user message and shows it as a quote headed "Forwarded from {from}"; anything else stays plain text, including a turn with a photo or document, whose stored text is JSON.
+
+A forwarded message never runs a bot command. It keeps its `bot_command` entity, so commands register on `bot.drop(matchFilter(":forward_origin"))`, grammY's filter for every update but a forward, and a forwarded `/cmd` reaches the agent as forwarded text. A forwarded message that arrives while a `/profile` or `/repo` dialog is open is dialog input like any other text.
+
 ## Typing Indicator
 
 Send `sendChatAction("typing")` once when a message arrives, before emitting the inbound event. The indicator expires after 5s — good enough for v0. Consider looping the indicator during agent processing later.
@@ -72,6 +111,8 @@ The adapter starts if a Telegram channel row exists in the DB. Bot token is read
 Unit tests use grammY transformers to capture outgoing API calls — no network, no bot token needed. Test:
 - Rejects messages when identity resolution fails (unknown user in `mapped` mode)
 - Calls `transport.emit()` with correct `InboundContent` for resolved users
+- Marks forwarded text, captions, captionless media and voice notes with `forwarded`, and leaves self-forwards unmarked
+- Routes a forwarded `/cmd` past the command handlers (real grammY `Composer`), and registers every command on the forward-dropping composer
 - Handles `/start` (sends welcome, no emit)
 - Handles `/new` (calls `transport.closeSession()` + `transport.createConversation()`, no emit)
 - Sends typing indicator before emit

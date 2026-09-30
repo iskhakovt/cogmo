@@ -532,10 +532,8 @@ export interface SynthesizeDegradedReplyResult {
  * - Single attempt, no Class C repair — if it fails for any reason
  *   (timeout, refusal, provider outage), fall back to the fixed string
  *   and emit `agent.degrade.synthesis` with `ok: false`.
- * - Wall-clock cap via `Promise.race`. The underlying request may
- *   continue dangling after the race — acceptable for the rare
- *   degrade-path; revisit with `AbortSignal` plumbing if cost
- *   telemetry shows the waste matters.
+ * - Wall-clock cap via `AbortSignal.timeout`, which aborts the request
+ *   when it fires.
  * - Same provider as the failing turn — switching providers on the
  *   apology message is a non-sequitur; the conversation is already
  *   paying for that model's quirks.
@@ -568,21 +566,19 @@ export async function synthesizeDegradedReply(
   const fallback = degradedReplyText(subtype);
 
   const start = Date.now();
-  let timeoutId: NodeJS.Timeout | undefined;
+  const signal = AbortSignal.timeout(timeoutMs);
   try {
-    const response = await Promise.race([
-      provider.chat({
+    const response = await provider.chat(
+      {
         model,
         system: systemPrompt,
         messages: [...messages],
         tools: [],
         temperature: 0,
         maxTokens: synthesisMaxTokens(subtype),
-      }),
-      new Promise<never>((_resolve, reject) => {
-        timeoutId = setTimeout(() => reject(new SynthesisTimeoutError(timeoutMs)), timeoutMs);
-      }),
-    ]);
+      },
+      { signal },
+    );
 
     const text = extractText(response.content).trim();
 
@@ -624,29 +620,18 @@ export async function synthesizeDegradedReply(
         subtype,
         durationMs: Date.now() - start,
         ok: false,
-        fallback:
-          err instanceof SynthesisTimeoutError
-            ? "timeout"
-            : err instanceof RefusalError
-              ? "refusal"
-              : err instanceof ProviderProtocolError
-                ? "protocol"
-                : "error",
+        fallback: signal.aborted
+          ? "timeout"
+          : err instanceof RefusalError
+            ? "refusal"
+            : err instanceof ProviderProtocolError
+              ? "protocol"
+              : "error",
         err,
       },
       "degraded synthesis failed — falling back to fixed string",
     );
     return { text: fallback, ok: false };
-  } finally {
-    if (timeoutId !== undefined) clearTimeout(timeoutId);
-  }
-}
-
-/** Raised when {@link synthesizeDegradedReply}'s wall-clock cap fires. */
-export class SynthesisTimeoutError extends Error {
-  constructor(public readonly timeoutMs: number) {
-    super(`degraded synthesis exceeded ${timeoutMs}ms wall-clock cap`);
-    this.name = "SynthesisTimeoutError";
   }
 }
 
