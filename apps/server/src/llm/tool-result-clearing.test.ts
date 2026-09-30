@@ -43,9 +43,11 @@ describe("encodedLength", () => {
   });
 
   it("keeps an astral letter's surrogate pair whole at a seam", () => {
-    const run = "𝐀".repeat(100);
+    // One code unit, then two per letter: a seam every 64 code units would
+    // fall inside a pair.
+    const run = `a${"𝐀".repeat(100)}`;
 
-    expect(encodedLength(enc, run)).toBe(whole("𝐀".repeat(64)) + whole("𝐀".repeat(36)));
+    expect(encodedLength(enc, run)).toBe(whole(`a${"𝐀".repeat(63)}`) + whole("𝐀".repeat(37)));
   });
 
   it.each([
