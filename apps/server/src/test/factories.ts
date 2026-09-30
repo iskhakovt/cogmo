@@ -205,8 +205,17 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
     insertSeedRule: vi.fn().mockResolvedValue({ id: "rule-1" }),
     getCorrections: vi.fn().mockResolvedValue([]),
     upsertCorrection: vi.fn().mockResolvedValue({ id: "rule-1", promoted: false }),
-    countActiveRules: vi.fn().mockResolvedValue(0),
+    countActiveLearnedRules: vi.fn().mockResolvedValue(0),
     replaceRules: vi.fn().mockResolvedValue({ id: "rule-1" }),
+    setInstructionRule: vi.fn().mockResolvedValue({
+      kind: "new",
+      id: "rule-1",
+      createdAt: new Date("2026-05-09T12:00:00Z"),
+    }),
+    retireRulesByText: vi
+      .fn()
+      .mockResolvedValue({ retired: [], alreadyRetired: [], notRemovable: [] }),
+    listRules: vi.fn().mockResolvedValue({ live: [], learning: [], retired: [] }),
     stagePendingMemory: vi.fn().mockResolvedValue({ id: "pending-1" }),
     bulkStagePendingMemories: vi.fn().mockResolvedValue(undefined),
     getPendingMemories: vi.fn().mockResolvedValue([]),

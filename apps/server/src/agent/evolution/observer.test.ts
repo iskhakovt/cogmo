@@ -250,7 +250,7 @@ describe("runObserver phase isolation", () => {
       provider: routedProvider({ consolidation: { groups: "not-an-array" } }),
       store: {
         getCorrections: vi.fn().mockResolvedValue(RULES),
-        countActiveRules: vi.fn().mockResolvedValue(31),
+        countActiveLearnedRules: vi.fn().mockResolvedValue(21),
       },
     });
 
@@ -367,7 +367,7 @@ describe("runObserver phase outcomes", () => {
       provider: routedProvider({ consolidation: { groups: "not-an-array" } }),
       store: {
         getCorrections: vi.fn().mockResolvedValue(RULES),
-        countActiveRules: vi.fn().mockResolvedValue(31),
+        countActiveLearnedRules: vi.fn().mockResolvedValue(21),
         deletePendingMemories: vi.fn().mockRejectedValue(new Error("connection reset")),
       },
       memory: { retainBatch },

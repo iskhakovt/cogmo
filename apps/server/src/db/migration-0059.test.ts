@@ -3,8 +3,8 @@
  * enum and moves the channel defaults `seedChannelRules` wrote as `manual` to
  * `seed`. Runs the raw migration SQL against PGlite over rows written in the
  * pre-migration shape (the column put back to text first, since the pushed
- * schema already has the enum) and asserts which rows become `seed`, and that
- * a source outside the enum fails the cast.
+ * schema already has the enum, and 0067's index and CHECK dropped) and asserts
+ * which rows become `seed`, and that a source outside the enum fails the cast.
  */
 
 import { readFile } from "node:fs/promises";
@@ -54,6 +54,12 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   await truncateAll(db);
+  // Migration 0067's index and CHECK compare `source` with enum values, so
+  // they block turning it back to text.
+  await db.execute(sql`DROP INDEX IF EXISTS uq_steering_rules_instruction`);
+  await db.execute(
+    sql`ALTER TABLE steering_rules DROP CONSTRAINT IF EXISTS chk_steering_rules_lifecycle`,
+  );
   await db.execute(sql`ALTER TABLE steering_rules ALTER COLUMN source SET DATA TYPE text`);
   await db.execute(sql`DROP TYPE steering_rule_source`);
 });
@@ -176,7 +182,7 @@ describe("migration 0059 — steering rule source", () => {
 
     const profileId = await seedProfile();
     const store = new DrizzleAgentStore();
-    const rules = await tx((trx) => store.getActiveRules(trx, profileId));
+    const rules = await tx((trx) => store.getActiveRules(trx, { profileId, userId: null }));
     expect(Object.fromEntries(rules.map((r) => [r.rule, r.section]))).toEqual({
       [OPERATOR]: "always",
       [TABLES]: "channel_defaults",

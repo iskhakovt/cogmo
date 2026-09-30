@@ -4,10 +4,13 @@ import type { SectionedRule } from "../rule-sections.js";
 import type { AgentStore, Profile } from "../store/index.js";
 
 /**
- * Load what the prompt assembler renders: the profile's steering rules, every
- * channel's included, and the conversation user's core memory blocks the
- * turn's scope sees. The reads share one tx and see a consistent snapshot
- * under the project's REPEATABLE READ default.
+ * Load what the prompt assembler renders: the steering rules the profile and
+ * the conversation's user see, every channel's included, and the user's core
+ * memory blocks the turn's scope sees. A scope without core memory (a
+ * third-party or unloadable profile) withholds the user's instruction rules
+ * as it withholds core memory: their text can carry what core memory holds.
+ * The reads share one tx and see a consistent snapshot under the project's
+ * REPEATABLE READ default.
  *
  * The `Profile` row is NOT re-read here — the orchestrator passes the
  * row it already loaded for voice-mode + tool-catalog resolution, so a
@@ -24,9 +27,9 @@ export interface LoadConversationContextDeps {
 }
 
 export interface LoadConversationContextArgs {
-  /** The conversation's user, whose core memory blocks the prompt renders. */
+  /** The conversation's user, whose core memory blocks and instruction rules the prompt renders. */
   userId: string;
-  /** Which of those blocks the turn sees (`loadCoreMemoryScope`, frozen in a turn). */
+  /** Which of those the turn sees (`loadCoreMemoryScope`, frozen in a turn). */
   coreMemoryScope: CoreMemoryScope;
   /**
    * Pre-loaded profile from the orchestrator. `undefined` when the
@@ -54,7 +57,12 @@ export async function readConversationContext(
   agentStore: AgentStore,
   args: LoadConversationContextArgs,
 ): Promise<ConversationContext> {
-  const rules = args.profile ? await agentStore.getActiveRules(tx, args.profile.id) : [];
+  const rules = args.profile
+    ? await agentStore.getActiveRules(tx, {
+        profileId: args.profile.id,
+        userId: args.coreMemoryScope.kind === "none" ? null : args.userId,
+      })
+    : [];
   const coreMemory = await readCoreMemory(tx, agentStore, args.userId, args.coreMemoryScope);
   return { rules, coreMemory };
 }

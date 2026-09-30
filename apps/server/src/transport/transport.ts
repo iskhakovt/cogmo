@@ -5,7 +5,7 @@ import { err, ok, type Result } from "neverthrow";
 import { planGateEmission } from "../agent/coding/plan-gate.js";
 import type { CodingStore } from "../agent/coding/store/index.js";
 import type { CompactConversationResult } from "../agent/conversation/compact-conversation.js";
-import { IDENTITY_BLOCK_KEY } from "../agent/core-memory/scope.js";
+import { admitsFirstParty, IDENTITY_BLOCK_KEY } from "../agent/core-memory/scope.js";
 import { isCoreCompartment } from "../agent/evolution/memory-extraction-schema.js";
 import type { TriggerReflectionResult } from "../agent/evolution/trigger-reflection.js";
 import { gateToken } from "../agent/pipeline/gate-keyboard.js";
@@ -1384,11 +1384,15 @@ export function createTransport(deps: {
             // Independent reads — fan out so /status doesn't pay six round-trips
             // sequentially. Each query is cheap on its own; the user is waiting
             // on the slowest one.
-            const [stats, alias, lastTurn, steeringRulesCount, mcpServers] = await Promise.all([
+            const [stats, alias, lastTurn, rules, mcpServers] = await Promise.all([
               agentStore.getConversationStats(tx, conv.id),
               agentStore.getAliasForConversation(tx, identity.userId, conv.id),
               agentStore.getLastTokens(tx, conv.id),
-              agentStore.countActiveRules(tx, conv.profileId),
+              // The rules `# Rules` renders for this conversation.
+              agentStore.getActiveRules(tx, {
+                profileId: conv.profileId,
+                userId: admitsFirstParty(profile) ? identity.userId : null,
+              }),
               mcpRegistry ? mcpRegistry.listServers() : Promise.resolve(null),
             ]);
             if (!stats) return err({ code: "conversation_not_found" as const });
@@ -1440,7 +1444,7 @@ export function createTransport(deps: {
               // normalize to null so the renderer only branches on one shape.
               lastTurn: lastTurn ?? null,
               contextBudget,
-              steeringRulesCount,
+              steeringRulesCount: rules.length,
               mcp,
             });
           },

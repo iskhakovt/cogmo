@@ -14,7 +14,7 @@ export interface SystemPromptDeps {
 }
 
 export interface RenderSystemPromptArgs {
-  /** The conversation's user, whose core memory `# User` renders. */
+  /** The conversation's user: `# User` renders their core memory, `# Rules` their instruction rules. */
   userId: string;
   /** The profile row the turn loaded; `undefined` when it is gone, which renders no rules. */
   profile: Profile | undefined;

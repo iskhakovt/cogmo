@@ -1,9 +1,11 @@
 /**
- * Rule consolidation — merges semantically similar steering rules.
+ * Rule consolidation — merges semantically similar learned rules.
  *
- * Triggered when active rule count exceeds the threshold (30).
- * An LLM groups similar rules and produces merged versions.
- * Old rules are atomically replaced via store.replaceRules().
+ * Triggered when the active learned rules pass the threshold (20). Loads
+ * `correction` and `evolution` rows only, so it never touches an instruction
+ * rule. An LLM groups similar rules and produces merged versions. Old rules
+ * are atomically replaced via store.replaceRules(); a group a retirement
+ * changed meanwhile is skipped.
  */
 
 import * as R from "remeda";
@@ -12,6 +14,7 @@ import type { Transactor } from "../../db/index.js";
 import type { LlmProvider } from "../../llm/provider.js";
 import { chatTyped } from "../../llm/typed.js";
 import { logger } from "../../logger.js";
+import { RuleGroupChangedError } from "../store/errors.js";
 import type { AgentStore } from "../store/index.js";
 import { labelRules } from "./extraction-schema.js";
 
@@ -167,19 +170,28 @@ async function consolidateChannelGroup(
 
     const totalObservations = originals.reduce((sum, r) => sum + r.observationCount, 0);
 
-    await deps.runInTx((tx) =>
-      deps.store.replaceRules(tx, {
-        oldIds,
-        newRule: {
-          rule: group.mergedRule,
-          category: group.category,
-          profileId: null,
-          channelType,
-          priority: 100,
-          observationCount: totalObservations,
-        },
-      }),
-    );
+    try {
+      await deps.runInTx((tx) =>
+        deps.store.replaceRules(tx, {
+          oldIds,
+          newRule: {
+            rule: group.mergedRule,
+            category: group.category,
+            profileId: null,
+            channelType,
+            priority: 100,
+            observationCount: totalObservations,
+          },
+        }),
+      );
+    } catch (error) {
+      if (!(error instanceof RuleGroupChangedError)) throw error;
+      logger.warn(
+        { oldIds, channelType, deleted: error.deleted },
+        "merge group holds a rule retired or merged since it was listed — skipped",
+      );
+      continue;
+    }
 
     mergedGroups++;
     rulesRemoved += oldIds.length - 1; // each group replaces N rules with 1

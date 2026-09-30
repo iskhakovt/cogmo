@@ -1,7 +1,7 @@
 /** Core memory scopes: design/memory.md → Core Memory Scope by Profile Class. */
 
 import type { Transaction } from "../../db/index.js";
-import type { AgentStore } from "../store/index.js";
+import type { AgentStore, Profile } from "../store/index.js";
 
 /** The one key a classed profile shares with every persona. */
 export const IDENTITY_BLOCK_KEY = "identity";
@@ -35,6 +35,15 @@ export type CoreMemoryScope =
 export interface CoreMemoryView {
   readonly scope: CoreMemoryScope;
   readonly blocks: ReadonlyArray<ScopedCoreMemoryBlock>;
+}
+
+/**
+ * Whether a profile's trust admits `first-party`, as a null `memory_scope`
+ * does. A profile that doesn't is third-party: it sees neither core memory nor
+ * the user's instruction rules (design/memory.md → Boundaries).
+ */
+export function admitsFirstParty(profile: Pick<Profile, "memoryScope">): boolean {
+  return profile.memoryScope === null || profile.memoryScope.trust.includes("first-party");
 }
 
 /**
