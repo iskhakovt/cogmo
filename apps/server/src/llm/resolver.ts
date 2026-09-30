@@ -140,7 +140,11 @@ async function buildAdapter(row: ProviderRow, deps: DbResolverDeps): Promise<Llm
   // before the new value can ship silently mis-routed.
   switch (row.type) {
     case "anthropic":
-      return new AnthropicProvider(apiKey, row.baseUrl ?? undefined);
+      return new AnthropicProvider(apiKey, row.baseUrl ?? undefined, {
+        ...(row.attrs.prefixMismatchBehavior && {
+          prefixMismatchBehavior: row.attrs.prefixMismatchBehavior,
+        }),
+      });
     case "openai_compatible": {
       if (!row.baseUrl) {
         throw new ProviderConfigError(

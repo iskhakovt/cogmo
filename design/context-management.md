@@ -95,7 +95,7 @@ The table is **append-only**. Re-compaction inserts a new row summarizing the pr
 
 `/compact` forces Strategy 2 immediately, regardless of budget pressure, and stores the result. The next turn then starts from a summary it did not have to wait for. `src/agent/conversation/compact-conversation.ts` drives it synchronously — the same trade-off `/reflect` makes: the user is waiting on the reply, single-user scale means no concurrent fire to race, and errors surface to the caller instead of a retry log.
 
-It picks the same split the budget-triggered path would (`DEFAULT_KEEP_TURNS`). `[confirmed]` It renders the prefix through the one renderer and carries that fork's Strategy 1 intent, triggered at the summarization model's budget, so a prefix that fits is summarized from the full tool results ([Strategy 2](#strategy-2-summarize-trigger-80) → Cleared results in the fork). Outside a turn there is no frozen tool table, so it strips every thinking block from its request ([prompt-caching.md](prompt-caching.md#sources-and-fixes) → source (h)). `[proposed]` Its attachments: [Strategy 2](#strategy-2-summarize-trigger-80) → Images.
+It picks the same split the budget-triggered path would (`DEFAULT_KEEP_TURNS`) and sends that prefix as the history holds it, with no Strategy 1 intent, so a prefix past the request cap fails as `compaction_failed`. `[confirmed]` From Append-only step 7 it renders the prefix through the one renderer and carries that fork's Strategy 1 intent, triggered at the summarization model's budget, so a prefix that fits is summarized from the full tool results ([Strategy 2](#strategy-2-summarize-trigger-80) → Cleared results in the fork); outside a turn there is no frozen tool table, so it strips every thinking block from its request ([prompt-caching.md](prompt-caching.md#sources-and-fixes) → source (h)). `[proposed]` Its attachments: [Strategy 2](#strategy-2-summarize-trigger-80) → Images.
 
 Because there is no budget gate, the manual path carries a floor the automatic one does not need: below `MIN_MESSAGES_TO_COMPACT` **real messages** outside the retain window it returns `too_short` rather than paying for a call. Reaching 80% of the window on that few messages means they are individually enormous and worth summarizing; asking by hand on a short conversation is not. The floor counts messages rather than compaction-view entries, so a re-compaction can't clear it on the strength of the previous summary occupying a slot.
 
@@ -135,9 +135,11 @@ Replace old `tool_result` content with a placeholder. The OpenAI-compatible adap
 
 **Where it runs** `[confirmed]`. As a request-level edit intent on `ChatParams`, which leaves the transcript alone; each adapter maps the intent, as with the cache intent.
 
-- **Anthropic.** The adapter sends server-side `clear_tool_uses_20250919` (beta `context-management-2025-06-27`) on every request, which keeps the beta set constant. Its trigger is this threshold in input tokens, `keep` is 5 tool uses, and `clear_at_least` makes each clearing worth its cache write. The client keeps sending the full history, and the preserved-thinking check compares what was sent, so thinking stays valid. Clearing also runs between a turn's iterations.
-- **Token counting.** `countTokens` applies the same intent on every adapter. The Anthropic endpoint returns the post-clearing count, and the count before clearing in `context_management.original_input_tokens`, which compaction's telemetry logs as its "before"; the OpenAI-compatible adapter clears locally exactly as it clears the wire body.
-- **OpenAI-compatible.** The adapter applies the same clearing to the wire body. Those routes replay no reasoning, so the moving cleared set costs cache only.
+`toolResultClearing(budget)` (`src/agent/context.ts`) builds the turn's intent, and every request of a chat or stage turn carries it: the counts, each loop iteration and its in-step replay, the summarization fork and the degraded-reply synthesis. It derives from the frozen model limits, so every invocation sends the same intent. A fork is its own request: the trigger is evaluated on the fork's prompt, and `keep` keeps the last five results the fork sends, so the summarizer reads its prefix cleared by the turn's rule, not exactly as the turn's requests read it.
+
+- **Anthropic.** The adapter sends server-side `clear_tool_uses_20250919` (beta `context-management-2025-06-27`) on every request to Anthropic's API that carries the intent, which keeps the beta set constant. Its trigger is this threshold in input tokens, `keep` is 5 tool uses, and `clear_at_least` is a tenth of the budget: a clearing writes the cache again from the first result it clears, so it has to buy at least half the room between the clearing and summarization thresholds (the docs' example asks a sixth of its trigger, the same ratio). The client keeps sending the full history, and the preserved-thinking check compares what was sent, so thinking stays valid. Clearing also runs between a turn's iterations.
+- **Token counting.** `countTokens` applies the same intent on every adapter and returns the count after clearing, which is what compaction compares with its thresholds and logs. The Anthropic endpoint clears as a message does; the adapters that clear on the wire count the body they send.
+- **OpenAI-compatible, and Anthropic-compatible third-party endpoints.** The adapter applies the same rule to the wire body, `[Cleared — call tool again if needed]` in place of each cleared result: past the trigger, by a local cl100k estimate, every result but the last five, provided they hold at least `clear_at_least` tokens (`src/llm/tool-result-clearing.ts`). The caller's messages stay as they are. OpenAI-compatible routes replay no reasoning, so the moving cleared set costs cache only. A third-party Anthropic endpoint gets no request controls ([prompt-caching.md](prompt-caching.md#server-side-controls-confirmed)), and its cleared set moves within a turn too: each iteration re-evaluates the rule, so a new result clears the sixth-newest, and on such a route that enforces preserved thinking the moved set is a history edit mid-turn. The decision encodes on the request's own thread, lazily: once the request's JSON bytes pass the trigger, it reads the prompt a slice (8,192 characters) at a time until the sum passes the trigger, then the results it would clear until they pass `clear_at_least`. It remembers each slice's count, so a result both passes read is encoded once, and the counts of the first 4,096 pieces of long runs, so a repeated rule, indent or run of one character is encoded once. It encodes at most about 70% of the budget plus a slice a pass, and its time depends on how the text breaks into pieces. At a 926k-token budget, on 16 MB in one message, it takes 0.5 s on English prose or base64, 1.2 s on CJK with punctuation, 1.3 s on CJK without, and 2.2 s on lines of random ACGT. The OpenAI-compatible count reads on from the decision's memory and stops once past the budget (`countUpTo`): 0.8 s, 2.0 s, 2.2 s and 3.8 s on the same texts. A long run the pre-tokenizer keeps whole (letters with the character before them, punctuation or whitespace) is encoded 64 UTF-8 bytes at a time, since byte-pair merging is quadratic in a piece. A seam costs a token where tokens merge across it: at most 0.3% on prose in English, German, Finnish, Chinese and Japanese, on code and on a test log, and 5–12% on text made mostly of long rules or indents. Longer pieces cut the drift but cost more a byte: one 128-byte piece of random letters takes 0.7 ms, two of 64 bytes 0.4 ms.
 
 ### Strategy 2: Summarize `[trigger: 80%]`
 
@@ -170,6 +172,16 @@ The summarization call receives the system prompt (or at minimum the core memory
 
 **Images:** A summary replaces the images in its span with text; if the model needs an earlier image again, the user re-sends it. `[proposed]` From Append-only step 4a the summarization fork sends the span's attachments as the turn's view renders them, under the conversation's cutoff, so the summary can describe them; `/compact` renders its prefix the same way. Normalized images fit every route, so the fork differs only where the summarization route's budget is smaller than the turn's: there it advances its own cutoff over the span, rendering those attachments as placeholders, and strips every thinking block from its request, since a placeholder the turn never sent invalidates the thinking after it ([prompt-caching.md](prompt-caching.md#sources-and-fixes) → source (h)). It renders its span from `load-turn-transcript`'s rows over the view's index range, since nothing before Strategy 2 changes the array's length ([Durable summaries](#durable-summaries-confirmed) → Cutoff derivation): a placeholder needs the ref's name, which the view's resolved blocks don't carry.
 
+**Size trigger** `[confirmed]`. The server clears after the request arrives, so a request carries every result, and its bytes can reach a route's cap (Anthropic 32 MB, Bedrock 20 MB, a `413 request_too_large`) while the count after clearing is well under the budget. The window itself is checked after the edits ([measured](prompt-caching.md#validation-confirmed)), so bytes are the only limit clearing hides. Compaction holds a view's raw JSON to `MAX_VIEW_BYTES`, C: the smallest route cap, 20 MB, less 64 KiB for what an adapter's wire format adds (Anthropic's adds about 20 bytes a document block and 1 KB of top-level fields). T is 80% of C. Truncation's cuts form a chain: the view, then each cut lighter than every view before it, run until a cut changes nothing, past any the marker makes heavier than the messages it replaces. The chain ends at the marker and the tail, three messages on plain alternation and five after a tool call, which is the smallest view unless the marker outweighs what it replaced.
+- A view within T needs nothing.
+- A view within C whose smallest cut is past T goes as it is, counted: its bytes are in the tail, and cutting would only drop history it fits with.
+- A view whose smallest cut is past C goes as it is, counted, and logs a warning with its bytes: no cut fits a 20 MB route, and Anthropic's 32 MB route takes the view whole.
+- Any other view past T summarizes on any path, the skip-counting fast path included, without a count first, since counting it sends it. It then takes the first view of the chain within T, the view itself included, else the first within C.
+
+The cap is one constant until [Append-only step 4a](prompt-caching.md#rollout) declares limits per route. Residuals:
+- A view whose smallest cut is past C fails on a 20 MB route, its count included; from Append-only step 4b attachments are capped at arrival ([transport/attachments.md](transport/attachments.md)).
+- Only the turn's start checks bytes, so a turn's own tool results can grow its requests past the cap between iterations.
+
 **Failure handling:** If the summarization LLM call fails (timeout, rate limit, malformed output), fall through to strategy 3 (truncation). Summarization failure should not block the conversation. Nothing is stored on that path, so the next turn re-attempts rather than inheriting a partial result.
 
 **Durability:** the summary is persisted — see [Durable summaries](#durable-summaries-confirmed). Iterative compaction reads the stored summary back as the head of the prefix it re-summarizes, which is the same shape the in-memory path produced before the table existed.
@@ -199,21 +211,32 @@ Anthropic requires every `tool_result` block (on a user message) to have a match
 ```
 cutoff = attachmentCutoff(epoch, refSizes, limits)           # [proposed] before counting: fits attachments to their budget
 messages = render(rows, cutoff)                              # [proposed] attachments up to the cutoff as placeholders
-edit = clearToolResults(trigger = budget * 0.60, keep = 5)   # Strategy 1: an intent every request carries
+edit = clearToolResults(trigger = budget * 0.60, keep = 5,  # Strategy 1: an intent every request carries
+                        clearAtLeast = budget * 0.10)
+C = MAX_VIEW_BYTES                                           # the smallest route cap, less the wire's overhead
+T = C * 0.80
+cuts(m) = [m, truncate(m), ...]                              # each lighter than all before it, until a cut changes nothing
+small(m) = bytes(last(cuts(m)))
+oversized(m) = bytes(m) > T and small(m) <= C and (bytes(m) > C or small(m) <= T)
+count(m) = oversized(m) ? none : countTokens(system, m, tools, edit)   # after clearing
 
-count = countTokens(system, messages, tools, edit)           # after clearing
+tokens = count(messages)
 
-if count > budget * 0.80:
+if tokens is none or tokens > budget * 0.80:
   messages = summarize(messages, keep=6)
-  count = countTokens(system, messages, tools, edit)
+  tokens = count(messages)
 
-if count > budget * 0.95:
-  messages = truncate(messages)
+if oversized(messages):
+  messages = first(cuts(messages), <= T) ?? first(cuts(messages), <= C)
+else if tokens > budget * 0.95:
+  messages = cuts(messages)[1]                               # one cut, if one shrinks it
+
+if bytes(messages) > C: warn                                 # no cut fits it
 ```
 
 `[proposed]` The attachment cutoff comes first, so no count sends a view over the request cap ([prompt-caching.md](prompt-caching.md#sources-and-fixes) → source (d)). Every request carries Strategy 1's intent, the count included, and the adapter clears ([Where it runs](#strategy-1-clear-tool-results-trigger-60)). Strategy 0 is retired ([Retirement](#retirement-confirmed)).
 
-**Skip-counting fast path.** `compactMessages` accepts a `skipBudgetStrategies` flag. When the caller has already decided via `shouldSkipCounting` that the turn is comfortably under the context budget, it passes `true`, and `compactMessages` returns the view unchanged without the `provider.countTokens` round-trip. Otherwise it counts once, and again only after a summary, whose size varies.
+**Skip-counting fast path.** `compactMessages` accepts a `skipBudgetStrategies` flag. When the caller has already decided via `shouldSkipCounting` that the turn is comfortably under the context budget, it passes `true`, and `compactMessages` returns the view unchanged without the `provider.countTokens` round-trip, unless the view passes the [size trigger](#strategy-2-summarize-trigger-80). Otherwise it counts once, and again after a summary or a truncation; a view the size trigger compacts isn't counted. Each count asks for tokens up to the budget (`countUpTo`), past which compaction tells none apart, and the OpenAI-compatible count stops there.
 
 ## Fast Path: Usage Tracking
 
@@ -246,12 +269,14 @@ No event is emitted for tool result clearing (instant, no user-visible delay) or
 ## Observability
 
 Compaction events are logged with:
-- Which strategies fired (tool clearing, summarization, truncation)
-- Token count before and after each strategy
-- Number of tool results cleared, number of messages summarized
+- Which strategies fired (summarization, truncation)
+- Token count before and after, each after Strategy 1's clearing, `null` for a view the size trigger compacts, and past the budget a figure past it where the adapter counts locally
+- The view's raw bytes before compaction
+- A warning with the view's bytes whenever a view past `MAX_VIEW_BYTES` goes out
+- Number of messages summarized
 - Summarization model used and its token cost
 
-This data is essential for tuning thresholds — if summarization fires too often, raise the tool-clearing threshold; if truncation fires at all, something is misconfigured.
+Tool-result clearing happens in the provider, per request; Anthropic reports each clearing in the response's `context_management.applied_edits`. This data is essential for tuning thresholds. If summarization fires too often, clear more (a smaller `keep` or a lower `clear_at_least`; not a lower trigger, which a count at 80% has already passed) or raise the summarization threshold. If truncation fires at all, something is misconfigured.
 
 ## What This Doesn't Cover
 

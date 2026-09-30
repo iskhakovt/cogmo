@@ -1,6 +1,7 @@
 /**
  * Live: Anthropic prompt caching through the adapter — the within-turn
- * relation of scenario A in design/prompt-caching.md → Test Plan → Live tier.
+ * relation of scenario A in design/prompt-caching.md → Test Plan → Live tier —
+ * and the count endpoint under the request controls production sends.
  *
  * Replay can't show this: llmock replays Anthropic usage without the cache
  * fields, and only the real endpoint decides what it serves from cache. A
@@ -9,7 +10,7 @@
  * exactly what the one before it cached.
  *
  * Skipped unless `LIVE=1` and `ANTHROPIC_API_KEY` are set. Costs a few cents:
- * one ~5k-token cache write at the 1-hour rate, then reads.
+ * one ~5k-token cache write at the 1-hour rate, then reads. Counting is free.
  *
  *   set -a; . ./.env; set +a; LIVE=1 pnpm test:live
  */
@@ -22,7 +23,7 @@ import { DEFAULT_PROFILE_MODEL } from "../setup/seed.js";
 import { expectDefined } from "../test/assertions.js";
 import { createWireRecorder, type WireResponse } from "../test/wire-recorder.js";
 import { AnthropicProvider } from "./anthropic.js";
-import type { Message, ToolDefinition, Usage } from "./types.js";
+import type { Message, ToolDefinition, ToolResultClearing, Usage } from "./types.js";
 
 // An empty `ANTHROPIC_API_KEY=` line in `.env` counts as unset.
 const API_KEY = (process.env.LIVE === "1" && process.env.ANTHROPIC_API_KEY) || undefined;
@@ -190,5 +191,55 @@ describe.skipIf(API_KEY === undefined)("AnthropicProvider prompt caching (live)"
     for (const body of sent) {
       expect(body?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
     }
+  });
+
+  it("counts after the edit intent's clearing, with the binding controls on", async () => {
+    const recorder = createWireRecorder();
+    // As a provider row with `prefixMismatchBehavior` configures it: the model
+    // runs the prefix check, so the count carries `block_binding` too.
+    const provider = new AnthropicProvider(expectDefined(API_KEY, "API key"), undefined, {
+      fetch: recorder.fetch,
+      prefixMismatchBehavior: "error",
+    });
+    const log = R.times(200, (i) => `line ${i + 1}: rule ${i + 1} reads as expected`).join("\n");
+    const params = {
+      model: MODEL,
+      system: systemPrompt(randomUUID()),
+      messages: [
+        { role: "user", content: "Look up rule 7." },
+        {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "toolu_1", name: "lookup_rule", input: { number: 7 } }],
+        },
+        { role: "user", content: [{ type: "tool_result", toolUseId: "toolu_1", content: log }] },
+        { role: "assistant", content: "Rule 7 reads as expected." },
+        { role: "user", content: "Thanks." },
+      ] satisfies Message[],
+      tools: TOOLS,
+    };
+    const clearing: ToolResultClearing = { triggerTokens: 1000, keep: 0, clearAtLeastTokens: 500 };
+
+    const uncleared = await provider.countTokens(params);
+    const cleared = await provider.countTokens({ ...params, clearToolResults: clearing });
+    const underTrigger = await provider.countTokens({
+      ...params,
+      clearToolResults: { ...clearing, triggerTokens: 1_000_000 },
+    });
+    console.log({ uncleared, cleared, underTrigger });
+
+    expect(cleared).toBeLessThan(uncleared - 500);
+    expect(underTrigger).toBe(uncleared);
+    const [, withIntent] = recorder.exchanges;
+    const request = expectDefined(withIntent, "the count with the intent").request;
+    expect(request.headers["anthropic-beta"]?.split(",")).toEqual(
+      expect.arrayContaining([
+        "context-management-2025-06-27",
+        "thinking-binding-controls-2026-08-01",
+      ]),
+    );
+    expect(request.body?.thinking).toEqual({
+      type: "adaptive",
+      block_binding: { prefix_mismatch_behavior: "error" },
+    });
   });
 });

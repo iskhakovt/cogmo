@@ -244,11 +244,30 @@ export interface CacheIntent {
   retention: "short" | "long";
 }
 
+/**
+ * Clears the oldest tool results from what the model reads, leaving
+ * `messages` as sent: compaction's Strategy 1 as a request-level edit (see
+ * design/context-management.md → Strategy 1). Each adapter applies it the
+ * same way, on the request and in its token count: Anthropic's API on the
+ * server (`clear_tool_uses_20250919`), the OpenAI-compatible adapter and a
+ * third-party Anthropic endpoint on the wire.
+ */
+export interface ToolResultClearing {
+  /** Clears once the prompt, before clearing, exceeds this many input tokens. */
+  triggerTokens: number;
+  /** The most recent tool results that stay. */
+  keep: number;
+  /** Clears nothing unless the results it would clear hold at least this many tokens. */
+  clearAtLeastTokens: number;
+}
+
 export interface ChatParams {
   model: string;
   system: string;
   messages: Message[];
   tools?: ToolDefinition[];
+  /** Strategy 1's edit intent. */
+  clearToolResults?: ToolResultClearing;
   maxTokens?: number;
   /**
    * Request structured JSON output. Mutually exclusive with tools. A provider
@@ -287,6 +306,14 @@ export interface ChatOptions {
 /**
  * ChatParams minus `maxTokens` and `cache` — if you can chat(), you can count
  * tokens for it, since a `ChatParams` value still fits. A count is never sent
- * again, so it takes no cache intent.
+ * again, so it takes no cache intent. With `clearToolResults`, the count is
+ * the prompt after clearing.
  */
-export type CountTokensParams = Omit<ChatParams, "maxTokens" | "cache">;
+export interface CountTokensParams extends Omit<ChatParams, "maxTokens" | "cache"> {
+  /**
+   * The largest count the caller tells apart. An adapter that counts locally
+   * stops once its sum passes this and returns that sum, a figure past it but
+   * short of the exact count; a count a server returns is exact either way.
+   */
+  countUpTo?: number;
+}

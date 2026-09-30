@@ -5,6 +5,7 @@ import { mock } from "vitest-mock-extended";
 import type { z } from "zod";
 import { conversationTurnConcurrency } from "../inngest/concurrency.js";
 import type { inboundReady } from "../inngest/events.js";
+import { MAX_REQUEST_BYTES, MAX_VIEW_BYTES } from "../llm/request-size.js";
 import { ProviderConfigError } from "../llm/resolver.js";
 import type { ChatParams, ChatStreamFrame, Message, StopReason } from "../llm/types.js";
 import { logger } from "../logger.js";
@@ -37,6 +38,7 @@ import {
 } from "../test/factories.js";
 import type { InboundContent } from "../transport/content.js";
 import { StreamDeliveryError } from "../transport/delivery-router.js";
+import { toolResultClearing } from "./context.js";
 import { coreMemoryTools } from "./core-memory-tools.js";
 import type { HandleMessageDeps } from "./handle-message.js";
 import { createHandleMessage } from "./handle-message.js";
@@ -1414,12 +1416,99 @@ describe("createHandleMessage", () => {
     expect(deps.runStreamingAgentLoop).toHaveBeenCalled();
   });
 
+  it("sends the turn's Strategy 1 intent on every count and the summarization fork, and hands it to the loop", async () => {
+    // Over 80% of budget after clearing → summarization, then under.
+    const countTokens = vi.fn().mockResolvedValueOnce(800_000).mockResolvedValueOnce(50_000);
+    const chat = vi.fn().mockResolvedValue({
+      content: [{ type: "text", text: "Summary of conversation" }],
+      stopReason: "end_turn",
+      model: "mock",
+      usage: { inputTokens: 10, outputTokens: 5 },
+    });
+    const deps = mockDeps({
+      resolveProvider: mockResolver(mockProvider({ countTokens, chat })),
+      agentStore: mockAgentStore({
+        getLastTokens: vi.fn().mockResolvedValue(null),
+        listMessages: vi.fn().mockResolvedValue([
+          { id: "m1", role: "user", content: "m1" },
+          { id: "m2", role: "assistant", content: "r1" },
+          { id: "m3", role: "user", content: "m2" },
+          { id: "m4", role: "assistant", content: "r2" },
+          { id: "m5", role: "user", content: "m3" },
+          { id: "m6", role: "assistant", content: "r3" },
+          { id: "msg-1", role: "user", content: "m4" },
+          { id: "m8", role: "assistant", content: "r4" },
+        ]),
+      }),
+    });
+
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    const clearing = toolResultClearing(926_000);
+    const loopParams = expectDefined(
+      vi.mocked(deps.runStreamingAgentLoop).mock.calls[0],
+      "loop call",
+    )[0];
+    expect(loopParams.clearToolResults).toEqual(clearing);
+    expect(countTokens).toHaveBeenCalledTimes(2);
+    for (const [params] of countTokens.mock.calls) {
+      expect(params.clearToolResults).toEqual(clearing);
+    }
+    expect(expectDefined(chat.mock.calls[0], "summarization call")[0].clearToolResults).toEqual(
+      clearing,
+    );
+  });
+
+  it("summarizes a view past 80% of the view cap on the fast path, without counting it", async () => {
+    // The last turn's usage, after clearing, is small; the history's raw bytes are not.
+    const countTokens = vi.fn().mockResolvedValue(50_000);
+    const chat = vi.fn().mockResolvedValue({
+      content: [{ type: "text", text: "Summary of conversation" }],
+      stopReason: "end_turn",
+      model: "mock",
+      usage: { inputTokens: 10, outputTokens: 5 },
+    });
+    // Past 80% of the view cap, within 80% of the request cap it leaves the wire room under.
+    const huge = "x".repeat(Math.floor(MAX_REQUEST_BYTES * 0.8) - 20_000);
+    expect(huge.length).toBeGreaterThan(MAX_VIEW_BYTES * 0.8);
+    const deps = mockDeps({
+      resolveProvider: mockResolver(mockProvider({ countTokens, chat })),
+      agentStore: mockAgentStore({
+        getLastTokens: vi.fn().mockResolvedValue({ inputTokens: 1000, outputTokens: 100 }),
+        listMessages: vi.fn().mockResolvedValue([
+          { id: "m1", role: "user", content: huge },
+          { id: "m2", role: "assistant", content: "r1" },
+          { id: "m3", role: "user", content: "m2" },
+          { id: "m4", role: "assistant", content: "r2" },
+          { id: "m5", role: "user", content: "m3" },
+          { id: "m6", role: "assistant", content: "r3" },
+          { id: "msg-1", role: "user", content: "m4" },
+          { id: "m8", role: "assistant", content: "r4" },
+        ]),
+      }),
+    });
+
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    expect(chat).toHaveBeenCalledOnce();
+    // Counted once, after the summary replaced the oversized message.
+    expect(countTokens).toHaveBeenCalledOnce();
+    expect(JSON.stringify(countTokens.mock.calls[0]?.[0].messages)).not.toContain(huge);
+  });
+
   it("pushes status event through delivery when summarization runs", async () => {
     // Over 80% of budget (926_000 * 0.8 ≈ 740_800) → triggers summarization
     const countTokens = vi
       .fn()
-      .mockResolvedValueOnce(800_000) // initial: over 80%
-      .mockResolvedValueOnce(800_000) // after tool clearing (nothing to clear): still over
+      .mockResolvedValueOnce(800_000) // after clearing: over 80%
       .mockResolvedValueOnce(50_000); // after summarization: under
     const handle = mockDeliveryHandle();
     const deps = mockDeps({
@@ -3556,11 +3645,16 @@ describe("createHandleMessage", () => {
       runId: testRunId,
     });
 
-    // Synthesis call was made with tools disabled at the API level and
-    // temperature: 0 — pins the design constraints at the wiring layer.
+    // Synthesis call was made with tools disabled at the API level,
+    // temperature: 0 and the turn's Strategy 1 intent — pins the design
+    // constraints at the wiring layer.
     const chatCalls = vi.mocked(synthesisProvider.chat).mock.calls;
     expect(chatCalls).toHaveLength(1);
-    expect(chatCalls[0]?.[0]).toMatchObject({ tools: [], temperature: 0 });
+    expect(chatCalls[0]?.[0]).toMatchObject({
+      tools: [],
+      temperature: 0,
+      clearToolResults: toolResultClearing(926_000),
+    });
 
     // The synthesized text was pushed onto the streaming delivery.
     const textPushes = vi

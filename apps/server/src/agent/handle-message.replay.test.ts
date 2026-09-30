@@ -27,6 +27,7 @@ import { mock } from "vitest-mock-extended";
 import { z } from "zod";
 import { inngest } from "../inngest/client.js";
 import { AnthropicProvider } from "../llm/anthropic.js";
+import { MAX_REQUEST_BYTES } from "../llm/request-size.js";
 import type { ChatParams, ChatStreamFrame, ContentFrame, ToolDefinition } from "../llm/types.js";
 import { agentIterations, memoryRecallFailures } from "../metrics.js";
 import type { SkillRunner } from "../skills/runner.js";
@@ -329,6 +330,65 @@ describe("handle-message — crash recovery / step replay", () => {
     // pipeline having skipped summarization altogether.
     await new InngestTestEngine({ function: fn, events: [event] }).execute();
     expect(deps.agentStore.insertOrRecoverSummary).toHaveBeenCalledTimes(1);
+  });
+
+  it("replays an oversized fast-path turn's summary, its persist and its one count from the cache", async () => {
+    // The fast path skips counting, but the history is past the size trigger:
+    // the turn plans `summarize-prefix-outcome`, `persist-summary` and, for
+    // the summarized view, `count-tokens-1`, with no count before them.
+    const huge = "x".repeat(Math.ceil(MAX_REQUEST_BYTES * 0.85));
+    const countTokens = vi.fn().mockResolvedValue(50_000);
+    const chat = vi.fn().mockResolvedValue({
+      content: [{ type: "text", text: "fresh summary" }],
+      stopReason: "end_turn",
+      model: "mock-model",
+      usage: { inputTokens: 10, outputTokens: 5 },
+    });
+    const deps = mockDeps({
+      resolveProvider: mockResolver(mockProvider({ countTokens, chat })),
+      agentStore: mockAgentStore({
+        getLastTokens: vi.fn().mockResolvedValue({ inputTokens: 1_000, outputTokens: 100 }),
+        listMessages: vi.fn().mockResolvedValue([
+          { id: "m1", role: "user", content: huge },
+          ...Array.from({ length: 6 }, (_, i) => ({
+            id: `m${i + 2}`,
+            role: i % 2 === 0 ? "assistant" : "user",
+            content: `turn ${i + 2}`,
+          })),
+          { id: "msg-1", role: "user", content: "m8" },
+        ]),
+      }),
+    });
+    const fn = createHandleMessage(deps);
+
+    await new InngestTestEngine({
+      function: fn,
+      events: [event],
+      steps: [
+        {
+          id: "summarize-prefix-outcome",
+          handler: () => ({ text: "[cached summary]", stopReason: "end_turn" }),
+        },
+        { id: "persist-summary", handler: () => ({ id: "cached-summary-id" }) },
+        { id: "count-tokens-1", handler: () => 50_000 },
+      ],
+    }).execute();
+
+    expect(chat).not.toHaveBeenCalled();
+    expect(deps.agentStore.insertOrRecoverSummary).not.toHaveBeenCalled();
+    expect(countTokens).not.toHaveBeenCalled();
+    const loopMessages = expectDefined(
+      vi.mocked(deps.runStreamingAgentLoop).mock.calls[0],
+      "agent loop call",
+    )[0].messages;
+    expect(JSON.stringify(loopMessages)).toContain("[cached summary]");
+    expect(JSON.stringify(loopMessages)).not.toContain(huge);
+
+    // Non-vacuity: run live, the same turn summarizes, persists and counts once.
+    await new InngestTestEngine({ function: fn, events: [event] }).execute();
+    expect(chat).toHaveBeenCalledOnce();
+    expect(deps.agentStore.insertOrRecoverSummary).toHaveBeenCalledOnce();
+    expect(countTokens).toHaveBeenCalledOnce();
   });
 
   it("does not re-execute a durable tool step body when the iteration-keyed step is cached", async () => {
@@ -861,7 +921,7 @@ describe("handle-message — replay equality", () => {
   function replayDeps(epoch: { configDigest: string } | null) {
     const recorder = createWireRecorder(async (input, init) => {
       const req = new Request(input, init);
-      if (req.url.endsWith("/v1/messages/count_tokens")) {
+      if (new URL(req.url).pathname === "/v1/messages/count_tokens") {
         return new Response(JSON.stringify({ input_tokens: 100 }), {
           headers: { "content-type": "application/json" },
         });
@@ -976,7 +1036,7 @@ describe("handle-message — replay equality", () => {
       runStreamingAgentLoop,
     });
     const messageRequests = () =>
-      recorder.exchanges.filter((e) => e.request.url.endsWith("/v1/messages"));
+      recorder.exchanges.filter((e) => new URL(e.request.url).pathname === "/v1/messages");
     return { deps, messageRequests };
   }
 

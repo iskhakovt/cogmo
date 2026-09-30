@@ -16,7 +16,9 @@ import {
 import { z } from "zod";
 import { jsonbZod, pk, ts } from "../../db/helpers.js";
 import { CacheDialectSchema } from "../../llm/cache-dialect.js";
+import { PrefixMismatchBehaviorSchema } from "../../llm/prefix-mismatch-behavior.js";
 import { MessageContentSchema } from "../../llm/types.js";
+import { logger } from "../../logger.js";
 import { secrets } from "../../secrets/store/schema.js";
 import { EvolutionEventPayloadSchema } from "../evolution/event-schema.js";
 import {
@@ -182,16 +184,29 @@ export type SttProviderTypeValue = (typeof sttProviderType.enumValues)[number];
 // --- JSONB shapes ---
 
 /**
- * `llm_providers.attrs` — adapter-specific knobs, all for OpenAI-compatible
- * rows. `cacheDialect` says which caching and routing hints the endpoint takes
- * for a cache intent; absent reads as `none`, and Anthropic rows never carry
- * it. `headers` sets extra default headers on the OpenAI SDK client (e.g.
- * `HTTP-Referer` for OpenRouter usage attribution). Unknown keys are dropped
- * on read, so a stray key never fails a provider lookup.
+ * `llm_providers.attrs` — adapter-specific knobs. `cacheDialect` says which
+ * caching and routing hints an OpenAI-compatible endpoint takes for a cache
+ * intent; absent reads as `none`, and Anthropic rows never carry it.
+ * `headers` sets extra default headers on the OpenAI SDK client (e.g.
+ * `HTTP-Referer` for OpenRouter usage attribution). `prefixMismatchBehavior`,
+ * on an Anthropic row, is what the API does with a replayed thinking block
+ * whose prefix changed; absent keeps the account's default, and so does a
+ * value the API doesn't take, which reads as absent with a warning: it is set
+ * by hand, and a typo must not fail every model routed through the row.
+ * Unknown keys are dropped on read, so a stray key never fails a provider
+ * lookup.
  */
 export const ProviderAttrsSchema = z.object({
   cacheDialect: CacheDialectSchema.optional(),
   headers: z.record(z.string(), z.string()).optional(),
+  prefixMismatchBehavior: PrefixMismatchBehaviorSchema.optional().catch((ctx) => {
+    // Once per read of the row, which the provider resolver caches per model.
+    logger.warn(
+      { prefixMismatchBehavior: ctx.value },
+      "ignoring llm_providers.attrs.prefixMismatchBehavior: the API takes drop_block or error",
+    );
+    return undefined;
+  }),
 });
 export type ProviderAttrs = z.infer<typeof ProviderAttrsSchema>;
 
@@ -1051,13 +1066,14 @@ export const evolutionEvents = pgTable(
  * Durable conversation summaries — the persisted output of the summarize
  * compaction strategy.
  *
- * Compaction itself stays ephemeral for Strategies 0, 1 and 3 (they rewrite
- * or drop blocks in memory at turn time). Summarization is different: it
- * costs an LLM call, so its result is written here and replayed on every
- * subsequent turn instead of being recomputed. `through_message_id` names the
- * last message the summary stands in for — the turn loader drops every
- * message up to and including it and prepends the summary as a single user
- * message. See design/context-management.md → Durable summaries.
+ * The rest of compaction stores nothing: Strategy 1 is an edit intent on the
+ * request, and Strategy 3 drops messages from the turn's view in memory.
+ * Summarization is different: it costs an LLM call, so its result is written
+ * here and replayed on every subsequent turn instead of being recomputed.
+ * `through_message_id` names the last message the summary stands in for — the
+ * turn loader drops every message up to and including it and prepends the
+ * summary as a single user message. See design/context-management.md →
+ * Durable summaries.
  *
  * The two foreign keys are independent, so the schema alone permits a row
  * pairing conversation A with a message from conversation B — a cutoff that

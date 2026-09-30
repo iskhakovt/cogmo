@@ -12,6 +12,7 @@ import {
 } from "../inngest/events.js";
 import { isRetriableProviderError } from "../llm/fallback.js";
 import { computeBudget, resolveLimits } from "../llm/models.js";
+import { MAX_VIEW_BYTES } from "../llm/request-size.js";
 import {
   type LlmProviderResolver,
   ProviderConfigError,
@@ -42,6 +43,7 @@ import {
   extractSummaryText,
   shouldSkipCounting,
   summarizationRequest,
+  toolResultClearing,
 } from "./context.js";
 import { loadSystemPrompt } from "./conversation/load-system-prompt.js";
 import {
@@ -912,6 +914,9 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         resolveLimits(model, rowLimits),
       );
       const budget = computeBudget(limits);
+      // Strategy 1's edit intent, on every request of the turn. Derived from
+      // the frozen limits, so every invocation sends the same intent.
+      const clearToolResults = toolResultClearing(budget);
       const summarizationModel = snapshot.summarizationModel;
 
       // Durable: persist-new-messages rewrites the row this reads MID-RUN,
@@ -932,14 +937,9 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         budget,
       );
 
-      // Always invoke compaction. Strategy 0 (same-tool supersession)
-      // is structural and runs regardless of budget — gating it behind
-      // shouldSkipCounting would defeat the design (volume-driven
-      // attention dilution doesn't care about budget headroom). The
-      // skip-counting decision now flows in as `skipBudgetStrategies`,
-      // which gates Strategies 1–3 inside compactMessages so the
-      // expensive provider.countTokens round-trip is only paid when
-      // budget pressure could matter.
+      // The skip-counting decision flows in as `skipBudgetStrategies`, which
+      // spares compactMessages the provider.countTokens round-trip when budget
+      // pressure can't matter; a view past the size trigger compacts anyway.
       // Set by the `summarize` callback below when Strategy 2 fires. Assigned
       // on every invocation that reaches the strategy — `summarize-prefix-outcome`
       // hands back the memoized text on a replay just as it does on the first
@@ -975,6 +975,8 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             };
           })(),
           budget,
+          clearToolResults,
+          maxViewBytes: MAX_VIEW_BYTES,
           // Refuse a split that buys nothing durable — the shape where the
           // prefix is the previously-stored summary and nothing else.
           canSummarizePrefix: (candidate) =>
@@ -1021,6 +1023,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
                   system,
                   messages: msgs,
                   maxOutputTokens: summarizationLimits.maxOutputTokens,
+                  clearToolResults,
                 }),
               );
               const text = extractSummaryText(response.content);
@@ -1046,11 +1049,10 @@ export function createHandleMessage(deps: HandleMessageDeps) {
 
       // Persist what Strategy 2 produced so the next turn replays the summary
       // instead of paying for it again. `messagesSummarized` is the split
-      // index into the compaction input — Strategies 0 and 1 rewrite block
-      // content in place and never change the array's length, so it indexes
-      // `turnHistory.messageIds` directly. It is 0 whenever the strategy
-      // no-opped (under budget, or the model returned no text), which is also
-      // the guard against storing an empty summary.
+      // index into the compaction input — nothing before Strategy 2 changes
+      // the array, so it indexes `turnHistory.messageIds` directly. It is 0
+      // whenever the strategy no-opped (under budget, or the model returned
+      // no text), which is also the guard against storing an empty summary.
       //
       // Every input here is durable or memoized, so this step is planned the
       // same way on every invocation. The (conversation, cutoff) unique makes
@@ -1210,6 +1212,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           // re-fire moves — see `firstInboundId` above.)
           ...(firstInboundId !== "" && { turnKey: firstInboundId }),
           cache: turnCacheIntent(conversationId, "chat"),
+          clearToolResults,
           turnLogger,
         });
         // Class C / D degraded off-ramp. The loop exited because a repair
@@ -1250,6 +1253,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
               messages: result.messages,
               reason: degraded.reason,
               subtype: degraded.subtype,
+              clearToolResults,
               log: turnLogger,
             });
             // Retract first. Output streamed before the degrade fired is

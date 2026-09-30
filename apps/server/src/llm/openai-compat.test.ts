@@ -12,12 +12,15 @@ import { ProviderProtocolError, ToolArgsCutOffError } from "./errors.js";
 import { isRetriableProviderError, RefusalError } from "./fallback.js";
 import { toObjectJsonSchema } from "./json-schema.js";
 import { modelFamilyParams, OpenAICompatibleProvider } from "./openai-compat.js";
+import { CLEARED_PLACEHOLDER, cl100k } from "./tool-result-clearing.js";
 import type {
   CacheIntent,
   ChatParams,
   ChatStreamFrame,
   ImageBlock,
+  Message,
   ToolDefinition,
+  ToolResultClearing,
 } from "./types.js";
 
 const mockCreate = vi.fn();
@@ -1980,7 +1983,331 @@ describe("OpenAICompatibleProvider", () => {
     });
   });
 
+  describe("tool-result clearing", () => {
+    const RESULT = "line of output from the tool\n".repeat(40);
+
+    /** Four tool calls and their results, oldest first, then a user turn. */
+    function toolHeavy(): Message[] {
+      return [
+        { role: "user", content: "read the logs" },
+        ...[1, 2, 3, 4].flatMap((n): Message[] => [
+          {
+            role: "assistant",
+            content: [{ type: "tool_use", id: `t${n}`, name: "read", input: { part: n } }],
+          },
+          {
+            role: "user",
+            content: [{ type: "tool_result", toolUseId: `t${n}`, content: `${n}: ${RESULT}` }],
+          },
+        ]),
+        { role: "user", content: "summarize" },
+      ];
+    }
+
+    const CLEARING: ToolResultClearing = { triggerTokens: 100, keep: 2, clearAtLeastTokens: 50 };
+
+    function toolContents(args: ChatCreateArgs): unknown[] {
+      return args.messages.filter((m) => m.role === "tool").map((m) => m.content);
+    }
+
+    function okCompletion(): unknown {
+      return {
+        choices: [{ message: { content: "ok", tool_calls: null }, finish_reason: "stop" }],
+        model: "gpt-5-nano",
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      };
+    }
+
+    it("clears every result but the last `keep` on the wire, past the trigger", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce(okCompletion());
+      const messages = toolHeavy();
+      const before = structuredClone(messages);
+
+      await provider.chat({
+        model: "gpt-5-nano",
+        system: "sys",
+        messages,
+        clearToolResults: CLEARING,
+      });
+
+      const args = firstCreateArgs();
+      expect(toolContents(args)).toEqual([
+        CLEARED_PLACEHOLDER,
+        CLEARED_PLACEHOLDER,
+        `3: ${RESULT}`,
+        `4: ${RESULT}`,
+      ]);
+      // The calls stay, so the model knows what was called and with what.
+      const calls = args.messages.flatMap((m) => m.tool_calls ?? []);
+      expect(calls).toHaveLength(4);
+      // The caller's transcript is left as it was.
+      expect(messages).toEqual(before);
+    });
+
+    it("encodes a tokenizer marker in a tool result as text, on chat, stream and count", async () => {
+      // cl100k's special tokens: a model's own output or a fetched page can hold one.
+      const marked = toolHeavy().map((m): Message => {
+        if (typeof m.content === "string") return m;
+        return {
+          ...m,
+          content: m.content.map((b) =>
+            b.type === "tool_result"
+              ? { ...b, content: `${b.content}<|endoftext|><|fim_prefix|>` }
+              : b,
+          ),
+        };
+      });
+      const params = { model: "gpt-5-nano", system: "sys", messages: marked };
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce(okCompletion());
+      mockCreate.mockResolvedValueOnce(
+        mockStream([
+          {
+            model: "gpt-5-nano",
+            choices: [{ delta: { content: "ok" }, finish_reason: "stop" }],
+            usage: { prompt_tokens: 1, completion_tokens: 1 },
+          },
+        ]),
+      );
+
+      await provider.chat({ ...params, clearToolResults: CLEARING });
+      await drainFrames(provider.chatStream({ ...params, clearToolResults: CLEARING }));
+      const counted = await provider.countTokens(params);
+
+      expect(mockCreate).toHaveBeenCalledTimes(2);
+      expect(counted).toBeGreaterThan(
+        await provider.countTokens({ ...params, messages: toolHeavy() }),
+      );
+    });
+
+    it("clears the same results on the streaming path", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce(
+        mockStream([
+          {
+            model: "gpt-5-nano",
+            choices: [{ delta: { content: "ok" }, finish_reason: "stop" }],
+            usage: { prompt_tokens: 1, completion_tokens: 1 },
+          },
+        ]),
+      );
+
+      await drainFrames(
+        provider.chatStream({
+          model: "gpt-5-nano",
+          system: "sys",
+          messages: toolHeavy(),
+          clearToolResults: CLEARING,
+        }),
+      );
+
+      expect(toolContents(firstCreateArgs())).toEqual([
+        CLEARED_PLACEHOLDER,
+        CLEARED_PLACEHOLDER,
+        `3: ${RESULT}`,
+        `4: ${RESULT}`,
+      ]);
+    });
+
+    it.each([
+      ["under the trigger", { ...CLEARING, triggerTokens: 100_000 }],
+      [
+        "when the results would free less than clear_at_least",
+        { ...CLEARING, clearAtLeastTokens: 100_000 },
+      ],
+      ["when every result is within `keep`", { ...CLEARING, keep: 4 }],
+      ["when `keep` exceeds the results", { ...CLEARING, keep: 5 }],
+    ])("clears nothing %s", async (_label, clearing) => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce(okCompletion());
+
+      await provider.chat({
+        model: "gpt-5-nano",
+        system: "sys",
+        messages: toolHeavy(),
+        clearToolResults: clearing,
+      });
+
+      expect(toolContents(firstCreateArgs())).toEqual([1, 2, 3, 4].map((n) => `${n}: ${RESULT}`));
+    });
+
+    it("clears nothing at a trigger the prompt's tokens reach but don't exceed, however many bytes it has", async () => {
+      const provider = createProvider();
+      const params = { model: "gpt-5-nano", system: "sys", messages: toolHeavy() };
+      const tokens = await provider.countTokens(params);
+      // Several bytes to a token, so only the token count can keep this under the trigger.
+      expect(Buffer.byteLength(JSON.stringify(params.messages))).toBeGreaterThan(tokens * 2);
+      mockCreate.mockResolvedValueOnce(okCompletion());
+
+      await provider.chat({ ...params, clearToolResults: { ...CLEARING, triggerTokens: tokens } });
+
+      expect(toolContents(firstCreateArgs())).toEqual([1, 2, 3, 4].map((n) => `${n}: ${RESULT}`));
+    });
+
+    describe("clear_at_least", () => {
+      const enc = getEncoding("cl100k_base");
+      const tokens = (n: number) => enc.encode(`${n}: ${RESULT}`, [], []).length;
+      /** What clearing the two oldest results frees. */
+      const oldestTwo = () => tokens(1) + tokens(2);
+
+      async function clearedWith(clearAtLeastTokens: number): Promise<unknown[]> {
+        const provider = createProvider();
+        mockCreate.mockResolvedValueOnce(okCompletion());
+        await provider.chat({
+          model: "gpt-5-nano",
+          system: "sys",
+          messages: toolHeavy(),
+          clearToolResults: { ...CLEARING, clearAtLeastTokens },
+        });
+        return toolContents(firstCreateArgs());
+      }
+
+      it("clears when the results it would clear hold exactly the minimum", async () => {
+        expect(await clearedWith(oldestTwo())).toEqual([
+          CLEARED_PLACEHOLDER,
+          CLEARED_PLACEHOLDER,
+          `3: ${RESULT}`,
+          `4: ${RESULT}`,
+        ]);
+      });
+
+      it("counts only the results it would clear, not the ones it keeps", async () => {
+        // More than the two oldest hold, less than all four.
+        const between = oldestTwo() + tokens(3);
+        expect(await clearedWith(between)).toEqual([1, 2, 3, 4].map((n) => `${n}: ${RESULT}`));
+      });
+    });
+
+    it("counts the tool definitions toward the trigger", async () => {
+      const provider = createProvider();
+      const tools: ToolDefinition[] = [
+        {
+          name: "read",
+          description: "Read one part of the logs. ".repeat(30),
+          parameters: { type: "object", properties: { part: { type: "integer" } } },
+        },
+      ];
+      const params = { model: "gpt-5-nano", system: "sys", messages: toolHeavy() };
+      // At the trigger without the tools, past it with them.
+      const withoutTools = await provider.countTokens(params);
+      mockCreate.mockResolvedValueOnce(okCompletion());
+
+      await provider.chat({
+        ...params,
+        tools,
+        clearToolResults: { ...CLEARING, triggerTokens: withoutTools },
+      });
+
+      expect(toolContents(firstCreateArgs()).slice(0, 2)).toEqual([
+        CLEARED_PLACEHOLDER,
+        CLEARED_PLACEHOLDER,
+      ]);
+    });
+
+    it("counts the system prompt toward the byte bound", async () => {
+      const provider = createProvider();
+      const system = "Follow the house rules. ".repeat(200);
+      // Short results, so the messages alone are small in bytes.
+      const messages = toolHeavy().map((m): Message => {
+        if (typeof m.content === "string") return m;
+        return {
+          ...m,
+          content: m.content.map((b) =>
+            b.type === "tool_result" ? { ...b, content: `result ${b.toolUseId}` } : b,
+          ),
+        };
+      });
+      const params = { model: "gpt-5-nano", system, messages };
+      const tokens = await provider.countTokens(params);
+      // The messages alone fit under the trigger in bytes; with the system
+      // prompt the request is past it in tokens.
+      const triggerTokens = Buffer.byteLength(JSON.stringify(messages)) + 1;
+      expect(tokens).toBeGreaterThan(triggerTokens);
+      mockCreate.mockResolvedValueOnce(okCompletion());
+
+      await provider.chat({
+        ...params,
+        clearToolResults: { triggerTokens, keep: 2, clearAtLeastTokens: 1 },
+      });
+
+      expect(toolContents(firstCreateArgs())).toEqual([
+        CLEARED_PLACEHOLDER,
+        CLEARED_PLACEHOLDER,
+        "result t3",
+        "result t4",
+      ]);
+    });
+
+    it("encodes each text once across the clearing decision and the count", async () => {
+      const provider = createProvider();
+      const params = { model: "gpt-5-nano", system: "sys", messages: toolHeavy() };
+      const exact = await provider.countTokens(params);
+      // The prompt pass reads nearly all of it; nothing is cleared, so the count reads it all.
+      const clearing = { triggerTokens: exact - 20, keep: 2, clearAtLeastTokens: 1_000_000 };
+      const encode = vi.spyOn(cl100k(), "encode");
+      try {
+        const counted = await provider.countTokens({ ...params, clearToolResults: clearing });
+        const texts = encode.mock.calls.map(([text]) => text);
+
+        expect(counted).toBe(exact);
+        expect(new Set(texts).size).toBe(texts.length);
+      } finally {
+        encode.mockRestore();
+      }
+    });
+
+    it("counts the prompt as cleared, as it goes on the wire", async () => {
+      const provider = createProvider();
+      const params = { model: "gpt-5-nano", system: "sys", messages: toolHeavy() };
+      const cleared = toolHeavy().map((m): Message => {
+        if (typeof m.content === "string") return m;
+        return {
+          ...m,
+          content: m.content.map((b) =>
+            b.type === "tool_result" && (b.toolUseId === "t1" || b.toolUseId === "t2")
+              ? { ...b, content: CLEARED_PLACEHOLDER }
+              : b,
+          ),
+        };
+      });
+
+      const uncleared = await provider.countTokens(params);
+      const withIntent = await provider.countTokens({ ...params, clearToolResults: CLEARING });
+
+      expect(withIntent).toBe(await provider.countTokens({ ...params, messages: cleared }));
+      expect(withIntent).toBeLessThan(uncleared);
+      expect(
+        await provider.countTokens({
+          ...params,
+          clearToolResults: { ...CLEARING, triggerTokens: 100_000 },
+        }),
+      ).toBe(uncleared);
+    });
+  });
+
   describe("countTokens", () => {
+    it("stops once past `countUpTo`, with a figure past it", async () => {
+      const provider = createProvider();
+      const head: Message[] = [
+        { role: "user", content: "hello" },
+        { role: "assistant", content: "hi" },
+      ];
+      const params = {
+        model: "gpt-5-nano",
+        system: "sys",
+        messages: [...head, { role: "user", content: "word ".repeat(40_000) }] satisfies Message[],
+      };
+      const exact = await provider.countTokens(params);
+      // The sum after the reply, without the reply priming the count ends with.
+      const afterReply = (await provider.countTokens({ ...params, messages: head })) - 3;
+
+      // At the cap the count goes on, to the next message's framing.
+      expect(await provider.countTokens({ ...params, countUpTo: afterReply })).toBe(afterReply + 4);
+      expect(await provider.countTokens({ ...params, countUpTo: exact })).toBe(exact);
+      expect(exact).toBeGreaterThan(afterReply + 4);
+    });
+
     it("returns a positive token count for simple messages", async () => {
       const provider = createProvider();
       const count = await provider.countTokens({

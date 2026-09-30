@@ -54,6 +54,11 @@ export interface WireResponse {
    * present when the request sent the thinking-binding-controls beta.
    */
   inputTransformations: unknown;
+  /**
+   * Anthropic's `context_management` — the edits the server applied — on a
+   * JSON body or a stream's `message_delta`, when the request sent one.
+   */
+  contextManagement: unknown;
 }
 
 export interface WireExchange {
@@ -93,6 +98,7 @@ const NOTHING_CAPTURED: Capture = {
   usage: undefined,
   diagnostics: undefined,
   inputTransformations: undefined,
+  contextManagement: undefined,
 };
 
 const JsonObjectSchema = z.record(z.string(), z.unknown());
@@ -103,6 +109,7 @@ const ResponseBodySchema = z.object({
   usage: z.unknown().optional(),
   diagnostics: z.unknown().optional(),
   input_transformations: z.unknown().optional(),
+  context_management: z.unknown().optional(),
 });
 
 const MessageStartSchema = z.object({
@@ -113,6 +120,11 @@ const MessageStartSchema = z.object({
     diagnostics: z.unknown().optional(),
     input_transformations: z.unknown().optional(),
   }),
+});
+
+const MessageDeltaSchema = z.object({
+  type: z.literal("message_delta"),
+  context_management: z.unknown().optional(),
 });
 
 /** An OpenAI chunk: it has no `type`, which every Anthropic stream event carries. */
@@ -220,13 +232,16 @@ function captureResponse(text: string, contentType: string | null): Capture {
     usage: body.data.usage,
     diagnostics: body.data.diagnostics,
     inputTransformations: body.data.input_transformations,
+    contextManagement: body.data.context_management,
   };
 }
 
 /**
- * Anthropic reports the request's id, usage, diagnostics and input transformations once, on
- * `message_start`. OpenAI repeats the id on every chunk and reports usage on
- * the last one (`stream_options.include_usage`), with `usage: null` before it.
+ * Anthropic reports the request's id, usage, diagnostics and input
+ * transformations once, on `message_start`, and the context edits it applied
+ * on the final `message_delta`. OpenAI repeats the id on every chunk and
+ * reports usage on the last one (`stream_options.include_usage`), with
+ * `usage: null` before it.
  */
 function captureStream(text: string): Capture {
   const events = text.split(/\r?\n/).flatMap((line) => {
@@ -240,7 +255,17 @@ function captureStream(text: string): Capture {
       const start = MessageStartSchema.safeParse(event);
       if (start.success) {
         const { id, usage, diagnostics, input_transformations } = start.data.message;
-        return { id, usage, diagnostics, inputTransformations: input_transformations };
+        return {
+          ...capture,
+          id,
+          usage,
+          diagnostics,
+          inputTransformations: input_transformations,
+        };
+      }
+      const delta = MessageDeltaSchema.safeParse(event);
+      if (delta.success) {
+        return { ...capture, contextManagement: delta.data.context_management };
       }
       const chunk = ChatChunkSchema.safeParse(event);
       if (!chunk.success) return capture;

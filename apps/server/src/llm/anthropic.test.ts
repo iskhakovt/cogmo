@@ -7,11 +7,20 @@ import { logger } from "../logger.js";
 import { expectDefined } from "../test/assertions.js";
 import { drainFrames } from "../test/factories.js";
 import { type OtelHarness, setupOtelHarness } from "../test/otel-harness.js";
-import { AnthropicProvider } from "./anthropic.js";
+import { AnthropicProvider, type AnthropicProviderOptions } from "./anthropic.js";
 import { extractText } from "./content.js";
 import { MissingToolCallError, ProviderProtocolError, ToolArgsCutOffError } from "./errors.js";
 import { toObjectJsonSchema } from "./json-schema.js";
-import type { CacheIntent, ChatStreamFrame, ResponseFormat, ToolDefinition } from "./types.js";
+import { CLEARED_PLACEHOLDER } from "./tool-result-clearing.js";
+import type {
+  CacheIntent,
+  ChatStreamFrame,
+  CountTokensParams,
+  Message,
+  ResponseFormat,
+  ToolDefinition,
+  ToolResultClearing,
+} from "./types.js";
 
 // Mock the Anthropic client — use a class so `new Anthropic()` works — and
 // keep the SDK's error classes.
@@ -22,9 +31,13 @@ const clientOptions: Array<{ fetch?: typeof fetch }> = [];
 vi.mock("@anthropic-ai/sdk", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@anthropic-ai/sdk")>()),
   default: class MockAnthropic {
-    messages = { create: mockCreate, countTokens: mockCountTokens };
-    constructor(opts: { fetch?: typeof fetch }) {
+    beta = { messages: { create: mockCreate, countTokens: mockCountTokens } };
+    // As the SDK resolves it, less the `ANTHROPIC_BASE_URL` fallback, which
+    // `resolver.test.ts` covers on the real client.
+    baseURL: string;
+    constructor(opts: { fetch?: typeof fetch; baseURL?: string }) {
       clientOptions.push(opts);
+      this.baseURL = opts.baseURL || "https://api.anthropic.com";
     }
   },
 }));
@@ -419,6 +432,7 @@ describe("AnthropicProvider", () => {
   it.each([
     ["stop_sequence", "end_turn"],
     ["pause_turn", "end_turn"],
+    ["compaction", "end_turn"],
   ] as const)("maps %s stop reason to %s", async (anthropicReason, expected) => {
     // These arms are named explicitly rather than left to a catch-all so the
     // switch stays exhaustive over the SDK union — the compile error on the
@@ -1475,6 +1489,303 @@ describe("AnthropicProvider", () => {
       if (!firstCall) throw new Error("expected countTokens to have been called");
       const callArgs = firstCall[0] as { tools?: unknown };
       expect(callArgs.tools).toBeUndefined();
+    });
+  });
+
+  describe("edit intent and binding controls", () => {
+    const CLEARING: ToolResultClearing = {
+      triggerTokens: 60_000,
+      keep: 5,
+      clearAtLeastTokens: 10_000,
+    };
+    const CLEAR_TOOL_USES = {
+      edits: [
+        {
+          type: "clear_tool_uses_20250919",
+          trigger: { type: "input_tokens", value: 60_000 },
+          keep: { type: "tool_uses", value: 5 },
+          clear_at_least: { type: "input_tokens", value: 10_000 },
+        },
+      ],
+    };
+    const BINDING = "thinking-binding-controls-2026-08-01";
+    const CONTEXT_MANAGEMENT = "context-management-2025-06-27";
+
+    const BodySchema = z.looseObject({
+      tools: z.array(z.unknown()).optional(),
+      betas: z.array(z.string()).optional(),
+      context_management: z.unknown().optional(),
+      thinking: z.unknown().optional(),
+    });
+
+    function provider(baseURL?: string, options?: AnthropicProviderOptions): AnthropicProvider {
+      mockCreate.mockReset();
+      mockCountTokens.mockReset();
+      return new AnthropicProvider("test-key", baseURL, options);
+    }
+
+    const PARAMS = {
+      system: "sys",
+      messages: [{ role: "user" as const, content: "hi" }],
+    };
+
+    /** The body each of the three request kinds hands the SDK, for `params`. */
+    async function sentBodies(
+      p: AnthropicProvider,
+      params: CountTokensParams,
+    ): Promise<{
+      chat: z.infer<typeof BodySchema>;
+      stream: z.infer<typeof BodySchema>;
+      count: z.infer<typeof BodySchema>;
+    }> {
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: "ok", citations: null }],
+        stop_reason: "end_turn",
+        model: params.model,
+        usage: { input_tokens: 5, output_tokens: 1 },
+      });
+      await p.chat(params);
+      mockCreate.mockResolvedValueOnce(
+        mockStream([
+          {
+            type: "message_start",
+            message: { model: params.model, usage: { input_tokens: 5, output_tokens: 0 } },
+          },
+          {
+            type: "message_delta",
+            delta: { stop_reason: "end_turn" },
+            usage: { output_tokens: 1 },
+          },
+        ]),
+      );
+      await drainFrames(p.chatStream(params));
+      mockCountTokens.mockResolvedValueOnce({ input_tokens: 5 });
+      await p.countTokens(params);
+      return {
+        chat: BodySchema.parse(expectDefined(mockCreate.mock.calls[0], "chat call")[0]),
+        stream: BodySchema.parse(expectDefined(mockCreate.mock.calls[1], "stream call")[0]),
+        count: BodySchema.parse(expectDefined(mockCountTokens.mock.calls[0], "count call")[0]),
+      };
+    }
+
+    it("sends the Strategy 1 intent as context_management on every request and to countTokens", async () => {
+      const bodies = await sentBodies(provider(), {
+        model: "claude-sonnet-5",
+        ...PARAMS,
+        clearToolResults: CLEARING,
+      });
+
+      for (const body of Object.values(bodies)) {
+        expect(body.context_management).toEqual(CLEAR_TOOL_USES);
+        expect(body.betas).toContain(CONTEXT_MANAGEMENT);
+      }
+    });
+
+    it("sends no context_management, and not its beta, without an intent", async () => {
+      const bodies = await sentBodies(provider(), { model: "claude-sonnet-5", ...PARAMS });
+
+      for (const body of Object.values(bodies)) {
+        expect(body).not.toHaveProperty("context_management");
+        expect(body.betas ?? []).not.toContain(CONTEXT_MANAGEMENT);
+      }
+    });
+
+    it("carries the intent on the structured-output path", async () => {
+      const p = provider();
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: '{"ok":true}', citations: null }],
+        stop_reason: "end_turn",
+        model: "claude-sonnet-5",
+        usage: { input_tokens: 5, output_tokens: 1 },
+      });
+
+      await p.chat({
+        model: "claude-sonnet-5",
+        ...PARAMS,
+        clearToolResults: CLEARING,
+        responseFormat: {
+          type: "json_schema",
+          name: "extract",
+          schema: { type: "object", properties: { ok: { type: "boolean" } } },
+        },
+      });
+
+      const body = BodySchema.parse(expectDefined(mockCreate.mock.calls[0], "create call")[0]);
+      expect(body.context_management).toEqual(CLEAR_TOOL_USES);
+    });
+
+    it("carries the intent and the header on the synthetic-tool path", async () => {
+      const p = provider();
+      mockCreate.mockResolvedValueOnce({
+        content: [
+          {
+            type: "tool_use",
+            id: "tu_1",
+            name: "extract",
+            input: { labels: { a: "b" } },
+            caller: { type: "direct" },
+          },
+        ],
+        stop_reason: "tool_use",
+        model: "claude-sonnet-5",
+        usage: { input_tokens: 5, output_tokens: 1 },
+      });
+
+      await p.chat({
+        model: "claude-sonnet-5",
+        ...PARAMS,
+        clearToolResults: CLEARING,
+        responseFormat: {
+          type: "json_schema",
+          name: "extract",
+          // A record is an open object, which structured outputs can't take.
+          schema: toObjectJsonSchema(z.object({ labels: z.record(z.string(), z.string()) })),
+        },
+      });
+
+      const body = BodySchema.parse(expectDefined(mockCreate.mock.calls[0], "create call")[0]);
+      expect(body.tools).toEqual([expect.objectContaining({ name: "extract" })]);
+      expect(body.context_management).toEqual(CLEAR_TOOL_USES);
+      expect(body.betas).toEqual([CONTEXT_MANAGEMENT, BINDING]);
+    });
+
+    it.each([
+      ["no base URL", undefined, undefined],
+      ["an empty base URL, which the SDK resolves to its own", "", undefined],
+      ["Anthropic's own base URL", "https://api.anthropic.com", undefined],
+      ["Anthropic's own base URL with a path", "https://api.anthropic.com/", undefined],
+      ["Anthropic's own host in capitals", "https://API.ANTHROPIC.COM", undefined],
+      ["Anthropic's own host over http", "http://api.anthropic.com", undefined],
+      ["a base URL marked first-party", "http://127.0.0.1:4010", { firstParty: true }],
+    ] as const)("sends the binding-controls header to %s", async (_label, baseURL, options) => {
+      const bodies = await sentBodies(provider(baseURL, options), {
+        model: "claude-sonnet-5",
+        ...PARAMS,
+      });
+
+      for (const body of Object.values(bodies)) expect(body.betas).toEqual([BINDING]);
+    });
+
+    it.each([
+      "https://openrouter.ai/api",
+      // Ends in `anthropic.com` without being Anthropic's API.
+      "https://api.notanthropic.com",
+    ])(
+      "sends %s no request controls: no betas, context_management or block_binding",
+      async (baseURL) => {
+        const bodies = await sentBodies(
+          provider(baseURL, { prefixMismatchBehavior: "drop_block" }),
+          { model: "claude-opus-5-5", ...PARAMS, clearToolResults: CLEARING },
+        );
+
+        for (const body of Object.values(bodies)) {
+          expect(body).not.toHaveProperty("betas");
+          expect(body).not.toHaveProperty("thinking");
+          expect(body).not.toHaveProperty("context_management");
+        }
+      },
+    );
+
+    it("clears a third-party endpoint's tool results on the wire, the same in body and count", async () => {
+      const result = "line of output from the tool\n".repeat(40);
+      const messages: Message[] = [
+        { role: "user", content: "read the logs" },
+        ...[1, 2, 3].flatMap((n): Message[] => [
+          {
+            role: "assistant",
+            content: [{ type: "tool_use", id: `t${n}`, name: "read", input: { part: n } }],
+          },
+          {
+            role: "user",
+            content: [{ type: "tool_result", toolUseId: `t${n}`, content: `${n}: ${result}` }],
+          },
+        ]),
+        { role: "user", content: "summarize" },
+      ];
+      const before = structuredClone(messages);
+
+      const bodies = await sentBodies(provider("https://openrouter.ai/api"), {
+        model: "claude-opus-5-5",
+        system: "sys",
+        messages,
+        clearToolResults: { triggerTokens: 100, keep: 1, clearAtLeastTokens: 50 },
+      });
+
+      const ResultsSchema = z.looseObject({
+        messages: z.array(
+          z.looseObject({
+            content: z.union([z.string(), z.array(z.looseObject({ type: z.string() }))]),
+          }),
+        ),
+      });
+      const results = (body: unknown) =>
+        ResultsSchema.parse(body).messages.flatMap((m) =>
+          typeof m.content === "string"
+            ? []
+            : m.content.filter((b) => b.type === "tool_result").map((b) => b.content),
+        );
+      for (const body of Object.values(bodies)) {
+        expect(results(body)).toEqual([CLEARED_PLACEHOLDER, CLEARED_PLACEHOLDER, `3: ${result}`]);
+      }
+      expect(messages).toEqual(before);
+    });
+
+    it("warns that a third-party endpoint ignores prefixMismatchBehavior", () => {
+      const warn = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
+      try {
+        provider("https://openrouter.ai/api", { prefixMismatchBehavior: "drop_block" });
+        provider("https://openrouter.ai/api");
+        provider(undefined, { prefixMismatchBehavior: "drop_block" });
+
+        expect(warn).toHaveBeenCalledOnce();
+        expect(warn).toHaveBeenCalledWith(
+          { baseURL: "https://openrouter.ai/api", prefixMismatchBehavior: "drop_block" },
+          expect.stringContaining("ignoring prefixMismatchBehavior"),
+        );
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it.each([
+      "claude-opus-5-5",
+      "claude-fable-5-1",
+      "claude-sonnet-5-5",
+      "claude-sonnet-5-5-20261001",
+    ])("sends block_binding with adaptive thinking to %s", async (model) => {
+      const bodies = await sentBodies(provider(undefined, { prefixMismatchBehavior: "error" }), {
+        model,
+        ...PARAMS,
+      });
+
+      for (const body of Object.values(bodies)) {
+        expect(body.thinking).toEqual({
+          type: "adaptive",
+          block_binding: { prefix_mismatch_behavior: "error" },
+        });
+        expect(body.betas).toContain(BINDING);
+      }
+    });
+
+    it.each(["claude-sonnet-5", "claude-haiku-4-5", "claude-mythos-5-1", "claude-opus-5"])(
+      "sends no thinking parameter to %s, which runs no prefix check",
+      async (model) => {
+        const bodies = await sentBodies(
+          provider(undefined, { prefixMismatchBehavior: "drop_block" }),
+          { model, ...PARAMS },
+        );
+
+        for (const body of Object.values(bodies)) {
+          expect(body).not.toHaveProperty("thinking");
+          expect(body.betas).toEqual([BINDING]);
+        }
+      },
+    );
+
+    it("sends no thinking parameter when the provider row sets no behaviour", async () => {
+      const bodies = await sentBodies(provider(), { model: "claude-opus-5-5", ...PARAMS });
+
+      for (const body of Object.values(bodies)) expect(body).not.toHaveProperty("thinking");
     });
   });
 

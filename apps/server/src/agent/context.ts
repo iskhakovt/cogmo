@@ -1,9 +1,9 @@
 /**
  * Context window management — ephemeral compaction pipeline.
  *
- * Four strategies applied gentlest-first:
- * 0. Same-tool supersession (count-based, unconditional check)
- * 1. Clear old tool results (60% of budget)
+ * Three strategies applied gentlest-first:
+ * 1. Clear old tool results (60% of budget) — an edit intent every request
+ *    carries, which the adapter applies ({@link toolResultClearing})
  * 2. Summarize conversation prefix (80% of budget)
  * 3. Truncate oldest messages (95% of budget)
  *
@@ -17,6 +17,7 @@ import type {
   CountTokensParams,
   Message,
   ToolDefinition,
+  ToolResultClearing,
 } from "../llm/types.js";
 import { logger } from "../logger.js";
 import { validateHistory } from "./history-invariants.js";
@@ -24,10 +25,27 @@ import { validateHistory } from "./history-invariants.js";
 // --- Public interface ---
 
 export interface ContextManagerDeps {
-  /** Count tokens for the given request parameters. */
+  /**
+   * Count tokens for the given request parameters, after the clearing they ask
+   * for. Compaction tells counts apart only up to the budget, so it asks for
+   * none past it (`countUpTo`).
+   */
   countTokens: (params: CountTokensParams) => Promise<number>;
   /** Maximum input tokens before rejection (contextWindow - maxOutputTokens - safetyBuffer). */
   budget: number;
+  /**
+   * The most a view's canonical JSON may weigh, in bytes (`MAX_VIEW_BYTES`).
+   * A view past 80% of it summarizes, then takes the first of
+   * {@link truncations} within 80%, else the first within the cap. It goes as
+   * it is when no cut would fit it better: it is within the cap and its
+   * smallest cut is still past 80%, or its smallest cut is past the cap too.
+   */
+  maxViewBytes: number;
+  /**
+   * Strategy 1, which every count carries: the intent the turn's requests
+   * send, from {@link toolResultClearing}.
+   */
+  clearToolResults: ToolResultClearing;
   /**
    * Make a summarization LLM call. Receives system prompt + messages to summarize.
    *
@@ -49,22 +67,26 @@ export interface ContextManagerDeps {
    * caller holding the message ids can tell those apart, so `handle-message`
    * gates on whether the span has a durable cutoff. Omitted means no veto.
    *
-   * `splitIdx` indexes the array the caller passed in, which holds only because
-   * every strategy running before summarization rewrites block content in place
-   * and preserves length. `context.test.ts` pins that; a future pre-summarize
-   * strategy that drops or merges entries has to hand the split back instead.
+   * `splitIdx` indexes the array the caller passed in, which holds because
+   * nothing before summarization changes it: Strategy 1 is an intent on the
+   * request. A future pre-summarize strategy that drops or merges entries has
+   * to hand the split back instead.
    */
   canSummarizePrefix?: (splitIdx: number) => boolean;
 }
 
+/**
+ * A compaction that rewrote the view. Counts are after Strategy 1's clearing,
+ * `null` where the view was too large in bytes to count, and, past the budget,
+ * a figure past it where the adapter counts locally.
+ */
 export interface CompactionEvent {
-  strategies: ("compact_same_tool_clusters" | "clear_tool_results" | "summarize" | "truncate")[];
-  tokensBefore: number;
-  tokensAfter: number;
-  toolResultsCleared: number;
+  strategies: ("summarize" | "truncate")[];
+  tokensBefore: number | null;
+  tokensAfter: number | null;
+  /** The view's raw size before compaction, which the size trigger compares. */
+  requestBytesBefore: number;
   messagesSummarized: number;
-  sameToolClustersCompacted: number;
-  sameToolResultsSuperseded: number;
 }
 
 export interface CompactResult {
@@ -77,7 +99,29 @@ const CLEAR_THRESHOLD = 0.6;
 const SUMMARIZE_THRESHOLD = 0.8;
 const TRUNCATE_THRESHOLD = 0.95;
 
+/** Tool results Strategy 1 leaves in place, newest first. */
 const DEFAULT_KEEP_TOOL_RESULTS = 5;
+
+/**
+ * The least a clearing must free, as a fraction of the budget: half the room
+ * between the clearing and summarization thresholds, since a clearing writes
+ * the cache again from the first result it clears (see
+ * design/context-management.md → Strategy 1).
+ */
+const CLEAR_AT_LEAST = 0.1;
+
+/**
+ * Strategy 1's edit intent for a turn with `budget` input tokens: once the
+ * prompt passes 60% of the budget, clear every tool result but the last five,
+ * provided they free a tenth of it. Every request of the turn carries it.
+ */
+export function toolResultClearing(budget: number): ToolResultClearing {
+  return {
+    triggerTokens: Math.floor(budget * CLEAR_THRESHOLD),
+    keep: DEFAULT_KEEP_TOOL_RESULTS,
+    clearAtLeastTokens: Math.floor(budget * CLEAR_AT_LEAST),
+  };
+}
 
 /**
  * Messages kept verbatim after the summarized prefix. Exported because the
@@ -86,16 +130,6 @@ const DEFAULT_KEEP_TOOL_RESULTS = 5;
  * automatic one cover different spans of the same conversation.
  */
 export const DEFAULT_KEEP_TURNS = 6;
-
-// Strategy 0 defaults — see design/context-management.md → Strategy 0.
-// triggerCount = retainRecent + retainFirst + 2 → first fire compacts
-// 2 results, making the cache-invalidation cost worthwhile.
-// Exported for the same reason as DEFAULT_KEEP_TURNS: `/compact` runs
-// Strategy 0 itself, and a divergence here would have a manual compaction and
-// an automatic one summarize different prefixes for the same span.
-export const DEFAULT_RETAIN_RECENT = 2;
-export const DEFAULT_RETAIN_FIRST = 1;
-export const DEFAULT_TRIGGER_COUNT = 5;
 
 export const SUMMARIZATION_PROMPT = `Summarize the conversation below. You MUST preserve:
 1. All user decisions and stated preferences
@@ -135,6 +169,12 @@ export function summarizationRequest(params: {
   system: string;
   messages: ReadonlyArray<Message>;
   maxOutputTokens: number;
+  /**
+   * The turn's Strategy 1 intent, which applies to the fork as a request of
+   * its own (design/context-management.md → Strategy 1). `/compact`, outside
+   * a turn, sends none.
+   */
+  clearToolResults?: ToolResultClearing;
 }): ChatParams {
   const { messages: repaired, repairs } = validateHistory(params.messages);
   if (repairs.length > 0) {
@@ -149,6 +189,7 @@ export function summarizationRequest(params: {
     system: params.system,
     messages: [...repaired, { role: "user", content: SUMMARIZATION_PROMPT }],
     maxTokens: Math.min(16_000, params.maxOutputTokens),
+    ...(params.clearToolResults && { clearToolResults: params.clearToolResults }),
   };
 }
 
@@ -192,14 +233,21 @@ export function formatSummaryMessage(summary: string): Message {
  * Run the compaction pipeline on conversation messages. Returns the
  * (possibly compacted) messages and metadata about what was applied.
  *
- * Strategy 0 (same-tool supersession) runs **always** because it's
- * count-based and structural — it doesn't depend on the token budget,
- * and skipping it on a low-budget turn would defeat the whole point
- * (volume-driven attention dilution happens regardless of budget
- * headroom). Strategies 1–3 are budget-pressure-triggered and gated
- * by `skipBudgetStrategies`: callers that know the turn is comfortably
- * under budget (via `shouldSkipCounting`) can avoid the expensive
- * `countTokens` round-trip by passing `true`.
+ * Every count carries Strategy 1's intent, so each is the prompt after
+ * clearing, and the view comes back unchanged unless Strategy 2 or 3 rewrote
+ * it. Both fire on budget pressure: callers that know the turn is comfortably
+ * under budget (via `shouldSkipCounting`) skip the `countTokens` round-trip by
+ * passing `skipBudgetStrategies`.
+ *
+ * They also fire on size, since the server clears only after the bytes
+ * arrive (design/context-management.md → Strategy 2 → Size trigger): a view
+ * past 80% of `maxViewBytes` summarizes on any path without a count, since
+ * counting it sends it, then takes the first of {@link truncations} within
+ * 80%, else the first within the cap. A view goes as it is, counted, when
+ * its smallest cut is past 80% and it fits the cap, since its bytes are in the
+ * tail and cutting would only drop history it fits with; or when its smallest
+ * cut is past the cap too, since no cut fits a 20 MB route and a 32 MB one
+ * takes the view whole. A view past the cap logs a warning as it goes.
  */
 export async function compactMessages(
   system: string,
@@ -208,73 +256,55 @@ export async function compactMessages(
   deps: ContextManagerDeps,
   skipBudgetStrategies = false,
 ): Promise<CompactResult> {
-  const { countTokens, budget, summarize } = deps;
+  const { countTokens, budget, summarize, clearToolResults, maxViewBytes } = deps;
+  const threshold = Math.floor(maxViewBytes * SUMMARIZE_THRESHOLD);
+  const bytes = (msgs: ReadonlyArray<Message>): number => requestBytes(system, msgs, tools);
+  // Whether the view's size needs compaction: past the threshold, with a cut
+  // that fits the cap, unless the view fits it too and no cut gets it under
+  // the threshold anyway.
+  const oversized = (msgs: ReadonlyArray<Message>): boolean => {
+    const size = bytes(msgs);
+    if (size <= threshold) return false;
+    const smallest = bytes(R.last(truncations(msgs)));
+    return smallest <= maxViewBytes && (size > maxViewBytes || smallest <= threshold);
+  };
+  // A view past the cap here is one no cut fits.
+  const sent = (compacted: CompactResult): CompactResult => {
+    const size = bytes(compacted.messages);
+    if (size > maxViewBytes) {
+      logger.warn(
+        { requestBytes: size, maxViewBytes },
+        "sending a view past the request cap: no cut fits it",
+      );
+    }
+    return compacted;
+  };
+  if (skipBudgetStrategies && !oversized(messages)) {
+    return sent({ messages: [...messages], didCompact: false });
+  }
+
   const strategies: CompactionEvent["strategies"] = [];
   let result = [...messages];
-  let toolResultsCleared = 0;
   let messagesSummarized = 0;
-  let sameToolClustersCompacted = 0;
-  let sameToolResultsSuperseded = 0;
+  const requestBytesBefore = bytes(result);
 
-  const count = (msgs: Message[]) =>
-    countTokens({ model: "", system, messages: msgs, ...(tools && { tools }) });
-
-  // Strategy 0 — always. Cheap O(N) scan; per-block no-op skip means
-  // idempotent re-application doesn't inflate telemetry.
-  const supersession = compactSameToolClusters(result, {
-    retainRecent: DEFAULT_RETAIN_RECENT,
-    retainFirst: DEFAULT_RETAIN_FIRST,
-    triggerCount: DEFAULT_TRIGGER_COUNT,
-    tools,
-  });
-  if (supersession.resultsCompacted > 0) {
-    result = supersession.messages;
-    sameToolClustersCompacted = supersession.clusters;
-    sameToolResultsSuperseded = supersession.resultsCompacted;
-    strategies.push("compact_same_tool_clusters");
-  }
-
-  if (skipBudgetStrategies) {
-    if (strategies.length > 0) {
-      const event: CompactionEvent = {
-        strategies,
-        // tokensBefore/tokensAfter are absent on the skip-counting path —
-        // the caller's fast-path heuristic already decided the budget
-        // strategies aren't worth a real countTokens call. Use 0 as a
-        // sentinel; downstream telemetry consumers should rely on the
-        // strategies array, not absolute counts, when this flag was set.
-        tokensBefore: 0,
-        tokensAfter: 0,
-        toolResultsCleared,
-        messagesSummarized,
-        sameToolClustersCompacted,
-        sameToolResultsSuperseded,
-      };
-      logger.info(
-        event,
-        "context compaction applied (Strategy 0 only — budget strategies skipped)",
-      );
-      return { messages: result, didCompact: true, event };
-    }
-    return { messages: result, didCompact: false };
-  }
+  const count = (msgs: Message[]): Promise<number | null> =>
+    oversized(msgs)
+      ? Promise.resolve(null)
+      : countTokens({
+          model: "",
+          system,
+          messages: msgs,
+          clearToolResults,
+          countUpTo: budget,
+          ...(tools && { tools }),
+        });
 
   let tokens = await count(result);
   const tokensBefore = tokens;
 
-  // Strategy 1: Clear old tool results at 60%
-  if (tokens > budget * CLEAR_THRESHOLD) {
-    const cleared = clearToolResults(result, DEFAULT_KEEP_TOOL_RESULTS);
-    result = cleared.messages;
-    toolResultsCleared = cleared.clearedCount;
-    if (toolResultsCleared > 0) {
-      strategies.push("clear_tool_results");
-      tokens = await count(result);
-    }
-  }
-
-  // Strategy 2: Summarize conversation prefix at 80%
-  if (tokens > budget * SUMMARIZE_THRESHOLD && summarize) {
+  // Strategy 2: Summarize conversation prefix at 80%, of the budget or the request cap
+  if ((tokens === null || tokens > budget * SUMMARIZE_THRESHOLD) && summarize) {
     try {
       const summarized = await summarizePrefix(
         result,
@@ -294,9 +324,17 @@ export async function compactMessages(
     }
   }
 
-  // Strategy 3: Emergency truncation at 95%
-  if (tokens > budget * TRUNCATE_THRESHOLD) {
-    result = truncateOldest(result);
+  // Strategy 3: on size, the first cut within the threshold, else the first
+  // within the cap; on 95% of the budget, one cut
+  const views = truncations(result);
+  const cut = oversized(result)
+    ? (views.find((view) => bytes(view) <= threshold) ??
+      views.find((view) => bytes(view) <= maxViewBytes))
+    : tokens !== null && tokens > budget * TRUNCATE_THRESHOLD
+      ? views[1]
+      : undefined;
+  if (cut !== undefined && cut !== views[0]) {
+    result = cut;
     strategies.push("truncate");
     tokens = await count(result);
   }
@@ -306,15 +344,44 @@ export async function compactMessages(
       strategies,
       tokensBefore,
       tokensAfter: tokens,
-      toolResultsCleared,
+      requestBytesBefore,
       messagesSummarized,
-      sameToolClustersCompacted,
-      sameToolResultsSuperseded,
     };
     logger.info(event, "context compaction applied");
-    return { messages: result, didCompact: true, event };
+    return sent({ messages: result, didCompact: true, event });
   }
-  return { messages: result, didCompact: false };
+  return sent({ messages: result, didCompact: false });
+}
+
+/**
+ * The request's raw size as the view holds it: every tool result and
+ * attachment, before any clearing. The adapter's wire format differs by a few
+ * key names, which the 20% margin under the cap absorbs. The UTF-8 bytes of
+ * `JSON.stringify({ system, messages, tools })`, summed a message at a time,
+ * so the views truncation weighs share each message's size.
+ */
+function requestBytes(
+  system: string,
+  messages: ReadonlyArray<Message>,
+  tools: ToolDefinition[] | undefined,
+): number {
+  const frame = Buffer.byteLength(JSON.stringify({ system, messages: [], tools }));
+  return frame + messagesBytes(messages);
+}
+
+/** The messages' part of {@link requestBytes}: each message, and the commas between them. */
+function messagesBytes(messages: ReadonlyArray<Message>): number {
+  return R.sumBy(messages, messageBytes) + Math.max(0, messages.length - 1);
+}
+
+const messageSizes = new WeakMap<Message, number>();
+
+function messageBytes(message: Message): number {
+  const known = messageSizes.get(message);
+  if (known !== undefined) return known;
+  const size = Buffer.byteLength(JSON.stringify(message));
+  messageSizes.set(message, size);
+  return size;
 }
 
 /**
@@ -344,263 +411,6 @@ export function shouldSkipCounting(
 }
 
 // --- Internal strategies ---
-
-const CLEARED_PLACEHOLDER = "[Cleared — call tool again if needed]";
-
-export interface SupersessionOpts {
-  retainRecent: number;
-  retainFirst: number;
-  triggerCount: number;
-  /**
-   * The turn's tool definitions. A compacted call is named by its first
-   * string argument in the tool's declared parameter order, which puts the
-   * argument that identifies the call (`query`, `path`) ahead of modifiers
-   * like `budget`. `undefined`, or a tool missing from the list, falls back
-   * to the input's own key order.
-   */
-  tools: ReadonlyArray<ToolDefinition> | undefined;
-}
-
-export interface SupersessionResult {
-  messages: Message[];
-  clusters: number;
-  resultsCompacted: number;
-}
-
-interface ToolResultPos {
-  msgIdx: number;
-  blockIdx: number;
-  toolUseId: string;
-  /** Current `tool_result.content` byte length — for the no-op + size-gate checks. */
-  currentLen: number;
-}
-
-/**
- * Strategy 0 — same-tool supersession. For each tool whose `tool_result`
- * blocks in `messages` total at least `triggerCount`, replace the
- * middle results (between `retainFirst` at the front and `retainRecent`
- * at the back) with a single aggregate-summary string. Arg shapes are
- * read from the paired `tool_use.input` via an id-to-name index so
- * previously-compacted blocks still contribute the original call's
- * context to the new summary.
- *
- * Cardinal rule: only `tool_result.content` is mutated; `tool_use`
- * blocks are left intact. Anthropic's tool_use ↔ tool_result pairing
- * invariant holds by construction. The earliest-positioned tool_result
- * for each tool is preserved verbatim across all subsequent passes
- * ("sticky first") — every pass identifies it by position in the
- * message array, never by content.
- *
- * Two guards keep the transform honest:
- *
- *  - **Size gate**: if the aggregate byte size of the middle results
- *    would not shrink (or shrinks negligibly) under compaction, skip
- *    the cluster. Strategy 0's claim of "never increases token count"
- *    holds only when the replacement summary is smaller per block on
- *    average than what it replaces — for tools that return very small
- *    payloads (`"ok"` from a write-style tool) the summary would grow
- *    the array. Skipping in that case preserves the invariant.
- *  - **No-op skip**: idempotent re-application (the steady state after
- *    the first fire) finds the same `summary` text already present on
- *    every middle block. The per-block apply loop compares old vs.
- *    new content and only counts blocks that actually changed, so
- *    `resultsCompacted` reflects real work and downstream telemetry
- *    doesn't flip `didCompact: true` every turn.
- *
- * See `design/context-management.md` → Strategy 0: Same-Tool
- * Supersession.
- */
-export function compactSameToolClusters(
-  messages: ReadonlyArray<Message>,
-  opts: SupersessionOpts,
-): SupersessionResult {
-  const { retainRecent, retainFirst, triggerCount, tools } = opts;
-
-  const declaredParams = new Map(
-    (tools ?? []).map((t) => [t.name, Object.keys(t.parameters.properties ?? {})] as const),
-  );
-
-  // Index every tool_use block by id → { name, input }.
-  const toolUseById = new Map<string, { name: string; input: unknown }>(
-    R.pipe(
-      messages,
-      R.flatMap((msg) =>
-        msg.role === "assistant" && Array.isArray(msg.content) ? msg.content : [],
-      ),
-      R.filter((b) => b.type === "tool_use"),
-      R.map((b) => [b.id, { name: b.name, input: b.input }] as const),
-    ),
-  );
-
-  // Walk every tool_result block, resolve its tool name via the paired
-  // tool_use, bucket by tool name. Preserves the order they appear in
-  // the message array (oldest → newest), which is the order
-  // `retainFirst` / `retainRecent` slice against.
-  const positionsByTool = new Map<string, ToolResultPos[]>();
-  for (const [msgIdx, msg] of messages.entries()) {
-    if (msg.role !== "user" || typeof msg.content === "string") continue;
-    for (const [blockIdx, block] of msg.content.entries()) {
-      if (block.type !== "tool_result") continue;
-      const toolUse = toolUseById.get(block.toolUseId);
-      if (!toolUse) continue;
-      const list = positionsByTool.get(toolUse.name) ?? [];
-      list.push({
-        msgIdx,
-        blockIdx,
-        toolUseId: block.toolUseId,
-        currentLen: block.content.length,
-      });
-      positionsByTool.set(toolUse.name, list);
-    }
-  }
-
-  // For each cluster over threshold, run the size gate and record
-  // per-position replacements. No-op detection happens in the apply
-  // pass below — idempotent re-application produces the same summary
-  // string on every middle block, and the byte comparison there skips
-  // rewrites that wouldn't change content.
-  const replacements = new Map<string, string>();
-
-  for (const [toolName, positions] of positionsByTool) {
-    if (positions.length < triggerCount) continue;
-    const middleStart = retainFirst;
-    const middleEnd = positions.length - retainRecent;
-    if (middleEnd <= middleStart) continue;
-
-    const middle = positions.slice(middleStart, middleEnd);
-    const declared = declaredParams.get(toolName) ?? [];
-    const argShapes = middle.map((p) =>
-      formatToolUseArgs(toolUseById.get(p.toolUseId)?.input, declared),
-    );
-    const summary =
-      `[Same-tool cluster: ${middle.length} prior \`${toolName}\` results compacted — calls: ` +
-      `${argShapes.join("; ")}. Latest ${retainRecent} verbatim below.]`;
-
-    // Size gate. Use byte length as a tokenization proxy: only compact
-    // if the summary would shrink the aggregate. For tools returning
-    // tiny payloads (`"ok"` from a write-style tool) the summary can
-    // be longer per block than the original content; compacting would
-    // grow the array and contradict the design's "doesn't increase
-    // token count" claim.
-    const aggregateMiddleLen = middle.reduce((sum, pos) => sum + pos.currentLen, 0);
-    const aggregateSummaryLen = middle.length * summary.length;
-    if (aggregateSummaryLen >= aggregateMiddleLen) continue;
-
-    for (const pos of middle) {
-      replacements.set(`${pos.msgIdx}:${pos.blockIdx}`, summary);
-    }
-  }
-
-  if (replacements.size === 0) {
-    return { messages: [...messages], clusters: 0, resultsCompacted: 0 };
-  }
-
-  // Apply pass: rewrite tool_result content where the planned summary
-  // differs from the current bytes (no-op skip), count actual changes
-  // by tool, and only allocate new message/content arrays for messages
-  // that had at least one block change.
-  const clusterTouched = new Set<string>();
-  let resultsCompacted = 0;
-  const result = messages.map((msg, msgIdx) => {
-    if (typeof msg.content === "string") return msg;
-    let modified = false;
-    const newContent = msg.content.map((block, blockIdx) => {
-      const replacement = replacements.get(`${msgIdx}:${blockIdx}`);
-      if (replacement === undefined) return block;
-      if (block.type !== "tool_result") return block;
-      if (block.content === replacement) return block; // Idempotent — already compacted.
-      modified = true;
-      resultsCompacted++;
-      const toolUse = toolUseById.get(block.toolUseId);
-      if (toolUse) clusterTouched.add(toolUse.name);
-      return { ...block, content: replacement };
-    });
-    return modified ? { ...msg, content: newContent } : msg;
-  });
-
-  return { messages: result, clusters: clusterTouched.size, resultsCompacted };
-}
-
-/**
- * Compact one-line representation of a `tool_use.input` for the
- * supersession summary text. Falls back to a JSON-ish render for shapes
- * that don't look like a simple-string-keyed bag.
- *
- * `declared` is the tool's parameter names in declaration order. Transcript
- * inputs carry sorted keys, so the input's own order says nothing about
- * which argument matters; the declaration does.
- */
-function formatToolUseArgs(input: unknown, declared: ReadonlyArray<string>): string {
-  if (input === null || typeof input !== "object") return JSON.stringify(input);
-  const entries = Object.entries(input as Record<string, unknown>);
-  if (entries.length === 0) return "{}";
-  // Name the call by its first non-empty string argument (query, prompt,
-  // path, etc.): declared parameters in declaration order, then the input's
-  // other keys in their own order (`sortBy` is stable). Fall back to JSON
-  // when there is none.
-  const rank = (key: string): number => {
-    const i = declared.indexOf(key);
-    return i === -1 ? declared.length : i;
-  };
-  const [stringEntry] = R.sortBy(
-    entries.filter((e): e is [string, string] => typeof e[1] === "string" && e[1].length > 0),
-    ([k]) => rank(k),
-  );
-  if (stringEntry) {
-    const [k, v] = stringEntry;
-    const trimmed = v.length > 80 ? `${v.slice(0, 77)}...` : v;
-    return `${k}: ${JSON.stringify(trimmed)}`;
-  }
-  const json = JSON.stringify(input);
-  return json.length > 100 ? `${json.slice(0, 97)}...` : json;
-}
-
-function clearToolResults(
-  messages: Message[],
-  keep: number,
-): { messages: Message[]; clearedCount: number } {
-  // Collect all tool_result positions across all messages
-  const toolResultPositions = R.pipe(
-    messages,
-    R.flatMap((msg, msgIdx) => {
-      if (typeof msg.content === "string") return [];
-      return R.pipe(
-        msg.content,
-        R.map((block, blockIdx) => ({ block, msgIdx, blockIdx })),
-        R.filter(
-          ({ block }) => block.type === "tool_result" && block.content !== CLEARED_PLACEHOLDER,
-        ),
-        R.map(({ msgIdx, blockIdx }) => ({ msgIdx, blockIdx })),
-      );
-    }),
-  );
-
-  // Keep the last `keep` tool results intact
-  const clearCount = Math.max(0, toolResultPositions.length - keep);
-  if (clearCount === 0) return { messages, clearedCount: 0 };
-
-  const toClear = new Set(
-    R.pipe(
-      toolResultPositions,
-      R.take(clearCount),
-      R.map((p) => `${p.msgIdx}:${p.blockIdx}`),
-    ),
-  );
-
-  const result = R.map(messages, (msg, msgIdx) => {
-    if (typeof msg.content === "string") return msg;
-
-    const newContent = R.map(msg.content, (block, blockIdx) =>
-      block.type === "tool_result" && toClear.has(`${msgIdx}:${blockIdx}`)
-        ? { ...block, content: CLEARED_PLACEHOLDER }
-        : block,
-    );
-    const modified = newContent.some((b, i) => b !== (msg.content as ContentBlock[])[i]);
-    return modified ? { ...msg, content: newContent } : msg;
-  });
-
-  return { messages: result, clearedCount: clearCount };
-}
 
 async function summarizePrefix(
   messages: Message[],
@@ -643,6 +453,29 @@ async function summarizePrefix(
     messages: [summaryMessage, ...suffix],
     summarizedCount: prefix.length,
   };
+}
+
+/**
+ * The views truncation reaches from `messages`: `messages` itself, then each
+ * cut with fewer bytes than every view before it, the one that only puts the
+ * truncation marker in place of the first message included. Cuts run until
+ * one changes nothing, past any the marker makes larger than the messages it
+ * replaces. They end at the marker and the tail, three messages on plain
+ * alternation and five after a tool call
+ * (`[marker, tool_use, tool_result, reply, current]`), which is the last view
+ * unless the marker outweighs what it replaced.
+ */
+export function truncations(messages: ReadonlyArray<Message>): [Message[], ...Message[][]] {
+  let view = [...messages];
+  const views: [Message[], ...Message[][]] = [view];
+  for (;;) {
+    const next = truncateOldest(view);
+    // A cut is shorter, or as long and lighter: longer only by the marker,
+    // which also makes it heavier. So the cuts end.
+    if (next.length >= view.length && messagesBytes(next) >= messagesBytes(view)) return views;
+    if (messagesBytes(next) < messagesBytes(R.last(views))) views.push(next);
+    view = next;
+  }
 }
 
 function truncateOldest(messages: Message[]): Message[] {

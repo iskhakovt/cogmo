@@ -30,7 +30,13 @@ import { extractText } from "../llm/content.js";
 import { ProviderProtocolError, ToolArgsCutOffError } from "../llm/errors.js";
 import { RefusalError } from "../llm/fallback.js";
 import type { LlmProvider } from "../llm/provider.js";
-import type { ContentBlock, Message, StopReason, ToolUseBlock } from "../llm/types.js";
+import type {
+  ContentBlock,
+  Message,
+  StopReason,
+  ToolResultClearing,
+  ToolUseBlock,
+} from "../llm/types.js";
 
 /**
  * Subtypes the in-loop classifier emits on the degraded off-ramp.
@@ -500,6 +506,8 @@ export interface SynthesizeDegradedReplyDeps {
   messages: ReadonlyArray<Message>;
   reason: string;
   subtype: DegradeSubtype | null;
+  /** The turn's Strategy 1 intent, so the history is cleared as the loop's requests were. */
+  clearToolResults: ToolResultClearing;
   log: Logger;
   /** Wall-clock cap; defaults to {@link DEGRADED_SYNTHESIS_TIMEOUT_MS}. */
   timeoutMs?: number;
@@ -552,7 +560,7 @@ export interface SynthesizeDegradedReplyResult {
 export async function synthesizeDegradedReply(
   deps: SynthesizeDegradedReplyDeps,
 ): Promise<SynthesizeDegradedReplyResult> {
-  const { provider, model, messages, reason, subtype, log } = deps;
+  const { provider, model, messages, reason, subtype, clearToolResults, log } = deps;
   const timeoutMs = deps.timeoutMs ?? DEGRADED_SYNTHESIS_TIMEOUT_MS;
 
   const reasonHuman = humanReasonForDegrade(subtype, reason);
@@ -576,6 +584,7 @@ export async function synthesizeDegradedReply(
         tools: [],
         temperature: 0,
         maxTokens: synthesisMaxTokens(subtype),
+        clearToolResults,
       },
       { signal },
     );

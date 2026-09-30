@@ -2426,6 +2426,78 @@ describe("cache intent", () => {
   });
 });
 
+describe("Strategy 1 edit intent", () => {
+  const CLEARING = { triggerTokens: 120_000, keep: 5, clearAtLeastTokens: 20_000 };
+
+  function echoTools(): ToolRegistry {
+    const tools = new ToolRegistry();
+    tools.register(
+      defineTool({
+        name: "echo",
+        description: "echoes",
+        schema: z.object({ text: z.string() }),
+        handler: async (input) => `pong from ${input.text}`,
+      }),
+    );
+    return tools;
+  }
+
+  it("goes on every iteration's request, and leaves the tool results it returns intact", async () => {
+    const provider = mockStreamProvider([
+      {
+        events: [{ type: "tool_start", id: "t1", name: "echo", input: { text: "a" } }],
+        stopReason: "tool_use",
+      },
+      {
+        events: [{ type: "tool_start", id: "t2", name: "echo", input: { text: "b" } }],
+        stopReason: "tool_use",
+      },
+      { events: [{ type: "text_delta", text: "done" }], stopReason: "end_turn" },
+    ]);
+
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "go" }],
+      tools: echoTools(),
+      onEvent: async () => {},
+      clearToolResults: CLEARING,
+    });
+
+    const sent = vi.mocked(provider.chatStream).mock.calls.map(([p]) => p.clearToolResults);
+    expect(sent).toEqual([CLEARING, CLEARING, CLEARING]);
+    const results = result.newMessages.flatMap((m) =>
+      typeof m.content === "string" ? [] : m.content.filter((b) => b.type === "tool_result"),
+    );
+    expect(results.map((r) => r.content)).toEqual(["pong from a", "pong from b"]);
+  });
+
+  it("carries the intent into the in-step non-streaming replay", async () => {
+    const { provider, chatCalls, streamCalls } = repairStreamProvider([
+      {
+        kind: "throw",
+        error: new ProviderProtocolError("tool args failed to parse", new SyntaxError("x")),
+      },
+      {
+        kind: "stream",
+        events: [{ type: "tool_start", id: "t1", name: "echo", input: { text: "hi" } }],
+        stopReason: "tool_use",
+      },
+      { kind: "stream", events: [{ type: "text_delta", text: "done" }], stopReason: "end_turn" },
+    ]);
+
+    await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "hi" }],
+      tools: echoTools(),
+      onEvent: async () => {},
+      clearToolResults: CLEARING,
+    });
+
+    expect(chatCalls.map((p) => p.clearToolResults)).toEqual([CLEARING]);
+    expect(streamCalls.map((p) => p.clearToolResults)).toEqual([CLEARING, CLEARING]);
+  });
+});
+
 // The turn's totals are what `agent loop complete` logs and what the next
 // turn's compaction fast path reads, so they keep the cache split: reads and
 // writes summed across iterations, as subsets of the summed input.

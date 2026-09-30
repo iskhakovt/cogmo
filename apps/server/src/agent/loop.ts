@@ -12,6 +12,7 @@ import type {
   ResponseMeta,
   StopReason,
   StreamEvent,
+  ToolResultClearing,
   ToolUseBlock,
   Usage,
 } from "../llm/types.js";
@@ -724,6 +725,12 @@ export interface StreamingAgentLoopParams extends AgentLoopParams {
    * cache. Omit for a transcript nothing will send again.
    */
   cache?: CacheIntent;
+  /**
+   * Strategy 1's edit intent, sent on every iteration and to the in-step
+   * replay, so the provider clears between a turn's iterations as it does
+   * across turns. The transcript the loop holds and returns is never cleared.
+   */
+  clearToolResults?: ToolResultClearing;
 }
 
 /** What one live execution forwarded to `onEvent`, in order. */
@@ -879,6 +886,7 @@ export async function runStreamingAgentLoop(
     turnKey,
     maxTokens,
     cache,
+    clearToolResults,
     maxIterations = DEFAULT_MAX_ITERATIONS,
     turnLogger: log,
   } = params;
@@ -923,6 +931,7 @@ export async function runStreamingAgentLoop(
       messages,
       ...(maxTokens !== undefined && { maxTokens }),
       ...(cache && { cache }),
+      ...(clearToolResults && { clearToolResults }),
     };
     if (toolDefs.length > 0) {
       chatParams.tools = toolDefs;

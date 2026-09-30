@@ -2,11 +2,7 @@ import type { Transactor } from "../../db/index.js";
 import { resolveLimits } from "../../llm/models.js";
 import type { LlmProviderResolver } from "../../llm/resolver.js";
 import {
-  compactSameToolClusters,
   DEFAULT_KEEP_TURNS,
-  DEFAULT_RETAIN_FIRST,
-  DEFAULT_RETAIN_RECENT,
-  DEFAULT_TRIGGER_COUNT,
   extractSummaryText,
   snapToPairBoundary,
   summarizationRequest,
@@ -132,20 +128,8 @@ export async function compactConversation(
     return { status: "skipped", reason: "too_short" };
   }
 
-  // Strategy 0 before summarizing, matching the turn-time ladder's first rung:
-  // repeated same-tool results in the prefix collapse to one aggregate line, so
-  // the summarizer reads a cleaner transcript and a tool-heavy prefix shrinks
-  // before it reaches the model. Structural and count-based — no token count
-  // needed, which is what lets the manual path run it unconditionally.
-  // No tool definitions here (see below), so a compacted call is named by its
-  // first string argument in key order; its `tool_use` block, which the
-  // summarizer also reads, keeps the full input.
-  const prefix = compactSameToolClusters(messages.slice(0, splitIdx), {
-    retainRecent: DEFAULT_RETAIN_RECENT,
-    retainFirst: DEFAULT_RETAIN_FIRST,
-    triggerCount: DEFAULT_TRIGGER_COUNT,
-    tools: undefined,
-  }).messages;
+  // The summarizer reads the prefix as it was sent, every tool result verbatim.
+  const prefix = messages.slice(0, splitIdx);
 
   const coreMemoryScope = await loadCoreMemoryScope(
     { runInTx: deps.runInTx, agentStore: deps.agentStore },

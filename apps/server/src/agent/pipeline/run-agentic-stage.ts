@@ -26,6 +26,7 @@ import type { Transactor } from "../../db/index.js";
 import { inngest } from "../../inngest/client.js";
 import { isRetriableProviderError } from "../../llm/fallback.js";
 import { computeBudget, resolveLimits } from "../../llm/models.js";
+import { MAX_VIEW_BYTES } from "../../llm/request-size.js";
 import {
   type LlmProviderResolver,
   ProviderConfigError,
@@ -45,6 +46,7 @@ import {
   extractSummaryText,
   shouldSkipCounting,
   summarizationRequest,
+  toolResultClearing,
 } from "../context.js";
 import { loadConversationContext } from "../conversation/load-conversation-context.js";
 import {
@@ -327,6 +329,8 @@ export async function runAgenticStage(
     resolveLimits(ctx.model, rowLimits),
   );
   const budget = computeBudget(limits);
+  // Strategy 1, on every request of the stage turn: counts, iterations and the fork.
+  const clearToolResults = toolResultClearing(budget);
 
   // Frozen for the run: the persist step below rewrites the row this reads.
   const lastTokens = await steps.stepRun("load-last-tokens", () =>
@@ -354,6 +358,8 @@ export async function runAgenticStage(
         );
       },
       budget,
+      clearToolResults,
+      maxViewBytes: MAX_VIEW_BYTES,
       canSummarizePrefix: (candidate) => summarizedSpan(turnHistory.messageIds, candidate) !== null,
       summarize: async (system, msgs) => {
         const resolved =
@@ -372,6 +378,7 @@ export async function runAgenticStage(
               system,
               messages: msgs,
               maxOutputTokens: summarizationLimits.maxOutputTokens,
+              clearToolResults,
             }),
           );
           return { text: extractSummaryText(response.content), stopReason: response.stopReason };
@@ -465,6 +472,7 @@ export async function runAgenticStage(
       stepRun: steps.stepRun,
       turnKey: inboundId,
       cache: turnCacheIntent(conversationId, "stage"),
+      clearToolResults,
       turnLogger: log,
     });
     // A degrade drops the iteration that triggered it, so its streamed output
