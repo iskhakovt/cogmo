@@ -622,7 +622,7 @@ RPC signature:
 ```typescript
 interface SkillRunner {
   // `origin` (required) decides who a schedule the request puts live runs as —
-  // see Run-as identity. `signal` cancels the deploy until it commits.
+  // see Run-as identity. `signal` cancels the deploy until its transaction starts.
   register(opts: {
     branch: string;
     origin: SkillDeployOrigin;
@@ -672,7 +672,7 @@ type EnableResult =
 - **`main` is authoritative.** `refs/heads/main` in the bare repo and `skills.git_sha` in the DB always agree — both are written together inside the register transaction.
 - **No race via direct push.** Pre-receive hook rejects non-Cogmo writes to `main`; Cogmo's own registers queue on the advisory lock, with the snapshot caveat in register step 1.
 - **Idempotent.** Registering a branch whose tip is already `main` is a no-op. Safe to retry on network timeouts.
-- **Cancellable before the commit.** An abort of `register`'s `signal` before the deploy transaction starts stops the deploy: the lockfile compile's exec is disposed and its session deleted, no session starts after the abort, and `register` rejects with the signal's reason, leaving `main` and the branch untouched. An abort once the transaction has started only kills the mirror push to the remote, and the result stands. A skill-repo coding task's auto-register runs `register` under a 300 s deadline.
+- **Cancellable until the deploy transaction starts.** `register` checks its `signal` at its start and again just before the transaction, and the lockfile compile honours it throughout: a wait for the image ends, no session starts, and a running exec is disposed before its session is deleted. An abort seen by then stops the deploy, and `register` rejects with the signal's reason, not with a rejection the abort caused, leaving `main` and the branch untouched. These are checks, not a wall-clock cap: work between them that takes no signal (local git, the classifier, the Pyodide check's PyPI lookups) runs to its end first. Once the transaction has started, its wait on the advisory lock included, an abort only kills the mirror push to the remote, and the result stands. A skill-repo coding task's auto-register runs `register` under a 300 s deadline.
 - **Git push is orthogonal.** Pushing branches to a user-configured remote (backup, multi-machine) neither triggers nor depends on registration.
 
 ## Dependencies `[proposed]`

@@ -229,11 +229,15 @@ function deployRunAs(owner: SkillRunIdentity, origin: SkillDeployOrigin): SkillR
  */
 export interface SkillRunner {
   /**
-   * `origin` decides who a schedule the request puts live runs as. Aborting
-   * `signal` before the deploy transaction starts stops the deploy: the
-   * lockfile compile stops, and `register` rejects with the signal's reason,
-   * leaving main and the branch as they were. Once the transaction has
-   * started, an abort only cuts the mirror push short.
+   * `origin` decides who a schedule the request puts live runs as.
+   *
+   * `signal` is checked at the start and just before the deploy transaction,
+   * and the lockfile compile honours it throughout. An abort seen by then
+   * stops the deploy: `register` rejects with the signal's reason, leaving
+   * main and the branch as they were. It is not a wall-clock cap: work that
+   * takes no signal (local git, the classifier, PyPI lookups) runs to its end
+   * first. Once the transaction has started, an abort only cuts the mirror
+   * push short.
    */
   register(opts: {
     branch: string;
@@ -458,6 +462,16 @@ interface SkillSourceCacheEntry {
   lockfile?: SkillLockfileCacheValue;
 }
 
+/** A branch that passed every check `register` makes before its transaction. */
+interface PreparedRegister {
+  branchSha: string;
+  mainSha: string | null;
+  manifest: SkillManifest;
+  body: string;
+  classifierLog: ClassifierLog;
+  lockfile: { hash: string; contents: string } | null;
+}
+
 /** Build the cohesive cache value from a lockfile snapshot. */
 function buildLockfileCacheValue(snapshot: {
   hash: string;
@@ -588,7 +602,7 @@ export class SkillRunnerImpl implements SkillRunner {
    * still pinned, and a wheel yanked from PyPI since shouldn't block
    * the operator from rewinding to a known-good revision.
    *
-   * Aborting `signal` stops the compile, and this throws its reason.
+   * Aborting `signal` stops the compile, which then errs as `transport_failed`.
    */
   async #readManifestLockfile(
     repoPath: string,
@@ -610,8 +624,6 @@ export class SkillRunnerImpl implements SkillRunner {
       const compiled = await this.#lockfileCompiler.compile(manifest.dependencies, {
         ...(opts.signal && { signal: opts.signal }),
       });
-      // An abort surfaces as itself, not as the compile failure it caused.
-      opts.signal?.throwIfAborted();
       if (compiled.isErr()) {
         return err(`requirements_lock_${compiled.error.kind}: ${compiled.error.message}`);
       }
@@ -698,124 +710,15 @@ export class SkillRunnerImpl implements SkillRunner {
   }): Promise<RegisterResult> {
     const repoPath = this.#requireRepoPath("register");
 
-    // Reject branch=main at the boundary. Without this guard, the register
-    // flow would (a) "fast-forward" main onto itself (no-op) and then
-    // (b) call `deleteRef("refs/heads/main")` in the same applyFilesystem
-    // step, which would drop the only authoritative ref. The deleteRef
-    // helper now refuses too (defense in depth), but rejecting at the entry
-    // gives a clear error before any git/DB work runs.
-    if (opts.branch === "main" || opts.branch === "refs/heads/main") {
-      return rejectedResult("", "invalid_branch: cannot register from 'main' itself");
-    }
-
-    let branchSha: string;
-    try {
-      branchSha = await revParse(repoPath, `refs/heads/${opts.branch}`);
-    } catch (e) {
-      if (e instanceof GitOpsError && e.code === "ref_not_found") {
-        return rejectedResult("", `branch_not_found: ${opts.branch}`);
-      }
-      throw e;
-    }
-
-    const mainSha = await getMainSha(repoPath);
-    // Fast-forward check: feature branch must descend from current main.
-    if (mainSha && !(await isAncestor(repoPath, mainSha, branchSha))) {
-      return rejectedResult(branchSha, "non_fast_forward: rebase branch onto main and retry");
-    }
-
-    let manifestSource: string;
-    let body: string;
-    try {
-      manifestSource = await gitShow(repoPath, branchSha, "SKILL.md");
-    } catch (e) {
-      if (e instanceof GitOpsError && e.code === "file_not_found") {
-        return rejectedResult(branchSha, "missing_skill_md: SKILL.md not found at branch tip");
-      }
-      throw e;
-    }
-    try {
-      body = await gitShow(repoPath, branchSha, "skill.py");
-    } catch (e) {
-      if (e instanceof GitOpsError && e.code === "file_not_found") {
-        return rejectedResult(branchSha, "missing_skill_py: skill.py not found at branch tip");
-      }
-      throw e;
-    }
-
-    const parsed = parseManifest(manifestSource);
-    if (!parsed.isOk()) {
-      const errors =
-        parsed.error.kind === "invalid_manifest" ? parsed.error.issues : [parsed.error.message];
-      return {
-        name: "",
-        riskTier: "notify",
-        status: "rejected",
-        gitSha: branchSha,
-        errors,
-      };
-    }
-    const manifest = parsed.value.manifest;
-
-    // Compile the manifest's JSON Schemas BEFORE any filesystem / DB write.
-    // Without this, an invalid `inputs` / `outputs` schema would only surface
-    // at first invoke — by which point `update-ref refs/heads/main` has
-    // already moved main + the skills row is committed. Running ajv up-front
-    // makes "schema parses" part of the deploy contract, alongside manifest
-    // YAML and effect declarations.
-    const schemaErrors = this.#prevalidateSchemas(manifest);
-    if (schemaErrors.length > 0) {
-      return {
-        name: manifest.name,
-        riskTier: "notify",
-        status: "rejected",
-        gitSha: branchSha,
-        errors: schemaErrors,
-      };
-    }
-
-    // Tier-1 bodies get the Pyodide-compatibility scan before anything is
-    // written. Its whole purpose is turning "imports fine, dies on first
-    // invoke" into a rejection here, which only holds if it actually runs
-    // on the register path.
-    if (manifest.tier === "wasm") {
-      const lint = lintWasmCompat(body);
-      if (lint.isErr()) {
-        return rejectedResult(
-          branchSha,
-          lint.error.map((e) => `line ${e.line}: ${e.reason}`).join("; "),
-        );
-      }
-    }
-
-    const classifierLog = await classifyManifest(manifest, body);
-    if (classifierLog.validation_errors.length > 0) {
-      // Undeclared dangerous effects → reject the deploy outright with
-      // the per-effect labels surfaced to the user. Don't even insert
-      // a `denied` deploy row: the AST path is a pre-flight, not a
-      // human approval, and storing a denied row for "manifest typo"
-      // pollutes the audit log meant for real approval-gate events.
-      return rejectedResult(branchSha, classifierLog.validation_errors.join("; "));
-    }
-
-    const lockfileResult = await this.#readManifestLockfile(repoPath, branchSha, manifest, {
-      verifyFresh: true,
-      ...(opts.signal && { signal: opts.signal }),
-    });
-    if (lockfileResult.isErr()) {
-      return rejectedResult(branchSha, lockfileResult.error);
-    }
-    const lockfile = lockfileResult.value;
-
-    if (manifest.tier === "wasm" && lockfile !== null) {
-      const compat = await checkPyodideCompat(parseLockfilePackageSpecs(lockfile.contents));
-      if (compat.isErr()) {
-        return rejectedResult(branchSha, formatPyodideCompatIssues(compat.error));
-      }
-    }
-
-    // The last point an abort stops the deploy: the transaction moves main.
     opts.signal?.throwIfAborted();
+    const prepared = await this.#prepareRegister(repoPath, opts.branch, opts.signal);
+    // The last point an abort stops the deploy: the transaction moves main.
+    // Checked ahead of the outcome, so an abort surfaces as itself, not as a
+    // rejection it caused.
+    opts.signal?.throwIfAborted();
+    if (prepared.isErr()) return prepared.error;
+    const { branchSha, mainSha, manifest, body, classifierLog, lockfile } = prepared.value;
+
     const schedule = manifest.schedule ?? null;
     const result = await this.#runInTx((tx) =>
       this.#store.executeRegister(tx, {
@@ -854,6 +757,137 @@ export class SkillRunnerImpl implements SkillRunner {
       body,
       lockfile,
     });
+  }
+
+  /**
+   * Every check `register` makes before its transaction: the branch, its
+   * manifest and body, the classifier, the lockfile, Pyodide compatibility.
+   * Errs with the rejection `register` returns.
+   */
+  async #prepareRegister(
+    repoPath: string,
+    branch: string,
+    signal: AbortSignal | undefined,
+  ): Promise<Result<PreparedRegister, RegisterResult>> {
+    // Reject branch=main at the boundary. Without this guard, the register
+    // flow would (a) "fast-forward" main onto itself (no-op) and then
+    // (b) call `deleteRef("refs/heads/main")` in the same applyFilesystem
+    // step, which would drop the only authoritative ref. The deleteRef
+    // helper now refuses too (defense in depth), but rejecting at the entry
+    // gives a clear error before any git/DB work runs.
+    if (branch === "main" || branch === "refs/heads/main") {
+      return err(rejectedResult("", "invalid_branch: cannot register from 'main' itself"));
+    }
+
+    let branchSha: string;
+    try {
+      branchSha = await revParse(repoPath, `refs/heads/${branch}`);
+    } catch (e) {
+      if (e instanceof GitOpsError && e.code === "ref_not_found") {
+        return err(rejectedResult("", `branch_not_found: ${branch}`));
+      }
+      throw e;
+    }
+
+    const mainSha = await getMainSha(repoPath);
+    // Fast-forward check: feature branch must descend from current main.
+    if (mainSha && !(await isAncestor(repoPath, mainSha, branchSha))) {
+      return err(rejectedResult(branchSha, "non_fast_forward: rebase branch onto main and retry"));
+    }
+
+    let manifestSource: string;
+    let body: string;
+    try {
+      manifestSource = await gitShow(repoPath, branchSha, "SKILL.md");
+    } catch (e) {
+      if (e instanceof GitOpsError && e.code === "file_not_found") {
+        return err(rejectedResult(branchSha, "missing_skill_md: SKILL.md not found at branch tip"));
+      }
+      throw e;
+    }
+    try {
+      body = await gitShow(repoPath, branchSha, "skill.py");
+    } catch (e) {
+      if (e instanceof GitOpsError && e.code === "file_not_found") {
+        return err(rejectedResult(branchSha, "missing_skill_py: skill.py not found at branch tip"));
+      }
+      throw e;
+    }
+
+    const parsed = parseManifest(manifestSource);
+    if (!parsed.isOk()) {
+      const errors =
+        parsed.error.kind === "invalid_manifest" ? parsed.error.issues : [parsed.error.message];
+      return err({
+        name: "",
+        riskTier: "notify",
+        status: "rejected",
+        gitSha: branchSha,
+        errors,
+      });
+    }
+    const manifest = parsed.value.manifest;
+
+    // Compile the manifest's JSON Schemas BEFORE any filesystem / DB write.
+    // Without this, an invalid `inputs` / `outputs` schema would only surface
+    // at first invoke — by which point `update-ref refs/heads/main` has
+    // already moved main + the skills row is committed. Running ajv up-front
+    // makes "schema parses" part of the deploy contract, alongside manifest
+    // YAML and effect declarations.
+    const schemaErrors = this.#prevalidateSchemas(manifest);
+    if (schemaErrors.length > 0) {
+      return err({
+        name: manifest.name,
+        riskTier: "notify",
+        status: "rejected",
+        gitSha: branchSha,
+        errors: schemaErrors,
+      });
+    }
+
+    // Tier-1 bodies get the Pyodide-compatibility scan before anything is
+    // written. Its whole purpose is turning "imports fine, dies on first
+    // invoke" into a rejection here, which only holds if it actually runs
+    // on the register path.
+    if (manifest.tier === "wasm") {
+      const lint = lintWasmCompat(body);
+      if (lint.isErr()) {
+        return err(
+          rejectedResult(
+            branchSha,
+            lint.error.map((e) => `line ${e.line}: ${e.reason}`).join("; "),
+          ),
+        );
+      }
+    }
+
+    const classifierLog = await classifyManifest(manifest, body);
+    if (classifierLog.validation_errors.length > 0) {
+      // Undeclared dangerous effects → reject the deploy outright with
+      // the per-effect labels surfaced to the user. Don't even insert
+      // a `denied` deploy row: the AST path is a pre-flight, not a
+      // human approval, and storing a denied row for "manifest typo"
+      // pollutes the audit log meant for real approval-gate events.
+      return err(rejectedResult(branchSha, classifierLog.validation_errors.join("; ")));
+    }
+
+    const lockfileResult = await this.#readManifestLockfile(repoPath, branchSha, manifest, {
+      verifyFresh: true,
+      ...(signal && { signal }),
+    });
+    if (lockfileResult.isErr()) {
+      return err(rejectedResult(branchSha, lockfileResult.error));
+    }
+    const lockfile = lockfileResult.value;
+
+    if (manifest.tier === "wasm" && lockfile !== null) {
+      const compat = await checkPyodideCompat(parseLockfilePackageSpecs(lockfile.contents));
+      if (compat.isErr()) {
+        return err(rejectedResult(branchSha, formatPyodideCompatIssues(compat.error)));
+      }
+    }
+
+    return ok({ branchSha, mainSha, manifest, body, classifierLog, lockfile });
   }
 
   async approveDeploy(opts: {

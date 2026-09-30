@@ -325,6 +325,52 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
     expect(await getMainSha(repo.bare)).toBe(mainBefore);
   });
 
+  it("an aborted signal rejects with its reason ahead of any validation", async () => {
+    const runner = await makeRunner();
+    const reason = new Error("register deadline");
+
+    await expect(
+      runner.register({ branch: "nope", origin: OWNER, signal: AbortSignal.abort(reason) }),
+    ).rejects.toBe(reason);
+  });
+
+  it("an abort once the deploy transaction has started still commits and reports live", async () => {
+    const controller = new AbortController();
+    // The deadline passes while the transaction moves main.
+    class AbortingStore extends DrizzleSkillStore {
+      override executeRegister(
+        trx: Parameters<DrizzleSkillStore["executeRegister"]>[0],
+        params: Parameters<DrizzleSkillStore["executeRegister"]>[1],
+      ) {
+        return super.executeRegister(trx, {
+          ...params,
+          applyFilesystem: async () => {
+            controller.abort(new Error("register deadline"));
+            await params.applyFilesystem();
+          },
+        });
+      }
+    }
+    const runner = await makeRunner({ store: new AbortingStore() });
+    const sha = await pushFeatureBranch({
+      work: repo.work,
+      branch: "skill/echo",
+      manifest: ECHO_MANIFEST,
+      body: ECHO_BODY,
+    });
+
+    const result = await runner.register({
+      branch: "skill/echo",
+      origin: OWNER,
+      signal: controller.signal,
+    });
+
+    expect(controller.signal.aborted).toBe(true);
+    expect(result.status).toBe("live");
+    expect(await getMainSha(repo.bare)).toBe(sha);
+    expect((await tx((trx) => store.getSkillByName(trx, "echo")))?.gitSha).toBe(sha);
+  });
+
   it("rejects a missing branch", async () => {
     const runner = await makeRunner();
     const result = await runner.register({ branch: "nope", origin: OWNER });
@@ -435,6 +481,48 @@ tier: wasm
       const skill = await tx((trx) => store.getSkillByName(trx, "echo"));
       // sha256(ECHO_LOCKFILE) — hex length 64 is the schema-level shape.
       expect(skill?.lockfileHash).toMatch(/^[0-9a-f]{64}$/);
+    });
+
+    it("an abort during the PyPI lookups rejects with its reason and commits nothing", async () => {
+      // A dependency Pyodide doesn't bundle, so the compatibility check asks PyPI.
+      const lockfile = "cogmo-unbundled==1.0.0 \\\n    --hash=sha256:0\n";
+      await writeFile(
+        join(repo.work, "SKILL.md"),
+        ECHO_WITH_DEPS.replace("httpx==0.27.0", "cogmo-unbundled==1.0.0"),
+      );
+      await writeFile(join(repo.work, "skill.py"), ECHO_BODY);
+      await writeFile(join(repo.work, "requirements.lock"), lockfile);
+      await execFileP("git", ["-C", repo.work, "add", "."]);
+      await execFileP("git", ["-C", repo.work, "commit", "-m", "unbundled dep", "--allow-empty"]);
+      await execFileP("git", [
+        "-C",
+        repo.work,
+        "push",
+        "-f",
+        "origin",
+        "HEAD:refs/heads/skill/echo-pypi",
+      ]);
+      const runner = await makeRunner();
+      const mainBefore = await getMainSha(repo.bare);
+      const controller = new AbortController();
+      const reason = new Error("register deadline");
+      const fetch = vi.fn(async () => {
+        controller.abort(reason);
+        return new Response(null, { status: 404 });
+      });
+      vi.stubGlobal("fetch", fetch);
+
+      try {
+        await expect(
+          runner.register({ branch: "skill/echo-pypi", origin: OWNER, signal: controller.signal }),
+        ).rejects.toBe(reason);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+
+      expect(fetch).toHaveBeenCalled();
+      expect(await tx((trx) => store.getSkillByName(trx, "echo"))).toBeUndefined();
+      expect(await getMainSha(repo.bare)).toBe(mainBefore);
     });
 
     it("stores null lockfile_hash when manifest declares no deps", async () => {
@@ -558,6 +646,23 @@ tier: wasm
           "refs/heads/skill/echo-aborted",
         ]);
         expect(stdout.trim()).toBe(sha);
+      });
+
+      it("an aborted signal starts no compile", async () => {
+        const lockfile = "httpx==0.27.0 --hash=sha256:0\n";
+        const compiler = { compile: vi.fn().mockResolvedValue(ok(lockfile)) };
+        const runner = await makeRunner({ lockfileCompiler: compiler });
+        await commitWithLockfile("skill/echo-dead", lockfile);
+        const reason = new Error("register deadline");
+
+        await expect(
+          runner.register({
+            branch: "skill/echo-dead",
+            origin: OWNER,
+            signal: AbortSignal.abort(reason),
+          }),
+        ).rejects.toBe(reason);
+        expect(compiler.compile).not.toHaveBeenCalled();
       });
 
       it("skips compile when no compiler is configured (tier-1-only deployment)", async () => {

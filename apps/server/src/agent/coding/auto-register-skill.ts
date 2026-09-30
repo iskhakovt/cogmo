@@ -30,9 +30,11 @@ import type { CodingStore } from "./store/index.js";
 const log = logger.child({ component: "coding.auto-register-skill" });
 
 /**
- * Deadline for `register`, whose abort stops the deploy before it commits.
- * Covers the lockfile compile's exec cap (`DEFAULT_COMPILE_TIMEOUT_MS`, 180 s)
- * plus sandbox start and the classifier.
+ * Deadline for `register`, whose abort stops the deploy until its transaction
+ * starts. `register` checks it at points rather than as a wall-clock cap, so
+ * work that takes no signal runs to its end first. Covers the lockfile
+ * compile's exec cap (`DEFAULT_COMPILE_TIMEOUT_MS`, 180 s) plus sandbox start
+ * and the classifier.
  */
 const REGISTER_TIMEOUT_MS = 300_000;
 
