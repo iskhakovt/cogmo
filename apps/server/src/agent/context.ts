@@ -435,19 +435,24 @@ async function summarizePrefix(
 }
 
 /**
- * The views truncation reaches from `messages`, one cut at a time: `messages`
- * itself, then each cut with strictly fewer bytes, the one that only puts the
- * truncation marker in place of the first message included. The last is the
- * smallest, the marker and the tail: three messages on plain alternation, and
- * five after a tool call (`[marker, tool_use, tool_result, reply, current]`).
+ * The views truncation reaches from `messages`: `messages` itself, then each
+ * cut with fewer bytes than every view before it, the one that only puts the
+ * truncation marker in place of the first message included. Cuts run until
+ * one changes nothing, past any the marker makes larger than the messages it
+ * replaces. They end at the marker and the tail, three messages on plain
+ * alternation and five after a tool call
+ * (`[marker, tool_use, tool_result, reply, current]`), which is the last view
+ * unless the marker outweighs what it replaced.
  */
 export function truncations(messages: ReadonlyArray<Message>): [Message[], ...Message[][]] {
   let view = [...messages];
   const views: [Message[], ...Message[][]] = [view];
   for (;;) {
     const next = truncateOldest(view);
-    if (messagesBytes(next) >= messagesBytes(view)) return views;
-    views.push(next);
+    // A cut is shorter, or as long and lighter: longer only by the marker,
+    // which also makes it heavier. So the cuts end.
+    if (next.length >= view.length && messagesBytes(next) >= messagesBytes(view)) return views;
+    if (messagesBytes(next) < messagesBytes(R.last(views))) views.push(next);
     view = next;
   }
 }

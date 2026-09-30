@@ -502,6 +502,29 @@ describe("compactMessages", () => {
       expect(bytesOf(result.messages)).toBeLessThan(11_100_000);
     });
 
+    it("finds the cut that fits past one the marker makes larger", async () => {
+      // 21 MB. The first cut drops the two short rows and adds the marker, which
+      // outweighs them; two cuts later the view is the marker, a reply and 11 MB.
+      const messages: Message[] = [
+        msg("user", "hi"),
+        msg("user", "hello?"),
+        msg("assistant", "Hi! How can I help?"),
+        docTurn(10_000_000),
+        msg("assistant", "read it"),
+        docTurn(11_000_000),
+      ];
+      expect(bytesOf(messages)).toBeGreaterThan(MAX_REQUEST_BYTES);
+
+      const result = await compactMessages("system", messages, undefined, deps(), true);
+
+      expect(result.event?.strategies).toEqual(["truncate"]);
+      expect(result.messages).toEqual([
+        { role: "user", content: "[Earlier conversation history was truncated]" },
+        ...messages.slice(-2),
+      ]);
+      expect(bytesOf(result.messages)).toBeLessThan(11_100_000);
+    });
+
     it("sends the smallest view when no cut fits the cap, uncounted", async () => {
       const messages: Message[] = [
         msg("user", "hello ".repeat(100)),
@@ -821,6 +844,28 @@ describe("truncations", () => {
     const views = truncations(messages);
 
     expect(views[0]).toEqual(messages);
+    for (const [i, view] of views.entries()) {
+      if (i > 0) expect(size(view)).toBeLessThan(size(expectDefined(views[i - 1], "previous")));
+    }
+    expect(R.last(views)).toEqual([
+      { role: "user", content: "[Earlier conversation history was truncated]" },
+      ...messages.slice(-2),
+    ]);
+  });
+
+  it("runs past a cut the marker makes larger", () => {
+    // Two short user rows first: the marker outweighs the pair it replaces.
+    const messages: Message[] = [
+      msg("user", "hi"),
+      msg("user", "hello?"),
+      msg("assistant", "Hi! How can I help?"),
+      msg("user", "x".repeat(1000)),
+      msg("assistant", "read it"),
+      msg("user", "y".repeat(1100)),
+    ];
+
+    const views = truncations(messages);
+
     for (const [i, view] of views.entries()) {
       if (i > 0) expect(size(view)).toBeLessThan(size(expectDefined(views[i - 1], "previous")));
     }
