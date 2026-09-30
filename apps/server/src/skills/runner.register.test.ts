@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -10,6 +11,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { mock } from "vitest-mock-extended";
 import { profiles, users } from "../agent/store/schema.js";
 import type { Database, Transactor } from "../db/index.js";
+import { GitHubIdentitySchema } from "../secrets/github.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { expectDefined } from "../test/assertions.js";
 import { mockFilesService } from "../test/factories.js";
@@ -2017,7 +2019,7 @@ effects:
       }
     });
 
-    it("an abort after the commit cuts a stalled mirror push short and still reports live", async () => {
+    it("an abort after the commit returns promptly from a stalled mirror push and still reports live", async () => {
       const repoWithRemote = await setupRepoWithRemote();
       try {
         // The remote's pre-receive hook marks that the push arrived, then stalls it.
@@ -2049,6 +2051,75 @@ effects:
         expect(result.gitSha).toBe(sha);
         expect(await getMainSha(repoWithRemote.bare)).toBe(sha);
       } finally {
+        await repoWithRemote.cleanup();
+      }
+    });
+
+    it("a stalled HTTPS mirror push gives up at its own timeout and still reports live", async () => {
+      const repoWithRemote = await setupRepoWithRemote();
+      // An HTTPS remote that takes the connection and never answers, so the
+      // push goes through the PAT branch and stalls in the TLS handshake.
+      const sockets = new Set<Socket>();
+      const connected = Promise.withResolvers<void>();
+      const server = createServer((socket) => {
+        sockets.add(socket);
+        connected.resolve();
+      });
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (address === null || typeof address === "string") throw new Error("no TCP address");
+      await execFileP("git", [
+        "-C",
+        repoWithRemote.bare,
+        "remote",
+        "set-url",
+        "origin",
+        `https://127.0.0.1:${address.port}/owner/skills.git`,
+      ]);
+      const secretsStore = mock<SecretsStore>();
+      secretsStore.getSecret.mockResolvedValue(
+        JSON.stringify(
+          GitHubIdentitySchema.parse({
+            pat: "ghp_test",
+            sshPrivateKey: "-----BEGIN OPENSSH PRIVATE KEY-----",
+            sshPublicKey: "ssh-ed25519 AAAA",
+            login: "cogmo-bot",
+            id: "12345",
+          }),
+        ),
+      );
+      const pushDeadline = new AbortController();
+      const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(pushDeadline.signal);
+      try {
+        const runner = await SkillRunnerImpl.create({
+          store,
+          runInTx: tx,
+          secretsStore,
+          userTimezone: "UTC",
+          defaultRunAs: DEFAULT_RUN_AS,
+          skillsRepoPath: repoWithRemote.bare,
+        });
+        const sha = await pushFeatureBranch({
+          work: repoWithRemote.work,
+          branch: "skill/echo",
+          manifest: ECHO_MANIFEST,
+          body: ECHO_BODY,
+        });
+
+        // No caller signal, as from the CLI.
+        const registered = runner.register({ branch: "skill/echo", origin: OWNER });
+        await connected.promise;
+        pushDeadline.abort(new DOMException("push timed out", "TimeoutError"));
+        const result = await registered;
+
+        expect(timeout).toHaveBeenCalledWith(60_000);
+        expect(result.status).toBe("live");
+        expect(result.gitSha).toBe(sha);
+        expect(await getMainSha(repoWithRemote.bare)).toBe(sha);
+      } finally {
+        timeout.mockRestore();
+        for (const socket of sockets) socket.destroy();
+        server.close();
         await repoWithRemote.cleanup();
       }
     });

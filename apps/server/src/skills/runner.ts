@@ -5,7 +5,7 @@ import type { Transactor } from "../db/index.js";
 import { defaultSkillsImage } from "../env.js";
 import { logger } from "../logger.js";
 import type { SandboxClient } from "../sandbox/index.js";
-import { runGit, withGitAskpass } from "../secrets/git-askpass.js";
+import { type GitEnv, runGit, withGitAskpass } from "../secrets/git-askpass.js";
 import { DEFAULT_GITHUB_IDENTITY_NAME, resolveGitHubIdentity } from "../secrets/github.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { classifyManifest, STUB_CLASSIFIER_VERSION } from "./classifier.js";
@@ -87,6 +87,12 @@ export function mapManifestResourceLimits(resources: SkillManifest["resources"] 
 const log = logger.child({ component: "skills.runner" });
 
 const ZERO_SHA = "0000000000000000000000000000000000000000";
+
+/**
+ * Cap on the mirror push: pushing one ref takes seconds, and a minute rides
+ * out a slow link while still freeing the caller from a stalled connection.
+ */
+const MIRROR_PUSH_TIMEOUT_MS = 60_000;
 
 function rowToSummary(r: SkillRow): SkillSummary {
   return {
@@ -1687,7 +1693,8 @@ export class SkillRunnerImpl implements SkillRunner {
    * history); register/approve use fast-forward push which fails clearly
    * if the remote has somehow drifted.
    *
-   * Aborting `signal` kills the push, which then fails like any other.
+   * The push gives up after `MIRROR_PUSH_TIMEOUT_MS`, or once `signal`
+   * aborts: git is killed, and the push fails like any other.
    */
   async #mirrorMainToRemote(
     newSha: string,
@@ -1721,13 +1728,13 @@ export class SkillRunnerImpl implements SkillRunner {
     }
     args.push(remoteUrl, `${newSha}:refs/heads/main`);
 
-    const spawnOpts = options?.signal && { signal: options.signal };
+    const signal = AbortSignal.any([
+      AbortSignal.timeout(MIRROR_PUSH_TIMEOUT_MS),
+      ...(options?.signal ? [options.signal] : []),
+    ]);
+    const push = (env?: GitEnv) => runGit(args, env, { signal });
     try {
-      if (pat) {
-        await withGitAskpass(pat, (env) => runGit(args, env, spawnOpts));
-      } else {
-        await runGit(args, undefined, spawnOpts);
-      }
+      await (pat ? withGitAskpass(pat, push) : push());
       log.info({ newSha, remoteUrl }, "mirrored skills main to remote");
     } catch (e) {
       log.warn(
