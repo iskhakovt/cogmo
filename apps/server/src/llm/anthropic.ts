@@ -20,6 +20,7 @@ import {
 import { definitionsOf } from "./json-schema.js";
 import { withFailureLogging } from "./logging-fetch.js";
 import { failChatSpan, recordChatUsage, startChatSpan } from "./otel.js";
+import type { PrefixMismatchBehavior } from "./prefix-mismatch-behavior.js";
 import type { LlmProvider } from "./provider.js";
 import {
   type ChatOptions,
@@ -33,6 +34,7 @@ import {
   type ResponseFormat,
   type StopReason,
   type ToolDefinition,
+  type ToolResultClearing,
   type Usage,
 } from "./types.js";
 
@@ -43,17 +45,41 @@ export interface AnthropicProviderOptions {
    * the default `globalThis.fetch` is.
    */
   fetch?: typeof fetch;
+  /**
+   * Whether the endpoint is Anthropic's own API, which gets the
+   * binding-controls beta. Defaults to true without a base URL or on
+   * `api.anthropic.com`: an Anthropic-compatible third-party endpoint may
+   * reject an unknown beta. A test pointing at llmock, which records from
+   * Anthropic's API, sets it.
+   */
+  firstParty?: boolean;
+  /**
+   * `llm_providers.attrs.prefixMismatchBehavior`, sent as
+   * `thinking.block_binding` to the models that run the prefix check, on a
+   * first-party endpoint. Absent sends no `thinking` parameter and keeps the
+   * account's default.
+   */
+  prefixMismatchBehavior?: PrefixMismatchBehavior;
+}
+
+/** What the adapter's endpoint takes beyond a plain Messages request. */
+interface Endpoint {
+  firstParty: boolean;
+  prefixMismatchBehavior: PrefixMismatchBehavior | undefined;
 }
 
 /**
  * Anthropic SDK adapter.
  *
- * Translates between our canonical types and the Anthropic Messages API.
- * The mapping is nearly 1:1 — Anthropic's format inspired our canonical types.
+ * Translates between our canonical types and the Anthropic Messages API,
+ * through the SDK's beta namespace, which carries `context_management` and
+ * the binding controls. The mapping is nearly 1:1 — Anthropic's format
+ * inspired our canonical types.
  */
 export class AnthropicProvider implements LlmProvider {
   readonly name = "anthropic";
   #client: Anthropic;
+  #endpoint: Endpoint;
 
   constructor(apiKey: string, baseURL?: string, options?: AnthropicProviderOptions) {
     this.#client = new Anthropic({
@@ -61,6 +87,10 @@ export class AnthropicProvider implements LlmProvider {
       ...(baseURL ? { baseURL } : {}),
       fetch: withFailureLogging(options?.fetch ?? globalThis.fetch, logger, this.name),
     });
+    this.#endpoint = {
+      firstParty: options?.firstParty ?? isAnthropicApi(baseURL),
+      prefixMismatchBehavior: options?.prefixMismatchBehavior,
+    };
   }
 
   chatStream(params: ChatParams, options?: ChatOptions): AsyncIterable<ChatStreamFrame> {
@@ -68,7 +98,7 @@ export class AnthropicProvider implements LlmProvider {
       throw new Error("responseFormat and tools are mutually exclusive");
     }
 
-    const anthropicParams = buildCreateParams(params, takesToolPath(params));
+    const anthropicParams = buildCreateParams(params, takesToolPath(params), this.#endpoint);
     const client = this.#client;
     const providerName = this.name;
     const signal = options?.signal;
@@ -77,7 +107,7 @@ export class AnthropicProvider implements LlmProvider {
       const span = startChatSpan(providerName, params.model);
       let completed = false;
       try {
-        const stream = await client.messages.create(
+        const stream = await client.beta.messages.create(
           { ...anthropicParams, stream: true },
           { signal },
         );
@@ -216,16 +246,28 @@ export class AnthropicProvider implements LlmProvider {
     return generateFrames();
   }
 
+  /**
+   * The request's input tokens, after the edits it asks for: the endpoint
+   * applies `context_management` as it does on a message, and runs the same
+   * prefix check, so the count carries the same controls.
+   */
   async countTokens(params: CountTokensParams): Promise<number> {
-    const built = buildCreateParams({ ...params, maxTokens: 1 }, takesToolPath(params));
-    const countParams: Anthropic.MessageCountTokensParams = {
+    const built = buildCreateParams(
+      { ...params, maxTokens: 1 },
+      takesToolPath(params),
+      this.#endpoint,
+    );
+    const countParams: Anthropic.Beta.Messages.MessageCountTokensParams = {
       model: built.model,
       messages: built.messages,
+      ...(built.system && { system: built.system }),
+      ...(built.tools && { tools: built.tools }),
+      ...(built.output_config && { output_config: built.output_config }),
+      ...(built.context_management && { context_management: built.context_management }),
+      ...(built.thinking && { thinking: built.thinking }),
+      ...(built.betas && { betas: built.betas }),
     };
-    if (built.system) countParams.system = built.system;
-    if (built.tools) countParams.tools = built.tools;
-    if (built.output_config) countParams.output_config = built.output_config;
-    const result = await this.#client.messages.countTokens(countParams);
+    const result = await this.#client.beta.messages.countTokens(countParams);
     return result.input_tokens;
   }
 
@@ -296,9 +338,11 @@ export class AnthropicProvider implements LlmProvider {
   async #create(
     params: ChatParams,
     signal: AbortSignal | undefined,
-  ): Promise<{ response: Anthropic.Message; toolPath: boolean }> {
-    const send = (toolPath: boolean): Promise<Anthropic.Message> =>
-      this.#client.messages.create(buildCreateParams(params, toolPath), { signal });
+  ): Promise<{ response: Anthropic.Beta.BetaMessage; toolPath: boolean }> {
+    const send = (toolPath: boolean): Promise<Anthropic.Beta.BetaMessage> =>
+      this.#client.beta.messages.create(buildCreateParams(params, toolPath, this.#endpoint), {
+        signal,
+      });
     const toolPath = takesToolPath(params);
     try {
       return { response: await send(toolPath), toolPath };
@@ -377,6 +421,79 @@ function dropSamplingParams(params: ChatParams): void {
   );
 }
 
+// --- Request controls ---
+
+/** Context editing, which carries `context_management`. */
+const CONTEXT_MANAGEMENT_BETA = "context-management-2025-06-27";
+
+/**
+ * Preserved thinking's binding controls: `input_transformations` on every
+ * response, and `thinking.block_binding`, which is a 400 without it.
+ */
+export const BINDING_CONTROLS_BETA = "thinking-binding-controls-2026-08-01";
+
+/**
+ * The models that run preserved thinking's prefix check, each adaptive by
+ * default. Sonnet 5 accepts `block_binding` but runs no check, and Haiku 4.5
+ * rejects `adaptive`, so a model missing from the list loses only the field.
+ */
+const PREFIX_CHECKED_MODELS = ["claude-opus-5-5", "claude-fable-5-1", "claude-sonnet-5-5"];
+
+function runsPrefixCheck(model: string): boolean {
+  return PREFIX_CHECKED_MODELS.some((id) => model === id || model.startsWith(`${id}-`));
+}
+
+function isAnthropicApi(baseURL: string | undefined): boolean {
+  return baseURL === undefined || URL.parse(baseURL)?.hostname === "api.anthropic.com";
+}
+
+/** The fields and betas every request for `params` carries beyond the Messages request itself. */
+interface RequestControls {
+  betas?: Anthropic.Beta.AnthropicBeta[];
+  context_management?: Anthropic.Beta.BetaContextManagementConfig;
+  thinking?: Anthropic.Beta.BetaThinkingConfigAdaptive;
+}
+
+/**
+ * The edit intent as `clear_tool_uses_20250919`, and the binding controls:
+ * the header on every first-party request, and `block_binding` where the
+ * provider row sets a behaviour and the model runs the check. `block_binding`
+ * goes with `adaptive`, the configuration those models run anyway; never
+ * `between_tools`, which rejects it.
+ */
+function requestControls(params: CountTokensParams, endpoint: Endpoint): RequestControls {
+  const clearing = params.clearToolResults;
+  const behavior = endpoint.firstParty ? endpoint.prefixMismatchBehavior : undefined;
+  const betas = [
+    ...(clearing ? [CONTEXT_MANAGEMENT_BETA] : []),
+    ...(endpoint.firstParty ? [BINDING_CONTROLS_BETA] : []),
+  ];
+  return {
+    ...(betas.length > 0 && { betas }),
+    ...(clearing && { context_management: { edits: [toClearToolUses(clearing)] } }),
+    ...(behavior &&
+      runsPrefixCheck(params.model) && {
+        thinking: { type: "adaptive", block_binding: { prefix_mismatch_behavior: behavior } },
+      }),
+  };
+}
+
+/**
+ * Strategy 1 on Anthropic's server. The client keeps sending every result;
+ * the server replaces each cleared one with a placeholder, and the
+ * preserved-thinking check compares what was sent.
+ */
+function toClearToolUses(
+  clearing: ToolResultClearing,
+): Anthropic.Beta.BetaClearToolUses20250919Edit {
+  return {
+    type: "clear_tool_uses_20250919",
+    trigger: { type: "input_tokens", value: clearing.triggerTokens },
+    keep: { type: "tool_uses", value: clearing.keep },
+    clear_at_least: { type: "input_tokens", value: clearing.clearAtLeastTokens },
+  };
+}
+
 /**
  * The request for `params`. With `toolPath`, a `responseFormat` goes as a
  * synthetic tool rather than as structured outputs.
@@ -384,8 +501,10 @@ function dropSamplingParams(params: ChatParams): void {
 function buildCreateParams(
   params: ChatParams,
   toolPath: boolean,
-): Anthropic.MessageCreateParamsNonStreaming {
+  endpoint: Endpoint,
+): Anthropic.Beta.Messages.MessageCreateParamsNonStreaming {
   dropSamplingParams(params);
+  const controls = requestControls(params, endpoint);
 
   // A structured-output call is one-shot — nothing re-sends its transcript —
   // so it keeps the default markers whatever the intent.
@@ -395,7 +514,7 @@ function buildCreateParams(
   // Tools + system are static per conversation — caching saves 90% on reads.
   // Omit the block when there's no prompt: Anthropic rejects an empty-text
   // content block, and a null-persona sub-agent passes system: "".
-  const systemBlocks: Anthropic.TextBlockParam[] =
+  const systemBlocks: Anthropic.Beta.BetaTextBlockParam[] =
     params.system.trim().length > 0
       ? [{ type: "text", text: params.system, cache_control: marker }]
       : [];
@@ -412,6 +531,7 @@ function buildCreateParams(
         output_config: {
           format: { type: "json_schema", schema: toStructuredOutputSchema(format.schema) },
         },
+        ...controls,
       };
     }
 
@@ -429,6 +549,7 @@ function buildCreateParams(
       system: [...systemBlocks, { type: "text", text: callInstruction(format.name) }],
       messages: params.messages.map(toAnthropicMessage),
       tools: [syntheticTool],
+      ...controls,
     };
   }
 
@@ -441,10 +562,10 @@ function buildCreateParams(
 
   const maxTokens = params.maxTokens ?? DEFAULT_MAX_TOKENS;
 
-  // No `thinking` parameter: each model applies its own default, which is
-  // adaptive thinking on Sonnet 5 and the rest of the 5 series. Explicit
-  // depth control belongs in `output_config.effort`, which nothing needs
-  // yet. Thinking blocks that come back are translated by
+  // No `thinking` parameter beyond `block_binding`'s: each model applies its
+  // own default, which is adaptive thinking on Sonnet 5 and the rest of the 5
+  // series. Explicit depth control belongs in `output_config.effort`, which
+  // nothing needs yet. Thinking blocks that come back are translated by
   // `toAnthropicMessage` / `toCanonicalBlock` either way.
   //
   // With a cache intent, top-level `cache_control` turns on automatic
@@ -460,6 +581,7 @@ function buildCreateParams(
     messages: params.messages.map(toAnthropicMessage),
     ...(tools && { tools }),
     ...(params.cache && { cache_control: marker }),
+    ...controls,
   };
 }
 
@@ -537,7 +659,7 @@ function callInstruction(name: string): string {
  * tokens after the last cache breakpoint; the prompt's total adds back what
  * was read from and written to the cache.
  */
-function fromAnthropicUsage(usage: Anthropic.Usage): Usage {
+function fromAnthropicUsage(usage: Anthropic.Beta.BetaUsage): Usage {
   const cacheRead = usage.cache_read_input_tokens;
   const cacheCreation = usage.cache_creation_input_tokens;
   return {
@@ -550,7 +672,7 @@ function fromAnthropicUsage(usage: Anthropic.Usage): Usage {
 
 // --- To Anthropic format ---
 
-function toAnthropicMessage(msg: Message): Anthropic.MessageParam {
+function toAnthropicMessage(msg: Message): Anthropic.Beta.BetaMessageParam {
   if (typeof msg.content === "string") {
     return { role: msg.role, content: msg.content };
   }
@@ -561,9 +683,7 @@ function toAnthropicMessage(msg: Message): Anthropic.MessageParam {
   };
 }
 
-function toAnthropicBlock(
-  block: ContentBlock,
-): Anthropic.ContentBlockParam | Anthropic.ToolResultBlockParam {
+function toAnthropicBlock(block: ContentBlock): Anthropic.Beta.BetaContentBlockParam {
   switch (block.type) {
     case "text":
       return { type: "text", text: block.text };
@@ -633,7 +753,7 @@ function toAnthropicBlock(
     case "tool_use":
       return { type: "tool_use", id: block.id, name: block.name, input: block.input };
     case "tool_result": {
-      const result: Anthropic.ToolResultBlockParam = {
+      const result: Anthropic.Beta.BetaToolResultBlockParam = {
         type: "tool_result",
         tool_use_id: block.toolUseId,
         content: block.content,
@@ -647,7 +767,7 @@ function toAnthropicBlock(
 }
 
 /** The tool with its schema's definitions, without which its `$ref`s dangle. */
-function toAnthropicTool(tool: ToolDefinition): Anthropic.Tool {
+function toAnthropicTool(tool: ToolDefinition): Anthropic.Beta.BetaTool {
   const { properties, required } = tool.parameters;
   return {
     name: tool.name,
@@ -663,7 +783,7 @@ function toAnthropicTool(tool: ToolDefinition): Anthropic.Tool {
 
 // --- From Anthropic format ---
 
-function fromAnthropicBlock(block: Anthropic.ContentBlock): ContentBlock[] {
+function fromAnthropicBlock(block: Anthropic.Beta.BetaContentBlock): ContentBlock[] {
   switch (block.type) {
     case "text":
       return [{ type: "text", text: block.text }];
@@ -726,7 +846,7 @@ function isTextLikeDocumentMediaType(mt: string): boolean {
  * returned an empty turn", so the loop would answer an unmapped terminal
  * condition with a continuation prompt.
  */
-function fromAnthropicStopReason(reason: Anthropic.StopReason | null): StopReason {
+function fromAnthropicStopReason(reason: Anthropic.Beta.BetaStopReason | null): StopReason {
   switch (reason) {
     case "end_turn":
     case "stop_sequence":
@@ -740,6 +860,11 @@ function fromAnthropicStopReason(reason: Anthropic.StopReason | null): StopReaso
       // A long-running server-tool turn the API paused and expects to be
       // handed back for continuation. We don't drive server tools, so this
       // arrives with content and terminates the turn like a normal stop.
+      return "end_turn";
+    case "compaction":
+      // Server-side compaction paused the turn after writing its summary.
+      // The adapter sends no compaction edit, so this ends the turn like
+      // `pause_turn` should it ever arrive.
       return "end_turn";
     case "tool_use":
       return "tool_use";
