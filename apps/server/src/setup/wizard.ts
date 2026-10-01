@@ -887,7 +887,7 @@ async function promptAddImageModels(
     );
 
     const imageInputChoice = cancelGuard(
-      await p.select({
+      await p.select<"none" | "optional" | "required">({
         message: "Reference-image support?",
         options: [
           { value: "none", label: "None — text-to-image only" },
@@ -916,7 +916,7 @@ async function promptAddImageModels(
       ...(ratios && { aspectRatios: [...ratios] }),
       ...(seed && { seed: true }),
       ...(imageInputChoice !== "none" && {
-        imageInput: imageInputChoice as "required" | "optional",
+        imageInput: imageInputChoice,
       }),
       ...(negativePrompt && { negativePrompt: true }),
     };
