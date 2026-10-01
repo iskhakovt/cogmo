@@ -16,6 +16,7 @@ import {
   type SQL,
   sql,
 } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import * as R from "remeda";
 import { single } from "../../db/helpers.js";
 import type { Transaction } from "../../db/index.js";
@@ -188,14 +189,17 @@ export interface ScheduledTask {
  * row (or worse, per-row group). `null` when either the staging profile
  * was unclassed or the lineage isn't available — pre-feature live
  * retains, migration backfill, or rows whose staging profile was deleted
- * (`profile_id` SET NULL). `skillName` names the staging skill on a
- * `skill` row and is null otherwise.
+ * (`profile_id` SET NULL). `profileId` is the staging profile, whose
+ * `memory`-category rules the drain applies; null where it has none or it
+ * belongs to another user.
+ * `skillName` names the staging skill on a `skill` row and is null otherwise.
  */
 export interface PendingMemory {
   id: string;
   content: string;
   context: string | null;
   source: PendingMemorySource;
+  profileId: string | null;
   profileClass: string | null;
   skillName: string | null;
   createdAt: Date;
@@ -496,6 +500,83 @@ function visibleTo(scope: RuleScope): SQL | undefined {
     scope.userId === null
       ? isNull(steeringRules.userId)
       : or(isNull(steeringRules.userId), eq(steeringRules.userId, scope.userId)),
+  );
+}
+
+/** The user's live instruction rules. */
+function liveInstructionRulesOf(userId: string): SQL | undefined {
+  return and(
+    eq(steeringRules.source, "instruction"),
+    isNull(steeringRules.retractedAt),
+    eq(steeringRules.userId, userId),
+  );
+}
+
+/** What correction extraction reads of a rule. */
+const EXTRACTION_RULE_COLUMNS = {
+  id: steeringRules.id,
+  rule: steeringRules.rule,
+  category: steeringRules.category,
+  active: steeringRules.active,
+  observationCount: steeringRules.observationCount,
+  priority: steeringRules.priority,
+  channelType: steeringRules.channelType,
+};
+
+/** A steering rule as correction extraction reads it. */
+export type ExtractionRule = Pick<
+  typeof steeringRules.$inferSelect,
+  keyof typeof EXTRACTION_RULE_COLUMNS
+>;
+
+/** A live `memory`-category rule, as `getMemoryRules` returns it. */
+export interface MemoryRule {
+  rule: string;
+  /** Null for every profile. */
+  profileId: string | null;
+  /** An instruction rule the user set, which a third-party profile doesn't see. */
+  fromUser: boolean;
+}
+
+/** The rules of `rules` that a staging profile sees; a null profile sees the global ones. */
+export function memoryRulesFor(
+  rules: ReadonlyArray<MemoryRule>,
+  profileId: string | null,
+): ReadonlyArray<MemoryRule> {
+  return rules.filter((r) => r.profileId === null || r.profileId === profileId);
+}
+
+/**
+ * Whether `rules` hold one of the user's own rules that a profile not seeing
+ * the user's instruction rules (`seesUserRules` false) would be bound by
+ * without being shown it.
+ */
+export function bindsUnseenUserRule(
+  rules: ReadonlyArray<MemoryRule>,
+  seesUserRules: boolean,
+): boolean {
+  return !seesUserRules && rules.some((r) => r.fromUser);
+}
+
+/** Which of a user's pending rows a read takes. */
+export interface PendingMemoryFilter {
+  /** Only rows staged by this profile. */
+  stagedBy?: string;
+  /** Only rows of these sources. */
+  sources?: ReadonlyArray<PendingMemorySource>;
+  /** Only these rows. */
+  ids?: ReadonlyArray<string>;
+}
+
+/** A user's pending rows, narrowed by `filter`. */
+function pendingRowsOf(userId: string, filter: PendingMemoryFilter | undefined): SQL | undefined {
+  return and(
+    eq(pendingMemories.userId, userId),
+    filter?.stagedBy === undefined ? undefined : eq(pendingMemories.profileId, filter.stagedBy),
+    filter?.sources === undefined
+      ? undefined
+      : inArray(pendingMemories.source, [...filter.sources]),
+    filter?.ids === undefined ? undefined : inArray(pendingMemories.id, [...filter.ids]),
   );
 }
 
@@ -1473,26 +1554,35 @@ export interface AgentStore {
   ): Promise<{ id: string }>;
 
   /** The unretired learned rules, active and learning, for extraction and consolidation. */
-  getCorrections(
-    tx: Transaction,
-    profileId: string,
-  ): Promise<
-    ReadonlyArray<{
-      id: string;
-      rule: string;
-      category: string;
-      active: boolean;
-      observationCount: number;
-      priority: number;
-      channelType: string | null;
-    }>
-  >;
+  getCorrections(tx: Transaction, profileId: string): Promise<ReadonlyArray<ExtractionRule>>;
 
   /**
-   * Insert a new correction or reinforce an existing one, which promotes it
-   * to active when observationCount reaches 2. Null when `existingRuleId`
-   * names no unretired rule: it was retired or merged since the caller read
-   * it, and nothing is written.
+   * The user's live instruction rules the profile sees, for extraction:
+   * listed apart from `getCorrections` so consolidation never loads them.
+   */
+  getInstructionRules(
+    tx: Transaction,
+    scope: { profileId: string; userId: string },
+  ): Promise<ReadonlyArray<ExtractionRule>>;
+
+  /**
+   * Whether a live instruction rule of the user's with this text (normalized)
+   * covers a rule in `channelType` (null for every channel), seen from
+   * `profileId`'s conversation: the instruction is global or that profile's,
+   * and on every channel or that one. A channel rule doesn't cover another
+   * channel or every channel.
+   */
+  hasInstructionRule(
+    tx: Transaction,
+    params: { userId: string; text: string; profileId: string; channelType: string | null },
+  ): Promise<boolean>;
+
+  /**
+   * Insert a new correction or reinforce an existing one, which promotes a
+   * learned rule to active when observationCount reaches 2; reinforcing an
+   * instruction rule only counts. Null when `existingRuleId` names no
+   * unretired rule: it was retired or merged since the caller read it, and
+   * nothing is written.
    */
   upsertCorrection(
     tx: Transaction,
@@ -1504,6 +1594,31 @@ export interface AgentStore {
       existingRuleId?: string;
     },
   ): Promise<{ id: string; promoted: boolean } | null>;
+
+  /**
+   * Apply a contradiction from `conversationId` to a learned rule still
+   * learning. The first resets its observation count to 0 and records the
+   * conversation (`reset`); one from another conversation retires it and
+   * records that conversation instead (`retired`). A contradiction from the
+   * recorded conversation writes nothing and reports what that conversation
+   * did, so a retried or repeated extraction applies once and counts the
+   * same. Every other retirement clears the record, so one against a rule that
+   * is active, retired otherwise or not learned writes nothing (`unchanged`).
+   */
+  contradictLearningRule(
+    tx: Transaction,
+    params: { id: string; conversationId: string },
+  ): Promise<"reset" | "retired" | "unchanged">;
+
+  /**
+   * The live `memory`-category rules, of every source, that any of
+   * `profileIds` sees: global ones and each profile's own, among instruction
+   * rules only `userId`'s. `memoryRulesFor` picks one profile's out of them.
+   */
+  getMemoryRules(
+    tx: Transaction,
+    scope: { profileIds: ReadonlyArray<string>; userId: string },
+  ): Promise<ReadonlyArray<MemoryRule>>;
 
   /** Count the active learned rules (`correction`, `evolution`) a profile sees: what consolidation merges. */
   countActiveLearnedRules(tx: Transaction, profileId: string): Promise<number>;
@@ -1608,12 +1723,21 @@ export interface AgentStore {
    * `limit` caps the result size — callers running inside an Inngest step
    * pass a bounded value so the row payload never exceeds the run-state
    * size limit. Omit to read every pending row (tests, ad-hoc tooling).
+   * `filter` narrows the rows before the limit applies.
    */
   getPendingMemories(
     tx: Transaction,
     userId: string,
     limit?: number,
+    filter?: PendingMemoryFilter,
   ): Promise<ReadonlyArray<PendingMemory>>;
+
+  /** Count a user's pending rows, `filter` narrowing them as `getPendingMemories` does. */
+  countPendingMemories(
+    tx: Transaction,
+    userId: string,
+    filter?: PendingMemoryFilter,
+  ): Promise<number>;
 
   /** Delete pending rows by id. Used by the Observer drain step after successful retain. */
   deletePendingMemories(tx: Transaction, ids: ReadonlyArray<string>): Promise<void>;
@@ -3405,30 +3529,9 @@ export class DrizzleAgentStore implements AgentStore {
 
   // --- Evolution: correction extraction ---
 
-  async getCorrections(
-    tx: Transaction,
-    profileId: string,
-  ): Promise<
-    ReadonlyArray<{
-      id: string;
-      rule: string;
-      category: string;
-      active: boolean;
-      observationCount: number;
-      priority: number;
-      channelType: string | null;
-    }>
-  > {
+  async getCorrections(tx: Transaction, profileId: string): Promise<ReadonlyArray<ExtractionRule>> {
     return tx
-      .select({
-        id: steeringRules.id,
-        rule: steeringRules.rule,
-        category: steeringRules.category,
-        active: steeringRules.active,
-        observationCount: steeringRules.observationCount,
-        priority: steeringRules.priority,
-        channelType: steeringRules.channelType,
-      })
+      .select(EXTRACTION_RULE_COLUMNS)
       .from(steeringRules)
       .where(
         and(
@@ -3438,6 +3541,116 @@ export class DrizzleAgentStore implements AgentStore {
         ),
       )
       .orderBy(asc(steeringRules.priority), asc(steeringRules.id));
+  }
+
+  async getInstructionRules(
+    tx: Transaction,
+    scope: { profileId: string; userId: string },
+  ): Promise<ReadonlyArray<ExtractionRule>> {
+    return tx
+      .select(EXTRACTION_RULE_COLUMNS)
+      .from(steeringRules)
+      .where(
+        and(
+          liveInstructionRulesOf(scope.userId),
+          or(isNull(steeringRules.profileId), eq(steeringRules.profileId, scope.profileId)),
+        ),
+      )
+      .orderBy(asc(steeringRules.priority), asc(steeringRules.id));
+  }
+
+  async hasInstructionRule(
+    tx: Transaction,
+    params: { userId: string; text: string; profileId: string; channelType: string | null },
+  ): Promise<boolean> {
+    const rows = await tx
+      .select({ id: steeringRules.id })
+      .from(steeringRules)
+      .where(
+        and(
+          liveInstructionRulesOf(params.userId),
+          textMatches(params.text),
+          or(isNull(steeringRules.profileId), eq(steeringRules.profileId, params.profileId)),
+          params.channelType === null
+            ? isNull(steeringRules.channelType)
+            : or(
+                isNull(steeringRules.channelType),
+                eq(steeringRules.channelType, params.channelType),
+              ),
+        ),
+      )
+      .limit(1);
+    return rows.length > 0;
+  }
+
+  async contradictLearningRule(
+    tx: Transaction,
+    params: { id: string; conversationId: string },
+  ): Promise<"reset" | "retired" | "unchanged"> {
+    const learning = and(
+      eq(steeringRules.id, params.id),
+      eq(steeringRules.active, false),
+      isNull(steeringRules.retractedAt),
+      inArray(steeringRules.source, LEARNED_RULE_SOURCES),
+    );
+    const retired = await tx
+      .update(steeringRules)
+      .set({ retractedAt: sql`now()`, contradictedInConversationId: params.conversationId })
+      .where(
+        and(
+          learning,
+          isNotNull(steeringRules.contradictedInConversationId),
+          ne(steeringRules.contradictedInConversationId, params.conversationId),
+        ),
+      )
+      .returning({ id: steeringRules.id });
+    if (retired.length > 0) return "retired";
+    const reset = await tx
+      .update(steeringRules)
+      .set({ observationCount: 0, contradictedInConversationId: params.conversationId })
+      .where(and(learning, isNull(steeringRules.contradictedInConversationId)))
+      .returning({ id: steeringRules.id });
+    if (reset.length > 0) return "reset";
+    const [applied] = await tx
+      .select({ active: steeringRules.active, retractedAt: steeringRules.retractedAt })
+      .from(steeringRules)
+      .where(
+        and(
+          eq(steeringRules.id, params.id),
+          eq(steeringRules.contradictedInConversationId, params.conversationId),
+          inArray(steeringRules.source, LEARNED_RULE_SOURCES),
+        ),
+      );
+    if (applied === undefined || applied.active) return "unchanged";
+    return applied.retractedAt === null ? "reset" : "retired";
+  }
+
+  async getMemoryRules(
+    tx: Transaction,
+    scope: { profileIds: ReadonlyArray<string>; userId: string },
+  ): Promise<ReadonlyArray<MemoryRule>> {
+    const rows = await tx
+      .select({
+        rule: steeringRules.rule,
+        profileId: steeringRules.profileId,
+        userId: steeringRules.userId,
+      })
+      .from(steeringRules)
+      .where(
+        and(
+          eq(steeringRules.active, true),
+          eq(steeringRules.category, "memory"),
+          scope.profileIds.length === 0
+            ? isNull(steeringRules.profileId)
+            : or(
+                isNull(steeringRules.profileId),
+                inArray(steeringRules.profileId, [...scope.profileIds]),
+              ),
+          or(isNull(steeringRules.userId), eq(steeringRules.userId, scope.userId)),
+        ),
+      )
+      .orderBy(...RULE_ORDER);
+    return rows.map((r) => ({ rule: r.rule, profileId: r.profileId, fromUser: r.userId !== null }));
   }
 
   async upsertCorrection(
@@ -3460,12 +3673,15 @@ export class DrizzleAgentStore implements AgentStore {
         .where(and(eq(steeringRules.id, params.existingRuleId), isNull(steeringRules.retractedAt)))
         .returning({
           id: steeringRules.id,
+          source: steeringRules.source,
           active: steeringRules.active,
           observationCount: steeringRules.observationCount,
         });
       const row = rows[0];
       if (row === undefined) return null;
-      return { id: row.id, promoted: row.observationCount === 2 && row.active };
+      // An instruction rule is live from its set: a reinforcement never promotes it.
+      const promoted = row.source !== "instruction" && row.observationCount === 2 && row.active;
+      return { id: row.id, promoted };
     }
 
     const row = single(
@@ -3585,7 +3801,8 @@ export class DrizzleAgentStore implements AgentStore {
     }
     await tx
       .update(steeringRules)
-      .set({ active: false, retractedAt: sql`now()` })
+      // Not a contradiction's retirement: no conversation recorded it.
+      .set({ active: false, retractedAt: sql`now()`, contradictedInConversationId: null })
       .where(
         and(
           inArray(steeringRules.source, LEARNED_RULE_SOURCES),
@@ -3604,7 +3821,8 @@ export class DrizzleAgentStore implements AgentStore {
     const scope = { profileId: params.profileId, userId: params.userId };
     const retired = await tx
       .update(steeringRules)
-      .set({ active: false, retractedAt: sql`now()` })
+      // Not a contradiction's retirement: no conversation recorded it.
+      .set({ active: false, retractedAt: sql`now()`, contradictedInConversationId: null })
       .where(
         and(
           textMatches(params.text),
@@ -3722,11 +3940,25 @@ export class DrizzleAgentStore implements AgentStore {
     }
   }
 
+  async countPendingMemories(
+    tx: Transaction,
+    userId: string,
+    filter?: PendingMemoryFilter,
+  ): Promise<number> {
+    const rows = await tx
+      .select({ value: count() })
+      .from(pendingMemories)
+      .where(pendingRowsOf(userId, filter));
+    return rows[0]?.value ?? 0;
+  }
+
   async getPendingMemories(
     tx: Transaction,
     userId: string,
     limit?: number,
+    filter?: PendingMemoryFilter,
   ): Promise<ReadonlyArray<PendingMemory>> {
+    const stagingProfiles = alias(profiles, "staging_profiles");
     // LEFT JOIN onto profiles so we surface the staging profile's CURRENT
     // class on each row at drain time. LEFT (not INNER) so rows whose
     // profile was deleted (`profile_id` SET NULL) or never had one
@@ -3740,11 +3972,22 @@ export class DrizzleAgentStore implements AgentStore {
         content: pendingMemories.content,
         context: pendingMemories.context,
         source: pendingMemories.source,
+        profileId: stagingProfiles.id,
         profileClass: profiles.profileClass,
         skillName: pendingMemories.skillName,
         createdAt: pendingMemories.createdAt,
       })
       .from(pendingMemories)
+      // The staging profile whose memory rules the drain applies: the user's
+      // own or an org profile (`user_id` NULL), never another user's. An org
+      // profile has no class, so the class join below keeps to the user's own.
+      .leftJoin(
+        stagingProfiles,
+        and(
+          eq(stagingProfiles.id, pendingMemories.profileId),
+          or(isNull(stagingProfiles.userId), eq(stagingProfiles.userId, pendingMemories.userId)),
+        ),
+      )
       // Defence in depth on the join: require the joined profile to
       // belong to the SAME user as the pending row. The FK on
       // `pending_memories.profile_id → profiles.id` doesn't enforce
@@ -3762,7 +4005,7 @@ export class DrizzleAgentStore implements AgentStore {
           eq(profiles.userId, pendingMemories.userId),
         ),
       )
-      .where(eq(pendingMemories.userId, userId))
+      .where(pendingRowsOf(userId, filter))
       // Secondary sort by id breaks createdAt ties — bulk inserts share a
       // timestamp, but UUIDv7 ids are time-ordered, so the tiebreak preserves
       // insertion order for callers that care (drain FIFO, tests).

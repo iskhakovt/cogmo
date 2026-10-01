@@ -1,0 +1,11 @@
+The Observer applies explicit instruction rules (Explicit instructions step 4).
+
+- **Correction extraction** lists the user's instruction rules as set by the user and treats what a successful `rule_set` / `rule_remove` call recorded as handled; a new correction is dropped when a live instruction rule visible to the conversation covers its scope (global or the conversation's profile; every channel or the correction's). Reinforcing an instruction rule never promotes it. A learning rule the user contradicts has its observation count reset (`corrections.reset`) and is retired only when another conversation contradicts it again (`corrections.retired`); migration 0068 adds `steering_rules.contradicted_in_conversation_id` to tell the two apart, so a re-read transcript can't retire a rule on its own; a contradicted live rule is only logged, and one outside the active channels counts in `corrections.outOfScopeContradictionsSkipped`.
+- **Memory extraction** skips recorded instructions and lists the `memory`-category rules visible to the staging profile. The prompt defines `memory` as what the assistant remembers, tracks or must not store.
+- **The drain** asks the classifier whether a rule forbids each live or skill row; a withheld row is deleted without a retain, logged with its id and the rules that applied, and counted in `drained.withheld`.
+- **Third-party profiles** never see the user's rules or other profiles' facts. Their extraction model gets no user rules, and where a user's `memory` rule binds the fire, memory extraction is skipped (`memories.skippedForUnseenRules`). Their drain classifies only rows their own profile staged; every other row, migration rows included, waits for a first-party fire (`drained.deferredToFirstParty`). The drain batch filters before its limit, so deferred rows never hold up the queue.
+- `/reflect`, `/learned` and the web UI show reset, retired, withheld, skipped and deferred counts.
+
+The learning-loop integration suite is re-recorded with these prompts and adds a scenario where a `memory` rule withholds a health fact and keeps an unrelated one, and a third-party fire defers both.
+
+The rule tools themselves come in step 3. See design/evolution.md → Explicit Instructions.

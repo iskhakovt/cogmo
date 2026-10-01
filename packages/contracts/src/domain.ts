@@ -105,14 +105,29 @@ export interface EvolutionEventPayload {
     extracted: number;
     reinforced: number;
     contradictions: number;
+    /** Rules still learning that a second contradiction, from another conversation, retired. */
+    retired: number;
+    /** Rules still learning whose count a first contradiction reset. */
+    reset: number;
     promoted: number;
     outOfScopeReinforcementsSkipped: number;
+    outOfScopeContradictionsSkipped: number;
     unknownRuleReinforcementsSkipped: number;
     consolidationNeeded: boolean;
   };
   consolidation: { mergedGroups: number; rulesRemoved: number } | null;
-  memories: { extracted: number; byNetwork: Record<string, number> };
-  drained: { drained: number; byNetwork: Record<string, number> };
+  /** `skippedForUnseenRules`: 1 when a user's memory rule bound a profile that can't see it. */
+  memories: { extracted: number; byNetwork: Record<string, number>; skippedForUnseenRules: number };
+  /**
+   * `withheld`: staged rows a `memory`-category rule forbade, deleted unretained.
+   * `deferredToFirstParty`: rows a third-party fire left pending for a first-party one.
+   */
+  drained: {
+    drained: number;
+    byNetwork: Record<string, number>;
+    withheld: number;
+    deferredToFirstParty: number;
+  };
   messageCount: number;
   profileId: string;
   durationMs?: number | undefined;

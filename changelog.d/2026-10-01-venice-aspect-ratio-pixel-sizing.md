@@ -1,0 +1,8 @@
+Venice fixed-dimension image models now take aspect ratios. Venice sizes each image model one of two ways: a model whose `/models?type=image` entry lists `aspectRatios` takes an `aspect_ratio` token, and a model that lists none takes `width`/`height` in multiples of its `widthHeightDivisor`. `VeniceImageProvider` reads that listing when a call carries an aspect ratio and sends whichever the model takes.
+
+- **Pixel sizing.** `venicePixelSize` keeps the area of Venice's default 1024×1024, reshapes it to the ratio, caps the long side at 1280 (the endpoint's documented maximum for `width` and `height`) and rounds each side to the model's divisor. For example, `16:9` becomes 1280×720, `4:3` becomes 1184×888 at divisor 8, and `1:1` stays 1024×1024.
+- **Listing.** It is read only for a call with a ratio, cached per provider for an hour, and shared by concurrent calls. A model the listing doesn't describe fails the call before anything is generated (`provider_error`), telling the LLM to call again without a ratio. A failed read isn't cached and also fails the call before generating: a 4xx other than 429 is terminal (`provider_error`), and anything else is left to the handler's retry.
+- **Operator side.** Nothing new to configure beyond the ratios themselves. Declaring `capabilities.aspectRatios` on a fixed-size Venice row (`cogmo image-model add … --ratios`, or the wizard) lets the LLM pick them, and the adapter does the rest.
+- **Tests.** The Venice record/replay mock serves the listing from `test/fixtures/venice/venice-models-image.json`, and the recorded integration test asserts its 1:1 request on `venice-sd35` (divisor 16) travels as 1024×1024.
+
+See design/image-generation.md → Venice.ai (native adapter) → Aspect ratio → sizing fields.

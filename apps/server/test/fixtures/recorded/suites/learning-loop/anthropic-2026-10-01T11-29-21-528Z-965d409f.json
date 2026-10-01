@@ -2,7 +2,7 @@
   "fixtures": [
     {
       "match": {
-        "userMessage": "Fact: T had dinner at Taberna da Rua das Flores in Lisbon and said the bacalhau there was the best they've ever had.\nContext: Casual conversation about Lisbon food, Sept 2026",
+        "userMessage": "Fact: T had dinner at Taberna da Rua das Flores in Lisbon and said the bacalhau was the best they've ever had.\nContext: T just moved to Lisbon; chatting about Portuguese food",
         "model": "claude-sonnet-5",
         "turnIndex": 0,
         "hasToolResult": false
@@ -11,7 +11,7 @@
         "content": "{\"network\":\"bank\",\"compartment\":\"personal\",\"trust\":\"first-party\"}"
       },
       "metadata": {
-        "systemHash": "cc7ea80c"
+        "systemHash": "6d194ceb"
       }
     }
   ]

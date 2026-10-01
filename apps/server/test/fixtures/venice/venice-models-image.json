@@ -1,0 +1,55 @@
+{
+  "status": 200,
+  "headers": {
+    "Content-Type": "application/json; charset=utf-8"
+  },
+  "body": {
+    "data": [
+      {
+        "created": 1743099022,
+        "id": "venice-sd35",
+        "model_spec": {
+          "pricing": {
+            "generation": {
+              "usd": 0.01,
+              "diem": 0.01
+            },
+            "upscale": {
+              "2x": {
+                "usd": 0.02,
+                "diem": 0.02
+              },
+              "4x": {
+                "usd": 0.08,
+                "diem": 0.08
+              }
+            }
+          },
+          "constraints": {
+            "promptCharacterLimit": 1500,
+            "steps": {
+              "default": 25,
+              "max": 30
+            },
+            "widthHeightDivisor": 16
+          },
+          "supportsWebSearch": false,
+          "supportsOptimizePromptThinking": false,
+          "supportsStyleReferences": false,
+          "name": "Venice SD35",
+          "modelSource": "https://huggingface.co/stabilityai/stable-diffusion-3.5-large",
+          "offline": false,
+          "privacy": "private",
+          "traits": [
+            "eliza-default"
+          ]
+        },
+        "object": "model",
+        "owned_by": "venice.ai",
+        "type": "image"
+      }
+    ],
+    "object": "list",
+    "type": "image"
+  }
+}

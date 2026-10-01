@@ -8,31 +8,29 @@
         "hasToolResult": false
       },
       "response": {
-        "content": "Understood — I'll stick to plain sentences from here on."
+        "content": "Understood — I'll stick to plain prose from here on."
       },
       "recordedTimings": {
-        "ttftMs": 756,
+        "ttftMs": 788,
         "interChunkDelaysMs": [
+          1,
+          823,
           0,
-          1692,
+          0,
           0,
           1,
           0,
           0,
           0,
-          85,
-          2,
-          3,
-          2,
-          1,
-          2,
+          4,
+          0,
           0
         ],
-        "totalDurationMs": 2544
+        "totalDurationMs": 1617
       },
       "metadata": {
-        "systemHash": "9f41335d",
-        "toolsHash": "837ba743"
+        "systemHash": "d68ba1da",
+        "toolsHash": "80e92520"
       }
     }
   ]

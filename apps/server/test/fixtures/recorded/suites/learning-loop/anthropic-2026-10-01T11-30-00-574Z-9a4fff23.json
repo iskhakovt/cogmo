@@ -1,0 +1,37 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "<turn_context>\nCurrent time: [NOW]\n\nReply modality: text\n</turn_context>\n\nWhat's a good name for a cat?",
+        "model": "claude-sonnet-5",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "content": "Depends on the vibe you're going for! A few fun options:\n\n- **Classic/elegant**: Luna, Oliver, Jasper, Willow\n- **Playful**: Biscuit, Noodle, Waffles, Pancake\n- **Sassy/bold**: Loki, Vesper, Phantom, Bandit\n- **Simple & timeless**: Milo, Chloe, Felix, Nala\n\nDo you have a specific cat in mind — like its color, personality, or breed? I can tailor suggestions."
+      },
+      "recordedTimings": {
+        "ttftMs": 1573,
+        "interChunkDelaysMs": [
+          0,
+          580,
+          0,
+          0,
+          1,
+          0,
+          1,
+          537,
+          545,
+          347,
+          1,
+          18,
+          1
+        ],
+        "totalDurationMs": 3604
+      },
+      "metadata": {
+        "systemHash": "7ce6da71"
+      }
+    }
+  ]
+}

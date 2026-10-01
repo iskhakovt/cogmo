@@ -219,8 +219,8 @@ describe("buildExtractionPrompt", () => {
   it("includes existing rules when provided, each under its label", () => {
     const prompt = buildExtractionPrompt(
       new Map([
-        ["R1", { rule: "Be concise", category: "style", channelType: null }],
-        ["R2", { rule: "Use tables", category: "style", channelType: null }],
+        ["R1", { rule: "Be concise", category: "style", channelType: null, setByUser: false }],
+        ["R2", { rule: "Use tables", category: "style", channelType: null, setByUser: false }],
       ]),
       [],
     );
@@ -233,8 +233,16 @@ describe("buildExtractionPrompt", () => {
   it("renders channel scope alongside each existing rule", () => {
     const prompt = buildExtractionPrompt(
       new Map([
-        ["R1", { rule: "Be concise", category: "style", channelType: null }],
-        ["R2", { rule: "No long voice notes", category: "style", channelType: "telegram" }],
+        ["R1", { rule: "Be concise", category: "style", channelType: null, setByUser: false }],
+        [
+          "R2",
+          {
+            rule: "No long voice notes",
+            category: "style",
+            channelType: "telegram",
+            setByUser: false,
+          },
+        ],
       ]),
       ["telegram"],
     );

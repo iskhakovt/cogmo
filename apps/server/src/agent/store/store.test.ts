@@ -3506,6 +3506,8 @@ describe("DrizzleAgentStore", () => {
       const legacy = rows.find((r) => r.content === "wife's birthday is March 15");
       expect(intimate?.profileClass).toBe("intimate");
       expect(legacy?.profileClass).toBeNull();
+      expect(intimate?.profileId).toBe(profile.id);
+      expect(legacy?.profileId).toBeNull();
     });
 
     it("getPendingMemories scopes the profile JOIN by user_id — no cross-user class contamination", async () => {
@@ -3545,6 +3547,78 @@ describe("DrizzleAgentStore", () => {
       // Class MUST NOT leak across the user boundary even though the
       // profile_id points at a real (other-user) profile with a class.
       expect(rows[0]?.profileClass).toBeNull();
+      // Nor does the profile, whose memory rules the drain would apply.
+      expect(rows[0]?.profileId).toBeNull();
+    });
+
+    it("getPendingMemories filters before its limit, so excluded rows never fill a batch", async () => {
+      const userId = await seedUser();
+      const mk = (name: string) =>
+        tx((trx) =>
+          store.createProfile(trx, { userId, name, basePrompt: "p", model: "m", toolSet: [] }),
+        );
+      const own = await mk("third-party");
+      const other = await mk("main");
+      for (let i = 0; i < 101; i++) {
+        await tx((trx) =>
+          store.stagePendingMemory(trx, {
+            userId,
+            profileId: other.id,
+            content: `first-party fact ${i}`,
+            source: "live_retain",
+          }),
+        );
+      }
+      await tx((trx) =>
+        store.stagePendingMemory(trx, {
+          userId,
+          profileId: own.id,
+          content: "staged by the third-party profile",
+          source: "live_retain",
+        }),
+      );
+      const filter = { stagedBy: own.id };
+
+      const batch = await tx((trx) => store.getPendingMemories(trx, userId, 100, filter));
+      const unfiltered = await tx((trx) => store.getPendingMemories(trx, userId, 100));
+
+      expect(batch.map((r) => r.content)).toEqual(["staged by the third-party profile"]);
+      expect(unfiltered.map((r) => r.profileId)).not.toContain(own.id);
+      expect(await tx((trx) => store.countPendingMemories(trx, userId))).toBe(102);
+      expect(await tx((trx) => store.countPendingMemories(trx, userId, filter))).toBe(1);
+      expect(
+        await tx((trx) => store.countPendingMemories(trx, userId, { sources: ["migration"] })),
+      ).toBe(0);
+      const [first] = unfiltered;
+      const byId = await tx((trx) =>
+        store.getPendingMemories(trx, userId, undefined, { ids: [expectDefined(first, "row").id] }),
+      );
+      expect(byId).toHaveLength(1);
+    });
+
+    it("getPendingMemories surfaces an org staging profile, which has no class", async () => {
+      const userId = await seedUser();
+      const org = await tx((trx) =>
+        store.createProfile(trx, {
+          userId: null,
+          name: "org",
+          basePrompt: "p",
+          model: "m",
+          toolSet: [],
+        }),
+      );
+      await tx((trx) =>
+        store.stagePendingMemory(trx, {
+          userId,
+          profileId: org.id,
+          content: "staged by the org profile",
+          source: "live_retain",
+        }),
+      );
+
+      const [row] = await tx((trx) => store.getPendingMemories(trx, userId));
+      expect(row?.profileId).toBe(org.id);
+      expect(row?.profileClass).toBeNull();
     });
 
     it("getPendingMemories surfaces the staging profile's CURRENT class — re-flows on reassignment", async () => {
@@ -4265,18 +4339,51 @@ describe("DrizzleAgentStore", () => {
           extracted: 1,
           reinforced: 2,
           contradictions: 0,
+          retired: 0,
+          reset: 0,
           promoted: 1,
           outOfScopeReinforcementsSkipped: 0,
+          outOfScopeContradictionsSkipped: 0,
           unknownRuleReinforcementsSkipped: 0,
           consolidationNeeded: false,
         },
         consolidation: null,
-        memories: { extracted: 3, byNetwork: { world: 1, bank: 2 } },
-        drained: { drained: 0, byNetwork: {} },
+        memories: { extracted: 3, byNetwork: { world: 1, bank: 2 }, skippedForUnseenRules: 0 },
+        drained: { drained: 0, byNetwork: {}, withheld: 0, deferredToFirstParty: 0 },
         messageCount: 12,
         profileId: "11111111-1111-7111-8111-111111111111",
       };
     }
+
+    it("reads a row without retirement, withholding or deferral counts as 0 of each", async () => {
+      const { userId, conversationId } = await seedConversation();
+      const {
+        retired: _retired,
+        reset: _reset,
+        outOfScopeContradictionsSkipped: _outOfScope,
+        ...corrections
+      } = samplePayload().corrections;
+      const { skippedForUnseenRules: _skipped, ...memories } = samplePayload().memories;
+      const {
+        withheld: _withheld,
+        deferredToFirstParty: _deferred,
+        ...drained
+      } = samplePayload().drained;
+      const payload = { ...samplePayload(), corrections, memories, drained };
+      await db.execute(sql`
+        INSERT INTO evolution_events (conversation_id, user_id, triggered_by, payload)
+        VALUES (${conversationId}, ${userId}, 'idle', ${JSON.stringify(payload)}::jsonb)
+      `);
+
+      const [row] = await tx((trx) => store.listEvolutionEvents(trx, userId));
+      const read = expectDefined(row, "older row").payload;
+      expect(read.corrections.retired).toBe(0);
+      expect(read.corrections.reset).toBe(0);
+      expect(read.corrections.outOfScopeContradictionsSkipped).toBe(0);
+      expect(read.memories.skippedForUnseenRules).toBe(0);
+      expect(read.drained.withheld).toBe(0);
+      expect(read.drained.deferredToFirstParty).toBe(0);
+    });
 
     it("records and lists events newest-first per user", async () => {
       const { userId, conversationId } = await seedConversation();
