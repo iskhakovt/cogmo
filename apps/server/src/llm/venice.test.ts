@@ -1,7 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { IMAGE_ALLOWED_ASPECT_RATIOS } from "../agent/store/schema.js";
+import { expectDefined } from "../test/assertions.js";
 import { AbortError } from "../util/with-retry.js";
 import { ImageGenerationFailedError } from "./image-failure.js";
-import { VeniceImageProvider } from "./venice.js";
+import { VENICE_MAX_DIMENSION, VeniceImageProvider, venicePixelSize } from "./venice.js";
 
 /**
  * Unit coverage for `VeniceImageProvider`:
@@ -21,6 +23,75 @@ function mockFetch(handler: (url: string, init: RequestInit) => Response | Promi
 
 const ONE_PX_PNG_BASE64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+
+const BASE_URL = "https://api.venice.ai/api/v1";
+const LISTING_PATH = "/models?type=image";
+
+/** A `/models?type=image` entry, trimmed to the fields the adapter reads plus a neighbour. */
+function listingEntry(id: string, constraints: Record<string, unknown>) {
+  return {
+    id,
+    object: "model",
+    type: "image",
+    model_spec: { constraints: { promptCharacterLimit: 1500, ...constraints }, traits: [] },
+  };
+}
+
+/**
+ * The listing's shape as Venice serves it: pixel-sized models list a
+ * `widthHeightDivisor` and no `aspectRatios`; aspect-ratio models list both.
+ */
+const LISTING = {
+  object: "list",
+  type: "image",
+  data: [
+    listingEntry("chroma", { widthHeightDivisor: 8 }),
+    listingEntry("venice-sd35", { widthHeightDivisor: 16 }),
+    listingEntry("qwen-image", {
+      aspectRatios: ["1:1", "3:2", "16:9", "21:9", "9:16", "2:3", "3:4", "4:5"],
+      defaultAspectRatio: "1:1",
+      widthHeightDivisor: 1,
+    }),
+    // No divisor: the entry doesn't parse, so the model counts as undescribed.
+    listingEntry("odd-model", {}),
+  ],
+};
+
+interface Captured {
+  listingCalls: Array<{ url: string; init: RequestInit }>;
+  generateBodies: Array<Record<string, unknown>>;
+}
+
+/**
+ * A Venice stand-in routing the models listing and `/image/generate` apart.
+ * `listing` answers each listing read in turn; the last answer repeats.
+ */
+function veniceFetch(listing: ReadonlyArray<() => Response> = [() => jsonResponse(LISTING)]): {
+  fetchFn: typeof fetch;
+  captured: Captured;
+} {
+  const captured: Captured = { listingCalls: [], generateBodies: [] };
+  const fetchFn = mockFetch((url, init) => {
+    if (url.endsWith(LISTING_PATH)) {
+      const answer = listing[Math.min(captured.listingCalls.length, listing.length - 1)];
+      captured.listingCalls.push({ url, init });
+      if (answer === undefined) throw new Error("veniceFetch: no listing answer configured");
+      return answer();
+    }
+    captured.generateBodies.push(JSON.parse(init.body as string) as Record<string, unknown>);
+    return jsonResponse({ images: [ONE_PX_PNG_BASE64] });
+  });
+  return { fetchFn, captured };
+}
+
+function provider(fetchFn: typeof fetch): VeniceImageProvider {
+  return new VeniceImageProvider({
+    apiKey: "sk-venice",
+    baseUrl: BASE_URL,
+    defaults: {},
+    fetch: fetchFn,
+  });
+}
 
 function jsonResponse(
   body: object,
@@ -106,7 +177,8 @@ describe("VeniceImageProvider.generate", () => {
 
   it("forwards per-call negativePrompt, aspectRatio, seed when supplied", async () => {
     let capturedBody: Record<string, unknown> = {};
-    const fetchFn = mockFetch((_url, init) => {
+    const fetchFn = mockFetch((url, init) => {
+      if (url.endsWith(LISTING_PATH)) return jsonResponse(LISTING);
       capturedBody = JSON.parse(init.body as string) as Record<string, unknown>;
       return jsonResponse({ images: [ONE_PX_PNG_BASE64] });
     });
@@ -119,7 +191,7 @@ describe("VeniceImageProvider.generate", () => {
     });
 
     await provider.generate({
-      model: "m",
+      model: "qwen-image",
       prompt: "p",
       negativePrompt: "blurry, extra fingers",
       aspectRatio: "16:9",
@@ -272,5 +344,253 @@ describe("VeniceImageProvider.generate", () => {
     });
 
     await expect(provider.generate({ model: "m", prompt: "p" })).rejects.toThrow(/no image data/);
+  });
+});
+
+describe("venicePixelSize", () => {
+  it.each([
+    ["1:1", 8, { width: 1024, height: 1024 }],
+    ["1:1", 16, { width: 1024, height: 1024 }],
+    ["16:9", 8, { width: 1280, height: 720 }],
+    ["9:16", 8, { width: 720, height: 1280 }],
+    ["4:3", 8, { width: 1184, height: 888 }],
+    ["3:4", 8, { width: 888, height: 1184 }],
+    ["4:3", 16, { width: 1184, height: 880 }],
+    ["21:9", 8, { width: 1280, height: 552 }],
+    ["9:21", 8, { width: 552, height: 1280 }],
+    ["21:9", 16, { width: 1280, height: 544 }],
+  ])("sizes %s at divisor %d as %o", (ratio, divisor, expected) => {
+    expect(venicePixelSize(ratio, divisor)).toEqual(expected);
+  });
+
+  // Every ratio the catalog can declare, at the divisors Venice publishes
+  // (1, 8, 16) and a coarser one.
+  const cases = IMAGE_ALLOWED_ASPECT_RATIOS.flatMap((ratio) =>
+    [1, 8, 16, 64].map((divisor) => [ratio, divisor] as const),
+  );
+
+  it.each(cases)("sizes %s at divisor %d inside Venice's limits", (ratio, divisor) => {
+    const { width, height } = venicePixelSize(ratio, divisor);
+    for (const side of [width, height]) {
+      expect(Number.isInteger(side)).toBe(true);
+      expect(side % divisor).toBe(0);
+      expect(side).toBeGreaterThanOrEqual(divisor);
+      expect(side).toBeLessThanOrEqual(VENICE_MAX_DIMENSION);
+    }
+    const [rw = 0, rh = 0] = ratio.split(":").map(Number);
+    // The long side sits at the cap, or the area stays near 1024×1024.
+    const atCap = Math.max(width, height) === VENICE_MAX_DIMENSION;
+    expect(atCap || Math.abs(width * height - 1024 * 1024) <= 1024 * 1024 * 0.15).toBe(true);
+    // For every catalog ratio no side reaches the clamp, so rounding — at
+    // most half a divisor per side — is all that moves it off the exact
+    // ratio. An extreme ratio can hit the clamp ("never rounds a side to
+    // zero" below), where this bound doesn't hold.
+    expect(Math.abs(width * rh - height * rw)).toBeLessThanOrEqual((divisor * (rw + rh)) / 2);
+  });
+
+  it("rounds down at the ceiling when the divisor doesn't divide 1280", () => {
+    // 1280 / 3 = 426.7 rounds up to 427 × 3 = 1281, past Venice's cap.
+    expect(venicePixelSize("16:9", 3)).toEqual({ width: 1278, height: 720 });
+  });
+
+  it("never rounds a side to zero", () => {
+    expect(venicePixelSize("1000:1", 8)).toEqual({ width: 1280, height: 8 });
+  });
+
+  it.each(["wide", "16:0", "0:9", "16/9", ""])("throws on the malformed ratio %j", (ratio) => {
+    expect(() => venicePixelSize(ratio, 8)).toThrow(/not a W:H aspect ratio/);
+  });
+
+  it.each([0, -8, 2.5, VENICE_MAX_DIMENSION + 1])("throws on the divisor %d", (divisor) => {
+    expect(() => venicePixelSize("1:1", divisor)).toThrow(/divisor/);
+  });
+});
+
+describe("VeniceImageProvider.generate — aspect ratio sizing", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it("sends width/height for a model sized in pixels, rounded to its divisor", async () => {
+    const { fetchFn, captured } = veniceFetch();
+
+    await provider(fetchFn).generate({ model: "chroma", prompt: "p", aspectRatio: "9:16" });
+
+    expect(captured.generateBodies).toHaveLength(1);
+    const body = captured.generateBodies[0];
+    expect(body).toMatchObject({ model: "chroma", width: 720, height: 1280 });
+    expect(body).not.toHaveProperty("aspect_ratio");
+  });
+
+  it("uses each model's own divisor", async () => {
+    const { fetchFn, captured } = veniceFetch();
+
+    await provider(fetchFn).generate({ model: "venice-sd35", prompt: "p", aspectRatio: "4:3" });
+
+    expect(captured.generateBodies[0]).toMatchObject({ width: 1184, height: 880 });
+  });
+
+  it("sends aspect_ratio, not width/height, to a model whose listing declares ratios", async () => {
+    const { fetchFn, captured } = veniceFetch();
+
+    await provider(fetchFn).generate({ model: "qwen-image", prompt: "p", aspectRatio: "16:9" });
+
+    const body = captured.generateBodies[0];
+    expect(body).toMatchObject({ aspect_ratio: "16:9" });
+    expect(body).not.toHaveProperty("width");
+    expect(body).not.toHaveProperty("height");
+  });
+
+  it.each([
+    ["missing from the listing", "not-listed"],
+    ["whose entry doesn't parse", "odd-model"],
+  ])("fails terminally for a model %s, without generating", async (_label, model) => {
+    const { fetchFn, captured } = veniceFetch();
+
+    const promise = provider(fetchFn).generate({ model, prompt: "p", aspectRatio: "16:9" });
+
+    await expect(promise).rejects.toBeInstanceOf(ImageGenerationFailedError);
+    await expect(promise).rejects.toMatchObject({
+      failure: { kind: "provider_error", provider: "venice" },
+    });
+    await expect(promise).rejects.toThrow(
+      `no usable entry for ${model}, so aspect ratio 16:9 can't be sized for it. Call again without aspectRatio.`,
+    );
+    expect(captured.generateBodies).toHaveLength(0);
+  });
+
+  it("still generates for an undescribed model when the call carries no ratio", async () => {
+    const { fetchFn, captured } = veniceFetch();
+
+    await provider(fetchFn).generate({ model: "not-listed", prompt: "p" });
+
+    expect(captured.listingCalls).toHaveLength(0);
+    expect(captured.generateBodies).toHaveLength(1);
+  });
+
+  it("reads the listing from {baseUrl}/models?type=image with Bearer auth", async () => {
+    const { fetchFn, captured } = veniceFetch();
+
+    await provider(fetchFn).generate({ model: "chroma", prompt: "p", aspectRatio: "1:1" });
+
+    expect(captured.listingCalls).toHaveLength(1);
+    const call = expectDefined(captured.listingCalls[0], "listing call");
+    expect(call.url).toBe(`${BASE_URL}/models?type=image`);
+    expect(call.init.method).toBe("GET");
+    expect(call.init.headers).toMatchObject({ Authorization: "Bearer sk-venice" });
+  });
+
+  it("doesn't read the listing for a call without an aspect ratio", async () => {
+    const { fetchFn, captured } = veniceFetch();
+
+    await provider(fetchFn).generate({ model: "chroma", prompt: "p" });
+
+    expect(captured.listingCalls).toHaveLength(0);
+    const body = captured.generateBodies[0];
+    expect(body).not.toHaveProperty("aspect_ratio");
+    expect(body).not.toHaveProperty("width");
+    expect(body).not.toHaveProperty("height");
+  });
+
+  it("reads the listing once for sequential and concurrent calls within the hour", async () => {
+    const { fetchFn, captured } = veniceFetch();
+    const venice = provider(fetchFn);
+
+    await Promise.all([
+      venice.generate({ model: "chroma", prompt: "a", aspectRatio: "16:9" }),
+      venice.generate({ model: "qwen-image", prompt: "b", aspectRatio: "16:9" }),
+    ]);
+    await venice.generate({ model: "venice-sd35", prompt: "c", aspectRatio: "1:1" });
+
+    expect(captured.listingCalls).toHaveLength(1);
+    expect(captured.generateBodies).toHaveLength(3);
+  });
+
+  it("reads the listing again once an hour has passed", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-01T12:00:00Z"));
+    const pixelsThenRatios = {
+      ...LISTING,
+      data: [listingEntry("chroma", { widthHeightDivisor: 8 })],
+    };
+    const ratiosNow = {
+      ...LISTING,
+      data: [listingEntry("chroma", { aspectRatios: ["16:9"], widthHeightDivisor: 1 })],
+    };
+    const { fetchFn, captured } = veniceFetch([
+      () => jsonResponse(pixelsThenRatios),
+      () => jsonResponse(ratiosNow),
+    ]);
+    const venice = provider(fetchFn);
+
+    await venice.generate({ model: "chroma", prompt: "p", aspectRatio: "16:9" });
+    vi.setSystemTime(new Date("2026-10-01T12:59:59Z"));
+    await venice.generate({ model: "chroma", prompt: "p", aspectRatio: "16:9" });
+    vi.setSystemTime(new Date("2026-10-01T13:00:00Z"));
+    await venice.generate({ model: "chroma", prompt: "p", aspectRatio: "16:9" });
+
+    expect(captured.listingCalls).toHaveLength(2);
+    expect(captured.generateBodies.map((b) => b.aspect_ratio ?? `${b.width}x${b.height}`)).toEqual([
+      "1280x720",
+      "1280x720",
+      "16:9",
+    ]);
+  });
+
+  it("fails retryably on a 5xx listing without generating, then reads the listing again", async () => {
+    const { fetchFn, captured } = veniceFetch([
+      () => new Response("upstream is down", { status: 503 }),
+      () => jsonResponse(LISTING),
+    ]);
+    const venice = provider(fetchFn);
+
+    const first = venice.generate({ model: "chroma", prompt: "p", aspectRatio: "16:9" });
+    await expect(first).rejects.toThrow(/model listing failed: HTTP 503/);
+    await expect(first).rejects.not.toBeInstanceOf(AbortError);
+    expect(captured.generateBodies).toHaveLength(0);
+
+    await venice.generate({ model: "chroma", prompt: "p", aspectRatio: "16:9" });
+    expect(captured.listingCalls).toHaveLength(2);
+    expect(captured.generateBodies[0]).toMatchObject({ width: 1280, height: 720 });
+  });
+
+  it("fails terminally on a 4xx listing (other than 429) without generating", async () => {
+    const { fetchFn, captured } = veniceFetch([() => new Response("not found", { status: 404 })]);
+
+    const promise = provider(fetchFn).generate({
+      model: "chroma",
+      prompt: "p",
+      aspectRatio: "16:9",
+    });
+
+    await expect(promise).rejects.toBeInstanceOf(ImageGenerationFailedError);
+    await expect(promise).rejects.toMatchObject({
+      failure: { kind: "provider_error", provider: "venice" },
+    });
+    await expect(promise).rejects.toThrow(/model listing failed: HTTP 404/);
+    expect(captured.generateBodies).toHaveLength(0);
+  });
+
+  it("fails retryably on a 429 listing", async () => {
+    const { fetchFn } = veniceFetch([() => new Response("slow down", { status: 429 })]);
+
+    const promise = provider(fetchFn).generate({
+      model: "chroma",
+      prompt: "p",
+      aspectRatio: "16:9",
+    });
+
+    await expect(promise).rejects.toThrow(/HTTP 429/);
+    await expect(promise).rejects.not.toBeInstanceOf(AbortError);
+  });
+
+  it("fails on a listing that isn't the documented shape", async () => {
+    const { fetchFn, captured } = veniceFetch([() => jsonResponse({ models: [] })]);
+
+    await expect(
+      provider(fetchFn).generate({ model: "chroma", prompt: "p", aspectRatio: "16:9" }),
+    ).rejects.toThrow();
+    expect(captured.generateBodies).toHaveLength(0);
   });
 });

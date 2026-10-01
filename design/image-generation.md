@@ -132,6 +132,19 @@ Hand-rolled, not via the AI SDK. Venice exposes an OpenAI-compat path (`/v1/imag
 
 `ImageGenerationFailedError` extends `AbortError` so `withRetry` still treats it as fatal; the `failure` field carries the structured `{ kind, reason, provider }` the tool handler surfaces uniformly across all detection paths.
 
+**Aspect ratio → sizing fields** `[confirmed]`. Venice sizes each model one of two ways, and its models listing (`GET /models?type=image`) says which in `model_spec.constraints`. A model with a non-empty `aspectRatios` list takes the `aspect_ratio` token (the Qwen Image family rejects `width`/`height` with a 400). A model with no listed ratios is sized in pixels: it takes `width`/`height`, each a multiple of its `widthHeightDivisor` (8 for `chroma` and the `lustify-*` line, 16 for `venice-sd35`) and at most 1280 (the endpoint's `maximum`). Given an `aspectRatio`, the adapter reads the listing and sends whichever the model takes. For a pixel-sized model, `venicePixelSize` keeps the area of Venice's default 1024×1024, reshapes it to the ratio, scales it down until the long side fits 1280, and rounds each side to the nearest multiple of the divisor:
+
+| Ratio | Divisor 8 | Divisor 16 |
+|-|-|-|
+| `1:1` | 1024×1024 | 1024×1024 |
+| `16:9` / `9:16` | 1280×720 / 720×1280 | same |
+| `4:3` / `3:4` | 1184×888 / 888×1184 | 1184×880 / 880×1184 |
+| `21:9` / `9:21` | 1280×552 / 552×1280 | 1280×544 / 544×1280 |
+
+So a fixed-size Venice model takes ratios like any other: the operator declares them in `capabilities.aspectRatios` (`cogmo image-model add … --ratios` or the wizard), the tool description lists them, and the handler forwards the LLM's pick. Without a declaration the handler still rejects a ratio, as for any model.
+
+The listing is read only for a call that carries a ratio, cached per provider for an hour, and shared by concurrent calls. A model the listing doesn't describe (absent, or an entry that doesn't parse) fails the call before anything is generated, as `ImageGenerationFailedError` (`kind: "provider_error"`) telling the LLM to call again without a ratio: guessing a field could size a pixel model wrong without a sign. A failed read isn't cached and also fails the call without generating: a 4xx other than 429 as `provider_error`, anything else as a plain error the handler's `withRetry` retries. Reading Venice's own description, rather than an operator-declared sizing flag, means the operator can't pick the wrong mode or divisor, and a model Venice re-sizes is picked up within the hour.
+
 **Output format pinning.** Venice supports `webp` / `jpeg` / `png` — the adapter pins `png` for parity with fal so downstream (Telegram `sendPhoto`, AttachmentStore) doesn't change behaviour by provider. If a future provider-or-model wants a different output, lift the format into the catalog / tool surface; today it's a hand-tuned adapter invariant.
 
 ### Base URL validation
