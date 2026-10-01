@@ -1,4 +1,5 @@
 import { err, ok, type Result } from "neverthrow";
+import { match } from "ts-pattern";
 import type { Transactor } from "../../db/index.js";
 import type { SkillSourceCacheEntry } from "../source-cache.js";
 import type { SkillRunStatus, SkillStore } from "../store/index.js";
@@ -9,7 +10,8 @@ import type { ExecutedOutcome } from "./start-run.js";
  * The `executed → finished` transition: validate the executed output against
  * the manifest's `outputs` schema and settle the run's terminal status.
  * Validation is pure, so a recovered `executed` row reaches the verdict the
- * original attempt would have.
+ * original attempt would have. A concurrent attempt that finished the row
+ * first wins: its settled result is returned.
  */
 export async function finishRun(
   deps: { store: SkillStore; runInTx: Transactor },
@@ -41,7 +43,7 @@ export async function finishRun(
     }
   }
 
-  await deps.runInTx((tx) =>
+  const transition = await deps.runInTx((tx) =>
     deps.store.transitionToFinished(tx, {
       id: runId,
       status: finalStatus,
@@ -50,7 +52,14 @@ export async function finishRun(
     }),
   );
 
-  return reconstructFinishedResult(runId, finalStatus, finalOutput, finalError);
+  return match(transition)
+    .with({ kind: "transitioned" }, () =>
+      reconstructFinishedResult(runId, finalStatus, finalOutput, finalError),
+    )
+    .with({ kind: "already_finished" }, ({ row }) =>
+      reconstructFinishedResult(runId, row.status, row.output, row.error),
+    )
+    .exhaustive();
 }
 
 /** Err with why `output` fails the manifest's `outputs` schema; ok when it declares none. */

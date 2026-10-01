@@ -2,7 +2,7 @@ import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { profiles, users } from "../../agent/store/schema.js";
 import type { Database, Transactor } from "../../db/index.js";
-import { expectDefined } from "../../test/assertions.js";
+import { assertKind, expectDefined } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import type { ClassifierLog, SkillInputs } from "../types.js";
 import {
@@ -916,6 +916,64 @@ describe("DrizzleSkillStore", () => {
       const reloaded = await tx((trx) => store.getRun(trx, row.id));
       expect(reloaded?.recoveryPoint).toBe("finished");
       expect(reloaded?.status).toBe("success");
+    });
+
+    it("transitionToFinished reports a row another attempt already finished", async () => {
+      const skill = await seedSkill();
+      const { row } = await tx((trx) =>
+        store.startOrRecoverRun(trx, {
+          skillId: skill.id,
+          trigger: "cron",
+          inputs: {},
+          idempotencyKey: "k-race",
+        }),
+      );
+      await tx((trx) =>
+        store.transitionToExecuted(trx, {
+          id: row.id,
+          output: { echo: 1 },
+          error: null,
+          resourceUsage: { wallClockMs: 1, peakMemoryBytes: null },
+          finishedAt: new Date(),
+        }),
+      );
+      const finish = () =>
+        tx((trx) =>
+          store.transitionToFinished(trx, {
+            id: row.id,
+            status: "success",
+            output: { echo: 1 },
+            error: null,
+          }),
+        );
+
+      expect(await finish()).toEqual({ kind: "transitioned" });
+      const second = await finish();
+      assertKind(second, "already_finished");
+      expect(second.row.status).toBe("success");
+      expect(second.row.output).toEqual({ echo: 1 });
+    });
+
+    it("transitionToFinished throws on a row still at started", async () => {
+      const skill = await seedSkill();
+      const { row } = await tx((trx) =>
+        store.startOrRecoverRun(trx, {
+          skillId: skill.id,
+          trigger: "cron",
+          inputs: {},
+          idempotencyKey: "k-started",
+        }),
+      );
+      await expect(
+        tx((trx) =>
+          store.transitionToFinished(trx, {
+            id: row.id,
+            status: "success",
+            output: null,
+            error: null,
+          }),
+        ),
+      ).rejects.toThrow(/recovery_point != 'executed'/);
     });
 
     it("UNIQUE constraint allows multiple null-key rows for the same skill", async () => {

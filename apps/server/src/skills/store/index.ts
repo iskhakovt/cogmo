@@ -312,6 +312,11 @@ export interface ExecuteRollbackParams {
   applyFilesystem(): Promise<void>;
 }
 
+/** Outcome of {@link SkillStore.transitionToFinished}. */
+export type FinishRunTransition =
+  | { kind: "transitioned" }
+  | { kind: "already_finished"; row: SkillRunRow };
+
 export interface SkillStore {
   // --- skills ---
   insertSkill(tx: Transaction, params: InsertSkillParams): Promise<SkillRow>;
@@ -457,6 +462,10 @@ export interface SkillStore {
    * (which the execute step doesn't have — output validation runs after)
    * and flips `recovery_point` to `finished`. Output is overwritten with
    * `null` when output validation rejected the executed payload.
+   *
+   * Two keyed retries that both recovered the row at `executed` race here;
+   * the loser gets `already_finished` with the row the winner settled. A row
+   * that is missing or still `started` is a bug and throws.
    */
   transitionToFinished(
     tx: Transaction,
@@ -466,7 +475,7 @@ export interface SkillStore {
       output: unknown | null;
       error: string | null;
     },
-  ): Promise<void>;
+  ): Promise<FinishRunTransition>;
 
   // --- skill_context_calls ---
   recordContextCall(tx: Transaction, params: RecordContextCallParams): Promise<void>;
@@ -1062,7 +1071,7 @@ export class DrizzleSkillStore implements SkillStore {
       output: unknown | null;
       error: string | null;
     },
-  ): Promise<void> {
+  ): Promise<FinishRunTransition> {
     // Guard the transition on `recovery_point='executed'`. Same
     // rationale as transitionToExecuted — catch out-of-order calls
     // at the DB layer instead of silently regressing the row.
@@ -1076,11 +1085,12 @@ export class DrizzleSkillStore implements SkillStore {
       })
       .where(and(eq(skillRuns.id, params.id), eq(skillRuns.recoveryPoint, "executed")))
       .returning({ id: skillRuns.id });
-    if (updated.length === 0) {
-      throw new Error(
-        `transitionToFinished(${params.id}): row not found or recovery_point != 'executed'`,
-      );
-    }
+    if (updated.length > 0) return { kind: "transitioned" };
+    const current = await this.getRun(tx, params.id);
+    if (current?.recoveryPoint === "finished") return { kind: "already_finished", row: current };
+    throw new Error(
+      `transitionToFinished(${params.id}): row not found or recovery_point != 'executed'`,
+    );
   }
 
   async getRun(tx: Transaction, id: string): Promise<SkillRunRow | undefined> {
