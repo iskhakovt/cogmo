@@ -119,7 +119,12 @@ async function seedMessage(conversationId: string, createdAt: string): Promise<s
 async function seedFire(
   conversationId: string,
   createdAt: string,
-  payload: { durationMs?: number; failedPhases?: string[] },
+  payload: {
+    durationMs?: number;
+    failedPhases?: string[];
+    memories?: { skippedForUnseenRules?: number };
+    modelBudgetTooSmall?: boolean;
+  },
 ): Promise<void> {
   await db.execute(sql`
     INSERT INTO evolution_events (conversation_id, user_id, triggered_by, payload, created_at)
@@ -201,6 +206,53 @@ describe("migrations 0068 and 0069 — observer cursors", () => {
     });
     expect(await cursorsOf(onlyFailed)).toMatchObject({
       corrections_observed_through: onlyMessage,
+      memories_observed_through: null,
+    });
+  });
+
+  it("doesn't start the memories cursor at a fire that held memories for an unseen rule", async () => {
+    const conversationId = await seedConversation();
+    const first = await seedMessage(conversationId, "2026-09-01T09:00:00Z");
+    await seedFire(conversationId, "2026-09-01T10:00:00Z", {
+      durationMs: 0,
+      memories: { skippedForUnseenRules: 0 },
+    });
+    const second = await seedMessage(conversationId, "2026-09-01T10:30:00Z");
+    await seedFire(conversationId, "2026-09-01T11:00:00Z", {
+      durationMs: 0,
+      memories: { skippedForUnseenRules: 1 },
+    });
+    const onlyHeld = await seedConversation();
+    const onlyMessage = await seedMessage(onlyHeld, "2026-09-01T09:00:00Z");
+    await seedFire(onlyHeld, "2026-09-01T10:00:00Z", {
+      durationMs: 0,
+      memories: { skippedForUnseenRules: 1 },
+    });
+
+    await applyMigrations();
+
+    expect(await cursorsOf(conversationId)).toMatchObject({
+      corrections_observed_through: second,
+      memories_observed_through: first,
+    });
+    expect(await cursorsOf(onlyHeld)).toMatchObject({
+      corrections_observed_through: onlyMessage,
+      memories_observed_through: null,
+    });
+  });
+
+  it("starts neither cursor at a fire whose model was too small to extract", async () => {
+    const conversationId = await seedConversation();
+    await seedMessage(conversationId, "2026-09-01T09:00:00Z");
+    await seedFire(conversationId, "2026-09-01T10:00:00Z", {
+      durationMs: 0,
+      modelBudgetTooSmall: true,
+    });
+
+    await applyMigrations();
+
+    expect(await cursorsOf(conversationId)).toMatchObject({
+      corrections_observed_through: null,
       memories_observed_through: null,
     });
   });
