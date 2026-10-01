@@ -33,6 +33,31 @@ import { handleResumeCallback } from "./commands/sessions.js";
  */
 const BOUNDARY_CALLBACK_REGEX = /^boundary:([0-9a-f-]{36}):(resume|fresh)$/;
 
+/**
+ * An empty keyboard, which Telegram reads as "remove the existing one".
+ * grammY's strict-optional types reject `reply_markup: undefined`.
+ */
+function clearedKeyboard(): { inline_keyboard: [] } {
+  return { inline_keyboard: [] };
+}
+
+/**
+ * Edit the message whose button was tapped. Telegram answers a no-op edit
+ * (a double tap, a replayed callback) with 400 "message is not modified",
+ * which is ignored; any other failure (e.g. the user deleted the message)
+ * is logged and must not block the rest of the tap's outcome.
+ */
+async function editTappedMessage(edit: () => Promise<unknown>, what: string): Promise<void> {
+  try {
+    await edit();
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : "";
+    if (!msg.includes("message is not modified")) {
+      logger.warn({ err }, `telegram: failed to ${what}`);
+    }
+  }
+}
+
 export function registerCallbackQueries(bot: Bot, transport: Transport): void {
   // Boundary prompt taps — callback_data = "boundary:<boundaryId>:<resume|fresh>"
   bot.callbackQuery(BOUNDARY_CALLBACK_REGEX, async (ctx) => {
@@ -47,16 +72,12 @@ export function registerCallbackQueries(bot: Bot, transport: Transport): void {
       reason: isResume ? "user_resume" : "user_fresh",
     });
 
-    try {
-      // Drop the keyboard so the buttons can't be tapped twice. Same pattern
-      // as the plan / pipeline-gate / skills-approval callback handlers.
-      await ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } });
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "";
-      if (!msg.includes("message is not modified")) {
-        logger.warn({ err }, "telegram: failed to clear boundary keyboard");
-      }
-    }
+    // Drop the keyboard so the buttons can't be tapped twice. Same pattern
+    // as the plan / pipeline-gate / skills-approval callback handlers.
+    await editTappedMessage(
+      () => ctx.editMessageReplyMarkup({ reply_markup: clearedKeyboard() }),
+      "clear boundary keyboard",
+    );
 
     if (result.isErr()) {
       const code = result.error.code;
@@ -89,24 +110,11 @@ export function registerCallbackQueries(bot: Bot, transport: Transport): void {
     const outcome = await handlePlanCallback(transport, parsed, String(fromId));
 
     // Edit the original plan message: replace its body with the outcome
-    // text and clear the keyboard so the buttons don't linger after the
-    // tap. Telegram returns 400 "message is not modified" on no-op edits;
-    // ignore. Failure to edit (e.g. message deleted by the user) shouldn't
-    // block the rest of the outcome.
-    try {
-      // Pass an empty inline_keyboard rather than reply_markup: undefined.
-      // grammY's strict-optional types reject `undefined` for reply_markup,
-      // and Telegram accepts an empty keyboard array as "remove the
-      // existing keyboard".
-      await ctx.editMessageText(outcome.editText, {
-        reply_markup: { inline_keyboard: [] },
-      });
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "";
-      if (!msg.includes("message is not modified")) {
-        logger.warn({ err }, "telegram: failed to edit plan message");
-      }
-    }
+    // text and clear the keyboard so the buttons don't linger after the tap.
+    await editTappedMessage(
+      () => ctx.editMessageText(outcome.editText, { reply_markup: clearedKeyboard() }),
+      "edit plan message",
+    );
     if (outcome.followUp) {
       await ctx.reply(outcome.followUp);
     }
@@ -123,14 +131,10 @@ export function registerCallbackQueries(bot: Bot, transport: Transport): void {
 
     const outcome = await handlePipelineGateCallback(transport, parsed, String(fromId));
     if (outcome.clearKeyboard) {
-      try {
-        await ctx.editMessageText(outcome.editText, { reply_markup: { inline_keyboard: [] } });
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "";
-        if (!msg.includes("message is not modified")) {
-          logger.warn({ err }, "telegram: failed to edit pipeline gate message");
-        }
-      }
+      await editTappedMessage(
+        () => ctx.editMessageText(outcome.editText, { reply_markup: clearedKeyboard() }),
+        "edit pipeline gate message",
+      );
     }
     await ctx.answerCallbackQuery({ text: outcome.toast });
   });
@@ -156,16 +160,10 @@ export function registerCallbackQueries(bot: Bot, transport: Transport): void {
       String(fromId),
       String(chatId),
     );
-    try {
-      await ctx.editMessageText(outcome.editText, {
-        reply_markup: { inline_keyboard: [] },
-      });
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "";
-      if (!msg.includes("message is not modified")) {
-        logger.warn({ err }, "telegram: failed to edit skills approval message");
-      }
-    }
+    await editTappedMessage(
+      () => ctx.editMessageText(outcome.editText, { reply_markup: clearedKeyboard() }),
+      "edit skills approval message",
+    );
     await ctx.answerCallbackQuery({ text: outcome.toast });
   });
 }
