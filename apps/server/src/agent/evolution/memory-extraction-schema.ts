@@ -160,6 +160,13 @@ export function buildClassifiedMemorySchema(customNames: ReadonlyArray<string>) 
   });
 }
 
+/** The classification, and whether a listed memory rule forbids storing the fact. */
+export function buildWithholdingClassifiedMemorySchema(customNames: ReadonlyArray<string>) {
+  return buildClassifiedMemorySchema(customNames).extend({
+    withhold: z.boolean().describe("True when a listed memory rule forbids storing this fact"),
+  });
+}
+
 // --- Shared taxonomy definitions ---
 //
 // The three classification axes are described once and templated into
@@ -170,14 +177,14 @@ export function buildClassifiedMemorySchema(customNames: ReadonlyArray<string>) 
 const NETWORK_DEFINITIONS = `- **world**: External facts about the world, systems, tools, infrastructure, people, places, events. Things that exist independently of the user's preferences.
   Examples: "homelab IP is 10.0.10.10", "Alice works at Acme Corp", "project deadline is March 15"
 
-- **bank**: Personal facts about the user — preferences, habits, biographical details, relationships, commitments.
-  Examples: "prefers tables over prose", "allergic to peanuts", "wife's name is Alice", "runs every morning"
+- **bank**: Personal facts about the user — preferences about things in the world, habits, biographical details, relationships, commitments.
+  Examples: "prefers trains to flying", "allergic to peanuts", "wife's name is Alice", "runs every morning"
 
-- **opinion**: The agent's learned assessments about what works well or poorly — insights about the user's communication style, effective approaches, tool preferences.
-  Examples: "user gets frustrated with verbose explanations", "email extraction v3 works better than v2"
+- **opinion**: The agent's learned assessments about what works well or poorly — effective approaches, tool choices.
+  Examples: "email extraction v3 works better than v2", "the NAS backup is more reliable than the cloud sync"
 
-- **observation**: Behavioral patterns the agent has noticed — recurring behaviors, timing patterns, contextual preferences.
-  Examples: "usually asks about homelab on weekends", "prefers short responses in the morning"`;
+- **observation**: Behavioral patterns the agent has noticed — recurring behaviors, timing patterns.
+  Examples: "usually asks about homelab on weekends", "books travel about a month ahead"`;
 
 const CORE_COMPARTMENT_DEFINITIONS = `- **personal**: general life — relationships, habits, hobbies, daily preferences, household, family. Default for facts that don't clearly belong elsewhere.
   Examples: "wife's birthday is March 15", "prefers tea over coffee", "lives in Berlin"
@@ -245,6 +252,7 @@ const EXTRACTION_RULES = `## Rules for Extraction
   - "Cogmo's profiles each have their own model and tool set"
 
   Rule of thumb: if the fact would be wrong after a code change you'd expect to see this quarter, it's state — skip it. If the fact would still be true after several releases, it's architecture — extract it. The user's own technical environment ("user's homelab is offline", "user's NAS uses ZFS") is always durable user-fact and should be extracted regardless — this rule is specifically about Cogmo-the-agent's internals.
+- **Rules the user set**: Skip an instruction or retraction that a successful \`rule_set\` or \`rule_remove\` call recorded: the assistant's rules hold it, not memory.
 - **No conversation references**: Don't mention "the user said" or "in this conversation" — extract the fact itself.
 - **Admission criteria**: Only extract facts with future utility, factual confidence, and semantic novelty. Ask: "would knowing this help in a future conversation?"
 - **One fact per item**: Don't combine multiple independent facts into one entry.
@@ -252,12 +260,28 @@ const EXTRACTION_RULES = `## Rules for Extraction
 
 Analyze the transcript below and extract facts worth remembering.`;
 
+/** The live `memory`-category rules, listed only when there are some. */
+function memoryRulesSection(memoryRules: ReadonlyArray<string>, instruction: string): string {
+  if (memoryRules.length === 0) return "";
+  return `## Memory Rules
+
+The assistant follows these rules about what it remembers, tracks or must not store. ${instruction}
+
+${memoryRules.map((r) => `- ${r}`).join("\n")}
+
+`;
+}
+
 /**
  * Build the extraction system prompt for an Observer fire. Customs are
  * templated into the compartment section verbatim; pass `[]` for the
- * core-only version.
+ * core-only version. `memoryRules` are the live `memory`-category rules the
+ * conversation's profile sees.
  */
-export function buildMemoryExtractionPrompt(customs: ReadonlyArray<CompartmentDefinition>): string {
+export function buildMemoryExtractionPrompt(
+  customs: ReadonlyArray<CompartmentDefinition>,
+  memoryRules: ReadonlyArray<string>,
+): string {
   return `You are a memory extraction engine. Your job is to analyze a conversation transcript between a user and an AI assistant, and extract facts worth storing in long-term memory. For each fact, assign three independent classifications: network, compartment, and trust tier.
 
 ## Memory Networks (what kind of knowledge)
@@ -278,18 +302,22 @@ Classify each fact into exactly one tier:
 
 ${TRUST_DEFINITIONS}
 
-${EXTRACTION_RULES}`;
+${memoryRulesSection(memoryRules, "Extract nothing a rule forbids.")}${EXTRACTION_RULES}`;
 }
 
 /**
  * Build the classification system prompt for a pending-memory drain. Same
  * shape as `buildMemoryExtractionPrompt` but tuned for single-fact
- * classification (no extraction-rules section).
+ * classification (no extraction-rules section). With `memoryRules`, the
+ * rules the row's staging profile sees, it also asks for `withhold`
+ * (`buildWithholdingClassifiedMemorySchema`).
  */
 export function buildPendingClassificationPrompt(
   customs: ReadonlyArray<CompartmentDefinition>,
+  memoryRules: ReadonlyArray<string>,
 ): string {
-  return `You are classifying a single fact for storage in long-term memory. The fact has already been chosen for retention — do not decide whether to keep it. Assign three independent classifications: network, compartment, and trust tier.
+  const exceptUnderRules = memoryRules.length > 0 ? ", except under the memory rules below" : "";
+  return `You are classifying a single fact for storage in long-term memory. The fact has already been chosen for retention — do not decide whether to keep it${exceptUnderRules}. Assign three independent classifications: network, compartment, and trust tier.
 
 ## Memory Networks (what kind of knowledge)
 
@@ -305,5 +333,8 @@ ${TRUST_DEFINITIONS}
 
 When in doubt on trust, choose first-party. When in doubt on compartment, choose personal.
 
-Output only the JSON classification.`;
+${memoryRulesSection(
+  memoryRules,
+  "Set `withhold` to true when a rule forbids storing this fact, and to false otherwise.",
+)}Output only the JSON classification.`;
 }

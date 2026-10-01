@@ -185,12 +185,51 @@ function mockExtractionDeps(
     runInTx: fakeRunInTx,
     store: {
       getCorrections: vi.fn().mockResolvedValue([]),
+      getInstructionRules: vi.fn().mockResolvedValue([]),
+      hasInstructionRule: vi.fn().mockResolvedValue(false),
       upsertCorrection: vi.fn().mockResolvedValue({ id: "rule-1", promoted: false }),
+      contradictLearningRule: vi.fn().mockResolvedValue("reset"),
       countActiveLearnedRules: vi.fn().mockResolvedValue(5),
       ...storeOverrides,
     },
     activeChannelTypes,
   };
+}
+
+const SCOPE = {
+  conversationId: "conv-1",
+  profileId: "profile-1",
+  userId: "user-1",
+  seesUserRules: true,
+};
+
+/** A live instruction rule as `getInstructionRules` returns it. */
+function instructionRow(id: string, rule: string, observationCount = 1) {
+  return { ...ruleRow(id, rule), observationCount };
+}
+
+/** A learned rule still learning, as `getCorrections` returns it. */
+function learningRow(id: string, rule: string, channelType: string | null = null) {
+  return { ...ruleRow(id, rule), active: false, channelType };
+}
+
+function contradiction(label: string) {
+  return {
+    corrections: [
+      {
+        rule: "Bullet points are fine",
+        category: "style",
+        reasoning: "The user takes it back",
+        matchedExistingRuleId: label,
+        action: "contradiction",
+      },
+    ],
+  };
+}
+
+function systemPromptOf(deps: ExtractionDeps): string {
+  const call = expectDefined(vi.mocked(deps.provider.chat).mock.calls[0], "chat call");
+  return call[0].system;
 }
 
 const sampleHistory: Message[] = [
@@ -212,18 +251,308 @@ const sampleHistory: Message[] = [
 describe("extractCorrections", () => {
   it("returns zeros when no corrections found", async () => {
     const deps = mockExtractionDeps({ corrections: [] });
-    const result = await extractCorrections(sampleHistory, "profile-1", deps);
+    const result = await extractCorrections(sampleHistory, SCOPE, deps);
 
     expect(result).toEqual({
       extracted: 0,
       reinforced: 0,
       contradictions: 0,
+      retired: 0,
+      reset: 0,
       promoted: 0,
       outOfScopeReinforcementsSkipped: 0,
+      outOfScopeContradictionsSkipped: 0,
       unknownRuleReinforcementsSkipped: 0,
       consolidationNeeded: false,
     });
     expect(deps.store.upsertCorrection).not.toHaveBeenCalled();
+  });
+
+  describe("rules the user set", () => {
+    it("shows a third-party profile's model none of the user's instruction rules", async () => {
+      const deps = mockExtractionDeps(
+        { corrections: [] },
+        {
+          getCorrections: vi.fn().mockResolvedValue([ruleRow("learned", "Be concise")]),
+          getInstructionRules: vi
+            .fn()
+            .mockResolvedValue([instructionRow("mine", "Don't use bullet points")]),
+        },
+      );
+
+      await extractCorrections(sampleHistory, { ...SCOPE, seesUserRules: false }, deps);
+
+      expect(deps.store.getInstructionRules).not.toHaveBeenCalled();
+      const system = systemPromptOf(deps);
+      expect(system).toContain("Be concise");
+      expect(system).not.toContain("Don't use bullet points");
+      expect(system).not.toContain(", set by the user)");
+    });
+
+    it("lists the user's instruction rules the profile sees, marked as set by the user", async () => {
+      const deps = mockExtractionDeps(
+        { corrections: [] },
+        {
+          getCorrections: vi.fn().mockResolvedValue([ruleRow("learned", "Be concise")]),
+          getInstructionRules: vi
+            .fn()
+            .mockResolvedValue([instructionRow("mine", "Don't use bullet points")]),
+        },
+      );
+
+      await extractCorrections(sampleHistory, SCOPE, deps);
+
+      expect(deps.store.getInstructionRules).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ profileId: "profile-1", userId: "user-1" }),
+      );
+      const system = systemPromptOf(deps);
+      expect(system).toContain("[R1] (style, all channels) Be concise");
+      expect(system).toContain(
+        "[R2] (style, all channels, set by the user) Don't use bullet points",
+      );
+    });
+
+    it("tells the model a successful rule tool call is handled, and an already-set rule reinforced", async () => {
+      const deps = mockExtractionDeps(
+        { corrections: [] },
+        {
+          getInstructionRules: vi
+            .fn()
+            .mockResolvedValue([instructionRow("mine", "Don't use bullet points")]),
+        },
+      );
+
+      await extractCorrections(sampleHistory, SCOPE, deps);
+
+      const system = systemPromptOf(deps);
+      expect(system).toContain(
+        "An instruction or retraction that a successful `rule_set` or `rule_remove` call recorded is handled: extract nothing for it.",
+      );
+      expect(system).toContain(
+        'When `rule_set` answered that the rule is already set, the user had to say it again: "reinforce" the rule marked "set by the user" that it names.',
+      );
+    });
+
+    it("defines the memory category as what the assistant remembers, tracks or must not store", async () => {
+      const deps = mockExtractionDeps({ corrections: [] });
+
+      await extractCorrections(sampleHistory, SCOPE, deps);
+
+      expect(systemPromptOf(deps)).toContain(
+        '"memory": What the assistant remembers, tracks or must not store',
+      );
+    });
+
+    // Whether that promotes is the store's answer: `upsertCorrection` never
+    // promotes an instruction rule (steering-rules.test.ts).
+    it("resolves an instruction rule's label to its id and reinforces it", async () => {
+      const deps = mockExtractionDeps(
+        {
+          corrections: [
+            {
+              rule: "Don't use bullet points",
+              category: "style",
+              reasoning: "Stated again",
+              matchedExistingRuleId: "R1",
+              action: "reinforce",
+            },
+          ],
+        },
+        {
+          getInstructionRules: vi
+            .fn()
+            .mockResolvedValue([instructionRow("mine", "Don't use bullet points")]),
+        },
+      );
+
+      const result = await extractCorrections(sampleHistory, SCOPE, deps);
+
+      expect(result).toMatchObject({ reinforced: 1, unknownRuleReinforcementsSkipped: 0 });
+      expect(deps.store.upsertCorrection).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ existingRuleId: "mine" }),
+      );
+    });
+
+    it("drops a new correction an instruction rule holds in its scope, with a warning", async () => {
+      const deps = mockExtractionDeps(
+        {
+          corrections: [
+            {
+              rule: "No emojis",
+              category: "style",
+              reasoning: "The user asked",
+              matchedExistingRuleId: null,
+              action: "new",
+              channelType: "telegram",
+            },
+          ],
+        },
+        { hasInstructionRule: vi.fn().mockResolvedValue(true) },
+        ["telegram"],
+      );
+      const warn = vi.spyOn(logger, "warn");
+
+      const result = await extractCorrections(sampleHistory, SCOPE, deps);
+
+      expect(result.extracted).toBe(0);
+      expect(deps.store.hasInstructionRule).toHaveBeenCalledWith(expect.anything(), {
+        userId: "user-1",
+        text: "No emojis",
+        profileId: "profile-1",
+        channelType: "telegram",
+      });
+      expect(deps.store.upsertCorrection).not.toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({ rule: "No emojis" }),
+        expect.stringContaining("instruction rule"),
+      );
+      warn.mockRestore();
+    });
+
+    it("checks the backstop in the scope the rule would be written to, after channel coercion", async () => {
+      const deps = mockExtractionDeps(
+        {
+          corrections: [
+            {
+              rule: "No emojis",
+              category: "style",
+              reasoning: "The user asked",
+              matchedExistingRuleId: null,
+              action: "new",
+              channelType: "slack",
+            },
+          ],
+        },
+        undefined,
+        ["web"],
+      );
+
+      const result = await extractCorrections(sampleHistory, SCOPE, deps);
+
+      expect(result.extracted).toBe(1);
+      expect(deps.store.hasInstructionRule).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ text: "No emojis", channelType: null }),
+      );
+    });
+
+    it("checks the backstop against the user's rules even when the model doesn't see them", async () => {
+      const deps = mockExtractionDeps(
+        {
+          corrections: [
+            {
+              rule: "No emojis",
+              category: "style",
+              reasoning: "The user asked",
+              matchedExistingRuleId: null,
+              action: "new",
+              channelType: null,
+            },
+          ],
+        },
+        { hasInstructionRule: vi.fn().mockResolvedValue(true) },
+      );
+
+      const result = await extractCorrections(
+        sampleHistory,
+        { ...SCOPE, seesUserRules: false },
+        deps,
+      );
+
+      expect(result.extracted).toBe(0);
+    });
+  });
+
+  describe("a contradiction", () => {
+    it("resets a rule still learning on a first contradiction, from this conversation", async () => {
+      const deps = mockExtractionDeps(contradiction("R1"), {
+        getCorrections: vi.fn().mockResolvedValue([learningRow("learning", "Use bullet points")]),
+      });
+
+      const result = await extractCorrections(sampleHistory, SCOPE, deps);
+
+      expect(result).toMatchObject({ contradictions: 1, reset: 1, retired: 0, extracted: 0 });
+      expect(deps.store.contradictLearningRule).toHaveBeenCalledWith(expect.anything(), {
+        id: "learning",
+        conversationId: "conv-1",
+      });
+      expect(deps.store.upsertCorrection).not.toHaveBeenCalled();
+    });
+
+    it("counts a retirement when the store retires it on a second contradiction", async () => {
+      const deps = mockExtractionDeps(contradiction("R1"), {
+        getCorrections: vi.fn().mockResolvedValue([learningRow("learning", "Use bullet points")]),
+        contradictLearningRule: vi.fn().mockResolvedValue("retired"),
+      });
+
+      const result = await extractCorrections(sampleHistory, SCOPE, deps);
+
+      expect(result).toMatchObject({ contradictions: 1, reset: 0, retired: 1 });
+    });
+
+    it("only logs one against an active learned rule or an instruction rule", async () => {
+      for (const store of [
+        { getCorrections: vi.fn().mockResolvedValue([ruleRow("active", "Use bullet points")]) },
+        {
+          getInstructionRules: vi
+            .fn()
+            .mockResolvedValue([instructionRow("mine", "Use bullet points")]),
+        },
+      ]) {
+        const deps = mockExtractionDeps(contradiction("R1"), store);
+
+        const result = await extractCorrections(sampleHistory, SCOPE, deps);
+
+        expect(result).toMatchObject({ contradictions: 1, retired: 0, reset: 0 });
+        expect(deps.store.contradictLearningRule).not.toHaveBeenCalled();
+      }
+    });
+
+    it("leaves a learning rule scoped to a channel the conversation isn't on", async () => {
+      const deps = mockExtractionDeps(
+        contradiction("R1"),
+        {
+          getCorrections: vi
+            .fn()
+            .mockResolvedValue([learningRow("learning", "Use bullet points", "telegram")]),
+        },
+        ["web"],
+      );
+      const warn = vi.spyOn(logger, "warn");
+      const info = vi.spyOn(logger, "info");
+
+      const result = await extractCorrections(sampleHistory, SCOPE, deps);
+
+      expect(result).toMatchObject({
+        contradictions: 1,
+        retired: 0,
+        outOfScopeContradictionsSkipped: 1,
+      });
+      expect(deps.store.contradictLearningRule).not.toHaveBeenCalled();
+      const logged = [...warn.mock.calls, ...info.mock.calls].filter(
+        ([fields]) =>
+          typeof fields === "object" &&
+          fields !== null &&
+          "rule" in fields &&
+          fields.rule === "Bullet points are fine",
+      );
+      expect(logged).toHaveLength(1);
+      warn.mockRestore();
+      info.mockRestore();
+    });
+
+    it("counts nothing when the store changes nothing: the same conversation again, or a rule promoted or retired since", async () => {
+      const deps = mockExtractionDeps(contradiction("R1"), {
+        getCorrections: vi.fn().mockResolvedValue([learningRow("learning", "Use bullet points")]),
+        contradictLearningRule: vi.fn().mockResolvedValue("unchanged"),
+      });
+
+      const result = await extractCorrections(sampleHistory, SCOPE, deps);
+
+      expect(result).toMatchObject({ contradictions: 1, retired: 0, reset: 0 });
+    });
   });
 
   it("inserts new correction", async () => {
@@ -240,7 +569,7 @@ describe("extractCorrections", () => {
       ],
     });
 
-    const result = await extractCorrections(sampleHistory, "profile-1", deps);
+    const result = await extractCorrections(sampleHistory, SCOPE, deps);
 
     expect(result.extracted).toBe(1);
     expect(deps.store.upsertCorrection).toHaveBeenCalledWith(expect.anything(), {
@@ -266,7 +595,7 @@ describe("extractCorrections", () => {
       ],
     });
 
-    const result = await extractCorrections(sampleHistory, "profile-1", deps);
+    const result = await extractCorrections(sampleHistory, SCOPE, deps);
 
     expect(result.extracted).toBe(1);
     expect(deps.store.upsertCorrection).toHaveBeenCalledWith(expect.anything(), {
@@ -293,7 +622,7 @@ describe("extractCorrections", () => {
       { getCorrections: vi.fn().mockResolvedValue(LABELLED_RULES) },
     );
 
-    const result = await extractCorrections(sampleHistory, "profile-1", deps);
+    const result = await extractCorrections(sampleHistory, SCOPE, deps);
 
     expect(result.reinforced).toBe(1);
     expect(result.unknownRuleReinforcementsSkipped).toBe(0);
@@ -323,7 +652,7 @@ describe("extractCorrections", () => {
     );
     const warn = vi.spyOn(logger, "warn");
 
-    const result = await extractCorrections(sampleHistory, "profile-1", deps);
+    const result = await extractCorrections(sampleHistory, SCOPE, deps);
 
     expect(result.reinforced).toBe(0);
     expect(result.unknownRuleReinforcementsSkipped).toBe(1);
@@ -341,7 +670,7 @@ describe("extractCorrections", () => {
       { getCorrections: vi.fn().mockResolvedValue(LABELLED_RULES) },
     );
 
-    await extractCorrections(sampleHistory, "profile-1", deps);
+    await extractCorrections(sampleHistory, SCOPE, deps);
 
     const system = expectDefined(vi.mocked(deps.provider.chat).mock.calls[0], "chat call")[0]
       .system;
@@ -373,7 +702,7 @@ describe("extractCorrections", () => {
       { getCorrections: vi.fn().mockResolvedValue(rules) },
     );
 
-    await extractCorrections(sampleHistory, "profile-1", deps);
+    await extractCorrections(sampleHistory, SCOPE, deps);
 
     const system = expectDefined(vi.mocked(deps.provider.chat).mock.calls[0], "chat call")[0]
       .system;
@@ -403,7 +732,7 @@ describe("extractCorrections", () => {
     );
     const warn = vi.spyOn(logger, "warn");
 
-    const result = await extractCorrections(sampleHistory, "profile-1", deps);
+    const result = await extractCorrections(sampleHistory, SCOPE, deps);
 
     expect(result.contradictions).toBe(0);
     expect(deps.store.upsertCorrection).not.toHaveBeenCalled();
@@ -442,7 +771,7 @@ describe("extractCorrections", () => {
       },
     );
 
-    const result = await extractCorrections(sampleHistory, "profile-1", deps);
+    const result = await extractCorrections(sampleHistory, SCOPE, deps);
 
     expect(result.reinforced).toBe(1);
     expect(deps.store.upsertCorrection).toHaveBeenCalledWith(expect.anything(), {
@@ -474,7 +803,7 @@ describe("extractCorrections", () => {
       },
     );
 
-    const result = await extractCorrections(sampleHistory, "profile-1", deps);
+    const result = await extractCorrections(sampleHistory, SCOPE, deps);
 
     expect(result.contradictions).toBe(1);
     expect(result.extracted).toBe(0);
@@ -510,7 +839,7 @@ describe("extractCorrections", () => {
       },
     );
 
-    const result = await extractCorrections(sampleHistory, "profile-1", deps);
+    const result = await extractCorrections(sampleHistory, SCOPE, deps);
 
     expect(result.promoted).toBe(1);
     expect(result.reinforced).toBe(1);
@@ -522,7 +851,7 @@ describe("extractCorrections", () => {
       { countActiveLearnedRules: vi.fn().mockResolvedValue(21) },
     );
 
-    const result = await extractCorrections(sampleHistory, "profile-1", deps);
+    const result = await extractCorrections(sampleHistory, SCOPE, deps);
     expect(result.consolidationNeeded).toBe(true);
     expect(deps.store.countActiveLearnedRules).toHaveBeenCalledWith(FAKE_TX, "profile-1");
   });
@@ -533,7 +862,7 @@ describe("extractCorrections", () => {
       { countActiveLearnedRules: vi.fn().mockResolvedValue(20) },
     );
 
-    const result = await extractCorrections(sampleHistory, "profile-1", deps);
+    const result = await extractCorrections(sampleHistory, SCOPE, deps);
     expect(result.consolidationNeeded).toBe(false);
   });
 
@@ -557,7 +886,7 @@ describe("extractCorrections", () => {
     );
     const warn = vi.spyOn(logger, "warn");
 
-    const result = await extractCorrections(sampleHistory, "profile-1", deps);
+    const result = await extractCorrections(sampleHistory, SCOPE, deps);
 
     expect(result).toMatchObject({
       reinforced: 0,
@@ -616,7 +945,7 @@ describe("extractCorrections", () => {
       },
     );
 
-    const result = await extractCorrections(sampleHistory, "profile-1", deps);
+    const result = await extractCorrections(sampleHistory, SCOPE, deps);
 
     expect(result.extracted).toBe(1);
     expect(result.reinforced).toBe(1);
@@ -643,7 +972,7 @@ describe("extractCorrections", () => {
       ["telegram", "direct"],
     );
 
-    const result = await extractCorrections(sampleHistory, "profile-1", deps);
+    const result = await extractCorrections(sampleHistory, SCOPE, deps);
 
     expect(result.extracted).toBe(1);
     expect(deps.store.upsertCorrection).toHaveBeenCalledWith(expect.anything(), {
@@ -672,7 +1001,7 @@ describe("extractCorrections", () => {
       ["telegram"],
     );
 
-    const result = await extractCorrections(sampleHistory, "profile-1", deps);
+    const result = await extractCorrections(sampleHistory, SCOPE, deps);
 
     expect(result.extracted).toBe(1);
     expect(deps.store.upsertCorrection).toHaveBeenCalledWith(expect.anything(), {
@@ -712,7 +1041,7 @@ describe("extractCorrections", () => {
       ["telegram"],
     );
 
-    const result = await extractCorrections(sampleHistory, "profile-1", deps);
+    const result = await extractCorrections(sampleHistory, SCOPE, deps);
 
     expect(result.reinforced).toBe(1);
     expect(result.outOfScopeReinforcementsSkipped).toBe(0);
@@ -755,7 +1084,7 @@ describe("extractCorrections", () => {
       ["telegram"],
     );
 
-    const result = await extractCorrections(sampleHistory, "profile-1", deps);
+    const result = await extractCorrections(sampleHistory, SCOPE, deps);
 
     expect(result.reinforced).toBe(1);
     expect(result.outOfScopeReinforcementsSkipped).toBe(0);
@@ -798,7 +1127,7 @@ describe("extractCorrections", () => {
       ["telegram"],
     );
 
-    const result = await extractCorrections(sampleHistory, "profile-1", deps);
+    const result = await extractCorrections(sampleHistory, SCOPE, deps);
 
     expect(result.reinforced).toBe(0);
     expect(result.outOfScopeReinforcementsSkipped).toBe(1);
@@ -825,7 +1154,7 @@ describe("extractCorrections", () => {
       ["telegram"],
     );
 
-    const result = await extractCorrections(sampleHistory, "profile-1", deps);
+    const result = await extractCorrections(sampleHistory, SCOPE, deps);
 
     expect(result.reinforced).toBe(0);
     expect(result.outOfScopeReinforcementsSkipped).toBe(0);
@@ -861,7 +1190,7 @@ describe("extractCorrections", () => {
       ["telegram"],
     );
 
-    await extractCorrections(sampleHistory, "profile-1", deps);
+    await extractCorrections(sampleHistory, SCOPE, deps);
 
     expect(deps.provider.chat).toHaveBeenCalledOnce();
     const call = vi.mocked(deps.provider.chat).mock.calls[0]?.[0];
@@ -874,7 +1203,7 @@ describe("extractCorrections", () => {
   it("instructs the LLM to default to null when no channels are active", async () => {
     const deps = mockExtractionDeps({ corrections: [] }, undefined, []);
 
-    await extractCorrections(sampleHistory, "profile-1", deps);
+    await extractCorrections(sampleHistory, SCOPE, deps);
 
     const call = vi.mocked(deps.provider.chat).mock.calls[0]?.[0];
     const system = call?.system ?? "";
@@ -890,14 +1219,17 @@ describe("extractCorrections", () => {
       },
     ];
 
-    const result = await extractCorrections(thinkingOnly, "profile-1", deps);
+    const result = await extractCorrections(thinkingOnly, SCOPE, deps);
 
     expect(result).toEqual({
       extracted: 0,
       reinforced: 0,
       contradictions: 0,
+      retired: 0,
+      reset: 0,
       promoted: 0,
       outOfScopeReinforcementsSkipped: 0,
+      outOfScopeContradictionsSkipped: 0,
       unknownRuleReinforcementsSkipped: 0,
       consolidationNeeded: false,
     });
@@ -923,19 +1255,9 @@ describe("extractCorrections", () => {
         usage: { inputTokens: 10, outputTokens: 5 },
       }),
     });
-    const deps: ExtractionDeps = {
-      provider,
-      model: "test-model",
-      runInTx: fakeRunInTx,
-      store: {
-        getCorrections: vi.fn().mockResolvedValue([]),
-        upsertCorrection: vi.fn().mockResolvedValue({ id: "rule-1", promoted: false }),
-        countActiveLearnedRules: vi.fn().mockResolvedValue(5),
-      },
-      activeChannelTypes: [],
-    };
+    const deps: ExtractionDeps = { ...mockExtractionDeps({ corrections: [] }), provider };
 
-    const result = await extractCorrections(sampleHistory, "profile-1", deps);
+    const result = await extractCorrections(sampleHistory, SCOPE, deps);
 
     expect(result.extracted).toBe(1);
     expect(provider.chat).toHaveBeenCalledTimes(1);

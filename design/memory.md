@@ -35,7 +35,7 @@ Two routing lines come with `identity`, in `CORE_MEMORY_PROMPT_GUIDANCE` and the
 
 The test is whether a reply to an unrelated message could go wrong without the fact. A family member belongs in core memory, and details about them belong in Hindsight. A trip leaves home and timezone as they are, and a one-off request ("this one as a list") is not a standing preference.
 
-**Instructions are rules** `[proposed]`. A standing instruction about how the agent replies or conducts itself goes to `rule_set`, in neither store ([evolution.md](evolution.md#the-boundary) → The Boundary). Core memory keeps the facts a rule depends on: `identity` holds the languages the user speaks, and the language of replies is a rule. The table's standing preferences narrow to preferences about the user's life, and spelling variety moves to a rule. The user's `memory`-category rules join the staging policy below: the classifier can withhold a live or skill row one forbids ([evolution.md](evolution.md#observer-and-consolidation) → Observer and Consolidation).
+**Instructions are rules** `[proposed]`. A standing instruction about how the agent replies or conducts itself goes to `rule_set`, in neither store ([evolution.md](evolution.md#the-boundary) → The Boundary). Core memory keeps the facts a rule depends on: `identity` holds the languages the user speaks, and the language of replies is a rule. The table's standing preferences narrow to preferences about the user's life, and spelling variety moves to a rule. The user's `memory`-category rules join the staging policy below: the classifier can withhold a live or skill row one forbids ([evolution.md](evolution.md#observer-and-consolidation-confirmed) → Observer and Consolidation).
 
 **Current facts only.** A block states what holds now. A change replaces the old value without mentioning it: the location reads Lisbon, not "Lisbon, moved from London". A finished project leaves `active_projects`. A block carries no relative time words ("recently", "last month", "this week"): every later prompt shows the block, so a relative time goes stale while the block stays. What used to be true goes to Hindsight, as do the details about a family member.
 
@@ -175,6 +175,8 @@ Caller-supplied `tags` / `tagsMatch` and `tagGroups` are folded into the same AN
 ### Live Retains via Staging `[confirmed]`
 
 `memory_retain` and a skill's `ctx.memory.remember` do not write directly to Hindsight. Both insert into a `pending_memories` table (a skill's row has `source = 'skill'` and names the skill in `skill_name` and `context`); Observer drains pending rows during post-conversation extraction, classifies each (network + compartment + trust) via `chatTyped()`, retains to Hindsight, and deletes the staging row. This guarantees a single classification path — every memory in Hindsight is tagged by the Observer prompt, and live writes cannot bypass policy.
+
+**Memory rules withhold a row.** A `live_retain` or `skill` row is classified under the live `memory`-category rules its staging profile sees ("Don't save anything about my health"), and the classifier answers `withhold` beside the tags. A withheld row is deleted without a retain and counted in the audit row's `drained.withheld`; a `migration` row passes. A fire on a third-party profile classifies only the rows its own profile staged, and none of those one of the user's own rules binds, since its model sees neither other profiles' facts nor those rules; the rest stay pending for a first-party fire, counted in `drained.deferredToFirstParty`. The fire reads its rows through that filter before the batch limit, so deferred rows never fill its batch ([evolution.md](evolution.md#observer-and-consolidation-confirmed) → Observer and Consolidation).
 
 **The drain's retain is keyed on the staging row.** Retain and delete are separate steps with no transaction spanning Hindsight and Postgres, so a delete that fails after its retain leaves the row pending and the next drain retains it again. Each row goes to Hindsight under its id (`RetainBatchItem.documentId` → `document_id`), and Hindsight upserts on `document_id` within a bank. A row's content never changes, so repeating a retain Hindsight has processed finds no changed chunk: it keeps the extracted facts, extracts nothing new, and relabels the document and its facts with the repeat's tags and metadata. One copy of the fact remains. Transcript extraction has no durable id per fact and leaves `documentId` unset, so the adapter mints a fresh one per item.
 
@@ -317,9 +319,11 @@ An `r` turn already running when `/classes unrestrict r` lands has its scope fro
 | Network | Tag | Contents | Examples |
 |-|-|-|-|
 | World | `network:world` | External facts | "homelab IP is 10.0.10.10", "Grafana runs on port 3000" |
-| Bank | `network:bank` | Personal facts/preferences | "prefers tables over prose", "allergic to peanuts", "wife's birthday March 15" |
-| Opinion | `network:opinion` | Agent's learned assessments | "user gets frustrated with verbose explanations", "email extraction v3 works better" |
+| Bank | `network:bank` | Personal facts, preferences about the world | "prefers trains to flying", "allergic to peanuts", "wife's birthday March 15" |
+| Opinion | `network:opinion` | Agent's learned assessments | "the NAS backup is more reliable than the cloud sync", "email extraction v3 works better" |
 | Observation | `network:observation` | Behavioral patterns | "usually asks about homelab on weekends", "ignores morning briefings before 8am" |
+
+How the agent replies is a rule's, not a memory's ([evolution.md](evolution.md#the-boundary) → The Boundary): no network's examples are about the style of replies.
 
 ### Classification Strategy `[confirmed]`
 

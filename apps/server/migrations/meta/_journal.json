@@ -481,8 +481,15 @@
     {
       "idx": 68,
       "version": "7",
-      "when": 1790852067794,
-      "tag": "0068_model_providers_extra_body",
+      "when": 1790856378616,
+      "tag": "0068_steering_rule_contradicted_in",
+      "breakpoints": true
+    },
+    {
+      "idx": 69,
+      "version": "7",
+      "when": 1790864239042,
+      "tag": "0069_model_providers_extra_body",
       "breakpoints": true
     }
   ]

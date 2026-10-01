@@ -38,8 +38,14 @@ const ExtractionResultSchema = z.object({
   extracted: z.number().int().nonnegative(),
   reinforced: z.number().int().nonnegative(),
   contradictions: z.number().int().nonnegative(),
+  /** Older rows omit it and read as 0. */
+  retired: z.number().int().nonnegative().default(0),
+  /** Older rows omit it and read as 0. */
+  reset: z.number().int().nonnegative().default(0),
   promoted: z.number().int().nonnegative(),
   outOfScopeReinforcementsSkipped: z.number().int().nonnegative(),
+  /** Older rows omit it and read as 0. */
+  outOfScopeContradictionsSkipped: z.number().int().nonnegative().default(0),
   unknownRuleReinforcementsSkipped: z.number().int().nonnegative(),
   consolidationNeeded: z.boolean(),
 });
@@ -52,11 +58,17 @@ const ConsolidationResultSchema = z.object({
 const MemoryExtractionResultSchema = z.object({
   extracted: z.number().int().nonnegative(),
   byNetwork: z.record(z.string(), z.number().int().nonnegative()),
+  /** Older rows omit it and read as 0. */
+  skippedForUnseenRules: z.number().int().nonnegative().default(0),
 });
 
 const DrainResultSchema = z.object({
   drained: z.number().int().nonnegative(),
   byNetwork: z.record(z.string(), z.number().int().nonnegative()),
+  /** Older rows omit it and read as 0. */
+  withheld: z.number().int().nonnegative().default(0),
+  /** Older rows omit it and read as 0. */
+  deferredToFirstParty: z.number().int().nonnegative().default(0),
 });
 
 export const EvolutionEventPayloadSchema = z.object({

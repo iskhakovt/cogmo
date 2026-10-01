@@ -1,8 +1,26 @@
 import { describe, expect, it, vi } from "vitest";
 import { ProviderProtocolError } from "../../llm/errors.js";
 import type { Message } from "../../llm/types.js";
+import { logger } from "../../logger.js";
+import { expectDefined } from "../../test/assertions.js";
 import { mockProvider } from "../../test/factories.js";
+import type { MemoryRule } from "../store/index.js";
+import type { ObserverFire } from "./drain-pending-memories.js";
 import { extractMemories, type MemoryExtractionDeps } from "./extract-memories.js";
+
+const HEALTH_RULE: MemoryRule = {
+  rule: "Don't save anything about my health.",
+  profileId: null,
+  fromUser: true,
+};
+
+const FIRE: ObserverFire = {
+  conversationId: "conv-1",
+  userId: "user-1",
+  profileId: "profile-1",
+  seesUserRules: true,
+};
+const THIRD_PARTY_FIRE: ObserverFire = { ...FIRE, seesUserRules: false };
 
 function mockExtractionDeps(
   chatTypedResponse: { memories: Array<Record<string, unknown>> },
@@ -24,6 +42,8 @@ function mockExtractionDeps(
       retainBatch: vi.fn().mockResolvedValue(undefined),
     },
     customCompartments: [],
+    memoryRules: [],
+    fire: FIRE,
     ...overrides,
   };
 }
@@ -40,7 +60,7 @@ describe("extractMemories", () => {
     const deps = mockExtractionDeps({ memories: [] });
     const result = await extractMemories([], "user-1", null, deps);
 
-    expect(result).toEqual({ extracted: 0, byNetwork: {} });
+    expect(result).toEqual({ extracted: 0, byNetwork: {}, skippedForUnseenRules: 0 });
     expect(deps.memory.retainBatch).not.toHaveBeenCalled();
     expect(deps.provider.chat).not.toHaveBeenCalled();
   });
@@ -49,7 +69,7 @@ describe("extractMemories", () => {
     const deps = mockExtractionDeps({ memories: [] });
     const result = await extractMemories(sampleHistory, "user-1", null, deps);
 
-    expect(result).toEqual({ extracted: 0, byNetwork: {} });
+    expect(result).toEqual({ extracted: 0, byNetwork: {}, skippedForUnseenRules: 0 });
     expect(deps.memory.retainBatch).not.toHaveBeenCalled();
   });
 
@@ -158,7 +178,7 @@ describe("extractMemories", () => {
 
     const result = await extractMemories(sampleHistory, "user-1", null, deps);
 
-    expect(result).toEqual({ extracted: 0, byNetwork: {} });
+    expect(result).toEqual({ extracted: 0, byNetwork: {}, skippedForUnseenRules: 0 });
     expect(deps.memory.retainBatch).not.toHaveBeenCalled();
   });
 
@@ -185,7 +205,7 @@ describe("extractMemories", () => {
 
     const result = await extractMemories(sampleHistory, "user-1", null, deps);
 
-    expect(result).toEqual({ extracted: 0, byNetwork: {} });
+    expect(result).toEqual({ extracted: 0, byNetwork: {}, skippedForUnseenRules: 0 });
     expect(deps.memory.retainBatch).not.toHaveBeenCalled();
   });
 
@@ -236,6 +256,8 @@ describe("extractMemories", () => {
       model: "test-model",
       memory: { retainBatch: vi.fn().mockResolvedValue(undefined) },
       customCompartments: customs,
+      memoryRules: [],
+      fire: FIRE,
     };
 
     await extractMemories(sampleHistory, "user-1", null, deps);
@@ -248,6 +270,52 @@ describe("extractMemories", () => {
     expect(system).toContain("**dnd**: tabletop campaign notes");
     expect(system).toContain("**music**: music production sessions");
     expect(system).toContain("Custom compartments");
+  });
+
+  it("lists the memory rules it is given in the system prompt", async () => {
+    const deps = mockExtractionDeps({ memories: [] }, { memoryRules: [HEALTH_RULE] });
+
+    await extractMemories(sampleHistory, "user-1", null, deps);
+
+    const call = expectDefined(vi.mocked(deps.provider.chat).mock.calls[0], "chat call");
+    expect(call[0].system).toContain("## Memory Rules");
+    expect(call[0].system).toContain("- Don't save anything about my health.");
+  });
+
+  it("skips extraction, and counts it, when a user's rule binds a profile that can't see it", async () => {
+    const deps = mockExtractionDeps(
+      { memories: [{ fact: "x", network: "world", compartment: "misc", trust: "any" }] },
+      { memoryRules: [HEALTH_RULE], fire: THIRD_PARTY_FIRE },
+    );
+    const info = vi.spyOn(logger, "info");
+
+    const result = await extractMemories(sampleHistory, "user-1", null, deps);
+
+    expect(result).toEqual({ extracted: 0, byNetwork: {}, skippedForUnseenRules: 1 });
+    expect(deps.provider.chat).not.toHaveBeenCalled();
+    expect(deps.memory.retainBatch).not.toHaveBeenCalled();
+    expect(info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conversationId: "conv-1",
+        profileId: "profile-1",
+        userId: "user-1",
+      }),
+      expect.stringContaining("skipped"),
+    );
+    info.mockRestore();
+  });
+
+  it("extracts under an operator's memory rule in a profile that can't see the user's", async () => {
+    const deps = mockExtractionDeps(
+      { memories: [] },
+      { memoryRules: [{ ...HEALTH_RULE, fromUser: false }], fire: THIRD_PARTY_FIRE },
+    );
+
+    const result = await extractMemories(sampleHistory, "user-1", null, deps);
+
+    expect(result.skippedForUnseenRules).toBe(0);
+    const call = expectDefined(vi.mocked(deps.provider.chat).mock.calls[0], "chat call");
+    expect(call[0].system).toContain("- Don't save anything about my health.");
   });
 
   it("retains memories with a custom compartment value emitted by the LLM", async () => {
@@ -300,7 +368,7 @@ describe("extractMemories", () => {
 
     const result = await extractMemories(sampleHistory, "user-1", null, deps);
 
-    expect(result).toEqual({ extracted: 0, byNetwork: {} });
+    expect(result).toEqual({ extracted: 0, byNetwork: {}, skippedForUnseenRules: 0 });
     expect(deps.memory.retainBatch).not.toHaveBeenCalled();
   });
 
@@ -344,6 +412,8 @@ describe("extractMemories", () => {
       model: "test-model",
       memory: { retainBatch: vi.fn().mockResolvedValue(undefined) },
       customCompartments: [],
+      memoryRules: [],
+      fire: FIRE,
     };
 
     const result = await extractMemories(sampleHistory, "user-1", null, deps);

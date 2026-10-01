@@ -14,6 +14,12 @@
  *    block under `# User`, the rule under `# Rules`, and the dinner in the
  *    turn context's recalled memories, recalled from Hindsight.
  *
+ * A second test gives another user a `memory`-category instruction rule and
+ * two staged facts, one it forbids. A third-party profile's fire skips
+ * memory extraction and leaves both rows pending; a first-party fire lists
+ * the rule in memory extraction and the classifier, withholds the forbidden
+ * fact and retains the other.
+ *
  * The user and profile are this file's own. The Observer writes a learned
  * rule global (`profile_id` null; rules have no user column), so the test
  * scopes it to its profile while it is still inactive, and `afterAll` deletes
@@ -33,6 +39,7 @@ import {
   coreMemoryBlocks,
   evolutionEvents,
   messages,
+  pendingMemories,
   steeringRules,
 } from "../agent/store/schema.js";
 import { db } from "../db/index.js";
@@ -64,6 +71,15 @@ const CORRECTION_AGAIN =
   "Again, no bullet points or numbered lists with me, please. Plain sentences only.";
 /** Names neither the restaurant nor the dish, so only recall can put them in the prompt. */
 const PROBE = "Where was that restaurant with the amazing cod? I want to book it again.";
+
+/** The memory rule the withholding scenario's user holds, and what it stages and says. */
+const HEALTH_RULE = "Don't store anything about my health.";
+const STAGED_HEALTH_FACT = "Has high blood pressure and takes lisinopril every morning.";
+const STAGED_HOBBY_FACT = "Is learning to play the Portuguese guitar.";
+const PLUGIN_ASK = "What's a good name for a cat?";
+const PLUGIN_FOLLOW_UP = "Something Portuguese, please.";
+const WORK_NEWS = "I've just started a new job at a bakery in Alfama.";
+const HEALTH_NEWS = "My doctor says my cholesterol is high, so I'm cutting back on cheese.";
 
 /** The only channel this file's conversations use, so the only scope a rule it learns can take. */
 const CHANNEL_TYPE = "direct";
@@ -140,11 +156,14 @@ interface Conversation {
   sessionId: string;
 }
 
-/** A conversation on the direct channel, for this file's user and profile. */
-async function startConversation(): Promise<Conversation> {
+/** A conversation on the direct channel, for a user and one of its profiles. */
+async function startConversation(owner: {
+  userId: string;
+  profileId: string;
+}): Promise<Conversation> {
   const { runInTx, agentStore } = bootstrapped;
   const { id } = await runInTx((tx) =>
-    agentStore.createConversation(tx, { userId, profileId: profile.id, isPrivate: true }),
+    agentStore.createConversation(tx, { ...owner, isPrivate: true }),
   );
   const [session] = await db
     .insert(channelSessions)
@@ -242,12 +261,12 @@ async function bulletPointRule() {
  * return the bank's facts. The Observer's retains are async, and a recall
  * before they finish would miss what they carry.
  */
-async function retainedFacts(): Promise<ReadonlyArray<string>> {
+async function retainedFacts(bankId: string): Promise<ReadonlyArray<string>> {
   const retains = await vi.waitFor(
     async () => {
       const { data, error } = await sdk.listOperations({
         client: hindsightSdk,
-        path: { bank_id: userId },
+        path: { bank_id: bankId },
         query: { type: "retain" },
       });
       if (data === undefined) throw new Error(`listOperations: ${JSON.stringify(error)}`);
@@ -265,7 +284,7 @@ async function retainedFacts(): Promise<ReadonlyArray<string>> {
     retains.filter((op) => op.status !== "completed").map((op) => op.error_message),
     "failed retains",
   ).toEqual([]);
-  const page = await hindsight.listMemories(userId, { limit: 100, offset: 0 });
+  const page = await hindsight.listMemories(bankId, { limit: 100, offset: 0 });
   return page.items.map((item) => item.text ?? "");
 }
 
@@ -296,6 +315,25 @@ async function requestSentWith(userMessage: string): Promise<{ system: string; t
   throw new Error(`no request in the llmock journal ends with "${userMessage}"`);
 }
 
+/**
+ * Every request llmock received whose system prompt starts with `opening`: its
+ * system prompt and its last user message.
+ */
+async function requestsWithSystem(
+  opening: string,
+): Promise<ReadonlyArray<{ system: string; user: string }>> {
+  const res = await fetch(`${fileLlmockUrl()}/__aimock/journal?path=/v1/messages`);
+  if (!res.ok) throw new Error(`llmock journal: ${res.status}`);
+  const entries = z.array(JournalEntrySchema).parse(await res.json());
+  return entries.flatMap((entry) => {
+    const body = ChatBodySchema.safeParse(entry.body);
+    if (!body.success) return [];
+    const system = body.data.messages.find((m) => m.role === "system")?.content;
+    const user = body.data.messages.filter((m) => m.role === "user").at(-1)?.content;
+    return system?.startsWith(opening) && typeof user === "string" ? [{ system, user }] : [];
+  });
+}
+
 /** The body of a turn context's recalled-memories element, or "" when it has none. */
 function recalledMemories(turn: string): string {
   return turn.split(/<recalled_memories[^>]*>\n/)[1]?.split("\n</recalled_memories>")[0] ?? "";
@@ -311,7 +349,7 @@ describe("learning loop", () => {
     timeout: RECORDING ? 900_000 : 240_000,
   }, async () => {
     // ── Conversation 1: a core fact, a Hindsight detail, a correction ──
-    const first = await startConversation();
+    const first = await startConversation({ userId, profileId: profile.id });
 
     await turn(first, CORE_FACT);
     const blocksAfterFact = await db
@@ -336,10 +374,10 @@ describe("learning loop", () => {
       .where(eq(steeringRules.id, learning.id));
 
     expect(firstObservation.memories.extracted).toBeGreaterThanOrEqual(1);
-    expect((await retainedFacts()).join("\n")).toMatch(/Taberna da Rua das Flores/);
+    expect((await retainedFacts(userId)).join("\n")).toMatch(/Taberna da Rua das Flores/);
 
     // ── Conversation 2: the same correction graduates the rule ──
-    const second = await startConversation();
+    const second = await startConversation({ userId, profileId: profile.id });
     await turn(second, DAY_TRIPS);
     await turn(second, CORRECTION_AGAIN);
 
@@ -354,7 +392,7 @@ describe("learning loop", () => {
     });
 
     // Conversation 2's own retains land before conversation 3 recalls.
-    await retainedFacts();
+    await retainedFacts(userId);
 
     // ── Conversation 3: the model's request carries all three ──
     const blocks = await db
@@ -367,7 +405,7 @@ describe("learning loop", () => {
       "core memory",
     );
 
-    const third = await startConversation();
+    const third = await startConversation({ userId, profileId: profile.id });
     await turn(third, PROBE);
     const sent = await requestSentWith(PROBE);
 
@@ -375,5 +413,95 @@ describe("learning loop", () => {
     expect(section(sent.system, "User")).toBe(userSection);
     expect(section(sent.system, "Rules").split("\n")).toContain(`- ${rule.rule}`);
     expect(recalledMemories(sent.turn)).toMatch(/Taberna da Rua das Flores/);
+  });
+
+  it("withholds a staged fact the user's memory rule forbids, and defers it from a third-party fire", {
+    timeout: RECORDING ? 900_000 : 240_000,
+  }, async () => {
+    const { runInTx, agentStore } = bootstrapped;
+    const owner = await createIsolatedUser(db);
+    const firstParty = await runInTx((tx) =>
+      agentStore.createProfile(tx, {
+        userId: owner,
+        name: "memory-rules",
+        basePrompt: DEFAULT_BASE_PROMPT,
+        model: CASSETTE_CHAT_MODEL,
+        toolSet: [],
+      }),
+    );
+    const thirdParty = await runInTx((tx) =>
+      agentStore.createProfile(tx, {
+        userId: owner,
+        name: "memory-rules-plugin",
+        basePrompt: DEFAULT_BASE_PROMPT,
+        model: CASSETTE_CHAT_MODEL,
+        toolSet: [],
+        memoryScope: { compartments: ["misc"], trust: ["any"] },
+      }),
+    );
+    // As `rule_set` sets a stated instruction: the user's, on every profile.
+    const set = await runInTx((tx) =>
+      agentStore.setInstructionRule(tx, {
+        rule: HEALTH_RULE,
+        category: "memory",
+        userId: owner,
+        profileId: null,
+        channelType: null,
+        quote: HEALTH_RULE,
+      }),
+    );
+    expect(set.kind).toBe("new");
+    // Staged by the first-party profile, as `memory_retain` or a skill stages them.
+    const staged = await runInTx(async (tx) => ({
+      forbidden: await agentStore.stagePendingMemory(tx, {
+        userId: owner,
+        profileId: firstParty.id,
+        content: STAGED_HEALTH_FACT,
+        source: "live_retain",
+      }),
+      allowed: await agentStore.stagePendingMemory(tx, {
+        userId: owner,
+        profileId: firstParty.id,
+        content: STAGED_HOBBY_FACT,
+        source: "live_retain",
+      }),
+    }));
+    const pendingIds = async () =>
+      (
+        await db
+          .select({ id: pendingMemories.id })
+          .from(pendingMemories)
+          .where(eq(pendingMemories.userId, owner))
+      ).map((r) => r.id);
+
+    // ── A third-party fire: its model sees neither the rule nor the staged facts ──
+    const plugin = await startConversation({ userId: owner, profileId: thirdParty.id });
+    await turn(plugin, PLUGIN_ASK);
+    await turn(plugin, PLUGIN_FOLLOW_UP);
+    const deferred = await observe(plugin);
+    expect(deferred.memories).toMatchObject({ extracted: 0, skippedForUnseenRules: 1 });
+    expect(deferred.drained).toMatchObject({ drained: 0, withheld: 0, deferredToFirstParty: 2 });
+    expect((await pendingIds()).sort()).toEqual([staged.forbidden.id, staged.allowed.id].sort());
+
+    // ── A first-party fire: extraction lists the rule, the drain withholds ──
+    const own = await startConversation({ userId: owner, profileId: firstParty.id });
+    await turn(own, WORK_NEWS);
+    await turn(own, HEALTH_NEWS);
+    const drained = await observe(own);
+    expect(drained.drained).toMatchObject({ drained: 1, withheld: 1, deferredToFirstParty: 0 });
+    expect(await pendingIds()).toEqual([]);
+
+    const extraction = await requestsWithSystem("You are a memory extraction engine.");
+    expect(extraction.some((r) => r.system.includes(`- ${HEALTH_RULE}`))).toBe(true);
+    const classification = await requestsWithSystem("You are classifying a single fact");
+    const forbidden = classification.find((r) => r.user.includes(STAGED_HEALTH_FACT));
+    expect(expectDefined(forbidden, "the forbidden fact's classification").system).toContain(
+      `- ${HEALTH_RULE}`,
+    );
+
+    const facts = (await retainedFacts(owner)).join("\n");
+    expect(facts).toMatch(/guitar/i);
+    expect(facts).not.toMatch(/lisinopril|blood pressure/i);
+    expect(facts).not.toMatch(/cholesterol/i);
   });
 });

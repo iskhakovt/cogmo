@@ -97,9 +97,13 @@ function EvolutionPanel({ onSelect }: { onSelect: (event: EvolutionEventEntry) =
                 <td className={tdMono}>{e.triggeredBy}</td>
                 <td className={tdMono}>
                   +{e.payload.corrections.extracted} / ↻{e.payload.corrections.reinforced} / ↑
-                  {e.payload.corrections.promoted}
+                  {e.payload.corrections.promoted} / ✕{e.payload.corrections.retired} / ↺
+                  {e.payload.corrections.reset}
                 </td>
-                <td className={tdMono}>{e.payload.memories.extracted}</td>
+                <td className={tdMono}>
+                  {e.payload.memories.extracted}
+                  {memoryNotes(e.payload.drained)}
+                </td>
                 <td className={tdMono}>{e.payload.messageCount}</td>
                 <td className={td}>
                   <PhaseOutcome failedPhases={e.payload.failedPhases} />
@@ -111,6 +115,15 @@ function EvolutionPanel({ onSelect }: { onSelect: (event: EvolutionEventEntry) =
       )}
     </PanelResource>
   );
+}
+
+/** The staged rows a fire withheld or deferred, as the `/learned` digest notes them. */
+function memoryNotes(drained: EvolutionEventEntry["payload"]["drained"]): string | null {
+  const notes = [
+    ...(drained.withheld > 0 ? [`${drained.withheld} withheld`] : []),
+    ...(drained.deferredToFirstParty > 0 ? [`${drained.deferredToFirstParty} deferred`] : []),
+  ];
+  return notes.length > 0 ? ` (${notes.join(", ")})` : null;
 }
 
 /** The phases a fire recorded as failed; an older row shows a dash, not "ok". */
@@ -139,8 +152,11 @@ function EvolutionDetail({ event }: { event: EvolutionEventEntry }) {
             <Field label="extracted" value={c.extracted} />
             <Field label="reinforced" value={c.reinforced} />
             <Field label="contradictions" value={c.contradictions} />
+            <Field label="retired" value={c.retired} />
+            <Field label="reset" value={c.reset} />
             <Field label="promoted" value={c.promoted} />
             <Field label="out-of-scope skipped" value={c.outOfScopeReinforcementsSkipped} />
+            <Field label="out-of-scope contradictions" value={c.outOfScopeContradictionsSkipped} />
             <Field label="unknown-rule skipped" value={c.unknownRuleReinforcementsSkipped} />
             <Field label="consolidation needed" value={String(c.consolidationNeeded)} />
           </>
@@ -162,6 +178,7 @@ function EvolutionDetail({ event }: { event: EvolutionEventEntry }) {
         ) : (
           <>
             <Field label="extracted" value={memories.extracted} />
+            <Field label="skipped, unseen user rule" value={memories.skippedForUnseenRules} />
             <NetworkField byNetwork={memories.byNetwork} />
           </>
         )}
@@ -172,6 +189,8 @@ function EvolutionDetail({ event }: { event: EvolutionEventEntry }) {
         ) : (
           <>
             <Field label="drained" value={drained.drained} />
+            <Field label="withheld" value={drained.withheld} />
+            <Field label="deferred to a first-party fire" value={drained.deferredToFirstParty} />
             <NetworkField byNetwork={drained.byNetwork} />
           </>
         )}

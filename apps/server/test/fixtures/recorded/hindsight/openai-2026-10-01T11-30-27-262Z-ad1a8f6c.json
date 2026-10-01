@@ -1,0 +1,33 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "Return valid json only.\n\n## MISSION\n\nTrack anything notable in the new facts — names, numbers, dates, places, events, decisions, claims, relationships, and recurring patterns.\n\n## INPUT\n\n### New facts\n\n[[UUID]] User works at a bakery in Alfama | Involving: user (mentioned_at=2026-10-01 11:30:22.668861+00:00)\n\n### Existing observations\n\n[]",
+        "model": "gpt-4o-mini",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "content": "{\n  \"creates\": [\n    {\n      \"text\": \"User works at a bakery in Alfama.\",\n      \"source_fact_ids\": [\n        \"2a87ae78-88c5-4986-ba39-0ca8543ce945\"\n      ],\n      \"reason\": \"This is new durable knowledge with no existing observation to match.\"\n    }\n  ],\n  \"updates\": [],\n  \"deletes\": []\n}",
+        "usage": {
+          "prompt_tokens": 3703,
+          "completion_tokens": 88,
+          "total_tokens": 3791,
+          "prompt_tokens_details": {
+            "cached_tokens": 3072,
+            "audio_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0,
+            "audio_tokens": 0,
+            "accepted_prediction_tokens": 0,
+            "rejected_prediction_tokens": 0
+          }
+        }
+      },
+      "metadata": {
+        "systemHash": "a4694c92"
+      }
+    }
+  ]
+}

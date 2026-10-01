@@ -2523,15 +2523,40 @@ export async function handleReflect(
       return;
     }
     case "processed": {
-      const { ruleChanges, memoryCount, drained, eventId } = outcome;
+      const {
+        ruleChanges,
+        memoryCount,
+        drained,
+        withheld,
+        skippedForUnseenRules,
+        deferredToFirstParty,
+        eventId,
+      } = outcome;
       const ruleSummary =
-        ruleChanges.extracted + ruleChanges.reinforced + ruleChanges.promoted === 0
+        ruleChanges.extracted +
+          ruleChanges.reinforced +
+          ruleChanges.promoted +
+          ruleChanges.retired +
+          ruleChanges.reset ===
+        0
           ? "no rule changes"
-          : `${ruleChanges.extracted} new, ${ruleChanges.reinforced} reinforced, ${ruleChanges.promoted} promoted`;
+          : `${ruleChanges.extracted} new, ${ruleChanges.reinforced} reinforced, ${ruleChanges.promoted} promoted` +
+            (ruleChanges.retired > 0 ? `, ${ruleChanges.retired} retired` : "") +
+            (ruleChanges.reset > 0 ? `, ${ruleChanges.reset} reset` : "");
+      const extraction =
+        skippedForUnseenRules > 0
+          ? "extraction skipped (a user's memory rule this profile can't see)"
+          : `${memoryCount} extracted`;
       const memorySummary =
-        memoryCount === 0 && drained === 0
+        memoryCount === 0 &&
+        drained === 0 &&
+        withheld === 0 &&
+        skippedForUnseenRules === 0 &&
+        deferredToFirstParty === 0
           ? "no memories"
-          : `${memoryCount} extracted, ${drained} drained`;
+          : `${extraction}, ${drained} drained` +
+            (withheld > 0 ? `, ${withheld} withheld` : "") +
+            (deferredToFirstParty > 0 ? `, ${deferredToFirstParty} deferred` : "");
       await ctx.reply(
         `Reflected. Rules: ${ruleSummary}. Memories: ${memorySummary}.\n` +
           `/learned ${eventId} for the full breakdown.`,
@@ -2611,14 +2636,19 @@ function formatEvolutionDigest(
   const lines = events.map((e, i) => {
     const c = e.payload.corrections;
     const m = e.payload.memories;
-    const ruleDelta = c.extracted + c.reinforced + c.promoted;
+    const ruleDelta = c.extracted + c.reinforced + c.promoted + c.retired + c.reset;
     const memoryDelta = m.extracted;
+    const withheld = e.payload.drained.withheld;
+    const deferred = e.payload.drained.deferredToFirstParty;
+    const withheldNote =
+      (withheld > 0 ? `, ${withheld} withheld` : "") +
+      (deferred > 0 ? `, ${deferred} deferred` : "");
     const tag = e.triggeredBy === "manual" ? " [manual]" : "";
     const failed = e.payload.failedPhases ?? [];
     const failedNote = failed.length > 0 ? `; failed: ${failed.join(", ")}` : "";
     return (
       `${i + 1}. ${e.id}${tag}\n` +
-      `   ${formatRelativeTime(e.createdAt, now)} — ${ruleDelta} rule change(s), ${memoryDelta} memory write(s)${failedNote}`
+      `   ${formatRelativeTime(e.createdAt, now)} — ${ruleDelta} rule change(s), ${memoryDelta} memory write(s)${withheldNote}${failedNote}`
     );
   });
   return [header, ...lines].join("\n");
@@ -2638,6 +2668,7 @@ const PHASE_FAILED = "failed after retries";
  */
 function formatEvolutionDetail(event: EvolutionEventEntry, now: Date = new Date()): string {
   const { payload } = event;
+  // Reinforcements the extraction skipped: none counts in `reinforced`.
   const skipped =
     payload.corrections.outOfScopeReinforcementsSkipped +
     payload.corrections.unknownRuleReinforcementsSkipped;
@@ -2665,6 +2696,18 @@ function formatEvolutionDetail(event: EvolutionEventEntry, now: Date = new Date(
       `  promoted:     ${payload.corrections.promoted}`,
       `  contradicted: ${payload.corrections.contradictions}`,
     );
+    // Each is a part of `contradicted`: a first contradiction resets, a second retires.
+    if (payload.corrections.retired > 0) {
+      lines.push(`  retired:      ${payload.corrections.retired} (learning, contradicted twice)`);
+    }
+    if (payload.corrections.reset > 0) {
+      lines.push(`  reset:        ${payload.corrections.reset} (learning, contradicted once)`);
+    }
+    if (payload.corrections.outOfScopeContradictionsSkipped > 0) {
+      lines.push(
+        `  not applied:  ${payload.corrections.outOfScopeContradictionsSkipped} (learning, on another channel)`,
+      );
+    }
   }
   // Surface the skipped counters only when non-zero — they're zero on
   // most fires and the silence is the signal. When something WAS
@@ -2673,7 +2716,7 @@ function formatEvolutionDetail(event: EvolutionEventEntry, now: Date = new Date(
   // gates the whole block so a "0 skipped" line never adds noise.
   if (skipped > 0) {
     lines.push(
-      `  skipped:      ${skipped} (${payload.corrections.outOfScopeReinforcementsSkipped} out-of-scope, ${payload.corrections.unknownRuleReinforcementsSkipped} unknown-rule)`,
+      `  skipped:      ${skipped} reinforcement(s) (${payload.corrections.outOfScopeReinforcementsSkipped} out-of-scope, ${payload.corrections.unknownRuleReinforcementsSkipped} unknown-rule)`,
     );
   }
   if (phaseFailed(event, "consolidation")) {
@@ -2685,18 +2728,34 @@ function formatEvolutionDetail(event: EvolutionEventEntry, now: Date = new Date(
   }
   if (phaseFailed(event, "memories")) {
     lines.push("", `Memories: ${PHASE_FAILED}`);
+  } else if (payload.memories.skippedForUnseenRules > 0) {
+    lines.push(
+      "",
+      "Memories: skipped; a user's memory rule binds it and this profile can't see it",
+    );
   } else {
     lines.push("", `Memories: ${payload.memories.extracted} extracted`);
     for (const [network, count] of Object.entries(payload.memories.byNetwork)) {
       lines.push(`  ${network}: ${count}`);
     }
   }
+  const { deferredToFirstParty } = payload.drained;
   if (phaseFailed(event, "drain")) {
     lines.push("", `Pending drain: ${PHASE_FAILED}; undrained rows stay pending`);
-  } else if (payload.drained.drained > 0) {
+  } else if (
+    payload.drained.drained > 0 ||
+    payload.drained.withheld > 0 ||
+    deferredToFirstParty > 0
+  ) {
     lines.push("", `Pending drained: ${payload.drained.drained}`);
     for (const [network, count] of Object.entries(payload.drained.byNetwork)) {
       lines.push(`  ${network}: ${count}`);
+    }
+    if (payload.drained.withheld > 0) {
+      lines.push(`  withheld by a memory rule: ${payload.drained.withheld}`);
+    }
+    if (deferredToFirstParty > 0) {
+      lines.push(`  deferred to a first-party fire: ${deferredToFirstParty}`);
     }
   }
   return lines.join("\n");

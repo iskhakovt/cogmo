@@ -1,5 +1,5 @@
 {
-  "id": "86f0415a-2026-4bd4-a61e-ae429e71840c",
+  "id": "baefd0a9-6739-4078-98ac-63b6d5aa9438",
   "prevId": "2f2564ad-44e4-41d6-809a-ba38184d3d85",
   "version": "7",
   "dialect": "postgresql",
@@ -1479,12 +1479,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "extra_body": {
-          "name": "extra_body",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": false
-        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -2101,6 +2095,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "contradicted_in_conversation_id": {
+          "name": "contradicted_in_conversation_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -2143,6 +2143,22 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "idx_steering_rules_contradicted_in_conversation": {
+          "name": "idx_steering_rules_contradicted_in_conversation",
+          "columns": [
+            {
+              "expression": "contradicted_in_conversation_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "contradicted_in_conversation_id IS NOT NULL",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -2162,6 +2178,15 @@
           "columnsFrom": ["user_id"],
           "columnsTo": ["id"],
           "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "steering_rules_contradicted_in_conversation_id_conversations_id_fk": {
+          "name": "steering_rules_contradicted_in_conversation_id_conversations_id_fk",
+          "tableFrom": "steering_rules",
+          "tableTo": "conversations",
+          "columnsFrom": ["contradicted_in_conversation_id"],
+          "columnsTo": ["id"],
+          "onDelete": "set null",
           "onUpdate": "no action"
         }
       },
