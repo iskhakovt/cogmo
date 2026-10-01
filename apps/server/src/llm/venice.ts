@@ -23,6 +23,14 @@
  * (set in the wizard / `cogmo image-provider` CLI). The LLM never picks
  * `safe_mode`, `cfg_scale`, etc. — those are operator-pinned policy.
  *
+ * Sizing is per model. Venice's models listing (`GET /models?type=image`)
+ * publishes each model's `model_spec.constraints`: a model with a non-empty
+ * `aspectRatios` list takes `aspect_ratio` (the Qwen family rejects
+ * `width`/`height` with a 400), and a model with no listed ratios is sized in
+ * pixels, taking `width`/`height` in multiples of its `widthHeightDivisor`.
+ * The adapter reads the listing to translate a requested aspect ratio into
+ * whichever of the two the model takes — see `#sizingFields`.
+ *
  * Endpoint shape (https://docs.venice.ai/api-reference/endpoint/image/generate):
  *   POST {baseUrl}/image/generate
  *   Authorization: Bearer <apiKey>
@@ -35,8 +43,81 @@
  *     body: { images: ["<base64>", ...], ... }
  */
 
+import * as R from "remeda";
+import { z } from "zod";
 import type { ImageGenerationDefaults } from "../agent/store/schema.js";
 import { ImageGenerationFailedError } from "./image-failure.js";
+
+/**
+ * Venice's ceiling for `width` and `height` on `POST /image/generate`
+ * (`maximum: 1280` on both in the endpoint's OpenAPI schema).
+ */
+export const VENICE_MAX_DIMENSION = 1280;
+
+/**
+ * Venice's default for `width` and `height` (`default: 1024` on both). A
+ * pixel-sized model given an aspect ratio keeps this square's area, so
+ * `1:1` lands exactly on the size Venice picks by default.
+ */
+const VENICE_DEFAULT_DIMENSION = 1024;
+
+/**
+ * How long one read of the models listing answers sizing questions. Venice
+ * changes a model's constraints rarely; an hour bounds how long a process
+ * keeps sizing a model the old way after it does.
+ */
+const MODEL_LISTING_TTL_MS = 60 * 60 * 1000;
+
+/** The fields of a `/models?type=image` entry the adapter sizes requests from. */
+const VeniceModelEntrySchema = z.object({
+  id: z.string(),
+  model_spec: z.object({
+    constraints: z.object({
+      aspectRatios: z.array(z.string()).optional(),
+      widthHeightDivisor: z.number().int().min(1).max(VENICE_MAX_DIMENSION),
+    }),
+  }),
+});
+
+const VeniceModelListingSchema = z.object({ data: z.array(z.unknown()) });
+
+/** How a model takes its size: an `aspect_ratio` token, or `width`/`height` in pixels. */
+type VeniceSizing = { kind: "aspect_ratio" } | { kind: "pixels"; divisor: number };
+
+/**
+ * The `width`/`height` Venice should render `aspectRatio` (`"W:H"`) at on a
+ * model sized in pixels: the area of Venice's default 1024×1024 reshaped to
+ * the ratio, scaled down until the long side fits `VENICE_MAX_DIMENSION`,
+ * and each side rounded to the nearest multiple of `divisor` within
+ * `[divisor, VENICE_MAX_DIMENSION]`. Holding the area keeps every ratio near
+ * the one-megapixel scale these models render at by default. Rounding moves
+ * each side by at most half a `divisor`, so the result approximates the
+ * ratio — unless a side hits the clamp, which only a ratio far beyond the
+ * catalog's (`IMAGE_ALLOWED_ASPECT_RATIOS`) or a divisor that doesn't divide
+ * 1280 can make it do.
+ */
+export function venicePixelSize(
+  aspectRatio: string,
+  divisor: number,
+): { width: number; height: number } {
+  const match = /^(\d+):(\d+)$/.exec(aspectRatio);
+  const ratioWidth = Number(match?.[1]);
+  const ratioHeight = Number(match?.[2]);
+  if (!(ratioWidth > 0 && ratioHeight > 0)) {
+    throw new Error(`venicePixelSize: "${aspectRatio}" is not a W:H aspect ratio`);
+  }
+  if (!Number.isInteger(divisor) || divisor < 1 || divisor > VENICE_MAX_DIMENSION) {
+    throw new Error(`venicePixelSize: divisor ${divisor} is outside 1..${VENICE_MAX_DIMENSION}`);
+  }
+  const area = VENICE_DEFAULT_DIMENSION * VENICE_DEFAULT_DIMENSION;
+  const width = Math.sqrt((area * ratioWidth) / ratioHeight);
+  const height = Math.sqrt((area * ratioHeight) / ratioWidth);
+  const scale = Math.min(1, VENICE_MAX_DIMENSION / Math.max(width, height));
+  const ceiling = Math.floor(VENICE_MAX_DIMENSION / divisor) * divisor;
+  const snap = (side: number): number =>
+    Math.min(ceiling, Math.max(divisor, Math.round((side * scale) / divisor) * divisor));
+  return { width: snap(width), height: snap(height) };
+}
 
 /** Wire-shape body sent to `POST /image/generate`. */
 interface VeniceRequestBody {
@@ -78,7 +159,11 @@ export interface VeniceGenerateOptions {
   prompt: string;
   /** Free-form "don't draw X". Gated on `capabilities.negativePrompt`. */
   negativePrompt?: string;
-  /** Aspect ratio token, e.g. `"16:9"`. Forwarded as-is. */
+  /**
+   * Aspect ratio token, e.g. `"16:9"`. Sent as `aspect_ratio` to a model
+   * whose listing declares aspect ratios, and as `width`/`height` to a model
+   * sized in pixels (see `venicePixelSize`).
+   */
   aspectRatio?: string;
   /** Reproducibility seed; honored only when the model declares it. */
   seed?: number;
@@ -125,6 +210,12 @@ export class VeniceImageProvider {
    * the tool schema; today it's a provider invariant.
    */
   readonly #format: VeniceRequestBody["format"] = "png";
+  /**
+   * The models listing's sizing per model id, with when it was read. Shared
+   * by concurrent calls while in flight; a read that fails is dropped, so the
+   * next call reads again.
+   */
+  #listing: { readAt: number; sizing: Promise<ReadonlyMap<string, VeniceSizing>> } | undefined;
 
   constructor(config: VeniceImageProviderConfig) {
     this.#apiKey = config.apiKey;
@@ -134,12 +225,14 @@ export class VeniceImageProvider {
   }
 
   async generate(opts: VeniceGenerateOptions): Promise<VeniceGenerateResult> {
+    const sizing =
+      opts.aspectRatio === undefined ? {} : await this.#sizingFields(opts.model, opts.aspectRatio);
     const body: VeniceRequestBody = {
       model: opts.model,
       prompt: opts.prompt,
       format: this.#format,
       ...(opts.negativePrompt !== undefined && { negative_prompt: opts.negativePrompt }),
-      ...(opts.aspectRatio !== undefined && { aspect_ratio: opts.aspectRatio }),
+      ...sizing,
       ...(opts.seed !== undefined && { seed: opts.seed }),
       // Provider-level defaults the operator pinned (wizard / CLI). Only
       // forward fields the operator opted into so we don't accidentally
@@ -229,5 +322,86 @@ export class VeniceImageProvider {
       uint8Array: bytes,
       mediaType: MEDIA_TYPE_BY_FORMAT[this.#format],
     };
+  }
+
+  /**
+   * The request-body fields that carry `aspectRatio` for `model`. A model
+   * the listing doesn't describe — absent, or an entry that doesn't parse —
+   * fails the call before anything is generated: guessing a field could size
+   * a pixel model wrong without a sign, the outcome a failed listing read
+   * also refuses. The error tells the LLM to call again without a ratio.
+   */
+  async #sizingFields(
+    model: string,
+    aspectRatio: string,
+  ): Promise<Pick<VeniceRequestBody, "aspect_ratio" | "width" | "height">> {
+    const sizing = (await this.#modelSizing()).get(model);
+    if (sizing === undefined) {
+      throw new ImageGenerationFailedError({
+        kind: "provider_error",
+        provider: "venice",
+        reason:
+          `Venice's model listing (/models?type=image) has no usable entry for ${model}, ` +
+          `so aspect ratio ${aspectRatio} can't be sized for it. Call again without aspectRatio.`,
+      });
+    }
+    return sizing.kind === "aspect_ratio"
+      ? { aspect_ratio: aspectRatio }
+      : venicePixelSize(aspectRatio, sizing.divisor);
+  }
+
+  #modelSizing(): Promise<ReadonlyMap<string, VeniceSizing>> {
+    const now = Date.now();
+    if (this.#listing !== undefined && now - this.#listing.readAt < MODEL_LISTING_TTL_MS) {
+      return this.#listing.sizing;
+    }
+    const listing = { readAt: now, sizing: this.#readModelSizing() };
+    this.#listing = listing;
+    // Drops the failed read from the cache; the caller still receives the
+    // rejection through the promise returned below.
+    listing.sizing.catch(() => {
+      if (this.#listing === listing) this.#listing = undefined;
+    });
+    return listing.sizing;
+  }
+
+  /**
+   * Read `GET /models?type=image` into each model's sizing. An entry that
+   * doesn't parse is left out — the model then counts as undescribed —
+   * rather than failing every sized call over one odd entry. HTTP failures
+   * classify like `generate`'s: 4xx other than 429 is terminal, the rest is
+   * left to the caller's retry.
+   */
+  async #readModelSizing(): Promise<ReadonlyMap<string, VeniceSizing>> {
+    const resp = await this.#fetch(`${this.#baseUrl}/models?type=image`, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${this.#apiKey}`,
+        Accept: "application/json",
+      },
+    });
+    if (resp.status >= 400 && resp.status < 500 && resp.status !== 429) {
+      throw new ImageGenerationFailedError({
+        kind: "provider_error",
+        provider: "venice",
+        reason: `Venice model listing failed: HTTP ${resp.status}`,
+      });
+    }
+    if (!resp.ok) {
+      throw new Error(`Venice model listing failed: HTTP ${resp.status}`);
+    }
+    const listing = VeniceModelListingSchema.parse(await resp.json());
+    return new Map(
+      R.flatMap(listing.data, (raw): Array<[string, VeniceSizing]> => {
+        const entry = VeniceModelEntrySchema.safeParse(raw);
+        if (!entry.success) return [];
+        const { aspectRatios, widthHeightDivisor } = entry.data.model_spec.constraints;
+        const sizing: VeniceSizing =
+          aspectRatios !== undefined && aspectRatios.length > 0
+            ? { kind: "aspect_ratio" }
+            : { kind: "pixels", divisor: widthHeightDivisor };
+        return [[entry.data.id, sizing]];
+      }),
+    );
   }
 }

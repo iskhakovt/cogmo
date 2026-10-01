@@ -64,10 +64,19 @@ describe("venice native image gen (recorded)", () => {
       return;
     }
 
-    const veniceFetch = createVeniceFetch({
+    const replayFetch = createVeniceFetch({
       mode: recording ? "record" : "replay",
       fixturePath: FIXTURE_PATH,
     });
+    // Captures each `/image/generate` body on its way to the mock, to pin
+    // how the recorded models listing shaped the request.
+    const generateBodies: Array<Record<string, unknown>> = [];
+    const veniceFetch: typeof replayFetch = async (input, init) => {
+      if (String(input).endsWith("/image/generate") && typeof init?.body === "string") {
+        generateBodies.push(JSON.parse(init.body) as Record<string, unknown>);
+      }
+      return replayFetch(input, init);
+    };
 
     const providerRow: ImageProviderRow = {
       id: PROVIDER_ID,
@@ -148,5 +157,11 @@ describe("venice native image gen (recorded)", () => {
     // produces the real ~MB-scale PNG; trim back before committing.
     expect(upload).toHaveBeenCalledTimes(1);
     expect(uploadedBuffers[0]?.byteLength).toBeGreaterThan(50);
+
+    // The listing sizes venice-sd35 in pixels (`widthHeightDivisor: 16`, no
+    // `aspectRatios`), so the requested 1:1 travels as width/height.
+    expect(generateBodies).toHaveLength(1);
+    expect(generateBodies[0]).toMatchObject({ width: 1024, height: 1024 });
+    expect(generateBodies[0]).not.toHaveProperty("aspect_ratio");
   });
 });

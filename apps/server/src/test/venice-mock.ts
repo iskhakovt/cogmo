@@ -1,6 +1,7 @@
 /**
- * Scoped `fetch` interceptor for Venice.ai's native `/image/generate` endpoint —
- * record/replay for integration tests.
+ * Scoped `fetch` interceptor for Venice.ai's native `/image/generate` endpoint
+ * and the `/models` listing the adapter sizes requests from — record/replay
+ * for integration tests.
  *
  * Mirrors `src/test/fal-mock.ts`: llmock can't cover Venice's bespoke wire
  * shape (response-header content-policy signals, base64 image bytes inline) so
@@ -12,6 +13,9 @@
  *
  * Strategy:
  * - Intercept `POST {VENICE_HOST}/api/v1/image/generate`.
+ * - Intercept `GET {VENICE_HOST}/api/v1/models?type=…`, one fixture per
+ *   `type` (`venice-models-{type}.json`). A fresh recording captures the
+ *   whole catalog; trim it to the models the tests use before committing.
  * - On replay, load `{key}.json` from disk and replay the recorded
  *   status/headers/body (so `x-venice-is-content-violation` and
  *   `x-venice-is-blurred` survive across the wire).
@@ -36,6 +40,7 @@ import { join } from "node:path";
 
 export const VENICE_HOST = "https://api.venice.ai";
 const VENICE_GENERATE_PATH = "/api/v1/image/generate";
+const VENICE_MODELS_PATH = "/api/v1/models";
 
 interface VeniceRequestBodyLike {
   model: string;
@@ -105,20 +110,15 @@ async function handleGenerate(
   const jsonPath = join(opts.fixturePath, `${key}.json`);
 
   if (opts.mode === "replay") {
-    try {
-      const content = await readFile(jsonPath, "utf-8");
-      const recorded = JSON.parse(content) as RecordedResponse;
-      return new Response(JSON.stringify(recorded.body), {
-        status: recorded.status,
-        headers: recorded.headers,
-      });
-    } catch {
+    const content = await readFixture(jsonPath);
+    if (content === undefined) {
       return new Response(
         `venice-mock: no fixture for key "${key}" (model=${body.model} prompt="${body.prompt.slice(0, 60)}..."). ` +
           "Re-record with RECORD=1 VENICE_API_KEY=... pnpm test:record.",
         { status: 503, headers: { "Content-Type": "text/plain" } },
       );
     }
+    return replayed(content);
   }
 
   // record mode: passthrough + capture.
@@ -157,6 +157,78 @@ async function handleGenerate(
   });
 }
 
+/**
+ * Replay or record the models listing. Keyed on the `type` query parameter
+ * alone — the listing is the same for every caller and changes only when
+ * Venice changes its catalog.
+ */
+async function handleModels(
+  url: string,
+  init: RequestInit | undefined,
+  opts: VeniceMockOptions,
+): Promise<Response> {
+  const type = new URL(url).searchParams.get("type") ?? "all";
+  const jsonPath = join(opts.fixturePath, `venice-models-${type}.json`);
+
+  if (opts.mode === "replay") {
+    const content = await readFixture(jsonPath);
+    if (content === undefined) {
+      return new Response(
+        `venice-mock: no fixture for the models listing (type=${type}). ` +
+          "Re-record with RECORD=1 VENICE_API_KEY=... pnpm test:record.",
+        { status: 503, headers: { "Content-Type": "text/plain" } },
+      );
+    }
+    return replayed(content);
+  }
+
+  // Record mode: direct to Venice, like `handleGenerate`. A failed listing
+  // (bad key, rate limit, outage) or one that isn't JSON goes back to the
+  // caller unrecorded, so it never becomes the fixture replay serves.
+  const realResp = await globalThis.fetch(url, init);
+  if (!realResp.ok) return realResp;
+  const text = await realResp.text();
+  const listing = tryParseJson(text);
+  if (typeof listing === "string") {
+    return new Response(text, { status: realResp.status, headers: realResp.headers });
+  }
+  const captured: RecordedResponse = {
+    status: realResp.status,
+    headers: {
+      "Content-Type": realResp.headers.get("Content-Type") ?? "application/json",
+    },
+    body: listing,
+  };
+  await mkdir(opts.fixturePath, { recursive: true });
+  await writeFile(jsonPath, JSON.stringify(captured, null, 2));
+  return new Response(JSON.stringify(captured.body), {
+    status: captured.status,
+    headers: captured.headers,
+  });
+}
+
+/** A committed fixture's text, or undefined when there is none to read. */
+async function readFixture(path: string): Promise<string | undefined> {
+  try {
+    return await readFile(path, "utf-8");
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Replay a committed fixture. Parsed outside `readFixture`'s catch, so a
+ * malformed fixture fails with its parse error rather than reading as a
+ * missing one.
+ */
+function replayed(content: string): Response {
+  const recorded = JSON.parse(content) as RecordedResponse;
+  return new Response(JSON.stringify(recorded.body), {
+    status: recorded.status,
+    headers: recorded.headers,
+  });
+}
+
 function tryParseJson(raw: string): unknown {
   try {
     return JSON.parse(raw);
@@ -172,8 +244,9 @@ export interface VeniceMockOptions {
 
 /**
  * Create a `fetch`-compatible function that intercepts Venice's native
- * `/image/generate` endpoint and delegates everything else to
- * `globalThis.fetch`. Pass the result to `VeniceImageProvider({ fetch })`.
+ * `/image/generate` endpoint and its `/models` listing, and delegates
+ * everything else to `globalThis.fetch`. Pass the result to
+ * `VeniceImageProvider({ fetch })`.
  */
 export function createVeniceFetch(
   opts: VeniceMockOptions,
@@ -184,6 +257,10 @@ export function createVeniceFetch(
 
     if (url.startsWith(`${VENICE_HOST}${VENICE_GENERATE_PATH}`) && method === "POST") {
       return handleGenerate(init, opts);
+    }
+
+    if (url.startsWith(`${VENICE_HOST}${VENICE_MODELS_PATH}`) && method === "GET") {
+      return handleModels(url, init, opts);
     }
 
     if (opts.mode === "replay" && url.includes("venice.ai")) {
