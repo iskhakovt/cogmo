@@ -1,4 +1,6 @@
-import { finishesWithin } from "./util/finishes-within.js";
+import { logger } from "../logger.js";
+import { finishesWithin } from "../util/finishes-within.js";
+import type { CoreDeps, RuntimeDeps, SandboxDeps, SkillRunnerHandle } from "./stages.js";
 
 /** What `cogmo serve` tears down on exit. */
 export interface ServeResources {
@@ -83,6 +85,47 @@ export async function shutdownServe(
     ...sandboxOutcomes,
     ...instanceOutcomes,
   ];
+}
+
+/** What `cogmo serve` tears down, from what the bootstrap and the web UI started. */
+export function serveResources(
+  boot: Pick<CoreDeps, "runInTx" | "sandboxStore"> &
+    Pick<SandboxDeps, "sandbox" | "sandboxInstanceId"> &
+    Pick<RuntimeDeps, "adapters" | "codingStreams" | "mcpRegistry"> &
+    SkillRunnerHandle,
+  web: ServeResources["web"],
+): ServeResources {
+  const { runInTx, sandboxStore, sandboxInstanceId } = boot;
+  return {
+    web,
+    adapters: boot.adapters,
+    codingStreams: boot.codingStreams,
+    mcpRegistry: boot.mcpRegistry,
+    skills: boot.skillRunner,
+    sandbox: boot.sandbox,
+    closeInstance: sandboxInstanceId
+      ? () => runInTx((tx) => sandboxStore.closeInstance(tx, sandboxInstanceId))
+      : null,
+  };
+}
+
+export function logShutdownOutcomes(outcomes: ReadonlyArray<StepOutcome>): void {
+  for (const outcome of outcomes) {
+    switch (outcome.outcome) {
+      case "done":
+        logger.debug({ step: outcome.step }, "shutdown step done");
+        break;
+      case "timed_out":
+        logger.warn({ step: outcome.step, ms: outcome.ms }, "shutdown step timed out");
+        break;
+      case "failed":
+        logger.error({ step: outcome.step, err: outcome.error }, "shutdown step failed");
+        break;
+      case "skipped":
+        logger.warn({ step: outcome.step, reason: outcome.reason }, "shutdown step skipped");
+        break;
+    }
+  }
 }
 
 async function bounded(step: string, ms: number, run: () => Promise<void>): Promise<StepOutcome> {
