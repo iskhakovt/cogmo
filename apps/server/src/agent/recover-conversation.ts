@@ -29,11 +29,11 @@ import {
 } from "../inngest/events.js";
 import { logger } from "../logger.js";
 import { nextCooldownState } from "./cooldown.js";
-import type { AgentStore } from "./store/index.js";
+import type { ConversationStore } from "./store/index.js";
 
 export interface RecoverConversationDeps {
   runInTx: Transactor;
-  agentStore: AgentStore;
+  agentStore: ConversationStore;
 }
 
 export function createRecoverConversation(deps: RecoverConversationDeps) {

@@ -1,12 +1,12 @@
 import type { Transactor } from "../../db/index.js";
 import type { CoreMemoryScope } from "../core-memory/scope.js";
-import type { AgentStore } from "../store/index.js";
+import type { TranscriptStore } from "../store/index.js";
 import type { CoreMemoryChange } from "../system-prompt-snapshot.js";
 import { renderTurnContext, type TurnContext, type TurnContextInput } from "../turn-context.js";
 
 export interface StoreTurnContextDeps {
   runInTx: Transactor;
-  agentStore: AgentStore;
+  agentStore: TranscriptStore;
 }
 
 /**

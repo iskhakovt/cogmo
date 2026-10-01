@@ -1,8 +1,8 @@
 /**
- * Instruction rules and retirement in `DrizzleAgentStore`
- * (design/evolution.md → Explicit Instructions): who sees a rule, setting and
- * retiring it, the review list, and the learned-rule paths that skip a
- * retired row.
+ * `DrizzleSteeringRuleStore`: who sees a rule, setting and retiring an
+ * instruction (design/evolution.md → Explicit Instructions), the review list,
+ * and the learned-rule paths — extraction, promotion, contradiction and
+ * consolidation — including those that skip a retired row.
  */
 
 import { eq } from "drizzle-orm";
@@ -11,24 +11,29 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
 import { expectDefined, expectOk } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
+import { DrizzleConversationStore } from "./conversations.js";
+import { DrizzleProfileStore } from "./profiles.js";
+import { type SteeringRuleSourceValue, steeringRules, users } from "./schema.js";
 import {
-  DrizzleAgentStore,
+  DrizzleSteeringRuleStore,
   INSTRUCTION_RULE_LIMIT,
   type InstructionRuleRow,
   type MemoryRule,
   memoryRulesFor,
   type SetInstructionRuleResult,
-} from "./index.js";
-import { type SteeringRuleSourceValue, steeringRules, users } from "./schema.js";
+} from "./steering-rules.js";
+import { DrizzleUserStore } from "./users.js";
 
 let db: Database;
 let tx: Transactor;
 let close: () => Promise<void>;
-let store: DrizzleAgentStore;
+const store = new DrizzleSteeringRuleStore();
+const userStore = new DrizzleUserStore();
+const profileStore = new DrizzleProfileStore();
+const conversationStore = new DrizzleConversationStore();
 
 beforeAll(async () => {
   ({ db, tx, close } = await createTestDatabase());
-  store = new DrizzleAgentStore();
 });
 
 afterEach(async () => {
@@ -40,13 +45,13 @@ afterAll(async () => {
 });
 
 async function seedUser(): Promise<string> {
-  return (await tx((trx) => store.createUser(trx))).id;
+  return (await tx((trx) => userStore.createUser(trx))).id;
 }
 
 async function seedProfile(name = "main"): Promise<string> {
   return (
     await tx((trx) =>
-      store
+      profileStore
         .createProfile(trx, { userId: null, name, basePrompt: "", model: "m", toolSet: [] })
         .then(expectOk),
     )
@@ -816,7 +821,9 @@ describe("the Observer's rule reads", () => {
       const userId = await seedUser();
       const profileId = await seedProfile(`p-${Math.random()}`);
       return (
-        await tx((trx) => store.createConversation(trx, { userId, profileId, isPrivate: true }))
+        await tx((trx) =>
+          conversationStore.createConversation(trx, { userId, profileId, isPrivate: true }),
+        )
       ).id;
     }
 
@@ -984,5 +991,757 @@ describe("the Observer's rule reads", () => {
         .map((r) => r.rule)
         .sort(),
     ).toEqual(["Mine", "Persona"]);
+  });
+});
+
+describe("DrizzleSteeringRuleStore", () => {
+  describe("steering rules", () => {
+    it("returns active rules for profile + global, safety first", async () => {
+      const profileId = await seedProfile();
+      const otherProfileId = (
+        await tx((trx) =>
+          profileStore
+            .createProfile(trx, {
+              userId: null,
+              name: "other",
+              basePrompt: "p",
+              model: "m",
+              toolSet: [],
+            })
+            .then(expectOk),
+        )
+      ).id;
+
+      // Insert rules via raw db since store doesn't expose createRule
+      const { steeringRules } = await import("./schema.js");
+      await db.insert(steeringRules).values([
+        {
+          rule: "Be concise",
+          category: "style",
+          active: true,
+          source: "manual",
+          priority: 2,
+          observationCount: 0,
+          profileId,
+        },
+        {
+          rule: "Global safety rule",
+          category: "safety",
+          active: true,
+          source: "manual",
+          priority: 1,
+          observationCount: 0,
+          profileId: null,
+        },
+        {
+          rule: "Inactive rule",
+          category: "style",
+          active: false,
+          source: "manual",
+          priority: 0,
+          observationCount: 0,
+          profileId,
+        },
+        {
+          rule: "Other profile rule",
+          category: "domain",
+          active: true,
+          source: "manual",
+          priority: 0,
+          observationCount: 0,
+          profileId: otherProfileId,
+        },
+      ]);
+
+      const rules = await tx((trx) => store.getActiveRules(trx, { profileId, userId: null }));
+      expect(rules).toEqual([
+        { rule: "Global safety rule", section: "always", channelType: null },
+        { rule: "Be concise", section: "always", channelType: null },
+      ]);
+    });
+
+    it("sections each rule by its source", async () => {
+      const profileId = await seedProfile();
+      const userId = await seedUser();
+      const { steeringRules } = await import("./schema.js");
+      const rule = (
+        text: string,
+        source: "manual" | "seed" | "instruction" | "correction" | "evolution",
+        priority: number,
+        channelType: string | null,
+      ) => ({
+        rule: text,
+        category: "style",
+        active: true,
+        source,
+        priority,
+        observationCount: 2,
+        profileId: null,
+        channelType,
+        ...(source === "instruction" && { userId, quote: text }),
+      });
+      await db
+        .insert(steeringRules)
+        .values([
+          rule("Channel default", "seed", 50, "telegram"),
+          rule("Learned", "correction", 100, null),
+          rule("Merged", "evolution", 100, null),
+          rule("Stated", "instruction", 100, null),
+          rule("Operator", "manual", 200, null),
+        ]);
+
+      const rules = await tx((trx) => store.getActiveRules(trx, { profileId, userId }));
+      expect(Object.fromEntries(rules.map((r) => [r.rule, r.section]))).toEqual({
+        Operator: "always",
+        Stated: "from_user",
+        Learned: "learned",
+        Merged: "learned",
+        "Channel default": "channel_defaults",
+      });
+    });
+
+    it("orders a section by profile scope, then channel scope, then priority", async () => {
+      const profileId = await seedProfile();
+      const { steeringRules } = await import("./schema.js");
+      const rule = (
+        text: string,
+        scope: { profileId: string | null; channelType: string | null },
+        priority: number,
+      ) => ({
+        rule: text,
+        category: "style",
+        active: true,
+        source: "correction" as const,
+        priority,
+        observationCount: 2,
+        ...scope,
+      });
+      const everywhere = { profileId: null, channelType: null };
+      // Inserted widest first, so id order is the reverse of the expected one.
+      await db
+        .insert(steeringRules)
+        .values([
+          rule("Everywhere, priority 100", everywhere, 100),
+          rule("Everywhere, priority 90", everywhere, 90),
+          rule("All profiles, on telegram", { profileId: null, channelType: "telegram" }, 10),
+          rule("This profile, all channels", { profileId, channelType: null }, 10),
+          rule("This profile, on telegram", { profileId, channelType: "telegram" }, 100),
+        ]);
+
+      expect(
+        (await tx((trx) => store.getActiveRules(trx, { profileId, userId: null }))).map(
+          (r) => r.rule,
+        ),
+      ).toEqual([
+        "This profile, on telegram",
+        "This profile, all channels",
+        "All profiles, on telegram",
+        "Everywhere, priority 90",
+        "Everywhere, priority 100",
+      ]);
+    });
+
+    it("lists safety rules first in Always, whatever their scope and priority", async () => {
+      const profileId = await seedProfile();
+      const { steeringRules } = await import("./schema.js");
+      await db.insert(steeringRules).values([
+        {
+          rule: "Profile style rule",
+          category: "style",
+          active: true,
+          source: "manual",
+          priority: 1,
+          observationCount: 0,
+          profileId,
+        },
+        {
+          rule: "Global safety rule",
+          category: "safety",
+          active: true,
+          source: "manual",
+          priority: 500,
+          observationCount: 0,
+          profileId: null,
+        },
+      ]);
+
+      expect(await tx((trx) => store.getActiveRules(trx, { profileId, userId: null }))).toEqual([
+        { rule: "Global safety rule", section: "always", channelType: null },
+        { rule: "Profile style rule", section: "always", channelType: null },
+      ]);
+    });
+
+    it("insertSeedRule writes an active, global channel default", async () => {
+      const { id } = await tx((trx) =>
+        store.insertSeedRule(trx, {
+          rule: "Avoid tables",
+          category: "style",
+          channelType: "telegram",
+          priority: 50,
+        }),
+      );
+
+      const { steeringRules } = await import("./schema.js");
+      const rows = await db
+        .select({
+          source: steeringRules.source,
+          active: steeringRules.active,
+          profileId: steeringRules.profileId,
+          channelType: steeringRules.channelType,
+          priority: steeringRules.priority,
+          observationCount: steeringRules.observationCount,
+        })
+        .from(steeringRules)
+        .where(eq(steeringRules.id, id));
+      expect(rows).toEqual([
+        {
+          source: "seed",
+          active: true,
+          profileId: null,
+          channelType: "telegram",
+          priority: 50,
+          observationCount: 0,
+        },
+      ]);
+    });
+
+    it("hasChannelDefaults counts only the channel's seed rules", async () => {
+      const { steeringRules } = await import("./schema.js");
+      const has = () => tx((trx) => store.hasChannelDefaults(trx, "telegram"));
+      const insert = (source: "manual" | "seed" | "correction", channelType: string) =>
+        db.insert(steeringRules).values({
+          rule: `${source} on ${channelType}`,
+          category: "style",
+          active: true,
+          source,
+          priority: 100,
+          observationCount: 2,
+          profileId: null,
+          channelType,
+        });
+
+      await insert("correction", "telegram");
+      await insert("manual", "telegram");
+      await insert("seed", "slack");
+      expect(await has()).toBe(false);
+
+      await insert("seed", "telegram");
+      expect(await has()).toBe(true);
+    });
+
+    it("keeps tied priorities newest first after both corrections are promoted", async () => {
+      const profileId = await seedProfile();
+      // Created and graduated the way the Observer does it: each correction is
+      // inserted at the same priority, then promoted by an in-place update that
+      // moves its row in the heap. Graduating the first last leaves the rows in
+      // id order on disk, the reverse of the rendered order.
+      const observe = async (rule: string, existingRuleId?: string) =>
+        expectDefined(
+          await tx((trx) =>
+            store.upsertCorrection(trx, {
+              rule,
+              category: "style",
+              profileId: null,
+              ...(existingRuleId !== undefined && { existingRuleId }),
+            }),
+          ),
+          rule,
+        );
+      const first = await observe("First rule");
+      const second = await observe("Second rule");
+      await observe("Second rule", second.id);
+      await observe("First rule", first.id);
+
+      expect(await tx((trx) => store.getActiveRules(trx, { profileId, userId: null }))).toEqual([
+        { rule: "Second rule", section: "learned", channelType: null },
+        { rule: "First rule", section: "learned", channelType: null },
+      ]);
+      expect((await tx((trx) => store.getCorrections(trx, profileId))).map((c) => c.rule)).toEqual([
+        "First rule",
+        "Second rule",
+      ]);
+    });
+
+    it("returns empty array when no active rules", async () => {
+      const profileId = await seedProfile();
+      expect(await tx((trx) => store.getActiveRules(trx, { profileId, userId: null }))).toEqual([]);
+    });
+
+    it("returns every channel's rules with their channel, the narrower scope first", async () => {
+      const profileId = await seedProfile();
+      const { steeringRules: sr } = await import("./schema.js");
+      await db.insert(sr).values([
+        {
+          rule: "Global rule",
+          category: "style",
+          active: true,
+          source: "manual",
+          priority: 1,
+          observationCount: 0,
+          profileId: null,
+          channelType: null,
+        },
+        {
+          rule: "Telegram rule",
+          category: "style",
+          active: true,
+          source: "manual",
+          priority: 2,
+          observationCount: 0,
+          profileId: null,
+          channelType: "telegram",
+        },
+        {
+          rule: "Slack rule",
+          category: "style",
+          active: true,
+          source: "manual",
+          priority: 3,
+          observationCount: 0,
+          profileId: null,
+          channelType: "slack",
+        },
+      ]);
+
+      expect(await tx((trx) => store.getActiveRules(trx, { profileId, userId: null }))).toEqual([
+        { rule: "Telegram rule", section: "always", channelType: "telegram" },
+        { rule: "Slack rule", section: "always", channelType: "slack" },
+        { rule: "Global rule", section: "always", channelType: null },
+      ]);
+    });
+  });
+
+  describe("evolution: corrections", () => {
+    it("getCorrections returns correction-sourced rules with channelType for profile + global", async () => {
+      const profileId = await seedProfile();
+
+      const { steeringRules } = await import("./schema.js");
+      await db.insert(steeringRules).values([
+        {
+          rule: "Be concise",
+          category: "style",
+          active: false,
+          source: "correction",
+          priority: 100,
+          observationCount: 1,
+          profileId: null,
+        },
+        {
+          rule: "No long voice notes",
+          category: "style",
+          active: true,
+          source: "correction",
+          priority: 100,
+          observationCount: 2,
+          profileId: null,
+          channelType: "telegram",
+        },
+        {
+          rule: "Manual rule",
+          category: "safety",
+          active: true,
+          source: "manual",
+          priority: 1,
+          observationCount: 0,
+          profileId: null,
+        },
+      ]);
+
+      const corrections = await tx((trx) => store.getCorrections(trx, profileId));
+      expect(corrections).toHaveLength(2);
+      expect(
+        corrections.map((c) => ({
+          rule: c.rule,
+          channelType: c.channelType,
+          priority: c.priority,
+        })),
+      ).toEqual([
+        { rule: "Be concise", channelType: null, priority: 100 },
+        { rule: "No long voice notes", channelType: "telegram", priority: 100 },
+      ]);
+    });
+
+    it("upsertCorrection inserts new rule as inactive with observationCount 1", async () => {
+      const result = expectDefined(
+        await tx((trx) =>
+          store.upsertCorrection(trx, {
+            rule: "Prefer bullet points",
+            category: "style",
+            profileId: null,
+          }),
+        ),
+        "upsert",
+      );
+
+      expect(result.promoted).toBe(false);
+
+      const { steeringRules } = await import("./schema.js");
+      const rows = await db
+        .select({
+          rule: steeringRules.rule,
+          active: steeringRules.active,
+          source: steeringRules.source,
+          observationCount: steeringRules.observationCount,
+          priority: steeringRules.priority,
+          channelType: steeringRules.channelType,
+        })
+        .from(steeringRules)
+        .where(eq(steeringRules.id, result.id));
+
+      expect(rows[0]).toEqual({
+        rule: "Prefer bullet points",
+        active: false,
+        source: "correction",
+        observationCount: 1,
+        priority: 100,
+        channelType: null,
+      });
+    });
+
+    it("upsertCorrection persists channelType on a new rule when supplied", async () => {
+      const result = expectDefined(
+        await tx((trx) =>
+          store.upsertCorrection(trx, {
+            rule: "Skip markdown headings here",
+            category: "style",
+            profileId: null,
+            channelType: "telegram",
+          }),
+        ),
+        "upsert",
+      );
+
+      const { steeringRules } = await import("./schema.js");
+      const rows = await db
+        .select({ channelType: steeringRules.channelType })
+        .from(steeringRules)
+        .where(eq(steeringRules.id, result.id));
+
+      expect(rows[0]?.channelType).toBe("telegram");
+    });
+
+    it("upsertCorrection increments existing rule without promotion when count < 2", async () => {
+      // Insert a rule that's already been seen once but needs special handling
+      // (observationCount will go to 2 on increment, which triggers promotion)
+      // So for this test, we need a rule with observationCount = 0 (edge case)
+      const { steeringRules } = await import("./schema.js");
+      const [inserted] = await db
+        .insert(steeringRules)
+        .values({
+          rule: "Test rule",
+          category: "style",
+          active: false,
+          source: "correction",
+          priority: 100,
+          observationCount: 0,
+        })
+        .returning({ id: steeringRules.id });
+
+      const result = expectDefined(
+        await tx((trx) =>
+          store.upsertCorrection(trx, {
+            rule: "Test rule",
+            category: "style",
+            profileId: null,
+            existingRuleId: inserted!.id,
+          }),
+        ),
+        "upsert",
+      );
+
+      expect(result.promoted).toBe(false);
+
+      const rows = await db
+        .select({
+          observationCount: steeringRules.observationCount,
+          active: steeringRules.active,
+        })
+        .from(steeringRules)
+        .where(eq(steeringRules.id, inserted!.id));
+
+      expect(rows[0]).toEqual({ observationCount: 1, active: false });
+    });
+
+    it("upsertCorrection graduates rule to active when observationCount reaches 2", async () => {
+      // Insert with observationCount = 1 — next increment crosses the threshold
+      const { steeringRules } = await import("./schema.js");
+      const [inserted] = await db
+        .insert(steeringRules)
+        .values({
+          rule: "Be concise",
+          category: "style",
+          active: false,
+          source: "correction",
+          priority: 100,
+          observationCount: 1,
+        })
+        .returning({ id: steeringRules.id });
+
+      const result = expectDefined(
+        await tx((trx) =>
+          store.upsertCorrection(trx, {
+            rule: "Be concise",
+            category: "style",
+            profileId: null,
+            existingRuleId: inserted!.id,
+          }),
+        ),
+        "upsert",
+      );
+
+      expect(result.promoted).toBe(true);
+
+      const rows = await db
+        .select({
+          observationCount: steeringRules.observationCount,
+          active: steeringRules.active,
+        })
+        .from(steeringRules)
+        .where(eq(steeringRules.id, inserted!.id));
+
+      expect(rows[0]).toEqual({ observationCount: 2, active: true });
+    });
+
+    it("upsertCorrection does not re-promote already active rule", async () => {
+      const { steeringRules } = await import("./schema.js");
+      const [inserted] = await db
+        .insert(steeringRules)
+        .values({
+          rule: "Already active",
+          category: "domain",
+          active: true,
+          source: "correction",
+          priority: 100,
+          observationCount: 5,
+        })
+        .returning({ id: steeringRules.id });
+
+      const result = expectDefined(
+        await tx((trx) =>
+          store.upsertCorrection(trx, {
+            rule: "Already active",
+            category: "domain",
+            profileId: null,
+            existingRuleId: inserted!.id,
+          }),
+        ),
+        "upsert",
+      );
+
+      expect(result.promoted).toBe(false);
+
+      const rows = await db
+        .select({ observationCount: steeringRules.observationCount })
+        .from(steeringRules)
+        .where(eq(steeringRules.id, inserted!.id));
+
+      expect(rows[0]!.observationCount).toBe(6);
+    });
+
+    it("countActiveLearnedRules counts global + profile-specific", async () => {
+      const profileId = await seedProfile();
+
+      const { steeringRules } = await import("./schema.js");
+      await db.insert(steeringRules).values([
+        {
+          rule: "Global rule",
+          category: "style",
+          active: true,
+          source: "correction",
+          priority: 100,
+          observationCount: 2,
+          profileId: null,
+        },
+        {
+          rule: "Profile rule",
+          category: "domain",
+          active: true,
+          source: "correction",
+          priority: 100,
+          observationCount: 2,
+          profileId,
+        },
+        {
+          rule: "Inactive rule",
+          category: "style",
+          active: false,
+          source: "correction",
+          priority: 100,
+          observationCount: 1,
+          profileId: null,
+        },
+      ]);
+
+      expect(await tx((trx) => store.countActiveLearnedRules(trx, profileId))).toBe(2);
+    });
+
+    it("replaceRules deletes old and inserts new atomically", async () => {
+      const { steeringRules } = await import("./schema.js");
+      const inserted = await db
+        .insert(steeringRules)
+        .values([
+          {
+            rule: "Rule A",
+            category: "style",
+            active: true,
+            source: "correction",
+            priority: 100,
+            observationCount: 3,
+          },
+          {
+            rule: "Rule B",
+            category: "style",
+            active: true,
+            source: "correction",
+            priority: 100,
+            observationCount: 2,
+          },
+        ])
+        .returning({ id: steeringRules.id });
+
+      const oldIds = inserted.map((r) => r.id);
+
+      const result = await tx((trx) =>
+        store
+          .replaceRules(trx, {
+            oldIds,
+            newRule: {
+              rule: "Combined rule A+B",
+              category: "style",
+              profileId: null,
+              channelType: null,
+              priority: 100,
+              observationCount: 5,
+            },
+          })
+          .then(expectOk),
+      );
+
+      // Old rules deleted
+      const remaining = await db.select({ id: steeringRules.id }).from(steeringRules);
+      expect(remaining).toHaveLength(1);
+      expect(remaining[0]!.id).toBe(result.id);
+
+      // New rule has correct values, channelType persists as null
+      const rows = await db
+        .select({
+          rule: steeringRules.rule,
+          source: steeringRules.source,
+          active: steeringRules.active,
+          observationCount: steeringRules.observationCount,
+          channelType: steeringRules.channelType,
+        })
+        .from(steeringRules)
+        .where(eq(steeringRules.id, result.id));
+
+      expect(rows[0]).toEqual({
+        rule: "Combined rule A+B",
+        source: "evolution",
+        active: true,
+        observationCount: 5,
+        channelType: null,
+      });
+    });
+
+    it("replaceRules persists channelType when supplied", async () => {
+      const { steeringRules } = await import("./schema.js");
+      const inserted = await db
+        .insert(steeringRules)
+        .values([
+          {
+            rule: "Avoid markdown headings on Telegram",
+            category: "style",
+            active: true,
+            source: "correction",
+            priority: 100,
+            observationCount: 3,
+            channelType: "telegram",
+          },
+          {
+            rule: "Skip headings in Telegram replies",
+            category: "style",
+            active: true,
+            source: "correction",
+            priority: 100,
+            observationCount: 2,
+            channelType: "telegram",
+          },
+        ])
+        .returning({ id: steeringRules.id });
+
+      const oldIds = inserted.map((r) => r.id);
+
+      const result = await tx((trx) =>
+        store
+          .replaceRules(trx, {
+            oldIds,
+            newRule: {
+              rule: "Avoid markdown headings in Telegram replies",
+              category: "style",
+              profileId: null,
+              channelType: "telegram",
+              priority: 100,
+              observationCount: 5,
+            },
+          })
+          .then(expectOk),
+      );
+
+      const rows = await db
+        .select({
+          rule: steeringRules.rule,
+          channelType: steeringRules.channelType,
+          source: steeringRules.source,
+        })
+        .from(steeringRules)
+        .where(eq(steeringRules.id, result.id));
+
+      expect(rows[0]).toEqual({
+        rule: "Avoid markdown headings in Telegram replies",
+        channelType: "telegram",
+        source: "evolution",
+      });
+    });
+
+    it("replaceRules result visible in getActiveRules", async () => {
+      const profileId = await seedProfile();
+
+      const { steeringRules } = await import("./schema.js");
+      const inserted = await db
+        .insert(steeringRules)
+        .values([
+          {
+            rule: "Old rule",
+            category: "style",
+            active: true,
+            source: "correction",
+            priority: 100,
+            observationCount: 2,
+            profileId: null,
+          },
+        ])
+        .returning({ id: steeringRules.id });
+
+      await tx((trx) =>
+        store
+          .replaceRules(trx, {
+            oldIds: [inserted[0]!.id],
+            newRule: {
+              rule: "New consolidated rule",
+              category: "style",
+              profileId: null,
+              channelType: null,
+              priority: 100,
+              observationCount: 2,
+            },
+          })
+          .then(expectOk),
+      );
+
+      const rules = await tx((trx) => store.getActiveRules(trx, { profileId, userId: null }));
+      expect(rules).toEqual([
+        { rule: "New consolidated rule", section: "learned", channelType: null },
+      ]);
+    });
   });
 });

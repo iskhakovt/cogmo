@@ -1,7 +1,7 @@
 import type { Transaction, Transactor } from "../../db/index.js";
 import { type CoreMemoryScope, type CoreMemoryView, readCoreMemory } from "../core-memory/scope.js";
 import type { SectionedRule } from "../rule-sections.js";
-import type { AgentStore, Profile } from "../store/index.js";
+import type { CoreMemoryStore, Profile, SteeringRuleStore } from "../store/index.js";
 
 /**
  * Load what the prompt assembler renders: the steering rules the profile and
@@ -23,7 +23,7 @@ import type { AgentStore, Profile } from "../store/index.js";
  */
 export interface LoadConversationContextDeps {
   runInTx: Transactor;
-  agentStore: AgentStore;
+  agentStore: SteeringRuleStore & CoreMemoryStore;
 }
 
 export interface LoadConversationContextArgs {
@@ -54,7 +54,7 @@ export async function loadConversationContext(
 /** The same reads in a caller's transaction. */
 export async function readConversationContext(
   tx: Transaction,
-  agentStore: AgentStore,
+  agentStore: SteeringRuleStore & CoreMemoryStore,
   args: LoadConversationContextArgs,
 ): Promise<ConversationContext> {
   const rules = args.profile
