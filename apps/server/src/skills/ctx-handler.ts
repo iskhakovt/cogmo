@@ -1,9 +1,13 @@
 import { lookup } from "node:dns/promises";
+import { err, ok, type Result } from "neverthrow";
+import { match } from "ts-pattern";
 import { z } from "zod";
+import { describeFileError } from "../agent/files.js";
 import type { Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
 import type { SecretsStore } from "../secrets/store/index.js";
-import { CtxError, type CtxHandler } from "./dispatcher.js";
+import { describeError } from "../util/describe-error.js";
+import type { CtxFailure, CtxHandler } from "./dispatcher.js";
 import type { SkillRunServices } from "./run-as.js";
 import type { SkillManifest } from "./types.js";
 import { DEFAULT_WALL_CLOCK_S } from "./wall-clock.js";
@@ -56,7 +60,8 @@ export interface DefaultCtxHandlerOptions {
    */
   recordContextCall: (call: {
     runId: string;
-    method: CtxMethod;
+    /** A method outside `CTX_METHODS` is recorded as the worker named it. */
+    method: string;
     target: string | null;
     ok: boolean;
     error: string | null;
@@ -294,11 +299,12 @@ async function withDeadline<T>(work: Promise<T>, ms: number, what: string): Prom
  * Read a response body, refusing anything past `cap`. Counting while
  * streaming means an oversized body is abandoned as soon as it crosses
  * the line, rather than buffered in full and measured afterwards — which
- * is the whole point of a cap when the consumer is a WASM heap.
+ * is the whole point of a cap when the consumer is a WASM heap. Errs with
+ * `too_large`; a failing stream throws.
  */
-async function readCapped(response: Response, cap: number): Promise<string> {
+async function readCapped(response: Response, cap: number): Promise<Result<string, "too_large">> {
   const reader = response.body?.getReader();
-  if (!reader) return "";
+  if (!reader) return ok("");
   const chunks: Uint8Array[] = [];
   let total = 0;
   for (;;) {
@@ -307,7 +313,7 @@ async function readCapped(response: Response, cap: number): Promise<string> {
     total += value.byteLength;
     if (total > cap) {
       await reader.cancel();
-      throw new CtxError("response_too_large", `http.request response exceeded ${cap} bytes`);
+      return err("too_large");
     }
     chunks.push(value);
   }
@@ -317,16 +323,70 @@ async function readCapped(response: Response, cap: number): Promise<string> {
     joined.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  return new TextDecoder().decode(joined);
+  return ok(new TextDecoder().decode(joined));
+}
+
+/** The `kind` a refused ctx call raises in the skill as `CtxError.kind`. */
+type CtxErrorKind =
+  | "unknown_method"
+  | "invalid_args"
+  | "not_in_allowlist"
+  | "secret_not_found"
+  | "missing_effect"
+  | "read_failed"
+  | "write_failed"
+  | "list_failed"
+  | "blocked_destination"
+  | "timeout"
+  | "network_error"
+  | "response_too_large";
+
+/** A served call: its value, and the target its audit row names. */
+interface Served {
+  value: unknown;
+  target: string | null;
 }
 
 /**
- * Resolves `ctx.*` RPCs from a Tier 1 worker against host services. Every
- * invocation: (1) validates the args against a per-method schema, (2)
- * enforces manifest-declared allowlists, (3) hits the host service, (4)
- * persists to `skill_context_calls` (target name only — never value), (5)
- * returns the value or throws a typed `CtxError` the dispatcher will surface
- * as a typed Python exception.
+ * A refused call. The audit row records `auditAs` when set, else `kind`:
+ * a host outside `network.allow` raises `blocked_destination` but is
+ * audited as `not_in_allowlist`, the policy that refused it.
+ */
+interface Refusal {
+  kind: CtxErrorKind;
+  message: string;
+  target: string | null;
+  auditAs?: string;
+}
+
+type Outcome = Result<Served, Refusal>;
+
+function served(value: unknown, target: string | null): Outcome {
+  return ok({ value, target });
+}
+
+function refused(
+  kind: CtxErrorKind,
+  message: string,
+  target: string | null,
+  auditAs?: string,
+): Outcome {
+  return err({ kind, message, target, ...(auditAs !== undefined && { auditAs }) });
+}
+
+/** A thrown fetch or resolver error, as the kind the skill sees. */
+function transportKind(e: unknown): "timeout" | "network_error" {
+  return e instanceof Error && e.name === "TimeoutError" ? "timeout" : "network_error";
+}
+
+/**
+ * Resolves `ctx.*` RPCs from a worker against host services. Every call:
+ * (1) validates the args against a per-method schema, (2) enforces
+ * manifest-declared allowlists, (3) hits the host service, (4) persists to
+ * `skill_context_calls` (target name only — never value), (5) returns the
+ * value or a typed refusal the worker raises as a Python `CtxError`. A host
+ * service that throws is not a refusal: it propagates, unaudited, and the
+ * dispatcher answers it as `internal`.
  */
 export class DefaultCtxHandler implements CtxHandler {
   #manifest: SkillManifest;
@@ -361,77 +421,78 @@ export class DefaultCtxHandler implements CtxHandler {
     this.#allowedHosts = opts.manifest.network?.allow.map((h) => h.toLowerCase()) ?? [];
   }
 
-  async handle(call: { method: string; args: unknown }): Promise<unknown> {
-    const method = call.method;
-    if (!isCtxMethod(method)) {
-      await this.#audit(method, null, false, "unknown_method");
-      throw new CtxError("unknown_method", `unknown ctx method: ${method}`);
-    }
-    const value = await this.#dispatch(method, call.args);
-    return value;
+  async handle(call: { method: string; args: unknown }): Promise<Result<unknown, CtxFailure>> {
+    const outcome = isCtxMethod(call.method)
+      ? await this.#dispatch(call.method, call.args)
+      : refused("unknown_method", `unknown ctx method: ${call.method}`, null);
+    await outcome.match(
+      ({ target }) => this.#audit(call.method, target, null),
+      ({ target, kind, auditAs }) => this.#audit(call.method, target, auditAs ?? kind),
+    );
+    return outcome.map(({ value }) => value).mapErr(({ kind, message }) => ({ kind, message }));
   }
 
-  async #dispatch(method: CtxMethod, args: unknown): Promise<unknown> {
-    switch (method) {
-      case "secrets.get":
-        return this.#secretsGet(args);
-      case "memory.recall":
-        return this.#memoryRecall(args);
-      case "memory.remember":
-        return this.#memoryRemember(args);
-      case "files.read":
-        return this.#filesRead(args);
-      case "files.write":
-        return this.#filesWrite(args);
-      case "files.list":
-        return this.#filesList(args);
-      case "now":
-        return this.#nowMethod();
-      case "user":
-        return this.#userMethod();
-      case "log.info":
-        return this.#logInfo(args);
-      case "http.request":
-        return this.#httpRequest(args);
-    }
+  #dispatch(method: CtxMethod, args: unknown): Promise<Outcome> {
+    return match(method)
+      .with("secrets.get", () => this.#secretsGet(args))
+      .with("memory.recall", () => this.#memoryRecall(args))
+      .with("memory.remember", () => this.#memoryRemember(args))
+      .with("files.read", () => this.#filesRead(args))
+      .with("files.write", () => this.#filesWrite(args))
+      .with("files.list", () => this.#filesList(args))
+      .with("now", async () => served(this.#now(), null))
+      .with("user", async () => served(this.#user, null))
+      .with("log.info", async () => this.#logInfo(args))
+      .with("http.request", () => this.#httpRequest(args))
+      .exhaustive();
   }
 
-  async #secretsGet(args: unknown): Promise<string> {
+  /** Refuse unless the manifest declares `effect`. */
+  #requireEffect(
+    method: CtxMethod,
+    effect: SkillManifest["effects"][number],
+    target: string | null,
+  ): Result<void, Refusal> {
+    return this.#manifest.effects.includes(effect)
+      ? ok(undefined)
+      : err({
+          kind: "missing_effect",
+          message: `${method} requires effects: [${effect}] in SKILL.md`,
+          target,
+        });
+  }
+
+  async #secretsGet(args: unknown): Promise<Outcome> {
     const parsed = SecretsGetArgsSchema.safeParse(args);
     if (!parsed.success) {
-      await this.#audit("secrets.get", null, false, "invalid_args");
-      throw new CtxError("invalid_args", "secrets.get expects { name: string }");
+      return refused("invalid_args", "secrets.get expects { name: string }", null);
     }
     const name = parsed.data.name;
     if (!this.#declaredSecrets.has(name)) {
-      await this.#audit("secrets.get", name, false, "not_in_allowlist");
-      throw new CtxError(
+      return refused(
         "not_in_allowlist",
         `secret '${name}' is not declared in SKILL.md frontmatter`,
+        name,
       );
     }
     const value = await this.#runInTx((tx) => this.#secretsStore.getSecret(tx, name));
     if (value === undefined) {
-      await this.#audit("secrets.get", name, false, "secret_not_found");
-      throw new CtxError("secret_not_found", `secret '${name}' is declared but not configured`);
+      return refused("secret_not_found", `secret '${name}' is declared but not configured`, name);
     }
-    await this.#audit("secrets.get", name, true, null);
-    return value;
+    return served(value, name);
   }
 
-  async #memoryRecall(args: unknown): Promise<{ memories: { content: string; type: string }[] }> {
+  async #memoryRecall(args: unknown): Promise<Outcome> {
     const parsed = MemoryRecallArgsSchema.safeParse(args);
     if (!parsed.success) {
-      await this.#audit("memory.recall", null, false, "invalid_args");
-      throw new CtxError("invalid_args", "memory.recall expects { query: string, limit?: number }");
-    }
-    if (!this.#manifest.effects.includes("reads_memory")) {
-      await this.#audit("memory.recall", null, false, "missing_effect");
-      throw new CtxError(
-        "missing_effect",
-        "memory.recall requires effects: [reads_memory] in SKILL.md",
+      return refused(
+        "invalid_args",
+        "memory.recall expects { query: string, limit?: number }",
+        null,
       );
     }
+    const allowed = this.#requireEffect("memory.recall", "reads_memory", null);
+    if (allowed.isErr()) return err(allowed.error);
     const result = await this.#memory.recall(parsed.data.query);
     // Hindsight's RecallOptions takes `maxTokens`, not a per-item count.
     // The Python-facing `limit` is "max number of memories" — apply it
@@ -439,28 +500,20 @@ export class DefaultCtxHandler implements CtxHandler {
     // when the backend returns more than the skill asked for.
     const limit = parsed.data.limit;
     const sliced = limit === undefined ? result.memories : result.memories.slice(0, limit);
-    await this.#audit("memory.recall", null, true, null);
-    return {
-      memories: sliced.map((m) => ({ content: m.content, type: m.type })),
-    };
+    return served({ memories: sliced.map((m) => ({ content: m.content, type: m.type })) }, null);
   }
 
-  async #memoryRemember(args: unknown): Promise<null> {
+  async #memoryRemember(args: unknown): Promise<Outcome> {
     const parsed = MemoryRememberArgsSchema.safeParse(args);
     if (!parsed.success) {
-      await this.#audit("memory.remember", null, false, "invalid_args");
-      throw new CtxError(
+      return refused(
         "invalid_args",
         "memory.remember expects { content: string, tags?: string[] }",
+        null,
       );
     }
-    if (!this.#manifest.effects.includes("writes_memory")) {
-      await this.#audit("memory.remember", null, false, "missing_effect");
-      throw new CtxError(
-        "missing_effect",
-        "memory.remember requires effects: [writes_memory] in SKILL.md",
-      );
-    }
+    const allowed = this.#requireEffect("memory.remember", "writes_memory", null);
+    if (allowed.isErr()) return err(allowed.error);
     // Staged for the Observer to classify and tag, as `source = 'skill'` with
     // the skill's name. The skill's own tags reach it only as context, beside
     // the name, so a fact a skill fetched is not read as the user's.
@@ -472,99 +525,69 @@ export class DefaultCtxHandler implements CtxHandler {
       source: "skill",
       skillName,
     });
-    await this.#audit("memory.remember", null, true, null);
-    return null;
+    return served(null, null);
   }
 
-  async #filesRead(args: unknown): Promise<string> {
+  // A workspace operation's own failure (a missing file, a quota) is the
+  // skill's to handle, so it refuses rather than throwing.
+
+  async #filesRead(args: unknown): Promise<Outcome> {
     const parsed = FilesReadArgsSchema.safeParse(args);
-    if (!parsed.success) {
-      await this.#audit("files.read", null, false, "invalid_args");
-      throw new CtxError("invalid_args", "files.read expects { path: string }");
-    }
-    if (!this.#manifest.effects.includes("reads_filesystem")) {
-      await this.#audit("files.read", parsed.data.path, false, "missing_effect");
-      throw new CtxError(
-        "missing_effect",
-        "files.read requires effects: [reads_filesystem] in SKILL.md",
-      );
-    }
+    if (!parsed.success)
+      return refused("invalid_args", "files.read expects { path: string }", null);
+    const { path } = parsed.data;
+    const allowed = this.#requireEffect("files.read", "reads_filesystem", path);
+    if (allowed.isErr()) return err(allowed.error);
     try {
-      const content = await this.#files.read(parsed.data.path);
-      await this.#audit("files.read", parsed.data.path, true, null);
-      return content;
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      await this.#audit("files.read", parsed.data.path, false, "read_failed");
-      throw new CtxError("read_failed", message);
+      const read = await this.#files.read(path);
+      return read.isErr()
+        ? refused("read_failed", describeFileError(read.error), path)
+        : served(read.value, path);
+    } catch (e) {
+      return refused("read_failed", describeError(e), path);
     }
   }
 
-  async #filesWrite(args: unknown): Promise<null> {
+  async #filesWrite(args: unknown): Promise<Outcome> {
     const parsed = FilesWriteArgsSchema.safeParse(args);
     if (!parsed.success) {
-      await this.#audit("files.write", null, false, "invalid_args");
-      throw new CtxError("invalid_args", "files.write expects { path: string, content: string }");
+      return refused("invalid_args", "files.write expects { path: string, content: string }", null);
     }
-    if (!this.#manifest.effects.includes("writes_filesystem")) {
-      await this.#audit("files.write", parsed.data.path, false, "missing_effect");
-      throw new CtxError(
-        "missing_effect",
-        "files.write requires effects: [writes_filesystem] in SKILL.md",
-      );
-    }
+    const { path, content } = parsed.data;
+    const allowed = this.#requireEffect("files.write", "writes_filesystem", path);
+    if (allowed.isErr()) return err(allowed.error);
     try {
-      await this.#files.write(parsed.data.path, parsed.data.content);
-      await this.#audit("files.write", parsed.data.path, true, null);
-      return null;
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      await this.#audit("files.write", parsed.data.path, false, "write_failed");
-      throw new CtxError("write_failed", message);
+      const written = await this.#files.write(path, content);
+      return written.isErr()
+        ? refused("write_failed", describeFileError(written.error), path)
+        : served(null, path);
+    } catch (e) {
+      return refused("write_failed", describeError(e), path);
     }
   }
 
-  async #filesList(args: unknown): Promise<{
-    entries: { path: string; size: number; last_modified: string }[];
-  }> {
+  async #filesList(args: unknown): Promise<Outcome> {
     const parsed = FilesListArgsSchema.safeParse(args);
-    if (!parsed.success) {
-      await this.#audit("files.list", null, false, "invalid_args");
-      throw new CtxError("invalid_args", "files.list expects { prefix?: string }");
-    }
-    if (!this.#manifest.effects.includes("reads_filesystem")) {
-      await this.#audit("files.list", parsed.data.prefix ?? null, false, "missing_effect");
-      throw new CtxError(
-        "missing_effect",
-        "files.list requires effects: [reads_filesystem] in SKILL.md",
-      );
-    }
+    if (!parsed.success)
+      return refused("invalid_args", "files.list expects { prefix?: string }", null);
+    const prefix = parsed.data.prefix ?? null;
+    const allowed = this.#requireEffect("files.list", "reads_filesystem", prefix);
+    if (allowed.isErr()) return err(allowed.error);
     try {
       const entries = await this.#files.list(parsed.data.prefix);
-      await this.#audit("files.list", parsed.data.prefix ?? null, true, null);
-      return {
-        entries: entries.map((e) => ({
-          path: e.path,
-          size: e.size,
-          last_modified: e.lastModified.toISOString(),
-        })),
-      };
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      await this.#audit("files.list", parsed.data.prefix ?? null, false, "list_failed");
-      throw new CtxError("list_failed", message);
+      return served(
+        {
+          entries: entries.map((e) => ({
+            path: e.path,
+            size: e.size,
+            last_modified: e.lastModified.toISOString(),
+          })),
+        },
+        prefix,
+      );
+    } catch (e) {
+      return refused("list_failed", describeError(e), prefix);
     }
-  }
-
-  async #nowMethod(): Promise<string> {
-    const value = this.#now();
-    await this.#audit("now", null, true, null);
-    return value;
-  }
-
-  async #userMethod(): Promise<CtxUser> {
-    await this.#audit("user", null, true, null);
-    return this.#user;
   }
 
   /**
@@ -607,36 +630,32 @@ export class DefaultCtxHandler implements CtxHandler {
    * still reach the network without passing through this method — what
    * the allowlist bounds absolutely is where a *bound* credential can
    * travel, since substitution happens on this path alone.
+   *
+   * A 4xx/5xx is a response the skill gets to inspect, not a refusal; only
+   * a failure to *obtain* a response refuses.
    */
-  async #httpRequest(args: unknown): Promise<{
-    status: number;
-    headers: Record<string, string>;
-    body: string;
-  }> {
+  async #httpRequest(args: unknown): Promise<Outcome> {
     const parsed = HttpRequestArgsSchema.safeParse(args);
     if (!parsed.success) {
-      await this.#audit("http.request", null, false, "invalid_args");
-      throw new CtxError(
+      return refused(
         "invalid_args",
         "http.request expects { method, url, headers?, body?, timeoutMs? }",
+        null,
       );
     }
     const { method, url, headers, body, timeoutMs } = parsed.data;
 
     // `z.string().url()` accepts any parseable URL, including `file:` and
     // `data:`, which would turn a network call into a host-filesystem read.
-    let parsedUrl: URL;
-    try {
-      parsedUrl = new URL(url);
-    } catch {
-      await this.#audit("http.request", null, false, "invalid_args");
-      throw new CtxError("invalid_args", `http.request could not parse url: ${url}`);
+    const parsedUrl = URL.parse(url);
+    if (parsedUrl === null) {
+      return refused("invalid_args", `http.request could not parse url: ${url}`, null);
     }
     if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
-      await this.#audit("http.request", parsedUrl.protocol, false, "invalid_args");
-      throw new CtxError(
+      return refused(
         "invalid_args",
         `http.request supports http and https, got '${parsedUrl.protocol}'`,
+        parsedUrl.protocol,
       );
     }
     // Query strings routinely carry API keys, so the audit records origin
@@ -648,12 +667,13 @@ export class DefaultCtxHandler implements CtxHandler {
     // the skill is holding can travel. The address guard below answers a
     // different question — whether a permitted name points somewhere internal.
     if (!hostAllowed(parsedUrl.hostname, this.#allowedHosts)) {
-      await this.#audit("http.request", target, false, "not_in_allowlist");
-      throw new CtxError(
+      return refused(
         "blocked_destination",
         this.#allowedHosts.length === 0
           ? `http.request refused ${target}: this skill declares no 'network:' block, so it has no network access`
           : `http.request refused ${target}: '${parsedUrl.hostname}' is not in this skill's network.allow list`,
+        target,
+        "not_in_allowlist",
       );
     }
     // One budget spans resolution and the request. Starting the clock at
@@ -662,34 +682,35 @@ export class DefaultCtxHandler implements CtxHandler {
     const timeoutBudgetMs = this.#httpTimeoutMs(timeoutMs);
     const budgetStartedMs = Date.now();
 
+    // An IPv6 literal reaches `URL.hostname` wrapped in brackets, which no
+    // allowlist entry can match, so anything arriving here is a name or an
+    // IPv4 literal — either of which the resolver takes as written.
+    const hostname = parsedUrl.hostname;
+    let resolved: Array<{ address: string; family: number }>;
     try {
-      // An IPv6 literal reaches `URL.hostname` wrapped in brackets, which no
-      // allowlist entry can match, so anything arriving here is a name or an
-      // IPv4 literal — either of which the resolver takes as written.
-      const hostname = parsedUrl.hostname;
-      const resolved = await withDeadline(
+      resolved = await withDeadline(
         this.#resolveHost(hostname),
         timeoutBudgetMs,
         `resolving ${hostname}`,
       );
-      const blocked = resolved.find((r) => isBlockedAddress(r.address, r.family));
-      if (blocked) {
-        await this.#audit("http.request", target, false, "blocked_destination");
-        throw new CtxError(
-          "blocked_destination",
-          `http.request refused ${target}: ${parsedUrl.hostname} resolves to ${blocked.address}, ` +
-            `which is on the host's own network rather than the public internet`,
-        );
-      }
     } catch (e) {
-      if (e instanceof CtxError) throw e;
-      const message = e instanceof Error ? e.message : String(e);
       // A resolver deadline is a timeout like any other — classifying it
       // as a transport failure would tell a caller not to retry something
       // that is worth retrying.
-      const kind = e instanceof Error && e.name === "TimeoutError" ? "timeout" : "network_error";
-      await this.#audit("http.request", target, false, kind);
-      throw new CtxError(kind, `http.request could not resolve ${target}: ${message}`);
+      return refused(
+        transportKind(e),
+        `http.request could not resolve ${target}: ${describeError(e)}`,
+        target,
+      );
+    }
+    const blocked = resolved.find((r) => isBlockedAddress(r.address, r.family));
+    if (blocked) {
+      return refused(
+        "blocked_destination",
+        `http.request refused ${target}: ${hostname} resolves to ${blocked.address}, ` +
+          `which is on the host's own network rather than the public internet`,
+        target,
+      );
     }
 
     let response: Response;
@@ -709,46 +730,49 @@ export class DefaultCtxHandler implements CtxHandler {
         signal: AbortSignal.timeout(Math.max(1, timeoutBudgetMs - (Date.now() - budgetStartedMs))),
       });
     } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      const kind = e instanceof Error && e.name === "TimeoutError" ? "timeout" : "network_error";
-      await this.#audit("http.request", target, false, kind);
-      throw new CtxError(kind, `http.request to ${target} failed: ${message}`);
+      return refused(
+        transportKind(e),
+        `http.request to ${target} failed: ${describeError(e)}`,
+        target,
+      );
     }
 
-    let text: string;
+    let text: Result<string, "too_large">;
     try {
       text = await readCapped(response, MAX_HTTP_RESPONSE_BYTES);
     } catch (e) {
-      if (e instanceof CtxError) {
-        await this.#audit("http.request", target, false, e.kind);
-        throw e;
-      }
       // The same signal covers the body, so a stall here aborts too —
       // and reads as a timeout rather than a generic transport failure.
-      const kind = e instanceof Error && e.name === "TimeoutError" ? "timeout" : "network_error";
-      const message = e instanceof Error ? e.message : String(e);
-      await this.#audit("http.request", target, false, kind);
-      throw new CtxError(kind, `http.request to ${target} failed mid-body: ${message}`);
+      return refused(
+        transportKind(e),
+        `http.request to ${target} failed mid-body: ${describeError(e)}`,
+        target,
+      );
     }
-
-    // A 4xx/5xx is a response the skill should get to inspect, not an
-    // exception — the status is right there in the return value. Only a
-    // failure to *obtain* a response throws.
-    await this.#audit("http.request", target, true, null);
-    return {
-      status: response.status,
-      headers: Object.fromEntries(response.headers),
-      body: text,
-    };
+    if (text.isErr()) {
+      return refused(
+        "response_too_large",
+        `http.request response exceeded ${MAX_HTTP_RESPONSE_BYTES} bytes`,
+        target,
+      );
+    }
+    return served(
+      {
+        status: response.status,
+        headers: Object.fromEntries(response.headers),
+        body: text.value,
+      },
+      target,
+    );
   }
 
-  async #logInfo(args: unknown): Promise<null> {
+  #logInfo(args: unknown): Outcome {
     const parsed = LogInfoArgsSchema.safeParse(args);
     if (!parsed.success) {
-      await this.#audit("log.info", null, false, "invalid_args");
-      throw new CtxError(
+      return refused(
         "invalid_args",
         "log.info expects { message: string, fields?: Record<string, unknown> }",
+        null,
       );
     }
     log.info(
@@ -763,8 +787,7 @@ export class DefaultCtxHandler implements CtxHandler {
       },
       parsed.data.message,
     );
-    await this.#audit("log.info", null, true, null);
-    return null;
+    return served(null, null);
   }
 
   /**
@@ -778,25 +801,17 @@ export class DefaultCtxHandler implements CtxHandler {
    * the value) for sensitive methods like `secrets.get` while staying
    * fail-open for low-risk methods like `now()`.
    */
-  async #audit(
-    method: CtxMethod | string,
-    target: string | null,
-    ok: boolean,
-    errorKind: string | null,
-  ): Promise<void> {
+  async #audit(method: string, target: string | null, errorKind: string | null): Promise<void> {
     try {
       await this.#recordContextCall({
         runId: this.#runId,
-        method: method as CtxMethod,
+        method,
         target,
-        ok,
+        ok: errorKind === null,
         error: errorKind,
       });
     } catch (e) {
-      log.warn(
-        { err: e instanceof Error ? e.message : String(e), method },
-        "failed to record ctx audit row",
-      );
+      log.warn({ err: describeError(e), method }, "failed to record ctx audit row");
     }
   }
 }

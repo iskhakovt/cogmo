@@ -22,6 +22,7 @@
  */
 
 import { InngestTestEngine } from "@inngest/test";
+import { ok } from "neverthrow";
 import * as R from "remeda";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
@@ -945,7 +946,7 @@ describe("handle-message — replay equality", () => {
         description: "Echo the input",
         schema: z.object({ zeta: z.number(), alpha: z.string() }),
         durable: true,
-        handler: async ({ alpha }) => `echoed ${alpha}`,
+        handler: async ({ alpha }) => ok(`echoed ${alpha}`),
       }),
     );
     const earlierContext =
@@ -1216,7 +1217,7 @@ describe("handle-message — turn inputs frozen across re-invocations", () => {
     );
     skillRunner.invoke.mockImplementation(async () => {
       skillLoads = false;
-      return { runId: "skill-run-1", status: "success", output: 42 };
+      return ok({ runId: "skill-run-1", status: "success", output: 42 });
     });
     const { resolveProvider, requests } = callThenAnswer({ name: "echo", input: { n: 42 } });
     const deps = mockDeps({
@@ -1258,7 +1259,7 @@ describe("handle-message — turn inputs frozen across re-invocations", () => {
           prompt: z.string().describe("What to draw"),
           model: z.string().optional(),
         }),
-        handler: async () => "ok",
+        handler: async () => ok("ok"),
       }),
     );
     const sentTools: ToolDefinition[][] = [];
@@ -1336,6 +1337,43 @@ describe("handle-message — turn inputs frozen across re-invocations", () => {
       ]);
     });
 
+    it("sends a memoized success in the step's object form as the tool's output", async () => {
+      const { deps, handler, toolResults } = timeCallingTurn();
+
+      await new InngestTestEngine({
+        function: createHandleMessage(deps),
+        events: [event],
+        steps: [{ id: "tool-iter1-0", handler: () => ({ ok: true, content: CACHED_TIME }) }],
+      }).execute();
+
+      expect(handler).not.toHaveBeenCalled();
+      expect(toolResults()).toEqual([
+        { type: "tool_result", toolUseId: "t1", content: CACHED_TIME },
+      ]);
+    });
+
+    it("sends a memoized rejection as an is_error result, without re-executing the handler", async () => {
+      const { deps, handler, toolResults } = timeCallingTurn();
+
+      await new InngestTestEngine({
+        function: createHandleMessage(deps),
+        events: [event],
+        steps: [
+          { id: "tool-iter1-0", handler: () => ({ ok: false, message: "clock unavailable" }) },
+        ],
+      }).execute();
+
+      expect(handler).not.toHaveBeenCalled();
+      expect(toolResults()).toEqual([
+        {
+          type: "tool_result",
+          toolUseId: "t1",
+          content: "Error: clock unavailable",
+          isError: true,
+        },
+      ]);
+    });
+
     it("dispatches on the durability its run froze: a non-durable read runs in the bare body", async () => {
       // A memoized `freeze-turn-inputs` whose table offers the tool without `durable`.
       const nonDurable = new ToolRegistry();
@@ -1344,7 +1382,7 @@ describe("handle-message — turn inputs frozen across re-invocations", () => {
       const { deps, handler, toolResults } = timeCallingTurn();
       expect(frozenNonDurable).not.toBe(freezeToolTable(deps.tools));
       const LIVE_TIME = '{"iso":"2026-06-01T12:00:00.000Z"}';
-      handler.mockResolvedValue(LIVE_TIME);
+      handler.mockResolvedValue(ok(LIVE_TIME));
 
       await new InngestTestEngine({
         function: createHandleMessage(deps),

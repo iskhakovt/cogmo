@@ -1,5 +1,6 @@
+import { err, ok, type Result } from "neverthrow";
 import { z } from "zod";
-import { McpInvalidServerNameError } from "./errors.js";
+import type { McpAddServerError } from "./errors.js";
 
 // --- Value sources (literal or secret reference) ---
 
@@ -147,13 +148,21 @@ export const SERVER_NAME_RE = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/;
  * Allowing single underscores between alphanumerics covers `google_calendar`
  * while disallowing leading, trailing, or consecutive underscores.
  */
+export function validateServerName(
+  name: string,
+): Result<string, Extract<McpAddServerError, { code: "invalid_name" }>> {
+  if (SERVER_NAME_RE.test(name)) return ok(name);
+  return err({
+    code: "invalid_name",
+    name,
+    reason: `Invalid MCP server name: ${JSON.stringify(name)} — must match /${SERVER_NAME_RE.source}/`,
+  });
+}
+
+/** {@link validateServerName} for a name that was validated upstream: a failure is a bug. */
 export function assertValidServerName(name: string): void {
-  if (!SERVER_NAME_RE.test(name)) {
-    throw new McpInvalidServerNameError(
-      name,
-      `Invalid MCP server name: ${JSON.stringify(name)} — must match /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/`,
-    );
-  }
+  const valid = validateServerName(name);
+  if (valid.isErr()) throw new Error(valid.error.reason);
 }
 
 /** Compose the agent-facing tool name: `mcp__<server>__<tool>`. */

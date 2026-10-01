@@ -8,6 +8,7 @@ import { mock } from "vitest-mock-extended";
 import type { Database, Transactor } from "../../db/index.js";
 import type { StepRun } from "../../inngest/index.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
+import { expectOk } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { sweepRepo } from "./cleanup-orphan-run-branches.js";
 import { type CodingRepoRow, type CodingTaskRow, DrizzleCodingStore } from "./store/index.js";
@@ -47,18 +48,20 @@ const stepRun = ((_: string, fn: () => Promise<unknown>) => fn()) as unknown as 
 
 async function seedRepo(): Promise<CodingRepoRow> {
   return tx((trx) =>
-    store.insertRepo(trx, {
-      name: "example",
-      localPath: `${baseDir}/repo`,
-      defaultBranch: "main",
-      remoteUrl: "https://github.com/owner/example.git",
-      devcontainer: null,
-      allowedBackends: ["claude"],
-      verifyCommand: "true",
-      taskTokenBudget: 100_000,
-      taskWallTimeSeconds: 60,
-      maxConcurrentTasks: 1,
-    }),
+    store
+      .insertRepo(trx, {
+        name: "example",
+        localPath: `${baseDir}/repo`,
+        defaultBranch: "main",
+        remoteUrl: "https://github.com/owner/example.git",
+        devcontainer: null,
+        allowedBackends: ["claude"],
+        verifyCommand: "true",
+        taskTokenBudget: 100_000,
+        taskWallTimeSeconds: 60,
+        maxConcurrentTasks: 1,
+      })
+      .then(expectOk),
   );
 }
 
@@ -302,19 +305,21 @@ describe("sweepRepo", () => {
     // local path) means parseRemoteUrl returns null. The sweep must not
     // try to call GitHub.
     const repo = await tx((trx) =>
-      store.insertRepo(trx, {
-        name: "broken",
-        localPath: `${baseDir}/broken-repo`,
-        defaultBranch: "main",
-        // Not a recognisable GitHub remote shape.
-        remoteUrl: "not-a-url-at-all",
-        devcontainer: null,
-        allowedBackends: ["claude"],
-        verifyCommand: "true",
-        taskTokenBudget: 100_000,
-        taskWallTimeSeconds: 60,
-        maxConcurrentTasks: 1,
-      }),
+      store
+        .insertRepo(trx, {
+          name: "broken",
+          localPath: `${baseDir}/broken-repo`,
+          defaultBranch: "main",
+          // Not a recognisable GitHub remote shape.
+          remoteUrl: "not-a-url-at-all",
+          devcontainer: null,
+          allowedBackends: ["claude"],
+          verifyCommand: "true",
+          taskTokenBudget: 100_000,
+          taskWallTimeSeconds: 60,
+          maxConcurrentTasks: 1,
+        })
+        .then(expectOk),
     );
 
     const oct = fakeOctokit([]);

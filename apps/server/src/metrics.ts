@@ -70,7 +70,7 @@ export const debounceWaitMs = {
 
 /**
  * Iterations per agent loop turn, sampled once the turn's messages are
- * persisted — see the `persist-new-messages` step in `handle-message.ts` for
+ * persisted — see the `persist-new-messages` step in `agent/handle-message/persist-turn.ts` for
  * why that is the only place a durable function can take the sample exactly
  * once. A turn whose persist fails irrecoverably therefore contributes
  * nothing, so read the histogram as "turns that produced a persisted reply",

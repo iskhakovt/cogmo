@@ -182,7 +182,7 @@ Beyond "insert then retrieve":
 - **Atomic multi-field state** — JSONB blobs that group correlated fields (e.g. `worktree_assignment: {branch, worktreePath}`) should have null-until-both-set + reject-half-set tests.
 - **Idempotent replay** — store methods invoked twice (Inngest retry simulation) produce the same terminal state without errors.
 - **Missing-row behaviors** — `getById("nonexistent")` returns `null`, not throws.
-- **Constraint collisions** — UNIQUE / FK violations surface as the right typed error (e.g. `UniqueViolationError` mapped to `repo_name_taken`).
+- **Constraint collisions** — UNIQUE / FK violations surface as the right `Err` (e.g. `uq_profiles_user_name` as `profile_name_taken`), and leave the caller's transaction usable.
 
 ### Error-path coverage matrix per module
 
@@ -212,7 +212,7 @@ These belong in **integration tests** that exercise the orchestrator + event bus
 
 For every command surface (Telegram `/repo`, agent tools), enumerate the discriminated error codes and pin the user-visible response per code. Prevents drift where a new error code returns a generic fallback instead of a tailored message.
 
-Reference: `src/transport/adapters/telegram/repo-commands.test.ts`; `src/agent/coding/tool.test.ts`.
+Reference: `src/transport/adapters/telegram/commands/repo.test.ts`; `src/agent/coding/tool.test.ts`.
 
 ### Version-pinning canaries
 
@@ -231,10 +231,9 @@ The pattern:
 await handle.wait();
 expect(...).toBe(...);
 
-// RIGHT — structurally bounded, asserts on the rejection class
+// RIGHT — structurally bounded, asserts on the failure the rejection carries
 const err = await handle.wait().catch((e: Error) => e);
-expect(err).toBeInstanceOf(ExecTimeoutError);
-expect((err as ExecTimeoutError).kind).toBe("total");
+expect(err).toMatchObject({ failure: { kind: "timed_out", deadline: "total" } });
 ```
 
 Reference: `src/sandbox/daytona/exec-streaming.test.ts → "timeoutMs: total wall-clock cap fires…"`. Motivating incident: the 4-day Daytona WS-wedge ([changelog 2026-05-18](../changelog.d/2026-05-18-coding-exec-wedge-resilience.md)) had no unit-tier regression test because earlier tests modelled `wait()` as always-settling.

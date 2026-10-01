@@ -1,6 +1,6 @@
 import { PassThrough } from "node:stream";
 import { ok } from "neverthrow";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, assert, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import {
   type ExecStreamingHandle,
@@ -104,7 +104,7 @@ function buildFakeSandbox(): FakeSandboxBundle {
   return { sandbox, session, stdin, stdout, stderr, execDisposeCalls, calls };
 }
 
-const noopCtx: CtxHandler = { handle: async () => null };
+const noopCtx: CtxHandler = { handle: async () => ok(null) };
 
 function invokeParams(taskId: string): InvokeParams {
   return {
@@ -475,7 +475,7 @@ describe("SysboxSkillWorker", () => {
       });
       w.tryAcquire();
       const r = await w.invoke({ ...invokeParams("t-r"), isolation: "recycle" });
-      expect(r.ok).toBe(true);
+      assert(r.ok);
       expect(r.workerReusable).toBe(false);
       expect(w.state).toBe("dead");
     });
@@ -539,7 +539,7 @@ describe("SysboxSkillWorker", () => {
         },
       });
 
-      expect(r.ok).toBe(true);
+      assert(r.ok);
       expect(r.workerReusable).toBe(true);
       // Populate exec ran (sh + supervisor python3, in some order).
       expect(bundle.calls).toContain("exec:sh");
@@ -591,7 +591,7 @@ describe("SysboxSkillWorker", () => {
         },
       });
 
-      expect(r.ok).toBe(false);
+      assert(!r.ok);
       expect(r.error).toMatch(/skill_venv_populate_failed/);
       expect(r.error).toMatch(/hash mismatch/);
       expect(r.workerReusable).toBe(false);

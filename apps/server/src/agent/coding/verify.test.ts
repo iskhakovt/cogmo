@@ -2,11 +2,11 @@ import { PassThrough } from "node:stream";
 import { err, ok, type Result } from "neverthrow";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  ExecError,
   type ExecExit,
   type ExecFailure,
   type ExecOptions,
   type ExecStreamingHandle,
-  ExecTimeoutError,
 } from "../../sandbox/index.js";
 import { fakeExecHandle } from "../../test/coding-fixtures.js";
 import { OUTPUT_CAP_BYTES, runVerifyStreaming, TIMEOUT_EXIT_CODE } from "./verify.js";
@@ -201,7 +201,7 @@ describe("runVerifyStreaming", () => {
 
   it("throws a timeout that settles the exec before its command runs", async () => {
     // The start outlasted the cap, so there is no handle and no output to judge.
-    const timeout = new ExecTimeoutError("total", 60_000);
+    const timeout = new ExecError({ kind: "timed_out", deadline: "total", timeoutMs: 60_000 });
     await expect(
       runVerifyStreaming({
         container: {

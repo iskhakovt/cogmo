@@ -3,6 +3,7 @@ import split2 from "split2";
 import { z } from "zod";
 import { logger } from "../../logger.js";
 import type { ExecStreamingHandle, SandboxSession } from "../../sandbox/index.js";
+import { describeError } from "../../util/describe-error.js";
 import type { BackendCallContext, BackendUsage, CodingBackend, CodingEvent } from "./backend.js";
 import { readJsonl } from "./jsonl.js";
 import { buildExecutePrompt, buildPlanPrompt } from "./prompt.js";
@@ -220,7 +221,7 @@ function drainStderr(exec: ExecStreamingHandle, mode: "plan" | "execute"): void 
         if (trimmed) log.warn({ stderr: trimmed, mode }, "claude stderr");
       }
     } catch (err) {
-      log.warn({ err: (err as Error).message, mode }, "claude stderr drain error");
+      log.warn({ err: describeError(err), mode }, "claude stderr drain error");
     }
   })();
 }

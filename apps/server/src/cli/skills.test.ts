@@ -1,3 +1,4 @@
+import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { SkillRunAs, SkillRunServices } from "../skills/run-as.js";
@@ -102,11 +103,13 @@ describe("skillsCli", () => {
   it("invokes the runner and prints success result with exit 0", async () => {
     const { io, out } = captureIo();
     const runner = makeRunner({
-      invoke: vi.fn().mockResolvedValue({
-        runId: "run-1",
-        status: "success",
-        output: { echo: 2 },
-      }),
+      invoke: vi.fn().mockResolvedValue(
+        ok({
+          runId: "run-1",
+          status: "success",
+          output: { echo: 2 },
+        }),
+      ),
     });
     const code = await run(["run", "echo", `{"x":1}`], depsFor(runner), io);
     expect(code).toBe(0);
@@ -130,11 +133,13 @@ describe("skillsCli", () => {
   it("returns exit 1 when the run errors", async () => {
     const { io } = captureIo();
     const runner = makeRunner({
-      invoke: vi.fn().mockResolvedValue({
-        runId: "run-2",
-        status: "error",
-        error: "boom",
-      }),
+      invoke: vi.fn().mockResolvedValue(
+        ok({
+          runId: "run-2",
+          status: "error",
+          error: "boom",
+        }),
+      ),
     });
     const code = await run(["run", "echo", "{}"], depsFor(runner), io);
     expect(code).toBe(1);
@@ -157,7 +162,7 @@ describe("skillsCli", () => {
   it("accepts a JSON array as inputs (validation deferred to runner)", async () => {
     const { io } = captureIo();
     const runner = makeRunner({
-      invoke: vi.fn().mockResolvedValue({ runId: "r", status: "success", output: null }),
+      invoke: vi.fn().mockResolvedValue(ok({ runId: "r", status: "success", output: null })),
     });
     const code = await run(["run", "echo", "[1,2,3]"], depsFor(runner), io);
     expect(code).toBe(0);
@@ -167,6 +172,16 @@ describe("skillsCli", () => {
       trigger: "manual",
       runAs: OWNER_RUN_AS,
     });
+  });
+
+  it("exits 1 naming a rejection on stderr", async () => {
+    const { io, err: stderr } = captureIo();
+    const runner = makeRunner({
+      invoke: vi.fn().mockResolvedValue(err({ kind: "not_found", name: "echo" })),
+    });
+    const code = await run(["run", "echo", "{}"], depsFor(runner), io);
+    expect(code).toBe(1);
+    expect(stderr.join("\n")).toMatch(/invoke failed: skill not found: echo/);
   });
 
   it("catches a runner.invoke exception and exits 1 with stderr", async () => {
@@ -286,11 +301,13 @@ describe("skillsCli", () => {
   it("printed JSON output is valid (round-trips through JSON.parse)", async () => {
     const { io, out } = captureIo();
     const runner = makeRunner({
-      invoke: vi.fn().mockResolvedValue({
-        runId: "r",
-        status: "success",
-        output: { nested: { deep: [1, 2, 3] } },
-      }),
+      invoke: vi.fn().mockResolvedValue(
+        ok({
+          runId: "r",
+          status: "success",
+          output: { nested: { deep: [1, 2, 3] } },
+        }),
+      ),
     });
     await run(["run", "echo", "{}"], depsFor(runner), io);
     const last = out.join("\n");

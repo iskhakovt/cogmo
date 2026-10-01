@@ -1,5 +1,5 @@
 import { NonRetriableError } from "inngest";
-import { err } from "neverthrow";
+import { err, ok } from "neverthrow";
 import * as R from "remeda";
 import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
@@ -39,7 +39,7 @@ import {
   turnContextSent,
 } from "../test/factories.js";
 import type { InboundContent } from "../transport/content.js";
-import { StreamDeliveryError } from "../transport/delivery-router.js";
+import type { StreamDeliveryError } from "../transport/delivery-router.js";
 import { toolResultClearing } from "./context.js";
 import { coreMemoryTools } from "./core-memory-tools.js";
 import { readFile } from "./file-tools.js";
@@ -979,6 +979,71 @@ describe("createHandleMessage", () => {
     ]);
   });
 
+  it("delivers the surviving image and counts the failed one when a download rejects", async () => {
+    const okBytes = Buffer.from("png");
+    const handle = mockDeliveryHandle({
+      hasBatchTargets: vi.fn().mockReturnValue(true),
+    });
+    const download = vi.fn(async (path: string) => {
+      if (path === "generated/b.png") throw new Error("S3 boom");
+      return okBytes;
+    });
+    const imageResult = (toolUseId: string, path: string) => ({
+      type: "tool_result" as const,
+      toolUseId,
+      content: JSON.stringify({ path, mediaType: "image/png" }),
+    });
+    const deps = mockDeps({
+      deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+      attachments: { upload: vi.fn().mockResolvedValue("inbound/x"), download },
+      runStreamingAgentLoop: vi.fn().mockResolvedValue({
+        text: "pictures",
+        messages: [],
+        newMessages: [
+          {
+            role: "assistant",
+            content: [
+              { type: "tool_use", id: "tu_a", name: "generate_image", input: {} },
+              { type: "tool_use", id: "tu_b", name: "generate_image", input: {} },
+            ],
+          },
+          {
+            role: "user",
+            content: [
+              imageResult("tu_a", "generated/a.png"),
+              imageResult("tu_b", "generated/b.png"),
+            ],
+          },
+        ],
+        usage: { inputTokens: 1, outputTokens: 1 },
+        model: "mock-model",
+        iterations: 1,
+        streamed: { text: "", toolUseIds: [] },
+      }),
+    });
+    const step = mockStep();
+
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+      event: testEvent,
+      step,
+      runId: testRunId,
+    });
+
+    expect(handle.deliverBatch).toHaveBeenCalledWith(
+      "pictures",
+      [{ data: okBytes, mediaType: "image/png" }],
+      undefined,
+    );
+    const batchCall = step.run.mock.calls.findIndex((call) => call[0] === "batch-delivery");
+    expect(batchCall).not.toBe(-1);
+    await expect(step.run.mock.results[batchCall]?.value).resolves.toEqual({
+      imagesDelivered: 1,
+      imagesFailed: 1,
+      documentsDelivered: 0,
+      documentsFailed: 0,
+    });
+  });
+
   // Cooldown guard — `recover-conversation` writes `cooldown_state` after
   // `handle-message` exhausts retries (or fails non-retriably). While the
   // window is open, refuse to spend more LLM calls and deliver a terse
@@ -1608,7 +1673,7 @@ describe("createHandleMessage", () => {
       description: "Open a PR",
       inputSchema: { type: "object" as const, properties: {} },
       durable: true,
-      handler: vi.fn().mockResolvedValue("ok"),
+      handler: vi.fn().mockResolvedValue(ok("ok")),
     };
     // Real ToolRegistry — mockToolRegistry doesn't populate snapshot()
     // because register/snapshot are vi.fn stubs.
@@ -1617,7 +1682,7 @@ describe("createHandleMessage", () => {
       name: "memory_recall",
       description: "recall",
       inputSchema: { type: "object", properties: {} },
-      handler: async () => "ok",
+      handler: async () => ok("ok"),
     });
     const deps = mockDeps({
       tools: builtIns,
@@ -1670,7 +1735,7 @@ describe("createHandleMessage", () => {
       name: "memory_recall",
       description: "recall",
       inputSchema: { type: "object", properties: {} },
-      handler: async () => "ok",
+      handler: async () => ok("ok"),
     });
     const deps = mockDeps({
       tools: builtIns,
@@ -1747,7 +1812,7 @@ describe("createHandleMessage", () => {
           name: "generate_image",
           description: "generate",
           inputSchema: { type: "object", properties: {} },
-          handler: async () => "ok",
+          handler: async () => ok("ok"),
         },
       ]);
       const deps = mockDeps({
@@ -1806,7 +1871,7 @@ describe("createHandleMessage", () => {
           gitSha: "abc1234",
         },
       ]);
-      skillRunner.invoke.mockResolvedValue({ runId: "run-1", status: "success", output: {} });
+      skillRunner.invoke.mockResolvedValue(ok({ runId: "run-1", status: "success", output: {} }));
       const deps = mockDeps({
         agentStore: mockAgentStore({
           getProfile: vi.fn().mockResolvedValue(profileWithAllTools()),
@@ -1887,7 +1952,7 @@ describe("createHandleMessage", () => {
           description: "open a PR",
           inputSchema: { type: "object", properties: {} },
           durable: true,
-          handler: async () => "ok",
+          handler: async () => ok("ok"),
         },
       ]);
       const deps = mockDeps({
@@ -1914,7 +1979,7 @@ describe("createHandleMessage", () => {
         name: "memory_recall",
         description: "recall",
         inputSchema: { type: "object", properties: {} },
-        handler: async () => "ok",
+        handler: async () => ok("ok"),
       });
       const deps = mockDeps({
         tools: builtIns,
@@ -1941,7 +2006,7 @@ describe("createHandleMessage", () => {
         name: "memory_recall",
         description: "recall",
         inputSchema: { type: "object", properties: {} },
-        handler: async () => "ok",
+        handler: async () => ok("ok"),
       });
       const mcpRegistry = mock<McpRegistry>();
       mcpRegistry.resolveTools.mockResolvedValue([
@@ -1950,7 +2015,7 @@ describe("createHandleMessage", () => {
           description: "open a PR",
           inputSchema: { type: "object", properties: {} },
           durable: true,
-          handler: async () => "ok",
+          handler: async () => ok("ok"),
         },
       ]);
       const deps = mockDeps({
@@ -4297,9 +4362,9 @@ describe("createHandleMessage", () => {
   });
 
   describe("stream delivery failures", () => {
-    const deliveryFailed = new StreamDeliveryError([
-      { sessionId: "session-tg", reason: "telegram: chat not found" },
-    ]);
+    const deliveryFailed: StreamDeliveryError = {
+      failures: [{ sessionId: "session-tg", reason: "telegram: chat not found" }],
+    };
 
     async function runTurn(deps: HandleMessageDeps): Promise<unknown> {
       return invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
@@ -4394,8 +4459,9 @@ describe("createHandleMessage", () => {
         }),
       });
 
-      expect(await runTurn(deps)).toBe(deliveryFailed);
-      expect(pushOutcome).toBe(deliveryFailed);
+      const failed = await runTurn(deps);
+      expect(pushOutcome).toEqual(new Error("stream delivery failed: telegram: chat not found"));
+      expect(failed).toBe(pushOutcome);
     });
   });
 });

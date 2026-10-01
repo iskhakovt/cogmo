@@ -1,5 +1,7 @@
+import { ok } from "neverthrow";
+import { match } from "ts-pattern";
 import { z } from "zod";
-import { defineTool, type ToolSpec } from "../agent/tools.js";
+import { defineTool, reject, type ToolSpec } from "../agent/tools.js";
 
 const RegisterSkillInput = z.object({
   branch: z
@@ -35,26 +37,41 @@ export const registerSkillTool: ToolSpec = defineTool({
   schema: RegisterSkillInput,
   handler: async ({ branch }, service) => {
     if (!service.skills) {
-      throw new Error(
+      return reject(
         "Skills runtime is unavailable in this build — bootstrap missing skillRunner wiring.",
       );
     }
     const result = await service.skills.register({ branch });
-    return JSON.stringify({
-      status: result.status,
-      name: result.name || undefined,
-      riskTier: result.riskTier,
-      gitSha: result.gitSha,
-      ...(result.errors && result.errors.length > 0 && { errors: result.errors }),
-      ...(result.pendingId && { pendingId: result.pendingId }),
-      nextStep:
-        result.status === "live"
-          ? `Skill '${result.name}' is live. It appears as its own tool starting next turn — don't try to call it inside this turn (the tool list was already built).`
-          : result.status === "pending_approval"
-            ? `Skill '${result.name}' is awaiting user approval. Tell the user a deploy is pending; they'll receive an approval prompt.`
-            : result.status === "no_op"
-              ? `Skill '${result.name}' branch tip already matches main — nothing to deploy.`
-              : "Register rejected; surface the errors verbatim and ask the user for guidance.",
-    });
+    if (result.status === "rejected") {
+      return reject(
+        `Register rejected: ${result.errors.join("; ") || "no reason given"}. ` +
+          "Surface the errors verbatim and ask the user for guidance.",
+      );
+    }
+    return ok(
+      JSON.stringify({
+        status: result.status,
+        name: result.name || undefined,
+        riskTier: result.riskTier,
+        gitSha: result.gitSha,
+        ...(result.status === "pending_approval" && { pendingId: result.pendingId }),
+        nextStep: match(result.status)
+          .with(
+            "live",
+            () =>
+              `Skill '${result.name}' is live. It appears as its own tool starting next turn — don't try to call it inside this turn (the tool list was already built).`,
+          )
+          .with(
+            "pending_approval",
+            () =>
+              `Skill '${result.name}' is awaiting user approval. Tell the user a deploy is pending; they'll receive an approval prompt.`,
+          )
+          .with(
+            "no_op",
+            () => `Skill '${result.name}' branch tip already matches main — nothing to deploy.`,
+          )
+          .exhaustive(),
+      }),
+    );
   },
 });

@@ -39,6 +39,22 @@ export interface FileEntry {
   lastModified: Date;
 }
 
+/**
+ * An expected file-workspace failure: a missing file, an edit that doesn't
+ * apply, or a write the read-before-write guard refuses. `op` names the
+ * refused operation for the guard's failures.
+ */
+export type FileError =
+  | { kind: "not_found"; path: string }
+  | { kind: "missing_for_edit"; path: string }
+  | { kind: "not_read"; path: string; op: "edit" | "overwrite" }
+  | { kind: "partial_view"; path: string; op: "edit" | "overwrite" }
+  | { kind: "stale"; path: string; op: "edit" | "overwrite" }
+  | { kind: "empty_old_string"; path: string }
+  | { kind: "identical_strings"; path: string }
+  | { kind: "old_string_not_found"; path: string }
+  | { kind: "ambiguous_old_string"; path: string; occurrences: number };
+
 /** Prompt guidance for the memory Service namespace. */
 export const MEMORY_PROMPT_GUIDANCE = `You have persistent memory across conversations. Use it well:
 - **Recall first**: At the start of a conversation or when a topic comes up, check if you already know relevant context.
@@ -86,14 +102,14 @@ export interface Service {
     stageRetain: StageRetainFn;
   };
   files: {
-    read(path: string): Promise<string>;
-    write(path: string, content: string): Promise<void>;
+    read(path: string): Promise<Result<string, FileError>>;
+    write(path: string, content: string): Promise<Result<void, FileError>>;
     edit(
       path: string,
       oldString: string,
       newString: string,
       opts?: { replaceAll?: boolean },
-    ): Promise<void>;
+    ): Promise<Result<void, FileError>>;
     list(prefix?: string): Promise<FileEntry[]>;
   };
   /** The conversation user's core memory, confined to the turn's scope. */

@@ -1,3 +1,4 @@
+import { ok } from "neverthrow";
 import { z } from "zod";
 import type { AttachmentStore } from "../transport/attachment-store.js";
 import { defineTool, type ToolSpec } from "./tools.js";
@@ -9,11 +10,13 @@ import { defineTool, type ToolSpec } from "./tools.js";
  * (`extractGeneratedDocuments`) and the Telegram stream handle (mid-stream
  * `sendDocument`). Keep this contract in one place.
  */
-export interface GeneratedDocumentPayload {
-  path: string;
-  mediaType: string;
-  name: string;
-}
+const GeneratedDocumentPayloadSchema = z.object({
+  path: z.string(),
+  mediaType: z.string(),
+  name: z.string(),
+});
+
+export type GeneratedDocumentPayload = z.infer<typeof GeneratedDocumentPayloadSchema>;
 
 export function parseGeneratedDocumentPayload(raw: string): GeneratedDocumentPayload | null {
   let parsed: unknown;
@@ -22,16 +25,8 @@ export function parseGeneratedDocumentPayload(raw: string): GeneratedDocumentPay
   } catch {
     return null;
   }
-  if (parsed === null || typeof parsed !== "object") return null;
-  const obj = parsed as Record<string, unknown>;
-  if (
-    typeof obj.path !== "string" ||
-    typeof obj.mediaType !== "string" ||
-    typeof obj.name !== "string"
-  ) {
-    return null;
-  }
-  return { path: obj.path, mediaType: obj.mediaType, name: obj.name };
+  const payload = GeneratedDocumentPayloadSchema.safeParse(parsed);
+  return payload.success ? payload.data : null;
 }
 
 const TOOL_DESCRIPTION =
@@ -89,7 +84,7 @@ export function createDocumentTools(attachments: AttachmentStore): ToolSpec[] {
         const mediaType = input.mediaType ?? inferMediaType(input.filename);
         const buffer = Buffer.from(input.content, "utf-8");
         const path = await attachments.upload(buffer, mediaType, "generated");
-        return JSON.stringify({ path, mediaType, name: input.filename });
+        return ok(JSON.stringify({ path, mediaType, name: input.filename }));
       },
     }),
   ];

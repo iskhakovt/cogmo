@@ -14,7 +14,8 @@ import {
   type SandboxSession,
 } from "../../sandbox/index.js";
 import { DrizzleSandboxStore } from "../../sandbox/store/index.js";
-import { expectDefined } from "../../test/assertions.js";
+import { expectDefined, expectOk } from "../../test/assertions.js";
+import { codingAuthSecrets } from "../../test/coding-fixtures.js";
 import {
   makeStepRun,
   mockAgentStore,
@@ -73,18 +74,20 @@ beforeEach(async () => {
 /** The one repo every test in this file delegates against. */
 async function seedRepo(): Promise<CodingRepoRow> {
   return tx((trx) =>
-    store.insertRepo(trx, {
-      name: "cogmo",
-      localPath: repoPath,
-      defaultBranch: "main",
-      remoteUrl: "git@github.com:user/cogmo.git",
-      devcontainer: null,
-      allowedBackends: ["claude"],
-      verifyCommand: "true",
-      taskTokenBudget: 100_000,
-      taskWallTimeSeconds: 600,
-      maxConcurrentTasks: 1,
-    }),
+    store
+      .insertRepo(trx, {
+        name: "cogmo",
+        localPath: repoPath,
+        defaultBranch: "main",
+        remoteUrl: "git@github.com:user/cogmo.git",
+        devcontainer: null,
+        allowedBackends: ["claude"],
+        verifyCommand: "true",
+        taskTokenBudget: 100_000,
+        taskWallTimeSeconds: 600,
+        maxConcurrentTasks: 1,
+      })
+      .then(expectOk),
   );
 }
 
@@ -92,13 +95,15 @@ async function seedRepo(): Promise<CodingRepoRow> {
 async function seedConversation(): Promise<string> {
   const user = await tx((trx) => agentStore.createUser(trx));
   const profile = await tx((trx) =>
-    agentStore.createProfile(trx, {
-      userId: user.id,
-      name: "default",
-      basePrompt: "p",
-      model: "test-model",
-      toolSet: [],
-    }),
+    agentStore
+      .createProfile(trx, {
+        userId: user.id,
+        name: "default",
+        basePrompt: "p",
+        model: "test-model",
+        toolSet: [],
+      })
+      .then(expectOk),
   );
   const conv = await tx((trx) =>
     agentStore.createConversation(trx, { userId: user.id, profileId: profile.id, isPrivate: true }),
@@ -333,6 +338,7 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
         store,
         sandbox,
         backend,
+        secretsStore: codingAuthSecrets(),
         devbaseImage: "cogmo/devbase:test",
         defaultResourceLimits: RESOURCE_LIMITS,
         taskTtlMs: 60_000,
@@ -407,6 +413,7 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
         store,
         sandbox,
         backend,
+        secretsStore: codingAuthSecrets(),
         devbaseImage: "cogmo/devbase:test",
         defaultResourceLimits: RESOURCE_LIMITS,
         taskTtlMs: 60_000,
@@ -495,6 +502,7 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
       store,
       sandbox,
       backend,
+      secretsStore: codingAuthSecrets(),
       devbaseImage: "cogmo/devbase:test",
       defaultResourceLimits: RESOURCE_LIMITS,
       taskTtlMs: 60_000,
@@ -686,6 +694,7 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
           ],
           executeEvents: [],
         }),
+        secretsStore: codingAuthSecrets(),
         devbaseImage: "cogmo/devbase:test",
         defaultResourceLimits: RESOURCE_LIMITS,
         taskTtlMs: 60_000,

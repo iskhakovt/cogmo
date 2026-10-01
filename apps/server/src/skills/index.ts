@@ -9,11 +9,11 @@ export {
   type ConfigureSkillsRemoteSuccess,
   configureSkillsRemote,
 } from "./configure-remote.js";
+export type { SkillInvokeRejection } from "./invoke-rejection.js";
 export type { ManifestParseError, ParsedManifest } from "./manifest.js";
 export { parseManifest } from "./manifest.js";
 export { bootstrapSkillsRepo } from "./repo.js";
 export {
-  InputValidationError,
   type RegisterResult,
   type SkillRunner,
   SkillRunnerImpl,

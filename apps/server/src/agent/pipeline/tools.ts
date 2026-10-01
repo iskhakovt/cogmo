@@ -2,13 +2,15 @@ import { randomUUID } from "node:crypto";
 /**
  * Agent tools for user-defined pipelines. Dumb adapters over
  * `service.pipelines` — compile/cap/ownership logic lives in the service,
- * the tools parse Zod input and render results (and structured errors)
- * into LLM-readable text.
+ * the tools parse Zod input, render results into LLM-readable text, and
+ * reject with a structured error's explanation.
  */
 
+import { err, ok, type Result } from "neverthrow";
+import { match } from "ts-pattern";
 import { z } from "zod";
 import type { Service } from "../service.js";
-import { defineTool, type ToolSpec } from "../tools.js";
+import { defineTool, reject, type ToolRejection, type ToolSpec } from "../tools.js";
 import {
   MAX_SOURCE_TEXT_LENGTH,
   type PipelineSummary,
@@ -58,18 +60,21 @@ export const definePipelineTool: ToolSpec = defineTool({
   durable: true,
   handler: async ({ description }, service) => {
     const pipelines = requirePipelines(service);
-    const result = await pipelines.define({ sourceText: description });
-    if (result.isErr()) return renderError(result.error);
-    const { name, version, preview } = result.value;
-    return JSON.stringify({
-      ok: true,
-      name,
-      version,
-      preview,
-      nextStep:
-        "Show the preview to the user verbatim and ask for confirmation. Call activate_pipeline " +
-        "only after they explicitly confirm.",
-    });
+    if (pipelines.isErr()) return err(pipelines.error);
+    const result = await pipelines.value.define({ sourceText: description });
+    return result
+      .map(({ name, version, preview }) =>
+        JSON.stringify({
+          ok: true,
+          name,
+          version,
+          preview,
+          nextStep:
+            "Show the preview to the user verbatim and ask for confirmation. Call activate_pipeline " +
+            "only after they explicitly confirm.",
+        }),
+      )
+      .mapErr(pipelinesRejection);
   },
 });
 
@@ -84,20 +89,24 @@ export const activatePipelineTool: ToolSpec = defineTool({
   schema: activateSchema,
   handler: async (input, service) => {
     const pipelines = requirePipelines(service);
-    const result = await pipelines.activate({
+    if (pipelines.isErr()) return err(pipelines.error);
+    const result = await pipelines.value.activate({
       name: input.name,
       ...(input.version !== undefined && { version: input.version }),
     });
-    if (result.isErr()) return renderError(result.error);
-    return JSON.stringify({
-      ok: true,
-      name: result.value.name,
-      version: result.value.version,
-      note:
-        "Active. Command-triggered pipelines start when the user asks and you call " +
-        "start_pipeline. Cron and event triggers, loops and wait stages are not runnable yet — " +
-        "start_pipeline reports which features block a run.",
-    });
+    return result
+      .map(({ name, version }) =>
+        JSON.stringify({
+          ok: true,
+          name,
+          version,
+          note:
+            "Active. Command-triggered pipelines start when the user asks and you call " +
+            "start_pipeline. Cron and event triggers, loops and wait stages are not runnable yet — " +
+            "start_pipeline reports which features block a run.",
+        }),
+      )
+      .mapErr(pipelinesRejection);
   },
 });
 
@@ -113,9 +122,10 @@ export const listPipelinesTool: ToolSpec = defineTool({
   sideEffectful: false,
   handler: async (_input, service) => {
     const pipelines = requirePipelines(service);
-    const summaries = await pipelines.list();
-    if (summaries.length === 0) return "No pipelines defined yet.";
-    return JSON.stringify(summaries.map(renderSummary));
+    if (pipelines.isErr()) return err(pipelines.error);
+    const summaries = await pipelines.value.list();
+    if (summaries.length === 0) return ok("No pipelines defined yet.");
+    return ok(JSON.stringify(summaries.map(renderSummary)));
   },
 });
 
@@ -135,23 +145,26 @@ export const startPipelineTool: ToolSpec = defineTool({
   durable: true,
   handler: async ({ name }, service, ctx) => {
     const pipelines = requirePipelines(service);
+    if (pipelines.isErr()) return err(pipelines.error);
     // Outside a retrying context nothing re-executes this call, so a fresh
     // key carries no dedup obligation.
     const idempotencyKey =
       ctx !== undefined ? `start_pipeline:${ctx.idempotencyKey}` : randomUUID();
-    const result = await pipelines.start({ name, idempotencyKey });
-    if (result.isErr()) return renderError(result.error);
-    const { runId, version, firstStage } = result.value;
-    return JSON.stringify({
-      ok: true,
-      runId,
-      name: result.value.name,
-      version,
-      firstStage,
-      note:
-        "The run has started in a new conversation, which the user's chat now points at. Tell " +
-        "the user it is underway; its stage output and checkpoints will appear there.",
-    });
+    const result = await pipelines.value.start({ name, idempotencyKey });
+    return result
+      .map((run) =>
+        JSON.stringify({
+          ok: true,
+          runId: run.runId,
+          name: run.name,
+          version: run.version,
+          firstStage: run.firstStage,
+          note:
+            "The run has started in a new conversation, which the user's chat now points at. Tell " +
+            "the user it is underway; its stage output and checkpoints will appear there.",
+        }),
+      )
+      .mapErr(pipelinesRejection);
   },
 });
 
@@ -172,11 +185,10 @@ export const pipelineTools: ReadonlyArray<ToolSpec> = [
  */
 export const PIPELINE_TOOL_NAMES: ReadonlyArray<string> = pipelineTools.map((t) => t.name);
 
-function requirePipelines(service: Service): PipelinesService {
-  if (!service.pipelines) {
-    throw new Error("Pipelines are unavailable in this context.");
-  }
-  return service.pipelines;
+function requirePipelines(service: Service): Result<PipelinesService, ToolRejection> {
+  return service.pipelines
+    ? ok(service.pipelines)
+    : reject("Pipelines are unavailable in this context.");
 }
 
 function renderSummary(summary: PipelineSummary): Record<string, unknown> {
@@ -189,29 +201,51 @@ function renderSummary(summary: PipelineSummary): Record<string, unknown> {
   };
 }
 
-function renderError(error: PipelinesError): string {
-  switch (error.kind) {
-    case "compile_failed":
-      return (
+/** The rejection the model reads for a `PipelinesError`. */
+function pipelinesRejection(error: PipelinesError): ToolRejection {
+  const message = match(error)
+    .with(
+      { kind: "compile_failed" },
+      (e) =>
         "Could not compile the pipeline — these points need disambiguation:\n" +
-        error.issues.map((i) => `- ${i.path}: ${i.message}`).join("\n") +
-        "\nAsk the user to clarify, then call define_pipeline again with the refined description."
-      );
-    case "source_too_long":
-      return `Description is ${error.length} chars; the limit is ${error.maxLength}. Summarize the workflow and retry.`;
-    case "definition_cap_exceeded":
-      return `Definition cap reached (${error.current}/${error.limit}). The user must remove pipelines before defining more.`;
-    case "not_found":
-      return `No pipeline named "${error.name}"${error.version !== undefined ? ` with version ${error.version}` : ""}. Use list_pipelines to see what exists.`;
-    case "not_active":
-      return `Pipeline "${error.name}" has no active version. Use list_pipelines to check its name, and activate_pipeline only after the user confirms its preview.`;
-    case "unsupported_features":
-      return `Pipeline "${error.name}" can't run yet — it uses features the run engine doesn't support: ${error.features.join(", ")}. Tell the user; they can redefine it without those features.`;
-    case "no_reachable_channel":
-      return "No channel can reach the user for this run's checkpoints, so it was not started.";
-    case "no_gate_channel":
-      return "This pipeline has approval checkpoints, and none of the user's reachable channels can show them (approval buttons appear on Telegram), so it was not started.";
-    case "runs_unavailable":
-      return "Pipeline runs aren't available in this context.";
-  }
+        e.issues.map((i) => `- ${i.path}: ${i.message}`).join("\n") +
+        "\nAsk the user to clarify, then call define_pipeline again with the refined description.",
+    )
+    .with(
+      { kind: "source_too_long" },
+      (e) =>
+        `Description is ${e.length} chars; the limit is ${e.maxLength}. Summarize the workflow and retry.`,
+    )
+    .with(
+      { kind: "definition_cap_exceeded" },
+      (e) =>
+        `Definition cap reached (${e.current}/${e.limit}). The user must remove pipelines before defining more.`,
+    )
+    .with(
+      { kind: "not_found" },
+      (e) =>
+        `No pipeline named "${e.name}"${e.version !== undefined ? ` with version ${e.version}` : ""}. Use list_pipelines to see what exists.`,
+    )
+    .with(
+      { kind: "not_active" },
+      (e) =>
+        `Pipeline "${e.name}" has no active version. Use list_pipelines to check its name, and activate_pipeline only after the user confirms its preview.`,
+    )
+    .with(
+      { kind: "unsupported_features" },
+      (e) =>
+        `Pipeline "${e.name}" can't run yet — it uses features the run engine doesn't support: ${e.features.join(", ")}. Tell the user; they can redefine it without those features.`,
+    )
+    .with(
+      { kind: "no_reachable_channel" },
+      () => "No channel can reach the user for this run's checkpoints, so it was not started.",
+    )
+    .with(
+      { kind: "no_gate_channel" },
+      () =>
+        "This pipeline has approval checkpoints, and none of the user's reachable channels can show them (approval buttons appear on Telegram), so it was not started.",
+    )
+    .with({ kind: "runs_unavailable" }, () => "Pipeline runs aren't available in this context.")
+    .exhaustive();
+  return { message };
 }

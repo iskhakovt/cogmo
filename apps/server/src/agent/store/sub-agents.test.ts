@@ -1,18 +1,19 @@
+import { err } from "neverthrow";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
 import { expectDefined } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
-import { UniqueViolationError } from "./errors.js";
-import { DrizzleAgentStore } from "./index.js";
+import { DrizzleSubAgentStore } from "./sub-agents.js";
+import { DrizzleUserStore } from "./users.js";
 
 let db: Database;
 let tx: Transactor;
 let close: () => Promise<void>;
-let store: DrizzleAgentStore;
+const store = new DrizzleSubAgentStore();
+const userStore = new DrizzleUserStore();
 
 beforeAll(async () => {
   ({ db, tx, close } = await createTestDatabase());
-  store = new DrizzleAgentStore();
 });
 
 afterEach(async () => {
@@ -24,10 +25,10 @@ afterAll(async () => {
 });
 
 async function seedUser(): Promise<string> {
-  return (await tx((trx) => store.createUser(trx))).id;
+  return (await tx((trx) => userStore.createUser(trx))).id;
 }
 
-describe("DrizzleAgentStore sub-agents", () => {
+describe("DrizzleSubAgentStore", () => {
   it("creates and lists a sub-agent", async () => {
     const userId = await seedUser();
     await tx((trx) =>
@@ -81,7 +82,7 @@ describe("DrizzleAgentStore sub-agents", () => {
     expect(rows.map((r) => r.name)).toEqual(["alpha", "mid", "zed"]);
   });
 
-  it("rejects a duplicate (user_id, name) with UniqueViolationError", async () => {
+  it("rejects a duplicate (user_id, name) as sub_agent_name_taken", async () => {
     const userId = await seedUser();
     await tx((trx) =>
       store.createSubAgent(trx, {
@@ -92,17 +93,18 @@ describe("DrizzleAgentStore sub-agents", () => {
         model: "m",
       }),
     );
-    await expect(
-      tx((trx) =>
-        store.createSubAgent(trx, {
-          userId,
-          name: "writer",
-          description: "other",
-          systemPrompt: null,
-          model: "m2",
-        }),
-      ),
-    ).rejects.toBeInstanceOf(UniqueViolationError);
+    const dup = await tx((trx) =>
+      store.createSubAgent(trx, {
+        userId,
+        name: "writer",
+        description: "other",
+        systemPrompt: null,
+        model: "m2",
+      }),
+    );
+    expect(dup).toEqual(err({ kind: "sub_agent_name_taken", name: "writer" }));
+    const rows = await tx((trx) => store.listSubAgents(trx, userId));
+    expect(rows.map((r) => r.description)).toEqual(["d"]);
   });
 
   it("scopes list + delete by user — same name under two users is allowed", async () => {

@@ -1,5 +1,5 @@
 import { NonRetriableError } from "inngest";
-import { err } from "neverthrow";
+import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { z } from "zod";
@@ -21,7 +21,7 @@ import {
   mockMemoryProvider,
   mockTransportStore,
 } from "../../test/factories.js";
-import { StreamDeliveryError } from "../../transport/delivery-router.js";
+import type { StreamDeliveryError } from "../../transport/delivery-router.js";
 import { canonicalKeyOrder } from "../../util/canonical-key-order.js";
 import { toolResultClearing } from "../context.js";
 import type { AgentLoopResult, StepRunner } from "../loop.js";
@@ -78,7 +78,12 @@ function loopResult(overrides: Partial<AgentLoopResult> = {}): AgentLoopResult {
 }
 
 function toolNamed(name: string) {
-  return defineTool({ name, description: name, schema: z.object({}), handler: async () => "ok" });
+  return defineTool({
+    name,
+    description: name,
+    schema: z.object({}),
+    handler: async () => ok("ok"),
+  });
 }
 
 /** Step runners that execute bodies inline and record the ids they were given. */
@@ -605,7 +610,7 @@ describe("runAgenticStage", () => {
           gitSha: "abc1234",
         },
       ]);
-      skillRunner.invoke.mockResolvedValue({ runId: "run-1", status: "success", output: {} });
+      skillRunner.invoke.mockResolvedValue(ok({ runId: "run-1", status: "success", output: {} }));
       skillRunner.register.mockResolvedValue({
         name: "echo",
         riskTier: "notify",
@@ -808,9 +813,9 @@ describe("runAgenticStage", () => {
   });
 
   describe("stream delivery failures", () => {
-    const deliveryFailed = new StreamDeliveryError([
-      { sessionId: "session-tg", reason: "telegram: chat not found" },
-    ]);
+    const deliveryFailed: StreamDeliveryError = {
+      failures: [{ sessionId: "session-tg", reason: "telegram: chat not found" }],
+    };
 
     it("keeps a deterministic loop error non-retriable when the abort fails", async () => {
       const h = await harness();

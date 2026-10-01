@@ -12,6 +12,7 @@ import {
   subcommands,
   type Type,
 } from "cmd-ts";
+import { describeInvokeRejection } from "../skills/invoke-rejection.js";
 import type { SkillRunAs } from "../skills/run-as.js";
 import type { RegisterResult, SkillDeployOrigin, SkillRunner } from "../skills/runner.js";
 import { identifier } from "./args.js";
@@ -159,7 +160,12 @@ async function runSkill(
   const { name, inputs } = args;
   try {
     const runAs = await deps.ownerRunAs();
-    const result = await deps.runner.invoke({ name, inputs, trigger: "manual", runAs });
+    const invoked = await deps.runner.invoke({ name, inputs, trigger: "manual", runAs });
+    if (invoked.isErr()) {
+      io.err(`invoke failed: ${describeInvokeRejection(invoked.error)}`);
+      return 1;
+    }
+    const result = invoked.value;
     io.out(JSON.stringify(result, null, 2));
     return result.status === "success" ? 0 : 1;
   } catch (e) {

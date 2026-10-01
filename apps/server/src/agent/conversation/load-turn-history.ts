@@ -2,12 +2,12 @@ import * as R from "remeda";
 import type { Transaction, Transactor } from "../../db/index.js";
 import type { Message } from "../../llm/types.js";
 import { formatSummaryMessage } from "../context.js";
-import type { AgentStore } from "../store/index.js";
+import type { TranscriptStore } from "../store/index.js";
 import { type TurnContext, withTurnContext } from "../turn-context.js";
 
 export interface LoadTurnHistoryDeps {
   runInTx: Transactor;
-  agentStore: AgentStore;
+  agentStore: TranscriptStore;
 }
 
 export interface TurnHistory {
@@ -89,7 +89,7 @@ export async function loadTurnHistory(
 
 async function findTurn(
   tx: Transaction,
-  agentStore: AgentStore,
+  agentStore: TranscriptStore,
   conversationId: string,
   inboundId: string | null,
 ): Promise<TurnHistory["turn"]> {

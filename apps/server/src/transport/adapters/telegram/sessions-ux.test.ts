@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ConversationSummary, Profile } from "../../../agent/store/index.js";
 import type { ConversationStatusSummary } from "../../transport.js";
 import {
+  formatScope,
   renderConversationStatus,
   renderModelList,
   renderProfileList,
@@ -402,5 +403,148 @@ describe("renderModelList", () => {
 
   it("handles empty list", () => {
     expect(renderModelList([])).toContain("No user-selectable");
+  });
+});
+
+describe("formatScope", () => {
+  it("null → 'unrestricted (recalls all memories)'", () => {
+    expect(formatScope(null)).toBe("unrestricted (recalls all memories)");
+  });
+
+  it("set scope renders compartments + trust", () => {
+    expect(formatScope({ compartments: ["work", "technical"], trust: ["first-party"] })).toBe(
+      "compartments: work, technical / trust: first-party",
+    );
+  });
+
+  it("marks custom compartments with `*` and appends a legend when any custom appears", () => {
+    expect(
+      formatScope(
+        { compartments: ["work", "dnd", "technical", "music"], trust: ["first-party"] },
+        new Set(["dnd", "music"]),
+      ),
+    ).toBe("compartments: work, dnd*, technical, music* / trust: first-party (* = custom)");
+  });
+
+  it("omits the legend when no compartment is custom (all-core scopes stay clean)", () => {
+    expect(
+      formatScope(
+        { compartments: ["work", "technical"], trust: ["first-party"] },
+        new Set(["dnd"]),
+      ),
+    ).toBe("compartments: work, technical / trust: first-party");
+  });
+
+  it("an empty / missing customs set leaves output unmarked (default for callers that don't load customs)", () => {
+    // Same input, no second arg → no asterisks, no legend. Lets call
+    // sites that don't have the customs loaded (currently /profile list
+    // and /status) keep emitting bare scope strings without leaking
+    // misleading "no customs exist" through a stale empty Set.
+    const out = formatScope({ compartments: ["work", "dnd"], trust: ["first-party"] });
+    expect(out).not.toContain("*");
+  });
+
+  it("marks restricted classes with `!` and appends a legend when any restricted appears", () => {
+    expect(
+      formatScope(
+        {
+          compartments: ["personal"],
+          trust: ["first-party"],
+          profileClasses: ["intimate", "general"],
+        },
+        undefined,
+        new Set(["intimate"]),
+      ),
+    ).toBe(
+      "compartments: personal / trust: first-party / classes: intimate!, general (! = restricted)",
+    );
+  });
+
+  it("combines * (custom) and ! (restricted) legends when both apply", () => {
+    expect(
+      formatScope(
+        { compartments: ["work", "dnd"], trust: ["first-party"], profileClasses: ["intimate"] },
+        new Set(["dnd"]),
+        new Set(["intimate"]),
+      ),
+    ).toBe(
+      "compartments: work, dnd* / trust: first-party / classes: intimate! (* = custom; ! = restricted)",
+    );
+  });
+
+  it("a missing restrictedClasses set leaves classes unmarked", () => {
+    const out = formatScope({
+      compartments: ["personal"],
+      trust: ["first-party"],
+      profileClasses: ["intimate"],
+    });
+    expect(out).not.toContain("!");
+  });
+
+  it("appends speaker class with `(speaker)` annotation when not in the explicit list", () => {
+    // Operator wrote `classes=general` but the profile speaks as `intimate`.
+    // The Service auto-includes intimate in the recall filter; the rendered
+    // scope must reflect that effective set so the operator isn't surprised.
+    expect(
+      formatScope(
+        { compartments: ["personal"], trust: ["first-party"], profileClasses: ["general"] },
+        undefined,
+        undefined,
+        "intimate",
+      ),
+    ).toBe("compartments: personal / trust: first-party / classes: general, intimate (speaker)");
+  });
+
+  it("does not duplicate the speaker class when already in the explicit list", () => {
+    expect(
+      formatScope(
+        {
+          compartments: ["personal"],
+          trust: ["first-party"],
+          profileClasses: ["general", "intimate"],
+        },
+        undefined,
+        undefined,
+        "intimate",
+      ),
+    ).toBe("compartments: personal / trust: first-party / classes: general, intimate");
+  });
+
+  it("composes speaker `(speaker)` annotation with `!` restricted marker on the same class", () => {
+    expect(
+      formatScope(
+        { compartments: ["personal"], trust: ["first-party"], profileClasses: ["general"] },
+        undefined,
+        new Set(["intimate"]),
+        "intimate",
+      ),
+    ).toBe(
+      "compartments: personal / trust: first-party / classes: general, intimate! (speaker) (! = restricted)",
+    );
+  });
+
+  it("speakerClass null leaves classes unannotated", () => {
+    expect(
+      formatScope(
+        { compartments: ["personal"], trust: ["first-party"], profileClasses: ["general"] },
+        undefined,
+        undefined,
+        null,
+      ),
+    ).toBe("compartments: personal / trust: first-party / classes: general");
+  });
+
+  it("speakerClass set but scope has no profileClasses leaves rendering unchanged", () => {
+    // No `classes:` segment in the rendered output → no auto-include
+    // surface to annotate. Speaker has no effect on the compartment-only
+    // scope; the rendering stays the same as before.
+    expect(
+      formatScope(
+        { compartments: ["work"], trust: ["first-party"] },
+        undefined,
+        undefined,
+        "intimate",
+      ),
+    ).toBe("compartments: work / trust: first-party");
   });
 });

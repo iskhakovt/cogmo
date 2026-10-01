@@ -183,7 +183,7 @@ export interface DaytonaProbeOpts {
  * mistyped key runs this more than once.
  *
  * Every failure — including a client that never got built — comes back as
- * a `ValidationResult`. Both callers (`wizard.ts` spinner, the
+ * a `ValidationResult`. Both callers (the wizard's Daytona step, the
  * non-interactive validator set) render `error` and offer a retry; a
  * rejection would abort the setup flow instead.
  */

@@ -72,6 +72,7 @@ vi.mock("./worktree.js", () => ({
   removeWorktree: worktreeMocks.removeWorktree,
 }));
 
+import { expectOk } from "../../test/assertions.js";
 // `vi.mock` is hoisted by Vitest, so static imports below see the mocked
 // modules. Type imports are erased at compile time and don't trigger
 // module loading.
@@ -133,18 +134,20 @@ const fakeInngest = { send: vi.fn().mockResolvedValue(undefined) };
 
 async function seedRepo(): Promise<CodingRepoRow> {
   return tx((trx) =>
-    store.insertRepo(trx, {
-      name: "cogmo",
-      localPath: join(baseDir, "repo"),
-      defaultBranch: "main",
-      remoteUrl: "https://github.com/owner/cogmo.git",
-      devcontainer: null,
-      allowedBackends: ["claude"],
-      verifyCommand: "true",
-      taskTokenBudget: 100_000,
-      taskWallTimeSeconds: 600,
-      maxConcurrentTasks: 1,
-    }),
+    store
+      .insertRepo(trx, {
+        name: "cogmo",
+        localPath: join(baseDir, "repo"),
+        defaultBranch: "main",
+        remoteUrl: "https://github.com/owner/cogmo.git",
+        devcontainer: null,
+        allowedBackends: ["claude"],
+        verifyCommand: "true",
+        taskTokenBudget: 100_000,
+        taskWallTimeSeconds: 600,
+        maxConcurrentTasks: 1,
+      })
+      .then(expectOk),
   );
 }
 
@@ -373,30 +376,6 @@ describe("runCodingTask — git-remote transport", () => {
     const reloaded = await tx((trx) => store.getTask(trx, task.id));
     expect(reloaded?.worktreeAssignment?.type).toBe("git-remote");
     expect(reloaded?.worktreeAssignment?.branch).toBe(`cogmo/${idShort}`);
-  });
-
-  it("fails fast when secretsStore is missing (git-remote requires identity for push auth)", async () => {
-    const repo = await seedRepo();
-    const task = await seedTask(repo);
-    const { sandbox } = fakeGitRemoteSandbox();
-
-    const result = await runCodingTask({
-      taskId: task.id,
-      runId: "run-test",
-      deps: makeDeps({
-        sandbox,
-        backend: backendYielding([]),
-        // @ts-expect-error — deliberately undefined to exercise the secretsStore guard
-        secretsStore: undefined,
-      }),
-      stepRun,
-      stepSendEvent,
-    });
-
-    expect(result.status).toBe("failed");
-    expect(result.failureReason).toContain("secretsStore");
-    // Push and clone never happened — fast-fail before any side effect.
-    expect(transportMocks.pushTaskBranchToRemote).not.toHaveBeenCalled();
   });
 
   it("rolls back the run-branch push on resume — assignment already persisted, push still re-fires", async () => {

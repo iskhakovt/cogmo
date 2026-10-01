@@ -1,6 +1,6 @@
 import { PassThrough, type Readable, type Writable } from "node:stream";
 import { ok } from "neverthrow";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, assert, describe, expect, it, vi } from "vitest";
 import {
   type ExecStreamingHandle,
   type LocalDockerSessionState,
@@ -93,7 +93,7 @@ function buildFakeSandbox(): FakeSandboxBundle {
   return { sandbox, stdin, stdout, calls };
 }
 
-const noopCtx: CtxHandler = { handle: async () => null };
+const noopCtx: CtxHandler = { handle: async () => ok(null) };
 
 /** Auto-respond to any `task_invoke` line with a matching `task_result` and `task_exited`. */
 function autoRespond(
@@ -281,7 +281,7 @@ describe("runOnSysboxContainer", () => {
       ctxHandler: noopCtx,
     });
 
-    expect(result.ok).toBe(false);
+    assert(!result.ok);
     expect(result.workerReusable).toBe(false);
     expect(result.error).toMatch(/exec blew up/);
     // Even on failure, the worker's dispose ran — sandbox.delete called.
@@ -302,7 +302,7 @@ describe("runOnSysboxContainer", () => {
       ctxHandler: noopCtx,
     });
 
-    expect(result.ok).toBe(false);
+    assert(!result.ok);
     expect(result.error).toMatch(/daemon unreachable/);
     // sandbox.delete is never called because no session was ever created.
     expect(bundle.sandbox.delete).not.toHaveBeenCalled();
@@ -324,6 +324,6 @@ describe("runOnSysboxContainer", () => {
       ctxHandler: noopCtx,
     });
 
-    expect(result.ok).toBe(true);
+    assert(result.ok);
   });
 });

@@ -414,7 +414,7 @@ describe("FakeDaytonaSandboxClient — execStreaming", () => {
     expect(Buffer.concat(chunks).toString("utf8")).toContain("done");
   }, 10_000);
 
-  it("dispose() rejects wait() with ExecDisposedError per the ExecStreamingHandle contract", async () => {
+  it("dispose() rejects wait() with a disposed ExecError per the ExecStreamingHandle contract", async () => {
     const session = await client.create(
       makeSpec({
         worktree: {

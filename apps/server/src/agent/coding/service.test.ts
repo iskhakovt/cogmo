@@ -1,7 +1,7 @@
 import type { Inngest } from "inngest";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
-import { expectDefined } from "../../test/assertions.js";
+import { expectDefined, expectOk } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { DrizzleAgentStore } from "../store/index.js";
 import { createCodingService } from "./service.js";
@@ -25,13 +25,15 @@ let conversationId: string;
 beforeEach(async () => {
   const user = await tx((trx) => agentStore.createUser(trx));
   const profile = await tx((trx) =>
-    agentStore.createProfile(trx, {
-      userId: user.id,
-      name: "default",
-      basePrompt: "p",
-      model: "test-model",
-      toolSet: [],
-    }),
+    agentStore
+      .createProfile(trx, {
+        userId: user.id,
+        name: "default",
+        basePrompt: "p",
+        model: "test-model",
+        toolSet: [],
+      })
+      .then(expectOk),
   );
   const conv = await tx((trx) =>
     agentStore.createConversation(trx, { userId: user.id, profileId: profile.id, isPrivate: true }),
@@ -53,18 +55,20 @@ function fakeInngest(): Pick<Inngest, "send"> & { send: ReturnType<typeof vi.fn>
 
 async function seedRepo(name = "cogmo", maxConcurrentTasks = 1): Promise<string> {
   const row = await tx((trx) =>
-    store.insertRepo(trx, {
-      name,
-      localPath: `/var/lib/cogmo/repos/${name}`,
-      defaultBranch: "main",
-      remoteUrl: `git@github.com:user/${name}.git`,
-      devcontainer: null,
-      allowedBackends: ["claude"],
-      verifyCommand: "pnpm test",
-      taskTokenBudget: 200_000,
-      taskWallTimeSeconds: 1800,
-      maxConcurrentTasks,
-    }),
+    store
+      .insertRepo(trx, {
+        name,
+        localPath: `/var/lib/cogmo/repos/${name}`,
+        defaultBranch: "main",
+        remoteUrl: `git@github.com:user/${name}.git`,
+        devcontainer: null,
+        allowedBackends: ["claude"],
+        verifyCommand: "pnpm test",
+        taskTokenBudget: 200_000,
+        taskWallTimeSeconds: 1800,
+        maxConcurrentTasks,
+      })
+      .then(expectOk),
   );
   return row.id;
 }
@@ -115,13 +119,20 @@ describe("createCodingService", () => {
       conversationId,
     );
 
-    await expect(service.delegate({ goal: "x".repeat(20), repoName: "cogmo" })).rejects.toThrow(
-      /sandbox module is not initialized/,
-    );
+    const result = await service.delegate({ goal: "x".repeat(20), repoName: "cogmo" });
+
+    expect(result).toEqual({
+      taskId: null,
+      status: "rejected",
+      reason: expect.stringMatching(/sandbox module is not initialized/),
+    });
     expect(inngest.send).not.toHaveBeenCalled();
   });
 
-  it("throws when the repo is not registered", async () => {
+  it.each([
+    ["ghost", /Repo not registered: ghost/],
+    ["skills", /Skills repo isn't configured yet/],
+  ])("rejects when the repo %s is not registered", async (repoName, reason) => {
     const inngest = fakeInngest();
     const service = createCodingService(
       {
@@ -133,9 +144,13 @@ describe("createCodingService", () => {
       conversationId,
     );
 
-    await expect(service.delegate({ goal: "x".repeat(20), repoName: "ghost" })).rejects.toThrow(
-      /Repo not registered: ghost/,
-    );
+    const result = await service.delegate({ goal: "x".repeat(20), repoName });
+
+    expect(result).toEqual({
+      taskId: null,
+      status: "rejected",
+      reason: expect.stringMatching(reason),
+    });
     expect(inngest.send).not.toHaveBeenCalled();
   });
 

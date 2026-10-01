@@ -10,18 +10,19 @@
 import { randomBytes } from "node:crypto";
 import { eq, like } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
+import { err } from "neverthrow";
 import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import * as schema from "../../db/schemas.js";
 import { type Transaction, transactor } from "../../db/transactor.js";
-import { assertKind, expectDefined } from "../../test/assertions.js";
+import { assertKind, expectDefined, expectOk } from "../../test/assertions.js";
 import { fileDatabaseUrl, fileDefaultUserId } from "../../test/integration-file.js";
-import { RuleGroupChangedError } from "./errors.js";
-import { DrizzleAgentStore, type InstructionRuleParams } from "./index.js";
+import { DrizzleProfileStore } from "./profiles.js";
 import { profiles, steeringRules } from "./schema.js";
+import { DrizzleSteeringRuleStore, type InstructionRuleParams } from "./steering-rules.js";
 
 const PREFIX = `it-${randomBytes(4).toString("hex")}-`;
-const store = new DrizzleAgentStore();
+const store = new DrizzleSteeringRuleStore();
 
 let winnerSql: ReturnType<typeof postgres>;
 let loserSql: ReturnType<typeof postgres>;
@@ -38,13 +39,15 @@ beforeAll(async () => {
   loserPid = expectDefined(row, "loser pid").pid;
   profileId = (
     await transactor(drizzle(observerSql, { schema }))((trx) =>
-      store.createProfile(trx, {
-        userId: null,
-        name: `${PREFIX}profile`,
-        basePrompt: "",
-        model: "m",
-        toolSet: [],
-      }),
+      new DrizzleProfileStore()
+        .createProfile(trx, {
+          userId: null,
+          name: `${PREFIX}profile`,
+          basePrompt: "",
+          model: "m",
+          toolSet: [],
+        })
+        .then(expectOk),
     )
   ).id;
 });
@@ -160,8 +163,10 @@ describe("instruction rules against a concurrent writer (real Postgres)", () => 
     );
 
     expect(won.retired.map((r) => r.id)).toEqual([retiring]);
-    assertKind(lost, "rejected");
-    expect(lost.error).toBeInstanceOf(RuleGroupChangedError);
+    // The first attempt's delete hits 40001; the retry's fresh snapshot finds
+    // the group one rule short.
+    assertKind(lost, "fulfilled");
+    expect(lost.value).toEqual(err({ kind: "rule_group_changed", deleted: 1 }));
     expect(attempts).toBe(2);
     const survivors = await drizzle(observerSql, { schema })
       .select({ id: steeringRules.id, active: steeringRules.active })

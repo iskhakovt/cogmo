@@ -40,21 +40,23 @@ describe("memory_recall", () => {
       }),
     });
 
-    const result = await memoryRecall.handler({ query: "Alice" }, caps);
+    const result = (await memoryRecall.handler({ query: "Alice" }, caps))._unsafeUnwrap();
 
     expect(result).toBe("[world] Alice likes coffee\n[observation] Met Alice in 2023");
   });
 
   it("returns message when no memories found", async () => {
     const caps = mockService();
-    const result = await memoryRecall.handler({ query: "unknown" }, caps);
+    const result = (await memoryRecall.handler({ query: "unknown" }, caps))._unsafeUnwrap();
 
     expect(result).toBe("No relevant memories found.");
   });
 
   it("rejects invalid input (missing query)", async () => {
     const caps = mockService();
-    await expect(memoryRecall.handler({}, caps)).rejects.toThrow();
+    const result = await memoryRecall.handler({}, caps);
+    expect(result._unsafeUnwrapErr().message).toContain("query");
+    expect(caps.memory.recall).not.toHaveBeenCalled();
   });
 
   it("has valid tool definition", () => {
@@ -93,14 +95,17 @@ describe("memory_retain", () => {
 
   it("returns confirmation", async () => {
     const caps = mockService();
-    const result = await memoryRetain.handler({ content: "a fact" }, caps);
+    const result = (await memoryRetain.handler({ content: "a fact" }, caps))._unsafeUnwrap();
 
     expect(result).toBe("Remembered.");
   });
 
   it("rejects invalid input (missing content)", async () => {
     const caps = mockService();
-    await expect(memoryRetain.handler({}, caps)).rejects.toThrow();
+    const result = await memoryRetain.handler({}, caps);
+    expect(result._unsafeUnwrapErr().message).toContain("content");
+    expect(caps.memory.retain).not.toHaveBeenCalled();
+    expect(caps.memory.stageRetain).not.toHaveBeenCalled();
   });
 
   it("has valid tool definition", () => {
@@ -151,19 +156,23 @@ describe("memory_reflect", () => {
       reflect: vi.fn().mockResolvedValue({ answer: "Alice prefers dark roast coffee." }),
     });
 
-    const result = await memoryReflect.handler({ query: "Alice coffee" }, caps);
+    const result = (await memoryReflect.handler({ query: "Alice coffee" }, caps))._unsafeUnwrap();
 
     expect(result).toBe("Alice prefers dark roast coffee.");
   });
 
   it("rejects invalid input (missing query)", async () => {
     const caps = mockService();
-    await expect(memoryReflect.handler({}, caps)).rejects.toThrow();
+    const result = await memoryReflect.handler({}, caps);
+    expect(result._unsafeUnwrapErr().message).toContain("query");
+    expect(caps.memory.reflect).not.toHaveBeenCalled();
   });
 
   it("rejects invalid budget value", async () => {
     const caps = mockService();
-    await expect(memoryReflect.handler({ query: "q", budget: "extreme" }, caps)).rejects.toThrow();
+    const result = await memoryReflect.handler({ query: "q", budget: "extreme" }, caps);
+    expect(result._unsafeUnwrapErr().message).toContain("budget");
+    expect(caps.memory.reflect).not.toHaveBeenCalled();
   });
 
   it("has valid tool definition", () => {

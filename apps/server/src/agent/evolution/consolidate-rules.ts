@@ -14,7 +14,6 @@ import type { Transactor } from "../../db/index.js";
 import type { LlmProvider } from "../../llm/provider.js";
 import { chatTyped } from "../../llm/typed.js";
 import { logger } from "../../logger.js";
-import { RuleGroupChangedError } from "../store/errors.js";
 import type { AgentStore } from "../store/index.js";
 import { labelRules } from "./extraction-schema.js";
 
@@ -170,24 +169,22 @@ async function consolidateChannelGroup(
 
     const totalObservations = originals.reduce((sum, r) => sum + r.observationCount, 0);
 
-    try {
-      await deps.runInTx((tx) =>
-        deps.store.replaceRules(tx, {
-          oldIds,
-          newRule: {
-            rule: group.mergedRule,
-            category: group.category,
-            profileId: null,
-            channelType,
-            priority: 100,
-            observationCount: totalObservations,
-          },
-        }),
-      );
-    } catch (error) {
-      if (!(error instanceof RuleGroupChangedError)) throw error;
+    const replaced = await deps.runInTx((tx) =>
+      deps.store.replaceRules(tx, {
+        oldIds,
+        newRule: {
+          rule: group.mergedRule,
+          category: group.category,
+          profileId: null,
+          channelType,
+          priority: 100,
+          observationCount: totalObservations,
+        },
+      }),
+    );
+    if (replaced.isErr()) {
       logger.warn(
-        { oldIds, channelType, deleted: error.deleted },
+        { oldIds, channelType, deleted: replaced.error.deleted },
         "merge group holds a rule retired or merged since it was listed — skipped",
       );
       continue;

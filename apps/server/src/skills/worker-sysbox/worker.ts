@@ -10,9 +10,9 @@ import type {
 import { ensureVenvPopulated } from "../deps.js";
 import { type CtxHandler, Dispatcher } from "../dispatcher.js";
 import {
-  type RuntimeRusage,
   SUPERVISOR_PROTOCOL_VERSION,
   type TaskInvoke,
+  type TaskOutcome,
   type TaskResult,
 } from "../protocol.js";
 import { DEFAULT_WALL_CLOCK_S, timeoutSignal } from "../wall-clock.js";
@@ -110,7 +110,7 @@ function describeStartFailure(failure: StartFailure): string {
     .exhaustive();
 }
 
-function fromTaskResult(result: TaskResult): Omit<InvokeResult, "workerReusable"> {
+function fromTaskResult(result: TaskResult): TaskOutcome {
   return {
     ...(result.ok ? { ok: true, output: result.output } : { ok: false, error: result.error }),
     ...(result.rusage !== undefined && { rusage: result.rusage }),
@@ -158,18 +158,14 @@ export interface InvokeParams {
   ctxHandler: CtxHandler;
 }
 
-export interface InvokeResult {
-  ok: boolean;
-  output?: unknown;
-  error?: string;
-  /**
-   * Per-task rusage from the task process. Populated for every
-   * normally-completing run (`runner.py` snapshots `getrusage(RUSAGE_SELF)`
-   * just before emitting `task_result`). Absent for synthesised results
-   * — wall-clock kill, task process died, supervisor-hung watchdog,
-   * transport errors — since none of those paths see the task's rusage.
-   */
-  rusage?: RuntimeRusage;
+/**
+ * A tier-2 task's outcome. `rusage` comes from the task process for every
+ * normally-completing run (`runner.py` snapshots `getrusage(RUSAGE_SELF)`
+ * just before emitting `task_result`), and is absent for synthesised results
+ * — wall-clock kill, task process died, supervisor-hung watchdog, transport
+ * errors — since none of those paths see the task's rusage.
+ */
+export type InvokeResult = TaskOutcome & {
   /**
    * True when the worker is safe to reuse for another task: the supervisor
    * confirmed the task's processes exited and the skill did not declare
@@ -177,7 +173,7 @@ export interface InvokeResult {
    * pool replaces it.
    */
   workerReusable: boolean;
-}
+};
 
 /**
  * One sysbox container with a long-lived python supervisor process,

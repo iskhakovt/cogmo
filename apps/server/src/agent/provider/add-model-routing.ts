@@ -10,7 +10,7 @@
  */
 import type { Transactor } from "../../db/index.js";
 import type { ExtraBody } from "../../llm/extra-body.js";
-import type { AgentStore } from "../store/index.js";
+import type { LlmProviderStore } from "../store/index.js";
 
 export interface AddModelRoutingArgs {
   model: string;
@@ -23,7 +23,7 @@ export interface AddModelRoutingArgs {
   userSelectable?: boolean;
   /**
    * Position in the fallback chain for this model. When omitted, picks
-   * the next available value via {@link AgentStore.getNextModelProviderPosition}
+   * the next available value via {@link LlmProviderStore.getNextModelProviderPosition}
    * so the UNIQUE constraint on `(model, position)` doesn't trip.
    */
   position?: number;
@@ -42,7 +42,7 @@ export interface AddModelRoutingArgs {
 
 export interface AddModelRoutingDeps {
   runInTx: Transactor;
-  agentStore: AgentStore;
+  agentStore: LlmProviderStore;
 }
 
 /**

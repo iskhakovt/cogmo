@@ -23,6 +23,7 @@ import { InngestTestEngine } from "@inngest/test";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { inngest } from "../../inngest/client.js";
 import {
+  codingAuthSecrets,
   codingRepoRow,
   codingTaskRow,
   FIXTURE_TASK_ID,
@@ -166,6 +167,7 @@ function makeDeps(overrides: Partial<CodingOrchestratorDeps>): CodingOrchestrato
     store: statefulCodingStore(codingTaskRow()).store,
     sandbox: fakeCodingSandbox().sandbox,
     backend: countingBackend({}).backend,
+    secretsStore: codingAuthSecrets(),
     devbaseImage: "cogmo/devbase:test",
     defaultResourceLimits: { cpus: 0.5, memory_bytes: 256 * 1024 * 1024, pids: 64 },
     taskTtlMs: 60_000,

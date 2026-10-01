@@ -43,43 +43,40 @@ export type ExecFailure =
   /** The output ended, but the backend has no exit code for it. */
   | { kind: "no_exit_code"; reason: string };
 
-/** What `wait()` throws for a `timed_out` exec. */
-export class ExecTimeoutError extends Error {
-  readonly kind: "total" | "idle";
-  readonly timeoutMs: number;
-  constructor(kind: "total" | "idle", timeoutMs: number) {
-    super(
-      kind === "total"
-        ? `exec exceeded wall-clock timeout ${timeoutMs}ms`
-        : `exec exceeded idle timeout ${timeoutMs}ms with no stdout/stderr activity`,
-    );
-    this.name = "ExecTimeoutError";
-    this.kind = kind;
-    this.timeoutMs = timeoutMs;
+/** A failure the exec lifecycle itself decided, rather than its transport. */
+export type ExecLifecycleFailure = Exclude<ExecFailure, { kind: "transport_failed" }>;
+
+/** What `wait()` throws for a failure the lifecycle decided; `failure` says which. */
+export class ExecError extends Error {
+  readonly failure: ExecLifecycleFailure;
+  constructor(failure: ExecLifecycleFailure) {
+    super(describeExecFailure(failure));
+    this.name = "ExecError";
+    this.failure = failure;
   }
 }
 
-/** What `wait()` throws for a `disposed` exec. */
-export class ExecDisposedError extends Error {
-  constructor() {
-    super("exec was disposed");
-    this.name = "ExecDisposedError";
-  }
+function describeExecFailure(failure: ExecLifecycleFailure): string {
+  return match(failure)
+    .with(
+      { kind: "timed_out", deadline: "total" },
+      (f) => `exec exceeded wall-clock timeout ${f.timeoutMs}ms`,
+    )
+    .with(
+      { kind: "timed_out", deadline: "idle" },
+      (f) => `exec exceeded idle timeout ${f.timeoutMs}ms with no stdout/stderr activity`,
+    )
+    .with({ kind: "disposed" }, () => "exec was disposed")
+    .with({ kind: "no_exit_code" }, (f) => f.reason)
+    .exhaustive();
 }
 
 /**
- * The error `wait()` throws for a failure: `ExecTimeoutError`,
- * `ExecDisposedError`, the transport's own error, or an `Error` naming why
- * there is no exit code.
+ * The error `wait()` throws for a failure: the transport's own error, which
+ * keeps its SDK's type, or an `ExecError` carrying the lifecycle's failure.
  */
 export function execFailureError(failure: ExecFailure): Error {
-  return match(failure)
-    .returnType<Error>()
-    .with({ kind: "timed_out" }, (f) => new ExecTimeoutError(f.deadline, f.timeoutMs))
-    .with({ kind: "disposed" }, () => new ExecDisposedError())
-    .with({ kind: "transport_failed" }, (f) => f.error)
-    .with({ kind: "no_exit_code" }, (f) => new Error(f.reason))
-    .exhaustive();
+  return failure.kind === "transport_failed" ? failure.error : new ExecError(failure);
 }
 
 /** The exit, or the failure thrown as `execFailureError` describes. */

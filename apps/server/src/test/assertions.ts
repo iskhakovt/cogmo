@@ -9,6 +9,7 @@
  */
 
 import type { TextOptions } from "@clack/prompts";
+import type { Result } from "neverthrow";
 
 import type { Adapter, StreamingAdapter } from "../transport/types.js";
 
@@ -38,6 +39,15 @@ export function expectDefined<T>(value: T | null | undefined, label = "value"): 
 }
 
 /**
+ * Return an `Ok`'s value, or throw naming the `Err`. For fixture setup through
+ * a `Result`-returning call: `store.createProfile(trx, …).then(expectOk)`.
+ */
+export function expectOk<T, E>(result: Result<T, E>): T {
+  if (result.isErr()) throw new Error(`expected Ok, got Err ${JSON.stringify(result.error)}`);
+  return result.value;
+}
+
+/**
  * Narrow a discriminated-union value to a specific variant. The `asserts`
  * annotation propagates the narrowing without a cast at the call site.
  *
@@ -56,6 +66,23 @@ export function assertKind<U extends { kind: string }, K extends U["kind"]>(
   }
   if (value.kind !== kind) {
     throw new Error(`expected kind '${kind}', got '${value.kind}'`);
+  }
+}
+
+/**
+ * {@link assertKind} for unions discriminated on `status`, such as
+ * `RegisterResult` and `SkillRunResult`. Throws naming the value when the
+ * status differs, so a test failure shows the errors a rejection carried.
+ */
+export function assertStatus<U extends { status: string }, S extends U["status"]>(
+  value: U | null | undefined,
+  status: S,
+): asserts value is U & { status: S } {
+  if (value === null || value === undefined) {
+    throw new Error(`expected status '${status}', got null/undefined`);
+  }
+  if (value.status !== status) {
+    throw new Error(`expected status '${status}', got ${JSON.stringify(value)}`);
   }
 }
 

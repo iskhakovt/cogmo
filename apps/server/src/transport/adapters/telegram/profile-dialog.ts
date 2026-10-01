@@ -13,13 +13,13 @@
  *   model   → user types model name (or "skip" in edit mode)
  *   confirm → user types "save" or "cancel"
  *
- * The caller in `index.ts` intercepts `bot.on("message:text")` for chats with active dialogs and
+ * `registerMessageHandlers` intercepts `bot.on("message:text")` for chats with active dialogs and
  * routes the text here instead of emitting to the agent.
  */
 
 import type { Profile } from "../../../agent/store/index.js";
 import type { Transport } from "../../transport.js";
-import type { TelegramCommandContext } from "./commands.js";
+import type { TelegramCommandContext } from "./commands/reply.js";
 
 type Step = "prompt" | "model" | "confirm";
 

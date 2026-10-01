@@ -1,7 +1,7 @@
 /**
  * The built-in agent surface: the service guidance rendered into every
  * prompt's `# Capabilities` section and the tools registered at boot.
- * `src/index.ts` wires both into production; the live evals build their
+ * `src/boot/agent.ts` wires both into production; the live evals build their
  * prompt from the same lists so they measure what production sends.
  */
 
