@@ -8,19 +8,15 @@
  * branches, not the registry's own behaviour (covered in `mcp/registry.test.ts`).
  */
 
-import type { Inngest } from "inngest";
 import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
-import type { AgentStore } from "../agent/store/index.js";
-import type { Transactor } from "../db/index.js";
-import { inboundArrived } from "../inngest/events.js";
-import type { McpServer, McpServerConfig, McpServerStatus } from "../mcp/config.js";
-import type { McpRegistry } from "../mcp/registry.js";
-import { mockAgentStore, mockTransportStore } from "../test/factories.js";
-import type { AttachmentStore } from "./attachment-store.js";
-import type { TransportStore } from "./store/index.js";
-import { createTransport } from "./transport.js";
+import type { Transactor } from "../../db/index.js";
+import type { McpServer, McpServerConfig, McpServerStatus } from "../../mcp/config.js";
+import type { McpRegistry } from "../../mcp/registry.js";
+import { mockTransportStore } from "../../test/factories.js";
+import type { TransportStore } from "../store/index.js";
+import { createMcp } from "./mcp.js";
 
 const FAKE_TX = { __mockTx: true } as never;
 const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
@@ -37,26 +33,12 @@ function makeTransportStore(): TransportStore {
   return ts;
 }
 
-function makeTransport(opts: {
-  registry?: McpRegistry;
-  agentStore?: AgentStore;
-  transportStore?: TransportStore;
-}) {
-  const { registry } = opts;
-  const inngest = mock<Inngest>();
-  inngest.send.mockResolvedValue({ ids: [] });
-  return createTransport({
+function makeMcp(opts: { registry?: McpRegistry; transportStore?: TransportStore }) {
+  return createMcp({
     channelId: "ch-1",
-    defaultUserId: USER_ID,
-    defaultProfileId: "019d0000-0000-7000-8000-000000000099",
     runInTx: fakeRunInTx,
     transportStore: opts.transportStore ?? makeTransportStore(),
-    agentStore: opts.agentStore ?? mockAgentStore(),
-    ...(registry !== undefined && { mcpRegistry: registry }),
-    inngest,
-    inboundArrived,
-    attachments: mock<AttachmentStore>(),
-    idleTimeoutMs: 60_000,
+    mcpRegistry: opts.registry,
   });
 }
 
@@ -94,14 +76,14 @@ describe("Transport.mcp.toolBudget", () => {
   it("returns the registry's configured budget", () => {
     const registry = mock<McpRegistry>();
     registry.toolBudget.mockReturnValue(50);
-    const transport = makeTransport({ registry });
+    const mcp = makeMcp({ registry });
 
-    expect(transport.mcp.toolBudget()).toBe(50);
+    expect(mcp.toolBudget()).toBe(50);
   });
 
   it("returns 0 when no registry is wired (mcp_disabled deployment)", () => {
-    const transport = makeTransport({});
-    expect(transport.mcp.toolBudget()).toBe(0);
+    const mcp = makeMcp({});
+    expect(mcp.toolBudget()).toBe(0);
   });
 });
 
@@ -110,9 +92,9 @@ describe("Transport.mcp.addServer", () => {
     const registry = mock<McpRegistry>();
     const server = makeMcpServer();
     registry.addServer.mockResolvedValue(ok(server));
-    const transport = makeTransport({ registry });
+    const mcp = makeMcp({ registry });
 
-    const result = await transport.mcp.addServer(KNOWN_HANDLE, {
+    const result = await mcp.addServer(KNOWN_HANDLE, {
       name: "github",
       config: VALID_STDIO_CONFIG,
       enabled: true,
@@ -129,8 +111,8 @@ describe("Transport.mcp.addServer", () => {
   it("identity check fires BEFORE the mcp_disabled probe (no info leak)", async () => {
     // An impostor on a deployment without MCP wiring must not learn whether
     // MCP is configured. Order matters: identity must reject first.
-    const transport = makeTransport({});
-    const result = await transport.mcp.addServer(UNKNOWN_HANDLE, {
+    const mcp = makeMcp({});
+    const result = await mcp.addServer(UNKNOWN_HANDLE, {
       name: "github",
       config: VALID_STDIO_CONFIG,
       enabled: true,
@@ -139,8 +121,8 @@ describe("Transport.mcp.addServer", () => {
   });
 
   it("returns mcp_disabled when known caller, no registry", async () => {
-    const transport = makeTransport({});
-    const result = await transport.mcp.addServer(KNOWN_HANDLE, {
+    const mcp = makeMcp({});
+    const result = await mcp.addServer(KNOWN_HANDLE, {
       name: "github",
       config: VALID_STDIO_CONFIG,
       enabled: true,
@@ -150,10 +132,10 @@ describe("Transport.mcp.addServer", () => {
 
   it("returns mcp_invalid_config with joined Zod issues when the config blob is malformed", async () => {
     const registry = mock<McpRegistry>();
-    const transport = makeTransport({ registry });
+    const mcp = makeMcp({ registry });
 
     // Drive a real Zod failure — missing `command` on stdio.
-    const result = await transport.mcp.addServer(KNOWN_HANDLE, {
+    const result = await mcp.addServer(KNOWN_HANDLE, {
       name: "broken",
       config: { transport: "stdio", args: [], env: {} },
       enabled: true,
@@ -172,9 +154,9 @@ describe("Transport.mcp.addServer", () => {
   it("maps name_taken → mcp_server_name_taken", async () => {
     const registry = mock<McpRegistry>();
     registry.addServer.mockResolvedValue(err({ code: "name_taken", name: "github" }));
-    const transport = makeTransport({ registry });
+    const mcp = makeMcp({ registry });
 
-    const result = await transport.mcp.addServer(KNOWN_HANDLE, {
+    const result = await mcp.addServer(KNOWN_HANDLE, {
       name: "github",
       config: VALID_STDIO_CONFIG,
       enabled: true,
@@ -195,9 +177,9 @@ describe("Transport.mcp.addServer", () => {
         reason: "server name cannot contain underscores",
       }),
     );
-    const transport = makeTransport({ registry });
+    const mcp = makeMcp({ registry });
 
-    const result = await transport.mcp.addServer(KNOWN_HANDLE, {
+    const result = await mcp.addServer(KNOWN_HANDLE, {
       name: "bad_name",
       config: VALID_STDIO_CONFIG,
       enabled: true,
@@ -212,10 +194,10 @@ describe("Transport.mcp.addServer", () => {
   it("rethrows other registry errors — Result wraps domain failures only", async () => {
     const registry = mock<McpRegistry>();
     registry.addServer.mockRejectedValue(new Error("connection refused"));
-    const transport = makeTransport({ registry });
+    const mcp = makeMcp({ registry });
 
     await expect(
-      transport.mcp.addServer(KNOWN_HANDLE, {
+      mcp.addServer(KNOWN_HANDLE, {
         name: "github",
         config: VALID_STDIO_CONFIG,
         enabled: true,
@@ -228,9 +210,9 @@ describe("Transport.mcp.removeServer", () => {
   it("happy path → ok(undefined)", async () => {
     const registry = mock<McpRegistry>();
     registry.removeServer.mockResolvedValue(undefined);
-    const transport = makeTransport({ registry });
+    const mcp = makeMcp({ registry });
 
-    const result = await transport.mcp.removeServer(KNOWN_HANDLE, "server-1");
+    const result = await mcp.removeServer(KNOWN_HANDLE, "server-1");
 
     expect(result._unsafeUnwrap()).toBe(undefined);
     expect(registry.removeServer).toHaveBeenCalledWith("server-1");
@@ -238,15 +220,15 @@ describe("Transport.mcp.removeServer", () => {
 
   it("rejects unknown caller", async () => {
     const registry = mock<McpRegistry>();
-    const transport = makeTransport({ registry });
-    const result = await transport.mcp.removeServer(UNKNOWN_HANDLE, "server-1");
+    const mcp = makeMcp({ registry });
+    const result = await mcp.removeServer(UNKNOWN_HANDLE, "server-1");
     expect(result._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
     expect(registry.removeServer).not.toHaveBeenCalled();
   });
 
   it("returns mcp_disabled when registry is unwired", async () => {
-    const transport = makeTransport({});
-    const result = await transport.mcp.removeServer(KNOWN_HANDLE, "server-1");
+    const mcp = makeMcp({});
+    const result = await mcp.removeServer(KNOWN_HANDLE, "server-1");
     expect(result._unsafeUnwrapErr()).toEqual({ code: "mcp_disabled" });
   });
 });
@@ -256,22 +238,22 @@ describe("Transport.mcp.listServers", () => {
     const registry = mock<McpRegistry>();
     const status = makeMcpServerStatus();
     registry.listServers.mockResolvedValue([status]);
-    const transport = makeTransport({ registry });
+    const mcp = makeMcp({ registry });
 
-    const result = await transport.mcp.listServers(KNOWN_HANDLE);
+    const result = await mcp.listServers(KNOWN_HANDLE);
 
     expect(result._unsafeUnwrap()).toEqual([status]);
   });
 
   it("rejects unknown caller", async () => {
-    const transport = makeTransport({ registry: mock<McpRegistry>() });
-    const result = await transport.mcp.listServers(UNKNOWN_HANDLE);
+    const mcp = makeMcp({ registry: mock<McpRegistry>() });
+    const result = await mcp.listServers(UNKNOWN_HANDLE);
     expect(result._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
   });
 
   it("returns mcp_disabled when registry is unwired", async () => {
-    const transport = makeTransport({});
-    const result = await transport.mcp.listServers(KNOWN_HANDLE);
+    const mcp = makeMcp({});
+    const result = await mcp.listServers(KNOWN_HANDLE);
     expect(result._unsafeUnwrapErr()).toEqual({ code: "mcp_disabled" });
   });
 });
@@ -280,9 +262,9 @@ describe("Transport.mcp.approveServer", () => {
   it("happy path → ok(undefined)", async () => {
     const registry = mock<McpRegistry>();
     registry.approveServer.mockResolvedValue(ok(undefined));
-    const transport = makeTransport({ registry });
+    const mcp = makeMcp({ registry });
 
-    const result = await transport.mcp.approveServer(KNOWN_HANDLE, "server-1");
+    const result = await mcp.approveServer(KNOWN_HANDLE, "server-1");
 
     expect(result._unsafeUnwrap()).toBe(undefined);
   });
@@ -292,9 +274,9 @@ describe("Transport.mcp.approveServer", () => {
     registry.approveServer.mockResolvedValue(
       err({ code: "server_not_found", serverId: "server-ghost" }),
     );
-    const transport = makeTransport({ registry });
+    const mcp = makeMcp({ registry });
 
-    const result = await transport.mcp.approveServer(KNOWN_HANDLE, "server-ghost");
+    const result = await mcp.approveServer(KNOWN_HANDLE, "server-ghost");
 
     expect(result._unsafeUnwrapErr()).toEqual({
       code: "mcp_server_not_found",
@@ -307,9 +289,9 @@ describe("Transport.mcp.approveServer", () => {
     registry.approveServer.mockResolvedValue(
       err({ code: "connection_failed", serverId: "server-1", reason: "ECONNREFUSED at 127.0.0.1" }),
     );
-    const transport = makeTransport({ registry });
+    const mcp = makeMcp({ registry });
 
-    const result = await transport.mcp.approveServer(KNOWN_HANDLE, "server-1");
+    const result = await mcp.approveServer(KNOWN_HANDLE, "server-1");
 
     expect(result._unsafeUnwrapErr()).toEqual({
       code: "mcp_connection_failed",
@@ -320,15 +302,15 @@ describe("Transport.mcp.approveServer", () => {
 
   it("rejects unknown caller before any registry call", async () => {
     const registry = mock<McpRegistry>();
-    const transport = makeTransport({ registry });
-    const result = await transport.mcp.approveServer(UNKNOWN_HANDLE, "server-1");
+    const mcp = makeMcp({ registry });
+    const result = await mcp.approveServer(UNKNOWN_HANDLE, "server-1");
     expect(result._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
     expect(registry.approveServer).not.toHaveBeenCalled();
   });
 
   it("returns mcp_disabled when registry is unwired", async () => {
-    const transport = makeTransport({});
-    const result = await transport.mcp.approveServer(KNOWN_HANDLE, "server-1");
+    const mcp = makeMcp({});
+    const result = await mcp.approveServer(KNOWN_HANDLE, "server-1");
     expect(result._unsafeUnwrapErr()).toEqual({ code: "mcp_disabled" });
   });
 });
@@ -337,9 +319,9 @@ describe("Transport.mcp.approveTool", () => {
   it("happy path: registry returns true → ok(undefined)", async () => {
     const registry = mock<McpRegistry>();
     registry.approveTool.mockResolvedValue(true);
-    const transport = makeTransport({ registry });
+    const mcp = makeMcp({ registry });
 
-    const result = await transport.mcp.approveTool(KNOWN_HANDLE, "server-1", "read_file");
+    const result = await mcp.approveTool(KNOWN_HANDLE, "server-1", "read_file");
 
     expect(result._unsafeUnwrap()).toBe(undefined);
     expect(registry.approveTool).toHaveBeenCalledWith("server-1", "read_file");
@@ -350,9 +332,9 @@ describe("Transport.mcp.approveTool", () => {
     // a zero-row UPDATE would otherwise look like success.
     const registry = mock<McpRegistry>();
     registry.approveTool.mockResolvedValue(false);
-    const transport = makeTransport({ registry });
+    const mcp = makeMcp({ registry });
 
-    const result = await transport.mcp.approveTool(KNOWN_HANDLE, "server-1", "no_such_tool");
+    const result = await mcp.approveTool(KNOWN_HANDLE, "server-1", "no_such_tool");
 
     expect(result._unsafeUnwrapErr()).toEqual({
       code: "mcp_tool_not_found",
@@ -362,14 +344,14 @@ describe("Transport.mcp.approveTool", () => {
   });
 
   it("rejects unknown caller", async () => {
-    const transport = makeTransport({ registry: mock<McpRegistry>() });
-    const result = await transport.mcp.approveTool(UNKNOWN_HANDLE, "server-1", "read_file");
+    const mcp = makeMcp({ registry: mock<McpRegistry>() });
+    const result = await mcp.approveTool(UNKNOWN_HANDLE, "server-1", "read_file");
     expect(result._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
   });
 
   it("returns mcp_disabled when registry is unwired", async () => {
-    const transport = makeTransport({});
-    const result = await transport.mcp.approveTool(KNOWN_HANDLE, "server-1", "read_file");
+    const mcp = makeMcp({});
+    const result = await mcp.approveTool(KNOWN_HANDLE, "server-1", "read_file");
     expect(result._unsafeUnwrapErr()).toEqual({ code: "mcp_disabled" });
   });
 });
@@ -378,9 +360,9 @@ describe("Transport.mcp.rejectTool", () => {
   it("happy path → ok(undefined)", async () => {
     const registry = mock<McpRegistry>();
     registry.rejectTool.mockResolvedValue(true);
-    const transport = makeTransport({ registry });
+    const mcp = makeMcp({ registry });
 
-    const result = await transport.mcp.rejectTool(KNOWN_HANDLE, "server-1", "write_file");
+    const result = await mcp.rejectTool(KNOWN_HANDLE, "server-1", "write_file");
 
     expect(result._unsafeUnwrap()).toBe(undefined);
     expect(registry.rejectTool).toHaveBeenCalledWith("server-1", "write_file");
@@ -389,9 +371,9 @@ describe("Transport.mcp.rejectTool", () => {
   it("returns mcp_tool_not_found when registry returns false", async () => {
     const registry = mock<McpRegistry>();
     registry.rejectTool.mockResolvedValue(false);
-    const transport = makeTransport({ registry });
+    const mcp = makeMcp({ registry });
 
-    const result = await transport.mcp.rejectTool(KNOWN_HANDLE, "server-1", "no_such_tool");
+    const result = await mcp.rejectTool(KNOWN_HANDLE, "server-1", "no_such_tool");
 
     expect(result._unsafeUnwrapErr()).toEqual({
       code: "mcp_tool_not_found",
@@ -401,8 +383,8 @@ describe("Transport.mcp.rejectTool", () => {
   });
 
   it("rejects unknown caller", async () => {
-    const transport = makeTransport({ registry: mock<McpRegistry>() });
-    const result = await transport.mcp.rejectTool(UNKNOWN_HANDLE, "server-1", "write_file");
+    const mcp = makeMcp({ registry: mock<McpRegistry>() });
+    const result = await mcp.rejectTool(UNKNOWN_HANDLE, "server-1", "write_file");
     expect(result._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
   });
 });

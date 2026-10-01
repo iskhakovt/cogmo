@@ -1,0 +1,5 @@
+`handle-message` reads as a sequence of named phases, behaviour unchanged.
+
+- **Phases.** The ~1.3k-line handler body moves to `agent/handle-message/`: admission and cooldown, the inbound batch, recording the user message, loading the transcript, the live tool catalog, freezing turn inputs, attachments, the chat-turn service, context assembly, the turn model, compaction, context finalization, the turn loop, persistence, delivery and the failure report. Each phase is a function with explicit inputs and outputs. `handle-message.ts` is the deps interface plus the sequence.
+- **Step contract.** Every `step.run` and `step.sendEvent` id, their order, every memoized shape and every conditional gate are unchanged: a trace of the step ids across all 171 handler and replay tests is byte-identical before and after, and both test files pass without edits.
+- **Tests.** Admission and the inbound batch logic have their own tests, and a batch delivery where one of two images fails to download is pinned.

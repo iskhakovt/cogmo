@@ -129,7 +129,7 @@ Reference: `executeToolCalls` in `src/agent/loop.ts`. See `design/decisions.md` 
 
 A **sub-agent** is a specialist model the orchestrator can delegate a subtask to, exposed as a tool. It's the answer to "this model is great at a feature but can't run tools": the orchestrator holds the tools, the specialist runs tool-free and returns text. Claude's native tool selection handles routing — no router agent.
 
-**Data model.** `sub_agents` (owned here; schema in `src/agent/store/schema.ts`) is a per-user catalog — a thin binding over a model already routable via `model_providers`:
+**Data model.** `sub_agents` (owned here; schema in `src/agent/store/schema/sub-agents.ts`) is a per-user catalog — a thin binding over a model already routable via `model_providers`:
 
 - `name` → surfaced as a tool `subagent__<name>` (namespaced like `mcp__`, so it can't collide with a built-in and a profile can opt in with a `subagent__*` glob).
 - `description` → the routing signal the orchestrator reads to decide *when* to delegate. Required.

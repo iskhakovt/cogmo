@@ -24,7 +24,7 @@ import {
   validateAnthropicKey,
   validateOpenAICompatibleKey,
 } from "../../setup/validate.js";
-import type { AgentStore } from "../store/index.js";
+import type { LlmProviderStore } from "../store/index.js";
 import type { ProviderAttrs } from "../store/schema.js";
 
 export type AdapterType = "anthropic" | "openai_compatible";
@@ -52,7 +52,7 @@ export interface AddProviderArgs {
 
 export interface AddProviderDeps {
   runInTx: Transactor;
-  agentStore: AgentStore;
+  agentStore: LlmProviderStore;
   secretsStore: SecretsStore;
 }
 

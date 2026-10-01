@@ -12,6 +12,7 @@
  */
 
 import { command, extendType, optional, positional, string, subcommands } from "cmd-ts";
+import { CANONICAL_NAME_RE } from "../agent/store/canonical-name.js";
 import { describeImageCatalogError } from "../agent/store/errors.js";
 import type { AgentStore } from "../agent/store/index.js";
 import {
@@ -25,15 +26,6 @@ import type { SecretsStore } from "../secrets/store/index.js";
 import { choice, identifier, optionalOption } from "./args.js";
 import { type CliIo, EXIT_USAGE, type LoadDeps } from "./run.js";
 
-/**
- * Provider names round-trip into `secrets.name` as `<name>_api_key`, so the
- * shape needs to be conservative enough that whitespace, shell
- * metacharacters, or Unicode can't propagate there. Same shape as
- * `CANONICAL_NAME_RE` used for compartments / profile classes
- * (`src/agent/store/index.ts`).
- */
-const PROVIDER_NAME_RE = /^[a-z][a-z0-9_-]{0,31}$/;
-
 export interface ImageProviderCliDeps {
   runInTx: Transactor;
   agentStore: AgentStore;
@@ -45,7 +37,8 @@ const providerType = choice(imageProviderType.enumValues, "type");
 const providerName = extendType(string, {
   displayName: "name",
   async from(value) {
-    if (!PROVIDER_NAME_RE.test(value)) {
+    // The name round-trips into `secrets.name` as `<name>_api_key`.
+    if (!CANONICAL_NAME_RE.test(value)) {
       throw new Error(
         `Invalid name "${value}": must start with a lowercase letter and contain only ` +
           "lowercase letters, digits, hyphens, or underscores (≤32 chars). " +

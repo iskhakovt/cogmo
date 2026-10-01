@@ -119,7 +119,7 @@ export function renderProfileList(
  * bare — the value isn't in `CORE_COMPARTMENTS` *and* isn't in the
  * loaded customs set, so it gets no `*`. A reader could infer "core"
  * when the value is actually orphaned. New profile writes can't create
- * this state (`findUnknownCompartmentImpl` rejects unknown values on
+ * this state (`findUnknownCompartment` rejects unknown values on
  * create/update), but pre-existing scopes survive deletion of the
  * compartment they reference (forward-only delete by design — see
  * `Transport.compartments.delete`). Acceptable at single-user scale;
