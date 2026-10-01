@@ -30,6 +30,7 @@ import {
   resolveGitHubIdentity,
 } from "../../secrets/github.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
+import { describeError } from "../../util/describe-error.js";
 import { AskpassLease } from "./askpass-lease.js";
 import type { loadCodingSandboxEnv } from "./auth.js";
 import { type CodingRun, loadTaskAndRepo } from "./coding-run.js";
@@ -201,7 +202,7 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
     if (pr.kind === "failed") return await failVerify(run, deps, failure, pr.reason);
     return { status: "pr_open", prUrl: pr.value.url, prNumber: pr.value.number };
   } catch (err) {
-    const reason = (err as Error).message;
+    const reason = describeError(err);
     run.log.error({ err }, "coding verify failed");
     await failTaskFromCatch(run, deps, reason);
     await safeTeardownWorktree({

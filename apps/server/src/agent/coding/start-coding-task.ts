@@ -7,6 +7,7 @@ import type { Inngest } from "inngest";
 import type { Transactor } from "../../db/index.js";
 import { codingTaskStart } from "../../inngest/events.js";
 import { logger } from "../../logger.js";
+import { describeError } from "../../util/describe-error.js";
 import type { CodingStore } from "./store/index.js";
 
 const log = logger.child({ component: "coding.service" });
@@ -49,7 +50,7 @@ export async function startCodingTask(
         deps.codingStore.failQueuedTask(
           tx,
           taskId,
-          `inngest.send failed: ${(sendErr as Error).message}`,
+          `inngest.send failed: ${describeError(sendErr)}`,
         ),
       )
       .then((freed) => {

@@ -204,7 +204,7 @@ async function readHeadSha(container: Pick<SandboxSession, "execStreaming">): Pr
   });
   const chunks: Buffer[] = [];
   for await (const chunk of handle.stdout) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string));
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   }
   // Drain stderr to avoid backpressure.
   const drain = (async () => {

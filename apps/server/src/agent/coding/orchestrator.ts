@@ -18,6 +18,7 @@ import { logger } from "../../logger.js";
 import type { SandboxClient, SandboxSession } from "../../sandbox/index.js";
 import type { ResourceLimits } from "../../sandbox/types.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
+import { describeError } from "../../util/describe-error.js";
 import { allocateTaskWorktree } from "./allocate-task-worktree.js";
 import { AskpassLease } from "./askpass-lease.js";
 import type { loadCodingSandboxEnv } from "./auth.js";
@@ -240,7 +241,7 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     if (gate === "left_planning") return { status: "skipped" };
     return { status: "awaiting_approval", plan };
   } catch (err) {
-    const reason = (err as Error).message;
+    const reason = describeError(err);
     run.log.error({ err }, "coding task failed");
     await failTaskFromCatch(run, deps, reason);
     if (assignment) {
@@ -354,7 +355,7 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
     await handOffToVerify(run, deps, params.inngest, { stream, usage: result.usage });
     return { status: "pending_verify" };
   } catch (err) {
-    const reason = (err as Error).message;
+    const reason = describeError(err);
     run.log.error({ err }, "coding execute failed");
     await failTaskFromCatch(run, deps, reason);
     await safeTeardownWorktree({
