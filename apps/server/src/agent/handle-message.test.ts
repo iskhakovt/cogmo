@@ -979,6 +979,71 @@ describe("createHandleMessage", () => {
     ]);
   });
 
+  it("delivers the surviving image and counts the failed one when a download rejects", async () => {
+    const okBytes = Buffer.from("png");
+    const handle = mockDeliveryHandle({
+      hasBatchTargets: vi.fn().mockReturnValue(true),
+    });
+    const download = vi.fn(async (path: string) => {
+      if (path === "generated/b.png") throw new Error("S3 boom");
+      return okBytes;
+    });
+    const imageResult = (toolUseId: string, path: string) => ({
+      type: "tool_result" as const,
+      toolUseId,
+      content: JSON.stringify({ path, mediaType: "image/png" }),
+    });
+    const deps = mockDeps({
+      deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+      attachments: { upload: vi.fn().mockResolvedValue("inbound/x"), download },
+      runStreamingAgentLoop: vi.fn().mockResolvedValue({
+        text: "pictures",
+        messages: [],
+        newMessages: [
+          {
+            role: "assistant",
+            content: [
+              { type: "tool_use", id: "tu_a", name: "generate_image", input: {} },
+              { type: "tool_use", id: "tu_b", name: "generate_image", input: {} },
+            ],
+          },
+          {
+            role: "user",
+            content: [
+              imageResult("tu_a", "generated/a.png"),
+              imageResult("tu_b", "generated/b.png"),
+            ],
+          },
+        ],
+        usage: { inputTokens: 1, outputTokens: 1 },
+        model: "mock-model",
+        iterations: 1,
+        streamed: { text: "", toolUseIds: [] },
+      }),
+    });
+    const step = mockStep();
+
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+      event: testEvent,
+      step,
+      runId: testRunId,
+    });
+
+    expect(handle.deliverBatch).toHaveBeenCalledWith(
+      "pictures",
+      [{ data: okBytes, mediaType: "image/png" }],
+      undefined,
+    );
+    const batchCall = step.run.mock.calls.findIndex((call) => call[0] === "batch-delivery");
+    expect(batchCall).not.toBe(-1);
+    await expect(step.run.mock.results[batchCall]?.value).resolves.toEqual({
+      imagesDelivered: 1,
+      imagesFailed: 1,
+      documentsDelivered: 0,
+      documentsFailed: 0,
+    });
+  });
+
   // Cooldown guard — `recover-conversation` writes `cooldown_state` after
   // `handle-message` exhausts retries (or fails non-retriably). While the
   // window is open, refuse to spend more LLM calls and deliver a terse
