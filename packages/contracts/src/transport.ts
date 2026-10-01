@@ -194,4 +194,8 @@ export type TriggerReflectionOutcome =
       drained: number;
       /** Staged rows a `memory`-category rule forbade. */
       withheld: number;
+      /** 1 when memory extraction was skipped for a user's memory rule the profile can't see. */
+      skippedForUnseenRules: number;
+      /** Staged rows left pending for a first-party fire. */
+      deferredToFirstParty: number;
     };

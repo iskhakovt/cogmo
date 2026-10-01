@@ -6,13 +6,14 @@
  * own `step.run`, making the classifier results and the Hindsight
  * retain durably memoized:
  *
- *   1. `classifyPendingMemories` — runs the classifier prompt over a
+ *   1. `loadPendingBatch` — reads the rows the fire may classify.
+ *   2. `classifyPendingMemories` — runs the classifier prompt over a
  *      batch of pending rows, bounded concurrency, and withholds a row a
  *      `memory`-category rule forbids.
- *   2. `buildRetainItems` — pure mapping from classified rows to
+ *   3. `buildRetainItems` — pure mapping from classified rows to
  *      `RetainBatchItem`s.
- *   3. `drainPendingMemories` — convenience wrapper composing all
- *      three for non-Inngest callers (tests, scripts).
+ *   4. `drainPendingMemories` — convenience wrapper composing them for
+ *      non-Inngest callers (tests, scripts).
  *
  * Failures on a single classification are skipped (row left in the
  * table for the next drain attempt). A withheld row is deleted with the
@@ -30,9 +31,11 @@ import { logger } from "../../logger.js";
 import type { MemoryProvider, RetainBatchItem } from "../../memory/provider.js";
 import {
   type AgentStore,
+  bindsUnseenUserRule,
   type MemoryRule,
   memoryRulesFor,
   type PendingMemory,
+  type PendingMemoryFilter,
   type PendingMemorySource,
 } from "../store/index.js";
 import {
@@ -50,6 +53,21 @@ import {
  */
 const CLASSIFIER_CONCURRENCY = 8;
 
+/** The Observer fire a drain or an extraction runs in. */
+export interface ObserverFire {
+  conversationId: string;
+  userId: string;
+  /** The conversation's profile, whose model classifies and extracts. */
+  profileId: string;
+  /**
+   * Whether that profile sees the user's instruction rules and first-party
+   * staged facts (`admitsFirstParty`). A third-party fire's model classifies
+   * only rows its own profile staged, and none a user's rule it can't see
+   * binds; the rest wait for a first-party fire.
+   */
+  seesUserRules: boolean;
+}
+
 export interface ClassifyDeps {
   provider: LlmProvider;
   model: string;
@@ -60,23 +78,21 @@ export interface ClassifyDeps {
    * shares the same schema (one compile per fire, not per row).
    */
   customCompartments: ReadonlyArray<CompartmentDefinition>;
-  /**
-   * Whether the fire's profile, whose model classifies, sees the user's
-   * instruction rules (`admitsFirstParty`). When it doesn't, a row such a
-   * rule binds stays pending for a fire whose profile does.
-   */
-  seesUserRules: boolean;
+  fire: ObserverFire;
   runInTx: Transactor;
   /**
    * Reads the `memory`-category rules each row's staging profile sees, and
-   * re-reads a row's staging profile when a replayed row lacks it.
+   * the staging profile of a replayed row that lacks it.
    */
   store: Pick<AgentStore, "getMemoryRules" | "getPendingMemories">;
 }
 
 export interface DrainPendingDeps extends ClassifyDeps {
   memory: Pick<MemoryProvider, "retainBatch">;
-  store: Pick<AgentStore, "getPendingMemories" | "deletePendingMemories" | "getMemoryRules">;
+  store: Pick<
+    AgentStore,
+    "getPendingMemories" | "countPendingMemories" | "deletePendingMemories" | "getMemoryRules"
+  >;
 }
 
 export interface DrainPendingResult {
@@ -84,8 +100,8 @@ export interface DrainPendingResult {
   byNetwork: Record<string, number>;
   /** Rows a memory rule forbids, deleted without a retain. */
   withheld: number;
-  /** Rows left pending because a user's memory rule binds them and the fire's profile can't see it. */
-  deferredForUnseenRules: number;
+  /** Rows left pending for a first-party fire: see `ObserverFire.seesUserRules`. */
+  deferredToFirstParty: number;
 }
 
 /**
@@ -111,8 +127,14 @@ export interface ClassifyPendingResult {
   /** Ids of rows a memory rule forbids: deleted without a retain. */
   withheld: string[];
   byNetwork: Record<string, number>;
-  /** Rows left pending, unclassified, for a fire whose profile sees the user's rules. */
-  deferredForUnseenRules: number;
+  /** Rows of the batch left pending, unclassified, for a first-party fire. */
+  deferredToFirstParty: number;
+}
+
+/** The rows one drain classifies, and how many it leaves for a first-party fire. */
+export interface PendingBatch {
+  pending: ReadonlyArray<PendingMemory>;
+  deferredToFirstParty: number;
 }
 
 /**
@@ -129,44 +151,86 @@ export type ClassifierInput = Pick<
 >;
 
 /**
+ * Read the oldest `limit` rows the fire may classify. A first-party fire takes
+ * every row of the user. A third-party fire takes only rows its own profile
+ * staged, and none of those a user's rule its model can't see binds; it
+ * counts the rest as deferred. The filter applies before the limit, so
+ * deferred rows never fill a third-party fire's batch.
+ */
+export async function loadPendingBatch(
+  fire: ObserverFire,
+  limit: number | undefined,
+  deps: { runInTx: Transactor; store: DrainPendingDeps["store"] },
+): Promise<PendingBatch> {
+  return deps.runInTx(async (tx) => {
+    if (fire.seesUserRules) {
+      return {
+        pending: await deps.store.getPendingMemories(tx, fire.userId, limit),
+        deferredToFirstParty: 0,
+      };
+    }
+    const rules = await deps.store.getMemoryRules(tx, {
+      profileIds: [fire.profileId],
+      userId: fire.userId,
+    });
+    const filter: PendingMemoryFilter = {
+      stagedBy: fire.profileId,
+      ...(bindsUnseenUserRule(rules, fire.seesUserRules) && { sources: ["migration"] as const }),
+    };
+    const pending = await deps.store.getPendingMemories(tx, fire.userId, limit, filter);
+    const all = await deps.store.countPendingMemories(tx, fire.userId);
+    const eligible = await deps.store.countPendingMemories(tx, fire.userId, filter);
+    const deferredToFirstParty = all - eligible;
+    if (deferredToFirstParty > 0) {
+      logger.info(
+        { ...fire, deferredToFirstParty },
+        "pending rows left for a first-party fire — a third-party profile's model doesn't classify them",
+      );
+    }
+    return { pending, deferredToFirstParty };
+  });
+}
+
+/**
  * Run the classifier prompt over a batch of pending rows. A `live_retain` or
  * `skill` row is classified under the `memory`-category rules its staging
  * profile sees, and withheld when one forbids it; a `migration` row is a
- * restaged memory and passes. A row stays pending, unclassified, when it is
- * gone or a rule the fire's model may not see binds it. Single-row failures
- * are skipped, not propagated.
+ * restaged memory and passes. A row that is no longer pending is skipped, and
+ * one a third-party fire may not classify (as `loadPendingBatch` filters, for
+ * a batch read without that filter) is deferred. Single-row failures are
+ * skipped, not propagated.
  */
 export async function classifyPendingMemories(
   pending: ReadonlyArray<ClassifierInput>,
-  userId: string,
   deps: ClassifyDeps,
 ): Promise<ClassifyPendingResult> {
+  const { fire } = deps;
   const customNames = deps.customCompartments.map((c) => c.name);
   const schemas = {
     plain: buildClassifiedMemorySchema(customNames),
     withholding: buildWithholdingClassifiedMemorySchema(customNames),
   };
-  const rulesOf = await loadMemoryRules(pending, userId, deps);
+  const { stagingOf, rulesOf } = await loadMemoryRules(pending, deps);
   const [deferred, classifiable] = R.partition(pending, (p) => {
-    const rules = rulesOf(p);
-    return rules !== undefined && !deps.seesUserRules && rules.some((r) => r.fromUser);
+    const staging = stagingOf(p);
+    if (staging === undefined || fire.seesUserRules) return false;
+    return staging !== fire.profileId || bindsUnseenUserRule(rulesOf(p), fire.seesUserRules);
   });
   if (deferred.length > 0) {
     logger.info(
-      { pendingIds: deferred.map((p) => p.id) },
-      "pending rows bound by a user's memory rule this fire's profile can't see — left pending",
+      { ...fire, pendingIds: deferred.map((p) => p.id) },
+      "pending rows left for a first-party fire — a third-party profile's model doesn't classify them",
     );
   }
   const classified: Array<ClassifiedOutcome | null> = [];
   for (const chunk of R.chunk(classifiable, CLASSIFIER_CONCURRENCY)) {
     const results = await Promise.all(
       chunk.map((p) => {
-        const rules = rulesOf(p);
-        if (rules === undefined) {
+        if (stagingOf(p) === undefined) {
           logger.info({ pendingId: p.id }, "pending row gone before classification — skipped");
           return null;
         }
-        return classifyOne(p, rules, schemas, deps);
+        return classifyOne(p, rulesOf(p), schemas, deps);
       }),
     );
     classified.push(...results);
@@ -181,46 +245,59 @@ export async function classifyPendingMemories(
     successful,
     withheld: withheldOutcomes.map((c) => c.row.id),
     byNetwork,
-    deferredForUnseenRules: deferred.length,
+    deferredToFirstParty: deferred.length,
   };
 }
 
 /**
- * The memory rules each row is classified under, from one read: none for a
- * `migration` row, its staging profile's for the rest, and `undefined` for a
- * row that is no longer pending. A replayed row memoized without `profileId`
- * has it `undefined`; its staging profile is read again rather than taken as
- * none, which would leave its persona's rules out.
+ * Each row's staging profile and the memory rules it is classified under,
+ * from one read: no rules for a `migration` row, its staging profile's for
+ * the rest. A replayed row memoized without `profileId` has it `undefined`;
+ * its staging profile is read again, for those ids only, and one no longer
+ * pending reads as `undefined`. A row that kept its `profileId` isn't
+ * checked: one deleted meanwhile is classified again, and its retain
+ * replaces the same document.
  */
 async function loadMemoryRules(
   pending: ReadonlyArray<ClassifierInput>,
-  userId: string,
-  deps: Pick<ClassifyDeps, "runInTx" | "store">,
-): Promise<(p: ClassifierInput) => ReadonlyArray<MemoryRule> | undefined> {
-  const bound = pending.filter((p) => p.source !== "migration");
-  if (bound.length === 0) return () => [];
-  const { staging, rules } = await deps.runInTx(async (tx) => {
-    const unresolved = bound.some((p) => p.profileId === undefined);
-    const current = unresolved
-      ? new Map((await deps.store.getPendingMemories(tx, userId)).map((r) => [r.id, r.profileId]))
-      : undefined;
-    const staging = new Map(
-      bound.flatMap((p): Array<[string, string | null]> => {
-        if (p.profileId !== undefined) return [[p.id, p.profileId]];
-        const reread = current?.get(p.id);
-        return reread === undefined ? [] : [[p.id, reread]];
-      }),
+  deps: Pick<ClassifyDeps, "fire" | "runInTx" | "store">,
+): Promise<{
+  stagingOf: (p: ClassifierInput) => string | null | undefined;
+  rulesOf: (p: ClassifierInput) => ReadonlyArray<MemoryRule>;
+}> {
+  const { userId } = deps.fire;
+  const unresolved = pending.filter((p) => p.profileId === undefined).map((p) => p.id);
+  const { reread, rules } = await deps.runInTx(async (tx) => {
+    const reread =
+      unresolved.length === 0
+        ? new Map<string, string | null>()
+        : new Map(
+            (await deps.store.getPendingMemories(tx, userId, undefined, { ids: unresolved })).map(
+              (r) => [r.id, r.profileId],
+            ),
+          );
+    const staging = pending.map((p) =>
+      p.profileId === undefined ? reread.get(p.id) : p.profileId,
     );
-    const profileIds = R.unique([...staging.values()].filter((id) => id !== null));
-    return { staging, rules: await deps.store.getMemoryRules(tx, { profileIds, userId }) };
+    const profileIds = R.unique(staging.filter((id) => typeof id === "string"));
+    const bound = pending.some((p) => p.source !== "migration");
+    return {
+      reread,
+      rules: bound ? await deps.store.getMemoryRules(tx, { profileIds, userId }) : [],
+    };
   });
-  return (p) => {
-    if (p.source === "migration") return [];
-    const profileId = staging.get(p.id);
-    return profileId === undefined ? undefined : memoryRulesFor(rules, profileId);
+  const stagingOf = (p: ClassifierInput) =>
+    p.profileId === undefined ? reread.get(p.id) : p.profileId;
+  return {
+    stagingOf,
+    rulesOf: (p) => {
+      const staging = stagingOf(p);
+      return p.source === "migration" || staging === undefined
+        ? []
+        : memoryRulesFor(rules, staging);
+    },
   };
 }
-
 /**
  * Map classified rows to `RetainBatchItem`s. `metadata.source` carries the
  * staging origin so live retains, skill writes and migrations stay
@@ -262,25 +339,28 @@ export function buildRetainItems(rows: ReadonlyArray<ClassifiedRow>): RetainBatc
   }));
 }
 
-export async function drainPendingMemories(
-  userId: string,
-  deps: DrainPendingDeps,
-): Promise<DrainPendingResult> {
-  const pending = await deps.runInTx((tx) => deps.store.getPendingMemories(tx, userId));
-  if (pending.length === 0) {
+export async function drainPendingMemories(deps: DrainPendingDeps): Promise<DrainPendingResult> {
+  const { userId } = deps.fire;
+  const batch = await loadPendingBatch(deps.fire, undefined, deps);
+  if (batch.pending.length === 0) {
     logger.debug({ userId }, "no pending memories to drain");
-    return { drained: 0, byNetwork: {}, withheld: 0, deferredForUnseenRules: 0 };
+    return {
+      drained: 0,
+      byNetwork: {},
+      withheld: 0,
+      deferredToFirstParty: batch.deferredToFirstParty,
+    };
   }
 
-  const { successful, withheld, byNetwork, deferredForUnseenRules } = await classifyPendingMemories(
-    pending,
-    userId,
-    deps,
-  );
+  const classified = await classifyPendingMemories(batch.pending, deps);
+  const { successful, withheld, byNetwork } = classified;
+  const deferredToFirstParty = batch.deferredToFirstParty + classified.deferredToFirstParty;
 
   if (successful.length === 0 && withheld.length === 0) {
-    logger.warn({ userId, pendingCount: pending.length }, "no pending row classified");
-    return { drained: 0, byNetwork: {}, withheld: 0, deferredForUnseenRules };
+    if (batch.pending.length > classified.deferredToFirstParty) {
+      logger.warn({ userId, pendingCount: batch.pending.length }, "no pending row classified");
+    }
+    return { drained: 0, byNetwork: {}, withheld: 0, deferredToFirstParty };
   }
 
   if (successful.length > 0) {
@@ -294,7 +374,7 @@ export async function drainPendingMemories(
     {
       drained: successful.length,
       withheld: withheld.length,
-      deferredForUnseenRules,
+      deferredToFirstParty,
       byNetwork,
       userId,
     },
@@ -305,10 +385,9 @@ export async function drainPendingMemories(
     drained: successful.length,
     byNetwork,
     withheld: withheld.length,
-    deferredForUnseenRules,
+    deferredToFirstParty,
   };
 }
-
 interface ClassifiedOutcome {
   row: ClassifiedRow;
   /** A listed memory rule forbids storing the row. */

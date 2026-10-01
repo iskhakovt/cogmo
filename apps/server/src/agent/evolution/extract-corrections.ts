@@ -198,19 +198,20 @@ export async function extractCorrections(
         : null;
 
     if (correction.action === "new") {
-      // The rule this correction would write is global on the profile axis.
+      // Dropped when an instruction this conversation sees covers its scope:
+      // a persona's own instruction keeps its text out of a global learned rule.
       const held = await deps.runInTx((tx) =>
         deps.store.hasInstructionRule(tx, {
           userId: scope.userId,
           text: correction.rule,
-          profileId: null,
+          profileId: scope.profileId,
           channelType,
         }),
       );
       if (held) {
         logger.warn(
           { rule: correction.rule, channelType, reasoning: correction.reasoning },
-          "extraction: new correction repeats an instruction rule in its scope — dropped",
+          "extraction: new correction repeats an instruction rule covering its scope — dropped",
         );
         continue;
       }

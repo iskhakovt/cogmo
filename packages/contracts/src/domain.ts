@@ -118,13 +118,13 @@ export interface EvolutionEventPayload {
   memories: { extracted: number; byNetwork: Record<string, number>; skippedForUnseenRules: number };
   /**
    * `withheld`: staged rows a `memory`-category rule forbade, deleted unretained.
-   * `deferredForUnseenRules`: rows left pending for a fire whose profile sees the user's rules.
+   * `deferredToFirstParty`: rows a third-party fire left pending for a first-party one.
    */
   drained: {
     drained: number;
     byNetwork: Record<string, number>;
     withheld: number;
-    deferredForUnseenRules: number;
+    deferredToFirstParty: number;
   };
   messageCount: number;
   profileId: string;

@@ -3489,6 +3489,51 @@ describe("DrizzleAgentStore", () => {
       expect(rows[0]?.profileId).toBeNull();
     });
 
+    it("getPendingMemories filters before its limit, so excluded rows never fill a batch", async () => {
+      const userId = await seedUser();
+      const mk = (name: string) =>
+        tx((trx) =>
+          store.createProfile(trx, { userId, name, basePrompt: "p", model: "m", toolSet: [] }),
+        );
+      const own = await mk("third-party");
+      const other = await mk("main");
+      for (let i = 0; i < 101; i++) {
+        await tx((trx) =>
+          store.stagePendingMemory(trx, {
+            userId,
+            profileId: other.id,
+            content: `first-party fact ${i}`,
+            source: "live_retain",
+          }),
+        );
+      }
+      await tx((trx) =>
+        store.stagePendingMemory(trx, {
+          userId,
+          profileId: own.id,
+          content: "staged by the third-party profile",
+          source: "live_retain",
+        }),
+      );
+      const filter = { stagedBy: own.id };
+
+      const batch = await tx((trx) => store.getPendingMemories(trx, userId, 100, filter));
+      const unfiltered = await tx((trx) => store.getPendingMemories(trx, userId, 100));
+
+      expect(batch.map((r) => r.content)).toEqual(["staged by the third-party profile"]);
+      expect(unfiltered.map((r) => r.profileId)).not.toContain(own.id);
+      expect(await tx((trx) => store.countPendingMemories(trx, userId))).toBe(102);
+      expect(await tx((trx) => store.countPendingMemories(trx, userId, filter))).toBe(1);
+      expect(
+        await tx((trx) => store.countPendingMemories(trx, userId, { sources: ["migration"] })),
+      ).toBe(0);
+      const [first] = unfiltered;
+      const byId = await tx((trx) =>
+        store.getPendingMemories(trx, userId, undefined, { ids: [expectDefined(first, "row").id] }),
+      );
+      expect(byId).toHaveLength(1);
+    });
+
     it("getPendingMemories surfaces an org staging profile, which has no class", async () => {
       const userId = await seedUser();
       const org = await tx((trx) =>
@@ -4241,7 +4286,7 @@ describe("DrizzleAgentStore", () => {
         },
         consolidation: null,
         memories: { extracted: 3, byNetwork: { world: 1, bank: 2 }, skippedForUnseenRules: 0 },
-        drained: { drained: 0, byNetwork: {}, withheld: 0, deferredForUnseenRules: 0 },
+        drained: { drained: 0, byNetwork: {}, withheld: 0, deferredToFirstParty: 0 },
         messageCount: 12,
         profileId: "11111111-1111-7111-8111-111111111111",
       };
@@ -4257,7 +4302,7 @@ describe("DrizzleAgentStore", () => {
       const { skippedForUnseenRules: _skipped, ...memories } = samplePayload().memories;
       const {
         withheld: _withheld,
-        deferredForUnseenRules: _deferred,
+        deferredToFirstParty: _deferred,
         ...drained
       } = samplePayload().drained;
       const payload = { ...samplePayload(), corrections, memories, drained };
@@ -4272,7 +4317,7 @@ describe("DrizzleAgentStore", () => {
       expect(read.corrections.outOfScopeContradictionsSkipped).toBe(0);
       expect(read.memories.skippedForUnseenRules).toBe(0);
       expect(read.drained.withheld).toBe(0);
-      expect(read.drained.deferredForUnseenRules).toBe(0);
+      expect(read.drained.deferredToFirstParty).toBe(0);
     });
 
     it("records and lists events newest-first per user", async () => {

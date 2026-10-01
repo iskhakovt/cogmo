@@ -3132,8 +3132,8 @@ describe("createTransport", () => {
         status: "processed",
         eventId: "evt-99",
         corrections: { extracted: 1, reinforced: 2, promoted: 3, retired: 6 },
-        memories: { extracted: 4 },
-        drained: { drained: 5, withheld: 7 },
+        memories: { extracted: 4, skippedForUnseenRules: 1 },
+        drained: { drained: 5, withheld: 7, deferredToFirstParty: 8 },
       });
       const { transport } = buildEvolutionTransport({
         identity: { userId: "user-1" },
@@ -3148,6 +3148,8 @@ describe("createTransport", () => {
         memoryCount: 4,
         drained: 5,
         withheld: 7,
+        skippedForUnseenRules: 1,
+        deferredToFirstParty: 8,
         ruleChanges: { extracted: 1, reinforced: 2, promoted: 3, retired: 6 },
       });
     });

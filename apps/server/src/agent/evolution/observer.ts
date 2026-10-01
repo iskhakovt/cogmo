@@ -32,12 +32,15 @@ import { logger } from "../../logger.js";
 import type { MemoryProvider } from "../../memory/provider.js";
 import type { TransportStore } from "../../transport/store/index.js";
 import { admitsFirstParty } from "../core-memory/scope.js";
-import type { AgentStore } from "../store/index.js";
+import type { AgentStore, PendingMemory } from "../store/index.js";
 import { consolidateRules } from "./consolidate-rules.js";
 import {
   buildRetainItems,
   classifyPendingMemories,
   type DrainPendingResult,
+  loadPendingBatch,
+  type ObserverFire,
+  type PendingBatch,
 } from "./drain-pending-memories.js";
 import type { EvolutionTrigger, ObserverPhase } from "./event-schema.js";
 import { extractCorrections } from "./extract-corrections.js";
@@ -247,9 +250,10 @@ export async function runObserver(
   // The Observer runs on the conversation's profile's model, so it shows that
   // model only the rules the profile's turns see: a third-party profile sees
   // none of the user's instruction rules (`admitsFirstParty`).
-  const ruleScope = {
-    profileId: conv.profileId,
+  const fire: ObserverFire = {
+    conversationId,
     userId: conv.userId,
+    profileId: conv.profileId,
     seesUserRules: admitsFirstParty(profile),
   };
 
@@ -272,7 +276,7 @@ export async function runObserver(
     },
     () =>
       step.run("extract-corrections", async () => {
-        return extractCorrections(history, ruleScope, {
+        return extractCorrections(history, fire, {
           provider,
           model,
           runInTx: deps.runInTx,
@@ -313,7 +317,7 @@ export async function runObserver(
           memory: deps.memory,
           customCompartments,
           memoryRules,
-          seesUserRules: ruleScope.seesUserRules,
+          fire,
         });
       }),
   );
@@ -328,34 +332,42 @@ export async function runObserver(
   const drain = await settlePhase(
     "drain",
     conversationId,
-    { drained: 0, byNetwork: {}, withheld: 0, deferredForUnseenRules: 0 },
+    { drained: 0, byNetwork: {}, withheld: 0, deferredToFirstParty: 0 },
     async (): Promise<DrainPendingResult> => {
-      const pending = await step.run("load-pending-memories", async () => {
-        return deps.runInTx((tx) =>
-          agentStore.getPendingMemories(tx, conv.userId, PENDING_DRAIN_BATCH_SIZE),
-        );
+      const loaded = await step.run("load-pending-memories", async () => {
+        return loadPendingBatch(fire, PENDING_DRAIN_BATCH_SIZE, {
+          runInTx: deps.runInTx,
+          store: agentStore,
+        });
       });
-      if (pending.length === 0) {
-        return { drained: 0, byNetwork: {}, withheld: 0, deferredForUnseenRules: 0 };
+      const batch = asPendingBatch(loaded);
+      if (batch.pending.length === 0) {
+        return {
+          drained: 0,
+          byNetwork: {},
+          withheld: 0,
+          deferredToFirstParty: batch.deferredToFirstParty,
+        };
       }
 
       const classified = await step.run("classify-pending-memories", async () => {
-        return classifyPendingMemories(pending, conv.userId, {
+        return classifyPendingMemories(batch.pending, {
           provider,
           model,
           customCompartments,
-          seesUserRules: ruleScope.seesUserRules,
+          fire,
           runInTx: deps.runInTx,
           store: agentStore,
         });
       });
       const { successful } = classified;
       // A classification memoized before results carried `withheld` or
-      // `deferredForUnseenRules` replays without them.
+      // `deferredToFirstParty` replays without them.
       const withheld = classified.withheld ?? [];
-      const deferredForUnseenRules = classified.deferredForUnseenRules ?? 0;
+      const deferredToFirstParty =
+        batch.deferredToFirstParty + (classified.deferredToFirstParty ?? 0);
       if (successful.length === 0 && withheld.length === 0) {
-        return { drained: 0, byNetwork: {}, withheld: 0, deferredForUnseenRules };
+        return { drained: 0, byNetwork: {}, withheld: 0, deferredToFirstParty };
       }
 
       // Each row carries its own staging profile's class (denormalised
@@ -380,7 +392,7 @@ export async function runObserver(
         drained: successful.length,
         byNetwork: classified.byNetwork,
         withheld: withheld.length,
-        deferredForUnseenRules,
+        deferredToFirstParty,
       };
     },
   );
@@ -419,6 +431,11 @@ export async function runObserver(
   });
 
   return { status: "processed", conversationId, eventId, ...outcome };
+}
+
+/** A batch memoized as a bare row list replays as one with nothing deferred. */
+function asPendingBatch(loaded: PendingBatch | ReadonlyArray<PendingMemory>): PendingBatch {
+  return "pending" in loaded ? loaded : { pending: loaded, deferredToFirstParty: 0 };
 }
 
 export function createObserver(deps: ObserverDeps) {

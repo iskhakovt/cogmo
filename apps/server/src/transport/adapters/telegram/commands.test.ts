@@ -4353,7 +4353,7 @@ describe("handleLearned", () => {
       },
       consolidation: null,
       memories: { extracted: overrides?.memories ?? 0, byNetwork: {}, skippedForUnseenRules: 0 },
-      drained: { drained: 0, byNetwork: {}, withheld: 0, deferredForUnseenRules: 0 },
+      drained: { drained: 0, byNetwork: {}, withheld: 0, deferredToFirstParty: 0 },
       messageCount: 8,
       profileId: "11111111-1111-7111-8111-111111111111",
     };
@@ -4405,7 +4405,7 @@ describe("handleLearned", () => {
               payload: {
                 ...payload,
                 corrections: { ...payload.corrections, retired: 2 },
-                drained: { ...payload.drained, withheld: 4, deferredForUnseenRules: 5 },
+                drained: { ...payload.drained, withheld: 4, deferredToFirstParty: 5 },
               },
               createdAt: new Date("2026-05-30T08:00:00Z"),
             },
@@ -4602,6 +4602,8 @@ describe("handleReflect", () => {
             memoryCount: 3,
             drained: 0,
             withheld: 0,
+            skippedForUnseenRules: 0,
+            deferredToFirstParty: 0,
           }),
         ),
       },
@@ -4630,6 +4632,8 @@ describe("handleReflect", () => {
             memoryCount: 0,
             drained: 0,
             withheld: 2,
+            skippedForUnseenRules: 0,
+            deferredToFirstParty: 0,
           }),
         ),
       },
@@ -4639,6 +4643,31 @@ describe("handleReflect", () => {
     const digest = (ctx.reply.mock.calls[1]?.[0] ?? "") as string;
     expect(digest).toContain("0 new, 0 reinforced, 0 promoted, 1 retired");
     expect(digest).toContain("0 extracted, 0 drained, 2 withheld");
+  });
+
+  it("reports an extraction skipped and rows deferred for a first-party fire", async () => {
+    const transport = transportWith({
+      evolution: {
+        triggerReflection: vi.fn().mockResolvedValue(
+          ok({
+            status: "processed",
+            eventId: "019e2900-0000-7000-8000-0000000000ff",
+            ruleChanges: { extracted: 0, reinforced: 0, promoted: 0, retired: 0 },
+            memoryCount: 0,
+            drained: 0,
+            withheld: 0,
+            skippedForUnseenRules: 1,
+            deferredToFirstParty: 3,
+          }),
+        ),
+      },
+    });
+    const ctx = mkCtx();
+    await handleReflect(transport, ctx);
+    const digest = (ctx.reply.mock.calls[1]?.[0] ?? "") as string;
+    expect(digest).toContain(
+      "Memories: extraction skipped (a user's memory rule this profile can't see), 0 drained, 3 deferred.",
+    );
   });
 
   it("reports too-short conversations clearly", async () => {
@@ -4676,6 +4705,8 @@ describe("handleReflect", () => {
             memoryCount: 0,
             drained: 0,
             withheld: 0,
+            skippedForUnseenRules: 0,
+            deferredToFirstParty: 0,
           }),
         ),
       },
@@ -4798,7 +4829,7 @@ describe("handleLearned detail rendering", () => {
         drained: 0,
         byNetwork: {},
         withheld: overrides.withheld ?? 0,
-        deferredForUnseenRules: overrides.deferred ?? 0,
+        deferredToFirstParty: overrides.deferred ?? 0,
       },
       messageCount: 8,
       profileId: "11111111-1111-7111-8111-111111111111",
@@ -4844,7 +4875,7 @@ describe("handleLearned detail rendering", () => {
       "Memories: skipped; a user's memory rule binds it and this profile can't see it",
     );
     expect(reply).toContain("Pending drained: 0");
-    expect(reply).toContain("  deferred, a user's memory rule this profile can't see: 3");
+    expect(reply).toContain("  deferred to a first-party fire: 3");
   });
 
   it("surfaces skipped counters when non-zero", async () => {
@@ -4867,6 +4898,18 @@ describe("handleLearned detail rendering", () => {
     expect(reply).toContain("skipped:      4");
     expect(reply).toContain("3 out-of-scope");
     expect(reply).toContain("1 unknown-rule");
+  });
+
+  it("shows out-of-scope contradictions as a part of contradicted, apart from skipped reinforcements", async () => {
+    const payload = makePayload({ contradictions: 3, retired: 1, outOfScope: 2 });
+    const reply = await detailOf({
+      ...payload,
+      corrections: { ...payload.corrections, outOfScopeContradictionsSkipped: 2 },
+    });
+    expect(reply).toContain("contradicted: 3");
+    expect(reply).toContain("retired:      1 (learning, contradicted)");
+    expect(reply).toContain("not retired:  2 (learning, on another channel)");
+    expect(reply).toContain("skipped:      2 reinforcement(s) (2 out-of-scope, 0 unknown-rule)");
   });
 
   it("omits the skipped line when both counters are zero", async () => {

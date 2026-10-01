@@ -356,7 +356,7 @@ describe("extractCorrections", () => {
       expect(deps.store.hasInstructionRule).toHaveBeenCalledWith(expect.anything(), {
         userId: "user-1",
         text: "No emojis",
-        profileId: null,
+        profileId: "profile-1",
         channelType: "telegram",
       });
       expect(deps.store.upsertCorrection).not.toHaveBeenCalled();

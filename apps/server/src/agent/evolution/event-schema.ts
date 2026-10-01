@@ -66,7 +66,7 @@ const DrainResultSchema = z.object({
   /** Older rows omit it and read as 0. */
   withheld: z.number().int().nonnegative().default(0),
   /** Older rows omit it and read as 0. */
-  deferredForUnseenRules: z.number().int().nonnegative().default(0),
+  deferredToFirstParty: z.number().int().nonnegative().default(0),
 });
 
 export const EvolutionEventPayloadSchema = z.object({

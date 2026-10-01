@@ -410,11 +410,14 @@ describe("runObserver rules", () => {
 
     await runObserver(EVENT, exhaustedRetriesStep(), deps);
 
-    expect(deps.agentStore.getInstructionRules).toHaveBeenCalledWith(expect.anything(), {
-      profileId: "profile-1",
-      userId: "user-1",
-      seesUserRules: true,
-    });
+    expect(deps.agentStore.getInstructionRules).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        profileId: "profile-1",
+        userId: "user-1",
+        seesUserRules: true,
+      }),
+    );
   });
 
   it("extracts memories under the memory rules the conversation's profile sees", async () => {
@@ -460,7 +463,7 @@ describe("runObserver rules", () => {
     expect(deps.agentStore.deletePendingMemories).not.toHaveBeenCalled();
     const deferral = {
       memories: { extracted: 0, skippedForUnseenRules: 1 },
-      drained: { drained: 0, withheld: 0, deferredForUnseenRules: 1 },
+      drained: { drained: 0, withheld: 0, deferredToFirstParty: 1 },
     };
     expect(result).toMatchObject(deferral);
     expect(recordedPayload(deps)).toMatchObject(deferral);
@@ -476,7 +479,7 @@ describe("runObserver rules", () => {
 
     expect(recordedPayload(deps)).toMatchObject({
       memories: { skippedForUnseenRules: 0 },
-      drained: { deferredForUnseenRules: 0 },
+      drained: { deferredToFirstParty: 0 },
     });
   });
 
@@ -529,10 +532,54 @@ describe("runObserver rules", () => {
 
     const result = await runObserver(EVENT, step, deps);
 
-    expect(result).toMatchObject({ drained: { drained: 1, withheld: 0 } });
+    expect(result).toMatchObject({
+      drained: { drained: 1, withheld: 0, deferredToFirstParty: 0 },
+    });
     expect(deps.agentStore.deletePendingMemories).toHaveBeenCalledWith(expect.anything(), [
       "pending-1",
     ]);
+  });
+
+  it("drains a batch memoized as a bare row list", async () => {
+    const step: ObserverStepHarness = {
+      run: (id, fn) =>
+        // The step result as an earlier deploy memoized it.
+        id === "load-pending-memories" ? Promise.resolve(PENDING as never) : fn(),
+    };
+    const deps = observerDeps({ provider: routedProvider() });
+
+    const result = await runObserver(EVENT, step, deps);
+
+    expect(result).toMatchObject({
+      drained: { drained: 1, withheld: 0, deferredToFirstParty: 0 },
+    });
+  });
+
+  it("classifies on a third-party fire only what its own profile staged", async () => {
+    const own = { ...expectDefined(PENDING[0], "row"), id: "pending-own" };
+    const other = { ...own, id: "pending-other", profileId: "profile-main" };
+    const rows = [other, own];
+    const deps = observerDeps({
+      provider: routedProvider(),
+      store: {
+        getProfile: thirdPartyProfile(),
+        getPendingMemories: vi.fn(async (_tx, _userId, _limit, filter) =>
+          rows.filter((r) => filter?.stagedBy === undefined || r.profileId === filter.stagedBy),
+        ),
+        countPendingMemories: vi.fn(async (_tx, _userId, filter) =>
+          filter?.stagedBy === undefined ? 2 : 1,
+        ),
+      },
+    });
+
+    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps);
+
+    expect(result).toMatchObject({
+      drained: { drained: 1, withheld: 0, deferredToFirstParty: 1 },
+    });
+    const retained = vi.mocked(deps.memory.retainBatch).mock.calls.flatMap(([, items]) => items);
+    expect(retained.map((i) => i.documentId)).toContain("pending-own");
+    expect(retained.map((i) => i.documentId)).not.toContain("pending-other");
   });
 });
 

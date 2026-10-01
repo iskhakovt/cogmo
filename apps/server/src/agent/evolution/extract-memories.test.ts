@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { ProviderProtocolError } from "../../llm/errors.js";
 import type { Message } from "../../llm/types.js";
+import { logger } from "../../logger.js";
 import { expectDefined } from "../../test/assertions.js";
 import { mockProvider } from "../../test/factories.js";
 import type { MemoryRule } from "../store/index.js";
+import type { ObserverFire } from "./drain-pending-memories.js";
 import { extractMemories, type MemoryExtractionDeps } from "./extract-memories.js";
 
 const HEALTH_RULE: MemoryRule = {
@@ -11,6 +13,14 @@ const HEALTH_RULE: MemoryRule = {
   profileId: null,
   fromUser: true,
 };
+
+const FIRE: ObserverFire = {
+  conversationId: "conv-1",
+  userId: "user-1",
+  profileId: "profile-1",
+  seesUserRules: true,
+};
+const THIRD_PARTY_FIRE: ObserverFire = { ...FIRE, seesUserRules: false };
 
 function mockExtractionDeps(
   chatTypedResponse: { memories: Array<Record<string, unknown>> },
@@ -33,7 +43,7 @@ function mockExtractionDeps(
     },
     customCompartments: [],
     memoryRules: [],
-    seesUserRules: true,
+    fire: FIRE,
     ...overrides,
   };
 }
@@ -247,7 +257,7 @@ describe("extractMemories", () => {
       memory: { retainBatch: vi.fn().mockResolvedValue(undefined) },
       customCompartments: customs,
       memoryRules: [],
-      seesUserRules: true,
+      fire: FIRE,
     };
 
     await extractMemories(sampleHistory, "user-1", null, deps);
@@ -275,20 +285,30 @@ describe("extractMemories", () => {
   it("skips extraction, and counts it, when a user's rule binds a profile that can't see it", async () => {
     const deps = mockExtractionDeps(
       { memories: [{ fact: "x", network: "world", compartment: "misc", trust: "any" }] },
-      { memoryRules: [HEALTH_RULE], seesUserRules: false },
+      { memoryRules: [HEALTH_RULE], fire: THIRD_PARTY_FIRE },
     );
+    const info = vi.spyOn(logger, "info");
 
     const result = await extractMemories(sampleHistory, "user-1", null, deps);
 
     expect(result).toEqual({ extracted: 0, byNetwork: {}, skippedForUnseenRules: 1 });
     expect(deps.provider.chat).not.toHaveBeenCalled();
     expect(deps.memory.retainBatch).not.toHaveBeenCalled();
+    expect(info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conversationId: "conv-1",
+        profileId: "profile-1",
+        userId: "user-1",
+      }),
+      expect.stringContaining("skipped"),
+    );
+    info.mockRestore();
   });
 
   it("extracts under an operator's memory rule in a profile that can't see the user's", async () => {
     const deps = mockExtractionDeps(
       { memories: [] },
-      { memoryRules: [{ ...HEALTH_RULE, fromUser: false }], seesUserRules: false },
+      { memoryRules: [{ ...HEALTH_RULE, fromUser: false }], fire: THIRD_PARTY_FIRE },
     );
 
     const result = await extractMemories(sampleHistory, "user-1", null, deps);
@@ -393,7 +413,7 @@ describe("extractMemories", () => {
       memory: { retainBatch: vi.fn().mockResolvedValue(undefined) },
       customCompartments: [],
       memoryRules: [],
-      seesUserRules: true,
+      fire: FIRE,
     };
 
     const result = await extractMemories(sampleHistory, "user-1", null, deps);

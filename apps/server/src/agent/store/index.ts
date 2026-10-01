@@ -544,6 +544,40 @@ export function memoryRulesFor(
   return rules.filter((r) => r.profileId === null || r.profileId === profileId);
 }
 
+/**
+ * Whether `rules` hold one of the user's own rules that a profile not seeing
+ * the user's instruction rules (`seesUserRules` false) would be bound by
+ * without being shown it.
+ */
+export function bindsUnseenUserRule(
+  rules: ReadonlyArray<MemoryRule>,
+  seesUserRules: boolean,
+): boolean {
+  return !seesUserRules && rules.some((r) => r.fromUser);
+}
+
+/** Which of a user's pending rows a read takes. */
+export interface PendingMemoryFilter {
+  /** Only rows staged by this profile. */
+  stagedBy?: string;
+  /** Only rows of these sources. */
+  sources?: ReadonlyArray<PendingMemorySource>;
+  /** Only these rows. */
+  ids?: ReadonlyArray<string>;
+}
+
+/** A user's pending rows, narrowed by `filter`. */
+function pendingRowsOf(userId: string, filter: PendingMemoryFilter | undefined): SQL | undefined {
+  return and(
+    eq(pendingMemories.userId, userId),
+    filter?.stagedBy === undefined ? undefined : eq(pendingMemories.profileId, filter.stagedBy),
+    filter?.sources === undefined
+      ? undefined
+      : inArray(pendingMemories.source, [...filter.sources]),
+    filter?.ids === undefined ? undefined : inArray(pendingMemories.id, [...filter.ids]),
+  );
+}
+
 function textMatches(text: string): SQL {
   return eq(normalizedRuleText(steeringRules.rule), normalizedRuleText(sql`${text}`));
 }
@@ -1529,14 +1563,15 @@ export interface AgentStore {
   ): Promise<ReadonlyArray<ExtractionRule>>;
 
   /**
-   * Whether the user holds a live instruction rule with this text
-   * (normalized) in exactly this profile and channel scope: the one a learned
-   * rule with that text and scope would duplicate, as `setInstructionRule`
-   * scopes its supersession.
+   * Whether a live instruction rule of the user's with this text (normalized)
+   * covers a rule in `channelType` (null for every channel), seen from
+   * `profileId`'s conversation: the instruction is global or that profile's,
+   * and on every channel or that one. A channel rule doesn't cover another
+   * channel or every channel.
    */
   hasInstructionRule(
     tx: Transaction,
-    params: { userId: string; text: string; profileId: string | null; channelType: string | null },
+    params: { userId: string; text: string; profileId: string; channelType: string | null },
   ): Promise<boolean>;
 
   /**
@@ -1676,12 +1711,21 @@ export interface AgentStore {
    * `limit` caps the result size — callers running inside an Inngest step
    * pass a bounded value so the row payload never exceeds the run-state
    * size limit. Omit to read every pending row (tests, ad-hoc tooling).
+   * `filter` narrows the rows before the limit applies.
    */
   getPendingMemories(
     tx: Transaction,
     userId: string,
     limit?: number,
+    filter?: PendingMemoryFilter,
   ): Promise<ReadonlyArray<PendingMemory>>;
+
+  /** Count a user's pending rows, `filter` narrowing them as `getPendingMemories` does. */
+  countPendingMemories(
+    tx: Transaction,
+    userId: string,
+    filter?: PendingMemoryFilter,
+  ): Promise<number>;
 
   /** Delete pending rows by id. Used by the Observer drain step after successful retain. */
   deletePendingMemories(tx: Transaction, ids: ReadonlyArray<string>): Promise<void>;
@@ -3505,7 +3549,7 @@ export class DrizzleAgentStore implements AgentStore {
 
   async hasInstructionRule(
     tx: Transaction,
-    params: { userId: string; text: string; profileId: string | null; channelType: string | null },
+    params: { userId: string; text: string; profileId: string; channelType: string | null },
   ): Promise<boolean> {
     const rows = await tx
       .select({ id: steeringRules.id })
@@ -3514,7 +3558,13 @@ export class DrizzleAgentStore implements AgentStore {
         and(
           liveInstructionRulesOf(params.userId),
           textMatches(params.text),
-          inScope(params.profileId, params.channelType),
+          or(isNull(steeringRules.profileId), eq(steeringRules.profileId, params.profileId)),
+          params.channelType === null
+            ? isNull(steeringRules.channelType)
+            : or(
+                isNull(steeringRules.channelType),
+                eq(steeringRules.channelType, params.channelType),
+              ),
         ),
       )
       .limit(1);
@@ -3850,10 +3900,23 @@ export class DrizzleAgentStore implements AgentStore {
     }
   }
 
+  async countPendingMemories(
+    tx: Transaction,
+    userId: string,
+    filter?: PendingMemoryFilter,
+  ): Promise<number> {
+    const rows = await tx
+      .select({ value: count() })
+      .from(pendingMemories)
+      .where(pendingRowsOf(userId, filter));
+    return rows[0]?.value ?? 0;
+  }
+
   async getPendingMemories(
     tx: Transaction,
     userId: string,
     limit?: number,
+    filter?: PendingMemoryFilter,
   ): Promise<ReadonlyArray<PendingMemory>> {
     const stagingProfiles = alias(profiles, "staging_profiles");
     // LEFT JOIN onto profiles so we surface the staging profile's CURRENT
@@ -3902,7 +3965,7 @@ export class DrizzleAgentStore implements AgentStore {
           eq(profiles.userId, pendingMemories.userId),
         ),
       )
-      .where(eq(pendingMemories.userId, userId))
+      .where(pendingRowsOf(userId, filter))
       // Secondary sort by id breaks createdAt ties — bulk inserts share a
       // timestamp, but UUIDv7 ids are time-ordered, so the tiebreak preserves
       // insertion order for callers that care (drain FIFO, tests).

@@ -101,9 +101,7 @@ function EvolutionPanel({ onSelect }: { onSelect: (event: EvolutionEventEntry) =
                 </td>
                 <td className={tdMono}>
                   {e.payload.memories.extracted}
-                  {e.payload.drained.withheld > 0
-                    ? ` (${e.payload.drained.withheld} withheld)`
-                    : null}
+                  {memoryNotes(e.payload.drained)}
                 </td>
                 <td className={tdMono}>{e.payload.messageCount}</td>
                 <td className={td}>
@@ -116,6 +114,15 @@ function EvolutionPanel({ onSelect }: { onSelect: (event: EvolutionEventEntry) =
       )}
     </PanelResource>
   );
+}
+
+/** The staged rows a fire withheld or deferred, as the `/learned` digest notes them. */
+function memoryNotes(drained: EvolutionEventEntry["payload"]["drained"]): string | null {
+  const notes = [
+    ...(drained.withheld > 0 ? [`${drained.withheld} withheld`] : []),
+    ...(drained.deferredToFirstParty > 0 ? [`${drained.deferredToFirstParty} deferred`] : []),
+  ];
+  return notes.length > 0 ? ` (${notes.join(", ")})` : null;
 }
 
 /** The phases a fire recorded as failed; an older row shows a dash, not "ok". */
@@ -181,7 +188,7 @@ function EvolutionDetail({ event }: { event: EvolutionEventEntry }) {
           <>
             <Field label="drained" value={drained.drained} />
             <Field label="withheld" value={drained.withheld} />
-            <Field label="deferred, unseen user rule" value={drained.deferredForUnseenRules} />
+            <Field label="deferred to a first-party fire" value={drained.deferredToFirstParty} />
             <NetworkField byNetwork={drained.byNetwork} />
           </>
         )}

@@ -712,14 +712,13 @@ describe("the Observer's rule reads", () => {
   it("hasInstructionRule matches the user's live instruction rules on normalized text", async () => {
     const userId = await seedUser();
     const otherUserId = await seedUser();
+    const profileId = await seedProfile();
     await row({ rule: "No bullet points", source: "instruction", userId });
     await row({ rule: "Mine withdrawn", source: "instruction", userId, retired: true });
     await row({ rule: "Theirs", source: "instruction", userId: otherUserId });
     await row({ rule: "Learned", source: "correction" });
     const has = (text: string) =>
-      tx((trx) =>
-        store.hasInstructionRule(trx, { userId, text, profileId: null, channelType: null }),
-      );
+      tx((trx) => store.hasInstructionRule(trx, { userId, text, profileId, channelType: null }));
 
     expect(await has("  no BULLET\n points ")).toBe(true);
     expect(await has("Mine withdrawn")).toBe(false);
@@ -727,19 +726,42 @@ describe("the Observer's rule reads", () => {
     expect(await has("Learned")).toBe(false);
   });
 
-  it("hasInstructionRule matches only a rule in exactly the scope asked about", async () => {
-    const userId = await seedUser();
-    const profileId = await seedProfile();
-    await row({ rule: "No emojis", source: "instruction", userId, channelType: "telegram" });
-    await row({ rule: "Short replies", source: "instruction", userId, profileId });
-    const has = (text: string, scope: { profileId: string | null; channelType: string | null }) =>
-      tx((trx) => store.hasInstructionRule(trx, { userId, text, ...scope }));
+  describe("hasInstructionRule covers a correction's scope", () => {
+    async function setup() {
+      const userId = await seedUser();
+      const profileId = await seedProfile();
+      const otherProfileId = await seedProfile("other");
+      const has = (text: string, scope: { profileId: string; channelType: string | null }) =>
+        tx((trx) => store.hasInstructionRule(trx, { userId, text, ...scope }));
+      return { userId, profileId, otherProfileId, has };
+    }
 
-    expect(await has("No emojis", { profileId: null, channelType: "telegram" })).toBe(true);
-    expect(await has("No emojis", { profileId: null, channelType: "web" })).toBe(false);
-    expect(await has("No emojis", { profileId: null, channelType: null })).toBe(false);
-    expect(await has("Short replies", { profileId, channelType: null })).toBe(true);
-    expect(await has("Short replies", { profileId: null, channelType: null })).toBe(false);
+    it("doesn't let a channel's rule cover another channel or every channel", async () => {
+      const { userId, profileId, has } = await setup();
+      await row({ rule: "No emojis", source: "instruction", userId, channelType: "telegram" });
+
+      expect(await has("No emojis", { profileId, channelType: "telegram" })).toBe(true);
+      expect(await has("No emojis", { profileId, channelType: "web" })).toBe(false);
+      expect(await has("No emojis", { profileId, channelType: null })).toBe(false);
+    });
+
+    it("lets a rule on every channel cover a channel's correction", async () => {
+      const { userId, profileId, has } = await setup();
+      await row({ rule: "No emojis", source: "instruction", userId });
+
+      expect(await has("No emojis", { profileId, channelType: "telegram" })).toBe(true);
+      expect(await has("No emojis", { profileId, channelType: null })).toBe(true);
+    });
+
+    it("lets a persona's own rule cover a correction in its conversation, and only there", async () => {
+      const { userId, profileId, otherProfileId, has } = await setup();
+      await row({ rule: "Short replies", source: "instruction", userId, profileId });
+
+      expect(await has("Short replies", { profileId, channelType: null })).toBe(true);
+      expect(await has("Short replies", { profileId: otherProfileId, channelType: null })).toBe(
+        false,
+      );
+    });
   });
 
   it("upsertCorrection reinforces an instruction rule without promoting it", async () => {
