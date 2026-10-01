@@ -9,7 +9,7 @@ import { isCoreCompartment } from "./memory-extraction-schema.js";
  * runs in the caller's transaction so the check and the write see one
  * snapshot.
  */
-export async function findUnknownCompartmentImpl(
+export async function findUnknownCompartment(
   tx: Transaction,
   agentStore: Pick<AgentStore, "listCustomCompartments">,
   userId: string,

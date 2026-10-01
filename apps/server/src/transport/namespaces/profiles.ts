@@ -1,6 +1,6 @@
 import type { Inngest } from "inngest";
 import { err, ok, type Result } from "neverthrow";
-import { findUnknownCompartmentImpl } from "../../agent/evolution/find-unknown-compartment.js";
+import { findUnknownCompartment } from "../../agent/evolution/find-unknown-compartment.js";
 import type { CodingAutoapproveMode, Profile } from "../../agent/store/index.js";
 import type { CooldownState, ProfileMemoryScope, ToolSet } from "../../agent/store/schema.js";
 import type { TransportError } from "../transport-error.js";
@@ -90,7 +90,7 @@ export function createProfiles(deps: TransportContext & { inngest: Inngest }): P
           return err({ code: "model_unavailable" as const, model: input.model });
         }
         if (input.memoryScope) {
-          const unknown = await findUnknownCompartmentImpl(
+          const unknown = await findUnknownCompartment(
             tx,
             agentStore,
             identity.userId,
@@ -144,7 +144,7 @@ export function createProfiles(deps: TransportContext & { inngest: Inngest }): P
           return err({ code: "model_unavailable" as const, model: changes.model });
         }
         if (changes.memoryScope) {
-          const unknown = await findUnknownCompartmentImpl(
+          const unknown = await findUnknownCompartment(
             tx,
             agentStore,
             identity.userId,
