@@ -319,6 +319,9 @@ export interface CompactionSummary {
 /** An Observer extraction phase that keeps a cursor on the conversation. */
 export type ObservedPhase = "corrections" | "memories";
 
+/** What `AgentStore.advanceObserverCursor` found. */
+export type CursorAdvance = "advanced" | "alreadyAt" | "moved";
+
 /** See `AgentStore.getObserverBounds`. */
 export interface ObserverBounds {
   messageCount: number;
@@ -1023,14 +1026,15 @@ export interface AgentStore {
   /**
    * Move an extraction phase's cursor from `from` (null: never observed) to
    * `to`, forward only: a compare-and-set, so a run that planned its chunk
-   * from a cursor another run has moved since writes nothing. True when the
-   * cursor is at `to` afterwards, by this call or an earlier one with the same
-   * arguments (a re-run step); false when another run moved it.
+   * from a cursor another run has moved since writes nothing. `advanced` when
+   * this call moved it; `alreadyAt` when it was already at `to`, which a
+   * re-run of this step and another run through the same chunk leave alike;
+   * `moved` when another run moved it elsewhere.
    */
   advanceObserverCursor(
     tx: Transaction,
     params: { conversationId: string; phase: ObservedPhase; from: string | null; to: string },
-  ): Promise<boolean>;
+  ): Promise<CursorAdvance>;
 
   /** Load a profile by ID. */
   getProfile(tx: Transaction, profileId: string): Promise<Profile | undefined>;
@@ -2480,7 +2484,7 @@ export class DrizzleAgentStore implements AgentStore {
   async advanceObserverCursor(
     tx: Transaction,
     params: { conversationId: string; phase: ObservedPhase; from: string | null; to: string },
-  ): Promise<boolean> {
+  ): Promise<CursorAdvance> {
     const corrections = params.phase === "corrections";
     const cursor = corrections
       ? conversations.correctionsObservedThrough
@@ -2500,12 +2504,12 @@ export class DrizzleAgentStore implements AgentStore {
         ),
       )
       .returning({ id: conversations.id });
-    if (moved.length > 0) return true;
+    if (moved.length > 0) return "advanced";
     const [now] = await tx
       .select({ cursor })
       .from(conversations)
       .where(eq(conversations.id, params.conversationId));
-    return now?.cursor === params.to;
+    return now?.cursor === params.to ? "alreadyAt" : "moved";
   }
 
   async getProfile(tx: Transaction, profileId: string): Promise<Profile | undefined> {

@@ -5291,20 +5291,21 @@ describe("observer window", () => {
     const cursors = async () =>
       (await tx((trx) => store.getObserverBounds(trx, conversationId))).observedThrough;
 
-    expect(await advance("corrections", null, m2)).toBe(true);
-    expect(await advance("memories", null, m0)).toBe(true);
+    expect(await advance("corrections", null, m2)).toBe("advanced");
+    expect(await advance("memories", null, m0)).toBe("advanced");
     expect(await cursors()).toEqual({ corrections: m2, memories: m0 });
 
-    // A re-run of an advance that already landed reports it landed.
-    expect(await advance("corrections", null, m2)).toBe(true);
+    // The cursor already at the chunk's end: this step re-run, or another run
+    // through the same chunk.
+    expect(await advance("corrections", null, m2)).toBe("alreadyAt");
     // A run that planned from where the cursor no longer is writes nothing.
-    expect(await advance("corrections", null, m3)).toBe(false);
-    expect(await advance("corrections", m1, m3)).toBe(false);
+    expect(await advance("corrections", null, m3)).toBe("moved");
+    expect(await advance("corrections", m1, m3)).toBe("moved");
     // Never backwards, even from the cursor's own position.
-    expect(await advance("corrections", m2, m1)).toBe(false);
+    expect(await advance("corrections", m2, m1)).toBe("moved");
     expect(await cursors()).toEqual({ corrections: m2, memories: m0 });
 
-    expect(await advance("corrections", m2, m3)).toBe(true);
+    expect(await advance("corrections", m2, m3)).toBe("advanced");
     expect(await cursors()).toEqual({ corrections: m3, memories: m0 });
   });
 

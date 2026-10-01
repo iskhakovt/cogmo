@@ -40,6 +40,7 @@ import { admitsFirstParty } from "../core-memory/scope.js";
 import {
   type AgentStore,
   bindsUnseenUserRule,
+  type CursorAdvance,
   type ObservedPhase,
   type PendingMemory,
 } from "../store/index.js";
@@ -353,7 +354,9 @@ export async function runObserver(
    * Another run on the conversation (a `/reflect` beside an idle fire) can
    * take a chunk: an extraction step that finds the phase's cursor moved off
    * the chunk's start extracts nothing, and an advance moves the cursor only
-   * from the chunk's start. Either ends the phase without failing it.
+   * from the chunk's start. Either ends the phase without failing it, and so
+   * does an advance that finds the cursor already at the chunk's end, which a
+   * re-run of the step and a run through the same chunk alongside leave alike.
    */
   async function observePhase<T>(
     phase: ObservedPhase,
@@ -404,7 +407,7 @@ export async function runObserver(
       if (extracted.result.kind === "taken") return { ...none, result: total, processed };
       total = spec.combine(total, extracted.result.result);
       if (spec.heldChunk(extracted.result.result)) return { ...none, result: total, processed };
-      const advanced = await settle<boolean | null>(phase, null, () =>
+      const advanced = await settle<CursorAdvance | null>(phase, null, () =>
         step.run(`advance-${phase}-cursor-${n}`, () =>
           deps.runInTx((tx) =>
             agentStore.advanceObserverCursor(tx, {
@@ -417,7 +420,7 @@ export async function runObserver(
         ),
       );
       if (advanced.result === null) return { ...none, result: total, processed, failed: true };
-      if (!advanced.result) {
+      if (advanced.result === "moved") {
         logger.info(
           { conversationId, phase, chunk },
           "observer: another run moved the cursor off this chunk — stopping the phase",
@@ -425,6 +428,16 @@ export async function runObserver(
         return { ...none, result: total, processed };
       }
       processed += chunk.messages;
+      // Already at the chunk's end: this step re-run, or another run that
+      // extracted the same chunk alongside this one. The two look alike, so
+      // the phase stops here either way; the next fire carries on.
+      if (advanced.result === "alreadyAt") {
+        logger.info(
+          { conversationId, phase, chunk },
+          "observer: the cursor was already past this chunk — stopping the phase",
+        );
+        return { ...none, result: total, processed };
+      }
     }
     return { ...none, result: total, processed };
   }

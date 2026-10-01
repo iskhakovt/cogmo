@@ -223,10 +223,10 @@ function messageLog(initial: ReadonlyArray<Message>): MessageLog {
       advanceObserverCursor: vi.fn<AgentStore["advanceObserverCursor"]>(
         async (_tx, { phase, from, to }) => {
           const cursor = log.cursors[phase];
-          if (cursor === to) return true;
-          if (cursor !== from || (from !== null && to <= from)) return false;
+          if (cursor === to) return "alreadyAt";
+          if (cursor !== from || (from !== null && to <= from)) return "moved";
           log.cursors[phase] = to;
-          return true;
+          return "advanced";
         },
       ),
     },
@@ -1173,6 +1173,36 @@ describe("runObserver observation window", () => {
       expect(log.cursors).toEqual({ corrections: "msg-004", memories: "msg-004" });
     });
 
+    it("stops after a chunk another run advanced through at the same time", async () => {
+      const log = messageLog(
+        Array.from({ length: 6 }, (_, i) => ({
+          role: i % 2 === 0 ? ("user" as const) : ("assistant" as const),
+          content: `${"x".repeat(6_000)} part-${i + 1}.`,
+        })),
+      );
+      const provider = routedProvider();
+      // 21k context, 1k output: one of these messages a chunk.
+      const deps = observerDeps({
+        provider,
+        log,
+        resolveProvider: constantResolver(provider, {
+          contextWindow: 21_000,
+          maxOutputTokens: 1_000,
+        }),
+      });
+      // The other run extracted the same first chunk and advanced through it first.
+      const step = interleaved("advance-corrections-cursor-1", () => {
+        log.cursors.corrections = "msg-001";
+      });
+
+      const result = await runObserver(EVENT, step, deps);
+
+      expect(step.ids).toContain("advance-corrections-cursor-1");
+      expect(step.ids).not.toContain("extract-corrections-2");
+      expect(result).toMatchObject({ failedPhases: [], newMessages: { corrections: 1 } });
+      expect(log.cursors.corrections).toBe("msg-001");
+    });
+
     it("advances nothing when another run moved the cursor after the extraction", async () => {
       const log = messageLog(HISTORY);
       const provider = routedProvider();
@@ -1299,8 +1329,10 @@ describe("runObserver observation window", () => {
           ),
         ).rejects.toThrow(Crash);
         const replay = replayingStep(recorded);
-        await runObserver(EVENT, replay, deps);
+        const result = await runObserver(EVENT, replay, deps);
 
+        // Its own advance, recorded or re-run, counts the chunk.
+        expect(result).toMatchObject({ newMessages: { corrections: 4 }, failedPhases: [] });
         expect(replay.ran).not.toContain("extract-corrections-1");
         expect(userMessagesOf(provider, CORRECTIONS)).toHaveLength(1);
         const correctionAdvances = vi
