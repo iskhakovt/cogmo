@@ -20,6 +20,7 @@
  *   per-turn structured-log context to thread through.
  */
 
+import { err, ok, type Result } from "neverthrow";
 import type { ZodType } from "zod";
 import { logger } from "../logger.js";
 import { extractText } from "./content.js";
@@ -195,34 +196,31 @@ export async function chatTyped<T>(params: TypedChatParams<T>): Promise<TypedCha
     const text = extractText(response.content);
 
     const parsed = parseStructuredOutput(text, name, repair.jsonrepair);
+    if (parsed.isErr()) throw parsed.error;
 
-    let data: T;
-    try {
-      data = schema.parse(parsed);
-    } catch (zodErr) {
-      if (!canRetry()) {
-        logger.warn(
-          { name, retries, err: zodErr },
-          "chatTyped: zod validation failed, no retry budget",
-        );
-        throw zodErr;
-      }
-
-      const errorMessage = zodErr instanceof Error ? zodErr.message : String(zodErr);
-      logger.debug({ name, retry: retries + 1, error: errorMessage }, "chatTyped: retrying");
-
-      messages.push(
-        { role: "assistant", content: text },
-        {
-          role: "user",
-          content: `Your response didn't match the expected format. Error: ${errorMessage}\n\nPlease try again with the correct format.`,
-        },
+    const validated = schema.safeParse(parsed.value);
+    if (validated.success) {
+      return { data: validated.data, usage: totalUsage, model: response.model, retries };
+    }
+    if (!canRetry()) {
+      logger.warn(
+        { name, retries, err: validated.error },
+        "chatTyped: zod validation failed, no retry budget",
       );
-      retries++;
-      continue;
+      throw validated.error;
     }
 
-    return { data, usage: totalUsage, model: response.model, retries };
+    const errorMessage = validated.error.message;
+    logger.debug({ name, retry: retries + 1, error: errorMessage }, "chatTyped: retrying");
+
+    messages.push(
+      { role: "assistant", content: text },
+      {
+        role: "user",
+        content: `Your response didn't match the expected format. Error: ${errorMessage}\n\nPlease try again with the correct format.`,
+      },
+    );
+    retries++;
   }
 }
 
@@ -253,22 +251,26 @@ function assertWholeAnswer(stopReason: StopReason, name: string): void {
 /**
  * Parse the assistant's structured-output text. With `useJsonrepair: true`,
  * delegates to {@link parseProviderJson} so trailing commas / minor
- * malformations are repaired deterministically and an irrecoverable failure
- * surfaces as {@link ProviderProtocolError}. With `useJsonrepair: false`,
- * uses bare `JSON.parse` and wraps a `SyntaxError` in
- * {@link ProviderProtocolError} so callers see a consistent error class
- * either way.
+ * malformations are repaired deterministically. With `useJsonrepair: false`,
+ * uses bare `JSON.parse`. Either way an irrecoverable failure is a
+ * {@link ProviderProtocolError}.
  */
-function parseStructuredOutput(text: string, name: string, useJsonrepair: boolean): unknown {
+function parseStructuredOutput(
+  text: string,
+  name: string,
+  useJsonrepair: boolean,
+): Result<unknown, ProviderProtocolError> {
   if (useJsonrepair) {
     return parseProviderJson(text, name, "chatTyped structured output");
   }
   try {
-    return JSON.parse(text);
-  } catch (err) {
-    throw new ProviderProtocolError(
-      `chatTyped structured output for "${name}" failed JSON.parse: ${err instanceof Error ? err.message : String(err)}`,
-      err,
+    return ok(JSON.parse(text));
+  } catch (parseErr) {
+    return err(
+      new ProviderProtocolError(
+        `chatTyped structured output for "${name}" failed JSON.parse: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`,
+        parseErr,
+      ),
     );
   }
 }

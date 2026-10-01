@@ -1,11 +1,12 @@
 import type Anthropic from "@anthropic-ai/sdk";
+import { Result } from "neverthrow";
 import OpenAI from "openai";
 import * as R from "remeda";
 import { logger } from "../logger.js";
 import { abortReasonOr } from "./abort.js";
 import type { CacheDialect } from "./cache-dialect.js";
 import { cacheMarker } from "./cache-marker.js";
-import { ProviderProtocolError, parseToolArgs, ToolArgsCutOffError } from "./errors.js";
+import { type ProviderProtocolError, parseToolArgs, ToolArgsCutOffError } from "./errors.js";
 import { RefusalError } from "./fallback.js";
 import { withFailureLogging } from "./logging-fetch.js";
 import { fitsStrictMode } from "./openai-output-schema.js";
@@ -261,7 +262,8 @@ export class OpenAICompatibleProvider implements LlmProvider {
             "OpenAI-compatible streamed tool_calls arguments",
             finishReason === "max_tokens" && position === calls.length - 1,
           );
-          yield { type: "tool_start", id: call.id, name: call.name, input };
+          if (input.isErr()) throw input.error;
+          yield { type: "tool_start", id: call.id, name: call.name, input: input.value };
         }
 
         recordChatUsage(span, providerName, model, usage, finishReason);
@@ -707,7 +709,7 @@ function toOpenAITool(tool: ToolDefinition): OpenAI.ChatCompletionTool {
     function: {
       name: tool.name,
       description: tool.description,
-      parameters: tool.parameters as Record<string, unknown>,
+      parameters: tool.parameters,
     },
   };
 }
@@ -740,43 +742,38 @@ function fromOpenAIMessage(
   const text: ContentBlock[] = message.content ? [{ type: "text", text: message.content }] : [];
 
   const calls = (message.tool_calls ?? []).filter((tc) => tc.type === "function");
-  const toolUses = calls.map(
-    (tc, position): ContentBlock => ({
-      type: "tool_use",
-      id: tc.id,
-      name: tc.function.name,
-      input: parseCallArgs(
+  const toolUses = Result.combine(
+    calls.map((tc, position) =>
+      parseCallArgs(
         tc.function.arguments,
         tc.function.name,
         "OpenAI-compatible non-streaming tool_calls arguments",
         stopReason === "max_tokens" && position === calls.length - 1,
+      ).map(
+        (input): ContentBlock => ({ type: "tool_use", id: tc.id, name: tc.function.name, input }),
       ),
-    }),
+    ),
   );
+  if (toolUses.isErr()) throw toolUses.error;
 
-  return [...text, ...toolUses];
+  return [...text, ...toolUses.value];
 }
 
 /**
  * Parse one call's arguments. `lastCallAtCap` marks the call the output cap
  * could have cut off — the response's final call when it stopped at
- * `max_tokens` — so a parse failure there is reported as unfinished JSON
- * ({@link ToolArgsCutOffError}) rather than malformed JSON. `parseToolArgs`
- * wraps SyntaxError as ProviderProtocolError so the fallback chain doesn't
- * misclassify it as transient.
+ * `max_tokens` — so a parse failure there is unfinished JSON
+ * ({@link ToolArgsCutOffError}) rather than malformed JSON.
  */
 function parseCallArgs(
   raw: string,
   toolName: string,
   context: string,
   lastCallAtCap: boolean,
-): unknown {
-  try {
-    return parseToolArgs(raw, toolName, context);
-  } catch (err) {
-    if (lastCallAtCap && err instanceof ProviderProtocolError) throw new ToolArgsCutOffError(err);
-    throw err;
-  }
+): Result<unknown, ProviderProtocolError> {
+  return parseToolArgs(raw, toolName, context).mapErr((parseErr) =>
+    lastCallAtCap ? new ToolArgsCutOffError(parseErr) : parseErr,
+  );
 }
 
 // --- Error mapping ---
