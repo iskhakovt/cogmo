@@ -205,6 +205,16 @@ describe("biome plugin: no-default-params", () => {
 describe("biome plugin: no-discriminant-switch", () => {
   const DISPATCH = /Dispatch on a discriminated union with ts-pattern/;
 
+  it.each(["kind", "status"])('fires on `switch (x["%s"])`', async (field) => {
+    const { exitCode, output } = await lintSource(
+      `src/switch-computed-${field}.ts`,
+      `export function f(x: { ${field}: "a" | "b" }) {\n  switch (x["${field}"]) {\n    case "a":\n      return 1;\n    case "b":\n      return 2;\n  }\n}\n`,
+    );
+
+    expect(exitCode, `biome should exit non-zero; output:\n${output}`).not.toBe(0);
+    expect(output).toMatch(DISPATCH);
+  });
+
   it.each(["kind", "status"])("fires on `switch (x.%s)`", async (field) => {
     const { exitCode, output } = await lintSource(
       `src/switch-${field}.ts`,
