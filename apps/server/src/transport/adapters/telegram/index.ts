@@ -65,8 +65,6 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   return { adapter, functions: telegramFunctions(deps, bot) };
 }
 
-export { renderTelegramHtml } from "./render.js";
-
 export const telegramModule = {
   channelType,
   setup,

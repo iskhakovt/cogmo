@@ -3,6 +3,7 @@
  * the user and threaded into the task row.
  */
 
+import { match, P } from "ts-pattern";
 import type { SandboxClient, SandboxSession, SandboxSessionState } from "../../sandbox/index.js";
 import type { CodingBackend } from "./backend.js";
 import type { CodingRun, TaskStoreDeps } from "./coding-run.js";
@@ -67,30 +68,29 @@ async function streamPlan(
   let failureReason: string | undefined;
 
   for await (const event of deps.backend.plan({ task, repo, container })) {
-    switch (event.kind) {
-      case "session_started":
-        await deps.runInTx((tx) => deps.store.setTaskSessionId(tx, task.id, event.sessionId));
-        break;
-      case "text_delta":
-        await stream.appendText(event.text);
-        break;
-      case "plan_ready":
-        plan = event.plan;
-        break;
-      case "complete":
-        if (event.isError) {
+    await match(event)
+      .with({ kind: "session_started" }, (e) =>
+        deps.runInTx((tx) => deps.store.setTaskSessionId(tx, task.id, e.sessionId)),
+      )
+      .with({ kind: "text_delta" }, (e) => stream.appendText(e.text))
+      .with({ kind: "plan_ready" }, (e) => {
+        plan = e.plan;
+      })
+      .with({ kind: "complete" }, (e) => {
+        if (e.isError) {
           isError = true;
-          failureReason = `claude exit code ${event.exitCode}`;
+          failureReason = `claude exit code ${e.exitCode}`;
         }
-        break;
-      // tool_call / tool_result fall through to the default no-op — the CLI
-      // emits an `ExitPlanMode` tool_use as part of plan completion, but the
-      // plan stream surfaces the same text via `text_delta` + `plan_ready`,
-      // so the tool_call is redundant noise for the user. permission_request
-      // doesn't reach plan mode: the CLI under `--permission-mode plan` (with
-      // no `--permission-prompt-tool stdio` flag) resolves every tool call
+      })
+      // tool_call / tool_result are no-ops — the CLI emits an `ExitPlanMode`
+      // tool_use as part of plan completion, but the plan stream surfaces the
+      // same text via `text_delta` + `plan_ready`, so the tool_call is
+      // redundant noise for the user. permission_request doesn't reach plan
+      // mode: the CLI under `--permission-mode plan` (with no
+      // `--permission-prompt-tool stdio` flag) resolves every tool call
       // locally and never asks back through the stream-json control channel.
-    }
+      .with({ kind: P.union("tool_call", "tool_result") }, () => undefined)
+      .exhaustive();
   }
 
   return {

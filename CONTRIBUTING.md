@@ -82,7 +82,8 @@ Wrong format = no release. The PR title check runs commitlint (the `pr-title` jo
 | Job | What |
 |-|-|
 | **PR Title** | Validates Conventional Commits format (PRs only) |
-| **Typecheck & Lint** | `pnpm typecheck && pnpm lint` |
+| **Schema ⇒ design doc** | Fails a PR that changes a store schema, a migration or a `jsonbZod` column's Zod schema without touching `design/`. A PR body line that is exactly `[schema-only]` waives it (PRs only) |
+| **Typecheck, Lint & Knip** | `pnpm typecheck && pnpm lint && pnpm knip` |
 | **Unit Tests** | `pnpm test` (PGlite, mocked LLM) + Codecov upload |
 | **Integration Tests** | `pnpm test:integration` against testcontainers + llmock fixtures |
 | **E2E Tests** | Builds Docker image, runs `pnpm test:e2e` against it |

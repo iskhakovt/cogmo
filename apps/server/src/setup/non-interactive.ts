@@ -99,7 +99,7 @@ export class NonInteractiveValidationError extends Error {
  */
 export async function validateNonInteractive(
   env: Record<string, string | undefined>,
-  validators: Validators = defaultValidators,
+  validators: Validators,
 ): Promise<Result<ValidatedNonInteractive, SetupEnvError | NonInteractiveValidationError>> {
   const parsed = parseNonInteractiveEnv(env);
   if (parsed.isErr()) return err(parsed.error);

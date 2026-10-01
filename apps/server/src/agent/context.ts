@@ -255,7 +255,7 @@ export async function compactMessages(
   messages: ReadonlyArray<Message>,
   tools: ToolDefinition[] | undefined,
   deps: ContextManagerDeps,
-  skipBudgetStrategies = false,
+  skipBudgetStrategies: boolean,
 ): Promise<CompactResult> {
   const { countTokens, budget, summarize, clearToolResults, maxViewBytes } = deps;
   const threshold = Math.floor(maxViewBytes * SUMMARIZE_THRESHOLD);

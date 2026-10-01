@@ -37,7 +37,6 @@ export const HostPathWorktreeAssignmentSchema = z
     worktreePath: z.string().min(1),
   })
   .strict();
-export type HostPathWorktreeAssignment = z.infer<typeof HostPathWorktreeAssignmentSchema>;
 
 export const GitRemoteWorktreeAssignmentSchema = z
   .object({
@@ -45,7 +44,6 @@ export const GitRemoteWorktreeAssignmentSchema = z
     branch: z.string().min(1),
   })
   .strict();
-export type GitRemoteWorktreeAssignment = z.infer<typeof GitRemoteWorktreeAssignmentSchema>;
 
 export const WorktreeAssignmentSchema = z.discriminatedUnion("type", [
   HostPathWorktreeAssignmentSchema,

@@ -1,3 +1,4 @@
+import { match } from "ts-pattern";
 import { logger } from "../../logger.js";
 import { buildPlanKeyboard, type PlanInlineKeyboardMarkup } from "./plan-keyboard.js";
 import {
@@ -6,7 +7,6 @@ import {
   formatProgressMessage,
   type ProgressFormatInput,
   type ProgressPhase,
-  type ProgressTokenCounter,
 } from "./progress-format.js";
 import type { CodingStreamingRegistry } from "./streaming-registry.js";
 
@@ -98,56 +98,53 @@ export function startCodingProgressSubscriber(args: SubscriberArgs): void {
   }
 
   registry.subscribe(taskId, async (event) => {
-    switch (event.kind) {
-      case "text":
-        state.body += event.delta;
-        await maybeEdit();
-        break;
-      case "tool_call":
-        state.lastActivity = describeToolCall(event.tool);
-        await maybeEdit();
-        break;
-      case "tool_result":
-        state.lastActivity = describeToolResult(event.tool, event.ok, event.summary);
-        await maybeEdit();
-        break;
-      case "plan_finalized":
+    await match(event)
+      .with({ kind: "text" }, (e) => {
+        state.body += e.delta;
+        return maybeEdit();
+      })
+      .with({ kind: "tool_call" }, (e) => {
+        state.lastActivity = describeToolCall(e.tool);
+        return maybeEdit();
+      })
+      .with({ kind: "tool_result" }, (e) => {
+        state.lastActivity = describeToolResult(e.tool, e.ok, e.summary);
+        return maybeEdit();
+      })
+      .with({ kind: "plan_finalized" }, (e) => {
         state.phase = "awaiting_approval";
-        state.body = event.plan;
+        state.body = e.plan;
         // Force a post (bypass throttle) so the final plan body lands
         // before execute_started arrives. The approve/revise/cancel
         // keyboard is suppressed when the plan orchestrator is about to
         // auto-approve — those buttons would be misleading (Approve is
         // a no-op against an already-approved plan, and a stray Cancel
         // tap mid-execute is action-at-a-distance).
-        await postOrEdit(event.autoApproved ? undefined : buildPlanKeyboard(taskId));
-        break;
-      case "execute_started":
+        return postOrEdit(e.autoApproved ? undefined : buildPlanKeyboard(taskId));
+      })
+      .with({ kind: "execute_started" }, () => {
         state.phase = "executing";
         // Reset body — execute narration starts from scratch; the plan
         // text is kept in the DB and on prior message edits in scrollback.
         state.body = "";
         delete state.lastActivity;
-        await postOrEdit();
-        break;
-      case "execute_complete":
-        state.phase = setPhase(event.ok, "pending_verify", "failed");
+        return postOrEdit();
+      })
+      .with({ kind: "execute_complete" }, (e) => {
+        state.phase = setPhase(e.ok, "pending_verify", "failed");
         delete state.lastActivity;
-        if (event.tokens) state.tokens = event.tokens;
-        await postOrEdit();
-        break;
-      case "failed":
+        if (e.tokens) state.tokens = e.tokens;
+        return postOrEdit();
+      })
+      .with({ kind: "failed" }, (e) => {
         state.phase = "failed";
-        state.failureReason = event.reason;
-        await postOrEdit();
-        break;
-    }
+        state.failureReason = e.reason;
+        return postOrEdit();
+      })
+      .exhaustive();
   });
 }
 
 function setPhase(ok: boolean, ifTrue: ProgressPhase, ifFalse: ProgressPhase): ProgressPhase {
   return ok ? ifTrue : ifFalse;
 }
-
-/** Re-exported for tests. */
-export type { ProgressTokenCounter };

@@ -1,0 +1,38 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  // An export used only inside its own file (a type naming a parameter of an
+  // exported function, a schema backing an exported type) is not dead code.
+  "ignoreExportsUsedInFile": true,
+  "workspaces": {
+    ".": {
+      // Both run through `npx` in CI (pr-title, release), so no plugin sees
+      // them via package.json.
+      "entry": ["commitlint.config.js", "release.config.mjs"]
+    },
+    "apps/server": {
+      // tsup.config.ts (runtime entries), vitest.config.ts (tests, setup
+      // files) and drizzle.config.ts (schemas) are read by knip's plugins.
+      "entry": [
+        "scripts/*.ts",
+        // Compile-time parity guard: exists only to be type-checked.
+        "src/test/contracts-parity.ts"
+      ],
+      "project": ["src/**/*.ts", "scripts/**/*.ts", "test/**/*.ts", "dev/**/*.ts"],
+      "ignoreDependencies": [
+        // Imported only by the bundled `@cogmo/contracts` source (tsup
+        // `noExternal`); see tsup.config.ts.
+        "@orpc/contract",
+        // Loaded by name as a pino transport target in src/logger.ts.
+        "pino-pretty"
+      ],
+      // Host tool spawned by scripts/tokei.ts, not an npm package.
+      "ignoreBinaries": ["tokei"]
+    },
+    "apps/web": {
+      "project": ["src/**/*.{ts,tsx,css}"]
+    },
+    "packages/contracts": {
+      "project": ["src/**/*.ts"]
+    }
+  }
+}

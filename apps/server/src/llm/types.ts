@@ -93,7 +93,9 @@ export type TextBlock = z.infer<typeof TextBlockSchema>;
 export type ToolUseBlock = z.infer<typeof ToolUseBlockSchema>;
 export type ToolResultBlock = z.infer<typeof ToolResultBlockSchema>;
 export type ImageBlock = z.infer<typeof ImageBlockSchema>;
+/** @public Every `ContentBlock` variant has a named type, consumed or not. */
 export type DocumentBlock = z.infer<typeof DocumentBlockSchema>;
+/** @public */
 export type ThinkingBlock = z.infer<typeof ThinkingBlockSchema>;
 export type ContentBlock = z.infer<typeof ContentBlockSchema>;
 

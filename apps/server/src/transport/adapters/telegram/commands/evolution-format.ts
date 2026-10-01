@@ -10,7 +10,7 @@ import type { EvolutionEventEntry } from "../../../transport.js";
  */
 export function formatEvolutionDigest(
   events: ReadonlyArray<EvolutionEventEntry>,
-  now: Date = new Date(),
+  now: Date,
 ): string {
   const header = `Evolution events (${events.length}):`;
   const lines = events.map((e, i) => {
@@ -46,7 +46,7 @@ const PHASE_FAILED = "failed after retries";
  * structured-log fields the Observer emits per fire so the operator can
  * cross-reference against process logs when debugging.
  */
-export function formatEvolutionDetail(event: EvolutionEventEntry, now: Date = new Date()): string {
+export function formatEvolutionDetail(event: EvolutionEventEntry, now: Date): string {
   const { payload } = event;
   // Reinforcements the extraction skipped: none counts in `reinforced`.
   const skipped =

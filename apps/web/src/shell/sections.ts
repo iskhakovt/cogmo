@@ -9,5 +9,3 @@ export const SECTIONS = [
   { to: "/agent", label: "Agent" },
   { to: "/system", label: "System" },
 ] as const;
-
-export type Section = (typeof SECTIONS)[number];

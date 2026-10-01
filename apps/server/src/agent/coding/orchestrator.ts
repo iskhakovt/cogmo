@@ -50,7 +50,7 @@ import type { WorktreeAssignment } from "./types.js";
 
 const log = logger.child({ component: "coding.orchestrator" });
 
-export type { StepRun, StepSendEvent } from "../../inngest/index.js";
+export type { StepSendEvent } from "../../inngest/index.js";
 
 export interface CodingOrchestratorDeps {
   runInTx: Transactor;

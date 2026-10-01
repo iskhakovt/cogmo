@@ -13,7 +13,14 @@
       "tailwindDirectives": true
     }
   },
-  "plugins": ["./biome-plugins/no-unsafe-cast.grit"],
+  "plugins": [
+    "./biome-plugins/no-unsafe-cast.grit",
+    {
+      "path": "./biome-plugins/no-default-params.grit",
+      "includes": ["**", "!**/*.test.ts", "!**/*.test.tsx", "!**/test/**"]
+    },
+    "./biome-plugins/no-discriminant-switch.grit"
+  ],
   "formatter": {
     "indentStyle": "space",
     "indentWidth": 2,

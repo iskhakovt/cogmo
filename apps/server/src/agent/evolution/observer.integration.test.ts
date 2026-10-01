@@ -318,6 +318,7 @@ describe("runObserver — real PG + recording memory mock", () => {
           }),
         memory: recorder.memory,
       },
+      "idle",
     );
     expect(result).toEqual({ status: "skipped", reason: "conversation_not_found" });
     expect(stub.calls).toHaveLength(0);
@@ -336,17 +337,22 @@ describe("runObserver — real PG + recording memory mock", () => {
     const { conversationId } = await seedConversation({ messageCount: 2 });
     const stub = buildStubProvider({});
     const recorder = buildRecordingMemory();
-    const result = await runObserver({ data: { conversationId } }, fakeStep, {
-      runInTx: fakeRunInTx,
-      agentStore: store,
-      transportStore,
-      resolveProvider: () =>
-        Promise.resolve({
-          provider: stub.provider,
-          limits: { contextWindow: null, maxOutputTokens: null },
-        }),
-      memory: recorder.memory,
-    });
+    const result = await runObserver(
+      { data: { conversationId } },
+      fakeStep,
+      {
+        runInTx: fakeRunInTx,
+        agentStore: store,
+        transportStore,
+        resolveProvider: () =>
+          Promise.resolve({
+            provider: stub.provider,
+            limits: { contextWindow: null, maxOutputTokens: null },
+          }),
+        memory: recorder.memory,
+      },
+      "idle",
+    );
     expect(result).toEqual({ status: "skipped", reason: "too_short" });
     expect(stub.calls).toHaveLength(0);
     expect(recorder.calls).toHaveLength(0);
@@ -366,17 +372,22 @@ describe("runObserver — real PG + recording memory mock", () => {
     });
     const recorder = buildRecordingMemory();
 
-    const result = await runObserver({ data: { conversationId } }, fakeStep, {
-      runInTx: fakeRunInTx,
-      agentStore: store,
-      transportStore,
-      resolveProvider: () =>
-        Promise.resolve({
-          provider: stub.provider,
-          limits: { contextWindow: null, maxOutputTokens: null },
-        }),
-      memory: recorder.memory,
-    });
+    const result = await runObserver(
+      { data: { conversationId } },
+      fakeStep,
+      {
+        runInTx: fakeRunInTx,
+        agentStore: store,
+        transportStore,
+        resolveProvider: () =>
+          Promise.resolve({
+            provider: stub.provider,
+            limits: { contextWindow: null, maxOutputTokens: null },
+          }),
+        memory: recorder.memory,
+      },
+      "idle",
+    );
 
     if (result.status !== "processed") throw new Error(`expected processed, got ${result.status}`);
     expect(result.memories.extracted).toBe(1);
@@ -468,17 +479,22 @@ describe("runObserver — real PG + recording memory mock", () => {
     });
     const recorder = buildRecordingMemory();
 
-    const result = await runObserver({ data: { conversationId } }, fakeStep, {
-      runInTx: fakeRunInTx,
-      agentStore: store,
-      transportStore,
-      resolveProvider: () =>
-        Promise.resolve({
-          provider: stub.provider,
-          limits: { contextWindow: null, maxOutputTokens: null },
-        }),
-      memory: recorder.memory,
-    });
+    const result = await runObserver(
+      { data: { conversationId } },
+      fakeStep,
+      {
+        runInTx: fakeRunInTx,
+        agentStore: store,
+        transportStore,
+        resolveProvider: () =>
+          Promise.resolve({
+            provider: stub.provider,
+            limits: { contextWindow: null, maxOutputTokens: null },
+          }),
+        memory: recorder.memory,
+      },
+      "idle",
+    );
 
     if (result.status !== "processed") throw new Error("expected processed");
     expect(recorder.calls[0]?.items[0]?.tags).toContain("profile_class:intimate");
@@ -503,17 +519,22 @@ describe("runObserver — real PG + recording memory mock", () => {
     });
     const recorder = buildRecordingMemory();
 
-    const result = await runObserver({ data: { conversationId } }, fakeStep, {
-      runInTx: fakeRunInTx,
-      agentStore: store,
-      transportStore,
-      resolveProvider: () =>
-        Promise.resolve({
-          provider: stub.provider,
-          limits: { contextWindow: null, maxOutputTokens: null },
-        }),
-      memory: recorder.memory,
-    });
+    const result = await runObserver(
+      { data: { conversationId } },
+      fakeStep,
+      {
+        runInTx: fakeRunInTx,
+        agentStore: store,
+        transportStore,
+        resolveProvider: () =>
+          Promise.resolve({
+            provider: stub.provider,
+            limits: { contextWindow: null, maxOutputTokens: null },
+          }),
+        memory: recorder.memory,
+      },
+      "idle",
+    );
 
     if (result.status !== "processed") throw new Error("expected processed");
     // Prompt threading: the extraction system prompt should contain
@@ -549,17 +570,22 @@ describe("runObserver — real PG + recording memory mock", () => {
     });
     const recorder = buildRecordingMemory();
 
-    const result = await runObserver({ data: { conversationId } }, fakeStep, {
-      runInTx: fakeRunInTx,
-      agentStore: store,
-      transportStore,
-      resolveProvider: () =>
-        Promise.resolve({
-          provider: stub.provider,
-          limits: { contextWindow: null, maxOutputTokens: null },
-        }),
-      memory: recorder.memory,
-    });
+    const result = await runObserver(
+      { data: { conversationId } },
+      fakeStep,
+      {
+        runInTx: fakeRunInTx,
+        agentStore: store,
+        transportStore,
+        resolveProvider: () =>
+          Promise.resolve({
+            provider: stub.provider,
+            limits: { contextWindow: null, maxOutputTokens: null },
+          }),
+        memory: recorder.memory,
+      },
+      "idle",
+    );
 
     if (result.status !== "processed") throw new Error("expected processed");
     const classifierCall = stub.calls.find((c) => c.system.includes("classifying a single fact"));
@@ -584,17 +610,22 @@ describe("runObserver — real PG + recording memory mock", () => {
     });
     const recorder = buildRecordingMemory();
 
-    const result = await runObserver({ data: { conversationId } }, fakeStep, {
-      runInTx: fakeRunInTx,
-      agentStore: store,
-      transportStore,
-      resolveProvider: () =>
-        Promise.resolve({
-          provider: stub.provider,
-          limits: { contextWindow: null, maxOutputTokens: null },
-        }),
-      memory: recorder.memory,
-    });
+    const result = await runObserver(
+      { data: { conversationId } },
+      fakeStep,
+      {
+        runInTx: fakeRunInTx,
+        agentStore: store,
+        transportStore,
+        resolveProvider: () =>
+          Promise.resolve({
+            provider: stub.provider,
+            limits: { contextWindow: null, maxOutputTokens: null },
+          }),
+        memory: recorder.memory,
+      },
+      "idle",
+    );
 
     if (result.status !== "processed") throw new Error("expected processed");
     expect(result.drained.drained).toBe(1);
@@ -630,17 +661,22 @@ describe("runObserver — real PG + recording memory mock", () => {
     const stub = buildStubProvider({ extractionMemories: [] });
     const recorder = buildRecordingMemory();
 
-    const result = await runObserver({ data: { conversationId } }, fakeStep, {
-      runInTx: fakeRunInTx,
-      agentStore: store,
-      transportStore,
-      resolveProvider: () =>
-        Promise.resolve({
-          provider: stub.provider,
-          limits: { contextWindow: null, maxOutputTokens: null },
-        }),
-      memory: recorder.memory,
-    });
+    const result = await runObserver(
+      { data: { conversationId } },
+      fakeStep,
+      {
+        runInTx: fakeRunInTx,
+        agentStore: store,
+        transportStore,
+        resolveProvider: () =>
+          Promise.resolve({
+            provider: stub.provider,
+            limits: { contextWindow: null, maxOutputTokens: null },
+          }),
+        memory: recorder.memory,
+      },
+      "idle",
+    );
 
     if (result.status !== "processed") throw new Error("expected processed");
     expect(result.drained.drained).toBe(1);
@@ -685,17 +721,22 @@ describe("runObserver — real PG + recording memory mock", () => {
     });
     const recorder = buildRecordingMemory();
 
-    const result = await runObserver({ data: { conversationId } }, fakeStep, {
-      runInTx: fakeRunInTx,
-      agentStore: store,
-      transportStore,
-      resolveProvider: () =>
-        Promise.resolve({
-          provider: stub.provider,
-          limits: { contextWindow: null, maxOutputTokens: null },
-        }),
-      memory: recorder.memory,
-    });
+    const result = await runObserver(
+      { data: { conversationId } },
+      fakeStep,
+      {
+        runInTx: fakeRunInTx,
+        agentStore: store,
+        transportStore,
+        resolveProvider: () =>
+          Promise.resolve({
+            provider: stub.provider,
+            limits: { contextWindow: null, maxOutputTokens: null },
+          }),
+        memory: recorder.memory,
+      },
+      "idle",
+    );
 
     if (result.status !== "processed") throw new Error("expected processed");
     const drainCall = recorder.calls.find((c) => c.items.length > 0);
@@ -747,14 +788,19 @@ describe("runObserver — real PG + recording memory mock", () => {
     };
     const recorder = buildRecordingMemory();
 
-    const result = await runObserver({ data: { conversationId } }, fakeStep, {
-      runInTx: fakeRunInTx,
-      agentStore: store,
-      transportStore,
-      resolveProvider: () =>
-        Promise.resolve({ provider, limits: { contextWindow: null, maxOutputTokens: null } }),
-      memory: recorder.memory,
-    });
+    const result = await runObserver(
+      { data: { conversationId } },
+      fakeStep,
+      {
+        runInTx: fakeRunInTx,
+        agentStore: store,
+        transportStore,
+        resolveProvider: () =>
+          Promise.resolve({ provider, limits: { contextWindow: null, maxOutputTokens: null } }),
+        memory: recorder.memory,
+      },
+      "idle",
+    );
 
     if (result.status !== "processed") throw new Error("expected processed");
     expect(result.drained.drained).toBe(0);
@@ -828,14 +874,19 @@ describe("runObserver — real PG + recording memory mock", () => {
     };
     const recorder = buildRecordingMemory();
 
-    const result = await runObserver({ data: { conversationId } }, fakeStep, {
-      runInTx: fakeRunInTx,
-      agentStore: store,
-      transportStore,
-      resolveProvider: () =>
-        Promise.resolve({ provider, limits: { contextWindow: null, maxOutputTokens: null } }),
-      memory: recorder.memory,
-    });
+    const result = await runObserver(
+      { data: { conversationId } },
+      fakeStep,
+      {
+        runInTx: fakeRunInTx,
+        agentStore: store,
+        transportStore,
+        resolveProvider: () =>
+          Promise.resolve({ provider, limits: { contextWindow: null, maxOutputTokens: null } }),
+        memory: recorder.memory,
+      },
+      "idle",
+    );
 
     if (result.status !== "processed") throw new Error("expected processed");
     expect(result.corrections.extracted).toBe(1);

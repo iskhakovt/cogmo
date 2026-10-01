@@ -1,0 +1,41 @@
+// Discriminated-union dispatch goes through ts-pattern, not `switch`.
+//
+// A `switch` over a discriminant compiles fine when a new variant is
+// added and the switch has no case for it; `match(x).with(...).exhaustive()`
+// does not (.claude/rules/state-machines.md → "Outcomes are discriminated
+// unions matched with ts-pattern's `.exhaustive()`").
+//
+// Flags `switch (x.kind)` and `switch (x["kind"])`, likewise for `status`.
+// A destructured discriminant (`const { kind } = x; switch (kind)`) is not
+// flagged: the plugin sees no types, and on the current tree the only bare
+// `switch (status)` is over an HTTP status number, so matching bare
+// identifiers would flag the wrong switches. Review catches that form.
+//
+// Scoped to the `kind` and `status` discriminants this codebase owns. `.type`
+// is left alone: it is the discriminant of the Anthropic and OpenAI SDK
+// unions, where a `switch` over upstream stream events is the SDKs' own idiom.
+//
+// A switch that must stay (a hot loop measured to matter) keeps it with
+// `// biome-ignore lint/plugin/no-discriminant-switch: <reason>` on the line above.
+
+language js
+
+JsSwitchStatement(discriminant=$discriminant) where {
+  $discriminant <: or {
+    JsStaticMemberExpression(member=$member) where {
+      $member <: or {
+        `kind`,
+        `status`
+      }
+    },
+    JsComputedMemberExpression(member=$member) where {
+      $member <: or {
+        `"kind"`,
+        `"status"`,
+        `'kind'`,
+        `'status'`
+      }
+    }
+  },
+  register_diagnostic(span=$discriminant, message="Dispatch on a discriminated union with ts-pattern: `match(x).with({ kind: ... }, ...).exhaustive()`, so a new variant is a compile error. If the switch must stay, add `// biome-ignore lint/plugin/no-discriminant-switch: <reason>` on the line above.")
+}

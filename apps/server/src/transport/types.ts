@@ -74,6 +74,8 @@ export function isStreamingAdapter(
 /**
  * Factory — connect to platform, return a ready-to-use adapter.
  * The runtime calls this once per channel row in the DB.
+ *
+ * @public The adapter-plugin contract in design/transport/adapters.md.
  */
 export type StartAdapter<T extends Adapter = Adapter> = (
   transport: Transport,

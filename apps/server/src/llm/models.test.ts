@@ -168,12 +168,6 @@ describe("computeBudget", () => {
     expect(computeBudget({ contextWindow: 1_000_000, maxOutputTokens: 64_000 })).toBe(926_000);
   });
 
-  it("accepts custom safety buffer", () => {
-    expect(computeBudget({ contextWindow: 1_000_000, maxOutputTokens: 64_000 }, 5_000)).toBe(
-      931_000,
-    );
-  });
-
   it("works on the conservative default", () => {
     // 128_000 - 4_096 - 10_000 = 113_904
     expect(computeBudget(DEFAULT_LIMITS)).toBe(113_904);

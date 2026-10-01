@@ -66,7 +66,7 @@ async function getActiveConversationId(channelId: string): Promise<string | null
 async function waitForResponse(
   conversationId: string,
   afterMessageId: string | null,
-  timeoutMs = 30_000,
+  timeoutMs: number,
 ): Promise<string> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
@@ -170,7 +170,7 @@ async function main() {
       }
 
       process.stdout.write("...");
-      const response = await waitForResponse(conversationId, lastAssistantId);
+      const response = await waitForResponse(conversationId, lastAssistantId, 30_000);
       process.stdout.write("\r");
       console.log(`\n${response}\n`);
 

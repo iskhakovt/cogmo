@@ -13,8 +13,6 @@ import { CacheDialectSchema } from "../llm/cache-dialect.js";
 import { resolveEnvFile } from "../secrets/env-file.js";
 import { PROVIDER_TYPES } from "./providers.js";
 
-export { PROVIDER_BASE_URLS, PROVIDER_TYPES, type ProviderType } from "./providers.js";
-
 const commaSeparated = z
   .string()
   .min(1)

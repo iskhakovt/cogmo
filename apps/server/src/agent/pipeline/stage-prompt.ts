@@ -9,6 +9,7 @@
  * output contract — comes before the handoffs, which the prompt marks as data.
  */
 
+import { match, P } from "ts-pattern";
 import type { StageOutputs } from "./run-types.js";
 import type { PipelineDefinition, Stage } from "./types.js";
 
@@ -32,17 +33,20 @@ function escapeJsonHandoff(json: string): string {
 
 /** The stage's output contract, or null for a stage whose output needs none in the prompt. */
 function renderOutputSection(stage: Stage): string | null {
-  switch (stage.output?.kind) {
-    case "text":
-      return "## Output\n\nEnd with a final reply that is this stage's result. Later stages receive that reply verbatim.";
-    case "json":
-      return (
+  return match(stage.output)
+    .with(
+      { kind: "text" },
+      () =>
+        "## Output\n\nEnd with a final reply that is this stage's result. Later stages receive that reply verbatim.",
+    )
+    .with(
+      { kind: "json" },
+      (output) =>
         "## Output\n\nEnd with a final reply that states this stage's result completely. It will be converted into structured data matching this JSON Schema, so every required field must be derivable from it:\n\n" +
-        `\`\`\`json\n${JSON.stringify(stage.output.schema, null, 2)}\n\`\`\``
-      );
-    default:
-      return null;
-  }
+        `\`\`\`json\n${JSON.stringify(output.schema, null, 2)}\n\`\`\``,
+    )
+    .with(P.union(undefined, { kind: P.union("plan", "pr_metadata") }), () => null)
+    .exhaustive();
 }
 
 export function buildStagePrompt(args: {

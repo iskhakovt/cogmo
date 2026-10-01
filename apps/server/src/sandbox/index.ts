@@ -1,7 +1,5 @@
 import { z } from "zod";
-import type { DockerFacade } from "./docker-facade.js";
 import type { ExecOptions, ExecResult, ExecStreamingHandle } from "./exec.js";
-import type { SandboxStore } from "./store/index.js";
 import type { ResourceLimits } from "./types.js";
 
 export type {
@@ -12,9 +10,7 @@ export type {
   ExecStreamingHandle,
 } from "./exec.js";
 export { ExecError, execFailureError, unwrapExit } from "./exec.js";
-export type { SandboxRuntime } from "./runtime.js";
-export type { ContainerRow, ContainerRuntime, ContainerStatus } from "./store/index.js";
-export type { ContainerLabels, ResourceLimits } from "./types.js";
+export type { ResourceLimits } from "./types.js";
 
 /**
  * Working-tree material to materialize at session start. Discriminated
@@ -293,12 +289,5 @@ export interface SandboxClient<TState extends SandboxSessionState = SandboxSessi
   shutdown(): Promise<void>;
 }
 
-export interface SandboxDeps {
-  docker: DockerFacade;
-  store: SandboxStore;
-}
-
-export type { ProxyOptions, TaskScope } from "./proxy/index.js";
 export { CogmoSocketProxy } from "./proxy/index.js";
-export { dockerRuntimeName } from "./runtime.js";
-export { createSandboxClient, LocalDockerSandboxClient } from "./supervisor.js";
+export { LocalDockerSandboxClient } from "./supervisor.js";

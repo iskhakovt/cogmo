@@ -1,0 +1,39 @@
+// Bans default parameter values in production source.
+//
+// A default hides a value from the call site: the reader of `f(x)` cannot see
+// the `timeout = 30_000` or `trigger = "idle"` it runs with, and a new caller
+// inherits an assumption nobody chose for it (.claude/rules/architecture-rules.md
+// → "Avoid default values"). Pass the value explicitly, or make the parameter
+// optional and branch on `undefined` where absence means something.
+//
+// Flags `function f(x = 1)`, arrow and method parameters, constructor parameter
+// properties, and object or array destructuring defaults inside a parameter
+// (`function f({ x = 1 }: Opts)`, `function f([x = 1]: number[])`). An empty options bag (`opts: Opts = {}`) is
+// not flagged: it supplies no value, only the absence of options.
+//
+// Test files are out of scope via `includes` in biome.json. A default that is
+// genuinely the contract keeps it with
+// `// biome-ignore lint/plugin/no-default-params: <reason>` on the line above.
+
+language js
+
+or {
+  JsFormalParameter(initializer=$init) as $node where {
+    $init <: JsInitializerClause(expression=$value),
+    $value <: not JsObjectExpression(members=[])
+  },
+  JsObjectBindingPatternShorthandProperty(init=$init) as $node where {
+    $init <: not .,
+    $node <: within JsFormalParameter()
+  },
+  JsObjectBindingPatternProperty(init=$init) as $node where {
+    $init <: not .,
+    $node <: within JsFormalParameter()
+  },
+  JsArrayBindingPatternElement(init=$init) as $node where {
+    $init <: not .,
+    $node <: within JsFormalParameter()
+  }
+} where {
+  register_diagnostic(span=$node, message="Avoid default parameter values: pass the value at the call site, or make the parameter optional and handle `undefined`. If the default is the contract, add `// biome-ignore lint/plugin/no-default-params: <reason>` on the line above.")
+}

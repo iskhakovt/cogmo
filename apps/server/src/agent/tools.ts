@@ -284,10 +284,7 @@ export class ToolRegistry {
  *
  * @param defaultTimezone IANA timezone for the current_time tool (e.g. "Europe/Moscow")
  */
-export function createDefaultTools(
-  extraTools: ToolSpec[] = [],
-  defaultTimezone = "UTC",
-): ToolRegistry {
+export function createDefaultTools(extraTools: ToolSpec[], defaultTimezone: string): ToolRegistry {
   const registry = new ToolRegistry();
 
   registry.register(

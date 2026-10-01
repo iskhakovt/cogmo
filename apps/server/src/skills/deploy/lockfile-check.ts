@@ -35,7 +35,7 @@ export async function readManifestLockfile(
   repoPath: string,
   gitSha: string,
   manifest: SkillManifest,
-  opts: { verifyFresh: boolean; signal?: AbortSignal } = { verifyFresh: true },
+  opts: { verifyFresh: boolean; signal?: AbortSignal },
 ): Promise<Result<LockfileSnapshot | null, string>> {
   if (manifest.dependencies.length === 0) {
     return ok(null);

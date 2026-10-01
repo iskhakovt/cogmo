@@ -6,6 +6,7 @@
 import type { Octokit } from "@octokit/rest";
 import type { Inngest } from "inngest";
 import { err, ok, type Result } from "neverthrow";
+import { buildCodingTaskPushedEvent } from "../../inngest/events.js";
 import type { AskpassMaterials } from "../../sandbox/askpass.js";
 import type { SandboxClient, SandboxSession } from "../../sandbox/index.js";
 import type { GitHubIdentity } from "../../secrets/github.js";
@@ -71,11 +72,7 @@ export async function pushVerifiedBranch(
   );
   await run.stepRun("emit-pushed", () =>
     inngest
-      .send({
-        name: "coding/task/pushed",
-        data: { taskId: run.taskId, branchSha },
-        id: `pushed-${run.taskId}`,
-      })
+      .send(buildCodingTaskPushedEvent({ taskId: run.taskId, branchSha }))
       .then(() => undefined),
   );
   return ok({ branchSha });

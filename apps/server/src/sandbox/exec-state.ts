@@ -120,13 +120,13 @@ export function transition(state: ExecRunState, event: ExecEvent): ExecTransitio
   return match<[ExecRunState, ExecEvent], ExecTransition>([state, event])
     .with([{ kind: "settled" }, P._], ([s, e]) => afterSettlement(s, e))
     .with([{ kind: P.union(...LIVE) }, { type: "dispose" }], () =>
-      settle(err({ kind: "disposed" })),
+      settle(err({ kind: "disposed" }), END_STREAMS),
     )
     .with([{ kind: P.union(...LIVE) }, { type: "deadline", deadline: "total" }], ([, e]) =>
-      settle(err({ kind: "timed_out", deadline: "total", timeoutMs: e.timeoutMs })),
+      settle(err({ kind: "timed_out", deadline: "total", timeoutMs: e.timeoutMs }), END_STREAMS),
     )
     .with([{ kind: P.union(...IDLE_ARMED) }, { type: "deadline", deadline: "idle" }], ([, e]) =>
-      settle(err({ kind: "timed_out", deadline: "idle", timeoutMs: e.timeoutMs })),
+      settle(err({ kind: "timed_out", deadline: "idle", timeoutMs: e.timeoutMs }), END_STREAMS),
     )
     .with([{ kind: "awaiting_stdin" }, { type: "stdin_ended" }], () =>
       step({ kind: "starting", held: [] }, [{ type: "start" }]),
@@ -152,13 +152,13 @@ export function transition(state: ExecRunState, event: ExecEvent): ExecTransitio
       settle(err({ kind: "transport_failed", error: e.error }), failStreams(e.error)),
     )
     .with([{ kind: "draining" }, { type: "fetch_failed" }], ([, e]) =>
-      settle(err({ kind: "transport_failed", error: e.error })),
+      settle(err({ kind: "transport_failed", error: e.error }), END_STREAMS),
     )
     .with([{ kind: "draining" }, { type: "exit_code" }], ([, e]) =>
-      settle(ok({ exitCode: e.exitCode })),
+      settle(ok({ exitCode: e.exitCode }), END_STREAMS),
     )
     .with([{ kind: "draining" }, { type: "exit_code_missing" }], ([, e]) =>
-      settle(err({ kind: "no_exit_code", reason: e.reason })),
+      settle(err({ kind: "no_exit_code", reason: e.reason }), END_STREAMS),
     )
     .with([{ kind: P.union(...LIVE) }, P._], ([s]) => stay(s))
     .exhaustive();
@@ -231,19 +231,18 @@ function tearDownAgain(state: Settled): ExecTransition {
 }
 
 /**
- * Enter `settled`. The caller's streams end, unless the transport broke while
- * output was flowing: then they fail with its error.
+ * Enter `settled`. The caller's streams end (`END_STREAMS`), unless the
+ * transport broke while output was flowing: then they fail with its error.
  */
-function settle(
-  outcome: ExecOutcome,
-  streams: ExecEffect = { type: "end_streams" },
-): ExecTransition {
+function settle(outcome: ExecOutcome, streams: ExecEffect): ExecTransition {
   return step(settledWith(outcome, 1), [
     streams,
     { type: "settle", outcome },
     { type: "teardown" },
   ]);
 }
+
+const END_STREAMS: ExecEffect = { type: "end_streams" };
 
 function settledWith(outcome: ExecOutcome, inFlight: number): Settled {
   return {

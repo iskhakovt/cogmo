@@ -8,6 +8,7 @@
  */
 
 import { command, extendType, option, positional, subcommands } from "cmd-ts";
+import { match } from "ts-pattern";
 import type { AgentStore } from "../agent/store/index.js";
 import { type CreateSubAgentError, createSubAgent } from "../agent/subagent/create-sub-agent.js";
 import { SUB_AGENT_NAME_RE, subAgentToolName } from "../agent/subagent/sub-agent-tool-builder.js";
@@ -137,16 +138,23 @@ async function addSubAgent(args: AddArgs, deps: SubAgentCliDeps, io: CliIo): Pro
 }
 
 function describeAddError(e: CreateSubAgentError): string {
-  switch (e.kind) {
-    case "invalid_name":
-      return `Invalid sub-agent name "${e.name}": it must be lowercase ASCII letters/digits/hyphen/underscore, start with a letter, ≤32 chars.`;
-    case "description_empty":
-      return "The description must not be empty: it is the routing signal.";
-    case "unknown_model":
-      return `Unknown model "${e.model}": it has no provider in model_providers. Run \`cogmo model list\` to see routable models, or \`cogmo model add\` to register one.`;
-    case "sub_agent_name_taken":
-      return `A sub-agent named "${e.name}" already exists.`;
-  }
+  return match(e)
+    .with(
+      { kind: "invalid_name" },
+      (x) =>
+        `Invalid sub-agent name "${x.name}": it must be lowercase ASCII letters/digits/hyphen/underscore, start with a letter, ≤32 chars.`,
+    )
+    .with(
+      { kind: "description_empty" },
+      () => "The description must not be empty: it is the routing signal.",
+    )
+    .with(
+      { kind: "unknown_model" },
+      (x) =>
+        `Unknown model "${x.model}": it has no provider in model_providers. Run \`cogmo model list\` to see routable models, or \`cogmo model add\` to register one.`,
+    )
+    .with({ kind: "sub_agent_name_taken" }, (x) => `A sub-agent named "${x.name}" already exists.`)
+    .exhaustive();
 }
 
 async function listSubAgents(deps: SubAgentCliDeps, io: CliIo): Promise<number> {

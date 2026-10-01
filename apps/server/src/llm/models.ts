@@ -149,12 +149,12 @@ function warnFallbackOnce(model: string): void {
 /**
  * Compute the input-token budget for a turn given resolved model limits.
  *
- *   budget = contextWindow - maxOutputTokens - safetyBuffer
+ *   budget = contextWindow - maxOutputTokens - DEFAULT_SAFETY_BUFFER
  *
- * `safetyBuffer` defaults to 10k tokens — leaves headroom for tool
- * definitions, system prompt, and the reply priming that the SDK's
- * `countTokens` doesn't account for cleanly across providers.
+ * The 10k-token buffer leaves headroom for tool definitions, system prompt,
+ * and the reply priming that the SDK's `countTokens` doesn't account for
+ * cleanly across providers.
  */
-export function computeBudget(limits: ModelLimits, safetyBuffer = DEFAULT_SAFETY_BUFFER): number {
-  return limits.contextWindow - limits.maxOutputTokens - safetyBuffer;
+export function computeBudget(limits: ModelLimits): number {
+  return limits.contextWindow - limits.maxOutputTokens - DEFAULT_SAFETY_BUFFER;
 }

@@ -1,4 +1,3 @@
-import { z } from "zod";
 import { UUID_PATTERN } from "../../util/uuid.js";
 
 /**
@@ -63,9 +62,3 @@ export function parsePlanCallback(data: string): ParsedPlanCallback | null {
 
 /** Regex for grammY's `bot.callbackQuery(REGEX, ...)` registration. */
 export const PLAN_CALLBACK_REGEX = new RegExp(`^plan:${UUID_PATTERN}:(approve|revise|cancel)$`);
-
-/** Zod schema for the parsed shape — handy for tests + future runtime guards. */
-export const ParsedPlanCallbackSchema = z.object({
-  taskId: z.string().regex(new RegExp(`^${UUID_PATTERN}$`)),
-  action: z.enum(["approve", "revise", "cancel"]),
-});

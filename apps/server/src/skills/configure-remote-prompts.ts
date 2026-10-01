@@ -17,6 +17,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import * as p from "@clack/prompts";
+import { match } from "ts-pattern";
 import type { Transactor } from "../db/index.js";
 import {
   DEFAULT_GITHUB_IDENTITY_NAME,
@@ -115,72 +116,62 @@ export async function collectSkillsRemoteMode<T>(
 
 /** Format a `ConfigureSkillsRemoteError` as operator-readable @clack/prompts
  * output. Exhaustive over the error variants so a new variant added to
- * `configure-remote.ts` won't silently render as nothing — TypeScript flags
- * the missing case via the `never` assignment in `default`. */
+ * `configure-remote.ts` is a compile error rather than rendering as nothing. */
 export function renderConfigureError(error: ConfigureSkillsRemoteError): void {
-  switch (error.kind) {
-    case "url_invalid":
-      p.log.error(`Invalid URL: ${error.reason}`);
-      break;
-    case "remote_unreachable":
-      p.log.error(`Remote unreachable: ${error.reason}`);
+  match(error)
+    .with({ kind: "url_invalid" }, (e) => {
+      p.log.error(`Invalid URL: ${e.reason}`);
+    })
+    .with({ kind: "remote_unreachable" }, (e) => {
+      p.log.error(`Remote unreachable: ${e.reason}`);
       p.log.info(
         "Check the URL, credentials, and network. For HTTPS URLs, the GitHub identity's PAT must have access.",
       );
-      break;
-    case "remote_empty":
+    })
+    .with({ kind: "remote_empty" }, () => {
       p.log.error(
         `Remote has no \`refs/heads/main\` to adopt. Pick "Publish to a fresh remote" instead, ` +
           `or initialize the remote first (GitHub: \`gh repo create --add-readme\`).`,
       );
-      break;
-    case "local_empty":
+    })
+    .with({ kind: "local_empty" }, () => {
       p.log.error(
         'Local skills bare repo has no commits to publish. Pick "Adopt an existing remote" instead.',
       );
-      break;
-    case "remote_diverged":
+    })
+    .with({ kind: "remote_diverged" }, (e) => {
       p.log.error(
-        `Adopt would orphan local commits. Local main is ${error.localSha.slice(0, 7)}; ` +
-          `remote main is ${error.remoteSha.slice(0, 7)} and isn't a descendant. ` +
+        `Adopt would orphan local commits. Local main is ${e.localSha.slice(0, 7)}; ` +
+          `remote main is ${e.remoteSha.slice(0, 7)} and isn't a descendant. ` +
           `Resolve outside the helper: push local first (\`git push origin main\` from $COGMO_SKILLS_PATH) ` +
           `or delete local main intentionally (\`git update-ref -d refs/heads/main\`) and re-run.`,
       );
-      break;
-    case "local_diverged":
+    })
+    .with({ kind: "local_diverged" }, (e) => {
       p.log.error(
-        `Publish would orphan remote commits. Local main is ${error.localSha.slice(0, 7)}; ` +
-          `remote main is ${error.remoteSha.slice(0, 7)} and isn't an ancestor. ` +
+        `Publish would orphan remote commits. Local main is ${e.localSha.slice(0, 7)}; ` +
+          `remote main is ${e.remoteSha.slice(0, 7)} and isn't an ancestor. ` +
           `Resolve outside the helper: fetch remote first (\`git fetch origin main\` from $COGMO_SKILLS_PATH), ` +
           `merge or rebase, then re-run.`,
       );
-      break;
-    case "origin_attach_failed":
+    })
+    .with({ kind: "origin_attach_failed" }, (e) => {
       p.log.error(
-        `Transfer succeeded but \`git remote add\` failed: ${error.reason}. ` +
+        `Transfer succeeded but \`git remote add\` failed: ${e.reason}. ` +
           `The bare repo at $COGMO_SKILLS_PATH may be missing the \`origin\` config; ` +
           `re-run \`cogmo migrate-skills-remote\` to retry.`,
       );
-      break;
-    case "auto_provision_failed":
+    })
+    .with({ kind: "auto_provision_failed" }, (e) => {
+      p.log.error(`Auto-provision failed${e.status ? ` (HTTP ${e.status})` : ""}: ${e.reason}`);
+    })
+    .with({ kind: "auto_provision_repo_exists" }, (e) => {
       p.log.error(
-        `Auto-provision failed${error.status ? ` (HTTP ${error.status})` : ""}: ${error.reason}`,
-      );
-      break;
-    case "auto_provision_repo_exists":
-      p.log.error(
-        `\`${error.repoName}\` already exists on the configured GitHub account. ` +
+        `\`${e.repoName}\` already exists on the configured GitHub account. ` +
           `Re-run and pick "Adopt an existing remote" pointing at the existing repo.`,
       );
-      break;
-    default: {
-      // Exhaustiveness: TS errors here if a new variant lands without a case.
-      const _exhaustive: never = error;
-      throw new Error(
-        `unhandled ConfigureSkillsRemoteError variant: ${JSON.stringify(_exhaustive)}`,
-      );
-    }
-  }
+    })
+    .exhaustive();
   p.log.warn("Re-run `cogmo setup` or `cogmo migrate-skills-remote` to retry.");
 }
 

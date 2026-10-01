@@ -97,8 +97,8 @@ export async function stepConfigureProvider(deps: WizardDeps): Promise<void> {
     baseUrl = cancelGuard(
       await p.text({
         message: "Base URL (e.g., https://api.example.com/v1):",
-        validate: (v = "") => {
-          if (!v.startsWith("http")) return "Must start with http:// or https://";
+        validate: (v) => {
+          if (!v?.startsWith("http")) return "Must start with http:// or https://";
           return undefined;
         },
       }),

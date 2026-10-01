@@ -1,5 +1,6 @@
 /** Core memory scopes: design/memory.md → Core Memory Scope by Profile Class. */
 
+import { match } from "ts-pattern";
 import type { Transaction } from "../../db/index.js";
 import type { AgentStore, Profile } from "../store/index.js";
 
@@ -57,19 +58,20 @@ export async function readCoreMemory(
   userId: string,
   scope: CoreMemoryScope,
 ): Promise<CoreMemoryView> {
-  switch (scope.kind) {
-    case "none":
-      return { scope, blocks: [] };
-    case "unclassed":
-      return { scope, blocks: await store.getCoreMemoryBlocks(tx, userId, null) };
-    case "classed": {
-      const blocks = await store.getCoreMemoryBlocks(tx, userId, scope.profileClass);
+  return match(scope)
+    .with({ kind: "none" }, (s) => ({ scope: s, blocks: [] }))
+    .with({ kind: "unclassed" }, async (s) => ({
+      scope: s,
+      blocks: await store.getCoreMemoryBlocks(tx, userId, null),
+    }))
+    .with({ kind: "classed" }, async (s) => {
+      const blocks = await store.getCoreMemoryBlocks(tx, userId, s.profileClass);
       return {
-        scope,
-        blocks: scope.restricted
+        scope: s,
+        blocks: s.restricted
           ? blocks
           : blocks.filter((b) => b.profileClass === null || b.key !== IDENTITY_BLOCK_KEY),
       };
-    }
-  }
+    })
+    .exhaustive();
 }

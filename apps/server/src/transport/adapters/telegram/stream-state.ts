@@ -203,7 +203,7 @@ export function transition(state: StreamState, input: StreamInput, opts: StreamO
         }),
       )
       .with([{ kind: "idle" }, { type: "finish" }], () =>
-        settle({ kind: "done" }, ok(undefined), true),
+        settle({ kind: "done" }, ok(undefined), true, []),
       )
       .with([{ kind: "idle" }, { type: "abort" }], ([, { error, now }]) =>
         onAbort(open(), error, opts, now),
@@ -771,7 +771,7 @@ function settle(
   state: Extract<StreamState, { kind: "done" | "failed" }>,
   outcome: Result<void, string>,
   stopping: boolean,
-  effects: ReadonlyArray<Effect> = [],
+  effects: ReadonlyArray<Effect>,
 ): Transition {
   return step(state, [
     ...effects,

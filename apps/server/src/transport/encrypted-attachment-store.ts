@@ -51,7 +51,7 @@ export function wrapAttachmentStoreWithEncryption(
   key: Uint8Array,
 ): AttachmentStore {
   return {
-    async upload(data: Buffer, _mediaType: string, prefix?: string): Promise<string> {
+    async upload(data: Buffer, _mediaType: string, prefix: string): Promise<string> {
       const encrypted = encryptBuffer(data, key);
       return inner.upload(encrypted, "application/octet-stream", prefix);
     },
