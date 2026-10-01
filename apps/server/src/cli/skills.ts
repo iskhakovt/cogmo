@@ -12,13 +12,9 @@ import {
   subcommands,
   type Type,
 } from "cmd-ts";
+import { describeInvokeRejection } from "../skills/invoke-rejection.js";
 import type { SkillRunAs } from "../skills/run-as.js";
-import {
-  describeInvokeRejection,
-  type RegisterResult,
-  type SkillDeployOrigin,
-  type SkillRunner,
-} from "../skills/runner.js";
+import type { RegisterResult, SkillDeployOrigin, SkillRunner } from "../skills/runner.js";
 import { identifier } from "./args.js";
 import type { CliIo, LoadDeps } from "./run.js";
 

@@ -21,8 +21,9 @@ import { match } from "ts-pattern";
 import type { Transactor } from "../db/index.js";
 import { skillCronFire } from "../inngest/events.js";
 import { logger } from "../logger.js";
+import { describeInvokeRejection, type SkillInvokeRejection } from "./invoke-rejection.js";
 import type { SkillRunAs } from "./run-as.js";
-import { describeInvokeRejection, type SkillInvokeRejection, type SkillRunner } from "./runner.js";
+import type { SkillRunner } from "./runner.js";
 import type { SkillRunIdentity, SkillStore } from "./store/index.js";
 
 const log = logger.child({ component: "skills.cron-fire-handler" });

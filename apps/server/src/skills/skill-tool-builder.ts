@@ -1,7 +1,8 @@
 import { compileToolMatchers } from "../agent/tool-matchers.js";
 import { ToolRegistry, type ToolSpec } from "../agent/tools.js";
 import { logger } from "../logger.js";
-import { describeInvokeRejection, type SkillRunner, type SkillToolDef } from "./runner.js";
+import { describeInvokeRejection } from "./invoke-rejection.js";
+import type { SkillRunner, SkillToolDef } from "./runner.js";
 
 const log = logger.child({ component: "skills.tool-builder" });
 
