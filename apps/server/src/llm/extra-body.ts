@@ -11,9 +11,11 @@
  * the value is written, rather than merged on the wire.
  */
 
+import { err, ok, Result } from "neverthrow";
 import * as R from "remeda";
 import { z } from "zod";
 import { logger } from "../logger.js";
+import { describeError } from "../util/describe-error.js";
 
 /**
  * Top-level request-body keys an operator can't set: those
@@ -90,25 +92,22 @@ export const StoredExtraBodySchema = JsonObjectSchema.transform((body): ExtraBod
 });
 
 /**
- * Read operator-typed text as an {@link ExtraBody}. Throws with a message
+ * Read operator-typed text as an {@link ExtraBody}. Errs with a message
  * naming what is wrong — not JSON, not an object, a reserved key, or empty.
  */
-export function parseExtraBody(text: string): ExtraBody {
-  let value: unknown;
-  try {
-    value = JSON.parse(text);
-  } catch (err) {
-    throw new Error(
-      `expected a JSON object, got text that doesn't parse: ${(err as Error).message}`,
-    );
-  }
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    const kind = value === null ? "null" : Array.isArray(value) ? "an array" : typeof value;
-    throw new Error(`expected a JSON object, got ${kind}`);
-  }
-  const parsed = ExtraBodySchema.safeParse(value);
-  if (!parsed.success) {
-    throw new Error(parsed.error.issues.map((issue) => issue.message).join("; "));
-  }
-  return parsed.data;
+export function parseExtraBody(text: string): Result<ExtraBody, string> {
+  const json = Result.fromThrowable(
+    (): unknown => JSON.parse(text),
+    (e) => `expected a JSON object, got text that doesn't parse: ${describeError(e)}`,
+  )();
+  return json.andThen((value) => {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) {
+      const kind = value === null ? "null" : Array.isArray(value) ? "an array" : typeof value;
+      return err(`expected a JSON object, got ${kind}`);
+    }
+    const parsed = ExtraBodySchema.safeParse(value);
+    return parsed.success
+      ? ok(parsed.data)
+      : err(parsed.error.issues.map((issue) => issue.message).join("; "));
+  });
 }

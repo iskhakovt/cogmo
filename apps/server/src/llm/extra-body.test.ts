@@ -16,7 +16,7 @@ describe("parseExtraBody", () => {
       top_p: 0.8,
     });
 
-    expect(parseExtraBody(text)).toEqual({
+    expect(parseExtraBody(text)._unsafeUnwrap()).toEqual({
       reasoning: { enabled: false, effort: null },
       venice_parameters: { disable_thinking: true, strip_thinking_response: false },
       stop: ["</answer>"],
@@ -25,19 +25,19 @@ describe("parseExtraBody", () => {
   });
 
   it.each(RESERVED_EXTRA_BODY_KEYS)("refuses %s, which the adapter sets", (key) => {
-    expect(() => parseExtraBody(JSON.stringify({ [key]: "x", top_p: 1 }))).toThrow(
+    expect(parseExtraBody(JSON.stringify({ [key]: "x", top_p: 1 }))._unsafeUnwrapErr()).toMatch(
       new RegExp(`^"${key}" is set by the adapter and can't be overridden \\(reserved: model, `),
     );
   });
 
   it("names every reserved key it finds", () => {
-    expect(() => parseExtraBody('{"model":"m","stream":false,"top_p":1}')).toThrow(
+    expect(parseExtraBody('{"model":"m","stream":false,"top_p":1}')._unsafeUnwrapErr()).toMatch(
       /^"model", "stream" are set by the adapter/,
     );
   });
 
   it("refuses a reserved key only at the top level", () => {
-    expect(parseExtraBody('{"venice_parameters":{"model":"x"}}')).toEqual({
+    expect(parseExtraBody('{"venice_parameters":{"model":"x"}}')._unsafeUnwrap()).toEqual({
       venice_parameters: { model: "x" },
     });
   });
@@ -49,17 +49,17 @@ describe("parseExtraBody", () => {
     ["7", /expected a JSON object, got number/],
     ["true", /expected a JSON object, got boolean/],
   ])("refuses %s, which is not an object", (text, message) => {
-    expect(() => parseExtraBody(text)).toThrow(message);
+    expect(parseExtraBody(text)._unsafeUnwrapErr()).toMatch(message);
   });
 
   it("refuses text that isn't JSON, saying so", () => {
-    expect(() => parseExtraBody("{reasoning: {enabled: false}}")).toThrow(
+    expect(parseExtraBody("{reasoning: {enabled: false}}")._unsafeUnwrapErr()).toMatch(
       /^expected a JSON object, got text that doesn't parse: /,
     );
   });
 
   it("refuses an empty object, which would add nothing", () => {
-    expect(() => parseExtraBody("{}")).toThrow(/an empty object adds nothing/);
+    expect(parseExtraBody("{}")._unsafeUnwrapErr()).toMatch(/an empty object adds nothing/);
   });
 });
 

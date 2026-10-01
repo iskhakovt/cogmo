@@ -33,7 +33,10 @@ export interface ModelCliDeps {
 const extraBody = extendType(string, {
   displayName: "json",
   async from(value): Promise<ExtraBody> {
-    return parseExtraBody(value);
+    // cmd-ts reports a throw from `from` as the argument's parse error.
+    const parsed = parseExtraBody(value);
+    if (parsed.isErr()) throw new Error(parsed.error);
+    return parsed.value;
   },
 });
 
