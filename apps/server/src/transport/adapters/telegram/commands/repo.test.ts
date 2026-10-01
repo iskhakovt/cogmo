@@ -1,22 +1,8 @@
 import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
-import { type DeepPartial, mockTransportDeep } from "../../../test/factories.js";
-import type { Transport } from "../../transport.js";
-import { handleRepo, type TelegramCommandContext } from "./commands.js";
-import { RepoDialogs } from "./repo-dialog.js";
-
-function mkCtx(match?: string): TelegramCommandContext & { reply: ReturnType<typeof vi.fn> } {
-  return {
-    chat: { id: 42 },
-    from: { id: 1 },
-    match,
-    reply: vi.fn().mockResolvedValue(undefined),
-  };
-}
-
-function transportWith(overrides: DeepPartial<Transport> = {}): Transport {
-  return mockTransportDeep(overrides);
-}
+import { RepoDialogs } from "../repo-dialog.js";
+import { handleRepo } from "./repo.js";
+import { mkCtx, transportWith } from "./test-fixtures.js";
 
 describe("handleRepo", () => {
   describe("list", () => {

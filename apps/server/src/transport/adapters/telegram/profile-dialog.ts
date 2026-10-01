@@ -19,7 +19,7 @@
 
 import type { Profile } from "../../../agent/store/index.js";
 import type { Transport } from "../../transport.js";
-import type { TelegramCommandContext } from "./commands.js";
+import type { TelegramCommandContext } from "./commands/reply.js";
 
 type Step = "prompt" | "model" | "confirm";
 

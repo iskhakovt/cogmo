@@ -30,34 +30,30 @@ import type { InboundContent } from "../../content.js";
 import type { BufferedInboundEntry, PriorClosedConversation } from "../../store/index.js";
 import type { Adapter, StreamHandle, StreamingAdapter, StreamOpts } from "../../types.js";
 import { editResolvedBoundaryPrompt } from "./boundary-prompt-editor.js";
+import { handleClasses } from "./commands/classes.js";
+import { handleCompartments } from "./commands/compartments.js";
+import { handleCompact, handleRepair, handleStatus, handleVoice } from "./commands/conversation.js";
+import { handleLearned, handleReflect } from "./commands/evolution.js";
 import {
-  handleClasses,
-  handleCompact,
-  handleCompartments,
-  handleDisable,
-  handleEnable,
-  handleEnd,
-  handleLearned,
-  handleMcp,
-  handleModel,
-  handleName,
-  handleNew,
   handlePipelineGateCallback,
   handlePlanCallback,
-  handleProfile,
-  handleReflect,
-  handleRepair,
-  handleRepo,
+  handleSkillsApprovalCallback,
+} from "./commands/keyboard-callbacks.js";
+import { handleMcp } from "./commands/mcp.js";
+import { handleModel } from "./commands/model.js";
+import { handleProfile } from "./commands/profile.js";
+import type { TelegramCommandContext } from "./commands/reply.js";
+import { handleRepo } from "./commands/repo.js";
+import { handleSchedules } from "./commands/schedules.js";
+import {
+  handleEnd,
+  handleName,
+  handleNew,
   handleResume,
   handleResumeCallback,
-  handleSchedules,
   handleSessions,
-  handleSkills,
-  handleSkillsApprovalCallback,
-  handleStatus,
-  handleVoice,
-  type TelegramCommandContext,
-} from "./commands.js";
+} from "./commands/sessions.js";
+import { handleDisable, handleEnable, handleSkills } from "./commands/skills.js";
 import { commandComposer, forwardedFrom, inboundTextBlock, othersOrigin } from "./forwarded.js";
 import { postPipelineGateKeyboard } from "./pipeline-gate-poster.js";
 import { ProfileDialogs } from "./profile-dialog.js";

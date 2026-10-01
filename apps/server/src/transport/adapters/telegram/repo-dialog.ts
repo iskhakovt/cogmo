@@ -15,7 +15,7 @@
 
 import { parseRemoteUrl } from "../../../agent/coding/open-pr.js";
 import type { RepoSummary, Transport, TransportError } from "../../transport.js";
-import type { TelegramCommandContext } from "./commands.js";
+import type { TelegramCommandContext } from "./commands/reply.js";
 
 type Step = "name" | "remote" | "confirm";
 
