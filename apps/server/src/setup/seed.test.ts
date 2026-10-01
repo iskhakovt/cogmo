@@ -6,7 +6,7 @@ import type { Database, Transactor } from "../db/index.js";
 import { resolveLimits } from "../llm/models.js";
 import { deriveMasterKey, generateMasterKey, parseMasterKey } from "../secrets/encryption.js";
 import { DrizzleSecretsStore } from "../secrets/store/index.js";
-import { expectDefined } from "../test/assertions.js";
+import { expectDefined, expectOk } from "../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import { DrizzleTransportStore } from "../transport/store/index.js";
 import { channels, userIdentities } from "../transport/store/schema.js";
@@ -186,6 +186,41 @@ describe("ensureFalImageDefaults", () => {
     expect(providers).toHaveLength(1);
     const after = await tx((trx) => agentStore.listImageModels(trx));
     expect(after.length).toBe(modelsBefore.length); // back to original count
+  });
+
+  it("fails, seeding nothing, when an operator's model takes a default's slug", async () => {
+    const { id: secretId } = await tx((trx) =>
+      secretsStore.putSecret(trx, { name: "fal_api_key", plaintext: "sk" }),
+    );
+    const provider = await tx((trx) =>
+      agentStore
+        .createImageProvider(trx, {
+          name: "replicate",
+          type: "openai_compatible",
+          baseUrl: "https://api.replicate.example",
+          secretId,
+          attrs: {},
+        })
+        .then(expectOk),
+    );
+    await tx((trx) =>
+      agentStore
+        .createImageModel(trx, {
+          providerId: provider.id,
+          name: "replicate/flux-dev",
+          modelString: "flux-dev",
+          description: "operator's",
+          capabilities: {},
+          userSelectable: true,
+        })
+        .then(expectOk),
+    );
+
+    await expect(ensureFalImageDefaults({ runInTx: tx, agentStore, secretsStore })).rejects.toThrow(
+      /would collide on slug "flux-dev" with "replicate\/flux-dev"/,
+    );
+    const providers = await tx((trx) => agentStore.listImageProviders(trx));
+    expect(providers.map((p) => p.name)).toEqual(["replicate"]);
   });
 });
 

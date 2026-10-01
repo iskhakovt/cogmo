@@ -36,6 +36,7 @@ import * as p from "@clack/prompts";
 import { err as failed, ok as found } from "neverthrow";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
+import { discoverModels } from "../agent/provider/discover-models.js";
 import type { AgentStore } from "../agent/store/index.js";
 import type { BootstrapLock } from "../db/bootstrap-lock.js";
 import type { Transactor } from "../db/index.js";
@@ -1144,6 +1145,42 @@ describe("stepConfigureProvider", () => {
       apiKey: "sk-or-test-1234567890",
       cacheDialect: "openrouter",
     });
+  });
+
+  it("falls back to typing the model id when discovery is unavailable", async () => {
+    const deps = buildDeps();
+    deps.agentStore.listProviders.mockResolvedValue([]);
+    addProviderSpy.mockResolvedValue({ providerId: "p-new", validation: { valid: true } });
+    vi.mocked(discoverModels).mockResolvedValueOnce(
+      failed({ kind: "unavailable", message: "returned 404" }),
+    );
+    vi.mocked(p.select).mockResolvedValueOnce("openrouter"); // provider type
+    vi.mocked(p.password).mockResolvedValueOnce("sk-or-test-1234567890");
+    vi.mocked(p.isCancel)
+      .mockReturnValueOnce(false) // provider type
+      .mockReturnValueOnce(false) // API key
+      .mockReturnValueOnce(true); // model id
+
+    await expect(stepConfigureProvider(deps)).rejects.toBeInstanceOf(WizardCancelled);
+    expect(vi.mocked(p.select)).toHaveBeenCalledOnce();
+    expect(vi.mocked(p.text)).toHaveBeenCalledOnce();
+  });
+
+  it("offers retry / skip / abort when the endpoint rejects discovery", async () => {
+    const deps = buildDeps();
+    deps.agentStore.listProviders.mockResolvedValue([]);
+    addProviderSpy.mockResolvedValue({ providerId: "p-new", validation: { valid: true } });
+    vi.mocked(discoverModels).mockResolvedValueOnce(
+      failed({ kind: "rejected", status: 401, message: "returned 401" }),
+    );
+    vi.mocked(p.select)
+      .mockResolvedValueOnce("openrouter") // provider type
+      .mockResolvedValueOnce("abort"); // discovery failed
+    vi.mocked(p.password).mockResolvedValueOnce("sk-or-test-1234567890");
+
+    await expect(stepConfigureProvider(deps)).rejects.toBeInstanceOf(WizardCancelled);
+    expect(vi.mocked(p.select).mock.calls[1]?.[0]?.message).toMatch(/Discovery failed/);
+    expect(vi.mocked(p.text)).not.toHaveBeenCalled();
   });
 
   it("custom provider: prompts for base URL before API key", async () => {
