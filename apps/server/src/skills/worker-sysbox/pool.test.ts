@@ -1,5 +1,5 @@
 import { err, ok } from "neverthrow";
-import { describe, expect, it, vi } from "vitest";
+import { assert, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { SandboxClient } from "../../sandbox/index.js";
 import { expectDefined } from "../../test/assertions.js";
@@ -239,7 +239,7 @@ describe("SysboxWorkerPool", () => {
     const h = buildPoolHarness({ poolOptions: { min: 1, max: 3 } });
     const pool = await h.pool;
     const result = await pool.invoke(invokeParams("t-1"));
-    expect(result.ok).toBe(true);
+    assert(result.ok);
     expect(pool.stats()).toMatchObject({ total: 1, idle: 1, busy: 0 });
     await pool.dispose();
   });
@@ -321,7 +321,7 @@ describe("SysboxWorkerPool", () => {
 
     h.advanceTime(6_000);
     const r = await pool.invoke(invokeParams("t-aged"));
-    expect(r.ok).toBe(true);
+    assert(r.ok);
     await new Promise<void>((r) => setTimeout(r, 0));
     expect(original?.state).toBe("disposed");
     expect(h.spawnCount()).toBe(2);
@@ -337,7 +337,7 @@ describe("SysboxWorkerPool", () => {
     const pool = await h.pool;
 
     const result = await pool.invoke(invokeParams("t-1"));
-    expect(result.ok).toBe(false);
+    assert(!result.ok);
     expect(result.error).toBe("wall_clock_exceeded");
 
     await new Promise<void>((r) => setTimeout(r, 0));
@@ -354,7 +354,7 @@ describe("SysboxWorkerPool", () => {
 
     const result = await pool.invoke(invokeParams("t-after-death"));
 
-    expect(result.ok).toBe(true);
+    assert(result.ok);
     expect(dead.state).toBe("disposed");
     expect(h.spawnCount()).toBe(2);
     expect(pool.stats()).toMatchObject({ total: 1, idle: 1, dead: 0 });
@@ -620,9 +620,10 @@ describe("SysboxWorkerPool", () => {
         await settle();
         expect(h.spawned).toHaveLength(3);
         // An acquirer waits on one probe, and fails when it dies too.
-        await expect(pool.invoke(invokeParams("t-1"))).rejects.toThrow(
-          /keep dying before their first task/,
-        );
+        await expect(pool.invoke(invokeParams("t-1"))).resolves.toMatchObject({
+          ok: false,
+          error: expect.stringMatching(/keep dying before their first task/),
+        });
         expect(h.spawned).toHaveLength(4);
 
         const before = h.spawned.length;
@@ -693,9 +694,10 @@ describe("SysboxWorkerPool", () => {
       // Spawns 1–4 die; from spawn 5 on, workers live.
       const h = crashing({ min: 0, max: 3, dies: (n) => n <= 4 });
       const pool = await h.pool;
-      await expect(pool.invoke(invokeParams("t-1"))).rejects.toThrow(
-        /keep dying before their first task/,
-      );
+      await expect(pool.invoke(invokeParams("t-1"))).resolves.toMatchObject({
+        ok: false,
+        error: expect.stringMatching(/keep dying before their first task/),
+      });
       await vi.waitFor(() => expect(h.spawned).toHaveLength(4));
       await settle();
 
@@ -732,16 +734,20 @@ describe("SysboxWorkerPool", () => {
           return w;
         },
       }).pool;
-      await expect(pool.invoke(invokeParams("t-0"))).rejects.toThrow(
-        /keep dying before their first task/,
-      );
+      await expect(pool.invoke(invokeParams("t-0"))).resolves.toMatchObject({
+        ok: false,
+        error: expect.stringMatching(/keep dying before their first task/),
+      });
       await vi.waitFor(() => expect(creating).toBe(0));
       await settle();
       const before = spawns;
       most = 0;
 
       const failed = ["t-1", "t-2", "t-3", "t-4"].map((id) =>
-        expect(pool.invoke(invokeParams(id))).rejects.toThrow(/keep dying before their first task/),
+        expect(pool.invoke(invokeParams(id))).resolves.toMatchObject({
+          ok: false,
+          error: expect.stringMatching(/keep dying before their first task/),
+        }),
       );
       await Promise.all(failed);
 
@@ -866,7 +872,7 @@ describe("SysboxWorkerPool", () => {
     await pool.dispose();
   });
 
-  it("rejects an acquire queued behind a replacement spawn that fails", async () => {
+  it("fails a task queued behind a replacement spawn that fails", async () => {
     const replacement = gate();
     const spawned: FakeWorker[] = [];
     const pool = await poolWith({
@@ -890,11 +896,14 @@ describe("SysboxWorkerPool", () => {
 
     replacement.open();
 
-    await expect(queued).rejects.toThrow(/replacement spawn failed/);
+    await expect(queued).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/replacement spawn failed/),
+    });
     await pool.dispose();
   });
 
-  it("spawns for the next queued acquire after a failed spawn rejects the one ahead of it", async () => {
+  it("spawns for the next queued acquire after a failed spawn fails the one ahead of it", async () => {
     const task = gate();
     const spawned: FakeWorker[] = [];
     let spawns = 0;
@@ -924,7 +933,10 @@ describe("SysboxWorkerPool", () => {
     task.open();
     await a;
 
-    await expect(b).rejects.toThrow(/replacement spawn failed/);
+    await expect(b).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/replacement spawn failed/),
+    });
     await expect(c).resolves.toMatchObject({ ok: true });
     await pool.dispose();
   });
@@ -952,7 +964,10 @@ describe("SysboxWorkerPool", () => {
 
     spawn.open();
 
-    await expect(a).rejects.toThrow(/spawn failed/);
+    await expect(a).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/spawn failed/),
+    });
     await expect(b).resolves.toMatchObject({ ok: true });
     await pool.dispose();
   });
@@ -1008,7 +1023,7 @@ describe("SysboxWorkerPool", () => {
     await pool.dispose();
   });
 
-  it("dispose tears down all workers and rejects queued waiters", async () => {
+  it("dispose tears down all workers and fails queued tasks", async () => {
     // Pool size 1 max so the second invoke queues forever.
     const spawned: FakeWorker[] = [];
     const pool = await poolWith({
@@ -1038,7 +1053,10 @@ describe("SysboxWorkerPool", () => {
 
     const disposePromise = pool.dispose();
 
-    await expect(queued).rejects.toThrow(/disposed before worker available/);
+    await expect(queued).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/disposed before worker available/),
+    });
     await disposePromise;
     await inFlight;
     expect(spawned.every((w) => w.state === "disposed")).toBe(true);
@@ -1204,9 +1222,10 @@ describe("SysboxWorkerPool", () => {
       },
     }).pool;
     // No worker is idle, so this spawns one, held until the pool is disposed.
-    const fails = expect(pool.invoke(invokeParams("t-1"))).rejects.toThrow(
-      /disposed before worker available/,
-    );
+    const fails = expect(pool.invoke(invokeParams("t-1"))).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/disposed before worker available/),
+    });
 
     const disposing = pool.dispose();
     spawn.open();
@@ -1271,7 +1290,7 @@ describe("SysboxWorkerPool", () => {
     }
   });
 
-  it("rejects the queued waiter when the replacement spawn fails", async () => {
+  it("fails the queued task when the replacement spawn fails", async () => {
     // Pool at max=1, A busy with a non-reusable result, B queued. The slot
     // the dead worker frees spawns a replacement for the queued waiter; if
     // that spawn fails, the waiter must reject — otherwise B hangs forever.
@@ -1300,7 +1319,10 @@ describe("SysboxWorkerPool", () => {
 
     first.open();
     await a; // resolves with non-reusable result
-    await expect(b).rejects.toThrow(/replacement spawn failed/);
+    await expect(b).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/replacement spawn failed/),
+    });
     await pool.dispose();
   });
 
@@ -1337,7 +1359,7 @@ describe("SysboxWorkerPool", () => {
 
     first.open();
     const aResult = await a;
-    expect(aResult.ok).toBe(false);
+    assert(!aResult.ok);
     const bResult = await b;
     expect(bResult).toMatchObject({ ok: true, output: { x: 1 } });
     expect(spawnIndex).toBe(2);
@@ -1386,7 +1408,10 @@ describe("SysboxWorkerPool", () => {
     const second = pool.invoke(invokeParams("t-second"));
     await vi.waitFor(() => expect(signals).toHaveLength(2));
     // Disposal fails the acquire waiting on that spawn.
-    const secondFails = expect(second).rejects.toThrow(/disposed before worker available/);
+    const secondFails = expect(second).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/disposed before worker available/),
+    });
 
     const disposed = pool.dispose();
     expect(signals.map((s) => s.aborted)).toEqual([true, true]);

@@ -8,13 +8,14 @@
  * It injects Inngest's `step.run` without making the loop depend on Inngest,
  * and applies the retry policy per step kind INSIDE the body:
  *
- * - `tool-iter*` gets NO step retries at all. A failed tool handler is the
- *   model's feedback channel — the agent loop is the retry mechanism (the
- *   model re-decides with the `is_error` tool_result in context), and blind
- *   re-runs of the same handler only delay that feedback by the backoff
- *   schedule. This covers deterministic failures (Zod validation, edit_file
- *   mismatches) and outages alike: a fresh tool_use from the model creates a
- *   fresh step, which IS the retry.
+ * - `tool-iter*` gets NO step retries at all. A tool's expected failures
+ *   never reach here: the handler rejects, and the step returns that
+ *   rejection as its result. What does reach here is a throw — a bug, or an
+ *   outage the handler didn't map — and the loop answers it with an
+ *   `is_error` tool_result too. The agent loop is the retry mechanism (the
+ *   model re-decides with that result in context); blind re-runs of the same
+ *   handler only delay the feedback by the backoff schedule. A fresh
+ *   tool_use from the model creates a fresh step, which IS the retry.
  * - Everything else keeps Inngest's per-step retries for transient failures,
  *   with deterministic provider errors (4xx that aren't 408/425/429)
  *   translated to NonRetriableError so Inngest fails fast instead of burning

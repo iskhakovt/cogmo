@@ -17,6 +17,7 @@
  * checks and summaries live in `eval-checks.ts`.
  */
 
+import { ok } from "neverthrow";
 import * as R from "remeda";
 import { mock } from "vitest-mock-extended";
 import { z } from "zod";
@@ -219,7 +220,7 @@ function evalTools(): ToolRegistry {
     tools.register(
       spec.name.startsWith("core_memory_")
         ? spec
-        : { ...spec, handler: async () => cannedResult(spec.name) },
+        : { ...spec, handler: async () => ok(cannedResult(spec.name)) },
     );
   }
   return tools;

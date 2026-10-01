@@ -212,42 +212,14 @@ async function serve(): Promise<number> {
   const { createServer: createInngestServer } = await import("inngest/node");
   const { bootstrap } = await import("./index.js");
   const { env } = await import("./env.js");
-  const { startWebServer } = await import("./web/server.js");
-  const { verifyWebLoginToken } = await import("./web/auth/login-token.js");
+  const { startWebUi } = await import("./boot/web.js");
   const { logger } = await import("./logger.js");
-  const { SERVE_SHUTDOWN_BOUNDS, shutdownServe } = await import("./shutdown.js");
+  const { SERVE_SHUTDOWN_BOUNDS, logShutdownOutcomes, serveResources, shutdownServe } =
+    await import("./boot/shutdown.js");
 
-  const {
-    inngest,
-    functions,
-    adapters,
-    sandbox,
-    sandboxStore,
-    sandboxInstanceId,
-    mcpRegistry,
-    codingStreams,
-    skillRunner,
-    runInTx,
-    webTransport,
-    webSessionStore,
-    webStreamRegistry,
-    webLoginToken,
-    user,
-  } = await bootstrap();
-  const web = await startWebServer({
-    webTransport,
-    webSessionStore,
-    webStreamRegistry,
-    runInTx,
-    verifyLoginToken: (candidate) => verifyWebLoginToken(candidate, webLoginToken),
-    ownerUserId: user.id,
-    sessionTtlDays: env.WEB_SESSION_TTL_DAYS,
-    cookieSecure: !env.WEB_INSECURE_COOKIES,
-    staticRoot: env.WEB_STATIC_ROOT,
-    webDevAllowOrigin: env.WEB_DEV_ALLOW_ORIGIN ?? null,
-    host: env.WEB_HOST,
-    port: env.WEB_PORT,
-  });
+  const boot = await bootstrap();
+  const { inngest, functions } = boot;
+  const web = await startWebUi(boot);
 
   try {
     if (env.INNGEST_MODE === "serve") {
@@ -273,36 +245,7 @@ async function serve(): Promise<number> {
       await connection.closed;
     }
   } finally {
-    const outcomes = await shutdownServe(
-      {
-        web,
-        adapters,
-        codingStreams,
-        mcpRegistry,
-        skills: skillRunner,
-        sandbox,
-        closeInstance: sandboxInstanceId
-          ? () => runInTx((tx) => sandboxStore.closeInstance(tx, sandboxInstanceId))
-          : null,
-      },
-      SERVE_SHUTDOWN_BOUNDS,
-    );
-    for (const outcome of outcomes) {
-      switch (outcome.outcome) {
-        case "done":
-          logger.debug({ step: outcome.step }, "shutdown step done");
-          break;
-        case "timed_out":
-          logger.warn({ step: outcome.step, ms: outcome.ms }, "shutdown step timed out");
-          break;
-        case "failed":
-          logger.error({ step: outcome.step, err: outcome.error }, "shutdown step failed");
-          break;
-        case "skipped":
-          logger.warn({ step: outcome.step, reason: outcome.reason }, "shutdown step skipped");
-          break;
-      }
-    }
+    logShutdownOutcomes(await shutdownServe(serveResources(boot, web), SERVE_SHUTDOWN_BOUNDS));
   }
 
   // Zero even when a step failed: the process did stop, and its log says what didn't.

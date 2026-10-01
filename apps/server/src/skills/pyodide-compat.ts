@@ -1,13 +1,15 @@
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { err, ok, type Result } from "neverthrow";
+import { z } from "zod";
 import { logger } from "../logger.js";
+import { describeError } from "../util/describe-error.js";
 
 const log = logger.child({ component: "skills.pyodide-compat" });
 
-interface PyodideLockfileShape {
-  packages: Record<string, { name: string; version: string }>;
-}
+const PyodideLockfileSchema = z.object({
+  packages: z.record(z.string(), z.object({ name: z.string(), version: z.string() })),
+});
 
 /** Bundled-package name -> version map, lazily loaded from pyodide's installed lockfile. */
 let cachedBundled: Map<string, string> | null = null;
@@ -29,7 +31,7 @@ async function loadBundled(lockfilePathOverride?: string): Promise<Map<string, s
   const require = createRequire(import.meta.url);
   const lockPath = lockfilePathOverride ?? require.resolve("pyodide/pyodide-lock.json");
   const raw = await readFile(lockPath, "utf-8");
-  const parsed = JSON.parse(raw) as PyodideLockfileShape;
+  const parsed = PyodideLockfileSchema.parse(JSON.parse(raw));
   const map = new Map<string, string>();
   for (const pkg of Object.values(parsed.packages)) {
     map.set(normalizeName(pkg.name), pkg.version);
@@ -45,61 +47,69 @@ function normalizeName(name: string): string {
 
 const PURE_WHEEL_SUFFIXES = ["-py3-none-any.whl", "-py2.py3-none-any.whl"] as const;
 
-interface PypiUrlEntry {
-  packagetype?: string;
-  filename?: string;
-}
+const PypiReleaseSchema = z.object({
+  urls: z
+    .array(z.object({ packagetype: z.string().optional(), filename: z.string().optional() }))
+    .optional(),
+});
 
-interface PypiJsonShape {
-  urls?: PypiUrlEntry[];
+/** PyPI could not answer: an error status other than 404, a network failure, a timeout. */
+export interface PypiUnavailable {
+  kind: "pypi_unavailable";
+  reason: string;
 }
 
 /**
- * Hit PyPI's JSON API for `<name>/<version>`; return true iff at least
- * one wheel artifact has a pure-Python platform tag (importable on any
+ * Hit PyPI's JSON API for `<name>/<version>`; ok(true) iff at least one
+ * wheel artifact has a pure-Python platform tag (importable on any
  * platform Pyodide targets). `bdist_wheel` is the wheel marker; the
- * pure-Python suffix narrows it from a native-binary wheel. AbortController
- * caps the lookup at `timeoutMs` so a hung PyPI doesn't block register.
+ * pure-Python suffix narrows it from a native-binary wheel. A 404 is
+ * ok(false); any other failure to get an answer errs, and the caller
+ * decides. The lookup is capped at `timeoutMs` so a hung PyPI doesn't
+ * block register.
  */
 export async function pypiHasPureWheel(
   name: string,
   version: string,
   opts: { timeoutMs?: number; fetchImpl?: typeof fetch } = {},
-): Promise<boolean> {
+): Promise<Result<boolean, PypiUnavailable>> {
   const cacheKey = `${normalizeName(name)}==${version}`;
-  if (pypiPureWheelCache.has(cacheKey)) return true;
-  const timeoutMs = opts.timeoutMs ?? 5_000;
+  if (pypiPureWheelCache.has(cacheKey)) return ok(true);
   const fetchImpl = opts.fetchImpl ?? fetch;
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  const spec = `${name}==${version}`;
+  let body: unknown;
   try {
     const resp = await fetchImpl(
       `https://pypi.org/pypi/${encodeURIComponent(name)}/${encodeURIComponent(version)}/json`,
-      { signal: ctrl.signal, headers: { Accept: "application/json" } },
+      {
+        signal: AbortSignal.timeout(opts.timeoutMs ?? 5_000),
+        headers: { Accept: "application/json" },
+      },
     );
-    if (resp.status === 404) {
-      // Name/version doesn't exist upstream -- legitimate "no pure wheel".
-      // Not cached: see `pypiPureWheelCache` comment for why.
-      return false;
-    }
+    // Name/version doesn't exist upstream: a legitimate "no pure wheel".
+    // Not cached: see `pypiPureWheelCache`.
+    if (resp.status === 404) return ok(false);
     if (!resp.ok) {
-      // 5xx / 429 / etc. -- transient. Throw so checkPyodideCompat's
-      // outer try/catch fails-open with a warn log; otherwise a brief
-      // PyPI hiccup would block tier-1 registers for the spec.
-      throw new Error(`pypi http ${resp.status} for ${name}==${version}`);
+      return err({ kind: "pypi_unavailable", reason: `pypi http ${resp.status} for ${spec}` });
     }
-    const parsed = (await resp.json()) as PypiJsonShape;
-    const hasPure = (parsed.urls ?? []).some(
-      (u) =>
-        u.packagetype === "bdist_wheel" &&
-        typeof u.filename === "string" &&
-        PURE_WHEEL_SUFFIXES.some((suf) => u.filename?.endsWith(suf)),
-    );
-    if (hasPure) pypiPureWheelCache.set(cacheKey, true);
-    return hasPure;
-  } finally {
-    clearTimeout(timer);
+    body = await resp.json();
+  } catch (e) {
+    return err({
+      kind: "pypi_unavailable",
+      reason: `pypi lookup for ${spec}: ${describeError(e)}`,
+    });
   }
+  const parsed = PypiReleaseSchema.safeParse(body);
+  if (!parsed.success) {
+    return err({ kind: "pypi_unavailable", reason: `pypi answered ${spec} in an unknown shape` });
+  }
+  const hasPure = (parsed.data.urls ?? []).some(
+    (u) =>
+      u.packagetype === "bdist_wheel" &&
+      PURE_WHEEL_SUFFIXES.some((suf) => u.filename?.endsWith(suf) === true),
+  );
+  if (hasPure) pypiPureWheelCache.set(cacheKey, true);
+  return ok(hasPure);
 }
 
 export interface PyodideCompatIssue {
@@ -126,7 +136,7 @@ export interface CheckPyodideCompatOptions {
  * during the first WASM invocation of the skill. Pyodide-incompatible
  * deps should declare `tier: container` instead.
  *
- * PyPI network failures fail-open with a warn log: the worst case is
+ * PyPI failures fail open with a warn log: the worst case is
  * first-invoke micropip surface, which is the pre-existing behaviour;
  * we don't want a transient PyPI 503 to block register.
  */
@@ -145,7 +155,7 @@ export async function checkPyodideCompat(
     // PyPI network errors below: register stays unblocked, first
     // WASM-tier invocation surfaces the real issue via micropip.
     log.warn(
-      { err: (e as Error).message },
+      { err: describeError(e) },
       "pyodide-compat: lockfile load failed; allowing register (first-invoke surfaces the real issue)",
     );
     return ok();
@@ -160,17 +170,17 @@ export async function checkPyodideCompat(
     const normName = normalizeName(name);
     const bundledVersion = bundled.get(normName);
     if (bundledVersion === version) continue;
-    try {
-      if (await pypiHasPureWheel(name, version, opts)) continue;
-    } catch (e) {
-      // Transient network / abort -> fail-open. First-invoke surfaces the
-      // same case via micropip; register stays unblocked.
+    const pure = await pypiHasPureWheel(name, version, opts);
+    if (pure.isErr()) {
+      // Fail open: first invoke surfaces the same case via micropip, and a
+      // brief PyPI outage shouldn't block tier-1 registers.
       log.warn(
-        { spec, err: (e as Error).message },
+        { spec, reason: pure.error.reason },
         "pyodide-compat: PyPI check failed; allowing register (first-invoke will recheck via micropip)",
       );
       continue;
     }
+    if (pure.value) continue;
     issues.push({
       spec,
       reason: bundledVersion

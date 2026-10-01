@@ -39,7 +39,9 @@ describe("registerSkillTool", () => {
     const skills: SkillsService = {
       register,
     };
-    const result = await registerSkillTool.handler({ branch: "skill/echo" }, makeService(skills));
+    const result = (
+      await registerSkillTool.handler({ branch: "skill/echo" }, makeService(skills))
+    )._unsafeUnwrap();
     expect(register).toHaveBeenCalledWith({ branch: "skill/echo" });
     const parsed = RegisterAckSchema.parse(JSON.parse(result));
     expect(parsed.status).toBe("live");
@@ -48,7 +50,7 @@ describe("registerSkillTool", () => {
     expect(parsed.nextStep).toMatch(/appears as its own tool starting next turn/);
   });
 
-  it("forwards error list verbatim on rejected", async () => {
+  it("rejects with the error list verbatim on rejected", async () => {
     const skills: SkillsService = {
       register: vi.fn().mockResolvedValue({
         name: "",
@@ -58,15 +60,43 @@ describe("registerSkillTool", () => {
         errors: ["non_fast_forward: rebase branch onto main and retry"],
       }),
     };
-    const result = await registerSkillTool.handler({ branch: "x" }, makeService(skills));
-    const parsed = RegisterAckSchema.parse(JSON.parse(result));
-    expect(parsed.status).toBe("rejected");
-    expect(parsed.errors).toEqual(["non_fast_forward: rebase branch onto main and retry"]);
+    const rejection = (
+      await registerSkillTool.handler({ branch: "x" }, makeService(skills))
+    )._unsafeUnwrapErr();
+    expect(rejection.message).toBe(
+      "Register rejected: non_fast_forward: rebase branch onto main and retry. " +
+        "Surface the errors verbatim and ask the user for guidance.",
+    );
   });
 
-  it("throws a clear error when service.skills is missing", async () => {
-    await expect(
-      registerSkillTool.handler({ branch: "x" }, makeService(undefined)),
-    ).rejects.toThrow(/Skills runtime is unavailable/);
+  it("joins multiple errors and names a missing reason on rejected", async () => {
+    const register = vi
+      .fn()
+      .mockResolvedValueOnce({
+        name: "",
+        riskTier: "notify",
+        status: "rejected",
+        gitSha: "",
+        errors: ["a", "b"],
+      })
+      .mockResolvedValueOnce({
+        name: "",
+        riskTier: "notify",
+        status: "rejected",
+        gitSha: "",
+        errors: [],
+      });
+    const service = makeService({ register });
+    const joined = (await registerSkillTool.handler({ branch: "x" }, service))._unsafeUnwrapErr();
+    expect(joined.message).toMatch(/^Register rejected: a; b\. /);
+    const bare = (await registerSkillTool.handler({ branch: "x" }, service))._unsafeUnwrapErr();
+    expect(bare.message).toMatch(/^Register rejected: no reason given\. /);
+  });
+
+  it("rejects with a clear message when service.skills is missing", async () => {
+    const rejection = (
+      await registerSkillTool.handler({ branch: "x" }, makeService(undefined))
+    )._unsafeUnwrapErr();
+    expect(rejection.message).toMatch(/Skills runtime is unavailable/);
   });
 });

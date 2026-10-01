@@ -1,4 +1,5 @@
-import { afterAll, describe, expect, it, vi } from "vitest";
+import { err, ok } from "neverthrow";
+import { afterAll, assert, describe, expect, it, vi } from "vitest";
 import type { CtxHandler } from "../dispatcher.js";
 import { runOnWorker } from "./host.js";
 
@@ -18,7 +19,7 @@ afterAll(() => {
 });
 
 function noopHandler(): CtxHandler {
-  return { handle: vi.fn().mockResolvedValue(null) };
+  return { handle: vi.fn().mockResolvedValue(ok(null)) };
 }
 
 describe("runOnWorker (Pyodide)", () => {
@@ -34,7 +35,7 @@ async def run(inputs, ctx):
       ctxHandler: noopHandler(),
     });
 
-    expect(result.ok).toBe(true);
+    assert(result.ok);
     expect(result.output).toEqual({ echo: 8 });
   });
 
@@ -42,9 +43,9 @@ async def run(inputs, ctx):
     const handler: CtxHandler = {
       handle: vi.fn(async ({ method, args }) => {
         if (method === "secrets.get" && (args as { name: string }).name === "api_key") {
-          return "sk-live-123";
+          return ok("sk-live-123");
         }
-        if (method === "now") return "2026-01-01T00:00:00.000Z";
+        if (method === "now") return ok("2026-01-01T00:00:00.000Z");
         throw new Error(`unexpected ctx call: ${method}`);
       }),
     };
@@ -62,12 +63,74 @@ async def run(inputs, ctx):
       ctxHandler: handler,
     });
 
-    expect(result.ok).toBe(true);
+    assert(result.ok);
     expect(result.output).toEqual({ len: 11, ts: "2026-01-01T00:00:00.000Z" });
     expect(handler.handle).toHaveBeenCalledWith({
       method: "secrets.get",
       args: expect.objectContaining({ name: "api_key" }),
     });
+  });
+
+  it("raises a refused ctx call in the skill as CtxError with its kind and message", async () => {
+    const handler: CtxHandler = {
+      handle: vi.fn(async () =>
+        err({ kind: "not_in_allowlist", message: "secret 'x' is not declared" }),
+      ),
+    };
+    const result = await runOnWorker({
+      taskId: "task-refused",
+      skillName: "refused",
+      body: `
+async def run(inputs, ctx):
+    try:
+        await ctx.secrets.get("x")
+    except CtxError as e:
+        return {"kind": e.kind, "message": e.message, "str": str(e)}
+    return {"kind": None}
+`,
+      inputs: {},
+      ctxHandler: handler,
+    });
+    assert(result.ok);
+    expect(result.output).toEqual({
+      kind: "not_in_allowlist",
+      message: "secret 'x' is not declared",
+      str: "not_in_allowlist: secret 'x' is not declared",
+    });
+  });
+
+  it("fails the task naming the CtxError a skill leaves uncaught", async () => {
+    const handler: CtxHandler = {
+      handle: vi.fn(async () => err({ kind: "missing_effect", message: "needs reads_memory" })),
+    };
+    const result = await runOnWorker({
+      taskId: "task-uncaught",
+      skillName: "uncaught",
+      body: `
+async def run(inputs, ctx):
+    return await ctx.memory.recall("q")
+`,
+      inputs: {},
+      ctxHandler: handler,
+    });
+    assert(!result.ok);
+    expect(result.error).toContain("CtxError: missing_effect: needs reads_memory");
+  });
+
+  it("hands a served null to the skill as None", async () => {
+    const result = await runOnWorker({
+      taskId: "task-null",
+      skillName: "null-value",
+      body: `
+async def run(inputs, ctx):
+    v = await ctx.memory.remember("fact")
+    return {"isNone": v is None}
+`,
+      inputs: {},
+      ctxHandler: noopHandler(),
+    });
+    assert(result.ok);
+    expect(result.output).toEqual({ isNone: true });
   });
 
   it("returns ok: false with the Python exception when the skill raises", async () => {
@@ -82,7 +145,7 @@ async def run(inputs, ctx):
       ctxHandler: noopHandler(),
     });
 
-    expect(result.ok).toBe(false);
+    assert(!result.ok);
     expect(result.error).toContain("kaboom");
   });
 
@@ -103,7 +166,7 @@ async def run(inputs, ctx):
       ctxHandler: noopHandler(),
     });
 
-    expect(result.ok).toBe(false);
+    assert(!result.ok);
     expect(result.error).toBe("wall_clock_exceeded");
   });
 
@@ -118,7 +181,7 @@ async def run(inputs, ctx):
       inputs: {},
       ctxHandler: noopHandler(),
     });
-    expect(result.ok).toBe(true);
+    assert(result.ok);
     expect(result.output).toBe("hello");
   });
 
@@ -133,7 +196,7 @@ async def run(inputs, ctx):
       inputs: {},
       ctxHandler: noopHandler(),
     });
-    expect(result.ok).toBe(true);
+    assert(result.ok);
     expect(result.output).toBe(42);
   });
 
@@ -148,7 +211,7 @@ async def run(inputs, ctx):
       inputs: {},
       ctxHandler: noopHandler(),
     });
-    expect(result.ok).toBe(true);
+    assert(result.ok);
     expect(result.output).toEqual([1, 2, 3]);
   });
 
@@ -163,7 +226,7 @@ async def run(inputs, ctx):
       inputs: {},
       ctxHandler: noopHandler(),
     });
-    expect(result.ok).toBe(true);
+    assert(result.ok);
     expect(result.output).toBeNull();
   });
 
@@ -178,7 +241,7 @@ async def run(inputs, ctx):
       inputs: {},
       ctxHandler: noopHandler(),
     });
-    expect(result.ok).toBe(false);
+    assert(!result.ok);
     expect(typeof result.error).toBe("string");
     expect(result.error?.length ?? 0).toBeGreaterThan(0);
   });
@@ -197,7 +260,7 @@ async def run(inputs, ctx):
       inputs: {},
       ctxHandler: noopHandler(),
     });
-    expect(result.ok).toBe(false);
+    assert(!result.ok);
     expect(result.error).toContain("MyCustomError");
     expect(result.error).toContain("specific failure");
   });
@@ -205,7 +268,7 @@ async def run(inputs, ctx):
   it("ctx.user round-trips the user dict", async () => {
     const handler: CtxHandler = {
       handle: vi.fn(async ({ method }) => {
-        if (method === "user") return { id: "u1", timezone: "Europe/London" };
+        if (method === "user") return ok({ id: "u1", timezone: "Europe/London" });
         throw new Error(`unexpected ${method}`);
       }),
     };
@@ -220,7 +283,7 @@ async def run(inputs, ctx):
       inputs: {},
       ctxHandler: handler,
     });
-    expect(result.ok).toBe(true);
+    assert(result.ok);
     expect(result.output).toEqual({ got: "u1", tz: "Europe/London" });
   });
 
@@ -243,14 +306,14 @@ async def run(inputs, ctx):
       inputs: {},
       ctxHandler: noopHandler(),
     });
-    expect(result.ok).toBe(false);
+    assert(!result.ok);
     expect(typeof result.error).toBe("string");
     expect(result.error?.length ?? 0).toBeGreaterThan(0);
   });
 
   it("two sequential runOnWorker calls are independent (no shared state)", async () => {
-    const handler1: CtxHandler = { handle: vi.fn(async () => "first") };
-    const handler2: CtxHandler = { handle: vi.fn(async () => "second") };
+    const handler1: CtxHandler = { handle: vi.fn(async () => ok("first")) };
+    const handler2: CtxHandler = { handle: vi.fn(async () => ok("second")) };
 
     const body = `
 async def run(inputs, ctx):
@@ -272,6 +335,8 @@ async def run(inputs, ctx):
       ctxHandler: handler2,
     });
 
+    assert(r1.ok);
+    assert(r2.ok);
     expect(r1.output).toEqual({ v: "first" });
     expect(r2.output).toEqual({ v: "second" });
     expect(handler1.handle).toHaveBeenCalledTimes(1);
@@ -290,7 +355,7 @@ async def run(inputs, ctx):
       readyTimeoutMs: 50,
       ctxHandler: noopHandler(),
     });
-    expect(result.ok).toBe(false);
+    assert(!result.ok);
     expect(result.error).toMatch(/worker_init_timeout/);
   });
 
@@ -307,7 +372,7 @@ async def run(inputs, ctx):
       inputs: { nums: [1, 2, 3, 4], flag: true },
       ctxHandler: noopHandler(),
     });
-    expect(result.ok).toBe(true);
+    assert(result.ok);
     expect(result.output).toEqual({ sum: 10, flag: true });
   });
 });

@@ -1,253 +1,98 @@
 import * as p from "@clack/prompts";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { mock } from "vitest-mock-extended";
-import type { AgentStore } from "../agent/store/index.js";
-import type { BootstrapLock } from "../db/bootstrap-lock.js";
-import type { Transactor } from "../db/index.js";
-import type { SecretsStore } from "../secrets/store/index.js";
-import type { TransportStore } from "../transport/store/index.js";
+import { buildWizardDeps } from "../test/wizard.js";
+import { stepConfigureClaudeCodeAuth } from "./wizard/claude-code-auth.js";
+import { stepConfigureDaytona } from "./wizard/daytona.js";
+import { stepConfigureGitHubIdentity } from "./wizard/github-identity.js";
+import { stepValidateHindsight } from "./wizard/hindsight.js";
+import { stepConfigureImageProviders } from "./wizard/image-providers.js";
+import { stepConfigureProvider } from "./wizard/llm-provider.js";
+import { stepConfigureOptionalTools } from "./wizard/optional-tools.js";
+import { stepConfigureSkillsRemote } from "./wizard/skills-remote.js";
+import { WizardCancelled } from "./wizard/step.js";
+import { stepSummary } from "./wizard/summary.js";
+import { stepConfigureTelegram } from "./wizard/telegram.js";
+import { stepConfigureVoice } from "./wizard/voice.js";
+import { runWizard } from "./wizard.js";
 
-// Sentinel-tx token — fakeRunInTx passes it through to every store call so
-// assertions on call args can use it directly (vs. `expect.anything()`).
-const FAKE_TX = { __mockTx: true } as never;
-const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
+vi.mock("@clack/prompts", async () =>
+  (await import("../test/clack-prompts-mock.js")).clackPromptsMock(),
+);
+vi.mock("./wizard/claude-code-auth.js", () => ({ stepConfigureClaudeCodeAuth: vi.fn() }));
+vi.mock("./wizard/daytona.js", () => ({ stepConfigureDaytona: vi.fn() }));
+vi.mock("./wizard/github-identity.js", () => ({ stepConfigureGitHubIdentity: vi.fn() }));
+vi.mock("./wizard/hindsight.js", () => ({ stepValidateHindsight: vi.fn() }));
+vi.mock("./wizard/image-providers.js", () => ({ stepConfigureImageProviders: vi.fn() }));
+vi.mock("./wizard/llm-provider.js", () => ({ stepConfigureProvider: vi.fn() }));
+vi.mock("./wizard/optional-tools.js", () => ({ stepConfigureOptionalTools: vi.fn() }));
+vi.mock("./wizard/skills-remote.js", () => ({ stepConfigureSkillsRemote: vi.fn() }));
+vi.mock("./wizard/summary.js", () => ({ stepSummary: vi.fn() }));
+vi.mock("./wizard/telegram.js", () => ({ stepConfigureTelegram: vi.fn() }));
+vi.mock("./wizard/voice.js", () => ({ stepConfigureVoice: vi.fn() }));
 
-// vi.mock is hoisted above imports, so the @clack/prompts and provider
-// factories can't reference test-scope variables. Use vi.hoisted to lift the
-// probe spies alongside.
-const { openaiTtsProbe, elevenlabsTtsProbe } = vi.hoisted(() => ({
-  openaiTtsProbe: vi.fn(),
-  elevenlabsTtsProbe: vi.fn(),
-}));
+const PROVIDER = {
+  id: "p-1",
+  name: "anthropic",
+  type: "anthropic",
+  baseUrl: null,
+  attrs: {},
+} as const;
 
-vi.mock("@clack/prompts", () => ({
-  confirm: vi.fn(),
-  password: vi.fn(),
-  text: vi.fn(),
-  select: vi.fn(),
-  spinner: vi.fn(() => ({ start: vi.fn(), stop: vi.fn(), message: vi.fn() })),
-  note: vi.fn(),
-  log: { success: vi.fn(), warn: vi.fn(), error: vi.fn(), info: vi.fn() },
-  // cancelGuard wraps every prompt; isCancel=false keeps the flow alive so
-  // tests drive happy + degraded paths without dealing with WizardCancelled.
-  isCancel: vi.fn(() => false),
-}));
+/** Every step, in the order the wizard must run them. */
+const STEPS_IN_ORDER = [
+  stepConfigureProvider,
+  stepConfigureTelegram,
+  stepConfigureOptionalTools,
+  stepConfigureImageProviders,
+  stepConfigureVoice,
+  stepConfigureGitHubIdentity,
+  stepConfigureClaudeCodeAuth,
+  stepConfigureDaytona,
+  stepConfigureSkillsRemote,
+  stepValidateHindsight,
+  stepSummary,
+];
 
-vi.mock("../voice/openai.js", () => ({
-  OpenAIVoiceProvider: class {
-    readonly name = "openai";
-    tts = openaiTtsProbe;
-    stt = vi.fn();
-  },
-}));
+beforeEach(() => {
+  vi.mocked(stepConfigureTelegram).mockResolvedValue({ botUsername: "cogmo_bot" });
+});
 
-vi.mock("../voice/elevenlabs.js", () => ({
-  ElevenLabsTtsProvider: class {
-    readonly name = "elevenlabs";
-    tts = elevenlabsTtsProbe;
-  },
-}));
+describe("runWizard", () => {
+  it("runs every step once, in order, and hands the bot username to the summary", async () => {
+    const deps = buildWizardDeps();
+    deps.agentStore.listProviders.mockResolvedValue([PROVIDER]);
 
-// Pulled in AFTER the vi.mocks so the wizard module loads against the mocks.
-const { stepConfigureVoice } = await import("./wizard.js");
+    await runWizard({ ...deps, userId: "user-1" });
 
-interface TestDeps {
-  agentStore: ReturnType<typeof mock<AgentStore>>;
-  secretsStore: ReturnType<typeof mock<SecretsStore>>;
-  transportStore: ReturnType<typeof mock<TransportStore>>;
-  runInTx: Transactor;
-  bootstrapLock: BootstrapLock;
-}
-
-function buildDeps(): TestDeps {
-  const agentStore = mock<AgentStore>();
-  const secretsStore = mock<SecretsStore>();
-  const transportStore = mock<TransportStore>();
-  agentStore.getVoiceConfig.mockResolvedValue(undefined);
-  agentStore.upsertVoiceConfig.mockResolvedValue({ id: "voice-config-1" });
-  // putSecret returns distinct ids on each call so reusedSecret vs.
-  // independent-secrets paths can be told apart in assertions.
-  let nextSecretId = 1;
-  secretsStore.putSecret.mockImplementation(async () => ({ id: `secret-${nextSecretId++}` }));
-  secretsStore.markValidated.mockResolvedValue(undefined);
-  return {
-    agentStore,
-    secretsStore,
-    transportStore,
-    runInTx: fakeRunInTx,
-    bootstrapLock: (fn) => fn(),
-  };
-}
-
-describe("stepConfigureVoice", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
+    const order = STEPS_IN_ORDER.map((step) => {
+      expect(step).toHaveBeenCalledOnce();
+      return vi.mocked(step).mock.invocationCallOrder[0];
+    });
+    expect(order).toEqual([...order].sort((a = 0, b = 0) => a - b));
+    expect(stepConfigureTelegram).toHaveBeenCalledWith(expect.anything(), "user-1");
+    expect(stepSummary).toHaveBeenCalledWith(expect.anything(), "cogmo_bot");
   });
 
-  it("openai TTS + openai STT (reused key) — persists secret, marks validated, writes voice_config", async () => {
-    const deps = buildDeps();
-    // Prompt order: initial-confirm, tts-type-select, tts-key-password,
-    // tts-model-text, tts-voice-select, stt-type-select, reuse-key-confirm,
-    // stt-model-text.
-    vi.mocked(p.confirm).mockResolvedValueOnce(true); // initial confirm
-    vi.mocked(p.select).mockResolvedValueOnce("openai"); // tts type
-    vi.mocked(p.password).mockResolvedValueOnce("sk-tts-key");
-    vi.mocked(p.text).mockResolvedValueOnce("gpt-4o-mini-tts"); // tts model
-    vi.mocked(p.select).mockResolvedValueOnce("alloy"); // tts voice
-    vi.mocked(p.select).mockResolvedValueOnce("openai"); // stt type
-    vi.mocked(p.confirm).mockResolvedValueOnce(true); // reuse key
-    vi.mocked(p.text).mockResolvedValueOnce("gpt-4o-mini-transcribe"); // stt model
-    openaiTtsProbe.mockResolvedValueOnce({ audio: Buffer.alloc(0), mediaType: "audio/ogg" });
+  it("repeats the provider step until a provider exists", async () => {
+    const deps = buildWizardDeps();
+    deps.agentStore.listProviders.mockResolvedValueOnce([]).mockResolvedValue([PROVIDER]);
 
-    await stepConfigureVoice(deps);
+    await runWizard({ ...deps, userId: "user-1" });
 
-    expect(deps.secretsStore.putSecret).toHaveBeenCalledOnce();
-    expect(deps.secretsStore.putSecret).toHaveBeenCalledWith(FAKE_TX, {
-      name: "openai_voice_key",
-      plaintext: "sk-tts-key",
-      description: "openai API key for voice TTS",
-    });
-    expect(deps.secretsStore.markValidated).toHaveBeenCalledOnce();
-    expect(deps.secretsStore.markValidated).toHaveBeenCalledWith(FAKE_TX, "openai_voice_key");
-    expect(deps.agentStore.upsertVoiceConfig).toHaveBeenCalledOnce();
-    expect(deps.agentStore.upsertVoiceConfig).toHaveBeenCalledWith(FAKE_TX, {
-      ttsSecretId: "secret-1",
-      sttSecretId: "secret-1",
-      ttsProvider: "openai",
-      ttsModel: "gpt-4o-mini-tts",
-      ttsVoice: "alloy",
-      ttsBaseUrl: null,
-      sttProvider: "openai",
-      sttModel: "gpt-4o-mini-transcribe",
-      sttBaseUrl: null,
-    });
-  });
-
-  it("openai_compatible TTS + openai_compatible STT — persists base URLs and two secrets", async () => {
-    const deps = buildDeps();
-    vi.mocked(p.confirm).mockResolvedValueOnce(true); // initial confirm
-    vi.mocked(p.select).mockResolvedValueOnce("openai_compatible"); // tts type
-    vi.mocked(p.text).mockResolvedValueOnce("https://api.groq.com/openai/v1"); // tts baseURL
-    vi.mocked(p.password).mockResolvedValueOnce("gsk_tts_groq_key_xxxxxxxxxx");
-    vi.mocked(p.text).mockResolvedValueOnce("playai-tts"); // tts model
-    vi.mocked(p.text).mockResolvedValueOnce("Adelaide-PlayAI"); // tts voice (text input on compat)
-    vi.mocked(p.select).mockResolvedValueOnce("openai_compatible"); // stt type
-    vi.mocked(p.text).mockResolvedValueOnce("https://api.fireworks.ai/inference/v1"); // stt baseURL
-    // Different baseURL → no reuse confirm; password prompted directly.
-    vi.mocked(p.password).mockResolvedValueOnce("fw_stt_key_yyyyyyyyyyyy");
-    vi.mocked(p.text).mockResolvedValueOnce("whisper-v3"); // stt model
-    openaiTtsProbe.mockResolvedValueOnce({ audio: Buffer.alloc(0), mediaType: "audio/ogg" });
-
-    await stepConfigureVoice(deps);
-
-    expect(deps.secretsStore.putSecret).toHaveBeenCalledTimes(2);
-    expect(deps.agentStore.upsertVoiceConfig).toHaveBeenCalledWith(FAKE_TX, {
-      ttsSecretId: "secret-1",
-      sttSecretId: "secret-2",
-      ttsProvider: "openai_compatible",
-      ttsModel: "playai-tts",
-      ttsVoice: "Adelaide-PlayAI",
-      ttsBaseUrl: "https://api.groq.com/openai/v1",
-      sttProvider: "openai_compatible",
-      sttModel: "whisper-v3",
-      sttBaseUrl: "https://api.fireworks.ai/inference/v1",
-    });
-  });
-
-  it("elevenlabs TTS + openai STT — separate keys, ElevenLabs probe", async () => {
-    const deps = buildDeps();
-    vi.mocked(p.confirm).mockResolvedValueOnce(true); // initial confirm
-    vi.mocked(p.select).mockResolvedValueOnce("elevenlabs"); // tts type
-    vi.mocked(p.password).mockResolvedValueOnce("xi-elevenlabs-key-xxxxxxxx");
-    vi.mocked(p.text).mockResolvedValueOnce("eleven_turbo_v2_5"); // tts model
-    vi.mocked(p.text).mockResolvedValueOnce("21m00Tcm4TlvDq8ikWAM"); // tts voice id
-    vi.mocked(p.select).mockResolvedValueOnce("openai"); // stt type
-    // ElevenLabs ≠ OpenAI → no reuse confirm; STT password prompted directly.
-    vi.mocked(p.password).mockResolvedValueOnce("sk-stt-openai-key-xxxxxxxx");
-    vi.mocked(p.text).mockResolvedValueOnce("gpt-4o-mini-transcribe"); // stt model
-    elevenlabsTtsProbe.mockResolvedValueOnce({
-      audio: Buffer.alloc(0),
-      mediaType: "audio/ogg",
-    });
-
-    await stepConfigureVoice(deps);
-
-    expect(elevenlabsTtsProbe).toHaveBeenCalledOnce();
-    expect(openaiTtsProbe).not.toHaveBeenCalled();
-    expect(deps.secretsStore.putSecret).toHaveBeenCalledTimes(2);
-    expect(deps.agentStore.upsertVoiceConfig).toHaveBeenCalledWith(FAKE_TX, {
-      ttsSecretId: "secret-1",
-      sttSecretId: "secret-2",
-      ttsProvider: "elevenlabs",
-      ttsModel: "eleven_turbo_v2_5",
-      ttsVoice: "21m00Tcm4TlvDq8ikWAM",
-      ttsBaseUrl: null,
-      sttProvider: "openai",
-      sttModel: "gpt-4o-mini-transcribe",
-      sttBaseUrl: null,
-    });
-  });
-
-  it("identical key pasted across incompatible providers — stores two rows, descriptions stay accurate", async () => {
-    // Same string entered for TTS (elevenlabs) and STT (openai) — perhaps
-    // the user's clipboard happened to carry one over. Reuse must NOT
-    // collapse them into a single row named `voice_tts_key` with the
-    // description "elevenlabs API key for voice TTS" reused for STT.
-    const deps = buildDeps();
-    const sharedKey = "same-clipboard-contents-xxxxx";
-    vi.mocked(p.confirm).mockResolvedValueOnce(true); // initial confirm
-    vi.mocked(p.select).mockResolvedValueOnce("elevenlabs"); // tts type
-    vi.mocked(p.password).mockResolvedValueOnce(sharedKey); // tts key
-    vi.mocked(p.text).mockResolvedValueOnce("eleven_turbo_v2_5"); // tts model
-    vi.mocked(p.text).mockResolvedValueOnce("21m00Tcm4TlvDq8ikWAM"); // tts voice
-    vi.mocked(p.select).mockResolvedValueOnce("openai"); // stt type
-    // Different type → no reuse confirm; STT key prompted directly.
-    vi.mocked(p.password).mockResolvedValueOnce(sharedKey); // stt key (string match)
-    vi.mocked(p.text).mockResolvedValueOnce("gpt-4o-mini-transcribe");
-    elevenlabsTtsProbe.mockResolvedValueOnce({
-      audio: Buffer.alloc(0),
-      mediaType: "audio/ogg",
-    });
-
-    await stepConfigureVoice(deps);
-
-    // Two distinct rows — string match alone doesn't trigger reuse anymore.
-    expect(deps.secretsStore.putSecret).toHaveBeenCalledTimes(2);
-    expect(deps.secretsStore.putSecret).toHaveBeenNthCalledWith(1, FAKE_TX, {
-      name: "voice_tts_key",
-      plaintext: sharedKey,
-      description: "elevenlabs API key for voice TTS",
-    });
-    expect(deps.secretsStore.putSecret).toHaveBeenNthCalledWith(2, FAKE_TX, {
-      name: "voice_stt_key",
-      plaintext: sharedKey,
-      description: "openai API key for voice STT",
-    });
-    expect(deps.agentStore.upsertVoiceConfig).toHaveBeenCalledWith(
-      FAKE_TX,
-      expect.objectContaining({ ttsSecretId: "secret-1", sttSecretId: "secret-2" }),
+    expect(stepConfigureProvider).toHaveBeenCalledTimes(2);
+    expect(p.log.warn).toHaveBeenCalledWith(
+      "At least one LLM provider is required. Let's try again.",
     );
   });
 
-  it("probe fails + save-anyway — secret stored, voice_config written, markValidated NOT called", async () => {
-    const deps = buildDeps();
-    vi.mocked(p.confirm).mockResolvedValueOnce(true); // initial confirm
-    vi.mocked(p.select).mockResolvedValueOnce("openai"); // tts type
-    vi.mocked(p.password).mockResolvedValueOnce("sk-tts-key");
-    vi.mocked(p.text).mockResolvedValueOnce("gpt-4o-mini-tts");
-    vi.mocked(p.select).mockResolvedValueOnce("alloy");
-    vi.mocked(p.select).mockResolvedValueOnce("openai"); // stt type
-    vi.mocked(p.confirm).mockResolvedValueOnce(true); // reuse key
-    vi.mocked(p.text).mockResolvedValueOnce("gpt-4o-mini-transcribe");
-    openaiTtsProbe.mockRejectedValueOnce(new Error("401 unauthorized"));
-    // The save-anyway prompt resolves to true.
-    vi.mocked(p.confirm).mockResolvedValueOnce(true);
+  it("stops at a cancelled step", async () => {
+    const deps = buildWizardDeps();
+    deps.agentStore.listProviders.mockResolvedValue([PROVIDER]);
+    vi.mocked(stepConfigureVoice).mockRejectedValueOnce(new WizardCancelled());
 
-    await stepConfigureVoice(deps);
+    await expect(runWizard({ ...deps, userId: "user-1" })).rejects.toBeInstanceOf(WizardCancelled);
 
-    expect(deps.secretsStore.putSecret).toHaveBeenCalledOnce();
-    // Distinguishes a known-good-but-flaky save from a probe-validated save.
-    expect(deps.secretsStore.markValidated).not.toHaveBeenCalled();
-    expect(deps.agentStore.upsertVoiceConfig).toHaveBeenCalledOnce();
+    expect(stepConfigureGitHubIdentity).not.toHaveBeenCalled();
+    expect(stepSummary).not.toHaveBeenCalled();
   });
 });

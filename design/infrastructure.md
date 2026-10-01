@@ -99,7 +99,7 @@ Keys don't close every route — see `DEPLOYMENT.md` → Securing internal servi
 
 ## Boot-Time Blocking Policy `[confirmed]`
 
-`cogmo serve` boot is staged (`bootstrapCore` → `bootstrapSandbox` → `bootstrapSkillRunner` → `bootstrapRuntime`); each stage blocks only on work that the *first inbound request* genuinely needs. Slow or recoverable work is fire-and-forget with structured error logging.
+`cogmo serve` boot is staged (`bootstrapCore` → `bootstrapSandbox` → `bootstrapSkillRunner` → `bootstrapRuntime`, composed in `src/boot/`); each stage blocks only on work that the *first inbound request* genuinely needs. Slow or recoverable work is fire-and-forget with structured error logging.
 
 **Stays blocking** (every later path depends on it):
 - DB migrations and boot seeding, under the bootstrap advisory lock ([setup.md → Concurrent runs](setup.md#concurrent-runs))
@@ -111,7 +111,7 @@ Keys don't close every route — see `DEPLOYMENT.md` → Securing internal servi
 - Channel adapter startup (`startChannels`) — without channels open we can't receive anything
 
 **Fire-and-forget at boot**:
-- `reconcileCrashedInstances` on either backend — wrapped by `scheduleReconcileCrashedInstances` in `src/index.ts`. Reaping orphans from prior instances is recovery work; the per-minute reaper (`src/sandbox/reaper.ts`) and per-task TTL deletes cover ongoing orphans, so the boot pass only catches what the periodic reaper would catch on its next tick.
+- `reconcileCrashedInstances` on either backend — wrapped by `scheduleReconcileCrashedInstances` in `src/boot/sandbox.ts`. Reaping orphans from prior instances is recovery work; the per-minute reaper (`src/sandbox/reaper.ts`) and per-task TTL deletes cover ongoing orphans, so the boot pass only catches what the periodic reaper would catch on its next tick.
 
 **Already lazy** (verified during the audit):
 - `mcpRegistry.start()` — declared as a no-op; MCP connections happen on first tool call via the connection pool.
@@ -122,7 +122,7 @@ Keys don't close every route — see `DEPLOYMENT.md` → Securing internal servi
 
 ## Shutdown `[confirmed]`
 
-On `SIGTERM` or `SIGINT`, the Inngest connection closes first, waiting for every request in flight with no deadline. Then `cogmo serve` tears down in this order (`src/shutdown.ts`), each step finishing before the next starts:
+On `SIGTERM` or `SIGINT`, the Inngest connection closes first, waiting for every request in flight with no deadline. Then `cogmo serve` tears down in this order (`src/boot/shutdown.ts`), each step finishing before the next starts:
 
 1. **Web server** (`close(drainMs)` in `src/web/server.ts`). End every chat stream cleanly: the browser reconnects to the next process either way, and a clean end avoids a network error. Then `close()`, which refuses new connections, while idle keep-alive connections are closed every 50 ms as their requests finish. A request still in flight after 3 s has its connection closed (`closeAllConnections()`, called after `close()` as Node's docs recommend). Last, wait for the session closes the ended streams started.
 2. **Channel adapters**, concurrently. Telegram confirms the update offset past every update it handled, so none is redelivered on restart.

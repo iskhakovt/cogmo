@@ -40,6 +40,7 @@ import {
   resolveGitHubIdentity,
 } from "../../secrets/github.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
+import { describeError } from "../../util/describe-error.js";
 import { noBackgroundMaintenanceEnv } from "./git-maintenance.js";
 import type { CodingRepoRow } from "./store/index.js";
 import type { WorktreeAssignment } from "./types.js";
@@ -155,7 +156,7 @@ export async function teardownWorktree(opts: TeardownWorktreeOpts): Promise<Tear
     await removeWorktree(repoPath, worktreePath);
     return { kind: "wip_pushed_and_removed", wipRef, sha };
   } catch (err) {
-    const reason = (err as Error).message;
+    const reason = describeError(err);
     log.warn(
       { err, taskId, worktreePath, dirty, unpushed },
       "teardown: WIP push failed — keeping worktree for manual recovery",

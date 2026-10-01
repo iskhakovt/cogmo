@@ -27,6 +27,7 @@ import { logger } from "../logger.js";
 import type { AttachmentStore } from "../transport/attachment-store.js";
 import { createImageTools } from "./image-tools.js";
 import type { Service } from "./service.js";
+import type { ToolOutcome } from "./tools.js";
 
 const PROVIDER_ID = "provider-venice";
 
@@ -41,7 +42,7 @@ const FAKE_SERVICE = {} as Service;
  */
 function buildTool(rejection: unknown): {
   generateFn: ReturnType<typeof vi.fn>;
-  handler: (input: Record<string, unknown>) => Promise<string>;
+  handler: (input: Record<string, unknown>) => Promise<ToolOutcome>;
 } {
   const veniceMock = mock<VeniceImageProvider>();
   veniceMock.generate.mockRejectedValue(rejection);
@@ -91,7 +92,7 @@ describe("generate_image retry boundary", () => {
     vi.useRealTimers();
   });
 
-  it("charges one generation for a terminal failure and returns it as a tool result", async () => {
+  it("charges one generation for a terminal failure and rejects with its reason", async () => {
     const { generateFn, handler } = buildTool(
       new ImageGenerationFailedError({
         kind: "moderation_blocked",
@@ -100,12 +101,14 @@ describe("generate_image retry boundary", () => {
       }),
     );
 
-    const result = await handler({ prompt: "x", model: "sd35" });
+    const outcome = await handler({ prompt: "x", model: "sd35" });
 
     // The `failure.reason` survived the retry wrapper — proof the handler
     // never handed the AbortError to p-retry, which would have replaced it
     // with a plain Error and left the LLM with a thrown exception.
-    expect(result).toBe("Error: Venice rejected the prompt as a content policy violation.");
+    expect(outcome._unsafeUnwrapErr().message).toBe(
+      "Venice rejected the prompt as a content policy violation.",
+    );
     expect(generateFn).toHaveBeenCalledTimes(1);
   });
 

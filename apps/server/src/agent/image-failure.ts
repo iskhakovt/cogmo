@@ -120,7 +120,7 @@ export function detectImageFailure(input: {
             reason:
               `image was flagged as nsfw by fal${conceptHint}. ` +
               "The provider returned a placeholder instead of the requested image — " +
-              "rephrase the prompt to rephrase the prompt, or pick a different model.",
+              "rephrase the prompt, or pick a different model.",
           },
         };
       }

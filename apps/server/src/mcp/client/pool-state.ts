@@ -1,6 +1,6 @@
 import { err, ok, type Result } from "neverthrow";
 import { match, P } from "ts-pattern";
-import { McpPoolError, type McpPoolErrorCode } from "../errors.js";
+import { describeMcpPoolError, type McpPoolError } from "../errors.js";
 import type { McpConnection } from "./client.js";
 
 /**
@@ -37,7 +37,7 @@ import type { McpConnection } from "./client.js";
 export const MAX_CONNECT_ATTEMPTS = 2;
 
 /** A `getConnection` call waiting for its outcome. */
-export type Waiter = (result: Result<McpConnection, Error>) => void;
+export type Waiter = (result: Result<McpConnection, McpPoolError>) => void;
 
 export type EntryState =
   /**
@@ -75,7 +75,7 @@ export type PoolEvent =
    * The connect running under `signal` failed. `spent` when it reached the
    * runner: one that failed looking up the server spawned nothing.
    */
-  | { type: "spawn_failed"; signal: AbortSignal; error: Error; spent: boolean }
+  | { type: "spawn_failed"; signal: AbortSignal; failure: McpPoolError; spent: boolean }
   | { type: "transport_closed"; connection: McpConnection }
   /** The server was removed. */
   | { type: "evict" }
@@ -90,7 +90,7 @@ export type PoolEffect =
   | { type: "connect"; signal: AbortSignal }
   /** Abandon a connect, or end a live connection's watch. */
   | { type: "abort"; controller: AbortController }
-  | { type: "settle"; waiters: ReadonlyArray<Waiter>; result: Result<McpConnection, Error> }
+  | { type: "settle"; waiters: ReadonlyArray<Waiter>; result: Result<McpConnection, McpPoolError> }
   | { type: "close"; connection: McpConnection }
   /**
    * Until `signal` aborts, report `connection`'s transport closing, and arm
@@ -135,7 +135,7 @@ function onGet(
       step({ ...s, lastUsedAt: at }, [settle([waiter], ok(s.connection))]),
     )
     .with({ kind: "unhealthy" }, (s) =>
-      step(s, [settle([waiter], err(new McpPoolError("server_unhealthy", s.lastError)))]),
+      step(s, [settle([waiter], err({ code: "server_unhealthy", lastError: s.lastError }))]),
     )
     .exhaustive();
 }
@@ -172,20 +172,21 @@ function onSpawned(
  */
 function onSpawnFailed(
   entry: EntryState | undefined,
-  { signal, error, spent }: Extract<PoolEvent, { type: "spawn_failed" }>,
+  { signal, failure, spent }: Extract<PoolEvent, { type: "spawn_failed" }>,
 ): Transition {
   return match<EntryState | undefined, Transition>(entry)
     .with(
       { kind: "connecting" },
       (s) => s.abort.signal === signal,
       (s) => {
-        const failed = settle(s.waiters, err(error));
+        const failed = settle(s.waiters, err(failure));
         if (!spent) return step(closedAfter(s.attempt - 1), [failed]);
+        const message = describeMcpPoolError(failure);
         const next: EntryState =
           s.attempt >= MAX_CONNECT_ATTEMPTS
-            ? { kind: "unhealthy", lastError: error.message }
+            ? { kind: "unhealthy", lastError: message }
             : { kind: "closed", failedAttempts: s.attempt };
-        return step(next, [failed, { type: "record_error", message: error.message }]);
+        return step(next, [failed, { type: "record_error", message }]);
       },
     )
     .with(ANY_ENTRY, (s) => step(s, []))
@@ -248,10 +249,10 @@ function onIdle(
  * Forget the entry: an in-flight connect is aborted and its waiters fail
  * with `code`; a live connection is closed.
  */
-function end(entry: EntryState | undefined, code: McpPoolErrorCode): Transition {
+function end(entry: EntryState | undefined, code: "evicted" | "pool_closed"): Transition {
   return match<EntryState | undefined, Transition>(entry)
     .with({ kind: "connecting" }, (s) =>
-      step(undefined, [abortEffect(s.abort), settle(s.waiters, err(new McpPoolError(code)))]),
+      step(undefined, [abortEffect(s.abort), settle(s.waiters, err({ code }))]),
     )
     .with({ kind: "live" }, (s) =>
       step(undefined, [abortEffect(s.abort), { type: "close", connection: s.connection }]),
@@ -273,7 +274,10 @@ function closedAfter(failedAttempts: number): EntryState | undefined {
   return failedAttempts === 0 ? undefined : { kind: "closed", failedAttempts };
 }
 
-function settle(waiters: ReadonlyArray<Waiter>, result: Result<McpConnection, Error>): PoolEffect {
+function settle(
+  waiters: ReadonlyArray<Waiter>,
+  result: Result<McpConnection, McpPoolError>,
+): PoolEffect {
   return { type: "settle", waiters, result };
 }
 

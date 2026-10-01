@@ -1,6 +1,6 @@
 /**
  * Daytona managed-sandbox auth — the secret-store key shared by the
- * runtime read path (`src/index.ts`), the setup wizard, and the
+ * runtime read path (`src/boot/sandbox.ts`), the setup wizard, and the
  * non-interactive bootstrap.
  *
  * Mirrors the pattern from `src/agent/coding/auth.ts`: the constant lives

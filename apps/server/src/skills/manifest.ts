@@ -60,3 +60,8 @@ export function parseManifest(source: string): Result<ParsedManifest, ManifestPa
 
   return ok({ manifest: parsed.data, body });
 }
+
+/** The parse error as author-facing lines: the schema issues, or its one message. */
+export function manifestErrorIssues(error: ManifestParseError): readonly string[] {
+  return error.kind === "invalid_manifest" ? error.issues : [error.message];
+}

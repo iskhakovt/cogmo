@@ -3,7 +3,6 @@ import { err, ok, type Result } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import {
-  CtxError,
   type CtxHandler,
   Dispatcher,
   type DispatcherOptions,
@@ -84,7 +83,7 @@ async function leased(ch: Channel, opts: Partial<DispatcherOptions> = {}): Promi
 
 function noopHandler(): CtxHandler {
   const handler = mock<CtxHandler>();
-  handler.handle.mockResolvedValue(null);
+  handler.handle.mockResolvedValue(ok(null));
   return handler;
 }
 
@@ -200,7 +199,7 @@ describe("Dispatcher", () => {
     const ch = channel();
     const handler = mock<CtxHandler>();
     handler.handle.mockImplementation(async ({ method, args }) => {
-      if (method === "secrets.get" && (args as { name: string }).name === "foo") return "bar";
+      if (method === "secrets.get" && (args as { name: string }).name === "foo") return ok("bar");
       throw new Error("unexpected call");
     });
     const d = await leased(ch);
@@ -225,10 +224,12 @@ describe("Dispatcher", () => {
     await outcome;
   });
 
-  it("surfaces CtxError as a typed ctx_result with errorKind", async () => {
+  it("answers a refusal as a typed ctx_result with errorKind", async () => {
     const ch = channel();
     const handler = mock<CtxHandler>();
-    handler.handle.mockRejectedValue(new CtxError("not_in_allowlist", "secret 'x' not declared"));
+    handler.handle.mockResolvedValue(
+      err({ kind: "not_in_allowlist", message: "secret 'x' not declared" }),
+    );
     const d = await leased(ch);
 
     d.invoke(INVOKE, { ctxHandler: handler, deadline: NEVER });
@@ -254,7 +255,7 @@ describe("Dispatcher", () => {
     d.close("done");
   });
 
-  it("wraps non-CtxError exceptions as errorKind: internal", async () => {
+  it("answers a handler that throws as errorKind: internal", async () => {
     const ch = channel();
     const handler = mock<CtxHandler>();
     handler.handle.mockRejectedValue(new Error("boom"));
@@ -283,7 +284,7 @@ describe("Dispatcher", () => {
     const handler = mock<CtxHandler>();
     handler.handle.mockImplementation(({ args }) => {
       const id = (args as { id: string }).id;
-      return new Promise((resolve) => resolvers.set(id, resolve));
+      return new Promise((resolve) => resolvers.set(id, (v) => resolve(ok(v))));
     });
     const d = await leased(ch);
 
@@ -308,7 +309,7 @@ describe("Dispatcher", () => {
   it("handles 100 concurrent ctx calls without dropping any", async () => {
     const ch = channel();
     const handler = mock<CtxHandler>();
-    handler.handle.mockImplementation(async ({ args }) => (args as { i: number }).i * 2);
+    handler.handle.mockImplementation(async ({ args }) => ok((args as { i: number }).i * 2));
     const d = await leased(ch);
 
     d.invoke(INVOKE, { ctxHandler: handler, deadline: NEVER });
@@ -464,9 +465,9 @@ describe("Dispatcher", () => {
     const d = await leased(ch);
 
     const handlerA = mock<CtxHandler>();
-    handlerA.handle.mockResolvedValue("A");
+    handlerA.handle.mockResolvedValue(ok("A"));
     const handlerB = mock<CtxHandler>();
-    handlerB.handle.mockResolvedValue("B");
+    handlerB.handle.mockResolvedValue(ok("B"));
 
     ch.onSend((m) => {
       if (m.type === "task_invoke") {
@@ -589,7 +590,9 @@ describe("Dispatcher", () => {
       const d = await leased(ch);
       let release: (v: unknown) => void = () => {};
       const handler = mock<CtxHandler>();
-      handler.handle.mockImplementation(() => new Promise((resolve) => (release = resolve)));
+      handler.handle.mockImplementation(
+        () => new Promise((resolve) => (release = (v) => resolve(ok(v)))),
+      );
 
       const outcome = d.invoke(INVOKE, { ctxHandler: handler, deadline: NEVER });
       ch.emit({ type: "ctx_call", taskId: "task-1", id: "c", method: "now", args: {} });
@@ -609,7 +612,9 @@ describe("Dispatcher", () => {
       const d = await leased(ch);
       let release: (v: unknown) => void = () => {};
       const handler = mock<CtxHandler>();
-      handler.handle.mockImplementation(() => new Promise((resolve) => (release = resolve)));
+      handler.handle.mockImplementation(
+        () => new Promise((resolve) => (release = (v) => resolve(ok(v)))),
+      );
 
       const outcome = d.invoke(INVOKE, { ctxHandler: handler, deadline: NEVER });
       ch.emit({ type: "ctx_call", taskId: "task-1", id: "c", method: "now", args: {} });

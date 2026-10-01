@@ -3,6 +3,7 @@ import { mkdir, rename, rm, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { logger } from "../../logger.js";
+import { describeError } from "../../util/describe-error.js";
 
 const execFileP = promisify(execFile);
 const log = logger.child({ component: "coding.worktree" });
@@ -126,10 +127,10 @@ export async function removeWorktree(repoPath: string, worktreePath: string): Pr
   // thing that notices.
   const retry = { recursive: true, force: true, maxRetries: 3, retryDelay: 50 } as const;
   await rm(worktreePath, retry).catch((err) => {
-    log.warn({ err: (err as Error).message, worktreePath }, "failed to remove working tree");
+    log.warn({ err: describeError(err), worktreePath }, "failed to remove working tree");
   });
   await rm(stagingPathFor(worktreePath), retry).catch((err) => {
-    log.warn({ err: (err as Error).message, worktreePath }, "failed to remove staging dir");
+    log.warn({ err: describeError(err), worktreePath }, "failed to remove staging dir");
   });
   await pruneWorktreeMetadata(repoPath, worktreePath);
 }
@@ -169,7 +170,7 @@ async function classifyPath(worktreePath: string): Promise<PathClass> {
 
 async function pruneWorktreeMetadata(repoPath: string, worktreePath: string): Promise<void> {
   await git(repoPath, ["worktree", "prune"]).catch((err) => {
-    log.warn({ err: (err as Error).message, worktreePath }, "git worktree prune failed");
+    log.warn({ err: describeError(err), worktreePath }, "git worktree prune failed");
   });
 }
 

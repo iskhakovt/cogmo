@@ -1,5 +1,6 @@
+import { ok } from "neverthrow";
 import { z } from "zod";
-import { defineTool, type ToolSpec } from "../tools.js";
+import { defineTool, reject, type ToolSpec } from "../tools.js";
 
 const DelegateCodingInput = z.object({
   goal: z
@@ -23,7 +24,7 @@ export const DELEGATE_CODING_GUIDANCE = `You can delegate multi-step coding work
 - Do NOT speculate about plan content, file lists, or expected outcomes. The CLI's own plan is authoritative; your guesses would conflict with it.
 - Do NOT call the tool a second time for the same goal — the first call is already running. Cancel via the message keyboard if needed.
 
-If the sandbox is not initialized (dev machine without SANDBOX_RUNTIME), the tool throws a clear error — relay the message to the user and suggest they configure it. If the repo has reached its concurrent-task limit, the tool returns \`status: "rejected"\` with a reason — surface it.`;
+If the tool returns an error — the sandbox isn't initialized, or the repo has reached its concurrent-task limit — relay its message to the user.`;
 
 export const delegateCodingTool: ToolSpec = defineTool({
   name: "delegate_coding",
@@ -38,7 +39,7 @@ export const delegateCodingTool: ToolSpec = defineTool({
   schema: DelegateCodingInput,
   handler: async ({ goal, repo }, service, ctx) => {
     if (!service.coding) {
-      throw new Error(
+      return reject(
         "Coding delegation is unavailable — the sandbox module is not initialized. " +
           "Set SANDBOX_RUNTIME (sysbox in prod, runc for dev/CI) and restart Cogmo.",
       );
@@ -51,31 +52,33 @@ export const delegateCodingTool: ToolSpec = defineTool({
       repoName: repo,
       ...(ctx !== undefined && { idempotencyKey: `delegate_coding:${ctx.idempotencyKey}` }),
     });
-    if (result.status === "rejected") {
-      return JSON.stringify({ ok: false, reason: result.reason });
-    }
+    if (result.status === "rejected") return reject(result.reason);
     if (result.status === "recovered") {
       // Already submitted on a prior attempt. Report where that task
       // actually is — announcing a `failed` one as freshly queued would have
       // the model tell the user work is under way that is not.
-      return JSON.stringify({
+      return ok(
+        JSON.stringify({
+          ok: true,
+          taskId: result.taskId,
+          status: result.priorStatus,
+          nextStep:
+            "This request was already submitted and its task is in the status above. " +
+            "Do not submit it again. Tell the user the current state; if it is `failed` " +
+            "or `cancelled`, ask whether they want it re-run.",
+        }),
+      );
+    }
+    return ok(
+      JSON.stringify({
         ok: true,
         taskId: result.taskId,
-        status: result.priorStatus,
+        status: result.status,
         nextStep:
-          "This request was already submitted and its task is in the status above. " +
-          "Do not submit it again. Tell the user the current state; if it is `failed` " +
-          "or `cancelled`, ask whether they want it re-run.",
-      });
-    }
-    return JSON.stringify({
-      ok: true,
-      taskId: result.taskId,
-      status: result.status,
-      nextStep:
-        "Task submitted. The plan will post as a separate message with Approve / Revise / Cancel " +
-        "buttons. Acknowledge the submission to the user and stop — don't speculate about plan " +
-        "content.",
-    });
+          "Task submitted. The plan will post as a separate message with Approve / Revise / Cancel " +
+          "buttons. Acknowledge the submission to the user and stop — don't speculate about plan " +
+          "content.",
+      }),
+    );
   },
 });

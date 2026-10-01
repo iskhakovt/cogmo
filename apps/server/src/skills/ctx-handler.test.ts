@@ -1,3 +1,4 @@
+import { err, ok, type Result } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import { type MockProxy, mock } from "vitest-mock-extended";
 import type { Service } from "../agent/service.js";
@@ -6,13 +7,23 @@ import type { SecretsStore } from "../secrets/store/index.js";
 import { mockFilesService } from "../test/factories.js";
 import type { DefaultCtxHandlerOptions } from "./ctx-handler.js";
 import { DefaultCtxHandler } from "./ctx-handler.js";
-import { CtxError } from "./dispatcher.js";
+import type { CtxFailure } from "./dispatcher.js";
 import { parseManifest } from "./manifest.js";
 import type { SkillRunServices } from "./run-as.js";
 import type { SkillManifest } from "./types.js";
 
 const FAKE_TX = { __mockTx: true } as never;
 const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
+
+/** The value a call was served; fails the test on a refusal. */
+async function served(call: Promise<Result<unknown, CtxFailure>>): Promise<unknown> {
+  return (await call)._unsafeUnwrap();
+}
+
+/** Why a call was refused; fails the test if it was served. */
+async function refusal(call: Promise<Result<unknown, CtxFailure>>): Promise<CtxFailure> {
+  return (await call)._unsafeUnwrapErr();
+}
 
 function manifest(overrides: string = ""): SkillManifest {
   const source = `---
@@ -100,7 +111,7 @@ describe("DefaultCtxHandler", () => {
       vi.mocked(d.secretsStore.getSecret).mockResolvedValue("sk-123");
       const h = makeHandler(m, d);
 
-      const value = await h.handle({ method: "secrets.get", args: { name: "api_key" } });
+      const value = await served(h.handle({ method: "secrets.get", args: { name: "api_key" } }));
       expect(value).toBe("sk-123");
       expect(d.recordContextCall).toHaveBeenCalledWith({
         runId: "run-1",
@@ -109,6 +120,7 @@ describe("DefaultCtxHandler", () => {
         ok: true,
         error: null,
       });
+      expect(d.recordContextCall).toHaveBeenCalledTimes(1);
     });
 
     it("rejects an undeclared secret with not_in_allowlist", async () => {
@@ -116,9 +128,9 @@ describe("DefaultCtxHandler", () => {
       const d = deps();
       const h = makeHandler(m, d);
 
-      await expect(
-        h.handle({ method: "secrets.get", args: { name: "api_key" } }),
-      ).rejects.toMatchObject({ kind: "not_in_allowlist" });
+      expect(
+        await refusal(h.handle({ method: "secrets.get", args: { name: "api_key" } })),
+      ).toMatchObject({ kind: "not_in_allowlist" });
 
       expect(d.recordContextCall).toHaveBeenCalledWith({
         runId: "run-1",
@@ -127,6 +139,7 @@ describe("DefaultCtxHandler", () => {
         ok: false,
         error: "not_in_allowlist",
       });
+      expect(d.recordContextCall).toHaveBeenCalledTimes(1);
       // Crucially: never records the value.
       expect(d.secretsStore.getSecret).not.toHaveBeenCalled();
     });
@@ -137,9 +150,9 @@ describe("DefaultCtxHandler", () => {
       vi.mocked(d.secretsStore.getSecret).mockResolvedValue(undefined);
       const h = makeHandler(m, d);
 
-      await expect(
-        h.handle({ method: "secrets.get", args: { name: "api_key" } }),
-      ).rejects.toMatchObject({ kind: "secret_not_found" });
+      expect(
+        await refusal(h.handle({ method: "secrets.get", args: { name: "api_key" } })),
+      ).toMatchObject({ kind: "secret_not_found" });
     });
 
     it("rejects malformed args with invalid_args", async () => {
@@ -147,7 +160,9 @@ describe("DefaultCtxHandler", () => {
       const d = deps();
       const h = makeHandler(m, d);
 
-      await expect(h.handle({ method: "secrets.get", args: {} })).rejects.toBeInstanceOf(CtxError);
+      expect(await refusal(h.handle({ method: "secrets.get", args: {} }))).toMatchObject({
+        kind: "invalid_args",
+      });
     });
   });
 
@@ -159,10 +174,12 @@ describe("DefaultCtxHandler", () => {
       const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(okResponse('{"ok":1}'));
       try {
         const h = makeHandler(httpManifest(), deps());
-        const out = await h.handle({
-          method: "http.request",
-          args: { method: "GET", url: "https://api.example.com/v1/things" },
-        });
+        const out = await served(
+          h.handle({
+            method: "http.request",
+            args: { method: "GET", url: "https://api.example.com/v1/things" },
+          }),
+        );
         expect(out).toMatchObject({ status: 200, body: '{"ok":1}' });
       } finally {
         fetchMock.mockRestore();
@@ -174,10 +191,12 @@ describe("DefaultCtxHandler", () => {
       try {
         const d = deps();
         const h = makeHandler(httpManifest(), d);
-        await h.handle({
-          method: "http.request",
-          args: { method: "GET", url: "https://api.example.com/v1/things?api_key=hunter2" },
-        });
+        await served(
+          h.handle({
+            method: "http.request",
+            args: { method: "GET", url: "https://api.example.com/v1/things?api_key=hunter2" },
+          }),
+        );
         expect(d.recordContextCall).toHaveBeenCalledWith(
           expect.objectContaining({
             method: "http.request",
@@ -201,10 +220,12 @@ describe("DefaultCtxHandler", () => {
           .fn<NonNullable<DefaultCtxHandlerOptions["fetch"]>>()
           .mockResolvedValue(okResponse('{"stub":1}'));
         const h = makeHandler(httpManifest(), deps(), undefined, injected);
-        const out = await h.handle({
-          method: "http.request",
-          args: { method: "GET", url: "https://api.example.com/v1/things" },
-        });
+        const out = await served(
+          h.handle({
+            method: "http.request",
+            args: { method: "GET", url: "https://api.example.com/v1/things" },
+          }),
+        );
         expect(out).toMatchObject({ status: 200, body: '{"stub":1}' });
         expect(injected).toHaveBeenCalledWith(
           "https://api.example.com/v1/things",
@@ -229,12 +250,16 @@ describe("DefaultCtxHandler", () => {
           async () => [{ address: "127.0.0.1", family: 4 }],
           injected,
         );
-        await expect(
-          h.handle({
-            method: "http.request",
-            args: { method: "GET", url: "http://hindsight.internal:8888/v1/banks" },
-          }),
-        ).rejects.toThrow(/host's own network/);
+        expect(
+          (
+            await refusal(
+              h.handle({
+                method: "http.request",
+                args: { method: "GET", url: "http://hindsight.internal:8888/v1/banks" },
+              }),
+            )
+          ).message,
+        ).toMatch(/host's own network/);
         expect(injected).not.toHaveBeenCalled();
         expect(globalFetch).not.toHaveBeenCalled();
         expect(d.recordContextCall).toHaveBeenCalledWith(
@@ -263,12 +288,16 @@ describe("DefaultCtxHandler", () => {
         try {
           const d = deps();
           const h = makeHandler(httpManifest(), d, async () => [{ address, family }]);
-          await expect(
-            h.handle({
-              method: "http.request",
-              args: { method: "GET", url: "http://hindsight.internal:8888/v1/banks" },
-            }),
-          ).rejects.toThrow(/host's own network/);
+          expect(
+            (
+              await refusal(
+                h.handle({
+                  method: "http.request",
+                  args: { method: "GET", url: "http://hindsight.internal:8888/v1/banks" },
+                }),
+              )
+            ).message,
+          ).toMatch(/host's own network/);
           expect(fetchMock).not.toHaveBeenCalled();
           expect(d.recordContextCall).toHaveBeenCalledWith(
             expect.objectContaining({ ok: false, error: "blocked_destination" }),
@@ -305,12 +334,16 @@ describe("DefaultCtxHandler", () => {
       const fetchMock = vi.spyOn(globalThis, "fetch");
       try {
         const h = makeHandler(httpManifest(), deps(), async () => [{ address, family: 6 }]);
-        await expect(
-          h.handle({
-            method: "http.request",
-            args: { method: "GET", url: "http://internal.example/x" },
-          }),
-        ).rejects.toThrow(/host's own network/);
+        expect(
+          (
+            await refusal(
+              h.handle({
+                method: "http.request",
+                args: { method: "GET", url: "http://internal.example/x" },
+              }),
+            )
+          ).message,
+        ).toMatch(/host's own network/);
         expect(fetchMock).not.toHaveBeenCalled();
       } finally {
         fetchMock.mockRestore();
@@ -323,10 +356,12 @@ describe("DefaultCtxHandler", () => {
         const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(okResponse("{}"));
         try {
           const h = makeHandler(httpManifest(), deps(), async () => [{ address, family: 6 }]);
-          const out = await h.handle({
-            method: "http.request",
-            args: { method: "GET", url: "https://api.example.com/x" },
-          });
+          const out = await served(
+            h.handle({
+              method: "http.request",
+              args: { method: "GET", url: "https://api.example.com/x" },
+            }),
+          );
           expect(out).toMatchObject({ status: 200 });
         } finally {
           fetchMock.mockRestore();
@@ -340,12 +375,16 @@ describe("DefaultCtxHandler", () => {
         const h = makeHandler(httpManifest(), deps(), async () => [
           { address: "not:an:address:at:all:::", family: 6 },
         ]);
-        await expect(
-          h.handle({
-            method: "http.request",
-            args: { method: "GET", url: "http://weird.example/x" },
-          }),
-        ).rejects.toThrow(/host's own network/);
+        expect(
+          (
+            await refusal(
+              h.handle({
+                method: "http.request",
+                args: { method: "GET", url: "http://weird.example/x" },
+              }),
+            )
+          ).message,
+        ).toMatch(/host's own network/);
         expect(fetchMock).not.toHaveBeenCalled();
       } finally {
         fetchMock.mockRestore();
@@ -363,9 +402,16 @@ describe("DefaultCtxHandler", () => {
           seen.push(hostname);
           return [{ address: "::1", family: 6 }];
         });
-        await expect(
-          h.handle({ method: "http.request", args: { method: "GET", url: "http://[::1]:8888/x" } }),
-        ).rejects.toThrow(/not in this skill's network\.allow list/);
+        expect(
+          (
+            await refusal(
+              h.handle({
+                method: "http.request",
+                args: { method: "GET", url: "http://[::1]:8888/x" },
+              }),
+            )
+          ).message,
+        ).toMatch(/not in this skill's network\.allow list/);
         // Refused ahead of resolution, so it never became a DNS query.
         expect(seen).toEqual([]);
         expect(fetchMock).not.toHaveBeenCalled();
@@ -385,12 +431,16 @@ describe("DefaultCtxHandler", () => {
           d,
           () => new Promise(() => {}), // never resolves
         );
-        await expect(
-          h.handle({
-            method: "http.request",
-            args: { method: "GET", url: "https://slow-dns.example/x", timeoutMs: 20 },
-          }),
-        ).rejects.toThrow(/timed out/);
+        expect(
+          (
+            await refusal(
+              h.handle({
+                method: "http.request",
+                args: { method: "GET", url: "https://slow-dns.example/x", timeoutMs: 20 },
+              }),
+            )
+          ).message,
+        ).toMatch(/timed out/);
         expect(fetchMock).not.toHaveBeenCalled();
         // A resolver deadline is a timeout, not a transport failure —
         // one is worth retrying and the other usually is not.
@@ -406,10 +456,12 @@ describe("DefaultCtxHandler", () => {
       const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(okResponse("{}"));
       try {
         const h = makeHandler(httpManifest(), deps());
-        const out = await h.handle({
-          method: "http.request",
-          args: { method: "GET", url: "https://api.example.com/x" },
-        });
+        const out = await served(
+          h.handle({
+            method: "http.request",
+            args: { method: "GET", url: "https://api.example.com/x" },
+          }),
+        );
         expect(out).toMatchObject({ status: 200 });
       } finally {
         fetchMock.mockRestore();
@@ -426,10 +478,12 @@ describe("DefaultCtxHandler", () => {
         );
       try {
         const h = makeHandler(httpManifest(), deps());
-        const out = (await h.handle({
-          method: "http.request",
-          args: { method: "GET", url: "https://api.example.com/start" },
-        })) as { status: number; headers: Record<string, string> };
+        const out = (await served(
+          h.handle({
+            method: "http.request",
+            args: { method: "GET", url: "https://api.example.com/start" },
+          }),
+        )) as { status: number; headers: Record<string, string> };
         expect(out.status).toBe(302);
         expect(out.headers.location).toBe("http://127.0.0.1:8888/");
         expect(fetchMock).toHaveBeenCalledWith(
@@ -449,10 +503,12 @@ describe("DefaultCtxHandler", () => {
       const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(okResponse("{}"));
       try {
         const h = makeHandler(httpManifest("resources:\n  wall_clock_s: 5"), deps());
-        await h.handle({
-          method: "http.request",
-          args: { method: "GET", url: "https://api.example.com/x" },
-        });
+        await served(
+          h.handle({
+            method: "http.request",
+            args: { method: "GET", url: "https://api.example.com/x" },
+          }),
+        );
         const asked = timeoutSpy.mock.calls.at(-1)?.[0] as number;
         expect(asked).toBeGreaterThan(3_000);
         expect(asked).toBeLessThanOrEqual(4_000);
@@ -470,10 +526,12 @@ describe("DefaultCtxHandler", () => {
       const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(okResponse("{}"));
       try {
         const h = makeHandler({ ...httpManifest(), tier: "container" }, deps());
-        await h.handle({
-          method: "http.request",
-          args: { method: "GET", url: "https://api.example.com/x", timeoutMs: 120_000 },
-        });
+        await served(
+          h.handle({
+            method: "http.request",
+            args: { method: "GET", url: "https://api.example.com/x", timeoutMs: 120_000 },
+          }),
+        );
         const asked = timeoutSpy.mock.calls.at(-1)?.[0] as number;
         expect(asked).toBeGreaterThan(54_000);
         expect(asked).toBeLessThanOrEqual(55_000);
@@ -490,10 +548,12 @@ describe("DefaultCtxHandler", () => {
       const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(okResponse("{}"));
       try {
         const h = makeHandler(httpManifest("resources:\n  wall_clock_s: 20"), deps());
-        await h.handle({
-          method: "http.request",
-          args: { method: "GET", url: "https://api.example.com/x", timeoutMs: 60_000 },
-        });
+        await served(
+          h.handle({
+            method: "http.request",
+            args: { method: "GET", url: "https://api.example.com/x", timeoutMs: 60_000 },
+          }),
+        );
         // 20s wall clock less a 20% margin, not the 60s asked for. A
         // range, not an equality: the fetch deadline is the budget less
         // whatever resolution consumed, so an exact figure would flake.
@@ -510,10 +570,12 @@ describe("DefaultCtxHandler", () => {
       const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(okResponse("{}"));
       try {
         const h = makeHandler(httpManifest(), deps());
-        const out = (await h.handle({
-          method: "http.request",
-          args: { method: "GET", url: "https://api.example.com/x" },
-        })) as { headers: Record<string, string> };
+        const out = (await served(
+          h.handle({
+            method: "http.request",
+            args: { method: "GET", url: "https://api.example.com/x" },
+          }),
+        )) as { headers: Record<string, string> };
         expect(out.headers["content-type"]).toBe("application/json");
       } finally {
         fetchMock.mockRestore();
@@ -530,12 +592,16 @@ describe("DefaultCtxHandler", () => {
       try {
         const d = deps();
         const h = makeHandler(httpManifest(), d);
-        await expect(
-          h.handle({
-            method: "http.request",
-            args: { method: "GET", url: "https://api.example.com/slow" },
-          }),
-        ).rejects.toThrow(/failed/);
+        expect(
+          (
+            await refusal(
+              h.handle({
+                method: "http.request",
+                args: { method: "GET", url: "https://api.example.com/slow" },
+              }),
+            )
+          ).message,
+        ).toMatch(/failed/);
         expect(d.recordContextCall).toHaveBeenCalledWith(
           expect.objectContaining({ ok: false, error: "timeout" }),
         );
@@ -559,12 +625,16 @@ describe("DefaultCtxHandler", () => {
       try {
         const d = deps();
         const h = makeHandler(httpManifest(), d);
-        await expect(
-          h.handle({
-            method: "http.request",
-            args: { method: "GET", url: "https://api.example.com/stall" },
-          }),
-        ).rejects.toThrow(/mid-body/);
+        expect(
+          (
+            await refusal(
+              h.handle({
+                method: "http.request",
+                args: { method: "GET", url: "https://api.example.com/stall" },
+              }),
+            )
+          ).message,
+        ).toMatch(/mid-body/);
         expect(d.recordContextCall).toHaveBeenCalledWith(
           expect.objectContaining({ ok: false, error: "timeout" }),
         );
@@ -579,10 +649,12 @@ describe("DefaultCtxHandler", () => {
         .mockResolvedValue(new Response(null, { status: 204 }));
       try {
         const h = makeHandler(httpManifest(), deps());
-        const out = await h.handle({
-          method: "http.request",
-          args: { method: "DELETE", url: "https://api.example.com/thing" },
-        });
+        const out = await served(
+          h.handle({
+            method: "http.request",
+            args: { method: "DELETE", url: "https://api.example.com/thing" },
+          }),
+        );
         expect(out).toMatchObject({ status: 204, body: "" });
       } finally {
         fetchMock.mockRestore();
@@ -595,10 +667,12 @@ describe("DefaultCtxHandler", () => {
         .mockResolvedValue(okResponse("not found", 404));
       try {
         const h = makeHandler(httpManifest(), deps());
-        const out = await h.handle({
-          method: "http.request",
-          args: { method: "GET", url: "https://api.example.com/missing" },
-        });
+        const out = await served(
+          h.handle({
+            method: "http.request",
+            args: { method: "GET", url: "https://api.example.com/missing" },
+          }),
+        );
         expect(out).toMatchObject({ status: 404, body: "not found" });
       } finally {
         fetchMock.mockRestore();
@@ -611,9 +685,10 @@ describe("DefaultCtxHandler", () => {
         const fetchMock = vi.spyOn(globalThis, "fetch");
         try {
           const h = makeHandler(httpManifest(), deps());
-          await expect(
-            h.handle({ method: "http.request", args: { method: "GET", url } }),
-          ).rejects.toThrow(/supports http and https/);
+          expect(
+            (await refusal(h.handle({ method: "http.request", args: { method: "GET", url } })))
+              .message,
+          ).toMatch(/supports http and https/);
           expect(fetchMock).not.toHaveBeenCalled();
         } finally {
           fetchMock.mockRestore();
@@ -634,12 +709,16 @@ describe("DefaultCtxHandler", () => {
         .mockResolvedValue(new Response(stream, { status: 200 }));
       try {
         const h = makeHandler(httpManifest(), deps());
-        await expect(
-          h.handle({
-            method: "http.request",
-            args: { method: "GET", url: "https://api.example.com/big" },
-          }),
-        ).rejects.toThrow(/exceeded/);
+        expect(
+          (
+            await refusal(
+              h.handle({
+                method: "http.request",
+                args: { method: "GET", url: "https://api.example.com/big" },
+              }),
+            )
+          ).message,
+        ).toMatch(/exceeded/);
       } finally {
         fetchMock.mockRestore();
       }
@@ -650,12 +729,16 @@ describe("DefaultCtxHandler", () => {
       try {
         const d = deps();
         const h = makeHandler(httpManifest(), d);
-        await expect(
-          h.handle({
-            method: "http.request",
-            args: { method: "GET", url: "https://api.example.com/x" },
-          }),
-        ).rejects.toThrow(/api\.example\.com/);
+        expect(
+          (
+            await refusal(
+              h.handle({
+                method: "http.request",
+                args: { method: "GET", url: "https://api.example.com/x" },
+              }),
+            )
+          ).message,
+        ).toMatch(/api\.example\.com/);
         expect(d.recordContextCall).toHaveBeenCalledWith(
           expect.objectContaining({ ok: false, error: "network_error" }),
         );
@@ -666,9 +749,10 @@ describe("DefaultCtxHandler", () => {
 
     it("rejects a malformed request shape", async () => {
       const h = makeHandler(httpManifest(), deps());
-      await expect(
-        h.handle({ method: "http.request", args: { url: "https://example.com" } }),
-      ).rejects.toThrow(/expects/);
+      expect(
+        (await refusal(h.handle({ method: "http.request", args: { url: "https://example.com" } })))
+          .message,
+      ).toMatch(/expects/);
     });
 
     describe("network allowlist", () => {
@@ -682,12 +766,16 @@ describe("DefaultCtxHandler", () => {
             seen.push(hostname);
             return [{ address: "93.184.216.34", family: 4 }];
           });
-          await expect(
-            h.handle({
-              method: "http.request",
-              args: { method: "GET", url: "https://api.example.com/v1" },
-            }),
-          ).rejects.toThrow(/declares no 'network:' block/);
+          expect(
+            (
+              await refusal(
+                h.handle({
+                  method: "http.request",
+                  args: { method: "GET", url: "https://api.example.com/v1" },
+                }),
+              )
+            ).message,
+          ).toMatch(/declares no 'network:' block/);
           // Ahead of resolution, so a destination the skill never declared
           // does not even leak as a DNS query.
           expect(seen).toEqual([]);
@@ -700,12 +788,12 @@ describe("DefaultCtxHandler", () => {
       it("records a refused destination in the audit as not_in_allowlist", async () => {
         const d = deps();
         const h = makeHandler(manifest(""), d, publicAddress);
-        await expect(
+        await refusal(
           h.handle({
             method: "http.request",
             args: { method: "GET", url: "https://api.example.com/v1" },
           }),
-        ).rejects.toThrow();
+        );
         expect(d.recordContextCall).toHaveBeenCalledWith(
           expect.objectContaining({
             method: "http.request",
@@ -720,12 +808,16 @@ describe("DefaultCtxHandler", () => {
         const fetchMock = vi.spyOn(globalThis, "fetch");
         try {
           const h = makeHandler(httpManifest(), deps(), publicAddress);
-          await expect(
-            h.handle({
-              method: "http.request",
-              args: { method: "GET", url: "https://evil.example.net/collect" },
-            }),
-          ).rejects.toThrow(/'evil\.example\.net' is not in this skill's network\.allow list/);
+          expect(
+            (
+              await refusal(
+                h.handle({
+                  method: "http.request",
+                  args: { method: "GET", url: "https://evil.example.net/collect" },
+                }),
+              )
+            ).message,
+          ).toMatch(/'evil\.example\.net' is not in this skill's network\.allow list/);
           expect(fetchMock).not.toHaveBeenCalled();
         } finally {
           fetchMock.mockRestore();
@@ -740,10 +832,12 @@ describe("DefaultCtxHandler", () => {
             deps(),
             publicAddress,
           );
-          const out = await h.handle({
-            method: "http.request",
-            args: { method: "GET", url: "https://api.example.com/v1" },
-          });
+          const out = await served(
+            h.handle({
+              method: "http.request",
+              args: { method: "GET", url: "https://api.example.com/v1" },
+            }),
+          );
           expect(out).toMatchObject({ status: 200 });
         } finally {
           fetchMock.mockRestore();
@@ -758,12 +852,16 @@ describe("DefaultCtxHandler", () => {
             deps(),
             publicAddress,
           );
-          await expect(
-            h.handle({
-              method: "http.request",
-              args: { method: "GET", url: "https://example.com/v1" },
-            }),
-          ).rejects.toThrow(/not in this skill's network\.allow list/);
+          expect(
+            (
+              await refusal(
+                h.handle({
+                  method: "http.request",
+                  args: { method: "GET", url: "https://example.com/v1" },
+                }),
+              )
+            ).message,
+          ).toMatch(/not in this skill's network\.allow list/);
           expect(fetchMock).not.toHaveBeenCalled();
         } finally {
           fetchMock.mockRestore();
@@ -778,12 +876,16 @@ describe("DefaultCtxHandler", () => {
             deps(),
             publicAddress,
           );
-          await expect(
-            h.handle({
-              method: "http.request",
-              args: { method: "GET", url: "https://notexample.com/v1" },
-            }),
-          ).rejects.toThrow(/not in this skill's network\.allow list/);
+          expect(
+            (
+              await refusal(
+                h.handle({
+                  method: "http.request",
+                  args: { method: "GET", url: "https://notexample.com/v1" },
+                }),
+              )
+            ).message,
+          ).toMatch(/not in this skill's network\.allow list/);
           expect(fetchMock).not.toHaveBeenCalled();
         } finally {
           fetchMock.mockRestore();
@@ -798,10 +900,12 @@ describe("DefaultCtxHandler", () => {
             deps(),
             publicAddress,
           );
-          const out = await h.handle({
-            method: "http.request",
-            args: { method: "GET", url: "https://api.example.com/v1" },
-          });
+          const out = await served(
+            h.handle({
+              method: "http.request",
+              args: { method: "GET", url: "https://api.example.com/v1" },
+            }),
+          );
           expect(out).toMatchObject({ status: 200 });
         } finally {
           fetchMock.mockRestore();
@@ -815,12 +919,16 @@ describe("DefaultCtxHandler", () => {
         const h = makeHandler(httpManifest(), deps(), async () => [
           { address: "127.0.0.1", family: 4 },
         ]);
-        await expect(
-          h.handle({
-            method: "http.request",
-            args: { method: "GET", url: "https://api.example.com/v1" },
-          }),
-        ).rejects.toThrow(/host's own network/);
+        expect(
+          (
+            await refusal(
+              h.handle({
+                method: "http.request",
+                args: { method: "GET", url: "https://api.example.com/v1" },
+              }),
+            )
+          ).message,
+        ).toMatch(/host's own network/);
       });
     });
   });
@@ -831,9 +939,9 @@ describe("DefaultCtxHandler", () => {
       const d = deps();
       const h = makeHandler(m, d);
 
-      await expect(
-        h.handle({ method: "memory.recall", args: { query: "hello" } }),
-      ).rejects.toMatchObject({ kind: "missing_effect" });
+      expect(
+        await refusal(h.handle({ method: "memory.recall", args: { query: "hello" } })),
+      ).toMatchObject({ kind: "missing_effect" });
     });
 
     it("recall returns memories when effect is declared", async () => {
@@ -844,7 +952,7 @@ describe("DefaultCtxHandler", () => {
       });
       const h = makeHandler(m, d);
 
-      const value = await h.handle({ method: "memory.recall", args: { query: "hello" } });
+      const value = await served(h.handle({ method: "memory.recall", args: { query: "hello" } }));
       expect(value).toEqual({ memories: [{ content: "fact", type: "world" }] });
       // Through the run's scoped service, which folds in the profile's scope.
       expect(d.memory.recall).toHaveBeenCalledWith("hello");
@@ -862,9 +970,9 @@ describe("DefaultCtxHandler", () => {
       const d = deps();
       const h = makeHandler(m, d);
 
-      await expect(
-        h.handle({ method: "memory.remember", args: { content: "x" } }),
-      ).rejects.toMatchObject({ kind: "missing_effect" });
+      expect(
+        await refusal(h.handle({ method: "memory.remember", args: { content: "x" } })),
+      ).toMatchObject({ kind: "missing_effect" });
     });
 
     it("remember stages the fact as source skill, naming the skill and its tags", async () => {
@@ -872,10 +980,12 @@ describe("DefaultCtxHandler", () => {
       const d = deps();
       const h = makeHandler(m, d);
 
-      await h.handle({
-        method: "memory.remember",
-        args: { content: "remember this", tags: ["world", "work"] },
-      });
+      await served(
+        h.handle({
+          method: "memory.remember",
+          args: { content: "remember this", tags: ["world", "work"] },
+        }),
+      );
       expect(d.memory.stageRetain).toHaveBeenCalledWith("remember this", {
         context: "from skill 'test-skill', tagged world, work",
         source: "skill",
@@ -890,9 +1000,9 @@ describe("DefaultCtxHandler", () => {
       const d = deps();
       const h = makeHandler(m, d);
 
-      await expect(
-        h.handle({ method: "files.read", args: { path: "notes/x.md" } }),
-      ).rejects.toMatchObject({ kind: "missing_effect" });
+      expect(
+        await refusal(h.handle({ method: "files.read", args: { path: "notes/x.md" } })),
+      ).toMatchObject({ kind: "missing_effect" });
       expect(d.files.read).not.toHaveBeenCalled();
       expect(d.recordContextCall).toHaveBeenCalledWith({
         runId: "run-1",
@@ -906,10 +1016,10 @@ describe("DefaultCtxHandler", () => {
     it("read returns the workspace content when effect is declared", async () => {
       const m = manifest("effects:\n  - reads_filesystem");
       const d = deps();
-      vi.mocked(d.files.read).mockResolvedValue("hello");
+      vi.mocked(d.files.read).mockResolvedValue(ok("hello"));
       const h = makeHandler(m, d);
 
-      const value = await h.handle({ method: "files.read", args: { path: "notes/x.md" } });
+      const value = await served(h.handle({ method: "files.read", args: { path: "notes/x.md" } }));
       expect(value).toBe("hello");
       expect(d.files.read).toHaveBeenCalledWith("notes/x.md");
       expect(d.recordContextCall).toHaveBeenCalledWith({
@@ -924,12 +1034,12 @@ describe("DefaultCtxHandler", () => {
     it("read surfaces backend failures as read_failed", async () => {
       const m = manifest("effects:\n  - reads_filesystem");
       const d = deps();
-      vi.mocked(d.files.read).mockRejectedValue(new Error("File not found: notes/x.md"));
+      vi.mocked(d.files.read).mockResolvedValue(err({ kind: "not_found", path: "notes/x.md" }));
       const h = makeHandler(m, d);
 
-      await expect(
-        h.handle({ method: "files.read", args: { path: "notes/x.md" } }),
-      ).rejects.toMatchObject({ kind: "read_failed" });
+      expect(
+        await refusal(h.handle({ method: "files.read", args: { path: "notes/x.md" } })),
+      ).toMatchObject({ kind: "read_failed", message: "File not found: notes/x.md" });
       expect(d.recordContextCall).toHaveBeenCalledWith({
         runId: "run-1",
         method: "files.read",
@@ -944,12 +1054,14 @@ describe("DefaultCtxHandler", () => {
       const d = deps();
       const h = makeHandler(m, d);
 
-      await expect(
-        h.handle({
-          method: "files.write",
-          args: { path: "notes/x.md", content: "hi" },
-        }),
-      ).rejects.toMatchObject({ kind: "missing_effect" });
+      expect(
+        await refusal(
+          h.handle({
+            method: "files.write",
+            args: { path: "notes/x.md", content: "hi" },
+          }),
+        ),
+      ).toMatchObject({ kind: "missing_effect" });
       expect(d.files.write).not.toHaveBeenCalled();
     });
 
@@ -959,12 +1071,14 @@ describe("DefaultCtxHandler", () => {
       vi.mocked(d.files.write).mockRejectedValue(new Error("S3 5xx"));
       const h = makeHandler(m, d);
 
-      await expect(
-        h.handle({
-          method: "files.write",
-          args: { path: "notes/x.md", content: "hi" },
-        }),
-      ).rejects.toMatchObject({ kind: "write_failed" });
+      expect(
+        await refusal(
+          h.handle({
+            method: "files.write",
+            args: { path: "notes/x.md", content: "hi" },
+          }),
+        ),
+      ).toMatchObject({ kind: "write_failed" });
       expect(d.recordContextCall).toHaveBeenCalledWith({
         runId: "run-1",
         method: "files.write",
@@ -980,9 +1094,9 @@ describe("DefaultCtxHandler", () => {
       vi.mocked(d.files.list).mockRejectedValue(new Error("S3 listing timeout"));
       const h = makeHandler(m, d);
 
-      await expect(
-        h.handle({ method: "files.list", args: { prefix: "notes/" } }),
-      ).rejects.toMatchObject({ kind: "list_failed" });
+      expect(
+        await refusal(h.handle({ method: "files.list", args: { prefix: "notes/" } })),
+      ).toMatchObject({ kind: "list_failed" });
       expect(d.recordContextCall).toHaveBeenCalledWith({
         runId: "run-1",
         method: "files.list",
@@ -997,10 +1111,12 @@ describe("DefaultCtxHandler", () => {
       const d = deps();
       const h = makeHandler(m, d);
 
-      const r = await h.handle({
-        method: "files.write",
-        args: { path: "notes/x.md", content: "draft v1" },
-      });
+      const r = await served(
+        h.handle({
+          method: "files.write",
+          args: { path: "notes/x.md", content: "draft v1" },
+        }),
+      );
       expect(r).toBeNull();
       expect(d.files.write).toHaveBeenCalledWith("notes/x.md", "draft v1");
       expect(d.recordContextCall).toHaveBeenCalledWith({
@@ -1017,9 +1133,9 @@ describe("DefaultCtxHandler", () => {
       const d = deps();
       const h = makeHandler(m, d);
 
-      await expect(
-        h.handle({ method: "files.list", args: { prefix: "notes/" } }),
-      ).rejects.toMatchObject({ kind: "missing_effect" });
+      expect(
+        await refusal(h.handle({ method: "files.list", args: { prefix: "notes/" } })),
+      ).toMatchObject({ kind: "missing_effect" });
       expect(d.files.list).not.toHaveBeenCalled();
     });
 
@@ -1033,7 +1149,7 @@ describe("DefaultCtxHandler", () => {
       ]);
       const h = makeHandler(m, d);
 
-      const value = await h.handle({ method: "files.list", args: { prefix: "notes/" } });
+      const value = await served(h.handle({ method: "files.list", args: { prefix: "notes/" } }));
       expect(value).toEqual({
         entries: [
           { path: "notes/a.md", size: 42, last_modified: "2026-04-01T12:00:00.000Z" },
@@ -1048,7 +1164,7 @@ describe("DefaultCtxHandler", () => {
       const d = deps();
       const h = makeHandler(m, d);
 
-      await h.handle({ method: "files.list", args: {} });
+      await served(h.handle({ method: "files.list", args: {} }));
       expect(d.files.list).toHaveBeenCalledWith(undefined);
     });
 
@@ -1057,24 +1173,26 @@ describe("DefaultCtxHandler", () => {
       const d = deps();
       const h = makeHandler(m, d);
 
-      await expect(h.handle({ method: "files.read", args: {} })).rejects.toMatchObject({
+      expect(await refusal(h.handle({ method: "files.read", args: {} }))).toMatchObject({
         kind: "invalid_args",
       });
-      await expect(h.handle({ method: "files.write", args: { path: "x" } })).rejects.toMatchObject({
-        kind: "invalid_args",
-      });
+      expect(await refusal(h.handle({ method: "files.write", args: { path: "x" } }))).toMatchObject(
+        {
+          kind: "invalid_args",
+        },
+      );
     });
   });
 
   describe("now / user / log.info", () => {
     it("now returns the injected clock value", async () => {
       const h = makeHandler(manifest(), deps());
-      expect(await h.handle({ method: "now", args: {} })).toBe("2026-01-01T00:00:00.000Z");
+      expect(await served(h.handle({ method: "now", args: {} }))).toBe("2026-01-01T00:00:00.000Z");
     });
 
     it("user returns the injected user", async () => {
       const h = makeHandler(manifest(), deps());
-      expect(await h.handle({ method: "user", args: {} })).toEqual({
+      expect(await served(h.handle({ method: "user", args: {} }))).toEqual({
         id: "user-1",
         timezone: "UTC",
       });
@@ -1083,7 +1201,7 @@ describe("DefaultCtxHandler", () => {
     it("log.info accepts a plain message", async () => {
       const d = deps();
       const h = makeHandler(manifest(), d);
-      const r = await h.handle({ method: "log.info", args: { message: "hello" } });
+      const r = await served(h.handle({ method: "log.info", args: { message: "hello" } }));
       expect(r).toBeNull();
       expect(d.recordContextCall).toHaveBeenCalledWith({
         runId: "run-1",
@@ -1097,7 +1215,7 @@ describe("DefaultCtxHandler", () => {
 
   it("rejects an unknown method", async () => {
     const h = makeHandler(manifest(), deps());
-    await expect(h.handle({ method: "evil.delete", args: {} })).rejects.toMatchObject({
+    expect(await refusal(h.handle({ method: "evil.delete", args: {} }))).toMatchObject({
       kind: "unknown_method",
     });
   });
@@ -1107,7 +1225,7 @@ describe("DefaultCtxHandler", () => {
       const m = manifest("secrets:\n  - api_key");
       const d = deps();
       const h = makeHandler(m, d);
-      await expect(h.handle({ method: "secrets.get", args: { name: "" } })).rejects.toMatchObject({
+      expect(await refusal(h.handle({ method: "secrets.get", args: { name: "" } }))).toMatchObject({
         kind: "invalid_args",
       });
     });
@@ -1115,56 +1233,56 @@ describe("DefaultCtxHandler", () => {
     it("memory.recall query='' is invalid_args", async () => {
       const m = manifest("effects:\n  - reads_memory");
       const h = makeHandler(m, deps());
-      await expect(
-        h.handle({ method: "memory.recall", args: { query: "" } }),
-      ).rejects.toMatchObject({ kind: "invalid_args" });
+      expect(
+        await refusal(h.handle({ method: "memory.recall", args: { query: "" } })),
+      ).toMatchObject({ kind: "invalid_args" });
     });
 
     it("memory.recall limit=0 is invalid_args", async () => {
       const m = manifest("effects:\n  - reads_memory");
       const h = makeHandler(m, deps());
-      await expect(
-        h.handle({ method: "memory.recall", args: { query: "x", limit: 0 } }),
-      ).rejects.toMatchObject({ kind: "invalid_args" });
+      expect(
+        await refusal(h.handle({ method: "memory.recall", args: { query: "x", limit: 0 } })),
+      ).toMatchObject({ kind: "invalid_args" });
     });
 
     it("memory.recall limit=51 is invalid_args (max 50)", async () => {
       const m = manifest("effects:\n  - reads_memory");
       const h = makeHandler(m, deps());
-      await expect(
-        h.handle({ method: "memory.recall", args: { query: "x", limit: 51 } }),
-      ).rejects.toMatchObject({ kind: "invalid_args" });
+      expect(
+        await refusal(h.handle({ method: "memory.recall", args: { query: "x", limit: 51 } })),
+      ).toMatchObject({ kind: "invalid_args" });
     });
 
     it("memory.recall limit=1.5 is invalid_args (must be integer)", async () => {
       const m = manifest("effects:\n  - reads_memory");
       const h = makeHandler(m, deps());
-      await expect(
-        h.handle({ method: "memory.recall", args: { query: "x", limit: 1.5 } }),
-      ).rejects.toMatchObject({ kind: "invalid_args" });
+      expect(
+        await refusal(h.handle({ method: "memory.recall", args: { query: "x", limit: 1.5 } })),
+      ).toMatchObject({ kind: "invalid_args" });
     });
 
     it("memory.remember content='' is invalid_args", async () => {
       const m = manifest("effects:\n  - writes_memory");
       const h = makeHandler(m, deps());
-      await expect(
-        h.handle({ method: "memory.remember", args: { content: "" } }),
-      ).rejects.toMatchObject({ kind: "invalid_args" });
+      expect(
+        await refusal(h.handle({ method: "memory.remember", args: { content: "" } })),
+      ).toMatchObject({ kind: "invalid_args" });
     });
 
     it("memory.remember tags=[''] is invalid_args (each tag must be non-empty)", async () => {
       const m = manifest("effects:\n  - writes_memory");
       const h = makeHandler(m, deps());
-      await expect(
-        h.handle({ method: "memory.remember", args: { content: "x", tags: [""] } }),
-      ).rejects.toMatchObject({ kind: "invalid_args" });
+      expect(
+        await refusal(h.handle({ method: "memory.remember", args: { content: "x", tags: [""] } })),
+      ).toMatchObject({ kind: "invalid_args" });
     });
 
     it("memory.remember without tags names only the skill", async () => {
       const m = manifest("effects:\n  - writes_memory");
       const d = deps();
       const h = makeHandler(m, d);
-      await h.handle({ method: "memory.remember", args: { content: "x" } });
+      await served(h.handle({ method: "memory.remember", args: { content: "x" } }));
       expect(d.memory.stageRetain).toHaveBeenCalledWith("x", {
         context: "from skill 'test-skill'",
         source: "skill",
@@ -1176,10 +1294,12 @@ describe("DefaultCtxHandler", () => {
       const m = manifest("effects:\n  - writes_memory");
       const d = deps();
       const h = makeHandler(m, d);
-      await h.handle({
-        method: "memory.remember",
-        args: { content: "x", skillName: "other", source: "live_retain" },
-      });
+      await served(
+        h.handle({
+          method: "memory.remember",
+          args: { content: "x", skillName: "other", source: "live_retain" },
+        }),
+      );
       expect(d.memory.stageRetain).toHaveBeenCalledWith("x", {
         context: "from skill 'test-skill'",
         source: "skill",
@@ -1190,10 +1310,12 @@ describe("DefaultCtxHandler", () => {
     it("log.info accepts structured fields and emits them on the pino child", async () => {
       const d = deps();
       const h = makeHandler(manifest(), d);
-      await h.handle({
-        method: "log.info",
-        args: { message: "hello", fields: { foo: 1, bar: "two" } },
-      });
+      await served(
+        h.handle({
+          method: "log.info",
+          args: { message: "hello", fields: { foo: 1, bar: "two" } },
+        }),
+      );
       // Verifying actual pino output is fragile; assert the audit row
       // happened, which means dispatch reached `log.info` successfully.
       expect(d.recordContextCall).toHaveBeenCalledWith({
@@ -1207,7 +1329,7 @@ describe("DefaultCtxHandler", () => {
 
     it("log.info with empty message accepted (z.string() allows empty)", async () => {
       const h = makeHandler(manifest(), deps());
-      const r = await h.handle({ method: "log.info", args: { message: "" } });
+      const r = await served(h.handle({ method: "log.info", args: { message: "" } }));
       expect(r).toBeNull();
     });
   });
@@ -1217,9 +1339,9 @@ describe("DefaultCtxHandler", () => {
       const m = manifest();
       const d = deps();
       const h = makeHandler(m, d);
-      await expect(
-        h.handle({ method: "memory.recall", args: { query: "hello" } }),
-      ).rejects.toMatchObject({ kind: "missing_effect" });
+      expect(
+        await refusal(h.handle({ method: "memory.recall", args: { query: "hello" } })),
+      ).toMatchObject({ kind: "missing_effect" });
       expect(d.memory.recall).not.toHaveBeenCalled();
     });
 
@@ -1227,16 +1349,16 @@ describe("DefaultCtxHandler", () => {
       const m = manifest();
       const d = deps();
       const h = makeHandler(m, d);
-      await expect(
-        h.handle({ method: "memory.remember", args: { content: "x" } }),
-      ).rejects.toMatchObject({ kind: "missing_effect" });
+      expect(
+        await refusal(h.handle({ method: "memory.remember", args: { content: "x" } })),
+      ).toMatchObject({ kind: "missing_effect" });
       expect(d.memory.stageRetain).not.toHaveBeenCalled();
     });
 
     it("unknown_method audit row carries the original method string", async () => {
       const d = deps();
       const h = makeHandler(manifest(), d);
-      await expect(h.handle({ method: "evil.delete", args: {} })).rejects.toMatchObject({
+      expect(await refusal(h.handle({ method: "evil.delete", args: {} }))).toMatchObject({
         kind: "unknown_method",
       });
       expect(d.recordContextCall).toHaveBeenCalledWith({
@@ -1254,7 +1376,7 @@ describe("DefaultCtxHandler", () => {
       const m = manifest();
       const h = makeHandler(m, d);
       // The success path: now() — even if audit fails, return value is correct.
-      const r = await h.handle({ method: "now", args: {} });
+      const r = await served(h.handle({ method: "now", args: {} }));
       expect(r).toBe("2026-01-01T00:00:00.000Z");
     });
   });
@@ -1267,7 +1389,7 @@ describe("DefaultCtxHandler", () => {
       const d = deps();
       vi.mocked(d.secretsStore.getSecret).mockResolvedValue("v");
       const h = makeHandler(m, d);
-      const r = await h.handle({ method: "secrets.get", args: { name: "scoped" } });
+      const r = await served(h.handle({ method: "secrets.get", args: { name: "scoped" } }));
       expect(r).toBe("v");
     });
 
@@ -1280,8 +1402,12 @@ describe("DefaultCtxHandler", () => {
         name === "bare" ? "BARE" : name === "object_form" ? "OBJ" : null,
       );
       const h = makeHandler(m, d);
-      expect(await h.handle({ method: "secrets.get", args: { name: "bare" } })).toBe("BARE");
-      expect(await h.handle({ method: "secrets.get", args: { name: "object_form" } })).toBe("OBJ");
+      expect(await served(h.handle({ method: "secrets.get", args: { name: "bare" } }))).toBe(
+        "BARE",
+      );
+      expect(await served(h.handle({ method: "secrets.get", args: { name: "object_form" } }))).toBe(
+        "OBJ",
+      );
     });
   });
 });

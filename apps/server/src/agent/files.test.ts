@@ -10,10 +10,11 @@ import {
   PutObjectCommand,
   type PutObjectCommandInput,
 } from "@aws-sdk/client-s3";
+import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import { encryptBuffer, isEncrypted } from "../secrets/blob-envelope.js";
 import { deriveMasterKey, generateMasterKey, parseMasterKey } from "../secrets/encryption.js";
-import { createFileService } from "./files.js";
+import { createFileService, describeFileError } from "./files.js";
 
 type S3Command = HeadObjectCommand | GetObjectCommand | PutObjectCommand | ListObjectsV2Command;
 
@@ -116,15 +117,18 @@ describe("createFileService.read", () => {
 
     const result = await files.read("notes/test.md");
 
-    expect(result).toBe("hello world");
+    expect(result).toEqual(ok("hello world"));
     expect(calls).toEqual([{ kind: "get", input: { Bucket: "bucket", Key: "notes/test.md" } }]);
   });
 
-  it("throws 'File not found' on NoSuchKey", async () => {
+  it("returns not_found on NoSuchKey", async () => {
     const { client } = s3Mock();
     const files = createFileService(client, "bucket");
 
-    await expect(files.read("missing.txt")).rejects.toThrow("File not found: missing.txt");
+    const result = await files.read("missing.txt");
+
+    expect(result).toEqual(err({ kind: "not_found", path: "missing.txt" }));
+    expect(describeFileError(result._unsafeUnwrapErr())).toBe("File not found: missing.txt");
   });
 
   it("re-throws non-NoSuchKey errors from GET", async () => {
@@ -154,7 +158,7 @@ describe("createFileService.read", () => {
     const { client } = s3Mock({ get: () => ({ Body: body(huge), LastModified: T0 }) });
     const files = createFileService(client, "bucket");
 
-    const result = await files.read("big.txt");
+    const result = (await files.read("big.txt"))._unsafeUnwrap();
 
     expect(result).toContain("[Content truncated");
     expect(result.length).toBeLessThan(huge.length);
@@ -166,7 +170,7 @@ describe("createFileService.read", () => {
     const { client } = s3Mock({ get: () => ({ Body: body(content), LastModified: T0 }) });
     const files = createFileService(client, "bucket");
 
-    const result = await files.read("emoji.txt");
+    const result = (await files.read("emoji.txt"))._unsafeUnwrap();
 
     expect(result.isWellFormed()).toBe(true);
     expect(result.startsWith(`${"x".repeat(99_999)}\n\n[Content truncated`)).toBe(true);
@@ -195,7 +199,9 @@ describe("createFileService.write", () => {
     const { client } = s3Mock({ head: () => ({ LastModified: T0 }) });
     const files = createFileService(client, "bucket");
 
-    await expect(files.write("notes/existing.md", "new")).rejects.toThrow("read the file first");
+    expect(await files.write("notes/existing.md", "new")).toEqual(
+      err({ kind: "not_read", path: "notes/existing.md", op: "overwrite" }),
+    );
   });
 
   it("allows overwrite after read, sending the new bytes through PUT", async () => {
@@ -238,8 +244,8 @@ describe("createFileService.write", () => {
     const files = createFileService(client, "bucket");
 
     await files.read("notes/x.md");
-    await expect(files.write("notes/x.md", "my edit")).rejects.toThrow(
-      "modified since you read it",
+    expect(await files.write("notes/x.md", "my edit")).toEqual(
+      err({ kind: "stale", path: "notes/x.md", op: "overwrite" }),
     );
   });
 
@@ -269,7 +275,9 @@ describe("createFileService.write", () => {
     const files = createFileService(client, "bucket");
 
     await files.read("big.txt"); // returns truncated marker, caches isPartialView
-    await expect(files.write("big.txt", "short replacement")).rejects.toThrow("truncated view");
+    expect(await files.write("big.txt", "short replacement")).toEqual(
+      err({ kind: "partial_view", path: "big.txt", op: "overwrite" }),
+    );
   });
 
   it("read always issues a fresh GET, even after a write populated the cache", async () => {
@@ -285,7 +293,7 @@ describe("createFileService.write", () => {
     await files.write("notes/x.md", "from write");
     const result = await files.read("notes/x.md");
 
-    expect(result).toBe("from disk");
+    expect(result).toEqual(ok("from disk"));
     expect(calls.filter((c) => c.kind === "get")).toHaveLength(1);
   });
 
@@ -306,7 +314,7 @@ describe("createFileService.write", () => {
     const files = createFileService(client, "bucket");
 
     await files.write("notes/n.md", "alpha beta gamma");
-    await files.edit("notes/n.md", "beta", "BETA");
+    expect(await files.edit("notes/n.md", "beta", "BETA")).toEqual(ok(undefined));
 
     const puts = calls.filter((c) => c.kind === "put");
     expect(puts).toHaveLength(2);
@@ -325,8 +333,8 @@ describe("createFileService.edit", () => {
     const files = createFileService(client, "bucket");
 
     await files.read("f.md");
-    await expect(files.edit("f.md", "contents", "new contents")).rejects.toThrow(
-      "no longer exists",
+    expect(await files.edit("f.md", "contents", "new contents")).toEqual(
+      err({ kind: "missing_for_edit", path: "f.md" }),
     );
   });
 
@@ -341,14 +349,18 @@ describe("createFileService.edit", () => {
     const files = createFileService(client, "bucket");
 
     await files.read("f.md");
-    await expect(files.edit("f.md", "", "x")).rejects.toThrow("must be non-empty");
+    expect(await files.edit("f.md", "", "x")).toEqual(
+      err({ kind: "empty_old_string", path: "f.md" }),
+    );
   });
 
   it("rejects edit when the file was not read first", async () => {
     const { client } = s3Mock({ head: () => ({ LastModified: T0 }) });
     const files = createFileService(client, "bucket");
 
-    await expect(files.edit("f.md", "a", "b")).rejects.toThrow("read the file first");
+    expect(await files.edit("f.md", "a", "b")).toEqual(
+      err({ kind: "not_read", path: "f.md", op: "edit" }),
+    );
   });
 
   it("rejects edit when the read returned a truncated view", async () => {
@@ -360,7 +372,9 @@ describe("createFileService.edit", () => {
     const files = createFileService(client, "bucket");
 
     await files.read("big.txt");
-    await expect(files.edit("big.txt", "needle", "found")).rejects.toThrow("truncated view");
+    expect(await files.edit("big.txt", "needle", "found")).toEqual(
+      err({ kind: "partial_view", path: "big.txt", op: "edit" }),
+    );
   });
 
   it("rejects edit when old_string is absent", async () => {
@@ -371,7 +385,9 @@ describe("createFileService.edit", () => {
     const files = createFileService(client, "bucket");
 
     await files.read("f.md");
-    await expect(files.edit("f.md", "missing", "x")).rejects.toThrow("old_string not found");
+    expect(await files.edit("f.md", "missing", "x")).toEqual(
+      err({ kind: "old_string_not_found", path: "f.md" }),
+    );
   });
 
   it("rejects edit when old_string is ambiguous and replace_all is not set", async () => {
@@ -382,7 +398,10 @@ describe("createFileService.edit", () => {
     const files = createFileService(client, "bucket");
 
     await files.read("f.md");
-    await expect(files.edit("f.md", "foo", "bar")).rejects.toThrow("old_string appears 2 times");
+    const result = await files.edit("f.md", "foo", "bar");
+
+    expect(result).toEqual(err({ kind: "ambiguous_old_string", path: "f.md", occurrences: 2 }));
+    expect(describeFileError(result._unsafeUnwrapErr())).toContain("old_string appears 2 times");
   });
 
   it("replaces the single occurrence by default", async () => {
@@ -421,7 +440,9 @@ describe("createFileService.edit", () => {
     const files = createFileService(client, "bucket");
 
     await files.read("f.md");
-    await expect(files.edit("f.md", "alpha", "alpha")).rejects.toThrow("identical");
+    expect(await files.edit("f.md", "alpha", "alpha")).toEqual(
+      err({ kind: "identical_strings", path: "f.md" }),
+    );
   });
 
   it("rejects edit when the file changed on disk since the read", async () => {
@@ -435,8 +456,8 @@ describe("createFileService.edit", () => {
     const files = createFileService(client, "bucket");
 
     await files.read("f.md");
-    await expect(files.edit("f.md", "needle", "thread")).rejects.toThrow(
-      "modified since you read it",
+    expect(await files.edit("f.md", "needle", "thread")).toEqual(
+      err({ kind: "stale", path: "f.md", op: "edit" }),
     );
   });
 
@@ -469,7 +490,9 @@ describe("createFileService — read state is per-instance", () => {
 
     await a.read("f.md");
     // Instance B never read f.md — even though it exists on its (mock) S3.
-    await expect(b.write("f.md", "x")).rejects.toThrow("read the file first");
+    expect(await b.write("f.md", "x")).toEqual(
+      err({ kind: "not_read", path: "f.md", op: "overwrite" }),
+    );
   });
 });
 
@@ -540,7 +563,7 @@ describe("createFileService — client-side encryption", () => {
     });
     const files = createFileService(client, "bucket", { key });
 
-    expect(await files.read("notes/secret.md")).toBe("notes content");
+    expect(await files.read("notes/secret.md")).toEqual(ok("notes content"));
   });
 
   it("read falls back to plaintext for pre-flag files (no magic prefix)", async () => {
@@ -551,7 +574,7 @@ describe("createFileService — client-side encryption", () => {
     });
     const files = createFileService(client, "bucket", { key });
 
-    expect(await files.read("notes/legacy.md")).toBe("legacy plaintext markdown");
+    expect(await files.read("notes/legacy.md")).toEqual(ok("legacy plaintext markdown"));
   });
 
   it("read throws on wrong key", async () => {
@@ -584,7 +607,7 @@ describe("createFileService — client-side encryption", () => {
 
     const original = "🔒 секрет 密码 — emoji + кириллица + 汉字";
     await files.write("notes/u.md", original);
-    expect(await files.read("notes/u.md")).toBe(original);
+    expect(await files.read("notes/u.md")).toEqual(ok(original));
   });
 
   it("edit round-trips through encryption — decrypts on read, re-encrypts on PUT", async () => {

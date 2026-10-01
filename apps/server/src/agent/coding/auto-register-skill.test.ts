@@ -209,7 +209,6 @@ describe("autoRegisterSkill", () => {
       riskTier: "notify",
       status: "live",
       gitSha: "abc123",
-      errors: [],
     };
     const skillRunner = mock<SkillRunner>();
     skillRunner.register.mockResolvedValue(registerResult);

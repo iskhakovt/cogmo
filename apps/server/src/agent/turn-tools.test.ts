@@ -1,3 +1,4 @@
+import { ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { z } from "zod";
@@ -22,7 +23,7 @@ const generateImage = defineTool({
   parallelSafe: true,
   sideEffectful: true,
   invocationBudget: 2,
-  handler: async ({ prompt }) => `image of ${prompt}`,
+  handler: async ({ prompt }) => ok(`image of ${prompt}`),
 });
 
 const echo: ToolSpec = {
@@ -30,7 +31,7 @@ const echo: ToolSpec = {
   description: "echo a number",
   inputSchema: { type: "object", properties: { n: { type: "number" } } },
   durable: true,
-  handler: async (input) => `echoed ${JSON.stringify(input)}`,
+  handler: async (input) => ok(`echoed ${JSON.stringify(input)}`),
 };
 
 describe("freezeToolTable", () => {
@@ -94,7 +95,9 @@ describe("bindFrozenTools", () => {
       "bound generate_image",
     );
 
-    await expect(bound.handler({ prompt: "a cat" }, service)).resolves.toBe("image of a cat");
+    expect((await bound.handler({ prompt: "a cat" }, service))._unsafeUnwrap()).toBe(
+      "image of a cat",
+    );
     expect(bound.normalizeInput).toBe(generateImage.normalizeInput);
   });
 
@@ -109,7 +112,7 @@ describe("bindFrozenTools", () => {
     // replays its result instead of reaching the handler.
     expect(bound.definitions().map((d) => d.name)).toEqual(["generate_image", "echo"]);
     expect(missing.durable).toBe(true);
-    await expect(missing.handler({ n: 1 }, service)).rejects.toThrow(
+    expect((await missing.handler({ n: 1 }, service))._unsafeUnwrapErr().message).toBe(
       "the echo tool could not be loaded, so it did not run",
     );
     expect(liveHandler).not.toHaveBeenCalled();

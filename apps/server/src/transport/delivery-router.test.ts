@@ -13,7 +13,6 @@ import {
   createDeliveryRouter,
   pushOrThrow,
   type RoutingContext,
-  StreamDeliveryError,
 } from "./delivery-router.js";
 import type { Session } from "./store/index.js";
 import type { ChannelSessionReceive } from "./store/schema.js";
@@ -703,9 +702,7 @@ describe("createDeliveryRouter", () => {
       const aborted = await outcome(delivery.abort("LLM failed"));
 
       expect(healthy.abort).toHaveBeenCalledWith("LLM failed");
-      expect(aborted).toEqual(
-        err(new StreamDeliveryError([{ sessionId: "s1", reason: "telegram down" }])),
-      );
+      expect(aborted).toEqual(err({ failures: [{ sessionId: "s1", reason: "telegram down" }] }));
     });
 
     it("finishes every handle when one reports a failure", async () => {
@@ -716,9 +713,7 @@ describe("createDeliveryRouter", () => {
       const finished = await outcome(delivery.finish());
 
       expect(healthy.finish).toHaveBeenCalled();
-      expect(finished).toEqual(
-        err(new StreamDeliveryError([{ sessionId: "s1", reason: "chat not found" }])),
-      );
+      expect(finished).toEqual(err({ failures: [{ sessionId: "s1", reason: "chat not found" }] }));
     });
 
     it("pushes to every handle when one reports a failure", async () => {
@@ -730,7 +725,7 @@ describe("createDeliveryRouter", () => {
 
       expect(healthy.push).toHaveBeenCalledWith(textDelta);
       expect(pushed).toEqual(
-        err(new StreamDeliveryError([{ sessionId: "s1", reason: "bot was blocked by the user" }])),
+        err({ failures: [{ sessionId: "s1", reason: "bot was blocked by the user" }] }),
       );
     });
 
@@ -739,8 +734,8 @@ describe("createDeliveryRouter", () => {
         mockStreamHandle({ push: vi.fn().mockResolvedValue(err("chat not found")) }),
       );
 
-      await expect(pushOrThrow(delivery, textDelta)).rejects.toEqual(
-        new StreamDeliveryError([{ sessionId: "s1", reason: "chat not found" }]),
+      await expect(pushOrThrow(delivery, textDelta)).rejects.toThrow(
+        new Error("stream delivery failed: chat not found"),
       );
       expect(healthy.push).toHaveBeenCalledWith(textDelta);
     });
@@ -790,12 +785,12 @@ describe("createDeliveryRouter", () => {
       telegram.resolve(err("chat not found"));
 
       expect(await pushed).toEqual(
-        err(
-          new StreamDeliveryError([
+        err({
+          failures: [
             { sessionId: "s1", reason: "chat not found" },
             { sessionId: "s2", reason: "tab gone" },
-          ]),
-        ),
+          ],
+        }),
       );
     });
 
@@ -841,9 +836,7 @@ describe("createDeliveryRouter", () => {
       const { delivery, deliver } = await prepareWithFailedFinish();
 
       const finished = await delivery.finish();
-      expect(finished).toEqual(
-        err(new StreamDeliveryError([{ sessionId: "s1", reason: "chat not found" }])),
-      );
+      expect(finished).toEqual(err({ failures: [{ sessionId: "s1", reason: "chat not found" }] }));
       await delivery.deliverUnstreamed(["s1"], "the reply");
 
       expect(deliver).toHaveBeenCalledExactlyOnceWith("addr-s1", {

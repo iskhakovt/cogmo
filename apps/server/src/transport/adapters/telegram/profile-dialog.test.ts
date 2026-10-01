@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { Profile } from "../../../agent/store/index.js";
 import { type DeepPartial, mockTransportDeep } from "../../../test/factories.js";
 import type { Transport } from "../../transport.js";
-import type { TelegramCommandContext } from "./commands.js";
+import type { TelegramCommandContext } from "./commands/reply.js";
 import { ProfileDialogs } from "./profile-dialog.js";
 
 function mkCtx(

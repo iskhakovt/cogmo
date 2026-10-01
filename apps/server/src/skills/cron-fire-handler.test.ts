@@ -2,24 +2,19 @@
  * Fire-handler unit tests via `InngestTestEngine`. Covers the dispatch
  * branch matrix: success, runner-side error (run row persisted, no retry),
  * the skipped reasons (skill_not_found / not_scheduled / skill_disabled /
- * invalid_inputs / sandbox_unavailable), the run-as identity read from the
+ * invalid_inputs / sandbox_unavailable / inflight), the run-as identity read from the
  * skill row, and the replay-safety contract on the `dispatch` step.
  */
 
 import { InngestTestEngine } from "@inngest/test";
+import { err, ok } from "neverthrow";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { inngest } from "../inngest/client.js";
 import { fakeRunInTx, mockFilesService } from "../test/factories.js";
 import { createSkillCronFireHandler, type SkillCronFireDeps } from "./cron-fire-handler.js";
 import type { SkillRunAs, SkillRunServices } from "./run-as.js";
-import {
-  InputValidationError,
-  SandboxUnavailableError,
-  SkillDisabledError,
-  SkillNotFoundError,
-  type SkillRunner,
-} from "./runner.js";
+import type { SkillRunner } from "./runner.js";
 import type { SkillRow, SkillStore } from "./store/index.js";
 
 const baseEvent = {
@@ -77,11 +72,9 @@ function deps(runner: SkillRunner, row: SkillRow | null = skillRow()) {
 describe("createSkillCronFireHandler", () => {
   it("invokes the runner with empty inputs and trigger='cron', returns completed/success", async () => {
     const runner = mock<SkillRunner>();
-    runner.invoke.mockResolvedValue({
-      runId: "run-7",
-      status: "success",
-      output: { message: "ok" },
-    });
+    runner.invoke.mockResolvedValue(
+      ok({ runId: "run-7", status: "success", output: { message: "ok" } }),
+    );
     const fn = createSkillCronFireHandler(deps(runner), inngest);
 
     const { result } = await new InngestTestEngine({ function: fn, events: [baseEvent] }).execute();
@@ -102,7 +95,7 @@ describe("createSkillCronFireHandler", () => {
 
   it("runs as the identity stored on the skill, with that identity's scoped services", async () => {
     const runner = mock<SkillRunner>();
-    runner.invoke.mockResolvedValue({ runId: "run-8", status: "success", output: {} });
+    runner.invoke.mockResolvedValue(ok({ runId: "run-8", status: "success", output: {} }));
     const d = deps(runner);
     const fn = createSkillCronFireHandler(d, inngest);
 
@@ -169,7 +162,7 @@ describe("createSkillCronFireHandler", () => {
     // runner.invoke writes the failure into skill_runs; the handler reflects
     // it back as runStatus='error' so the cron continues firing tomorrow.
     const runner = mock<SkillRunner>();
-    runner.invoke.mockResolvedValue({ runId: "run-err", status: "error", error: "boom" });
+    runner.invoke.mockResolvedValue(ok({ runId: "run-err", status: "error", error: "boom" }));
     const fn = createSkillCronFireHandler(deps(runner), inngest);
 
     const { result } = await new InngestTestEngine({ function: fn, events: [baseEvent] }).execute();
@@ -179,17 +172,21 @@ describe("createSkillCronFireHandler", () => {
 
   it("skips with reason 'skill_not_found' when the row was deregistered between tick and fire", async () => {
     const runner = mock<SkillRunner>();
-    runner.invoke.mockRejectedValue(new SkillNotFoundError("morning-brief"));
+    runner.invoke.mockResolvedValue(err({ kind: "not_found", name: "morning-brief" }));
     const fn = createSkillCronFireHandler(deps(runner), inngest);
 
     const { result } = await new InngestTestEngine({ function: fn, events: [baseEvent] }).execute();
 
-    expect(result).toMatchObject({ status: "skipped", reason: "skill_not_found" });
+    expect(result).toEqual({
+      status: "skipped",
+      reason: "skill_not_found",
+      detail: "skill not found: morning-brief",
+    });
   });
 
   it("skips with reason 'skill_disabled' when the row was disabled between tick and fire", async () => {
     const runner = mock<SkillRunner>();
-    runner.invoke.mockRejectedValue(new SkillDisabledError("morning-brief"));
+    runner.invoke.mockResolvedValue(err({ kind: "disabled", name: "morning-brief" }));
     const fn = createSkillCronFireHandler(deps(runner), inngest);
 
     const { result } = await new InngestTestEngine({ function: fn, events: [baseEvent] }).execute();
@@ -202,7 +199,7 @@ describe("createSkillCronFireHandler", () => {
     // Without classifying this we'd burn the full retries: 2 budget every
     // tick for a condition that won't self-heal between attempts.
     const runner = mock<SkillRunner>();
-    runner.invoke.mockRejectedValue(new SandboxUnavailableError("morning-brief"));
+    runner.invoke.mockResolvedValue(err({ kind: "sandbox_unavailable", name: "morning-brief" }));
     const fn = createSkillCronFireHandler(deps(runner), inngest);
 
     const { result } = await new InngestTestEngine({ function: fn, events: [baseEvent] }).execute();
@@ -210,11 +207,9 @@ describe("createSkillCronFireHandler", () => {
     expect(result).toMatchObject({ status: "skipped", reason: "sandbox_unavailable" });
   });
 
-  it("propagates a plain Error whose message coincidentally contains 'skill not found' — discriminates by class, not substring", async () => {
-    // Regression guard for the old `msg.includes("skill not found")`
-    // matcher: a deeper-layer error whose text mentions the phrase must
-    // NOT be classified as skill_not_found. Only `SkillNotFoundError`
-    // counts.
+  it("propagates a thrown Error even when its message reads like a rejection", async () => {
+    // A deeper-layer error whose text mentions "skill not found" is not a
+    // `not_found` rejection; only the runner's rejection value skips.
     const runner = mock<SkillRunner>();
     runner.invoke.mockRejectedValue(new Error("registry lookup failed: skill not found in cache"));
     const fn = createSkillCronFireHandler(deps(runner), inngest);
@@ -228,14 +223,38 @@ describe("createSkillCronFireHandler", () => {
     // skill. Surfaces here as a non-retrying skipped result so the operator
     // sees the misconfiguration in logs instead of an Inngest retry storm.
     const runner = mock<SkillRunner>();
-    runner.invoke.mockRejectedValue(
-      new InputValidationError("inputs failed schema validation: missing required field 'x'"),
+    runner.invoke.mockResolvedValue(
+      err({
+        kind: "invalid_inputs",
+        name: "morning-brief",
+        issues: ["<root> must have required property 'x'"],
+      }),
     );
     const fn = createSkillCronFireHandler(deps(runner), inngest);
 
     const { result } = await new InngestTestEngine({ function: fn, events: [baseEvent] }).execute();
 
     expect(result).toMatchObject({ status: "skipped", reason: "invalid_inputs" });
+  });
+
+  it("skips with reason 'inflight' when a prior attempt under the fire's key is still marked started", async () => {
+    const runner = mock<SkillRunner>();
+    runner.invoke.mockResolvedValue(
+      err({ kind: "inflight", name: "morning-brief", runId: "run-stuck" }),
+    );
+    const fn = createSkillCronFireHandler(deps(runner), inngest);
+
+    const { result, error } = await new InngestTestEngine({
+      function: fn,
+      events: [baseEvent],
+    }).execute();
+
+    expect(error).toBeUndefined();
+    expect(result).toMatchObject({
+      status: "skipped",
+      reason: "inflight",
+      detail: expect.stringContaining("run-stuck"),
+    });
   });
 
   it("propagates unknown errors so Inngest's retry budget catches transient failures", async () => {

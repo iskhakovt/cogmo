@@ -208,7 +208,7 @@ function createImageTools(deps: {
     }),
     handler: async (input) => {
       const row = modelByName.get(input.model);
-      if (!row) return `Error: unknown model ${input.model}`;
+      if (!row) return reject(`unknown model ${input.model}`);
       // Treat absent and [] identically — both mean "model accepts no
       // aspectRatio". Both surface as a text error the LLM can recover from
       // (re-pick a ratio or pick a different model), not as silent drop.
@@ -217,7 +217,7 @@ function createImageTools(deps: {
         const hint = supported.length > 0
           ? `Supported: ${supported.join(", ")}.`
           : "This model does not accept a custom aspect ratio.";
-        return `Error: model ${row.name} does not support aspect ratio ${input.aspectRatio}. ${hint}`;
+        return reject(`model ${row.name} does not support aspect ratio ${input.aspectRatio}. ${hint}`);
       }
       const provider = deps.providers.get(row.providerId)!;
       const imageModel = provider.kind === "fal"
@@ -253,9 +253,9 @@ function createImageTools(deps: {
 
 **Tool exposes a small surface.** Only `prompt`, `model`, `aspectRatio`, `seed`. Advanced params (steps, guidance_scale, negative_prompt) are intentionally omitted — the LLM shouldn't tune inference hyperparameters. If the user asks for specific tuning, the prompt description is the right lever.
 
-**Per-model capability narrowing.** The Zod `aspectRatio` enum is the union of `capabilities.aspectRatios` across all user-selectable models. The handler narrows per the picked model and returns text the LLM can act on (re-pick a ratio or a different model) — not an exception. `seed` similarly: handler drops it for models whose `capabilities.seed` is false/absent. The LLM sees per-model support inline in the tool description.
+**Per-model capability narrowing.** The Zod `aspectRatio` enum is the union of `capabilities.aspectRatios` across all user-selectable models. The handler narrows per the picked model and rejects the call with a message the LLM can act on (re-pick a ratio or a different model) — not an exception. `seed` similarly: handler drops it for models whose `capabilities.seed` is false/absent. The LLM sees per-model support inline in the tool description.
 
-**Reference image (image-to-image / kontext).** Models that accept an existing image — fal/flux-kontext, future fal-2/edit variants — declare `capabilities.imageInput = "required" | "optional"`. The tool schema exposes a `referenceImage: string` field; the value is an `AttachmentStore` path: for a user's image, the normalized copy's path its label names (`[proposed]`, [transport/attachments.md](transport/attachments.md#images-proposed)), or `generated/<id>.png` from a previous turn the LLM generated. The handler downloads the bytes via `attachments.download(path)` and forwards them through the AI SDK's `prompt: { text, images }` shape — only validated against `kind: "fal"` today (kontext line). For `kind: "oai"` the handler returns a text error pointing the LLM at a fal model; a dedicated `openai` provider type would unlock gpt-image-* edit support later (tracked separately in `todo.md`). Three text-recoverable error shapes are surfaced: required-but-missing (LLM re-calls with a path), supplied-but-unsupported (LLM picks a different model or drops the field), supplied-to-non-fal (LLM picks a fal-backed edit model).
+**Reference image (image-to-image / kontext).** Models that accept an existing image — fal/flux-kontext, future fal-2/edit variants — declare `capabilities.imageInput = "required" | "optional"`. The tool schema exposes a `referenceImage: string` field; the value is an `AttachmentStore` path: for a user's image, the normalized copy's path its label names (`[proposed]`, [transport/attachments.md](transport/attachments.md#images-proposed)), or `generated/<id>.png` from a previous turn the LLM generated. The handler downloads the bytes via `attachments.download(path)` and forwards them through the AI SDK's `prompt: { text, images }` shape — only validated against `kind: "fal"` today (kontext line). For `kind: "oai"` the handler rejects, pointing the LLM at a fal model; a dedicated `openai` provider type would unlock gpt-image-* edit support later (tracked separately in `todo.md`). Three recoverable rejections are surfaced: required-but-missing (LLM re-calls with a path), supplied-but-unsupported (LLM picks a different model or drops the field), supplied-to-non-fal (LLM picks a fal-backed edit model).
 
 **Storage prefix.** Generated images use the `"generated"` prefix via `attachments.upload(buffer, mediaType, "generated")`. The `AttachmentStore.upload()` signature accepts an optional `prefix` param (default `"inbound"` for backward compatibility).
 
@@ -273,7 +273,7 @@ interface ImageFailure {
 }
 ```
 
-`ImageGenerationFailedError(failure, options?)` accepts `ErrorOptions` so adapter-thrown failures can chain the original SDK error as `cause` — matches the `NonRetriableError({ cause: err })` pattern used elsewhere for non-retryable wraps. The APICallError → ImageGenerationFailedError converter in the tool handler chains the wrapped error so its request URL, response body, and status code survive in stack traces.
+`ImageGenerationFailedError(failure)` carries an adapter-thrown failure (Venice). On the AI SDK path the tool handler classifies a non-retryable `APICallError` into an `ImageFailure` value directly, which ends the retry loop without a throw; it logs the `APICallError` (request URL, status, response body) at the classification site, since the `ImageFailure` keeps only the message.
 
 Two surfaces produce it:
 
@@ -285,9 +285,10 @@ Two surfaces produce it:
    - Venice's `x-venice-is-content-violation: true` response header → `kind: "moderation_blocked"`.
    - Venice's `x-venice-is-blurred: true` when `safe_mode` was explicitly `false` → `kind: "blur_unexpected"`.
    - Venice's non-retryable 4xx (other than 429) → `kind: "provider_error"`.
-   - openai-compat 4xx whose body matches `content_policy_violation` / `safety system` (gpt-image-1) → `kind: "moderation_blocked"`. Other non-retryable 4xx → `kind: "provider_error"`.
 
-Both paths converge in the tool handler's `surfaceFailure(failure, row, slug)` helper: it emits one `logger.warn` carrying `{ kind, provider, rowName, providerId, slug, reason }` for operator filtering, and returns `Error: ${reason}` to the LLM. The LLM sees one shape regardless of which surface detected the failure, and can rephrase, switch model, or report back to the user. No bytes touch the attachment store on failure; no Telegram delivery is attempted.
+3. **Classified SDK errors** on the AI SDK path (fal, openai-compat): a non-retryable `APICallError` becomes an `ImageFailure` value in `generateViaAiSdk`. A body matching `content_policy_violation` / `safety system` (gpt-image-1) → `kind: "moderation_blocked"`; any other → `kind: "provider_error"`.
+
+All three paths converge in the tool handler's `surfaceFailure(failure, row, slug)` helper: it emits one `logger.warn` carrying `{ kind, provider, rowName, providerId, slug, reason }` for operator filtering, and rejects the call with `reason`, which the LLM reads as `Error: <reason>` on an `is_error` tool_result. The LLM sees one shape regardless of which surface detected the failure, and can rephrase, switch model, or report back to the user. No bytes touch the attachment store on failure; no Telegram delivery is attempted.
 
 **Non-goal: pixel-level analysis.** No runtime image-processing dependency. Decoding bytes to inspect luminance variance or detect a known-stub bitmap is deferred until production traffic shows a real case the cheap signals miss — the heavy decode dep isn't worth carrying for hypothetical coverage.
 
@@ -474,7 +475,7 @@ Aspect ratio support varies across providers (Venice's `image_size` presets, rec
 The wizard surfaces two distinct entry points:
 
 - **`stepConfigureOptionalTools`** handles fal — a single `fal_api_key` prompt. The boot-time `ensureFalImageDefaults` seed wires the canonical 9-model catalog automatically, so the wizard doesn't ask the operator to pick fal models one by one.
-- **`stepConfigureImageProviders`** (`src/setup/wizard.ts`) handles `openai_compatible` and `venice` providers — Venice.ai (native API), OpenAI dall-e, custom inference servers. Asks for the provider type first, then prompts for name + base URL + API key (+ `safe_mode` default when type=venice), then loops "add a model? (name, model_string, description, ratios, seed, image-input, negative-prompt)" until the operator declines. Same domain functions back the `cogmo image-provider` / `cogmo image-model` CLI commands — no behaviour drift between wizard and CLI.
+- **`stepConfigureImageProviders`** (`src/setup/wizard/image-providers.ts`) handles `openai_compatible` and `venice` providers — Venice.ai (native API), OpenAI dall-e, custom inference servers. Asks for the provider type first, then prompts for name + base URL + API key (+ `safe_mode` default when type=venice), then loops "add a model? (name, model_string, description, ratios, seed, image-input, negative-prompt)" until the operator declines. Same domain functions back the `cogmo image-provider` / `cogmo image-model` CLI commands — no behaviour drift between wizard and CLI.
 
 Both surfaces are hot-reload-aware: changes take effect on the next message turn, not on process restart.
 
@@ -578,7 +579,7 @@ The `ai` package also exports `generateText`/`streamText` which we don't use for
 | No new `StreamEvent` type | Reuse existing `tool_result` event | Adapter recognizes `name === "generate_image"`, parses output JSON. Zero changes to agent loop or tool handler signatures. |
 | Catalog storage | `image_providers` + `image_models` tables, `pgEnum` for `type` | User-defined models without redeploy. Mirrors `llm_providers` precedent. Wizard manages the rows. Adding a new provider type is always a code change *and* a migration anyway, so enum vs text costs the same and the enum gives exhaustive `switch` checking. |
 | OpenAI-compat second provider type | `@ai-sdk/openai-compatible` with per-provider `baseURL` | Venice's image endpoint is OpenAI-shaped; the AI SDK adapter covers it without bespoke code. Custom `ImageModelV2` is the fallback for non-OAI-shaped endpoints. |
-| Per-model capabilities | `capabilities JSONB` validated by `ImageModelCapabilitiesSchema` | Aspect ratio support varies across providers/models; future knobs (seed, image input, negative prompt, max prompt length) land without migrations. Tool description lists per-model ratios; handler narrows the LLM's pick per model and returns text errors the LLM can recover from. Zod-validated at the store boundary on read and write. |
+| Per-model capabilities | `capabilities JSONB` validated by `ImageModelCapabilitiesSchema` | Aspect ratio support varies across providers/models; future knobs (seed, image input, negative prompt, max prompt length) land without migrations. Tool description lists per-model ratios; handler narrows the LLM's pick per model and rejects with errors the LLM can recover from. Zod-validated at the store boundary on read and write. |
 | Tool surface | prompt, model (enum), aspectRatio, seed | LLM picks model per-call from the configured user-selectable catalog. Inference hyperparameters omitted — prompt is the lever. |
 | Storage prefix | `generated/` for tool output | AttachmentStore `upload()` gains optional `prefix` param (default `"inbound"`). Backward compatible. |
 | Test mock | Scoped `fetch` interceptor (`createFalFetch`) passed via `createFal({ fetch })` | llmock is LLM-API-specific and can't cover fal. MSW was tried first but `onUnhandledRequest: "bypass"` mangled Anthropic streaming auth headers through llmock. Per-library fetch injection via the SDK's own `fetch` option avoids that class of interaction and touches nothing outside fal. Record/replay fixtures follow llmock's spirit. |

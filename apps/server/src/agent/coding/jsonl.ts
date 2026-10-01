@@ -1,6 +1,7 @@
 import type { Readable } from "node:stream";
 import split2 from "split2";
 import { logger } from "../../logger.js";
+import { describeError } from "../../util/describe-error.js";
 
 const log = logger.child({ component: "coding.jsonl" });
 
@@ -26,7 +27,7 @@ export async function* readJsonl(stream: Readable): AsyncIterable<unknown> {
       yield JSON.parse(candidate);
     } catch (err) {
       log.warn(
-        { err: (err as Error).message, line: candidate.slice(0, 200) },
+        { err: describeError(err), line: candidate.slice(0, 200) },
         "skipping malformed JSONL line",
       );
     }

@@ -16,7 +16,7 @@
  *
  * Real `Docker` (from dockerode) structurally satisfies this interface —
  * `new Docker()` is assignable to `DockerFacade` with no cast at the boot
- * site (`src/index.ts`).
+ * site (`src/boot/sandbox.ts`).
  *
  * Return types intentionally mirror dockerode's own shapes (`ContainerInfo`,
  * `ContainerCreateOptions`, `ExecCreateOptions`, etc.) — those types are

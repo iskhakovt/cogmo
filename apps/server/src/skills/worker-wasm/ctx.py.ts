@@ -110,18 +110,17 @@ class Ctx:
         self.log = _Log(self)
 
     async def _call(self, method, args):
-        from pyodide.ffi import to_js
+        from pyodide.ffi import jsnull, to_js
         from js import Object
         # Convert Python dict -> plain JS object so structured clone passes
         # cleanly through postMessage.
         js_args = to_js(args, dict_converter=Object.fromEntries)
-        result = await self._bridge.call(method, js_args)
-        # Result may be a JsProxy (e.g. recall returns an object). Call
-        # .to_py() recursively if it's a proxy.
-        try:
-            return result.to_py()
-        except AttributeError:
-            return result
+        # The bridge answers { ok, value } or { ok, kind, message }.
+        reply = (await self._bridge.call(method, js_args)).to_py()
+        if not reply["ok"]:
+            raise CtxError(reply["kind"], reply["message"])
+        value = reply.get("value")
+        return None if value is jsnull else value
 
     async def now(self):
         return await self._call("now", {})

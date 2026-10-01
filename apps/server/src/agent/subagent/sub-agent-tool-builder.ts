@@ -1,4 +1,4 @@
-import { NonRetriableError } from "inngest";
+import { ok } from "neverthrow";
 import { z } from "zod";
 import { extractText } from "../../llm/content.js";
 import { resolveLimits } from "../../llm/models.js";
@@ -8,7 +8,7 @@ import {
   type ResolvedLlm,
 } from "../../llm/resolver.js";
 import type { SubAgent } from "../store/index.js";
-import { defineTool, type ToolSpec } from "../tools.js";
+import { defineTool, reject, type ToolSpec } from "../tools.js";
 
 /**
  * Tool-name namespace for sub-agents. Mirrors MCP's `mcp__<server>__<tool>` —
@@ -82,21 +82,15 @@ export function buildSubAgentTools(
       // the specialist call.
       durable: true,
       handler: async (input) => {
-        // Resolve the specialist's model. A ProviderConfigError is permanent —
-        // the model's routing was removed after this sub-agent was created (the
-        // sub_agents.model dangle). Rethrow as NonRetriableError: Inngest fails
-        // the durable step on the first attempt (no retry burn on an error that
-        // can't succeed) and the loop records a proper isError tool_result.
-        // Transient resolve failures rethrow as-is, so the step retries them.
-        // Mirrors `resolveOrFail` (handle-message.ts) — duplicated, not imported,
-        // to avoid a handle-message → builder dependency cycle.
+        // Resolve the specialist's model. A ProviderConfigError means the
+        // model's routing was removed after this sub-agent was created (the
+        // sub_agents.model dangle): the delegation can't run, which the model
+        // reads as a rejection. Anything else resolve throws propagates.
         let resolved: ResolvedLlm;
         try {
           resolved = await resolveProvider(row.model);
         } catch (err) {
-          if (err instanceof ProviderConfigError) {
-            throw new NonRetriableError(err.message, { cause: err });
-          }
+          if (err instanceof ProviderConfigError) return reject(err.message);
           throw err;
         }
         const { provider, limits } = resolved;
@@ -117,13 +111,11 @@ export function buildSubAgentTools(
         // fidelity (leading/trailing whitespace, formatting) survives.
         const text = extractText(response.content);
         // No text (the model emitted only thinking, refused, or stopped early)
-        // is a failed delegation, not an empty answer — throw so the loop
-        // records an isError tool_result, rather than handing the orchestrator
-        // fabricated content it might surface to the user or reason over.
+        // is a failed delegation, not an empty answer — reject rather than
+        // hand the orchestrator fabricated content it might surface to the
+        // user or reason over.
         if (text.length === 0) {
-          throw new NonRetriableError(
-            `sub-agent "${row.name}" (model ${row.model}) returned no text output`,
-          );
+          return reject(`sub-agent "${row.name}" (model ${row.model}) returned no text output`);
         }
         // Same reasoning for a truncated answer, which the empty-text
         // check above cannot see: it wears the shape of a complete one, so
@@ -131,13 +123,13 @@ export function buildSubAgentTools(
         // mid-clause. The message avoids quoting the cap requested above —
         // delegation is non-streaming, and a provider may hold it lower.
         if (response.stopReason === "max_tokens") {
-          throw new NonRetriableError(
+          return reject(
             `sub-agent "${row.name}" (model ${row.model}) ran out of output tokens and returned ` +
               `a truncated answer. Delegation is non-streaming, so the effective cap can be ` +
               `lower than the model's own limit — split the task or ask for a shorter answer.`,
           );
         }
-        return text;
+        return ok(text);
       },
     }),
   );

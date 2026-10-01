@@ -159,7 +159,7 @@ Both share the same persistence model. Industry validation in [decisions.md](dec
 
 ### `evolution_events` table
 
-Append-only, one row per Observer fire (`status: "processed"` only — skipped fires don't earn a row since there's nothing to surface). Owned by `agent/store/schema.ts`.
+Append-only, one row per Observer fire (`status: "processed"` only — skipped fires don't earn a row since there's nothing to surface). Owned by `agent/store/schema/evolution-events.ts`.
 
 | Column | Type | Notes |
 |-|-|-|

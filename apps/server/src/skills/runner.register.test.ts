@@ -13,7 +13,7 @@ import { profiles, users } from "../agent/store/schema.js";
 import type { Database, Transactor } from "../db/index.js";
 import { GitHubIdentitySchema } from "../secrets/github.js";
 import type { SecretsStore } from "../secrets/store/index.js";
-import { expectDefined } from "../test/assertions.js";
+import { assertStatus, expectDefined } from "../test/assertions.js";
 import { mockFilesService } from "../test/factories.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import { makePopulatedBareRepo } from "../test/skills-bare-repo.js";
@@ -224,7 +224,7 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
     });
 
     const result = await runner.register({ branch: "skill/echo", origin: OWNER });
-    expect(result.status).toBe("live");
+    assertStatus(result, "live");
     expect(result.name).toBe("echo");
     expect(result.gitSha).toBe(sha);
     // ECHO body has no detectable side effects + manifest declares no
@@ -256,7 +256,7 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
       body: ECHO_BODY,
     });
     const first = await runner.register({ branch: "skill/echo", origin: OWNER });
-    expect(first.status).toBe("live");
+    assertStatus(first, "live");
 
     // Push the same content under a fresh branch (same tree, new commit since
     // the old branch was deleted by the first register).
@@ -281,7 +281,50 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
       `refs/heads/at-main:refs/heads/at-main`,
     ]);
     const second = await runner.register({ branch: "at-main", origin: OWNER });
-    expect(second.status).toBe("no_op");
+    assertStatus(second, "no_op");
+  });
+
+  it("rejects as non-fast-forward when main moves while the register waits on its lock", async () => {
+    const runner = await makeRunner();
+    const base = await pushFeatureBranch({
+      work: repo.work,
+      branch: "skill/echo",
+      manifest: ECHO_MANIFEST,
+      body: ECHO_BODY,
+    });
+    await runner.register({ branch: "skill/echo", origin: OWNER });
+    await pushFeatureBranch({
+      work: repo.work,
+      branch: "skill/echo-mine",
+      manifest: ECHO_MANIFEST,
+      body: `${ECHO_BODY}\n# mine\n`,
+    });
+    await execFileP("git", ["-C", repo.work, "reset", "--hard", base]);
+    const theirs = await pushFeatureBranch({
+      work: repo.work,
+      branch: "skill/echo-theirs",
+      manifest: ECHO_MANIFEST,
+      body: `${ECHO_BODY}\n# theirs\n`,
+    });
+    // A concurrent register of the same skill wins the advisory lock and
+    // moves main after this one's pre-transaction checks passed.
+    const executeRegister = store.executeRegister.bind(store);
+    const spy = vi.spyOn(store, "executeRegister").mockImplementationOnce(async (trx, params) => {
+      await execFileP("git", ["-C", repo.bare, "update-ref", "refs/heads/main", theirs]);
+      return executeRegister(trx, params);
+    });
+
+    try {
+      const result = await runner.register({ branch: "skill/echo-mine", origin: OWNER });
+
+      assertStatus(result, "rejected");
+      expect(result.errors).toEqual(["non_fast_forward: rebase branch onto main and retry"]);
+      expect(await getMainSha(repo.bare)).toBe(theirs);
+      const skill = await tx((trx) => store.getSkillByName(trx, "echo"));
+      expect(skill?.gitSha).toBe(base);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("rejects a non-fast-forward branch", async () => {
@@ -304,7 +347,7 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
     await execFileP("git", ["-C", repo.work, "push", "origin", "fresh:refs/heads/divergent"]);
 
     const result = await runner.register({ branch: "divergent", origin: OWNER });
-    expect(result.status).toBe("rejected");
+    assertStatus(result, "rejected");
     expect(result.errors?.[0]).toMatch(/non_fast_forward/);
   });
 
@@ -368,7 +411,7 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
     });
 
     expect(controller.signal.aborted).toBe(true);
-    expect(result.status).toBe("live");
+    assertStatus(result, "live");
     expect(await getMainSha(repo.bare)).toBe(sha);
     expect((await tx((trx) => store.getSkillByName(trx, "echo")))?.gitSha).toBe(sha);
   });
@@ -376,7 +419,7 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
   it("rejects a missing branch", async () => {
     const runner = await makeRunner();
     const result = await runner.register({ branch: "nope", origin: OWNER });
-    expect(result.status).toBe("rejected");
+    assertStatus(result, "rejected");
     expect(result.errors?.[0]).toMatch(/branch_not_found/);
   });
 
@@ -387,7 +430,7 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
     await execFileP("git", ["-C", repo.work, "commit", "-m", "no manifest"]);
     await execFileP("git", ["-C", repo.work, "push", "origin", "main:refs/heads/no-manifest"]);
     const result = await runner.register({ branch: "no-manifest", origin: OWNER });
-    expect(result.status).toBe("rejected");
+    assertStatus(result, "rejected");
     expect(result.errors?.[0]).toMatch(/missing_skill_md/);
   });
 
@@ -406,8 +449,37 @@ tier: wasm
       body: ECHO_BODY,
     });
     const result = await runner.register({ branch: "bad", origin: OWNER });
-    expect(result.status).toBe("rejected");
+    assertStatus(result, "rejected");
     expect(result.errors?.length).toBeGreaterThan(0);
+  });
+
+  it("rejects an $async inputs schema and an outputs schema ajv cannot compile", async () => {
+    const runner = await makeRunner();
+    const manifest = `---
+name: bad-schemas
+description: a skill whose JSON Schemas cannot validate
+tier: wasm
+inputs:
+  type: object
+  $async: true
+  properties: {}
+outputs:
+  type: not-a-type
+---
+`;
+    await pushFeatureBranch({
+      work: repo.work,
+      branch: "bad-schemas",
+      manifest,
+      body: ECHO_BODY,
+    });
+    const result = await runner.register({ branch: "bad-schemas", origin: OWNER });
+    assertStatus(result, "rejected");
+    expect(result.errors).toEqual([
+      "invalid_inputs_schema: $async schemas are not supported",
+      expect.stringMatching(/^invalid_outputs_schema: /),
+    ]);
+    expect(await getMainSha(repo.bare)).toBeNull();
   });
 
   describe("dependencies", () => {
@@ -422,7 +494,7 @@ tier: wasm
         body: ECHO_BODY,
       });
       const result = await runner.register({ branch: "skill/echo-deps", origin: OWNER });
-      expect(result.status).toBe("rejected");
+      assertStatus(result, "rejected");
       expect(result.errors?.[0]).toMatch(/requirements_lock_missing/);
       // main did not move — register failed before any update-ref.
       const skill = await tx((trx) => store.getSkillByName(trx, "echo"));
@@ -452,7 +524,7 @@ tier: wasm
         "HEAD:refs/heads/skill/echo-empty-lock",
       ]);
       const result = await runner.register({ branch: "skill/echo-empty-lock", origin: OWNER });
-      expect(result.status).toBe("rejected");
+      assertStatus(result, "rejected");
       expect(result.errors?.[0]).toMatch(/requirements_lock_empty/);
     });
 
@@ -479,7 +551,7 @@ tier: wasm
         "HEAD:refs/heads/skill/echo-locked",
       ]);
       const result = await runner.register({ branch: "skill/echo-locked", origin: OWNER });
-      expect(result.status).toBe("live");
+      assertStatus(result, "live");
       const skill = await tx((trx) => store.getSkillByName(trx, "echo"));
       // sha256(ECHO_LOCKFILE) — hex length 64 is the schema-level shape.
       expect(skill?.lockfileHash).toMatch(/^[0-9a-f]{64}$/);
@@ -536,7 +608,7 @@ tier: wasm
         body: ECHO_BODY,
       });
       const result = await runner.register({ branch: "skill/echo-nodeps", origin: OWNER });
-      expect(result.status).toBe("live");
+      assertStatus(result, "live");
       const skill = await tx((trx) => store.getSkillByName(trx, "echo"));
       expect(skill?.lockfileHash).toBeNull();
     });
@@ -574,7 +646,7 @@ tier: wasm
         await commitWithLockfile("skill/echo-verified", lockfile);
 
         const result = await runner.register({ branch: "skill/echo-verified", origin: OWNER });
-        expect(result.status).toBe("live");
+        assertStatus(result, "live");
         expect(compiler.compile).toHaveBeenCalledWith(["httpx==0.27.0"], {});
       });
 
@@ -586,7 +658,7 @@ tier: wasm
         await commitWithLockfile("skill/echo-stale", committed);
 
         const result = await runner.register({ branch: "skill/echo-stale", origin: OWNER });
-        expect(result.status).toBe("rejected");
+        assertStatus(result, "rejected");
         expect(result.errors?.[0]).toMatch(/requirements_lock_stale/);
         // main did NOT advance — the skill never went live.
         const skill = await tx((trx) => store.getSkillByName(trx, "echo"));
@@ -606,7 +678,7 @@ tier: wasm
         await commitWithLockfile("skill/echo-bad", "anything\n");
 
         const result = await runner.register({ branch: "skill/echo-bad", origin: OWNER });
-        expect(result.status).toBe("rejected");
+        assertStatus(result, "rejected");
         expect(result.errors?.[0]).toMatch(/requirements_lock_resolver_failed/);
         expect(result.errors?.[0]).toMatch(/Distribution not found/);
       });
@@ -676,7 +748,7 @@ tier: wasm
         await commitWithLockfile("skill/echo-no-compiler", lockfile);
 
         const result = await runner.register({ branch: "skill/echo-no-compiler", origin: OWNER });
-        expect(result.status).toBe("live");
+        assertStatus(result, "live");
         const skill = await tx((trx) => store.getSkillByName(trx, "echo"));
         expect(skill?.lockfileHash).toMatch(/^[0-9a-f]{64}$/);
       });
@@ -693,8 +765,10 @@ tier: wasm
     });
     await runner.register({ branch: "skill/echo", origin: OWNER });
 
-    const result = await runner.invoke({ name: "echo", inputs: { x: 7 }, runAs: RUN_AS });
-    expect(result.status).toBe("success");
+    const result = (
+      await runner.invoke({ name: "echo", inputs: { x: 7 }, runAs: RUN_AS })
+    )._unsafeUnwrap();
+    assertStatus(result, "success");
     expect(result.output).toEqual({ echo: 8 });
   });
 
@@ -712,8 +786,10 @@ tier: wasm
     await r1.register({ branch: "skill/echo", origin: OWNER });
 
     const r2 = await makeRunner();
-    const result = await r2.invoke({ name: "echo", inputs: { x: 7 }, runAs: RUN_AS });
-    expect(result.status).toBe("success");
+    const result = (
+      await r2.invoke({ name: "echo", inputs: { x: 7 }, runAs: RUN_AS })
+    )._unsafeUnwrap();
+    assertStatus(result, "success");
     expect(result.output).toEqual({ echo: 8 });
   });
 
@@ -726,8 +802,10 @@ tier: wasm
       body: ECHO_BODY_BAD_OUTPUT,
     });
     await runner.register({ branch: "skill/bad-out", origin: OWNER });
-    const result = await runner.invoke({ name: "bad-out", inputs: { x: 1 }, runAs: RUN_AS });
-    expect(result.status).toBe("error");
+    const result = (
+      await runner.invoke({ name: "bad-out", inputs: { x: 1 }, runAs: RUN_AS })
+    )._unsafeUnwrap();
+    assertStatus(result, "error");
     expect(result.error).toMatch(/output failed schema/);
   });
 
@@ -769,7 +847,7 @@ tier: wasm
       body: ECHO_BODY,
     });
     const second = await runner.register({ branch: "skill/echo-v2", origin: OWNER });
-    expect(second.status).toBe("live");
+    assertStatus(second, "live");
 
     const defs = await runner.listToolDefs();
     expect(defs[0]?.description).toContain("v2 now adds two instead");
@@ -799,7 +877,7 @@ tier: wasm
       await runner.register({ branch: "skill/echo-v2", origin: OWNER });
 
       const result = await runner.rollback({ name: "echo", toGitSha: v1, origin: OWNER });
-      expect(result.status).toBe("live");
+      assertStatus(result, "live");
       expect(result.gitSha).toBe(v1);
 
       expect(await getMainSha(repo.bare)).toBe(v1);
@@ -818,7 +896,7 @@ tier: wasm
       await runner.register({ branch: "skill/echo", origin: OWNER });
 
       const result = await runner.rollback({ name: "echo", toGitSha: v1, origin: OWNER });
-      expect(result.status).toBe("no_op");
+      assertStatus(result, "no_op");
     });
 
     it("rollback succeeds even if a fresh compile would resolver_fail (yanked wheel)", async () => {
@@ -851,7 +929,7 @@ tier: wasm
         "HEAD:refs/heads/skill/echo-deps-v1",
       ]);
       const v1Result = await runner.register({ branch: "skill/echo-deps-v1", origin: OWNER });
-      expect(v1Result.status).toBe("live");
+      assertStatus(v1Result, "live");
       const v1Sha = v1Result.gitSha;
 
       // v2 — same lockfile bytes, only manifest description changes.
@@ -872,7 +950,7 @@ tier: wasm
       ]);
       compiler.compile.mockResolvedValueOnce(ok(lockfile));
       const v2Result = await runner.register({ branch: "skill/echo-deps-v2", origin: OWNER });
-      expect(v2Result.status).toBe("live");
+      assertStatus(v2Result, "live");
 
       // Rollback — compiler stub now reports yanked-wheel. Must still succeed.
       const rollbackResult = await runner.rollback({
@@ -880,7 +958,7 @@ tier: wasm
         toGitSha: v1Sha,
         origin: OWNER,
       });
-      expect(rollbackResult.status).toBe("live");
+      assertStatus(rollbackResult, "live");
       expect(rollbackResult.gitSha).toBe(v1Sha);
     });
   });
@@ -1021,7 +1099,7 @@ ${effects}
         origin: { kind: "user", actor: approver, conversation: null },
       });
 
-      expect(approved.status).toBe("live");
+      assertStatus(approved, "live");
       expect(await runAsOfBriefing()).toEqual([approver.userId, owner.profileId]);
       const deploy = await tx((trx) => store.getDeployById(trx, pendingId));
       expect(deploy?.approvedBy).toBe(approver.identityId);
@@ -1109,7 +1187,7 @@ ${effects}
         origin: fromConversation(rollbackOrigin),
       });
 
-      expect(rolled.status).toBe("live");
+      assertStatus(rolled, "live");
       expect(await runAsOfBriefing()).toEqual([rollbackOrigin.userId, rollbackOrigin.profileId]);
     });
 
@@ -1193,7 +1271,7 @@ effects:
         pendingId: "00000000-0000-0000-0000-000000000099",
         origin: OWNER,
       });
-      expect(result.status).toBe("rejected");
+      assertStatus(result, "rejected");
       expect(result.errors?.[0]).toMatch(/deploy_not_found/);
       expect(result.gitSha).toBe("");
     });
@@ -1206,10 +1284,10 @@ effects:
       const runner = await makeRunner();
       const pendingId = await makePendingDeploy(runner);
       const first = await runner.approveDeploy({ pendingId, origin: OWNER });
-      expect(first.status).toBe("live");
+      assertStatus(first, "live");
 
       const second = await runner.approveDeploy({ pendingId, origin: OWNER });
-      expect(second.status).toBe("rejected");
+      assertStatus(second, "rejected");
       expect(second.errors?.[0]).toMatch(/deploy_not_pending/);
       expect(second.errors?.[0]).toMatch(/live/);
     });
@@ -1230,12 +1308,41 @@ effects:
         body: ECHO_BODY,
       });
       const leap = await runner.register({ branch: "skill/echo-leap", origin: OWNER });
-      expect(leap.status).toBe("live");
+      assertStatus(leap, "live");
 
       // Now approve the original pending — main has moved.
       const result = await runner.approveDeploy({ pendingId, origin: OWNER });
-      expect(result.status).toBe("rejected");
+      assertStatus(result, "rejected");
       expect(result.errors?.[0]).toMatch(/non_fast_forward_at_approve_time/);
+    });
+
+    it("rejects when another skill's deploy moves main while the approve waits on its lock", async () => {
+      const runner = await makeRunner();
+      const pendingId = await makePendingDeploy(runner);
+      await execFileP("git", ["-C", repo.work, "checkout", "--orphan", "unrelated"]);
+      const theirs = await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/unrelated",
+        manifest: ECHO_MANIFEST,
+        body: ECHO_BODY,
+      });
+      const executeApprove = store.executeApprove.bind(store);
+      const spy = vi.spyOn(store, "executeApprove").mockImplementationOnce(async (trx, params) => {
+        await execFileP("git", ["-C", repo.bare, "update-ref", "refs/heads/main", theirs]);
+        return executeApprove(trx, params);
+      });
+
+      try {
+        const result = await runner.approveDeploy({ pendingId, origin: OWNER });
+
+        assertStatus(result, "rejected");
+        expect(result.errors).toEqual(["non_fast_forward_at_approve_time"]);
+        expect(await getMainSha(repo.bare)).toBe(theirs);
+        const deploy = await tx((trx) => store.getDeployById(trx, pendingId));
+        expect(deploy?.status).toBe("pending_approval");
+      } finally {
+        spy.mockRestore();
+      }
     });
 
     it("target_missing_source when SKILL.md is gone at the deploy sha", async () => {
@@ -1275,12 +1382,53 @@ effects:
       });
 
       const result = await runner.approveDeploy({ pendingId, origin: OWNER });
-      expect(result.status).toBe("rejected");
+      assertStatus(result, "rejected");
       expect(result.errors?.[0]).toMatch(/target_missing_source/);
     });
   });
 
   describe("rollback: rejection matrix", () => {
+    it("rejects when another deploy moves main while the rollback waits on its lock", async () => {
+      const runner = await makeRunner();
+      const v1 = await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/echo",
+        manifest: ECHO_MANIFEST,
+        body: ECHO_BODY,
+      });
+      await runner.register({ branch: "skill/echo", origin: OWNER });
+      const v2 = await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/echo-v2",
+        manifest: ECHO_MANIFEST,
+        body: `${ECHO_BODY}\n# v2\n`,
+      });
+      await runner.register({ branch: "skill/echo-v2", origin: OWNER });
+      const theirs = await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/other",
+        manifest: ECHO_MANIFEST,
+        body: `${ECHO_BODY}\n# other\n`,
+      });
+      const executeRollback = store.executeRollback.bind(store);
+      const spy = vi.spyOn(store, "executeRollback").mockImplementationOnce(async (trx, params) => {
+        await execFileP("git", ["-C", repo.bare, "update-ref", "refs/heads/main", theirs]);
+        return executeRollback(trx, params);
+      });
+
+      try {
+        const result = await runner.rollback({ name: "echo", toGitSha: v1, origin: OWNER });
+
+        assertStatus(result, "rejected");
+        expect(result.errors?.[0]).toMatch(/^main_moved:/);
+        expect(await getMainSha(repo.bare)).toBe(theirs);
+        const skill = await tx((trx) => store.getSkillByName(trx, "echo"));
+        expect(skill?.gitSha).toBe(v2);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     it("target_sha_not_found when the target sha is unknown to the repo", async () => {
       const runner = await makeRunner();
       // Register echo first so the skill row exists.
@@ -1301,7 +1449,7 @@ effects:
         toGitSha: "refs/heads/totally-missing-ref",
         origin: OWNER,
       });
-      expect(result.status).toBe("rejected");
+      assertStatus(result, "rejected");
       expect(result.errors?.[0]).toMatch(/target_sha_not_found/);
     });
 
@@ -1337,7 +1485,7 @@ effects:
       ]);
 
       const result = await runner.rollback({ name: "echo", toGitSha: noFilesSha, origin: OWNER });
-      expect(result.status).toBe("rejected");
+      assertStatus(result, "rejected");
       expect(result.errors?.[0]).toMatch(/target_missing_source/);
     });
   });
@@ -1376,7 +1524,7 @@ effects:
     it("rejects branch == 'main' before touching git or DB", async () => {
       const runner = await makeRunner();
       const result = await runner.register({ branch: "main", origin: OWNER });
-      expect(result.status).toBe("rejected");
+      assertStatus(result, "rejected");
       expect(result.errors?.[0]).toMatch(/invalid_branch/);
       // No skills row created.
       expect(await tx((trx) => store.getSkillByName(trx, "echo"))).toBeUndefined();
@@ -1385,7 +1533,7 @@ effects:
     it("rejects branch == 'refs/heads/main' too", async () => {
       const runner = await makeRunner();
       const result = await runner.register({ branch: "refs/heads/main", origin: OWNER });
-      expect(result.status).toBe("rejected");
+      assertStatus(result, "rejected");
       expect(result.errors?.[0]).toMatch(/invalid_branch/);
     });
   });
@@ -1412,7 +1560,7 @@ inputs:
       });
       const before = await getMainSha(repo.bare);
       const result = await runner.register({ branch: "skill/bad-schema", origin: OWNER });
-      expect(result.status).toBe("rejected");
+      assertStatus(result, "rejected");
       expect(result.errors?.[0]).toMatch(/inputs\.type/);
       // main is unchanged — no half-deploy.
       expect(await getMainSha(repo.bare)).toBe(before);
@@ -1442,7 +1590,7 @@ inputs:
       });
       const before = await getMainSha(repo.bare);
       const result = await runner.register({ branch: "skill/bad-properties", origin: OWNER });
-      expect(result.status).toBe("rejected");
+      assertStatus(result, "rejected");
       // Either layer is acceptable — what matters is no main advance.
       expect(result.errors?.length).toBeGreaterThan(0);
       expect(await getMainSha(repo.bare)).toBe(before);
@@ -1472,7 +1620,7 @@ effects:
       });
       const before = await getMainSha(repo.bare);
       const result = await runner.register({ branch: "skill/notifier", origin: OWNER });
-      expect(result.status).toBe("pending_approval");
+      assertStatus(result, "pending_approval");
       expect(result.riskTier).toBe("approve");
       expect(result.pendingId).toBeTruthy();
       // main is NOT advanced for approve-tier.
@@ -1499,12 +1647,12 @@ effects:
         body: ECHO_BODY,
       });
       const reg = await runner.register({ branch: "skill/notifier", origin: OWNER });
-      expect(reg.status).toBe("pending_approval");
+      assertStatus(reg, "pending_approval");
       const pendingId = reg.pendingId;
       if (!pendingId) throw new Error("expected pendingId");
 
       const approved = await runner.approveDeploy({ pendingId, origin: OWNER });
-      expect(approved.status).toBe("live");
+      assertStatus(approved, "live");
       expect(approved.gitSha).toBe(sha);
 
       // main moved + skills row reflects the approved sha.
@@ -1539,7 +1687,7 @@ async def run(inputs, ctx):
       const before = await getMainSha(repo.bare);
       const result = await runner.register({ branch: "skill/echo", origin: OWNER });
 
-      expect(result.status).toBe("rejected");
+      assertStatus(result, "rejected");
       expect(result.errors?.[0]).toMatch(/undeclared effect 'financial'/);
       expect(result.errors?.[0]).toMatch(/stripe/);
       // No advance, no skills row.
@@ -1566,7 +1714,7 @@ async def run(inputs, ctx):
         body: okBody,
       });
       const result = await runner.register({ branch: "skill/echo", origin: OWNER });
-      expect(result.status).toBe("pending_approval");
+      assertStatus(result, "pending_approval");
       expect(result.riskTier).toBe("approve");
     });
   });
@@ -1591,7 +1739,7 @@ async def run(inputs, ctx):
       const before = await getMainSha(repo.bare);
       const result = await runner.register({ branch: "skill/echo", origin: OWNER });
 
-      expect(result.status).toBe("rejected");
+      assertStatus(result, "rejected");
       expect(result.errors?.[0]).toMatch(/stdlib networking/);
       expect(result.errors?.[0]).toMatch(/line 2/);
       expect(await getMainSha(repo.bare)).toBe(before);
@@ -1612,7 +1760,7 @@ async def run(inputs, ctx):
         body: subprocessBody,
       });
       const result = await runner.register({ branch: "skill/echo", origin: OWNER });
-      expect(result.status).toBe("rejected");
+      assertStatus(result, "rejected");
       expect(result.errors?.[0]).toMatch(/subprocess/);
     });
   });
@@ -1641,7 +1789,7 @@ async def run(inputs, ctx):
       // Try to roll back A to B's sha — must reject; otherwise A would
       // silently start running B's code.
       const result = await runner.rollback({ name: "alpha", toGitSha: bSha, origin: OWNER });
-      expect(result.status).toBe("rejected");
+      assertStatus(result, "rejected");
       expect(result.errors?.[0]).toMatch(/target_skill_mismatch/);
 
       // A's sha is unchanged.
@@ -1675,7 +1823,7 @@ effects:
         body: ECHO_BODY,
       });
       const reg = await runner.register({ branch: "skill/shapeshift-v1", origin: OWNER });
-      if (!reg.pendingId) throw new Error("expected pendingId for sends_message skill");
+      assertStatus(reg, "pending_approval");
       await runner.approveDeploy({ pendingId: reg.pendingId, origin: OWNER });
 
       // Now stage v2 with a different inputs schema + extra effect.
@@ -1702,9 +1850,9 @@ effects:
         body: ECHO_BODY,
       });
       const reg2 = await runner.register({ branch: "skill/shapeshift-v2", origin: OWNER });
-      if (!reg2.pendingId) throw new Error("expected pendingId for v2 register");
+      assertStatus(reg2, "pending_approval");
       const approved = await runner.approveDeploy({ pendingId: reg2.pendingId, origin: OWNER });
-      expect(approved.status).toBe("live");
+      assertStatus(approved, "live");
 
       const skill = await tx((trx) => store.getSkillByName(trx, "shapeshift"));
       expect(skill?.gitSha).toBe(v2Sha);
@@ -1747,7 +1895,7 @@ inputs:
       await runner.register({ branch: "skill/shape-v2", origin: OWNER });
 
       const result = await runner.rollback({ name: "shape", toGitSha: v1Sha, origin: OWNER });
-      expect(result.status).toBe("live");
+      assertStatus(result, "live");
 
       const skill = await tx((trx) => store.getSkillByName(trx, "shape"));
       expect(skill?.gitSha).toBe(v1Sha);
@@ -1783,7 +1931,7 @@ effects:
         body: ECHO_BODY,
       });
       const reg = await runner.register({ branch: "skill/notify-skill", origin: OWNER });
-      expect(reg.status).toBe("pending_approval");
+      assertStatus(reg, "pending_approval");
       expect(reg.gitSha).toBe(sha);
       if (!reg.pendingId) throw new Error("expected pendingId");
 
@@ -1808,7 +1956,7 @@ effects:
       // guard, the disabled row is treated as "not no_op" and a fresh
       // pending_approval row is created.
       const reg2 = await runner.register({ branch: "skill/notify-skill", origin: OWNER });
-      expect(reg2.status).toBe("pending_approval");
+      assertStatus(reg2, "pending_approval");
       expect(reg2.gitSha).toBe(sha);
       expect(reg2.pendingId).toBeTruthy();
       expect(reg2.pendingId).not.toBe(reg.pendingId);
@@ -1825,7 +1973,7 @@ effects:
         body: ECHO_BODY,
       });
       const reg1 = await runner.register({ branch: "skill/upgradable-v1", origin: OWNER });
-      expect(reg1.status).toBe("live");
+      assertStatus(reg1, "live");
 
       const liveBefore = await tx((trx) => store.getSkillByName(trx, "upgradable"));
       expect(liveBefore?.disabled).toBe(false);
@@ -1855,7 +2003,7 @@ effects:
         body: ECHO_BODY,
       });
       const reg2 = await runner.register({ branch: "skill/upgradable-v2", origin: OWNER });
-      expect(reg2.status).toBe("pending_approval");
+      assertStatus(reg2, "pending_approval");
       if (!reg2.pendingId) throw new Error("expected pendingId for v2");
 
       // Critical: skills row UNCHANGED — still pointing at v1, still live.
@@ -1972,7 +2120,7 @@ effects:
         });
 
         const result = await runner.register({ branch: "skill/echo", origin: OWNER });
-        expect(result.status).toBe("live");
+        assertStatus(result, "live");
         expect(result.gitSha).toBe(sha);
 
         // The crux: remote main now equals the registered SHA. Without the
@@ -2010,7 +2158,7 @@ effects:
         });
 
         const result = await runner.register({ branch: "skill/echo", origin: OWNER });
-        expect(result.status).toBe("live");
+        assertStatus(result, "live");
         expect(result.gitSha).toBe(sha);
         // Local main advanced even though remote push failed.
         expect(await getMainSha(repoWithRemote.bare)).toBe(sha);
@@ -2047,7 +2195,7 @@ effects:
         const result = await registered;
 
         expect(Date.now() - abortedAt).toBeLessThan(5_000);
-        expect(result.status).toBe("live");
+        assertStatus(result, "live");
         expect(result.gitSha).toBe(sha);
         expect(await getMainSha(repoWithRemote.bare)).toBe(sha);
       } finally {
@@ -2113,7 +2261,7 @@ effects:
         const result = await registered;
 
         expect(timeout).toHaveBeenCalledWith(60_000);
-        expect(result.status).toBe("live");
+        assertStatus(result, "live");
         expect(result.gitSha).toBe(sha);
         expect(await getMainSha(repoWithRemote.bare)).toBe(sha);
       } finally {
@@ -2156,7 +2304,7 @@ effects:
         // Register lands as pending_approval (sends_message → approve tier)
         // and leaves both local and remote main on the seed commit.
         const reg = await runner.register({ branch: "skill/notifier", origin: OWNER });
-        expect(reg.status).toBe("pending_approval");
+        assertStatus(reg, "pending_approval");
         const pendingId = reg.pendingId;
         if (!pendingId) throw new Error("expected pendingId");
         const seedSha = (
@@ -2168,7 +2316,7 @@ effects:
         // local but leaves remote on the seed commit", which would silently
         // break Daytona-backed coding tasks operating on the skill.
         const approved = await runner.approveDeploy({ pendingId, origin: OWNER });
-        expect(approved.status).toBe("live");
+        assertStatus(approved, "live");
         expect(approved.gitSha).toBe(sha);
 
         const remoteMainAfter = (
@@ -2217,7 +2365,7 @@ effects:
         // Rollback to v1 — rewinds local main backwards. The mirror push
         // uses --force-with-lease so the remote follows.
         const result = await runner.rollback({ name: "echo", toGitSha: v1, origin: OWNER });
-        expect(result.status).toBe("live");
+        assertStatus(result, "live");
         expect(result.gitSha).toBe(v1);
 
         expect(await getMainSha(repoWithRemote.bare)).toBe(v1);
@@ -2285,7 +2433,7 @@ effects:
         // push aborts. The mirror is non-blocking, so rollback still
         // reports `live`.
         const result = await runner.rollback({ name: "echo", toGitSha: v1, origin: OWNER });
-        expect(result.status).toBe("live");
+        assertStatus(result, "live");
         expect(result.gitSha).toBe(v1);
 
         // Local rolled back as expected.

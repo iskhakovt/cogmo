@@ -1,4 +1,3 @@
-import { NonRetriableError } from "inngest";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { type LlmProviderResolver, ProviderConfigError } from "../../llm/resolver.js";
@@ -61,7 +60,7 @@ describe("buildSubAgentTools", () => {
       mock<Service>(),
     );
 
-    expect(out).toBe("DRAFT more");
+    expect(out._unsafeUnwrap()).toBe("DRAFT more");
     const params = expectDefined(chat.mock.calls[0], "chat call")[0];
     // The whole point: the specialist is handed no tools, so it physically
     // cannot tool-call — the orchestrator acts on the text it returns.
@@ -105,10 +104,10 @@ describe("buildSubAgentTools", () => {
     });
     const tools = buildSubAgentTools([row()], mockResolver(mockProvider({ chat })));
     const out = await expectDefined(tools[0], "spec").handler({ task: "t" }, mock<Service>());
-    expect(out).toBe("answer");
+    expect(out._unsafeUnwrap()).toBe("answer");
   });
 
-  it("throws on empty specialist output instead of fabricating content", async () => {
+  it("rejects empty specialist output instead of fabricating content", async () => {
     const chat = vi.fn().mockResolvedValue({
       content: [],
       stopReason: "end_turn",
@@ -116,12 +115,13 @@ describe("buildSubAgentTools", () => {
       usage: { inputTokens: 1, outputTokens: 0 },
     });
     const tools = buildSubAgentTools([row()], mockResolver(mockProvider({ chat })));
-    await expect(
-      expectDefined(tools[0], "spec").handler({ task: "t" }, mock<Service>()),
-    ).rejects.toThrow(/no text output/);
+    const out = await expectDefined(tools[0], "spec").handler({ task: "t" }, mock<Service>());
+    expect(out._unsafeUnwrapErr().message).toBe(
+      'sub-agent "writer" (model claude-test) returned no text output',
+    );
   });
 
-  it("throws on truncated specialist output rather than passing off a partial answer", async () => {
+  it("rejects truncated specialist output rather than passing off a partial answer", async () => {
     // Text plus `max_tokens` is the case the empty-text check cannot see:
     // it looks like a complete answer, so the orchestrator would reason
     // over a sentence that stops mid-clause.
@@ -132,18 +132,18 @@ describe("buildSubAgentTools", () => {
       usage: { inputTokens: 1, outputTokens: 21_333 },
     });
     const tools = buildSubAgentTools([row()], mockResolver(mockProvider({ chat })));
-    await expect(
-      expectDefined(tools[0], "spec").handler({ task: "t" }, mock<Service>()),
-    ).rejects.toThrow(/truncated/);
+    const out = await expectDefined(tools[0], "spec").handler({ task: "t" }, mock<Service>());
+    expect(out._unsafeUnwrapErr().message).toMatch(
+      /^sub-agent "writer" \(model claude-test\) ran out of output tokens and returned a truncated answer\./,
+    );
   });
 
-  it("throws NonRetriableError on a permanent config error (loop makes an isError result, no retry)", async () => {
+  it("rejects with the config error's message on a permanent config error", async () => {
     const resolveProvider: LlmProviderResolver = () =>
       Promise.reject(new ProviderConfigError('No provider configured for model "ghost".'));
     const tools = buildSubAgentTools([row({ model: "ghost" })], resolveProvider);
-    await expect(
-      expectDefined(tools[0], "spec").handler({ task: "t" }, mock<Service>()),
-    ).rejects.toBeInstanceOf(NonRetriableError);
+    const out = await expectDefined(tools[0], "spec").handler({ task: "t" }, mock<Service>());
+    expect(out._unsafeUnwrapErr().message).toBe('No provider configured for model "ghost".');
   });
 
   it("rethrows a transient resolve error so the durable step can retry", async () => {

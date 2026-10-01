@@ -24,46 +24,42 @@ if (!parentPort) {
   throw new Error("worker-entry must run inside a worker thread");
 }
 
-// ctx_call → ctx_result correlation. The Python `ctx` proxy resolves these
-// JS Promises when the matching ctx_result arrives.
+/**
+ * A ctx call's answer as it reaches Python. `Ctx._call` in ctx.py returns
+ * the value or raises `CtxError(kind, message)`, the class tier 2 raises: a
+ * plain value crosses into Pyodide intact, where a rejected promise arrives
+ * as a `JsException` carrying only the error's name and message.
+ */
+type BridgeReply = { ok: true; value: unknown } | { ok: false; kind: string; message: string };
+
+// ctx_call → ctx_result correlation. The Python `ctx` proxy awaits these
+// JS Promises, settled when the matching ctx_result arrives.
 const pendingCtxCalls = new Map<
   string,
-  { resolve: (value: unknown) => void; reject: (e: HostCtxError) => void }
+  { resolve: (reply: BridgeReply) => void; reject: (e: Error) => void }
 >();
 let nextCtxId = 0;
-
-class HostCtxError extends Error {
-  readonly kind: string;
-  constructor(kind: string, message: string) {
-    // Pyodide surfaces JS errors to Python as `pyodide.ffi.JsException`,
-    // which carries `name` and `message` but no arbitrary attributes — so
-    // the kind disappears unless we encode it in the message itself. The
-    // `kind=...` prefix is parsed by ctx.py to materialize a typed Python
-    // exception.
-    super(`kind=${kind}: ${message}`);
-    this.kind = kind;
-    this.name = `CtxError(${kind})`;
-  }
-}
 
 /**
  * Bridge object exposed to Python via `pyodide.registerJsModule`. Every call
  * names `taskId`: the host serves a ctx call only for the task it belongs to.
  */
-function bridgeFor(taskId: string): { call(method: string, args: unknown): Promise<unknown> } {
+function bridgeFor(taskId: string): {
+  call(method: string, args: unknown): Promise<BridgeReply>;
+} {
   return { call: (method, args) => callHost(taskId, method, args) };
 }
 
-function callHost(taskId: string, method: string, args: unknown): Promise<unknown> {
+function callHost(taskId: string, method: string, args: unknown): Promise<BridgeReply> {
   const id = `ctx-${nextCtxId++}`;
   return new Promise((resolve, reject) => {
     pendingCtxCalls.set(id, { resolve, reject });
     try {
       port.postMessage({ type: "ctx_call", taskId, id, method, args });
     } catch (e) {
-      // Send failed (port closed, transferable detached) — drop the
-      // pending entry so it doesn't leak, and reject the awaiting Python
-      // coroutine instead of leaving it hung on a never-arriving result.
+      // Send failed (port closed, transferable detached): the channel is
+      // gone, so no reply will come. Drop the pending entry and fail the
+      // awaiting Python coroutine rather than leave it hung.
       pendingCtxCalls.delete(id);
       reject(e instanceof Error ? e : new Error(String(e)));
     }
@@ -79,11 +75,11 @@ function handleCtxResult(raw: unknown): void {
   const pending = pendingCtxCalls.get(result.id);
   if (!pending) return;
   pendingCtxCalls.delete(result.id);
-  if (result.ok) {
-    pending.resolve(result.value);
-  } else {
-    pending.reject(new HostCtxError(result.errorKind, result.message));
-  }
+  pending.resolve(
+    result.ok
+      ? { ok: true, value: result.value }
+      : { ok: false, kind: result.errorKind, message: result.message },
+  );
 }
 
 async function runTask(invoke: { id: string; inputs: unknown }): Promise<TaskResult> {

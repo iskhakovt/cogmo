@@ -282,7 +282,7 @@ describe("ClaudeCodeBackend against cogmo-devbase:test", () => {
       const kinds = events.map((e) => e.kind);
 
       // The wrapper closes stdin immediately after writing the prompt;
-      // the CLI's 5-min idle timer would throw `ExecTimeoutError` out of
+      // the CLI's 5-min idle timer would throw a timed_out `ExecError` out of
       // the for-await loop if stdin EOF stopped propagating cleanly, so
       // reaching this point proves the shutdown contract is intact.
       expect(kinds).toContain("session_started");

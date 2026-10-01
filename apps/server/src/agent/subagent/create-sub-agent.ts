@@ -11,7 +11,7 @@
 import { err, type Result } from "neverthrow";
 import type { Transactor } from "../../db/index.js";
 import type { InvalidName, SubAgentNameTaken } from "../store/errors.js";
-import type { AgentStore } from "../store/index.js";
+import type { LlmProviderStore, SubAgentStore } from "../store/index.js";
 import { SUB_AGENT_NAME_RE } from "./sub-agent-tool-builder.js";
 
 export interface CreateSubAgentArgs {
@@ -25,7 +25,7 @@ export interface CreateSubAgentArgs {
 
 export interface CreateSubAgentDeps {
   runInTx: Transactor;
-  agentStore: AgentStore;
+  agentStore: SubAgentStore & LlmProviderStore;
 }
 
 /**

@@ -1,7 +1,6 @@
 import { DaytonaNotFoundError, type PtyHandle, type PtyResult } from "@daytona/sdk";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
-import { ExecDisposedError, ExecTimeoutError } from "../index.js";
 import { type PtyFileSystemClient, type PtyProcessClient, startExecPty } from "./exec-pty.js";
 
 /**
@@ -332,10 +331,7 @@ describe("startExecPty", () => {
       await vi.advanceTimersByTimeAsync(1_001);
 
       const err = await failure;
-      if (!(err instanceof ExecTimeoutError)) {
-        throw new Error(`expected ExecTimeoutError, got ${String(err)}`);
-      }
-      expect(err.kind).toBe("total");
+      expect(err).toMatchObject({ failure: { kind: "timed_out", deadline: "total" } });
       // The pre-end wait gets unblocked before createPty is ever called.
       expect(procCtrl.process.createPty).not.toHaveBeenCalled();
     } finally {
@@ -368,10 +364,7 @@ describe("startExecPty", () => {
       await vi.advanceTimersByTimeAsync(5_001);
 
       const err = await failure;
-      if (!(err instanceof ExecTimeoutError)) {
-        throw new Error(`expected ExecTimeoutError, got ${String(err)}`);
-      }
-      expect(err.kind).toBe("total");
+      expect(err).toMatchObject({ failure: { kind: "timed_out", deadline: "total" } });
       // The start sees the settlement once the slow upload returns, and
       // stops before `createPty`.
       expect(procCtrl.process.createPty).not.toHaveBeenCalled();
@@ -412,7 +405,7 @@ describe("startExecPty", () => {
     ];
 
     for (const { step, hang } of hangs) {
-      it(`settles with ExecTimeoutError when ${step} never returns`, async () => {
+      it(`settles with a timed_out ExecError when ${step} never returns`, async () => {
         vi.useFakeTimers();
         try {
           const ptyCtrl = fakePty();
@@ -441,7 +434,7 @@ describe("startExecPty", () => {
 
           await vi.advanceTimersByTimeAsync(1_001);
 
-          expect(settled).toBeInstanceOf(ExecTimeoutError);
+          expect(settled).toMatchObject({ failure: { kind: "timed_out" } });
         } finally {
           vi.useRealTimers();
         }
@@ -621,10 +614,7 @@ describe("startExecPty", () => {
       expect(ptyCtrl.killed).toBe(true);
 
       const err = await failure;
-      if (!(err instanceof ExecTimeoutError)) {
-        throw new Error(`expected ExecTimeoutError, got ${String(err)}`);
-      }
-      expect(err.kind).toBe("idle");
+      expect(err).toMatchObject({ failure: { kind: "timed_out", deadline: "idle" } });
     } finally {
       vi.useRealTimers();
     }
@@ -660,10 +650,7 @@ describe("startExecPty", () => {
       expect(ptyCtrl.killed).toBe(true);
 
       const err = await failure;
-      if (!(err instanceof ExecTimeoutError)) {
-        throw new Error(`expected ExecTimeoutError, got ${String(err)}`);
-      }
-      expect(err.kind).toBe("total");
+      expect(err).toMatchObject({ failure: { kind: "timed_out", deadline: "total" } });
     } finally {
       vi.useRealTimers();
     }
@@ -700,10 +687,7 @@ describe("startExecPty", () => {
       // Fire the total timer; wait() never resolves, abort signal does.
       await vi.advanceTimersByTimeAsync(1_001);
       const err = await failure;
-      if (!(err instanceof ExecTimeoutError)) {
-        throw new Error(`expected ExecTimeoutError, got ${String(err)}`);
-      }
-      expect(err.kind).toBe("total");
+      expect(err).toMatchObject({ failure: { kind: "timed_out", deadline: "total" } });
       expect(ptyCtrl.killed).toBe(true);
     } finally {
       vi.useRealTimers();
@@ -736,10 +720,10 @@ describe("startExecPty", () => {
     await handle.dispose();
     expect(ptyCtrl.killed).toBe(true);
     const err = await failure;
-    expect(err).toBeInstanceOf(ExecDisposedError);
+    expect(err).toMatchObject({ failure: { kind: "disposed" } });
   });
 
-  it("dispose() before exit rejects wait() with ExecDisposedError and kills the PTY", async () => {
+  it("dispose() before exit rejects wait() with a disposed ExecError and kills the PTY", async () => {
     const ptyCtrl = fakePty();
     const fsCtrl = fakeFs();
     const procCtrl = fakeProcess(ptyCtrl);
@@ -761,7 +745,7 @@ describe("startExecPty", () => {
     expect(ptyCtrl.killed).toBe(true);
 
     const err = await failure;
-    expect(err).toBeInstanceOf(ExecDisposedError);
+    expect(err).toMatchObject({ failure: { kind: "disposed" } });
   });
 
   it("dispose() mid-upload kills the PTY once it lands, doesn't run the exec to completion", async () => {
@@ -800,7 +784,7 @@ describe("startExecPty", () => {
     await disposed;
 
     const err = await failure;
-    expect(err).toBeInstanceOf(ExecDisposedError);
+    expect(err).toMatchObject({ failure: { kind: "disposed" } });
     // PTY was never created (disposed check fires before createPty).
     expect(procCtrl.process.createPty).not.toHaveBeenCalled();
     expect(ptyCtrl.killed).toBe(false);
@@ -852,14 +836,14 @@ describe("startExecPty", () => {
     releaseCreate();
     await disposed;
 
-    expect(await failure).toBeInstanceOf(ExecDisposedError);
+    expect(await failure).toMatchObject({ failure: { kind: "disposed" } });
     // The late start's teardown killed the PTY before `dispose()` resolved.
     expect(killedWhenDisposed).toBe(true);
     expect(proc.createPty).toHaveBeenCalledTimes(1);
     expect(ptyCtrl.sendInputs).toHaveLength(0);
   });
 
-  it("dispose() before stdin.end() rejects wait() with ExecDisposedError", async () => {
+  it("dispose() before stdin.end() rejects wait() with a disposed ExecError", async () => {
     const ptyCtrl = fakePty();
     const fsCtrl = fakeFs();
     const procCtrl = fakeProcess(ptyCtrl);
@@ -877,7 +861,7 @@ describe("startExecPty", () => {
     await handle.dispose();
 
     const err = await failure;
-    expect(err).toBeInstanceOf(ExecDisposedError);
+    expect(err).toMatchObject({ failure: { kind: "disposed" } });
     // PTY was never created — no kill to perform.
     expect(ptyCtrl.killed).toBe(false);
     // Nothing to upload either: the start never ran.
