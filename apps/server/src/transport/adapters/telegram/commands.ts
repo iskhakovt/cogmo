@@ -102,7 +102,6 @@ const USAGE = {
     "  /compartments add dnd <desc>      → register a new compartment (description is read by the classifier LLM)\n" +
     "  /compartments rm dnd              → remove (forward-only: existing memory tags are kept)\n" +
     `  Core values (always available, not editable): ${CORE_LIST}`,
-  model: "Usage: /model [<model>]",
   repo:
     "Usage: /repo [list|add [<name> <local_path> <remote_url>]|remove <name>]\n" +
     "  /repo add (no args)            → guided dialog: clones via the bot PAT\n" +
@@ -113,7 +112,6 @@ const USAGE = {
     "  /mcp approve <name>            → connect, snapshot tools (pending), mark server approved\n" +
     "  /mcp approve <name> <tool>     → flip a single tool to approved (visible to the agent)\n" +
     "  /mcp reject <name> <tool>      → mark tool rejected (hidden from the agent)",
-  repair: "Usage: /repair  (or /repair <alias|uuid>  to target a specific conversation)",
   disable: "Usage: /disable <name>",
   enable: "Usage: /enable <name>",
   schedules:
