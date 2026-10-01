@@ -111,7 +111,7 @@ Keys don't close every route — see `DEPLOYMENT.md` → Securing internal servi
 - Channel adapter startup (`startChannels`) — without channels open we can't receive anything
 
 **Fire-and-forget at boot**:
-- `reconcileCrashedInstances` on either backend — wrapped by `scheduleReconcileCrashedInstances` in `src/index.ts`. Reaping orphans from prior instances is recovery work; the per-minute reaper (`src/sandbox/reaper.ts`) and per-task TTL deletes cover ongoing orphans, so the boot pass only catches what the periodic reaper would catch on its next tick.
+- `reconcileCrashedInstances` on either backend — wrapped by `scheduleReconcileCrashedInstances` in `src/boot/sandbox.ts`. Reaping orphans from prior instances is recovery work; the per-minute reaper (`src/sandbox/reaper.ts`) and per-task TTL deletes cover ongoing orphans, so the boot pass only catches what the periodic reaper would catch on its next tick.
 
 **Already lazy** (verified during the audit):
 - `mcpRegistry.start()` — declared as a no-op; MCP connections happen on first tool call via the connection pool.
