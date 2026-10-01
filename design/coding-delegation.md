@@ -246,6 +246,43 @@ coding_repos (
 
 Owned by `src/agent/store/` (fits the existing agent domain — tasks are agent work items). Consumer of `containers` from the sandbox store.
 
+### Task lifecycle `[confirmed]`
+
+The unit is the `coding_tasks` row, keyed on its id. Each orchestrator opens with an ownership claim (`task-lifecycle.ts` → `CLAIMS`, `claimTask`); everything else it writes follows from owning the task.
+
+```text
+queued ──claim──▶ planning ──▶ awaiting_approval ──claim──▶ executing ──▶ pending_verify ──claim──▶ verifying ──▶ pushed ──▶ pr_open
+   │                 │                │                         │                                    │             │
+   └─────────────────┴────────────────┴──── cancelled (Cancel / Revise tap, any non-terminal) ───────┘             │
+   └──────────── failed (any orchestrator's failure channel, reconcile, a failed start emit) ──────────────────────┘
+```
+
+| Transition | Writer (step) | Guard |
+|-|-|-|
+| `queued → planning` | plan, `claim-task-planning` | conditional on `queued`; stamps `claimed_by_run_id` |
+| `planning → awaiting_approval` | plan, `set-status-plan-ready` | conditional on `planning` |
+| `awaiting_approval → executing` | execute, `set-status-executing` | conditional; stamps `claimed_by_run_id` |
+| `executing → pending_verify` | execute, `set-status-pending-verify` | conditional on `executing` |
+| `pending_verify → verifying` | verify, `set-status-verifying` | conditional; stamps `claimed_by_run_id` |
+| `verifying → pushed` | verify, `set-status-pushed` | unconditional |
+| `pushed → pr_open` | verify, `set-status-pr-open` | unconditional |
+| non-terminal → `failed` | each orchestrator's failure channel (`task-failure.ts`) | unconditional |
+| non-terminal → `failed` | `coding-task-reconcile`, `failTaskIfNonTerminal` | conditional on non-terminal |
+| `queued → failed` | `delegate`, when the start emit throws (`failQueuedTask`) | conditional on `queued` |
+| non-terminal → `cancelled` | the plan keyboard, `cancelTaskIfActive` | conditional on non-terminal |
+
+Known residuals: `pushed`, `pr_open` and the orchestrators' own `failed` writes are unconditional, so a Cancel landing mid-verify is overwritten. Making them conditional needs the bare body to branch on the result, which means new step ids (their current steps memoize `void`); tracked as a follow-up rather than done under the existing ids.
+
+Each orchestrator is a sequence of named stages, one module per stage:
+
+| Orchestrator | Stages |
+|-|-|
+| `coding-task-start` (`orchestrator.ts` → `runCodingTask`) | claim → `allocate-task-worktree` → `plan-sandbox` → `plan-session` → `persist-plan` → `plan-gate-stage` |
+| `coding-task-execute` (`orchestrator.ts` → `runCodingExecute`) | claim → `execute-sandbox` → `execute-session` → push execute changes (git-remote) → hand off to verify |
+| `coding-task-verify` (`verify-orchestrator.ts`) | claim → credentials → verify sandbox → `run-verify` → `verify-publish` (push branch, open PR) |
+
+Shared across them: `coding-run.ts` (the run's handles and task load), `task-failure.ts` (the failure channel), `askpass-lease.ts` (the host askpass dir's run-scoped lifetime) and `task-sandbox.ts` (session spec, lazy resume, feature-branch checkout, reap).
+
 ## Container Lifecycle `[confirmed: single-task plan→execute; reaper / sibling / proxy still proposed]`
 
 > Slice 2 confirms the in-task lifecycle: per-task container (depth 0),
@@ -457,7 +494,7 @@ That transition is also the durable half of duplicate-event protection. Every ha
 | `allocate-worktree` | `step.run` | Branches on `sandbox.capabilities.workingTreeTransport`. **bind-mount:** idempotent host reconcile of a standalone clone — adopt when a clone already sits at the path on the right branch; otherwise stage `git clone --no-hardlinks` + `git checkout -B <branch>` + `git remote set-url origin <remote_url>` into `<path>.partial` and atomically rename into place (a legacy linked worktree found at the path is removed and re-materialized). **git-remote:** persists `{type:"git-remote", branch:"cogmo/<idShort>"}`, calls `pushTaskBranchToRemote` (`src/agent/coding/git-as-transport.ts`) which fetches `origin/<defaultBranch>` and force-pushes it to `cogmo/run/<task-id>` on the remote under one askpass helper. Identity is loaded inline from the secrets table — NOT inside `step.run` — so the PAT + SSH key never become a step return value. |
 | `create-container` | `step.run` | Returns just `sessionState` (the discriminated `SandboxSessionState` blob). `sandbox.create()` builds the right `WorktreeSpec` variant via `buildWorktreeSpec`: bind-mount → `host-path` pointing at the host worktree; git-remote → `git-remote` pointing at `cogmo/run/<task-id>` with HTTPS basic-auth (`x-access-token`:`<pat>`). The Daytona SDK's `sandbox.git.clone()` materializes the run-branch inside the sandbox. Auth resolution happens INSIDE the step body — the PAT is consumed by `buildWorktreeSpec` and never returned, so Inngest doesn't persist it. |
 | `plan-cli` | `step.run` | Spawns `claude -p --permission-mode plan` and threads its JSONL events into the plan stream and the DB. Durable because it is billable and has no `--resume` on the plan flags: a bare-body call replans from scratch at every later boundary and re-renders the plan into the user's message each time. The session-id write and the text pushes fire live from inside the body and are suppressed on replay; the return value is just the plan text plus an error flag, which also pins the step graph that branches on it. |
-| `persist-container-id` | `step.run` (local-docker only) | Stamps `coding_tasks.container_id` with the local-Docker FK target. Skipped on managed backends (column stays null; lineage carried by sandbox-side task-id labels). Split out of `create-container` so a DB-write failure doesn't lose the container — `containerCreated` flag is set OUTSIDE the create step (Inngest replay safety) and the catch path's `deleteByTaskId` reaps via the task-id label regardless of whether the FK row was inserted. |
+| `persist-container-id` | `step.run` (local-docker only) | Stamps `coding_tasks.container_id` with the local-Docker FK target. Skipped on managed backends (column stays null; lineage carried by sandbox-side task-id labels). Split out of `create-container` so a DB-write failure doesn't lose the container: the catch path's `deleteByTaskId` reaps by the task-id label whether or not the FK row was inserted. |
 | `checkout-feature-branch` | `step.run` (git-remote only) | Post-clone `git checkout -B cogmo/<idShort>` inside the sandbox so `runCommitAndPush(branch="cogmo/<idShort>")` works unchanged. On the verify orchestrator's clone of the run-branch, HEAD already points at claude's executed commits (pushed by the execute-orchestrator's `commit-and-push-execute-changes` step), so the feature branch is created at that tip. Idempotent: `checkout -B` resets the branch to current HEAD if it already exists. Skipped on bind-mount (the worktree is already on the right branch from `allocate-worktree`). |
 | `persist-plan` | `step.run` | Writes `coding_tasks.plan` only. |
 | `set-status-plan-ready` | `step.run` | Conditional `planning → awaiting_approval`, for every trigger source — `coding-task-execute` is the only writer of `executing`. Conditional rather than an unguarded write because `plan-cli` runs for minutes: a Cancel landing inside it takes `cancelTaskIfActive`'s `FOR UPDATE` path, and an unconditional UPDATE here would resurrect the task and render an approval keyboard for work the user already cancelled. When it doesn't fire, the run tears down its own worktree, sandbox and askpass — it is returning from inside the `try`, so the catch that normally owns cleanup never sees it — and leaves the status exactly as the canceller wrote it. |
@@ -478,7 +515,7 @@ That transition is also the durable half of duplicate-event protection. Every ha
 | `fetch-feature-branch` | `step.run` (git-remote only) | After PR open, host-side `fetchFeatureBranch` updates `refs/remotes/origin/cogmo/<idShort>` in the local mirror so the host's commit graph reflects the sandbox's push. Best-effort — origin is the source of truth. Skipped on bind-mount (the host worktree IS the source of truth). |
 | `emit-task-failed` | `step.run` | On any failure path in plan / execute / verify, emits `coding/task/failed` so cleanup subscribers (run-branch deletion, future telemetry) hook in without polling the row. |
 | `teardown-worktree` | `step.run` (host-path assignments only) | `safeTeardownWorktree` removes the clone on clean, `git add -A && commit && force-push HEAD:refs/cogmo-wip/<task-id>` on dirty/unpushed. git-remote assignments have no host worktree — the helper early-returns. |
-| `teardown` | `try/finally` | `sandbox.deleteByTaskId(taskId)` cascades sandbox kill + clears the per-task askpass dir (slice 4.0d). Runs whether the orchestrator path succeeded or threw. The catch-path catch always calls `deleteByTaskId` when `containerCreated` is true — flag is set OUTSIDE the create step body so it survives Inngest replay. |
+| `teardown` | step, or `catch`/`finally` | `sandbox.deleteByTaskId(taskId)` cascades the sandbox kill. A step on the in-run failure exits and the execute hand-off; unconditional in every catch (and in verify's `finally`), since the sweep is idempotent by task label and also reaps a managed sandbox that outlived a thrown create. The host askpass dir is released separately, by each orchestrator's `AskpassLease` in its `finally`. |
 
 **Slice 4.0h orchestrator function.** The verify → push → PR sequence runs in its own Inngest function (`coding-task-verify`), triggered by `coding/task/cli-done` which the execute orchestrator emits after the durable `pending_verify` transition. The hand-off pattern keeps each function's retry policy independent and lets the execute container be torn down cleanly before verify spins up a fresh one with the askpass mount bound. Fires `coding/task/verify-complete`, `coding/task/pushed`, and `coding/task/pr-opened` events for observability + Telegram delivery.
 
