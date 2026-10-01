@@ -1,97 +1,41 @@
-import { NonRetriableError } from "inngest";
 import type { Transactor } from "../db/index.js";
 import { inngest } from "../inngest/client.js";
 import { conversationTurnConcurrency } from "../inngest/concurrency.js";
-import {
-  buildConversationCooldownClearedEvent,
-  buildConversationErroredEvent,
-  calculateElapsedCooldown,
-  conversationDegraded,
-  inboundReady,
-  responseReady,
-} from "../inngest/events.js";
-import { isRetriableProviderError } from "../llm/fallback.js";
-import { computeBudget, resolveLimits } from "../llm/models.js";
-import { MAX_VIEW_BYTES } from "../llm/request-size.js";
-import {
-  type LlmProviderResolver,
-  ProviderConfigError,
-  type ResolvedLlm,
-} from "../llm/resolver.js";
-import type { ContentBlock, CountTokensParams, Message, StreamEvent } from "../llm/types.js";
+import { inboundReady, responseReady } from "../inngest/events.js";
+import type { LlmProviderResolver } from "../llm/resolver.js";
 import { logger } from "../logger.js";
 import type { McpRegistry } from "../mcp/registry.js";
 import type { MemoryProvider } from "../memory/provider.js";
-import { agentIterations, memoryRecallFailures } from "../metrics.js";
 import type { SkillRunner } from "../skills/runner.js";
-import { buildSkillTools, composeTurnTools } from "../skills/skill-tool-builder.js";
-import { createSkillsService } from "../skills/skills-service.js";
 import type { AttachmentStore } from "../transport/attachment-store.js";
-import {
-  contentToBlocks,
-  type InboundContent,
-  isVoiceContent,
-  renderInboundText,
-} from "../transport/content.js";
-import { type DeliveryRouter, pushOrThrow } from "../transport/delivery-router.js";
+import type { DeliveryRouter } from "../transport/delivery-router.js";
 import type { TransportStore } from "../transport/store/index.js";
-import { resolveVoiceMode } from "../voice/mode.js";
 import type { VoiceProviderResolver } from "../voice/resolver.js";
 import type { CodingService } from "./coding/service.js";
-import {
-  compactMessages,
-  extractSummaryText,
-  shouldSkipCounting,
-  summarizationRequest,
-  toolResultClearing,
-} from "./context.js";
-import { loadSystemPrompt } from "./conversation/load-system-prompt.js";
-import {
-  loadTurnHistory,
-  summarizedSpan,
-  TurnRowMissingError,
-} from "./conversation/load-turn-history.js";
-import { openSystemPromptEpoch } from "./conversation/open-system-prompt-epoch.js";
-import { storeTurnContext } from "./conversation/store-turn-context.js";
-import { buildInCooldownReply, isInCooldown } from "./cooldown.js";
-import { loadCoreMemoryScope } from "./core-memory/load-core-memory-scope.js";
-import { offeredBuiltIns } from "./core-memory-tools.js";
 import type { DebounceConfig } from "./debounce.js";
-import { extractGeneratedDocuments, extractGeneratedImages } from "./extract-images.js";
+import { admitTurn } from "./handle-message/admit-turn.js";
+import { assembleTurnContext } from "./handle-message/assemble-turn-context.js";
+import { buildChatTurnService } from "./handle-message/chat-turn-service.js";
+import { compactTurn } from "./handle-message/compact-turn.js";
+import { deliverReply } from "./handle-message/deliver-reply.js";
+import { finalizeTurnContext } from "./handle-message/finalize-turn-context.js";
+import { freezeTurnInputs } from "./handle-message/freeze-turn-inputs.js";
+import { batchCursors, routingKindOf } from "./handle-message/inbound-batch.js";
+import { loadTurnTranscript } from "./handle-message/load-turn-transcript.js";
+import { persistTurn } from "./handle-message/persist-turn.js";
+import { recordUserMessage } from "./handle-message/record-user-message.js";
+import { reportTurnFailure } from "./handle-message/report-turn-failure.js";
+import { resolveInboundAttachments } from "./handle-message/resolve-attachments.js";
+import { resolveTurnModel } from "./handle-message/resolve-turn-model.js";
+import { runTurnLoop } from "./handle-message/run-turn-loop.js";
 import type { ImageToolsLoader } from "./image-tools-loader.js";
 import type { AgentLoopResult, StreamingAgentLoopParams } from "./loop.js";
-import { createPipelinesService } from "./pipeline/pipelines-service.js";
 import type { PipelineRunStore, PipelineStore } from "./pipeline/store/index.js";
-import { PIPELINE_TOOL_NAMES } from "./pipeline/tools.js";
 import type { PromptSource } from "./prompt.js";
-import { recallQueryText, shouldSkipRecall } from "./recall-gate.js";
-import { synthesizeDegradedReply } from "./repair.js";
-import { computeRetraction } from "./retraction.js";
-import { createSchedulingService } from "./scheduling/scheduling-service.js";
 import type { Service } from "./service.js";
 import type { AgentStore } from "./store/index.js";
-import { buildSubAgentTools } from "./subagent/sub-agent-tool-builder.js";
-import {
-  continuesEpoch,
-  historyStart,
-  stripThinkingBefore,
-  unannounced,
-} from "./system-prompt-snapshot.js";
 import type { ToolRegistry } from "./tools.js";
-import { turnCacheIntent } from "./turn-cache-intent.js";
-import {
-  announcedInView,
-  findTurnContext,
-  newMemories,
-  renderTurnContext,
-  replaceTurnContext,
-  shownMemories,
-  withTurnContext,
-} from "./turn-context.js";
-import { buildTurnService } from "./turn-service.js";
-import { asNonRetriable, createTurnStepRunner } from "./turn-step-runner.js";
-import { bindFrozenTools, freezeToolTable } from "./turn-tools.js";
-
+import { createTurnStepRunner } from "./turn-step-runner.js";
 export interface HandleMessageDeps {
   runInTx: Transactor;
   agentStore: AgentStore;
@@ -181,106 +125,29 @@ export interface HandleMessageDeps {
 }
 
 /**
- * Resolve a provider, rewrapping permanent config errors as
- * `NonRetriableError` so Inngest aborts on the first attempt instead of
- * burning all `retries: 2` attempts before `onFailure` notifies the user.
- * Transient errors (DB blip, network) keep their plain shape and follow
- * the default retry path.
- */
-async function resolveOrFail(
-  resolveProvider: LlmProviderResolver,
-  model: string,
-): Promise<ResolvedLlm> {
-  try {
-    return await resolveProvider(model);
-  } catch (err) {
-    if (err instanceof ProviderConfigError) {
-      throw new NonRetriableError(err.message, { cause: err });
-    }
-    throw err;
-  }
-}
-
-/**
  * Main message pipeline — thin orchestration only.
  *
- * Receives inbound/ready events (debounce router has decided it's time to process).
- * Loads context, streams the agent response to streaming adapters, persists,
- * delivers to batch adapters, emits notification, applies resume policy.
+ * Receives inbound/ready events (debounce router has decided it's time to
+ * process) and runs the turn's phases in order: admission, the user message,
+ * the transcript, the frozen turn inputs, context assembly and compaction, the
+ * agent loop, persistence, delivery, and the post-turn events. Each phase
+ * plans its own steps; their ids, order and memoized shapes are the
+ * durability map in design/crash-recovery.md.
  */
 export function createHandleMessage(deps: HandleMessageDeps) {
-  const {
-    agentStore,
-    transportStore,
-    resolveProvider,
-    tools,
-    memory,
-    promptSource,
-    fileService,
-    attachments,
-    debounceConfig,
-    deliveryRouter,
-    runStreamingAgentLoop,
-  } = deps;
-
   return inngest.createFunction(
     {
       id: "handle-message",
       triggers: [inboundReady],
       retries: 2,
       concurrency: conversationTurnConcurrency,
-      // Last-chance handler: retries are exhausted (or the run failed
-      // non-retriably). Two responsibilities, ordered durable-first:
-      //  1. Emit `conversation/errored` — the durable signal downstream
-      //     consumers (recovery, evolution reflector) depend on. Must run
-      //     even if user notification fails.
-      //  2. Notify the user — best-effort courtesy. Wrapped so a failure
-      //     in `notifyConversation` (DB outage on session lookup, etc.)
-      //     can't propagate up and prevent step (1) from being recorded.
-      // The original turn's `delivery` handle is gone (closure scope of a
-      // different run), so we re-resolve sessions via `notifyConversation`.
       onFailure: async ({ event, error, step }) => {
         const { conversationId, triggerInboundId } = event.data.event.data;
-        const runId = event.data.run_id;
-        const turnLogger = logger.child({ runId, conversationId });
-        // `error` is what Inngest saw — typically NonRetriableError, since
-        // we rewrap non-retriable provider errors above. The original
-        // class (BadRequestError, RateLimitError, etc.) is on `cause`.
-        // Surface both so the evolution failure-reflector can bucket by
-        // upstream class rather than every error coalescing to one bucket.
-        const cause = error.cause;
-        const causeClass = cause instanceof Error ? cause.name : null;
-        // Bus-level dedup with the worker-death reconcile (subscriber on
-        // `inngest/function.failed`). Both emit `conversation/errored`
-        // via `buildConversationErroredEvent`, which bakes in
-        // `id: "errored-${runId}"`. Inngest's event-id dedup window
-        // ensures `recover-conversation` runs exactly once even when
-        // both paths fire for the same failed run. See
-        // `src/inngest/events.ts → buildConversationErroredEvent` and
-        // `design/agent-resilience.md → Triggers`.
-        await step.sendEvent(
-          "emit-conversation-errored",
-          buildConversationErroredEvent({
-            conversationId,
-            runId,
-            triggerInboundId,
-            errorClass: error.name,
-            causeClass,
-            errorMessage: error.message,
-          }),
-        );
-        await step.run("notify-user", async () => {
-          try {
-            await deliveryRouter.notifyConversation(
-              conversationId,
-              "I hit an error processing your last message and won't keep retrying. Please try again.",
-            );
-          } catch (notifyErr) {
-            turnLogger.error(
-              { err: notifyErr },
-              "onFailure: notifyConversation failed, conversation/errored already emitted",
-            );
-          }
+        await reportTurnFailure(step, deps.deliveryRouter, {
+          conversationId,
+          triggerInboundId,
+          runId: event.data.run_id,
+          error,
         });
       },
     },
@@ -292,146 +159,18 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // logs to `conversation/degraded` events. See design/agent-resilience.md.
       const turnLogger = logger.child({ runId, conversationId });
 
-      // ──── DURABLE: load context + entry guards ────
-
-      const conv = await step.run("load-conversation", async () => {
-        return deps.runInTx((tx) => agentStore.getConversation(tx, conversationId));
-      });
-      if (!conv) throw new Error(`Conversation not found: ${conversationId}`);
-
+      const admission = await admitTurn(
+        step,
+        { ...deps, resumePolicy: deps.debounceConfig.resumePolicy },
+        { conversationId, triggerInboundId, turnLogger },
+      );
+      if (admission.kind === "skipped") {
+        return { status: "skipped", reason: admission.reason };
+      }
+      const { conv, lastAssistant, snapshot, inboundMessages } = admission;
       const { userId, profileId } = conv;
-
-      const lastAssistant = await step.run("last-assistant", async () => {
-        return deps.runInTx((tx) => agentStore.getLastAssistantMessage(tx, conversationId));
-      });
-
-      // Turn snapshot — read profile + model once at turn-start and stamp them on
-      // every message row this turn produces (user batch + intermediate + final
-      // assistant). Mid-turn /profile switch updates conversations.profile_id but
-      // the running turn keeps its snapshot; next turn picks up the new value.
-      // `summarizationModel` is captured the same way: profile override falls
-      // back to the chat model so a Haiku profile doesn't pay the Sonnet rate
-      // for prefix summarization.
-      // See design/transport/overview.md → Profile and Model Stamping.
-      const snapshot = await step.run("load-turn-snapshot", async () => {
-        const p = await deps.runInTx((tx) => agentStore.getProfile(tx, profileId));
-        if (!p) throw new Error(`Profile not found: ${profileId}`);
-        return {
-          profileId,
-          model: p.model,
-          summarizationModel: p.summarizationModel ?? p.model,
-        };
-      });
-
-      // Guard 1 — Staleness: trigger was already batched into a previous turn.
-      // null trigger = flush, skip this check.
-      if (
-        triggerInboundId !== null &&
-        lastAssistant?.lastInboundMessageId &&
-        triggerInboundId <= lastAssistant.lastInboundMessageId
-      ) {
-        return { status: "skipped", reason: "stale" };
-      }
-
-      // Guard 2 — Await_input: trigger was created before the last response.
-      if (
-        debounceConfig.resumePolicy === "await_input" &&
-        triggerInboundId !== null &&
-        lastAssistant &&
-        triggerInboundId < lastAssistant.id
-      ) {
-        return { status: "skipped", reason: "await_input" };
-      }
-
-      const inboundMessages = await step.run("load-inbound", async () => {
-        return deps.runInTx((tx) =>
-          transportStore.getUnbatchedInbound(
-            tx,
-            conversationId,
-            lastAssistant?.lastInboundMessageId ?? null,
-          ),
-        );
-      });
-
-      // No unbatched messages — nothing to process (e.g., flush with no new input)
-      if (inboundMessages.length === 0) {
-        return { status: "skipped", reason: "no_messages" };
-      }
-
-      // Cooldown guard — `recover-conversation` writes a `cooldown_state`
-      // blob on conversations whose `handle-message` runs exhausted retries
-      // (or failed non-retriably). While the cooldown window is open, we
-      // refuse to spend more LLM calls; the user gets a terse hand-built
-      // reply with a retry-time estimate.
-      //
-      // Placement is deliberate — *after* the no_messages / staleness /
-      // await_input exits — so the cooldown reply only fires when there's
-      // a real triggering inbound the user is actively trying to deliver.
-      // Otherwise a null-trigger flush during cooldown would send a reply
-      // to a message that doesn't exist.
-      //
-      // The debounce contract caps the reply rate naturally: a burst of
-      // user messages during one debounce window coalesces to one
-      // `inbound/ready` and one cooldown reply. Across multiple debounce
-      // windows in the same cooldown the user gets N replies, where N is
-      // the number of user-active windows — not a tight loop. See
-      // design/agent-resilience.md → In-cooldown reply.
-      //
-      // Inbounds stay unbatched — `getUnbatchedInbound` is a pure SELECT,
-      // so when the cooldown elapses the next `inbound/ready` loads the
-      // entire backlog as one batch.
-      const guardNow = new Date();
-      if (conv.cooldownState !== null && isInCooldown(conv.cooldownState, guardNow)) {
-        const cooldownState = conv.cooldownState;
-        await step.run("in-cooldown-reply", async () => {
-          try {
-            await deliveryRouter.notifyConversation(
-              conversationId,
-              buildInCooldownReply(cooldownState, guardNow),
-            );
-          } catch (notifyErr) {
-            // Best-effort delivery — same shape as `onFailure`'s
-            // `notify-user`. Swallowing prevents a transient session-lookup
-            // or transport blip from propagating up, exhausting Inngest's
-            // retry budget, and tripping `onFailure` → spuriously doubling
-            // the cooldown for what's really just a delivery hiccup.
-            turnLogger.error(
-              { err: notifyErr },
-              "in-cooldown-reply: notifyConversation failed; conversation stays in cooldown",
-            );
-          }
-        });
-        return { status: "skipped", reason: "cooldown" };
-      }
-
-      const inboundBlocks = inboundMessages.flatMap((m) => contentToBlocks(m.content));
-      // Safe — guarded by length check above
-      const maxInboundId = inboundMessages.at(-1)?.id ?? "";
-      // Low-water mark, for the turn token below. It doesn't move when a
-      // re-delivered turn reloads a batch that has grown: the batch always
-      // starts after the last message the previous assistant turn consumed,
-      // so its first id is the same on every delivery of the same logical
-      // turn. `triggerInboundId` is not — Inngest hands debounce the LAST
-      // event of a burst, so another message arriving before the turn
-      // succeeds re-fires it with a different trigger over a grown batch.
-      const firstInboundId = inboundMessages[0]?.id ?? "";
-
-      // A batch is either all-user or all-scheduled — never mixed. The
-      // debounce stages user inbounds; scheduled fires emit their own
-      // `inbound/arrived` independently after persisting a single
-      // synthetic row, so the two paths can't legitimately interleave
-      // into one turn. A mixed batch would mean a fire landed in a
-      // user-batched turn (or vice versa) and the routing kind below
-      // would silently pick the wrong path — fail fast instead.
-      const scheduledCount = inboundMessages.filter((m) => m.source === "scheduled").length;
-      if (scheduledCount > 0 && scheduledCount !== inboundMessages.length) {
-        throw new Error(
-          `mixed-source inbound batch in conversation ${conversationId}: ${scheduledCount}/${inboundMessages.length} scheduled`,
-        );
-      }
-      // Scheduled inbounds have no originating session for source
-      // routing — broadcast to every reachable session instead.
-      const routingKind: "reply" | "broadcast" = scheduledCount > 0 ? "broadcast" : "reply";
+      const { maxInboundId, firstInboundId } = batchCursors(inboundMessages);
+      const routingKind = routingKindOf(conversationId, inboundMessages);
 
       // Voice bundle resolved once per turn (one indexed singleton read +
       // two secret lookups; cached by content hash inside the resolver so
@@ -441,886 +180,106 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // edits between attempts surface on the next non-cached step.
       const voiceBundle = await deps.voiceResolver?.();
 
-      // Voice transcription runs in a durable `step.run` boundary — STT is
-      // a billable LLM-adjacent call, so Inngest retries replay from the
-      // step cache (exactly-once on second attempt) instead of re-charging
-      // the provider. Cached value is just an array of transcripts in the
-      // same order as voice_ref blocks; OGG bytes never enter step state.
-      // Runs BEFORE create-user-message so the persisted message contains
-      // the actual transcript text rather than a path-only JSON literal.
-      const voiceRefs = inboundBlocks.filter((b) => b.type === "voice_ref");
-      const transcripts =
-        voiceRefs.length > 0
-          ? await step.run("transcribe-voice", async () => {
-              const stt = voiceBundle?.stt;
-              if (!stt) {
-                throw new Error(
-                  "voice block received but no STT provider configured — run `cogmo setup` and configure voice, or insert a `voice_config` row pointing at valid `secrets` entries",
-                );
-              }
-              const out: string[] = [];
-              for (const ref of voiceRefs) {
-                const bytes = await attachments.download(ref.path);
-                const result = await stt.provider.stt({
-                  audio: bytes,
-                  mediaType: ref.mediaType,
-                  model: stt.model,
-                });
-                out.push(result.text);
-              }
-              return out;
-            })
-          : [];
-
-      // Each inbound row after voice transcription: every consumer below
-      // derives from this. A forwarded clip's transcript keeps the clip's
-      // `forwarded` marking, as forwarded text does; userContentText and
-      // resolvedBlocks render it into its `<forwarded_message>` element, and
-      // the recall query reads the bare text. The cursor walks `transcripts`
-      // in the order they were produced: voice blocks, in inbound order.
-      const substitutedMessages = ((): ReadonlyArray<{ content: InboundContent }> => {
-        let cursor = 0;
-        return inboundMessages.map((m) => {
-          if (typeof m.content === "string") return { content: m.content };
-          const blocks = m.content.map((b) => {
-            if (b.type !== "voice") return b;
-            const text = transcripts[cursor++] ?? "";
-            return {
-              type: "text",
-              text,
-              ...(b.forwarded !== undefined && { forwarded: b.forwarded }),
-            } as const;
-          });
-          return { content: blocks };
-        });
-      })();
-
-      // Per-row text serialization for `messages.content`, forwarded text
-      // inside its element. After voice→text substitution above, a text-only
-      // row joins on newline, so it loads back cleanly as history; a row that
-      // still carries image or document blocks is JSON-stringified.
-      const userContentText = substitutedMessages
-        .map(({ content }) => {
-          if (typeof content === "string") return content;
-          const rendered = content.map((b) =>
-            b.type === "text"
-              ? ({ type: "text", text: renderInboundText(b.text, b.forwarded) } as const)
-              : b,
-          );
-          if (rendered.every((b) => b.type === "text")) {
-            return rendered.map((b) => b.text).join("\n");
-          }
-          return JSON.stringify(rendered);
-        })
-        .join("\n");
-
-      await step.run("create-user-message", async () => {
-        await deps.runInTx((tx) =>
-          agentStore.insertMessage(tx, {
-            conversationId,
-            role: "user",
-            content: userContentText,
-            profileId: snapshot.profileId,
-            model: snapshot.model,
-            lastInboundMessageId: maxInboundId,
-          }),
-        );
+      const { substitutedMessages, userContentText } = await recordUserMessage(step, deps, {
+        conversationId,
+        inboundMessages,
+        voiceBundle,
+        snapshot,
+        maxInboundId,
       });
 
-      // The compacted view with stored turn contexts, plus the turn's own row
-      // found by its inbound cursor (see `loadTurnHistory`). In a step so a
-      // `/compact` landing mid-run can't shift the history between invocations.
-      const turnHistory = await step.run("load-turn-transcript", async () => {
-        try {
-          return await loadTurnHistory(
-            { runInTx: deps.runInTx, agentStore },
-            { conversationId, turnInboundId: maxInboundId },
-          );
-        } catch (err) {
-          if (err instanceof TurnRowMissingError) throw asNonRetriable(err);
-          throw err;
-        }
+      const transcript = await loadTurnTranscript(step, deps, {
+        conversationId,
+        turnInboundId: maxInboundId,
       });
-      const history: Message[] = turnHistory.messages;
-      const turn = turnHistory.turn;
-      if (turn === null) throw new Error("load-turn-transcript returned no turn row");
 
-      // Load profile up front — its streaming knobs ride into `prepare` so
-      // open streams honor the per-profile chunk target and edit mode, and
-      // voice resolution, auto-recall gating, and the `memoryScope` ACL
-      // filter further down read the same row. One DB roundtrip per turn.
-      // `model` still comes from the turn snapshot, not this read, to
-      // preserve the invariant that one turn = one (profileId, model) stamp
-      // even if profile.model changes mid-turn.
-      const profile = await deps.runInTx((tx) => agentStore.getProfile(tx, profileId));
-
-      // Which core memory the turn renders, reads and writes. Its own step, and
-      // ahead of the catalog reads: design/crash-recovery.md → Turn inputs are
-      // frozen.
-      const coreMemoryScope = await step.run("freeze-core-memory-scope", () =>
-        loadCoreMemoryScope({ runInTx: deps.runInTx, agentStore }, { userId, profile }),
-      );
-
-      // Open delivery handles early — needed to resolve voice mode
-      // (`canDeliverVoice` reflects which active sessions implement
-      // `sendVoice`). Side effect is benign: the streaming adapter just
-      // tracks an open run id; no Telegram message is posted until first
-      // `push`.
-      const delivery = await deliveryRouter.prepare({
+      const frozen = await freezeTurnInputs(step, deps, {
         conversationId,
         runId,
-        isPrivate: conv.isPrivate,
-        maxInboundId,
-        prevCursor: lastAssistant?.lastInboundMessageId ?? null,
-        kind: routingKind,
-        ...(profile && {
-          streamOpts: {
-            chunkChars: profile.streamChunkChars,
-            allowEdits: profile.streamEdits,
-          },
-        }),
-      });
-
-      // Live tool catalog — built-ins from bootstrap + the live image
-      // catalog (loaded fresh each turn so wizard / CLI CRUD takes effect
-      // without a restart) + one dynamic tool per live skill + MCP tools
-      // resolved against the profile's globs. Rebuilt every turn so
-      // registered skills + newly-approved MCP tools appear immediately, and
-      // rolled-back / disabled / un-approved ones disappear. The skill-tool
-      // builder is fault-tolerant: a single skill with unreadable git source
-      // is logged and dropped, the rest of the list still loads. Composition
-      // policy (built-ins win on collision; profile.toolSet globs filter
-      // every source) lives in `composeTurnTools`. Image tools join the
-      // built-ins set rather than the skill/MCP sets — they're first-party
-      // and should win on any name collision with operator-installed
-      // extensions, same as memory / web / file tools.
-      //
-      // Every invocation builds it, for the handlers; which tools the turn
-      // offers is frozen below.
-      const imageTools = deps.imageToolsLoader ? await deps.imageToolsLoader.getTools() : [];
-      const skillTools = deps.skillRunner
-        ? await buildSkillTools(deps.skillRunner, { userId })
-        : [];
-      // One `subagent__<name>` tool per row, loaded fresh each turn (CLI CRUD
-      // takes effect without a restart). The handler closes over the same
-      // per-turn `resolveProvider`, so a sub-agent can target any routable
-      // model — including a different provider than the main turn. Joins the
-      // built-ins set; the `subagent__` namespace makes a collision with a
-      // built-in structurally impossible.
-      const subAgentTools = buildSubAgentTools(
-        await deps.runInTx((tx) => agentStore.listSubAgents(tx, userId)),
-        resolveProvider,
-      );
-      const turnToolSetGlobs = profile?.toolSet ?? [];
-      const mcpTools = deps.mcpRegistry
-        ? await deps.mcpRegistry.resolveTools({ toolGlobs: turnToolSetGlobs })
-        : [];
-      const liveTools = composeTurnTools({
-        builtIns: offeredBuiltIns(coreMemoryScope, [
-          ...tools.snapshot(),
-          ...imageTools,
-          ...subAgentTools,
-        ]),
-        skillTools,
-        mcpTools,
-        toolSetGlobs: turnToolSetGlobs,
-      });
-
-      // Frozen for the turn: decisions resolved from non-durable reads (the
-      // profile, the delivery handle, the live catalogs) that shape the LLM
-      // request or the step graph. See `turn-tools.ts` for the tool table.
-      const turnInputs = await step.run("freeze-turn-inputs", async () => ({
-        // Decision gates: adapter capability, TTS provider configured,
-        // conversation override (NULL = follow profile default), profile
-        // mode, modality of the most recent inbound. See design/voice.md.
-        voiceMode: resolveVoiceMode({
-          adapterSupportsVoice: delivery.canDeliverVoice(),
-          voiceConfigPresent: voiceBundle !== undefined,
-          conversationMode: conv.voiceMode,
-          profileMode: profile?.voiceMode ?? "auto",
-          // Inspect ONLY the most recent inbound message in the debounced
-          // batch — the user's latest intent. If the batch is [voice, text]
-          // (user dictated, then typed a follow-up), they're at the keyboard
-          // now and shouldn't get a voice reply just because the batch
-          // started with voice. Symmetrically, [text, voice] correctly
-          // mirrors voice. A forwarded voice note isn't the user speaking.
-          lastInboundWasVoice: isVoiceContent(inboundMessages.at(-1)?.content ?? ""),
-        }),
-        // Gates `batch-delivery`, so the step exists on every invocation that
-        // reaches it or on none.
-        batchDelivery: delivery.hasBatchTargets(),
-        tools: freezeToolTable(liveTools),
-      }));
-      const turnTools = bindFrozenTools(turnInputs.tools, liveTools);
-      const toolDefs = turnTools.definitions();
-
-      // The system prompt as it renders now, and the conversation's current
-      // epoch (design/prompt-caching.md → System Prompt Snapshot). `# Tools`
-      // renders from the frozen turn inputs — the same table the loop sends
-      // as `tools` — and the base prompt from the outer `profile` read.
-      const systemPromptArgs = {
-        conversationId,
         userId,
-        profile,
-        coreMemoryScope,
-        toolDefinitions: toolDefs,
-        toolTable: turnInputs.tools,
-      };
-      const systemPromptDeps = { runInTx: deps.runInTx, agentStore, promptSource };
-      const loadedSystemPrompt = await step.run("load-system-prompt", () =>
-        loadSystemPrompt({ ...systemPromptDeps, transportStore }, systemPromptArgs),
-      );
+        profileId,
+        conversation: conv,
+        routing: {
+          maxInboundId,
+          prevCursor: lastAssistant?.lastInboundMessageId ?? null,
+          kind: routingKind,
+        },
+        voiceBundle,
+        lastInboundContent: inboundMessages.at(-1)?.content ?? "",
+      });
+      const { profile, coreMemoryScope, delivery, loadedSystemPrompt } = frozen;
 
       // ──── Streaming section: bare-body glue + in-loop durable steps ────
 
-      // Resolve image/document refs (S3 → base64). Voice substitution
-      // already happened in `substitutedMessages` above, so re-flattening
-      // through `contentToBlocks` produces a block stream with text in
-      // place of voice — no voice_ref branch needed here.
-      const substitutedInboundBlocks = substitutedMessages.flatMap(({ content }) =>
-        contentToBlocks(content),
-      );
-      const resolvedBlocks: ContentBlock[] = await Promise.all(
-        substitutedInboundBlocks.map(async (block): Promise<ContentBlock> => {
-          if (block.type === "image_ref") {
-            const bytes = await attachments.download(block.path);
-            return {
-              type: "image",
-              source: "base64",
-              data: bytes.toString("base64"),
-              mediaType: block.mediaType,
-            };
-          }
-          if (block.type === "document_ref") {
-            const bytes = await attachments.download(block.path);
-            return {
-              type: "document",
-              source: "base64",
-              data: bytes.toString("base64"),
-              mediaType: block.mediaType,
-              ...(block.name && { name: block.name }),
-            };
-          }
-          // voice_ref is substituted to text upstream in substitutedMessages
-          // — this branch is unreachable in practice. Keep an explicit
-          // mapping rather than a cast so a future code path that bypasses
-          // the substitution still produces a sane block instead of
-          // crashing the loop's return-type inference.
-          if (block.type === "voice_ref") return { type: "text", text: "" };
-          return block;
-        }),
-      );
-
-      const codingService = deps.codingServiceFactory?.(conversationId);
-      const skillsService = deps.skillRunner
-        ? createSkillsService({
-            runner: deps.skillRunner,
-            inngest,
-            conversationId,
-            origin: { userId, profileId },
-          })
-        : undefined;
-      // Scheduling service is scoped per-turn to (userId, profileId)
-      // so `schedule_task` / `list_tasks` / `remove_task` can't leak
-      // across users. Always constructed when handle-message runs —
-      // unlike coding/skills there's no env-gated absence.
-      const schedulingService = createSchedulingService({
-        runInTx: deps.runInTx,
-        agentStore: deps.agentStore,
+      const resolvedBlocks = await resolveInboundAttachments(deps.attachments, substitutedMessages);
+      const service = await buildChatTurnService(deps, {
+        conversationId,
         userId,
         profileId,
-        defaultTimezone: deps.userTimezone,
+        profile,
+        coreMemoryScope,
+        model: snapshot.model,
+        toolDefs: frozen.toolDefs,
       });
-      // Pipelines service compiles on the conversation's current model and
-      // validates stage tool-globs against this turn's composed tool list,
-      // so a definition can't allowlist a tool the profile can't see. The
-      // pipeline tools themselves are excluded — a run defining/activating
-      // pipelines mid-run is a self-modification surface the
-      // preview/confirm gate exists to prevent.
-      const pipelinesService = deps.pipelineStore
-        ? createPipelinesService({
-            runInTx: deps.runInTx,
-            store: deps.pipelineStore,
-            userId,
-            resolveProvider,
-            model: snapshot.model,
-            validation: {
-              availableTools: toolDefs
-                .map((d) => d.name)
-                .filter((name) => !PIPELINE_TOOL_NAMES.includes(name)),
-              knownEventSources: [],
-            },
-            ...(deps.pipelineRunStore !== undefined && {
-              run: {
-                deps: {
-                  runInTx: deps.runInTx,
-                  pipelineStore: deps.pipelineStore,
-                  runStore: deps.pipelineRunStore,
-                  agentStore,
-                  transportStore,
-                  inngest,
-                  gateChannelTypes: deps.pipelineGateChannelTypes ?? new Set<string>(),
-                },
-                profileId,
-                originConversationId: conversationId,
-              },
-            }),
-          })
-        : undefined;
-      // Scoped service for this turn — must precede auto-recall so the recall
-      // goes through the same `memoryScope` ACL filter every other memory
-      // operation does.
-      const service = await buildTurnService(
-        { runInTx: deps.runInTx, agentStore, memory, fileService },
-        {
-          userId,
-          profile,
-          coreMemoryScope,
-          coding: codingService,
-          skills: skillsService,
-          scheduling: schedulingService,
-          pipelines: pipelinesService,
-        },
-      );
 
       // In-turn durable boundary wrapper — per-step-kind retry policy lives in
       // `createTurnStepRunner`.
       const stepRun = createTurnStepRunner((id, fn) => step.run(id, fn));
 
-      // Auto-recall: search memory for context relevant to this message, via
-      // the scoped service so the profile's `memoryScope` filter applies.
-      // Best-effort — a Hindsight failure (server down, malformed query, 4xx
-      // from a server-side change we haven't caught up with) must not abort
-      // the turn or trigger Inngest re-enqueue. Degrade to "no memories" and
-      // let the conversation proceed; the LLM-driven `memory_recall` tool
-      // path still surfaces hard failures to the model.
-      const autoRecallMode = profile?.autoRecall ?? "heuristic";
-      // Durable: recall costs an embedding round-trip plus a vector search
-      // per call, and its result feeds the turn context — caching it keeps
-      // both the spend and the context identical across the ~one
-      // re-invocation per step boundary that a tool-calling turn produces.
-      // The `.catch` stays INSIDE the body so a Hindsight failure degrades to "no
-      // memories" instead of failing the step into Inngest retries, and so
-      // the failure counts once per failed recall rather than once per
-      // replay. `bank_id` is the conversation user, who owns the bank
-      // (`buildTurnService`). Known conditional-step caveat: the gate reads
-      // `profile.autoRecall` from a non-durable read, so a concurrent
-      // settings change mid-turn can flip the step's existence between
-      // invocations — same accepted hazard as `summarize-prefix-outcome`,
-      // see design/crash-recovery.md.
-      const recallQuery = recallQueryText(substitutedMessages);
-      const recallResult = shouldSkipRecall(autoRecallMode, recallQuery)
-        ? { memories: [] }
-        : await stepRun("auto-recall", async () =>
-            service.memory.recall(recallQuery, { maxTokens: 2000 }).catch((err: unknown) => {
-              turnLogger.warn({ err }, "auto-recall failed, proceeding without recalled context");
-              memoryRecallFailures.add(1, { bank_id: userId });
-              return { memories: [] };
-            }),
-          );
-      // This turn's message, led by a provisional block carrying every
-      // recalled memory: compaction counts that upper bound, and
-      // `render-turn-context` swaps in the stored, deduplicated block.
-      const turnIndex = turnHistory.messageIds.lastIndexOf(turn.id);
-      const turnRow = history[turnIndex];
-      if (turnRow === undefined) {
-        throw new Error(`user message ${turn.id} is missing from the turn's history`);
-      }
-      const hasAttachments = resolvedBlocks.some(
-        (b) => b.type === "image" || b.type === "document",
-      );
-      const handledAt = new Date(turn.createdAt);
-      const recalledMemories = recallResult.memories.map((m) => m.content);
-      const { channelTypes, coreMemoryChanges } = loadedSystemPrompt;
-      // An upper bound on the stored block, which compaction counts: every
-      // recalled memory and every core-memory change since the snapshot. The
-      // stored block leaves out what earlier turns still in view show.
-      const provisionalTurnContext = renderTurnContext({
-        handledAt,
+      const context = await assembleTurnContext(stepRun, service, {
+        userId,
+        autoRecallMode: profile?.autoRecall ?? "heuristic",
+        substitutedMessages,
+        transcript,
+        resolvedBlocks,
+        loadedSystemPrompt,
+        voiceMode: frozen.voiceMode,
+        coreMemoryScope,
         timezone: deps.userTimezone,
-        context: {
-          recalledMemories,
-          voiceMode: turnInputs.voiceMode,
-          channelTypes,
-          announcedCoreMemoryBlocks: coreMemoryChanges.map(({ profileClass, key, updatedAt }) => ({
-            profileClass,
-            key,
-            updatedAt,
-          })),
-        },
-        coreMemoryUpdates: { scope: coreMemoryScope, blocks: coreMemoryChanges },
+        turnLogger,
       });
 
-      // The epoch continues unless the configuration or the summary the history
-      // starts from changed; compaction below can still open one. The turns
-      // before the epoch's opening row lose their thinking blocks, which are
-      // bound to an earlier system prompt or history.
-      const loadedStart = historyStart(turnHistory.messageIds, null);
-      const continuing = continuesEpoch(loadedSystemPrompt.snapshot, {
-        configDigest: loadedSystemPrompt.configDigest,
-        historyStart: loadedStart,
-      })
-        ? loadedSystemPrompt.snapshot
-        : null;
-      // An opener missing from the history belongs to a concurrent turn's epoch,
-      // which opened after everything before this turn.
-      const openerIndex =
-        continuing === null ? -1 : turnHistory.messageIds.indexOf(continuing.openedBy);
-      // The row's content, or the resolved image and document blocks it names.
-      let historyMessages: Message[] = stripThinkingBefore(
-        history,
-        openerIndex === -1 ? turnIndex : openerIndex,
-      ).with(
-        turnIndex,
-        withTurnContext(
-          { role: "user", content: hasAttachments ? resolvedBlocks : turnRow.content },
-          provisionalTurnContext,
-        ),
-      );
+      const turnModel = await resolveTurnModel(stepRun, deps.resolveProvider, snapshot.model);
 
-      // ──── Context window compaction ────
-      //
-      // compactMessages orchestration runs on every invocation — the
-      // threshold decisions are pure functions, and `historyMessages`
-      // carries resolved image payloads that must not land in Inngest step
-      // state, so the pipeline itself can't be a step. Its expensive or
-      // decision-bearing inputs ARE steps: history, auto-recall, the frozen
-      // tool table, `load-last-tokens` (freezes the skip decision
-      // persist-new-messages would otherwise flip mid-run), each
-      // `count-tokens-<n>` round-trip, and the `summarize-prefix-outcome` LLM
-      // call. Every replay therefore walks the same decision tree over cached
-      // values. See design/crash-recovery.md.
+      const compacted = await compactTurn(stepRun, deps, {
+        conversationId,
+        turnModel,
+        summarizationModel: snapshot.summarizationModel,
+        system: context.continuing?.rendered ?? loadedSystemPrompt.rendered,
+        messages: context.messages,
+        toolDefs: frozen.toolDefs,
+        messageIds: transcript.history.messageIds,
+        newContentChars: userContentText.length + context.provisionalTurnContext.length,
+        delivery,
+        turnLogger,
+      });
 
-      const model = snapshot.model;
+      const finalized = await finalizeTurnContext(step, frozen.systemPromptDeps, {
+        messages: compacted.messages,
+        provisionalTurnContext: context.provisionalTurnContext,
+        transcript,
+        continuing: context.continuing,
+        storedCutoff: compacted.storedCutoff,
+        loadedSystemPrompt,
+        systemPromptArgs: frozen.systemPromptArgs,
+        recalledMemories: context.recalledMemories,
+        handledAt: context.handledAt,
+        voiceMode: frozen.voiceMode,
+        coreMemoryScope,
+        timezone: deps.userTimezone,
+      });
 
-      // Per-turn provider dispatch — the snapshot's model determines which
-      // adapter (Anthropic, xAI via OpenAI-compat, etc.) handles the chat,
-      // streaming, and token-counting calls below. Resolved outside any
-      // `step.run` because the resolver returns an `LlmProvider` instance
-      // that isn't JSON-serializable; the production resolver caches by
-      // model, so this is one DB read + one AES decrypt the first time a
-      // model is seen, then a Map lookup for the rest of the process.
-      // `resolveOrFail` rewraps permanent config errors (no routing row,
-      // no secret, malformed `llm_providers` row) as `NonRetriableError`
-      // so Inngest aborts immediately and `onFailure` notifies the user
-      // — no point burning retries on a misconfiguration. See
-      // design/providers.md → Provider dispatch.
-      const { provider, limits: rowLimits } = await resolveOrFail(resolveProvider, model);
-      // Layered limits: row override → LiteLLM catalog → conservative
-      // default. Durable: a catalog refresh landing between invocations
-      // swaps the in-process catalog, and `budget` decides which
-      // compaction steps the run plans.
-      const limits = await stepRun("freeze-model-limits", async () =>
-        resolveLimits(model, rowLimits),
-      );
-      const budget = computeBudget(limits);
-      // Strategy 1's edit intent, on every request of the turn. Derived from
-      // the frozen limits, so every invocation sends the same intent.
-      const clearToolResults = toolResultClearing(budget);
-      const summarizationModel = snapshot.summarizationModel;
-
-      // Durable: persist-new-messages rewrites the row this reads MID-RUN,
-      // so a bare-body read would flip `skipBudgetStrategies` between
-      // invocations — and with it the compaction decisions and the
-      // existence of the conditional `summarize-prefix-outcome` / `count-tokens-*`
-      // steps. Freezing the read pins the whole compaction decision tree
-      // for the run.
-      const lastTokens = await stepRun("load-last-tokens", () =>
-        deps.runInTx((tx) => agentStore.getLastTokens(tx, conversationId)),
-      );
-      // The turn context is new input too: recalled memories are in no earlier
-      // request's usage.
-      const skipBudgetStrategies = shouldSkipCounting(
-        lastTokens?.inputTokens ?? null,
-        lastTokens?.outputTokens ?? null,
-        userContentText.length + provisionalTurnContext.length,
-        budget,
-      );
-
-      // The skip-counting decision flows in as `skipBudgetStrategies`, which
-      // spares compactMessages the provider.countTokens round-trip when budget
-      // pressure can't matter; a view past the size trigger compacts anyway.
-      // Set by the `summarize` callback below when Strategy 2 fires. Assigned
-      // on every invocation that reaches the strategy — `summarize-prefix-outcome`
-      // hands back the memoized text on a replay just as it does on the first
-      // pass — so the persist step downstream is planned identically each time.
-      let summaryText: string | null = null;
-      /**
-       * Set when the summarization response stopped at its output cap. The
-       * text is still worth using for this turn, but a summary cut mid-sentence
-       * must not become the permanent stand-in for a span whose raw messages
-       * later turns no longer load — nothing ever re-derives it.
-       */
-      let summaryTruncated = false;
-
-      const compactResult = await compactMessages(
-        continuing?.rendered ?? loadedSystemPrompt.rendered,
-        historyMessages,
-        toolDefs,
-        {
-          // Each count is a full-payload POST (system + history + tool
-          // schemas + resolved images) — durable so re-invocations replay
-          // the integer instead of re-shipping megabytes per boundary. The
-          // call sequence is deterministic per run: compaction's inputs are
-          // frozen (durable history, auto-recall, the frozen tool table,
-          // load-last-tokens), so the counter-keyed ids line up on every
-          // replay.
-          countTokens: (() => {
-            let countCall = 0;
-            return (params: CountTokensParams) => {
-              countCall += 1;
-              return stepRun(`count-tokens-${countCall}`, () =>
-                provider.countTokens({ ...params, model }),
-              );
-            };
-          })(),
-          budget,
-          clearToolResults,
-          maxViewBytes: MAX_VIEW_BYTES,
-          // Refuse a split that buys nothing durable — the shape where the
-          // prefix is the previously-stored summary and nothing else.
-          canSummarizePrefix: (candidate) =>
-            summarizedSpan(turnHistory.messageIds, candidate) !== null,
-          summarize: async (system, msgs) => {
-            // Resolve the summarization provider lazily — only when
-            // compaction actually picks the SUMMARIZE strategy. Resolving
-            // eagerly at turn start would surface a misconfigured
-            // `summarizationModel` (missing routing row, missing secret)
-            // as a per-turn failure, even on small messages that never
-            // trigger summarization. The memoized resolver makes this
-            // a `Map` lookup after the first hit per process. Stays
-            // outside the `step.run` below because the provider instance
-            // isn't JSON-serializable.
-            // Keep the resolved limits, not just the provider: the cap
-            // below has to respect this model's own output ceiling, and
-            // the main model's row overrides don't describe it.
-            const resolvedSummarization =
-              summarizationModel === model
-                ? null
-                : await resolveOrFail(resolveProvider, summarizationModel);
-            const summarizationProvider = resolvedSummarization?.provider ?? provider;
-            const summarizationLimits = resolvedSummarization
-              ? resolveLimits(summarizationModel, resolvedSummarization.limits)
-              : limits;
-            // Step ID is hardcoded — relies on `compactMessages` calling
-            // `summarize` at most once per invocation (contract on
-            // ContextManagerDeps.summarize). If that ever changes, switch to
-            // a counter-based ID like `summarize-prefix-${i}` to avoid
-            // Inngest's duplicate-step-id error.
-            const summarized = await stepRun("summarize-prefix-outcome", async () => {
-              // Status banner lives inside the step body so it reaches the
-              // user exactly once — compactMessages re-runs on every
-              // invocation, and a bare-body push would re-append the banner
-              // (or open a stray message on a post-finish replay handle)
-              // each time.
-              await pushOrThrow(delivery, {
-                type: "status",
-                message: "Summarizing conversation...",
-              });
-              const response = await summarizationProvider.chat(
-                summarizationRequest({
-                  model: summarizationModel,
-                  system,
-                  messages: msgs,
-                  maxOutputTokens: summarizationLimits.maxOutputTokens,
-                  clearToolResults,
-                }),
-              );
-              const text = extractSummaryText(response.content);
-              if (response.stopReason === "max_tokens") {
-                // Logged from the step body so replay suppresses it. In the
-                // bare body this would re-emit once per remaining boundary of
-                // the turn, over-reporting by the turn's step count.
-                turnLogger.warn(
-                  { summaryChars: text.length },
-                  "summarization hit its output cap; using the text for this turn but not storing it",
-                );
-              }
-              return { text, stopReason: response.stopReason };
-            });
-            summaryText = summarized.text;
-            summaryTruncated = summarized.stopReason === "max_tokens";
-            return summarized.text;
-          },
-        },
-        skipBudgetStrategies,
-      );
-      historyMessages = compactResult.messages;
-
-      // Persist what Strategy 2 produced so the next turn replays the summary
-      // instead of paying for it again. `messagesSummarized` is the split
-      // index into the compaction input — nothing before Strategy 2 changes
-      // the array, so it indexes `turnHistory.messageIds` directly. It is 0
-      // whenever the strategy no-opped (under budget, or the model returned
-      // no text), which is also the guard against storing an empty summary.
-      //
-      // Every input here is durable or memoized, so this step is planned the
-      // same way on every invocation. The (conversation, cutoff) unique makes
-      // the write idempotent under the retry that `durable` alone doesn't
-      // prevent — a crash between the commit and Inngest recording the step
-      // recovers the existing row rather than appending a second one.
-      // The compaction view's split index, not the count the row records:
-      // `event.messagesSummarized` counts entries, a folded-in previous summary
-      // among them, while the column stores `span.messageCount`.
-      const splitIdx = compactResult.event?.messagesSummarized ?? 0;
-      const span = splitIdx > 0 ? summarizedSpan(turnHistory.messageIds, splitIdx) : null;
-      // The cutoff of the summary this turn stored, which later turns' history starts after.
-      let storedCutoff: string | null = null;
-      if (summaryText !== null && span !== null && !summaryTruncated) {
-        // `text` needs the local because `summaryText` is a `let` whose
-        // narrowing TypeScript discards inside the callback below; `span` is a
-        // `const` and needs no such help.
-        const text = summaryText;
-        // Caching a summary is not worth the turn. The write sits between
-        // compaction and the agent loop, so an unhandled failure here costs the
-        // user their reply over a span that would simply be re-summarized next
-        // turn — the same reasoning that has `auto-recall` degrade inside its
-        // own step body rather than propagate.
-        //
-        // Projected down to the id: the full row would push the summary text
-        // into Inngest step state a second time, and its `createdAt` would come
-        // back from the cache as a string rather than a Date.
-        // Caught around the step, not inside it. Inside, `stepRun` never sees
-        // the error, so Inngest cannot retry and one connection blip discards a
-        // summary already paid for. Out here the step keeps its retry budget
-        // and only a permanently-failed one reaches this catch — where
-        // degrading is the designed channel, since caching a summary is not
-        // worth costing the user their reply over a span the next turn would
-        // re-summarize anyway.
-        try {
-          await stepRun("persist-summary", async () => {
-            const { kind, row } = await deps.runInTx((tx) =>
-              agentStore.insertOrRecoverSummary(tx, {
-                conversationId,
-                summary: text,
-                throughMessageId: span.cutoff,
-                // The real messages replaced, not the compaction-view entries:
-                // the column is an audit trail, and counting a folded-in
-                // previous summary as content would overstate every
-                // re-compaction by one.
-                messagesSummarized: span.messageCount,
-                model: summarizationModel,
-                source: "turn",
-              }),
-            );
-            if (kind === "recovered") {
-              // A concurrent `/compact` stored this span first and the conflict
-              // arm kept its text. This turn answers from the summary it just
-              // computed while every later turn replays the other one — the
-              // same signal `compactConversation` reports as `nothing_new`,
-              // which here is only worth a log.
-              turnLogger.info(
-                { summaryId: row.id },
-                "summary for this span was already stored; keeping the stored text",
-              );
-            }
-            // The id is not read by any caller — it is here to show up in the
-            // Inngest run view, where it is the only handle on which row a
-            // summarizing turn wrote.
-            return { id: row.id };
-          });
-          storedCutoff = span.cutoff;
-        } catch (err) {
-          turnLogger.warn({ err }, "failed to persist conversation summary, continuing the turn");
-        }
-      }
-
-      const turnPosition = findTurnContext(historyMessages, provisionalTurnContext);
-      if (turnPosition === -1) throw new Error("compaction dropped the turn's own message");
-
-      // A summary this turn stored moves the history's start, so the turn opens
-      // an epoch on the prefix compaction already rewrote. An opening turn
-      // strips every thinking block before its own message.
-      const epochStart = historyStart(turnHistory.messageIds, storedCutoff);
-      const epoch =
-        continuing !== null && continuing.historyStart === epochStart
-          ? continuing
-          : await step.run("open-system-prompt-epoch", () =>
-              openSystemPromptEpoch(systemPromptDeps, {
-                ...systemPromptArgs,
-                openedBy: turn.id,
-                historyStart: epochStart,
-              }),
-            );
-      if (epoch.openedBy === turn.id) {
-        historyMessages = stripThinkingBefore(historyMessages, turnPosition);
-      }
-
-      // Deduplicated after compaction: before it, a memory or an announcement
-      // whose only earlier copy compaction then removes would be dropped. An
-      // opening turn's snapshot shows core memory as it is, so it announces
-      // nothing.
-      const earlierInView = historyMessages.toSpliced(turnPosition, 1);
-      const announced =
-        epoch.openedBy === turn.id
-          ? []
-          : unannounced(coreMemoryChanges, announcedInView(earlierInView, turnHistory));
-      const renderedTurnContext = await step.run("render-turn-context", () =>
-        storeTurnContext(
-          { runInTx: deps.runInTx, agentStore },
-          {
-            messageId: turn.id,
-            handledAt,
-            timezone: deps.userTimezone,
-            context: {
-              recalledMemories: newMemories(
-                recalledMemories,
-                shownMemories(earlierInView, turnHistory),
-              ),
-              voiceMode: turnInputs.voiceMode,
-              channelTypes,
-            },
-            coreMemoryUpdates: { scope: coreMemoryScope, blocks: announced },
-          },
-        ),
-      );
-      historyMessages = replaceTurnContext(historyMessages, turnPosition, renderedTurnContext);
-
-      let result: AgentLoopResult;
-      // Sessions whose stream failed at finish; the reply goes to them again once persisted.
-      let unstreamed: ReadonlyArray<string> = [];
-      try {
-        result = await runStreamingAgentLoop({
-          provider,
-          model,
-          systemPrompt: epoch.rendered,
-          messages: historyMessages,
-          tools: turnTools,
-          service,
-          // The number `computeBudget` reserved for output when it sized
-          // the input budget above; reasoning shares it on models that
-          // think by default. That reservation covers one iteration while
-          // the loop caps every one, so a long tool-using turn can still
-          // outgrow the window and degrade to `context_overflow`.
-          maxTokens: limits.maxOutputTokens,
-          onEvent: (event: StreamEvent) => pushOrThrow(delivery, event),
-          // Durable boundaries inside the loop: each streaming LLM
-          // iteration runs in a `llm-iter<N>` step (tokens reach the
-          // delivery layer live from inside the step body; a memoized
-          // replay returns the cached iteration outcome without calling
-          // the provider or re-emitting), and each `durable: true` tool
-          // handler runs in a `tool-iter<N>-<P>` step. Handlers execute
-          // *between* stream events, so wrapping preserves event
-          // ordering. See design/crash-recovery.md → Durable LLM
-          // iterations / Per-tool durability.
-          stepRun,
-          // Turn token for per-tool-call idempotency keys: the batch's
-          // low-water mark, which identifies this turn's input and survives
-          // re-invocations, function retries and re-deliveries alike. Empty
-          // only for a turn with no inbound rows, which has nothing for a
-          // tool to duplicate. (Not `triggerInboundId`, which a debounce
-          // re-fire moves — see `firstInboundId` above.)
-          ...(firstInboundId !== "" && { turnKey: firstInboundId }),
-          cache: turnCacheIntent(conversationId, "chat"),
-          clearToolResults,
-          turnLogger,
-        });
-        // Class C / D degraded off-ramp. The loop exited because a repair
-        // budget exhausted (or an immediate-degrade subtype tripped); the
-        // user-facing apology is appended here so the streamed reply
-        // closes with a coherent message rather than silence. See
-        // design/agent-resilience.md → Degraded reply.
-        if (result.degraded) {
-          const degraded = result.degraded;
-          // Retraction computed OUTSIDE the step from `result.streamed` —
-          // the loop derives that ledger from its durable iteration
-          // outcomes, so it is identical on every invocation (a ledger of
-          // live emissions would be empty on a replay whose iterations all
-          // came from the step cache).
-          const retraction = computeRetraction(result.streamed, result.newMessages, turnLogger);
-          // One step owns the whole user-visible off-ramp: the tools-free
-          // synthesis LLM call plus the retract/apology pushes. The
-          // synthesis is billable and the pushes append to the user's live
-          // message, so both must fire exactly once across the persist /
-          // delivery / notify boundaries that follow — in the bare body
-          // they would re-fire on every subsequent re-invocation. The
-          // step returns the apology text, so replays persist the same
-          // words the user saw. Plain `step.run`, not the `stepRun`
-          // wrapper: synthesizeDegradedReply swallows provider failures
-          // into the fixed fallback string internally, so no 4xx can
-          // escape this body — the only escapable errors are delivery
-          // pushes, which should keep normal step-retry semantics.
-          const apology = await step.run("degraded-reply", async () => {
-            // One tools-free LLM call summarizes the failure in
-            // user-facing terms (what was attempted, what went wrong, one
-            // next step). Falls through to the fixed string on any
-            // synthesis failure (timeout, refusal, provider outage). See
-            // design/agent-resilience.md → Tools-free synthesis on
-            // degrade.
-            const { text } = await synthesizeDegradedReply({
-              provider,
-              model: result.model,
-              messages: result.messages,
-              reason: degraded.reason,
-              subtype: degraded.subtype,
-              clearToolResults,
-              log: turnLogger,
-            });
-            // Retract first. Output streamed before the degrade fired is
-            // already on the user's screen (Telegram edits the live
-            // message every ~500ms; the web adapter forwards every delta
-            // as an SSE frame), and the loop drops the triggering
-            // iteration from `newMessages` — so appending the apology to
-            // it would leave the user reading a truncated fragment welded
-            // to an apology that history doesn't contain. The retraction
-            // names that iteration's output and nothing else: text and
-            // tool calls from earlier iterations are persisted, so they
-            // stay. Nothing to retract (nothing streamed, or an
-            // iteration-cap degrade that persists every iteration) means
-            // no event at all.
-            if (retraction) {
-              await pushOrThrow(delivery, { type: "retract", ...retraction });
-            }
-            await pushOrThrow(delivery, { type: "text_delta", text });
-            return text;
-          });
-          result = {
-            ...result,
-            text: apology,
-            newMessages: [
-              ...result.newMessages,
-              { role: "assistant", content: [{ type: "text", text: apology }] },
-            ],
-          };
-        }
-        // A step, so the sessions whose stream failed are known on every
-        // later invocation. Such a stream may have shown the user nothing:
-        // append-only mode writes only at chunk boundaries and at finish. A
-        // retry of the turn wouldn't help, since replayed iterations re-emit
-        // nothing, so the reply reaches those sessions through batch delivery
-        // once it is persisted.
-        unstreamed = await step.run("finish-stream", async () => {
-          const finished = await delivery.finish();
-          if (finished.isOk()) return [];
-          turnLogger.warn(
-            { failures: finished.error.failures },
-            "stream delivery failed at finish",
-          );
-          return finished.error.failures.map((failure) => failure.sessionId);
-        });
-      } catch (err) {
-        // The loop's error decides the retry, so a failed abort is only logged.
-        const aborted = await delivery.abort(err instanceof Error ? err.message : "Unknown error");
-        if (aborted.isErr()) {
-          turnLogger.warn({ err: aborted.error }, "stream delivery failed at abort");
-        }
-        // Translate provider classification into Inngest's retry decision.
-        // 4xx that aren't 408/425/429 are deterministic client errors — the
-        // same payload will fail every retry. Wrap in NonRetriableError so
-        // Inngest fails the run on the first attempt instead of burning
-        // ~6 minutes on retries before the onFailure handler can notify the
-        // user. See design/crash-recovery.md.
-        if (!isRetriableProviderError(err)) {
-          throw asNonRetriable(err);
-        }
-        // Never wrap the error on this rethrow path. A permanently-failed
-        // step surfaces here as Inngest's StepError (no `status`, so it
-        // classifies as "retriable" above), and the engine's non-retriable
-        // detection relies on the rethrown object keeping its identity and
-        // serialized name — wrapping it would silently re-enable function
-        // retries that instantly replay the memoized rejection.
-        throw err;
-      }
+      const { result, unstreamed } = await runTurnLoop(step, stepRun, deps.runStreamingAgentLoop, {
+        conversationId,
+        turnModel,
+        systemPrompt: finalized.systemPrompt,
+        messages: finalized.messages,
+        tools: frozen.turnTools,
+        service,
+        delivery,
+        firstInboundId,
+        turnLogger,
+      });
 
       turnLogger.info(
         {
@@ -1331,252 +290,26 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         "agent loop complete",
       );
 
-      // ──── DURABLE: persist all new messages (tool turns + final assistant) ────
-      //
-      // Half-open success: when the entry guard saw an elapsed cooldown
-      // and admitted this probe turn, clear `cooldown_state` in the same
-      // transaction. Strict prior-cooldown gating avoids a per-turn
-      // pointless UPDATE on Closed conversations.
-
-      const wasCoolingDown = conv.cooldownState !== null;
-      const assistantMsg = await step.run("persist-new-messages", async () => {
-        const persisted = await deps.runInTx(async (tx) => {
-          const inserted = await agentStore.insertMessages(tx, {
-            conversationId,
-            messages: result.newMessages,
-            profileId: snapshot.profileId,
-            model: snapshot.model,
-            lastInboundMessageId: maxInboundId,
-            lastMessageInputTokens: result.usage.inputTokens,
-            lastMessageOutputTokens: result.usage.outputTokens,
-          });
-          if (wasCoolingDown) {
-            await agentStore.clearCooldown(tx, conversationId);
-          }
-          return inserted;
-        });
-        // Inside the step, because the bare body re-executes once per
-        // remaining boundary and would record the same turn 3-6 times; a step
-        // body fires once and is suppressed on replay. After the write,
-        // because a step body re-runs on every retry too — recording first
-        // would add a sample per attempt whenever the transaction is the thing
-        // failing. The turn is durably persisted by the time the sample is
-        // taken, and the step has not returned, so nothing downstream has
-        // moved on.
-        //
-        // The cost is coverage: a turn whose persist fails irrecoverably is
-        // never sampled, so the histogram counts turns that produced a
-        // persisted reply rather than every turn the loop ran. Recording
-        // ahead of the write would not buy back much — a turn that fails
-        // before reaching this step is unsampled either way — and it would
-        // pay in duplicates, N identical samples whenever the transaction is
-        // what keeps retrying. For a histogram read to spot runaway
-        // iteration counts, repeated copies of one value are worse than a
-        // missing one: they invent the pattern it exists to detect.
-        agentIterations.record(result.iterations, { model: result.model });
-        return persisted;
+      const assistantMessageId = await persistTurn(step, deps, {
+        conversationId,
+        runId,
+        triggerInboundId,
+        snapshot,
+        maxInboundId,
+        priorCooldown: conv.cooldownState,
+        result,
       });
 
-      // Half-open success: cooldown was cleared inside the persist tx.
-      // Emit `conversation/cooldown/cleared` as a separate durable step
-      // AFTER persist commits so the event can't fire on a rolled-back
-      // tx. Same pattern as the degrade emit below. Pre-tx
-      // `conv.cooldownState` carries `lastErroredAt` for the elapsed
-      // calculation. Explicit bus-dedup `id` keyed on the cooldown
-      // being cleared protects against `step.sendEvent`'s at-least-once
-      // delivery contract — a retry after the send registers but before
-      // the cache write would otherwise double-fire downstream
-      // consumers. See design/agent-resilience.md → Telemetry.
-      //
-      // Narrow once via the local — `wasCoolingDown` is the same
-      // predicate but doesn't help TS narrow `conv.cooldownState`.
-      const priorCooldown = conv.cooldownState;
-      if (priorCooldown !== null) {
-        await step.sendEvent(
-          "emit-cooldown-cleared",
-          buildConversationCooldownClearedEvent(
-            {
-              conversationId,
-              clearedBy: "success",
-              elapsedCooldownSeconds: calculateElapsedCooldown(priorCooldown.lastErroredAt),
-            },
-            `cooldown-cleared-${conversationId}-${priorCooldown.lastErroredAt}`,
-          ),
-        );
-      }
-
-      // Emit the degrade signal as a separate durable step after persist —
-      // `step.sendEvent` provides exactly-once delivery, same pattern as
-      // `conversation/errored` in `onFailure`. See
-      // design/agent-resilience.md → Telemetry.
-      if (result.degraded) {
-        const degradedSubtype = result.degraded.subtype;
-        await step.sendEvent(
-          "emit-conversation-degraded",
-          conversationDegraded.create({
-            conversationId,
-            runId,
-            triggerInboundId,
-            subtype: degradedSubtype,
-            reason: result.degraded.reason,
-          }),
-        );
-      }
-
-      // ──── DURABLE: batch delivery ────
-      //
-      // Wrapped in step.run so it's exactly-once on Inngest retry — without
-      // this, a post-delivery step failure would re-fire sendMessage /
-      // sendPhoto to batch adapters. Return value is the delivery summary
-      // (small counts), so state stays lean — image bytes flow through the
-      // step body in memory but never into Inngest state.
-      //
-      // Skipped entirely when the turn froze no batch targets (pure-streaming
-      // setups like Telegram-only): the stream handle already handled
-      // delivery mid-loop, and no S3 downloads are needed. The live targets
-      // are re-checked inside the body.
-      if (turnInputs.batchDelivery) {
-        await step.run("batch-delivery", async () => {
-          if (!delivery.hasBatchTargets()) {
-            turnLogger.warn("batch delivery skipped — no batch targets");
-            return { skipped: "unavailable" };
-          }
-          const imageRefs = extractGeneratedImages(result.newMessages);
-          const documentRefs = extractGeneratedDocuments(result.newMessages);
-
-          // Per-attachment resilience via allSettled — one S3 miss or
-          // corrupted attachment shouldn't block delivery of the others
-          // (matches the stream handle's swallow-and-log pattern).
-          const imageSettled = await Promise.allSettled(
-            imageRefs.map(async (ref) => ({
-              data: await attachments.download(ref.path),
-              mediaType: ref.mediaType,
-            })),
-          );
-
-          const fulfilledImages = imageSettled
-            .filter((r) => r.status === "fulfilled")
-            .map((r) => r.value);
-
-          for (const [i, r] of imageSettled.entries()) {
-            if (r.status === "rejected") {
-              turnLogger.error(
-                { err: r.reason, path: imageRefs[i]?.path },
-                "outbound image download failed, skipping",
-              );
-            }
-          }
-
-          const docSettled = await Promise.allSettled(
-            documentRefs.map(async (ref) => ({
-              data: await attachments.download(ref.path),
-              mediaType: ref.mediaType,
-              name: ref.name,
-            })),
-          );
-
-          const fulfilledDocs = docSettled
-            .filter((r) => r.status === "fulfilled")
-            .map((r) => r.value);
-
-          for (const [i, r] of docSettled.entries()) {
-            if (r.status === "rejected") {
-              turnLogger.error(
-                { err: r.reason, path: documentRefs[i]?.path },
-                "outbound document download failed, skipping",
-              );
-            }
-          }
-
-          await delivery.deliverBatch(
-            result.text,
-            fulfilledImages.length > 0 ? fulfilledImages : undefined,
-            fulfilledDocs.length > 0 ? fulfilledDocs : undefined,
-          );
-
-          return {
-            imagesDelivered: fulfilledImages.length,
-            imagesFailed: imageSettled.length - fulfilledImages.length,
-            documentsDelivered: fulfilledDocs.length,
-            documentsFailed: docSettled.length - fulfilledDocs.length,
-          };
-        });
-      }
-
-      // ──── DURABLE: redeliver to streams that failed at finish ────
-      //
-      // Through the target's batch `deliver`, in a step whose retries can
-      // outlast a Telegram wait the stream handle gave up on.
-      if (unstreamed.length > 0 && result.text.length > 0) {
-        const sessions = unstreamed;
-        await step.run("redeliver-unstreamed", async () => {
-          await delivery.deliverUnstreamed(sessions, result.text);
-          return { sessions: sessions.length };
-        });
-      }
-
-      // ──── DURABLE: voice delivery (Option B — voice + transcript) ────
-      //
-      // TTS happens AFTER persist + batch delivery so the streamed text
-      // already landed before we touch the voice provider — a TTS failure
-      // never strands the user (text is in front of them, voice is a
-      // bonus). Wrapped in step.run so retries replay from the cached
-      // result rather than re-charging the TTS provider; cached value is
-      // just the audio length so step state stays small. Long replies
-      // (above the per-channel cap) skip TTS entirely — the cap is a
-      // fail-safe; the voice guidance should keep replies short already.
-      //
-      // Gated on the frozen decision and the reply only, so the step exists
-      // on every invocation that needs it; the live capability checks run
-      // inside the body.
-      if (turnInputs.voiceMode && result.text.length > 0) {
-        await step.run("voice-delivery", async () => {
-          const ttsBundle = voiceBundle?.tts;
-          if (ttsBundle === undefined || !delivery.canDeliverVoice()) {
-            turnLogger.warn("voice reply skipped — no TTS provider or voice-capable session");
-            return { skipped: "unavailable" };
-          }
-          const cap = await deps.runInTx((tx) =>
-            transportStore.getVoiceMaxReplyChars(tx, conversationId),
-          );
-          const effectiveCap = cap ?? 700;
-          if (result.text.length > effectiveCap) {
-            turnLogger.info(
-              { length: result.text.length, cap: effectiveCap },
-              "voice reply skipped — over cap",
-            );
-            // The streamed text reply already landed; tell the user voice
-            // was skipped so they know why their voice request didn't
-            // produce a clip. Notify reaches every active session — in
-            // mixed-channel setups a non-voice session also sees the
-            // note, which is harmless and matches Option B (text always
-            // wins). Wrapped in try/catch so a transient notify failure
-            // (Telegram rate limit, network blip) can't fail the whole
-            // turn — the text reply has already succeeded; the note is a
-            // best-effort UX nicety.
-            try {
-              await deliveryRouter.notifyConversation(
-                conversationId,
-                "(text reply too long for voice — see above)",
-              );
-            } catch (notifyErr) {
-              turnLogger.warn(
-                { err: notifyErr },
-                "voice over-cap notification failed; turn already succeeded",
-              );
-            }
-            return { skipped: "over_cap", length: result.text.length };
-          }
-          const { audio, mediaType } = await ttsBundle.provider.tts({
-            text: result.text,
-            voice: ttsBundle.voice,
-            model: ttsBundle.model,
-            format: "ogg",
-          });
-          await delivery.deliverVoice({ audio, mediaType });
-          return { delivered: audio.byteLength, mediaType };
-        });
-      }
+      await deliverReply(step, deps, {
+        conversationId,
+        delivery,
+        result,
+        batchDelivery: frozen.batchDelivery,
+        unstreamed,
+        voiceMode: frozen.voiceMode,
+        voiceBundle,
+        turnLogger,
+      });
 
       // ──── DURABLE: notify (Observer, metrics — not delivery) ────
 
@@ -1584,13 +317,13 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         "send-response",
         responseReady.create({
           conversationId,
-          messageId: assistantMsg.id,
+          messageId: assistantMessageId,
         }),
       );
 
       // ──── RESUME POLICY ────
 
-      if (debounceConfig.resumePolicy === "flush") {
+      if (deps.debounceConfig.resumePolicy === "flush") {
         // Process any remaining unbatched messages immediately (no debounce wait)
         await step.sendEvent(
           "flush",

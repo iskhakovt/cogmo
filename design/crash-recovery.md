@@ -49,6 +49,8 @@ The bug class to catch is #2 — and to catch it you have to **count boundaries,
 | Notify | `send-response` | `step.sendEvent("response/ready")` | Inngest event | ✓ |
 | Resume | `flush` (conditional) | `step.sendEvent("inbound/ready")` | Inngest event | ✓ |
 
+`src/agent/handle-message.ts` runs the phases in this order, each a module under `src/agent/handle-message/` that plans its own steps with the handler's `step`: `admit-turn` (the load steps through `load-inbound`, and the in-cooldown reply), `record-user-message`, `load-turn-transcript`, `freeze-turn-inputs` (through `load-system-prompt`), `assemble-turn-context` (`auto-recall`), `resolve-turn-model` (`freeze-model-limits`), `compact-turn`, `finalize-turn-context` (the epoch and `render-turn-context`), `run-turn-loop` (the loop, `degraded-reply`, `finish-stream`), `persist-turn` (`persist-new-messages` and its events), `deliver-reply`, then `send-response` and `flush` in the handler. `report-turn-failure` is the `onFailure` handler (`emit-conversation-errored`, `notify-user`).
+
 The non-durable regions are:
 
 - **`compactMessages` orchestration.** The threshold decisions are cheap relative to what a step would cost to freeze, and `historyMessages` carries resolved base64 image payloads that must not land in Inngest state. Its inputs are stable across invocations (durable history + durable `auto-recall` + the frozen tool table + `load-last-tokens` + deterministic image resolution), and each count is a durable `count-tokens-<n>`, so every replay reaches the same verdicts. Its one LLM call, summarization, is durable — see [Why only summarization's LLM call is durable](#why-only-summarizations-llm-call-is-durable-confirmed) below.

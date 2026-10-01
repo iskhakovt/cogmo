@@ -303,7 +303,7 @@ describe("bus-level dedup contract", () => {
     expect(payload.name).toBe("conversation/errored");
   });
 
-  // Cross-emitter pin: if `onFailure` (in handle-message.ts) is ever
+  // Cross-emitter pin: if `onFailure` (`handle-message/report-turn-failure.ts`) is ever
   // changed to bypass `buildConversationErroredEvent` and call
   // `conversationErrored.create(...)` directly, that emit would land
   // on the bus WITHOUT an id and double-fire `recover-conversation`

@@ -105,7 +105,7 @@ Rules:
 - **Ephemeral — not persisted to `messages`.** The cooldown reply exists only on the outbound transport; no `assistant` row is written. Persisting it would leave an assistant row with no corresponding user row (inbounds stay unbatched — see below), producing a transcript hole that future-turn retrieval and the failure-reflector would have to special-case. It pairs with the `[Previous conversation summary]` turn, which the loader renders from the stored summary and never writes as a row. The next successful turn's transcript covers the user's cooldown-era messages with a real LLM-generated response; the canned cooldown text only ever existed in the user's inbox.
 - **Retry-time estimate** is the remaining cooldown rounded to a coarse unit (seconds under a minute, minutes under an hour). Stale by the time the user reads it — acceptable: they get an order-of-magnitude, not a stopwatch.
 - **One reply per debounce batch.** A burst of user messages during cooldown coalesces through the debouncer into one `inbound/ready` and gets one in-cooldown reply. Subsequent activity (after the debounce idle window) triggers another `inbound/ready` and another reply if still in cooldown — N user-active windows → N replies, not a tight loop.
-- **Inbounds are NOT consumed.** The in-cooldown skip path returns `{ status: "skipped", reason: "cooldown" }` before loading inbounds (matching today's `errored` skip-path shape at `handle-message.ts:235`). The inbounds stay unbatched. When cooldown elapses, the next `inbound/ready` loads the entire backlog as one batch — the user's cooldown-era messages get a real response as part of the next successful turn. Pile-up semantic, not consume-and-acknowledge.
+- **Inbounds are NOT consumed.** The in-cooldown skip path returns `{ status: "skipped", reason: "cooldown" }` before loading inbounds (the skip shape of every admission guard, `src/agent/handle-message/admit-turn.ts`). The inbounds stay unbatched. When cooldown elapses, the next `inbound/ready` loads the entire backlog as one batch — the user's cooldown-era messages get a real response as part of the next successful turn. Pile-up semantic, not consume-and-acknowledge.
 - **Model is NOT invoked.** The in-cooldown reply is a hand-built text response; no tokens spent. Cooldown's whole point is to stop burning tokens on something that just failed.
 
 ### Clear triggers `[confirmed]`
@@ -290,7 +290,7 @@ Single event name, `ok: boolean` for outcome — no separate `synthesis_failed` 
 
 ### Outside the agent loop
 
-`chatTyped` callsites in evolution background jobs — `drain-pending-memories.ts` (`classifyOne`), `extract-corrections.ts:79`, `extract-memories.ts:67`, `consolidate-rules.ts:121` — and untyped non-loop calls like the summarization step in `handle-message.ts:702` are still Class C surfaces, but they're not inside the agent loop and have no user to degrade to. They use **single-call retry-with-feedback** semantics:
+`chatTyped` callsites in evolution background jobs — `drain-pending-memories.ts` (`classifyOne`), `extract-corrections.ts:79`, `extract-memories.ts:67`, `consolidate-rules.ts:121` — and untyped non-loop calls like the summarization step in `handle-message/compact-turn.ts` are still Class C surfaces, but they're not inside the agent loop and have no user to degrade to. They use **single-call retry-with-feedback** semantics:
 
 | Aspect | In-loop | Outside the loop |
 |-|-|-|
