@@ -1,10 +1,11 @@
 import { getEventListeners } from "node:events";
+import type { Result } from "neverthrow";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Transactor } from "../../db/index.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import { expectDefined } from "../../test/assertions.js";
 import type { McpServer } from "../config.js";
-import { McpPoolError } from "../errors.js";
+import type { McpPoolError } from "../errors.js";
 import type { McpStore } from "../store/index.js";
 import type { McpConnection } from "./client.js";
 import { McpConnectionPool } from "./pool.js";
@@ -108,6 +109,22 @@ function makePool(
   });
 }
 
+/** The connection `getConnection` yields; fails the test on an error. */
+async function connected(pool: McpConnectionPool, serverId: string): Promise<McpConnection> {
+  const result = await pool.getConnection(serverId);
+  if (result.isErr()) throw new Error(`expected a connection, got ${result.error.code}`);
+  return result.value;
+}
+
+/** Why `getConnection` yielded no connection; fails the test on a connection. */
+async function failure(
+  outcome: Promise<Result<McpConnection, McpPoolError>>,
+): Promise<McpPoolError> {
+  const result = await outcome;
+  if (result.isOk()) throw new Error("expected getConnection to fail");
+  return result.error;
+}
+
 // --- Tests ---
 
 afterEach(() => {
@@ -120,8 +137,8 @@ describe("McpConnectionPool.getConnection", () => {
     const runner: Runner = { spawn: vi.fn(async () => conn) };
     const pool = makePool(runner);
 
-    const a = await pool.getConnection("s1");
-    const b = await pool.getConnection("s1");
+    const a = await connected(pool, "s1");
+    const b = await connected(pool, "s1");
     expect(a).toBe(b);
     expect(runner.spawn).toHaveBeenCalledTimes(1);
     await pool.close();
@@ -137,8 +154,8 @@ describe("McpConnectionPool.getConnection", () => {
 
     const pool = makePool(runner);
 
-    const p1 = pool.getConnection("s1");
-    const p2 = pool.getConnection("s1");
+    const p1 = connected(pool, "s1");
+    const p2 = connected(pool, "s1");
     resolveSpawn(conn);
     const [a, b] = await Promise.all([p1, p2]);
     expect(a).toBe(conn);
@@ -147,15 +164,12 @@ describe("McpConnectionPool.getConnection", () => {
     await pool.close();
   });
 
-  it("throws server_not_found for an unknown id, spending no attempt on it", async () => {
+  it("fails with server_not_found for an unknown id, spending no attempt on it", async () => {
     const runner: Runner = { spawn: vi.fn() };
     const store = makeStore([]);
     const pool = makePool(runner, store);
-    await expect(pool.getConnection("missing")).rejects.toBeInstanceOf(McpPoolError);
-    for (let call = 0; call < 2; call++) {
-      await expect(pool.getConnection("missing")).rejects.toMatchObject({
-        code: "server_not_found",
-      });
+    for (let call = 0; call < 3; call++) {
+      expect(await failure(pool.getConnection("missing"))).toEqual({ code: "server_not_found" });
     }
     expect(runner.spawn).not.toHaveBeenCalled();
     expect(store.recordLastError).not.toHaveBeenCalled();
@@ -167,7 +181,10 @@ describe("McpConnectionPool.getConnection", () => {
     vi.mocked(store.getServerById).mockRejectedValue(new Error("db down"));
     const pool = makePool(runner, store);
     for (let call = 0; call < 3; call++) {
-      await expect(pool.getConnection("s1")).rejects.toThrow("db down");
+      expect(await failure(pool.getConnection("s1"))).toEqual({
+        code: "connect_failed",
+        error: new Error("db down"),
+      });
     }
     expect(pool.__getEntryState("s1")).toBeUndefined();
     expect(runner.spawn).not.toHaveBeenCalled();
@@ -179,7 +196,7 @@ describe("McpConnectionPool.getConnection", () => {
     const runner: Runner = { spawn: vi.fn(async () => conn) };
     const pool = makePool(runner);
 
-    await pool.getConnection("s1");
+    await connected(pool, "s1");
     conn.triggerClose();
     expect(pool.__getEntryState("s1")).toEqual({ kind: "closed", failedAttempts: 0 });
     await pool.close();
@@ -194,9 +211,9 @@ describe("McpConnectionPool.getConnection", () => {
       .mockResolvedValueOnce(conn2);
     const pool = makePool({ spawn });
 
-    await pool.getConnection("s1");
+    await connected(pool, "s1");
     conn1.triggerClose();
-    const reconnect = await pool.getConnection("s1");
+    const reconnect = await connected(pool, "s1");
     expect(reconnect).toBe(conn2);
     expect(spawn).toHaveBeenCalledTimes(2);
     await pool.close();
@@ -211,14 +228,21 @@ describe("McpConnectionPool.getConnection", () => {
       .mockRejectedValueOnce(new Error("boom-2"));
     const pool = makePool({ spawn });
 
-    await pool.getConnection("s1");
+    await connected(pool, "s1");
     conn1.triggerClose();
-    await expect(pool.getConnection("s1")).rejects.toThrow("boom-1");
-    await expect(pool.getConnection("s1")).rejects.toThrow("boom-2");
+    expect(await failure(pool.getConnection("s1"))).toMatchObject({
+      error: new Error("boom-1"),
+    });
+    expect(await failure(pool.getConnection("s1"))).toMatchObject({
+      error: new Error("boom-2"),
+    });
     expect(pool.__getEntryState("s1")?.kind).toBe("unhealthy");
     // Subsequent calls fail fast — no further spawn attempt.
     spawn.mockClear();
-    await expect(pool.getConnection("s1")).rejects.toMatchObject({ code: "server_unhealthy" });
+    expect(await failure(pool.getConnection("s1"))).toEqual({
+      code: "server_unhealthy",
+      lastError: "boom-2",
+    });
     expect(spawn).not.toHaveBeenCalled();
     await pool.close();
   });
@@ -231,11 +255,11 @@ describe("McpConnectionPool.getConnection", () => {
       .mockResolvedValueOnce(fakeConnection());
     const pool = makePool({ spawn });
 
-    await expect(pool.getConnection("s1")).rejects.toThrow();
-    await expect(pool.getConnection("s1")).rejects.toThrow();
+    await failure(pool.getConnection("s1"));
+    await failure(pool.getConnection("s1"));
     expect(pool.__getEntryState("s1")?.kind).toBe("unhealthy");
     pool.reset("s1");
-    await expect(pool.getConnection("s1")).resolves.toBeDefined();
+    await connected(pool, "s1");
     await pool.close();
   });
 
@@ -250,7 +274,7 @@ describe("McpConnectionPool.getConnection", () => {
       recordLastError: vi.fn(async () => {}),
     } as unknown as McpStore;
     const pool = makePool({ spawn: vi.fn(async () => conn) }, store);
-    const c = await pool.getConnection("s1");
+    const c = await connected(pool, "s1");
     expect(c).toBe(conn);
     expect(pool.__getEntryState("s1")?.kind).toBe("live");
     await pool.close();
@@ -260,7 +284,7 @@ describe("McpConnectionPool.getConnection", () => {
     const conn = fakeConnection();
     const closeSpy = vi.spyOn(conn, "close");
     const pool = makePool({ spawn: vi.fn(async () => conn) });
-    await pool.getConnection("s1");
+    await connected(pool, "s1");
     pool.reset("s1");
     // Live entry preserved; subprocess not orphaned.
     expect(pool.__getEntryState("s1")?.kind).toBe("live");
@@ -274,8 +298,8 @@ describe("McpConnectionPool.getConnection", () => {
       .mockRejectedValueOnce(new Error("boom-1"))
       .mockRejectedValueOnce(new Error("boom-2"));
     const pool = makePool({ spawn });
-    await expect(pool.getConnection("s1")).rejects.toThrow();
-    await expect(pool.getConnection("s1")).rejects.toThrow();
+    await failure(pool.getConnection("s1"));
+    await failure(pool.getConnection("s1"));
     expect(pool.__getEntryState("s1")?.kind).toBe("unhealthy");
     pool.reset("s1");
     expect(pool.__getEntryState("s1")).toBeUndefined();
@@ -286,7 +310,7 @@ describe("McpConnectionPool.getConnection", () => {
     const conn = fakeConnection();
     const store = makeStore([makeServer("s1")]);
     const pool = makePool({ spawn: vi.fn(async () => conn) }, store);
-    await pool.getConnection("s1");
+    await connected(pool, "s1");
     expect(store.recordLastConnected).toHaveBeenCalledWith(
       expect.anything(),
       "s1",
@@ -302,7 +326,7 @@ describe("McpConnectionPool.getConnection", () => {
       },
       store,
     );
-    await expect(failingPool.getConnection("s1")).rejects.toThrow();
+    await failure(failingPool.getConnection("s1"));
     expect(store.recordLastError).toHaveBeenCalledWith(expect.anything(), "s1", "nope");
     await failingPool.close();
   });
@@ -313,7 +337,7 @@ describe("McpConnectionPool.evict / close", () => {
     const conn = fakeConnection();
     const closeSpy = vi.spyOn(conn, "close");
     const pool = makePool({ spawn: vi.fn(async () => conn) });
-    await pool.getConnection("s1");
+    await connected(pool, "s1");
     await pool.evict("s1");
     expect(closeSpy).toHaveBeenCalled();
     expect(pool.__getEntryState("s1")).toBeUndefined();
@@ -326,11 +350,7 @@ describe("McpConnectionPool.evict / close", () => {
     const conn = fakeConnection();
     const closeSpy = vi.spyOn(conn, "close");
     const pool = makePool({ spawn });
-    const pending = pool.getConnection("s1");
-    const outcome = pending.then(
-      () => "connected",
-      (e: unknown) => e,
-    );
+    const outcome = failure(pool.getConnection("s1"));
     await vi.waitFor(() => expect(spawn).toHaveBeenCalledOnce());
 
     const evicted = pool.evict("s1");
@@ -339,7 +359,7 @@ describe("McpConnectionPool.evict / close", () => {
 
     expect(closeSpy).toHaveBeenCalledOnce();
     expect(pool.__getEntryState("s1")).toBeUndefined();
-    expect(await outcome).toMatchObject({ code: "evicted" });
+    expect(await outcome).toEqual({ code: "evicted" });
   });
 
   it("evict aborts an in-flight spawn and waits for the connection it still yields", async () => {
@@ -348,13 +368,11 @@ describe("McpConnectionPool.evict / close", () => {
     const conn = fakeConnection();
     const closeSpy = vi.spyOn(conn, "close");
     const pool = makePool({ spawn });
-    const pending = pool.getConnection("s1");
+    const pending = failure(pool.getConnection("s1"));
     await vi.waitFor(() => expect(spawn).toHaveBeenCalledOnce());
 
-    // Attached before the evict, which fails the call as it runs.
-    const failed = expect(pending).rejects.toMatchObject({ code: "evicted" });
     const evicted = settledFlag(pool.evict("s1"));
-    await failed;
+    expect(await pending).toEqual({ code: "evicted" });
     await flush();
     expect(evicted.settled).toBe(false);
     expect(expectDefined(spawn.mock.calls[0], "spawn call")[3].aborted).toBe(true);
@@ -370,13 +388,11 @@ describe("McpConnectionPool.evict / close", () => {
     const conn = fakeConnection();
     const closeSpy = vi.spyOn(conn, "close");
     const pool = makePool({ spawn });
-    const pending = pool.getConnection("s1");
+    const pending = failure(pool.getConnection("s1"));
     await vi.waitFor(() => expect(spawn).toHaveBeenCalledOnce());
 
-    // Attached before the close, which fails the call as it runs.
-    const failed = expect(pending).rejects.toMatchObject({ code: "pool_closed" });
     const closing = settledFlag(pool.close());
-    await failed;
+    expect(await pending).toEqual({ code: "pool_closed" });
     await flush();
     expect(closing.settled).toBe(false);
 
@@ -390,7 +406,7 @@ describe("McpConnectionPool.evict / close", () => {
     const conn = fakeConnection();
     vi.spyOn(conn, "close").mockRejectedValue(new Error("close failed"));
     const pool = makePool({ spawn: vi.fn(async () => conn) });
-    await pool.getConnection("s1");
+    await connected(pool, "s1");
     expect(conn.openSubscriptions()).toBe(1);
 
     await pool.evict("s1");
@@ -410,11 +426,11 @@ describe("McpConnectionPool.evict / close", () => {
         }),
     );
     const pool = makePool({ spawn });
-    const failed = expect(pool.getConnection("s1")).rejects.toMatchObject({ code: "evicted" });
+    const failed = failure(pool.getConnection("s1"));
     await vi.waitFor(() => expect(spawn).toHaveBeenCalledOnce());
 
     const evicted = settledFlag(pool.evict("s1"));
-    await failed;
+    expect(await failed).toEqual({ code: "evicted" });
     await flush();
     expect(evicted.settled).toBe(false);
 
@@ -428,20 +444,20 @@ describe("McpConnectionPool.evict / close", () => {
     vi.mocked(store.getServerById).mockReturnValueOnce(lookup.promise);
     const spawn = vi.fn<Runner["spawn"]>();
     const pool = makePool({ spawn }, store);
-    const failed = expect(pool.getConnection("s1")).rejects.toMatchObject({ code: "evicted" });
+    const failed = failure(pool.getConnection("s1"));
     await vi.waitFor(() => expect(store.getServerById).toHaveBeenCalledOnce());
 
     const evicted = pool.evict("s1");
-    await failed;
+    expect(await failed).toEqual({ code: "evicted" });
     lookup.resolve(makeServer("s1"));
     await evicted;
     expect(spawn).not.toHaveBeenCalled();
   });
 
-  it("close throws on subsequent getConnection", async () => {
+  it("fails every getConnection after close with pool_closed", async () => {
     const pool = makePool({ spawn: vi.fn(async () => fakeConnection()) });
     await pool.close();
-    await expect(pool.getConnection("s1")).rejects.toMatchObject({ code: "pool_closed" });
+    expect(await failure(pool.getConnection("s1"))).toEqual({ code: "pool_closed" });
   });
 });
 
@@ -453,12 +469,12 @@ describe("McpConnectionPool transport close", () => {
     const spawn = vi.fn<Runner["spawn"]>().mockResolvedValueOnce(dead).mockResolvedValueOnce(fresh);
     const pool = makePool({ spawn });
 
-    await pool.getConnection("s1");
+    await connected(pool, "s1");
     expect(pool.__getEntryState("s1")).toEqual({ kind: "closed", failedAttempts: 0 });
     expect(vi.getTimerCount()).toBe(0);
     expect(dead.openSubscriptions()).toBe(0);
 
-    await expect(pool.getConnection("s1")).resolves.toBe(fresh);
+    expect(await connected(pool, "s1")).toBe(fresh);
     expect(spawn).toHaveBeenCalledTimes(2);
     await pool.close();
   });
@@ -466,7 +482,7 @@ describe("McpConnectionPool transport close", () => {
   it("releases its close subscription when the transport closes", async () => {
     const conn = fakeConnection();
     const pool = makePool({ spawn: vi.fn(async () => conn) });
-    await pool.getConnection("s1");
+    await connected(pool, "s1");
     conn.triggerClose();
     expect(conn.openSubscriptions()).toBe(0);
     await pool.close();
@@ -481,7 +497,7 @@ describe("McpConnectionPool idle eviction", () => {
     const conn = fakeConnection();
     const closeSpy = vi.spyOn(conn, "close");
     const pool = makePool({ spawn: vi.fn(async () => conn) }, undefined, IDLE_MS);
-    await pool.getConnection("s1");
+    await connected(pool, "s1");
 
     await vi.advanceTimersByTimeAsync(IDLE_MS - 1);
     expect(pool.__getEntryState("s1")?.kind).toBe("live");
@@ -496,9 +512,9 @@ describe("McpConnectionPool idle eviction", () => {
     const conn = fakeConnection();
     const closeSpy = vi.spyOn(conn, "close");
     const pool = makePool({ spawn: vi.fn(async () => conn) }, undefined, IDLE_MS);
-    await pool.getConnection("s1");
+    await connected(pool, "s1");
     await vi.advanceTimersByTimeAsync(600);
-    await pool.getConnection("s1");
+    await connected(pool, "s1");
 
     // The first timer fires 400ms after the last use and re-arms for the rest.
     await vi.advanceTimersByTimeAsync(IDLE_MS - 1);
@@ -522,8 +538,8 @@ describe("McpConnectionPool idle eviction", () => {
       makeStore([makeServer("s1"), makeServer("s2")]),
       IDLE_MS,
     );
-    await pool.getConnection("s1");
-    await pool.getConnection("s2");
+    await connected(pool, "s1");
+    await connected(pool, "s2");
     expect(vi.getTimerCount()).toBe(2);
 
     await pool.evict("s1");
@@ -536,7 +552,7 @@ describe("McpConnectionPool idle eviction", () => {
   it("keeps one abort listener per timer across re-arms", async () => {
     vi.useFakeTimers();
     const pool = makePool({ spawn: vi.fn(async () => fakeConnection()) }, undefined, IDLE_MS);
-    await pool.getConnection("s1");
+    await connected(pool, "s1");
     const signal = liveSignal(pool, "s1");
     const listeners = getEventListeners(signal, "abort").length;
 
@@ -544,7 +560,7 @@ describe("McpConnectionPool idle eviction", () => {
     let untilCheck = IDLE_MS;
     for (let check = 0; check < 3; check++) {
       await vi.advanceTimersByTimeAsync(untilCheck - 1);
-      await pool.getConnection("s1");
+      await connected(pool, "s1");
       await vi.advanceTimersByTimeAsync(1);
       untilCheck = IDLE_MS - 1;
     }
@@ -557,7 +573,7 @@ describe("McpConnectionPool idle eviction", () => {
     vi.useFakeTimers();
     const pool = makePool({ spawn: vi.fn(async () => fakeConnection()) }, undefined, 2 ** 31);
     const start = Date.now();
-    await pool.getConnection("s1");
+    await connected(pool, "s1");
 
     await vi.advanceTimersByTimeAsync(1);
     expect(pool.__getEntryState("s1")?.kind).toBe("live");

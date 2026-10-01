@@ -1,3 +1,4 @@
+import { err } from "neverthrow";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Database, Transactor } from "../db/index.js";
 import type { SecretsStore } from "../secrets/store/index.js";
@@ -196,10 +197,51 @@ describe("McpRegistryImpl.approveServer", () => {
     await reg.stop();
   });
 
-  it("throws when the server id is unknown", async () => {
+  it("answers an unknown server id with server_not_found", async () => {
     const reg = makeRegistry(makeRunner({}));
-    await expect(reg.approveServer("00000000-0000-0000-0000-000000000000")).rejects.toThrow(
-      /MCP server not found/,
+    const serverId = "00000000-0000-0000-0000-000000000000";
+    expect(await reg.approveServer(serverId)).toEqual(err({ code: "server_not_found", serverId }));
+    await reg.stop();
+  });
+
+  it("answers a failed connect with connection_failed, approving nothing", async () => {
+    const server = await tx((trx) =>
+      store.addServer(trx, { name: "github", config: stdioConfig, enabled: true }),
+    );
+    const reg = makeRegistry({
+      spawn: vi.fn(async () => {
+        throw new Error("spawn ENOENT");
+      }),
+    });
+
+    expect(await reg.approveServer(server.id)).toEqual(
+      err({ code: "connection_failed", serverId: server.id, reason: "spawn ENOENT" }),
+    );
+    const refreshed = await tx((trx) => store.getServerById(trx, server.id));
+    expect(refreshed?.approvalStatus).toBe("pending");
+    await reg.stop();
+  });
+
+  it("answers a failed listTools with connection_failed", async () => {
+    const server = await tx((trx) =>
+      store.addServer(trx, { name: "github", config: stdioConfig, enabled: true }),
+    );
+    const reg = makeRegistry({
+      async spawn() {
+        return {
+          callTool: vi.fn(),
+          listTools: vi.fn(async () => {
+            throw new Error("tools/list timed out");
+          }),
+          onToolsChanged: vi.fn(() => () => {}),
+          onClose: vi.fn(() => () => {}),
+          close: vi.fn(async () => {}),
+        };
+      },
+    });
+
+    expect(await reg.approveServer(server.id)).toEqual(
+      err({ code: "connection_failed", serverId: server.id, reason: "tools/list timed out" }),
     );
     await reg.stop();
   });
@@ -296,6 +338,26 @@ describe("McpRegistryImpl.resolveTools", () => {
   });
 });
 
+describe("McpRegistryImpl.addServer", () => {
+  it("answers a taken name with name_taken", async () => {
+    const reg = makeRegistry(makeRunner({}));
+    const spec = { name: "github", config: stdioConfig, enabled: true };
+    expect((await reg.addServer(spec)).isOk()).toBe(true);
+
+    expect(await reg.addServer(spec)).toEqual(err({ code: "name_taken", name: "github" }));
+    await reg.stop();
+  });
+
+  it("answers a malformed name with invalid_name, writing nothing", async () => {
+    const reg = makeRegistry(makeRunner({}));
+    const added = await reg.addServer({ name: "foo__bar", config: stdioConfig, enabled: true });
+
+    expect(added._unsafeUnwrapErr()).toMatchObject({ code: "invalid_name", name: "foo__bar" });
+    expect(await reg.listServers()).toEqual([]);
+    await reg.stop();
+  });
+});
+
 describe("McpRegistryImpl.removeServer", () => {
   it("evicts the pool entry and deletes the row", async () => {
     const server = await tx((trx) =>
@@ -323,10 +385,6 @@ describe("McpRegistryImpl.removeServer", () => {
     const approving = reg.approveServer(server.id);
     await vi.waitFor(() => expect(spawn).toHaveBeenCalledOnce());
 
-    const outcome = approving.then(
-      () => "approved",
-      (e: unknown) => e,
-    );
     const removing = reg.removeServer(server.id);
     await vi.waitFor(async () =>
       expect(await tx((trx) => store.getServerById(trx, server.id))).toBeUndefined(),
@@ -341,7 +399,7 @@ describe("McpRegistryImpl.removeServer", () => {
     });
     await removing;
     expect(close).toHaveBeenCalledOnce();
-    expect(await outcome).toMatchObject({ code: "evicted" });
+    expect(await approving).toEqual(err({ code: "server_not_found", serverId: server.id }));
     await reg.stop();
   });
 });

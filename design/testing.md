@@ -231,10 +231,9 @@ The pattern:
 await handle.wait();
 expect(...).toBe(...);
 
-// RIGHT — structurally bounded, asserts on the rejection class
+// RIGHT — structurally bounded, asserts on the failure the rejection carries
 const err = await handle.wait().catch((e: Error) => e);
-expect(err).toBeInstanceOf(ExecTimeoutError);
-expect((err as ExecTimeoutError).kind).toBe("total");
+expect(err).toMatchObject({ failure: { kind: "timed_out", deadline: "total" } });
 ```
 
 Reference: `src/sandbox/daytona/exec-streaming.test.ts → "timeoutMs: total wall-clock cap fires…"`. Motivating incident: the 4-day Daytona WS-wedge ([changelog 2026-05-18](../changelog.d/2026-05-18-coding-exec-wedge-resilience.md)) had no unit-tier regression test because earlier tests modelled `wait()` as always-settling.

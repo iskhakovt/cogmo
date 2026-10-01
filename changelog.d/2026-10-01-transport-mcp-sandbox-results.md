@@ -1,0 +1,6 @@
+Expected failures in `transport/`, `mcp/` and `sandbox/` are tagged values, and two bugs are fixed.
+
+- **Direct-channel refusals complete.** `identity_rejected` and `session_not_found` were thrown inside steps, so Inngest retried an answer that can never change. The run finishes `{ status: "rejected", reason }`. The two steps are renamed (`resolve-or-create-session`, `emit-inbound`) because their memoized shape changed; a direct-channel run in flight across the deploy re-runs them once.
+- **A taken MCP server name answers `mcp_server_name_taken`.** The duplicate-key error was never translated, so adding a server under a taken name crashed.
+- **MCP.** `getConnection` resolves with `Result<McpConnection, McpPoolError>` (`server_not_found | server_unhealthy | evicted | pool_closed | connect_failed`); `addServer` and `approveServer` return tagged errors that Transport maps with ts-pattern. The `McpServerNotFoundError`, `McpPoolError` and `McpInvalidServerNameError` classes are gone.
+- **Delivery and sandbox.** `StreamDeliveryError` is a plain `{ failures }` value, thrown once by `pushOrThrow` inside the step. `ExecTimeoutError` and `ExecDisposedError` become one `ExecError` carrying the same `ExecFailure` value `exited` returns. The Docker proxy's `readBody` returns an oversized body as a value.

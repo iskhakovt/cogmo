@@ -1,23 +1,23 @@
 /**
  * `Transport.mcp.*` — admin surface for MCP servers, used by the `/mcp`
  * command in the Telegram adapter and (in principle) any other channel.
- * Identity gating, error mapping (Zod parse, a unique violation,
- * McpInvalidServerNameError, McpServerNotFoundError, mcp_tool_not_found),
+ * Identity gating, error mapping (Zod parse, the registry's addServer and
+ * approveServer errors, mcp_tool_not_found),
  * and the `mcp_disabled` short-circuit are the meaningful contracts. The
  * `McpRegistry` is mocked because the test is about the transport-layer
  * branches, not the registry's own behaviour (covered in `mcp/registry.test.ts`).
  */
 
 import type { Inngest } from "inngest";
+import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { AgentStore } from "../agent/store/index.js";
 import type { Transactor } from "../db/index.js";
 import { inboundArrived } from "../inngest/events.js";
 import type { McpServer, McpServerConfig, McpServerStatus } from "../mcp/config.js";
-import { McpInvalidServerNameError, McpServerNotFoundError } from "../mcp/errors.js";
 import type { McpRegistry } from "../mcp/registry.js";
-import { mockAgentStore, mockTransportStore, pgUniqueViolation } from "../test/factories.js";
+import { mockAgentStore, mockTransportStore } from "../test/factories.js";
 import type { AttachmentStore } from "./attachment-store.js";
 import type { TransportStore } from "./store/index.js";
 import { createTransport } from "./transport.js";
@@ -109,7 +109,7 @@ describe("Transport.mcp.addServer", () => {
   it("happy path: identity ok, Zod parse ok, registry returns server", async () => {
     const registry = mock<McpRegistry>();
     const server = makeMcpServer();
-    registry.addServer.mockResolvedValue(server);
+    registry.addServer.mockResolvedValue(ok(server));
     const transport = makeTransport({ registry });
 
     const result = await transport.mcp.addServer(KNOWN_HANDLE, {
@@ -169,9 +169,9 @@ describe("Transport.mcp.addServer", () => {
     expect(registry.addServer).not.toHaveBeenCalled();
   });
 
-  it("maps the driver's unique violation → mcp_server_name_taken", async () => {
+  it("maps name_taken → mcp_server_name_taken", async () => {
     const registry = mock<McpRegistry>();
-    registry.addServer.mockRejectedValue(pgUniqueViolation("mcp_servers_name_unique"));
+    registry.addServer.mockResolvedValue(err({ code: "name_taken", name: "github" }));
     const transport = makeTransport({ registry });
 
     const result = await transport.mcp.addServer(KNOWN_HANDLE, {
@@ -186,10 +186,14 @@ describe("Transport.mcp.addServer", () => {
     });
   });
 
-  it("maps McpInvalidServerNameError → mcp_invalid_config with the error message", async () => {
+  it("maps invalid_name → mcp_invalid_config with its reason", async () => {
     const registry = mock<McpRegistry>();
-    registry.addServer.mockRejectedValue(
-      new McpInvalidServerNameError("bad_name", "server name cannot contain underscores"),
+    registry.addServer.mockResolvedValue(
+      err({
+        code: "invalid_name",
+        name: "bad_name",
+        reason: "server name cannot contain underscores",
+      }),
     );
     const transport = makeTransport({ registry });
 
@@ -275,7 +279,7 @@ describe("Transport.mcp.listServers", () => {
 describe("Transport.mcp.approveServer", () => {
   it("happy path → ok(undefined)", async () => {
     const registry = mock<McpRegistry>();
-    registry.approveServer.mockResolvedValue(undefined);
+    registry.approveServer.mockResolvedValue(ok(undefined));
     const transport = makeTransport({ registry });
 
     const result = await transport.mcp.approveServer(KNOWN_HANDLE, "server-1");
@@ -283,9 +287,11 @@ describe("Transport.mcp.approveServer", () => {
     expect(result._unsafeUnwrap()).toBe(undefined);
   });
 
-  it("maps McpServerNotFoundError → mcp_server_not_found", async () => {
+  it("maps server_not_found → mcp_server_not_found", async () => {
     const registry = mock<McpRegistry>();
-    registry.approveServer.mockRejectedValue(new McpServerNotFoundError("server-ghost"));
+    registry.approveServer.mockResolvedValue(
+      err({ code: "server_not_found", serverId: "server-ghost" }),
+    );
     const transport = makeTransport({ registry });
 
     const result = await transport.mcp.approveServer(KNOWN_HANDLE, "server-ghost");
@@ -296,11 +302,11 @@ describe("Transport.mcp.approveServer", () => {
     });
   });
 
-  it("maps a generic registry error → mcp_connection_failed with the error message", async () => {
-    // connect/listTools failures surface as Result errors (not throws) so
-    // the Telegram callback can render a precise toast for the operator.
+  it("maps connection_failed → mcp_connection_failed with its reason", async () => {
     const registry = mock<McpRegistry>();
-    registry.approveServer.mockRejectedValue(new Error("ECONNREFUSED at 127.0.0.1"));
+    registry.approveServer.mockResolvedValue(
+      err({ code: "connection_failed", serverId: "server-1", reason: "ECONNREFUSED at 127.0.0.1" }),
+    );
     const transport = makeTransport({ registry });
 
     const result = await transport.mcp.approveServer(KNOWN_HANDLE, "server-1");

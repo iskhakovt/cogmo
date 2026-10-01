@@ -554,7 +554,7 @@ export class DaytonaMock {
     // down — which is exactly what production looked like during the
     // wedge incident. The fixture cursor is NOT advanced, so any
     // subsequent HTTP call (e.g. the cleanup `DELETE` triggered by
-    // `ExecTimeoutError`) still matches its fixture entry in FIFO
+    // a timed_out `ExecError`) still matches its fixture entry in FIFO
     // order.
     const fault = this.#opts.faults?.find((f) => f.wsPathPattern.test(path));
     if (fault?.kind === "ws-hold-open") {

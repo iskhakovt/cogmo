@@ -1,7 +1,7 @@
 import * as R from "remeda";
 import { describe, expect, it } from "vitest";
 import { mock } from "vitest-mock-extended";
-import { McpPoolError } from "../errors.js";
+import type { McpPoolError } from "../errors.js";
 import type { McpConnection } from "./client.js";
 import {
   type EntryKind,
@@ -25,8 +25,8 @@ const LIVE = mock<McpConnection>();
 const ARRIVING = mock<McpConnection>();
 const WAITING: Waiter = () => {};
 const CALLER: Waiter = () => {};
-const BOOM = new Error("boom");
-const NOT_FOUND = new McpPoolError("server_not_found");
+const BOOM: McpPoolError = { code: "connect_failed", error: new Error("boom") };
+const NOT_FOUND: McpPoolError = { code: "server_not_found" };
 const USED_AT = 1_000;
 
 const STATES = {
@@ -43,9 +43,14 @@ const EVENTS = {
   get: { type: "get", waiter: CALLER, at: USED_AT + 50, abort: FRESH },
   spawned_own: { type: "spawned", signal: OWN.signal, connection: ARRIVING, at: USED_AT + 50 },
   spawned_stale: { type: "spawned", signal: STALE.signal, connection: ARRIVING, at: USED_AT + 50 },
-  failed_own: { type: "spawn_failed", signal: OWN.signal, error: BOOM, spent: true },
-  failed_own_unspent: { type: "spawn_failed", signal: OWN.signal, error: NOT_FOUND, spent: false },
-  failed_stale: { type: "spawn_failed", signal: STALE.signal, error: BOOM, spent: true },
+  failed_own: { type: "spawn_failed", signal: OWN.signal, failure: BOOM, spent: true },
+  failed_own_unspent: {
+    type: "spawn_failed",
+    signal: OWN.signal,
+    failure: NOT_FOUND,
+    spent: false,
+  },
+  failed_stale: { type: "spawn_failed", signal: STALE.signal, failure: BOOM, spent: true },
   transport_closed_own: { type: "transport_closed", connection: LIVE },
   transport_closed_other: { type: "transport_closed", connection: ARRIVING },
   evict: { type: "evict" },
@@ -391,9 +396,9 @@ describe("the pool entry machine", () => {
 
     it("fails a caller fast on an unhealthy server", () => {
       const [settled] = settles(transition(STATES.unhealthy, EVENTS.get));
-      expect(settled?.result._unsafeUnwrapErr()).toMatchObject({
+      expect(settled?.result._unsafeUnwrapErr()).toEqual({
         code: "server_unhealthy",
-        message: "boom",
+        lastError: "boom",
       });
     });
 
@@ -407,7 +412,7 @@ describe("the pool entry machine", () => {
       for (const eventName of ["failed_own", "failed_own_unspent"] as const) {
         const [settled] = settles(transition(STATES.connecting, EVENTS[eventName]));
         expect(settled?.waiters).toEqual([WAITING]);
-        expect(settled?.result._unsafeUnwrapErr()).toBe(EVENTS[eventName].error);
+        expect(settled?.result._unsafeUnwrapErr()).toBe(EVENTS[eventName].failure);
       }
     });
 
