@@ -327,6 +327,17 @@ describe("createDefaultTools", () => {
     );
   });
 
+  it("get_current_time names the configured default when it is the invalid timezone", async () => {
+    const registry = createDefaultTools([], "Mars/Olympus");
+    const spec = expectDefined(registry.get("get_current_time"), "get_current_time");
+
+    const result = await spec.handler({}, stubService);
+
+    expect(result._unsafeUnwrapErr().message).toBe(
+      'the configured default timezone "Mars/Olympus" is invalid; pass an explicit IANA timezone such as "Europe/London".',
+    );
+  });
+
   it("accepts extra tools", () => {
     const registry = createDefaultTools(memoryTools);
     expect(registry.get("memory_recall")).toBeDefined();

@@ -311,7 +311,11 @@ export function createDefaultTools(
       handler: async (input) => {
         const tz = input.timezone ?? defaultTimezone;
         if (!isTimeZone(tz)) {
-          return reject(`unknown timezone "${tz}"; pass an IANA name such as "Europe/London".`);
+          return reject(
+            input.timezone === undefined
+              ? `the configured default timezone "${tz}" is invalid; pass an explicit IANA timezone such as "Europe/London".`
+              : `unknown timezone "${tz}"; pass an IANA name such as "Europe/London".`,
+          );
         }
         const now = new Date();
         const formatter = new Intl.DateTimeFormat("en-US", {
