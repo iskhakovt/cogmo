@@ -26,11 +26,15 @@
 # install expands its version with `:?` because npm reads an empty one as
 # `latest`.
 #
-# uv toolchain as a stage, shared with cogmo-skills. ARG-in-FROM needs
-# global scope.
+# uv and pnpm come in as stages copied from their official images. ARGs in a
+# FROM need global scope, so they precede the first one. uv is shared with
+# cogmo-skills.
 ARG UV_VERSION
 ARG UV_DIGEST
+ARG PNPM_VERSION
+ARG PNPM_DIGEST
 FROM ghcr.io/astral-sh/uv:${UV_VERSION}@${UV_DIGEST} AS uv
+FROM ghcr.io/pnpm/pnpm:${PNPM_VERSION}@${PNPM_DIGEST} AS pnpm
 
 FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04@sha256:d94c97dd9cacf183d0a6fd12a8e87b526e9e928307674ae9c94139139c0c6eae
 
@@ -69,16 +73,19 @@ RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
  && npm install -g "npm@${NPM_VERSION:?}" \
  && npm cache clean --force
 
-# pnpm via npm, not corepack — corepack's cached pnpm bundle (tar /
-# picomatch / minimatch / brace-expansion) lags upstream and shows up as
-# image CVEs. pnpm's install script swaps its `pnpm` bin placeholder for the
-# native binary from its per-platform optional dependency. Blocked, the
-# placeholder still works but routes every call through Node and warns on a
-# terminal, so the build checks that `pnpm` resolves to the ELF binary.
-RUN npm install -g --allow-scripts=pnpm "pnpm@${PNPM_VERSION:?}" \
- && head -c 4 "$(readlink -f "$(command -v pnpm)")" | grep -q ELF \
- && pnpm --version \
- && npm cache clean --force
+# pnpm is a native executable, plus the `dist/` it reads beside the resolved
+# executable (its bundled node-gyp). `pnpx` and `pnx` are `pnpm dlx`. A symlink
+# to the binary runs plain `pnpm`, so each is a script. A tag beside a digest
+# is ignored, so the version check catches a PNPM_VERSION bumped without
+# PNPM_DIGEST.
+COPY --from=pnpm --chown=root:root /opt/pnpm /opt/pnpm
+RUN ln -s /opt/pnpm/pnpm /usr/local/bin/pnpm \
+ && ln -s /opt/pnpm/pnpm /usr/local/bin/pn \
+ && for alias in pnpx pnx; do \
+      printf '#!/bin/sh\nexec /opt/pnpm/pnpm dlx "$@"\n' > "/usr/local/bin/$alias" \
+      && chmod 755 "/usr/local/bin/$alias"; \
+    done \
+ && test "$(pnpm --version)" = "${PNPM_VERSION:?}"
 
 # Claude Code CLI. npm blocks install scripts unless the package is named in
 # `--allow-scripts`, independently of `ignore-scripts`. Claude Code ships a
