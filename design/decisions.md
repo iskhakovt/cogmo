@@ -5,7 +5,7 @@
 | Decision | Choice | Rationale |
 |-|-|-|
 | Framework | None (raw `anthropic` SDK) | ~30 line agentic loop. LangGraph's immutable compiled graph incompatible with self-evolution. LangChain sentiment brutally negative. |
-| Language | TypeScript (Node.js) | Tier 1 SDK support across providers, real types, 60-70% of YC X25 agent startups chose TS. Node over Bun (memory leaks). |
+| Language | TypeScript (Node.js) | Tier 1 SDK support across providers, real types, 60-70% of YC X25 agent startups chose TS. Node over Bun and Deno — see [tooling.md](tooling.md) → Runtime. |
 | Topology | Layered hub-and-spoke | 4.4x error rate with orchestrator vs 17.2x without. Peer mesh: 0 production successes. |
 | Memory | Hindsight (self-hosted server) + Observer | 91.4% LongMemEval, PostgreSQL-native, HTTP client SDK, MCP. Post-conversation extraction bypasses 15% silent failure rate. |
 | Self-evolution | 6-stage ladder | Each stage complete and useful alone. Data thresholds gate progression. |
@@ -75,6 +75,7 @@
 | Peer mesh | Topology | 17x error amplification, 3-5x dev cost, 0 production deployments |
 | Next.js / TanStack Start (framework mode) | Web UI framework | Second supervised process; RSC/SSR fights the SSE + Transport-RPC model on a single-user box with no SEO. Vite React SPA instead. |
 | AI SDK `useChat` | Web UI chat | Protocol tax — a `StreamEvent`->`UIMessageChunk` shim for a backend with no AI SDK route. `ExternalStoreRuntime` imposes no wire protocol. |
+| Fastify / Express / Hono | HTTP server | Cogmo serves little HTTP: Inngest runs in connect mode and Telegram long-polls, so nothing inbound but the web UI's `/health`, session, `/rpc`, `/api/chat` and static routes. oRPC + Zod already route, validate and serialize `/rpc`; none of them owns the chat SSE stream's lifecycle — holding it open per session and draining it on shutdown stays our code either way, on Node's response (Express, Fastify's `reply.hijack()`) or inside Hono's `streamSSE`. The price is hand-rolled CORS, CSRF, auth chain, body limits and drain in `src/web/`. Revisit when HTTP outgrows a handful of routes — inbound webhooks, a REST API beyond oRPC's OpenAPI, per-route rate limits — and reach for a small router (Hono) first. |
 | tRPC | Web UI API | Mature + great DX, but no native OpenAPI (the future programmatic-API channel wants it) and its ecosystem leans on a framework adapter. oRPC gives the same typed RPC + SSE, runs framework-free on raw `node:http` (`@orpc/server/node`), and emits OpenAPI natively. |
 | MUI / Mantine / Chakra / Ant | Web UI components | Styled kits inherit their own design language; restyling to a distinctive identity fights the framework. Headless Radix + shadcn copy-in instead. |
 | Redis `resumable-stream` / Durable Streams | Web UI streaming | External broker for serverless-without-sticky-routing; one long-lived process + Postgres replay is simpler and strictly better. |
