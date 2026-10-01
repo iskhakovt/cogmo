@@ -763,7 +763,7 @@ describe("createImageTools", () => {
   });
 
   it("rejects referenceImage for venice (non-fal) providers", async () => {
-    const { provider } = fakeVeniceProvider();
+    const { generateFn, provider } = fakeVeniceProvider();
     const model = falModel({
       providerId: "provider-3",
       name: "venice/flux-edit",
@@ -782,6 +782,7 @@ describe("createImageTools", () => {
         FAKE_SERVICE,
       ),
     ).rejects.toThrow(/only supported by fal providers \(got venice\)/);
+    expect(generateFn).not.toHaveBeenCalled();
   });
 
   it("does NOT forward negativePrompt when the model's capability is absent", async () => {
