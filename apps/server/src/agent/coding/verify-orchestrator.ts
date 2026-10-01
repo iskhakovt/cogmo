@@ -38,16 +38,18 @@ import { loadCodingSandboxEnv } from "./auth.js";
 import { commitAuthorFor, runCommitAndPush } from "./commit-push.js";
 import { fetchFeatureBranch } from "./git-as-transport.js";
 import { parseRemoteUrl, runOpenPr } from "./open-pr.js";
-import { buildWorktreeSpec, checkoutFeatureBranchInSandbox } from "./orchestrator.js";
 import type { CodingStore } from "./store/index.js";
+import {
+  buildWorktreeSpec,
+  checkoutFeatureBranchInSandbox,
+  HOME_VOLUME_PREFIX,
+  WORKTREE_DIR_IN_CONTAINER,
+} from "./task-sandbox.js";
 import { safeTeardownWorktree } from "./teardown.js";
 import type { PrMetadata } from "./types.js";
 import { runVerifyStreaming } from "./verify.js";
 
 const log = logger.child({ component: "coding.verify-orchestrator" });
-
-const HOME_VOLUME_PREFIX = "cogmo-task-home";
-const WORKTREE_DIR_IN_CONTAINER = "/workspace";
 
 export interface VerifyOrchestratorDeps {
   runInTx: Transactor;
