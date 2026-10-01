@@ -9,11 +9,13 @@ import type { SandboxClient } from "../sandbox/index.js";
 import { type GitEnv, runGit, withGitAskpass } from "../secrets/git-askpass.js";
 import { DEFAULT_GITHUB_IDENTITY_NAME, resolveGitHubIdentity } from "../secrets/github.js";
 import type { SecretsStore } from "../secrets/store/index.js";
+import { describeError } from "../util/describe-error.js";
 import { classifyManifest, STUB_CLASSIFIER_VERSION } from "./classifier.js";
 import { DefaultCtxHandler, type DefaultCtxHandlerOptions } from "./ctx-handler.js";
 import {
   hashLockfileContents,
   type LockfileCompiler,
+  type LockfileSnapshot,
   makeSandboxLockfileCompiler,
   parseLockfilePackageSpecs,
   readLockfileAtSha,
@@ -27,6 +29,7 @@ import {
   readSkillSource,
   SKILL_BODY_FILE,
   SKILL_MANIFEST_FILE,
+  type SkillSource,
   type SkillSourceError,
 } from "./skill-source.js";
 import type {
@@ -504,22 +507,17 @@ interface SkillLockfileCacheValue {
 }
 
 interface SkillSourceCacheEntry {
-  manifest: SkillManifest;
-  body: string;
-  inputsValidator: ValidateFunction;
-  /**
-   * Compiled lazily on first invoke that has a manifest.outputs to validate
-   * against. Stored on the cache entry itself so subsequent invocations reuse
-   * the validator instead of re-compiling per call. `undefined` until first
-   * use; remains `undefined` for skills without declared outputs.
-   */
-  outputsValidator?: ValidateFunction;
+  readonly manifest: SkillManifest;
+  readonly body: string;
+  readonly inputsValidator: ValidateFunction;
+  /** Present iff the manifest declares `outputs`. */
+  readonly outputsValidator?: ValidateFunction;
   /**
    * Lockfile-derived data, populated atomically when the manifest declares
    * dependencies. All three fields go together; half-populated states are
    * unrepresentable. Absent when the manifest has no deps.
    */
-  lockfile?: SkillLockfileCacheValue;
+  readonly lockfile?: SkillLockfileCacheValue;
 }
 
 /** A branch that passed every check `register` makes before its transaction. */
@@ -1009,13 +1007,7 @@ export class SkillRunnerImpl implements SkillRunner {
     if (result.kind === "live") {
       // Warm the source cache with the just-approved manifest so the next
       // listToolDefs / invoke read doesn't re-fetch from git.
-      const inputsValidator = this.#compileInputsValidator(manifest, "approve-warm");
-      this.#sourceCache.set(cacheKey(skill.name, deploy.gitSha), {
-        manifest,
-        body,
-        inputsValidator,
-        ...(lockfile && { lockfile: buildLockfileCacheValue(lockfile) }),
-      });
+      this.#cacheSource(deploy.gitSha, { manifest, body }, lockfile);
       // Mirror the new main SHA to the configured remote — same rationale as
       // register's mirror call.
       await this.#mirrorMainToRemote(deploy.gitSha);
@@ -1134,14 +1126,7 @@ export class SkillRunnerImpl implements SkillRunner {
     // Warm the source cache with the rolled-back manifest+body so the next
     // invoke or listToolDefs read doesn't re-fetch from git.
     if (result.kind === "live") {
-      const inputsValidator = this.#compileInputsValidator(manifest, "rollback-warm");
-      this.#sourceCache.set(cacheKey(opts.name, targetSha), {
-        manifest,
-        body,
-        inputsValidator,
-        // Same invariant as approve-warm above.
-        ...(lockfile && { lockfile: buildLockfileCacheValue(lockfile) }),
-      });
+      this.#cacheSource(targetSha, { manifest, body }, lockfile);
       // Rollback rewinds main backwards, so the remote push needs `force`. We
       // gate with `--force-with-lease=refs/heads/main:<mainSha>` — if anything
       // moved remote main between our last fetch and this push, the lease
@@ -1438,11 +1423,11 @@ export class SkillRunnerImpl implements SkillRunner {
     if (savedError !== null) {
       finalStatus = "error";
     } else {
-      const outputErr = this.#validateOutput(cached, savedOutput, opts.name);
-      if (outputErr !== null) {
+      const valid = this.#validateOutput(cached, savedOutput, opts.name);
+      if (valid.isErr()) {
         finalStatus = "error";
         finalOutput = null;
-        finalError = outputErr;
+        finalError = valid.error;
       } else {
         finalStatus = "success";
       }
@@ -1595,13 +1580,7 @@ export class SkillRunnerImpl implements SkillRunner {
       }),
     );
 
-    const inputsValidator = this.#compileInputsValidator(manifest, params.name);
-    this.#sourceCache.set(cacheKey(manifest.name, gitSha), {
-      manifest,
-      body: params.body,
-      inputsValidator,
-      ...(lockfileSnapshot && { lockfile: buildLockfileCacheValue(lockfileSnapshot) }),
-    });
+    this.#cacheSource(gitSha, { manifest, body: params.body }, lockfileSnapshot);
 
     return row;
   }
@@ -1688,48 +1667,66 @@ export class SkillRunnerImpl implements SkillRunner {
     }
   }
 
-  #compileInputsValidator(manifest: SkillManifest, contextName: string): ValidateFunction {
-    const validator = this.#ajv.compile(manifest.inputs as Record<string, unknown>);
-    if ((validator as { $async?: boolean }).$async === true) {
-      throw new Error(
-        `${contextName}: skill '${manifest.name}' uses an $async JSON Schema; not supported`,
-      );
+  /**
+   * Compile one of a manifest's JSON Schemas, or err with why it can't
+   * validate: ajv rejects it, or it is `$async`, whose validator returns a
+   * promise that a truthiness check would read as valid.
+   */
+  #compileSchema(schema: SkillInputs | Record<string, unknown>): Result<ValidateFunction, string> {
+    let validator: ValidateFunction;
+    try {
+      validator = this.#ajv.compile(schema);
+    } catch (e) {
+      return err(describeError(e));
     }
-    return validator;
+    return "$async" in validator && validator.$async === true
+      ? err("$async schemas are not supported")
+      : ok(validator);
   }
 
   /**
    * Compile the manifest's `inputs` and (if declared) `outputs` JSON Schemas
-   * with ajv to catch shape errors *before* the register flow advances main
-   * or writes DB rows. Returns a flat list of human-readable errors; an empty
-   * list means both schemas compile cleanly.
-   *
-   * Compilation failures (`ajv.compile` throws) and `$async` schemas are both
-   * treated as deploy errors — they would either crash the worker on first
-   * invoke or silently bypass validation, which is worse than a register
-   * rejection up front.
+   * *before* the register flow advances main or writes DB rows. Returns a
+   * flat list of human-readable errors; an empty list means both compile.
    */
   #prevalidateSchemas(manifest: SkillManifest): string[] {
-    const errors: string[] = [];
+    const inputs = this.#compileSchema(manifest.inputs).mapErr(
+      (e) => `invalid_inputs_schema: ${e}`,
+    );
+    const outputs =
+      manifest.outputs === undefined
+        ? ok(undefined)
+        : this.#compileSchema(manifest.outputs).mapErr((e) => `invalid_outputs_schema: ${e}`);
+    return [inputs, outputs].flatMap((r) => (r.isErr() ? [r.error] : []));
+  }
 
-    try {
-      this.#compileInputsValidator(manifest, "register-prevalidate");
-    } catch (e) {
-      errors.push(`invalid_inputs_schema: ${e instanceof Error ? e.message : String(e)}`);
-    }
-
-    if (manifest.outputs !== undefined) {
-      try {
-        const v = this.#ajv.compile(manifest.outputs as Record<string, unknown>);
-        if ((v as { $async?: boolean }).$async === true) {
-          errors.push("invalid_outputs_schema: $async schemas are not supported");
-        }
-      } catch (e) {
-        errors.push(`invalid_outputs_schema: ${e instanceof Error ? e.message : String(e)}`);
+  /**
+   * Cache a manifest that passed `#prevalidateSchemas` with its compiled
+   * validators, keyed by `(name, gitSha)`, so the next invoke or tool-list
+   * read skips git. A schema failing to compile here is a bug.
+   */
+  #cacheSource(
+    gitSha: string,
+    source: SkillSource,
+    lockfile: { hash: string; contents: string } | null,
+  ): SkillSourceCacheEntry {
+    const { manifest, body } = source;
+    const compiled = (schema: SkillInputs | Record<string, unknown>): ValidateFunction => {
+      const validator = this.#compileSchema(schema);
+      if (validator.isErr()) {
+        throw new Error(`skill '${manifest.name}' @ ${gitSha}: schema invalid: ${validator.error}`);
       }
-    }
-
-    return errors;
+      return validator.value;
+    };
+    const entry: SkillSourceCacheEntry = {
+      manifest,
+      body,
+      inputsValidator: compiled(manifest.inputs),
+      ...(manifest.outputs !== undefined && { outputsValidator: compiled(manifest.outputs) }),
+      ...(lockfile && { lockfile: buildLockfileCacheValue(lockfile) }),
+    };
+    this.#sourceCache.set(cacheKey(manifest.name, gitSha), entry);
+    return entry;
   }
 
   /**
@@ -1739,8 +1736,7 @@ export class SkillRunnerImpl implements SkillRunner {
    * picks up the new source on the next read.
    */
   async #loadSourceForRow(row: SkillRow): Promise<SkillSourceCacheEntry> {
-    const key = cacheKey(row.name, row.gitSha);
-    const cached = this.#sourceCache.get(key);
+    const cached = this.#sourceCache.get(cacheKey(row.name, row.gitSha));
     if (cached) return cached;
 
     if (!this.#skillsRepoPath) {
@@ -1757,9 +1753,7 @@ export class SkillRunnerImpl implements SkillRunner {
         `no source for skill '${row.name}' at ${row.gitSha} (${source.error.kind}) — repo and DB are out of sync`,
       );
     }
-    const { manifest, body } = source.value;
-    const inputsValidator = this.#compileInputsValidator(manifest, "loadSource");
-    const entry: SkillSourceCacheEntry = { manifest, body, inputsValidator };
+    let lockfile: LockfileSnapshot | null = null;
     if (row.lockfileHash !== null) {
       // Lockfile presence is invariant with `row.lockfileHash != null` —
       // register persists the hash atomically with the gitSha, so a row
@@ -1772,37 +1766,23 @@ export class SkillRunnerImpl implements SkillRunner {
           `lockfile for skill '${row.name}' at ${row.gitSha} is ${snapshot.error.kind} — repo and DB are out of sync (skills.lockfile_hash=${row.lockfileHash})`,
         );
       }
-      entry.lockfile = buildLockfileCacheValue(snapshot.value);
+      lockfile = snapshot.value;
     }
-    this.#sourceCache.set(key, entry);
-    return entry;
+    return this.#cacheSource(row.gitSha, source.value, lockfile);
   }
 
+  /** Err with why `output` fails the manifest's `outputs` schema; ok when it declares none. */
   #validateOutput(
     cached: SkillSourceCacheEntry,
     output: unknown,
     skillName: string,
-  ): string | null {
-    if (cached.manifest.outputs === undefined) return null;
-    // Lazy-compile per skill source — first invoke pays the cost, subsequent
-    // invokes reuse the cached validator on the entry.
-    if (cached.outputsValidator === undefined) {
-      cached.outputsValidator = this.#ajv.compile(
-        cached.manifest.outputs as Record<string, unknown>,
-      );
-    }
+  ): Result<void, string> {
     const validator = cached.outputsValidator;
-    if ((validator as { $async?: boolean }).$async === true) {
-      // Defensive — manifest should never compile to async, but if it
-      // somehow did the truthy check below would silently bypass validation.
-      return `outputs schema for skill '${skillName}' is async — rejecting`;
-    }
-    const valid = validator(output);
-    if (valid) return null;
+    if (validator === undefined || validator(output)) return ok(undefined);
     const issues = (validator.errors ?? []).map(
       (e) => `${e.instancePath || "<root>"} ${e.message ?? "invalid"}`,
     );
-    return `output failed schema validation for skill '${skillName}': ${issues.join("; ")}`;
+    return err(`output failed schema validation for skill '${skillName}': ${issues.join("; ")}`);
   }
 
   #registerResultToRpc(args: {
@@ -1829,13 +1809,7 @@ export class SkillRunnerImpl implements SkillRunner {
     if (result.kind === "live") {
       // Warm the source cache with the just-registered manifest+body so the
       // next `invoke` (or tool-list rebuild) doesn't re-read git.
-      const inputsValidator = this.#compileInputsValidator(manifest, "register-warm");
-      this.#sourceCache.set(cacheKey(name, branchSha), {
-        manifest,
-        body,
-        inputsValidator,
-        ...(lockfile && { lockfile: buildLockfileCacheValue(lockfile) }),
-      });
+      this.#cacheSource(branchSha, { manifest, body }, lockfile);
       return {
         name,
         riskTier: classifierLog.risk_tier,
@@ -1844,13 +1818,7 @@ export class SkillRunnerImpl implements SkillRunner {
       };
     }
     // pending_approval — also warm cache so a follow-up approve doesn't re-read.
-    const inputsValidator = this.#compileInputsValidator(manifest, "register-warm");
-    this.#sourceCache.set(cacheKey(name, branchSha), {
-      manifest,
-      body,
-      inputsValidator,
-      ...(lockfile && { lockfile: buildLockfileCacheValue(lockfile) }),
-    });
+    this.#cacheSource(branchSha, { manifest, body }, lockfile);
     return {
       name,
       riskTier: classifierLog.risk_tier,

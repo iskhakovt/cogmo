@@ -410,6 +410,35 @@ tier: wasm
     expect(result.errors?.length).toBeGreaterThan(0);
   });
 
+  it("rejects an $async inputs schema and an outputs schema ajv cannot compile", async () => {
+    const runner = await makeRunner();
+    const manifest = `---
+name: bad-schemas
+description: a skill whose JSON Schemas cannot validate
+tier: wasm
+inputs:
+  type: object
+  $async: true
+  properties: {}
+outputs:
+  type: not-a-type
+---
+`;
+    await pushFeatureBranch({
+      work: repo.work,
+      branch: "bad-schemas",
+      manifest,
+      body: ECHO_BODY,
+    });
+    const result = await runner.register({ branch: "bad-schemas", origin: OWNER });
+    expect(result.status).toBe("rejected");
+    expect(result.errors).toEqual([
+      "invalid_inputs_schema: $async schemas are not supported",
+      expect.stringMatching(/^invalid_outputs_schema: /),
+    ]);
+    expect(await getMainSha(repo.bare)).toBeNull();
+  });
+
   describe("dependencies", () => {
     const ECHO_LOCKFILE = `httpx==0.27.0 \\\n    --hash=sha256:0000000000000000000000000000000000000000000000000000000000000000\n`;
 
