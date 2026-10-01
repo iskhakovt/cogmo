@@ -4,6 +4,7 @@ import {
   redactSecretsInText,
   redactSignedQuery,
   redactSignedQueryParams,
+  redactSignedQueryParamsInText,
 } from "./redact-secrets.js";
 
 /** Shaped like a Bot API token (numeric id, colon, URL-safe base64), but not one. */
@@ -111,6 +112,14 @@ describe("redactSignedQueryParams", () => {
     );
   });
 
+  it("reads a value in a URL to the next & or #, whatever it contains", () => {
+    expect(redactSignedQueryParams("https://h.example/p?sig=a)b;c,d e&keep=1#f")).toBe(
+      "https://h.example/p?sig=REDACTED&keep=1#f",
+    );
+  });
+});
+
+describe("redactSignedQueryParamsInText", () => {
   it.each([
     [
       "an error message",
@@ -127,10 +136,17 @@ describe("redactSignedQueryParams", () => {
       "fetch (https://h.example/p?a=1&Signature=abc) failed",
       "fetch (https://h.example/p?a=1&Signature=REDACTED) failed",
     ],
-  ])("redacts a signed URL inside %s", (_label, text, expected) => {
-    expect(redactSignedQueryParams(text)).toBe(expected);
+  ])("redacts a signed URL inside %s, stopping where the URL ends", (_label, text, expected) => {
+    expect(redactSignedQueryParamsInText(text)).toBe(expected);
   });
 
+  it("leaves text without a signed URL untouched", () => {
+    const text = "request to https://h.example/p?a=1 failed";
+    expect(redactSignedQueryParamsInText(text)).toBe(text);
+  });
+});
+
+describe("redactSignedQueryParams — fragments and look-alikes", () => {
   it("keeps a fragment after the query", () => {
     expect(redactSignedQueryParams("/p?sig=abc#frag")).toBe("/p?sig=REDACTED#frag");
   });

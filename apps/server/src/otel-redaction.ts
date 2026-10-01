@@ -7,17 +7,43 @@ import {
   redactSecretsInText,
   redactSignedQuery,
   redactSignedQueryParams,
+  redactSignedQueryParamsInText,
 } from "./util/redact-secrets.js";
 
 /**
- * Every string a span exports — its name, status message, attributes and
- * event attributes — with Bot API token segments and signed query
- * parameters redacted. Both patterns are narrow enough to run over free
- * text, so an `exception.message` naming a URL is covered as well as
- * `url.full`.
+ * Free text a span exports — its name, status message, and every attribute
+ * that isn't a URL, `exception.message` and `exception.stacktrace` included —
+ * with Bot API token segments and signed query parameters redacted.
  */
 function redactText(text: string): string {
-  return redactSignedQueryParams(redactSecretsInText(text));
+  return redactSignedQueryParamsInText(redactSecretsInText(text));
+}
+
+/** A URL-valued attribute, whose signed values run to the next `&` or `#`. */
+function redactUrl(url: string): string {
+  return redactSignedQueryParams(redactSecretsInText(url));
+}
+
+/** `url.query`, which can be a bare query with no leading `?`. */
+function redactQuery(query: string): string {
+  return redactSignedQuery(redactSecretsInText(query));
+}
+
+/**
+ * How each attribute is redacted: URL-valued ones (both HTTP semantic
+ * convention generations) as URLs, everything else as free text.
+ */
+function redactorFor(key: string): (value: string) => string {
+  switch (key) {
+    case "url.full":
+    case "http.url":
+    case "http.target":
+      return redactUrl;
+    case "url.query":
+      return redactQuery;
+    default:
+      return redactText;
+  }
 }
 
 /**
@@ -114,23 +140,19 @@ function redactEvents(events: TimedEvent[]): TimedEvent[] {
 
 /**
  * `attributes` with secrets redacted from every string and string array
- * element, or `attributes` itself when nothing changed. `url.query` can be a
- * bare query with no leading `?`, so it gets the query-shaped redaction.
+ * element, each the way {@link redactorFor} picks for its key, or
+ * `attributes` itself when nothing changed.
  */
 function redactAttributes(attributes: Attributes): Attributes {
   let redacted: Attributes | undefined;
   for (const [key, value] of Object.entries(attributes)) {
-    const next = redactValue(value, key === "url.query" ? redactQueryAttribute : redactText);
+    const next = redactValue(value, redactorFor(key));
     if (next !== value) {
       redacted ??= { ...attributes };
       redacted[key] = next;
     }
   }
   return redacted ?? attributes;
-}
-
-function redactQueryAttribute(query: string): string {
-  return redactSignedQuery(redactSecretsInText(query));
 }
 
 /**

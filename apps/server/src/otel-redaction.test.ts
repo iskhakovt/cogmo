@@ -183,6 +183,24 @@ describe("RedactingSpanExporter with the HTTP instrumentations", () => {
     expect(exportedText(span)).not.toContain("deadbeef");
   });
 
+  it("reads a signed value in a URL attribute to the next &, and in free text to the URL's end", () => {
+    trace
+      .getTracer("test")
+      .startSpan("caller", {
+        attributes: {
+          "url.full": "https://h.example/k?sig=ab)c;d,e&keep=1",
+          "url.query": "sig=ab)c;d,e&keep=1",
+          "test.note": "fetch (https://h.example/k?sig=abc) failed",
+        },
+      })
+      .end();
+
+    const span = expectDefined(harness.getSpans()[0], "span");
+    expect(span.attributes["url.full"]).toBe("https://h.example/k?sig=REDACTED&keep=1");
+    expect(span.attributes["url.query"]).toBe("sig=REDACTED&keep=1");
+    expect(span.attributes["test.note"]).toBe("fetch (https://h.example/k?sig=REDACTED) failed");
+  });
+
   it("redacts a span name and string array attributes", async () => {
     const tracer = trace.getTracer("test");
     tracer
