@@ -98,6 +98,20 @@ What reads it:
 
 A forwarded message never runs a bot command. It keeps its `bot_command` entity, so commands register on `bot.drop(matchFilter(":forward_origin"))`, grammY's filter for every update but a forward, and a forwarded `/cmd` reaches the agent as forwarded text. A forwarded message that arrives while a `/profile` or `/repo` dialog is open is dialog input like any other text.
 
+## Module Layout
+
+`src/transport/adapters/telegram/`. `index.ts`'s `setup()` builds the bot and wires the pieces below in order.
+
+| Module | Holds |
+|-|-|
+| `adapter.ts` | `TelegramAdapter`: delivery, stream handles, voice, and a `stop()` that confirms handled updates |
+| `command-routes.ts` | Command registration on the forward-dropping composer, `/start`, `/cancel`, the command menu |
+| `callback-routes.ts` | Inline-keyboard taps: boundary prompt, `/sessions`, plan, pipeline gate, skills approval |
+| `message-handlers.ts` | Text, photo, document and voice inbound, packed as `InboundContent` |
+| `inbound-dispatch.ts` | Per-chat serialized dispatch through the boundary-hold gate |
+| `inngest-functions.ts` | Coding progress, skills approval, pipeline gate and boundary-cleanup functions |
+| `commands/` | One module per command family; `reply.ts` holds the handler context and `TransportError` text, `lookup.ts` resolves typed ids and profile names |
+
 ## Typing Indicator
 
 Send `sendChatAction("typing")` once when a message arrives, before emitting the inbound event. The indicator expires after 5s — good enough for v0. Consider looping the indicator during agent processing later.
