@@ -72,7 +72,7 @@ export async function executeRun(
   };
   const executed: ExecutedOutcome = result.ok
     ? { kind: "output", output: result.output ?? null }
-    : { kind: "error", error: result.error ?? "unknown_error" };
+    : { kind: "error", error: result.error };
   await deps.runInTx((tx) =>
     deps.store.transitionToExecuted(tx, {
       id: run.id,
