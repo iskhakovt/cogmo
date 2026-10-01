@@ -177,7 +177,7 @@ export async function reapTaskSandbox(
 }
 
 /**
- * After cloning `cogmo/run/<task-id>`, move HEAD onto the slice-4 feature
+ * After cloning `cogmo/run/<task-id>`, move HEAD onto the task's feature
  * branch `cogmo/<idShort>` so `runCommitAndPush(branch)` operates on the
  * right name. Idempotent on retry: `checkout -B` resets the branch to
  * current HEAD if it already exists.

@@ -248,40 +248,48 @@ Owned by `src/agent/store/` (fits the existing agent domain — tasks are agent 
 
 ### Task lifecycle `[confirmed]`
 
-The unit is the `coding_tasks` row, keyed on its id. Each orchestrator opens with an ownership claim (`task-lifecycle.ts` → `CLAIMS`, `claimTask`); everything else it writes follows from owning the task.
-
-```text
-queued ──claim──▶ planning ──▶ awaiting_approval ──claim──▶ executing ──▶ pending_verify ──claim──▶ verifying ──▶ pushed ──▶ pr_open
-   │                 │                │                         │                                    │             │
-   └─────────────────┴────────────────┴──── cancelled (Cancel / Revise tap, any non-terminal) ───────┘             │
-   └──────────── failed (any orchestrator's failure channel, reconcile, a failed start emit) ──────────────────────┘
-```
+The unit is the `coding_tasks` row, keyed on its id. Each orchestrator opens with an ownership claim (`task-lifecycle.ts` → `CLAIMS`, `claimTask`); everything else it writes follows from owning the task. `pr_open`, `failed` and `cancelled` are terminal.
 
 | Transition | Writer (step) | Guard |
 |-|-|-|
 | `queued → planning` | plan, `claim-task-planning` | conditional on `queued`; stamps `claimed_by_run_id` |
-| `planning → awaiting_approval` | plan, `set-status-plan-ready` | conditional on `planning` |
+| `planning → awaiting_approval` | plan, `set-status-plan-ready` (`advanceTask`) | conditional on `planning` |
 | `awaiting_approval → executing` | execute, `set-status-executing` | conditional; stamps `claimed_by_run_id` |
-| `executing → pending_verify` | execute, `set-status-pending-verify` | conditional on `executing` |
+| `executing → pending_verify` | execute, `transition-pending-verify` (`advanceTask`) | conditional on `executing` |
 | `pending_verify → verifying` | verify, `set-status-verifying` | conditional; stamps `claimed_by_run_id` |
 | `verifying → pushed` | verify, `set-status-pushed` | unconditional |
 | `pushed → pr_open` | verify, `set-status-pr-open` | unconditional |
 | non-terminal → `failed` | each orchestrator's failure channel (`task-failure.ts`) | unconditional |
 | non-terminal → `failed` | `coding-task-reconcile`, `failTaskIfNonTerminal` | conditional on non-terminal |
 | `queued → failed` | `delegate`, when the start emit throws (`failQueuedTask`) | conditional on `queued` |
-| non-terminal → `cancelled` | the plan keyboard, `cancelTaskIfActive` | conditional on non-terminal |
+| non-terminal → `cancelled` | the plan keyboard's Cancel / Revise, `cancelTaskIfActive` | conditional on non-terminal |
 
-Known residuals: `pushed`, `pr_open` and the orchestrators' own `failed` writes are unconditional, so a Cancel landing mid-verify is overwritten. Making them conditional needs the bare body to branch on the result, which means new step ids (their current steps memoize `void`); tracked as a follow-up rather than done under the existing ids.
+`transition-pending-verify` supersedes `set-status-pending-verify`, an unconditional write that memoized `void`. A run in flight that already ran the old step never requests it again: it runs the new one, finds the row `stale` at `pending_verify` (verify can't claim it before `emit-cli-done`), and carries on.
+
+| Crash point or race | State left | Why safe, or the residual |
+|-|-|-|
+| A claim's UPDATE commits, its step result is lost | at the claim's target, claimed by this run | the re-run claim reads `stale` at its own target with its own run id and resumes |
+| Duplicate trigger event, inside or past the bus's dedup window | unchanged | the claim matches no row (or another run's claimant); the run returns `skipped` before its failure machinery |
+| Worker dies mid-step (CLI session, verify suite) | non-terminal | `inngest/function.failed` → `coding-task-reconcile` fails it conditionally and emits `coding/task/failed` |
+| A step fails after retries, or the body throws | `failed` | the catch emits, then writes; a failed emit or write fails the function, and reconcile finishes the job |
+| Cancel during `plan-cli` | `cancelled` | `set-status-plan-ready` reads `left`; the run reclaims worktree, sandbox and stream (`reclaimEndedTask`) |
+| Cancel during `execute-cli` | `cancelled` | `transition-pending-verify` reads `left`; the run reclaims and emits no `cli-done`. **Residual:** on git-remote the pushed `cogmo/run/<task-id>` stays on the remote until the weekly orphan sweep, since `cleanup-run-branch` listens only for `failed` / `pr-opened` |
+| Cancel during `execute-cli`, then the session errors or the execute push fails | **Residual:** `failed` | the in-run failure exits write `failed` unconditionally over `cancelled` |
+| Cancel at `awaiting_approval` or `pending_verify` (no run holds the task) | `cancelled` | the next claim skips it. **Residual:** a bind-mount host worktree is left behind; `cancelTask` does no cleanup |
+| Cancel during verify | **Residual:** `pushed` / `pr_open` | both writes are unconditional and their steps memoize `void`, so making them conditional needs new step ids the bare body can branch on |
+| `delegate`'s start emit throws | `failed` if still `queued` | `failQueuedTask` is conditional, so a run that already claimed the task is left alone |
+| Run in flight across the deploy that replaced `set-status-pending-verify` | `pending_verify` | see above: the new step reads `stale` at its target |
 
 Each orchestrator is a sequence of named stages, one module per stage:
 
 | Orchestrator | Stages |
 |-|-|
 | `coding-task-start` (`orchestrator.ts` → `runCodingTask`) | claim → `allocate-task-worktree` → `plan-sandbox` → `plan-session` → `persist-plan` → `plan-gate-stage` |
-| `coding-task-execute` (`orchestrator.ts` → `runCodingExecute`) | claim → `execute-sandbox` → `execute-session` → push execute changes (git-remote) → hand off to verify |
+| `coding-task-execute` (`orchestrator.ts` → `runCodingExecute`) | claim → `execute-sandbox` → `execute-session` → `execute-outcomes` (push execute changes on git-remote, then hand off to verify, fail, or reclaim) |
 | `coding-task-verify` (`verify-orchestrator.ts`) | claim → credentials → verify sandbox → `run-verify` → `verify-publish` (push branch, open PR) |
 
-Shared across them: `coding-run.ts` (the run's handles and task load), `task-failure.ts` (the failure channel), `askpass-lease.ts` (the host askpass dir's run-scoped lifetime) and `task-sandbox.ts` (session spec, lazy resume, feature-branch checkout, reap).
+Shared across them: `coding-run.ts` (the run's handles and task load), `task-lifecycle.ts` (claims, in-run advances, reclaiming a task that ended under the run), `task-failure.ts` (the failure channel), `askpass-lease.ts` (the host askpass dir's run-scoped lifetime) and `task-sandbox.ts` (session spec, lazy resume, feature-branch checkout, reap).
+
 
 ## Container Lifecycle `[confirmed: single-task plan→execute; reaper / sibling / proxy still proposed]`
 
@@ -506,7 +514,8 @@ That transition is also the durable half of duplicate-event protection. Every ha
 | `try-resume` | `step.run` (execute) | Calls `sandbox.tryResumeByTaskId` and returns the state or null. A non-null return means the execute orchestrator skips the create-fresh branch entirely — no fresh clone, no checkout, no auth resolution. |
 | `execute-cli` | `step.run` | `claude -p --resume <sid>`, permission responses over stdin. Durable for the same reason as `plan-cli` — a billable session, re-run once per remaining boundary if left bare. Emits the `execute_started` banner and all text/tool pushes from inside the body, so the user sees one run's worth of progress. Returns `{isError, failureReason?, usage?}`. |
 | `provision-askpass` | `step.run` (git-remote only) | Writes the per-task askpass dir on the host (PAT + signing key + helper script) before `create-container` so the execute sandbox can mount it. Returns the safe-to-persist paths (no secrets in the step return). Skipped on bind-mount: the host worktree is shared with the verify sandbox via the bind mount, so no separate transport step is needed and the verify orchestrator's own `provision-askpass` is the only call site. |
-| `commit-and-push-execute-changes` | `step.run` (git-remote only) | After execute streaming succeeds and before `set-status-pending-verify`. Calls `runCommitAndPush` from inside the execute sandbox with `branch=cogmo/<idShort>` (local) and `remoteBranch=cogmo/run/<task-id>` (push refspec). claude's edits land on the run-branch on origin, where the verify sandbox's fresh clone will pick them up. Push failure marks the task `failed` with a descriptive `failure_reason` and skips the pending-verify transition. |
+| `commit-and-push-execute-changes` | `step.run` (git-remote only) | After execute streaming succeeds and before `transition-pending-verify`. Calls `runCommitAndPush` from inside the execute sandbox with `branch=cogmo/<idShort>` (local) and `remoteBranch=cogmo/run/<task-id>` (push refspec). claude's edits land on the run-branch on origin, where the verify sandbox's fresh clone will pick them up. Push failure marks the task `failed` with a descriptive `failure_reason` and skips the pending-verify transition. |
+| `transition-pending-verify` | `step.run` | Conditional `executing → pending_verify`, returning the transition result. When the task left `executing` under the run (a Cancel during `execute-cli`), the run reclaims its worktree and sandbox in `teardown-worktree-cancelled` / `teardown-cancelled`, fails the stream, emits no `cli-done` and returns `skipped`. Supersedes `set-status-pending-verify`; see Task lifecycle. |
 | `emit-cli-done` | `step.run` | Hand-off to the verify orchestrator via `coding/task/cli-done` event. Emitted after the durable `pending_verify` transition. |
 | `run-verify` | `step.run` | Single post-hoc execution of `<coding_repos.verify_command>` inside the container (via `bash -lc`). **No retry loop in this step.** Iterating on failure was the CLI's job during the execute phase per *Prompt Construction → Self-verify clause*; this step exists only to confirm the CLI's "done" claim. Pass → proceed to push + PR; fail → mark task failed with the verify output. Budget caps (`task_token_budget`, `task_wall_time_seconds`) enforce termination of the execute phase upstream; this step is bounded by `coding_repos.verify_timeout_seconds`. Durable because it runs the repo's entire test suite — minutes of compute that a bare body would repeat at every later boundary — and because `ok` selects disjoint step sets downstream. `runVerifyStreaming` caps the captured `output` at 8 KiB, so the step return stays small. |
 | `commit-and-push` | `step.run` | `git push origin cogmo/<idShort>` via slice 4.0f's `runCommitAndPush`. Non-fast-forward / rejected → `branch_conflict`; PAT auth fail → `auth_failed`; both surface as task failure with discriminated reason, no force push. Backend-agnostic: `runCommitAndPush` shells out via `execStreaming` inside the sandbox, so the same code path serves bind-mount and git-remote. The identity's PAT reaches the runner through the askpass env and the enclosing closure, never as a step argument or return. |

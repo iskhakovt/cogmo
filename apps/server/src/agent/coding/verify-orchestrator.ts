@@ -59,7 +59,7 @@ export interface VerifyOrchestratorDeps {
   sandbox: SandboxClient;
   /** Resolves `github_identity:<name>` rows. */
   secretsStore: SecretsStore;
-  /** Host root for per-task askpass material (slice 4.0d). */
+  /** Host root for per-task askpass material. */
   askpassBaseDir: string;
   /** Default base image when the repo has no devcontainer override. */
   devbaseImage: string;
