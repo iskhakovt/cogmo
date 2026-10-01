@@ -7,7 +7,7 @@ import type { TransportError } from "../transport-error.js";
 import type { TransportContext } from "./context.js";
 
 /**
- * Plan-approval surface for the slice 2.0e Telegram inline keyboard.
+ * Plan-approval surface behind the approve / cancel inline keyboard.
  * Each method takes the platform handle of the user who tapped — the
  * implementation resolves it to a userId and rejects with
  * `identity_rejected` if it doesn't match the conversation owner.

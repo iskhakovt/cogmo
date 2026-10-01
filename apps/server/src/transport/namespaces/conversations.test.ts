@@ -10,10 +10,8 @@ import { createConversations } from "./conversations.js";
 const FAKE_TX = { __mockTx: true } as never;
 const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
 
-// Filter `inngest.send` mock calls down to events whose payload name
-// matches. Tighter than `.find(...)` — a future regression that
-// double-fires the event surfaces as `toHaveLength(2)` instead of
-// silently passing the same `.find` assertion.
+// Every `inngest.send` call whose payload carries `eventName`. Returning all
+// matches lets a test assert the event fired exactly once.
 function inngestSendCallsForEvent(calls: unknown[][], eventName: string): unknown[][] {
   return calls.filter((c) => {
     const payload = c[0];
