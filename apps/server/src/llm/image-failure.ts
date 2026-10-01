@@ -59,33 +59,20 @@ export interface ImageFailure {
 }
 
 /**
- * Thrown by adapters that detect failure inline (Venice's response
- * headers, the tool handler's APICallError conversion for
- * openai-compat moderation). Extends `AbortError` so `withRetry`
+ * Thrown by an adapter that detects a failure inline (Venice's
+ * content-policy response headers). Extends `AbortError` so `withRetry`
  * treats it as fatal — every `ImageFailureKind` is non-retryable.
  *
- * The tool handler catches this once at the call site, logs the
- * structured `failure`, and surfaces `failure.reason` to the LLM.
- * Consumers should switch on `failure.kind` for behavior, not parse
- * `message`.
- *
- * Accepts `ErrorOptions` so callers can chain the original cause
- * when wrapping an SDK or fetch error — preserves the stack trace
- * for operator debugging, matching the `{ cause: err }` posture used
- * elsewhere (`NonRetriableError` wrap sites in `handle-message.ts`).
+ * The tool handler catches it inside the retried generation block and
+ * returns `failure` as a value, then logs it and surfaces
+ * `failure.reason` to the LLM. Consumers should switch on
+ * `failure.kind` for behavior, not parse `message`.
  */
 export class ImageGenerationFailedError extends AbortError {
   readonly failure: ImageFailure;
 
-  constructor(failure: ImageFailure, options?: ErrorOptions) {
-    // p-retry's `AbortError(message: string | Error)` doesn't type a
-    // second `options` arg, so we can't pass `ErrorOptions` through
-    // `super`. Assign `cause` manually after — same pattern Inngest's
-    // `NonRetriableError` uses.
+  constructor(failure: ImageFailure) {
     super(failure.reason);
-    if (options?.cause !== undefined) {
-      this.cause = options.cause;
-    }
     // AbortError pins `name: "AbortError"` as a literal type so a field
     // override at the class level won't compile; define it
     // imperatively on the instance for readable stack traces and

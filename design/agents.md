@@ -62,7 +62,7 @@ Every tool input is validated at runtime before the handler executes.
 
 JSON Schema is the universal contract format. Zod is a convenience for TypeScript tool authors, not a system requirement. No dynamic JSON Schema → Zod conversion needed.
 
-Validation failure → `tool_result` with `isError: true` + error details → LLM can retry with corrected input.
+Validation failure → a rejection (below) carrying the error details → LLM can retry with corrected input.
 
 ### Tool Definition
 
@@ -72,7 +72,7 @@ interface ToolSpec {
   name: string;
   description: string;
   inputSchema: JsonSchema;
-  handler: (input: Record<string, unknown>, capabilities: Service) => Promise<string>;
+  handler: ToolHandler;
 }
 
 // Typed helper for in-process TypeScript tools (Zod convenience)
@@ -80,20 +80,26 @@ function defineTool<T>(opts: {
   name: string;
   description: string;
   schema: ZodSchema<T>;
-  handler: (input: T, capabilities: Service) => Promise<string>;
+  handler: (input: T, capabilities: Service, ctx?: ToolCallContext) => Promise<ToolOutcome>;
 }): ToolSpec;
 ```
 
-### Handler Signature
+### Handler Signature `[confirmed]`
 
 ```typescript
 type ToolHandler = (
   input: Record<string, unknown>,   // LLM-provided, validated against inputSchema
-  capabilities: Service,    // orchestrator-provided, pre-scoped dispatch
-) => Promise<string>;
+  capabilities: Service,            // orchestrator-provided, pre-scoped dispatch
+  ctx?: ToolCallContext,            // per-call facts: the idempotency key
+) => Promise<ToolOutcome>;
+
+type ToolOutcome = Result<string, ToolRejection>;   // neverthrow
+interface ToolRejection { readonly message: string } // LLM-facing
 ```
 
-Two args: **data in** (from LLM) and **capabilities** (from orchestrator). No context object — capabilities are pre-scoped, so tools don't need per-request metadata like userId. Files and attachments are accessed through capabilities (`readAttachment(id)`), not passed as input.
+**Data in** (from LLM) and **capabilities** (from orchestrator), plus an optional per-call context. Capabilities are pre-scoped, so tools don't need per-request metadata like userId. Files and attachments are accessed through capabilities (`readAttachment(id)`), not passed as input.
+
+**Outcome.** `ok(content)` becomes the `tool_result` content. An expected failure — arguments the tool can't honour, an unconfigured capability, a domain error from the service, an upstream refusal — is `reject(message)`: the loop answers it with `{ content: "Error: <message>", isError: true }`. The flag is what the rest of the turn reads: Class D counts a rejected call as no progress, the volume-cluster summary counts it as a failure, and delivery (the Telegram stream handle's mid-stream image and document sends) skips it. A throw is a bug; the loop still answers with an `is_error` tool_result, so the turn carries on, and logs it at error level. A durable tool's rejection is its `tool-iter<N>-<P>` step's result, not a failed step — see [crash-recovery.md](crash-recovery.md#per-tool-durability).
 
 ### Tool Registry
 

@@ -154,7 +154,9 @@ describe("MCP HTTP end-to-end against server-everything streamableHttp", () => {
     expect(tools.map((t) => t.name)).toEqual(["mcp__everything_http__echo"]);
 
     const echoSpec = expectDefined(tools[0], "echo tool");
-    const result = await echoSpec.handler({ message: "hello http mcp" }, {} as never);
+    const result = (
+      await echoSpec.handler({ message: "hello http mcp" }, {} as never)
+    )._unsafeUnwrap();
     expect(result).toMatch(/hello http mcp/);
   });
 });

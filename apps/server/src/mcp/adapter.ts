@@ -1,4 +1,7 @@
-import type { ToolSpec } from "../agent/tools.js";
+import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
+import { ok } from "neverthrow";
+import { z } from "zod";
+import { reject, type ToolOutcome, type ToolSpec } from "../agent/tools.js";
 import type { JsonSchema } from "../llm/types.js";
 import type { McpConnectionPool } from "./client/pool.js";
 import { composeMcpToolName, type McpServer, type McpToolDescriptor } from "./config.js";
@@ -33,13 +36,35 @@ export function mcpDescriptorToToolSpec(opts: McpToolAdapterOptions): ToolSpec {
     durable: true,
     handler: async (input) => {
       const conn = await opts.pool.getConnection(opts.server.id);
-      if (conn.isErr()) throw new Error(describeMcpPoolError(conn.error));
-      const result = await conn.value.callTool(opts.descriptor.name, input, {
-        timeoutMs: opts.timeoutMs,
-      });
+      if (conn.isErr()) return reject(describeMcpPoolError(conn.error));
+      let result: unknown;
+      try {
+        result = await conn.value.callTool(opts.descriptor.name, input, {
+          timeoutMs: opts.timeoutMs,
+        });
+      } catch (e) {
+        if (isRefusedCall(e)) return reject(e.message);
+        throw e;
+      }
       return serializeCallToolResult(result);
     },
   };
+}
+
+/**
+ * JSON-RPC codes that mean the server refused this call rather than the
+ * connection failing: arguments it rejects, a tool it doesn't know, and the
+ * SDK's per-call request timeout. A closed connection or a server-internal
+ * error stays a throw.
+ */
+const REFUSED_CALL_CODES: ReadonlySet<number> = new Set([
+  ErrorCode.InvalidParams,
+  ErrorCode.MethodNotFound,
+  ErrorCode.RequestTimeout,
+]);
+
+function isRefusedCall(e: unknown): e is McpError {
+  return e instanceof McpError && REFUSED_CALL_CODES.has(e.code);
 }
 
 function descriptorToJsonSchema(descriptor: McpToolDescriptor): JsonSchema {
@@ -57,40 +82,41 @@ function descriptorToJsonSchema(descriptor: McpToolDescriptor): JsonSchema {
   return { ...schema, type: "object" } as JsonSchema;
 }
 
-interface CallToolResultLike {
-  content?: ReadonlyArray<{ type?: string; text?: string; [k: string]: unknown }>;
-  isError?: boolean;
-  structuredContent?: unknown;
-}
+/** The parts of an MCP `CallToolResult` the adapter reads; other fields pass through. */
+const CallToolResultSchema = z.object({
+  content: z.array(z.looseObject({ type: z.unknown(), text: z.unknown() })).optional(),
+  isError: z.boolean().optional(),
+  structuredContent: z.unknown().optional(),
+});
 
 /**
- * Convert an MCP `CallToolResult` to the string the agent loop appends as a
- * `tool_result`. Throws on `isError: true` — the agent loop's try/catch
- * wraps thrown errors as `isError` tool_result content blocks for the LLM.
+ * Convert an MCP `CallToolResult` to the agent loop's tool outcome. A result
+ * flagged `isError` is the server rejecting the call, and rejects it.
  */
-function serializeCallToolResult(result: unknown): string {
-  const r = (result ?? {}) as CallToolResultLike;
+function serializeCallToolResult(result: unknown): ToolOutcome {
+  const r = CallToolResultSchema.parse(result ?? {});
 
   if (r.isError) {
     const text = (r.content ?? [])
-      .map((c) => c.text ?? "")
+      .map((c) => (typeof c.text === "string" ? c.text : ""))
       .join("\n")
       .trim();
-    throw new Error(text || "MCP tool reported isError without textual content");
+    return reject(text || "MCP tool reported isError without textual content");
   }
 
   const textParts = (r.content ?? [])
-    .filter((c) => c.type === "text" && typeof c.text === "string")
-    .map((c) => c.text as string);
+    .filter((c) => c.type === "text")
+    .map((c) => c.text)
+    .filter((t) => typeof t === "string");
 
-  if (textParts.length > 0) return textParts.join("\n");
-  if (r.structuredContent !== undefined) return JSON.stringify(r.structuredContent);
+  if (textParts.length > 0) return ok(textParts.join("\n"));
+  if (r.structuredContent !== undefined) return ok(JSON.stringify(r.structuredContent));
   // TODO(phase-e): when MCP resources / image / audio content support lands,
   // route non-text content blocks through the LLM provider's native typed
   // ContentBlock instead of JSON-stringifying them here. This fallback is
   // intentionally lossy — the LLM gets the raw block array as JSON, which
   // is deterministic + safe but not useful for vision-style content.
   // Phase A unblocks dispatch; Phase E surfaces the rich types properly.
-  if (r.content && r.content.length > 0) return JSON.stringify(r.content);
-  return "";
+  if (r.content && r.content.length > 0) return ok(JSON.stringify(r.content));
+  return ok("");
 }

@@ -1,5 +1,6 @@
 import { lookup } from "node:dns/promises";
 import { z } from "zod";
+import { describeFileError } from "../agent/files.js";
 import type { Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
 import type { SecretsStore } from "../secrets/store/index.js";
@@ -490,9 +491,10 @@ export class DefaultCtxHandler implements CtxHandler {
       );
     }
     try {
-      const content = await this.#files.read(parsed.data.path);
+      const read = await this.#files.read(parsed.data.path);
+      if (read.isErr()) throw new CtxError("read_failed", describeFileError(read.error));
       await this.#audit("files.read", parsed.data.path, true, null);
-      return content;
+      return read.value;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       await this.#audit("files.read", parsed.data.path, false, "read_failed");
@@ -514,7 +516,8 @@ export class DefaultCtxHandler implements CtxHandler {
       );
     }
     try {
-      await this.#files.write(parsed.data.path, parsed.data.content);
+      const written = await this.#files.write(parsed.data.path, parsed.data.content);
+      if (written.isErr()) throw new CtxError("write_failed", describeFileError(written.error));
       await this.#audit("files.write", parsed.data.path, true, null);
       return null;
     } catch (err) {

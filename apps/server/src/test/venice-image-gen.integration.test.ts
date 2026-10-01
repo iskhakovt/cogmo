@@ -145,7 +145,7 @@ describe("venice native image gen (recorded)", () => {
       {} as Service,
     );
 
-    const parsed = parseGeneratedImagePayload(result);
+    const parsed = parseGeneratedImagePayload(result._unsafeUnwrap());
     expect(parsed).not.toBeNull();
     const payload = parsed as GeneratedImagePayload;
     expect(payload.path).toMatch(/^generated\/venice-image-\d+\./);

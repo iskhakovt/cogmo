@@ -1,3 +1,4 @@
+import { ok } from "neverthrow";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { defineTool, ToolRegistry } from "../tools.js";
@@ -11,7 +12,7 @@ function registryOf(...names: string[]): ToolRegistry {
         name,
         description: name,
         schema: z.object({}),
-        handler: async () => "ok",
+        handler: async () => ok("ok"),
       }),
     );
   }

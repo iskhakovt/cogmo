@@ -7,8 +7,10 @@ import {
   PutObjectCommand,
   type S3Client,
 } from "@aws-sdk/client-s3";
+import { err, ok, type Result } from "neverthrow";
+import { match } from "ts-pattern";
 import { decryptBuffer, encryptBuffer, isEncrypted } from "../secrets/blob-envelope.js";
-import type { FileEntry, Service } from "./service.js";
+import type { FileEntry, FileError, Service } from "./service.js";
 
 /**
  * Cap on bytes returned by `read`. Files larger than this come back
@@ -28,6 +30,45 @@ const MAX_READ_LENGTH = 100_000;
 function truncateToCodePoint(text: string, length: number): string {
   const last = text.charCodeAt(length - 1);
   return text.slice(0, last >= 0xd800 && last <= 0xdbff ? length - 1 : length);
+}
+
+/** The LLM-facing account of a {@link FileError}. */
+export function describeFileError(error: FileError): string {
+  return match(error)
+    .with({ kind: "not_found" }, (e) => `File not found: ${e.path}`)
+    .with(
+      { kind: "missing_for_edit" },
+      (e) => `Cannot edit ${e.path}: the file no longer exists. Use write_file to create it.`,
+    )
+    .with(
+      { kind: "not_read" },
+      (e) => `Cannot ${e.op} ${e.path}: read the file first so you act on its current contents.`,
+    )
+    .with(
+      { kind: "partial_view" },
+      (e) =>
+        `Cannot ${e.op} ${e.path}: the last read returned a truncated view (file is larger than ${MAX_READ_LENGTH} bytes).`,
+    )
+    .with(
+      { kind: "stale" },
+      (e) =>
+        `Cannot ${e.op} ${e.path}: the file was modified since you read it. Re-read it and try again.`,
+    )
+    .with(
+      { kind: "empty_old_string" },
+      (e) => `Cannot edit ${e.path}: old_string must be non-empty.`,
+    )
+    .with(
+      { kind: "identical_strings" },
+      (e) => `Cannot edit ${e.path}: old_string and new_string are identical.`,
+    )
+    .with({ kind: "old_string_not_found" }, (e) => `Cannot edit ${e.path}: old_string not found.`)
+    .with(
+      { kind: "ambiguous_old_string" },
+      (e) =>
+        `Cannot edit ${e.path}: old_string appears ${e.occurrences} times. Pass replace_all to replace every occurrence, or extend old_string with surrounding context to make it unique.`,
+    )
+    .exhaustive();
 }
 
 /** Prompt guidance for the files Service namespace. */
@@ -108,11 +149,11 @@ export function createFileService(
   }
 
   /**
-   * Confirm the bytes on disk still match what the caller has seen.
+   * Check the bytes on disk still match what the caller has seen.
    *
    * Takes the current HEAD as an argument so the caller can capture
    * it once and reuse it (overwrite needs to know existence; edit
-   * uses it for staleness). Three rejection paths:
+   * uses it for staleness). Three failures:
    *   - Caller never read this path in this instance.
    *   - Caller's last read was truncated (partial view).
    *   - mtime advanced AND the on-disk bytes diverged from the cache.
@@ -120,30 +161,23 @@ export function createFileService(
    * On a benign mtime bump (mtime advanced, content unchanged — e.g.
    * a re-upload of identical bytes), the cached timestamp is refreshed
    * and the operation proceeds. Callers pass a non-null `head` — write
-   * guards on existence before calling, and edit rejects null itself
-   * with a more specific message.
+   * guards on existence before calling, and edit fails null itself
+   * with a more specific error. Resolves to the cached entry.
    */
-  async function assertFresh(path: string, kind: "edit" | "overwrite", head: Date): Promise<void> {
+  async function checkFresh(
+    path: string,
+    op: "edit" | "overwrite",
+    head: Date,
+  ): Promise<Result<ReadEntry, FileError>> {
     const entry = readState.get(path);
-    if (!entry) {
-      throw new Error(
-        `Cannot ${kind} ${path}: read the file first so you act on its current contents.`,
-      );
-    }
-    if (entry.isPartialView) {
-      throw new Error(
-        `Cannot ${kind} ${path}: the last read returned a truncated view (file is larger than ${MAX_READ_LENGTH} bytes).`,
-      );
-    }
-    if (head.getTime() <= entry.lastModified.getTime()) return;
+    if (!entry) return err({ kind: "not_read", path, op });
+    if (entry.isPartialView) return err({ kind: "partial_view", path, op });
+    if (head.getTime() <= entry.lastModified.getTime()) return ok(entry);
     // mtime advanced — verify content actually changed before failing.
     const fresh = await fetchObject(path);
-    if (fresh.content !== entry.content) {
-      throw new Error(
-        `Cannot ${kind} ${path}: the file was modified since you read it. Re-read it and try again.`,
-      );
-    }
+    if (fresh.content !== entry.content) return err({ kind: "stale", path, op });
     entry.lastModified = fresh.lastModified;
+    return ok(entry);
   }
 
   async function putObject(path: string, content: string): Promise<void> {
@@ -157,13 +191,13 @@ export function createFileService(
   }
 
   return {
-    async read(path: string): Promise<string> {
+    async read(path: string): Promise<Result<string, FileError>> {
       let fetched: FetchResult;
       try {
         fetched = await fetchObject(path);
-      } catch (err) {
-        if (err instanceof NoSuchKey) throw new Error(`File not found: ${path}`);
-        throw err;
+      } catch (e) {
+        if (e instanceof NoSuchKey) return err({ kind: "not_found", path });
+        throw e;
       }
       const truncated = fetched.content.length > MAX_READ_LENGTH;
       readState.set(path, {
@@ -172,14 +206,19 @@ export function createFileService(
         isPartialView: truncated,
       });
       if (truncated) {
-        return `${truncateToCodePoint(fetched.content, MAX_READ_LENGTH)}\n\n[Content truncated at ${MAX_READ_LENGTH} characters. Edits and overwrites are blocked until the file is read in full.]`;
+        return ok(
+          `${truncateToCodePoint(fetched.content, MAX_READ_LENGTH)}\n\n[Content truncated at ${MAX_READ_LENGTH} characters. Edits and overwrites are blocked until the file is read in full.]`,
+        );
       }
-      return fetched.content;
+      return ok(fetched.content);
     },
 
-    async write(path: string, content: string): Promise<void> {
+    async write(path: string, content: string): Promise<Result<void, FileError>> {
       const head = await headExisting(path);
-      if (head) await assertFresh(path, "overwrite", head);
+      if (head) {
+        const fresh = await checkFresh(path, "overwrite", head);
+        if (fresh.isErr()) return err(fresh.error);
+      }
       await putObject(path, content);
       // Reflect the write in the read cache — the caller now knows the current bytes.
       // lastModified is the client clock, not S3's: PutObjectCommandOutput
@@ -192,6 +231,7 @@ export function createFileService(
         lastModified: new Date(),
         isPartialView: false,
       });
+      return ok(undefined);
     },
 
     async edit(
@@ -199,38 +239,22 @@ export function createFileService(
       oldString: string,
       newString: string,
       opts?: { replaceAll?: boolean },
-    ): Promise<void> {
+    ): Promise<Result<void, FileError>> {
       const replaceAll = opts?.replaceAll ?? false;
-      if (oldString === "") {
-        throw new Error(`Cannot edit ${path}: old_string must be non-empty.`);
-      }
+      if (oldString === "") return err({ kind: "empty_old_string", path });
       const head = await headExisting(path);
-      if (!head) {
-        throw new Error(
-          `Cannot edit ${path}: the file no longer exists. Use write_file to create it.`,
-        );
-      }
-      await assertFresh(path, "edit", head);
-      // assertFresh guarantees a cached entry for `path`.
-      const entry = readState.get(path);
-      if (!entry) throw new Error(`Internal: read cache missing for ${path} after freshness check`);
-      const current = entry.content;
-      if (oldString === newString) {
-        throw new Error(`Cannot edit ${path}: old_string and new_string are identical.`);
-      }
-      if (!current.includes(oldString)) {
-        throw new Error(`Cannot edit ${path}: old_string not found.`);
-      }
+      if (!head) return err({ kind: "missing_for_edit", path });
+      const fresh = await checkFresh(path, "edit", head);
+      if (fresh.isErr()) return err(fresh.error);
+      const current = fresh.value.content;
+      if (oldString === newString) return err({ kind: "identical_strings", path });
+      if (!current.includes(oldString)) return err({ kind: "old_string_not_found", path });
       let next: string;
       if (replaceAll) {
         next = current.replaceAll(oldString, newString);
       } else {
         const occurrences = current.split(oldString).length - 1;
-        if (occurrences > 1) {
-          throw new Error(
-            `Cannot edit ${path}: old_string appears ${occurrences} times. Pass replace_all to replace every occurrence, or extend old_string with surrounding context to make it unique.`,
-          );
-        }
+        if (occurrences > 1) return err({ kind: "ambiguous_old_string", path, occurrences });
         next = current.replace(oldString, newString);
       }
       await putObject(path, next);
@@ -240,6 +264,7 @@ export function createFileService(
         lastModified: new Date(),
         isPartialView: false,
       });
+      return ok(undefined);
     },
 
     // TODO: handle pagination for >1000 files (ListObjectsV2 returns max 1000 per call)

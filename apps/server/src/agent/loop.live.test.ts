@@ -22,6 +22,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { ok } from "neverthrow";
 import * as R from "remeda";
 import { describe, expect, it } from "vitest";
 import { mock } from "vitest-mock-extended";
@@ -90,7 +91,7 @@ function lookupTools(calls: string[]): ToolRegistry {
       sideEffectful: false,
       handler: async ({ key }) => {
         calls.push(key);
-        return TABLE[key] ?? `No entry for ${key}.`;
+        return ok(TABLE[key] ?? `No entry for ${key}.`);
       },
     }),
   );

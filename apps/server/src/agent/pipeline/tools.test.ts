@@ -37,7 +37,7 @@ describe("define_pipeline", () => {
       serviceWith(pipelines),
     );
 
-    expect(JSON.parse(result)).toMatchObject({
+    expect(JSON.parse(result._unsafeUnwrap())).toMatchObject({
       ok: true,
       preview: expect.stringContaining("issue-to-pr"),
       nextStep: expect.stringContaining("explicitly confirm"),
@@ -45,7 +45,7 @@ describe("define_pipeline", () => {
     expect(pipelines.define).toHaveBeenCalledWith({ sourceText: DESCRIPTION });
   });
 
-  it("renders compile issues as a clarification ask", async () => {
+  it("rejects compile issues as a clarification ask", async () => {
     const pipelines = mock<PipelinesService>();
     pipelines.define.mockResolvedValue(
       err({
@@ -59,18 +59,46 @@ describe("define_pipeline", () => {
       serviceWith(pipelines),
     );
 
-    expect(result).toContain("trigger.source");
-    expect(result).toContain("Ask the user to clarify");
+    const message = result._unsafeUnwrapErr().message;
+    expect(message).toContain("- trigger.source: no external event sources");
+    expect(message).toContain("Ask the user to clarify");
   });
 
-  it("throws a clear error when the namespace is absent", async () => {
-    await expect(
-      definePipelineTool.handler({ description: DESCRIPTION }, serviceWith()),
-    ).rejects.toThrow(/unavailable/);
+  it.each([
+    [
+      { kind: "source_too_long", length: 9000, maxLength: 4000 } as const,
+      "Description is 9000 chars; the limit is 4000. Summarize the workflow and retry.",
+    ],
+    [
+      { kind: "definition_cap_exceeded", current: 50, limit: 50 } as const,
+      "Definition cap reached (50/50). The user must remove pipelines before defining more.",
+    ],
+  ])("rejects %o with its explanation", async (error, expected) => {
+    const pipelines = mock<PipelinesService>();
+    pipelines.define.mockResolvedValue(err(error));
+
+    const result = await definePipelineTool.handler(
+      { description: DESCRIPTION },
+      serviceWith(pipelines),
+    );
+
+    expect(result._unsafeUnwrapErr().message).toBe(expected);
   });
 
   it("is marked durable — the compile is a billable LLM interaction", () => {
     expect(definePipelineTool.durable).toBe(true);
+  });
+});
+
+describe("pipeline tools without the pipelines namespace", () => {
+  it.each([
+    { tool: definePipelineTool, input: { description: DESCRIPTION } },
+    { tool: activatePipelineTool, input: { name: "issue-to-pr" } },
+    { tool: listPipelinesTool, input: {} },
+    { tool: startPipelineTool, input: { name: "issue-to-pr" } },
+  ])("$tool.name rejects with a clear message", async ({ tool, input }) => {
+    const result = await tool.handler(input, serviceWith());
+    expect(result._unsafeUnwrapErr().message).toBe("Pipelines are unavailable in this context.");
   });
 });
 
@@ -84,17 +112,22 @@ describe("activate_pipeline", () => {
       serviceWith(pipelines),
     );
 
-    expect(JSON.parse(result)).toMatchObject({ ok: true, name: "issue-to-pr", version: 2 });
+    expect(JSON.parse(result._unsafeUnwrap())).toMatchObject({
+      ok: true,
+      name: "issue-to-pr",
+      version: 2,
+    });
   });
 
-  it("renders not_found with a pointer to list_pipelines", async () => {
+  it("rejects not_found with a pointer to list_pipelines", async () => {
     const pipelines = mock<PipelinesService>();
     pipelines.activate.mockResolvedValue(err({ kind: "not_found", name: "ghost" }));
 
     const result = await activatePipelineTool.handler({ name: "ghost" }, serviceWith(pipelines));
 
-    expect(result).toContain('"ghost"');
-    expect(result).toContain("list_pipelines");
+    expect(result._unsafeUnwrapErr().message).toBe(
+      'No pipeline named "ghost". Use list_pipelines to see what exists.',
+    );
   });
 });
 
@@ -103,7 +136,7 @@ describe("list_pipelines", () => {
     const pipelines = mock<PipelinesService>();
     pipelines.list.mockResolvedValue([]);
     const result = await listPipelinesTool.handler({}, serviceWith(pipelines));
-    expect(result).toBe("No pipelines defined yet.");
+    expect(result._unsafeUnwrap()).toBe("No pipelines defined yet.");
   });
 
   it("is a pure read", () => {
@@ -138,7 +171,7 @@ describe("start_pipeline", () => {
       name: "issue-to-pr",
       idempotencyKey: "start_pipeline:turn-7:iter-1:0",
     });
-    expect(JSON.parse(result)).toMatchObject({
+    expect(JSON.parse(result._unsafeUnwrap())).toMatchObject({
       ok: true,
       runId: "run-1",
       version: 2,
@@ -175,13 +208,13 @@ describe("start_pipeline", () => {
     [{ kind: "no_reachable_channel" } as const, "No channel can reach the user"],
     [{ kind: "no_gate_channel" } as const, "none of the user's reachable channels can show them"],
     [{ kind: "runs_unavailable" } as const, "aren't available"],
-  ])("renders %o for the model", async (error, expected) => {
+  ])("rejects %o for the model", async (error, expected) => {
     const pipelines = mock<PipelinesService>();
     pipelines.start.mockResolvedValue(err(error));
 
     const result = await startPipelineTool.handler({ name: "issue-to-pr" }, serviceWith(pipelines));
 
-    expect(result).toContain(expected);
+    expect(result._unsafeUnwrapErr().message).toContain(expected);
   });
 
   it("is excluded from stage tool allowlists with the other pipeline tools", () => {

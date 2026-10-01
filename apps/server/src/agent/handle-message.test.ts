@@ -1,5 +1,5 @@
 import { NonRetriableError } from "inngest";
-import { err } from "neverthrow";
+import { err, ok } from "neverthrow";
 import * as R from "remeda";
 import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
@@ -1608,7 +1608,7 @@ describe("createHandleMessage", () => {
       description: "Open a PR",
       inputSchema: { type: "object" as const, properties: {} },
       durable: true,
-      handler: vi.fn().mockResolvedValue("ok"),
+      handler: vi.fn().mockResolvedValue(ok("ok")),
     };
     // Real ToolRegistry — mockToolRegistry doesn't populate snapshot()
     // because register/snapshot are vi.fn stubs.
@@ -1617,7 +1617,7 @@ describe("createHandleMessage", () => {
       name: "memory_recall",
       description: "recall",
       inputSchema: { type: "object", properties: {} },
-      handler: async () => "ok",
+      handler: async () => ok("ok"),
     });
     const deps = mockDeps({
       tools: builtIns,
@@ -1670,7 +1670,7 @@ describe("createHandleMessage", () => {
       name: "memory_recall",
       description: "recall",
       inputSchema: { type: "object", properties: {} },
-      handler: async () => "ok",
+      handler: async () => ok("ok"),
     });
     const deps = mockDeps({
       tools: builtIns,
@@ -1747,7 +1747,7 @@ describe("createHandleMessage", () => {
           name: "generate_image",
           description: "generate",
           inputSchema: { type: "object", properties: {} },
-          handler: async () => "ok",
+          handler: async () => ok("ok"),
         },
       ]);
       const deps = mockDeps({
@@ -1887,7 +1887,7 @@ describe("createHandleMessage", () => {
           description: "open a PR",
           inputSchema: { type: "object", properties: {} },
           durable: true,
-          handler: async () => "ok",
+          handler: async () => ok("ok"),
         },
       ]);
       const deps = mockDeps({
@@ -1914,7 +1914,7 @@ describe("createHandleMessage", () => {
         name: "memory_recall",
         description: "recall",
         inputSchema: { type: "object", properties: {} },
-        handler: async () => "ok",
+        handler: async () => ok("ok"),
       });
       const deps = mockDeps({
         tools: builtIns,
@@ -1941,7 +1941,7 @@ describe("createHandleMessage", () => {
         name: "memory_recall",
         description: "recall",
         inputSchema: { type: "object", properties: {} },
-        handler: async () => "ok",
+        handler: async () => ok("ok"),
       });
       const mcpRegistry = mock<McpRegistry>();
       mcpRegistry.resolveTools.mockResolvedValue([
@@ -1950,7 +1950,7 @@ describe("createHandleMessage", () => {
           description: "open a PR",
           inputSchema: { type: "object", properties: {} },
           durable: true,
-          handler: async () => "ok",
+          handler: async () => ok("ok"),
         },
       ]);
       const deps = mockDeps({

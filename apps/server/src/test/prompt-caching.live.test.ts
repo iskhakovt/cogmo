@@ -10,6 +10,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { ok } from "neverthrow";
 import * as R from "remeda";
 import { describe, expect, it } from "vitest";
 import { mock } from "vitest-mock-extended";
@@ -107,7 +108,7 @@ function drawTool(result: string): ToolRegistry {
         prompt: z.string().describe("What to draw."),
         model: z.enum(["flux-dev", "flux-pro"]).describe("The image model."),
       }),
-      handler: async () => result,
+      handler: async () => ok(result),
     }),
   );
   return tools;
