@@ -2,7 +2,7 @@ import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import { mockTransport } from "../../../test/factories.js";
 import type { Transport } from "../../transport.js";
-import type { TelegramCommandContext } from "./commands.js";
+import type { TelegramCommandContext } from "./commands/reply.js";
 import { RepoDialogs } from "./repo-dialog.js";
 
 function mkCtx(text?: string): TelegramCommandContext & { reply: ReturnType<typeof vi.fn> } {

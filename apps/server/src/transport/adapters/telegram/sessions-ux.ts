@@ -103,7 +103,7 @@ export function renderProfileList(
 
 /**
  * Canonical render for a profile's memory scope. Used both by the
- * `/profile scope` show-reply (commands.ts) and the `/profile list`
+ * `/profile scope` show-reply (commands/profile.ts) and the `/profile list`
  * annotation above. Single source of truth so the two views can't drift.
  *
  * When `customCompartments` is supplied (the user's `custom_compartments`
@@ -119,7 +119,7 @@ export function renderProfileList(
  * bare — the value isn't in `CORE_COMPARTMENTS` *and* isn't in the
  * loaded customs set, so it gets no `*`. A reader could infer "core"
  * when the value is actually orphaned. New profile writes can't create
- * this state (`findUnknownCompartmentImpl` rejects unknown values on
+ * this state (`findUnknownCompartment` rejects unknown values on
  * create/update), but pre-existing scopes survive deletion of the
  * compartment they reference (forward-only delete by design — see
  * `Transport.compartments.delete`). Acceptable at single-user scale;
@@ -195,7 +195,7 @@ function labelFor(s: ConversationSummary, current: boolean): string {
 
 /**
  * Render the `/status` reply. Pure function over a `ConversationStatusSummary`
- * so the dispatch in `commands.ts` stays trivial. `now` is injected so tests
+ * so the dispatch in `commands/conversation.ts` stays trivial. `now` is injected so tests
  * can pin the relative-age line; production callers pass `new Date()`.
  *
  * Layout follows the existing one-line-per-fact convention used by `/voice`

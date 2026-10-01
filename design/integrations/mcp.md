@@ -60,7 +60,7 @@ src/mcp/
 | `ToolRegistry` ([src/agent/tools.ts](../../src/agent/tools.ts)) | Stays static, in-process tools only. MCP tools are merged at request time. |
 | Agent loop tool list ([src/agent/loop.ts](../../src/agent/loop.ts)) | `tools = [...registry.snapshot(), ...mcpTools]` once per turn. |
 | `Service` ([src/agent/service.ts](../../src/agent/service.ts)) | MCP handlers receive the same scoped `Service`. ACL boundary unchanged. |
-| `profiles.toolSet` ([src/agent/store/schema.ts](../../src/agent/store/schema.ts)) | Extended to support globs (`mcp__github__*`). Backwards compatible. |
+| `profiles.toolSet` ([src/agent/store/schema/profiles.ts](../../apps/server/src/agent/store/schema/profiles.ts)) | Extended to support globs (`mcp__github__*`). Backwards compatible. |
 | `secrets` ([src/secrets/store/schema.ts](../../src/secrets/store/schema.ts)) | Per-server credentials stored as rows; resolved at spawn / request. |
 | Sandbox ([sandbox.md](../sandbox.md)) | Reused for untrusted stdio servers. No new runtime. |
 | LLM tool format ([src/llm/types.ts](../../src/llm/types.ts)) | JSON Schema is already the lingua franca. MCP tool schemas pass through unchanged. |
@@ -201,7 +201,7 @@ interface McpConnection {
 }
 ```
 
-Tool naming: **`mcp__<server>__<tool>`** (Claude Code convention). Stable, glob-friendly, escape-safe through Telegram (already handled by [src/transport/adapters/telegram/index.ts](../../src/transport/adapters/telegram/index.ts) plain-text fallback).
+Tool naming: **`mcp__<server>__<tool>`** (Claude Code convention). Stable, glob-friendly, escape-safe through Telegram (already handled by [src/transport/adapters/telegram/adapter.ts](../../apps/server/src/transport/adapters/telegram/adapter.ts) plain-text fallback).
 
 ## Lifecycle
 
