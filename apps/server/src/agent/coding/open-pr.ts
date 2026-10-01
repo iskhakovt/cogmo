@@ -23,6 +23,7 @@
 
 import { RequestError } from "@octokit/request-error";
 import { Octokit } from "@octokit/rest";
+import { describeError } from "../../util/describe-error.js";
 
 const TITLE_MAX_CHARS = 70;
 const BODY_PLAN_HEADER = "## Plan";
@@ -179,6 +180,6 @@ export async function runOpenPr(params: OpenPrParams): Promise<OpenPrResult> {
       }
       return { kind: "failed", message: `${error.status} ${error.message}` };
     }
-    return { kind: "failed", message: (error as Error).message };
+    return { kind: "failed", message: describeError(error) };
   }
 }

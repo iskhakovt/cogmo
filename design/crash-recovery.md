@@ -49,6 +49,8 @@ The bug class to catch is #2 — and to catch it you have to **count boundaries,
 | Notify | `send-response` | `step.sendEvent("response/ready")` | Inngest event | ✓ |
 | Resume | `flush` (conditional) | `step.sendEvent("inbound/ready")` | Inngest event | ✓ |
 
+The handler (`src/agent/handle-message.ts`) runs one module per phase from `src/agent/handle-message/`, in order: `admit-turn`, `record-user-message`, `load-turn-transcript`, `freeze-turn-inputs`, `assemble-turn-context`, `resolve-turn-model`, `compact-turn`, `finalize-turn-context`, `run-turn-loop`, `persist-turn`, `deliver-reply`. `onFailure` is `report-turn-failure`. Each module's doc lists the steps it plans.
+
 The non-durable regions are:
 
 - **`compactMessages` orchestration.** The threshold decisions are cheap relative to what a step would cost to freeze, and `historyMessages` carries resolved base64 image payloads that must not land in Inngest state. Its inputs are stable across invocations (durable history + durable `auto-recall` + the frozen tool table + `load-last-tokens` + deterministic image resolution), and each count is a durable `count-tokens-<n>`, so every replay reaches the same verdicts. Its one LLM call, summarization, is durable — see [Why only summarization's LLM call is durable](#why-only-summarizations-llm-call-is-durable-confirmed) below.

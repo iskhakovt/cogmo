@@ -1,0 +1,5 @@
+The agent store is split into per-aggregate stores, behaviour unchanged.
+
+- **Stores.** `agent/store/index.ts` (~4.2k lines, one class) becomes fifteen stores, each with its own interface, Drizzle implementation and test file: users, profiles, profile classes, compartments, core memory, conversations, transcript (messages, summaries, turn contexts, prompt snapshots), steering rules, pending memories, scheduled tasks, evolution events, sub-agents, voice config, LLM providers and routing, image providers and models. The schema follows, one `schema/<aggregate>.ts` per store behind the `schema.ts` barrel; `pnpm db:generate` produces no migration.
+- **Compatibility.** `AgentStore` is the composition of the per-aggregate interfaces and `new DrizzleAgentStore()` composes the stores, so callers outside `agent/` are unchanged. Use cases inside `agent/` depend on the narrow store they call.
+- **Build boundary.** A unit test fails when a shipped source file imports from `src/test/`: the production image omits that directory, and PR CI doesn't build the image.

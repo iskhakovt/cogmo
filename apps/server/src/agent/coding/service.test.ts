@@ -119,13 +119,20 @@ describe("createCodingService", () => {
       conversationId,
     );
 
-    await expect(service.delegate({ goal: "x".repeat(20), repoName: "cogmo" })).rejects.toThrow(
-      /sandbox module is not initialized/,
-    );
+    const result = await service.delegate({ goal: "x".repeat(20), repoName: "cogmo" });
+
+    expect(result).toEqual({
+      taskId: null,
+      status: "rejected",
+      reason: expect.stringMatching(/sandbox module is not initialized/),
+    });
     expect(inngest.send).not.toHaveBeenCalled();
   });
 
-  it("throws when the repo is not registered", async () => {
+  it.each([
+    ["ghost", /Repo not registered: ghost/],
+    ["skills", /Skills repo isn't configured yet/],
+  ])("rejects when the repo %s is not registered", async (repoName, reason) => {
     const inngest = fakeInngest();
     const service = createCodingService(
       {
@@ -137,9 +144,13 @@ describe("createCodingService", () => {
       conversationId,
     );
 
-    await expect(service.delegate({ goal: "x".repeat(20), repoName: "ghost" })).rejects.toThrow(
-      /Repo not registered: ghost/,
-    );
+    const result = await service.delegate({ goal: "x".repeat(20), repoName });
+
+    expect(result).toEqual({
+      taskId: null,
+      status: "rejected",
+      reason: expect.stringMatching(reason),
+    });
     expect(inngest.send).not.toHaveBeenCalled();
   });
 

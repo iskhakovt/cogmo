@@ -11,7 +11,8 @@
 import { PassThrough, type Readable, type Writable } from "node:stream";
 import { err, ok } from "neverthrow";
 import { vi } from "vitest";
-import { mock } from "vitest-mock-extended";
+import { type MockProxy, mock } from "vitest-mock-extended";
+import { CLAUDE_CODE_OAUTH_TOKEN_SECRET } from "../agent/coding/auth.js";
 import type { CodingRepoRow, CodingStore, CodingTaskRow } from "../agent/coding/store/index.js";
 import {
   type ExecStreamingHandle,
@@ -21,6 +22,7 @@ import {
   type SandboxSession,
   unwrapExit,
 } from "../sandbox/index.js";
+import type { SecretsStore } from "../secrets/store/index.js";
 
 export const FIXTURE_TASK_ID = "01a02000-0000-7000-8000-00000000ta5c";
 export const FIXTURE_REPO_ID = "01a02000-0000-7000-8000-000000007e90";
@@ -77,6 +79,20 @@ export interface StatefulCodingStore {
   store: CodingStore;
   /** The task row as the fake's own writes have left it. */
   current: () => CodingTaskRow;
+}
+
+export const FIXTURE_OAUTH_TOKEN = "sk-test-oauth";
+
+/**
+ * Secrets store holding only the Claude Code subscription token: enough for
+ * an orchestrator to create a sandbox, with no GitHub identity behind it.
+ */
+export function codingAuthSecrets(): MockProxy<SecretsStore> {
+  const secrets = mock<SecretsStore>();
+  secrets.getSecret.mockImplementation(async (_tx, name) =>
+    name === CLAUDE_CODE_OAUTH_TOKEN_SECRET ? FIXTURE_OAUTH_TOKEN : undefined,
+  );
+  return secrets;
 }
 
 /**

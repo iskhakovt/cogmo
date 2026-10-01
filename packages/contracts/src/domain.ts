@@ -1,6 +1,6 @@
 /**
  * Domain value-shapes + entity projections shared with the web client.
- * Mirrored from backend `z.infer` shapes (`src/agent/store/schema.ts`) and
+ * Mirrored from backend `z.infer` shapes (`apps/server/src/agent/store/schema/<aggregate>.ts`) and
  * store/service interfaces; parity is enforced at compile time by
  * `apps/server/src/test/contracts-parity.ts`.
  *

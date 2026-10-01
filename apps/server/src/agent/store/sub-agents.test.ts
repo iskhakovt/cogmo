@@ -3,16 +3,17 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
 import { expectDefined } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
-import { DrizzleAgentStore } from "./index.js";
+import { DrizzleSubAgentStore } from "./sub-agents.js";
+import { DrizzleUserStore } from "./users.js";
 
 let db: Database;
 let tx: Transactor;
 let close: () => Promise<void>;
-let store: DrizzleAgentStore;
+const store = new DrizzleSubAgentStore();
+const userStore = new DrizzleUserStore();
 
 beforeAll(async () => {
   ({ db, tx, close } = await createTestDatabase());
-  store = new DrizzleAgentStore();
 });
 
 afterEach(async () => {
@@ -24,10 +25,10 @@ afterAll(async () => {
 });
 
 async function seedUser(): Promise<string> {
-  return (await tx((trx) => store.createUser(trx))).id;
+  return (await tx((trx) => userStore.createUser(trx))).id;
 }
 
-describe("DrizzleAgentStore sub-agents", () => {
+describe("DrizzleSubAgentStore", () => {
   it("creates and lists a sub-agent", async () => {
     const userId = await seedUser();
     await tx((trx) =>
