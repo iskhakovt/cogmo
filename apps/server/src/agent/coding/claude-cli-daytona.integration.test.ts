@@ -187,7 +187,7 @@ describe.skip("ClaudeCodeBackend against real Daytona + PTY backend", () => {
         // inside the PTY shell) propagated to claude, which then
         // emitted `result` and let the PTY tear down. Without that
         // path, the CLI's 5-min idle backstop would throw
-        // `ExecTimeoutError` out of the for-await loop.
+        // a timed_out `ExecError` out of the for-await loop.
         expect(kinds).toContain("session_started");
         expect(kinds).toContain("complete");
 

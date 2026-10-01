@@ -8,7 +8,7 @@ describe("parseProviderJson", () => {
       "web_search",
       "Anthropic streamed tool_use input",
     );
-    expect(result).toEqual({ query: "weather" });
+    expect(result._unsafeUnwrap()).toEqual({ query: "weather" });
   });
 
   it("repairs and parses trailing-comma JSON via jsonrepair before declaring failure", () => {
@@ -17,21 +17,18 @@ describe("parseProviderJson", () => {
       "web_search",
       "Anthropic streamed tool_use input",
     );
-    expect(result).toEqual({ query: "weather" });
+    expect(result._unsafeUnwrap()).toEqual({ query: "weather" });
   });
 
-  it("throws ProviderProtocolError with .cause set to the repair error when neither pass succeeds", () => {
+  it("returns a ProviderProtocolError with .cause set to the repair error when neither pass succeeds", () => {
     // `}}}]]]` — closers-only with no payload, structurally unrepairable.
-    let caught: unknown;
-    try {
-      parseProviderJson("}}}]]]", "web_search", "Anthropic streamed tool_use input");
-    } catch (err) {
-      caught = err;
-    }
+    const protoErr = parseProviderJson(
+      "}}}]]]",
+      "web_search",
+      "Anthropic streamed tool_use input",
+    )._unsafeUnwrapErr();
 
-    expect(caught).toBeInstanceOf(ProviderProtocolError);
-    const protoErr = caught as ProviderProtocolError;
-
+    expect(protoErr).toBeInstanceOf(ProviderProtocolError);
     // .cause points to the jsonrepair failure (the decisive error, named in
     // the message after "after jsonrepair:"), not the initial JSON.parse
     // SyntaxError. Both errors are visible in the message so a reader sees
@@ -46,18 +43,20 @@ describe("parseProviderJson", () => {
 
 describe("parseToolArgs", () => {
   it("returns {} for empty string (canonical zero-arg shape)", () => {
-    expect(parseToolArgs("", "btc_spot", "ctx")).toEqual({});
+    expect(parseToolArgs("", "btc_spot", "ctx")._unsafeUnwrap()).toEqual({});
   });
 
   it("returns {} for whitespace-only input", () => {
-    expect(parseToolArgs("   \n\t ", "btc_spot", "ctx")).toEqual({});
+    expect(parseToolArgs("   \n\t ", "btc_spot", "ctx")._unsafeUnwrap()).toEqual({});
   });
 
   it("parses well-formed JSON via parseProviderJson", () => {
-    expect(parseToolArgs('{"q":"x"}', "search", "ctx")).toEqual({ q: "x" });
+    expect(parseToolArgs('{"q":"x"}', "search", "ctx")._unsafeUnwrap()).toEqual({ q: "x" });
   });
 
-  it("propagates ProviderProtocolError for unrepairable input — empty-check doesn't mask real bugs", () => {
-    expect(() => parseToolArgs("}}}]]]", "search", "ctx")).toThrow(ProviderProtocolError);
+  it("returns ProviderProtocolError for unrepairable input — empty-check doesn't mask real bugs", () => {
+    expect(parseToolArgs("}}}]]]", "search", "ctx")._unsafeUnwrapErr()).toBeInstanceOf(
+      ProviderProtocolError,
+    );
   });
 });

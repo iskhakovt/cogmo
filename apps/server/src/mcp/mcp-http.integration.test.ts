@@ -1,6 +1,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
+import { ok } from "neverthrow";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Transactor } from "../db/index.js";
@@ -126,17 +127,19 @@ afterAll(async () => {
 
 describe("MCP HTTP end-to-end against server-everything streamableHttp", () => {
   it("approves the server, lists real tools, dispatches `echo` over HTTP", async () => {
-    const server = await registry.addServer({
-      name: "everything_http",
-      config: {
-        transport: "http",
-        url: serverUrl,
-        headers: {},
-      },
-      enabled: true,
-    });
+    const server = (
+      await registry.addServer({
+        name: "everything_http",
+        config: {
+          transport: "http",
+          url: serverUrl,
+          headers: {},
+        },
+        enabled: true,
+      })
+    )._unsafeUnwrap();
 
-    await registry.approveServer(server.id);
+    expect(await registry.approveServer(server.id)).toEqual(ok(undefined));
     const refreshed = await tx((trx) => store.getServerById(trx, server.id));
     expect(refreshed?.approvalStatus).toBe("approved");
 

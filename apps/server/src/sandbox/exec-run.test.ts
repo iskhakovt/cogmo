@@ -3,7 +3,6 @@ import { err, ok, type Result } from "neverthrow";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { expectDefined } from "../test/assertions.js";
-import { ExecDisposedError, ExecTimeoutError } from "./exec.js";
 import { type ExecBackend, type ExecSink, runExec, TEARDOWN_TIMEOUT_MS } from "./exec-run.js";
 import type { ExecOutcome } from "./exec-state.js";
 
@@ -94,7 +93,7 @@ describe("runExec", () => {
     const opening = runExec(f.backend, { timeoutMs: 1_000 }).catch((e: unknown) => e);
     await vi.advanceTimersByTimeAsync(1_000);
 
-    expect(await opening).toBeInstanceOf(ExecTimeoutError);
+    expect(await opening).toMatchObject({ failure: { kind: "timed_out" } });
     expect(f.startSignal().aborted).toBe(true);
     expect(f.calls).toEqual(["start", "teardown"]);
 
@@ -289,7 +288,7 @@ describe("runExec", () => {
     const handle = await runExec(f.backend, { signal: controller.signal });
     controller.abort();
     expect(await handle.exited).toEqual(err({ kind: "disposed" }));
-    await expect(handle.wait()).rejects.toBeInstanceOf(ExecDisposedError);
+    await expect(handle.wait()).rejects.toMatchObject({ failure: { kind: "disposed" } });
   });
 
   it("never starts for a signal that aborted already", async () => {
@@ -298,9 +297,9 @@ describe("runExec", () => {
     f.started.resolve({});
     const controller = new AbortController();
     controller.abort();
-    await expect(runExec(f.backend, { signal: controller.signal })).rejects.toBeInstanceOf(
-      ExecDisposedError,
-    );
+    await expect(runExec(f.backend, { signal: controller.signal })).rejects.toMatchObject({
+      failure: { kind: "disposed" },
+    });
     expect(f.backend.start).not.toHaveBeenCalled();
     expect(f.backend.teardown).not.toHaveBeenCalled();
   });

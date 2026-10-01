@@ -878,7 +878,7 @@ export async function checkoutFeatureBranchInSandbox(
   // See design/coding-delegation.md → Per-callsite exec timeouts.
   // `git checkout -B` is a fast op (~1s in steady state); the caps catch
   // a wedged transport (Daytona WS half-close, hijacked socket stall) and
-  // surface as `ExecTimeoutError` on `wait()` so the orchestrator's outer
+  // surface as a timed_out `ExecError` on `wait()` so the orchestrator's outer
   // `catch` can mark the task `failed` instead of blocking forever.
   const handle = await session.execStreaming(["git", "checkout", "-B", branch], {
     workingDir: WORKTREE_DIR_IN_CONTAINER,

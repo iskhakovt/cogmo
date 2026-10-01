@@ -6,6 +6,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import { mock } from "vitest-mock-extended";
 import type { Database, Transactor } from "../../db/index.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
+import { expectOk } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { deleteRunBranch } from "./cleanup-run-branch.js";
 import { DrizzleCodingStore } from "./store/index.js";
@@ -41,18 +42,20 @@ const validIdentity = JSON.stringify({
 
 async function seedRepoAndTask(): Promise<{ taskId: string }> {
   const repo = await tx((trx) =>
-    store.insertRepo(trx, {
-      name: "example",
-      localPath: `${baseDir}/repo`,
-      defaultBranch: "main",
-      remoteUrl: "https://github.com/owner/example.git",
-      devcontainer: null,
-      allowedBackends: ["claude"],
-      verifyCommand: "true",
-      taskTokenBudget: 100_000,
-      taskWallTimeSeconds: 60,
-      maxConcurrentTasks: 1,
-    }),
+    store
+      .insertRepo(trx, {
+        name: "example",
+        localPath: `${baseDir}/repo`,
+        defaultBranch: "main",
+        remoteUrl: "https://github.com/owner/example.git",
+        devcontainer: null,
+        allowedBackends: ["claude"],
+        verifyCommand: "true",
+        taskTokenBudget: 100_000,
+        taskWallTimeSeconds: 60,
+        maxConcurrentTasks: 1,
+      })
+      .then(expectOk),
   );
   const task = await tx((trx) =>
     store.insertTask(trx, {

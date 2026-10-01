@@ -35,7 +35,7 @@ import { FallbackLlmProvider } from "../llm/fallback.js";
 import { createDbProviderResolver } from "../llm/resolver.js";
 import { deriveMasterKey, parseMasterKey } from "../secrets/encryption.js";
 import { DrizzleSecretsStore } from "../secrets/store/index.js";
-import { expectDefined } from "./assertions.js";
+import { expectDefined, expectOk } from "./assertions.js";
 import { fileDatabaseUrl, fileDefaultUserId, fileLlmockUrl } from "./integration-file.js";
 
 const SUITE = randomBytes(4).toString("hex");
@@ -122,13 +122,15 @@ beforeAll(async () => {
   );
 
   await tx((trx) =>
-    agentStore.createSubAgent(trx, {
-      userId,
-      name: SUB_AGENT_NAME,
-      description: "long-form writing specialist",
-      systemPrompt: "Be terse.",
-      model: MODEL_SPECIALIST,
-    }),
+    agentStore
+      .createSubAgent(trx, {
+        userId,
+        name: SUB_AGENT_NAME,
+        description: "long-form writing specialist",
+        systemPrompt: "Be terse.",
+        model: MODEL_SPECIALIST,
+      })
+      .then(expectOk),
   );
 });
 

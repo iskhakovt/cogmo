@@ -44,6 +44,8 @@ The degraded-reply synthesis is the one caller that passes a signal: its 5-secon
 - **Reasoning effort.** From GPT-5.5, Chat Completions rejects function tools at any effort but `none` (GPT-5.6 onward also at their default), and every reasoning model rejects a `temperature` other than 1 except at `none`. A request with tools or a temperature to a model with a `none` effort (GPT-5.1 onward, except the Astra tier and `chat-latest`) goes at `none`; any other request keeps the model's default. So those models' tool turns run without reasoning, and the degraded-reply synthesis (`temperature: 0`) answers quickly within its 5-second cap.
 - **Temperature.** Sent at `none`, and dropped with a once-per-model warning from every other request to a reasoning model.
 
+Reasoning text an endpoint returns outside the reply — `reasoning_content` (DeepSeek, Venice, vLLM) or `reasoning` (OpenRouter), on the message or each stream delta — is not forwarded. The adapter measures it instead: the chat span carries `cogmo.llm.reasoning_chars`, stamped however the call ends, so a stream cut off mid-thought still shows how long the model had been thinking; and a reported `completion_tokens_details.reasoning_tokens` becomes `Usage.reasoningTokens`, a subset of `outputTokens`, on the span as `gen_ai.usage.reasoning.output_tokens` and in the turn's summed usage on the `agent loop complete` log line. `[confirmed]`
+
 The Responses API keeps reasoning on tool calls but is a separate wire protocol this adapter doesn't speak. GPT-6 Astra has no `none` effort and takes tools only there, so it can't serve chat turns.
 
 ## Data Model
@@ -86,6 +88,9 @@ model_providers (
   provider_id     UUID NOT NULL FK → llm_providers CASCADE,
   position        INT NOT NULL,                           -- 0 = primary, 1 = fallback
   user_selectable BOOLEAN NOT NULL,                       -- true = appears in /model picker; false = internal-only (summarization, experimental)
+  context_window    INT,                                  -- NULL = resolver falls back (see Limits resolution)
+  max_output_tokens INT,                                  -- NULL = resolver falls back
+  extra_body      JSONB,                                  -- ExtraBodySchema; NULL = the adapter's fields only
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (model, provider_id),                            -- one entry per pair
   UNIQUE (model, position)                                -- ordered, no ties
@@ -103,6 +108,16 @@ The `UNIQUE (model, position)` constraint prevents ambiguous ties. Adding a fall
 **Why not on the profile:** Provider routing changes for operational reasons (key rotation, provider outage, cost optimization), not behavioral reasons. Coupling it to profiles would require updating every profile to switch providers. The routing table changes once and affects all profiles using that model.
 
 **Why not on the provider:** A provider doesn't know about other providers — priority is a relative ranking across providers for a given model. It belongs on the relationship, not on either entity.
+
+### Extra request body `[confirmed]`
+
+`model_providers.extra_body` holds request fields an operator adds to every chat-completions request for the model on an OpenAI-compatible provider, streaming and not: what the endpoint takes beyond the OpenAI shape, such as a reasoning model's thinking controls (Venice's `reasoning: {enabled: false}` or `venice_parameters.disable_thinking`, vLLM's `chat_template_kwargs.enable_thinking`). The resolver builds one adapter per resolved model, so the fields reach that model's calls only. Anthropic rows carry none.
+
+- **On the routing row.** Thinking controls differ by model on one endpoint — one provider row serves a model that turns thinking off with a flag beside one that takes an effort level — so the fields sit with the model × provider pair, like its limits. A provider-level default (a provider-wide flag such as Venice's `include_venice_system_prompt`) is not stored: nothing needs one yet, and when something does it goes in `llm_providers.attrs`, deep-merged under the row's fields.
+- **The adapter's keys are reserved.** `ExtraBodySchema` (`src/llm/extra-body.ts`) refuses, when the value is written, a top-level key the adapter sets on any request — `model`, `messages`, `stream`, `stream_options`, `tools`, `response_format`, `max_tokens`, `max_completion_tokens`, `temperature`, `reasoning_effort`, `prompt_cache_key`, `session_id` and `cache_control` — and `tool_choice`, which the adapter leaves at the provider's default `auto`: the agent loop ends a turn on a reply with no tool call, so a forced choice would never let it end, and `none` would take the tools away. An effort level goes through the endpoint's nested form where it has one (`reasoning.effort` on Venice and OpenRouter). Values are any JSON; an empty object is refused, since clearing is its own operation.
+- **No merge on the wire.** With the adapter's keys refused, the row's fields and the adapter's never share a key, so the request is the row's object with the adapter's fields after it, and a nested object like `venice_parameters` goes out exactly as written. The adapter's fields come last regardless, so they win if a reserved key ever got into a row.
+- **Strict on write, lenient on read.** The store checks each write against `ExtraBodySchema`; the column reads through `StoredExtraBodySchema`, which drops a reserved key written outside the store with a warning instead of failing the lookup — failing it would stop every call to the model and the `cogmo model` commands that fix the row. An object left with no keys reads as null, the same as a row with no extra fields.
+- **Operator surface.** `cogmo model add <model> --provider <name> --extra-body '<json>'` sets it on a new row; `cogmo model set <model> --provider <name> --extra-body '<json>'` replaces it and `--clear-extra-body` removes it, keeping the row; `cogmo model list` shows it as a compact JSON column. Both refuse an Anthropic provider. Like every routing change, it takes effect on restart (the resolver caches per process).
 
 ### Profile model configuration
 

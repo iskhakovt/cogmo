@@ -9,6 +9,7 @@ import { drainFrames } from "../test/factories.js";
 import { type OtelHarness, setupOtelHarness } from "../test/otel-harness.js";
 import type { CacheDialect } from "./cache-dialect.js";
 import { ProviderProtocolError, ToolArgsCutOffError } from "./errors.js";
+import type { ExtraBody } from "./extra-body.js";
 import { isRetriableProviderError, RefusalError } from "./fallback.js";
 import { toObjectJsonSchema } from "./json-schema.js";
 import { modelFamilyParams, OpenAICompatibleProvider } from "./openai-compat.js";
@@ -105,6 +106,22 @@ function mockStream(chunks: unknown[]): AsyncIterable<unknown> {
 }
 
 describe("OpenAICompatibleProvider", () => {
+  // One harness for the file: the tracer caches the first provider it
+  // resolves, so a second harness would never see a span.
+  let harness: OtelHarness;
+
+  beforeAll(() => {
+    harness = setupOtelHarness();
+  });
+
+  beforeEach(async () => {
+    await harness.reset();
+  });
+
+  afterAll(async () => {
+    await harness.shutdown();
+  });
+
   describe("chat", () => {
     it("maps a simple text response", async () => {
       const provider = createProvider();
@@ -1156,20 +1173,6 @@ describe("OpenAICompatibleProvider", () => {
   });
 
   describe("abandoned stream", () => {
-    let harness: OtelHarness;
-
-    beforeAll(() => {
-      harness = setupOtelHarness();
-    });
-
-    beforeEach(async () => {
-      await harness.reset();
-    });
-
-    afterAll(async () => {
-      await harness.shutdown();
-    });
-
     const params: ChatParams = {
       model: "m",
       system: "sys",
@@ -3046,6 +3049,222 @@ describe("OpenAICompatibleProvider", () => {
         { type: "image_url", image_url: { url: "data:image/jpeg;base64,aW1n" } },
         { type: "image_url", image_url: { url: "https://example.com/cat.png" } },
       ]);
+    });
+  });
+
+  describe("extra body", () => {
+    const EXTRA: ExtraBody = {
+      reasoning: { enabled: false },
+      venice_parameters: { disable_thinking: true, include_venice_system_prompt: false },
+      top_p: 0.8,
+    };
+
+    async function sentWith(
+      path: "chat" | "chatStream",
+      extraBody: ExtraBody | undefined,
+      params: Partial<ChatParams> = {},
+    ): Promise<Record<string, unknown>> {
+      mockCreate.mockReset();
+      const provider = new OpenAICompatibleProvider("test", {
+        apiKey: "test-key",
+        baseURL: "http://test",
+        cacheDialect: "openai",
+        ...(extraBody !== undefined && { extraBody }),
+      });
+      const request: ChatParams = {
+        model: "qwen-3-6-plus",
+        system: "sys",
+        messages: [{ role: "user", content: "hi" }],
+        maxTokens: 300,
+        ...params,
+      };
+      if (path === "chat") {
+        mockCreate.mockResolvedValueOnce({
+          choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+          model: request.model,
+          usage: { prompt_tokens: 5, completion_tokens: 1 },
+        });
+        await provider.chat(request);
+      } else {
+        mockCreate.mockResolvedValueOnce(
+          mockStream([{ model: request.model, choices: [{ delta: {}, finish_reason: "stop" }] }]),
+        );
+        await drainFrames(provider.chatStream(request));
+      }
+      const call = expectDefined(mockCreate.mock.calls[0], "create call");
+      return z.record(z.string(), z.unknown()).parse(call[0]);
+    }
+
+    describe.each(["chat", "chatStream"] as const)("%s", (path) => {
+      it("sends every extra field, nested objects as written", async () => {
+        const body = await sentWith(path, EXTRA);
+
+        expect(body.reasoning).toEqual({ enabled: false });
+        expect(body.venice_parameters).toEqual({
+          disable_thinking: true,
+          include_venice_system_prompt: false,
+        });
+        expect(body.top_p).toBe(0.8);
+      });
+
+      it("keeps every field the adapter builds alongside them", async () => {
+        const body = await sentWith(path, EXTRA, {
+          tools: [GET_TIME],
+          temperature: 0.2,
+          cache: { key: "conv-1", retention: "short" },
+        });
+
+        expect(body.model).toBe("qwen-3-6-plus");
+        expect(body.max_tokens).toBe(300);
+        expect(body.temperature).toBe(0.2);
+        expect(body.prompt_cache_key).toBe("conv-1");
+        expect(body.tools).toHaveLength(1);
+        expect(ChatCreateArgsSchema.parse(body).messages).toHaveLength(2);
+        if (path === "chatStream") {
+          expect(body.stream).toBe(true);
+          expect(body.stream_options).toEqual({ include_usage: true });
+        } else {
+          expect(body).not.toHaveProperty("stream");
+        }
+      });
+
+      it("sends the same body as without one, less the extra fields", async () => {
+        const without = await sentWith(path, undefined);
+        const withExtra = await sentWith(path, EXTRA);
+
+        const { reasoning, venice_parameters, top_p, ...rest } = withExtra;
+        expect([reasoning, venice_parameters, top_p]).not.toContain(undefined);
+        expect(rest).toEqual(without);
+      });
+    });
+
+    it("sends the extra fields with a structured-output request", async () => {
+      const schema = { type: "object", properties: { a: { type: "string" } } } as const;
+      const body = await sentWith("chat", EXTRA, {
+        responseFormat: { type: "json_schema", name: "out", schema },
+      });
+
+      expect(body.reasoning).toEqual({ enabled: false });
+      expect(body.response_format).toMatchObject({ type: "json_schema" });
+    });
+  });
+
+  describe("reasoning", () => {
+    const params: ChatParams = {
+      model: "qwen-3-6-plus",
+      system: "sys",
+      messages: [{ role: "user", content: "hi" }],
+    };
+
+    function chatSpan() {
+      return expectDefined(harness.getSpans()[0], "chat span");
+    }
+
+    it("reports the provider's reasoning token count on a non-streaming response", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce({
+        choices: [
+          {
+            message: { content: "ok", reasoning_content: "Let me think." },
+            finish_reason: "stop",
+          },
+        ],
+        model: "qwen-3-6-plus",
+        usage: {
+          prompt_tokens: 40,
+          completion_tokens: 120,
+          completion_tokens_details: { reasoning_tokens: 100 },
+        },
+      });
+
+      const result = await provider.chat(params);
+
+      expect(result.usage).toEqual({ inputTokens: 40, outputTokens: 120, reasoningTokens: 100 });
+      expect(result.content).toEqual([{ type: "text", text: "ok" }]);
+      expect(chatSpan().attributes["gen_ai.usage.reasoning.output_tokens"]).toBe(100);
+      expect(chatSpan().attributes["cogmo.llm.reasoning_chars"]).toBe("Let me think.".length);
+    });
+
+    it("counts streamed reasoning_content and reasoning deltas without forwarding them", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce(
+        mockStream([
+          {
+            model: "qwen-3-6-plus",
+            choices: [{ delta: { reasoning_content: "Hmm, " }, finish_reason: null }],
+          },
+          {
+            model: "qwen-3-6-plus",
+            choices: [{ delta: { reasoning: "the user said hi." }, finish_reason: null }],
+          },
+          {
+            model: "qwen-3-6-plus",
+            choices: [{ delta: { content: "Hello" }, finish_reason: null }],
+          },
+          {
+            model: "qwen-3-6-plus",
+            choices: [{ delta: {}, finish_reason: "stop" }],
+            usage: {
+              prompt_tokens: 40,
+              completion_tokens: 30,
+              completion_tokens_details: { reasoning_tokens: 25 },
+            },
+          },
+        ]),
+      );
+
+      const { frames, meta } = await drainFrames(provider.chatStream(params));
+
+      expect(frames).toEqual([{ type: "text_delta", text: "Hello" }]);
+      expect(meta.usage).toEqual({ inputTokens: 40, outputTokens: 30, reasoningTokens: 25 });
+      expect(chatSpan().attributes["cogmo.llm.reasoning_chars"]).toBe(
+        "Hmm, the user said hi.".length,
+      );
+      expect(chatSpan().attributes["gen_ai.usage.reasoning.output_tokens"]).toBe(25);
+    });
+
+    it("stamps the reasoning seen so far on a stream cut off mid-thought", async () => {
+      const provider = createProvider();
+      const controller = new AbortController();
+      const reason = new Error("stream wall-clock");
+      async function* sdkStream(): AsyncGenerator<unknown> {
+        for (const text of ["First, ", "consider ", "the "]) {
+          yield {
+            model: "qwen-3-6-plus",
+            choices: [{ delta: { reasoning_content: text }, finish_reason: null }],
+          };
+        }
+        // The SDK's stream ends quietly once its signal fires.
+        controller.abort(reason);
+      }
+      mockCreate.mockResolvedValueOnce(sdkStream());
+
+      const drained = drainFrames(provider.chatStream(params, { signal: controller.signal }));
+
+      await expect(drained).rejects.toBe(reason);
+      expect(chatSpan().attributes["cogmo.llm.reasoning_chars"]).toBe(
+        "First, consider the ".length,
+      );
+      expect(chatSpan().attributes).not.toHaveProperty("gen_ai.usage.reasoning.output_tokens");
+      expect(chatSpan().status.code).toBe(SpanStatusCode.ERROR);
+    });
+
+    it("stamps no reasoning attributes on a call that did no reasoning", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce(
+        mockStream([
+          {
+            model: "m",
+            choices: [{ delta: { content: "ok" }, finish_reason: "stop" }],
+            usage: { prompt_tokens: 5, completion_tokens: 1 },
+          },
+        ]),
+      );
+
+      await drainFrames(provider.chatStream({ ...params, model: "m" }));
+
+      expect(chatSpan().attributes).not.toHaveProperty("cogmo.llm.reasoning_chars");
+      expect(chatSpan().attributes).not.toHaveProperty("gen_ai.usage.reasoning.output_tokens");
     });
   });
 });

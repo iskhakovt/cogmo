@@ -1,4 +1,5 @@
 import { createRequire } from "node:module";
+import { ok } from "neverthrow";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Transactor } from "../db/index.js";
 import type { SecretsStore } from "../secrets/store/index.js";
@@ -59,19 +60,21 @@ afterAll(async () => {
 
 describe("MCP end-to-end against server-everything", () => {
   it("approves the server, lists real tools, dispatches `echo`, and round-trips the result", async () => {
-    const server = await registry.addServer({
-      name: "everything",
-      config: {
-        transport: "stdio",
-        command: process.execPath, // `node`
-        args: [SERVER_EVERYTHING_PATH, "stdio"],
-        env: {},
-      },
-      enabled: true,
-    });
+    const server = (
+      await registry.addServer({
+        name: "everything",
+        config: {
+          transport: "stdio",
+          command: process.execPath, // `node`
+          args: [SERVER_EVERYTHING_PATH, "stdio"],
+          env: {},
+        },
+        enabled: true,
+      })
+    )._unsafeUnwrap();
 
     // approveServer handshakes, lists tools, and pins them as `pending`.
-    await registry.approveServer(server.id);
+    expect(await registry.approveServer(server.id)).toEqual(ok(undefined));
     const refreshed = await tx((trx) => store.getServerById(trx, server.id));
     expect(refreshed?.approvalStatus).toBe("approved");
 
@@ -100,17 +103,19 @@ describe("MCP end-to-end against server-everything", () => {
   });
 
   it("removeServer evicts the pool entry and the row", async () => {
-    const server = await registry.addServer({
-      name: "everything_temp",
-      config: {
-        transport: "stdio",
-        command: process.execPath,
-        args: [SERVER_EVERYTHING_PATH, "stdio"],
-        env: {},
-      },
-      enabled: true,
-    });
-    await registry.approveServer(server.id);
+    const server = (
+      await registry.addServer({
+        name: "everything_temp",
+        config: {
+          transport: "stdio",
+          command: process.execPath,
+          args: [SERVER_EVERYTHING_PATH, "stdio"],
+          env: {},
+        },
+        enabled: true,
+      })
+    )._unsafeUnwrap();
+    expect(await registry.approveServer(server.id)).toEqual(ok(undefined));
     await registry.removeServer(server.id);
     expect(await tx((trx) => store.getServerById(trx, server.id))).toBeUndefined();
     // No pool sweep needed — evict closes the connection synchronously.

@@ -9,6 +9,7 @@ import {
   ATTR_GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS,
   ATTR_GEN_AI_USAGE_INPUT_TOKENS,
   ATTR_GEN_AI_USAGE_OUTPUT_TOKENS,
+  ATTR_GEN_AI_USAGE_REASONING_OUTPUT_TOKENS,
   GEN_AI_OPERATION_NAME_VALUE_CHAT,
 } from "@opentelemetry/semantic-conventions/incubating";
 import { llmTokens } from "../metrics.js";
@@ -61,6 +62,9 @@ export function recordChatUsage(
     ...(usage.cacheCreationTokens != null && {
       [ATTR_GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS]: usage.cacheCreationTokens,
     }),
+    ...(usage.reasoningTokens != null && {
+      [ATTR_GEN_AI_USAGE_REASONING_OUTPUT_TOKENS]: usage.reasoningTokens,
+    }),
   });
 
   const labels = { model: responseModel, provider };
@@ -78,6 +82,19 @@ export function recordChatUsage(
   if (usage.cacheCreationTokens) {
     llmTokens.add(usage.cacheCreationTokens, { ...labels, type: "cache_create" });
   }
+}
+
+/**
+ * Span attribute for the characters of reasoning text an endpoint returned
+ * outside the reply (`reasoning_content`), which the adapter doesn't
+ * forward. Unlike the provider's reasoning token count, which arrives only
+ * with the final usage, it is known for a call cut off mid-thought.
+ */
+export const ATTR_COGMO_REASONING_CHARS = "cogmo.llm.reasoning_chars";
+
+/** Stamp the reasoning characters a chat call received; nothing when it received none. */
+export function recordReasoningChars(span: Span, chars: number): void {
+  if (chars > 0) span.setAttribute(ATTR_COGMO_REASONING_CHARS, chars);
 }
 
 export function failChatSpan(span: Span, err: unknown): void {

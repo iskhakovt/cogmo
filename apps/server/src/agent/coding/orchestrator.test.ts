@@ -16,7 +16,7 @@ import {
 } from "../../sandbox/index.js";
 import { DrizzleSandboxStore } from "../../sandbox/store/index.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
-import { expectDefined } from "../../test/assertions.js";
+import { expectDefined, expectOk } from "../../test/assertions.js";
 import { makeStepRun, makeStepSendEvent } from "../../test/factories.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { DrizzleAgentStore } from "../store/index.js";
@@ -85,18 +85,20 @@ const RESOURCE_LIMITS = { cpus: 0.5, memory_bytes: 256 * 1024 * 1024, pids: 64 }
 
 async function seedRepo(name = "cogmo"): Promise<CodingRepoRow> {
   return tx((trx) =>
-    store.insertRepo(trx, {
-      name,
-      localPath: repoPath,
-      defaultBranch: "main",
-      remoteUrl: "git@github.com:user/cogmo.git",
-      devcontainer: null,
-      allowedBackends: ["claude"],
-      verifyCommand: "true",
-      taskTokenBudget: 100_000,
-      taskWallTimeSeconds: 600,
-      maxConcurrentTasks: 1,
-    }),
+    store
+      .insertRepo(trx, {
+        name,
+        localPath: repoPath,
+        defaultBranch: "main",
+        remoteUrl: "git@github.com:user/cogmo.git",
+        devcontainer: null,
+        allowedBackends: ["claude"],
+        verifyCommand: "true",
+        taskTokenBudget: 100_000,
+        taskWallTimeSeconds: 600,
+        maxConcurrentTasks: 1,
+      })
+      .then(expectOk),
   );
 }
 
@@ -482,16 +484,20 @@ describe("runCodingTask", () => {
     // getCodingAutoapproveModeForTask resolves to the profile we toggle.
     const user = await tx((trx) => agentStore.createUser(trx));
     const profile = await tx((trx) =>
-      agentStore.createProfile(trx, {
-        userId: user.id,
-        name: `${namePrefix}-${Math.random().toString(36).slice(2)}`,
-        basePrompt: "x",
-        model: "claude-haiku-4-5-20251001",
-        toolSet: [],
-      }),
+      agentStore
+        .createProfile(trx, {
+          userId: user.id,
+          name: `${namePrefix}-${Math.random().toString(36).slice(2)}`,
+          basePrompt: "x",
+          model: "claude-haiku-4-5-20251001",
+          toolSet: [],
+        })
+        .then(expectOk),
     );
     if (mode === "on") {
-      await tx((trx) => agentStore.updateProfile(trx, profile.id, { codingAutoapproveMode: "on" }));
+      await tx((trx) =>
+        agentStore.updateProfile(trx, profile.id, { codingAutoapproveMode: "on" }).then(expectOk),
+      );
     }
     const conv = await tx((trx) =>
       agentStore.createConversation(trx, {
@@ -632,15 +638,19 @@ describe("runCodingTask", () => {
     const repo = await seedRepo();
     const user = await tx((trx) => agentStore.createUser(trx));
     const profile = await tx((trx) =>
-      agentStore.createProfile(trx, {
-        userId: user.id,
-        name: `evo-${Math.random().toString(36).slice(2)}`,
-        basePrompt: "x",
-        model: "claude-haiku-4-5-20251001",
-        toolSet: [],
-      }),
+      agentStore
+        .createProfile(trx, {
+          userId: user.id,
+          name: `evo-${Math.random().toString(36).slice(2)}`,
+          basePrompt: "x",
+          model: "claude-haiku-4-5-20251001",
+          toolSet: [],
+        })
+        .then(expectOk),
     );
-    await tx((trx) => agentStore.updateProfile(trx, profile.id, { codingAutoapproveMode: "on" }));
+    await tx((trx) =>
+      agentStore.updateProfile(trx, profile.id, { codingAutoapproveMode: "on" }).then(expectOk),
+    );
     const conv = await tx((trx) =>
       agentStore.createConversation(trx, {
         userId: user.id,
@@ -905,18 +915,20 @@ describe("runCodingTask", () => {
   it("worktree allocation failure → status=failed", async () => {
     // Repo with a non-existent local path so the clone errors out.
     const badRepo = await tx((trx) =>
-      store.insertRepo(trx, {
-        name: "bad-path-repo",
-        localPath: "/no/such/repo/path",
-        defaultBranch: "main",
-        remoteUrl: "x",
-        devcontainer: null,
-        allowedBackends: ["claude"],
-        verifyCommand: "true",
-        taskTokenBudget: 1,
-        taskWallTimeSeconds: 1,
-        maxConcurrentTasks: 1,
-      }),
+      store
+        .insertRepo(trx, {
+          name: "bad-path-repo",
+          localPath: "/no/such/repo/path",
+          defaultBranch: "main",
+          remoteUrl: "x",
+          devcontainer: null,
+          allowedBackends: ["claude"],
+          verifyCommand: "true",
+          taskTokenBudget: 1,
+          taskWallTimeSeconds: 1,
+          maxConcurrentTasks: 1,
+        })
+        .then(expectOk),
     );
     const badTask = await tx((trx) =>
       store.insertTask(trx, {

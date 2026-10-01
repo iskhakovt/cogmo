@@ -5,7 +5,7 @@ import { logger } from "../../logger.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import { describeError } from "../../util/describe-error.js";
 import type { McpServer } from "../config.js";
-import { McpPoolError } from "../errors.js";
+import type { McpPoolError } from "../errors.js";
 import type { McpStore } from "../store/index.js";
 import type { McpConnection } from "./client.js";
 import { type EntryState, type PoolEffect, type PoolEvent, transition } from "./pool-state.js";
@@ -27,7 +27,7 @@ export interface McpConnectionPoolOptions {
 
 /** Why a connect produced no connection, and whether it spent an attempt. */
 interface ConnectFailure {
-  error: Error;
+  failure: McpPoolError;
   spent: boolean;
 }
 
@@ -65,18 +65,16 @@ export class McpConnectionPool {
     this.#idleEvictionMs = opts.idleEvictionMs;
   }
 
-  async getConnection(serverId: string): Promise<McpConnection> {
-    if (this.#closed) throw new McpPoolError("pool_closed");
-    const outcome = Promise.withResolvers<Result<McpConnection, Error>>();
+  async getConnection(serverId: string): Promise<Result<McpConnection, McpPoolError>> {
+    if (this.#closed) return err({ code: "pool_closed" });
+    const outcome = Promise.withResolvers<Result<McpConnection, McpPoolError>>();
     this.#feed(serverId, {
       type: "get",
       waiter: outcome.resolve,
       at: Date.now(),
       abort: new AbortController(),
     });
-    const result = await outcome.promise;
-    if (result.isErr()) throw result.error;
-    return result.value;
+    return outcome.promise;
   }
 
   /**
@@ -171,7 +169,7 @@ export class McpConnectionPool {
     const spawned = await this.#spawn(serverId, signal);
     const event = spawned.match<PoolEvent>(
       (connection) => ({ type: "spawned", signal, connection, at: Date.now() }),
-      ({ error, spent }) => ({ type: "spawn_failed", signal, error, spent }),
+      ({ failure, spent }) => ({ type: "spawn_failed", signal, failure, spent }),
     );
     await Promise.all(this.#feed(serverId, event));
   }
@@ -180,18 +178,18 @@ export class McpConnectionPool {
     serverId: string,
     signal: AbortSignal,
   ): Promise<Result<McpConnection, ConnectFailure>> {
-    const found: Result<McpServer, Error> = await this.#runInTx((tx) =>
+    const found: Result<McpServer, McpPoolError> = await this.#runInTx((tx) =>
       this.#store.getServerById(tx, serverId),
     ).then(
-      (server) => (server ? ok(server) : err(new McpPoolError("server_not_found"))),
-      (e: unknown) => err(asError(e)),
+      (server) => (server ? ok(server) : err({ code: "server_not_found" })),
+      (e: unknown) => err({ code: "connect_failed", error: asError(e) }),
     );
-    if (found.isErr()) return err({ error: found.error, spent: false });
+    if (found.isErr()) return err({ failure: found.error, spent: false });
     try {
       signal.throwIfAborted();
       return ok(await this.#runner.spawn(found.value, this.#secrets, this.#runInTx, signal));
     } catch (e) {
-      return err({ error: asError(e), spent: true });
+      return err({ failure: { code: "connect_failed", error: asError(e) }, spent: true });
     }
   }
 

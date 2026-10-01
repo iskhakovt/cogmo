@@ -10,6 +10,7 @@ import { GitHubIdentitySchema } from "../../secrets/github.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import { bootstrapSkillsRepo, SKILLS_CODING_REPO_NAME } from "../../skills/repo.js";
 import type { RegisterResult, SkillRunner } from "../../skills/runner.js";
+import { expectOk } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { DrizzleAgentStore } from "../store/index.js";
 import { autoRegisterSkill } from "./auto-register-skill.js";
@@ -79,18 +80,20 @@ async function seedRepoAndTask(
   opts: { withWorktreeAssignment?: boolean; conversationId?: string } = {},
 ): Promise<{ taskId: string; branch: string }> {
   const repo = await tx((trx) =>
-    store.insertRepo(trx, {
-      name: repoName,
-      localPath: bareRepoPath,
-      defaultBranch: "main",
-      remoteUrl: upstreamPath,
-      devcontainer: null,
-      allowedBackends: ["claude"],
-      verifyCommand: "true",
-      taskTokenBudget: 100_000,
-      taskWallTimeSeconds: 60,
-      maxConcurrentTasks: 1,
-    }),
+    store
+      .insertRepo(trx, {
+        name: repoName,
+        localPath: bareRepoPath,
+        defaultBranch: "main",
+        remoteUrl: upstreamPath,
+        devcontainer: null,
+        allowedBackends: ["claude"],
+        verifyCommand: "true",
+        taskTokenBudget: 100_000,
+        taskWallTimeSeconds: 60,
+        maxConcurrentTasks: 1,
+      })
+      .then(expectOk),
   );
   const task = await tx((trx) =>
     store.insertTask(trx, {
@@ -247,13 +250,15 @@ describe("autoRegisterSkill", () => {
   it("registers with the task conversation's user and profile as the origin", async () => {
     const origin = await tx(async (trx) => {
       const user = await agentStore.createUser(trx);
-      const profile = await agentStore.createProfile(trx, {
-        userId: user.id,
-        name: "work",
-        basePrompt: "",
-        model: "m",
-        toolSet: [],
-      });
+      const profile = await agentStore
+        .createProfile(trx, {
+          userId: user.id,
+          name: "work",
+          basePrompt: "",
+          model: "m",
+          toolSet: [],
+        })
+        .then(expectOk);
       const conversation = await agentStore.createConversation(trx, {
         userId: user.id,
         profileId: profile.id,
@@ -295,13 +300,15 @@ describe("autoRegisterSkill", () => {
   it("throws rather than deploy as the owner when the task's conversation doesn't resolve", async () => {
     const conversationId = await tx(async (trx) => {
       const user = await agentStore.createUser(trx);
-      const profile = await agentStore.createProfile(trx, {
-        userId: user.id,
-        name: "work",
-        basePrompt: "",
-        model: "m",
-        toolSet: [],
-      });
+      const profile = await agentStore
+        .createProfile(trx, {
+          userId: user.id,
+          name: "work",
+          basePrompt: "",
+          model: "m",
+          toolSet: [],
+        })
+        .then(expectOk);
       const conversation = await agentStore.createConversation(trx, {
         userId: user.id,
         profileId: profile.id,

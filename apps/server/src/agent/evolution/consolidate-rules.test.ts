@@ -1,9 +1,9 @@
+import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import type { Transactor } from "../../db/index.js";
 import { logger } from "../../logger.js";
 import { expectDefined } from "../../test/assertions.js";
 import { mockProvider } from "../../test/factories.js";
-import { RuleGroupChangedError } from "../store/errors.js";
 import { type ConsolidationDeps, consolidateRules } from "./consolidate-rules.js";
 
 const FAKE_TX = { __mockTx: true } as never;
@@ -108,7 +108,7 @@ function mockConsolidationDeps(
     runInTx: fakeRunInTx,
     store: {
       getCorrections: vi.fn().mockResolvedValue(defaultRules),
-      replaceRules: vi.fn().mockResolvedValue({ id: "new-rule-1" }),
+      replaceRules: vi.fn().mockResolvedValue(ok({ id: "new-rule-1" })),
       ...storeOverrides,
     },
   };
@@ -163,8 +163,8 @@ describe("consolidateRules", () => {
     it("is skipped, and the next group merges", async () => {
       const replaceRules = vi
         .fn()
-        .mockRejectedValueOnce(new RuleGroupChangedError(2, 1))
-        .mockResolvedValueOnce({ id: "merged" });
+        .mockResolvedValueOnce(err({ kind: "rule_group_changed", deleted: 1 }))
+        .mockResolvedValueOnce(ok({ id: "merged" }));
       const deps = mockConsolidationDeps([GROUPS], {
         getCorrections: vi.fn().mockResolvedValue(PAIRS),
         replaceRules,
@@ -496,7 +496,7 @@ describe("consolidateRules", () => {
             channelType: "telegram",
           },
         ] satisfies CorrectionRow[]),
-        replaceRules: vi.fn().mockResolvedValue({ id: "new-rule-1" }),
+        replaceRules: vi.fn().mockResolvedValue(ok({ id: "new-rule-1" })),
       },
     };
 
@@ -638,7 +638,7 @@ describe("consolidateRules", () => {
             channelType: null,
           },
         ] satisfies CorrectionRow[]),
-        replaceRules: vi.fn().mockResolvedValue({ id: "new-rule-1" }),
+        replaceRules: vi.fn().mockResolvedValue(ok({ id: "new-rule-1" })),
       },
     };
 

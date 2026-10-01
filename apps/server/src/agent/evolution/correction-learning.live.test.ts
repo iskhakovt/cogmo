@@ -46,7 +46,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 import { AnthropicProvider } from "../../llm/anthropic.js";
 import { seedChannelRules } from "../../setup/seed.js";
-import { expectDefined } from "../../test/assertions.js";
+import { expectDefined, expectOk } from "../../test/assertions.js";
 import { REPLY_CHECKS, type ReplyCheck, wordCount } from "../../test/eval-checks.js";
 import {
   CoreMemoryBlocksSchema,
@@ -292,13 +292,15 @@ describe.skipIf(LIVE_API_KEY === undefined)(
           // Nothing in this eval sets an instruction rule.
           const owner = await db.tx(async (tx) => {
             const user = await store.createUser(tx);
-            const profile = await store.createProfile(tx, {
-              userId: null,
-              name: `eval-${nonce}-${scenario.id}`,
-              basePrompt: "",
-              model: EXTRACTION_MODEL,
-              toolSet: [],
-            });
+            const profile = await store
+              .createProfile(tx, {
+                userId: null,
+                name: `eval-${nonce}-${scenario.id}`,
+                basePrompt: "",
+                model: EXTRACTION_MODEL,
+                toolSet: [],
+              })
+              .then(expectOk);
             return { userId: user.id, profileId: profile.id };
           });
 

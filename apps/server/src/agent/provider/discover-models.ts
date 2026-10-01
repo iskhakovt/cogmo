@@ -16,11 +16,10 @@
  *    discovery standpoint — just ids.
  *
  * Some custom endpoints don't expose `/v1/models` at all (corporate
- * gateways with bespoke auth flows). Callers should treat
- * {@link DiscoveryUnavailable} as "fall back to free-form text input"
- * rather than aborting.
+ * gateways with bespoke auth flows); see `DiscoveryError`.
  */
 
+import { err, ok, type Result } from "neverthrow";
 import { z } from "zod";
 
 export interface DiscoveredModel {
@@ -33,19 +32,14 @@ export interface DiscoveredModel {
 }
 
 /**
- * Thrown when discovery fails for a reason the caller should turn into
- * "type the model id by hand" UX (404, malformed response, network drop).
- * Distinct from a network/auth failure, which should propagate as a real
- * error.
+ * Why discovery returned no list. `unavailable`: the endpoint is unreachable,
+ * answers 404, or answers in a shape we can't read, so the caller falls back
+ * to typing the id by hand. `rejected`: it answered with an error status
+ * (auth, rate limit), which is worth a retry.
  */
-export class DiscoveryUnavailable extends Error {
-  override readonly name = "DiscoveryUnavailable";
-  override readonly cause?: unknown;
-  constructor(message: string, cause?: unknown) {
-    super(message);
-    if (cause !== undefined) this.cause = cause;
-  }
-}
+export type DiscoveryError =
+  | { kind: "unavailable"; message: string }
+  | { kind: "rejected"; message: string };
 
 const OpenRouterEntrySchema = z
   .object({
@@ -91,78 +85,92 @@ export interface DiscoverArgs {
   apiKey: string;
 }
 
-export async function discoverModels(args: DiscoverArgs): Promise<DiscoveredModel[]> {
+export async function discoverModels(
+  args: DiscoverArgs,
+): Promise<Result<DiscoveredModel[], DiscoveryError>> {
   if (args.type === "anthropic") {
     return discoverAnthropic(args.baseUrl, args.apiKey);
   }
   return discoverOpenAICompat(args.baseUrl, args.apiKey);
 }
 
-async function discoverAnthropic(baseUrl: string, apiKey: string): Promise<DiscoveredModel[]> {
+async function discoverAnthropic(
+  baseUrl: string,
+  apiKey: string,
+): Promise<Result<DiscoveredModel[], DiscoveryError>> {
   const url = `${trimTrailingSlash(baseUrl)}/v1/models`;
-  let res: Response;
-  try {
-    res = await fetch(url, {
-      headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
-    });
-  } catch (err) {
-    throw new DiscoveryUnavailable(`network error talking to ${url}`, err);
-  }
-  if (res.status === 404) {
-    throw new DiscoveryUnavailable(`${url} returned 404 (endpoint not exposed)`);
-  }
-  if (!res.ok) {
-    throw new Error(`Anthropic /v1/models returned ${res.status}`);
-  }
-  const body = await res.json();
-  const parsed = AnthropicResponseSchema.safeParse(body);
-  if (!parsed.success) {
-    throw new DiscoveryUnavailable(`malformed /v1/models response from ${url}`, parsed.error);
-  }
-  return parsed.data.data.map((entry) => ({
-    id: entry.id,
-    ...(entry.display_name && { name: entry.display_name }),
-  }));
+  const body = await fetchModelList(url, {
+    "x-api-key": apiKey,
+    "anthropic-version": "2023-06-01",
+  });
+  if (body.isErr()) return err(body.error);
+  const parsed = AnthropicResponseSchema.safeParse(body.value);
+  if (!parsed.success) return unavailable(`malformed /v1/models response from ${url}`);
+  return ok(
+    parsed.data.data.map((entry) => ({
+      id: entry.id,
+      ...(entry.display_name && { name: entry.display_name }),
+    })),
+  );
 }
 
-async function discoverOpenAICompat(baseUrl: string, apiKey: string): Promise<DiscoveredModel[]> {
+async function discoverOpenAICompat(
+  baseUrl: string,
+  apiKey: string,
+): Promise<Result<DiscoveredModel[], DiscoveryError>> {
   const url = `${trimTrailingSlash(baseUrl)}/models`;
-  let res: Response;
-  try {
-    res = await fetch(url, { headers: { Authorization: `Bearer ${apiKey}` } });
-  } catch (err) {
-    throw new DiscoveryUnavailable(`network error talking to ${url}`, err);
-  }
-  if (res.status === 404) {
-    throw new DiscoveryUnavailable(`${url} returned 404 (endpoint not exposed)`);
-  }
-  if (!res.ok) {
-    throw new Error(`OpenAI-compatible /models returned ${res.status}`);
-  }
-  const body = await res.json();
+  const body = await fetchModelList(url, { Authorization: `Bearer ${apiKey}` });
+  if (body.isErr()) return err(body.error);
 
   // Try the OpenRouter shape first — it's a strict superset of the OpenAI
   // shape, so a successful parse there means we get inline limits for free.
   // Only one of these branches should produce a `data` array with inline
   // `context_length` per row; the OpenAI shape never sets it.
-  const orParsed = OpenRouterResponseSchema.safeParse(body);
+  const orParsed = OpenRouterResponseSchema.safeParse(body.value);
   if (orParsed.success && orParsed.data.data.some((e) => e.context_length != null)) {
-    return orParsed.data.data.map((entry) => {
-      const max = entry.top_provider?.max_completion_tokens ?? null;
-      return {
-        id: entry.id,
-        ...(entry.name && { name: entry.name }),
-        ...(entry.context_length != null && { contextWindow: entry.context_length }),
-        ...(max != null && { maxOutputTokens: max }),
-      };
-    });
+    return ok(
+      orParsed.data.data.map((entry) => {
+        const max = entry.top_provider?.max_completion_tokens ?? null;
+        return {
+          id: entry.id,
+          ...(entry.name && { name: entry.name }),
+          ...(entry.context_length != null && { contextWindow: entry.context_length }),
+          ...(max != null && { maxOutputTokens: max }),
+        };
+      }),
+    );
   }
 
-  const oaParsed = OpenAIResponseSchema.safeParse(body);
-  if (!oaParsed.success) {
-    throw new DiscoveryUnavailable(`malformed /models response from ${url}`, oaParsed.error);
+  const oaParsed = OpenAIResponseSchema.safeParse(body.value);
+  if (!oaParsed.success) return unavailable(`malformed /models response from ${url}`);
+  return ok(oaParsed.data.data.map((entry) => ({ id: entry.id })));
+}
+
+/** GET `url` and read its JSON body. */
+async function fetchModelList(
+  url: string,
+  headers: Record<string, string>,
+): Promise<Result<unknown, DiscoveryError>> {
+  let res: Response;
+  try {
+    res = await fetch(url, { headers });
+  } catch {
+    return unavailable(`network error talking to ${url}`);
   }
-  return oaParsed.data.data.map((entry) => ({ id: entry.id }));
+  if (!res.ok) {
+    await res.body?.cancel();
+    if (res.status === 404) return unavailable(`${url} returned 404 (endpoint not exposed)`);
+    return err({ kind: "rejected", message: `${url} returned ${res.status}` });
+  }
+  try {
+    return ok(await res.json());
+  } catch {
+    return unavailable(`non-JSON response from ${url}`);
+  }
+}
+
+function unavailable(message: string): Result<never, DiscoveryError> {
+  return err({ kind: "unavailable", message });
 }
 
 function trimTrailingSlash(url: string): string {

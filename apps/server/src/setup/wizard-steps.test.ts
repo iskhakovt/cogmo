@@ -33,8 +33,10 @@
  * surface from the tests.
  */
 import * as p from "@clack/prompts";
+import { err as failed, ok as found } from "neverthrow";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
+import { discoverModels } from "../agent/provider/discover-models.js";
 import type { AgentStore } from "../agent/store/index.js";
 import type { BootstrapLock } from "../db/bootstrap-lock.js";
 import type { Transactor } from "../db/index.js";
@@ -156,9 +158,10 @@ vi.mock("../agent/provider/add-provider.js", () => ({
   addProvider: addProviderSpy,
 }));
 
-vi.mock("../agent/provider/discover-models.js", () => ({
-  discoverModels: vi.fn().mockResolvedValue([]),
-}));
+vi.mock("../agent/provider/discover-models.js", async () => {
+  const { ok: found } = await import("neverthrow");
+  return { discoverModels: vi.fn().mockResolvedValue(found([])) };
+});
 
 vi.mock("../agent/provider/add-model-routing.js", () => ({
   addModelRouting: vi.fn().mockResolvedValue({ id: "row-1", position: 0 }),
@@ -1144,6 +1147,42 @@ describe("stepConfigureProvider", () => {
     });
   });
 
+  it("falls back to typing the model id when discovery is unavailable", async () => {
+    const deps = buildDeps();
+    deps.agentStore.listProviders.mockResolvedValue([]);
+    addProviderSpy.mockResolvedValue({ providerId: "p-new", validation: { valid: true } });
+    vi.mocked(discoverModels).mockResolvedValueOnce(
+      failed({ kind: "unavailable", message: "returned 404" }),
+    );
+    vi.mocked(p.select).mockResolvedValueOnce("openrouter"); // provider type
+    vi.mocked(p.password).mockResolvedValueOnce("sk-or-test-1234567890");
+    vi.mocked(p.isCancel)
+      .mockReturnValueOnce(false) // provider type
+      .mockReturnValueOnce(false) // API key
+      .mockReturnValueOnce(true); // model id
+
+    await expect(stepConfigureProvider(deps)).rejects.toBeInstanceOf(WizardCancelled);
+    expect(vi.mocked(p.select)).toHaveBeenCalledOnce();
+    expect(vi.mocked(p.text)).toHaveBeenCalledOnce();
+  });
+
+  it("offers retry / skip / abort when the endpoint rejects discovery", async () => {
+    const deps = buildDeps();
+    deps.agentStore.listProviders.mockResolvedValue([]);
+    addProviderSpy.mockResolvedValue({ providerId: "p-new", validation: { valid: true } });
+    vi.mocked(discoverModels).mockResolvedValueOnce(
+      failed({ kind: "rejected", message: "returned 401" }),
+    );
+    vi.mocked(p.select)
+      .mockResolvedValueOnce("openrouter") // provider type
+      .mockResolvedValueOnce("abort"); // discovery failed
+    vi.mocked(p.password).mockResolvedValueOnce("sk-or-test-1234567890");
+
+    await expect(stepConfigureProvider(deps)).rejects.toBeInstanceOf(WizardCancelled);
+    expect(vi.mocked(p.select).mock.calls[1]?.[0]?.message).toMatch(/Discovery failed/);
+    expect(vi.mocked(p.text)).not.toHaveBeenCalled();
+  });
+
   it("custom provider: prompts for base URL before API key", async () => {
     const deps = buildDeps();
     deps.agentStore.listProviders.mockResolvedValue([]);
@@ -1259,7 +1298,7 @@ describe("stepConfigureImageProviders", () => {
   it("happy path: adds a non-fal provider when no existing + user accepts", async () => {
     const deps = buildDeps();
     deps.agentStore.listImageProviders.mockResolvedValue([]);
-    deps.agentStore.createImageProvider.mockResolvedValue({ id: "p-new" });
+    deps.agentStore.createImageProvider.mockResolvedValue(found({ id: "p-new" }));
     vi.mocked(p.confirm)
       .mockResolvedValueOnce(true) // proceed
       .mockResolvedValueOnce(true) // safe_mode default
@@ -1290,7 +1329,7 @@ describe("stepConfigureImageProviders", () => {
   it("openai_compatible: no safe_mode prompt, attrs stay empty", async () => {
     const deps = buildDeps();
     deps.agentStore.listImageProviders.mockResolvedValue([]);
-    deps.agentStore.createImageProvider.mockResolvedValue({ id: "p-new" });
+    deps.agentStore.createImageProvider.mockResolvedValue(found({ id: "p-new" }));
     vi.mocked(p.confirm)
       .mockResolvedValueOnce(true) // proceed
       .mockResolvedValueOnce(false); // promptAddImageModels first add → no
@@ -1311,7 +1350,9 @@ describe("stepConfigureImageProviders", () => {
   it("createImageProvider failure: logs error and returns without further work", async () => {
     const deps = buildDeps();
     deps.agentStore.listImageProviders.mockResolvedValue([]);
-    deps.agentStore.createImageProvider.mockRejectedValue(new Error("UNIQUE constraint"));
+    deps.agentStore.createImageProvider.mockResolvedValue(
+      failed({ kind: "image_provider_name_taken", name: "venice" }),
+    );
     vi.mocked(p.confirm).mockResolvedValueOnce(true).mockResolvedValueOnce(true);
     vi.mocked(p.select).mockResolvedValueOnce("venice");
     vi.mocked(p.text)
@@ -1321,7 +1362,7 @@ describe("stepConfigureImageProviders", () => {
 
     await stepConfigureImageProviders(deps);
 
-    // putSecret was attempted; createImageProvider threw; no model prompts should follow.
+    // putSecret was attempted; createImageProvider failed; no model prompts should follow.
     expect(deps.agentStore.createImageModel).not.toHaveBeenCalled();
   });
 

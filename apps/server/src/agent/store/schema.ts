@@ -16,6 +16,7 @@ import {
 import { z } from "zod";
 import { jsonbZod, pk, ts } from "../../db/helpers.js";
 import { CacheDialectSchema } from "../../llm/cache-dialect.js";
+import { StoredExtraBodySchema } from "../../llm/extra-body.js";
 import { PrefixMismatchBehaviorSchema } from "../../llm/prefix-mismatch-behavior.js";
 import { MessageContentSchema } from "../../llm/types.js";
 import { logger } from "../../logger.js";
@@ -380,6 +381,11 @@ export const llmProviders = pgTable("llm_providers", {
  * resolver layers them: row override → bundled LiteLLM JSON snapshot →
  * conservative default. Operators only need to set them when LiteLLM doesn't
  * know the model id and the conservative default (128k/4k) is too small.
+ *
+ * `extraBody` is the operator's extra chat-completions request fields for the
+ * model on an OpenAI-compatible provider; null sends only the adapter's own.
+ * Writes are checked against `ExtraBodySchema`, reads against the more
+ * lenient `StoredExtraBodySchema`. Anthropic rows never carry one.
  */
 export const modelProviders = pgTable(
   "model_providers",
@@ -393,6 +399,7 @@ export const modelProviders = pgTable(
     userSelectable: boolean("user_selectable").notNull(), // false = internal-only (hidden from /model picker)
     contextWindow: integer("context_window"), // null → resolver falls back
     maxOutputTokens: integer("max_output_tokens"), // null → resolver falls back
+    extraBody: jsonbZod("extra_body", StoredExtraBodySchema), // null → the adapter's fields only
     createdAt: ts(),
   },
   (t) => [
@@ -408,8 +415,8 @@ export const modelProviders = pgTable(
  *
  * The CHECK constraint pins the base_url invariant at the DB layer
  * (`fal ↔ NULL`, `openai_compatible ↔ NOT NULL`). The store layer adds URL
- * hygiene (https, no trailing slash) on top with a typed
- * `InvalidProviderConfigError`.
+ * hygiene (https, no trailing slash) on top, returning
+ * `invalid_provider_config`.
  *
  * No fallback chain — unlike `llm_providers` + `model_providers`, image
  * generation has no transparent cross-provider retry. A failed image gen

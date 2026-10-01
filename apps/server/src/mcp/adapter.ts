@@ -5,6 +5,7 @@ import { reject, type ToolOutcome, type ToolSpec } from "../agent/tools.js";
 import type { JsonSchema } from "../llm/types.js";
 import type { McpConnectionPool } from "./client/pool.js";
 import { composeMcpToolName, type McpServer, type McpToolDescriptor } from "./config.js";
+import { describeMcpPoolError } from "./errors.js";
 
 export interface McpToolAdapterOptions {
   server: McpServer;
@@ -35,9 +36,10 @@ export function mcpDescriptorToToolSpec(opts: McpToolAdapterOptions): ToolSpec {
     durable: true,
     handler: async (input) => {
       const conn = await opts.pool.getConnection(opts.server.id);
+      if (conn.isErr()) return reject(describeMcpPoolError(conn.error));
       let result: unknown;
       try {
-        result = await conn.callTool(opts.descriptor.name, input, {
+        result = await conn.value.callTool(opts.descriptor.name, input, {
           timeoutMs: opts.timeoutMs,
         });
       } catch (e) {

@@ -11,7 +11,7 @@ export type {
   ExecResult,
   ExecStreamingHandle,
 } from "./exec.js";
-export { ExecDisposedError, ExecTimeoutError, execFailureError, unwrapExit } from "./exec.js";
+export { ExecError, execFailureError, unwrapExit } from "./exec.js";
 export type { SandboxRuntime } from "./runtime.js";
 export type { ContainerRow, ContainerRuntime, ContainerStatus } from "./store/index.js";
 export type { ContainerLabels, ResourceLimits } from "./types.js";

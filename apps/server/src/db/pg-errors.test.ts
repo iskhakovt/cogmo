@@ -42,6 +42,16 @@ describe("findPgErrorByCode", () => {
     ).toMatchObject({ constraint: "uq_b" });
   });
 
+  it("returns the code and string constraint fields only, not the driver error", () => {
+    const driver = driverError("23505", { constraint_name: "uq_a", detail: "Key (id)=(1)" });
+    expect(findPgErrorByCode(wrapped(driver), ["23505"])).toEqual({
+      code: "23505",
+      constraint_name: "uq_a",
+    });
+    const numeric = Object.assign(new Error("pg"), { code: "23505", constraint: 7 });
+    expect(findPgErrorByCode(numeric, ["23505"])).toEqual({ code: "23505" });
+  });
+
   it("returns null for a different code, a code-less chain, or a non-error cause", () => {
     expect(findPgErrorByCode(wrapped(driverError("23505")), CODES)).toBeNull();
     expect(findPgErrorByCode(wrapped(new Error("no code here")), CODES)).toBeNull();

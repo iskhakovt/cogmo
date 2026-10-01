@@ -1,0 +1,1 @@
+ALTER TABLE "model_providers" ADD COLUMN "extra_body" jsonb;

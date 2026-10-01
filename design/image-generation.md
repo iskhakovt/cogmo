@@ -152,7 +152,7 @@ The listing is read only for a call that carries a ratio, cached per provider fo
 Two layers, for `openai_compatible` and `venice` providers:
 
 - **DB CHECK** (`chk_image_providers_base_url`) enforces per-value implications: `openai_compatible ↔ NOT NULL`, `venice ↔ NOT NULL`, `fal ↔ NULL`. Atomic; can't be bypassed by ad-hoc psql or a future store implementer who forgets.
-- **Store guard** (`addImageProvider`) adds URL hygiene the CHECK can't express: must be `https://`, no trailing slash, parseable as a URL. Throws `InvalidProviderConfigError` with a wizard-friendly message.
+- **Store guard** (`createImageProvider`) adds URL hygiene the CHECK can't express: must be `https://`, no trailing slash, parseable as a URL. A violation returns `invalid_provider_config` with a reason the wizard and CLI show.
 
 ## Tool Definition `[confirmed]`
 

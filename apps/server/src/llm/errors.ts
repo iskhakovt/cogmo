@@ -10,12 +10,14 @@
  *
  * This file also hosts {@link parseProviderJson} — the shared JSON pre-pass
  * that adapters use to parse buffered tool-arg payloads, with a `jsonrepair`
- * fallback and a typed throw on irrecoverable failure. It lives here, beside
- * the error it raises, rather than in a separate `parse.ts`; greppers looking
- * for the parse logic should start with this file.
+ * fallback and a {@link ProviderProtocolError} result on irrecoverable
+ * failure. It lives here, beside the error it returns, rather than in a
+ * separate `parse.ts`; greppers looking for the parse logic should start with
+ * this file.
  */
 
 import { jsonrepair } from "jsonrepair";
+import { err, ok, type Result } from "neverthrow";
 import type { Usage } from "./types.js";
 
 /**
@@ -87,39 +89,39 @@ export class MissingToolCallError extends ProviderProtocolError {
  * Parse a JSON payload streamed by a provider (e.g. buffered tool-use
  * argument chunks). Try `JSON.parse` first; on failure, run `jsonrepair`
  * (handles trailing commas, unclosed strings within reason, missing
- * quotes) and parse again. If repair also fails, raise
- * {@link ProviderProtocolError} so the in-loop classifier owns the
- * recovery decision instead of the provider chain misclassifying a bare
- * `SyntaxError`.
+ * quotes) and parse again. If repair also fails, the result is a
+ * {@link ProviderProtocolError}. The adapter decides whether the output cap
+ * cut the payload off ({@link ToolArgsCutOffError}) and throws it from the
+ * call, where the in-loop classifier owns the recovery and the provider chain
+ * propagates it rather than reading a bare `SyntaxError` as transient.
  *
- * `context` identifies the call site in the resulting error message
- * (e.g. "Anthropic streamed tool_use input", "OpenAI-compatible streamed
- * tool_calls arguments") so failures point at the right adapter without
- * the caller having to format the message.
+ * `context` identifies the call site in the error message (e.g. "Anthropic
+ * streamed tool_use input", "OpenAI-compatible streamed tool_calls
+ * arguments") so failures point at the right adapter without the caller
+ * having to format the message.
  *
- * The thrown {@link ProviderProtocolError} carries the `jsonrepair` failure
- * as its `.cause` (the final, decisive error) and embeds the initial
- * `JSON.parse` failure in the human-readable message so both attempts are
- * visible without chasing `.cause`. There is no in-loop handler today —
- * PR 5 will install one. Until then the error propagates out of
- * `runStreamingAgentLoop` and surfaces as an Inngest function failure,
- * which fails the turn (the same observable outcome as the pre-PR-#256
- * behavior, just routed through a typed error class instead of a bare
- * `SyntaxError`).
+ * The error carries the `jsonrepair` failure as its `.cause` (the final,
+ * decisive error) and embeds the initial `JSON.parse` failure in its message,
+ * so both attempts are visible without chasing `.cause`.
  */
-export function parseProviderJson(raw: string, toolName: string, context: string): unknown {
+export function parseProviderJson(
+  raw: string,
+  toolName: string,
+  context: string,
+): Result<unknown, ProviderProtocolError> {
   try {
-    return JSON.parse(raw);
+    return ok(JSON.parse(raw));
   } catch (initial) {
     try {
-      const repaired = jsonrepair(raw);
-      return JSON.parse(repaired);
+      return ok(JSON.parse(jsonrepair(raw)));
     } catch (repairErr) {
       const initialMsg = initial instanceof Error ? initial.message : String(initial);
       const repairMsg = repairErr instanceof Error ? repairErr.message : String(repairErr);
-      throw new ProviderProtocolError(
-        `${context} for "${toolName}" failed to parse — initial: ${initialMsg}; after jsonrepair: ${repairMsg}`,
-        repairErr,
+      return err(
+        new ProviderProtocolError(
+          `${context} for "${toolName}" failed to parse — initial: ${initialMsg}; after jsonrepair: ${repairMsg}`,
+          repairErr,
+        ),
       );
     }
   }
@@ -133,7 +135,11 @@ export function parseProviderJson(raw: string, toolName: string, context: string
  * — and yields `{}` here to match the non-streaming SDK behavior.
  * Anything else delegates to {@link parseProviderJson}.
  */
-export function parseToolArgs(raw: string, toolName: string, context: string): unknown {
-  if (raw.trim() === "") return {};
+export function parseToolArgs(
+  raw: string,
+  toolName: string,
+  context: string,
+): Result<unknown, ProviderProtocolError> {
+  if (raw.trim() === "") return ok({});
   return parseProviderJson(raw, toolName, context);
 }

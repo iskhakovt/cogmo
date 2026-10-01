@@ -11,7 +11,7 @@ import { imageProviders, llmProviders } from "./schema.js";
  * llm_providers.type enum. Scope is deliberately narrow:
  *
  * - The DB CHECK on image_providers.base_url is defense-in-depth that the
- *   future store method (which translates inputs to `InvalidProviderConfigError`)
+ *   store method (which rejects bad inputs as `invalid_provider_config`)
  *   can't reach. One PGlite test pins each accept/reject case.
  * - The llm_providers.type enum cast (`USING type::llm_provider_type` in
  *   migration 0029) is locked in here — store method inserts go via the
@@ -20,7 +20,7 @@ import { imageProviders, llmProviders } from "./schema.js";
  * UNIQUE name violations, ON DELETE CASCADE, and JSONB roundtrip are
  * covered by the store-method tests that ship with the implementation PR
  * (precedent: `store.test.ts` → "deleteProvider cascades to model_providers",
- * "updateProfile translates unique-name collision to UniqueViolationError"),
+ * "updateProfile reports a unique-name collision as profile_name_taken"),
  * so they don't get duplicate coverage here.
  */
 

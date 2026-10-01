@@ -21,7 +21,7 @@ import {
   mockMemoryProvider,
   mockTransportStore,
 } from "../../test/factories.js";
-import { StreamDeliveryError } from "../../transport/delivery-router.js";
+import type { StreamDeliveryError } from "../../transport/delivery-router.js";
 import { canonicalKeyOrder } from "../../util/canonical-key-order.js";
 import { toolResultClearing } from "../context.js";
 import type { AgentLoopResult, StepRunner } from "../loop.js";
@@ -813,9 +813,9 @@ describe("runAgenticStage", () => {
   });
 
   describe("stream delivery failures", () => {
-    const deliveryFailed = new StreamDeliveryError([
-      { sessionId: "session-tg", reason: "telegram: chat not found" },
-    ]);
+    const deliveryFailed: StreamDeliveryError = {
+      failures: [{ sessionId: "session-tg", reason: "telegram: chat not found" }],
+    };
 
     it("keeps a deterministic loop error non-retriable when the abort fails", async () => {
       const h = await harness();
