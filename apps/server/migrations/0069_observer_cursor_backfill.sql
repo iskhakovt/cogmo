@@ -1,53 +1,56 @@
--- Start each observed conversation's cursors where its last fire began
--- reading: every fire before the cursors read the whole transcript from a
--- history load at its start, so the messages created before that start were
--- extracted. A fire's start is its audit row's time less its `durationMs`; a
--- row without one is taken to have begun 10 minutes earlier, past the longest
--- fire's model calls and step retries, so a message is re-extracted rather
--- than skipped. Each phase starts at the latest fire that extracted it: one
--- that didn't fail it (`failedPhases`; a row without the field failed none),
--- didn't find the model too small for a chunk (`modelBudgetTooSmall`) and,
--- for memories, didn't hold them for a user's rule the profile couldn't see
+-- Start each observed conversation's cursors at the last message its latest
+-- fire read. Every fire before the cursors read the whole transcript, ordered
+-- by id, and recorded how many messages that was (`messageCount`); messages
+-- are deleted only with their conversation, so the read was the first
+-- `messageCount` messages by id, and the last of them is the cursor.
+--
+-- Each phase starts at the latest fire that extracted it: one that didn't fail
+-- it (`failedPhases`; a row without the field failed none) and, for memories,
+-- didn't hold them for a user's rule the profile couldn't see
 -- (`memories.skippedForUnseenRules` above 0; missing reads as 0). A skipped
--- fire writes no row. A phase with no such fire, like a conversation the
--- Observer never fired on, stays NULL.
+-- fire writes no row. A row without `messageCount`, or counting more messages
+-- than the conversation has, describes no read of this transcript and doesn't
+-- qualify. A phase with no qualifying fire, like a conversation the Observer
+-- never fired on, stays NULL and is read whole on its next fire.
 WITH "fires" AS (
   SELECT "conversation_id",
-    "created_at" - COALESCE(
-      ("payload"->>'durationMs')::bigint * interval '1 millisecond',
-      interval '10 minutes'
-    ) AS "started_at",
+    ("payload"->>'messageCount')::int AS "message_count",
     COALESCE("payload"->'failedPhases', '[]'::jsonb) AS "failed",
-    COALESCE(("payload"->'memories'->>'skippedForUnseenRules')::int, 0) > 0 AS "memories_held",
-    COALESCE(("payload"->>'modelBudgetTooSmall')::boolean, false) AS "too_small"
+    COALESCE(("payload"->'memories'->>'skippedForUnseenRules')::int, 0) > 0 AS "memories_held"
   FROM "evolution_events"
-), "last_start" AS (
+  WHERE "payload"->>'messageCount' IS NOT NULL
+    AND ("payload"->>'messageCount')::int <= (
+      SELECT count(*) FROM "messages"
+      WHERE "messages"."conversation_id" = "evolution_events"."conversation_id"
+    )
+), "read" AS (
   SELECT "conversation_id",
-    max("started_at") FILTER (
-      WHERE NOT "failed" @> '["corrections"]'::jsonb AND NOT "too_small"
-    ) AS "corrections_at",
-    max("started_at") FILTER (
-      WHERE NOT "failed" @> '["memories"]'::jsonb AND NOT "memories_held" AND NOT "too_small"
-    ) AS "memories_at"
+    max("message_count") FILTER (
+      WHERE NOT "failed" @> '["corrections"]'::jsonb
+    ) AS "corrections_count",
+    max("message_count") FILTER (
+      WHERE NOT "failed" @> '["memories"]'::jsonb AND NOT "memories_held"
+    ) AS "memories_count"
   FROM "fires"
   GROUP BY "conversation_id"
+), "numbered" AS (
+  SELECT "messages"."conversation_id", "messages"."id",
+    row_number() OVER (PARTITION BY "messages"."conversation_id" ORDER BY "messages"."id") AS "position"
+  FROM "messages"
+  JOIN "read" ON "read"."conversation_id" = "messages"."conversation_id"
 )
 UPDATE "conversations"
 SET "corrections_observed_through" = (
-    SELECT "messages"."id" FROM "messages"
-    WHERE "messages"."conversation_id" = "conversations"."id"
-      AND "messages"."created_at" <= "last_start"."corrections_at"
-    ORDER BY "messages"."id" DESC
-    LIMIT 1
+    SELECT "numbered"."id" FROM "numbered"
+    WHERE "numbered"."conversation_id" = "conversations"."id"
+      AND "numbered"."position" = "read"."corrections_count"
   ),
   "memories_observed_through" = (
-    SELECT "messages"."id" FROM "messages"
-    WHERE "messages"."conversation_id" = "conversations"."id"
-      AND "messages"."created_at" <= "last_start"."memories_at"
-    ORDER BY "messages"."id" DESC
-    LIMIT 1
+    SELECT "numbered"."id" FROM "numbered"
+    WHERE "numbered"."conversation_id" = "conversations"."id"
+      AND "numbered"."position" = "read"."memories_count"
   )
-FROM "last_start"
-WHERE "conversations"."id" = "last_start"."conversation_id"
+FROM "read"
+WHERE "conversations"."id" = "read"."conversation_id"
   AND "conversations"."corrections_observed_through" IS NULL
   AND "conversations"."memories_observed_through" IS NULL;

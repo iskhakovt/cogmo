@@ -114,16 +114,17 @@ async function seedMessage(conversationId: string, createdAt: string): Promise<s
 
 /**
  * An Observer audit row written at `createdAt`, the end of its fire. Only the
- * payload fields the backfill reads are set; an older row may lack either.
+ * payload fields the backfill reads are set, and `durationMs` where a test
+ * shows the backfill ignores it; an older row may lack any of them.
  */
 async function seedFire(
   conversationId: string,
   createdAt: string,
   payload: {
+    messageCount?: number;
     durationMs?: number;
     failedPhases?: string[];
     memories?: { skippedForUnseenRules?: number };
-    modelBudgetTooSmall?: boolean;
   },
 ): Promise<void> {
   await db.execute(sql`
@@ -144,57 +145,44 @@ async function cursorsOf(conversationId: string) {
 }
 
 describe("migrations 0068 and 0069 — observer cursors", () => {
-  it("starts an observed conversation's cursors at the last message before its latest fire began", async () => {
+  it("starts an observed conversation's cursors at the last message its latest fire read", async () => {
     const conversationId = await seedConversation();
     await seedMessage(conversationId, "2026-09-01T09:00:00Z");
-    await seedFire(conversationId, "2026-09-01T09:30:00Z", { durationMs: 60_000 });
-    const seen = await seedMessage(conversationId, "2026-09-01T10:00:00Z");
-    // The latest fire began at 10:01 and wrote its row at 10:05: a message
-    // that arrived at 10:03 came after its history load.
+    await seedFire(conversationId, "2026-09-01T09:30:00Z", { messageCount: 1 });
+    const read = await seedMessage(conversationId, "2026-09-01T10:00:00Z");
+    // Saved while the fire's model calls ran, after its history load: the
+    // row's `durationMs` (≈0 on rows written before the first step timed the
+    // fire) can't tell, but its count of the messages it read can.
     const during = await seedMessage(conversationId, "2026-09-01T10:03:00Z");
-    await seedFire(conversationId, "2026-09-01T10:05:00Z", { durationMs: 240_000 });
+    await seedFire(conversationId, "2026-09-01T10:05:00Z", { messageCount: 2, durationMs: 2 });
     const after = await seedMessage(conversationId, "2026-09-01T10:06:00Z");
 
     await applyMigrations();
 
     expect(await cursorsOf(conversationId)).toMatchObject({
-      corrections_observed_through: seen,
-      memories_observed_through: seen,
+      corrections_observed_through: read,
+      memories_observed_through: read,
     });
     const store = new DrizzleAgentStore();
     const unseen = await tx((trx) =>
-      store.listMessagesInRange(trx, conversationId, { after: seen, through: after, limit: null }),
+      store.listMessagesInRange(trx, conversationId, { after: read, through: after, limit: null }),
     );
     expect(unseen.map((m) => m.id)).toEqual([during, after]);
   });
 
-  it("takes a fire without a recorded duration to have begun ten minutes before its row", async () => {
-    const conversationId = await seedConversation();
-    const seen = await seedMessage(conversationId, "2026-09-01T11:45:00Z");
-    await seedMessage(conversationId, "2026-09-01T11:55:00Z");
-    await seedFire(conversationId, "2026-09-01T12:00:00Z", {});
-
-    await applyMigrations();
-
-    expect(await cursorsOf(conversationId)).toMatchObject({
-      corrections_observed_through: seen,
-      memories_observed_through: seen,
-    });
-  });
-
-  it("starts each phase's cursor at the latest fire that phase didn't fail", async () => {
+  it("starts each phase's cursor at the latest fire that extracted it", async () => {
     const conversationId = await seedConversation();
     const first = await seedMessage(conversationId, "2026-09-01T09:00:00Z");
-    await seedFire(conversationId, "2026-09-01T10:00:00Z", { durationMs: 0, failedPhases: [] });
+    await seedFire(conversationId, "2026-09-01T10:00:00Z", { messageCount: 1, failedPhases: [] });
     const second = await seedMessage(conversationId, "2026-09-01T10:30:00Z");
     await seedFire(conversationId, "2026-09-01T11:00:00Z", {
-      durationMs: 0,
+      messageCount: 2,
       failedPhases: ["corrections", "drain"],
     });
     const onlyFailed = await seedConversation();
     const onlyMessage = await seedMessage(onlyFailed, "2026-09-01T09:00:00Z");
     await seedFire(onlyFailed, "2026-09-01T10:00:00Z", {
-      durationMs: 0,
+      messageCount: 1,
       failedPhases: ["memories"],
     });
 
@@ -214,18 +202,18 @@ describe("migrations 0068 and 0069 — observer cursors", () => {
     const conversationId = await seedConversation();
     const first = await seedMessage(conversationId, "2026-09-01T09:00:00Z");
     await seedFire(conversationId, "2026-09-01T10:00:00Z", {
-      durationMs: 0,
+      messageCount: 1,
       memories: { skippedForUnseenRules: 0 },
     });
     const second = await seedMessage(conversationId, "2026-09-01T10:30:00Z");
     await seedFire(conversationId, "2026-09-01T11:00:00Z", {
-      durationMs: 0,
+      messageCount: 2,
       memories: { skippedForUnseenRules: 1 },
     });
     const onlyHeld = await seedConversation();
     const onlyMessage = await seedMessage(onlyHeld, "2026-09-01T09:00:00Z");
     await seedFire(onlyHeld, "2026-09-01T10:00:00Z", {
-      durationMs: 0,
+      messageCount: 1,
       memories: { skippedForUnseenRules: 1 },
     });
 
@@ -241,37 +229,35 @@ describe("migrations 0068 and 0069 — observer cursors", () => {
     });
   });
 
-  it("starts neither cursor at a fire whose model was too small to extract", async () => {
-    const conversationId = await seedConversation();
-    await seedMessage(conversationId, "2026-09-01T09:00:00Z");
-    await seedFire(conversationId, "2026-09-01T10:00:00Z", {
-      durationMs: 0,
-      modelBudgetTooSmall: true,
-    });
+  it("starts no cursor at a fire claiming more messages than the conversation has, or none", async () => {
+    const tooMany = await seedConversation();
+    await seedMessage(tooMany, "2026-09-01T09:00:00Z");
+    await seedFire(tooMany, "2026-09-01T10:00:00Z", { messageCount: 5 });
+    const uncounted = await seedConversation();
+    await seedMessage(uncounted, "2026-09-01T09:00:00Z");
+    await seedFire(uncounted, "2026-09-01T10:00:00Z", {});
 
+    // An earlier fire that read a count the conversation has still qualifies.
+    const laterTooMany = await seedConversation();
+    const counted = await seedMessage(laterTooMany, "2026-09-01T09:00:00Z");
+    await seedFire(laterTooMany, "2026-09-01T09:30:00Z", { messageCount: 1 });
+    await seedFire(laterTooMany, "2026-09-01T10:00:00Z", { messageCount: 5 });
     await applyMigrations();
-
-    expect(await cursorsOf(conversationId)).toMatchObject({
-      corrections_observed_through: null,
-      memories_observed_through: null,
+    expect(await cursorsOf(laterTooMany)).toMatchObject({
+      corrections_observed_through: counted,
+      memories_observed_through: counted,
     });
+
+    for (const conversationId of [tooMany, uncounted]) {
+      expect(await cursorsOf(conversationId)).toMatchObject({
+        corrections_observed_through: null,
+        memories_observed_through: null,
+      });
+    }
   });
 
   it("leaves a conversation the Observer never fired on unobserved", async () => {
     const conversationId = await seedConversation();
-    await seedMessage(conversationId, "2026-09-01T10:00:00Z");
-
-    await applyMigrations();
-
-    expect(await cursorsOf(conversationId)).toMatchObject({
-      corrections_observed_through: null,
-      memories_observed_through: null,
-    });
-  });
-
-  it("leaves a conversation whose fire predates its every message unobserved", async () => {
-    const conversationId = await seedConversation();
-    await seedFire(conversationId, "2026-09-01T09:00:00Z", { durationMs: 1_000 });
     await seedMessage(conversationId, "2026-09-01T10:00:00Z");
 
     await applyMigrations();
