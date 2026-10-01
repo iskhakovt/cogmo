@@ -178,7 +178,7 @@ const env = createEnv({
 | Tool | Why not |
 |-|-|
 | Next.js / TanStack Start | SSR buys nothing for a single-user dashboard and fights the SSE + RPC model — a Vite SPA instead ([decisions.md](decisions.md)) |
-| Fastify / Express / Hono | The UI server is a handful of routes plus the oRPC handler on raw `node:http`; a framework adds nothing |
+| Fastify / Express / Hono | The UI server is a handful of routes, `/rpc` belongs to oRPC, and the chat SSE stream needs the raw response — see [decisions.md](decisions.md) |
 | Jest | Vitest is faster with native TS/ESM |
 | Winston | Pino is 5x faster, JSON-native |
 | ESLint + Prettier | Biome does both, 20x faster |
