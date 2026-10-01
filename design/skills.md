@@ -210,6 +210,7 @@ The pool's bookkeeping is a second pure state machine (`src/skills/worker-sysbox
 - A death is early when the worker died on its own (`worker`, not `host`), never leased, within a minute of its handshake. After three early deaths in a row, a dead worker is not replaced at once. A waiter waits for a busy worker; with none, the queue probes one spawn at a time, once any refused probe's death is heard. The head waiter takes the probe: one that lives serves it, one that dies early fails it, and the next waiter probes again. The sweep spawns one worker toward `min` when nothing is spawning. Whatever `min` is, an acquire after the fault clears is served without a sweep or a restart.
 - The sweep retires idle workers above `min` that have sat past `idleShutdownMs`.
 - `dispose()` aborts the signal every worker was created with — a live worker's channel closes, a spawn stops at its next step — rejects every waiter, and tears down every worker, held ones included. A worker that spawns afterwards is torn down; `dispose()` returns once no spawn or teardown is left.
+- A rejected waiter's task fails as a value: `invoke` returns `ok: false` naming the rejection, and the runner finishes the run as an error rather than leaving its row in flight.
 
 ### State reset between tasks `[confirmed]`
 

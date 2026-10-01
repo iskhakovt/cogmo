@@ -121,9 +121,9 @@ export interface WorkerHandle {
   dispose(): Promise<void>;
 }
 
+/** A queued acquire, settled with a leased worker or the machine's refusal. */
 interface PendingWaiter {
-  resolve: (worker: WorkerHandle) => void;
-  reject: (err: Error) => void;
+  settle: (acquired: Result<WorkerHandle, Rejection>) => void;
 }
 
 type Event = PoolEvent<WorkerHandle, PendingWaiter>;
@@ -243,12 +243,19 @@ export class SysboxWorkerPool {
   /**
    * Run one task. Acquires a worker — idle, spawned for it below `max`, or
    * freed while it queued — invokes the task, and gives the worker back.
+   * When no worker can be had (the pool disposed while the task queued, a
+   * crash loop, a failed spawn) the task fails as a value, like any other
+   * task the sandbox could not run.
    */
   async invoke(params: InvokeParams): Promise<InvokeResult> {
     if (this.#state.phase === "disposed") {
       throw new Error("SysboxWorkerPool: invoke after dispose");
     }
-    const worker = await this.#acquire();
+    const acquired = await this.#acquire();
+    if (acquired.isErr()) {
+      return { ok: false, error: describeRejection(acquired.error), workerReusable: false };
+    }
+    const worker = acquired.value;
     // `worker.invoke` returns a task's failures as `ok: false`; a throw is a bug.
     let returned: TaskReturn = { kind: "threw" };
     try {
@@ -298,9 +305,9 @@ export class SysboxWorkerPool {
 
   // --- internals ---
 
-  #acquire(): Promise<WorkerHandle> {
-    const { promise, resolve, reject } = Promise.withResolvers<WorkerHandle>();
-    this.#feed({ type: "acquire", waiter: { resolve, reject } });
+  #acquire(): Promise<Result<WorkerHandle, Rejection>> {
+    const { promise, resolve } = Promise.withResolvers<Result<WorkerHandle, Rejection>>();
+    this.#feed({ type: "acquire", waiter: { settle: resolve } });
     return promise;
   }
 
@@ -332,7 +339,7 @@ export class SysboxWorkerPool {
       })
       .with({ type: "grant" }, ({ worker, waiter }) => this.#grant(worker, waiter))
       .with({ type: "reject" }, ({ waiter, rejection }) => {
-        waiter.reject(rejectionError(rejection));
+        waiter.settle(err(rejection));
         return [];
       })
       .with({ type: "retire" }, ({ worker }) => {
@@ -409,7 +416,7 @@ export class SysboxWorkerPool {
       log.debug({ workerId: worker.workerId, reason: lease.error }, "worker refused its lease");
       return [{ type: "grant_refused", worker, waiter }];
     }
-    waiter.resolve(worker);
+    waiter.settle(ok(worker));
     return [];
   }
 
@@ -426,19 +433,11 @@ export class SysboxWorkerPool {
   }
 }
 
-function rejectionError(rejection: Rejection): Error {
+function describeRejection(rejection: Rejection): string {
   return match(rejection)
-    .returnType<Error>()
-    .with(
-      { kind: "disposed" },
-      () => new Error("SysboxWorkerPool: disposed before worker available"),
-    )
-    .with(
-      { kind: "crash_loop" },
-      () => new Error("skills workers keep dying before their first task"),
-    )
-    .with({ kind: "spawn_failed" }, ({ error }) =>
-      error instanceof Error ? error : new Error(String(error)),
-    )
+    .returnType<string>()
+    .with({ kind: "disposed" }, () => "SysboxWorkerPool: disposed before worker available")
+    .with({ kind: "crash_loop" }, () => "skills workers keep dying before their first task")
+    .with({ kind: "spawn_failed" }, ({ error }) => describeError(error))
     .exhaustive();
 }
