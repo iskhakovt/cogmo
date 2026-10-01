@@ -5,11 +5,11 @@ import type { Service } from "../agent/service.js";
 import type { Database, Transactor } from "../db/index.js";
 import type { SandboxClient } from "../sandbox/index.js";
 import type { SecretsStore } from "../secrets/store/index.js";
-import { expectDefined } from "../test/assertions.js";
+import { assertStatus, expectDefined } from "../test/assertions.js";
 import { mockFilesService } from "../test/factories.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import type { SkillRunAs, SkillRunServices } from "./run-as.js";
-import { mapManifestResourceLimits, SkillRunnerImpl, type SkillRunnerOptions } from "./runner.js";
+import { SkillRunnerImpl, type SkillRunnerOptions } from "./runner.js";
 import { DrizzleSkillStore } from "./store/index.js";
 import { SysboxWorkerPool } from "./worker-sysbox/pool.js";
 
@@ -125,7 +125,7 @@ describe("SkillRunnerImpl", () => {
     const result = (
       await runner.invoke({ name: "echo", inputs: { x: 7 }, runAs: runAs() })
     )._unsafeUnwrap();
-    expect(result.status).toBe("success");
+    assertStatus(result, "success");
     expect(result.output).toEqual({ echo: 8 });
 
     const run = await tx((trx) => store.getRun(trx, result.runId));
@@ -171,7 +171,7 @@ async def run(inputs, ctx):
         runAs: runAs({ memory }),
       })
     )._unsafeUnwrap();
-    expect(result.status).toBe("success");
+    assertStatus(result, "success");
     expect(result.output).toEqual({ count: 1 });
 
     const calls = await tx((trx) => store.listContextCallsForRun(trx, result.runId));
@@ -214,6 +214,7 @@ async def run(inputs, ctx):
       })
     )._unsafeUnwrap();
 
+    assertStatus(result, "success");
     expect(result.output).toEqual({ user: "user-42", timezone: "UTC", count: 1 });
     expect(memory.recall).toHaveBeenCalledWith("hello");
     expect(memory.stageRetain).toHaveBeenCalledWith("seen", {
@@ -255,7 +256,7 @@ async def run(inputs, ctx):
     const result = (
       await runner.invoke({ name: "with-files", inputs: {}, runAs: runAs({ files }) })
     )._unsafeUnwrap();
-    expect(result.status).toBe("success");
+    assertStatus(result, "success");
     expect(result.output).toEqual({
       content: "hello",
       first_path: "notes/draft.md",
@@ -310,7 +311,7 @@ async def run(inputs, ctx):
       const result = (
         await runner.invoke({ name: "with-http", inputs: {}, runAs: runAs() })
       )._unsafeUnwrap();
-      expect(result.status).toBe("success");
+      assertStatus(result, "success");
       expect(result.output).toEqual({ status: 200, n: 42 });
       expect(resolveHost).toHaveBeenCalledWith("api.example.com");
       expect(fetchImpl).toHaveBeenCalledWith("https://api.example.com/n", expect.anything());
@@ -361,7 +362,7 @@ async def run(inputs, ctx):
       const result = (
         await runner.invoke({ name: "http-audited", inputs: {}, runAs: runAs() })
       )._unsafeUnwrap();
-      expect(result.status).toBe("success");
+      assertStatus(result, "success");
       const calls = await tx((trx) => store.listContextCallsForRun(trx, result.runId));
       expect(calls.find((c) => c.method === "http.request")?.ok).toBe(true);
       // The audit row proves the runner kept its own binding only if the
@@ -414,7 +415,7 @@ async def run(inputs, ctx):
         runAs: runAs({ files }),
       })
     )._unsafeUnwrap();
-    expect(result.status).toBe("success");
+    assertStatus(result, "success");
     expect(result.output).toEqual({ reached: false, kind: "missing_effect" });
     expect(files.read).not.toHaveBeenCalled();
   });
@@ -434,7 +435,7 @@ async def run(inputs, ctx):
     const result = (
       await runner.invoke({ name: "boom", inputs: { x: 1 }, runAs: runAs() })
     )._unsafeUnwrap();
-    expect(result.status).toBe("error");
+    assertStatus(result, "error");
     expect(result.error).toContain("kaboom");
 
     const run = await tx((trx) => store.getRun(trx, result.runId));
@@ -554,6 +555,8 @@ inputs:
     const b = (
       await runner.invoke({ name: "echo", inputs: { x: 2 }, runAs: runAs() })
     )._unsafeUnwrap();
+    assertStatus(a, "success");
+    assertStatus(b, "success");
     expect(a.output).toEqual({ echo: 2 });
     expect(b.output).toEqual({ echo: 3 });
     expect(a.runId).not.toBe(b.runId);
@@ -780,7 +783,7 @@ inputs:
           runAs: runAs(),
         })
       )._unsafeUnwrap();
-      expect(result.status).toBe("success");
+      assertStatus(result, "success");
       expect(result.output).toEqual({ echo: 11 });
 
       const run = await tx((trx) => store.getRun(trx, result.runId));
@@ -823,7 +826,7 @@ inputs:
       // one. Same output proves the cached result was returned. No way
       // for these two to match by coincidence — runId is a per-row UUID.
       expect(second.runId).toBe(first.runId);
-      expect(second.status).toBe("success");
+      assertStatus(second, "success");
       expect(second.output).toEqual({ echo: 8 });
     });
 
@@ -872,7 +875,7 @@ inputs:
         })
       )._unsafeUnwrap();
       expect(result.runId).toBe(row.id);
-      expect(result.status).toBe("success");
+      assertStatus(result, "success");
       expect(result.output).toEqual({ echo: 999 });
       // The row finalized.
       const reloaded = await tx((trx) => store.getRun(trx, row.id));
@@ -950,7 +953,7 @@ async def run(inputs, ctx):
     const r = (
       await runner.invoke({ name: "unicode", inputs: { x: 1 }, runAs: runAs() })
     )._unsafeUnwrap();
-    expect(r.status).toBe("success");
+    assertStatus(r, "success");
     expect(r.output).toEqual({
       emoji: "😀",
       accented: "café",
@@ -960,36 +963,9 @@ async def run(inputs, ctx):
   });
 });
 
-describe("mapManifestResourceLimits", () => {
-  it("maps memory_mb to bytes and cpu_shares to cpus", () => {
-    expect(mapManifestResourceLimits({ memory_mb: 1024, cpu_shares: 2, wall_clock_s: 30 })).toEqual(
-      { memory_bytes: 1024 * 1024 * 1024, cpus: 2 },
-    );
-  });
-
-  it("maps cpu_shares alone — regression: was silently dropped before", () => {
-    expect(mapManifestResourceLimits({ cpu_shares: 3 })).toEqual({ cpus: 3 });
-  });
-
-  it("maps memory_mb alone", () => {
-    expect(mapManifestResourceLimits({ memory_mb: 512 })).toEqual({
-      memory_bytes: 512 * 1024 * 1024,
-    });
-  });
-
-  it("returns an empty object when the manifest declares no resources", () => {
-    expect(mapManifestResourceLimits(undefined)).toEqual({});
-    expect(mapManifestResourceLimits({})).toEqual({});
-  });
-
-  it("ignores wall_clock_s — that's threaded as a separate runOnSysboxContainer arg", () => {
-    expect(mapManifestResourceLimits({ wall_clock_s: 60 })).toEqual({});
-  });
-});
-
 // Race + lifecycle invariants for the lazy tier-2 pool. Spies on
 // `SysboxWorkerPool.create` (named import is bound to the module's
-// class object, so the spy propagates to runner.ts's call site
+// class object, so the spy propagates to warm-pool.ts's call site
 // without further plumbing) so we can control timing without
 // spinning up real sysbox containers.
 const TIER2_MANIFEST = `---
@@ -1047,13 +1023,13 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
     const runner = await makeTier2Runner();
 
     // Three invokes fire before the pool finishes constructing — all
-    // three should queue behind one in-flight `#poolPromise`.
+    // three should queue behind one in-flight pool start.
     const pending = [
       runner.invoke({ name: "tier2-test", inputs: {}, runAs: runAs() }),
       runner.invoke({ name: "tier2-test", inputs: {}, runAs: runAs() }),
       runner.invoke({ name: "tier2-test", inputs: {}, runAs: runAs() }),
     ];
-    // Drain microtasks so each invoke reaches `#ensurePool`.
+    // Drain microtasks so each invoke reaches `LazyWarmPool.ensure`.
     await new Promise<void>((r) => setImmediate(r));
 
     expect(createSpy).toHaveBeenCalledTimes(1);
@@ -1068,7 +1044,7 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
     }
   });
 
-  it("clears #poolPromise on init failure — next invoke retries with a fresh create", async () => {
+  it("clears a failed pool start — next invoke retries with a fresh create", async () => {
     const fakePool = makeFakePool();
     createSpy
       .mockRejectedValueOnce(new Error("daytona unreachable"))
@@ -1086,7 +1062,7 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
     const ok = (
       await runner.invoke({ name: "tier2-test", inputs: {}, runAs: runAs() })
     )._unsafeUnwrap();
-    expect(ok.status).toBe("success");
+    assertStatus(ok, "success");
     expect(createSpy).toHaveBeenCalledTimes(2);
     expect(fakePool.invoke).toHaveBeenCalledTimes(1);
   });
@@ -1108,7 +1084,7 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
     expect(await db.query.skillRuns.findFirst()).toBeUndefined();
 
     const retried = (await runner.invoke(keyed))._unsafeUnwrap();
-    expect(retried.status).toBe("success");
+    assertStatus(retried, "success");
     expect(fakePool.invoke).toHaveBeenCalledTimes(1);
   });
 
@@ -1172,7 +1148,7 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
       await runner.invoke({ name: "tier2-test", inputs: {}, runAs: runAs() })
     )._unsafeUnwrap();
 
-    expect(result.status).toBe("error");
+    assertStatus(result, "error");
     const run = await db.query.skillRuns.findFirst();
     expect(run?.status).toBe("error");
     expect(run?.error).toBe("worker_crashed");

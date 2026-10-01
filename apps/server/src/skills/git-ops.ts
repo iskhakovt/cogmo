@@ -35,6 +35,14 @@ function exitCodeOf(e: unknown): unknown {
  * the repo unreadable, a corrupt object. Thrown, since nothing but a human
  * repairs it.
  */
+/** `update-ref`'s compare-and-swap failed: the ref no longer holds the expected sha. */
+export class RefMovedError extends Error {
+  constructor(ref: string, expectedOldSha: string | undefined, cause: unknown) {
+    super(`ref ${ref} changed since read (expected ${expectedOldSha})`, { cause });
+    this.name = "RefMovedError";
+  }
+}
+
 function gitFailure(what: string, e: unknown): Error {
   return new Error(`git ${what} failed: ${describeError(e)}`, { cause: e });
 }
@@ -115,7 +123,7 @@ export async function isAncestor(
  * `pre-receive` hook installed by `bootstrapSkillsRepo` — so this is the
  * single mechanism by which Cogmo advances `refs/heads/main`.
  *
- * Throws when the CAS check fails: the deploy transactions call this last,
+ * Throws {@link RefMovedError} when the CAS check fails: the deploy transactions call this last,
  * inside the transaction, and the throw is what rolls them back.
  */
 export async function updateRef(
@@ -132,7 +140,7 @@ export async function updateRef(
     await execFileP("git", args);
   } catch (e) {
     if (/cannot lock ref|is at .* but expected/.test(stderrOf(e))) {
-      throw new Error(`ref ${ref} changed since read (expected ${expectedOldSha})`, { cause: e });
+      throw new RefMovedError(ref, expectedOldSha, e);
     }
     throw gitFailure("update-ref", e);
   }

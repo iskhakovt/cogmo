@@ -70,6 +70,23 @@ export function assertKind<U extends { kind: string }, K extends U["kind"]>(
 }
 
 /**
+ * {@link assertKind} for unions discriminated on `status`, such as
+ * `RegisterResult` and `SkillRunResult`. Throws naming the value when the
+ * status differs, so a test failure shows the errors a rejection carried.
+ */
+export function assertStatus<U extends { status: string }, S extends U["status"]>(
+  value: U | null | undefined,
+  status: S,
+): asserts value is U & { status: S } {
+  if (value === null || value === undefined) {
+    throw new Error(`expected status '${status}', got null/undefined`);
+  }
+  if (value.status !== status) {
+    throw new Error(`expected status '${status}', got ${JSON.stringify(value)}`);
+  }
+}
+
+/**
  * Await `promise`, throwing if it is still pending after `ms` — for a wait
  * whose failure mode is hanging forever. A rejection propagates. Real timers
  * only.

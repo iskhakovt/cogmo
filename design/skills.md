@@ -607,7 +607,7 @@ cogmo skills register --branch skill/summarize-email-<date>
 The `register` RPC:
 
 1. **Acquire advisory lock** `pg_advisory_xact_lock(hashtext("skill_register:" + name))`. Queues concurrent registers on the same skill name, but under REPEATABLE READ the checks below can still read state from before the winner's commit ([store-pattern rule](../.claude/rules/store-pattern.md); audit filed in `todo.md`).
-2. **Fast-forward check.** Verify `main` is an ancestor of the branch tip. If not → return `{ status: "rejected", errors: ["main has advanced; rebase branch and retry"] }`.
+2. **Fast-forward check.** Verify `main` is an ancestor of the branch tip. If not → return `{ status: "rejected", errors: ["non_fast_forward: rebase branch onto main and retry"] }`. Checked before the transaction to fail fast, and again just before `update-ref`, reading `main` afresh: the advisory lock is per skill name and `main` is shared, so a deploy of any other skill may have moved it. A deploy that moves `main` between that re-read and `update-ref` fails the compare-and-swap. Either way the transaction rolls back and the same rejection returns. `approveDeploy` does the same (`non_fast_forward_at_approve_time`); `rollback` requires `main` unchanged since its pre-transaction read, so it never rewinds past a deploy that landed meanwhile (`main_moved`).
 3. **No-op check.** If `current skills.git_sha == branch tip sha` → return `{ status: "live", … }` with no side effects (idempotent).
 4. **Pending-approval check.** If any `skill_deploys` row for this skill has `status = 'pending_approval'` → return `{ status: "rejected", errors: ["pending deploy exists; approve or deny first"] }`.
 5. **Read + classify.** `git show <branch-tip>:SKILL.md` / `:skill.py`. Run classifier + static analysis. Validate manifest against `SkillManifestSchema`.
@@ -644,14 +644,16 @@ type SkillDeployOrigin =
   | { kind: "user"; actor: SkillActor; conversation: SkillRunIdentity | null }  // approval tap, /enable
   | { kind: "owner" };                                              // CLI, conversation-less coding task
 
-interface RegisterResult {
-  name: string;
-  riskTier: "auto" | "notify" | "approve";
-  status: "live" | "pending_approval" | "rejected" | "no_op";
-  gitSha: string;                // live SHA post-register (or unchanged if pending/rejected)
-  errors?: readonly string[];    // present if status === "rejected"
-  pendingId?: string;            // present if status === "pending_approval"
-}
+// Each variant also carries name, riskTier and gitSha.
+type RegisterResult =
+  | { status: "live" }                                              // gitSha: main's new tip
+  | { status: "pending_approval"; pendingId: string; schedule?: string }  // gitSha: branch tip
+  | { status: "no_op" }
+  | { status: "rejected"; errors: readonly string[] };              // nothing written
+
+type SkillRunResult =
+  | { runId: string; status: "success"; output?: unknown }
+  | { runId: string; status: "error"; error: string };
 
 // Discriminated unions — typed `kind` instead of thrown `Error`s, so transport
 // adapters can pattern-match without string-matching error messages.
@@ -1270,13 +1272,13 @@ UPDATE recovery_point='executed', output/error/resource_usage/finished_at  ← t
 UPDATE recovery_point='finished', status='success'|'error'  ← transitionToFinished, atomic
 ```
 
-**Recovery branches.** Every `runner.invoke({idempotencyKey})` calls `startOrRecoverRun` first. A warm-pool skill whose key has no row yet starts the pool before that write, so a pool that can't start leaves no row and the keyed retry runs the skill; a key that already has a row is settled from it without starting the pool.
+**Recovery branches.** Every `runner.invoke({idempotencyKey})` calls `startOrRecoverRun` first. `invoke/start-run.ts` maps the row to a `RunStart` (`execute`, `finish`, `replay`, `inflight`), matched exhaustively. A warm-pool skill whose key has no row yet starts the pool before that write, so a pool that can't start leaves no row and the keyed retry runs the skill; a key that already has a row is settled from it without starting the pool.
 
 | recovered row state | runner action |
 |-|-|
 | `kind='new'` (no prior row) | Standard flow: execute → executed → finished |
 | `recovered`, `recovery_point='finished'` | Return cached `SkillRunResult` reconstructed from the row. Runtime never touched. |
-| `recovered`, `recovery_point='executed'` | Skip execute, replay output validation against stored output, transition to `finished`. Persist-failure retries land here. |
+| `recovered`, `recovery_point='executed'` | Skip execute, replay output validation against stored output, transition to `finished`. Persist-failure retries land here. When two attempts finish the same row, the second gets the result the first settled. |
 | `recovered`, `recovery_point='started'` | In-flight: either the prior attempt crashed mid-execute, or another worker is currently executing this same key. The runner can't tell those apart from the row state alone. Reject as `inflight`, naming the run — conservative refusal in both cases, since re-executing risks double-firing non-idempotent side effects (and in the concurrent case, the original is still running and will eventually finalize). Operator inspects. Future manifest flag `idempotent_invocation: true` would opt into optimistic re-execute. A heartbeat predicate (`created_at < now() - interval 'N min'`) would let the runner discriminate at runtime; deferred. |
 
 **Caller key conventions** (deterministic per logical fire):
@@ -1297,7 +1299,10 @@ UPDATE recovery_point='finished', status='success'|'error'  ← transitionToFini
 
 | Group | Subdirectory / key entrypoints | Responsibility |
 |-|-|-|
-| Public interface | `index.ts`, `runner.ts` | `SkillRunner` contract + Dispatcher / Pool coordination across register, approve, rollback, invoke |
+| Public interface | `index.ts`, `runner.ts` | `SkillRunner` contract; `SkillRunnerImpl` wires the source cache, warm pool and use cases below |
+| Deploy pipeline | `deploy/` | One use case per RPC: `register.ts`, `approve.ts` (approve + deny), `rollback.ts`, `activation.ts` (enable + deregister); the lockfile check, the remote mirror, and the run-as `origin.ts` they share |
+| Invocation | `invoke/` | `invoke.ts` (pre-flight, then the recovery-point state machine: `start-run.ts`, `execute-run.ts`, `finish-run.ts`), `runtime.ts` (planning + dispatch to the isolate, pool or one-shot container), `warm-pool.ts` (lazy pool start + shutdown) |
+| Source cache + listing | `source-cache.ts`, `listing.ts` | Parsed manifests with compiled validators keyed by `(name, gitSha)`; `list` / `listAll` / `listToolDefs` |
 | Manifest + classifier | `manifest.ts`, `classifier.ts`, `ast-classifier.ts`, `ast-rules.ts` | `SKILL.md` frontmatter parsing + risk-tier assignment (tree-sitter static analysis) |
 | Dependency stack | `deps.ts`, `deps-reaper*.ts`, `pyodide-compat.ts` | Lockfile compile + verify at register, venv populate + activate at invoke, unreachable-venv reaper, tier-1 Pyodide compat check |
 | Workers (tier 2) | `worker-sysbox/` | sysbox container host + in-container supervisor + warm pool |

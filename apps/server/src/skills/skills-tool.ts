@@ -44,7 +44,7 @@ export const registerSkillTool: ToolSpec = defineTool({
     const result = await service.skills.register({ branch });
     if (result.status === "rejected") {
       return reject(
-        `Register rejected: ${(result.errors ?? []).join("; ") || "no reason given"}. ` +
+        `Register rejected: ${result.errors.join("; ") || "no reason given"}. ` +
           "Surface the errors verbatim and ask the user for guidance.",
       );
     }
@@ -54,8 +54,7 @@ export const registerSkillTool: ToolSpec = defineTool({
         name: result.name || undefined,
         riskTier: result.riskTier,
         gitSha: result.gitSha,
-        ...(result.errors && result.errors.length > 0 && { errors: result.errors }),
-        ...(result.pendingId && { pendingId: result.pendingId }),
+        ...(result.status === "pending_approval" && { pendingId: result.pendingId }),
         nextStep: match(result.status)
           .with(
             "live",

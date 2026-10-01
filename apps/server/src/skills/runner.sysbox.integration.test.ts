@@ -14,6 +14,7 @@ import {
 import { DrizzleSandboxStore } from "../sandbox/store/index.js";
 import { LABEL_INSTANCE, LABEL_MANAGED } from "../sandbox/supervisor.js";
 import type { SecretsStore } from "../secrets/store/index.js";
+import { assertStatus } from "../test/assertions.js";
 import { mockFilesService } from "../test/factories.js";
 import { createTestDatabase } from "../test/pglite.js";
 import type { SkillRunAs, SkillRunServices } from "./run-as.js";
@@ -301,7 +302,7 @@ describe.skipIf(!SHOULD_RUN)("SkillRunnerImpl tier-2 (sysbox runtime, GHA only)"
       const result = (
         await runner.invoke({ name: "tier2-now", inputs: { x: 7 }, runAs: RUN_AS })
       )._unsafeUnwrap();
-      expect(result.status).toBe("success");
+      assertStatus(result, "success");
       expect(result.output).toMatchObject({ echoed: 8 });
       // ctx.now returns an ISO-8601 string from the host's clock.
       expect((result.output as { got: string }).got).toMatch(
@@ -345,7 +346,7 @@ resources:
       await runner.invoke({ name: "tier2-sleep", inputs: {}, runAs: RUN_AS })
     )._unsafeUnwrap();
     const elapsedMs = Date.now() - start;
-    expect(result.status).toBe("error");
+    assertStatus(result, "error");
     expect(result.error).toBe("wall_clock_exceeded");
     // The kill must land before the skill's own 60 s sleep would resolve.
     // Generous upper bound to absorb container startup + reaper jitter.
@@ -381,8 +382,8 @@ resources:
       const r2 = (
         await runner.invoke({ name: "tier2-host", inputs: {}, runAs: RUN_AS })
       )._unsafeUnwrap();
-      expect(r1.status).toBe("success");
-      expect(r2.status).toBe("success");
+      assertStatus(r1, "success");
+      assertStatus(r2, "success");
       const o1 = r1.output as { host: string; relay: number; supervisor: number };
       const o2 = r2.output as { host: string; relay: number; supervisor: number };
       // Same container — pool reused the warm worker.
@@ -462,7 +463,7 @@ async def run(inputs, ctx):
       const result = (
         await runner.invoke({ name: "tier2-with-deps", inputs: {}, runAs: RUN_AS })
       )._unsafeUnwrap();
-      expect(result.status, JSON.stringify(result)).toBe("success");
+      assertStatus(result, "success");
       // Pass `result` as the assertion-failure label so a mismatch
       // surfaces the whole row (error string, runId, etc.) rather than
       // just the matchObject diff.
@@ -509,8 +510,8 @@ async def run(inputs, ctx):
     const r2 = (
       await runner.invoke({ name: "tier2-leak", inputs: {}, runAs: RUN_AS })
     )._unsafeUnwrap();
-    expect(r1.status).toBe("success");
-    expect(r2.status).toBe("success");
+    assertStatus(r1, "success");
+    assertStatus(r2, "success");
     // Task 1 sets `sys.modules["_cogmo_test_marker"]`. Task 2 runs in a
     // fresh fork from the supervisor, so its `sys.modules` is the
     // supervisor's snapshot at fork time — the marker isn't there.
@@ -545,7 +546,7 @@ async def run(inputs, ctx):
       const left = (
         await runner.invoke({ name: "tier2-leave-sleeper", inputs: {}, runAs: RUN_AS })
       )._unsafeUnwrap();
-      expect(left.status, JSON.stringify(left)).toBe("success");
+      assertStatus(left, "success");
       const { host, pid } = left.output as { host: string; pid: number };
       const checked = (
         await runner.invoke({
@@ -554,7 +555,7 @@ async def run(inputs, ctx):
           runAs: RUN_AS,
         })
       )._unsafeUnwrap();
-      expect(checked.status, JSON.stringify(checked)).toBe("success");
+      assertStatus(checked, "success");
       // Same container, so the pid names the same process namespace.
       expect(checked.output).toEqual({ host, alive: false });
     } finally {
@@ -582,7 +583,7 @@ async def run(inputs, ctx):
       const result = (
         await runner.invoke({ name: "tier2-proc-probe", inputs: {}, runAs: RUN_AS })
       )._unsafeUnwrap();
-      expect(result.status, JSON.stringify(result)).toBe("success");
+      assertStatus(result, "success");
       expect(result.output).toEqual({ opened: [], control: true });
     } finally {
       await runner.shutdown();

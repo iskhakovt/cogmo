@@ -122,7 +122,9 @@ export function createSkills(
       return err({
         code: "skill_deploy_register_failed" as const,
         pendingId,
-        reason: result.errors?.[0] ?? `unexpected status '${result.status}'`,
+        reason:
+          (result.status === "rejected" ? result.errors[0] : undefined) ??
+          `unexpected status '${result.status}'`,
       });
     },
     async denyDeploy(pendingId, tapperPlatformHandle, reason) {
