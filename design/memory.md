@@ -351,40 +351,12 @@ Adopted from Mastra's 94.87% LongMemEval approach. The Observer is an Inngest fu
 
 ### Memory Extraction `[confirmed]`
 
-Added as a new step in the existing Observer function, after correction extraction. Uses `chatTyped()` with a Zod schema to extract structured facts.
+Runs in the Observer after correction extraction, one `extract-memories-<n>` step per chunk of the conversation's unprocessed messages. Uses `chatTyped()` with a Zod schema (`buildMemoryExtractionSchema`) to extract structured facts, each with a network, compartment and trust tier, and retains them in one `retainBatch` with those tags.
 
-```typescript
-// Extraction schema (chatTyped structured output)
-interface ExtractedMemory {
-  fact: string;                                        // the memory content
-  network: "world" | "bank" | "opinion" | "observation"; // classification
-  context?: string;                                    // when/why this was learned
-}
-
-// Observer step: extract-memories (after extract-corrections)
-const memories = await step.run("extract-memories", async () => {
-  const extracted = await chatTyped(provider, {
-    model,
-    system: MEMORY_EXTRACTION_PROMPT,
-    messages: [{ role: "user", content: formatTranscript(history) }],
-    schema: extractedMemoriesSchema,
-  });
-
-  // Retain each fact with network tag
-  for (const mem of extracted) {
-    await memory.retain(userId, mem.fact, {
-      tags: [`network:${mem.network}`],
-      context: mem.context,
-      metadata: { source: "conversation" },
-    });
-  }
-
-  return { count: extracted.length };
-});
-```
+**Observation window** `[proposed]`. Extraction reads only the messages after `conversations.memories_observed_through`, in chunks of at most a quarter of the extraction model's input budget, three a fire, advancing the cursor after each chunk ([evolution.md](evolution.md#observation-window-proposed) → Observation Window). Each chunk is sent with the widest compaction summary that ends before it and the last 10 messages before it, marked as already processed: the prompt extracts only from the new messages and uses the earlier part to resolve references, as Mem0 does. Each fact is retained under a document id derived from the conversation, the chunk's last message and the fact's index, so a re-run of the step replaces the documents it wrote instead of adding copies.
 
 The extraction prompt instructs the LLM to:
-- Extract facts worth remembering from the conversation (skip greetings, small talk, transient discussion)
+- Extract facts worth remembering from the new messages only (skip greetings, small talk, transient discussion), using the earlier conversation only to resolve references
 - Classify each fact into a network (world/bank/opinion/observation)
 - Avoid extracting information the agent already stored via `memory_retain` during the conversation (dedup hint)
 - Apply memory admission criteria: future utility, factual confidence, semantic novelty

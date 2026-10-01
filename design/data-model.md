@@ -14,7 +14,7 @@ Tables are documented in the design doc that owns their domain:
 | `user_identities` | [transport/identity.md](transport/identity.md) | Platform handle → user mapping. IS the allowlist. |
 | `channels` | [transport/overview.md](transport/overview.md) | Platform connections (credentials, identity mode) |
 | `profiles` | [transport/overview.md](transport/overview.md) | Agent configurations (prompt, model, tools). `user_id` nullable: NULL = org profile (managed out-of-band, read-only via Transport), set = user profile (owned by that user). |
-| `conversations` | [transport/overview.md](transport/overview.md) | Dialogue threads. No lifecycle — go idle naturally. |
+| `conversations` | [transport/overview.md](transport/overview.md) | Dialogue threads. No lifecycle — go idle naturally. `corrections_observed_through` / `memories_observed_through` are the Observer's per-phase cursors ([evolution.md](evolution.md#observation-window-proposed) → Observation Window). |
 | `messages` | [transport/overview.md](transport/overview.md) | Conversation turns. Immutable. Content: [prompt-caching.md](prompt-caching.md#stored-shapes-confirmed) → Stored shapes. Carry `lastInboundMessageId` cursor, plus `profileId` + `model` stamps so history survives mid-conversation profile/model changes. Assistant rows carry the `transcript_head` of the request that produced them ([prompt-caching.md](prompt-caching.md#head-check-confirmed)). |
 | `channel_sessions` | [transport/sessions.md](transport/sessions.md) | Platform address → conversation mapping |
 | `inbound_messages` | [transport/debounce.md](transport/debounce.md) | Raw input staging buffer for debounce batching |
@@ -52,7 +52,6 @@ Design sketches — added via Drizzle migrations when their phase begins.
 | Table | Phase | Purpose |
 |-|-|-|
 | `agent_traces` | 2 | LLM execution log (tool calls, reasoning). FK → messages. |
-| `reflections` | 2 | Tracks Observer runs (conversation_id, covered_up_to message). |
 | `signals` | 2 | Conversation signals for evolution pipeline (re-ask, correction, etc.). |
 | `scheduled_tasks` | 2 | User/agent-defined cron + one-off schedules. Source of truth for `schedule_task` / `list_tasks` / `remove_task` agent tools and wizard recurring-tasks step. See [scheduling.md](scheduling.md) → Agent Self-Scheduling. |
 | `mcp_servers` | 2 | MCP server configs (transport, config blob, enabled, approval). See [integrations/mcp.md](integrations/mcp.md). |
