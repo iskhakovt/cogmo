@@ -69,6 +69,7 @@ export async function runSetup(opts: SetupOptions = {}): Promise<void> {
     const transportStore = new DrizzleTransportStore();
     const encryptionKey = deriveMasterKey(parseMasterKey(masterKey), "cogmo/secrets-at-rest/v1");
     const secretsStore = new DrizzleSecretsStore(encryptionKey);
+    const stores = { runInTx: tx, agentStore, transportStore, secretsStore };
 
     const { userId } = await migrateAndSeed(
       { bootstrapLock: lock, db, runInTx: tx, agentStore, transportStore },
@@ -76,15 +77,11 @@ export async function runSetup(opts: SetupOptions = {}): Promise<void> {
     );
 
     if (validatedNonInteractive) {
-      await persistNonInteractive(
-        { runInTx: tx, agentStore, transportStore, secretsStore },
-        validatedNonInteractive,
-        userId,
-      );
+      await persistNonInteractive(stores, validatedNonInteractive, userId);
       return;
     }
 
-    await runWizard({ db, agentStore, transportStore, masterKey, userId, bootstrapLock: lock });
+    await runWizard({ ...stores, bootstrapLock: lock, userId });
   } catch (err) {
     if (err instanceof WizardCancelled) {
       logger.info("setup cancelled by user");

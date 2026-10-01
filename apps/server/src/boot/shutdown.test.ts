@@ -1,5 +1,18 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { type ServeResources, type ShutdownBounds, shutdownServe } from "./shutdown.js";
+import { mock } from "vitest-mock-extended";
+import type { Transactor } from "../db/index.js";
+import type { McpRegistryImpl } from "../mcp/registry.js";
+import type { SandboxClient } from "../sandbox/index.js";
+import type { DrizzleSandboxStore } from "../sandbox/store/index.js";
+import type { SkillRunnerImpl } from "../skills/runner.js";
+import { expectDefined } from "../test/assertions.js";
+import type { ChannelAdapter } from "../transport/registry.js";
+import {
+  type ServeResources,
+  type ShutdownBounds,
+  serveResources,
+  shutdownServe,
+} from "./shutdown.js";
 
 const BOUNDS: ShutdownBounds = { webDrainMs: 100, stepMs: 300 };
 
@@ -211,5 +224,52 @@ describe("shutdownServe", () => {
       "mcp",
       "skills pool",
     ]);
+  });
+});
+
+describe("serveResources", () => {
+  const FAKE_TX = { __mockTx: true } as never;
+  const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
+
+  function boot(sandboxInstanceId: string | null) {
+    return {
+      runInTx: fakeRunInTx,
+      sandboxStore: mock<DrizzleSandboxStore>(),
+      sandbox: null,
+      sandboxInstanceId,
+      adapters: [],
+      codingStreams: { close: vi.fn() },
+      mcpRegistry: mock<McpRegistryImpl>(),
+      skillRunner: mock<SkillRunnerImpl>(),
+    };
+  }
+
+  it("hands each started resource to its teardown step", () => {
+    const sandbox = mock<SandboxClient>();
+    const adapters = [{ channelType: "telegram", adapter: mock<ChannelAdapter["adapter"]>() }];
+    const deps = { ...boot("instance-1"), sandbox, adapters };
+    const web = resources().web;
+
+    expect(serveResources(deps, web)).toMatchObject({
+      web,
+      adapters,
+      codingStreams: deps.codingStreams,
+      mcpRegistry: deps.mcpRegistry,
+      skills: deps.skillRunner,
+      sandbox,
+    });
+  });
+
+  it("closes this process's instance row", async () => {
+    const deps = boot("instance-1");
+
+    const { closeInstance } = serveResources(deps, resources().web);
+    await expectDefined(closeInstance, "closeInstance")();
+
+    expect(deps.sandboxStore.closeInstance).toHaveBeenCalledWith(FAKE_TX, "instance-1");
+  });
+
+  it("has no instance row to close without a sandbox instance", () => {
+    expect(serveResources(boot(null), resources().web).closeInstance).toBeNull();
   });
 });
