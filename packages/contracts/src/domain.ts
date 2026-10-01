@@ -105,6 +105,8 @@ export interface EvolutionEventPayload {
     extracted: number;
     reinforced: number;
     contradictions: number;
+    /** Rules still learning that a contradiction retired. */
+    retired: number;
     promoted: number;
     outOfScopeReinforcementsSkipped: number;
     unknownRuleReinforcementsSkipped: number;
@@ -112,7 +114,8 @@ export interface EvolutionEventPayload {
   };
   consolidation: { mergedGroups: number; rulesRemoved: number } | null;
   memories: { extracted: number; byNetwork: Record<string, number> };
-  drained: { drained: number; byNetwork: Record<string, number> };
+  /** `withheld`: staged rows a `memory`-category rule forbade, deleted unretained. */
+  drained: { drained: number; byNetwork: Record<string, number>; withheld: number };
   messageCount: number;
   profileId: string;
   durationMs?: number | undefined;

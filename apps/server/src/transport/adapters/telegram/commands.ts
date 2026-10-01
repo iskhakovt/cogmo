@@ -2665,6 +2665,9 @@ function formatEvolutionDetail(event: EvolutionEventEntry, now: Date = new Date(
       `  promoted:     ${payload.corrections.promoted}`,
       `  contradicted: ${payload.corrections.contradictions}`,
     );
+    if (payload.corrections.retired > 0) {
+      lines.push(`  retired:      ${payload.corrections.retired} (learning, contradicted)`);
+    }
   }
   // Surface the skipped counters only when non-zero — they're zero on
   // most fires and the silence is the signal. When something WAS
@@ -2693,10 +2696,13 @@ function formatEvolutionDetail(event: EvolutionEventEntry, now: Date = new Date(
   }
   if (phaseFailed(event, "drain")) {
     lines.push("", `Pending drain: ${PHASE_FAILED}; undrained rows stay pending`);
-  } else if (payload.drained.drained > 0) {
+  } else if (payload.drained.drained > 0 || payload.drained.withheld > 0) {
     lines.push("", `Pending drained: ${payload.drained.drained}`);
     for (const [network, count] of Object.entries(payload.drained.byNetwork)) {
       lines.push(`  ${network}: ${count}`);
+    }
+    if (payload.drained.withheld > 0) {
+      lines.push(`  withheld by a memory rule: ${payload.drained.withheld}`);
     }
   }
   return lines.join("\n");

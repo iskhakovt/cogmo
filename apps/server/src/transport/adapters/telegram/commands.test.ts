@@ -4344,6 +4344,7 @@ describe("handleLearned", () => {
         extracted: overrides?.extracted ?? 1,
         reinforced: overrides?.reinforced ?? 0,
         contradictions: 0,
+        retired: 0,
         promoted: overrides?.promoted ?? 0,
         outOfScopeReinforcementsSkipped: 0,
         unknownRuleReinforcementsSkipped: 0,
@@ -4351,7 +4352,7 @@ describe("handleLearned", () => {
       },
       consolidation: null,
       memories: { extracted: overrides?.memories ?? 0, byNetwork: {} },
-      drained: { drained: 0, byNetwork: {} },
+      drained: { drained: 0, byNetwork: {}, withheld: 0 },
       messageCount: 8,
       profileId: "11111111-1111-7111-8111-111111111111",
     };
@@ -4719,12 +4720,15 @@ describe("handleLearned detail rendering", () => {
     outOfScope?: number;
     unknownRule?: number;
     durationMs?: number;
+    retired?: number;
+    withheld?: number;
   }) {
     return {
       corrections: {
         extracted: 1,
         reinforced: 1,
-        contradictions: 0,
+        contradictions: overrides.retired ?? 0,
+        retired: overrides.retired ?? 0,
         promoted: 0,
         outOfScopeReinforcementsSkipped: overrides.outOfScope ?? 0,
         unknownRuleReinforcementsSkipped: overrides.unknownRule ?? 0,
@@ -4732,12 +4736,42 @@ describe("handleLearned detail rendering", () => {
       },
       consolidation: null,
       memories: { extracted: 0, byNetwork: {} },
-      drained: { drained: 0, byNetwork: {} },
+      drained: { drained: 0, byNetwork: {}, withheld: overrides.withheld ?? 0 },
       messageCount: 8,
       profileId: "11111111-1111-7111-8111-111111111111",
       ...(overrides.durationMs !== undefined && { durationMs: overrides.durationMs }),
     };
   }
+
+  async function detailOf(payload: ReturnType<typeof makePayload>): Promise<string> {
+    const transport = transportWith({
+      evolution: {
+        getEvent: vi.fn().mockResolvedValue(
+          ok({
+            id: EVT,
+            conversationId: "c1",
+            triggeredBy: "idle",
+            payload,
+            createdAt: new Date("2026-05-30T08:00:00Z"),
+          }),
+        ),
+      },
+    });
+    const ctx = mkCtx(EVT);
+    await handleLearned(transport, ctx);
+    return (ctx.reply.mock.calls[0]?.[0] ?? "") as string;
+  }
+
+  it("shows retired learning rules and withheld rows only when there are some", async () => {
+    const reply = await detailOf(makePayload({ retired: 1, withheld: 2 }));
+    expect(reply).toContain("retired:      1 (learning, contradicted)");
+    expect(reply).toContain("Pending drained: 0");
+    expect(reply).toContain("withheld by a memory rule: 2");
+
+    const quiet = await detailOf(makePayload({}));
+    expect(quiet).not.toContain("retired:");
+    expect(quiet).not.toContain("Pending drained");
+  });
 
   it("surfaces skipped counters when non-zero", async () => {
     const transport = transportWith({
@@ -4815,6 +4849,7 @@ describe("handleLearned detail rendering", () => {
                 extracted: 0,
                 reinforced: 0,
                 contradictions: 0,
+                retired: 0,
                 promoted: 0,
                 outOfScopeReinforcementsSkipped: 0,
                 unknownRuleReinforcementsSkipped: 0,

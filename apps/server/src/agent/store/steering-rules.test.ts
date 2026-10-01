@@ -684,3 +684,140 @@ describe("learned rules skip a retired row", () => {
     });
   });
 });
+
+describe("the Observer's rule reads", () => {
+  it("getInstructionRules lists the user's live instruction rules the profile sees", async () => {
+    const userId = await seedUser();
+    const otherUserId = await seedUser();
+    const profileId = await seedProfile();
+    const otherProfileId = await seedProfile("other");
+    await row({ rule: "Everywhere", source: "instruction", userId });
+    await row({ rule: "Here", source: "instruction", userId, profileId, channelType: "telegram" });
+    await row({ rule: "Other persona", source: "instruction", userId, profileId: otherProfileId });
+    await row({ rule: "Other user", source: "instruction", userId: otherUserId });
+    await row({ rule: "Withdrawn", source: "instruction", userId, retired: true });
+    await row({ rule: "Learned", source: "correction" });
+    await row({ rule: "Operator", source: "manual", observationCount: 0 });
+
+    const rules = await tx((trx) => store.getInstructionRules(trx, { profileId, userId }));
+
+    expect(rules.map((r) => [r.rule, r.channelType, r.active])).toEqual([
+      ["Everywhere", null, true],
+      ["Here", "telegram", true],
+    ]);
+  });
+
+  it("hasInstructionRule matches normalized text among the rules getInstructionRules lists", async () => {
+    const userId = await seedUser();
+    const otherUserId = await seedUser();
+    const profileId = await seedProfile();
+    await row({ rule: "No bullet points", source: "instruction", userId });
+    await row({ rule: "Mine withdrawn", source: "instruction", userId, retired: true });
+    await row({ rule: "Theirs", source: "instruction", userId: otherUserId });
+    await row({ rule: "Learned", source: "correction" });
+    const has = (text: string) =>
+      tx((trx) => store.hasInstructionRule(trx, { profileId, userId }, text));
+
+    expect(await has("  no BULLET\n points ")).toBe(true);
+    expect(await has("Mine withdrawn")).toBe(false);
+    expect(await has("Theirs")).toBe(false);
+    expect(await has("Learned")).toBe(false);
+  });
+
+  it("upsertCorrection reinforces an instruction rule without promoting it", async () => {
+    const userId = await seedUser();
+    const id = await row({ rule: "Mine", source: "instruction", userId, observationCount: 1 });
+
+    const result = await tx((trx) =>
+      store.upsertCorrection(trx, {
+        rule: "Mine",
+        category: "style",
+        profileId: null,
+        existingRuleId: id,
+      }),
+    );
+
+    expect(result).toEqual({ id, promoted: false });
+    const [after] = await db
+      .select({ observationCount: steeringRules.observationCount })
+      .from(steeringRules)
+      .where(eq(steeringRules.id, id));
+    expect(after?.observationCount).toBe(2);
+    expect(await stateOf(id)).toBe("live");
+  });
+
+  it("upsertCorrection promotes a learned rule at its second observation", async () => {
+    const id = await row({
+      rule: "Learning",
+      source: "correction",
+      active: false,
+      observationCount: 1,
+    });
+
+    const result = await tx((trx) =>
+      store.upsertCorrection(trx, {
+        rule: "Learning",
+        category: "style",
+        profileId: null,
+        existingRuleId: id,
+      }),
+    );
+
+    expect(result).toEqual({ id, promoted: true });
+    expect(await stateOf(id)).toBe("live");
+  });
+
+  it("retireLearningRule retires a rule still learning and nothing else", async () => {
+    const userId = await seedUser();
+    const learning = await row({
+      rule: "Learning",
+      source: "correction",
+      active: false,
+      observationCount: 1,
+    });
+    const active = await row({ rule: "Active", source: "correction" });
+    const retired = await row({ rule: "Retired", source: "correction", retired: true });
+    const instruction = await row({ rule: "Mine", source: "instruction", userId });
+    const retire = (id: string) => tx((trx) => store.retireLearningRule(trx, id));
+
+    expect(await retire(learning)).toBe(true);
+    expect(await retire(learning)).toBe(false);
+    expect(await retire(active)).toBe(false);
+    expect(await retire(retired)).toBe(false);
+    expect(await retire(instruction)).toBe(false);
+    expect([
+      await stateOf(learning),
+      await stateOf(active),
+      await stateOf(retired),
+      await stateOf(instruction),
+    ]).toEqual(["retired", "live", "retired", "live"]);
+  });
+
+  it("getMemoryRules lists the live memory rules a staging profile sees, of every source", async () => {
+    const userId = await seedUser();
+    const otherUserId = await seedUser();
+    const profileId = await seedProfile();
+    const otherProfileId = await seedProfile("other");
+    const memory = { category: "memory" };
+    await row({ ...memory, rule: "Operator", source: "manual", observationCount: 0 });
+    await row({ ...memory, rule: "Mine", source: "instruction", userId });
+    await row({ ...memory, rule: "Persona", source: "instruction", userId, profileId });
+    await row({ ...memory, rule: "Learned", source: "correction" });
+    await row({
+      ...memory,
+      rule: "Other persona",
+      source: "correction",
+      profileId: otherProfileId,
+    });
+    await row({ ...memory, rule: "Theirs", source: "instruction", userId: otherUserId });
+    await row({ ...memory, rule: "Learning", source: "correction", active: false });
+    await row({ ...memory, rule: "Withdrawn", source: "instruction", userId, retired: true });
+    await row({ rule: "Style", source: "instruction", userId });
+
+    const forProfile = await tx((trx) => store.getMemoryRules(trx, { profileId, userId }));
+    const forNoProfile = await tx((trx) => store.getMemoryRules(trx, { profileId: null, userId }));
+
+    expect([...forProfile].sort()).toEqual(["Learned", "Mine", "Operator", "Persona"]);
+    expect([...forNoProfile].sort()).toEqual(["Learned", "Mine", "Operator"]);
+  });
+});

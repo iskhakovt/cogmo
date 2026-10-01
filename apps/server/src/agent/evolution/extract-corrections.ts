@@ -32,7 +32,15 @@ export interface ExtractionDeps {
   provider: LlmProvider;
   model: string;
   runInTx: Transactor;
-  store: Pick<AgentStore, "getCorrections" | "upsertCorrection" | "countActiveLearnedRules">;
+  store: Pick<
+    AgentStore,
+    | "getCorrections"
+    | "getInstructionRules"
+    | "hasInstructionRule"
+    | "upsertCorrection"
+    | "retireLearningRule"
+    | "countActiveLearnedRules"
+  >;
   /**
    * Distinct channel types active for the conversation when this Observer
    * fired. Threaded into the extraction prompt and used to validate the
@@ -46,6 +54,8 @@ export interface ExtractionResult {
   extracted: number;
   reinforced: number;
   contradictions: number;
+  /** Rules still learning that a contradiction retired; the rest of `contradictions` are only logged. */
+  retired: number;
   promoted: number;
   outOfScopeReinforcementsSkipped: number;
   /** Reinforcements naming no listed rule, or one retired or merged since the list was read. */
@@ -61,7 +71,7 @@ export interface ExtractionResult {
  */
 export async function extractCorrections(
   history: ReadonlyArray<Message>,
-  profileId: string,
+  scope: { profileId: string; userId: string },
   deps: ExtractionDeps,
 ): Promise<ExtractionResult> {
   const transcript = formatTranscript(history);
@@ -72,6 +82,7 @@ export async function extractCorrections(
       extracted: 0,
       reinforced: 0,
       contradictions: 0,
+      retired: 0,
       promoted: 0,
       outOfScopeReinforcementsSkipped: 0,
       unknownRuleReinforcementsSkipped: 0,
@@ -79,10 +90,16 @@ export async function extractCorrections(
     };
   }
 
-  const existingRules = await deps.runInTx((tx) => deps.store.getCorrections(tx, profileId));
+  const { learned, instructions } = await deps.runInTx(async (tx) => ({
+    learned: await deps.store.getCorrections(tx, scope.profileId),
+    instructions: await deps.store.getInstructionRules(tx, scope),
+  }));
   // The prompt lists each rule under a short label rather than its id; the
   // model's `matchedExistingRuleId` carries the label back.
-  const existingRulesByLabel = labelRules(existingRules);
+  const existingRulesByLabel = labelRules([
+    ...learned.map((r) => ({ ...r, setByUser: false })),
+    ...instructions.map((r) => ({ ...r, setByUser: true })),
+  ]);
   const systemPrompt = buildExtractionPrompt(existingRulesByLabel, deps.activeChannelTypes);
 
   const { data } = await chatTyped({
@@ -98,6 +115,7 @@ export async function extractCorrections(
   let extracted = 0;
   let reinforced = 0;
   let contradictions = 0;
+  let retired = 0;
   let promoted = 0;
   let outOfScopeReinforcementsSkipped = 0;
   let unknownRuleReinforcementsSkipped = 0;
@@ -118,17 +136,48 @@ export async function extractCorrections(
         );
         continue;
       }
-      logger.info(
-        {
-          rule: correction.rule,
-          matchedLabel: correction.matchedExistingRuleId,
-          matchedId: contradictedRule.id,
-          reasoning: correction.reasoning,
-        },
-        "correction contradicts existing rule — skipped",
-      );
       contradictions++;
+      const log = {
+        rule: correction.rule,
+        matchedLabel: correction.matchedExistingRuleId,
+        matchedId: contradictedRule.id,
+        reasoning: correction.reasoning,
+      };
+      // The user retracts a live rule in the turn; one still learning, which
+      // `# Rules` doesn't show, is retired here.
+      if (
+        contradictedRule.active ||
+        !isRuleInScope(contradictedRule, correction.rule, activeChannelSet, "contradiction")
+      ) {
+        logger.info(log, "correction contradicts existing rule — logged, not applied");
+        continue;
+      }
+      const retiredNow = await deps.runInTx((tx) =>
+        deps.store.retireLearningRule(tx, contradictedRule.id),
+      );
+      if (retiredNow) {
+        retired++;
+        logger.info(log, "correction contradicts a rule still learning — retired it");
+      } else {
+        logger.warn(
+          log,
+          "extraction: contradicted rule was promoted or retired since it was listed",
+        );
+      }
       continue;
+    }
+
+    if (correction.action === "new") {
+      const held = await deps.runInTx((tx) =>
+        deps.store.hasInstructionRule(tx, scope, correction.rule),
+      );
+      if (held) {
+        logger.warn(
+          { rule: correction.rule, reasoning: correction.reasoning },
+          "extraction: new correction repeats an instruction rule — dropped",
+        );
+        continue;
+      }
     }
 
     let existingRuleId: string | null = null;
@@ -146,7 +195,7 @@ export async function extractCorrections(
         unknownRuleReinforcementsSkipped++;
         continue;
       }
-      if (!isReinforcementInScope(matchedRule, correction.rule, activeChannelSet)) {
+      if (!isRuleInScope(matchedRule, correction.rule, activeChannelSet, "reinforce")) {
         outOfScopeReinforcementsSkipped++;
         continue;
       }
@@ -177,7 +226,9 @@ export async function extractCorrections(
     if (result.promoted) promoted++;
   }
 
-  const activeCount = await deps.runInTx((tx) => deps.store.countActiveLearnedRules(tx, profileId));
+  const activeCount = await deps.runInTx((tx) =>
+    deps.store.countActiveLearnedRules(tx, scope.profileId),
+  );
   const consolidationNeeded = activeCount > CONSOLIDATION_THRESHOLD;
 
   logger.info(
@@ -185,6 +236,7 @@ export async function extractCorrections(
       extracted,
       reinforced,
       contradictions,
+      retired,
       promoted,
       outOfScopeReinforcementsSkipped,
       unknownRuleReinforcementsSkipped,
@@ -198,6 +250,7 @@ export async function extractCorrections(
     extracted,
     reinforced,
     contradictions,
+    retired,
     promoted,
     outOfScopeReinforcementsSkipped,
     unknownRuleReinforcementsSkipped,
@@ -229,22 +282,23 @@ async function applyCorrection(
 }
 
 /**
- * Reinforcement is gated on the matched rule's `channelType` matching
- * the conversation's active channel set. The prompt is the steering
- * signal that asks the LLM to emit cross-scope wording matches as
- * `new` with the right `channelType`; this gate is the safety net for
- * when it doesn't. The matched rule is already in `existingRules`
- * (loaded for the prompt), so the validation costs nothing extra at
- * the DB layer. Channel-scoped rules pass only when their
- * `channelType` is in the active set; out-of-scope matches skip with
- * a structured warning shaped like `coerceChannelType`'s so audit
- * grepping stays uniform. A label that names no listed rule is rejected
- * at the call site (the unknown-rule branch), with its own counter and log.
+ * Reinforcing a rule, or retiring one still learning on a contradiction, is
+ * gated on the matched rule's `channelType` matching the conversation's
+ * active channel set. The prompt is the steering signal that asks the LLM to
+ * emit cross-scope wording matches as `new` with the right `channelType`;
+ * this gate is the safety net for when it doesn't. The matched rule is
+ * already in `existingRules` (loaded for the prompt), so the validation
+ * costs nothing extra at the DB layer. Channel-scoped rules pass only when
+ * their `channelType` is in the active set; out-of-scope matches skip with
+ * a structured warning shaped like `coerceChannelType`'s so audit grepping
+ * stays uniform. A label that names no listed rule is rejected at the call
+ * site (the unknown-rule branch), with its own counter and log.
  */
-function isReinforcementInScope(
+function isRuleInScope(
   matchedRule: { id: string; channelType: string | null },
   ruleText: string,
   activeChannelSet: ReadonlySet<string>,
+  action: "reinforce" | "contradiction",
 ): boolean {
   // Global rules always pass — the gate catches channel-mismatch, not
   // scope-narrowing of a global into channel-specific.
@@ -257,7 +311,7 @@ function isReinforcementInScope(
       channelType: matchedRule.channelType,
       activeChannels: [...activeChannelSet],
     },
-    "extraction: reinforce targets a rule outside the active channel set — skipping",
+    `extraction: ${action} targets a rule outside the active channel set — skipping`,
   );
   return false;
 }

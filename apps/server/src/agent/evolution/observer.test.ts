@@ -38,6 +38,7 @@ const PENDING: PendingMemory[] = [
     content: "Prefers tea over coffee",
     context: null,
     source: "live_retain",
+    profileId: "profile-1",
     profileClass: null,
     skillName: null,
     createdAt: new Date("2026-09-01T00:00:00Z"),
@@ -382,6 +383,65 @@ describe("runObserver phase outcomes", () => {
     expect(recordedPayload(deps)).toMatchObject({
       failedPhases: ["consolidation", "memories", "drain"],
     });
+  });
+});
+
+describe("runObserver rules", () => {
+  const HEALTH_RULE = "Don't save anything about my health.";
+  const SCOPE = { profileId: "profile-1", userId: "user-1" };
+
+  function promptsOf(provider: LlmProvider, marker: string): string[] {
+    return vi
+      .mocked(provider.chat)
+      .mock.calls.map(([params]) => params.system)
+      .filter((system) => system.includes(marker));
+  }
+
+  it("reads the instruction rules of the conversation's user for correction extraction", async () => {
+    const deps = observerDeps({ provider: routedProvider() });
+
+    await runObserver(EVENT, exhaustedRetriesStep(), deps);
+
+    expect(deps.agentStore.getInstructionRules).toHaveBeenCalledWith(expect.anything(), SCOPE);
+  });
+
+  it("extracts memories under the memory rules the conversation's profile sees", async () => {
+    const provider = routedProvider();
+    const deps = observerDeps({
+      provider,
+      store: { getMemoryRules: vi.fn().mockResolvedValue([HEALTH_RULE]) },
+    });
+
+    await runObserver(EVENT, exhaustedRetriesStep(), deps);
+
+    expect(deps.agentStore.getMemoryRules).toHaveBeenCalledWith(expect.anything(), SCOPE);
+    const [extraction] = promptsOf(provider, "memory extraction engine");
+    expect(extraction).toContain(`- ${HEALTH_RULE}`);
+  });
+
+  it("withholds a staged row a memory rule forbids, deleting it unretained and counting it", async () => {
+    const deps = observerDeps({
+      provider: routedProvider({
+        classification: {
+          network: "bank",
+          compartment: "health",
+          trust: "first-party",
+          withhold: true,
+        },
+      }),
+      store: { getMemoryRules: vi.fn().mockResolvedValue([HEALTH_RULE]) },
+    });
+    const step = exhaustedRetriesStep();
+
+    const result = await runObserver(EVENT, step, deps);
+
+    expect(result).toMatchObject({ drained: { drained: 0, byNetwork: {}, withheld: 1 } });
+    expect(step.ids).not.toContain("retain-pending-memories");
+    expect(deps.memory.retainBatch).toHaveBeenCalledOnce();
+    expect(deps.agentStore.deletePendingMemories).toHaveBeenCalledWith(expect.anything(), [
+      "pending-1",
+    ]);
+    expect(recordedPayload(deps)).toMatchObject({ drained: { drained: 0, withheld: 1 } });
   });
 });
 

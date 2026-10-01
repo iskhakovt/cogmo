@@ -7,14 +7,16 @@
  * retain durably memoized:
  *
  *   1. `classifyPendingMemories` — runs the classifier prompt over a
- *      batch of pending rows, bounded concurrency.
+ *      batch of pending rows, bounded concurrency, and withholds a row a
+ *      `memory`-category rule forbids.
  *   2. `buildRetainItems` — pure mapping from classified rows to
  *      `RetainBatchItem`s.
  *   3. `drainPendingMemories` — convenience wrapper composing all
  *      three for non-Inngest callers (tests, scripts).
  *
  * Failures on a single classification are skipped (row left in the
- * table for the next drain attempt). retainBatch is treated as atomic
+ * table for the next drain attempt). A withheld row is deleted with the
+ * retained ones and never retained. retainBatch is treated as atomic
  * — a batch failure leaves every row pending and rethrows. Each row is
  * retained under its id as the document id, so re-draining a row whose
  * delete failed replaces its document rather than duplicating it.
@@ -30,6 +32,7 @@ import type { AgentStore, PendingMemory, PendingMemorySource } from "../store/in
 import {
   buildClassifiedMemorySchema,
   buildPendingClassificationPrompt,
+  buildWithholdingClassifiedMemorySchema,
   type ClassifiedMemory,
   type CompartmentDefinition,
 } from "./memory-extraction-schema.js";
@@ -51,17 +54,21 @@ export interface ClassifyDeps {
    * shares the same schema (one compile per fire, not per row).
    */
   customCompartments: ReadonlyArray<CompartmentDefinition>;
+  runInTx: Transactor;
+  /** Reads the `memory`-category rules each row's staging profile sees. */
+  store: Pick<AgentStore, "getMemoryRules">;
 }
 
 export interface DrainPendingDeps extends ClassifyDeps {
-  runInTx: Transactor;
   memory: Pick<MemoryProvider, "retainBatch">;
-  store: Pick<AgentStore, "getPendingMemories" | "deletePendingMemories">;
+  store: Pick<AgentStore, "getPendingMemories" | "deletePendingMemories" | "getMemoryRules">;
 }
 
 export interface DrainPendingResult {
   drained: number;
   byNetwork: Record<string, number>;
+  /** Rows a memory rule forbids, deleted without a retain. */
+  withheld: number;
 }
 
 /**
@@ -82,7 +89,10 @@ export interface ClassifiedRow {
 }
 
 export interface ClassifyPendingResult {
+  /** Rows to retain. */
   successful: ClassifiedRow[];
+  /** Ids of rows a memory rule forbids: deleted without a retain. */
+  withheld: string[];
   byNetwork: Record<string, number>;
 }
 
@@ -91,29 +101,74 @@ export interface ClassifyPendingResult {
  * separately so callers can pass rows that have already been through
  * Inngest step memoization (where `createdAt` is a JSON string, not a
  * `Date`) — we don't use the timestamp here. Includes `profileClass` and
- * `skillName`, which the retain step stamps on each row.
+ * `skillName`, which the retain step stamps on each row, and `profileId`,
+ * whose memory rules the classifier applies.
  */
 export type ClassifierInput = Pick<
   PendingMemory,
-  "id" | "content" | "context" | "source" | "profileClass" | "skillName"
+  "id" | "content" | "context" | "source" | "profileId" | "profileClass" | "skillName"
 >;
 
-/** Run the classifier prompt over a batch of pending rows. Single-row failures are skipped, not propagated. */
+/**
+ * Run the classifier prompt over a batch of pending rows. A `live_retain` or
+ * `skill` row is classified under the `memory`-category rules its staging
+ * profile sees, and withheld when one forbids it; a `migration` row is a
+ * restaged memory and passes. Single-row failures are skipped, not propagated.
+ */
 export async function classifyPendingMemories(
   pending: ReadonlyArray<ClassifierInput>,
+  userId: string,
   deps: ClassifyDeps,
 ): Promise<ClassifyPendingResult> {
   const customNames = deps.customCompartments.map((c) => c.name);
-  const schema = buildClassifiedMemorySchema(customNames);
-  const system = buildPendingClassificationPrompt(deps.customCompartments);
-  const classified: Array<ClassifiedRow | null> = [];
+  const schemas = {
+    plain: buildClassifiedMemorySchema(customNames),
+    withholding: buildWithholdingClassifiedMemorySchema(customNames),
+  };
+  const rulesByProfile = await loadMemoryRules(pending, userId, deps);
+  const classified: Array<ClassifiedOutcome | null> = [];
   for (const chunk of R.chunk([...pending], CLASSIFIER_CONCURRENCY)) {
-    const results = await Promise.all(chunk.map((p) => classifyOne(p, schema, system, deps)));
+    const results = await Promise.all(
+      chunk.map((p) => {
+        const rules =
+          p.source === "migration" ? [] : (rulesByProfile.get(stagingProfileOf(p)) ?? []);
+        return classifyOne(p, rules, schemas, deps);
+      }),
+    );
     classified.push(...results);
   }
-  const successful = R.filter(classified, (c) => c !== null);
+  const outcomes = R.filter(classified, (c) => c !== null);
+  const successful = outcomes.flatMap((c) => (c.withhold ? [] : [c.row]));
+  const withheld = outcomes.flatMap((c) => (c.withhold ? [c.row.id] : []));
   const byNetwork = R.countBy(successful, (c) => c.tags.network);
-  return { successful, byNetwork };
+  return { successful, withheld, byNetwork };
+}
+
+/**
+ * `typeof`, not `!== null`: a row memoized without `profileId` replays with
+ * it `undefined`, which reads as no profile.
+ */
+function stagingProfileOf(p: ClassifierInput): string | null {
+  return typeof p.profileId === "string" ? p.profileId : null;
+}
+
+/** The memory rules each staging profile of a rule-bound row sees, one read per profile. */
+async function loadMemoryRules(
+  pending: ReadonlyArray<ClassifierInput>,
+  userId: string,
+  deps: Pick<ClassifyDeps, "runInTx" | "store">,
+): Promise<ReadonlyMap<string | null, ReadonlyArray<string>>> {
+  const profileIds = R.unique(
+    pending.flatMap((p) => (p.source === "migration" ? [] : [stagingProfileOf(p)])),
+  );
+  if (profileIds.length === 0) return new Map();
+  return deps.runInTx(async (tx) => {
+    const rules = new Map<string | null, ReadonlyArray<string>>();
+    for (const profileId of profileIds) {
+      rules.set(profileId, await deps.store.getMemoryRules(tx, { profileId, userId }));
+    }
+    return rules;
+  });
 }
 
 /**
@@ -164,59 +219,69 @@ export async function drainPendingMemories(
   const pending = await deps.runInTx((tx) => deps.store.getPendingMemories(tx, userId));
   if (pending.length === 0) {
     logger.debug({ userId }, "no pending memories to drain");
-    return { drained: 0, byNetwork: {} };
+    return { drained: 0, byNetwork: {}, withheld: 0 };
   }
 
-  const { successful, byNetwork } = await classifyPendingMemories(pending, {
-    provider: deps.provider,
-    model: deps.model,
-    customCompartments: deps.customCompartments,
-  });
+  const { successful, withheld, byNetwork } = await classifyPendingMemories(pending, userId, deps);
 
-  if (successful.length === 0) {
+  if (successful.length === 0 && withheld.length === 0) {
     logger.warn({ userId, pendingCount: pending.length }, "all pending classifications failed");
-    return { drained: 0, byNetwork: {} };
+    return { drained: 0, byNetwork: {}, withheld: 0 };
   }
 
-  const items = buildRetainItems(successful);
-  await deps.memory.retainBatch(userId, items);
+  if (successful.length > 0) {
+    await deps.memory.retainBatch(userId, buildRetainItems(successful));
+  }
   await deps.runInTx((tx) =>
-    deps.store.deletePendingMemories(
-      tx,
-      successful.map((c) => c.id),
-    ),
+    deps.store.deletePendingMemories(tx, [...successful.map((c) => c.id), ...withheld]),
   );
 
-  logger.info({ drained: successful.length, byNetwork, userId }, "pending memory drain complete");
+  logger.info(
+    { drained: successful.length, withheld: withheld.length, byNetwork, userId },
+    "pending memory drain complete",
+  );
 
-  return { drained: successful.length, byNetwork };
+  return { drained: successful.length, byNetwork, withheld: withheld.length };
+}
+
+interface ClassifiedOutcome {
+  row: ClassifiedRow;
+  /** A listed memory rule forbids storing the row. */
+  withhold: boolean;
 }
 
 async function classifyOne(
   p: ClassifierInput,
-  schema: ReturnType<typeof buildClassifiedMemorySchema>,
-  system: string,
-  deps: Pick<ClassifyDeps, "provider" | "model">,
-): Promise<ClassifiedRow | null> {
+  memoryRules: ReadonlyArray<string>,
+  schemas: {
+    plain: ReturnType<typeof buildClassifiedMemorySchema>;
+    withholding: ReturnType<typeof buildWithholdingClassifiedMemorySchema>;
+  },
+  deps: Pick<ClassifyDeps, "provider" | "model" | "customCompartments">,
+): Promise<ClassifiedOutcome | null> {
+  const request = {
+    provider: deps.provider,
+    model: deps.model,
+    system: buildPendingClassificationPrompt(deps.customCompartments, memoryRules),
+    messages: [{ role: "user" as const, content: formatForClassifier(p) }],
+    name: "pending-memory-classification",
+    repair: {},
+  };
   try {
-    const { data } = await chatTyped({
-      provider: deps.provider,
-      model: deps.model,
-      system,
-      messages: [{ role: "user", content: formatForClassifier(p) }],
-      schema,
-      name: "pending-memory-classification",
-      repair: {},
-    });
-    return {
+    const { withhold, ...tags } =
+      memoryRules.length > 0
+        ? (await chatTyped({ ...request, schema: schemas.withholding })).data
+        : { ...(await chatTyped({ ...request, schema: schemas.plain })).data, withhold: false };
+    const row: ClassifiedRow = {
       id: p.id,
       content: p.content,
       context: p.context,
       source: p.source,
       profileClass: p.profileClass,
       skillName: p.skillName,
-      tags: data,
+      tags,
     };
+    return { row, withhold };
   } catch (err) {
     logger.warn({ err, pendingId: p.id }, "pending classification failed — row left in table");
     return null;

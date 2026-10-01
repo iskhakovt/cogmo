@@ -38,6 +38,8 @@ const ExtractionResultSchema = z.object({
   extracted: z.number().int().nonnegative(),
   reinforced: z.number().int().nonnegative(),
   contradictions: z.number().int().nonnegative(),
+  /** Older rows omit it and read as 0. */
+  retired: z.number().int().nonnegative().default(0),
   promoted: z.number().int().nonnegative(),
   outOfScopeReinforcementsSkipped: z.number().int().nonnegative(),
   unknownRuleReinforcementsSkipped: z.number().int().nonnegative(),
@@ -57,6 +59,8 @@ const MemoryExtractionResultSchema = z.object({
 const DrainResultSchema = z.object({
   drained: z.number().int().nonnegative(),
   byNetwork: z.record(z.string(), z.number().int().nonnegative()),
+  /** Older rows omit it and read as 0. */
+  withheld: z.number().int().nonnegative().default(0),
 });
 
 export const EvolutionEventPayloadSchema = z.object({

@@ -30,6 +30,8 @@ export interface MemoryExtractionDeps {
    * LLM picks exactly from `core ∪ customs`. Empty array = core-only.
    */
   customCompartments: ReadonlyArray<CompartmentDefinition>;
+  /** The live `memory`-category rules the conversation's profile sees; extraction stores nothing one forbids. */
+  memoryRules: ReadonlyArray<string>;
 }
 
 export interface MemoryExtractionResult {
@@ -67,7 +69,7 @@ export async function extractMemories(
     ({ data } = await chatTyped({
       provider: deps.provider,
       model: deps.model,
-      system: buildMemoryExtractionPrompt(deps.customCompartments),
+      system: buildMemoryExtractionPrompt(deps.customCompartments, deps.memoryRules),
       messages: [{ role: "user", content: transcript }],
       schema,
       name: "memory-extraction",

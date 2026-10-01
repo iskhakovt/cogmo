@@ -139,6 +139,7 @@ function EvolutionDetail({ event }: { event: EvolutionEventEntry }) {
             <Field label="extracted" value={c.extracted} />
             <Field label="reinforced" value={c.reinforced} />
             <Field label="contradictions" value={c.contradictions} />
+            <Field label="retired" value={c.retired} />
             <Field label="promoted" value={c.promoted} />
             <Field label="out-of-scope skipped" value={c.outOfScopeReinforcementsSkipped} />
             <Field label="unknown-rule skipped" value={c.unknownRuleReinforcementsSkipped} />
@@ -172,6 +173,7 @@ function EvolutionDetail({ event }: { event: EvolutionEventEntry }) {
         ) : (
           <>
             <Field label="drained" value={drained.drained} />
+            <Field label="withheld" value={drained.withheld} />
             <NetworkField byNetwork={drained.byNetwork} />
           </>
         )}

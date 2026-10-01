@@ -3444,6 +3444,8 @@ describe("DrizzleAgentStore", () => {
       const legacy = rows.find((r) => r.content === "wife's birthday is March 15");
       expect(intimate?.profileClass).toBe("intimate");
       expect(legacy?.profileClass).toBeNull();
+      expect(intimate?.profileId).toBe(profile.id);
+      expect(legacy?.profileId).toBeNull();
     });
 
     it("getPendingMemories scopes the profile JOIN by user_id — no cross-user class contamination", async () => {
@@ -4203,6 +4205,7 @@ describe("DrizzleAgentStore", () => {
           extracted: 1,
           reinforced: 2,
           contradictions: 0,
+          retired: 0,
           promoted: 1,
           outOfScopeReinforcementsSkipped: 0,
           unknownRuleReinforcementsSkipped: 0,
@@ -4210,11 +4213,27 @@ describe("DrizzleAgentStore", () => {
         },
         consolidation: null,
         memories: { extracted: 3, byNetwork: { world: 1, bank: 2 } },
-        drained: { drained: 0, byNetwork: {} },
+        drained: { drained: 0, byNetwork: {}, withheld: 0 },
         messageCount: 12,
         profileId: "11111111-1111-7111-8111-111111111111",
       };
     }
+
+    it("reads a row without retirement or withholding counts as 0 of each", async () => {
+      const { userId, conversationId } = await seedConversation();
+      const { retired: _retired, ...corrections } = samplePayload().corrections;
+      const { withheld: _withheld, ...drained } = samplePayload().drained;
+      const payload = { ...samplePayload(), corrections, drained };
+      await db.execute(sql`
+        INSERT INTO evolution_events (conversation_id, user_id, triggered_by, payload)
+        VALUES (${conversationId}, ${userId}, 'idle', ${JSON.stringify(payload)}::jsonb)
+      `);
+
+      const [row] = await tx((trx) => store.listEvolutionEvents(trx, userId));
+      const read = expectDefined(row, "older row").payload;
+      expect(read.corrections.retired).toBe(0);
+      expect(read.drained.withheld).toBe(0);
+    });
 
     it("records and lists events newest-first per user", async () => {
       const { userId, conversationId } = await seedConversation();

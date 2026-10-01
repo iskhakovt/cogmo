@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { ProviderProtocolError } from "../../llm/errors.js";
 import type { Message } from "../../llm/types.js";
+import { expectDefined } from "../../test/assertions.js";
 import { mockProvider } from "../../test/factories.js";
 import { extractMemories, type MemoryExtractionDeps } from "./extract-memories.js";
 
@@ -24,6 +25,7 @@ function mockExtractionDeps(
       retainBatch: vi.fn().mockResolvedValue(undefined),
     },
     customCompartments: [],
+    memoryRules: [],
     ...overrides,
   };
 }
@@ -236,6 +238,7 @@ describe("extractMemories", () => {
       model: "test-model",
       memory: { retainBatch: vi.fn().mockResolvedValue(undefined) },
       customCompartments: customs,
+      memoryRules: [],
     };
 
     await extractMemories(sampleHistory, "user-1", null, deps);
@@ -248,6 +251,19 @@ describe("extractMemories", () => {
     expect(system).toContain("**dnd**: tabletop campaign notes");
     expect(system).toContain("**music**: music production sessions");
     expect(system).toContain("Custom compartments");
+  });
+
+  it("lists the memory rules it is given in the system prompt", async () => {
+    const deps = mockExtractionDeps(
+      { memories: [] },
+      { memoryRules: ["Don't save anything about my health."] },
+    );
+
+    await extractMemories(sampleHistory, "user-1", null, deps);
+
+    const call = expectDefined(vi.mocked(deps.provider.chat).mock.calls[0], "chat call");
+    expect(call[0].system).toContain("## Memory Rules");
+    expect(call[0].system).toContain("- Don't save anything about my health.");
   });
 
   it("retains memories with a custom compartment value emitted by the LLM", async () => {
@@ -344,6 +360,7 @@ describe("extractMemories", () => {
       model: "test-model",
       memory: { retainBatch: vi.fn().mockResolvedValue(undefined) },
       customCompartments: [],
+      memoryRules: [],
     };
 
     const result = await extractMemories(sampleHistory, "user-1", null, deps);

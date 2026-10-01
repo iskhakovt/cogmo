@@ -6,7 +6,12 @@
  *      optional consolidation when active rule count crosses threshold)
  *   2. extract facts from the transcript → Hindsight (with full
  *      network + compartment + trust tags)
- *   3. drain pending memories for the user → classify each → Hindsight
+ *   3. drain pending memories for the user → classify each → Hindsight,
+ *      withholding a row a `memory`-category rule forbids
+ *
+ * Steps 1 and 2 follow the steering rules the conversation's profile sees:
+ * correction extraction lists the user's instruction rules beside the
+ * learned ones, and memory extraction the `memory`-category rules.
  *
  * Observer is the sole writer to Hindsight. The live `memory_retain`
  * tool stages into `pending_memories`; step 3 catches those rows up
@@ -238,6 +243,11 @@ export async function runObserver(
     throw err;
   }
 
+  // The rules the Observer applies are those the conversation's profile sees,
+  // its user's instruction rules included: the Observer is first-party, so a
+  // third-party profile's withholding doesn't apply to it.
+  const ruleScope = { profileId: conv.profileId, userId: conv.userId };
+
   // Phase 1: extract corrections from the transcript into steering rules.
   // A failed extraction reports nothing found, which also rules out
   // consolidation for this fire.
@@ -248,6 +258,7 @@ export async function runObserver(
       extracted: 0,
       reinforced: 0,
       contradictions: 0,
+      retired: 0,
       promoted: 0,
       outOfScopeReinforcementsSkipped: 0,
       unknownRuleReinforcementsSkipped: 0,
@@ -255,7 +266,7 @@ export async function runObserver(
     },
     () =>
       step.run("extract-corrections", async () => {
-        return extractCorrections(history, conv.profileId, {
+        return extractCorrections(history, ruleScope, {
           provider,
           model,
           runInTx: deps.runInTx,
@@ -287,11 +298,13 @@ export async function runObserver(
     { extracted: 0, byNetwork: {} },
     () =>
       step.run("extract-memories", async () => {
+        const memoryRules = await deps.runInTx((tx) => agentStore.getMemoryRules(tx, ruleScope));
         return extractMemories(history, conv.userId, profile.profileClass, {
           provider,
           model,
           memory: deps.memory,
           customCompartments,
+          memoryRules,
         });
       }),
   );
@@ -306,38 +319,52 @@ export async function runObserver(
   const drain = await settlePhase(
     "drain",
     conversationId,
-    { drained: 0, byNetwork: {} },
+    { drained: 0, byNetwork: {}, withheld: 0 },
     async (): Promise<DrainPendingResult> => {
       const pending = await step.run("load-pending-memories", async () => {
         return deps.runInTx((tx) =>
           agentStore.getPendingMemories(tx, conv.userId, PENDING_DRAIN_BATCH_SIZE),
         );
       });
-      if (pending.length === 0) return { drained: 0, byNetwork: {} };
+      if (pending.length === 0) return { drained: 0, byNetwork: {}, withheld: 0 };
 
       const classified = await step.run("classify-pending-memories", async () => {
-        return classifyPendingMemories(pending, { provider, model, customCompartments });
+        return classifyPendingMemories(pending, conv.userId, {
+          provider,
+          model,
+          customCompartments,
+          runInTx: deps.runInTx,
+          store: agentStore,
+        });
       });
-      if (classified.successful.length === 0) return { drained: 0, byNetwork: {} };
+      const { successful, withheld } = classified;
+      if (successful.length === 0 && withheld.length === 0) {
+        return { drained: 0, byNetwork: {}, withheld: 0 };
+      }
 
       // Each row carries its own staging profile's class (denormalised
       // by `getPendingMemories`'s LEFT JOIN). The drain stamps tags
       // per row, so a batch that mixes rows staged by different
       // profiles preserves each one's speaker-isolation boundary
       // regardless of which conversation triggered this Observer fire.
-      const items = buildRetainItems(classified.successful);
-      await step.run("retain-pending-memories", async () => {
-        await deps.memory.retainBatch(conv.userId, items);
-      });
+      // A batch that is all withheld has nothing to retain; the branch
+      // reads the memoized classification, so a replay plans the same steps.
+      if (successful.length > 0) {
+        const items = buildRetainItems(successful);
+        await step.run("retain-pending-memories", async () => {
+          await deps.memory.retainBatch(conv.userId, items);
+        });
+      }
       await step.run("delete-pending-memories", async () => {
         await deps.runInTx((tx) =>
-          agentStore.deletePendingMemories(
-            tx,
-            classified.successful.map((c) => c.id),
-          ),
+          agentStore.deletePendingMemories(tx, [...successful.map((c) => c.id), ...withheld]),
         );
       });
-      return { drained: classified.successful.length, byNetwork: classified.byNetwork };
+      return {
+        drained: successful.length,
+        byNetwork: classified.byNetwork,
+        withheld: withheld.length,
+      };
     },
   );
 
