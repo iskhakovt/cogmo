@@ -59,8 +59,8 @@ describe("parseScopeSpec", () => {
     if (r.kind === "error") expect(r.message).toContain("Invalid scope");
   });
 
-  it("accepts an unknown compartment value at parse time (validation moved to Transport)", () => {
-    // Compartments are now runtime-validated against the user's
+  it("accepts an unknown compartment value at parse time (Transport validates it)", () => {
+    // Compartments are validated at runtime against the user's
     // `custom_compartments` registry, which the parser can't see. An
     // unknown value passes here and is rejected later by Transport with
     // a `compartment_unknown` error — keeping the parser pure of DB I/O

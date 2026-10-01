@@ -202,13 +202,14 @@ interface GrammyCtxLite {
 
 /** `ReplyOptions` in grammY's shape, whose keyboard rows are mutable arrays. */
 function toGrammyReplyOptions(options: ReplyOptions): GrammyReplyOptions {
-  return options.reply_markup === undefined
-    ? {}
-    : {
-        reply_markup: {
-          inline_keyboard: options.reply_markup.inline_keyboard.map((row) => [...row]),
-        },
-      };
+  // Every other field passes through as is, so one added to ReplyOptions reaches grammY.
+  const { reply_markup, ...rest } = options;
+  return {
+    ...rest,
+    ...(reply_markup !== undefined && {
+      reply_markup: { inline_keyboard: reply_markup.inline_keyboard.map((row) => [...row]) },
+    }),
+  };
 }
 
 export function toCmdCtx(ctx: GrammyCtxLite, overrideMatch?: string): TelegramCommandContext {

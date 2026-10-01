@@ -876,8 +876,8 @@ describe("handleProfile", () => {
     });
 
     it("surfaces parse errors without calling update", async () => {
-      // `trust` still has a strict enum (first-party | any). Compartments
-      // moved to runtime validation against the user's `custom_compartments`,
+      // `trust` has a strict enum (first-party | any). Compartments are
+      // validated at runtime against the user's `custom_compartments`,
       // so an unknown compartment value passes parse and surfaces as a
       // typed Transport error instead — see `compartment_unknown` below.
       const update = vi.fn();
