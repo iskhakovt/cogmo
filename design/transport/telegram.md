@@ -118,7 +118,9 @@ Send `sendChatAction("typing")` once when a message arrives, before emitting the
 
 ## Configuration
 
-The adapter starts if a Telegram channel row exists in the DB. Bot token is read from `channels.credentials`.
+The adapter starts if a Telegram channel row exists in the DB. `channels.credentials` carries the bot token and an optional `apiRoot`, validated at setup.
+
+`apiRoot` points the bot at a self-hosted Bot API server; absent or empty, it is Telegram's own (`https://api.telegram.org`). API calls and inbound file downloads (`<apiRoot>/file/bot<token>/<file_path>`) both go there. A server run with `--local` is not supported for inbound files: its `getFile` returns an absolute path on the server's disk, which this process can't read, so the message is skipped and logged with the `local_path` download error.
 
 ## Testing
 

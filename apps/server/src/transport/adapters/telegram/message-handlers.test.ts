@@ -1,5 +1,6 @@
 import { ok } from "neverthrow";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { logger } from "../../../logger.js";
 import { mockAttachmentStore, mockInngest, mockTransport } from "../../../test/factories.js";
 import { handlers, resetGrammyMock } from "../../../test/telegram/grammy-mock.js";
 import {
@@ -161,6 +162,81 @@ describe("registerMessageHandlers", () => {
         ],
         expect.any(Date),
       );
+    });
+
+    it("logs a missing file_path as no_file_path", async () => {
+      const error = vi.spyOn(logger, "error").mockImplementation(() => {});
+      try {
+        await createAdapter();
+        const ctx = makePhotoCtx(111);
+        ctx.api.getFile = vi.fn().mockResolvedValue({ file_path: undefined });
+
+        await handlers.get("on:message:photo")!(ctx);
+
+        expect(error).toHaveBeenCalledWith(
+          { error: { kind: "no_file_path", fileId: "large_id" } },
+          "failed to process photo",
+        );
+      } finally {
+        error.mockRestore();
+      }
+    });
+
+    it("logs an error status from the file endpoint as http_error", async () => {
+      const error = vi.spyOn(logger, "error").mockImplementation(() => {});
+      try {
+        await createAdapter();
+        mockFetch.mockResolvedValueOnce({
+          ok: false,
+          status: 500,
+          statusText: "Internal Server Error",
+          arrayBuffer: async () => new Uint8Array().buffer,
+        });
+
+        await handlers.get("on:message:photo")!(makePhotoCtx(111));
+
+        expect(error).toHaveBeenCalledWith(
+          {
+            error: {
+              kind: "http_error",
+              fileId: "large_id",
+              status: 500,
+              statusText: "Internal Server Error",
+            },
+          },
+          "failed to process photo",
+        );
+      } finally {
+        error.mockRestore();
+      }
+    });
+
+    it("refuses a local-mode server's absolute file_path, naming the cause", async () => {
+      const error = vi.spyOn(logger, "error").mockImplementation(() => {});
+      try {
+        const { transport } = await createAdapter();
+        const ctx = makePhotoCtx(111);
+        ctx.api.getFile = vi
+          .fn()
+          .mockResolvedValue({ file_path: "/var/lib/telegram-bot-api/photos/file_1.jpg" });
+
+        await handlers.get("on:message:photo")!(ctx);
+
+        expect(mockFetch).not.toHaveBeenCalled();
+        expect(transport.uploadAttachment).not.toHaveBeenCalled();
+        expect(error).toHaveBeenCalledWith(
+          {
+            error: {
+              kind: "local_path",
+              fileId: "large_id",
+              path: "/var/lib/telegram-bot-api/photos/file_1.jpg",
+            },
+          },
+          "failed to process photo",
+        );
+      } finally {
+        error.mockRestore();
+      }
     });
 
     it("does not upload or emit when getFile returns no file_path", async () => {

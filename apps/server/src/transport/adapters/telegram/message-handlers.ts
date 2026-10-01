@@ -18,12 +18,16 @@ import type { RepoDialogs } from "./repo-dialog.js";
  *   - `no_file_path`: `getFile()` returns no `file_path` for files over
  *     20MB and for certain media types. The URL would end in `/undefined`,
  *     and the 404 page behind it would be uploaded as the user's file.
+ *   - `local_path`: a Bot API server run with `--local` answers with an
+ *     absolute path on its own disk instead of a path under `/file/`.
+ *     Reading it needs that disk, which this process doesn't have.
  *   - `http_error`: the file endpoint answers 4xx/5xx (rate limit, expired
  *     file_id, transient outage), and `arrayBuffer()` would hand back the
  *     error body just the same.
  */
 type FileDownloadError =
   | { kind: "no_file_path"; fileId: string }
+  | { kind: "local_path"; fileId: string; path: string }
   | { kind: "http_error"; fileId: string; status: number; statusText: string };
 
 interface FileDownloadCtx {
@@ -38,6 +42,9 @@ async function downloadTelegramFile(
 ): Promise<Result<Buffer, FileDownloadError>> {
   const file = await ctx.api.getFile(fileId);
   if (!file.file_path) return err({ kind: "no_file_path", fileId });
+  if (file.file_path.startsWith("/")) {
+    return err({ kind: "local_path", fileId, path: file.file_path });
+  }
   const url = `${apiRoot}/file/bot${token}/${file.file_path}`;
   const response = await fetch(url);
   if (!response.ok) {
