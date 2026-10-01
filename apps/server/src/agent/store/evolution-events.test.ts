@@ -1,11 +1,11 @@
 import { sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
+import { seedConversation, seedUser } from "../../test/agent-store-fixtures.js";
 import { expectDefined } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { DrizzleConversationStore } from "./conversations.js";
 import { DrizzleEvolutionEventStore } from "./evolution-events.js";
-import { seedConversation, seedUser } from "./test-fixtures.js";
 
 let db: Database;
 let tx: Transactor;

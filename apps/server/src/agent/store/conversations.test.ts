@@ -1,12 +1,17 @@
 import { err } from "neverthrow";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
+import {
+  seedConversation,
+  seedProfile,
+  seedUser,
+  TEST_MODEL,
+} from "../../test/agent-store-fixtures.js";
 import { expectOk } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { renderInboundText } from "../../transport/content.js";
 import { DrizzleConversationStore } from "./conversations.js";
 import { DrizzleProfileStore } from "./profiles.js";
-import { seedConversation, seedProfile, seedUser, TEST_MODEL } from "./test-fixtures.js";
 import { DrizzleTranscriptStore } from "./transcript.js";
 
 let db: Database;

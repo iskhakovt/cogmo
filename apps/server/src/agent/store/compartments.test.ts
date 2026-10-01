@@ -1,10 +1,10 @@
 import { err } from "neverthrow";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
+import { seedUser } from "../../test/agent-store-fixtures.js";
 import { expectOk } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { DrizzleCompartmentStore } from "./compartments.js";
-import { seedUser } from "./test-fixtures.js";
 
 let db: Database;
 let tx: Transactor;

@@ -2,12 +2,12 @@ import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 import type { Database, Transactor } from "../../db/index.js";
+import { seedUser } from "../../test/agent-store-fixtures.js";
 import { expectDefined, expectOk } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { type CoreMemoryUpsertOutcome, DrizzleCoreMemoryStore } from "./core-memory.js";
 import { DrizzleProfileClassStore } from "./profile-classes.js";
 import { coreMemoryBlocks } from "./schema.js";
-import { seedUser } from "./test-fixtures.js";
 
 let db: Database;
 let tx: Transactor;

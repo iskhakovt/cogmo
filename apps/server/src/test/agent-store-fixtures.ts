@@ -3,11 +3,11 @@
  * conversation between them, written through the stores that own them.
  */
 
-import type { Transactor } from "../../db/index.js";
-import { expectOk } from "../../test/assertions.js";
-import { DrizzleConversationStore } from "./conversations.js";
-import { DrizzleProfileStore } from "./profiles.js";
-import { DrizzleUserStore } from "./users.js";
+import { DrizzleConversationStore } from "../agent/store/conversations.js";
+import { DrizzleProfileStore } from "../agent/store/profiles.js";
+import { DrizzleUserStore } from "../agent/store/users.js";
+import type { Transactor } from "../db/index.js";
+import { expectOk } from "./assertions.js";
 
 export const TEST_MODEL = "claude-sonnet-4-6";
 

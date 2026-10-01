@@ -2,12 +2,12 @@ import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
 import { HARNESS_ROW_TAGS, type Message } from "../../llm/types.js";
+import { seedConversation } from "../../test/agent-store-fixtures.js";
 import { expectDefined } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { inboundMessages } from "../../transport/store/schema.js";
 import { DrizzleConversationStore } from "./conversations.js";
 import { conversationSummaries, messages, systemPromptSnapshots } from "./schema.js";
-import { seedConversation } from "./test-fixtures.js";
 import { DrizzleTranscriptStore } from "./transcript.js";
 
 let db: Database;
