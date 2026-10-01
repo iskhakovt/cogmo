@@ -307,6 +307,24 @@ export async function stepConfigureVoice(deps: WizardDeps): Promise<void> {
     if (!cancelGuard(saveAnyway)) return;
   }
 
+  await saveVoiceConfig(deps, tts, stt, probeOk);
+
+  const summary = `TTS=${tts.type}/${tts.model}/${tts.voice}, STT=${stt.type}/${stt.model}`;
+  if (probeOk) {
+    p.log.success(`Voice configured (${summary}). Takes effect on the next message.`);
+  } else {
+    p.log.warn(
+      `Voice config saved UNVALIDATED — probe failed; first voice reply will surface any auth issue (${summary}). Takes effect on the next message.`,
+    );
+  }
+}
+
+async function saveVoiceConfig(
+  deps: WizardDeps,
+  tts: TtsChoice,
+  stt: SttChoice,
+  probeOk: boolean,
+): Promise<void> {
   // Atomic — store secret(s), conditionally mark them validated, and link
   // the voice_config row in a single tx. A crash mid-flight leaves no
   // orphan rows in a state that affects bootstrap (no voice_config row →
@@ -357,13 +375,4 @@ export async function stepConfigureVoice(deps: WizardDeps): Promise<void> {
       sttBaseUrl: stt.baseURL,
     });
   });
-
-  const summary = `TTS=${tts.type}/${tts.model}/${tts.voice}, STT=${stt.type}/${stt.model}`;
-  if (probeOk) {
-    p.log.success(`Voice configured (${summary}). Takes effect on the next message.`);
-  } else {
-    p.log.warn(
-      `Voice config saved UNVALIDATED — probe failed; first voice reply will surface any auth issue (${summary}). Takes effect on the next message.`,
-    );
-  }
 }
