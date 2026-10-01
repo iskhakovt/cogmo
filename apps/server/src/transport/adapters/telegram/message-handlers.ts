@@ -1,6 +1,7 @@
 /** Inbound text, photos, documents and voice notes, packed as `InboundContent` and dispatched. */
 
 import type { Bot } from "grammy";
+import { err, ok, type Result } from "neverthrow";
 import { logger } from "../../../logger.js";
 import type { InboundContent } from "../../content.js";
 import type { Transport } from "../../transport.js";
@@ -11,43 +12,43 @@ import type { ProfileDialogs } from "./profile-dialog.js";
 import type { RepoDialogs } from "./repo-dialog.js";
 
 /**
- * Download a Telegram-hosted file (photo / document / voice / etc.) by file_id.
+ * Why a Telegram-hosted file couldn't be downloaded. Either way the caller
+ * logs and skips the message rather than persisting a bogus attachment:
  *
- * Two failure modes the inline `getFile + fetch + arrayBuffer` chain
- * silently absorbed:
- *
- *   1. `getFile()` returns `file_path: undefined` for files >20MB and for
- *      certain media types. The URL would become `.../bot<token>/undefined`
- *      and Telegram's CDN responds with a 404 HTML page; without an
- *      explicit guard we'd upload that HTML as the user's "document".
- *   2. The CDN can return 4xx/5xx (rate limit, expired file_id, transient
- *      outage). `arrayBuffer()` succeeds anyway, returning the error body —
- *      same garbage-upload outcome.
- *
- * Throws on either, so the caller's existing try/catch logs and skips
- * instead of persisting a bogus attachment.
+ *   - `no_file_path`: `getFile()` returns no `file_path` for files over
+ *     20MB and for certain media types. The URL would end in `/undefined`,
+ *     and the 404 page behind it would be uploaded as the user's file.
+ *   - `http_error`: the file endpoint answers 4xx/5xx (rate limit, expired
+ *     file_id, transient outage), and `arrayBuffer()` would hand back the
+ *     error body just the same.
  */
+type FileDownloadError =
+  | { kind: "no_file_path"; fileId: string }
+  | { kind: "http_error"; fileId: string; status: number; statusText: string };
+
 interface FileDownloadCtx {
   api: { getFile: (fileId: string) => Promise<{ file_path?: string }> };
 }
 
+/** Download a Telegram-hosted file (photo / document / voice / etc.) by file_id. */
 async function downloadTelegramFile(
   ctx: FileDownloadCtx,
   fileId: string,
   { apiRoot, token }: { apiRoot: string; token: string },
-): Promise<Buffer> {
+): Promise<Result<Buffer, FileDownloadError>> {
   const file = await ctx.api.getFile(fileId);
-  if (!file.file_path) {
-    throw new Error(`telegram getFile returned no file_path (file_id=${fileId})`);
-  }
+  if (!file.file_path) return err({ kind: "no_file_path", fileId });
   const url = `${apiRoot}/file/bot${token}/${file.file_path}`;
   const response = await fetch(url);
   if (!response.ok) {
-    throw new Error(
-      `telegram file download failed: ${response.status} ${response.statusText} (file_id=${fileId})`,
-    );
+    return err({
+      kind: "http_error",
+      fileId,
+      status: response.status,
+      statusText: response.statusText,
+    });
   }
-  return Buffer.from(await response.arrayBuffer());
+  return ok(Buffer.from(await response.arrayBuffer()));
 }
 
 export interface MessageHandlerDeps {
@@ -103,7 +104,12 @@ export function registerMessageHandlers(
       const photo = ctx.message.photo.at(-1);
       if (!photo) return;
 
-      const buffer = await downloadTelegramFile(ctx, photo.file_id, { apiRoot, token });
+      const download = await downloadTelegramFile(ctx, photo.file_id, { apiRoot, token });
+      if (download.isErr()) {
+        logger.error({ error: download.error }, "failed to process photo");
+        return;
+      }
+      const buffer = download.value;
 
       const path = await transport.uploadAttachment(buffer, "image/jpeg");
       const caption = ctx.message.caption ?? "";
@@ -133,7 +139,12 @@ export function registerMessageHandlers(
       // the LLM call doesn't reject a missing media_type at validation.
       const mediaType = doc.mime_type ?? "application/octet-stream";
 
-      const buffer = await downloadTelegramFile(ctx, doc.file_id, { apiRoot, token });
+      const download = await downloadTelegramFile(ctx, doc.file_id, { apiRoot, token });
+      if (download.isErr()) {
+        logger.error({ error: download.error }, "failed to process document");
+        return;
+      }
+      const buffer = download.value;
 
       const path = await transport.uploadAttachment(buffer, mediaType);
       const caption = ctx.message.caption ?? "";
@@ -184,7 +195,12 @@ export function registerMessageHandlers(
       // mime_type field is informational. Hardcode rather than relying on it.
       const mediaType = "audio/ogg";
 
-      const buffer = await downloadTelegramFile(ctx, voice.file_id, { apiRoot, token });
+      const download = await downloadTelegramFile(ctx, voice.file_id, { apiRoot, token });
+      if (download.isErr()) {
+        logger.error({ error: download.error }, "failed to process voice message");
+        return;
+      }
+      const buffer = download.value;
       const path = await transport.uploadAttachment(buffer, mediaType);
       const caption = ctx.message.caption ?? "";
       const durationMs = voice.duration ? voice.duration * 1000 : undefined;
