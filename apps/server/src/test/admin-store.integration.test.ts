@@ -23,6 +23,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DrizzleAgentStore } from "../agent/store/index.js";
 import { transactor } from "../db/index.js";
 import * as schema from "../db/schemas.js";
+import { commitIfOk } from "../db/transactor.js";
 import { expectDefined, expectOk } from "./assertions.js";
 import { fileDatabaseUrl } from "./integration-file.js";
 
@@ -225,6 +226,27 @@ describe("AgentStore admin (real Postgres)", () => {
     expect(await tx((trx) => store.findConversationByAlias(trx, userId, name("nightjob")))).toEqual(
       { conversationId: c2 },
     );
+  });
+
+  it("commitIfOk rolls back a top-level transaction whose callback returns Err", async () => {
+    const { id: userId } = await tx((trx) => store.createUser(trx));
+
+    const result = await commitIfOk(tx, async (trx) => {
+      await store
+        .createProfile(trx, {
+          userId,
+          name: name("rolled-back"),
+          basePrompt: "p",
+          model: TEST_MODEL,
+          toolSet: [],
+        })
+        .then(expectOk);
+      return err({ kind: "rejected" } as const);
+    });
+
+    expect(result).toEqual(err({ kind: "rejected" }));
+    const profiles = await tx((trx) => store.listProfiles(trx, userId));
+    expect(profiles.filter((p) => p.name === name("rolled-back"))).toEqual([]);
   });
 });
 
