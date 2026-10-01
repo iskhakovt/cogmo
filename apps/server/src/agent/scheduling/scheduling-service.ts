@@ -23,7 +23,7 @@
 import { err, ok, type Result } from "neverthrow";
 import type { Transactor } from "../../db/index.js";
 import { logger } from "../../logger.js";
-import type { AgentStore, ScheduledTask, ScheduleKind } from "../store/index.js";
+import type { ScheduledTask, ScheduledTaskStore, ScheduleKind } from "../store/index.js";
 import { type CronValidationError, computeNextRun, isValidTimezone, validateCron } from "./cron.js";
 
 const log = logger.child({ component: "scheduling.service" });
@@ -116,7 +116,7 @@ export interface SchedulingService {
 
 export interface SchedulingServiceDeps {
   runInTx: Transactor;
-  agentStore: AgentStore;
+  agentStore: ScheduledTaskStore;
   userId: string;
   profileId: string;
   /** Fallback IANA tz when create() args omit `timezone`. Sourced from `env.USER_TIMEZONE`. */
