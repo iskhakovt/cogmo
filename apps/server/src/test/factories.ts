@@ -207,7 +207,7 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
     getInstructionRules: vi.fn().mockResolvedValue([]),
     hasInstructionRule: vi.fn().mockResolvedValue(false),
     upsertCorrection: vi.fn().mockResolvedValue({ id: "rule-1", promoted: false }),
-    retireLearningRule: vi.fn().mockResolvedValue(true),
+    contradictLearningRule: vi.fn().mockResolvedValue("reset"),
     getMemoryRules: vi.fn().mockResolvedValue([]),
     countActiveLearnedRules: vi.fn().mockResolvedValue(0),
     replaceRules: vi.fn().mockResolvedValue({ id: "rule-1" }),

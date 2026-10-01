@@ -3164,7 +3164,7 @@ describe("createTransport", () => {
       const trigger = vi.fn().mockResolvedValue({
         status: "processed",
         eventId: "evt-99",
-        corrections: { extracted: 1, reinforced: 2, promoted: 3, retired: 6 },
+        corrections: { extracted: 1, reinforced: 2, promoted: 3, retired: 6, reset: 9 },
         memories: { extracted: 4, skippedForUnseenRules: 1 },
         drained: { drained: 5, withheld: 7, deferredToFirstParty: 8 },
       });
@@ -3183,7 +3183,7 @@ describe("createTransport", () => {
         withheld: 7,
         skippedForUnseenRules: 1,
         deferredToFirstParty: 8,
-        ruleChanges: { extracted: 1, reinforced: 2, promoted: 3, retired: 6 },
+        ruleChanges: { extracted: 1, reinforced: 2, promoted: 3, retired: 6, reset: 9 },
       });
     });
   });

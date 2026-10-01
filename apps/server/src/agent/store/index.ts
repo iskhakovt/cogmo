@@ -1596,10 +1596,17 @@ export interface AgentStore {
   ): Promise<{ id: string; promoted: boolean } | null>;
 
   /**
-   * Retire a learned rule still learning, which the user contradicted. False
-   * when the rule is active, retired or not learned, and nothing is written.
+   * Apply a contradiction from `conversationId` to a learned rule still
+   * learning. The first resets its observation count to 0 and records the
+   * conversation (`reset`); one from another conversation retires it
+   * (`retired`). One from the recorded conversation, or against a rule that
+   * is active, retired or not learned, writes nothing (`unchanged`), so a
+   * retried or repeated extraction of one conversation applies once.
    */
-  retireLearningRule(tx: Transaction, id: string): Promise<boolean>;
+  contradictLearningRule(
+    tx: Transaction,
+    params: { id: string; conversationId: string },
+  ): Promise<"reset" | "retired" | "unchanged">;
 
   /**
    * The live `memory`-category rules, of every source, that any of
@@ -3574,20 +3581,34 @@ export class DrizzleAgentStore implements AgentStore {
     return rows.length > 0;
   }
 
-  async retireLearningRule(tx: Transaction, id: string): Promise<boolean> {
-    const rows = await tx
+  async contradictLearningRule(
+    tx: Transaction,
+    params: { id: string; conversationId: string },
+  ): Promise<"reset" | "retired" | "unchanged"> {
+    const learning = and(
+      eq(steeringRules.id, params.id),
+      eq(steeringRules.active, false),
+      isNull(steeringRules.retractedAt),
+      inArray(steeringRules.source, LEARNED_RULE_SOURCES),
+    );
+    const retired = await tx
       .update(steeringRules)
-      .set({ active: false, retractedAt: sql`now()` })
+      .set({ retractedAt: sql`now()` })
       .where(
         and(
-          eq(steeringRules.id, id),
-          eq(steeringRules.active, false),
-          isNull(steeringRules.retractedAt),
-          inArray(steeringRules.source, LEARNED_RULE_SOURCES),
+          learning,
+          isNotNull(steeringRules.contradictedInConversationId),
+          ne(steeringRules.contradictedInConversationId, params.conversationId),
         ),
       )
       .returning({ id: steeringRules.id });
-    return rows.length > 0;
+    if (retired.length > 0) return "retired";
+    const reset = await tx
+      .update(steeringRules)
+      .set({ observationCount: 0, contradictedInConversationId: params.conversationId })
+      .where(and(learning, isNull(steeringRules.contradictedInConversationId)))
+      .returning({ id: steeringRules.id });
+    return reset.length > 0 ? "reset" : "unchanged";
   }
 
   async getMemoryRules(

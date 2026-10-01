@@ -39,6 +39,7 @@ function makeEvent(overrides: Partial<EvolutionEventEntry> = {}): EvolutionEvent
         reinforced: 1,
         contradictions: 0,
         retired: 1,
+        reset: 0,
         promoted: 1,
         outOfScopeReinforcementsSkipped: 0,
         outOfScopeContradictionsSkipped: 0,

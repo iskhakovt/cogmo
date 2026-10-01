@@ -939,6 +939,15 @@ export const steeringRules = pgTable(
     // instructions stay out of another's prompt.
     userId: uuid("user_id").references(() => users.id, { onDelete: "cascade" }),
     quote: text("quote"), // the user's words `rule_set` quoted; set on every instruction row
+    // NULL = never contradicted while learning. The conversation whose
+    // contradiction reset the learning rule's count; a contradiction from
+    // another conversation retires it, one from the same changes nothing, so
+    // a retried or repeated extraction of one conversation can't retire it.
+    // A deleted conversation clears it, which only costs one more reset.
+    contradictedInConversationId: uuid("contradicted_in_conversation_id").references(
+      () => conversations.id,
+      { onDelete: "set null" },
+    ),
     createdAt: ts(),
   },
   (t) => [

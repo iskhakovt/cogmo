@@ -152,6 +152,7 @@ function EvolutionDetail({ event }: { event: EvolutionEventEntry }) {
             <Field label="reinforced" value={c.reinforced} />
             <Field label="contradictions" value={c.contradictions} />
             <Field label="retired" value={c.retired} />
+            <Field label="reset" value={c.reset} />
             <Field label="promoted" value={c.promoted} />
             <Field label="out-of-scope skipped" value={c.outOfScopeReinforcementsSkipped} />
             <Field label="out-of-scope contradictions" value={c.outOfScopeContradictionsSkipped} />

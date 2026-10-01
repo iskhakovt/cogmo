@@ -4345,6 +4345,7 @@ describe("handleLearned", () => {
         reinforced: overrides?.reinforced ?? 0,
         contradictions: 0,
         retired: 0,
+        reset: 0,
         promoted: overrides?.promoted ?? 0,
         outOfScopeReinforcementsSkipped: 0,
         outOfScopeContradictionsSkipped: 0,
@@ -4598,7 +4599,7 @@ describe("handleReflect", () => {
           ok({
             status: "processed",
             eventId: "019e2900-0000-7000-8000-0000000000cc",
-            ruleChanges: { extracted: 2, reinforced: 1, promoted: 1, retired: 0 },
+            ruleChanges: { extracted: 2, reinforced: 1, promoted: 1, retired: 0, reset: 0 },
             memoryCount: 3,
             drained: 0,
             withheld: 0,
@@ -4628,7 +4629,7 @@ describe("handleReflect", () => {
           ok({
             status: "processed",
             eventId: "019e2900-0000-7000-8000-0000000000ee",
-            ruleChanges: { extracted: 0, reinforced: 0, promoted: 0, retired: 1 },
+            ruleChanges: { extracted: 0, reinforced: 0, promoted: 0, retired: 1, reset: 2 },
             memoryCount: 0,
             drained: 0,
             withheld: 2,
@@ -4641,7 +4642,7 @@ describe("handleReflect", () => {
     const ctx = mkCtx();
     await handleReflect(transport, ctx);
     const digest = (ctx.reply.mock.calls[1]?.[0] ?? "") as string;
-    expect(digest).toContain("0 new, 0 reinforced, 0 promoted, 1 retired");
+    expect(digest).toContain("0 new, 0 reinforced, 0 promoted, 1 retired, 2 reset");
     expect(digest).toContain("0 extracted, 0 drained, 2 withheld");
   });
 
@@ -4652,7 +4653,7 @@ describe("handleReflect", () => {
           ok({
             status: "processed",
             eventId: "019e2900-0000-7000-8000-0000000000ff",
-            ruleChanges: { extracted: 0, reinforced: 0, promoted: 0, retired: 0 },
+            ruleChanges: { extracted: 0, reinforced: 0, promoted: 0, retired: 0, reset: 0 },
             memoryCount: 0,
             drained: 0,
             withheld: 0,
@@ -4701,7 +4702,7 @@ describe("handleReflect", () => {
           ok({
             status: "processed",
             eventId: "019e2900-0000-7000-8000-0000000000dd",
-            ruleChanges: { extracted: 0, reinforced: 0, promoted: 0, retired: 0 },
+            ruleChanges: { extracted: 0, reinforced: 0, promoted: 0, retired: 0, reset: 0 },
             memoryCount: 0,
             drained: 0,
             withheld: 0,
@@ -4807,6 +4808,7 @@ describe("handleLearned detail rendering", () => {
     durationMs?: number;
     contradictions?: number;
     retired?: number;
+    reset?: number;
     withheld?: number;
     skipped?: number;
     deferred?: number;
@@ -4817,6 +4819,7 @@ describe("handleLearned detail rendering", () => {
         reinforced: 1,
         contradictions: overrides.contradictions ?? 0,
         retired: overrides.retired ?? 0,
+        reset: overrides.reset ?? 0,
         promoted: 0,
         outOfScopeReinforcementsSkipped: overrides.outOfScope ?? 0,
         outOfScopeContradictionsSkipped: 0,
@@ -4857,14 +4860,18 @@ describe("handleLearned detail rendering", () => {
   }
 
   it("shows retired learning rules and withheld rows only when there are some", async () => {
-    const reply = await detailOf(makePayload({ contradictions: 2, retired: 1, withheld: 2 }));
-    expect(reply).toContain("contradicted: 2");
+    const reply = await detailOf(
+      makePayload({ contradictions: 3, retired: 1, reset: 1, withheld: 2 }),
+    );
+    expect(reply).toContain("contradicted: 3");
+    expect(reply).toContain("reset:        1 (learning, contradicted once)");
     expect(reply).toContain("retired:      1 (learning, contradicted)");
     expect(reply).toContain("Pending drained: 0");
     expect(reply).toContain("withheld by a memory rule: 2");
 
     const quiet = await detailOf(makePayload({}));
     expect(quiet).not.toContain("retired:");
+    expect(quiet).not.toContain("reset:");
     expect(quiet).not.toContain("Pending drained");
     expect(quiet).not.toContain("profile can't see");
   });
@@ -4967,6 +4974,7 @@ describe("handleLearned detail rendering", () => {
                 reinforced: 0,
                 contradictions: 0,
                 retired: 0,
+                reset: 0,
                 promoted: 0,
                 outOfScopeReinforcementsSkipped: 0,
                 outOfScopeContradictionsSkipped: 0,

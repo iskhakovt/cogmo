@@ -188,7 +188,7 @@ function mockExtractionDeps(
       getInstructionRules: vi.fn().mockResolvedValue([]),
       hasInstructionRule: vi.fn().mockResolvedValue(false),
       upsertCorrection: vi.fn().mockResolvedValue({ id: "rule-1", promoted: false }),
-      retireLearningRule: vi.fn().mockResolvedValue(true),
+      contradictLearningRule: vi.fn().mockResolvedValue("reset"),
       countActiveLearnedRules: vi.fn().mockResolvedValue(5),
       ...storeOverrides,
     },
@@ -196,7 +196,12 @@ function mockExtractionDeps(
   };
 }
 
-const SCOPE = { profileId: "profile-1", userId: "user-1", seesUserRules: true };
+const SCOPE = {
+  conversationId: "conv-1",
+  profileId: "profile-1",
+  userId: "user-1",
+  seesUserRules: true,
+};
 
 /** A live instruction rule as `getInstructionRules` returns it. */
 function instructionRow(id: string, rule: string, observationCount = 1) {
@@ -253,6 +258,7 @@ describe("extractCorrections", () => {
       reinforced: 0,
       contradictions: 0,
       retired: 0,
+      reset: 0,
       promoted: 0,
       outOfScopeReinforcementsSkipped: 0,
       outOfScopeContradictionsSkipped: 0,
@@ -460,16 +466,30 @@ describe("extractCorrections", () => {
   });
 
   describe("a contradiction", () => {
-    it("retires a rule still learning", async () => {
+    it("resets a rule still learning on a first contradiction, from this conversation", async () => {
       const deps = mockExtractionDeps(contradiction("R1"), {
         getCorrections: vi.fn().mockResolvedValue([learningRow("learning", "Use bullet points")]),
       });
 
       const result = await extractCorrections(sampleHistory, SCOPE, deps);
 
-      expect(result).toMatchObject({ contradictions: 1, retired: 1, extracted: 0 });
-      expect(deps.store.retireLearningRule).toHaveBeenCalledWith(expect.anything(), "learning");
+      expect(result).toMatchObject({ contradictions: 1, reset: 1, retired: 0, extracted: 0 });
+      expect(deps.store.contradictLearningRule).toHaveBeenCalledWith(expect.anything(), {
+        id: "learning",
+        conversationId: "conv-1",
+      });
       expect(deps.store.upsertCorrection).not.toHaveBeenCalled();
+    });
+
+    it("counts a retirement when the store retires it on a second contradiction", async () => {
+      const deps = mockExtractionDeps(contradiction("R1"), {
+        getCorrections: vi.fn().mockResolvedValue([learningRow("learning", "Use bullet points")]),
+        contradictLearningRule: vi.fn().mockResolvedValue("retired"),
+      });
+
+      const result = await extractCorrections(sampleHistory, SCOPE, deps);
+
+      expect(result).toMatchObject({ contradictions: 1, reset: 0, retired: 1 });
     });
 
     it("only logs one against an active learned rule or an instruction rule", async () => {
@@ -485,8 +505,8 @@ describe("extractCorrections", () => {
 
         const result = await extractCorrections(sampleHistory, SCOPE, deps);
 
-        expect(result).toMatchObject({ contradictions: 1, retired: 0 });
-        expect(deps.store.retireLearningRule).not.toHaveBeenCalled();
+        expect(result).toMatchObject({ contradictions: 1, retired: 0, reset: 0 });
+        expect(deps.store.contradictLearningRule).not.toHaveBeenCalled();
       }
     });
 
@@ -510,7 +530,7 @@ describe("extractCorrections", () => {
         retired: 0,
         outOfScopeContradictionsSkipped: 1,
       });
-      expect(deps.store.retireLearningRule).not.toHaveBeenCalled();
+      expect(deps.store.contradictLearningRule).not.toHaveBeenCalled();
       const logged = [...warn.mock.calls, ...info.mock.calls].filter(
         ([fields]) =>
           typeof fields === "object" &&
@@ -523,15 +543,15 @@ describe("extractCorrections", () => {
       info.mockRestore();
     });
 
-    it("counts no retirement when the rule was promoted or retired since it was listed", async () => {
+    it("counts nothing when the store changes nothing: the same conversation again, or a rule promoted or retired since", async () => {
       const deps = mockExtractionDeps(contradiction("R1"), {
         getCorrections: vi.fn().mockResolvedValue([learningRow("learning", "Use bullet points")]),
-        retireLearningRule: vi.fn().mockResolvedValue(false),
+        contradictLearningRule: vi.fn().mockResolvedValue("unchanged"),
       });
 
       const result = await extractCorrections(sampleHistory, SCOPE, deps);
 
-      expect(result).toMatchObject({ contradictions: 1, retired: 0 });
+      expect(result).toMatchObject({ contradictions: 1, retired: 0, reset: 0 });
     });
   });
 
@@ -1206,6 +1226,7 @@ describe("extractCorrections", () => {
       reinforced: 0,
       contradictions: 0,
       retired: 0,
+      reset: 0,
       promoted: 0,
       outOfScopeReinforcementsSkipped: 0,
       outOfScopeContradictionsSkipped: 0,

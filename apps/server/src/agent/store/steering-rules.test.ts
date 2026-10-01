@@ -807,30 +807,78 @@ describe("the Observer's rule reads", () => {
     expect(await stateOf(id)).toBe("live");
   });
 
-  it("retireLearningRule retires a rule still learning and nothing else", async () => {
-    const userId = await seedUser();
-    const learning = await row({
-      rule: "Learning",
-      source: "correction",
-      active: false,
-      observationCount: 1,
-    });
-    const active = await row({ rule: "Active", source: "correction" });
-    const retired = await row({ rule: "Retired", source: "correction", retired: true });
-    const instruction = await row({ rule: "Mine", source: "instruction", userId });
-    const retire = (id: string) => tx((trx) => store.retireLearningRule(trx, id));
+  describe("contradictLearningRule", () => {
+    async function conversation(): Promise<string> {
+      const userId = await seedUser();
+      const profileId = await seedProfile(`p-${Math.random()}`);
+      return (
+        await tx((trx) => store.createConversation(trx, { userId, profileId, isPrivate: true }))
+      ).id;
+    }
 
-    expect(await retire(learning)).toBe(true);
-    expect(await retire(learning)).toBe(false);
-    expect(await retire(active)).toBe(false);
-    expect(await retire(retired)).toBe(false);
-    expect(await retire(instruction)).toBe(false);
-    expect([
-      await stateOf(learning),
-      await stateOf(active),
-      await stateOf(retired),
-      await stateOf(instruction),
-    ]).toEqual(["retired", "live", "retired", "live"]);
+    async function countOf(id: string): Promise<number> {
+      const [state] = await db
+        .select({ observationCount: steeringRules.observationCount })
+        .from(steeringRules)
+        .where(eq(steeringRules.id, id));
+      return expectDefined(state, id).observationCount;
+    }
+
+    const contradict = (id: string, conversationId: string) =>
+      tx((trx) => store.contradictLearningRule(trx, { id, conversationId }));
+
+    it("resets a learning rule's count on a first contradiction, and keeps it learning", async () => {
+      const convA = await conversation();
+      const id = await row({ rule: "Learning", source: "correction", active: false });
+
+      expect(await contradict(id, convA)).toBe("reset");
+      expect(await countOf(id)).toBe(0);
+      expect(await stateOf(id)).toBe("learning");
+    });
+
+    it("changes nothing on another contradiction from the same conversation", async () => {
+      const convA = await conversation();
+      const id = await row({ rule: "Learning", source: "correction", active: false });
+      await contradict(id, convA);
+
+      expect(await contradict(id, convA)).toBe("unchanged");
+      expect(await stateOf(id)).toBe("learning");
+    });
+
+    it("retires it on a contradiction from another conversation, reinforced meanwhile or not", async () => {
+      const [convA, convB] = [await conversation(), await conversation()];
+      const id = await row({ rule: "Learning", source: "correction", active: false });
+      await contradict(id, convA);
+      await tx((trx) =>
+        store.upsertCorrection(trx, {
+          rule: "Learning",
+          category: "style",
+          profileId: null,
+          existingRuleId: id,
+        }),
+      );
+      expect(await stateOf(id)).toBe("learning");
+
+      expect(await contradict(id, convB)).toBe("retired");
+      expect(await stateOf(id)).toBe("retired");
+    });
+
+    it("leaves an active, retired or instruction rule alone", async () => {
+      const userId = await seedUser();
+      const convA = await conversation();
+      const active = await row({ rule: "Active", source: "correction" });
+      const retired = await row({ rule: "Retired", source: "correction", retired: true });
+      const instruction = await row({ rule: "Mine", source: "instruction", userId });
+
+      for (const id of [active, retired, instruction]) {
+        expect(await contradict(id, convA)).toBe("unchanged");
+      }
+      expect([await stateOf(active), await stateOf(retired), await stateOf(instruction)]).toEqual([
+        "live",
+        "retired",
+        "live",
+      ]);
+    });
   });
 
   it("getMemoryRules lists the live memory rules the staging profiles see, of every source", async () => {

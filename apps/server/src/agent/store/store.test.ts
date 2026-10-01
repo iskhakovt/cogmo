@@ -4340,6 +4340,7 @@ describe("DrizzleAgentStore", () => {
           reinforced: 2,
           contradictions: 0,
           retired: 0,
+          reset: 0,
           promoted: 1,
           outOfScopeReinforcementsSkipped: 0,
           outOfScopeContradictionsSkipped: 0,
@@ -4358,6 +4359,7 @@ describe("DrizzleAgentStore", () => {
       const { userId, conversationId } = await seedConversation();
       const {
         retired: _retired,
+        reset: _reset,
         outOfScopeContradictionsSkipped: _outOfScope,
         ...corrections
       } = samplePayload().corrections;
@@ -4376,6 +4378,7 @@ describe("DrizzleAgentStore", () => {
       const [row] = await tx((trx) => store.listEvolutionEvents(trx, userId));
       const read = expectDefined(row, "older row").payload;
       expect(read.corrections.retired).toBe(0);
+      expect(read.corrections.reset).toBe(0);
       expect(read.corrections.outOfScopeContradictionsSkipped).toBe(0);
       expect(read.memories.skippedForUnseenRules).toBe(0);
       expect(read.drained.withheld).toBe(0);

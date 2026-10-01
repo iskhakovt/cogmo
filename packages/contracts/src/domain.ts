@@ -105,8 +105,10 @@ export interface EvolutionEventPayload {
     extracted: number;
     reinforced: number;
     contradictions: number;
-    /** Rules still learning that a contradiction retired. */
+    /** Rules still learning that a second contradiction, from another conversation, retired. */
     retired: number;
+    /** Rules still learning whose count a first contradiction reset. */
+    reset: number;
     promoted: number;
     outOfScopeReinforcementsSkipped: number;
     outOfScopeContradictionsSkipped: number;

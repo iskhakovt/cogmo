@@ -39,7 +39,7 @@ export interface ExtractionDeps {
     | "getInstructionRules"
     | "hasInstructionRule"
     | "upsertCorrection"
-    | "retireLearningRule"
+    | "contradictLearningRule"
     | "countActiveLearnedRules"
   >;
   /**
@@ -55,8 +55,10 @@ export interface ExtractionResult {
   extracted: number;
   reinforced: number;
   contradictions: number;
-  /** Rules still learning that a contradiction retired; the rest of `contradictions` are only logged. */
+  /** Rules still learning that a second contradiction, from another conversation, retired. */
   retired: number;
+  /** Rules still learning whose count a first contradiction reset to 0. */
+  reset: number;
   promoted: number;
   outOfScopeReinforcementsSkipped: number;
   /** Contradictions of a rule still learning on a channel the conversation isn't on: logged, not applied. */
@@ -68,6 +70,8 @@ export interface ExtractionResult {
 
 /** Whose rules one extraction reads. */
 export interface ExtractionScope {
+  /** The conversation extracted from: a contradiction is applied once per conversation. */
+  conversationId: string;
   profileId: string;
   userId: string;
   /**
@@ -98,6 +102,7 @@ export async function extractCorrections(
       reinforced: 0,
       contradictions: 0,
       retired: 0,
+      reset: 0,
       promoted: 0,
       outOfScopeReinforcementsSkipped: 0,
       outOfScopeContradictionsSkipped: 0,
@@ -132,6 +137,7 @@ export async function extractCorrections(
   let reinforced = 0;
   let contradictions = 0;
   let retired = 0;
+  let reset = 0;
   let promoted = 0;
   let outOfScopeReinforcementsSkipped = 0;
   let outOfScopeContradictionsSkipped = 0;
@@ -160,8 +166,10 @@ export async function extractCorrections(
         matchedId: contradictedRule.id,
         reasoning: correction.reasoning,
       };
-      // The user retracts a live rule in the turn; one still learning, which
-      // `# Rules` doesn't show, is retired here.
+      // The user retracts a live rule in the turn. One still learning, which
+      // `# Rules` doesn't show, has its count reset by a first contradiction
+      // and is retired by a second from another conversation: a single
+      // mislabelled contradiction costs its evidence, not the rule.
       if (contradictedRule.active) {
         logger.info(log, "correction contradicts a live rule — logged, not applied");
         continue;
@@ -178,16 +186,22 @@ export async function extractCorrections(
         );
         continue;
       }
-      const retiredNow = await deps.runInTx((tx) =>
-        deps.store.retireLearningRule(tx, contradictedRule.id),
+      const outcome = await deps.runInTx((tx) =>
+        deps.store.contradictLearningRule(tx, {
+          id: contradictedRule.id,
+          conversationId: scope.conversationId,
+        }),
       );
-      if (retiredNow) {
+      if (outcome === "retired") {
         retired++;
-        logger.info(log, "correction contradicts a rule still learning — retired it");
+        logger.info(log, "correction contradicts a rule still learning a second time — retired it");
+      } else if (outcome === "reset") {
+        reset++;
+        logger.info(log, "correction contradicts a rule still learning — reset its count");
       } else {
-        logger.warn(
+        logger.info(
           log,
-          "extraction: contradicted rule was promoted or retired since it was listed",
+          "extraction: contradiction already applied from this conversation, or the rule was promoted or retired since it was listed",
         );
       }
       continue;
@@ -280,6 +294,7 @@ export async function extractCorrections(
       reinforced,
       contradictions,
       retired,
+      reset,
       promoted,
       outOfScopeReinforcementsSkipped,
       outOfScopeContradictionsSkipped,
@@ -295,6 +310,7 @@ export async function extractCorrections(
     reinforced,
     contradictions,
     retired,
+    reset,
     promoted,
     outOfScopeReinforcementsSkipped,
     outOfScopeContradictionsSkipped,

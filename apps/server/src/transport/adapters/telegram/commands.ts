@@ -2536,11 +2536,13 @@ export async function handleReflect(
         ruleChanges.extracted +
           ruleChanges.reinforced +
           ruleChanges.promoted +
-          ruleChanges.retired ===
+          ruleChanges.retired +
+          ruleChanges.reset ===
         0
           ? "no rule changes"
           : `${ruleChanges.extracted} new, ${ruleChanges.reinforced} reinforced, ${ruleChanges.promoted} promoted` +
-            (ruleChanges.retired > 0 ? `, ${ruleChanges.retired} retired` : "");
+            (ruleChanges.retired > 0 ? `, ${ruleChanges.retired} retired` : "") +
+            (ruleChanges.reset > 0 ? `, ${ruleChanges.reset} reset` : "");
       const extraction =
         skippedForUnseenRules > 0
           ? "extraction skipped (a user's memory rule this profile can't see)"
@@ -2634,7 +2636,7 @@ function formatEvolutionDigest(
   const lines = events.map((e, i) => {
     const c = e.payload.corrections;
     const m = e.payload.memories;
-    const ruleDelta = c.extracted + c.reinforced + c.promoted + c.retired;
+    const ruleDelta = c.extracted + c.reinforced + c.promoted + c.retired + c.reset;
     const memoryDelta = m.extracted;
     const withheld = e.payload.drained.withheld;
     const deferred = e.payload.drained.deferredToFirstParty;
@@ -2697,6 +2699,9 @@ function formatEvolutionDetail(event: EvolutionEventEntry, now: Date = new Date(
     // Both are parts of `contradicted`.
     if (payload.corrections.retired > 0) {
       lines.push(`  retired:      ${payload.corrections.retired} (learning, contradicted)`);
+    }
+    if (payload.corrections.reset > 0) {
+      lines.push(`  reset:        ${payload.corrections.reset} (learning, contradicted once)`);
     }
     if (payload.corrections.outOfScopeContradictionsSkipped > 0) {
       lines.push(

@@ -268,6 +268,7 @@ export async function runObserver(
       reinforced: 0,
       contradictions: 0,
       retired: 0,
+      reset: 0,
       promoted: 0,
       outOfScopeReinforcementsSkipped: 0,
       outOfScopeContradictionsSkipped: 0,
