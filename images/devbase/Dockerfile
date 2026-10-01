@@ -71,8 +71,12 @@ RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
 
 # pnpm via npm, not corepack — corepack's cached pnpm bundle (tar /
 # picomatch / minimatch / brace-expansion) lags upstream and shows up as
-# image CVEs.
-RUN npm install -g "pnpm@${PNPM_VERSION:?}" \
+# image CVEs. pnpm's install script swaps its `pnpm` bin placeholder for the
+# native binary from its per-platform optional dependency. Blocked, the
+# placeholder still works but routes every call through Node and warns on a
+# terminal, so the build checks that `pnpm` resolves to the ELF binary.
+RUN npm install -g --allow-scripts=pnpm "pnpm@${PNPM_VERSION:?}" \
+ && head -c 4 "$(readlink -f "$(command -v pnpm)")" | grep -q ELF \
  && pnpm --version \
  && npm cache clean --force
 

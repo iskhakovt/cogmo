@@ -47,7 +47,7 @@ variable "UV_DIGEST" {
 }
 // Match package.json packageManager.
 variable "PNPM_VERSION" {
-  default = "11.27.1"
+  default = "12.8.1"
 }
 variable "NPM_VERSION" {
   default = "12.1.0"
