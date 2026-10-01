@@ -33,7 +33,6 @@ import { createSkills, type SkillsNamespace } from "./namespaces/skills.js";
 import type { TransportStore } from "./store/index.js";
 
 export type {
-  CompactConversationOutcome,
   ConversationStatusSummary,
   CurrentConversation,
 } from "./namespaces/conversations.js";

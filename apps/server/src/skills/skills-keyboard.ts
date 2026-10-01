@@ -1,4 +1,3 @@
-import { z } from "zod";
 import { UUID_PATTERN } from "../util/uuid.js";
 
 /**
@@ -57,9 +56,3 @@ export function parseSkillsApprovalCallback(data: string): ParsedSkillsApprovalC
 
 /** Regex for grammY's `bot.callbackQuery(REGEX, ...)` registration. */
 export const SKILLS_APPROVAL_CALLBACK_REGEX = new RegExp(`^skill:${UUID_PATTERN}:(approve|deny)$`);
-
-/** Zod schema for the parsed shape. */
-export const ParsedSkillsApprovalCallbackSchema = z.object({
-  pendingId: z.string().regex(new RegExp(`^${UUID_PATTERN}$`)),
-  action: z.enum(["approve", "deny"]),
-});

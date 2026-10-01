@@ -1,34 +1,3 @@
-export {
-  type ConsolidationDeps,
-  type ConsolidationResult,
-  consolidateRules,
-} from "./consolidate-rules.js";
-export {
-  type EvolutionEventPayload,
-  EvolutionEventPayloadSchema,
-  type EvolutionTrigger,
-  EvolutionTriggerSchema,
-  type ObserverPhase,
-} from "./event-schema.js";
-export {
-  type ExtractionDeps,
-  type ExtractionResult,
-  extractCorrections,
-  formatTranscript,
-} from "./extract-corrections.js";
-export {
-  extractMemories,
-  type MemoryExtractionDeps,
-  type MemoryExtractionResult,
-} from "./extract-memories.js";
-export {
-  createObserver,
-  MIN_MESSAGES_FOR_EXTRACTION,
-  type ObserverDeps,
-  type ObserverResult,
-} from "./observer.js";
-export {
-  type TriggerReflectionDeps,
-  type TriggerReflectionResult,
-  triggerReflection,
-} from "./trigger-reflection.js";
+export type { ObserverPhase } from "./event-schema.js";
+export { createObserver, MIN_MESSAGES_FOR_EXTRACTION } from "./observer.js";
+export { type TriggerReflectionResult, triggerReflection } from "./trigger-reflection.js";

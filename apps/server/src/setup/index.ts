@@ -97,5 +97,3 @@ export async function runSetup(opts: SetupOptions = {}): Promise<void> {
     await db.$client.end();
   }
 }
-
-export { seedDefaults } from "./seed.js";

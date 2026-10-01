@@ -1015,19 +1015,6 @@ export function turnContextSent(deps: HandleMessageDeps, call = 0): string {
   return first.text;
 }
 
-/**
- * A unique violation as a store throws it on the production driver: the
- * postgres-js error, SQLSTATE and constraint on it, under Drizzle's
- * `DrizzleQueryError`, which carries it on `cause`.
- */
-export function pgUniqueViolation(constraint: string): Error {
-  const driverError = Object.assign(new Error("duplicate key value violates unique constraint"), {
-    code: "23505",
-    constraint_name: constraint,
-  });
-  return new Error("Failed query: insert into ...", { cause: driverError });
-}
-
 /** A `CliIo` that records every line, for asserting on a CLI's output. */
 export function captureIo(): { io: CliIo; out: string[]; err: string[] } {
   const out: string[] = [];

@@ -19,7 +19,7 @@ import type { Octokit } from "@octokit/rest";
 import type { Inngest } from "inngest";
 import { err, ok, type Result } from "neverthrow";
 import type { Transactor } from "../../db/index.js";
-import { codingTaskCliDone } from "../../inngest/events.js";
+import { codingTaskCliDone, codingTaskVerifyComplete } from "../../inngest/events.js";
 import type { StepRun, StepSendEvent } from "../../inngest/index.js";
 import { logger } from "../../logger.js";
 import type { AskpassMaterials } from "../../sandbox/askpass.js";
@@ -336,13 +336,12 @@ async function runVerifyStage(
   await run.stepRun("emit-verify-complete", () =>
     inngest
       .send({
-        name: "coding/task/verify-complete",
-        data: {
+        ...codingTaskVerifyComplete.create({
           taskId: run.taskId,
           ok: verdict.ok,
           exitCode: verdict.exitCode,
           durationMs: verdict.durationMs,
-        },
+        }),
         // The step boundary covers replay, the id the crash window it
         // can't. One verify verdict per task, so the id is unambiguous.
         id: `verify-complete-${run.taskId}`,

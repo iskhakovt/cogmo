@@ -35,8 +35,8 @@ const log = logger.child({ component: "sandbox" });
 export const LABEL_MANAGED = "cogmo.managed";
 export const LABEL_INSTANCE = "cogmo.instance";
 export const LABEL_ROOT_TASK = "cogmo.root_task";
-export const LABEL_PARENT = "cogmo.parent";
-export const LABEL_DEPTH = "cogmo.depth";
+const LABEL_PARENT = "cogmo.parent";
+const LABEL_DEPTH = "cogmo.depth";
 
 /** Buffered-exec output cap per stream. Configurable via env later if needed. */
 const EXEC_BUFFER_LIMIT_BYTES = 1024 * 1024;
@@ -752,10 +752,3 @@ function sinkWritable(sink: ExecSink, stream: ExecStreamName): Writable {
     },
   });
 }
-
-/**
- * Factory shorthand. Same shape as the other module factories
- * (`startTelegramAdapter`, `createSecretsStore`, etc.).
- */
-export const createSandboxClient: typeof LocalDockerSandboxClient.create =
-  LocalDockerSandboxClient.create;

@@ -29,10 +29,12 @@
     "test:all": "pnpm --filter cogmo test:all",
     "test:watch": "pnpm --filter cogmo test:watch",
     "db:generate": "pnpm --filter cogmo db:generate",
-    "db:migrate": "pnpm --filter cogmo db:migrate"
+    "db:migrate": "pnpm --filter cogmo db:migrate",
+    "knip": "knip"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.14",
-    "husky": "^9.1.7"
+    "husky": "^9.1.7",
+    "knip": "6.39.0"
   }
 }

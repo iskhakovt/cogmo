@@ -204,12 +204,3 @@ function openAiCompatible(
     }),
   );
 }
-
-/**
- * Trivial resolver that always returns the same bundle. Used by tests that
- * want to inject a deterministic stub instead of wiring an AgentStore +
- * SecretsStore pair.
- */
-export function constantVoiceResolver(bundle: VoiceBundle | undefined): VoiceProviderResolver {
-  return () => Promise.resolve(bundle);
-}

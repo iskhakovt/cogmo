@@ -1,2 +1,1 @@
-export { DaytonaSandboxClient, type DaytonaSandboxClientOptions } from "./client.js";
-export { DaytonaSandboxSession } from "./session.js";
+export { DaytonaSandboxClient } from "./client.js";

@@ -29,8 +29,6 @@ export type Repair =
   | { kind: "dropped_stray_tool_result"; index: number; toolUseId: string }
   | { kind: "dropped_empty_message"; index: number };
 
-export type RepairKind = Repair["kind"];
-
 export interface ValidationResult {
   messages: Message[];
   repairs: Repair[];

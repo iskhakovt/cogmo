@@ -37,9 +37,7 @@ import { SkillSourceCache } from "./source-cache.js";
 import type { SkillRow, SkillRunIdentity, SkillRunTrigger, SkillStore } from "./store/index.js";
 
 export type {
-  DeregisterFailureReason,
   DeregisterResult,
-  EnableFailureReason,
   EnableResult,
 } from "./deploy/activation.js";
 export type { SkillActor, SkillDeployOrigin } from "./deploy/origin.js";

@@ -6,7 +6,6 @@ import {
   formatProgressMessage,
   type ProgressFormatInput,
   type ProgressPhase,
-  type ProgressTokenCounter,
 } from "./progress-format.js";
 import type { CodingStreamingRegistry } from "./streaming-registry.js";
 
@@ -148,6 +147,3 @@ export function startCodingProgressSubscriber(args: SubscriberArgs): void {
 function setPhase(ok: boolean, ifTrue: ProgressPhase, ifFalse: ProgressPhase): ProgressPhase {
   return ok ? ifTrue : ifFalse;
 }
-
-/** Re-exported for tests. */
-export type { ProgressTokenCounter };

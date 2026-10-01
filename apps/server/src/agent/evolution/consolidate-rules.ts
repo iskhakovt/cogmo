@@ -33,8 +33,6 @@ export const ConsolidationSchema = z.object({
     .describe("Groups of rules to merge. Empty if no merges needed."),
 });
 
-export type Consolidation = z.infer<typeof ConsolidationSchema>;
-
 // --- Consolidation prompt ---
 
 function buildConsolidationPrompt(

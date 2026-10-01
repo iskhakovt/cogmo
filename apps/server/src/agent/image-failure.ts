@@ -16,17 +16,11 @@ import type { GenerateImageResult } from "ai";
 import { z } from "zod";
 import {
   type ImageFailure,
-  type ImageFailureKind,
   ImageGenerationFailedError,
   type ImageProviderKind,
 } from "../llm/image-failure.js";
 
-export {
-  type ImageFailure,
-  type ImageFailureKind,
-  ImageGenerationFailedError,
-  type ImageProviderKind,
-};
+export { type ImageFailure, ImageGenerationFailedError, type ImageProviderKind };
 
 /**
  * Generated images whose byte length falls below this threshold are treated

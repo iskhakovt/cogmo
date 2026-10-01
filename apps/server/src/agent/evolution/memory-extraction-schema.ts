@@ -29,7 +29,6 @@ export const CORE_COMPARTMENTS = [
   "technical",
   "misc",
 ] as const;
-export type CoreMemoryCompartment = (typeof CORE_COMPARTMENTS)[number];
 
 /**
  * True when `name` is one of the curated core compartment values. Lifted
@@ -81,27 +80,6 @@ export const MemoryTrustSchema = z
     "Access tier: first-party (only profiles the user controls can access), any (safe for third-party plugins)",
   );
 
-export const ExtractedMemorySchema = z.object({
-  fact: z
-    .string()
-    .trim()
-    .min(1)
-    .describe("The fact or information to remember — clear, standalone, context-free"),
-  network: MemoryNetworkSchema,
-  compartment: MemoryCompartmentSchema,
-  trust: MemoryTrustSchema,
-  context: z
-    .string()
-    .trim()
-    .min(1)
-    .optional()
-    .describe("Optional: when or why this was learned, for temporal context"),
-});
-
-export const MemoryExtractionSchema = z.object({
-  memories: z.array(ExtractedMemorySchema),
-});
-
 /**
  * Schema for classifying a single pre-existing fact (e.g. a row in
  * `pending_memories` drained by Observer). The fact text is supplied as
@@ -113,20 +91,16 @@ export const ClassifiedMemorySchema = z.object({
   trust: MemoryTrustSchema,
 });
 
-export type MemoryNetwork = z.infer<typeof MemoryNetworkSchema>;
-export type MemoryCompartment = z.infer<typeof MemoryCompartmentSchema>;
 export type MemoryTrust = z.infer<typeof MemoryTrustSchema>;
-export type ExtractedMemory = z.infer<typeof ExtractedMemorySchema>;
-export type MemoryExtraction = z.infer<typeof MemoryExtractionSchema>;
 export type ClassifiedMemory = z.infer<typeof ClassifiedMemorySchema>;
 
 /**
  * Per-fire builders that produce the strict classifier schemas (compartment
  * field locked to `[...CORE, ...customs]`). Use these when calling
  * `chatTyped` so the LLM's structured output is bounded by the user's
- * actual compartment registry. The static `MemoryExtractionSchema` /
- * `ClassifiedMemorySchema` exports stay loose (compartment is `string`)
- * for non-classifier consumers (storage shapes, type imports).
+ * actual compartment registry. The static `ClassifiedMemorySchema` stays
+ * loose (compartment is `string`) for non-classifier consumers (storage
+ * shapes, type imports).
  */
 export function buildExtractedMemorySchema(customNames: ReadonlyArray<string>) {
   const compartment = buildCompartmentSchema(customNames);

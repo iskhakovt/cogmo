@@ -798,8 +798,6 @@ export const pipelineGateResolved = eventType("pipeline/gate.resolved", {
   }),
 });
 
-export type PipelineGateResolvedData = z.infer<typeof pipelineGateResolved.schema>;
-
 /**
  * The run has left this gate. `pipeline-gate-resolver` emits it once its step
  * has committed, or from `onFailure` once the run is found moved on; the

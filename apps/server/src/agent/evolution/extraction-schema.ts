@@ -58,7 +58,6 @@ export const CorrectionExtractionSchema = z.object({
 });
 
 export type CorrectionItem = z.infer<typeof CorrectionItemSchema>;
-export type CorrectionExtraction = z.infer<typeof CorrectionExtractionSchema>;
 
 // --- Rule labels ---
 
