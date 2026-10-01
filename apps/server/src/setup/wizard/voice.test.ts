@@ -1,11 +1,11 @@
 import * as p from "@clack/prompts";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
-import type { AgentStore } from "../agent/store/index.js";
-import type { BootstrapLock } from "../db/bootstrap-lock.js";
-import type { Transactor } from "../db/index.js";
-import type { SecretsStore } from "../secrets/store/index.js";
-import type { TransportStore } from "../transport/store/index.js";
+import type { AgentStore } from "../../agent/store/index.js";
+import type { BootstrapLock } from "../../db/bootstrap-lock.js";
+import type { Transactor } from "../../db/index.js";
+import type { SecretsStore } from "../../secrets/store/index.js";
+import type { TransportStore } from "../../transport/store/index.js";
 
 // Sentinel-tx token — fakeRunInTx passes it through to every store call so
 // assertions on call args can use it directly (vs. `expect.anything()`).
@@ -33,7 +33,7 @@ vi.mock("@clack/prompts", () => ({
   isCancel: vi.fn(() => false),
 }));
 
-vi.mock("../voice/openai.js", () => ({
+vi.mock("../../voice/openai.js", () => ({
   OpenAIVoiceProvider: class {
     readonly name = "openai";
     tts = openaiTtsProbe;
@@ -41,7 +41,7 @@ vi.mock("../voice/openai.js", () => ({
   },
 }));
 
-vi.mock("../voice/elevenlabs.js", () => ({
+vi.mock("../../voice/elevenlabs.js", () => ({
   ElevenLabsTtsProvider: class {
     readonly name = "elevenlabs";
     tts = elevenlabsTtsProbe;
@@ -49,7 +49,7 @@ vi.mock("../voice/elevenlabs.js", () => ({
 }));
 
 // Pulled in AFTER the vi.mocks so the wizard module loads against the mocks.
-const { stepConfigureVoice } = await import("./wizard.js");
+const { stepConfigureVoice } = await import("./voice.js");
 
 interface TestDeps {
   agentStore: ReturnType<typeof mock<AgentStore>>;

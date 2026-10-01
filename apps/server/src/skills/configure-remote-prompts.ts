@@ -1,5 +1,5 @@
 /**
- * @clack/prompts UX shared between `src/setup/wizard.ts:stepConfigureSkillsRemote`
+ * @clack/prompts UX shared between `src/setup/wizard/skills-remote.ts:stepConfigureSkillsRemote`
  * and `src/cli/migrate-skills-remote.ts:runMigrateSkillsRemoteCli`. Splits the
  * prompt construction + error rendering out of both callers so a new
  * `ConfigureSkillsRemoteError` variant or a re-worded prompt updates

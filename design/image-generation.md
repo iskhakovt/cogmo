@@ -475,7 +475,7 @@ Aspect ratio support varies across providers (Venice's `image_size` presets, rec
 The wizard surfaces two distinct entry points:
 
 - **`stepConfigureOptionalTools`** handles fal — a single `fal_api_key` prompt. The boot-time `ensureFalImageDefaults` seed wires the canonical 9-model catalog automatically, so the wizard doesn't ask the operator to pick fal models one by one.
-- **`stepConfigureImageProviders`** (`src/setup/wizard.ts`) handles `openai_compatible` and `venice` providers — Venice.ai (native API), OpenAI dall-e, custom inference servers. Asks for the provider type first, then prompts for name + base URL + API key (+ `safe_mode` default when type=venice), then loops "add a model? (name, model_string, description, ratios, seed, image-input, negative-prompt)" until the operator declines. Same domain functions back the `cogmo image-provider` / `cogmo image-model` CLI commands — no behaviour drift between wizard and CLI.
+- **`stepConfigureImageProviders`** (`src/setup/wizard/image-providers.ts`) handles `openai_compatible` and `venice` providers — Venice.ai (native API), OpenAI dall-e, custom inference servers. Asks for the provider type first, then prompts for name + base URL + API key (+ `safe_mode` default when type=venice), then loops "add a model? (name, model_string, description, ratios, seed, image-input, negative-prompt)" until the operator declines. Same domain functions back the `cogmo image-provider` / `cogmo image-model` CLI commands — no behaviour drift between wizard and CLI.
 
 Both surfaces are hot-reload-aware: changes take effect on the next message turn, not on process restart.
 
