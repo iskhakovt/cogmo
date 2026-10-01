@@ -1,8 +1,11 @@
+import { err, ok, type Result, ResultAsync } from "neverthrow";
+import { UniqueViolationError } from "../agent/store/errors.js";
 import { compileToolMatchers } from "../agent/tool-matchers.js";
 import type { ToolSpec } from "../agent/tools.js";
 import type { Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
 import type { SecretsStore } from "../secrets/store/index.js";
+import { describeError } from "../util/describe-error.js";
 import { mcpDescriptorToToolSpec } from "./adapter.js";
 import { hashToolSchema } from "./approval.js";
 import { McpConnectionPool } from "./client/pool.js";
@@ -12,8 +15,13 @@ import {
   type McpServer,
   type McpServerSpec,
   type McpServerStatus,
+  validateServerName,
 } from "./config.js";
-import { McpServerNotFoundError } from "./errors.js";
+import {
+  describeMcpPoolError,
+  type McpAddServerError,
+  type McpApproveServerError,
+} from "./errors.js";
 import type { McpStore } from "./store/index.js";
 
 export interface ResolveToolsParams {
@@ -35,7 +43,7 @@ export interface McpRegistry {
    */
   resolveTools(params: ResolveToolsParams): Promise<readonly ToolSpec[]>;
 
-  addServer(spec: McpServerSpec): Promise<McpServer>;
+  addServer(spec: McpServerSpec): Promise<Result<McpServer, McpAddServerError>>;
   removeServer(id: string): Promise<void>;
   listServers(): Promise<readonly McpServerStatus[]>;
   /**
@@ -53,7 +61,7 @@ export interface McpRegistry {
    * Resets any prior `unhealthy` pool state — operator action implies the
    * intent to retry.
    */
-  approveServer(id: string): Promise<void>;
+  approveServer(id: string): Promise<Result<void, McpApproveServerError>>;
   /**
    * Flip a single tool to `approved`. Returns `true` if the pin existed and
    * was updated, `false` if no pin exists for `(serverId, toolName)`. The
@@ -154,8 +162,15 @@ export class McpRegistryImpl implements McpRegistry {
     return tools;
   }
 
-  async addServer(spec: McpServerSpec): Promise<McpServer> {
-    return this.#runInTx((tx) => this.#store.addServer(tx, spec));
+  async addServer(spec: McpServerSpec): Promise<Result<McpServer, McpAddServerError>> {
+    const named = validateServerName(spec.name);
+    if (named.isErr()) return err(named.error);
+    try {
+      return ok(await this.#runInTx((tx) => this.#store.addServer(tx, spec)));
+    } catch (e) {
+      if (e instanceof UniqueViolationError) return err({ code: "name_taken", name: spec.name });
+      throw e;
+    }
   }
 
   /**
@@ -171,9 +186,9 @@ export class McpRegistryImpl implements McpRegistry {
     return this.#runInTx((tx) => this.#store.listServerStatuses(tx));
   }
 
-  async approveServer(id: string): Promise<void> {
+  async approveServer(id: string): Promise<Result<void, McpApproveServerError>> {
     const server = await this.#runInTx((tx) => this.#store.getServerById(tx, id));
-    if (!server) throw new McpServerNotFoundError(id);
+    if (!server) return err({ code: "server_not_found", serverId: id });
 
     // Operator action — clear any prior unhealthy state so connect retries.
     // `reset` is narrow by design: it only clears `unhealthy` entries, so
@@ -183,9 +198,28 @@ export class McpRegistryImpl implements McpRegistry {
     this.#pool.reset(id);
 
     const conn = await this.#pool.getConnection(id);
-    const tools = await conn.listTools();
+    if (conn.isErr()) {
+      // Removed since the lookup above: before the connect, or during it.
+      if (conn.error.code === "server_not_found" || conn.error.code === "evicted") {
+        return err({ code: "server_not_found", serverId: id });
+      }
+      return err({
+        code: "connection_failed",
+        serverId: id,
+        reason: describeMcpPoolError(conn.error),
+      });
+    }
+    const listed = await ResultAsync.fromPromise(
+      conn.value.listTools(),
+      (e): McpApproveServerError => ({
+        code: "connection_failed",
+        serverId: id,
+        reason: describeError(e),
+      }),
+    );
+    if (listed.isErr()) return err(listed.error);
 
-    const snapshots = tools.map((tool) => {
+    const snapshots = listed.value.map((tool) => {
       const schemaSnapshot = {
         description: tool.description,
         inputSchema: tool.inputSchema,
@@ -204,6 +238,7 @@ export class McpRegistryImpl implements McpRegistry {
     await this.#runInTx((tx) =>
       this.#store.syncServerApproval(tx, { serverId: server.id, snapshots }),
     );
+    return ok(undefined);
   }
 
   async approveTool(serverId: string, toolName: string): Promise<boolean> {

@@ -2,6 +2,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import type { Inngest } from "inngest";
 import { err, ok, type Result } from "neverthrow";
+import { match } from "ts-pattern";
 import { planGateEmission } from "../agent/coding/plan-gate.js";
 import type { CodingStore } from "../agent/coding/store/index.js";
 import type { CompactConversationResult } from "../agent/conversation/compact-conversation.js";
@@ -55,7 +56,6 @@ import {
   type McpServerSpecInput,
   type McpServerStatus,
 } from "../mcp/config.js";
-import { McpInvalidServerNameError, McpServerNotFoundError } from "../mcp/errors.js";
 import type { McpRegistry } from "../mcp/registry.js";
 import { runGit, withGitAskpass } from "../secrets/git-askpass.js";
 import {
@@ -2530,20 +2530,21 @@ export function createTransport(deps: {
             reason: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "),
           });
         }
-        try {
-          const server = await mcpRegistry.addServer({
-            name: spec.name,
-            config: parsed.data,
-            enabled: spec.enabled,
-          });
-          return ok(server);
-        } catch (e) {
-          if (e instanceof UniqueViolationError)
-            return err({ code: "mcp_server_name_taken" as const, name: spec.name });
-          if (e instanceof McpInvalidServerNameError)
-            return err({ code: "mcp_invalid_config" as const, reason: e.message });
-          throw e;
-        }
+        const added = await mcpRegistry.addServer({
+          name: spec.name,
+          config: parsed.data,
+          enabled: spec.enabled,
+        });
+        return added.mapErr((e) =>
+          match(e)
+            .returnType<TransportError>()
+            .with({ code: "name_taken" }, ({ name }) => ({ code: "mcp_server_name_taken", name }))
+            .with({ code: "invalid_name" }, ({ reason }) => ({
+              code: "mcp_invalid_config",
+              reason,
+            }))
+            .exhaustive(),
+        );
       },
 
       async removeServer(platformUserHandle, serverId) {
@@ -2572,20 +2573,21 @@ export function createTransport(deps: {
         );
         if (!identity) return err({ code: "identity_rejected" as const });
         if (!mcpRegistry) return err({ code: "mcp_disabled" as const });
-        try {
-          await mcpRegistry.approveServer(serverId);
-          return ok(undefined);
-        } catch (e) {
-          if (e instanceof McpServerNotFoundError)
-            return err({ code: "mcp_server_not_found" as const, serverId: e.serverId });
-          // Connect / listTools failure surfaces as a Result error so the
-          // Telegram callback can render a precise toast.
-          return err({
-            code: "mcp_connection_failed" as const,
-            serverId,
-            reason: e instanceof Error ? e.message : String(e),
-          });
-        }
+        const approved = await mcpRegistry.approveServer(serverId);
+        return approved.mapErr((e) =>
+          match(e)
+            .returnType<TransportError>()
+            .with({ code: "server_not_found" }, (f) => ({
+              code: "mcp_server_not_found",
+              serverId: f.serverId,
+            }))
+            .with({ code: "connection_failed" }, (f) => ({
+              code: "mcp_connection_failed",
+              serverId: f.serverId,
+              reason: f.reason,
+            }))
+            .exhaustive(),
+        );
       },
 
       async approveTool(platformUserHandle, serverId, toolName) {

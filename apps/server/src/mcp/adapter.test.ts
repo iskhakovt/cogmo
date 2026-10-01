@@ -1,3 +1,4 @@
+import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import { mcpDescriptorToToolSpec } from "./adapter.js";
 import type { McpConnectionPool } from "./client/pool.js";
@@ -42,12 +43,29 @@ function makePool(callTool: (...args: unknown[]) => Promise<unknown>): McpConnec
     close: vi.fn(),
   };
   return {
-    getConnection: vi.fn(async () => conn),
+    getConnection: vi.fn(async () => ok(conn)),
     // The adapter only uses getConnection — the rest are unused but typed.
   } as unknown as McpConnectionPool;
 }
 
 describe("mcpDescriptorToToolSpec", () => {
+  it("fails the call with the pool's reason when it has no connection", async () => {
+    const pool = {
+      getConnection: vi.fn(async () =>
+        err({ code: "server_unhealthy" as const, lastError: "spawn ENOENT" }),
+      ),
+    } as unknown as McpConnectionPool;
+    const spec = mcpDescriptorToToolSpec({
+      server: makeServer(),
+      descriptor: makeDescriptor(),
+      pool,
+      timeoutMs: 30_000,
+    });
+    await expect(spec.handler({ repo: "x" }, {} as never)).rejects.toThrow(
+      "MCP server is unhealthy: spawn ENOENT",
+    );
+  });
+
   it("composes the canonical tool name", () => {
     const spec = mcpDescriptorToToolSpec({
       server: makeServer("github"),

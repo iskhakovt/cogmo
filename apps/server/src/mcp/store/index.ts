@@ -1,4 +1,5 @@
 import { and, count, eq, sql } from "drizzle-orm";
+import { translateUniqueViolation } from "../../agent/store/errors.js";
 import { single } from "../../db/helpers.js";
 import type { Transaction } from "../../db/index.js";
 import {
@@ -16,7 +17,10 @@ import { mcpServers, mcpServerTools } from "./schema.js";
 // --- Interface ---
 
 export interface McpStore {
-  /** Insert a new server. Throws on duplicate name or invalid name shape. */
+  /**
+   * Insert a new server. Throws `UniqueViolationError` on a taken name; the
+   * name's shape is validated upstream, so an invalid one throws as a bug.
+   */
   addServer(tx: Transaction, spec: McpServerSpec): Promise<McpServer>;
 
   /** Delete a server by id. Cascades to tool pins. No-op if not found. */
@@ -118,8 +122,8 @@ export interface McpStore {
 export class DrizzleMcpStore implements McpStore {
   async addServer(tx: Transaction, spec: McpServerSpec): Promise<McpServer> {
     assertValidServerName(spec.name);
-    const row = single(
-      await tx
+    const rows = await translateUniqueViolation(() =>
+      tx
         .insert(mcpServers)
         .values({
           name: spec.name,
@@ -129,7 +133,7 @@ export class DrizzleMcpStore implements McpStore {
         })
         .returning(),
     );
-    return rowToServer(row);
+    return rowToServer(single(rows));
   }
 
   async removeServer(tx: Transaction, id: string): Promise<void> {

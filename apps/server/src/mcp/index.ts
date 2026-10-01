@@ -23,7 +23,12 @@ export {
   McpValueSourceSchema,
   ToolSchemaSnapshotSchema,
 } from "./config.js";
-export { McpPoolError, type McpPoolErrorCode } from "./errors.js";
+export {
+  describeMcpPoolError,
+  type McpAddServerError,
+  type McpApproveServerError,
+  type McpPoolError,
+} from "./errors.js";
 export {
   type McpRegistry,
   McpRegistryImpl,

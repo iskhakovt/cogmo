@@ -92,12 +92,14 @@ afterAll(async () => {
  */
 async function seedEchoServer(): Promise<string> {
   const { mcpRegistry } = bootstrapped;
-  const server = await mcpRegistry.addServer({
-    name: MCP_SERVER_NAME,
-    config: { transport: "http", url: inject("mcpEchoUrl"), headers: {} },
-    enabled: true,
-  });
-  await mcpRegistry.approveServer(server.id);
+  const server = (
+    await mcpRegistry.addServer({
+      name: MCP_SERVER_NAME,
+      config: { transport: "http", url: inject("mcpEchoUrl"), headers: {} },
+      enabled: true,
+    })
+  )._unsafeUnwrap();
+  (await mcpRegistry.approveServer(server.id))._unsafeUnwrap();
   await mcpRegistry.approveTool(server.id, "echo");
   return server.id;
 }
