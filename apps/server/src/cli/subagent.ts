@@ -139,11 +139,11 @@ async function addSubAgent(args: AddArgs, deps: SubAgentCliDeps, io: CliIo): Pro
 function describeAddError(e: CreateSubAgentError): string {
   switch (e.kind) {
     case "invalid_name":
-      return `invalid sub_agent name "${e.name}": must be lowercase ASCII letters/digits/hyphen/underscore, start with a letter, ≤32 chars`;
+      return `Invalid sub-agent name "${e.name}": it must be lowercase ASCII letters/digits/hyphen/underscore, start with a letter, ≤32 chars.`;
     case "description_empty":
       return "The description must not be empty: it is the routing signal.";
     case "unknown_model":
-      return `unknown model: "${e.model}" has no provider in model_providers. Run \`cogmo model list\` to see routable models, or \`cogmo model add\` to register one.`;
+      return `Unknown model "${e.model}": it has no provider in model_providers. Run \`cogmo model list\` to see routable models, or \`cogmo model add\` to register one.`;
     case "sub_agent_name_taken":
       return `A sub-agent named "${e.name}" already exists.`;
   }

@@ -170,9 +170,9 @@ describe("withRetry", () => {
     it("does NOT log a warn line when shouldRetry returns false", async () => {
       // p-retry fires onFailedAttempt BEFORE consulting shouldRetry,
       // so the wrapper has to re-check the predicate inside the hook.
-      // Without this guard, every routine non-retriable error (e.g.
-      // a unique violation) would spam a
-      // "retry attempt 1 failed" warn even though no retry ran.
+      // Without this guard, every routine non-retriable error (e.g. a
+      // unique violation) would spam a "retry attempt 1 failed" warn
+      // even though no retry ran.
       const fn = vi.fn().mockRejectedValue(new Error("permanent"));
       await expect(
         withRetry(fn, { minTimeoutMs: 1, maxTimeoutMs: 5, shouldRetry: () => false }),

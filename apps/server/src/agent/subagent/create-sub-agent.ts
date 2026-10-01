@@ -28,11 +28,14 @@ export interface CreateSubAgentDeps {
   agentStore: AgentStore;
 }
 
+/**
+ * Why `createSubAgent` refused. `description_empty`: the description is the
+ * routing signal the orchestrator delegates on. `unknown_model`: the model has
+ * no row in `model_providers`, so a sub-agent on it could never run.
+ */
 export type CreateSubAgentError =
   | InvalidName
-  /** `description` is the routing signal the orchestrator delegates on. */
   | { kind: "description_empty" }
-  /** `model` has no row in `model_providers`, so a sub-agent on it could never run. */
   | { kind: "unknown_model"; model: string }
   | SubAgentNameTaken;
 

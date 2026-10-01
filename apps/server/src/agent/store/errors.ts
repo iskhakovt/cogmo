@@ -3,8 +3,9 @@
  * `Result`, and the Postgres-error translation that produces them.
  *
  * A store method that returns one of these has left the caller's transaction
- * as it found it: the write runs in a savepoint (`inSavepoint`), so neither a
- * half-applied change nor an aborted transaction outlives the `Err`.
+ * as it found it: it fails before writing, or its write runs in a savepoint
+ * (`inSavepoint`), so neither a half-applied change nor an aborted
+ * transaction outlives the `Err`.
  */
 
 import { err, ok, type Result } from "neverthrow";

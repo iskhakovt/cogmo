@@ -144,7 +144,7 @@ describe("subAgentCli", () => {
       [["writer", "--model", "m", "--description", "  "], /expected text, got " {2}"/],
       [
         ["Writer", "--model", "m", "--description", "d"],
-        /invalid sub_agent name "Writer": must be lowercase/,
+        /Invalid sub-agent name "Writer": it must be lowercase/,
       ],
       [
         ["writer", "--modle", "x", "--description", "d"],

@@ -31,13 +31,14 @@ export interface DiscoveredModel {
   maxOutputTokens?: number;
 }
 
+/**
+ * Why discovery returned no list. `unavailable`: the endpoint is unreachable,
+ * answers 404, or answers in a shape we can't read, so the caller falls back
+ * to typing the id by hand. `rejected`: it answered with an error status
+ * (auth, rate limit), which is worth a retry.
+ */
 export type DiscoveryError =
-  /**
-   * No list to be had: the endpoint is unreachable, answers 404, or answers
-   * in a shape we can't read. The caller falls back to typing the id by hand.
-   */
   | { kind: "unavailable"; message: string }
-  /** The endpoint answered with an error status (auth, rate limit): worth a retry. */
   | { kind: "rejected"; message: string };
 
 const OpenRouterEntrySchema = z

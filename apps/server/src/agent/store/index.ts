@@ -2572,8 +2572,10 @@ export class DrizzleAgentStore implements AgentStore {
       .from(profiles)
       .where(and(eq(profiles.userId, userId), eq(profiles.profileClass, name)));
     const refCount = refRows[0]?.value ?? 0;
-    // refCount may be 0 when the referencing UPDATE landed after the count;
-    // the FK confirmed "in use right now", so report at least one.
+    // Defensive: under REPEATABLE READ a reference committed after this
+    // snapshot fails the DELETE with 40001 rather than the FK, so when the FK
+    // fires the count already saw the reference. The clamp keeps the report
+    // consistent with the FK if that ever stops holding.
     const inUse = { kind: "profile_class_in_use", profileRefs: Math.max(refCount, 1) } as const;
     return inSavepoint(tx, (sp) =>
       referentialViolationAs("fk_profiles_profile_class", inUse, async () => {
