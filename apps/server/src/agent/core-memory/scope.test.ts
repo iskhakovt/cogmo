@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Transactor } from "../../db/index.js";
+import { expectOk } from "../../test/assertions.js";
 import { createTestDatabase } from "../../test/pglite.js";
 import { DrizzleAgentStore } from "../store/index.js";
 import { readCoreMemory } from "./scope.js";
@@ -14,7 +15,7 @@ describe("readCoreMemory (PGlite)", () => {
     ({ tx: runInTx, close } = await createTestDatabase());
     userId = (await runInTx((tx) => store.createUser(tx))).id;
     await runInTx(async (tx) => {
-      await store.createProfileClass(tx, { userId, name: "game", description: "x" });
+      await store.createProfileClass(tx, { userId, name: "game", description: "x" }).then(expectOk);
       await store.upsertCoreMemoryBlock(tx, {
         userId,
         profileClass: null,

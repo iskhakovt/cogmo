@@ -1,5 +1,5 @@
+import { err as failed } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
-import { UniqueViolationError } from "../agent/store/errors.js";
 import type { SubAgent } from "../agent/store/index.js";
 import { captureIo, fakeRunInTx, mockAgentStore } from "../test/factories.js";
 import { type CliIo, type LoadDeps, runCli } from "./run.js";
@@ -97,7 +97,7 @@ describe("subAgentCli", () => {
           ...routable,
           createSubAgent: vi
             .fn()
-            .mockRejectedValue(new UniqueViolationError("uq_sub_agents_user_name")),
+            .mockResolvedValue(failed({ kind: "sub_agent_name_taken", name: "writer" })),
         }),
         io,
       );

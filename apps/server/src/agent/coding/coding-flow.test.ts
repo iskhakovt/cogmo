@@ -14,7 +14,7 @@ import {
   type SandboxSession,
 } from "../../sandbox/index.js";
 import { DrizzleSandboxStore } from "../../sandbox/store/index.js";
-import { expectDefined } from "../../test/assertions.js";
+import { expectDefined, expectOk } from "../../test/assertions.js";
 import {
   makeStepRun,
   mockAgentStore,
@@ -92,13 +92,15 @@ async function seedRepo(): Promise<CodingRepoRow> {
 async function seedConversation(): Promise<string> {
   const user = await tx((trx) => agentStore.createUser(trx));
   const profile = await tx((trx) =>
-    agentStore.createProfile(trx, {
-      userId: user.id,
-      name: "default",
-      basePrompt: "p",
-      model: "test-model",
-      toolSet: [],
-    }),
+    agentStore
+      .createProfile(trx, {
+        userId: user.id,
+        name: "default",
+        basePrompt: "p",
+        model: "test-model",
+        toolSet: [],
+      })
+      .then(expectOk),
   );
   const conv = await tx((trx) =>
     agentStore.createConversation(trx, { userId: user.id, profileId: profile.id, isPrivate: true }),

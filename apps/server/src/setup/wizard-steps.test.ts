@@ -33,6 +33,7 @@
  * surface from the tests.
  */
 import * as p from "@clack/prompts";
+import { err as failed, ok as found } from "neverthrow";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { AgentStore } from "../agent/store/index.js";
@@ -1259,7 +1260,7 @@ describe("stepConfigureImageProviders", () => {
   it("happy path: adds a non-fal provider when no existing + user accepts", async () => {
     const deps = buildDeps();
     deps.agentStore.listImageProviders.mockResolvedValue([]);
-    deps.agentStore.createImageProvider.mockResolvedValue({ id: "p-new" });
+    deps.agentStore.createImageProvider.mockResolvedValue(found({ id: "p-new" }));
     vi.mocked(p.confirm)
       .mockResolvedValueOnce(true) // proceed
       .mockResolvedValueOnce(true) // safe_mode default
@@ -1290,7 +1291,7 @@ describe("stepConfigureImageProviders", () => {
   it("openai_compatible: no safe_mode prompt, attrs stay empty", async () => {
     const deps = buildDeps();
     deps.agentStore.listImageProviders.mockResolvedValue([]);
-    deps.agentStore.createImageProvider.mockResolvedValue({ id: "p-new" });
+    deps.agentStore.createImageProvider.mockResolvedValue(found({ id: "p-new" }));
     vi.mocked(p.confirm)
       .mockResolvedValueOnce(true) // proceed
       .mockResolvedValueOnce(false); // promptAddImageModels first add → no
@@ -1311,7 +1312,9 @@ describe("stepConfigureImageProviders", () => {
   it("createImageProvider failure: logs error and returns without further work", async () => {
     const deps = buildDeps();
     deps.agentStore.listImageProviders.mockResolvedValue([]);
-    deps.agentStore.createImageProvider.mockRejectedValue(new Error("UNIQUE constraint"));
+    deps.agentStore.createImageProvider.mockResolvedValue(
+      failed({ kind: "image_provider_name_taken", name: "venice" }),
+    );
     vi.mocked(p.confirm).mockResolvedValueOnce(true).mockResolvedValueOnce(true);
     vi.mocked(p.select).mockResolvedValueOnce("venice");
     vi.mocked(p.text)
@@ -1321,7 +1324,7 @@ describe("stepConfigureImageProviders", () => {
 
     await stepConfigureImageProviders(deps);
 
-    // putSecret was attempted; createImageProvider threw; no model prompts should follow.
+    // putSecret was attempted; createImageProvider failed; no model prompts should follow.
     expect(deps.agentStore.createImageModel).not.toHaveBeenCalled();
   });
 

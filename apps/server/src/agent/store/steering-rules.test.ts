@@ -6,11 +6,11 @@
  */
 
 import { eq } from "drizzle-orm";
+import { err } from "neverthrow";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
-import { expectDefined } from "../../test/assertions.js";
+import { expectDefined, expectOk } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
-import { RuleGroupChangedError } from "./errors.js";
 import {
   DrizzleAgentStore,
   INSTRUCTION_RULE_LIMIT,
@@ -46,7 +46,9 @@ async function seedUser(): Promise<string> {
 async function seedProfile(name = "main"): Promise<string> {
   return (
     await tx((trx) =>
-      store.createProfile(trx, { userId: null, name, basePrompt: "", model: "m", toolSet: [] }),
+      store
+        .createProfile(trx, { userId: null, name, basePrompt: "", model: "m", toolSet: [] })
+        .then(expectOk),
     )
   ).id;
 }
@@ -663,11 +665,12 @@ describe("learned rules skip a retired row", () => {
       const live = await row({ rule: "Live", source: "correction" });
       const retired = await row({ rule: "Retired", source: "correction", retired: true });
 
-      const attempt = tx((trx) =>
+      // The caller's transaction commits; the store's savepoint carries the rollback.
+      const attempt = await tx((trx) =>
         store.replaceRules(trx, { oldIds: [live, retired], newRule: merged }),
       );
 
-      await expect(attempt).rejects.toBeInstanceOf(RuleGroupChangedError);
+      expect(attempt).toEqual(err({ kind: "rule_group_changed", groupSize: 2, deleted: 1 }));
       expect(
         (await db.select({ id: steeringRules.id }).from(steeringRules)).map((r) => r.id).sort(),
       ).toEqual([live, retired].sort());
@@ -679,9 +682,10 @@ describe("learned rules skip a retired row", () => {
       const live = await row({ rule: "Live", source: "correction" });
       const instruction = await row({ rule: "Mine", source: "instruction", userId });
 
-      await expect(
-        tx((trx) => store.replaceRules(trx, { oldIds: [live, instruction], newRule: merged })),
-      ).rejects.toBeInstanceOf(RuleGroupChangedError);
+      const attempt = await tx((trx) =>
+        store.replaceRules(trx, { oldIds: [live, instruction], newRule: merged }),
+      );
+      expect(attempt.isErr()).toBe(true);
       expect(await db.select({ id: steeringRules.id }).from(steeringRules)).toHaveLength(2);
     });
   });

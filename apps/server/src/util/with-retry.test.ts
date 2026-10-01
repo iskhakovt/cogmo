@@ -171,7 +171,7 @@ describe("withRetry", () => {
       // p-retry fires onFailedAttempt BEFORE consulting shouldRetry,
       // so the wrapper has to re-check the predicate inside the hook.
       // Without this guard, every routine non-retriable error (e.g.
-      // UniqueViolationError from admission caps) would spam a
+      // a unique violation) would spam a
       // "retry attempt 1 failed" warn even though no retry ran.
       const fn = vi.fn().mockRejectedValue(new Error("permanent"));
       await expect(

@@ -4,6 +4,7 @@ import { mock } from "vitest-mock-extended";
 import type { Database, Transactor } from "../../db/index.js";
 import { inngest } from "../../inngest/client.js";
 import type { StepRun } from "../../inngest/index.js";
+import { expectOk } from "../../test/assertions.js";
 import { fakeRunInTx, spyOnInngestSend } from "../../test/factories.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import type { AgentStore } from "../store/index.js";
@@ -36,13 +37,15 @@ async function seedUserAndProfile(): Promise<{ userId: string; profileId: string
   const userId = (await tx((trx) => store.createUser(trx))).id;
   const profileId = (
     await tx((trx) =>
-      store.createProfile(trx, {
-        userId,
-        name: "test",
-        basePrompt: "be helpful",
-        model: "claude-test",
-        toolSet: [],
-      }),
+      store
+        .createProfile(trx, {
+          userId,
+          name: "test",
+          basePrompt: "be helpful",
+          model: "claude-test",
+          toolSet: [],
+        })
+        .then(expectOk),
     )
   ).id;
   return { userId, profileId };

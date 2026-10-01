@@ -1,3 +1,4 @@
+import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { CodingStore } from "../agent/coding/store/index.js";
@@ -591,13 +592,12 @@ describe("createTransport", () => {
       });
     });
 
-    it("maps UniqueViolationError to alias_taken", async () => {
-      const { UniqueViolationError } = await import("../agent/store/errors.js");
+    it("maps alias_taken through", async () => {
       const agentStore = mockAgentStore({
         getConversation: vi
           .fn()
           .mockResolvedValue({ id: "c1", userId: "user-1", profileId: "p", isPrivate: true }),
-        setAlias: vi.fn().mockRejectedValue(new UniqueViolationError("uq_aliases_user_alias")),
+        setAlias: vi.fn().mockResolvedValue(err({ kind: "alias_taken" })),
       });
       const { transport } = setup({ agentStore });
 
@@ -1302,11 +1302,10 @@ describe("createTransport", () => {
       });
     });
 
-    it("maps UniqueViolationError to profile_name_taken", async () => {
-      const { UniqueViolationError } = await import("../agent/store/errors.js");
+    it("maps profile_name_taken through", async () => {
       const agentStore = mockAgentStore({
         getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
-        updateProfile: vi.fn().mockRejectedValue(new UniqueViolationError("uq_profiles_user_name")),
+        updateProfile: vi.fn().mockResolvedValue(err({ kind: "profile_name_taken" })),
       });
       const { transport } = setup({ agentStore });
       const res = await transport.profiles.update("handle", "p-mine", { name: "taken" });
@@ -1314,7 +1313,7 @@ describe("createTransport", () => {
     });
 
     it("forwards memoryScope=null (clear) to agentStore.updateProfile verbatim", async () => {
-      const updateProfile = vi.fn().mockResolvedValue({});
+      const updateProfile = vi.fn().mockResolvedValue(ok({}));
       const agentStore = mockAgentStore({
         getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
         updateProfile,
@@ -1327,7 +1326,7 @@ describe("createTransport", () => {
     });
 
     it("forwards a non-null memoryScope to agentStore.updateProfile verbatim", async () => {
-      const updateProfile = vi.fn().mockResolvedValue({});
+      const updateProfile = vi.fn().mockResolvedValue(ok({}));
       const agentStore = mockAgentStore({
         getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
         updateProfile,
@@ -1347,7 +1346,7 @@ describe("createTransport", () => {
     // clear fires and ownership is checked against the conversation
     // before the profile update commits.
     it("clearCooldownForConversation: calls clearCooldown in the same tx as the model update", async () => {
-      const updateProfile = vi.fn().mockResolvedValue({});
+      const updateProfile = vi.fn().mockResolvedValue(ok({}));
       const clearCooldown = vi.fn();
       const agentStore = mockAgentStore({
         getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
@@ -1396,7 +1395,7 @@ describe("createTransport", () => {
     // update rather than silently dropping the cooldown-clear side
     // effect.
     it("clearCooldownForConversation: returns access_denied when conversation isn't owned by caller", async () => {
-      const updateProfile = vi.fn().mockResolvedValue({});
+      const updateProfile = vi.fn().mockResolvedValue(ok({}));
       const clearCooldown = vi.fn();
       const agentStore = mockAgentStore({
         getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
@@ -1426,7 +1425,7 @@ describe("createTransport", () => {
     });
 
     it("clearCooldownForConversation: returns conversation_not_found when conv row is missing", async () => {
-      const updateProfile = vi.fn().mockResolvedValue({});
+      const updateProfile = vi.fn().mockResolvedValue(ok({}));
       const agentStore = mockAgentStore({
         getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
         getConversation: vi.fn().mockResolvedValue(undefined),
@@ -1449,7 +1448,7 @@ describe("createTransport", () => {
     // Reject so the caller surfaces a bug rather than silently
     // clearing cooldown on an unrelated conversation.
     it("clearCooldownForConversation: returns access_denied when conversation uses a different profile", async () => {
-      const updateProfile = vi.fn().mockResolvedValue({});
+      const updateProfile = vi.fn().mockResolvedValue(ok({}));
       const clearCooldown = vi.fn();
       const agentStore = mockAgentStore({
         getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
@@ -1482,25 +1481,11 @@ describe("createTransport", () => {
     // nothing to clear. Without this, every `/model` against a
     // not-currently-cooling-down conversation would write a no-op
     // row version on `conversations`.
-    // When `updateProfile` raises `UniqueViolationError`, Postgres
-    // marks the tx as aborted. The error MUST propagate out of
-    // `runInTx` so Drizzle issues a clean ROLLBACK before the outer
-    // catch translates to `err`. Catching inside the tx and returning
-    // `err` would let `runInTx` resolve, Drizzle would send COMMIT,
-    // and Postgres would silently turn that into a ROLLBACK with a
-    // NOTICE — end-to-end correct but misleading-on-paper. The
-    // observable contract this test pins: `clearCooldown` must NOT
-    // fire on the unique-violation path, even though
-    // `clearCooldownForConversation` was passed and the conversation
-    // was cooling down.
-    it("UniqueViolationError aborts the tx without firing clearCooldown", async () => {
-      const updateProfile = vi
-        .fn()
-        .mockRejectedValue(
-          new (await import("../agent/store/errors.js")).UniqueViolationError(
-            "uq_profiles_user_name",
-          ),
-        );
+    // `clearCooldown` must NOT fire on the name-taken path, even though
+    // `clearCooldownForConversation` was passed and the conversation was
+    // cooling down.
+    it("profile_name_taken returns before clearCooldown", async () => {
+      const updateProfile = vi.fn().mockResolvedValue(err({ kind: "profile_name_taken" }));
       const clearCooldown = vi.fn();
       const agentStore = mockAgentStore({
         getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
@@ -1598,17 +1583,10 @@ describe("createTransport", () => {
       }
     });
 
-    // UniqueViolation path: tx rolls back, so no clear actually
-    // happened. The post-tx emit must NOT fire even though
-    // priorCooldownStateForEmit was captured inside the cb.
-    it("does NOT emit cleared when updateProfile throws (rolled-back clear)", async () => {
-      const updateProfile = vi
-        .fn()
-        .mockRejectedValue(
-          new (await import("../agent/store/errors.js")).UniqueViolationError(
-            "uq_profiles_user_name",
-          ),
-        );
+    // Name-taken path: no clear happened. The post-tx emit must NOT fire
+    // even though priorCooldownStateForEmit was captured inside the cb.
+    it("does NOT emit cleared when updateProfile fails", async () => {
+      const updateProfile = vi.fn().mockResolvedValue(err({ kind: "profile_name_taken" }));
       const agentStore = mockAgentStore({
         getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
         getConversation: vi.fn().mockResolvedValue({
@@ -1639,16 +1617,13 @@ describe("createTransport", () => {
   });
 
   describe("profiles.delete", () => {
-    it("returns profile_in_use when deleteProfile throws ProfileInUseError (atomic check)", async () => {
-      const { ProfileInUseError } = await import("../agent/store/errors.js");
+    it("returns profile_in_use when deleteProfile finds references (atomic check)", async () => {
       const agentStore = mockAgentStore({
         getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
-        deleteProfile: vi.fn().mockRejectedValue(
-          new ProfileInUseError({
-            conversations: 1,
-            messages: 4,
-            schedules: 0,
-            steeringRules: 0,
+        deleteProfile: vi.fn().mockResolvedValue(
+          err({
+            kind: "profile_in_use",
+            refs: { conversations: 1, messages: 4, schedules: 0, steeringRules: 0 },
           }),
         ),
       });
@@ -1689,7 +1664,7 @@ describe("createTransport", () => {
     });
 
     it("forwards memoryScope to agentStore.createProfile when present", async () => {
-      const createProfile = vi.fn().mockResolvedValue({});
+      const createProfile = vi.fn().mockResolvedValue(ok({}));
       const agentStore = mockAgentStore({ createProfile });
       const { transport } = setup({ agentStore });
       const memoryScope = {
@@ -1714,7 +1689,7 @@ describe("createTransport", () => {
       // transport must not coerce undefined → null on the way through, because
       // future store-level defaults (e.g. inheriting from the org profile)
       // must not be silently overwritten by an explicit null.
-      const createProfile = vi.fn().mockResolvedValue({});
+      const createProfile = vi.fn().mockResolvedValue(ok({}));
       const agentStore = mockAgentStore({ createProfile });
       const { transport } = setup({ agentStore });
       await transport.profiles.create("handle", {
@@ -1768,11 +1743,12 @@ describe("createTransport", () => {
       expect(res._unsafeUnwrapErr()).toEqual({ code: "profile_not_found" });
     });
 
-    it("maps UnknownProfileClassError to unknown_profile_class with the offending name", async () => {
-      const { UnknownProfileClassError } = await import("../agent/store/errors.js");
+    it("maps unknown_profile_class through with the offending name", async () => {
       const agentStore = mockAgentStore({
         getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
-        setProfileClass: vi.fn().mockRejectedValue(new UnknownProfileClassError("nope")),
+        setProfileClass: vi
+          .fn()
+          .mockResolvedValue(err({ kind: "unknown_profile_class", name: "nope" })),
       });
       const { transport } = setup({ agentStore });
       const res = await transport.profiles.setClass("handle", "p-mine", "nope");
@@ -1780,7 +1756,7 @@ describe("createTransport", () => {
     });
 
     it("forwards className=null (clear) to agentStore.setProfileClass verbatim", async () => {
-      const setProfileClass = vi.fn().mockResolvedValue(undefined);
+      const setProfileClass = vi.fn().mockResolvedValue(ok(undefined));
       const agentStore = mockAgentStore({
         getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
         setProfileClass,
@@ -1792,7 +1768,7 @@ describe("createTransport", () => {
     });
 
     it("happy path forwards a non-null className", async () => {
-      const setProfileClass = vi.fn().mockResolvedValue(undefined);
+      const setProfileClass = vi.fn().mockResolvedValue(ok(undefined));
       const agentStore = mockAgentStore({
         getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
         setProfileClass,
@@ -1832,12 +1808,11 @@ describe("createTransport", () => {
       expect(listProfileClasses).toHaveBeenCalledWith(expect.anything(), "user-1");
     });
 
-    it("create maps UniqueViolationError to profile_class_name_taken", async () => {
-      const { UniqueViolationError } = await import("../agent/store/errors.js");
+    it("create maps profile_class_name_taken through", async () => {
       const agentStore = mockAgentStore({
         createProfileClass: vi
           .fn()
-          .mockRejectedValue(new UniqueViolationError("uq_profile_classes_user_name")),
+          .mockResolvedValue(err({ kind: "profile_class_name_taken", name: "intimate" })),
       });
       const { transport } = setup({ agentStore });
       const res = await transport.profileClasses.create("handle", {
@@ -1850,12 +1825,13 @@ describe("createTransport", () => {
       });
     });
 
-    it("create maps InvalidNameError to profile_class_name_invalid", async () => {
-      const { InvalidNameError } = await import("../agent/store/errors.js");
+    it("create maps invalid_name to profile_class_name_invalid", async () => {
       const agentStore = mockAgentStore({
         createProfileClass: vi
           .fn()
-          .mockRejectedValue(new InvalidNameError("Mixed Case", "profile_class")),
+          .mockResolvedValue(
+            err({ kind: "invalid_name", name: "Mixed Case", subject: "profile_class" }),
+          ),
       });
       const { transport } = setup({ agentStore });
       const res = await transport.profileClasses.create("handle", {
@@ -1869,14 +1845,16 @@ describe("createTransport", () => {
     });
 
     it("create happy path forwards name + description", async () => {
-      const createProfileClass = vi.fn().mockResolvedValue({
-        id: "c-1",
-        userId: "user-1",
-        name: "intimate",
-        description: "for emotional / relationship topics",
-        restricted: false,
-        createdAt: new Date("2026-04-16T12:00:00Z"),
-      });
+      const createProfileClass = vi.fn().mockResolvedValue(
+        ok({
+          id: "c-1",
+          userId: "user-1",
+          name: "intimate",
+          description: "for emotional / relationship topics",
+          restricted: false,
+          createdAt: new Date("2026-04-16T12:00:00Z"),
+        }),
+      );
       const agentStore = mockAgentStore({ createProfileClass });
       const { transport } = setup({ agentStore });
       const res = await transport.profileClasses.create("handle", {
@@ -1893,7 +1871,7 @@ describe("createTransport", () => {
 
     it("delete returns profile_class_not_found when no row matches", async () => {
       const agentStore = mockAgentStore({
-        deleteProfileClass: vi.fn().mockResolvedValue({ deleted: false }),
+        deleteProfileClass: vi.fn().mockResolvedValue(ok({ deleted: false })),
       });
       const { transport } = setup({ agentStore });
       const res = await transport.profileClasses.delete("handle", "no-such", { confirm: false });
@@ -1903,10 +1881,11 @@ describe("createTransport", () => {
       });
     });
 
-    it("delete maps ProfileClassInUseError to profile_class_in_use with refCount", async () => {
-      const { ProfileClassInUseError } = await import("../agent/store/errors.js");
+    it("delete maps profile_class_in_use through with refCount", async () => {
       const agentStore = mockAgentStore({
-        deleteProfileClass: vi.fn().mockRejectedValue(new ProfileClassInUseError(2)),
+        deleteProfileClass: vi
+          .fn()
+          .mockResolvedValue(err({ kind: "profile_class_in_use", profileRefs: 2 })),
       });
       const { transport } = setup({ agentStore });
       const res = await transport.profileClasses.delete("handle", "intimate", { confirm: false });
@@ -1914,7 +1893,7 @@ describe("createTransport", () => {
     });
 
     it("delete happy path returns ok with deleted:true", async () => {
-      const deleteProfileClass = vi.fn().mockResolvedValue({ deleted: true });
+      const deleteProfileClass = vi.fn().mockResolvedValue(ok({ deleted: true }));
       const agentStore = mockAgentStore({ deleteProfileClass });
       const { transport } = setup({ agentStore });
       const res = await transport.profileClasses.delete("handle", "intimate", { confirm: false });
@@ -1923,7 +1902,7 @@ describe("createTransport", () => {
     });
 
     it("delete lists the core-memory blocks it would delete and changes nothing unconfirmed", async () => {
-      const deleteProfileClass = vi.fn().mockResolvedValue({ deleted: true });
+      const deleteProfileClass = vi.fn().mockResolvedValue(ok({ deleted: true }));
       const agentStore = mockAgentStore({
         deleteProfileClass,
         listCoreMemoryKeys: vi.fn().mockResolvedValue(["identity", "preferences"]),
@@ -1963,7 +1942,7 @@ describe("createTransport", () => {
     });
 
     it("delete with confirm deletes a class that has blocks", async () => {
-      const deleteProfileClass = vi.fn().mockResolvedValue({ deleted: true });
+      const deleteProfileClass = vi.fn().mockResolvedValue(ok({ deleted: true }));
       const agentStore = mockAgentStore({
         deleteProfileClass,
         listCoreMemoryKeys: vi.fn().mockResolvedValue(["preferences"]),
@@ -2117,12 +2096,13 @@ describe("createTransport", () => {
       expect(listCustomCompartments).toHaveBeenCalledWith(expect.anything(), "user-1");
     });
 
-    it("create maps InvalidNameError to compartment_name_invalid", async () => {
-      const { InvalidNameError } = await import("../agent/store/errors.js");
+    it("create maps invalid_name to compartment_name_invalid", async () => {
       const agentStore = mockAgentStore({
         createCustomCompartment: vi
           .fn()
-          .mockRejectedValue(new InvalidNameError("Bad Name", "compartment")),
+          .mockResolvedValue(
+            err({ kind: "invalid_name", name: "Bad Name", subject: "compartment" }),
+          ),
       });
       const { transport } = setup({ agentStore });
       const res = await transport.compartments.create("handle", {
@@ -2136,11 +2116,10 @@ describe("createTransport", () => {
     });
 
     it("create maps reserved-name error to compartment_name_reserved", async () => {
-      const { ReservedCompartmentNameError } = await import("../agent/store/errors.js");
       const agentStore = mockAgentStore({
         createCustomCompartment: vi
           .fn()
-          .mockRejectedValue(new ReservedCompartmentNameError("personal")),
+          .mockResolvedValue(err({ kind: "compartment_name_reserved", name: "personal" })),
       });
       const { transport } = setup({ agentStore });
       const res = await transport.compartments.create("handle", {
@@ -2154,11 +2133,10 @@ describe("createTransport", () => {
     });
 
     it("create maps cap-exceeded error to compartment_cap_exceeded", async () => {
-      const { CustomCompartmentCapExceededError } = await import("../agent/store/errors.js");
       const agentStore = mockAgentStore({
         createCustomCompartment: vi
           .fn()
-          .mockRejectedValue(new CustomCompartmentCapExceededError(10, 10)),
+          .mockResolvedValue(err({ kind: "compartment_cap_exceeded", limit: 10, current: 10 })),
       });
       const { transport } = setup({ agentStore });
       const res = await transport.compartments.create("handle", {
@@ -2172,12 +2150,11 @@ describe("createTransport", () => {
       });
     });
 
-    it("create maps UniqueViolationError to compartment_name_taken", async () => {
-      const { UniqueViolationError } = await import("../agent/store/errors.js");
+    it("create maps compartment_name_taken through", async () => {
       const agentStore = mockAgentStore({
         createCustomCompartment: vi
           .fn()
-          .mockRejectedValue(new UniqueViolationError("uq_custom_compartments_user_name")),
+          .mockResolvedValue(err({ kind: "compartment_name_taken", name: "dnd" })),
       });
       const { transport } = setup({ agentStore });
       const res = await transport.compartments.create("handle", {
@@ -2230,23 +2207,25 @@ describe("createTransport", () => {
     });
 
     it("accepts core + custom compartment values", async () => {
-      const updateProfile = vi.fn().mockResolvedValue({
-        id: "p1",
-        userId: "user-1",
-        name: "test",
-        basePrompt: "",
-        model: "claude-sonnet-4-6",
-        summarizationModel: null,
-        extractionModel: null,
-        autoRecall: "heuristic",
-        voiceMode: "auto",
-        toolSet: [],
-        memoryScope: { compartments: ["work", "dnd"], trust: ["first-party"] },
-        profileClass: null,
-        streamChunkChars: 4000,
-        streamEdits: true,
-        codingAutoapproveMode: "off",
-      });
+      const updateProfile = vi.fn().mockResolvedValue(
+        ok({
+          id: "p1",
+          userId: "user-1",
+          name: "test",
+          basePrompt: "",
+          model: "claude-sonnet-4-6",
+          summarizationModel: null,
+          extractionModel: null,
+          autoRecall: "heuristic",
+          voiceMode: "auto",
+          toolSet: [],
+          memoryScope: { compartments: ["work", "dnd"], trust: ["first-party"] },
+          profileClass: null,
+          streamChunkChars: 4000,
+          streamEdits: true,
+          codingAutoapproveMode: "off",
+        }),
+      );
       const agentStore = mockAgentStore({
         getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
         listCustomCompartments: vi.fn().mockResolvedValue([

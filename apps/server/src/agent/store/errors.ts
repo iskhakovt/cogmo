@@ -1,203 +1,163 @@
-/** Typed store errors. Thrown from DrizzleAgentStore; caught + mapped by Transport. */
-
-import { constraintNameOf, findPgErrorByCode, type PgError } from "../../db/pg-errors.js";
-import { logger } from "../../logger.js";
-
 /**
- * Postgres unique constraint violation (SQLSTATE 23505).
- * The constraint name lets callers distinguish between e.g. `uq_profiles_user_name` vs `uq_aliases_user_alias`.
- */
-export class UniqueViolationError extends Error {
-  readonly constraint: string;
-  constructor(constraint: string) {
-    super(`unique violation on constraint "${constraint}"`);
-    this.name = "UniqueViolationError";
-    this.constraint = constraint;
-  }
-}
-
-/**
- * Thrown by `deleteProfile` when the profile is still referenced by a conversation, a message,
- * a schedule that runs as it (`scheduled_tasks.profile_id`, `skills.run_as_profile_id`), or a
- * steering rule scoped to it. Messages reference profiles via `messages.profile_id` for audit
- * stamping — once a profile has ever been used in a turn, it stays pinned until that history is
- * deleted. Transport catches this and surfaces `profile_in_use`.
- */
-export class ProfileInUseError extends Error {
-  constructor(
-    public readonly refs: {
-      conversations: number;
-      messages: number;
-      schedules: number;
-      steeringRules: number;
-    },
-  ) {
-    super(
-      `profile in use: ${refs.conversations} conversation(s), ${refs.messages} message(s), ` +
-        `${refs.schedules} schedule(s), ${refs.steeringRules} steering rule(s) reference it`,
-    );
-    this.name = "ProfileInUseError";
-  }
-}
-
-/**
- * Thrown by `deleteProfileClass` when at least one profile still references
- * the class via `profiles.profile_class`. The caller must clear the
- * references (or reassign the profiles to a different class) before the
- * class can be deleted. Transport surfaces this as `profile_class_in_use`.
- */
-export class ProfileClassInUseError extends Error {
-  constructor(public readonly profileRefs: number) {
-    super(`profile class in use: ${profileRefs} profile(s) reference it`);
-    this.name = "ProfileClassInUseError";
-  }
-}
-
-/**
- * Thrown by `setProfileClass` and any other call that assigns a class name
- * to a profile (or scopes a profile against a list of class names) when the
- * referenced class is not registered for the profile's user. Transport
- * surfaces this as `unknown_profile_class`.
- */
-export class UnknownProfileClassError extends Error {
-  constructor(public readonly className: string) {
-    super(`unknown profile class: "${className}"`);
-    this.name = "UnknownProfileClassError";
-  }
-}
-
-/**
- * Thrown by `replaceRules` when it deletes fewer rows than the group holds:
- * a rule in it was retired or merged since consolidation read it, or isn't a
- * learned rule. Its transaction rolls back, so the group survives unmerged.
- */
-export class RuleGroupChangedError extends Error {
-  constructor(
-    public readonly groupSize: number,
-    public readonly deleted: number,
-  ) {
-    super(`rule group changed: deleted ${deleted} of ${groupSize} rules`);
-    this.name = "RuleGroupChangedError";
-  }
-}
-
-/**
- * Thrown by `createCustomCompartment` when the user already has the maximum
- * number of custom compartments. Cap protects classifier accuracy + prompt
- * size; >~10 compartments degrades the LLM's bucket choice.
- */
-export class CustomCompartmentCapExceededError extends Error {
-  constructor(
-    public readonly limit: number,
-    public readonly current: number,
-  ) {
-    super(`custom compartment cap exceeded: ${current}/${limit}`);
-    this.name = "CustomCompartmentCapExceededError";
-  }
-}
-
-/**
- * Thrown when a profile-scope update / create references a compartment value
- * that's neither a core value nor one of the user's registered custom
- * compartments. Surfaced from Transport when the operator typo's a value or
- * forgets to `/compartments add` first. Carries the offending name so the
- * adapter can emit an actionable message.
- */
-export class UnknownCompartmentError extends Error {
-  constructor(public readonly compartmentName: string) {
-    super(`unknown compartment: "${compartmentName}"`);
-    this.name = "UnknownCompartmentError";
-  }
-}
-
-/**
- * Thrown by `createCustomCompartment` / `createProfileClass` when the
- * proposed name doesn't match the canonical shape (lowercase ASCII +
- * `-`/`_`, ≤32 chars, must start with a letter). The constraint matches
- * the format of `CORE_COMPARTMENTS` values and avoids `Work` / `work`
- * conceptual duplicates, weird Unicode in tag values, or names that
- * render badly when templated into LLM prompts as `**<name>**:`.
- */
-export class InvalidNameError extends Error {
-  constructor(
-    public readonly proposedName: string,
-    public readonly kind: "compartment" | "profile_class" | "sub_agent",
-  ) {
-    super(
-      `invalid ${kind} name "${proposedName}": must be lowercase ASCII letters/digits/hyphen/underscore, start with a letter, ≤32 chars`,
-    );
-    this.name = "InvalidNameError";
-  }
-}
-
-/**
- * Thrown by the create-sub-agent use case when the requested `model` has no
- * row in `model_providers` — it isn't routable, so a sub-agent pointing at it
- * could never run. Deliberately not `user_selectable`-gated: a sub-agent may
- * use an internal model hidden from the `/model` picker, the same way
- * `profiles.summarization_model` can.
- */
-export class UnknownModelError extends Error {
-  constructor(public readonly model: string) {
-    super(`unknown model: "${model}" has no provider in model_providers`);
-    this.name = "UnknownModelError";
-  }
-}
-
-/**
- * Thrown by `createCustomCompartment` when the proposed name collides with a
- * core compartment value (`personal`, `work`, …). Reserving the core names
- * keeps the merged classifier set unambiguous and prevents an operator from
- * shadowing a built-in bucket with a different definition.
- */
-export class ReservedCompartmentNameError extends Error {
-  constructor(public readonly compartmentName: string) {
-    super(`compartment name "${compartmentName}" is reserved`);
-    this.name = "ReservedCompartmentNameError";
-  }
-}
-
-/**
- * Thrown by `createImageProvider` when the proposed config violates the
- * store-layer URL hygiene rules that the DB CHECK can't express (e.g.
- * `base_url` must be `https://`, must not have a trailing slash, must be
- * parseable as a URL). The DB CHECK pins the coarser invariant
- * (`openai_compatible` requires `base_url`, `fal` forbids it); this guard
- * adds the wizard-friendly details on top.
+ * Expected failures of `AgentStore` writes, returned as the `Err` of a
+ * `Result`, and the Postgres-error translation that produces them.
  *
- * Distinct from `UniqueViolationError` (name collision) and the raw
- * CHECK rejection that surfaces if a caller bypasses the store guard.
+ * A store method that returns one of these has left the caller's transaction
+ * as it found it: the write runs in a savepoint (`inSavepoint`), so neither a
+ * half-applied change nor an aborted transaction outlives the `Err`.
  */
-export class InvalidProviderConfigError extends Error {
-  constructor(public readonly reason: string) {
-    super(`invalid provider config: ${reason}`);
-    this.name = "InvalidProviderConfigError";
+
+import { err, ok, type Result } from "neverthrow";
+import { constraintNameOf, findPgErrorByCode, type PgError } from "../../db/pg-errors.js";
+import { commitIfOk, type Transaction } from "../../db/transactor.js";
+
+/** A name that isn't lowercase ASCII letters/digits/`-`/`_`, letter-led, ≤32 chars. */
+export interface InvalidName {
+  kind: "invalid_name";
+  name: string;
+  subject: "compartment" | "profile_class" | "sub_agent";
+}
+
+/** `(user_id, name)` is taken on a profile write. */
+export interface ProfileNameTaken {
+  kind: "profile_name_taken";
+}
+
+/**
+ * `deleteProfile` found references: conversations, messages (audit stamps
+ * that pin the profile for as long as the history exists), schedules that run
+ * as it (`scheduled_tasks.profile_id`, `skills.run_as_profile_id`), or steering
+ * rules scoped to it.
+ */
+export interface ProfileInUse {
+  kind: "profile_in_use";
+  refs: { conversations: number; messages: number; schedules: number; steeringRules: number };
+}
+
+export interface ProfileClassNameTaken {
+  kind: "profile_class_name_taken";
+  name: string;
+}
+
+/** At least one of the user's profiles still references the class. */
+export interface ProfileClassInUse {
+  kind: "profile_class_in_use";
+  profileRefs: number;
+}
+
+/** The class isn't registered for the profile's user, or the profile is an org profile. */
+export interface UnknownProfileClass {
+  kind: "unknown_profile_class";
+  name: string;
+}
+
+/** The name is a core compartment (`personal`, `work`, …), which a custom one can't shadow. */
+export interface CompartmentNameReserved {
+  kind: "compartment_name_reserved";
+  name: string;
+}
+
+/**
+ * The user already holds `CUSTOM_COMPARTMENT_LIMIT` custom compartments.
+ * Beyond ~10 buckets the classifier's choice degrades and its prompt grows.
+ */
+export interface CompartmentCapExceeded {
+  kind: "compartment_cap_exceeded";
+  limit: number;
+  current: number;
+}
+
+export interface CompartmentNameTaken {
+  kind: "compartment_name_taken";
+  name: string;
+}
+
+export interface AliasTaken {
+  kind: "alias_taken";
+}
+
+/**
+ * An image provider's `(type, base_url)` breaks a rule the DB CHECK can't
+ * express: `base_url` must parse, be `https://` and carry no trailing slash.
+ */
+export interface InvalidProviderConfig {
+  kind: "invalid_provider_config";
+  reason: string;
+}
+
+export interface ImageProviderNameTaken {
+  kind: "image_provider_name_taken";
+  name: string;
+}
+
+export interface ImageModelNameTaken {
+  kind: "image_model_name_taken";
+  name: string;
+}
+
+/**
+ * The model's slug (the segment after the last `/`, which is all the LLM
+ * sees — see `imageModelSlug`) equals an existing model's.
+ */
+export interface ImageModelSlugCollision {
+  kind: "image_model_slug_collision";
+  name: string;
+  existingName: string;
+  slug: string;
+}
+
+export interface SubAgentNameTaken {
+  kind: "sub_agent_name_taken";
+  name: string;
+}
+
+/**
+ * `replaceRules` matched fewer rules than the group holds: one was retired or
+ * merged since consolidation read it, or isn't a learned rule.
+ */
+export interface RuleGroupChanged {
+  kind: "rule_group_changed";
+  groupSize: number;
+  deleted: number;
+}
+
+export type CreateProfileClassError = InvalidName | ProfileClassNameTaken;
+export type CreateCustomCompartmentError =
+  | InvalidName
+  | CompartmentNameReserved
+  | CompartmentCapExceeded
+  | CompartmentNameTaken;
+export type CreateImageProviderError = InvalidProviderConfig | ImageProviderNameTaken;
+export type CreateImageModelError = ImageModelNameTaken | ImageModelSlugCollision;
+
+/** One line an operator can act on, for the CLI and setup surfaces. */
+export function describeImageCatalogError(
+  e: CreateImageProviderError | CreateImageModelError,
+): string {
+  switch (e.kind) {
+    case "invalid_provider_config":
+      return `invalid config: ${e.reason}`;
+    case "image_provider_name_taken":
+      return `an image provider named "${e.name}" already exists`;
+    case "image_model_name_taken":
+      return `an image model named "${e.name}" already exists`;
+    case "image_model_slug_collision":
+      return (
+        `image model "${e.name}" would collide on slug "${e.slug}" with "${e.existingName}"; ` +
+        `rename one so the segment after the last "/" is unique (the LLM sees only that)`
+      );
   }
 }
 
 /**
- * Thrown by `createImageModel` / `upsertImageModelsByName` when the new
- * row's `name` would slug-collide with an existing row (e.g. inserting
- * `replicate/flux-pro` while `fal-ai/flux-pro` is already registered;
- * both reduce to slug `flux-pro`). The slug is what reaches the LLM —
- * see `imageModelSlug` and the xAI grammar-compiler issue PR #240
- * documented — so distinct catalog entries must produce distinct slugs.
- * Catch at the insert boundary so the operator gets a clear message
- * pointing at the offending row, instead of a boot-time `createImageTools`
- * throw at the next process restart.
+ * Run `fn` in a savepoint of `tx`. An `Err` or a throw rolls the savepoint
+ * back, so a failed write leaves `tx` unchanged and usable.
  */
-export class ImageModelSlugCollisionError extends Error {
-  constructor(
-    public readonly newName: string,
-    public readonly existingName: string,
-    public readonly slug: string,
-  ) {
-    super(
-      `image model "${newName}" would collide on slug "${slug}" with existing model "${existingName}". ` +
-        `Rename one of them so the last path segment is unique (the LLM sees only the segment after the last "/").`,
-    );
-    this.name = "ImageModelSlugCollisionError";
-  }
+export function inSavepoint<T, E>(
+  tx: Transaction,
+  fn: (sp: Transaction) => Promise<Result<T, E>>,
+): Promise<Result<T, E>> {
+  return commitIfOk((cb) => tx.transaction(cb), fn);
 }
 
 const UNIQUE_VIOLATION_CODES = ["23505"] as const;
@@ -242,48 +202,42 @@ export function findPostgresReferentialViolation(err: unknown): PgReferentialVio
   return findPgErrorByCode(err, REFERENTIAL_VIOLATION_CODES);
 }
 
-/** Wrap a block and convert Postgres unique violations to `UniqueViolationError`. */
-export async function translateUniqueViolation<T>(fn: () => Promise<T>): Promise<T> {
+/**
+ * Run `fn`, turning a unique violation on `constraint` into `Err(onViolation)`.
+ * Violations on other constraints, and every other error, propagate. The
+ * violation aborts the transaction, so call this inside `inSavepoint`.
+ */
+export async function uniqueViolationAs<T, E>(
+  constraint: string,
+  onViolation: E,
+  fn: () => Promise<T>,
+): Promise<Result<T, E>> {
   try {
-    return await fn();
+    return ok(await fn());
   } catch (e) {
     const pg = findPostgresUniqueViolation(e);
-    if (pg) {
-      const constraint = pg.constraint_name ?? pg.constraint;
-      if (!constraint) {
-        // Shouldn't normally fire — postgres-js + PGlite both populate `constraint` on 23505.
-        // If this warns in prod, our driver-error walker is missing a new wrapper shape and
-        // downstream Transport mapping silently degrades to generic errors. Investigate.
-        logger.warn(
-          { err: e },
-          "translateUniqueViolation: 23505 without constraint name — update findPostgresUniqueViolation",
-        );
-      }
-      throw new UniqueViolationError(constraint ?? "unknown");
-    }
+    if (pg && constraintNameOf(pg) === constraint) return err(onViolation);
     throw e;
   }
 }
 
 /**
- * Wrap a block and convert a referential violation on `constraintName` into
- * the supplied error, whichever referential action raised it. Violations on
- * other constraints, and non-referential errors, propagate unchanged. Used to
- * translate composite-FK enforcement on
- * `(profiles.user_id, profiles.profile_class)` into the typed
- * `UnknownProfileClassError` / `ProfileClassInUseError`.
+ * Run `fn`, turning a referential violation on `constraint` — under either
+ * referential action, see `REFERENTIAL_VIOLATION_CODES` — into
+ * `Err(onViolation)`. Violations on other constraints, and every other error,
+ * propagate. The violation aborts the transaction, so call this inside
+ * `inSavepoint`.
  */
-export async function translateReferentialViolation<T>(
+export async function referentialViolationAs<T, E>(
+  constraint: string,
+  onViolation: E,
   fn: () => Promise<T>,
-  match: { constraintName: string; rethrow: () => Error },
-): Promise<T> {
+): Promise<Result<T, E>> {
   try {
-    return await fn();
+    return ok(await fn());
   } catch (e) {
     const pg = findPostgresReferentialViolation(e);
-    if (pg && constraintNameOf(pg) === match.constraintName) {
-      throw match.rethrow();
-    }
+    if (pg && constraintNameOf(pg) === constraint) return err(onViolation);
     throw e;
   }
 }

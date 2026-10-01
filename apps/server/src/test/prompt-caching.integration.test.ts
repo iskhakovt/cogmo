@@ -34,7 +34,7 @@ import { DEFAULT_BASE_PROMPT } from "../setup/seed.js";
 import type { InboundContent } from "../transport/content.js";
 import { channelSessions, inboundMessages } from "../transport/store/schema.js";
 import { assertAppendOnly, compareRequests } from "./append-only.js";
-import { expectDefined } from "./assertions.js";
+import { expectDefined, expectOk } from "./assertions.js";
 import { CASSETTE_CHAT_MODEL } from "./cassette-model.js";
 import { createFalFetch } from "./fal-mock.js";
 import { fileLlmockUrl } from "./integration-file.js";
@@ -88,13 +88,15 @@ beforeAll(async () => {
 
   userId = await createIsolatedUser(db);
   profile = await runInTx((tx) =>
-    agentStore.createProfile(tx, {
-      userId,
-      name: "prompt-caching",
-      basePrompt: DEFAULT_BASE_PROMPT,
-      model: CASSETTE_CHAT_MODEL,
-      toolSet: ["generate_image", "core_memory_update"],
-    }),
+    agentStore
+      .createProfile(tx, {
+        userId,
+        name: "prompt-caching",
+        basePrompt: DEFAULT_BASE_PROMPT,
+        model: CASSETTE_CHAT_MODEL,
+        toolSet: ["generate_image", "core_memory_update"],
+      })
+      .then(expectOk),
   );
   // A known user, so the prompt carries core memory rather than onboarding.
   await runInTx((tx) =>

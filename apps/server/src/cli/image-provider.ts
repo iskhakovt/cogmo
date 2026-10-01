@@ -12,7 +12,7 @@
  */
 
 import { command, extendType, optional, positional, string, subcommands } from "cmd-ts";
-import { InvalidProviderConfigError } from "../agent/store/errors.js";
+import { describeImageCatalogError } from "../agent/store/errors.js";
 import type { AgentStore } from "../agent/store/index.js";
 import {
   type ImageGenerationDefaults,
@@ -20,6 +20,7 @@ import {
   imageProviderType,
 } from "../agent/store/schema.js";
 import type { Transactor } from "../db/index.js";
+import { commitIfOk } from "../db/transactor.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { choice, identifier, optionalOption } from "./args.js";
 import { type CliIo, EXIT_USAGE, type LoadDeps } from "./run.js";
@@ -209,32 +210,28 @@ async function addProviderCmd(
   // One secret per provider, named like the wizard's `fal_api_key` slot, keeps key rotation per provider.
   const secretName = `${name}_api_key`;
   const deps = await loadDeps();
-  try {
-    const { id: providerId } = await deps.runInTx(async (tx) => {
-      const { id: secretId } = await deps.secretsStore.putSecret(tx, {
-        name: secretName,
-        plaintext: apiKey,
-        description: `${providerType} image provider key (${name})`,
-      });
-      return deps.agentStore.createImageProvider(tx, {
-        name,
-        type: providerType,
-        baseUrl: args.baseUrl ?? null,
-        secretId,
-        attrs,
-      });
+  // The secret rolls back with a rejected provider.
+  const created = await commitIfOk(deps.runInTx, async (tx) => {
+    const { id: secretId } = await deps.secretsStore.putSecret(tx, {
+      name: secretName,
+      plaintext: apiKey,
+      description: `${providerType} image provider key (${name})`,
     });
-    io.out(`Added image provider "${name}" (id=${providerId}, secret=${secretName}).`);
-    io.out(`Next: cogmo image-model add <model-name> --provider ${name} --model-string <id>`);
-    return 0;
-  } catch (err) {
-    if (err instanceof InvalidProviderConfigError) {
-      io.err(`Invalid config: ${err.reason}`);
-      return EXIT_USAGE;
-    }
-    io.err(`Failed to add image provider: ${(err as Error).message}`);
-    return 1;
+    return deps.agentStore.createImageProvider(tx, {
+      name,
+      type: providerType,
+      baseUrl: args.baseUrl ?? null,
+      secretId,
+      attrs,
+    });
+  });
+  if (created.isErr()) {
+    io.err(`Failed to add image provider: ${describeImageCatalogError(created.error)}`);
+    return created.error.kind === "invalid_provider_config" ? EXIT_USAGE : 1;
   }
+  io.out(`Added image provider "${name}" (id=${created.value.id}, secret=${secretName}).`);
+  io.out(`Next: cogmo image-model add <model-name> --provider ${name} --model-string <id>`);
+  return 0;
 }
 
 async function removeProvider(

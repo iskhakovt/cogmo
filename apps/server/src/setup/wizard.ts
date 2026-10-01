@@ -20,6 +20,7 @@ import {
   DiscoveryUnavailable,
   discoverModels,
 } from "../agent/provider/discover-models.js";
+import { describeImageCatalogError } from "../agent/store/errors.js";
 import type { AgentStore } from "../agent/store/index.js";
 import {
   IMAGE_ALLOWED_ASPECT_RATIOS,
@@ -28,7 +29,7 @@ import {
   type TtsProviderTypeValue,
 } from "../agent/store/schema.js";
 import type { BootstrapLock } from "../db/bootstrap-lock.js";
-import { type Transactor, transactor } from "../db/transactor.js";
+import { commitIfOk, type Transactor, transactor } from "../db/transactor.js";
 import { env } from "../env.js";
 import {
   DAYTONA_API_KEY_SECRET,
@@ -765,28 +766,27 @@ async function addNonFalImageProvider(deps: WizardDeps): Promise<void> {
   const secretName = `${name}_api_key`;
   const s = p.spinner();
   s.start("Saving image provider...");
-  let providerId: string;
-  try {
-    providerId = await deps.runInTx(async (tx) => {
-      const { id: secretId } = await deps.secretsStore.putSecret(tx, {
-        name: secretName,
-        plaintext: apiKey,
-        description: `${providerType} image provider key (${name})`,
-      });
-      const result = await deps.agentStore.createImageProvider(tx, {
-        name,
-        type: providerType,
-        baseUrl,
-        secretId,
-        attrs,
-      });
-      return result.id;
+  // The secret rolls back with a rejected provider.
+  const created = await commitIfOk(deps.runInTx, async (tx) => {
+    const { id: secretId } = await deps.secretsStore.putSecret(tx, {
+      name: secretName,
+      plaintext: apiKey,
+      description: `${providerType} image provider key (${name})`,
     });
-    s.stop(`Added image provider "${name}".`);
-  } catch (err) {
-    s.stop(`Failed to add image provider: ${(err as Error).message}`);
+    return deps.agentStore.createImageProvider(tx, {
+      name,
+      type: providerType,
+      baseUrl,
+      secretId,
+      attrs,
+    });
+  });
+  if (created.isErr()) {
+    s.stop(`Failed to add image provider: ${describeImageCatalogError(created.error)}`);
     return;
   }
+  const providerId = created.value.id;
+  s.stop(`Added image provider "${name}".`);
 
   // No credential probe here — unlike the LLM-provider step we can't ping
   // `/v1/models` without a model id we haven't collected yet, and an unsolicited
@@ -927,21 +927,18 @@ async function promptAddImageModels(
       ...(negativePrompt && { negativePrompt: true }),
     };
 
-    try {
-      await deps.runInTx((tx) =>
-        deps.agentStore.createImageModel(tx, {
-          providerId,
-          name: modelName,
-          modelString,
-          description,
-          capabilities,
-          userSelectable: true,
-        }),
-      );
-      p.log.success(`Added image model "${modelName}".`);
-    } catch (err) {
-      p.log.error(`Failed to add model: ${(err as Error).message}`);
-    }
+    const created = await deps.runInTx((tx) =>
+      deps.agentStore.createImageModel(tx, {
+        providerId,
+        name: modelName,
+        modelString,
+        description,
+        capabilities,
+        userSelectable: true,
+      }),
+    );
+    if (created.isOk()) p.log.success(`Added image model "${modelName}".`);
+    else p.log.error(`Failed to add model: ${describeImageCatalogError(created.error)}`);
   }
 }
 

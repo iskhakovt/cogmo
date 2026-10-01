@@ -12,6 +12,7 @@
  */
 
 import { command, extendType, flag, option, positional, string, subcommands } from "cmd-ts";
+import { describeImageCatalogError } from "../agent/store/errors.js";
 import type { AgentStore } from "../agent/store/index.js";
 import {
   IMAGE_ALLOWED_ASPECT_RATIOS,
@@ -181,23 +182,22 @@ async function addModelCmd(args: AddArgs, deps: ImageModelCliDeps, io: CliIo): P
     ...(args.negativePrompt && { negativePrompt: true }),
   };
 
-  try {
-    const { id } = await deps.runInTx((tx) =>
-      deps.agentStore.createImageModel(tx, {
-        providerId: provider.id,
-        name,
-        modelString,
-        description,
-        capabilities,
-        userSelectable: !args.noSelectable,
-      }),
-    );
-    io.out(`Added image model "${name}" (id=${id}, provider=${provider.name}).`);
-    return 0;
-  } catch (err) {
-    io.err(`Failed to add image model: ${(err as Error).message}`);
+  const created = await deps.runInTx((tx) =>
+    deps.agentStore.createImageModel(tx, {
+      providerId: provider.id,
+      name,
+      modelString,
+      description,
+      capabilities,
+      userSelectable: !args.noSelectable,
+    }),
+  );
+  if (created.isErr()) {
+    io.err(`Failed to add image model: ${describeImageCatalogError(created.error)}`);
     return 1;
   }
+  io.out(`Added image model "${name}" (id=${created.value.id}, provider=${provider.name}).`);
+  return 0;
 }
 
 async function listModels(

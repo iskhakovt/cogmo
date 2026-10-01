@@ -3,6 +3,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database, Transactor } from "../../../db/index.js";
 import { DrizzleSandboxStore } from "../../../sandbox/store/index.js";
 import type { ContainerLabels, ResourceLimits } from "../../../sandbox/types.js";
+import { expectOk } from "../../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../../test/pglite.js";
 import { DrizzleAgentStore } from "../../store/index.js";
 import { type CodingBackend, type CodingTaskStatus, DrizzleCodingStore } from "./index.js";
@@ -61,13 +62,15 @@ async function seedRepo(name = "cogmo"): Promise<string> {
 async function seedConversation(): Promise<string> {
   const user = await tx((trx) => agentStore.createUser(trx));
   const profile = await tx((trx) =>
-    agentStore.createProfile(trx, {
-      userId: user.id,
-      name: "default",
-      basePrompt: "p",
-      model: "test-model",
-      toolSet: [],
-    }),
+    agentStore
+      .createProfile(trx, {
+        userId: user.id,
+        name: "default",
+        basePrompt: "p",
+        model: "test-model",
+        toolSet: [],
+      })
+      .then(expectOk),
   );
   const conv = await tx((trx) =>
     agentStore.createConversation(trx, {
@@ -1284,17 +1287,19 @@ describe("DrizzleCodingStore", () => {
       const repoId = await seedRepo(`repo-${Math.random().toString(36).slice(2)}`);
       const user = await tx((trx) => agentStore.createUser(trx));
       const profile = await tx((trx) =>
-        agentStore.createProfile(trx, {
-          userId: user.id,
-          name: `prof-${Math.random().toString(36).slice(2)}`,
-          basePrompt: "x",
-          model: "claude-haiku-4-5-20251001",
-          toolSet: [],
-        }),
+        agentStore
+          .createProfile(trx, {
+            userId: user.id,
+            name: `prof-${Math.random().toString(36).slice(2)}`,
+            basePrompt: "x",
+            model: "claude-haiku-4-5-20251001",
+            toolSet: [],
+          })
+          .then(expectOk),
       );
       if (autoapprove === "on") {
         await tx((trx) =>
-          agentStore.updateProfile(trx, profile.id, { codingAutoapproveMode: "on" }),
+          agentStore.updateProfile(trx, profile.id, { codingAutoapproveMode: "on" }).then(expectOk),
         );
       }
       const conv = await tx((trx) =>

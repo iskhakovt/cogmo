@@ -6,11 +6,11 @@
  * that `model` is routable via `model_providers`, then inserts the row. The
  * model is **not** `user_selectable`-gated: a sub-agent is an internal-use
  * model (like `profiles.summarization_model`), so it may point at a model the
- * `/model` picker hides. A `(user_id, name)` collision surfaces as
- * `UniqueViolationError` from the store.
+ * `/model` picker hides.
  */
+import { err, type Result } from "neverthrow";
 import type { Transactor } from "../../db/index.js";
-import { InvalidNameError, UnknownModelError } from "../store/errors.js";
+import type { InvalidName, SubAgentNameTaken } from "../store/errors.js";
 import type { AgentStore } from "../store/index.js";
 import { SUB_AGENT_NAME_RE } from "./sub-agent-tool-builder.js";
 
@@ -28,24 +28,27 @@ export interface CreateSubAgentDeps {
   agentStore: AgentStore;
 }
 
+export type CreateSubAgentError =
+  | InvalidName
+  /** `description` is the routing signal the orchestrator delegates on. */
+  | { kind: "description_empty" }
+  /** `model` has no row in `model_providers`, so a sub-agent on it could never run. */
+  | { kind: "unknown_model"; model: string }
+  | SubAgentNameTaken;
+
 export async function createSubAgent(
   deps: CreateSubAgentDeps,
   args: CreateSubAgentArgs,
-): Promise<{ id: string }> {
+): Promise<Result<{ id: string }, CreateSubAgentError>> {
   if (!SUB_AGENT_NAME_RE.test(args.name)) {
-    throw new InvalidNameError(args.name, "sub_agent");
+    return err({ kind: "invalid_name", name: args.name, subject: "sub_agent" });
   }
-  // `description` is the routing signal the orchestrator reads to decide when to
-  // delegate. The column is NOT NULL but "" satisfies it — enforce non-empty
-  // here so every surface (CLI, future wizard / Transport) inherits the rule.
-  if (args.description.trim().length === 0) {
-    throw new Error("sub-agent description must not be empty (it is the routing signal)");
-  }
-  return deps.runInTx(async (tx) => {
+  // The column is NOT NULL but "" satisfies it; enforced here so every
+  // surface inherits the rule.
+  if (args.description.trim().length === 0) return err({ kind: "description_empty" });
+  return deps.runInTx(async (tx): Promise<Result<{ id: string }, CreateSubAgentError>> => {
     const providers = await deps.agentStore.listProvidersForModel(tx, args.model);
-    if (providers.length === 0) {
-      throw new UnknownModelError(args.model);
-    }
+    if (providers.length === 0) return err({ kind: "unknown_model", model: args.model });
     return deps.agentStore.createSubAgent(tx, {
       userId: args.userId,
       name: args.name,
