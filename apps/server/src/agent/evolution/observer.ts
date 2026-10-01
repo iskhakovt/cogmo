@@ -54,13 +54,16 @@ import {
 } from "./drain-pending-memories.js";
 import type { EvolutionTrigger, ObserverPhase } from "./event-schema.js";
 import {
+  correctionExtractionPrompt,
   type ExtractionResult,
   extractCorrections,
   type ObserverTranscript,
 } from "./extract-corrections.js";
 import { extractMemories, type MemoryExtractionResult } from "./extract-memories.js";
+import { buildMemoryExtractionPrompt } from "./memory-extraction-schema.js";
 import {
   chunkTokenLimit,
+  estimateTokens,
   isCaughtUp,
   loadChunkTranscript,
   type PhasePlan,
@@ -145,6 +148,15 @@ interface SettledPhase<T> {
   failed: boolean;
 }
 
+/** A phase's error no step's retries absorbed, held until the audit row is written. */
+interface UnrecordedFailure {
+  phase: ObserverPhase;
+  err: unknown;
+}
+
+/** What a chunk's extraction step did: extracted it, or found another run had taken it. */
+type ChunkExtraction<T> = { kind: "extracted"; result: T } | { kind: "taken" };
+
 /** An extraction phase's outcome: the messages it advanced past, and whether its model was too small. */
 interface ObservedPhaseOutcome<T> extends SettledPhase<T> {
   processed: number;
@@ -167,7 +179,7 @@ async function settlePhase<T>(
   conversationId: string,
   fallback: T,
   run: () => Promise<T>,
-  unrecorded: unknown[],
+  unrecorded: UnrecordedFailure[],
 ): Promise<SettledPhase<T>> {
   try {
     return { phase, result: await run(), failed: false };
@@ -178,7 +190,7 @@ async function settlePhase<T>(
         "observer: phase failed after retries — continuing without it",
       );
     } else {
-      unrecorded.push(err);
+      unrecorded.push({ phase, err });
       logger.error(
         { err, conversationId, phase },
         "observer: phase failed — recording the fire, then rethrowing",
@@ -297,29 +309,37 @@ export async function runObserver(
   };
 
   const windowDeps = { runInTx: deps.runInTx, store: agentStore };
-  const tokenLimit = chunkTokenLimit(model, resolved.limits);
   // Errors no step's retries absorbed: thrown once the audit row is written.
-  const unrecorded: unknown[] = [];
+  const unrecorded: UnrecordedFailure[] = [];
   const settle = <T>(phase: ObserverPhase, fallback: T, run: () => Promise<T>) =>
     settlePhase(phase, conversationId, fallback, run, unrecorded);
 
-  /** One phase's chunks, planned in a step of that phase so its id derives from durable state. */
-  const planPhase = (phase: ObservedPhase, through: string) =>
+  /**
+   * One phase's chunks, planned in a step of that phase so its id derives
+   * from durable state, cut to the limit the phase's system prompt leaves.
+   */
+  const planPhase = (phase: ObservedPhase, through: string, systemPrompt: () => Promise<string>) =>
     step.run(`plan-${phase}-chunks`, async () => {
+      const promptTokens = estimateTokens(await systemPrompt());
       const plan = await planPhaseChunks(windowDeps, {
         conversationId,
         after: bounds.observedThrough[phase],
         through,
-        tokenLimit,
+        tokenLimit: chunkTokenLimit(model, resolved.limits, promptTokens),
       });
       if (plan.kind === "budget_too_small") {
         logger.warn(
-          { conversationId, phase, model },
-          "observer: the extraction model's input budget can't hold a chunk — extraction skipped",
+          { conversationId, phase, model, promptTokens },
+          "observer: the extraction model's input budget can't hold its prompt and a chunk — extraction skipped",
         );
       }
       return plan;
     });
+
+  const memoryRulesOf = () =>
+    deps.runInTx((tx) =>
+      agentStore.getMemoryRules(tx, { profileIds: [conv.profileId], userId: conv.userId }),
+    );
 
   /**
    * Plan a phase and extract its chunks in order, advancing its cursor after
@@ -329,6 +349,11 @@ export async function runObserver(
    * fire. A plan of `held` leaves the window to a later fire without failing
    * the phase, and so does a chunk `heldChunk` reports was left unextracted.
    * `processed` counts the messages of the chunks whose cursor advanced.
+   *
+   * Another run on the conversation (a `/reflect` beside an idle fire) can
+   * take a chunk: an extraction step that finds the phase's cursor moved off
+   * the chunk's start extracts nothing, and an advance moves the cursor only
+   * from the chunk's start. Either ends the phase without failing it.
    */
   async function observePhase<T>(
     phase: ObservedPhase,
@@ -355,29 +380,50 @@ export async function runObserver(
     // Sequential: each chunk's cursor advance must land before the next chunk.
     for (const chunk of plan.chunks) {
       n += 1;
-      const extracted = await settle<T | null>(phase, null, () =>
-        step.run(`extract-${phase}-${n}`, async () =>
-          spec.extract(
-            await loadChunkTranscript(windowDeps, {
+      const extracted = await settle<ChunkExtraction<T> | null>(phase, null, () =>
+        step.run(`extract-${phase}-${n}`, async (): Promise<ChunkExtraction<T>> => {
+          const { observedThrough } = await deps.runInTx((tx) =>
+            agentStore.getObserverBounds(tx, conversationId),
+          );
+          if (observedThrough[phase] !== chunk.after) {
+            logger.info(
+              { conversationId, phase, chunk },
+              "observer: another run took this chunk — leaving it",
+            );
+            return { kind: "taken" };
+          }
+          const transcript = await loadChunkTranscript(windowDeps, {
+            conversationId,
+            chunk,
+            tokenLimit: plan.tokenLimit,
+          });
+          return { kind: "extracted", result: await spec.extract(transcript) };
+        }),
+      );
+      if (extracted.result === null) return { ...none, result: total, processed, failed: true };
+      if (extracted.result.kind === "taken") return { ...none, result: total, processed };
+      total = spec.combine(total, extracted.result.result);
+      if (spec.heldChunk(extracted.result.result)) return { ...none, result: total, processed };
+      const advanced = await settle<boolean | null>(phase, null, () =>
+        step.run(`advance-${phase}-cursor-${n}`, () =>
+          deps.runInTx((tx) =>
+            agentStore.advanceObserverCursor(tx, {
               conversationId,
-              chunk,
-              tokenLimit: plan.tokenLimit,
+              phase,
+              from: chunk.after,
+              to: chunk.through,
             }),
           ),
         ),
       );
-      if (extracted.result === null) return { ...none, result: total, processed, failed: true };
-      total = spec.combine(total, extracted.result);
-      if (spec.heldChunk(extracted.result)) return { ...none, result: total, processed };
-      const advanced = await settle(phase, false, () =>
-        step.run(`advance-${phase}-cursor-${n}`, async () => {
-          await deps.runInTx((tx) =>
-            agentStore.advanceObserverCursor(tx, { conversationId, phase, through: chunk.through }),
-          );
-          return true;
-        }),
-      );
-      if (!advanced.result) return { ...none, result: total, processed, failed: true };
+      if (advanced.result === null) return { ...none, result: total, processed, failed: true };
+      if (!advanced.result) {
+        logger.info(
+          { conversationId, phase, chunk },
+          "observer: another run moved the cursor off this chunk — stopping the phase",
+        );
+        return { ...none, result: total, processed };
+      }
       processed += chunk.messages;
     }
     return { ...none, result: total, processed };
@@ -390,7 +436,15 @@ export async function runObserver(
     empty: NO_CORRECTIONS,
     held: NO_CORRECTIONS,
     combine: addCorrections,
-    plan: (through) => planPhase("corrections", through),
+    plan: (through) =>
+      planPhase("corrections", through, async () => {
+        const { system } = await correctionExtractionPrompt(fire, {
+          runInTx: deps.runInTx,
+          store: agentStore,
+          activeChannelTypes,
+        });
+        return system;
+      }),
     extract: (transcript) =>
       extractCorrections(transcript, fire, {
         provider,
@@ -432,9 +486,7 @@ export async function runObserver(
     plan: async (through) => {
       if (!fire.seesUserRules) {
         const held = await step.run("check-unseen-memory-rules", async () => {
-          const memoryRules = await deps.runInTx((tx) =>
-            agentStore.getMemoryRules(tx, { profileIds: [conv.profileId], userId: conv.userId }),
-          );
+          const memoryRules = await memoryRulesOf();
           const binds = bindsUnseenUserRule(memoryRules, fire.seesUserRules);
           if (binds) {
             logger.info(
@@ -446,12 +498,15 @@ export async function runObserver(
         });
         if (held) return "held";
       }
-      return planPhase("memories", through);
+      return planPhase("memories", through, async () =>
+        buildMemoryExtractionPrompt(
+          customCompartments,
+          (await memoryRulesOf()).map((r) => r.rule),
+        ),
+      );
     },
     extract: async (transcript) => {
-      const memoryRules = await deps.runInTx((tx) =>
-        agentStore.getMemoryRules(tx, { profileIds: [conv.profileId], userId: conv.userId }),
-      );
+      const memoryRules = await memoryRulesOf();
       return extractMemories(transcript, conv.userId, profile.profileClass, {
         provider,
         model,
@@ -557,7 +612,7 @@ export async function runObserver(
   // here only re-runs the DB insert, not the LLM-bearing steps. Status is
   // implied (only `processed` fires earn a row), so skipped branches above
   // returned early and never reach this point.
-  const { id: eventId } = await step.run("persist-evolution-event", async () => {
+  const persist = step.run("persist-evolution-event", async () => {
     return deps.runInTx((tx) =>
       agentStore.recordEvolutionEvent(tx, {
         conversationId,
@@ -573,8 +628,21 @@ export async function runObserver(
     );
   });
 
+  let eventId: string;
+  try {
+    ({ id: eventId } = await persist);
+  } catch (err) {
+    // A `StepError` keeps its identity for the engine; the phase errors were
+    // logged when they were caught.
+    if (unrecorded.length === 0 || err instanceof StepError) throw err;
+    throw new AggregateError(
+      [...unrecorded.map((u) => u.err), err],
+      `observer: ${unrecorded.map((u) => u.phase).join(", ")} failed, and the audit row could not be written`,
+      { cause: unrecorded[0]?.err },
+    );
+  }
   const [failure] = unrecorded;
-  if (failure !== undefined) throw failure;
+  if (failure !== undefined) throw failure.err;
   return { status: "processed", conversationId, eventId, ...outcome };
 }
 

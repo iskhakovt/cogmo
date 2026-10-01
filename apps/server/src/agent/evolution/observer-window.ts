@@ -5,7 +5,6 @@
  * design/evolution.md → Observation Window.
  */
 
-import * as R from "remeda";
 import type { Transactor } from "../../db/index.js";
 import { computeBudget, type PartialLimits, resolveLimits } from "../../llm/models.js";
 import type { Message } from "../../llm/types.js";
@@ -35,8 +34,6 @@ const CHUNK_BUDGET_SHARE = 0.25;
  */
 export const MIN_CHUNK_TOKENS = 1_000;
 
-export const OBSERVED_PHASES: ReadonlyArray<ObservedPhase> = ["corrections", "memories"];
-
 /** A run of a phase's window: the messages after `after` (from the start when null) through `through`. */
 export interface ObserverChunk {
   after: string | null;
@@ -58,14 +55,27 @@ export function isCaughtUp(bounds: ObserverBounds, phase: ObservedPhase): boolea
 }
 
 /**
- * The tokens one chunk, or its context, may take on `model`: a quarter of its
- * input budget, at least `MIN_CHUNK_TOKENS`. Null when the budget can't hold a
- * chunk and its context at that minimum.
+ * The tokens one chunk, or its context, may take on `model` beside a system
+ * prompt of `promptTokens`: a quarter of the input budget, at most half of
+ * what the prompt leaves of it, and at least `MIN_CHUNK_TOKENS`. Null when
+ * what the prompt leaves can't hold a chunk and its context at that minimum.
+ * The budget already reserves the model's output (`computeBudget` subtracts
+ * its `maxOutputTokens`) and a safety buffer; the prompt is counted against
+ * it besides, so a model too small for the phase is skipped rather than fail
+ * on every fire.
  */
-export function chunkTokenLimit(model: string, limits: PartialLimits): number | null {
+export function chunkTokenLimit(
+  model: string,
+  limits: PartialLimits,
+  promptTokens: number,
+): number | null {
   const budget = computeBudget(resolveLimits(model, limits));
-  if (budget < 2 * MIN_CHUNK_TOKENS) return null;
-  return Math.max(MIN_CHUNK_TOKENS, Math.floor(budget * CHUNK_BUDGET_SHARE));
+  const room = budget - promptTokens;
+  if (room < 2 * MIN_CHUNK_TOKENS) return null;
+  return Math.max(
+    MIN_CHUNK_TOKENS,
+    Math.min(Math.floor(budget * CHUNK_BUDGET_SHARE), Math.floor(room / 2)),
+  );
 }
 
 /**
@@ -77,7 +87,14 @@ export function chunkTokenLimit(model: string, limits: PartialLimits): number | 
  * chunks with.
  */
 export function estimateTokens(text: string): number {
-  return Math.ceil(R.sumBy([...text], thirdsOf) / 3);
+  return Math.ceil(thirdsIn(text) / 3);
+}
+
+/** `text`'s estimate in thirds of a token, iterating its code points in place. */
+function thirdsIn(text: string): number {
+  let thirds = 0;
+  for (const char of text) thirds += thirdsOf(char);
+  return thirds;
 }
 
 /** A character's estimate in thirds of a token: 1 for ASCII, else 1.5 per UTF-8 byte. */
@@ -86,26 +103,38 @@ function thirdsOf(char: string): number {
   return code < 0x80 ? 1 : code < 0x800 ? 3 : code < 0x10000 ? 4.5 : 6;
 }
 
+/** Text with its estimated size. */
+export interface SizedText {
+  text: string;
+  tokens: number;
+}
+
 /** `text` cut to `tokenLimit` estimated tokens, the cut marked; unchanged when it fits. */
-export function truncateToTokens(text: string, tokenLimit: number): string {
-  if (estimateTokens(text) <= tokenLimit) return text;
+export function truncateToTokens(text: string, tokenLimit: number): SizedText {
+  const whole = thirdsIn(text);
+  if (Math.ceil(whole / 3) <= tokenLimit) return { text, tokens: Math.ceil(whole / 3) };
   const marker = (omitted: number) => `\n[… ${omitted} characters truncated]`;
   const room = (tokenLimit - estimateTokens(marker(text.length))) * 3;
-  const chars = [...text];
   let thirds = 0;
   let kept = 0;
-  // A stateful scan that stops at the limit.
-  for (const char of chars) {
+  let keptUnits = 0;
+  let total = 0;
+  // One pass: the code points that fit, and how many there are in all.
+  for (const char of text) {
+    total += 1;
     const weight = thirdsOf(char);
-    if (thirds + weight > room) break;
-    thirds += weight;
-    kept += 1;
+    if (kept === total - 1 && thirds + weight <= room) {
+      thirds += weight;
+      kept += 1;
+      keptUnits += char.length;
+    }
   }
-  return chars.slice(0, kept).join("") + marker(chars.length - kept);
+  const cut = marker(total - kept);
+  return { text: text.slice(0, keptUnits) + cut, tokens: Math.ceil((thirds + thirdsIn(cut)) / 3) };
 }
 
 /** A message's transcript line, cut to `tokenLimit`; "" when nothing in it is shown. */
-export function messageLine(message: Message, tokenLimit: number): string {
+export function messageLine(message: Message, tokenLimit: number): SizedText {
   return truncateToTokens(formatMessage(message), tokenLimit);
 }
 
@@ -132,7 +161,7 @@ function chunkCutter(after: string | null, tokenLimit: number, maxChunks: number
   return {
     full,
     add(message) {
-      const size = estimateTokens(messageLine(message, tokenLimit));
+      const size = messageLine(message, tokenLimit).tokens;
       if (last !== null && count > 0 && tokens + size > tokenLimit) {
         chunks.push({ after: start, through: last, messages: count });
         start = last;
@@ -151,21 +180,6 @@ function chunkCutter(after: string | null, tokenLimit: number, maxChunks: number
       return [...chunks];
     },
   };
-}
-
-/** Split a window already in hand into chunks, keeping the first `maxChunks`. */
-export function planChunks(
-  window: ReadonlyArray<Message & { id: string }>,
-  after: string | null,
-  tokenLimit: number,
-  maxChunks: number,
-): ObserverChunk[] {
-  const cutter = chunkCutter(after, tokenLimit, maxChunks);
-  for (const message of window) {
-    if (cutter.full()) break;
-    cutter.add(message);
-  }
-  return cutter.finish();
 }
 
 export interface ObserverWindowDeps {
@@ -244,13 +258,12 @@ export async function loadChunkTranscript(
   }));
   const summaryText =
     summary === undefined ? null : truncateToTokens(summary.summary, Math.floor(tokenLimit / 2));
-  const summaryTokens = summaryText === null ? 0 : estimateTokens(summaryText);
   return {
-    summary: summaryText,
-    context: fitContext(context, tokenLimit, tokenLimit - summaryTokens),
+    summary: summaryText?.text ?? null,
+    context: fitContext(context, tokenLimit, tokenLimit - (summaryText?.tokens ?? 0)),
     messages: messages.flatMap((m) => {
-      const line = messageLine(m, tokenLimit);
-      return line.length === 0 ? [] : [{ id: m.id, line }];
+      const { text } = messageLine(m, tokenLimit);
+      return text.length === 0 ? [] : [{ id: m.id, line: text }];
     }),
   };
 }
@@ -262,10 +275,10 @@ function fitContext(context: ReadonlyArray<Message>, tokenLimit: number, room: n
   // Newest first, stopping at the first line that doesn't fit.
   for (const message of [...context].reverse()) {
     const line = messageLine(message, tokenLimit);
-    if (line.length === 0) continue;
-    tokens += estimateTokens(line);
+    if (line.text.length === 0) continue;
+    tokens += line.tokens;
     if (tokens > room) break;
-    kept.unshift(line);
+    kept.unshift(line.text);
   }
   return kept;
 }

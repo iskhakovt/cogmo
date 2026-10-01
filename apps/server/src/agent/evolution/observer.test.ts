@@ -221,10 +221,11 @@ function messageLog(initial: ReadonlyArray<Message>): MessageLog {
         },
       ),
       advanceObserverCursor: vi.fn<AgentStore["advanceObserverCursor"]>(
-        async (_tx, { phase, through }) => {
+        async (_tx, { phase, from, to }) => {
           const cursor = log.cursors[phase];
-          if (cursor !== null && cursor >= through) return false;
-          log.cursors[phase] = through;
+          if (cursor === to) return true;
+          if (cursor !== from || (from !== null && to <= from)) return false;
+          log.cursors[phase] = to;
           return true;
         },
       ),
@@ -428,6 +429,42 @@ describe("runObserver phase isolation", () => {
       memories: { extracted: 1 },
       drained: { drained: 1 },
     });
+  });
+
+  it("under /reflect, throws the phase's error with the audit row's when the row can't be written", async () => {
+    const phaseError = new Error("hindsight unavailable");
+    const persistError = new Error("connection reset");
+    const deps = observerDeps({
+      provider: routedProvider(),
+      memory: {
+        retainBatch: vi
+          .fn<MemoryProvider["retainBatch"]>()
+          .mockRejectedValueOnce(phaseError)
+          .mockResolvedValue(undefined),
+      },
+      store: { recordEvolutionEvent: vi.fn().mockRejectedValue(persistError) },
+    });
+    const error = vi.spyOn(logger, "error");
+
+    const thrown = await runObserver(EVENT, syncStep, deps).catch((err: unknown) => err);
+
+    expect(thrown).toBeInstanceOf(AggregateError);
+    expect(thrown).toMatchObject({ errors: [phaseError, persistError], cause: phaseError });
+    expect(String((thrown as Error).message)).toContain("memories failed");
+    expect(error).toHaveBeenCalledWith(
+      expect.objectContaining({ phase: "memories", err: phaseError }),
+      expect.any(String),
+    );
+  });
+
+  it("throws the audit row's error as it is when no phase failed", async () => {
+    const persistError = new Error("connection reset");
+    const deps = observerDeps({
+      provider: routedProvider(),
+      store: { recordEvolutionEvent: vi.fn().mockRejectedValue(persistError) },
+    });
+
+    await expect(runObserver(EVENT, syncStep, deps)).rejects.toBe(persistError);
   });
 
   it("under /reflect, records the rule changes made before memory extraction failed, and drains", async () => {
@@ -990,7 +1027,7 @@ describe("runObserver observation window", () => {
         "advance-memories-cursor-3",
       ]);
       expect(
-        vi.mocked(deps.agentStore.advanceObserverCursor).mock.calls.map(([, a]) => a.through),
+        vi.mocked(deps.agentStore.advanceObserverCursor).mock.calls.map(([, a]) => a.to),
       ).toEqual(["msg-001", "msg-002", "msg-003", "msg-001", "msg-002", "msg-003"]);
       expect(userMessagesOf(provider, MEMORIES).map((t) => parts(t).fresh)).toEqual([
         expect.stringContaining("part-1."),
@@ -1050,35 +1087,37 @@ describe("runObserver observation window", () => {
       expect(log.cursors).toEqual({ corrections: "msg-001", memories: "msg-003" });
     });
 
-    it("skips extraction, leaving both cursors and logging why, when the model's budget can't hold a chunk", async () => {
+    it("skips a phase, leaving its cursor and logging why, when a 3.5k budget can't hold its prompt and a chunk", async () => {
       const log = messageLog(LONG);
       const provider = routedProvider();
       const warn = vi.spyOn(logger, "warn");
       const deps = observerDeps({
         provider,
         log,
-        // 11.5k context, 1k output: a 500-token budget.
+        // 14.5k context, 1k output: a 3.5k budget. The memory prompt (~4k
+        // estimated) leaves nothing; the correction prompt, with no rules
+        // listed, leaves room for two minimum chunks.
         resolveProvider: constantResolver(provider, {
-          contextWindow: 11_500,
+          contextWindow: 14_500,
           maxOutputTokens: 1_000,
         }),
       });
 
       const result = await runObserver(EVENT, exhaustedRetriesStep(), deps);
 
-      expect(log.cursors).toEqual({ corrections: null, memories: null });
-      expect(userMessagesOf(provider, CORRECTIONS)).toEqual([]);
+      expect(log.cursors).toMatchObject({ memories: null });
+      expect(log.cursors.corrections).not.toBeNull();
       expect(userMessagesOf(provider, MEMORIES)).toEqual([]);
       expect(result).toMatchObject({
         modelBudgetTooSmall: true,
-        newMessages: { corrections: 0, memories: 0 },
+        newMessages: { memories: 0 },
         failedPhases: [],
         drained: { drained: 1 },
       });
       expect(recordedPayload(deps)).toMatchObject({ modelBudgetTooSmall: true });
       expect(warn).toHaveBeenCalledWith(
         expect.objectContaining({ phase: "memories" }),
-        expect.stringContaining("budget can't hold a chunk"),
+        expect.stringContaining("can't hold its prompt and a chunk"),
       );
     });
 
@@ -1096,6 +1135,56 @@ describe("runObserver observation window", () => {
       const [sent] = userMessagesOf(provider, MEMORIES);
       expect(parts(expectDefined(sent, "memories")).fresh).toContain("characters truncated");
       expect(log.cursors).toEqual({ corrections: "msg-005", memories: "msg-005" });
+    });
+  });
+
+  describe("a concurrent run", () => {
+    /** A harness that lets another run move a phase's cursor just before step `id`. */
+    function interleaved(id: string, move: () => void): ObserverStepHarness & { ids: string[] } {
+      const ids: string[] = [];
+      return {
+        ids,
+        async run<T>(stepId: string, fn: () => Promise<T>): Promise<T> {
+          ids.push(stepId);
+          if (stepId === id) move();
+          return fn();
+        },
+      };
+    }
+
+    it("leaves a chunk another run took before its extraction began", async () => {
+      const log = messageLog(HISTORY);
+      const provider = routedProvider();
+      const deps = observerDeps({ provider, log });
+      const step = interleaved("extract-memories-1", () => {
+        log.cursors.memories = "msg-004";
+      });
+
+      const result = await runObserver(EVENT, step, deps);
+
+      expect(userMessagesOf(provider, MEMORIES)).toEqual([]);
+      expect(deps.memory.retainBatch).toHaveBeenCalledOnce(); // the drain's
+      expect(step.ids).not.toContain("advance-memories-cursor-1");
+      expect(result).toMatchObject({
+        failedPhases: [],
+        newMessages: { corrections: 4, memories: 0 },
+        memories: { extracted: 0 },
+      });
+      expect(log.cursors).toEqual({ corrections: "msg-004", memories: "msg-004" });
+    });
+
+    it("advances nothing when another run moved the cursor after the extraction", async () => {
+      const log = messageLog(HISTORY);
+      const provider = routedProvider();
+      const deps = observerDeps({ provider, log });
+      const step = interleaved("advance-memories-cursor-1", () => {
+        log.cursors.memories = "msg-002";
+      });
+
+      const result = await runObserver(EVENT, step, deps);
+
+      expect(result).toMatchObject({ failedPhases: [], newMessages: { memories: 0 } });
+      expect(log.cursors.memories).toBe("msg-002");
     });
   });
 

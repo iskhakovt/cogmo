@@ -2652,13 +2652,13 @@ export function createTransport(deps: {
           return ok({ status: "skipped" as const, reason: result.reason });
         }
         // Nothing new only when nothing was left unextracted: a memories window
-        // held for an unseen rule, a failed phase or a model too small for a
-        // chunk is reported as processed.
+        // held for an unseen rule or a model too small for a chunk is reported
+        // as processed. A failed phase never reaches here: `triggerReflection`
+        // runs without retries, so the failure is thrown once the fire is recorded.
         if (
           result.newMessages.corrections === 0 &&
           result.newMessages.memories === 0 &&
           result.memories.skippedForUnseenRules === 0 &&
-          result.failedPhases.length === 0 &&
           !result.modelBudgetTooSmall
         ) {
           return ok({

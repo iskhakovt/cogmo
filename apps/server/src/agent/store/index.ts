@@ -1021,12 +1021,15 @@ export interface AgentStore {
   ): Promise<CompactionSummary | undefined>;
 
   /**
-   * Move an extraction phase's cursor to `through`, forward only: a cursor
-   * already at or past it stays. True when the cursor moved.
+   * Move an extraction phase's cursor from `from` (null: never observed) to
+   * `to`, forward only: a compare-and-set, so a run that planned its chunk
+   * from a cursor another run has moved since writes nothing. True when the
+   * cursor is at `to` afterwards, by this call or an earlier one with the same
+   * arguments (a re-run step); false when another run moved it.
    */
   advanceObserverCursor(
     tx: Transaction,
-    params: { conversationId: string; phase: ObservedPhase; through: string },
+    params: { conversationId: string; phase: ObservedPhase; from: string | null; to: string },
   ): Promise<boolean>;
 
   /** Load a profile by ID. */
@@ -2476,7 +2479,7 @@ export class DrizzleAgentStore implements AgentStore {
 
   async advanceObserverCursor(
     tx: Transaction,
-    params: { conversationId: string; phase: ObservedPhase; through: string },
+    params: { conversationId: string; phase: ObservedPhase; from: string | null; to: string },
   ): Promise<boolean> {
     const corrections = params.phase === "corrections";
     const cursor = corrections
@@ -2486,17 +2489,23 @@ export class DrizzleAgentStore implements AgentStore {
       .update(conversations)
       .set(
         corrections
-          ? { correctionsObservedThrough: params.through }
-          : { memoriesObservedThrough: params.through },
+          ? { correctionsObservedThrough: params.to }
+          : { memoriesObservedThrough: params.to },
       )
       .where(
         and(
           eq(conversations.id, params.conversationId),
-          or(isNull(cursor), lt(cursor, params.through)),
+          params.from === null ? isNull(cursor) : eq(cursor, params.from),
+          params.from === null ? undefined : lt(cursor, params.to),
         ),
       )
       .returning({ id: conversations.id });
-    return moved.length > 0;
+    if (moved.length > 0) return true;
+    const [now] = await tx
+      .select({ cursor })
+      .from(conversations)
+      .where(eq(conversations.id, params.conversationId));
+    return now?.cursor === params.to;
   }
 
   async getProfile(tx: Transaction, profileId: string): Promise<Profile | undefined> {

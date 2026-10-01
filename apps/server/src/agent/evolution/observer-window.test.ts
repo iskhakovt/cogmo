@@ -11,7 +11,6 @@ import {
   MAX_CHUNKS_PER_FIRE,
   MIN_CHUNK_TOKENS,
   PLAN_PAGE_SIZE,
-  planChunks,
   planPhaseChunks,
   truncateToTokens,
 } from "./observer-window.js";
@@ -49,64 +48,23 @@ describe("estimateTokens", () => {
 
 describe("truncateToTokens", () => {
   it("leaves text that fits as it is", () => {
-    expect(truncateToTokens("short", 10)).toBe("short");
+    expect(truncateToTokens("short", 10)).toEqual({ text: "short", tokens: 2 });
   });
 
   it("cuts text past the limit to it, marking the cut", () => {
     const cut = truncateToTokens("x".repeat(3_000), 100);
 
-    expect(estimateTokens(cut)).toBeLessThanOrEqual(100);
-    expect(cut).toMatch(/^x+\n\[… \d+ characters truncated\]$/);
+    expect(cut.tokens).toBe(estimateTokens(cut.text));
+    expect(cut.tokens).toBeLessThanOrEqual(100);
+    expect(cut.text).toMatch(/^x+\n\[… \d+ characters truncated\]$/);
   });
 
   it("cuts non-Latin text by its weight, not its length", () => {
     const cut = truncateToTokens("漢".repeat(1_000), 100);
 
-    expect(estimateTokens(cut)).toBeLessThanOrEqual(100);
-    expect(cut).toContain("characters truncated");
-  });
-});
-
-describe("planChunks", () => {
-  it("closes a chunk before the message that would take it past the limit", () => {
-    const window = [sized("m1", 40), sized("m2", 50), sized("m3", 20), sized("m4", 30)];
-
-    expect(planChunks(window, "m0", 100, 3)).toEqual([
-      { after: "m0", through: "m2", messages: 2 },
-      { after: "m2", through: "m4", messages: 2 },
-    ]);
-  });
-
-  it("makes a message larger than the limit a chunk of its own", () => {
-    const window = [sized("m1", 10), sized("m2", 500), sized("m3", 10)];
-
-    expect(planChunks(window, null, 100, 3)).toEqual([
-      { after: null, through: "m1", messages: 1 },
-      { after: "m1", through: "m2", messages: 1 },
-      { after: "m2", through: "m3", messages: 1 },
-    ]);
-  });
-
-  it("counts a message larger than the limit at the limit, so the next one starts a chunk", () => {
-    const window = [sized("m1", 5_000), sized("m2", 10)];
-
-    expect(planChunks(window, null, 100, 3)).toEqual([
-      { after: null, through: "m1", messages: 1 },
-      { after: "m1", through: "m2", messages: 1 },
-    ]);
-  });
-
-  it("keeps the first `maxChunks` chunks", () => {
-    const window = ["m1", "m2", "m3", "m4", "m5"].map((id) => sized(id, 80));
-
-    expect(planChunks(window, null, 100, 2)).toEqual([
-      { after: null, through: "m1", messages: 1 },
-      { after: "m1", through: "m2", messages: 1 },
-    ]);
-  });
-
-  it("plans nothing for an empty window", () => {
-    expect(planChunks([], "m0", 100, MAX_CHUNKS_PER_FIRE)).toEqual([]);
+    expect(cut.tokens).toBe(estimateTokens(cut.text));
+    expect(cut.tokens).toBeLessThanOrEqual(100);
+    expect(cut.text).toContain("characters truncated");
   });
 });
 
@@ -123,38 +81,104 @@ describe("chunkTokenLimit", () => {
   it("is a quarter of the model's input budget", () => {
     // 200k context − 20k output − the 10k safety buffer.
     expect(
-      chunkTokenLimit("unlisted-model", { contextWindow: 200_000, maxOutputTokens: 20_000 }),
+      chunkTokenLimit("unlisted-model", { contextWindow: 200_000, maxOutputTokens: 20_000 }, 4_000),
     ).toBe(42_500);
   });
 
+  it("is at most half of what the system prompt leaves", () => {
+    // A 10k budget less a 5k prompt leaves 5k: 2.5k a chunk, not a quarter of 10k.
+    expect(chunkTokenLimit("m", { contextWindow: 21_000, maxOutputTokens: 1_000 }, 5_000)).toBe(
+      2_500,
+    );
+  });
+
   it("is raised to the minimum when a quarter of the budget falls below it", () => {
-    // A 3k budget: a quarter is 750, and a chunk and its context still fit at the minimum.
-    expect(chunkTokenLimit("m", { contextWindow: 14_000, maxOutputTokens: 1_000 })).toBe(
+    // A 3k budget: a quarter is 750, and with a small prompt a chunk and its context fit.
+    expect(chunkTokenLimit("m", { contextWindow: 14_000, maxOutputTokens: 1_000 }, 500)).toBe(
       MIN_CHUNK_TOKENS,
     );
   });
 
-  it("is null when the budget can't hold a chunk and its context at the minimum, or is negative", () => {
-    expect(chunkTokenLimit("m", { contextWindow: 11_500, maxOutputTokens: 1_000 })).toBeNull();
-    expect(chunkTokenLimit("m", { contextWindow: 8_000, maxOutputTokens: 4_000 })).toBeNull();
+  it("is null when the prompt leaves too little for a chunk and its context, or the budget is negative", () => {
+    // A 3.5k budget beside the memory prompt's ~4k.
+    expect(
+      chunkTokenLimit("m", { contextWindow: 14_500, maxOutputTokens: 1_000 }, 4_000),
+    ).toBeNull();
+    expect(chunkTokenLimit("m", { contextWindow: 11_500, maxOutputTokens: 1_000 }, 0)).toBeNull();
+    expect(chunkTokenLimit("m", { contextWindow: 8_000, maxOutputTokens: 4_000 }, 0)).toBeNull();
   });
 });
 
-describe("planPhaseChunks", () => {
-  /** A store over `window` that serves `listMessagesInRange` pages as Postgres would. */
-  function storeOver(window: ReadonlyArray<Message & { id: string }>) {
-    const store = mock<AgentStore>();
-    store.listMessagesInRange.mockImplementation(async (_tx, _conversationId, range) => {
-      const after = window.filter(
-        (m) => (range.after === null || m.id > range.after) && m.id <= range.through,
-      );
-      return range.limit === null ? after : after.slice(0, range.limit);
-    });
-    return store;
-  }
+/** A store over `window` that serves `listMessagesInRange` pages as Postgres would. */
+function storeOver(window: ReadonlyArray<Message & { id: string }>) {
+  const store = mock<AgentStore>();
+  store.listMessagesInRange.mockImplementation(async (_tx, _conversationId, range) => {
+    const after = window.filter(
+      (m) => (range.after === null || m.id > range.after) && m.id <= range.through,
+    );
+    return range.limit === null ? after : after.slice(0, range.limit);
+  });
+  return store;
+}
 
+/** The chunks `planPhaseChunks` cuts `window` into, from `after`, at `tokenLimit`. */
+async function chunksOf(
+  window: ReadonlyArray<Message & { id: string }>,
+  after: string | null,
+  tokenLimit: number,
+) {
+  const plan = await planPhaseChunks(
+    { runInTx: fakeRunInTx, store: storeOver(window) },
+    { conversationId: "c", after, through: window.at(-1)?.id ?? "m0", tokenLimit },
+  );
+  return plan.kind === "planned" ? plan.chunks : plan;
+}
+
+describe("planPhaseChunks", () => {
   const ids = (n: number) =>
     Array.from({ length: n }, (_, i) => `m${String(i + 1).padStart(4, "0")}`);
+
+  it("closes a chunk before the message that would take it past the limit", async () => {
+    const window = [sized("m1", 40), sized("m2", 50), sized("m3", 20), sized("m4", 30)];
+
+    expect(await chunksOf(window, "m0", 100)).toEqual([
+      { after: "m0", through: "m2", messages: 2 },
+      { after: "m2", through: "m4", messages: 2 },
+    ]);
+  });
+
+  it("makes a message larger than the limit a chunk of its own", async () => {
+    const window = [sized("m1", 10), sized("m2", 500), sized("m3", 10)];
+
+    expect(await chunksOf(window, null, 100)).toEqual([
+      { after: null, through: "m1", messages: 1 },
+      { after: "m1", through: "m2", messages: 1 },
+      { after: "m2", through: "m3", messages: 1 },
+    ]);
+  });
+
+  it("counts a message larger than the limit at the limit, so the next one starts a chunk", async () => {
+    const window = [sized("m1", 5_000), sized("m2", 10)];
+
+    expect(await chunksOf(window, null, 100)).toEqual([
+      { after: null, through: "m1", messages: 1 },
+      { after: "m1", through: "m2", messages: 1 },
+    ]);
+  });
+
+  it(`keeps the first ${MAX_CHUNKS_PER_FIRE} chunks`, async () => {
+    const window = ["m1", "m2", "m3", "m4", "m5"].map((id) => sized(id, 80));
+
+    expect(await chunksOf(window, null, 100)).toEqual([
+      { after: null, through: "m1", messages: 1 },
+      { after: "m1", through: "m2", messages: 1 },
+      { after: "m2", through: "m3", messages: 1 },
+    ]);
+  });
+
+  it("plans nothing for an empty window", async () => {
+    expect(await chunksOf([], "m0", 100)).toEqual([]);
+  });
 
   it("reads one page when the chunks fill inside it", async () => {
     const window = ids(500).map((id) => sized(id, 40));

@@ -83,6 +83,31 @@ export interface ExtractionScope {
 }
 
 /**
+ * The correction-extraction system prompt for `scope`, and the rules it lists
+ * by label. The prompt lists each rule under a short label rather than its
+ * id; the model's `matchedExistingRuleId` carries the label back.
+ */
+export async function correctionExtractionPrompt(
+  scope: ExtractionScope,
+  deps: Pick<ExtractionDeps, "runInTx" | "activeChannelTypes"> & {
+    store: Pick<AgentStore, "getCorrections" | "getInstructionRules">;
+  },
+) {
+  const { learned, instructions } = await deps.runInTx(async (tx) => ({
+    learned: await deps.store.getCorrections(tx, scope.profileId),
+    instructions: scope.seesUserRules ? await deps.store.getInstructionRules(tx, scope) : [],
+  }));
+  const existingRulesByLabel = labelRules([
+    ...learned.map((r) => ({ ...r, setByUser: false })),
+    ...instructions.map((r) => ({ ...r, setByUser: true })),
+  ]);
+  return {
+    system: buildExtractionPrompt(existingRulesByLabel, deps.activeChannelTypes),
+    existingRulesByLabel,
+  };
+}
+
+/**
  * Extract behavioral corrections from a chunk of new messages, read beside
  * the earlier conversation it continues.
  *
@@ -111,17 +136,10 @@ export async function extractCorrections(
     };
   }
 
-  const { learned, instructions } = await deps.runInTx(async (tx) => ({
-    learned: await deps.store.getCorrections(tx, scope.profileId),
-    instructions: scope.seesUserRules ? await deps.store.getInstructionRules(tx, scope) : [],
-  }));
-  // The prompt lists each rule under a short label rather than its id; the
-  // model's `matchedExistingRuleId` carries the label back.
-  const existingRulesByLabel = labelRules([
-    ...learned.map((r) => ({ ...r, setByUser: false })),
-    ...instructions.map((r) => ({ ...r, setByUser: true })),
-  ]);
-  const systemPrompt = buildExtractionPrompt(existingRulesByLabel, deps.activeChannelTypes);
+  const { system: systemPrompt, existingRulesByLabel } = await correctionExtractionPrompt(
+    scope,
+    deps,
+  );
 
   const { data } = await chatTyped({
     provider: deps.provider,

@@ -5279,22 +5279,33 @@ describe("observer window", () => {
     expect(beforeAny).toBeUndefined();
   });
 
-  it("advances a phase's cursor forward only, leaving the other phase's alone", async () => {
+  it("advances a phase's cursor from where it was planned, leaving the other phase's alone", async () => {
     const { conversationId, stamp } = await seedConversation();
     const ids = await seedMessages(conversationId, stamp, 4);
-    const advance = (phase: "corrections" | "memories", through: string) =>
-      tx((trx) => store.advanceObserverCursor(trx, { conversationId, phase, through }));
+    const m0 = expectDefined(ids[0]);
+    const m1 = expectDefined(ids[1]);
+    const m2 = expectDefined(ids[2]);
+    const m3 = expectDefined(ids[3]);
+    const advance = (phase: "corrections" | "memories", from: string | null, to: string) =>
+      tx((trx) => store.advanceObserverCursor(trx, { conversationId, phase, from, to }));
     const cursors = async () =>
       (await tx((trx) => store.getObserverBounds(trx, conversationId))).observedThrough;
 
-    expect(await advance("corrections", expectDefined(ids[2]))).toBe(true);
-    expect(await advance("corrections", expectDefined(ids[1]))).toBe(false);
-    expect(await advance("corrections", expectDefined(ids[2]))).toBe(false);
-    expect(await advance("memories", expectDefined(ids[0]))).toBe(true);
-    expect(await cursors()).toEqual({ corrections: ids[2], memories: ids[0] });
+    expect(await advance("corrections", null, m2)).toBe(true);
+    expect(await advance("memories", null, m0)).toBe(true);
+    expect(await cursors()).toEqual({ corrections: m2, memories: m0 });
 
-    expect(await advance("corrections", expectDefined(ids[3]))).toBe(true);
-    expect(await cursors()).toEqual({ corrections: ids[3], memories: ids[0] });
+    // A re-run of an advance that already landed reports it landed.
+    expect(await advance("corrections", null, m2)).toBe(true);
+    // A run that planned from where the cursor no longer is writes nothing.
+    expect(await advance("corrections", null, m3)).toBe(false);
+    expect(await advance("corrections", m1, m3)).toBe(false);
+    // Never backwards, even from the cursor's own position.
+    expect(await advance("corrections", m2, m1)).toBe(false);
+    expect(await cursors()).toEqual({ corrections: m2, memories: m0 });
+
+    expect(await advance("corrections", m2, m3)).toBe(true);
+    expect(await cursors()).toEqual({ corrections: m3, memories: m0 });
   });
 
   it("refuses a cursor naming a message that doesn't exist", async () => {
@@ -5305,7 +5316,8 @@ describe("observer window", () => {
         store.advanceObserverCursor(trx, {
           conversationId,
           phase: "memories",
-          through: "019d0000-0000-7000-8000-000000000999",
+          from: null,
+          to: "019d0000-0000-7000-8000-000000000999",
         }),
       ),
     ).rejects.toThrow();
