@@ -1826,6 +1826,37 @@ describe("tool durability (stepRun)", () => {
     expect(attempt0Ids).toEqual(["tool-iter1-0"]);
   });
 
+  it("answers a durable tool whose step re-throws a cached rejection with an is_error result", async () => {
+    // Inngest replays a step that failed for good by re-throwing its error
+    // (a `StepError` carrying the original message) at the `step.run` call
+    // site; the handler body doesn't run again.
+    const handler = vi.fn(async () => "fresh");
+    const tools = new ToolRegistry();
+    tools.register({
+      name: "paid",
+      description: "expensive",
+      inputSchema: { type: "object" },
+      durable: true,
+      handler,
+    });
+    const message = "model m does not support aspect ratio 9:16. Supported: 1:1.";
+    const stepRun: StepRunner = async () => {
+      throw Object.assign(new Error(message), { name: "NonRetriableError" });
+    };
+
+    const result = await testRunAgentLoop({
+      provider: mockProvider([toolUseResponse("paid", "toolu_1", {}), textResponse("done")]),
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      stepRun,
+    });
+
+    expect(handler).not.toHaveBeenCalled();
+    expect(result.messages[2]?.content).toEqual([
+      { type: "tool_result", toolUseId: "toolu_1", content: `Error: ${message}`, isError: true },
+    ]);
+  });
+
   it("returns a cached step result even when attempt 1 picks a different tool at the same position", async () => {
     // The accepted trade-off of position-based step ids: if attempt 0
     // cached `tool-iter1-0` for tool A and attempt 1's fresh LLM call
@@ -3869,6 +3900,57 @@ describe("loop-pathology fingerprint", () => {
 
     expect(result.degraded).toEqual({ reason: "stuck_loop", subtype: "stuck_loop" });
     expect(result.iterations).toBe(3);
+  });
+
+  it("a durable side-effectful tool whose step rejects makes no progress, replayed or live", async () => {
+    // A durable tool's rejection reaches the loop through its step — on a
+    // replay, as the cached `StepError` Inngest re-throws at the call site,
+    // without the handler running. It is still a rejection: the tool_result
+    // and the streamed `tool_result` event both carry `isError`, and Class D
+    // counts no side effect, so three identical rejected calls trip.
+    const handler = vi.fn(async () => "wrote it");
+    const tools = new ToolRegistry();
+    tools.register(
+      defineTool({
+        name: "writer",
+        description: "writes",
+        schema: z.object({ path: z.string() }),
+        durable: true,
+        sideEffectful: true,
+        handler,
+      }),
+    );
+    const rejection = "path x is outside the workspace";
+    const stepRun: StepRunner = async (id, fn) => {
+      if (id.startsWith("tool-iter")) {
+        throw Object.assign(new Error(rejection), { name: "NonRetriableError" });
+      }
+      return fn();
+    };
+    const events: StreamEvent[] = [];
+
+    const result = await testRunStreamingAgentLoop({
+      provider: mockStreamProvider([
+        toolUseTurn("writer", "t1", { path: "x" }),
+        toolUseTurn("writer", "t2", { path: "x" }),
+        toolUseTurn("writer", "t3", { path: "x" }),
+      ]),
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      onEvent: async (event) => {
+        events.push(event);
+      },
+      stepRun,
+    });
+
+    expect(handler).not.toHaveBeenCalled();
+    expect(result.degraded).toEqual({ reason: "stuck_loop", subtype: "stuck_loop" });
+    expect(result.iterations).toBe(3);
+    const streamed = events.filter((e) => e.type === "tool_result");
+    expect(streamed.length).toBeGreaterThan(0);
+    for (const event of streamed) {
+      expect(event).toMatchObject({ name: "writer", output: `Error: ${rejection}`, isError: true });
+    }
   });
 
   it("persistence boundary: trip iteration's tool_use + tool_result pair is NOT persisted; prior identical iterations ARE", async () => {

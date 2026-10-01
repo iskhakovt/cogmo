@@ -304,7 +304,7 @@ export type ImageProviderAttrs = z.infer<typeof ImageProviderAttrsSchema>;
  *   array → the model accepts no custom aspect ratio (fixed-size models like
  *   recraft-v3 character/embedding variants). Both states are treated
  *   identically by the handler: if the LLM still passes `aspectRatio`, the
- *   handler returns a text error the LLM can recover from (re-pick a ratio
+ *   handler rejects with an error the LLM can recover from (re-pick a ratio
  *   or a different model) rather than dropping it silently.
  * `seed` — whether `seed` is honored. Absent treated as false; advertised in
  *   the tool description so the LLM doesn't ask for reproducibility from a

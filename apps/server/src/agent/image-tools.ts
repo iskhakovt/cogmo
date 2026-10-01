@@ -341,10 +341,10 @@ function looksLikeModerationBlock(err: APICallError): boolean {
 /**
  * Single-format point for both failure paths (adapter-thrown via
  * `ImageGenerationFailedError`, post-generation via `detectImageFailure`).
- * Logs the structured failure for operator filtering and returns the
- * LLM-facing `Error: ...` string the tool result carries.
+ * Logs the structured failure for operator filtering and throws it, so the
+ * call ends in an `is_error` tool_result reading `Error: <reason>`.
  */
-function surfaceFailure(failure: ImageFailure, row: ImageModelWithProvider, slug: string): string {
+function surfaceFailure(failure: ImageFailure, row: ImageModelWithProvider, slug: string): never {
   logger.warn(
     {
       kind: failure.kind,
@@ -356,7 +356,7 @@ function surfaceFailure(failure: ImageFailure, row: ImageModelWithProvider, slug
     },
     "image generation failed",
   );
-  return `Error: ${failure.reason}`;
+  throw new ImageGenerationFailedError(failure);
 }
 
 /**
@@ -364,6 +364,13 @@ function surfaceFailure(failure: ImageFailure, row: ImageModelWithProvider, slug
  *
  * Inputs are loaded at bootstrap and reused across every turn — same
  * caching posture as `LlmProviderResolver`. Hot-reload is a deferred p3.
+ *
+ * Every way a call can fail without an image — a request the picked model
+ * can't serve, a reference image that won't load, a provider or moderation
+ * failure — throws with an LLM-facing message. The agent loop turns the
+ * throw into an `is_error` tool_result reading `Error: <message>`, the same
+ * from a durable step's cached rejection as from a live one, so delivery
+ * never mistakes it for an image and Class D never counts it as progress.
  *
  * Returns `[]` (no tool registered) when `models.length === 0`. Cleaner
  * than registering a tool that always errors — the LLM simply doesn't
@@ -430,8 +437,9 @@ export function createImageTools(deps: {
       name: "generate_image",
       description: buildToolDescription(deps.models, anyImageInput, anyNegativePrompt),
       // Durable: each call bills $0.02-$0.04 and uploads to AttachmentStore.
-      // On Inngest retry the cached JSON result (path + mediaType) replays,
-      // so we neither re-bill the provider nor produce duplicate uploads.
+      // On Inngest retry the cached JSON result (path + mediaType) — or the
+      // cached rejection of a failed call — replays, so we neither re-bill
+      // the provider nor produce duplicate uploads.
       durable: true,
       parallelSafe: true,
       // Each call is paid and multi-second; legitimate multi-attempt is rare.
@@ -463,7 +471,7 @@ export function createImageTools(deps: {
       }),
       handler: async (input) => {
         const row = modelBySlug.get(input.model);
-        if (!row) return `Error: unknown model ${input.model}`;
+        if (!row) throw new Error(`unknown model ${input.model}`);
         const provider = deps.providers.get(row.providerId);
         if (!provider) {
           // Should never happen — the bootstrap loop populates `providers`
@@ -475,47 +483,55 @@ export function createImageTools(deps: {
             { rowName: row.name, providerId: row.providerId, slug: input.model },
             "generate_image: model row references a provider not present in the image-providers map",
           );
-          return `Error: model ${input.model} references unknown provider`;
+          throw new Error(`model ${input.model} references unknown provider`);
         }
 
         // Treat absent and [] identically — both mean "model accepts no
-        // aspectRatio". Both surface as a text error the LLM can recover
-        // from (re-pick a ratio or pick a different model), not silent drop.
+        // aspectRatio". Both end in an error the LLM can recover from
+        // (re-pick a ratio or pick a different model), not a silent drop.
         const supportedRatios = row.capabilities.aspectRatios ?? [];
         if (input.aspectRatio && !supportedRatios.includes(input.aspectRatio)) {
           const hint =
             supportedRatios.length > 0
               ? `Supported: ${supportedRatios.join(", ")}.`
               : "This model does not accept a custom aspect ratio.";
-          return `Error: model ${input.model} does not support aspect ratio ${input.aspectRatio}. ${hint}`;
+          throw new Error(
+            `model ${input.model} does not support aspect ratio ${input.aspectRatio}. ${hint}`,
+          );
         }
 
-        // Reference-image gating. Three text-recoverable error shapes the
-        // LLM can act on: (a) required-but-missing → re-call with the path;
-        // (b) supplied-but-unsupported by this model → pick a different
-        // model or drop the field; (c) supplied to a non-fal provider →
-        // pick a fal model (the only validated path today). The fetch
-        // itself is wrapped: an attachment-store miss surfaces as a text
-        // error rather than a thrown rejection that crashes the turn.
+        // Reference-image gating. Three recoverable errors the LLM can act
+        // on: (a) required-but-missing → re-call with the path; (b)
+        // supplied-but-unsupported by this model → pick a different model
+        // or drop the field; (c) supplied to a non-fal provider → pick a
+        // fal model (the only validated path today). An attachment-store
+        // miss on the fetch names the path the LLM passed.
         const imageInputCap = row.capabilities.imageInput;
         if (imageInputCap === "required" && !input.referenceImage) {
-          return (
-            `Error: model ${input.model} is an image-editing model and requires ` +
-            "`referenceImage` — pass the AttachmentStore path of the image you want to edit."
+          throw new Error(
+            `model ${input.model} is an image-editing model and requires ` +
+              "`referenceImage` — pass the AttachmentStore path of the image you want to edit.",
           );
         }
         if (input.referenceImage && imageInputCap === undefined) {
-          return `Error: model ${input.model} does not accept a reference image. Drop \`referenceImage\` or pick a model marked \`[needs reference image]\` or \`[optional reference image]\`.`;
+          throw new Error(
+            `model ${input.model} does not accept a reference image. Drop \`referenceImage\` or pick a model marked \`[needs reference image]\` or \`[optional reference image]\`.`,
+          );
         }
         if (input.referenceImage && provider.kind !== "fal") {
-          return `Error: reference images are only supported by fal providers (got ${provider.kind}). Pick a fal-backed model marked \`[needs reference image]\`.`;
+          throw new Error(
+            `reference images are only supported by fal providers (got ${provider.kind}). Pick a fal-backed model marked \`[needs reference image]\`.`,
+          );
         }
         let referenceImageBytes: Buffer | undefined;
         if (input.referenceImage) {
           try {
             referenceImageBytes = await deps.attachments.download(input.referenceImage);
           } catch (err) {
-            return `Error: couldn't load referenceImage "${input.referenceImage}": ${(err as Error).message}`;
+            throw new Error(
+              `couldn't load referenceImage "${input.referenceImage}": ${(err as Error).message}`,
+              { cause: err },
+            );
           }
         }
 
@@ -596,7 +612,7 @@ export function createImageTools(deps: {
         );
 
         if ("failure" in generateResult) {
-          return surfaceFailure(generateResult.failure, row, input.model);
+          surfaceFailure(generateResult.failure, row, input.model);
         }
         const { image, providerMetadata } = generateResult;
 
@@ -606,7 +622,7 @@ export function createImageTools(deps: {
           providerKind: provider.kind,
         });
         if (!detection.ok) {
-          return surfaceFailure(detection.failure, row, input.model);
+          surfaceFailure(detection.failure, row, input.model);
         }
 
         const buffer = Buffer.from(image.uint8Array);

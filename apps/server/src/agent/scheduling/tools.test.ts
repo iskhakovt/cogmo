@@ -161,7 +161,7 @@ describe("scheduleTask tool", () => {
     [
       "malformed cron",
       { kind: "validation", cause: { kind: "malformed", message: "bad" } },
-      /cron expression is malformed: bad/,
+      /^invalid schedule: cron expression is malformed: bad$/,
     ],
     [
       "unsupported field count",
@@ -196,21 +196,28 @@ describe("scheduleTask tool", () => {
       { kind: "task_cap_exceeded", limit: 200, current: 200 },
       /scheduled-task cap \(200\/200\).*Remove an unused task/,
     ],
-  ])("formats SchedulingError kind=%s", async (_label, error, pattern) => {
+    [
+      "prompt too long",
+      { kind: "prompt_too_long", length: 5000, maxLength: 4000 },
+      /^prompt is 5000 characters but max is 4000\. Shorten the prompt/,
+    ],
+  ])("rejects with SchedulingError kind=%s formatted", async (_label, error, pattern) => {
     const service = buildService({ create: vi.fn().mockResolvedValue(err(error)) });
-    const result = await scheduleTask.handler(
-      { schedule: { kind: "recurring", cron: "0 9 * * *" }, prompt: "x" },
-      service,
-    );
-    expect(result).toMatch(pattern);
+    await expect(
+      scheduleTask.handler(
+        { schedule: { kind: "recurring", cron: "0 9 * * *" }, prompt: "x" },
+        service,
+      ),
+    ).rejects.toThrow(pattern);
   });
 
-  it("returns a graceful message when service.scheduling is absent", async () => {
-    const result = await scheduleTask.handler(
-      { schedule: { kind: "recurring", cron: "0 9 * * *" }, prompt: "x" },
-      buildServiceWithoutScheduling(),
-    );
-    expect(result).toMatch(/Scheduling is not available/);
+  it("rejects when service.scheduling is absent", async () => {
+    await expect(
+      scheduleTask.handler(
+        { schedule: { kind: "recurring", cron: "0 9 * * *" }, prompt: "x" },
+        buildServiceWithoutScheduling(),
+      ),
+    ).rejects.toThrow(new Error("Scheduling is not available in this conversation."));
   });
 });
 
@@ -291,9 +298,9 @@ describe("listTasks tool", () => {
     expect(result).not.toContain("a".repeat(81));
   });
 
-  it("returns a graceful message when service.scheduling is absent", async () => {
-    expect(await listTasks.handler({}, buildServiceWithoutScheduling())).toMatch(
-      /Scheduling is not available/,
+  it("rejects when service.scheduling is absent", async () => {
+    await expect(listTasks.handler({}, buildServiceWithoutScheduling())).rejects.toThrow(
+      new Error("Scheduling is not available in this conversation."),
     );
   });
 });
@@ -314,21 +321,22 @@ describe("removeTask tool", () => {
     expect(result).toBe(`Removed task ${VALID_ID_A}.`);
   });
 
-  it("renders not_found cleanly", async () => {
+  it("rejects with not_found formatted", async () => {
     const service = buildService({
       remove: vi.fn().mockResolvedValue(err({ kind: "not_found", id: VALID_ID_MISSING })),
     });
-    const result = await removeTask.handler({ id: VALID_ID_MISSING }, service);
-    expect(result).toMatch(new RegExp(`no scheduled task with id '${VALID_ID_MISSING}'`));
+    await expect(removeTask.handler({ id: VALID_ID_MISSING }, service)).rejects.toThrow(
+      new Error(`no scheduled task with id '${VALID_ID_MISSING}' found for this user.`),
+    );
   });
 
-  it("returns a graceful message when service.scheduling is absent", async () => {
-    expect(
-      await removeTask.handler(
+  it("rejects when service.scheduling is absent", async () => {
+    await expect(
+      removeTask.handler(
         { id: "00000000-0000-7000-8000-000000000001" },
         buildServiceWithoutScheduling(),
       ),
-    ).toMatch(/Scheduling is not available/);
+    ).rejects.toThrow(new Error("Scheduling is not available in this conversation."));
   });
 });
 

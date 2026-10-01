@@ -12,9 +12,9 @@
  * The structured half is the sharp edge. `ImageGenerationFailedError`
  * extends p-retry's `AbortError`, and p-retry answers a thrown
  * `AbortError` by rethrowing its `originalError` — a plain `Error` with no
- * `failure` field. So the handler has to end the loop by *returning* the
- * failure; a rethrow would reach the LLM as an exception instead of a
- * formatted tool result.
+ * `failure` field. So the handler ends the loop by *returning* the
+ * failure, and throws it only once it is past the retry boundary; a
+ * rethrow inside would reach the agent loop stripped of its `failure`.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -91,7 +91,7 @@ describe("generate_image retry boundary", () => {
     vi.useRealTimers();
   });
 
-  it("charges one generation for a terminal failure and returns it as a tool result", async () => {
+  it("charges one generation for a terminal failure and rejects with it intact", async () => {
     const { generateFn, handler } = buildTool(
       new ImageGenerationFailedError({
         kind: "moderation_blocked",
@@ -100,12 +100,16 @@ describe("generate_image retry boundary", () => {
       }),
     );
 
-    const result = await handler({ prompt: "x", model: "sd35" });
+    const thrown = await handler({ prompt: "x", model: "sd35" }).catch((e: unknown) => e);
 
-    // The `failure.reason` survived the retry wrapper — proof the handler
+    // The structured failure survived the retry wrapper — proof the handler
     // never handed the AbortError to p-retry, which would have replaced it
-    // with a plain Error and left the LLM with a thrown exception.
-    expect(result).toBe("Error: Venice rejected the prompt as a content policy violation.");
+    // with a plain Error carrying no `failure`.
+    expect(thrown).toBeInstanceOf(ImageGenerationFailedError);
+    expect(thrown).toMatchObject({
+      message: "Venice rejected the prompt as a content policy violation.",
+      failure: { kind: "moderation_blocked", provider: "venice" },
+    });
     expect(generateFn).toHaveBeenCalledTimes(1);
   });
 

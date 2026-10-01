@@ -94,6 +94,9 @@ const scheduleTaskSchema = z.object({
     ),
 });
 
+/** Why every scheduling tool rejects in a conversation without a scheduling service. */
+const SCHEDULING_UNAVAILABLE = "Scheduling is not available in this conversation.";
+
 export const scheduleTask = defineTool({
   name: "schedule_task",
   description:
@@ -116,7 +119,7 @@ export const scheduleTask = defineTool({
   schema: scheduleTaskSchema,
   handler: async (input, service, ctx) => {
     if (!service.scheduling) {
-      return "Scheduling is not available in this conversation.";
+      throw new Error(SCHEDULING_UNAVAILABLE);
     }
     const args =
       input.schedule.kind === "recurring"
@@ -145,7 +148,7 @@ export const scheduleTask = defineTool({
       ...(ctx !== undefined ? ([`schedule_task:${ctx.idempotencyKey}`] as const) : []),
     );
     if (result.isErr()) {
-      return formatSchedulingError(result.error);
+      throw new Error(schedulingErrorMessage(result.error));
     }
     return `Scheduled task ${result.value.id}. First fire: ${result.value.nextRunAt.toISOString()}.`;
   },
@@ -164,7 +167,7 @@ export const listTasks = defineTool({
   schema: listTasksSchema,
   handler: async (_input, service) => {
     if (!service.scheduling) {
-      return "Scheduling is not available in this conversation.";
+      throw new Error(SCHEDULING_UNAVAILABLE);
     }
     const tasks = await service.scheduling.list();
     if (tasks.length === 0) {
@@ -199,11 +202,11 @@ export const removeTask = defineTool({
   schema: removeTaskSchema,
   handler: async (input, service) => {
     if (!service.scheduling) {
-      return "Scheduling is not available in this conversation.";
+      throw new Error(SCHEDULING_UNAVAILABLE);
     }
     const result = await service.scheduling.remove(input.id);
     if (result.isErr()) {
-      return formatSchedulingError(result.error);
+      throw new Error(schedulingErrorMessage(result.error));
     }
     return `Removed task ${input.id}.`;
   },
@@ -211,25 +214,29 @@ export const removeTask = defineTool({
 
 export const schedulingTools = [scheduleTask, listTasks, removeTask];
 
-/** Render a `SchedulingError` into LLM-readable text. */
-function formatSchedulingError(err: SchedulingError): string {
+/**
+ * Render a `SchedulingError` into the message the tool rejects with. The
+ * agent loop answers the rejection with an `is_error` tool_result reading
+ * `Error: <message>`.
+ */
+function schedulingErrorMessage(err: SchedulingError): string {
   switch (err.kind) {
     case "validation":
-      return `Error validating schedule: ${formatCronValidationError(err.cause)}`;
+      return `invalid schedule: ${formatCronValidationError(err.cause)}`;
     case "invalid_run_at":
-      return `Error: invalid runAt '${err.runAt}'. ${err.message}`;
+      return `invalid runAt '${err.runAt}'. ${err.message}`;
     case "prompt_too_long":
       return (
-        `Error: prompt is ${err.length} characters but max is ${err.maxLength}. ` +
+        `prompt is ${err.length} characters but max is ${err.maxLength}. ` +
         "Shorten the prompt — the model gets context from conversation history when the fire lands, so the prompt only needs to be the trigger instruction."
       );
     case "task_cap_exceeded":
       return (
-        `Error: you've hit the scheduled-task cap (${err.current}/${err.limit}). ` +
+        `you've hit the scheduled-task cap (${err.current}/${err.limit}). ` +
         "Remove an unused task with `remove_task` before scheduling another."
       );
     case "not_found":
-      return `Error: no scheduled task with id '${err.id}' found for this user.`;
+      return `no scheduled task with id '${err.id}' found for this user.`;
   }
 }
 

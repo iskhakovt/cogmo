@@ -116,11 +116,12 @@ describe("web_search", () => {
     );
   });
 
-  it("returns error when API key is missing", async () => {
+  it("rejects when the API key is missing", async () => {
     const [search] = createWebTools(undefined, undefined);
-    const result = await search!.handler({ query: "test" }, stubService());
 
-    expect(result).toContain("not configured");
+    await expect(search!.handler({ query: "test" }, stubService())).rejects.toThrow(
+      new Error("web_search is not configured (TAVILY_API_KEY missing)."),
+    );
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
@@ -188,12 +189,14 @@ describe("web_answer", () => {
     expect(result).not.toContain("Sources:");
   });
 
-  it("returns error when API key is missing", async () => {
+  it("rejects when the API key is missing", async () => {
     const tools = createWebTools(undefined, undefined);
     const answer = tools[1]!;
-    const result = await answer.handler({ question: "test" }, stubService());
 
-    expect(result).toContain("not configured");
+    await expect(answer.handler({ question: "test" }, stubService())).rejects.toThrow(
+      new Error("web_answer is not configured (OPENROUTER_API_KEY missing)."),
+    );
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 
   it("throws on server error (5xx)", async () => {

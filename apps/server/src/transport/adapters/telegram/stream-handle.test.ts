@@ -1,6 +1,8 @@
 import type { Bot } from "grammy";
 import { err, ok } from "neverthrow";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { mock } from "vitest-mock-extended";
+import { logger } from "../../../logger.js";
 import { mockAttachmentStore } from "../../../test/factories.js";
 import { TelegramStreamHandle } from "./stream-handle.js";
 import { type StreamInput, transition } from "./stream-state.js";
@@ -85,6 +87,53 @@ describe("TelegramStreamHandle", () => {
     await handle.push({ type: "tool_result", name: "generate_image", output: image });
 
     expect(api.sendPhoto).not.toHaveBeenCalled();
+  });
+
+  describe("a generate_image result that isn't an image", () => {
+    const rejection =
+      "Error: model m does not support aspect ratio 9:16. This model does not accept a custom aspect ratio.";
+
+    /** The handle's child logger, captured so its warnings can be asserted. */
+    function spyOnHandleLog() {
+      const log = mock<ReturnType<typeof logger.child>>();
+      vi.spyOn(logger, "child").mockReturnValue(log);
+      return log;
+    }
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it("passes over an is_error result quietly", async () => {
+      const log = spyOnHandleLog();
+      const { bot, api } = fakeBot();
+      const handle = openHandle(bot);
+
+      await handle.push({
+        type: "tool_result",
+        name: "generate_image",
+        output: rejection,
+        isError: true,
+      });
+
+      expect(api.sendPhoto).not.toHaveBeenCalled();
+      expect(log.warn.mock.calls.flat()).not.toContainEqual(
+        expect.stringContaining("payload shape"),
+      );
+    });
+
+    it("warns about the payload shape when an unflagged result doesn't parse", async () => {
+      const log = spyOnHandleLog();
+      const { bot, api } = fakeBot();
+      const handle = openHandle(bot);
+
+      await handle.push({ type: "tool_result", name: "generate_image", output: rejection });
+
+      expect(api.sendPhoto).not.toHaveBeenCalled();
+      expect(log.warn).toHaveBeenCalledWith(
+        "telegram: generate_image tool_result didn't match expected payload shape",
+      );
+    });
   });
 
   it("stops the typing heartbeat once an append-only stream aborts", async () => {

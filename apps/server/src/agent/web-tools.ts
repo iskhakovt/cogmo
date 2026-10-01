@@ -104,7 +104,7 @@ function createWebSearch(apiKey: string | undefined): ToolSpec {
         .describe("Maximum number of results to return"),
     }),
     handler: async (input) => {
-      if (!apiKey) return "Error: web_search is not configured (TAVILY_API_KEY missing).";
+      if (!apiKey) throw new Error("web_search is not configured (TAVILY_API_KEY missing).");
 
       const res = await withRetry(
         async () => {
@@ -162,7 +162,7 @@ function createWebAnswer(apiKey: string | undefined): ToolSpec {
       question: z.string().describe("The question to answer"),
     }),
     handler: async (input) => {
-      if (!apiKey) return "Error: web_answer is not configured (OPENROUTER_API_KEY missing).";
+      if (!apiKey) throw new Error("web_answer is not configured (OPENROUTER_API_KEY missing).");
 
       const res = await withRetry(
         async () => {
