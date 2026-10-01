@@ -9,6 +9,7 @@
  * `(model, position)` UNIQUE constraint never trips on a default.
  */
 import type { Transactor } from "../../db/index.js";
+import type { ExtraBody } from "../../llm/extra-body.js";
 import type { AgentStore } from "../store/index.js";
 
 export interface AddModelRoutingArgs {
@@ -32,6 +33,11 @@ export interface AddModelRoutingArgs {
    */
   contextWindow?: number | null;
   maxOutputTokens?: number | null;
+  /**
+   * Extra chat-completions request fields for the model, on an
+   * OpenAI-compatible provider. Leave `undefined` to send only the adapter's.
+   */
+  extraBody?: ExtraBody | null;
 }
 
 export interface AddModelRoutingDeps {
@@ -66,6 +72,7 @@ export async function addModelRouting(
       userSelectable: args.userSelectable ?? true,
       contextWindow: args.contextWindow ?? null,
       maxOutputTokens: args.maxOutputTokens ?? null,
+      extraBody: args.extraBody ?? null,
     });
     return { id, position };
   });

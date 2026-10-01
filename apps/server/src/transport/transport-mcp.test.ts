@@ -1,7 +1,7 @@
 /**
  * `Transport.mcp.*` — admin surface for MCP servers, used by the `/mcp`
  * command in the Telegram adapter and (in principle) any other channel.
- * Identity gating, error mapping (Zod parse, UniqueViolationError,
+ * Identity gating, error mapping (Zod parse, a unique violation,
  * McpInvalidServerNameError, McpServerNotFoundError, mcp_tool_not_found),
  * and the `mcp_disabled` short-circuit are the meaningful contracts. The
  * `McpRegistry` is mocked because the test is about the transport-layer
@@ -11,14 +11,13 @@
 import type { Inngest } from "inngest";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
-import { UniqueViolationError } from "../agent/store/errors.js";
 import type { AgentStore } from "../agent/store/index.js";
 import type { Transactor } from "../db/index.js";
 import { inboundArrived } from "../inngest/events.js";
 import type { McpServer, McpServerConfig, McpServerStatus } from "../mcp/config.js";
 import { McpInvalidServerNameError, McpServerNotFoundError } from "../mcp/errors.js";
 import type { McpRegistry } from "../mcp/registry.js";
-import { mockAgentStore, mockTransportStore } from "../test/factories.js";
+import { mockAgentStore, mockTransportStore, pgUniqueViolation } from "../test/factories.js";
 import type { AttachmentStore } from "./attachment-store.js";
 import type { TransportStore } from "./store/index.js";
 import { createTransport } from "./transport.js";
@@ -170,9 +169,9 @@ describe("Transport.mcp.addServer", () => {
     expect(registry.addServer).not.toHaveBeenCalled();
   });
 
-  it("maps UniqueViolationError → mcp_server_name_taken", async () => {
+  it("maps the driver's unique violation → mcp_server_name_taken", async () => {
     const registry = mock<McpRegistry>();
-    registry.addServer.mockRejectedValue(new UniqueViolationError("dup name"));
+    registry.addServer.mockRejectedValue(pgUniqueViolation("mcp_servers_name_unique"));
     const transport = makeTransport({ registry });
 
     const result = await transport.mcp.addServer(KNOWN_HANDLE, {

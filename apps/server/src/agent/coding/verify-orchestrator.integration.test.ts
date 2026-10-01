@@ -52,6 +52,7 @@ import {
 } from "../../secrets/github.js";
 import { generateSshKeyPair } from "../../secrets/ssh-keygen.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
+import { expectOk } from "../../test/assertions.js";
 import { FakeDaytonaSandboxClient } from "../../test/daytona-sandbox-fake.js";
 import { makeStepRun, makeStepSendEvent } from "../../test/factories.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
@@ -462,19 +463,21 @@ async function seedTask(opts?: {
   verifyCommand?: string;
 }): Promise<{ taskId: string; branch: string }> {
   const repoRow = await tx((trx) =>
-    store.insertRepo(trx, {
-      name: "fixture",
-      localPath: worktreePath,
-      defaultBranch: GITEA_DEFAULT_BRANCH,
-      remoteUrl: opts?.remoteUrl ?? `${giteaUrl}/${GITEA_USER}/${GITEA_REPO}.git`,
-      devcontainer: null,
-      allowedBackends: ["claude"] as ReadonlyArray<CodingBackend>,
-      verifyCommand: opts?.verifyCommand ?? "true",
-      taskTokenBudget: 200_000,
-      taskWallTimeSeconds: 1800,
-      maxConcurrentTasks: 1,
-      verifyTimeoutSeconds: 30,
-    }),
+    store
+      .insertRepo(trx, {
+        name: "fixture",
+        localPath: worktreePath,
+        defaultBranch: GITEA_DEFAULT_BRANCH,
+        remoteUrl: opts?.remoteUrl ?? `${giteaUrl}/${GITEA_USER}/${GITEA_REPO}.git`,
+        devcontainer: null,
+        allowedBackends: ["claude"] as ReadonlyArray<CodingBackend>,
+        verifyCommand: opts?.verifyCommand ?? "true",
+        taskTokenBudget: 200_000,
+        taskWallTimeSeconds: 1800,
+        maxConcurrentTasks: 1,
+        verifyTimeoutSeconds: 30,
+      })
+      .then(expectOk),
   );
 
   const task = await tx((trx) =>
@@ -639,19 +642,21 @@ describe("verify orchestrator integration — gitea + scoped octokit", () => {
 
 async function seedTaskGitRemote(): Promise<{ taskId: string; branch: string; runRef: string }> {
   const repoRow = await tx((trx) =>
-    store.insertRepo(trx, {
-      name: "fixture",
-      localPath: worktreePath,
-      defaultBranch: GITEA_DEFAULT_BRANCH,
-      remoteUrl: `${giteaUrl}/${GITEA_USER}/${GITEA_REPO}.git`,
-      devcontainer: null,
-      allowedBackends: ["claude"] as ReadonlyArray<CodingBackend>,
-      verifyCommand: "true",
-      taskTokenBudget: 200_000,
-      taskWallTimeSeconds: 1800,
-      maxConcurrentTasks: 1,
-      verifyTimeoutSeconds: 30,
-    }),
+    store
+      .insertRepo(trx, {
+        name: "fixture",
+        localPath: worktreePath,
+        defaultBranch: GITEA_DEFAULT_BRANCH,
+        remoteUrl: `${giteaUrl}/${GITEA_USER}/${GITEA_REPO}.git`,
+        devcontainer: null,
+        allowedBackends: ["claude"] as ReadonlyArray<CodingBackend>,
+        verifyCommand: "true",
+        taskTokenBudget: 200_000,
+        taskWallTimeSeconds: 1800,
+        maxConcurrentTasks: 1,
+        verifyTimeoutSeconds: 30,
+      })
+      .then(expectOk),
   );
 
   const task = await tx((trx) =>

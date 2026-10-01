@@ -8,13 +8,8 @@
  */
 
 import { command, extendType, option, positional, subcommands } from "cmd-ts";
-import {
-  InvalidNameError,
-  UniqueViolationError,
-  UnknownModelError,
-} from "../agent/store/errors.js";
 import type { AgentStore } from "../agent/store/index.js";
-import { createSubAgent } from "../agent/subagent/create-sub-agent.js";
+import { type CreateSubAgentError, createSubAgent } from "../agent/subagent/create-sub-agent.js";
 import { SUB_AGENT_NAME_RE, subAgentToolName } from "../agent/subagent/sub-agent-tool-builder.js";
 import type { Transactor } from "../db/index.js";
 import { identifier, optionalOption, text } from "./args.js";
@@ -28,7 +23,9 @@ export interface SubAgentCliDeps {
 /** A name that makes `subagent__<name>` a legal tool name. */
 const subAgentName = extendType(identifier("name"), {
   async from(name) {
-    if (!SUB_AGENT_NAME_RE.test(name)) throw new InvalidNameError(name, "sub_agent");
+    if (!SUB_AGENT_NAME_RE.test(name)) {
+      throw new Error(describeAddError({ kind: "invalid_name", name, subject: "sub_agent" }));
+    }
     return name;
   },
 });
@@ -116,26 +113,15 @@ async function addSubAgent(args: AddArgs, deps: SubAgentCliDeps, io: CliIo): Pro
     return 1;
   }
 
-  try {
-    await createSubAgent(deps, {
-      userId: user.id,
-      name,
-      description,
-      systemPrompt: systemPrompt ?? null,
-      model,
-    });
-  } catch (err) {
-    if (err instanceof UniqueViolationError) {
-      io.err(`A sub-agent named "${name}" already exists.`);
-      return 1;
-    }
-    if (err instanceof UnknownModelError) {
-      io.err(
-        `${err.message}. Run \`cogmo model list\` to see routable models, or \`cogmo model add\` to register one.`,
-      );
-      return 1;
-    }
-    io.err(`Failed to add sub-agent: ${(err as Error).message}`);
+  const created = await createSubAgent(deps, {
+    userId: user.id,
+    name,
+    description,
+    systemPrompt: systemPrompt ?? null,
+    model,
+  });
+  if (created.isErr()) {
+    io.err(describeAddError(created.error));
     return 1;
   }
 
@@ -148,6 +134,19 @@ async function addSubAgent(args: AddArgs, deps: SubAgentCliDeps, io: CliIo): Pro
     "Takes effect on the next turn — the agent reloads sub-agents each turn (no restart needed).",
   );
   return 0;
+}
+
+function describeAddError(e: CreateSubAgentError): string {
+  switch (e.kind) {
+    case "invalid_name":
+      return `Invalid sub-agent name "${e.name}": it must be lowercase ASCII letters/digits/hyphen/underscore, start with a letter, ≤32 chars.`;
+    case "description_empty":
+      return "The description must not be empty: it is the routing signal.";
+    case "unknown_model":
+      return `Unknown model "${e.model}": it has no provider in model_providers. Run \`cogmo model list\` to see routable models, or \`cogmo model add\` to register one.`;
+    case "sub_agent_name_taken":
+      return `A sub-agent named "${e.name}" already exists.`;
+  }
 }
 
 async function listSubAgents(deps: SubAgentCliDeps, io: CliIo): Promise<number> {

@@ -1,8 +1,12 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { count } from "drizzle-orm";
+import { err, ok } from "neverthrow";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
+import { users } from "../agent/store/schema.js";
 import { expectDefined } from "../test/assertions.js";
-import type { Database, Transaction } from "./transactor.js";
-import { transactor } from "./transactor.js";
+import { createTestDatabase, truncateAll } from "../test/pglite.js";
+import type { Database, Transaction, Transactor } from "./transactor.js";
+import { commitIfOk, transactor } from "./transactor.js";
 
 /**
  * The driver error postgres-js raises: SQLSTATE on a top-level `code`.
@@ -136,9 +140,9 @@ describe("transactor", () => {
 
   it("does NOT retry on non-40001 errors — surfaces them with type intact", async () => {
     // The original-type preservation is the load-bearing property of
-    // the shouldRetry approach (over AbortError). A
-    // UniqueViolationError thrown inside a tx must surface as
-    // UniqueViolationError to the caller, not wrapped.
+    // the shouldRetry approach (over AbortError). A driver error
+    // thrown inside a tx must surface as the same object, with its
+    // class, not wrapped.
     vi.stubEnv("RETRY_DISABLED", "false");
     class UniqueViolationError extends Error {
       readonly code = "23505" as const;
@@ -192,5 +196,51 @@ describe("transactor", () => {
     const tx = transactor(db);
     await expect(tx(async () => "unused")).rejects.toBe(expectDefined(failures[2]));
     expect(calls).toHaveLength(3);
+  });
+});
+
+describe("commitIfOk", () => {
+  let db: Database;
+  let runInTx: Transactor;
+  let close: () => Promise<void>;
+
+  beforeAll(async () => {
+    ({ db, tx: runInTx, close } = await createTestDatabase());
+  });
+  afterAll(async () => close());
+  beforeEach(async () => truncateAll(db));
+
+  async function userCount(): Promise<number> {
+    const [row] = await db.select({ value: count() }).from(users);
+    return row?.value ?? 0;
+  }
+
+  it("commits on Ok", async () => {
+    const result = await commitIfOk(runInTx, async (tx) => {
+      await tx.insert(users).values({});
+      return ok(1);
+    });
+    expect(result).toEqual(ok(1));
+    expect(await userCount()).toBe(1);
+  });
+
+  it("rolls back and returns the Err as is", async () => {
+    const result = await commitIfOk(runInTx, async (tx) => {
+      await tx.insert(users).values({});
+      return err({ kind: "rejected" } as const);
+    });
+    expect(result).toEqual(err({ kind: "rejected" }));
+    expect(await userCount()).toBe(0);
+  });
+
+  it("rolls back and propagates a throw", async () => {
+    const boom = new Error("boom");
+    await expect(
+      commitIfOk(runInTx, async (tx) => {
+        await tx.insert(users).values({});
+        throw boom;
+      }),
+    ).rejects.toBe(boom);
+    expect(await userCount()).toBe(0);
   });
 });

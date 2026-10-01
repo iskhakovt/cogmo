@@ -23,6 +23,7 @@ import {
   serializeGitHubIdentity,
 } from "../../secrets/github.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
+import { expectOk } from "../../test/assertions.js";
 import { fakeExecHandle } from "../../test/coding-fixtures.js";
 import { makeStepRun, makeStepSendEvent } from "../../test/factories.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
@@ -158,18 +159,20 @@ async function seedTask(opts?: {
   status?: "pending_verify" | "queued";
 }): Promise<{ taskId: string; repoId: string }> {
   const repo = await tx((trx) =>
-    store.insertRepo(trx, {
-      name: "fixture",
-      localPath: "/tmp/repo",
-      defaultBranch: "main",
-      remoteUrl: opts?.remoteUrl ?? "https://github.com/user/cogmo.git",
-      devcontainer: null,
-      allowedBackends: ["claude"] as ReadonlyArray<CodingBackend>,
-      verifyCommand: "pnpm test",
-      taskTokenBudget: 200_000,
-      taskWallTimeSeconds: 1800,
-      maxConcurrentTasks: 1,
-    }),
+    store
+      .insertRepo(trx, {
+        name: "fixture",
+        localPath: "/tmp/repo",
+        defaultBranch: "main",
+        remoteUrl: opts?.remoteUrl ?? "https://github.com/user/cogmo.git",
+        devcontainer: null,
+        allowedBackends: ["claude"] as ReadonlyArray<CodingBackend>,
+        verifyCommand: "pnpm test",
+        taskTokenBudget: 200_000,
+        taskWallTimeSeconds: 1800,
+        maxConcurrentTasks: 1,
+      })
+      .then(expectOk),
   );
 
   const task = await tx((trx) =>

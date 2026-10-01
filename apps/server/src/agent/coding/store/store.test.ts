@@ -3,6 +3,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database, Transactor } from "../../../db/index.js";
 import { DrizzleSandboxStore } from "../../../sandbox/store/index.js";
 import type { ContainerLabels, ResourceLimits } from "../../../sandbox/types.js";
+import { expectOk } from "../../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../../test/pglite.js";
 import { DrizzleAgentStore } from "../../store/index.js";
 import { type CodingBackend, type CodingTaskStatus, DrizzleCodingStore } from "./index.js";
@@ -48,11 +49,13 @@ const REPO_DEFAULTS = {
 
 async function seedRepo(name = "cogmo"): Promise<string> {
   const row = await tx((trx) =>
-    store.insertRepo(trx, {
-      name,
-      localPath: `/var/lib/cogmo/repos/${name}`,
-      ...REPO_DEFAULTS,
-    }),
+    store
+      .insertRepo(trx, {
+        name,
+        localPath: `/var/lib/cogmo/repos/${name}`,
+        ...REPO_DEFAULTS,
+      })
+      .then(expectOk),
   );
   return row.id;
 }
@@ -61,13 +64,15 @@ async function seedRepo(name = "cogmo"): Promise<string> {
 async function seedConversation(): Promise<string> {
   const user = await tx((trx) => agentStore.createUser(trx));
   const profile = await tx((trx) =>
-    agentStore.createProfile(trx, {
-      userId: user.id,
-      name: "default",
-      basePrompt: "p",
-      model: "test-model",
-      toolSet: [],
-    }),
+    agentStore
+      .createProfile(trx, {
+        userId: user.id,
+        name: "default",
+        basePrompt: "p",
+        model: "test-model",
+        toolSet: [],
+      })
+      .then(expectOk),
   );
   const conv = await tx((trx) =>
     agentStore.createConversation(trx, {
@@ -167,11 +172,13 @@ describe("DrizzleCodingStore", () => {
   describe("repos", () => {
     it("inserts and retrieves a repo with parsed JSONB defaults", async () => {
       const row = await tx((trx) =>
-        store.insertRepo(trx, {
-          name: "cogmo",
-          localPath: "/var/lib/cogmo/repos/cogmo",
-          ...REPO_DEFAULTS,
-        }),
+        store
+          .insertRepo(trx, {
+            name: "cogmo",
+            localPath: "/var/lib/cogmo/repos/cogmo",
+            ...REPO_DEFAULTS,
+          })
+          .then(expectOk),
       );
       expect(row.name).toBe("cogmo");
       expect(row.allowedBackends).toEqual(["claude"]);
@@ -187,21 +194,39 @@ describe("DrizzleCodingStore", () => {
 
     it("identityName overrides the default when provided", async () => {
       const row = await tx((trx) =>
-        store.insertRepo(trx, {
-          name: "acme",
-          localPath: "/repos/acme",
-          ...REPO_DEFAULTS,
-          identityName: "acme-bot",
-        }),
+        store
+          .insertRepo(trx, {
+            name: "acme",
+            localPath: "/repos/acme",
+            ...REPO_DEFAULTS,
+            identityName: "acme-bot",
+          })
+          .then(expectOk),
       );
       expect(row.identityName).toBe("acme-bot");
       const reloaded = await tx((trx) => store.getRepoById(trx, row.id));
       expect(reloaded?.identityName).toBe("acme-bot");
     });
 
-    it("rejects duplicate repo name", async () => {
+    it("returns repo_name_taken for a duplicate name and leaves the transaction usable", async () => {
       await seedRepo();
-      await expect(seedRepo()).rejects.toThrow();
+      const { duplicate, other } = await tx(async (trx) => {
+        const duplicate = await store.insertRepo(trx, {
+          name: "cogmo",
+          localPath: "/elsewhere/cogmo",
+          ...REPO_DEFAULTS,
+        });
+        const other = await store
+          .insertRepo(trx, { name: "other", localPath: "/repos/other", ...REPO_DEFAULTS })
+          .then(expectOk);
+        return { duplicate, other };
+      });
+
+      expect(duplicate._unsafeUnwrapErr()).toEqual({ kind: "repo_name_taken", name: "cogmo" });
+      expect((await tx((trx) => store.listRepos(trx))).map((r) => r.name)).toEqual([
+        "cogmo",
+        other.name,
+      ]);
     });
 
     it("insertOrRecoverRepo recovers the stored row for a repeated name without overwriting it", async () => {
@@ -230,17 +255,19 @@ describe("DrizzleCodingStore", () => {
 
     it("stores and round-trips devcontainer JSONB", async () => {
       const row = await tx((trx) =>
-        store.insertRepo(trx, {
-          name: "with-dev",
-          localPath: "/repos/with-dev",
-          ...REPO_DEFAULTS,
-          devcontainer: {
-            image: "ghcr.io/example/devcontainer:1",
-            features: { "ghcr.io/devcontainers/features/node:1": { version: "24" } },
-            postCreateCommand: ["pnpm", "install"],
-            forwardPorts: [3000, "5432:5432"],
-          },
-        }),
+        store
+          .insertRepo(trx, {
+            name: "with-dev",
+            localPath: "/repos/with-dev",
+            ...REPO_DEFAULTS,
+            devcontainer: {
+              image: "ghcr.io/example/devcontainer:1",
+              features: { "ghcr.io/devcontainers/features/node:1": { version: "24" } },
+              postCreateCommand: ["pnpm", "install"],
+              forwardPorts: [3000, "5432:5432"],
+            },
+          })
+          .then(expectOk),
       );
       expect(row.devcontainer?.image).toBe("ghcr.io/example/devcontainer:1");
       const reloaded = await tx((trx) => store.getRepoById(trx, row.id));
@@ -260,12 +287,14 @@ describe("DrizzleCodingStore", () => {
 
     it("supports both backends in allowedBackends", async () => {
       const row = await tx((trx) =>
-        store.insertRepo(trx, {
-          name: "multi",
-          localPath: "/repos/multi",
-          ...REPO_DEFAULTS,
-          allowedBackends: ["claude", "codex"],
-        }),
+        store
+          .insertRepo(trx, {
+            name: "multi",
+            localPath: "/repos/multi",
+            ...REPO_DEFAULTS,
+            allowedBackends: ["claude", "codex"],
+          })
+          .then(expectOk),
       );
       expect(row.allowedBackends).toEqual(["claude", "codex"]);
     });
@@ -295,12 +324,14 @@ describe("DrizzleCodingStore", () => {
       // table, so a future regression that widens the UPDATE would silently
       // overwrite columns the operator didn't intend to touch.
       const inserted = await tx((trx) =>
-        store.insertRepo(trx, {
-          name: "skills",
-          localPath: "/var/lib/cogmo/skills",
-          ...REPO_DEFAULTS,
-          remoteUrl: "git@github.com:user/old-skills.git",
-        }),
+        store
+          .insertRepo(trx, {
+            name: "skills",
+            localPath: "/var/lib/cogmo/skills",
+            ...REPO_DEFAULTS,
+            remoteUrl: "git@github.com:user/old-skills.git",
+          })
+          .then(expectOk),
       );
 
       await tx((trx) =>
@@ -1284,17 +1315,19 @@ describe("DrizzleCodingStore", () => {
       const repoId = await seedRepo(`repo-${Math.random().toString(36).slice(2)}`);
       const user = await tx((trx) => agentStore.createUser(trx));
       const profile = await tx((trx) =>
-        agentStore.createProfile(trx, {
-          userId: user.id,
-          name: `prof-${Math.random().toString(36).slice(2)}`,
-          basePrompt: "x",
-          model: "claude-haiku-4-5-20251001",
-          toolSet: [],
-        }),
+        agentStore
+          .createProfile(trx, {
+            userId: user.id,
+            name: `prof-${Math.random().toString(36).slice(2)}`,
+            basePrompt: "x",
+            model: "claude-haiku-4-5-20251001",
+            toolSet: [],
+          })
+          .then(expectOk),
       );
       if (autoapprove === "on") {
         await tx((trx) =>
-          agentStore.updateProfile(trx, profile.id, { codingAutoapproveMode: "on" }),
+          agentStore.updateProfile(trx, profile.id, { codingAutoapproveMode: "on" }).then(expectOk),
         );
       }
       const conv = await tx((trx) =>

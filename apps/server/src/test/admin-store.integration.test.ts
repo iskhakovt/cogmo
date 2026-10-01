@@ -17,13 +17,14 @@
 
 import { randomBytes } from "node:crypto";
 import { drizzle } from "drizzle-orm/postgres-js";
+import { err } from "neverthrow";
 import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { UniqueViolationError } from "../agent/store/errors.js";
 import { DrizzleAgentStore } from "../agent/store/index.js";
 import { transactor } from "../db/index.js";
 import * as schema from "../db/schemas.js";
-import { expectDefined } from "./assertions.js";
+import { commitIfOk } from "../db/transactor.js";
+import { expectDefined, expectOk } from "./assertions.js";
 import { fileDatabaseUrl } from "./integration-file.js";
 
 const SUITE = randomBytes(4).toString("hex"); // unique per test run — no collision with seed data
@@ -47,50 +48,55 @@ afterAll(async () => {
 describe("AgentStore admin (real Postgres)", () => {
   it("profiles(user_id, name) is UNIQUE NULLS NOT DISTINCT", async () => {
     await tx((trx) =>
+      store
+        .createProfile(trx, {
+          userId: null,
+          name: name("org-A"),
+          basePrompt: "p",
+          model: "m",
+          toolSet: [],
+        })
+        .then(expectOk),
+    );
+    // Same (null, name) must collide even though PG normally treats NULLs as distinct
+    const dup = await tx((trx) =>
       store.createProfile(trx, {
         userId: null,
         name: name("org-A"),
-        basePrompt: "p",
-        model: "m",
+        basePrompt: "p2",
+        model: "m2",
         toolSet: [],
       }),
     );
-    // Same (null, name) must collide even though PG normally treats NULLs as distinct
-    await expect(
-      tx((trx) =>
-        store.createProfile(trx, {
-          userId: null,
-          name: name("org-A"),
-          basePrompt: "p2",
-          model: "m2",
-          toolSet: [],
-        }),
-      ),
-    ).rejects.toThrow(UniqueViolationError);
+    expect(dup).toEqual(err({ kind: "profile_name_taken" }));
 
     // Same name under a user: allowed
     const { id: userId } = await tx((trx) => store.createUser(trx));
     await tx((trx) =>
-      store.createProfile(trx, {
-        userId,
-        name: name("org-A"),
-        basePrompt: "p",
-        model: "m",
-        toolSet: [],
-      }),
+      store
+        .createProfile(trx, {
+          userId,
+          name: name("org-A"),
+          basePrompt: "p",
+          model: "m",
+          toolSet: [],
+        })
+        .then(expectOk),
     );
   });
 
   it("listConversationsForUser returns alias + preview + real Date timestamp", async () => {
     const { id: userId } = await tx((trx) => store.createUser(trx));
     const { id: profileId } = await tx((trx) =>
-      store.createProfile(trx, {
-        userId,
-        name: name("listconv"),
-        basePrompt: "p",
-        model: TEST_MODEL,
-        toolSet: [],
-      }),
+      store
+        .createProfile(trx, {
+          userId,
+          name: name("listconv"),
+          basePrompt: "p",
+          model: TEST_MODEL,
+          toolSet: [],
+        })
+        .then(expectOk),
     );
     const { id: c1 } = await tx((trx) =>
       store.createConversation(trx, { userId, profileId, isPrivate: true }),
@@ -119,7 +125,7 @@ describe("AgentStore admin (real Postgres)", () => {
         lastInboundMessageId: inboundId,
       }),
     );
-    await tx((trx) => store.setAlias(trx, userId, c2, name("groceries")));
+    await tx((trx) => store.setAlias(trx, userId, c2, name("groceries")).then(expectOk));
 
     const list = await tx((trx) => store.listConversationsForUser(trx, userId));
     expect(list).toHaveLength(2);
@@ -138,13 +144,15 @@ describe("AgentStore admin (real Postgres)", () => {
     const { id: u1 } = await tx((trx) => store.createUser(trx));
     const { id: u2 } = await tx((trx) => store.createUser(trx));
     const { id: profileId } = await tx((trx) =>
-      store.createProfile(trx, {
-        userId: u1,
-        name: name("scope"),
-        basePrompt: "p",
-        model: TEST_MODEL,
-        toolSet: [],
-      }),
+      store
+        .createProfile(trx, {
+          userId: u1,
+          name: name("scope"),
+          basePrompt: "p",
+          model: TEST_MODEL,
+          toolSet: [],
+        })
+        .then(expectOk),
     );
     const mine = (
       await tx((trx) => store.createConversation(trx, { userId: u1, profileId, isPrivate: true }))
@@ -176,13 +184,15 @@ describe("AgentStore admin (real Postgres)", () => {
   it("setAlias round-trip + unique-alias collision across conversations", async () => {
     const { id: userId } = await tx((trx) => store.createUser(trx));
     const { id: profileId } = await tx((trx) =>
-      store.createProfile(trx, {
-        userId,
-        name: name("alias"),
-        basePrompt: "p",
-        model: TEST_MODEL,
-        toolSet: [],
-      }),
+      store
+        .createProfile(trx, {
+          userId,
+          name: name("alias"),
+          basePrompt: "p",
+          model: TEST_MODEL,
+          toolSet: [],
+        })
+        .then(expectOk),
     );
     const c1 = (
       await tx((trx) => store.createConversation(trx, { userId, profileId, isPrivate: true }))
@@ -191,13 +201,13 @@ describe("AgentStore admin (real Postgres)", () => {
       await tx((trx) => store.createConversation(trx, { userId, profileId, isPrivate: true }))
     ).id;
 
-    await tx((trx) => store.setAlias(trx, userId, c1, name("work")));
+    await tx((trx) => store.setAlias(trx, userId, c1, name("work")).then(expectOk));
     expect(await tx((trx) => store.findConversationByAlias(trx, userId, name("work")))).toEqual({
       conversationId: c1,
     });
 
     // Upsert on same conversation — alias replaces, old alias becomes unresolvable
-    await tx((trx) => store.setAlias(trx, userId, c1, name("dayjob")));
+    await tx((trx) => store.setAlias(trx, userId, c1, name("dayjob")).then(expectOk));
     expect(
       await tx((trx) => store.findConversationByAlias(trx, userId, name("work"))),
     ).toBeUndefined();
@@ -205,10 +215,38 @@ describe("AgentStore admin (real Postgres)", () => {
       conversationId: c1,
     });
 
-    // Cross-conversation collision → 23505 → UniqueViolationError
-    await expect(tx((trx) => store.setAlias(trx, userId, c2, name("dayjob")))).rejects.toThrow(
-      UniqueViolationError,
+    // Cross-conversation collision → 23505 → alias_taken, and the caller's
+    // transaction is still usable after the store's savepoint rolled back.
+    const taken = await tx(async (trx) => {
+      const result = await store.setAlias(trx, userId, c2, name("dayjob"));
+      await store.setAlias(trx, userId, c2, name("nightjob")).then(expectOk);
+      return result;
+    });
+    expect(taken).toEqual(err({ kind: "alias_taken" }));
+    expect(await tx((trx) => store.findConversationByAlias(trx, userId, name("nightjob")))).toEqual(
+      { conversationId: c2 },
     );
+  });
+
+  it("commitIfOk rolls back a top-level transaction whose callback returns Err", async () => {
+    const { id: userId } = await tx((trx) => store.createUser(trx));
+
+    const result = await commitIfOk(tx, async (trx) => {
+      await store
+        .createProfile(trx, {
+          userId,
+          name: name("rolled-back"),
+          basePrompt: "p",
+          model: TEST_MODEL,
+          toolSet: [],
+        })
+        .then(expectOk);
+      return err({ kind: "rejected" } as const);
+    });
+
+    expect(result).toEqual(err({ kind: "rejected" }));
+    const profiles = await tx((trx) => store.listProfiles(trx, userId));
+    expect(profiles.filter((p) => p.name === name("rolled-back"))).toEqual([]);
   });
 });
 
@@ -218,13 +256,15 @@ describe("conversation summaries (real Postgres)", () => {
   async function seed(messageCount: number) {
     const { id: userId } = await tx((trx) => store.createUser(trx));
     const { id: profileId } = await tx((trx) =>
-      store.createProfile(trx, {
-        userId,
-        name: name(`summaries-${randomBytes(3).toString("hex")}`),
-        basePrompt: "p",
-        model: TEST_MODEL,
-        toolSet: [],
-      }),
+      store
+        .createProfile(trx, {
+          userId,
+          name: name(`summaries-${randomBytes(3).toString("hex")}`),
+          basePrompt: "p",
+          model: TEST_MODEL,
+          toolSet: [],
+        })
+        .then(expectOk),
     );
     const conversationId = (
       await tx((trx) => store.createConversation(trx, { userId, profileId, isPrivate: true }))
@@ -321,13 +361,15 @@ describe("messages.content tool inputs (real Postgres)", () => {
   it("reads a tool_use input back in canonical key order, byte-identical to the loop's block", async () => {
     const { id: userId } = await tx((trx) => store.createUser(trx));
     const { id: profileId } = await tx((trx) =>
-      store.createProfile(trx, {
-        userId,
-        name: name("tool-input-order"),
-        basePrompt: "p",
-        model: TEST_MODEL,
-        toolSet: [],
-      }),
+      store
+        .createProfile(trx, {
+          userId,
+          name: name("tool-input-order"),
+          basePrompt: "p",
+          model: TEST_MODEL,
+          toolSet: [],
+        })
+        .then(expectOk),
     );
     const { id: conversationId } = await tx((trx) =>
       store.createConversation(trx, { userId, profileId, isPrivate: true }),

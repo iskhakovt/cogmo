@@ -1,3 +1,4 @@
+import { err as failed, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type {
@@ -25,7 +26,7 @@ const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
 function makeDeps() {
   const deps = { runInTx: fakeRunInTx, agentStore: mock<AgentStore>() };
   deps.agentStore.findImageProviderByName.mockResolvedValue(fakeProvider());
-  deps.agentStore.createImageModel.mockResolvedValue({ id: "m-new" });
+  deps.agentStore.createImageModel.mockResolvedValue(ok({ id: "m-new" }));
   return deps;
 }
 
@@ -271,15 +272,24 @@ describe("cogmo image-model add", () => {
     expect(deps.agentStore.createImageModel).not.toHaveBeenCalled();
   });
 
-  it("surfaces createImageModel failures as exit code 1", async () => {
+  it("surfaces a slug collision as exit code 1", async () => {
     const deps = makeDeps();
-    deps.agentStore.createImageModel.mockRejectedValue(new Error("duplicate name"));
+    deps.agentStore.createImageModel.mockResolvedValue(
+      failed({
+        kind: "image_model_slug_collision",
+        name: "replicate/flux-pro",
+        existingName: "fal-ai/flux-pro",
+        slug: "flux-pro",
+      }),
+    );
     const { io, err } = captureIo();
 
     const code = await run(ADD, deps, io);
 
     expect(code).toBe(1);
-    expect(err.join("\n")).toMatch(/Failed to add image model: duplicate name/);
+    expect(err.join("\n")).toMatch(
+      /Failed to add image model: image model "replicate\/flux-pro" would collide on slug "flux-pro" with "fal-ai\/flux-pro"/,
+    );
   });
 });
 

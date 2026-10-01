@@ -6,6 +6,7 @@ import type { Transactor } from "../db/index.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { expectDefined } from "../test/assertions.js";
 import { mockProvider } from "../test/factories.js";
+import type { ExtraBody } from "./extra-body.js";
 import { FallbackLlmProvider } from "./fallback.js";
 import { constantResolver, createDbProviderResolver, ProviderConfigError } from "./resolver.js";
 
@@ -21,6 +22,7 @@ type ProviderRow = {
   attrs: ProviderAttrs;
   contextWindow: number | null;
   maxOutputTokens: number | null;
+  extraBody: ExtraBody | null;
 };
 
 function row(overrides: Partial<ProviderRow> = {}): ProviderRow {
@@ -33,6 +35,7 @@ function row(overrides: Partial<ProviderRow> = {}): ProviderRow {
     attrs: {},
     contextWindow: null,
     maxOutputTokens: null,
+    extraBody: null,
     ...overrides,
   };
 }
@@ -167,6 +170,82 @@ describe("createDbProviderResolver — happy path", () => {
       expect(Object.keys(body)).not.toContain("prompt_cache_key");
       expect(Object.keys(body)).not.toContain("session_id");
       expect(request.headers.get("x-grok-conv-id")).toBeNull();
+    });
+  });
+
+  describe("a routing row's extra body", () => {
+    /** Resolve `model` from `rows`, send one chat and one stream, and return both request bodies. */
+    async function sentBodies(
+      model: string,
+      rows: ReadonlyArray<ProviderRow>,
+    ): Promise<Array<Record<string, unknown>>> {
+      const bodies: Array<Record<string, unknown>> = [];
+      const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+        const sent = z.record(z.string(), z.unknown()).parse(await new Request(input, init).json());
+        bodies.push(sent);
+        if (sent.stream === true) {
+          const sse =
+            `data: ${JSON.stringify({ id: "c-1", model, choices: [{ index: 0, delta: { content: "ok" }, finish_reason: "stop" }] })}\n\n` +
+            "data: [DONE]\n\n";
+          return new Response(sse, { headers: { "content-type": "text/event-stream" } });
+        }
+        return new Response(
+          JSON.stringify({
+            id: "c-1",
+            model,
+            choices: [
+              { index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" },
+            ],
+            usage: { prompt_tokens: 1, completion_tokens: 1 },
+          }),
+          { headers: { "content-type": "application/json" } },
+        );
+      });
+      try {
+        const { agentStore, secretsStore } = makeDeps({ rows });
+        const resolve = createDbProviderResolver({
+          runInTx: fakeRunInTx,
+          agentStore,
+          secretsStore,
+        });
+        const { provider } = await resolve(model);
+        const params = {
+          model,
+          system: "sys",
+          messages: [{ role: "user" as const, content: "hi" }],
+        };
+        await provider.chat(params);
+        for await (const _ of provider.chatStream(params)) {
+          // Drain.
+        }
+        return bodies;
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    }
+
+    const venice = (extraBody: ExtraBody | null): ProviderRow =>
+      row({
+        name: "custom",
+        type: "openai_compatible",
+        baseUrl: "http://llm.test/v1",
+        extraBody,
+      });
+
+    it("goes out with the model's chat and stream requests", async () => {
+      const bodies = await sentBodies("qwen-3-6-plus", [venice({ reasoning: { enabled: false } })]);
+
+      expect(bodies).toHaveLength(2);
+      for (const body of bodies) {
+        expect(body).toMatchObject({ model: "qwen-3-6-plus", reasoning: { enabled: false } });
+      }
+    });
+
+    it("adds nothing when the row has none", async () => {
+      const bodies = await sentBodies("qwen-3-6-plus", [venice(null)]);
+
+      expect(bodies).toHaveLength(2);
+      for (const body of bodies) expect(body).not.toHaveProperty("reasoning");
     });
   });
 
