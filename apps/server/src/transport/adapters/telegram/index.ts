@@ -15,6 +15,9 @@ import { RepoDialogs } from "./repo-dialog.js";
 
 export const channelType = "telegram";
 
+/** grammY's default Bot API server. */
+const TELEGRAM_API_ROOT = "https://api.telegram.org";
+
 /** `channels.credentials` once the registry has resolved its secret references. */
 const TelegramCredentialsSchema = z.object({
   token: z.string().min(1),
@@ -39,6 +42,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   registerMessageHandlers(bot, {
     transport,
     token: creds.token,
+    apiRoot: creds.apiRoot ?? TELEGRAM_API_ROOT,
     profileDialogs,
     repoDialogs,
     dispatchInbound: createInboundDispatch({ transport, api: bot.api, boundary }),

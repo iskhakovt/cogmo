@@ -34,13 +34,13 @@ interface FileDownloadCtx {
 async function downloadTelegramFile(
   ctx: FileDownloadCtx,
   fileId: string,
-  botToken: string,
+  { apiRoot, token }: { apiRoot: string; token: string },
 ): Promise<Buffer> {
   const file = await ctx.api.getFile(fileId);
   if (!file.file_path) {
     throw new Error(`telegram getFile returned no file_path (file_id=${fileId})`);
   }
-  const url = `https://api.telegram.org/file/bot${botToken}/${file.file_path}`;
+  const url = `${apiRoot}/file/bot${token}/${file.file_path}`;
   const response = await fetch(url);
   if (!response.ok) {
     throw new Error(
@@ -54,6 +54,8 @@ export interface MessageHandlerDeps {
   transport: Transport;
   /** The bot token, which Telegram's file download URL carries. */
   token: string;
+  /** The Bot API server files download from: Telegram's, or a self-hosted one. */
+  apiRoot: string;
   profileDialogs: ProfileDialogs;
   repoDialogs: RepoDialogs;
   dispatchInbound: DispatchInbound;
@@ -61,7 +63,7 @@ export interface MessageHandlerDeps {
 
 export function registerMessageHandlers(
   bot: Bot,
-  { transport, token, profileDialogs, repoDialogs, dispatchInbound }: MessageHandlerDeps,
+  { transport, token, apiRoot, profileDialogs, repoDialogs, dispatchInbound }: MessageHandlerDeps,
 ): void {
   bot.on("message:text", async (ctx) => {
     // Mid-dialog input (e.g. /profile new flow) goes to the FSM, not the agent.
@@ -101,7 +103,7 @@ export function registerMessageHandlers(
       const photo = ctx.message.photo.at(-1);
       if (!photo) return;
 
-      const buffer = await downloadTelegramFile(ctx, photo.file_id, token);
+      const buffer = await downloadTelegramFile(ctx, photo.file_id, { apiRoot, token });
 
       const path = await transport.uploadAttachment(buffer, "image/jpeg");
       const caption = ctx.message.caption ?? "";
@@ -131,7 +133,7 @@ export function registerMessageHandlers(
       // the LLM call doesn't reject a missing media_type at validation.
       const mediaType = doc.mime_type ?? "application/octet-stream";
 
-      const buffer = await downloadTelegramFile(ctx, doc.file_id, token);
+      const buffer = await downloadTelegramFile(ctx, doc.file_id, { apiRoot, token });
 
       const path = await transport.uploadAttachment(buffer, mediaType);
       const caption = ctx.message.caption ?? "";
@@ -182,7 +184,7 @@ export function registerMessageHandlers(
       // mime_type field is informational. Hardcode rather than relying on it.
       const mediaType = "audio/ogg";
 
-      const buffer = await downloadTelegramFile(ctx, voice.file_id, token);
+      const buffer = await downloadTelegramFile(ctx, voice.file_id, { apiRoot, token });
       const path = await transport.uploadAttachment(buffer, mediaType);
       const caption = ctx.message.caption ?? "";
       const durationMs = voice.duration ? voice.duration * 1000 : undefined;

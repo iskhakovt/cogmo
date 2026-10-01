@@ -88,6 +88,31 @@ describe("registerMessageHandlers", () => {
       vi.stubGlobal("fetch", mockFetch);
     });
 
+    it("downloads from Telegram's file endpoint by default", async () => {
+      await createAdapter();
+      await handlers.get("on:message:photo")!(makePhotoCtx(111));
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        "https://api.telegram.org/file/botfake/photos/file_1.jpg",
+      );
+    });
+
+    it("downloads from the self-hosted Bot API server when the channel names one", async () => {
+      await setup({
+        channelId: "tg-ch",
+        credentials: { token: "fake", apiRoot: "http://bot-api.local:8081" },
+        transport: mockTransport(),
+        attachments: mockAttachmentStore(),
+        inngest: mockInngest(),
+        boundary: { promptTimeoutMs: 30000, minUserTurns: 3 },
+      });
+      await handlers.get("on:message:photo")!(makePhotoCtx(111));
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        "http://bot-api.local:8081/file/botfake/photos/file_1.jpg",
+      );
+    });
+
     it("uploads photo to S3 and emits structured content", async () => {
       const { transport } = await createAdapter();
       const ctx = makePhotoCtx(111);
