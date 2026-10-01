@@ -7,7 +7,7 @@ import type { SecretsStore } from "../../secrets/store/index.js";
 import type { DefaultCtxHandlerOptions } from "../ctx-handler.js";
 import type { SkillInvokeRejection } from "../invoke-rejection.js";
 import type { SkillRunAs } from "../run-as.js";
-import type { SkillSourceCache } from "../source-cache.js";
+import { type SkillSourceCache, schemaIssues } from "../source-cache.js";
 import type { SkillRunTrigger, SkillStore } from "../store/index.js";
 import { executeRun } from "./execute-run.js";
 import { finishRun } from "./finish-run.js";
@@ -70,10 +70,7 @@ export async function invokeSkill(
   const cached = await deps.sourceCache.load(skill);
 
   if (!cached.inputsValidator(opts.inputs)) {
-    const issues = (cached.inputsValidator.errors ?? []).map(
-      (e) => `${e.instancePath || "<root>"} ${e.message ?? "invalid"}`,
-    );
-    return err({ kind: "invalid_inputs", name, issues });
+    return err({ kind: "invalid_inputs", name, issues: schemaIssues(cached.inputsValidator) });
   }
 
   const plan = planRuntime(skill.tier, cached.manifest, deps.sandbox);

@@ -1,7 +1,7 @@
 import { err, ok, type Result } from "neverthrow";
 import { match } from "ts-pattern";
 import type { Transactor } from "../../db/index.js";
-import type { SkillSourceCacheEntry } from "../source-cache.js";
+import { type SkillSourceCacheEntry, schemaIssues } from "../source-cache.js";
 import type { SkillRunStatus, SkillStore } from "../store/index.js";
 import { reconstructFinishedResult, type SkillRunResult } from "./run-result.js";
 import type { ExecutedOutcome } from "./start-run.js";
@@ -70,8 +70,7 @@ function validateOutput(
 ): Result<void, string> {
   const validator = cached.outputsValidator;
   if (validator === undefined || validator(output)) return ok(undefined);
-  const issues = (validator.errors ?? []).map(
-    (e) => `${e.instancePath || "<root>"} ${e.message ?? "invalid"}`,
+  return err(
+    `output failed schema validation for skill '${skillName}': ${schemaIssues(validator).join("; ")}`,
   );
-  return err(`output failed schema validation for skill '${skillName}': ${issues.join("; ")}`);
 }

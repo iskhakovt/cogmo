@@ -3,6 +3,7 @@ import { logger } from "../../logger.js";
 import { type GitEnv, runGit, withGitAskpass } from "../../secrets/git-askpass.js";
 import { DEFAULT_GITHUB_IDENTITY_NAME, resolveGitHubIdentity } from "../../secrets/github.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
+import { describeError } from "../../util/describe-error.js";
 import { readOriginUrl } from "../repo.js";
 
 const log = logger.child({ component: "skills.runner" });
@@ -78,7 +79,7 @@ export async function mirrorMainToRemote(
     log.info({ newSha, remoteUrl }, "mirrored skills main to remote");
   } catch (e) {
     log.warn(
-      { newSha, remoteUrl, error: (e as Error).message },
+      { newSha, remoteUrl, error: describeError(e) },
       "skills remote mirror push failed; local state is authoritative — retry with `git -C $COGMO_SKILLS_PATH push origin main`",
     );
   }

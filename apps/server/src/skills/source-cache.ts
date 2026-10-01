@@ -42,6 +42,13 @@ function cacheKey(name: string, gitSha: string): string {
   return `${name}@${gitSha}`;
 }
 
+/** One line per issue a validator reported on its last call: `<path> <message>`. */
+export function schemaIssues(validator: ValidateFunction): string[] {
+  return (validator.errors ?? []).map(
+    (e) => `${e.instancePath || "<root>"} ${e.message ?? "invalid"}`,
+  );
+}
+
 /**
  * Parsed manifests with their compiled JSON Schema validators, keyed by
  * `<name>@<sha>`. A new deploy invalidates by virtue of the new SHA being in
