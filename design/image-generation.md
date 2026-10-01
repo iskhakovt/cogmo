@@ -273,7 +273,7 @@ interface ImageFailure {
 }
 ```
 
-`ImageGenerationFailedError(failure, options?)` accepts `ErrorOptions` so adapter-thrown failures can chain the original SDK error as `cause` — matches the `NonRetriableError({ cause: err })` pattern used elsewhere for non-retryable wraps. On the AI SDK path the tool handler classifies a non-retryable `APICallError` into an `ImageFailure` value directly, which ends the retry loop without a throw.
+`ImageGenerationFailedError(failure)` carries an adapter-thrown failure (Venice). On the AI SDK path the tool handler classifies a non-retryable `APICallError` into an `ImageFailure` value directly, which ends the retry loop without a throw; it logs the `APICallError` (request URL, status, response body) at the classification site, since the `ImageFailure` keeps only the message.
 
 Two surfaces produce it:
 

@@ -1030,7 +1030,8 @@ describe("createImageTools", () => {
     // generation block and returned as a typed failure, so the LLM gets
     // a rejection carrying the provider's message instead of an
     // exception propagating up the agent loop.
-    mockGenerateImage.mockRejectedValueOnce(new FakeAPICallError("auth failed", false));
+    const apiError = new FakeAPICallError("auth failed", false);
+    mockGenerateImage.mockRejectedValueOnce(apiError);
     const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => logger);
     try {
       const [tool] = createImageTools({
@@ -1047,6 +1048,12 @@ describe("createImageTools", () => {
       expect(warnSpy).toHaveBeenCalledWith(
         expect.objectContaining({ kind: "provider_error", provider: "fal" }),
         "image generation failed",
+      );
+      // The SDK error carries the request URL, status and response body;
+      // the classified failure keeps only its message.
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ err: apiError, provider: "fal" }),
+        "image provider rejected the request",
       );
     } finally {
       warnSpy.mockRestore();

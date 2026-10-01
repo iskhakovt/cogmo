@@ -300,6 +300,9 @@ async function generateViaAiSdk(args: {
     // safety-system text) are tagged `kind: "moderation_blocked"`
     // so the LLM sees the same shape it would from venice or fal.
     if (APICallError.isInstance(e) && e.isRetryable === false) {
+      // The failure keeps only the message; the request URL, status and
+      // response body an operator needs live on the SDK error.
+      logger.warn({ err: e, provider: args.provider.kind }, "image provider rejected the request");
       return err({
         kind: looksLikeModerationBlock(e) ? "moderation_blocked" : "provider_error",
         provider: args.provider.kind,
