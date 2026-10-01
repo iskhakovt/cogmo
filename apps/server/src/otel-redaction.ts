@@ -1,7 +1,7 @@
 // Redaction applied to every span on its way out of the process. Loaded only
 // by `otel.ts`, and only when telemetry is enabled.
 
-import type { Attributes, AttributeValue } from "@opentelemetry/api";
+import type { Attributes, AttributeValue, SpanStatus } from "@opentelemetry/api";
 import type { ReadableSpan, SpanExporter, TimedEvent } from "@opentelemetry/sdk-trace-base";
 import {
   redactSecretsInText,
@@ -10,17 +10,15 @@ import {
 } from "./util/redact-secrets.js";
 
 /**
- * Attributes whose value is a URL or part of one, across both HTTP semantic
- * convention generations, mapped to the signed-query redaction their shape
- * takes. Bot API token segments are redacted from every string attribute;
- * signed query parameters only from these.
+ * Every string a span exports — its name, status message, attributes and
+ * event attributes — with Bot API token segments and signed query
+ * parameters redacted. Both patterns are narrow enough to run over free
+ * text, so an `exception.message` naming a URL is covered as well as
+ * `url.full`.
  */
-const QUERY_BEARING_ATTRIBUTES: ReadonlyMap<string, (value: string) => string> = new Map([
-  ["url.full", redactSignedQueryParams],
-  ["http.url", redactSignedQueryParams],
-  ["http.target", redactSignedQueryParams],
-  ["url.query", redactSignedQuery],
-]);
+function redactText(text: string): string {
+  return redactSignedQueryParams(redactSecretsInText(text));
+}
 
 /**
  * A `SpanExporter` that redacts secrets carried in URLs before handing spans
@@ -33,11 +31,11 @@ const QUERY_BEARING_ATTRIBUTES: ReadonlyMap<string, (value: string) => string> =
  * `@opentelemetry/instrumentation-http`; global `fetch` (file downloads) goes
  * through undici and arrives via `@opentelemetry/instrumentation-undici`.
  * Redacting here rather than in either instrumentation's hooks covers both,
- * any span a future instrumentation adds, and the span name and event
- * attributes (`exception.message`, `exception.stacktrace`) as well.
+ * any span a future instrumentation adds, and the span name, status message
+ * and event attributes (`exception.message`, `exception.stacktrace`) as well.
  *
- * Signed query parameters are redacted the way instrumentation-http already
- * does for its own spans; undici's instrumentation doesn't.
+ * Signed query parameters are redacted as instrumentation-http already does
+ * in its own `url.full`; undici's instrumentation doesn't.
  */
 export class RedactingSpanExporter implements SpanExporter {
   readonly #inner: SpanExporter;
@@ -61,10 +59,16 @@ export class RedactingSpanExporter implements SpanExporter {
 
 /** `span` with its secrets redacted, or `span` itself when it carries none. */
 function redactSpan(span: ReadableSpan): ReadableSpan {
-  const name = redactSecretsInText(span.name);
-  const attributes = redactAttributes(span.attributes, QUERY_BEARING_ATTRIBUTES);
+  const name = redactText(span.name);
+  const status = redactStatus(span.status);
+  const attributes = redactAttributes(span.attributes);
   const events = redactEvents(span.events);
-  if (name === span.name && attributes === span.attributes && events === span.events) {
+  if (
+    name === span.name &&
+    status === span.status &&
+    attributes === span.attributes &&
+    events === span.events
+  ) {
     return span;
   }
   return {
@@ -74,7 +78,7 @@ function redactSpan(span: ReadableSpan): ReadableSpan {
     ...(span.parentSpanContext !== undefined && { parentSpanContext: span.parentSpanContext }),
     startTime: span.startTime,
     endTime: span.endTime,
-    status: span.status,
+    status,
     attributes,
     links: span.links,
     events,
@@ -88,12 +92,19 @@ function redactSpan(span: ReadableSpan): ReadableSpan {
   };
 }
 
+/** `status` with its message redacted, or `status` itself when it carries no secret. */
+function redactStatus(status: SpanStatus): SpanStatus {
+  if (status.message === undefined) return status;
+  const message = redactText(status.message);
+  return message === status.message ? status : { ...status, message };
+}
+
 /** `events` with secrets redacted from their attributes, or `events` itself when none changed. */
 function redactEvents(events: TimedEvent[]): TimedEvent[] {
   let changed = false;
   const redacted = events.map((event) => {
     if (event.attributes === undefined) return event;
-    const attributes = redactAttributes(event.attributes, NO_QUERY_REDACTIONS);
+    const attributes = redactAttributes(event.attributes);
     if (attributes === event.attributes) return event;
     changed = true;
     return { ...event, attributes };
@@ -101,20 +112,15 @@ function redactEvents(events: TimedEvent[]): TimedEvent[] {
   return changed ? redacted : events;
 }
 
-const NO_QUERY_REDACTIONS: ReadonlyMap<string, (value: string) => string> = new Map();
-
 /**
- * `attributes` with secrets redacted, or `attributes` itself when nothing
- * changed. Token segments come out of every string (and string array
- * element); `queryRedactions` adds the signed-query pass for its keys.
+ * `attributes` with secrets redacted from every string and string array
+ * element, or `attributes` itself when nothing changed. `url.query` can be a
+ * bare query with no leading `?`, so it gets the query-shaped redaction.
  */
-function redactAttributes(
-  attributes: Attributes,
-  queryRedactions: ReadonlyMap<string, (value: string) => string>,
-): Attributes {
+function redactAttributes(attributes: Attributes): Attributes {
   let redacted: Attributes | undefined;
   for (const [key, value] of Object.entries(attributes)) {
-    const next = redactValue(value, queryRedactions.get(key));
+    const next = redactValue(value, key === "url.query" ? redactQueryAttribute : redactText);
     if (next !== value) {
       redacted ??= { ...attributes };
       redacted[key] = next;
@@ -123,16 +129,22 @@ function redactAttributes(
   return redacted ?? attributes;
 }
 
+function redactQueryAttribute(query: string): string {
+  return redactSignedQuery(redactSecretsInText(query));
+}
+
+/**
+ * `value` with `redact` applied to it, or to each string element. The SDK
+ * keeps only homogeneous arrays (`isAttributeValue` in `@opentelemetry/core`),
+ * so an array holding a string holds nothing but strings and nulls.
+ */
 function redactValue(
   value: AttributeValue | undefined,
-  redactQuery: ((value: string) => string) | undefined,
+  redact: (text: string) => string,
 ): AttributeValue | undefined {
-  if (typeof value === "string") {
-    const scrubbed = redactSecretsInText(value);
-    return redactQuery ? redactQuery(scrubbed) : scrubbed;
-  }
+  if (typeof value === "string") return redact(value);
   if (isStringArray(value)) {
-    const next = value.map((item) => (typeof item === "string" ? redactSecretsInText(item) : item));
+    const next = value.map((item) => (typeof item === "string" ? redact(item) : item));
     return next.some((item, i) => item !== value[i]) ? next : value;
   }
   return value;

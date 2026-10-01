@@ -25,20 +25,15 @@ export const REDACTED_QUERY_VALUE = "REDACTED";
 const BOT_TOKEN_SEGMENT = /\/bot\d+(?::|%3[Aa])[A-Za-z0-9_-]+/g;
 
 /**
- * Query parameters that carry a signature or credential — the list
+ * A query parameter that carries a signature or credential — the names
  * `@opentelemetry/instrumentation-http` redacts from `url.full` by default
- * (`DEFAULT_QUERY_STRINGS_TO_REDACT`). `@opentelemetry/instrumentation-undici`
- * applies none, so its `url.full` and `url.query` carry them verbatim.
+ * (`DEFAULT_QUERY_STRINGS_TO_REDACT`), matched as exactly there. The value
+ * runs to the next `&` or `#`, or to a character that ends a URL in running
+ * text (whitespace, a quote, `<`, `>`, `)`, `,`, `;`).
+ * `@opentelemetry/instrumentation-undici` redacts none of them.
  */
-const SIGNED_QUERY_PARAMS: readonly string[] = [
-  "sig",
-  "Signature",
-  "AWSAccessKeyId",
-  "X-Goog-Signature",
-  "X-Amz-Signature",
-  "X-Amz-Credential",
-  "X-Amz-Security-Token",
-];
+const SIGNED_QUERY_PARAM =
+  /([?&])(sig|Signature|AWSAccessKeyId|X-Goog-Signature|X-Amz-Signature|X-Amz-Credential|X-Amz-Security-Token)=[^&#\s"'<>),;]*/g;
 
 /**
  * `text` with every Bot API token path segment replaced by
@@ -52,30 +47,23 @@ export function redactSecretsInText(text: string): string {
 }
 
 /**
- * `url` — a full URL or a path — with the value of every parameter in
- * {@link SIGNED_QUERY_PARAMS} in its query replaced by `REDACTED`. Returns
- * `url` itself, not re-encoded, when there is no such parameter.
+ * `text` with the value of every signed query parameter in it replaced by
+ * `REDACTED`, in place: the rest of the text — other parameters, their
+ * encoding, repeated keys — is left as it was. Works on a URL, a path with a
+ * query, or running text that contains one. Returns `text` itself when
+ * nothing matches.
  */
-export function redactSignedQueryParams(url: string): string {
-  const queryStart = url.indexOf("?");
-  if (queryStart === -1) return url;
-  const fragmentStart = url.indexOf("#", queryStart);
-  const queryEnd = fragmentStart === -1 ? url.length : fragmentStart;
-  const query = url.slice(queryStart, queryEnd);
-  const redacted = redactSignedQuery(query);
-  return redacted === query ? url : `${url.slice(0, queryStart)}${redacted}${url.slice(queryEnd)}`;
+export function redactSignedQueryParams(text: string): string {
+  if (!text.includes("=")) return text;
+  return text.replace(SIGNED_QUERY_PARAM, `$1$2=${REDACTED_QUERY_VALUE}`);
 }
 
 /**
- * `query` — a query string, with or without its leading `?` — with the value
- * of every parameter in {@link SIGNED_QUERY_PARAMS} replaced by `REDACTED`.
- * Returns `query` itself, not re-encoded, when there is no such parameter.
+ * {@link redactSignedQueryParams} for a query string on its own, with or
+ * without its leading `?` — `url.query` as each instrumentation writes it.
  */
 export function redactSignedQuery(query: string): string {
-  const prefix = query.startsWith("?") ? "?" : "";
-  const params = new URLSearchParams(query.slice(prefix.length));
-  const signed = SIGNED_QUERY_PARAMS.filter((name) => params.has(name));
-  if (signed.length === 0) return query;
-  for (const name of signed) params.set(name, REDACTED_QUERY_VALUE);
-  return `${prefix}${params.toString()}`;
+  if (query.startsWith("?")) return redactSignedQueryParams(query);
+  const redacted = redactSignedQueryParams(`?${query}`).slice(1);
+  return redacted === query ? query : redacted;
 }

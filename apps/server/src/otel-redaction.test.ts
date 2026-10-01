@@ -22,6 +22,14 @@ const instrumentations = [new HttpInstrumentation(), new UndiciInstrumentation()
 
 let server: Server;
 let base: string;
+/** A server that drops every connection, so a request to it fails the same way each run. */
+let dropping: Server;
+let droppingBase: string;
+
+async function listen(target: Server): Promise<string> {
+  await new Promise<void>((resolve) => target.listen(0, "127.0.0.1", resolve));
+  return `http://127.0.0.1:${(target.address() as AddressInfo).port}`;
+}
 
 beforeAll(async () => {
   server = createServer((_req, res) => {
@@ -30,8 +38,10 @@ beforeAll(async () => {
       JSON.stringify({ ok: true, result: { id: 1, is_bot: true, first_name: "t", username: "t" } }),
     );
   });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  base = await listen(server);
+  dropping = createServer();
+  dropping.on("connection", (socket) => socket.destroy());
+  droppingBase = await listen(dropping);
 });
 
 beforeEach(async () => {
@@ -40,13 +50,19 @@ beforeEach(async () => {
 
 afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
+  await new Promise<void>((resolve) => dropping.close(() => resolve()));
   for (const instrumentation of instrumentations) instrumentation.disable();
   await harness.shutdown();
 });
 
-/** Everything a span would export that could carry text: name, attributes, events. */
+/** Everything a span would export that could carry text: name, status, attributes, events. */
 function exportedText(span: ReadableSpan): string {
-  return JSON.stringify({ name: span.name, attributes: span.attributes, events: span.events });
+  return JSON.stringify({
+    name: span.name,
+    status: span.status,
+    attributes: span.attributes,
+    events: span.events,
+  });
 }
 
 function clientSpan(scope: string): ReadableSpan {
@@ -93,14 +109,7 @@ describe("RedactingSpanExporter with the HTTP instrumentations", () => {
   });
 
   it("redacts the token from a failed call's span and recorded exception", async () => {
-    const closed = createServer();
-    await new Promise<void>((resolve) => closed.listen(0, "127.0.0.1", resolve));
-    const port = (closed.address() as AddressInfo).port;
-    await new Promise<void>((resolve) => closed.close(() => resolve()));
-
-    const failure: unknown = await (await bot(`http://127.0.0.1:${port}`)).api
-      .getMe()
-      .catch((e: unknown) => e);
+    const failure: unknown = await (await bot(droppingBase)).api.getMe().catch((e: unknown) => e);
     const { HttpError } = await import("grammy");
     if (!(failure instanceof HttpError) || !(failure.error instanceof Error)) {
       throw new Error("expected grammY to throw an HttpError wrapping node-fetch's error");
@@ -123,7 +132,7 @@ describe("RedactingSpanExporter with the HTTP instrumentations", () => {
     );
     expect(caller.events[0]?.attributes?.["exception.message"]).toContain("/bot<redacted>/getMe");
     expect(clientSpan("@opentelemetry/instrumentation-http").attributes["url.full"]).toBe(
-      `http://127.0.0.1:${port}/bot<redacted>/getMe`,
+      `${droppingBase}/bot<redacted>/getMe`,
     );
   });
 
@@ -151,6 +160,27 @@ describe("RedactingSpanExporter with the HTTP instrumentations", () => {
     expect(span.attributes["url.full"]).toBe(`${base}/v1/messages?beta=true&q=a%20b`);
     expect(span.attributes["url.path"]).toBe("/v1/messages");
     expect(span.attributes["url.query"]).toBe("?beta=true&q=a%20b");
+  });
+
+  it("redacts a status message and exception text, signed URLs included", () => {
+    const message = `request to ${base}/bot${FAKE_TOKEN}/getMe failed`;
+    const presigned = `request to https://h.example/k.png?X-Amz-Signature=deadbeef&a=1 failed`;
+    trace.getTracer("test").startActiveSpan("caller", (span) => {
+      span.recordException(new Error(presigned));
+      span.setStatus({ code: SpanStatusCode.ERROR, message });
+      span.end();
+    });
+
+    const span = expectDefined(harness.getSpans()[0], "span");
+    expect(span.status).toEqual({
+      code: SpanStatusCode.ERROR,
+      message: `request to ${base}/bot<redacted>/getMe failed`,
+    });
+    expect(span.events[0]?.attributes?.["exception.message"]).toBe(
+      "request to https://h.example/k.png?X-Amz-Signature=REDACTED&a=1 failed",
+    );
+    expect(exportedText(span)).not.toContain(FAKE_SECRET);
+    expect(exportedText(span)).not.toContain("deadbeef");
   });
 
   it("redacts a span name and string array attributes", async () => {

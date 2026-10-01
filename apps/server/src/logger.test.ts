@@ -3,7 +3,7 @@ import type { AddressInfo } from "node:net";
 import { Writable } from "node:stream";
 import { Bot, HttpError } from "grammy";
 import pino from "pino";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createLogger } from "./logger.js";
 
 /** Shaped like a Bot API token (numeric id, colon, URL-safe base64), but not one. */
@@ -23,21 +23,26 @@ function capture(): { stream: Writable; lines: string[] } {
 }
 
 /**
- * The `HttpError` grammY throws when a Bot API request can't connect: its
+ * The `HttpError` grammY throws when a Bot API request fails on the network: its
  * message names only the method, but it keeps node-fetch's error on
  * `.error`, and that error's message names the URL — token included.
  */
 let networkFailure: HttpError;
+/** Drops every connection, so the request fails the same way on every run. */
+const dropping = createServer();
 
 beforeAll(async () => {
-  const closed = createServer();
-  await new Promise<void>((resolve) => closed.listen(0, "127.0.0.1", resolve));
-  const port = (closed.address() as AddressInfo).port;
-  await new Promise<void>((resolve) => closed.close(() => resolve()));
+  dropping.on("connection", (socket) => socket.destroy());
+  await new Promise<void>((resolve) => dropping.listen(0, "127.0.0.1", resolve));
+  const port = (dropping.address() as AddressInfo).port;
   const bot = new Bot(FAKE_TOKEN, { client: { apiRoot: `http://127.0.0.1:${port}` } });
   const failure: unknown = await bot.api.getMe().catch((e: unknown) => e);
   if (!(failure instanceof HttpError)) throw new Error("expected grammY to throw an HttpError");
   networkFailure = failure;
+});
+
+afterAll(async () => {
+  await new Promise<void>((resolve) => dropping.close(() => resolve()));
 });
 
 describe("createLogger", () => {

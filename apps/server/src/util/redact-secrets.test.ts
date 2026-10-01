@@ -99,6 +99,38 @@ describe("redactSignedQueryParams", () => {
     );
   });
 
+  it("changes only the signed values, leaving other parameters' encoding as it was", () => {
+    expect(redactSignedQueryParams("https://h.example/p?q=a%20b&x=1+2&sig=abc&y=%7E")).toBe(
+      "https://h.example/p?q=a%20b&x=1+2&sig=REDACTED&y=%7E",
+    );
+  });
+
+  it("redacts every occurrence of a repeated parameter", () => {
+    expect(redactSignedQueryParams("/p?sig=a&keep=1&sig=b")).toBe(
+      "/p?sig=REDACTED&keep=1&sig=REDACTED",
+    );
+  });
+
+  it.each([
+    [
+      "an error message",
+      "request to https://h.example/p?X-Amz-Signature=abc failed, reason: timeout",
+      "request to https://h.example/p?X-Amz-Signature=REDACTED failed, reason: timeout",
+    ],
+    [
+      "a quoted URL",
+      '{"url":"https://h.example/p?sig=abc"}',
+      '{"url":"https://h.example/p?sig=REDACTED"}',
+    ],
+    [
+      "a parenthesised URL",
+      "fetch (https://h.example/p?a=1&Signature=abc) failed",
+      "fetch (https://h.example/p?a=1&Signature=REDACTED) failed",
+    ],
+  ])("redacts a signed URL inside %s", (_label, text, expected) => {
+    expect(redactSignedQueryParams(text)).toBe(expected);
+  });
+
   it("keeps a fragment after the query", () => {
     expect(redactSignedQueryParams("/p?sig=abc#frag")).toBe("/p?sig=REDACTED#frag");
   });
@@ -106,7 +138,8 @@ describe("redactSignedQueryParams", () => {
   it.each([
     ["a URL without a query", "https://h.example/p"],
     ["a query without signed parameters, not re-encoded", "https://h.example/p?q=a%20b&x=1+2"],
-    ["a parameter that only resembles one", "https://h.example/p?signature=x&sigil=y"],
+    ["a parameter that only resembles one", "https://h.example/p?signature=x&sigil=y&xsig=z"],
+    ["a signed name outside a query", "sig=abc"],
   ])("leaves %s untouched", (_label, url) => {
     expect(redactSignedQueryParams(url)).toBe(url);
   });
@@ -120,7 +153,7 @@ describe("redactSignedQuery", () => {
     expect(redactSignedQuery(query)).toBe(expected);
   });
 
-  it("leaves a query without signed parameters untouched", () => {
-    expect(redactSignedQuery("?q=a%20b")).toBe("?q=a%20b");
+  it.each(["?q=a%20b", "q=a%20b&x=1"])("leaves %s untouched", (query) => {
+    expect(redactSignedQuery(query)).toBe(query);
   });
 });
