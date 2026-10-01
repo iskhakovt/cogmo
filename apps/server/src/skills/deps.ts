@@ -9,7 +9,7 @@ import {
   type SandboxSession,
 } from "../sandbox/index.js";
 import { abortable } from "../util/abortable.js";
-import { GitOpsError, gitShow } from "./git-ops.js";
+import { gitShow } from "./git-ops.js";
 
 const log = logger.child({ component: "skills.deps" });
 
@@ -41,36 +41,30 @@ export type LockfileReadError =
  *   - `err({ kind: "missing" })` when git reports `file_not_found`.
  *   - `err({ kind: "empty" })` when the file is present but blank.
  *
- * Other git failures (unreadable repo, missing sha) propagate as thrown
- * `GitOpsError`s — they indicate infrastructure-level bugs, not author
- * mistakes the register flow can surface as `errors[]`.
+ * A sha that does not resolve, or any other git failure, throws: register
+ * reads the lockfile only at a sha it has already resolved, so either is a
+ * repo fault rather than an author mistake the register flow can surface as
+ * `errors[]`.
  */
 export async function readLockfileAtSha(
   repoPath: string,
   gitSha: string,
 ): Promise<Result<LockfileSnapshot, LockfileReadError>> {
-  let contents: string;
-  try {
-    contents = await gitShow(repoPath, gitSha, REQUIREMENTS_LOCK_FILE);
-  } catch (e) {
-    if (e instanceof GitOpsError && e.code === "file_not_found") {
-      return err({
-        kind: "missing",
-        message: `${REQUIREMENTS_LOCK_FILE} not found at ${gitSha}`,
-      });
+  const shown = await gitShow(repoPath, gitSha, REQUIREMENTS_LOCK_FILE);
+  if (shown.isErr()) {
+    if (shown.error.kind === "ref_not_found") {
+      throw new Error(`readLockfileAtSha: commit ${gitSha} not found`);
     }
-    throw e;
+    return err({ kind: "missing", message: `${REQUIREMENTS_LOCK_FILE} not found at ${gitSha}` });
   }
+  const contents = shown.value;
   if (contents.trim().length === 0) {
     return err({
       kind: "empty",
       message: `${REQUIREMENTS_LOCK_FILE} is empty at ${gitSha}`,
     });
   }
-  return ok({
-    hash: createHash("sha256").update(contents, "utf-8").digest("hex"),
-    contents,
-  });
+  return ok({ hash: hashLockfileContents(contents), contents });
 }
 
 /** Exposed so WASM-tier consumers re-hashing committed contents skip a git round-trip. */

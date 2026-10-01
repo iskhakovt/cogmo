@@ -1,5 +1,6 @@
 import { Ajv, type ValidateFunction } from "ajv";
 import { err, ok, type Result } from "neverthrow";
+import { match } from "ts-pattern";
 import { computeNextRun } from "../agent/scheduling/cron.js";
 import type { Transactor } from "../db/index.js";
 import { defaultSkillsImage } from "../env.js";
@@ -17,19 +18,17 @@ import {
   parseLockfilePackageSpecs,
   readLockfileAtSha,
 } from "./deps.js";
-import {
-  deleteRef,
-  GitOpsError,
-  getMainSha,
-  gitShow,
-  isAncestor,
-  revParse,
-  updateRef,
-} from "./git-ops.js";
-import { parseManifest } from "./manifest.js";
+import { deleteRef, getMainSha, isAncestor, revParse, updateRef } from "./git-ops.js";
+import { manifestErrorIssues, parseManifest } from "./manifest.js";
 import { checkPyodideCompat, formatPyodideCompatIssues } from "./pyodide-compat.js";
 import { readOriginUrl } from "./repo.js";
 import type { SkillRunAs } from "./run-as.js";
+import {
+  readSkillSource,
+  SKILL_BODY_FILE,
+  SKILL_MANIFEST_FILE,
+  type SkillSourceError,
+} from "./skill-source.js";
 import type {
   ExecuteRegisterResult,
   InsertSkillParams,
@@ -785,15 +784,11 @@ export class SkillRunnerImpl implements SkillRunner {
       return err(rejectedResult("", "invalid_branch: cannot register from 'main' itself"));
     }
 
-    let branchSha: string;
-    try {
-      branchSha = await revParse(repoPath, `refs/heads/${branch}`);
-    } catch (e) {
-      if (e instanceof GitOpsError && e.code === "ref_not_found") {
-        return err(rejectedResult("", `branch_not_found: ${branch}`));
-      }
-      throw e;
+    const resolved = await revParse(repoPath, `refs/heads/${branch}`);
+    if (resolved.isErr()) {
+      return err(rejectedResult("", `branch_not_found: ${branch}`));
     }
+    const branchSha = resolved.value;
 
     const mainSha = await getMainSha(repoPath);
     // Fast-forward check: feature branch must descend from current main.
@@ -801,38 +796,21 @@ export class SkillRunnerImpl implements SkillRunner {
       return err(rejectedResult(branchSha, "non_fast_forward: rebase branch onto main and retry"));
     }
 
-    let manifestSource: string;
-    let body: string;
-    try {
-      manifestSource = await gitShow(repoPath, branchSha, "SKILL.md");
-    } catch (e) {
-      if (e instanceof GitOpsError && e.code === "file_not_found") {
-        return err(rejectedResult(branchSha, "missing_skill_md: SKILL.md not found at branch tip"));
-      }
-      throw e;
+    const source = await readSkillSource(repoPath, branchSha);
+    if (source.isErr()) {
+      return err(
+        match(source.error)
+          .with({ kind: "missing_file", file: SKILL_MANIFEST_FILE }, () =>
+            rejectedResult(branchSha, "missing_skill_md: SKILL.md not found at branch tip"),
+          )
+          .with({ kind: "missing_file", file: SKILL_BODY_FILE }, () =>
+            rejectedResult(branchSha, "missing_skill_py: skill.py not found at branch tip"),
+          )
+          .with({ kind: "invalid_manifest" }, ({ issues }) => rejectedResult(branchSha, ...issues))
+          .exhaustive(),
+      );
     }
-    try {
-      body = await gitShow(repoPath, branchSha, "skill.py");
-    } catch (e) {
-      if (e instanceof GitOpsError && e.code === "file_not_found") {
-        return err(rejectedResult(branchSha, "missing_skill_py: skill.py not found at branch tip"));
-      }
-      throw e;
-    }
-
-    const parsed = parseManifest(manifestSource);
-    if (!parsed.isOk()) {
-      const errors =
-        parsed.error.kind === "invalid_manifest" ? parsed.error.issues : [parsed.error.message];
-      return err({
-        name: "",
-        riskTier: "notify",
-        status: "rejected",
-        gitSha: branchSha,
-        errors,
-      });
-    }
-    const manifest = parsed.value.manifest;
+    const { manifest, body } = source.value;
 
     // Compile the manifest's JSON Schemas BEFORE any filesystem / DB write.
     // Without this, an invalid `inputs` / `outputs` schema would only surface
@@ -928,29 +906,9 @@ export class SkillRunnerImpl implements SkillRunner {
     // the prior live commit's manifest while pointing at the approved sha,
     // which would silently mismatch tool definitions and ajv input
     // validation against the actual code on disk.
-    let manifest: SkillManifest;
-    let body: string;
-    try {
-      const manifestSource = await gitShow(repoPath, deploy.gitSha, "SKILL.md");
-      body = await gitShow(repoPath, deploy.gitSha, "skill.py");
-      const parsed = parseManifest(manifestSource);
-      if (!parsed.isOk()) {
-        return rejectedResult(
-          deploy.gitSha,
-          `target_manifest_invalid: ${
-            parsed.error.kind === "invalid_manifest"
-              ? parsed.error.issues.join("; ")
-              : parsed.error.message
-          }`,
-        );
-      }
-      manifest = parsed.value.manifest;
-    } catch (e) {
-      if (e instanceof GitOpsError && e.code === "file_not_found") {
-        return rejectedResult(deploy.gitSha, "target_missing_source");
-      }
-      throw e;
-    }
+    const source = await readSkillSource(repoPath, deploy.gitSha);
+    if (source.isErr()) return rejectedResult(deploy.gitSha, targetSourceRejection(source.error));
+    const { manifest, body } = source.value;
 
     if (manifest.name !== skill.name) {
       return rejectedResult(
@@ -1044,15 +1002,11 @@ export class SkillRunnerImpl implements SkillRunner {
   }): Promise<RegisterResult> {
     const repoPath = this.#requireRepoPath("rollback");
 
-    let targetSha: string;
-    try {
-      targetSha = await revParse(repoPath, opts.toGitSha);
-    } catch (e) {
-      if (e instanceof GitOpsError && e.code === "ref_not_found") {
-        return rejectedResult(opts.toGitSha, `target_sha_not_found: ${opts.toGitSha}`);
-      }
-      throw e;
+    const resolved = await revParse(repoPath, opts.toGitSha);
+    if (resolved.isErr()) {
+      return rejectedResult(opts.toGitSha, `target_sha_not_found: ${opts.toGitSha}`);
     }
+    const targetSha = resolved.value;
 
     // Re-read the manifest at the target sha. We need it for two things:
     // (a) verify manifest.name matches opts.name — without this, rolling
@@ -1061,29 +1015,9 @@ export class SkillRunnerImpl implements SkillRunner {
     // manifest-derived columns (tier, effects, schedule, inputs, outputs,
     // riskTier) into the skills row, so tool definitions and validation
     // reflect what's actually on disk at the rolled-back sha.
-    let manifest: SkillManifest;
-    let body: string;
-    try {
-      const manifestSource = await gitShow(repoPath, targetSha, "SKILL.md");
-      body = await gitShow(repoPath, targetSha, "skill.py");
-      const parsed = parseManifest(manifestSource);
-      if (!parsed.isOk()) {
-        return rejectedResult(
-          targetSha,
-          `target_manifest_invalid: ${
-            parsed.error.kind === "invalid_manifest"
-              ? parsed.error.issues.join("; ")
-              : parsed.error.message
-          }`,
-        );
-      }
-      manifest = parsed.value.manifest;
-    } catch (e) {
-      if (e instanceof GitOpsError && e.code === "file_not_found") {
-        return rejectedResult(targetSha, "target_missing_source");
-      }
-      throw e;
-    }
+    const source = await readSkillSource(repoPath, targetSha);
+    if (source.isErr()) return rejectedResult(targetSha, targetSourceRejection(source.error));
+    const { manifest, body } = source.value;
 
     if (manifest.name !== opts.name) {
       return rejectedResult(
@@ -1592,11 +1526,7 @@ export class SkillRunnerImpl implements SkillRunner {
     const parsed = parseManifest(params.manifestSource);
     if (!parsed.isOk()) {
       throw new Error(
-        `__registerForTests: invalid manifest: ${
-          parsed.error.kind === "invalid_manifest"
-            ? parsed.error.issues.join("; ")
-            : parsed.error.message
-        }`,
+        `__registerForTests: invalid manifest: ${manifestErrorIssues(parsed.error).join("; ")}`,
       );
     }
     const manifest = parsed.value.manifest;
@@ -1805,26 +1735,15 @@ export class SkillRunnerImpl implements SkillRunner {
       );
     }
 
-    let manifestSource: string;
-    let body: string;
-    try {
-      manifestSource = await gitShow(this.#skillsRepoPath, row.gitSha, "SKILL.md");
-      body = await gitShow(this.#skillsRepoPath, row.gitSha, "skill.py");
-    } catch (e) {
-      if (e instanceof GitOpsError && (e.code === "ref_not_found" || e.code === "file_not_found")) {
-        throw new Error(
-          `no source for skill '${row.name}' at ${row.gitSha} (${e.code}) — repo and DB are out of sync`,
-        );
-      }
-      throw e;
-    }
-    const parsed = parseManifest(manifestSource);
-    if (!parsed.isOk()) {
+    // A deployed sha passed these reads at register, so a failure here is
+    // the repo and the DB out of sync — corruption, not an outcome to handle.
+    const source = await readSkillSource(this.#skillsRepoPath, row.gitSha);
+    if (source.isErr()) {
       throw new Error(
-        `cached SKILL.md for '${row.name}' @ ${row.gitSha} fails parse — registration drift?`,
+        `no readable source for skill '${row.name}' at ${row.gitSha} (${source.error.kind}) — repo and DB are out of sync`,
       );
     }
-    const manifest = parsed.value.manifest;
+    const { manifest, body } = source.value;
     const inputsValidator = this.#compileInputsValidator(manifest, "loadSource");
     const entry: SkillSourceCacheEntry = { manifest, body, inputsValidator };
     if (row.lockfileHash !== null) {
@@ -2039,14 +1958,21 @@ function reconstructFinishedResult(
   };
 }
 
-function rejectedResult(gitSha: string, reason: string): RegisterResult {
+function rejectedResult(gitSha: string, ...errors: readonly string[]): RegisterResult {
   return {
     name: "",
     riskTier: "notify",
     status: "rejected",
     gitSha,
-    errors: [reason],
+    errors,
   };
+}
+
+/** Why approve or rollback refuses a target sha whose source does not read. */
+function targetSourceRejection(error: SkillSourceError): string {
+  return error.kind === "missing_file"
+    ? "target_missing_source"
+    : `target_manifest_invalid: ${error.issues.join("; ")}`;
 }
 
 function cacheKey(name: string, gitSha: string): string {

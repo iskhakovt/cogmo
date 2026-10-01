@@ -4,15 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import {
-  deleteRef,
-  GitOpsError,
-  getMainSha,
-  gitShow,
-  isAncestor,
-  revParse,
-  updateRef,
-} from "./git-ops.js";
+import { deleteRef, getMainSha, gitShow, isAncestor, revParse, updateRef } from "./git-ops.js";
 
 const execFileP = promisify(execFile);
 
@@ -75,15 +67,20 @@ describe("git-ops", () => {
     it("resolves a branch ref to a sha", async () => {
       const { bare, work, shaB } = await makeRepos();
       cleanup.push(bare, work);
-      expect(await revParse(bare, "refs/heads/feat")).toBe(shaB);
+      expect((await revParse(bare, "refs/heads/feat"))._unsafeUnwrap()).toBe(shaB);
     });
 
-    it("throws ref_not_found for an unknown ref", async () => {
+    it("errs ref_not_found for an unknown ref", async () => {
       const { bare, work } = await makeRepos();
       cleanup.push(bare, work);
-      await expect(revParse(bare, "refs/heads/missing")).rejects.toMatchObject({
-        code: "ref_not_found",
+      expect((await revParse(bare, "refs/heads/missing"))._unsafeUnwrapErr()).toEqual({
+        kind: "ref_not_found",
+        ref: "refs/heads/missing",
       });
+    });
+
+    it("throws when the repo is unreadable", async () => {
+      await expect(revParse("/nonexistent/repo", "HEAD")).rejects.toThrow(/git rev-parse failed/);
     });
   });
 
@@ -91,24 +88,27 @@ describe("git-ops", () => {
     it("reads a file at a specific sha", async () => {
       const { bare, work, shaA, shaB } = await makeRepos();
       cleanup.push(bare, work);
-      expect(await gitShow(bare, shaA, "SKILL.md")).toBe("first\n");
-      expect(await gitShow(bare, shaB, "SKILL.md")).toBe("second\n");
+      expect((await gitShow(bare, shaA, "SKILL.md"))._unsafeUnwrap()).toBe("first\n");
+      expect((await gitShow(bare, shaB, "SKILL.md"))._unsafeUnwrap()).toBe("second\n");
     });
 
-    it("throws file_not_found when the path is missing at that sha", async () => {
+    it("errs file_not_found when the path is missing at that sha", async () => {
       const { bare, work, shaA } = await makeRepos();
       cleanup.push(bare, work);
-      await expect(gitShow(bare, shaA, "MISSING.md")).rejects.toMatchObject({
-        code: "file_not_found",
+      expect((await gitShow(bare, shaA, "MISSING.md"))._unsafeUnwrapErr()).toEqual({
+        kind: "file_not_found",
+        sha: shaA,
+        file: "MISSING.md",
       });
     });
 
-    it("throws ref_not_found for an invalid sha", async () => {
+    it("errs ref_not_found for a ref that does not resolve", async () => {
       const { bare, work } = await makeRepos();
       cleanup.push(bare, work);
-      await expect(
-        gitShow(bare, "0000000000000000000000000000000000000000", "SKILL.md"),
-      ).rejects.toBeInstanceOf(GitOpsError);
+      expect((await gitShow(bare, "refs/heads/missing", "SKILL.md"))._unsafeUnwrapErr()).toEqual({
+        kind: "ref_not_found",
+        ref: "refs/heads/missing",
+      });
     });
   });
 
@@ -154,7 +154,7 @@ describe("git-ops", () => {
       await updateRef(bare, "refs/heads/main", shaA, "0000000000000000000000000000000000000000");
       await expect(
         updateRef(bare, "refs/heads/main", shaB, "0000000000000000000000000000000000000000"),
-      ).rejects.toMatchObject({ code: "ref_changed" });
+      ).rejects.toThrow(/changed since read/);
     });
   });
 
@@ -163,9 +163,7 @@ describe("git-ops", () => {
       const { bare, work } = await makeRepos();
       cleanup.push(bare, work);
       await deleteRef(bare, "refs/heads/feat");
-      await expect(revParse(bare, "refs/heads/feat")).rejects.toMatchObject({
-        code: "ref_not_found",
-      });
+      expect((await revParse(bare, "refs/heads/feat")).isErr()).toBe(true);
     });
 
     it("is a no-op on a missing ref", async () => {
@@ -178,21 +176,17 @@ describe("git-ops", () => {
       const { bare, work, shaA } = await makeRepos();
       cleanup.push(bare, work);
       await updateRef(bare, "refs/heads/main", shaA, "0000000000000000000000000000000000000000");
-      await expect(deleteRef(bare, "refs/heads/main")).rejects.toMatchObject({
-        code: "exec_failed",
-        message: expect.stringMatching(/refuses to delete refs\/heads\/main/),
-      });
+      await expect(deleteRef(bare, "refs/heads/main")).rejects.toThrow(
+        /refuses to delete refs\/heads\/main/,
+      );
       // main still exists.
-      expect(await revParse(bare, "refs/heads/main")).toBe(shaA);
+      expect((await revParse(bare, "refs/heads/main"))._unsafeUnwrap()).toBe(shaA);
     });
 
     it("refuses bare 'main' too", async () => {
       const { bare, work } = await makeRepos();
       cleanup.push(bare, work);
-      await expect(deleteRef(bare, "main")).rejects.toMatchObject({
-        code: "exec_failed",
-        message: expect.stringMatching(/refuses to delete refs\/heads\/main/),
-      });
+      await expect(deleteRef(bare, "main")).rejects.toThrow(/refuses to delete refs\/heads\/main/);
     });
   });
 });
