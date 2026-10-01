@@ -23,6 +23,7 @@ import * as schema from "../db/schemas.js";
 import { HindsightMemoryProvider } from "../memory/hindsight.js";
 import { deriveMasterKey, generateMasterKey, parseMasterKey } from "../secrets/encryption.js";
 import { DrizzleSecretsStore } from "../secrets/store/index.js";
+import { expectOk } from "../test/assertions.js";
 import { mockFilesService } from "../test/factories.js";
 import { fileDatabaseUrl } from "../test/integration-file.js";
 import { resolveSkillRunAs, type SkillRunAs } from "./run-as.js";
@@ -52,13 +53,15 @@ beforeAll(async () => {
   const agentStore = new DrizzleAgentStore();
   const identity = await tx(async (trx) => {
     const user = await agentStore.createUser(trx);
-    const profile = await agentStore.createProfile(trx, {
-      userId: user.id,
-      name: `runner-it-${SUITE}`,
-      basePrompt: "",
-      model: "m",
-      toolSet: [],
-    });
+    const profile = await agentStore
+      .createProfile(trx, {
+        userId: user.id,
+        name: `runner-it-${SUITE}`,
+        basePrompt: "",
+        model: "m",
+        toolSet: [],
+      })
+      .then(expectOk);
     return { userId: user.id, profileId: profile.id };
   });
   runAs = await resolveSkillRunAs(

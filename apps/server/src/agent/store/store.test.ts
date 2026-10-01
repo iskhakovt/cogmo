@@ -1,4 +1,5 @@
 import { eq, sql } from "drizzle-orm";
+import { err } from "neverthrow";
 import * as R from "remeda";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -9,7 +10,7 @@ import { HARNESS_ROW_TAGS, type Message } from "../../llm/types.js";
 import { deriveMasterKey, generateMasterKey, parseMasterKey } from "../../secrets/encryption.js";
 import { DrizzleSecretsStore } from "../../secrets/store/index.js";
 import { skills } from "../../skills/store/schema.js";
-import { expectDefined } from "../../test/assertions.js";
+import { expectDefined, expectOk } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { renderInboundText } from "../../transport/content.js";
 import { inboundMessages } from "../../transport/store/schema.js";
@@ -54,13 +55,15 @@ const TEST_MODEL = "claude-sonnet-4-6";
 async function seedProfile(): Promise<string> {
   return (
     await tx((trx) =>
-      store.createProfile(trx, {
-        userId: null,
-        name: "test",
-        basePrompt: "You are a test assistant.",
-        model: TEST_MODEL,
-        toolSet: ["tool_a"],
-      }),
+      store
+        .createProfile(trx, {
+          userId: null,
+          name: "test",
+          basePrompt: "You are a test assistant.",
+          model: TEST_MODEL,
+          toolSet: ["tool_a"],
+        })
+        .then(expectOk),
     )
   ).id;
 }
@@ -112,13 +115,15 @@ describe("DrizzleAgentStore", () => {
   describe("profiles", () => {
     it("creates and retrieves a profile", async () => {
       const { id } = await tx((trx) =>
-        store.createProfile(trx, {
-          userId: null,
-          name: "main",
-          basePrompt: "Be helpful.",
-          model: "claude-test",
-          toolSet: ["memory_recall"],
-        }),
+        store
+          .createProfile(trx, {
+            userId: null,
+            name: "main",
+            basePrompt: "Be helpful.",
+            model: "claude-test",
+            toolSet: ["memory_recall"],
+          })
+          .then(expectOk),
       );
 
       const profile = await tx((trx) => store.getProfile(trx, id));
@@ -150,13 +155,15 @@ describe("DrizzleAgentStore", () => {
     it("getDefaultProfile returns first profile", async () => {
       expect(await tx((trx) => store.getDefaultProfile(trx))).toBeUndefined();
       const { id } = await tx((trx) =>
-        store.createProfile(trx, {
-          userId: null,
-          name: "default",
-          basePrompt: "prompt",
-          model: "m",
-          toolSet: [],
-        }),
+        store
+          .createProfile(trx, {
+            userId: null,
+            name: "default",
+            basePrompt: "prompt",
+            model: "m",
+            toolSet: [],
+          })
+          .then(expectOk),
       );
       expect((await tx((trx) => store.getDefaultProfile(trx)))?.id).toBe(id);
     });
@@ -164,74 +171,83 @@ describe("DrizzleAgentStore", () => {
     it("getDefaultProfile stays on the oldest profile after it is edited", async () => {
       const create = (name: string) =>
         tx((trx) =>
-          store.createProfile(trx, {
-            userId: null,
-            name,
-            basePrompt: "prompt",
-            model: "m",
-            toolSet: [],
-          }),
+          store
+            .createProfile(trx, {
+              userId: null,
+              name,
+              basePrompt: "prompt",
+              model: "m",
+              toolSet: [],
+            })
+            .then(expectOk),
         );
       const { id: first } = await create("first");
       await create("second");
       // An in-place update writes a new row version after `second`'s.
-      await tx((trx) => store.updateProfile(trx, first, { model: "m2" }));
+      await tx((trx) => store.updateProfile(trx, first, { model: "m2" }).then(expectOk));
 
       expect((await tx((trx) => store.getDefaultProfile(trx)))?.id).toBe(first);
     });
 
     it("enforces unique org profile name (user_id null)", async () => {
       await tx((trx) =>
+        store
+          .createProfile(trx, {
+            userId: null,
+            name: "dup",
+            basePrompt: "p",
+            model: "m",
+            toolSet: [],
+          })
+          .then(expectOk),
+      );
+      const dup = await tx((trx) =>
         store.createProfile(trx, {
           userId: null,
           name: "dup",
-          basePrompt: "p",
-          model: "m",
+          basePrompt: "p2",
+          model: "m2",
           toolSet: [],
         }),
       );
-      await expect(
-        tx((trx) =>
-          store.createProfile(trx, {
-            userId: null,
-            name: "dup",
-            basePrompt: "p2",
-            model: "m2",
-            toolSet: [],
-          }),
-        ),
-      ).rejects.toThrow();
+      expect(dup).toEqual(err({ kind: "profile_name_taken" }));
     });
 
     it("allows same name across different users (and between org and user)", async () => {
       const u1 = await seedUser();
       const u2 = await seedUser();
       await tx((trx) =>
-        store.createProfile(trx, {
-          userId: null,
-          name: "coder",
-          basePrompt: "p",
-          model: "m",
-          toolSet: [],
-        }),
+        store
+          .createProfile(trx, {
+            userId: null,
+            name: "coder",
+            basePrompt: "p",
+            model: "m",
+            toolSet: [],
+          })
+          .then(expectOk),
       );
       await tx((trx) =>
-        store.createProfile(trx, {
-          userId: u1,
-          name: "coder",
-          basePrompt: "p",
-          model: "m",
-          toolSet: [],
-        }),
+        store
+          .createProfile(trx, {
+            userId: u1,
+            name: "coder",
+            basePrompt: "p",
+            model: "m",
+            toolSet: [],
+          })
+          .then(expectOk),
       );
       await tx((trx) =>
-        store.createProfile(trx, {
-          userId: u2,
-          name: "coder",
-          basePrompt: "p",
-          model: "m",
-          toolSet: [],
-        }),
+        store
+          .createProfile(trx, {
+            userId: u2,
+            name: "coder",
+            basePrompt: "p",
+            model: "m",
+            toolSet: [],
+          })
+          .then(expectOk),
       );
       // No throw — same name is allowed when (user_id, name) differs.
     });
@@ -264,25 +280,26 @@ describe("DrizzleAgentStore", () => {
     it("rejects duplicate name within the same user", async () => {
       const u = await seedUser();
       await tx((trx) =>
+        store
+          .createProfile(trx, {
+            userId: u,
+            name: "mine",
+            basePrompt: "p",
+            model: "m",
+            toolSet: [],
+          })
+          .then(expectOk),
+      );
+      const dup = await tx((trx) =>
         store.createProfile(trx, {
           userId: u,
           name: "mine",
-          basePrompt: "p",
-          model: "m",
+          basePrompt: "p2",
+          model: "m2",
           toolSet: [],
         }),
       );
-      await expect(
-        tx((trx) =>
-          store.createProfile(trx, {
-            userId: u,
-            name: "mine",
-            basePrompt: "p2",
-            model: "m2",
-            toolSet: [],
-          }),
-        ),
-      ).rejects.toThrow();
+      expect(dup).toEqual(err({ kind: "profile_name_taken" }));
     });
   });
 
@@ -290,13 +307,15 @@ describe("DrizzleAgentStore", () => {
     async function seedClassed(): Promise<{ userId: string; profileId: string }> {
       const userId = await seedUser();
       const profile = await tx((trx) =>
-        store.createProfile(trx, {
-          userId,
-          name: "intimate",
-          basePrompt: "p",
-          model: "m",
-          toolSet: [],
-        }),
+        store
+          .createProfile(trx, {
+            userId,
+            name: "intimate",
+            basePrompt: "p",
+            model: "m",
+            toolSet: [],
+          })
+          .then(expectOk),
       );
       return { userId, profileId: profile.id };
     }
@@ -304,11 +323,13 @@ describe("DrizzleAgentStore", () => {
     it("creates a class and lists it", async () => {
       const { userId } = await seedClassed();
       const created = await tx((trx) =>
-        store.createProfileClass(trx, {
-          userId,
-          name: "intimate",
-          description: "for emotional / relationship topics",
-        }),
+        store
+          .createProfileClass(trx, {
+            userId,
+            name: "intimate",
+            description: "for emotional / relationship topics",
+          })
+          .then(expectOk),
       );
       expect(created.name).toBe("intimate");
       const list = await tx((trx) => store.listProfileClasses(trx, userId));
@@ -319,33 +340,36 @@ describe("DrizzleAgentStore", () => {
     it("rejects duplicate class name within the same user", async () => {
       const { userId } = await seedClassed();
       await tx((trx) =>
-        store.createProfileClass(trx, { userId, name: "intimate", description: "first" }),
+        store
+          .createProfileClass(trx, { userId, name: "intimate", description: "first" })
+          .then(expectOk),
       );
-      await expect(
-        tx((trx) =>
-          store.createProfileClass(trx, { userId, name: "intimate", description: "second" }),
-        ),
-      ).rejects.toThrow();
+      const dup = await tx((trx) =>
+        store.createProfileClass(trx, { userId, name: "intimate", description: "second" }),
+      );
+      expect(dup).toEqual(err({ kind: "profile_class_name_taken", name: "intimate" }));
     });
 
     it("rejects class names that don't match the canonical shape", async () => {
       const { userId } = await seedClassed();
       // Same canonical-name regex enforced for profile classes — keeps
       // the merged "label registry" surface uniform with compartments.
-      await expect(
-        tx((trx) => store.createProfileClass(trx, { userId, name: "Intimate", description: "x" })),
-      ).rejects.toThrow(/invalid profile_class name/);
-      await expect(
-        tx((trx) => store.createProfileClass(trx, { userId, name: "two words", description: "x" })),
-      ).rejects.toThrow(/invalid profile_class name/);
+      for (const name of ["Intimate", "two words"]) {
+        const created = await tx((trx) =>
+          store.createProfileClass(trx, { userId, name, description: "x" }),
+        );
+        expect(created).toEqual(err({ kind: "invalid_name", name, subject: "profile_class" }));
+      }
     });
 
     it("setProfileClass attaches a registered class", async () => {
       const { userId, profileId } = await seedClassed();
       await tx((trx) =>
-        store.createProfileClass(trx, { userId, name: "intimate", description: "x" }),
+        store
+          .createProfileClass(trx, { userId, name: "intimate", description: "x" })
+          .then(expectOk),
       );
-      await tx((trx) => store.setProfileClass(trx, profileId, "intimate"));
+      await tx((trx) => store.setProfileClass(trx, profileId, "intimate").then(expectOk));
       const profile = await tx((trx) => store.getProfile(trx, profileId));
       expect(profile?.profileClass).toBe("intimate");
     });
@@ -353,56 +377,72 @@ describe("DrizzleAgentStore", () => {
     it("setProfileClass with null clears the class", async () => {
       const { userId, profileId } = await seedClassed();
       await tx((trx) =>
-        store.createProfileClass(trx, { userId, name: "intimate", description: "x" }),
+        store
+          .createProfileClass(trx, { userId, name: "intimate", description: "x" })
+          .then(expectOk),
       );
-      await tx((trx) => store.setProfileClass(trx, profileId, "intimate"));
-      await tx((trx) => store.setProfileClass(trx, profileId, null));
+      await tx((trx) => store.setProfileClass(trx, profileId, "intimate").then(expectOk));
+      await tx((trx) => store.setProfileClass(trx, profileId, null).then(expectOk));
       const profile = await tx((trx) => store.getProfile(trx, profileId));
       expect(profile?.profileClass).toBeNull();
     });
 
-    it("setProfileClass throws UnknownProfileClassError for an unregistered class", async () => {
+    it("setProfileClass refuses an unregistered class and leaves the tx usable", async () => {
       const { profileId } = await seedClassed();
-      await expect(
-        tx((trx) => store.setProfileClass(trx, profileId, "no-such-class")),
-      ).rejects.toThrow(/unknown profile class/);
+      const result = await tx(async (trx) => {
+        const set = await store.setProfileClass(trx, profileId, "no-such-class");
+        await store.updateProfile(trx, profileId, { basePrompt: "after" }).then(expectOk);
+        return set;
+      });
+      expect(result).toEqual(err({ kind: "unknown_profile_class", name: "no-such-class" }));
+      const profile = await tx((trx) => store.getProfile(trx, profileId));
+      expect(profile).toMatchObject({ profileClass: null, basePrompt: "after" });
     });
 
     it("setProfileClass on an org profile (userId=null) rejects any non-null class", async () => {
       // Create an org profile (userId=null).
       const orgProfile = await tx((trx) =>
-        store.createProfile(trx, {
-          userId: null,
-          name: "org",
-          basePrompt: "p",
-          model: "m",
-          toolSet: [],
-        }),
+        store
+          .createProfile(trx, {
+            userId: null,
+            name: "org",
+            basePrompt: "p",
+            model: "m",
+            toolSet: [],
+          })
+          .then(expectOk),
       );
-      await expect(
-        tx((trx) => store.setProfileClass(trx, orgProfile.id, "anything")),
-      ).rejects.toThrow(/unknown profile class/);
+      expect(await tx((trx) => store.setProfileClass(trx, orgProfile.id, "anything"))).toEqual(
+        err({ kind: "unknown_profile_class", name: "anything" }),
+      );
     });
 
-    it("deleteProfileClass throws ProfileClassInUseError when a profile references the class", async () => {
+    it("deleteProfileClass refuses a class a profile references", async () => {
       const { userId, profileId } = await seedClassed();
       await tx((trx) =>
-        store.createProfileClass(trx, { userId, name: "intimate", description: "x" }),
+        store
+          .createProfileClass(trx, { userId, name: "intimate", description: "x" })
+          .then(expectOk),
       );
-      await tx((trx) => store.setProfileClass(trx, profileId, "intimate"));
-      await expect(tx((trx) => store.deleteProfileClass(trx, userId, "intimate"))).rejects.toThrow(
-        /profile class in use/,
+      await tx((trx) => store.setProfileClass(trx, profileId, "intimate").then(expectOk));
+      expect(await tx((trx) => store.deleteProfileClass(trx, userId, "intimate"))).toEqual(
+        err({ kind: "profile_class_in_use", profileRefs: 1 }),
       );
+      expect(await tx((trx) => store.listProfileClasses(trx, userId))).toHaveLength(1);
     });
 
     it("deleteProfileClass succeeds after the references are cleared", async () => {
       const { userId, profileId } = await seedClassed();
       await tx((trx) =>
-        store.createProfileClass(trx, { userId, name: "intimate", description: "x" }),
+        store
+          .createProfileClass(trx, { userId, name: "intimate", description: "x" })
+          .then(expectOk),
       );
-      await tx((trx) => store.setProfileClass(trx, profileId, "intimate"));
-      await tx((trx) => store.setProfileClass(trx, profileId, null));
-      const result = await tx((trx) => store.deleteProfileClass(trx, userId, "intimate"));
+      await tx((trx) => store.setProfileClass(trx, profileId, "intimate").then(expectOk));
+      await tx((trx) => store.setProfileClass(trx, profileId, null).then(expectOk));
+      const result = await tx((trx) =>
+        store.deleteProfileClass(trx, userId, "intimate").then(expectOk),
+      );
       expect(result.deleted).toBe(true);
       const list = await tx((trx) => store.listProfileClasses(trx, userId));
       expect(list).toHaveLength(0);
@@ -410,14 +450,18 @@ describe("DrizzleAgentStore", () => {
 
     it("deleteProfileClass returns deleted:false for an unknown name (idempotent)", async () => {
       const { userId } = await seedClassed();
-      const result = await tx((trx) => store.deleteProfileClass(trx, userId, "no-such"));
+      const result = await tx((trx) =>
+        store.deleteProfileClass(trx, userId, "no-such").then(expectOk),
+      );
       expect(result.deleted).toBe(false);
     });
 
     it("createProfileClass defaults restricted=false; listProfileClasses surfaces it", async () => {
       const { userId } = await seedClassed();
       const created = await tx((trx) =>
-        store.createProfileClass(trx, { userId, name: "intimate", description: "x" }),
+        store
+          .createProfileClass(trx, { userId, name: "intimate", description: "x" })
+          .then(expectOk),
       );
       expect(created.restricted).toBe(false);
       const list = await tx((trx) => store.listProfileClasses(trx, userId));
@@ -427,7 +471,9 @@ describe("DrizzleAgentStore", () => {
     it("setProfileClassRestricted flips the flag and is idempotent", async () => {
       const { userId } = await seedClassed();
       await tx((trx) =>
-        store.createProfileClass(trx, { userId, name: "intimate", description: "x" }),
+        store
+          .createProfileClass(trx, { userId, name: "intimate", description: "x" })
+          .then(expectOk),
       );
       const first = await tx((trx) =>
         store.setProfileClassRestricted(trx, userId, "intimate", true),
@@ -459,9 +505,11 @@ describe("DrizzleAgentStore", () => {
     it("setProfileClassRestricted is independent of in-use status — restricting an attached class works", async () => {
       const { userId, profileId } = await seedClassed();
       await tx((trx) =>
-        store.createProfileClass(trx, { userId, name: "intimate", description: "x" }),
+        store
+          .createProfileClass(trx, { userId, name: "intimate", description: "x" })
+          .then(expectOk),
       );
-      await tx((trx) => store.setProfileClass(trx, profileId, "intimate"));
+      await tx((trx) => store.setProfileClass(trx, profileId, "intimate").then(expectOk));
       const result = await tx((trx) =>
         store.setProfileClassRestricted(trx, userId, "intimate", true),
       );
@@ -475,10 +523,14 @@ describe("DrizzleAgentStore", () => {
     it("creates and lists, ordered by name", async () => {
       const userId = await seedUser();
       await tx((trx) =>
-        store.createCustomCompartment(trx, { userId, name: "music", description: "music notes" }),
+        store
+          .createCustomCompartment(trx, { userId, name: "music", description: "music notes" })
+          .then(expectOk),
       );
       await tx((trx) =>
-        store.createCustomCompartment(trx, { userId, name: "dnd", description: "dnd campaign" }),
+        store
+          .createCustomCompartment(trx, { userId, name: "dnd", description: "dnd campaign" })
+          .then(expectOk),
       );
       const list = await tx((trx) => store.listCustomCompartments(trx, userId));
       expect(list.map((c) => c.name)).toEqual(["dnd", "music"]);
@@ -493,9 +545,10 @@ describe("DrizzleAgentStore", () => {
       // tag value, even if it reads oddly).
       const badNames = ["Work", "1campaign", "dnd!", "x".repeat(33), "two words", "", "-leading"];
       for (const name of badNames) {
-        await expect(
-          tx((trx) => store.createCustomCompartment(trx, { userId, name, description: "x" })),
-        ).rejects.toThrow(/invalid compartment name/);
+        const created = await tx((trx) =>
+          store.createCustomCompartment(trx, { userId, name, description: "x" }),
+        );
+        expect(created).toEqual(err({ kind: "invalid_name", name, subject: "compartment" }));
       }
     });
 
@@ -503,7 +556,9 @@ describe("DrizzleAgentStore", () => {
       const userId = await seedUser();
       const ok = ["dnd", "music-prod", "side_project", "campaign1", "a"];
       for (const name of ok) {
-        await tx((trx) => store.createCustomCompartment(trx, { userId, name, description: "x" }));
+        await tx((trx) =>
+          store.createCustomCompartment(trx, { userId, name, description: "x" }).then(expectOk),
+        );
       }
       const list = await tx((trx) => store.listCustomCompartments(trx, userId));
       expect(list.map((c) => c.name).sort()).toEqual([...ok].sort());
@@ -511,64 +566,52 @@ describe("DrizzleAgentStore", () => {
 
     it("rejects core-compartment names as reserved", async () => {
       const userId = await seedUser();
-      await expect(
-        tx((trx) =>
-          store.createCustomCompartment(trx, {
-            userId,
-            name: "personal",
-            description: "shadow",
-          }),
-        ),
-      ).rejects.toThrow(/reserved/);
-      await expect(
-        tx((trx) =>
-          store.createCustomCompartment(trx, {
-            userId,
-            name: "misc",
-            description: "shadow",
-          }),
-        ),
-      ).rejects.toThrow(/reserved/);
+      for (const name of ["personal", "misc"]) {
+        const created = await tx((trx) =>
+          store.createCustomCompartment(trx, { userId, name, description: "shadow" }),
+        );
+        expect(created).toEqual(err({ kind: "compartment_name_reserved", name }));
+      }
     });
 
     it("rejects duplicates within the same user", async () => {
       const userId = await seedUser();
       await tx((trx) =>
-        store.createCustomCompartment(trx, { userId, name: "dnd", description: "first" }),
+        store
+          .createCustomCompartment(trx, { userId, name: "dnd", description: "first" })
+          .then(expectOk),
       );
-      await expect(
-        tx((trx) =>
-          store.createCustomCompartment(trx, { userId, name: "dnd", description: "second" }),
-        ),
-      ).rejects.toThrow();
+      const dup = await tx((trx) =>
+        store.createCustomCompartment(trx, { userId, name: "dnd", description: "second" }),
+      );
+      expect(dup).toEqual(err({ kind: "compartment_name_taken", name: "dnd" }));
     });
 
     it("enforces the per-user cap and reports current count on overflow", async () => {
       const userId = await seedUser();
       for (let i = 0; i < 10; i++) {
         await tx((trx) =>
-          store.createCustomCompartment(trx, {
-            userId,
-            name: `c${i}`,
-            description: `desc-${i}`,
-          }),
+          store
+            .createCustomCompartment(trx, {
+              userId,
+              name: `c${i}`,
+              description: `desc-${i}`,
+            })
+            .then(expectOk),
         );
       }
-      await expect(
-        tx((trx) =>
-          store.createCustomCompartment(trx, {
-            userId,
-            name: "overflow",
-            description: "x",
-          }),
-        ),
-      ).rejects.toThrow(/cap exceeded: 10\/10/);
+      const overflow = await tx((trx) =>
+        store.createCustomCompartment(trx, { userId, name: "overflow", description: "x" }),
+      );
+      expect(overflow).toEqual(err({ kind: "compartment_cap_exceeded", limit: 10, current: 10 }));
     });
 
     it("delete is forward-only and idempotent on unknown names", async () => {
       const userId = await seedUser();
       await tx((trx) =>
-        store.createCustomCompartment(trx, { userId, name: "dnd", description: "x" }),
+        store
+          .createCustomCompartment(trx, { userId, name: "dnd", description: "x" })
+          .then(expectOk),
       );
       const r1 = await tx((trx) => store.deleteCustomCompartment(trx, userId, "dnd"));
       expect(r1.deleted).toBe(true);
@@ -580,7 +623,9 @@ describe("DrizzleAgentStore", () => {
       const u1 = await seedUser();
       const u2 = await seedUser();
       await tx((trx) =>
-        store.createCustomCompartment(trx, { userId: u1, name: "dnd", description: "x" }),
+        store
+          .createCustomCompartment(trx, { userId: u1, name: "dnd", description: "x" })
+          .then(expectOk),
       );
       const list1 = await tx((trx) => store.listCustomCompartments(trx, u1));
       const list2 = await tx((trx) => store.listCustomCompartments(trx, u2));
@@ -1184,13 +1229,15 @@ describe("DrizzleAgentStore", () => {
       const profileId = await seedProfile();
       const otherProfileId = (
         await tx((trx) =>
-          store.createProfile(trx, {
-            userId: null,
-            name: "other",
-            basePrompt: "p",
-            model: "m",
-            toolSet: [],
-          }),
+          store
+            .createProfile(trx, {
+              userId: null,
+              name: "other",
+              basePrompt: "p",
+              model: "m",
+              toolSet: [],
+            })
+            .then(expectOk),
         )
       ).id;
 
@@ -1504,7 +1551,9 @@ describe("DrizzleAgentStore", () => {
     }
 
     async function seedClass(userId: string, name: string): Promise<void> {
-      await tx((trx) => store.createProfileClass(trx, { userId, name, description: name }));
+      await tx((trx) =>
+        store.createProfileClass(trx, { userId, name, description: name }).then(expectOk),
+      );
     }
 
     it("upsert creates a new block", async () => {
@@ -1623,7 +1672,7 @@ describe("DrizzleAgentStore", () => {
       await upsert(userId, "game", "identity", "Name: Thorin");
       await upsert(userId, "game", "preferences", "Dice");
 
-      await tx((trx) => store.deleteProfileClass(trx, userId, "game"));
+      await tx((trx) => store.deleteProfileClass(trx, userId, "game").then(expectOk));
 
       const rows = await db
         .select({ profileClass: coreMemoryBlocks.profileClass, key: coreMemoryBlocks.key })
@@ -2245,13 +2294,15 @@ describe("DrizzleAgentStore", () => {
     it("createProfile defaults memoryScope to null when not supplied", async () => {
       const userId = await seedUser();
       const profile = await tx((trx) =>
-        store.createProfile(trx, {
-          userId,
-          name: "no-scope",
-          basePrompt: "p",
-          model: "m",
-          toolSet: [],
-        }),
+        store
+          .createProfile(trx, {
+            userId,
+            name: "no-scope",
+            basePrompt: "p",
+            model: "m",
+            toolSet: [],
+          })
+          .then(expectOk),
       );
       expect(profile.memoryScope).toBeNull();
     });
@@ -2259,17 +2310,19 @@ describe("DrizzleAgentStore", () => {
     it("createProfile + getProfile round-trip a memoryScope", async () => {
       const userId = await seedUser();
       const created = await tx((trx) =>
-        store.createProfile(trx, {
-          userId,
-          name: "coder",
-          basePrompt: "p",
-          model: "m",
-          toolSet: [],
-          memoryScope: {
-            compartments: ["work", "technical"],
-            trust: ["first-party"],
-          },
-        }),
+        store
+          .createProfile(trx, {
+            userId,
+            name: "coder",
+            basePrompt: "p",
+            model: "m",
+            toolSet: [],
+            memoryScope: {
+              compartments: ["work", "technical"],
+              trust: ["first-party"],
+            },
+          })
+          .then(expectOk),
       );
       expect(created.memoryScope).toEqual({
         compartments: ["work", "technical"],
@@ -2282,23 +2335,29 @@ describe("DrizzleAgentStore", () => {
     it("updateProfile can set and clear memoryScope", async () => {
       const userId = await seedUser();
       const { id } = await tx((trx) =>
-        store.createProfile(trx, {
-          userId,
-          name: "p",
-          basePrompt: "p",
-          model: "m",
-          toolSet: [],
-        }),
+        store
+          .createProfile(trx, {
+            userId,
+            name: "p",
+            basePrompt: "p",
+            model: "m",
+            toolSet: [],
+          })
+          .then(expectOk),
       );
 
       const set = await tx((trx) =>
-        store.updateProfile(trx, id, {
-          memoryScope: { compartments: ["health"], trust: ["first-party"] },
-        }),
+        store
+          .updateProfile(trx, id, {
+            memoryScope: { compartments: ["health"], trust: ["first-party"] },
+          })
+          .then(expectOk),
       );
       expect(set.memoryScope).toEqual({ compartments: ["health"], trust: ["first-party"] });
 
-      const cleared = await tx((trx) => store.updateProfile(trx, id, { memoryScope: null }));
+      const cleared = await tx((trx) =>
+        store.updateProfile(trx, id, { memoryScope: null }).then(expectOk),
+      );
       expect(cleared.memoryScope).toBeNull();
     });
 
@@ -2323,34 +2382,40 @@ describe("DrizzleAgentStore", () => {
       const u2 = await seedUser();
       const org = (
         await tx((trx) =>
-          store.createProfile(trx, {
-            userId: null,
-            name: "default",
-            basePrompt: "p",
-            model: "m",
-            toolSet: [],
-          }),
+          store
+            .createProfile(trx, {
+              userId: null,
+              name: "default",
+              basePrompt: "p",
+              model: "m",
+              toolSet: [],
+            })
+            .then(expectOk),
         )
       ).id;
       const mine = (
         await tx((trx) =>
-          store.createProfile(trx, {
-            userId: u1,
-            name: "mine",
-            basePrompt: "p",
-            model: "m",
-            toolSet: [],
-          }),
+          store
+            .createProfile(trx, {
+              userId: u1,
+              name: "mine",
+              basePrompt: "p",
+              model: "m",
+              toolSet: [],
+            })
+            .then(expectOk),
         )
       ).id;
       await tx((trx) =>
-        store.createProfile(trx, {
-          userId: u2,
-          name: "theirs",
-          basePrompt: "p",
-          model: "m",
-          toolSet: [],
-        }),
+        store
+          .createProfile(trx, {
+            userId: u2,
+            name: "theirs",
+            basePrompt: "p",
+            model: "m",
+            toolSet: [],
+          })
+          .then(expectOk),
       );
 
       const visible = await tx((trx) => store.listProfiles(trx, u1));
@@ -2361,24 +2426,28 @@ describe("DrizzleAgentStore", () => {
       const u = await seedUser();
       const orgId = (
         await tx((trx) =>
-          store.createProfile(trx, {
-            userId: null,
-            name: "org",
-            basePrompt: "p",
-            model: "m",
-            toolSet: [],
-          }),
+          store
+            .createProfile(trx, {
+              userId: null,
+              name: "org",
+              basePrompt: "p",
+              model: "m",
+              toolSet: [],
+            })
+            .then(expectOk),
         )
       ).id;
       const mineId = (
         await tx((trx) =>
-          store.createProfile(trx, {
-            userId: u,
-            name: "mine",
-            basePrompt: "p",
-            model: "m",
-            toolSet: [],
-          }),
+          store
+            .createProfile(trx, {
+              userId: u,
+              name: "mine",
+              basePrompt: "p",
+              model: "m",
+              toolSet: [],
+            })
+            .then(expectOk),
         )
       ).id;
       expect(await tx((trx) => store.getProfileOwner(trx, orgId))).toEqual({ userId: null });
@@ -2391,16 +2460,18 @@ describe("DrizzleAgentStore", () => {
     it("updateProfile applies partial changes and preserves unlisted fields", async () => {
       const u = await seedUser();
       const { id } = await tx((trx) =>
-        store.createProfile(trx, {
-          userId: u,
-          name: "before",
-          basePrompt: "before-prompt",
-          model: "m",
-          toolSet: ["a"],
-        }),
+        store
+          .createProfile(trx, {
+            userId: u,
+            name: "before",
+            basePrompt: "before-prompt",
+            model: "m",
+            toolSet: ["a"],
+          })
+          .then(expectOk),
       );
       const updated = await tx((trx) =>
-        store.updateProfile(trx, id, { name: "after", model: "m2" }),
+        store.updateProfile(trx, id, { name: "after", model: "m2" }).then(expectOk),
       );
       expect(updated).toMatchObject({
         id,
@@ -2417,58 +2488,66 @@ describe("DrizzleAgentStore", () => {
       // bypassing resolveVoiceMode's profile-default fallback.
       const u = await seedUser();
       const created = await tx((trx) =>
-        store.createProfile(trx, {
-          userId: u,
-          name: "voice-test",
-          basePrompt: "p",
-          model: "m",
-          toolSet: [],
-        }),
+        store
+          .createProfile(trx, {
+            userId: u,
+            name: "voice-test",
+            basePrompt: "p",
+            model: "m",
+            toolSet: [],
+          })
+          .then(expectOk),
       );
       expect(created.voiceMode).toBe("auto");
 
       const updated = await tx((trx) =>
-        store.updateProfile(trx, created.id, { voiceMode: "always" }),
+        store.updateProfile(trx, created.id, { voiceMode: "always" }).then(expectOk),
       );
       expect(updated.voiceMode).toBe("always");
     });
 
-    it("updateProfile translates unique-name collision to UniqueViolationError", async () => {
+    it("updateProfile reports a unique-name collision as profile_name_taken", async () => {
       const u = await seedUser();
       await tx((trx) =>
-        store.createProfile(trx, {
-          userId: u,
-          name: "taken",
-          basePrompt: "p",
-          model: "m",
-          toolSet: [],
-        }),
+        store
+          .createProfile(trx, {
+            userId: u,
+            name: "taken",
+            basePrompt: "p",
+            model: "m",
+            toolSet: [],
+          })
+          .then(expectOk),
       );
       const { id: other } = await tx((trx) =>
-        store.createProfile(trx, {
-          userId: u,
-          name: "free",
-          basePrompt: "p",
-          model: "m",
-          toolSet: [],
-        }),
+        store
+          .createProfile(trx, {
+            userId: u,
+            name: "free",
+            basePrompt: "p",
+            model: "m",
+            toolSet: [],
+          })
+          .then(expectOk),
       );
-      const { UniqueViolationError } = await import("./errors.js");
-      await expect(tx((trx) => store.updateProfile(trx, other, { name: "taken" }))).rejects.toThrow(
-        UniqueViolationError,
+      expect(await tx((trx) => store.updateProfile(trx, other, { name: "taken" }))).toEqual(
+        err({ kind: "profile_name_taken" }),
       );
+      expect((await tx((trx) => store.getProfile(trx, other)))?.name).toBe("free");
     });
 
     it("countProfileReferences counts both conversations and messages", async () => {
       const u = await seedUser();
       const { id: profileId } = await tx((trx) =>
-        store.createProfile(trx, {
-          userId: u,
-          name: "p",
-          basePrompt: "p",
-          model: "m",
-          toolSet: [],
-        }),
+        store
+          .createProfile(trx, {
+            userId: u,
+            name: "p",
+            basePrompt: "p",
+            model: "m",
+            toolSet: [],
+          })
+          .then(expectOk),
       );
       expect(await tx((trx) => store.countProfileReferences(trx, profileId))).toEqual({
         conversations: 0,
@@ -2498,58 +2577,64 @@ describe("DrizzleAgentStore", () => {
     it("deleteProfile removes the row when no references exist", async () => {
       const u = await seedUser();
       const { id } = await tx((trx) =>
-        store.createProfile(trx, {
-          userId: u,
-          name: "temp",
-          basePrompt: "p",
-          model: "m",
-          toolSet: [],
-        }),
+        store
+          .createProfile(trx, {
+            userId: u,
+            name: "temp",
+            basePrompt: "p",
+            model: "m",
+            toolSet: [],
+          })
+          .then(expectOk),
       );
-      await tx((trx) => store.deleteProfile(trx, id));
+      await tx((trx) => store.deleteProfile(trx, id).then(expectOk));
       expect(await tx((trx) => store.getProfile(trx, id))).toBeUndefined();
     });
 
-    it("deleteProfile throws ProfileInUseError when conversations reference it", async () => {
+    it("deleteProfile refuses while conversations reference it", async () => {
       const u = await seedUser();
       const { id: profileId } = await tx((trx) =>
-        store.createProfile(trx, {
-          userId: u,
-          name: "busy",
-          basePrompt: "p",
-          model: "m",
-          toolSet: [],
-        }),
+        store
+          .createProfile(trx, {
+            userId: u,
+            name: "busy",
+            basePrompt: "p",
+            model: "m",
+            toolSet: [],
+          })
+          .then(expectOk),
       );
       await tx((trx) => store.createConversation(trx, { userId: u, profileId, isPrivate: true }));
-      const { ProfileInUseError } = await import("./errors.js");
-      await expect(tx((trx) => store.deleteProfile(trx, profileId))).rejects.toThrow(
-        ProfileInUseError,
+      expect(await tx((trx) => store.deleteProfile(trx, profileId))).toEqual(
+        err({ kind: "profile_in_use" }),
       );
-      // Profile still exists — delete rolled back.
       expect(await tx((trx) => store.getProfile(trx, profileId))).not.toBeUndefined();
     });
 
-    it("deleteProfile throws ProfileInUseError when only message history references it", async () => {
+    it("deleteProfile refuses when only message history references it", async () => {
       // The conversation has been switched away (profileId pointer gone) but stamped messages remain.
       const u = await seedUser();
       const { id: oldProfileId } = await tx((trx) =>
-        store.createProfile(trx, {
-          userId: u,
-          name: "old",
-          basePrompt: "p",
-          model: "m",
-          toolSet: [],
-        }),
+        store
+          .createProfile(trx, {
+            userId: u,
+            name: "old",
+            basePrompt: "p",
+            model: "m",
+            toolSet: [],
+          })
+          .then(expectOk),
       );
       const { id: newProfileId } = await tx((trx) =>
-        store.createProfile(trx, {
-          userId: u,
-          name: "new",
-          basePrompt: "p",
-          model: "m",
-          toolSet: [],
-        }),
+        store
+          .createProfile(trx, {
+            userId: u,
+            name: "new",
+            basePrompt: "p",
+            model: "m",
+            toolSet: [],
+          })
+          .then(expectOk),
       );
       const { id: convId } = await tx((trx) =>
         store.createConversation(trx, {
@@ -2571,13 +2656,12 @@ describe("DrizzleAgentStore", () => {
       // Switch the conversation to new profile — old profile now only referenced by stamped msg
       await tx((trx) => store.setConversationProfile(trx, convId, newProfileId));
 
-      const { ProfileInUseError } = await import("./errors.js");
-      await expect(tx((trx) => store.deleteProfile(trx, oldProfileId))).rejects.toThrow(
-        ProfileInUseError,
+      expect(await tx((trx) => store.deleteProfile(trx, oldProfileId))).toEqual(
+        err({ kind: "profile_in_use" }),
       );
     });
 
-    it("deleteProfile throws ProfileInUseError while a scheduled task runs as it", async () => {
+    it("deleteProfile refuses while a scheduled task runs as it", async () => {
       const userId = await seedUser();
       const profileId = await seedProfile();
       await tx((trx) =>
@@ -2594,14 +2678,12 @@ describe("DrizzleAgentStore", () => {
           source: "agent",
         }),
       );
-      const { ProfileInUseError } = await import("./errors.js");
-
-      await expect(tx((trx) => store.deleteProfile(trx, profileId))).rejects.toMatchObject(
-        new ProfileInUseError({ conversations: 0, messages: 0, schedules: 1, steeringRules: 0 }),
+      expect(await tx((trx) => store.deleteProfile(trx, profileId))).toEqual(
+        err({ kind: "profile_in_use" }),
       );
     });
 
-    it("deleteProfile throws ProfileInUseError while a scheduled skill runs as it", async () => {
+    it("deleteProfile refuses while a scheduled skill runs as it", async () => {
       const userId = await seedUser();
       const profileId = await seedProfile();
       await db.insert(skills).values({
@@ -2616,15 +2698,13 @@ describe("DrizzleAgentStore", () => {
         gitSha: "sha",
         inputs: { type: "object" },
       });
-      const { ProfileInUseError } = await import("./errors.js");
-
-      await expect(tx((trx) => store.deleteProfile(trx, profileId))).rejects.toMatchObject(
-        new ProfileInUseError({ conversations: 0, messages: 0, schedules: 1, steeringRules: 0 }),
+      expect(await tx((trx) => store.deleteProfile(trx, profileId))).toEqual(
+        err({ kind: "profile_in_use" }),
       );
       expect(await tx((trx) => store.getProfile(trx, profileId))).toBeDefined();
     });
 
-    it("deleteProfile throws ProfileInUseError while a steering rule is scoped to it", async () => {
+    it("deleteProfile refuses while a steering rule is scoped to it", async () => {
       const profileId = await seedProfile();
       const { steeringRules } = await import("./schema.js");
       await db.insert(steeringRules).values({
@@ -2636,10 +2716,8 @@ describe("DrizzleAgentStore", () => {
         observationCount: 0,
         profileId,
       });
-      const { ProfileInUseError } = await import("./errors.js");
-
-      await expect(tx((trx) => store.deleteProfile(trx, profileId))).rejects.toMatchObject(
-        new ProfileInUseError({ conversations: 0, messages: 0, schedules: 0, steeringRules: 1 }),
+      expect(await tx((trx) => store.deleteProfile(trx, profileId))).toEqual(
+        err({ kind: "profile_in_use" }),
       );
     });
   });
@@ -2657,7 +2735,7 @@ describe("DrizzleAgentStore", () => {
           ...stamp,
         }),
       );
-      await tx((trx) => store.setAlias(trx, userId, conversationId, "work"));
+      await tx((trx) => store.setAlias(trx, userId, conversationId, "work").then(expectOk));
 
       const list = await tx((trx) => store.listConversationsForUser(trx, userId));
       expect(list).toHaveLength(1);
@@ -2771,13 +2849,15 @@ describe("DrizzleAgentStore", () => {
     it("setConversationProfile updates conversations.profile_id", async () => {
       const { userId, conversationId } = await seedConversation();
       const { id: newProfileId } = await tx((trx) =>
-        store.createProfile(trx, {
-          userId,
-          name: "other",
-          basePrompt: "p",
-          model: "m",
-          toolSet: [],
-        }),
+        store
+          .createProfile(trx, {
+            userId,
+            name: "other",
+            basePrompt: "p",
+            model: "m",
+            toolSet: [],
+          })
+          .then(expectOk),
       );
       await tx((trx) => store.setConversationProfile(trx, conversationId, newProfileId));
       const conv = await tx((trx) => store.getConversation(trx, conversationId));
@@ -2788,12 +2868,12 @@ describe("DrizzleAgentStore", () => {
   describe("aliases", () => {
     it("setAlias inserts, then updates on same conversationId", async () => {
       const { userId, conversationId } = await seedConversation();
-      await tx((trx) => store.setAlias(trx, userId, conversationId, "work"));
+      await tx((trx) => store.setAlias(trx, userId, conversationId, "work").then(expectOk));
       expect(await tx((trx) => store.findConversationByAlias(trx, userId, "work"))).toEqual({
         conversationId,
       });
 
-      await tx((trx) => store.setAlias(trx, userId, conversationId, "personal"));
+      await tx((trx) => store.setAlias(trx, userId, conversationId, "personal").then(expectOk));
       expect(await tx((trx) => store.findConversationByAlias(trx, userId, "work"))).toBeUndefined();
       expect(await tx((trx) => store.findConversationByAlias(trx, userId, "personal"))).toEqual({
         conversationId,
@@ -2802,12 +2882,12 @@ describe("DrizzleAgentStore", () => {
 
     it("setAlias with null clears the alias", async () => {
       const { userId, conversationId } = await seedConversation();
-      await tx((trx) => store.setAlias(trx, userId, conversationId, "work"));
-      await tx((trx) => store.setAlias(trx, userId, conversationId, null));
+      await tx((trx) => store.setAlias(trx, userId, conversationId, "work").then(expectOk));
+      await tx((trx) => store.setAlias(trx, userId, conversationId, null).then(expectOk));
       expect(await tx((trx) => store.findConversationByAlias(trx, userId, "work"))).toBeUndefined();
     });
 
-    it("setAlias collision across conversations throws UniqueViolationError", async () => {
+    it("setAlias reports a collision across conversations as alias_taken", async () => {
       const userId = await seedUser();
       const profileId = await seedProfile();
       const c1 = (
@@ -2816,11 +2896,13 @@ describe("DrizzleAgentStore", () => {
       const c2 = (
         await tx((trx) => store.createConversation(trx, { userId, profileId, isPrivate: true }))
       ).id;
-      await tx((trx) => store.setAlias(trx, userId, c1, "work"));
-      const { UniqueViolationError } = await import("./errors.js");
-      await expect(tx((trx) => store.setAlias(trx, userId, c2, "work"))).rejects.toThrow(
-        UniqueViolationError,
+      await tx((trx) => store.setAlias(trx, userId, c1, "work").then(expectOk));
+      expect(await tx((trx) => store.setAlias(trx, userId, c2, "work"))).toEqual(
+        err({ kind: "alias_taken" }),
       );
+      expect(await tx((trx) => store.findConversationByAlias(trx, userId, "work"))).toEqual({
+        conversationId: c1,
+      });
     });
 
     it("findConversationByAlias scopes to user", async () => {
@@ -2830,7 +2912,7 @@ describe("DrizzleAgentStore", () => {
       const conv = (
         await tx((trx) => store.createConversation(trx, { userId: u1, profileId, isPrivate: true }))
       ).id;
-      await tx((trx) => store.setAlias(trx, u1, conv, "shared"));
+      await tx((trx) => store.setAlias(trx, u1, conv, "shared").then(expectOk));
       // u2 searching for same alias should see nothing
       expect(await tx((trx) => store.findConversationByAlias(trx, u2, "shared"))).toBeUndefined();
     });
@@ -2840,11 +2922,11 @@ describe("DrizzleAgentStore", () => {
       expect(
         await tx((trx) => store.getAliasForConversation(trx, userId, conversationId)),
       ).toBeUndefined();
-      await tx((trx) => store.setAlias(trx, userId, conversationId, "work"));
+      await tx((trx) => store.setAlias(trx, userId, conversationId, "work").then(expectOk));
       expect(await tx((trx) => store.getAliasForConversation(trx, userId, conversationId))).toBe(
         "work",
       );
-      await tx((trx) => store.setAlias(trx, userId, conversationId, null));
+      await tx((trx) => store.setAlias(trx, userId, conversationId, null).then(expectOk));
       expect(
         await tx((trx) => store.getAliasForConversation(trx, userId, conversationId)),
       ).toBeUndefined();
@@ -2857,7 +2939,7 @@ describe("DrizzleAgentStore", () => {
       const conv = (
         await tx((trx) => store.createConversation(trx, { userId: u1, profileId, isPrivate: true }))
       ).id;
-      await tx((trx) => store.setAlias(trx, u1, conv, "owned-by-u1"));
+      await tx((trx) => store.setAlias(trx, u1, conv, "owned-by-u1").then(expectOk));
       expect(await tx((trx) => store.getAliasForConversation(trx, u2, conv))).toBeUndefined();
       expect(await tx((trx) => store.getAliasForConversation(trx, u1, conv))).toBe("owned-by-u1");
     });
@@ -3199,17 +3281,19 @@ describe("DrizzleAgentStore", () => {
       const oldIds = inserted.map((r) => r.id);
 
       const result = await tx((trx) =>
-        store.replaceRules(trx, {
-          oldIds,
-          newRule: {
-            rule: "Combined rule A+B",
-            category: "style",
-            profileId: null,
-            channelType: null,
-            priority: 100,
-            observationCount: 5,
-          },
-        }),
+        store
+          .replaceRules(trx, {
+            oldIds,
+            newRule: {
+              rule: "Combined rule A+B",
+              category: "style",
+              profileId: null,
+              channelType: null,
+              priority: 100,
+              observationCount: 5,
+            },
+          })
+          .then(expectOk),
       );
 
       // Old rules deleted
@@ -3267,17 +3351,19 @@ describe("DrizzleAgentStore", () => {
       const oldIds = inserted.map((r) => r.id);
 
       const result = await tx((trx) =>
-        store.replaceRules(trx, {
-          oldIds,
-          newRule: {
-            rule: "Avoid markdown headings in Telegram replies",
-            category: "style",
-            profileId: null,
-            channelType: "telegram",
-            priority: 100,
-            observationCount: 5,
-          },
-        }),
+        store
+          .replaceRules(trx, {
+            oldIds,
+            newRule: {
+              rule: "Avoid markdown headings in Telegram replies",
+              category: "style",
+              profileId: null,
+              channelType: "telegram",
+              priority: 100,
+              observationCount: 5,
+            },
+          })
+          .then(expectOk),
       );
 
       const rows = await db
@@ -3316,17 +3402,19 @@ describe("DrizzleAgentStore", () => {
         .returning({ id: steeringRules.id });
 
       await tx((trx) =>
-        store.replaceRules(trx, {
-          oldIds: [inserted[0]!.id],
-          newRule: {
-            rule: "New consolidated rule",
-            category: "style",
-            profileId: null,
-            channelType: null,
-            priority: 100,
-            observationCount: 2,
-          },
-        }),
+        store
+          .replaceRules(trx, {
+            oldIds: [inserted[0]!.id],
+            newRule: {
+              rule: "New consolidated rule",
+              category: "style",
+              profileId: null,
+              channelType: null,
+              priority: 100,
+              observationCount: 2,
+            },
+          })
+          .then(expectOk),
       );
 
       const rules = await tx((trx) => store.getActiveRules(trx, { profileId, userId: null }));
@@ -3600,22 +3688,26 @@ describe("DrizzleAgentStore", () => {
       const userId = await seedUser();
       // Seed a class and a profile bound to it.
       await tx((trx) =>
-        store.createProfileClass(trx, {
-          userId,
-          name: "intimate",
-          description: "for emotional / relationship topics",
-        }),
+        store
+          .createProfileClass(trx, {
+            userId,
+            name: "intimate",
+            description: "for emotional / relationship topics",
+          })
+          .then(expectOk),
       );
       const profile = await tx((trx) =>
-        store.createProfile(trx, {
-          userId,
-          name: "intimate-profile",
-          basePrompt: "p",
-          model: "m",
-          toolSet: [],
-        }),
+        store
+          .createProfile(trx, {
+            userId,
+            name: "intimate-profile",
+            basePrompt: "p",
+            model: "m",
+            toolSet: [],
+          })
+          .then(expectOk),
       );
-      await tx((trx) => store.setProfileClass(trx, profile.id, "intimate"));
+      await tx((trx) => store.setProfileClass(trx, profile.id, "intimate").then(expectOk));
 
       // Stage a pending row tied to that profile.
       await tx((trx) =>
@@ -3658,18 +3750,22 @@ describe("DrizzleAgentStore", () => {
       const userB = await seedUser();
       // Create a class + profile under userB.
       await tx((trx) =>
-        store.createProfileClass(trx, { userId: userB, name: "intimate", description: "x" }),
+        store
+          .createProfileClass(trx, { userId: userB, name: "intimate", description: "x" })
+          .then(expectOk),
       );
       const profileB = await tx((trx) =>
-        store.createProfile(trx, {
-          userId: userB,
-          name: "p",
-          basePrompt: "p",
-          model: "m",
-          toolSet: [],
-        }),
+        store
+          .createProfile(trx, {
+            userId: userB,
+            name: "p",
+            basePrompt: "p",
+            model: "m",
+            toolSet: [],
+          })
+          .then(expectOk),
       );
-      await tx((trx) => store.setProfileClass(trx, profileB.id, "intimate"));
+      await tx((trx) => store.setProfileClass(trx, profileB.id, "intimate").then(expectOk));
       // Stage a pending row for userA but maliciously pointing at userB's profile.
       // This shape can't arise via the supported store API, but we simulate
       // it via a raw insert to test the JOIN's defence.
@@ -3691,7 +3787,9 @@ describe("DrizzleAgentStore", () => {
       const userId = await seedUser();
       const mk = (name: string) =>
         tx((trx) =>
-          store.createProfile(trx, { userId, name, basePrompt: "p", model: "m", toolSet: [] }),
+          store
+            .createProfile(trx, { userId, name, basePrompt: "p", model: "m", toolSet: [] })
+            .then(expectOk),
         );
       const own = await mk("third-party");
       const other = await mk("main");
@@ -3735,13 +3833,15 @@ describe("DrizzleAgentStore", () => {
     it("getPendingMemories surfaces an org staging profile, which has no class", async () => {
       const userId = await seedUser();
       const org = await tx((trx) =>
-        store.createProfile(trx, {
-          userId: null,
-          name: "org",
-          basePrompt: "p",
-          model: "m",
-          toolSet: [],
-        }),
+        store
+          .createProfile(trx, {
+            userId: null,
+            name: "org",
+            basePrompt: "p",
+            model: "m",
+            toolSet: [],
+          })
+          .then(expectOk),
       );
       await tx((trx) =>
         store.stagePendingMemory(trx, {
@@ -3766,21 +3866,25 @@ describe("DrizzleAgentStore", () => {
       // reorganises which profile belongs to which class.
       const userId = await seedUser();
       await tx((trx) =>
-        store.createProfileClass(trx, { userId, name: "intimate", description: "x" }),
+        store
+          .createProfileClass(trx, { userId, name: "intimate", description: "x" })
+          .then(expectOk),
       );
       await tx((trx) =>
-        store.createProfileClass(trx, { userId, name: "general", description: "y" }),
+        store.createProfileClass(trx, { userId, name: "general", description: "y" }).then(expectOk),
       );
       const profile = await tx((trx) =>
-        store.createProfile(trx, {
-          userId,
-          name: "p",
-          basePrompt: "p",
-          model: "m",
-          toolSet: [],
-        }),
+        store
+          .createProfile(trx, {
+            userId,
+            name: "p",
+            basePrompt: "p",
+            model: "m",
+            toolSet: [],
+          })
+          .then(expectOk),
       );
-      await tx((trx) => store.setProfileClass(trx, profile.id, "intimate"));
+      await tx((trx) => store.setProfileClass(trx, profile.id, "intimate").then(expectOk));
       await tx((trx) =>
         store.stagePendingMemory(trx, {
           userId,
@@ -3794,13 +3898,13 @@ describe("DrizzleAgentStore", () => {
 
       // Reassign the profile to a different class — the pending row's
       // profile_id is unchanged, but the JOIN now resolves to "general".
-      await tx((trx) => store.setProfileClass(trx, profile.id, "general"));
+      await tx((trx) => store.setProfileClass(trx, profile.id, "general").then(expectOk));
       const after = await tx((trx) => store.getPendingMemories(trx, userId));
       expect(after[0]?.profileClass).toBe("general");
 
       // Clearing the class on the profile drops the row to untagged on
       // the class dimension — drain stamps no profile_class:* tag.
-      await tx((trx) => store.setProfileClass(trx, profile.id, null));
+      await tx((trx) => store.setProfileClass(trx, profile.id, null).then(expectOk));
       const cleared = await tx((trx) => store.getPendingMemories(trx, userId));
       expect(cleared[0]?.profileClass).toBeNull();
     });
@@ -3995,13 +4099,15 @@ describe("DrizzleAgentStore", () => {
     it("creates a fal provider (base_url null)", async () => {
       const { id: secretId } = await seedSecret("fal_api_key");
       const { id } = await tx((trx) =>
-        store.createImageProvider(trx, {
-          name: "fal",
-          type: "fal",
-          baseUrl: null,
-          secretId,
-          attrs: {},
-        }),
+        store
+          .createImageProvider(trx, {
+            name: "fal",
+            type: "fal",
+            baseUrl: null,
+            secretId,
+            attrs: {},
+          })
+          .then(expectOk),
       );
       const row = await tx((trx) => store.getImageProvider(trx, id));
       expect(row).toMatchObject({ name: "fal", type: "fal", baseUrl: null });
@@ -4010,13 +4116,15 @@ describe("DrizzleAgentStore", () => {
     it("creates an openai_compatible provider with base_url", async () => {
       const { id: secretId } = await seedSecret("venice_api_key");
       const { id } = await tx((trx) =>
-        store.createImageProvider(trx, {
-          name: "venice",
-          type: "openai_compatible",
-          baseUrl: "https://api.venice.ai/api/v1",
-          secretId,
-          attrs: {},
-        }),
+        store
+          .createImageProvider(trx, {
+            name: "venice",
+            type: "openai_compatible",
+            baseUrl: "https://api.venice.ai/api/v1",
+            secretId,
+            attrs: {},
+          })
+          .then(expectOk),
       );
       const row = await tx((trx) => store.findImageProviderByName(trx, "venice"));
       expect(row).toMatchObject({
@@ -4027,48 +4135,50 @@ describe("DrizzleAgentStore", () => {
       });
     });
 
-    it("rejects fal with a base_url at the store boundary (InvalidProviderConfigError)", async () => {
+    it("rejects fal with a base_url at the store boundary", async () => {
       const { id: secretId } = await seedSecret("fal_api_key");
-      const { InvalidProviderConfigError } = await import("./errors.js");
-      await expect(
-        tx((trx) =>
-          store.createImageProvider(trx, {
-            name: "fal",
-            type: "fal",
-            baseUrl: "https://fal.run",
-            secretId,
-            attrs: {},
-          }),
-        ),
-      ).rejects.toBeInstanceOf(InvalidProviderConfigError);
+      const result = await tx((trx) =>
+        store.createImageProvider(trx, {
+          name: "fal",
+          type: "fal",
+          baseUrl: "https://fal.run",
+          secretId,
+          attrs: {},
+        }),
+      );
+      expect(result).toEqual(
+        err({ kind: "invalid_provider_config", reason: "fal does not accept a base_url" }),
+      );
     });
 
     it("rejects openai_compatible without base_url at the store boundary", async () => {
       const { id: secretId } = await seedSecret("venice_api_key");
-      const { InvalidProviderConfigError } = await import("./errors.js");
-      await expect(
-        tx((trx) =>
-          store.createImageProvider(trx, {
-            name: "venice",
-            type: "openai_compatible",
-            baseUrl: null,
-            secretId,
-            attrs: {},
-          }),
-        ),
-      ).rejects.toBeInstanceOf(InvalidProviderConfigError);
+      const result = await tx((trx) =>
+        store.createImageProvider(trx, {
+          name: "venice",
+          type: "openai_compatible",
+          baseUrl: null,
+          secretId,
+          attrs: {},
+        }),
+      );
+      expect(result).toEqual(
+        err({ kind: "invalid_provider_config", reason: "openai_compatible requires a base_url" }),
+      );
     });
 
     it("creates a venice provider with base_url + imageGenerationDefaults", async () => {
       const { id: secretId } = await seedSecret("venice_native_api_key");
       const { id } = await tx((trx) =>
-        store.createImageProvider(trx, {
-          name: "venice-native",
-          type: "venice",
-          baseUrl: "https://api.venice.ai/api/v1",
-          secretId,
-          attrs: { imageGenerationDefaults: { safe_mode: false, cfg_scale: 7.5 } },
-        }),
+        store
+          .createImageProvider(trx, {
+            name: "venice-native",
+            type: "venice",
+            baseUrl: "https://api.venice.ai/api/v1",
+            secretId,
+            attrs: { imageGenerationDefaults: { safe_mode: false, cfg_scale: 7.5 } },
+          })
+          .then(expectOk),
       );
       const row = await tx((trx) => store.getImageProvider(trx, id));
       expect(row).toMatchObject({
@@ -4092,13 +4202,15 @@ describe("DrizzleAgentStore", () => {
         style_preset: "Photographic",
       };
       const { id } = await tx((trx) =>
-        store.createImageProvider(trx, {
-          name: "venice-all",
-          type: "venice",
-          baseUrl: "https://api.venice.ai/api/v1",
-          secretId,
-          attrs: { imageGenerationDefaults: defaults },
-        }),
+        store
+          .createImageProvider(trx, {
+            name: "venice-all",
+            type: "venice",
+            baseUrl: "https://api.venice.ai/api/v1",
+            secretId,
+            attrs: { imageGenerationDefaults: defaults },
+          })
+          .then(expectOk),
       );
       const row = await tx((trx) => store.getImageProvider(trx, id));
       expect(row?.attrs.imageGenerationDefaults).toEqual(defaults);
@@ -4106,55 +4218,69 @@ describe("DrizzleAgentStore", () => {
 
     it("rejects venice without base_url at the store boundary", async () => {
       const { id: secretId } = await seedSecret("venice_native_api_key");
-      const { InvalidProviderConfigError } = await import("./errors.js");
-      await expect(
-        tx((trx) =>
-          store.createImageProvider(trx, {
-            name: "venice-native",
-            type: "venice",
-            baseUrl: null,
-            secretId,
-            attrs: {},
-          }),
-        ),
-      ).rejects.toBeInstanceOf(InvalidProviderConfigError);
+      const result = await tx((trx) =>
+        store.createImageProvider(trx, {
+          name: "venice-native",
+          type: "venice",
+          baseUrl: null,
+          secretId,
+          attrs: {},
+        }),
+      );
+      expect(result).toEqual(
+        err({ kind: "invalid_provider_config", reason: "venice requires a base_url" }),
+      );
     });
 
     it("rejects non-https base_url", async () => {
       const { id: secretId } = await seedSecret("rogue_api_key");
-      const { InvalidProviderConfigError } = await import("./errors.js");
-      await expect(
-        tx((trx) =>
-          store.createImageProvider(trx, {
-            name: "rogue",
-            type: "openai_compatible",
-            baseUrl: "http://insecure.example.com/v1",
-            secretId,
-            attrs: {},
-          }),
-        ),
-      ).rejects.toBeInstanceOf(InvalidProviderConfigError);
+      const result = await tx((trx) =>
+        store.createImageProvider(trx, {
+          name: "rogue",
+          type: "openai_compatible",
+          baseUrl: "http://insecure.example.com/v1",
+          secretId,
+          attrs: {},
+        }),
+      );
+      expect(result).toEqual(
+        err({ kind: "invalid_provider_config", reason: "base_url must be https (got http:)" }),
+      );
     });
 
     it("rejects trailing-slash base_url", async () => {
       const { id: secretId } = await seedSecret("rogue_api_key");
-      const { InvalidProviderConfigError } = await import("./errors.js");
-      await expect(
-        tx((trx) =>
-          store.createImageProvider(trx, {
-            name: "rogue",
-            type: "openai_compatible",
-            baseUrl: "https://api.venice.ai/api/v1/",
-            secretId,
-            attrs: {},
-          }),
-        ),
-      ).rejects.toBeInstanceOf(InvalidProviderConfigError);
+      const result = await tx((trx) =>
+        store.createImageProvider(trx, {
+          name: "rogue",
+          type: "openai_compatible",
+          baseUrl: "https://api.venice.ai/api/v1/",
+          secretId,
+          attrs: {},
+        }),
+      );
+      expect(result).toEqual(
+        err({
+          kind: "invalid_provider_config",
+          reason: "base_url must not end with a trailing slash",
+        }),
+      );
     });
 
-    it("rejects duplicate provider names (UniqueViolationError)", async () => {
+    it("rejects duplicate provider names", async () => {
       const { id: secretId } = await seedSecret("fal_api_key");
       await tx((trx) =>
+        store
+          .createImageProvider(trx, {
+            name: "fal",
+            type: "fal",
+            baseUrl: null,
+            secretId,
+            attrs: {},
+          })
+          .then(expectOk),
+      );
+      const result = await tx((trx) =>
         store.createImageProvider(trx, {
           name: "fal",
           type: "fal",
@@ -4163,40 +4289,33 @@ describe("DrizzleAgentStore", () => {
           attrs: {},
         }),
       );
-      const { UniqueViolationError } = await import("./errors.js");
-      await expect(
-        tx((trx) =>
-          store.createImageProvider(trx, {
-            name: "fal",
-            type: "fal",
-            baseUrl: null,
-            secretId,
-            attrs: {},
-          }),
-        ),
-      ).rejects.toBeInstanceOf(UniqueViolationError);
+      expect(result).toEqual(err({ kind: "image_provider_name_taken", name: "fal" }));
     });
 
     it("lists providers ordered by name", async () => {
       const { id: s1 } = await seedSecret("fal_api_key");
       const { id: s2 } = await seedSecret("venice_api_key");
       await tx((trx) =>
-        store.createImageProvider(trx, {
-          name: "venice",
-          type: "openai_compatible",
-          baseUrl: "https://api.venice.ai/api/v1",
-          secretId: s2,
-          attrs: {},
-        }),
+        store
+          .createImageProvider(trx, {
+            name: "venice",
+            type: "openai_compatible",
+            baseUrl: "https://api.venice.ai/api/v1",
+            secretId: s2,
+            attrs: {},
+          })
+          .then(expectOk),
       );
       await tx((trx) =>
-        store.createImageProvider(trx, {
-          name: "fal",
-          type: "fal",
-          baseUrl: null,
-          secretId: s1,
-          attrs: {},
-        }),
+        store
+          .createImageProvider(trx, {
+            name: "fal",
+            type: "fal",
+            baseUrl: null,
+            secretId: s1,
+            attrs: {},
+          })
+          .then(expectOk),
       );
       const rows = await tx((trx) => store.listImageProviders(trx));
       expect(rows.map((r) => r.name)).toEqual(["fal", "venice"]);
@@ -4205,23 +4324,27 @@ describe("DrizzleAgentStore", () => {
     it("deleteImageProvider cascades to image_models", async () => {
       const { id: secretId } = await seedSecret("fal_api_key");
       const { id: providerId } = await tx((trx) =>
-        store.createImageProvider(trx, {
-          name: "fal",
-          type: "fal",
-          baseUrl: null,
-          secretId,
-          attrs: {},
-        }),
+        store
+          .createImageProvider(trx, {
+            name: "fal",
+            type: "fal",
+            baseUrl: null,
+            secretId,
+            attrs: {},
+          })
+          .then(expectOk),
       );
       await tx((trx) =>
-        store.createImageModel(trx, {
-          providerId,
-          name: "fal/flux-dev",
-          modelString: "fal-ai/flux/dev",
-          description: "default",
-          capabilities: { aspectRatios: ["1:1"], seed: true },
-          userSelectable: true,
-        }),
+        store
+          .createImageModel(trx, {
+            providerId,
+            name: "fal/flux-dev",
+            modelString: "fal-ai/flux/dev",
+            description: "default",
+            capabilities: { aspectRatios: ["1:1"], seed: true },
+            userSelectable: true,
+          })
+          .then(expectOk),
       );
 
       await tx((trx) => store.deleteImageProvider(trx, providerId));
@@ -4237,27 +4360,31 @@ describe("DrizzleAgentStore", () => {
         secretsStore.putSecret(trx, { name: `${name}_api_key`, plaintext: "sk-test" }),
       );
       return tx((trx) =>
-        store.createImageProvider(trx, {
-          name,
-          type: "fal",
-          baseUrl: null,
-          secretId,
-          attrs: {},
-        }),
+        store
+          .createImageProvider(trx, {
+            name,
+            type: "fal",
+            baseUrl: null,
+            secretId,
+            attrs: {},
+          })
+          .then(expectOk),
       );
     }
 
     it("creates and lists image models", async () => {
       const { id: providerId } = await seedProvider();
       await tx((trx) =>
-        store.createImageModel(trx, {
-          providerId,
-          name: "fal/flux-dev",
-          modelString: "fal-ai/flux/dev",
-          description: "default",
-          capabilities: { aspectRatios: ["1:1", "16:9"], seed: true },
-          userSelectable: true,
-        }),
+        store
+          .createImageModel(trx, {
+            providerId,
+            name: "fal/flux-dev",
+            modelString: "fal-ai/flux/dev",
+            description: "default",
+            capabilities: { aspectRatios: ["1:1", "16:9"], seed: true },
+            userSelectable: true,
+          })
+          .then(expectOk),
       );
       const rows = await tx((trx) => store.listImageModels(trx));
       expect(rows).toHaveLength(1);
@@ -4268,31 +4395,31 @@ describe("DrizzleAgentStore", () => {
       });
     });
 
-    it("rejects duplicate model names (UniqueViolationError)", async () => {
+    it("rejects duplicate model names", async () => {
       const { id: providerId } = await seedProvider();
       await tx((trx) =>
+        store
+          .createImageModel(trx, {
+            providerId,
+            name: "fal/flux-dev",
+            modelString: "fal-ai/flux/dev",
+            description: "default",
+            capabilities: {},
+            userSelectable: true,
+          })
+          .then(expectOk),
+      );
+      const result = await tx((trx) =>
         store.createImageModel(trx, {
           providerId,
           name: "fal/flux-dev",
           modelString: "fal-ai/flux/dev",
-          description: "default",
+          description: "duplicate",
           capabilities: {},
           userSelectable: true,
         }),
       );
-      const { UniqueViolationError } = await import("./errors.js");
-      await expect(
-        tx((trx) =>
-          store.createImageModel(trx, {
-            providerId,
-            name: "fal/flux-dev",
-            modelString: "fal-ai/flux/dev",
-            description: "duplicate",
-            capabilities: {},
-            userSelectable: true,
-          }),
-        ),
-      ).rejects.toBeInstanceOf(UniqueViolationError);
+      expect(result).toEqual(err({ kind: "image_model_name_taken", name: "fal/flux-dev" }));
     });
 
     it("createImageModel rejects a slug collision with a distinct existing name", async () => {
@@ -4301,55 +4428,67 @@ describe("DrizzleAgentStore", () => {
       // at the insert boundary instead of at next-boot createImageTools.
       const { id: providerId } = await seedProvider();
       await tx((trx) =>
+        store
+          .createImageModel(trx, {
+            providerId,
+            name: "fal-ai/flux-pro",
+            modelString: "fal-ai/flux-pro",
+            description: "first",
+            capabilities: {},
+            userSelectable: true,
+          })
+          .then(expectOk),
+      );
+      const result = await tx((trx) =>
         store.createImageModel(trx, {
           providerId,
-          name: "fal-ai/flux-pro",
-          modelString: "fal-ai/flux-pro",
-          description: "first",
+          name: "replicate/flux-pro",
+          modelString: "replicate/flux-pro",
+          description: "second",
           capabilities: {},
           userSelectable: true,
         }),
       );
-      const { ImageModelSlugCollisionError } = await import("./errors.js");
-      await expect(
-        tx((trx) =>
-          store.createImageModel(trx, {
+      expect(result).toEqual(
+        err({
+          kind: "image_model_slug_collision",
+          name: "replicate/flux-pro",
+          existingName: "fal-ai/flux-pro",
+          slug: "flux-pro",
+        }),
+      );
+    });
+
+    it("upsertImageModelsByName rejects a slug collision in the batch", async () => {
+      const { id: providerId } = await seedProvider();
+      const result = await tx((trx) =>
+        store.upsertImageModelsByName(trx, [
+          {
+            providerId,
+            name: "fal-ai/flux-pro",
+            modelString: "fal-ai/flux-pro",
+            description: "first",
+            capabilities: {},
+            userSelectable: true,
+          },
+          {
             providerId,
             name: "replicate/flux-pro",
             modelString: "replicate/flux-pro",
             description: "second",
             capabilities: {},
             userSelectable: true,
-          }),
-        ),
-      ).rejects.toBeInstanceOf(ImageModelSlugCollisionError);
-    });
-
-    it("upsertImageModelsByName rejects a slug collision in the batch", async () => {
-      const { id: providerId } = await seedProvider();
-      const { ImageModelSlugCollisionError } = await import("./errors.js");
-      await expect(
-        tx((trx) =>
-          store.upsertImageModelsByName(trx, [
-            {
-              providerId,
-              name: "fal-ai/flux-pro",
-              modelString: "fal-ai/flux-pro",
-              description: "first",
-              capabilities: {},
-              userSelectable: true,
-            },
-            {
-              providerId,
-              name: "replicate/flux-pro",
-              modelString: "replicate/flux-pro",
-              description: "second",
-              capabilities: {},
-              userSelectable: true,
-            },
-          ]),
-        ),
-      ).rejects.toBeInstanceOf(ImageModelSlugCollisionError);
+          },
+        ]),
+      );
+      expect(result).toEqual(
+        err({
+          kind: "image_model_slug_collision",
+          name: "replicate/flux-pro",
+          existingName: "fal-ai/flux-pro",
+          slug: "flux-pro",
+        }),
+      );
     });
 
     it("upsertImageModelsByName skips existing names (idempotent)", async () => {
@@ -4372,31 +4511,33 @@ describe("DrizzleAgentStore", () => {
           userSelectable: true,
         },
       ];
-      const first = await tx((trx) => store.upsertImageModelsByName(trx, rows));
+      const first = await tx((trx) => store.upsertImageModelsByName(trx, rows).then(expectOk));
       expect(first).toBe(2);
 
       // Re-run with the same names plus a new one. Existing rows are
       // preserved (no overwrite of `description`); only the new row is
       // inserted.
       const second = await tx((trx) =>
-        store.upsertImageModelsByName(trx, [
-          {
-            providerId,
-            name: "fal/a",
-            modelString: "fal-ai/a",
-            description: "edited", // would-be edit; must be ignored
-            capabilities: {},
-            userSelectable: true,
-          },
-          {
-            providerId,
-            name: "fal/c",
-            modelString: "fal-ai/c",
-            description: "third",
-            capabilities: {},
-            userSelectable: true,
-          },
-        ]),
+        store
+          .upsertImageModelsByName(trx, [
+            {
+              providerId,
+              name: "fal/a",
+              modelString: "fal-ai/a",
+              description: "edited", // would-be edit; must be ignored
+              capabilities: {},
+              userSelectable: true,
+            },
+            {
+              providerId,
+              name: "fal/c",
+              modelString: "fal-ai/c",
+              description: "third",
+              capabilities: {},
+              userSelectable: true,
+            },
+          ])
+          .then(expectOk),
       );
       expect(second).toBe(1);
 
@@ -4409,24 +4550,26 @@ describe("DrizzleAgentStore", () => {
     it("listImageModelsWithProvider filters to user_selectable when asked", async () => {
       const { id: providerId } = await seedProvider();
       await tx((trx) =>
-        store.upsertImageModelsByName(trx, [
-          {
-            providerId,
-            name: "fal/visible",
-            modelString: "fal-ai/x",
-            description: "shown",
-            capabilities: {},
-            userSelectable: true,
-          },
-          {
-            providerId,
-            name: "fal/hidden",
-            modelString: "fal-ai/y",
-            description: "hidden",
-            capabilities: {},
-            userSelectable: false,
-          },
-        ]),
+        store
+          .upsertImageModelsByName(trx, [
+            {
+              providerId,
+              name: "fal/visible",
+              modelString: "fal-ai/x",
+              description: "shown",
+              capabilities: {},
+              userSelectable: true,
+            },
+            {
+              providerId,
+              name: "fal/hidden",
+              modelString: "fal-ai/y",
+              description: "hidden",
+              capabilities: {},
+              userSelectable: false,
+            },
+          ])
+          .then(expectOk),
       );
       const all = await tx((trx) => store.listImageModelsWithProvider(trx));
       const onlySelectable = await tx((trx) =>
@@ -4440,24 +4583,26 @@ describe("DrizzleAgentStore", () => {
     it("deleteImageModel removes a single row without touching siblings", async () => {
       const { id: providerId } = await seedProvider();
       await tx((trx) =>
-        store.upsertImageModelsByName(trx, [
-          {
-            providerId,
-            name: "fal/keep",
-            modelString: "x",
-            description: "keep",
-            capabilities: {},
-            userSelectable: true,
-          },
-          {
-            providerId,
-            name: "fal/drop",
-            modelString: "y",
-            description: "drop",
-            capabilities: {},
-            userSelectable: true,
-          },
-        ]),
+        store
+          .upsertImageModelsByName(trx, [
+            {
+              providerId,
+              name: "fal/keep",
+              modelString: "x",
+              description: "keep",
+              capabilities: {},
+              userSelectable: true,
+            },
+            {
+              providerId,
+              name: "fal/drop",
+              modelString: "y",
+              description: "drop",
+              capabilities: {},
+              userSelectable: true,
+            },
+          ])
+          .then(expectOk),
       );
       const allBefore = await tx((trx) => store.listImageModels(trx));
       const drop = allBefore.find((m) => m.name === "fal/drop");

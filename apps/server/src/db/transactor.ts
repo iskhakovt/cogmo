@@ -1,4 +1,5 @@
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
+import type { Result } from "neverthrow";
 import { withRetry } from "../util/with-retry.js";
 import { findPgErrorByCode } from "./pg-errors.js";
 import type * as schema from "./schemas.js";
@@ -62,6 +63,35 @@ export function transactor(db: Database): Transactor {
       context: "tx-serialization-retry",
       essential: true,
     });
+}
+
+/** Thrown through the transaction to roll it back; never escapes `commitIfOk`. */
+const ROLLBACK = new Error("commitIfOk: rollback on Err");
+
+/**
+ * Run `fn` in a transaction that commits only when it returns `Ok`: an `Err`
+ * rolls the work back and is returned as is, a throw rolls back and
+ * propagates. `runInTx` is any `Transactor`, so this covers a top-level
+ * transaction and, given `(cb) => tx.transaction(cb)`, a savepoint.
+ */
+export async function commitIfOk<T, E>(
+  runInTx: Transactor,
+  fn: (tx: Transaction) => Promise<Result<T, E>>,
+): Promise<Result<T, E>> {
+  let failed: Result<T, E> | undefined;
+  try {
+    return await runInTx(async (tx) => {
+      const result = await fn(tx);
+      if (result.isErr()) {
+        failed = result;
+        throw ROLLBACK;
+      }
+      return result;
+    });
+  } catch (e) {
+    if (e === ROLLBACK && failed !== undefined) return failed;
+    throw e;
+  }
 }
 
 /**

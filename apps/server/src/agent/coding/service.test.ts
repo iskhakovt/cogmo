@@ -1,7 +1,7 @@
 import type { Inngest } from "inngest";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
-import { expectDefined } from "../../test/assertions.js";
+import { expectDefined, expectOk } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { DrizzleAgentStore } from "../store/index.js";
 import { createCodingService } from "./service.js";
@@ -25,13 +25,15 @@ let conversationId: string;
 beforeEach(async () => {
   const user = await tx((trx) => agentStore.createUser(trx));
   const profile = await tx((trx) =>
-    agentStore.createProfile(trx, {
-      userId: user.id,
-      name: "default",
-      basePrompt: "p",
-      model: "test-model",
-      toolSet: [],
-    }),
+    agentStore
+      .createProfile(trx, {
+        userId: user.id,
+        name: "default",
+        basePrompt: "p",
+        model: "test-model",
+        toolSet: [],
+      })
+      .then(expectOk),
   );
   const conv = await tx((trx) =>
     agentStore.createConversation(trx, { userId: user.id, profileId: profile.id, isPrivate: true }),
@@ -53,18 +55,20 @@ function fakeInngest(): Pick<Inngest, "send"> & { send: ReturnType<typeof vi.fn>
 
 async function seedRepo(name = "cogmo", maxConcurrentTasks = 1): Promise<string> {
   const row = await tx((trx) =>
-    store.insertRepo(trx, {
-      name,
-      localPath: `/var/lib/cogmo/repos/${name}`,
-      defaultBranch: "main",
-      remoteUrl: `git@github.com:user/${name}.git`,
-      devcontainer: null,
-      allowedBackends: ["claude"],
-      verifyCommand: "pnpm test",
-      taskTokenBudget: 200_000,
-      taskWallTimeSeconds: 1800,
-      maxConcurrentTasks,
-    }),
+    store
+      .insertRepo(trx, {
+        name,
+        localPath: `/var/lib/cogmo/repos/${name}`,
+        defaultBranch: "main",
+        remoteUrl: `git@github.com:user/${name}.git`,
+        devcontainer: null,
+        allowedBackends: ["claude"],
+        verifyCommand: "pnpm test",
+        taskTokenBudget: 200_000,
+        taskWallTimeSeconds: 1800,
+        maxConcurrentTasks,
+      })
+      .then(expectOk),
   );
   return row.id;
 }

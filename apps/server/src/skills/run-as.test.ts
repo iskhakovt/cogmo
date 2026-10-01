@@ -10,6 +10,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { DrizzleAgentStore } from "../agent/store/index.js";
 import { type ProfileMemoryScope, pendingMemories } from "../agent/store/schema.js";
 import type { Database, Transactor } from "../db/index.js";
+import { expectOk } from "../test/assertions.js";
 import { mockFilesService, mockMemoryProvider } from "../test/factories.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import { resolveSkillRunAs } from "./run-as.js";
@@ -37,20 +38,24 @@ async function seedIdentity(
 ): Promise<SkillRunIdentity> {
   return tx(async (trx) => {
     const user = await agentStore.createUser(trx);
-    const profile = await agentStore.createProfile(trx, {
-      userId: user.id,
-      name: "persona",
-      basePrompt: "",
-      model: "m",
-      toolSet: [],
-      ...(opts.memoryScope && { memoryScope: opts.memoryScope }),
-    });
+    const profile = await agentStore
+      .createProfile(trx, {
+        userId: user.id,
+        name: "persona",
+        basePrompt: "",
+        model: "m",
+        toolSet: [],
+        ...(opts.memoryScope && { memoryScope: opts.memoryScope }),
+      })
+      .then(expectOk);
     for (const name of [opts.profileClass, opts.restrictedClass]) {
       if (name === undefined) continue;
-      await agentStore.createProfileClass(trx, { userId: user.id, name, description: name });
+      await agentStore
+        .createProfileClass(trx, { userId: user.id, name, description: name })
+        .then(expectOk);
     }
     if (opts.profileClass !== undefined) {
-      await agentStore.setProfileClass(trx, profile.id, opts.profileClass);
+      await agentStore.setProfileClass(trx, profile.id, opts.profileClass).then(expectOk);
     }
     if (opts.restrictedClass !== undefined) {
       await agentStore.setProfileClassRestricted(trx, user.id, opts.restrictedClass, true);

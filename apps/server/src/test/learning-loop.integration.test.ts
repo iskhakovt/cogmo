@@ -46,7 +46,7 @@ import { db } from "../db/index.js";
 import { bootstrap } from "../index.js";
 import { DEFAULT_BASE_PROMPT } from "../setup/seed.js";
 import { channelSessions, inboundMessages } from "../transport/store/schema.js";
-import { expectDefined } from "./assertions.js";
+import { expectDefined, expectOk } from "./assertions.js";
 import { CASSETTE_CHAT_MODEL } from "./cassette-model.js";
 import { fileLlmockUrl } from "./integration-file.js";
 import { createIsolatedUser } from "./isolated-user.js";
@@ -112,13 +112,15 @@ beforeAll(async () => {
 
   userId = await createIsolatedUser(db);
   profile = await runInTx((tx) =>
-    agentStore.createProfile(tx, {
-      userId,
-      name: "learning-loop",
-      basePrompt: DEFAULT_BASE_PROMPT,
-      model: CASSETTE_CHAT_MODEL,
-      toolSet: ["core_memory_update", "core_memory_read", "memory_retain"],
-    }),
+    agentStore
+      .createProfile(tx, {
+        userId,
+        name: "learning-loop",
+        basePrompt: DEFAULT_BASE_PROMPT,
+        model: CASSETTE_CHAT_MODEL,
+        toolSet: ["core_memory_update", "core_memory_read", "memory_retain"],
+      })
+      .then(expectOk),
   );
   const channel = await runInTx((tx) => transportStore.getChannelByType(tx, CHANNEL_TYPE));
   channelId = expectDefined(channel, "seeded direct channel").id;
@@ -421,23 +423,27 @@ describe("learning loop", () => {
     const { runInTx, agentStore } = bootstrapped;
     const owner = await createIsolatedUser(db);
     const firstParty = await runInTx((tx) =>
-      agentStore.createProfile(tx, {
-        userId: owner,
-        name: "memory-rules",
-        basePrompt: DEFAULT_BASE_PROMPT,
-        model: CASSETTE_CHAT_MODEL,
-        toolSet: [],
-      }),
+      agentStore
+        .createProfile(tx, {
+          userId: owner,
+          name: "memory-rules",
+          basePrompt: DEFAULT_BASE_PROMPT,
+          model: CASSETTE_CHAT_MODEL,
+          toolSet: [],
+        })
+        .then(expectOk),
     );
     const thirdParty = await runInTx((tx) =>
-      agentStore.createProfile(tx, {
-        userId: owner,
-        name: "memory-rules-plugin",
-        basePrompt: DEFAULT_BASE_PROMPT,
-        model: CASSETTE_CHAT_MODEL,
-        toolSet: [],
-        memoryScope: { compartments: ["misc"], trust: ["any"] },
-      }),
+      agentStore
+        .createProfile(tx, {
+          userId: owner,
+          name: "memory-rules-plugin",
+          basePrompt: DEFAULT_BASE_PROMPT,
+          model: CASSETTE_CHAT_MODEL,
+          toolSet: [],
+          memoryScope: { compartments: ["misc"], trust: ["any"] },
+        })
+        .then(expectOk),
     );
     // As `rule_set` sets a stated instruction: the user's, on every profile.
     const set = await runInTx((tx) =>

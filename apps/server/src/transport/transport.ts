@@ -12,15 +12,7 @@ import { gateToken } from "../agent/pipeline/gate-keyboard.js";
 import type { PipelineRunStatus, PipelineRunStore } from "../agent/pipeline/store/index.js";
 import type { AutoRecallMode } from "../agent/recall-gate.js";
 import type { ScheduledTaskSummary } from "../agent/scheduling/scheduling-service.js";
-import {
-  CustomCompartmentCapExceededError,
-  InvalidNameError,
-  ProfileClassInUseError,
-  ProfileInUseError,
-  ReservedCompartmentNameError,
-  UniqueViolationError,
-  UnknownProfileClassError,
-} from "../agent/store/errors.js";
+import { findPostgresUniqueViolation } from "../agent/store/errors.js";
 import type {
   AgentStore,
   ChatHistoryMessage,
@@ -1485,13 +1477,9 @@ export function createTransport(deps: {
               reason: "aliases are not allowed on non-private conversations",
             });
           }
-          try {
-            await agentStore.setAlias(tx, identity.userId, conversationId, alias);
-            return ok(undefined);
-          } catch (e) {
-            if (e instanceof UniqueViolationError) return err({ code: "alias_taken" as const });
-            throw e;
-          }
+          const set = await agentStore.setAlias(tx, identity.userId, conversationId, alias);
+          if (set.isErr()) return err({ code: "alias_taken" as const });
+          return ok(undefined);
         });
       },
 
@@ -1709,138 +1697,114 @@ export function createTransport(deps: {
               return err({ code: "compartment_unknown" as const, name: unknown });
             }
           }
-          try {
-            const created = await agentStore.createProfile(tx, {
-              userId: identity.userId,
-              name: input.name,
-              basePrompt: input.basePrompt,
-              model: input.model,
-              toolSet: input.toolSet,
-              ...(input.memoryScope !== undefined && { memoryScope: input.memoryScope }),
-            });
-            return ok(created);
-          } catch (e) {
-            if (e instanceof UniqueViolationError)
-              return err({ code: "profile_name_taken" as const });
-            throw e;
-          }
+          const created = await agentStore.createProfile(tx, {
+            userId: identity.userId,
+            name: input.name,
+            basePrompt: input.basePrompt,
+            model: input.model,
+            toolSet: input.toolSet,
+            ...(input.memoryScope !== undefined && { memoryScope: input.memoryScope }),
+          });
+          if (created.isErr()) return err({ code: "profile_name_taken" as const });
+          return ok(created.value);
         });
       },
 
       async update(platformUserHandle, profileId, changes, opts) {
-        // `UniqueViolationError` from the profile_name unique constraint
-        // is caught OUTSIDE `runInTx` so the underlying Postgres tx
-        // rolls back cleanly. Catching inside the tx (and `return
-        // err(...)`-ing) lets the cb resolve, which makes Drizzle send
-        // COMMIT — and Postgres turns COMMIT-after-failed-statement
-        // into a silent ROLLBACK plus a NOTICE. End-to-end behaviour is
-        // the same (no data persists, err result returned) but the
-        // intent is misleading and the log noise hides real issues.
-        // Letting the error propagate triggers Drizzle's proper
-        // ROLLBACK path before this handler translates the error.
         // Closure-captured so the post-tx telemetry emit knows the
         // prior cooldown state. Stays `null` when no clear happened
         // (either `clearTarget` was absent or validation rejected
-        // before the capture). Only read AFTER runInTx resolves
-        // successfully — never on the catch path, since a thrown
-        // UniqueViolation means the clear was rolled back.
+        // before the capture). Only read when the update succeeded.
         let priorCooldownStateForEmit: CooldownState | null = null;
         const clearTarget = opts?.clearCooldownForConversation;
-        try {
-          const result = await runInTx(async (tx) => {
-            const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
-            if (!identity) return err({ code: "identity_rejected" as const });
-            const owner = await agentStore.getProfileOwner(tx, profileId);
-            if (!owner) return err({ code: "profile_not_found" as const });
-            if (owner.userId === null) {
+        const result = await runInTx(async (tx) => {
+          const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
+          if (!identity) return err({ code: "identity_rejected" as const });
+          const owner = await agentStore.getProfileOwner(tx, profileId);
+          if (!owner) return err({ code: "profile_not_found" as const });
+          if (owner.userId === null) {
+            return err({
+              code: "access_denied" as const,
+              reason: "org profiles are read-only via Transport",
+            });
+          }
+          if (owner.userId !== identity.userId) {
+            return err({
+              code: "access_denied" as const,
+              reason: "profile not owned by caller",
+            });
+          }
+          if (
+            changes.model !== undefined &&
+            !(await agentStore.isModelUserSelectable(tx, changes.model))
+          ) {
+            return err({ code: "model_unavailable" as const, model: changes.model });
+          }
+          if (changes.memoryScope) {
+            const unknown = await findUnknownCompartmentImpl(
+              tx,
+              agentStore,
+              identity.userId,
+              changes.memoryScope.compartments,
+            );
+            if (unknown !== null) {
+              return err({ code: "compartment_unknown" as const, name: unknown });
+            }
+          }
+          // Pre-validate the cooldown-clear side effect BEFORE the
+          // profile update commits, so a wrong / missing / mismatched
+          // conversation aborts the whole update rather than silently
+          // dropping the clear (or worse — clearing the cooldown on a
+          // conversation that doesn't use this profile, defeating the
+          // "context switch ends cooldown" rationale).
+          let shouldClearCooldown = false;
+          if (clearTarget !== undefined) {
+            const conv = await agentStore.getConversation(tx, clearTarget);
+            if (!conv) return err({ code: "conversation_not_found" as const });
+            if (conv.userId !== identity.userId) {
               return err({
                 code: "access_denied" as const,
-                reason: "org profiles are read-only via Transport",
+                reason: "conversation not owned by caller",
               });
             }
-            if (owner.userId !== identity.userId) {
+            if (conv.profileId !== profileId) {
+              // The clear's rationale is "the model the failing turn
+              // used changed". If the conversation doesn't actually
+              // use this profile, the new model isn't its model and
+              // the clear would be a spurious side effect. Reject
+              // rather than silently no-op so the caller surfaces a
+              // bug instead of hiding it.
               return err({
                 code: "access_denied" as const,
-                reason: "profile not owned by caller",
+                reason: "conversation does not use this profile",
               });
             }
-            if (
-              changes.model !== undefined &&
-              !(await agentStore.isModelUserSelectable(tx, changes.model))
-            ) {
-              return err({ code: "model_unavailable" as const, model: changes.model });
-            }
-            if (changes.memoryScope) {
-              const unknown = await findUnknownCompartmentImpl(
-                tx,
-                agentStore,
-                identity.userId,
-                changes.memoryScope.compartments,
-              );
-              if (unknown !== null) {
-                return err({ code: "compartment_unknown" as const, name: unknown });
-              }
-            }
-            // Pre-validate the cooldown-clear side effect BEFORE the
-            // profile update commits, so a wrong / missing / mismatched
-            // conversation aborts the whole update rather than silently
-            // dropping the clear (or worse — clearing the cooldown on a
-            // conversation that doesn't use this profile, defeating the
-            // "context switch ends cooldown" rationale).
-            let shouldClearCooldown = false;
-            if (clearTarget !== undefined) {
-              const conv = await agentStore.getConversation(tx, clearTarget);
-              if (!conv) return err({ code: "conversation_not_found" as const });
-              if (conv.userId !== identity.userId) {
-                return err({
-                  code: "access_denied" as const,
-                  reason: "conversation not owned by caller",
-                });
-              }
-              if (conv.profileId !== profileId) {
-                // The clear's rationale is "the model the failing turn
-                // used changed". If the conversation doesn't actually
-                // use this profile, the new model isn't its model and
-                // the clear would be a spurious side effect. Reject
-                // rather than silently no-op so the caller surfaces a
-                // bug instead of hiding it.
-                return err({
-                  code: "access_denied" as const,
-                  reason: "conversation does not use this profile",
-                });
-              }
-              // Match setProfile's optimization — skip the UPDATE when
-              // there's nothing to clear, avoiding a no-op row write.
-              shouldClearCooldown = conv.cooldownState !== null;
-              // Capture the prior state for the post-tx telemetry emit.
-              // Stays null when there's nothing to clear, which makes
-              // `emitCooldownClearedIfAny` skip below.
-              priorCooldownStateForEmit = conv.cooldownState;
-            }
-            const updated = await agentStore.updateProfile(tx, profileId, changes);
-            // Same-tx clear — `/model` rationale: model switch is a
-            // context change that ends any active cooldown. Atomicity
-            // prevents the partial-commit "switched model but still
-            // cooling down" state. See
-            // design/agent-resilience.md → Clear triggers.
-            if (shouldClearCooldown && clearTarget !== undefined) {
-              await agentStore.clearCooldown(tx, clearTarget);
-            }
-            return ok(updated);
-          });
-          // Emit AFTER the tx commits successfully — a validation err
-          // (`result.isErr()`) means the clear didn't happen, so don't
-          // fire telemetry. The thrown-error path is the catch below.
-          if (result.isOk() && clearTarget !== undefined) {
-            await emitCooldownClearedIfAny(priorCooldownStateForEmit, clearTarget, "model_switch");
+            // Match setProfile's optimization — skip the UPDATE when
+            // there's nothing to clear, avoiding a no-op row write.
+            shouldClearCooldown = conv.cooldownState !== null;
+            // Capture the prior state for the post-tx telemetry emit.
+            // Stays null when there's nothing to clear, which makes
+            // `emitCooldownClearedIfAny` skip below.
+            priorCooldownStateForEmit = conv.cooldownState;
           }
-          return result;
-        } catch (e) {
-          if (e instanceof UniqueViolationError) {
-            return err({ code: "profile_name_taken" as const });
+          const updated = await agentStore.updateProfile(tx, profileId, changes);
+          if (updated.isErr()) return err({ code: "profile_name_taken" as const });
+          // Same-tx clear — `/model` rationale: model switch is a
+          // context change that ends any active cooldown. Atomicity
+          // prevents the partial-commit "switched model but still
+          // cooling down" state. See
+          // design/agent-resilience.md → Clear triggers.
+          if (shouldClearCooldown && clearTarget !== undefined) {
+            await agentStore.clearCooldown(tx, clearTarget);
           }
-          throw e;
+          return ok(updated.value);
+        });
+        // Emit AFTER the tx commits — an err means the clear didn't
+        // happen, so don't fire telemetry.
+        if (result.isOk() && clearTarget !== undefined) {
+          await emitCooldownClearedIfAny(priorCooldownStateForEmit, clearTarget, "model_switch");
         }
+        return result;
       },
 
       async delete(platformUserHandle, profileId) {
@@ -1858,13 +1822,9 @@ export function createTransport(deps: {
           if (owner.userId !== identity.userId) {
             return err({ code: "access_denied" as const, reason: "profile not owned by caller" });
           }
-          try {
-            await agentStore.deleteProfile(tx, profileId);
-            return ok(undefined);
-          } catch (e) {
-            if (e instanceof ProfileInUseError) return err({ code: "profile_in_use" as const });
-            throw e;
-          }
+          const deleted = await agentStore.deleteProfile(tx, profileId);
+          if (deleted.isErr()) return err({ code: "profile_in_use" as const });
+          return ok(undefined);
         });
       },
 
@@ -1883,15 +1843,10 @@ export function createTransport(deps: {
           if (owner.userId !== identity.userId) {
             return err({ code: "access_denied" as const, reason: "profile not owned by caller" });
           }
-          try {
-            await agentStore.setProfileClass(tx, profileId, className);
-            return ok(undefined);
-          } catch (e) {
-            if (e instanceof UnknownProfileClassError) {
-              return err({ code: "unknown_profile_class" as const, name: e.className });
-            }
-            throw e;
-          }
+          const set = await agentStore.setProfileClass(tx, profileId, className);
+          if (set.isErr())
+            return err({ code: "unknown_profile_class" as const, name: set.error.name });
+          return ok(undefined);
         });
       },
     },
@@ -1909,21 +1864,18 @@ export function createTransport(deps: {
         return runInTx(async (tx) => {
           const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
           if (!identity) return err({ code: "identity_rejected" as const });
-          try {
-            const created = await agentStore.createProfileClass(tx, {
-              userId: identity.userId,
-              name: input.name,
-              description: input.description,
-            });
-            return ok(created);
-          } catch (e) {
-            if (e instanceof InvalidNameError) {
-              return err({ code: "profile_class_name_invalid" as const, name: e.proposedName });
-            }
-            if (e instanceof UniqueViolationError) {
-              return err({ code: "profile_class_name_taken" as const, name: input.name });
-            }
-            throw e;
+          const created = await agentStore.createProfileClass(tx, {
+            userId: identity.userId,
+            name: input.name,
+            description: input.description,
+          });
+          if (created.isOk()) return ok(created.value);
+          const e = created.error;
+          switch (e.kind) {
+            case "invalid_name":
+              return err({ code: "profile_class_name_invalid" as const, name: e.name });
+            case "profile_class_name_taken":
+              return err({ code: "profile_class_name_taken" as const, name: e.name });
           }
         });
       },
@@ -1942,18 +1894,17 @@ export function createTransport(deps: {
             if (refs > 0) return err({ code: "profile_class_in_use" as const, profileRefs: refs });
             return err({ code: "profile_class_has_blocks" as const, keys: [...keys] });
           }
-          try {
-            const result = await agentStore.deleteProfileClass(tx, identity.userId, name);
-            if (!result.deleted) {
-              return err({ code: "profile_class_not_found" as const, name });
-            }
-            return ok(undefined);
-          } catch (e) {
-            if (e instanceof ProfileClassInUseError) {
-              return err({ code: "profile_class_in_use" as const, profileRefs: e.profileRefs });
-            }
-            throw e;
+          const result = await agentStore.deleteProfileClass(tx, identity.userId, name);
+          if (result.isErr()) {
+            return err({
+              code: "profile_class_in_use" as const,
+              profileRefs: result.error.profileRefs,
+            });
           }
+          if (!result.value.deleted) {
+            return err({ code: "profile_class_not_found" as const, name });
+          }
+          return ok(undefined);
         });
       },
 
@@ -2003,31 +1954,26 @@ export function createTransport(deps: {
         return runInTx(async (tx) => {
           const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
           if (!identity) return err({ code: "identity_rejected" as const });
-          try {
-            const created = await agentStore.createCustomCompartment(tx, {
-              userId: identity.userId,
-              name: input.name,
-              description: input.description,
-            });
-            return ok(created);
-          } catch (e) {
-            if (e instanceof InvalidNameError) {
-              return err({ code: "compartment_name_invalid" as const, name: e.proposedName });
-            }
-            if (e instanceof ReservedCompartmentNameError) {
-              return err({ code: "compartment_name_reserved" as const, name: e.compartmentName });
-            }
-            if (e instanceof CustomCompartmentCapExceededError) {
+          const created = await agentStore.createCustomCompartment(tx, {
+            userId: identity.userId,
+            name: input.name,
+            description: input.description,
+          });
+          if (created.isOk()) return ok(created.value);
+          const e = created.error;
+          switch (e.kind) {
+            case "invalid_name":
+              return err({ code: "compartment_name_invalid" as const, name: e.name });
+            case "compartment_name_reserved":
+              return err({ code: "compartment_name_reserved" as const, name: e.name });
+            case "compartment_cap_exceeded":
               return err({
                 code: "compartment_cap_exceeded" as const,
                 limit: e.limit,
                 current: e.current,
               });
-            }
-            if (e instanceof UniqueViolationError) {
-              return err({ code: "compartment_name_taken" as const, name: input.name });
-            }
-            throw e;
+            case "compartment_name_taken":
+              return err({ code: "compartment_name_taken" as const, name: e.name });
           }
         });
       },
@@ -2076,39 +2022,34 @@ export function createTransport(deps: {
         // it to `git push` — empty-string check is enough for now.
         const validation = validateRepoInput(input);
         if (validation) return err(validation);
-        try {
-          const row = await runInTx((tx) =>
-            codingStore.insertRepo(tx, {
-              name: input.name,
-              localPath: input.localPath,
-              defaultBranch: input.defaultBranch ?? "main",
-              remoteUrl: input.remoteUrl,
-              devcontainer: null,
-              allowedBackends: ["claude"],
-              // Slice-1 default: a no-op so plan-only tasks have something to
-              // record. Slice 4's verify+push step needs a real value before
-              // it can use the repo. /repo edit (later) or SQL update for now.
-              verifyCommand: input.verifyCommand ?? "true",
-              taskTokenBudget: 200_000,
-              taskWallTimeSeconds: 1800,
-              maxConcurrentTasks: 1,
-              ...(input.identityName !== undefined && { identityName: input.identityName }),
-            }),
-          );
-          return ok({
+        const inserted = await runInTx((tx) =>
+          codingStore.insertRepo(tx, {
+            name: input.name,
+            localPath: input.localPath,
+            defaultBranch: input.defaultBranch ?? "main",
+            remoteUrl: input.remoteUrl,
+            devcontainer: null,
+            allowedBackends: ["claude"],
+            // Slice-1 default: a no-op so plan-only tasks have something to
+            // record. Slice 4's verify+push step needs a real value before
+            // it can use the repo. /repo edit (later) or SQL update for now.
+            verifyCommand: input.verifyCommand ?? "true",
+            taskTokenBudget: 200_000,
+            taskWallTimeSeconds: 1800,
+            maxConcurrentTasks: 1,
+            ...(input.identityName !== undefined && { identityName: input.identityName }),
+          }),
+        );
+        return inserted
+          .map((row) => ({
             id: row.id,
             name: row.name,
             localPath: row.localPath,
             defaultBranch: row.defaultBranch,
             remoteUrl: row.remoteUrl,
             verifyCommand: row.verifyCommand,
-          });
-        } catch (e) {
-          if (e instanceof UniqueViolationError) {
-            return err({ code: "repo_name_taken" as const, name: input.name });
-          }
-          throw e;
-        }
+          }))
+          .mapErr((e) => ({ code: "repo_name_taken" as const, name: e.name }));
       },
       async cloneAndAdd(input) {
         if (!codingStore) return err({ code: "sandbox_disabled" as const });
@@ -2169,36 +2110,31 @@ export function createTransport(deps: {
           });
         }
 
-        try {
-          const row = await runInTx((tx) =>
-            codingStore.insertRepo(tx, {
-              name: input.name,
-              localPath,
-              defaultBranch: input.defaultBranch ?? "main",
-              remoteUrl: input.remoteUrl,
-              devcontainer: null,
-              allowedBackends: ["claude"],
-              verifyCommand: input.verifyCommand ?? "true",
-              taskTokenBudget: 200_000,
-              taskWallTimeSeconds: 1800,
-              maxConcurrentTasks: 1,
-              ...(input.identityName !== undefined && { identityName: input.identityName }),
-            }),
-          );
-          return ok({
+        const inserted = await runInTx((tx) =>
+          codingStore.insertRepo(tx, {
+            name: input.name,
+            localPath,
+            defaultBranch: input.defaultBranch ?? "main",
+            remoteUrl: input.remoteUrl,
+            devcontainer: null,
+            allowedBackends: ["claude"],
+            verifyCommand: input.verifyCommand ?? "true",
+            taskTokenBudget: 200_000,
+            taskWallTimeSeconds: 1800,
+            maxConcurrentTasks: 1,
+            ...(input.identityName !== undefined && { identityName: input.identityName }),
+          }),
+        );
+        return inserted
+          .map((row) => ({
             id: row.id,
             name: row.name,
             localPath: row.localPath,
             defaultBranch: row.defaultBranch,
             remoteUrl: row.remoteUrl,
             verifyCommand: row.verifyCommand,
-          });
-        } catch (e) {
-          if (e instanceof UniqueViolationError) {
-            return err({ code: "repo_name_taken" as const, name: input.name });
-          }
-          throw e;
-        }
+          }))
+          .mapErr((e) => ({ code: "repo_name_taken" as const, name: e.name }));
       },
       async remove(name) {
         if (!codingStore) return err({ code: "sandbox_disabled" as const });
@@ -2538,7 +2474,7 @@ export function createTransport(deps: {
           });
           return ok(server);
         } catch (e) {
-          if (e instanceof UniqueViolationError)
+          if (findPostgresUniqueViolation(e))
             return err({ code: "mcp_server_name_taken" as const, name: spec.name });
           if (e instanceof McpInvalidServerNameError)
             return err({ code: "mcp_invalid_config" as const, reason: e.message });

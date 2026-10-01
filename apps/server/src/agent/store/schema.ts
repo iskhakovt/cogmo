@@ -415,8 +415,8 @@ export const modelProviders = pgTable(
  *
  * The CHECK constraint pins the base_url invariant at the DB layer
  * (`fal ↔ NULL`, `openai_compatible ↔ NOT NULL`). The store layer adds URL
- * hygiene (https, no trailing slash) on top with a typed
- * `InvalidProviderConfigError`.
+ * hygiene (https, no trailing slash) on top, returning
+ * `invalid_provider_config`.
  *
  * No fallback chain — unlike `llm_providers` + `model_providers`, image
  * generation has no transparent cross-provider retry. A failed image gen

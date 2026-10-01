@@ -98,14 +98,25 @@ describe("keyed insert against a concurrent writer (real Postgres)", () => {
     expect(attempts).toBe(2);
   });
 
-  it("insertRepo, the control: the loser fails with 23505, which is not retried", async () => {
+  it("a plain insert, the control: the loser fails with 23505, which is not retried", async () => {
     const params = repo("plain");
-    const { loser, attempts } = await race(params, (trx) => store.insertRepo(trx, params));
+    const { loser, attempts } = await race(params, (trx) =>
+      trx.insert(codingRepos).values({ ...params, allowedBackends: [...params.allowedBackends] }),
+    );
 
     assertKind(loser, "rejected");
     expect(findPgErrorByCode(loser.error, ["23505"])).toMatchObject({
       constraint_name: "coding_repos_name_unique",
     });
+    expect(attempts).toBe(1);
+  });
+
+  it("insertRepo: the loser's 23505 is repo_name_taken, not retried", async () => {
+    const params = repo("taken");
+    const { loser, attempts } = await race(params, (trx) => store.insertRepo(trx, params));
+
+    assertKind(loser, "fulfilled");
+    expect(loser.value._unsafeUnwrapErr()).toEqual({ kind: "repo_name_taken", name: params.name });
     expect(attempts).toBe(1);
   });
 });
