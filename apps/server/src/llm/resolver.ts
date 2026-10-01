@@ -92,7 +92,12 @@ export function createDbProviderResolver(deps: DbResolverDeps): LlmProviderResol
 
 async function buildResolved(model: string, deps: DbResolverDeps): Promise<ResolvedLlm> {
   const rows = await deps.runInTx((tx) => deps.agentStore.listProvidersForModel(tx, model));
-  if (rows.length === 0) {
+  // Limits come from the primary row (position 0). Fallback rows can carry
+  // their own limits in the schema, but only the primary's apply — the
+  // fallback wrapper picks one chain per turn and the budget isn't
+  // recomputed mid-turn if it switches providers.
+  const [primary] = rows;
+  if (primary === undefined) {
     throw new ProviderConfigError(
       `No provider configured for model "${model}". Run \`cogmo setup\` to configure one.`,
     );
@@ -101,20 +106,8 @@ async function buildResolved(model: string, deps: DbResolverDeps): Promise<Resol
   // Resolve every row in parallel — each is an independent secret-decrypt +
   // adapter construction. Promise.all rejects on the first failing row
   // (which surfaces the operator-fix-needed message); other in-flight
-  // decrypts complete harmlessly. Sequential `for...of` would serialize the
-  // DB reads on first miss for fallback chains; only matters when N > 1
-  // but cheap to do right. Matches the snippet in `design/providers.md`.
+  // decrypts complete harmlessly.
   const providers = await Promise.all(rows.map((row) => buildAdapter(row, deps)));
-  // Limits come from the primary row (position 0). Fallback rows can carry
-  // their own limits in the schema, but we currently apply only the
-  // primary's — the fallback wrapper picks one chain per turn and we don't
-  // recompute the budget mid-turn if it switches providers.
-  const primary = rows[0];
-  if (!primary) {
-    // Defensive: rows.length > 0 above guarantees this, but the type checker
-    // doesn't know `rows[0]` is non-undefined under noUncheckedIndexedAccess.
-    throw new ProviderConfigError(`No primary provider row for model "${model}"`);
-  }
   return {
     provider: new FallbackLlmProvider(providers),
     limits: {
