@@ -98,7 +98,7 @@ export type TaskInvoke = z.infer<typeof TaskInvokeSchema>;
  * Boundary translation: this protocol schema uses `.optional()` (field
  * may be absent on the wire) while the storage schema
  * `SkillRunResourceUsageSchema` uses `.nullable()` (field must be
- * present, may be null). `runner.invoke` bridges the two with
+ * present, may be null). `executeRun` (`invoke/execute-run.ts`) bridges the two with
  * `result.rusage?.peakMemoryBytes ?? null` — wire-absence + tier-1 +
  * synthesised-result all collapse to the same `null` on disk.
  */
@@ -123,6 +123,11 @@ const TaskResultErrSchema = z.object({
 });
 export const TaskResultSchema = z.union([TaskResultOkSchema, TaskResultErrSchema]);
 export type TaskResult = z.infer<typeof TaskResultSchema>;
+
+/** A task's result as a host hands it to the runner: the wire result without its framing. */
+export type TaskOutcome =
+  | { ok: true; output?: unknown; rusage?: RuntimeRusage }
+  | { ok: false; error: string; rusage?: RuntimeRusage };
 
 export const CtxCallSchema = z.object({
   type: z.literal("ctx_call"),

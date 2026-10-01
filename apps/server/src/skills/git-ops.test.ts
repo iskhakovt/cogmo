@@ -4,7 +4,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { deleteRef, getMainSha, gitShow, isAncestor, revParse, updateRef } from "./git-ops.js";
+import {
+  deleteRef,
+  getMainSha,
+  gitShow,
+  isAncestor,
+  RefMovedError,
+  revParse,
+  updateRef,
+} from "./git-ops.js";
 
 const execFileP = promisify(execFile);
 
@@ -154,7 +162,7 @@ describe("git-ops", () => {
       await updateRef(bare, "refs/heads/main", shaA, "0000000000000000000000000000000000000000");
       await expect(
         updateRef(bare, "refs/heads/main", shaB, "0000000000000000000000000000000000000000"),
-      ).rejects.toThrow(/changed since read/);
+      ).rejects.toThrow(RefMovedError);
     });
   });
 

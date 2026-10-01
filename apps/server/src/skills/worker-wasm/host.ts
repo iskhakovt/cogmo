@@ -4,7 +4,7 @@ import { err, ok, type Result } from "neverthrow";
 import { match } from "ts-pattern";
 import { logger } from "../../logger.js";
 import { type CtxHandler, Dispatcher } from "../dispatcher.js";
-import type { RuntimeRusage, TaskResult } from "../protocol.js";
+import type { TaskOutcome, TaskResult } from "../protocol.js";
 import { DEFAULT_WALL_CLOCK_S, timeoutSignal } from "../wall-clock.js";
 import type { StartFailure, WorkerFrame } from "../worker-state.js";
 import { createPortTransport } from "./transport.js";
@@ -51,19 +51,11 @@ export interface RunOnWorkerParams {
   ctxHandler: CtxHandler;
 }
 
-export interface RunOnWorkerResult {
-  ok: boolean;
-  /** Set when ok=true. */
-  output?: unknown;
-  /** Set when ok=false. */
-  error?: string;
-  /**
-   * The rusage the task's `task_result` carried, if any. The Pyodide worker
-   * sends none: `getrusage` is process-wide and would inflate under
-   * concurrent workers.
-   */
-  rusage?: RuntimeRusage;
-}
+/**
+ * A tier-1 task's outcome. The Pyodide worker sends no `rusage`: `getrusage`
+ * is process-wide and would inflate under concurrent workers.
+ */
+export type RunOnWorkerResult = TaskOutcome;
 
 /** A Pyodide worker thread, as `runOnThread` drives it. */
 export interface PyodideThread {

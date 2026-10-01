@@ -1,6 +1,6 @@
 import { PassThrough, type Readable, type Writable } from "node:stream";
 import { ok } from "neverthrow";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, assert, describe, expect, it, vi } from "vitest";
 import {
   type ExecStreamingHandle,
   type LocalDockerSessionState,
@@ -281,7 +281,7 @@ describe("runOnSysboxContainer", () => {
       ctxHandler: noopCtx,
     });
 
-    expect(result.ok).toBe(false);
+    assert(!result.ok);
     expect(result.workerReusable).toBe(false);
     expect(result.error).toMatch(/exec blew up/);
     // Even on failure, the worker's dispose ran — sandbox.delete called.
@@ -302,7 +302,7 @@ describe("runOnSysboxContainer", () => {
       ctxHandler: noopCtx,
     });
 
-    expect(result.ok).toBe(false);
+    assert(!result.ok);
     expect(result.error).toMatch(/daemon unreachable/);
     // sandbox.delete is never called because no session was ever created.
     expect(bundle.sandbox.delete).not.toHaveBeenCalled();
@@ -324,6 +324,6 @@ describe("runOnSysboxContainer", () => {
       ctxHandler: noopCtx,
     });
 
-    expect(result.ok).toBe(true);
+    assert(result.ok);
   });
 });

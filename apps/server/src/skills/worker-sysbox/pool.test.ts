@@ -1,5 +1,5 @@
 import { err, ok } from "neverthrow";
-import { describe, expect, it, vi } from "vitest";
+import { assert, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { SandboxClient } from "../../sandbox/index.js";
 import { expectDefined } from "../../test/assertions.js";
@@ -239,7 +239,7 @@ describe("SysboxWorkerPool", () => {
     const h = buildPoolHarness({ poolOptions: { min: 1, max: 3 } });
     const pool = await h.pool;
     const result = await pool.invoke(invokeParams("t-1"));
-    expect(result.ok).toBe(true);
+    assert(result.ok);
     expect(pool.stats()).toMatchObject({ total: 1, idle: 1, busy: 0 });
     await pool.dispose();
   });
@@ -321,7 +321,7 @@ describe("SysboxWorkerPool", () => {
 
     h.advanceTime(6_000);
     const r = await pool.invoke(invokeParams("t-aged"));
-    expect(r.ok).toBe(true);
+    assert(r.ok);
     await new Promise<void>((r) => setTimeout(r, 0));
     expect(original?.state).toBe("disposed");
     expect(h.spawnCount()).toBe(2);
@@ -337,7 +337,7 @@ describe("SysboxWorkerPool", () => {
     const pool = await h.pool;
 
     const result = await pool.invoke(invokeParams("t-1"));
-    expect(result.ok).toBe(false);
+    assert(!result.ok);
     expect(result.error).toBe("wall_clock_exceeded");
 
     await new Promise<void>((r) => setTimeout(r, 0));
@@ -354,7 +354,7 @@ describe("SysboxWorkerPool", () => {
 
     const result = await pool.invoke(invokeParams("t-after-death"));
 
-    expect(result.ok).toBe(true);
+    assert(result.ok);
     expect(dead.state).toBe("disposed");
     expect(h.spawnCount()).toBe(2);
     expect(pool.stats()).toMatchObject({ total: 1, idle: 1, dead: 0 });
@@ -1359,7 +1359,7 @@ describe("SysboxWorkerPool", () => {
 
     first.open();
     const aResult = await a;
-    expect(aResult.ok).toBe(false);
+    assert(!aResult.ok);
     const bResult = await b;
     expect(bResult).toMatchObject({ ok: true, output: { x: 1 } });
     expect(spawnIndex).toBe(2);

@@ -212,7 +212,7 @@ These belong in **integration tests** that exercise the orchestrator + event bus
 
 For every command surface (Telegram `/repo`, agent tools), enumerate the discriminated error codes and pin the user-visible response per code. Prevents drift where a new error code returns a generic fallback instead of a tailored message.
 
-Reference: `src/transport/adapters/telegram/repo-commands.test.ts`; `src/agent/coding/tool.test.ts`.
+Reference: `src/transport/adapters/telegram/commands/repo.test.ts`; `src/agent/coding/tool.test.ts`.
 
 ### Version-pinning canaries
 

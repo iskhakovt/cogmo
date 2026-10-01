@@ -1,0 +1,6 @@
+The skills runner is split into deploy, invoke and source-cache modules, and three deploy and run races are fixed.
+
+- **Concurrent deploys.** Register, approve and rollback read `main` before taking their per-skill lock, while `main` is shared by every skill, so a concurrent deploy of another skill made them throw a raw `update-ref` error. One `advanceMain` re-reads `main` under the lock and maps a moved `main` (or a compare-and-swap that loses the race) to a rejection: register `non_fast_forward`, approve `non_fast_forward_at_approve_time`, rollback `main_moved`.
+- **Two keyed retries finishing one run.** The loser threw; it gets the settled result the winner wrote.
+- **Modules.** `runner.ts` (~1.9k lines) is a thin `SkillRunnerImpl` over `deploy/` (register, approve, rollback, activation, lockfile check, mirror), `invoke/` (runtime planning, the warm pool, and one module per recovery-point transition), `source-cache.ts` and `listing.ts`. The recovery point maps to an explicit `RunStart` union. Idempotency keys, lock order and write order are unchanged.
+- **Results as unions.** `RegisterResult`, `SkillRunResult`, `InvokeResult` and `RunOnWorkerResult` are discriminated unions, so `errors` exists only on `rejected` and `output` only on `success`.

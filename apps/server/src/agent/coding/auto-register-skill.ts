@@ -122,15 +122,15 @@ export async function autoRegisterSkill(
     origin,
     signal: AbortSignal.timeout(REGISTER_TIMEOUT_MS),
   });
-  const hasErrors = result.errors && result.errors.length > 0;
-  const logLevel = result.status === "live" && !hasErrors ? "info" : "warn";
+  const errors = result.status === "rejected" ? result.errors : [];
+  const logLevel = result.status === "live" ? "info" : "warn";
   log[logLevel](
     {
       taskId: args.taskId,
       branch,
       status: result.status,
       name: result.name,
-      ...(hasErrors && { errors: result.errors }),
+      ...(errors.length > 0 && { errors }),
     },
     "auto-register fired",
   );

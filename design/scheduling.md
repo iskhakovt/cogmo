@@ -204,7 +204,7 @@ const sessionState = await step.run("create-container", async () => {
 });
 ```
 
-The inline DB read is itself idempotent (a secret decrypt has no side effects), so re-running it on replay is safe even though it's not checkpointed. Concrete examples in `src/agent/coding/orchestrator.ts` and `src/agent/coding/cleanup-orphan-run-branches.ts`.
+The inline DB read is itself idempotent (a secret decrypt has no side effects), so re-running it on replay is safe even though it's not checkpointed. Concrete examples in `src/agent/coding/plan-sandbox.ts`, `src/agent/coding/execute-sandbox.ts` and `src/agent/coding/cleanup-orphan-run-branches.ts`.
 
 ## Agent Self-Scheduling `[proposed]`
 

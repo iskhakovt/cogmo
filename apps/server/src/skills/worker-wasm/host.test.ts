@@ -1,5 +1,5 @@
 import { err, ok } from "neverthrow";
-import { afterAll, describe, expect, it, vi } from "vitest";
+import { afterAll, assert, describe, expect, it, vi } from "vitest";
 import type { CtxHandler } from "../dispatcher.js";
 import { runOnWorker } from "./host.js";
 
@@ -35,7 +35,7 @@ async def run(inputs, ctx):
       ctxHandler: noopHandler(),
     });
 
-    expect(result.ok).toBe(true);
+    assert(result.ok);
     expect(result.output).toEqual({ echo: 8 });
   });
 
@@ -63,7 +63,7 @@ async def run(inputs, ctx):
       ctxHandler: handler,
     });
 
-    expect(result.ok).toBe(true);
+    assert(result.ok);
     expect(result.output).toEqual({ len: 11, ts: "2026-01-01T00:00:00.000Z" });
     expect(handler.handle).toHaveBeenCalledWith({
       method: "secrets.get",
@@ -91,6 +91,7 @@ async def run(inputs, ctx):
       inputs: {},
       ctxHandler: handler,
     });
+    assert(result.ok);
     expect(result.output).toEqual({
       kind: "not_in_allowlist",
       message: "secret 'x' is not declared",
@@ -112,7 +113,7 @@ async def run(inputs, ctx):
       inputs: {},
       ctxHandler: handler,
     });
-    expect(result.ok).toBe(false);
+    assert(!result.ok);
     expect(result.error).toContain("CtxError: missing_effect: needs reads_memory");
   });
 
@@ -128,6 +129,7 @@ async def run(inputs, ctx):
       inputs: {},
       ctxHandler: noopHandler(),
     });
+    assert(result.ok);
     expect(result.output).toEqual({ isNone: true });
   });
 
@@ -143,7 +145,7 @@ async def run(inputs, ctx):
       ctxHandler: noopHandler(),
     });
 
-    expect(result.ok).toBe(false);
+    assert(!result.ok);
     expect(result.error).toContain("kaboom");
   });
 
@@ -164,7 +166,7 @@ async def run(inputs, ctx):
       ctxHandler: noopHandler(),
     });
 
-    expect(result.ok).toBe(false);
+    assert(!result.ok);
     expect(result.error).toBe("wall_clock_exceeded");
   });
 
@@ -179,7 +181,7 @@ async def run(inputs, ctx):
       inputs: {},
       ctxHandler: noopHandler(),
     });
-    expect(result.ok).toBe(true);
+    assert(result.ok);
     expect(result.output).toBe("hello");
   });
 
@@ -194,7 +196,7 @@ async def run(inputs, ctx):
       inputs: {},
       ctxHandler: noopHandler(),
     });
-    expect(result.ok).toBe(true);
+    assert(result.ok);
     expect(result.output).toBe(42);
   });
 
@@ -209,7 +211,7 @@ async def run(inputs, ctx):
       inputs: {},
       ctxHandler: noopHandler(),
     });
-    expect(result.ok).toBe(true);
+    assert(result.ok);
     expect(result.output).toEqual([1, 2, 3]);
   });
 
@@ -224,7 +226,7 @@ async def run(inputs, ctx):
       inputs: {},
       ctxHandler: noopHandler(),
     });
-    expect(result.ok).toBe(true);
+    assert(result.ok);
     expect(result.output).toBeNull();
   });
 
@@ -239,7 +241,7 @@ async def run(inputs, ctx):
       inputs: {},
       ctxHandler: noopHandler(),
     });
-    expect(result.ok).toBe(false);
+    assert(!result.ok);
     expect(typeof result.error).toBe("string");
     expect(result.error?.length ?? 0).toBeGreaterThan(0);
   });
@@ -258,7 +260,7 @@ async def run(inputs, ctx):
       inputs: {},
       ctxHandler: noopHandler(),
     });
-    expect(result.ok).toBe(false);
+    assert(!result.ok);
     expect(result.error).toContain("MyCustomError");
     expect(result.error).toContain("specific failure");
   });
@@ -281,7 +283,7 @@ async def run(inputs, ctx):
       inputs: {},
       ctxHandler: handler,
     });
-    expect(result.ok).toBe(true);
+    assert(result.ok);
     expect(result.output).toEqual({ got: "u1", tz: "Europe/London" });
   });
 
@@ -304,7 +306,7 @@ async def run(inputs, ctx):
       inputs: {},
       ctxHandler: noopHandler(),
     });
-    expect(result.ok).toBe(false);
+    assert(!result.ok);
     expect(typeof result.error).toBe("string");
     expect(result.error?.length ?? 0).toBeGreaterThan(0);
   });
@@ -333,6 +335,8 @@ async def run(inputs, ctx):
       ctxHandler: handler2,
     });
 
+    assert(r1.ok);
+    assert(r2.ok);
     expect(r1.output).toEqual({ v: "first" });
     expect(r2.output).toEqual({ v: "second" });
     expect(handler1.handle).toHaveBeenCalledTimes(1);
@@ -351,7 +355,7 @@ async def run(inputs, ctx):
       readyTimeoutMs: 50,
       ctxHandler: noopHandler(),
     });
-    expect(result.ok).toBe(false);
+    assert(!result.ok);
     expect(result.error).toMatch(/worker_init_timeout/);
   });
 
@@ -368,7 +372,7 @@ async def run(inputs, ctx):
       inputs: { nums: [1, 2, 3, 4], flag: true },
       ctxHandler: noopHandler(),
     });
-    expect(result.ok).toBe(true);
+    assert(result.ok);
     expect(result.output).toEqual({ sum: 10, flag: true });
   });
 });

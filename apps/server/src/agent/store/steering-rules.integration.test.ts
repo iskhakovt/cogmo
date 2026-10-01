@@ -17,11 +17,12 @@ import * as schema from "../../db/schemas.js";
 import { type Transaction, transactor } from "../../db/transactor.js";
 import { assertKind, expectDefined, expectOk } from "../../test/assertions.js";
 import { fileDatabaseUrl, fileDefaultUserId } from "../../test/integration-file.js";
-import { DrizzleAgentStore, type InstructionRuleParams } from "./index.js";
+import { DrizzleProfileStore } from "./profiles.js";
 import { profiles, steeringRules } from "./schema.js";
+import { DrizzleSteeringRuleStore, type InstructionRuleParams } from "./steering-rules.js";
 
 const PREFIX = `it-${randomBytes(4).toString("hex")}-`;
-const store = new DrizzleAgentStore();
+const store = new DrizzleSteeringRuleStore();
 
 let winnerSql: ReturnType<typeof postgres>;
 let loserSql: ReturnType<typeof postgres>;
@@ -38,7 +39,7 @@ beforeAll(async () => {
   loserPid = expectDefined(row, "loser pid").pid;
   profileId = (
     await transactor(drizzle(observerSql, { schema }))((trx) =>
-      store
+      new DrizzleProfileStore()
         .createProfile(trx, {
           userId: null,
           name: `${PREFIX}profile`,

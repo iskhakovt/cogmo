@@ -1,32 +1,29 @@
 /**
- * Verify → push → PR orchestrator (slice 4.0h).
+ * Verify → push → PR orchestrator (`coding-task-verify`).
  *
- * Triggered by `coding/task/cli-done` after the execute orchestrator
- * (`coding-task-execute`) flips the task to `pending_verify`. Drives:
+ * Triggered by `coding/task/cli-done` after the execute orchestrator flips
+ * the task to `pending_verify`. Drives:
  *
  *   pending_verify → verifying → (failed) | pushed → pr_open
  *
- * with durable Inngest steps so an Inngest replay re-enters the same
- * code path and the in-progress steps are checkpointed. Container
- * creation is re-done by this function (the execute teardown already
- * cleaned the previous one) so the askpass mount is bound to a fresh
- * container that only this orchestrator can `exec` against.
+ *   claim → credentials → verify sandbox → run verify → push branch →
+ *   open PR
  *
- * On any failure: status=failed, captured reason persisted, container
- * + askpass torn down. Optional `refs/cogmo-wip/<task-id>` push on
- * verify-fail is gated behind `CODING_VERIFY_WIP_PUSH=true` (default
- * off — see slice4-plan.md decision 5); flipping it on requires
- * implementing the push, which is currently a no-op.
+ * The execute run already reaped its container, so this one creates a
+ * fresh container with the askpass mount bound, which only this run can
+ * `exec` against. On any failure: status=failed, reason persisted, worktree,
+ * container and askpass torn down.
  */
 
 import type { Octokit } from "@octokit/rest";
 import type { Inngest } from "inngest";
+import { err, ok, type Result } from "neverthrow";
 import type { Transactor } from "../../db/index.js";
-import { codingTaskCliDone, codingTaskFailed } from "../../inngest/events.js";
+import { codingTaskCliDone } from "../../inngest/events.js";
 import type { StepRun, StepSendEvent } from "../../inngest/index.js";
 import { logger } from "../../logger.js";
-import { cleanupAskpass, provisionAskpass } from "../../sandbox/askpass.js";
-import type { SandboxClient, SandboxSession } from "../../sandbox/index.js";
+import type { AskpassMaterials } from "../../sandbox/askpass.js";
+import type { SandboxClient, SandboxSession, SandboxSessionState } from "../../sandbox/index.js";
 import type { ResourceLimits } from "../../sandbox/types.js";
 import {
   describeResolveIdentityError,
@@ -34,20 +31,27 @@ import {
   resolveGitHubIdentity,
 } from "../../secrets/github.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
-import { loadCodingSandboxEnv } from "./auth.js";
-import { commitAuthorFor, runCommitAndPush } from "./commit-push.js";
-import { fetchFeatureBranch } from "./git-as-transport.js";
-import { parseRemoteUrl, runOpenPr } from "./open-pr.js";
-import { buildWorktreeSpec, checkoutFeatureBranchInSandbox } from "./orchestrator.js";
-import type { CodingStore } from "./store/index.js";
+import { describeError } from "../../util/describe-error.js";
+import { AskpassLease } from "./askpass-lease.js";
+import type { loadCodingSandboxEnv } from "./auth.js";
+import { type CodingRun, codingRun, loadTaskAndRepo } from "./coding-run.js";
+import { parseRemoteUrl } from "./open-pr.js";
+import type { CodingRepoRow, CodingStore, CodingTaskRow } from "./store/index.js";
+import { failTaskFromCatch, recordTaskFailed } from "./task-failure.js";
+import { CLAIMS, claimTask } from "./task-lifecycle.js";
+import {
+  checkoutFeatureBranchStep,
+  lazySession,
+  loadSandboxEnv,
+  taskImage,
+  taskSessionSpec,
+} from "./task-sandbox.js";
 import { safeTeardownWorktree } from "./teardown.js";
-import type { PrMetadata } from "./types.js";
-import { runVerifyStreaming } from "./verify.js";
+import type { WorktreeAssignment } from "./types.js";
+import { runVerifyStreaming, type VerifyResult } from "./verify.js";
+import { openTaskPr, pushVerifiedBranch } from "./verify-publish.js";
 
 const log = logger.child({ component: "coding.verify-orchestrator" });
-
-const HOME_VOLUME_PREFIX = "cogmo-task-home";
-const WORKTREE_DIR_IN_CONTAINER = "/workspace";
 
 export interface VerifyOrchestratorDeps {
   runInTx: Transactor;
@@ -55,7 +59,7 @@ export interface VerifyOrchestratorDeps {
   sandbox: SandboxClient;
   /** Resolves `github_identity:<name>` rows. */
   secretsStore: SecretsStore;
-  /** Host root for per-task askpass material (slice 4.0d). */
+  /** Host root for per-task askpass material. */
   askpassBaseDir: string;
   /** Default base image when the repo has no devcontainer override. */
   devbaseImage: string;
@@ -86,7 +90,7 @@ export function createCodingVerifyOrchestrator(deps: VerifyOrchestratorDeps, inn
       triggers: [codingTaskCliDone],
       retries: 0,
       // Sequentialize per task — guards against duplicate fires from the
-      // execute orchestrator's retry path. Matches the slice 1/2 pattern.
+      // execute orchestrator's retry path.
       concurrency: { limit: 1, key: "event.data.taskId" },
     },
     async ({ event, step, runId }) => {
@@ -104,21 +108,19 @@ export function createCodingVerifyOrchestrator(deps: VerifyOrchestratorDeps, inn
 
 interface RunParams {
   taskId: string;
-  /**
-   * Inngest run id, stamped on the ownership claim so a re-executed claim can
-   * tell its own committed write from a duplicate delivery's. Tests pass any
-   * stable string.
-   */
+  /** See {@link CodingRun.runId}. */
   runId: string;
   deps: VerifyOrchestratorDeps;
   stepRun: StepRun;
-  /**
-   * Durable bus emit. Used in the in-worker catch path so a transient
-   * send blip surfaces as a function failure (caught by the reconcile
-   * subscriber) rather than a silently-swallowed event.
-   */
+  /** See {@link CodingRun.stepSendEvent}. */
   stepSendEvent: StepSendEvent;
   inngest: Pick<Inngest, "send">;
+}
+
+/** What a run fails with: the task's repo and worktree, for teardown. */
+interface VerifyFailureContext {
+  repo: CodingRepoRow;
+  assignment: WorktreeAssignment;
 }
 
 /**
@@ -126,440 +128,226 @@ interface RunParams {
  * and an inline shim in tests.
  */
 export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestratorResult> {
-  const { taskId, runId, deps, stepRun, stepSendEvent, inngest } = params;
-  const taskLog = log.child({ taskId, runId });
-  const { runInTx, store, sandbox, secretsStore, askpassBaseDir } = deps;
-
-  const task = await runInTx((tx) => store.getTask(tx, taskId));
-  if (!task) throw new Error(`coding task not found: ${taskId}`);
-  const repo = await runInTx((tx) => store.getRepoById(tx, task.repoId));
-  if (!repo) throw new Error(`coding repo not found: ${task.repoId}`);
-
+  const { taskId, deps, inngest } = params;
+  const run = codingRun(params, log);
+  const { task, repo } = await loadTaskAndRepo(deps, taskId);
   if (!task.worktreeAssignment) {
     throw new Error(`coding task ${taskId} has no worktree_assignment`);
   }
-  const worktreeAssignment = task.worktreeAssignment;
+  const assignment = task.worktreeAssignment;
 
-  // The run's ownership claim (see .claude/rules/inngest.md — a bare-body
-  // status read would see this run's own write and abandon the sequence).
-  //
-  // Ahead of the try block and of the fail-fast checks below, because every
-  // one of those can call `failAndTeardown`: a duplicate event that trips,
-  // say, a rotated secret would otherwise flip a task another run owns to
-  // `failed`. The cost is that a run failing one of those checks passes
-  // through `verifying` on its way to `failed` for the millisecond the
-  // decrypts take — invisible (the progress UI renders from stream events,
-  // and both statuses are non-terminal so admission counting is unchanged),
-  // and moving the claim back below the checks to avoid it reinstates the
-  // flip-a-terminal-task bug.
-  // `stale` at the transition's own target is this run's earlier attempt,
-  // not a rival: the UPDATE committed and the step result was lost before
-  // Inngest recorded it, so the re-run finds its own write. Reading that as
-  // a lost race returns `skipped` with no failure event — the stranded task
-  // this whole change exists to prevent. Per-task `concurrency: 1` means no
-  // rival run can be live to have written it.
-  // `stale` naming this transition's own target is ambiguous by status alone:
-  // it is either this run's earlier attempt (the UPDATE committed, the step
-  // result was lost) or a duplicate delivery arriving after a dead run left
-  // the row here. The first must resume; the second must not mint a second
-  // sandbox and a second paid CLI session. `claimedByRunId` is what separates
-  // them — a fresh delivery is a fresh Inngest run.
-  const transition = await stepRun("set-status-verifying", () =>
-    runInTx((tx) => store.transitionTaskStatus(tx, taskId, "pending_verify", "verifying", runId)),
-  );
-  //
-  // A row already at the target with no claimant — every row predating
-  // migration 0054 — is adopted by the transition itself, which stamps this
-  // run and returns `transitioned`. It never reaches this branch, and the
-  // next delivery finds a claimant that isn't its own.
-  if (
-    transition.kind !== "transitioned" &&
-    !(
-      transition.kind === "stale" &&
-      transition.status === "verifying" &&
-      transition.claimedByRunId === runId
-    )
-  ) {
-    taskLog.info(
-      { transition },
+  // Ahead of the credential checks too, since each of them fails the task: a
+  // duplicate event tripping, say, a rotated secret would otherwise flip a
+  // task another run owns to `failed`. The cost is that a run failing one of
+  // them passes through `verifying` for the millisecond the decrypts take —
+  // invisible, as both statuses are non-terminal.
+  const claim = await claimTask(run, deps, CLAIMS.verify);
+  if (claim.kind === "lost") {
+    run.log.info(
+      { transition: claim.transition },
       "verify: status transition lost the race (already verifying or terminal)",
     );
     return { status: "skipped" };
   }
 
-  /**
-   * Local helper bundling status=failed + worktree teardown for every
-   * verify-orchestrator failure exit. Inlined as a closure (rather than a
-   * top-level function with many params) because it captures `stepRun`,
-   * `store`, `secretsStore`, `repo`, `taskId`, `worktreeAssignment` from
-   * this scope.
-   */
-  const failAndTeardown = async (reason: string): Promise<VerifyOrchestratorResult> => {
-    await stepRun("set-status-failed", () =>
-      runInTx((tx) =>
-        store.updateTaskStatus(tx, { id: taskId, status: "failed", failureReason: reason }),
-      ),
-    );
-    await stepSendEvent("emit-task-failed", {
-      ...codingTaskFailed.create({ taskId, reason }),
-      id: `task-failed-${taskId}`,
-    });
-    await stepRun("teardown-worktree", () =>
-      safeTeardownWorktree({ secretsStore, runInTx, repo, taskId, worktreeAssignment }),
-    ).catch(() => undefined);
-    return { status: "failed", failureReason: reason };
-  };
+  const failure: VerifyFailureContext = { repo, assignment };
+  const credentials = await resolveVerifyCredentials(deps, repo);
+  if (credentials.isErr()) return await failVerify(run, deps, failure, credentials.error);
+  const { remote, identity, env } = credentials.value;
 
-  const remote = parseRemoteUrl(repo.remoteUrl);
-  if (!remote) {
-    return await failAndTeardown(`cannot parse owner/repo from remote URL: ${repo.remoteUrl}`);
-  }
-
-  // Identity resolution happens before any container work — fast-fail when
-  // the wizard hasn't been run rather than spinning up a container we'll
-  // throw away.
-  const identityResult = await runInTx((tx) =>
-    resolveGitHubIdentity(tx, secretsStore, repo.identityName),
-  );
-  if (identityResult.isErr()) {
-    return await failAndTeardown(describeResolveIdentityError(identityResult.error));
-  }
-  const identity: GitHubIdentity = identityResult.value;
-
-  // Same fail-fast contract for the Claude Code subscription token —
-  // resolved here (not inside the create-container step) so a missing
-  // secret doesn't waste an askpass provision on disk before surfacing.
-  const loadAuth = deps.loadCodingSandboxEnv ?? loadCodingSandboxEnv;
-  const authResult = await runInTx((tx) => loadAuth(tx, secretsStore));
-  if (authResult.isErr()) {
-    return await failAndTeardown(authResult.error.message);
-  }
-  const sandboxEnv = authResult.value;
-
-  let askpassProvisioned = false;
-
+  const askpassLease = new AskpassLease(deps.askpassBaseDir, taskId);
   try {
-    // Provision askpass material — host-side, per-task. Mark before the
-    // step body executes so a partial provision (mkdir succeeded but a
-    // writeFileSync threw) still triggers cleanup in the finally block.
-    // The cleanup is a recursive `rm -rf`; absent or partial dirs are
-    // no-ops so over-cleaning is harmless.
-    askpassProvisioned = true;
-    const askpass = await stepRun("provision-askpass", async () =>
-      provisionAskpass({ baseDir: askpassBaseDir, rootTaskId: taskId, identity }),
-    );
-
-    // Create a fresh container with the askpass dir mounted read-only at
-    // /tmp/cogmo-askpass. Cleanup goes through `deleteByTaskId(taskId)`
-    // unconditionally in the finally block — idempotent at the
-    // label-index layer, sweeps any provider-side state that survived
-    // a thrown create on managed backends, and a no-op when nothing
-    // labelled exists.
-    const containerImage = repo.devcontainer?.image ?? deps.devbaseImage;
-    // Delegate-gate on the named-snapshot warm. Boot fires-and-forgets;
-    // a verify task arriving before warm completes shares the promise.
-    await stepRun("ensure-image-present", async () => {
-      await sandbox.ensureImagePresent(containerImage);
+    const askpass = await askpassLease.provision(run, identity);
+    const state = await createVerifySandbox(run, deps, {
+      task,
+      repo,
+      assignment,
+      identity,
+      askpass,
+      env,
     });
-    const sessionState = await stepRun("create-container", async () => {
-      const session = await sandbox.create({
-        taskId,
-        worktree: buildWorktreeSpec({
-          taskId,
-          capability: sandbox.capabilities.workingTreeTransport,
-          assignment: worktreeAssignment,
-          remoteUrl: repo.remoteUrl,
-          identityPat: identity.pat,
-        }),
-        ...(sandbox.capabilities.workingTreeTransport === "bind-mount" && {
-          homeVolume: { volumeName: `${HOME_VOLUME_PREFIX}-${taskId}` },
-        }),
-        image: containerImage,
-        resourceLimits: deps.defaultResourceLimits,
-        expiresAt: new Date(Date.now() + deps.taskTtlMs),
-        allowPrivilegedRunc: task.allowPrivilegedRunc,
-        askpass: { hostDir: askpass.hostDir, containerDir: askpass.containerDir },
-        env: sandboxEnv,
-      });
-      return session.state;
+    const container = lazySession(deps.sandbox, state);
+
+    const verdict = await runVerifyStage(run, inngest, { repo, container });
+    if (!verdict.ok) {
+      const reason = `verify failed (exit ${verdict.exitCode})\n\n${verdict.output}`;
+      return await failVerify(run, deps, failure, reason);
+    }
+
+    const pushed = await pushVerifiedBranch(run, deps, inngest, {
+      task,
+      branch: assignment.branch,
+      identity,
+      askpass,
+      container,
     });
+    if (pushed.isErr()) return await failVerify(run, deps, failure, pushed.error);
 
-    if (sandbox.capabilities.workingTreeTransport === "git-remote") {
-      await stepRun("checkout-feature-branch", async () => {
-        const session = await sandbox.resume(sessionState);
-        await checkoutFeatureBranchInSandbox(session, worktreeAssignment.branch);
-      });
-    }
-    // Handles can't cross a step boundary, and `sandbox.resume` is a live
-    // provider call. Resolving it lazily, memoized per invocation, keeps the
-    // round-trips proportional to container work rather than to replay count.
-    // Memoizes the PROMISE, not the resolved handle: `??=` on an awaited
-    // value leaves the read and the write either side of a suspension point,
-    // so two concurrent callers would both see null and both resume.
-    let resumed: Promise<SandboxSession> | null = null;
-    const container = (): Promise<SandboxSession> => {
-      resumed ??= sandbox.resume(sessionState);
-      return resumed;
-    };
-
-    // 1. Verify ───────────────────────────────────────────────────────
-    // Durable: the repo's entire test suite, and `ok` selects disjoint step
-    // sets downstream, so a verdict that drifted between replays would plan a
-    // step graph the executor never asked for. The runner caps `output` at
-    // 8 KiB, so the step return stays small.
-    const verifyResult = await stepRun("run-verify", async () =>
-      runVerifyStreaming({
-        container: await container(),
-        verifyCommand: repo.verifyCommand,
-        timeoutSeconds: repo.verifyTimeoutSeconds,
-      }),
-    );
-    await stepRun("emit-verify-complete", () =>
-      inngest
-        .send({
-          name: "coding/task/verify-complete",
-          data: {
-            taskId,
-            ok: verifyResult.ok,
-            exitCode: verifyResult.exitCode,
-            durationMs: verifyResult.durationMs,
-          },
-          // Same `<verb>-<taskId>` bus dedup as every other hand-off emit: the
-          // step boundary covers replay, the id covers the crash window it
-          // can't. One verify verdict per task, so the id is unambiguous.
-          id: `verify-complete-${taskId}`,
-        })
-        .then(() => undefined),
-    );
-    if (!verifyResult.ok) {
-      const reason = `verify failed (exit ${verifyResult.exitCode})\n\n${verifyResult.output}`;
-      return await failAndTeardown(reason);
-    }
-
-    // 2. Commit + push ────────────────────────────────────────────────
-    const branch = worktreeAssignment.branch;
-    // Durable: writes a commit and pushes it. The PAT reaches the runner
-    // through the askpass env and the closure, never as a step argument or
-    // return, so it stays out of Inngest's state store.
-    const commitResult = await stepRun("commit-and-push", async () =>
-      runCommitAndPush({
-        container: await container(),
-        worktreeDir: WORKTREE_DIR_IN_CONTAINER,
-        branch,
-        commitMessage: task.goal,
-        signingKeyPath: askpass.signingKeyPath,
-        askpassEnv: askpass.env,
-        author: commitAuthorFor(identity),
-      }),
-    );
-
-    if (commitResult.kind === "branch_conflict") {
-      return await failAndTeardown(
-        `push rejected — branch conflict on cogmo/<idShort>:\n\n${commitResult.output}`,
-      );
-    }
-    if (commitResult.kind === "auth_failed") {
-      return await failAndTeardown(
-        `push rejected — GitHub authentication failed:\n\n${commitResult.output}`,
-      );
-    }
-    if (commitResult.kind === "failed") {
-      return await failAndTeardown(`commit+push failed:\n\n${commitResult.output}`);
-    }
-
-    // `nothing_to_commit` is a valid outcome — the verify passed on a
-    // clean tree (re-running an already-pushed task). We still try to
-    // open the PR; if octokit reports `validation_failed` (PR already
-    // exists), surface it as a failure with that reason.
-    let branchSha = commitResult.kind === "pushed" ? commitResult.commitSha : "";
-    if (!branchSha) {
-      // Re-derive HEAD — the verify-only path didn't run rev-parse. Durable
-      // so the PR head is pinned to one value. Conditional on the memoized
-      // `commitResult.kind`, so the step plan is identical on every replay.
-      branchSha = await stepRun("read-head-sha", async () => readHeadSha(await container()));
-    }
-
-    await stepRun("set-status-pushed", () =>
-      runInTx((tx) => store.updateTaskStatus(tx, { id: taskId, status: "pushed" })),
-    );
-    await stepRun("emit-pushed", () =>
-      inngest
-        .send({
-          name: "coding/task/pushed",
-          data: { taskId, branchSha },
-          id: `pushed-${taskId}`,
-        })
-        .then(() => undefined),
-    );
-
-    // 3. Open PR ─────────────────────────────────────────────────────
-    const planText = task.plan ?? "";
-    // Durable: opening a PR is irreversible and not idempotent upstream. A
-    // second `pulls.create` returns 422 `validation_failed`, which this
-    // function reads as a failure — so a re-POST would have the run that
-    // just opened the PR mark its own task `failed`. The PAT is a closure
-    // argument, and `OpenPrResult` carries only public metadata.
-    const prResult = await stepRun("open-pr", () =>
-      runOpenPr({
-        pat: identity.pat,
-        owner: remote.owner,
-        repo: remote.repo,
-        head: branch,
-        base: repo.defaultBranch,
-        goal: task.goal,
-        plan: planText,
-        verifyOutput: verifyResult.output,
-        branchSha,
-        ...(deps.octokitFactory && { octokit: deps.octokitFactory(identity.pat) }),
-      }),
-    );
-
-    if (prResult.kind === "auth_failed") {
-      return await failAndTeardown(`PR open failed (auth): ${prResult.message}`);
-    }
-    if (prResult.kind === "validation_failed") {
-      return await failAndTeardown(`PR open failed (validation): ${prResult.message}`);
-    }
-    if (prResult.kind === "failed") {
-      // The branch is pushed but no PR — log + leave for retry per
-      // slice4-plan.md. Surface as failed so the operator can re-delegate;
-      // the pushed branch is preserved upstream.
-      return await failAndTeardown(`PR open failed: ${prResult.message}`);
-    }
-
-    const metadata: PrMetadata = {
-      url: prResult.url,
-      number: prResult.number,
-      branchSha: prResult.branchSha,
-      openedAt: prResult.openedAt,
-    };
-    await stepRun("set-pr-metadata", () =>
-      runInTx((tx) => store.setTaskPrMetadata(tx, taskId, metadata)),
-    );
-    await stepRun("set-status-pr-open", () =>
-      runInTx((tx) => store.updateTaskStatus(tx, { id: taskId, status: "pr_open" })),
-    );
-    await stepRun("emit-pr-opened", () =>
-      inngest
-        .send({
-          name: "coding/task/pr-opened",
-          data: { taskId, prUrl: prResult.url, prNumber: prResult.number },
-          // Matters more than its siblings: `auto-register-skill` subscribes
-          // to this one, and a re-send re-enters the register flow (mostly
-          // absorbed by its `no_op` tip resolution) alongside any user-facing
-          // notification firing twice.
-          id: `pr-opened-${taskId}`,
-        })
-        .then(() => undefined),
-    );
-
-    // git-remote backends don't bind-mount the worktree, so the local
-    // mirror's `refs/remotes/origin/cogmo/<idShort>` lags the sandbox's
-    // push. Fetch it back so a future host-side merge or `git log`
-    // reflects the actual PR head. Best-effort — origin is the source
-    // of truth and any later op can fetch on demand.
-    //
-    // The catch is what makes that best-effort real. The branch is
-    // pushed and the PR is open, so the task has succeeded; a throw
-    // escaping here lands in the catch below, which is this function's
-    // failure channel — it would overwrite `pr_open` with `failed` and
-    // fire `coding/task/failed` for a task that shipped. Caught inside
-    // the step body so the step records success and a lagging mirror
-    // stays a warning.
-    if (sandbox.capabilities.workingTreeTransport === "git-remote") {
-      await stepRun("fetch-feature-branch", () =>
-        fetchFeatureBranch({
-          localRepoPath: repo.localPath,
-          remoteUrl: repo.remoteUrl,
-          branch: worktreeAssignment.branch,
-          identity,
-        }).catch((err: unknown) => {
-          taskLog.warn(
-            { err, branch: worktreeAssignment.branch },
-            "verify: feature-branch fetch-back failed — origin holds the branch, mirror lags",
-          );
-        }),
-      );
-    }
-
-    return { status: "pr_open", prUrl: prResult.url, prNumber: prResult.number };
+    const pr = await openTaskPr(run, deps, inngest, {
+      task,
+      repo,
+      remote,
+      assignment,
+      identity,
+      branchSha: pushed.value.branchSha,
+      verifyOutput: verdict.output,
+    });
+    if (pr.isErr()) return await failVerify(run, deps, failure, pr.error);
+    return { status: "pr_open", prUrl: pr.value.url, prNumber: pr.value.number };
   } catch (err) {
-    const reason = (err as Error).message;
-    taskLog.error({ err }, "coding verify failed");
-    // Deliberately broad: every failure here, `StepError` from a
-    // permanently-failed step included, belongs in the same designed channel
-    // — `status=failed` plus `coding/task/failed` for the subscribers.
-    //
-    // Emit BEFORE the DB status update — see the rationale on the
-    // matching catch in `runCodingTask`.
-    await stepSendEvent("emit-task-failed", {
-      ...codingTaskFailed.create({ taskId, reason }),
-      id: `task-failed-${taskId}`,
-    });
-    // Letting this throw is load-bearing — see the matching catch in
-    // `runCodingTask`.
-    await runInTx((tx) =>
-      store.updateTaskStatus(tx, { id: taskId, status: "failed", failureReason: reason }),
-    );
+    const reason = describeError(err);
+    run.log.error({ err }, "coding verify failed");
+    await failTaskFromCatch(run, deps, reason);
     await safeTeardownWorktree({
-      secretsStore,
-      runInTx,
+      secretsStore: deps.secretsStore,
+      runInTx: deps.runInTx,
       repo,
       taskId,
-      worktreeAssignment,
+      worktreeAssignment: assignment,
     }).catch(() => undefined);
     return { status: "failed", failureReason: reason };
   } finally {
-    // Unconditional sandbox sweep — idempotent at the label-index layer
-    // and reaps managed-backend state (Daytona) that survived a thrown
-    // create. No-op when no labelled sandbox exists.
-    await sandbox.deleteByTaskId(taskId).catch((err: unknown) => {
-      taskLog.warn({ err }, "verify: deleteByTaskId failed");
+    // Unconditional sweep — idempotent at the label-index layer, reaps
+    // managed-backend state that survived a thrown create, and a no-op when
+    // no labelled sandbox exists.
+    await deps.sandbox.deleteByTaskId(taskId).catch((err: unknown) => {
+      run.log.warn({ err }, "verify: deleteByTaskId failed");
     });
-    // The host-side askpass dir holds the PAT + signing key and is
-    // independent of the sandbox lifecycle — wipe it whenever
-    // provisioning got far enough to create the directory. Idempotent
-    // + tolerant of missing dirs (recursive remove with force:true),
-    // which matters here because on Local-Docker the
-    // `sandbox.deleteByTaskId` above already calls `cleanupAskpass`
-    // internally (supervisor's `delete()` owns the bind-mount); the
-    // second call is harmless and removes the per-task dir even on
-    // Daytona (where the sandbox-side copy is wiped server-side but
-    // the host source dir would otherwise leak the PAT).
-    if (askpassProvisioned) {
-      cleanupAskpass({ baseDir: askpassBaseDir, rootTaskId: taskId });
-    }
+    // After the sweep: on Local-Docker `deleteByTaskId` already wiped the
+    // bind-mount source, and this second, idempotent release still removes
+    // the host dir on Daytona, where only the sandbox-side copy is wiped.
+    askpassLease.release();
   }
 }
 
-async function readHeadSha(container: Pick<SandboxSession, "execStreaming">): Promise<string> {
-  // Same caps `runGit` puts on the identical command in `commit-push.ts`,
-  // per design/coding-delegation.md → Per-callsite exec timeouts: the call
-  // runs inside a durable step, where a half-closed transport would hang
-  // the run past its lease.
-  const handle = await container.execStreaming(["git", "rev-parse", "HEAD"], {
-    workingDir: WORKTREE_DIR_IN_CONTAINER,
-    timeoutMs: 60_000,
-    idleTimeoutMs: 30_000,
+interface VerifyCredentials {
+  remote: { owner: string; repo: string };
+  identity: GitHubIdentity;
+  env: Readonly<Record<string, string>>;
+}
+
+/**
+ * Resolved before any container work, so a repo the wizard hasn't finished
+ * fails fast rather than after spinning up a container to throw away — and
+ * before askpass is provisioned on disk. The error is the failure reason.
+ */
+async function resolveVerifyCredentials(
+  deps: VerifyOrchestratorDeps,
+  repo: CodingRepoRow,
+): Promise<Result<VerifyCredentials, string>> {
+  const remote = parseRemoteUrl(repo.remoteUrl);
+  if (!remote) return err(`cannot parse owner/repo from remote URL: ${repo.remoteUrl}`);
+  const identity = await deps.runInTx((tx) =>
+    resolveGitHubIdentity(tx, deps.secretsStore, repo.identityName),
+  );
+  if (identity.isErr()) return err(describeResolveIdentityError(identity.error));
+  const auth = await loadSandboxEnv(deps);
+  if (auth.isErr()) return err(auth.error.message);
+  return ok({ remote, identity: identity.value, env: auth.value });
+}
+
+/**
+ * The failure exit for every failure this run observes: status, event, and
+ * worktree teardown. The sandbox and askpass are reaped by the caller's
+ * `finally`.
+ */
+async function failVerify(
+  run: CodingRun,
+  deps: VerifyOrchestratorDeps,
+  failure: VerifyFailureContext,
+  reason: string,
+): Promise<VerifyOrchestratorResult> {
+  await recordTaskFailed(run, deps, reason, "set-status-failed");
+  await run
+    .stepRun("teardown-worktree", () =>
+      safeTeardownWorktree({
+        secretsStore: deps.secretsStore,
+        runInTx: deps.runInTx,
+        repo: failure.repo,
+        taskId: run.taskId,
+        worktreeAssignment: failure.assignment,
+      }),
+    )
+    .catch(() => undefined);
+  return { status: "failed", failureReason: reason };
+}
+
+/** A fresh container with the askpass dir mounted read-only. */
+async function createVerifySandbox(
+  run: CodingRun,
+  deps: VerifyOrchestratorDeps,
+  args: {
+    task: CodingTaskRow;
+    repo: CodingRepoRow;
+    assignment: WorktreeAssignment;
+    identity: GitHubIdentity;
+    askpass: AskpassMaterials;
+    env: Readonly<Record<string, string>>;
+  },
+): Promise<SandboxSessionState> {
+  const { sandbox } = deps;
+  const image = taskImage(args.repo, deps.devbaseImage);
+  // Delegate-gate on the named-snapshot warm. Boot fires-and-forgets; a
+  // verify task arriving before warm completes shares the promise.
+  await run.stepRun("ensure-image-present", async () => {
+    await sandbox.ensureImagePresent(image);
   });
-  const chunks: Buffer[] = [];
-  for await (const chunk of handle.stdout) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string));
+  const state = await run.stepRun("create-container", async () => {
+    const session = await sandbox.create(
+      taskSessionSpec({
+        sandbox,
+        task: args.task,
+        repo: args.repo,
+        assignment: args.assignment,
+        identityPat: args.identity.pat,
+        askpass: args.askpass,
+        image,
+        resourceLimits: deps.defaultResourceLimits,
+        taskTtlMs: deps.taskTtlMs,
+        env: args.env,
+      }),
+    );
+    return session.state;
+  });
+  if (sandbox.capabilities.workingTreeTransport === "git-remote") {
+    await checkoutFeatureBranchStep(run, sandbox, state, args.assignment.branch);
   }
-  // Drain stderr to avoid backpressure.
-  const drain = (async () => {
-    for await (const _ of handle.stderr) {
-      // discard
-    }
-  })();
-  const { exitCode } = await handle.wait();
-  await drain;
-  const sha = Buffer.concat(chunks).toString("utf8").trim();
-  if (exitCode !== 0 || sha === "") {
-    // Throw rather than return "": this runs inside a durable step, so an
-    // empty sha would be memoized and then written verbatim into the
-    // `coding/task/pushed` event, the PR body and `pr_metadata.branchSha`.
-    throw new Error(`git rev-parse HEAD failed (exit ${exitCode}) in ${WORKTREE_DIR_IN_CONTAINER}`);
-  }
-  return sha;
+  return state;
+}
+
+/**
+ * `run-verify`, then `coding/task/verify-complete`. Durable: the repo's
+ * entire suite, and `ok` selects disjoint step sets downstream, so a verdict
+ * drifting between replays would plan a step graph the executor never
+ * asked for. The runner caps `output` at 8 KiB, keeping the return small.
+ */
+async function runVerifyStage(
+  run: CodingRun,
+  inngest: Pick<Inngest, "send">,
+  args: { repo: CodingRepoRow; container: () => Promise<SandboxSession> },
+): Promise<VerifyResult> {
+  const verdict = await run.stepRun("run-verify", async () =>
+    runVerifyStreaming({
+      container: await args.container(),
+      verifyCommand: args.repo.verifyCommand,
+      timeoutSeconds: args.repo.verifyTimeoutSeconds,
+    }),
+  );
+  await run.stepRun("emit-verify-complete", () =>
+    inngest
+      .send({
+        name: "coding/task/verify-complete",
+        data: {
+          taskId: run.taskId,
+          ok: verdict.ok,
+          exitCode: verdict.exitCode,
+          durationMs: verdict.durationMs,
+        },
+        // The step boundary covers replay, the id the crash window it
+        // can't. One verify verdict per task, so the id is unambiguous.
+        id: `verify-complete-${run.taskId}`,
+      })
+      .then(() => undefined),
+  );
+  return verdict;
 }
