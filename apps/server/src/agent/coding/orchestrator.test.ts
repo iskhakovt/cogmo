@@ -1343,6 +1343,33 @@ describe("runCodingExecute", () => {
     expect(stream.failed).toEqual([]);
   });
 
+  it("records a non-Error throw as the failure reason", async () => {
+    const repo = await seedRepo();
+    const { task } = await seedExecutableTask(repo);
+    const { sandbox } = fakeSandbox();
+    const backend: CodingBackend = {
+      plan: () => throwingPlan("plan not exercised by this test"),
+      execute: () => ({
+        [Symbol.asyncIterator]: () => ({
+          next: () => Promise.reject("sandbox went away"),
+        }),
+      }),
+    };
+
+    const result = await runCodingExecute({
+      taskId: task.id,
+      runId: "run-test",
+      deps: makeDeps({ sandbox, backend }),
+      stepRun,
+      stepSendEvent,
+      inngest: fakeInngest,
+    });
+
+    expect(result).toEqual({ status: "failed", failureReason: "sandbox went away" });
+    const reloaded = await tx((trx) => store.getTask(trx, task.id));
+    expect(reloaded?.failureReason).toBe("sandbox went away");
+  });
+
   it("leaves a task cancelled during the session cancelled — no resurrection to pending_verify", async () => {
     const repo = await seedRepo();
     const { task } = await seedExecutableTask(repo);
