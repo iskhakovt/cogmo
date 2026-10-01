@@ -14,6 +14,7 @@ import type { AutoRecallMode } from "../agent/recall-gate.js";
 import type { ScheduledTaskSummary } from "../agent/scheduling/scheduling-service.js";
 import {
   CustomCompartmentCapExceededError,
+  findPostgresUniqueViolation,
   InvalidNameError,
   ProfileClassInUseError,
   ProfileInUseError,
@@ -2104,7 +2105,7 @@ export function createTransport(deps: {
             verifyCommand: row.verifyCommand,
           });
         } catch (e) {
-          if (e instanceof UniqueViolationError) {
+          if (findPostgresUniqueViolation(e)) {
             return err({ code: "repo_name_taken" as const, name: input.name });
           }
           throw e;
@@ -2194,7 +2195,7 @@ export function createTransport(deps: {
             verifyCommand: row.verifyCommand,
           });
         } catch (e) {
-          if (e instanceof UniqueViolationError) {
+          if (findPostgresUniqueViolation(e)) {
             return err({ code: "repo_name_taken" as const, name: input.name });
           }
           throw e;
@@ -2538,7 +2539,7 @@ export function createTransport(deps: {
           });
           return ok(server);
         } catch (e) {
-          if (e instanceof UniqueViolationError)
+          if (findPostgresUniqueViolation(e))
             return err({ code: "mcp_server_name_taken" as const, name: spec.name });
           if (e instanceof McpInvalidServerNameError)
             return err({ code: "mcp_invalid_config" as const, reason: e.message });

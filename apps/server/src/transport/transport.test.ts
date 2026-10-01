@@ -6,7 +6,7 @@ import type { Transactor } from "../db/index.js";
 import type { inboundArrived } from "../inngest/events.js";
 import { AllProvidersFailedError } from "../llm/fallback.js";
 import { ProviderConfigError } from "../llm/resolver.js";
-import { mockAgentStore, mockTransportStore } from "../test/factories.js";
+import { mockAgentStore, mockTransportStore, pgUniqueViolation } from "../test/factories.js";
 import { createTransport } from "./transport.js";
 
 const FAKE_TX = { __mockTx: true } as never;
@@ -2487,11 +2487,10 @@ describe("createTransport", () => {
       });
     });
 
-    it("add maps UniqueViolationError to repo_name_taken", async () => {
-      const { UniqueViolationError } = await import("../agent/store/errors.js");
+    it("add maps the driver's unique violation to repo_name_taken", async () => {
       const transport = setupWithCoding({
         listRepos: vi.fn(),
-        insertRepo: vi.fn().mockRejectedValue(new UniqueViolationError("cogmo")),
+        insertRepo: vi.fn().mockRejectedValue(pgUniqueViolation("coding_repos_name_unique")),
         getRepoByName: vi.fn(),
         countActiveTasksForRepo: vi.fn(),
         removeRepo: vi.fn(),
