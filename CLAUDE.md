@@ -152,6 +152,8 @@ Constraints every sub-agent brief must carry, and how to run several without the
 
 After making changes, run: `pnpm typecheck && pnpm lint && pnpm test`
 
+**Conformance review:** `/cogmo-review code <PR | branch | range>` checks a change against these rules (idioms, architecture, state machines, Inngest, data, tests, bookkeeping); `/cogmo-review design <path>` checks a design doc against [state-machines.md](.claude/rules/state-machines.md). Run it before opening a PR and before approving a design, alongside `/code-review` for bugs.
+
 **Bug fixes: verify-then-act.** Prove the symptom (failing test or repro steps), identify root cause, propose fix, write a regression test. No shotgun debugging.
 
 ## Design Philosophy
