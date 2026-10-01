@@ -8,19 +8,18 @@
 import type { Inngest } from "inngest";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
-import { gateToken } from "../agent/pipeline/gate-keyboard.js";
+import { gateToken } from "../../agent/pipeline/gate-keyboard.js";
 import type {
   PipelineRunRow,
   PipelineRunStore,
   PipelineRunWithDefinition,
-} from "../agent/pipeline/store/index.js";
-import { validPipelineDefinition } from "../agent/pipeline/test-fixtures.js";
-import type { Transactor } from "../db/index.js";
-import { inboundArrived, pipelineGateKey } from "../inngest/events.js";
-import { expectDefined } from "../test/assertions.js";
-import { mockAgentStore, mockTransportStore } from "../test/factories.js";
-import type { AttachmentStore } from "./attachment-store.js";
-import { createTransport } from "./transport.js";
+} from "../../agent/pipeline/store/index.js";
+import { validPipelineDefinition } from "../../agent/pipeline/test-fixtures.js";
+import type { Transactor } from "../../db/index.js";
+import { pipelineGateKey } from "../../inngest/events.js";
+import { expectDefined } from "../../test/assertions.js";
+import { mockTransportStore } from "../../test/factories.js";
+import { createPipelines } from "./pipelines.js";
 
 const FAKE_TX = { __mockTx: true } as never;
 const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
@@ -61,7 +60,7 @@ function loaded(overrides: Partial<PipelineRunRow> = {}): PipelineRunWithDefinit
   };
 }
 
-function makeTransport(opts: { runStore?: PipelineRunStore } = {}) {
+function makePipelines(opts: { runStore?: PipelineRunStore } = {}) {
   const transportStore = mockTransportStore();
   vi.mocked(transportStore.resolveUser).mockImplementation(async (_tx, _channelId, handle) => {
     if (handle === OWNER_HANDLE) return { userId: OWNER_ID };
@@ -72,20 +71,14 @@ function makeTransport(opts: { runStore?: PipelineRunStore } = {}) {
   // exceeds the compiler's instantiation depth.
   const send = vi.fn().mockResolvedValue({ ids: [] });
   const inngest = mock<Inngest>({ send });
-  const transport = createTransport({
+  const pipelines = createPipelines({
     channelId: "ch-1",
-    defaultUserId: OWNER_ID,
-    defaultProfileId: "019d0000-0000-7000-8000-000000000099",
     runInTx: fakeRunInTx,
     transportStore,
-    agentStore: mockAgentStore(),
-    ...(opts.runStore !== undefined && { pipelineRunStore: opts.runStore }),
     inngest,
-    inboundArrived,
-    attachments: mock<AttachmentStore>(),
-    idleTimeoutMs: 60_000,
+    pipelineRunStore: opts.runStore,
   });
-  return { transport, send };
+  return { pipelines, send };
 }
 
 describe("Transport.pipelines.resolveGate", () => {
@@ -97,14 +90,9 @@ describe("Transport.pipelines.resolveGate", () => {
     async (action, decision) => {
       const runStore = mock<PipelineRunStore>();
       runStore.getRunWithDefinition.mockResolvedValue(loaded());
-      const { transport, send } = makeTransport({ runStore });
+      const { pipelines, send } = makePipelines({ runStore });
 
-      const result = await transport.pipelines.resolveGate(
-        RUN_ID,
-        PLAN_GATE_TOKEN,
-        action,
-        OWNER_HANDLE,
-      );
+      const result = await pipelines.resolveGate(RUN_ID, PLAN_GATE_TOKEN, action, OWNER_HANDLE);
 
       expect(result._unsafeUnwrap()).toEqual({
         runId: RUN_ID,
@@ -133,14 +121,9 @@ describe("Transport.pipelines.resolveGate", () => {
     // leftover buttons.
     const runStore = mock<PipelineRunStore>();
     runStore.getRunWithDefinition.mockResolvedValue(loaded({ currentStage: "sign-off" }));
-    const { transport, send } = makeTransport({ runStore });
+    const { pipelines, send } = makePipelines({ runStore });
 
-    const result = await transport.pipelines.resolveGate(
-      RUN_ID,
-      PLAN_GATE_TOKEN,
-      "approve",
-      OWNER_HANDLE,
-    );
+    const result = await pipelines.resolveGate(RUN_ID, PLAN_GATE_TOKEN, "approve", OWNER_HANDLE);
 
     expect(result._unsafeUnwrapErr()).toEqual({
       code: "pipeline_gate_not_pending",
@@ -153,14 +136,9 @@ describe("Transport.pipelines.resolveGate", () => {
   it("rejects a tapper who does not own the pipeline, without emitting", async () => {
     const runStore = mock<PipelineRunStore>();
     runStore.getRunWithDefinition.mockResolvedValue(loaded());
-    const { transport, send } = makeTransport({ runStore });
+    const { pipelines, send } = makePipelines({ runStore });
 
-    const result = await transport.pipelines.resolveGate(
-      RUN_ID,
-      PLAN_GATE_TOKEN,
-      "approve",
-      OTHER_HANDLE,
-    );
+    const result = await pipelines.resolveGate(RUN_ID, PLAN_GATE_TOKEN, "approve", OTHER_HANDLE);
 
     expect(result._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
     expect(send).not.toHaveBeenCalled();
@@ -169,14 +147,9 @@ describe("Transport.pipelines.resolveGate", () => {
   it("rejects an unknown tapper before revealing whether the run exists", async () => {
     const runStore = mock<PipelineRunStore>();
     runStore.getRunWithDefinition.mockResolvedValue(undefined);
-    const { transport } = makeTransport({ runStore });
+    const { pipelines } = makePipelines({ runStore });
 
-    const result = await transport.pipelines.resolveGate(
-      RUN_ID,
-      PLAN_GATE_TOKEN,
-      "approve",
-      "tg-unknown",
-    );
+    const result = await pipelines.resolveGate(RUN_ID, PLAN_GATE_TOKEN, "approve", "tg-unknown");
 
     expect(result._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
     expect(runStore.getRunWithDefinition).not.toHaveBeenCalled();
@@ -185,14 +158,9 @@ describe("Transport.pipelines.resolveGate", () => {
   it("answers a late tap with the run's actual status, without emitting", async () => {
     const runStore = mock<PipelineRunStore>();
     runStore.getRunWithDefinition.mockResolvedValue(loaded({ status: "cancelled" }));
-    const { transport, send } = makeTransport({ runStore });
+    const { pipelines, send } = makePipelines({ runStore });
 
-    const result = await transport.pipelines.resolveGate(
-      RUN_ID,
-      PLAN_GATE_TOKEN,
-      "approve",
-      OWNER_HANDLE,
-    );
+    const result = await pipelines.resolveGate(RUN_ID, PLAN_GATE_TOKEN, "approve", OWNER_HANDLE);
 
     expect(result._unsafeUnwrapErr()).toEqual({
       code: "pipeline_gate_not_pending",
@@ -205,27 +173,17 @@ describe("Transport.pipelines.resolveGate", () => {
   it("reports an unknown run to a known user", async () => {
     const runStore = mock<PipelineRunStore>();
     runStore.getRunWithDefinition.mockResolvedValue(undefined);
-    const { transport } = makeTransport({ runStore });
+    const { pipelines } = makePipelines({ runStore });
 
-    const result = await transport.pipelines.resolveGate(
-      RUN_ID,
-      PLAN_GATE_TOKEN,
-      "cancel",
-      OWNER_HANDLE,
-    );
+    const result = await pipelines.resolveGate(RUN_ID, PLAN_GATE_TOKEN, "cancel", OWNER_HANDLE);
 
     expect(result._unsafeUnwrapErr()).toEqual({ code: "pipeline_run_not_found", runId: RUN_ID });
   });
 
   it("returns pipelines_disabled when no run store is wired", async () => {
-    const { transport, send } = makeTransport();
+    const { pipelines, send } = makePipelines();
 
-    const result = await transport.pipelines.resolveGate(
-      RUN_ID,
-      PLAN_GATE_TOKEN,
-      "approve",
-      OWNER_HANDLE,
-    );
+    const result = await pipelines.resolveGate(RUN_ID, PLAN_GATE_TOKEN, "approve", OWNER_HANDLE);
 
     expect(result._unsafeUnwrapErr()).toEqual({ code: "pipelines_disabled" });
     expect(send).not.toHaveBeenCalled();

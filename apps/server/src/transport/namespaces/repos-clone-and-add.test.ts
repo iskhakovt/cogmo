@@ -11,17 +11,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { err, ok } from "neverthrow";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import type { CodingRepoRow, CodingStore, CodingTaskRow } from "../agent/coding/store/index.js";
-import type { inboundArrived } from "../inngest/events.js";
-import { runGit, withGitAskpass } from "../secrets/git-askpass.js";
+import type { CodingRepoRow, CodingStore, CodingTaskRow } from "../../agent/coding/store/index.js";
+import { runGit, withGitAskpass } from "../../secrets/git-askpass.js";
 import {
   type GitHubIdentity,
   gitHubIdentitySecretName,
   serializeGitHubIdentity,
-} from "../secrets/github.js";
-import type { SecretsStore } from "../secrets/store/index.js";
-import { mockAgentStore, mockTransportStore } from "../test/factories.js";
-import { createTransport } from "./transport.js";
+} from "../../secrets/github.js";
+import type { SecretsStore } from "../../secrets/store/index.js";
+import { createRepos } from "./repos.js";
 
 const VALID_IDENTITY: GitHubIdentity = {
   pat: "ghp_dummy_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
@@ -130,40 +128,23 @@ afterEach(() => {
   if (tempRoot) rmSync(tempRoot, { recursive: true, force: true });
 });
 
-function makeTransport(
+function makeRepos(
   opts: { reposDir?: string; withSecretsStore?: boolean; withCodingStore?: boolean } = {},
 ) {
-  const transportStore = mockTransportStore();
-  const agentStore = mockAgentStore();
   codingStore = fakeCodingStore();
-  const inngest = { send: vi.fn().mockResolvedValue(undefined) } as never;
-  const mockEvent = {
-    create: vi.fn((data: never) => ({ name: "inbound/arrived", data })),
-  } as unknown as typeof inboundArrived;
-
-  return createTransport({
-    channelId: "ch-1",
-    defaultUserId: "user-1",
-    defaultProfileId: "profile-1",
+  return createRepos({
     runInTx: fakeRunInTx as never,
-    transportStore,
-    agentStore,
-    ...(opts.withCodingStore !== false && { codingStore }),
-    ...(opts.withSecretsStore !== false && {
-      secretsStore: secretsStore as unknown as SecretsStore,
-    }),
-    ...(opts.reposDir !== undefined && { reposDir: opts.reposDir }),
-    inngest,
-    inboundArrived: mockEvent,
-    attachments: { upload: vi.fn(), download: vi.fn() } as never,
-    idleTimeoutMs: 0,
+    codingStore: opts.withCodingStore !== false ? codingStore : undefined,
+    secretsStore:
+      opts.withSecretsStore !== false ? (secretsStore as unknown as SecretsStore) : undefined,
+    reposDir: opts.reposDir,
   });
 }
 
 describe("Transport.repos.cloneAndAdd", () => {
   it("returns sandbox_disabled when no codingStore is wired", async () => {
-    const transport = makeTransport({ withCodingStore: false });
-    const result = await transport.repos.cloneAndAdd({
+    const repos = makeRepos({ withCodingStore: false });
+    const result = await repos.cloneAndAdd({
       name: "x",
       remoteUrl: bareRepoUrl,
     });
@@ -173,8 +154,8 @@ describe("Transport.repos.cloneAndAdd", () => {
 
   it("returns github_identity_unavailable when no secretsStore is wired", async () => {
     tempRoot = mkdtempSync(join(tmpdir(), "cogmo-cloneAndAdd-r-"));
-    const transport = makeTransport({ reposDir: tempRoot, withSecretsStore: false });
-    const result = await transport.repos.cloneAndAdd({
+    const repos = makeRepos({ reposDir: tempRoot, withSecretsStore: false });
+    const result = await repos.cloneAndAdd({
       name: "x",
       remoteUrl: bareRepoUrl,
     });
@@ -183,8 +164,8 @@ describe("Transport.repos.cloneAndAdd", () => {
   });
 
   it("returns github_identity_unavailable when no reposDir is wired", async () => {
-    const transport = makeTransport({});
-    const result = await transport.repos.cloneAndAdd({
+    const repos = makeRepos({});
+    const result = await repos.cloneAndAdd({
       name: "x",
       remoteUrl: bareRepoUrl,
     });
@@ -195,29 +176,14 @@ describe("Transport.repos.cloneAndAdd", () => {
   it("returns github_identity_unavailable when the named identity is missing", async () => {
     tempRoot = mkdtempSync(join(tmpdir(), "cogmo-cloneAndAdd-r-"));
     const empty = new FakeSecretsStore();
-    const transportStore = mockTransportStore();
-    const agentStore = mockAgentStore();
     codingStore = fakeCodingStore();
-    const inngest = { send: vi.fn().mockResolvedValue(undefined) } as never;
-    const mockEvent = {
-      create: vi.fn((data: never) => ({ name: "inbound/arrived", data })),
-    } as unknown as typeof inboundArrived;
-    const transport = createTransport({
-      channelId: "ch-1",
-      defaultUserId: "user-1",
-      defaultProfileId: "profile-1",
+    const repos = createRepos({
       runInTx: fakeRunInTx as never,
-      transportStore,
-      agentStore,
       codingStore,
       secretsStore: empty as unknown as SecretsStore,
       reposDir: tempRoot,
-      inngest,
-      inboundArrived: mockEvent,
-      attachments: { upload: vi.fn(), download: vi.fn() } as never,
-      idleTimeoutMs: 0,
     });
-    const result = await transport.repos.cloneAndAdd({
+    const result = await repos.cloneAndAdd({
       name: "x",
       remoteUrl: bareRepoUrl,
     });
@@ -232,9 +198,9 @@ describe("Transport.repos.cloneAndAdd", () => {
 
   it("clones a real git remote and registers it on success", async () => {
     tempRoot = mkdtempSync(join(tmpdir(), "cogmo-cloneAndAdd-r-"));
-    const transport = makeTransport({ reposDir: tempRoot });
+    const repos = makeRepos({ reposDir: tempRoot });
 
-    const result = await transport.repos.cloneAndAdd({
+    const result = await repos.cloneAndAdd({
       name: "fixture",
       remoteUrl: bareRepoUrl,
     });
@@ -253,10 +219,10 @@ describe("Transport.repos.cloneAndAdd", () => {
     // re-add with the same name surfaces the registry collision rather
     // than running the clone and tripping `repo_local_path_exists`.
     tempRoot = mkdtempSync(join(tmpdir(), "cogmo-cloneAndAdd-r-"));
-    const transport = makeTransport({ reposDir: tempRoot });
-    await transport.repos.cloneAndAdd({ name: "twice", remoteUrl: bareRepoUrl });
+    const repos = makeRepos({ reposDir: tempRoot });
+    await repos.cloneAndAdd({ name: "twice", remoteUrl: bareRepoUrl });
 
-    const result = await transport.repos.cloneAndAdd({
+    const result = await repos.cloneAndAdd({
       name: "twice",
       remoteUrl: bareRepoUrl,
     });
@@ -266,12 +232,12 @@ describe("Transport.repos.cloneAndAdd", () => {
 
   it("returns repo_name_taken when the name is taken between the pre-check and the insert", async () => {
     tempRoot = mkdtempSync(join(tmpdir(), "cogmo-cloneAndAdd-r-"));
-    const transport = makeTransport({ reposDir: tempRoot });
+    const repos = makeRepos({ reposDir: tempRoot });
     vi.mocked(codingStore.insertRepo).mockResolvedValueOnce(
       err({ kind: "repo_name_taken", name: "raced" }),
     );
 
-    const result = await transport.repos.cloneAndAdd({ name: "raced", remoteUrl: bareRepoUrl });
+    const result = await repos.cloneAndAdd({ name: "raced", remoteUrl: bareRepoUrl });
 
     expect(result._unsafeUnwrapErr()).toEqual({ code: "repo_name_taken", name: "raced" });
   });
@@ -281,11 +247,11 @@ describe("Transport.repos.cloneAndAdd", () => {
     // run (or manual operator action), but no `coding_repos` row points at
     // it. The DB pre-check passes, the filesystem check fires next.
     tempRoot = mkdtempSync(join(tmpdir(), "cogmo-cloneAndAdd-r-"));
-    const transport = makeTransport({ reposDir: tempRoot });
+    const repos = makeRepos({ reposDir: tempRoot });
     const { mkdirSync } = await import("node:fs");
     mkdirSync(join(tempRoot, "stale"));
 
-    const result = await transport.repos.cloneAndAdd({
+    const result = await repos.cloneAndAdd({
       name: "stale",
       remoteUrl: bareRepoUrl,
     });
@@ -295,8 +261,8 @@ describe("Transport.repos.cloneAndAdd", () => {
 
   it("rejects an invalid name before touching the filesystem", async () => {
     tempRoot = mkdtempSync(join(tmpdir(), "cogmo-cloneAndAdd-r-"));
-    const transport = makeTransport({ reposDir: tempRoot });
-    const result = await transport.repos.cloneAndAdd({
+    const repos = makeRepos({ reposDir: tempRoot });
+    const result = await repos.cloneAndAdd({
       name: "../escape",
       remoteUrl: bareRepoUrl,
     });
@@ -309,8 +275,8 @@ describe("Transport.repos.cloneAndAdd", () => {
 
   it("returns repo_clone_failed when the remote URL is unreachable", async () => {
     tempRoot = mkdtempSync(join(tmpdir(), "cogmo-cloneAndAdd-r-"));
-    const transport = makeTransport({ reposDir: tempRoot });
-    const result = await transport.repos.cloneAndAdd({
+    const repos = makeRepos({ reposDir: tempRoot });
+    const result = await repos.cloneAndAdd({
       name: "broken",
       remoteUrl: "file:///path/that/does/not/exist",
     });
