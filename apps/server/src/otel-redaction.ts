@@ -3,47 +3,30 @@
 
 import type { Attributes, AttributeValue, SpanStatus } from "@opentelemetry/api";
 import type { ReadableSpan, SpanExporter, TimedEvent } from "@opentelemetry/sdk-trace-base";
-import {
-  redactSecretsInText,
-  redactSignedQuery,
-  redactSignedQueryParams,
-  redactSignedQueryParamsInText,
-} from "./util/redact-secrets.js";
+import { redactSecretsInText } from "./util/redact-secrets.js";
 
 /**
- * Free text a span exports — its name, status message, and every attribute
- * that isn't a URL, `exception.message` and `exception.stacktrace` included —
- * with Bot API token segments and signed query parameters redacted.
+ * Attributes that hold only a query or fragment, which can carry a signature
+ * or credential under any name. Dropped from every span.
  */
-function redactText(text: string): string {
-  return redactSignedQueryParamsInText(redactSecretsInText(text));
-}
+const DROPPED_KEYS: ReadonlySet<string> = new Set(["url.query", "url.fragment"]);
 
-/** A URL-valued attribute, whose signed values run to the next `&` or `#`. */
+/**
+ * Attributes that hold a whole URL or a request target (path plus query), in
+ * both HTTP semantic convention generations. Exported without their query or
+ * fragment, as `url.path` already is.
+ */
+const URL_KEYS: ReadonlySet<string> = new Set([
+  "url.full",
+  "url.original",
+  "http.url",
+  "http.target",
+]);
+
+/** `url` cut at its query or fragment, with Bot API token segments redacted. */
 function redactUrl(url: string): string {
-  return redactSignedQueryParams(redactSecretsInText(url));
-}
-
-/** `url.query`, which can be a bare query with no leading `?`. */
-function redactQuery(query: string): string {
-  return redactSignedQuery(redactSecretsInText(query));
-}
-
-/**
- * How each attribute is redacted: URL-valued ones (both HTTP semantic
- * convention generations) as URLs, everything else as free text.
- */
-function redactorFor(key: string): (value: string) => string {
-  switch (key) {
-    case "url.full":
-    case "http.url":
-    case "http.target":
-      return redactUrl;
-    case "url.query":
-      return redactQuery;
-    default:
-      return redactText;
-  }
+  const end = url.search(/[?#]/);
+  return redactSecretsInText(end === -1 ? url : url.slice(0, end));
 }
 
 /**
@@ -60,8 +43,11 @@ function redactorFor(key: string): (value: string) => string {
  * any span a future instrumentation adds, and the span name, status message
  * and event attributes (`exception.message`, `exception.stacktrace`) as well.
  *
- * Signed query parameters are redacted as instrumentation-http already does
- * in its own `url.full`; undici's instrumentation doesn't.
+ * Queries are dropped rather than scrubbed by parameter name: a credential
+ * can sit under any name (`key`, `token`, a presigned URL's signature), and
+ * which endpoint a span called is in the path, not the query. Free text —
+ * span names, status messages, `exception.*` — has only the token segment
+ * redacted; a URL embedded in prose has no reliable end to cut at.
  */
 export class RedactingSpanExporter implements SpanExporter {
   readonly #inner: SpanExporter;
@@ -85,7 +71,7 @@ export class RedactingSpanExporter implements SpanExporter {
 
 /** `span` with its secrets redacted, or `span` itself when it carries none. */
 function redactSpan(span: ReadableSpan): ReadableSpan {
-  const name = redactText(span.name);
+  const name = redactSecretsInText(span.name);
   const status = redactStatus(span.status);
   const attributes = redactAttributes(span.attributes);
   const events = redactEvents(span.events);
@@ -121,7 +107,7 @@ function redactSpan(span: ReadableSpan): ReadableSpan {
 /** `status` with its message redacted, or `status` itself when it carries no secret. */
 function redactStatus(status: SpanStatus): SpanStatus {
   if (status.message === undefined) return status;
-  const message = redactText(status.message);
+  const message = redactSecretsInText(status.message);
   return message === status.message ? status : { ...status, message };
 }
 
@@ -139,14 +125,19 @@ function redactEvents(events: TimedEvent[]): TimedEvent[] {
 }
 
 /**
- * `attributes` with secrets redacted from every string and string array
- * element, each the way {@link redactorFor} picks for its key, or
- * `attributes` itself when nothing changed.
+ * `attributes` without query and fragment attributes, with URL attributes cut
+ * at their query and every other string (and string array element) token
+ * redacted, or `attributes` itself when nothing changed.
  */
 function redactAttributes(attributes: Attributes): Attributes {
   let redacted: Attributes | undefined;
   for (const [key, value] of Object.entries(attributes)) {
-    const next = redactValue(value, redactorFor(key));
+    if (DROPPED_KEYS.has(key)) {
+      redacted ??= { ...attributes };
+      delete redacted[key];
+      continue;
+    }
+    const next = redactValue(value, URL_KEYS.has(key) ? redactUrl : redactSecretsInText);
     if (next !== value) {
       redacted ??= { ...attributes };
       redacted[key] = next;

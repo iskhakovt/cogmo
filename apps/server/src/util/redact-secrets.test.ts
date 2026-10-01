@@ -1,11 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  REDACTED_BOT_SEGMENT,
-  redactSecretsInText,
-  redactSignedQuery,
-  redactSignedQueryParams,
-  redactSignedQueryParamsInText,
-} from "./redact-secrets.js";
+import { REDACTED_BOT_SEGMENT, redactSecretsInText } from "./redact-secrets.js";
 
 /** Shaped like a Bot API token (numeric id, colon, URL-safe base64), but not one. */
 const FAKE_SECRET = "AAFake-TokenForTests_0123456789abcdef";
@@ -44,6 +38,11 @@ describe("redactSecretsInText", () => {
       `https://api.telegram.org/${REDACTED_BOT_SEGMENT}`,
     ],
     [
+      "a token followed by punctuation",
+      `invalid json response body at https://api.telegram.org/bot${FAKE_TOKEN}.`,
+      `invalid json response body at https://api.telegram.org/${REDACTED_BOT_SEGMENT}.`,
+    ],
+    [
       "node-fetch's error message",
       `request to https://api.telegram.org/bot${FAKE_TOKEN}/getUpdates failed, reason: socket hang up`,
       `request to https://api.telegram.org/${REDACTED_BOT_SEGMENT}/getUpdates failed, reason: socket hang up`,
@@ -71,105 +70,5 @@ describe("redactSecretsInText", () => {
     ["text with no URL", "telegram polling loop failed"],
   ])("leaves %s untouched", (_label, input) => {
     expect(redactSecretsInText(input)).toBe(input);
-  });
-});
-
-describe("redactSignedQueryParams", () => {
-  it("redacts each signed parameter and keeps the rest", () => {
-    const url =
-      "https://bucket.s3.eu-west-2.amazonaws.com/key.png?X-Amz-Algorithm=AWS4-HMAC-SHA256" +
-      "&X-Amz-Credential=AKIDFAKE%2F20261001&X-Amz-Signature=deadbeef&X-Amz-Security-Token=tok&keep=1";
-
-    expect(redactSignedQueryParams(url)).toBe(
-      "https://bucket.s3.eu-west-2.amazonaws.com/key.png?X-Amz-Algorithm=AWS4-HMAC-SHA256" +
-        "&X-Amz-Credential=REDACTED&X-Amz-Signature=REDACTED&X-Amz-Security-Token=REDACTED&keep=1",
-    );
-  });
-
-  it.each([
-    "sig",
-    "Signature",
-    "AWSAccessKeyId",
-    "X-Goog-Signature",
-    "X-Amz-Signature",
-    "X-Amz-Credential",
-    "X-Amz-Security-Token",
-  ])("redacts %s", (name) => {
-    expect(redactSignedQueryParams(`https://h.example/p?${name}=secret-value`)).toBe(
-      `https://h.example/p?${name}=REDACTED`,
-    );
-  });
-
-  it("changes only the signed values, leaving other parameters' encoding as it was", () => {
-    expect(redactSignedQueryParams("https://h.example/p?q=a%20b&x=1+2&sig=abc&y=%7E")).toBe(
-      "https://h.example/p?q=a%20b&x=1+2&sig=REDACTED&y=%7E",
-    );
-  });
-
-  it("redacts every occurrence of a repeated parameter", () => {
-    expect(redactSignedQueryParams("/p?sig=a&keep=1&sig=b")).toBe(
-      "/p?sig=REDACTED&keep=1&sig=REDACTED",
-    );
-  });
-
-  it("reads a value in a URL to the next & or #, whatever it contains", () => {
-    expect(redactSignedQueryParams("https://h.example/p?sig=a)b;c,d e&keep=1#f")).toBe(
-      "https://h.example/p?sig=REDACTED&keep=1#f",
-    );
-  });
-});
-
-describe("redactSignedQueryParamsInText", () => {
-  it.each([
-    [
-      "an error message",
-      "request to https://h.example/p?X-Amz-Signature=abc failed, reason: timeout",
-      "request to https://h.example/p?X-Amz-Signature=REDACTED failed, reason: timeout",
-    ],
-    [
-      "a quoted URL",
-      '{"url":"https://h.example/p?sig=abc"}',
-      '{"url":"https://h.example/p?sig=REDACTED"}',
-    ],
-    [
-      "a parenthesised URL",
-      "fetch (https://h.example/p?a=1&Signature=abc) failed",
-      "fetch (https://h.example/p?a=1&Signature=REDACTED) failed",
-    ],
-  ])("redacts a signed URL inside %s, stopping where the URL ends", (_label, text, expected) => {
-    expect(redactSignedQueryParamsInText(text)).toBe(expected);
-  });
-
-  it("leaves text without a signed URL untouched", () => {
-    const text = "request to https://h.example/p?a=1 failed";
-    expect(redactSignedQueryParamsInText(text)).toBe(text);
-  });
-});
-
-describe("redactSignedQueryParams — fragments and look-alikes", () => {
-  it("keeps a fragment after the query", () => {
-    expect(redactSignedQueryParams("/p?sig=abc#frag")).toBe("/p?sig=REDACTED#frag");
-  });
-
-  it.each([
-    ["a URL without a query", "https://h.example/p"],
-    ["a query without signed parameters, not re-encoded", "https://h.example/p?q=a%20b&x=1+2"],
-    ["a parameter that only resembles one", "https://h.example/p?signature=x&sigil=y&xsig=z"],
-    ["a signed name outside a query", "sig=abc"],
-  ])("leaves %s untouched", (_label, url) => {
-    expect(redactSignedQueryParams(url)).toBe(url);
-  });
-});
-
-describe("redactSignedQuery", () => {
-  it.each([
-    ["with its leading ?", "?sig=abc&a=1", "?sig=REDACTED&a=1"],
-    ["without one", "sig=abc&a=1", "sig=REDACTED&a=1"],
-  ])("redacts a query %s", (_label, query, expected) => {
-    expect(redactSignedQuery(query)).toBe(expected);
-  });
-
-  it.each(["?q=a%20b", "q=a%20b&x=1"])("leaves %s untouched", (query) => {
-    expect(redactSignedQuery(query)).toBe(query);
   });
 });

@@ -136,69 +136,68 @@ describe("RedactingSpanExporter with the HTTP instrumentations", () => {
     );
   });
 
-  it("redacts signed query parameters from undici spans, as instrumentation-http does for its own", async () => {
-    const signed = "/key.png?X-Amz-Credential=AKIDFAKE&X-Amz-Signature=deadbeef&keep=1";
-    await (await fetch(`${base}${signed}`)).arrayBuffer();
+  it("drops the query from undici spans, whatever its parameters are named", async () => {
+    await (await fetch(`${base}/key.png?api_key=k3y&X-Amz-Signature=deadbeef`)).arrayBuffer();
 
     const undici = clientSpan("@opentelemetry/instrumentation-undici");
-    expect(undici.attributes["url.full"]).toBe(
-      `${base}/key.png?X-Amz-Credential=REDACTED&X-Amz-Signature=REDACTED&keep=1`,
-    );
-    expect(undici.attributes["url.query"]).toBe(
-      "?X-Amz-Credential=REDACTED&X-Amz-Signature=REDACTED&keep=1",
-    );
+    expect(undici.attributes["url.full"]).toBe(`${base}/key.png`);
+    expect(undici.attributes["url.path"]).toBe("/key.png");
+    expect(undici.attributes).not.toHaveProperty("url.query");
     for (const span of harness.getSpans()) {
+      expect(exportedText(span)).not.toContain("k3y");
       expect(exportedText(span)).not.toContain("deadbeef");
-      expect(exportedText(span)).not.toContain("AKIDFAKE");
     }
   });
 
-  it("leaves other URLs as the instrumentations recorded them", async () => {
-    await (await fetch(`${base}/v1/messages?beta=true&q=a%20b`)).arrayBuffer();
+  it("keeps the path of other URLs as the instrumentations recorded it", async () => {
+    await (await fetch(`${base}/v1/messages?beta=true`)).arrayBuffer();
 
     const span = clientSpan("@opentelemetry/instrumentation-undici");
-    expect(span.attributes["url.full"]).toBe(`${base}/v1/messages?beta=true&q=a%20b`);
+    expect(span.attributes["url.full"]).toBe(`${base}/v1/messages`);
     expect(span.attributes["url.path"]).toBe("/v1/messages");
-    expect(span.attributes["url.query"]).toBe("?beta=true&q=a%20b");
   });
 
-  it("redacts a status message and exception text, signed URLs included", () => {
-    const message = `request to ${base}/bot${FAKE_TOKEN}/getMe failed`;
-    const presigned = `request to https://h.example/k.png?X-Amz-Signature=deadbeef&a=1 failed`;
-    trace.getTracer("test").startActiveSpan("caller", (span) => {
-      span.recordException(new Error(presigned));
-      span.setStatus({ code: SpanStatusCode.ERROR, message });
-      span.end();
-    });
-
-    const span = expectDefined(harness.getSpans()[0], "span");
-    expect(span.status).toEqual({
-      code: SpanStatusCode.ERROR,
-      message: `request to ${base}/bot<redacted>/getMe failed`,
-    });
-    expect(span.events[0]?.attributes?.["exception.message"]).toBe(
-      "request to https://h.example/k.png?X-Amz-Signature=REDACTED&a=1 failed",
-    );
-    expect(exportedText(span)).not.toContain(FAKE_SECRET);
-    expect(exportedText(span)).not.toContain("deadbeef");
-  });
-
-  it("reads a signed value in a URL attribute to the next &, and in free text to the URL's end", () => {
+  it("cuts every URL attribute at its query or fragment and drops query and fragment attributes", () => {
     trace
       .getTracer("test")
       .startSpan("caller", {
         attributes: {
-          "url.full": "https://h.example/k?sig=ab)c;d,e&keep=1",
-          "url.query": "sig=ab)c;d,e&keep=1",
-          "test.note": "fetch (https://h.example/k?sig=abc) failed",
+          "url.full": `https://h.example/bot${FAKE_TOKEN}/k?token=t0k#frag`,
+          "url.original": "https://h.example/k#access_token=t0k",
+          "http.url": "https://h.example/k?token=t0k",
+          "http.target": "/k?token=t0k",
+          "url.query": "token=t0k",
+          "url.fragment": "access_token=t0k",
+          "url.path": "/k",
+          "test.note": "query ?token=kept-in-free-text",
         },
       })
       .end();
 
     const span = expectDefined(harness.getSpans()[0], "span");
-    expect(span.attributes["url.full"]).toBe("https://h.example/k?sig=REDACTED&keep=1");
-    expect(span.attributes["url.query"]).toBe("sig=REDACTED&keep=1");
-    expect(span.attributes["test.note"]).toBe("fetch (https://h.example/k?sig=REDACTED) failed");
+    expect(span.attributes).toEqual({
+      "url.full": "https://h.example/bot<redacted>/k",
+      "url.original": "https://h.example/k",
+      "http.url": "https://h.example/k",
+      "http.target": "/k",
+      "url.path": "/k",
+      "test.note": "query ?token=kept-in-free-text",
+    });
+  });
+
+  it("redacts the token from a status message and exception text", () => {
+    const message = `request to ${base}/bot${FAKE_TOKEN}/getMe failed`;
+    trace.getTracer("test").startActiveSpan("caller", (span) => {
+      span.recordException(new Error(message));
+      span.setStatus({ code: SpanStatusCode.ERROR, message });
+      span.end();
+    });
+
+    const span = expectDefined(harness.getSpans()[0], "span");
+    const redacted = `request to ${base}/bot<redacted>/getMe failed`;
+    expect(span.status).toEqual({ code: SpanStatusCode.ERROR, message: redacted });
+    expect(span.events[0]?.attributes?.["exception.message"]).toBe(redacted);
+    expect(exportedText(span)).not.toContain(FAKE_SECRET);
   });
 
   it("redacts a span name and string array attributes", async () => {

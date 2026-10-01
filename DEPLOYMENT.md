@@ -368,10 +368,10 @@ The image entrypoint always launches with `node --import ./dist/otel.js`, which 
 
 Telegram's Bot API authenticates by URL path (`/bot<id>:<secret>/<method>`, and `/file/bot<id>:<secret>/…` for downloads), so the bot token is part of every Telegram request URL. Cogmo redacts it before anything leaves the process, so a backend that takes OTLP directly needs no scrubbing of its own:
 
-- **Spans.** The trace exporter is wrapped (`src/otel-redaction.ts`). Every span, whichever instrumentation produced it, has `bot<id>:<secret>` path segments replaced with `bot<redacted>` in its name, status message, attributes (`url.full`, `url.path` and the rest) and event attributes (`exception.message`, `exception.stacktrace`). The same strings get the values of signed query parameters (`sig`, `Signature`, `AWSAccessKeyId`, `X-Goog-Signature`, `X-Amz-Signature`, `X-Amz-Credential`, `X-Amz-Security-Token`) replaced with `REDACTED`, in place. `instrumentation-http` already does that in its own `url.full`; `instrumentation-undici` doesn't.
+- **Spans.** The trace exporter is wrapped (`src/otel-redaction.ts`), whichever instrumentation produced the span. URL attributes (`url.full`, `url.original`, `http.url`, `http.target`) are exported without their query or fragment, and `url.query` and `url.fragment` are dropped, so a query-string credential never reaches a URL attribute, whatever its parameter is called. In every string — names, status messages, attributes, `exception.message` and `exception.stacktrace` — `bot<id>:<secret>` path segments become `bot<redacted>`.
 - **Logs.** Every serialized pino line goes through the same token redaction before it's written (`src/logger.ts`), so stdout and the OTLP log export carry the same redacted line. A grammY network failure is where this matters: its `HttpError` keeps node-fetch's error, whose message names the full request URL.
 
-Redaction matches only those shapes. A credential that another URL carries some other way — an MCP server URL with a token in its path, for example — is exported as configured.
+Free text isn't cut at queries: a URL with a query-string credential inside an error message is exported as written, and so is a credential in another URL's path, such as an MCP server URL with a token in it.
 
 ### Cross-function-run correlation
 
