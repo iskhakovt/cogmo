@@ -56,7 +56,7 @@ export async function runTurnLoop(
       tools: args.tools,
       service: args.service,
       // The number `computeBudget` reserved for output when it sized
-      // the input budget above; reasoning shares it on models that
+      // the input budget (`resolveTurnModel`); reasoning shares it on models that
       // think by default. That reservation covers one iteration while
       // the loop caps every one, so a long tool-using turn can still
       // outgrow the window and degrade to `context_overflow`.

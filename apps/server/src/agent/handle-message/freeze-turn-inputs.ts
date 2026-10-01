@@ -82,8 +82,9 @@ export async function freezeTurnInputs(
 
   // Load profile up front — its streaming knobs ride into `prepare` so
   // open streams honor the per-profile chunk target and edit mode, and
-  // voice resolution, auto-recall gating, and the `memoryScope` ACL
-  // filter further down read the same row. One DB roundtrip per turn.
+  // voice resolution here, and the turn's auto-recall gate and Service
+  // (`memoryScope` ACL) after it, read the same row. One DB roundtrip per
+  // turn.
   // `model` still comes from the turn snapshot, not this read, to
   // preserve the invariant that one turn = one (profileId, model) stamp
   // even if profile.model changes mid-turn.

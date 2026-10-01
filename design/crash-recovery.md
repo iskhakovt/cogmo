@@ -49,7 +49,7 @@ The bug class to catch is #2 — and to catch it you have to **count boundaries,
 | Notify | `send-response` | `step.sendEvent("response/ready")` | Inngest event | ✓ |
 | Resume | `flush` (conditional) | `step.sendEvent("inbound/ready")` | Inngest event | ✓ |
 
-`src/agent/handle-message.ts` runs the phases in this order, each a module under `src/agent/handle-message/` that plans its own steps with the handler's `step`: `admit-turn` (the load steps through `load-inbound`, and the in-cooldown reply), `record-user-message`, `load-turn-transcript`, `freeze-turn-inputs` (through `load-system-prompt`), `assemble-turn-context` (`auto-recall`), `resolve-turn-model` (`freeze-model-limits`), `compact-turn`, `finalize-turn-context` (the epoch and `render-turn-context`), `run-turn-loop` (the loop, `degraded-reply`, `finish-stream`), `persist-turn` (`persist-new-messages` and its events), `deliver-reply`, then `send-response` and `flush` in the handler. `report-turn-failure` is the `onFailure` handler (`emit-conversation-errored`, `notify-user`).
+The handler (`src/agent/handle-message.ts`) runs one module per phase from `src/agent/handle-message/`, in order: `admit-turn`, `record-user-message`, `load-turn-transcript`, `freeze-turn-inputs`, `assemble-turn-context`, `resolve-turn-model`, `compact-turn`, `finalize-turn-context`, `run-turn-loop`, `persist-turn`, `deliver-reply`. `onFailure` is `report-turn-failure`. Each module's doc lists the steps it plans.
 
 The non-durable regions are:
 

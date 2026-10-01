@@ -28,7 +28,7 @@ export interface SkillsService {
 /**
  * Conversation-scoped — `conversationId` is required so the approval-keyboard
  * event can be routed back to the originating chat. Construct one per
- * conversation turn (see `handle-message.ts`); the CLI calls
+ * conversation turn (see `agent/handle-message/chat-turn-service.ts`); the CLI calls
  * `runner.register` directly and skips this layer.
  */
 export interface SkillsServiceDeps {
