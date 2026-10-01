@@ -815,6 +815,9 @@ export class SkillRunnerImpl implements SkillRunner {
           .with({ kind: "missing_file", file: SKILL_BODY_FILE }, () =>
             rejectedResult(branchSha, "missing_skill_py: skill.py not found at branch tip"),
           )
+          .with({ kind: "commit_not_found" }, () =>
+            rejectedResult(branchSha, "missing_commit: branch tip not found"),
+          )
           .with({ kind: "invalid_manifest" }, ({ issues }) => rejectedResult(branchSha, ...issues))
           .exhaustive(),
       );
@@ -1830,9 +1833,13 @@ function rejectedResult(gitSha: string, ...errors: readonly string[]): RegisterR
 
 /** Why approve or rollback refuses a target sha whose source does not read. */
 function targetSourceRejection(error: SkillSourceError): string {
-  return error.kind === "missing_file"
-    ? "target_missing_source"
-    : `target_manifest_invalid: ${error.issues.join("; ")}`;
+  return match(error)
+    .with({ kind: "commit_not_found" }, { kind: "missing_file" }, () => "target_missing_source")
+    .with(
+      { kind: "invalid_manifest" },
+      ({ issues }) => `target_manifest_invalid: ${issues.join("; ")}`,
+    )
+    .exhaustive();
 }
 
 function cacheKey(name: string, gitSha: string): string {

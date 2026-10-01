@@ -82,8 +82,10 @@ describe("readSkillSource", () => {
     expect(error.kind).toBe("invalid_manifest");
   });
 
-  it("throws when the sha does not resolve", async () => {
+  it("errs with commit_not_found when the sha does not resolve", async () => {
     const { repo } = await commit({});
-    await expect(readSkillSource(repo, "refs/heads/missing")).rejects.toThrow(/not found/);
+    expect((await readSkillSource(repo, "refs/heads/missing"))._unsafeUnwrapErr()).toEqual({
+      kind: "commit_not_found",
+    });
   });
 });
