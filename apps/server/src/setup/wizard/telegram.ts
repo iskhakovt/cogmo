@@ -6,7 +6,7 @@
 import * as p from "@clack/prompts";
 import { seedChannelRules } from "../seed.js";
 import { validateTelegramToken } from "../validate.js";
-import { cancelGuard, type WizardDeps } from "./step.js";
+import { cancelGuard, storeSecret, type WizardDeps } from "./step.js";
 
 export async function stepConfigureTelegram(
   deps: WizardDeps,
@@ -63,14 +63,15 @@ export async function stepConfigureTelegram(
   // Store bot token as an encrypted secret, reference by name in channel credentials.
   // The adapter resolves the secret at startup via the secrets store.
   const tokenSecretName = "telegram_bot_token";
-  await deps.runInTx((tx) =>
-    deps.secretsStore.putSecret(tx, {
+  await storeSecret(
+    deps,
+    {
       name: tokenSecretName,
       plaintext: token,
       description: `Telegram bot token (@${result.meta?.botUsername})`,
-    }),
+    },
+    true,
   );
-  await deps.runInTx((tx) => deps.secretsStore.markValidated(tx, tokenSecretName));
 
   const { id: channelId } = await deps.runInTx((tx) =>
     deps.transportStore.createChannel(tx, {

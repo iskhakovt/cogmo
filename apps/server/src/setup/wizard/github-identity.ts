@@ -13,7 +13,7 @@ import {
 } from "../../secrets/github.js";
 import { generateSshKeyPair } from "../../secrets/ssh-keygen.js";
 import { validateGitHubPat } from "../validate.js";
-import { cancelGuard, type WizardDeps } from "./step.js";
+import { cancelGuard, storeSecret, type WizardDeps } from "./step.js";
 
 export async function stepConfigureGitHubIdentity(deps: WizardDeps): Promise<void> {
   const existing = await deps.runInTx((tx) =>
@@ -104,17 +104,7 @@ export async function stepConfigureGitHubIdentity(deps: WizardDeps): Promise<voi
     login,
     id: userId,
   };
-
-  await deps.runInTx((tx) =>
-    deps.secretsStore.putSecret(tx, {
-      name: gitHubIdentitySecretName(DEFAULT_GITHUB_IDENTITY_NAME),
-      plaintext: serializeGitHubIdentity(identity),
-      description: `GitHub identity (@${login})`,
-    }),
-  );
-  await deps.runInTx((tx) =>
-    deps.secretsStore.markValidated(tx, gitHubIdentitySecretName(DEFAULT_GITHUB_IDENTITY_NAME)),
-  );
+  await storeIdentity(deps, identity);
 
   p.note(
     [
@@ -180,16 +170,19 @@ async function collectAndStorePat(deps: WizardDeps, existing: GitHubIdentity): P
     login,
     id: userId,
   };
+  await storeIdentity(deps, identity);
+  p.log.success("GitHub PAT rotated.");
+}
 
-  await deps.runInTx((tx) =>
-    deps.secretsStore.putSecret(tx, {
+/** Store the default identity, its PAT already validated against `GET /user`. */
+async function storeIdentity(deps: WizardDeps, identity: GitHubIdentity): Promise<void> {
+  await storeSecret(
+    deps,
+    {
       name: gitHubIdentitySecretName(DEFAULT_GITHUB_IDENTITY_NAME),
       plaintext: serializeGitHubIdentity(identity),
-      description: `GitHub identity (@${login})`,
-    }),
+      description: `GitHub identity (@${identity.login})`,
+    },
+    true,
   );
-  await deps.runInTx((tx) =>
-    deps.secretsStore.markValidated(tx, gitHubIdentitySecretName(DEFAULT_GITHUB_IDENTITY_NAME)),
-  );
-  p.log.success("GitHub PAT rotated.");
 }

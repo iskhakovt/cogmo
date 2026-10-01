@@ -9,7 +9,7 @@ import {
   CLAUDE_CODE_OAUTH_TOKEN_SECRET_DESCRIPTION,
 } from "../../agent/coding/auth.js";
 import { validateClaudeCodeOauthToken } from "../validate.js";
-import { cancelGuard, type WizardDeps } from "./step.js";
+import { cancelGuard, storeSecret, type WizardDeps } from "./step.js";
 
 export async function stepConfigureClaudeCodeAuth(deps: WizardDeps): Promise<void> {
   const existing = await deps.runInTx((tx) =>
@@ -69,16 +69,15 @@ export async function stepConfigureClaudeCodeAuth(deps: WizardDeps): Promise<voi
     if (!cancelGuard(saveAnyway)) return;
   }
 
-  await deps.runInTx((tx) =>
-    deps.secretsStore.putSecret(tx, {
+  await storeSecret(
+    deps,
+    {
       name: CLAUDE_CODE_OAUTH_TOKEN_SECRET,
       plaintext: token,
       description: CLAUDE_CODE_OAUTH_TOKEN_SECRET_DESCRIPTION,
-    }),
+    },
+    result.valid,
   );
-  if (result.valid) {
-    await deps.runInTx((tx) => deps.secretsStore.markValidated(tx, CLAUDE_CODE_OAUTH_TOKEN_SECRET));
-  }
 
   p.log.success("Claude Code OAuth token stored.");
 }

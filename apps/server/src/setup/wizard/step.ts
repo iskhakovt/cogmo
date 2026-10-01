@@ -30,3 +30,18 @@ export interface WizardDeps {
   secretsStore: SecretsStore;
   bootstrapLock: BootstrapLock;
 }
+
+/**
+ * Store a credential a step collected, marked validated when its live probe
+ * passed. One transaction, so a stored secret's validation mark is never lost.
+ */
+export async function storeSecret(
+  deps: Pick<WizardDeps, "runInTx" | "secretsStore">,
+  secret: { name: string; plaintext: string; description: string },
+  validated: boolean,
+): Promise<void> {
+  await deps.runInTx(async (tx) => {
+    await deps.secretsStore.putSecret(tx, secret);
+    if (validated) await deps.secretsStore.markValidated(tx, secret.name);
+  });
+}

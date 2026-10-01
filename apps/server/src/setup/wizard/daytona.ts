@@ -8,7 +8,7 @@ import {
   DAYTONA_API_KEY_SECRET_DESCRIPTION,
 } from "../../sandbox/daytona/auth.js";
 import { type DaytonaProbeOpts, validateDaytonaApiKey } from "../validate.js";
-import { cancelGuard, type WizardDeps } from "./step.js";
+import { cancelGuard, storeSecret, type WizardDeps } from "./step.js";
 
 export async function stepConfigureDaytona(deps: WizardDeps): Promise<void> {
   const existing = await deps.runInTx((tx) =>
@@ -75,16 +75,15 @@ export async function stepConfigureDaytona(deps: WizardDeps): Promise<void> {
     if (!cancelGuard(saveAnyway)) return;
   }
 
-  await deps.runInTx((tx) =>
-    deps.secretsStore.putSecret(tx, {
+  await storeSecret(
+    deps,
+    {
       name: DAYTONA_API_KEY_SECRET,
       plaintext: apiKey,
       description: DAYTONA_API_KEY_SECRET_DESCRIPTION,
-    }),
+    },
+    result.valid,
   );
-  if (result.valid) {
-    await deps.runInTx((tx) => deps.secretsStore.markValidated(tx, DAYTONA_API_KEY_SECRET));
-  }
 
   p.log.success("Daytona API key stored.");
 }
