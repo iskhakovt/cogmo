@@ -1,6 +1,7 @@
 import { PassThrough } from "node:stream";
 import { err, ok, type Result } from "neverthrow";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { buildCodingTaskVerifyCompleteEvent } from "../../inngest/events.js";
 import {
   ExecError,
   type ExecExit,
@@ -241,5 +242,29 @@ describe("runVerifyStreaming", () => {
       timeoutSeconds: 60,
     });
     expect(result.durationMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it("keeps durationMs a valid verify-complete payload when the wall clock steps back", async () => {
+    const wallClock = vi.spyOn(Date, "now");
+    wallClock.mockReturnValueOnce(1_000_000_000_000).mockReturnValue(1_000_000_000_000 - 3_600_000);
+    try {
+      const result = await runVerifyStreaming({
+        container: fakeContainer({ stdoutChunks: ["x"], exitDelayMs: 5, exitCode: 0 }),
+        verifyCommand: "true",
+        timeoutSeconds: 60,
+      });
+      expect(Number.isInteger(result.durationMs)).toBe(true);
+      expect(result.durationMs).toBeGreaterThanOrEqual(0);
+      await expect(
+        buildCodingTaskVerifyCompleteEvent({
+          taskId: "task-1",
+          ok: result.ok,
+          exitCode: result.exitCode,
+          durationMs: result.durationMs,
+        }).validate(),
+      ).resolves.toBeUndefined();
+    } finally {
+      wallClock.mockRestore();
+    }
   });
 });

@@ -58,7 +58,9 @@ export interface VerifyResult {
  */
 export async function runVerifyStreaming(params: VerifyParams): Promise<VerifyResult> {
   const { container, verifyCommand, timeoutSeconds } = params;
-  const start = Date.now();
+  // Monotonic: a wall-clock step during the run cannot make the duration
+  // negative, which the `coding/task/verify-complete` schema rejects.
+  const start = performance.now();
 
   const handle = await container.execStreaming(["bash", "-lc", verifyCommand], {
     timeoutMs: Math.max(1, timeoutSeconds * 1000),
@@ -112,7 +114,7 @@ async function captureVerify(
   const exited = await handle.exited;
   await pumped;
 
-  const durationMs = Date.now() - start;
+  const durationMs = Math.round(performance.now() - start);
   if (exited.isErr()) {
     if (exited.error.kind !== "timed_out") throw execFailureError(exited.error);
     const note = `\n\n[verify timed out after ${timeoutSeconds}s]`;

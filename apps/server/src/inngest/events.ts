@@ -468,6 +468,17 @@ export const codingTaskVerifyComplete = eventType("coding/task/verify-complete",
   }),
 });
 
+export type CodingTaskVerifyCompleteData = z.infer<typeof codingTaskVerifyComplete.schema>;
+
+/**
+ * Build a `coding/task/verify-complete` event. `send` validates the payload
+ * against the schema. The bus-dedup `id` covers the crash window between the
+ * send and the step recording it: one verify verdict per task.
+ */
+export function buildCodingTaskVerifyCompleteEvent(data: CodingTaskVerifyCompleteData) {
+  return { ...codingTaskVerifyComplete.create(data), id: `verify-complete-${data.taskId}` };
+}
+
 /**
  * Coding delegation — `git push` succeeded. Observability + Telegram
  * delivery hook (slice 4.0c progress message can show "branch pushed"
@@ -480,6 +491,17 @@ export const codingTaskPushed = eventType("coding/task/pushed", {
     branchSha: z.string(),
   }),
 });
+
+export type CodingTaskPushedData = z.infer<typeof codingTaskPushed.schema>;
+
+/**
+ * Build a `coding/task/pushed` event. `send` validates the payload against
+ * the schema. The bus-dedup `id` covers the crash window between the send
+ * and the step recording it: one push per task.
+ */
+export function buildCodingTaskPushedEvent(data: CodingTaskPushedData) {
+  return { ...codingTaskPushed.create(data), id: `pushed-${data.taskId}` };
+}
 
 /**
  * Coding delegation — PR opened on GitHub. Consumed by the
