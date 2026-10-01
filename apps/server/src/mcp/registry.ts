@@ -1,5 +1,5 @@
 import { err, ok, type Result, ResultAsync } from "neverthrow";
-import { UniqueViolationError } from "../agent/store/errors.js";
+import { uniqueViolationAs } from "../agent/store/errors.js";
 import { compileToolMatchers } from "../agent/tool-matchers.js";
 import type { ToolSpec } from "../agent/tools.js";
 import type { Transactor } from "../db/index.js";
@@ -22,7 +22,7 @@ import {
   type McpAddServerError,
   type McpApproveServerError,
 } from "./errors.js";
-import type { McpStore } from "./store/index.js";
+import { MCP_SERVER_NAME_CONSTRAINT, type McpStore } from "./store/index.js";
 
 export interface ResolveToolsParams {
   /** picomatch-compatible globs from `profile.toolSet`. Empty array = no MCP tools surfaced. */
@@ -165,12 +165,13 @@ export class McpRegistryImpl implements McpRegistry {
   async addServer(spec: McpServerSpec): Promise<Result<McpServer, McpAddServerError>> {
     const named = validateServerName(spec.name);
     if (named.isErr()) return err(named.error);
-    try {
-      return ok(await this.#runInTx((tx) => this.#store.addServer(tx, spec)));
-    } catch (e) {
-      if (e instanceof UniqueViolationError) return err({ code: "name_taken", name: spec.name });
-      throw e;
-    }
+    // The violation aborts the whole transaction, which this call owns, so
+    // it is matched outside `runInTx` rather than inside a savepoint.
+    return uniqueViolationAs(
+      MCP_SERVER_NAME_CONSTRAINT,
+      { code: "name_taken", name: spec.name },
+      () => this.#runInTx((tx) => this.#store.addServer(tx, spec)),
+    );
   }
 
   /**

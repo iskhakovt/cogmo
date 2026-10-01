@@ -1,5 +1,4 @@
 import { and, count, eq, sql } from "drizzle-orm";
-import { translateUniqueViolation } from "../../agent/store/errors.js";
 import { single } from "../../db/helpers.js";
 import type { Transaction } from "../../db/index.js";
 import {
@@ -16,10 +15,14 @@ import { mcpServers, mcpServerTools } from "./schema.js";
 
 // --- Interface ---
 
+/** The unique constraint on `mcp_servers.name`. */
+export const MCP_SERVER_NAME_CONSTRAINT = "mcp_servers_name_unique";
+
 export interface McpStore {
   /**
-   * Insert a new server. Throws `UniqueViolationError` on a taken name; the
-   * name's shape is validated upstream, so an invalid one throws as a bug.
+   * Insert a new server. A taken name raises the driver's unique violation on
+   * `MCP_SERVER_NAME_CONSTRAINT`; the name's shape is validated upstream, so
+   * an invalid one throws as a bug.
    */
   addServer(tx: Transaction, spec: McpServerSpec): Promise<McpServer>;
 
@@ -122,17 +125,15 @@ export interface McpStore {
 export class DrizzleMcpStore implements McpStore {
   async addServer(tx: Transaction, spec: McpServerSpec): Promise<McpServer> {
     assertValidServerName(spec.name);
-    const rows = await translateUniqueViolation(() =>
-      tx
-        .insert(mcpServers)
-        .values({
-          name: spec.name,
-          config: spec.config,
-          enabled: spec.enabled,
-          approvalStatus: "pending",
-        })
-        .returning(),
-    );
+    const rows = await tx
+      .insert(mcpServers)
+      .values({
+        name: spec.name,
+        config: spec.config,
+        enabled: spec.enabled,
+        approvalStatus: "pending",
+      })
+      .returning();
     return rowToServer(single(rows));
   }
 
