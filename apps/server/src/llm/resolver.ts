@@ -144,11 +144,14 @@ async function buildAdapter(row: ProviderRow, deps: DbResolverDeps): Promise<Llm
           `Provider "${row.name}" (openai_compatible) requires a base URL. Re-run \`cogmo setup\` to reconfigure.`,
         );
       }
+      // Each resolved model gets its own adapter, so the routing row's extra
+      // request fields apply to this model's calls only.
       return new OpenAICompatibleProvider(row.name, {
         apiKey,
         baseURL: row.baseUrl,
         ...(row.attrs.headers && { headers: row.attrs.headers }),
         cacheDialect: row.attrs.cacheDialect ?? "none",
+        ...(row.extraBody !== null && { extraBody: row.extraBody }),
       });
     }
   }
