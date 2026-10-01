@@ -45,9 +45,13 @@ variable "UV_VERSION" {
 variable "UV_DIGEST" {
   default = "sha256:3adc3706091ce7c2fe595e669628caedd6d951551b92b258b7e7dbe06d9440bc"
 }
-// Match package.json packageManager.
+// Match package.json packageManager. The digest is ghcr.io/pnpm/pnpm's
+// index for that version.
 variable "PNPM_VERSION" {
-  default = "11.27.1"
+  default = "12.8.1"
+}
+variable "PNPM_DIGEST" {
+  default = "sha256:44cfd11d75b901dc7a83a16812d9134e4bf9d82f6b0eb28af6d666ebbf0fb4fb"
 }
 variable "NPM_VERSION" {
   default = "12.1.0"
@@ -142,6 +146,7 @@ target "devbase" {
   args = {
     NPM_VERSION         = "${NPM_VERSION}"
     PNPM_VERSION        = "${PNPM_VERSION}"
+    PNPM_DIGEST         = "${PNPM_DIGEST}"
     CLAUDE_CODE_VERSION = "${CLAUDE_CODE_VERSION}"
     UV_VERSION          = "${UV_VERSION}"
     UV_DIGEST           = "${UV_DIGEST}"
