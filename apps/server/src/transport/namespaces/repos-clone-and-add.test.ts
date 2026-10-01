@@ -21,6 +21,13 @@ import {
 import type { SecretsStore } from "../../secrets/store/index.js";
 import { createRepos } from "./repos.js";
 
+// `runGit` stays real; the spy lets one test make the clone reject with a
+// value that is not an Error.
+vi.mock("../../secrets/git-askpass.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../secrets/git-askpass.js")>();
+  return { ...actual, runGit: vi.fn(actual.runGit) };
+});
+
 const VALID_IDENTITY: GitHubIdentity = {
   pat: "ghp_dummy_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
   sshPrivateKey: "-----BEGIN OPENSSH PRIVATE KEY-----\nx\n-----END OPENSSH PRIVATE KEY-----",
@@ -282,6 +289,17 @@ describe("Transport.repos.cloneAndAdd", () => {
     });
     expect(result.isErr()).toBe(true);
     if (result.isErr()) expect(result.error.code).toBe("repo_clone_failed");
+  });
+
+  it("reports a clone that rejects with a non-Error value by its string form", async () => {
+    tempRoot = mkdtempSync(join(tmpdir(), "cogmo-cloneAndAdd-r-"));
+    vi.mocked(runGit).mockRejectedValueOnce("fatal: remote hung up");
+    const repos = makeRepos({ reposDir: tempRoot });
+    const result = await repos.cloneAndAdd({ name: "strthrow", remoteUrl: bareRepoUrl });
+    expect(result._unsafeUnwrapErr()).toEqual({
+      code: "repo_clone_failed",
+      reason: "fatal: remote hung up",
+    });
   });
 
   // Suppress unused-binding warnings when CodingTaskRow isn't referenced
