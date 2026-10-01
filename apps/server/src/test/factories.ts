@@ -204,7 +204,11 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
     hasChannelDefaults: vi.fn().mockResolvedValue(false),
     insertSeedRule: vi.fn().mockResolvedValue({ id: "rule-1" }),
     getCorrections: vi.fn().mockResolvedValue([]),
+    getInstructionRules: vi.fn().mockResolvedValue([]),
+    hasInstructionRule: vi.fn().mockResolvedValue(false),
     upsertCorrection: vi.fn().mockResolvedValue({ id: "rule-1", promoted: false }),
+    contradictLearningRule: vi.fn().mockResolvedValue("reset"),
+    getMemoryRules: vi.fn().mockResolvedValue([]),
     countActiveLearnedRules: vi.fn().mockResolvedValue(0),
     replaceRules: vi.fn().mockResolvedValue({ id: "rule-1" }),
     setInstructionRule: vi.fn().mockResolvedValue({
@@ -219,6 +223,7 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
     stagePendingMemory: vi.fn().mockResolvedValue({ id: "pending-1" }),
     bulkStagePendingMemories: vi.fn().mockResolvedValue(undefined),
     getPendingMemories: vi.fn().mockResolvedValue([]),
+    countPendingMemories: vi.fn().mockResolvedValue(0),
     deletePendingMemories: vi.fn().mockResolvedValue(undefined),
     createScheduledTask: vi.fn().mockResolvedValue({
       id: "sched-1",

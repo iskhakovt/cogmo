@@ -269,9 +269,21 @@ export type TriggerReflectionOutcome =
   | {
       status: "processed";
       eventId: string;
-      ruleChanges: { extracted: number; reinforced: number; promoted: number };
+      ruleChanges: {
+        extracted: number;
+        reinforced: number;
+        promoted: number;
+        retired: number;
+        reset: number;
+      };
       memoryCount: number;
       drained: number;
+      /** Staged rows a `memory`-category rule forbade. */
+      withheld: number;
+      /** 1 when memory extraction was skipped for a user's memory rule the profile can't see. */
+      skippedForUnseenRules: number;
+      /** Staged rows left pending for a first-party fire. */
+      deferredToFirstParty: number;
     };
 
 /**
@@ -2639,9 +2651,14 @@ export function createTransport(deps: {
             extracted: result.corrections.extracted,
             reinforced: result.corrections.reinforced,
             promoted: result.corrections.promoted,
+            retired: result.corrections.retired,
+            reset: result.corrections.reset,
           },
           memoryCount,
           drained: result.drained.drained,
+          withheld: result.drained.withheld,
+          skippedForUnseenRules: result.memories.skippedForUnseenRules,
+          deferredToFirstParty: result.drained.deferredToFirstParty,
         });
       },
     },

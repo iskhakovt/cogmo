@@ -1,12 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Transactor } from "../../db/index.js";
+import { logger } from "../../logger.js";
+import { expectDefined } from "../../test/assertions.js";
 import { mockProvider } from "../../test/factories.js";
-import type { PendingMemory } from "../store/index.js";
+import type { MemoryRule, PendingMemory, PendingMemoryFilter } from "../store/index.js";
 import {
   buildRetainItems,
   type ClassifiedRow,
+  classifyPendingMemories,
   type DrainPendingDeps,
   drainPendingMemories,
+  loadPendingBatch,
+  type ObserverFire,
 } from "./drain-pending-memories.js";
 
 const FAKE_TX = { __mockTx: true } as never;
@@ -18,10 +23,39 @@ function pending(overrides: Partial<PendingMemory> = {}): PendingMemory {
     content: "homelab IP is 10.0.10.10",
     context: null,
     source: "live_retain",
+    profileId: "profile-1",
     profileClass: null,
     skillName: null,
     createdAt: new Date("2026-05-06T10:00:00Z"),
     ...overrides,
+  };
+}
+
+const FIRE: ObserverFire = {
+  conversationId: "conv-1",
+  userId: "user-1",
+  profileId: "profile-1",
+  seesUserRules: true,
+};
+
+/** The store's pending-row reads over `rows`, filtered as the store filters them. */
+function pendingStore(rows: ReadonlyArray<PendingMemory>) {
+  const matching = (filter: PendingMemoryFilter | undefined) =>
+    rows.filter(
+      (r) =>
+        (filter?.stagedBy === undefined || r.profileId === filter.stagedBy) &&
+        (filter?.sources === undefined || filter.sources.includes(r.source)) &&
+        (filter?.ids === undefined || filter.ids.includes(r.id)),
+    );
+  return {
+    getPendingMemories: vi.fn(
+      async (_tx: unknown, _userId: string, limit?: number, filter?: PendingMemoryFilter) =>
+        matching(filter).slice(0, limit),
+    ),
+    countPendingMemories: vi.fn(
+      async (_tx: unknown, _userId: string, filter?: PendingMemoryFilter) =>
+        matching(filter).length,
+    ),
   };
 }
 
@@ -31,7 +65,10 @@ function mockDeps(
     network: string;
     compartment: string;
     trust: string;
+    withhold?: boolean;
   }>,
+  memoryRules: ReadonlyArray<MemoryRule> = [],
+  seesUserRules = true,
 ): DrainPendingDeps {
   let callIndex = 0;
   const provider = mockProvider({
@@ -53,20 +90,261 @@ function mockDeps(
     runInTx: fakeRunInTx,
     memory: { retainBatch: vi.fn().mockResolvedValue(undefined) },
     store: {
-      getPendingMemories: vi.fn().mockResolvedValue(pendingRows),
+      ...pendingStore(pendingRows),
       deletePendingMemories: vi.fn().mockResolvedValue(undefined),
+      // What the store returns: global rules and those of the profiles asked about.
+      getMemoryRules: vi.fn(
+        async (_tx: unknown, scope: { profileIds: ReadonlyArray<string>; userId: string }) =>
+          memoryRules.filter((r) => r.profileId === null || scope.profileIds.includes(r.profileId)),
+      ),
     },
     customCompartments: [],
+    fire: { ...FIRE, seesUserRules },
   };
 }
+
+const HEALTH_RULE = "Don't save anything about my health.";
+
+function memoryRule(rule: string, overrides: Partial<MemoryRule> = {}): MemoryRule {
+  return { rule, profileId: null, fromUser: true, ...overrides };
+}
+
+function systemPrompts(deps: DrainPendingDeps): string[] {
+  return vi.mocked(deps.provider.chat).mock.calls.map(([params]) => params.system);
+}
+
+describe("drainPendingMemories — memory rules", () => {
+  it("withholds a row a rule forbids: deleted without a retain, counted and logged", async () => {
+    const rows = [
+      pending({ id: "pm-health", content: "takes metformin" }),
+      pending({ id: "pm-ip", content: "homelab IP is 10.0.10.10" }),
+    ];
+    const deps = mockDeps(
+      rows,
+      [
+        { network: "bank", compartment: "health", trust: "first-party", withhold: true },
+        { network: "world", compartment: "technical", trust: "first-party", withhold: false },
+      ],
+      [memoryRule(HEALTH_RULE)],
+    );
+    const info = vi.spyOn(logger, "info");
+
+    const result = await drainPendingMemories(deps);
+
+    expect(result).toEqual({
+      drained: 1,
+      byNetwork: { world: 1 },
+      withheld: 1,
+      deferredToFirstParty: 0,
+    });
+    const items = expectDefined(vi.mocked(deps.memory.retainBatch).mock.calls[0], "retain")[1];
+    expect(items.map((i) => i.documentId)).toEqual(["pm-ip"]);
+    expect(deps.store.deletePendingMemories).toHaveBeenCalledWith(expect.anything(), [
+      "pm-ip",
+      "pm-health",
+    ]);
+    const withheldLogs = info.mock.calls.filter(([, msg]) => String(msg).includes("withheld"));
+    expect(withheldLogs).toEqual([
+      [
+        { pendingId: "pm-health", source: "live_retain", memoryRules: [HEALTH_RULE] },
+        expect.any(String),
+      ],
+    ]);
+    expect(JSON.stringify(withheldLogs)).not.toContain("metformin");
+    info.mockRestore();
+  });
+
+  it("deletes the rows without a retain when every row is withheld", async () => {
+    const deps = mockDeps(
+      [pending({ id: "pm-health", content: "takes metformin" })],
+      [{ network: "bank", compartment: "health", trust: "first-party", withhold: true }],
+      [memoryRule(HEALTH_RULE)],
+    );
+
+    const result = await drainPendingMemories(deps);
+
+    expect(result).toEqual({ drained: 0, byNetwork: {}, withheld: 1, deferredToFirstParty: 0 });
+    expect(deps.memory.retainBatch).not.toHaveBeenCalled();
+    expect(deps.store.deletePendingMemories).toHaveBeenCalledWith(expect.anything(), ["pm-health"]);
+  });
+
+  it("lists the rules each row's staging profile sees, from one read", async () => {
+    const rows = [
+      pending({ id: "pm-1", profileId: "profile-a", source: "skill", skillName: "notes" }),
+      pending({ id: "pm-2", profileId: "profile-b" }),
+      pending({ id: "pm-3", profileId: null }),
+      pending({ id: "pm-4", profileId: "profile-a" }),
+    ];
+    const answer = { network: "world", compartment: "technical", trust: "first-party" };
+    const deps = mockDeps(
+      rows,
+      [{ ...answer, withhold: false }, answer, answer, { ...answer, withhold: false }],
+      [memoryRule(HEALTH_RULE, { profileId: "profile-a" })],
+    );
+
+    const result = await drainPendingMemories(deps);
+
+    expect(result.drained).toBe(4);
+    expect(vi.mocked(deps.store.getMemoryRules).mock.calls.map(([, scope]) => scope)).toEqual([
+      { profileIds: ["profile-a", "profile-b"], userId: "user-1" },
+    ]);
+    expect(systemPrompts(deps).map((s) => s.includes(HEALTH_RULE))).toEqual([
+      true,
+      false,
+      false,
+      true,
+    ]);
+  });
+
+  it("passes a migration row without consulting the rules", async () => {
+    const deps = mockDeps(
+      [pending({ id: "pm-1", source: "migration" })],
+      [{ network: "world", compartment: "technical", trust: "first-party" }],
+      [memoryRule(HEALTH_RULE)],
+    );
+
+    const result = await drainPendingMemories(deps);
+
+    expect(result).toEqual({
+      drained: 1,
+      byNetwork: { world: 1 },
+      withheld: 0,
+      deferredToFirstParty: 0,
+    });
+    expect(deps.store.getMemoryRules).not.toHaveBeenCalled();
+    expect(systemPrompts(deps)[0]).not.toContain("withhold");
+  });
+
+  describe("a third-party fire", () => {
+    const answer = { network: "world", compartment: "technical", trust: "first-party" };
+
+    it("classifies only rows its own profile staged, deferring the rest to a first-party fire", async () => {
+      const rows = [
+        pending({ id: "pm-other", profileId: "profile-b" }),
+        pending({ id: "pm-migrated", profileId: null, source: "migration" }),
+        pending({ id: "pm-own", profileId: "profile-1" }),
+      ];
+      const deps = mockDeps(
+        rows,
+        [{ ...answer, withhold: false }],
+        [memoryRule("Never store passwords.", { fromUser: false })],
+        false,
+      );
+      const warn = vi.spyOn(logger, "warn");
+
+      const result = await drainPendingMemories(deps);
+
+      expect(result).toEqual({
+        drained: 1,
+        byNetwork: { world: 1 },
+        withheld: 0,
+        deferredToFirstParty: 2,
+      });
+      expect(deps.provider.chat).toHaveBeenCalledOnce();
+      expect(deps.store.getPendingMemories).toHaveBeenCalledWith(
+        expect.anything(),
+        "user-1",
+        undefined,
+        { stagedBy: "profile-1" },
+      );
+      expect(deps.store.deletePendingMemories).toHaveBeenCalledWith(expect.anything(), ["pm-own"]);
+      expect(warn).not.toHaveBeenCalled();
+      warn.mockRestore();
+    });
+
+    it("defers its own rows when a user's rule it can't see binds them, without a warning", async () => {
+      const deps = mockDeps(
+        [pending({ id: "pm-own", profileId: "profile-1" })],
+        [],
+        [memoryRule(HEALTH_RULE, { profileId: "profile-1" })],
+        false,
+      );
+      const warn = vi.spyOn(logger, "warn");
+
+      const result = await drainPendingMemories(deps);
+
+      expect(result).toEqual({ drained: 0, byNetwork: {}, withheld: 0, deferredToFirstParty: 1 });
+      expect(deps.provider.chat).not.toHaveBeenCalled();
+      expect(deps.store.deletePendingMemories).not.toHaveBeenCalled();
+      expect(warn).not.toHaveBeenCalled();
+      warn.mockRestore();
+    });
+
+    it("reads past more than a batch of deferred rows to one it may classify", async () => {
+      const deferred = Array.from({ length: 150 }, (_, i) =>
+        pending({ id: `pm-other-${i}`, profileId: "profile-b" }),
+      );
+      const deps = mockDeps([...deferred, pending({ id: "pm-own" })], [], [], false);
+
+      const batch = await loadPendingBatch(deps.fire, 100, deps);
+
+      expect(batch.pending.map((p) => p.id)).toEqual(["pm-own"]);
+      expect(batch.deferredToFirstParty).toBe(150);
+    });
+
+    it("defers a row of another profile in a batch read without the filter", async () => {
+      const deps = mockDeps(
+        [],
+        [{ ...answer, withhold: false }],
+        [memoryRule("Never store passwords.", { fromUser: false })],
+        false,
+      );
+
+      const result = await classifyPendingMemories(
+        [pending({ id: "pm-other", profileId: "profile-b" }), pending({ id: "pm-own" })],
+        deps,
+      );
+
+      expect(result.deferredToFirstParty).toBe(1);
+      expect(result.successful.map((r) => r.id)).toEqual(["pm-own"]);
+    });
+  });
+
+  it("reads again the staging profile of a replayed row that lacks it", async () => {
+    const { profileId: _dropped, ...replayed } = pending({ id: "pm-1", profileId: "profile-a" });
+    const deps = mockDeps(
+      [pending({ id: "pm-1", profileId: "profile-a" })],
+      [{ network: "bank", compartment: "health", trust: "first-party", withhold: true }],
+      [memoryRule(HEALTH_RULE, { profileId: "profile-a" })],
+    );
+
+    // A replayed row memoized without `profileId`.
+    const result = await classifyPendingMemories([replayed as unknown as PendingMemory], deps);
+
+    expect(deps.store.getPendingMemories).toHaveBeenCalledWith(
+      expect.anything(),
+      "user-1",
+      undefined,
+      { ids: ["pm-1"] },
+    );
+    expect(systemPrompts(deps)[0]).toContain(HEALTH_RULE);
+    expect(result.withheld).toEqual(["pm-1"]);
+  });
+
+  it("skips a replayed row that is no longer pending", async () => {
+    const { profileId: _dropped, ...replayed } = pending({ id: "pm-gone" });
+    const deps = mockDeps([], [], [memoryRule(HEALTH_RULE)]);
+
+    // A replayed row memoized without `profileId`.
+    const result = await classifyPendingMemories([replayed as unknown as PendingMemory], deps);
+
+    expect(result).toEqual({
+      successful: [],
+      withheld: [],
+      byNetwork: {},
+      deferredToFirstParty: 0,
+    });
+    expect(deps.provider.chat).not.toHaveBeenCalled();
+  });
+});
 
 describe("drainPendingMemories", () => {
   it("returns zeros and skips work when nothing pending", async () => {
     const deps = mockDeps([], []);
 
-    const result = await drainPendingMemories("user-1", deps);
+    const result = await drainPendingMemories(deps);
 
-    expect(result).toEqual({ drained: 0, byNetwork: {} });
+    expect(result).toEqual({ drained: 0, byNetwork: {}, withheld: 0, deferredToFirstParty: 0 });
     expect(deps.memory.retainBatch).not.toHaveBeenCalled();
     expect(deps.store.deletePendingMemories).not.toHaveBeenCalled();
     expect(deps.provider.chat).not.toHaveBeenCalled();
@@ -78,7 +356,7 @@ describe("drainPendingMemories", () => {
       { network: "world", compartment: "technical", trust: "first-party" },
     ]);
 
-    const result = await drainPendingMemories("user-1", deps);
+    const result = await drainPendingMemories(deps);
 
     expect(result.drained).toBe(1);
     expect(result.byNetwork).toEqual({ world: 1 });
@@ -102,7 +380,7 @@ describe("drainPendingMemories", () => {
       { network: "bank", compartment: "personal", trust: "first-party" },
     ]);
 
-    await drainPendingMemories("user-1", deps);
+    await drainPendingMemories(deps);
 
     expect(deps.memory.retainBatch).toHaveBeenCalledWith("user-1", [
       {
@@ -122,7 +400,7 @@ describe("drainPendingMemories", () => {
       { network: "world", compartment: "technical", trust: "first-party" },
     ]);
 
-    await drainPendingMemories("user-1", deps);
+    await drainPendingMemories(deps);
 
     expect(deps.memory.retainBatch).toHaveBeenCalledWith("user-1", [
       expect.objectContaining({ metadata: { source: "migration" } }),
@@ -135,7 +413,7 @@ describe("drainPendingMemories", () => {
       { network: "world", compartment: "technical", trust: "first-party" },
     ]);
 
-    await drainPendingMemories("user-1", deps);
+    await drainPendingMemories(deps);
 
     expect(deps.memory.retainBatch).toHaveBeenCalledWith("user-1", [
       expect.objectContaining({ metadata: { source: "skill", skill: "ci_watch" } }),
@@ -151,7 +429,7 @@ describe("drainPendingMemories", () => {
       new Error("Hindsight unreachable"),
     );
 
-    await expect(drainPendingMemories("user-1", deps)).rejects.toThrow("Hindsight unreachable");
+    await expect(drainPendingMemories(deps)).rejects.toThrow("Hindsight unreachable");
     expect(deps.store.deletePendingMemories).not.toHaveBeenCalled();
   });
 
@@ -188,13 +466,15 @@ describe("drainPendingMemories", () => {
       runInTx: fakeRunInTx,
       memory: { retainBatch: vi.fn().mockResolvedValue(undefined) },
       store: {
-        getPendingMemories: vi.fn().mockResolvedValue(rows),
+        ...pendingStore(rows),
         deletePendingMemories: vi.fn().mockResolvedValue(undefined),
+        getMemoryRules: vi.fn().mockResolvedValue([]),
       },
+      fire: FIRE,
       customCompartments: [],
     };
 
-    const result = await drainPendingMemories("user-1", deps);
+    const result = await drainPendingMemories(deps);
 
     expect(result.drained).toBe(1);
     expect(deps.memory.retainBatch).toHaveBeenCalledWith("user-1", [
@@ -213,15 +493,17 @@ describe("drainPendingMemories", () => {
       runInTx: fakeRunInTx,
       memory: { retainBatch: vi.fn().mockResolvedValue(undefined) },
       store: {
-        getPendingMemories: vi.fn().mockResolvedValue(rows),
+        ...pendingStore(rows),
         deletePendingMemories: vi.fn().mockResolvedValue(undefined),
+        getMemoryRules: vi.fn().mockResolvedValue([]),
       },
+      fire: FIRE,
       customCompartments: [],
     };
 
-    const result = await drainPendingMemories("user-1", deps);
+    const result = await drainPendingMemories(deps);
 
-    expect(result).toEqual({ drained: 0, byNetwork: {} });
+    expect(result).toEqual({ drained: 0, byNetwork: {}, withheld: 0, deferredToFirstParty: 0 });
     expect(deps.memory.retainBatch).not.toHaveBeenCalled();
     expect(deps.store.deletePendingMemories).not.toHaveBeenCalled();
   });
@@ -251,13 +533,15 @@ describe("drainPendingMemories", () => {
       runInTx: fakeRunInTx,
       memory: { retainBatch: vi.fn().mockResolvedValue(undefined) },
       store: {
-        getPendingMemories: vi.fn().mockResolvedValue(rows),
+        ...pendingStore(rows),
         deletePendingMemories: vi.fn().mockResolvedValue(undefined),
+        getMemoryRules: vi.fn().mockResolvedValue([]),
       },
+      fire: FIRE,
       customCompartments: [],
     };
 
-    const result = await drainPendingMemories("user-1", deps);
+    const result = await drainPendingMemories(deps);
 
     expect(result.drained).toBe(1);
     expect(provider.chat).toHaveBeenCalledTimes(1);
@@ -291,13 +575,15 @@ describe("drainPendingMemories — customCompartments threading", () => {
       runInTx: fakeRunInTx,
       memory: { retainBatch: vi.fn().mockResolvedValue(undefined) },
       store: {
-        getPendingMemories: vi.fn().mockResolvedValue(rows),
+        ...pendingStore(rows),
         deletePendingMemories: vi.fn().mockResolvedValue(undefined),
+        getMemoryRules: vi.fn().mockResolvedValue([]),
       },
+      fire: FIRE,
       customCompartments: customs,
     };
 
-    await drainPendingMemories("user-1", deps);
+    await drainPendingMemories(deps);
 
     const call = vi.mocked(provider.chat).mock.calls[0]?.[0];
     const system = (call as { system?: string } | undefined)?.system ?? "";
@@ -329,13 +615,15 @@ describe("drainPendingMemories — customCompartments threading", () => {
       runInTx: fakeRunInTx,
       memory: { retainBatch: vi.fn().mockResolvedValue(undefined) },
       store: {
-        getPendingMemories: vi.fn().mockResolvedValue(rows),
+        ...pendingStore(rows),
         deletePendingMemories: vi.fn().mockResolvedValue(undefined),
+        getMemoryRules: vi.fn().mockResolvedValue([]),
       },
+      fire: FIRE,
       customCompartments: [{ name: "dnd", description: "x" }],
     };
 
-    const result = await drainPendingMemories("user-1", deps);
+    const result = await drainPendingMemories(deps);
 
     expect(result.drained).toBe(1);
     expect(deps.memory.retainBatch).toHaveBeenCalledWith("user-1", [
@@ -384,13 +672,15 @@ describe("drainPendingMemories — customCompartments threading", () => {
       runInTx: fakeRunInTx,
       memory: { retainBatch: vi.fn().mockResolvedValue(undefined) },
       store: {
-        getPendingMemories: vi.fn().mockResolvedValue(rows),
+        ...pendingStore(rows),
         deletePendingMemories: vi.fn().mockResolvedValue(undefined),
+        getMemoryRules: vi.fn().mockResolvedValue([]),
       },
+      fire: FIRE,
       customCompartments: [{ name: "dnd", description: "x" }],
     };
 
-    const result = await drainPendingMemories("user-1", deps);
+    const result = await drainPendingMemories(deps);
 
     expect(result.drained).toBe(1);
     // Only the good row's id is deleted — the bad row stays for retry.

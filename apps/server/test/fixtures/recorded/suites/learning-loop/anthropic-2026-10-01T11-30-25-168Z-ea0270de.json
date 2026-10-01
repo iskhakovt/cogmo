@@ -1,0 +1,18 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "Fact: Is learning to play the Portuguese guitar.",
+        "model": "claude-sonnet-5",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "content": "{\"network\":\"bank\",\"compartment\":\"personal\",\"trust\":\"first-party\",\"withhold\":false}"
+      },
+      "metadata": {
+        "systemHash": "d0f424d9"
+      }
+    }
+  ]
+}

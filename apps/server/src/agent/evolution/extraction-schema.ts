@@ -16,7 +16,7 @@ const CorrectionBaseSchema = z.object({
   category: z
     .enum(["style", "domain", "memory"])
     .describe(
-      "Rule category: style (how to respond), domain (what to know), memory (what to remember)",
+      "Rule category: style (how to respond), domain (what to know), memory (what to remember, track or not store)",
     ),
   reasoning: z
     .string()
@@ -103,6 +103,8 @@ export function buildExtractionPrompt(
       rule: string;
       category: string;
       channelType: string | null;
+      /** An instruction rule, which the user set with `rule_set`. */
+      setByUser: boolean;
     }
   >,
   activeChannelTypes: ReadonlyArray<string>,
@@ -111,12 +113,13 @@ export function buildExtractionPrompt(
     existingRules.size > 0
       ? `## Existing Rules
 
-The following rules have already been extracted from previous conversations. Compare each new correction against these to avoid duplicates.
+The following rules already exist: learned from previous conversations, or set by the user. Compare each new correction against these to avoid duplicates.
 
 ${[...existingRules]
   .map(([label, r], i) => {
     const scope = r.channelType ? `channel:${r.channelType}` : "all channels";
-    return `${i + 1}. [${label}] (${r.category}, ${scope}) ${r.rule}`;
+    const setByUser = r.setByUser ? ", set by the user" : "";
+    return `${i + 1}. [${label}] (${r.category}, ${scope}${setByUser}) ${r.rule}`;
   })
   .join("\n")}
 
@@ -142,6 +145,11 @@ Default to \`null\` when in doubt — channel-specific corrections are the excep
 
 No active channels were resolved for this conversation. Set \`channelType\` to \`null\` for every new correction.`;
 
+  // Only a listed instruction rule can be the one an "already set" names.
+  const alreadySetLine = [...existingRules.values()].some((r) => r.setByUser)
+    ? `\n- When \`rule_set\` answered that the rule is already set, the user had to say it again: "reinforce" the rule marked "set by the user" that it names.`
+    : "";
+
   return `You are a behavioral correction extractor. Your job is to analyze a conversation transcript between a user and an AI assistant, and identify moments where the user corrected, redirected, or expressed a preference about the assistant's behavior.
 
 ## What to Look For
@@ -164,7 +172,14 @@ No active channels were resolved for this conversation. Set \`channelType\` to \
 - **Categories**:
   - "style": How the assistant should communicate (tone, format, length, approach)
   - "domain": What the assistant should know or do in specific domains
-  - "memory": What the assistant should remember or track
+  - "memory": What the assistant remembers, tracks or must not store
+
+## Rules the User Set
+
+The assistant records a standing instruction the user states with the \`rule_set\` tool, and a retraction with \`rule_remove\`. The transcript shows each call as [Tool: rule_set(...)] followed by its result.
+
+- An instruction or retraction that a successful \`rule_set\` or \`rule_remove\` call recorded is handled: extract nothing for it.${alreadySetLine}
+- A call that failed ([Error]) recorded nothing: judge the user's words as you would without it.
 
 ${channelsSection}
 

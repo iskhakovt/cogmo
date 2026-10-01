@@ -1,0 +1,18 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "[correction-extraction] User: Suggest three day trips from Lisbon I could do by train.\n\nAssistant: Three good options come to mind. Sintra is the easiest and most popular, about forty minutes from Rossio station, with its fairy-tale palaces like Pena Palace and the Moorish Castle, plus Quinta da Regaleira with its mysterious initiation well. Cascais is a scenic coastal town roughly forty minutes from Cais do Sodré station, good for a relaxed day of beaches, a charming marina, and seafood lunches. For something further afield, Coimbra is about two hours by train from Santa Apolónia or Oriente station, home to one of Europe's oldest universities and a beautiful historic center along the Mondego river, so it works best if you want a fuller day trip rather than a half-day outing.\n\nUser: Again, no bullet points or numbered lists with me, please. Plain sentences only.\n\nAssistant: Understood — I'll stick to plain prose from here on.",
+        "model": "claude-sonnet-5",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "content": "{\"corrections\":[{\"rule\":\"Communicate in plain prose sentences rather than bullet points or lists.\",\"category\":\"style\",\"reasoning\":\"User explicitly reiterated a preference for plain prose over bullet points or numbered lists, which matches an existing rule.\",\"action\":\"reinforce\",\"matchedExistingRuleId\":\"R1\"}]}"
+      },
+      "metadata": {
+        "systemHash": "4329644f"
+      }
+    }
+  ]
+}
