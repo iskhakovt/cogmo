@@ -106,6 +106,10 @@ function normalizeContent(text: string): string {
       // every turn's user message — collapse to a stable token so
       // record/replay matching doesn't miss after the first turn.
       .replace(/\.claude\/plans\/task-[a-z0-9-]+\.md/g, ".claude/plans/task-[SLUG].md")
+      // Claude Code's environment system-reminder names the host kernel
+      // (` - OS Version: Linux 6.17.0-1022-azure`), so a recording would
+      // match only on the machine that made it.
+      .replace(/( - OS Version: )[^\n]+/g, "$1[OS]")
       // Month-rollover-safe temporal suffix (see HAPPENED_IN_RE).
       .replace(HAPPENED_IN_RE, "(happened in [WHEN])")
   );

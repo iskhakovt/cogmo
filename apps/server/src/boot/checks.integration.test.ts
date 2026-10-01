@@ -14,7 +14,7 @@ import {
   independentProbeContext,
 } from "./checks.js";
 
-const INNGEST_IMAGE = "mirror.gcr.io/inngest/inngest:v1.44.0";
+const INNGEST_IMAGE = "mirror.gcr.io/inngest/inngest:v1.45.1";
 
 const probeDeps = { fetch, ...independentProbeContext() };
 

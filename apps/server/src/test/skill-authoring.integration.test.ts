@@ -63,7 +63,7 @@
 
 import { execFile as execFileCb } from "node:child_process";
 import { existsSync } from "node:fs";
-import { copyFile, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { copyFile, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -88,10 +88,10 @@ import { bootstrapSkillsRepo } from "../skills/repo.js";
 import { skillRuns, skills } from "../skills/store/schema.js";
 import { channelSessions, channels, inboundMessages } from "../transport/store/schema.js";
 import { expectDefined } from "./assertions.js";
+import { printBakeTarget, withArgDefaults } from "./bake.js";
 import { CASSETTE_CHAT_MODEL, pinOrgProfileToCassetteModel } from "./cassette-model.js";
 import { DaytonaMock, type DaytonaMockOptions } from "./daytona-mock.js";
 import { fileDatabaseUrl, fileDefaultUserId, fileLlmockUrl } from "./integration-file.js";
-import { repoRoot } from "./repo-root.js";
 import { workerInngestBaseUrl } from "./worker-inngest.js";
 
 const execFileP = promisify(execFileCb);
@@ -771,12 +771,9 @@ async function prebuildDaytonaPrereqs(): Promise<void> {
     }),
   });
 
-  // 1a. Devbase snapshot. `images/` sits at the repo root while Vitest runs
-  // with `apps/server` as its cwd, so the path is resolved from the root
-  // rather than passed through relative.
-  await ensureSnapshot(realSdk, "devbase", snapshotName, () =>
-    Image.fromDockerfile(join(repoRoot(), "images/devbase/Dockerfile")),
-  );
+  // 1a. Devbase snapshot.
+  const devbase = await bakedDevbaseImage();
+  await ensureSnapshot(realSdk, "devbase", snapshotName, () => devbase);
 
   // 1b. cogmo-skills snapshot — register's lockfile-compile sandbox uses
   // this image. The default `:latest` tag is a ghcr.io pull, not a local
@@ -812,6 +809,28 @@ async function prebuildDaytonaPrereqs(): Promise<void> {
     { timeout: 120_000, interval: 2000 },
   );
   console.log(`[skill-authoring e2e] deps-cache volume ${depsVolumeName} ready`);
+}
+
+/**
+ * The devbase image as Daytona should build it. Daytona builds the Dockerfile
+ * it is handed with no build args, and the toolchain versions exist only in
+ * docker-bake.hcl, so they are written in as ARG defaults first.
+ * `fromDockerfile` reads the file on the spot, and devbase COPYs nothing from
+ * its context, so the temp directory can go straight after.
+ */
+async function bakedDevbaseImage(): Promise<Image> {
+  const devbase = await printBakeTarget("devbase");
+  const dir = await mkdtemp(join(tmpdir(), "cogmo-devbase-"));
+  try {
+    const dockerfile = join(dir, "Dockerfile");
+    await writeFile(
+      dockerfile,
+      withArgDefaults(await readFile(devbase.dockerfilePath, "utf8"), devbase.args),
+    );
+    return Image.fromDockerfile(dockerfile);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 }
 
 async function readGhAuth(): Promise<{ pat: string; login: string; id: string }> {

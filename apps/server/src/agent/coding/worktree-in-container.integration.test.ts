@@ -34,7 +34,7 @@ const execFileP = promisify(execFile);
 // entrypoint with `/bin/sleep infinity`, so the image's own git
 // entrypoint never runs.
 const GIT_IMAGE =
-  "mirror.gcr.io/alpine/git:v2.49.1@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26";
+  "mirror.gcr.io/alpine/git:v2.52.0@sha256:4a0e72d49596a1f5d3701aeedafdadc5c0da4062be4657c7bdc4017387f591cc";
 
 // Same rationale as supervisor.integration.test.ts: runc so dev machines
 // don't need sysbox; the sysbox-specific path runs on GHA.
