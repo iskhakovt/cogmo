@@ -1,3 +1,4 @@
+import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it, vi } from "vitest";
 import { mcpDescriptorToToolSpec } from "./adapter.js";
 import type { McpConnectionPool } from "./client/pool.js";
@@ -160,5 +161,47 @@ describe("mcpDescriptorToToolSpec", () => {
     expect((await spec.handler({}, {} as never))._unsafeUnwrapErr().message).toBe(
       "MCP tool reported isError without textual content",
     );
+  });
+
+  it.each([
+    ["invalid params", ErrorCode.InvalidParams, "Invalid arguments for tool create_pr"],
+    ["an unknown method", ErrorCode.MethodNotFound, "Method not found"],
+    ["the per-call timeout", ErrorCode.RequestTimeout, "Request timed out"],
+  ])("rejects a call the server refused with %s", async (_label, code, message) => {
+    const spec = mcpDescriptorToToolSpec({
+      server: makeServer(),
+      descriptor: makeDescriptor(),
+      pool: makePool(async () => {
+        throw new McpError(code, message);
+      }),
+      timeoutMs: 30_000,
+    });
+    expect((await spec.handler({}, {} as never))._unsafeUnwrapErr().message).toBe(
+      `MCP error ${code}: ${message}`,
+    );
+  });
+
+  it("throws a connection-level failure", async () => {
+    const spec = mcpDescriptorToToolSpec({
+      server: makeServer(),
+      descriptor: makeDescriptor(),
+      pool: makePool(async () => {
+        throw new McpError(ErrorCode.ConnectionClosed, "Connection closed");
+      }),
+      timeoutMs: 30_000,
+    });
+    await expect(spec.handler({}, {} as never)).rejects.toThrow("Connection closed");
+  });
+
+  it("throws a server-side internal error", async () => {
+    const spec = mcpDescriptorToToolSpec({
+      server: makeServer(),
+      descriptor: makeDescriptor(),
+      pool: makePool(async () => {
+        throw new McpError(ErrorCode.InternalError, "boom");
+      }),
+      timeoutMs: 30_000,
+    });
+    await expect(spec.handler({}, {} as never)).rejects.toThrow("boom");
   });
 });

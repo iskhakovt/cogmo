@@ -1,3 +1,4 @@
+import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { ok } from "neverthrow";
 import { z } from "zod";
 import { reject, type ToolOutcome, type ToolSpec } from "../agent/tools.js";
@@ -34,12 +35,34 @@ export function mcpDescriptorToToolSpec(opts: McpToolAdapterOptions): ToolSpec {
     durable: true,
     handler: async (input) => {
       const conn = await opts.pool.getConnection(opts.server.id);
-      const result = await conn.callTool(opts.descriptor.name, input, {
-        timeoutMs: opts.timeoutMs,
-      });
+      let result: unknown;
+      try {
+        result = await conn.callTool(opts.descriptor.name, input, {
+          timeoutMs: opts.timeoutMs,
+        });
+      } catch (e) {
+        if (isRefusedCall(e)) return reject(e.message);
+        throw e;
+      }
       return serializeCallToolResult(result);
     },
   };
+}
+
+/**
+ * JSON-RPC codes that mean the server refused this call rather than the
+ * connection failing: arguments it rejects, a tool it doesn't know, and the
+ * SDK's per-call request timeout. A closed connection or a server-internal
+ * error stays a throw.
+ */
+const REFUSED_CALL_CODES: ReadonlySet<number> = new Set([
+  ErrorCode.InvalidParams,
+  ErrorCode.MethodNotFound,
+  ErrorCode.RequestTimeout,
+]);
+
+function isRefusedCall(e: unknown): e is McpError {
+  return e instanceof McpError && REFUSED_CALL_CODES.has(e.code);
 }
 
 function descriptorToJsonSchema(descriptor: McpToolDescriptor): JsonSchema {

@@ -211,7 +211,8 @@ On first call to a server's tool:
 ### Tool dispatch
 
 - Per-call timeout (default **30s** — Claude Code's #1 failure mode is the missing timeout, [issue #15945](https://github.com/anthropics/claude-code/issues/15945)).
-- On timeout: the SDK sends `notifications/cancelled` and stops waiting, as the MCP spec directs; the connection stays open and the agent loop gets a tool error.
+- On timeout: the SDK sends `notifications/cancelled` and stops waiting, as the MCP spec directs; the connection stays open and the handler rejects the call, so the model gets an `is_error` tool_result.
+- A JSON-RPC error answering the call with `InvalidParams` or `MethodNotFound` is the server refusing it, and rejects the same way. Any other `McpError` (a closed connection, a server-internal error) throws.
 - On transport close, the in-flight call fails with a tool error and the next call reconnects; two failed connects in a row mark the server unhealthy.
 - All MCP tool calls set `durable: true` on the adapted `ToolSpec` → wrapped in Inngest `step.run()`. Step memoization is correct because the MCP server is non-deterministic; retry of `handle-message` reuses the recorded tool result.
 
