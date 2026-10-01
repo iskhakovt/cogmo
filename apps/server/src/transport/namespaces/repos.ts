@@ -2,7 +2,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { err, ok, type Result } from "neverthrow";
 import { match } from "ts-pattern";
-import type { CodingStore } from "../../agent/coding/store/index.js";
+import type { CodingRepoRow, CodingStore } from "../../agent/coding/store/index.js";
 import type { Transactor } from "../../db/index.js";
 import { runGit, withGitAskpass } from "../../secrets/git-askpass.js";
 import {
@@ -33,11 +33,7 @@ export interface RepoInput {
   remoteUrl: string;
   /** Optional override; defaults to "main" when omitted. */
   defaultBranch?: string;
-  /**
-   * Optional override; defaults to `"true"` (no-op) so slice-1 plan-only
-   * tasks have something to record. Slice 4's verify+push step needs a real
-   * value and the user can update via `/repo edit` (later) or SQL meanwhile.
-   */
+  /** Optional override; defaults to `"true"`, a no-op. */
   verifyCommand?: string;
   /** Optional override; defaults to `'default'` (the wizard-provisioned bot). */
   identityName?: string;
@@ -45,7 +41,7 @@ export interface RepoInput {
 
 /**
  * Input for `repos.cloneAndAdd` — clone the remote, then register. Used by
- * the slice 4.0c FSM dialog. `localPath` is derived from `${reposDir}/${name}`
+ * the `/repo add` dialog. `localPath` is derived from `${reposDir}/${name}`
  * inside the implementation; the caller doesn't choose it.
  */
 export interface RepoCloneAndAddInput {
@@ -53,7 +49,7 @@ export interface RepoCloneAndAddInput {
   remoteUrl: string;
   /** Optional override; defaults to "main" when omitted. */
   defaultBranch?: string;
-  /** Optional override; defaults to `"true"` until `/repo edit` ships. */
+  /** Optional override; defaults to `"true"`, a no-op. */
   verifyCommand?: string;
   /** Optional override; defaults to `'default'` (the wizard-provisioned bot). */
   identityName?: string;
@@ -69,7 +65,7 @@ export interface ReposNamespace {
   add(input: RepoInput): Promise<Result<RepoSummary, TransportError>>;
   /**
    * Clone the remote into `${reposDir}/${name}` using the default GitHub
-   * identity's PAT, then register it. Used by the slice 4.0c FSM dialog
+   * identity's PAT, then register it. Used by the `/repo add` dialog
    * (name → remoteUrl → confirm) so the operator never has to think about
    * paths or pre-clone manually. Returns `github_identity_unavailable`
    * when no identity is provisioned, `repo_local_path_exists` when the
@@ -91,55 +87,18 @@ export function createRepos(deps: {
     async list() {
       if (!codingStore) return err({ code: "sandbox_disabled" as const });
       const rows = await runInTx((tx) => codingStore.listRepos(tx));
-      return ok(
-        rows.map((r) => ({
-          id: r.id,
-          name: r.name,
-          localPath: r.localPath,
-          defaultBranch: r.defaultBranch,
-          remoteUrl: r.remoteUrl,
-          verifyCommand: r.verifyCommand,
-        })),
-      );
+      return ok(rows.map(toRepoSummary));
     },
     async add(input) {
       if (!codingStore) return err({ code: "sandbox_disabled" as const });
       // Input validation — `name` becomes a path segment under
       // worktreesDir, so it must be a safe identifier. `localPath` must
       // be absolute (relative would resolve against Cogmo's CWD, which
-      // changes between dev and prod). `remoteUrl` is opaque to slice 1
-      // (we only `git -C localPath` operations), but slice 4 will pass
-      // it to `git push` — empty-string check is enough for now.
+      // changes between dev and prod). `remoteUrl` is where verified work
+      // is pushed, so it must not be empty.
       const validation = validateRepoInput(input);
       if (validation) return err(validation);
-      const inserted = await runInTx((tx) =>
-        codingStore.insertRepo(tx, {
-          name: input.name,
-          localPath: input.localPath,
-          defaultBranch: input.defaultBranch ?? "main",
-          remoteUrl: input.remoteUrl,
-          devcontainer: null,
-          allowedBackends: ["claude"],
-          // Slice-1 default: a no-op so plan-only tasks have something to
-          // record. Slice 4's verify+push step needs a real value before
-          // it can use the repo. /repo edit (later) or SQL update for now.
-          verifyCommand: input.verifyCommand ?? "true",
-          taskTokenBudget: 200_000,
-          taskWallTimeSeconds: 1800,
-          maxConcurrentTasks: 1,
-          ...(input.identityName !== undefined && { identityName: input.identityName }),
-        }),
-      );
-      return inserted
-        .map((row) => ({
-          id: row.id,
-          name: row.name,
-          localPath: row.localPath,
-          defaultBranch: row.defaultBranch,
-          remoteUrl: row.remoteUrl,
-          verifyCommand: row.verifyCommand,
-        }))
-        .mapErr((e) => ({ code: "repo_name_taken" as const, name: e.name }));
+      return registerRepo(codingStore, input);
     },
     async cloneAndAdd(input) {
       if (!codingStore) return err({ code: "sandbox_disabled" as const });
@@ -151,10 +110,7 @@ export function createRepos(deps: {
         });
       }
       const identityName = input.identityName ?? DEFAULT_GITHUB_IDENTITY_NAME;
-      const secretsStoreLocal = secretsStore;
-      const identity = await runInTx((tx) =>
-        resolveGitHubIdentity(tx, secretsStoreLocal, identityName),
-      );
+      const identity = await runInTx((tx) => resolveGitHubIdentity(tx, secretsStore, identityName));
       if (identity.isErr()) {
         return err({
           code: "github_identity_unavailable" as const,
@@ -196,35 +152,11 @@ export function createRepos(deps: {
       } catch (e) {
         return err({
           code: "repo_clone_failed" as const,
-          reason: (e as Error).message,
+          reason: e instanceof Error ? e.message : String(e),
         });
       }
 
-      const inserted = await runInTx((tx) =>
-        codingStore.insertRepo(tx, {
-          name: input.name,
-          localPath,
-          defaultBranch: input.defaultBranch ?? "main",
-          remoteUrl: input.remoteUrl,
-          devcontainer: null,
-          allowedBackends: ["claude"],
-          verifyCommand: input.verifyCommand ?? "true",
-          taskTokenBudget: 200_000,
-          taskWallTimeSeconds: 1800,
-          maxConcurrentTasks: 1,
-          ...(input.identityName !== undefined && { identityName: input.identityName }),
-        }),
-      );
-      return inserted
-        .map((row) => ({
-          id: row.id,
-          name: row.name,
-          localPath: row.localPath,
-          defaultBranch: row.defaultBranch,
-          remoteUrl: row.remoteUrl,
-          verifyCommand: row.verifyCommand,
-        }))
-        .mapErr((e) => ({ code: "repo_name_taken" as const, name: e.name }));
+      return registerRepo(codingStore, { ...input, localPath });
     },
     async remove(name) {
       if (!codingStore) return err({ code: "sandbox_disabled" as const });
@@ -250,15 +182,55 @@ export function createRepos(deps: {
       );
     },
   };
+
+  /**
+   * Insert the repo row, filling what the operator didn't choose with the
+   * registry's defaults: branch `main`, the Claude backend, one task at a
+   * time, and the no-op verify command `true`.
+   */
+  async function registerRepo(
+    store: CodingStore,
+    input: RepoInput,
+  ): Promise<Result<RepoSummary, TransportError>> {
+    const inserted = await runInTx((tx) =>
+      store.insertRepo(tx, {
+        name: input.name,
+        localPath: input.localPath,
+        defaultBranch: input.defaultBranch ?? "main",
+        remoteUrl: input.remoteUrl,
+        devcontainer: null,
+        allowedBackends: ["claude"],
+        verifyCommand: input.verifyCommand ?? "true",
+        taskTokenBudget: 200_000,
+        taskWallTimeSeconds: 1800,
+        maxConcurrentTasks: 1,
+        ...(input.identityName !== undefined && { identityName: input.identityName }),
+      }),
+    );
+    return inserted
+      .map(toRepoSummary)
+      .mapErr((e) => ({ code: "repo_name_taken" as const, name: e.name }));
+  }
 }
+
+function toRepoSummary(row: CodingRepoRow): RepoSummary {
+  return {
+    id: row.id,
+    name: row.name,
+    localPath: row.localPath,
+    defaultBranch: row.defaultBranch,
+    remoteUrl: row.remoteUrl,
+    verifyCommand: row.verifyCommand,
+  };
+}
+
+const REPO_NAME_RE = /^[a-zA-Z0-9._-]+$/;
 
 /**
  * Validate `RepoInput` for shape constraints that the schema can't enforce
  * (the DB is text, but we have semantic constraints for filesystem safety).
  * Returns a `TransportError` to surface, or `null` if input is valid.
  */
-const REPO_NAME_RE = /^[a-zA-Z0-9._-]+$/;
-
 function validateRepoInput(input: {
   name: string;
   localPath: string;
