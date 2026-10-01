@@ -11,7 +11,7 @@ updates:
     # the default `dependencies` + ecosystem labels would cost a CI run
     # apiece. Nothing reads them; the `chore(deps)` prefix marks these PRs.
     labels: []
-    # Wait 7 days after a release before bumping. pnpm 11 enforces a 24h
+    # Wait 7 days after a release before bumping. pnpm enforces a 24h
     # minimumReleaseAge soak at install time, so Dependabot's default
     # (bump the instant a version is published) produces lockfiles that
     # fail `pnpm install --frozen-lockfile` whenever a release is fresh.

@@ -1,27 +1,49 @@
 # Tooling
 
-Modern TypeScript/Node.js stack for a long-running backend service. No frontend, no browser bundling.
+TypeScript on Node.js across a pnpm workspace: the long-running backend (`apps/server`), the web UI SPA (`apps/web`), and the contracts they share (`packages/contracts`).
 
 ## Core Stack
 
 | Layer | Tool | Why |
 |-|-|-|
-| Runtime | Node.js LTS | Stable for 24/7 services. Bun still has memory leaks (Jan 2026). |
+| Runtime | Node.js LTS | Stable for a 24/7 process. Every runtime dependency and the OTel preload (`--import ./dist/otel.js`) target Node — see Runtime below |
 | Package manager | pnpm | Fastest installs, strict deps, content-addressable store |
 | Dev runner | tsx (watch mode) | Runs TS directly via esbuild, sub-second reloads, zero config |
 | Build | tsup | esbuild-powered production builds, zero config |
 | Type check | tsc --noEmit | Separate from build — run in CI and as watch process |
-| HTTP framework | Fastify | 3x faster than Express, native TS, built-in Pino logging |
+| HTTP | `node:http` + oRPC + sirv | No framework: the UI server routes on raw `node:http`, serves the admin API through oRPC's node handler and the SPA through sirv — see [web-ui.md](web-ui.md) |
 | Validation | Zod v4 | 14x faster than v3, 78+ integrating libraries, ecosystem standard |
 | ORM | Drizzle | SQL-like query chains, TS-native schema, tiny (5KB) |
 | Migrations | drizzle-kit | Schema diffs → SQL files, comes with Drizzle |
 | Testing | Vitest | 10-20x faster than Jest, native TS/ESM, same API |
-| Logging | Pino | Structured JSON, 5x faster than Winston, built into Fastify |
+| Logging | Pino | Structured JSON, 5x faster than Winston |
 | Linter/formatter | Biome | Replaces ESLint + Prettier, 20x faster, one tool |
 | Collections | Remeda + ES2025 | Kotlin-feel pipe chains, groupBy, lazy eval |
 | Error handling | neverthrow | Result\<T, E\> without exceptions |
 | CLI parsing | cmd-ts | Typed argument decoders, nested subcommands, generated help — see [decisions.md](decisions.md) |
 | Orchestration | Inngest (self-hosted) | Event-driven durable execution — queues, scheduling, HITL, observability in one tool |
+
+## Runtime
+
+Node.js, on the `engines` floor in `apps/server/package.json`. Re-checked 2026-10 against the two alternatives:
+
+- **Bun** — memory growth in long-running processes is still reported through 2026, and its Rust rewrite has not had a stable track record yet. Cogmo is one process running for weeks under a fixed memory cap, the workload that exposes it. Revisit after several stable releases with no long-run leak reports.
+- **Deno** — runs most npm packages and ships OpenTelemetry built in, but offers cogmo nothing it lacks: Node 24 strips TypeScript types natively, isolation is the container sandbox rather than runtime permissions, and OTel already works through Node's module hooks. Moving would mean re-proving dockerode, pyodide's loader, the Inngest SDK, PGlite, testcontainers, Vitest and `pnpm deploy` for no gain. Revisit if in-process plugins need runtime-level permissions that Node's permission model can't give.
+
+## Web UI
+
+`apps/web` is a Vite-built React SPA, served by the backend. [web-ui.md](web-ui.md) owns the rationale and the planned additions; installed today:
+
+| Layer | Tool |
+|-|-|
+| Build / dev server | Vite (proxies `/rpc` and `/api` to the backend in dev) |
+| Framework | React 19, no SSR |
+| Routing | TanStack Router |
+| Chat | `@assistant-ui/react`, fed by `eventsource-client` over SSE |
+| API client | oRPC client, typed from `webContract` in `packages/contracts` |
+| Styling | Tailwind v4 (`@tailwindcss/vite`), IBM Plex via Fontsource |
+| Command palette | cmdk |
+| Testing | Vitest — Node for `.test.ts`, Browser Mode on Playwright Chromium for `.test.tsx` |
 
 ## Kotlin-Developer Patterns
 
@@ -39,7 +61,7 @@ pipe(
 );
 ```
 
-ES2025 built-ins (Node 20+): `Object.groupBy()`, `Map.groupBy()`, iterator helpers (`.map()`, `.filter()`, `.take()`, `.drop()`, `.flatMap()` on iterators — lazy sequences natively).
+ES2025 built-ins (Node 24): `Object.groupBy()`, `Map.groupBy()`, iterator helpers (`.map()`, `.filter()`, `.take()`, `.drop()`, `.flatMap()` on iterators — lazy sequences natively).
 
 Use ES2025 where it suffices, Remeda for richer processing or pipe chains.
 
@@ -93,7 +115,7 @@ const activeRules = await db
   .orderBy(steeringRules.createdAt);
 ```
 
-Drizzle-kit generates migration SQL from schema diffs: `drizzle-kit generate` → review `.sql` → `drizzle-kit migrate`.
+drizzle-kit generates migration SQL from schema diffs (`pnpm db:generate`, then review the `.sql`). Boot and `cogmo seed` apply pending migrations through `src/db/migrate-per-file.ts`, one transaction per file.
 
 ## Utility Libraries
 
@@ -125,23 +147,20 @@ const response = match(event)
 
 ### Async Primitives (p-* family by Sindre Sorhus)
 
-| Library | What | Example |
-|-|-|-|
-| **p-limit** | Concurrency limiter | `const limit = pLimit(3); limit(() => callLLM(...))` |
-| **p-retry** | Retry with backoff | `pRetry(() => fetch(url), { retries: 3 })` |
-| **p-queue** | Priority queue with concurrency | When p-limit isn't enough |
-
-Essential for LLM calls — limit concurrent API requests, retry transient failures.
+**p-retry** — retry with backoff for transient failures: `pRetry(() => fetch(url), { retries: 3 })`. Reach for **p-limit** / **p-queue** from the same family when a call site needs a concurrency cap.
 
 ### Environment Parsing
 
 ```typescript
-import { parseEnv, z } from '@t3-oss/env-core';
+import { createEnv } from '@t3-oss/env-core';
+import { z } from 'zod';
 
-const env = parseEnv(process.env, {
-  ANTHROPIC_API_KEY: z.string().min(1),
-  REDIS_PORT: z.number().default(6380),
-  DEBUG: z.boolean().default(false),  // handles "false" → false correctly
+const env = createEnv({
+  server: {
+    ANTHROPIC_API_KEY: z.string().min(1),
+    REDIS_PORT: z.coerce.number().default(6380),
+  },
+  runtimeEnv: process.env,
 });
 ```
 
@@ -153,37 +172,36 @@ const env = parseEnv(process.env, {
 |-|-|-|
 | **UUID v7** | Time-ordered unique IDs (native PostgreSQL 18, `uuidv7()`) | DB-generated, time-ordered, no dependency |
 | **date-fns** | Modular date utilities | Until Node ships Temporal API natively |
-| **superjson** | JSON.stringify that preserves Date, Map, Set, BigInt | API boundaries, Inngest event data |
 
 ## Not Needed
 
 | Tool | Why not |
 |-|-|
-| Next.js / Vite / Webpack | Frontend/browser tools — this is a backend service |
-| Express | Slower, weaker TS support than Fastify |
+| Next.js / TanStack Start | SSR buys nothing for a single-user dashboard and fights the SSE + RPC model — a Vite SPA instead ([decisions.md](decisions.md)) |
+| Fastify / Express / Hono | The UI server is a handful of routes, `/rpc` belongs to oRPC, and the chat SSE stream needs the raw response — see [decisions.md](decisions.md) |
 | Jest | Vitest is faster with native TS/ESM |
 | Winston | Pino is 5x faster, JSON-native |
 | ESLint + Prettier | Biome does both, 20x faster |
 | Lodash | Remeda is TS-first; ES2025 covers basics natively |
-| tRPC | No TypeScript client consuming the API yet — add when a TS frontend or service-to-service calls appear |
-| gRPC / ConnectRPC | Overkill for single service — add if polyglot microservices appear |
+| tRPC | oRPC gives the same typed RPC plus native SSE and OpenAPI without a framework adapter ([decisions.md](decisions.md)) |
 | cuid2 | UUID v7 is native in PostgreSQL 18 — no dependency needed |
 | nanoid | UUID v7 covers all ID generation needs |
 | BullMQ | Inngest handles all orchestration — queues, scheduling, durable execution |
 | Effect-TS | Massive learning curve, overkill for solo project |
 | fp-ts | Superseded by Effect; neverthrow covers Result types |
 | Prisma | Heavier than Drizzle, custom DSL instead of TypeScript schema |
-| Bun (runtime) | Memory leaks in long-running processes (Jan 2026) |
+| Bun / Deno (runtime) | See Runtime above |
 
 ## Dev Workflow
 
 ```bash
 pnpm install              # install deps
-pnpm dev                  # tsx watch src/index.ts
-pnpm build                # tsup → dist/
-pnpm typecheck            # tsc --noEmit
-pnpm test                 # vitest
-pnpm lint                 # biome check
+pnpm dev                  # dev infra in Docker, then the backend (tsx watch) and the Vite dev server
+pnpm dev:app              # backend only: tsx watch src/main.ts serve
+pnpm build                # backend: tsc && tsup → apps/server/dist
+pnpm typecheck            # tsc in every workspace package
+pnpm test                 # backend unit tier (Vitest); apps/web: pnpm --filter web test
+pnpm lint                 # biome check, whole workspace
 ```
 
 ## Python sub-projects

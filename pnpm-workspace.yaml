@@ -31,3 +31,11 @@ overrides:
 # apps/server/dev/containers.ts and cogmo.hindsightCompat.
 minimumReleaseAgeExclude:
   - '@vectorize-io/hindsight-client@0.10.1'
+
+# Keeps pnpm-lock.yaml a single YAML document. Under the default `download`,
+# pnpm 12 prepends an environment document recording itself, and GitHub's
+# dependency graph reads only that first document, so Dependabot alerts see no
+# dependencies (dependabot/dependabot-core#15904). The pnpm version is still
+# enforced from `packageManager`, by corepack locally and in the image build and
+# by pnpm/action-setup in CI.
+pmOnFail: ignore
