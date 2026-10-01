@@ -42,12 +42,12 @@ import {
 import type { SecretsStore } from "../secrets/store/index.js";
 import type { AttachmentStore } from "../transport/attachment-store.js";
 import { createImageTools } from "./image-tools.js";
-import type { AgentStore, ImageProviderRow } from "./store/index.js";
+import type { ImageProviderRow, ImageProviderStore } from "./store/index.js";
 import type { ToolSpec } from "./tools.js";
 
 export interface ImageToolsLoaderDeps {
   runInTx: Transactor;
-  agentStore: AgentStore;
+  agentStore: ImageProviderStore;
   secretsStore: SecretsStore;
   attachments: AttachmentStore;
   fetchOverrides?: ImageProviderFetchOverrides;

@@ -2,14 +2,19 @@ import type { Transaction, Transactor } from "../../db/index.js";
 import type { ToolDefinition } from "../../llm/types.js";
 import type { CoreMemoryScope, CoreMemoryView } from "../core-memory/scope.js";
 import type { PromptSource } from "../prompt.js";
-import type { AgentStore, Profile } from "../store/index.js";
+import type {
+  CoreMemoryStore,
+  Profile,
+  SteeringRuleStore,
+  TranscriptStore,
+} from "../store/index.js";
 import { configDigest, hasIdentityOverride } from "../system-prompt-snapshot.js";
 import { readConversationContext } from "./load-conversation-context.js";
 
 /** What loading and opening a chat turn's system prompt epoch need. */
 export interface SystemPromptDeps {
   runInTx: Transactor;
-  agentStore: AgentStore;
+  agentStore: SteeringRuleStore & CoreMemoryStore & TranscriptStore;
   promptSource: PromptSource;
 }
 
