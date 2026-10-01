@@ -93,7 +93,7 @@ describe("mcpDescriptorToToolSpec", () => {
       timeoutMs: 12_345,
     });
 
-    const out = await spec.handler({ repo: "iskhakovt/cogmo" }, {} as never);
+    const out = (await spec.handler({ repo: "iskhakovt/cogmo" }, {} as never))._unsafeUnwrap();
     expect(out).toBe("PR opened");
     expect(pool.getConnection).toHaveBeenCalledWith("server-1");
     expect(callTool).toHaveBeenCalledWith(
@@ -116,7 +116,7 @@ describe("mcpDescriptorToToolSpec", () => {
       pool,
       timeoutMs: 30_000,
     });
-    expect(await spec.handler({}, {} as never)).toBe("Line 1\nLine 2");
+    expect((await spec.handler({}, {} as never))._unsafeUnwrap()).toBe("Line 1\nLine 2");
   });
 
   it("falls back to JSON-stringifying structuredContent when no text blocks", async () => {
@@ -130,10 +130,12 @@ describe("mcpDescriptorToToolSpec", () => {
       pool,
       timeoutMs: 30_000,
     });
-    expect(await spec.handler({}, {} as never)).toBe('{"number":42,"opened":true}');
+    expect((await spec.handler({}, {} as never))._unsafeUnwrap()).toBe(
+      '{"number":42,"opened":true}',
+    );
   });
 
-  it("throws on isError so the agent loop wraps as tool_result with isError", async () => {
+  it("rejects on isError so the agent loop answers with an is_error tool_result", async () => {
     const pool = makePool(async () => ({
       isError: true,
       content: [{ type: "text", text: "rate limit hit" }],
@@ -144,10 +146,10 @@ describe("mcpDescriptorToToolSpec", () => {
       pool,
       timeoutMs: 30_000,
     });
-    await expect(spec.handler({}, {} as never)).rejects.toThrow(/rate limit hit/);
+    expect((await spec.handler({}, {} as never))._unsafeUnwrapErr().message).toBe("rate limit hit");
   });
 
-  it("throws a generic message when isError is set but content is empty", async () => {
+  it("rejects with a generic message when isError is set but content is empty", async () => {
     const pool = makePool(async () => ({ isError: true }));
     const spec = mcpDescriptorToToolSpec({
       server: makeServer(),
@@ -155,6 +157,8 @@ describe("mcpDescriptorToToolSpec", () => {
       pool,
       timeoutMs: 30_000,
     });
-    await expect(spec.handler({}, {} as never)).rejects.toThrow(/isError without textual content/);
+    expect((await spec.handler({}, {} as never))._unsafeUnwrapErr().message).toBe(
+      "MCP tool reported isError without textual content",
+    );
   });
 });

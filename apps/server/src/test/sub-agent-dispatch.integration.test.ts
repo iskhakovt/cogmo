@@ -35,6 +35,7 @@ import { FallbackLlmProvider } from "../llm/fallback.js";
 import { createDbProviderResolver } from "../llm/resolver.js";
 import { deriveMasterKey, parseMasterKey } from "../secrets/encryption.js";
 import { DrizzleSecretsStore } from "../secrets/store/index.js";
+import { expectDefined } from "./assertions.js";
 import { fileDatabaseUrl, fileDefaultUserId, fileLlmockUrl } from "./integration-file.js";
 
 const SUITE = randomBytes(4).toString("hex");
@@ -163,8 +164,10 @@ describe("sub-agent dispatch — orchestrator and specialist on different provid
     // /v1/chat/completions → default completion. A non-empty result proves the
     // sub-agent's second model dispatched over its own adapter and the text
     // round-tripped back (an Anthropic-adapter mis-route would 404 the path).
-    const out = await tools[0]?.handler({ task: "Write a haiku about the sea." }, mock<Service>());
-    expect(typeof out).toBe("string");
-    expect((out ?? "").length).toBeGreaterThan(0);
+    const out = await expectDefined(tools[0], "sub-agent tool").handler(
+      { task: "Write a haiku about the sea." },
+      mock<Service>(),
+    );
+    expect(out._unsafeUnwrap().length).toBeGreaterThan(0);
   });
 });

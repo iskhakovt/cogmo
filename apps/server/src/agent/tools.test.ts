@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { ok } from "neverthrow";
+import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { z } from "zod";
 import { expectDefined } from "../test/assertions.js";
@@ -36,7 +37,7 @@ describe("ToolRegistry", () => {
       name: "my_tool",
       description: "does stuff",
       schema: z.object({}),
-      handler: async () => "result",
+      handler: async () => ok("result"),
     });
 
     registry.register(spec);
@@ -59,7 +60,7 @@ describe("ToolRegistry", () => {
         name: "a",
         description: "tool a",
         schema: z.object({}),
-        handler: async () => "",
+        handler: async () => ok(""),
       }),
     );
     registry.register(
@@ -67,7 +68,7 @@ describe("ToolRegistry", () => {
         name: "b",
         description: "tool b",
         schema: z.object({ x: z.string() }),
-        handler: async () => "",
+        handler: async () => ok(""),
       }),
     );
 
@@ -88,7 +89,7 @@ describe("defineTool", () => {
       name: "test",
       description: "test tool",
       schema: z.object({ query: z.string() }),
-      handler: async () => "ok",
+      handler: async () => ok("ok"),
     });
 
     expect(spec.inputSchema.type).toBe("object");
@@ -96,16 +97,35 @@ describe("defineTool", () => {
     expect(spec.inputSchema.required).toContain("query");
   });
 
-  it("validates input at runtime", async () => {
+  it("rejects input that fails validation without running the handler", async () => {
+    const handler = vi.fn(async () => ok("ok"));
     const spec = defineTool({
       name: "test",
       description: "test tool",
       schema: z.object({ query: z.string() }),
-      handler: async () => "ok",
+      handler,
     });
 
     // Invalid input — missing required field
-    await expect(spec.handler({}, stubService)).rejects.toThrow();
+    const result = await spec.handler({}, stubService);
+
+    expect(result._unsafeUnwrapErr().message).toContain('"query"');
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("propagates a non-validation error the schema throws", async () => {
+    const spec = defineTool({
+      name: "test",
+      description: "test tool",
+      schema: z.object({
+        query: z.string().refine(() => {
+          throw new TypeError("schema bug");
+        }),
+      }),
+      handler: async () => ok("ok"),
+    });
+
+    await expect(spec.handler({ query: "q" }, stubService)).rejects.toThrow("schema bug");
   });
 
   it("passes parsed typed input to handler", async () => {
@@ -113,11 +133,11 @@ describe("defineTool", () => {
       name: "test",
       description: "test tool",
       schema: z.object({ query: z.string(), count: z.number().optional() }),
-      handler: async (input) => `got: ${input.query}`,
+      handler: async (input) => ok(`got: ${input.query}`),
     });
 
     const result = await spec.handler({ query: "hello" }, stubService);
-    expect(result).toBe("got: hello");
+    expect(result._unsafeUnwrap()).toBe("got: hello");
   });
 
   it("passes service to handler", async () => {
@@ -128,7 +148,7 @@ describe("defineTool", () => {
       schema: z.object({}),
       handler: async (_input, caps) => {
         received = caps;
-        return "ok";
+        return ok("ok");
       },
     });
 
@@ -148,7 +168,7 @@ describe("defineTool", () => {
         description: "x",
         schema: z.object({}),
         invocationBudget: 0,
-        handler: async () => "ok",
+        handler: async () => ok("ok"),
       }),
     ).toThrow(/invocationBudget must be a positive integer/);
   });
@@ -160,7 +180,7 @@ describe("defineTool", () => {
         description: "x",
         schema: z.object({}),
         invocationBudget: -1,
-        handler: async () => "ok",
+        handler: async () => ok("ok"),
       }),
     ).toThrow(/invocationBudget must be a positive integer/);
   });
@@ -172,7 +192,7 @@ describe("defineTool", () => {
         description: "x",
         schema: z.object({}),
         invocationBudget: 2.5,
-        handler: async () => "ok",
+        handler: async () => ok("ok"),
       }),
     ).toThrow(/invocationBudget must be a positive integer/);
   });
@@ -184,7 +204,7 @@ describe("defineTool", () => {
         description: "x",
         schema: z.object({}),
         invocationBudget: 1,
-        handler: async () => "ok",
+        handler: async () => ok("ok"),
       }),
     ).not.toThrow();
   });
@@ -194,7 +214,7 @@ describe("defineTool", () => {
       name: "no_budget",
       description: "x",
       schema: z.object({}),
-      handler: async () => "ok",
+      handler: async () => ok("ok"),
     });
     expect(spec.invocationBudget).toBeUndefined();
   });
@@ -207,21 +227,21 @@ describe("ToolSpec.sideEffectful", () => {
       name: "explicit_false",
       description: "",
       schema: z.object({}),
-      handler: async () => "",
+      handler: async () => ok(""),
       sideEffectful: false,
     });
     const explicitTrue = defineTool({
       name: "explicit_true",
       description: "",
       schema: z.object({}),
-      handler: async () => "",
+      handler: async () => ok(""),
       sideEffectful: true,
     });
     const omitted = defineTool({
       name: "omitted",
       description: "",
       schema: z.object({}),
-      handler: async () => "",
+      handler: async () => ok(""),
     });
 
     // `satisfies` keeps the literal types so the assertions below are
@@ -272,8 +292,8 @@ describe("createDefaultTools", () => {
     const registry = createDefaultTools();
     const spec = registry.get("get_current_time");
     expect(spec).toBeDefined();
-    const result = await spec!.handler({}, stubService);
-    const parsed = TimeResultSchema.parse(JSON.parse(result));
+    const result = await expectDefined(spec, "get_current_time").handler({}, stubService);
+    const parsed = TimeResultSchema.parse(JSON.parse(result._unsafeUnwrap()));
 
     expect(parsed.iso).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     expect(parsed.dayOfWeek).toBeTruthy();
@@ -290,11 +310,21 @@ describe("createDefaultTools", () => {
 
   it("get_current_time respects timezone parameter", async () => {
     const registry = createDefaultTools([], "America/New_York");
-    const spec = registry.get("get_current_time");
-    const result = await spec!.handler({}, stubService);
-    const parsed = TimeResultSchema.parse(JSON.parse(result));
+    const spec = expectDefined(registry.get("get_current_time"), "get_current_time");
+    const result = await spec.handler({}, stubService);
+    const parsed = TimeResultSchema.parse(JSON.parse(result._unsafeUnwrap()));
 
     expect(parsed.timezone).toBe("America/New_York");
+  });
+
+  it("get_current_time rejects a timezone that isn't an IANA name", async () => {
+    const spec = expectDefined(createDefaultTools().get("get_current_time"), "get_current_time");
+
+    const result = await spec.handler({ timezone: "Mars/Olympus" }, stubService);
+
+    expect(result._unsafeUnwrapErr().message).toBe(
+      'unknown timezone "Mars/Olympus"; pass an IANA name such as "Europe/London".',
+    );
   });
 
   it("accepts extra tools", () => {

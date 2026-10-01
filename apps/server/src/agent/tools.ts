@@ -1,3 +1,4 @@
+import { type Err, err, ok, type Result } from "neverthrow";
 import { type ZodType, z } from "zod";
 import { toObjectJsonSchema } from "../llm/json-schema.js";
 import type { JsonSchema, ToolDefinition } from "../llm/types.js";
@@ -5,11 +6,6 @@ import { logger } from "../logger.js";
 import type { Service } from "./service.js";
 import { coerceToolInput } from "./tool-input-coercion.js";
 
-/**
- * A tool handler receives validated input and scoped service.
- * Returns a string result for the LLM. Errors should be thrown —
- * the agentic loop catches and reports them as tool_result with isError.
- */
 /**
  * Per-call context for one tool invocation. Distinct from {@link Service},
  * which is the per-conversation capability bundle (and the ACL boundary):
@@ -34,11 +30,37 @@ export interface ToolCallContext {
   idempotencyKey: string;
 }
 
+/**
+ * An expected tool failure: the call was well-formed enough to reach the
+ * handler, but the tool can't do what it asked — bad arguments, an
+ * unconfigured capability, an upstream refusal. The loop answers it with an
+ * `is_error` tool_result reading `Error: <message>`, so the model can
+ * re-decide, and Class D counts the call as no progress.
+ */
+export interface ToolRejection {
+  /** LLM-facing explanation of why the call failed and, ideally, what to try instead. */
+  readonly message: string;
+}
+
+/** What a handler resolves to: the tool_result content, or a rejection. */
+export type ToolOutcome = Result<string, ToolRejection>;
+
+/** Reject a tool call with an LLM-facing message. */
+export function reject(message: string): Err<never, ToolRejection> {
+  return err({ message });
+}
+
+/**
+ * A tool handler receives validated input and the scoped service, and
+ * resolves to a {@link ToolOutcome}. Expected failures are `err`; a throw
+ * means a bug, which the loop still answers with an `is_error` tool_result
+ * but logs as one.
+ */
 export type ToolHandler = (
   input: Record<string, unknown>,
   service: Service,
   ctx?: ToolCallContext,
-) => Promise<string>;
+) => Promise<ToolOutcome>;
 
 /**
  * Full tool specification — execution-environment agnostic.
@@ -145,14 +167,14 @@ export const DEFAULT_INVOCATION_BUDGET = 5;
  *
  * Generates JSON Schema from Zod via z.toJSONSchema(), and wraps
  * the handler with schema.parse() for runtime input validation.
- * Validation errors are caught by the loop's try/catch and returned
- * as isError tool results — the LLM can retry with corrected input.
+ * Input that fails validation rejects the call with the Zod error's
+ * message, so the LLM can retry with corrected input.
  */
 export function defineTool<T>(opts: {
   name: string;
   description: string;
   schema: ZodType<T>;
-  handler: (input: T, service: Service, ctx?: ToolCallContext) => Promise<string>;
+  handler: (input: T, service: Service, ctx?: ToolCallContext) => Promise<ToolOutcome>;
   /** See `ToolSpec.durable`. */
   durable?: boolean;
   /** See `ToolSpec.parallelSafe`. */
@@ -204,7 +226,16 @@ export function defineTool<T>(opts: {
     name: opts.name,
     description: opts.description,
     inputSchema,
-    handler: async (raw, service, ctx) => opts.handler(parseOnce(raw), service, ctx),
+    handler: async (raw, service, ctx) => {
+      let input: T;
+      try {
+        input = parseOnce(raw);
+      } catch (e) {
+        if (e instanceof z.ZodError) return reject(e.message);
+        throw e;
+      }
+      return opts.handler(input, service, ctx);
+    },
     // The value the handler will receive, exposed so the loop keys a call on
     // its normalized arguments rather than the raw payload.
     normalizeInput: parseOnce,
@@ -279,6 +310,9 @@ export function createDefaultTools(
       }),
       handler: async (input) => {
         const tz = input.timezone ?? defaultTimezone;
+        if (!isTimeZone(tz)) {
+          return reject(`unknown timezone "${tz}"; pass an IANA name such as "Europe/London".`);
+        }
         const now = new Date();
         const formatter = new Intl.DateTimeFormat("en-US", {
           timeZone: tz,
@@ -295,14 +329,16 @@ export function createDefaultTools(
         );
         const offset = getUtcOffset(now, tz);
 
-        return JSON.stringify({
-          iso: now.toISOString(),
-          date: `${parts.weekday}, ${parts.month} ${parts.day}, ${parts.year}`,
-          time: `${parts.hour}:${parts.minute}`,
-          dayOfWeek: parts.weekday,
-          timezone: tz,
-          utcOffset: offset,
-        });
+        return ok(
+          JSON.stringify({
+            iso: now.toISOString(),
+            date: `${parts.weekday}, ${parts.month} ${parts.day}, ${parts.year}`,
+            time: `${parts.hour}:${parts.minute}`,
+            dayOfWeek: parts.weekday,
+            timezone: tz,
+            utcOffset: offset,
+          }),
+        );
       },
     }),
   );
@@ -312,6 +348,16 @@ export function createDefaultTools(
   }
 
   return registry;
+}
+
+function isTimeZone(name: string): boolean {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: name });
+    return true;
+  } catch (e) {
+    if (e instanceof RangeError) return false;
+    throw e;
+  }
 }
 
 function getUtcOffset(date: Date, timezone: string): string {

@@ -1,10 +1,10 @@
 import { Readability } from "@mozilla/readability";
 import { JSDOM } from "jsdom";
+import { err, ok, type Result } from "neverthrow";
 import { z } from "zod";
 import { logger } from "../logger.js";
 import { AbortError, withRetry } from "../util/with-retry.js";
-import type { ToolSpec } from "./tools.js";
-import { defineTool } from "./tools.js";
+import { defineTool, reject, type ToolRejection, type ToolSpec } from "./tools.js";
 
 const MAX_CONTENT_LENGTH = 50_000;
 
@@ -65,7 +65,7 @@ function retryHeaders(targetUrl: string): Record<string, string> {
 /**
  * Create web tools (search, answer, fetch) with injected API keys.
  *
- * Keys are optional — tools return a helpful error if the key is missing.
+ * Keys are optional — a tool whose key is missing rejects every call.
  * This keeps the tools registered (LLM sees them) so it can explain
  * why a capability is unavailable rather than silently lacking it.
  */
@@ -104,7 +104,7 @@ function createWebSearch(apiKey: string | undefined): ToolSpec {
         .describe("Maximum number of results to return"),
     }),
     handler: async (input) => {
-      if (!apiKey) return "Error: web_search is not configured (TAVILY_API_KEY missing).";
+      if (!apiKey) return reject("web_search is not configured (TAVILY_API_KEY missing).");
 
       const res = await withRetry(
         async () => {
@@ -134,13 +134,11 @@ function createWebSearch(apiKey: string | undefined): ToolSpec {
         { retries: 2, context: "tavily.search" },
       );
 
-      const data = (await res.json()) as {
-        results: Array<{ title: string; url: string; content: string }>;
-      };
+      const data = TavilySearchResponseSchema.parse(await res.json());
 
-      if (data.results.length === 0) return "No results found.";
+      if (data.results.length === 0) return ok("No results found.");
 
-      return data.results.map((r) => `[${r.title}](${r.url})\n${r.content}`).join("\n\n");
+      return ok(data.results.map((r) => `[${r.title}](${r.url})\n${r.content}`).join("\n\n"));
     },
   });
 }
@@ -162,7 +160,7 @@ function createWebAnswer(apiKey: string | undefined): ToolSpec {
       question: z.string().describe("The question to answer"),
     }),
     handler: async (input) => {
-      if (!apiKey) return "Error: web_answer is not configured (OPENROUTER_API_KEY missing).";
+      if (!apiKey) return reject("web_answer is not configured (OPENROUTER_API_KEY missing).");
 
       const res = await withRetry(
         async () => {
@@ -193,18 +191,15 @@ function createWebAnswer(apiKey: string | undefined): ToolSpec {
         { retries: 2, context: "openrouter.sonar" },
       );
 
-      const data = (await res.json()) as {
-        choices: Array<{ message: { content: string } }>;
-        citations?: string[];
-      };
+      const data = OpenRouterAnswerSchema.parse(await res.json());
 
       const answer = data.choices[0]?.message.content ?? "No answer returned.";
       const citations = data.citations;
 
       if (citations && citations.length > 0) {
-        return `${answer}\n\nSources:\n${citations.map((c) => `- ${c}`).join("\n")}`;
+        return ok(`${answer}\n\nSources:\n${citations.map((c) => `- ${c}`).join("\n")}`);
       }
-      return answer;
+      return ok(answer);
     },
   });
 }
@@ -228,31 +223,35 @@ function createFetchUrl(tavilyApiKey: string | undefined): ToolSpec {
       url: z.string().url().describe("The URL to fetch (http or https only)"),
     }),
     handler: async (input) => {
-      validateUrl(input.url);
+      const urlCheck = validateUrl(input.url);
+      if (urlCheck.isErr()) return err(urlCheck.error);
 
       let content: string;
       try {
         content = await directFetch(input.url);
       } catch (e) {
+        // A page that can't be fetched is the model's to handle, not a bug.
         // Fall back to Tavily Extract when the failure looks like a bot
         // block (403/429 after our retry-with-Referer round, or a 503
         // / network timeout that often indicates an anti-bot WAF).
-        // Permanent failures like 404 / 401 propagate as-is — Tavily
+        // Permanent failures like 404 / 401 reject as-is — Tavily
         // can't conjure pages that don't exist or unauthenticated ones.
-        if (!tavilyApiKey || !looksLikeBotBlock(e)) throw e;
         const errMsg = e instanceof Error ? e.message : String(e);
+        if (!tavilyApiKey || !looksLikeBotBlock(e)) return reject(errMsg);
         logger.info(
           { url: new URL(input.url).hostname, originalError: errMsg },
           "fetch_url falling back to Tavily Extract",
         );
-        content = await tavilyExtract(input.url, tavilyApiKey, errMsg);
+        const extracted = await tavilyExtract(input.url, tavilyApiKey, errMsg);
+        if (extracted.isErr()) return err(extracted.error);
+        content = extracted.value;
       }
 
       if (content.length > MAX_CONTENT_LENGTH) {
         content = `${content.slice(0, MAX_CONTENT_LENGTH)}\n\n[Content truncated at ${MAX_CONTENT_LENGTH} characters]`;
       }
 
-      return content || "No content could be extracted from this URL.";
+      return ok(content || "No content could be extracted from this URL.");
     },
   });
 }
@@ -339,22 +338,25 @@ function looksLikeBotBlock(error: unknown): boolean {
   return error instanceof Error && !(error instanceof PermanentFetchError);
 }
 
-interface TavilyExtractResult {
-  url: string;
-  raw_content: string;
-}
+const TavilySearchResponseSchema = z.object({
+  results: z.array(z.object({ title: z.string(), url: z.string(), content: z.string() })),
+});
 
-interface TavilyExtractFailure {
-  url: string;
-  error: string;
-}
+const OpenRouterAnswerSchema = z.object({
+  choices: z.array(z.object({ message: z.object({ content: z.string() }) })),
+  citations: z.array(z.string()).optional(),
+});
 
-interface TavilyExtractResponse {
-  results: TavilyExtractResult[];
-  failed_results?: TavilyExtractFailure[];
-}
+const TavilyExtractResponseSchema = z.object({
+  results: z.array(z.object({ url: z.string(), raw_content: z.string().nullish() })),
+  failed_results: z.array(z.object({ url: z.string(), error: z.string() })).optional(),
+});
 
-async function tavilyExtract(url: string, apiKey: string, directError: string): Promise<string> {
+async function tavilyExtract(
+  url: string,
+  apiKey: string,
+  directError: string,
+): Promise<Result<string, ToolRejection>> {
   const res = await withRetry(
     async () => {
       const r = await fetch("https://api.tavily.com/extract", {
@@ -383,16 +385,16 @@ async function tavilyExtract(url: string, apiKey: string, directError: string): 
     { retries: 2, context: `tavily.extract ${new URL(url).hostname}` },
   );
 
-  const data = (await res.json()) as TavilyExtractResponse;
+  const data = TavilyExtractResponseSchema.parse(await res.json());
   const result = data.results[0];
-  if (result?.raw_content) return result.raw_content;
+  if (result?.raw_content) return ok(result.raw_content);
 
   const tavilyError = data.failed_results?.[0]?.error ?? "Tavily returned no content";
   // Surface both errors so the agent (and logs) know the direct path
   // failed AND the fallback failed — useful for diagnosing whether to
   // tweak headers further or accept that this site needs a real
   // browser.
-  throw new Error(
+  return reject(
     `Failed to fetch URL. Direct fetch: ${directError}. Tavily fallback: ${tavilyError}`,
   );
 }
@@ -404,11 +406,11 @@ function extractArticle(html: string, url: string): string {
   return article?.textContent?.trim() ?? "";
 }
 
-function validateUrl(url: string): void {
+function validateUrl(url: string): Result<void, ToolRejection> {
   const parsed = new URL(url);
 
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    throw new Error(`Unsupported protocol: ${parsed.protocol}`);
+    return reject(`Unsupported protocol: ${parsed.protocol}`);
   }
 
   // Reject private/internal IPs (string-level check — does not resolve DNS,
@@ -425,8 +427,9 @@ function validateUrl(url: string): void {
     hostname.endsWith(".local") ||
     hostname.endsWith(".internal")
   ) {
-    throw new Error("Fetching private/internal URLs is not allowed.");
+    return reject("Fetching private/internal URLs is not allowed.");
   }
+  return ok(undefined);
 }
 
 /** 172.16.0.0/12 = 172.16.x.x through 172.31.x.x */

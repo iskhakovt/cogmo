@@ -1,4 +1,5 @@
 import { APICallError, generateImage } from "ai";
+import { err, ok, type Result } from "neverthrow";
 import { z } from "zod";
 import type { ImageModelWithProvider } from "../agent/store/index.js";
 import { type ImageProvider, openAiCompatibleOptionsKey } from "../llm/image-providers.js";
@@ -10,7 +11,7 @@ import {
   type ImageFailure,
   ImageGenerationFailedError,
 } from "./image-failure.js";
-import { defineTool, type ToolSpec } from "./tools.js";
+import { defineTool, reject, type ToolRejection, type ToolSpec } from "./tools.js";
 
 /**
  * The shape returned by the `generate_image` tool's text result (JSON-encoded).
@@ -20,17 +21,20 @@ import { defineTool, type ToolSpec } from "./tools.js";
  * `sendPhoto`). Keep this contract in one place so any field change
  * touches both consumers via the type system.
  */
-export interface GeneratedImagePayload {
-  path: string;
-  mediaType: string;
+const GeneratedImagePayloadSchema = z.object({
+  path: z.string(),
+  mediaType: z.string(),
   /**
    * Model the LLM picked, in the canonical form stored as the row's `name`
    * (e.g. `fal-ai/flux-pro`) — **not** the slug we hand to the LLM (see
    * `imageModelSlug`). Informational — not used by delivery. Operators
    * reading logs / future analytics consumers want the canonical identifier.
+   * A non-string value is dropped rather than failing the payload.
    */
-  model?: string;
-}
+  model: z.string().optional().catch(undefined),
+});
+
+export type GeneratedImagePayload = z.infer<typeof GeneratedImagePayloadSchema>;
 
 /**
  * Parse and validate a `generate_image` tool_result body.
@@ -47,14 +51,10 @@ export function parseGeneratedImagePayload(raw: string): GeneratedImagePayload |
   } catch {
     return null;
   }
-  if (parsed === null || typeof parsed !== "object") return null;
-  const obj = parsed as Record<string, unknown>;
-  if (typeof obj.path !== "string" || typeof obj.mediaType !== "string") return null;
-  return {
-    path: obj.path,
-    mediaType: obj.mediaType,
-    ...(typeof obj.model === "string" && { model: obj.model }),
-  };
+  const payload = GeneratedImagePayloadSchema.safeParse(parsed);
+  if (!payload.success) return null;
+  const { path, mediaType, model } = payload.data;
+  return { path, mediaType, ...(model !== undefined && { model }) };
 }
 
 /**
@@ -148,8 +148,8 @@ interface ImageBytes {
  * Carries the bytes plus the AI SDK's `providerMetadata` so the
  * moderation hook can read provider-specific failure signals (fal's
  * per-image NSFW flag). Venice surfaces content-policy outcomes via response headers,
- * handled inside its adapter and surfaced as thrown errors — it returns
- * `providerMetadata: undefined` here.
+ * handled inside its adapter and surfaced as a thrown
+ * `ImageGenerationFailedError` — it returns `providerMetadata: undefined` here.
  */
 interface ImageGenerationResult {
   image: ImageBytes;
@@ -247,7 +247,7 @@ async function generateViaAiSdk(args: {
   aspectRatio?: string;
   seed?: number;
   negativePrompt?: string;
-}): Promise<ImageGenerationResult> {
+}): Promise<Result<ImageGenerationResult, ImageFailure>> {
   // Returns both the bytes and providerMetadata so the moderation hook
   // upstream can read fal's per-image NSFW signal without re-routing
   // through a second call.
@@ -290,34 +290,23 @@ async function generateViaAiSdk(args: {
       ...(args.seed !== undefined && { seed: args.seed }),
       ...(providerOptions !== undefined && { providerOptions }),
     });
-    return { image, providerMetadata };
-  } catch (err) {
+    return ok({ image, providerMetadata });
+  } catch (e) {
     // Structured 4xx classification. `isRetryable: false` on 4xx
     // (except 429) means re-trying burns budget without helping —
-    // surface as `ImageGenerationFailedError` so `withRetry` stops
-    // AND the tool handler gets a typed failure to format uniformly
-    // with the venice / moderation paths. Moderation-shaped 4xx
+    // return it as a typed failure, which ends `withRetry` and formats
+    // uniformly with the venice / moderation paths. Moderation-shaped 4xx
     // bodies (gpt-image-1's `content_policy_violation`, OpenAI's
     // safety-system text) are tagged `kind: "moderation_blocked"`
     // so the LLM sees the same shape it would from venice or fal.
-    if (APICallError.isInstance(err) && err.isRetryable === false) {
-      const kind: ImageFailure["kind"] = looksLikeModerationBlock(err)
-        ? "moderation_blocked"
-        : "provider_error";
-      throw new ImageGenerationFailedError(
-        {
-          kind,
-          provider: args.provider.kind,
-          reason: err.message,
-        },
-        // Chain the SDK error so the original `APICallError` (with its
-        // request URL, response body, status code) survives in stack
-        // traces. Matches the `NonRetriableError(..., { cause: err })`
-        // pattern used in `handle-message.ts` for non-retryable wraps.
-        { cause: err },
-      );
+    if (APICallError.isInstance(e) && e.isRetryable === false) {
+      return err({
+        kind: looksLikeModerationBlock(e) ? "moderation_blocked" : "provider_error",
+        provider: args.provider.kind,
+        reason: e.message,
+      });
     }
-    throw err;
+    throw e;
   }
 }
 
@@ -339,12 +328,15 @@ function looksLikeModerationBlock(err: APICallError): boolean {
 }
 
 /**
- * Single-format point for both failure paths (adapter-thrown via
- * `ImageGenerationFailedError`, post-generation via `detectImageFailure`).
- * Logs the structured failure for operator filtering and returns the
- * LLM-facing `Error: ...` string the tool result carries.
+ * Single-format point for both failure paths (generation, post-generation
+ * via `detectImageFailure`). Logs the structured failure for operator
+ * filtering and rejects the call with its reason.
  */
-function surfaceFailure(failure: ImageFailure, row: ImageModelWithProvider, slug: string): string {
+function surfaceFailure(
+  failure: ImageFailure,
+  row: ImageModelWithProvider,
+  slug: string,
+): Result<never, ToolRejection> {
   logger.warn(
     {
       kind: failure.kind,
@@ -356,7 +348,7 @@ function surfaceFailure(failure: ImageFailure, row: ImageModelWithProvider, slug
     },
     "image generation failed",
   );
-  return `Error: ${failure.reason}`;
+  return reject(failure.reason);
 }
 
 /**
@@ -463,59 +455,65 @@ export function createImageTools(deps: {
       }),
       handler: async (input) => {
         const row = modelBySlug.get(input.model);
-        if (!row) return `Error: unknown model ${input.model}`;
+        if (!row) return reject(`unknown model ${input.model}`);
         const provider = deps.providers.get(row.providerId);
         if (!provider) {
           // Should never happen — the bootstrap loop populates `providers`
           // from the same DB rows we used to build `models`. If it does,
-          // something has gone badly wrong; surface to the LLM rather than
-          // crashing the turn. Log the canonical row name (not the slug)
+          // something has gone badly wrong; reject rather than crash the
+          // turn. Log the canonical row name (not the slug)
           // since this branch only fires on operator-facing misconfiguration.
           logger.error(
             { rowName: row.name, providerId: row.providerId, slug: input.model },
             "generate_image: model row references a provider not present in the image-providers map",
           );
-          return `Error: model ${input.model} references unknown provider`;
+          return reject(`model ${input.model} references unknown provider`);
         }
 
         // Treat absent and [] identically — both mean "model accepts no
-        // aspectRatio". Both surface as a text error the LLM can recover
-        // from (re-pick a ratio or pick a different model), not silent drop.
+        // aspectRatio". Both reject with an error the LLM can recover from
+        // (re-pick a ratio or pick a different model), not silent drop.
         const supportedRatios = row.capabilities.aspectRatios ?? [];
         if (input.aspectRatio && !supportedRatios.includes(input.aspectRatio)) {
           const hint =
             supportedRatios.length > 0
               ? `Supported: ${supportedRatios.join(", ")}.`
               : "This model does not accept a custom aspect ratio.";
-          return `Error: model ${input.model} does not support aspect ratio ${input.aspectRatio}. ${hint}`;
+          return reject(
+            `model ${input.model} does not support aspect ratio ${input.aspectRatio}. ${hint}`,
+          );
         }
 
-        // Reference-image gating. Three text-recoverable error shapes the
-        // LLM can act on: (a) required-but-missing → re-call with the path;
+        // Reference-image gating. Three recoverable rejections the LLM can
+        // act on: (a) required-but-missing → re-call with the path;
         // (b) supplied-but-unsupported by this model → pick a different
         // model or drop the field; (c) supplied to a non-fal provider →
-        // pick a fal model (the only validated path today). The fetch
-        // itself is wrapped: an attachment-store miss surfaces as a text
-        // error rather than a thrown rejection that crashes the turn.
+        // pick a fal model (the only validated path today). An
+        // attachment-store miss on the fetch rejects too.
         const imageInputCap = row.capabilities.imageInput;
         if (imageInputCap === "required" && !input.referenceImage) {
-          return (
-            `Error: model ${input.model} is an image-editing model and requires ` +
-            "`referenceImage` — pass the AttachmentStore path of the image you want to edit."
+          return reject(
+            `model ${input.model} is an image-editing model and requires ` +
+              "`referenceImage` — pass the AttachmentStore path of the image you want to edit.",
           );
         }
         if (input.referenceImage && imageInputCap === undefined) {
-          return `Error: model ${input.model} does not accept a reference image. Drop \`referenceImage\` or pick a model marked \`[needs reference image]\` or \`[optional reference image]\`.`;
+          return reject(
+            `model ${input.model} does not accept a reference image. Drop \`referenceImage\` or pick a model marked \`[needs reference image]\` or \`[optional reference image]\`.`,
+          );
         }
         if (input.referenceImage && provider.kind !== "fal") {
-          return `Error: reference images are only supported by fal providers (got ${provider.kind}). Pick a fal-backed model marked \`[needs reference image]\`.`;
+          return reject(
+            `reference images are only supported by fal providers (got ${provider.kind}). Pick a fal-backed model marked \`[needs reference image]\`.`,
+          );
         }
         let referenceImageBytes: Buffer | undefined;
         if (input.referenceImage) {
           try {
             referenceImageBytes = await deps.attachments.download(input.referenceImage);
-          } catch (err) {
-            return `Error: couldn't load referenceImage "${input.referenceImage}": ${(err as Error).message}`;
+          } catch (e) {
+            const reason = e instanceof Error ? e.message : String(e);
+            return reject(`couldn't load referenceImage "${input.referenceImage}": ${reason}`);
           }
         }
 
@@ -532,7 +530,7 @@ export function createImageTools(deps: {
           input.negativePrompt !== undefined && row.capabilities.negativePrompt === true;
 
         const generateResult = await withRetry(
-          async (): Promise<ImageGenerationResult | { failure: ImageFailure }> => {
+          async (): Promise<Result<ImageGenerationResult, ImageFailure>> => {
             try {
               switch (provider.kind) {
                 case "fal":
@@ -566,27 +564,25 @@ export function createImageTools(deps: {
                   // content-policy signals are response headers handled inside
                   // the adapter (throws `ImageGenerationFailedError`). The
                   // size canary in `detectImageFailure` still applies.
-                  return { image: bytes, providerMetadata: undefined };
+                  return ok({ image: bytes, providerMetadata: undefined });
                 }
               }
-            } catch (err) {
-              // Adapter-thrown failures (Venice headers, openai-compat
-              // moderation 4xx) arrive as `ImageGenerationFailedError`, which
-              // is terminal by construction — it only ever wraps an outcome
-              // the provider already classified as non-retryable. Returning
-              // it as a value rather than rethrowing does two things: every
-              // attempt here is a paid generation, so ending the loop keeps
-              // the bill at one; and the structured `failure` survives, which
-              // a rethrow would lose — `ImageGenerationFailedError` extends
-              // p-retry's `AbortError`, and p-retry answers a thrown
-              // `AbortError` by rethrowing its `originalError`, a plain
-              // `Error` with no `failure` field. Transport-shaped failures
-              // (5xx, socket resets) propagate as their own error types and
-              // keep the full retry budget.
-              if (err instanceof ImageGenerationFailedError) {
-                return { failure: err.failure };
-              }
-              throw err;
+            } catch (e) {
+              // The Venice adapter throws its failures (content-policy
+              // headers) as `ImageGenerationFailedError`, which is terminal
+              // by construction — it only ever wraps an outcome the provider
+              // already classified as non-retryable. Returning it as a value
+              // rather than rethrowing does two things: every attempt here is
+              // a paid generation, so ending the loop keeps the bill at one;
+              // and the structured `failure` survives, which a rethrow would
+              // lose — `ImageGenerationFailedError` extends p-retry's
+              // `AbortError`, and p-retry answers a thrown `AbortError` by
+              // rethrowing its `originalError`, a plain `Error` with no
+              // `failure` field. Transport-shaped failures (5xx, socket
+              // resets) propagate as their own error types and keep the full
+              // retry budget.
+              if (e instanceof ImageGenerationFailedError) return err(e.failure);
+              throw e;
             }
           },
           {
@@ -595,10 +591,10 @@ export function createImageTools(deps: {
           },
         );
 
-        if ("failure" in generateResult) {
-          return surfaceFailure(generateResult.failure, row, input.model);
+        if (generateResult.isErr()) {
+          return surfaceFailure(generateResult.error, row, input.model);
         }
-        const { image, providerMetadata } = generateResult;
+        const { image, providerMetadata } = generateResult.value;
 
         const detection = moderate({
           image,
@@ -611,11 +607,7 @@ export function createImageTools(deps: {
 
         const buffer = Buffer.from(image.uint8Array);
         const path = await deps.attachments.upload(buffer, image.mediaType, "generated");
-        return JSON.stringify({
-          path,
-          mediaType: image.mediaType,
-          model: row.name,
-        });
+        return ok(JSON.stringify({ path, mediaType: image.mediaType, model: row.name }));
       },
     }),
   ];

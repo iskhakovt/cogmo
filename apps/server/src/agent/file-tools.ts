@@ -1,3 +1,4 @@
+import { ok } from "neverthrow";
 import { z } from "zod";
 import { defineTool } from "./tools.js";
 
@@ -18,7 +19,7 @@ export const readFile = defineTool({
   schema: z.object({
     path: z.string().describe("File path (e.g. 'notes/meeting.md')"),
   }),
-  handler: (input, service) => service.files.read(input.path),
+  handler: async (input, service) => ok(await service.files.read(input.path)),
 });
 
 export const writeFile = defineTool({
@@ -40,7 +41,7 @@ export const writeFile = defineTool({
   handler: async (input, service) => {
     await service.files.write(input.path, input.content);
     const bytes = new TextEncoder().encode(input.content).length;
-    return `Written ${bytes} bytes to ${input.path}`;
+    return ok(`Written ${bytes} bytes to ${input.path}`);
   },
 });
 
@@ -71,7 +72,7 @@ export const editFile = defineTool({
     await service.files.edit(input.path, input.old_string, input.new_string, {
       replaceAll: input.replace_all ?? false,
     });
-    return `Edited ${input.path}`;
+    return ok(`Edited ${input.path}`);
   },
 });
 
@@ -96,16 +97,18 @@ export const listFiles = defineTool({
   handler: async (input, service) => {
     const entries = await service.files.list(input.prefix);
     if (entries.length === 0) {
-      return input.prefix
-        ? `No files found with prefix "${input.prefix}".`
-        : "No files in workspace.";
+      return ok(
+        input.prefix ? `No files found with prefix "${input.prefix}".` : "No files in workspace.",
+      );
     }
-    return entries
-      .map((e) => {
-        const size = e.size < 1024 ? `${e.size}B` : `${(e.size / 1024).toFixed(1)}KB`;
-        return `${e.path} (${size}, ${e.lastModified.toISOString()})`;
-      })
-      .join("\n");
+    return ok(
+      entries
+        .map((e) => {
+          const size = e.size < 1024 ? `${e.size}B` : `${(e.size / 1024).toFixed(1)}KB`;
+          return `${e.path} (${size}, ${e.lastModified.toISOString()})`;
+        })
+        .join("\n"),
+    );
   },
 });
 

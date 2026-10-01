@@ -1,3 +1,4 @@
+import { ok } from "neverthrow";
 import { z } from "zod";
 import { defineTool } from "./tools.js";
 
@@ -27,9 +28,9 @@ export const memoryRecall = defineTool({
   handler: async (input, service) => {
     const result = await service.memory.recall(input.query);
     if (result.memories.length === 0) {
-      return "No relevant memories found.";
+      return ok("No relevant memories found.");
     }
-    return result.memories.map((m) => `[${m.type}] ${m.content}`).join("\n");
+    return ok(result.memories.map((m) => `[${m.type}] ${m.content}`).join("\n"));
   },
 });
 
@@ -57,7 +58,7 @@ export const memoryRetain = defineTool({
     } else {
       await service.memory.stageRetain(input.content);
     }
-    return "Remembered.";
+    return ok("Remembered.");
   },
 });
 
@@ -107,7 +108,7 @@ export const memoryReflect = defineTool({
       ...(input.tags !== undefined && { tags: input.tags }),
       ...(input.tagsMatch !== undefined && { tagsMatch: input.tagsMatch }),
     });
-    return result.answer;
+    return ok(result.answer);
   },
 });
 

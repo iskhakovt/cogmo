@@ -1,5 +1,5 @@
 import { NonRetriableError } from "inngest";
-import { err } from "neverthrow";
+import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { z } from "zod";
@@ -78,7 +78,12 @@ function loopResult(overrides: Partial<AgentLoopResult> = {}): AgentLoopResult {
 }
 
 function toolNamed(name: string) {
-  return defineTool({ name, description: name, schema: z.object({}), handler: async () => "ok" });
+  return defineTool({
+    name,
+    description: name,
+    schema: z.object({}),
+    handler: async () => ok("ok"),
+  });
 }
 
 /** Step runners that execute bodies inline and record the ids they were given. */

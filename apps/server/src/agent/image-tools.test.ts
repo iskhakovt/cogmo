@@ -322,7 +322,8 @@ describe("createImageTools", () => {
       providers: new Map([["provider-1", provider]]),
       attachments,
     });
-    const result = await tool!.handler({ prompt: "hello", model: "flux-dev" }, FAKE_SERVICE);
+    const outcome = await tool!.handler({ prompt: "hello", model: "flux-dev" }, FAKE_SERVICE);
+    const result = outcome._unsafeUnwrap();
 
     expect(imageFn).toHaveBeenCalledWith("fal-ai/flux/dev");
     expect(attachments.upload).toHaveBeenCalled();
@@ -447,11 +448,37 @@ describe("createImageTools", () => {
     expect(opts.context).toBe("image.generate.fal/flux-dev");
   });
 
-  it("returns a text error for an unsupported aspect ratio (per-model narrowing)", async () => {
+  it("rejects a model whose row references a provider missing from the providers map", async () => {
+    // Bootstrap builds `providers` from the same rows as `models`, so this
+    // is operator-facing misconfiguration: the call is rejected (and logged)
+    // rather than crashing the turn.
+    const errorSpy = vi.spyOn(logger, "error").mockImplementation(() => logger);
+    try {
+      const [tool] = createImageTools({
+        models: [falModel({ providerId: "provider-missing" })],
+        providers: new Map([["provider-1", fakeFalProvider().provider]]),
+        attachments: fakeAttachments(),
+      });
+      const outcome = await expectDefined(tool, "generate_image").handler(
+        { prompt: "x", model: "flux-dev" },
+        FAKE_SERVICE,
+      );
+      expect(outcome._unsafeUnwrapErr().message).toBe("model flux-dev references unknown provider");
+      expect(mockGenerateImage).not.toHaveBeenCalled();
+      expect(errorSpy).toHaveBeenCalledWith(
+        { rowName: "fal/flux-dev", providerId: "provider-missing", slug: "flux-dev" },
+        expect.stringContaining("not present in the image-providers map"),
+      );
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("rejects an unsupported aspect ratio (per-model narrowing)", async () => {
     // Per-model narrowing: the Zod enum is the union across all models. Here
     // model A supports 1:1/16:9 and model B supports 21:9 — the LLM can pick
-    // 21:9 from the union, but if it lands on model A the handler returns a
-    // text error rather than letting the provider reject it.
+    // 21:9 from the union, but if it lands on model A the handler rejects
+    // the call rather than letting the provider reject it.
     const [tool] = createImageTools({
       models: [
         falModel(), // supports 1:1, 16:9
@@ -465,7 +492,7 @@ describe("createImageTools", () => {
       providers: new Map([["provider-1", fakeFalProvider().provider]]),
       attachments: fakeAttachments(),
     });
-    const result = await tool!.handler(
+    const outcome = await tool!.handler(
       {
         prompt: "x",
         model: "flux-dev",
@@ -473,12 +500,13 @@ describe("createImageTools", () => {
       },
       FAKE_SERVICE,
     );
+    const result = outcome._unsafeUnwrapErr().message;
     expect(result).toMatch(/does not support aspect ratio 21:9/);
     expect(result).toMatch(/Supported: 1:1, 16:9/);
     expect(mockGenerateImage).not.toHaveBeenCalled();
   });
 
-  it('returns "no custom aspect ratio" error for fixed-size models when the LLM still passes one', async () => {
+  it('rejects with "no custom aspect ratio" for fixed-size models when the LLM still passes one', async () => {
     // Union must be non-empty for the Zod field to accept any value; second
     // model contributes 1:1 to the union. The first model is fixed-size and
     // should reject the LLM's pick via the handler's narrowing branch.
@@ -497,7 +525,7 @@ describe("createImageTools", () => {
       providers: new Map([["provider-1", fakeFalProvider().provider]]),
       attachments: fakeAttachments(),
     });
-    const result = await tool!.handler(
+    const outcome = await tool!.handler(
       {
         prompt: "x",
         model: "fixed",
@@ -505,6 +533,7 @@ describe("createImageTools", () => {
       },
       FAKE_SERVICE,
     );
+    const result = outcome._unsafeUnwrapErr().message;
     expect(result).toMatch(/does not accept a custom aspect ratio/);
   });
 
@@ -565,10 +594,11 @@ describe("createImageTools", () => {
       providers: new Map([["provider-1", fakeFalProvider().provider]]),
       attachments: fakeAttachments(),
     });
-    const result = await tool!.handler(
+    const outcome = await tool!.handler(
       { prompt: "make it sepia", model: "flux-kontext" },
       FAKE_SERVICE,
     );
+    const result = outcome._unsafeUnwrapErr().message;
     expect(result).toMatch(/requires `referenceImage`/);
     expect(mockGenerateImage).not.toHaveBeenCalled();
   });
@@ -579,7 +609,7 @@ describe("createImageTools", () => {
       providers: new Map([["provider-1", fakeFalProvider().provider]]),
       attachments: fakeAttachments(),
     });
-    const result = await tool!.handler(
+    const outcome = await tool!.handler(
       {
         prompt: "x",
         model: "flux-dev",
@@ -587,6 +617,7 @@ describe("createImageTools", () => {
       },
       FAKE_SERVICE,
     );
+    const result = outcome._unsafeUnwrapErr().message;
     expect(result).toMatch(/does not accept a reference image/);
     expect(mockGenerateImage).not.toHaveBeenCalled();
   });
@@ -605,7 +636,7 @@ describe("createImageTools", () => {
       providers: new Map([["provider-2", provider]]),
       attachments: fakeAttachments(),
     });
-    const result = await tool!.handler(
+    const outcome = await tool!.handler(
       {
         prompt: "make changes",
         model: "edit",
@@ -613,6 +644,7 @@ describe("createImageTools", () => {
       },
       FAKE_SERVICE,
     );
+    const result = outcome._unsafeUnwrapErr().message;
     expect(result).toMatch(/only supported by fal providers/);
     expect(mockGenerateImage).not.toHaveBeenCalled();
   });
@@ -651,7 +683,7 @@ describe("createImageTools", () => {
     });
   });
 
-  it("surfaces AttachmentStore download failures as text errors", async () => {
+  it("rejects when the AttachmentStore download of referenceImage fails", async () => {
     const attachments = fakeAttachments();
     attachments.download = vi.fn().mockRejectedValue(new Error("no such key"));
     const [tool] = createImageTools({
@@ -665,7 +697,7 @@ describe("createImageTools", () => {
       providers: new Map([["provider-1", fakeFalProvider().provider]]),
       attachments,
     });
-    const result = await tool!.handler(
+    const outcome = await tool!.handler(
       {
         prompt: "x",
         model: "flux-kontext",
@@ -673,6 +705,7 @@ describe("createImageTools", () => {
       },
       FAKE_SERVICE,
     );
+    const result = outcome._unsafeUnwrapErr().message;
     expect(result).toMatch(/couldn't load referenceImage/);
     expect(mockGenerateImage).not.toHaveBeenCalled();
   });
@@ -709,7 +742,7 @@ describe("createImageTools", () => {
       attachments,
     });
 
-    const result = await tool!.handler(
+    const outcome = await tool!.handler(
       {
         prompt: "a painted dragon",
         model: "flux-dev",
@@ -719,6 +752,7 @@ describe("createImageTools", () => {
       },
       FAKE_SERVICE,
     );
+    const result = outcome._unsafeUnwrap();
 
     expect(generateFn).toHaveBeenCalledTimes(1);
     expect(generateFn.mock.calls[0]?.[0]).toMatchObject({
@@ -751,10 +785,11 @@ describe("createImageTools", () => {
       providers: new Map([["provider-3", provider]]),
       attachments: fakeAttachments(),
     });
-    const result = await tool!.handler(
+    const outcome = await tool!.handler(
       { prompt: "x", model: "flux-edit", referenceImage: "inbound/photo.png" },
       FAKE_SERVICE,
     );
+    const result = outcome._unsafeUnwrapErr().message;
     expect(result).toMatch(/only supported by fal providers/);
   });
 
@@ -869,7 +904,7 @@ describe("createImageTools", () => {
     expect(tool!.description).toMatch(/negativePrompt/);
   });
 
-  it("returns a text error when fal flags the result as nsfw (no upload)", async () => {
+  it("rejects when fal flags the result as nsfw (no upload)", async () => {
     mockGenerateImage.mockResolvedValueOnce({
       image: healthyImage(),
       providerMetadata: {
@@ -886,13 +921,14 @@ describe("createImageTools", () => {
       providers: new Map([["provider-1", provider]]),
       attachments,
     });
-    const result = await tool!.handler({ prompt: "x", model: "flux-dev" }, FAKE_SERVICE);
-    expect(result).toMatch(/Error: image was flagged as nsfw by fal/);
+    const outcome = await tool!.handler({ prompt: "x", model: "flux-dev" }, FAKE_SERVICE);
+    const result = outcome._unsafeUnwrapErr().message;
+    expect(result).toMatch(/^image was flagged as nsfw by fal/);
     expect(result).toMatch(/concepts: nudity/);
     expect(attachments.upload).not.toHaveBeenCalled();
   });
 
-  it("returns a text error when the generated bytes are below the size canary (no upload)", async () => {
+  it("rejects when the generated bytes are below the size canary (no upload)", async () => {
     mockGenerateImage.mockResolvedValueOnce({
       // Below SUSPICIOUS_SIZE_THRESHOLD_BYTES — solid-color placeholders
       // compress to a few hundred bytes; this stub mimics that.
@@ -904,8 +940,9 @@ describe("createImageTools", () => {
       providers: new Map([["provider-1", fakeFalProvider().provider]]),
       attachments,
     });
-    const result = await tool!.handler({ prompt: "x", model: "flux-dev" }, FAKE_SERVICE);
-    expect(result).toMatch(/Error: generated image is suspiciously small/);
+    const outcome = await tool!.handler({ prompt: "x", model: "flux-dev" }, FAKE_SERVICE);
+    const result = outcome._unsafeUnwrapErr().message;
+    expect(result).toMatch(/^generated image is suspiciously small/);
     expect(result).toMatch(/500 bytes/);
     expect(attachments.upload).not.toHaveBeenCalled();
   });
@@ -959,9 +996,10 @@ describe("createImageTools", () => {
       attachments,
       detectImageFailure: detector,
     });
-    const result = await tool!.handler({ prompt: "x", model: "flux-dev" }, FAKE_SERVICE);
+    const outcome = await tool!.handler({ prompt: "x", model: "flux-dev" }, FAKE_SERVICE);
+    const result = outcome._unsafeUnwrap();
     expect(detector).toHaveBeenCalledTimes(1);
-    expect(result).not.toMatch(/^Error:/);
+    expect(JSON.parse(result)).toMatchObject({ path: "inbound/test.png" });
     expect(attachments.upload).toHaveBeenCalledTimes(1);
   });
 
@@ -976,7 +1014,8 @@ describe("createImageTools", () => {
       providers: new Map([["provider-1", fakeFalProvider().provider]]),
       attachments,
     });
-    const result = await tool!.handler({ prompt: "x", model: "flux-dev" }, FAKE_SERVICE);
+    const outcome = await tool!.handler({ prompt: "x", model: "flux-dev" }, FAKE_SERVICE);
+    const result = outcome._unsafeUnwrap();
     expect(attachments.upload).toHaveBeenCalledTimes(1);
     expect(JSON.parse(result)).toMatchObject({
       path: "inbound/test.png",
@@ -984,27 +1023,40 @@ describe("createImageTools", () => {
     });
   });
 
-  it("converts non-retryable APICallErrors into a provider_error tool result (no throw)", async () => {
+  it("converts non-retryable APICallErrors into a provider_error rejection (no throw)", async () => {
     // Non-moderation 4xx (auth, unknown model, quota) — no
-    // content-policy substring in the body — surface as
-    // `kind: "provider_error"` in the LLM-facing string. The throw
-    // is caught inside the retried generation block so the LLM gets
-    // a structured failure instead of an exception propagating up
-    // the agent loop.
+    // content-policy substring in the body — are tagged
+    // `kind: "provider_error"`. The throw is caught inside the retried
+    // generation block and returned as a typed failure, so the LLM gets
+    // a rejection carrying the provider's message instead of an
+    // exception propagating up the agent loop.
     mockGenerateImage.mockRejectedValueOnce(new FakeAPICallError("auth failed", false));
-    const [tool] = createImageTools({
-      models: [falModel()],
-      providers: new Map([["provider-1", fakeFalProvider().provider]]),
-      attachments: fakeAttachments(),
-    });
-    const result = await tool!.handler({ prompt: "x", model: "flux-dev" }, FAKE_SERVICE);
-    expect(result).toMatch(/^Error: auth failed/);
+    const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => logger);
+    try {
+      const [tool] = createImageTools({
+        models: [falModel()],
+        providers: new Map([["provider-1", fakeFalProvider().provider]]),
+        attachments: fakeAttachments(),
+      });
+      const outcome = await expectDefined(tool, "generate_image").handler(
+        { prompt: "x", model: "flux-dev" },
+        FAKE_SERVICE,
+      );
+      expect(outcome._unsafeUnwrapErr().message).toBe("auth failed");
+      expect(mockGenerateImage).toHaveBeenCalledTimes(1);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ kind: "provider_error", provider: "fal" }),
+        "image generation failed",
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it("surfaces a venice-thrown ImageGenerationFailedError through surfaceFailure (symmetry)", async () => {
     // Venice's adapter throws `ImageGenerationFailedError` from
     // response-header parsing; the tool handler must convert that into
-    // the same `Error: <reason>` + structured warn log that fal NSFW /
+    // the same `<reason>` rejection + structured warn log that fal NSFW /
     // size canary / oai content-policy produce. Without this test we'd
     // have:
     //  - venice.test.ts proving the throw,
@@ -1035,8 +1087,9 @@ describe("createImageTools", () => {
         providers: new Map([["provider-3", provider]]),
         attachments: fakeAttachments(),
       });
-      const result = await tool!.handler({ prompt: "x", model: "sd35" }, FAKE_SERVICE);
-      expect(result).toMatch(/^Error: Venice rejected the prompt/);
+      const outcome = await tool!.handler({ prompt: "x", model: "sd35" }, FAKE_SERVICE);
+      const result = outcome._unsafeUnwrapErr().message;
+      expect(result).toMatch(/^Venice rejected the prompt/);
       expect(warnSpy).toHaveBeenCalledWith(
         expect.objectContaining({
           kind: "moderation_blocked",
@@ -1072,8 +1125,9 @@ describe("createImageTools", () => {
         providers: new Map([["provider-1", fakeFalProvider().provider]]),
         attachments: fakeAttachments(),
       });
-      const result = await tool!.handler({ prompt: "x", model: "flux-dev" }, FAKE_SERVICE);
-      expect(result).toMatch(/^Error: Your request was rejected/);
+      const outcome = await tool!.handler({ prompt: "x", model: "flux-dev" }, FAKE_SERVICE);
+      const result = outcome._unsafeUnwrapErr().message;
+      expect(result).toBe("Your request was rejected as a result of our safety system.");
       expect(warnSpy).toHaveBeenCalledWith(
         expect.objectContaining({ kind: "moderation_blocked", provider: "fal" }),
         "image generation failed",

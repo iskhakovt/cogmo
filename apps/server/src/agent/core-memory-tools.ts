@@ -1,9 +1,10 @@
+import { ok } from "neverthrow";
 import { match } from "ts-pattern";
 import { z } from "zod";
 import { type CoreMemoryScope, DOCUMENTED_BLOCK_KEYS } from "./core-memory/scope.js";
 import type { CoreMemoryWrite } from "./core-memory/write-core-memory-block.js";
 import { formatUserContext } from "./prompt.js";
-import { defineTool, type ToolSpec } from "./tools.js";
+import { defineTool, reject, type ToolSpec } from "./tools.js";
 
 export const coreMemoryUpdate = defineTool({
   name: "core_memory_update",
@@ -32,8 +33,9 @@ export const coreMemoryUpdate = defineTool({
   }),
   handler: async (input, service) => {
     const written = await service.coreMemory.update(input.key, input.content);
-    if (written.isErr()) throw new Error("Core memory isn't available in this profile.");
-    return writtenText(input.key, written.value);
+    return written
+      .map((w) => writtenText(input.key, w))
+      .orElse(() => reject("Core memory isn't available in this profile."));
   },
 });
 
@@ -73,7 +75,7 @@ export const coreMemoryRead = defineTool({
   sideEffectful: false,
   schema: z.object({}),
   handler: async (_input, service) => {
-    return formatUserContext(await service.coreMemory.get()) ?? "No core memory blocks yet.";
+    return ok(formatUserContext(await service.coreMemory.get()) ?? "No core memory blocks yet.");
   },
 });
 

@@ -1,9 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { mockFilesService } from "../test/factories.js";
-import { fileTools } from "./file-tools.js";
+import { editFile, listFiles, readFile, writeFile } from "./file-tools.js";
 import type { Service } from "./service.js";
-
-const [readFile, writeFile, editFile, listFiles] = fileTools;
 
 function mockService(filesOverrides?: Partial<Service["files"]>): Service {
   const files = mockFilesService({
@@ -28,7 +26,7 @@ function mockService(filesOverrides?: Partial<Service["files"]>): Service {
 describe("read_file", () => {
   it("reads file content via service", async () => {
     const svc = mockService({ read: vi.fn().mockResolvedValue("hello world") });
-    const result = await readFile!.handler({ path: "notes/test.md" }, svc);
+    const result = (await readFile.handler({ path: "notes/test.md" }, svc))._unsafeUnwrap();
 
     expect(result).toBe("hello world");
     expect(svc.files.read).toHaveBeenCalledWith("notes/test.md");
@@ -38,7 +36,7 @@ describe("read_file", () => {
     // Truncation now lives in the service; the tool returns whatever read produces.
     const truncated = `${"x".repeat(100_000)}\n\n[Content truncated at 100000 characters. Edits and overwrites are blocked until the file is read in full.]`;
     const svc = mockService({ read: vi.fn().mockResolvedValue(truncated) });
-    const result = await readFile!.handler({ path: "big.txt" }, svc);
+    const result = (await readFile.handler({ path: "big.txt" }, svc))._unsafeUnwrap();
 
     expect(result).toContain("[Content truncated");
   });
@@ -47,7 +45,9 @@ describe("read_file", () => {
 describe("write_file", () => {
   it("writes content via service and returns byte count", async () => {
     const svc = mockService();
-    const result = await writeFile!.handler({ path: "notes/new.md", content: "hello" }, svc);
+    const result = (
+      await writeFile.handler({ path: "notes/new.md", content: "hello" }, svc)
+    )._unsafeUnwrap();
 
     expect(svc.files.write).toHaveBeenCalledWith("notes/new.md", "hello");
     expect(result).toContain("5 bytes");
@@ -59,7 +59,7 @@ describe("write_file", () => {
       write: vi.fn().mockRejectedValue(new Error("read the file first before overwriting")),
     });
 
-    await expect(writeFile!.handler({ path: "notes/x.md", content: "y" }, svc)).rejects.toThrow(
+    await expect(writeFile.handler({ path: "notes/x.md", content: "y" }, svc)).rejects.toThrow(
       "read the file first",
     );
   });
@@ -68,10 +68,9 @@ describe("write_file", () => {
 describe("edit_file", () => {
   it("calls service.files.edit with old/new strings and default replace_all=false", async () => {
     const svc = mockService();
-    const result = await editFile!.handler(
-      { path: "notes/n.md", old_string: "a", new_string: "b" },
-      svc,
-    );
+    const result = (
+      await editFile.handler({ path: "notes/n.md", old_string: "a", new_string: "b" }, svc)
+    )._unsafeUnwrap();
 
     expect(svc.files.edit).toHaveBeenCalledWith("notes/n.md", "a", "b", { replaceAll: false });
     expect(result).toBe("Edited notes/n.md");
@@ -79,7 +78,7 @@ describe("edit_file", () => {
 
   it("threads replace_all=true into the service call", async () => {
     const svc = mockService();
-    await editFile!.handler(
+    await editFile.handler(
       { path: "notes/n.md", old_string: "a", new_string: "b", replace_all: true },
       svc,
     );
@@ -93,7 +92,7 @@ describe("edit_file", () => {
     });
 
     await expect(
-      editFile!.handler({ path: "n.md", old_string: "x", new_string: "y" }, svc),
+      editFile.handler({ path: "n.md", old_string: "x", new_string: "y" }, svc),
     ).rejects.toThrow("old_string appears 3 times");
   });
 });
@@ -107,7 +106,7 @@ describe("list_files", () => {
       ]),
     });
 
-    const result = await listFiles!.handler({ prefix: "notes/" }, svc);
+    const result = (await listFiles.handler({ prefix: "notes/" }, svc))._unsafeUnwrap();
 
     expect(result).toContain("notes/a.md");
     expect(result).toContain("512B");
@@ -118,14 +117,14 @@ describe("list_files", () => {
 
   it("handles empty workspace", async () => {
     const svc = mockService({ list: vi.fn().mockResolvedValue([]) });
-    const result = await listFiles!.handler({}, svc);
+    const result = (await listFiles.handler({}, svc))._unsafeUnwrap();
 
     expect(result).toContain("No files");
   });
 
   it("shows prefix in empty message when filtered", async () => {
     const svc = mockService({ list: vi.fn().mockResolvedValue([]) });
-    const result = await listFiles!.handler({ prefix: "drafts/" }, svc);
+    const result = (await listFiles.handler({ prefix: "drafts/" }, svc))._unsafeUnwrap();
 
     expect(result).toContain('prefix "drafts/"');
   });

@@ -35,9 +35,11 @@ import {
   truncationNotice,
 } from "./repair.js";
 import type { Service } from "./service.js";
+import { fromToolStepResult, toToolStepResult } from "./tool-step-result.js";
 import {
   DEFAULT_INVOCATION_BUDGET,
   type ToolCallContext,
+  type ToolOutcome,
   type ToolRegistry,
   type ToolSpec,
 } from "./tools.js";
@@ -48,18 +50,19 @@ const tracer = trace.getTracer("cogmo.agent");
  * Wraps one durable unit of work in a boundary backed by Inngest `step.run`.
  * The agent loop creates two kinds of steps through it: each streaming LLM
  * iteration (`llm-iter<N>`, returning an {@link LlmIterationOutcome}) and each
- * durable tool handler (`tool-iter<N>-<P>`, returning the handler's string
- * output). Results are cached exactly-once across Inngest re-invocations of
- * the surrounding function; body errors propagate (Inngest per-step retries
- * fire first, then the error bubbles up — a cached rejection re-throws).
+ * durable tool handler (`tool-iter<N>-<P>`, returning a `ToolStepResult`,
+ * rejections included). Results are cached exactly-once across Inngest
+ * re-invocations of the surrounding function; body errors propagate (Inngest
+ * per-step retries fire first, then the error bubbles up — a cached failure
+ * re-throws).
  *
  * Injected rather than depending on Inngest's `step` directly — keeps the
  * loop testable without an Inngest context. When undefined, all work runs
  * directly and nothing is memoized.
  *
  * Contract: the resolved value of `fn` must survive a JSON round-trip
- * unchanged (Inngest stores step results as JSON). Both payload shapes the
- * loop passes satisfy this by construction — see design/crash-recovery.md →
+ * unchanged (Inngest stores step results as JSON). Every payload shape the
+ * loop passes satisfies this by construction — see design/crash-recovery.md →
  * State serialization.
  */
 export type StepRunner = <T>(id: string, fn: () => Promise<T>) => Promise<T>;
@@ -255,11 +258,8 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
     const interceptions = computeVolumeClusterInterceptions(messages, initialLength, tools, log);
     const toolResults = await executeToolCalls(
       content,
-      tools,
-      service,
-      stepRun,
+      { tools, service, stepRun, turnKey, log },
       iterations,
-      turnKey,
       interceptions,
     );
     messages.push({ role: "user", content: toolResults });
@@ -334,6 +334,15 @@ function toolCallKey(
   }
   const digest = sha256(`${block.name}\u0000${canonicalJson(input)}`).slice(0, 16);
   return `${turnKey}:i${stepKey.iteration}:p${stepKey.position}:${digest}`;
+}
+
+/** What every tool call of a turn runs against. */
+interface ToolExecution {
+  tools: ToolRegistry;
+  service: Service;
+  stepRun: StepRunner | undefined;
+  turnKey: string | undefined;
+  log: Logger;
 }
 
 interface PlannedCall {
@@ -461,19 +470,16 @@ function isSafeCall(entry: PlannedCall): boolean {
 
 async function executeToolCalls(
   content: ContentBlock[],
-  tools: ToolRegistry,
-  service: Service,
-  stepRun: StepRunner | undefined,
+  exec: ToolExecution,
   iteration: number,
-  turnKey: string | undefined,
-  interceptions?: ReadonlyMap<string, ContentBlock>,
+  interceptions: ReadonlyMap<string, ContentBlock>,
 ): Promise<ContentBlock[]> {
   const toolUseBlocks = content.filter((b) => b.type === "tool_use");
   if (toolUseBlocks.length === 0) return [];
 
   const planned: PlannedCall[] = toolUseBlocks.map((block, position) => ({
     block,
-    spec: tools.get(block.name) ?? null,
+    spec: exec.tools.get(block.name) ?? null,
     stepKey: { iteration, position },
   }));
 
@@ -497,9 +503,7 @@ async function executeToolCalls(
   const results: ContentBlock[] = [];
   for (const group of groups) {
     const batch = await Promise.all(
-      group.map(({ block, spec, stepKey }) =>
-        runOne(block, spec, service, stepRun, stepKey, turnKey, interceptions),
-      ),
+      group.map(({ block, spec, stepKey }) => runOne(block, spec, exec, stepKey, interceptions)),
     );
     results.push(...batch);
   }
@@ -515,8 +519,8 @@ async function executeToolCalls(
  *     fail-safe: a missing flag is treated as side-effectful so Class
  *     D never wrongly trips on a tool that genuinely makes progress).
  *
- * Errored tool calls (Zod validation failures, handler throws, unknown
- * tool) contribute no side effect. This is exactly the "free upside"
+ * Errored tool calls (Zod validation failures, rejections, handler throws,
+ * unknown tool) contribute no side effect. This is exactly the "free upside"
  * the design calls out — runaway identical-malformed-args sequences
  * trip Class D rather than burning to the iteration cap.
  *
@@ -549,15 +553,13 @@ function iterationHadSideEffect(
 async function runOne(
   block: ToolUseBlock,
   spec: ToolSpec | null,
-  service: Service,
-  stepRun: StepRunner | undefined,
+  exec: ToolExecution,
   stepKey: ToolStepKey,
-  turnKey: string | undefined,
-  interceptions?: ReadonlyMap<string, ContentBlock>,
+  interceptions: ReadonlyMap<string, ContentBlock>,
 ): Promise<ContentBlock> {
   // Volume-cluster intercept short-circuits the handler — synthetic
   // tool_result already prepared by the caller, no span / step.run.
-  const intercepted = interceptions?.get(block.id);
+  const intercepted = interceptions.get(block.id);
   if (intercepted) return intercepted;
 
   if (!spec) {
@@ -569,16 +571,12 @@ async function runOne(
     };
   }
 
+  const { service, stepRun, turnKey, log } = exec;
   return tracer.startActiveSpan(
     "tool.execute",
     { attributes: { "cogmo.tool.name": block.name } },
-    async (span) => {
+    async (span): Promise<ContentBlock> => {
       try {
-        // Step id is SDK-local (iteration + filtered-tool-use position)
-        // so the cache key is stable across Inngest replays even though
-        // the provider's `tool_use_id` is not. Cached content may
-        // semantically mismatch the current `tool_use` — see
-        // design/crash-recovery.md → Per-tool durability.
         // Built inside the handler thunk, not in the bare body: the bare
         // body re-runs once per step boundary, and keying costs a coercion
         // walk, a Zod parse, a canonical clone and a hash over payloads that
@@ -587,29 +585,53 @@ async function runOne(
         // durable tools get one; a non-durable handler re-runs per boundary by
         // design and has nothing to dedup against. Undefined without a turn
         // token (unit tests, loops outside Inngest) — no tool may assume dedup.
-        const runHandler = (): Promise<string> => {
+        const runHandler = (): Promise<ToolOutcome> => {
           const callCtx: ToolCallContext | undefined =
             turnKey !== undefined && spec.durable === true
               ? { idempotencyKey: toolCallKey(turnKey, stepKey, spec, block) }
               : undefined;
           return spec.handler(block.input as Record<string, unknown>, service, callCtx);
         };
-        const out =
+        // Step id is SDK-local (iteration + filtered-tool-use position)
+        // so the cache key is stable across Inngest replays even though
+        // the provider's `tool_use_id` is not. Cached content may
+        // semantically mismatch the current `tool_use` — see
+        // design/crash-recovery.md → Per-tool durability. A rejection is
+        // the step's result, not its failure, so it memoizes and replays
+        // like a success.
+        const outcome =
           spec.durable === true && stepRun
-            ? await stepRun(`tool-iter${stepKey.iteration}-${stepKey.position}`, runHandler)
+            ? fromToolStepResult(
+                await stepRun<unknown>(
+                  `tool-iter${stepKey.iteration}-${stepKey.position}`,
+                  async () => toToolStepResult(await runHandler()),
+                ),
+              )
             : await runHandler();
-        return { type: "tool_result" as const, toolUseId: block.id, content: out };
+        return outcome.match<ContentBlock>(
+          (content) => ({ type: "tool_result", toolUseId: block.id, content }),
+          (rejection) => {
+            span.setAttribute("cogmo.tool.rejected", true);
+            return {
+              type: "tool_result",
+              toolUseId: block.id,
+              content: `Error: ${rejection.message}`,
+              isError: true,
+            };
+          },
+        );
       } catch (err) {
-        // Also catches cached rejections from a durable `stepRun` — Inngest
-        // replays a stored failure by re-throwing here. Converting to an
-        // `isError: true` tool_result keeps Class D's
-        // `iterationHadSideEffect` accurate across replays.
+        // A throw is a bug — expected failures are rejections. The model
+        // still gets an `is_error` tool_result, so the turn carries on and
+        // Class D counts no progress. Also catches the failure a durable
+        // `stepRun` re-throws on replay.
         const message = err instanceof Error ? err.message : String(err);
+        log.error({ err, tool: block.name }, "tool handler threw");
         span.recordException(err instanceof Error ? err : new Error(message));
         span.setStatus({ code: SpanStatusCode.ERROR, message });
         span.setAttribute("cogmo.tool.error", true);
         return {
-          type: "tool_result" as const,
+          type: "tool_result",
           toolUseId: block.id,
           content: `Error: ${message}`,
           isError: true,
@@ -1102,11 +1124,8 @@ export async function runStreamingAgentLoop(
     // Execute tool calls, emit results, append to messages
     const toolResults = await executeToolCalls(
       iterationContent,
-      tools,
-      service,
-      stepRun,
+      { tools, service, stepRun, turnKey, log },
       iterations,
-      turnKey,
       interceptions,
     );
 

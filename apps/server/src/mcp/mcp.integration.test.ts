@@ -95,7 +95,7 @@ describe("MCP end-to-end against server-everything", () => {
 
     // Dispatch the tool through the spec's handler. The registry's pool
     // re-uses the connection that approveServer opened.
-    const result = await echoSpec.handler({ message: "hello mcp" }, {} as never);
+    const result = (await echoSpec.handler({ message: "hello mcp" }, {} as never))._unsafeUnwrap();
     expect(result).toMatch(/hello mcp/);
   });
 
