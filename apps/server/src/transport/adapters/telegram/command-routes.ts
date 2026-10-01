@@ -75,7 +75,7 @@ export function registerCommands(
     );
   });
 
-  // Admin commands — each delegates to a pure handler in commands.ts.
+  // Admin commands — each delegates to a pure handler under commands/.
   // grammY's ctx is ducktyped to `TelegramCommandContext` at call time; `ctx.match` holds
   // the trailing text after the command word (empty string for bare `/profile`).
   commands.command("new", (ctx) => handleNew(transport, toCmdCtx(ctx)));

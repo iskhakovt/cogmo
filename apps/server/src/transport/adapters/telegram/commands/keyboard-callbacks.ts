@@ -38,7 +38,7 @@ export async function handlePlanCallback(
   }
 
   // Revise & Cancel both end the current task — Revise additionally tells
-  // the user how to continue. Slice 2's "revise" is conversational
+  // the user how to continue. "Revise" is conversational
   // (matches Cursor / Devin / Claude Code's plan mode): the user describes
   // what to change, and the agent issues a fresh delegate_coding next
   // turn. In-place plan editing requires an editor surface Telegram

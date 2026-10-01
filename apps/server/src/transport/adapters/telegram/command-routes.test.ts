@@ -57,8 +57,7 @@ describe("registerCommands", () => {
     await handlers.get("command:new")!(ctx);
 
     expect(transport.closeSession).toHaveBeenCalledWith("session-1");
-    // handleNew now surfaces the profile actually used in the reply; the
-    // mocked createConversation default returns profileName "assistant".
+    // handleNew names the profile it used in the reply; the mocked createConversation default returns profileName "assistant".
     expect(ctx.reply.mock.calls[0]?.[0]).toBe('New conversation started with profile "assistant".');
   });
 

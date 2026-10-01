@@ -212,5 +212,5 @@ export function registerMessageHandlers(
   // `lastInboundWasVoice` would become true. Voice notes
   // (`message:voice`) are the well-defined PTT shape; explicit
   // transcription of attached audio files is a future opt-in feature
-  // (with a duration cap and a separate block type). See PR #149 review.
+  // (with a duration cap and a separate block type).
 }

@@ -233,9 +233,8 @@ describe("registerMessageHandlers", () => {
     });
 
     it("does NOT register a message:audio handler (music files would burn STT tokens)", async () => {
-      // Slice 1 deliberately omits the audio handler — see the comment in
-      // src/transport/adapters/telegram/index.ts above bot.on("message:voice").
-      // Voice notes only.
+      // The audio handler is deliberately absent — see the comment after
+      // bot.on("message:voice") in message-handlers.ts. Voice notes only.
       await createAdapter();
       expect(handlers.has("on:message:audio")).toBe(false);
     });

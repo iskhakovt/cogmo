@@ -1148,7 +1148,7 @@ describe("/profile class subcommand", () => {
     await handleProfile(transport, ctx, mkDialogs());
     const reply = ctx.reply.mock.calls[0]?.[0];
     // Positive assertion catches the exact friendly-error wording wired
-    // in `commands.ts:errorMessage("identity_rejected")`. The
+    // in `errorMessage("identity_rejected")` (commands/reply.ts). The
     // accompanying `not.toContain("set to")` rules out a misleading
     // success message — both halves are necessary because a silent
     // return would pass the negative alone.

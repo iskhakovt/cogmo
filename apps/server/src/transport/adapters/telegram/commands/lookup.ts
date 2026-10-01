@@ -41,11 +41,10 @@ export function ambiguityMessage(name: string, matches: ReadonlyArray<Profile>):
 
 /**
  * Treat a `/resume <target>` argument as a UUID iff it matches the
- * standard 8-4-4-4-12 shape. Slice 2 enforced version-7 strictly; we
- * relax to any-version because the Telegram surface only uses this
- * to disambiguate UUID-looking strings from aliases — handing a
- * structurally-valid-but-unknown UUID to \`resumeConversation\` falls
- * through to an honest \"not found\" error.
+ * standard 8-4-4-4-12 shape, of any version: the Telegram surface only
+ * uses this to disambiguate UUID-looking strings from aliases — handing a
+ * structurally-valid-but-unknown UUID to `resumeConversation` falls
+ * through to an honest "not found" error.
  */
 export function looksLikeUuid(s: string): boolean {
   return isUuid(s.toLowerCase());

@@ -23,7 +23,7 @@ import { handleResumeCallback } from "./commands/sessions.js";
 /**
  * Regex matched against `callback_data` for boundary prompt taps. UUIDv7
  * format (`[0-9a-f-]{36}`) keeps the pattern unambiguous against other
- * `…:…` callback shapes (`resume:`, `plan:`, `perm:`, `skill:`).
+ * `…:…` callback shapes (`resume:`, `plan:`, `pipe:`, `skill:`).
  *
  * **Budget:** Telegram caps `callback_data` at 64 bytes. The longest shape
  * here is `boundary:<36-char-uuid>:resume` = 51 bytes, leaving ~13 bytes
@@ -49,7 +49,7 @@ export function registerCallbackQueries(bot: Bot, transport: Transport): void {
 
     try {
       // Drop the keyboard so the buttons can't be tapped twice. Same pattern
-      // as plan / permission / skills-approval callback handlers.
+      // as the plan / pipeline-gate / skills-approval callback handlers.
       await ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "";

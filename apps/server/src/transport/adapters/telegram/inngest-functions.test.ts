@@ -22,14 +22,7 @@ describe("telegramFunctions", () => {
     resetGrammyMock();
   });
 
-  // Inline-keyboard callbackQuery handlers are wired in setup() with three
-  // regexes (plan / permission / skills approval). The pure handler logic
-  // lives in commands.ts and is tested there; this block exercises the
-  // adapter-side wiring — does the registered handler dispatch to the right
-  // transport call, edit the original message, send the toast, and (where
-  // applicable) reply with the follow-up? A regex shape or parse* signature
-  // drift would silently brick the buttons without this coverage.
-  describe("callback query dispatch", () => {
+  describe("pipeline gate", () => {
     it("registers the pipeline gate poster on pipeline/gate.pending when gate deps are supplied", async () => {
       const inngest = mockInngest();
       await setup({
@@ -51,7 +44,7 @@ describe("telegramFunctions", () => {
     });
   });
 
-  describe("boundary hold", () => {
+  describe("boundary prompt cleanup", () => {
     it("registers a boundary/resolved listener whose handler edits the prompt to its outcome", async () => {
       // The handler itself is covered in boundary-prompt-editor.test.ts; this
       // pins the thin setup() glue the unit test can't reach — that the

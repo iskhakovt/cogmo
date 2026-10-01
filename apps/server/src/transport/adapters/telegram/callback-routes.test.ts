@@ -15,9 +15,9 @@ describe("registerCallbackQueries", () => {
     resetGrammyMock();
   });
 
-  // Inline-keyboard callbackQuery handlers are wired in setup() with three
-  // regexes (plan / permission / skills approval). The pure handler logic
-  // lives in commands.ts and is tested there; this block exercises the
+  // Inline-keyboard callbackQuery handlers are wired with one regex per
+  // keyboard (plan / pipeline gate / skills approval). The pure handler logic
+  // lives in commands/keyboard-callbacks.ts and is tested there; this block exercises the
   // adapter-side wiring — does the registered handler dispatch to the right
   // transport call, edit the original message, send the toast, and (where
   // applicable) reply with the follow-up? A regex shape or parse* signature

@@ -36,7 +36,7 @@ export async function handleRepo(
 
   if (subcommand === "add") {
     const [, name, localPath, remoteUrl] = args;
-    // No positional args → guided dialog (slice 4.0c). When the FSM isn't
+    // No positional args → guided dialog. When the FSM isn't
     // wired (e.g. unit tests for the positional path), fall through to the
     // usage hint so the operator gets a clear nudge instead of silence.
     if (!name && !localPath && !remoteUrl) {

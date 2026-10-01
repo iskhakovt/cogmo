@@ -19,8 +19,8 @@ const USAGE =
  * because `/disable` and `/enable` are already taken by the skills
  * surface. The subcommand-style also keeps `setMyCommands` short.
  *
- * IDs are full UUIDs (copy-pasted from the list output) — no prefix
- * matching today. Add prefix matching when the UX bites.
+ * IDs are full UUIDs (copy-pasted from the list output); there is no
+ * prefix matching.
  */
 export async function handleSchedules(
   transport: Transport,
@@ -113,7 +113,7 @@ export async function handleSchedules(
  * them toward `list_tasks` (the agent tool) which has no length cap.
  *
  * Note: `ctx.reply` does NOT auto-rotate — the streaming-text
- * rotator from PR #239 only applies to the assistant-text path.
+ * rotator only applies to the assistant-text path.
  */
 const MAX_SCHEDULE_DISPLAY = 15;
 

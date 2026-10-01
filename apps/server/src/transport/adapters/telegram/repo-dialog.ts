@@ -125,8 +125,8 @@ export class RepoDialogs {
       return;
     }
     // Catch typos ("htps://", missing host) before paying the network
-    // round-trip on `git clone`. The verify orchestrator (slice 4.0h)
-    // also requires the URL to parse as `owner/repo` for the PR step,
+    // round-trip on `git clone`. The verify orchestrator also
+    // requires the URL to parse as `owner/repo` for the PR step,
     // so a URL the dialog accepts but the orchestrator can't parse
     // would surface as a confusing post-clone failure.
     if (!parseRemoteUrl(text)) {

@@ -157,7 +157,7 @@ export class TelegramAdapter implements Adapter, StreamingAdapter {
       await this.#bot.api.sendVoice(chatId, file);
     } else {
       // Non-Opus → degrade to sendAudio (still playable, just not the
-      // voice-bubble UI). Slice 1 doesn't bundle ffmpeg.
+      // voice-bubble UI). Cogmo doesn't bundle ffmpeg to transcode.
       await this.#bot.api.sendAudio(chatId, file);
     }
   }

@@ -23,7 +23,7 @@ describe("createInboundDispatch", () => {
 
   // The text-message path's branches around session resolution: identity
   // rejection on createConversation and emit-failure on transport.emit. Both
-  // are silent error paths today (info or error log, no user-visible reply);
+  // are silent error paths (info or error log, no user-visible reply);
   // a regression that turns either into an exception would crash the bot's
   // event loop.
   describe("identity rejection + emit failure (text path)", () => {
