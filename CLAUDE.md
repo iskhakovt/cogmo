@@ -170,6 +170,12 @@ Transactions, UUIDv7 PKs, NOT NULL by default, JSONB+Zod, migrations from `pnpm 
 
 @.claude/rules/architecture-rules.md
 
+## State Machines
+
+Anything with a lifecycle is an explicit state machine: a durable unit, a `pgEnum` status, a transition table and a failure-mode table in the design before code; conditional-UPDATE transitions, exhaustive matching and `Result` errors in the code. See [.claude/rules/state-machines.md](.claude/rules/state-machines.md).
+
+@.claude/rules/state-machines.md
+
 ## Inngest
 
 Replay model (per-boundary re-invocation on success), what belongs in a step, step-id determinism, tool durability policy. See [.claude/rules/inngest.md](.claude/rules/inngest.md).
