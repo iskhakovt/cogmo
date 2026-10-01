@@ -145,13 +145,18 @@ export type StopReason = "end_turn" | "tool_use" | "max_tokens" | "refusal" | "c
  * `cacheCreationTokens` are subsets of it, never in addition to it — the
  * convention of the OpenTelemetry GenAI attributes. Adapters whose wire format
  * reports only the uncached remainder (Anthropic's `input_tokens`) add the
- * cache fields back in. Present only when the provider reports them.
+ * cache fields back in. `reasoningTokens` is likewise a subset of
+ * `outputTokens`: what a reasoning model spent thinking, as an
+ * OpenAI-compatible endpoint reports it in
+ * `completion_tokens_details.reasoning_tokens`. Present only when the
+ * provider reports them.
  */
 export interface Usage {
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens?: number;
   cacheCreationTokens?: number;
+  reasoningTokens?: number;
 }
 
 /** How a response ended, and what it cost. */

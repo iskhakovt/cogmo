@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { AgentStore } from "../agent/store/index.js";
 import { installLiveCatalog } from "../llm/litellm-data.js";
+import { expectDefined } from "../test/assertions.js";
 import { captureIo, fakeRunInTx } from "../test/factories.js";
 import { type ModelCliDeps, modelCli } from "./model.js";
 import { type CliIo, type LoadDeps, runCli } from "./run.js";
@@ -17,15 +18,21 @@ function run(argv: readonly string[], deps: ModelCliDeps, io: CliIo): Promise<nu
   );
 }
 
-function provider(id: string, name: string): Provider {
-  return { id, name, type: "openai_compatible", baseUrl: null, attrs: {} };
+function provider(
+  id: string,
+  name: string,
+  type: Provider["type"] = "openai_compatible",
+): Provider {
+  return { id, name, type, baseUrl: null, attrs: {} };
 }
 
 function routingRow(
   id: string,
   name: string,
   position: number,
-  limits: Partial<Pick<RoutingRow, "contextWindow" | "maxOutputTokens">> = {},
+  limits: Partial<
+    Pick<RoutingRow, "contextWindow" | "maxOutputTokens" | "type" | "extraBody">
+  > = {},
 ): RoutingRow {
   return {
     id,
@@ -37,6 +44,7 @@ function routingRow(
     position,
     contextWindow: null,
     maxOutputTokens: null,
+    extraBody: null,
     ...limits,
   };
 }
@@ -58,6 +66,7 @@ function makeDeps(
     Object.entries(rowsByModel).flatMap(([model, rows]) => rows.map((row) => ({ model, ...row }))),
   );
   agentStore.addModelProvider.mockResolvedValue({ id: "row-1" });
+  agentStore.setModelProviderExtraBody.mockResolvedValue(true);
   agentStore.getNextModelProviderPosition.mockResolvedValue(0);
   return {
     runInTx: fakeRunInTx,
@@ -73,6 +82,7 @@ describe("cogmo model — usage", () => {
     [[]],
     [["--help"]],
     [["add", "--help"]],
+    [["set", "--help"]],
     [["list", "--help"]],
     [["remove", "--help"]],
     [["refresh", "--help"]],
@@ -93,7 +103,7 @@ describe("cogmo model — usage", () => {
 
     await run(["add", "--help"], makeDeps(), io);
 
-    for (const flag of ["--provider", "--context", "--max-output", "--position"]) {
+    for (const flag of ["--provider", "--context", "--max-output", "--position", "--extra-body"]) {
       expect(out.join("\n")).toContain(flag);
     }
   });
@@ -191,6 +201,53 @@ describe("cogmo model add", () => {
     );
   });
 
+  it("stores --extra-body on the row and echoes it", async () => {
+    const deps = makeDeps({ providers: [provider("p1", "custom")] });
+    const { io, out } = captureIo();
+    const code = await run(
+      [
+        "add",
+        "qwen-3-6-plus",
+        "--provider",
+        "custom",
+        "--extra-body",
+        '{"reasoning":{"enabled":false}}',
+      ],
+      deps,
+      io,
+    );
+    expect(code).toBe(0);
+    expect(deps.agentStore.addModelProvider).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ extraBody: { reasoning: { enabled: false } } }),
+    );
+    expect(out).toContain('  extra body: {"reasoning":{"enabled":false}}');
+  });
+
+  it("stores no extra body without --extra-body", async () => {
+    const deps = makeDeps({ providers: [provider("p1", "custom")] });
+    const { io, out } = captureIo();
+    await run(["add", "m", "--provider", "custom"], deps, io);
+    expect(deps.agentStore.addModelProvider).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ extraBody: null }),
+    );
+    expect(out.join("\n")).not.toContain("extra body");
+  });
+
+  it("refuses --extra-body on an anthropic provider and adds nothing", async () => {
+    const deps = makeDeps({ providers: [provider("p1", "anthropic", "anthropic")] });
+    const { io, err } = captureIo();
+    const code = await run(
+      ["add", "claude-sonnet-5", "--provider", "anthropic", "--extra-body", '{"top_k":5}'],
+      deps,
+      io,
+    );
+    expect(code).toBe(2);
+    expect(err.join("\n")).toMatch(/--extra-body applies to OpenAI-compatible providers only/);
+    expect(deps.agentStore.addModelProvider).not.toHaveBeenCalled();
+  });
+
   it("surfaces addModelRouting errors as exit code 1", async () => {
     const deps = makeDeps({ providers: [provider("p1", "openrouter")] });
     deps.agentStore.addModelProvider.mockRejectedValue(new Error("conflicting position"));
@@ -217,9 +274,9 @@ describe("cogmo model list", () => {
     await run(["list"], deps, io);
     // Header + one row; the catalog line goes to stderr.
     expect(out.length).toBe(2);
-    expect(out[0]).toMatch(/model\tprovider\tposition\tcontext\tmax_output\tsource/);
+    expect(out[0]).toMatch(/model\tprovider\tposition\tcontext\tmax_output\tsource\textra_body/);
     // Both columns came from LiteLLM → source collapses to the shared tag.
-    expect(out[1]).toMatch(/^claude-sonnet-4-6\tanthropic\t0\t1000000\t64000\tlitellm$/);
+    expect(out[1]).toMatch(/^claude-sonnet-4-6\tanthropic\t0\t1000000\t64000\tlitellm\t-$/);
   });
 
   describe("catalog line", () => {
@@ -282,7 +339,7 @@ describe("cogmo model list", () => {
     });
     const { io, out } = captureIo();
     await run(["list"], deps, io);
-    expect(out[1]).toMatch(/^claude-sonnet-4-6\tanthropic\t0\t1000000\t8000\tcw=litellm,mo=db$/);
+    expect(out[1]).toMatch(/^claude-sonnet-4-6\tanthropic\t0\t1000000\t8000\tcw=litellm,mo=db\t-$/);
   });
 
   it("displays the stored position, not the array index, when positions are non-sequential", async () => {
@@ -307,6 +364,24 @@ describe("cogmo model list", () => {
     expect(deps.agentStore.listProvidersForModel).not.toHaveBeenCalled();
   });
 
+  it("shows a row's extra body as one compact JSON cell", async () => {
+    const deps = makeDeps({
+      rowsByModel: {
+        "qwen-3-6-plus": [
+          routingRow("r1", "custom", 0, {
+            type: "openai_compatible",
+            extraBody: { reasoning: { enabled: false }, stop: ["a\tb"] },
+          }),
+        ],
+      },
+    });
+    const { io, out } = captureIo();
+    await run(["list"], deps, io);
+    const cells = expectDefined(out[1], "row line").split("\t");
+    expect(cells).toHaveLength(7);
+    expect(cells[6]).toBe('{"reasoning":{"enabled":false},"stop":["a\\tb"]}');
+  });
+
   it("--model + --provider filter narrows the output", async () => {
     const deps = makeDeps({
       rowsByModel: { a: [routingRow("r1", "p1", 0)], b: [routingRow("r2", "p2", 0)] },
@@ -315,6 +390,130 @@ describe("cogmo model list", () => {
     await run(["list", "--model", "a", "--provider", "p1"], deps, io);
     expect(out.join("\n")).toContain("a\tp1");
     expect(out.join("\n")).not.toContain("b\tp2");
+  });
+});
+
+describe("cogmo model set", () => {
+  const routed = () =>
+    makeDeps({
+      rowsByModel: {
+        "qwen-3-6-plus": [
+          routingRow("prov-custom", "custom", 0, { type: "openai_compatible" }),
+          routingRow("prov-anthropic", "anthropic", 1),
+        ],
+      },
+    });
+
+  it("replaces the row's extra body", async () => {
+    const deps = routed();
+    const { io, out } = captureIo();
+    const code = await run(
+      [
+        "set",
+        "qwen-3-6-plus",
+        "--provider",
+        "custom",
+        "--extra-body",
+        '{"venice_parameters":{"disable_thinking":true}}',
+      ],
+      deps,
+      io,
+    );
+    expect(code).toBe(0);
+    expect(deps.agentStore.setModelProviderExtraBody).toHaveBeenCalledWith(
+      expect.anything(),
+      "qwen-3-6-plus",
+      "prov-custom",
+      { venice_parameters: { disable_thinking: true } },
+    );
+    expect(out[0]).toBe(
+      'Set the extra body of "qwen-3-6-plus" → "custom": {"venice_parameters":{"disable_thinking":true}}',
+    );
+    expect(out.join("\n")).toMatch(/Restart `cogmo serve`/);
+  });
+
+  it("clears it with --clear-extra-body", async () => {
+    const deps = routed();
+    const { io, out } = captureIo();
+    const code = await run(
+      ["set", "qwen-3-6-plus", "--provider", "custom", "--clear-extra-body"],
+      deps,
+      io,
+    );
+    expect(code).toBe(0);
+    expect(deps.agentStore.setModelProviderExtraBody).toHaveBeenCalledWith(
+      expect.anything(),
+      "qwen-3-6-plus",
+      "prov-custom",
+      null,
+    );
+    expect(out[0]).toBe('Cleared the extra body of "qwen-3-6-plus" → "custom".');
+  });
+
+  it("clears an anthropic row's extra body, which nothing could have set", async () => {
+    const deps = routed();
+    const { io } = captureIo();
+    const code = await run(
+      ["set", "qwen-3-6-plus", "--provider", "anthropic", "--clear-extra-body"],
+      deps,
+      io,
+    );
+    expect(code).toBe(0);
+  });
+
+  it.each([
+    [[], "neither"],
+    [["--extra-body", '{"top_p":1}', "--clear-extra-body"], "both"],
+  ])("refuses %j (%s) with exit 2 and changes nothing", async (flags, _label) => {
+    const loadDeps = vi.fn<LoadDeps<ModelCliDeps>>(async () => routed());
+    const { io, err } = captureIo();
+    const code = await runCli(
+      modelCli(io, loadDeps),
+      ["set", "qwen-3-6-plus", "--provider", "custom", ...flags],
+      io,
+    );
+    expect(code).toBe(2);
+    expect(err.join("\n")).toMatch(/Pass exactly one of --extra-body or --clear-extra-body/);
+    expect(loadDeps).not.toHaveBeenCalled();
+  });
+
+  it("refuses --extra-body on an anthropic row", async () => {
+    const deps = routed();
+    const { io, err } = captureIo();
+    const code = await run(
+      ["set", "qwen-3-6-plus", "--provider", "anthropic", "--extra-body", '{"top_k":5}'],
+      deps,
+      io,
+    );
+    expect(code).toBe(2);
+    expect(err.join("\n")).toMatch(/OpenAI-compatible providers only/);
+    expect(deps.agentStore.setModelProviderExtraBody).not.toHaveBeenCalled();
+  });
+
+  it("returns 1 when the model isn't routed via --provider", async () => {
+    const deps = routed();
+    const { io, err } = captureIo();
+    const code = await run(
+      ["set", "qwen-3-6-plus", "--provider", "openrouter", "--clear-extra-body"],
+      deps,
+      io,
+    );
+    expect(code).toBe(1);
+    expect(err.join("\n")).toMatch(/Model "qwen-3-6-plus" is not routed via provider "openrouter"/);
+    expect(deps.agentStore.setModelProviderExtraBody).not.toHaveBeenCalled();
+  });
+
+  it("returns 1 when the row is gone by the time it is written", async () => {
+    const deps = routed();
+    deps.agentStore.setModelProviderExtraBody.mockResolvedValue(false);
+    const { io, err } = captureIo();
+    const code = await run(
+      ["set", "qwen-3-6-plus", "--provider", "custom", "--clear-extra-body"],
+      deps,
+      io,
+    );
+    expect(code).toBe(1);
+    expect(err.join("\n")).toMatch(/is not routed via provider "custom"/);
   });
 });
 
@@ -429,6 +628,26 @@ describe("cogmo model — rejected command lines", () => {
       /expected an integer >= 1, got "200000abc"/,
     ],
     [["add", "m", "--provider", "vllm", "--position", "-1"], /expected an integer >= 0, got "-1"/],
+    [
+      ["add", "m", "--provider", "vllm", "--extra-body", '{"model":"other","top_p":1}'],
+      /"model" is set by the adapter and can't be overridden/,
+    ],
+    [
+      ["set", "m", "--provider", "vllm", "--extra-body", '{"stream":false}'],
+      /"stream" is set by the adapter/,
+    ],
+    [
+      ["add", "m", "--provider", "vllm", "--extra-body", "{reasoning: false}"],
+      /expected a JSON object, got text that doesn't parse/,
+    ],
+    [
+      ["add", "m", "--provider", "vllm", "--extra-body", "[]"],
+      /expected a JSON object, got an array/,
+    ],
+    [["add", "m", "--provider", "vllm", "--extra-body", "{}"], /an empty object adds nothing/],
+    [["add", "m", "--provider", "vllm", "--extra-body"], /Expected to get a value, found a flag/],
+    [["set", "m", "--clear-extra-body"], /No value provided for --provider/],
+    [["set"], /No value provided for model-id/],
     // A swallowed `--max-outputs` would register the model with no override
     // and still print a success line carrying the resolver's own number.
     [

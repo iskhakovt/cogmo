@@ -477,6 +477,13 @@
       "when": 1790789004213,
       "tag": "0067_steering_rule_instructions",
       "breakpoints": true
+    },
+    {
+      "idx": 68,
+      "version": "7",
+      "when": 1790852067794,
+      "tag": "0068_model_providers_extra_body",
+      "breakpoints": true
     }
   ]
 }

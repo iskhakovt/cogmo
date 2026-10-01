@@ -25,10 +25,25 @@ describe("sumUsage", () => {
     ).toEqual({ inputTokens: 220, outputTokens: 10, cacheReadTokens: 90 });
   });
 
-  it("leaves the cache fields off when neither side reports them", () => {
+  it("leaves the cache and reasoning fields off when neither side reports them", () => {
     expect(
       sumUsage({ inputTokens: 10, outputTokens: 5 }, { inputTokens: 20, outputTokens: 1 }),
     ).toEqual({ inputTokens: 30, outputTokens: 6 });
+  });
+
+  it("sums reasoning tokens, kept once either side reports them", () => {
+    expect(
+      sumUsage(
+        { inputTokens: 100, outputTokens: 900, reasoningTokens: 850 },
+        { inputTokens: 120, outputTokens: 40 },
+      ),
+    ).toEqual({ inputTokens: 220, outputTokens: 940, reasoningTokens: 850 });
+    expect(
+      sumUsage(
+        { inputTokens: 100, outputTokens: 900, reasoningTokens: 850 },
+        { inputTokens: 120, outputTokens: 400, reasoningTokens: 300 },
+      ),
+    ).toEqual({ inputTokens: 220, outputTokens: 1300, reasoningTokens: 1150 });
   });
 
   it("starts a total from ZERO_USAGE as the identity, and leaves it at zero", () => {

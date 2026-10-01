@@ -29,7 +29,20 @@ describe("addModelRouting", () => {
         userSelectable: true,
         contextWindow: null,
         maxOutputTokens: null,
+        extraBody: null,
       }),
+    );
+  });
+
+  it("passes the extra body through to the row", async () => {
+    const store = makeStore();
+    await addModelRouting(
+      { runInTx: (cb) => cb(FAKE_TX), agentStore: store },
+      { model: "m", providerId: "p", extraBody: { reasoning: { enabled: false } } },
+    );
+    expect(store.addModelProvider).toHaveBeenCalledWith(
+      FAKE_TX,
+      expect.objectContaining({ extraBody: { reasoning: { enabled: false } } }),
     );
   });
 
