@@ -83,11 +83,15 @@ jobs:
             -p @commitlint/config-conventional@20.5.0 \
             commitlint
 
-  # A PR that changes a table changes the design doc that owns it
+  # A PR that changes stored shape changes the design doc that owns it
   # (.claude/rules/architecture-rules.md → "No table design is final").
-  # `[schema-only]` in the title or body waives it for a change with no
-  # design consequence. Title and body are read from the API, not the event
-  # payload, so re-running the job after editing them sees the edit.
+  # Stored shape is the Drizzle schemas, the migrations, and the modules
+  # declaring the Zod schemas behind `jsonbZod` columns; that module list is
+  # kept complete by src/test/schema-docs-filter.test.ts. Any design/ change
+  # satisfies the check: whether it is the owning doc is left to review.
+  # A body line that is exactly `[schema-only]` waives it for a change with
+  # no design consequence. Title and body are read from the API, not the
+  # event payload, so re-running the job after editing them sees the edit.
   schema-docs:
     name: Schema ⇒ design doc
     if: github.event_name == 'pull_request'
@@ -100,12 +104,25 @@ jobs:
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         id: filter
         with:
-          predicate-quantifier: every
           list-files: shell
           filters: |
             schema:
-              - 'apps/server/src/**/store/{schema.ts,schema/**}'
-              - '!**/*.test.ts'
+              - 'apps/server/src/**/store/schema.ts'
+              - 'apps/server/src/**/store/schema/**/!(*.test).ts'
+              - 'apps/server/migrations/**'
+              # Modules declaring a schema behind a `jsonbZod` column.
+              - 'apps/server/src/agent/coding/types.ts'
+              - 'apps/server/src/agent/evolution/event-schema.ts'
+              - 'apps/server/src/agent/pipeline/run-types.ts'
+              - 'apps/server/src/agent/pipeline/types.ts'
+              - 'apps/server/src/agent/turn-context.ts'
+              - 'apps/server/src/llm/extra-body.ts'
+              - 'apps/server/src/llm/litellm-data.ts'
+              - 'apps/server/src/llm/types.ts'
+              - 'apps/server/src/mcp/config.ts'
+              - 'apps/server/src/sandbox/types.ts'
+              - 'apps/server/src/skills/types.ts'
+              - 'apps/server/src/transport/content.ts'
             design:
               - 'design/**'
       - name: Require a design doc change alongside the schema change
@@ -116,12 +133,12 @@ jobs:
           SCHEMA_FILES: ${{ steps.filter.outputs.schema_files }}
         run: |
           set -euo pipefail
-          text=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.title + "\n" + (.body // "")')
-          if grep -qF '[schema-only]' <<<"$text"; then
-            echo "Schema change without a design/ change, waived by [schema-only]."
+          body=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.body // ""' | tr -d '\r')
+          if grep -qx '[[:space:]]*\[schema-only\][[:space:]]*' <<<"$body"; then
+            echo "Schema change without a design/ change, waived by a [schema-only] body line."
             exit 0
           fi
-          echo "::error::This PR changes $SCHEMA_FILES but nothing under design/. Update the design doc that owns the table, or add [schema-only] to the PR title or body and re-run this job."
+          echo "::error::This PR changes $SCHEMA_FILES but nothing under design/. Update the design doc that owns the table or schema, or add a PR body line that is exactly [schema-only] and re-run this job."
           exit 1
 
   check:
