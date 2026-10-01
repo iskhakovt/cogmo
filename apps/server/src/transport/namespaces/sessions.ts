@@ -218,7 +218,7 @@ export function createSessions(
     },
 
     async uploadAttachment(data: Buffer, mediaType: string): Promise<string> {
-      return attachments.upload(data, mediaType);
+      return attachments.upload(data, mediaType, "inbound");
     },
   };
 }

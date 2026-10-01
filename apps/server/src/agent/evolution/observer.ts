@@ -164,7 +164,7 @@ export async function runObserver(
   event: ObserverEvent,
   step: ObserverStepHarness,
   deps: ObserverDeps,
-  triggeredBy: EvolutionTrigger = "idle",
+  triggeredBy: EvolutionTrigger,
 ): Promise<ObserverResult> {
   const { agentStore, resolveProvider } = deps;
   const { conversationId } = event.data;
@@ -454,7 +454,7 @@ export function createObserver(deps: ObserverDeps) {
       // the JSON-safe payloads `runObserver` produces; the cast bridges the
       // two type universes without infecting the test harness type.
       // biome-ignore lint/plugin/no-unsafe-cast: Inngest Jsonify<T> vs harness T — identical at runtime for JSON-safe payloads.
-      return runObserver(event, step as unknown as ObserverStepHarness, deps);
+      return runObserver(event, step as unknown as ObserverStepHarness, deps, "idle");
     },
   );
 }

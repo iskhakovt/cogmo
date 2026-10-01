@@ -15,7 +15,7 @@ function testKey(): Uint8Array {
 interface UploadRecord {
   data: Buffer;
   mediaType: string;
-  prefix?: string;
+  prefix: string;
 }
 
 function fakeStore(): {
@@ -27,9 +27,9 @@ function fakeStore(): {
   const uploads: UploadRecord[] = [];
   let i = 0;
   const store: AttachmentStore = {
-    upload: vi.fn(async (data: Buffer, mediaType: string, prefix?: string) => {
-      uploads.push({ data, mediaType, ...(prefix !== undefined && { prefix }) });
-      const path = `${prefix ?? "inbound"}/blob-${i++}.bin`;
+    upload: vi.fn(async (data: Buffer, mediaType: string, prefix: string) => {
+      uploads.push({ data, mediaType, prefix });
+      const path = `${prefix}/blob-${i++}.bin`;
       blobs.set(path, data);
       return path;
     }),
@@ -69,9 +69,9 @@ describe("wrapAttachmentStoreWithEncryption", () => {
     const { store, uploads } = fakeStore();
     const wrapped = wrapAttachmentStoreWithEncryption(store, key);
 
-    await wrapped.upload(Buffer.from("a"), "image/png");
-    await wrapped.upload(Buffer.from("b"), "audio/ogg");
-    await wrapped.upload(Buffer.from("c"), "application/pdf");
+    await wrapped.upload(Buffer.from("a"), "image/png", "inbound");
+    await wrapped.upload(Buffer.from("b"), "audio/ogg", "inbound");
+    await wrapped.upload(Buffer.from("c"), "application/pdf", "inbound");
 
     expect(uploads.map((u) => u.mediaType)).toEqual([
       "application/octet-stream",
@@ -86,7 +86,7 @@ describe("wrapAttachmentStoreWithEncryption", () => {
     const wrapped = wrapAttachmentStoreWithEncryption(store, key);
 
     const plaintext = Buffer.from([0xde, 0xad, 0xbe, 0xef, 0x00, 0x42]);
-    const path = await wrapped.upload(plaintext, "application/octet-stream");
+    const path = await wrapped.upload(plaintext, "application/octet-stream", "inbound");
     const fetched = await wrapped.download(path);
 
     expect(fetched.equals(plaintext)).toBe(true);
@@ -106,17 +106,17 @@ describe("wrapAttachmentStoreWithEncryption", () => {
     const { store, uploads } = fakeStore();
     const wrapped = wrapAttachmentStoreWithEncryption(store, key);
 
-    await wrapped.upload(Buffer.from("a"), "text/plain");
+    await wrapped.upload(Buffer.from("a"), "text/plain", "inbound");
     await wrapped.upload(Buffer.from("b"), "text/plain", "generated");
 
-    expect(uploads[0]?.prefix).toBeUndefined();
+    expect(uploads[0]?.prefix).toBe("inbound");
     expect(uploads[1]?.prefix).toBe("generated");
   });
 
   it("throws on download when the wrong key is used", async () => {
     const { store } = fakeStore();
     const wrapped = wrapAttachmentStoreWithEncryption(store, testKey());
-    const path = await wrapped.upload(Buffer.from("secret"), "text/plain");
+    const path = await wrapped.upload(Buffer.from("secret"), "text/plain", "inbound");
 
     const otherWrapped = wrapAttachmentStoreWithEncryption(store, testKey());
     await expect(otherWrapped.download(path)).rejects.toThrow();
@@ -167,7 +167,7 @@ describe("wrapAttachmentStoreWithEncryption — plaintext passthrough on read", 
     const { store, blobs } = fakeStore();
     const wrapped = wrapAttachmentStoreWithEncryption(store, testKey());
 
-    const path = await wrapped.upload(Buffer.from("new bytes"), "text/plain");
+    const path = await wrapped.upload(Buffer.from("new bytes"), "text/plain", "inbound");
     const stored = blobs.get(path);
     expect(stored).toBeDefined();
     if (!stored) throw new Error("unreachable");
@@ -185,7 +185,7 @@ describe("wrapAttachmentStoreWithEncryption — plaintext passthrough on read", 
     const wrapped = wrapAttachmentStoreWithEncryption(store, key);
 
     const plaintext = Buffer.from("important plaintext");
-    const path = await wrapped.upload(plaintext, "text/plain");
+    const path = await wrapped.upload(plaintext, "text/plain", "inbound");
 
     const raw = await store.download(path);
     expect(raw.includes(plaintext)).toBe(false);

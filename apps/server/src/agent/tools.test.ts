@@ -265,7 +265,7 @@ describe("ToolSpec.sideEffectful", () => {
   it("marks the documented read-only tools as sideEffectful: false", () => {
     const webTools = createWebTools("tavily-key", "openrouter-key");
     const webByName = new Map(webTools.map((t) => [t.name, t]));
-    const defaults = createDefaultTools();
+    const defaults = createDefaultTools([], "UTC");
 
     const readOnlyTools: ReadonlyArray<{ name: string; spec: ToolSpec | undefined }> = [
       { name: "read_file", spec: readFile },
@@ -289,7 +289,7 @@ describe("ToolSpec.sideEffectful", () => {
 
 describe("createDefaultTools", () => {
   it("get_current_time returns structured time JSON", async () => {
-    const registry = createDefaultTools();
+    const registry = createDefaultTools([], "UTC");
     const spec = registry.get("get_current_time");
     expect(spec).toBeDefined();
     const result = await expectDefined(spec, "get_current_time").handler({}, stubService);
@@ -318,7 +318,10 @@ describe("createDefaultTools", () => {
   });
 
   it("get_current_time rejects a timezone that isn't an IANA name", async () => {
-    const spec = expectDefined(createDefaultTools().get("get_current_time"), "get_current_time");
+    const spec = expectDefined(
+      createDefaultTools([], "UTC").get("get_current_time"),
+      "get_current_time",
+    );
 
     const result = await spec.handler({ timezone: "Mars/Olympus" }, stubService);
 
@@ -339,7 +342,7 @@ describe("createDefaultTools", () => {
   });
 
   it("accepts extra tools", () => {
-    const registry = createDefaultTools(memoryTools);
+    const registry = createDefaultTools(memoryTools, "UTC");
     expect(registry.get("memory_recall")).toBeDefined();
     expect(registry.get("memory_retain")).toBeDefined();
     expect(registry.get("memory_reflect")).toBeDefined();
@@ -389,7 +392,7 @@ describe("durability policy invariant", () => {
         upload: async () => "path",
         download: async () => Buffer.from(""),
       }),
-      ...createDefaultTools().snapshot(),
+      ...createDefaultTools([], "UTC").snapshot(),
     ];
   }
 

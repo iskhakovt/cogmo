@@ -1,5 +1,6 @@
 import { APICallError, generateImage } from "ai";
 import { err, ok, type Result } from "neverthrow";
+import { match, P } from "ts-pattern";
 import { z } from "zod";
 import type { ImageModelWithProvider } from "../agent/store/index.js";
 import { type ImageProvider, openAiCompatibleOptionsKey } from "../llm/image-providers.js";
@@ -535,11 +536,10 @@ export function createImageTools(deps: {
         const generateResult = await withRetry(
           async (): Promise<Result<ImageGenerationResult, ImageFailure>> => {
             try {
-              switch (provider.kind) {
-                case "fal":
-                case "oai":
-                  return await generateViaAiSdk({
-                    provider,
+              return await match(provider)
+                .with({ kind: P.union("fal", "oai") }, (aiSdkProvider) =>
+                  generateViaAiSdk({
+                    provider: aiSdkProvider,
                     row,
                     prompt: input.prompt,
                     ...(referenceImageBytes !== undefined && { referenceImageBytes }),
@@ -550,9 +550,10 @@ export function createImageTools(deps: {
                       input.negativePrompt !== undefined && {
                         negativePrompt: input.negativePrompt,
                       }),
-                  });
-                case "venice": {
-                  const bytes = await provider.provider.generate({
+                  }),
+                )
+                .with({ kind: "venice" }, async (veniceProvider) => {
+                  const bytes = await veniceProvider.provider.generate({
                     model: row.modelString,
                     prompt: input.prompt,
                     ...(shouldForwardAspect &&
@@ -568,8 +569,8 @@ export function createImageTools(deps: {
                   // the adapter (throws `ImageGenerationFailedError`). The
                   // size canary in `detectImageFailure` still applies.
                   return ok({ image: bytes, providerMetadata: undefined });
-                }
-              }
+                })
+                .exhaustive();
             } catch (e) {
               // The Venice adapter throws its failures (content-policy
               // headers) as `ImageGenerationFailedError`, which is terminal

@@ -26,7 +26,7 @@ function extractRawKeyBytes(pair: SshKeyPair): { secretKey: Uint8Array; publicKe
 
 describe("generateSshKeyPair", () => {
   it("returns a complete OpenSSH-formatted keypair", () => {
-    const pair = generateSshKeyPair();
+    const pair = generateSshKeyPair("cogmo-bot");
     expect(pair.privateKey.startsWith("-----BEGIN OPENSSH PRIVATE KEY-----")).toBe(true);
     expect(pair.privateKey.trimEnd().endsWith("-----END OPENSSH PRIVATE KEY-----")).toBe(true);
     expect(pair.publicKey.startsWith("ssh-ed25519 ")).toBe(true);
@@ -39,20 +39,20 @@ describe("generateSshKeyPair", () => {
   });
 
   it("defaults the comment to cogmo-bot when none is supplied", () => {
-    const pair = generateSshKeyPair();
+    const pair = generateSshKeyPair("cogmo-bot");
     expect(pair.publicKey.endsWith(" cogmo-bot")).toBe(true);
   });
 
   it("produces a fresh keypair on each call (random seed)", () => {
-    const a = generateSshKeyPair();
-    const b = generateSshKeyPair();
+    const a = generateSshKeyPair("cogmo-bot");
+    const b = generateSshKeyPair("cogmo-bot");
     expect(a.publicKey).not.toBe(b.publicKey);
     expect(a.privateKey).not.toBe(b.privateKey);
     expect(a.fingerprint).not.toBe(b.fingerprint);
   });
 
   it("emits a private/public pair that signs and verifies a message", () => {
-    const pair = generateSshKeyPair();
+    const pair = generateSshKeyPair("cogmo-bot");
     const { secretKey, publicKey } = extractRawKeyBytes(pair);
 
     expect(secretKey).toHaveLength(32);
@@ -67,8 +67,8 @@ describe("generateSshKeyPair", () => {
   });
 
   it("rejects a signature when verified against a different keypair's public key", () => {
-    const a = generateSshKeyPair();
-    const b = generateSshKeyPair();
+    const a = generateSshKeyPair("cogmo-bot");
+    const b = generateSshKeyPair("cogmo-bot");
     const aBytes = extractRawKeyBytes(a);
     const bBytes = extractRawKeyBytes(b);
 

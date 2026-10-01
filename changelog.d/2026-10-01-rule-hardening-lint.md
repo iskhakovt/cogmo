@@ -1,0 +1,8 @@
+Three code-style rules and one schema rule are enforced in CI instead of by review.
+
+- **knip** (6.39.0, `pnpm knip`, in the `Typecheck, Lint & Knip` job) reports unused files, exports, types and dependencies across the workspace. The baseline deletes seven unused module barrels, two unused runtime dependencies (`date-fns`, `@opentelemetry/resources`), and 67 of the 70 unused exports and types it reports. The other three — `StartAdapter`, `DocumentBlock`, `ThinkingBlock` — stay as `/** @public */` vocabulary. `coding/task/verify-complete` and `coding/task/pushed` are sent through their typed event definitions.
+- **`no-default-params`** (Grit plugin, non-test files) flags default parameter values, except an empty options bag. All 22 hits are fixed, none suppressed: callers pass the observer's trigger, the compaction flag, the attachment prefix, the default tools' timezone, the setup validators, the lockfile `verifyFresh` mode and the evolution formatters' clock, and the setup wizard's prompt validators handle `undefined`. The unused `computeBudget` safety-buffer override is removed.
+- **`no-discriminant-switch`** (Grit plugin) flags `switch (x.kind)` and `switch (x.status)`. All 17 hits are rewritten as ts-pattern `match(...).exhaustive()`. `.type` is out of scope because it is the SDK unions' discriminant.
+- **Schema ⇒ design doc** (a CI job gated by Required Checks) fails a PR that changes `apps/server/src/**/store/schema.ts` or `store/schema/**` without touching `design/`, unless the title or body says `[schema-only]`.
+
+testing.md now states that the red in red-before-green must come from the old behaviour, not from a missing symbol.

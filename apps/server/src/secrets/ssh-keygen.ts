@@ -24,11 +24,9 @@ export interface SshKeyPair {
  * Generate a fresh Ed25519 keypair with a 32-byte random seed.
  *
  * `comment` is rendered as the trailing comment field on the public-key
- * line and embedded inside the private-key block. Default `cogmo-bot`
- * keeps existing identities recognisable on github.com without leaking
- * the host the wizard ran on.
+ * line and embedded inside the private-key block.
  */
-export function generateSshKeyPair(comment = "cogmo-bot"): SshKeyPair {
+export function generateSshKeyPair(comment: string): SshKeyPair {
   const seed = randomBytes(32);
   const keys = getKeys(seed, comment);
   return {

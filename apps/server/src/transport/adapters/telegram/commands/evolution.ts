@@ -1,5 +1,6 @@
 /** `/learned` and `/reflect`: the Observer's audit log and its manual trigger. */
 
+import { match } from "ts-pattern";
 import { MIN_MESSAGES_FOR_EXTRACTION } from "../../../../agent/evolution/index.js";
 import type { Transport } from "../../../transport.js";
 import { formatEvolutionDetail, formatEvolutionDigest } from "./evolution-format.js";
@@ -42,7 +43,7 @@ export async function handleLearned(
       );
       return;
     }
-    await ctx.reply(formatEvolutionDigest(res.value));
+    await ctx.reply(formatEvolutionDigest(res.value, new Date()));
     return;
   }
 
@@ -62,7 +63,7 @@ export async function handleLearned(
     await ctx.reply(`No evolution event with id "${shortenId(arg)}". Use /learned to list.`);
     return;
   }
-  await ctx.reply(formatEvolutionDetail(res.value));
+  await ctx.reply(formatEvolutionDetail(res.value, new Date()));
 }
 
 /**
@@ -91,22 +92,21 @@ export async function handleReflect(
   }
 
   const outcome = res.value;
-  switch (outcome.status) {
-    case "no_session":
-      await ctx.reply("No active conversation here — send a message first.");
-      return;
-    case "skipped": {
+  await match(outcome)
+    .with({ status: "no_session" }, () =>
+      ctx.reply("No active conversation here — send a message first."),
+    )
+    .with({ status: "skipped" }, ({ reason }) => {
       const message =
-        outcome.reason === "too_short"
+        reason === "too_short"
           ? `Conversation too short to reflect on yet (need at least ${MIN_MESSAGES_FOR_EXTRACTION} messages).`
           : // `conversation_not_found` / `profile_not_found` mean the underlying
             // row vanished mid-call — surfaces as a soft error rather than an
             // exception so the command doesn't crash the bot.
             "Couldn't load the conversation. Try /sessions to confirm it's there.";
-      await ctx.reply(message);
-      return;
-    }
-    case "processed": {
+      return ctx.reply(message);
+    })
+    .with({ status: "processed" }, (processed) => {
       const {
         ruleChanges,
         memoryCount,
@@ -115,7 +115,7 @@ export async function handleReflect(
         skippedForUnseenRules,
         deferredToFirstParty,
         eventId,
-      } = outcome;
+      } = processed;
       const ruleSummary =
         ruleChanges.extracted +
           ruleChanges.reinforced +
@@ -141,11 +141,10 @@ export async function handleReflect(
           : `${extraction}, ${drained} drained` +
             (withheld > 0 ? `, ${withheld} withheld` : "") +
             (deferredToFirstParty > 0 ? `, ${deferredToFirstParty} deferred` : "");
-      await ctx.reply(
+      return ctx.reply(
         `Reflected. Rules: ${ruleSummary}. Memories: ${memorySummary}.\n` +
           `/learned ${eventId} for the full breakdown.`,
       );
-      return;
-    }
-  }
+    })
+    .exhaustive();
 }

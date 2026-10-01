@@ -1,3 +1,4 @@
+import { match } from "ts-pattern";
 import type { SkillRunIdentity } from "../store/index.js";
 
 /** The `user_identities` row that acted, and its user. */
@@ -27,20 +28,15 @@ export type SkillDeployOrigin =
  * a conversation of theirs. The owner runs it with the default profile.
  */
 export function deployRunAs(owner: SkillRunIdentity, origin: SkillDeployOrigin): SkillRunIdentity {
-  switch (origin.kind) {
-    case "conversation":
-      return { userId: origin.userId, profileId: origin.profileId };
-    case "user": {
-      const { actor, conversation } = origin;
-      return {
-        userId: actor.userId,
-        profileId:
-          conversation !== null && conversation.userId === actor.userId
-            ? conversation.profileId
-            : owner.profileId,
-      };
-    }
-    case "owner":
-      return owner;
-  }
+  return match(origin)
+    .with({ kind: "conversation" }, (o) => ({ userId: o.userId, profileId: o.profileId }))
+    .with({ kind: "user" }, ({ actor, conversation }) => ({
+      userId: actor.userId,
+      profileId:
+        conversation !== null && conversation.userId === actor.userId
+          ? conversation.profileId
+          : owner.profileId,
+    }))
+    .with({ kind: "owner" }, () => owner)
+    .exhaustive();
 }

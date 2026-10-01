@@ -139,7 +139,7 @@ async function pickModelInteractive(
   if (discovered === null || discovered.length === 0) {
     const id = await p.text({
       message: "Enter the model id (no model list available from this provider):",
-      validate: (v = "") => (v.trim().length === 0 ? "Required" : undefined),
+      validate: (v) => (v?.trim() ? undefined : "Required"),
     });
     const value = cancelGuard(id).trim();
     if (!value) return null;

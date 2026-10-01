@@ -73,6 +73,7 @@ export async function approveDeploy(
     repoPath,
     deploy.gitSha,
     manifest,
+    { verifyFresh: true },
   );
   if (lockfileResult.isErr()) {
     return rejectedResult(deploy.gitSha, lockfileResult.error);

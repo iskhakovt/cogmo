@@ -3,6 +3,7 @@
  * with edits allowed, streamed to the user, and record what it cost.
  */
 
+import { match } from "ts-pattern";
 import type { SandboxSession } from "../../sandbox/index.js";
 import type { BackendUsage, CodingBackend } from "./backend.js";
 import type { CodingRun, TaskStoreDeps } from "./coding-run.js";
@@ -89,28 +90,23 @@ async function streamExecute(
   let usage: BackendUsage | undefined;
 
   for await (const event of backend.execute({ task, repo, container }, sessionId)) {
-    switch (event.kind) {
-      case "session_started":
-        // The resumed session — the plan phase's persisted id stays
-        // authoritative, so it is not re-written.
-        break;
-      case "text_delta":
-        await stream.appendText(event.text);
-        break;
-      case "tool_call":
-        await stream.toolCall(event.tool);
-        break;
-      case "tool_result":
-        await stream.toolResult(event.tool, event.ok, event.summary);
-        break;
-      case "complete":
-        if (event.usage) usage = event.usage;
-        if (event.isError) {
+    await match(event)
+      // The resumed session — the plan phase's persisted id stays
+      // authoritative, so it is not re-written.
+      .with({ kind: "session_started" }, () => undefined)
+      .with({ kind: "text_delta" }, (e) => stream.appendText(e.text))
+      .with({ kind: "tool_call" }, (e) => stream.toolCall(e.tool))
+      .with({ kind: "tool_result" }, (e) => stream.toolResult(e.tool, e.ok, e.summary))
+      .with({ kind: "complete" }, (e) => {
+        if (e.usage) usage = e.usage;
+        if (e.isError) {
           isError = true;
-          failureReason = `claude exit code ${event.exitCode}`;
+          failureReason = `claude exit code ${e.exitCode}`;
         }
-        break;
-    }
+      })
+      // Execute mode never presents a plan; a stray `plan_ready` carries nothing to stream.
+      .with({ kind: "plan_ready" }, () => undefined)
+      .exhaustive();
   }
 
   return {

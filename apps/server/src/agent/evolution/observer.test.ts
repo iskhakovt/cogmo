@@ -194,7 +194,7 @@ describe("runObserver phase isolation", () => {
     });
     const warn = vi.spyOn(logger, "warn");
 
-    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps);
+    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps, "idle");
 
     expect(result).toMatchObject({
       status: "processed",
@@ -220,12 +220,13 @@ describe("runObserver phase isolation", () => {
 
   it("plans the same steps whether or not correction extraction fails", async () => {
     const clean = exhaustedRetriesStep();
-    await runObserver(EVENT, clean, observerDeps({ provider: routedProvider() }));
+    await runObserver(EVENT, clean, observerDeps({ provider: routedProvider() }), "idle");
     const failing = exhaustedRetriesStep();
     await runObserver(
       EVENT,
       failing,
       observerDeps({ provider: routedProvider({ corrections: UNPARSEABLE_CORRECTIONS }) }),
+      "idle",
     );
 
     expect(failing.ids).toEqual(clean.ids);
@@ -255,7 +256,7 @@ describe("runObserver phase isolation", () => {
       },
     });
 
-    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps);
+    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps, "idle");
 
     expect(result).toMatchObject({
       status: "processed",
@@ -274,7 +275,7 @@ describe("runObserver phase isolation", () => {
       .mockResolvedValue(undefined);
     const deps = observerDeps({ provider: routedProvider(), memory: { retainBatch } });
 
-    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps);
+    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps, "idle");
 
     expect(result).toMatchObject({
       status: "processed",
@@ -292,7 +293,7 @@ describe("runObserver phase isolation", () => {
       .mockRejectedValue(new Error("hindsight unavailable"));
     const deps = observerDeps({ provider: routedProvider(), memory: { retainBatch } });
 
-    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps);
+    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps, "idle");
 
     expect(result).toMatchObject({
       status: "processed",
@@ -315,8 +316,8 @@ describe("runObserver phase isolation", () => {
       store: { deletePendingMemories },
     });
 
-    const first = await runObserver(EVENT, exhaustedRetriesStep(), deps);
-    const second = await runObserver(EVENT, exhaustedRetriesStep(), deps);
+    const first = await runObserver(EVENT, exhaustedRetriesStep(), deps, "idle");
+    const second = await runObserver(EVENT, exhaustedRetriesStep(), deps, "idle");
 
     expect(first).toMatchObject({ drained: { drained: 0 } });
     expect(second).toMatchObject({ drained: { drained: 1 } });
@@ -333,7 +334,9 @@ describe("runObserver phase isolation", () => {
       provider: routedProvider({ corrections: UNPARSEABLE_CORRECTIONS }),
     });
 
-    await expect(runObserver(EVENT, syncStep, deps)).rejects.toThrow(/matchedExistingRuleId/);
+    await expect(runObserver(EVENT, syncStep, deps, "idle")).rejects.toThrow(
+      /matchedExistingRuleId/,
+    );
     expect(deps.memory.retainBatch).not.toHaveBeenCalled();
   });
 });
@@ -342,7 +345,7 @@ describe("runObserver phase outcomes", () => {
   it("records no failed phase on a fire where every phase completes", async () => {
     const deps = observerDeps({ provider: routedProvider() });
 
-    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps);
+    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps, "idle");
 
     expect(result).toMatchObject({ status: "processed", failedPhases: [] });
     expect(recordedPayload(deps)).toMatchObject({ failedPhases: [] });
@@ -353,7 +356,7 @@ describe("runObserver phase outcomes", () => {
       provider: routedProvider({ corrections: UNPARSEABLE_CORRECTIONS }),
     });
 
-    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps);
+    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps, "idle");
 
     expect(result).toMatchObject({ failedPhases: ["corrections"] });
     expect(recordedPayload(deps)).toMatchObject({ failedPhases: ["corrections"] });
@@ -374,7 +377,7 @@ describe("runObserver phase outcomes", () => {
       memory: { retainBatch },
     });
 
-    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps);
+    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps, "idle");
 
     expect(result).toMatchObject({
       corrections: { consolidationNeeded: true },
@@ -408,7 +411,7 @@ describe("runObserver rules", () => {
   it("reads the instruction rules of the conversation's user for correction extraction", async () => {
     const deps = observerDeps({ provider: routedProvider() });
 
-    await runObserver(EVENT, exhaustedRetriesStep(), deps);
+    await runObserver(EVENT, exhaustedRetriesStep(), deps, "idle");
 
     expect(deps.agentStore.getInstructionRules).toHaveBeenCalledWith(
       expect.anything(),
@@ -427,7 +430,7 @@ describe("runObserver rules", () => {
       store: { getMemoryRules: vi.fn().mockResolvedValue([USER_HEALTH_RULE]) },
     });
 
-    await runObserver(EVENT, exhaustedRetriesStep(), deps);
+    await runObserver(EVENT, exhaustedRetriesStep(), deps, "idle");
 
     expect(deps.agentStore.getMemoryRules).toHaveBeenCalledWith(expect.anything(), {
       profileIds: ["profile-1"],
@@ -452,7 +455,7 @@ describe("runObserver rules", () => {
       },
     });
 
-    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps);
+    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps, "idle");
 
     expect(deps.agentStore.getInstructionRules).not.toHaveBeenCalled();
     const prompts = vi.mocked(provider.chat).mock.calls.map(([params]) => params.system);
@@ -475,7 +478,7 @@ describe("runObserver rules", () => {
       store: { getMemoryRules: vi.fn().mockResolvedValue([USER_HEALTH_RULE]) },
     });
 
-    await runObserver(EVENT, exhaustedRetriesStep(), deps);
+    await runObserver(EVENT, exhaustedRetriesStep(), deps, "idle");
 
     expect(recordedPayload(deps)).toMatchObject({
       memories: { skippedForUnseenRules: 0 },
@@ -497,7 +500,7 @@ describe("runObserver rules", () => {
     });
     const step = exhaustedRetriesStep();
 
-    const result = await runObserver(EVENT, step, deps);
+    const result = await runObserver(EVENT, step, deps, "idle");
 
     expect(result).toMatchObject({ drained: { drained: 0, byNetwork: {}, withheld: 1 } });
     expect(step.ids).not.toContain("retain-pending-memories");
@@ -530,7 +533,7 @@ describe("runObserver rules", () => {
     };
     const deps = observerDeps({ provider: routedProvider() });
 
-    const result = await runObserver(EVENT, step, deps);
+    const result = await runObserver(EVENT, step, deps, "idle");
 
     expect(result).toMatchObject({
       drained: { drained: 1, withheld: 0, deferredToFirstParty: 0 },
@@ -548,7 +551,7 @@ describe("runObserver rules", () => {
     };
     const deps = observerDeps({ provider: routedProvider() });
 
-    const result = await runObserver(EVENT, step, deps);
+    const result = await runObserver(EVENT, step, deps, "idle");
 
     expect(result).toMatchObject({
       drained: { drained: 1, withheld: 0, deferredToFirstParty: 0 },
@@ -572,7 +575,7 @@ describe("runObserver rules", () => {
       },
     });
 
-    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps);
+    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps, "idle");
 
     expect(result).toMatchObject({
       drained: { drained: 1, withheld: 0, deferredToFirstParty: 1 },

@@ -83,8 +83,49 @@ jobs:
             -p @commitlint/config-conventional@20.5.0 \
             commitlint
 
+  # A PR that changes a table changes the design doc that owns it
+  # (.claude/rules/architecture-rules.md → "No table design is final").
+  # `[schema-only]` in the title or body waives it for a change with no
+  # design consequence. Title and body are read from the API, not the event
+  # payload, so re-running the job after editing them sees the edit.
+  schema-docs:
+    name: Schema ⇒ design doc
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
+        with:
+          predicate-quantifier: every
+          list-files: shell
+          filters: |
+            schema:
+              - 'apps/server/src/**/store/{schema.ts,schema/**}'
+              - '!**/*.test.ts'
+            design:
+              - 'design/**'
+      - name: Require a design doc change alongside the schema change
+        if: steps.filter.outputs.schema == 'true' && steps.filter.outputs.design != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          SCHEMA_FILES: ${{ steps.filter.outputs.schema_files }}
+        run: |
+          set -euo pipefail
+          text=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.title + "\n" + (.body // "")')
+          if grep -qF '[schema-only]' <<<"$text"; then
+            echo "Schema change without a design/ change, waived by [schema-only]."
+            exit 0
+          fi
+          echo "::error::This PR changes $SCHEMA_FILES but nothing under design/. Update the design doc that owns the table, or add [schema-only] to the PR title or body and re-run this job."
+          exit 1
+
   check:
-    name: Typecheck & Lint
+    name: Typecheck, Lint & Knip
     needs: [changes]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
@@ -101,6 +142,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm lint
+      - run: pnpm knip
 
   # Dockerfile lint. Runs against all three repo-owned Dockerfiles. Matrix
   # over files so a violation in one image reports independently. Config
@@ -392,11 +434,11 @@ jobs:
   required-checks:
     name: Required Checks
     if: always()
-    needs: [changes, pr-title, check, hadolint, skills-runtime, unit, web, integration, e2e]
+    needs: [changes, pr-title, schema-docs, check, hadolint, skills-runtime, unit, web, integration, e2e]
     runs-on: ubuntu-latest
     timeout-minutes: 1
     steps:
       - uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
         with:
           jobs: ${{ toJSON(needs) }}
-          allowed-skips: pr-title,check,hadolint,skills-runtime,unit,web,integration,e2e
+          allowed-skips: pr-title,schema-docs,check,hadolint,skills-runtime,unit,web,integration,e2e

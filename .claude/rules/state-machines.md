@@ -22,7 +22,7 @@ The design doc carries, before any implementation:
 ## In the code
 
 - **Each transition is a conditional UPDATE** — `WHERE id = $1 AND status = <from>` — returning whether it happened, as in `DrizzleCodingStore.transitionTaskStatus` (`{ kind: "transitioned" } | { kind: "stale"; status; claimedByRunId }`). Branch on the result; never read the status in the bare body and write it in a later step ([inngest.md](inngest.md) → re-entry guards).
-- **Outcomes are discriminated unions** matched with ts-pattern's `.exhaustive()`, so an unhandled state or outcome is a compile error. Not booleans, not string flags compared with `===`.
+- **Outcomes are discriminated unions** matched with ts-pattern's `.exhaustive()`, so an unhandled state or outcome is a compile error. Not booleans, not string flags compared with `===`, not a `switch` — `biome-plugins/no-discriminant-switch.grit` flags `switch (x.kind)` and `switch (x.status)`.
 - **Expected failures are values** — `Result<T, E>` with a sealed error union that says which failures are terminal for the unit and which only pause the work (auth, billing, an unreachable provider). Exceptions stay for bugs.
 - **Idempotency keys come from durable state**: the unit id, a phase, a position in a memoized step result. Never from model output, a clock or a fresh uuid ([inngest.md](inngest.md)).
 - **One use-case file per transition** ([store-pattern.md](store-pattern.md)), not one orchestrator that owns every state.

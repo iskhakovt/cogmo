@@ -47,12 +47,18 @@ function toolCallMsg(id: string, name: string): Message {
 describe("compactMessages", () => {
   it("passes messages through unchanged when under budget", async () => {
     const messages = [msg("user", "hello"), msg("assistant", "hi")];
-    const result = await compactMessages("system", messages, undefined, {
-      countTokens: vi.fn().mockResolvedValue(100),
-      budget: 1000,
-      clearToolResults: CLEARING,
-      maxViewBytes: MAX_REQUEST_BYTES,
-    });
+    const result = await compactMessages(
+      "system",
+      messages,
+      undefined,
+      {
+        countTokens: vi.fn().mockResolvedValue(100),
+        budget: 1000,
+        clearToolResults: CLEARING,
+        maxViewBytes: MAX_REQUEST_BYTES,
+      },
+      false,
+    );
 
     expect(result.didCompact).toBe(false);
     expect(result.messages).toEqual(messages);
@@ -71,13 +77,19 @@ describe("compactMessages", () => {
     // Past the clearing threshold, under the summarization one.
     const countTokens = vi.fn().mockResolvedValue(700);
 
-    const result = await compactMessages("system", messages, undefined, {
-      countTokens,
-      budget: 1000,
-      clearToolResults: CLEARING,
-      maxViewBytes: MAX_REQUEST_BYTES,
-      summarize: vi.fn(),
-    });
+    const result = await compactMessages(
+      "system",
+      messages,
+      undefined,
+      {
+        countTokens,
+        budget: 1000,
+        clearToolResults: CLEARING,
+        maxViewBytes: MAX_REQUEST_BYTES,
+        summarize: vi.fn(),
+      },
+      false,
+    );
 
     expect(result.didCompact).toBe(false);
     expect(result.messages).toEqual(before);
@@ -99,13 +111,19 @@ describe("compactMessages", () => {
       .mockResolvedValueOnce(960)
       .mockResolvedValueOnce(200);
 
-    await compactMessages("system", messages, undefined, {
-      countTokens,
-      budget: 1000,
-      clearToolResults: CLEARING,
-      maxViewBytes: MAX_REQUEST_BYTES,
-      summarize: vi.fn().mockResolvedValue("a summary"),
-    });
+    await compactMessages(
+      "system",
+      messages,
+      undefined,
+      {
+        countTokens,
+        budget: 1000,
+        clearToolResults: CLEARING,
+        maxViewBytes: MAX_REQUEST_BYTES,
+        summarize: vi.fn().mockResolvedValue("a summary"),
+      },
+      false,
+    );
 
     expect(countTokens).toHaveBeenCalledTimes(3);
     for (const [params] of countTokens.mock.calls) {
@@ -126,13 +144,19 @@ describe("compactMessages", () => {
     const countTokens = vi.fn().mockResolvedValueOnce(700);
     const summarize = vi.fn();
 
-    await compactMessages("system", messages, undefined, {
-      countTokens,
-      budget: 1000,
-      clearToolResults: CLEARING,
-      maxViewBytes: MAX_REQUEST_BYTES,
-      summarize,
-    });
+    await compactMessages(
+      "system",
+      messages,
+      undefined,
+      {
+        countTokens,
+        budget: 1000,
+        clearToolResults: CLEARING,
+        maxViewBytes: MAX_REQUEST_BYTES,
+        summarize,
+      },
+      false,
+    );
 
     expect(summarize).not.toHaveBeenCalled();
   });
@@ -159,13 +183,19 @@ describe("compactMessages", () => {
       .mockResolvedValueOnce(300); // after summarization: under
     const summarize = vi.fn().mockResolvedValue("Summary of old messages");
 
-    const result = await compactMessages("system", messages, undefined, {
-      countTokens,
-      budget: 1000,
-      clearToolResults: CLEARING,
-      maxViewBytes: MAX_REQUEST_BYTES,
-      summarize,
-    });
+    const result = await compactMessages(
+      "system",
+      messages,
+      undefined,
+      {
+        countTokens,
+        budget: 1000,
+        clearToolResults: CLEARING,
+        maxViewBytes: MAX_REQUEST_BYTES,
+        summarize,
+      },
+      false,
+    );
 
     expect(result.didCompact).toBe(true);
     expect(result.event?.strategies).toEqual(["summarize"]);
@@ -203,13 +233,19 @@ describe("compactMessages", () => {
       .mockResolvedValueOnce(200); // after truncation: under
     const summarize = vi.fn().mockResolvedValue("Summary of old messages");
 
-    const result = await compactMessages("system", messages, undefined, {
-      countTokens,
-      budget: 1000,
-      clearToolResults: CLEARING,
-      maxViewBytes: MAX_REQUEST_BYTES,
-      summarize,
-    });
+    const result = await compactMessages(
+      "system",
+      messages,
+      undefined,
+      {
+        countTokens,
+        budget: 1000,
+        clearToolResults: CLEARING,
+        maxViewBytes: MAX_REQUEST_BYTES,
+        summarize,
+      },
+      false,
+    );
 
     expect(result.event?.strategies).toEqual(["summarize", "truncate"]);
     expect(summarize).toHaveBeenCalledOnce();
@@ -236,13 +272,19 @@ describe("compactMessages", () => {
       .mockResolvedValueOnce(500); // after truncation
     const summarize = vi.fn().mockRejectedValue(new Error("LLM timeout"));
 
-    const result = await compactMessages("system", messages, undefined, {
-      countTokens,
-      budget: 1000,
-      clearToolResults: CLEARING,
-      maxViewBytes: MAX_REQUEST_BYTES,
-      summarize,
-    });
+    const result = await compactMessages(
+      "system",
+      messages,
+      undefined,
+      {
+        countTokens,
+        budget: 1000,
+        clearToolResults: CLEARING,
+        maxViewBytes: MAX_REQUEST_BYTES,
+        summarize,
+      },
+      false,
+    );
 
     expect(result.event?.strategies).toContain("truncate");
     expect(result.event?.strategies).not.toContain("summarize");
@@ -263,12 +305,18 @@ describe("compactMessages", () => {
       .mockResolvedValueOnce(960) // initial
       .mockResolvedValueOnce(400); // after truncation
 
-    const result = await compactMessages("system", messages, undefined, {
-      countTokens,
-      budget: 1000,
-      clearToolResults: CLEARING,
-      maxViewBytes: MAX_REQUEST_BYTES,
-    });
+    const result = await compactMessages(
+      "system",
+      messages,
+      undefined,
+      {
+        countTokens,
+        budget: 1000,
+        clearToolResults: CLEARING,
+        maxViewBytes: MAX_REQUEST_BYTES,
+      },
+      false,
+    );
 
     expect(result.didCompact).toBe(true);
     // If first remaining is assistant, synthetic user message is prepended
@@ -299,13 +347,19 @@ describe("compactMessages", () => {
 
     const countTokens = vi.fn().mockResolvedValue(850);
 
-    const result = await compactMessages("system", messages, undefined, {
-      countTokens,
-      budget: 1000,
-      clearToolResults: CLEARING,
-      maxViewBytes: MAX_REQUEST_BYTES,
-      summarize: vi.fn().mockResolvedValue("   "),
-    });
+    const result = await compactMessages(
+      "system",
+      messages,
+      undefined,
+      {
+        countTokens,
+        budget: 1000,
+        clearToolResults: CLEARING,
+        maxViewBytes: MAX_REQUEST_BYTES,
+        summarize: vi.fn().mockResolvedValue("   "),
+      },
+      false,
+    );
 
     expect(
       result.messages.some((m) => String(m.content).includes("Previous conversation summary")),
@@ -327,13 +381,19 @@ describe("compactMessages", () => {
       .mockResolvedValueOnce(900) // after clearing: over 80%
       .mockResolvedValueOnce(400); // after summarization: under
 
-    const result = await compactMessages("system", messages, undefined, {
-      countTokens,
-      budget: 1000,
-      clearToolResults: CLEARING,
-      maxViewBytes: MAX_REQUEST_BYTES,
-      summarize: vi.fn().mockResolvedValue("summary"),
-    });
+    const result = await compactMessages(
+      "system",
+      messages,
+      undefined,
+      {
+        countTokens,
+        budget: 1000,
+        clearToolResults: CLEARING,
+        maxViewBytes: MAX_REQUEST_BYTES,
+        summarize: vi.fn().mockResolvedValue("summary"),
+      },
+      false,
+    );
 
     expect(result.event).toEqual({
       strategies: ["summarize"],
@@ -404,13 +464,19 @@ describe("compactMessages", () => {
       const maxViewBytes = Math.floor(bytesOf(messages) / 1.1);
       const countTokens = vi.fn().mockResolvedValue(100);
 
-      const result = await compactMessages("system", messages, undefined, {
-        countTokens,
-        budget: 1_000_000,
-        clearToolResults: CLEARING,
-        maxViewBytes,
-        summarize: vi.fn().mockRejectedValue(new Error("413 request_too_large")),
-      });
+      const result = await compactMessages(
+        "system",
+        messages,
+        undefined,
+        {
+          countTokens,
+          budget: 1_000_000,
+          clearToolResults: CLEARING,
+          maxViewBytes,
+          summarize: vi.fn().mockRejectedValue(new Error("413 request_too_large")),
+        },
+        false,
+      );
 
       expect(result.event?.strategies).toEqual(["truncate"]);
       expect(bytesOf(result.messages)).toBeLessThanOrEqual(maxViewBytes * 0.8);
@@ -599,7 +665,13 @@ describe("compactMessages", () => {
       const messages: Message[] = [docTurn(21_000_000)];
       const countTokens = vi.fn().mockResolvedValue(100);
 
-      const result = await compactMessages("system", messages, undefined, deps({ countTokens }));
+      const result = await compactMessages(
+        "system",
+        messages,
+        undefined,
+        deps({ countTokens }),
+        false,
+      );
 
       expect(result.didCompact).toBe(false);
       expect(result.messages).toEqual(messages);
@@ -801,12 +873,18 @@ describe("compactMessages", () => {
     ])(
       "cuts over the budget even when the cut only puts the marker first: %#",
       async (messages) => {
-        const result = await compactMessages("system", messages, undefined, {
-          countTokens: vi.fn().mockResolvedValue(990),
-          budget: 1000,
-          clearToolResults: CLEARING,
-          maxViewBytes: MAX_REQUEST_BYTES,
-        });
+        const result = await compactMessages(
+          "system",
+          messages,
+          undefined,
+          {
+            countTokens: vi.fn().mockResolvedValue(990),
+            budget: 1000,
+            clearToolResults: CLEARING,
+            maxViewBytes: MAX_REQUEST_BYTES,
+          },
+          false,
+        );
 
         expect(result.event?.strategies).toEqual(["truncate"]);
         expect(result.messages[0]).toEqual({
@@ -818,12 +896,18 @@ describe("compactMessages", () => {
     );
 
     it("records no truncation when no cut shortens the view", async () => {
-      const result = await compactMessages("system", [msg("user", "q")], undefined, {
-        countTokens: vi.fn().mockResolvedValue(990),
-        budget: 1000,
-        clearToolResults: CLEARING,
-        maxViewBytes: MAX_REQUEST_BYTES,
-      });
+      const result = await compactMessages(
+        "system",
+        [msg("user", "q")],
+        undefined,
+        {
+          countTokens: vi.fn().mockResolvedValue(990),
+          budget: 1000,
+          clearToolResults: CLEARING,
+          maxViewBytes: MAX_REQUEST_BYTES,
+        },
+        false,
+      );
 
       expect(result.didCompact).toBe(false);
       expect(result.messages).toEqual([msg("user", "q")]);
@@ -832,13 +916,19 @@ describe("compactMessages", () => {
     it("cuts once for the budget, and keeps the tail, when the tail alone is past the threshold", async () => {
       const messages = pdfTurn();
 
-      const result = await compactMessages("system", messages, undefined, {
-        // Past 95% of the budget: truncation fires on tokens.
-        countTokens: vi.fn().mockResolvedValue(990),
-        budget: 1000,
-        clearToolResults: CLEARING,
-        maxViewBytes: MAX_REQUEST_BYTES,
-      });
+      const result = await compactMessages(
+        "system",
+        messages,
+        undefined,
+        {
+          // Past 95% of the budget: truncation fires on tokens.
+          countTokens: vi.fn().mockResolvedValue(990),
+          budget: 1000,
+          clearToolResults: CLEARING,
+          maxViewBytes: MAX_REQUEST_BYTES,
+        },
+        false,
+      );
 
       expect(result.event?.strategies).toEqual(["truncate"]);
       expect(result.messages).toEqual(truncations(messages)[1]);
@@ -852,12 +942,18 @@ describe("compactMessages", () => {
       const maxViewBytes = Math.floor(bytesOf(expectDefined(cuts[2], "two cuts")) / 0.8) - 1;
       expect(bytesOf(expectDefined(cuts[3], "three cuts"))).toBeLessThanOrEqual(maxViewBytes * 0.8);
 
-      const result = await compactMessages("system", messages, undefined, {
-        countTokens: vi.fn().mockResolvedValue(100),
-        budget: 1_000_000,
-        clearToolResults: CLEARING,
-        maxViewBytes,
-      });
+      const result = await compactMessages(
+        "system",
+        messages,
+        undefined,
+        {
+          countTokens: vi.fn().mockResolvedValue(100),
+          budget: 1_000_000,
+          clearToolResults: CLEARING,
+          maxViewBytes,
+        },
+        false,
+      );
 
       expect(result.event?.strategies).toEqual(["truncate"]);
       expect(result.messages).toEqual(cuts[3]);
@@ -951,12 +1047,18 @@ describe("compactMessages", () => {
   it("asks for counts up to the budget, past which it tells none apart", async () => {
     const countTokens = vi.fn().mockResolvedValue(100);
 
-    await compactMessages("system", [msg("user", "hello")], undefined, {
-      countTokens,
-      budget: 1000,
-      clearToolResults: CLEARING,
-      maxViewBytes: MAX_REQUEST_BYTES,
-    });
+    await compactMessages(
+      "system",
+      [msg("user", "hello")],
+      undefined,
+      {
+        countTokens,
+        budget: 1000,
+        clearToolResults: CLEARING,
+        maxViewBytes: MAX_REQUEST_BYTES,
+      },
+      false,
+    );
 
     expect(countTokens).toHaveBeenCalledWith(expect.objectContaining({ countUpTo: 1000 }));
   });
@@ -1196,12 +1298,18 @@ describe("compactMessages — pair-aware", () => {
 
     const countTokens = vi.fn().mockResolvedValueOnce(960).mockResolvedValueOnce(400);
 
-    const result = await compactMessages("system", msgs13, undefined, {
-      countTokens,
-      budget: 1000,
-      clearToolResults: CLEARING,
-      maxViewBytes: MAX_REQUEST_BYTES,
-    });
+    const result = await compactMessages(
+      "system",
+      msgs13,
+      undefined,
+      {
+        countTokens,
+        budget: 1000,
+        clearToolResults: CLEARING,
+        maxViewBytes: MAX_REQUEST_BYTES,
+      },
+      false,
+    );
 
     assertNoOrphanedToolResults(result.messages);
   });
@@ -1223,13 +1331,19 @@ describe("compactMessages — pair-aware", () => {
 
     const countTokens = vi.fn().mockResolvedValueOnce(850).mockResolvedValueOnce(300);
 
-    const result = await compactMessages("system", messages, undefined, {
-      countTokens,
-      budget: 1000,
-      clearToolResults: CLEARING,
-      maxViewBytes: MAX_REQUEST_BYTES,
-      summarize: vi.fn().mockResolvedValue("summary of old conversation"),
-    });
+    const result = await compactMessages(
+      "system",
+      messages,
+      undefined,
+      {
+        countTokens,
+        budget: 1000,
+        clearToolResults: CLEARING,
+        maxViewBytes: MAX_REQUEST_BYTES,
+        summarize: vi.fn().mockResolvedValue("summary of old conversation"),
+      },
+      false,
+    );
 
     expect(result.didCompact).toBe(true);
 
@@ -1354,6 +1468,7 @@ describe("prefix veto", () => {
       sevenMessages(),
       undefined,
       summarizeDeps(summarize),
+      false,
     );
 
     expect(summarize).toHaveBeenCalledOnce();
@@ -1364,10 +1479,16 @@ describe("prefix veto", () => {
     const summarize = vi.fn().mockResolvedValue("a summary");
     const canSummarizePrefix = vi.fn().mockReturnValue(false);
 
-    const result = await compactMessages("system", sevenMessages(), undefined, {
-      ...summarizeDeps(summarize),
-      canSummarizePrefix,
-    });
+    const result = await compactMessages(
+      "system",
+      sevenMessages(),
+      undefined,
+      {
+        ...summarizeDeps(summarize),
+        canSummarizePrefix,
+      },
+      false,
+    );
 
     expect(canSummarizePrefix).toHaveBeenCalledWith(1);
     expect(summarize).not.toHaveBeenCalled();
@@ -1386,10 +1507,16 @@ describe("prefix veto", () => {
       ...Array.from({ length: 5 }, (_, i) => msg(i % 2 === 0 ? "assistant" : "user", `u${i}`)),
     ];
 
-    await compactMessages("system", messages, undefined, {
-      ...summarizeDeps(vi.fn().mockResolvedValue("a summary")),
-      canSummarizePrefix,
-    });
+    await compactMessages(
+      "system",
+      messages,
+      undefined,
+      {
+        ...summarizeDeps(vi.fn().mockResolvedValue("a summary")),
+        canSummarizePrefix,
+      },
+      false,
+    );
 
     // 9 entries, keepTurns 6 → raw split 3, which lands on the user-role
     // tool_result and snaps back to 2 so the pair stays intact.

@@ -1296,7 +1296,7 @@ describe("handle-message — turn inputs frozen across re-invocations", () => {
 
   describe("durable reads", () => {
     const getCurrentTime = expectDefined(
-      createDefaultTools().get("get_current_time"),
+      createDefaultTools([], "UTC").get("get_current_time"),
       "get_current_time",
     );
 

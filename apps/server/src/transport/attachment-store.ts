@@ -12,9 +12,9 @@ export interface AttachmentStore {
   /**
    * Upload bytes to storage. The `prefix` partitions the storage path
    * (`inbound/` for platform uploads, `generated/` for agent-generated
-   * content, etc.). Defaults to `"inbound"` for backward compatibility.
+   * content, etc.).
    */
-  upload(data: Buffer, mediaType: string, prefix?: string): Promise<string>;
+  upload(data: Buffer, mediaType: string, prefix: string): Promise<string>;
   download(path: string): Promise<Buffer>;
 }
 
@@ -37,7 +37,7 @@ export function mediaTypeToExt(mediaType: string): string {
  */
 export function createAttachmentStore(client: S3Client, bucket: string): AttachmentStore {
   return {
-    async upload(data: Buffer, mediaType: string, prefix = "inbound"): Promise<string> {
+    async upload(data: Buffer, mediaType: string, prefix: string): Promise<string> {
       const ext = mediaTypeToExt(mediaType);
       const path = `${prefix}/${randomUUID()}.${ext}`;
       await client.send(

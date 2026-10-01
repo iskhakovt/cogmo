@@ -85,8 +85,8 @@ async function addNonFalImageProvider(deps: WizardDeps): Promise<void> {
   const name = cancelGuard(
     await p.text({
       message: "Provider name (e.g. venice, openai):",
-      validate: (v = "") => {
-        if (!IMAGE_PROVIDER_NAME_RE.test(v)) {
+      validate: (v) => {
+        if (!IMAGE_PROVIDER_NAME_RE.test(v ?? "")) {
           return "Lowercase letters, digits, hyphens, or underscores; must start with a letter; ≤32 chars";
         }
         return undefined;
@@ -100,8 +100,8 @@ async function addNonFalImageProvider(deps: WizardDeps): Promise<void> {
     await p.text({
       message: `Base URL (default ${defaultBaseUrl}):`,
       placeholder: defaultBaseUrl,
-      validate: (v = "") => {
-        if (!v.startsWith("https://")) return "Must start with https://";
+      validate: (v) => {
+        if (!v?.startsWith("https://")) return "Must start with https://";
         if (v.endsWith("/")) return "Drop the trailing slash";
         return undefined;
       },
@@ -217,19 +217,19 @@ async function promptAddImageModels(
     const modelName = cancelGuard(
       await p.text({
         message: "Model name (LLM-facing, e.g. venice/flux-dev):",
-        validate: (v = "") => (v.trim() ? undefined : "Required"),
+        validate: (v) => (v?.trim() ? undefined : "Required"),
       }),
     );
     const modelString = cancelGuard(
       await p.text({
         message: "Model string (provider API id, e.g. flux-dev):",
-        validate: (v = "") => (v.trim() ? undefined : "Required"),
+        validate: (v) => (v?.trim() ? undefined : "Required"),
       }),
     );
     const description = cancelGuard(
       await p.text({
         message: "Description (one line, read by the LLM at every turn):",
-        validate: (v = "") => (v.trim() ? undefined : "Required"),
+        validate: (v) => (v?.trim() ? undefined : "Required"),
       }),
     );
 
@@ -241,8 +241,8 @@ async function promptAddImageModels(
         // description the user already typed — they edit-fix the ratios prompt
         // and continue. The parser does the work; we discard the parse result
         // here and re-call after to keep types clean.
-        validate: (v = "") => {
-          if (parseWizardRatios(v) === "invalid") {
+        validate: (v) => {
+          if (parseWizardRatios(v ?? "") === "invalid") {
             return `Allowed: ${IMAGE_ALLOWED_ASPECT_RATIOS.join(", ")}`;
           }
           return undefined;

@@ -12,6 +12,7 @@ import { DrizzleSecretsStore } from "../secrets/store/index.js";
 import { DrizzleTransportStore } from "../transport/store/index.js";
 import { migrateAndSeed } from "./migrate-and-seed.js";
 import {
+  defaultValidators,
   NonInteractiveValidationError,
   persistNonInteractive,
   SetupEnvError,
@@ -54,7 +55,7 @@ export async function runSetup(opts: SetupOptions = {}): Promise<void> {
     // so a bad config can't trigger migrations or wipe state via --reset.
     let validatedNonInteractive = null;
     if (opts.nonInteractive) {
-      const result = await validateNonInteractive(process.env);
+      const result = await validateNonInteractive(process.env, defaultValidators);
       if (result.isErr()) {
         console.error(result.error.message);
         process.exitCode = 1;

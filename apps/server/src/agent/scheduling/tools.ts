@@ -228,27 +228,31 @@ function schedulingRejection(error: SchedulingError): ToolRejection {
 }
 
 function formatCronValidationError(err: CronValidationError): string {
-  switch (err.kind) {
-    case "unsupported_field_count":
-      return (
-        `cron expression has ${err.got} field(s), expected ${err.expected}. ` +
-        "Use a standard 5-field cron — minute hour day-of-month month day-of-week."
-      );
-    case "invalid_timezone":
-      return (
-        `timezone '${err.timezone}' is not recognised. Use an IANA name like ` +
-        "'Europe/London', 'America/New_York', or 'UTC'."
-      );
-    case "malformed":
-      return `cron expression is malformed: ${err.message}`;
-    case "interval_too_short":
-      return (
-        `cron fires every ${err.periodSeconds}s, but the minimum allowed interval ` +
-        `is ${err.minSeconds}s (${MIN_CRON_INTERVAL_SECONDS}). Widen the schedule.`
-      );
-    case "no_next_occurrence":
-      return "cron expression has no future occurrence (year-range exhausted).";
-  }
+  return match(err)
+    .with(
+      { kind: "unsupported_field_count" },
+      (e) =>
+        `cron expression has ${e.got} field(s), expected ${e.expected}. ` +
+        "Use a standard 5-field cron — minute hour day-of-month month day-of-week.",
+    )
+    .with(
+      { kind: "invalid_timezone" },
+      (e) =>
+        `timezone '${e.timezone}' is not recognised. Use an IANA name like ` +
+        "'Europe/London', 'America/New_York', or 'UTC'.",
+    )
+    .with({ kind: "malformed" }, (e) => `cron expression is malformed: ${e.message}`)
+    .with(
+      { kind: "interval_too_short" },
+      (e) =>
+        `cron fires every ${e.periodSeconds}s, but the minimum allowed interval ` +
+        `is ${e.minSeconds}s (${MIN_CRON_INTERVAL_SECONDS}). Widen the schedule.`,
+    )
+    .with(
+      { kind: "no_next_occurrence" },
+      () => "cron expression has no future occurrence (year-range exhausted).",
+    )
+    .exhaustive();
 }
 
 /**

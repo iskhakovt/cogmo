@@ -18,6 +18,7 @@
  * follow-ups the stale path would, so a failure never stops a moving run.
  */
 
+import { match, P } from "ts-pattern";
 import { inngest as inngestClient } from "../../inngest/client.js";
 import {
   buildPipelineStageDueEvent,
@@ -125,30 +126,32 @@ export function gateNotice(
   outcome: ResolveGateOutcome,
 ): string | null {
   const timedOut = !isTap(decision);
-  switch (outcome.kind) {
-    case "advanced":
-      return timedOut
-        ? `⏱ Checkpoint timed out — pipeline "${outcome.pipelineName}" is proceeding to "${outcome.nextStage}".`
-        : null;
-    case "completed":
-      return timedOut
-        ? `⏱ Checkpoint timed out — pipeline "${outcome.pipelineName}" completed.`
-        : `✅ Pipeline "${outcome.pipelineName}" completed.`;
-    case "cancelled":
-      return timedOut
-        ? `⏱ Checkpoint timed out — pipeline "${outcome.pipelineName}" was cancelled.`
-        : `❌ Pipeline "${outcome.pipelineName}" cancelled.`;
-    case "stale": {
-      if (outcome.appliedByThis) {
-        const effect = effectInPlace(decision, outcome);
+  return match(outcome)
+    .with({ kind: "advanced" }, (o) =>
+      timedOut
+        ? `⏱ Checkpoint timed out — pipeline "${o.pipelineName}" is proceeding to "${o.nextStage}".`
+        : null,
+    )
+    .with({ kind: "completed" }, (o) =>
+      timedOut
+        ? `⏱ Checkpoint timed out — pipeline "${o.pipelineName}" completed.`
+        : `✅ Pipeline "${o.pipelineName}" completed.`,
+    )
+    .with({ kind: "cancelled" }, (o) =>
+      timedOut
+        ? `⏱ Checkpoint timed out — pipeline "${o.pipelineName}" was cancelled.`
+        : `❌ Pipeline "${o.pipelineName}" cancelled.`,
+    )
+    .with({ kind: "stale" }, (o) => {
+      if (o.appliedByThis) {
+        const effect = effectInPlace(decision, o);
         return effect === null ? null : gateNotice(decision, effect);
       }
-      if (timedOut || decisionReflected(decision, outcome)) return null;
-      return outcome.status === "failed" ? RUN_STOPPED : TOO_LATE;
-    }
-    case "not_found":
-      return null;
-  }
+      if (timedOut || decisionReflected(decision, o)) return null;
+      return o.status === "failed" ? RUN_STOPPED : TOO_LATE;
+    })
+    .with({ kind: "not_found" }, () => null)
+    .exhaustive();
 }
 
 /**
@@ -216,30 +219,31 @@ export function createPipelineGateResolver(deps: PipelineGateResolverDeps) {
           }),
         );
 
-        switch (inspection.kind) {
-          case "parked":
-            await notifyAfterRetries(
+        await match(inspection)
+          .with({ kind: "parked" }, () =>
+            notifyAfterRetries(
               step,
               "notify-tap-failed",
               deps.deliveryRouter,
               conversationId,
               "⚠️ Your decision at this checkpoint couldn't be applied. The checkpoint is still open and will resolve on its timeout.",
               { runId, gateKey },
-            );
-            return;
-          case "failed":
-            await notifyAfterRetries(
+            ),
+          )
+          .with({ kind: "failed" }, () =>
+            notifyAfterRetries(
               step,
               "notify-run-failed",
               deps.deliveryRouter,
               conversationId,
               "❌ A pipeline checkpoint's timeout couldn't be applied, so the run has stopped.",
               { runId, gateKey },
-            );
-            return;
-          default:
-            await sendFollowUps(step, deps.deliveryRouter, resolution, inspection);
-        }
+            ),
+          )
+          .with({ kind: P.union("stale", "not_found") }, (outcome) =>
+            sendFollowUps(step, deps.deliveryRouter, resolution, outcome),
+          )
+          .exhaustive();
       },
     },
     async ({ event, step, runId: resolverRunId }) => {

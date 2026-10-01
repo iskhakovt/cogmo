@@ -9,6 +9,7 @@
  */
 
 import { err, ok, type Result } from "neverthrow";
+import { match } from "ts-pattern";
 import { constraintNameOf, findPgErrorByCode, type PgError } from "../../db/pg-errors.js";
 import { commitIfOk, type Transaction } from "../../db/transactor.js";
 
@@ -133,19 +134,23 @@ export type CreateImageModelError = ImageModelNameTaken | ImageModelSlugCollisio
 export function describeImageCatalogError(
   e: CreateImageProviderError | CreateImageModelError,
 ): string {
-  switch (e.kind) {
-    case "invalid_provider_config":
-      return `invalid config: ${e.reason}`;
-    case "image_provider_name_taken":
-      return `an image provider named "${e.name}" already exists`;
-    case "image_model_name_taken":
-      return `an image model named "${e.name}" already exists`;
-    case "image_model_slug_collision":
-      return (
-        `image model "${e.name}" would collide on slug "${e.slug}" with "${e.existingName}"; ` +
-        `rename one so the segment after the last "/" is unique (the LLM sees only that)`
-      );
-  }
+  return match(e)
+    .with({ kind: "invalid_provider_config" }, (x) => `invalid config: ${x.reason}`)
+    .with(
+      { kind: "image_provider_name_taken" },
+      (x) => `an image provider named "${x.name}" already exists`,
+    )
+    .with(
+      { kind: "image_model_name_taken" },
+      (x) => `an image model named "${x.name}" already exists`,
+    )
+    .with(
+      { kind: "image_model_slug_collision" },
+      (x) =>
+        `image model "${x.name}" would collide on slug "${x.slug}" with "${x.existingName}"; ` +
+        `rename one so the segment after the last "/" is unique (the LLM sees only that)`,
+    )
+    .exhaustive();
 }
 
 /**
