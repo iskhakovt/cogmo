@@ -55,18 +55,20 @@ function fakeInngest(): Pick<Inngest, "send"> & { send: ReturnType<typeof vi.fn>
 
 async function seedRepo(name = "cogmo", maxConcurrentTasks = 1): Promise<string> {
   const row = await tx((trx) =>
-    store.insertRepo(trx, {
-      name,
-      localPath: `/var/lib/cogmo/repos/${name}`,
-      defaultBranch: "main",
-      remoteUrl: `git@github.com:user/${name}.git`,
-      devcontainer: null,
-      allowedBackends: ["claude"],
-      verifyCommand: "pnpm test",
-      taskTokenBudget: 200_000,
-      taskWallTimeSeconds: 1800,
-      maxConcurrentTasks,
-    }),
+    store
+      .insertRepo(trx, {
+        name,
+        localPath: `/var/lib/cogmo/repos/${name}`,
+        defaultBranch: "main",
+        remoteUrl: `git@github.com:user/${name}.git`,
+        devcontainer: null,
+        allowedBackends: ["claude"],
+        verifyCommand: "pnpm test",
+        taskTokenBudget: 200_000,
+        taskWallTimeSeconds: 1800,
+        maxConcurrentTasks,
+      })
+      .then(expectOk),
   );
   return row.id;
 }

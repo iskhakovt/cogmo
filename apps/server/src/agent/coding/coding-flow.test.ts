@@ -73,18 +73,20 @@ beforeEach(async () => {
 /** The one repo every test in this file delegates against. */
 async function seedRepo(): Promise<CodingRepoRow> {
   return tx((trx) =>
-    store.insertRepo(trx, {
-      name: "cogmo",
-      localPath: repoPath,
-      defaultBranch: "main",
-      remoteUrl: "git@github.com:user/cogmo.git",
-      devcontainer: null,
-      allowedBackends: ["claude"],
-      verifyCommand: "true",
-      taskTokenBudget: 100_000,
-      taskWallTimeSeconds: 600,
-      maxConcurrentTasks: 1,
-    }),
+    store
+      .insertRepo(trx, {
+        name: "cogmo",
+        localPath: repoPath,
+        defaultBranch: "main",
+        remoteUrl: "git@github.com:user/cogmo.git",
+        devcontainer: null,
+        allowedBackends: ["claude"],
+        verifyCommand: "true",
+        taskTokenBudget: 100_000,
+        taskWallTimeSeconds: 600,
+        maxConcurrentTasks: 1,
+      })
+      .then(expectOk),
   );
 }
 

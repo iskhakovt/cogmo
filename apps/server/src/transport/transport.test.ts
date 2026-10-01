@@ -7,7 +7,7 @@ import type { Transactor } from "../db/index.js";
 import type { inboundArrived } from "../inngest/events.js";
 import { AllProvidersFailedError } from "../llm/fallback.js";
 import { ProviderConfigError } from "../llm/resolver.js";
-import { mockAgentStore, mockTransportStore, pgUniqueViolation } from "../test/factories.js";
+import { mockAgentStore, mockTransportStore } from "../test/factories.js";
 import { createTransport } from "./transport.js";
 
 const FAKE_TX = { __mockTx: true } as never;
@@ -2342,20 +2342,22 @@ describe("createTransport", () => {
     });
 
     it("add applies slice-1 defaults (verify=true, branch=main, single backend, single concurrent)", async () => {
-      const insertRepo = vi.fn().mockResolvedValue({
-        id: "r1",
-        name: "cogmo",
-        localPath: "/p",
-        defaultBranch: "main",
-        remoteUrl: "git@x:y/z.git",
-        verifyCommand: "true",
-        devcontainer: null,
-        allowedBackends: ["claude"],
-        taskTokenBudget: 200_000,
-        taskWallTimeSeconds: 1800,
-        maxConcurrentTasks: 1,
-        createdAt: new Date(),
-      });
+      const insertRepo = vi.fn().mockResolvedValue(
+        ok({
+          id: "r1",
+          name: "cogmo",
+          localPath: "/p",
+          defaultBranch: "main",
+          remoteUrl: "git@x:y/z.git",
+          verifyCommand: "true",
+          devcontainer: null,
+          allowedBackends: ["claude"],
+          taskTokenBudget: 200_000,
+          taskWallTimeSeconds: 1800,
+          maxConcurrentTasks: 1,
+          createdAt: new Date(),
+        }),
+      );
       const transport = setupWithCoding({
         listRepos: vi.fn(),
         insertRepo,
@@ -2412,20 +2414,22 @@ describe("createTransport", () => {
       });
 
       it("accepts valid names with letters, digits, dot, dash, underscore", async () => {
-        const insertRepo = vi.fn().mockResolvedValue({
-          id: "r1",
-          name: "cogmo.notes_v2-rc1",
-          localPath: "/p",
-          defaultBranch: "main",
-          remoteUrl: "x",
-          devcontainer: null,
-          allowedBackends: ["claude"],
-          verifyCommand: "true",
-          taskTokenBudget: 1,
-          taskWallTimeSeconds: 1,
-          maxConcurrentTasks: 1,
-          createdAt: new Date(),
-        });
+        const insertRepo = vi.fn().mockResolvedValue(
+          ok({
+            id: "r1",
+            name: "cogmo.notes_v2-rc1",
+            localPath: "/p",
+            defaultBranch: "main",
+            remoteUrl: "x",
+            devcontainer: null,
+            allowedBackends: ["claude"],
+            verifyCommand: "true",
+            taskTokenBudget: 1,
+            taskWallTimeSeconds: 1,
+            maxConcurrentTasks: 1,
+            createdAt: new Date(),
+          }),
+        );
         const t = setupWithCoding({
           listRepos: vi.fn(),
           insertRepo,
@@ -2466,10 +2470,10 @@ describe("createTransport", () => {
       });
     });
 
-    it("add maps the driver's unique violation to repo_name_taken", async () => {
+    it("add maps the store's repo_name_taken", async () => {
       const transport = setupWithCoding({
         listRepos: vi.fn(),
-        insertRepo: vi.fn().mockRejectedValue(pgUniqueViolation("coding_repos_name_unique")),
+        insertRepo: vi.fn().mockResolvedValue(err({ kind: "repo_name_taken", name: "cogmo" })),
         getRepoByName: vi.fn(),
         countActiveTasksForRepo: vi.fn(),
         removeRepo: vi.fn(),

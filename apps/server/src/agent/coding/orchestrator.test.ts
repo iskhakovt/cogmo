@@ -85,18 +85,20 @@ const RESOURCE_LIMITS = { cpus: 0.5, memory_bytes: 256 * 1024 * 1024, pids: 64 }
 
 async function seedRepo(name = "cogmo"): Promise<CodingRepoRow> {
   return tx((trx) =>
-    store.insertRepo(trx, {
-      name,
-      localPath: repoPath,
-      defaultBranch: "main",
-      remoteUrl: "git@github.com:user/cogmo.git",
-      devcontainer: null,
-      allowedBackends: ["claude"],
-      verifyCommand: "true",
-      taskTokenBudget: 100_000,
-      taskWallTimeSeconds: 600,
-      maxConcurrentTasks: 1,
-    }),
+    store
+      .insertRepo(trx, {
+        name,
+        localPath: repoPath,
+        defaultBranch: "main",
+        remoteUrl: "git@github.com:user/cogmo.git",
+        devcontainer: null,
+        allowedBackends: ["claude"],
+        verifyCommand: "true",
+        taskTokenBudget: 100_000,
+        taskWallTimeSeconds: 600,
+        maxConcurrentTasks: 1,
+      })
+      .then(expectOk),
   );
 }
 
@@ -913,18 +915,20 @@ describe("runCodingTask", () => {
   it("worktree allocation failure → status=failed", async () => {
     // Repo with a non-existent local path so the clone errors out.
     const badRepo = await tx((trx) =>
-      store.insertRepo(trx, {
-        name: "bad-path-repo",
-        localPath: "/no/such/repo/path",
-        defaultBranch: "main",
-        remoteUrl: "x",
-        devcontainer: null,
-        allowedBackends: ["claude"],
-        verifyCommand: "true",
-        taskTokenBudget: 1,
-        taskWallTimeSeconds: 1,
-        maxConcurrentTasks: 1,
-      }),
+      store
+        .insertRepo(trx, {
+          name: "bad-path-repo",
+          localPath: "/no/such/repo/path",
+          defaultBranch: "main",
+          remoteUrl: "x",
+          devcontainer: null,
+          allowedBackends: ["claude"],
+          verifyCommand: "true",
+          taskTokenBudget: 1,
+          taskWallTimeSeconds: 1,
+          maxConcurrentTasks: 1,
+        })
+        .then(expectOk),
     );
     const badTask = await tx((trx) =>
       store.insertTask(trx, {

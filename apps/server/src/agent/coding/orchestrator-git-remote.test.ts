@@ -72,6 +72,7 @@ vi.mock("./worktree.js", () => ({
   removeWorktree: worktreeMocks.removeWorktree,
 }));
 
+import { expectOk } from "../../test/assertions.js";
 // `vi.mock` is hoisted by Vitest, so static imports below see the mocked
 // modules. Type imports are erased at compile time and don't trigger
 // module loading.
@@ -133,18 +134,20 @@ const fakeInngest = { send: vi.fn().mockResolvedValue(undefined) };
 
 async function seedRepo(): Promise<CodingRepoRow> {
   return tx((trx) =>
-    store.insertRepo(trx, {
-      name: "cogmo",
-      localPath: join(baseDir, "repo"),
-      defaultBranch: "main",
-      remoteUrl: "https://github.com/owner/cogmo.git",
-      devcontainer: null,
-      allowedBackends: ["claude"],
-      verifyCommand: "true",
-      taskTokenBudget: 100_000,
-      taskWallTimeSeconds: 600,
-      maxConcurrentTasks: 1,
-    }),
+    store
+      .insertRepo(trx, {
+        name: "cogmo",
+        localPath: join(baseDir, "repo"),
+        defaultBranch: "main",
+        remoteUrl: "https://github.com/owner/cogmo.git",
+        devcontainer: null,
+        allowedBackends: ["claude"],
+        verifyCommand: "true",
+        taskTokenBudget: 100_000,
+        taskWallTimeSeconds: 600,
+        maxConcurrentTasks: 1,
+      })
+      .then(expectOk),
   );
 }
 

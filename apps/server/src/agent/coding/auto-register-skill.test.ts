@@ -80,18 +80,20 @@ async function seedRepoAndTask(
   opts: { withWorktreeAssignment?: boolean; conversationId?: string } = {},
 ): Promise<{ taskId: string; branch: string }> {
   const repo = await tx((trx) =>
-    store.insertRepo(trx, {
-      name: repoName,
-      localPath: bareRepoPath,
-      defaultBranch: "main",
-      remoteUrl: upstreamPath,
-      devcontainer: null,
-      allowedBackends: ["claude"],
-      verifyCommand: "true",
-      taskTokenBudget: 100_000,
-      taskWallTimeSeconds: 60,
-      maxConcurrentTasks: 1,
-    }),
+    store
+      .insertRepo(trx, {
+        name: repoName,
+        localPath: bareRepoPath,
+        defaultBranch: "main",
+        remoteUrl: upstreamPath,
+        devcontainer: null,
+        allowedBackends: ["claude"],
+        verifyCommand: "true",
+        taskTokenBudget: 100_000,
+        taskWallTimeSeconds: 60,
+        maxConcurrentTasks: 1,
+      })
+      .then(expectOk),
   );
   const task = await tx((trx) =>
     store.insertTask(trx, {

@@ -2022,39 +2022,34 @@ export function createTransport(deps: {
         // it to `git push` — empty-string check is enough for now.
         const validation = validateRepoInput(input);
         if (validation) return err(validation);
-        try {
-          const row = await runInTx((tx) =>
-            codingStore.insertRepo(tx, {
-              name: input.name,
-              localPath: input.localPath,
-              defaultBranch: input.defaultBranch ?? "main",
-              remoteUrl: input.remoteUrl,
-              devcontainer: null,
-              allowedBackends: ["claude"],
-              // Slice-1 default: a no-op so plan-only tasks have something to
-              // record. Slice 4's verify+push step needs a real value before
-              // it can use the repo. /repo edit (later) or SQL update for now.
-              verifyCommand: input.verifyCommand ?? "true",
-              taskTokenBudget: 200_000,
-              taskWallTimeSeconds: 1800,
-              maxConcurrentTasks: 1,
-              ...(input.identityName !== undefined && { identityName: input.identityName }),
-            }),
-          );
-          return ok({
+        const inserted = await runInTx((tx) =>
+          codingStore.insertRepo(tx, {
+            name: input.name,
+            localPath: input.localPath,
+            defaultBranch: input.defaultBranch ?? "main",
+            remoteUrl: input.remoteUrl,
+            devcontainer: null,
+            allowedBackends: ["claude"],
+            // Slice-1 default: a no-op so plan-only tasks have something to
+            // record. Slice 4's verify+push step needs a real value before
+            // it can use the repo. /repo edit (later) or SQL update for now.
+            verifyCommand: input.verifyCommand ?? "true",
+            taskTokenBudget: 200_000,
+            taskWallTimeSeconds: 1800,
+            maxConcurrentTasks: 1,
+            ...(input.identityName !== undefined && { identityName: input.identityName }),
+          }),
+        );
+        return inserted
+          .map((row) => ({
             id: row.id,
             name: row.name,
             localPath: row.localPath,
             defaultBranch: row.defaultBranch,
             remoteUrl: row.remoteUrl,
             verifyCommand: row.verifyCommand,
-          });
-        } catch (e) {
-          if (findPostgresUniqueViolation(e)) {
-            return err({ code: "repo_name_taken" as const, name: input.name });
-          }
-          throw e;
-        }
+          }))
+          .mapErr((e) => ({ code: "repo_name_taken" as const, name: e.name }));
       },
       async cloneAndAdd(input) {
         if (!codingStore) return err({ code: "sandbox_disabled" as const });
@@ -2115,36 +2110,31 @@ export function createTransport(deps: {
           });
         }
 
-        try {
-          const row = await runInTx((tx) =>
-            codingStore.insertRepo(tx, {
-              name: input.name,
-              localPath,
-              defaultBranch: input.defaultBranch ?? "main",
-              remoteUrl: input.remoteUrl,
-              devcontainer: null,
-              allowedBackends: ["claude"],
-              verifyCommand: input.verifyCommand ?? "true",
-              taskTokenBudget: 200_000,
-              taskWallTimeSeconds: 1800,
-              maxConcurrentTasks: 1,
-              ...(input.identityName !== undefined && { identityName: input.identityName }),
-            }),
-          );
-          return ok({
+        const inserted = await runInTx((tx) =>
+          codingStore.insertRepo(tx, {
+            name: input.name,
+            localPath,
+            defaultBranch: input.defaultBranch ?? "main",
+            remoteUrl: input.remoteUrl,
+            devcontainer: null,
+            allowedBackends: ["claude"],
+            verifyCommand: input.verifyCommand ?? "true",
+            taskTokenBudget: 200_000,
+            taskWallTimeSeconds: 1800,
+            maxConcurrentTasks: 1,
+            ...(input.identityName !== undefined && { identityName: input.identityName }),
+          }),
+        );
+        return inserted
+          .map((row) => ({
             id: row.id,
             name: row.name,
             localPath: row.localPath,
             defaultBranch: row.defaultBranch,
             remoteUrl: row.remoteUrl,
             verifyCommand: row.verifyCommand,
-          });
-        } catch (e) {
-          if (findPostgresUniqueViolation(e)) {
-            return err({ code: "repo_name_taken" as const, name: input.name });
-          }
-          throw e;
-        }
+          }))
+          .mapErr((e) => ({ code: "repo_name_taken" as const, name: e.name }));
       },
       async remove(name) {
         if (!codingStore) return err({ code: "sandbox_disabled" as const });
