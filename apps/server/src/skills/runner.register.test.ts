@@ -693,7 +693,9 @@ tier: wasm
     });
     await runner.register({ branch: "skill/echo", origin: OWNER });
 
-    const result = await runner.invoke({ name: "echo", inputs: { x: 7 }, runAs: RUN_AS });
+    const result = (
+      await runner.invoke({ name: "echo", inputs: { x: 7 }, runAs: RUN_AS })
+    )._unsafeUnwrap();
     expect(result.status).toBe("success");
     expect(result.output).toEqual({ echo: 8 });
   });
@@ -712,7 +714,9 @@ tier: wasm
     await r1.register({ branch: "skill/echo", origin: OWNER });
 
     const r2 = await makeRunner();
-    const result = await r2.invoke({ name: "echo", inputs: { x: 7 }, runAs: RUN_AS });
+    const result = (
+      await r2.invoke({ name: "echo", inputs: { x: 7 }, runAs: RUN_AS })
+    )._unsafeUnwrap();
     expect(result.status).toBe("success");
     expect(result.output).toEqual({ echo: 8 });
   });
@@ -726,7 +730,9 @@ tier: wasm
       body: ECHO_BODY_BAD_OUTPUT,
     });
     await runner.register({ branch: "skill/bad-out", origin: OWNER });
-    const result = await runner.invoke({ name: "bad-out", inputs: { x: 1 }, runAs: RUN_AS });
+    const result = (
+      await runner.invoke({ name: "bad-out", inputs: { x: 1 }, runAs: RUN_AS })
+    )._unsafeUnwrap();
     expect(result.status).toBe("error");
     expect(result.error).toMatch(/output failed schema/);
   });

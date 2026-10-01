@@ -13,8 +13,8 @@ export type { ManifestParseError, ParsedManifest } from "./manifest.js";
 export { parseManifest } from "./manifest.js";
 export { bootstrapSkillsRepo } from "./repo.js";
 export {
-  InputValidationError,
   type RegisterResult,
+  type SkillInvokeRejection,
   type SkillRunner,
   SkillRunnerImpl,
   type SkillRunResult,

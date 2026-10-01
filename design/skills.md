@@ -635,7 +635,7 @@ interface SkillRunner {
   enable(opts: { name: string; origin: SkillDeployOrigin }): Promise<EnableResult>;
   list(): Promise<readonly SkillSummary[]>;
   listAll(): Promise<readonly SkillSummary[]>;  // includes disabled
-  invoke(opts: { name: string; inputs: unknown; runAs: SkillRunAs }): Promise<SkillRunResult>;
+  invoke(opts: { name: string; inputs: unknown; runAs: SkillRunAs }): Promise<Result<SkillRunResult, SkillInvokeRejection>>;
 }
 
 type SkillDeployOrigin =
@@ -662,6 +662,15 @@ type EnableResult =
   | { kind: "enabled"; name: string; gitSha: string }
   | { kind: "already_enabled"; name: string; gitSha: string }
   | { kind: "rejected"; name: string; reason: "not_found" | "no_live_deploy" };
+
+// Why `invoke` declined to run; nothing executed. A skill run that fails is
+// not a rejection: it is a `SkillRunResult` with `status: "error"`.
+type SkillInvokeRejection =
+  | { kind: "not_found"; name: string }
+  | { kind: "disabled"; name: string }
+  | { kind: "invalid_inputs"; name: string; issues: readonly string[] }
+  | { kind: "sandbox_unavailable"; name: string }
+  | { kind: "inflight"; name: string; runId: string };  // see Exactly-once invocation
 ```
 
 **Approval-gate guard on `enable`.** Re-enabling refuses (`reason: "no_live_deploy"`) when the skill's current `gitSha` has no `skill_deploys` row with `status = 'live'`. Without the guard, a denied first deploy (`skills.disabled = true`, `skill_deploys.status = 'denied'` at the rejected sha) could be smuggled past the approval gate via `/disable foo` then `/enable foo` — flipping `disabled = false` would activate code that never passed human review. Rolled-back skills still pass because the prior live deploy row remains in the append-only history.
@@ -1267,7 +1276,7 @@ UPDATE recovery_point='finished', status='success'|'error'  ← transitionToFini
 | `kind='new'` (no prior row) | Standard flow: execute → executed → finished |
 | `recovered`, `recovery_point='finished'` | Return cached `SkillRunResult` reconstructed from the row. Runtime never touched. |
 | `recovered`, `recovery_point='executed'` | Skip execute, replay output validation against stored output, transition to `finished`. Persist-failure retries land here. |
-| `recovered`, `recovery_point='started'` | In-flight: either the prior attempt crashed mid-execute, or another worker is currently executing this same key. The runner can't tell those apart from the row state alone. Throw `SkillInflightError` — conservative refusal in both cases, since re-executing risks double-firing non-idempotent side effects (and in the concurrent case, the original is still running and will eventually finalize). Operator inspects. Future manifest flag `idempotent_invocation: true` would opt into optimistic re-execute. A heartbeat predicate (`created_at < now() - interval 'N min'`) would let the runner discriminate at runtime; deferred. |
+| `recovered`, `recovery_point='started'` | In-flight: either the prior attempt crashed mid-execute, or another worker is currently executing this same key. The runner can't tell those apart from the row state alone. Reject as `inflight`, naming the run — conservative refusal in both cases, since re-executing risks double-firing non-idempotent side effects (and in the concurrent case, the original is still running and will eventually finalize). Operator inspects. Future manifest flag `idempotent_invocation: true` would opt into optimistic re-execute. A heartbeat predicate (`created_at < now() - interval 'N min'`) would let the runner discriminate at runtime; deferred. |
 
 **Caller key conventions** (deterministic per logical fire):
 
@@ -1310,7 +1319,7 @@ interface SkillRunner {
   deregister(opts: { name: string }): Promise<DeregisterResult>;
   enable(opts: { name: string; origin: SkillDeployOrigin }): Promise<EnableResult>;
   list(): Promise<readonly SkillSummary[]>;
-  invoke(opts: { name: string; inputs: unknown; runAs: SkillRunAs }): Promise<SkillRunResult>;
+  invoke(opts: { name: string; inputs: unknown; runAs: SkillRunAs }): Promise<Result<SkillRunResult, SkillInvokeRejection>>;
 }
 ```
 

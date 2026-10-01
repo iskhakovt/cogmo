@@ -121,6 +121,45 @@ export interface SkillRunResult {
   error?: string;
 }
 
+/**
+ * Why `invoke` declined to run a skill. Nothing executed. Only `inflight`
+ * has a run row: the one a prior attempt under the same idempotency key
+ * left at `recovery_point='started'`. The runner can't tell a crashed
+ * attempt from one still executing, and re-executing either risks firing
+ * the skill's side effects twice, so it declines and names the row for an
+ * operator to inspect (design/skills.md → Exactly-once invocation).
+ */
+export type SkillInvokeRejection =
+  | { kind: "not_found"; name: string }
+  | { kind: "disabled"; name: string }
+  | { kind: "invalid_inputs"; name: string; issues: readonly string[] }
+  /** A `tier: container` skill on a deployment with no sandbox configured. */
+  | { kind: "sandbox_unavailable"; name: string }
+  | { kind: "inflight"; name: string; runId: string };
+
+/** One line naming the rejection, for logs and operator-facing output. */
+export function describeInvokeRejection(rejection: SkillInvokeRejection): string {
+  return match(rejection)
+    .with({ kind: "not_found" }, ({ name }) => `skill not found: ${name}`)
+    .with({ kind: "disabled" }, ({ name }) => `skill is disabled: ${name}`)
+    .with(
+      { kind: "invalid_inputs" },
+      ({ name, issues }) =>
+        `inputs failed schema validation for skill '${name}': ${issues.join("; ")}`,
+    )
+    .with(
+      { kind: "sandbox_unavailable" },
+      ({ name }) =>
+        `skill '${name}' is tier=container but no sandbox is configured (set SANDBOX_RUNTIME)`,
+    )
+    .with(
+      { kind: "inflight" },
+      ({ name, runId }) =>
+        `skill '${name}' has an in-flight run (id=${runId}) — prior attempt may have crashed mid-execute or another worker is currently executing`,
+    )
+    .exhaustive();
+}
+
 export interface SkillSummary {
   name: string;
   tier: SkillTier;
@@ -311,7 +350,7 @@ export interface SkillRunner {
     idempotencyKey?: string;
     /** Who the run acts for: `ctx.user()`, and the services `ctx.memory` / `ctx.files` reach. */
     runAs: SkillRunAs;
-  }): Promise<SkillRunResult>;
+  }): Promise<Result<SkillRunResult, SkillInvokeRejection>>;
 }
 
 /**
@@ -1228,44 +1267,34 @@ export class SkillRunnerImpl implements SkillRunner {
     trigger?: SkillRunTrigger;
     idempotencyKey?: string;
     runAs: SkillRunAs;
-  }): Promise<SkillRunResult> {
+  }): Promise<Result<SkillRunResult, SkillInvokeRejection>> {
+    // Empty-string idempotency keys would all collide on the UNIQUE
+    // constraint as if they were the same key. Keys are built by code,
+    // never taken from input, so an empty one is a caller bug.
+    if (opts.idempotencyKey === "") {
+      throw new Error(
+        `invoke: idempotencyKey must be non-empty when provided (skill '${opts.name}')`,
+      );
+    }
+
     // --- Pre-flight (cheap, idempotent reads; re-runs freely on retry) ---
-    // Typed-error throws here happen *before* any DB write. The cron-fire
-    // handler etc. catch them at the function-handler level and return
-    // non-retrying skipped results without touching state.
-    const skill = await this.#runInTx((tx) => this.#store.getSkillByName(tx, opts.name));
-    if (!skill) {
-      throw new SkillNotFoundError(opts.name);
-    }
-    if (skill.disabled) {
-      throw new SkillDisabledError(opts.name);
-    }
+    // A rejection here precedes any DB write.
+    const name = opts.name;
+    const skill = await this.#runInTx((tx) => this.#store.getSkillByName(tx, name));
+    if (!skill) return err({ kind: "not_found", name });
+    if (skill.disabled) return err({ kind: "disabled", name });
 
     const cached = await this.#loadSourceForRow(skill);
 
-    const validInputs = cached.inputsValidator(opts.inputs);
-    if (!validInputs) {
-      const errors = (cached.inputsValidator.errors ?? []).map(
+    if (!cached.inputsValidator(opts.inputs)) {
+      const issues = (cached.inputsValidator.errors ?? []).map(
         (e) => `${e.instancePath || "<root>"} ${e.message ?? "invalid"}`,
       );
-      throw new InputValidationError(
-        `inputs failed schema validation for skill '${opts.name}': ${errors.join("; ")}`,
-      );
+      return err({ kind: "invalid_inputs", name, issues });
     }
 
     if (skill.tier === "container" && !this.#sandbox) {
-      throw new SandboxUnavailableError(opts.name);
-    }
-
-    // Empty-string idempotency keys would all collide on the UNIQUE
-    // constraint as if they were the same key — a silent contract bug
-    // for any caller that constructs a key from optional fields and
-    // forgets to validate. Refuse explicitly so the failure surfaces at
-    // the API boundary, not deep in the recovery branch.
-    if (opts.idempotencyKey === "") {
-      throw new InputValidationError(
-        `idempotencyKey must be a non-empty string when provided (skill '${opts.name}')`,
-      );
+      return err({ kind: "sandbox_unavailable", name });
     }
 
     const trigger: SkillRunTrigger = opts.trigger ?? "manual";
@@ -1313,16 +1342,10 @@ export class SkillRunnerImpl implements SkillRunner {
           { runId, skillName: opts.name, idempotencyKey },
           "replaying cached terminal skill run (recovery_point=finished)",
         );
-        return reconstructFinishedResult(runId, row.status, savedOutput, savedError);
+        return ok(reconstructFinishedResult(runId, row.status, savedOutput, savedError));
       }
       if (kind === "recovered" && recoveryPoint === "started") {
-        // The row is in flight: either a prior attempt crashed
-        // mid-execute, or another worker is currently executing this
-        // same key. The runner can't tell those apart — both leave the
-        // row at `recovery_point='started'`. Conservative refusal in
-        // both cases: re-executing risks double-firing non-idempotent
-        // side effects (ctx.memory.write, outbound HTTP, etc.).
-        throw new SkillInflightError(opts.name, runId);
+        return err({ kind: "inflight", name, runId });
       }
       // kind === 'new' (fresh start) OR kind === 'recovered' &&
       // recovery_point === 'executed' (execute succeeded last time, just
@@ -1418,7 +1441,7 @@ export class SkillRunnerImpl implements SkillRunner {
       }),
     );
 
-    return reconstructFinishedResult(runId, finalStatus, finalOutput, finalError);
+    return ok(reconstructFinishedResult(runId, finalStatus, finalOutput, finalError));
   }
 
   /**
@@ -1740,7 +1763,7 @@ export class SkillRunnerImpl implements SkillRunner {
     const source = await readSkillSource(this.#skillsRepoPath, row.gitSha);
     if (source.isErr()) {
       throw new Error(
-        `no readable source for skill '${row.name}' at ${row.gitSha} (${source.error.kind}) — repo and DB are out of sync`,
+        `no source for skill '${row.name}' at ${row.gitSha} (${source.error.kind}) — repo and DB are out of sync`,
       );
     }
     const { manifest, body } = source.value;
@@ -1845,90 +1868,6 @@ export class SkillRunnerImpl implements SkillRunner {
       pendingId: result.deploy.id,
       ...(manifest.schedule !== undefined && { schedule: manifest.schedule }),
     };
-  }
-}
-
-export class InputValidationError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "InputValidationError";
-  }
-}
-
-/**
- * `invoke` was called with a name that doesn't resolve to a skills row.
- * Discriminated via `instanceof` rather than substring matching against
- * `error.message` — call sites (the cron-fire-handler is the only one
- * today) translate it into their own skipped-result reason without
- * coupling to message wording.
- */
-export class SkillNotFoundError extends Error {
-  constructor(name: string) {
-    super(`skill not found: ${name}`);
-    this.name = "SkillNotFoundError";
-  }
-}
-
-/**
- * `invoke` was called on a row whose `disabled = true`. Same rationale as
- * {@link SkillNotFoundError}: `instanceof` discrimination, not string match.
- */
-export class SkillDisabledError extends Error {
-  constructor(name: string) {
-    super(`skill is disabled: ${name}`);
-    this.name = "SkillDisabledError";
-  }
-}
-
-/**
- * `invoke` was called on a `tier: container` skill but no sandbox is wired
- * (e.g. `SANDBOX_RUNTIME` unset in the deployment). Permanent
- * misconfiguration — won't self-heal between retry attempts. The
- * cron-fire-handler discriminates this via `instanceof` to short-circuit
- * the retry budget into a `skipped: sandbox_unavailable` result, same
- * shape as {@link InputValidationError}'s `invalid_inputs` skip.
- */
-export class SandboxUnavailableError extends Error {
-  constructor(name: string) {
-    super(`skill '${name}' is tier=container but no sandbox is configured (set SANDBOX_RUNTIME)`);
-    this.name = "SandboxUnavailableError";
-  }
-}
-
-/**
- * `runner.invoke` recovered an existing run row whose `recovery_point` is
- * still `started`. Two situations produce this state and the runner can't
- * tell them apart from the row alone:
- *
- *   1. **Crashed mid-execute.** Prior attempt died after the INSERT but
- *      before the executed-transition wrote back. No worker is doing the
- *      work — the row is an orphan and the caller can retry once
- *      operators clear it (or the future `idempotent_invocation: true`
- *      manifest flag opts into optimistic re-execute).
- *   2. **Concurrent in-flight.** Another worker is actively executing
- *      this same key right now; the bus-dedup window was crossed and the
- *      retry landed on a live row. No crash, just contention.
- *
- * The conservative default in both cases is to refuse re-execution and
- * surface a typed error: re-executing case (1) is a recovery, but in
- * case (2) it would double-fire side effects (ctx.memory.write, outbound
- * HTTP, file writes) while the original is still in flight. The Stripe
- * pattern this implements takes the same posture — see
- * brandur.org/idempotency-keys → "Resumed transactions."
- *
- * Carries the run `runId` so operators can inspect. Discriminating
- * crash from concurrency at runtime would need a heartbeat (e.g.
- * `recovery_point='started' AND created_at < now() - interval 'N min'`);
- * deferred until either failure mode shows up in practice.
- */
-export class SkillInflightError extends Error {
-  readonly runId: string;
-  constructor(name: string, runId: string) {
-    super(
-      `skill '${name}' has an in-flight run (id=${runId}) — prior attempt may have crashed mid-execute or another worker is currently executing`,
-    );
-    this.name = "SkillInflightError";
-    this.runId = runId;
   }
 }
 

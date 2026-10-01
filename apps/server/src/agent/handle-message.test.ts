@@ -1,5 +1,5 @@
 import { NonRetriableError } from "inngest";
-import { err } from "neverthrow";
+import { err, ok } from "neverthrow";
 import * as R from "remeda";
 import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
@@ -1806,7 +1806,7 @@ describe("createHandleMessage", () => {
           gitSha: "abc1234",
         },
       ]);
-      skillRunner.invoke.mockResolvedValue({ runId: "run-1", status: "success", output: {} });
+      skillRunner.invoke.mockResolvedValue(ok({ runId: "run-1", status: "success", output: {} }));
       const deps = mockDeps({
         agentStore: mockAgentStore({
           getProfile: vi.fn().mockResolvedValue(profileWithAllTools()),

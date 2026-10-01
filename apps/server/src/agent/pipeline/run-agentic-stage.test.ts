@@ -1,5 +1,5 @@
 import { NonRetriableError } from "inngest";
-import { err } from "neverthrow";
+import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { z } from "zod";
@@ -605,7 +605,7 @@ describe("runAgenticStage", () => {
           gitSha: "abc1234",
         },
       ]);
-      skillRunner.invoke.mockResolvedValue({ runId: "run-1", status: "success", output: {} });
+      skillRunner.invoke.mockResolvedValue(ok({ runId: "run-1", status: "success", output: {} }));
       skillRunner.register.mockResolvedValue({
         name: "echo",
         riskTier: "notify",
