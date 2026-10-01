@@ -2689,6 +2689,87 @@ describe("OpenAICompatibleProvider", () => {
       ]);
     });
 
+    it("merges two multipart messages, joining the text that meets across them", async () => {
+      // Both sides are parts arrays, and so is the merge the continuation
+      // prompt joins. The adapter puts a row's text before its images, so
+      // every join here meets an image and needs no separator.
+      await setup().chat({
+        model: "m",
+        system: "",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "first" },
+              { type: "image", source: "url", data: "https://x/a.png", mediaType: "image/png" },
+            ],
+          },
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "second" },
+              { type: "image", source: "url", data: "https://x/b.png", mediaType: "image/png" },
+            ],
+          },
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "Please complete your response.", harness: "continuation" },
+            ],
+          },
+        ],
+      });
+
+      expect(firstCreateArgs().messages).toEqual([
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "first" },
+            { type: "image_url", image_url: { url: "https://x/a.png" } },
+            { type: "text", text: "second" },
+            { type: "image_url", image_url: { url: "https://x/b.png" } },
+            { type: "text", text: "Please complete your response." },
+          ],
+        },
+      ]);
+    });
+
+    it("joins a parts message ending in text to a following parts message", async () => {
+      // A row whose only part is text still goes as a string, so a parts side
+      // ending in text needs a merged pair as its left side.
+      await setup().chat({
+        model: "m",
+        system: "",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "image", source: "url", data: "https://x/a.png", mediaType: "image/png" },
+            ],
+          },
+          { role: "user", content: "caption" },
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "and this" },
+              { type: "image", source: "url", data: "https://x/b.png", mediaType: "image/png" },
+            ],
+          },
+        ],
+      });
+
+      expect(firstCreateArgs().messages).toEqual([
+        {
+          role: "user",
+          content: [
+            { type: "image_url", image_url: { url: "https://x/a.png" } },
+            { type: "text", text: "caption\n\nand this" },
+            { type: "image_url", image_url: { url: "https://x/b.png" } },
+          ],
+        },
+      ]);
+    });
+
     it("leaves a user message after tool results as its own message", async () => {
       await setup().chat({
         model: "m",
