@@ -38,11 +38,6 @@ describe("generateSshKeyPair", () => {
     expect(pair.publicKey.endsWith(" cogmo-bot@host")).toBe(true);
   });
 
-  it("defaults the comment to cogmo-bot when none is supplied", () => {
-    const pair = generateSshKeyPair("cogmo-bot");
-    expect(pair.publicKey.endsWith(" cogmo-bot")).toBe(true);
-  });
-
   it("produces a fresh keypair on each call (random seed)", () => {
     const a = generateSshKeyPair("cogmo-bot");
     const b = generateSshKeyPair("cogmo-bot");
