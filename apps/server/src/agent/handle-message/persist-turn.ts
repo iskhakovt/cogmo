@@ -41,13 +41,12 @@ export async function persistTurn(
   deps: PersistTurnDeps,
   args: PersistTurnArgs,
 ): Promise<string> {
-  const { conversationId, snapshot, result } = args;
+  const { conversationId, snapshot, result, priorCooldown } = args;
 
   // Half-open success: when the entry guard saw an elapsed cooldown
   // and admitted this probe turn, clear `cooldown_state` in the same
   // transaction. Strict prior-cooldown gating avoids a per-turn
   // pointless UPDATE on Closed conversations.
-  const wasCoolingDown = args.priorCooldown !== null;
   const assistantMsg = await step.run("persist-new-messages", async () => {
     const persisted = await deps.runInTx(async (tx) => {
       const inserted = await deps.agentStore.insertMessages(tx, {
@@ -59,7 +58,7 @@ export async function persistTurn(
         lastMessageInputTokens: result.usage.inputTokens,
         lastMessageOutputTokens: result.usage.outputTokens,
       });
-      if (wasCoolingDown) {
+      if (priorCooldown !== null) {
         await deps.agentStore.clearCooldown(tx, conversationId);
       }
       return inserted;
@@ -89,17 +88,13 @@ export async function persistTurn(
   // Half-open success: cooldown was cleared inside the persist tx.
   // Emit `conversation/cooldown/cleared` as a separate durable step
   // AFTER persist commits so the event can't fire on a rolled-back
-  // tx. Same pattern as the degrade emit below. Pre-tx
-  // `cooldownState` carries `lastErroredAt` for the elapsed
+  // tx. Same pattern as the degrade emit below. The pre-tx
+  // `priorCooldown` carries `lastErroredAt` for the elapsed
   // calculation. Explicit bus-dedup `id` keyed on the cooldown
   // being cleared protects against `step.sendEvent`'s at-least-once
   // delivery contract — a retry after the send registers but before
   // the cache write would otherwise double-fire downstream
   // consumers. See design/agent-resilience.md → Telemetry.
-  //
-  // Narrow once via the local — `wasCoolingDown` is the same
-  // predicate but doesn't help TS narrow `cooldownState`.
-  const priorCooldown = args.priorCooldown;
   if (priorCooldown !== null) {
     await step.sendEvent(
       "emit-cooldown-cleared",
