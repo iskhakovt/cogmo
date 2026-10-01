@@ -74,7 +74,7 @@ export function createCodingService(
   return {
     async delegate(input: DelegateInput): Promise<DelegateResult> {
       if (!deps.sandboxAvailable) {
-        throw new Error(
+        return rejected(
           "Coding delegation is unavailable — the sandbox module is not initialized. " +
             "Set SANDBOX_RUNTIME (sysbox in prod, runc for dev/CI) and restart Cogmo.",
         );
@@ -88,12 +88,12 @@ export function createCodingService(
         // not in a "no /repo add yet" state — point them at the dedicated
         // CLI rather than the generic registry surface.
         if (input.repoName === "skills") {
-          throw new Error(
+          return rejected(
             "Skills repo isn't configured yet. Run `cogmo migrate-skills-remote` " +
               "(or re-run `cogmo setup`) to attach a remote and register the row.",
           );
         }
-        throw new Error(
+        return rejected(
           `Repo not registered: ${input.repoName}. Use /repo list to see available repos.`,
         );
       }
@@ -107,13 +107,10 @@ export function createCodingService(
         }),
       );
       if (admit.kind === "rejected") {
-        return {
-          taskId: null,
-          status: "rejected",
-          reason:
-            `Repo "${repo.name}" already has ${admit.active} active task(s) ` +
+        return rejected(
+          `Repo "${repo.name}" already has ${admit.active} active task(s) ` +
             `(limit ${repo.maxConcurrentTasks}). Wait for one to finish or cancel it.`,
-        };
+        );
       }
       const { task } = admit;
       if (admit.kind === "recovered") {
@@ -139,4 +136,8 @@ export function createCodingService(
       return { taskId: task.id, status: "queued" };
     },
   };
+}
+
+function rejected(reason: string): DelegateResult {
+  return { taskId: null, status: "rejected", reason };
 }
