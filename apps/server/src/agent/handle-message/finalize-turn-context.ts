@@ -60,9 +60,7 @@ export async function finalizeTurnContext(
 ): Promise<FinalizedTurnContext> {
   const { transcript, continuing } = args;
   const { history: turnHistory, turn } = transcript;
-  let historyMessages = args.messages;
-
-  const turnPosition = findTurnContext(historyMessages, args.provisionalTurnContext);
+  const turnPosition = findTurnContext(args.messages, args.provisionalTurnContext);
   if (turnPosition === -1) throw new Error("compaction dropped the turn's own message");
 
   // A summary this turn stored moves the history's start, so the turn opens
@@ -79,22 +77,22 @@ export async function finalizeTurnContext(
             historyStart: epochStart,
           }),
         );
-  if (epoch.openedBy === turn.id) {
-    historyMessages = stripThinkingBefore(historyMessages, turnPosition);
-  }
+  const opensEpoch = epoch.openedBy === turn.id;
+  const historyMessages = opensEpoch
+    ? stripThinkingBefore(args.messages, turnPosition)
+    : args.messages;
 
   // Deduplicated after compaction: before it, a memory or an announcement
   // whose only earlier copy compaction then removes would be dropped. An
   // opening turn's snapshot shows core memory as it is, so it announces
   // nothing.
   const earlierInView = historyMessages.toSpliced(turnPosition, 1);
-  const announced =
-    epoch.openedBy === turn.id
-      ? []
-      : unannounced(
-          args.loadedSystemPrompt.coreMemoryChanges,
-          announcedInView(earlierInView, turnHistory),
-        );
+  const announced = opensEpoch
+    ? []
+    : unannounced(
+        args.loadedSystemPrompt.coreMemoryChanges,
+        announcedInView(earlierInView, turnHistory),
+      );
   const renderedTurnContext = await step.run("render-turn-context", () =>
     storeTurnContext(
       { runInTx: deps.runInTx, agentStore: deps.agentStore },
