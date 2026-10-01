@@ -345,6 +345,19 @@ describe("VeniceImageProvider.generate", () => {
 
     await expect(provider.generate({ model: "m", prompt: "p" })).rejects.toThrow(/no image data/);
   });
+
+  it("throws rather than decoding a body whose images field isn't a list", async () => {
+    const fetchFn = mockFetch(() => jsonResponse({ images: "aGVsbG8=" }));
+
+    const provider = new VeniceImageProvider({
+      apiKey: "sk",
+      baseUrl: "https://api.venice.ai/api/v1",
+      defaults: {},
+      fetch: fetchFn,
+    });
+
+    await expect(provider.generate({ model: "m", prompt: "p" })).rejects.toThrow(/no image data/);
+  });
 });
 
 describe("venicePixelSize", () => {
