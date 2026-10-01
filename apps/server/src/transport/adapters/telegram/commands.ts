@@ -2489,7 +2489,8 @@ export async function handleLearned(
  *
  * Respects the same min-message gate (`MIN_MESSAGES_FOR_EXTRACTION = 4`)
  * as the autonomous path — too-short conversations reply with a clear
- * "not enough yet" message rather than silently no-op.
+ * "not enough yet" message rather than silently no-op — and says so when
+ * nothing arrived since the Observer last extracted.
  */
 export async function handleReflect(
   transport: Transport,
@@ -2520,6 +2521,18 @@ export async function handleReflect(
             // exception so the command doesn't crash the bot.
             "Couldn't load the conversation. Try /sessions to confirm it's there.";
       await ctx.reply(message);
+      return;
+    }
+    case "nothing_new": {
+      const { drained, withheld, deferredToFirstParty, eventId } = outcome;
+      const drain =
+        drained + withheld + deferredToFirstParty === 0
+          ? ""
+          : ` Memories: ${drained} drained` +
+            (withheld > 0 ? `, ${withheld} withheld` : "") +
+            (deferredToFirstParty > 0 ? `, ${deferredToFirstParty} deferred` : "") +
+            `.\n/learned ${eventId} for the full breakdown.`;
+      await ctx.reply(`Nothing new since the last reflection.${drain}`);
       return;
     }
     case "processed": {

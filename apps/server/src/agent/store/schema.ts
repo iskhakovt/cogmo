@@ -1,5 +1,6 @@
 import { desc, type SQL, type SQLWrapper, sql } from "drizzle-orm";
 import {
+  type AnyPgColumn,
   boolean,
   check,
   foreignKey,
@@ -701,6 +702,19 @@ export const conversations = pgTable(
      * (`/voice clear`) restores profile-level behaviour.
      */
     voiceMode: voiceMode("voice_mode"),
+    /**
+     * The Observer's cursors, one per extraction phase: the last message each
+     * phase extracted from, NULL until it has. A phase's next window is the
+     * messages after its cursor. See design/evolution.md → Observation Window.
+     */
+    correctionsObservedThrough: uuid("corrections_observed_through").references(
+      (): AnyPgColumn => messages.id,
+      { onDelete: "set null" },
+    ),
+    memoriesObservedThrough: uuid("memories_observed_through").references(
+      (): AnyPgColumn => messages.id,
+      { onDelete: "set null" },
+    ),
     createdAt: ts(),
   },
   (t) => [
@@ -939,14 +953,13 @@ export const steeringRules = pgTable(
     // instructions stay out of another's prompt.
     userId: uuid("user_id").references(() => users.id, { onDelete: "cascade" }),
     quote: text("quote"), // the user's words `rule_set` quoted; set on every instruction row
-    // NULL = never contradicted while learning. The conversation whose
-    // contradiction reset the learning rule's count, then the one whose
-    // contradiction retired it; one from the recorded conversation changes
-    // nothing, so a retried or repeated extraction of one conversation applies
-    // once. Any other retirement, and a deleted conversation, clears it; the
-    // latter only costs one more reset.
-    contradictedInConversationId: uuid("contradicted_in_conversation_id").references(
-      () => conversations.id,
+    // NULL = never contradicted while learning. The last message of the
+    // Observer chunk whose contradiction reset the learning rule's count, then
+    // of the one whose contradiction retired it; one from the recorded chunk
+    // changes nothing, so a re-run extraction step applies once. Any other
+    // retirement clears it.
+    contradictedThroughMessageId: uuid("contradicted_through_message_id").references(
+      () => messages.id,
       { onDelete: "set null" },
     ),
     createdAt: ts(),
@@ -962,10 +975,10 @@ export const steeringRules = pgTable(
     uniqueIndex("uq_steering_rules_instruction")
       .on(...INSTRUCTION_RULE_KEY)
       .where(LIVE_INSTRUCTION_RULE),
-    // For the FK's ON DELETE SET NULL: a conversation delete finds its rows.
-    index("idx_steering_rules_contradicted_in_conversation")
-      .on(t.contradictedInConversationId)
-      .where(sql`contradicted_in_conversation_id IS NOT NULL`),
+    // For the FK's ON DELETE SET NULL: a message delete finds its rows.
+    index("idx_steering_rules_contradicted_through_message")
+      .on(t.contradictedThroughMessageId)
+      .where(sql`contradicted_through_message_id IS NOT NULL`),
   ],
 );
 

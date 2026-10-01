@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Transactor } from "../../db/index.js";
 import type { LlmProvider } from "../../llm/provider.js";
-import type { Message } from "../../llm/types.js";
 import type { MemoryProvider } from "../../memory/provider.js";
 import type { TransportStore } from "../../transport/store/index.js";
 import type { AgentStore } from "../store/index.js";
@@ -14,10 +13,6 @@ const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
 const CONV_ID = "11111111-1111-7111-8111-111111111111";
 const USER_ID = "22222222-2222-7222-8222-222222222222";
 const PROFILE_ID = "33333333-3333-7333-8333-333333333333";
-
-function emptyHistory(): (Message & { id: string })[] {
-  return [];
-}
 
 describe("triggerReflection", () => {
   it("short-circuits when the conversation is not found", async () => {
@@ -62,7 +57,11 @@ describe("triggerReflection", () => {
       streamEdits: true,
       codingAutoapproveMode: "off",
     });
-    agentStore.listMessages.mockResolvedValue(emptyHistory());
+    agentStore.getObserverBounds.mockResolvedValue({
+      messageCount: 0,
+      lastMessageId: null,
+      observedThrough: { corrections: null, memories: null },
+    });
     const result = await triggerReflection(CONV_ID, {
       runInTx: fakeRunInTx,
       agentStore,

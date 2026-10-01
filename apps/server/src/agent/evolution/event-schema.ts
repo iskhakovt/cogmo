@@ -88,6 +88,13 @@ export const EvolutionEventPayloadSchema = z.object({
   durationMs: z.number().int().nonnegative().optional(),
   /** Phases that failed after their step retries, in run order; their counts above are the empty fallback. Absent on older rows: unknown, not `[]`. */
   failedPhases: z.array(ObserverPhaseSchema).optional(),
+  /** The messages each extraction phase took on after its cursor; 0 for a phase with nothing new. Absent on older rows. */
+  newMessages: z
+    .object({
+      corrections: z.number().int().nonnegative(),
+      memories: z.number().int().nonnegative(),
+    })
+    .optional(),
 });
 export type EvolutionEventPayload = z.infer<typeof EvolutionEventPayloadSchema>;
 

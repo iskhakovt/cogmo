@@ -267,6 +267,14 @@ export type TriggerReflectionOutcome =
   | { status: "no_session" }
   | { status: "skipped"; reason: "conversation_not_found" | "profile_not_found" | "too_short" }
   | {
+      /** Neither extraction phase had a message after its cursor; the drain still ran. */
+      status: "nothing_new";
+      eventId: string;
+      drained: number;
+      withheld: number;
+      deferredToFirstParty: number;
+    }
+  | {
       status: "processed";
       eventId: string;
       ruleChanges: {
@@ -2642,6 +2650,15 @@ export function createTransport(deps: {
         const result = await triggerReflection(resolved.conversationId);
         if (result.status === "skipped") {
           return ok({ status: "skipped" as const, reason: result.reason });
+        }
+        if (result.newMessages.corrections === 0 && result.newMessages.memories === 0) {
+          return ok({
+            status: "nothing_new" as const,
+            eventId: result.eventId,
+            drained: result.drained.drained,
+            withheld: result.drained.withheld,
+            deferredToFirstParty: result.drained.deferredToFirstParty,
+          });
         }
         const memoryCount = result.memories.extracted;
         return ok({

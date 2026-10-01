@@ -1,5 +1,5 @@
 {
-  "id": "baefd0a9-6739-4078-98ac-63b6d5aa9438",
+  "id": "c0e71e9d-de7f-4d8e-8b93-c2f5a5810049",
   "prevId": "2f2564ad-44e4-41d6-809a-ba38184d3d85",
   "version": "7",
   "dialect": "postgresql",
@@ -753,6 +753,18 @@
           "primaryKey": false,
           "notNull": false
         },
+        "corrections_observed_through": {
+          "name": "corrections_observed_through",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "memories_observed_through": {
+          "name": "memories_observed_through",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -823,6 +835,24 @@
           "columnsFrom": ["profile_id"],
           "columnsTo": ["id"],
           "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "conversations_corrections_observed_through_messages_id_fk": {
+          "name": "conversations_corrections_observed_through_messages_id_fk",
+          "tableFrom": "conversations",
+          "tableTo": "messages",
+          "columnsFrom": ["corrections_observed_through"],
+          "columnsTo": ["id"],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "conversations_memories_observed_through_messages_id_fk": {
+          "name": "conversations_memories_observed_through_messages_id_fk",
+          "tableFrom": "conversations",
+          "tableTo": "messages",
+          "columnsFrom": ["memories_observed_through"],
+          "columnsTo": ["id"],
+          "onDelete": "set null",
           "onUpdate": "no action"
         }
       },
@@ -2095,8 +2125,8 @@
           "primaryKey": false,
           "notNull": false
         },
-        "contradicted_in_conversation_id": {
-          "name": "contradicted_in_conversation_id",
+        "contradicted_through_message_id": {
+          "name": "contradicted_through_message_id",
           "type": "uuid",
           "primaryKey": false,
           "notNull": false
@@ -2144,18 +2174,18 @@
           "method": "btree",
           "with": {}
         },
-        "idx_steering_rules_contradicted_in_conversation": {
-          "name": "idx_steering_rules_contradicted_in_conversation",
+        "idx_steering_rules_contradicted_through_message": {
+          "name": "idx_steering_rules_contradicted_through_message",
           "columns": [
             {
-              "expression": "contradicted_in_conversation_id",
+              "expression": "contradicted_through_message_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
             }
           ],
           "isUnique": false,
-          "where": "contradicted_in_conversation_id IS NOT NULL",
+          "where": "contradicted_through_message_id IS NOT NULL",
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -2180,11 +2210,11 @@
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
-        "steering_rules_contradicted_in_conversation_id_conversations_id_fk": {
-          "name": "steering_rules_contradicted_in_conversation_id_conversations_id_fk",
+        "steering_rules_contradicted_through_message_id_messages_id_fk": {
+          "name": "steering_rules_contradicted_through_message_id_messages_id_fk",
           "tableFrom": "steering_rules",
-          "tableTo": "conversations",
-          "columnsFrom": ["contradicted_in_conversation_id"],
+          "tableTo": "messages",
+          "columnsFrom": ["contradicted_through_message_id"],
           "columnsTo": ["id"],
           "onDelete": "set null",
           "onUpdate": "no action"

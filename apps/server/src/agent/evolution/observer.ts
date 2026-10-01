@@ -2,12 +2,16 @@
  * Observer — post-conversation extraction. Inngest function triggered by
  * `conversation/idle`. Sequence per fire:
  *
- *   1. extract corrections from the transcript → steering rules (with
+ *   1. extract corrections from the new messages → steering rules (with
  *      optional consolidation when active rule count crosses threshold)
- *   2. extract facts from the transcript → Hindsight (with full
+ *   2. extract facts from the new messages → Hindsight (with full
  *      network + compartment + trust tags)
  *   3. drain pending memories for the user → classify each → Hindsight,
  *      withholding a row a `memory`-category rule forbids
+ *
+ * Steps 1 and 2 each read only the messages after their own cursor on the
+ * conversation, in chunks, and advance it after each chunk (see
+ * `observer-window.ts` and design/evolution.md → Observation Window).
  *
  * Steps 1 and 2 follow the steering rules the conversation's profile sees:
  * correction extraction lists the user's instruction rules beside the
@@ -24,6 +28,7 @@
  */
 
 import { NonRetriableError, StepError } from "inngest";
+import * as R from "remeda";
 import type { Transactor } from "../../db/index.js";
 import { inngest } from "../../inngest/client.js";
 import { conversationIdle } from "../../inngest/events.js";
@@ -32,7 +37,7 @@ import { logger } from "../../logger.js";
 import type { MemoryProvider } from "../../memory/provider.js";
 import type { TransportStore } from "../../transport/store/index.js";
 import { admitsFirstParty } from "../core-memory/scope.js";
-import type { AgentStore, PendingMemory } from "../store/index.js";
+import type { AgentStore, ObservedPhase, PendingMemory } from "../store/index.js";
 import { consolidateRules } from "./consolidate-rules.js";
 import {
   buildRetainItems,
@@ -43,8 +48,17 @@ import {
   type PendingBatch,
 } from "./drain-pending-memories.js";
 import type { EvolutionTrigger, ObserverPhase } from "./event-schema.js";
-import { extractCorrections } from "./extract-corrections.js";
-import { extractMemories } from "./extract-memories.js";
+import { type ExtractionResult, extractCorrections } from "./extract-corrections.js";
+import { extractMemories, type MemoryExtractionResult } from "./extract-memories.js";
+import {
+  chunkTokenLimit,
+  isCaughtUp,
+  loadChunkTranscript,
+  OBSERVED_PHASES,
+  type ObserverChunk,
+  type ObserverPlan,
+  planObserverChunks,
+} from "./observer-window.js";
 
 /**
  * Minimum transcript length (count of `messages` rows) before the
@@ -111,6 +125,8 @@ export type ObserverResult =
       memories: Awaited<ReturnType<typeof extractMemories>>;
       drained: DrainPendingResult;
       failedPhases: ObserverPhase[];
+      /** The messages each extraction phase took on this fire; 0 for both when nothing was new. */
+      newMessages: Record<ObservedPhase, number>;
     };
 
 /** A phase's result, and whether that result is the fallback for a failure. */
@@ -192,17 +208,15 @@ export async function runObserver(
   }
   const model = profile.extractionModel ?? profile.model;
 
-  // The complete transcript, deliberately not the compacted turn view — fact
-  // extraction sees every message even on a conversation that has been
-  // summarized. The row ids come along unused; `listMessages` is the only
-  // full-history read.
-  const history = await step.run("load-history", async () => {
-    return deps.runInTx((tx) => agentStore.listMessages(tx, conversationId));
+  // The fire's window: its top is the conversation's last message as of this
+  // memoized read, so every replay sees the same one.
+  const bounds = await step.run("load-observer-bounds", async () => {
+    return deps.runInTx((tx) => agentStore.getObserverBounds(tx, conversationId));
   });
 
-  if (history.length < MIN_MESSAGES_FOR_EXTRACTION) {
+  if (bounds.messageCount < MIN_MESSAGES_FOR_EXTRACTION) {
     logger.debug(
-      { conversationId, messageCount: history.length },
+      { conversationId, messageCount: bounds.messageCount },
       "observer: conversation too short for extraction",
     );
     return { status: "skipped", reason: "too_short" };
@@ -237,15 +251,16 @@ export async function runObserver(
   // rewrapped as `NonRetriableError` so Inngest doesn't burn its
   // single retry on a misconfiguration; transient infra errors keep
   // their plain shape and follow the default retry path.
-  let provider: Awaited<ReturnType<typeof resolveProvider>>["provider"];
+  let resolved: Awaited<ReturnType<typeof resolveProvider>>;
   try {
-    ({ provider } = await resolveProvider(model));
+    resolved = await resolveProvider(model);
   } catch (err) {
     if (err instanceof ProviderConfigError) {
       throw new NonRetriableError(err.message, { cause: err });
     }
     throw err;
   }
+  const { provider } = resolved;
 
   // The Observer runs on the conversation's profile's model, so it shows that
   // model only the rules the profile's turns see: a third-party profile sees
@@ -257,33 +272,70 @@ export async function runObserver(
     seesUserRules: admitsFirstParty(profile),
   };
 
-  // Phase 1: extract corrections from the transcript into steering rules.
-  // A failed extraction reports nothing found, which also rules out
-  // consolidation for this fire.
-  const corrections = await settlePhase(
-    "corrections",
-    conversationId,
-    {
-      extracted: 0,
-      reinforced: 0,
-      contradictions: 0,
-      retired: 0,
-      reset: 0,
-      promoted: 0,
-      outOfScopeReinforcementsSkipped: 0,
-      outOfScopeContradictionsSkipped: 0,
-      unknownRuleReinforcementsSkipped: 0,
-      consolidationNeeded: false,
-    },
-    () =>
-      step.run("extract-corrections", async () => {
-        return extractCorrections(history, fire, {
-          provider,
-          model,
-          runInTx: deps.runInTx,
-          store: agentStore,
-          activeChannelTypes,
+  // Each phase's chunks, planned once and memoized, so the step ids below
+  // derive from durable state. A fire with nothing new plans nothing.
+  const windowDeps = { runInTx: deps.runInTx, store: agentStore };
+  const plan: ObserverPlan = OBSERVED_PHASES.every((phase) => isCaughtUp(bounds, phase))
+    ? { tokenLimit: 0, chunks: { corrections: [], memories: [] } }
+    : await step.run("plan-observer-chunks", async () => {
+        return planObserverChunks(windowDeps, {
+          conversationId,
+          bounds,
+          tokenLimit: chunkTokenLimit(model, resolved.limits),
         });
+      });
+  const transcriptOf = (chunk: ObserverChunk) =>
+    loadChunkTranscript(windowDeps, { conversationId, chunk, tokenLimit: plan.tokenLimit });
+
+  /**
+   * Extract a phase's chunks in order, advancing its cursor after each. A
+   * chunk whose extraction or advance fails after its retries ends the phase:
+   * the cursor stays after the last chunk that succeeded, and the chunks
+   * after it wait for the next fire.
+   */
+  async function observePhase<T>(
+    phase: ObservedPhase,
+    empty: T,
+    combine: (total: T, chunk: T) => T,
+    extract: (chunk: ObserverChunk) => Promise<T>,
+  ): Promise<SettledPhase<T>> {
+    let total = empty;
+    let n = 0;
+    // Sequential: each chunk's cursor advance must land before the next chunk.
+    for (const chunk of plan.chunks[phase]) {
+      n += 1;
+      const extracted = await settlePhase(phase, conversationId, null, () =>
+        step.run(`extract-${phase}-${n}`, () => extract(chunk)),
+      );
+      if (extracted.result === null) return { phase, result: total, failed: true };
+      total = combine(total, extracted.result);
+      const advanced = await settlePhase(phase, conversationId, false, () =>
+        step.run(`advance-${phase}-cursor-${n}`, async () => {
+          await deps.runInTx((tx) =>
+            agentStore.advanceObserverCursor(tx, { conversationId, phase, through: chunk.through }),
+          );
+          return true;
+        }),
+      );
+      if (!advanced.result) return { phase, result: total, failed: true };
+    }
+    return { phase, result: total, failed: false };
+  }
+
+  // Phase 1: extract corrections from the new messages into steering rules.
+  // A failed chunk keeps what the chunks before it found; consolidation
+  // follows the last chunk that completed.
+  const corrections = await observePhase(
+    "corrections",
+    NO_CORRECTIONS,
+    addCorrections,
+    async (chunk) =>
+      extractCorrections(await transcriptOf(chunk), fire, {
+        provider,
+        model,
+        runInTx: deps.runInTx,
+        store: agentStore,
+        activeChannelTypes,
       }),
   );
 
@@ -300,28 +352,22 @@ export async function runObserver(
       )
     : null;
 
-  // Phase 2: extract facts from the transcript into long-term memory.
+  // Phase 2: extract facts from the new messages into long-term memory.
   // `profile.profileClass` (when non-null) becomes a `profile_class:<class>`
   // tag on every retained memory, supporting speaker-driven isolation.
-  const memories = await settlePhase(
-    "memories",
-    conversationId,
-    { extracted: 0, byNetwork: {}, skippedForUnseenRules: 0 },
-    () =>
-      step.run("extract-memories", async () => {
-        const memoryRules = await deps.runInTx((tx) =>
-          agentStore.getMemoryRules(tx, { profileIds: [conv.profileId], userId: conv.userId }),
-        );
-        return extractMemories(history, conv.userId, profile.profileClass, {
-          provider,
-          model,
-          memory: deps.memory,
-          customCompartments,
-          memoryRules,
-          fire,
-        });
-      }),
-  );
+  const memories = await observePhase("memories", NO_MEMORIES, addMemories, async (chunk) => {
+    const memoryRules = await deps.runInTx((tx) =>
+      agentStore.getMemoryRules(tx, { profileIds: [conv.profileId], userId: conv.userId }),
+    );
+    return extractMemories(await transcriptOf(chunk), conv.userId, profile.profileClass, {
+      provider,
+      model,
+      memory: deps.memory,
+      customCompartments,
+      memoryRules,
+      fire,
+    });
+  });
 
   // Phase 3: drain pending_memories — staged live retains, skill writes
   // and any migration backfill — through the same classifier prompt. Split
@@ -409,6 +455,10 @@ export async function runObserver(
     memories: memories.result,
     drained: drain.result,
     failedPhases,
+    newMessages: {
+      corrections: R.sumBy(plan.chunks.corrections, (c) => c.messages),
+      memories: R.sumBy(plan.chunks.memories, (c) => c.messages),
+    },
   };
 
   // Persist the audit row last — once everything above is memoised, a retry
@@ -423,7 +473,7 @@ export async function runObserver(
         triggeredBy,
         payload: {
           ...outcome,
-          messageCount: history.length,
+          messageCount: bounds.messageCount,
           profileId: conv.profileId,
           durationMs: Date.now() - startedAt,
         },
@@ -432,6 +482,60 @@ export async function runObserver(
   });
 
   return { status: "processed", conversationId, eventId, ...outcome };
+}
+
+const NO_CORRECTIONS: ExtractionResult = {
+  extracted: 0,
+  reinforced: 0,
+  contradictions: 0,
+  retired: 0,
+  reset: 0,
+  promoted: 0,
+  outOfScopeReinforcementsSkipped: 0,
+  outOfScopeContradictionsSkipped: 0,
+  unknownRuleReinforcementsSkipped: 0,
+  consolidationNeeded: false,
+};
+
+/** Two chunks' corrections; whether to consolidate is the later chunk's call. */
+function addCorrections(total: ExtractionResult, chunk: ExtractionResult): ExtractionResult {
+  return {
+    extracted: total.extracted + chunk.extracted,
+    reinforced: total.reinforced + chunk.reinforced,
+    contradictions: total.contradictions + chunk.contradictions,
+    retired: total.retired + chunk.retired,
+    reset: total.reset + chunk.reset,
+    promoted: total.promoted + chunk.promoted,
+    outOfScopeReinforcementsSkipped:
+      total.outOfScopeReinforcementsSkipped + chunk.outOfScopeReinforcementsSkipped,
+    outOfScopeContradictionsSkipped:
+      total.outOfScopeContradictionsSkipped + chunk.outOfScopeContradictionsSkipped,
+    unknownRuleReinforcementsSkipped:
+      total.unknownRuleReinforcementsSkipped + chunk.unknownRuleReinforcementsSkipped,
+    consolidationNeeded: chunk.consolidationNeeded,
+  };
+}
+
+const NO_MEMORIES: MemoryExtractionResult = {
+  extracted: 0,
+  byNetwork: {},
+  skippedForUnseenRules: 0,
+};
+
+/** Two chunks' memories; a skip for unseen rules counts once per fire. */
+function addMemories(
+  total: MemoryExtractionResult,
+  chunk: MemoryExtractionResult,
+): MemoryExtractionResult {
+  return {
+    extracted: total.extracted + chunk.extracted,
+    byNetwork: R.pipe(
+      [...R.entries(total.byNetwork), ...R.entries(chunk.byNetwork)],
+      R.groupBy(([network]) => network),
+      R.mapValues((counts) => R.sumBy(counts, ([, n]) => n)),
+    ),
+    skippedForUnseenRules: Math.max(total.skippedForUnseenRules, chunk.skippedForUnseenRules),
+  };
 }
 
 /** A batch memoized as a bare row list replays as one with nothing deferred. */

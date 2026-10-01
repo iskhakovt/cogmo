@@ -5149,3 +5149,147 @@ describe("system prompt snapshots", () => {
     ).rejects.toThrow();
   });
 });
+
+describe("observer window", () => {
+  const INBOUND = "019d0000-0000-7000-8000-0000000000ff";
+
+  async function seedMessages(
+    conversationId: string,
+    stamp: { profileId: string; model: string },
+    count: number,
+  ): Promise<string[]> {
+    const ids: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const row = await tx((trx) =>
+        store.insertMessage(trx, {
+          conversationId,
+          role: i % 2 === 0 ? "user" : "assistant",
+          content: `m${i}`,
+          lastInboundMessageId: INBOUND,
+          ...stamp,
+        }),
+      );
+      ids.push(row.id);
+    }
+    return ids;
+  }
+
+  async function summaryThrough(conversationId: string, through: string, summary: string) {
+    await tx((trx) =>
+      store.insertOrRecoverSummary(trx, {
+        conversationId,
+        summary,
+        throughMessageId: through,
+        messagesSummarized: 1,
+        model: "claude-haiku-4-5",
+        source: "turn",
+      }),
+    );
+  }
+
+  it("reads the count, the last message and NULL cursors for a conversation never observed", async () => {
+    const { conversationId, stamp } = await seedConversation();
+    const ids = await seedMessages(conversationId, stamp, 3);
+
+    expect(await tx((trx) => store.getObserverBounds(trx, conversationId))).toEqual({
+      messageCount: 3,
+      lastMessageId: ids[2],
+      observedThrough: { corrections: null, memories: null },
+    });
+  });
+
+  it("reads no last message for a conversation without messages", async () => {
+    const { conversationId } = await seedConversation();
+
+    expect(await tx((trx) => store.getObserverBounds(trx, conversationId))).toEqual({
+      messageCount: 0,
+      lastMessageId: null,
+      observedThrough: { corrections: null, memories: null },
+    });
+  });
+
+  it("reads the messages after a cursor through the window's top, and from the start without one", async () => {
+    const { userId, profileId, conversationId, stamp } = await seedConversation();
+    const ids = await seedMessages(conversationId, stamp, 5);
+    const other = await tx((trx) =>
+      store.createConversation(trx, { userId, profileId, isPrivate: true }),
+    );
+    await seedMessages(other.id, stamp, 2);
+    const top = expectDefined(ids[3]);
+
+    const after = await tx((trx) =>
+      store.listMessagesInRange(trx, conversationId, {
+        after: expectDefined(ids[1]),
+        through: top,
+      }),
+    );
+    const fromStart = await tx((trx) =>
+      store.listMessagesInRange(trx, conversationId, { after: null, through: top }),
+    );
+
+    expect(after.map((m) => m.id)).toEqual(ids.slice(2, 4));
+    expect(after.map((m) => m.content)).toEqual(["m2", "m3"]);
+    expect(fromStart.map((m) => m.id)).toEqual(ids.slice(0, 4));
+  });
+
+  it("reads the last messages at or before a message, oldest first", async () => {
+    const { conversationId, stamp } = await seedConversation();
+    const ids = await seedMessages(conversationId, stamp, 5);
+
+    const last = await tx((trx) =>
+      store.listMessagesThrough(trx, conversationId, expectDefined(ids[3]), 2),
+    );
+
+    expect(last.map((m) => m.id)).toEqual([ids[2], ids[3]]);
+  });
+
+  it("reads the widest summary ending at or before a message, never one reaching past it", async () => {
+    const { conversationId, stamp } = await seedConversation();
+    const ids = await seedMessages(conversationId, stamp, 6);
+    await summaryThrough(conversationId, expectDefined(ids[1]), "narrow");
+    await summaryThrough(conversationId, expectDefined(ids[3]), "covers the cursor");
+    await summaryThrough(conversationId, expectDefined(ids[4]), "reaches into the window");
+
+    const atCursor = await tx((trx) =>
+      store.getLatestSummaryThrough(trx, conversationId, expectDefined(ids[3])),
+    );
+    const beforeAny = await tx((trx) =>
+      store.getLatestSummaryThrough(trx, conversationId, expectDefined(ids[0])),
+    );
+
+    expect(atCursor?.summary).toBe("covers the cursor");
+    expect(beforeAny).toBeUndefined();
+  });
+
+  it("advances a phase's cursor forward only, leaving the other phase's alone", async () => {
+    const { conversationId, stamp } = await seedConversation();
+    const ids = await seedMessages(conversationId, stamp, 4);
+    const advance = (phase: "corrections" | "memories", through: string) =>
+      tx((trx) => store.advanceObserverCursor(trx, { conversationId, phase, through }));
+    const cursors = async () =>
+      (await tx((trx) => store.getObserverBounds(trx, conversationId))).observedThrough;
+
+    expect(await advance("corrections", expectDefined(ids[2]))).toBe(true);
+    expect(await advance("corrections", expectDefined(ids[1]))).toBe(false);
+    expect(await advance("corrections", expectDefined(ids[2]))).toBe(false);
+    expect(await advance("memories", expectDefined(ids[0]))).toBe(true);
+    expect(await cursors()).toEqual({ corrections: ids[2], memories: ids[0] });
+
+    expect(await advance("corrections", expectDefined(ids[3]))).toBe(true);
+    expect(await cursors()).toEqual({ corrections: ids[3], memories: ids[0] });
+  });
+
+  it("refuses a cursor naming a message that doesn't exist", async () => {
+    const { conversationId } = await seedConversation();
+
+    await expect(
+      tx((trx) =>
+        store.advanceObserverCursor(trx, {
+          conversationId,
+          phase: "memories",
+          through: "019d0000-0000-7000-8000-000000000999",
+        }),
+      ),
+    ).rejects.toThrow();
+  });
+});

@@ -3167,6 +3167,7 @@ describe("createTransport", () => {
         corrections: { extracted: 1, reinforced: 2, promoted: 3, retired: 6, reset: 9 },
         memories: { extracted: 4, skippedForUnseenRules: 1 },
         drained: { drained: 5, withheld: 7, deferredToFirstParty: 8 },
+        newMessages: { corrections: 6, memories: 6 },
       });
       const { transport } = buildEvolutionTransport({
         identity: { userId: "user-1" },
@@ -3185,6 +3186,50 @@ describe("createTransport", () => {
         deferredToFirstParty: 8,
         ruleChanges: { extracted: 1, reinforced: 2, promoted: 3, retired: 6, reset: 9 },
       });
+    });
+
+    it("triggerReflection: nothing_new when neither extraction phase had a new message", async () => {
+      const trigger = vi.fn().mockResolvedValue({
+        status: "processed",
+        eventId: "evt-100",
+        corrections: { extracted: 0, reinforced: 0, promoted: 0, retired: 0, reset: 0 },
+        memories: { extracted: 0, skippedForUnseenRules: 0 },
+        drained: { drained: 2, withheld: 1, deferredToFirstParty: 0 },
+        newMessages: { corrections: 0, memories: 0 },
+      });
+      const { transport } = buildEvolutionTransport({
+        identity: { userId: "user-1" },
+        session: { conversationId: "c1" },
+        conv: { id: "c1", userId: "user-1" },
+        triggerReflection: trigger,
+      });
+      const res = await transport.evolution.triggerReflection("h", "addr");
+      expect(res._unsafeUnwrap()).toEqual({
+        status: "nothing_new",
+        eventId: "evt-100",
+        drained: 2,
+        withheld: 1,
+        deferredToFirstParty: 0,
+      });
+    });
+
+    it("triggerReflection: processed when only one phase had new messages", async () => {
+      const trigger = vi.fn().mockResolvedValue({
+        status: "processed",
+        eventId: "evt-101",
+        corrections: { extracted: 0, reinforced: 0, promoted: 0, retired: 0, reset: 0 },
+        memories: { extracted: 1, skippedForUnseenRules: 0 },
+        drained: { drained: 0, withheld: 0, deferredToFirstParty: 0 },
+        newMessages: { corrections: 0, memories: 3 },
+      });
+      const { transport } = buildEvolutionTransport({
+        identity: { userId: "user-1" },
+        session: { conversationId: "c1" },
+        conv: { id: "c1", userId: "user-1" },
+        triggerReflection: trigger,
+      });
+      const res = await transport.evolution.triggerReflection("h", "addr");
+      expect(res._unsafeUnwrap()).toMatchObject({ status: "processed", memoryCount: 1 });
     });
   });
 });

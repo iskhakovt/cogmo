@@ -6,6 +6,7 @@ import { expectDefined } from "../../test/assertions.js";
 import { mockProvider } from "../../test/factories.js";
 import type { MemoryRule } from "../store/index.js";
 import type { ObserverFire } from "./drain-pending-memories.js";
+import type { ObserverTranscript } from "./extract-corrections.js";
 import { extractMemories, type MemoryExtractionDeps } from "./extract-memories.js";
 
 const HEALTH_RULE: MemoryRule = {
@@ -55,10 +56,20 @@ const sampleHistory: Message[] = [
   { role: "assistant", content: "Noted — weekends are infrastructure time." },
 ];
 
+/** A chunk of new messages with nothing before it, ending at `throughMessageId`. */
+function chunkOf(
+  messages: ReadonlyArray<Message>,
+  throughMessageId = "msg-chunk-end",
+): ObserverTranscript {
+  return { summary: null, context: [], messages, throughMessageId };
+}
+
+const sampleChunk = chunkOf(sampleHistory);
+
 describe("extractMemories", () => {
   it("returns zeros for empty transcript", async () => {
     const deps = mockExtractionDeps({ memories: [] });
-    const result = await extractMemories([], "user-1", null, deps);
+    const result = await extractMemories(chunkOf([]), "user-1", null, deps);
 
     expect(result).toEqual({ extracted: 0, byNetwork: {}, skippedForUnseenRules: 0 });
     expect(deps.memory.retainBatch).not.toHaveBeenCalled();
@@ -67,7 +78,7 @@ describe("extractMemories", () => {
 
   it("returns zeros when no memories extracted", async () => {
     const deps = mockExtractionDeps({ memories: [] });
-    const result = await extractMemories(sampleHistory, "user-1", null, deps);
+    const result = await extractMemories(sampleChunk, "user-1", null, deps);
 
     expect(result).toEqual({ extracted: 0, byNetwork: {}, skippedForUnseenRules: 0 });
     expect(deps.memory.retainBatch).not.toHaveBeenCalled();
@@ -91,19 +102,21 @@ describe("extractMemories", () => {
       ],
     });
 
-    const result = await extractMemories(sampleHistory, "user-1", null, deps);
+    const result = await extractMemories(sampleChunk, "user-1", null, deps);
 
     expect(result.extracted).toBe(2);
     expect(result.byNetwork).toEqual({ world: 1, bank: 1 });
     expect(deps.memory.retainBatch).toHaveBeenCalledWith("user-1", [
       {
         content: "homelab IP is 10.0.10.10",
+        documentId: "observer:conv-1:msg-chunk-end:0",
         tags: ["network:world", "compartment:technical", "trust:first-party"],
         metadata: { source: "conversation" },
         observationScopes: "per_tag",
       },
       {
         content: "prefers dark mode",
+        documentId: "observer:conv-1:msg-chunk-end:1",
         tags: ["network:bank", "compartment:personal", "trust:any"],
         metadata: { source: "conversation" },
         observationScopes: "per_tag",
@@ -124,12 +137,13 @@ describe("extractMemories", () => {
       ],
     });
 
-    const result = await extractMemories(sampleHistory, "user-1", null, deps);
+    const result = await extractMemories(sampleChunk, "user-1", null, deps);
 
     expect(result.extracted).toBe(1);
     expect(deps.memory.retainBatch).toHaveBeenCalledWith("user-1", [
       {
         content: "wife's birthday is March 15",
+        documentId: "observer:conv-1:msg-chunk-end:0",
         context: "mentioned while planning a gift",
         tags: ["network:bank", "compartment:personal", "trust:first-party"],
         metadata: { source: "conversation" },
@@ -148,10 +162,58 @@ describe("extractMemories", () => {
       ],
     });
 
-    const result = await extractMemories(sampleHistory, "user-1", null, deps);
+    const result = await extractMemories(sampleChunk, "user-1", null, deps);
 
     expect(result.extracted).toBe(4);
     expect(result.byNetwork).toEqual({ world: 2, observation: 1, opinion: 1 });
+  });
+
+  it("names the same documents on a re-run of a chunk, and other documents for another chunk", async () => {
+    const answer = {
+      memories: [
+        { fact: "fact 1", network: "world", compartment: "technical", trust: "first-party" },
+        { fact: "fact 2", network: "bank", compartment: "personal", trust: "first-party" },
+      ],
+    };
+    const documentIds = async (chunk: ObserverTranscript) => {
+      const deps = mockExtractionDeps(answer);
+      await extractMemories(chunk, "user-1", null, deps);
+      const [, items] = expectDefined(vi.mocked(deps.memory.retainBatch).mock.calls[0], "retain");
+      return items.map((i) => i.documentId);
+    };
+
+    const first = await documentIds(chunkOf(sampleHistory, "msg-a"));
+    const rerun = await documentIds(chunkOf(sampleHistory, "msg-a"));
+    const next = await documentIds(chunkOf(sampleHistory, "msg-b"));
+
+    expect(first).toEqual(["observer:conv-1:msg-a:0", "observer:conv-1:msg-a:1"]);
+    expect(rerun).toEqual(first);
+    expect(next).toEqual(["observer:conv-1:msg-b:0", "observer:conv-1:msg-b:1"]);
+  });
+
+  it("sends the earlier conversation as context and the chunk as the new messages", async () => {
+    const deps = mockExtractionDeps({ memories: [] });
+
+    await extractMemories(
+      {
+        summary: "The user is moving abroad.",
+        context: [{ role: "user", content: "My sister lives in Porto." }],
+        messages: [{ role: "user", content: "I'm moving near her in May." }],
+        throughMessageId: "m",
+      },
+      "user-1",
+      null,
+      deps,
+    );
+
+    const call = expectDefined(vi.mocked(deps.provider.chat).mock.calls[0], "chat call")[0];
+    const content = expectDefined(call.messages[0], "user message").content;
+    expect(content).toContain(
+      "<earlier_conversation>\n<summary>\nThe user is moving abroad.\n</summary>",
+    );
+    expect(content).toContain("<new_messages>\nUser: I'm moving near her in May.\n</new_messages>");
+    expect(call.system).toContain("extract nothing from it");
+    expect(call.system).toContain("Analyze the new messages below and extract facts");
   });
 
   it("uses bankId as the Hindsight bank", async () => {
@@ -161,12 +223,12 @@ describe("extractMemories", () => {
       ],
     });
 
-    await extractMemories(sampleHistory, "ti", null, deps);
+    await extractMemories(sampleChunk, "ti", null, deps);
 
     expect(deps.memory.retainBatch).toHaveBeenCalledWith("ti", expect.any(Array));
   });
 
-  it("catches chatTyped failure and returns zeros", async () => {
+  it("throws on a failed model call, so the chunk stays unobserved", async () => {
     const deps = mockExtractionDeps(
       { memories: [] },
       {
@@ -176,17 +238,13 @@ describe("extractMemories", () => {
       },
     );
 
-    const result = await extractMemories(sampleHistory, "user-1", null, deps);
-
-    expect(result).toEqual({ extracted: 0, byNetwork: {}, skippedForUnseenRules: 0 });
+    await expect(extractMemories(sampleChunk, "user-1", null, deps)).rejects.toThrow("LLM timeout");
     expect(deps.memory.retainBatch).not.toHaveBeenCalled();
   });
 
-  it("degrades to a no-op when chatTyped throws ProviderProtocolError", async () => {
-    // When the structured-output parse fails irrecoverably (jsonrepair also
-    // chokes), chatTyped surfaces a ProviderProtocolError. extract-memories
-    // must catch it the same way as any other failure — degrade to zeros,
-    // skip retainBatch, no rethrow.
+  it("throws when the structured output can't be parsed", async () => {
+    // chatTyped surfaces an irrecoverable parse as a ProviderProtocolError;
+    // the step's retries, then the phase's failure, handle it.
     const deps = mockExtractionDeps(
       { memories: [] },
       {
@@ -203,9 +261,9 @@ describe("extractMemories", () => {
       },
     );
 
-    const result = await extractMemories(sampleHistory, "user-1", null, deps);
-
-    expect(result).toEqual({ extracted: 0, byNetwork: {}, skippedForUnseenRules: 0 });
+    await expect(extractMemories(sampleChunk, "user-1", null, deps)).rejects.toThrow(
+      ProviderProtocolError,
+    );
     expect(deps.memory.retainBatch).not.toHaveBeenCalled();
   });
 
@@ -216,7 +274,7 @@ describe("extractMemories", () => {
       ],
     });
 
-    await extractMemories(sampleHistory, "user-1", "intimate", deps);
+    await extractMemories(sampleChunk, "user-1", "intimate", deps);
 
     const call = vi.mocked(deps.memory.retainBatch).mock.calls[0];
     const items = call?.[1] ?? [];
@@ -231,7 +289,7 @@ describe("extractMemories", () => {
       ],
     });
 
-    await extractMemories(sampleHistory, "user-1", null, deps);
+    await extractMemories(sampleChunk, "user-1", null, deps);
 
     const call = vi.mocked(deps.memory.retainBatch).mock.calls[0];
     const items = call?.[1] ?? [];
@@ -260,7 +318,7 @@ describe("extractMemories", () => {
       fire: FIRE,
     };
 
-    await extractMemories(sampleHistory, "user-1", null, deps);
+    await extractMemories(sampleChunk, "user-1", null, deps);
 
     // Single chat call; the system prompt is the second positional arg
     // shape on `provider.chat({ system, messages, ... })`. Inspect it
@@ -275,7 +333,7 @@ describe("extractMemories", () => {
   it("lists the memory rules it is given in the system prompt", async () => {
     const deps = mockExtractionDeps({ memories: [] }, { memoryRules: [HEALTH_RULE] });
 
-    await extractMemories(sampleHistory, "user-1", null, deps);
+    await extractMemories(sampleChunk, "user-1", null, deps);
 
     const call = expectDefined(vi.mocked(deps.provider.chat).mock.calls[0], "chat call");
     expect(call[0].system).toContain("## Memory Rules");
@@ -289,7 +347,7 @@ describe("extractMemories", () => {
     );
     const info = vi.spyOn(logger, "info");
 
-    const result = await extractMemories(sampleHistory, "user-1", null, deps);
+    const result = await extractMemories(sampleChunk, "user-1", null, deps);
 
     expect(result).toEqual({ extracted: 0, byNetwork: {}, skippedForUnseenRules: 1 });
     expect(deps.provider.chat).not.toHaveBeenCalled();
@@ -311,7 +369,7 @@ describe("extractMemories", () => {
       { memoryRules: [{ ...HEALTH_RULE, fromUser: false }], fire: THIRD_PARTY_FIRE },
     );
 
-    const result = await extractMemories(sampleHistory, "user-1", null, deps);
+    const result = await extractMemories(sampleChunk, "user-1", null, deps);
 
     expect(result.skippedForUnseenRules).toBe(0);
     const call = expectDefined(vi.mocked(deps.provider.chat).mock.calls[0], "chat call");
@@ -334,7 +392,7 @@ describe("extractMemories", () => {
       { customCompartments: customs },
     );
 
-    const result = await extractMemories(sampleHistory, "user-1", null, deps);
+    const result = await extractMemories(sampleChunk, "user-1", null, deps);
 
     expect(result.extracted).toBe(1);
     expect(deps.memory.retainBatch).toHaveBeenCalledWith("user-1", [
@@ -348,10 +406,10 @@ describe("extractMemories", () => {
   it("rejects an LLM-emitted compartment value not in core ∪ customs (schema enforcement)", async () => {
     // The structured-output schema is locked to `[...CORE, ...customNames]`
     // — a stale prompt or LLM hallucination producing "music" with no
-    // matching custom row fails the parse, which `extractMemories` catches
-    // and degrades to a no-op. Without per-fire schema construction, the
-    // value would slip through to Hindsight as a tag the recall predicate
-    // can never match, silently inflating misc-bucket noise.
+    // matching custom row fails the parse, and nothing reaches Hindsight.
+    // Without per-fire schema construction, the value would slip through as
+    // a tag the recall predicate can never match, silently inflating
+    // misc-bucket noise.
     const deps = mockExtractionDeps(
       {
         memories: [
@@ -366,9 +424,7 @@ describe("extractMemories", () => {
       { customCompartments: [{ name: "dnd", description: "x" }] },
     );
 
-    const result = await extractMemories(sampleHistory, "user-1", null, deps);
-
-    expect(result).toEqual({ extracted: 0, byNetwork: {}, skippedForUnseenRules: 0 });
+    await expect(extractMemories(sampleChunk, "user-1", null, deps)).rejects.toThrow();
     expect(deps.memory.retainBatch).not.toHaveBeenCalled();
   });
 
@@ -383,7 +439,7 @@ describe("extractMemories", () => {
       ],
     });
 
-    await extractMemories(sampleHistory, "user-1", undefined as unknown as string | null, deps);
+    await extractMemories(sampleChunk, "user-1", undefined as unknown as string | null, deps);
 
     const call = vi.mocked(deps.memory.retainBatch).mock.calls[0];
     const items = call?.[1] ?? [];
@@ -416,7 +472,7 @@ describe("extractMemories", () => {
       fire: FIRE,
     };
 
-    const result = await extractMemories(sampleHistory, "user-1", null, deps);
+    const result = await extractMemories(sampleChunk, "user-1", null, deps);
 
     expect(result.extracted).toBe(1);
     expect(provider.chat).toHaveBeenCalledTimes(1);

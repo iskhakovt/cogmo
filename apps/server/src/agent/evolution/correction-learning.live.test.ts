@@ -315,11 +315,27 @@ describe.skipIf(LIVE_API_KEY === undefined)(
             for (const t of conversation.turns) usage.add(t.result.usage);
             expectCompleted(conversation.turns);
             stage = `in the ${label} extraction`;
-            const conv = await db.tx((tx) =>
-              store.createConversation(tx, { ...owner, isPrivate: true }),
-            );
-            const scope = { ...owner, conversationId: conv.id, seesUserRules: true };
-            const extracted = await extractCorrections(conversation.history, scope, {
+            // The whole conversation is one chunk, ending at a stored message
+            // a contradiction can key on.
+            const chunkEnd = await db.tx(async (tx) => {
+              const conv = await store.createConversation(tx, { ...owner, isPrivate: true });
+              return store.insertMessage(tx, {
+                conversationId: conv.id,
+                role: "user",
+                content: label,
+                lastInboundMessageId: conv.id,
+                profileId: owner.profileId,
+                model: EXTRACTION_MODEL,
+              });
+            });
+            const scope = { ...owner, seesUserRules: true };
+            const chunk = {
+              summary: null,
+              context: [],
+              messages: conversation.history,
+              throughMessageId: chunkEnd.id,
+            };
+            const extracted = await extractCorrections(chunk, scope, {
               provider: usage.metered(provider),
               model: EXTRACTION_MODEL,
               runInTx: db.tx,

@@ -105,7 +105,7 @@ export interface EvolutionEventPayload {
     extracted: number;
     reinforced: number;
     contradictions: number;
-    /** Rules still learning that a second contradiction, from another conversation, retired. */
+    /** Rules still learning that a second contradiction, from another chunk, retired. */
     retired: number;
     /** Rules still learning whose count a first contradiction reset. */
     reset: number;
@@ -133,6 +133,8 @@ export interface EvolutionEventPayload {
   durationMs?: number | undefined;
   /** Phases that failed after their retries; absent on older rows, where it's unknown. */
   failedPhases?: ObserverPhase[] | undefined;
+  /** Messages each extraction phase took on after its cursor; absent on older rows. */
+  newMessages?: { corrections: number; memories: number } | undefined;
 }
 
 export interface EvolutionEventRow {

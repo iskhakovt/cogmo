@@ -187,6 +187,14 @@ export type TriggerReflectionOutcome =
   | { status: "no_session" }
   | { status: "skipped"; reason: "conversation_not_found" | "profile_not_found" | "too_short" }
   | {
+      /** Neither extraction phase had a message after its cursor; the drain still ran. */
+      status: "nothing_new";
+      eventId: string;
+      drained: number;
+      withheld: number;
+      deferredToFirstParty: number;
+    }
+  | {
       status: "processed";
       eventId: string;
       ruleChanges: {

@@ -4,6 +4,7 @@ import { StepError } from "inngest";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Transactor } from "../../db/index.js";
 import type { LlmProvider } from "../../llm/provider.js";
+import { constantResolver } from "../../llm/resolver.js";
 import type { ChatParams, LlmResponse, Message } from "../../llm/types.js";
 import { logger } from "../../logger.js";
 import type { MemoryProvider, RetainBatchItem } from "../../memory/provider.js";
@@ -14,7 +15,7 @@ import {
   mockResolver,
   mockTransportStore,
 } from "../../test/factories.js";
-import type { AgentStore, MemoryRule, PendingMemory } from "../store/index.js";
+import type { AgentStore, MemoryRule, ObservedPhase, PendingMemory } from "../store/index.js";
 import {
   createObserver,
   type ObserverDeps,
@@ -151,6 +152,80 @@ function documentBank(): {
   };
 }
 
+/** A conversation's messages and cursors as the store keeps them; ids sort in insertion order. */
+interface MessageLog {
+  messages: Array<Message & { id: string }>;
+  cursors: Record<ObservedPhase, string | null>;
+  summaries: Array<{ through: string; summary: string }>;
+  append(...messages: Message[]): string[];
+  store: Pick<
+    AgentStore,
+    | "getObserverBounds"
+    | "listMessagesInRange"
+    | "listMessagesThrough"
+    | "getLatestSummaryThrough"
+    | "advanceObserverCursor"
+  >;
+}
+
+function messageLog(initial: ReadonlyArray<Message>): MessageLog {
+  const log: MessageLog = {
+    messages: [],
+    cursors: { corrections: null, memories: null },
+    summaries: [],
+    append: (...messages) =>
+      messages.map((m) => {
+        const id = `msg-${String(log.messages.length + 1).padStart(3, "0")}`;
+        log.messages.push({ ...m, id });
+        return id;
+      }),
+    store: {
+      getObserverBounds: vi.fn<AgentStore["getObserverBounds"]>(async () => ({
+        messageCount: log.messages.length,
+        lastMessageId: log.messages.at(-1)?.id ?? null,
+        observedThrough: { ...log.cursors },
+      })),
+      listMessagesInRange: vi.fn<AgentStore["listMessagesInRange"]>(
+        async (_tx, _conversationId, { after, through }) =>
+          log.messages.filter((m) => (after === null || m.id > after) && m.id <= through),
+      ),
+      listMessagesThrough: vi.fn<AgentStore["listMessagesThrough"]>(
+        async (_tx, _conversationId, through, limit) =>
+          log.messages.filter((m) => m.id <= through).slice(-limit),
+      ),
+      getLatestSummaryThrough: vi.fn<AgentStore["getLatestSummaryThrough"]>(
+        async (_tx, conversationId, through) => {
+          const [widest] = log.summaries
+            .filter((x) => x.through <= through)
+            .sort((a, b) => (a.through < b.through ? 1 : -1));
+          return widest === undefined
+            ? undefined
+            : {
+                id: `summary-${widest.through}`,
+                conversationId,
+                summary: widest.summary,
+                throughMessageId: widest.through,
+                messagesSummarized: 1,
+                model: "m",
+                source: "turn" as const,
+                createdAt: new Date(),
+              };
+        },
+      ),
+      advanceObserverCursor: vi.fn<AgentStore["advanceObserverCursor"]>(
+        async (_tx, { phase, through }) => {
+          const cursor = log.cursors[phase];
+          if (cursor !== null && cursor >= through) return false;
+          log.cursors[phase] = through;
+          return true;
+        },
+      ),
+    },
+  };
+  log.append(...initial);
+  return log;
+}
+
 /** The `/reflect` harness: no retries, a body's error reaches the caller as is. */
 const syncStep: ObserverStepHarness = { run: (_id, fn) => fn() };
 
@@ -158,16 +233,18 @@ function observerDeps(opts: {
   provider: LlmProvider;
   store?: Partial<AgentStore>;
   memory?: Pick<MemoryProvider, "retainBatch">;
+  log?: MessageLog;
+  resolveProvider?: ObserverDeps["resolveProvider"];
 }): ObserverDeps & { agentStore: AgentStore; memory: Pick<MemoryProvider, "retainBatch"> } {
   return {
     runInTx: fakeRunInTx,
     agentStore: mockAgentStore({
-      listMessages: vi.fn().mockResolvedValue(HISTORY),
+      ...(opts.log ?? messageLog(HISTORY)).store,
       getPendingMemories: vi.fn().mockResolvedValue(PENDING),
       ...opts.store,
     }),
     transportStore: mockTransportStore(),
-    resolveProvider: mockResolver(opts.provider),
+    resolveProvider: opts.resolveProvider ?? mockResolver(opts.provider),
     memory: opts.memory ?? { retainBatch: vi.fn().mockResolvedValue(undefined) },
   };
 }
@@ -211,14 +288,14 @@ describe("runObserver phase isolation", () => {
       expect.objectContaining({
         conversationId: "conv-1",
         phase: "corrections",
-        stepId: "extract-corrections",
+        stepId: "extract-corrections-1",
         err: expect.any(StepError),
       }),
       expect.stringContaining("observer"),
     );
   });
 
-  it("plans the same steps whether or not correction extraction fails", async () => {
+  it("plans the same steps whether or not correction extraction fails, short of its cursor advance", async () => {
     const clean = exhaustedRetriesStep();
     await runObserver(EVENT, clean, observerDeps({ provider: routedProvider() }));
     const failing = exhaustedRetriesStep();
@@ -228,16 +305,19 @@ describe("runObserver phase isolation", () => {
       observerDeps({ provider: routedProvider({ corrections: UNPARSEABLE_CORRECTIONS }) }),
     );
 
-    expect(failing.ids).toEqual(clean.ids);
+    expect(failing.ids).toEqual(clean.ids.filter((id) => id !== "advance-corrections-cursor-1"));
     expect(clean.ids).toEqual([
       "record-start-time",
       "load-conversation",
       "load-profile",
-      "load-history",
+      "load-observer-bounds",
       "load-custom-compartments",
       "load-active-channel-types",
-      "extract-corrections",
-      "extract-memories",
+      "plan-observer-chunks",
+      "extract-corrections-1",
+      "advance-corrections-cursor-1",
+      "extract-memories-1",
+      "advance-memories-cursor-1",
       "load-pending-memories",
       "classify-pending-memories",
       "retain-pending-memories",
@@ -580,6 +660,384 @@ describe("runObserver rules", () => {
     const retained = vi.mocked(deps.memory.retainBatch).mock.calls.flatMap(([, items]) => items);
     expect(retained.map((i) => i.documentId)).toContain("pending-own");
     expect(retained.map((i) => i.documentId)).not.toContain("pending-other");
+  });
+});
+
+describe("runObserver observation window", () => {
+  const CORRECTIONS = "behavioral correction extractor";
+  const MEMORIES = "memory extraction engine";
+  const MISO: Message[] = [
+    { role: "user", content: "I adopted a cat named Miso." },
+    { role: "assistant", content: "Lovely!" },
+  ];
+
+  /** The user message of each extraction call made with the prompt `marker` names. */
+  function userMessagesOf(provider: LlmProvider, marker: string): string[] {
+    return vi
+      .mocked(provider.chat)
+      .mock.calls.filter(([params]) => params.system.includes(marker))
+      .map(([params]) => {
+        const content = expectDefined(params.messages[0], "user message").content;
+        return typeof content === "string" ? content : JSON.stringify(content);
+      });
+  }
+
+  /** A transcript split at `<new_messages>`: what it shows as processed, and what as new. */
+  function parts(transcript: string): { earlier: string; fresh: string } {
+    const at = transcript.indexOf("<new_messages>");
+    return { earlier: transcript.slice(0, at), fresh: transcript.slice(at) };
+  }
+
+  class Crash extends Error {}
+
+  /**
+   * Inngest's memoization: a step whose result was recorded replays it. A
+   * crash at `crash.id` ends the run after that step's body, with its result
+   * recorded or not.
+   */
+  function replayingStep(
+    recorded: Map<string, unknown>,
+    crash?: { id: string; recorded: boolean },
+  ): ObserverStepHarness & { ran: string[] } {
+    const ran: string[] = [];
+    return {
+      ran,
+      async run<T>(id: string, fn: () => Promise<T>): Promise<T> {
+        // The map holds what this id's body returned.
+        if (recorded.has(id)) return recorded.get(id) as T;
+        ran.push(id);
+        const value = await fn();
+        if (crash?.id === id) {
+          if (crash.recorded) recorded.set(id, value);
+          throw new Crash(id);
+        }
+        recorded.set(id, value);
+        return value;
+      },
+    };
+  }
+
+  it("extracts only the messages after each phase's cursor, with the earlier ones as context", async () => {
+    const log = messageLog(HISTORY);
+    log.cursors = { corrections: "msg-004", memories: "msg-004" };
+    log.append(...MISO);
+    const provider = routedProvider();
+
+    const result = await runObserver(
+      EVENT,
+      exhaustedRetriesStep(),
+      observerDeps({ provider, log }),
+    );
+
+    for (const marker of [CORRECTIONS, MEMORIES]) {
+      const [transcript] = userMessagesOf(provider, marker);
+      const { earlier, fresh } = parts(expectDefined(transcript, marker));
+      expect(fresh).toContain("I adopted a cat named Miso.");
+      expect(fresh).not.toContain("Berlin");
+      expect(earlier).toMatch(/^<earlier_conversation>\n/);
+      expect(earlier).toContain("I live in Berlin, by the way.");
+    }
+    expect(log.cursors).toEqual({ corrections: "msg-006", memories: "msg-006" });
+    expect(result).toMatchObject({ newMessages: { corrections: 2, memories: 2 } });
+  });
+
+  it("sends the widest summary ending before the chunk and the last 10 messages before it", async () => {
+    const log = messageLog(
+      Array.from({ length: 14 }, (_, i) => ({
+        role: i % 2 === 0 ? ("user" as const) : ("assistant" as const),
+        content: `turn-${i + 1}.`,
+      })),
+    );
+    log.cursors = { corrections: "msg-012", memories: "msg-012" };
+    log.summaries.push(
+      { through: "msg-001", summary: "A narrower summary." },
+      { through: "msg-002", summary: "The summary before the window." },
+      { through: "msg-013", summary: "A summary reaching into the window." },
+    );
+    const provider = routedProvider();
+
+    await runObserver(EVENT, exhaustedRetriesStep(), observerDeps({ provider, log }));
+
+    for (const marker of [CORRECTIONS, MEMORIES]) {
+      const { earlier, fresh } = parts(expectDefined(userMessagesOf(provider, marker)[0], marker));
+      expect(earlier).toContain("<summary>\nThe summary before the window.\n</summary>");
+      expect(earlier).not.toContain("reaching into the window");
+      expect(earlier).not.toContain("A narrower summary.");
+      for (let i = 3; i <= 12; i++) expect(earlier).toContain(`turn-${i}.`);
+      expect(earlier).not.toContain("turn-2.");
+      expect(fresh).toContain("turn-13.");
+      expect(fresh).toContain("turn-14.");
+      expect(fresh).not.toContain("turn-12.");
+    }
+  });
+
+  it("skips both extractions when nothing is new, and still drains and records the fire", async () => {
+    const log = messageLog(HISTORY);
+    log.cursors = { corrections: "msg-004", memories: "msg-004" };
+    const provider = routedProvider();
+    const deps = observerDeps({ provider, log });
+    const step = exhaustedRetriesStep();
+
+    const result = await runObserver(EVENT, step, deps);
+
+    expect(step.ids.filter((id) => /^(plan|extract|advance)-/.test(id))).toEqual([]);
+    expect(userMessagesOf(provider, CORRECTIONS)).toEqual([]);
+    expect(userMessagesOf(provider, MEMORIES)).toEqual([]);
+    expect(result).toMatchObject({
+      status: "processed",
+      drained: { drained: 1 },
+      newMessages: { corrections: 0, memories: 0 },
+      failedPhases: [],
+    });
+    expect(recordedPayload(deps)).toMatchObject({
+      messageCount: 4,
+      newMessages: { corrections: 0, memories: 0 },
+    });
+  });
+
+  it("keeps a failed phase's cursor while the other advances, and reads its whole window next fire", async () => {
+    const log = messageLog(HISTORY);
+    await runObserver(
+      EVENT,
+      exhaustedRetriesStep(),
+      observerDeps({ provider: routedProvider({ corrections: UNPARSEABLE_CORRECTIONS }), log }),
+    );
+    expect(log.cursors).toEqual({ corrections: null, memories: "msg-004" });
+
+    log.append(...MISO);
+    const provider = routedProvider();
+    const result = await runObserver(
+      EVENT,
+      exhaustedRetriesStep(),
+      observerDeps({ provider, log }),
+    );
+
+    const [corrections] = userMessagesOf(provider, CORRECTIONS);
+    expect(corrections).not.toContain("<earlier_conversation>");
+    expect(corrections).toContain("Berlin");
+    expect(corrections).toContain("Miso");
+    const memories = parts(expectDefined(userMessagesOf(provider, MEMORIES)[0], "memories"));
+    expect(memories.fresh).toContain("Miso");
+    expect(memories.fresh).not.toContain("Berlin");
+    expect(result).toMatchObject({ newMessages: { corrections: 6, memories: 2 } });
+    expect(log.cursors).toEqual({ corrections: "msg-006", memories: "msg-006" });
+  });
+
+  describe("a window over the chunk limit", () => {
+    // 21k context, 1k output: a 10k-token budget, so a 2.5k-token chunk limit
+    // that one ~1.5k-token message fills.
+    const LIMITS = { contextWindow: 21_000, maxOutputTokens: 1_000 };
+    const LONG: Message[] = Array.from({ length: 8 }, (_, i) => ({
+      role: i % 2 === 0 ? ("user" as const) : ("assistant" as const),
+      content: `${"x".repeat(6_000)} part-${i + 1}.`,
+    }));
+
+    it("extracts at most three chunks a fire, advancing the cursor after each", async () => {
+      const log = messageLog(LONG);
+      const provider = routedProvider();
+      const deps = observerDeps({
+        provider,
+        log,
+        resolveProvider: constantResolver(provider, LIMITS),
+      });
+      const step = exhaustedRetriesStep();
+
+      const result = await runObserver(EVENT, step, deps);
+
+      expect(step.ids.filter((id) => /^(extract|advance)-/.test(id))).toEqual([
+        "extract-corrections-1",
+        "advance-corrections-cursor-1",
+        "extract-corrections-2",
+        "advance-corrections-cursor-2",
+        "extract-corrections-3",
+        "advance-corrections-cursor-3",
+        "extract-memories-1",
+        "advance-memories-cursor-1",
+        "extract-memories-2",
+        "advance-memories-cursor-2",
+        "extract-memories-3",
+        "advance-memories-cursor-3",
+      ]);
+      expect(
+        vi.mocked(deps.agentStore.advanceObserverCursor).mock.calls.map(([, a]) => a.through),
+      ).toEqual(["msg-001", "msg-002", "msg-003", "msg-001", "msg-002", "msg-003"]);
+      expect(userMessagesOf(provider, MEMORIES).map((t) => parts(t).fresh)).toEqual([
+        expect.stringContaining("part-1."),
+        expect.stringContaining("part-2."),
+        expect.stringContaining("part-3."),
+      ]);
+      expect(result).toMatchObject({ newMessages: { corrections: 3, memories: 3 } });
+      expect(log.cursors).toEqual({ corrections: "msg-003", memories: "msg-003" });
+
+      await runObserver(EVENT, exhaustedRetriesStep(), deps);
+
+      expect(log.cursors).toEqual({ corrections: "msg-006", memories: "msg-006" });
+    });
+
+    it("ends a phase at its failed chunk, keeping what the chunks before it found", async () => {
+      const log = messageLog(LONG);
+      const routed = routedProvider({
+        corrections: {
+          corrections: [
+            {
+              rule: "Prefer prose",
+              category: "style",
+              reasoning: "said so",
+              action: "new",
+              matchedExistingRuleId: null,
+              channelType: null,
+            },
+          ],
+        },
+      });
+      const chat = vi.fn(async (params: ChatParams) => {
+        const content = params.messages[0]?.content;
+        const second = typeof content === "string" && content.includes("part-2.\n</new_messages>");
+        return second && params.system.includes(CORRECTIONS)
+          ? routedProvider({ corrections: UNPARSEABLE_CORRECTIONS }).chat(params)
+          : routed.chat(params);
+      });
+      const provider = { ...routed, chat };
+      const step = exhaustedRetriesStep();
+
+      const result = await runObserver(
+        EVENT,
+        step,
+        observerDeps({ provider, log, resolveProvider: constantResolver(provider, LIMITS) }),
+      );
+
+      expect(step.ids).toContain("extract-corrections-2");
+      expect(step.ids).not.toContain("advance-corrections-cursor-2");
+      expect(step.ids).not.toContain("extract-corrections-3");
+      expect(result).toMatchObject({
+        corrections: { extracted: 1 },
+        failedPhases: ["corrections"],
+      });
+      expect(log.cursors).toEqual({ corrections: "msg-001", memories: "msg-003" });
+    });
+  });
+
+  describe("replays", () => {
+    it("replays a recorded extraction and runs only its cursor advance", async () => {
+      const log = messageLog(HISTORY);
+      const provider = routedProvider();
+      const deps = observerDeps({ provider, log });
+      const recorded = new Map<string, unknown>();
+
+      await expect(
+        runObserver(
+          EVENT,
+          replayingStep(recorded, { id: "extract-memories-1", recorded: true }),
+          deps,
+        ),
+      ).rejects.toThrow(Crash);
+      expect(log.cursors.memories).toBeNull();
+      const replay = replayingStep(recorded);
+      await runObserver(EVENT, replay, deps);
+
+      expect(replay.ran).not.toContain("extract-memories-1");
+      expect(replay.ran).toContain("advance-memories-cursor-1");
+      expect(userMessagesOf(provider, MEMORIES)).toHaveLength(1);
+      expect(log.cursors.memories).toBe("msg-004");
+    });
+
+    it("re-runs an unrecorded extraction into the same Hindsight documents", async () => {
+      const log = messageLog(HISTORY);
+      const bank = documentBank();
+      const provider = routedProvider();
+      const deps = observerDeps({ provider, log, memory: bank.memory });
+      const recorded = new Map<string, unknown>();
+
+      await expect(
+        runObserver(
+          EVENT,
+          replayingStep(recorded, { id: "extract-memories-1", recorded: false }),
+          deps,
+        ),
+      ).rejects.toThrow(Crash);
+      await runObserver(EVENT, replayingStep(recorded), deps);
+
+      expect(userMessagesOf(provider, MEMORIES)).toHaveLength(2);
+      const berlin = [...bank.documents.entries()].filter(
+        ([, d]) => d.content === "Lives in Berlin",
+      );
+      expect(berlin.map(([id]) => id)).toEqual(["observer:conv-1:msg-004:0"]);
+      expect(log.cursors.memories).toBe("msg-004");
+    });
+
+    it("re-applies an unrecorded chunk's contradiction under the same chunk", async () => {
+      const log = messageLog(HISTORY);
+      const provider = routedProvider({
+        corrections: {
+          corrections: [
+            {
+              rule: "Bullet points are fine",
+              category: "style",
+              reasoning: "takes it back",
+              action: "contradiction",
+              matchedExistingRuleId: "R1",
+            },
+          ],
+        },
+      });
+      const deps = observerDeps({
+        provider,
+        log,
+        store: {
+          getCorrections: vi
+            .fn()
+            .mockResolvedValue([{ ...expectDefined(RULES[0], "rule"), active: false }]),
+        },
+      });
+      const recorded = new Map<string, unknown>();
+
+      await expect(
+        runObserver(
+          EVENT,
+          replayingStep(recorded, { id: "extract-corrections-1", recorded: false }),
+          deps,
+        ),
+      ).rejects.toThrow(Crash);
+      await runObserver(EVENT, replayingStep(recorded), deps);
+
+      expect(
+        vi.mocked(deps.agentStore.contradictLearningRule).mock.calls.map(([, params]) => params),
+      ).toEqual([
+        { id: "rule-a", throughMessageId: "msg-004" },
+        { id: "rule-a", throughMessageId: "msg-004" },
+      ]);
+    });
+
+    it.each([
+      { recorded: true, advances: 1 },
+      { recorded: false, advances: 2 },
+    ])(
+      "leaves the cursor where one advance put it after a crash at the advance (recorded: $recorded)",
+      async ({ recorded: wasRecorded, advances }) => {
+        const log = messageLog(HISTORY);
+        const provider = routedProvider();
+        const deps = observerDeps({ provider, log });
+        const recorded = new Map<string, unknown>();
+
+        await expect(
+          runObserver(
+            EVENT,
+            replayingStep(recorded, { id: "advance-corrections-cursor-1", recorded: wasRecorded }),
+            deps,
+          ),
+        ).rejects.toThrow(Crash);
+        const replay = replayingStep(recorded);
+        await runObserver(EVENT, replay, deps);
+
+        expect(replay.ran).not.toContain("extract-corrections-1");
+        expect(userMessagesOf(provider, CORRECTIONS)).toHaveLength(1);
+        const correctionAdvances = vi
+          .mocked(deps.agentStore.advanceObserverCursor)
+          .mock.calls.filter(([, a]) => a.phase === "corrections");
+        expect(correctionAdvances).toHaveLength(advances);
+        expect(log.cursors).toEqual({ corrections: "msg-004", memories: "msg-004" });
+      },
+    );
   });
 });
 

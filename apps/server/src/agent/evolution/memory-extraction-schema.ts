@@ -7,6 +7,7 @@
  */
 
 import { z } from "zod";
+import { TRANSCRIPT_LAYOUT } from "./extraction-schema.js";
 
 // --- Extraction output schema ---
 
@@ -258,7 +259,9 @@ const EXTRACTION_RULES = `## Rules for Extraction
 - **One fact per item**: Don't combine multiple independent facts into one entry.
 - **Return empty array if nothing qualifies**: Most short conversations have nothing worth extracting.
 
-Analyze the transcript below and extract facts worth remembering.`;
+${TRANSCRIPT_LAYOUT}
+
+Analyze the new messages below and extract facts worth remembering.`;
 
 /** The live `memory`-category rules, listed only when there are some. */
 function memoryRulesSection(memoryRules: ReadonlyArray<string>, instruction: string): string {

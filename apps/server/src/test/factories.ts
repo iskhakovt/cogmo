@@ -110,6 +110,18 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
       },
     }),
     getHistoryAfter: vi.fn().mockResolvedValue([]),
+    // The default conversation of `listMessages`, never observed.
+    getObserverBounds: vi.fn().mockResolvedValue({
+      messageCount: 1,
+      lastMessageId: "msg-1",
+      observedThrough: { corrections: null, memories: null },
+    }),
+    listMessagesInRange: vi
+      .fn()
+      .mockResolvedValue([{ id: "msg-1", role: "user", content: "hello" }]),
+    listMessagesThrough: vi.fn().mockResolvedValue([]),
+    getLatestSummaryThrough: vi.fn().mockResolvedValue(undefined),
+    advanceObserverCursor: vi.fn().mockResolvedValue(true),
     getProfile: vi.fn().mockResolvedValue({
       id: "profile-1",
       userId: null,

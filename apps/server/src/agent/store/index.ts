@@ -9,6 +9,7 @@ import {
   inArray,
   isNotNull,
   isNull,
+  lt,
   lte,
   ne,
   not,
@@ -313,6 +314,17 @@ export interface CompactionSummary {
   model: string;
   source: SummarySourceValue;
   createdAt: Date;
+}
+
+/** An Observer extraction phase that keeps a cursor on the conversation. */
+export type ObservedPhase = "corrections" | "memories";
+
+/** See `AgentStore.getObserverBounds`. */
+export interface ObserverBounds {
+  messageCount: number;
+  lastMessageId: string | null;
+  /** Per phase, the last message it extracted from; null until it has. */
+  observedThrough: Readonly<Record<ObservedPhase, string | null>>;
 }
 
 /** A row from `turn_contexts`: the block a turn-starting user message was sent with. */
@@ -887,8 +899,8 @@ export interface AgentStore {
    * A conversation's complete message history with row ids, ordered by id.
    *
    * The raw transcript, not the compacted turn view — `loadTurnHistory` layers
-   * durable summaries on top of this for the LLM-facing path, while the
-   * Observer and the web history read take it as-is.
+   * durable summaries on top of this for the LLM-facing path, while the web
+   * history read takes it as-is.
    */
   listMessages(
     tx: Transaction,
@@ -898,8 +910,7 @@ export interface AgentStore {
   /**
    * Widest durable summary for a conversation, or undefined when it has never
    * been compacted. The turn loader replaces every message up to and including
-   * `throughMessageId` with this text; the Observer deliberately does not read
-   * it, so fact extraction still sees the complete transcript.
+   * `throughMessageId` with this text.
    */
   getLatestSummary(tx: Transaction, conversationId: string): Promise<CompactionSummary | undefined>;
 
@@ -973,6 +984,47 @@ export interface AgentStore {
     conversationId: string,
     afterMessageId: string,
   ): Promise<ReadonlyArray<Message & { id: string }>>;
+
+  /**
+   * What an Observer fire's window is cut from, read in one snapshot: the
+   * conversation's message count, its last message (null when it has none)
+   * and each extraction phase's cursor.
+   */
+  getObserverBounds(tx: Transaction, conversationId: string): Promise<ObserverBounds>;
+
+  /** A conversation's messages after `after` (from its start when null) through `through`, ordered by id. */
+  listMessagesInRange(
+    tx: Transaction,
+    conversationId: string,
+    range: { after: string | null; through: string },
+  ): Promise<ReadonlyArray<Message & { id: string }>>;
+
+  /** The last `limit` messages of a conversation at or before `through`, ordered by id. */
+  listMessagesThrough(
+    tx: Transaction,
+    conversationId: string,
+    through: string,
+    limit: number,
+  ): Promise<ReadonlyArray<Message & { id: string }>>;
+
+  /**
+   * The widest durable summary that ends at or before `through`, or undefined
+   * when none does: the Observer's context for messages it already processed.
+   */
+  getLatestSummaryThrough(
+    tx: Transaction,
+    conversationId: string,
+    through: string,
+  ): Promise<CompactionSummary | undefined>;
+
+  /**
+   * Move an extraction phase's cursor to `through`, forward only: a cursor
+   * already at or past it stays. True when the cursor moved.
+   */
+  advanceObserverCursor(
+    tx: Transaction,
+    params: { conversationId: string; phase: ObservedPhase; through: string },
+  ): Promise<boolean>;
 
   /** Load a profile by ID. */
   getProfile(tx: Transaction, profileId: string): Promise<Profile | undefined>;
@@ -1596,18 +1648,19 @@ export interface AgentStore {
   ): Promise<{ id: string; promoted: boolean } | null>;
 
   /**
-   * Apply a contradiction from `conversationId` to a learned rule still
-   * learning. The first resets its observation count to 0 and records the
-   * conversation (`reset`); one from another conversation retires it and
-   * records that conversation instead (`retired`). A contradiction from the
-   * recorded conversation writes nothing and reports what that conversation
-   * did, so a retried or repeated extraction applies once and counts the
-   * same. Every other retirement clears the record, so one against a rule that
-   * is active, retired otherwise or not learned writes nothing (`unchanged`).
+   * Apply a contradiction from the Observer chunk ending at `throughMessageId`
+   * to a learned rule still learning. The first resets its observation count
+   * to 0 and records the chunk (`reset`); one from any other chunk, of the
+   * same conversation or another, retires it and records that chunk instead
+   * (`retired`). A contradiction from the recorded chunk writes nothing and
+   * reports what that chunk did, so a re-run extraction step applies once and
+   * counts the same. Every other retirement clears the record, so one against
+   * a rule that is active, retired otherwise or not learned writes nothing
+   * (`unchanged`).
    */
   contradictLearningRule(
     tx: Transaction,
-    params: { id: string; conversationId: string },
+    params: { id: string; throughMessageId: string },
   ): Promise<"reset" | "retired" | "unchanged">;
 
   /**
@@ -2333,6 +2386,112 @@ export class DrizzleAgentStore implements AgentStore {
       .where(and(eq(messages.conversationId, conversationId), gt(messages.id, afterMessageId)))
       .orderBy(asc(messages.id));
     return rows as ReadonlyArray<Message & { id: string }>;
+  }
+
+  async getObserverBounds(tx: Transaction, conversationId: string): Promise<ObserverBounds> {
+    const [conversation] = await tx
+      .select({
+        corrections: conversations.correctionsObservedThrough,
+        memories: conversations.memoriesObservedThrough,
+      })
+      .from(conversations)
+      .where(eq(conversations.id, conversationId));
+    const [stats] = await tx
+      .select({ messageCount: count() })
+      .from(messages)
+      .where(eq(messages.conversationId, conversationId));
+    const [last] = await tx
+      .select({ id: messages.id })
+      .from(messages)
+      .where(eq(messages.conversationId, conversationId))
+      .orderBy(desc(messages.id))
+      .limit(1);
+    return {
+      messageCount: stats?.messageCount ?? 0,
+      lastMessageId: last?.id ?? null,
+      observedThrough: {
+        corrections: conversation?.corrections ?? null,
+        memories: conversation?.memories ?? null,
+      },
+    };
+  }
+
+  async listMessagesInRange(
+    tx: Transaction,
+    conversationId: string,
+    range: { after: string | null; through: string },
+  ): Promise<ReadonlyArray<Message & { id: string }>> {
+    const rows = await tx
+      .select({ id: messages.id, role: messages.role, content: messages.content })
+      .from(messages)
+      .where(
+        and(
+          eq(messages.conversationId, conversationId),
+          range.after === null ? undefined : gt(messages.id, range.after),
+          lte(messages.id, range.through),
+        ),
+      )
+      .orderBy(asc(messages.id));
+    return rows as ReadonlyArray<Message & { id: string }>;
+  }
+
+  async listMessagesThrough(
+    tx: Transaction,
+    conversationId: string,
+    through: string,
+    limit: number,
+  ): Promise<ReadonlyArray<Message & { id: string }>> {
+    const rows = await tx
+      .select({ id: messages.id, role: messages.role, content: messages.content })
+      .from(messages)
+      .where(and(eq(messages.conversationId, conversationId), lte(messages.id, through)))
+      .orderBy(desc(messages.id))
+      .limit(limit);
+    return (rows as Array<Message & { id: string }>).reverse();
+  }
+
+  async getLatestSummaryThrough(
+    tx: Transaction,
+    conversationId: string,
+    through: string,
+  ): Promise<CompactionSummary | undefined> {
+    const rows = await tx
+      .select()
+      .from(conversationSummaries)
+      .where(
+        and(
+          eq(conversationSummaries.conversationId, conversationId),
+          lte(conversationSummaries.throughMessageId, through),
+        ),
+      )
+      .orderBy(desc(conversationSummaries.throughMessageId))
+      .limit(1);
+    return rows[0];
+  }
+
+  async advanceObserverCursor(
+    tx: Transaction,
+    params: { conversationId: string; phase: ObservedPhase; through: string },
+  ): Promise<boolean> {
+    const corrections = params.phase === "corrections";
+    const cursor = corrections
+      ? conversations.correctionsObservedThrough
+      : conversations.memoriesObservedThrough;
+    const moved = await tx
+      .update(conversations)
+      .set(
+        corrections
+          ? { correctionsObservedThrough: params.through }
+          : { memoriesObservedThrough: params.through },
+      )
+      .where(
+        and(
+          eq(conversations.id, params.conversationId),
+          or(isNull(cursor), lt(cursor, params.through)),
+        ),
+      )
+      .returning({ id: conversations.id });
+    return moved.length > 0;
   }
 
   async getProfile(tx: Transaction, profileId: string): Promise<Profile | undefined> {
@@ -3585,7 +3744,7 @@ export class DrizzleAgentStore implements AgentStore {
 
   async contradictLearningRule(
     tx: Transaction,
-    params: { id: string; conversationId: string },
+    params: { id: string; throughMessageId: string },
   ): Promise<"reset" | "retired" | "unchanged"> {
     const learning = and(
       eq(steeringRules.id, params.id),
@@ -3595,20 +3754,20 @@ export class DrizzleAgentStore implements AgentStore {
     );
     const retired = await tx
       .update(steeringRules)
-      .set({ retractedAt: sql`now()`, contradictedInConversationId: params.conversationId })
+      .set({ retractedAt: sql`now()`, contradictedThroughMessageId: params.throughMessageId })
       .where(
         and(
           learning,
-          isNotNull(steeringRules.contradictedInConversationId),
-          ne(steeringRules.contradictedInConversationId, params.conversationId),
+          isNotNull(steeringRules.contradictedThroughMessageId),
+          ne(steeringRules.contradictedThroughMessageId, params.throughMessageId),
         ),
       )
       .returning({ id: steeringRules.id });
     if (retired.length > 0) return "retired";
     const reset = await tx
       .update(steeringRules)
-      .set({ observationCount: 0, contradictedInConversationId: params.conversationId })
-      .where(and(learning, isNull(steeringRules.contradictedInConversationId)))
+      .set({ observationCount: 0, contradictedThroughMessageId: params.throughMessageId })
+      .where(and(learning, isNull(steeringRules.contradictedThroughMessageId)))
       .returning({ id: steeringRules.id });
     if (reset.length > 0) return "reset";
     const [applied] = await tx
@@ -3617,7 +3776,7 @@ export class DrizzleAgentStore implements AgentStore {
       .where(
         and(
           eq(steeringRules.id, params.id),
-          eq(steeringRules.contradictedInConversationId, params.conversationId),
+          eq(steeringRules.contradictedThroughMessageId, params.throughMessageId),
           inArray(steeringRules.source, LEARNED_RULE_SOURCES),
         ),
       );
@@ -3801,8 +3960,8 @@ export class DrizzleAgentStore implements AgentStore {
     }
     await tx
       .update(steeringRules)
-      // Not a contradiction's retirement: no conversation recorded it.
-      .set({ active: false, retractedAt: sql`now()`, contradictedInConversationId: null })
+      // Not a contradiction's retirement: no chunk recorded it.
+      .set({ active: false, retractedAt: sql`now()`, contradictedThroughMessageId: null })
       .where(
         and(
           inArray(steeringRules.source, LEARNED_RULE_SOURCES),
@@ -3821,8 +3980,8 @@ export class DrizzleAgentStore implements AgentStore {
     const scope = { profileId: params.profileId, userId: params.userId };
     const retired = await tx
       .update(steeringRules)
-      // Not a contradiction's retirement: no conversation recorded it.
-      .set({ active: false, retractedAt: sql`now()`, contradictedInConversationId: null })
+      // Not a contradiction's retirement: no chunk recorded it.
+      .set({ active: false, retractedAt: sql`now()`, contradictedThroughMessageId: null })
       .where(
         and(
           textMatches(params.text),

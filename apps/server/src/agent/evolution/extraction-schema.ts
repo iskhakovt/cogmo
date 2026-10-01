@@ -95,6 +95,15 @@ export function labelRules<T extends LabelOrderKey>(
 
 // --- Extraction prompt ---
 
+/**
+ * How both extraction prompts read their user message, which
+ * `formatObserverTranscript` lays out: the earlier conversation is context
+ * for references, never a source.
+ */
+export const TRANSCRIPT_LAYOUT = `## Transcript Layout
+
+The transcript may open with an \`<earlier_conversation>\` element: a summary of the conversation and its latest messages, which an earlier pass already analyzed. Use it only to understand the new messages, such as what "that" or "she" refers to, and extract nothing from it. The \`<new_messages>\` element holds the messages to analyze: extract only from those.`;
+
 export function buildExtractionPrompt(
   /** Existing rules keyed by label, as `labelRules` returns them. */
   existingRules: ReadonlyMap<
@@ -185,5 +194,7 @@ ${channelsSection}
 
 ${rulesSection}
 
-Analyze the transcript below and extract any behavioral corrections.`;
+${TRANSCRIPT_LAYOUT}
+
+Analyze the new messages below and extract any behavioral corrections.`;
 }

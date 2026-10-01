@@ -1,7 +1,7 @@
 /**
  * Correction extraction — pure function with injected dependencies.
  *
- * Analyzes a conversation transcript for behavioral corrections,
+ * Analyzes a chunk of a conversation's new messages for behavioral corrections,
  * compares against existing rules for dedup, and persists new/reinforced
  * corrections via the store. Graduation logic (observation threshold)
  * lives in the store's upsertCorrection method.
@@ -55,7 +55,7 @@ export interface ExtractionResult {
   extracted: number;
   reinforced: number;
   contradictions: number;
-  /** Rules still learning that a second contradiction, from another conversation, retired. */
+  /** Rules still learning that a second contradiction, from another chunk, retired. */
   retired: number;
   /** Rules still learning whose count a first contradiction reset to 0. */
   reset: number;
@@ -70,8 +70,6 @@ export interface ExtractionResult {
 
 /** Whose rules one extraction reads. */
 export interface ExtractionScope {
-  /** The conversation extracted from: a contradiction is applied once per conversation. */
-  conversationId: string;
   profileId: string;
   userId: string;
   /**
@@ -83,19 +81,18 @@ export interface ExtractionScope {
 }
 
 /**
- * Extract behavioral corrections from a conversation transcript.
+ * Extract behavioral corrections from a chunk of new messages, read beside
+ * the earlier conversation it continues.
  *
  * Returns counts of what was found and whether consolidation is needed.
  * Pure function — all I/O goes through deps.
  */
 export async function extractCorrections(
-  history: ReadonlyArray<Message>,
+  transcript: ObserverTranscript,
   scope: ExtractionScope,
   deps: ExtractionDeps,
 ): Promise<ExtractionResult> {
-  const transcript = formatTranscript(history);
-
-  if (transcript.trim().length === 0) {
+  if (formatTranscript(transcript.messages).trim().length === 0) {
     logger.debug("empty transcript — skipping extraction");
     return {
       extracted: 0,
@@ -127,7 +124,7 @@ export async function extractCorrections(
     provider: deps.provider,
     model: deps.model,
     system: systemPrompt,
-    messages: [{ role: "user", content: transcript }],
+    messages: [{ role: "user", content: formatObserverTranscript(transcript) }],
     schema: CorrectionExtractionSchema,
     name: "correction-extraction",
     repair: {},
@@ -168,8 +165,8 @@ export async function extractCorrections(
       };
       // The user retracts a live rule in the turn. One still learning, which
       // `# Rules` doesn't show, has its count reset by a first contradiction
-      // and is retired by a second from another conversation: a single
-      // mislabelled contradiction costs its evidence, not the rule.
+      // and is retired by a second from another chunk: a single mislabelled
+      // contradiction costs its evidence, not the rule.
       if (contradictedRule.active) {
         logger.info(log, "correction contradicts a live rule — logged, not applied");
         continue;
@@ -189,7 +186,7 @@ export async function extractCorrections(
       const outcome = await deps.runInTx((tx) =>
         deps.store.contradictLearningRule(tx, {
           id: contradictedRule.id,
-          conversationId: scope.conversationId,
+          throughMessageId: transcript.throughMessageId,
         }),
       );
       if (outcome === "retired") {
@@ -201,7 +198,7 @@ export async function extractCorrections(
       } else {
         logger.info(
           log,
-          "extraction: contradiction already applied from this conversation, or the rule was promoted or retired since it was listed",
+          "extraction: contradiction already applied from this chunk, or the rule was promoted or retired since it was listed",
         );
       }
       continue;
@@ -388,6 +385,37 @@ function coerceChannelType(
 // --- Transcript formatting ---
 
 /**
+ * What one extraction reads: a chunk of the conversation's new messages, and
+ * the earlier conversation an earlier pass already processed, given only to
+ * resolve references.
+ */
+export interface ObserverTranscript {
+  /** The widest compaction summary that ends before the chunk, if any. */
+  summary: string | null;
+  /** The last messages before the chunk, oldest first. */
+  context: ReadonlyArray<Message>;
+  /** The chunk: the messages to extract from. */
+  messages: ReadonlyArray<Message>;
+  /** The chunk's last message, which keys its contradictions and documents. */
+  throughMessageId: string;
+}
+
+/**
+ * The user message an extraction sends: the earlier conversation in
+ * `<earlier_conversation>`, when there is one, then the chunk in
+ * `<new_messages>`. The extraction prompts' `TRANSCRIPT_LAYOUT` describes it.
+ */
+export function formatObserverTranscript(transcript: ObserverTranscript): string {
+  const earlier = [
+    ...(transcript.summary === null ? [] : [`<summary>\n${transcript.summary}\n</summary>`]),
+    ...(transcript.context.length === 0 ? [] : [formatTranscript(transcript.context)]),
+  ];
+  const fresh = `<new_messages>\n${formatTranscript(transcript.messages)}\n</new_messages>`;
+  if (earlier.length === 0) return fresh;
+  return `<earlier_conversation>\n${earlier.join("\n\n")}\n</earlier_conversation>\n\n${fresh}`;
+}
+
+/**
  * Format a Message[] array into human-readable transcript text.
  *
  * Strips images, thinking blocks and the loop's harness prompts (the
@@ -402,7 +430,8 @@ export function formatTranscript(messages: ReadonlyArray<Message>): string {
   ).join("\n\n");
 }
 
-function formatMessage(msg: Message): string {
+/** One message as a transcript line; "" when nothing in it is shown. */
+export function formatMessage(msg: Message): string {
   if (typeof msg.content === "string") {
     return `${roleLabel(msg.role)}: ${msg.content}`;
   }
