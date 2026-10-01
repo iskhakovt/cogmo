@@ -1,7 +1,8 @@
 import { logger } from "../../logger.js";
-import { getMainSha, isAncestor, updateRef } from "../git-ops.js";
+import { getMainSha, isAncestor } from "../git-ops.js";
 import { readSkillSource } from "../skill-source.js";
-import { type DeployDeps, requireRepoPath, ZERO_SHA } from "./deploy-deps.js";
+import { advanceMain, runDeployTx } from "./advance-main.js";
+import { type DeployDeps, requireRepoPath } from "./deploy-deps.js";
 import { readManifestLockfile } from "./lockfile-check.js";
 import { mirrorMainToRemote } from "./mirror.js";
 import { deployRunAs, type SkillDeployOrigin } from "./origin.js";
@@ -34,7 +35,7 @@ export async function approveDeploy(
 
   const mainSha = await getMainSha(repoPath);
   // Fast-forward check at approve time too — main may have moved since the
-  // approve-tier deploy was created.
+  // approve-tier deploy was created. Repeated under the lock by `advanceMain`.
   if (mainSha && !(await isAncestor(repoPath, mainSha, deploy.gitSha))) {
     return rejectedResult(deploy.gitSha, "non_fast_forward_at_approve_time");
   }
@@ -79,7 +80,7 @@ export async function approveDeploy(
   const lockfile = lockfileResult.value;
 
   const schedule = manifest.schedule ?? null;
-  const result = await deps.runInTx((tx) =>
+  const executed = await runDeployTx(deps.runInTx, (tx) =>
     deps.store.executeApprove(tx, {
       pendingId: opts.pendingId,
       approvedBy: opts.origin.kind === "user" ? opts.origin.actor.identityId : null,
@@ -96,10 +97,12 @@ export async function approveDeploy(
       outputs: manifest.outputs ?? null,
       runAs: deployRunAs(deps.defaultRunAs, opts.origin),
       applyFilesystem: async () => {
-        await updateRef(repoPath, "refs/heads/main", deploy.gitSha, mainSha ?? ZERO_SHA);
+        await advanceMain(repoPath, deploy.gitSha, { kind: "fast_forward" });
       },
     }),
   );
+  if (executed.isErr()) return rejectedResult(deploy.gitSha, "non_fast_forward_at_approve_time");
+  const result = executed.value;
 
   if (result.kind === "live") {
     // Warm the source cache with the just-approved manifest so the next

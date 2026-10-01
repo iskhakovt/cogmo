@@ -1,45 +1,21 @@
 import { err, ok, type Result } from "neverthrow";
 import { match } from "ts-pattern";
-import type { Transaction } from "../../db/index.js";
 import { classifyManifest } from "../classifier.js";
 import { type LockfileSnapshot, parseLockfilePackageSpecs } from "../deps.js";
-import { deleteRef, getMainSha, isAncestor, revParse, updateRef } from "../git-ops.js";
+import { deleteRef, getMainSha, isAncestor, revParse } from "../git-ops.js";
 import { checkPyodideCompat, formatPyodideCompatIssues } from "../pyodide-compat.js";
 import { readSkillSource, SKILL_BODY_FILE, SKILL_MANIFEST_FILE } from "../skill-source.js";
 import type { ExecuteRegisterResult } from "../store/index.js";
 import type { ClassifierLog, SkillManifest } from "../types.js";
 import { lintWasmCompat } from "../worker-wasm/wasm-lint.js";
-import { type DeployDeps, requireRepoPath, ZERO_SHA } from "./deploy-deps.js";
+import { advanceMain, runDeployTx } from "./advance-main.js";
+import { type DeployDeps, requireRepoPath } from "./deploy-deps.js";
 import { readManifestLockfile } from "./lockfile-check.js";
 import { mirrorMainToRemote } from "./mirror.js";
 import { deployRunAs, type SkillDeployOrigin } from "./origin.js";
 import { type RegisterResult, rejectedResult } from "./register-result.js";
 
 const NON_FAST_FORWARD = "non_fast_forward: rebase branch onto main and retry";
-
-/**
- * Thrown from `applyFilesystem` to roll the register transaction back when
- * main no longer precedes the branch tip.
- */
-class MainMovedError extends Error {
-  constructor() {
-    super("skills main moved off the branch's base during register");
-    this.name = "MainMovedError";
-  }
-}
-
-/** Run the register transaction, erring when it rolled back because main moved. */
-async function executeUnderLock(
-  deps: Pick<DeployDeps, "runInTx">,
-  execute: (tx: Transaction) => Promise<ExecuteRegisterResult>,
-): Promise<Result<ExecuteRegisterResult, MainMovedError>> {
-  try {
-    return ok(await deps.runInTx(execute));
-  } catch (e) {
-    if (e instanceof MainMovedError) return err(e);
-    throw e;
-  }
-}
 
 /** A branch that passed every check `register` makes before its transaction. */
 interface PreparedRegister {
@@ -71,7 +47,7 @@ export async function registerSkill(
   const { branchSha, manifest, body, classifierLog, lockfile } = prepared.value;
 
   const schedule = manifest.schedule ?? null;
-  const executed = await executeUnderLock(deps, (tx) =>
+  const executed = await runDeployTx(deps.runInTx, (tx) =>
     deps.store.executeRegister(tx, {
       name: manifest.name,
       tier: manifest.tier,
@@ -86,18 +62,12 @@ export async function registerSkill(
       classifierLog,
       runAs: deployRunAs(deps.defaultRunAs, opts.origin),
       applyFilesystem: async () => {
-        // Main is read here, under the advisory lock, not with the checks
-        // before the transaction: a register of the same skill that held the
-        // lock first may have moved it since.
-        const mainSha = await getMainSha(repoPath);
-        if (mainSha && !(await isAncestor(repoPath, mainSha, branchSha))) {
-          throw new MainMovedError();
-        }
-        await updateRef(repoPath, "refs/heads/main", branchSha, mainSha ?? ZERO_SHA);
+        await advanceMain(repoPath, branchSha, { kind: "fast_forward" });
         await deleteRef(repoPath, `refs/heads/${opts.branch}`);
       },
     }),
   );
+  // `main_moved`: a deploy of another skill moved main off the branch's base.
   if (executed.isErr()) return rejectedResult(branchSha, NON_FAST_FORWARD);
   const result = executed.value;
 

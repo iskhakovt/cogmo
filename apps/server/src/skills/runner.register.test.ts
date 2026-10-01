@@ -1316,6 +1316,35 @@ effects:
       expect(result.errors?.[0]).toMatch(/non_fast_forward_at_approve_time/);
     });
 
+    it("rejects when another skill's deploy moves main while the approve waits on its lock", async () => {
+      const runner = await makeRunner();
+      const pendingId = await makePendingDeploy(runner);
+      await execFileP("git", ["-C", repo.work, "checkout", "--orphan", "unrelated"]);
+      const theirs = await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/unrelated",
+        manifest: ECHO_MANIFEST,
+        body: ECHO_BODY,
+      });
+      const executeApprove = store.executeApprove.bind(store);
+      const spy = vi.spyOn(store, "executeApprove").mockImplementationOnce(async (trx, params) => {
+        await execFileP("git", ["-C", repo.bare, "update-ref", "refs/heads/main", theirs]);
+        return executeApprove(trx, params);
+      });
+
+      try {
+        const result = await runner.approveDeploy({ pendingId, origin: OWNER });
+
+        assertStatus(result, "rejected");
+        expect(result.errors).toEqual(["non_fast_forward_at_approve_time"]);
+        expect(await getMainSha(repo.bare)).toBe(theirs);
+        const deploy = await tx((trx) => store.getDeployById(trx, pendingId));
+        expect(deploy?.status).toBe("pending_approval");
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     it("target_missing_source when SKILL.md is gone at the deploy sha", async () => {
       // Patch the deploy's git_sha column to point at a commit lacking
       // SKILL.md — simulates the original branch being rebased away
@@ -1359,6 +1388,47 @@ effects:
   });
 
   describe("rollback: rejection matrix", () => {
+    it("rejects when another deploy moves main while the rollback waits on its lock", async () => {
+      const runner = await makeRunner();
+      const v1 = await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/echo",
+        manifest: ECHO_MANIFEST,
+        body: ECHO_BODY,
+      });
+      await runner.register({ branch: "skill/echo", origin: OWNER });
+      const v2 = await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/echo-v2",
+        manifest: ECHO_MANIFEST,
+        body: `${ECHO_BODY}\n# v2\n`,
+      });
+      await runner.register({ branch: "skill/echo-v2", origin: OWNER });
+      const theirs = await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/other",
+        manifest: ECHO_MANIFEST,
+        body: `${ECHO_BODY}\n# other\n`,
+      });
+      const executeRollback = store.executeRollback.bind(store);
+      const spy = vi.spyOn(store, "executeRollback").mockImplementationOnce(async (trx, params) => {
+        await execFileP("git", ["-C", repo.bare, "update-ref", "refs/heads/main", theirs]);
+        return executeRollback(trx, params);
+      });
+
+      try {
+        const result = await runner.rollback({ name: "echo", toGitSha: v1, origin: OWNER });
+
+        assertStatus(result, "rejected");
+        expect(result.errors?.[0]).toMatch(/^main_moved:/);
+        expect(await getMainSha(repo.bare)).toBe(theirs);
+        const skill = await tx((trx) => store.getSkillByName(trx, "echo"));
+        expect(skill?.gitSha).toBe(v2);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     it("target_sha_not_found when the target sha is unknown to the repo", async () => {
       const runner = await makeRunner();
       // Register echo first so the skill row exists.

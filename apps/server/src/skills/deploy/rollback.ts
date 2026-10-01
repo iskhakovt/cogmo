@@ -1,6 +1,7 @@
 import { classifyManifest } from "../classifier.js";
-import { getMainSha, revParse, updateRef } from "../git-ops.js";
+import { getMainSha, revParse } from "../git-ops.js";
 import { readSkillSource } from "../skill-source.js";
+import { advanceMain, runDeployTx } from "./advance-main.js";
 import { type DeployDeps, requireRepoPath, ZERO_SHA } from "./deploy-deps.js";
 import { readManifestLockfile } from "./lockfile-check.js";
 import { mirrorMainToRemote } from "./mirror.js";
@@ -79,7 +80,7 @@ export async function rollbackSkill(
   const lockfile = lockfileResult.value;
 
   const schedule = manifest.schedule ?? null;
-  const result = await deps.runInTx((tx) =>
+  const executed = await runDeployTx(deps.runInTx, (tx) =>
     deps.store.executeRollback(tx, {
       name: opts.name,
       toGitSha: targetSha,
@@ -96,11 +97,16 @@ export async function rollbackSkill(
       applyFilesystem: async () => {
         // Rollback rewrites main backward — pre-receive hook would normally
         // reject this, but `update-ref` bypasses hooks by design (see
-        // bootstrapSkillsRepo). Pass `mainSha` as expectedOldSha for CAS.
-        await updateRef(repoPath, "refs/heads/main", targetSha, mainSha ?? ZERO_SHA);
+        // bootstrapSkillsRepo). Main must still be the `mainSha` read above:
+        // rewinding past a deploy that landed since would drop it from main.
+        await advanceMain(repoPath, targetSha, { kind: "unchanged", expected: mainSha });
       },
     }),
   );
+  if (executed.isErr()) {
+    return rejectedResult(targetSha, "main_moved: main changed during the rollback; retry");
+  }
+  const result = executed.value;
 
   // Warm the source cache with the rolled-back manifest+body so the next
   // invoke or listToolDefs read doesn't re-fetch from git.
