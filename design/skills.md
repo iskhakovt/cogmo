@@ -607,7 +607,7 @@ cogmo skills register --branch skill/summarize-email-<date>
 The `register` RPC:
 
 1. **Acquire advisory lock** `pg_advisory_xact_lock(hashtext("skill_register:" + name))`. Queues concurrent registers on the same skill name, but under REPEATABLE READ the checks below can still read state from before the winner's commit ([store-pattern rule](../.claude/rules/store-pattern.md); audit filed in `todo.md`).
-2. **Fast-forward check.** Verify `main` is an ancestor of the branch tip. If not → return `{ status: "rejected", errors: ["main has advanced; rebase branch and retry"] }`.
+2. **Fast-forward check.** Verify `main` is an ancestor of the branch tip. If not → return `{ status: "rejected", errors: ["non_fast_forward: rebase branch onto main and retry"] }`. Checked before the transaction to fail fast, and again under the lock just before `update-ref`, reading `main` afresh: a register of the same skill that held the lock first may have moved it. The second check rolls the transaction back and returns the same rejection.
 3. **No-op check.** If `current skills.git_sha == branch tip sha` → return `{ status: "live", … }` with no side effects (idempotent).
 4. **Pending-approval check.** If any `skill_deploys` row for this skill has `status = 'pending_approval'` → return `{ status: "rejected", errors: ["pending deploy exists; approve or deny first"] }`.
 5. **Read + classify.** `git show <branch-tip>:SKILL.md` / `:skill.py`. Run classifier + static analysis. Validate manifest against `SkillManifestSchema`.

@@ -284,6 +284,49 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
     expect(second.status).toBe("no_op");
   });
 
+  it("rejects as non-fast-forward when main moves while the register waits on its lock", async () => {
+    const runner = await makeRunner();
+    const base = await pushFeatureBranch({
+      work: repo.work,
+      branch: "skill/echo",
+      manifest: ECHO_MANIFEST,
+      body: ECHO_BODY,
+    });
+    await runner.register({ branch: "skill/echo", origin: OWNER });
+    await pushFeatureBranch({
+      work: repo.work,
+      branch: "skill/echo-mine",
+      manifest: ECHO_MANIFEST,
+      body: `${ECHO_BODY}\n# mine\n`,
+    });
+    await execFileP("git", ["-C", repo.work, "reset", "--hard", base]);
+    const theirs = await pushFeatureBranch({
+      work: repo.work,
+      branch: "skill/echo-theirs",
+      manifest: ECHO_MANIFEST,
+      body: `${ECHO_BODY}\n# theirs\n`,
+    });
+    // A concurrent register of the same skill wins the advisory lock and
+    // moves main after this one's pre-transaction checks passed.
+    const executeRegister = store.executeRegister.bind(store);
+    const spy = vi.spyOn(store, "executeRegister").mockImplementationOnce(async (trx, params) => {
+      await execFileP("git", ["-C", repo.bare, "update-ref", "refs/heads/main", theirs]);
+      return executeRegister(trx, params);
+    });
+
+    try {
+      const result = await runner.register({ branch: "skill/echo-mine", origin: OWNER });
+
+      expect(result.status).toBe("rejected");
+      expect(result.errors).toEqual(["non_fast_forward: rebase branch onto main and retry"]);
+      expect(await getMainSha(repo.bare)).toBe(theirs);
+      const skill = await tx((trx) => store.getSkillByName(trx, "echo"));
+      expect(skill?.gitSha).toBe(base);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("rejects a non-fast-forward branch", async () => {
     const runner = await makeRunner();
     await pushFeatureBranch({
