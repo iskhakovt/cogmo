@@ -4,7 +4,7 @@
  * remote that requires the bot's PAT).
  *
  * Per-task askpass for in-container git inside the sandbox lives separately
- * (slice 4.0d, `src/sandbox/askpass.ts`). This module is for **host-side**
+ * (`src/sandbox/askpass.ts`). This module is for **host-side**
  * one-shot use: caller invokes `withGitAskpass(pat, fn)`, fn runs with the
  * PAT exposed only via `GIT_ASKPASS`, and the helper directory is wiped
  * unconditionally on return — even if `fn` throws.

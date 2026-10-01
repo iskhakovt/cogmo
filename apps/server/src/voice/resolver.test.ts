@@ -141,6 +141,36 @@ describe("createDbVoiceResolver", () => {
     expect(await resolve()).toBeUndefined();
   });
 
+  it("returns undefined when an openai_compatible STT provider is missing a baseURL", async () => {
+    const { agentStore, secretsStore } = setup();
+    agentStore.getVoiceConfig.mockResolvedValue(
+      voiceRow({ sttProvider: "openai_compatible", sttBaseUrl: null }),
+    );
+
+    const resolve = createDbVoiceResolver({
+      runInTx: fakeRunInTx,
+      agentStore,
+      secretsStore,
+    });
+    expect(await resolve()).toBeUndefined();
+  });
+
+  it("returns undefined once the TTS config stops building a provider", async () => {
+    const { agentStore, secretsStore } = setup();
+    agentStore.getVoiceConfig.mockResolvedValue(voiceRow());
+    const resolve = createDbVoiceResolver({
+      runInTx: fakeRunInTx,
+      agentStore,
+      secretsStore,
+    });
+    expect(await resolve()).toBeDefined();
+
+    agentStore.getVoiceConfig.mockResolvedValue(
+      voiceRow({ ttsProvider: "openai_compatible", ttsBaseUrl: null }),
+    );
+    expect(await resolve()).toBeUndefined();
+  });
+
   it("caches the bundle when row + secrets are unchanged across calls", async () => {
     const { agentStore, secretsStore } = setup();
     agentStore.getVoiceConfig.mockResolvedValue(voiceRow());

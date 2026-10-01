@@ -5,6 +5,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 import type { Database, Transactor } from "../../db/index.js";
 import type { CacheDialect } from "../../llm/cache-dialect.js";
+import type { ExtraBody } from "../../llm/extra-body.js";
 import { HARNESS_ROW_TAGS, type Message } from "../../llm/types.js";
 import { deriveMasterKey, generateMasterKey, parseMasterKey } from "../../secrets/encryption.js";
 import { DrizzleSecretsStore } from "../../secrets/store/index.js";
@@ -2004,6 +2005,141 @@ describe("DrizzleAgentStore", () => {
         store.createProvider(trx, { name, type: "anthropic", secretId, attrs: {} }),
       );
     }
+
+    describe("extra body", () => {
+      async function seedRow(extraBody?: ExtraBody | null) {
+        const { id: providerId } = await seedProviderWithSecret("custom");
+        await tx((trx) =>
+          store.addModelProvider(trx, {
+            model: "qwen-3-6-plus",
+            providerId,
+            position: 0,
+            userSelectable: true,
+            ...(extraBody !== undefined && { extraBody }),
+          }),
+        );
+        return providerId;
+      }
+
+      async function stored(): Promise<ExtraBody | null> {
+        const rows = await tx((trx) => store.listProvidersForModel(trx, "qwen-3-6-plus"));
+        return expectDefined(rows[0], "routing row").extraBody;
+      }
+
+      it("reads back as null when the row is added without one", async () => {
+        await seedRow();
+
+        expect(await stored()).toBeNull();
+      });
+
+      it("round-trips through add, both lists, set and clear", async () => {
+        const providerId = await seedRow({
+          venice_parameters: { disable_thinking: true, strip_thinking_response: false },
+        });
+
+        expect(await stored()).toEqual({
+          venice_parameters: { disable_thinking: true, strip_thinking_response: false },
+        });
+        const all = await tx((trx) => store.listAllModelProviders(trx));
+        expect(all.map((row) => row.extraBody)).toEqual([
+          { venice_parameters: { disable_thinking: true, strip_thinking_response: false } },
+        ]);
+
+        const set = await tx((trx) =>
+          store.setModelProviderExtraBody(trx, "qwen-3-6-plus", providerId, {
+            reasoning: { enabled: false },
+          }),
+        );
+        expect(set).toBe(true);
+        expect(await stored()).toEqual({ reasoning: { enabled: false } });
+
+        const cleared = await tx((trx) =>
+          store.setModelProviderExtraBody(trx, "qwen-3-6-plus", providerId, null),
+        );
+        expect(cleared).toBe(true);
+        expect(await stored()).toBeNull();
+      });
+
+      it("changes only the (model, provider) row it names", async () => {
+        const providerId = await seedRow();
+        await tx((trx) =>
+          store.addModelProvider(trx, {
+            model: "other-model",
+            providerId,
+            position: 0,
+            userSelectable: true,
+          }),
+        );
+
+        await tx((trx) =>
+          store.setModelProviderExtraBody(trx, "other-model", providerId, { top_p: 0.5 }),
+        );
+
+        expect(await stored()).toBeNull();
+      });
+
+      it("returns false when no row matches", async () => {
+        const providerId = await seedRow();
+
+        const updated = await tx((trx) =>
+          store.setModelProviderExtraBody(trx, "missing-model", providerId, { top_p: 0.5 }),
+        );
+
+        expect(updated).toBe(false);
+      });
+
+      it("refuses a reserved key on write and keeps the stored value", async () => {
+        const providerId = await seedRow({ reasoning: { enabled: false } });
+
+        await expect(
+          tx((trx) =>
+            store.setModelProviderExtraBody(trx, "qwen-3-6-plus", providerId, {
+              stream: false,
+            } as unknown as ExtraBody),
+          ),
+        ).rejects.toThrow(/stream\\" is set by the adapter/);
+        expect(await stored()).toEqual({ reasoning: { enabled: false } });
+      });
+
+      it("refuses a reserved key on add", async () => {
+        const { id: providerId } = await seedProviderWithSecret("custom");
+
+        await expect(
+          tx((trx) =>
+            store.addModelProvider(trx, {
+              model: "qwen-3-6-plus",
+              providerId,
+              position: 0,
+              userSelectable: true,
+              extraBody: { max_tokens: 10 } as unknown as ExtraBody,
+            }),
+          ),
+        ).rejects.toThrow(/max_tokens\\" is set by the adapter/);
+        expect(await tx((trx) => store.listProvidersForModel(trx, "qwen-3-6-plus"))).toEqual([]);
+      });
+
+      it("reads past a reserved key written outside the store, dropping it", async () => {
+        const providerId = await seedRow();
+        await db.execute(
+          sql`UPDATE model_providers SET extra_body = '{"model":"other","top_p":0.5}'::jsonb WHERE provider_id = ${providerId}`,
+        );
+
+        expect(await stored()).toEqual({ top_p: 0.5 });
+        const all = await tx((trx) => store.listAllModelProviders(trx));
+        expect(all.map((row) => row.extraBody)).toEqual([{ top_p: 0.5 }]);
+      });
+
+      it("reads a row left with only reserved keys as having none", async () => {
+        const providerId = await seedRow();
+        await db.execute(
+          sql`UPDATE model_providers SET extra_body = '{"model":"other"}'::jsonb WHERE provider_id = ${providerId}`,
+        );
+
+        expect(await stored()).toBeNull();
+        const all = await tx((trx) => store.listAllModelProviders(trx));
+        expect(all.map((row) => row.extraBody)).toEqual([null]);
+      });
+    });
 
     it("resolves the lowest-position provider for a model", async () => {
       const { id: fallbackId } = await seedProviderWithSecret("fallback");

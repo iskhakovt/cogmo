@@ -141,12 +141,8 @@ interface VeniceRequestBody {
   format: "png" | "jpeg" | "webp";
 }
 
-/** Wire-shape response body. Venice returns base64 images inline. */
-interface VeniceResponseBody {
-  images?: ReadonlyArray<string>;
-  /** Echoed back for some models — informational only, we don't consume. */
-  request?: unknown;
-}
+/** The response body's field the adapter reads: base64 images, inline. */
+const VeniceResponseSchema = z.object({ images: z.array(z.string()).optional() });
 
 /**
  * Generation options the tool handler builds and hands to the adapter.
@@ -309,9 +305,12 @@ export class VeniceImageProvider {
       throw new Error(`Venice image generation failed: HTTP ${resp.status}`);
     }
 
-    const parsed = (await resp.json()) as VeniceResponseBody;
-    const first = parsed.images?.[0];
-    if (typeof first !== "string" || first.length === 0) {
+    const parsed = VeniceResponseSchema.safeParse(await resp.json());
+    if (!parsed.success) {
+      throw new Error(`Venice response did not match the expected shape: ${parsed.error.message}`);
+    }
+    const first = parsed.data.images?.[0];
+    if (first === undefined || first.length === 0) {
       throw new Error("Venice response carried no image data");
     }
     // Buffer extends Uint8Array, so the `uint8Array` field contract is

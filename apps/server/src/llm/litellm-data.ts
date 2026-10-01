@@ -75,7 +75,7 @@ let live: LiveCatalog | null = null;
 export function bundledSnapshot(): LitellmCatalog {
   if (cache) return cache;
   const body = readFileSync(SNAPSHOT_PATH, "utf-8");
-  cache = JSON.parse(body) as LitellmCatalog;
+  cache = LitellmCatalogSchema.parse(JSON.parse(body));
   return cache;
 }
 

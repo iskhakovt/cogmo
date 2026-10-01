@@ -23,6 +23,7 @@ import { single } from "../../db/helpers.js";
 import type { Transaction } from "../../db/index.js";
 import type { CacheDialect } from "../../llm/cache-dialect.js";
 import { NOT_TURN_ROW_JSONPATH } from "../../llm/content.js";
+import { type ExtraBody, ExtraBodySchema } from "../../llm/extra-body.js";
 import type { ContentBlock, Message } from "../../llm/types.js";
 import { skills } from "../../skills/store/schema.js";
 import { previewInboundText } from "../../transport/content.js";
@@ -1343,6 +1344,9 @@ export interface AgentStore {
    * undefined to let the resolver fall back through LiteLLM JSON → conservative
    * default. Set them only when the model is unknown to LiteLLM and the
    * default doesn't fit (e.g., a niche local model with a 1M context window).
+   *
+   * `extraBody` is the model's extra request fields on an OpenAI-compatible
+   * provider; undefined or null stores none.
    */
   addModelProvider(
     tx: Transaction,
@@ -1353,8 +1357,20 @@ export interface AgentStore {
       userSelectable: boolean;
       contextWindow?: number | null;
       maxOutputTokens?: number | null;
+      extraBody?: ExtraBody | null;
     },
   ): Promise<{ id: string }>;
+
+  /**
+   * Replace the extra request fields of the `(model, providerId)` routing row;
+   * null clears them. Returns whether a row matched.
+   */
+  setModelProviderExtraBody(
+    tx: Transaction,
+    model: string,
+    providerId: string,
+    extraBody: ExtraBody | null,
+  ): Promise<boolean>;
 
   /**
    * List every provider registered for a model, ordered by position ASC
@@ -1377,6 +1393,7 @@ export interface AgentStore {
       position: number;
       contextWindow: number | null;
       maxOutputTokens: number | null;
+      extraBody: ExtraBody | null;
     }>
   >;
 
@@ -1398,6 +1415,7 @@ export interface AgentStore {
       position: number;
       contextWindow: number | null;
       maxOutputTokens: number | null;
+      extraBody: ExtraBody | null;
     }>
   >;
 
@@ -3148,9 +3166,12 @@ export class DrizzleAgentStore implements AgentStore {
       userSelectable: boolean;
       contextWindow?: number | null;
       maxOutputTokens?: number | null;
+      extraBody?: ExtraBody | null;
     },
   ): Promise<{ id: string }> {
-    const { contextWindow, maxOutputTokens, ...rest } = params;
+    const { contextWindow, maxOutputTokens, extraBody, ...rest } = params;
+    // The column reads leniently, so a write is checked against the strict schema here.
+    if (extraBody != null) ExtraBodySchema.parse(extraBody);
     return single(
       await tx
         .insert(modelProviders)
@@ -3158,9 +3179,26 @@ export class DrizzleAgentStore implements AgentStore {
           ...rest,
           contextWindow: contextWindow ?? null,
           maxOutputTokens: maxOutputTokens ?? null,
+          extraBody: extraBody ?? null,
         })
         .returning({ id: modelProviders.id }),
     );
+  }
+
+  async setModelProviderExtraBody(
+    tx: Transaction,
+    model: string,
+    providerId: string,
+    extraBody: ExtraBody | null,
+  ): Promise<boolean> {
+    // The column reads leniently, so a write is checked against the strict schema here.
+    if (extraBody !== null) ExtraBodySchema.parse(extraBody);
+    const rows = await tx
+      .update(modelProviders)
+      .set({ extraBody })
+      .where(and(eq(modelProviders.model, model), eq(modelProviders.providerId, providerId)))
+      .returning({ id: modelProviders.id });
+    return rows.length > 0;
   }
 
   async listProvidersForModel(
@@ -3177,6 +3215,7 @@ export class DrizzleAgentStore implements AgentStore {
       position: number;
       contextWindow: number | null;
       maxOutputTokens: number | null;
+      extraBody: ExtraBody | null;
     }>
   > {
     const rows = await tx
@@ -3190,6 +3229,7 @@ export class DrizzleAgentStore implements AgentStore {
         position: modelProviders.position,
         contextWindow: modelProviders.contextWindow,
         maxOutputTokens: modelProviders.maxOutputTokens,
+        extraBody: modelProviders.extraBody,
       })
       .from(modelProviders)
       .innerJoin(llmProviders, eq(modelProviders.providerId, llmProviders.id))
@@ -3210,6 +3250,7 @@ export class DrizzleAgentStore implements AgentStore {
       position: number;
       contextWindow: number | null;
       maxOutputTokens: number | null;
+      extraBody: ExtraBody | null;
     }>
   > {
     const rows = await tx
@@ -3224,6 +3265,7 @@ export class DrizzleAgentStore implements AgentStore {
         position: modelProviders.position,
         contextWindow: modelProviders.contextWindow,
         maxOutputTokens: modelProviders.maxOutputTokens,
+        extraBody: modelProviders.extraBody,
       })
       .from(modelProviders)
       .innerJoin(llmProviders, eq(modelProviders.providerId, llmProviders.id))
