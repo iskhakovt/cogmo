@@ -99,7 +99,7 @@ Keys don't close every route — see `DEPLOYMENT.md` → Securing internal servi
 
 ## Boot-Time Blocking Policy `[confirmed]`
 
-`cogmo serve` boot is staged (`bootstrapCore` → `bootstrapSandbox` → `bootstrapSkillRunner` → `bootstrapRuntime`); each stage blocks only on work that the *first inbound request* genuinely needs. Slow or recoverable work is fire-and-forget with structured error logging.
+`cogmo serve` boot is staged (`bootstrapCore` → `bootstrapSandbox` → `bootstrapSkillRunner` → `bootstrapRuntime`, composed in `src/boot/`); each stage blocks only on work that the *first inbound request* genuinely needs. Slow or recoverable work is fire-and-forget with structured error logging.
 
 **Stays blocking** (every later path depends on it):
 - DB migrations and boot seeding, under the bootstrap advisory lock ([setup.md → Concurrent runs](setup.md#concurrent-runs))

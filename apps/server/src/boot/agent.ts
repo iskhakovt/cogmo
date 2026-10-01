@@ -62,7 +62,7 @@ export function createAgentTools(
   return { imageToolsLoader, tools, promptSource };
 }
 
-export type AgentTools = ReturnType<typeof createAgentTools>;
+type AgentTools = ReturnType<typeof createAgentTools>;
 
 /** In-process `/reflect` and `/compact`, injected into every Transport. */
 export function createConversationTriggers(core: CoreDeps, promptSource: DefaultPromptSource) {
