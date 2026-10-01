@@ -1270,7 +1270,7 @@ UPDATE recovery_point='executed', output/error/resource_usage/finished_at  ← t
 UPDATE recovery_point='finished', status='success'|'error'  ← transitionToFinished, atomic
 ```
 
-**Recovery branches.** Every `runner.invoke({idempotencyKey})` calls `startOrRecoverRun` first. A warm-pool skill whose key has no row yet starts the pool before that write, so a pool that can't start leaves no row and the keyed retry runs the skill; a key that already has a row is settled from it without starting the pool.
+**Recovery branches.** Every `runner.invoke({idempotencyKey})` calls `startOrRecoverRun` first. `invoke/start-run.ts` maps the row to a `RunStart` (`execute`, `finish`, `replay`, `inflight`), matched exhaustively in `invoke/invoke.ts`; `invoke/execute-run.ts` and `invoke/finish-run.ts` own the two transitions. A warm-pool skill whose key has no row yet starts the pool before that write, so a pool that can't start leaves no row and the keyed retry runs the skill; a key that already has a row is settled from it without starting the pool.
 
 | recovered row state | runner action |
 |-|-|
@@ -1299,7 +1299,7 @@ UPDATE recovery_point='finished', status='success'|'error'  ← transitionToFini
 |-|-|-|
 | Public interface | `index.ts`, `runner.ts` | `SkillRunner` contract; `SkillRunnerImpl` wires the source cache, warm pool and use cases below |
 | Deploy pipeline | `deploy/` | One use case per RPC: `register.ts`, `approve.ts` (approve + deny), `rollback.ts`, `activation.ts` (enable + deregister); the lockfile check, the remote mirror, and the run-as `origin.ts` they share |
-| Invocation | `invoke/` | `invoke.ts` (pre-flight, then the recovery-point state machine), `runtime.ts` (planning + dispatch to the isolate, pool or one-shot container), `warm-pool.ts` (lazy pool start + shutdown) |
+| Invocation | `invoke/` | `invoke.ts` (pre-flight, then the recovery-point state machine: `start-run.ts`, `execute-run.ts`, `finish-run.ts`), `runtime.ts` (planning + dispatch to the isolate, pool or one-shot container), `warm-pool.ts` (lazy pool start + shutdown) |
 | Source cache + listing | `source-cache.ts`, `listing.ts` | Parsed manifests with compiled validators keyed by `(name, gitSha)`; `list` / `listAll` / `listToolDefs` |
 | Manifest + classifier | `manifest.ts`, `classifier.ts`, `ast-classifier.ts`, `ast-rules.ts` | `SKILL.md` frontmatter parsing + risk-tier assignment (tree-sitter static analysis) |
 | Dependency stack | `deps.ts`, `deps-reaper*.ts`, `pyodide-compat.ts` | Lockfile compile + verify at register, venv populate + activate at invoke, unreachable-venv reaper, tier-1 Pyodide compat check |
