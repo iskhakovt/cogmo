@@ -644,14 +644,16 @@ type SkillDeployOrigin =
   | { kind: "user"; actor: SkillActor; conversation: SkillRunIdentity | null }  // approval tap, /enable
   | { kind: "owner" };                                              // CLI, conversation-less coding task
 
-interface RegisterResult {
-  name: string;
-  riskTier: "auto" | "notify" | "approve";
-  status: "live" | "pending_approval" | "rejected" | "no_op";
-  gitSha: string;                // live SHA post-register (or unchanged if pending/rejected)
-  errors?: readonly string[];    // present if status === "rejected"
-  pendingId?: string;            // present if status === "pending_approval"
-}
+// Each variant also carries name, riskTier and gitSha.
+type RegisterResult =
+  | { status: "live" }                                              // gitSha: main's new tip
+  | { status: "pending_approval"; pendingId: string; schedule?: string }  // gitSha: branch tip
+  | { status: "no_op" }
+  | { status: "rejected"; errors: readonly string[] };              // nothing written
+
+type SkillRunResult =
+  | { runId: string; status: "success"; output?: unknown }
+  | { runId: string; status: "error"; error: string };
 
 // Discriminated unions — typed `kind` instead of thrown `Error`s, so transport
 // adapters can pattern-match without string-matching error messages.

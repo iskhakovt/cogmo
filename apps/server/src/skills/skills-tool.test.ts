@@ -79,7 +79,13 @@ describe("registerSkillTool", () => {
         gitSha: "",
         errors: ["a", "b"],
       })
-      .mockResolvedValueOnce({ name: "", riskTier: "notify", status: "rejected", gitSha: "" });
+      .mockResolvedValueOnce({
+        name: "",
+        riskTier: "notify",
+        status: "rejected",
+        gitSha: "",
+        errors: [],
+      });
     const service = makeService({ register });
     const joined = (await registerSkillTool.handler({ branch: "x" }, service))._unsafeUnwrapErr();
     expect(joined.message).toMatch(/^Register rejected: a; b\. /);

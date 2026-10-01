@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
-import { expectOk } from "../../test/assertions.js";
+import { assertStatus, expectOk } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { parseManifest } from "../manifest.js";
 import { SkillSourceCache, type SkillSourceCacheEntry } from "../source-cache.js";
@@ -100,7 +100,7 @@ describe("finishRun", () => {
       { runId, skillName: "echo", cached, executed: { kind: "output", output: { other: 1 } } },
     );
 
-    expect(result.status).toBe("error");
+    assertStatus(result, "error");
     expect(result.error).toMatch(/output failed schema validation for skill 'echo'/);
   });
 

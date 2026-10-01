@@ -23,7 +23,7 @@ import * as schema from "../db/schemas.js";
 import { HindsightMemoryProvider } from "../memory/hindsight.js";
 import { deriveMasterKey, generateMasterKey, parseMasterKey } from "../secrets/encryption.js";
 import { DrizzleSecretsStore } from "../secrets/store/index.js";
-import { expectOk } from "../test/assertions.js";
+import { assertStatus, expectOk } from "../test/assertions.js";
 import { mockFilesService } from "../test/factories.js";
 import { fileDatabaseUrl } from "../test/integration-file.js";
 import { resolveSkillRunAs, type SkillRunAs } from "./run-as.js";
@@ -121,7 +121,7 @@ describe("SkillRunnerImpl (integration)", { timeout: 60_000 }, () => {
       body: ECHO_BODY,
     });
     const result = (await runner.invoke({ name, inputs: { x: 7 }, runAs }))._unsafeUnwrap();
-    expect(result.status).toBe("success");
+    assertStatus(result, "success");
     expect(result.output).toEqual({ echo: 8 });
 
     const run = await tx((trx) => store.getRun(trx, result.runId));
@@ -161,7 +161,7 @@ async def run(inputs, ctx):
     await runner.__registerForTests({ name, manifestSource: manifest, body });
 
     const result = (await runner.invoke({ name, inputs: {}, runAs }))._unsafeUnwrap();
-    expect(result.status).toBe("success");
+    assertStatus(result, "success");
     expect(result.output).toEqual({ len: "sk-real-secret-value".length, starts_with: "sk-re" });
 
     // Verify audit row landed with the secret NAME (never the value).
@@ -200,7 +200,7 @@ async def run(inputs, ctx):
 
     const fact = `integration-fact-${SUITE}`;
     const result = (await runner.invoke({ name, inputs: { fact }, runAs }))._unsafeUnwrap();
-    expect(result.status).toBe("success");
+    assertStatus(result, "success");
 
     const calls = await tx((trx) => store.listContextCallsForRun(trx, result.runId));
     const remember = calls.find((c) => c.method === "memory.remember");
@@ -239,7 +239,7 @@ async def run(inputs, ctx):
     await runner.__registerForTests({ name, manifestSource: manifest, body });
 
     const result = (await runner.invoke({ name, inputs: {}, runAs }))._unsafeUnwrap();
-    expect(result.status).toBe("error");
+    assertStatus(result, "error");
     expect(result.error).toContain("integration kaboom");
 
     const run = await tx((trx) => store.getRun(trx, result.runId));
@@ -262,7 +262,11 @@ async def run(inputs, ctx):
       await Promise.all(names.map((name, i) => runner.invoke({ name, inputs: { x: i }, runAs })))
     ).map((r) => r._unsafeUnwrap());
     expect(results.every((r) => r.status === "success")).toBe(true);
-    expect(results.map((r) => r.output)).toEqual([{ echo: 1 }, { echo: 2 }, { echo: 3 }]);
+    expect(results.map((r) => (r.status === "success" ? r.output : r.error))).toEqual([
+      { echo: 1 },
+      { echo: 2 },
+      { echo: 3 },
+    ]);
     // Distinct run ids — no collision.
     expect(new Set(results.map((r) => r.runId)).size).toBe(3);
   });
@@ -287,7 +291,7 @@ async def run(inputs, ctx):
     await runner.__registerForTests({ name, manifestSource: manifest, body });
 
     const result = (await runner.invoke({ name, inputs: {}, runAs }))._unsafeUnwrap();
-    expect(result.status).toBe("error");
+    assertStatus(result, "error");
     expect(result.error).toContain("CtxError: not_in_allowlist:");
 
     const calls = await tx((trx) => store.listContextCallsForRun(trx, result.runId));
