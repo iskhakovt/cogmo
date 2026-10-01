@@ -1,6 +1,6 @@
 import { Readability } from "@mozilla/readability";
 import { JSDOM } from "jsdom";
-import { err, ok, type Result } from "neverthrow";
+import { type Err, err, ok, type Result } from "neverthrow";
 import { z } from "zod";
 import { logger } from "../logger.js";
 import { AbortError, withRetry } from "../util/with-retry.js";
@@ -132,9 +132,13 @@ function createWebSearch(apiKey: string | undefined): ToolSpec {
         },
         // retries: 2 — external rate-limited API, don't hammer.
         { retries: 2, context: "tavily.search" },
+      ).then(
+        (r) => ok(r),
+        (e: unknown) => upstreamFailure("web_search", e),
       );
+      if (res.isErr()) return reject(`web_search failed: ${res.error}`);
 
-      const data = TavilySearchResponseSchema.parse(await res.json());
+      const data = TavilySearchResponseSchema.parse(await res.value.json());
 
       if (data.results.length === 0) return ok("No results found.");
 
@@ -189,9 +193,13 @@ function createWebAnswer(apiKey: string | undefined): ToolSpec {
         },
         // retries: 2 — external rate-limited API, don't hammer.
         { retries: 2, context: "openrouter.sonar" },
+      ).then(
+        (r) => ok(r),
+        (e: unknown) => upstreamFailure("web_answer", e),
       );
+      if (res.isErr()) return reject(`web_answer failed: ${res.error}`);
 
-      const data = OpenRouterAnswerSchema.parse(await res.json());
+      const data = OpenRouterAnswerSchema.parse(await res.value.json());
 
       const answer = data.choices[0]?.message.content ?? "No answer returned.";
       const citations = data.citations;
@@ -343,7 +351,7 @@ const TavilySearchResponseSchema = z.object({
 });
 
 const OpenRouterAnswerSchema = z.object({
-  choices: z.array(z.object({ message: z.object({ content: z.string() }) })),
+  choices: z.array(z.object({ message: z.object({ content: z.string().nullable() }) })),
   citations: z.array(z.string()).optional(),
 });
 
@@ -383,9 +391,17 @@ async function tavilyExtract(
       return r;
     },
     { retries: 2, context: `tavily.extract ${new URL(url).hostname}` },
+  ).then(
+    (r) => ok(r),
+    (e: unknown) => upstreamFailure("fetch_url", e),
   );
+  if (res.isErr()) {
+    return reject(
+      `Failed to fetch URL. Direct fetch: ${directError}. Tavily fallback: ${res.error}`,
+    );
+  }
 
-  const data = TavilyExtractResponseSchema.parse(await res.json());
+  const data = TavilyExtractResponseSchema.parse(await res.value.json());
   const result = data.results[0];
   if (result?.raw_content) return ok(result.raw_content);
 
@@ -397,6 +413,17 @@ async function tavilyExtract(
   return reject(
     `Failed to fetch URL. Direct fetch: ${directError}. Tavily fallback: ${tavilyError}`,
   );
+}
+
+/**
+ * The error a `withRetry`-wrapped upstream request ended on — a status it gave
+ * up on or aborted at, a network failure — as its message. An upstream outage
+ * or refusal is an expected external failure the model can relay, so it logs
+ * at warn rather than surfacing as a bug.
+ */
+function upstreamFailure(tool: string, e: unknown): Err<never, string> {
+  logger.warn({ err: e, tool }, "web tool upstream request failed");
+  return err(e instanceof Error ? e.message : String(e));
 }
 
 function extractArticle(html: string, url: string): string {

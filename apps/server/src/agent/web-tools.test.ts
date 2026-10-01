@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { z } from "zod";
+import { logger } from "../logger.js";
 import type { Service } from "./service.js";
 import { createWebTools } from "./web-tools.js";
 
@@ -128,19 +129,31 @@ describe("web_search", () => {
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
-  it("throws on API error", async () => {
+  it("rejects on a client error (4xx) and logs it at warn", async () => {
     const [search] = createWebTools("key", undefined);
     mockFetch.mockResolvedValueOnce({ ok: false, status: 429, text: async () => "rate limited" });
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
 
-    await expect(search!.handler({ query: "test" }, stubService())).rejects.toThrow("429");
+    const outcome = await search!.handler({ query: "test" }, stubService());
+
+    expect(outcome._unsafeUnwrapErr().message).toBe(
+      "web_search failed: Tavily API error: 429 rate limited",
+    );
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ tool: "web_search" }),
+      "web tool upstream request failed",
+    );
+    warn.mockRestore();
   });
 
-  it("throws on server error (5xx)", async () => {
+  it("rejects on a server error (5xx) after the retry budget", async () => {
     const [search] = createWebTools("key", undefined);
     mockFetch.mockResolvedValue({ ok: false, status: 503, text: async () => "down" });
 
-    await expect(search!.handler({ query: "test" }, stubService())).rejects.toThrow(
-      "Tavily API server error: 503",
+    const outcome = await search!.handler({ query: "test" }, stubService());
+
+    expect(outcome._unsafeUnwrapErr().message).toBe(
+      "web_search failed: Tavily API server error: 503 down",
     );
   });
 
@@ -204,24 +217,41 @@ describe("web_answer", () => {
     );
   });
 
-  it("throws on server error (5xx)", async () => {
+  it("rejects on a server error (5xx) after the retry budget", async () => {
     const tools = createWebTools(undefined, "or-key");
     const answer = tools[1]!;
     mockFetch.mockResolvedValue({ ok: false, status: 502, text: async () => "bad gateway" });
 
-    await expect(answer.handler({ question: "test" }, stubService())).rejects.toThrow(
-      "OpenRouter API server error: 502",
+    const outcome = await answer.handler({ question: "test" }, stubService());
+
+    expect(outcome._unsafeUnwrapErr().message).toBe(
+      "web_answer failed: OpenRouter API server error: 502 bad gateway",
     );
   });
 
-  it("throws on client error (4xx)", async () => {
+  it("rejects on a client error (4xx)", async () => {
     const tools = createWebTools(undefined, "or-key");
     const answer = tools[1]!;
     mockFetch.mockResolvedValueOnce({ ok: false, status: 401, text: async () => "unauthorized" });
 
-    await expect(answer.handler({ question: "test" }, stubService())).rejects.toThrow(
-      "OpenRouter API error: 401",
+    const outcome = await answer.handler({ question: "test" }, stubService());
+
+    expect(outcome._unsafeUnwrapErr().message).toBe(
+      "web_answer failed: OpenRouter API error: 401 unauthorized",
     );
+  });
+
+  it("falls back to a placeholder when the model returns null content", async () => {
+    const tools = createWebTools(undefined, "or-key");
+    const answer = tools[1]!;
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ choices: [{ message: { content: null } }] }),
+    });
+
+    const result = (await answer.handler({ question: "test" }, stubService()))._unsafeUnwrap();
+
+    expect(result).toBe("No answer returned.");
   });
 });
 
@@ -545,6 +575,26 @@ describe("fetch_url", () => {
     );
     expect(outcome._unsafeUnwrapErr().message).toMatch(
       /Direct fetch:.*403.*Tavily fallback:.*not accessible/,
+    );
+  });
+
+  it("rejects with both errors when Tavily Extract itself fails upstream", async () => {
+    const tools = createWebTools("tavily-key", undefined);
+    const fetchUrl = tools[2]!;
+
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url === "https://api.tavily.com/extract") {
+        return { ok: false, status: 432, text: async () => "plan limit exceeded" };
+      }
+      return { ok: false, status: 403, statusText: "Forbidden" };
+    });
+
+    const outcome = await fetchUrl.handler(
+      { url: "https://walled.example.com/page" },
+      stubService(),
+    );
+    expect(outcome._unsafeUnwrapErr().message).toBe(
+      "Failed to fetch URL. Direct fetch: Fetch failed: 403 Forbidden. Tavily fallback: Tavily Extract error: 432 plan limit exceeded",
     );
   });
 });
