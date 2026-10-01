@@ -244,6 +244,7 @@ describe("createDbProviderResolver — happy path", () => {
     it("adds nothing when the row has none", async () => {
       const bodies = await sentBodies("qwen-3-6-plus", [venice(null)]);
 
+      expect(bodies).toHaveLength(2);
       for (const body of bodies) expect(body).not.toHaveProperty("reasoning");
     });
   });

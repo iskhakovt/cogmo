@@ -16,10 +16,14 @@ import { z } from "zod";
 import { logger } from "../logger.js";
 
 /**
- * Top-level request-body keys `OpenAICompatibleProvider` sets itself: the
- * call's content and tools, its output shape and cap, the sampling and
- * reasoning-effort mapping of `modelFamilyParams`, and the cache dialect's
- * hints (`cacheHints`).
+ * Top-level request-body keys an operator can't set: those
+ * `OpenAICompatibleProvider` sets itself — the call's content and tools, its
+ * output shape and cap, the sampling and reasoning-effort mapping of
+ * `modelFamilyParams`, and the cache dialect's hints (`cacheHints`) — and
+ * `tool_choice`, which the adapter leaves to the provider's default `auto`.
+ * The agent loop ends a turn on a reply with no tool call, so a forced
+ * `required` (or a named tool) would never let it end, and `none` would take
+ * the tools away.
  */
 export const RESERVED_EXTRA_BODY_KEYS: readonly string[] = [
   "model",
@@ -70,15 +74,19 @@ export type ExtraBody = z.infer<typeof ExtraBodySchema>;
  * key, which only a write outside the store can have put there, is dropped
  * with a warning instead of failing the lookup. Failing it would stop every
  * call to the model and the `cogmo model` commands that would fix the row.
+ * An object left with no keys reads as null — no extra fields — the same as
+ * a row that never had any, and never as the empty object a write refuses.
  */
-export const StoredExtraBodySchema = JsonObjectSchema.transform((body): ExtraBody => {
+export const StoredExtraBodySchema = JsonObjectSchema.transform((body): ExtraBody | null => {
   const reserved = reservedKeysOf(body);
-  if (reserved.length === 0) return body;
-  logger.warn(
-    { reserved },
-    "ignoring model_providers.extra_body keys the OpenAI-compatible adapter sets itself",
-  );
-  return R.omit(body, reserved);
+  if (reserved.length > 0) {
+    logger.warn(
+      { reserved },
+      "ignoring model_providers.extra_body keys the OpenAI-compatible adapter sets itself",
+    );
+  }
+  const kept = reserved.length === 0 ? body : R.omit(body, reserved);
+  return Object.keys(kept).length === 0 ? null : kept;
 });
 
 /**

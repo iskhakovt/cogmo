@@ -2079,6 +2079,17 @@ describe("DrizzleAgentStore", () => {
         const all = await tx((trx) => store.listAllModelProviders(trx));
         expect(all.map((row) => row.extraBody)).toEqual([{ top_p: 0.5 }]);
       });
+
+      it("reads a row left with only reserved keys as having none", async () => {
+        const providerId = await seedRow();
+        await db.execute(
+          sql`UPDATE model_providers SET extra_body = '{"model":"other"}'::jsonb WHERE provider_id = ${providerId}`,
+        );
+
+        expect(await stored()).toBeNull();
+        const all = await tx((trx) => store.listAllModelProviders(trx));
+        expect(all.map((row) => row.extraBody)).toEqual([null]);
+      });
     });
 
     it("resolves the lowest-position provider for a model", async () => {

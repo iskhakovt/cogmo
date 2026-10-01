@@ -102,6 +102,18 @@ describe("StoredExtraBodySchema", () => {
     }
   });
 
+  it.each([
+    ["only reserved keys", { model: "x", stream: false }],
+    ["no keys", {}],
+  ])("reads an object left with %s as null", (_label, stored) => {
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+    try {
+      expect(StoredExtraBodySchema.parse(stored)).toBeNull();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("still refuses a value that isn't a JSON object", () => {
     expect(StoredExtraBodySchema.safeParse([1]).success).toBe(false);
     expect(StoredExtraBodySchema.safeParse("x").success).toBe(false);
