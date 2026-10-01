@@ -6,10 +6,11 @@ import { abortReasonOr } from "./abort.js";
 import type { CacheDialect } from "./cache-dialect.js";
 import { cacheMarker } from "./cache-marker.js";
 import { ProviderProtocolError, parseToolArgs, ToolArgsCutOffError } from "./errors.js";
+import type { ExtraBody } from "./extra-body.js";
 import { RefusalError } from "./fallback.js";
 import { withFailureLogging } from "./logging-fetch.js";
 import { fitsStrictMode } from "./openai-output-schema.js";
-import { failChatSpan, recordChatUsage, startChatSpan } from "./otel.js";
+import { failChatSpan, recordChatUsage, recordReasoningChars, startChatSpan } from "./otel.js";
 import type { LlmProvider } from "./provider.js";
 import {
   cl100k,
@@ -48,6 +49,12 @@ export interface OpenAICompatibleConfig {
   /** Which hints a request's cache intent puts on the wire — see {@link CacheDialect}. */
   cacheDialect: CacheDialect;
   /**
+   * The model's operator-set request fields (`model_providers.extra_body`),
+   * sent on every chat-completions request. None of its keys is one the
+   * adapter sets — `ExtraBodySchema` refuses those.
+   */
+  extraBody?: ExtraBody;
+  /**
    * Transport for the SDK's requests — tests pass the wire recorder
    * (`src/test/wire-recorder.ts`). Wrapped in the failure logger exactly as
    * the default `globalThis.fetch` is.
@@ -65,10 +72,12 @@ export class OpenAICompatibleProvider implements LlmProvider {
   readonly name: string;
   #client: OpenAI;
   #cacheDialect: CacheDialect;
+  #extraBody: ExtraBody;
 
   constructor(name: string, config: OpenAICompatibleConfig) {
     this.name = name;
     this.#cacheDialect = config.cacheDialect;
+    this.#extraBody = config.extraBody ?? {};
     this.#client = new OpenAI({
       apiKey: config.apiKey,
       baseURL: config.baseURL,
@@ -102,7 +111,11 @@ export class OpenAICompatibleProvider implements LlmProvider {
     const signal = options?.signal;
     const span = startChatSpan(this.name, params.model);
     try {
-      const createParams: OpenAI.ChatCompletionCreateParamsNonStreaming & CacheHintFields = {
+      const createParams: OpenAI.ChatCompletionCreateParamsNonStreaming &
+        CacheHintFields &
+        Record<string, unknown> = {
+        // First, so a field the adapter builds always wins.
+        ...this.#extraBody,
         model: params.model,
         ...modelFamilyParams(params.model, params),
         messages: buildMessages(
@@ -143,6 +156,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
         : { inputTokens: 0, outputTokens: 0 };
       const stopReason = fromOpenAIFinishReason(choice.finish_reason);
       recordChatUsage(span, this.name, response.model, usage, stopReason);
+      recordReasoningChars(span, reasoningText(choice.message)?.length ?? 0);
 
       return {
         content: fromOpenAIMessage(choice.message, stopReason),
@@ -166,12 +180,17 @@ export class OpenAICompatibleProvider implements LlmProvider {
 
     const client = this.#client;
     const hints = cacheHints(this.#cacheDialect, params);
+    const extraBody = this.#extraBody;
     const providerName = this.name;
     const signal = options?.signal;
 
     async function* generateFrames(): AsyncGenerator<ChatStreamFrame> {
       const span = startChatSpan(providerName, params.model);
       let completed = false;
+      // Characters of reasoning the endpoint streamed and the adapter doesn't
+      // forward. Stamped on the span however the stream ends, so a turn cut
+      // off mid-thought still shows how long the model had been thinking.
+      let reasoningChars = 0;
       try {
         const messages = buildMessages(
           params.system,
@@ -185,6 +204,8 @@ export class OpenAICompatibleProvider implements LlmProvider {
         const stream = await client.chat.completions
           .create(
             {
+              // First, so a field the adapter builds always wins.
+              ...extraBody,
               model: params.model,
               ...modelFamilyParams(params.model, params),
               messages,
@@ -222,6 +243,8 @@ export class OpenAICompatibleProvider implements LlmProvider {
           }
 
           if (!delta) continue;
+
+          reasoningChars += reasoningText(delta)?.length ?? 0;
 
           // Text content
           if (delta.content) {
@@ -276,6 +299,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
         // Returned before completing: the consumer stopped early. Mid-SDK
         // stream, leaving its loop above aborted the request.
         if (!completed) failChatSpan(span, new Error("chatStream consumer abandoned the stream"));
+        recordReasoningChars(span, reasoningChars);
         span.end();
       }
     }
@@ -723,6 +747,7 @@ function toOpenAITool(tool: ToolDefinition): OpenAI.ChatCompletionTool {
  */
 function fromOpenAIUsage(usage: OpenAI.CompletionUsage): Usage {
   const details = usage.prompt_tokens_details;
+  const reasoningTokens = usage.completion_tokens_details?.reasoning_tokens;
   return {
     inputTokens: usage.prompt_tokens ?? 0,
     outputTokens: usage.completion_tokens ?? 0,
@@ -730,7 +755,22 @@ function fromOpenAIUsage(usage: OpenAI.CompletionUsage): Usage {
     ...(details?.cache_write_tokens != null && {
       cacheCreationTokens: details.cache_write_tokens,
     }),
+    ...(reasoningTokens != null && { reasoningTokens }),
   };
+}
+
+/**
+ * The reasoning text a message or stream delta carries outside `content`:
+ * `reasoning_content` (DeepSeek, Venice, vLLM) or `reasoning` (OpenRouter).
+ * Neither is in the OpenAI SDK's types. The adapter doesn't forward it; it
+ * is measured so a long think is visible on the span.
+ */
+function reasoningText(part: object): string | undefined {
+  if ("reasoning_content" in part && typeof part.reasoning_content === "string") {
+    return part.reasoning_content;
+  }
+  if ("reasoning" in part && typeof part.reasoning === "string") return part.reasoning;
+  return undefined;
 }
 
 function fromOpenAIMessage(
