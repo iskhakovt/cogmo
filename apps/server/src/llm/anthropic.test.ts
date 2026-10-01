@@ -2674,6 +2674,7 @@ describe("AnthropicProvider", () => {
         rule: "Be brief",
         category: "Style",
         reasoning: "The user asked twice",
+        sourceMessage: 2,
         action: "New",
         matchedExistingRuleId: null,
         channelType: null,
