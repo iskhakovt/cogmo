@@ -22,6 +22,17 @@ class Tagged {
   readonly note = "tag\uDC00ged";
 }
 
+describe("single", () => {
+  it("returns the only row", () => {
+    expect(single([{ id: "a" }])).toEqual({ id: "a" });
+  });
+
+  it("throws on zero or several rows, naming the count", () => {
+    expect(() => single([])).toThrow("Expected exactly 1 row, got 0");
+    expect(() => single([{ id: "a" }, { id: "b" }])).toThrow("Expected exactly 1 row, got 2");
+  });
+});
+
 describe("stringifyWellFormedJson", () => {
   const COLUMN = "content";
 
