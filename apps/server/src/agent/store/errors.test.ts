@@ -1,12 +1,16 @@
-import { describe, expect, it } from "vitest";
+import { count } from "drizzle-orm";
+import { err, ok } from "neverthrow";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import type { Database, Transactor } from "../../db/transactor.js";
+import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import {
   findPostgresReferentialViolation,
   findPostgresUniqueViolation,
-  ProfileClassInUseError,
-  translateReferentialViolation,
-  translateUniqueViolation,
-  UniqueViolationError,
+  inSavepoint,
+  referentialViolationAs,
+  uniqueViolationAs,
 } from "./errors.js";
+import { users } from "./schema.js";
 
 /**
  * Driver-error shapes, as they reach the store.
@@ -77,73 +81,145 @@ describe("findPostgresReferentialViolation", () => {
   });
 });
 
-describe("translateReferentialViolation", () => {
-  const match = {
-    constraintName: "fk_profiles_profile_class",
-    rethrow: () => new ProfileClassInUseError(1),
-  };
+describe("referentialViolationAs", () => {
+  const inUse = { kind: "profile_class_in_use", profileRefs: 1 } as const;
 
-  it.each(["23503", "23001"])("translates a %s violation on the named constraint", async (code) => {
-    await expect(
-      translateReferentialViolation(() => {
-        throw wrapped(pgliteError(code, "fk_profiles_profile_class"));
-      }, match),
-    ).rejects.toBeInstanceOf(ProfileClassInUseError);
+  it.each(["23503", "23001"])("maps a %s violation on the named constraint", async (code) => {
+    const result = await referentialViolationAs("fk_profiles_profile_class", inUse, () => {
+      throw wrapped(pgliteError(code, "fk_profiles_profile_class"));
+    });
+    expect(result).toEqual(err(inUse));
   });
 
   it("matches the constraint under postgres-js's constraint_name spelling", async () => {
-    await expect(
-      translateReferentialViolation(() => {
-        throw wrapped(postgresJsError("23001", "fk_profiles_profile_class"));
-      }, match),
-    ).rejects.toBeInstanceOf(ProfileClassInUseError);
+    const result = await referentialViolationAs("fk_profiles_profile_class", inUse, () => {
+      throw wrapped(postgresJsError("23001", "fk_profiles_profile_class"));
+    });
+    expect(result).toEqual(err(inUse));
   });
 
   it("propagates a violation on a different constraint unchanged", async () => {
     const original = wrapped(pgliteError("23001", "fk_something_else"));
     await expect(
-      translateReferentialViolation(() => {
-        throw original;
-      }, match),
-    ).rejects.toBe(original);
-  });
-
-  it("propagates non-violation errors unchanged", async () => {
-    const original = new Error("connection reset");
-    await expect(
-      translateReferentialViolation(() => {
-        throw original;
-      }, match),
-    ).rejects.toBe(original);
-  });
-
-  it("returns the block's value when it does not throw", async () => {
-    await expect(
-      translateReferentialViolation(async () => ({ deleted: true }), match),
-    ).resolves.toEqual({
-      deleted: true,
-    });
-  });
-});
-
-describe("translateUniqueViolation", () => {
-  it.each([
-    ["PGlite", pgliteError],
-    ["postgres-js", postgresJsError],
-  ])("carries the constraint name through the %s shape", async (_driver, buildError) => {
-    const caught = await translateUniqueViolation(() => {
-      throw wrapped(buildError("23505", "uq_profiles_user_name"));
-    }).catch((e: unknown) => e);
-    expect(caught).toBeInstanceOf(UniqueViolationError);
-    expect(caught).toMatchObject({ constraint: "uq_profiles_user_name" });
-  });
-
-  it("propagates non-violation errors unchanged", async () => {
-    const original = new Error("connection reset");
-    await expect(
-      translateUniqueViolation(() => {
+      referentialViolationAs("fk_profiles_profile_class", inUse, () => {
         throw original;
       }),
     ).rejects.toBe(original);
+  });
+
+  it("propagates non-violation errors unchanged", async () => {
+    const original = new Error("connection reset");
+    await expect(
+      referentialViolationAs("fk_profiles_profile_class", inUse, () => {
+        throw original;
+      }),
+    ).rejects.toBe(original);
+  });
+
+  it("returns the block's value as Ok when it does not throw", async () => {
+    const result = await referentialViolationAs("fk_a", inUse, async () => ({ deleted: true }));
+    expect(result).toEqual(ok({ deleted: true }));
+  });
+});
+
+describe("uniqueViolationAs", () => {
+  const taken = { kind: "profile_name_taken" } as const;
+
+  it.each([
+    ["PGlite", pgliteError],
+    ["postgres-js", postgresJsError],
+  ])("maps a violation on the named constraint in the %s shape", async (_driver, buildError) => {
+    const result = await uniqueViolationAs("uq_profiles_user_name", taken, () => {
+      throw wrapped(buildError("23505", "uq_profiles_user_name"));
+    });
+    expect(result).toEqual(err(taken));
+  });
+
+  it("propagates a violation on a different constraint unchanged", async () => {
+    const original = wrapped(pgliteError("23505", "uq_aliases_user_alias"));
+    await expect(
+      uniqueViolationAs("uq_profiles_user_name", taken, () => {
+        throw original;
+      }),
+    ).rejects.toBe(original);
+  });
+
+  it("propagates non-violation errors unchanged", async () => {
+    const original = new Error("connection reset");
+    await expect(
+      uniqueViolationAs("uq_profiles_user_name", taken, () => {
+        throw original;
+      }),
+    ).rejects.toBe(original);
+  });
+});
+
+describe("inSavepoint", () => {
+  let db: Database;
+  let tx: Transactor;
+  let close: () => Promise<void>;
+
+  beforeAll(async () => {
+    ({ db, tx, close } = await createTestDatabase());
+  });
+  afterAll(async () => close());
+  beforeEach(async () => truncateAll(db));
+
+  async function userCount(): Promise<number> {
+    const [row] = await db.select({ value: count() }).from(users);
+    return row?.value ?? 0;
+  }
+
+  it("keeps the savepoint's writes on Ok", async () => {
+    const result = await tx((trx) =>
+      inSavepoint(trx, async (sp) => {
+        await sp.insert(users).values({});
+        return ok("done");
+      }),
+    );
+    expect(result).toEqual(ok("done"));
+    expect(await userCount()).toBe(1);
+  });
+
+  it("rolls back only the savepoint on Err, keeping the caller's writes", async () => {
+    const result = await tx(async (trx) => {
+      await trx.insert(users).values({});
+      const inner = await inSavepoint(trx, async (sp) => {
+        await sp.insert(users).values({});
+        return err({ kind: "nope" } as const);
+      });
+      await trx.insert(users).values({});
+      return inner;
+    });
+    expect(result).toEqual(err({ kind: "nope" }));
+    expect(await userCount()).toBe(2);
+  });
+
+  it("leaves the caller's tx usable after a violation mapped to Err", async () => {
+    const id = "0198f000-0000-7000-8000-000000000001";
+    await tx(async (trx) => {
+      await trx.insert(users).values({ id });
+      const inner = await inSavepoint(trx, (sp) =>
+        uniqueViolationAs("users_pkey", { kind: "taken" } as const, async () => {
+          await sp.insert(users).values({ id });
+        }),
+      );
+      expect(inner).toEqual(err({ kind: "taken" }));
+      await trx.insert(users).values({});
+    });
+    expect(await userCount()).toBe(2);
+  });
+
+  it("rolls back the savepoint and propagates a throw", async () => {
+    const boom = new Error("boom");
+    await expect(
+      tx((trx) =>
+        inSavepoint(trx, async (sp) => {
+          await sp.insert(users).values({});
+          throw boom;
+        }),
+      ),
+    ).rejects.toBe(boom);
+    expect(await userCount()).toBe(0);
   });
 });

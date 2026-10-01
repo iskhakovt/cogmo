@@ -496,7 +496,7 @@ export async function runAgenticStage(
     unstreamed = await steps.run("finish-stream", async () => {
       const finished = await delivery.finish();
       if (finished.isOk()) return [];
-      log.warn({ err: finished.error }, "stream delivery failed at finish");
+      log.warn({ failures: finished.error.failures }, "stream delivery failed at finish");
       return finished.error.failures.map((failure) => failure.sessionId);
     });
   } catch (err) {

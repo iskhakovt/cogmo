@@ -18,13 +18,12 @@ function service(coding?: Service["coding"]): Service {
   return stub;
 }
 
-// What `delegateCodingTool.handler` returns: a JSON-encoded ack envelope.
+// What `delegateCodingTool.handler` resolves to on success: a JSON-encoded ack envelope.
 const DelegateAckSchema = z
   .object({
     ok: z.boolean(),
     taskId: z.string().nullable().optional(),
     status: z.string().optional(),
-    reason: z.string().optional(),
     plan: z.string().optional(),
     nextStep: z.string().optional(),
   })
@@ -41,7 +40,7 @@ describe("delegate_coding tool", () => {
       goal: "refactor steering rules to support per-channel scoping",
       repoName: "cogmo",
     });
-    const parsed = DelegateAckSchema.parse(JSON.parse(result));
+    const parsed = DelegateAckSchema.parse(JSON.parse(result._unsafeUnwrap()));
     expect(parsed.ok).toBe(true);
     expect(parsed.taskId).toBe("t-1");
     expect(parsed.status).toBe("queued");
@@ -51,16 +50,18 @@ describe("delegate_coding tool", () => {
     expect(parsed.nextStep).toMatch(/don't speculate/);
   });
 
-  it("throws a clear error when service.coding is unavailable", async () => {
-    await expect(
-      delegateCodingTool.handler(
-        { goal: "refactor steering rules to support per-channel scoping", repo: "cogmo" },
-        service(undefined),
-      ),
-    ).rejects.toThrow(/sandbox module is not initialized/);
+  it("rejects with a clear message when service.coding is unavailable", async () => {
+    const result = await delegateCodingTool.handler(
+      { goal: "refactor steering rules to support per-channel scoping", repo: "cogmo" },
+      service(undefined),
+    );
+    expect(result._unsafeUnwrapErr().message).toBe(
+      "Coding delegation is unavailable — the sandbox module is not initialized. " +
+        "Set SANDBOX_RUNTIME (sysbox in prod, runc for dev/CI) and restart Cogmo.",
+    );
   });
 
-  it("returns ok=false with reason on admission rejection", async () => {
+  it("rejects with the admission reason when the service rejects the task", async () => {
     const delegate = vi.fn(async () => ({
       taskId: null,
       status: "rejected" as const,
@@ -70,15 +71,19 @@ describe("delegate_coding tool", () => {
       { goal: "refactor steering rules to support per-channel scoping", repo: "cogmo" },
       service({ delegate }),
     );
-    const parsed = DelegateAckSchema.parse(JSON.parse(result));
-    expect(parsed.ok).toBe(false);
-    expect(parsed.reason).toMatch(/active task/);
+    expect(result._unsafeUnwrapErr().message).toBe(
+      'Repo "cogmo" already has 1 active task(s) (limit 1).',
+    );
   });
 
   it("rejects too-short goal at the schema layer", async () => {
-    await expect(
-      delegateCodingTool.handler({ goal: "fix it", repo: "cogmo" }, service({ delegate: vi.fn() })),
-    ).rejects.toThrow();
+    const delegate = vi.fn();
+    const result = await delegateCodingTool.handler(
+      { goal: "fix it", repo: "cogmo" },
+      service({ delegate }),
+    );
+    expect(result._unsafeUnwrapErr().message).toContain("goal");
+    expect(delegate).not.toHaveBeenCalled();
   });
 
   it("never lets the LLM choose triggerSource — tool schema strips it", async () => {
@@ -96,13 +101,12 @@ describe("delegate_coding tool", () => {
     }));
     await delegateCodingTool.handler(
       // The LLM-supplied `triggerSource` is intentionally not in the tool's
-      // input schema — Zod strips it. Cast away the input type so the test
-      // compiles while still exercising the strip behaviour.
+      // input schema — Zod strips it.
       {
         goal: "refactor steering rules to support per-channel scoping",
         repo: "cogmo",
         triggerSource: "evolution",
-      } as Parameters<typeof delegateCodingTool.handler>[0],
+      },
       service({ delegate }),
     );
     expect(delegate).toHaveBeenCalledWith({

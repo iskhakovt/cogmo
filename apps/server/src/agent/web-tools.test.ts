@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { z } from "zod";
+import { logger } from "../logger.js";
 import type { Service } from "./service.js";
 import { createWebTools } from "./web-tools.js";
 
@@ -101,7 +102,9 @@ describe("web_search", () => {
       }),
     });
 
-    const result = await search!.handler({ query: "test query", maxResults: 5 }, stubService());
+    const result = (
+      await search!.handler({ query: "test query", maxResults: 5 }, stubService())
+    )._unsafeUnwrap();
 
     expect(result).toContain("[Result 1](https://example.com/1)");
     expect(result).toContain("Snippet 1");
@@ -116,27 +119,41 @@ describe("web_search", () => {
     );
   });
 
-  it("returns error when API key is missing", async () => {
+  it("rejects when API key is missing", async () => {
     const [search] = createWebTools(undefined, undefined);
-    const result = await search!.handler({ query: "test" }, stubService());
+    const outcome = await search!.handler({ query: "test" }, stubService());
 
-    expect(result).toContain("not configured");
+    expect(outcome._unsafeUnwrapErr().message).toBe(
+      "web_search is not configured (TAVILY_API_KEY missing).",
+    );
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
-  it("throws on API error", async () => {
+  it("rejects on a client error (4xx) and logs it at warn", async () => {
     const [search] = createWebTools("key", undefined);
     mockFetch.mockResolvedValueOnce({ ok: false, status: 429, text: async () => "rate limited" });
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
 
-    await expect(search!.handler({ query: "test" }, stubService())).rejects.toThrow("429");
+    const outcome = await search!.handler({ query: "test" }, stubService());
+
+    expect(outcome._unsafeUnwrapErr().message).toBe(
+      "web_search failed: Tavily API error: 429 rate limited",
+    );
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ tool: "web_search" }),
+      "web tool upstream request failed",
+    );
+    warn.mockRestore();
   });
 
-  it("throws on server error (5xx)", async () => {
+  it("rejects on a server error (5xx) after the retry budget", async () => {
     const [search] = createWebTools("key", undefined);
     mockFetch.mockResolvedValue({ ok: false, status: 503, text: async () => "down" });
 
-    await expect(search!.handler({ query: "test" }, stubService())).rejects.toThrow(
-      "Tavily API server error: 503",
+    const outcome = await search!.handler({ query: "test" }, stubService());
+
+    expect(outcome._unsafeUnwrapErr().message).toBe(
+      "web_search failed: Tavily API server error: 503 down",
     );
   });
 
@@ -144,7 +161,7 @@ describe("web_search", () => {
     const [search] = createWebTools("key", undefined);
     mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ results: [] }) });
 
-    const result = await search!.handler({ query: "obscure" }, stubService());
+    const result = (await search!.handler({ query: "obscure" }, stubService()))._unsafeUnwrap();
     expect(result).toBe("No results found.");
   });
 });
@@ -162,7 +179,9 @@ describe("web_answer", () => {
       }),
     });
 
-    const result = await answer.handler({ question: "meaning of life" }, stubService());
+    const result = (
+      await answer.handler({ question: "meaning of life" }, stubService())
+    )._unsafeUnwrap();
 
     expect(result).toContain("The answer is 42.");
     expect(result).toContain("Sources:");
@@ -183,37 +202,56 @@ describe("web_answer", () => {
       }),
     });
 
-    const result = await answer.handler({ question: "test" }, stubService());
+    const result = (await answer.handler({ question: "test" }, stubService()))._unsafeUnwrap();
     expect(result).toBe("Just an answer.");
     expect(result).not.toContain("Sources:");
   });
 
-  it("returns error when API key is missing", async () => {
+  it("rejects when API key is missing", async () => {
     const tools = createWebTools(undefined, undefined);
     const answer = tools[1]!;
-    const result = await answer.handler({ question: "test" }, stubService());
+    const outcome = await answer.handler({ question: "test" }, stubService());
 
-    expect(result).toContain("not configured");
+    expect(outcome._unsafeUnwrapErr().message).toBe(
+      "web_answer is not configured (OPENROUTER_API_KEY missing).",
+    );
   });
 
-  it("throws on server error (5xx)", async () => {
+  it("rejects on a server error (5xx) after the retry budget", async () => {
     const tools = createWebTools(undefined, "or-key");
     const answer = tools[1]!;
     mockFetch.mockResolvedValue({ ok: false, status: 502, text: async () => "bad gateway" });
 
-    await expect(answer.handler({ question: "test" }, stubService())).rejects.toThrow(
-      "OpenRouter API server error: 502",
+    const outcome = await answer.handler({ question: "test" }, stubService());
+
+    expect(outcome._unsafeUnwrapErr().message).toBe(
+      "web_answer failed: OpenRouter API server error: 502 bad gateway",
     );
   });
 
-  it("throws on client error (4xx)", async () => {
+  it("rejects on a client error (4xx)", async () => {
     const tools = createWebTools(undefined, "or-key");
     const answer = tools[1]!;
     mockFetch.mockResolvedValueOnce({ ok: false, status: 401, text: async () => "unauthorized" });
 
-    await expect(answer.handler({ question: "test" }, stubService())).rejects.toThrow(
-      "OpenRouter API error: 401",
+    const outcome = await answer.handler({ question: "test" }, stubService());
+
+    expect(outcome._unsafeUnwrapErr().message).toBe(
+      "web_answer failed: OpenRouter API error: 401 unauthorized",
     );
+  });
+
+  it("falls back to a placeholder when the model returns null content", async () => {
+    const tools = createWebTools(undefined, "or-key");
+    const answer = tools[1]!;
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ choices: [{ message: { content: null } }] }),
+    });
+
+    const result = (await answer.handler({ question: "test" }, stubService()))._unsafeUnwrap();
+
+    expect(result).toBe("No answer returned.");
   });
 });
 
@@ -238,7 +276,9 @@ describe("fetch_url", () => {
       text: async () => html,
     });
 
-    const result = await fetchUrl.handler({ url: "https://example.com/article" }, stubService());
+    const result = (
+      await fetchUrl.handler({ url: "https://example.com/article" }, stubService())
+    )._unsafeUnwrap();
     expect(result).toContain("main content");
   });
 
@@ -252,7 +292,9 @@ describe("fetch_url", () => {
       text: async () => "Plain text content",
     });
 
-    const result = await fetchUrl.handler({ url: "https://example.com/file.txt" }, stubService());
+    const result = (
+      await fetchUrl.handler({ url: "https://example.com/file.txt" }, stubService())
+    )._unsafeUnwrap();
     expect(result).toBe("Plain text content");
   });
 
@@ -260,22 +302,21 @@ describe("fetch_url", () => {
     const tools = createWebTools(undefined, undefined);
     const fetchUrl = tools[2]!;
 
-    await expect(
-      fetchUrl.handler({ url: "https://192.168.1.1/secret" }, stubService()),
-    ).rejects.toThrow("private/internal");
+    const privateIp = await fetchUrl.handler({ url: "https://192.168.1.1/secret" }, stubService());
+    expect(privateIp._unsafeUnwrapErr().message).toContain("private/internal");
 
-    await expect(fetchUrl.handler({ url: "https://localhost/api" }, stubService())).rejects.toThrow(
-      "private/internal",
-    );
+    const localhost = await fetchUrl.handler({ url: "https://localhost/api" }, stubService());
+    expect(localhost._unsafeUnwrapErr().message).toContain("private/internal");
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 
   it("rejects non-http protocols", async () => {
     const tools = createWebTools(undefined, undefined);
     const fetchUrl = tools[2]!;
 
-    await expect(fetchUrl.handler({ url: "file:///etc/passwd" }, stubService())).rejects.toThrow(
-      "Unsupported protocol",
-    );
+    const outcome = await fetchUrl.handler({ url: "file:///etc/passwd" }, stubService());
+    expect(outcome._unsafeUnwrapErr().message).toBe("Unsupported protocol: file:");
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 
   it("truncates large content", async () => {
@@ -289,12 +330,14 @@ describe("fetch_url", () => {
       text: async () => largeContent,
     });
 
-    const result = await fetchUrl.handler({ url: "https://example.com/big" }, stubService());
+    const result = (
+      await fetchUrl.handler({ url: "https://example.com/big" }, stubService())
+    )._unsafeUnwrap();
     expect(result).toContain("[Content truncated");
     expect(result.length).toBeLessThan(60_000);
   });
 
-  it("throws on HTTP errors", async () => {
+  it("rejects on HTTP errors", async () => {
     const tools = createWebTools(undefined, undefined);
     const fetchUrl = tools[2]!;
 
@@ -304,12 +347,11 @@ describe("fetch_url", () => {
       statusText: "Not Found",
     });
 
-    await expect(
-      fetchUrl.handler({ url: "https://example.com/missing" }, stubService()),
-    ).rejects.toThrow("404");
+    const outcome = await fetchUrl.handler({ url: "https://example.com/missing" }, stubService());
+    expect(outcome._unsafeUnwrapErr().message).toBe("Fetch failed: 404 Not Found");
   });
 
-  it("throws on server error (5xx)", async () => {
+  it("rejects on server error (5xx) after the retry budget", async () => {
     const tools = createWebTools(undefined, undefined);
     const fetchUrl = tools[2]!;
 
@@ -319,9 +361,9 @@ describe("fetch_url", () => {
       statusText: "Service Unavailable",
     });
 
-    await expect(
-      fetchUrl.handler({ url: "https://example.com/down" }, stubService()),
-    ).rejects.toThrow("Fetch failed: 503");
+    const outcome = await fetchUrl.handler({ url: "https://example.com/down" }, stubService());
+    expect(outcome._unsafeUnwrapErr().message).toBe("Fetch failed: 503 Service Unavailable");
+    expect(mockFetch).toHaveBeenCalledTimes(3);
   });
 
   it("sends Chrome-like browser headers on the first attempt", async () => {
@@ -363,7 +405,9 @@ describe("fetch_url", () => {
         text: async () => "got through",
       });
 
-    const result = await fetchUrl.handler({ url: "https://example.com/article" }, stubService());
+    const result = (
+      await fetchUrl.handler({ url: "https://example.com/article" }, stubService())
+    )._unsafeUnwrap();
     expect(result).toBe("got through");
 
     expect(mockFetch).toHaveBeenCalledTimes(2);
@@ -391,7 +435,9 @@ describe("fetch_url", () => {
         text: async () => "ok",
       });
 
-    const result = await fetchUrl.handler({ url: "https://example.com/foo" }, stubService());
+    const result = (
+      await fetchUrl.handler({ url: "https://example.com/foo" }, stubService())
+    )._unsafeUnwrap();
     expect(result).toBe("ok");
     expect(mockFetch).toHaveBeenCalledTimes(2);
   });
@@ -422,10 +468,9 @@ describe("fetch_url", () => {
       throw new Error(`unexpected fetch: ${url}`);
     });
 
-    const result = await fetchUrl.handler(
-      { url: "https://walled.example.com/page" },
-      stubService(),
-    );
+    const result = (
+      await fetchUrl.handler({ url: "https://walled.example.com/page" }, stubService())
+    )._unsafeUnwrap();
     expect(result).toContain("Extracted via Tavily");
 
     // 3 direct attempts (1 + 2 retries) + 1 Tavily call.
@@ -448,9 +493,8 @@ describe("fetch_url", () => {
       statusText: "Not Found",
     });
 
-    await expect(
-      fetchUrl.handler({ url: "https://example.com/missing" }, stubService()),
-    ).rejects.toThrow("404");
+    const outcome = await fetchUrl.handler({ url: "https://example.com/missing" }, stubService());
+    expect(outcome._unsafeUnwrapErr().message).toBe("Fetch failed: 404 Not Found");
 
     // Tavily must not have been called — 404 means the page doesn't
     // exist, not a bot block.
@@ -463,9 +507,11 @@ describe("fetch_url", () => {
 
     mockFetch.mockResolvedValue({ ok: false, status: 403, statusText: "Forbidden" });
 
-    await expect(
-      fetchUrl.handler({ url: "https://walled.example.com/page" }, stubService()),
-    ).rejects.toThrow("403");
+    const outcome = await fetchUrl.handler(
+      { url: "https://walled.example.com/page" },
+      stubService(),
+    );
+    expect(outcome._unsafeUnwrapErr().message).toBe("Fetch failed: 403 Forbidden");
   });
 
   it("falls back to Tavily Extract on a connection timeout", async () => {
@@ -497,10 +543,9 @@ describe("fetch_url", () => {
       throw new Error(`unexpected fetch: ${url}`);
     });
 
-    const result = await fetchUrl.handler(
-      { url: "https://walled.example.com/page" },
-      stubService(),
-    );
+    const result = (
+      await fetchUrl.handler({ url: "https://walled.example.com/page" }, stubService())
+    )._unsafeUnwrap();
     expect(result).toContain("despite timeout");
     expect(mockFetch.mock.calls.some((c) => c[0] === "https://api.tavily.com/extract")).toBe(true);
   });
@@ -524,8 +569,32 @@ describe("fetch_url", () => {
       return { ok: false, status: 403, statusText: "Forbidden" };
     });
 
-    await expect(
-      fetchUrl.handler({ url: "https://walled.example.com/page" }, stubService()),
-    ).rejects.toThrow(/Direct fetch:.*403.*Tavily fallback:.*not accessible/);
+    const outcome = await fetchUrl.handler(
+      { url: "https://walled.example.com/page" },
+      stubService(),
+    );
+    expect(outcome._unsafeUnwrapErr().message).toMatch(
+      /Direct fetch:.*403.*Tavily fallback:.*not accessible/,
+    );
+  });
+
+  it("rejects with both errors when Tavily Extract itself fails upstream", async () => {
+    const tools = createWebTools("tavily-key", undefined);
+    const fetchUrl = tools[2]!;
+
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url === "https://api.tavily.com/extract") {
+        return { ok: false, status: 432, text: async () => "plan limit exceeded" };
+      }
+      return { ok: false, status: 403, statusText: "Forbidden" };
+    });
+
+    const outcome = await fetchUrl.handler(
+      { url: "https://walled.example.com/page" },
+      stubService(),
+    );
+    expect(outcome._unsafeUnwrapErr().message).toBe(
+      "Failed to fetch URL. Direct fetch: Fetch failed: 403 Forbidden. Tavily fallback: Tavily Extract error: 432 plan limit exceeded",
+    );
   });
 });

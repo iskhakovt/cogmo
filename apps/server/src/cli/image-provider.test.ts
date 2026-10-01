@@ -1,6 +1,6 @@
+import { err as failed, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
-import { InvalidProviderConfigError } from "../agent/store/errors.js";
 import type { AgentStore, ImageProviderRow } from "../agent/store/index.js";
 import type { Transactor } from "../db/index.js";
 import type { SecretsStore } from "../secrets/store/index.js";
@@ -26,7 +26,7 @@ function makeDeps() {
     secretsStore: mock<SecretsStore>(),
   };
   deps.secretsStore.putSecret.mockResolvedValue({ id: "sec-1" });
-  deps.agentStore.createImageProvider.mockResolvedValue({ id: "p-new" });
+  deps.agentStore.createImageProvider.mockResolvedValue(ok({ id: "p-new" }));
   return deps;
 }
 
@@ -124,7 +124,7 @@ describe("cogmo image-provider add", () => {
   it("creates a fal provider (writes secret + provider row)", async () => {
     const deps = makeDeps();
     deps.secretsStore.putSecret.mockResolvedValue({ id: "sec-fal" });
-    deps.agentStore.createImageProvider.mockResolvedValue({ id: "p-fal" });
+    deps.agentStore.createImageProvider.mockResolvedValue(ok({ id: "p-fal" }));
     const { io, out } = captureIo();
 
     const code = await run(["add", "fal", "fal", "sk-fal"], deps, io);
@@ -278,28 +278,30 @@ describe("cogmo image-provider add", () => {
     expect(loadDeps).not.toHaveBeenCalled();
   });
 
-  it("maps InvalidProviderConfigError to exit code 2", async () => {
+  it("maps an invalid config to exit code 2", async () => {
     const deps = makeDeps();
-    deps.agentStore.createImageProvider.mockRejectedValue(
-      new InvalidProviderConfigError("not allowed here"),
+    deps.agentStore.createImageProvider.mockResolvedValue(
+      failed({ kind: "invalid_provider_config", reason: "not allowed here" }),
     );
     const { io, err } = captureIo();
 
     const code = await run(["add", "fal", "fal", "sk"], deps, io);
 
     expect(code).toBe(2);
-    expect(err.join("\n")).toMatch(/Invalid config: not allowed here/);
+    expect(err.join("\n")).toMatch(/invalid config: not allowed here/);
   });
 
-  it("maps generic creation failures to exit code 1", async () => {
+  it("maps a taken name to exit code 1", async () => {
     const deps = makeDeps();
-    deps.agentStore.createImageProvider.mockRejectedValue(new Error("upstream timeout"));
+    deps.agentStore.createImageProvider.mockResolvedValue(
+      failed({ kind: "image_provider_name_taken", name: "fal" }),
+    );
     const { io, err } = captureIo();
 
     const code = await run(["add", "fal", "fal", "sk"], deps, io);
 
     expect(code).toBe(1);
-    expect(err.join("\n")).toMatch(/Failed to add image provider: upstream timeout/);
+    expect(err.join("\n")).toMatch(/an image provider named "fal" already exists/);
   });
 });
 

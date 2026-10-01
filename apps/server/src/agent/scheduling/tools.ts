@@ -8,14 +8,15 @@
  * parse Zod input, call the service, and format the result back into
  * LLM-readable text.
  *
- * On error, the tools render the structured `SchedulingError` into a
- * short instructive message so the LLM can self-correct from a single
- * `tool_result` round-trip without an infinite-retry loop (cf.
- * openclaw#9283).
+ * A `SchedulingError` rejects the call with a short instructive message so
+ * the LLM can self-correct from a single `tool_result` round-trip without
+ * an infinite-retry loop (cf. openclaw#9283).
  */
 
+import { ok } from "neverthrow";
+import { match } from "ts-pattern";
 import { z } from "zod";
-import { defineTool } from "../tools.js";
+import { defineTool, reject, type ToolRejection } from "../tools.js";
 import type { CronValidationError } from "./cron.js";
 import { MIN_CRON_INTERVAL_SECONDS } from "./cron.js";
 import {
@@ -115,9 +116,7 @@ export const scheduleTask = defineTool({
   durable: true,
   schema: scheduleTaskSchema,
   handler: async (input, service, ctx) => {
-    if (!service.scheduling) {
-      return "Scheduling is not available in this conversation.";
-    }
+    if (!service.scheduling) return reject(SCHEDULING_UNAVAILABLE);
     const args =
       input.schedule.kind === "recurring"
         ? ({
@@ -144,10 +143,9 @@ export const scheduleTask = defineTool({
       args,
       ...(ctx !== undefined ? ([`schedule_task:${ctx.idempotencyKey}`] as const) : []),
     );
-    if (result.isErr()) {
-      return formatSchedulingError(result.error);
-    }
-    return `Scheduled task ${result.value.id}. First fire: ${result.value.nextRunAt.toISOString()}.`;
+    return result
+      .map(({ id, nextRunAt }) => `Scheduled task ${id}. First fire: ${nextRunAt.toISOString()}.`)
+      .mapErr(schedulingRejection);
   },
 });
 
@@ -167,14 +165,9 @@ export const listTasks = defineTool({
   sideEffectful: false,
   schema: listTasksSchema,
   handler: async (_input, service) => {
-    if (!service.scheduling) {
-      return "Scheduling is not available in this conversation.";
-    }
+    if (!service.scheduling) return reject(SCHEDULING_UNAVAILABLE);
     const tasks = await service.scheduling.list();
-    if (tasks.length === 0) {
-      return "No scheduled tasks.";
-    }
-    return formatTaskList(tasks);
+    return ok(tasks.length === 0 ? "No scheduled tasks." : formatTaskList(tasks));
   },
 });
 
@@ -202,39 +195,36 @@ export const removeTask = defineTool({
   durable: true,
   schema: removeTaskSchema,
   handler: async (input, service) => {
-    if (!service.scheduling) {
-      return "Scheduling is not available in this conversation.";
-    }
+    if (!service.scheduling) return reject(SCHEDULING_UNAVAILABLE);
     const result = await service.scheduling.remove(input.id);
-    if (result.isErr()) {
-      return formatSchedulingError(result.error);
-    }
-    return `Removed task ${input.id}.`;
+    return result.map(() => `Removed task ${input.id}.`).mapErr(schedulingRejection);
   },
 });
 
 export const schedulingTools = [scheduleTask, listTasks, removeTask];
 
-/** Render a `SchedulingError` into LLM-readable text. */
-function formatSchedulingError(err: SchedulingError): string {
-  switch (err.kind) {
-    case "validation":
-      return `Error validating schedule: ${formatCronValidationError(err.cause)}`;
-    case "invalid_run_at":
-      return `Error: invalid runAt '${err.runAt}'. ${err.message}`;
-    case "prompt_too_long":
-      return (
-        `Error: prompt is ${err.length} characters but max is ${err.maxLength}. ` +
-        "Shorten the prompt — the model gets context from conversation history when the fire lands, so the prompt only needs to be the trigger instruction."
-      );
-    case "task_cap_exceeded":
-      return (
-        `Error: you've hit the scheduled-task cap (${err.current}/${err.limit}). ` +
-        "Remove an unused task with `remove_task` before scheduling another."
-      );
-    case "not_found":
-      return `Error: no scheduled task with id '${err.id}' found for this user.`;
-  }
+const SCHEDULING_UNAVAILABLE = "Scheduling is not available in this conversation.";
+
+/** The rejection the model reads for a `SchedulingError`. */
+function schedulingRejection(error: SchedulingError): ToolRejection {
+  const message = match(error)
+    .with({ kind: "validation" }, (e) => `invalid schedule: ${formatCronValidationError(e.cause)}`)
+    .with({ kind: "invalid_run_at" }, (e) => `invalid runAt '${e.runAt}'. ${e.message}`)
+    .with(
+      { kind: "prompt_too_long" },
+      (e) =>
+        `prompt is ${e.length} characters but max is ${e.maxLength}. ` +
+        "Shorten the prompt — the model gets context from conversation history when the fire lands, so the prompt only needs to be the trigger instruction.",
+    )
+    .with(
+      { kind: "task_cap_exceeded" },
+      (e) =>
+        `you've hit the scheduled-task cap (${e.current}/${e.limit}). ` +
+        "Remove an unused task with `remove_task` before scheduling another.",
+    )
+    .with({ kind: "not_found" }, (e) => `no scheduled task with id '${e.id}' found for this user.`)
+    .exhaustive();
+  return { message };
 }
 
 function formatCronValidationError(err: CronValidationError): string {

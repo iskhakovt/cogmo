@@ -15,8 +15,15 @@ import { mcpServers, mcpServerTools } from "./schema.js";
 
 // --- Interface ---
 
+/** The unique constraint on `mcp_servers.name`. */
+export const MCP_SERVER_NAME_CONSTRAINT = "mcp_servers_name_unique";
+
 export interface McpStore {
-  /** Insert a new server. Throws on duplicate name or invalid name shape. */
+  /**
+   * Insert a new server. A taken name raises the driver's unique violation on
+   * `MCP_SERVER_NAME_CONSTRAINT`; the name's shape is validated upstream, so
+   * an invalid one throws as a bug.
+   */
   addServer(tx: Transaction, spec: McpServerSpec): Promise<McpServer>;
 
   /** Delete a server by id. Cascades to tool pins. No-op if not found. */
@@ -118,18 +125,16 @@ export interface McpStore {
 export class DrizzleMcpStore implements McpStore {
   async addServer(tx: Transaction, spec: McpServerSpec): Promise<McpServer> {
     assertValidServerName(spec.name);
-    const row = single(
-      await tx
-        .insert(mcpServers)
-        .values({
-          name: spec.name,
-          config: spec.config,
-          enabled: spec.enabled,
-          approvalStatus: "pending",
-        })
-        .returning(),
-    );
-    return rowToServer(row);
+    const rows = await tx
+      .insert(mcpServers)
+      .values({
+        name: spec.name,
+        config: spec.config,
+        enabled: spec.enabled,
+        approvalStatus: "pending",
+      })
+      .returning();
+    return rowToServer(single(rows));
   }
 
   async removeServer(tx: Transaction, id: string): Promise<void> {

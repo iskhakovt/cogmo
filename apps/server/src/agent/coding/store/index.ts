@@ -12,8 +12,10 @@ import {
   or,
   sql,
 } from "drizzle-orm";
+import type { Result } from "neverthrow";
 import { single } from "../../../db/helpers.js";
 import type { Transaction } from "../../../db/index.js";
+import { inSavepoint, uniqueViolationAs } from "../../store/errors.js";
 import { conversations, profiles } from "../../store/schema.js";
 import {
   type DevcontainerSpec,
@@ -25,6 +27,12 @@ import {
 import { codingRepos, codingTasks } from "./schema.js";
 
 export type CodingBackend = "claude" | "codex";
+
+/** Another repo already has the name. */
+export interface RepoNameTaken {
+  kind: "repo_name_taken";
+  name: string;
+}
 /** Outcome of {@link CodingStore.approvePlanIfPending}. */
 export type ApprovePlanResult =
   | { kind: "approved"; conversationId: string | null }
@@ -154,14 +162,20 @@ export interface CodingTaskRow {
 export interface CodingStore {
   // --- Repos ---
 
-  /** Insert a new repo. Throws on `name` collision (UNIQUE). */
-  insertRepo(tx: Transaction, params: InsertRepoParams): Promise<CodingRepoRow>;
+  /**
+   * Insert a new repo. A taken `name` is `Err`, written in a savepoint so the
+   * caller's transaction stays usable.
+   */
+  insertRepo(
+    tx: Transaction,
+    params: InsertRepoParams,
+  ): Promise<Result<CodingRepoRow, RepoNameTaken>>;
 
   /**
    * {@link CodingStore.insertRepo} keyed on `name`: a second call with a
    * taken name returns `kind: "recovered"` and the stored row, unchanged,
-   * instead of throwing. For auto-managed rows that concurrent bootstraps
-   * may both try to create.
+   * instead of `Err`. For auto-managed rows that concurrent bootstraps may
+   * both try to create.
    */
   insertOrRecoverRepo(
     tx: Transaction,
@@ -453,8 +467,17 @@ function taskValues(params: InsertTaskParams) {
 export class DrizzleCodingStore implements CodingStore {
   // --- Repos ---
 
-  async insertRepo(tx: Transaction, params: InsertRepoParams): Promise<CodingRepoRow> {
-    return single(await tx.insert(codingRepos).values(repoValues(params)).returning());
+  async insertRepo(
+    tx: Transaction,
+    params: InsertRepoParams,
+  ): Promise<Result<CodingRepoRow, RepoNameTaken>> {
+    return inSavepoint(tx, (sp) =>
+      uniqueViolationAs(
+        "coding_repos_name_unique",
+        { kind: "repo_name_taken", name: params.name } as const,
+        async () => single(await sp.insert(codingRepos).values(repoValues(params)).returning()),
+      ),
+    );
   }
 
   async insertOrRecoverRepo(

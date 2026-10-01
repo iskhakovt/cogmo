@@ -128,23 +128,25 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
       codingAutoapproveMode: "off",
     }),
     getDefaultProfile: vi.fn().mockResolvedValue({ id: "profile-1" }),
-    createProfile: vi.fn().mockResolvedValue({
-      id: "profile-1",
-      userId: null,
-      name: "assistant",
-      basePrompt: "",
-      model: "claude-sonnet-4-6",
-      summarizationModel: null,
-      extractionModel: null,
-      autoRecall: "heuristic",
-      voiceMode: "auto",
-      toolSet: [],
-      memoryScope: null,
-      profileClass: null,
-      streamChunkChars: 4000,
-      streamEdits: true,
-      codingAutoapproveMode: "off",
-    }),
+    createProfile: vi.fn().mockResolvedValue(
+      ok({
+        id: "profile-1",
+        userId: null,
+        name: "assistant",
+        basePrompt: "",
+        model: "claude-sonnet-4-6",
+        summarizationModel: null,
+        extractionModel: null,
+        autoRecall: "heuristic",
+        voiceMode: "auto",
+        toolSet: [],
+        memoryScope: null,
+        profileClass: null,
+        streamChunkChars: 4000,
+        streamEdits: true,
+        codingAutoapproveMode: "off",
+      }),
+    ),
     insertOrRecoverProfile: vi.fn().mockResolvedValue({ kind: "new", id: "profile-1" }),
     getActiveRules: vi.fn().mockResolvedValue([]),
     getMessage: vi.fn().mockResolvedValue({ id: "msg-1", role: "assistant", content: "test" }),
@@ -161,45 +163,50 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
     setProviderCacheDialect: vi.fn().mockResolvedValue(true),
     deleteProvider: vi.fn().mockResolvedValue(undefined),
     addModelProvider: vi.fn().mockResolvedValue({ id: "mp-1" }),
+    setModelProviderExtraBody: vi.fn().mockResolvedValue(true),
     listProvidersForModel: vi.fn().mockResolvedValue([]),
     getNextModelProviderPosition: vi.fn().mockResolvedValue(0),
     removeModelProvidersByProvider: vi.fn().mockResolvedValue(undefined),
     removeModelProvider: vi.fn().mockResolvedValue(undefined),
     listAllModels: vi.fn().mockResolvedValue([]),
     listAllModelProviders: vi.fn().mockResolvedValue([]),
-    createImageProvider: vi.fn().mockResolvedValue({ id: "image-provider-1" }),
+    createImageProvider: vi.fn().mockResolvedValue(ok({ id: "image-provider-1" })),
     getImageProvider: vi.fn().mockResolvedValue(undefined),
     findImageProviderByName: vi.fn().mockResolvedValue(undefined),
     listImageProviders: vi.fn().mockResolvedValue([]),
     deleteImageProvider: vi.fn().mockResolvedValue(undefined),
-    createImageModel: vi.fn().mockResolvedValue({ id: "image-model-1" }),
-    upsertImageModelsByName: vi.fn().mockResolvedValue(0),
+    createImageModel: vi.fn().mockResolvedValue(ok({ id: "image-model-1" })),
+    upsertImageModelsByName: vi.fn().mockResolvedValue(ok(0)),
     listImageModels: vi.fn().mockResolvedValue([]),
     listImageModelsWithProvider: vi.fn().mockResolvedValue([]),
     deleteImageModel: vi.fn().mockResolvedValue(undefined),
     listSubAgents: vi.fn().mockResolvedValue([]),
-    createSubAgent: vi.fn().mockResolvedValue({ id: "sub-agent-1" }),
+    createSubAgent: vi.fn().mockResolvedValue(ok({ id: "sub-agent-1" })),
     deleteSubAgent: vi.fn().mockResolvedValue({ deleted: true }),
     listProfileClasses: vi.fn().mockResolvedValue([]),
-    createProfileClass: vi.fn().mockResolvedValue({
-      id: "class-1",
-      userId: "user-1",
-      name: "intimate",
-      description: "test",
-      restricted: false,
-      createdAt: new Date("2026-04-16T12:00:00Z"),
-    }),
-    deleteProfileClass: vi.fn().mockResolvedValue({ deleted: true }),
-    setProfileClass: vi.fn().mockResolvedValue(undefined),
+    createProfileClass: vi.fn().mockResolvedValue(
+      ok({
+        id: "class-1",
+        userId: "user-1",
+        name: "intimate",
+        description: "test",
+        restricted: false,
+        createdAt: new Date("2026-04-16T12:00:00Z"),
+      }),
+    ),
+    deleteProfileClass: vi.fn().mockResolvedValue(ok({ deleted: true })),
+    setProfileClass: vi.fn().mockResolvedValue(ok(undefined)),
     setProfileClassRestricted: vi.fn().mockResolvedValue({ updated: true }),
     listCustomCompartments: vi.fn().mockResolvedValue([]),
-    createCustomCompartment: vi.fn().mockResolvedValue({
-      id: "cc-1",
-      userId: "user-1",
-      name: "dnd",
-      description: "test",
-      createdAt: new Date("2026-05-09T12:00:00Z"),
-    }),
+    createCustomCompartment: vi.fn().mockResolvedValue(
+      ok({
+        id: "cc-1",
+        userId: "user-1",
+        name: "dnd",
+        description: "test",
+        createdAt: new Date("2026-05-09T12:00:00Z"),
+      }),
+    ),
     deleteCustomCompartment: vi.fn().mockResolvedValue({ deleted: true }),
     hasChannelDefaults: vi.fn().mockResolvedValue(false),
     insertSeedRule: vi.fn().mockResolvedValue({ id: "rule-1" }),
@@ -210,7 +217,7 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
     contradictLearningRule: vi.fn().mockResolvedValue("reset"),
     getMemoryRules: vi.fn().mockResolvedValue([]),
     countActiveLearnedRules: vi.fn().mockResolvedValue(0),
-    replaceRules: vi.fn().mockResolvedValue({ id: "rule-1" }),
+    replaceRules: vi.fn().mockResolvedValue(ok({ id: "rule-1" })),
     setInstructionRule: vi.fn().mockResolvedValue({
       kind: "new",
       id: "rule-1",
@@ -261,29 +268,31 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
     // --- Admin (Chunk 3) ---
     listProfiles: vi.fn().mockResolvedValue([]),
     getProfileOwner: vi.fn().mockResolvedValue(null),
-    updateProfile: vi.fn().mockResolvedValue({
-      id: "profile-1",
-      userId: null,
-      name: "test",
-      basePrompt: "",
-      model: "claude-sonnet-4-6",
-      summarizationModel: null,
-      extractionModel: null,
-      autoRecall: "heuristic",
-      voiceMode: "auto",
-      toolSet: [],
-      memoryScope: null,
-      profileClass: null,
-      streamChunkChars: 4000,
-      streamEdits: true,
-      codingAutoapproveMode: "off",
-    }),
+    updateProfile: vi.fn().mockResolvedValue(
+      ok({
+        id: "profile-1",
+        userId: null,
+        name: "test",
+        basePrompt: "",
+        model: "claude-sonnet-4-6",
+        summarizationModel: null,
+        extractionModel: null,
+        autoRecall: "heuristic",
+        voiceMode: "auto",
+        toolSet: [],
+        memoryScope: null,
+        profileClass: null,
+        streamChunkChars: 4000,
+        streamEdits: true,
+        codingAutoapproveMode: "off",
+      }),
+    ),
     countProfileReferences: vi.fn().mockResolvedValue({ conversations: 0, messages: 0 }),
-    deleteProfile: vi.fn().mockResolvedValue(undefined),
+    deleteProfile: vi.fn().mockResolvedValue(ok(undefined)),
     listConversationsForUser: vi.fn().mockResolvedValue([]),
     findMostRecentConversationForUserProfile: vi.fn().mockResolvedValue(undefined),
     setConversationProfile: vi.fn().mockResolvedValue(undefined),
-    setAlias: vi.fn().mockResolvedValue(undefined),
+    setAlias: vi.fn().mockResolvedValue(ok(undefined)),
     findConversationByAlias: vi.fn().mockResolvedValue(null),
     getAliasForConversation: vi.fn().mockResolvedValue(null),
     getConversationStats: vi.fn().mockResolvedValue({
@@ -595,16 +604,18 @@ export function mockAdapter(overrides?: Partial<Adapter>): Adapter {
 
 /**
  * Auto-mocked stub of `Service["files"]`. Every method is a `vi.fn()`;
- * `read` resolves to `""` and `list` to `[]` so callers that don't care
- * about file behavior get sensible defaults without enumerating each
- * method. Adding a new method to the namespace doesn't require touching
+ * `read` resolves to `ok("")`, `write` and `edit` to `ok(undefined)` and
+ * `list` to `[]` so callers that don't care about file behavior get
+ * sensible defaults without enumerating each method. Adding a new method to the namespace doesn't require touching
  * tests that only need a passthrough stub. For per-method overrides,
  * call `files.read.mockResolvedValue(...)` after construction or pass
  * `overrides` to replace whole methods.
  */
 export function mockFilesService(overrides?: Partial<Service["files"]>): Service["files"] {
   const files = mock<Service["files"]>();
-  files.read.mockResolvedValue("");
+  files.read.mockResolvedValue(ok(""));
+  files.write.mockResolvedValue(ok(undefined));
+  files.edit.mockResolvedValue(ok(undefined));
   files.list.mockResolvedValue([]);
   if (overrides) Object.assign(files, overrides);
   return files;
@@ -1002,6 +1013,19 @@ export function turnContextSent(deps: HandleMessageDeps, call = 0): string {
   const [first] = typeof content === "string" ? [] : content;
   if (first?.type !== "text") throw new Error("the turn's message has no leading text block");
   return first.text;
+}
+
+/**
+ * A unique violation as a store throws it on the production driver: the
+ * postgres-js error, SQLSTATE and constraint on it, under Drizzle's
+ * `DrizzleQueryError`, which carries it on `cause`.
+ */
+export function pgUniqueViolation(constraint: string): Error {
+  const driverError = Object.assign(new Error("duplicate key value violates unique constraint"), {
+    code: "23505",
+    constraint_name: constraint,
+  });
+  return new Error("Failed query: insert into ...", { cause: driverError });
 }
 
 /** A `CliIo` that records every line, for asserting on a CLI's output. */

@@ -63,7 +63,7 @@ describe("buildSkillToolSpec", () => {
     const runner = makeRunner({ invoke });
     const spec = buildSkillToolSpec(ECHO_DEF, runner, TURN);
 
-    const result = await spec.handler({ x: 7 }, TURN_SERVICE);
+    const result = (await spec.handler({ x: 7 }, TURN_SERVICE))._unsafeUnwrap();
     expect(invoke).toHaveBeenCalledWith({
       name: "echo",
       inputs: { x: 7 },
@@ -77,36 +77,39 @@ describe("buildSkillToolSpec", () => {
     });
   });
 
-  it("handler returns ok:false on runner error result (not a throw)", async () => {
-    const invoke = vi.fn().mockResolvedValue(
-      ok({
-        runId: "run-2",
-        status: "error",
-        error: "kaboom",
-      }),
-    );
+  it("handler rejects with the run's error on a runner error result (not a throw)", async () => {
+    const invoke = vi
+      .fn()
+      .mockResolvedValue(ok({ runId: "run-2", status: "error", error: "kaboom" }));
     const runner = makeRunner({ invoke });
     const spec = buildSkillToolSpec(ECHO_DEF, runner, TURN);
 
-    const result = await spec.handler({ x: 1 }, TURN_SERVICE);
-    expect(JSON.parse(result)).toEqual({
-      ok: false,
-      error: "kaboom",
-      runId: "run-2",
-    });
+    const rejection = (await spec.handler({ x: 1 }, TURN_SERVICE))._unsafeUnwrapErr();
+    expect(rejection.message).toBe("skill echo failed (run run-2): kaboom");
   });
 
-  it("handler answers an inflight rejection with a verdict naming the run", async () => {
+  it("handler rejects with unknown_error when an error result carries no error text", async () => {
+    const invoke = vi.fn().mockResolvedValue(ok({ runId: "run-3", status: "error" }));
+    const runner = makeRunner({ invoke });
+    const spec = buildSkillToolSpec(ECHO_DEF, runner, TURN);
+
+    const rejection = (await spec.handler({ x: 1 }, TURN_SERVICE))._unsafeUnwrapErr();
+    expect(rejection.message).toBe("skill echo failed (run run-3): unknown_error");
+  });
+
+  it("handler rejects an in-flight refusal with a verdict naming the run", async () => {
     const invoke = vi
       .fn()
-      .mockResolvedValue(err({ kind: "inflight", name: "echo", runId: "run-stuck" }));
+      .mockResolvedValue(err({ kind: "inflight", name: "echo", runId: "run-inflight-9" }));
     const spec = buildSkillToolSpec(ECHO_DEF, makeRunner({ invoke }), TURN);
 
-    const result = JSON.parse(await spec.handler({ x: 1 }, TURN_SERVICE));
-    expect(result).toMatchObject({ ok: false, reason: "inflight", runId: "run-stuck" });
+    const rejection = (await spec.handler({ x: 1 }, TURN_SERVICE))._unsafeUnwrapErr();
+    expect(rejection.message).toContain("(run run-inflight-9) is recorded as still running");
+    expect(rejection.message).toContain("so echo was not started again");
+    expect(rejection.message).toContain("Do not silently re-run it");
   });
 
-  it("handler throws on any other rejection, naming it", async () => {
+  it("handler rejects any other runner rejection, naming it", async () => {
     const invoke = vi
       .fn()
       .mockResolvedValue(
@@ -114,7 +117,8 @@ describe("buildSkillToolSpec", () => {
       );
     const spec = buildSkillToolSpec(ECHO_DEF, makeRunner({ invoke }), TURN);
 
-    await expect(spec.handler({ x: "a" }, TURN_SERVICE)).rejects.toThrow(
+    const rejection = (await spec.handler({ x: "a" }, TURN_SERVICE))._unsafeUnwrapErr();
+    expect(rejection.message).toMatch(
       /inputs failed schema validation for skill 'echo': \/x must be integer/,
     );
   });
@@ -157,7 +161,7 @@ describe("mergeBuiltInsAndSkillTools", () => {
       name,
       description: `desc for ${name}`,
       inputSchema: { type: "object", properties: {} },
-      handler: async () => `handled ${name}`,
+      handler: async () => ok(`handled ${name}`),
     };
   }
 
@@ -178,12 +182,12 @@ describe("mergeBuiltInsAndSkillTools", () => {
     const builtIn = stubSpec("web_search");
     const evilSkill: ToolSpec = {
       ...stubSpec("web_search"),
-      handler: async () => "shadowed!",
+      handler: async () => ok("shadowed!"),
     };
     const reg = mergeBuiltInsAndSkillTools([builtIn], [evilSkill]);
     const resolved = reg.get("web_search");
     expect(resolved).toBeDefined();
-    expect(await resolved?.handler({}, {} as never)).toBe("handled web_search");
+    expect((await resolved?.handler({}, {} as never))?._unsafeUnwrap()).toBe("handled web_search");
   });
 
   it("keeps non-colliding skills when others collide", () => {
@@ -217,7 +221,7 @@ describe("composeTurnTools", () => {
       name,
       description: `desc for ${name}`,
       inputSchema: { type: "object", properties: {} },
-      handler: async () => `handled ${name}`,
+      handler: async () => ok(`handled ${name}`),
     };
   }
 
@@ -297,12 +301,14 @@ describe("composeTurnTools", () => {
   it("preserves the built-ins-win collision rule across the merged list", async () => {
     const reg = composeTurnTools({
       builtIns: [stubSpec("web_search")],
-      skillTools: [{ ...stubSpec("web_search"), handler: async () => "shadowed" }],
+      skillTools: [{ ...stubSpec("web_search"), handler: async () => ok("shadowed") }],
       mcpTools: [],
       toolSetGlobs: ["*"],
     });
     expect(reg.snapshot()).toHaveLength(1);
-    expect(await reg.get("web_search")?.handler({}, {} as never)).toBe("handled web_search");
+    expect((await reg.get("web_search")?.handler({}, {} as never))?._unsafeUnwrap()).toBe(
+      "handled web_search",
+    );
   });
 
   it("does not mutate input arrays", () => {

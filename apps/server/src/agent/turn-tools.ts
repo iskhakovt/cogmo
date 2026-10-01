@@ -14,7 +14,7 @@
 import * as R from "remeda";
 import { z } from "zod";
 import type { JsonSchema } from "../llm/types.js";
-import { type ToolHandler, ToolRegistry } from "./tools.js";
+import { reject, type ToolHandler, ToolRegistry } from "./tools.js";
 
 function isObjectJsonSchema(value: unknown): value is JsonSchema {
   return R.isPlainObject(value) && value.type === "object";
@@ -54,7 +54,7 @@ export function freezeToolTable(registry: ToolRegistry): string {
  * included, parses the same `table`, so each builds identical definitions.
  *
  * A frozen tool missing from `live` keeps its definition and policy and gets a
- * handler that throws, which the loop reports as an `is_error` result. A
+ * handler that rejects every call, so the model reads an `is_error` result. A
  * durable one whose step already ran replays that result and never reaches the
  * handler. A live tool the turn didn't freeze is not offered.
  */
@@ -72,7 +72,5 @@ export function bindFrozenTools(table: string, live: ToolRegistry): ToolRegistry
 }
 
 function unavailable(name: string): ToolHandler {
-  return async () => {
-    throw new Error(`the ${name} tool could not be loaded, so it did not run`);
-  };
+  return async () => reject(`the ${name} tool could not be loaded, so it did not run`);
 }

@@ -1,3 +1,5 @@
+import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
+import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import { mcpDescriptorToToolSpec } from "./adapter.js";
 import type { McpConnectionPool } from "./client/pool.js";
@@ -42,12 +44,29 @@ function makePool(callTool: (...args: unknown[]) => Promise<unknown>): McpConnec
     close: vi.fn(),
   };
   return {
-    getConnection: vi.fn(async () => conn),
+    getConnection: vi.fn(async () => ok(conn)),
     // The adapter only uses getConnection — the rest are unused but typed.
   } as unknown as McpConnectionPool;
 }
 
 describe("mcpDescriptorToToolSpec", () => {
+  it("rejects the call with the pool's reason when it has no connection", async () => {
+    const pool = {
+      getConnection: vi.fn(async () =>
+        err({ code: "server_unhealthy" as const, lastError: "spawn ENOENT" }),
+      ),
+    } as unknown as McpConnectionPool;
+    const spec = mcpDescriptorToToolSpec({
+      server: makeServer(),
+      descriptor: makeDescriptor(),
+      pool,
+      timeoutMs: 30_000,
+    });
+    expect((await spec.handler({ repo: "x" }, {} as never))._unsafeUnwrapErr().message).toBe(
+      "MCP server is unhealthy: spawn ENOENT",
+    );
+  });
+
   it("composes the canonical tool name", () => {
     const spec = mcpDescriptorToToolSpec({
       server: makeServer("github"),
@@ -93,7 +112,7 @@ describe("mcpDescriptorToToolSpec", () => {
       timeoutMs: 12_345,
     });
 
-    const out = await spec.handler({ repo: "iskhakovt/cogmo" }, {} as never);
+    const out = (await spec.handler({ repo: "iskhakovt/cogmo" }, {} as never))._unsafeUnwrap();
     expect(out).toBe("PR opened");
     expect(pool.getConnection).toHaveBeenCalledWith("server-1");
     expect(callTool).toHaveBeenCalledWith(
@@ -116,7 +135,7 @@ describe("mcpDescriptorToToolSpec", () => {
       pool,
       timeoutMs: 30_000,
     });
-    expect(await spec.handler({}, {} as never)).toBe("Line 1\nLine 2");
+    expect((await spec.handler({}, {} as never))._unsafeUnwrap()).toBe("Line 1\nLine 2");
   });
 
   it("falls back to JSON-stringifying structuredContent when no text blocks", async () => {
@@ -130,10 +149,12 @@ describe("mcpDescriptorToToolSpec", () => {
       pool,
       timeoutMs: 30_000,
     });
-    expect(await spec.handler({}, {} as never)).toBe('{"number":42,"opened":true}');
+    expect((await spec.handler({}, {} as never))._unsafeUnwrap()).toBe(
+      '{"number":42,"opened":true}',
+    );
   });
 
-  it("throws on isError so the agent loop wraps as tool_result with isError", async () => {
+  it("rejects on isError so the agent loop answers with an is_error tool_result", async () => {
     const pool = makePool(async () => ({
       isError: true,
       content: [{ type: "text", text: "rate limit hit" }],
@@ -144,10 +165,10 @@ describe("mcpDescriptorToToolSpec", () => {
       pool,
       timeoutMs: 30_000,
     });
-    await expect(spec.handler({}, {} as never)).rejects.toThrow(/rate limit hit/);
+    expect((await spec.handler({}, {} as never))._unsafeUnwrapErr().message).toBe("rate limit hit");
   });
 
-  it("throws a generic message when isError is set but content is empty", async () => {
+  it("rejects with a generic message when isError is set but content is empty", async () => {
     const pool = makePool(async () => ({ isError: true }));
     const spec = mcpDescriptorToToolSpec({
       server: makeServer(),
@@ -155,6 +176,50 @@ describe("mcpDescriptorToToolSpec", () => {
       pool,
       timeoutMs: 30_000,
     });
-    await expect(spec.handler({}, {} as never)).rejects.toThrow(/isError without textual content/);
+    expect((await spec.handler({}, {} as never))._unsafeUnwrapErr().message).toBe(
+      "MCP tool reported isError without textual content",
+    );
+  });
+
+  it.each([
+    ["invalid params", ErrorCode.InvalidParams, "Invalid arguments for tool create_pr"],
+    ["an unknown method", ErrorCode.MethodNotFound, "Method not found"],
+    ["the per-call timeout", ErrorCode.RequestTimeout, "Request timed out"],
+  ])("rejects a call the server refused with %s", async (_label, code, message) => {
+    const spec = mcpDescriptorToToolSpec({
+      server: makeServer(),
+      descriptor: makeDescriptor(),
+      pool: makePool(async () => {
+        throw new McpError(code, message);
+      }),
+      timeoutMs: 30_000,
+    });
+    expect((await spec.handler({}, {} as never))._unsafeUnwrapErr().message).toBe(
+      `MCP error ${code}: ${message}`,
+    );
+  });
+
+  it("throws a connection-level failure", async () => {
+    const spec = mcpDescriptorToToolSpec({
+      server: makeServer(),
+      descriptor: makeDescriptor(),
+      pool: makePool(async () => {
+        throw new McpError(ErrorCode.ConnectionClosed, "Connection closed");
+      }),
+      timeoutMs: 30_000,
+    });
+    await expect(spec.handler({}, {} as never)).rejects.toThrow("Connection closed");
+  });
+
+  it("throws a server-side internal error", async () => {
+    const spec = mcpDescriptorToToolSpec({
+      server: makeServer(),
+      descriptor: makeDescriptor(),
+      pool: makePool(async () => {
+        throw new McpError(ErrorCode.InternalError, "boom");
+      }),
+      timeoutMs: 30_000,
+    });
+    await expect(spec.handler({}, {} as never)).rejects.toThrow("boom");
   });
 });

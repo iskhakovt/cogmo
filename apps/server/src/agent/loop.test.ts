@@ -1,3 +1,4 @@
+import { ok } from "neverthrow";
 import type { Logger } from "pino";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
@@ -26,7 +27,7 @@ import type {
 } from "./loop.js";
 import { runAgentLoop, runStreamingAgentLoop } from "./loop.js";
 import type { Service } from "./service.js";
-import { defineTool, ToolRegistry } from "./tools.js";
+import { defineTool, reject, type ToolOutcome, ToolRegistry } from "./tools.js";
 
 function stubService(): Service {
   return {
@@ -138,7 +139,7 @@ describe("runAgentLoop", () => {
         name: "echo",
         description: "echoes",
         schema: z.object({ text: z.string() }),
-        handler: async (input) => `pong from ${input.text}`,
+        handler: async (input) => ok(`pong from ${input.text}`),
       }),
     );
 
@@ -235,7 +236,7 @@ describe("runAgentLoop", () => {
         name: "a",
         description: "a",
         schema: z.object({}),
-        handler: async () => "result-a",
+        handler: async () => ok("result-a"),
       }),
     );
     tools.register(
@@ -243,7 +244,7 @@ describe("runAgentLoop", () => {
         name: "b",
         description: "b",
         schema: z.object({}),
-        handler: async () => "result-b",
+        handler: async () => ok("result-b"),
       }),
     );
 
@@ -274,7 +275,7 @@ describe("runAgentLoop", () => {
         name: "echo",
         description: "echo",
         schema: z.object({}),
-        handler: async () => "ok",
+        handler: async () => ok("ok"),
       }),
     );
 
@@ -310,7 +311,7 @@ describe("runAgentLoop", () => {
         name: "echo",
         description: "echo",
         schema: z.object({ text: z.string() }),
-        handler: async (input) => `pong from ${input.text}`,
+        handler: async (input) => ok(`pong from ${input.text}`),
       }),
     );
 
@@ -350,7 +351,7 @@ describe("runAgentLoop", () => {
         name: "echo",
         description: "echo",
         schema: z.object({}),
-        handler: async () => "ok",
+        handler: async () => ok("ok"),
       }),
     );
 
@@ -409,7 +410,7 @@ describe("runAgentLoop", () => {
         schema: z.object({}),
         handler: async (_input, service) => {
           receivedService = service;
-          return "ok";
+          return ok("ok");
         },
       }),
     );
@@ -461,7 +462,7 @@ describe("runAgentLoop", () => {
           started++;
           if (started === 3) releaseStartBarrier();
           await allStarted;
-          return `out-${input.n}`;
+          return ok(`out-${input.n}`);
         },
       }),
     );
@@ -528,7 +529,7 @@ describe("runAgentLoop", () => {
           const barrier = input.n <= 2 ? groupA : groupB;
           await barrier.enter();
           order.push(`safe-${input.n}`);
-          return `out-${input.n}`;
+          return ok(`out-${input.n}`);
         },
       }),
     );
@@ -539,7 +540,7 @@ describe("runAgentLoop", () => {
         schema: z.object({}),
         handler: async () => {
           order.push("unsafe");
-          return "u";
+          return ok("u");
         },
       }),
     );
@@ -592,7 +593,7 @@ describe("runAgentLoop", () => {
           await new Promise((r) => setTimeout(r, 5));
           order.push(input.tag);
           active--;
-          return `done-${input.tag}`;
+          return ok(`done-${input.tag}`);
         },
       }),
     );
@@ -643,7 +644,7 @@ describe("runAgentLoop", () => {
           started++;
           if (started === 2) releaseBarrier();
           await ready;
-          return "ok";
+          return ok("ok");
         },
       }),
     );
@@ -748,7 +749,7 @@ describe("runStreamingAgentLoop", () => {
         name: "echo",
         description: "echoes",
         schema: z.object({ text: z.string() }),
-        handler: async (input) => `pong from ${input.text}`,
+        handler: async (input) => ok(`pong from ${input.text}`),
       }),
     );
 
@@ -817,7 +818,7 @@ describe("runStreamingAgentLoop", () => {
         description: "draws",
         schema: z.object({ prompt: z.string(), aspectRatio: z.enum(["1:1", "16:9"]).optional() }),
         durable: true,
-        handler: async (input) => `drew ${input.prompt} at ${input.aspectRatio}`,
+        handler: async (input) => ok(`drew ${input.prompt} at ${input.aspectRatio}`),
       }),
     );
     const stepIds: string[] = [];
@@ -917,7 +918,7 @@ describe("runStreamingAgentLoop", () => {
         name: "echo",
         description: "echo",
         schema: z.object({}),
-        handler: async () => "ok",
+        handler: async () => ok("ok"),
       }),
     );
 
@@ -948,7 +949,7 @@ describe("runStreamingAgentLoop", () => {
       },
       { events: [{ type: "text_delta", text: "I'll split it up." }], stopReason: "end_turn" },
     ]);
-    const handler = vi.fn(async () => "written");
+    const handler = vi.fn(async () => ok("written"));
     const tools = new ToolRegistry();
     tools.register(
       defineTool({
@@ -1007,8 +1008,8 @@ describe("runStreamingAgentLoop", () => {
       },
       { events: [{ type: "text_delta", text: "done" }], stopReason: "end_turn" },
     ]);
-    const look = vi.fn(async () => "looked");
-    const write = vi.fn(async () => "written");
+    const look = vi.fn(async () => ok("looked"));
+    const write = vi.fn(async () => ok("written"));
     const tools = new ToolRegistry();
     tools.register(
       defineTool({ name: "look", description: "look", schema: z.object({}), handler: look }),
@@ -1044,7 +1045,7 @@ describe("runStreamingAgentLoop", () => {
       stopReason: "max_tokens" as const,
     };
     const provider = mockStreamProvider([capped, { ...capped, events: [...capped.events] }]);
-    const write = vi.fn(async () => "written");
+    const write = vi.fn(async () => ok("written"));
     const tools = new ToolRegistry();
     tools.register(
       defineTool({
@@ -1084,7 +1085,7 @@ describe("runStreamingAgentLoop", () => {
       },
       { events: [{ type: "text_delta", text: "Here is the summary." }], stopReason: "end_turn" },
     ]);
-    const look = vi.fn(async () => "looked");
+    const look = vi.fn(async () => ok("looked"));
     const tools = new ToolRegistry();
     tools.register(
       defineTool({ name: "look", description: "look", schema: z.object({}), handler: look }),
@@ -1192,7 +1193,7 @@ describe("runStreamingAgentLoop", () => {
         name: "echo",
         description: "echo",
         schema: z.object({}),
-        handler: async () => "ok",
+        handler: async () => ok("ok"),
       }),
     );
 
@@ -1249,7 +1250,7 @@ describe("runStreamingAgentLoop", () => {
         name: "echo",
         description: "echo",
         schema: z.object({ text: z.string() }),
-        handler: async (input) => `pong from ${input.text}`,
+        handler: async (input) => ok(`pong from ${input.text}`),
       }),
     );
 
@@ -1430,7 +1431,7 @@ describe("tool durability (stepRun)", () => {
       durable: true,
       handler: async () => {
         handlerCalls++;
-        return "paid-result";
+        return ok("paid-result");
       },
     });
 
@@ -1470,7 +1471,7 @@ describe("tool durability (stepRun)", () => {
       parallelSafe: true,
       handler: async (_input, _service, ctx) => {
         seen.push(ctx?.idempotencyKey);
-        return "ok";
+        return ok("ok");
       },
     });
 
@@ -1512,7 +1513,7 @@ describe("tool durability (stepRun)", () => {
       durable: true,
       handler: async (_input, _service, ctx) => {
         if (ctx) seenKeys.push(ctx.idempotencyKey);
-        return "ok";
+        return ok("ok");
       },
     });
 
@@ -1548,7 +1549,7 @@ describe("tool durability (stepRun)", () => {
         durable: true,
         handler: async (_input, _service, ctx) => {
           key = ctx?.idempotencyKey;
-          return "ok";
+          return ok("ok");
         },
       });
       await testRunAgentLoop({
@@ -1584,7 +1585,7 @@ describe("tool durability (stepRun)", () => {
           durable: true,
           handler: async (_input, _service, ctx) => {
             key = ctx?.idempotencyKey;
-            return "ok";
+            return ok("ok");
           },
         }),
       );
@@ -1622,7 +1623,7 @@ describe("tool durability (stepRun)", () => {
       durable: true,
       handler: async (_input, _service, ctx) => {
         seen.push(ctx);
-        return "ok";
+        return ok("ok");
       },
     });
 
@@ -1648,7 +1649,7 @@ describe("tool durability (stepRun)", () => {
       durable: true,
       handler: async () => {
         handlerCalls++;
-        return "paid-result";
+        return ok("paid-result");
       },
     });
 
@@ -1674,7 +1675,7 @@ describe("tool durability (stepRun)", () => {
       description: "free",
       inputSchema: { type: "object" },
       // durable omitted — defaults to not durable
-      handler: async () => "cheap-result",
+      handler: async () => ok("cheap-result"),
     });
 
     // `vi.fn<StepRunner>` can't carry StepRunner's generic signature, so
@@ -1715,7 +1716,7 @@ describe("tool durability (stepRun)", () => {
       description: "expensive",
       inputSchema: { type: "object" },
       durable: true,
-      handler: async () => "ok",
+      handler: async () => ok("ok"),
     });
 
     const ids: string[] = [];
@@ -1750,7 +1751,7 @@ describe("tool durability (stepRun)", () => {
       description: "expensive",
       inputSchema: { type: "object" },
       durable: true,
-      handler: async () => "stream-result",
+      handler: async () => ok("stream-result"),
     });
 
     const stepRunCalls: string[] = [];
@@ -1795,7 +1796,7 @@ describe("tool durability (stepRun)", () => {
         description: "expensive",
         inputSchema: { type: "object" },
         durable: true,
-        handler: async () => "paid-result",
+        handler: async () => ok("paid-result"),
       });
       return tools;
     }
@@ -1843,14 +1844,14 @@ describe("tool durability (stepRun)", () => {
       description: "read A",
       inputSchema: { type: "object" },
       durable: true,
-      handler: async () => "contents-of-A",
+      handler: async () => ok("contents-of-A"),
     });
     tools.register({
       name: "read_b",
       description: "read B",
       inputSchema: { type: "object" },
       durable: true,
-      handler: async () => "contents-of-B",
+      handler: async () => ok("contents-of-B"),
     });
 
     // Simulate Inngest's cache: stepRun returns a prior attempt's value
@@ -2066,7 +2067,7 @@ describe("durable LLM iterations (stepRun)", () => {
         name: "echo",
         description: "echo",
         schema: z.object({ text: z.string() }),
-        handler: async (input) => `pong from ${input.text}`,
+        handler: async (input) => ok(`pong from ${input.text}`),
       }),
     );
 
@@ -2224,7 +2225,7 @@ describe("durable LLM iterations (stepRun)", () => {
       ["emit-tool-results-iter1", null],
     ]);
     const { stepRun } = cachingStepRun(cache);
-    const handler = vi.fn(async (input: { text: string }) => `pong from ${input.text}`);
+    const handler = vi.fn(async (input: { text: string }) => ok(`pong from ${input.text}`));
     const tools = new ToolRegistry();
     tools.register(
       defineTool({
@@ -2283,7 +2284,7 @@ describe("durable LLM iterations (stepRun)", () => {
         name: "echo",
         description: "echo",
         schema: z.object({ text: z.string() }),
-        handler: async (input) => `pong from ${input.text}`,
+        handler: async (input) => ok(`pong from ${input.text}`),
       }),
     );
     const protocolErr = new ProviderProtocolError(
@@ -2352,7 +2353,7 @@ describe("cache intent", () => {
         name: "echo",
         description: "echoes",
         schema: z.object({ text: z.string() }),
-        handler: async (input) => `pong from ${input.text}`,
+        handler: async (input) => ok(`pong from ${input.text}`),
       }),
     );
     return tools;
@@ -2436,7 +2437,7 @@ describe("Strategy 1 edit intent", () => {
         name: "echo",
         description: "echoes",
         schema: z.object({ text: z.string() }),
-        handler: async (input) => `pong from ${input.text}`,
+        handler: async (input) => ok(`pong from ${input.text}`),
       }),
     );
     return tools;
@@ -2509,7 +2510,7 @@ describe("usage totals", () => {
         name: "echo",
         description: "echoes",
         schema: z.object({ text: z.string() }),
-        handler: async (input) => input.text,
+        handler: async (input) => ok(input.text),
       }),
     );
     const provider = mockStreamProvider([
@@ -2557,7 +2558,7 @@ describe("usage totals", () => {
         name: "echo",
         description: "echoes",
         schema: z.object({ text: z.string() }),
-        handler: async (input) => input.text,
+        handler: async (input) => ok(input.text),
       }),
     );
     const provider = mockStreamProvider([
@@ -2610,7 +2611,7 @@ describe("usage totals", () => {
         name: "echo",
         description: "echoes",
         schema: z.object({ text: z.string() }),
-        handler: async (input) => input.text,
+        handler: async (input) => ok(input.text),
       }),
     );
 
@@ -2769,7 +2770,7 @@ describe("turnLogger plumbing", () => {
         name: "echo",
         description: "echo",
         schema: z.object({}),
-        handler: async () => "ok",
+        handler: async () => ok("ok"),
       }),
     );
     const turnLogger = mock<Logger>();
@@ -3009,7 +3010,7 @@ describe("in-loop model-misbehavior repair", () => {
         name: "echo",
         description: "echo",
         schema: z.object({ text: z.string() }),
-        handler: async (input) => `pong from ${input.text}`,
+        handler: async (input) => ok(`pong from ${input.text}`),
       }),
     );
     const turnLogger = mock<Logger>();
@@ -3161,7 +3162,7 @@ describe("in-loop model-misbehavior repair", () => {
         stopReason: "end_turn",
       },
     ]);
-    const handler = vi.fn(async () => "written");
+    const handler = vi.fn(async () => ok("written"));
     const tools = new ToolRegistry();
     tools.register(
       defineTool({
@@ -3276,7 +3277,7 @@ describe("in-loop model-misbehavior repair", () => {
         name: "echo",
         description: "echo",
         schema: z.object({}),
-        handler: async () => "ok",
+        handler: async () => ok("ok"),
       }),
     );
 
@@ -3398,7 +3399,7 @@ describe("in-loop model-misbehavior repair", () => {
         name: "echo",
         description: "echo",
         schema: z.object({}),
-        handler: async () => "ok",
+        handler: async () => ok("ok"),
       }),
     );
 
@@ -3468,7 +3469,7 @@ describe("in-loop model-misbehavior repair", () => {
         name: "echo",
         description: "echo",
         schema: z.object({}),
-        handler: async () => "ok",
+        handler: async () => ok("ok"),
       }),
     );
 
@@ -3500,7 +3501,7 @@ describe("in-loop model-misbehavior repair", () => {
         name: "echo",
         description: "echo",
         schema: z.object({ text: z.string() }),
-        handler: async (input) => `pong from ${input.text}`,
+        handler: async (input) => ok(`pong from ${input.text}`),
       }),
     );
 
@@ -3554,7 +3555,7 @@ describe("loop-pathology fingerprint", () => {
       description: "read a file",
       schema: z.object({ path: z.string() }),
       sideEffectful: false,
-      handler: async (input) => `contents of ${input.path}`,
+      handler: async (input) => ok(`contents of ${input.path}`),
     });
   }
 
@@ -3564,7 +3565,7 @@ describe("loop-pathology fingerprint", () => {
       description: "write a file",
       schema: z.object({ path: z.string() }),
       sideEffectful: true,
-      handler: async (input) => `wrote ${input.path}`,
+      handler: async (input) => ok(`wrote ${input.path}`),
     });
   }
 
@@ -3817,7 +3818,7 @@ describe("loop-pathology fingerprint", () => {
         description: "list",
         schema: z.object({ path: z.string() }),
         sideEffectful: false,
-        handler: async (input) => `listing of ${input.path}`,
+        handler: async (input) => ok(`listing of ${input.path}`),
       }),
     );
 
@@ -3841,7 +3842,7 @@ describe("loop-pathology fingerprint", () => {
       name: "mystery",
       description: "no flag",
       schema: z.object({}),
-      handler: async () => "ok",
+      handler: async () => ok("ok"),
     });
     expect(unflaggedTool.sideEffectful).toBeUndefined();
 
@@ -3961,7 +3962,7 @@ describe("volume-cluster trigger", () => {
       parallelSafe: true,
       sideEffectful,
       invocationBudget: budget,
-      handler: async (input) => `result for ${input.q}`,
+      handler: async (input) => ok(`result for ${input.q}`),
     });
   }
 
@@ -4449,7 +4450,7 @@ describe("canonical tool inputs", () => {
         schema: z.record(z.string(), z.unknown()),
         handler: async (input) => {
           received.push(input);
-          return "ok";
+          return ok("ok");
         },
       }),
     );
@@ -4575,5 +4576,221 @@ describe("canonical tool inputs", () => {
     expect(serializedInput(followUp.messages[1]?.content)).toBe(CANONICAL);
     expect(serializedInput(result.newMessages[0]?.content)).toBe(CANONICAL);
     expect(received.map((input) => JSON.stringify(input))).toEqual([CANONICAL]);
+  });
+});
+describe("tool rejections", () => {
+  const REJECTION = "path x is outside the workspace";
+
+  function streamedToolUse(toolName: string, id: string, input: unknown): MockStreamTurn {
+    return { events: [{ type: "tool_start", id, name: toolName, input }], stopReason: "tool_use" };
+  }
+
+  /**
+   * A `step.run` stand-in that replays `memo` for the tool step. `StepRunner`
+   * promises the body's type, but a replay hands back whatever a run
+   * memoized, which is what these tests exercise.
+   */
+  function replaying(memo: unknown): StepRunner {
+    return async <T>(id: string, fn: () => Promise<T>): Promise<T> =>
+      id.startsWith("tool-iter") ? (memo as T) : fn();
+  }
+
+  function writer(handler: () => Promise<ToolOutcome>) {
+    return defineTool({
+      name: "writer",
+      description: "writes",
+      schema: z.object({ path: z.string() }),
+      durable: true,
+      sideEffectful: true,
+      handler,
+    });
+  }
+
+  it("answers a rejection with an is_error tool_result and logs no bug", async () => {
+    const tools = new ToolRegistry();
+    tools.register(writer(async () => reject(REJECTION)));
+    const turnLogger = mock<Logger>();
+
+    const result = await testRunAgentLoop({
+      provider: mockProvider([toolUseResponse("writer", "t1", { path: "x" }), textResponse("ok")]),
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      turnLogger,
+    });
+
+    expect(result.messages[2]?.content).toEqual([
+      { type: "tool_result", toolUseId: "t1", content: `Error: ${REJECTION}`, isError: true },
+    ]);
+    expect(turnLogger.error).not.toHaveBeenCalled();
+  });
+
+  it("answers schema-invalid input as a rejection: is_error tool_result, handler skipped, no bug logged", async () => {
+    const handler = vi.fn(async () => ok("wrote"));
+    const tools = new ToolRegistry();
+    tools.register(writer(handler));
+    const turnLogger = mock<Logger>();
+
+    const result = await testRunAgentLoop({
+      provider: mockProvider([toolUseResponse("writer", "t1", { path: 7 }), textResponse("ok")]),
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      turnLogger,
+    });
+
+    expect(handler).not.toHaveBeenCalled();
+    expect(result.messages[2]?.content).toEqual([
+      expect.objectContaining({ toolUseId: "t1", isError: true }),
+    ]);
+    expect(turnLogger.error).not.toHaveBeenCalled();
+  });
+
+  it("logs a handler throw as a bug and still answers with an is_error tool_result", async () => {
+    const tools = new ToolRegistry();
+    tools.register(
+      writer(async () => {
+        throw new Error("undefined is not a function");
+      }),
+    );
+    const turnLogger = mock<Logger>();
+
+    const result = await testRunAgentLoop({
+      provider: mockProvider([toolUseResponse("writer", "t1", { path: "x" }), textResponse("ok")]),
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      turnLogger,
+    });
+
+    expect(result.messages[2]?.content).toEqual([
+      {
+        type: "tool_result",
+        toolUseId: "t1",
+        content: "Error: undefined is not a function",
+        isError: true,
+      },
+    ]);
+    expect(turnLogger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ tool: "writer" }),
+      "tool handler threw",
+    );
+  });
+
+  it("returns a durable tool's rejection as its step result rather than failing the step", async () => {
+    const tools = new ToolRegistry();
+    tools.register(writer(async () => reject(REJECTION)));
+    const memos: unknown[] = [];
+    const stepRun: StepRunner = async (id, fn) => {
+      const value = await fn();
+      if (id.startsWith("tool-iter")) memos.push(value);
+      return value;
+    };
+
+    const result = await testRunAgentLoop({
+      provider: mockProvider([toolUseResponse("writer", "t1", { path: "x" }), textResponse("ok")]),
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      stepRun,
+    });
+
+    expect(memos).toEqual([{ ok: false, message: REJECTION }]);
+    expect(result.messages[2]?.content).toEqual([
+      { type: "tool_result", toolUseId: "t1", content: `Error: ${REJECTION}`, isError: true },
+    ]);
+  });
+
+  it("replays a memoized rejection without running the handler", async () => {
+    const handler = vi.fn(async () => ok("fresh"));
+    const tools = new ToolRegistry();
+    tools.register(writer(handler));
+    // Keys sorted, as the Inngest server re-encodes a memoized result.
+    const stepRun = replaying({ message: REJECTION, ok: false });
+
+    const result = await testRunAgentLoop({
+      provider: mockProvider([toolUseResponse("writer", "t1", { path: "x" }), textResponse("ok")]),
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      stepRun,
+    });
+
+    expect(handler).not.toHaveBeenCalled();
+    expect(result.messages[2]?.content).toEqual([
+      { type: "tool_result", toolUseId: "t1", content: `Error: ${REJECTION}`, isError: true },
+    ]);
+  });
+
+  it("reads a bare-string memo as a success", async () => {
+    const handler = vi.fn(async () => ok("fresh"));
+    const tools = new ToolRegistry();
+    tools.register(writer(handler));
+    const stepRun = replaying("wrote x");
+
+    const result = await testRunAgentLoop({
+      provider: mockProvider([toolUseResponse("writer", "t1", { path: "x" }), textResponse("ok")]),
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      stepRun,
+    });
+
+    expect(handler).not.toHaveBeenCalled();
+    expect(result.messages[2]?.content).toEqual([
+      { type: "tool_result", toolUseId: "t1", content: "wrote x" },
+    ]);
+  });
+
+  it("answers a memo it can't parse with an is_error tool_result and logs it as a bug", async () => {
+    const handler = vi.fn(async () => ok("fresh"));
+    const tools = new ToolRegistry();
+    tools.register(writer(handler));
+    const turnLogger = mock<Logger>();
+    const stepRun = replaying({ ok: "maybe" });
+
+    const result = await testRunAgentLoop({
+      provider: mockProvider([toolUseResponse("writer", "t1", { path: "x" }), textResponse("ok")]),
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      stepRun,
+      turnLogger,
+    });
+
+    expect(handler).not.toHaveBeenCalled();
+    expect(result.messages[2]?.content).toEqual([
+      expect.objectContaining({ type: "tool_result", toolUseId: "t1", isError: true }),
+    ]);
+    expect(turnLogger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ tool: "writer" }),
+      "tool handler threw",
+    );
+  });
+
+  it("counts a rejected side-effectful call as no progress, so repeating it trips Class D", async () => {
+    const tools = new ToolRegistry();
+    tools.register(writer(async () => reject(REJECTION)));
+    const events: StreamEvent[] = [];
+
+    const result = await testRunStreamingAgentLoop({
+      provider: mockStreamProvider([
+        streamedToolUse("writer", "t1", { path: "x" }),
+        streamedToolUse("writer", "t2", { path: "x" }),
+        streamedToolUse("writer", "t3", { path: "x" }),
+      ]),
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      onEvent: async (event) => {
+        events.push(event);
+      },
+      stepRun: async (_id, fn) => fn(),
+    });
+
+    expect(result.degraded).toEqual({ reason: "stuck_loop", subtype: "stuck_loop" });
+    expect(result.iterations).toBe(3);
+    const streamed = events.filter((e) => e.type === "tool_result");
+    expect(streamed).toHaveLength(3);
+    for (const event of streamed) {
+      expect(event).toEqual({
+        type: "tool_result",
+        name: "writer",
+        output: `Error: ${REJECTION}`,
+        isError: true,
+      });
+    }
   });
 });

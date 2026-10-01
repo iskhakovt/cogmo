@@ -1,5 +1,6 @@
+import { ok } from "neverthrow";
 import { compileToolMatchers } from "../agent/tool-matchers.js";
-import { ToolRegistry, type ToolSpec } from "../agent/tools.js";
+import { reject, ToolRegistry, type ToolRejection, type ToolSpec } from "../agent/tools.js";
 import { logger } from "../logger.js";
 import { describeInvokeRejection } from "./invoke-rejection.js";
 import type { SkillRunner, SkillToolDef } from "./runner.js";
@@ -7,30 +8,27 @@ import type { SkillRunner, SkillToolDef } from "./runner.js";
 const log = logger.child({ component: "skills.tool-builder" });
 
 /**
- * The runner's conservative in-flight refusal, as a result the model can act on.
+ * The runner's conservative in-flight refusal, as a rejection the model can act on.
  *
  * An `inflight` rejection means a prior attempt under this idempotency key left
  * its `skill_runs` row at `recovery_point='started'` — the runner can't tell
  * a crashed attempt from a concurrently-executing one, so it declines rather
  * than re-firing the skill's side effects. Naming it lets the model surface an
- * honest verdict instead of an opaque `is_error` tool_result. The `started`
- * marker is written *before* execution, so how far the earlier attempt got is
- * genuinely unknown — the message says so rather than claiming partial
- * completion. Reason string matches `skill-cron-fire`'s `"inflight"`.
+ * honest verdict instead of an opaque failure. The `started` marker is written
+ * *before* execution, so how far the earlier attempt got is genuinely unknown
+ * — the message says so rather than claiming partial completion. Reason
+ * string matches `skill-cron-fire`'s `"inflight"`.
  */
-function inflightVerdict(name: string, runId: string): string {
+function inflightRejection(name: string, runId: string): ToolRejection {
   log.warn({ skillName: name, runId }, "skill tool invocation refused — prior run still in flight");
-  return JSON.stringify({
-    ok: false,
-    reason: "inflight",
-    runId,
-    detail:
-      `A previous attempt at this exact call is recorded as still running, so ${name} was ` +
-      "not started again. Whether it did any work is unknown — the row is marked in-flight " +
-      "before execution begins, so the earlier attempt may have done everything, nothing, " +
-      "or stopped partway. Do not silently re-run it: tell the user what was attempted and " +
-      "ask them to check the result before deciding.",
-  });
+  return {
+    message:
+      `A previous attempt at this exact call (run ${runId}) is recorded as still running, ` +
+      `so ${name} was not started again. Whether it did any work is unknown — the row is ` +
+      "marked in-flight before execution begins, so the earlier attempt may have done " +
+      "everything, nothing, or stopped partway. Do not silently re-run it: tell the user what " +
+      "was attempted and ask them to check the result before deciding.",
+  };
 }
 
 /** The turn a skill tool is built for: the conversation's user, whom a run acts for. */
@@ -42,7 +40,7 @@ export interface SkillToolTurn {
  * Convert a registered skill into a per-turn LLM tool. The tool's name + JSON
  * Schema come from the manifest; the handler calls `runner.invoke` as the
  * turn's user, through the turn's scoped `Service`, and returns the
- * JSON-stringified output (or error).
+ * JSON-stringified output, or rejects with the run's error.
  *
  * One tool per skill — matches the progressive-disclosure design (see
  * `design/skills.md` → Invocation). The orchestrator rebuilds the tool list
@@ -71,8 +69,8 @@ export function buildSkillToolSpec(
     // assignment needs no cast.
     inputSchema: def.inputs,
     handler: async (input, service, ctx) => {
-      // A run refused as in flight reaches the model as a verdict naming the
-      // run, the shape `skill-cron-fire` gives it.
+      // A run refused as in flight reaches the model as a rejection naming
+      // the run, the verdict `skill-cron-fire` gives it.
       const invoked = await runner.invoke({
         name: def.name,
         inputs: input,
@@ -84,27 +82,17 @@ export function buildSkillToolSpec(
         // machine, which replays or finalizes instead of re-executing.
         ...(ctx !== undefined && { idempotencyKey: `skill-tool:${ctx.idempotencyKey}` }),
       });
-      if (invoked.isErr()) {
-        const rejection = invoked.error;
-        if (rejection.kind === "inflight") return inflightVerdict(def.name, rejection.runId);
-        throw new Error(describeInvokeRejection(rejection));
-      }
-      const run = invoked.value;
-      if (run.status === "error") {
-        // Surface errors as tool_result text (the loop wraps thrown errors
-        // as isError tool_results too — symmetric, but we already have the
-        // structured result so prefer the explicit JSON shape).
-        return JSON.stringify({
-          ok: false,
-          error: run.error ?? "unknown_error",
-          runId: run.runId,
-        });
-      }
-      return JSON.stringify({
-        ok: true,
-        runId: run.runId,
-        output: run.output ?? null,
-      });
+      return invoked
+        .mapErr((rejection) =>
+          rejection.kind === "inflight"
+            ? inflightRejection(def.name, rejection.runId)
+            : { message: describeInvokeRejection(rejection) },
+        )
+        .andThen((run) =>
+          run.status === "error"
+            ? reject(`skill ${def.name} failed (run ${run.runId}): ${run.error ?? "unknown_error"}`)
+            : ok(JSON.stringify({ ok: true, runId: run.runId, output: run.output ?? null })),
+        );
     },
   };
 }

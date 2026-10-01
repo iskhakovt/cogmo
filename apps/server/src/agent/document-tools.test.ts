@@ -30,7 +30,9 @@ describe("createDocumentTools", () => {
     const [tool] = createDocumentTools(attachments);
     if (!tool) throw new Error("tool missing");
 
-    const result = await tool.handler({ filename: "report.md", content: "# Hello" }, stubService());
+    const result = (
+      await tool.handler({ filename: "report.md", content: "# Hello" }, stubService())
+    )._unsafeUnwrap();
 
     expect(attachments.upload).toHaveBeenCalledWith(
       Buffer.from("# Hello", "utf-8"),
@@ -112,17 +114,23 @@ describe("createDocumentTools", () => {
   });
 
   it("rejects empty filename via schema validation", async () => {
-    const [tool] = createDocumentTools(fakeAttachments());
+    const attachments = fakeAttachments();
+    const [tool] = createDocumentTools(attachments);
     if (!tool) throw new Error("tool missing");
 
-    await expect(tool.handler({ filename: "", content: "x" }, stubService())).rejects.toThrow();
+    const outcome = await tool.handler({ filename: "", content: "x" }, stubService());
+    expect(outcome._unsafeUnwrapErr().message).toContain('"filename"');
+    expect(attachments.upload).not.toHaveBeenCalled();
   });
 
   it("rejects empty content via schema validation", async () => {
-    const [tool] = createDocumentTools(fakeAttachments());
+    const attachments = fakeAttachments();
+    const [tool] = createDocumentTools(attachments);
     if (!tool) throw new Error("tool missing");
 
-    await expect(tool.handler({ filename: "a.md", content: "" }, stubService())).rejects.toThrow();
+    const outcome = await tool.handler({ filename: "a.md", content: "" }, stubService());
+    expect(outcome._unsafeUnwrapErr().message).toContain('"content"');
+    expect(attachments.upload).not.toHaveBeenCalled();
   });
 
   it("is marked durable", () => {

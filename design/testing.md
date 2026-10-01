@@ -182,7 +182,7 @@ Beyond "insert then retrieve":
 - **Atomic multi-field state** — JSONB blobs that group correlated fields (e.g. `worktree_assignment: {branch, worktreePath}`) should have null-until-both-set + reject-half-set tests.
 - **Idempotent replay** — store methods invoked twice (Inngest retry simulation) produce the same terminal state without errors.
 - **Missing-row behaviors** — `getById("nonexistent")` returns `null`, not throws.
-- **Constraint collisions** — UNIQUE / FK violations surface as the right typed error (e.g. `UniqueViolationError` mapped to `repo_name_taken`).
+- **Constraint collisions** — UNIQUE / FK violations surface as the right `Err` (e.g. `uq_profiles_user_name` as `profile_name_taken`), and leave the caller's transaction usable.
 
 ### Error-path coverage matrix per module
 
@@ -231,10 +231,9 @@ The pattern:
 await handle.wait();
 expect(...).toBe(...);
 
-// RIGHT — structurally bounded, asserts on the rejection class
+// RIGHT — structurally bounded, asserts on the failure the rejection carries
 const err = await handle.wait().catch((e: Error) => e);
-expect(err).toBeInstanceOf(ExecTimeoutError);
-expect((err as ExecTimeoutError).kind).toBe("total");
+expect(err).toMatchObject({ failure: { kind: "timed_out", deadline: "total" } });
 ```
 
 Reference: `src/sandbox/daytona/exec-streaming.test.ts → "timeoutMs: total wall-clock cap fires…"`. Motivating incident: the 4-day Daytona WS-wedge ([changelog 2026-05-18](../changelog.d/2026-05-18-coding-exec-wedge-resilience.md)) had no unit-tier regression test because earlier tests modelled `wait()` as always-settling.

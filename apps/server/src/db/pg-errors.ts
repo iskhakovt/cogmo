@@ -42,22 +42,29 @@ export function findPgErrorByCode<C extends string>(
   codes: ReadonlyArray<C>,
 ): PgError<C> | null {
   let cur: unknown = err;
-  for (let depth = 0; depth < MAX_CAUSE_DEPTH && cur != null; depth++) {
-    if (typeof cur === "object" && "code" in cur) {
+  for (let depth = 0; depth < MAX_CAUSE_DEPTH; depth++) {
+    if (typeof cur !== "object" || cur === null) return null;
+    if ("code" in cur) {
+      const code = cur.code;
       // `find` rather than `includes` so the match carries `C`, not `string` —
       // the callers' literal unions survive without an assertion.
-      const matched = codes.find((c) => c === (cur as { code: unknown }).code);
-      if (matched !== undefined) {
-        return { ...(cur as { constraint?: string; constraint_name?: string }), code: matched };
-      }
+      const matched = codes.find((c) => c === code);
+      if (matched !== undefined) return { code: matched, ...constraintFields(cur) };
     }
-    if (typeof cur === "object" && "cause" in cur) {
-      cur = (cur as { cause: unknown }).cause;
-      continue;
-    }
-    break;
+    if (!("cause" in cur)) return null;
+    cur = cur.cause;
   }
   return null;
+}
+
+/** The constraint spellings `err` carries as strings. */
+function constraintFields(err: object): Pick<PgError, "constraint_name" | "constraint"> {
+  const constraintName = "constraint_name" in err ? err.constraint_name : undefined;
+  const constraint = "constraint" in err ? err.constraint : undefined;
+  return {
+    ...(typeof constraintName === "string" && { constraint_name: constraintName }),
+    ...(typeof constraint === "string" && { constraint }),
+  };
 }
 
 /**

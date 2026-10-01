@@ -2,21 +2,23 @@
  * `cogmo model <command>` — manage `model_providers` routing rows post-setup.
  *
  * Mirrors the wizard's model picker step at the CLI: register a model
- * against an existing provider (with optional explicit limits), list
- * routing rows with their effective limits and source, or remove a row
- * (or all rows for a model). `refresh` asks `cogmo serve` to fetch the
- * model catalog the limits come from.
+ * against an existing provider (with optional explicit limits and extra
+ * request fields), change a row's extra request fields, list routing rows
+ * with their effective limits and source, or remove a row (or all rows for a
+ * model). `refresh` asks `cogmo serve` to fetch the model catalog the
+ * limits come from.
  */
 
-import { command, option, positional, subcommands } from "cmd-ts";
+import { command, extendType, flag, option, positional, string, subcommands } from "cmd-ts";
 import { addModelRouting } from "../agent/provider/add-model-routing.js";
 import type { AgentStore } from "../agent/store/index.js";
 import type { Transactor } from "../db/index.js";
+import { type ExtraBody, parseExtraBody } from "../llm/extra-body.js";
 import { liveCatalogStatus } from "../llm/litellm-data.js";
 import { resolveLimits } from "../llm/models.js";
 import { describeError } from "../util/describe-error.js";
 import { identifier, intAtLeast, optionalOption } from "./args.js";
-import type { CliIo, LoadDeps } from "./run.js";
+import { type CliIo, EXIT_USAGE, type LoadDeps } from "./run.js";
 
 export interface ModelCliDeps {
   runInTx: Transactor;
@@ -26,6 +28,23 @@ export interface ModelCliDeps {
   /** Installs the stored catalog, so reported limits match what `cogmo serve` resolves. */
   loadLiveCatalog: () => Promise<void>;
 }
+
+/** A JSON object of extra request fields, checked against the adapter's reserved keys. */
+const extraBody = extendType(string, {
+  displayName: "json",
+  async from(value): Promise<ExtraBody> {
+    // cmd-ts reports a throw from `from` as the argument's parse error.
+    const parsed = parseExtraBody(value);
+    if (parsed.isErr()) throw new Error(parsed.error);
+    return parsed.value;
+  },
+});
+
+const EXTRA_BODY_HELP =
+  "Extra chat-completions request fields, as a JSON object sent with every request for the " +
+  "model — e.g. a reasoning model's thinking controls. OpenAI-compatible providers only.";
+
+const ADAPTER_SCOPE_ERROR = "--extra-body applies to OpenAI-compatible providers only";
 
 export function modelCli(io: CliIo, loadDeps: LoadDeps<ModelCliDeps>) {
   return subcommands({
@@ -62,6 +81,11 @@ export function modelCli(io: CliIo, loadDeps: LoadDeps<ModelCliDeps>) {
             type: intAtLeast(0),
             description: "Slot in the model's fallback chain, 0 first. Omitted, the next free one.",
           }),
+          extraBody: optionalOption({
+            long: "extra-body",
+            type: extraBody,
+            description: `${EXTRA_BODY_HELP} Omitted, none.`,
+          }),
         },
         examples: [
           {
@@ -72,13 +96,53 @@ export function modelCli(io: CliIo, loadDeps: LoadDeps<ModelCliDeps>) {
             description: "A self-hosted model with explicit limits",
             command: "cogmo model add my/llama --provider vllm --context 200000 --max-output 8000",
           },
+          {
+            description: "A reasoning model with thinking turned off",
+            command: `cogmo model add qwen3 --provider vllm --extra-body '{"chat_template_kwargs":{"enable_thinking":false}}'`,
+          },
         ],
         handler: async (args) => addModelCmd(args, await loadDeps(), io),
+      }),
+      set: command({
+        name: "set",
+        description: "Set or clear the extra request fields of one routing row, keeping the row.",
+        args: {
+          model: positional({
+            type: identifier("model-id"),
+            displayName: "model-id",
+            description: "The model.",
+          }),
+          provider: option({
+            long: "provider",
+            type: identifier("name"),
+            description: "The provider whose row to change.",
+          }),
+          extraBody: optionalOption({
+            long: "extra-body",
+            type: extraBody,
+            description: `${EXTRA_BODY_HELP} Replaces any the row has.`,
+          }),
+          clearExtraBody: flag({
+            long: "clear-extra-body",
+            description: "Remove the row's extra request fields.",
+          }),
+        },
+        examples: [
+          {
+            description: "Turn a reasoning model's thinking off",
+            command: `cogmo model set some-reasoning-model --provider custom --extra-body '{"reasoning":{"enabled":false}}'`,
+          },
+          {
+            description: "Send only the adapter's own fields again",
+            command: "cogmo model set some-reasoning-model --provider custom --clear-extra-body",
+          },
+        ],
+        handler: async (args) => setModelCmd(args, loadDeps, io),
       }),
       list: command({
         name: "list",
         description:
-          "Show routing rows with their effective limits and each limit's source (db, litellm or default).",
+          "Show routing rows with their effective limits, each limit's source (db, litellm or default), and their extra request fields.",
         args: {
           model: optionalOption({
             long: "model",
@@ -127,15 +191,20 @@ interface AddArgs {
   contextWindow: number | undefined;
   maxOutputTokens: number | undefined;
   position: number | undefined;
+  extraBody: ExtraBody | undefined;
 }
 
 async function addModelCmd(args: AddArgs, deps: ModelCliDeps, io: CliIo): Promise<number> {
-  const { model, contextWindow, maxOutputTokens, position } = args;
+  const { model, contextWindow, maxOutputTokens, position, extraBody } = args;
   const rows = await deps.runInTx((tx) => deps.agentStore.listProviders(tx));
   const provider = rows.find((r) => r.name === args.provider);
   if (!provider) {
     io.err(`No provider named "${args.provider}". Run \`cogmo provider list\` to see options.`);
     return 1;
+  }
+  if (extraBody !== undefined && provider.type !== "openai_compatible") {
+    io.err(ADAPTER_SCOPE_ERROR);
+    return EXIT_USAGE;
   }
 
   let result: { id: string; position: number };
@@ -146,6 +215,7 @@ async function addModelCmd(args: AddArgs, deps: ModelCliDeps, io: CliIo): Promis
       ...(contextWindow !== undefined && { contextWindow }),
       ...(maxOutputTokens !== undefined && { maxOutputTokens }),
       ...(position !== undefined && { position }),
+      ...(extraBody !== undefined && { extraBody }),
     });
   } catch (err) {
     io.err(`Failed to add model routing: ${(err as Error).message}`);
@@ -163,10 +233,65 @@ async function addModelCmd(args: AddArgs, deps: ModelCliDeps, io: CliIo): Promis
   io.out(
     `  effective limits: context=${limits.contextWindow} (${limits.contextWindowSource}), max_output=${limits.maxOutputTokens} (${limits.maxOutputTokensSource})`,
   );
-  // The per-turn LlmProviderResolver memoizes by model for the process
-  // lifetime (src/llm/resolver.ts), so a running `cogmo serve` keeps the old routing.
+  if (extraBody !== undefined) io.out(`  extra body: ${JSON.stringify(extraBody)}`);
+  printRestartHint(io);
+  return 0;
+}
+
+/**
+ * The per-turn LlmProviderResolver memoizes by model for the process
+ * lifetime (src/llm/resolver.ts), so a running `cogmo serve` keeps the old
+ * routing.
+ */
+function printRestartHint(io: CliIo): void {
   io.out("");
   io.out("Restart `cogmo serve` for the change to take effect (resolver caches per process).");
+}
+
+interface SetArgs {
+  model: string;
+  provider: string;
+  extraBody: ExtraBody | undefined;
+  clearExtraBody: boolean;
+}
+
+async function setModelCmd(
+  args: SetArgs,
+  loadDeps: LoadDeps<ModelCliDeps>,
+  io: CliIo,
+): Promise<number> {
+  const { model, provider, extraBody, clearExtraBody } = args;
+  if ((extraBody === undefined) === !clearExtraBody) {
+    io.err("Pass exactly one of --extra-body or --clear-extra-body.");
+    return EXIT_USAGE;
+  }
+
+  const deps = await loadDeps();
+  const rows = await deps.runInTx((tx) => deps.agentStore.listProvidersForModel(tx, model));
+  const target = rows.find((r) => r.name === provider);
+  if (!target) {
+    io.err(`Model "${model}" is not routed via provider "${provider}".`);
+    return 1;
+  }
+  if (extraBody !== undefined && target.type !== "openai_compatible") {
+    io.err(ADAPTER_SCOPE_ERROR);
+    return EXIT_USAGE;
+  }
+
+  const value = extraBody ?? null;
+  const updated = await deps.runInTx((tx) =>
+    deps.agentStore.setModelProviderExtraBody(tx, model, target.id, value),
+  );
+  if (!updated) {
+    io.err(`Model "${model}" is not routed via provider "${provider}".`);
+    return 1;
+  }
+  io.out(
+    value === null
+      ? `Cleared the extra body of "${model}" → "${provider}".`
+      : `Set the extra body of "${model}" → "${provider}": ${JSON.stringify(value)}`,
+  );
+  printRestartHint(io);
   return 0;
 }
 
@@ -190,7 +315,7 @@ async function listModels(args: ListArgs, deps: ModelCliDeps, io: CliIo): Promis
   }
 
   await deps.loadLiveCatalog();
-  io.out("model\tprovider\tposition\tcontext\tmax_output\tsource");
+  io.out("model\tprovider\tposition\tcontext\tmax_output\tsource\textra_body");
   for (const row of filtered) {
     const limits = resolveLimits(row.model, {
       contextWindow: row.contextWindow,
@@ -210,6 +335,8 @@ async function listModels(args: ListArgs, deps: ModelCliDeps, io: CliIo): Promis
         String(limits.contextWindow),
         String(limits.maxOutputTokens),
         source,
+        // Compact JSON escapes any tab inside a string, so the column stays one cell.
+        row.extraBody === null ? "-" : JSON.stringify(row.extraBody),
       ].join("\t"),
     );
   }

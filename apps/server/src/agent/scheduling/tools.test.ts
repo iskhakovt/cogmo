@@ -6,9 +6,9 @@
  * tests focus on:
  *   1. Zod schema parsing (each tool rejects malformed input loudly)
  *   2. Service dispatch (each tool calls the right method with the right shape)
- *   3. Result formatting (errors render as helpful LLM-readable text;
+ *   3. Result formatting (errors reject with helpful LLM-readable text;
  *      success returns a structured summary)
- *   4. Service-absent path (tools return a graceful error instead of crashing)
+ *   4. Service-absent path (tools reject instead of crashing)
  */
 
 import { err, ok } from "neverthrow";
@@ -58,13 +58,15 @@ describe("scheduleTask tool", () => {
       .mockResolvedValue(ok({ id: "task-1", nextRunAt: new Date("2026-06-01T09:00:00Z") }));
     const service = buildService({ create });
 
-    const result = await scheduleTask.handler(
-      {
-        schedule: { kind: "recurring", cron: "0 9 * * *" },
-        prompt: "morning briefing",
-      },
-      service,
-    );
+    const result = (
+      await scheduleTask.handler(
+        {
+          schedule: { kind: "recurring", cron: "0 9 * * *" },
+          prompt: "morning briefing",
+        },
+        service,
+      )
+    )._unsafeUnwrap();
 
     expect(create).toHaveBeenCalledWith({
       kind: "recurring",
@@ -155,7 +157,7 @@ describe("scheduleTask tool", () => {
     expect(args).not.toHaveProperty("catchupMissed");
   });
 
-  // --- Error rendering: each SchedulingError kind produces helpful LLM-readable text ---
+  // --- Error rendering: each SchedulingError kind rejects with helpful LLM-readable text ---
 
   it.each<[string, SchedulingError, RegExp]>([
     [
@@ -202,15 +204,17 @@ describe("scheduleTask tool", () => {
       { schedule: { kind: "recurring", cron: "0 9 * * *" }, prompt: "x" },
       service,
     );
-    expect(result).toMatch(pattern);
+    expect(result._unsafeUnwrapErr().message).toMatch(pattern);
   });
 
-  it("returns a graceful message when service.scheduling is absent", async () => {
+  it("rejects when service.scheduling is absent", async () => {
     const result = await scheduleTask.handler(
       { schedule: { kind: "recurring", cron: "0 9 * * *" }, prompt: "x" },
       buildServiceWithoutScheduling(),
     );
-    expect(result).toMatch(/Scheduling is not available/);
+    expect(result._unsafeUnwrapErr().message).toBe(
+      "Scheduling is not available in this conversation.",
+    );
   });
 });
 
@@ -231,7 +235,7 @@ describe("listTasks tool", () => {
 
   it("returns 'No scheduled tasks.' when the list is empty", async () => {
     const service = buildService({ list: vi.fn().mockResolvedValue([]) });
-    expect(await listTasks.handler({}, service)).toBe("No scheduled tasks.");
+    expect((await listTasks.handler({}, service))._unsafeUnwrap()).toBe("No scheduled tasks.");
   });
 
   it("renders one task as a numbered line with id, schedule, prompt, next, state", async () => {
@@ -247,7 +251,7 @@ describe("listTasks tool", () => {
       ]),
     });
 
-    const result = await listTasks.handler({}, service);
+    const result = (await listTasks.handler({}, service))._unsafeUnwrap();
     expect(result).toContain("You have 1 scheduled task:");
     expect(result).toContain("[task-1]");
     expect(result).toContain("cron '0 9 * * *' (Europe/London)");
@@ -262,21 +266,23 @@ describe("listTasks tool", () => {
         .fn()
         .mockResolvedValue([mkTask({ id: "a" }), mkTask({ id: "b" }), mkTask({ id: "c" })]),
     });
-    expect(await listTasks.handler({}, service)).toContain("You have 3 scheduled tasks:");
+    expect((await listTasks.handler({}, service))._unsafeUnwrap()).toContain(
+      "You have 3 scheduled tasks:",
+    );
   });
 
   it("marks disabled rows clearly", async () => {
     const service = buildService({
       list: vi.fn().mockResolvedValue([mkTask({ enabled: false })]),
     });
-    expect(await listTasks.handler({}, service)).toContain("(disabled)");
+    expect((await listTasks.handler({}, service))._unsafeUnwrap()).toContain("(disabled)");
   });
 
   it("describes one-off tasks differently (no cron, just tz)", async () => {
     const service = buildService({
       list: vi.fn().mockResolvedValue([mkTask({ kind: "one_off", cron: null, timezone: "UTC" })]),
     });
-    expect(await listTasks.handler({}, service)).toContain("one-off (UTC)");
+    expect((await listTasks.handler({}, service))._unsafeUnwrap()).toContain("one-off (UTC)");
   });
 
   it("truncates long prompts at 80 chars to keep the listing scannable", async () => {
@@ -284,17 +290,17 @@ describe("listTasks tool", () => {
     const service = buildService({
       list: vi.fn().mockResolvedValue([mkTask({ prompt: longPrompt })]),
     });
-    const result = await listTasks.handler({}, service);
+    const result = (await listTasks.handler({}, service))._unsafeUnwrap();
     // 77 chars of original + "..." = 80
     expect(result).toContain(`${"a".repeat(77)}...`);
     // The full 200-char version is NOT in the output.
     expect(result).not.toContain("a".repeat(81));
   });
 
-  it("returns a graceful message when service.scheduling is absent", async () => {
-    expect(await listTasks.handler({}, buildServiceWithoutScheduling())).toMatch(
-      /Scheduling is not available/,
-    );
+  it("rejects when service.scheduling is absent", async () => {
+    expect(
+      (await listTasks.handler({}, buildServiceWithoutScheduling()))._unsafeUnwrapErr().message,
+    ).toBe("Scheduling is not available in this conversation.");
   });
 });
 
@@ -308,90 +314,104 @@ describe("removeTask tool", () => {
     const remove = vi.fn().mockResolvedValue(ok(undefined));
     const service = buildService({ remove });
 
-    const result = await removeTask.handler({ id: VALID_ID_A }, service);
+    const result = (await removeTask.handler({ id: VALID_ID_A }, service))._unsafeUnwrap();
 
     expect(remove).toHaveBeenCalledWith(VALID_ID_A);
     expect(result).toBe(`Removed task ${VALID_ID_A}.`);
   });
 
-  it("renders not_found cleanly", async () => {
+  it("rejects not_found cleanly", async () => {
     const service = buildService({
       remove: vi.fn().mockResolvedValue(err({ kind: "not_found", id: VALID_ID_MISSING })),
     });
     const result = await removeTask.handler({ id: VALID_ID_MISSING }, service);
-    expect(result).toMatch(new RegExp(`no scheduled task with id '${VALID_ID_MISSING}'`));
+    expect(result._unsafeUnwrapErr().message).toBe(
+      `no scheduled task with id '${VALID_ID_MISSING}' found for this user.`,
+    );
   });
 
-  it("returns a graceful message when service.scheduling is absent", async () => {
-    expect(
-      await removeTask.handler(
-        { id: "00000000-0000-7000-8000-000000000001" },
-        buildServiceWithoutScheduling(),
-      ),
-    ).toMatch(/Scheduling is not available/);
+  it("rejects when service.scheduling is absent", async () => {
+    const result = await removeTask.handler(
+      { id: "00000000-0000-7000-8000-000000000001" },
+      buildServiceWithoutScheduling(),
+    );
+    expect(result._unsafeUnwrapErr().message).toBe(
+      "Scheduling is not available in this conversation.",
+    );
   });
 });
 
 describe("Tool schemas reject malformed input", () => {
   // The defineTool wrapper runs schema.parse on raw input before
-  // invoking the handler — these tests prove the Zod gate fires.
+  // invoking the handler and rejects the call on a Zod failure — these
+  // tests prove the gate fires and the service is never reached.
   // `ToolSpec.handler` is typed as `(input: Record<string, unknown>, ...)`
   // so structurally-bad inputs are type-valid; the rejection is a
   // pure runtime contract from Zod. No casts needed.
 
   it("scheduleTask: rejects schedule.kind outside the union", async () => {
-    const service = buildService({ create: vi.fn() });
-    await expect(
-      scheduleTask.handler({ schedule: { kind: "weekly" }, prompt: "x" }, service),
-    ).rejects.toThrow();
+    const create = vi.fn();
+    const result = await scheduleTask.handler(
+      { schedule: { kind: "weekly" }, prompt: "x" },
+      buildService({ create }),
+    );
+    expect(result._unsafeUnwrapErr().message).toContain("schedule");
+    expect(create).not.toHaveBeenCalled();
   });
 
   it("scheduleTask: rejects when prompt is missing", async () => {
-    const service = buildService({ create: vi.fn() });
-    await expect(
-      scheduleTask.handler({ schedule: { kind: "recurring", cron: "0 9 * * *" } }, service),
-    ).rejects.toThrow();
+    const create = vi.fn();
+    const result = await scheduleTask.handler(
+      { schedule: { kind: "recurring", cron: "0 9 * * *" } },
+      buildService({ create }),
+    );
+    expect(result._unsafeUnwrapErr().message).toContain("prompt");
+    expect(create).not.toHaveBeenCalled();
   });
 
   it("scheduleTask: rejects when prompt exceeds the max length", async () => {
     // Regression guard for the new `prompt.max(MAX_PROMPT_LENGTH)` cap
     // — a multi-KB prompt would balloon every fire as it's replayed
     // verbatim into the agent loop.
-    const service = buildService({ create: vi.fn() });
+    const create = vi.fn();
     const tooLong = "a".repeat(5000);
-    await expect(
-      scheduleTask.handler(
-        { schedule: { kind: "recurring", cron: "0 9 * * *" }, prompt: tooLong },
-        service,
-      ),
-    ).rejects.toThrow();
+    const result = await scheduleTask.handler(
+      { schedule: { kind: "recurring", cron: "0 9 * * *" }, prompt: tooLong },
+      buildService({ create }),
+    );
+    expect(result._unsafeUnwrapErr().message).toContain("prompt");
+    expect(create).not.toHaveBeenCalled();
   });
 
   it("scheduleTask: rejects catchupMissed on the one_off branch (schema-unrepresentable)", async () => {
     // catchupMissed lives inside the recurring schema. Passing it
     // alongside `kind: "one_off"` should fail Zod discriminator parse.
-    const service = buildService({ create: vi.fn() });
-    await expect(
-      scheduleTask.handler(
-        {
-          schedule: { kind: "one_off", runAt: "2099-01-01T00:00:00Z", catchupMissed: true },
-          prompt: "x",
-        },
-        service,
-      ),
-    ).rejects.toThrow();
+    const create = vi.fn();
+    const result = await scheduleTask.handler(
+      {
+        schedule: { kind: "one_off", runAt: "2099-01-01T00:00:00Z", catchupMissed: true },
+        prompt: "x",
+      },
+      buildService({ create }),
+    );
+    expect(result._unsafeUnwrapErr().message).toContain("catchupMissed");
+    expect(create).not.toHaveBeenCalled();
   });
 
   it("removeTask: rejects when id is missing", async () => {
-    const service = buildService({ remove: vi.fn() });
-    await expect(removeTask.handler({}, service)).rejects.toThrow();
+    const remove = vi.fn();
+    const result = await removeTask.handler({}, buildService({ remove }));
+    expect(result._unsafeUnwrapErr().message).toContain("id");
+    expect(remove).not.toHaveBeenCalled();
   });
 
   it("removeTask: rejects when id is not a UUID", async () => {
     // Regression guard: a non-UUID id at the tool boundary would
     // otherwise reach `getScheduledTask`'s WHERE-on-uuid-column query
     // and raise PG 22P02, escaping the Result envelope.
-    const service = buildService({ remove: vi.fn() });
-    await expect(removeTask.handler({ id: "not-a-uuid" }, service)).rejects.toThrow();
+    const remove = vi.fn();
+    const result = await removeTask.handler({ id: "not-a-uuid" }, buildService({ remove }));
+    expect(result._unsafeUnwrapErr().message).toMatch(/uuid/i);
+    expect(remove).not.toHaveBeenCalled();
   });
 });

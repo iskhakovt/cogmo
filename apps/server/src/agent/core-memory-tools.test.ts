@@ -27,10 +27,9 @@ function mockService(coreOverrides?: Partial<Service["coreMemory"]>): Service {
 describe("core_memory_update", () => {
   it("calls service.coreMemory.update with key and content", async () => {
     const svc = mockService();
-    const result = await coreMemoryUpdate.handler(
-      { key: "user_profile", content: "Name: Tim" },
-      svc,
-    );
+    const result = (
+      await coreMemoryUpdate.handler({ key: "user_profile", content: "Name: Tim" }, svc)
+    )._unsafeUnwrap();
 
     expect(svc.coreMemory.update).toHaveBeenCalledWith("user_profile", "Name: Tim");
     expect(result).toContain("user_profile");
@@ -43,10 +42,9 @@ describe("core_memory_update", () => {
         .fn()
         .mockResolvedValue(ok({ kind: "override", profileClass: "game", leftOut: [] })),
     });
-    const result = await coreMemoryUpdate.handler(
-      { key: "identity", content: "Name: Thorin" },
-      svc,
-    );
+    const result = (
+      await coreMemoryUpdate.handler({ key: "identity", content: "Name: Thorin" }, svc)
+    )._unsafeUnwrap();
 
     expect(result).toBe(
       'Saved "identity" for this persona only; other personas keep the shared block. ' +
@@ -64,10 +62,12 @@ describe("core_memory_update", () => {
         }),
       ),
     });
-    const result = await coreMemoryUpdate.handler(
-      { key: "identity", content: "Name: Samuel Carter\nLocation: Lisbon" },
-      svc,
-    );
+    const result = (
+      await coreMemoryUpdate.handler(
+        { key: "identity", content: "Name: Samuel Carter\nLocation: Lisbon" },
+        svc,
+      )
+    )._unsafeUnwrap();
 
     expect(result).toBe(
       'Saved "identity" for this persona only, keeping the lines that differ from the shared ' +
@@ -82,10 +82,9 @@ describe("core_memory_update", () => {
         .fn()
         .mockResolvedValue(ok({ kind: "override-matches-shared", profileClass: "game" })),
     });
-    const result = await coreMemoryUpdate.handler(
-      { key: "identity", content: "Name: Samuel Carter" },
-      svc,
-    );
+    const result = (
+      await coreMemoryUpdate.handler({ key: "identity", content: "Name: Samuel Carter" }, svc)
+    )._unsafeUnwrap();
 
     expect(result).toBe(
       "Nothing saved for this persona: no line differs from the shared identity block, " +
@@ -98,9 +97,8 @@ describe("core_memory_update", () => {
       update: vi.fn().mockResolvedValue(err({ code: "core_memory_unavailable" })),
     });
 
-    await expect(
-      coreMemoryUpdate.handler({ key: "identity", content: "Name: Sam" }, svc),
-    ).rejects.toThrow("Core memory isn't available in this profile.");
+    const result = await coreMemoryUpdate.handler({ key: "identity", content: "Name: Sam" }, svc);
+    expect(result._unsafeUnwrapErr().message).toBe("Core memory isn't available in this profile.");
   });
 });
 
@@ -115,7 +113,7 @@ describe("core_memory_read", () => {
         ],
       }),
     });
-    const result = await coreMemoryRead.handler({}, svc);
+    const result = (await coreMemoryRead.handler({}, svc))._unsafeUnwrap();
 
     expect(result).toContain("## user_profile");
     expect(result).toContain("Name: Tim");
@@ -133,7 +131,7 @@ describe("core_memory_read", () => {
         ],
       }),
     });
-    const result = await coreMemoryRead.handler({}, svc);
+    const result = (await coreMemoryRead.handler({}, svc))._unsafeUnwrap();
 
     expect(result).toBe(
       "Shared by every persona:\n\n## identity\nName: Tim\n\n" +
@@ -143,7 +141,7 @@ describe("core_memory_read", () => {
 
   it("returns message when no blocks exist", async () => {
     const svc = mockService();
-    const result = await coreMemoryRead.handler({}, svc);
+    const result = (await coreMemoryRead.handler({}, svc))._unsafeUnwrap();
 
     expect(result).toContain("No core memory blocks");
   });
@@ -182,5 +180,5 @@ describe("offeredBuiltIns", () => {
 });
 
 function toolNamed(name: string): ToolSpec {
-  return defineTool({ name, description: name, schema: z.object({}), handler: async () => "" });
+  return defineTool({ name, description: name, schema: z.object({}), handler: async () => ok("") });
 }

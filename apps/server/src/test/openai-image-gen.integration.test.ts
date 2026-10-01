@@ -147,7 +147,7 @@ describe("openai-compatible image gen — OpenAI dall-e-3 (recorded)", () => {
     // the canonical row name. See PR #240.
     const result = await tool!.handler({ prompt: PROMPT, model: MODEL_SLUG }, {} as Service);
 
-    const parsed = parseGeneratedImagePayload(result);
+    const parsed = parseGeneratedImagePayload(result._unsafeUnwrap());
     expect(parsed).not.toBeNull();
     const payload = parsed as GeneratedImagePayload;
     expect(payload.path).toMatch(/^generated\/openai-image-\d+\./);

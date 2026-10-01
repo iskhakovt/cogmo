@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { DiscoveryUnavailable, discoverModels } from "./discover-models.js";
+import { discoverModels } from "./discover-models.js";
 
 const fetchMock = vi.fn();
 vi.stubGlobal("fetch", fetchMock);
@@ -38,7 +38,7 @@ describe("discoverModels — OpenRouter shape", () => {
       apiKey: "sk-or-test",
     });
 
-    expect(result).toEqual([
+    expect(result._unsafeUnwrap()).toEqual([
       {
         id: "x-ai/grok-4.3",
         name: "xAI: Grok 4.3",
@@ -72,7 +72,7 @@ describe("discoverModels — OpenAI / generic shape", () => {
       apiKey: "sk-test",
     });
 
-    expect(result).toEqual([{ id: "gpt-5.5" }, { id: "gpt-5.4" }]);
+    expect(result._unsafeUnwrap()).toEqual([{ id: "gpt-5.5" }, { id: "gpt-5.4" }]);
   });
 });
 
@@ -97,52 +97,55 @@ describe("discoverModels — Anthropic shape", () => {
       apiKey: "sk-ant-test",
     });
 
-    expect(result).toEqual([{ id: "claude-opus-4-7", name: "Claude Opus 4.7" }]);
+    expect(result._unsafeUnwrap()).toEqual([{ id: "claude-opus-4-7", name: "Claude Opus 4.7" }]);
   });
 });
 
 describe("discoverModels — error handling", () => {
-  it("throws DiscoveryUnavailable on 404 (endpoint not exposed)", async () => {
+  const args = { type: "openai_compatible", baseUrl: "https://x", apiKey: "x" } as const;
+
+  it("is unavailable on 404 (endpoint not exposed)", async () => {
     fetchMock.mockResolvedValueOnce(new Response("not found", { status: 404 }));
-    await expect(
-      discoverModels({
-        type: "openai_compatible",
-        baseUrl: "https://corp.example.test",
-        apiKey: "x",
-      }),
-    ).rejects.toBeInstanceOf(DiscoveryUnavailable);
+    const result = await discoverModels({ ...args, baseUrl: "https://corp.example.test" });
+    expect(result._unsafeUnwrapErr()).toMatchObject({ kind: "unavailable" });
   });
 
-  it("throws DiscoveryUnavailable on a malformed body shape", async () => {
+  it("is unavailable on a malformed body shape", async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse({ wrong: "shape" }));
-    await expect(
-      discoverModels({
-        type: "openai_compatible",
-        baseUrl: "https://x",
-        apiKey: "x",
-      }),
-    ).rejects.toBeInstanceOf(DiscoveryUnavailable);
+    const result = await discoverModels(args);
+    expect(result._unsafeUnwrapErr()).toMatchObject({ kind: "unavailable" });
   });
 
-  it("throws a regular Error on a non-2xx that isn't 404 (auth, rate limit)", async () => {
+  it("is unavailable on a body that isn't JSON", async () => {
+    fetchMock.mockResolvedValueOnce(new Response("<html>gateway</html>", { status: 200 }));
+    const result = await discoverModels(args);
+    expect(result._unsafeUnwrapErr()).toEqual({
+      kind: "unavailable",
+      message: "non-JSON response from https://x/models",
+    });
+  });
+
+  it("is rejected on a non-2xx that isn't 404 (auth, rate limit)", async () => {
     fetchMock.mockResolvedValueOnce(new Response("nope", { status: 401 }));
-    await expect(
-      discoverModels({
-        type: "openai_compatible",
-        baseUrl: "https://x",
-        apiKey: "x",
-      }),
-    ).rejects.toThrow(/401/);
+    const result = await discoverModels(args);
+    expect(result._unsafeUnwrapErr()).toMatchObject({
+      kind: "rejected",
+      message: expect.stringContaining("401"),
+    });
   });
 
-  it("wraps fetch network errors as DiscoveryUnavailable", async () => {
+  it("is unavailable on a network error", async () => {
     fetchMock.mockRejectedValueOnce(new TypeError("fetch failed"));
-    await expect(
-      discoverModels({
-        type: "openai_compatible",
-        baseUrl: "https://x",
-        apiKey: "x",
-      }),
-    ).rejects.toBeInstanceOf(DiscoveryUnavailable);
+    const result = await discoverModels(args);
+    expect(result._unsafeUnwrapErr()).toMatchObject({ kind: "unavailable" });
+  });
+
+  it("reads the Anthropic endpoint's failures the same way", async () => {
+    fetchMock.mockResolvedValueOnce(new Response("nope", { status: 403 }));
+    const result = await discoverModels({ ...args, type: "anthropic" });
+    expect(result._unsafeUnwrapErr()).toMatchObject({
+      kind: "rejected",
+      message: expect.stringContaining("403"),
+    });
   });
 });

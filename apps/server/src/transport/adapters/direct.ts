@@ -8,7 +8,7 @@ import {
   type AdapterSetupResult,
   isRenderedMessage,
 } from "../adapter-module.js";
-import type { Transport } from "../transport.js";
+import type { Transport, TransportError } from "../transport.js";
 
 export const channelType = "direct";
 
@@ -16,7 +16,9 @@ type DirectInboundData = z.infer<typeof directInbound.schema>;
 
 export type DirectInboundResult =
   | { status: "new_conversation" }
-  | { status: "emitted"; conversationId: string };
+  | { status: "emitted"; conversationId: string }
+  /** Transport refused the message: an unknown sender, or a session gone before emit. */
+  | { status: "rejected"; reason: TransportError };
 
 /**
  * Inbound body for the Direct channel — extracted from the Inngest function
@@ -24,6 +26,11 @@ export type DirectInboundResult =
  * required. `/new` closes the session; anything else resolves (or creates)
  * the session and emits the message. Each transport touch is its own
  * `step.run` so an Inngest retry replays from the durable cache.
+ *
+ * Transport's refusals are deterministic, so the run completes as `rejected`
+ * rather than throwing into a retry that meets the same answer. Steps return
+ * them as plain records: a neverthrow `Result` does not survive the step's
+ * JSON round trip.
  */
 export async function handleDirectInbound(
   deps: { transport: Transport },
@@ -44,23 +51,35 @@ export async function handleDirectInbound(
     return { status: "new_conversation" };
   }
 
-  const session = await stepRun("resolve-session", async () => {
+  const resolved = await stepRun("resolve-or-create-session", async () => {
     const existing = await transport.resolveSession(platformAddress);
-    if (existing) return existing;
-
-    const result = await transport.createConversation(platformAddress, platformAddress, {
+    if (existing) return { ok: true as const, session: existing };
+    const created = await transport.createConversation(platformAddress, platformAddress, {
       isPrivate: true,
     });
-    if (result.isErr()) throw new Error(`Failed to create conversation: ${result.error.code}`);
-    return result.value;
+    return created.match(
+      (session) => ({ ok: true as const, session }),
+      (reason) => ({ ok: false as const, reason }),
+    );
   });
+  if (!resolved.ok) return rejected(platformAddress, resolved.reason);
+  const { session } = resolved;
 
-  await stepRun("emit", async () => {
+  const emitted = await stepRun("emit-inbound", async () => {
     const result = await transport.emit(session.id, text, new Date(platformTs));
-    if (result.isErr()) throw new Error(`Failed to emit: ${result.error.code}`);
+    return result.match(
+      () => ({ ok: true as const }),
+      (reason) => ({ ok: false as const, reason }),
+    );
   });
+  if (!emitted.ok) return rejected(platformAddress, emitted.reason);
 
   return { status: "emitted", conversationId: session.conversationId };
+}
+
+function rejected(platformAddress: string, reason: TransportError): DirectInboundResult {
+  logger.warn({ platformAddress, reason }, "direct: transport rejected the inbound message");
+  return { status: "rejected", reason };
 }
 
 /**

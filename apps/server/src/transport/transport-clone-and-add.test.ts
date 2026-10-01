@@ -9,6 +9,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { err, ok } from "neverthrow";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { CodingRepoRow, CodingStore, CodingTaskRow } from "../agent/coding/store/index.js";
 import type { inboundArrived } from "../inngest/events.js";
@@ -47,6 +48,7 @@ function fakeCodingStore(overrides: Partial<CodingStore> = {}): CodingStore {
   const repos = new Map<string, CodingRepoRow>();
   return {
     insertRepo: vi.fn(async (_tx: unknown, params) => {
+      if (repos.has(params.name)) return err({ kind: "repo_name_taken", name: params.name });
       const row: CodingRepoRow = {
         id: `r-${repos.size + 1}`,
         name: params.name,
@@ -64,7 +66,7 @@ function fakeCodingStore(overrides: Partial<CodingStore> = {}): CodingStore {
         createdAt: new Date(),
       };
       repos.set(params.name, row);
-      return row;
+      return ok(row);
     }),
     getRepoByName: vi.fn(async (_tx: unknown, name: string) => repos.get(name) ?? null),
     getRepoById: vi.fn(),
@@ -260,6 +262,18 @@ describe("Transport.repos.cloneAndAdd", () => {
     });
     expect(result.isErr()).toBe(true);
     if (result.isErr()) expect(result.error.code).toBe("repo_name_taken");
+  });
+
+  it("returns repo_name_taken when the name is taken between the pre-check and the insert", async () => {
+    tempRoot = mkdtempSync(join(tmpdir(), "cogmo-cloneAndAdd-r-"));
+    const transport = makeTransport({ reposDir: tempRoot });
+    vi.mocked(codingStore.insertRepo).mockResolvedValueOnce(
+      err({ kind: "repo_name_taken", name: "raced" }),
+    );
+
+    const result = await transport.repos.cloneAndAdd({ name: "raced", remoteUrl: bareRepoUrl });
+
+    expect(result._unsafeUnwrapErr()).toEqual({ code: "repo_name_taken", name: "raced" });
   });
 
   it("returns repo_local_path_exists when the dir is on disk but no DB row exists", async () => {

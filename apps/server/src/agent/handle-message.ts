@@ -1292,7 +1292,10 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         unstreamed = await step.run("finish-stream", async () => {
           const finished = await delivery.finish();
           if (finished.isOk()) return [];
-          turnLogger.warn({ err: finished.error }, "stream delivery failed at finish");
+          turnLogger.warn(
+            { failures: finished.error.failures },
+            "stream delivery failed at finish",
+          );
           return finished.error.failures.map((failure) => failure.sessionId);
         });
       } catch (err) {

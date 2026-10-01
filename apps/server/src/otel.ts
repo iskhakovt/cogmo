@@ -26,6 +26,7 @@ if (process.env.OTEL_EXPORTER_OTLP_ENDPOINT && process.env.OTEL_SDK_DISABLED !==
     { HttpInstrumentation },
     { UndiciInstrumentation },
     { PinoInstrumentation },
+    { RedactingSpanExporter },
   ] = await Promise.all([
     import("@opentelemetry/sdk-node"),
     import("@opentelemetry/exporter-trace-otlp-proto"),
@@ -34,11 +35,16 @@ if (process.env.OTEL_EXPORTER_OTLP_ENDPOINT && process.env.OTEL_SDK_DISABLED !==
     import("@opentelemetry/instrumentation-http"),
     import("@opentelemetry/instrumentation-undici"),
     import("@opentelemetry/instrumentation-pino"),
+    import("./otel-redaction.js"),
   ]);
 
   const sdk = new NodeSDK({
     serviceName: process.env.OTEL_SERVICE_NAME ?? "cogmo",
-    traceExporter: new OTLPTraceExporter(),
+    // Telegram's Bot API carries the bot token in the URL path, which every
+    // HTTP client span records; the wrapper redacts it, and drops every URL's
+    // query, before anything is exported. Log lines get the same
+    // redaction in `logger.ts`, ahead of instrumentation-pino's log export.
+    traceExporter: new RedactingSpanExporter(new OTLPTraceExporter()),
     metricReader: new PeriodicExportingMetricReader({
       exporter: new OTLPMetricExporter(),
     }),

@@ -162,13 +162,23 @@ export interface McpRegistry {
   }): Promise<readonly ToolSpec[]>;
 
   // admin operations (used by /settings UI, setup wizard, evolution)
-  addServer(spec: McpServerSpec): Promise<McpServer>;
+  addServer(spec: McpServerSpec): Promise<Result<McpServer, McpAddServerError>>;
   removeServer(id: string): Promise<void>;
   listServers(): Promise<readonly McpServerStatus[]>;
-  approveServer(id: string): Promise<void>;
+  approveServer(id: string): Promise<Result<void, McpApproveServerError>>;
   approveTool(serverId: string, toolName: string): Promise<void>;
 }
+
+type McpAddServerError =
+  | { code: "invalid_name"; name: string; reason: string }
+  | { code: "name_taken"; name: string };
+
+type McpApproveServerError =
+  | { code: "server_not_found"; serverId: string }        // gone before or during the connect
+  | { code: "connection_failed"; serverId: string; reason: string }; // connect or listTools
 ```
+
+Expected failures are values. A database failure in the registry's own reads throws; one in the pool's server lookup surfaces as `connection_failed`.
 
 Agent loop integration is one line in `handle-message`:
 
@@ -211,7 +221,8 @@ On first call to a server's tool:
 ### Tool dispatch
 
 - Per-call timeout (default **30s** — Claude Code's #1 failure mode is the missing timeout, [issue #15945](https://github.com/anthropics/claude-code/issues/15945)).
-- On timeout: the SDK sends `notifications/cancelled` and stops waiting, as the MCP spec directs; the connection stays open and the agent loop gets a tool error.
+- On timeout: the SDK sends `notifications/cancelled` and stops waiting, as the MCP spec directs; the connection stays open and the handler rejects the call, so the model gets an `is_error` tool_result.
+- A JSON-RPC error answering the call with `InvalidParams` or `MethodNotFound` is the server refusing it, and rejects the same way. Any other `McpError` (a closed connection, a server-internal error) throws.
 - On transport close, the in-flight call fails with a tool error and the next call reconnects; two failed connects in a row mark the server unhealthy.
 - All MCP tool calls set `durable: true` on the adapted `ToolSpec` → wrapped in Inngest `step.run()`. Step memoization is correct because the MCP server is non-deterministic; retry of `handle-message` reuses the recorded tool result.
 
@@ -234,6 +245,8 @@ One entry per server, driven by a pure `transition(entry, event)` in `pool-state
 | `unhealthy` | Two connects in a row failed; calls fail fast until `reset` (`/mcp approve`) |
 
 Events: `get`, `spawned`, `spawn_failed`, `transport_closed`, `evict`, `reset`, `idle`, `pool_closed`. A connect that fails looking up its server spends no attempt.
+
+`getConnection` resolves with a `Result`, never rejects. Its error is an `McpPoolError`: `server_not_found`, `server_unhealthy` (with the last connect's error), `evicted`, `pool_closed`, or `connect_failed` (with the lookup's or spawn's error). The tool handler turns it into the call's error text.
 
 - **Teardown.** `evict` (server removed) and `close` (shutdown) fail an in-flight connect's waiters, abort it, close any connection it still yields, and resolve once the server's connections are closed. `removeServer` deletes the row first, so a connect after the delete finds no server, and none spawns a process for it.
 - **Abort.** The MCP spec forbids cancelling `initialize`, so the SDK never sees the signal. While the handshake runs, the runner answers an abort by closing the connection, and rejects once it is closed, which for stdio is once the server process has exited. A spawn that has resolved ignores the signal, so a live connection keeps its connect's controller, aborted when it leaves the entry, which unsubscribes from its close and disarms its idle timer.

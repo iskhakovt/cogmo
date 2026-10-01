@@ -39,7 +39,7 @@ import {
   turnContextSent,
 } from "../test/factories.js";
 import type { InboundContent } from "../transport/content.js";
-import { StreamDeliveryError } from "../transport/delivery-router.js";
+import type { StreamDeliveryError } from "../transport/delivery-router.js";
 import { toolResultClearing } from "./context.js";
 import { coreMemoryTools } from "./core-memory-tools.js";
 import { readFile } from "./file-tools.js";
@@ -1608,7 +1608,7 @@ describe("createHandleMessage", () => {
       description: "Open a PR",
       inputSchema: { type: "object" as const, properties: {} },
       durable: true,
-      handler: vi.fn().mockResolvedValue("ok"),
+      handler: vi.fn().mockResolvedValue(ok("ok")),
     };
     // Real ToolRegistry — mockToolRegistry doesn't populate snapshot()
     // because register/snapshot are vi.fn stubs.
@@ -1617,7 +1617,7 @@ describe("createHandleMessage", () => {
       name: "memory_recall",
       description: "recall",
       inputSchema: { type: "object", properties: {} },
-      handler: async () => "ok",
+      handler: async () => ok("ok"),
     });
     const deps = mockDeps({
       tools: builtIns,
@@ -1670,7 +1670,7 @@ describe("createHandleMessage", () => {
       name: "memory_recall",
       description: "recall",
       inputSchema: { type: "object", properties: {} },
-      handler: async () => "ok",
+      handler: async () => ok("ok"),
     });
     const deps = mockDeps({
       tools: builtIns,
@@ -1747,7 +1747,7 @@ describe("createHandleMessage", () => {
           name: "generate_image",
           description: "generate",
           inputSchema: { type: "object", properties: {} },
-          handler: async () => "ok",
+          handler: async () => ok("ok"),
         },
       ]);
       const deps = mockDeps({
@@ -1887,7 +1887,7 @@ describe("createHandleMessage", () => {
           description: "open a PR",
           inputSchema: { type: "object", properties: {} },
           durable: true,
-          handler: async () => "ok",
+          handler: async () => ok("ok"),
         },
       ]);
       const deps = mockDeps({
@@ -1914,7 +1914,7 @@ describe("createHandleMessage", () => {
         name: "memory_recall",
         description: "recall",
         inputSchema: { type: "object", properties: {} },
-        handler: async () => "ok",
+        handler: async () => ok("ok"),
       });
       const deps = mockDeps({
         tools: builtIns,
@@ -1941,7 +1941,7 @@ describe("createHandleMessage", () => {
         name: "memory_recall",
         description: "recall",
         inputSchema: { type: "object", properties: {} },
-        handler: async () => "ok",
+        handler: async () => ok("ok"),
       });
       const mcpRegistry = mock<McpRegistry>();
       mcpRegistry.resolveTools.mockResolvedValue([
@@ -1950,7 +1950,7 @@ describe("createHandleMessage", () => {
           description: "open a PR",
           inputSchema: { type: "object", properties: {} },
           durable: true,
-          handler: async () => "ok",
+          handler: async () => ok("ok"),
         },
       ]);
       const deps = mockDeps({
@@ -4297,9 +4297,9 @@ describe("createHandleMessage", () => {
   });
 
   describe("stream delivery failures", () => {
-    const deliveryFailed = new StreamDeliveryError([
-      { sessionId: "session-tg", reason: "telegram: chat not found" },
-    ]);
+    const deliveryFailed: StreamDeliveryError = {
+      failures: [{ sessionId: "session-tg", reason: "telegram: chat not found" }],
+    };
 
     async function runTurn(deps: HandleMessageDeps): Promise<unknown> {
       return invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
@@ -4394,8 +4394,9 @@ describe("createHandleMessage", () => {
         }),
       });
 
-      expect(await runTurn(deps)).toBe(deliveryFailed);
-      expect(pushOutcome).toBe(deliveryFailed);
+      const failed = await runTurn(deps);
+      expect(pushOutcome).toEqual(new Error("stream delivery failed: telegram: chat not found"));
+      expect(failed).toBe(pushOutcome);
     });
   });
 });

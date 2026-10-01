@@ -188,7 +188,7 @@ type TurnOutcome =
 
 The repair runs inside the `llm-iter<N>` step body, so its verdict is cached and replays deterministically. Budget state is recomputed by the loop from the cached iteration outcomes on every invocation — a Class A per-step retry that succeeds does NOT reset Class C budgets; a spent budget stays spent for the rest of the turn, which is what keeps the step graph identical across replays.
 
-**Tool-arg validation feedback is NOT in the Class C budget.** When Zod validation throws inside a tool handler (`tools.ts:83`), the exception is caught at `loop.ts:260-270` and returned as an `is_error: true` `tool_result` — the same channel handler exceptions already use. This is **unbounded per turn**, capped only by `DEFAULT_MAX_ITERATIONS = 20`. Today a turn can self-correct three sequential Zod failures and finish on the fourth iteration; that behavior is preserved. The Class C budget covers only the subtypes that don't have an existing in-loop self-correction channel.
+**Tool-arg validation feedback is NOT in the Class C budget.** When Zod validation fails, `defineTool` rejects the call, and the loop answers it with an `is_error: true` `tool_result` — the same channel every tool rejection uses. This is **unbounded per turn**, capped only by `DEFAULT_MAX_ITERATIONS = 20`. Today a turn can self-correct three sequential Zod failures and finish on the fourth iteration; that behavior is preserved. The Class C budget covers only the subtypes that don't have an existing in-loop self-correction channel.
 
 #### Per-subtype repair
 

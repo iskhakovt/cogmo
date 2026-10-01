@@ -28,6 +28,7 @@ import { fakeRunInTx } from "../test/factories.js";
 import type { AttachmentStore } from "../transport/attachment-store.js";
 import { createImageTools } from "./image-tools.js";
 import type { Service } from "./service.js";
+import type { ToolOutcome } from "./tools.js";
 
 /** 1x1 transparent PNG — the smallest valid `data[].b64_json` payload. */
 const PNG_B64 =
@@ -72,7 +73,7 @@ async function buildCapturingTool(args: {
   modelString?: string;
 }): Promise<{
   requests: CapturedRequest[];
-  handler: (input: Record<string, unknown>) => Promise<string>;
+  handler: (input: Record<string, unknown>) => Promise<ToolOutcome>;
 }> {
   const providerRow = providerRowNamed(args.providerName ?? "acme-images");
   const modelString = args.modelString ?? "dall-e-3";
@@ -148,7 +149,7 @@ describe("openai_compatible image request body", () => {
     });
     // The adapter only decodes `data[].b64_json`, so a body that asked for
     // the right format round-trips all the way to an uploaded attachment.
-    expect(JSON.parse(result)).toMatchObject({ path: "generated/wire.png" });
+    expect(JSON.parse(result._unsafeUnwrap())).toMatchObject({ path: "generated/wire.png" });
   });
 
   it("leaves response_format out of a gpt-image-* body", async () => {
@@ -167,7 +168,7 @@ describe("openai_compatible image request body", () => {
     expect(requests).toHaveLength(1);
     expect(requests[0]?.body).toMatchObject({ model: "gpt-image-1" });
     expect(requests[0]?.body).not.toHaveProperty("response_format");
-    expect(JSON.parse(result)).toMatchObject({ path: "generated/wire.png" });
+    expect(JSON.parse(result._unsafeUnwrap())).toMatchObject({ path: "generated/wire.png" });
   });
 
   it("keeps response_format alongside an operator-enabled negative_prompt", async () => {

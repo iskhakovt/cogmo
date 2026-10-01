@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
 import { pipelineGateKey } from "../../inngest/events.js";
+import { expectOk } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { DrizzleAgentStore } from "../store/index.js";
 import { inspectFailedResolution, resolveGate } from "./resolve-gate.js";
@@ -49,13 +50,15 @@ const DEFINITION: PipelineDefinition = {
 async function parkedRun(stage: "approve" | "sign-off") {
   const userId = (await tx((trx) => agentStore.createUser(trx))).id;
   const profile = await tx((trx) =>
-    agentStore.createProfile(trx, {
-      userId,
-      name: "default",
-      basePrompt: "p",
-      model: "test-model",
-      toolSet: [],
-    }),
+    agentStore
+      .createProfile(trx, {
+        userId,
+        name: "default",
+        basePrompt: "p",
+        model: "test-model",
+        toolSet: [],
+      })
+      .then(expectOk),
   );
   const conversation = await tx((trx) =>
     agentStore.createConversation(trx, { userId, profileId: profile.id, isPrivate: true }),

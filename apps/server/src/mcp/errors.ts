@@ -1,36 +1,34 @@
-/**
- * Typed errors for the MCP module. Used at the registry boundary so the
- * Transport layer can route via `instanceof` checks rather than string-matching
- * on `Error.message` (which silently breaks the moment anyone reworders the
- * message).
- */
-
-export class McpServerNotFoundError extends Error {
-  readonly serverId: string;
-  constructor(serverId: string) {
-    super(`MCP server not found: ${serverId}`);
-    this.name = "McpServerNotFoundError";
-    this.serverId = serverId;
-  }
-}
-
-export type McpPoolErrorCode = "server_not_found" | "server_unhealthy" | "evicted" | "pool_closed";
+import { match } from "ts-pattern";
+import { describeError } from "../util/describe-error.js";
 
 /** Why the connection pool gave a caller no connection. */
-export class McpPoolError extends Error {
-  readonly code: McpPoolErrorCode;
-  constructor(code: McpPoolErrorCode, message?: string) {
-    super(message ?? code);
-    this.code = code;
-    this.name = "McpPoolError";
-  }
-}
+export type McpPoolError =
+  | { code: "server_not_found" }
+  /** The last connects in a row failed; every call fails fast until `reset`. */
+  | { code: "server_unhealthy"; lastError: string }
+  /** The server was removed while the call waited. */
+  | { code: "evicted" }
+  | { code: "pool_closed" }
+  /** Looking the server up, or spawning and handshaking with it, failed. */
+  | { code: "connect_failed"; error: Error };
 
-export class McpInvalidServerNameError extends Error {
-  readonly invalidName: string;
-  constructor(invalidName: string, message: string) {
-    super(message);
-    this.name = "McpInvalidServerNameError";
-    this.invalidName = invalidName;
-  }
+/** Why `addServer` created no server. */
+export type McpAddServerError =
+  | { code: "invalid_name"; name: string; reason: string }
+  | { code: "name_taken"; name: string };
+
+/** Why `approveServer` approved nothing. */
+export type McpApproveServerError =
+  | { code: "server_not_found"; serverId: string }
+  | { code: "connection_failed"; serverId: string; reason: string };
+
+/** Operator- and model-facing text for a pool failure. */
+export function describeMcpPoolError(error: McpPoolError): string {
+  return match(error)
+    .with({ code: "server_not_found" }, () => "MCP server not found")
+    .with({ code: "server_unhealthy" }, (e) => `MCP server is unhealthy: ${e.lastError}`)
+    .with({ code: "evicted" }, () => "MCP server was removed")
+    .with({ code: "pool_closed" }, () => "MCP connection pool is closed")
+    .with({ code: "connect_failed" }, (e) => describeError(e.error))
+    .exhaustive();
 }

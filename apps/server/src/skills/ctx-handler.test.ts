@@ -1,4 +1,4 @@
-import type { Result } from "neverthrow";
+import { err, ok, type Result } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import { type MockProxy, mock } from "vitest-mock-extended";
 import type { Service } from "../agent/service.js";
@@ -1016,7 +1016,7 @@ describe("DefaultCtxHandler", () => {
     it("read returns the workspace content when effect is declared", async () => {
       const m = manifest("effects:\n  - reads_filesystem");
       const d = deps();
-      vi.mocked(d.files.read).mockResolvedValue("hello");
+      vi.mocked(d.files.read).mockResolvedValue(ok("hello"));
       const h = makeHandler(m, d);
 
       const value = await served(h.handle({ method: "files.read", args: { path: "notes/x.md" } }));
@@ -1034,12 +1034,12 @@ describe("DefaultCtxHandler", () => {
     it("read surfaces backend failures as read_failed", async () => {
       const m = manifest("effects:\n  - reads_filesystem");
       const d = deps();
-      vi.mocked(d.files.read).mockRejectedValue(new Error("File not found: notes/x.md"));
+      vi.mocked(d.files.read).mockResolvedValue(err({ kind: "not_found", path: "notes/x.md" }));
       const h = makeHandler(m, d);
 
       expect(
         await refusal(h.handle({ method: "files.read", args: { path: "notes/x.md" } })),
-      ).toMatchObject({ kind: "read_failed" });
+      ).toMatchObject({ kind: "read_failed", message: "File not found: notes/x.md" });
       expect(d.recordContextCall).toHaveBeenCalledWith({
         runId: "run-1",
         method: "files.read",

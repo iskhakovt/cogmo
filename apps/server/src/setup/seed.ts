@@ -1,3 +1,9 @@
+import type { Result } from "neverthrow";
+import {
+  type CreateImageModelError,
+  type CreateImageProviderError,
+  describeImageCatalogError,
+} from "../agent/store/errors.js";
 import type { AgentStore } from "../agent/store/index.js";
 import type { ImageModelCapabilities } from "../agent/store/schema.js";
 import type { Transactor } from "../db/index.js";
@@ -268,6 +274,10 @@ const FAL_DEFAULT_MODELS: ReadonlyArray<FalDefaultModel> = [
  * Once a secret exists, ensure an `image_providers` row named `fal` exists
  * (link to the secret), and upsert the canonical model catalog by `name`.
  * Idempotent: re-running preserves operator edits to existing rows.
+ *
+ * Throws when the catalog conflicts with the operator's rows (a model whose
+ * slug collides with a default's), failing boot until the operator renames
+ * one, as a half-seeded catalog would be worse.
  */
 export async function ensureFalImageDefaults(deps: {
   runInTx: Transactor;
@@ -294,26 +304,28 @@ export async function ensureFalImageDefaults(deps: {
     const existing = await deps.agentStore.findImageProviderByName(tx, "fal");
     const providerId = existing
       ? existing.id
-      : (
+      : orFailBoot(
           await deps.agentStore.createImageProvider(tx, {
             name: "fal",
             type: "fal",
             baseUrl: null,
             secretId: secretMeta.id,
             attrs: {},
-          })
+          }),
         ).id;
 
-    const inserted = await deps.agentStore.upsertImageModelsByName(
-      tx,
-      FAL_DEFAULT_MODELS.map((m) => ({
-        providerId,
-        name: m.name,
-        modelString: m.modelString,
-        description: m.description,
-        capabilities: m.capabilities,
-        userSelectable: true,
-      })),
+    const inserted = orFailBoot(
+      await deps.agentStore.upsertImageModelsByName(
+        tx,
+        FAL_DEFAULT_MODELS.map((m) => ({
+          providerId,
+          name: m.name,
+          modelString: m.modelString,
+          description: m.description,
+          capabilities: m.capabilities,
+          userSelectable: true,
+        })),
+      ),
     );
     logger.info(
       { providerId, providerCreated: !existing, modelsInserted: inserted },
@@ -321,4 +333,11 @@ export async function ensureFalImageDefaults(deps: {
     );
     return { seeded: true, providerCreated: !existing, modelsInserted: inserted };
   });
+}
+
+function orFailBoot<T>(result: Result<T, CreateImageProviderError | CreateImageModelError>): T {
+  if (result.isErr()) {
+    throw new Error(`seeding fal image defaults: ${describeImageCatalogError(result.error)}`);
+  }
+  return result.value;
 }

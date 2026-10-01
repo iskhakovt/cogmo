@@ -2,6 +2,7 @@ import { lookup } from "node:dns/promises";
 import { err, ok, type Result } from "neverthrow";
 import { match } from "ts-pattern";
 import { z } from "zod";
+import { describeFileError } from "../agent/files.js";
 import type { Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
 import type { SecretsStore } from "../secrets/store/index.js";
@@ -538,7 +539,10 @@ export class DefaultCtxHandler implements CtxHandler {
     const allowed = this.#requireEffect("files.read", "reads_filesystem", path);
     if (allowed.isErr()) return err(allowed.error);
     try {
-      return served(await this.#files.read(path), path);
+      const read = await this.#files.read(path);
+      return read.isErr()
+        ? refused("read_failed", describeFileError(read.error), path)
+        : served(read.value, path);
     } catch (e) {
       return refused("read_failed", describeError(e), path);
     }
@@ -553,8 +557,10 @@ export class DefaultCtxHandler implements CtxHandler {
     const allowed = this.#requireEffect("files.write", "writes_filesystem", path);
     if (allowed.isErr()) return err(allowed.error);
     try {
-      await this.#files.write(path, content);
-      return served(null, path);
+      const written = await this.#files.write(path, content);
+      return written.isErr()
+        ? refused("write_failed", describeFileError(written.error), path)
+        : served(null, path);
     } catch (e) {
       return refused("write_failed", describeError(e), path);
     }

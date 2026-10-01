@@ -1,4 +1,4 @@
-import { ok } from "neverthrow";
+import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import { asBatchAdapter, expectDefined } from "../../test/assertions.js";
 import {
@@ -85,6 +85,31 @@ describe("direct adapter", () => {
 
       expect(transport.closeSession).toHaveBeenCalledWith("session-1");
       expect(result).toEqual({ status: "new_conversation" });
+    });
+
+    it("completes as rejected, emitting nothing, when the sender has no identity", async () => {
+      const transport = makeTransport({
+        resolveSession: vi.fn().mockResolvedValue(null),
+        createConversation: vi.fn().mockResolvedValue(err({ code: "identity_rejected" })),
+      });
+
+      const result = await handleDirectInbound({ transport }, baseEvent.data, makeStepRun());
+
+      expect(result).toEqual({ status: "rejected", reason: { code: "identity_rejected" } });
+      expect(transport.emit).not.toHaveBeenCalled();
+    });
+
+    it("completes as rejected when the session is gone by emit", async () => {
+      const transport = makeTransport({
+        emit: vi.fn().mockResolvedValue(err({ code: "session_not_found", sessionId: "session-1" })),
+      });
+
+      const result = await handleDirectInbound({ transport }, baseEvent.data, makeStepRun());
+
+      expect(result).toEqual({
+        status: "rejected",
+        reason: { code: "session_not_found", sessionId: "session-1" },
+      });
     });
   });
 

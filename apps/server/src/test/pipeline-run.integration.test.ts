@@ -38,7 +38,7 @@ import {
 import type { LlmProvider } from "../llm/provider.js";
 import type { ChatParams, LlmResponse } from "../llm/types.js";
 import { channelSessions, channels, inboundMessages } from "../transport/store/schema.js";
-import { expectDefined } from "./assertions.js";
+import { expectDefined, expectOk } from "./assertions.js";
 import { createIsolatedUser } from "./isolated-user.js";
 
 const DRAFT_REPLY = "Draft: add a retry around the flaky call.";
@@ -175,13 +175,15 @@ async function seedRunnable(gate: Gate) {
   const directAddress = `it-run-${suffix}`;
 
   const profile = await app.runInTx((tx) =>
-    app.agentStore.createProfile(tx, {
-      userId,
-      name,
-      basePrompt: "You run pipeline stages.",
-      model: "stub-model",
-      toolSet: [],
-    }),
+    app.agentStore
+      .createProfile(tx, {
+        userId,
+        name,
+        basePrompt: "You run pipeline stages.",
+        model: "stub-model",
+        toolSet: [],
+      })
+      .then(expectOk),
   );
   // Recall would reach Hindsight on every stage prompt; the engine doesn't need it.
   await db.update(profiles).set({ autoRecall: "off" }).where(eq(profiles.id, profile.id));

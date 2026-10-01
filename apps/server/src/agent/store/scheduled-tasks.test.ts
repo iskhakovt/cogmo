@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
+import { expectOk } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { DrizzleAgentStore, type ScheduledTask } from "./index.js";
 
@@ -28,13 +29,15 @@ async function seed(): Promise<{ userId: string; profileId: string }> {
   // reject two org profiles named "test").
   const profileId = (
     await tx((trx) =>
-      store.createProfile(trx, {
-        userId,
-        name: "test",
-        basePrompt: "be helpful",
-        model: "claude-test",
-        toolSet: [],
-      }),
+      store
+        .createProfile(trx, {
+          userId,
+          name: "test",
+          basePrompt: "be helpful",
+          model: "claude-test",
+          toolSet: [],
+        })
+        .then(expectOk),
     )
   ).id;
   return { userId, profileId };
