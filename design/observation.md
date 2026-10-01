@@ -72,7 +72,7 @@ A `/profile` switch mid-conversation therefore observes each turn under the prof
 | Unanswered, not last | Skipped in both phases as `unanswered`. Not terminal: discovery reopens it if assistant rows appear (a late retry). |
 | Unanswered and last | Not discovered: in flight, or awaiting its retry. A later fire decides. |
 
-A turn is **last** when no later non-pipeline turn row exists. A later one re-batches the turn's inbounds, so this is exactly when PR 0 still accepts the turn's reply: PR 0's check ignores pipeline stage prompts, and so does this test, so a pipeline stage turn after B doesn't end B's deferral.
+A turn is **last** when no later non-pipeline turn row exists. A later one re-batches the turn's inbounds, so this is exactly when PR 0 still accepts the turn's reply: PR 0's check ignores pipeline stage prompts, and so does this test, so a pipeline stage turn after an unanswered covering turn doesn't end the deferral of the turns it covers.
 
 An unanswered **chat** turn's words reach the next chat turn, which re-batches its inbounds ([attachments.md](transport/attachments.md)), and an unanswered scheduled turn's prompt reaches the next scheduled turn the same way. A failed scheduled turn followed by a user message gives a mixed batch, which `routingKindOf` rejects (Side bugs). A pipeline stage that kept nothing wrote only a prompt the pipeline authored.
 
