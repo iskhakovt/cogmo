@@ -170,7 +170,7 @@ steering_rules (
   retracted_at      TIMESTAMPTZ,              -- nullable: null = not retired
   user_id           UUID FK → users ON DELETE CASCADE, -- nullable: null = every user; set on every instruction row
   quote             TEXT,                     -- nullable: the user's words; set on every instruction row
-  contradicted_through_message_id UUID FK → messages ON DELETE SET NULL, -- nullable: null = never contradicted while learning
+  contradicted_by_message_id UUID FK → messages ON DELETE SET NULL, -- nullable: null = never contradicted while learning
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 -- chk_steering_rules_lifecycle, uq_steering_rules_instruction: evolution.md → Explicit Instructions → Data Model

@@ -58,6 +58,8 @@ conversations (
   user_id          UUID FK → users NOT NULL,
   profile_id       UUID FK → profiles NOT NULL,
   is_private       BOOLEAN NOT NULL,           -- controls memory scope. See identity.md.
+  corrections_observed_through UUID FK → messages ON DELETE SET NULL, -- [proposed] Observer cursor; null = never observed. See evolution.md → Observation Window.
+  memories_observed_through    UUID FK → messages ON DELETE SET NULL, -- [proposed] Observer cursor; null = never observed.
   created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
