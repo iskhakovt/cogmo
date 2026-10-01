@@ -74,7 +74,7 @@ describe("SystemScreen", () => {
     // Evolution row: trigger + the corrections summary cell.
     await expect.element(page.getByText("manual")).toBeVisible();
     await expect.element(page.getByText("+2 / ↻1 / ↑1 / ✕1 / ↺0")).toBeVisible();
-    await expect.element(page.getByText("3 (2 withheld)")).toBeVisible();
+    await expect.element(page.getByText("3 (2 withheld, 1 deferred)")).toBeVisible();
   });
 
   it("opens a detail drawer for the clicked evolution event and closes it again", async () => {
