@@ -17,6 +17,7 @@ import {
 import { DrizzleSandboxStore } from "../../sandbox/store/index.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import { expectDefined, expectOk } from "../../test/assertions.js";
+import { codingAuthSecrets } from "../../test/coding-fixtures.js";
 import { makeStepRun, makeStepSendEvent } from "../../test/factories.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { DrizzleAgentStore } from "../store/index.js";
@@ -342,6 +343,7 @@ function makeDeps(
   return {
     runInTx: tx,
     store,
+    secretsStore: codingAuthSecrets(),
     devbaseImage: "cogmo/devbase:test",
     defaultResourceLimits: RESOURCE_LIMITS,
     taskTtlMs: 60_000,
@@ -416,11 +418,6 @@ describe("runCodingTask", () => {
     expect(planStream.finalized).toEqual(["## Plan\n1. Do X\n"]);
     expect(planStream.failed).toEqual([]);
     expect(stopCalls).toEqual([]);
-    // No secretsStore wired ⇒ no auth env threaded. The supervisor unit
-    // test pins what happens with env present; this test pins the absent
-    // path so adding a `secretsStore` to the deps interface doesn't
-    // silently change the env shape on tests that omit it.
-    expect(createCalls[0]?.env).toBeUndefined();
   });
 
   it("threads CLAUDE_CODE_OAUTH_TOKEN from secretsStore into sandbox.create env", async () => {

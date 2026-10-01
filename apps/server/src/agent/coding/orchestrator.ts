@@ -46,11 +46,11 @@ export interface CodingOrchestratorDeps {
   sandbox: SandboxClient;
   backend: CodingBackend;
   /**
-   * Resolves `github_identity:<name>` rows for the failure-cascade WIP
-   * push (see `teardownWorktree`). When omitted (e.g. tests that don't
-   * exercise teardown), failed worktrees stay on disk.
+   * Resolves the Claude Code subscription token for the sandbox env, and
+   * the `github_identity:<name>` rows behind the git-remote run-branch push
+   * and the failure-cascade WIP push.
    */
-  secretsStore?: SecretsStore;
+  secretsStore: SecretsStore;
   /** Default base image when the repo has no devcontainer override. */
   devbaseImage: string;
   /** Per-task resource caps. P2 reads these from `coding_repos` overrides. */
@@ -285,11 +285,6 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
         // sandbox can clone it on `create()`. The slice-4 feature branch
         // (`cogmo/<idShort>`) is checked out inside the sandbox after
         // create — see `create-container` step.
-        if (!deps.secretsStore) {
-          throw new Error(
-            "git-remote sandbox requires a secretsStore to resolve the GitHub identity for the run-branch push",
-          );
-        }
         if (!assignment) {
           const next: WorktreeAssignment = { type: "git-remote", branch };
           assignment = next;
@@ -319,19 +314,13 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
 
     // Resolve subscription auth before the durable create-container step
     // so a missing secret short-circuits without spinning up a worktree-
-    // bound container that `claude -p` would then hang on. Skipped when
-    // the orchestrator is wired without a secrets store (unit tests).
-    // Local-capture narrows the type and avoids `secretsStore!`.
-    const secretsStore = deps.secretsStore;
+    // bound container that `claude -p` would then hang on.
     const loadAuth = deps.loadCodingSandboxEnv ?? loadCodingSandboxEnv;
-    let sandboxEnv: Record<string, string> | undefined;
-    if (secretsStore) {
-      const authResult = await runInTx((tx) => loadAuth(tx, secretsStore));
-      if (authResult.isErr()) {
-        throw new Error(authResult.error.message);
-      }
-      sandboxEnv = authResult.value;
+    const authResult = await runInTx((tx) => loadAuth(tx, deps.secretsStore));
+    if (authResult.isErr()) {
+      throw new Error(authResult.error.message);
     }
+    const sandboxEnv = authResult.value;
 
     // Resolve the GitHub identity once — git-remote backends need it
     // for the sandbox's clone auth AND for the execute-side push step
@@ -340,9 +329,6 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     let gitRemoteIdentityPat: string | undefined;
     let askpassMaterials: AskpassMaterials | undefined;
     if (sandbox.capabilities.workingTreeTransport === "git-remote") {
-      if (!deps.secretsStore) {
-        throw new Error("git-remote sandbox requires a secretsStore for clone auth");
-      }
       const identity = await loadIdentity({
         runInTx,
         secretsStore: deps.secretsStore,
@@ -401,7 +387,7 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
         resourceLimits: defaultResourceLimits,
         expiresAt: new Date(Date.now() + taskTtlMs),
         allowPrivilegedRunc: task.allowPrivilegedRunc,
-        ...(sandboxEnv && { env: sandboxEnv }),
+        env: sandboxEnv,
       });
       return session.state;
     });
@@ -469,7 +455,7 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
         await stepRun("teardown-worktree", () =>
           safeTeardownWorktree({
             runInTx,
-            ...(deps.secretsStore !== undefined && { secretsStore: deps.secretsStore }),
+            secretsStore: deps.secretsStore,
             repo,
             taskId,
             worktreeAssignment: a,
@@ -563,7 +549,7 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
       await stepRun("teardown-worktree-cancelled", () =>
         safeTeardownWorktree({
           runInTx,
-          ...(deps.secretsStore !== undefined && { secretsStore: deps.secretsStore }),
+          secretsStore: deps.secretsStore,
           repo,
           taskId,
           worktreeAssignment: wt,
@@ -695,7 +681,7 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     if (assignment) {
       await safeTeardownWorktree({
         runInTx,
-        ...(deps.secretsStore !== undefined && { secretsStore: deps.secretsStore }),
+        secretsStore: deps.secretsStore,
         repo,
         taskId,
         worktreeAssignment: assignment,
@@ -957,8 +943,6 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
     // Inngest's state store. Safe to skip the step boundary only
     // because this function is `retries: 0` — loosen retries and the
     // DB+decrypt would replay; cache through a step then.
-    const secretsStore = deps.secretsStore;
-
     // Get-or-create the task container in two checkpoints:
     //
     //   1. `try-resume` — non-null state means a prior sandbox is alive
@@ -984,9 +968,6 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
     // `askpassProvisioned` flips before the step body so a partial
     // provision still triggers cleanup in `finally`.
     if (needsExecutePush) {
-      if (!deps.secretsStore) {
-        throw new Error("git-remote sandbox requires a secretsStore for clone + push auth");
-      }
       const pushIdentity = await loadIdentity({
         runInTx,
         secretsStore: deps.secretsStore,
@@ -1019,14 +1000,11 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
 
       sessionState = await stepRun("create-container", async () => {
         const loadAuth = deps.loadCodingSandboxEnv ?? loadCodingSandboxEnv;
-        let sandboxEnv: Record<string, string> | undefined;
-        if (secretsStore) {
-          const authResult = await runInTx((tx) => loadAuth(tx, secretsStore));
-          if (authResult.isErr()) {
-            throw new Error(authResult.error.message);
-          }
-          sandboxEnv = authResult.value;
+        const authResult = await runInTx((tx) => loadAuth(tx, deps.secretsStore));
+        if (authResult.isErr()) {
+          throw new Error(authResult.error.message);
         }
+        const sandboxEnv = authResult.value;
 
         const session = await sandbox.create({
           taskId,
@@ -1050,7 +1028,7 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
           resourceLimits: defaultResourceLimits,
           expiresAt: new Date(Date.now() + taskTtlMs),
           allowPrivilegedRunc: task.allowPrivilegedRunc,
-          ...(sandboxEnv && { env: sandboxEnv }),
+          env: sandboxEnv,
         });
         return session.state;
       });
@@ -1138,7 +1116,7 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       await stepRun("teardown-worktree", () =>
         safeTeardownWorktree({
           runInTx,
-          ...(deps.secretsStore !== undefined && { secretsStore: deps.secretsStore }),
+          secretsStore: deps.secretsStore,
           repo,
           taskId,
           worktreeAssignment,
@@ -1305,7 +1283,7 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
     );
     await safeTeardownWorktree({
       runInTx,
-      ...(deps.secretsStore !== undefined && { secretsStore: deps.secretsStore }),
+      secretsStore: deps.secretsStore,
       repo,
       taskId,
       worktreeAssignment,

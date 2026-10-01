@@ -15,6 +15,7 @@ import {
 } from "../../sandbox/index.js";
 import { DrizzleSandboxStore } from "../../sandbox/store/index.js";
 import { expectDefined, expectOk } from "../../test/assertions.js";
+import { codingAuthSecrets } from "../../test/coding-fixtures.js";
 import {
   makeStepRun,
   mockAgentStore,
@@ -337,6 +338,7 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
         store,
         sandbox,
         backend,
+        secretsStore: codingAuthSecrets(),
         devbaseImage: "cogmo/devbase:test",
         defaultResourceLimits: RESOURCE_LIMITS,
         taskTtlMs: 60_000,
@@ -411,6 +413,7 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
         store,
         sandbox,
         backend,
+        secretsStore: codingAuthSecrets(),
         devbaseImage: "cogmo/devbase:test",
         defaultResourceLimits: RESOURCE_LIMITS,
         taskTtlMs: 60_000,
@@ -499,6 +502,7 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
       store,
       sandbox,
       backend,
+      secretsStore: codingAuthSecrets(),
       devbaseImage: "cogmo/devbase:test",
       defaultResourceLimits: RESOURCE_LIMITS,
       taskTtlMs: 60_000,
@@ -690,6 +694,7 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
           ],
           executeEvents: [],
         }),
+        secretsStore: codingAuthSecrets(),
         devbaseImage: "cogmo/devbase:test",
         defaultResourceLimits: RESOURCE_LIMITS,
         taskTtlMs: 60_000,
