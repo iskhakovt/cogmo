@@ -9,12 +9,14 @@
  * its stream-json output from the captured API conversation each time.
  *
  * Record: `RECORD=1 ANTHROPIC_API_KEY=… pnpm test:integration <this file>`.
+ * Under rootless Docker, also set `COGMO_TEST_HOST_ADDRESS` to a host
+ * address the containers can reach (its LAN or tailnet address).
  * Replay (CI default): free. Image-presence gate: run
  * `VERSION=test docker buildx bake --load devbase` locally, or rely on
  * the sysbox-e2e workflow's bake step in CI.
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Docker from "dockerode";
@@ -24,6 +26,7 @@ import { LocalDockerSandboxClient } from "../../sandbox/index.js";
 import { DrizzleSandboxStore } from "../../sandbox/store/index.js";
 import { LABEL_INSTANCE, LABEL_MANAGED } from "../../sandbox/supervisor.js";
 import type { ResourceLimits } from "../../sandbox/types.js";
+import { assertKind } from "../../test/assertions.js";
 import { fileLlmockUrl } from "../../test/integration-file.js";
 import { createTestDatabase } from "../../test/pglite.js";
 import type { CodingEvent } from "./backend.js";
@@ -61,10 +64,16 @@ beforeAll(async () => {
 
   // Rootless Docker still answers `network inspect bridge` with a gateway, but it
   // is RootlessKit's, not the host's — the CLI would dial an address nothing
-  // listens on and hang to the test timeout. Skip with a reason instead.
+  // listens on and hang to the test timeout. `COGMO_TEST_HOST_ADDRESS` names
+  // one the containers can reach; without it, skip with a reason instead.
+  const hostAddress = process.env.COGMO_TEST_HOST_ADDRESS;
   const info = (await docker.info()) as { SecurityOptions?: string[] };
-  if ((info.SecurityOptions ?? []).some((o) => o.includes("name=rootless"))) {
-    skipReason = "rootless Docker: the supervisor's containers cannot reach a host-bound mock";
+  if (
+    hostAddress === undefined &&
+    (info.SecurityOptions ?? []).some((o) => o.includes("name=rootless"))
+  ) {
+    skipReason =
+      "rootless Docker: the supervisor's containers cannot reach a host-bound mock (set COGMO_TEST_HOST_ADDRESS)";
     return;
   }
 
@@ -75,12 +84,13 @@ beforeAll(async () => {
     return;
   }
 
-  // Default bridge gateway = the address the container reaches the host on,
-  // resolved dynamically so a custom --bip works. `exposeHostPort` would be the
-  // portable answer but maps only containers Testcontainers creates, and these
-  // come from the supervisor via dockerode.
+  // The address the container reaches the host on: `COGMO_TEST_HOST_ADDRESS`
+  // when set, else the default bridge gateway, resolved dynamically so a
+  // custom --bip works. `exposeHostPort` would be the portable answer but maps
+  // only containers Testcontainers creates, and these come from the supervisor
+  // via dockerode.
   const bridge = await docker.getNetwork("bridge").inspect();
-  bridgeGateway = bridge.IPAM?.Config?.[0]?.Gateway ?? null;
+  bridgeGateway = hostAddress ?? bridge.IPAM?.Config?.[0]?.Gateway ?? null;
   if (!bridgeGateway) {
     throw new Error(
       "Could not resolve docker bridge gateway IP from `docker network inspect bridge`",
@@ -91,13 +101,18 @@ beforeAll(async () => {
   store = new DrizzleSandboxStore();
 
   // The model needs something concrete in /workspace to plan against —
-  // an empty directory makes it bail without ever calling ExitPlanMode,
-  // which would pass the test trivially and miss the regression.
+  // an empty directory makes it bail without producing a plan, which would
+  // pass a looser test trivially.
   workspaceTmp = mkdtempSync(join(tmpdir(), "cogmo-claude-cli-it-"));
   writeFileSync(
     join(workspaceTmp, "greet.ts"),
     `export function greet(name: string): string {\n  return \`Hello, \${name}!\`;\n}\n`,
   );
+  // `mkdtempSync` creates the directory 0700, and the CLI runs as the image's
+  // `vscode` user (uid 1000), which is only the directory's owner when the
+  // test's uid happens to match. To anyone else the workspace reads as empty.
+  chmodSync(workspaceTmp, 0o777);
+  chmodSync(join(workspaceTmp, "greet.ts"), 0o666);
 }, 60_000);
 
 afterAll(async () => {
@@ -182,8 +197,7 @@ function makeTask(taskId: string): CodingTaskRow {
     repoId: repo.id,
     conversationId: null,
     // Pointed at the planted greet.ts so the model has something concrete
-    // to plan against — empty workspaces make the model bail without
-    // calling ExitPlanMode, leaving the regression untested.
+    // to plan against — empty workspaces make the model bail without a plan.
     goal: "Read /workspace/greet.ts. Plan a single change: add a JSDoc comment to the greet function describing what it returns. Keep the plan to one short paragraph.",
     triggerSource: "user",
     triggerRef: null,
@@ -210,7 +224,7 @@ function makeTask(taskId: string): CodingTaskRow {
 
 describe("ClaudeCodeBackend against cogmo-devbase:test", () => {
   it(
-    "plan flow runs the real CLI to completion with ExitPlanMode in the tool calls",
+    "plan flow runs the real CLI to completion with a plan of the planted file",
     async (ctx) => {
       if (skipReason) {
         ctx.skip(skipReason);
@@ -246,6 +260,11 @@ describe("ClaudeCodeBackend against cogmo-devbase:test", () => {
         },
       });
 
+      // The model plans against greet.ts. A workspace the CLI's user can't read
+      // looks empty to it, which only a recording shows; a replay passes anyway.
+      const readable = await session.exec(["test", "-r", "/workspace/greet.ts"]);
+      expect(readable.exitCode, "greet.ts is unreadable inside the container").toBe(0);
+
       const events: CodingEvent[] = [];
       try {
         for await (const event of new ClaudeCodeBackend().plan({
@@ -275,11 +294,16 @@ describe("ClaudeCodeBackend against cogmo-devbase:test", () => {
       // 4 min keeps the failure mode "wedge detected", not "CI was slow".
       expect(elapsedMs).toBeLessThan(4 * 60_000);
 
-      // ExitPlanMode must actually have been called. Without this the
-      // test would pass against any model that emits text and never
-      // exits plan mode (the workspace-empty failure case).
+      // The plan must be about greet.ts. Without this the test would pass
+      // against a model that never read the workspace (the workspace-empty
+      // failure case). It arrives as the turn's text: the CLI offers
+      // `ExitPlanMode` in `-p` mode only alongside `--permission-prompt-tool`,
+      // which `claude.ts` doesn't pass.
       const toolCalls = events.filter((e) => e.kind === "tool_call").map((e) => e.tool);
-      expect(toolCalls).toContain("ExitPlanMode");
+      expect(toolCalls).toContain("Read");
+      const planReady = events.find((e) => e.kind === "plan_ready");
+      assertKind(planReady, "plan_ready");
+      expect(planReady.plan).toContain("greet");
 
       console.log(`claude-cli plan-mode events (${elapsedMs}ms): ${kinds.join(" → ")}`);
     },

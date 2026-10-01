@@ -649,7 +649,7 @@ This reuses the whole coding-delegation pipeline (sandbox, plan gate for user tr
 - `/etc/claude-code/CLAUDE.md` — managed-policy memory file containing Cogmo's non-negotiable invariants (see [Prompt Construction → Injected context](#injected-context)). Baked into the image so the repo cannot override or remove it.
 - Non-root user `cogmo` (UID mapping via sysbox handles the userns side)
 
-Images are pinned versions in Cogmo's deployment; updates happen via image rebuilds, not in-container installs. Managed-policy memory updates = image rebuild, same cadence as toolchain updates.
+Images are pinned versions in Cogmo's deployment; updates happen via image rebuilds, not in-container installs. Managed-policy memory updates = image rebuild, same cadence as toolchain updates. The toolchain pins (`claude`, npm, pnpm, uv) live in `docker-bake.hcl` alone: the Dockerfile declares its ARGs without defaults, and `docker-bake.integration.test.ts` holds the two to each other as `docker buildx bake --print` resolves them.
 
 **Session-file layout is an upstream contract we depend on.** Claude Code writes sessions to `~/.claude/projects/<project-hash>/sessions/<session-id>.jsonl` (project-hash derived from the git repo root, not cwd). Resume correctness hinges on this layout. Mitigation:
 

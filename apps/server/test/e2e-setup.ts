@@ -148,7 +148,7 @@ export async function setup({ provide }: GlobalSetupContext) {
 
   // CI bakes the image and passes the tag; a local run bakes it here.
   // `E2E_IMAGE_FALLBACK` mirrors the `cogmo-e2e` bake target's tag —
-  // version-pins.test.ts holds the two together.
+  // docker-bake.integration.test.ts holds the two together.
   const imageName = process.env.E2E_IMAGE ?? E2E_IMAGE_FALLBACK;
   if (process.env.E2E_IMAGE === undefined) {
     await bakeAppImage();
