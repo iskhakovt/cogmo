@@ -1,6 +1,7 @@
 /** `/profile` and its subcommands. `new` and `edit` hand off to the profile dialog. */
 
 import { isCoreCompartment } from "../../../../agent/evolution/memory-extraction-schema.js";
+import type { Profile } from "../../../../agent/store/index.js";
 import type { ProfileMemoryScope } from "../../../../agent/store/schema.js";
 import type { Transport } from "../../../transport.js";
 import type { ProfileDialogs } from "../profile-dialog.js";
@@ -256,30 +257,45 @@ async function replyProfileDefault(
   );
 }
 
+/**
+ * The profile a subcommand names, or `undefined` once the reply has said
+ * why there is none: no name given, no such profile, or more than one.
+ */
+async function resolveNamedProfile(
+  transport: Transport,
+  ctx: TelegramCommandContext,
+  handle: string,
+  name: string,
+): Promise<Profile | undefined> {
+  if (!name) {
+    await ctx.reply(USAGE);
+    return undefined;
+  }
+  const resolved = await resolveProfileByName(transport, handle, name);
+  if (resolved.kind === "error") {
+    await ctx.reply(errorMessage(resolved.error));
+    return undefined;
+  }
+  if (resolved.kind === "none") {
+    await ctx.reply(`No profile named "${name}".`);
+    return undefined;
+  }
+  if (resolved.kind === "ambiguous") {
+    await ctx.reply(ambiguityMessage(name, resolved.matches));
+    return undefined;
+  }
+  return resolved.profile;
+}
+
 async function replyProfileDelete(
   transport: Transport,
   ctx: TelegramCommandContext,
   handle: string,
   name: string,
 ): Promise<void> {
-  if (!name) {
-    await ctx.reply(USAGE);
-    return;
-  }
-  const res = await resolveProfileByName(transport, handle, name);
-  if (res.kind === "error") {
-    await ctx.reply(errorMessage(res.error));
-    return;
-  }
-  if (res.kind === "none") {
-    await ctx.reply(`No profile named "${name}".`);
-    return;
-  }
-  if (res.kind === "ambiguous") {
-    await ctx.reply(ambiguityMessage(name, res.matches));
-    return;
-  }
-  const del = await transport.profiles.delete(handle, res.profile.id);
+  const profile = await resolveNamedProfile(transport, ctx, handle, name);
+  if (!profile) return;
+  const del = await transport.profiles.delete(handle, profile.id);
   if (del.isErr()) {
     await ctx.reply(errorMessage(del.error));
     return;
@@ -294,24 +310,8 @@ async function replyProfileScope(
   name: string,
   scopeTokens: ReadonlyArray<string>,
 ): Promise<void> {
-  if (!name) {
-    await ctx.reply(USAGE);
-    return;
-  }
-  const resolved = await resolveProfileByName(transport, handle, name);
-  if (resolved.kind === "error") {
-    await ctx.reply(errorMessage(resolved.error));
-    return;
-  }
-  if (resolved.kind === "none") {
-    await ctx.reply(`No profile named "${name}".`);
-    return;
-  }
-  if (resolved.kind === "ambiguous") {
-    await ctx.reply(ambiguityMessage(name, resolved.matches));
-    return;
-  }
-  const profile = resolved.profile;
+  const profile = await resolveNamedProfile(transport, ctx, handle, name);
+  if (!profile) return;
 
   const spec = parseScopeSpec(scopeTokens);
   if (spec.kind === "error") {
@@ -384,24 +384,8 @@ async function replyProfileStream(
   name: string,
   streamTokens: ReadonlyArray<string>,
 ): Promise<void> {
-  if (!name) {
-    await ctx.reply(USAGE);
-    return;
-  }
-  const resolved = await resolveProfileByName(transport, handle, name);
-  if (resolved.kind === "error") {
-    await ctx.reply(errorMessage(resolved.error));
-    return;
-  }
-  if (resolved.kind === "none") {
-    await ctx.reply(`No profile named "${name}".`);
-    return;
-  }
-  if (resolved.kind === "ambiguous") {
-    await ctx.reply(ambiguityMessage(name, resolved.matches));
-    return;
-  }
-  const profile = resolved.profile;
+  const profile = await resolveNamedProfile(transport, ctx, handle, name);
+  if (!profile) return;
 
   const spec = parseStreamSpec(streamTokens);
   if (spec.kind === "error") {
@@ -443,24 +427,8 @@ async function replyProfileAutoapprove(
   name: string,
   action: "on" | "off" | undefined,
 ): Promise<void> {
-  if (!name) {
-    await ctx.reply(USAGE);
-    return;
-  }
-  const resolved = await resolveProfileByName(transport, handle, name);
-  if (resolved.kind === "error") {
-    await ctx.reply(errorMessage(resolved.error));
-    return;
-  }
-  if (resolved.kind === "none") {
-    await ctx.reply(`No profile named "${name}".`);
-    return;
-  }
-  if (resolved.kind === "ambiguous") {
-    await ctx.reply(ambiguityMessage(name, resolved.matches));
-    return;
-  }
-  const profile = resolved.profile;
+  const profile = await resolveNamedProfile(transport, ctx, handle, name);
+  if (!profile) return;
   if (action === undefined) {
     await ctx.reply(formatAutoapprove(profile.name, profile.codingAutoapproveMode));
     return;
@@ -490,24 +458,8 @@ async function replyProfileClass(
   name: string,
   classOrClear: string,
 ): Promise<void> {
-  if (!name) {
-    await ctx.reply(USAGE);
-    return;
-  }
-  const resolved = await resolveProfileByName(transport, handle, name);
-  if (resolved.kind === "error") {
-    await ctx.reply(errorMessage(resolved.error));
-    return;
-  }
-  if (resolved.kind === "none") {
-    await ctx.reply(`No profile named "${name}".`);
-    return;
-  }
-  if (resolved.kind === "ambiguous") {
-    await ctx.reply(ambiguityMessage(name, resolved.matches));
-    return;
-  }
-  const profile = resolved.profile;
+  const profile = await resolveNamedProfile(transport, ctx, handle, name);
+  if (!profile) return;
   const className = classOrClear.toLowerCase() === "clear" ? null : classOrClear;
   const res = await transport.profiles.setClass(handle, profile.id, className);
   if (res.isErr()) {
