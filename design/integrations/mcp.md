@@ -178,7 +178,7 @@ type McpApproveServerError =
   | { code: "connection_failed"; serverId: string; reason: string }; // connect or listTools
 ```
 
-Expected failures are values; a database failure still throws.
+Expected failures are values. A database failure in the registry's own reads throws; one in the pool's server lookup surfaces as `connection_failed`.
 
 Agent loop integration is one line in `handle-message`:
 

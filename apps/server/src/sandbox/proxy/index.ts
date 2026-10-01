@@ -240,11 +240,8 @@ export class CogmoSocketProxy {
   ): Promise<void> {
     const read = await readBody(req, CONTAINER_CREATE_MAX_BODY_BYTES);
     if (read.isErr()) {
-      // Write the 413 first, then drain whatever's still in flight so
-      // the client gets a clean response instead of ECONNRESET. Node
-      // discards drained chunks; for a hostile multi-GB body we'd want
-      // to bound the drain too, but at slice 3 scale the cap is small
-      // enough that draining the rest is cheap.
+      // Write the 413, then drain the rest so the client sees a clean
+      // response rather than ECONNRESET.
       respondJson(res, 413, {
         message: `Cogmo proxy: request body exceeds ${read.error.maxBytes} bytes`,
       });

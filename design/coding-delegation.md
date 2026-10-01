@@ -486,7 +486,7 @@ Session handles can't cross a step boundary, so every step body that needs a con
 
 ### Per-callsite exec timeouts `[confirmed]`
 
-Every `execStreaming()` call inside the orchestrator pair (plan + execute) and the verify orchestrator carries an explicit `timeoutMs` (total wall-clock) and `idleTimeoutMs` (no-byte-flow watchdog), so a wedged transport — Daytona WS half-close, hijacked Docker socket stall — settles the exec as `timed_out` (a timed_out `ExecError` from `wait()`) instead of blocking indefinitely. Defaults live at the callsite, not on the backend; the backend interface defaults to "no cap" for any caller that omits them. See [sandbox.md → Wall-clock and idle timeouts](sandbox.md#wall-clock-and-idle-timeouts-confirmed) for the cleanup semantics.
+Every `execStreaming()` call inside the orchestrator pair (plan + execute) and the verify orchestrator carries an explicit `timeoutMs` (total wall-clock) and `idleTimeoutMs` (no-byte-flow watchdog), so a wedged transport — Daytona WS half-close, hijacked Docker socket stall — settles the exec as `timed_out` (an `ExecError` from `wait()`) instead of blocking indefinitely. Defaults live at the callsite, not on the backend; the backend interface defaults to "no cap" for any caller that omits them. See [sandbox.md → Wall-clock and idle timeouts](sandbox.md#wall-clock-and-idle-timeouts-confirmed) for the cleanup semantics.
 
 | Callsite | `timeoutMs` | `idleTimeoutMs` | Rationale |
 |-|-|-|-|

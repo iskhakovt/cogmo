@@ -340,8 +340,8 @@ export function createDeliveryRouter(deps: DeliveryRouterDeps): DeliveryRouter {
 }
 
 /**
- * Push `event`, throwing when a target failed. It runs as the agent loop's
- * `onEvent` inside a step, where a throw is how a failure reaches Inngest: it
+ * Push `event`, throwing when a target failed. It runs inside a step, where a
+ * throw is how a failure reaches Inngest: it
  * fails the step, and the step's retry reopens the streams. The failed handle
  * has left its adapter, so the retry streams into a fresh one.
  */
