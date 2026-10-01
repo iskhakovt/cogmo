@@ -212,8 +212,8 @@ describe("pypiHasPureWheel", () => {
     });
     const a = await pypiHasPureWheel("x", "1.0", { fetchImpl: fetchMock });
     const b = await pypiHasPureWheel("x", "1.0", { fetchImpl: fetchMock });
-    expect(a).toBe(true);
-    expect(b).toBe(true);
+    expect(a._unsafeUnwrap()).toBe(true);
+    expect(b._unsafeUnwrap()).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
@@ -231,10 +231,10 @@ describe("pypiHasPureWheel", () => {
       } as unknown as Response;
     }) as unknown as typeof fetch;
     const first = await pypiHasPureWheel("rare", "1.0", { fetchImpl: fetchMock });
-    expect(first).toBe(false);
+    expect(first._unsafeUnwrap()).toBe(false);
     urls = [{ packagetype: "bdist_wheel", filename: "rare-1.0-py3-none-any.whl" }];
     const second = await pypiHasPureWheel("rare", "1.0", { fetchImpl: fetchMock });
-    expect(second).toBe(true);
+    expect(second._unsafeUnwrap()).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
@@ -245,7 +245,35 @@ describe("pypiHasPureWheel", () => {
         body: { urls: [{ packagetype: "bdist_wheel", filename: "y-1.0-py2.py3-none-any.whl" }] },
       },
     });
-    expect(await pypiHasPureWheel("y", "1.0", { fetchImpl: fetchMock })).toBe(true);
+    expect((await pypiHasPureWheel("y", "1.0", { fetchImpl: fetchMock }))._unsafeUnwrap()).toBe(
+      true,
+    );
+  });
+
+  it("errs pypi_unavailable on a non-404 error status", async () => {
+    const fetchMock = fakeFetch({ "z==1.0": { ok: false, status: 503 } });
+    const result = await pypiHasPureWheel("z", "1.0", { fetchImpl: fetchMock });
+    expect(result._unsafeUnwrapErr()).toEqual({
+      kind: "pypi_unavailable",
+      reason: "pypi http 503 for z==1.0",
+    });
+  });
+
+  it("errs pypi_unavailable when the request itself fails", async () => {
+    const fetchMock = vi.fn(async () => {
+      throw new TypeError("fetch failed");
+    }) as unknown as typeof fetch;
+    const result = await pypiHasPureWheel("w", "1.0", { fetchImpl: fetchMock });
+    expect(result._unsafeUnwrapErr()).toMatchObject({
+      kind: "pypi_unavailable",
+      reason: expect.stringContaining("fetch failed"),
+    });
+  });
+
+  it("errs pypi_unavailable on a body that is not a release", async () => {
+    const fetchMock = fakeFetch({ "v==1.0": { ok: true, body: { urls: "nope" } } });
+    const result = await pypiHasPureWheel("v", "1.0", { fetchImpl: fetchMock });
+    expect(result._unsafeUnwrapErr().kind).toBe("pypi_unavailable");
   });
 });
 
