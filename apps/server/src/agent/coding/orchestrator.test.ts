@@ -1370,6 +1370,35 @@ describe("runCodingExecute", () => {
     expect(reloaded?.failureReason).toBe("sandbox went away");
   });
 
+  it("records a thrown error's cause in the failure reason", async () => {
+    const repo = await seedRepo();
+    const { task } = await seedExecutableTask(repo);
+    const { sandbox } = fakeSandbox();
+    const stream = recordingExecuteStream();
+    const thrown = new Error("exec failed", { cause: new Error("socket hang up") });
+    const backend: CodingBackend = {
+      plan: () => throwingPlan("plan not exercised by this test"),
+      execute: () => ({
+        [Symbol.asyncIterator]: () => ({ next: () => Promise.reject(thrown) }),
+      }),
+    };
+
+    const result = await runCodingExecute({
+      taskId: task.id,
+      runId: "run-test",
+      deps: makeDeps({ sandbox, backend, openExecuteStream: async () => stream.handle }),
+      stepRun,
+      stepSendEvent,
+      inngest: fakeInngest,
+    });
+
+    const reason = "exec failed (socket hang up)";
+    expect(result).toEqual({ status: "failed", failureReason: reason });
+    const reloaded = await tx((trx) => store.getTask(trx, task.id));
+    expect(reloaded?.failureReason).toBe(reason);
+    expect(stream.failed).toEqual([reason]);
+  });
+
   it("stops on a Cancel during the session: stays cancelled, reclaims, no hand-off to verify", async () => {
     const repo = await seedRepo();
     const { task } = await seedExecutableTask(repo);
