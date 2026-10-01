@@ -36,6 +36,7 @@ import type { Service } from "./service.js";
 import type { AgentStore } from "./store/index.js";
 import type { ToolRegistry } from "./tools.js";
 import { createTurnStepRunner } from "./turn-step-runner.js";
+
 export interface HandleMessageDeps {
   runInTx: Transactor;
   agentStore: AgentStore;

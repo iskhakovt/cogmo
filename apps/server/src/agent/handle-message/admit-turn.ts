@@ -4,7 +4,9 @@ import type { DeliveryRouter } from "../../transport/delivery-router.js";
 import type { TransportStore } from "../../transport/store/index.js";
 import { buildInCooldownReply, isInCooldown } from "../cooldown.js";
 import type { DebounceConfig } from "../debounce.js";
-import type { AgentStore } from "../store/index.js";
+import type { AgentStore, VoiceMode } from "../store/index.js";
+import type { CooldownState } from "../store/schema.js";
+import type { InboundRow } from "./inbound-batch.js";
 import type { TurnSteps } from "./turn-steps.js";
 
 export interface AdmitTurnDeps {
@@ -25,6 +27,37 @@ export interface AdmitTurnArgs {
 /** Why a turn ends before doing any work. */
 export type TurnSkipReason = "stale" | "await_input" | "no_messages" | "cooldown";
 
+/** The conversation row as `load-conversation` returns it. */
+export interface AdmittedConversation {
+  id: string;
+  userId: string;
+  profileId: string;
+  isPrivate: boolean;
+  /** Null unless a failed run put the conversation in cooldown; an admitted one has elapsed. */
+  cooldownState: CooldownState | null;
+  voiceMode: VoiceMode | null;
+}
+
+/** The profile and models the turn stamps on every row it writes. */
+export interface TurnSnapshot {
+  profileId: string;
+  model: string;
+  summarizationModel: string;
+}
+
+/** Whether this delivery of `inbound/ready` runs a turn, and what admission loaded for it. */
+export type Admission =
+  | { kind: "skipped"; reason: TurnSkipReason }
+  | {
+      kind: "admitted";
+      conv: AdmittedConversation;
+      /** The previous reply's row and inbound cursor; none before the first reply. */
+      lastAssistant: { id: string; lastInboundMessageId: string } | null;
+      snapshot: TurnSnapshot;
+      /** The unbatched inbound rows, never empty. */
+      inboundMessages: ReadonlyArray<InboundRow>;
+    };
+
 /**
  * Admission: load the conversation, the previous turn's cursor, the turn
  * snapshot and the unbatched inbound batch, and decide whether this delivery
@@ -35,7 +68,11 @@ export type TurnSkipReason = "stale" | "await_input" | "no_messages" | "cooldown
  * `load-inbound` (unless a guard skips first), `in-cooldown-reply` (only when
  * the cooldown guard skips).
  */
-export async function admitTurn(step: TurnSteps, deps: AdmitTurnDeps, args: AdmitTurnArgs) {
+export async function admitTurn(
+  step: TurnSteps,
+  deps: AdmitTurnDeps,
+  args: AdmitTurnArgs,
+): Promise<Admission> {
   const { agentStore, transportStore } = deps;
   const { conversationId, triggerInboundId, turnLogger } = args;
 
@@ -149,9 +186,9 @@ export async function admitTurn(step: TurnSteps, deps: AdmitTurnDeps, args: Admi
     return skipped("cooldown");
   }
 
-  return { kind: "admitted", conv, lastAssistant, snapshot, inboundMessages } as const;
+  return { kind: "admitted", conv, lastAssistant, snapshot, inboundMessages };
 }
 
-function skipped(reason: TurnSkipReason) {
-  return { kind: "skipped", reason } as const;
+function skipped(reason: TurnSkipReason): Admission {
+  return { kind: "skipped", reason };
 }

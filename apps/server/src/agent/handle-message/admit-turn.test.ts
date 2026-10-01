@@ -140,12 +140,15 @@ describe("admitTurn", () => {
     });
     deliveryRouter.notifyConversation.mockRejectedValue(new Error("no session"));
     const error = vi.spyOn(logger, "error").mockImplementation(() => undefined);
-    expect(await admitTurn(step, deps, args("in-2"))).toEqual({
-      kind: "skipped",
-      reason: "cooldown",
-    });
-    expect(error).toHaveBeenCalled();
-    error.mockRestore();
+    try {
+      expect(await admitTurn(step, deps, args("in-2"))).toEqual({
+        kind: "skipped",
+        reason: "cooldown",
+      });
+      expect(error).toHaveBeenCalled();
+    } finally {
+      error.mockRestore();
+    }
   });
 
   it("admits a probe turn once the cooldown has elapsed", async () => {
