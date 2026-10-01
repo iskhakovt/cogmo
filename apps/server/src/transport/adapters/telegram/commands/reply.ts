@@ -183,3 +183,32 @@ export function toReplyOptions(
     },
   };
 }
+
+/**
+ * Narrow a grammY CommandContext/CallbackQueryContext to the minimal shape used by pure
+ * command handlers. Pure `TelegramCommandContext.reply` declares a narrower options type than
+ * grammY's; the wrapper casts at the boundary — runtime-safe because `reply_markup` is a
+ * valid field on grammY's `Other`.
+ */
+interface GrammyCtxLite {
+  chat: { id: number } | undefined;
+  from: { id: number | string } | undefined;
+  match?: unknown;
+  reply: (text: string, other?: Record<string, unknown>) => Promise<unknown>;
+}
+
+export function toCmdCtx(ctx: GrammyCtxLite, overrideMatch?: string): TelegramCommandContext {
+  if (!ctx.chat || !ctx.from) throw new Error("telegram: ctx missing chat/from");
+  const match =
+    overrideMatch !== undefined
+      ? overrideMatch
+      : typeof ctx.match === "string"
+        ? ctx.match
+        : undefined;
+  return {
+    chat: { id: ctx.chat.id },
+    from: { id: ctx.from.id },
+    match,
+    reply: (text, options) => ctx.reply(text, options as Record<string, unknown> | undefined),
+  };
+}
