@@ -27,6 +27,15 @@ export interface CodingRun {
   log: Logger;
 }
 
+/** A run from an orchestrator's params, logging under its component logger. */
+export function codingRun(
+  params: Pick<CodingRun, "taskId" | "runId" | "stepRun" | "stepSendEvent">,
+  componentLog: Logger,
+): CodingRun {
+  const { taskId, runId, stepRun, stepSendEvent } = params;
+  return { taskId, runId, stepRun, stepSendEvent, log: componentLog.child({ taskId, runId }) };
+}
+
 /** The store handles a stage needs to read or write the task row. */
 export interface TaskStoreDeps {
   runInTx: Transactor;

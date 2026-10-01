@@ -1370,10 +1370,13 @@ describe("runCodingExecute", () => {
     expect(reloaded?.failureReason).toBe("sandbox went away");
   });
 
-  it("leaves a task cancelled during the session cancelled — no resurrection to pending_verify", async () => {
+  it("stops on a Cancel during the session: stays cancelled, reclaims, no hand-off to verify", async () => {
     const repo = await seedRepo();
     const { task } = await seedExecutableTask(repo);
-    const { sandbox } = fakeSandbox();
+    const { sandbox, stopCalls } = fakeSandbox();
+    const secrets = codingAuthSecrets();
+    const stream = recordingExecuteStream();
+    fakeInngest.send.mockClear();
     // A Cancel tap landing while `execute-cli` streams.
     const backend: CodingBackend = {
       plan: () => throwingPlan("plan not exercised by this test"),
@@ -1384,17 +1387,32 @@ describe("runCodingExecute", () => {
       },
     };
 
-    await runCodingExecute({
+    const result = await runCodingExecute({
       taskId: task.id,
       runId: "run-test",
-      deps: makeDeps({ sandbox, backend }),
+      deps: makeDeps({
+        sandbox,
+        backend,
+        secretsStore: secrets,
+        openExecuteStream: async () => stream.handle,
+      }),
       stepRun,
       stepSendEvent,
       inngest: fakeInngest,
     });
 
+    expect(result).toEqual({ status: "skipped" });
+    // Worktree teardown is the only thing on this path that looks up the
+    // repo's GitHub identity (for the WIP push).
+    expect(secrets.getSecret).toHaveBeenCalledWith(expect.anything(), "github_identity:default");
     const reloaded = await tx((trx) => store.getTask(trx, task.id));
     expect(reloaded?.status).toBe("cancelled");
+    expect(fakeInngest.send).not.toHaveBeenCalledWith(
+      expect.objectContaining({ name: "coding/task/cli-done" }),
+    );
+    expect(stream.completed).toEqual([]);
+    expect(stream.failed).toEqual(["Task cancelled while executing."]);
+    expect(stopCalls).toEqual([task.id]);
   });
 
   it("recreates container when no live one exists (reaper got it during long approval)", async () => {

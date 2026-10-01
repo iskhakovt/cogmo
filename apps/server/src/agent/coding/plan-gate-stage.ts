@@ -11,7 +11,7 @@ import type { CodingRun, TaskStoreDeps } from "./coding-run.js";
 import { planGateEmission } from "./plan-gate.js";
 import type { PlanStreamHandle } from "./progress-stream.js";
 import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
-import { safeTeardownWorktree } from "./teardown.js";
+import { advanceTask, reclaimEndedTask } from "./task-lifecycle.js";
 import type { WorktreeAssignment } from "./types.js";
 
 export interface PlanGateDeps extends TaskStoreDeps {
@@ -56,27 +56,25 @@ export async function parkPlanAtGate(
   // landing inside it takes `cancelTaskIfActive`'s `FOR UPDATE` path and
   // writes `cancelled`. An unconditional write here would resurrect that
   // task, render an approval keyboard for work the user already cancelled,
-  // and put the row back into `countActiveTasksForRepo`. No `runId`: this
-  // is not an ownership claim, and supplying one would widen the store's
-  // predicate to adopt an unclaimed row at the target.
-  const awaiting = await run.stepRun("set-status-plan-ready", () =>
-    deps.runInTx((tx) =>
-      deps.store.transitionTaskStatus(tx, run.taskId, "planning", "awaiting_approval"),
-    ),
-  );
-  // `stale` at the target is this step re-executing after a lost result.
-  if (
-    awaiting.kind !== "transitioned" &&
-    !(awaiting.kind === "stale" && awaiting.status === "awaiting_approval")
-  ) {
-    // A task that ENDED (cancelled, or failed by a sibling run's catch) has
-    // no owner, so this run reclaims what it allocated. One that moved
-    // FORWARD is being worked by another run on those very resources.
-    const ended =
-      awaiting.kind === "stale" &&
-      (awaiting.status === "cancelled" || awaiting.status === "failed");
-    run.log.info({ awaiting, ended }, "plan: task left `planning` mid-session — stopping");
-    if (ended) await reclaimEndedPlan(run, deps, args);
+  // and put the row back into `countActiveTasksForRepo`.
+  const awaiting = await advanceTask(run, deps, {
+    stepId: "set-status-plan-ready",
+    from: "planning",
+    to: "awaiting_approval",
+  });
+  if (awaiting.kind === "left") {
+    run.log.info(
+      { awaiting: awaiting.transition, ended: awaiting.ended },
+      "plan: task left `planning` mid-session — stopping",
+    );
+    if (awaiting.ended) {
+      await reclaimEndedTask(run, deps, {
+        repo: args.repo,
+        assignment: args.assignment,
+        stream,
+        message: "Task cancelled while planning.",
+      });
+    }
     return "left_planning";
   }
 
@@ -166,39 +164,4 @@ async function clearGateInRun(run: CodingRun, deps: TaskStoreDeps, gate: Gate): 
     id: `plan-approved-${run.taskId}`,
   });
   run.log.info({ gate, kind: approveResult.kind }, "plan gate cleared in-run — execute handed off");
-}
-
-/**
- * Reclaims the worktree, sandbox and stream of a task that ended while
- * planning. The run returns from inside its `try`, past the catch that
- * normally owns cleanup, so it happens here. The status stays exactly as
- * the canceller wrote it: `safeTeardownWorktree` only reads it, and a
- * sandbox delete failure is logged rather than thrown, since reaching the
- * catch would overwrite `cancelled` with `failed`. The periodic reaper is
- * the backstop.
- */
-async function reclaimEndedPlan(
-  run: CodingRun,
-  deps: PlanGateDeps,
-  args: { repo: CodingRepoRow; assignment: WorktreeAssignment; stream: PlanStreamHandle },
-): Promise<void> {
-  await run.stepRun("teardown-worktree-cancelled", () =>
-    safeTeardownWorktree({
-      runInTx: deps.runInTx,
-      secretsStore: deps.secretsStore,
-      repo: args.repo,
-      taskId: run.taskId,
-      worktreeAssignment: args.assignment,
-    }).then(() => null),
-  );
-  await run.stepRun("teardown-cancelled", () =>
-    deps.sandbox
-      .deleteByTaskId(run.taskId)
-      .then(() => null)
-      .catch((err: unknown) => {
-        run.log.warn({ err }, "cancelled-path teardown failed — sandbox left to the reaper");
-        return null;
-      }),
-  );
-  await args.stream.fail("Task cancelled while planning.").catch(() => {});
 }

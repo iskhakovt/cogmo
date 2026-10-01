@@ -1,11 +1,17 @@
 /**
- * The coding task's run-ownership claims. Each orchestrator opens by moving
- * the task out of the status its trigger event hands over; the transition
- * table as a whole lives in design/coding-delegation.md → Task lifecycle.
+ * The coding task's status transitions as the orchestrators drive them:
+ * the run-ownership claim each opens with, the conditional advances within a
+ * run, and what a run does when the task leaves its status under it. The
+ * transition table as a whole lives in design/coding-delegation.md → Task
+ * lifecycle.
  */
 
+import type { SandboxClient } from "../../sandbox/index.js";
+import type { SecretsStore } from "../../secrets/store/index.js";
 import type { CodingRun, TaskStoreDeps } from "./coding-run.js";
-import type { CodingStore, CodingTaskStatus } from "./store/index.js";
+import type { CodingRepoRow, CodingStore, CodingTaskStatus } from "./store/index.js";
+import { safeTeardownWorktree } from "./teardown.js";
+import type { WorktreeAssignment } from "./types.js";
 
 interface Claim {
   stepId: string;
@@ -20,9 +26,9 @@ export const CLAIMS = {
   verify: { stepId: "set-status-verifying", from: "pending_verify", to: "verifying" },
 } as const satisfies Record<string, Claim>;
 
-export type TransitionResult = Awaited<ReturnType<CodingStore["transitionTaskStatus"]>>;
+type TransitionResult = Awaited<ReturnType<CodingStore["transitionTaskStatus"]>>;
 
-export type ClaimOutcome = { kind: "owned" } | { kind: "lost"; transition: TransitionResult };
+type ClaimOutcome = { kind: "owned" } | { kind: "lost"; transition: TransitionResult };
 
 /**
  * Takes the run's ownership claim: a conditional `from → to` UPDATE stamping
@@ -57,4 +63,84 @@ export async function claimTask(
       transition.status === claim.to &&
       transition.claimedByRunId === run.runId);
   return owned ? { kind: "owned" } : { kind: "lost", transition };
+}
+
+/**
+ * `advanced`: the task is at `to`. `left`: it moved out of `from` under this
+ * run. `ended` says whether it went terminal (a Cancel, or a sibling run's
+ * failure) — no owner left, so the run reclaims what it allocated — rather
+ * than forward, where another run is working on those very resources.
+ */
+type AdvanceOutcome =
+  | { kind: "advanced" }
+  | { kind: "left"; ended: boolean; transition: TransitionResult };
+
+/**
+ * A conditional `from → to` UPDATE inside an already-owned run, as a step
+ * whose result the bare body branches on. No `runId`: it is not an
+ * ownership claim, and supplying one would widen the store's predicate to
+ * adopt an unclaimed row at the target. `stale` at `to` is this step
+ * re-executing after a lost result.
+ */
+export async function advanceTask(
+  run: CodingRun,
+  deps: TaskStoreDeps,
+  advance: Claim,
+): Promise<AdvanceOutcome> {
+  const transition = await run.stepRun(advance.stepId, () =>
+    deps.runInTx((tx) => deps.store.transitionTaskStatus(tx, run.taskId, advance.from, advance.to)),
+  );
+  if (
+    transition.kind === "transitioned" ||
+    (transition.kind === "stale" && transition.status === advance.to)
+  ) {
+    return { kind: "advanced" };
+  }
+  const ended =
+    transition.kind === "stale" &&
+    (transition.status === "cancelled" || transition.status === "failed");
+  return { kind: "left", ended, transition };
+}
+
+/**
+ * Reclaims the worktree, sandbox and stream of a task that ended under this
+ * run. The run returns from inside its `try`, past the catch that normally
+ * owns cleanup, so it happens here. The status stays exactly as the
+ * canceller wrote it: `safeTeardownWorktree` only reads it, and a sandbox
+ * delete failure is logged rather than thrown, since reaching the catch
+ * would overwrite `cancelled` with `failed`. The periodic reaper is the
+ * backstop.
+ */
+export async function reclaimEndedTask(
+  run: CodingRun,
+  deps: TaskStoreDeps & {
+    sandbox: Pick<SandboxClient, "deleteByTaskId">;
+    secretsStore: SecretsStore;
+  },
+  args: {
+    repo: CodingRepoRow;
+    assignment: WorktreeAssignment;
+    stream: { fail(message: string): Promise<void> };
+    message: string;
+  },
+): Promise<void> {
+  await run.stepRun("teardown-worktree-cancelled", () =>
+    safeTeardownWorktree({
+      runInTx: deps.runInTx,
+      secretsStore: deps.secretsStore,
+      repo: args.repo,
+      taskId: run.taskId,
+      worktreeAssignment: args.assignment,
+    }).then(() => null),
+  );
+  await run.stepRun("teardown-cancelled", () =>
+    deps.sandbox
+      .deleteByTaskId(run.taskId)
+      .then(() => null)
+      .catch((err: unknown) => {
+        run.log.warn({ err }, "cancelled-path teardown failed — sandbox left to the reaper");
+        return null;
+      }),
+  );
+  await args.stream.fail(args.message).catch(() => {});
 }

@@ -15,19 +15,23 @@ import type { Transactor } from "../../db/index.js";
 import { codingTaskPlanApproved, codingTaskStart } from "../../inngest/events.js";
 import type { StepRun, StepSendEvent } from "../../inngest/index.js";
 import { logger } from "../../logger.js";
-import type { SandboxClient, SandboxSession } from "../../sandbox/index.js";
+import type { SandboxClient } from "../../sandbox/index.js";
 import type { ResourceLimits } from "../../sandbox/types.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import { describeError } from "../../util/describe-error.js";
 import { allocateTaskWorktree } from "./allocate-task-worktree.js";
 import { AskpassLease } from "./askpass-lease.js";
 import type { loadCodingSandboxEnv } from "./auth.js";
-import type { BackendUsage, CodingBackend } from "./backend.js";
-import { type CodingRun, loadTaskAndRepo, type TaskStoreDeps } from "./coding-run.js";
-import { commitAuthorFor, runCommitAndPush } from "./commit-push.js";
-import { acquireExecuteSandbox, type ExecutePushCredentials } from "./execute-sandbox.js";
-import { completionTokens, persistSessionUsage, runExecuteSession } from "./execute-session.js";
-import { runBranchFor } from "./git-as-transport.js";
+import type { CodingBackend } from "./backend.js";
+import { type CodingRun, codingRun, loadTaskAndRepo } from "./coding-run.js";
+import {
+  checkExecutable,
+  endExecuteFailed,
+  handOffToVerify,
+  pushExecuteChanges,
+} from "./execute-outcomes.js";
+import { acquireExecuteSandbox } from "./execute-sandbox.js";
+import { persistSessionUsage, runExecuteSession } from "./execute-session.js";
 import { parkPlanAtGate } from "./plan-gate-stage.js";
 import { preparePlanSandbox } from "./plan-sandbox.js";
 import { runPlanSession } from "./plan-session.js";
@@ -37,10 +41,10 @@ import {
   NULL_PLAN_STREAM,
   type PlanStreamHandle,
 } from "./progress-stream.js";
-import type { CodingRepoRow, CodingStore, CodingTaskRow } from "./store/index.js";
+import type { CodingRepoRow, CodingStore } from "./store/index.js";
 import { failTaskFromCatch, recordTaskFailed } from "./task-failure.js";
 import { CLAIMS, claimTask } from "./task-lifecycle.js";
-import { lazySession, reapTaskSandbox, WORKTREE_DIR_IN_CONTAINER } from "./task-sandbox.js";
+import { lazySession, reapTaskSandbox } from "./task-sandbox.js";
 import { safeTeardownWorktree } from "./teardown.js";
 import type { WorktreeAssignment } from "./types.js";
 
@@ -175,18 +179,13 @@ interface ExecuteRunParams extends RunParams {
   inngest: Pick<Inngest, "send">;
 }
 
-function codingRun(params: RunParams): CodingRun {
-  const { taskId, runId, stepRun, stepSendEvent } = params;
-  return { taskId, runId, stepRun, stepSendEvent, log: log.child({ taskId, runId }) };
-}
-
 /**
  * The plan orchestration. `stepRun` is Inngest's `step.run` in production
  * and an inline shim in tests, so this runs without booting Inngest.
  */
 export async function runCodingTask(params: RunParams): Promise<CodingOrchestratorResult> {
   const { deps } = params;
-  const run = codingRun(params);
+  const run = codingRun(params, log);
   const { task, repo } = await loadTaskAndRepo(deps, run.taskId);
 
   // A duplicate `coding/task/start` returns here, before `sandbox.create`
@@ -290,14 +289,10 @@ async function endPlanFailed(
 
 /**
  * The execute orchestration. Same `stepRun` injection as `runCodingTask`.
- *
- * After the claim, three fields the plan phase owns must be set:
- * `plan_approved_at`, `session_id` and `worktree_assignment`. This run never
- * writes them, so checking them in the bare body is stable across replays.
  */
 export async function runCodingExecute(params: ExecuteRunParams): Promise<CodingExecuteResult> {
   const { deps } = params;
-  const run = codingRun(params);
+  const run = codingRun(params, log);
   const { task, repo } = await loadTaskAndRepo(deps, run.taskId);
 
   const claim = await claimTask(run, deps, CLAIMS.execute);
@@ -312,6 +307,7 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
   // Ahead of the checks and the try, so every failure from here reaches it.
   const stream = await (deps.openExecuteStream ?? (async () => NULL_EXECUTE_STREAM))(run.taskId);
   const { sessionId, worktreeAssignment: assignment } = await checkExecutable(task, stream);
+  const exit = { repo, assignment, stream };
 
   const askpass = new AskpassLease(deps.askpassBaseDir, run.taskId);
   try {
@@ -326,12 +322,14 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
     });
     if (result.isError) {
       const reason = result.failureReason ?? "execute phase failed";
-      return await endExecuteFailed(run, deps, { repo, assignment, stream }, reason, {
+      await endExecuteFailed(run, deps, exit, reason, {
         status: "set-status-failed",
         teardownWorktree: "teardown-worktree",
         teardown: "teardown",
         sandboxDeleted: "persist-sandbox-deleted",
+        logSuffix: "",
       });
+      return { status: "failed", failureReason: reason };
     }
     await persistSessionUsage(run, deps, result.usage);
     if (sandbox.push) {
@@ -344,16 +342,21 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       if (pushFailure !== null) {
         // `safeTeardownWorktree` is a no-op for git-remote, the only
         // transport that pushes here, so no worktree teardown step.
-        return await endExecuteFailed(run, deps, { repo, assignment, stream }, pushFailure, {
+        await endExecuteFailed(run, deps, exit, pushFailure, {
           status: "set-status-failed-after-push",
           teardownWorktree: null,
           teardown: "teardown-after-push-failure",
           sandboxDeleted: "persist-sandbox-deleted-after-push-failure",
+          logSuffix: " (push failure)",
         });
+        return { status: "failed", failureReason: pushFailure };
       }
     }
-    await handOffToVerify(run, deps, params.inngest, { stream, usage: result.usage });
-    return { status: "pending_verify" };
+    const handOff = await handOffToVerify(run, deps, params.inngest, {
+      ...exit,
+      usage: result.usage,
+    });
+    return handOff === "handed_off" ? { status: "pending_verify" } : { status: "skipped" };
   } catch (err) {
     const reason = describeError(err);
     run.log.error({ err }, "coding execute failed");
@@ -376,176 +379,4 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
   } finally {
     askpass.release();
   }
-}
-
-/**
- * Below the claim on purpose: a throw here fails the function, which sends
- * `coding-task-reconcile` at a row that — before the claim — this run has no
- * title to.
- */
-async function checkExecutable(
-  task: CodingTaskRow,
-  stream: ExecuteStreamHandle,
-): Promise<{ sessionId: string; worktreeAssignment: WorktreeAssignment }> {
-  const failedCheck = async (message: string): Promise<Error> => {
-    await stream.fail(message).catch(() => {});
-    return new Error(message);
-  };
-  if (!task.planApprovedAt) {
-    throw await failedCheck(
-      `coding task ${task.id} has no plan_approved_at — execute fired prematurely`,
-    );
-  }
-  if (!task.sessionId) {
-    throw await failedCheck(
-      `coding task ${task.id} has no session_id — plan phase didn't capture it`,
-    );
-  }
-  if (!task.worktreeAssignment) {
-    throw await failedCheck(`coding task ${task.id} has no worktree_assignment`);
-  }
-  return { sessionId: task.sessionId, worktreeAssignment: task.worktreeAssignment };
-}
-
-/**
- * git-remote: push claude's commits from inside the execute sandbox to the
- * run-branch `cogmo/run/<task-id>` — the ref the verify sandbox clones.
- * Verify then creates `cogmo/<idShort>` from its tip and pushes that as the
- * PR head. Returns the failure reason, or null when the push landed (or
- * there was nothing to commit).
- */
-async function pushExecuteChanges(
-  run: CodingRun,
-  args: {
-    task: CodingTaskRow;
-    assignment: WorktreeAssignment;
-    credentials: ExecutePushCredentials;
-    container: () => Promise<SandboxSession>;
-  },
-): Promise<string | null> {
-  const { assignment, credentials } = args;
-  if (assignment.type !== "git-remote") {
-    throw new Error(
-      `git-remote push step requires a git-remote worktree assignment, got ${assignment.type}`,
-    );
-  }
-  const result = await run.stepRun("commit-and-push-execute-changes", async () =>
-    runCommitAndPush({
-      container: await args.container(),
-      worktreeDir: WORKTREE_DIR_IN_CONTAINER,
-      branch: assignment.branch,
-      remoteBranch: runBranchFor(run.taskId),
-      commitMessage: args.task.goal,
-      signingKeyPath: credentials.askpass.signingKeyPath,
-      askpassEnv: {
-        GIT_ASKPASS: credentials.askpass.helperPath,
-        GIT_TERMINAL_PROMPT: "0",
-      },
-      author: commitAuthorFor(credentials.identity),
-    }),
-  );
-  if (result.kind === "pushed" || result.kind === "nothing_to_commit") return null;
-  return `execute push failed (${result.kind}):\n\n${result.output}`;
-}
-
-/** Step ids of one execute failure exit; each exit has its own. */
-interface ExecuteFailureSteps {
-  status: string;
-  /** Null where the transport leaves no host worktree to tear down. */
-  teardownWorktree: string | null;
-  teardown: string;
-  sandboxDeleted: string;
-}
-
-async function endExecuteFailed(
-  run: CodingRun,
-  deps: CodingOrchestratorDeps,
-  args: { repo: CodingRepoRow; assignment: WorktreeAssignment; stream: ExecuteStreamHandle },
-  reason: string,
-  steps: ExecuteFailureSteps,
-): Promise<CodingExecuteResult> {
-  await recordTaskFailed(run, deps, reason, steps.status);
-  if (steps.teardownWorktree !== null) {
-    await run.stepRun(steps.teardownWorktree, () =>
-      safeTeardownWorktree({
-        runInTx: deps.runInTx,
-        secretsStore: deps.secretsStore,
-        repo: args.repo,
-        taskId: run.taskId,
-        worktreeAssignment: args.assignment,
-      }),
-    );
-  }
-  await reapTaskSandbox(run, deps.sandbox, steps.teardown);
-  await stampSandboxDeleted(run, deps, steps.sandboxDeleted);
-  // The status is committed: a subscriber error must not reach the catch
-  // and write a second, less informative failed status over this reason.
-  await args.stream.complete(false).catch((streamErr: unknown) => {
-    run.log.warn({ err: streamErr }, "execute stream complete(false) notification failed");
-  });
-  await args.stream.fail(reason).catch((streamErr: unknown) => {
-    run.log.warn({ err: streamErr }, "execute stream fail notification failed");
-  });
-  return { status: "failed", failureReason: reason };
-}
-
-/**
- * `pending_verify`, then reap this container before emitting
- * `coding/task/cli-done`, so the verify run gets a fresh container with its
- * own secrets bound rather than reusing this one. The step boundary covers
- * replay; the `cli-done-<taskId>` id covers the crash window it can't, and
- * past the bus's window the verify claim skips a duplicate.
- */
-async function handOffToVerify(
-  run: CodingRun,
-  deps: CodingOrchestratorDeps,
-  inngest: Pick<Inngest, "send">,
-  args: { stream: ExecuteStreamHandle; usage: BackendUsage | undefined },
-): Promise<void> {
-  // Conditional on `executing`, so a Cancel that landed during `execute-cli`
-  // stays cancelled; the verify claim then skips the `cli-done` below. The
-  // step memoizes `void`, as its runs in flight expect, so the bare body
-  // carries on either way.
-  await run.stepRun("set-status-pending-verify", () =>
-    deps
-      .runInTx((tx) =>
-        deps.store.transitionTaskStatus(tx, run.taskId, "executing", "pending_verify"),
-      )
-      .then(() => undefined),
-  );
-  await reapTaskSandbox(run, deps.sandbox, "teardown");
-  await stampSandboxDeleted(run, deps, "persist-sandbox-deleted");
-  await run.stepRun("emit-cli-done", () =>
-    inngest
-      .send({
-        name: "coding/task/cli-done",
-        data: { taskId: run.taskId },
-        id: `cli-done-${run.taskId}`,
-      })
-      .then(() => undefined),
-  );
-  // After the durable work: a subscriber failure (a transient Telegram error
-  // on the final edit) must not regress `pending_verify` to `failed`.
-  await args.stream.complete(true, completionTokens(args.usage)).catch((streamErr: unknown) => {
-    run.log.warn(
-      { err: streamErr },
-      "execute stream complete notification failed (task already pending_verify)",
-    );
-  });
-}
-
-/**
- * Stamps `resource_usage.sandbox.deleted_at`; a no-op when no sandbox block
- * was persisted or the stamp is already there.
- */
-async function stampSandboxDeleted(
-  run: CodingRun,
-  deps: TaskStoreDeps,
-  stepId: string,
-): Promise<void> {
-  await run.stepRun(stepId, () =>
-    deps.runInTx((tx) =>
-      deps.store.setTaskSandboxDeletedAt(tx, run.taskId, new Date().toISOString()),
-    ),
-  );
 }
