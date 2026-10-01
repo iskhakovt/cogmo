@@ -3,7 +3,9 @@ import * as http from "node:http";
 import * as net from "node:net";
 import { join } from "node:path";
 import { addAbortSignal } from "node:stream";
+import { err, ok, type Result } from "neverthrow";
 import { logger } from "../../logger.js";
+import { describeError } from "../../util/describe-error.js";
 import { applyContainerCreatePolicy } from "./policy.js";
 import { classify } from "./router.js";
 import type { ProxyOptions, TaskScope } from "./types.js";
@@ -215,7 +217,7 @@ export class CogmoSocketProxy {
           log.error({ err, taskId: scope.taskId }, "container_create policy failed");
         }
         if (!res.headersSent) {
-          respondJson(res, 500, { message: `Cogmo proxy: ${(err as Error).message}` });
+          respondJson(res, 500, { message: `Cogmo proxy: ${describeError(err)}` });
         }
       });
       return;
@@ -236,24 +238,20 @@ export class CogmoSocketProxy {
     scope: TaskScope,
     signal: AbortSignal,
   ): Promise<void> {
-    let body: Buffer;
-    try {
-      body = await readBody(req, CONTAINER_CREATE_MAX_BODY_BYTES);
-    } catch (err) {
-      if ((err as Error).message === "body_too_large") {
-        // Write the 413 first, then drain whatever's still in flight so
-        // the client gets a clean response instead of ECONNRESET. Node
-        // discards drained chunks; for a hostile multi-GB body we'd want
-        // to bound the drain too, but at slice 3 scale the cap is small
-        // enough that draining the rest is cheap.
-        respondJson(res, 413, {
-          message: `Cogmo proxy: request body exceeds ${CONTAINER_CREATE_MAX_BODY_BYTES} bytes`,
-        });
-        req.resume();
-        return;
-      }
-      throw err;
+    const read = await readBody(req, CONTAINER_CREATE_MAX_BODY_BYTES);
+    if (read.isErr()) {
+      // Write the 413 first, then drain whatever's still in flight so
+      // the client gets a clean response instead of ECONNRESET. Node
+      // discards drained chunks; for a hostile multi-GB body we'd want
+      // to bound the drain too, but at slice 3 scale the cap is small
+      // enough that draining the rest is cheap.
+      respondJson(res, 413, {
+        message: `Cogmo proxy: request body exceeds ${read.error.maxBytes} bytes`,
+      });
+      req.resume();
+      return;
     }
+    const body = read.value;
     const decision = applyContainerCreatePolicy(body, scope);
     if (decision.kind === "deny") {
       log.info(
@@ -495,19 +493,22 @@ function respondJson(res: http.ServerResponse, status: number, body: object): vo
   res.end(payload);
 }
 
-async function readBody(req: http.IncomingMessage, maxBytes: number): Promise<Buffer> {
+/**
+ * Read the whole body, or stop at the first chunk past `maxBytes`. The caller
+ * answers `body_too_large` with a 413 and drains the rest (`req.resume()`), so
+ * the client connection closes cleanly rather than RST'ing.
+ */
+async function readBody(
+  req: http.IncomingMessage,
+  maxBytes: number,
+): Promise<Result<Buffer, { kind: "body_too_large"; maxBytes: number }>> {
   const chunks: Buffer[] = [];
   let total = 0;
   for await (const chunk of req) {
     const buf = chunk as Buffer;
     total += buf.length;
-    if (total > maxBytes) {
-      // Surface to the caller so it can write a 413 response. The caller
-      // is responsible for draining the rest of the body (`req.resume()`)
-      // so the client connection closes cleanly rather than RST'ing.
-      throw new Error("body_too_large");
-    }
+    if (total > maxBytes) return err({ kind: "body_too_large", maxBytes });
     chunks.push(buf);
   }
-  return Buffer.concat(chunks);
+  return ok(Buffer.concat(chunks));
 }
