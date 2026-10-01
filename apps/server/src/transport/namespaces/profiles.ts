@@ -1,9 +1,8 @@
 import type { Inngest } from "inngest";
 import { err, ok, type Result } from "neverthrow";
-import { isCoreCompartment } from "../../agent/evolution/memory-extraction-schema.js";
-import type { AgentStore, CodingAutoapproveMode, Profile } from "../../agent/store/index.js";
+import { findUnknownCompartmentImpl } from "../../agent/evolution/find-unknown-compartment.js";
+import type { CodingAutoapproveMode, Profile } from "../../agent/store/index.js";
 import type { CooldownState, ProfileMemoryScope, ToolSet } from "../../agent/store/schema.js";
-import type { Transaction } from "../../db/index.js";
 import type { TransportError } from "../transport-error.js";
 import type { TransportContext } from "./context.js";
 import { emitCooldownClearedIfAny } from "./cooldown-cleared.js";
@@ -259,25 +258,4 @@ export function createProfiles(deps: TransportContext & { inngest: Inngest }): P
       });
     },
   };
-}
-
-/**
- * Walk a candidate compartment list and return the first value that's
- * neither a core compartment nor one of the user's registered
- * `custom_compartments`. Returns `null` when every value is valid.
- * Loads customs via the supplied `tx` so the check sits inside the
- * outer transaction (consistency with the upcoming write).
- */
-async function findUnknownCompartmentImpl(
-  tx: Transaction,
-  agentStore: Pick<AgentStore, "listCustomCompartments">,
-  userId: string,
-  compartments: ReadonlyArray<string>,
-): Promise<string | null> {
-  const customs = await agentStore.listCustomCompartments(tx, userId);
-  const customNames = new Set(customs.map((c) => c.name));
-  for (const c of compartments) {
-    if (!isCoreCompartment(c) && !customNames.has(c)) return c;
-  }
-  return null;
 }
