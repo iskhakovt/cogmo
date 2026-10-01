@@ -17,6 +17,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { err, ok, type Result } from "neverthrow";
 import type { AgentStore } from "../agent/store/index.js";
 import type { SttProviderTypeValue, TtsProviderTypeValue } from "../agent/store/schema.js";
 import type { Transactor } from "../db/index.js";
@@ -104,31 +105,32 @@ export function createDbVoiceResolver(deps: DbVoiceResolverDeps): VoiceProviderR
       .digest("hex");
     if (cache && cache.hash === hash) return cache.bundle;
 
-    try {
-      const tts = buildTts(row.ttsProvider, {
-        apiKey: ttsKey,
-        baseURL: row.ttsBaseUrl,
-        ...(deps.fetch && { fetch: deps.fetch }),
-      });
-      const stt = buildStt(row.sttProvider, {
+    const built = buildTts(row.ttsProvider, {
+      apiKey: ttsKey,
+      baseURL: row.ttsBaseUrl,
+      ...(deps.fetch && { fetch: deps.fetch }),
+    }).andThen((tts) =>
+      buildStt(row.sttProvider, {
         apiKey: sttKey,
         baseURL: row.sttBaseUrl,
         ...(deps.fetch && { fetch: deps.fetch }),
-      });
-      const bundle: VoiceBundle = {
-        tts: { provider: tts, voice: row.ttsVoice, model: row.ttsModel },
-        stt: { provider: stt, model: row.sttModel },
-      };
-      cache = { hash, bundle };
-      return bundle;
-    } catch (err) {
+      }).map(
+        (stt): VoiceBundle => ({
+          tts: { provider: tts, voice: row.ttsVoice, model: row.ttsModel },
+          stt: { provider: stt, model: row.sttModel },
+        }),
+      ),
+    );
+    if (built.isErr()) {
       logger.warn(
-        { err, ttsProvider: row.ttsProvider, sttProvider: row.sttProvider },
-        "voice provider construction failed — voice disabled until config is fixed",
+        { reason: built.error, ttsProvider: row.ttsProvider, sttProvider: row.sttProvider },
+        "voice provider config is invalid — voice disabled until config is fixed",
       );
       cache = undefined;
       return undefined;
     }
+    cache = { hash, bundle: built.value };
+    return built.value;
   };
 }
 
@@ -138,54 +140,69 @@ interface BuildOpts {
   fetch?: FetchLike;
 }
 
-function buildTts(type: TtsProviderTypeValue, opts: BuildOpts): TtsProvider {
+/** A voice config row that can't build a provider, as the operator-facing reason. */
+type VoiceConfigError = string;
+
+function buildTts(
+  type: TtsProviderTypeValue,
+  opts: BuildOpts,
+): Result<TtsProvider, VoiceConfigError> {
   switch (type) {
     case "openai":
-      return new OpenAIVoiceProvider({
-        apiKey: opts.apiKey,
-        ...(opts.baseURL && { baseURL: opts.baseURL }),
-        ...(opts.fetch && { fetch: opts.fetch }),
-      });
+      return ok(
+        new OpenAIVoiceProvider({
+          apiKey: opts.apiKey,
+          ...(opts.baseURL && { baseURL: opts.baseURL }),
+          ...(opts.fetch && { fetch: opts.fetch }),
+        }),
+      );
     case "openai_compatible":
-      if (!opts.baseURL) {
-        throw new Error(
-          "voice TTS provider 'openai_compatible' requires a base URL — re-run `cogmo setup` and set one",
-        );
-      }
-      return new OpenAIVoiceProvider({
-        apiKey: opts.apiKey,
-        baseURL: opts.baseURL,
-        ...(opts.fetch && { fetch: opts.fetch }),
-      });
+      return openAiCompatible("TTS", opts);
     case "elevenlabs":
-      return new ElevenLabsTtsProvider({
-        apiKey: opts.apiKey,
-        ...(opts.baseURL && { baseURL: opts.baseURL }),
-        ...(opts.fetch && { fetch: opts.fetch }),
-      });
+      return ok(
+        new ElevenLabsTtsProvider({
+          apiKey: opts.apiKey,
+          ...(opts.baseURL && { baseURL: opts.baseURL }),
+          ...(opts.fetch && { fetch: opts.fetch }),
+        }),
+      );
   }
 }
 
-function buildStt(type: SttProviderTypeValue, opts: BuildOpts): SttProvider {
+function buildStt(
+  type: SttProviderTypeValue,
+  opts: BuildOpts,
+): Result<SttProvider, VoiceConfigError> {
   switch (type) {
     case "openai":
-      return new OpenAIVoiceProvider({
-        apiKey: opts.apiKey,
-        ...(opts.baseURL && { baseURL: opts.baseURL }),
-        ...(opts.fetch && { fetch: opts.fetch }),
-      });
+      return ok(
+        new OpenAIVoiceProvider({
+          apiKey: opts.apiKey,
+          ...(opts.baseURL && { baseURL: opts.baseURL }),
+          ...(opts.fetch && { fetch: opts.fetch }),
+        }),
+      );
     case "openai_compatible":
-      if (!opts.baseURL) {
-        throw new Error(
-          "voice STT provider 'openai_compatible' requires a base URL — re-run `cogmo setup` and set one",
-        );
-      }
-      return new OpenAIVoiceProvider({
-        apiKey: opts.apiKey,
-        baseURL: opts.baseURL,
-        ...(opts.fetch && { fetch: opts.fetch }),
-      });
+      return openAiCompatible("STT", opts);
   }
+}
+
+function openAiCompatible(
+  side: "TTS" | "STT",
+  opts: BuildOpts,
+): Result<OpenAIVoiceProvider, VoiceConfigError> {
+  if (!opts.baseURL) {
+    return err(
+      `voice ${side} provider 'openai_compatible' requires a base URL — re-run \`cogmo setup\` and set one`,
+    );
+  }
+  return ok(
+    new OpenAIVoiceProvider({
+      apiKey: opts.apiKey,
+      baseURL: opts.baseURL,
+      ...(opts.fetch && { fetch: opts.fetch }),
+    }),
+  );
 }
 
 /**
