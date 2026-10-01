@@ -1,6 +1,7 @@
 import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import type { Profile } from "../../../../agent/store/index.js";
+import { mkCtx, transportWith } from "../../../../test/telegram/command-fixtures.js";
 import {
   handleEnd,
   handleName,
@@ -9,7 +10,6 @@ import {
   handleResumeCallback,
   handleSessions,
 } from "./sessions.js";
-import { mkCtx, transportWith } from "./test-fixtures.js";
 
 describe("handleSessions", () => {
   it("renders keyboard and includes current marker", async () => {

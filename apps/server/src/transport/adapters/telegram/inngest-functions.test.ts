@@ -12,10 +12,10 @@ import {
   mockTransport,
   mockTransportStore,
 } from "../../../test/factories.js";
+import { mockBotApi, resetGrammyMock } from "../../../test/telegram/grammy-mock.js";
 import { setup } from "./index.js";
-import { mockBotApi, resetGrammyMock } from "./test-grammy-mock.js";
 
-vi.mock("grammy", async () => (await import("./test-grammy-mock.js")).grammyModule);
+vi.mock("grammy", async () => (await import("../../../test/telegram/grammy-mock.js")).grammyModule);
 
 describe("telegramFunctions", () => {
   beforeEach(() => {

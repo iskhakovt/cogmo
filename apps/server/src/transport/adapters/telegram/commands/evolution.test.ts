@@ -1,7 +1,7 @@
 import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
+import { mkCtx, transportWith } from "../../../../test/telegram/command-fixtures.js";
 import { handleLearned, handleReflect } from "./evolution.js";
-import { mkCtx, transportWith } from "./test-fixtures.js";
 
 describe("handleLearned", () => {
   const EVT_A = "019e2900-0000-7000-8000-0000000000aa";

@@ -2,9 +2,9 @@
 
 import { ok } from "neverthrow";
 import { vi } from "vitest";
-import { asBatchAdapter } from "../../../test/assertions.js";
-import { mockAttachmentStore, mockInngest, mockTransport } from "../../../test/factories.js";
-import { setup } from "./index.js";
+import { setup } from "../../transport/adapters/telegram/index.js";
+import { asBatchAdapter } from "../assertions.js";
+import { mockAttachmentStore, mockInngest, mockTransport } from "../factories.js";
 
 export function makeCtx(fromId: number, text = "hello", chatId = 42) {
   return {

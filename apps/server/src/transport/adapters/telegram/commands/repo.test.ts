@@ -1,8 +1,8 @@
 import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
+import { mkCtx, transportWith } from "../../../../test/telegram/command-fixtures.js";
 import { RepoDialogs } from "../repo-dialog.js";
 import { handleRepo } from "./repo.js";
-import { mkCtx, transportWith } from "./test-fixtures.js";
 
 describe("handleRepo", () => {
   describe("list", () => {

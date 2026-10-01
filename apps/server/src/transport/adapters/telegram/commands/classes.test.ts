@@ -1,7 +1,7 @@
 import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
+import { mkCtx, transportWith } from "../../../../test/telegram/command-fixtures.js";
 import { handleClasses } from "./classes.js";
-import { mkCtx, transportWith } from "./test-fixtures.js";
 
 describe("handleClasses", () => {
   it("rejects /classes add with reserved name 'clear' before calling Transport", async () => {

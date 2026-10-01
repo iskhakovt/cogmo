@@ -1,9 +1,9 @@
 /** Context and transport stubs shared by the command handlers' tests. */
 
 import { vi } from "vitest";
-import { type DeepPartial, mockTransportDeep } from "../../../../test/factories.js";
-import type { Transport } from "../../../transport.js";
-import type { TelegramCommandContext } from "./reply.js";
+import type { TelegramCommandContext } from "../../transport/adapters/telegram/commands/reply.js";
+import type { Transport } from "../../transport/transport.js";
+import { type DeepPartial, mockTransportDeep } from "../factories.js";
 
 export function mkCtx(match?: string): TelegramCommandContext & {
   reply: ReturnType<typeof vi.fn>;

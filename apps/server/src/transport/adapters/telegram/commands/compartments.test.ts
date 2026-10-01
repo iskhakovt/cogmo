@@ -1,8 +1,8 @@
 import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
+import { mkCtx, transportWith } from "../../../../test/telegram/command-fixtures.js";
 import { ProfileDialogs } from "../profile-dialog.js";
 import { handleCompartments } from "./compartments.js";
-import { mkCtx, transportWith } from "./test-fixtures.js";
 
 function _mkDialogs(): ProfileDialogs {
   return new ProfileDialogs();

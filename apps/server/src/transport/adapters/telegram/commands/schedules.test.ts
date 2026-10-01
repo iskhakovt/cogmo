@@ -1,7 +1,7 @@
 import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
+import { mkCtx, transportWith } from "../../../../test/telegram/command-fixtures.js";
 import { handleSchedules } from "./schedules.js";
-import { mkCtx, transportWith } from "./test-fixtures.js";
 
 describe("handleSchedules", () => {
   const TASK_ID_A = "019e2900-0000-7000-8000-000000000001";

@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mockAttachmentStore, mockInngest, mockTransport } from "../../../test/factories.js";
+import { mockBotApi, resetGrammyMock } from "../../../test/telegram/grammy-mock.js";
 import { setup } from "./index.js";
-import { mockBotApi, resetGrammyMock } from "./test-grammy-mock.js";
 
-vi.mock("grammy", async () => (await import("./test-grammy-mock.js")).grammyModule);
+vi.mock("grammy", async () => (await import("../../../test/telegram/grammy-mock.js")).grammyModule);
 
 function setupWith(credentials: Parameters<typeof setup>[0]["credentials"]) {
   return setup({

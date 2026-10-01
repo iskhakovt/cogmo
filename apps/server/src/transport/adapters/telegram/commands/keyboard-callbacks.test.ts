@@ -1,12 +1,12 @@
 import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import { mockTransportDeep } from "../../../../test/factories.js";
+import { transportWith } from "../../../../test/telegram/command-fixtures.js";
 import {
   handlePipelineGateCallback,
   handlePlanCallback,
   handleSkillsApprovalCallback,
 } from "./keyboard-callbacks.js";
-import { transportWith } from "./test-fixtures.js";
 
 describe("handlePlanCallback", () => {
   const taskId = "019d0000-0000-7000-8000-000000000001";

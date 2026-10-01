@@ -4,11 +4,11 @@ import { PLAN_CALLBACK_REGEX } from "../../../agent/coding/plan-keyboard.js";
 import { PIPELINE_GATE_CALLBACK_REGEX } from "../../../agent/pipeline/gate-keyboard.js";
 import { SKILLS_APPROVAL_CALLBACK_REGEX } from "../../../skills/skills-keyboard.js";
 import { mockAttachmentStore, mockInngest, mockTransport } from "../../../test/factories.js";
+import { handlers, resetGrammyMock } from "../../../test/telegram/grammy-mock.js";
+import { createAdapter } from "../../../test/telegram/harness.js";
 import { setup } from "./index.js";
-import { handlers, resetGrammyMock } from "./test-grammy-mock.js";
-import { createAdapter } from "./test-harness.js";
 
-vi.mock("grammy", async () => (await import("./test-grammy-mock.js")).grammyModule);
+vi.mock("grammy", async () => (await import("../../../test/telegram/grammy-mock.js")).grammyModule);
 
 describe("registerCallbackQueries", () => {
   beforeEach(() => {

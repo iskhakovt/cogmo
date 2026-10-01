@@ -1,17 +1,17 @@
 import { ok } from "neverthrow";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mockAttachmentStore, mockInngest, mockTransport } from "../../../test/factories.js";
-import { setup } from "./index.js";
-import { handlers, resetGrammyMock } from "./test-grammy-mock.js";
+import { handlers, resetGrammyMock } from "../../../test/telegram/grammy-mock.js";
 import {
   createAdapter,
   makeCtx,
   makeDocumentCtx,
   makePhotoCtx,
   makeVoiceCtx,
-} from "./test-harness.js";
+} from "../../../test/telegram/harness.js";
+import { setup } from "./index.js";
 
-vi.mock("grammy", async () => (await import("./test-grammy-mock.js")).grammyModule);
+vi.mock("grammy", async () => (await import("../../../test/telegram/grammy-mock.js")).grammyModule);
 
 describe("registerMessageHandlers", () => {
   beforeEach(() => {

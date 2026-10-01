@@ -1,10 +1,15 @@
 import { matchFilter } from "grammy";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { expectDefined } from "../../../test/assertions.js";
-import { commandComposer, handlers, mockBotApi, resetGrammyMock } from "./test-grammy-mock.js";
-import { createAdapter, makeCtx } from "./test-harness.js";
+import {
+  commandComposer,
+  handlers,
+  mockBotApi,
+  resetGrammyMock,
+} from "../../../test/telegram/grammy-mock.js";
+import { createAdapter, makeCtx } from "../../../test/telegram/harness.js";
 
-vi.mock("grammy", async () => (await import("./test-grammy-mock.js")).grammyModule);
+vi.mock("grammy", async () => (await import("../../../test/telegram/grammy-mock.js")).grammyModule);
 
 describe("registerCommands", () => {
   beforeEach(() => {

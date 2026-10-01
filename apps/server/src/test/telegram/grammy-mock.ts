@@ -1,7 +1,7 @@
 /**
  * A stand-in for grammY that records what `setup()` registers, for the
  * adapter's tests. Each test file installs it with
- * `vi.mock("grammy", async () => (await import("./test-grammy-mock.js")).grammyModule)`
+ * `vi.mock("grammy", async () => (await import("<relative path>/test/telegram/grammy-mock.js")).grammyModule)`
  * and calls `resetGrammyMock()` before each test.
  */
 

@@ -1,7 +1,7 @@
 import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
+import { mkCtx, transportWith } from "../../../../test/telegram/command-fixtures.js";
 import { handleMcp } from "./mcp.js";
-import { mkCtx, transportWith } from "./test-fixtures.js";
 
 describe("handleMcp", () => {
   function mcpServerStatus(overrides: {

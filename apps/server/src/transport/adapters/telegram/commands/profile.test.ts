@@ -1,9 +1,9 @@
 import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import type { Profile } from "../../../../agent/store/index.js";
+import { mkCtx, transportWith } from "../../../../test/telegram/command-fixtures.js";
 import { ProfileDialogs } from "../profile-dialog.js";
 import { handleProfile } from "./profile.js";
-import { mkCtx, transportWith } from "./test-fixtures.js";
 
 function mkDialogs(): ProfileDialogs {
   return new ProfileDialogs();

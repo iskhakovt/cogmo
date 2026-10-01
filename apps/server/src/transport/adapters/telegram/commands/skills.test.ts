@@ -1,7 +1,7 @@
 import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
+import { mkCtx, transportWith } from "../../../../test/telegram/command-fixtures.js";
 import { handleDisable, handleEnable, handleSkills } from "./skills.js";
-import { mkCtx, transportWith } from "./test-fixtures.js";
 
 describe("handleSkills", () => {
   it("renders one line per skill, with disabled marker", async () => {

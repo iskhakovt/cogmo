@@ -1,9 +1,9 @@
 import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import { expectDefined } from "../../../../test/assertions.js";
+import { mkCtx, transportWith } from "../../../../test/telegram/command-fixtures.js";
 import type { Transport } from "../../../transport.js";
 import { handleCompact, handleRepair, handleStatus, handleVoice } from "./conversation.js";
-import { mkCtx, transportWith } from "./test-fixtures.js";
 
 describe("handleRepair", () => {
   // Bare `/repair` (no arg) acts on the current session. Mirrors `/name`'s

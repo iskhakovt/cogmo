@@ -1,7 +1,7 @@
 import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
+import { mkCtx, transportWith } from "../../../../test/telegram/command-fixtures.js";
 import { handleModel } from "./model.js";
-import { mkCtx, transportWith } from "./test-fixtures.js";
 
 describe("handleModel", () => {
   it("lists models when called without arg", async () => {

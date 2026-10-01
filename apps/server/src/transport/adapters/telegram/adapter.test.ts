@@ -3,12 +3,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { logger } from "../../../logger.js";
 import { expectDefined, resolvesWithin } from "../../../test/assertions.js";
 import { mockAttachmentStore, mockInngest, mockTransport } from "../../../test/factories.js";
+import {
+  botLifecycle,
+  mockBotApi,
+  resetGrammyMock,
+  runUpdate,
+} from "../../../test/telegram/grammy-mock.js";
+import { createAdapter } from "../../../test/telegram/harness.js";
 import type { StreamingAdapter } from "../../types.js";
 import { setup } from "./index.js";
-import { botLifecycle, mockBotApi, resetGrammyMock, runUpdate } from "./test-grammy-mock.js";
-import { createAdapter } from "./test-harness.js";
 
-vi.mock("grammy", async () => (await import("./test-grammy-mock.js")).grammyModule);
+vi.mock("grammy", async () => (await import("../../../test/telegram/grammy-mock.js")).grammyModule);
 
 describe("TelegramAdapter", () => {
   beforeEach(() => {
