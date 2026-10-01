@@ -444,13 +444,34 @@ export interface ObserverTranscript {
  */
 export function formatObserverTranscript(transcript: ObserverTranscript): string {
   const earlier = [
-    ...(transcript.summary === null ? [] : [`<summary>\n${transcript.summary}\n</summary>`]),
-    ...transcript.context,
+    ...(transcript.summary === null
+      ? []
+      : [`<summary>\n${neutralizeStructure(transcript.summary)}\n</summary>`]),
+    ...transcript.context.map(neutralizeStructure),
   ];
-  const numbered = transcript.messages.map((m, i) => `[${i + 1}] ${m.line}`).join("\n\n");
+  const numbered = transcript.messages
+    .map((m, i) => `[${i + 1}] ${neutralizeStructure(m.line)}`)
+    .join("\n\n");
   const fresh = `<new_messages>\n${numbered}\n</new_messages>`;
   if (earlier.length === 0) return fresh;
   return `<earlier_conversation>\n${earlier.join("\n\n")}\n</earlier_conversation>\n\n${fresh}`;
+}
+
+/** An opening or closing tag of the transcript's own structure, however spaced or cased. */
+const STRUCTURAL_TAG = /<(\s*\/?\s*)(new_messages|earlier_conversation|summary)(?=[\s/>]|$)/gi;
+
+/** A line that opens with a new message's number, `[n]`. */
+const NUMBERED_LINE = /^(\s*)\[(\d+)\]/gm;
+
+/**
+ * Text inserted into the transcript — a message, a tool call or result, the
+ * summary — with nothing that could pass for the transcript's structure: the
+ * `<` of a structural tag becomes `&lt;`, and a line opening with `[n]` opens
+ * with `\[n]`, so no inserted text can close or open a section or number an
+ * item. Text with neither is unchanged.
+ */
+export function neutralizeStructure(text: string): string {
+  return text.replace(STRUCTURAL_TAG, "&lt;$1$2").replace(NUMBERED_LINE, "$1\\[$2]");
 }
 
 /** The id of the new message an item cites by its `[n]`; undefined when it cites none. */
