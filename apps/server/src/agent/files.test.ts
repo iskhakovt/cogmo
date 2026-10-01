@@ -159,6 +159,18 @@ describe("createFileService.read", () => {
     expect(result).toContain("[Content truncated");
     expect(result.length).toBeLessThan(huge.length);
   });
+
+  it("truncates on a code-point boundary, never inside a surrogate pair", async () => {
+    // The emoji's two UTF-16 units straddle the 100,000-unit limit.
+    const content = `${"x".repeat(99_999)}😀${"y".repeat(10)}`;
+    const { client } = s3Mock({ get: () => ({ Body: body(content), LastModified: T0 }) });
+    const files = createFileService(client, "bucket");
+
+    const result = await files.read("emoji.txt");
+
+    expect(result.isWellFormed()).toBe(true);
+    expect(result.startsWith(`${"x".repeat(99_999)}\n\n[Content truncated`)).toBe(true);
+  });
 });
 
 describe("createFileService.write", () => {

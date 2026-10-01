@@ -307,15 +307,19 @@ describe("createDefaultTools", () => {
 });
 
 describe("durability policy invariant", () => {
-  // Side-effectful or billable ⇒ durable. Inngest re-invokes the whole
-  // function at every step boundary, so a non-durable side-effectful
-  // handler re-executes once per remaining boundary of the turn — the bug
-  // class design/crash-recovery.md → Tool durability policy exists to
-  // prevent. This sweeps every statically-constructible built-in spec so a
-  // forgotten flag on a new tool fails loudly instead of shipping on
-  // comment discipline. (Factory-built sets — image tools, skill tools,
-  // sub-agent tools, MCP tools — carry the flag in their builders, asserted
-  // in their own test files.)
+  // Side-effectful, billable, or output that can change within the turn ⇒
+  // durable, and every built-in qualifies: a clock, or a read a same-turn
+  // write changes. Inngest re-invokes the whole function at every step
+  // boundary, so a non-durable handler re-executes once per remaining
+  // boundary of the turn — the bug class design/crash-recovery.md → Tool
+  // durability policy exists to prevent. This sweeps every
+  // statically-constructible built-in spec so a forgotten flag on a new tool
+  // fails loudly instead of shipping on comment discipline. The policy's one
+  // exemption, a handler whose output is a pure function of its input, has no
+  // built-in today; a built-in that takes it is named in this sweep, in the
+  // same change. (Factory-built sets — image tools, skill tools, sub-agent
+  // tools, MCP tools — carry the flag in their builders, asserted in their
+  // own test files.)
   /**
    * Every statically-constructible built-in spec. Shared by both sweeps below
    * — building it twice invites the two lists to drift, and a tool missing
@@ -348,12 +352,10 @@ describe("durability policy invariant", () => {
     ];
   }
 
-  it("every side-effectful built-in tool is durable", async () => {
+  it("every built-in tool is durable", async () => {
     const specs = await builtInSpecs();
     expect(specs.length).toBeGreaterThan(15);
-    const violations = specs
-      .filter((spec) => (spec.sideEffectful ?? true) && spec.durable !== true)
-      .map((spec) => spec.name);
+    const violations = specs.filter((spec) => spec.durable !== true).map((spec) => spec.name);
     expect(violations).toEqual([]);
   });
 

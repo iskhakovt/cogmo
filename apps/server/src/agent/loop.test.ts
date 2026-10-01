@@ -1137,7 +1137,7 @@ describe("runStreamingAgentLoop", () => {
         role: "assistant",
         content: [
           { type: "text", text: "Step one: install. Step two: conf" },
-          { type: "text", text: notice },
+          { type: "text", text: notice, harness: "truncation_notice" },
         ],
       },
     ]);
@@ -2866,12 +2866,17 @@ function repairStreamProvider(turns: ReadonlyArray<RepairTurn>): {
 }
 
 describe("in-loop model-misbehavior repair", () => {
-  it("empty end_turn → continuation prompt → next iteration completes; ephemeral turn not persisted", async () => {
+  it("empty end_turn → continuation prompt → next iteration completes; the prompt persists and replays unchanged", async () => {
     const { provider, streamCalls } = repairStreamProvider([
       { kind: "stream", events: [], stopReason: "end_turn" },
       {
         kind: "stream",
         events: [{ type: "text_delta", text: "ok now" }],
+        stopReason: "end_turn",
+      },
+      {
+        kind: "stream",
+        events: [{ type: "text_delta", text: "next reply" }],
         stopReason: "end_turn",
       },
     ]);
@@ -2893,19 +2898,30 @@ describe("in-loop model-misbehavior repair", () => {
     expect(result.degraded).toBeUndefined();
     // Two LLM stream calls.
     expect(streamCalls).toHaveLength(2);
-    // Synthetic continuation prompt fed back to the model (visible in the
-    // second iteration's history input).
+    // The continuation prompt the second iteration sent is the message the
+    // turn persists, ahead of the reply bound to it.
+    const continuation: Message = {
+      role: "user",
+      content: [{ type: "text", text: "Please complete your response.", harness: "continuation" }],
+    };
     const secondCallMessages = streamCalls[1]?.messages ?? [];
-    const lastUser = secondCallMessages.at(-1);
-    expect(lastUser?.role).toBe("user");
-    expect(lastUser?.content).toBe("Please complete your response.");
-    // The synthetic user turn is NOT in newMessages — only the
-    // successful assistant reply from iteration 2.
-    expect(result.newMessages).toHaveLength(1);
-    expect(result.newMessages[0]).toEqual({
-      role: "assistant",
-      content: [{ type: "text", text: "ok now" }],
+    expect(secondCallMessages).toEqual([{ role: "user", content: "hi" }, continuation]);
+    expect(result.newMessages).toEqual([
+      continuation,
+      { role: "assistant", content: [{ type: "text", text: "ok now" }] },
+    ]);
+
+    // The next turn, loaded from those rows, replays the request the reply
+    // was bound to unchanged and appends to it.
+    const history: Message[] = [{ role: "user", content: "hi" }, ...result.newMessages];
+    await testRunStreamingAgentLoop({
+      provider,
+      messages: [...history, { role: "user", content: "and then?" }],
+      tools: new ToolRegistry(),
+      onEvent: async () => {},
     });
+    expect(streamCalls[2]?.messages.slice(0, history.length)).toEqual(history);
+
     // Repair telemetry.
     expect(turnLogger.warn).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -2937,8 +2953,9 @@ describe("in-loop model-misbehavior repair", () => {
       subtype: "empty_end_turn",
     });
     expect(result.iterations).toBe(2);
-    // The failing iteration's empty assistant content is NOT in newMessages.
-    expect(result.newMessages).toHaveLength(0);
+    // Neither empty reply persists, and so neither does the continuation
+    // prompt: no kept reply is bound to it, and the turn must not end on it.
+    expect(result.newMessages).toEqual([]);
     expect(turnLogger.warn).toHaveBeenCalledWith(
       expect.objectContaining({
         event: "agent.degrade",
@@ -2946,6 +2963,26 @@ describe("in-loop model-misbehavior repair", () => {
       }),
       expect.any(String),
     );
+  });
+
+  it("an empty end_turn on the last allowed iteration persists no continuation prompt", async () => {
+    // The prompt is pushed, the iteration cap ends the loop before any
+    // request carries it, and the degrade must not persist it.
+    const { provider, streamCalls } = repairStreamProvider([
+      { kind: "stream", events: [], stopReason: "end_turn" },
+    ]);
+
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "hi" }],
+      tools: new ToolRegistry(),
+      onEvent: async () => {},
+      maxIterations: 1,
+    });
+
+    expect(streamCalls).toHaveLength(1);
+    expect(result.degraded).toEqual({ reason: "iteration_cap", subtype: null });
+    expect(result.newMessages).toEqual([]);
   });
 
   it("stream truncation (ProviderProtocolError) → non-streaming replay → success", async () => {
@@ -3179,7 +3216,7 @@ describe("in-loop model-misbehavior repair", () => {
         role: "assistant",
         content: [
           { type: "text", text: "The answer starts here" },
-          { type: "text", text: notice },
+          { type: "text", text: notice, harness: "truncation_notice" },
         ],
       },
     ]);
@@ -3446,7 +3483,7 @@ describe("in-loop model-misbehavior repair", () => {
     expect(result.text).toBe("done");
   });
 
-  it("persistence boundary: successful tool round persists; failing iteration + synthetic prompt do not", async () => {
+  it("persistence boundary: the tool round persists; failing iterations and the prompt between them do not", async () => {
     // iteration 1: tool_use; iteration 2: empty end_turn (fails); iteration 3: empty end_turn (degrade)
     const { provider } = repairStreamProvider([
       {
@@ -3475,26 +3512,19 @@ describe("in-loop model-misbehavior repair", () => {
     });
 
     expect(result.degraded?.subtype).toBe("empty_end_turn");
-    // newMessages should contain the successful tool round (assistant
-    // tool_use + user tool_result) but NOT the empty assistant from
-    // iteration 2, NOT the synthetic continuation prompt, and NOT the
-    // empty assistant from iteration 3.
-    expect(result.newMessages).toHaveLength(2);
-    expect(result.newMessages[0]).toEqual({
-      role: "assistant",
-      content: [{ type: "tool_use", id: "t1", name: "echo", input: { text: "x" } }],
-    });
-    expect(result.newMessages[1]).toEqual({
-      role: "user",
-      content: [{ type: "tool_result", toolUseId: "t1", content: "pong from x" }],
-    });
-    // No "Please complete your response." synthetic prompt should
-    // appear among the persistable messages.
-    for (const m of result.newMessages) {
-      if (typeof m.content === "string") {
-        expect(m.content).not.toMatch(/please complete/i);
-      }
-    }
+    // The successful tool round persists. Neither empty assistant from
+    // iterations 2 and 3 does, and so neither does the continuation prompt
+    // between them, which no kept reply answers.
+    expect(result.newMessages).toEqual([
+      {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "t1", name: "echo", input: { text: "x" } }],
+      },
+      {
+        role: "user",
+        content: [{ type: "tool_result", toolUseId: "t1", content: "pong from x" }],
+      },
+    ]);
   });
 
   it("does not classify unrelated stream errors as model-misbehavior repairs", async () => {
@@ -3990,6 +4020,9 @@ describe("volume-cluster trigger", () => {
     expect(byId.get("t3")?.isError).toBe(true);
     // Synthetic carries the intercepted tool_use's id (Anthropic pairing).
     expect(byId.get("t3")?.toolUseId).toBe("t3");
+    // The nudge is tagged harness-authored; real results carry no tag.
+    expect(byId.get("t3")).toMatchObject({ harness: "volume_nudge" });
+    expect(byId.get("t1")).not.toHaveProperty("harness");
     // Telemetry on the intercept — batchCount: 3 (third iteration),
     // callCount: 3 (three tool_use blocks total across the turn).
     expect(turnLogger.warn).toHaveBeenCalledWith(

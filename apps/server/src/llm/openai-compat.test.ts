@@ -2592,12 +2592,225 @@ describe("OpenAICompatibleProvider", () => {
       });
 
       const args = firstCreateArgs();
-      // [0] system, [1] user "first turn", [2] user "follow up" — the
-      // thinking-only assistant turn was dropped, not sent as `content: null`.
-      expect(args.messages).toHaveLength(3);
-      expect(getMessage(args, 0).role).toBe("system");
-      expect(getMessage(args, 1)).toMatchObject({ role: "user", content: "first turn" });
-      expect(getMessage(args, 2)).toMatchObject({ role: "user", content: "follow up" });
+      // The thinking-only assistant turn was dropped, not sent as
+      // `content: null`, and the two user turns it separated are merged.
+      expect(args.messages).toEqual([
+        { role: "system", content: "sys" },
+        { role: "user", content: "first turn\n\nfollow up" },
+      ]);
+    });
+  });
+
+  describe("consecutive user messages", () => {
+    function setup() {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce({
+        choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+        model: "m",
+        usage: { prompt_tokens: 10, completion_tokens: 1 },
+      });
+      return provider;
+    }
+
+    it("merges the turn's row and a continuation prompt into one user message, without the tag", async () => {
+      // Strict-alternation chat templates reject two user messages in a row.
+      await setup().chat({
+        model: "m",
+        system: "sys",
+        messages: [
+          { role: "user", content: "hi" },
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "Please complete your response.", harness: "continuation" },
+            ],
+          },
+        ],
+      });
+
+      expect(firstCreateArgs().messages).toEqual([
+        { role: "system", content: "sys" },
+        { role: "user", content: "hi\n\nPlease complete your response." },
+      ]);
+    });
+
+    it("merges into a multipart message when either side carries an image", async () => {
+      await setup().chat({
+        model: "m",
+        system: "",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "look" },
+              { type: "image", source: "url", data: "https://x/a.png", mediaType: "image/png" },
+            ],
+          },
+          { role: "user", content: "well?" },
+        ],
+      });
+
+      expect(firstCreateArgs().messages).toEqual([
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "look" },
+            { type: "image_url", image_url: { url: "https://x/a.png" } },
+            { type: "text", text: "well?" },
+          ],
+        },
+      ]);
+    });
+
+    it("separates text meeting text across the join with a blank line, as two strings are", async () => {
+      await setup().chat({
+        model: "m",
+        system: "",
+        messages: [
+          { role: "user", content: "earlier" },
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "look" },
+              { type: "image", source: "url", data: "https://x/a.png", mediaType: "image/png" },
+            ],
+          },
+        ],
+      });
+
+      expect(firstCreateArgs().messages).toEqual([
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "earlier\n\nlook" },
+            { type: "image_url", image_url: { url: "https://x/a.png" } },
+          ],
+        },
+      ]);
+    });
+
+    it("merges two multipart messages, joining the text that meets across them", async () => {
+      // Both sides are parts arrays, and so is the merge the continuation
+      // prompt joins. The adapter puts a row's text before its images, so
+      // every join here meets an image and needs no separator.
+      await setup().chat({
+        model: "m",
+        system: "",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "first" },
+              { type: "image", source: "url", data: "https://x/a.png", mediaType: "image/png" },
+            ],
+          },
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "second" },
+              { type: "image", source: "url", data: "https://x/b.png", mediaType: "image/png" },
+            ],
+          },
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "Please complete your response.", harness: "continuation" },
+            ],
+          },
+        ],
+      });
+
+      expect(firstCreateArgs().messages).toEqual([
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "first" },
+            { type: "image_url", image_url: { url: "https://x/a.png" } },
+            { type: "text", text: "second" },
+            { type: "image_url", image_url: { url: "https://x/b.png" } },
+            { type: "text", text: "Please complete your response." },
+          ],
+        },
+      ]);
+    });
+
+    it("joins a parts message ending in text to a following parts message", async () => {
+      // A row whose only part is text still goes as a string, so a parts side
+      // ending in text needs a merged pair as its left side.
+      await setup().chat({
+        model: "m",
+        system: "",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "image", source: "url", data: "https://x/a.png", mediaType: "image/png" },
+            ],
+          },
+          { role: "user", content: "caption" },
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "and this" },
+              { type: "image", source: "url", data: "https://x/b.png", mediaType: "image/png" },
+            ],
+          },
+        ],
+      });
+
+      expect(firstCreateArgs().messages).toEqual([
+        {
+          role: "user",
+          content: [
+            { type: "image_url", image_url: { url: "https://x/a.png" } },
+            { type: "text", text: "caption\n\nand this" },
+            { type: "image_url", image_url: { url: "https://x/b.png" } },
+          ],
+        },
+      ]);
+    });
+
+    it("leaves a user message after tool results as its own message", async () => {
+      await setup().chat({
+        model: "m",
+        system: "",
+        messages: [
+          { role: "user", content: "go" },
+          {
+            role: "assistant",
+            content: [{ type: "tool_use", id: "t1", name: "echo", input: {} }],
+          },
+          {
+            role: "user",
+            content: [
+              {
+                type: "tool_result",
+                toolUseId: "t1",
+                content: "stop",
+                isError: true,
+                harness: "volume_nudge",
+              },
+            ],
+          },
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "Please complete your response.", harness: "continuation" },
+            ],
+          },
+        ],
+      });
+
+      expect(firstCreateArgs().messages).toEqual([
+        { role: "user", content: "go" },
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [{ id: "t1", type: "function", function: { name: "echo", arguments: "{}" } }],
+        },
+        { role: "tool", tool_call_id: "t1", content: "stop" },
+        { role: "user", content: "Please complete your response." },
+      ]);
     });
   });
 

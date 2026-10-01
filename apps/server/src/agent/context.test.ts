@@ -1109,6 +1109,46 @@ describe("snapToPairBoundary", () => {
     expect(snapToPairBoundary(messages, 0)).toBe(0);
     expect(snapToPairBoundary(messages, 2)).toBe(2);
   });
+
+  it("keeps a continuation prompt with the row before it", () => {
+    const continuation: Message = {
+      role: "user",
+      content: [{ type: "text", text: "Please complete your response.", harness: "continuation" }],
+    };
+    // After the turn's own row.
+    const afterTurn: Message[] = [
+      msg("user", "old"),
+      msg("assistant", "old reply"),
+      msg("user", "question"),
+      continuation,
+      msg("assistant", "answer"),
+    ];
+    expect(snapToPairBoundary(afterTurn, 3)).toBe(2);
+    // After a tool-result row, which stays with its tool call in turn.
+    const afterToolResult: Message[] = [
+      msg("user", "question"),
+      toolCallMsg("t1", "search"),
+      toolResultMsg([{ id: "t1", content: "r1" }]),
+      continuation,
+      msg("assistant", "answer"),
+    ];
+    expect(snapToPairBoundary(afterToolResult, 3)).toBe(1);
+  });
+
+  it("cuts before an assistant row carrying a truncation notice", () => {
+    // Only user rows attach to what precedes them.
+    const messages: Message[] = [
+      msg("user", "question"),
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "Partial" },
+          { type: "text", text: "\n\n[cut]", harness: "truncation_notice" },
+        ],
+      },
+    ];
+    expect(snapToPairBoundary(messages, 1)).toBe(1);
+  });
 });
 
 /** Assert no message in the array has a tool_result without a matching tool_use in the preceding assistant. */

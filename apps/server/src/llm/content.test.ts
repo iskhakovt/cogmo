@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { canonicalizeToolInputs, extractText } from "./content.js";
-import type { ContentBlock } from "./types.js";
+import {
+  canonicalizeToolInputs,
+  extractText,
+  isHarnessPrompt,
+  isTurnRowContent,
+  NOT_TURN_ROW_JSONPATH,
+} from "./content.js";
+import { type ContentBlock, HARNESS_ROW_TAGS } from "./types.js";
 
 describe("canonicalizeToolInputs", () => {
   it("sorts every tool_use input's keys and keeps the values", () => {
@@ -76,5 +82,42 @@ describe("extractText", () => {
   it("returns an empty string when there is no text", () => {
     expect(extractText([])).toBe("");
     expect(extractText([{ type: "tool_use", id: "t1", name: "echo", input: {} }])).toBe("");
+  });
+});
+
+describe("isTurnRowContent", () => {
+  it("takes a string, or a block array with no tool result and no harness-row tag", () => {
+    expect(isTurnRowContent("hello")).toBe(true);
+    expect(isTurnRowContent([{ type: "text", text: "look at this" }])).toBe(true);
+  });
+
+  it.each(HARNESS_ROW_TAGS)("refuses a row carrying a %s block", (tag) => {
+    expect(isTurnRowContent([{ type: "text", text: "x", harness: tag }])).toBe(false);
+  });
+
+  it("refuses a tool-result row", () => {
+    expect(isTurnRowContent([{ type: "tool_result", toolUseId: "t1", content: "ok" }])).toBe(false);
+  });
+
+  it("names every harness-row tag in the SQL path", () => {
+    for (const tag of HARNESS_ROW_TAGS) {
+      expect(NOT_TURN_ROW_JSONPATH).toContain(`@.harness == "${tag}"`);
+    }
+  });
+});
+
+describe("isHarnessPrompt", () => {
+  it("reports the continuation prompt and the nudge, not the truncation notice", () => {
+    expect(isHarnessPrompt({ type: "text", text: "x", harness: "continuation" })).toBe(true);
+    expect(
+      isHarnessPrompt({
+        type: "tool_result",
+        toolUseId: "t1",
+        content: "x",
+        harness: "volume_nudge",
+      }),
+    ).toBe(true);
+    expect(isHarnessPrompt({ type: "text", text: "x", harness: "truncation_notice" })).toBe(false);
+    expect(isHarnessPrompt({ type: "text", text: "x" })).toBe(false);
   });
 });

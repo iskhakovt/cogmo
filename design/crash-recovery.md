@@ -113,11 +113,11 @@ What this buys, per failure mode:
 **What a mid-step crash still costs.** If the process dies mid-stream the step never completed, so the retry re-runs the body and re-streams from the top of that iteration (and re-bills it — inherent to any retry of a failed attempt). The runId-keyed `#activeStreams` dedup turns the re-stream into edits of the same message. Durable steps cover the boundary-replay path; the dedup map covers the crash path. Keep both. Two narrower crash-window residuals, both accepted:
 
 - *Duplicated in-body pushes on step retry.* If a step body fails after some of its pushes (the `summarize-prefix-outcome` status banner, the `degraded-reply` apology, a partially-emitted `emit-tool-results-iter<N>`), the per-step retry re-runs the body and pushes again. Media dedups by path at the handle; text banners and non-media cards may append twice. Cosmetic, and bounded by the step's retry budget.
-- *File-freshness cache after process death.* `createFileService`'s read-before-mutate gate lives in a process-lifetime map. A cross-process replay re-populates it only by re-executing a non-durable `read_file`, so it lacks a file first created by a cached `write_file`. `[confirmed]` Once reads are durable (step 2 of [prompt-caching.md](prompt-caching.md#rollout) → Rollout), it lacks every file the turn read before the process died. Either way a later live `edit_file` errors with "read the file first", which is itself the recovery instruction: the model re-reads and retries. Self-healing; not worth persisting the cache.
+- *File-freshness cache after process death.* `createFileService`'s read-before-mutate gate lives in a process-lifetime map. A cross-process replay reads every `read_file` and `write_file` result from its step without re-executing it, so the new process lacks every file the turn read or created before the old one died. A later live `edit_file` errors with "read the file first", which is itself the recovery instruction: the model re-reads and retries. Self-healing; not worth persisting the cache.
 
 **Bare-body cost scales with the boundary count.** Durable iterations and durable tools took a turn from roughly 4 bare-body executions to roughly `3×iterations + tools + 4`, and everything left in the streaming glue pays that multiplier. The one that is not merely cheap is attachment rendering: `attachments.download()` is an S3 GET plus a base64 encode per image, so a 5-iteration turn carrying a photo does ~15 of each, and from Append-only step 4 every attachment in view is rendered. It is an idempotent read, so it is correct — but "idempotent" is a correctness claim, not a cost one. The attachment memo `[proposed]` lands with the same step ([prompt-caching.md](prompt-caching.md#one-renderer-confirmed) → One renderer), in process and deliberately not step state, since the payloads are exactly what must stay out of Inngest's store.
 
-**Replayed tool results.** A non-durable tool re-executes per invocation. A result that changes between invocations — a read after a same-turn write, a timestamp, an error flipping to success — reaches later iterations, the persisted row and Class D's side-effect gate, which in the worst case reaches a different degrade verdict and diverges the step graph. `[confirmed]` Once every tool whose output can change is durable ([Tool durability policy](#tool-durability-policy)), a replayed invocation reads each result from its step, and the in-turn head check reports any rebuilt request that differs from the one sent ([prompt-caching.md](prompt-caching.md#head-check-confirmed) → Head check).
+**Replayed tool results.** A non-durable tool re-executes per invocation. A result that changes between invocations — a read after a same-turn write, a timestamp, an error flipping to success — reaches later iterations, the persisted row and Class D's side-effect gate, which in the worst case reaches a different degrade verdict and diverges the step graph. `[confirmed]` Every tool whose output can change is durable ([Tool durability policy](#tool-durability-policy)), so a replayed invocation reads each result from its step, and the in-turn head check reports any rebuilt request that differs from the one sent ([prompt-caching.md](prompt-caching.md#head-check-confirmed) → Head check).
 
 ### When the streaming section crashes
 
@@ -136,15 +136,15 @@ Tool handlers run in the loop, in the bare body unless marked durable — so a n
 
 **Durable (side-effectful or billable — replay-safe per turn):** `generate_image`, `web_answer`, `web_search`, `fetch_url`, `memory_recall`, `memory_reflect`, `memory_retain`, `write_file`, `edit_file`, `core_memory_update`, `schedule_task`, `remove_task`, `activate_pipeline`, `define_pipeline`, `start_pipeline`, `delegate_coding`, `register_skill`, `send_document`, every `subagent__*` tool, and every MCP tool (`src/mcp/adapter.ts`).
 
-**Durable because the output changes during the turn** `[confirmed]`, from step 2 of [prompt-caching.md](prompt-caching.md#rollout) → Rollout: `read_file`, `list_files`, `list_tasks`, `list_pipelines`, `core_memory_read` and `get_current_time`, which run in the bare body until then.
+**Durable because the output changes during the turn** `[confirmed]`: `read_file`, `list_files`, `list_tasks`, `list_pipelines`, `core_memory_read` and `get_current_time`.
 
 - `get_current_time` returns a new millisecond timestamp on each re-execution.
 - A read re-executed after a same-turn write returns the written state: `read_file` after `edit_file`, `list_tasks` after `schedule_task`, `core_memory_read` after `core_memory_update`.
-- Later iterations and the persisted row then carry output the model never saw: a cache miss, and where preserved thinking is enforced, a 400 for every later thinking block ([prompt-caching.md](prompt-caching.md#sources-and-fixes) → source (g)).
+- Non-durable, later iterations and the persisted row would carry output the model never saw: a cache miss, and where preserved thinking is enforced, a 400 for every later thinking block ([prompt-caching.md](prompt-caching.md#sources-and-fixes) → source (g)).
 - Step state holds their outputs: `read_file` stops at 100,000 characters, `list_files` returns one S3 page of up to 1,000 keys, and the other list tools return every row they match.
-- A run in flight at that deploy keeps the policy its `freeze-turn-inputs` froze (`durable` is in the frozen tool table), so its reads stay non-durable until the turn ends.
+- `durable` is in the frozen tool table, which the configuration digest hashes: changing a flag opens one `configuration` epoch per conversation at its next turn, and a run in flight keeps the policy its `freeze-turn-inputs` froze until the turn ends.
 
-**Non-durable:** a handler whose output is a pure function of its input. After step 2, no built-in tool qualifies.
+**Non-durable:** a handler whose output is a pure function of its input. No built-in tool qualifies. `tools.test.ts` holds every built-in durable, so a built-in that qualifies is named there as an exemption in the same change.
 
 Marking a tool `durable: true` is a cost decision with two sides: it buys exactly-once for the handler and pins the recorded `tool_result` to what the model actually saw, and it charges one extra step boundary — which, with LLM iterations durable, costs a cheap cached replay rather than a fresh model call. Justify both sides in the PR that flips a flag.
 
@@ -166,6 +166,7 @@ Marking a tool `durable: true` is a cost decision with two sides: it buys exactl
 | `memory_retain` | Absorbed — memory writes are additive by design, and the consolidation Hindsight runs inside every `retain()` deduplicates ([memory.md](memory.md#hindsight-operations-confirmed) → Hindsight Operations). |
 | `remove_task` | Naturally idempotent — deleting an already-deleted row is `not_found`. |
 | `web_search`, `web_answer`, `fetch_url`, `memory_recall`, `memory_reflect`, `subagent__*` | Reads and generations with no persistent duplicate state. Durable because billable; a crash retry costs one extra call. No upstream idempotency slot to key on. |
+| `read_file`, `list_files`, `list_tasks`, `list_pipelines`, `core_memory_read`, `get_current_time` | Reads with no side effect. A crash retry reads again, and the step records the retry's output. |
 | `generate_image`, `send_document` | Residual: a retry re-bills the generation and can deliver a second copy. The delivery layer's `#activeStreams` dedup covers the streamed path, not a batch send. |
 | MCP tools | Residual, unclosable here: the MCP tool contract has no idempotency-token slot. `ToolCallContext` is available to forward the day a server accepts one. |
 
@@ -275,14 +276,14 @@ Before wrapping (or deciding not to), **count the boundaries**: state how many s
 
 Wrap work in `step.run` when **all** of these are true:
 
-- The RETURN VALUE is small and JSON-serializable (so Inngest can store and replay it). The work itself may stream, emit to a transport, or take minutes — side effects fired from inside the body happen live and are suppressed on replay, which is usually exactly what's wanted (see `llm-iter<N>`).
-- Re-executing it would be expensive, billable, wrong, or visible to the user.
+- The RETURN VALUE is JSON-serializable and bounded: Inngest stores it and re-ships it on every later invocation ([State serialization](#state-serialization-confirmed) → Size). The work itself may stream, emit to a transport, or take minutes — side effects fired from inside the body happen live and are suppressed on replay, which is usually exactly what's wanted (see `llm-iter<N>`).
+- Re-executing it would be expensive, billable, wrong, or visible to the user. A read whose output can change during the run and reaches the model, a persisted row or the step graph is wrong to re-execute, however cheap — every tool read is durable for this reason ([Tool durability policy](#tool-durability-policy)).
 - The step's inputs are themselves durable, OR the cached output remains valid even if the inputs drift slightly between attempts. Otherwise the cache freezes against stale inputs.
 - If the step is conditional, the condition derives from durable state — a gate on a non-durable read can flip between invocations and diverge the step graph (`summarize-prefix-outcome` and `auto-recall` carry a documented residual of this against concurrent profile edits).
 
 Do **not** wrap:
 
-- Pure reads from injected dependencies (cheap, idempotent).
+- Reads whose output can't change during the run, and reads whose payload must stay out of step state (`attachments.download()`, whose bytes the renderer re-fetches each invocation).
 - Code that must genuinely observe every invocation (the `#activeStreams`-deduped `deliveryRouter.prepare`, the loop's control flow) — a step would freeze its first execution's view.
 - The loop's *orchestration* (`runStreamingAgentLoop` as a whole) — it is deterministic glue over cached outcomes and must re-walk them each invocation. The expensive work inside it is already wrapped: each iteration in `llm-iter<N>`, each durable tool in `tool-iter<N>-<P>`.
 - Pipelines that build large intermediate values (image base64, full message histories) just to return a small final result. Wrap only the expensive sub-step.

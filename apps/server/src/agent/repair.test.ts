@@ -764,37 +764,51 @@ describe("summarizeToolHistory", () => {
     expect(read?.outcomes.failures).toBe(0);
   });
 
-  it("outcomes exclude this tool's own prior volume-cluster nudges (recursive-impurity invariant)", () => {
-    // Pin the recursive-impurity fix: if the model ignored a previous
-    // nudge and emitted another batch, summarizeToolHistory runs against
-    // a history that already contains the synthetic intercept. Without
-    // the prefix filter, that synthetic would be counted as a failure
-    // and its first line quoted back as a "reason" in the next nudge.
+  it("outcomes exclude this tool's own prior volume-cluster nudges, by their harness tag", () => {
+    // If the model ignored a previous nudge and emitted another batch,
+    // summarizeToolHistory runs against a history that already contains the
+    // synthetic intercept. Counted, it would be a failure whose first line is
+    // quoted back as a "reason" in the next nudge.
+    const nudge =
+      "You have called `img` 3 times this turn — 2 succeeded. " +
+      "Do NOT call `img` again this turn. Either reply to the user with what you have, " +
+      "ask a clarifying question, or use a different tool.";
     const messages: Message[] = [
       ...pair("t1", "img", true, "Error: nsfw flagged"),
       ...pair("t2", "img", true, "Error: nsfw flagged"),
-      // Synthetic from a prior intercept — matches the all-success branch
-      // of formatVolumeClusterContent ("You have called `img` 3 times
-      // this turn — 2 succeeded. Do NOT call `img` again...").
-      ...pair(
-        "t3",
-        "img",
-        true,
-        "You have called `img` 3 times this turn — 2 succeeded. " +
-          "Do NOT call `img` again this turn. Either reply to the user with what you have, " +
-          "ask a clarifying question, or use a different tool.",
-      ),
+      assistantToolUses({ type: "tool_use", id: "t3", name: "img", input: {} }),
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            toolUseId: "t3",
+            content: nudge,
+            isError: true,
+            harness: "volume_nudge",
+          },
+        ],
+      },
       ...pair("t4", "img", true, "Error: too long"),
     ];
     const summary = summarizeToolHistory(messages, 0).get("img");
-    // 3 real failures (t1, t2, t4); the synthetic t3 is excluded.
+    // 3 real failures (t1, t2, t4); the tagged t3 is excluded.
     expect(summary?.outcomes.failures).toBe(3);
     expect(summary?.outcomes.successes).toBe(0);
     expect(summary?.outcomes.failureReasons).toEqual(["Error: nsfw flagged", "Error: too long"]);
-    // Negative assertion: no reason starts with the prefix.
-    for (const reason of summary?.outcomes.failureReasons ?? []) {
-      expect(reason.startsWith("You have called `img`")).toBe(false);
-    }
+  });
+
+  it("outcomes count an untagged result whatever its wording", () => {
+    // Detection is structural: a real tool error that happens to read like a
+    // nudge is still a failure of that tool.
+    const messages: Message[] = [
+      ...pair("t1", "img", true, "You have called `img` with an unsupported size"),
+    ];
+    const summary = summarizeToolHistory(messages, 0).get("img");
+    expect(summary?.outcomes.failures).toBe(1);
+    expect(summary?.outcomes.failureReasons).toEqual([
+      "You have called `img` with an unsupported size",
+    ]);
   });
 
   it("returns separate entries per tool name in one pass", () => {

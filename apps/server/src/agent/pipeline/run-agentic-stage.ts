@@ -510,6 +510,8 @@ export async function runAgenticStage(
   }
 
   await steps.run("persist-new-messages", async () => {
+    // A turn that degraded on its first iteration kept nothing to write.
+    if (result.newMessages.length === 0) return { id: null };
     const { id } = await deps.runInTx((tx) =>
       deps.agentStore.insertMessages(tx, {
         conversationId,

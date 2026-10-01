@@ -54,14 +54,15 @@ export interface ToolSpec {
    *
    * When `true` AND a `StepRunner` is provided to the agent loop, the handler
    * runs inside `step.run()` so it executes exactly once per turn and the
-   * result replays from the Inngest step cache. Policy: **side-effectful or
-   * billable ⇒ `true`.** Inngest re-invokes the whole function at every step
-   * boundary on success, so a non-durable handler re-executes once per
-   * remaining boundary of the turn — a DB-writing tool inserts duplicates, a
-   * paid API re-bills, a non-idempotent mutation flips its recorded result.
-   * Leave unset ONLY for cheap idempotent reads whose output may be large or
-   * is trivially recomputed (`read_file`, `list_*`, `current_time`); their
-   * persisted tool_result is whatever the last invocation returned.
+   * result replays from the Inngest step cache. Policy: **side-effectful,
+   * billable, or output that can change within the turn ⇒ `true`.** Inngest
+   * re-invokes the whole function at every step boundary on success, so a
+   * non-durable handler re-executes once per remaining boundary of the turn —
+   * a DB-writing tool inserts duplicates, a paid API re-bills, a clock or a
+   * read after a same-turn write returns output the model never saw. Leave
+   * unset only for a handler whose output is a pure function of its input.
+   * The flag is part of the frozen tool table, so changing it opens a
+   * `configuration` epoch in each conversation.
    *
    * No effect when `StepRunner` is not provided (e.g. unit tests, agent loops
    * running outside Inngest). See `design/crash-recovery.md` → Tool
@@ -265,6 +266,9 @@ export function createDefaultTools(
         "Returns the current date, time, day of week, and timezone. " +
         "Use for scheduling, deadlines, or time questions. The system prompt includes the time " +
         "when the conversation started — call this tool for long-running sessions or exact time.",
+      // Durable: a non-durable handler would return a new timestamp on every
+      // later step boundary, which the model never saw.
+      durable: true,
       parallelSafe: true,
       sideEffectful: false,
       schema: z.object({
