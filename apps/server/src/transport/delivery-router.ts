@@ -52,13 +52,8 @@ export interface StreamFailure {
 }
 
 /** The stream targets a fan-out could not reach, each with its reason. */
-export class StreamDeliveryError extends Error {
+export interface StreamDeliveryError {
   readonly failures: ReadonlyArray<StreamFailure>;
-  constructor(failures: ReadonlyArray<StreamFailure>) {
-    super(`stream delivery failed: ${failures.map((f) => f.reason).join("; ")}`);
-    this.name = "StreamDeliveryError";
-    this.failures = failures;
-  }
 }
 
 /**
@@ -345,13 +340,17 @@ export function createDeliveryRouter(deps: DeliveryRouterDeps): DeliveryRouter {
 }
 
 /**
- * Push `event`, throwing when a target failed. Inside a step, that fails the
- * step, and the step's retry reopens the streams: the failed handle has left
- * its adapter, so the retry streams into a fresh one.
+ * Push `event`, throwing when a target failed. It runs as the agent loop's
+ * `onEvent` inside a step, where a throw is how a failure reaches Inngest: it
+ * fails the step, and the step's retry reopens the streams. The failed handle
+ * has left its adapter, so the retry streams into a fresh one.
  */
 export async function pushOrThrow(delivery: DeliveryHandle, event: StreamEvent): Promise<void> {
   const pushed = await delivery.push(event);
-  if (pushed.isErr()) throw pushed.error;
+  if (pushed.isErr()) {
+    const reasons = pushed.error.failures.map((f) => f.reason).join("; ");
+    throw new Error(`stream delivery failed: ${reasons}`);
+  }
 }
 
 /** An open stream, and the session and adapter it delivers to. */
@@ -378,7 +377,7 @@ async function fanOut(
     }
     return outcome.value.isErr() ? [{ sessionId, reason: outcome.value.error }] : [];
   });
-  return failures.length === 0 ? ok(undefined) : err(new StreamDeliveryError(failures));
+  return failures.length === 0 ? ok(undefined) : err({ failures });
 }
 
 function hasDeliver(adapter: AdapterEntry["adapter"]): adapter is Adapter {
