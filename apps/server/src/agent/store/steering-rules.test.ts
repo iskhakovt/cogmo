@@ -670,7 +670,7 @@ describe("learned rules skip a retired row", () => {
         store.replaceRules(trx, { oldIds: [live, retired], newRule: merged }),
       );
 
-      expect(attempt).toEqual(err({ kind: "rule_group_changed", groupSize: 2, deleted: 1 }));
+      expect(attempt).toEqual(err({ kind: "rule_group_changed", deleted: 1 }));
       expect(
         (await db.select({ id: steeringRules.id }).from(steeringRules)).map((r) => r.id).sort(),
       ).toEqual([live, retired].sort());

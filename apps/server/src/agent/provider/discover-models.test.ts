@@ -128,7 +128,10 @@ describe("discoverModels — error handling", () => {
   it("is rejected on a non-2xx that isn't 404 (auth, rate limit)", async () => {
     fetchMock.mockResolvedValueOnce(new Response("nope", { status: 401 }));
     const result = await discoverModels(args);
-    expect(result._unsafeUnwrapErr()).toMatchObject({ kind: "rejected", status: 401 });
+    expect(result._unsafeUnwrapErr()).toMatchObject({
+      kind: "rejected",
+      message: expect.stringContaining("401"),
+    });
   });
 
   it("is unavailable on a network error", async () => {
@@ -140,6 +143,9 @@ describe("discoverModels — error handling", () => {
   it("reads the Anthropic endpoint's failures the same way", async () => {
     fetchMock.mockResolvedValueOnce(new Response("nope", { status: 403 }));
     const result = await discoverModels({ ...args, type: "anthropic" });
-    expect(result._unsafeUnwrapErr()).toMatchObject({ kind: "rejected", status: 403 });
+    expect(result._unsafeUnwrapErr()).toMatchObject({
+      kind: "rejected",
+      message: expect.stringContaining("403"),
+    });
   });
 });

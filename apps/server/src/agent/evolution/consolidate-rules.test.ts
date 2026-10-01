@@ -163,7 +163,7 @@ describe("consolidateRules", () => {
     it("is skipped, and the next group merges", async () => {
       const replaceRules = vi
         .fn()
-        .mockResolvedValueOnce(err({ kind: "rule_group_changed", groupSize: 2, deleted: 1 }))
+        .mockResolvedValueOnce(err({ kind: "rule_group_changed", deleted: 1 }))
         .mockResolvedValueOnce(ok({ id: "merged" }));
       const deps = mockConsolidationDeps([GROUPS], {
         getCorrections: vi.fn().mockResolvedValue(PAIRS),

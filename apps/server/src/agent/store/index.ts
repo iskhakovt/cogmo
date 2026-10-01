@@ -2494,13 +2494,8 @@ export class DrizzleAgentStore implements AgentStore {
         .from(steeringRules)
         .where(eq(steeringRules.profileId, profileId)),
     ]);
-    const refs = {
-      conversations: convRows[0]?.value ?? 0,
-      messages: msgRows[0]?.value ?? 0,
-      schedules: (taskRows[0]?.value ?? 0) + (skillRows[0]?.value ?? 0),
-      steeringRules: ruleRows[0]?.value ?? 0,
-    };
-    if (Object.values(refs).some((n) => n > 0)) return err({ kind: "profile_in_use", refs });
+    const refRows = [convRows, msgRows, taskRows, skillRows, ruleRows];
+    if (refRows.some((rows) => (rows[0]?.value ?? 0) > 0)) return err({ kind: "profile_in_use" });
     await tx.delete(profiles).where(eq(profiles.id, profileId));
     return ok(undefined);
   }
@@ -3736,7 +3731,6 @@ export class DrizzleAgentStore implements AgentStore {
       if (deleted.length !== params.oldIds.length) {
         return err({
           kind: "rule_group_changed" as const,
-          groupSize: params.oldIds.length,
           deleted: deleted.length,
         });
       }

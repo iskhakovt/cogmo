@@ -38,7 +38,7 @@ export type DiscoveryError =
    */
   | { kind: "unavailable"; message: string }
   /** The endpoint answered with an error status (auth, rate limit): worth a retry. */
-  | { kind: "rejected"; status: number; message: string };
+  | { kind: "rejected"; message: string };
 
 const OpenRouterEntrySchema = z
   .object({
@@ -159,7 +159,7 @@ async function fetchModelList(
   if (!res.ok) {
     await res.body?.cancel();
     if (res.status === 404) return unavailable(`${url} returned 404 (endpoint not exposed)`);
-    return err({ kind: "rejected", status: res.status, message: `${url} returned ${res.status}` });
+    return err({ kind: "rejected", message: `${url} returned ${res.status}` });
   }
   try {
     return ok(await res.json());

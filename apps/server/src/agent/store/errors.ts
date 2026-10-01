@@ -31,7 +31,6 @@ export interface ProfileNameTaken {
  */
 export interface ProfileInUse {
   kind: "profile_in_use";
-  refs: { conversations: number; messages: number; schedules: number; steeringRules: number };
 }
 
 export interface ProfileClassNameTaken {
@@ -117,7 +116,6 @@ export interface SubAgentNameTaken {
  */
 export interface RuleGroupChanged {
   kind: "rule_group_changed";
-  groupSize: number;
   deleted: number;
 }
 

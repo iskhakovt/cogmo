@@ -1171,7 +1171,7 @@ describe("stepConfigureProvider", () => {
     deps.agentStore.listProviders.mockResolvedValue([]);
     addProviderSpy.mockResolvedValue({ providerId: "p-new", validation: { valid: true } });
     vi.mocked(discoverModels).mockResolvedValueOnce(
-      failed({ kind: "rejected", status: 401, message: "returned 401" }),
+      failed({ kind: "rejected", message: "returned 401" }),
     );
     vi.mocked(p.select)
       .mockResolvedValueOnce("openrouter") // provider type

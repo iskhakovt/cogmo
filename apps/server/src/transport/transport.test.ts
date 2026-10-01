@@ -1620,12 +1620,7 @@ describe("createTransport", () => {
     it("returns profile_in_use when deleteProfile finds references (atomic check)", async () => {
       const agentStore = mockAgentStore({
         getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
-        deleteProfile: vi.fn().mockResolvedValue(
-          err({
-            kind: "profile_in_use",
-            refs: { conversations: 1, messages: 4, schedules: 0, steeringRules: 0 },
-          }),
-        ),
+        deleteProfile: vi.fn().mockResolvedValue(err({ kind: "profile_in_use" })),
       });
       const { transport } = setup({ agentStore });
       const res = await transport.profiles.delete("handle", "p-mine");

@@ -2470,10 +2470,7 @@ describe("DrizzleAgentStore", () => {
       );
       await tx((trx) => store.createConversation(trx, { userId: u, profileId, isPrivate: true }));
       expect(await tx((trx) => store.deleteProfile(trx, profileId))).toEqual(
-        err({
-          kind: "profile_in_use",
-          refs: { conversations: 1, messages: 0, schedules: 0, steeringRules: 0 },
-        }),
+        err({ kind: "profile_in_use" }),
       );
       expect(await tx((trx) => store.getProfile(trx, profileId))).not.toBeUndefined();
     });
@@ -2524,10 +2521,7 @@ describe("DrizzleAgentStore", () => {
       await tx((trx) => store.setConversationProfile(trx, convId, newProfileId));
 
       expect(await tx((trx) => store.deleteProfile(trx, oldProfileId))).toEqual(
-        err({
-          kind: "profile_in_use",
-          refs: { conversations: 0, messages: 1, schedules: 0, steeringRules: 0 },
-        }),
+        err({ kind: "profile_in_use" }),
       );
     });
 
@@ -2549,10 +2543,7 @@ describe("DrizzleAgentStore", () => {
         }),
       );
       expect(await tx((trx) => store.deleteProfile(trx, profileId))).toEqual(
-        err({
-          kind: "profile_in_use",
-          refs: { conversations: 0, messages: 0, schedules: 1, steeringRules: 0 },
-        }),
+        err({ kind: "profile_in_use" }),
       );
     });
 
@@ -2572,10 +2563,7 @@ describe("DrizzleAgentStore", () => {
         inputs: { type: "object" },
       });
       expect(await tx((trx) => store.deleteProfile(trx, profileId))).toEqual(
-        err({
-          kind: "profile_in_use",
-          refs: { conversations: 0, messages: 0, schedules: 1, steeringRules: 0 },
-        }),
+        err({ kind: "profile_in_use" }),
       );
       expect(await tx((trx) => store.getProfile(trx, profileId))).toBeDefined();
     });
@@ -2593,10 +2581,7 @@ describe("DrizzleAgentStore", () => {
         profileId,
       });
       expect(await tx((trx) => store.deleteProfile(trx, profileId))).toEqual(
-        err({
-          kind: "profile_in_use",
-          refs: { conversations: 0, messages: 0, schedules: 0, steeringRules: 1 },
-        }),
+        err({ kind: "profile_in_use" }),
       );
     });
   });

@@ -165,7 +165,7 @@ describe("instruction rules against a concurrent writer (real Postgres)", () => 
     // The first attempt's delete hits 40001; the retry's fresh snapshot finds
     // the group one rule short.
     assertKind(lost, "fulfilled");
-    expect(lost.value).toEqual(err({ kind: "rule_group_changed", groupSize: 2, deleted: 1 }));
+    expect(lost.value).toEqual(err({ kind: "rule_group_changed", deleted: 1 }));
     expect(attempts).toBe(2);
     const survivors = await drizzle(observerSql, { schema })
       .select({ id: steeringRules.id, active: steeringRules.active })
