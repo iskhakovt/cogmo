@@ -65,70 +65,53 @@ export function createCodingRuntime(
   // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
   const codingFunctions: any[] = [];
   if (sandbox.codingSandbox) {
-    const orchestratorDeps = {
+    // Every coding function reads tasks and repos, and authenticates to
+    // GitHub through the stored identity.
+    const repoDeps = {
       runInTx: core.runInTx,
       store: core.codingStore,
-      sandbox: sandbox.codingSandbox,
-      backend: codingBackend,
-      // Threaded for the failure-cascade WIP-ref push (`safeTeardownWorktree`).
-      // Verify-orchestrator already needs it for commit signing + push auth;
-      // the plan/execute orchestrators reuse the same identity to push
-      // dirty/unpushed worktrees to `refs/cogmo-wip/<taskId>` on failure.
       secretsStore: core.secretsStore,
+    };
+    const octokit = opts.octokitFactory && { octokitFactory: opts.octokitFactory };
+    // What every orchestrator that runs a task in a sandbox shares.
+    const sandboxTaskDeps = {
+      ...repoDeps,
+      sandbox: sandbox.codingSandbox,
       devbaseImage: env.COGMO_DEVBASE_IMAGE,
       defaultResourceLimits: DEFAULT_CODING_RESOURCE_LIMITS,
       taskTtlMs: env.CODING_TASK_IDLE_TTL_MINUTES * 60 * 1000,
-      worktreesDir: env.COGMO_WORKTREES_DIR,
       askpassBaseDir: env.SANDBOX_ASKPASS_DIR,
       ...(opts.codingAuthOverride && { loadCodingSandboxEnv: opts.codingAuthOverride }),
+    };
+    // The plan/execute orchestrators use the secrets store's identity to push
+    // dirty/unpushed worktrees to `refs/cogmo-wip/<taskId>` on failure
+    // (`safeTeardownWorktree`); verify uses it to sign and push.
+    const orchestratorDeps = {
+      ...sandboxTaskDeps,
+      backend: codingBackend,
+      worktreesDir: env.COGMO_WORKTREES_DIR,
       openPlanStream: async (taskId: string) => codingStreamingRegistry.planStream(taskId),
       openExecuteStream: async (taskId: string) => codingStreamingRegistry.executeStream(taskId),
     };
     codingFunctions.push(createCodingOrchestrator(orchestratorDeps, inngest));
     codingFunctions.push(createCodingExecuteOrchestrator(orchestratorDeps, inngest));
     codingFunctions.push(
-      createCodingVerifyOrchestrator(
-        {
-          runInTx: core.runInTx,
-          store: core.codingStore,
-          sandbox: sandbox.codingSandbox,
-          secretsStore: core.secretsStore,
-          askpassBaseDir: env.SANDBOX_ASKPASS_DIR,
-          devbaseImage: env.COGMO_DEVBASE_IMAGE,
-          defaultResourceLimits: orchestratorDeps.defaultResourceLimits,
-          taskTtlMs: orchestratorDeps.taskTtlMs,
-          ...(opts.codingAuthOverride && { loadCodingSandboxEnv: opts.codingAuthOverride }),
-          ...(opts.octokitFactory && { octokitFactory: opts.octokitFactory }),
-        },
-        inngest,
-      ),
+      createCodingVerifyOrchestrator({ ...sandboxTaskDeps, ...octokit }, inngest),
     );
 
     // Event-driven cleanup of `cogmo/run/*` branches once a task reaches
     // a terminal state (`pr_open` or `failed`). Best-effort — the weekly
     // cron in `cleanup-orphan-run-branches.ts` is the safety net for
     // events that never fired.
-    codingFunctions.push(
-      createRunBranchCleanupSubscriber(
-        {
-          runInTx: core.runInTx,
-          store: core.codingStore,
-          secretsStore: core.secretsStore,
-          ...(opts.octokitFactory && { octokitFactory: opts.octokitFactory }),
-        },
-        inngest,
-      ),
-    );
+    codingFunctions.push(createRunBranchCleanupSubscriber({ ...repoDeps, ...octokit }, inngest));
 
     // Closes the chat -> register -> invoke loop for skills the agent
     // authors via the coding pipeline. No-op for human-mediated repos.
     codingFunctions.push(
       createAutoRegisterSkillSubscriber(
         {
-          runInTx: core.runInTx,
-          store: core.codingStore,
+          ...repoDeps,
           agentStore: core.agentStore,
-          secretsStore: core.secretsStore,
           skillRunner,
           skillsRepoPath: env.COGMO_SKILLS_PATH,
         },
@@ -140,16 +123,7 @@ export function createCodingRuntime(
     // event-driven cleanup missed (host crash before emit, drift,
     // foreign refs). Cron emits one event per repo; the per-repo
     // handler queries origin + DB and force-deletes stale refs.
-    codingFunctions.push(
-      ...createOrphanRunBranchSweepFunctions(
-        {
-          runInTx: core.runInTx,
-          store: core.codingStore,
-          secretsStore: core.secretsStore,
-        },
-        inngest,
-      ),
-    );
+    codingFunctions.push(...createOrphanRunBranchSweepFunctions(repoDeps, inngest));
 
     // Subscribes to `inngest/function.failed` and flips any non-terminal
     // `coding_tasks` row whose function id matches a coding orchestrator

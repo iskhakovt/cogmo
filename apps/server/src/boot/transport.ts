@@ -53,22 +53,18 @@ export async function startTransport(core: CoreDeps, wiring: TransportWiring) {
   // routes (open tab connections) — one shared instance, both sides below.
   const webStreamRegistry = new WebStreamRegistry();
 
-  const {
-    functions: channelFunctions,
-    adapters,
-    adapterMap,
-  } = await startChannels({
-    webStream: webStreamRegistry,
+  // What every channel's Transport and the web UI's share.
+  const transportDeps = {
     defaultUserId: core.user.id,
     defaultProfileId: core.profile.id,
     runInTx: core.runInTx,
     transportStore: core.transportStore,
     agentStore: core.agentStore,
     codingStore: core.codingStore,
-    codingStreamingRegistry: wiring.codingStreamingRegistry,
+    secretsStore: core.secretsStore,
+    reposDir: env.COGMO_REPOS_DIR,
     skillRunner: wiring.skillRunner,
     skillStore: core.skillStore,
-    pipelineRunStore: core.pipelineRunStore,
     mcpRegistry: wiring.mcpRegistry,
     triggerReflection: wiring.triggerReflection,
     compactConversation: wiring.compactConversation,
@@ -76,12 +72,21 @@ export async function startTransport(core: CoreDeps, wiring: TransportWiring) {
     inboundArrived,
     attachments: core.attachmentStore,
     idleTimeoutMs: wiring.idleTimeoutMs,
+  };
+
+  const {
+    functions: channelFunctions,
+    adapters,
+    adapterMap,
+  } = await startChannels({
+    ...transportDeps,
+    webStream: webStreamRegistry,
+    codingStreamingRegistry: wiring.codingStreamingRegistry,
+    pipelineRunStore: core.pipelineRunStore,
     boundary: {
       promptTimeoutMs: env.BOUNDARY_PROMPT_TIMEOUT_SECONDS * 1000,
       minUserTurns: env.BOUNDARY_PROMPT_MIN_USER_TURNS,
     },
-    secretsStore: core.secretsStore,
-    reposDir: env.COGMO_REPOS_DIR,
   });
 
   const deliveryRouter = createDeliveryRouter({
@@ -96,24 +101,8 @@ export async function startTransport(core: CoreDeps, wiring: TransportWiring) {
   const webChannel = await core.runInTx((tx) => core.transportStore.getChannelByType(tx, "web"));
   const webTransport: Transport | null = webChannel
     ? createTransport({
+        ...transportDeps,
         channelId: webChannel.id,
-        defaultUserId: core.user.id,
-        defaultProfileId: core.profile.id,
-        runInTx: core.runInTx,
-        transportStore: core.transportStore,
-        agentStore: core.agentStore,
-        codingStore: core.codingStore,
-        secretsStore: core.secretsStore,
-        reposDir: env.COGMO_REPOS_DIR,
-        skillRunner: wiring.skillRunner,
-        skillStore: core.skillStore,
-        mcpRegistry: wiring.mcpRegistry,
-        triggerReflection: wiring.triggerReflection,
-        compactConversation: wiring.compactConversation,
-        inngest,
-        inboundArrived,
-        attachments: core.attachmentStore,
-        idleTimeoutMs: wiring.idleTimeoutMs,
         // Tabs watch the whole conversation, not just turns they sent.
         sessionReceive: "all",
       })
@@ -125,19 +114,16 @@ export async function startTransport(core: CoreDeps, wiring: TransportWiring) {
 export function createSessionFunctions(core: CoreDeps, timing: SessionTiming) {
   const idleTimer = createIdleTimer({ idleTimeoutMs: timing.idleTimeoutMs });
   const debounceFunctions = createDebounceFunctions(timing.debounceConfig);
-  const boundaryWaiter = createBoundaryWaiter({
+  const boundaryDeps = {
     runInTx: core.runInTx,
     transportStore: core.transportStore,
     agentStore: core.agentStore,
     inngest,
     defaultProfileId: core.profile.id,
-  });
+  };
+  const boundaryWaiter = createBoundaryWaiter(boundaryDeps);
   const boundaryJanitor = createBoundaryJanitor({
-    runInTx: core.runInTx,
-    transportStore: core.transportStore,
-    agentStore: core.agentStore,
-    inngest,
-    defaultProfileId: core.profile.id,
+    ...boundaryDeps,
     gracePeriodMs: env.BOUNDARY_PROMPT_TIMEOUT_SECONDS * 2 * 1000,
   });
   return { idleTimer, debounceFunctions, boundaryWaiter, boundaryJanitor };

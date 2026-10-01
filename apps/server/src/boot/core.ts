@@ -40,8 +40,9 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
       "COGMO_MASTER_KEY is required. Generate one with: cogmo gen-key\n" + "Then run: cogmo setup",
     );
   }
+  const masterKey = parseMasterKey(env.COGMO_MASTER_KEY);
   const secretsStore = new DrizzleSecretsStore(
-    deriveMasterKey(parseMasterKey(env.COGMO_MASTER_KEY), "cogmo/secrets-at-rest/v1"),
+    deriveMasterKey(masterKey, "cogmo/secrets-at-rest/v1"),
   );
   // Derived bootstrap login token for the web UI — nothing persisted; the gate
   // recomputes + constant-time-compares the presented value.
@@ -54,7 +55,7 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
     opts,
   );
 
-  const storage = createObjectStorage(env.COGMO_MASTER_KEY);
+  const storage = createObjectStorage(masterKey);
 
   // Tool credentials: DB first (wizard-configured), env fallback (dev convenience).
   const tavilyKey =

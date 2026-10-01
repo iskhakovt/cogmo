@@ -8,7 +8,7 @@ import { createFileService } from "../agent/files.js";
 import type { Service } from "../agent/service.js";
 import { env } from "../env.js";
 import { logger } from "../logger.js";
-import { deriveMasterKey, parseMasterKey } from "../secrets/encryption.js";
+import { deriveMasterKey } from "../secrets/encryption.js";
 import type { AttachmentStore } from "../transport/attachment-store.js";
 import { createAttachmentStore } from "../transport/attachment-store.js";
 import { wrapAttachmentStoreWithEncryption } from "../transport/encrypted-attachment-store.js";
@@ -22,7 +22,7 @@ export interface ObjectStorage {
   attachmentEncryptionKey: Uint8Array | null;
 }
 
-export function createObjectStorage(masterKey: string): ObjectStorage {
+export function createObjectStorage(masterKey: Uint8Array): ObjectStorage {
   checkS3KeyPair(env.S3_ACCESS_KEY, env.S3_SECRET_KEY);
   const s3Client = new S3Client({
     ...(env.S3_ENDPOINT ? { endpoint: env.S3_ENDPOINT, forcePathStyle: true } : {}),
@@ -33,13 +33,13 @@ export function createObjectStorage(masterKey: string): ObjectStorage {
   });
   // Optional client-side encryption — when enabled, attachment bodies AND
   // workspace file bodies are AES-256-GCM-encrypted before upload using
-  // a key derived from `COGMO_MASTER_KEY` (already validated above).
+  // a key derived from `COGMO_MASTER_KEY`.
   // Storage provider only ever sees ciphertext. Object keys remain
   // plaintext (matches the AWS S3 Encryption Client convention — if
   // file names need to stay secret, choose non-revealing names). See
   // the `S3_CLIENT_ENCRYPT` env-var doc for the full trade-off.
   const attachmentEncryptionKey = env.S3_CLIENT_ENCRYPT
-    ? deriveMasterKey(parseMasterKey(masterKey), "cogmo/s3-objects/v1")
+    ? deriveMasterKey(masterKey, "cogmo/s3-objects/v1")
     : null;
   const fileService = createFileService(
     s3Client,

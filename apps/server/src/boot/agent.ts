@@ -14,15 +14,14 @@ import { ImageToolsLoader } from "../agent/image-tools-loader.js";
 import { runStreamingAgentLoop } from "../agent/loop.js";
 import { createPipelineGateResolver } from "../agent/pipeline/gate-resolver.js";
 import { createPipelineGateWaiter } from "../agent/pipeline/gate-waiter.js";
-import { runAgenticStage } from "../agent/pipeline/run-agentic-stage.js";
+import { type AgenticStageDeps, runAgenticStage } from "../agent/pipeline/run-agentic-stage.js";
 import { createPipelineStageRunner } from "../agent/pipeline/stage-runner.js";
 import { DefaultPromptSource } from "../agent/prompt.js";
 import { createHandleMessageReconcile } from "../agent/reconcile-on-failure.js";
 import { createRecoverConversation } from "../agent/recover-conversation.js";
 import { createScheduledTaskFireHandler } from "../agent/scheduling/fire-handler.js";
 import { createScheduledTaskTicker } from "../agent/scheduling/ticker.js";
-import type { ToolSpec } from "../agent/tools.js";
-import { createDefaultTools } from "../agent/tools.js";
+import { createDefaultTools, type ToolSpec } from "../agent/tools.js";
 import { env } from "../env.js";
 import { inngest } from "../inngest/index.js";
 import type { McpRegistryImpl } from "../mcp/registry.js";
@@ -72,13 +71,7 @@ export function createConversationTriggers(core: CoreDeps, promptSource: Default
   // Shares deps with `createObserver` — the autonomous Inngest path and the
   // manual path execute the same `runObserver` body.
   const reflectionTrigger = (conversationId: string) =>
-    triggerReflection(conversationId, {
-      runInTx: core.runInTx,
-      agentStore: core.agentStore,
-      transportStore: core.transportStore,
-      resolveProvider: core.resolveProvider,
-      memory: core.memory,
-    });
+    triggerReflection(conversationId, observerDeps(core));
 
   // Sync compaction driver injected into every Transport so `/compact` can
   // summarize and store in-process, ahead of the budget pressure that would
@@ -125,7 +118,8 @@ export function createAgentFunctions(
     ...(opts.voiceFetchOverride && { fetch: opts.voiceFetchOverride }),
   });
 
-  const handleMessage = createHandleMessage({
+  // What a chat turn and an agentic pipeline stage both run the agent loop with.
+  const turnDeps: AgenticStageDeps = {
     runInTx: core.runInTx,
     agentStore: core.agentStore,
     transportStore: core.transportStore,
@@ -135,14 +129,18 @@ export function createAgentFunctions(
     memory: core.memory,
     promptSource,
     fileService: core.fileService,
-    attachments: core.attachmentStore,
-    debounceConfig: timing.debounceConfig,
     deliveryRouter,
     runStreamingAgentLoop,
     codingServiceFactory,
     skillRunner,
     mcpRegistry,
     userTimezone: env.USER_TIMEZONE,
+  };
+
+  const handleMessage = createHandleMessage({
+    ...turnDeps,
+    attachments: core.attachmentStore,
+    debounceConfig: timing.debounceConfig,
     voiceResolver,
     pipelineStore: core.pipelineStore,
     pipelineRunStore: core.pipelineRunStore,
@@ -161,29 +159,7 @@ export function createAgentFunctions(
     runInTx: core.runInTx,
     runStore: core.pipelineRunStore,
     deliveryRouter,
-    executeAgenticStage: (args, steps, log) =>
-      runAgenticStage(
-        {
-          runInTx: core.runInTx,
-          agentStore: core.agentStore,
-          transportStore: core.transportStore,
-          resolveProvider: core.resolveProvider,
-          tools,
-          imageToolsLoader,
-          memory: core.memory,
-          promptSource,
-          fileService: core.fileService,
-          deliveryRouter,
-          runStreamingAgentLoop,
-          codingServiceFactory,
-          skillRunner,
-          mcpRegistry,
-          userTimezone: env.USER_TIMEZONE,
-        },
-        args,
-        steps,
-        log,
-      ),
+    executeAgenticStage: (args, steps, log) => runAgenticStage(turnDeps, args, steps, log),
   });
   const pipelineGateWaiter = createPipelineGateWaiter({ deliveryRouter });
   const pipelineGateResolver = createPipelineGateResolver({
@@ -192,13 +168,7 @@ export function createAgentFunctions(
     deliveryRouter,
   });
 
-  const observer = createObserver({
-    runInTx: core.runInTx,
-    agentStore: core.agentStore,
-    transportStore: core.transportStore,
-    resolveProvider: core.resolveProvider,
-    memory: core.memory,
-  });
+  const observer = createObserver(observerDeps(core));
 
   const recoverConversation = createRecoverConversation({
     runInTx: core.runInTx,
@@ -244,5 +214,16 @@ export function createAgentFunctions(
     handleMessageReconcile,
     scheduledTaskTicker,
     scheduledTaskFire,
+  };
+}
+
+/** The Observer's deps, shared by its Inngest function and the `/reflect` driver. */
+function observerDeps(core: CoreDeps) {
+  return {
+    runInTx: core.runInTx,
+    agentStore: core.agentStore,
+    transportStore: core.transportStore,
+    resolveProvider: core.resolveProvider,
+    memory: core.memory,
   };
 }
