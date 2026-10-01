@@ -20,6 +20,16 @@ import type { FileEntry, Service } from "./service.js";
  */
 const MAX_READ_LENGTH = 100_000;
 
+/**
+ * The first `length` UTF-16 units of `text`, one fewer when the cut would
+ * split a surrogate pair. A lone surrogate doesn't survive a JSON round trip
+ * through the step store or the database, so a replay would read other bytes.
+ */
+function truncateToCodePoint(text: string, length: number): string {
+  const last = text.charCodeAt(length - 1);
+  return text.slice(0, last >= 0xd800 && last <= 0xdbff ? length - 1 : length);
+}
+
 /** Prompt guidance for the files Service namespace. */
 export const FILES_PROMPT_GUIDANCE =
   "You have a persistent file workspace. Use it proactively — save meeting notes, draft emails, keep project summaries. Files persist across conversations. Read a file before overwriting or editing it; reach for `edit_file` rather than rewriting whole files.";
@@ -162,7 +172,7 @@ export function createFileService(
         isPartialView: truncated,
       });
       if (truncated) {
-        return `${fetched.content.slice(0, MAX_READ_LENGTH)}\n\n[Content truncated at ${MAX_READ_LENGTH} characters. Edits and overwrites are blocked until the file is read in full.]`;
+        return `${truncateToCodePoint(fetched.content, MAX_READ_LENGTH)}\n\n[Content truncated at ${MAX_READ_LENGTH} characters. Edits and overwrites are blocked until the file is read in full.]`;
       }
       return fetched.content;
     },

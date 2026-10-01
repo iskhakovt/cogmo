@@ -1179,6 +1179,21 @@ describe("handle-message — turn inputs frozen across re-invocations", () => {
     return scriptedStream(events, doneFrame(stopReason, { inputTokens: 10, outputTokens: 5 }));
   }
 
+  /**
+   * A provider that calls `call` as `t1`, then answers. `requests` snapshots
+   * each request as sent: the loop keeps appending to `messages`.
+   */
+  function callThenAnswer(call: { name: string; input: Record<string, unknown> }) {
+    const requests: ChatParams[] = [];
+    const chatStream = vi.fn((params: ChatParams) => {
+      requests.push(structuredClone(params));
+      return requests.length === 1
+        ? stream([{ type: "tool_start", id: "t1", ...call }], "tool_use")
+        : stream([{ type: "text_delta", text: "done" }], "end_turn");
+    });
+    return { resolveProvider: mockResolver(mockProvider({ chatStream })), requests };
+  }
+
   it("sends the same tools on every iteration when a skill stops loading mid-turn", async () => {
     // The skill's source becomes unreadable once it has run, so every later
     // invocation's live catalog drops it — as `listToolDefs` does for a skill
@@ -1203,16 +1218,9 @@ describe("handle-message — turn inputs frozen across re-invocations", () => {
       skillLoads = false;
       return { runId: "skill-run-1", status: "success", output: 42 };
     });
-    // Snapshot each request as sent: the loop keeps appending to `messages`.
-    const requests: ChatParams[] = [];
-    const chatStream = vi.fn((params: ChatParams) => {
-      requests.push(structuredClone(params));
-      return requests.length === 1
-        ? stream([{ type: "tool_start", id: "t1", name: "echo", input: { n: 42 } }], "tool_use")
-        : stream([{ type: "text_delta", text: "done" }], "end_turn");
-    });
+    const { resolveProvider, requests } = callThenAnswer({ name: "echo", input: { n: 42 } });
     const deps = mockDeps({
-      resolveProvider: mockResolver(mockProvider({ chatStream })),
+      resolveProvider,
       agentStore: mockAgentStore({ getProfile: vi.fn().mockResolvedValue(profile()) }),
       skillRunner,
       runStreamingAgentLoop,
@@ -1286,21 +1294,20 @@ describe("handle-message — turn inputs frozen across re-invocations", () => {
   });
 
   describe("durable reads", () => {
-    /** Calls `get_current_time`, then answers; returns every tool result the provider was sent. */
-    function timeCallingDeps(): { deps: HandleMessageDeps; toolResults: () => unknown[] } {
-      const requests: ChatParams[] = [];
-      const chatStream = vi.fn((params: ChatParams) => {
-        requests.push(structuredClone(params));
-        return requests.length === 1
-          ? stream(
-              [{ type: "tool_start", id: "t1", name: "get_current_time", input: {} }],
-              "tool_use",
-            )
-          : stream([{ type: "text_delta", text: "done" }], "end_turn");
-      });
+    const getCurrentTime = expectDefined(
+      createDefaultTools().get("get_current_time"),
+      "get_current_time",
+    );
+
+    /** A turn calling `get_current_time` once, a spy on its handler, and the tool results sent. */
+    function timeCallingTurn() {
+      const handler = vi.fn(getCurrentTime.handler);
+      const tools = new ToolRegistry();
+      tools.register({ ...getCurrentTime, handler });
+      const { resolveProvider, requests } = callThenAnswer({ name: "get_current_time", input: {} });
       const deps = mockDeps({
-        tools: createDefaultTools(),
-        resolveProvider: mockResolver(mockProvider({ chatStream })),
+        tools,
+        resolveProvider,
         agentStore: mockAgentStore({ getProfile: vi.fn().mockResolvedValue(profile()) }),
         runStreamingAgentLoop,
       });
@@ -1309,13 +1316,13 @@ describe("handle-message — turn inputs frozen across re-invocations", () => {
           const last = r.messages.at(-1)?.content;
           return Array.isArray(last) ? last.find((b) => b.type === "tool_result") : undefined;
         });
-      return { deps, toolResults };
+      return { deps, handler, toolResults };
     }
 
     const CACHED_TIME = '{"iso":"2026-01-01T00:00:00.000Z"}';
 
     it("sends a read's memoized output when its step is cached, without re-executing it", async () => {
-      const { deps, toolResults } = timeCallingDeps();
+      const { deps, handler, toolResults } = timeCallingTurn();
 
       await new InngestTestEngine({
         function: createHandleMessage(deps),
@@ -1323,20 +1330,19 @@ describe("handle-message — turn inputs frozen across re-invocations", () => {
         steps: [{ id: "tool-iter1-0", handler: () => CACHED_TIME }],
       }).execute();
 
+      expect(handler).not.toHaveBeenCalled();
       expect(toolResults()).toEqual([
         { type: "tool_result", toolUseId: "t1", content: CACHED_TIME },
       ]);
     });
 
-    it("keeps the policy a run in flight froze: its reads run in the bare body", async () => {
-      // `freeze-turn-inputs` memoized by a build before durable reads.
-      const before = new ToolRegistry();
-      for (const spec of createDefaultTools().snapshot()) {
-        before.register(R.omit(spec, ["durable"]));
-      }
-      const frozenBefore = freezeToolTable(before);
-      expect(frozenBefore).not.toBe(freezeToolTable(createDefaultTools()));
-      const { deps, toolResults } = timeCallingDeps();
+    it("dispatches on the durability its run froze: a non-durable read runs in the bare body", async () => {
+      // A memoized `freeze-turn-inputs` whose table offers the tool without `durable`.
+      const nonDurable = new ToolRegistry();
+      nonDurable.register(R.omit(getCurrentTime, ["durable"]));
+      const frozenNonDurable = freezeToolTable(nonDurable);
+      const { deps, handler, toolResults } = timeCallingTurn();
+      expect(frozenNonDurable).not.toBe(freezeToolTable(deps.tools));
 
       await new InngestTestEngine({
         function: createHandleMessage(deps),
@@ -1344,13 +1350,14 @@ describe("handle-message — turn inputs frozen across re-invocations", () => {
         steps: [
           {
             id: "freeze-turn-inputs",
-            handler: () => ({ voiceMode: false, batchDelivery: false, tools: frozenBefore }),
+            handler: () => ({ voiceMode: false, batchDelivery: false, tools: frozenNonDurable }),
           },
           // Never consulted: a non-durable call plans no step.
           { id: "tool-iter1-0", handler: () => CACHED_TIME },
         ],
       }).execute();
 
+      expect(handler).toHaveBeenCalled();
       const [result] = toolResults();
       expect(result).toMatchObject({ type: "tool_result", toolUseId: "t1" });
       expect(result).not.toMatchObject({ content: CACHED_TIME });

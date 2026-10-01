@@ -144,7 +144,7 @@ Tool handlers run in the loop, in the bare body unless marked durable — so a n
 - Step state holds their outputs: `read_file` stops at 100,000 characters, `list_files` returns one S3 page of up to 1,000 keys, and the other list tools return every row they match.
 - `durable` is in the frozen tool table, which the configuration digest hashes: changing a flag opens one `configuration` epoch per conversation at its next turn, and a run in flight keeps the policy its `freeze-turn-inputs` froze until the turn ends.
 
-**Non-durable:** a handler whose output is a pure function of its input. No built-in tool qualifies; `tools.test.ts` holds every built-in durable.
+**Non-durable:** a handler whose output is a pure function of its input. No built-in tool qualifies. `tools.test.ts` holds every built-in durable, so a built-in that qualifies is named there as an exemption in the same change.
 
 Marking a tool `durable: true` is a cost decision with two sides: it buys exactly-once for the handler and pins the recorded `tool_result` to what the model actually saw, and it charges one extra step boundary — which, with LLM iterations durable, costs a cheap cached replay rather than a fresh model call. Justify both sides in the PR that flips a flag.
 
@@ -276,14 +276,14 @@ Before wrapping (or deciding not to), **count the boundaries**: state how many s
 
 Wrap work in `step.run` when **all** of these are true:
 
-- The RETURN VALUE is small and JSON-serializable (so Inngest can store and replay it). The work itself may stream, emit to a transport, or take minutes — side effects fired from inside the body happen live and are suppressed on replay, which is usually exactly what's wanted (see `llm-iter<N>`).
-- Re-executing it would be expensive, billable, wrong, or visible to the user.
+- The RETURN VALUE is JSON-serializable and bounded: Inngest stores it and re-ships it on every later invocation ([State serialization](#state-serialization-confirmed) → Size). The work itself may stream, emit to a transport, or take minutes — side effects fired from inside the body happen live and are suppressed on replay, which is usually exactly what's wanted (see `llm-iter<N>`).
+- Re-executing it would be expensive, billable, wrong, or visible to the user. A read whose output can change during the run and reaches the model, a persisted row or the step graph is wrong to re-execute, however cheap — every tool read is durable for this reason ([Tool durability policy](#tool-durability-policy)).
 - The step's inputs are themselves durable, OR the cached output remains valid even if the inputs drift slightly between attempts. Otherwise the cache freezes against stale inputs.
 - If the step is conditional, the condition derives from durable state — a gate on a non-durable read can flip between invocations and diverge the step graph (`summarize-prefix-outcome` and `auto-recall` carry a documented residual of this against concurrent profile edits).
 
 Do **not** wrap:
 
-- Pure reads from injected dependencies (cheap, idempotent).
+- Reads whose output can't change during the run, and reads whose payload must stay out of step state (`attachments.download()`, whose bytes the renderer re-fetches each invocation).
 - Code that must genuinely observe every invocation (the `#activeStreams`-deduped `deliveryRouter.prepare`, the loop's control flow) — a step would freeze its first execution's view.
 - The loop's *orchestration* (`runStreamingAgentLoop` as a whole) — it is deterministic glue over cached outcomes and must re-walk them each invocation. The expensive work inside it is already wrapped: each iteration in `llm-iter<N>`, each durable tool in `tool-iter<N>-<P>`.
 - Pipelines that build large intermediate values (image base64, full message histories) just to return a small final result. Wrap only the expensive sub-step.
