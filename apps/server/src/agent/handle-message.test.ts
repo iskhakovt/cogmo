@@ -1,5 +1,6 @@
 import { NonRetriableError } from "inngest";
 import { err } from "neverthrow";
+import * as R from "remeda";
 import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { z } from "zod";
@@ -16,6 +17,7 @@ import { expectDefined } from "../test/assertions.js";
 import {
   directStep,
   doneFrame,
+  FAKE_TX,
   fakeRunInTx,
   invokeInngestFn,
   invokeInngestOnFailure,
@@ -40,13 +42,14 @@ import type { InboundContent } from "../transport/content.js";
 import { StreamDeliveryError } from "../transport/delivery-router.js";
 import { toolResultClearing } from "./context.js";
 import { coreMemoryTools } from "./core-memory-tools.js";
+import { readFile } from "./file-tools.js";
 import type { HandleMessageDeps } from "./handle-message.js";
 import { createHandleMessage } from "./handle-message.js";
 import type { ImageToolsLoader } from "./image-tools-loader.js";
 import { runStreamingAgentLoop } from "./loop.js";
 import { memoryTools } from "./memory-tools.js";
 import { DefaultPromptSource } from "./prompt.js";
-import { ToolRegistry } from "./tools.js";
+import { ToolRegistry, type ToolSpec } from "./tools.js";
 
 type InboundReadyData = z.infer<typeof inboundReady.schema>;
 
@@ -4775,15 +4778,17 @@ describe("system prompt snapshot", () => {
     return expectDefined(vi.mocked(deps.runStreamingAgentLoop).mock.calls[0], "agent loop call")[0];
   }
 
+  /** The digest of the epoch a turn opened; `undefined` when it continued one. */
+  function openedDigest(deps: HandleMessageDeps): string | undefined {
+    return vi.mocked(deps.agentStore.insertOrRecoverSystemPromptSnapshot).mock.calls[0]?.[1]
+      .configDigest;
+  }
+
   /** The digest a first turn on the default deps stores: the configuration they render. */
   async function defaultDigest(): Promise<string> {
     const deps = mockDeps();
     await run(deps);
-    const [, params] = expectDefined(
-      vi.mocked(deps.agentStore.insertOrRecoverSystemPromptSnapshot).mock.calls[0],
-      "snapshot insert",
-    );
-    return params.configDigest;
+    return expectDefined(openedDigest(deps), "snapshot insert");
   }
 
   function snapshot(overrides: { configDigest: string; historyStart?: string }) {
@@ -5066,6 +5071,45 @@ describe("system prompt snapshot", () => {
     const { systemPrompt, messages } = loopParams(deps);
     expect(systemPrompt).toBe("system prompt");
     expect(messages[1]).toEqual({ role: "assistant", content: [{ type: "text", text: "reply" }] });
+  });
+
+  it("opens one epoch when a tool's durability changes, and continues it after", async () => {
+    // `read_file` offered without `durable`, then with it.
+    const nonDurableReadFile = R.omit(readFile, ["durable"]);
+    const profile = expectDefined(
+      await mockAgentStore().getProfile(FAKE_TX, "profile-1"),
+      "default profile",
+    );
+
+    /** The digest a turn over `spec` stores, continuing from `current`; `undefined` if it opened none. */
+    async function turnOver(
+      spec: ToolSpec,
+      current: string | undefined,
+    ): Promise<string | undefined> {
+      const tools = new ToolRegistry();
+      tools.register(spec);
+      const deps = mockDeps({
+        tools,
+        agentStore: mockAgentStore({
+          getProfile: vi.fn().mockResolvedValue({ ...profile, toolSet: ["*"] }),
+          listMessages: vi.fn().mockResolvedValue(HISTORY),
+          getLatestSystemPromptSnapshot: vi
+            .fn()
+            .mockResolvedValue(
+              current === undefined ? undefined : snapshot({ configDigest: current }),
+            ),
+        }),
+      });
+      await run(deps);
+      expect(loopParams(deps).tools.get("read_file")).toBeDefined();
+      return openedDigest(deps);
+    }
+
+    const nonDurable = expectDefined(await turnOver(nonDurableReadFile, undefined), "first epoch");
+    const durable = expectDefined(await turnOver(readFile, nonDurable), "epoch on the flip");
+
+    expect(durable).not.toBe(nonDurable);
+    expect(await turnOver(readFile, durable)).toBeUndefined();
   });
 
   it("opens an epoch when the history starts from a summary the epoch didn't", async () => {
