@@ -7,8 +7,7 @@ import type { ToolOutcome } from "./tools.js";
  * successful step result carrying `ok: false`, so it replays like any other
  * value; only a bug fails the step.
  *
- * A bare string reads as a success: earlier builds memoized the handler's
- * string, and a run in flight replays what it memoized.
+ * A run in flight may hold a bare-string memo; it reads as a success.
  */
 const ToolStepResultSchema = z.union([
   z.string().transform((content) => ({ ok: true as const, content })),
