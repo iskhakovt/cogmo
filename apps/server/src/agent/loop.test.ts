@@ -2953,16 +2953,9 @@ describe("in-loop model-misbehavior repair", () => {
       subtype: "empty_end_turn",
     });
     expect(result.iterations).toBe(2);
-    // The failing iteration's empty assistant content is NOT in newMessages;
-    // the continuation prompt the model was sent is.
-    expect(result.newMessages).toEqual([
-      {
-        role: "user",
-        content: [
-          { type: "text", text: "Please complete your response.", harness: "continuation" },
-        ],
-      },
-    ]);
+    // Neither empty reply persists, and so neither does the continuation
+    // prompt: no kept reply is bound to it, and the turn must not end on it.
+    expect(result.newMessages).toEqual([]);
     expect(turnLogger.warn).toHaveBeenCalledWith(
       expect.objectContaining({
         event: "agent.degrade",
@@ -2970,6 +2963,26 @@ describe("in-loop model-misbehavior repair", () => {
       }),
       expect.any(String),
     );
+  });
+
+  it("an empty end_turn on the last allowed iteration persists no continuation prompt", async () => {
+    // The prompt is pushed, the iteration cap ends the loop before any
+    // request carries it, and the degrade must not persist it.
+    const { provider, streamCalls } = repairStreamProvider([
+      { kind: "stream", events: [], stopReason: "end_turn" },
+    ]);
+
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "hi" }],
+      tools: new ToolRegistry(),
+      onEvent: async () => {},
+      maxIterations: 1,
+    });
+
+    expect(streamCalls).toHaveLength(1);
+    expect(result.degraded).toEqual({ reason: "iteration_cap", subtype: null });
+    expect(result.newMessages).toEqual([]);
   });
 
   it("stream truncation (ProviderProtocolError) → non-streaming replay → success", async () => {
@@ -3470,7 +3483,7 @@ describe("in-loop model-misbehavior repair", () => {
     expect(result.text).toBe("done");
   });
 
-  it("persistence boundary: the tool round and the sent continuation prompt persist; failing iterations do not", async () => {
+  it("persistence boundary: the tool round persists; failing iterations and the prompt between them do not", async () => {
     // iteration 1: tool_use; iteration 2: empty end_turn (fails); iteration 3: empty end_turn (degrade)
     const { provider } = repairStreamProvider([
       {
@@ -3499,8 +3512,9 @@ describe("in-loop model-misbehavior repair", () => {
     });
 
     expect(result.degraded?.subtype).toBe("empty_end_turn");
-    // The successful tool round and the continuation prompt the model was
-    // sent persist; neither empty assistant from iterations 2 and 3 does.
+    // The successful tool round persists. Neither empty assistant from
+    // iterations 2 and 3 does, and so neither does the continuation prompt
+    // between them, which no kept reply answers.
     expect(result.newMessages).toEqual([
       {
         role: "assistant",
@@ -3509,12 +3523,6 @@ describe("in-loop model-misbehavior repair", () => {
       {
         role: "user",
         content: [{ type: "tool_result", toolUseId: "t1", content: "pong from x" }],
-      },
-      {
-        role: "user",
-        content: [
-          { type: "text", text: "Please complete your response.", harness: "continuation" },
-        ],
       },
     ]);
   });

@@ -2662,6 +2662,33 @@ describe("OpenAICompatibleProvider", () => {
       ]);
     });
 
+    it("separates text meeting text across the join with a blank line, as two strings are", async () => {
+      await setup().chat({
+        model: "m",
+        system: "",
+        messages: [
+          { role: "user", content: "earlier" },
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "look" },
+              { type: "image", source: "url", data: "https://x/a.png", mediaType: "image/png" },
+            ],
+          },
+        ],
+      });
+
+      expect(firstCreateArgs().messages).toEqual([
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "earlier\n\nlook" },
+            { type: "image_url", image_url: { url: "https://x/a.png" } },
+          ],
+        },
+      ]);
+    });
+
     it("leaves a user message after tool results as its own message", async () => {
       await setup().chat({
         model: "m",

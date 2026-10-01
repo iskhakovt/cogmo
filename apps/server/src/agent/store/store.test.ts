@@ -4,7 +4,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 import type { Database, Transactor } from "../../db/index.js";
 import type { CacheDialect } from "../../llm/cache-dialect.js";
-import type { Message } from "../../llm/types.js";
+import { HARNESS_ROW_TAGS, type Message } from "../../llm/types.js";
 import { deriveMasterKey, generateMasterKey, parseMasterKey } from "../../secrets/encryption.js";
 import { DrizzleSecretsStore } from "../../secrets/store/index.js";
 import { skills } from "../../skills/store/schema.js";
@@ -4926,6 +4926,22 @@ describe("turn contexts", () => {
 
     const found = await tx((trx) => store.findUserMessageByInbound(trx, conversationId, INBOUND));
     expect(found?.id).toBe(id);
+  });
+
+  it.each(HARNESS_ROW_TAGS)("skips a later user row carrying a %s block", async (tag) => {
+    const { conversationId, stamp, row } = await seedUserRow();
+    await tx((trx) =>
+      store.insertMessage(trx, {
+        conversationId,
+        role: "user",
+        content: [{ type: "text", text: "x", harness: tag }],
+        lastInboundMessageId: INBOUND,
+        ...stamp,
+      }),
+    );
+
+    const found = await tx((trx) => store.findUserMessageByInbound(trx, conversationId, INBOUND));
+    expect(found?.id).toBe(row.id);
   });
 });
 

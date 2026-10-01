@@ -1,5 +1,6 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
+import * as R from "remeda";
 import { logger } from "../logger.js";
 import { abortReasonOr } from "./abort.js";
 import type { CacheDialect } from "./cache-dialect.js";
@@ -534,26 +535,49 @@ function buildMessages(
  * `messages` with each run of adjacent user messages joined into one, since
  * strict-alternation chat templates reject two in a row. The continuation
  * prompt follows the turn's own row, and dropping a thinking-only assistant
- * turn leaves its neighbours adjacent. Two strings join with a blank line;
- * otherwise the parts concatenate.
+ * turn leaves its neighbours adjacent.
  */
 function mergeConsecutiveUserMessages(
   messages: ReadonlyArray<OpenAI.ChatCompletionMessageParam>,
 ): OpenAI.ChatCompletionMessageParam[] {
-  const out: OpenAI.ChatCompletionMessageParam[] = [];
-  for (const msg of messages) {
-    const prev = out.at(-1);
-    if (prev?.role !== "user" || msg.role !== "user") {
-      out.push(msg);
-      continue;
-    }
-    const content =
-      typeof prev.content === "string" && typeof msg.content === "string"
-        ? `${prev.content}\n\n${msg.content}`
-        : [...userParts(prev.content), ...userParts(msg.content)];
-    out[out.length - 1] = { role: "user", content };
+  // The accumulator is local, so pushing onto it keeps the merge linear.
+  return R.reduce(
+    messages,
+    (out: OpenAI.ChatCompletionMessageParam[], msg) => {
+      const prev = out.at(-1);
+      if (prev?.role === "user" && msg.role === "user") {
+        out[out.length - 1] = { role: "user", content: joinUserContent(prev.content, msg.content) };
+      } else {
+        out.push(msg);
+      }
+      return out;
+    },
+    [],
+  );
+}
+
+/**
+ * Two user messages' content as one. Text meeting text across the join is
+ * separated by a blank line, whether both sides are strings or parts; an
+ * image at the join separates them already.
+ */
+function joinUserContent(
+  first: OpenAI.ChatCompletionUserMessageParam["content"],
+  second: OpenAI.ChatCompletionUserMessageParam["content"],
+): OpenAI.ChatCompletionUserMessageParam["content"] {
+  if (typeof first === "string" && typeof second === "string") return `${first}\n\n${second}`;
+  const left = userParts(first);
+  const right = userParts(second);
+  const last = left.at(-1);
+  const next = right[0];
+  if (last?.type === "text" && next?.type === "text") {
+    return [
+      ...left.slice(0, -1),
+      { type: "text", text: `${last.text}\n\n${next.text}` },
+      ...right.slice(1),
+    ];
   }
-  return out;
+  return [...left, ...right];
 }
 
 function userParts(

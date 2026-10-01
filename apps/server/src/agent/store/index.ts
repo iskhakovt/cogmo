@@ -20,6 +20,7 @@ import * as R from "remeda";
 import { single } from "../../db/helpers.js";
 import type { Transaction } from "../../db/index.js";
 import type { CacheDialect } from "../../llm/cache-dialect.js";
+import { NOT_TURN_ROW_JSONPATH } from "../../llm/content.js";
 import type { ContentBlock, Message } from "../../llm/types.js";
 import { skills } from "../../skills/store/schema.js";
 import { previewInboundText } from "../../transport/content.js";
@@ -1992,8 +1993,8 @@ export class DrizzleAgentStore implements AgentStore {
     conversationId: string,
     inboundId: string,
   ): Promise<{ id: string; createdAt: Date } | undefined> {
-    // Drizzle has no operator for a JSON path, so the predicate is raw. A
-    // string row has no elements to match, so it counts as a turn row.
+    // Drizzle has no operator for a JSON path, so the predicate is raw; the
+    // path is `isTurnRowContent`'s rule, bound as a parameter.
     const rows = await tx
       .select({ id: messages.id, createdAt: messages.createdAt })
       .from(messages)
@@ -2002,9 +2003,7 @@ export class DrizzleAgentStore implements AgentStore {
           eq(messages.conversationId, conversationId),
           eq(messages.lastInboundMessageId, inboundId),
           eq(messages.role, "user"),
-          not(
-            sql`jsonb_path_exists(${messages.content}, '$[*] ? (@.type == "tool_result" || exists (@.harness))')`,
-          ),
+          not(sql`jsonb_path_exists(${messages.content}, ${NOT_TURN_ROW_JSONPATH}::jsonpath)`),
         ),
       )
       .orderBy(desc(messages.id))

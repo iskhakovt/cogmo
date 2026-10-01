@@ -11,6 +11,7 @@
  */
 
 import * as R from "remeda";
+import { isTurnRowContent } from "../llm/content.js";
 import type {
   ChatParams,
   ContentBlock,
@@ -502,12 +503,9 @@ function truncateOldest(messages: Message[]): Message[] {
 
 // --- Pair-aware helpers ---
 
-/** A user row that belongs to the row before it: tool results, or a harness-tagged row. */
+/** A user row that belongs to the row before it: any user row but a turn's own. */
 function attachesToPrevious(msg: Message): boolean {
-  if (msg.role !== "user" || typeof msg.content === "string") return false;
-  return msg.content.some(
-    (b) => b.type === "tool_result" || (b.type === "text" && b.harness !== undefined),
-  );
+  return msg.role === "user" && !isTurnRowContent(msg.content);
 }
 
 /**

@@ -363,7 +363,7 @@ describe("AnthropicProvider", () => {
       ],
     });
 
-    const sent = mockCreate.mock.calls[0]![0].messages;
+    const sent = expectDefined(mockCreate.mock.calls[0], "messages.create call")[0].messages;
     expect(JSON.stringify(sent)).not.toContain("harness");
     expect(sent[2].content).toEqual([
       { type: "tool_result", tool_use_id: "tu_1", content: "stop" },

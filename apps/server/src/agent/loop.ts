@@ -145,8 +145,8 @@ export interface AgentLoopResult {
    * Class D loop-pathology fingerprint tripped — the orchestrator posts
    * a system-generated apology as the final assistant message rather
    * than `text`. `text` is `""` and `newMessages` carries the successfully
-   * completed intermediate iterations and any continuation prompt the model
-   * was sent, but not the failing iteration's content. See
+   * completed intermediate iterations, but not the failing iteration's
+   * content nor a continuation prompt no kept reply follows. See
    * design/agent-resilience.md → Degraded reply.
    *
    * Class D trips set `subtype: "stuck_loop"` (consecutive) or
@@ -648,12 +648,15 @@ function buildResult(
 
 /**
  * Build a degraded result for Class C / D off-ramp exits. The caller has
- * already dropped the failing iteration, so `newMessages` holds what the
- * model was sent: the completed tool_use+tool_result pairs and any
- * continuation prompt. The orchestrator overrides `text` with the
- * user-facing apology and appends a single assistant text block on top of
- * these messages; the loop itself doesn't manufacture the apology text —
- * that lives next to the channel-aware delivery code.
+ * already dropped the failing iteration, so `newMessages` holds the completed
+ * tool_use+tool_result pairs, and a continuation prompt only when a kept reply
+ * follows it. One left at the tail answered nothing kept — the reply to it
+ * was dropped, or the iteration cap ended the loop before any request carried
+ * it — so it is dropped too, and the turn never ends on it. `messages` keeps
+ * it: it is what the last request sent. The orchestrator overrides `text`
+ * with the user-facing apology and appends a single assistant text block on
+ * top of these messages; the loop itself doesn't manufacture the apology
+ * text — that lives next to the channel-aware delivery code.
  */
 function buildDegradedResult(
   messages: Message[],
@@ -665,10 +668,16 @@ function buildDegradedResult(
   subtype: DegradeSubtype | null,
   streamed: EmittedLedger,
 ): AgentLoopResult {
+  const kept = messages.slice(initialLength);
+  const last = kept.at(-1);
+  const endsOnContinuation =
+    last?.role === "user" &&
+    Array.isArray(last.content) &&
+    last.content.some((b) => b.type === "text" && b.harness === "continuation");
   return {
     text: "",
     messages: [...messages],
-    newMessages: messages.slice(initialLength),
+    newMessages: endsOnContinuation ? kept.slice(0, -1) : kept,
     usage,
     model,
     iterations,
