@@ -38,6 +38,11 @@ rule from memory as if it were the rule.
 
 `src/...` paths in the rules are relative to `apps/server/`.
 
+The checklist below names concerns and the rule that owns each; it does not
+restate the rules. Where the checklist and a rule file disagree, the rule file
+wins — judge against what you just read, and treat any file or class name in
+a rule as an example to verify at the ref, not as structure to enforce.
+
 ## 2. Get the change
 
 Read the target **at its ref**, never the working tree (it is `main` or
@@ -57,7 +62,8 @@ with `--stat` — a hand-edited snapshot is itself a finding. Start with
 surrounding file at the ref to confirm it.
 
 Review only what the diff introduces or changes. Pre-existing code is out of
-scope unless the diff extends the pattern.
+scope unless the diff extends the pattern. Test files are code: the idiom
+items (section 1) apply to them as well as section 6.
 
 ## 3a. `code` mode checklist
 
@@ -66,16 +72,33 @@ not touch that concern). One row per item; a violation names `file:line` and
 the rule (`file` + a short exact quote).
 
 **1. Idioms** — `.claude/rules/code-style.md`, `design/tooling.md`
-- 1a Expected failures are `Result` (neverthrow), throws only for bugs.
-  Includes a function that throws on an anticipated outcome (failed model
-  call, parse failure, missing row) for its caller to catch.
-- 1b Discriminated unions matched with ts-pattern `.exhaustive()`; not
-  `if/else`/`switch` chains, `===` on string flags, or `.otherwise()` over a
-  closed union.
+- 1a Expected failures are tagged values — a discriminated union in a
+  `Result` (neverthrow), not an `Error` subclass told apart with `instanceof`
+  (code-style.md → Error handling). A throw is right only where it is the
+  framework's channel (an Inngest step failure / `NonRetriableError`,
+  p-retry's `AbortError`, oRPC's `fail`, a provider stream), converted from
+  the `Result` once at that edge; and for fatal boot checks and invariant
+  violations. A violation: a function that throws on an anticipated outcome
+  (failed model or HTTP call, parse failure, missing row, partial batch
+  failure, `AggregateError`) for its caller to catch, or domain code that
+  unwraps a `Result` into a throw. Also a violation: anticipated failures
+  caught, collected and rethrown later (a deferred rethrow, an
+  `AggregateError` assembled in domain code) — the framework channel is one
+  throw at the edge, not a failure report built out of exceptions. A callee
+  that still throws at the ref (pre-existing API) does not excuse new code
+  that catches and re-packages its errors.
+- 1b Outcomes and discriminated unions matched with ts-pattern
+  `.exhaustive()` (code-style.md → Use the stack; state-machines.md →
+  "Outcomes are discriminated unions"); not `if/else`/`switch` chains, `===`
+  on string outcomes or flags, or `.otherwise()` over a closed union. A
+  function returning a string-literal union that callers compare with `===`
+  is a violation even without a lifecycle.
 - 1c Remeda / ES2025 for data transforms; `for` loops only where the rule
   allows (sequential `await`, stateful early-exit scan).
 - 1d No rep exposure: returned collections are copies or `Readonly`; no
-  shared mutable module state.
+  shared mutable module state — including a module-level object or array
+  constant returned by reference from a function, unless it is frozen or
+  typed `Readonly`.
 - 1e Classes: `#private` for everything off the interface; async init via
   `private constructor` + `static async create()`.
 - 1f No unjustified `as`; any production `as unknown` carries the comment the
@@ -83,10 +106,13 @@ the rule (`file` + a short exact quote).
 - 1g Comments describe the current state (no "now", "no longer", "used to",
   PR/date/incident references).
 - 1h `function` declarations for named exports.
-- 1i No default parameter values or column defaults beyond those
-  `architecture-rules.md` justifies.
-- 1j No dead code: exported or private members nothing calls, unused
-  branches, parameters every caller passes identically.
+- 1i No default values beyond those `architecture-rules.md` justifies
+  ("Avoid default values in DB columns and function parameters"): parameter
+  defaults (`chunk = sample`) in production code and test helpers alike,
+  column defaults, and Zod `.default()` unless a comment justifies it.
+- 1j No dead code: exported or private members nothing calls, exports only
+  tests import (grep the ref for production callers), unused branches,
+  parameters every caller passes identically.
 
 **2. Architecture & DDD, as the repo defines it** — `CLAUDE.md`, `store-pattern.md`, `state-machines.md`
 - 2a Infrastructure modules (`db/`, `inngest/`, `llm/`, `memory/`, `util/`)
