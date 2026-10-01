@@ -148,9 +148,9 @@ function isTextBlock(b: unknown): b is { type: "text"; text: string } {
     typeof b === "object" &&
     b !== null &&
     "type" in b &&
-    (b as { type: unknown }).type === "text" &&
+    b.type === "text" &&
     "text" in b &&
-    typeof (b as { text: unknown }).text === "string"
+    typeof b.text === "string"
   );
 }
 

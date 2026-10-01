@@ -22,7 +22,7 @@ import {
  *      tool turns) — harmless because the fast path only reads the most
  *      recent **assistant** row, which always carries the real count.
  */
-export const UNKNOWN_OUTPUT_TOKENS = -1;
+const UNKNOWN_OUTPUT_TOKENS = -1;
 
 /**
  * A row from `conversation_summaries` — the persisted output of the summarize
