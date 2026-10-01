@@ -235,8 +235,9 @@ function buildTtsProbe(choice: TtsChoice): TtsProvider {
  * `/v1/audio/speech`, e.g. self-hosted relays), and ElevenLabs. STT
  * supports OpenAI and OpenAI-compatible (Groq's `/v1/audio/transcriptions`
  * is a common pick). Each direction is configured independently — a shared
- * key is offered only when the provider type and base URL match. Config takes effect on the next message; no
- * restart required (resolver is hot-reloaded).
+ * key is offered only when the provider type and base URL match. Config
+ * takes effect on the next message; no restart required (resolver is
+ * hot-reloaded).
  */
 export async function stepConfigureVoice(deps: WizardDeps): Promise<void> {
   const existing = await deps.runInTx((tx) => deps.agentStore.getVoiceConfig(tx));

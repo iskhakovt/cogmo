@@ -13,7 +13,7 @@ import { createSandboxBackend } from "../sandbox/factory.js";
 import { CogmoSocketProxy, type SandboxClient } from "../sandbox/index.js";
 import { DEFAULT_RESOURCE_LIMITS as SKILLS_DEFAULT_RESOURCE_LIMITS } from "../skills/worker-sysbox/host.js";
 import { checkDirWritable } from "./checks.js";
-import { DEFAULT_CODING_RESOURCE_LIMITS } from "./coding.js";
+import { DEFAULT_CODING_RESOURCE_LIMITS } from "./limits.js";
 import { scheduleSandboxImageWarm } from "./sandbox-image-warm.js";
 import { type BootstrapOptions, type CoreDeps, NO_SANDBOX, type SandboxDeps } from "./stages.js";
 

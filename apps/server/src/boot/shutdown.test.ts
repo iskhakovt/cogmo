@@ -2,9 +2,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Transactor } from "../db/index.js";
 import type { McpRegistryImpl } from "../mcp/registry.js";
+import type { SandboxClient } from "../sandbox/index.js";
 import type { DrizzleSandboxStore } from "../sandbox/store/index.js";
 import type { SkillRunnerImpl } from "../skills/runner.js";
 import { expectDefined } from "../test/assertions.js";
+import type { ChannelAdapter } from "../transport/registry.js";
 import {
   type ServeResources,
   type ShutdownBounds,
@@ -241,6 +243,22 @@ describe("serveResources", () => {
       skillRunner: mock<SkillRunnerImpl>(),
     };
   }
+
+  it("hands each started resource to its teardown step", () => {
+    const sandbox = mock<SandboxClient>();
+    const adapters = [{ channelType: "telegram", adapter: mock<ChannelAdapter["adapter"]>() }];
+    const deps = { ...boot("instance-1"), sandbox, adapters };
+    const web = resources().web;
+
+    expect(serveResources(deps, web)).toMatchObject({
+      web,
+      adapters,
+      codingStreams: deps.codingStreams,
+      mcpRegistry: deps.mcpRegistry,
+      skills: deps.skillRunner,
+      sandbox,
+    });
+  });
 
   it("closes this process's instance row", async () => {
     const deps = boot("instance-1");

@@ -21,18 +21,8 @@ import { env } from "../env.js";
 import { inngest } from "../inngest/index.js";
 import { createSandboxReaper } from "../sandbox/reaper.js";
 import type { SkillRunnerImpl } from "../skills/runner.js";
+import { DEFAULT_CODING_RESOURCE_LIMITS } from "./limits.js";
 import type { BootstrapOptions, CoreDeps, SandboxDeps } from "./stages.js";
-
-/**
- * Coding-delegation sandboxes (devbase image). 2 cpu / 2 GiB fits
- * `claude` CLI + a TS compile + pnpm install. `disk_bytes` omitted —
- * Daytona's 3 GiB default has headroom over the ~1.5 GiB devbase image.
- */
-export const DEFAULT_CODING_RESOURCE_LIMITS = {
-  cpus: 2,
-  memory_bytes: 2 * 1024 * 1024 * 1024,
-  pids: 256,
-} as const;
 
 export function createCodingRuntime(
   core: CoreDeps,
@@ -66,7 +56,9 @@ export function createCodingRuntime(
   const codingFunctions: any[] = [];
   if (sandbox.codingSandbox) {
     // Every coding function reads tasks and repos, and authenticates to
-    // GitHub through the stored identity.
+    // GitHub through the stored identity: the plan/execute orchestrators use
+    // it to push dirty/unpushed worktrees to `refs/cogmo-wip/<taskId>` on
+    // failure (`safeTeardownWorktree`); verify uses it to sign and push.
     const repoDeps = {
       runInTx: core.runInTx,
       store: core.codingStore,
@@ -83,9 +75,6 @@ export function createCodingRuntime(
       askpassBaseDir: env.SANDBOX_ASKPASS_DIR,
       ...(opts.codingAuthOverride && { loadCodingSandboxEnv: opts.codingAuthOverride }),
     };
-    // The plan/execute orchestrators use the secrets store's identity to push
-    // dirty/unpushed worktrees to `refs/cogmo-wip/<taskId>` on failure
-    // (`safeTeardownWorktree`); verify uses it to sign and push.
     const orchestratorDeps = {
       ...sandboxTaskDeps,
       backend: codingBackend,
