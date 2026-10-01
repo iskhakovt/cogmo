@@ -1,3 +1,4 @@
+import { ok } from "neverthrow";
 import { afterAll, describe, expect, it, vi } from "vitest";
 import type { CtxHandler } from "../dispatcher.js";
 import { runOnWorker } from "./host.js";
@@ -18,7 +19,7 @@ afterAll(() => {
 });
 
 function noopHandler(): CtxHandler {
-  return { handle: vi.fn().mockResolvedValue(null) };
+  return { handle: vi.fn().mockResolvedValue(ok(null)) };
 }
 
 describe("runOnWorker (Pyodide)", () => {
@@ -42,9 +43,9 @@ async def run(inputs, ctx):
     const handler: CtxHandler = {
       handle: vi.fn(async ({ method, args }) => {
         if (method === "secrets.get" && (args as { name: string }).name === "api_key") {
-          return "sk-live-123";
+          return ok("sk-live-123");
         }
-        if (method === "now") return "2026-01-01T00:00:00.000Z";
+        if (method === "now") return ok("2026-01-01T00:00:00.000Z");
         throw new Error(`unexpected ctx call: ${method}`);
       }),
     };
@@ -205,7 +206,7 @@ async def run(inputs, ctx):
   it("ctx.user round-trips the user dict", async () => {
     const handler: CtxHandler = {
       handle: vi.fn(async ({ method }) => {
-        if (method === "user") return { id: "u1", timezone: "Europe/London" };
+        if (method === "user") return ok({ id: "u1", timezone: "Europe/London" });
         throw new Error(`unexpected ${method}`);
       }),
     };
@@ -249,8 +250,8 @@ async def run(inputs, ctx):
   });
 
   it("two sequential runOnWorker calls are independent (no shared state)", async () => {
-    const handler1: CtxHandler = { handle: vi.fn(async () => "first") };
-    const handler2: CtxHandler = { handle: vi.fn(async () => "second") };
+    const handler1: CtxHandler = { handle: vi.fn(async () => ok("first")) };
+    const handler2: CtxHandler = { handle: vi.fn(async () => ok("second")) };
 
     const body = `
 async def run(inputs, ctx):

@@ -93,7 +93,7 @@ function buildFakeSandbox(): FakeSandboxBundle {
   return { sandbox, stdin, stdout, calls };
 }
 
-const noopCtx: CtxHandler = { handle: async () => null };
+const noopCtx: CtxHandler = { handle: async () => ok(null) };
 
 /** Auto-respond to any `task_invoke` line with a matching `task_result` and `task_exited`. */
 function autoRespond(
