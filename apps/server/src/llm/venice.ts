@@ -306,7 +306,10 @@ export class VeniceImageProvider {
     }
 
     const parsed = VeniceResponseSchema.safeParse(await resp.json());
-    const first = parsed.success ? parsed.data.images?.[0] : undefined;
+    if (!parsed.success) {
+      throw new Error(`Venice response did not match the expected shape: ${parsed.error.message}`);
+    }
+    const first = parsed.data.images?.[0];
     if (first === undefined || first.length === 0) {
       throw new Error("Venice response carried no image data");
     }

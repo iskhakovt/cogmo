@@ -356,7 +356,9 @@ describe("VeniceImageProvider.generate", () => {
       fetch: fetchFn,
     });
 
-    await expect(provider.generate({ model: "m", prompt: "p" })).rejects.toThrow(/no image data/);
+    await expect(provider.generate({ model: "m", prompt: "p" })).rejects.toThrow(
+      /did not match the expected shape/,
+    );
   });
 });
 

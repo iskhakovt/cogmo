@@ -155,7 +155,7 @@ describe("createDbVoiceResolver", () => {
     expect(await resolve()).toBeUndefined();
   });
 
-  it("drops the cached bundle once the config stops building a provider", async () => {
+  it("returns undefined once the TTS config stops building a provider", async () => {
     const { agentStore, secretsStore } = setup();
     agentStore.getVoiceConfig.mockResolvedValue(voiceRow());
     const resolve = createDbVoiceResolver({

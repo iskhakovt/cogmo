@@ -130,7 +130,7 @@ const DEFAULT_REPAIR: Required<ChatTypedRepair> = {
  * budget on a re-ask: the reply's text, then the adapter's instruction as
  * the user turn.
  *
- * {@link ProviderProtocolError} (raised by {@link parseProviderJson} when
+ * {@link ProviderProtocolError} (returned by {@link parseProviderJson} when
  * `jsonrepair` also fails) propagates immediately — no feedback retry, no
  * additional call. The in-loop classifier owns that recovery path for
  * in-loop callsites; for out-of-loop callsites the wrapping Inngest step
