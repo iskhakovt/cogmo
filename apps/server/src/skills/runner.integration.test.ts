@@ -285,9 +285,7 @@ async def run(inputs, ctx):
 
     const result = await runner.invoke({ name, inputs: {}, runAs });
     expect(result.status).toBe("error");
-    // CtxError encodes the kind as `kind=<kind>:` in the message so it
-    // survives the JS→Python JsException conversion.
-    expect(result.error).toContain("kind=not_in_allowlist");
+    expect(result.error).toContain("CtxError: not_in_allowlist:");
 
     const calls = await tx((trx) => store.listContextCallsForRun(trx, result.runId));
     const get = calls.find((c) => c.method === "secrets.get");

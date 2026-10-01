@@ -1,4 +1,4 @@
-import { ok } from "neverthrow";
+import { err, ok } from "neverthrow";
 import { afterAll, describe, expect, it, vi } from "vitest";
 import type { CtxHandler } from "../dispatcher.js";
 import { runOnWorker } from "./host.js";
@@ -69,6 +69,66 @@ async def run(inputs, ctx):
       method: "secrets.get",
       args: expect.objectContaining({ name: "api_key" }),
     });
+  });
+
+  it("raises a refused ctx call in the skill as CtxError with its kind and message", async () => {
+    const handler: CtxHandler = {
+      handle: vi.fn(async () =>
+        err({ kind: "not_in_allowlist", message: "secret 'x' is not declared" }),
+      ),
+    };
+    const result = await runOnWorker({
+      taskId: "task-refused",
+      skillName: "refused",
+      body: `
+async def run(inputs, ctx):
+    try:
+        await ctx.secrets.get("x")
+    except CtxError as e:
+        return {"kind": e.kind, "message": e.message, "str": str(e)}
+    return {"kind": None}
+`,
+      inputs: {},
+      ctxHandler: handler,
+    });
+    expect(result.output).toEqual({
+      kind: "not_in_allowlist",
+      message: "secret 'x' is not declared",
+      str: "not_in_allowlist: secret 'x' is not declared",
+    });
+  });
+
+  it("fails the task naming the CtxError a skill leaves uncaught", async () => {
+    const handler: CtxHandler = {
+      handle: vi.fn(async () => err({ kind: "missing_effect", message: "needs reads_memory" })),
+    };
+    const result = await runOnWorker({
+      taskId: "task-uncaught",
+      skillName: "uncaught",
+      body: `
+async def run(inputs, ctx):
+    return await ctx.memory.recall("q")
+`,
+      inputs: {},
+      ctxHandler: handler,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("CtxError: missing_effect: needs reads_memory");
+  });
+
+  it("hands a served null to the skill as None", async () => {
+    const result = await runOnWorker({
+      taskId: "task-null",
+      skillName: "null-value",
+      body: `
+async def run(inputs, ctx):
+    v = await ctx.memory.remember("fact")
+    return {"isNone": v is None}
+`,
+      inputs: {},
+      ctxHandler: noopHandler(),
+    });
+    expect(result.output).toEqual({ isNone: true });
   });
 
   it("returns ok: false with the Python exception when the skill raises", async () => {
