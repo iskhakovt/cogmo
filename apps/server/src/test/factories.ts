@@ -595,16 +595,18 @@ export function mockAdapter(overrides?: Partial<Adapter>): Adapter {
 
 /**
  * Auto-mocked stub of `Service["files"]`. Every method is a `vi.fn()`;
- * `read` resolves to `""` and `list` to `[]` so callers that don't care
- * about file behavior get sensible defaults without enumerating each
- * method. Adding a new method to the namespace doesn't require touching
+ * `read` resolves to `ok("")`, `write` and `edit` to `ok(undefined)` and
+ * `list` to `[]` so callers that don't care about file behavior get
+ * sensible defaults without enumerating each method. Adding a new method to the namespace doesn't require touching
  * tests that only need a passthrough stub. For per-method overrides,
  * call `files.read.mockResolvedValue(...)` after construction or pass
  * `overrides` to replace whole methods.
  */
 export function mockFilesService(overrides?: Partial<Service["files"]>): Service["files"] {
   const files = mock<Service["files"]>();
-  files.read.mockResolvedValue("");
+  files.read.mockResolvedValue(ok(""));
+  files.write.mockResolvedValue(ok(undefined));
+  files.edit.mockResolvedValue(ok(undefined));
   files.list.mockResolvedValue([]);
   if (overrides) Object.assign(files, overrides);
   return files;

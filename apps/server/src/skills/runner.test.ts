@@ -1,3 +1,4 @@
+import { ok } from "neverthrow";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Service } from "../agent/service.js";
@@ -226,7 +227,7 @@ async def run(inputs, ctx):
     vi.mocked(files.list).mockResolvedValue([
       { path: "notes/draft.md", size: 5, lastModified: new Date("2026-04-01T00:00:00.000Z") },
     ]);
-    vi.mocked(files.read).mockResolvedValue("hello");
+    vi.mocked(files.read).mockResolvedValue(ok("hello"));
     const runner = await makeRunner();
 
     const manifest = `---
