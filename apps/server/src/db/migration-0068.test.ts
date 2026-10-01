@@ -1,11 +1,9 @@
 /**
- * Migration 0068 adds the Observer's per-phase cursors to `conversations`
- * and `contradicted_through_message_id` to `steering_rules`. Runs the raw
- * migration SQL against PGlite over rows written in the pre-migration shape
- * (the pushed schema's new columns dropped first) and asserts that existing
- * conversations and rules come through with the new columns NULL, so their
- * next Observer fire reads the whole history, and that each foreign key
- * clears its column when the message goes.
+ * Migrations 0068 and 0069: the Observer's per-phase cursors on
+ * `conversations` and `contradicted_by_message_id` on `steering_rules`, then
+ * the backfill that starts each observed conversation's cursors at its last
+ * Observer fire. Runs the raw migration SQL against PGlite over rows written
+ * in the pre-migration shape (the pushed schema's new columns dropped first).
  */
 
 import { readFile } from "node:fs/promises";
@@ -13,34 +11,43 @@ import { fileURLToPath } from "node:url";
 import { sql } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
-import { messages, profiles, users } from "../agent/store/schema.js";
+import { DrizzleAgentStore } from "../agent/store/index.js";
+import { profiles, users } from "../agent/store/schema.js";
 import { expectDefined } from "../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
-import type { Database } from "./index.js";
+import type { Database, Transactor } from "./index.js";
 
-const MIGRATION_SQL = await readFile(
-  fileURLToPath(new URL("../../migrations/0068_observer_cursors.sql", import.meta.url)),
-  "utf8",
-);
+async function migrationSql(file: string): Promise<string> {
+  return readFile(fileURLToPath(new URL(`../../migrations/${file}`, import.meta.url)), "utf8");
+}
+
+const MIGRATIONS = [
+  await migrationSql("0068_observer_cursors.sql"),
+  await migrationSql("0069_observer_cursor_backfill.sql"),
+];
 
 const IdRowsSchema = z.object({ rows: z.array(z.object({ id: z.string() })) });
 const CursorRowsSchema = z.object({
   rows: z.array(
     z.object({
+      id: z.string(),
       corrections_observed_through: z.string().nullable(),
       memories_observed_through: z.string().nullable(),
     }),
   ),
 });
 const MarkerRowsSchema = z.object({
-  rows: z.array(z.object({ contradicted_through_message_id: z.string().nullable() })),
+  rows: z.array(z.object({ contradicted_by_message_id: z.string().nullable() })),
 });
 
 let db: Database;
+let tx: Transactor;
 let close: () => Promise<void>;
+let profileId: string;
+let userId: string;
 
 beforeAll(async () => {
-  ({ db, close } = await createTestDatabase());
+  ({ db, tx, close } = await createTestDatabase());
 });
 
 beforeEach(async () => {
@@ -51,85 +58,143 @@ beforeEach(async () => {
       DROP COLUMN IF EXISTS memories_observed_through
   `);
   await db.execute(
-    sql`ALTER TABLE steering_rules DROP COLUMN IF EXISTS contradicted_through_message_id`,
+    sql`ALTER TABLE steering_rules DROP COLUMN IF EXISTS contradicted_by_message_id`,
   );
+  const [user] = await db.insert(users).values({}).returning({ id: users.id });
+  userId = expectDefined(user, "user").id;
+  const [profile] = await db
+    .insert(profiles)
+    .values({ userId: null, name: "p", basePrompt: "", model: "m", toolSet: [] })
+    .returning({ id: profiles.id });
+  profileId = expectDefined(profile, "profile").id;
 });
 
 afterAll(async () => {
   await close();
 });
 
-async function applyMigration(): Promise<void> {
-  const statements = MIGRATION_SQL.split("--> statement-breakpoint")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-  for (const stmt of statements) {
-    await db.execute(sql.raw(stmt));
+/** Each file runs in its own transaction, as the per-file migrator runs them. */
+async function applyMigrations(): Promise<void> {
+  for (const file of MIGRATIONS) {
+    const statements = file
+      .split("--> statement-breakpoint")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    await db.transaction(async (trx) => {
+      for (const stmt of statements) await trx.execute(sql.raw(stmt));
+    });
   }
 }
 
-/** A conversation with one message, written in the pre-migration shape. */
-async function seedConversation(): Promise<{ conversationId: string; messageId: string }> {
-  const [user] = await db.insert(users).values({}).returning({ id: users.id });
-  const [profile] = await db
-    .insert(profiles)
-    .values({ userId: null, name: "p", basePrompt: "", model: "m", toolSet: [] })
-    .returning({ id: profiles.id });
-  const profileId = expectDefined(profile, "profile").id;
-  // Raw: Drizzle's insert names every column the pushed schema has, the dropped ones included.
+/** A conversation in the pre-migration shape. Raw: Drizzle's insert names the dropped columns. */
+async function seedConversation(): Promise<string> {
   const { rows } = IdRowsSchema.parse(
     await db.execute(sql`
       INSERT INTO conversations (user_id, profile_id, is_private)
-      VALUES (${expectDefined(user, "user").id}, ${profileId}, true)
+      VALUES (${userId}, ${profileId}, true)
       RETURNING id
     `),
   );
-  const conversationId = expectDefined(rows[0], "conversation").id;
-  const [message] = await db
-    .insert(messages)
-    .values({
-      conversationId,
-      role: "user",
-      content: "hello",
-      profileId,
-      model: "m",
-      lastInboundMessageId: "019d0000-0000-7000-8000-0000000000ff",
-      outputTokens: -1,
-    })
-    .returning({ id: messages.id });
-  return { conversationId, messageId: expectDefined(message, "message").id };
+  return expectDefined(rows[0], "conversation").id;
 }
 
-async function cursors() {
-  return CursorRowsSchema.parse(
-    await db.execute(
-      sql`SELECT corrections_observed_through, memories_observed_through FROM conversations`,
-    ),
-  ).rows;
+async function seedMessage(conversationId: string, createdAt: string): Promise<string> {
+  const { rows } = IdRowsSchema.parse(
+    await db.execute(sql`
+      INSERT INTO messages
+        (conversation_id, role, content, profile_id, model, last_inbound_message_id,
+          output_tokens, created_at)
+      VALUES (${conversationId}, 'user', '"hello"'::jsonb, ${profileId}, 'm',
+        '019d0000-0000-7000-8000-0000000000ff', -1, ${createdAt}::timestamptz)
+      RETURNING id
+    `),
+  );
+  return expectDefined(rows[0], "message").id;
 }
 
-describe("migration 0068 — observer cursors", () => {
-  it("leaves existing conversations and rules unobserved and uncontradicted", async () => {
-    await seedConversation();
+/** An Observer audit row, in whatever payload shape it was written. */
+async function seedFire(conversationId: string, createdAt: string): Promise<void> {
+  await db.execute(sql`
+    INSERT INTO evolution_events (conversation_id, user_id, triggered_by, payload, created_at)
+    VALUES (${conversationId}, ${userId}, 'idle', '{}'::jsonb, ${createdAt}::timestamptz)
+  `);
+}
+
+async function cursorsOf(conversationId: string) {
+  const { rows } = CursorRowsSchema.parse(
+    await db.execute(sql`
+      SELECT id, corrections_observed_through, memories_observed_through
+      FROM conversations WHERE id = ${conversationId}
+    `),
+  );
+  return expectDefined(rows[0], conversationId);
+}
+
+describe("migrations 0068 and 0069 — observer cursors", () => {
+  it("starts an observed conversation's cursors at the last message its latest fire saw", async () => {
+    const conversationId = await seedConversation();
+    await seedMessage(conversationId, "2026-09-01T10:00:00Z");
+    await seedFire(conversationId, "2026-09-01T10:00:30Z");
+    const seen = await seedMessage(conversationId, "2026-09-01T10:01:00Z");
+    await seedFire(conversationId, "2026-09-01T10:02:00Z");
+    const after = await seedMessage(conversationId, "2026-09-01T10:03:00Z");
+
+    await applyMigrations();
+
+    expect(await cursorsOf(conversationId)).toMatchObject({
+      corrections_observed_through: seen,
+      memories_observed_through: seen,
+    });
+    const store = new DrizzleAgentStore();
+    const unseen = await tx((trx) =>
+      store.listMessagesInRange(trx, conversationId, { after: seen, through: after, limit: null }),
+    );
+    expect(unseen.map((m) => m.id)).toEqual([after]);
+  });
+
+  it("leaves a conversation the Observer never fired on unobserved", async () => {
+    const conversationId = await seedConversation();
+    await seedMessage(conversationId, "2026-09-01T10:00:00Z");
+
+    await applyMigrations();
+
+    expect(await cursorsOf(conversationId)).toMatchObject({
+      corrections_observed_through: null,
+      memories_observed_through: null,
+    });
+  });
+
+  it("leaves a conversation whose fire predates its every message unobserved", async () => {
+    const conversationId = await seedConversation();
+    await seedFire(conversationId, "2026-09-01T09:00:00Z");
+    await seedMessage(conversationId, "2026-09-01T10:00:00Z");
+
+    await applyMigrations();
+
+    expect(await cursorsOf(conversationId)).toMatchObject({
+      corrections_observed_through: null,
+      memories_observed_through: null,
+    });
+  });
+
+  it("leaves existing rules uncontradicted", async () => {
     await db.execute(sql`
       INSERT INTO steering_rules (rule, category, active, source, priority, observation_count)
       VALUES ('Use metric units.', 'style', false, 'correction', 100, 1)
     `);
 
-    await applyMigration();
+    await applyMigrations();
 
-    expect(await cursors()).toEqual([
-      { corrections_observed_through: null, memories_observed_through: null },
-    ]);
     const { rows } = MarkerRowsSchema.parse(
-      await db.execute(sql`SELECT contradicted_through_message_id FROM steering_rules`),
+      await db.execute(sql`SELECT contradicted_by_message_id FROM steering_rules`),
     );
-    expect(rows).toEqual([{ contradicted_through_message_id: null }]);
+    expect(rows).toEqual([{ contradicted_by_message_id: null }]);
   });
 
   it("clears a cursor and a contradiction marker when their message is deleted", async () => {
-    const { conversationId, messageId } = await seedConversation();
-    await applyMigration();
+    const conversationId = await seedConversation();
+    const messageId = await seedMessage(conversationId, "2026-09-01T10:00:00Z");
+    await applyMigrations();
     await db.execute(sql`
       UPDATE conversations
       SET corrections_observed_through = ${messageId}, memories_observed_through = ${messageId}
@@ -137,18 +202,19 @@ describe("migration 0068 — observer cursors", () => {
     `);
     await db.execute(sql`
       INSERT INTO steering_rules
-        (rule, category, active, source, priority, observation_count, contradicted_through_message_id)
+        (rule, category, active, source, priority, observation_count, contradicted_by_message_id)
       VALUES ('Use metric units.', 'style', false, 'correction', 100, 0, ${messageId})
     `);
 
     await db.execute(sql`DELETE FROM messages WHERE id = ${messageId}`);
 
-    expect(await cursors()).toEqual([
-      { corrections_observed_through: null, memories_observed_through: null },
-    ]);
+    expect(await cursorsOf(conversationId)).toMatchObject({
+      corrections_observed_through: null,
+      memories_observed_through: null,
+    });
     const { rows } = MarkerRowsSchema.parse(
-      await db.execute(sql`SELECT contradicted_through_message_id FROM steering_rules`),
+      await db.execute(sql`SELECT contradicted_by_message_id FROM steering_rules`),
     );
-    expect(rows).toEqual([{ contradicted_through_message_id: null }]);
+    expect(rows).toEqual([{ contradicted_by_message_id: null }]);
   });
 });

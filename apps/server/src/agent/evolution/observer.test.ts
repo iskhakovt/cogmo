@@ -80,7 +80,13 @@ const VALID_ANSWERS: Answers = {
   consolidation: { groups: [] },
   memories: {
     memories: [
-      { fact: "Lives in Berlin", network: "bank", compartment: "personal", trust: "first-party" },
+      {
+        fact: "Lives in Berlin",
+        network: "bank",
+        compartment: "personal",
+        trust: "first-party",
+        sourceMessage: 3,
+      },
     ],
   },
   classification: { network: "bank", compartment: "personal", trust: "first-party" },
@@ -186,8 +192,10 @@ function messageLog(initial: ReadonlyArray<Message>): MessageLog {
         observedThrough: { ...log.cursors },
       })),
       listMessagesInRange: vi.fn<AgentStore["listMessagesInRange"]>(
-        async (_tx, _conversationId, { after, through }) =>
-          log.messages.filter((m) => (after === null || m.id > after) && m.id <= through),
+        async (_tx, _conversationId, { after, through, limit }) =>
+          log.messages
+            .filter((m) => (after === null || m.id > after) && m.id <= through)
+            .slice(0, limit ?? undefined),
       ),
       listMessagesThrough: vi.fn<AgentStore["listMessagesThrough"]>(
         async (_tx, _conversationId, through, limit) =>
@@ -313,9 +321,10 @@ describe("runObserver phase isolation", () => {
       "load-observer-bounds",
       "load-custom-compartments",
       "load-active-channel-types",
-      "plan-observer-chunks",
+      "plan-corrections-chunks",
       "extract-corrections-1",
       "advance-corrections-cursor-1",
+      "plan-memories-chunks",
       "extract-memories-1",
       "advance-memories-cursor-1",
       "load-pending-memories",
@@ -406,7 +415,7 @@ describe("runObserver phase isolation", () => {
     expect(staged).toHaveLength(1);
   });
 
-  it("propagates a failure that did not come from a step with exhausted retries", async () => {
+  it("records the fire, then throws, a failure that did not come from a step with exhausted retries", async () => {
     // `/reflect` runs the Observer through a harness with no retries; its
     // caller surfaces the error to the user instead of reporting zeros.
     const deps = observerDeps({
@@ -414,7 +423,52 @@ describe("runObserver phase isolation", () => {
     });
 
     await expect(runObserver(EVENT, syncStep, deps)).rejects.toThrow(/matchedExistingRuleId/);
-    expect(deps.memory.retainBatch).not.toHaveBeenCalled();
+    expect(recordedPayload(deps)).toMatchObject({
+      failedPhases: ["corrections"],
+      memories: { extracted: 1 },
+      drained: { drained: 1 },
+    });
+  });
+
+  it("under /reflect, records the rule changes made before memory extraction failed, and drains", async () => {
+    const log = messageLog(HISTORY);
+    const deps = observerDeps({
+      provider: routedProvider({
+        corrections: {
+          corrections: [
+            {
+              rule: "Prefer prose",
+              category: "style",
+              reasoning: "said so",
+              action: "new",
+              matchedExistingRuleId: null,
+              channelType: null,
+              sourceMessage: 3,
+            },
+          ],
+        },
+      }),
+      log,
+      memory: {
+        retainBatch: vi
+          .fn<MemoryProvider["retainBatch"]>()
+          .mockRejectedValueOnce(new Error("hindsight unavailable"))
+          .mockResolvedValue(undefined),
+      },
+    });
+
+    await expect(runObserver(EVENT, syncStep, deps)).rejects.toThrow("hindsight unavailable");
+
+    expect(deps.agentStore.upsertCorrection).toHaveBeenCalledOnce();
+    expect(deps.agentStore.deletePendingMemories).toHaveBeenCalledOnce();
+    expect(recordedPayload(deps)).toMatchObject({
+      corrections: { extracted: 1 },
+      memories: { extracted: 0 },
+      drained: { drained: 1 },
+      failedPhases: ["memories"],
+      newMessages: { corrections: 4, memories: 0 },
+    });
+    expect(log.cursors).toEqual({ corrections: "msg-004", memories: null });
   });
 });
 
@@ -578,6 +632,52 @@ describe("runObserver rules", () => {
     const provider = routedProvider();
     await runObserver(EVENT, exhaustedRetriesStep(), observerDeps({ provider, log }));
     expect(log.cursors).toEqual({ corrections: "msg-004", memories: "msg-004" });
+  });
+
+  it("logs a memories window held for an unseen rule once, not on each replay", async () => {
+    const info = vi.spyOn(logger, "info");
+    const step: ObserverStepHarness = {
+      // The check as an earlier invocation recorded it.
+      run: (id, fn) => (id === "check-unseen-memory-rules" ? Promise.resolve(true as never) : fn()),
+    };
+    const deps = observerDeps({
+      provider: routedProvider(),
+      store: {
+        getProfile: thirdPartyProfile(),
+        getMemoryRules: vi.fn().mockResolvedValue([USER_HEALTH_RULE]),
+      },
+    });
+
+    const result = await runObserver(EVENT, step, deps);
+
+    expect(result).toMatchObject({ memories: { skippedForUnseenRules: 1 } });
+    expect(info).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.stringContaining("memory extraction skipped"),
+    );
+  });
+
+  it("keeps corrections, the drain and the audit row when the unseen-rules read fails after its retries", async () => {
+    const log = messageLog(HISTORY);
+    const getMemoryRules = vi
+      .fn<AgentStore["getMemoryRules"]>()
+      .mockRejectedValueOnce(new Error("connection reset"))
+      .mockResolvedValue([]);
+    const deps = observerDeps({
+      provider: routedProvider(),
+      log,
+      store: { getProfile: thirdPartyProfile(), getMemoryRules },
+    });
+
+    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps);
+
+    expect(result).toMatchObject({
+      failedPhases: ["memories"],
+      newMessages: { corrections: 4, memories: 0 },
+    });
+    expect(log.cursors).toEqual({ corrections: "msg-004", memories: null });
+    expect(deps.agentStore.recordEvolutionEvent).toHaveBeenCalledOnce();
+    expect(deps.agentStore.getPendingMemories).toHaveBeenCalled();
   });
 
   it("records no deferral on a first-party fire", async () => {
@@ -917,6 +1017,7 @@ describe("runObserver observation window", () => {
               action: "new",
               matchedExistingRuleId: null,
               channelType: null,
+              sourceMessage: 1,
             },
           ],
         },
@@ -943,8 +1044,58 @@ describe("runObserver observation window", () => {
       expect(result).toMatchObject({
         corrections: { extracted: 1 },
         failedPhases: ["corrections"],
+        // Only the messages whose cursor advanced.
+        newMessages: { corrections: 1, memories: 3 },
       });
       expect(log.cursors).toEqual({ corrections: "msg-001", memories: "msg-003" });
+    });
+
+    it("skips extraction, leaving both cursors and logging why, when the model's budget can't hold a chunk", async () => {
+      const log = messageLog(LONG);
+      const provider = routedProvider();
+      const warn = vi.spyOn(logger, "warn");
+      const deps = observerDeps({
+        provider,
+        log,
+        // 11.5k context, 1k output: a 500-token budget.
+        resolveProvider: constantResolver(provider, {
+          contextWindow: 11_500,
+          maxOutputTokens: 1_000,
+        }),
+      });
+
+      const result = await runObserver(EVENT, exhaustedRetriesStep(), deps);
+
+      expect(log.cursors).toEqual({ corrections: null, memories: null });
+      expect(userMessagesOf(provider, CORRECTIONS)).toEqual([]);
+      expect(userMessagesOf(provider, MEMORIES)).toEqual([]);
+      expect(result).toMatchObject({
+        modelBudgetTooSmall: true,
+        newMessages: { corrections: 0, memories: 0 },
+        failedPhases: [],
+        drained: { drained: 1 },
+      });
+      expect(recordedPayload(deps)).toMatchObject({ modelBudgetTooSmall: true });
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({ phase: "memories" }),
+        expect.stringContaining("budget can't hold a chunk"),
+      );
+    });
+
+    it("extracts a message larger than the limit, cut down, and moves past it", async () => {
+      const log = messageLog([...HISTORY, { role: "user", content: `${"y".repeat(60_000)} end.` }]);
+      log.cursors = { corrections: "msg-004", memories: "msg-004" };
+      const provider = routedProvider();
+
+      await runObserver(
+        EVENT,
+        exhaustedRetriesStep(),
+        observerDeps({ provider, log, resolveProvider: constantResolver(provider, LIMITS) }),
+      );
+
+      const [sent] = userMessagesOf(provider, MEMORIES);
+      expect(parts(expectDefined(sent, "memories")).fresh).toContain("characters truncated");
+      expect(log.cursors).toEqual({ corrections: "msg-005", memories: "msg-005" });
     });
   });
 
@@ -992,7 +1143,7 @@ describe("runObserver observation window", () => {
       const berlin = [...bank.documents.entries()].filter(
         ([, d]) => d.content === "Lives in Berlin",
       );
-      expect(berlin.map(([id]) => id)).toEqual(["observer:conv-1:msg-004:0"]);
+      expect(berlin.map(([id]) => id)).toEqual(["observer:conv-1:msg-003:0"]);
       expect(log.cursors.memories).toBe("msg-004");
     });
 
@@ -1007,6 +1158,7 @@ describe("runObserver observation window", () => {
               reasoning: "takes it back",
               action: "contradiction",
               matchedExistingRuleId: "R1",
+              sourceMessage: 3,
             },
           ],
         },
@@ -1034,8 +1186,8 @@ describe("runObserver observation window", () => {
       expect(
         vi.mocked(deps.agentStore.contradictLearningRule).mock.calls.map(([, params]) => params),
       ).toEqual([
-        { id: "rule-a", throughMessageId: "msg-004" },
-        { id: "rule-a", throughMessageId: "msg-004" },
+        { id: "rule-a", messageId: "msg-003" },
+        { id: "rule-a", messageId: "msg-003" },
       ]);
     });
 

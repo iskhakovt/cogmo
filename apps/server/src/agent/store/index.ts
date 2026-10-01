@@ -992,11 +992,14 @@ export interface AgentStore {
    */
   getObserverBounds(tx: Transaction, conversationId: string): Promise<ObserverBounds>;
 
-  /** A conversation's messages after `after` (from its start when null) through `through`, ordered by id. */
+  /**
+   * A conversation's messages after `after` (from its start when null) through
+   * `through`, ordered by id: the first `limit` of them, or all when null.
+   */
   listMessagesInRange(
     tx: Transaction,
     conversationId: string,
-    range: { after: string | null; through: string },
+    range: { after: string | null; through: string; limit: number | null },
   ): Promise<ReadonlyArray<Message & { id: string }>>;
 
   /** The last `limit` messages of a conversation at or before `through`, ordered by id. */
@@ -1648,19 +1651,19 @@ export interface AgentStore {
   ): Promise<{ id: string; promoted: boolean } | null>;
 
   /**
-   * Apply a contradiction from the Observer chunk ending at `throughMessageId`
-   * to a learned rule still learning. The first resets its observation count
-   * to 0 and records the chunk (`reset`); one from any other chunk, of the
-   * same conversation or another, retires it and records that chunk instead
-   * (`retired`). A contradiction from the recorded chunk writes nothing and
-   * reports what that chunk did, so a re-run extraction step applies once and
-   * counts the same. Every other retirement clears the record, so one against
-   * a rule that is active, retired otherwise or not learned writes nothing
-   * (`unchanged`).
+   * Apply a contradiction citing the message `messageId` to a learned rule
+   * still learning. The first resets its observation count to 0 and records
+   * the message (`reset`); one citing any other message, of the same
+   * conversation or another, retires it and records that message instead
+   * (`retired`). One citing the recorded message writes nothing and reports
+   * what it did, so re-extracting a message (a retried step, a re-planned
+   * chunk) applies it once and counts the same. Every other retirement clears
+   * the record, so one against a rule that is active, retired otherwise or not
+   * learned writes nothing (`unchanged`).
    */
   contradictLearningRule(
     tx: Transaction,
-    params: { id: string; throughMessageId: string },
+    params: { id: string; messageId: string },
   ): Promise<"reset" | "retired" | "unchanged">;
 
   /**
@@ -2419,9 +2422,9 @@ export class DrizzleAgentStore implements AgentStore {
   async listMessagesInRange(
     tx: Transaction,
     conversationId: string,
-    range: { after: string | null; through: string },
+    range: { after: string | null; through: string; limit: number | null },
   ): Promise<ReadonlyArray<Message & { id: string }>> {
-    const rows = await tx
+    const query = tx
       .select({ id: messages.id, role: messages.role, content: messages.content })
       .from(messages)
       .where(
@@ -2431,7 +2434,9 @@ export class DrizzleAgentStore implements AgentStore {
           lte(messages.id, range.through),
         ),
       )
-      .orderBy(asc(messages.id));
+      .orderBy(asc(messages.id))
+      .$dynamic();
+    const rows = await (range.limit === null ? query : query.limit(range.limit));
     return rows as ReadonlyArray<Message & { id: string }>;
   }
 
@@ -3744,7 +3749,7 @@ export class DrizzleAgentStore implements AgentStore {
 
   async contradictLearningRule(
     tx: Transaction,
-    params: { id: string; throughMessageId: string },
+    params: { id: string; messageId: string },
   ): Promise<"reset" | "retired" | "unchanged"> {
     const learning = and(
       eq(steeringRules.id, params.id),
@@ -3754,20 +3759,20 @@ export class DrizzleAgentStore implements AgentStore {
     );
     const retired = await tx
       .update(steeringRules)
-      .set({ retractedAt: sql`now()`, contradictedThroughMessageId: params.throughMessageId })
+      .set({ retractedAt: sql`now()`, contradictedByMessageId: params.messageId })
       .where(
         and(
           learning,
-          isNotNull(steeringRules.contradictedThroughMessageId),
-          ne(steeringRules.contradictedThroughMessageId, params.throughMessageId),
+          isNotNull(steeringRules.contradictedByMessageId),
+          ne(steeringRules.contradictedByMessageId, params.messageId),
         ),
       )
       .returning({ id: steeringRules.id });
     if (retired.length > 0) return "retired";
     const reset = await tx
       .update(steeringRules)
-      .set({ observationCount: 0, contradictedThroughMessageId: params.throughMessageId })
-      .where(and(learning, isNull(steeringRules.contradictedThroughMessageId)))
+      .set({ observationCount: 0, contradictedByMessageId: params.messageId })
+      .where(and(learning, isNull(steeringRules.contradictedByMessageId)))
       .returning({ id: steeringRules.id });
     if (reset.length > 0) return "reset";
     const [applied] = await tx
@@ -3776,7 +3781,7 @@ export class DrizzleAgentStore implements AgentStore {
       .where(
         and(
           eq(steeringRules.id, params.id),
-          eq(steeringRules.contradictedThroughMessageId, params.throughMessageId),
+          eq(steeringRules.contradictedByMessageId, params.messageId),
           inArray(steeringRules.source, LEARNED_RULE_SOURCES),
         ),
       );
@@ -3961,7 +3966,7 @@ export class DrizzleAgentStore implements AgentStore {
     await tx
       .update(steeringRules)
       // Not a contradiction's retirement: no chunk recorded it.
-      .set({ active: false, retractedAt: sql`now()`, contradictedThroughMessageId: null })
+      .set({ active: false, retractedAt: sql`now()`, contradictedByMessageId: null })
       .where(
         and(
           inArray(steeringRules.source, LEARNED_RULE_SOURCES),
@@ -3981,7 +3986,7 @@ export class DrizzleAgentStore implements AgentStore {
     const retired = await tx
       .update(steeringRules)
       // Not a contradiction's retirement: no chunk recorded it.
-      .set({ active: false, retractedAt: sql`now()`, contradictedThroughMessageId: null })
+      .set({ active: false, retractedAt: sql`now()`, contradictedByMessageId: null })
       .where(
         and(
           textMatches(params.text),

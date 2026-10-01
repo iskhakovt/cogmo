@@ -72,7 +72,7 @@ import { createTestDatabase } from "../../test/pglite.js";
 import type { SectionedRule } from "../rule-sections.js";
 import type { CoreMemoryBlock } from "../service.js";
 import { DrizzleAgentStore } from "../store/index.js";
-import { type ExtractionResult, extractCorrections } from "./extract-corrections.js";
+import { type ExtractionResult, extractCorrections, formatMessage } from "./extract-corrections.js";
 
 const CheckSchema = z.enum([
   "no-list-lines",
@@ -315,25 +315,33 @@ describe.skipIf(LIVE_API_KEY === undefined)(
             for (const t of conversation.turns) usage.add(t.result.usage);
             expectCompleted(conversation.turns);
             stage = `in the ${label} extraction`;
-            // The whole conversation is one chunk, ending at a stored message
-            // a contradiction can key on.
-            const chunkEnd = await db.tx(async (tx) => {
+            // The whole conversation is one chunk, stored so a contradiction
+            // can key on the message it cites.
+            const stored = await db.tx(async (tx) => {
               const conv = await store.createConversation(tx, { ...owner, isPrivate: true });
-              return store.insertMessage(tx, {
-                conversationId: conv.id,
-                role: "user",
-                content: label,
-                lastInboundMessageId: conv.id,
-                profileId: owner.profileId,
-                model: EXTRACTION_MODEL,
-              });
+              const ids: string[] = [];
+              for (const message of conversation.history) {
+                const row = await store.insertMessage(tx, {
+                  conversationId: conv.id,
+                  role: message.role,
+                  content: message.content,
+                  lastInboundMessageId: conv.id,
+                  profileId: owner.profileId,
+                  model: EXTRACTION_MODEL,
+                });
+                ids.push(row.id);
+              }
+              return ids;
             });
             const scope = { ...owner, seesUserRules: true };
             const chunk = {
               summary: null,
               context: [],
-              messages: conversation.history,
-              throughMessageId: chunkEnd.id,
+              messages: conversation.history.flatMap((message, i) => {
+                const line = formatMessage(message);
+                const id = stored[i];
+                return line.length === 0 || id === undefined ? [] : [{ id, line }];
+              }),
             };
             const extracted = await extractCorrections(chunk, scope, {
               provider: usage.metered(provider),

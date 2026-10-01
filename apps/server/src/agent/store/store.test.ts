@@ -4345,10 +4345,16 @@ describe("DrizzleAgentStore", () => {
           outOfScopeReinforcementsSkipped: 0,
           outOfScopeContradictionsSkipped: 0,
           unknownRuleReinforcementsSkipped: 0,
+          droppedForContext: 0,
           consolidationNeeded: false,
         },
         consolidation: null,
-        memories: { extracted: 3, byNetwork: { world: 1, bank: 2 }, skippedForUnseenRules: 0 },
+        memories: {
+          extracted: 3,
+          byNetwork: { world: 1, bank: 2 },
+          skippedForUnseenRules: 0,
+          droppedForContext: 0,
+        },
         drained: { drained: 0, byNetwork: {}, withheld: 0, deferredToFirstParty: 0 },
         messageCount: 12,
         profileId: "11111111-1111-7111-8111-111111111111",
@@ -4361,9 +4367,14 @@ describe("DrizzleAgentStore", () => {
         retired: _retired,
         reset: _reset,
         outOfScopeContradictionsSkipped: _outOfScope,
+        droppedForContext: _correctionsDropped,
         ...corrections
       } = samplePayload().corrections;
-      const { skippedForUnseenRules: _skipped, ...memories } = samplePayload().memories;
+      const {
+        skippedForUnseenRules: _skipped,
+        droppedForContext: _memoriesDropped,
+        ...memories
+      } = samplePayload().memories;
       const {
         withheld: _withheld,
         deferredToFirstParty: _deferred,
@@ -4381,6 +4392,8 @@ describe("DrizzleAgentStore", () => {
       expect(read.corrections.reset).toBe(0);
       expect(read.corrections.outOfScopeContradictionsSkipped).toBe(0);
       expect(read.memories.skippedForUnseenRules).toBe(0);
+      expect(read.corrections.droppedForContext).toBe(0);
+      expect(read.memories.droppedForContext).toBe(0);
       expect(read.drained.withheld).toBe(0);
       expect(read.drained.deferredToFirstParty).toBe(0);
     });
@@ -5221,15 +5234,20 @@ describe("observer window", () => {
       store.listMessagesInRange(trx, conversationId, {
         after: expectDefined(ids[1]),
         through: top,
+        limit: null,
       }),
     );
     const fromStart = await tx((trx) =>
-      store.listMessagesInRange(trx, conversationId, { after: null, through: top }),
+      store.listMessagesInRange(trx, conversationId, { after: null, through: top, limit: null }),
+    );
+    const firstPage = await tx((trx) =>
+      store.listMessagesInRange(trx, conversationId, { after: null, through: top, limit: 2 }),
     );
 
     expect(after.map((m) => m.id)).toEqual(ids.slice(2, 4));
     expect(after.map((m) => m.content)).toEqual(["m2", "m3"]);
     expect(fromStart.map((m) => m.id)).toEqual(ids.slice(0, 4));
+    expect(firstPage.map((m) => m.id)).toEqual(ids.slice(0, 2));
   });
 
   it("reads the last messages at or before a message, oldest first", async () => {

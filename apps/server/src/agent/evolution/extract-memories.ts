@@ -15,8 +15,8 @@ import type { MemoryProvider, RetainBatchItem } from "../../memory/provider.js";
 import { bindsUnseenUserRule, type MemoryRule } from "../store/index.js";
 import type { ObserverFire } from "./drain-pending-memories.js";
 import {
+  citedMessageId,
   formatObserverTranscript,
-  formatTranscript,
   type ObserverTranscript,
 } from "./extract-corrections.js";
 import {
@@ -50,23 +50,24 @@ export interface MemoryExtractionResult {
   byNetwork: Record<string, number>;
   /** 1 when extraction was skipped for a user's memory rule the profile can't see, else 0. */
   skippedForUnseenRules: number;
+  /** Facts citing no new message (the earlier conversation, a number out of range, or none): dropped. */
+  droppedForContext: number;
 }
 
-function nothingExtracted(skippedForUnseenRules: number): MemoryExtractionResult {
-  return { extracted: 0, byNetwork: {}, skippedForUnseenRules };
+function nothingExtracted(
+  skippedForUnseenRules: number,
+  droppedForContext: number,
+): MemoryExtractionResult {
+  return { extracted: 0, byNetwork: {}, skippedForUnseenRules, droppedForContext };
 }
 
 /**
- * The Hindsight document a fact extracted from a chunk is retained under.
- * Derived from the chunk and the fact's position, so a re-run of the chunk's
- * extraction replaces its own documents rather than adding copies.
+ * The Hindsight document a fact is retained under: the message it cites, and
+ * its position among the facts citing that message. Re-extracting a message,
+ * whatever chunk it lands in, replaces its documents rather than adding copies.
  */
-export function chunkDocumentId(
-  conversationId: string,
-  throughMessageId: string,
-  index: number,
-): string {
-  return `observer:${conversationId}:${throughMessageId}:${index}`;
+export function factDocumentId(conversationId: string, messageId: string, index: number): string {
+  return `observer:${conversationId}:${messageId}:${index}`;
 }
 
 /**
@@ -87,9 +88,9 @@ export async function extractMemories(
   profileClass: string | null,
   deps: MemoryExtractionDeps,
 ): Promise<MemoryExtractionResult> {
-  if (formatTranscript(transcript.messages).trim().length === 0) {
+  if (transcript.messages.length === 0) {
     logger.debug("empty transcript — skipping memory extraction");
-    return nothingExtracted(0);
+    return nothingExtracted(0, 0);
   }
 
   if (bindsUnseenUserRule(deps.memoryRules, deps.fire.seesUserRules)) {
@@ -97,7 +98,7 @@ export async function extractMemories(
       { ...deps.fire },
       "memory extraction skipped — a user's memory rule binds a profile that can't see it",
     );
-    return nothingExtracted(1);
+    return nothingExtracted(1, 0);
   }
 
   const customNames = deps.customCompartments.map((c) => c.name);
@@ -115,14 +116,29 @@ export async function extractMemories(
     repair: {},
   });
 
-  if (data.memories.length === 0) {
+  const cited = data.memories.flatMap((mem) => {
+    const messageId = citedMessageId(transcript, mem.sourceMessage);
+    if (messageId !== undefined) return [{ ...mem, messageId }];
+    logger.warn(
+      { sourceMessage: mem.sourceMessage, newMessages: transcript.messages.length, bankId },
+      "memory extraction: fact cites no new message — dropped",
+    );
+    return [];
+  });
+  const droppedForContext = data.memories.length - cited.length;
+  if (cited.length === 0) {
     logger.debug("no memories extracted from transcript");
-    return nothingExtracted(0);
+    return nothingExtracted(0, droppedForContext);
   }
 
-  const items: RetainBatchItem[] = data.memories.map((mem, i) => ({
+  // Each fact's position among the facts citing the same message.
+  const indexed = cited.map((mem, i) => ({
+    ...mem,
+    index: cited.slice(0, i).filter((m) => m.messageId === mem.messageId).length,
+  }));
+  const items: RetainBatchItem[] = indexed.map((mem) => ({
     content: mem.fact,
-    documentId: chunkDocumentId(deps.fire.conversationId, transcript.throughMessageId, i),
+    documentId: factDocumentId(deps.fire.conversationId, mem.messageId, mem.index),
     ...(mem.context !== undefined && { context: mem.context }),
     tags: [
       `network:${mem.network}`,
@@ -141,9 +157,12 @@ export async function extractMemories(
 
   await deps.memory.retainBatch(bankId, items);
 
-  const byNetwork = R.countBy(data.memories, (m) => m.network);
+  const byNetwork = R.countBy(cited, (m) => m.network);
 
-  logger.info({ extracted: data.memories.length, byNetwork, bankId }, "memory extraction complete");
+  logger.info(
+    { extracted: cited.length, byNetwork, droppedForContext, bankId },
+    "memory extraction complete",
+  );
 
-  return { extracted: data.memories.length, byNetwork, skippedForUnseenRules: 0 };
+  return { extracted: cited.length, byNetwork, skippedForUnseenRules: 0, droppedForContext };
 }

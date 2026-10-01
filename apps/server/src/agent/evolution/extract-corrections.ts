@@ -55,7 +55,7 @@ export interface ExtractionResult {
   extracted: number;
   reinforced: number;
   contradictions: number;
-  /** Rules still learning that a second contradiction, from another chunk, retired. */
+  /** Rules still learning that a second contradiction, citing another message, retired. */
   retired: number;
   /** Rules still learning whose count a first contradiction reset to 0. */
   reset: number;
@@ -65,6 +65,8 @@ export interface ExtractionResult {
   outOfScopeContradictionsSkipped: number;
   /** Reinforcements naming no listed rule, or one retired or merged since the list was read. */
   unknownRuleReinforcementsSkipped: number;
+  /** Corrections citing no new message (the earlier conversation, a number out of range, or none): dropped. */
+  droppedForContext: number;
   consolidationNeeded: boolean;
 }
 
@@ -92,7 +94,7 @@ export async function extractCorrections(
   scope: ExtractionScope,
   deps: ExtractionDeps,
 ): Promise<ExtractionResult> {
-  if (formatTranscript(transcript.messages).trim().length === 0) {
+  if (transcript.messages.length === 0) {
     logger.debug("empty transcript — skipping extraction");
     return {
       extracted: 0,
@@ -104,6 +106,7 @@ export async function extractCorrections(
       outOfScopeReinforcementsSkipped: 0,
       outOfScopeContradictionsSkipped: 0,
       unknownRuleReinforcementsSkipped: 0,
+      droppedForContext: 0,
       consolidationNeeded: false,
     };
   }
@@ -139,10 +142,25 @@ export async function extractCorrections(
   let outOfScopeReinforcementsSkipped = 0;
   let outOfScopeContradictionsSkipped = 0;
   let unknownRuleReinforcementsSkipped = 0;
+  let droppedForContext = 0;
 
   const activeChannelSet = new Set(deps.activeChannelTypes);
 
   for (const correction of data.corrections) {
+    const messageId = citedMessageId(transcript, correction.sourceMessage);
+    if (messageId === undefined) {
+      droppedForContext++;
+      logger.warn(
+        {
+          rule: correction.rule,
+          sourceMessage: correction.sourceMessage,
+          newMessages: transcript.messages.length,
+          reasoning: correction.reasoning,
+        },
+        "extraction: correction cites no new message — dropped",
+      );
+      continue;
+    }
     if (correction.action === "contradiction") {
       const contradictedRule = existingRulesByLabel.get(correction.matchedExistingRuleId);
       if (contradictedRule === undefined) {
@@ -165,8 +183,8 @@ export async function extractCorrections(
       };
       // The user retracts a live rule in the turn. One still learning, which
       // `# Rules` doesn't show, has its count reset by a first contradiction
-      // and is retired by a second from another chunk: a single mislabelled
-      // contradiction costs its evidence, not the rule.
+      // and is retired by a second citing another message: a single
+      // mislabelled contradiction costs its evidence, not the rule.
       if (contradictedRule.active) {
         logger.info(log, "correction contradicts a live rule — logged, not applied");
         continue;
@@ -186,7 +204,7 @@ export async function extractCorrections(
       const outcome = await deps.runInTx((tx) =>
         deps.store.contradictLearningRule(tx, {
           id: contradictedRule.id,
-          throughMessageId: transcript.throughMessageId,
+          messageId,
         }),
       );
       if (outcome === "retired") {
@@ -198,7 +216,7 @@ export async function extractCorrections(
       } else {
         logger.info(
           log,
-          "extraction: contradiction already applied from this chunk, or the rule was promoted or retired since it was listed",
+          "extraction: contradiction already applied from this message, or the rule was promoted or retired since it was listed",
         );
       }
       continue;
@@ -296,6 +314,7 @@ export async function extractCorrections(
       outOfScopeReinforcementsSkipped,
       outOfScopeContradictionsSkipped,
       unknownRuleReinforcementsSkipped,
+      droppedForContext,
       activeCount,
       consolidationNeeded,
     },
@@ -312,6 +331,7 @@ export async function extractCorrections(
     outOfScopeReinforcementsSkipped,
     outOfScopeContradictionsSkipped,
     unknownRuleReinforcementsSkipped,
+    droppedForContext,
     consolidationNeeded,
   };
 }
@@ -385,34 +405,45 @@ function coerceChannelType(
 // --- Transcript formatting ---
 
 /**
- * What one extraction reads: a chunk of the conversation's new messages, and
- * the earlier conversation an earlier pass already processed, given only to
- * resolve references.
+ * What one extraction reads, as transcript lines: a chunk of the
+ * conversation's new messages, and the earlier conversation an earlier pass
+ * already processed, given only to resolve references.
  */
 export interface ObserverTranscript {
   /** The widest compaction summary that ends before the chunk, if any. */
   summary: string | null;
-  /** The last messages before the chunk, oldest first. */
-  context: ReadonlyArray<Message>;
-  /** The chunk: the messages to extract from. */
-  messages: ReadonlyArray<Message>;
-  /** The chunk's last message, which keys its contradictions and documents. */
-  throughMessageId: string;
+  /** The lines of the last messages before the chunk, oldest first. */
+  context: ReadonlyArray<string>;
+  /** The chunk's messages with something to show, numbered from 1 in this order. */
+  messages: ReadonlyArray<{ id: string; line: string }>;
 }
 
 /**
  * The user message an extraction sends: the earlier conversation in
  * `<earlier_conversation>`, when there is one, then the chunk in
- * `<new_messages>`. The extraction prompts' `TRANSCRIPT_LAYOUT` describes it.
+ * `<new_messages>`, each message numbered `[n]` for items to cite. The
+ * extraction prompts' `TRANSCRIPT_LAYOUT` describes it.
  */
 export function formatObserverTranscript(transcript: ObserverTranscript): string {
   const earlier = [
     ...(transcript.summary === null ? [] : [`<summary>\n${transcript.summary}\n</summary>`]),
-    ...(transcript.context.length === 0 ? [] : [formatTranscript(transcript.context)]),
+    ...transcript.context,
   ];
-  const fresh = `<new_messages>\n${formatTranscript(transcript.messages)}\n</new_messages>`;
+  const numbered = transcript.messages.map((m, i) => `[${i + 1}] ${m.line}`).join("\n\n");
+  const fresh = `<new_messages>\n${numbered}\n</new_messages>`;
   if (earlier.length === 0) return fresh;
   return `<earlier_conversation>\n${earlier.join("\n\n")}\n</earlier_conversation>\n\n${fresh}`;
+}
+
+/** The id of the new message an item cites by its `[n]`; undefined when it cites none. */
+export function citedMessageId(
+  transcript: ObserverTranscript,
+  sourceMessage: number | null,
+): string | undefined {
+  if (sourceMessage === null || !Number.isInteger(sourceMessage) || sourceMessage < 1) {
+    return undefined;
+  }
+  return transcript.messages[sourceMessage - 1]?.id;
 }
 
 /**

@@ -6,7 +6,7 @@ import { expectDefined } from "../../test/assertions.js";
 import { mockProvider } from "../../test/factories.js";
 import type { MemoryRule } from "../store/index.js";
 import type { ObserverFire } from "./drain-pending-memories.js";
-import type { ObserverTranscript } from "./extract-corrections.js";
+import { formatMessage, type ObserverTranscript } from "./extract-corrections.js";
 import { extractMemories, type MemoryExtractionDeps } from "./extract-memories.js";
 
 const HEALTH_RULE: MemoryRule = {
@@ -27,9 +27,11 @@ function mockExtractionDeps(
   chatTypedResponse: { memories: Array<Record<string, unknown>> },
   overrides?: Partial<MemoryExtractionDeps>,
 ): MemoryExtractionDeps {
+  // Every fact cites the sample's first message unless it says otherwise.
+  const cited = { memories: chatTypedResponse.memories.map((m) => ({ sourceMessage: 1, ...m })) };
   const provider = mockProvider({
     chat: vi.fn().mockResolvedValue({
-      content: [{ type: "text", text: JSON.stringify(chatTypedResponse) }],
+      content: [{ type: "text", text: JSON.stringify(cited) }],
       stopReason: "end_turn",
       model: "mock",
       usage: { inputTokens: 10, outputTokens: 5 },
@@ -56,12 +58,16 @@ const sampleHistory: Message[] = [
   { role: "assistant", content: "Noted — weekends are infrastructure time." },
 ];
 
-/** A chunk of new messages with nothing before it, ending at `throughMessageId`. */
-function chunkOf(
-  messages: ReadonlyArray<Message>,
-  throughMessageId = "msg-chunk-end",
-): ObserverTranscript {
-  return { summary: null, context: [], messages, throughMessageId };
+/** A chunk of new messages with nothing before it, the nth with id `msg-n`. */
+function chunkOf(messages: ReadonlyArray<Message>): ObserverTranscript {
+  return {
+    summary: null,
+    context: [],
+    messages: messages.flatMap((m, i) => {
+      const line = formatMessage(m);
+      return line.length === 0 ? [] : [{ id: `msg-${i + 1}`, line }];
+    }),
+  };
 }
 
 const sampleChunk = chunkOf(sampleHistory);
@@ -71,7 +77,12 @@ describe("extractMemories", () => {
     const deps = mockExtractionDeps({ memories: [] });
     const result = await extractMemories(chunkOf([]), "user-1", null, deps);
 
-    expect(result).toEqual({ extracted: 0, byNetwork: {}, skippedForUnseenRules: 0 });
+    expect(result).toEqual({
+      extracted: 0,
+      byNetwork: {},
+      skippedForUnseenRules: 0,
+      droppedForContext: 0,
+    });
     expect(deps.memory.retainBatch).not.toHaveBeenCalled();
     expect(deps.provider.chat).not.toHaveBeenCalled();
   });
@@ -80,7 +91,12 @@ describe("extractMemories", () => {
     const deps = mockExtractionDeps({ memories: [] });
     const result = await extractMemories(sampleChunk, "user-1", null, deps);
 
-    expect(result).toEqual({ extracted: 0, byNetwork: {}, skippedForUnseenRules: 0 });
+    expect(result).toEqual({
+      extracted: 0,
+      byNetwork: {},
+      skippedForUnseenRules: 0,
+      droppedForContext: 0,
+    });
     expect(deps.memory.retainBatch).not.toHaveBeenCalled();
   });
 
@@ -109,14 +125,14 @@ describe("extractMemories", () => {
     expect(deps.memory.retainBatch).toHaveBeenCalledWith("user-1", [
       {
         content: "homelab IP is 10.0.10.10",
-        documentId: "observer:conv-1:msg-chunk-end:0",
+        documentId: "observer:conv-1:msg-1:0",
         tags: ["network:world", "compartment:technical", "trust:first-party"],
         metadata: { source: "conversation" },
         observationScopes: "per_tag",
       },
       {
         content: "prefers dark mode",
-        documentId: "observer:conv-1:msg-chunk-end:1",
+        documentId: "observer:conv-1:msg-1:1",
         tags: ["network:bank", "compartment:personal", "trust:any"],
         metadata: { source: "conversation" },
         observationScopes: "per_tag",
@@ -143,7 +159,7 @@ describe("extractMemories", () => {
     expect(deps.memory.retainBatch).toHaveBeenCalledWith("user-1", [
       {
         content: "wife's birthday is March 15",
-        documentId: "observer:conv-1:msg-chunk-end:0",
+        documentId: "observer:conv-1:msg-1:0",
         context: "mentioned while planning a gift",
         tags: ["network:bank", "compartment:personal", "trust:first-party"],
         metadata: { source: "conversation" },
@@ -168,27 +184,121 @@ describe("extractMemories", () => {
     expect(result.byNetwork).toEqual({ world: 2, observation: 1, opinion: 1 });
   });
 
-  it("names the same documents on a re-run of a chunk, and other documents for another chunk", async () => {
-    const answer = {
-      memories: [
-        { fact: "fact 1", network: "world", compartment: "technical", trust: "first-party" },
-        { fact: "fact 2", network: "bank", compartment: "personal", trust: "first-party" },
-      ],
-    };
-    const documentIds = async (chunk: ObserverTranscript) => {
-      const deps = mockExtractionDeps(answer);
+  it("keys each fact's document on the message it cites and its place among that message's facts", async () => {
+    const fact = (text: string, sourceMessage: number) => ({
+      fact: text,
+      network: "bank",
+      compartment: "personal",
+      trust: "first-party",
+      sourceMessage,
+    });
+    const documentIds = async (memories: Array<Record<string, unknown>>, chunk = sampleChunk) => {
+      const deps = mockExtractionDeps({ memories });
       await extractMemories(chunk, "user-1", null, deps);
       const [, items] = expectDefined(vi.mocked(deps.memory.retainBatch).mock.calls[0], "retain");
-      return items.map((i) => i.documentId);
+      return items.map((i) => [i.content, i.documentId]);
     };
 
-    const first = await documentIds(chunkOf(sampleHistory, "msg-a"));
-    const rerun = await documentIds(chunkOf(sampleHistory, "msg-a"));
-    const next = await documentIds(chunkOf(sampleHistory, "msg-b"));
+    const first = await documentIds([fact("a", 1), fact("b", 3), fact("c", 1)]);
+    // The third message read again at the start of another chunk, where it is [1].
+    const rechunked = await documentIds([fact("b", 1)], {
+      summary: null,
+      context: [],
+      messages: [{ id: "msg-3", line: "User: Also, I usually work on infrastructure stuff." }],
+    });
 
-    expect(first).toEqual(["observer:conv-1:msg-a:0", "observer:conv-1:msg-a:1"]);
-    expect(rerun).toEqual(first);
-    expect(next).toEqual(["observer:conv-1:msg-b:0", "observer:conv-1:msg-b:1"]);
+    expect(first).toEqual([
+      ["a", "observer:conv-1:msg-1:0"],
+      ["b", "observer:conv-1:msg-3:0"],
+      ["c", "observer:conv-1:msg-1:1"],
+    ]);
+    expect(rechunked).toEqual([["b", "observer:conv-1:msg-3:0"]]);
+  });
+
+  it("leaves other messages' documents alone when a re-run finds fewer facts for one", async () => {
+    const fact = (text: string, sourceMessage: number) => ({
+      fact: text,
+      network: "bank",
+      compartment: "personal",
+      trust: "first-party",
+      sourceMessage,
+    });
+    const retained = new Map<string, string>();
+    const run = async (memories: Array<Record<string, unknown>>) => {
+      const deps = mockExtractionDeps({ memories });
+      vi.mocked(deps.memory.retainBatch).mockImplementation(async (_bank, items) => {
+        for (const i of items) retained.set(expectDefined(i.documentId, "id"), i.content);
+      });
+      await extractMemories(sampleChunk, "user-1", null, deps);
+    };
+
+    await run([fact("ip", 1), fact("dark mode", 1), fact("weekends", 3)]);
+    await run([fact("ip", 1), fact("weekends", 3)]);
+
+    expect(Object.fromEntries(retained)).toEqual({
+      "observer:conv-1:msg-1:0": "ip",
+      // The documented residual: a message's surplus document from the first run stays.
+      "observer:conv-1:msg-1:1": "dark mode",
+      "observer:conv-1:msg-3:0": "weekends",
+    });
+  });
+
+  it("drops a fact citing the earlier conversation, a number out of range, or nothing", async () => {
+    const deps = mockExtractionDeps({
+      memories: [
+        { fact: "kept", network: "bank", compartment: "personal", trust: "first-party" },
+        {
+          fact: "from context",
+          network: "bank",
+          compartment: "personal",
+          trust: "first-party",
+          sourceMessage: 7,
+        },
+        {
+          fact: "uncited",
+          network: "bank",
+          compartment: "personal",
+          trust: "first-party",
+          sourceMessage: null,
+        },
+      ],
+    });
+    const warn = vi.spyOn(logger, "warn");
+
+    const result = await extractMemories(sampleChunk, "user-1", null, deps);
+
+    expect(result).toMatchObject({ extracted: 1, droppedForContext: 2, byNetwork: { bank: 1 } });
+    const [, items] = expectDefined(vi.mocked(deps.memory.retainBatch).mock.calls[0], "retain");
+    expect(items.map((i) => i.content)).toEqual(["kept"]);
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ sourceMessage: 7 }),
+      expect.stringContaining("cites no new message"),
+    );
+    warn.mockRestore();
+  });
+
+  it("retains nothing when every fact cites the earlier conversation", async () => {
+    const deps = mockExtractionDeps({
+      memories: [
+        {
+          fact: "from context",
+          network: "bank",
+          compartment: "personal",
+          trust: "first-party",
+          sourceMessage: 9,
+        },
+      ],
+    });
+
+    const result = await extractMemories(sampleChunk, "user-1", null, deps);
+
+    expect(result).toEqual({
+      extracted: 0,
+      byNetwork: {},
+      skippedForUnseenRules: 0,
+      droppedForContext: 1,
+    });
+    expect(deps.memory.retainBatch).not.toHaveBeenCalled();
   });
 
   it("sends the earlier conversation as context and the chunk as the new messages", async () => {
@@ -197,9 +307,8 @@ describe("extractMemories", () => {
     await extractMemories(
       {
         summary: "The user is moving abroad.",
-        context: [{ role: "user", content: "My sister lives in Porto." }],
-        messages: [{ role: "user", content: "I'm moving near her in May." }],
-        throughMessageId: "m",
+        context: ["User: My sister lives in Porto."],
+        messages: [{ id: "m", line: "User: I'm moving near her in May." }],
       },
       "user-1",
       null,
@@ -211,7 +320,9 @@ describe("extractMemories", () => {
     expect(content).toContain(
       "<earlier_conversation>\n<summary>\nThe user is moving abroad.\n</summary>",
     );
-    expect(content).toContain("<new_messages>\nUser: I'm moving near her in May.\n</new_messages>");
+    expect(content).toContain(
+      "<new_messages>\n[1] User: I'm moving near her in May.\n</new_messages>",
+    );
     expect(call.system).toContain("extract nothing from it");
     expect(call.system).toContain("Analyze the new messages below and extract facts");
   });
@@ -349,7 +460,12 @@ describe("extractMemories", () => {
 
     const result = await extractMemories(sampleChunk, "user-1", null, deps);
 
-    expect(result).toEqual({ extracted: 0, byNetwork: {}, skippedForUnseenRules: 1 });
+    expect(result).toEqual({
+      extracted: 0,
+      byNetwork: {},
+      skippedForUnseenRules: 1,
+      droppedForContext: 0,
+    });
     expect(deps.provider.chat).not.toHaveBeenCalled();
     expect(deps.memory.retainBatch).not.toHaveBeenCalled();
     expect(info).toHaveBeenCalledWith(
@@ -455,7 +571,7 @@ describe("extractMemories", () => {
         content: [
           {
             type: "text",
-            text: '{"memories":[{"fact":"homelab IP is 10.0.10.10","network":"world","compartment":"technical","trust":"first-party",},],}',
+            text: '{"memories":[{"fact":"homelab IP is 10.0.10.10","network":"world","compartment":"technical","trust":"first-party","sourceMessage":1,},],}',
           },
         ],
         stopReason: "end_turn",

@@ -11,8 +11,23 @@ import { z } from "zod";
 
 // --- Extraction output schema ---
 
+/**
+ * The `[n]` of the new message an extracted item comes from. Null on parse
+ * when omitted, for the same reason as a `new` correction's null fields
+ * below; an item citing no new message is dropped.
+ */
+export const SourceMessageSchema = z
+  .number()
+  .int()
+  .nullable()
+  .default(null)
+  .describe(
+    "The number [n] of the new message this comes from. Never a message of the earlier conversation.",
+  );
+
 const CorrectionBaseSchema = z.object({
   rule: z.string().describe("The behavioral rule, generalized and context-free"),
+  sourceMessage: SourceMessageSchema,
   category: z
     .enum(["style", "domain", "memory"])
     .describe(
@@ -102,7 +117,9 @@ export function labelRules<T extends LabelOrderKey>(
  */
 export const TRANSCRIPT_LAYOUT = `## Transcript Layout
 
-The transcript may open with an \`<earlier_conversation>\` element: a summary of the conversation and its latest messages, which an earlier pass already analyzed. Use it only to understand the new messages, such as what "that" or "she" refers to, and extract nothing from it. The \`<new_messages>\` element holds the messages to analyze: extract only from those.`;
+The transcript may open with an \`<earlier_conversation>\` element: a summary of the conversation and its latest messages, which an earlier pass already analyzed. Use it only to understand the new messages, such as what "that" or "she" refers to, and extract nothing from it. The \`<new_messages>\` element holds the messages to analyze, each numbered \`[n]\`: extract only from those.
+
+Set \`sourceMessage\` on every item to the number of the new message it comes from. Something only the earlier conversation says is not new: leave it out, even when a new message is about the same topic.`;
 
 export function buildExtractionPrompt(
   /** Existing rules keyed by label, as `labelRules` returns them. */

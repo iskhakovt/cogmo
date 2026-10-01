@@ -2651,11 +2651,15 @@ export function createTransport(deps: {
         if (result.status === "skipped") {
           return ok({ status: "skipped" as const, reason: result.reason });
         }
-        // A memories window held for an unseen rule is not "nothing new": the reply says it was skipped.
+        // Nothing new only when nothing was left unextracted: a memories window
+        // held for an unseen rule, a failed phase or a model too small for a
+        // chunk is reported as processed.
         if (
           result.newMessages.corrections === 0 &&
           result.newMessages.memories === 0 &&
-          result.memories.skippedForUnseenRules === 0
+          result.memories.skippedForUnseenRules === 0 &&
+          result.failedPhases.length === 0 &&
+          !result.modelBudgetTooSmall
         ) {
           return ok({
             status: "nothing_new" as const,

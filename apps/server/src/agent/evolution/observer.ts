@@ -53,16 +53,18 @@ import {
   type PendingBatch,
 } from "./drain-pending-memories.js";
 import type { EvolutionTrigger, ObserverPhase } from "./event-schema.js";
-import { type ExtractionResult, extractCorrections } from "./extract-corrections.js";
+import {
+  type ExtractionResult,
+  extractCorrections,
+  type ObserverTranscript,
+} from "./extract-corrections.js";
 import { extractMemories, type MemoryExtractionResult } from "./extract-memories.js";
 import {
   chunkTokenLimit,
   isCaughtUp,
   loadChunkTranscript,
-  OBSERVED_PHASES,
-  type ObserverChunk,
-  type ObserverPlan,
-  planObserverChunks,
+  type PhasePlan,
+  planPhaseChunks,
 } from "./observer-window.js";
 
 /**
@@ -130,8 +132,10 @@ export type ObserverResult =
       memories: Awaited<ReturnType<typeof extractMemories>>;
       drained: DrainPendingResult;
       failedPhases: ObserverPhase[];
-      /** The messages each extraction phase took on this fire; 0 for both when nothing was new. */
+      /** The messages each extraction phase extracted and advanced its cursor past this fire. */
       newMessages: Record<ObservedPhase, number>;
+      /** Whether the extraction model's input budget was too small for a chunk, so extraction was skipped. */
+      modelBudgetTooSmall: boolean;
     };
 
 /** A phase's result, and whether that result is the fallback for a failure. */
@@ -141,30 +145,45 @@ interface SettledPhase<T> {
   failed: boolean;
 }
 
+/** An extraction phase's outcome: the messages it advanced past, and whether its model was too small. */
+interface ObservedPhaseOutcome<T> extends SettledPhase<T> {
+  processed: number;
+  budgetTooSmall: boolean;
+}
+
 /**
- * Run one phase of the fire so that its permanent failure costs only that
- * phase. The catch wraps the phase's steps, so each keeps its retries; only
- * a step that failed after them (`StepError`) is logged and replaced by
- * `fallback`, marked failed. Anything else propagates — including every
- * error under the `/reflect` harness, which has no retries to exhaust and
- * reports a failure to the user who asked. The fallback depends on nothing
- * but the memoized failure, so a replay reaches it again and plans the same
- * steps after it.
+ * Run one phase of the fire so that its failure costs only that phase. The
+ * catch wraps the phase's steps, so each keeps its retries. A step that failed
+ * after them (`StepError`) is logged and replaced by `fallback`, marked
+ * failed; that depends on nothing but the memoized failure, so a replay
+ * reaches it again and plans the same steps after it. Any other error — every
+ * error under the `/reflect` harness, which has no retries to exhaust — costs
+ * the phase the same way and goes into `unrecorded`: the fire still records
+ * what its other phases did, then throws it, so the user who asked sees the
+ * failure.
  */
 async function settlePhase<T>(
   phase: ObserverPhase,
   conversationId: string,
   fallback: T,
   run: () => Promise<T>,
+  unrecorded: unknown[],
 ): Promise<SettledPhase<T>> {
   try {
     return { phase, result: await run(), failed: false };
   } catch (err) {
-    if (!(err instanceof StepError)) throw err;
-    logger.warn(
-      { err, conversationId, phase, stepId: err.stepId },
-      "observer: phase failed after retries — continuing without it",
-    );
+    if (err instanceof StepError) {
+      logger.warn(
+        { err, conversationId, phase, stepId: err.stepId },
+        "observer: phase failed after retries — continuing without it",
+      );
+    } else {
+      unrecorded.push(err);
+      logger.error(
+        { err, conversationId, phase },
+        "observer: phase failed — recording the fire, then rethrowing",
+      );
+    }
     return { phase, result: fallback, failed: true };
   }
 }
@@ -277,72 +296,80 @@ export async function runObserver(
     seesUserRules: admitsFirstParty(profile),
   };
 
-  // A fire whose profile can't see one of the user's memory rules stores
-  // nothing such a rule binds. Its memories window stays unplanned and its
-  // cursor where it is, so a fire that can see the rule extracts it later.
-  // The rules don't depend on the chunk, so one read decides for the fire.
-  const memoriesHeld =
-    !fire.seesUserRules &&
-    !isCaughtUp(bounds, "memories") &&
-    (await step.run("check-unseen-memory-rules", async () => {
-      const memoryRules = await deps.runInTx((tx) =>
-        agentStore.getMemoryRules(tx, { profileIds: [conv.profileId], userId: conv.userId }),
-      );
-      return bindsUnseenUserRule(memoryRules, fire.seesUserRules);
-    }));
-  if (memoriesHeld) {
-    logger.info(
-      { ...fire },
-      "memory extraction skipped — a user's memory rule binds a profile that can't see it",
-    );
-  }
-  const planned = OBSERVED_PHASES.filter(
-    (phase) => !isCaughtUp(bounds, phase) && !(phase === "memories" && memoriesHeld),
-  );
-
-  // Each phase's chunks, planned once and memoized, so the step ids below
-  // derive from durable state. A fire with nothing new plans nothing.
   const windowDeps = { runInTx: deps.runInTx, store: agentStore };
-  const plan: ObserverPlan =
-    planned.length === 0
-      ? { tokenLimit: 0, chunks: { corrections: [], memories: [] } }
-      : await step.run("plan-observer-chunks", async () => {
-          return planObserverChunks(windowDeps, {
-            conversationId,
-            bounds,
-            phases: planned,
-            tokenLimit: chunkTokenLimit(model, resolved.limits),
-          });
-        });
-  const transcriptOf = (chunk: ObserverChunk) =>
-    loadChunkTranscript(windowDeps, { conversationId, chunk, tokenLimit: plan.tokenLimit });
+  const tokenLimit = chunkTokenLimit(model, resolved.limits);
+  // Errors no step's retries absorbed: thrown once the audit row is written.
+  const unrecorded: unknown[] = [];
+  const settle = <T>(phase: ObserverPhase, fallback: T, run: () => Promise<T>) =>
+    settlePhase(phase, conversationId, fallback, run, unrecorded);
+
+  /** One phase's chunks, planned in a step of that phase so its id derives from durable state. */
+  const planPhase = (phase: ObservedPhase, through: string) =>
+    step.run(`plan-${phase}-chunks`, async () => {
+      const plan = await planPhaseChunks(windowDeps, {
+        conversationId,
+        after: bounds.observedThrough[phase],
+        through,
+        tokenLimit,
+      });
+      if (plan.kind === "budget_too_small") {
+        logger.warn(
+          { conversationId, phase, model },
+          "observer: the extraction model's input budget can't hold a chunk — extraction skipped",
+        );
+      }
+      return plan;
+    });
 
   /**
-   * Extract a phase's chunks in order, advancing its cursor after each. A
-   * chunk whose extraction or advance fails after its retries ends the phase:
-   * the cursor stays after the last chunk that succeeded, and the chunks
-   * after it wait for the next fire. So does a chunk `held` reports was left
-   * unextracted, without failing the phase.
+   * Plan a phase and extract its chunks in order, advancing its cursor after
+   * each, all inside the phase's own `settlePhase`s, so its failure costs
+   * only it. A plan or chunk that fails ends the phase: the cursor stays after
+   * the last chunk that succeeded, and the chunks after it wait for the next
+   * fire. A plan of `held` leaves the window to a later fire without failing
+   * the phase, and so does a chunk `heldChunk` reports was left unextracted.
+   * `processed` counts the messages of the chunks whose cursor advanced.
    */
   async function observePhase<T>(
     phase: ObservedPhase,
-    empty: T,
-    combine: (total: T, chunk: T) => T,
-    extract: (chunk: ObserverChunk) => Promise<T>,
-    held: (chunk: T) => boolean = () => false,
-  ): Promise<SettledPhase<T>> {
-    let total = empty;
+    spec: {
+      empty: T;
+      held: T;
+      combine: (total: T, chunk: T) => T;
+      plan: (through: string) => Promise<PhasePlan | "held">;
+      extract: (transcript: ObserverTranscript) => Promise<T>;
+      heldChunk: (chunk: T) => boolean;
+    },
+  ): Promise<ObservedPhaseOutcome<T>> {
+    const none = { phase, result: spec.empty, failed: false, processed: 0, budgetTooSmall: false };
+    const top = bounds.lastMessageId;
+    if (top === null || isCaughtUp(bounds, phase)) return none;
+    const planned = await settle<PhasePlan | "held" | null>(phase, null, () => spec.plan(top));
+    if (planned.result === null) return { ...none, failed: true };
+    if (planned.result === "held") return { ...none, result: spec.held };
+    if (planned.result.kind === "budget_too_small") return { ...none, budgetTooSmall: true };
+    const plan = planned.result;
+    let total = spec.empty;
+    let processed = 0;
     let n = 0;
     // Sequential: each chunk's cursor advance must land before the next chunk.
-    for (const chunk of plan.chunks[phase]) {
+    for (const chunk of plan.chunks) {
       n += 1;
-      const extracted = await settlePhase(phase, conversationId, null, () =>
-        step.run(`extract-${phase}-${n}`, () => extract(chunk)),
+      const extracted = await settle<T | null>(phase, null, () =>
+        step.run(`extract-${phase}-${n}`, async () =>
+          spec.extract(
+            await loadChunkTranscript(windowDeps, {
+              conversationId,
+              chunk,
+              tokenLimit: plan.tokenLimit,
+            }),
+          ),
+        ),
       );
-      if (extracted.result === null) return { phase, result: total, failed: true };
-      total = combine(total, extracted.result);
-      if (held(extracted.result)) return { phase, result: total, failed: false };
-      const advanced = await settlePhase(phase, conversationId, false, () =>
+      if (extracted.result === null) return { ...none, result: total, processed, failed: true };
+      total = spec.combine(total, extracted.result);
+      if (spec.heldChunk(extracted.result)) return { ...none, result: total, processed };
+      const advanced = await settle(phase, false, () =>
         step.run(`advance-${phase}-cursor-${n}`, async () => {
           await deps.runInTx((tx) =>
             agentStore.advanceObserverCursor(tx, { conversationId, phase, through: chunk.through }),
@@ -350,30 +377,33 @@ export async function runObserver(
           return true;
         }),
       );
-      if (!advanced.result) return { phase, result: total, failed: true };
+      if (!advanced.result) return { ...none, result: total, processed, failed: true };
+      processed += chunk.messages;
     }
-    return { phase, result: total, failed: false };
+    return { ...none, result: total, processed };
   }
 
   // Phase 1: extract corrections from the new messages into steering rules.
   // A failed chunk keeps what the chunks before it found; consolidation
   // follows the last chunk that completed.
-  const corrections = await observePhase(
-    "corrections",
-    NO_CORRECTIONS,
-    addCorrections,
-    async (chunk) =>
-      extractCorrections(await transcriptOf(chunk), fire, {
+  const corrections = await observePhase("corrections", {
+    empty: NO_CORRECTIONS,
+    held: NO_CORRECTIONS,
+    combine: addCorrections,
+    plan: (through) => planPhase("corrections", through),
+    extract: (transcript) =>
+      extractCorrections(transcript, fire, {
         provider,
         model,
         runInTx: deps.runInTx,
         store: agentStore,
         activeChannelTypes,
       }),
-  );
+    heldChunk: () => false,
+  });
 
   const consolidation = corrections.result.consolidationNeeded
-    ? await settlePhase("consolidation", conversationId, null, () =>
+    ? await settle("consolidation", null, () =>
         step.run("consolidate-rules", () =>
           consolidateRules(conv.profileId, {
             provider,
@@ -388,33 +418,51 @@ export async function runObserver(
   // Phase 2: extract facts from the new messages into long-term memory.
   // `profile.profileClass` (when non-null) becomes a `profile_class:<class>`
   // tag on every retained memory, supporting speaker-driven isolation.
-  // A chunk extraction skips for an unseen rule only if one was set since
-  // the check above; it, too, leaves the cursor where it is.
-  const memories: SettledPhase<MemoryExtractionResult> = memoriesHeld
-    ? {
-        phase: "memories",
-        result: { ...NO_MEMORIES, skippedForUnseenRules: 1 },
-        failed: false,
-      }
-    : await observePhase(
-        "memories",
-        NO_MEMORIES,
-        addMemories,
-        async (chunk) => {
+  //
+  // A fire whose profile can't see one of the user's memory rules stores
+  // nothing such a rule binds: its memories window stays unplanned and its
+  // cursor where it is, so a fire that can see the rule extracts it later.
+  // The rules don't depend on the chunk, so one read decides before planning.
+  // A chunk extraction skips for an unseen rule only if one was set since;
+  // it, too, leaves the cursor where it is.
+  const memories = await observePhase("memories", {
+    empty: NO_MEMORIES,
+    held: { ...NO_MEMORIES, skippedForUnseenRules: 1 },
+    combine: addMemories,
+    plan: async (through) => {
+      if (!fire.seesUserRules) {
+        const held = await step.run("check-unseen-memory-rules", async () => {
           const memoryRules = await deps.runInTx((tx) =>
             agentStore.getMemoryRules(tx, { profileIds: [conv.profileId], userId: conv.userId }),
           );
-          return extractMemories(await transcriptOf(chunk), conv.userId, profile.profileClass, {
-            provider,
-            model,
-            memory: deps.memory,
-            customCompartments,
-            memoryRules,
-            fire,
-          });
-        },
-        (chunk) => chunk.skippedForUnseenRules > 0,
+          const binds = bindsUnseenUserRule(memoryRules, fire.seesUserRules);
+          if (binds) {
+            logger.info(
+              { ...fire },
+              "memory extraction skipped — a user's memory rule binds a profile that can't see it",
+            );
+          }
+          return binds;
+        });
+        if (held) return "held";
+      }
+      return planPhase("memories", through);
+    },
+    extract: async (transcript) => {
+      const memoryRules = await deps.runInTx((tx) =>
+        agentStore.getMemoryRules(tx, { profileIds: [conv.profileId], userId: conv.userId }),
       );
+      return extractMemories(transcript, conv.userId, profile.profileClass, {
+        provider,
+        model,
+        memory: deps.memory,
+        customCompartments,
+        memoryRules,
+        fire,
+      });
+    },
+    heldChunk: (chunk) => chunk.skippedForUnseenRules > 0,
+  });
 
   // Phase 3: drain pending_memories — staged live retains, skill writes
   // and any migration backfill — through the same classifier prompt. Split
@@ -423,9 +471,8 @@ export async function runObserver(
   // retry, not the LLM classifier or the retainBatch write. A step
   // that fails for good ends the drain there, and every row it has not
   // deleted stays pending for the next fire.
-  const drain = await settlePhase(
+  const drain = await settle(
     "drain",
-    conversationId,
     { drained: 0, byNetwork: {}, withheld: 0, deferredToFirstParty: 0 },
     async (): Promise<DrainPendingResult> => {
       const loaded = await step.run("load-pending-memories", async () => {
@@ -502,10 +549,8 @@ export async function runObserver(
     memories: memories.result,
     drained: drain.result,
     failedPhases,
-    newMessages: {
-      corrections: R.sumBy(plan.chunks.corrections, (c) => c.messages),
-      memories: R.sumBy(plan.chunks.memories, (c) => c.messages),
-    },
+    newMessages: { corrections: corrections.processed, memories: memories.processed },
+    modelBudgetTooSmall: corrections.budgetTooSmall || memories.budgetTooSmall,
   };
 
   // Persist the audit row last — once everything above is memoised, a retry
@@ -528,6 +573,8 @@ export async function runObserver(
     );
   });
 
+  const [failure] = unrecorded;
+  if (failure !== undefined) throw failure;
   return { status: "processed", conversationId, eventId, ...outcome };
 }
 
@@ -541,6 +588,7 @@ const NO_CORRECTIONS: ExtractionResult = {
   outOfScopeReinforcementsSkipped: 0,
   outOfScopeContradictionsSkipped: 0,
   unknownRuleReinforcementsSkipped: 0,
+  droppedForContext: 0,
   consolidationNeeded: false,
 };
 
@@ -559,6 +607,7 @@ function addCorrections(total: ExtractionResult, chunk: ExtractionResult): Extra
       total.outOfScopeContradictionsSkipped + chunk.outOfScopeContradictionsSkipped,
     unknownRuleReinforcementsSkipped:
       total.unknownRuleReinforcementsSkipped + chunk.unknownRuleReinforcementsSkipped,
+    droppedForContext: total.droppedForContext + chunk.droppedForContext,
     consolidationNeeded: chunk.consolidationNeeded,
   };
 }
@@ -567,6 +616,7 @@ const NO_MEMORIES: MemoryExtractionResult = {
   extracted: 0,
   byNetwork: {},
   skippedForUnseenRules: 0,
+  droppedForContext: 0,
 };
 
 /** Two chunks' memories; a skip for unseen rules counts once per fire. */
@@ -582,6 +632,7 @@ function addMemories(
       R.mapValues((counts) => R.sumBy(counts, ([, n]) => n)),
     ),
     skippedForUnseenRules: Math.max(total.skippedForUnseenRules, chunk.skippedForUnseenRules),
+    droppedForContext: total.droppedForContext + chunk.droppedForContext,
   };
 }
 

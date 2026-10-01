@@ -240,7 +240,10 @@ function buildStubProvider(opts: {
       let payload: unknown;
       const sys = params.system ?? "";
       if (sys.includes("memory extraction engine")) {
-        payload = { memories: opts.extractionMemories ?? [] };
+        // Each fact cites the first new message.
+        payload = {
+          memories: (opts.extractionMemories ?? []).map((m) => ({ sourceMessage: 1, ...m })),
+        };
       } else if (sys.includes("classifying a single fact")) {
         payload = opts.pendingClassification ?? {
           network: "world",
@@ -799,6 +802,7 @@ describe("runObserver — real PG + recording memory mock", () => {
                       matchedExistingRuleId: null,
                       action: "new",
                       channelType: "telegram",
+                      sourceMessage: 1,
                     },
                   ],
                 }),

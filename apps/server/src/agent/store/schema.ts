@@ -953,15 +953,14 @@ export const steeringRules = pgTable(
     // instructions stay out of another's prompt.
     userId: uuid("user_id").references(() => users.id, { onDelete: "cascade" }),
     quote: text("quote"), // the user's words `rule_set` quoted; set on every instruction row
-    // NULL = never contradicted while learning. The last message of the
-    // Observer chunk whose contradiction reset the learning rule's count, then
-    // of the one whose contradiction retired it; one from the recorded chunk
-    // changes nothing, so a re-run extraction step applies once. Any other
+    // NULL = never contradicted while learning. The message a contradiction
+    // that reset the learning rule's count cited, then the one cited by the
+    // contradiction that retired it; one citing the recorded message changes
+    // nothing, so re-extracting a message applies it once. Any other
     // retirement clears it.
-    contradictedThroughMessageId: uuid("contradicted_through_message_id").references(
-      () => messages.id,
-      { onDelete: "set null" },
-    ),
+    contradictedByMessageId: uuid("contradicted_by_message_id").references(() => messages.id, {
+      onDelete: "set null",
+    }),
     createdAt: ts(),
   },
   (t) => [
@@ -976,9 +975,9 @@ export const steeringRules = pgTable(
       .on(...INSTRUCTION_RULE_KEY)
       .where(LIVE_INSTRUCTION_RULE),
     // For the FK's ON DELETE SET NULL: a message delete finds its rows.
-    index("idx_steering_rules_contradicted_through_message")
-      .on(t.contradictedThroughMessageId)
-      .where(sql`contradicted_through_message_id IS NOT NULL`),
+    index("idx_steering_rules_contradicted_by_message")
+      .on(t.contradictedByMessageId)
+      .where(sql`contradicted_by_message_id IS NOT NULL`),
   ],
 );
 

@@ -1,7 +1,7 @@
 ALTER TABLE "conversations" ADD COLUMN "corrections_observed_through" uuid;--> statement-breakpoint
 ALTER TABLE "conversations" ADD COLUMN "memories_observed_through" uuid;--> statement-breakpoint
-ALTER TABLE "steering_rules" ADD COLUMN "contradicted_through_message_id" uuid;--> statement-breakpoint
+ALTER TABLE "steering_rules" ADD COLUMN "contradicted_by_message_id" uuid;--> statement-breakpoint
 ALTER TABLE "conversations" ADD CONSTRAINT "conversations_corrections_observed_through_messages_id_fk" FOREIGN KEY ("corrections_observed_through") REFERENCES "public"."messages"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "conversations" ADD CONSTRAINT "conversations_memories_observed_through_messages_id_fk" FOREIGN KEY ("memories_observed_through") REFERENCES "public"."messages"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "steering_rules" ADD CONSTRAINT "steering_rules_contradicted_through_message_id_messages_id_fk" FOREIGN KEY ("contradicted_through_message_id") REFERENCES "public"."messages"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
-CREATE INDEX "idx_steering_rules_contradicted_through_message" ON "steering_rules" USING btree ("contradicted_through_message_id") WHERE contradicted_through_message_id IS NOT NULL;
+ALTER TABLE "steering_rules" ADD CONSTRAINT "steering_rules_contradicted_by_message_id_messages_id_fk" FOREIGN KEY ("contradicted_by_message_id") REFERENCES "public"."messages"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
+CREATE INDEX "idx_steering_rules_contradicted_by_message" ON "steering_rules" USING btree ("contradicted_by_message_id") WHERE contradicted_by_message_id IS NOT NULL;

@@ -817,8 +817,8 @@ describe("the Observer's rule reads", () => {
       return { id, profileId };
     }
 
-    /** A new message in `conv`: the last message of an Observer chunk that ends there. */
-    async function chunk(conv: { id: string; profileId: string }): Promise<string> {
+    /** A new message in `conv`, which a contradiction cites. */
+    async function said(conv: { id: string; profileId: string }): Promise<string> {
       const { id } = await tx((trx) =>
         store.insertMessage(trx, {
           conversationId: conv.id,
@@ -840,8 +840,8 @@ describe("the Observer's rule reads", () => {
       return expectDefined(state, id).observationCount;
     }
 
-    const contradict = (id: string, throughMessageId: string) =>
-      tx((trx) => store.contradictLearningRule(trx, { id, throughMessageId }));
+    const contradict = (id: string, messageId: string) =>
+      tx((trx) => store.contradictLearningRule(trx, { id, messageId }));
 
     const reinforce = (id: string) =>
       tx((trx) =>
@@ -854,57 +854,57 @@ describe("the Observer's rule reads", () => {
       );
 
     it("resets a learning rule's count on a first contradiction, and keeps it learning", async () => {
-      const chunkA = await chunk(await conversation());
+      const messageA = await said(await conversation());
       const id = await row({ rule: "Learning", source: "correction", active: false });
 
-      expect(await contradict(id, chunkA)).toBe("reset");
+      expect(await contradict(id, messageA)).toBe("reset");
       expect(await countOf(id)).toBe(0);
       expect(await stateOf(id)).toBe("learning");
     });
 
-    it("reports the same reset to a re-run of the chunk, writing nothing more", async () => {
-      const chunkA = await chunk(await conversation());
+    it("reports the same reset to a re-extraction of the message, writing nothing more", async () => {
+      const messageA = await said(await conversation());
       const id = await row({ rule: "Learning", source: "correction", active: false });
-      await contradict(id, chunkA);
+      await contradict(id, messageA);
       await reinforce(id);
 
-      expect(await contradict(id, chunkA)).toBe("reset");
+      expect(await contradict(id, messageA)).toBe("reset");
       expect(await countOf(id)).toBe(1);
       expect(await stateOf(id)).toBe("learning");
     });
 
-    it("retires it on a contradiction from a later chunk of the same conversation", async () => {
+    it("retires it on a contradiction citing a later message of the same conversation", async () => {
       const conv = await conversation();
-      const chunkA = await chunk(conv);
+      const messageA = await said(conv);
       const id = await row({ rule: "Learning", source: "correction", active: false });
-      await contradict(id, chunkA);
-      const chunkB = await chunk(conv);
+      await contradict(id, messageA);
+      const messageB = await said(conv);
 
-      expect(await contradict(id, chunkB)).toBe("retired");
+      expect(await contradict(id, messageB)).toBe("retired");
       expect(await stateOf(id)).toBe("retired");
     });
 
-    it("reports the same retirement to a re-run of the retiring chunk", async () => {
-      const [chunkA, chunkB] = [
-        await chunk(await conversation()),
-        await chunk(await conversation()),
+    it("reports the same retirement to a re-extraction of the retiring message", async () => {
+      const [messageA, messageB] = [
+        await said(await conversation()),
+        await said(await conversation()),
       ];
       const id = await row({ rule: "Learning", source: "correction", active: false });
-      await contradict(id, chunkA);
-      await contradict(id, chunkB);
+      await contradict(id, messageA);
+      await contradict(id, messageB);
 
-      expect(await contradict(id, chunkB)).toBe("retired");
-      expect(await contradict(id, chunkA)).toBe("unchanged");
+      expect(await contradict(id, messageB)).toBe("retired");
+      expect(await contradict(id, messageA)).toBe("unchanged");
       expect(await stateOf(id)).toBe("retired");
     });
 
-    it("reports nothing to the resetting chunk once another path retired the rule", async () => {
+    it("reports nothing to the resetting message once another path retired the rule", async () => {
       const userId = await seedUser();
       const viaSet = await row({ rule: "No emojis", source: "correction", active: false });
       const viaRemove = await row({ rule: "Short replies", source: "correction", active: false });
-      const chunkA = await chunk(await conversation());
-      await contradict(viaSet, chunkA);
-      await contradict(viaRemove, chunkA);
+      const messageA = await said(await conversation());
+      await contradict(viaSet, messageA);
+      await contradict(viaRemove, messageA);
       // An instruction with the same text supersedes one.
       await set({ rule: "No emojis", userId });
       // Two reinforcements promote the other, which `rule_remove` can then retire.
@@ -929,38 +929,38 @@ describe("the Observer's rule reads", () => {
       );
       expect([await stateOf(viaSet), await stateOf(viaRemove)]).toEqual(["retired", "retired"]);
       const markers = await db
-        .select({ marker: steeringRules.contradictedThroughMessageId })
+        .select({ marker: steeringRules.contradictedByMessageId })
         .from(steeringRules)
         .where(inArray(steeringRules.id, [viaSet, viaRemove]));
       expect(markers).toEqual([{ marker: null }, { marker: null }]);
 
-      expect(await contradict(viaSet, chunkA)).toBe("unchanged");
-      expect(await contradict(viaRemove, chunkA)).toBe("unchanged");
+      expect(await contradict(viaSet, messageA)).toBe("unchanged");
+      expect(await contradict(viaRemove, messageA)).toBe("unchanged");
     });
 
     it("retires it on a contradiction from another conversation, reinforced meanwhile or not", async () => {
-      const [chunkA, chunkB] = [
-        await chunk(await conversation()),
-        await chunk(await conversation()),
+      const [messageA, messageB] = [
+        await said(await conversation()),
+        await said(await conversation()),
       ];
       const id = await row({ rule: "Learning", source: "correction", active: false });
-      await contradict(id, chunkA);
+      await contradict(id, messageA);
       await reinforce(id);
       expect(await stateOf(id)).toBe("learning");
 
-      expect(await contradict(id, chunkB)).toBe("retired");
+      expect(await contradict(id, messageB)).toBe("retired");
       expect(await stateOf(id)).toBe("retired");
     });
 
     it("leaves an active, retired or instruction rule alone", async () => {
       const userId = await seedUser();
-      const chunkA = await chunk(await conversation());
+      const messageA = await said(await conversation());
       const active = await row({ rule: "Active", source: "correction" });
       const retired = await row({ rule: "Retired", source: "correction", retired: true });
       const instruction = await row({ rule: "Mine", source: "instruction", userId });
 
       for (const id of [active, retired, instruction]) {
-        expect(await contradict(id, chunkA)).toBe("unchanged");
+        expect(await contradict(id, messageA)).toBe("unchanged");
       }
       expect([await stateOf(active), await stateOf(retired), await stateOf(instruction)]).toEqual([
         "live",

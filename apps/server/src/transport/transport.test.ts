@@ -3196,6 +3196,8 @@ describe("createTransport", () => {
         memories: { extracted: 0, skippedForUnseenRules: 0 },
         drained: { drained: 2, withheld: 1, deferredToFirstParty: 0 },
         newMessages: { corrections: 0, memories: 0 },
+        failedPhases: [],
+        modelBudgetTooSmall: false,
       });
       const { transport } = buildEvolutionTransport({
         identity: { userId: "user-1" },
@@ -3221,6 +3223,8 @@ describe("createTransport", () => {
         memories: { extracted: 0, skippedForUnseenRules: 1 },
         drained: { drained: 0, withheld: 0, deferredToFirstParty: 0 },
         newMessages: { corrections: 0, memories: 0 },
+        failedPhases: [],
+        modelBudgetTooSmall: false,
       });
       const { transport } = buildEvolutionTransport({
         identity: { userId: "user-1" },
@@ -3230,6 +3234,27 @@ describe("createTransport", () => {
       });
       const res = await transport.evolution.triggerReflection("h", "addr");
       expect(res._unsafeUnwrap()).toMatchObject({ status: "processed", skippedForUnseenRules: 1 });
+    });
+
+    it("triggerReflection: processed when the extraction model was too small for a chunk", async () => {
+      const trigger = vi.fn().mockResolvedValue({
+        status: "processed",
+        eventId: "evt-103",
+        corrections: { extracted: 0, reinforced: 0, promoted: 0, retired: 0, reset: 0 },
+        memories: { extracted: 0, skippedForUnseenRules: 0 },
+        drained: { drained: 0, withheld: 0, deferredToFirstParty: 0 },
+        newMessages: { corrections: 0, memories: 0 },
+        failedPhases: [],
+        modelBudgetTooSmall: true,
+      });
+      const { transport } = buildEvolutionTransport({
+        identity: { userId: "user-1" },
+        session: { conversationId: "c1" },
+        conv: { id: "c1", userId: "user-1" },
+        triggerReflection: trigger,
+      });
+      const res = await transport.evolution.triggerReflection("h", "addr");
+      expect(res._unsafeUnwrap()).toMatchObject({ status: "processed" });
     });
 
     it("triggerReflection: processed when only one phase had new messages", async () => {

@@ -2532,7 +2532,7 @@ export async function handleReflect(
             (withheld > 0 ? `, ${withheld} withheld` : "") +
             (deferredToFirstParty > 0 ? `, ${deferredToFirstParty} deferred` : "") +
             `.\n/learned ${eventId} for the full breakdown.`;
-      await ctx.reply(`Nothing new since the last reflection.${drain}`);
+      await ctx.reply(`Nothing new since the Observer last ran.${drain}`);
       return;
     }
     case "processed": {

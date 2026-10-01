@@ -5,19 +5,23 @@ import type { Message } from "../../llm/types.js";
 import type { AgentStore, ObserverBounds } from "../store/index.js";
 import {
   chunkTokenLimit,
+  estimateTokens,
   isCaughtUp,
   loadChunkTranscript,
   MAX_CHUNKS_PER_FIRE,
+  MIN_CHUNK_TOKENS,
+  PLAN_PAGE_SIZE,
   planChunks,
-  planObserverChunks,
+  planPhaseChunks,
+  truncateToTokens,
 } from "./observer-window.js";
 
 const FAKE_TX = { __mockTx: true } as never;
 const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
 
-/** A message whose transcript line ("User: " + text) is `tokens` × 4 characters. */
+/** A message whose ASCII transcript line ("User: " + text) estimates at `tokens`. */
 function sized(id: string, tokens: number): Message & { id: string } {
-  return { id, role: "user", content: "x".repeat(tokens * 4 - "User: ".length) };
+  return { id, role: "user", content: "x".repeat(tokens * 3 - "User: ".length) };
 }
 
 function bounds(
@@ -27,6 +31,41 @@ function bounds(
 ): ObserverBounds {
   return { messageCount: 10, lastMessageId, observedThrough: { corrections, memories } };
 }
+
+describe("estimateTokens", () => {
+  it("counts a third of a token per ASCII character", () => {
+    expect(estimateTokens("x".repeat(300))).toBe(100);
+  });
+
+  it("counts other text by its UTF-8 bytes, half a token each", () => {
+    // Three bytes a character: 1.5 tokens.
+    expect(estimateTokens("漢".repeat(100))).toBe(150);
+    // Two bytes: one token.
+    expect(estimateTokens("ж".repeat(100))).toBe(100);
+    // Four bytes: two tokens.
+    expect(estimateTokens("🙂".repeat(100))).toBe(200);
+  });
+});
+
+describe("truncateToTokens", () => {
+  it("leaves text that fits as it is", () => {
+    expect(truncateToTokens("short", 10)).toBe("short");
+  });
+
+  it("cuts text past the limit to it, marking the cut", () => {
+    const cut = truncateToTokens("x".repeat(3_000), 100);
+
+    expect(estimateTokens(cut)).toBeLessThanOrEqual(100);
+    expect(cut).toMatch(/^x+\n\[… \d+ characters truncated\]$/);
+  });
+
+  it("cuts non-Latin text by its weight, not its length", () => {
+    const cut = truncateToTokens("漢".repeat(1_000), 100);
+
+    expect(estimateTokens(cut)).toBeLessThanOrEqual(100);
+    expect(cut).toContain("characters truncated");
+  });
+});
 
 describe("planChunks", () => {
   it("closes a chunk before the message that would take it past the limit", () => {
@@ -45,6 +84,15 @@ describe("planChunks", () => {
       { after: null, through: "m1", messages: 1 },
       { after: "m1", through: "m2", messages: 1 },
       { after: "m2", through: "m3", messages: 1 },
+    ]);
+  });
+
+  it("counts a message larger than the limit at the limit, so the next one starts a chunk", () => {
+    const window = [sized("m1", 5_000), sized("m2", 10)];
+
+    expect(planChunks(window, null, 100, 3)).toEqual([
+      { after: null, through: "m1", messages: 1 },
+      { after: "m1", through: "m2", messages: 1 },
     ]);
   });
 
@@ -78,109 +126,147 @@ describe("chunkTokenLimit", () => {
       chunkTokenLimit("unlisted-model", { contextWindow: 200_000, maxOutputTokens: 20_000 }),
     ).toBe(42_500);
   });
+
+  it("is raised to the minimum when a quarter of the budget falls below it", () => {
+    // A 3k budget: a quarter is 750, and a chunk and its context still fit at the minimum.
+    expect(chunkTokenLimit("m", { contextWindow: 14_000, maxOutputTokens: 1_000 })).toBe(
+      MIN_CHUNK_TOKENS,
+    );
+  });
+
+  it("is null when the budget can't hold a chunk and its context at the minimum, or is negative", () => {
+    expect(chunkTokenLimit("m", { contextWindow: 11_500, maxOutputTokens: 1_000 })).toBeNull();
+    expect(chunkTokenLimit("m", { contextWindow: 8_000, maxOutputTokens: 4_000 })).toBeNull();
+  });
 });
 
-describe("planObserverChunks", () => {
-  const BOTH = ["corrections", "memories"] as const;
-  const WINDOW = ["m3", "m4", "m5", "m6"].map((id) => sized(id, 10));
-
-  it("reads from the lower cursor once and plans each phase from its own", async () => {
+describe("planPhaseChunks", () => {
+  /** A store over `window` that serves `listMessagesInRange` pages as Postgres would. */
+  function storeOver(window: ReadonlyArray<Message & { id: string }>) {
     const store = mock<AgentStore>();
-    store.listMessagesInRange.mockResolvedValue(WINDOW);
+    store.listMessagesInRange.mockImplementation(async (_tx, _conversationId, range) => {
+      const after = window.filter(
+        (m) => (range.after === null || m.id > range.after) && m.id <= range.through,
+      );
+      return range.limit === null ? after : after.slice(0, range.limit);
+    });
+    return store;
+  }
 
-    const plan = await planObserverChunks(
+  const ids = (n: number) =>
+    Array.from({ length: n }, (_, i) => `m${String(i + 1).padStart(4, "0")}`);
+
+  it("reads one page when the chunks fill inside it", async () => {
+    const window = ids(500).map((id) => sized(id, 40));
+    const store = storeOver(window);
+
+    const plan = await planPhaseChunks(
       { runInTx: fakeRunInTx, store },
-      {
-        conversationId: "conv-1",
-        bounds: bounds("m6", "m4", "m2"),
-        phases: BOTH,
-        tokenLimit: 1_000,
-      },
+      { conversationId: "c", after: null, through: "m0500", tokenLimit: 100 },
     );
 
-    expect(store.listMessagesInRange).toHaveBeenCalledExactlyOnceWith(expect.anything(), "conv-1", {
-      after: "m2",
-      through: "m6",
+    expect(store.listMessagesInRange).toHaveBeenCalledExactlyOnceWith(expect.anything(), "c", {
+      after: null,
+      through: "m0500",
+      limit: PLAN_PAGE_SIZE,
     });
     expect(plan).toEqual({
-      tokenLimit: 1_000,
-      chunks: {
-        corrections: [{ after: "m4", through: "m6", messages: 2 }],
-        memories: [{ after: "m2", through: "m6", messages: 4 }],
-      },
+      kind: "planned",
+      tokenLimit: 100,
+      chunks: [
+        { after: null, through: "m0002", messages: 2 },
+        { after: "m0002", through: "m0004", messages: 2 },
+        { after: "m0004", through: "m0006", messages: 2 },
+      ],
     });
   });
 
-  it("reads from the start for a phase never observed, and plans nothing for one caught up", async () => {
-    const store = mock<AgentStore>();
-    store.listMessagesInRange.mockResolvedValue(WINDOW);
+  it("reads further pages only until the chunks fill", async () => {
+    // Fifty messages a chunk: the third closes on the second page.
+    const window = ids(500).map((id) => sized(id, 2));
+    const store = storeOver(window);
 
-    const plan = await planObserverChunks(
+    const plan = await planPhaseChunks(
       { runInTx: fakeRunInTx, store },
-      {
-        conversationId: "conv-1",
-        bounds: bounds("m6", null, "m6"),
-        phases: BOTH,
-        tokenLimit: 1_000,
-      },
+      { conversationId: "c", after: null, through: "m0500", tokenLimit: 100 },
     );
 
-    expect(store.listMessagesInRange).toHaveBeenCalledWith(expect.anything(), "conv-1", {
-      after: null,
-      through: "m6",
-    });
-    expect(plan.chunks).toEqual({
-      corrections: [{ after: null, through: "m6", messages: 4 }],
-      memories: [],
+    expect(
+      store.listMessagesInRange.mock.calls.map(([, , range]) => [range.after, range.limit]),
+    ).toEqual([
+      [null, PLAN_PAGE_SIZE],
+      ["m0100", PLAN_PAGE_SIZE],
+    ]);
+    expect(plan).toMatchObject({
+      kind: "planned",
+      chunks: [
+        { after: null, through: "m0050", messages: 50 },
+        { after: "m0050", through: "m0100", messages: 50 },
+        { after: "m0100", through: "m0150", messages: 50 },
+      ],
     });
   });
 
-  it("plans only the phases it is given, reading from their lowest cursor", async () => {
-    const store = mock<AgentStore>();
-    store.listMessagesInRange.mockResolvedValue(WINDOW.slice(2));
+  it("plans the rest of a short window from its cursor", async () => {
+    const window = ids(6).map((id) => sized(id, 10));
+    const store = storeOver(window);
 
-    const plan = await planObserverChunks(
+    const plan = await planPhaseChunks(
       { runInTx: fakeRunInTx, store },
-      {
-        conversationId: "conv-1",
-        bounds: bounds("m6", "m4", null),
-        phases: ["corrections"],
-        tokenLimit: 1_000,
-      },
+      { conversationId: "c", after: "m0004", through: "m0006", tokenLimit: 100 },
     );
 
-    expect(store.listMessagesInRange).toHaveBeenCalledWith(expect.anything(), "conv-1", {
-      after: "m4",
-      through: "m6",
-    });
-    expect(plan.chunks).toEqual({
-      corrections: [{ after: "m4", through: "m6", messages: 2 }],
-      memories: [],
+    expect(plan).toEqual({
+      kind: "planned",
+      tokenLimit: 100,
+      chunks: [{ after: "m0004", through: "m0006", messages: 2 }],
     });
   });
 
-  it("reads nothing when both phases are caught up", async () => {
+  it("plans nothing, and reads nothing, when the model's budget is too small", async () => {
     const store = mock<AgentStore>();
 
-    const plan = await planObserverChunks(
+    const plan = await planPhaseChunks(
       { runInTx: fakeRunInTx, store },
-      {
-        conversationId: "conv-1",
-        bounds: bounds("m6", "m6", "m6"),
-        phases: BOTH,
-        tokenLimit: 1_000,
-      },
+      { conversationId: "c", after: null, through: "m6", tokenLimit: null },
     );
 
+    expect(plan).toEqual({ kind: "budget_too_small" });
     expect(store.listMessagesInRange).not.toHaveBeenCalled();
-    expect(plan.chunks).toEqual({ corrections: [], memories: [] });
   });
 });
 
 describe("loadChunkTranscript", () => {
   it("reads a chunk at the start of the conversation with nothing before it", async () => {
     const store = mock<AgentStore>();
-    store.listMessagesInRange.mockResolvedValue([sized("m1", 5)]);
+    store.listMessagesInRange.mockResolvedValue([
+      sized("m1", 5),
+      {
+        id: "m2",
+        role: "assistant",
+        content: [{ type: "thinking", thinking: "x", signature: "s" }],
+      },
+    ]);
+
+    const transcript = await loadChunkTranscript(
+      { runInTx: fakeRunInTx, store },
+      {
+        conversationId: "conv-1",
+        chunk: { after: null, through: "m2", messages: 2 },
+        tokenLimit: 100,
+      },
+    );
+
+    expect(transcript).toMatchObject({ summary: null, context: [] });
+    // Only what the transcript shows is numbered.
+    expect(transcript.messages.map((m) => m.id)).toEqual(["m1"]);
+    expect(store.listMessagesThrough).not.toHaveBeenCalled();
+    expect(store.getLatestSummaryThrough).not.toHaveBeenCalled();
+  });
+
+  it("cuts a message past the limit, marking the cut", async () => {
+    const store = mock<AgentStore>();
+    store.listMessagesInRange.mockResolvedValue([sized("m1", 5_000)]);
 
     const transcript = await loadChunkTranscript(
       { runInTx: fakeRunInTx, store },
@@ -191,10 +277,9 @@ describe("loadChunkTranscript", () => {
       },
     );
 
-    expect(transcript).toMatchObject({ summary: null, context: [], throughMessageId: "m1" });
-    expect(transcript.messages).toHaveLength(1);
-    expect(store.listMessagesThrough).not.toHaveBeenCalled();
-    expect(store.getLatestSummaryThrough).not.toHaveBeenCalled();
+    const [only] = transcript.messages;
+    expect(estimateTokens(only?.line ?? "")).toBeLessThanOrEqual(100);
+    expect(only?.line).toContain("characters truncated");
   });
 
   it("reads the summary and the last 10 messages through the chunk's start, the oldest dropped past the limit", async () => {
@@ -227,13 +312,14 @@ describe("loadChunkTranscript", () => {
 
     expect(store.listMessagesThrough).toHaveBeenCalledWith(expect.anything(), "conv-1", "m11", 10);
     expect(store.getLatestSummaryThrough).toHaveBeenCalledWith(expect.anything(), "conv-1", "m11");
-    expect(store.listMessagesInRange).toHaveBeenCalledWith(
-      expect.anything(),
-      "conv-1",
-      expect.objectContaining({ after: "m11", through: "m12" }),
-    );
+    expect(store.listMessagesInRange).toHaveBeenCalledWith(expect.anything(), "conv-1", {
+      after: "m11",
+      through: "m12",
+      limit: null,
+    });
     expect(transcript.summary).toBe("Earlier, the user planned a trip.");
-    expect(transcript.context).toEqual([sized("m10", 30), sized("m11", 30)]);
-    expect(transcript.throughMessageId).toBe("m12");
+    // The summary takes 11 of the 100 tokens; m10 and m11 fit the rest, m9 doesn't.
+    expect(transcript.context).toHaveLength(2);
+    expect(transcript.messages.map((m) => m.id)).toEqual(["m12"]);
   });
 });

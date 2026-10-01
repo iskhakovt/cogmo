@@ -47,6 +47,8 @@ const ExtractionResultSchema = z.object({
   /** Older rows omit it and read as 0. */
   outOfScopeContradictionsSkipped: z.number().int().nonnegative().default(0),
   unknownRuleReinforcementsSkipped: z.number().int().nonnegative(),
+  /** Older rows omit it and read as 0. */
+  droppedForContext: z.number().int().nonnegative().default(0),
   consolidationNeeded: z.boolean(),
 });
 
@@ -60,6 +62,8 @@ const MemoryExtractionResultSchema = z.object({
   byNetwork: z.record(z.string(), z.number().int().nonnegative()),
   /** Older rows omit it and read as 0. */
   skippedForUnseenRules: z.number().int().nonnegative().default(0),
+  /** Older rows omit it and read as 0. */
+  droppedForContext: z.number().int().nonnegative().default(0),
 });
 
 const DrainResultSchema = z.object({
@@ -88,13 +92,15 @@ export const EvolutionEventPayloadSchema = z.object({
   durationMs: z.number().int().nonnegative().optional(),
   /** Phases that failed after their step retries, in run order; their counts above are the empty fallback. Absent on older rows: unknown, not `[]`. */
   failedPhases: z.array(ObserverPhaseSchema).optional(),
-  /** The messages each extraction phase took on after its cursor; 0 for a phase with nothing new. Absent on older rows. */
+  /** The messages each extraction phase extracted and advanced its cursor past. Absent on older rows. */
   newMessages: z
     .object({
       corrections: z.number().int().nonnegative(),
       memories: z.number().int().nonnegative(),
     })
     .optional(),
+  /** True when the extraction model's input budget couldn't hold a chunk, so extraction was skipped. Absent on older rows. */
+  modelBudgetTooSmall: z.boolean().optional(),
 });
 export type EvolutionEventPayload = z.infer<typeof EvolutionEventPayloadSchema>;
 

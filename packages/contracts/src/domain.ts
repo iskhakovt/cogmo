@@ -105,7 +105,7 @@ export interface EvolutionEventPayload {
     extracted: number;
     reinforced: number;
     contradictions: number;
-    /** Rules still learning that a second contradiction, from another chunk, retired. */
+    /** Rules still learning that a second contradiction, citing another message, retired. */
     retired: number;
     /** Rules still learning whose count a first contradiction reset. */
     reset: number;
@@ -113,11 +113,19 @@ export interface EvolutionEventPayload {
     outOfScopeReinforcementsSkipped: number;
     outOfScopeContradictionsSkipped: number;
     unknownRuleReinforcementsSkipped: number;
+    /** Corrections citing no new message, dropped. */
+    droppedForContext: number;
     consolidationNeeded: boolean;
   };
   consolidation: { mergedGroups: number; rulesRemoved: number } | null;
   /** `skippedForUnseenRules`: 1 when a user's memory rule bound a profile that can't see it. */
-  memories: { extracted: number; byNetwork: Record<string, number>; skippedForUnseenRules: number };
+  memories: {
+    extracted: number;
+    byNetwork: Record<string, number>;
+    skippedForUnseenRules: number;
+    /** Facts citing no new message, dropped. */
+    droppedForContext: number;
+  };
   /**
    * `withheld`: staged rows a `memory`-category rule forbade, deleted unretained.
    * `deferredToFirstParty`: rows a third-party fire left pending for a first-party one.
@@ -133,8 +141,10 @@ export interface EvolutionEventPayload {
   durationMs?: number | undefined;
   /** Phases that failed after their retries; absent on older rows, where it's unknown. */
   failedPhases?: ObserverPhase[] | undefined;
-  /** Messages each extraction phase took on after its cursor; absent on older rows. */
+  /** Messages each extraction phase extracted and advanced its cursor past; absent on older rows. */
   newMessages?: { corrections: number; memories: number } | undefined;
+  /** The extraction model's budget couldn't hold a chunk; absent on older rows. */
+  modelBudgetTooSmall?: boolean | undefined;
 }
 
 export interface EvolutionEventRow {

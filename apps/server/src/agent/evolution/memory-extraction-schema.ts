@@ -7,7 +7,7 @@
  */
 
 import { z } from "zod";
-import { TRANSCRIPT_LAYOUT } from "./extraction-schema.js";
+import { SourceMessageSchema, TRANSCRIPT_LAYOUT } from "./extraction-schema.js";
 
 // --- Extraction output schema ---
 
@@ -83,6 +83,7 @@ export const MemoryTrustSchema = z
   );
 
 export const ExtractedMemorySchema = z.object({
+  sourceMessage: SourceMessageSchema,
   fact: z
     .string()
     .trim()
@@ -132,6 +133,7 @@ export type ClassifiedMemory = z.infer<typeof ClassifiedMemorySchema>;
 export function buildExtractedMemorySchema(customNames: ReadonlyArray<string>) {
   const compartment = buildCompartmentSchema(customNames);
   return z.object({
+    sourceMessage: SourceMessageSchema,
     fact: z
       .string()
       .trim()

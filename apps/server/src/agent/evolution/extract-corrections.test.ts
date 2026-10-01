@@ -5,8 +5,10 @@ import { logger } from "../../logger.js";
 import { expectDefined } from "../../test/assertions.js";
 import { mockProvider } from "../../test/factories.js";
 import {
+  citedMessageId,
   type ExtractionDeps,
   extractCorrections,
+  formatMessage,
   formatObserverTranscript,
   formatTranscript,
   type ObserverTranscript,
@@ -166,27 +168,27 @@ describe("formatTranscript", () => {
 });
 
 describe("formatObserverTranscript", () => {
-  it("sends a chunk with nothing before it as the new messages alone", () => {
+  it("sends a chunk with nothing before it as the numbered new messages alone", () => {
     expect(
       formatObserverTranscript({
         summary: null,
         context: [],
-        messages: [{ role: "user", content: "I moved to Lisbon." }],
-        throughMessageId: "m",
+        messages: [
+          { id: "m1", line: "User: I moved to Lisbon." },
+          { id: "m2", line: "Assistant: Welcome!" },
+        ],
       }),
-    ).toBe("<new_messages>\nUser: I moved to Lisbon.\n</new_messages>");
+    ).toBe(
+      "<new_messages>\n[1] User: I moved to Lisbon.\n\n[2] Assistant: Welcome!\n</new_messages>",
+    );
   });
 
-  it("puts the summary and the earlier messages before the chunk, apart from it", () => {
+  it("puts the summary and the earlier messages, unnumbered, before the chunk", () => {
     expect(
       formatObserverTranscript({
         summary: "The user is planning a move.",
-        context: [
-          { role: "user", content: "Where should I live?" },
-          { role: "assistant", content: "Somewhere sunny?" },
-        ],
-        messages: [{ role: "user", content: "There, then." }],
-        throughMessageId: "m",
+        context: ["User: Where should I live?", "Assistant: Somewhere sunny?"],
+        messages: [{ id: "m3", line: "User: There, then." }],
       }),
     ).toBe(
       [
@@ -201,10 +203,29 @@ describe("formatObserverTranscript", () => {
         "</earlier_conversation>",
         "",
         "<new_messages>",
-        "User: There, then.",
+        "[1] User: There, then.",
         "</new_messages>",
       ].join("\n"),
     );
+  });
+});
+
+describe("citedMessageId", () => {
+  const transcript: ObserverTranscript = {
+    summary: null,
+    context: ["User: earlier"],
+    messages: [
+      { id: "m7", line: "User: a" },
+      { id: "m8", line: "User: b" },
+    ],
+  };
+
+  it("resolves a new message's number to its id", () => {
+    expect(citedMessageId(transcript, 2)).toBe("m8");
+  });
+
+  it("resolves no number past the new messages, below 1, fractional or absent", () => {
+    for (const n of [3, 0, -1, 1.5, null]) expect(citedMessageId(transcript, n)).toBeUndefined();
   });
 });
 
@@ -215,9 +236,13 @@ function mockExtractionDeps(
   storeOverrides?: Partial<ExtractionDeps["store"]>,
   activeChannelTypes: ReadonlyArray<string> = [],
 ): ExtractionDeps {
+  // Every correction cites the sample's correcting message unless it says otherwise.
+  const cited = {
+    corrections: chatTypedResponse.corrections.map((c) => ({ sourceMessage: 3, ...c })),
+  };
   const provider = mockProvider({
     chat: vi.fn().mockResolvedValue({
-      content: [{ type: "text", text: JSON.stringify(chatTypedResponse) }],
+      content: [{ type: "text", text: JSON.stringify(cited) }],
       stopReason: "end_turn",
       model: "mock",
       usage: { inputTokens: 10, outputTokens: 5 },
@@ -294,7 +319,14 @@ const sampleHistory: Message[] = [
 
 /** A chunk of new messages with nothing before it. */
 function chunkOf(messages: ReadonlyArray<Message>): ObserverTranscript {
-  return { summary: null, context: [], messages, throughMessageId: "msg-chunk-end" };
+  return {
+    summary: null,
+    context: [],
+    messages: messages.flatMap((m, i) => {
+      const line = formatMessage(m);
+      return line.length === 0 ? [] : [{ id: `msg-${i + 1}`, line }];
+    }),
+  };
 }
 
 const sampleChunk = chunkOf(sampleHistory);
@@ -314,6 +346,7 @@ describe("extractCorrections", () => {
       outOfScopeReinforcementsSkipped: 0,
       outOfScopeContradictionsSkipped: 0,
       unknownRuleReinforcementsSkipped: 0,
+      droppedForContext: 0,
       consolidationNeeded: false,
     });
     expect(deps.store.upsertCorrection).not.toHaveBeenCalled();
@@ -527,7 +560,7 @@ describe("extractCorrections", () => {
       expect(result).toMatchObject({ contradictions: 1, reset: 1, retired: 0, extracted: 0 });
       expect(deps.store.contradictLearningRule).toHaveBeenCalledWith(expect.anything(), {
         id: "learning",
-        throughMessageId: "msg-chunk-end",
+        messageId: "msg-3",
       });
       expect(deps.store.upsertCorrection).not.toHaveBeenCalled();
     });
@@ -1267,9 +1300,8 @@ describe("extractCorrections", () => {
     await extractCorrections(
       {
         summary: "The user asked for bullet points.",
-        context: [{ role: "user", content: "Use bullet points." }],
-        messages: [{ role: "user", content: "No, plain prose." }],
-        throughMessageId: "m",
+        context: ["User: Use bullet points."],
+        messages: [{ id: "m", line: "User: No, plain prose." }],
       },
       SCOPE,
       deps,
@@ -1280,12 +1312,67 @@ describe("extractCorrections", () => {
       {
         role: "user",
         content: expect.stringMatching(
-          /^<earlier_conversation>[\s\S]*Use bullet points\.[\s\S]*<\/earlier_conversation>\n\n<new_messages>\nUser: No, plain prose\.\n<\/new_messages>$/,
+          /^<earlier_conversation>[\s\S]*Use bullet points\.[\s\S]*<\/earlier_conversation>\n\n<new_messages>\n\[1\] User: No, plain prose\.\n<\/new_messages>$/,
         ),
       },
     ]);
     expect(call.system).toContain("extract nothing from it");
+    expect(call.system).toContain("Set `sourceMessage` on every item");
     expect(call.system).toContain("Analyze the new messages below");
+  });
+
+  it("drops a correction citing the earlier conversation, a number out of range, or nothing", async () => {
+    const base = {
+      category: "style",
+      reasoning: "x",
+      action: "new",
+      matchedExistingRuleId: null,
+      channelType: null,
+    };
+    const deps = mockExtractionDeps({
+      corrections: [
+        { ...base, rule: "From context", sourceMessage: 9 },
+        { ...base, rule: "Uncited", sourceMessage: null },
+        { ...base, rule: "Use fetch_url for weather", sourceMessage: 3 },
+      ],
+    });
+    const warn = vi.spyOn(logger, "warn");
+
+    const result = await extractCorrections(sampleChunk, SCOPE, deps);
+
+    expect(result).toMatchObject({ extracted: 1, droppedForContext: 2 });
+    expect(deps.store.upsertCorrection).toHaveBeenCalledOnce();
+    expect(deps.store.upsertCorrection).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ rule: "Use fetch_url for weather" }),
+    );
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ rule: "From context", sourceMessage: 9 }),
+      expect.stringContaining("cites no new message"),
+    );
+    warn.mockRestore();
+  });
+
+  it("keys a contradiction on the message it cites, whatever chunk it is read in", async () => {
+    const deps = mockExtractionDeps(
+      { corrections: [{ ...contradiction("R1").corrections[0], sourceMessage: 1 }] },
+      { getCorrections: vi.fn().mockResolvedValue([learningRow("learning", "Use bullet points")]) },
+    );
+
+    await extractCorrections(
+      {
+        summary: null,
+        context: [],
+        messages: [{ id: "msg-41", line: "User: Bullet points are fine after all." }],
+      },
+      SCOPE,
+      deps,
+    );
+
+    expect(deps.store.contradictLearningRule).toHaveBeenCalledWith(expect.anything(), {
+      id: "learning",
+      messageId: "msg-41",
+    });
   });
 
   it("skips extraction when only the earlier conversation has text", async () => {
@@ -1294,11 +1381,8 @@ describe("extractCorrections", () => {
     const result = await extractCorrections(
       {
         summary: "The user asked for bullet points.",
-        context: [{ role: "user", content: "Use bullet points." }],
-        messages: [
-          { role: "assistant", content: [{ type: "thinking", thinking: "hmm", signature: "s" }] },
-        ],
-        throughMessageId: "m",
+        context: ["User: Use bullet points."],
+        messages: [],
       },
       SCOPE,
       deps,
@@ -1329,6 +1413,7 @@ describe("extractCorrections", () => {
       outOfScopeReinforcementsSkipped: 0,
       outOfScopeContradictionsSkipped: 0,
       unknownRuleReinforcementsSkipped: 0,
+      droppedForContext: 0,
       consolidationNeeded: false,
     });
     // chatTyped should not have been called
@@ -1345,7 +1430,7 @@ describe("extractCorrections", () => {
         content: [
           {
             type: "text",
-            text: '{"corrections":[{"rule":"Use fetch_url for weather lookups","category":"domain","reasoning":"User correction","matchedExistingRuleId":null,"action":"new","channelType":null,},],}',
+            text: '{"corrections":[{"rule":"Use fetch_url for weather lookups","category":"domain","reasoning":"User correction","matchedExistingRuleId":null,"action":"new","channelType":null,"sourceMessage":3,},],}',
           },
         ],
         stopReason: "end_turn",

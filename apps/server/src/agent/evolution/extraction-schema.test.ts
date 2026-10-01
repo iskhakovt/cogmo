@@ -16,6 +16,7 @@ describe("CorrectionExtractionSchema", () => {
           rule: "Be more concise",
           category: "style",
           reasoning: "User asked for shorter responses",
+          sourceMessage: 2,
           matchedExistingRuleId: null,
           action: "new",
           channelType: null,
@@ -32,6 +33,7 @@ describe("CorrectionExtractionSchema", () => {
           rule: "Avoid markdown headings",
           category: "style",
           reasoning: "Preference scoped to chat medium",
+          sourceMessage: 2,
           matchedExistingRuleId: null,
           action: "new",
           channelType: "telegram",
@@ -53,12 +55,28 @@ describe("CorrectionExtractionSchema", () => {
           rule: "Be concise",
           category: "style",
           reasoning: "Same as before",
+          sourceMessage: 2,
           matchedExistingRuleId: "rule-123",
           action: "reinforce",
         },
       ],
     };
     expect(CorrectionExtractionSchema.parse(input)).toEqual(input);
+  });
+
+  it("parses a correction that omits sourceMessage as citing nothing", () => {
+    const parsed = CorrectionExtractionSchema.parse({
+      corrections: [
+        {
+          rule: "Be concise",
+          category: "style",
+          reasoning: "x",
+          matchedExistingRuleId: "R1",
+          action: "reinforce",
+        },
+      ],
+    });
+    expect(parsed.corrections[0]?.sourceMessage).toBeNull();
   });
 
   it("rejects invalid category", () => {
