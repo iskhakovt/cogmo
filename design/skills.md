@@ -1297,7 +1297,10 @@ UPDATE recovery_point='finished', status='success'|'error'  ← transitionToFini
 
 | Group | Subdirectory / key entrypoints | Responsibility |
 |-|-|-|
-| Public interface | `index.ts`, `runner.ts` | `SkillRunner` contract + Dispatcher / Pool coordination across register, approve, rollback, invoke |
+| Public interface | `index.ts`, `runner.ts` | `SkillRunner` contract; `SkillRunnerImpl` wires the source cache, warm pool and use cases below |
+| Deploy pipeline | `deploy/` | One use case per RPC: `register.ts`, `approve.ts` (approve + deny), `rollback.ts`, `activation.ts` (enable + deregister); the lockfile check, the remote mirror, and the run-as `origin.ts` they share |
+| Invocation | `invoke/` | `invoke.ts` (pre-flight, then the recovery-point state machine), `runtime.ts` (planning + dispatch to the isolate, pool or one-shot container), `warm-pool.ts` (lazy pool start + shutdown) |
+| Source cache + listing | `source-cache.ts`, `listing.ts` | Parsed manifests with compiled validators keyed by `(name, gitSha)`; `list` / `listAll` / `listToolDefs` |
 | Manifest + classifier | `manifest.ts`, `classifier.ts`, `ast-classifier.ts`, `ast-rules.ts` | `SKILL.md` frontmatter parsing + risk-tier assignment (tree-sitter static analysis) |
 | Dependency stack | `deps.ts`, `deps-reaper*.ts`, `pyodide-compat.ts` | Lockfile compile + verify at register, venv populate + activate at invoke, unreachable-venv reaper, tier-1 Pyodide compat check |
 | Workers (tier 2) | `worker-sysbox/` | sysbox container host + in-container supervisor + warm pool |
