@@ -777,6 +777,23 @@ describe("DrizzleSkillStore", () => {
       expect(result.row.resourceUsage).toBeNull();
     });
 
+    it("getRunByIdempotencyKey finds the keyed row and nothing for an unused key", async () => {
+      const skill = await seedSkill({ name: "with-key" });
+      const { row } = await tx((trx) =>
+        store.startOrRecoverRun(trx, {
+          skillId: skill.id,
+          trigger: "cron",
+          inputs: { x: 1 },
+          idempotencyKey: "skill-cron:abc:lookup",
+        }),
+      );
+      await tx((trx) => store.insertRun(trx, { skillId: skill.id, trigger: "manual", inputs: {} }));
+
+      const found = await tx((trx) => store.getRunByIdempotencyKey(trx, "skill-cron:abc:lookup"));
+      expect(found?.id).toBe(row.id);
+      expect(await tx((trx) => store.getRunByIdempotencyKey(trx, "other"))).toBeUndefined();
+    });
+
     it("kind='recovered' on second call with same key — returns the existing row", async () => {
       const skill = await seedSkill({ name: "with-key" });
       const key = "skill-cron:abc:2026-06-01T09:00:00.000Z";

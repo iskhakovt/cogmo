@@ -71,14 +71,8 @@ export function buildSkillToolSpec(
     // assignment needs no cast.
     inputSchema: def.inputs,
     handler: async (input, service, ctx) => {
-      // A keyed retry whose prior attempt died mid-execute finds its
-      // `skill_runs` row at `recovery_point='started'`, and the runner
-      // refuses it rather than re-running arbitrary Python with outbound
-      // writes. That refusal is the point of the recovery-point machine —
-      // the alternative is double-firing the skill's side effects — but it
-      // reaches the model as an exception unless translated. Give it the
-      // same shape `skill-cron-fire` gives it: a verdict the caller can act
-      // on, naming the run so the user can check what actually landed.
+      // A run refused as in flight reaches the model as a verdict naming the
+      // run, the shape `skill-cron-fire` gives it.
       const invoked = await runner.invoke({
         name: def.name,
         inputs: input,

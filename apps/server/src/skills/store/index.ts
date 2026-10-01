@@ -417,6 +417,7 @@ export interface SkillStore {
   // --- skill_runs ---
   insertRun(tx: Transaction, params: InsertRunParams): Promise<SkillRunRow>;
   getRun(tx: Transaction, id: string): Promise<SkillRunRow | undefined>;
+  getRunByIdempotencyKey(tx: Transaction, idempotencyKey: string): Promise<SkillRunRow | undefined>;
 
   /**
    * Race-safe lookup-or-create for a keyed run. Used by `runner.invoke`
@@ -1084,6 +1085,18 @@ export class DrizzleSkillStore implements SkillStore {
 
   async getRun(tx: Transaction, id: string): Promise<SkillRunRow | undefined> {
     const rows = await tx.select().from(skillRuns).where(eq(skillRuns.id, id)).limit(1);
+    return rows[0];
+  }
+
+  async getRunByIdempotencyKey(
+    tx: Transaction,
+    idempotencyKey: string,
+  ): Promise<SkillRunRow | undefined> {
+    const rows = await tx
+      .select()
+      .from(skillRuns)
+      .where(eq(skillRuns.idempotencyKey, idempotencyKey))
+      .limit(1);
     return rows[0];
   }
 

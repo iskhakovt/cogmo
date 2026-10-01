@@ -4,6 +4,7 @@ import type { Service } from "../agent/service.js";
 import type { Database, Transactor } from "../db/index.js";
 import type { SandboxClient } from "../sandbox/index.js";
 import type { SecretsStore } from "../secrets/store/index.js";
+import { expectDefined } from "../test/assertions.js";
 import { mockFilesService } from "../test/factories.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import type { SkillRunAs, SkillRunServices } from "./run-as.js";
@@ -1108,6 +1109,73 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
     const retried = (await runner.invoke(keyed))._unsafeUnwrap();
     expect(retried.status).toBe("success");
     expect(fakePool.invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it("a finished keyed run replays its cached result without starting a pool", async () => {
+    createSpy.mockRejectedValue(new Error("daytona unreachable"));
+    const runner = await makeTier2Runner();
+    const keyed = {
+      name: "tier2-test",
+      inputs: {},
+      idempotencyKey: "skill-cron:tier2:replay",
+      runAs: runAs(),
+    };
+    const skill = expectDefined(
+      await tx((trx) => store.getSkillByName(trx, "tier2-test")),
+      "tier2-test skill",
+    );
+    const { row } = await tx((trx) =>
+      store.startOrRecoverRun(trx, {
+        skillId: skill.id,
+        trigger: "cron",
+        inputs: {},
+        idempotencyKey: keyed.idempotencyKey,
+      }),
+    );
+    await tx((trx) =>
+      store.transitionToExecuted(trx, {
+        id: row.id,
+        output: { x: 7 },
+        error: null,
+        resourceUsage: { wallClockMs: 5, peakMemoryBytes: null },
+        finishedAt: new Date(),
+      }),
+    );
+    await tx((trx) =>
+      store.transitionToFinished(trx, {
+        id: row.id,
+        status: "success",
+        output: { x: 7 },
+        error: null,
+      }),
+    );
+    const cached = { runId: row.id, status: "success", output: { x: 7 } };
+
+    expect((await runner.invoke(keyed))._unsafeUnwrap()).toMatchObject(cached);
+    await runner.shutdown();
+    expect((await runner.invoke(keyed))._unsafeUnwrap()).toMatchObject(cached);
+    expect(createSpy).not.toHaveBeenCalled();
+  });
+
+  it("a pool result with ok:false finishes the run as an error", async () => {
+    const fakePool = makeFakePool();
+    vi.mocked(fakePool.invoke).mockResolvedValueOnce({
+      ok: false,
+      error: "worker_crashed",
+      workerReusable: false,
+    });
+    createSpy.mockResolvedValueOnce(fakePool);
+    const runner = await makeTier2Runner();
+
+    const result = (
+      await runner.invoke({ name: "tier2-test", inputs: {}, runAs: runAs() })
+    )._unsafeUnwrap();
+
+    expect(result.status).toBe("error");
+    const run = await db.query.skillRuns.findFirst();
+    expect(run?.status).toBe("error");
+    expect(run?.error).toBe("worker_crashed");
+    expect(run?.recoveryPoint).toBe("finished");
   });
 
   it("invoke after shutdown throws and never calls SysboxWorkerPool.create", async () => {

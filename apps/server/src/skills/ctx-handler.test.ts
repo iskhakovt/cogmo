@@ -120,6 +120,7 @@ describe("DefaultCtxHandler", () => {
         ok: true,
         error: null,
       });
+      expect(d.recordContextCall).toHaveBeenCalledTimes(1);
     });
 
     it("rejects an undeclared secret with not_in_allowlist", async () => {
@@ -138,6 +139,7 @@ describe("DefaultCtxHandler", () => {
         ok: false,
         error: "not_in_allowlist",
       });
+      expect(d.recordContextCall).toHaveBeenCalledTimes(1);
       // Crucially: never records the value.
       expect(d.secretsStore.getSecret).not.toHaveBeenCalled();
     });

@@ -1270,7 +1270,7 @@ UPDATE recovery_point='executed', output/error/resource_usage/finished_at  ← t
 UPDATE recovery_point='finished', status='success'|'error'  ← transitionToFinished, atomic
 ```
 
-**Recovery branches.** Every `runner.invoke({idempotencyKey})` calls `startOrRecoverRun` first:
+**Recovery branches.** Every `runner.invoke({idempotencyKey})` calls `startOrRecoverRun` first. A warm-pool skill whose key has no row yet starts the pool before that write, so a pool that can't start leaves no row and the keyed retry runs the skill; a key that already has a row is settled from it without starting the pool.
 
 | recovered row state | runner action |
 |-|-|

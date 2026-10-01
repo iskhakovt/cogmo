@@ -326,7 +326,7 @@ async function readCapped(response: Response, cap: number): Promise<Result<strin
 }
 
 /** The `kind` a refused ctx call raises in the skill as `CtxError.kind`. */
-export type CtxErrorKind =
+type CtxErrorKind =
   | "unknown_method"
   | "invalid_args"
   | "not_in_allowlist"

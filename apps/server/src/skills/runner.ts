@@ -103,6 +103,11 @@ type SkillRuntime =
   | { kind: "pool"; pool: SysboxWorkerPool }
   | { kind: "one_shot"; sandbox: SandboxClient };
 
+/** A {@link SkillRuntime} before the warm pool is started. */
+type RuntimePlan =
+  | Exclude<SkillRuntime, { kind: "pool" }>
+  | { kind: "pool"; sandbox: SandboxClient };
+
 const log = logger.child({ component: "skills.runner" });
 
 const ZERO_SHA = "0000000000000000000000000000000000000000";
@@ -1253,10 +1258,21 @@ export class SkillRunnerImpl implements SkillRunner {
       return err({ kind: "invalid_inputs", name, issues });
     }
 
-    const runtime = await this.#selectRuntime(skill.tier, cached.manifest);
-    if (runtime === null) return err({ kind: "sandbox_unavailable", name });
+    const plan = this.#planRuntime(skill.tier, cached.manifest);
+    if (plan === null) return err({ kind: "sandbox_unavailable", name });
 
     const trigger: SkillRunTrigger = opts.trigger ?? "manual";
+    // Hoisted so the narrowed `string` survives into the `runInTx` closures.
+    const idempotencyKey = opts.idempotencyKey;
+
+    // The warm pool starts before the run row is written, so a pool that
+    // can't start throws with no row behind and a keyed retry runs the skill
+    // rather than refusing a `started` row as in flight. A key that already
+    // has a row is a replay, which recovery settles without the pool.
+    const pool =
+      plan.kind === "pool" && !(await this.#hasKeyedRun(idempotencyKey))
+        ? await this.#ensurePool(plan.sandbox)
+        : undefined;
 
     // --- Start or recover the run row ---
     //
@@ -1275,10 +1291,6 @@ export class SkillRunnerImpl implements SkillRunner {
     let savedOutput: unknown | null = null;
     let savedError: string | null = null;
 
-    // Hoist the key out so the narrowed `string` type survives across
-    // the `runInTx` closure (TS doesn't always retain narrowing through
-    // captured `opts.idempotencyKey` references inside an async lambda).
-    const idempotencyKey = opts.idempotencyKey;
     if (idempotencyKey !== undefined) {
       const { kind, row } = await this.#runInTx((tx) =>
         this.#store.startOrRecoverRun(tx, {
@@ -1349,6 +1361,12 @@ export class SkillRunnerImpl implements SkillRunner {
         }),
       });
 
+      // `pool` is unset here only when the keyed row seen above was gone by
+      // the time this attempt inserted its own.
+      const runtime: SkillRuntime =
+        plan.kind === "pool"
+          ? { kind: "pool", pool: pool ?? (await this.#ensurePool(plan.sandbox)) }
+          : plan;
       const result = await this.#dispatchToRuntime(
         runtime,
         skill,
@@ -1412,23 +1430,23 @@ export class SkillRunnerImpl implements SkillRunner {
 
   /**
    * Where a run of this skill executes, or null for a container skill on a
-   * deployment with no sandbox. Settled before the run row is written: a
-   * warm pool that can't start throws here, the sandbox failing rather than
-   * the skill, and leaves no row behind, so a keyed retry runs the skill
-   * instead of finding a `started` row and refusing it as in flight.
+   * deployment with no sandbox.
    */
-  async #selectRuntime(tier: SkillTier, manifest: SkillManifest): Promise<SkillRuntime | null> {
+  #planRuntime(tier: SkillTier, manifest: SkillManifest): RuntimePlan | null {
     if (tier === "wasm") return { kind: "wasm" };
     const sandbox = this.#sandbox;
     if (!sandbox) return null;
-    // A skill declaring its own resources gets a one-shot container at the
-    // ~1-2 s cost of a cold start (see `runsOnPool`); most declare none and
-    // ride the warm pool.
-    if (!runsOnPool(manifest)) return { kind: "one_shot", sandbox };
-    return { kind: "pool", pool: await this.#ensurePool(sandbox) };
+    return runsOnPool(manifest) ? { kind: "pool", sandbox } : { kind: "one_shot", sandbox };
   }
 
-  /** Run the task on the runtime `#selectRuntime` chose. */
+  /** Whether a run row already holds this idempotency key. */
+  async #hasKeyedRun(idempotencyKey: string | undefined): Promise<boolean> {
+    if (idempotencyKey === undefined) return false;
+    const row = await this.#runInTx((tx) => this.#store.getRunByIdempotencyKey(tx, idempotencyKey));
+    return row !== undefined;
+  }
+
+  /** Run the task on the runtime `#planRuntime` chose. */
   async #dispatchToRuntime(
     runtime: SkillRuntime,
     skill: SkillRow,
