@@ -9,12 +9,6 @@
  */
 
 import * as p from "@clack/prompts";
-import type { AgentStore } from "../agent/store/index.js";
-import type { BootstrapLock } from "../db/bootstrap-lock.js";
-import { transactor } from "../db/transactor.js";
-import { deriveMasterKey, parseMasterKey } from "../secrets/encryption.js";
-import { DrizzleSecretsStore } from "../secrets/store/index.js";
-import type { TransportStore } from "../transport/store/index.js";
 import { stepConfigureClaudeCodeAuth } from "./wizard/claude-code-auth.js";
 import { stepConfigureDaytona } from "./wizard/daytona.js";
 import { stepConfigureGitHubIdentity } from "./wizard/github-identity.js";
@@ -30,26 +24,13 @@ import { stepConfigureVoice } from "./wizard/voice.js";
 
 export { WizardCancelled } from "./wizard/step.js";
 
-export async function runWizard(deps: {
-  db: import("../db/index.js").Database;
-  agentStore: AgentStore;
-  transportStore: TransportStore;
-  masterKey: string;
-  /** The default user `migrateAndSeed` seeded ahead of the wizard. */
-  userId: string;
-  bootstrapLock: BootstrapLock;
-}): Promise<void> {
-  const encryptionKey = deriveMasterKey(parseMasterKey(deps.masterKey), "cogmo/secrets-at-rest/v1");
-  const tx = transactor(deps.db);
-  const secretsStore = new DrizzleSecretsStore(encryptionKey);
-
-  const wizardDeps: WizardDeps = {
-    runInTx: tx,
-    agentStore: deps.agentStore,
-    transportStore: deps.transportStore,
-    secretsStore,
-    bootstrapLock: deps.bootstrapLock,
-  };
+export async function runWizard(
+  deps: WizardDeps & {
+    /** The default user `migrateAndSeed` seeded ahead of the wizard. */
+    userId: string;
+  },
+): Promise<void> {
+  const { userId, ...wizardDeps } = deps;
 
   p.intro("Cogmo Setup");
 
@@ -68,7 +49,7 @@ export async function runWizard(deps: {
   }
 
   // Step 3: Telegram (optional)
-  const { botUsername } = await stepConfigureTelegram(wizardDeps, deps.userId);
+  const { botUsername } = await stepConfigureTelegram(wizardDeps, userId);
 
   // Step 4: Optional tools (Tavily, fal.ai)
   await stepConfigureOptionalTools(wizardDeps);
