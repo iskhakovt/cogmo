@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
+import { mock } from "vitest-mock-extended";
 import type { Transactor } from "../../db/index.js";
 import type { inboundArrived } from "../../inngest/events.js";
 import { mockAgentStore, mockTransportStore } from "../../test/factories.js";
+import type { AttachmentStore } from "../attachment-store.js";
 import { createSessions } from "./sessions.js";
 
 const FAKE_TX = { __mockTx: true } as never;
@@ -28,7 +30,7 @@ function setup(overrides?: {
     defaultProfileId: "profile-1",
     inngest,
     inboundArrived: mockEvent,
-    attachments: { upload: vi.fn(), download: vi.fn() } as any,
+    attachments: mock<AttachmentStore>(),
     idleTimeoutMs: overrides?.idleTimeoutMs ?? 0,
     sessionReceive: "routed",
   });
