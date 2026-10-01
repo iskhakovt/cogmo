@@ -152,39 +152,6 @@ describe("conversations.getMessages", () => {
       { id: "m2", role: "assistant", text: "hi there" },
     ]);
   });
-
-  it("drops the continuation prompt and keeps the truncation notice", async () => {
-    const notice = "\n\n[Reply cut off: it reached the model's output limit.]";
-    const agentStore = mockAgentStore({
-      getConversation: vi
-        .fn()
-        .mockResolvedValue({ id: "c1", userId: "user-1", profileId: "p", isPrivate: true }),
-      listMessages: vi.fn().mockResolvedValue([
-        { id: "m1", role: "user", content: "hello" },
-        {
-          id: "m2",
-          role: "user",
-          content: [
-            { type: "text", text: "Please complete your response.", harness: "continuation" },
-          ],
-        },
-        {
-          id: "m3",
-          role: "assistant",
-          content: [
-            { type: "text", text: "Partial" },
-            { type: "text", text: notice, harness: "truncation_notice" },
-          ],
-        },
-      ]),
-    });
-    const { conversations } = setup({ agentStore });
-    const res = await conversations.getMessages("handle", "c1");
-    expect(res._unsafeUnwrap()).toEqual([
-      { id: "m1", role: "user", text: "hello" },
-      { id: "m3", role: "assistant", text: `Partial${notice}` },
-    ]);
-  });
 });
 
 describe("conversations.setProfile", () => {

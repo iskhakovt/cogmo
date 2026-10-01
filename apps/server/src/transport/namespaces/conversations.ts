@@ -1,6 +1,7 @@
 import type { Inngest } from "inngest";
 import { err, ok, type Result } from "neverthrow";
 import type { CompactConversationResult } from "../../agent/conversation/compact-conversation.js";
+import { toChatHistory } from "../../agent/conversation/to-chat-history.js";
 import { admitsFirstParty } from "../../agent/core-memory/scope.js";
 import type { AutoRecallMode } from "../../agent/recall-gate.js";
 import type {
@@ -9,7 +10,6 @@ import type {
   VoiceMode,
 } from "../../agent/store/index.js";
 import type { CooldownState, ProfileMemoryScope } from "../../agent/store/schema.js";
-import { extractText, isHarnessPrompt } from "../../llm/content.js";
 import { AllProvidersFailedError, extractStatus } from "../../llm/fallback.js";
 import { computeBudget, resolveLimits } from "../../llm/models.js";
 import { ProviderConfigError } from "../../llm/resolver.js";
@@ -218,18 +218,7 @@ export function createConversations(
             reason: "conversation not owned by caller",
           });
         }
-        const rows = await agentStore.listMessages(tx, conversationId);
-        const history = rows.flatMap((m) => {
-          const text = extractText(
-            typeof m.content === "string"
-              ? m.content
-              : m.content.filter((b) => !isHarnessPrompt(b)),
-          );
-          // Drop turns with no displayable prose: tool roundtrips and the
-          // loop's continuation prompt.
-          return text.length > 0 ? [{ id: m.id, role: m.role, text }] : [];
-        });
-        return ok(history);
+        return ok(toChatHistory(await agentStore.listMessages(tx, conversationId)));
       });
     },
 
