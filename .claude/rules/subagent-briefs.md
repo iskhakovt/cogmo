@@ -23,6 +23,11 @@ absence cost real work in this repo.
 - **Hands off shared bookkeeping.** "Do not touch git. Do not edit `todo.md`,
   `PROGRESS.md`, or `changelog.d/`." Parallel agents each editing the changelog
   produces conflicts; the orchestrator owns those files.
+- **Self-audit before reporting.** "Run the `cogmo-reviewer` agent in `code`
+  mode on your own diff (or walk its checklist in
+  `.claude/agents/cogmo-reviewer.md`), and state each item in your report as
+  compliant, n/a, or a violation with its justification." A builder that has
+  checked its own work against the rules hands back fewer review rounds.
 
 ## Concurrency
 
@@ -48,3 +53,6 @@ claim yourself before acting on it — especially one that contradicts something
 already shipped. In this repo an agent's report has been right about a mechanism
 and wrong about its consequence, and an unverified claim repeated from a review
 put a wrong number in a changelog.
+
+Before opening a PR, run `/cogmo-review code <target>` on it, alongside
+`/code-review`; before approving a design, run `/cogmo-review design <path>`.
