@@ -361,7 +361,7 @@ The extraction prompt instructs the LLM to:
 - Avoid extracting information the agent already stored via `memory_retain` during the conversation (dedup hint)
 - Apply memory admission criteria: future utility, factual confidence, semantic novelty
 
-Hindsight handles deduplication and consolidation automatically after each `retain()` call — if the same fact is extracted from multiple conversations, Hindsight merges them rather than creating duplicates.
+Each chunk's facts go to Hindsight in one `retainBatch` submitted asynchronously (`async: true`): the call returns once Hindsight has queued the batch, and Hindsight extracts, deduplicates and consolidates its documents in the background — a fact extracted from several conversations is merged rather than duplicated. A document id Hindsight already holds is replaced, not added.
 
 ### Observation Scoping `[confirmed]`
 

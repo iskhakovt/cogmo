@@ -4559,47 +4559,6 @@ describe("handleCompact", () => {
     expect(reply).not.toMatch(/try again/i);
   });
 
-  it("says nothing is new since the Observer last ran", async () => {
-    const transport = transportWith({
-      evolution: {
-        triggerReflection: vi.fn().mockResolvedValue(
-          ok({
-            status: "nothing_new",
-            eventId: "019e2900-0000-7000-8000-000000000100",
-            drained: 0,
-            withheld: 0,
-            deferredToFirstParty: 0,
-          }),
-        ),
-      },
-    });
-    const ctx = mkCtx();
-    await handleReflect(transport, ctx);
-    expect(ctx.reply.mock.calls[1]?.[0]).toBe("Nothing new since the Observer last ran.");
-  });
-
-  it("says nothing is new, and what the drain did when it did something", async () => {
-    const transport = transportWith({
-      evolution: {
-        triggerReflection: vi.fn().mockResolvedValue(
-          ok({
-            status: "nothing_new",
-            eventId: "019e2900-0000-7000-8000-000000000101",
-            drained: 2,
-            withheld: 1,
-            deferredToFirstParty: 0,
-          }),
-        ),
-      },
-    });
-    const ctx = mkCtx();
-    await handleReflect(transport, ctx);
-    expect(ctx.reply.mock.calls[1]?.[0]).toBe(
-      "Nothing new since the Observer last ran. Memories: 2 drained, 1 withheld.\n" +
-        "/learned 019e2900-0000-7000-8000-000000000101 for the full breakdown.",
-    );
-  });
-
   it("reports no-session when there's no active conversation", async () => {
     const ctx = mkCtx();
     await handleCompact(compactWith(ok({ status: "no_session" })), ctx);
@@ -4723,6 +4682,47 @@ describe("handleReflect", () => {
     const ctx = mkCtx();
     await handleReflect(transport, ctx);
     expect(ctx.reply.mock.calls[1]?.[0]).toMatch(/too short/i);
+  });
+
+  it("says nothing is new since the Observer last ran", async () => {
+    const transport = transportWith({
+      evolution: {
+        triggerReflection: vi.fn().mockResolvedValue(
+          ok({
+            status: "nothing_new",
+            eventId: "019e2900-0000-7000-8000-000000000100",
+            drained: 0,
+            withheld: 0,
+            deferredToFirstParty: 0,
+          }),
+        ),
+      },
+    });
+    const ctx = mkCtx();
+    await handleReflect(transport, ctx);
+    expect(ctx.reply.mock.calls[1]?.[0]).toBe("Nothing new since the Observer last ran.");
+  });
+
+  it("says nothing is new, and what the drain did when it did something", async () => {
+    const transport = transportWith({
+      evolution: {
+        triggerReflection: vi.fn().mockResolvedValue(
+          ok({
+            status: "nothing_new",
+            eventId: "019e2900-0000-7000-8000-000000000101",
+            drained: 2,
+            withheld: 1,
+            deferredToFirstParty: 0,
+          }),
+        ),
+      },
+    });
+    const ctx = mkCtx();
+    await handleReflect(transport, ctx);
+    expect(ctx.reply.mock.calls[1]?.[0]).toBe(
+      "Nothing new since the Observer last ran. Memories: 2 drained, 1 withheld.\n" +
+        "/learned 019e2900-0000-7000-8000-000000000101 for the full breakdown.",
+    );
   });
 
   it("reports no-session when there's no active conversation", async () => {
