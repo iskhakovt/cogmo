@@ -15,11 +15,7 @@ import {
 import { DrizzleCodingStore } from "../agent/coding/store/index.js";
 import { addModelRouting } from "../agent/provider/add-model-routing.js";
 import { addProvider } from "../agent/provider/add-provider.js";
-import {
-  type DiscoveredModel,
-  DiscoveryUnavailable,
-  discoverModels,
-} from "../agent/provider/discover-models.js";
+import { type DiscoveredModel, discoverModels } from "../agent/provider/discover-models.js";
 import { describeImageCatalogError } from "../agent/store/errors.js";
 import type { AgentStore } from "../agent/store/index.js";
 import {
@@ -358,33 +354,31 @@ async function retryDiscovery(ctx: ProviderRegistrationContext): Promise<Discove
   for (;;) {
     const s = p.spinner();
     s.start("Discovering available models...");
-    try {
-      const models = await discoverModels({
-        type: ctx.adapterType,
-        baseUrl: ctx.baseUrl || guessAnthropicUrl(ctx.adapterType),
-        apiKey: ctx.apiKey,
-      });
+    const discovered = await discoverModels({
+      type: ctx.adapterType,
+      baseUrl: ctx.baseUrl || guessAnthropicUrl(ctx.adapterType),
+      apiKey: ctx.apiKey,
+    });
+    if (discovered.isOk()) {
+      const models = discovered.value;
       s.stop(`Found ${models.length} model${models.length === 1 ? "" : "s"}.`);
       return models;
-    } catch (err) {
-      s.stop(`Discovery failed: ${(err as Error).message}`);
-      if (err instanceof DiscoveryUnavailable) {
-        // Provider doesn't expose /v1/models. Fine — text input fallback.
-        return null;
-      }
-      const next = await p.select({
-        message: "Discovery failed. What would you like to do?",
-        options: [
-          { value: "retry", label: "Retry" },
-          { value: "skip", label: "Skip — type the model id by hand" },
-          { value: "abort", label: "Abort this provider" },
-        ],
-      });
-      cancelGuard(next);
-      if (next === "retry") continue;
-      if (next === "skip") return null;
-      throw new WizardCancelled();
     }
+    s.stop(`Discovery failed: ${discovered.error.message}`);
+    // No model list from this endpoint: fall back to text input.
+    if (discovered.error.kind === "unavailable") return null;
+    const next = await p.select({
+      message: "Discovery failed. What would you like to do?",
+      options: [
+        { value: "retry", label: "Retry" },
+        { value: "skip", label: "Skip — type the model id by hand" },
+        { value: "abort", label: "Abort this provider" },
+      ],
+    });
+    cancelGuard(next);
+    if (next === "retry") continue;
+    if (next === "skip") return null;
+    throw new WizardCancelled();
   }
 }
 

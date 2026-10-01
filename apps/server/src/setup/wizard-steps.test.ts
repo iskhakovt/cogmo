@@ -157,9 +157,10 @@ vi.mock("../agent/provider/add-provider.js", () => ({
   addProvider: addProviderSpy,
 }));
 
-vi.mock("../agent/provider/discover-models.js", () => ({
-  discoverModels: vi.fn().mockResolvedValue([]),
-}));
+vi.mock("../agent/provider/discover-models.js", async () => {
+  const { ok: found } = await import("neverthrow");
+  return { discoverModels: vi.fn().mockResolvedValue(found([])) };
+});
 
 vi.mock("../agent/provider/add-model-routing.js", () => ({
   addModelRouting: vi.fn().mockResolvedValue({ id: "row-1", position: 0 }),
