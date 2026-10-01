@@ -1,0 +1,18 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "[memory-extraction] <new_messages>\n[1] User: Suggest three day trips from Lisbon I could do by train.\n\n[2] Assistant: Three solid train day trips from Lisbon: Sintra is the classic choice, about 40 minutes on the Sintra line from Rossio station, and gets you to the palaces and misty hills, though it's worth going early since it gets crowded. Évora is roughly an hour and a half away and gives you a very different feel, with its Roman temple, the bone chapel, and a walkable historic center, plus good wine country nearby. Coimbra is about two hours by train and is worth it for the old university, the river, and a much quieter, more academic vibe than Lisbon. If you want something shorter, Setúbal and Cascais are also easy half-day options by train, with beaches and seafood rather than historic sights.\n\n[3] User: Again, no bullet points or numbered lists with me, please. Plain sentences only.\n\n[4] Assistant: Got it — I'll stick to plain prose from here on, no lists or bullets.\n</new_messages>",
+        "model": "claude-sonnet-5",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "content": "{\"memories\":[{\"sourceMessage\":3,\"fact\":\"Prefers responses in plain sentences only, without bullet points or numbered lists\",\"network\":\"bank\",\"compartment\":\"personal\",\"trust\":\"first-party\",\"context\":\"User reiterated this formatting preference when discussing Lisbon day trips\"}]}"
+      },
+      "metadata": {
+        "systemHash": "7a239459"
+      }
+    }
+  ]
+}

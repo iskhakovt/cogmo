@@ -1,0 +1,66 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "<turn_context>\nCurrent time: [NOW]\n\nReply modality: text\n</turn_context>\n\nPlease don't use bullet points with me — just write in plain sentences.",
+        "model": "claude-sonnet-5",
+        "turnIndex": 4,
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "core_memory_update",
+            "arguments": "{\"content\": \"Goes by \\\"T\\\". Lives in Lisbon, Portugal (timezone: Europe/Lisbon). Prefers responses in plain prose sentences, not bullet points or lists.\", \"key\": \"identity\"}",
+            "id": "toolu_01VisQoavbSxU14cy4L3bvpe"
+          }
+        ]
+      },
+      "recordedTimings": {
+        "ttftMs": 876,
+        "interChunkDelaysMs": [
+          0,
+          563,
+          1,
+          0,
+          0,
+          0,
+          0,
+          557,
+          0,
+          0,
+          0,
+          0,
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          119,
+          0,
+          0,
+          0,
+          1,
+          0
+        ],
+        "totalDurationMs": 2118
+      },
+      "metadata": {
+        "systemHash": "a8674893",
+        "toolsHash": "80e92520"
+      }
+    }
+  ]
+}

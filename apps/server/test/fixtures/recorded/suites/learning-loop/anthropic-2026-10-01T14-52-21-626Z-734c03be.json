@@ -1,0 +1,45 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "<turn_context>\nCurrent time: [NOW]\n\nReply modality: text\n</turn_context>\n\nMy doctor says my cholesterol is high, so I'm cutting back on cheese.",
+        "model": "claude-sonnet-5",
+        "turnIndex": 1,
+        "hasToolResult": false
+      },
+      "response": {
+        "content": "Got it, noted - though I won't log health details per your preference. Still want to grab your name, timezone, and communication style when you have a sec."
+      },
+      "recordedTimings": {
+        "ttftMs": 991,
+        "interChunkDelaysMs": [
+          0,
+          1338,
+          0,
+          0,
+          0,
+          0,
+          0,
+          43,
+          48,
+          42,
+          47,
+          45,
+          48,
+          42,
+          54,
+          39,
+          45,
+          33,
+          3,
+          2,
+          0
+        ],
+        "totalDurationMs": 2820
+      },
+      "metadata": {
+        "systemHash": "6dff8fdf"
+      }
+    }
+  ]
+}

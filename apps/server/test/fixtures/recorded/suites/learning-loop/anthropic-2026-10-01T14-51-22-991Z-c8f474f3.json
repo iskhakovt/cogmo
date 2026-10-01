@@ -1,0 +1,45 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "<turn_context>\nCurrent time: [NOW]\n\nReply modality: text\n</turn_context>\n\nMy sister Ana is flying in from Porto to stay with me next weekend.",
+        "model": "claude-sonnet-5",
+        "turnIndex": 7,
+        "hasToolResult": true
+      },
+      "response": {
+        "content": "That'll be a nice visit. If you want, I can help put together a food and sightseeing plan for Ana's weekend, or suggest a restaurant near you that could rival the bacalhau from the other night."
+      },
+      "recordedTimings": {
+        "ttftMs": 1171,
+        "interChunkDelaysMs": [
+          0,
+          0,
+          0,
+          361,
+          9,
+          0,
+          0,
+          0,
+          0,
+          0,
+          12,
+          45,
+          46,
+          44,
+          47,
+          45,
+          36,
+          3,
+          1,
+          0
+        ],
+        "totalDurationMs": 1820
+      },
+      "metadata": {
+        "systemHash": "a8674893",
+        "toolsHash": "80e92520"
+      }
+    }
+  ]
+}

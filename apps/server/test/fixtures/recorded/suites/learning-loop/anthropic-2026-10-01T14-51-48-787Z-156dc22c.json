@@ -1,0 +1,18 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "[correction-extraction] <new_messages>\n[1] User: Suggest three day trips from Lisbon I could do by train.\n\n[2] Assistant: Three solid train day trips from Lisbon: Sintra is the classic choice, about 40 minutes on the Sintra line from Rossio station, and gets you to the palaces and misty hills, though it's worth going early since it gets crowded. Évora is roughly an hour and a half away and gives you a very different feel, with its Roman temple, the bone chapel, and a walkable historic center, plus good wine country nearby. Coimbra is about two hours by train and is worth it for the old university, the river, and a much quieter, more academic vibe than Lisbon. If you want something shorter, Setúbal and Cascais are also easy half-day options by train, with beaches and seafood rather than historic sights.\n\n[3] User: Again, no bullet points or numbered lists with me, please. Plain sentences only.\n\n[4] Assistant: Got it — I'll stick to plain prose from here on, no lists or bullets.\n</new_messages>",
+        "model": "claude-sonnet-5",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "content": "{\"corrections\":[{\"rule\":\"Write responses in plain prose sentences rather than using bullet points or lists.\",\"sourceMessage\":3,\"category\":\"style\",\"reasoning\":\"User explicitly reiterated the preference for no bullet points or numbered lists, only plain sentences, matching an existing rule.\",\"action\":\"reinforce\",\"matchedExistingRuleId\":\"R1\"}]}"
+      },
+      "metadata": {
+        "systemHash": "429eb23c"
+      }
+    }
+  ]
+}

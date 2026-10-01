@@ -1,0 +1,107 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "<turn_context>\nCurrent time: [NOW]\n\nReply modality: text\n</turn_context>\n\nMy sister Ana is flying in from Porto to stay with me next weekend.",
+        "model": "claude-sonnet-5",
+        "turnIndex": 6,
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "core_memory_update",
+            "arguments": "{\"content\": \"Goes by \\\"T\\\". Lives in Lisbon, Portugal (timezone: Europe/Lisbon). Prefers responses in plain prose sentences, not bullet points or lists. Has a sister, Ana, who lives in Porto.\", \"key\": \"identity\"}",
+            "id": "toolu_01DikEHKZDP3vj8oN2XyGBH1"
+          },
+          {
+            "name": "memory_retain",
+            "arguments": "{\"content\": \"T's sister Ana is flying in from Porto to stay with T in Lisbon for the weekend of October 10-11, 2026.\", \"context\": \"Mentioned on Oct 1, 2026, referring to \\\"next weekend\\\"\"}",
+            "id": "toolu_01Axhs9i9oZCRobVc9Nk7HCB"
+          }
+        ]
+      },
+      "recordedTimings": {
+        "ttftMs": 1077,
+        "interChunkDelaysMs": [
+          0,
+          2071,
+          0,
+          0,
+          0,
+          0,
+          0,
+          653,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          214,
+          0,
+          0,
+          0,
+          0,
+          0,
+          455,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          303,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "totalDurationMs": 4773
+      },
+      "metadata": {
+        "systemHash": "a8674893",
+        "toolsHash": "80e92520"
+      }
+    }
+  ]
+}

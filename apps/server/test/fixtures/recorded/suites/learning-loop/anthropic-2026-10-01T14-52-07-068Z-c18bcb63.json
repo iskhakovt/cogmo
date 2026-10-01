@@ -1,0 +1,66 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "<turn_context>\nCurrent time: [NOW]\n\nReply modality: text\n</turn_context>\n\nWhat's a good name for a cat?",
+        "model": "claude-sonnet-5",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "content": "A good cat name depends on vibe — a few directions:\n\n- **Classic/cute**: Luna, Oliver, Milo, Bella\n- **Food-inspired**: Biscuit, Mochi, Pepper, Olive\n- **Sassy/regal**: Duchess, Caesar, Momo, Zelda\n- **Punny**: Sir Fluffington, Catniss, Meowgi\n\nDo you have a cat already (or getting one soon)? If you tell me a bit about its personality or looks, I can suggest something more tailored."
+      },
+      "recordedTimings": {
+        "ttftMs": 987,
+        "interChunkDelaysMs": [
+          0,
+          0,
+          0,
+          360,
+          6,
+          0,
+          0,
+          0,
+          0,
+          0,
+          30,
+          47,
+          46,
+          46,
+          44,
+          151,
+          0,
+          0,
+          33,
+          47,
+          44,
+          45,
+          46,
+          45,
+          50,
+          40,
+          47,
+          44,
+          45,
+          46,
+          45,
+          46,
+          47,
+          45,
+          45,
+          45,
+          46,
+          45,
+          37,
+          2,
+          0,
+          0
+        ],
+        "totalDurationMs": 2652
+      },
+      "metadata": {
+        "systemHash": "7ce6da71"
+      }
+    }
+  ]
+}

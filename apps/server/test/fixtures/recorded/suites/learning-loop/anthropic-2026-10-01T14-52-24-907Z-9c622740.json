@@ -1,0 +1,18 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "[correction-extraction] <new_messages>\n[1] User: I've just started a new job at a bakery in Alfama.\n\n[2] Assistant: Nice, congrats on the new job! I'm your AI assistant — I'll remember details like this so I can help you better over time.\n\nSince this is our first chat, a few quick things: what's your name, and what timezone are you in (sounds like Lisbon, but want to confirm)? Also, how do you like to communicate — quick and to the point, or more detailed?\n\n[3] User: My doctor says my cholesterol is high, so I'm cutting back on cheese.\n\n[4] Assistant: Got it, noted - though I won't log health details per your preference. Still want to grab your name, timezone, and communication style when you have a sec.\n</new_messages>",
+        "model": "claude-sonnet-5",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "content": "{\"corrections\":[]}"
+      },
+      "metadata": {
+        "systemHash": "1d8004db"
+      }
+    }
+  ]
+}

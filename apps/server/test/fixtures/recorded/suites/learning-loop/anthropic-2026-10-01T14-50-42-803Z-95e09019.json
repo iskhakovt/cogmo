@@ -1,0 +1,71 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "<turn_context>\nCurrent time: [NOW]\n\nReply modality: text\n</turn_context>\n\nWe had dinner at Taberna da Rua das Flores and the bacalhau was the best I've ever had. What other Portuguese dishes should I try?",
+        "model": "claude-sonnet-5",
+        "turnIndex": 2,
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "memory_retain",
+            "arguments": "{\"content\": \"T had dinner at Taberna da Rua das Flores in Lisbon and said the bacalhau there was the best they've ever had.\", \"context\": \"Casual chat about Lisbon dining, shortly after T moved to Lisbon\"}",
+            "id": "toolu_01HuAhrY1skT5yQmgTRm4HKE"
+          }
+        ]
+      },
+      "recordedTimings": {
+        "ttftMs": 979,
+        "interChunkDelaysMs": [
+          0,
+          499,
+          0,
+          0,
+          0,
+          0,
+          0,
+          292,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          300,
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          4,
+          0
+        ],
+        "totalDurationMs": 2075
+      },
+      "metadata": {
+        "systemHash": "a8674893",
+        "toolsHash": "80e92520"
+      }
+    }
+  ]
+}

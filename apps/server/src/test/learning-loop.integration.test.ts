@@ -241,13 +241,13 @@ async function observe(conversation: Conversation) {
 }
 
 /**
- * The Observer's documents for a conversation's facts, by the last message of
- * the chunk each came from, oldest chunk first: each one's retained text.
+ * The Observer's documents for a conversation's facts: the message each cites
+ * and its retained text.
  */
 async function observerDocuments(
   bankId: string,
   conversationId: string,
-): Promise<ReadonlyArray<{ chunk: string; texts: ReadonlyArray<string> }>> {
+): Promise<ReadonlyArray<{ message: string; text: string }>> {
   const prefix = `observer:${conversationId}:`;
   const { data, error } = await sdk.listDocuments({
     client: hindsightSdk,
@@ -262,24 +262,21 @@ async function observerDocuments(
         path: { bank_id: bankId, document_id: item.id },
       });
       if (doc.data === undefined) throw new Error(`getDocument: ${JSON.stringify(doc.error)}`);
-      const chunk = expectDefined(item.id.slice(prefix.length).split(":")[0], item.id);
-      return { chunk, text: doc.data.original_text ?? "" };
+      const message = expectDefined(item.id.slice(prefix.length).split(":")[0], item.id);
+      return { message, text: doc.data.original_text ?? "" };
     }),
   );
-  const chunks = [...new Set(documents.map((d) => d.chunk))].sort();
-  return chunks.map((chunk) => ({
-    chunk,
-    texts: documents.filter((d) => d.chunk === chunk).map((d) => d.text),
-  }));
+  return documents;
 }
 
-/** How many messages a conversation has. */
-async function messageCount(conversation: Conversation): Promise<number> {
+/** A conversation's message ids, oldest first. */
+async function messageIds(conversation: Conversation): Promise<string[]> {
   const rows = await db
     .select({ id: messages.id })
     .from(messages)
-    .where(eq(messages.conversationId, conversation.id));
-  return rows.length;
+    .where(eq(messages.conversationId, conversation.id))
+    .orderBy(asc(messages.id));
+  return rows.map((r) => r.id);
 }
 
 /** A transcript the Observer sent, split at `<new_messages>`. */
@@ -435,9 +432,10 @@ describe("learning loop", () => {
     expect((await retainedFacts(userId)).join("\n")).toMatch(/Taberna da Rua das Flores/);
 
     // ── Conversation 1 again: a second fire extracts only the new turn ──
-    const observedCount = await messageCount(first);
+    const observed = await messageIds(first);
     await turn(first, VISIT);
-    const turnMessages = (await messageCount(first)) - observedCount;
+    const visit = (await messageIds(first)).filter((id) => !observed.includes(id));
+    const turnMessages = visit.length;
     const again = await observe(first);
     expect(again.newMessages).toEqual({ corrections: turnMessages, memories: turnMessages });
     expect(again.failedPhases).toEqual([]);
@@ -459,14 +457,16 @@ describe("learning loop", () => {
       expect(earlier).toContain(CORRECTION);
     }
 
+    // Every document cites a message of the conversation; the visit's cite only the visit's.
     await retainedFacts(userId);
     const documents = await observerDocuments(userId, first.id);
-    expect(documents.map((d) => d.texts.length > 0)).toEqual([true, true]);
-    const [firstWindow, secondWindow] = documents;
-    expect(expectDefined(firstWindow, "first window").texts.join("\n")).toMatch(/Taberna/);
-    const secondTexts = expectDefined(secondWindow, "second window").texts.join("\n");
-    expect(secondTexts).toMatch(/Ana/);
-    expect(secondTexts).not.toMatch(/Taberna|bacalhau|bullet/i);
+    const all = await messageIds(first);
+    expect(documents.every((d) => all.includes(d.message))).toBe(true);
+    const firstTexts = documents.filter((d) => observed.includes(d.message)).map((d) => d.text);
+    const visitTexts = documents.filter((d) => visit.includes(d.message)).map((d) => d.text);
+    expect(firstTexts.join("\n")).toMatch(/Taberna/);
+    expect(visitTexts.join("\n")).toMatch(/Ana/);
+    expect(visitTexts.join("\n")).not.toMatch(/Taberna|bacalhau|bullet/i);
 
     // ── Conversation 2: the same correction graduates the rule ──
     const second = await startConversation({ userId, profileId: profile.id });

@@ -1,0 +1,33 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "Return valid json only.\n\n## MISSION\n\nTrack anything notable in the new facts — names, numbers, dates, places, events, decisions, claims, relationships, and recurring patterns.\n\n## INPUT\n\n### New facts\n\n[[UUID]] T had dinner at Taberna da Rua das Flores in Lisbon and said the bacalhau there was the best they've ever had. | When: 2026-10-01 | Involving: T (occurred_start=2026-10-01 00:00:00+00:00, occurred_end=2026-10-01 00:00:00+00:00, mentioned_at=2026-10-01 14:51:11.566213+00:00)\n\n### Existing observations\n\n[\n  {\n    \"id\": \"[UUID]\",\n    \"text\": \"User had dinner at Taberna da Rua das Flores in Lisbon and said the bacalhau there was the best they've ever had on October 1, 2026.\",\n    \"proof_count\": 1,\n    \"occurred_start\": \"[TS]\",\n    \"occurred_end\": \"[TS]\",\n    \"mentioned_at\": \"[TS]\",\n    \"source_memories\": [\n      {\n        \"text\": \"User had dinner at Taberna da Rua das Flores in Lisbon and said the bacalhau there was the best they've ever had. | When: 2026-10-01 | Involving: user\",\n        \"occurred_start\": \"[TS]\",\n        \"occurred_end\": \"[TS]\",\n        \"mentioned_at\": \"[TS]\"\n      }\n    ]\n  },\n  {\n    \"id\": \"[UUID]\",\n    \"text\": \"User prefers responses written in plain prose sentences rather than bullet points or lists.\",\n    \"proof_count\": 2,\n    \"mentioned_at\": \"[TS]\",\n    \"source_memories\": [\n      {\n        \"text\": \"User recently moved to Lisbon, Portugal | Involving: user\",\n        \"mentioned_at\": \"[TS]\"\n      },\n      {\n        \"text\": \"User prefers responses written in plain prose sentences rather than bullet points or lists | Involving: user\",\n        \"mentioned_at\": \"[TS]\"\n      }\n    ]\n  },\n  {\n    \"id\": \"[UUID]\",\n    \"text\": \"User prefers to be called T.\",\n    \"proof_count\": 1,\n    \"mentioned_at\": \"[TS]\",\n    \"source_memories\": [\n      {\n        \"text\": \"User prefers to be called T | Involving: user\",\n        \"mentioned_at\": \"[TS]\"\n      }\n    ]\n  }\n]",
+        "model": "gpt-4o-mini",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "content": "{\n  \"creates\": [],\n  \"updates\": [\n    {\n      \"text\": \"User had dinner at Taberna da Rua das Flores in Lisbon and said the bacalhau there was the best they've ever had on October 1, 2026.\",\n      \"observation_id\": \"9cda297f-5beb-42b2-b3d6-1ef82059910c\",\n      \"source_fact_ids\": [\n        \"01851811-398f-41cd-9042-911b072a2bfe\"\n      ],\n      \"reason\": \"The new fact restates the same dinner experience already captured by observation 9cda297f — merged as evidence rather than creating a sibling.\"\n    }\n  ],\n  \"deletes\": []\n}",
+        "usage": {
+          "prompt_tokens": 4391,
+          "completion_tokens": 160,
+          "total_tokens": 4551,
+          "prompt_tokens_details": {
+            "cached_tokens": 3072,
+            "audio_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0,
+            "audio_tokens": 0,
+            "accepted_prediction_tokens": 0,
+            "rejected_prediction_tokens": 0
+          }
+        }
+      },
+      "metadata": {
+        "systemHash": "a4694c92"
+      }
+    }
+  ]
+}

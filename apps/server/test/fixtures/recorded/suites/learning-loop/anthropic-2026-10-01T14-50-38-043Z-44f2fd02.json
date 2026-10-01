@@ -1,0 +1,56 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "<turn_context>\nCurrent time: [NOW]\n\nReply modality: text\n</turn_context>\n\nCall me T — I've just moved to Lisbon.",
+        "model": "claude-sonnet-5",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "core_memory_update",
+            "arguments": "{\"key\": \"identity\", \"content\": \"Goes by \\\"T\\\". Lives in Lisbon, Portugal (timezone: Europe/Lisbon).\"}",
+            "id": "toolu_01ENNc4XCuoye1X9c56v6Pes"
+          }
+        ]
+      },
+      "recordedTimings": {
+        "ttftMs": 1233,
+        "interChunkDelaysMs": [
+          1,
+          1693,
+          0,
+          0,
+          0,
+          0,
+          0,
+          184,
+          0,
+          0,
+          365,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "totalDurationMs": 3476
+      },
+      "metadata": {
+        "systemHash": "3a3d4d6c",
+        "toolsHash": "80e92520"
+      }
+    }
+  ]
+}

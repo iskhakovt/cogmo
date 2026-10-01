@@ -1,0 +1,18 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "[correction-extraction] <new_messages>\n[1] User: What's a good name for a cat?\n\n[2] Assistant: A good cat name depends on vibe — a few directions:\n\n- **Classic/cute**: Luna, Oliver, Milo, Bella\n- **Food-inspired**: Biscuit, Mochi, Pepper, Olive\n- **Sassy/regal**: Duchess, Caesar, Momo, Zelda\n- **Punny**: Sir Fluffington, Catniss, Meowgi\n\nDo you have a cat already (or getting one soon)? If you tell me a bit about its personality or looks, I can suggest something more tailored.\n\n[3] User: Something Portuguese, please.\n\n[4] Assistant: Some nice Portuguese options:\n\n- **Mimi** or **Mimosa** – sweet/affectionate\n- **Pipoca** – \"popcorn,\" cute for a playful cat\n- **Fofinho/Fofinha** – \"fluffy/cute one\"\n- **Tigre** – \"tiger,\" good for a striped cat\n- **Preta/Preto** – \"black,\" if your cat is black\n- **Saudade** – more poetic/moody, if you want something distinctive\n- **Chica** or **Chico** – classic affectionate nicknames\n\nIf it's a male vs. female cat, or a specific color/personality, I can narrow it down further.\n</new_messages>",
+        "model": "claude-sonnet-5",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "content": "{\"corrections\":[]}"
+      },
+      "metadata": {
+        "systemHash": "c5d22b24"
+      }
+    }
+  ]
+}

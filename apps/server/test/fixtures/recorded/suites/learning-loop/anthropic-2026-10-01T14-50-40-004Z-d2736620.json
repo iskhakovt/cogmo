@@ -1,0 +1,53 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "<turn_context>\nCurrent time: [NOW]\n\nReply modality: text\n</turn_context>\n\nCall me T — I've just moved to Lisbon.",
+        "model": "claude-sonnet-5",
+        "turnIndex": 1,
+        "hasToolResult": true
+      },
+      "response": {
+        "content": "Nice to meet you, T — welcome to Lisbon! I'm your assistant, and I'll try to keep track of what matters to you so I'm actually useful over time.\n\nA few quick things to get started:\n- What do you do (work/projects)?\n- Any particular way you like me to communicate — brief and direct, more detailed, casual, etc.?"
+      },
+      "recordedTimings": {
+        "ttftMs": 837,
+        "interChunkDelaysMs": [
+          0,
+          0,
+          0,
+          365,
+          15,
+          0,
+          0,
+          0,
+          0,
+          0,
+          10,
+          44,
+          45,
+          47,
+          45,
+          104,
+          0,
+          33,
+          45,
+          44,
+          48,
+          44,
+          46,
+          46,
+          37,
+          5,
+          1,
+          0
+        ],
+        "totalDurationMs": 1861
+      },
+      "metadata": {
+        "systemHash": "3a3d4d6c",
+        "toolsHash": "80e92520"
+      }
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "<turn_context>\nCurrent time: [NOW]\n\nReply modality: text\n</turn_context>\n\nWhere was that restaurant with the amazing cod? I want to book it again.",
+        "model": "claude-sonnet-5",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "content": "That was Taberna da Rua das Flores — the spot where you said the bacalhau was the best you'd ever had. Worth grabbing a table again before Ana's visit on the 10th."
+      },
+      "recordedTimings": {
+        "ttftMs": 5178,
+        "interChunkDelaysMs": [
+          0,
+          0,
+          0,
+          53,
+          4,
+          36,
+          42,
+          50,
+          39,
+          42,
+          40,
+          48,
+          43,
+          0,
+          2,
+          0
+        ],
+        "totalDurationMs": 5577
+      },
+      "metadata": {
+        "systemHash": "169808b8",
+        "toolsHash": "80e92520"
+      }
+    }
+  ]
+}
