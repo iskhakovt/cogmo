@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { DrizzleAgentStore } from "../../agent/store/index.js";
 import type { Database, Transactor } from "../../db/index.js";
+import { expectOk } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { renderInboundText } from "../content.js";
 import { DrizzleTransportStore } from "./index.js";
@@ -45,13 +46,15 @@ async function seedConversation(): Promise<{
   profileNameCounter += 1;
   const profileId = (
     await tx((trx) =>
-      agentStore.createProfile(trx, {
-        userId: null,
-        name: `test-${profileNameCounter}`,
-        basePrompt: "prompt",
-        model: "model",
-        toolSet: [],
-      }),
+      agentStore
+        .createProfile(trx, {
+          userId: null,
+          name: `test-${profileNameCounter}`,
+          basePrompt: "prompt",
+          model: "model",
+          toolSet: [],
+        })
+        .then(expectOk),
     )
   ).id;
   const conversationId = (
@@ -988,20 +991,22 @@ describe("DrizzleTransportStore", () => {
       profileNameCounter += 1;
       const profileId = (
         await tx((trx) =>
-          agentStore.createProfile(trx, {
-            userId: null,
-            name: `pin-only-${profileNameCounter}`,
-            basePrompt: "prompt",
-            model: "model",
-            toolSet: [],
-          }),
+          agentStore
+            .createProfile(trx, {
+              userId: null,
+              name: `pin-only-${profileNameCounter}`,
+              basePrompt: "prompt",
+              model: "model",
+              toolSet: [],
+            })
+            .then(expectOk),
         )
       ).id;
       await tx((trx) =>
         store.setChatDefaultProfile(trx, { channelId, platformAddress: "addr-1", profileId }),
       );
 
-      await tx((trx) => agentStore.deleteProfile(trx, profileId));
+      await tx((trx) => agentStore.deleteProfile(trx, profileId).then(expectOk));
 
       // Both the profile and its chat-default binding should be gone.
       expect(
@@ -1019,13 +1024,15 @@ describe("DrizzleTransportStore", () => {
       profileNameCounter += 1;
       const profileId = (
         await tx((trx) =>
-          agentStore.createProfile(trx, {
-            userId: null,
-            name: `pinned-only-${profileNameCounter}`,
-            basePrompt: "prompt",
-            model: "model",
-            toolSet: [],
-          }),
+          agentStore
+            .createProfile(trx, {
+              userId: null,
+              name: `pinned-only-${profileNameCounter}`,
+              basePrompt: "prompt",
+              model: "model",
+              toolSet: [],
+            })
+            .then(expectOk),
         )
       ).id;
       await tx((trx) =>
@@ -1175,25 +1182,29 @@ describe("DrizzleTransportStore", () => {
       profileNameCounter += 1;
       const profileA = (
         await tx((trx) =>
-          agentStore.createProfile(trx, {
-            userId: null,
-            name: `cross-profile-a-${profileNameCounter}`,
-            basePrompt: "p",
-            model: "m",
-            toolSet: [],
-          }),
+          agentStore
+            .createProfile(trx, {
+              userId: null,
+              name: `cross-profile-a-${profileNameCounter}`,
+              basePrompt: "p",
+              model: "m",
+              toolSet: [],
+            })
+            .then(expectOk),
         )
       ).id;
       profileNameCounter += 1;
       const profileB = (
         await tx((trx) =>
-          agentStore.createProfile(trx, {
-            userId: null,
-            name: `cross-profile-b-${profileNameCounter}`,
-            basePrompt: "p",
-            model: "m",
-            toolSet: [],
-          }),
+          agentStore
+            .createProfile(trx, {
+              userId: null,
+              name: `cross-profile-b-${profileNameCounter}`,
+              basePrompt: "p",
+              model: "m",
+              toolSet: [],
+            })
+            .then(expectOk),
         )
       ).id;
       const convA = (
@@ -1235,25 +1246,29 @@ describe("DrizzleTransportStore", () => {
       profileNameCounter += 1;
       const profileA = (
         await tx((trx) =>
-          agentStore.createProfile(trx, {
-            userId: null,
-            name: `closed-other-a-${profileNameCounter}`,
-            basePrompt: "p",
-            model: "m",
-            toolSet: [],
-          }),
+          agentStore
+            .createProfile(trx, {
+              userId: null,
+              name: `closed-other-a-${profileNameCounter}`,
+              basePrompt: "p",
+              model: "m",
+              toolSet: [],
+            })
+            .then(expectOk),
         )
       ).id;
       profileNameCounter += 1;
       const profileB = (
         await tx((trx) =>
-          agentStore.createProfile(trx, {
-            userId: null,
-            name: `closed-other-b-${profileNameCounter}`,
-            basePrompt: "p",
-            model: "m",
-            toolSet: [],
-          }),
+          agentStore
+            .createProfile(trx, {
+              userId: null,
+              name: `closed-other-b-${profileNameCounter}`,
+              basePrompt: "p",
+              model: "m",
+              toolSet: [],
+            })
+            .then(expectOk),
         )
       ).id;
       const convA = (

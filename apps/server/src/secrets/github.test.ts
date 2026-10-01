@@ -7,7 +7,6 @@ import {
   type GitHubIdentitySecretsLookup,
   gitHubIdentitySecretName,
   resolveGitHubIdentity,
-  resolveGitHubIdentityForRepo,
   serializeGitHubIdentity,
 } from "./github.js";
 
@@ -229,34 +228,15 @@ describe("resolveGitHubIdentity", () => {
     expect(def._unsafeUnwrap().pat).toBe(VALID.pat);
     expect(ac._unsafeUnwrap().pat).toBe(acme.pat);
   });
-});
 
-describe("resolveGitHubIdentityForRepo", () => {
-  it("uses the repo's identity_name to pick which row to read", async () => {
-    const lookup = new FakeLookup();
-    const acme: GitHubIdentity = { ...VALID, pat: "ghp_acme_xxxxxxxxxxxxxxx" };
-    lookup.set("github_identity:default", JSON.stringify(VALID));
-    lookup.set("github_identity:acme-bot", JSON.stringify(acme));
-
-    const defaultRepo = await resolveGitHubIdentityForRepo(FAKE_TX, lookup, {
-      identityName: "default",
-    });
-    const acmeRepo = await resolveGitHubIdentityForRepo(FAKE_TX, lookup, {
-      identityName: "acme-bot",
-    });
-
-    expect(defaultRepo._unsafeUnwrap().pat).toBe(VALID.pat);
-    expect(acmeRepo._unsafeUnwrap().pat).toBe(acme.pat);
-  });
-
-  it("does NOT fall back to default when the per-repo identity is missing", async () => {
+  it("does NOT fall back to default when the named identity is missing", async () => {
     // The fall-back semantics belong in the orchestrator if we ever want them;
     // the resolver answers exactly the question it was asked. This keeps the
     // misconfiguration surface narrow — a typo in `identity_name` fails loudly
     // rather than silently authoring PRs under the wrong account.
     const lookup = new FakeLookup();
     lookup.set("github_identity:default", JSON.stringify(VALID));
-    const result = await resolveGitHubIdentityForRepo(FAKE_TX, lookup, { identityName: "missing" });
+    const result = await resolveGitHubIdentity(FAKE_TX, lookup, "missing");
     expect(result.isErr()).toBe(true);
     const error = result._unsafeUnwrapErr();
     expect(error.code).toBe("missing");

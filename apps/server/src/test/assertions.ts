@@ -9,6 +9,7 @@
  */
 
 import type { TextOptions } from "@clack/prompts";
+import type { Result } from "neverthrow";
 
 import type { Adapter, StreamingAdapter } from "../transport/types.js";
 
@@ -35,6 +36,15 @@ export function expectDefined<T>(value: T | null | undefined, label = "value"): 
     throw new Error(`expected ${label} to be defined`);
   }
   return value;
+}
+
+/**
+ * Return an `Ok`'s value, or throw naming the `Err`. For fixture setup through
+ * a `Result`-returning call: `store.createProfile(trx, …).then(expectOk)`.
+ */
+export function expectOk<T, E>(result: Result<T, E>): T {
+  if (result.isErr()) throw new Error(`expected Ok, got Err ${JSON.stringify(result.error)}`);
+  return result.value;
 }
 
 /**

@@ -42,15 +42,27 @@
 
 import { sql } from "drizzle-orm";
 import { readMigrationFiles } from "drizzle-orm/migrator";
+import { z } from "zod";
 import type { Database } from "./index.js";
 
 const MIGRATIONS_SCHEMA = "drizzle";
 const MIGRATIONS_TABLE = "__drizzle_migrations";
 
-interface AppliedRow {
-  hash: string;
-  created_at: string | number | bigint;
-}
+const AppliedRowSchema = z.object({
+  hash: z.string(),
+  created_at: z.union([z.string(), z.number(), z.bigint()]),
+});
+
+/**
+ * `db.execute(SELECT ...)`'s result: postgres-js returns the rows as an
+ * array, PGlite as `{ rows: [...] }`.
+ */
+const AppliedRowsSchema = z.union([
+  z.array(AppliedRowSchema),
+  z.object({ rows: z.array(AppliedRowSchema) }).transform((result) => result.rows),
+]);
+
+type AppliedRow = z.infer<typeof AppliedRowSchema>;
 
 /**
  * Apply pending migrations one transaction per file. Reads the journal
@@ -121,18 +133,11 @@ export async function migratePerFile(
   }
 }
 
-/**
- * Read all applied migrations newest-first. The result shape of
- * `db.execute(SELECT ...)` differs by driver — postgres-js returns an
- * array-like, PGlite returns `{ rows: [...] }` — so unwrap defensively
- * rather than asserting one shape.
- */
+/** Read all applied migrations newest-first, whichever shape the driver returns. */
 async function readApplied(db: Database): Promise<ReadonlyArray<AppliedRow>> {
   const result = await db.execute(sql`
     SELECT hash, created_at FROM ${sql.identifier(MIGRATIONS_SCHEMA)}.${sql.identifier(MIGRATIONS_TABLE)}
     ORDER BY created_at DESC
   `);
-  return Array.isArray(result)
-    ? (result as ReadonlyArray<AppliedRow>)
-    : ((result as { rows?: ReadonlyArray<AppliedRow> }).rows ?? []);
+  return AppliedRowsSchema.parse(result);
 }

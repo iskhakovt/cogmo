@@ -33,6 +33,7 @@ import { connect } from "inngest/connect";
 import { afterAll, beforeAll, describe, expect, inject, it, vi } from "vitest";
 import { db, transactor } from "../../db/index.js";
 import { codingTaskFailed } from "../../inngest/events.js";
+import { expectOk } from "../../test/assertions.js";
 import { workerInngestBaseUrl } from "../../test/worker-inngest.js";
 import { createCodingTaskReconcile } from "./reconcile-on-failure.js";
 import { DrizzleCodingStore } from "./store/index.js";
@@ -121,18 +122,20 @@ async function seedRepoAndTask(initialStatus: "planning" | "executing" | "failed
   const tx = transactor(db);
   const suffix = Math.random().toString(36).slice(2, 8);
   const repo = await tx((trx) =>
-    store.insertRepo(trx, {
-      name: `reconcile-itest-${suffix}`,
-      localPath: `/tmp/reconcile-itest-${suffix}`,
-      defaultBranch: "main",
-      remoteUrl: `https://github.com/test/reconcile-itest-${suffix}.git`,
-      devcontainer: null,
-      allowedBackends: ["claude"],
-      verifyCommand: "true",
-      taskTokenBudget: 100_000,
-      taskWallTimeSeconds: 60,
-      maxConcurrentTasks: 1,
-    }),
+    store
+      .insertRepo(trx, {
+        name: `reconcile-itest-${suffix}`,
+        localPath: `/tmp/reconcile-itest-${suffix}`,
+        defaultBranch: "main",
+        remoteUrl: `https://github.com/test/reconcile-itest-${suffix}.git`,
+        devcontainer: null,
+        allowedBackends: ["claude"],
+        verifyCommand: "true",
+        taskTokenBudget: 100_000,
+        taskWallTimeSeconds: 60,
+        maxConcurrentTasks: 1,
+      })
+      .then(expectOk),
   );
   const task = await tx((trx) =>
     store.insertTask(trx, {

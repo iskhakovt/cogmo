@@ -182,7 +182,7 @@ Beyond "insert then retrieve":
 - **Atomic multi-field state** — JSONB blobs that group correlated fields (e.g. `worktree_assignment: {branch, worktreePath}`) should have null-until-both-set + reject-half-set tests.
 - **Idempotent replay** — store methods invoked twice (Inngest retry simulation) produce the same terminal state without errors.
 - **Missing-row behaviors** — `getById("nonexistent")` returns `null`, not throws.
-- **Constraint collisions** — UNIQUE / FK violations surface as the right typed error (e.g. `UniqueViolationError` mapped to `repo_name_taken`).
+- **Constraint collisions** — UNIQUE / FK violations surface as the right `Err` (e.g. `uq_profiles_user_name` as `profile_name_taken`), and leave the caller's transaction usable.
 
 ### Error-path coverage matrix per module
 

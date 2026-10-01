@@ -11,6 +11,7 @@ import {
   InMemorySpanExporter,
   type ReadableSpan,
   SimpleSpanProcessor,
+  type SpanExporter,
   type SpanProcessor,
 } from "@opentelemetry/sdk-trace-base";
 import { __resetMetricsForTests } from "../metrics.js";
@@ -32,6 +33,10 @@ import { __resetMetricsForTests } from "../metrics.js";
  * Use `harness.getSpans()` and `harness.collectMetrics()` to inspect emitted
  * telemetry, and `harness.startedSpanCount()` to count spans started,
  * whether or not they ended.
+ *
+ * `wrapExporter` puts an exporter wrapper between the span processor and the
+ * in-memory exporter, so `getSpans()` returns what the wrapper exported —
+ * how `otel.ts` wraps the OTLP exporter.
  */
 export interface OtelHarness {
   getSpans(): ReadonlyArray<ReadableSpan>;
@@ -41,7 +46,9 @@ export interface OtelHarness {
   shutdown(): Promise<void>;
 }
 
-export function setupOtelHarness(): OtelHarness {
+export function setupOtelHarness(opts?: {
+  wrapExporter?: (exporter: SpanExporter) => SpanExporter;
+}): OtelHarness {
   const spanExporter = new InMemorySpanExporter();
   let started = 0;
   const startCounter: SpanProcessor = {
@@ -53,7 +60,10 @@ export function setupOtelHarness(): OtelHarness {
     shutdown: async () => {},
   };
   const tracerProvider = new BasicTracerProvider({
-    spanProcessors: [new SimpleSpanProcessor(spanExporter), startCounter],
+    spanProcessors: [
+      new SimpleSpanProcessor(opts?.wrapExporter?.(spanExporter) ?? spanExporter),
+      startCounter,
+    ],
   });
   trace.setGlobalTracerProvider(tracerProvider);
 

@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { type OtelHarness, setupOtelHarness } from "../test/otel-harness.js";
-import { failChatSpan, recordChatUsage, startChatSpan } from "./otel.js";
+import { failChatSpan, recordChatUsage, recordReasoningChars, startChatSpan } from "./otel.js";
 
 describe("llm/otel", () => {
   let harness: OtelHarness;
@@ -59,6 +59,67 @@ describe("llm/otel", () => {
     const attrs = harness.getSpans()[0]?.attributes ?? {};
     expect(attrs["gen_ai.usage.cache_read.input_tokens"]).toBe(200);
     expect(attrs["gen_ai.usage.cache_creation.input_tokens"]).toBe(300);
+  });
+
+  it("records reasoning tokens as a span attribute when the provider reports them", () => {
+    const span = startChatSpan("custom", "qwen-3-6-plus");
+    recordChatUsage(
+      span,
+      "custom",
+      "qwen-3-6-plus",
+      { inputTokens: 100, outputTokens: 900, reasoningTokens: 850 },
+      "end_turn",
+    );
+    span.end();
+
+    const attrs = harness.getSpans()[0]?.attributes ?? {};
+    expect(attrs["gen_ai.usage.reasoning.output_tokens"]).toBe(850);
+    expect(attrs["gen_ai.usage.output_tokens"]).toBe(900);
+  });
+
+  it("leaves the reasoning attribute off when the provider doesn't report it", () => {
+    const span = startChatSpan("anthropic", "claude-sonnet-4-6");
+    recordChatUsage(
+      span,
+      "anthropic",
+      "claude-sonnet-4-6",
+      { inputTokens: 1, outputTokens: 1 },
+      "end_turn",
+    );
+    span.end();
+
+    expect(harness.getSpans()[0]?.attributes).not.toHaveProperty(
+      "gen_ai.usage.reasoning.output_tokens",
+    );
+  });
+
+  it("records reasoning characters only when there were some", () => {
+    const thought = startChatSpan("custom", "qwen-3-6-plus");
+    recordReasoningChars(thought, 7_400);
+    thought.end();
+    const silent = startChatSpan("custom", "qwen-3-6-plus");
+    recordReasoningChars(silent, 0);
+    silent.end();
+
+    const [first, second] = harness.getSpans();
+    expect(first?.attributes["cogmo.llm.reasoning_chars"]).toBe(7_400);
+    expect(second?.attributes).not.toHaveProperty("cogmo.llm.reasoning_chars");
+  });
+
+  it("counts reasoning tokens within output, adding no token type of their own", async () => {
+    const span = startChatSpan("custom", "qwen-3-6-plus");
+    recordChatUsage(
+      span,
+      "custom",
+      "qwen-3-6-plus",
+      { inputTokens: 100, outputTokens: 900, reasoningTokens: 850 },
+      "end_turn",
+    );
+    span.end();
+
+    const byType = await tokensByType();
+    expect(byType.get("output")).toBe(900);
+    expect([...byType.keys()].sort()).toEqual(["input", "output"]);
   });
 
   /** The `cogmo.llm.tokens` data points since the last reset. Collecting drains them. */

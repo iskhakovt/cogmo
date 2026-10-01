@@ -17,11 +17,13 @@ import {
   sql,
 } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
+import { err, ok, type Result } from "neverthrow";
 import * as R from "remeda";
 import { single } from "../../db/helpers.js";
 import type { Transaction } from "../../db/index.js";
 import type { CacheDialect } from "../../llm/cache-dialect.js";
 import { NOT_TURN_ROW_JSONPATH } from "../../llm/content.js";
+import { type ExtraBody, ExtraBodySchema } from "../../llm/extra-body.js";
 import type { ContentBlock, Message } from "../../llm/types.js";
 import { skills } from "../../skills/store/schema.js";
 import { previewInboundText } from "../../transport/content.js";
@@ -40,17 +42,22 @@ import {
 } from "../rule-sections.js";
 import type { TurnContext } from "../turn-context.js";
 import {
-  CustomCompartmentCapExceededError,
-  ImageModelSlugCollisionError,
-  InvalidNameError,
-  InvalidProviderConfigError,
-  ProfileClassInUseError,
-  ProfileInUseError,
-  ReservedCompartmentNameError,
-  RuleGroupChangedError,
-  translateReferentialViolation,
-  translateUniqueViolation,
-  UnknownProfileClassError,
+  type AliasTaken,
+  type CreateCustomCompartmentError,
+  type CreateImageModelError,
+  type CreateImageProviderError,
+  type CreateProfileClassError,
+  type ImageModelSlugCollision,
+  type InvalidProviderConfig,
+  inSavepoint,
+  type ProfileClassInUse,
+  type ProfileInUse,
+  type ProfileNameTaken,
+  type RuleGroupChanged,
+  referentialViolationAs,
+  type SubAgentNameTaken,
+  type UnknownProfileClass,
+  uniqueViolationAs,
 } from "./errors.js";
 import {
   aliases,
@@ -673,41 +680,30 @@ function previewFromContent(content: unknown): string {
 }
 
 /**
- * Validate `(type, base_url)` for an image provider. Throws
- * `InvalidProviderConfigError` with a wizard-friendly reason for the
- * cases the DB CHECK can't express. The DB CHECK still enforces the
- * coarser `openai_compatible ↔ NOT NULL`, `venice ↔ NOT NULL`,
- * `fal ↔ NULL` invariant — this guard fires first so the wizard gets a
- * useful message instead of an opaque 23514.
+ * Validate `(type, base_url)` for an image provider, for the cases the DB
+ * CHECK can't express. The CHECK still enforces the coarser
+ * `openai_compatible ↔ NOT NULL`, `venice ↔ NOT NULL`, `fal ↔ NULL`
+ * invariant; this runs first so the operator gets a reason instead of an
+ * opaque 23514.
  */
-function validateImageProviderBaseUrl(type: ImageProviderTypeValue, baseUrl: string | null): void {
-  // Exhaustive switch over `image_provider_type` — adding an enum value
-  // without a matching case is a compile error. Same pattern as
-  // `buildProvider` in src/llm/resolver.ts.
+function validateImageProviderBaseUrl(
+  type: ImageProviderTypeValue,
+  baseUrl: string | null,
+): Result<void, InvalidProviderConfig> {
+  const invalid = (reason: string) => err({ kind: "invalid_provider_config" as const, reason });
+  // Exhaustive over `image_provider_type`: a new enum value without a case
+  // leaves a path with no return, which is a compile error.
   switch (type) {
     case "fal":
-      if (baseUrl !== null) {
-        throw new InvalidProviderConfigError("fal does not accept a base_url");
-      }
-      return;
+      return baseUrl === null ? ok(undefined) : invalid("fal does not accept a base_url");
     case "openai_compatible":
     case "venice": {
-      if (baseUrl === null) {
-        throw new InvalidProviderConfigError(`${type} requires a base_url`);
-      }
-      let parsed: URL;
-      try {
-        parsed = new URL(baseUrl);
-      } catch {
-        throw new InvalidProviderConfigError(`base_url is not a valid URL: ${baseUrl}`);
-      }
-      if (parsed.protocol !== "https:") {
-        throw new InvalidProviderConfigError(`base_url must be https (got ${parsed.protocol})`);
-      }
-      if (baseUrl.endsWith("/")) {
-        throw new InvalidProviderConfigError("base_url must not end with a trailing slash");
-      }
-      return;
+      if (baseUrl === null) return invalid(`${type} requires a base_url`);
+      if (!URL.canParse(baseUrl)) return invalid(`base_url is not a valid URL: ${baseUrl}`);
+      const { protocol } = new URL(baseUrl);
+      if (protocol !== "https:") return invalid(`base_url must be https (got ${protocol})`);
+      if (baseUrl.endsWith("/")) return invalid("base_url must not end with a trailing slash");
+      return ok(undefined);
     }
   }
 }
@@ -983,7 +979,7 @@ export interface AgentStore {
   /** The oldest profile by `id`: the org profile setup seeds. */
   getDefaultProfile(tx: Transaction): Promise<{ id: string } | undefined>;
 
-  /** Create a profile and return the full row. `userId: null` = org profile (read-only via Transport); `userId: <id>` = user profile (owned by that user). Throws `UniqueViolationError` on (user_id, name) collision. */
+  /** Create a profile and return the full row. `userId: null` = org profile (read-only via Transport); `userId: <id>` = user profile (owned by that user). */
   createProfile(
     tx: Transaction,
     params: {
@@ -994,7 +990,7 @@ export interface AgentStore {
       toolSet: ToolSet;
       memoryScope?: ProfileMemoryScope | null;
     },
-  ): Promise<Profile>;
+  ): Promise<Result<Profile, ProfileNameTaken>>;
 
   /**
    * Keyed insert on `uq_profiles_user_name` (`.claude/rules/inngest.md`): a
@@ -1021,8 +1017,12 @@ export interface AgentStore {
     profileId: string,
   ): Promise<{ userId: string | null } | undefined>;
 
-  /** Update a profile in place. Caller must verify ownership. Throws `UniqueViolationError` on name collision. */
-  updateProfile(tx: Transaction, profileId: string, changes: ProfileUpdates): Promise<Profile>;
+  /** Update a profile in place. Caller must verify ownership. */
+  updateProfile(
+    tx: Transaction,
+    profileId: string,
+    changes: ProfileUpdates,
+  ): Promise<Result<Profile, ProfileNameTaken>>;
 
   /**
    * Count live references to a profile — active conversations + stamped message history.
@@ -1036,28 +1036,32 @@ export interface AgentStore {
   /**
    * Delete a profile atomically: checks `conversations`, `messages`, the schedules that run as
    * it (`scheduled_tasks`, `skills.run_as_profile_id`) and the steering rules scoped to it inside
-   * the same transaction and throws `ProfileInUseError` if any exist. Historical messages pin the profile as audit data — a
+   * the same transaction and deletes nothing if any exist. Historical messages pin the profile as audit data — a
    * profile that has ever been used in a turn stays undeletable.
    */
-  deleteProfile(tx: Transaction, profileId: string): Promise<void>;
+  deleteProfile(tx: Transaction, profileId: string): Promise<Result<void, ProfileInUse>>;
 
   // --- Profile classes (speaker-isolation registry) ---
 
   /** List the user's registered profile classes, ordered by name. */
   listProfileClasses(tx: Transaction, userId: string): Promise<ReadonlyArray<ProfileClass>>;
 
-  /** Create a new profile class. Throws `UniqueViolationError` on (user_id, name) collision. */
+  /** Create a new profile class. The name must have the canonical shape (`CANONICAL_NAME_RE`). */
   createProfileClass(
     tx: Transaction,
     params: { userId: string; name: string; description: string },
-  ): Promise<ProfileClass>;
+  ): Promise<Result<ProfileClass, CreateProfileClassError>>;
 
   /**
-   * Delete a profile class by name. Throws `ProfileClassInUseError` if any
-   * of the user's profiles still reference it via `profile_class`. Returns
-   * `{ deleted: false }` if no row matches; `{ deleted: true }` on success.
+   * Delete a profile class by name. `profile_class_in_use` if any of the
+   * user's profiles still reference it via `profile_class`; `{ deleted: false }`
+   * if no row matches.
    */
-  deleteProfileClass(tx: Transaction, userId: string, name: string): Promise<{ deleted: boolean }>;
+  deleteProfileClass(
+    tx: Transaction,
+    userId: string,
+    name: string,
+  ): Promise<Result<{ deleted: boolean }, ProfileClassInUse>>;
 
   /**
    * Flip the `restricted` flag on a profile class. Returns
@@ -1075,12 +1079,15 @@ export interface AgentStore {
 
   /**
    * Set or clear a profile's `profile_class`. `className: null` clears it.
-   * When `className` is non-null, validates the class exists in the
-   * profile's user's registry and throws `UnknownProfileClassError`
-   * otherwise. Org profiles (`user_id IS NULL`) cannot be classed —
-   * passing `className !== null` for one throws `UnknownProfileClassError`.
+   * A non-null `className` must be registered for the profile's user, and
+   * org profiles (`user_id IS NULL`) can't be classed: either way the result
+   * is `unknown_profile_class`.
    */
-  setProfileClass(tx: Transaction, profileId: string, className: string | null): Promise<void>;
+  setProfileClass(
+    tx: Transaction,
+    profileId: string,
+    className: string | null,
+  ): Promise<Result<void, UnknownProfileClass>>;
 
   // --- Custom compartments (memory-domain extension registry) ---
 
@@ -1092,11 +1099,12 @@ export interface AgentStore {
 
   /**
    * Create a new custom compartment for the user. Enforces:
+   *   - canonical name shape (`CANONICAL_NAME_RE`) → `invalid_name`
    *   - reserved-name check against `CORE_COMPARTMENTS` →
-   *     `ReservedCompartmentNameError`
+   *     `compartment_name_reserved`
    *   - per-user cap of `CUSTOM_COMPARTMENT_LIMIT` →
-   *     `CustomCompartmentCapExceededError`
-   *   - unique `(user_id, name)` → `UniqueViolationError`
+   *     `compartment_cap_exceeded`
+   *   - unique `(user_id, name)` → `compartment_name_taken`
    *
    * Cap is enforced via a count-then-insert in the same transaction.
    * REPEATABLE READ (the project default) doesn't catch this predicate
@@ -1109,7 +1117,7 @@ export interface AgentStore {
   createCustomCompartment(
     tx: Transaction,
     params: { userId: string; name: string; description: string },
-  ): Promise<CustomCompartment>;
+  ): Promise<Result<CustomCompartment, CreateCustomCompartmentError>>;
 
   /**
    * Delete a custom compartment by name. Returns `{ deleted: false }` if no
@@ -1222,13 +1230,13 @@ export interface AgentStore {
   /** Update a conversation's active profile. Takes effect on the next turn (current in-flight turn keeps its snapshot). */
   setConversationProfile(tx: Transaction, conversationId: string, profileId: string): Promise<void>;
 
-  /** Upsert or clear a conversation's alias. `alias: null` removes the alias row. Throws `UniqueViolationError` if the alias is taken. */
+  /** Upsert or clear a conversation's alias. `alias: null` removes the alias row. */
   setAlias(
     tx: Transaction,
     userId: string,
     conversationId: string,
     alias: string | null,
-  ): Promise<void>;
+  ): Promise<Result<void, AliasTaken>>;
 
   /** Resolve an alias to a conversation ID for a user. Returns `undefined` if no match. */
   findConversationByAlias(
@@ -1336,6 +1344,9 @@ export interface AgentStore {
    * undefined to let the resolver fall back through LiteLLM JSON → conservative
    * default. Set them only when the model is unknown to LiteLLM and the
    * default doesn't fit (e.g., a niche local model with a 1M context window).
+   *
+   * `extraBody` is the model's extra request fields on an OpenAI-compatible
+   * provider; undefined or null stores none.
    */
   addModelProvider(
     tx: Transaction,
@@ -1346,8 +1357,20 @@ export interface AgentStore {
       userSelectable: boolean;
       contextWindow?: number | null;
       maxOutputTokens?: number | null;
+      extraBody?: ExtraBody | null;
     },
   ): Promise<{ id: string }>;
+
+  /**
+   * Replace the extra request fields of the `(model, providerId)` routing row;
+   * null clears them. Returns whether a row matched.
+   */
+  setModelProviderExtraBody(
+    tx: Transaction,
+    model: string,
+    providerId: string,
+    extraBody: ExtraBody | null,
+  ): Promise<boolean>;
 
   /**
    * List every provider registered for a model, ordered by position ASC
@@ -1370,6 +1393,7 @@ export interface AgentStore {
       position: number;
       contextWindow: number | null;
       maxOutputTokens: number | null;
+      extraBody: ExtraBody | null;
     }>
   >;
 
@@ -1391,6 +1415,7 @@ export interface AgentStore {
       position: number;
       contextWindow: number | null;
       maxOutputTokens: number | null;
+      extraBody: ExtraBody | null;
     }>
   >;
 
@@ -1409,14 +1434,10 @@ export interface AgentStore {
   // --- Image Providers ---
 
   /**
-   * Create an image-gen provider row. Validates the base_url shape at the
-   * store boundary (https, no trailing slash, parseable) — the DB CHECK
-   * pins the coarser `openai_compatible ↔ NOT NULL`, `fal ↔ NULL`
-   * invariant. Unique-name collisions surface as `UniqueViolationError`.
-   *
-   * `baseUrl` is REQUIRED for `openai_compatible` and FORBIDDEN for `fal`
-   * — the guard raises `InvalidProviderConfigError` with a wizard-friendly
-   * reason before the row reaches the DB.
+   * Create an image-gen provider row. `baseUrl` is required for
+   * `openai_compatible` / `venice` (https, parseable, no trailing slash) and
+   * forbidden for `fal`; a violation is `invalid_provider_config`, with a
+   * reason, before the row reaches the DB.
    */
   createImageProvider(
     tx: Transaction,
@@ -1427,7 +1448,7 @@ export interface AgentStore {
       secretId: string;
       attrs: ImageProviderAttrs;
     },
-  ): Promise<{ id: string }>;
+  ): Promise<Result<{ id: string }, CreateImageProviderError>>;
 
   /** Get an image provider by ID. */
   getImageProvider(tx: Transaction, providerId: string): Promise<ImageProviderRow | undefined>;
@@ -1444,11 +1465,10 @@ export interface AgentStore {
   // --- Image Models ---
 
   /**
-   * Create an image-model catalog row. Exact-name collisions surface as
-   * `UniqueViolationError`; slug collisions (e.g. `replicate/flux-pro`
-   * when `fal-ai/flux-pro` already exists) surface as
-   * `ImageModelSlugCollisionError`. The Zod schema on `capabilities` (run
-   * inside `jsonbZod`) validates the bag at write time — invalid aspect
+   * Create an image-model catalog row. Fails on an exact-name collision, or
+   * a slug collision (`replicate/flux-pro` when `fal-ai/flux-pro` exists),
+   * since the slug is all the LLM sees. The Zod schema on `capabilities`
+   * (run inside `jsonbZod`) validates the bag at write time — invalid aspect
    * ratios or unexpected fields throw before reaching the DB.
    */
   createImageModel(
@@ -1461,15 +1481,15 @@ export interface AgentStore {
       capabilities: ImageModelCapabilities;
       userSelectable: boolean;
     },
-  ): Promise<{ id: string }>;
+  ): Promise<Result<{ id: string }, CreateImageModelError>>;
 
   /**
    * Bulk-insert image models keyed on `(providerId, name)`. Rows whose
    * `name` already exists are skipped (idempotent re-run). Returns the
    * count of rows actually inserted — operator edits to existing rows
    * are preserved. Used by `ensureFalImageDefaults`. A new row whose
-   * `name` slug-collides with an existing or sibling row throws
-   * `ImageModelSlugCollisionError`.
+   * `name` slug-collides with an existing or sibling row fails the batch,
+   * inserting nothing.
    */
   upsertImageModelsByName(
     tx: Transaction,
@@ -1481,7 +1501,7 @@ export interface AgentStore {
       capabilities: ImageModelCapabilities;
       userSelectable: boolean;
     }>,
-  ): Promise<number>;
+  ): Promise<Result<number, ImageModelSlugCollision>>;
 
   /**
    * List every image model. When `userSelectableOnly: true`, filters to
@@ -1518,8 +1538,7 @@ export interface AgentStore {
   listSubAgents(tx: Transaction, userId: string): Promise<ReadonlyArray<SubAgent>>;
 
   /**
-   * Insert a sub-agent. A `(user_id, name)` collision surfaces as
-   * `UniqueViolationError`. The caller (the create-sub-agent use case)
+   * Insert a sub-agent. The caller (the create-sub-agent use case)
    * validates the name shape and that `model` exists in `model_providers`
    * first.
    */
@@ -1532,7 +1551,7 @@ export interface AgentStore {
       systemPrompt: string | null;
       model: string;
     },
-  ): Promise<{ id: string }>;
+  ): Promise<Result<{ id: string }, SubAgentNameTaken>>;
 
   /** Delete a sub-agent by name. `deleted: false` when no row matched. */
   deleteSubAgent(tx: Transaction, userId: string, name: string): Promise<{ deleted: boolean }>;
@@ -1624,11 +1643,9 @@ export interface AgentStore {
   countActiveLearnedRules(tx: Transaction, profileId: string): Promise<number>;
 
   /**
-   * Replace a group of learned rules with one consolidated rule. Throws
-   * `RuleGroupChangedError` when a rule in the group is retired, gone, or not
-   * a learned rule. The DELETE has run by then, so the caller must let the
-   * error propagate out of the transaction, which rolls it back, and catch it
-   * outside.
+   * Replace a group of learned rules with one consolidated rule, or, when a
+   * rule in the group is retired, gone, or not a learned rule, change
+   * nothing and return `rule_group_changed`.
    */
   replaceRules(
     tx: Transaction,
@@ -1643,7 +1660,7 @@ export interface AgentStore {
         observationCount: number;
       };
     },
-  ): Promise<{ id: string }>;
+  ): Promise<Result<{ id: string }, RuleGroupChanged>>;
 
   // --- Explicit instructions ---
 
@@ -1953,6 +1970,25 @@ function scheduleValues(params: {
     source: params.source,
   };
 }
+
+/** The `profiles` columns a `Profile` carries. */
+const PROFILE_COLUMNS = {
+  id: profiles.id,
+  userId: profiles.userId,
+  name: profiles.name,
+  basePrompt: profiles.basePrompt,
+  model: profiles.model,
+  summarizationModel: profiles.summarizationModel,
+  extractionModel: profiles.extractionModel,
+  autoRecall: profiles.autoRecall,
+  voiceMode: profiles.voiceMode,
+  toolSet: profiles.toolSet,
+  memoryScope: profiles.memoryScope,
+  profileClass: profiles.profileClass,
+  streamChunkChars: profiles.streamChunkChars,
+  streamEdits: profiles.streamEdits,
+  codingAutoapproveMode: profiles.codingAutoapproveMode,
+};
 
 export class DrizzleAgentStore implements AgentStore {
   async createUser(tx: Transaction): Promise<{ id: string }> {
@@ -2337,23 +2373,7 @@ export class DrizzleAgentStore implements AgentStore {
 
   async getProfile(tx: Transaction, profileId: string): Promise<Profile | undefined> {
     const rows = await tx
-      .select({
-        id: profiles.id,
-        userId: profiles.userId,
-        name: profiles.name,
-        basePrompt: profiles.basePrompt,
-        model: profiles.model,
-        summarizationModel: profiles.summarizationModel,
-        extractionModel: profiles.extractionModel,
-        autoRecall: profiles.autoRecall,
-        voiceMode: profiles.voiceMode,
-        toolSet: profiles.toolSet,
-        memoryScope: profiles.memoryScope,
-        profileClass: profiles.profileClass,
-        streamChunkChars: profiles.streamChunkChars,
-        streamEdits: profiles.streamEdits,
-        codingAutoapproveMode: profiles.codingAutoapproveMode,
-      })
+      .select(PROFILE_COLUMNS)
       .from(profiles)
       .where(eq(profiles.id, profileId))
       .limit(1);
@@ -2384,29 +2404,14 @@ export class DrizzleAgentStore implements AgentStore {
       toolSet: ToolSet;
       memoryScope?: ProfileMemoryScope | null;
     },
-  ): Promise<Profile> {
-    return translateUniqueViolation(async () => {
-      const row = single(
-        await tx.insert(profiles).values(params).returning({
-          id: profiles.id,
-          userId: profiles.userId,
-          name: profiles.name,
-          basePrompt: profiles.basePrompt,
-          model: profiles.model,
-          summarizationModel: profiles.summarizationModel,
-          extractionModel: profiles.extractionModel,
-          autoRecall: profiles.autoRecall,
-          voiceMode: profiles.voiceMode,
-          toolSet: profiles.toolSet,
-          memoryScope: profiles.memoryScope,
-          profileClass: profiles.profileClass,
-          streamChunkChars: profiles.streamChunkChars,
-          streamEdits: profiles.streamEdits,
-          codingAutoapproveMode: profiles.codingAutoapproveMode,
-        }),
-      );
-      return row as Profile;
-    });
+  ): Promise<Result<Profile, ProfileNameTaken>> {
+    return inSavepoint(tx, (sp) =>
+      uniqueViolationAs(
+        "uq_profiles_user_name",
+        { kind: "profile_name_taken" } as const,
+        async () => single(await sp.insert(profiles).values(params).returning(PROFILE_COLUMNS)),
+      ),
+    );
   }
 
   async insertOrRecoverProfile(
@@ -2431,27 +2436,11 @@ export class DrizzleAgentStore implements AgentStore {
 
   async listProfiles(tx: Transaction, userId: string): Promise<ReadonlyArray<Profile>> {
     const rows = await tx
-      .select({
-        id: profiles.id,
-        userId: profiles.userId,
-        name: profiles.name,
-        basePrompt: profiles.basePrompt,
-        model: profiles.model,
-        summarizationModel: profiles.summarizationModel,
-        extractionModel: profiles.extractionModel,
-        autoRecall: profiles.autoRecall,
-        voiceMode: profiles.voiceMode,
-        toolSet: profiles.toolSet,
-        memoryScope: profiles.memoryScope,
-        profileClass: profiles.profileClass,
-        streamChunkChars: profiles.streamChunkChars,
-        streamEdits: profiles.streamEdits,
-        codingAutoapproveMode: profiles.codingAutoapproveMode,
-      })
+      .select(PROFILE_COLUMNS)
       .from(profiles)
       .where(or(isNull(profiles.userId), eq(profiles.userId, userId)))
       .orderBy(asc(profiles.name));
-    return rows as ReadonlyArray<Profile>;
+    return rows;
   }
 
   async getProfileOwner(
@@ -2470,31 +2459,21 @@ export class DrizzleAgentStore implements AgentStore {
     tx: Transaction,
     profileId: string,
     changes: ProfileUpdates,
-  ): Promise<Profile> {
-    return translateUniqueViolation(async () => {
-      const rows = await tx
-        .update(profiles)
-        .set(changes)
-        .where(eq(profiles.id, profileId))
-        .returning({
-          id: profiles.id,
-          userId: profiles.userId,
-          name: profiles.name,
-          basePrompt: profiles.basePrompt,
-          model: profiles.model,
-          summarizationModel: profiles.summarizationModel,
-          extractionModel: profiles.extractionModel,
-          autoRecall: profiles.autoRecall,
-          voiceMode: profiles.voiceMode,
-          toolSet: profiles.toolSet,
-          memoryScope: profiles.memoryScope,
-          profileClass: profiles.profileClass,
-          streamChunkChars: profiles.streamChunkChars,
-          streamEdits: profiles.streamEdits,
-          codingAutoapproveMode: profiles.codingAutoapproveMode,
-        });
-      return single(rows) as Profile;
-    });
+  ): Promise<Result<Profile, ProfileNameTaken>> {
+    return inSavepoint(tx, (sp) =>
+      uniqueViolationAs(
+        "uq_profiles_user_name",
+        { kind: "profile_name_taken" } as const,
+        async () =>
+          single(
+            await sp
+              .update(profiles)
+              .set(changes)
+              .where(eq(profiles.id, profileId))
+              .returning(PROFILE_COLUMNS),
+          ),
+      ),
+    );
   }
 
   async countProfileReferences(
@@ -2514,10 +2493,9 @@ export class DrizzleAgentStore implements AgentStore {
     };
   }
 
-  async deleteProfile(tx: Transaction, profileId: string): Promise<void> {
-    // Check refs + delete in one transaction so a concurrent conversation create / message insert
-    // can't sneak in between count and delete. Without this, callers would see a raw FK error
-    // instead of the typed ProfileInUseError.
+  async deleteProfile(tx: Transaction, profileId: string): Promise<Result<void, ProfileInUse>> {
+    // Refs are counted in the caller's transaction, so the count and the delete
+    // read one snapshot.
     const [convRows, msgRows, taskRows, skillRows, ruleRows] = await Promise.all([
       tx
         .select({ value: count() })
@@ -2534,16 +2512,10 @@ export class DrizzleAgentStore implements AgentStore {
         .from(steeringRules)
         .where(eq(steeringRules.profileId, profileId)),
     ]);
-    const refs = {
-      conversations: convRows[0]?.value ?? 0,
-      messages: msgRows[0]?.value ?? 0,
-      schedules: (taskRows[0]?.value ?? 0) + (skillRows[0]?.value ?? 0),
-      steeringRules: ruleRows[0]?.value ?? 0,
-    };
-    if (Object.values(refs).some((n) => n > 0)) {
-      throw new ProfileInUseError(refs);
-    }
+    const refRows = [convRows, msgRows, taskRows, skillRows, ruleRows];
+    if (refRows.some((rows) => (rows[0]?.value ?? 0) > 0)) return err({ kind: "profile_in_use" });
     await tx.delete(profiles).where(eq(profiles.id, profileId));
+    return ok(undefined);
   }
 
   async listProfileClasses(tx: Transaction, userId: string): Promise<ReadonlyArray<ProfileClass>> {
@@ -2565,22 +2537,27 @@ export class DrizzleAgentStore implements AgentStore {
   async createProfileClass(
     tx: Transaction,
     params: { userId: string; name: string; description: string },
-  ): Promise<ProfileClass> {
+  ): Promise<Result<ProfileClass, CreateProfileClassError>> {
     if (!CANONICAL_NAME_RE.test(params.name)) {
-      throw new InvalidNameError(params.name, "profile_class");
+      return err({ kind: "invalid_name", name: params.name, subject: "profile_class" });
     }
-    return translateUniqueViolation(async () => {
-      return single(
-        await tx.insert(profileClasses).values(params).returning({
-          id: profileClasses.id,
-          userId: profileClasses.userId,
-          name: profileClasses.name,
-          description: profileClasses.description,
-          restricted: profileClasses.restricted,
-          createdAt: profileClasses.createdAt,
-        }),
-      );
-    });
+    return inSavepoint(tx, (sp) =>
+      uniqueViolationAs(
+        "uq_profile_classes_user_name",
+        { kind: "profile_class_name_taken", name: params.name } as const,
+        async () =>
+          single(
+            await sp.insert(profileClasses).values(params).returning({
+              id: profileClasses.id,
+              userId: profileClasses.userId,
+              name: profileClasses.name,
+              description: profileClasses.description,
+              restricted: profileClasses.restricted,
+              createdAt: profileClasses.createdAt,
+            }),
+          ),
+      ),
+    );
   }
 
   async setProfileClassRestricted(
@@ -2601,7 +2578,7 @@ export class DrizzleAgentStore implements AgentStore {
     tx: Transaction,
     userId: string,
     name: string,
-  ): Promise<{ deleted: boolean }> {
+  ): Promise<Result<{ deleted: boolean }, ProfileClassInUse>> {
     // Atomicity comes from the composite FK on `profiles(user_id, profile_class)`
     // with ON DELETE RESTRICT — the DELETE fails at the DB level if any
     // profile still references this class, even when a concurrent
@@ -2613,21 +2590,19 @@ export class DrizzleAgentStore implements AgentStore {
       .from(profiles)
       .where(and(eq(profiles.userId, userId), eq(profiles.profileClass, name)));
     const refCount = refRows[0]?.value ?? 0;
-    return translateReferentialViolation(
-      async () => {
-        const deleted = await tx
+    // Defensive: under REPEATABLE READ a reference committed after this
+    // snapshot fails the DELETE with 40001 rather than the FK, so when the FK
+    // fires the count already saw the reference. The clamp keeps the report
+    // consistent with the FK if that ever stops holding.
+    const inUse = { kind: "profile_class_in_use", profileRefs: Math.max(refCount, 1) } as const;
+    return inSavepoint(tx, (sp) =>
+      referentialViolationAs("fk_profiles_profile_class", inUse, async () => {
+        const deleted = await sp
           .delete(profileClasses)
           .where(and(eq(profileClasses.userId, userId), eq(profileClasses.name, name)))
           .returning({ id: profileClasses.id });
         return { deleted: deleted.length > 0 };
-      },
-      {
-        constraintName: "fk_profiles_profile_class",
-        // refCount may be 0 here (the violating UPDATE landed AFTER we
-        // counted) — that's fine; the message is informational and the
-        // important fact is "in use right now", which the FK confirmed.
-        rethrow: () => new ProfileClassInUseError(Math.max(refCount, 1)),
-      },
+      }),
     );
   }
 
@@ -2635,11 +2610,12 @@ export class DrizzleAgentStore implements AgentStore {
     tx: Transaction,
     profileId: string,
     className: string | null,
-  ): Promise<void> {
+  ): Promise<Result<void, UnknownProfileClass>> {
     if (className === null) {
       await tx.update(profiles).set({ profileClass: null }).where(eq(profiles.id, profileId));
-      return;
+      return ok(undefined);
     }
+    const unknown = { kind: "unknown_profile_class", name: className } as const;
     // Composite FK with MATCH SIMPLE skips its check when either column is
     // NULL — so for org profiles (user_id IS NULL) the FK would silently
     // allow any class name. Reject org-profile classing here so the
@@ -2650,25 +2626,19 @@ export class DrizzleAgentStore implements AgentStore {
       .where(eq(profiles.id, profileId))
       .limit(1);
     const found = owner[0];
-    if (!found || found.userId === null) {
-      throw new UnknownProfileClassError(className);
-    }
+    if (!found || found.userId === null) return err(unknown);
     // For non-org profiles, the FK is the authoritative check: an unknown
     // class name surfaces as a 23503 on `fk_profiles_profile_class`.
     // Concurrent deleteProfileClass landing between this UPDATE and
     // commit fails the same way, so stale-snapshot races can't leave a
     // dangling pointer.
-    await translateReferentialViolation(
-      async () => {
-        await tx
+    return inSavepoint(tx, (sp) =>
+      referentialViolationAs("fk_profiles_profile_class", unknown, async () => {
+        await sp
           .update(profiles)
           .set({ profileClass: className })
           .where(eq(profiles.id, profileId));
-      },
-      {
-        constraintName: "fk_profiles_profile_class",
-        rethrow: () => new UnknownProfileClassError(className),
-      },
+      }),
     );
   }
 
@@ -2692,12 +2662,12 @@ export class DrizzleAgentStore implements AgentStore {
   async createCustomCompartment(
     tx: Transaction,
     params: { userId: string; name: string; description: string },
-  ): Promise<CustomCompartment> {
+  ): Promise<Result<CustomCompartment, CreateCustomCompartmentError>> {
     if (!CANONICAL_NAME_RE.test(params.name)) {
-      throw new InvalidNameError(params.name, "compartment");
+      return err({ kind: "invalid_name", name: params.name, subject: "compartment" });
     }
     if (isCoreCompartment(params.name)) {
-      throw new ReservedCompartmentNameError(params.name);
+      return err({ kind: "compartment_name_reserved", name: params.name });
     }
     const countRows = await tx
       .select({ value: count() })
@@ -2705,19 +2675,24 @@ export class DrizzleAgentStore implements AgentStore {
       .where(eq(customCompartments.userId, params.userId));
     const current = countRows[0]?.value ?? 0;
     if (current >= CUSTOM_COMPARTMENT_LIMIT) {
-      throw new CustomCompartmentCapExceededError(CUSTOM_COMPARTMENT_LIMIT, current);
+      return err({ kind: "compartment_cap_exceeded", limit: CUSTOM_COMPARTMENT_LIMIT, current });
     }
-    return translateUniqueViolation(async () => {
-      return single(
-        await tx.insert(customCompartments).values(params).returning({
-          id: customCompartments.id,
-          userId: customCompartments.userId,
-          name: customCompartments.name,
-          description: customCompartments.description,
-          createdAt: customCompartments.createdAt,
-        }),
-      );
-    });
+    return inSavepoint(tx, (sp) =>
+      uniqueViolationAs(
+        "uq_custom_compartments_user_name",
+        { kind: "compartment_name_taken", name: params.name } as const,
+        async () =>
+          single(
+            await sp.insert(customCompartments).values(params).returning({
+              id: customCompartments.id,
+              userId: customCompartments.userId,
+              name: customCompartments.name,
+              description: customCompartments.description,
+              createdAt: customCompartments.createdAt,
+            }),
+          ),
+      ),
+    );
   }
 
   async deleteCustomCompartment(
@@ -2993,17 +2968,19 @@ export class DrizzleAgentStore implements AgentStore {
     userId: string,
     conversationId: string,
     alias: string | null,
-  ): Promise<void> {
-    await translateUniqueViolation(async () => {
-      if (alias === null) {
-        await tx.delete(aliases).where(eq(aliases.conversationId, conversationId));
-        return;
-      }
-      await tx.insert(aliases).values({ userId, conversationId, alias }).onConflictDoUpdate({
-        target: aliases.conversationId,
-        set: { alias },
-      });
-    });
+  ): Promise<Result<void, AliasTaken>> {
+    if (alias === null) {
+      await tx.delete(aliases).where(eq(aliases.conversationId, conversationId));
+      return ok(undefined);
+    }
+    return inSavepoint(tx, (sp) =>
+      uniqueViolationAs("uq_aliases_user_alias", { kind: "alias_taken" } as const, async () => {
+        await sp.insert(aliases).values({ userId, conversationId, alias }).onConflictDoUpdate({
+          target: aliases.conversationId,
+          set: { alias },
+        });
+      }),
+    );
   }
 
   async findConversationByAlias(
@@ -3189,9 +3166,12 @@ export class DrizzleAgentStore implements AgentStore {
       userSelectable: boolean;
       contextWindow?: number | null;
       maxOutputTokens?: number | null;
+      extraBody?: ExtraBody | null;
     },
   ): Promise<{ id: string }> {
-    const { contextWindow, maxOutputTokens, ...rest } = params;
+    const { contextWindow, maxOutputTokens, extraBody, ...rest } = params;
+    // The column reads leniently, so a write is checked against the strict schema here.
+    if (extraBody != null) ExtraBodySchema.parse(extraBody);
     return single(
       await tx
         .insert(modelProviders)
@@ -3199,9 +3179,26 @@ export class DrizzleAgentStore implements AgentStore {
           ...rest,
           contextWindow: contextWindow ?? null,
           maxOutputTokens: maxOutputTokens ?? null,
+          extraBody: extraBody ?? null,
         })
         .returning({ id: modelProviders.id }),
     );
+  }
+
+  async setModelProviderExtraBody(
+    tx: Transaction,
+    model: string,
+    providerId: string,
+    extraBody: ExtraBody | null,
+  ): Promise<boolean> {
+    // The column reads leniently, so a write is checked against the strict schema here.
+    if (extraBody !== null) ExtraBodySchema.parse(extraBody);
+    const rows = await tx
+      .update(modelProviders)
+      .set({ extraBody })
+      .where(and(eq(modelProviders.model, model), eq(modelProviders.providerId, providerId)))
+      .returning({ id: modelProviders.id });
+    return rows.length > 0;
   }
 
   async listProvidersForModel(
@@ -3218,6 +3215,7 @@ export class DrizzleAgentStore implements AgentStore {
       position: number;
       contextWindow: number | null;
       maxOutputTokens: number | null;
+      extraBody: ExtraBody | null;
     }>
   > {
     const rows = await tx
@@ -3231,6 +3229,7 @@ export class DrizzleAgentStore implements AgentStore {
         position: modelProviders.position,
         contextWindow: modelProviders.contextWindow,
         maxOutputTokens: modelProviders.maxOutputTokens,
+        extraBody: modelProviders.extraBody,
       })
       .from(modelProviders)
       .innerJoin(llmProviders, eq(modelProviders.providerId, llmProviders.id))
@@ -3251,6 +3250,7 @@ export class DrizzleAgentStore implements AgentStore {
       position: number;
       contextWindow: number | null;
       maxOutputTokens: number | null;
+      extraBody: ExtraBody | null;
     }>
   > {
     const rows = await tx
@@ -3265,6 +3265,7 @@ export class DrizzleAgentStore implements AgentStore {
         position: modelProviders.position,
         contextWindow: modelProviders.contextWindow,
         maxOutputTokens: modelProviders.maxOutputTokens,
+        extraBody: modelProviders.extraBody,
       })
       .from(modelProviders)
       .innerJoin(llmProviders, eq(modelProviders.providerId, llmProviders.id))
@@ -3311,20 +3312,26 @@ export class DrizzleAgentStore implements AgentStore {
       secretId: string;
       attrs: ImageProviderAttrs;
     },
-  ): Promise<{ id: string }> {
-    validateImageProviderBaseUrl(params.type, params.baseUrl);
-    return translateUniqueViolation(async () =>
-      single(
-        await tx
-          .insert(imageProviders)
-          .values({
-            name: params.name,
-            type: params.type,
-            baseUrl: params.baseUrl,
-            secretId: params.secretId,
-            attrs: params.attrs,
-          })
-          .returning({ id: imageProviders.id }),
+  ): Promise<Result<{ id: string }, CreateImageProviderError>> {
+    const valid = validateImageProviderBaseUrl(params.type, params.baseUrl);
+    if (valid.isErr()) return err(valid.error);
+    return inSavepoint(tx, (sp) =>
+      uniqueViolationAs(
+        "image_providers_name_unique",
+        { kind: "image_provider_name_taken", name: params.name } as const,
+        async () =>
+          single(
+            await sp
+              .insert(imageProviders)
+              .values({
+                name: params.name,
+                type: params.type,
+                baseUrl: params.baseUrl,
+                secretId: params.secretId,
+                attrs: params.attrs,
+              })
+              .returning({ id: imageProviders.id }),
+          ),
       ),
     );
   }
@@ -3374,20 +3381,30 @@ export class DrizzleAgentStore implements AgentStore {
       capabilities: ImageModelCapabilities;
       userSelectable: boolean;
     },
-  ): Promise<{ id: string }> {
-    // Slug-collision pre-check (see ImageModelSlugCollisionError). Catalog
-    // size is tiny (~10 rows in practice); a SELECT-then-check is simpler
-    // than a SQL-expression unique index and surfaces a clear typed error.
+  ): Promise<Result<{ id: string }, CreateImageModelError>> {
+    // The catalog is tiny (~10 rows); a SELECT-then-check is simpler than a
+    // SQL-expression unique index. Two concurrent adds can both pass it,
+    // which at single-operator scale is a benign residual.
     const slug = imageModelSlug(params.name);
     const existing = await tx.select({ name: imageModels.name }).from(imageModels);
     const collision = existing.find(
       (r) => r.name !== params.name && imageModelSlug(r.name) === slug,
     );
     if (collision) {
-      throw new ImageModelSlugCollisionError(params.name, collision.name, slug);
+      return err({
+        kind: "image_model_slug_collision",
+        name: params.name,
+        existingName: collision.name,
+        slug,
+      });
     }
-    return translateUniqueViolation(async () =>
-      single(await tx.insert(imageModels).values(params).returning({ id: imageModels.id })),
+    return inSavepoint(tx, (sp) =>
+      uniqueViolationAs(
+        "image_models_name_unique",
+        { kind: "image_model_name_taken", name: params.name } as const,
+        async () =>
+          single(await sp.insert(imageModels).values(params).returning({ id: imageModels.id })),
+      ),
     );
   }
 
@@ -3401,12 +3418,12 @@ export class DrizzleAgentStore implements AgentStore {
       capabilities: ImageModelCapabilities;
       userSelectable: boolean;
     }>,
-  ): Promise<number> {
-    if (rows.length === 0) return 0;
+  ): Promise<Result<number, ImageModelSlugCollision>> {
+    if (rows.length === 0) return ok(0);
     // Slug-collision pre-check across (existing rows ∪ new rows in this
     // batch). Rows whose `name` matches an existing row are skipped (the
     // idempotent path used by ensureFalImageDefaults); a different new
-    // name with a colliding slug throws.
+    // name with a colliding slug fails the batch.
     const existingNames = (await tx.select({ name: imageModels.name }).from(imageModels)).map(
       (r) => r.name,
     );
@@ -3417,7 +3434,12 @@ export class DrizzleAgentStore implements AgentStore {
       const slug = imageModelSlug(row.name);
       const collision = seenSlugs.get(slug);
       if (collision !== undefined && collision !== row.name) {
-        throw new ImageModelSlugCollisionError(row.name, collision, slug);
+        return err({
+          kind: "image_model_slug_collision",
+          name: row.name,
+          existingName: collision,
+          slug,
+        });
       }
       seenSlugs.set(slug, row.name);
     }
@@ -3428,7 +3450,7 @@ export class DrizzleAgentStore implements AgentStore {
       .values([...rows])
       .onConflictDoNothing({ target: imageModels.name })
       .returning({ id: imageModels.id });
-    return inserted.length;
+    return ok(inserted.length);
   }
 
   async listImageModels(
@@ -3474,9 +3496,14 @@ export class DrizzleAgentStore implements AgentStore {
       systemPrompt: string | null;
       model: string;
     },
-  ): Promise<{ id: string }> {
-    return translateUniqueViolation(async () =>
-      single(await tx.insert(subAgents).values(params).returning({ id: subAgents.id })),
+  ): Promise<Result<{ id: string }, SubAgentNameTaken>> {
+    return inSavepoint(tx, (sp) =>
+      uniqueViolationAs(
+        "uq_sub_agents_user_name",
+        { kind: "sub_agent_name_taken", name: params.name } as const,
+        async () =>
+          single(await sp.insert(subAgents).values(params).returning({ id: subAgents.id })),
+      ),
     );
   }
 
@@ -3729,39 +3756,46 @@ export class DrizzleAgentStore implements AgentStore {
         observationCount: number;
       };
     },
-  ): Promise<{ id: string }> {
+  ): Promise<Result<{ id: string }, RuleGroupChanged>> {
     // A rule retired during consolidation's LLM call is never folded into a
-    // live one: short of the whole group, throw so the transaction rolls back.
+    // live one: short of the whole group, the savepoint rolls the delete back.
     // A retirement committed after this snapshot fails the delete with 40001,
     // and the transactor's retry comes up short here.
-    const deleted = await tx
-      .delete(steeringRules)
-      .where(
-        and(
-          inArray(steeringRules.id, params.oldIds),
-          inArray(steeringRules.source, LEARNED_RULE_SOURCES),
-          isNull(steeringRules.retractedAt),
+    return inSavepoint(tx, async (sp) => {
+      const deleted = await sp
+        .delete(steeringRules)
+        .where(
+          and(
+            inArray(steeringRules.id, params.oldIds),
+            inArray(steeringRules.source, LEARNED_RULE_SOURCES),
+            isNull(steeringRules.retractedAt),
+          ),
+        )
+        .returning({ id: steeringRules.id });
+      if (deleted.length !== params.oldIds.length) {
+        return err({
+          kind: "rule_group_changed" as const,
+          deleted: deleted.length,
+        });
+      }
+      return ok(
+        single(
+          await sp
+            .insert(steeringRules)
+            .values({
+              rule: params.newRule.rule,
+              category: params.newRule.category,
+              source: "evolution",
+              active: true,
+              priority: params.newRule.priority,
+              observationCount: params.newRule.observationCount,
+              profileId: params.newRule.profileId,
+              channelType: params.newRule.channelType,
+            })
+            .returning({ id: steeringRules.id }),
         ),
-      )
-      .returning({ id: steeringRules.id });
-    if (deleted.length !== params.oldIds.length) {
-      throw new RuleGroupChangedError(params.oldIds.length, deleted.length);
-    }
-    return single(
-      await tx
-        .insert(steeringRules)
-        .values({
-          rule: params.newRule.rule,
-          category: params.newRule.category,
-          source: "evolution",
-          active: true,
-          priority: params.newRule.priority,
-          observationCount: params.newRule.observationCount,
-          profileId: params.newRule.profileId,
-          channelType: params.newRule.channelType,
-        })
-        .returning({ id: steeringRules.id }),
-    );
+      );
+    });
   }
 
   async setInstructionRule(

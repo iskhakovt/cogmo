@@ -1,0 +1,7 @@
+Agent-store write failures are tagged `Result` values, and a duplicate repo or MCP server name answers instead of crashing.
+
+- **Store.** `createProfile`, `updateProfile`, `deleteProfile`, the profile-class, compartment, alias, image-provider, image-model and sub-agent writes, and `replaceRules` return `Result`s. The error is a plain tagged value (`profile_name_taken`, `profile_in_use`, `alias_taken`, `rule_group_changed`, …) in `agent/store/errors.ts`, replacing twelve `Error` classes. A write that can hit a constraint runs in a savepoint and matches it by constraint name, so an `Err` leaves the caller's transaction usable; any other database error still throws.
+- **`commitIfOk`** (`db/transactor.ts`) commits only an `Ok`. The CLI and wizard write a provider's API-key secret and the provider row through it, so a rejected provider no longer leaves its secret overwritten.
+- **Duplicate names.** Transport checked for `UniqueViolationError`, which neither the coding nor the MCP store ever threw, so `repos add` / `repos clone` with a taken name surfaced the raw Postgres error. The coding store returns `repo_name_taken`, matched on `coding_repos_name_unique`.
+- **Model discovery** returns `Result<…, DiscoveryError>`: `unavailable` falls back to typing the model id, `rejected` offers a retry. A 200 with a non-JSON body counts as `unavailable`.
+- `TurnRowMissingError` stays a throw: the row is written by an earlier step of the same run, so its absence is an invariant violation.

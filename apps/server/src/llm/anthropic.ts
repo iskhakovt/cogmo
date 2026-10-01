@@ -13,7 +13,7 @@ import { cacheMarker } from "./cache-marker.js";
 import { extractText } from "./content.js";
 import {
   MissingToolCallError,
-  ProviderProtocolError,
+  type ProviderProtocolError,
   parseToolArgs,
   ToolArgsCutOffError,
 } from "./errors.js";
@@ -201,22 +201,22 @@ export class AnthropicProvider implements LlmProvider {
             case "content_block_stop": {
               const toolBlock = toolBlocks.get(event.index);
               if (toolBlock) {
-                // parseToolArgs wraps SyntaxError as ProviderProtocolError so
-                // the fallback chain doesn't misclassify it as transient.
                 toolBlocks.delete(event.index);
-                let input: unknown;
-                try {
-                  input = parseToolArgs(
-                    toolBlock.jsonChunks.join(""),
-                    toolBlock.name,
-                    "Anthropic streamed tool_use input",
-                  );
-                } catch (parseErr) {
-                  if (!(parseErr instanceof ProviderProtocolError)) throw parseErr;
-                  unparsed = parseErr;
+                const input = parseToolArgs(
+                  toolBlock.jsonChunks.join(""),
+                  toolBlock.name,
+                  "Anthropic streamed tool_use input",
+                );
+                if (input.isErr()) {
+                  unparsed = input.error;
                   break;
                 }
-                yield { type: "tool_start", id: toolBlock.id, name: toolBlock.name, input };
+                yield {
+                  type: "tool_start",
+                  id: toolBlock.id,
+                  name: toolBlock.name,
+                  input: input.value,
+                };
               }
               const thinkingBlock = thinkingBlocks.get(event.index);
               if (thinkingBlock) {

@@ -26,14 +26,12 @@ export function pinoNoticeHandler(notice: Notice): void {
  * Workaround until Drizzle adds native .single() / .firstOrThrow().
  * See: https://github.com/drizzle-team/drizzle-orm/issues/4363
  */
-export function single<T>(rows: T[]): T {
-  if (rows.length === 0) {
-    throw new Error("Expected exactly 1 row, got 0");
-  }
-  if (rows.length > 1) {
+export function single<T>(rows: ReadonlyArray<T>): T {
+  const [row] = rows;
+  if (rows.length !== 1 || row === undefined) {
     throw new Error(`Expected exactly 1 row, got ${rows.length}`);
   }
-  return rows[0] as T;
+  return row;
 }
 
 /** UUIDv7 primary key — DB-generated, time-ordered. */
