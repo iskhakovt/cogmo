@@ -104,7 +104,7 @@ function buildFakeSandbox(): FakeSandboxBundle {
   return { sandbox, session, stdin, stdout, stderr, execDisposeCalls, calls };
 }
 
-const noopCtx: CtxHandler = { handle: async () => null };
+const noopCtx: CtxHandler = { handle: async () => ok(null) };
 
 function invokeParams(taskId: string): InvokeParams {
   return {

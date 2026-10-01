@@ -50,23 +50,16 @@ export interface WorkerTransport {
  */
 export interface CtxHandler {
   /**
-   * Resolve a single ctx_call with the call's value, or throw a `CtxError`
-   * to surface a typed Python exception in the worker.
+   * Resolve a single ctx_call: its value, or the failure the worker raises
+   * as a Python `CtxError`. A handler that throws answers as `internal`.
    */
-  handle(call: { method: string; args: unknown }): Promise<unknown>;
+  handle(call: { method: string; args: unknown }): Promise<Result<unknown, CtxFailure>>;
 }
 
-/**
- * Typed error a `CtxHandler` may throw to surface a specific Python exception
- * class to the caller. Maps to the `errorKind` field on `ctx_result`.
- */
-export class CtxError extends Error {
-  readonly kind: string;
-  constructor(kind: string, message: string) {
-    super(message);
-    this.kind = kind;
-    this.name = `CtxError(${kind})`;
-  }
+/** A refused ctx call. `kind` is the `errorKind` on `ctx_result` and the Python `CtxError.kind`. */
+export interface CtxFailure {
+  kind: string;
+  message: string;
 }
 
 /** Validate a frame from a worker. The machine decides what a malformed one means. */
@@ -280,22 +273,25 @@ export class Dispatcher {
 
   /**
    * Serve one ctx call. The awaitable lives on the worker side, blocked on
-   * the matching `ctx_result`; a handler that throws answers with
-   * `ok: false`. The reply goes back through the machine, which sends it
-   * only if the task is still running.
+   * the matching `ctx_result`; a refusal answers with `ok: false` and its
+   * kind, a handler that throws with kind `internal`. The reply goes back
+   * through the machine, which sends it only if the task is still running.
    */
   #serve(task: PendingTask, call: CtxCall): void {
     const frame = { type: "ctx_result", taskId: task.id, id: call.id } as const;
     void Promise.resolve()
       .then(() => task.ctxHandler.handle({ method: call.method, args: call.args }))
       .then(
-        (value): CtxResult => ({ ...frame, ok: true, value }),
+        (result): CtxResult =>
+          result.match(
+            (value) => ({ ...frame, ok: true, value }),
+            ({ kind, message }) => ({ ...frame, ok: false, errorKind: kind, message }),
+          ),
         (e: unknown): CtxResult => ({
           ...frame,
           ok: false,
-          ...(e instanceof CtxError
-            ? { errorKind: e.kind, message: e.message }
-            : { errorKind: "internal", message: describeError(e) }),
+          errorKind: "internal",
+          message: describeError(e),
         }),
       )
       .then((reply) => {

@@ -1,72 +1,95 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { err, ok, type Result } from "neverthrow";
+import { describeError } from "../util/describe-error.js";
 
 const execFileP = promisify(execFile);
 
-export class GitOpsError extends Error {
-  readonly code:
-    | "ref_not_found"
-    | "file_not_found"
-    | "non_fast_forward"
-    | "ref_changed"
-    | "exec_failed";
-  constructor(
-    code: GitOpsError["code"],
-    message: string,
-    public readonly stderr?: string,
-  ) {
-    super(message);
-    this.name = "GitOpsError";
-    this.code = code;
-  }
+/** A ref, branch or sha that does not resolve in the repo. */
+export interface RefNotFound {
+  kind: "ref_not_found";
+  ref: string;
+}
+
+/** A path absent from a commit that does exist. */
+export interface FileNotFound {
+  kind: "file_not_found";
+  sha: string;
+  file: string;
+}
+
+export type GitShowError = RefNotFound | FileNotFound;
+
+function stderrOf(e: unknown): string {
+  return typeof e === "object" && e !== null && "stderr" in e && typeof e.stderr === "string"
+    ? e.stderr
+    : "";
+}
+
+function exitCodeOf(e: unknown): unknown {
+  return typeof e === "object" && e !== null && "code" in e ? e.code : undefined;
 }
 
 /**
- * Resolve a ref (branch, tag, sha-prefix) to a full 40-char SHA. Throws
- * `ref_not_found` if the ref is unknown — used by `register` to verify the
- * branch exists before reading from it.
+ * A git invocation that failed for a reason no caller handles: git missing,
+ * the repo unreadable, a corrupt object. Thrown, since nothing but a human
+ * repairs it.
  */
-export async function revParse(repoPath: string, ref: string): Promise<string> {
+function gitFailure(what: string, e: unknown): Error {
+  return new Error(`git ${what} failed: ${describeError(e)}`, { cause: e });
+}
+
+/**
+ * Resolve a ref (branch, tag, sha-prefix) to a full 40-char SHA. Errs with
+ * `ref_not_found` when the ref is unknown.
+ */
+export async function revParse(
+  repoPath: string,
+  ref: string,
+): Promise<Result<string, RefNotFound>> {
   try {
     const { stdout } = await execFileP("git", ["-C", repoPath, "rev-parse", "--verify", ref]);
-    return stdout.trim();
+    return ok(stdout.trim());
   } catch (e) {
-    const stderr = (e as { stderr?: string }).stderr ?? "";
-    if (/unknown revision|bad revision|Needed a single revision|invalid object name/.test(stderr)) {
-      throw new GitOpsError("ref_not_found", `ref not found: ${ref}`, stderr);
+    if (
+      /unknown revision|bad revision|Needed a single revision|invalid object name/.test(stderrOf(e))
+    ) {
+      return err({ kind: "ref_not_found", ref });
     }
-    throw new GitOpsError("exec_failed", `git rev-parse failed: ${(e as Error).message}`, stderr);
+    throw gitFailure("rev-parse", e);
   }
 }
 
 /**
- * Read a file's contents at a specific commit. The bare repo doesn't have a
- * working copy, so all reads go through `git show <sha>:<path>`. Throws
- * `file_not_found` if the path doesn't exist at that commit (vs ref_not_found
- * which is a missing commit) so the caller can produce a precise error.
+ * Read a file's contents at a specific commit. The bare repo has no working
+ * copy, so every read goes through `git show <sha>:<path>`. A missing path
+ * (`file_not_found`) is told apart from a missing commit (`ref_not_found`).
  */
-export async function gitShow(repoPath: string, sha: string, file: string): Promise<string> {
+export async function gitShow(
+  repoPath: string,
+  sha: string,
+  file: string,
+): Promise<Result<string, GitShowError>> {
   try {
     const { stdout } = await execFileP("git", ["-C", repoPath, "show", `${sha}:${file}`], {
       maxBuffer: 16 * 1024 * 1024,
     });
-    return stdout;
+    return ok(stdout);
   } catch (e) {
-    const stderr = (e as { stderr?: string }).stderr ?? "";
+    const stderr = stderrOf(e);
     if (/exists on disk, but not in|does not exist/.test(stderr)) {
-      throw new GitOpsError("file_not_found", `file not found at ${sha}: ${file}`, stderr);
+      return err({ kind: "file_not_found", sha, file });
     }
     if (/unknown revision|bad revision|invalid object name/.test(stderr)) {
-      throw new GitOpsError("ref_not_found", `ref not found: ${sha}`, stderr);
+      return err({ kind: "ref_not_found", ref: sha });
     }
-    throw new GitOpsError("exec_failed", `git show failed: ${(e as Error).message}`, stderr);
+    throw gitFailure("show", e);
   }
 }
 
 /**
  * Returns true when `ancestor` is an ancestor of `descendant`. Used to enforce
- * fast-forward semantics on register / rollback. A ref that doesn't exist
- * yet (no prior main) is treated as ancestor of anything.
+ * fast-forward semantics on register / rollback.
  */
 export async function isAncestor(
   repoPath: string,
@@ -77,28 +100,23 @@ export async function isAncestor(
     await execFileP("git", ["-C", repoPath, "merge-base", "--is-ancestor", ancestor, descendant]);
     return true;
   } catch (e) {
-    const exitCode = (e as { code?: number }).code;
-    if (exitCode === 1) {
-      return false;
-    }
-    const stderr = (e as { stderr?: string }).stderr ?? "";
-    throw new GitOpsError(
-      "exec_failed",
-      `git merge-base --is-ancestor failed: ${(e as Error).message}`,
-      stderr,
-    );
+    if (exitCodeOf(e) === 1) return false;
+    throw gitFailure("merge-base --is-ancestor", e);
   }
 }
 
 /**
  * Atomically advance a ref to a new SHA, optionally checking the current SHA
  * matches `expectedOldSha` (CAS — `git update-ref`'s third positional argument).
- * Pass an empty string for `expectedOldSha` when creating the ref for the first
- * time; pass `undefined` to skip the CAS check.
+ * Pass the zero SHA for `expectedOldSha` when creating the ref; pass
+ * `undefined` to skip the CAS check.
  *
  * `git update-ref` is the only ref-mutation path that bypasses the
  * `pre-receive` hook installed by `bootstrapSkillsRepo` — so this is the
  * single mechanism by which Cogmo advances `refs/heads/main`.
+ *
+ * Throws when the CAS check fails: the deploy transactions call this last,
+ * inside the transaction, and the throw is what rolls them back.
  */
 export async function updateRef(
   repoPath: string,
@@ -113,49 +131,32 @@ export async function updateRef(
   try {
     await execFileP("git", args);
   } catch (e) {
-    const stderr = (e as { stderr?: string }).stderr ?? "";
-    if (/cannot lock ref|is at .* but expected/.test(stderr)) {
-      throw new GitOpsError(
-        "ref_changed",
-        `ref ${ref} changed since read (expected ${expectedOldSha})`,
-        stderr,
-      );
+    if (/cannot lock ref|is at .* but expected/.test(stderrOf(e))) {
+      throw new Error(`ref ${ref} changed since read (expected ${expectedOldSha})`, { cause: e });
     }
-    throw new GitOpsError("exec_failed", `git update-ref failed: ${(e as Error).message}`, stderr);
+    throw gitFailure("update-ref", e);
   }
 }
 
 /**
  * Delete a branch (any non-main ref). Used by `register` after merging a
- * feature branch into main — the branch is no longer needed; the audit trail
- * lives on `skill_deploys.git_sha`. No-op if the ref doesn't exist (best-effort
- * cleanup; we don't want to fail the register path on a stale delete).
+ * feature branch into main — the audit trail lives on `skill_deploys.git_sha`.
+ * No-op if the ref doesn't exist.
  *
- * Refuses `refs/heads/main` (or bare `main`) at the boundary — `main` is only
- * advanced via {@link updateRef}, never deleted. Defense in depth against a
- * caller bug computing the wrong branch name (e.g. registering from `main`
- * itself); without this guard, a misuse silently drops the skills repo's only
- * authoritative ref.
+ * Refuses `refs/heads/main` (or bare `main`): `main` is only advanced via
+ * {@link updateRef}, never deleted, and a caller computing that name has a bug.
  */
 export async function deleteRef(repoPath: string, ref: string): Promise<void> {
   if (ref === "main" || ref === "refs/heads/main") {
-    throw new GitOpsError(
-      "exec_failed",
+    throw new Error(
       "deleteRef refuses to delete refs/heads/main — main is advanced via updateRef only",
     );
   }
   try {
     await execFileP("git", ["-C", repoPath, "update-ref", "-d", ref]);
   } catch (e) {
-    const stderr = (e as { stderr?: string }).stderr ?? "";
-    if (/no ref|does not exist/.test(stderr)) {
-      return;
-    }
-    throw new GitOpsError(
-      "exec_failed",
-      `git update-ref -d failed: ${(e as Error).message}`,
-      stderr,
-    );
+    if (/no ref|does not exist/.test(stderrOf(e))) return;
+    throw gitFailure("update-ref -d", e);
   }
 }
 
@@ -164,12 +165,5 @@ export async function deleteRef(repoPath: string, ref: string): Promise<void> {
  * has no main on first boot — every register past that returns a SHA.
  */
 export async function getMainSha(repoPath: string): Promise<string | null> {
-  try {
-    return await revParse(repoPath, "refs/heads/main");
-  } catch (e) {
-    if (e instanceof GitOpsError && e.code === "ref_not_found") {
-      return null;
-    }
-    throw e;
-  }
+  return (await revParse(repoPath, "refs/heads/main")).unwrapOr(null);
 }

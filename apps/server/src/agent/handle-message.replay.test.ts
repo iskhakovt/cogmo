@@ -1217,7 +1217,7 @@ describe("handle-message — turn inputs frozen across re-invocations", () => {
     );
     skillRunner.invoke.mockImplementation(async () => {
       skillLoads = false;
-      return { runId: "skill-run-1", status: "success", output: 42 };
+      return ok({ runId: "skill-run-1", status: "success", output: 42 });
     });
     const { resolveProvider, requests } = callThenAnswer({ name: "echo", input: { n: 42 } });
     const deps = mockDeps({

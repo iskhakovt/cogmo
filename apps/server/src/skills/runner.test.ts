@@ -5,16 +5,11 @@ import type { Service } from "../agent/service.js";
 import type { Database, Transactor } from "../db/index.js";
 import type { SandboxClient } from "../sandbox/index.js";
 import type { SecretsStore } from "../secrets/store/index.js";
+import { expectDefined } from "../test/assertions.js";
 import { mockFilesService } from "../test/factories.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import type { SkillRunAs, SkillRunServices } from "./run-as.js";
-import {
-  InputValidationError,
-  mapManifestResourceLimits,
-  SkillInflightError,
-  SkillRunnerImpl,
-  type SkillRunnerOptions,
-} from "./runner.js";
+import { mapManifestResourceLimits, SkillRunnerImpl, type SkillRunnerOptions } from "./runner.js";
 import { DrizzleSkillStore } from "./store/index.js";
 import { SysboxWorkerPool } from "./worker-sysbox/pool.js";
 
@@ -127,7 +122,9 @@ describe("SkillRunnerImpl", () => {
       body: ECHO_BODY,
     });
 
-    const result = await runner.invoke({ name: "echo", inputs: { x: 7 }, runAs: runAs() });
+    const result = (
+      await runner.invoke({ name: "echo", inputs: { x: 7 }, runAs: runAs() })
+    )._unsafeUnwrap();
     expect(result.status).toBe("success");
     expect(result.output).toEqual({ echo: 8 });
 
@@ -167,11 +164,13 @@ async def run(inputs, ctx):
 `;
     await runner.__registerForTests({ name: "with-recall", manifestSource: manifest, body });
 
-    const result = await runner.invoke({
-      name: "with-recall",
-      inputs: {},
-      runAs: runAs({ memory }),
-    });
+    const result = (
+      await runner.invoke({
+        name: "with-recall",
+        inputs: {},
+        runAs: runAs({ memory }),
+      })
+    )._unsafeUnwrap();
     expect(result.status).toBe("success");
     expect(result.output).toEqual({ count: 1 });
 
@@ -207,11 +206,13 @@ async def run(inputs, ctx):
 `;
     await runner.__registerForTests({ name: "whoami", manifestSource: manifest, body });
 
-    const result = await runner.invoke({
-      name: "whoami",
-      inputs: {},
-      runAs: runAs({ memory }, "user-42"),
-    });
+    const result = (
+      await runner.invoke({
+        name: "whoami",
+        inputs: {},
+        runAs: runAs({ memory }, "user-42"),
+      })
+    )._unsafeUnwrap();
 
     expect(result.output).toEqual({ user: "user-42", timezone: "UTC", count: 1 });
     expect(memory.recall).toHaveBeenCalledWith("hello");
@@ -251,7 +252,9 @@ async def run(inputs, ctx):
 `;
     await runner.__registerForTests({ name: "with-files", manifestSource: manifest, body });
 
-    const result = await runner.invoke({ name: "with-files", inputs: {}, runAs: runAs({ files }) });
+    const result = (
+      await runner.invoke({ name: "with-files", inputs: {}, runAs: runAs({ files }) })
+    )._unsafeUnwrap();
     expect(result.status).toBe("success");
     expect(result.output).toEqual({
       content: "hello",
@@ -304,7 +307,9 @@ async def run(inputs, ctx):
 `;
       await runner.__registerForTests({ name: "with-http", manifestSource: manifest, body });
 
-      const result = await runner.invoke({ name: "with-http", inputs: {}, runAs: runAs() });
+      const result = (
+        await runner.invoke({ name: "with-http", inputs: {}, runAs: runAs() })
+      )._unsafeUnwrap();
       expect(result.status).toBe("success");
       expect(result.output).toEqual({ status: 200, n: 42 });
       expect(resolveHost).toHaveBeenCalledWith("api.example.com");
@@ -353,7 +358,9 @@ async def run(inputs, ctx):
 `;
       await runner.__registerForTests({ name: "http-audited", manifestSource: manifest, body });
 
-      const result = await runner.invoke({ name: "http-audited", inputs: {}, runAs: runAs() });
+      const result = (
+        await runner.invoke({ name: "http-audited", inputs: {}, runAs: runAs() })
+      )._unsafeUnwrap();
       expect(result.status).toBe("success");
       const calls = await tx((trx) => store.listContextCallsForRun(trx, result.runId));
       expect(calls.find((c) => c.method === "http.request")?.ok).toBe(true);
@@ -400,11 +407,13 @@ async def run(inputs, ctx):
 `;
     await runner.__registerForTests({ name: "forbidden-read", manifestSource: manifest, body });
 
-    const result = await runner.invoke({
-      name: "forbidden-read",
-      inputs: {},
-      runAs: runAs({ files }),
-    });
+    const result = (
+      await runner.invoke({
+        name: "forbidden-read",
+        inputs: {},
+        runAs: runAs({ files }),
+      })
+    )._unsafeUnwrap();
     expect(result.status).toBe("success");
     expect(result.output).toEqual({ reached: false, kind: "missing_effect" });
     expect(files.read).not.toHaveBeenCalled();
@@ -422,7 +431,9 @@ async def run(inputs, ctx):
       body,
     });
 
-    const result = await runner.invoke({ name: "boom", inputs: { x: 1 }, runAs: runAs() });
+    const result = (
+      await runner.invoke({ name: "boom", inputs: { x: 1 }, runAs: runAs() })
+    )._unsafeUnwrap();
     expect(result.status).toBe("error");
     expect(result.error).toContain("kaboom");
 
@@ -449,9 +460,16 @@ async def run(inputs, ctx):
       body: ECHO_BODY,
     });
 
-    await expect(
-      runner.invoke({ name: "echo", inputs: { x: "not-an-int" }, runAs: runAs() }),
-    ).rejects.toBeInstanceOf(InputValidationError);
+    const rejected = await runner.invoke({
+      name: "echo",
+      inputs: { x: "not-an-int" },
+      runAs: runAs(),
+    });
+    expect(rejected._unsafeUnwrapErr()).toEqual({
+      kind: "invalid_inputs",
+      name: "echo",
+      issues: [expect.stringContaining("/x")],
+    });
 
     // No skill_runs row created — the validator runs before insertRun.
     const run = await db.query.skillRuns.findFirst();
@@ -460,9 +478,8 @@ async def run(inputs, ctx):
 
   it("rejects an unknown skill name", async () => {
     const runner = await makeRunner();
-    await expect(runner.invoke({ name: "missing", inputs: {}, runAs: runAs() })).rejects.toThrow(
-      /not found/,
-    );
+    const rejected = await runner.invoke({ name: "missing", inputs: {}, runAs: runAs() });
+    expect(rejected._unsafeUnwrapErr()).toEqual({ kind: "not_found", name: "missing" });
   });
 
   it("rejects a disabled skill", async () => {
@@ -474,9 +491,8 @@ async def run(inputs, ctx):
     });
     await tx((trx) => store.disableSkill(trx, row.id));
 
-    await expect(runner.invoke({ name: "echo", inputs: { x: 1 }, runAs: runAs() })).rejects.toThrow(
-      /disabled/,
-    );
+    const rejected = await runner.invoke({ name: "echo", inputs: { x: 1 }, runAs: runAs() });
+    expect(rejected._unsafeUnwrapErr()).toEqual({ kind: "disabled", name: "echo" });
   });
 
   it("public register without skillsRepoPath throws clear config error", async () => {
@@ -518,9 +534,11 @@ inputs:
       manifestSource: containerManifest,
       body: ECHO_BODY,
     });
-    await expect(
-      runner.invoke({ name: "container-skill", inputs: {}, runAs: runAs() }),
-    ).rejects.toThrow(/no sandbox is configured/);
+    const rejected = await runner.invoke({ name: "container-skill", inputs: {}, runAs: runAs() });
+    expect(rejected._unsafeUnwrapErr()).toEqual({
+      kind: "sandbox_unavailable",
+      name: "container-skill",
+    });
   });
 
   it("two sequential invokes succeed independently (no shared state)", async () => {
@@ -530,8 +548,12 @@ inputs:
       manifestSource: ECHO_MANIFEST,
       body: ECHO_BODY,
     });
-    const a = await runner.invoke({ name: "echo", inputs: { x: 1 }, runAs: runAs() });
-    const b = await runner.invoke({ name: "echo", inputs: { x: 2 }, runAs: runAs() });
+    const a = (
+      await runner.invoke({ name: "echo", inputs: { x: 1 }, runAs: runAs() })
+    )._unsafeUnwrap();
+    const b = (
+      await runner.invoke({ name: "echo", inputs: { x: 2 }, runAs: runAs() })
+    )._unsafeUnwrap();
     expect(a.output).toEqual({ echo: 2 });
     expect(b.output).toEqual({ echo: 3 });
     expect(a.runId).not.toBe(b.runId);
@@ -544,12 +566,14 @@ inputs:
       manifestSource: ECHO_MANIFEST,
       body: ECHO_BODY,
     });
-    const result = await runner.invoke({
-      name: "echo",
-      inputs: { x: 1 },
-      trigger: "cron",
-      runAs: runAs(),
-    });
+    const result = (
+      await runner.invoke({
+        name: "echo",
+        inputs: { x: 1 },
+        trigger: "cron",
+        runAs: runAs(),
+      })
+    )._unsafeUnwrap();
     const run = await tx((trx) => store.getRun(trx, result.runId));
     expect(run?.trigger).toBe("cron");
   });
@@ -736,7 +760,7 @@ inputs:
     const results = await Promise.all(
       [1, 2, 3, 4, 5].map((x) => runner.invoke({ name: "echo", inputs: { x }, runAs: runAs() })),
     );
-    expect(results.every((r) => r.status === "success")).toBe(true);
+    expect(results.every((r) => r._unsafeUnwrap().status === "success")).toBe(true);
   });
 
   describe("idempotency key + recovery_point replay", () => {
@@ -748,12 +772,14 @@ inputs:
         body: ECHO_BODY,
       });
 
-      const result = await runner.invoke({
-        name: "echo",
-        inputs: { x: 10 },
-        idempotencyKey: "skill-cron:echo:t1",
-        runAs: runAs(),
-      });
+      const result = (
+        await runner.invoke({
+          name: "echo",
+          inputs: { x: 10 },
+          idempotencyKey: "skill-cron:echo:t1",
+          runAs: runAs(),
+        })
+      )._unsafeUnwrap();
       expect(result.status).toBe("success");
       expect(result.output).toEqual({ echo: 11 });
 
@@ -776,18 +802,22 @@ inputs:
         body: ECHO_BODY,
       });
 
-      const first = await runner.invoke({
-        name: "echo",
-        inputs: { x: 7 },
-        idempotencyKey: "skill-cron:echo:replay-key",
-        runAs: runAs(),
-      });
-      const second = await runner.invoke({
-        name: "echo",
-        inputs: { x: 7 },
-        idempotencyKey: "skill-cron:echo:replay-key",
-        runAs: runAs(),
-      });
+      const first = (
+        await runner.invoke({
+          name: "echo",
+          inputs: { x: 7 },
+          idempotencyKey: "skill-cron:echo:replay-key",
+          runAs: runAs(),
+        })
+      )._unsafeUnwrap();
+      const second = (
+        await runner.invoke({
+          name: "echo",
+          inputs: { x: 7 },
+          idempotencyKey: "skill-cron:echo:replay-key",
+          runAs: runAs(),
+        })
+      )._unsafeUnwrap();
 
       // Same runId proves we recovered the row instead of inserting a new
       // one. Same output proves the cached result was returned. No way
@@ -833,12 +863,14 @@ inputs:
         }),
       );
 
-      const result = await runner.invoke({
-        name: "echo",
-        inputs: { x: 100 },
-        idempotencyKey: "skill-cron:echo:executed-replay",
-        runAs: runAs(),
-      });
+      const result = (
+        await runner.invoke({
+          name: "echo",
+          inputs: { x: 100 },
+          idempotencyKey: "skill-cron:echo:executed-replay",
+          runAs: runAs(),
+        })
+      )._unsafeUnwrap();
       expect(result.runId).toBe(row.id);
       expect(result.status).toBe("success");
       expect(result.output).toEqual({ echo: 999 });
@@ -848,12 +880,19 @@ inputs:
       expect(reloaded?.status).toBe("success");
     });
 
-    it("recovered row with recovery_point='started' throws SkillInflightError", async () => {
+    it("throws on an empty idempotency key, before reading the skill", async () => {
+      const runner = await makeRunner();
+      await expect(
+        runner.invoke({ name: "missing", inputs: {}, idempotencyKey: "", runAs: runAs() }),
+      ).rejects.toThrow(/idempotencyKey must be non-empty/);
+    });
+
+    it("recovered row with recovery_point='started' is rejected as inflight", async () => {
       // Row in `recovery_point='started'` can mean either (a) a prior
       // attempt crashed mid-execute, or (b) another worker is currently
       // executing this same key. The runner can't tell those apart from
-      // the row alone — both refuse re-execution, both surface the same
-      // typed error. This test seeds the row directly via
+      // the row alone — both refuse re-execution with the same rejection.
+      // This test seeds the row directly via
       // `startOrRecoverRun` (no real execute), which is the test
       // equivalent of either scenario.
       const runner = await makeRunner();
@@ -872,14 +911,17 @@ inputs:
         }),
       );
 
-      await expect(
-        runner.invoke({
-          name: "echo",
-          inputs: { x: 1 },
-          idempotencyKey: "skill-cron:echo:inflight",
-          runAs: runAs(),
-        }),
-      ).rejects.toThrow(SkillInflightError);
+      const rejected = await runner.invoke({
+        name: "echo",
+        inputs: { x: 1 },
+        idempotencyKey: "skill-cron:echo:inflight",
+        runAs: runAs(),
+      });
+      expect(rejected._unsafeUnwrapErr()).toEqual({
+        kind: "inflight",
+        name: "echo",
+        runId: row.id,
+      });
 
       // Row stays as-is — operator inspects and decides.
       const reloaded = await tx((trx) => store.getRun(trx, row.id));
@@ -905,7 +947,9 @@ async def run(inputs, ctx):
       manifestSource: ECHO_MANIFEST.replace("name: echo", "name: unicode"),
       body,
     });
-    const r = await runner.invoke({ name: "unicode", inputs: { x: 1 }, runAs: runAs() });
+    const r = (
+      await runner.invoke({ name: "unicode", inputs: { x: 1 }, runAs: runAs() })
+    )._unsafeUnwrap();
     expect(r.status).toBe("success");
     expect(r.output).toEqual({
       emoji: "😀",
@@ -1020,7 +1064,7 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
     expect(createSpy).toHaveBeenCalledTimes(1);
     expect(fakePool.invoke).toHaveBeenCalledTimes(3);
     for (const r of results) {
-      expect(r.status).toBe("success");
+      expect(r._unsafeUnwrap().status).toBe("success");
     }
   });
 
@@ -1031,11 +1075,7 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
       .mockResolvedValueOnce(fakePool);
     const runner = await makeTier2Runner();
 
-    // First invoke fails because pool create rejects. The current
-    // tier-2 path surfaces the failure as a thrown exception (no
-    // outer try/catch wraps `pool.invoke`); the contract under test
-    // here is just that the failure happens AND that the second
-    // invoke retries — not the shape of the failure surface.
+    // First invoke throws because pool create rejects.
     await expect(runner.invoke({ name: "tier2-test", inputs: {}, runAs: runAs() })).rejects.toThrow(
       /daytona unreachable/,
     );
@@ -1043,10 +1083,100 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
     // Second invoke triggers a fresh create — pool resolves and the
     // skill runs through normally. Pins the "no permanent poisoning"
     // contract.
-    const ok = await runner.invoke({ name: "tier2-test", inputs: {}, runAs: runAs() });
+    const ok = (
+      await runner.invoke({ name: "tier2-test", inputs: {}, runAs: runAs() })
+    )._unsafeUnwrap();
     expect(ok.status).toBe("success");
     expect(createSpy).toHaveBeenCalledTimes(2);
     expect(fakePool.invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it("a pool that fails to start writes no run row, so a keyed retry runs the skill", async () => {
+    const fakePool = makeFakePool();
+    createSpy
+      .mockRejectedValueOnce(new Error("daytona unreachable"))
+      .mockResolvedValueOnce(fakePool);
+    const runner = await makeTier2Runner();
+    const keyed = {
+      name: "tier2-test",
+      inputs: {},
+      idempotencyKey: "skill-cron:tier2:retry",
+      runAs: runAs(),
+    };
+
+    await expect(runner.invoke(keyed)).rejects.toThrow(/daytona unreachable/);
+    expect(await db.query.skillRuns.findFirst()).toBeUndefined();
+
+    const retried = (await runner.invoke(keyed))._unsafeUnwrap();
+    expect(retried.status).toBe("success");
+    expect(fakePool.invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it("a finished keyed run replays its cached result without starting a pool", async () => {
+    createSpy.mockRejectedValue(new Error("daytona unreachable"));
+    const runner = await makeTier2Runner();
+    const keyed = {
+      name: "tier2-test",
+      inputs: {},
+      idempotencyKey: "skill-cron:tier2:replay",
+      runAs: runAs(),
+    };
+    const skill = expectDefined(
+      await tx((trx) => store.getSkillByName(trx, "tier2-test")),
+      "tier2-test skill",
+    );
+    const { row } = await tx((trx) =>
+      store.startOrRecoverRun(trx, {
+        skillId: skill.id,
+        trigger: "cron",
+        inputs: {},
+        idempotencyKey: keyed.idempotencyKey,
+      }),
+    );
+    await tx((trx) =>
+      store.transitionToExecuted(trx, {
+        id: row.id,
+        output: { x: 7 },
+        error: null,
+        resourceUsage: { wallClockMs: 5, peakMemoryBytes: null },
+        finishedAt: new Date(),
+      }),
+    );
+    await tx((trx) =>
+      store.transitionToFinished(trx, {
+        id: row.id,
+        status: "success",
+        output: { x: 7 },
+        error: null,
+      }),
+    );
+    const cached = { runId: row.id, status: "success", output: { x: 7 } };
+
+    expect((await runner.invoke(keyed))._unsafeUnwrap()).toMatchObject(cached);
+    await runner.shutdown();
+    expect((await runner.invoke(keyed))._unsafeUnwrap()).toMatchObject(cached);
+    expect(createSpy).not.toHaveBeenCalled();
+  });
+
+  it("a pool result with ok:false finishes the run as an error", async () => {
+    const fakePool = makeFakePool();
+    vi.mocked(fakePool.invoke).mockResolvedValueOnce({
+      ok: false,
+      error: "worker_crashed",
+      workerReusable: false,
+    });
+    createSpy.mockResolvedValueOnce(fakePool);
+    const runner = await makeTier2Runner();
+
+    const result = (
+      await runner.invoke({ name: "tier2-test", inputs: {}, runAs: runAs() })
+    )._unsafeUnwrap();
+
+    expect(result.status).toBe("error");
+    const run = await db.query.skillRuns.findFirst();
+    expect(run?.status).toBe("error");
+    expect(run?.error).toBe("worker_crashed");
+    expect(run?.recoveryPoint).toBe("finished");
   });
 
   it("invoke after shutdown throws and never calls SysboxWorkerPool.create", async () => {
@@ -1093,7 +1223,7 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
       body: TIER2_BODY,
     });
 
-    await runner.invoke({ name: "tier2-test", inputs: {}, runAs: runAs() });
+    (await runner.invoke({ name: "tier2-test", inputs: {}, runAs: runAs() }))._unsafeUnwrap();
 
     expect(createSpy).toHaveBeenCalledTimes(1);
     const poolArgs = createSpy.mock.calls[0]?.[0] as { depsCacheVolumeName?: string };
@@ -1130,7 +1260,7 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
       body: TIER2_BODY,
     });
 
-    await runner.invoke({ name: "tier2-test", inputs: {}, runAs: runAs() });
+    (await runner.invoke({ name: "tier2-test", inputs: {}, runAs: runAs() }))._unsafeUnwrap();
 
     expect(createSpy).toHaveBeenCalledTimes(1);
     const poolArgs = createSpy.mock.calls[0]?.[0] as { depsCacheVolumeName?: string };

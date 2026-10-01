@@ -1806,7 +1806,7 @@ describe("createHandleMessage", () => {
           gitSha: "abc1234",
         },
       ]);
-      skillRunner.invoke.mockResolvedValue({ runId: "run-1", status: "success", output: {} });
+      skillRunner.invoke.mockResolvedValue(ok({ runId: "run-1", status: "success", output: {} }));
       const deps = mockDeps({
         agentStore: mockAgentStore({
           getProfile: vi.fn().mockResolvedValue(profileWithAllTools()),

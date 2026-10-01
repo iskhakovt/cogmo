@@ -410,6 +410,35 @@ tier: wasm
     expect(result.errors?.length).toBeGreaterThan(0);
   });
 
+  it("rejects an $async inputs schema and an outputs schema ajv cannot compile", async () => {
+    const runner = await makeRunner();
+    const manifest = `---
+name: bad-schemas
+description: a skill whose JSON Schemas cannot validate
+tier: wasm
+inputs:
+  type: object
+  $async: true
+  properties: {}
+outputs:
+  type: not-a-type
+---
+`;
+    await pushFeatureBranch({
+      work: repo.work,
+      branch: "bad-schemas",
+      manifest,
+      body: ECHO_BODY,
+    });
+    const result = await runner.register({ branch: "bad-schemas", origin: OWNER });
+    expect(result.status).toBe("rejected");
+    expect(result.errors).toEqual([
+      "invalid_inputs_schema: $async schemas are not supported",
+      expect.stringMatching(/^invalid_outputs_schema: /),
+    ]);
+    expect(await getMainSha(repo.bare)).toBeNull();
+  });
+
   describe("dependencies", () => {
     const ECHO_LOCKFILE = `httpx==0.27.0 \\\n    --hash=sha256:0000000000000000000000000000000000000000000000000000000000000000\n`;
 
@@ -693,7 +722,9 @@ tier: wasm
     });
     await runner.register({ branch: "skill/echo", origin: OWNER });
 
-    const result = await runner.invoke({ name: "echo", inputs: { x: 7 }, runAs: RUN_AS });
+    const result = (
+      await runner.invoke({ name: "echo", inputs: { x: 7 }, runAs: RUN_AS })
+    )._unsafeUnwrap();
     expect(result.status).toBe("success");
     expect(result.output).toEqual({ echo: 8 });
   });
@@ -712,7 +743,9 @@ tier: wasm
     await r1.register({ branch: "skill/echo", origin: OWNER });
 
     const r2 = await makeRunner();
-    const result = await r2.invoke({ name: "echo", inputs: { x: 7 }, runAs: RUN_AS });
+    const result = (
+      await r2.invoke({ name: "echo", inputs: { x: 7 }, runAs: RUN_AS })
+    )._unsafeUnwrap();
     expect(result.status).toBe("success");
     expect(result.output).toEqual({ echo: 8 });
   });
@@ -726,7 +759,9 @@ tier: wasm
       body: ECHO_BODY_BAD_OUTPUT,
     });
     await runner.register({ branch: "skill/bad-out", origin: OWNER });
-    const result = await runner.invoke({ name: "bad-out", inputs: { x: 1 }, runAs: RUN_AS });
+    const result = (
+      await runner.invoke({ name: "bad-out", inputs: { x: 1 }, runAs: RUN_AS })
+    )._unsafeUnwrap();
     expect(result.status).toBe("error");
     expect(result.error).toMatch(/output failed schema/);
   });

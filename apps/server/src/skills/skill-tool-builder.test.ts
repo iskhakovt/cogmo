@@ -1,9 +1,9 @@
-import { ok } from "neverthrow";
+import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Service } from "../agent/service.js";
 import type { ToolSpec } from "../agent/tools.js";
-import { SkillInflightError, type SkillRunner, type SkillToolDef } from "./runner.js";
+import type { SkillRunner, SkillToolDef } from "./runner.js";
 import {
   buildSkillToolSpec,
   buildSkillTools,
@@ -53,11 +53,13 @@ describe("buildSkillToolSpec", () => {
   });
 
   it("handler runs the skill as the turn's user, through the turn's scoped service", async () => {
-    const invoke = vi.fn().mockResolvedValue({
-      runId: "run-1",
-      status: "success",
-      output: { echo: 8 },
-    });
+    const invoke = vi.fn().mockResolvedValue(
+      ok({
+        runId: "run-1",
+        status: "success",
+        output: { echo: 8 },
+      }),
+    );
     const runner = makeRunner({ invoke });
     const spec = buildSkillToolSpec(ECHO_DEF, runner, TURN);
 
@@ -76,11 +78,9 @@ describe("buildSkillToolSpec", () => {
   });
 
   it("handler rejects with the run's error on a runner error result (not a throw)", async () => {
-    const invoke = vi.fn().mockResolvedValue({
-      runId: "run-2",
-      status: "error",
-      error: "kaboom",
-    });
+    const invoke = vi
+      .fn()
+      .mockResolvedValue(ok({ runId: "run-2", status: "error", error: "kaboom" }));
     const runner = makeRunner({ invoke });
     const spec = buildSkillToolSpec(ECHO_DEF, runner, TURN);
 
@@ -89,7 +89,7 @@ describe("buildSkillToolSpec", () => {
   });
 
   it("handler rejects with unknown_error when an error result carries no error text", async () => {
-    const invoke = vi.fn().mockResolvedValue({ runId: "run-3", status: "error" });
+    const invoke = vi.fn().mockResolvedValue(ok({ runId: "run-3", status: "error" }));
     const runner = makeRunner({ invoke });
     const spec = buildSkillToolSpec(ECHO_DEF, runner, TURN);
 
@@ -98,9 +98,10 @@ describe("buildSkillToolSpec", () => {
   });
 
   it("handler rejects an in-flight refusal with a verdict naming the run", async () => {
-    const invoke = vi.fn().mockRejectedValue(new SkillInflightError("echo", "run-inflight-9"));
-    const runner = makeRunner({ invoke });
-    const spec = buildSkillToolSpec(ECHO_DEF, runner, TURN);
+    const invoke = vi
+      .fn()
+      .mockResolvedValue(err({ kind: "inflight", name: "echo", runId: "run-inflight-9" }));
+    const spec = buildSkillToolSpec(ECHO_DEF, makeRunner({ invoke }), TURN);
 
     const rejection = (await spec.handler({ x: 1 }, TURN_SERVICE))._unsafeUnwrapErr();
     expect(rejection.message).toContain("(run run-inflight-9) is recorded as still running");
@@ -108,12 +109,26 @@ describe("buildSkillToolSpec", () => {
     expect(rejection.message).toContain("Do not silently re-run it");
   });
 
-  it("handler propagates a thrown runner error (e.g. invalid inputs)", async () => {
-    const invoke = vi.fn().mockRejectedValue(new Error("inputs failed schema"));
+  it("handler rejects any other runner rejection, naming it", async () => {
+    const invoke = vi
+      .fn()
+      .mockResolvedValue(
+        err({ kind: "invalid_inputs", name: "echo", issues: ["/x must be integer"] }),
+      );
+    const spec = buildSkillToolSpec(ECHO_DEF, makeRunner({ invoke }), TURN);
+
+    const rejection = (await spec.handler({ x: "a" }, TURN_SERVICE))._unsafeUnwrapErr();
+    expect(rejection.message).toMatch(
+      /inputs failed schema validation for skill 'echo': \/x must be integer/,
+    );
+  });
+
+  it("handler propagates a thrown runner error", async () => {
+    const invoke = vi.fn().mockRejectedValue(new Error("db unreachable"));
     const runner = makeRunner({ invoke });
     const spec = buildSkillToolSpec(ECHO_DEF, runner, TURN);
 
-    await expect(spec.handler({}, TURN_SERVICE)).rejects.toThrow(/inputs failed schema/);
+    await expect(spec.handler({}, TURN_SERVICE)).rejects.toThrow(/db unreachable/);
   });
 });
 

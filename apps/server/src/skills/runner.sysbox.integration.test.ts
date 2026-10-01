@@ -298,7 +298,9 @@ describe.skipIf(!SHOULD_RUN)("SkillRunnerImpl tier-2 (sysbox runtime, GHA only)"
         body: NOW_BODY,
       });
 
-      const result = await runner.invoke({ name: "tier2-now", inputs: { x: 7 }, runAs: RUN_AS });
+      const result = (
+        await runner.invoke({ name: "tier2-now", inputs: { x: 7 }, runAs: RUN_AS })
+      )._unsafeUnwrap();
       expect(result.status).toBe("success");
       expect(result.output).toMatchObject({ echoed: 8 });
       // ctx.now returns an ISO-8601 string from the host's clock.
@@ -339,7 +341,9 @@ resources:
     });
 
     const start = Date.now();
-    const result = await runner.invoke({ name: "tier2-sleep", inputs: {}, runAs: RUN_AS });
+    const result = (
+      await runner.invoke({ name: "tier2-sleep", inputs: {}, runAs: RUN_AS })
+    )._unsafeUnwrap();
     const elapsedMs = Date.now() - start;
     expect(result.status).toBe("error");
     expect(result.error).toBe("wall_clock_exceeded");
@@ -371,8 +375,12 @@ resources:
         body: HOSTNAME_BODY,
       });
 
-      const r1 = await runner.invoke({ name: "tier2-host", inputs: {}, runAs: RUN_AS });
-      const r2 = await runner.invoke({ name: "tier2-host", inputs: {}, runAs: RUN_AS });
+      const r1 = (
+        await runner.invoke({ name: "tier2-host", inputs: {}, runAs: RUN_AS })
+      )._unsafeUnwrap();
+      const r2 = (
+        await runner.invoke({ name: "tier2-host", inputs: {}, runAs: RUN_AS })
+      )._unsafeUnwrap();
       expect(r1.status).toBe("success");
       expect(r2.status).toBe("success");
       const o1 = r1.output as { host: string; relay: number; supervisor: number };
@@ -451,7 +459,9 @@ async def run(inputs, ctx):
         lockfileContents: idnaLockfile,
       });
 
-      const result = await runner.invoke({ name: "tier2-with-deps", inputs: {}, runAs: RUN_AS });
+      const result = (
+        await runner.invoke({ name: "tier2-with-deps", inputs: {}, runAs: RUN_AS })
+      )._unsafeUnwrap();
       expect(result.status, JSON.stringify(result)).toBe("success");
       // Pass `result` as the assertion-failure label so a mismatch
       // surfaces the whole row (error string, runId, etc.) rather than
@@ -493,8 +503,12 @@ async def run(inputs, ctx):
       body: STATE_LEAK_BODY,
     });
 
-    const r1 = await runner.invoke({ name: "tier2-leak", inputs: {}, runAs: RUN_AS });
-    const r2 = await runner.invoke({ name: "tier2-leak", inputs: {}, runAs: RUN_AS });
+    const r1 = (
+      await runner.invoke({ name: "tier2-leak", inputs: {}, runAs: RUN_AS })
+    )._unsafeUnwrap();
+    const r2 = (
+      await runner.invoke({ name: "tier2-leak", inputs: {}, runAs: RUN_AS })
+    )._unsafeUnwrap();
     expect(r1.status).toBe("success");
     expect(r2.status).toBe("success");
     // Task 1 sets `sys.modules["_cogmo_test_marker"]`. Task 2 runs in a
@@ -528,14 +542,18 @@ async def run(inputs, ctx):
         body: CHECK_PID_BODY,
       });
 
-      const left = await runner.invoke({ name: "tier2-leave-sleeper", inputs: {}, runAs: RUN_AS });
+      const left = (
+        await runner.invoke({ name: "tier2-leave-sleeper", inputs: {}, runAs: RUN_AS })
+      )._unsafeUnwrap();
       expect(left.status, JSON.stringify(left)).toBe("success");
       const { host, pid } = left.output as { host: string; pid: number };
-      const checked = await runner.invoke({
-        name: "tier2-check-pid",
-        inputs: { pid },
-        runAs: RUN_AS,
-      });
+      const checked = (
+        await runner.invoke({
+          name: "tier2-check-pid",
+          inputs: { pid },
+          runAs: RUN_AS,
+        })
+      )._unsafeUnwrap();
       expect(checked.status, JSON.stringify(checked)).toBe("success");
       // Same container, so the pid names the same process namespace.
       expect(checked.output).toEqual({ host, alive: false });
@@ -561,7 +579,9 @@ async def run(inputs, ctx):
         body: PROC_FD_PROBE_BODY,
       });
 
-      const result = await runner.invoke({ name: "tier2-proc-probe", inputs: {}, runAs: RUN_AS });
+      const result = (
+        await runner.invoke({ name: "tier2-proc-probe", inputs: {}, runAs: RUN_AS })
+      )._unsafeUnwrap();
       expect(result.status, JSON.stringify(result)).toBe("success");
       expect(result.output).toEqual({ opened: [], control: true });
     } finally {

@@ -1,5 +1,6 @@
 import { Ajv, type ValidateFunction } from "ajv";
 import { err, ok, type Result } from "neverthrow";
+import { match } from "ts-pattern";
 import { computeNextRun } from "../agent/scheduling/cron.js";
 import type { Transactor } from "../db/index.js";
 import { defaultSkillsImage } from "../env.js";
@@ -8,28 +9,30 @@ import type { SandboxClient } from "../sandbox/index.js";
 import { type GitEnv, runGit, withGitAskpass } from "../secrets/git-askpass.js";
 import { DEFAULT_GITHUB_IDENTITY_NAME, resolveGitHubIdentity } from "../secrets/github.js";
 import type { SecretsStore } from "../secrets/store/index.js";
+import { describeError } from "../util/describe-error.js";
 import { classifyManifest, STUB_CLASSIFIER_VERSION } from "./classifier.js";
 import { DefaultCtxHandler, type DefaultCtxHandlerOptions } from "./ctx-handler.js";
 import {
   hashLockfileContents,
   type LockfileCompiler,
+  type LockfileSnapshot,
   makeSandboxLockfileCompiler,
   parseLockfilePackageSpecs,
   readLockfileAtSha,
 } from "./deps.js";
-import {
-  deleteRef,
-  GitOpsError,
-  getMainSha,
-  gitShow,
-  isAncestor,
-  revParse,
-  updateRef,
-} from "./git-ops.js";
-import { parseManifest } from "./manifest.js";
+import { deleteRef, getMainSha, isAncestor, revParse, updateRef } from "./git-ops.js";
+import type { SkillInvokeRejection } from "./invoke-rejection.js";
+import { manifestErrorIssues, parseManifest } from "./manifest.js";
 import { checkPyodideCompat, formatPyodideCompatIssues } from "./pyodide-compat.js";
 import { readOriginUrl } from "./repo.js";
 import type { SkillRunAs } from "./run-as.js";
+import {
+  readSkillSource,
+  SKILL_BODY_FILE,
+  SKILL_MANIFEST_FILE,
+  type SkillSource,
+  type SkillSourceError,
+} from "./skill-source.js";
 import type {
   ExecuteRegisterResult,
   InsertSkillParams,
@@ -83,6 +86,27 @@ export function mapManifestResourceLimits(resources: SkillManifest["resources"] 
     ...(resources?.cpu_shares !== undefined && { cpus: resources.cpu_shares }),
   };
 }
+
+/**
+ * Whether a tier-2 skill runs on the warm pool. The pool runs every worker
+ * at the default budget, so a skill declaring its own resources gets a
+ * one-shot container instead.
+ */
+function runsOnPool(manifest: SkillManifest): boolean {
+  const overrides = mapManifestResourceLimits(manifest.resources);
+  return overrides.cpus === undefined && overrides.memory_bytes === undefined;
+}
+
+/** Where a run executes: the tier-1 isolate, the warm pool, or a one-shot container. */
+type SkillRuntime =
+  | { kind: "wasm" }
+  | { kind: "pool"; pool: SysboxWorkerPool }
+  | { kind: "one_shot"; sandbox: SandboxClient };
+
+/** A {@link SkillRuntime} before the warm pool is started. */
+type RuntimePlan =
+  | Exclude<SkillRuntime, { kind: "pool" }>
+  | { kind: "pool"; sandbox: SandboxClient };
 
 const log = logger.child({ component: "skills.runner" });
 
@@ -312,7 +336,7 @@ export interface SkillRunner {
     idempotencyKey?: string;
     /** Who the run acts for: `ctx.user()`, and the services `ctx.memory` / `ctx.files` reach. */
     runAs: SkillRunAs;
-  }): Promise<SkillRunResult>;
+  }): Promise<Result<SkillRunResult, SkillInvokeRejection>>;
 }
 
 /**
@@ -450,22 +474,17 @@ interface SkillLockfileCacheValue {
 }
 
 interface SkillSourceCacheEntry {
-  manifest: SkillManifest;
-  body: string;
-  inputsValidator: ValidateFunction;
-  /**
-   * Compiled lazily on first invoke that has a manifest.outputs to validate
-   * against. Stored on the cache entry itself so subsequent invocations reuse
-   * the validator instead of re-compiling per call. `undefined` until first
-   * use; remains `undefined` for skills without declared outputs.
-   */
-  outputsValidator?: ValidateFunction;
+  readonly manifest: SkillManifest;
+  readonly body: string;
+  readonly inputsValidator: ValidateFunction;
+  /** Present iff the manifest declares `outputs`. */
+  readonly outputsValidator?: ValidateFunction;
   /**
    * Lockfile-derived data, populated atomically when the manifest declares
    * dependencies. All three fields go together; half-populated states are
    * unrepresentable. Absent when the manifest has no deps.
    */
-  lockfile?: SkillLockfileCacheValue;
+  readonly lockfile?: SkillLockfileCacheValue;
 }
 
 /** A branch that passed every check `register` makes before its transaction. */
@@ -656,18 +675,12 @@ export class SkillRunnerImpl implements SkillRunner {
    * promise is cleared so the next caller retries — keeps a transient
    * sandbox failure from poisoning the runner permanently.
    */
-  async #ensurePool(): Promise<SysboxWorkerPool> {
+  async #ensurePool(sandbox: SandboxClient): Promise<SysboxWorkerPool> {
     if (this.#disposed) {
       throw new Error("SkillRunnerImpl: tier-2 pool requested after shutdown");
     }
     if (this.#pool) return this.#pool;
     if (this.#poolPromise) return this.#poolPromise;
-    const sandbox = this.#sandbox;
-    if (!sandbox) {
-      // Caller paths gate on `#sandbox` before reaching here; this
-      // guard exists only to narrow `sandbox` for the `create` call.
-      throw new Error("invariant: #ensurePool called without a sandbox");
-    }
     this.#poolPromise = (async () => {
       try {
         const pool = await SysboxWorkerPool.create({
@@ -785,15 +798,11 @@ export class SkillRunnerImpl implements SkillRunner {
       return err(rejectedResult("", "invalid_branch: cannot register from 'main' itself"));
     }
 
-    let branchSha: string;
-    try {
-      branchSha = await revParse(repoPath, `refs/heads/${branch}`);
-    } catch (e) {
-      if (e instanceof GitOpsError && e.code === "ref_not_found") {
-        return err(rejectedResult("", `branch_not_found: ${branch}`));
-      }
-      throw e;
+    const resolved = await revParse(repoPath, `refs/heads/${branch}`);
+    if (resolved.isErr()) {
+      return err(rejectedResult("", `branch_not_found: ${branch}`));
     }
+    const branchSha = resolved.value;
 
     const mainSha = await getMainSha(repoPath);
     // Fast-forward check: feature branch must descend from current main.
@@ -801,38 +810,24 @@ export class SkillRunnerImpl implements SkillRunner {
       return err(rejectedResult(branchSha, "non_fast_forward: rebase branch onto main and retry"));
     }
 
-    let manifestSource: string;
-    let body: string;
-    try {
-      manifestSource = await gitShow(repoPath, branchSha, "SKILL.md");
-    } catch (e) {
-      if (e instanceof GitOpsError && e.code === "file_not_found") {
-        return err(rejectedResult(branchSha, "missing_skill_md: SKILL.md not found at branch tip"));
-      }
-      throw e;
+    const source = await readSkillSource(repoPath, branchSha);
+    if (source.isErr()) {
+      return err(
+        match(source.error)
+          .with({ kind: "missing_file", file: SKILL_MANIFEST_FILE }, () =>
+            rejectedResult(branchSha, "missing_skill_md: SKILL.md not found at branch tip"),
+          )
+          .with({ kind: "missing_file", file: SKILL_BODY_FILE }, () =>
+            rejectedResult(branchSha, "missing_skill_py: skill.py not found at branch tip"),
+          )
+          .with({ kind: "commit_not_found" }, () =>
+            rejectedResult(branchSha, "missing_commit: branch tip not found"),
+          )
+          .with({ kind: "invalid_manifest" }, ({ issues }) => rejectedResult(branchSha, ...issues))
+          .exhaustive(),
+      );
     }
-    try {
-      body = await gitShow(repoPath, branchSha, "skill.py");
-    } catch (e) {
-      if (e instanceof GitOpsError && e.code === "file_not_found") {
-        return err(rejectedResult(branchSha, "missing_skill_py: skill.py not found at branch tip"));
-      }
-      throw e;
-    }
-
-    const parsed = parseManifest(manifestSource);
-    if (!parsed.isOk()) {
-      const errors =
-        parsed.error.kind === "invalid_manifest" ? parsed.error.issues : [parsed.error.message];
-      return err({
-        name: "",
-        riskTier: "notify",
-        status: "rejected",
-        gitSha: branchSha,
-        errors,
-      });
-    }
-    const manifest = parsed.value.manifest;
+    const { manifest, body } = source.value;
 
     // Compile the manifest's JSON Schemas BEFORE any filesystem / DB write.
     // Without this, an invalid `inputs` / `outputs` schema would only surface
@@ -928,29 +923,9 @@ export class SkillRunnerImpl implements SkillRunner {
     // the prior live commit's manifest while pointing at the approved sha,
     // which would silently mismatch tool definitions and ajv input
     // validation against the actual code on disk.
-    let manifest: SkillManifest;
-    let body: string;
-    try {
-      const manifestSource = await gitShow(repoPath, deploy.gitSha, "SKILL.md");
-      body = await gitShow(repoPath, deploy.gitSha, "skill.py");
-      const parsed = parseManifest(manifestSource);
-      if (!parsed.isOk()) {
-        return rejectedResult(
-          deploy.gitSha,
-          `target_manifest_invalid: ${
-            parsed.error.kind === "invalid_manifest"
-              ? parsed.error.issues.join("; ")
-              : parsed.error.message
-          }`,
-        );
-      }
-      manifest = parsed.value.manifest;
-    } catch (e) {
-      if (e instanceof GitOpsError && e.code === "file_not_found") {
-        return rejectedResult(deploy.gitSha, "target_missing_source");
-      }
-      throw e;
-    }
+    const source = await readSkillSource(repoPath, deploy.gitSha);
+    if (source.isErr()) return rejectedResult(deploy.gitSha, targetSourceRejection(source.error));
+    const { manifest, body } = source.value;
 
     if (manifest.name !== skill.name) {
       return rejectedResult(
@@ -1002,13 +977,7 @@ export class SkillRunnerImpl implements SkillRunner {
     if (result.kind === "live") {
       // Warm the source cache with the just-approved manifest so the next
       // listToolDefs / invoke read doesn't re-fetch from git.
-      const inputsValidator = this.#compileInputsValidator(manifest, "approve-warm");
-      this.#sourceCache.set(cacheKey(skill.name, deploy.gitSha), {
-        manifest,
-        body,
-        inputsValidator,
-        ...(lockfile && { lockfile: buildLockfileCacheValue(lockfile) }),
-      });
+      this.#cacheSource(deploy.gitSha, { manifest, body }, lockfile);
       // Mirror the new main SHA to the configured remote — same rationale as
       // register's mirror call.
       await this.#mirrorMainToRemote(deploy.gitSha);
@@ -1044,15 +1013,11 @@ export class SkillRunnerImpl implements SkillRunner {
   }): Promise<RegisterResult> {
     const repoPath = this.#requireRepoPath("rollback");
 
-    let targetSha: string;
-    try {
-      targetSha = await revParse(repoPath, opts.toGitSha);
-    } catch (e) {
-      if (e instanceof GitOpsError && e.code === "ref_not_found") {
-        return rejectedResult(opts.toGitSha, `target_sha_not_found: ${opts.toGitSha}`);
-      }
-      throw e;
+    const resolved = await revParse(repoPath, opts.toGitSha);
+    if (resolved.isErr()) {
+      return rejectedResult(opts.toGitSha, `target_sha_not_found: ${opts.toGitSha}`);
     }
+    const targetSha = resolved.value;
 
     // Re-read the manifest at the target sha. We need it for two things:
     // (a) verify manifest.name matches opts.name — without this, rolling
@@ -1061,29 +1026,9 @@ export class SkillRunnerImpl implements SkillRunner {
     // manifest-derived columns (tier, effects, schedule, inputs, outputs,
     // riskTier) into the skills row, so tool definitions and validation
     // reflect what's actually on disk at the rolled-back sha.
-    let manifest: SkillManifest;
-    let body: string;
-    try {
-      const manifestSource = await gitShow(repoPath, targetSha, "SKILL.md");
-      body = await gitShow(repoPath, targetSha, "skill.py");
-      const parsed = parseManifest(manifestSource);
-      if (!parsed.isOk()) {
-        return rejectedResult(
-          targetSha,
-          `target_manifest_invalid: ${
-            parsed.error.kind === "invalid_manifest"
-              ? parsed.error.issues.join("; ")
-              : parsed.error.message
-          }`,
-        );
-      }
-      manifest = parsed.value.manifest;
-    } catch (e) {
-      if (e instanceof GitOpsError && e.code === "file_not_found") {
-        return rejectedResult(targetSha, "target_missing_source");
-      }
-      throw e;
-    }
+    const source = await readSkillSource(repoPath, targetSha);
+    if (source.isErr()) return rejectedResult(targetSha, targetSourceRejection(source.error));
+    const { manifest, body } = source.value;
 
     if (manifest.name !== opts.name) {
       return rejectedResult(
@@ -1151,14 +1096,7 @@ export class SkillRunnerImpl implements SkillRunner {
     // Warm the source cache with the rolled-back manifest+body so the next
     // invoke or listToolDefs read doesn't re-fetch from git.
     if (result.kind === "live") {
-      const inputsValidator = this.#compileInputsValidator(manifest, "rollback-warm");
-      this.#sourceCache.set(cacheKey(opts.name, targetSha), {
-        manifest,
-        body,
-        inputsValidator,
-        // Same invariant as approve-warm above.
-        ...(lockfile && { lockfile: buildLockfileCacheValue(lockfile) }),
-      });
+      this.#cacheSource(targetSha, { manifest, body }, lockfile);
       // Rollback rewinds main backwards, so the remote push needs `force`. We
       // gate with `--force-with-lease=refs/heads/main:<mainSha>` — if anything
       // moved remote main between our last fetch and this push, the lease
@@ -1294,47 +1232,47 @@ export class SkillRunnerImpl implements SkillRunner {
     trigger?: SkillRunTrigger;
     idempotencyKey?: string;
     runAs: SkillRunAs;
-  }): Promise<SkillRunResult> {
+  }): Promise<Result<SkillRunResult, SkillInvokeRejection>> {
+    // Empty-string idempotency keys would all collide on the UNIQUE
+    // constraint as if they were the same key. Keys are built by code,
+    // never taken from input, so an empty one is a caller bug.
+    if (opts.idempotencyKey === "") {
+      throw new Error(
+        `invoke: idempotencyKey must be non-empty when provided (skill '${opts.name}')`,
+      );
+    }
+
     // --- Pre-flight (cheap, idempotent reads; re-runs freely on retry) ---
-    // Typed-error throws here happen *before* any DB write. The cron-fire
-    // handler etc. catch them at the function-handler level and return
-    // non-retrying skipped results without touching state.
-    const skill = await this.#runInTx((tx) => this.#store.getSkillByName(tx, opts.name));
-    if (!skill) {
-      throw new SkillNotFoundError(opts.name);
-    }
-    if (skill.disabled) {
-      throw new SkillDisabledError(opts.name);
-    }
+    // A rejection here precedes any DB write.
+    const name = opts.name;
+    const skill = await this.#runInTx((tx) => this.#store.getSkillByName(tx, name));
+    if (!skill) return err({ kind: "not_found", name });
+    if (skill.disabled) return err({ kind: "disabled", name });
 
     const cached = await this.#loadSourceForRow(skill);
 
-    const validInputs = cached.inputsValidator(opts.inputs);
-    if (!validInputs) {
-      const errors = (cached.inputsValidator.errors ?? []).map(
+    if (!cached.inputsValidator(opts.inputs)) {
+      const issues = (cached.inputsValidator.errors ?? []).map(
         (e) => `${e.instancePath || "<root>"} ${e.message ?? "invalid"}`,
       );
-      throw new InputValidationError(
-        `inputs failed schema validation for skill '${opts.name}': ${errors.join("; ")}`,
-      );
+      return err({ kind: "invalid_inputs", name, issues });
     }
 
-    if (skill.tier === "container" && !this.#sandbox) {
-      throw new SandboxUnavailableError(opts.name);
-    }
-
-    // Empty-string idempotency keys would all collide on the UNIQUE
-    // constraint as if they were the same key — a silent contract bug
-    // for any caller that constructs a key from optional fields and
-    // forgets to validate. Refuse explicitly so the failure surfaces at
-    // the API boundary, not deep in the recovery branch.
-    if (opts.idempotencyKey === "") {
-      throw new InputValidationError(
-        `idempotencyKey must be a non-empty string when provided (skill '${opts.name}')`,
-      );
-    }
+    const plan = this.#planRuntime(skill.tier, cached.manifest);
+    if (plan === null) return err({ kind: "sandbox_unavailable", name });
 
     const trigger: SkillRunTrigger = opts.trigger ?? "manual";
+    // Hoisted so the narrowed `string` survives into the `runInTx` closures.
+    const idempotencyKey = opts.idempotencyKey;
+
+    // The warm pool starts before the run row is written, so a pool that
+    // can't start throws with no row behind and a keyed retry runs the skill
+    // rather than refusing a `started` row as in flight. A key that already
+    // has a row is a replay, which recovery settles without the pool.
+    const pool =
+      plan.kind === "pool" && !(await this.#hasKeyedRun(idempotencyKey))
+        ? await this.#ensurePool(plan.sandbox)
+        : undefined;
 
     // --- Start or recover the run row ---
     //
@@ -1353,10 +1291,6 @@ export class SkillRunnerImpl implements SkillRunner {
     let savedOutput: unknown | null = null;
     let savedError: string | null = null;
 
-    // Hoist the key out so the narrowed `string` type survives across
-    // the `runInTx` closure (TS doesn't always retain narrowing through
-    // captured `opts.idempotencyKey` references inside an async lambda).
-    const idempotencyKey = opts.idempotencyKey;
     if (idempotencyKey !== undefined) {
       const { kind, row } = await this.#runInTx((tx) =>
         this.#store.startOrRecoverRun(tx, {
@@ -1379,16 +1313,10 @@ export class SkillRunnerImpl implements SkillRunner {
           { runId, skillName: opts.name, idempotencyKey },
           "replaying cached terminal skill run (recovery_point=finished)",
         );
-        return reconstructFinishedResult(runId, row.status, savedOutput, savedError);
+        return ok(reconstructFinishedResult(runId, row.status, savedOutput, savedError));
       }
       if (kind === "recovered" && recoveryPoint === "started") {
-        // The row is in flight: either a prior attempt crashed
-        // mid-execute, or another worker is currently executing this
-        // same key. The runner can't tell those apart — both leave the
-        // row at `recovery_point='started'`. Conservative refusal in
-        // both cases: re-executing risks double-firing non-idempotent
-        // side effects (ctx.memory.write, outbound HTTP, etc.).
-        throw new SkillInflightError(opts.name, runId);
+        return err({ kind: "inflight", name, runId });
       }
       // kind === 'new' (fresh start) OR kind === 'recovered' &&
       // recovery_point === 'executed' (execute succeeded last time, just
@@ -1433,7 +1361,20 @@ export class SkillRunnerImpl implements SkillRunner {
         }),
       });
 
-      const result = await this.#dispatchToRuntime(skill, cached, opts.inputs, ctxHandler, runId);
+      // `pool` is unset here only when the keyed row seen above was gone by
+      // the time this attempt inserted its own.
+      const runtime: SkillRuntime =
+        plan.kind === "pool"
+          ? { kind: "pool", pool: pool ?? (await this.#ensurePool(plan.sandbox)) }
+          : plan;
+      const result = await this.#dispatchToRuntime(
+        runtime,
+        skill,
+        cached,
+        opts.inputs,
+        ctxHandler,
+        runId,
+      );
       const finishedAt = new Date();
       // Build the resource_usage blob once — `wallClockMs` is always derived
       // from the host-side timestamps; `peakMemoryBytes` rides whatever the
@@ -1465,11 +1406,11 @@ export class SkillRunnerImpl implements SkillRunner {
     if (savedError !== null) {
       finalStatus = "error";
     } else {
-      const outputErr = this.#validateOutput(cached, savedOutput, opts.name);
-      if (outputErr !== null) {
+      const valid = this.#validateOutput(cached, savedOutput, opts.name);
+      if (valid.isErr()) {
         finalStatus = "error";
         finalOutput = null;
-        finalError = outputErr;
+        finalError = valid.error;
       } else {
         finalStatus = "success";
       }
@@ -1484,15 +1425,30 @@ export class SkillRunnerImpl implements SkillRunner {
       }),
     );
 
-    return reconstructFinishedResult(runId, finalStatus, finalOutput, finalError);
+    return ok(reconstructFinishedResult(runId, finalStatus, finalOutput, finalError));
   }
 
   /**
-   * Per-tier dispatch to the worker runtime. Extracted from `invoke` so
-   * the execute path stays readable — every line above is pre-flight or
-   * recovery branching, every line after is finalize.
+   * Where a run of this skill executes, or null for a container skill on a
+   * deployment with no sandbox.
    */
+  #planRuntime(tier: SkillTier, manifest: SkillManifest): RuntimePlan | null {
+    if (tier === "wasm") return { kind: "wasm" };
+    const sandbox = this.#sandbox;
+    if (!sandbox) return null;
+    return runsOnPool(manifest) ? { kind: "pool", sandbox } : { kind: "one_shot", sandbox };
+  }
+
+  /** Whether a run row already holds this idempotency key. */
+  async #hasKeyedRun(idempotencyKey: string | undefined): Promise<boolean> {
+    if (idempotencyKey === undefined) return false;
+    const row = await this.#runInTx((tx) => this.#store.getRunByIdempotencyKey(tx, idempotencyKey));
+    return row !== undefined;
+  }
+
+  /** Run the task on the runtime `#planRuntime` chose. */
   async #dispatchToRuntime(
+    runtime: SkillRuntime,
     skill: SkillRow,
     cached: SkillSourceCacheEntry,
     inputs: unknown,
@@ -1500,90 +1456,50 @@ export class SkillRunnerImpl implements SkillRunner {
     taskId: string,
   ): Promise<RunOnWorkerResult | InvokeResult> {
     const wallClockS = cached.manifest.resources?.wall_clock_s;
-    // Switch + `never` exhaustiveness so a future SkillTier value (added to
-    // the pgEnum) is a compile-time miss here rather than a silent route
-    // through the sysbox path.
-    switch (skill.tier) {
-      case "wasm": {
-        // Specs only (not hashes) — see `design/skills.md` → Security posture
-        // for the WASM-vs-sysbox integrity asymmetry rationale.
-        const packageSpecs = cached.lockfile?.specs ?? [];
-        return runOnWorker({
-          taskId,
-          skillName: skill.name,
-          body: cached.body,
-          inputs,
-          ...(wallClockS !== undefined && { wallClockS }),
-          ...(this.#pyodidePackageCacheDir && {
-            packageCacheDir: this.#pyodidePackageCacheDir,
-          }),
-          ...(packageSpecs.length > 0 && { packageSpecs }),
-          ctxHandler,
-        });
-      }
-      case "container": {
-        const sandbox = this.#sandbox;
-        if (!sandbox) {
-          // Caught above in invoke by `tier === "container" && !sandbox`;
-          // this guard narrows for the call below.
-          throw new Error("invariant: sandbox unset on container tier path");
-        }
-        // Per-skill resource overrides are honoured via a one-shot
-        // container — the pool runs every worker at the default resource
-        // budget, so a skill that wants 2 GB of RAM can't share a 512 MB
-        // worker. Bypass the pool when overrides are declared; pay the
-        // ~1-2s cold-start that pre-pool tier-2 skills paid every time.
-        // This is rare: most skills don't override and ride the warm path.
-        const overrides = mapManifestResourceLimits(cached.manifest.resources);
-        const isolation = cached.manifest.isolation;
-        // Invariant: skill.lockfileHash != null ⇒ cached.lockfile set.
-        let deps: { lockfileHash: string; lockfileContents: string } | undefined;
-        if (skill.lockfileHash !== null) {
-          if (cached.lockfile === undefined) {
-            throw new Error(
-              `invariant: skill '${skill.name}' has lockfile_hash but cache missing lockfile`,
-            );
-          }
-          deps = {
-            lockfileHash: cached.lockfile.hash,
-            lockfileContents: cached.lockfile.contents,
-          };
-        }
-        if (overrides.cpus !== undefined || overrides.memory_bytes !== undefined) {
-          return runOnSysboxContainer({
-            taskId,
-            skillName: skill.name,
-            body: cached.body,
-            inputs,
-            ...(wallClockS !== undefined && { wallClockS }),
-            ...(isolation !== undefined && { isolation }),
-            ...(deps !== undefined && { deps }),
-            ...(this.#depsCacheVolumeName !== undefined && {
-              depsCacheVolumeName: this.#depsCacheVolumeName,
-            }),
-            resourceLimits: overrides,
-            image: this.#tier2Image,
-            sandbox,
-            ctxHandler,
-          });
-        }
-        const pool = await this.#ensurePool();
-        return pool.invoke({
-          taskId,
-          skillName: skill.name,
-          body: cached.body,
-          inputs,
-          ...(wallClockS !== undefined && { wallClockS }),
-          ...(isolation !== undefined && { isolation }),
-          ...(deps !== undefined && { deps }),
-          ctxHandler,
-        });
-      }
-      default: {
-        const _exhaustive: never = skill.tier;
-        throw new Error(`unhandled skill tier: ${_exhaustive as string}`);
-      }
+    const task = {
+      taskId,
+      skillName: skill.name,
+      body: cached.body,
+      inputs,
+      ...(wallClockS !== undefined && { wallClockS }),
+      ctxHandler,
+    };
+    if (runtime.kind === "wasm") {
+      // Specs only (not hashes) — see `design/skills.md` → Security posture
+      // for the WASM-vs-sysbox integrity asymmetry rationale.
+      const packageSpecs = cached.lockfile?.specs ?? [];
+      return runOnWorker({
+        ...task,
+        ...(this.#pyodidePackageCacheDir && { packageCacheDir: this.#pyodidePackageCacheDir }),
+        ...(packageSpecs.length > 0 && { packageSpecs }),
+      });
     }
+    const isolation = cached.manifest.isolation;
+    // Invariant: skill.lockfileHash != null ⇒ cached.lockfile set.
+    let deps: { lockfileHash: string; lockfileContents: string } | undefined;
+    if (skill.lockfileHash !== null) {
+      if (cached.lockfile === undefined) {
+        throw new Error(
+          `invariant: skill '${skill.name}' has lockfile_hash but cache missing lockfile`,
+        );
+      }
+      deps = { lockfileHash: cached.lockfile.hash, lockfileContents: cached.lockfile.contents };
+    }
+    const containerTask = {
+      ...task,
+      ...(isolation !== undefined && { isolation }),
+      ...(deps !== undefined && { deps }),
+    };
+    if (runtime.kind === "pool") return runtime.pool.invoke(containerTask);
+    return runOnSysboxContainer({
+      ...containerTask,
+      ...(this.#depsCacheVolumeName !== undefined && {
+        depsCacheVolumeName: this.#depsCacheVolumeName,
+      }),
+      resourceLimits: mapManifestResourceLimits(cached.manifest.resources),
+      image: this.#tier2Image,
+      sandbox: runtime.sandbox,
+    });
   }
 
   // --- Test-only helper ---
@@ -1592,11 +1508,7 @@ export class SkillRunnerImpl implements SkillRunner {
     const parsed = parseManifest(params.manifestSource);
     if (!parsed.isOk()) {
       throw new Error(
-        `__registerForTests: invalid manifest: ${
-          parsed.error.kind === "invalid_manifest"
-            ? parsed.error.issues.join("; ")
-            : parsed.error.message
-        }`,
+        `__registerForTests: invalid manifest: ${manifestErrorIssues(parsed.error).join("; ")}`,
       );
     }
     const manifest = parsed.value.manifest;
@@ -1651,13 +1563,7 @@ export class SkillRunnerImpl implements SkillRunner {
       }),
     );
 
-    const inputsValidator = this.#compileInputsValidator(manifest, params.name);
-    this.#sourceCache.set(cacheKey(manifest.name, gitSha), {
-      manifest,
-      body: params.body,
-      inputsValidator,
-      ...(lockfileSnapshot && { lockfile: buildLockfileCacheValue(lockfileSnapshot) }),
-    });
+    this.#cacheSource(gitSha, { manifest, body: params.body }, lockfileSnapshot);
 
     return row;
   }
@@ -1744,48 +1650,66 @@ export class SkillRunnerImpl implements SkillRunner {
     }
   }
 
-  #compileInputsValidator(manifest: SkillManifest, contextName: string): ValidateFunction {
-    const validator = this.#ajv.compile(manifest.inputs as Record<string, unknown>);
-    if ((validator as { $async?: boolean }).$async === true) {
-      throw new Error(
-        `${contextName}: skill '${manifest.name}' uses an $async JSON Schema; not supported`,
-      );
+  /**
+   * Compile one of a manifest's JSON Schemas, or err with why it can't
+   * validate: ajv rejects it, or it is `$async`, whose validator returns a
+   * promise that a truthiness check would read as valid.
+   */
+  #compileSchema(schema: SkillInputs | Record<string, unknown>): Result<ValidateFunction, string> {
+    let validator: ValidateFunction;
+    try {
+      validator = this.#ajv.compile(schema);
+    } catch (e) {
+      return err(describeError(e));
     }
-    return validator;
+    return "$async" in validator && validator.$async === true
+      ? err("$async schemas are not supported")
+      : ok(validator);
   }
 
   /**
    * Compile the manifest's `inputs` and (if declared) `outputs` JSON Schemas
-   * with ajv to catch shape errors *before* the register flow advances main
-   * or writes DB rows. Returns a flat list of human-readable errors; an empty
-   * list means both schemas compile cleanly.
-   *
-   * Compilation failures (`ajv.compile` throws) and `$async` schemas are both
-   * treated as deploy errors — they would either crash the worker on first
-   * invoke or silently bypass validation, which is worse than a register
-   * rejection up front.
+   * *before* the register flow advances main or writes DB rows. Returns a
+   * flat list of human-readable errors; an empty list means both compile.
    */
   #prevalidateSchemas(manifest: SkillManifest): string[] {
-    const errors: string[] = [];
+    const inputs = this.#compileSchema(manifest.inputs).mapErr(
+      (e) => `invalid_inputs_schema: ${e}`,
+    );
+    const outputs =
+      manifest.outputs === undefined
+        ? ok(undefined)
+        : this.#compileSchema(manifest.outputs).mapErr((e) => `invalid_outputs_schema: ${e}`);
+    return [inputs, outputs].flatMap((r) => (r.isErr() ? [r.error] : []));
+  }
 
-    try {
-      this.#compileInputsValidator(manifest, "register-prevalidate");
-    } catch (e) {
-      errors.push(`invalid_inputs_schema: ${e instanceof Error ? e.message : String(e)}`);
-    }
-
-    if (manifest.outputs !== undefined) {
-      try {
-        const v = this.#ajv.compile(manifest.outputs as Record<string, unknown>);
-        if ((v as { $async?: boolean }).$async === true) {
-          errors.push("invalid_outputs_schema: $async schemas are not supported");
-        }
-      } catch (e) {
-        errors.push(`invalid_outputs_schema: ${e instanceof Error ? e.message : String(e)}`);
+  /**
+   * Cache a manifest that passed `#prevalidateSchemas` with its compiled
+   * validators, keyed by `(name, gitSha)`, so the next invoke or tool-list
+   * read skips git. A schema failing to compile here is a bug.
+   */
+  #cacheSource(
+    gitSha: string,
+    source: SkillSource,
+    lockfile: { hash: string; contents: string } | null,
+  ): SkillSourceCacheEntry {
+    const { manifest, body } = source;
+    const compiled = (schema: SkillInputs | Record<string, unknown>): ValidateFunction => {
+      const validator = this.#compileSchema(schema);
+      if (validator.isErr()) {
+        throw new Error(`skill '${manifest.name}' @ ${gitSha}: schema invalid: ${validator.error}`);
       }
-    }
-
-    return errors;
+      return validator.value;
+    };
+    const entry: SkillSourceCacheEntry = {
+      manifest,
+      body,
+      inputsValidator: compiled(manifest.inputs),
+      ...(manifest.outputs !== undefined && { outputsValidator: compiled(manifest.outputs) }),
+      ...(lockfile && { lockfile: buildLockfileCacheValue(lockfile) }),
+    };
+    this.#sourceCache.set(cacheKey(manifest.name, gitSha), entry);
+    return entry;
   }
 
   /**
@@ -1795,8 +1719,7 @@ export class SkillRunnerImpl implements SkillRunner {
    * picks up the new source on the next read.
    */
   async #loadSourceForRow(row: SkillRow): Promise<SkillSourceCacheEntry> {
-    const key = cacheKey(row.name, row.gitSha);
-    const cached = this.#sourceCache.get(key);
+    const cached = this.#sourceCache.get(cacheKey(row.name, row.gitSha));
     if (cached) return cached;
 
     if (!this.#skillsRepoPath) {
@@ -1805,28 +1728,15 @@ export class SkillRunnerImpl implements SkillRunner {
       );
     }
 
-    let manifestSource: string;
-    let body: string;
-    try {
-      manifestSource = await gitShow(this.#skillsRepoPath, row.gitSha, "SKILL.md");
-      body = await gitShow(this.#skillsRepoPath, row.gitSha, "skill.py");
-    } catch (e) {
-      if (e instanceof GitOpsError && (e.code === "ref_not_found" || e.code === "file_not_found")) {
-        throw new Error(
-          `no source for skill '${row.name}' at ${row.gitSha} (${e.code}) — repo and DB are out of sync`,
-        );
-      }
-      throw e;
-    }
-    const parsed = parseManifest(manifestSource);
-    if (!parsed.isOk()) {
+    // A deployed sha passed these reads at register, so a failure here is
+    // the repo and the DB out of sync — corruption, not an outcome to handle.
+    const source = await readSkillSource(this.#skillsRepoPath, row.gitSha);
+    if (source.isErr()) {
       throw new Error(
-        `cached SKILL.md for '${row.name}' @ ${row.gitSha} fails parse — registration drift?`,
+        `no source for skill '${row.name}' at ${row.gitSha} (${source.error.kind}) — repo and DB are out of sync`,
       );
     }
-    const manifest = parsed.value.manifest;
-    const inputsValidator = this.#compileInputsValidator(manifest, "loadSource");
-    const entry: SkillSourceCacheEntry = { manifest, body, inputsValidator };
+    let lockfile: LockfileSnapshot | null = null;
     if (row.lockfileHash !== null) {
       // Lockfile presence is invariant with `row.lockfileHash != null` —
       // register persists the hash atomically with the gitSha, so a row
@@ -1839,37 +1749,23 @@ export class SkillRunnerImpl implements SkillRunner {
           `lockfile for skill '${row.name}' at ${row.gitSha} is ${snapshot.error.kind} — repo and DB are out of sync (skills.lockfile_hash=${row.lockfileHash})`,
         );
       }
-      entry.lockfile = buildLockfileCacheValue(snapshot.value);
+      lockfile = snapshot.value;
     }
-    this.#sourceCache.set(key, entry);
-    return entry;
+    return this.#cacheSource(row.gitSha, source.value, lockfile);
   }
 
+  /** Err with why `output` fails the manifest's `outputs` schema; ok when it declares none. */
   #validateOutput(
     cached: SkillSourceCacheEntry,
     output: unknown,
     skillName: string,
-  ): string | null {
-    if (cached.manifest.outputs === undefined) return null;
-    // Lazy-compile per skill source — first invoke pays the cost, subsequent
-    // invokes reuse the cached validator on the entry.
-    if (cached.outputsValidator === undefined) {
-      cached.outputsValidator = this.#ajv.compile(
-        cached.manifest.outputs as Record<string, unknown>,
-      );
-    }
+  ): Result<void, string> {
     const validator = cached.outputsValidator;
-    if ((validator as { $async?: boolean }).$async === true) {
-      // Defensive — manifest should never compile to async, but if it
-      // somehow did the truthy check below would silently bypass validation.
-      return `outputs schema for skill '${skillName}' is async — rejecting`;
-    }
-    const valid = validator(output);
-    if (valid) return null;
+    if (validator === undefined || validator(output)) return ok(undefined);
     const issues = (validator.errors ?? []).map(
       (e) => `${e.instancePath || "<root>"} ${e.message ?? "invalid"}`,
     );
-    return `output failed schema validation for skill '${skillName}': ${issues.join("; ")}`;
+    return err(`output failed schema validation for skill '${skillName}': ${issues.join("; ")}`);
   }
 
   #registerResultToRpc(args: {
@@ -1896,13 +1792,7 @@ export class SkillRunnerImpl implements SkillRunner {
     if (result.kind === "live") {
       // Warm the source cache with the just-registered manifest+body so the
       // next `invoke` (or tool-list rebuild) doesn't re-read git.
-      const inputsValidator = this.#compileInputsValidator(manifest, "register-warm");
-      this.#sourceCache.set(cacheKey(name, branchSha), {
-        manifest,
-        body,
-        inputsValidator,
-        ...(lockfile && { lockfile: buildLockfileCacheValue(lockfile) }),
-      });
+      this.#cacheSource(branchSha, { manifest, body }, lockfile);
       return {
         name,
         riskTier: classifierLog.risk_tier,
@@ -1911,13 +1801,7 @@ export class SkillRunnerImpl implements SkillRunner {
       };
     }
     // pending_approval — also warm cache so a follow-up approve doesn't re-read.
-    const inputsValidator = this.#compileInputsValidator(manifest, "register-warm");
-    this.#sourceCache.set(cacheKey(name, branchSha), {
-      manifest,
-      body,
-      inputsValidator,
-      ...(lockfile && { lockfile: buildLockfileCacheValue(lockfile) }),
-    });
+    this.#cacheSource(branchSha, { manifest, body }, lockfile);
     return {
       name,
       riskTier: classifierLog.risk_tier,
@@ -1926,90 +1810,6 @@ export class SkillRunnerImpl implements SkillRunner {
       pendingId: result.deploy.id,
       ...(manifest.schedule !== undefined && { schedule: manifest.schedule }),
     };
-  }
-}
-
-export class InputValidationError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "InputValidationError";
-  }
-}
-
-/**
- * `invoke` was called with a name that doesn't resolve to a skills row.
- * Discriminated via `instanceof` rather than substring matching against
- * `error.message` — call sites (the cron-fire-handler is the only one
- * today) translate it into their own skipped-result reason without
- * coupling to message wording.
- */
-export class SkillNotFoundError extends Error {
-  constructor(name: string) {
-    super(`skill not found: ${name}`);
-    this.name = "SkillNotFoundError";
-  }
-}
-
-/**
- * `invoke` was called on a row whose `disabled = true`. Same rationale as
- * {@link SkillNotFoundError}: `instanceof` discrimination, not string match.
- */
-export class SkillDisabledError extends Error {
-  constructor(name: string) {
-    super(`skill is disabled: ${name}`);
-    this.name = "SkillDisabledError";
-  }
-}
-
-/**
- * `invoke` was called on a `tier: container` skill but no sandbox is wired
- * (e.g. `SANDBOX_RUNTIME` unset in the deployment). Permanent
- * misconfiguration — won't self-heal between retry attempts. The
- * cron-fire-handler discriminates this via `instanceof` to short-circuit
- * the retry budget into a `skipped: sandbox_unavailable` result, same
- * shape as {@link InputValidationError}'s `invalid_inputs` skip.
- */
-export class SandboxUnavailableError extends Error {
-  constructor(name: string) {
-    super(`skill '${name}' is tier=container but no sandbox is configured (set SANDBOX_RUNTIME)`);
-    this.name = "SandboxUnavailableError";
-  }
-}
-
-/**
- * `runner.invoke` recovered an existing run row whose `recovery_point` is
- * still `started`. Two situations produce this state and the runner can't
- * tell them apart from the row alone:
- *
- *   1. **Crashed mid-execute.** Prior attempt died after the INSERT but
- *      before the executed-transition wrote back. No worker is doing the
- *      work — the row is an orphan and the caller can retry once
- *      operators clear it (or the future `idempotent_invocation: true`
- *      manifest flag opts into optimistic re-execute).
- *   2. **Concurrent in-flight.** Another worker is actively executing
- *      this same key right now; the bus-dedup window was crossed and the
- *      retry landed on a live row. No crash, just contention.
- *
- * The conservative default in both cases is to refuse re-execution and
- * surface a typed error: re-executing case (1) is a recovery, but in
- * case (2) it would double-fire side effects (ctx.memory.write, outbound
- * HTTP, file writes) while the original is still in flight. The Stripe
- * pattern this implements takes the same posture — see
- * brandur.org/idempotency-keys → "Resumed transactions."
- *
- * Carries the run `runId` so operators can inspect. Discriminating
- * crash from concurrency at runtime would need a heartbeat (e.g.
- * `recovery_point='started' AND created_at < now() - interval 'N min'`);
- * deferred until either failure mode shows up in practice.
- */
-export class SkillInflightError extends Error {
-  readonly runId: string;
-  constructor(name: string, runId: string) {
-    super(
-      `skill '${name}' has an in-flight run (id=${runId}) — prior attempt may have crashed mid-execute or another worker is currently executing`,
-    );
-    this.name = "SkillInflightError";
-    this.runId = runId;
   }
 }
 
@@ -2039,14 +1839,25 @@ function reconstructFinishedResult(
   };
 }
 
-function rejectedResult(gitSha: string, reason: string): RegisterResult {
+function rejectedResult(gitSha: string, ...errors: readonly string[]): RegisterResult {
   return {
     name: "",
     riskTier: "notify",
     status: "rejected",
     gitSha,
-    errors: [reason],
+    errors,
   };
+}
+
+/** Why approve or rollback refuses a target sha whose source does not read. */
+function targetSourceRejection(error: SkillSourceError): string {
+  return match(error)
+    .with({ kind: "commit_not_found" }, { kind: "missing_file" }, () => "target_missing_source")
+    .with(
+      { kind: "invalid_manifest" },
+      ({ issues }) => `target_manifest_invalid: ${issues.join("; ")}`,
+    )
+    .exhaustive();
 }
 
 function cacheKey(name: string, gitSha: string): string {

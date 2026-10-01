@@ -41,7 +41,7 @@ export const skillRunTrigger = pgEnum("skill_run_trigger", ["manual", "cron", "e
  *     sees this state refuses re-execution: the original may have
  *     crashed mid-execute OR another worker may be currently executing
  *     this same key. Either way, re-executing would risk double-firing
- *     non-idempotent side effects. See `SkillInflightError` in
+ *     non-idempotent side effects. See `SkillInvokeRejection` in
  *     `runner.ts` for the discrimination rationale.
  *   - `executed` — execute completed and its result is committed
  *     (output/error/rusage/finished_at). Output validation + final

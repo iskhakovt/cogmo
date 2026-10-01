@@ -120,7 +120,7 @@ describe("SkillRunnerImpl (integration)", { timeout: 60_000 }, () => {
       manifestSource: echoManifest(name),
       body: ECHO_BODY,
     });
-    const result = await runner.invoke({ name, inputs: { x: 7 }, runAs });
+    const result = (await runner.invoke({ name, inputs: { x: 7 }, runAs }))._unsafeUnwrap();
     expect(result.status).toBe("success");
     expect(result.output).toEqual({ echo: 8 });
 
@@ -160,7 +160,7 @@ async def run(inputs, ctx):
     const runner = await makeRunner();
     await runner.__registerForTests({ name, manifestSource: manifest, body });
 
-    const result = await runner.invoke({ name, inputs: {}, runAs });
+    const result = (await runner.invoke({ name, inputs: {}, runAs }))._unsafeUnwrap();
     expect(result.status).toBe("success");
     expect(result.output).toEqual({ len: "sk-real-secret-value".length, starts_with: "sk-re" });
 
@@ -199,7 +199,7 @@ async def run(inputs, ctx):
     await runner.__registerForTests({ name, manifestSource: manifest, body });
 
     const fact = `integration-fact-${SUITE}`;
-    const result = await runner.invoke({ name, inputs: { fact }, runAs });
+    const result = (await runner.invoke({ name, inputs: { fact }, runAs }))._unsafeUnwrap();
     expect(result.status).toBe("success");
 
     const calls = await tx((trx) => store.listContextCallsForRun(trx, result.runId));
@@ -238,7 +238,7 @@ async def run(inputs, ctx):
     const runner = await makeRunner();
     await runner.__registerForTests({ name, manifestSource: manifest, body });
 
-    const result = await runner.invoke({ name, inputs: {}, runAs });
+    const result = (await runner.invoke({ name, inputs: {}, runAs }))._unsafeUnwrap();
     expect(result.status).toBe("error");
     expect(result.error).toContain("integration kaboom");
 
@@ -258,9 +258,9 @@ async def run(inputs, ctx):
         body: ECHO_BODY,
       });
     }
-    const results = await Promise.all(
-      names.map((name, i) => runner.invoke({ name, inputs: { x: i }, runAs })),
-    );
+    const results = (
+      await Promise.all(names.map((name, i) => runner.invoke({ name, inputs: { x: i }, runAs })))
+    ).map((r) => r._unsafeUnwrap());
     expect(results.every((r) => r.status === "success")).toBe(true);
     expect(results.map((r) => r.output)).toEqual([{ echo: 1 }, { echo: 2 }, { echo: 3 }]);
     // Distinct run ids — no collision.
@@ -286,11 +286,9 @@ async def run(inputs, ctx):
     const runner = await makeRunner();
     await runner.__registerForTests({ name, manifestSource: manifest, body });
 
-    const result = await runner.invoke({ name, inputs: {}, runAs });
+    const result = (await runner.invoke({ name, inputs: {}, runAs }))._unsafeUnwrap();
     expect(result.status).toBe("error");
-    // CtxError encodes the kind as `kind=<kind>:` in the message so it
-    // survives the JS→Python JsException conversion.
-    expect(result.error).toContain("kind=not_in_allowlist");
+    expect(result.error).toContain("CtxError: not_in_allowlist:");
 
     const calls = await tx((trx) => store.listContextCallsForRun(trx, result.runId));
     const get = calls.find((c) => c.method === "secrets.get");
