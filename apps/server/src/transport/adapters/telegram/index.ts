@@ -21,7 +21,7 @@ const TELEGRAM_API_ROOT = "https://api.telegram.org";
 /** `channels.credentials` once the registry has resolved its secret references. */
 const TelegramCredentialsSchema = z.object({
   token: z.string().min(1),
-  /** A self-hosted Bot API server; Telegram's own when absent. */
+  /** A self-hosted Bot API server; Telegram's own when absent or empty. */
   apiRoot: z.string().optional(),
 });
 
@@ -31,8 +31,10 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   if (!parsed.success) {
     throw new Error(`telegram credentials: ${z.prettifyError(parsed.error)}`);
   }
-  const creds = parsed.data;
-  const bot = new Bot(creds.token, creds.apiRoot ? { client: { apiRoot: creds.apiRoot } } : {});
+  const { token } = parsed.data;
+  // An empty apiRoot means Telegram's own server, for the bot and its file downloads alike.
+  const apiRoot = parsed.data.apiRoot || TELEGRAM_API_ROOT;
+  const bot = new Bot(token, { client: { apiRoot } });
   const adapter = new TelegramAdapter(bot, attachments);
   const profileDialogs = new ProfileDialogs();
   const repoDialogs = new RepoDialogs();
@@ -41,8 +43,8 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   registerCallbackQueries(bot, transport);
   registerMessageHandlers(bot, {
     transport,
-    token: creds.token,
-    apiRoot: creds.apiRoot ?? TELEGRAM_API_ROOT,
+    token,
+    apiRoot,
     profileDialogs,
     repoDialogs,
     dispatchInbound: createInboundDispatch({ transport, api: bot.api, boundary }),

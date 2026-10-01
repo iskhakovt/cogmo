@@ -113,6 +113,22 @@ describe("registerMessageHandlers", () => {
       );
     });
 
+    it("downloads from Telegram's file endpoint when the channel's apiRoot is empty", async () => {
+      await setup({
+        channelId: "tg-ch",
+        credentials: { token: "fake", apiRoot: "" },
+        transport: mockTransport(),
+        attachments: mockAttachmentStore(),
+        inngest: mockInngest(),
+        boundary: { promptTimeoutMs: 30000, minUserTurns: 3 },
+      });
+      await handlers.get("on:message:photo")!(makePhotoCtx(111));
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        "https://api.telegram.org/file/botfake/photos/file_1.jpg",
+      );
+    });
+
     it("uploads photo to S3 and emits structured content", async () => {
       const { transport } = await createAdapter();
       const ctx = makePhotoCtx(111);

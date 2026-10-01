@@ -48,13 +48,17 @@ type UpdateMiddleware = (
 
 /**
  * What the mocked `bot.start()` (the polling loop) and `bot.stop()` (the
- * offset confirmation) return, and the middleware `bot.use()` registered.
- * Reset before each test.
+ * offset confirmation) return, the middleware `bot.use()` registered, the
+ * options the bot was built with, and the order the bot's middleware went
+ * in (`use`, `drop`, `callbackQuery`, `on:<filter>`, `start`), which is the
+ * order grammY runs it in. Reset before each test.
  */
 export const botLifecycle = {
   polling: (): Promise<void> => Promise.resolve(),
   stop: (): Promise<void> => Promise.resolve(),
   middleware: [] as UpdateMiddleware[],
+  options: undefined as unknown,
+  registrations: [] as string[],
 };
 
 /** Run one update through the registered middleware, then `handler`, as grammY composes them. */
@@ -77,25 +81,37 @@ class InputFile {
 }
 
 class MockBot {
+  constructor(_token: string, options?: unknown) {
+    botLifecycle.options = options;
+  }
   api = mockBotApi;
   command = vi.fn((cmd: string) => {
     throw new Error(`/${cmd} registered on the bot, where a forwarded /${cmd} would run it`);
   });
-  on = vi.fn((filter: string, handler: Handler) => handlers.set(`on:${filter}`, handler));
-  callbackQuery = vi.fn((pattern: RegExp, handler: Handler) =>
-    handlers.set(`callbackQuery:${pattern.source}`, handler),
-  );
+  on = vi.fn((filter: string, handler: Handler) => {
+    botLifecycle.registrations.push(`on:${filter}`);
+    handlers.set(`on:${filter}`, handler);
+  });
+  callbackQuery = vi.fn((pattern: RegExp, handler: Handler) => {
+    botLifecycle.registrations.push("callbackQuery");
+    handlers.set(`callbackQuery:${pattern.source}`, handler);
+  });
   drop = vi.fn((predicate: unknown) => {
     if (predicate !== forwardFilter) throw new Error("drop expects the forward_origin filter");
+    botLifecycle.registrations.push("drop");
     return commandComposer;
   });
   catch = vi.fn();
-  use = vi.fn((middleware: UpdateMiddleware) => botLifecycle.middleware.push(middleware));
+  use = vi.fn((middleware: UpdateMiddleware) => {
+    botLifecycle.registrations.push("use");
+    botLifecycle.middleware.push(middleware);
+  });
   // Real grammY returns a Promise<void> that resolves when bot.stop() is
   // called. The adapter awaits it on stop() to drain — without the
   // Promise return type, `attachPolling` errors with "Cannot read
   // properties of undefined (reading 'catch')".
   start = vi.fn(({ onStart }: { onStart?: () => void } = {}) => {
+    botLifecycle.registrations.push("start");
     onStart?.();
     return botLifecycle.polling();
   });
@@ -114,4 +130,6 @@ export function resetGrammyMock(): void {
   botLifecycle.polling = () => Promise.resolve();
   botLifecycle.stop = () => Promise.resolve();
   botLifecycle.middleware = [];
+  botLifecycle.options = undefined;
+  botLifecycle.registrations = [];
 }
