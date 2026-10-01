@@ -1,6 +1,6 @@
 {
-  "id": "a5747c6b-e730-44bb-98ea-a85c6e4d7bc1",
-  "prevId": "26069bbd-657b-42ee-9f51-8b63c2bc6526",
+  "id": "b8acbebc-e26f-4738-8be0-d0a26f84ca68",
+  "prevId": "26b1b2e0-cbec-4cf2-85af-2919de93b814",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -815,6 +815,38 @@
           "with": {},
           "method": "btree",
           "where": "is_private = true",
+          "concurrently": false
+        },
+        "idx_conversations_corrections_observed_through": {
+          "name": "idx_conversations_corrections_observed_through",
+          "columns": [
+            {
+              "expression": "corrections_observed_through",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "with": {},
+          "method": "btree",
+          "where": "corrections_observed_through IS NOT NULL",
+          "concurrently": false
+        },
+        "idx_conversations_memories_observed_through": {
+          "name": "idx_conversations_memories_observed_through",
+          "columns": [
+            {
+              "expression": "memories_observed_through",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "with": {},
+          "method": "btree",
+          "where": "memories_observed_through IS NOT NULL",
           "concurrently": false
         }
       },

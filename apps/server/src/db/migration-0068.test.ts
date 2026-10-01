@@ -36,6 +36,9 @@ const CursorRowsSchema = z.object({
     }),
   ),
 });
+const IndexRowsSchema = z.object({
+  rows: z.array(z.object({ indexname: z.string(), indexdef: z.string() })),
+});
 const MarkerRowsSchema = z.object({
   rows: z.array(z.object({ contradicted_by_message_id: z.string().nullable() })),
 });
@@ -266,6 +269,23 @@ describe("migrations 0068 and 0069 — observer cursors", () => {
       corrections_observed_through: null,
       memories_observed_through: null,
     });
+  });
+
+  it("indexes each cursor where it is set, for the foreign keys' ON DELETE SET NULL", async () => {
+    await applyMigrations();
+
+    const { rows } = IndexRowsSchema.parse(
+      await db.execute(sql`
+        SELECT indexname, indexdef FROM pg_indexes
+        WHERE tablename = 'conversations' AND indexname LIKE '%observed_through'
+        ORDER BY indexname
+      `),
+    );
+    expect(rows.map((r) => r.indexname)).toEqual([
+      "idx_conversations_corrections_observed_through",
+      "idx_conversations_memories_observed_through",
+    ]);
+    for (const r of rows) expect(r.indexdef).toMatch(/WHERE \(\w+ IS NOT NULL\)/);
   });
 
   it("leaves existing rules uncontradicted", async () => {

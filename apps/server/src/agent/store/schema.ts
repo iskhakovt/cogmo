@@ -726,6 +726,13 @@ export const conversations = pgTable(
     index("idx_conversations_user_profile_private_id")
       .on(t.userId, t.profileId, desc(t.id))
       .where(sql`is_private = true`),
+    // For the cursors' ON DELETE SET NULL: a message delete finds its rows.
+    index("idx_conversations_corrections_observed_through")
+      .on(t.correctionsObservedThrough)
+      .where(sql`corrections_observed_through IS NOT NULL`),
+    index("idx_conversations_memories_observed_through")
+      .on(t.memoriesObservedThrough)
+      .where(sql`memories_observed_through IS NOT NULL`),
   ],
 );
 

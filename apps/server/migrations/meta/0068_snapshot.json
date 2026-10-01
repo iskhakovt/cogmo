@@ -1,5 +1,5 @@
 {
-  "id": "26069bbd-657b-42ee-9f51-8b63c2bc6526",
+  "id": "26b1b2e0-cbec-4cf2-85af-2919de93b814",
   "prevId": "2f2564ad-44e4-41d6-809a-ba38184d3d85",
   "version": "7",
   "dialect": "postgresql",
@@ -813,6 +813,38 @@
           ],
           "isUnique": false,
           "where": "is_private = true",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_conversations_corrections_observed_through": {
+          "name": "idx_conversations_corrections_observed_through",
+          "columns": [
+            {
+              "expression": "corrections_observed_through",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "corrections_observed_through IS NOT NULL",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_conversations_memories_observed_through": {
+          "name": "idx_conversations_memories_observed_through",
+          "columns": [
+            {
+              "expression": "memories_observed_through",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "memories_observed_through IS NOT NULL",
           "concurrently": false,
           "method": "btree",
           "with": {}
