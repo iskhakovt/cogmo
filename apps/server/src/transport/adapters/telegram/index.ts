@@ -1,4 +1,5 @@
 import { Bot } from "grammy";
+import { z } from "zod";
 import { logger } from "../../../logger.js";
 import type { AdapterDeps, AdapterModule, AdapterSetupResult } from "../../adapter-module.js";
 import { TelegramAdapter } from "./adapter.js";
@@ -14,9 +15,20 @@ import { RepoDialogs } from "./repo-dialog.js";
 
 export const channelType = "telegram";
 
+/** `channels.credentials` once the registry has resolved its secret references. */
+const TelegramCredentialsSchema = z.object({
+  token: z.string().min(1),
+  /** A self-hosted Bot API server; Telegram's own when absent. */
+  apiRoot: z.string().optional(),
+});
+
 export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   const { credentials, transport, attachments, boundary } = deps;
-  const creds = credentials as { token: string; apiRoot?: string };
+  const parsed = TelegramCredentialsSchema.safeParse(credentials);
+  if (!parsed.success) {
+    throw new Error(`telegram credentials: ${z.prettifyError(parsed.error)}`);
+  }
+  const creds = parsed.data;
   const bot = new Bot(creds.token, creds.apiRoot ? { client: { apiRoot: creds.apiRoot } } : {});
   const adapter = new TelegramAdapter(bot, attachments);
   const profileDialogs = new ProfileDialogs();
