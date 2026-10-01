@@ -184,17 +184,31 @@ export function toReplyOptions(
   };
 }
 
+/** The part of grammY's `Other` for `sendMessage` that `ReplyOptions` maps onto. */
+interface GrammyReplyOptions {
+  reply_markup?: { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> };
+}
+
 /**
  * Narrow a grammY CommandContext/CallbackQueryContext to the minimal shape used by pure
- * command handlers. Pure `TelegramCommandContext.reply` declares a narrower options type than
- * grammY's; the wrapper casts at the boundary — runtime-safe because `reply_markup` is a
- * valid field on grammY's `Other`.
+ * command handlers.
  */
 interface GrammyCtxLite {
   chat: { id: number } | undefined;
   from: { id: number | string } | undefined;
   match?: unknown;
-  reply: (text: string, other?: Record<string, unknown>) => Promise<unknown>;
+  reply: (text: string, other?: GrammyReplyOptions) => Promise<unknown>;
+}
+
+/** `ReplyOptions` in grammY's shape, whose keyboard rows are mutable arrays. */
+function toGrammyReplyOptions(options: ReplyOptions): GrammyReplyOptions {
+  return options.reply_markup === undefined
+    ? {}
+    : {
+        reply_markup: {
+          inline_keyboard: options.reply_markup.inline_keyboard.map((row) => [...row]),
+        },
+      };
 }
 
 export function toCmdCtx(ctx: GrammyCtxLite, overrideMatch?: string): TelegramCommandContext {
@@ -209,6 +223,7 @@ export function toCmdCtx(ctx: GrammyCtxLite, overrideMatch?: string): TelegramCo
     chat: { id: ctx.chat.id },
     from: { id: ctx.from.id },
     match,
-    reply: (text, options) => ctx.reply(text, options as Record<string, unknown> | undefined),
+    reply: (text, options) =>
+      ctx.reply(text, options === undefined ? undefined : toGrammyReplyOptions(options)),
   };
 }

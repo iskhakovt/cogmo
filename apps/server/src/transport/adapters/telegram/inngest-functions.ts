@@ -8,20 +8,18 @@ import {
   pipelineGatePending,
   skillsDeployApprovalRequested,
 } from "../../../inngest/events.js";
-import type { AdapterDeps } from "../../adapter-module.js";
+import type { AdapterDeps, AdapterSetupResult } from "../../adapter-module.js";
 import { editResolvedBoundaryPrompt } from "./boundary-prompt-editor.js";
 import { postPipelineGateKeyboard } from "./pipeline-gate-poster.js";
 import { postSkillsApprovalKeyboard } from "./skills-approval-poster.js";
 
-// biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
-export function telegramFunctions(deps: AdapterDeps, bot: Bot): any[] {
+export function telegramFunctions(deps: AdapterDeps, bot: Bot): AdapterSetupResult["functions"] {
   const { inngest, channelId } = deps;
   // Coding-progress wiring — listen for coding/task/start, find the
   // Telegram session attached to the task's conversation, and subscribe
   // a per-task message renderer that edits in place as plan + execute
   // events stream through the registry.
-  // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
-  const functions: any[] = [];
+  const functions: AdapterSetupResult["functions"] = [];
   if (deps.codingProgress) {
     const { codingStore, runInTx, transportStore, streamingRegistry } = deps.codingProgress;
     functions.push(
