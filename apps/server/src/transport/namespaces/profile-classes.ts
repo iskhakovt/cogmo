@@ -1,6 +1,7 @@
 import { err, ok, type Result } from "neverthrow";
 import { match } from "ts-pattern";
-import { IDENTITY_BLOCK_KEY } from "../../agent/core-memory/scope.js";
+import { deleteProfileClass } from "../../agent/core-memory/delete-profile-class.js";
+import { setProfileClassRestricted } from "../../agent/core-memory/set-profile-class-restricted.js";
 import type { ProfileClass } from "../../agent/store/index.js";
 import type { TransportError } from "../transport-error.js";
 import type { TransportContext } from "./context.js";
@@ -86,27 +87,25 @@ export function createProfileClasses(deps: TransportContext): ProfileClassesName
       return runInTx(async (tx) => {
         const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
         if (!identity) return err({ code: "identity_rejected" as const });
-        const keys = await agentStore.listCoreMemoryKeys(tx, identity.userId, name);
-        if (keys.length > 0 && !confirm) {
-          // In use first, since that call deletes nothing; the FK stays the
-          // authority at delete time.
-          const refs = (await agentStore.listProfiles(tx, identity.userId)).filter(
-            (p) => p.userId === identity.userId && p.profileClass === name,
-          ).length;
-          if (refs > 0) return err({ code: "profile_class_in_use" as const, profileRefs: refs });
-          return err({ code: "profile_class_has_blocks" as const, keys: [...keys] });
-        }
-        const result = await agentStore.deleteProfileClass(tx, identity.userId, name);
-        if (result.isErr()) {
-          return err({
-            code: "profile_class_in_use" as const,
-            profileRefs: result.error.profileRefs,
-          });
-        }
-        if (!result.value.deleted) {
-          return err({ code: "profile_class_not_found" as const, name });
-        }
-        return ok(undefined);
+        const deleted = await deleteProfileClass(tx, agentStore, {
+          userId: identity.userId,
+          name,
+          confirm,
+        });
+        return deleted.mapErr((refusal) =>
+          match(refusal)
+            .returnType<TransportError>()
+            .with({ kind: "in_use" }, ({ profileRefs }) => ({
+              code: "profile_class_in_use",
+              profileRefs,
+            }))
+            .with({ kind: "has_blocks" }, ({ keys }) => ({
+              code: "profile_class_has_blocks",
+              keys,
+            }))
+            .with({ kind: "not_found" }, () => ({ code: "profile_class_not_found", name }))
+            .exhaustive(),
+        );
       });
     },
 
@@ -114,31 +113,22 @@ export function createProfileClasses(deps: TransportContext): ProfileClassesName
       return runInTx(async (tx) => {
         const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
         if (!identity) return err({ code: "identity_rejected" as const });
-        const override =
-          !restricted &&
-          (await agentStore.listCoreMemoryKeys(tx, identity.userId, name)).includes(
-            IDENTITY_BLOCK_KEY,
-          );
-        if (override && !confirm) {
-          return err({ code: "profile_class_has_blocks" as const, keys: [IDENTITY_BLOCK_KEY] });
-        }
-        const result = await agentStore.setProfileClassRestricted(
-          tx,
-          identity.userId,
+        const set = await setProfileClassRestricted(tx, agentStore, {
+          userId: identity.userId,
           name,
           restricted,
+          confirm,
+        });
+        return set.mapErr((refusal) =>
+          match(refusal)
+            .returnType<TransportError>()
+            .with({ kind: "has_blocks" }, ({ keys }) => ({
+              code: "profile_class_has_blocks",
+              keys,
+            }))
+            .with({ kind: "not_found" }, () => ({ code: "profile_class_not_found", name }))
+            .exhaustive(),
         );
-        if (!result.updated) {
-          return err({ code: "profile_class_not_found" as const, name });
-        }
-        if (override) {
-          await agentStore.deleteCoreMemoryBlock(tx, {
-            userId: identity.userId,
-            profileClass: name,
-            key: IDENTITY_BLOCK_KEY,
-          });
-        }
-        return ok({ overrideDeleted: override });
       });
     },
   };
