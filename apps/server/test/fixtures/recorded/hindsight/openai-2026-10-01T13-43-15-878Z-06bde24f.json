@@ -1,0 +1,33 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "Return valid json only.\n\nExtract facts from the following chunk.\n\nChunk: 1/1\nEvent Date: [DATE] ([TS])\nContext: Mentioned on Oct 1, 2026\nMetadata:\n  source: live_retain\n\nContent:\nT's sister Ana lives in/near Porto and is flying in to stay with T in Lisbon the weekend of October 10-11, 2026.",
+        "model": "gpt-4o-mini",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "content": "{\n  \"facts\": [\n    {\n      \"what\": \"Ana (T's sister) is flying in to stay with T in Lisbon on the weekend of October 10-11, 2026.\",\n      \"when\": \"2026-10-10 to 2026-10-11\",\n      \"where\": \"Lisbon\",\n      \"who\": \"Ana (T's sister), T\",\n      \"why\": \"N/A\",\n      \"fact_kind\": \"event\",\n      \"occurred_start\": \"2026-10-10\",\n      \"occurred_end\": \"2026-10-11\",\n      \"fact_type\": \"world\",\n      \"entities\": [\"Ana\", \"T\", \"Lisbon\", \"Porto\"],\n      \"causal_relations\": null\n    }\n  ]\n}",
+        "usage": {
+          "prompt_tokens": 2942,
+          "completion_tokens": 167,
+          "total_tokens": 3109,
+          "prompt_tokens_details": {
+            "cached_tokens": 2816,
+            "audio_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0,
+            "audio_tokens": 0,
+            "accepted_prediction_tokens": 0,
+            "rejected_prediction_tokens": 0
+          }
+        }
+      },
+      "metadata": {
+        "systemHash": "a24b0767"
+      }
+    }
+  ]
+}

@@ -7,7 +7,9 @@
  * 1. Conversation 1 — the user states a core fact, which the agent writes to
  *    core memory in the turn; mentions a dinner, a Hindsight detail; and asks
  *    for no bullet points. The Observer learns an inactive rule from the
- *    correction and retains the facts to Hindsight.
+ *    correction and retains the facts to Hindsight. One more turn and a
+ *    second idle fire extract only that turn: the dinner and the correction
+ *    are context, not found again.
  * 2. Conversation 2 — the same correction again. The Observer reinforces the
  *    rule, which graduates to active.
  * 3. Conversation 3 — the request the model receives carries the core memory
@@ -69,6 +71,7 @@ const CORRECTION = "Please don't use bullet points with me — just write in pla
 const DAY_TRIPS = "Suggest three day trips from Lisbon I could do by train.";
 const CORRECTION_AGAIN =
   "Again, no bullet points or numbered lists with me, please. Plain sentences only.";
+const VISIT = "My sister Ana is flying in from Porto to stay with me next weekend.";
 /** Names neither the restaurant nor the dish, so only recall can put them in the prompt. */
 const PROBE = "Where was that restaurant with the amazing cod? I want to book it again.";
 
@@ -213,8 +216,14 @@ async function turn(conversation: Conversation, content: string): Promise<void> 
   );
 }
 
-/** Fire the Observer the way the idle timer does and wait for its audit row. */
+/** Fire the Observer the way the idle timer does and wait for this fire's audit row. */
 async function observe(conversation: Conversation) {
+  const [before] = await db
+    .select({ id: evolutionEvents.id })
+    .from(evolutionEvents)
+    .where(eq(evolutionEvents.conversationId, conversation.id))
+    .orderBy(desc(evolutionEvents.id))
+    .limit(1);
   await sendEvent("conversation/idle", { conversationId: conversation.id });
   return vi.waitFor(
     async () => {
@@ -224,11 +233,60 @@ async function observe(conversation: Conversation) {
         .where(eq(evolutionEvents.conversationId, conversation.id))
         .orderBy(desc(evolutionEvents.id))
         .limit(1);
-      if (!event) throw new Error("the Observer has not finished yet");
+      if (!event || event.id === before?.id) throw new Error("the Observer has not finished yet");
       return event.payload;
     },
     { timeout: OBSERVER_TIMEOUT_MS, interval: 500 },
   );
+}
+
+/**
+ * The Observer's documents for a conversation's facts, by the last message of
+ * the chunk each came from, oldest chunk first: each one's retained text.
+ */
+async function observerDocuments(
+  bankId: string,
+  conversationId: string,
+): Promise<ReadonlyArray<{ chunk: string; texts: ReadonlyArray<string> }>> {
+  const prefix = `observer:${conversationId}:`;
+  const { data, error } = await sdk.listDocuments({
+    client: hindsightSdk,
+    path: { bank_id: bankId },
+    query: { q: prefix, limit: 100 },
+  });
+  if (data === undefined) throw new Error(`listDocuments: ${JSON.stringify(error)}`);
+  const documents = await Promise.all(
+    data.items.map(async (item) => {
+      const doc = await sdk.getDocument({
+        client: hindsightSdk,
+        path: { bank_id: bankId, document_id: item.id },
+      });
+      if (doc.data === undefined) throw new Error(`getDocument: ${JSON.stringify(doc.error)}`);
+      const chunk = expectDefined(item.id.slice(prefix.length).split(":")[0], item.id);
+      return { chunk, text: doc.data.original_text ?? "" };
+    }),
+  );
+  const chunks = [...new Set(documents.map((d) => d.chunk))].sort();
+  return chunks.map((chunk) => ({
+    chunk,
+    texts: documents.filter((d) => d.chunk === chunk).map((d) => d.text),
+  }));
+}
+
+/** How many messages a conversation has. */
+async function messageCount(conversation: Conversation): Promise<number> {
+  const rows = await db
+    .select({ id: messages.id })
+    .from(messages)
+    .where(eq(messages.conversationId, conversation.id));
+  return rows.length;
+}
+
+/** A transcript the Observer sent, split at `<new_messages>`. */
+function windowParts(transcript: string): { earlier: string; fresh: string } {
+  const at = transcript.indexOf("<new_messages>");
+  expect(at, "the transcript has a new-messages part").toBeGreaterThanOrEqual(0);
+  return { earlier: transcript.slice(0, at), fresh: transcript.slice(at) };
 }
 
 /**
@@ -375,6 +433,40 @@ describe("learning loop", () => {
 
     expect(firstObservation.memories.extracted).toBeGreaterThanOrEqual(1);
     expect((await retainedFacts(userId)).join("\n")).toMatch(/Taberna da Rua das Flores/);
+
+    // ── Conversation 1 again: a second fire extracts only the new turn ──
+    const observedCount = await messageCount(first);
+    await turn(first, VISIT);
+    const turnMessages = (await messageCount(first)) - observedCount;
+    const again = await observe(first);
+    expect(again.newMessages).toEqual({ corrections: turnMessages, memories: turnMessages });
+    expect(again.failedPhases).toEqual([]);
+    expect(again.corrections).toMatchObject({ extracted: 0, reinforced: 0, contradictions: 0 });
+    expect(await bulletPointRule()).toMatchObject({ id: learning.id, observationCount: 1 });
+    expect(again.memories.extracted).toBeGreaterThanOrEqual(1);
+
+    for (const opening of [
+      "You are a behavioral correction extractor.",
+      "You are a memory extraction engine.",
+    ]) {
+      const sent = (await requestsWithSystem(opening)).filter((r) => r.user.includes(VISIT));
+      expect(sent, opening).toHaveLength(1);
+      const { earlier, fresh } = windowParts(expectDefined(sent[0], opening).user);
+      expect(fresh).toContain(VISIT);
+      expect(fresh).not.toContain(CORRECTION);
+      expect(fresh).not.toContain("Taberna");
+      expect(earlier).toMatch(/^<earlier_conversation>\n/);
+      expect(earlier).toContain(CORRECTION);
+    }
+
+    await retainedFacts(userId);
+    const documents = await observerDocuments(userId, first.id);
+    expect(documents.map((d) => d.texts.length > 0)).toEqual([true, true]);
+    const [firstWindow, secondWindow] = documents;
+    expect(expectDefined(firstWindow, "first window").texts.join("\n")).toMatch(/Taberna/);
+    const secondTexts = expectDefined(secondWindow, "second window").texts.join("\n");
+    expect(secondTexts).toMatch(/Ana/);
+    expect(secondTexts).not.toMatch(/Taberna|bacalhau|bullet/i);
 
     // ── Conversation 2: the same correction graduates the rule ──
     const second = await startConversation({ userId, profileId: profile.id });

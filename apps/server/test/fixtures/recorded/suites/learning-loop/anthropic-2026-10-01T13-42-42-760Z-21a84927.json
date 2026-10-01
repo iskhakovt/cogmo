@@ -1,0 +1,88 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "<turn_context>\nCurrent time: [NOW]\n\nReply modality: text\n</turn_context>\n\nPlease don't use bullet points with me — just write in plain sentences.",
+        "model": "claude-sonnet-5",
+        "turnIndex": 5,
+        "hasToolResult": true
+      },
+      "response": {
+        "content": "Got it, I'll stick to plain sentences from now on. So, going back to Portuguese dishes: beyond the bacalhau variations like à Brás or com Natas, you'd probably enjoy arroz de marisco (a rich, soupy seafood rice), polvo à lagareiro (octopus roasted with olive oil and potatoes), and amêijoas à Bulhão Pato (clams cooked with garlic, olive oil, and coriander). For something simpler, try a prego, which is a steak sandwich that's great as a quick bite, or caldo verde, a comforting kale and potato soup with chouriço, especially nice now that the weather's cooling off. And of course, don't skip the pastéis de nata — Manteigaria and Aloma are both excellent if you want something beyond the touristy spots. Let me know if you'd like specific restaurant recommendations for any of these."
+      },
+      "recordedTimings": {
+        "ttftMs": 1034,
+        "interChunkDelaysMs": [
+          0,
+          0,
+          0,
+          278,
+          5,
+          0,
+          0,
+          0,
+          0,
+          5,
+          45,
+          48,
+          42,
+          40,
+          47,
+          72,
+          24,
+          43,
+          49,
+          47,
+          48,
+          48,
+          46,
+          46,
+          46,
+          47,
+          45,
+          44,
+          47,
+          44,
+          47,
+          46,
+          44,
+          44,
+          49,
+          39,
+          45,
+          49,
+          41,
+          47,
+          43,
+          64,
+          30,
+          45,
+          44,
+          48,
+          42,
+          50,
+          43,
+          47,
+          46,
+          45,
+          46,
+          45,
+          47,
+          43,
+          46,
+          47,
+          45,
+          47,
+          4,
+          1,
+          0
+        ],
+        "totalDurationMs": 3609
+      },
+      "metadata": {
+        "systemHash": "30a27033",
+        "toolsHash": "80e92520"
+      }
+    }
+  ]
+}

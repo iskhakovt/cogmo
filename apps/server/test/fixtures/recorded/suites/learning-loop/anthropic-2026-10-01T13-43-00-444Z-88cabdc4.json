@@ -1,0 +1,65 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "<turn_context>\nCurrent time: [NOW]\n\nReply modality: text\n</turn_context>\n\nMy sister Ana is flying in from Porto to stay with me next weekend.",
+        "model": "claude-sonnet-5",
+        "turnIndex": 6,
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "memory_retain",
+            "arguments": "{\"content\": \"T's sister Ana lives in/near Porto and is flying in to stay with T in Lisbon the weekend of October 10-11, 2026.\", \"context\": \"Mentioned on Oct 1, 2026\"}",
+            "id": "toolu_0185HC8MQjQsg8LsbAQNWanK"
+          }
+        ]
+      },
+      "recordedTimings": {
+        "ttftMs": 1037,
+        "interChunkDelaysMs": [
+          0,
+          378,
+          0,
+          0,
+          0,
+          0,
+          0,
+          582,
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          8,
+          0,
+          95,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "totalDurationMs": 2101
+      },
+      "metadata": {
+        "systemHash": "30a27033",
+        "toolsHash": "80e92520"
+      }
+    }
+  ]
+}

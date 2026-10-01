@@ -1,0 +1,18 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "[correction-extraction] <new_messages>\nUser: Suggest three day trips from Lisbon I could do by train.\n\nAssistant: Three good train-accessible day trips from Lisbon: Sintra, Coimbra, and Évora (though Évora's actually better by bus — more on that below).\n\nSintra is the obvious first pick and genuinely worth it despite the crowds. Trains leave frequently from Rossio station and take about 40 minutes. You'll want a full day to properly see Pena Palace, Quinta da Regaleira, and the Moorish Castle, since they're spread across hills and involve a fair bit of walking or local bus hopping.\n\nCoimbra is a great second option if you want a change of pace — a proper university city with one of Europe's oldest universities, a stunning baroque library (Biblioteca Joanina), and a lovely old town sloping down to the Mondego river. It's about 2 hours by fast train from Lisboa-Santa Apolónia or Oriente, so it works well as a day trip though you could also justify an overnight.\n\nFor a third, Setúbal is underrated and closer — about 1 hour by train from Lisbon. It's a fishing town known for excellent seafood and fried cuttlefish, and it's the jumping-off point for the Arrábida Natural Park beaches if you want to extend the trip with a bus or taxi into the hills.\n\nIf you wanted something further afield like Évora, it's actually easier by bus (Rede Expressos) since the train connection isn't direct, so I left it off this train-specific list.\n\nUser: Again, no bullet points or numbered lists with me, please. Plain sentences only.\n\nAssistant: Understood — plain prose from here on, no lists or bullets.\n</new_messages>",
+        "model": "claude-sonnet-5",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "content": "{\"corrections\":[{\"rule\":\"Write responses in plain prose sentences rather than using bullet points or lists.\",\"category\":\"style\",\"reasoning\":\"User explicitly restated the preference for plain sentences without bullet points or numbered lists, matching an existing rule.\",\"action\":\"reinforce\",\"matchedExistingRuleId\":\"R1\"}]}"
+      },
+      "metadata": {
+        "systemHash": "e32edd06"
+      }
+    }
+  ]
+}

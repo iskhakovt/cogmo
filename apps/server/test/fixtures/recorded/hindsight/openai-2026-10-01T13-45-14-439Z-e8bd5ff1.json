@@ -1,0 +1,33 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "Return valid json only.\n\n## MISSION\n\nTrack anything notable in the new facts — names, numbers, dates, places, events, decisions, claims, relationships, and recurring patterns.\n\n## INPUT\n\n### New facts\n\n[[UUID]] User prefers plain prose responses without bullet points or numbered lists. | Involving: user | User reiterated this formatting preference when discussing Lisbon day trip suggestions. (mentioned_at=2026-10-01 13:45:10.175388+00:00)\n\n### Existing observations\n\n[\n  {\n    \"id\": \"[UUID]\",\n    \"text\": \"User prefers plain prose over bullet points or lists in responses.\",\n    \"proof_count\": 2,\n    \"mentioned_at\": \"[TS]\",\n    \"source_memories\": [\n      {\n        \"text\": \"User goes by the name T. | Involving: user | User introduced themselves after moving to Lisbon\",\n        \"context\": \"User introduced themselves after moving to Lisbon\",\n        \"mentioned_at\": \"[TS]\"\n      },\n      {\n        \"text\": \"User prefers plain prose over bullet points or lists in responses. | Involving: user\",\n        \"mentioned_at\": \"[TS]\"\n      }\n    ]\n  },\n  {\n    \"id\": \"[UUID]\",\n    \"text\": \"Ana is flying in from Porto to stay with T in Lisbon on the weekend of October 10-11, 2026.\",\n    \"proof_count\": 3,\n    \"occurred_start\": \"[TS]\",\n    \"occurred_end\": \"[TS]\",\n    \"mentioned_at\": \"[TS]\",\n    \"source_memories\": [\n      {\n        \"text\": \"User recently moved to Lisbon, Portugal. | Involving: user\",\n        \"mentioned_at\": \"[TS]\"\n      },\n      {\n        \"text\": \"Ana flew in from Porto to stay with T in Lisbon for the weekend of October 10-11, 2026. | When: 2026-10-10 to 2026-10-11 | Involving: Ana (T's sister), T\",\n        \"context\": \"Mentioned Oct 1, 2026\",\n        \"occurred_start\": \"[TS]\",\n        \"occurred_end\": \"[TS]\",\n        \"mentioned_at\": \"[TS]\"\n      },\n      {\n        \"text\": \"Ana (T's sister) is flying in to stay with T in Lisbon on the weekend of October 10-11, 2026. | When: 2026-10-10 to 2026-10-11 | Involving: Ana (T's sister), T\",\n        \"context\": \"Mentioned on Oct 1, 2026\",\n        \"occurred_start\": \"[TS]\",\n        \"occurred_end\": \"[TS]\",\n        \"mentioned_at\": \"[TS]\"\n      }\n    ]\n  },\n  {\n    \"id\": \"[UUID]\",\n    \"text\": \"User had dinner at Taberna da Rua das Flores in Lisbon and said the bacalhau was the best they've ever had.\",\n    \"proof_count\": 2,\n    \"occurred_start\": \"[TS]\",\n    \"occurred_end\": \"[TS]\",\n    \"mentioned_at\": \"[TS]\",\n    \"source_memories\": [\n      {\n        \"text\": \"T had dinner at Taberna da Rua das Flores in Lisbon and said the bacalhau was the best they've ever had. | When: on October 01, 2026 | Involving: T\",\n        \"context\": \"Shared in conversation shortly after moving to Lisbon, Oct 2026\",\n        \"occurred_start\": \"[TS]\",\n        \"occurred_end\": \"[TS]\",\n        \"mentioned_at\": \"[TS]\"\n      },\n      {\n        \"text\": \"User had dinner at Taberna da Rua das Flores in Lisbon and said the bacalhau was the best they've ever had. | When: 2026-10-01 | Involving: user\",\n        \"context\": \"Shared shortly after moving to Lisbon\",\n        \"occurred_start\": \"[TS]\",\n        \"occurred_end\": \"[TS]\",\n        \"mentioned_at\": \"[TS]\"\n      }\n    ]\n  },\n  {\n    \"id\": \"[UUID]\",\n    \"text\": \"User's timezone is Europe/Lisbon.\",\n    \"proof_count\": 1,\n    \"mentioned_at\": \"[TS]\",\n    \"source_memories\": [\n      {\n        \"text\": \"User's timezone is Europe/Lisbon. | Involving: user\",\n        \"mentioned_at\": \"[TS]\"\n      }\n    ]\n  }\n]",
+        "model": "gpt-4o-mini",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "content": "{\n  \"creates\": [],\n  \"updates\": [\n    {\n      \"text\": \"User prefers plain prose over bullet points or lists in responses.\",\n      \"observation_id\": \"a7a4fe52-0620-42fa-8b4f-4899f8febb4c\",\n      \"source_fact_ids\": [\n        \"1a5a9807-75e5-49a5-be65-a30a99da4f50\"\n      ],\n      \"reason\": \"The new fact reiterates the user's preference for plain prose, which is already captured in observation a7a4fe52.\"\n    }\n  ],\n  \"deletes\": []\n}",
+        "usage": {
+          "prompt_tokens": 5031,
+          "completion_tokens": 141,
+          "total_tokens": 5172,
+          "prompt_tokens_details": {
+            "cached_tokens": 3072,
+            "audio_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0,
+            "audio_tokens": 0,
+            "accepted_prediction_tokens": 0,
+            "rejected_prediction_tokens": 0
+          }
+        }
+      },
+      "metadata": {
+        "systemHash": "a4694c92"
+      }
+    }
+  ]
+}

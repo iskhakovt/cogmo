@@ -1,0 +1,42 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "<turn_context>\nCurrent time: [NOW]\n\nReply modality: text\n</turn_context>\n\nWhere was that restaurant with the amazing cod? I want to book it again.",
+        "model": "claude-sonnet-5",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "content": "That was Taberna da Rua das Flores in Lisbon — the place where you said the bacalhau was the best you'd ever had. Want help booking a table there?"
+      },
+      "recordedTimings": {
+        "ttftMs": 1074,
+        "interChunkDelaysMs": [
+          0,
+          0,
+          0,
+          1011,
+          7,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          4,
+          0,
+          0
+        ],
+        "totalDurationMs": 2096
+      },
+      "metadata": {
+        "systemHash": "7d8307ee",
+        "toolsHash": "80e92520"
+      }
+    }
+  ]
+}

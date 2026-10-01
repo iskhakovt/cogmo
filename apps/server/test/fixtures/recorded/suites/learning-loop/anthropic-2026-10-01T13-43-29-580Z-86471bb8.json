@@ -1,0 +1,67 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "<turn_context>\nCurrent time: [NOW]\n\nReply modality: text\n</turn_context>\n\nI've just started a new job at a bakery in Alfama.",
+        "model": "claude-sonnet-5",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "content": "Congrats on the new job! I'm your personal assistant — I don't think we've met yet, so I'd love to get to know you a bit.\n\nI'll jot down that you just started working at a bakery in Alfama (sounds like Lisbon!). A few quick things to help me assist you well:\n\n1. What should I call you?\n2. What's your timezone (Lisbon time, I'm guessing)?\n3. How do you like to communicate — quick and to the point, or more detailed/conversational?"
+      },
+      "recordedTimings": {
+        "ttftMs": 948,
+        "interChunkDelaysMs": [
+          0,
+          1970,
+          0,
+          0,
+          0,
+          0,
+          0,
+          46,
+          45,
+          45,
+          46,
+          48,
+          43,
+          45,
+          52,
+          43,
+          43,
+          43,
+          47,
+          45,
+          46,
+          44,
+          45,
+          47,
+          56,
+          38,
+          43,
+          44,
+          50,
+          42,
+          47,
+          44,
+          46,
+          46,
+          71,
+          20,
+          43,
+          58,
+          33,
+          46,
+          39,
+          0,
+          0
+        ],
+        "totalDurationMs": 4457
+      },
+      "metadata": {
+        "systemHash": "6dff8fdf"
+      }
+    }
+  ]
+}
