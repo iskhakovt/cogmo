@@ -4774,6 +4774,7 @@ describe("handleLearned detail rendering", () => {
     outOfScope?: number;
     unknownRule?: number;
     durationMs?: number;
+    contradictions?: number;
     retired?: number;
     withheld?: number;
     skipped?: number;
@@ -4783,7 +4784,7 @@ describe("handleLearned detail rendering", () => {
       corrections: {
         extracted: 1,
         reinforced: 1,
-        contradictions: overrides.retired ?? 0,
+        contradictions: overrides.contradictions ?? 0,
         retired: overrides.retired ?? 0,
         promoted: 0,
         outOfScopeReinforcementsSkipped: overrides.outOfScope ?? 0,
@@ -4825,7 +4826,8 @@ describe("handleLearned detail rendering", () => {
   }
 
   it("shows retired learning rules and withheld rows only when there are some", async () => {
-    const reply = await detailOf(makePayload({ retired: 1, withheld: 2 }));
+    const reply = await detailOf(makePayload({ contradictions: 2, retired: 1, withheld: 2 }));
+    expect(reply).toContain("contradicted: 2");
     expect(reply).toContain("retired:      1 (learning, contradicted)");
     expect(reply).toContain("Pending drained: 0");
     expect(reply).toContain("withheld by a memory rule: 2");

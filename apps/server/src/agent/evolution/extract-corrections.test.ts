@@ -300,7 +300,9 @@ describe("extractCorrections", () => {
       );
     });
 
-    it("reinforces an instruction rule by its label, counting no promotion", async () => {
+    // Whether that promotes is the store's answer: `upsertCorrection` never
+    // promotes an instruction rule (steering-rules.test.ts).
+    it("resolves an instruction rule's label to its id and reinforces it", async () => {
       const deps = mockExtractionDeps(
         {
           corrections: [
@@ -322,7 +324,7 @@ describe("extractCorrections", () => {
 
       const result = await extractCorrections(sampleHistory, SCOPE, deps);
 
-      expect(result).toMatchObject({ reinforced: 1, promoted: 0 });
+      expect(result).toMatchObject({ reinforced: 1, unknownRuleReinforcementsSkipped: 0 });
       expect(deps.store.upsertCorrection).toHaveBeenCalledWith(
         expect.anything(),
         expect.objectContaining({ existingRuleId: "mine" }),
