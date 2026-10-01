@@ -37,7 +37,12 @@ import { logger } from "../../logger.js";
 import type { MemoryProvider } from "../../memory/provider.js";
 import type { TransportStore } from "../../transport/store/index.js";
 import { admitsFirstParty } from "../core-memory/scope.js";
-import type { AgentStore, ObservedPhase, PendingMemory } from "../store/index.js";
+import {
+  type AgentStore,
+  bindsUnseenUserRule,
+  type ObservedPhase,
+  type PendingMemory,
+} from "../store/index.js";
 import { consolidateRules } from "./consolidate-rules.js";
 import {
   buildRetainItems,
@@ -272,18 +277,43 @@ export async function runObserver(
     seesUserRules: admitsFirstParty(profile),
   };
 
+  // A fire whose profile can't see one of the user's memory rules stores
+  // nothing such a rule binds. Its memories window stays unplanned and its
+  // cursor where it is, so a fire that can see the rule extracts it later.
+  // The rules don't depend on the chunk, so one read decides for the fire.
+  const memoriesHeld =
+    !fire.seesUserRules &&
+    !isCaughtUp(bounds, "memories") &&
+    (await step.run("check-unseen-memory-rules", async () => {
+      const memoryRules = await deps.runInTx((tx) =>
+        agentStore.getMemoryRules(tx, { profileIds: [conv.profileId], userId: conv.userId }),
+      );
+      return bindsUnseenUserRule(memoryRules, fire.seesUserRules);
+    }));
+  if (memoriesHeld) {
+    logger.info(
+      { ...fire },
+      "memory extraction skipped — a user's memory rule binds a profile that can't see it",
+    );
+  }
+  const planned = OBSERVED_PHASES.filter(
+    (phase) => !isCaughtUp(bounds, phase) && !(phase === "memories" && memoriesHeld),
+  );
+
   // Each phase's chunks, planned once and memoized, so the step ids below
   // derive from durable state. A fire with nothing new plans nothing.
   const windowDeps = { runInTx: deps.runInTx, store: agentStore };
-  const plan: ObserverPlan = OBSERVED_PHASES.every((phase) => isCaughtUp(bounds, phase))
-    ? { tokenLimit: 0, chunks: { corrections: [], memories: [] } }
-    : await step.run("plan-observer-chunks", async () => {
-        return planObserverChunks(windowDeps, {
-          conversationId,
-          bounds,
-          tokenLimit: chunkTokenLimit(model, resolved.limits),
+  const plan: ObserverPlan =
+    planned.length === 0
+      ? { tokenLimit: 0, chunks: { corrections: [], memories: [] } }
+      : await step.run("plan-observer-chunks", async () => {
+          return planObserverChunks(windowDeps, {
+            conversationId,
+            bounds,
+            phases: planned,
+            tokenLimit: chunkTokenLimit(model, resolved.limits),
+          });
         });
-      });
   const transcriptOf = (chunk: ObserverChunk) =>
     loadChunkTranscript(windowDeps, { conversationId, chunk, tokenLimit: plan.tokenLimit });
 
@@ -291,13 +321,15 @@ export async function runObserver(
    * Extract a phase's chunks in order, advancing its cursor after each. A
    * chunk whose extraction or advance fails after its retries ends the phase:
    * the cursor stays after the last chunk that succeeded, and the chunks
-   * after it wait for the next fire.
+   * after it wait for the next fire. So does a chunk `held` reports was left
+   * unextracted, without failing the phase.
    */
   async function observePhase<T>(
     phase: ObservedPhase,
     empty: T,
     combine: (total: T, chunk: T) => T,
     extract: (chunk: ObserverChunk) => Promise<T>,
+    held: (chunk: T) => boolean = () => false,
   ): Promise<SettledPhase<T>> {
     let total = empty;
     let n = 0;
@@ -309,6 +341,7 @@ export async function runObserver(
       );
       if (extracted.result === null) return { phase, result: total, failed: true };
       total = combine(total, extracted.result);
+      if (held(extracted.result)) return { phase, result: total, failed: false };
       const advanced = await settlePhase(phase, conversationId, false, () =>
         step.run(`advance-${phase}-cursor-${n}`, async () => {
           await deps.runInTx((tx) =>
@@ -355,19 +388,33 @@ export async function runObserver(
   // Phase 2: extract facts from the new messages into long-term memory.
   // `profile.profileClass` (when non-null) becomes a `profile_class:<class>`
   // tag on every retained memory, supporting speaker-driven isolation.
-  const memories = await observePhase("memories", NO_MEMORIES, addMemories, async (chunk) => {
-    const memoryRules = await deps.runInTx((tx) =>
-      agentStore.getMemoryRules(tx, { profileIds: [conv.profileId], userId: conv.userId }),
-    );
-    return extractMemories(await transcriptOf(chunk), conv.userId, profile.profileClass, {
-      provider,
-      model,
-      memory: deps.memory,
-      customCompartments,
-      memoryRules,
-      fire,
-    });
-  });
+  // A chunk extraction skips for an unseen rule only if one was set since
+  // the check above; it, too, leaves the cursor where it is.
+  const memories: SettledPhase<MemoryExtractionResult> = memoriesHeld
+    ? {
+        phase: "memories",
+        result: { ...NO_MEMORIES, skippedForUnseenRules: 1 },
+        failed: false,
+      }
+    : await observePhase(
+        "memories",
+        NO_MEMORIES,
+        addMemories,
+        async (chunk) => {
+          const memoryRules = await deps.runInTx((tx) =>
+            agentStore.getMemoryRules(tx, { profileIds: [conv.profileId], userId: conv.userId }),
+          );
+          return extractMemories(await transcriptOf(chunk), conv.userId, profile.profileClass, {
+            provider,
+            model,
+            memory: deps.memory,
+            customCompartments,
+            memoryRules,
+            fire,
+          });
+        },
+        (chunk) => chunk.skippedForUnseenRules > 0,
+      );
 
   // Phase 3: drain pending_memories — staged live retains, skill writes
   // and any migration backfill — through the same classifier prompt. Split

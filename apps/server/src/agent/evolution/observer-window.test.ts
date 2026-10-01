@@ -81,6 +81,7 @@ describe("chunkTokenLimit", () => {
 });
 
 describe("planObserverChunks", () => {
+  const BOTH = ["corrections", "memories"] as const;
   const WINDOW = ["m3", "m4", "m5", "m6"].map((id) => sized(id, 10));
 
   it("reads from the lower cursor once and plans each phase from its own", async () => {
@@ -89,7 +90,12 @@ describe("planObserverChunks", () => {
 
     const plan = await planObserverChunks(
       { runInTx: fakeRunInTx, store },
-      { conversationId: "conv-1", bounds: bounds("m6", "m4", "m2"), tokenLimit: 1_000 },
+      {
+        conversationId: "conv-1",
+        bounds: bounds("m6", "m4", "m2"),
+        phases: BOTH,
+        tokenLimit: 1_000,
+      },
     );
 
     expect(store.listMessagesInRange).toHaveBeenCalledExactlyOnceWith(expect.anything(), "conv-1", {
@@ -111,7 +117,12 @@ describe("planObserverChunks", () => {
 
     const plan = await planObserverChunks(
       { runInTx: fakeRunInTx, store },
-      { conversationId: "conv-1", bounds: bounds("m6", null, "m6"), tokenLimit: 1_000 },
+      {
+        conversationId: "conv-1",
+        bounds: bounds("m6", null, "m6"),
+        phases: BOTH,
+        tokenLimit: 1_000,
+      },
     );
 
     expect(store.listMessagesInRange).toHaveBeenCalledWith(expect.anything(), "conv-1", {
@@ -124,12 +135,41 @@ describe("planObserverChunks", () => {
     });
   });
 
+  it("plans only the phases it is given, reading from their lowest cursor", async () => {
+    const store = mock<AgentStore>();
+    store.listMessagesInRange.mockResolvedValue(WINDOW.slice(2));
+
+    const plan = await planObserverChunks(
+      { runInTx: fakeRunInTx, store },
+      {
+        conversationId: "conv-1",
+        bounds: bounds("m6", "m4", null),
+        phases: ["corrections"],
+        tokenLimit: 1_000,
+      },
+    );
+
+    expect(store.listMessagesInRange).toHaveBeenCalledWith(expect.anything(), "conv-1", {
+      after: "m4",
+      through: "m6",
+    });
+    expect(plan.chunks).toEqual({
+      corrections: [{ after: "m4", through: "m6", messages: 2 }],
+      memories: [],
+    });
+  });
+
   it("reads nothing when both phases are caught up", async () => {
     const store = mock<AgentStore>();
 
     const plan = await planObserverChunks(
       { runInTx: fakeRunInTx, store },
-      { conversationId: "conv-1", bounds: bounds("m6", "m6", "m6"), tokenLimit: 1_000 },
+      {
+        conversationId: "conv-1",
+        bounds: bounds("m6", "m6", "m6"),
+        phases: BOTH,
+        tokenLimit: 1_000,
+      },
     );
 
     expect(store.listMessagesInRange).not.toHaveBeenCalled();

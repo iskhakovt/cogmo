@@ -2651,7 +2651,12 @@ export function createTransport(deps: {
         if (result.status === "skipped") {
           return ok({ status: "skipped" as const, reason: result.reason });
         }
-        if (result.newMessages.corrections === 0 && result.newMessages.memories === 0) {
+        // A memories window held for an unseen rule is not "nothing new": the reply says it was skipped.
+        if (
+          result.newMessages.corrections === 0 &&
+          result.newMessages.memories === 0 &&
+          result.memories.skippedForUnseenRules === 0
+        ) {
           return ok({
             status: "nothing_new" as const,
             eventId: result.eventId,

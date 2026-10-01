@@ -98,17 +98,23 @@ export interface ObserverWindowDeps {
 }
 
 /**
- * Plan each phase's chunks for a fire whose window tops out at
- * `bounds.lastMessageId`. Reads the messages after the lower cursor once and
- * returns only the chunks' bounds, so the plan stays small as step state.
+ * Plan the chunks of each of `phases` for a fire whose window tops out at
+ * `bounds.lastMessageId`; the other phases get none. Reads the messages after
+ * the lower cursor once and returns only the chunks' bounds, so the plan
+ * stays small as step state.
  */
 export async function planObserverChunks(
   deps: ObserverWindowDeps,
-  args: { conversationId: string; bounds: ObserverBounds; tokenLimit: number },
+  args: {
+    conversationId: string;
+    bounds: ObserverBounds;
+    phases: ReadonlyArray<ObservedPhase>;
+    tokenLimit: number;
+  },
 ): Promise<ObserverPlan> {
   const { bounds, tokenLimit } = args;
   const top = bounds.lastMessageId;
-  const behind = OBSERVED_PHASES.filter((phase) => !isCaughtUp(bounds, phase));
+  const behind = args.phases.filter((phase) => !isCaughtUp(bounds, phase));
   if (top === null || behind.length === 0) {
     return { tokenLimit, chunks: { corrections: [], memories: [] } };
   }

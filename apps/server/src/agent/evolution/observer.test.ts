@@ -549,6 +549,37 @@ describe("runObserver rules", () => {
     expect(recordedPayload(deps)).toMatchObject(deferral);
   });
 
+  it("leaves the memories window unobserved, and unread, when a rule the profile can't see binds it", async () => {
+    const log = messageLog(HISTORY);
+    const step = exhaustedRetriesStep();
+    const deps = observerDeps({
+      provider: routedProvider(),
+      log,
+      store: {
+        getProfile: thirdPartyProfile(),
+        getMemoryRules: vi.fn().mockResolvedValue([USER_HEALTH_RULE]),
+      },
+    });
+
+    const result = await runObserver(EVENT, step, deps);
+
+    expect(log.cursors).toEqual({ corrections: "msg-004", memories: null });
+    expect(result).toMatchObject({
+      memories: { extracted: 0, skippedForUnseenRules: 1 },
+      newMessages: { corrections: 4, memories: 0 },
+      failedPhases: [],
+    });
+    expect(step.ids.filter((id) => /memories-/.test(id))).toEqual([]);
+    // The plan's read and the correction chunk's: no memories chunk is read.
+    expect(deps.agentStore.listMessagesInRange).toHaveBeenCalledTimes(2);
+    expect(recordedPayload(deps)).toMatchObject({ memories: { skippedForUnseenRules: 1 } });
+
+    // The next first-party fire extracts the whole window.
+    const provider = routedProvider();
+    await runObserver(EVENT, exhaustedRetriesStep(), observerDeps({ provider, log }));
+    expect(log.cursors).toEqual({ corrections: "msg-004", memories: "msg-004" });
+  });
+
   it("records no deferral on a first-party fire", async () => {
     const deps = observerDeps({
       provider: routedProvider(),
