@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { IMAGE_ALLOWED_ASPECT_RATIOS } from "../agent/store/schema.js";
-import { logger } from "../logger.js";
 import { expectDefined } from "../test/assertions.js";
 import { AbortError } from "../util/with-retry.js";
 import { ImageGenerationFailedError } from "./image-failure.js";
@@ -382,8 +381,10 @@ describe("venicePixelSize", () => {
     // The long side sits at the cap, or the area stays near 1024×1024.
     const atCap = Math.max(width, height) === VENICE_MAX_DIMENSION;
     expect(atCap || Math.abs(width * height - 1024 * 1024) <= 1024 * 1024 * 0.15).toBe(true);
-    // Rounding moves each side at most half a divisor, which bounds how far
-    // the result can drift from the exact ratio.
+    // For every catalog ratio no side reaches the clamp, so rounding — at
+    // most half a divisor per side — is all that moves it off the exact
+    // ratio. An extreme ratio can hit the clamp ("never rounds a side to
+    // zero" below), where this bound doesn't hold.
     expect(Math.abs(width * rh - height * rw)).toBeLessThanOrEqual((divisor * (rw + rh)) / 2);
   });
 
@@ -444,18 +445,28 @@ describe("VeniceImageProvider.generate — aspect ratio sizing", () => {
   it.each([
     ["missing from the listing", "not-listed"],
     ["whose entry doesn't parse", "odd-model"],
-  ])("sends aspect_ratio unchanged for a model %s, and warns", async (_label, model) => {
-    const warn = vi.spyOn(logger, "warn");
+  ])("fails terminally for a model %s, without generating", async (_label, model) => {
     const { fetchFn, captured } = veniceFetch();
 
-    await provider(fetchFn).generate({ model, prompt: "p", aspectRatio: "16:9" });
+    const promise = provider(fetchFn).generate({ model, prompt: "p", aspectRatio: "16:9" });
 
-    expect(captured.generateBodies[0]).toMatchObject({ aspect_ratio: "16:9" });
-    expect(captured.generateBodies[0]).not.toHaveProperty("width");
-    expect(warn).toHaveBeenCalledWith(
-      expect.objectContaining({ model, aspectRatio: "16:9" }),
-      expect.stringContaining("/models?type=image"),
+    await expect(promise).rejects.toBeInstanceOf(ImageGenerationFailedError);
+    await expect(promise).rejects.toMatchObject({
+      failure: { kind: "provider_error", provider: "venice" },
+    });
+    await expect(promise).rejects.toThrow(
+      `no usable entry for ${model}, so aspect ratio 16:9 can't be sized for it. Call again without aspectRatio.`,
     );
+    expect(captured.generateBodies).toHaveLength(0);
+  });
+
+  it("still generates for an undescribed model when the call carries no ratio", async () => {
+    const { fetchFn, captured } = veniceFetch();
+
+    await provider(fetchFn).generate({ model: "not-listed", prompt: "p" });
+
+    expect(captured.listingCalls).toHaveLength(0);
+    expect(captured.generateBodies).toHaveLength(1);
   });
 
   it("reads the listing from {baseUrl}/models?type=image with Bearer auth", async () => {

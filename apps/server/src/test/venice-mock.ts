@@ -176,12 +176,9 @@ async function handleModels(
   const jsonPath = join(opts.fixturePath, `venice-models-${type}.json`);
 
   if (opts.mode === "replay") {
+    let content: string;
     try {
-      const recorded = JSON.parse(await readFile(jsonPath, "utf-8")) as RecordedResponse;
-      return new Response(JSON.stringify(recorded.body), {
-        status: recorded.status,
-        headers: recorded.headers,
-      });
+      content = await readFile(jsonPath, "utf-8");
     } catch {
       return new Response(
         `venice-mock: no fixture for the models listing (type=${type}). ` +
@@ -189,10 +186,20 @@ async function handleModels(
         { status: 503, headers: { "Content-Type": "text/plain" } },
       );
     }
+    // Parsed outside the catch, so a malformed committed fixture fails with
+    // its parse error rather than reading as a missing one.
+    const recorded = JSON.parse(content) as RecordedResponse;
+    return new Response(JSON.stringify(recorded.body), {
+      status: recorded.status,
+      headers: recorded.headers,
+    });
   }
 
-  // Record mode: same direct-to-Venice passthrough as `handleGenerate`.
+  // Record mode: same direct-to-Venice passthrough as `handleGenerate`. A
+  // failed listing (bad key, rate limit, outage) goes back to the caller
+  // unrecorded, so it never becomes the fixture replay serves.
   const realResp = await globalThis.fetch(url, init);
+  if (!realResp.ok) return realResp;
   const captured: RecordedResponse = {
     status: realResp.status,
     headers: {

@@ -24,9 +24,9 @@
  * `safe_mode`, `cfg_scale`, etc. — those are operator-pinned policy.
  *
  * Sizing is per model. Venice's models listing (`GET /models?type=image`)
- * publishes each model's `model_spec.constraints`: a model that lists
- * `aspectRatios` takes `aspect_ratio` (the Qwen family rejects
- * `width`/`height` with a 400), and a model that lists none is sized in
+ * publishes each model's `model_spec.constraints`: a model with a non-empty
+ * `aspectRatios` list takes `aspect_ratio` (the Qwen family rejects
+ * `width`/`height` with a 400), and a model with no listed ratios is sized in
  * pixels, taking `width`/`height` in multiples of its `widthHeightDivisor`.
  * The adapter reads the listing to translate a requested aspect ratio into
  * whichever of the two the model takes — see `#sizingFields`.
@@ -46,7 +46,6 @@
 import * as R from "remeda";
 import { z } from "zod";
 import type { ImageGenerationDefaults } from "../agent/store/schema.js";
-import { logger } from "../logger.js";
 import { ImageGenerationFailedError } from "./image-failure.js";
 
 /**
@@ -91,9 +90,11 @@ type VeniceSizing = { kind: "aspect_ratio" } | { kind: "pixels"; divisor: number
  * the ratio, scaled down until the long side fits `VENICE_MAX_DIMENSION`,
  * and each side rounded to the nearest multiple of `divisor` within
  * `[divisor, VENICE_MAX_DIMENSION]`. Holding the area keeps every ratio near
- * the one-megapixel scale these models render at by default; rounding moves
+ * the one-megapixel scale these models render at by default. Rounding moves
  * each side by at most half a `divisor`, so the result approximates the
- * ratio.
+ * ratio — unless a side hits the clamp, which only a ratio far beyond the
+ * catalog's (`IMAGE_ALLOWED_ASPECT_RATIOS`) or a divisor that doesn't divide
+ * 1280 can make it do.
  */
 export function venicePixelSize(
   aspectRatio: string,
@@ -325,8 +326,10 @@ export class VeniceImageProvider {
 
   /**
    * The request-body fields that carry `aspectRatio` for `model`. A model
-   * the listing doesn't describe gets `aspect_ratio` as given, leaving the
-   * call to Venice's own handling of it.
+   * the listing doesn't describe — absent, or an entry that doesn't parse —
+   * fails the call before anything is generated: guessing a field could size
+   * a pixel model wrong without a sign, the outcome a failed listing read
+   * also refuses. The error tells the LLM to call again without a ratio.
    */
   async #sizingFields(
     model: string,
@@ -334,11 +337,13 @@ export class VeniceImageProvider {
   ): Promise<Pick<VeniceRequestBody, "aspect_ratio" | "width" | "height">> {
     const sizing = (await this.#modelSizing()).get(model);
     if (sizing === undefined) {
-      logger.warn(
-        { model, aspectRatio },
-        "venice: model has no usable entry in /models?type=image; sending aspect_ratio unchanged",
-      );
-      return { aspect_ratio: aspectRatio };
+      throw new ImageGenerationFailedError({
+        kind: "provider_error",
+        provider: "venice",
+        reason:
+          `Venice's model listing (/models?type=image) has no usable entry for ${model}, ` +
+          `so aspect ratio ${aspectRatio} can't be sized for it. Call again without aspectRatio.`,
+      });
     }
     return sizing.kind === "aspect_ratio"
       ? { aspect_ratio: aspectRatio }
