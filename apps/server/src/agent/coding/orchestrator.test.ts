@@ -1343,6 +1343,33 @@ describe("runCodingExecute", () => {
     expect(stream.failed).toEqual([]);
   });
 
+  it("leaves a task cancelled during the session cancelled — no resurrection to pending_verify", async () => {
+    const repo = await seedRepo();
+    const { task } = await seedExecutableTask(repo);
+    const { sandbox } = fakeSandbox();
+    // A Cancel tap landing while `execute-cli` streams.
+    const backend: CodingBackend = {
+      plan: () => throwingPlan("plan not exercised by this test"),
+      execute: async function* () {
+        yield { kind: "text_delta", text: "Editing\n" };
+        await tx((trx) => store.cancelTaskIfActive(trx, task.id, "user cancelled"));
+        yield { kind: "complete", exitCode: 0, isError: false };
+      },
+    };
+
+    await runCodingExecute({
+      taskId: task.id,
+      runId: "run-test",
+      deps: makeDeps({ sandbox, backend }),
+      stepRun,
+      stepSendEvent,
+      inngest: fakeInngest,
+    });
+
+    const reloaded = await tx((trx) => store.getTask(trx, task.id));
+    expect(reloaded?.status).toBe("cancelled");
+  });
+
   it("recreates container when no live one exists (reaper got it during long approval)", async () => {
     const repo = await seedRepo();
     const { task } = await seedExecutableTask(repo);

@@ -501,10 +501,16 @@ async function handOffToVerify(
   inngest: Pick<Inngest, "send">,
   args: { stream: ExecuteStreamHandle; usage: BackendUsage | undefined },
 ): Promise<void> {
+  // Conditional on `executing`, so a Cancel that landed during `execute-cli`
+  // stays cancelled; the verify claim then skips the `cli-done` below. The
+  // step memoizes `void`, as its runs in flight expect, so the bare body
+  // carries on either way.
   await run.stepRun("set-status-pending-verify", () =>
-    deps.runInTx((tx) =>
-      deps.store.updateTaskStatus(tx, { id: run.taskId, status: "pending_verify" }),
-    ),
+    deps
+      .runInTx((tx) =>
+        deps.store.transitionTaskStatus(tx, run.taskId, "executing", "pending_verify"),
+      )
+      .then(() => undefined),
   );
   await reapTaskSandbox(run, deps.sandbox, "teardown");
   await stampSandboxDeleted(run, deps, "persist-sandbox-deleted");
