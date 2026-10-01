@@ -943,7 +943,8 @@ export const steeringRules = pgTable(
     // contradiction reset the learning rule's count, then the one whose
     // contradiction retired it; one from the recorded conversation changes
     // nothing, so a retried or repeated extraction of one conversation applies
-    // once. A deleted conversation clears it, which only costs one more reset.
+    // once. Any other retirement, and a deleted conversation, clears it; the
+    // latter only costs one more reset.
     contradictedInConversationId: uuid("contradicted_in_conversation_id").references(
       () => conversations.id,
       { onDelete: "set null" },

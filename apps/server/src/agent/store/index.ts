@@ -1602,8 +1602,8 @@ export interface AgentStore {
    * records that conversation instead (`retired`). A contradiction from the
    * recorded conversation writes nothing and reports what that conversation
    * did, so a retried or repeated extraction applies once and counts the
-   * same. One against a rule that is active, retired otherwise or not learned
-   * writes nothing (`unchanged`).
+   * same. Every other retirement clears the record, so one against a rule that
+   * is active, retired otherwise or not learned writes nothing (`unchanged`).
    */
   contradictLearningRule(
     tx: Transaction,
@@ -3801,7 +3801,8 @@ export class DrizzleAgentStore implements AgentStore {
     }
     await tx
       .update(steeringRules)
-      .set({ active: false, retractedAt: sql`now()` })
+      // Not a contradiction's retirement: no conversation recorded it.
+      .set({ active: false, retractedAt: sql`now()`, contradictedInConversationId: null })
       .where(
         and(
           inArray(steeringRules.source, LEARNED_RULE_SOURCES),
@@ -3820,7 +3821,8 @@ export class DrizzleAgentStore implements AgentStore {
     const scope = { profileId: params.profileId, userId: params.userId };
     const retired = await tx
       .update(steeringRules)
-      .set({ active: false, retractedAt: sql`now()` })
+      // Not a contradiction's retirement: no conversation recorded it.
+      .set({ active: false, retractedAt: sql`now()`, contradictedInConversationId: null })
       .where(
         and(
           textMatches(params.text),

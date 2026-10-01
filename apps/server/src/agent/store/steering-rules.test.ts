@@ -865,6 +865,41 @@ describe("the Observer's rule reads", () => {
       expect(await stateOf(id)).toBe("retired");
     });
 
+    it("reports nothing to the resetting conversation once another path retired the rule", async () => {
+      const userId = await seedUser();
+      const viaSet = await row({ rule: "No emojis", source: "correction", active: false });
+      const viaRemove = await row({ rule: "Short replies", source: "correction", active: false });
+      const convA = await conversation();
+      await contradict(viaSet, convA);
+      await contradict(viaRemove, convA);
+      // An instruction with the same text supersedes one.
+      await set({ rule: "No emojis", userId });
+      // Two reinforcements promote the other, which `rule_remove` can then retire.
+      for (let i = 0; i < 2; i++) {
+        await tx((trx) =>
+          store.upsertCorrection(trx, {
+            rule: "Short replies",
+            category: "style",
+            profileId: null,
+            existingRuleId: viaRemove,
+          }),
+        );
+      }
+      const profileId = await seedProfile("remover");
+      await tx((trx) =>
+        store.retireRulesByText(trx, {
+          text: "Short replies",
+          userId,
+          profileId,
+          restricted: false,
+        }),
+      );
+      expect([await stateOf(viaSet), await stateOf(viaRemove)]).toEqual(["retired", "retired"]);
+
+      expect(await contradict(viaSet, convA)).toBe("unchanged");
+      expect(await contradict(viaRemove, convA)).toBe("unchanged");
+    });
+
     it("retires it on a contradiction from another conversation, reinforced meanwhile or not", async () => {
       const [convA, convB] = [await conversation(), await conversation()];
       const id = await row({ rule: "Learning", source: "correction", active: false });
