@@ -17,6 +17,7 @@ import {
 import { DrizzleSandboxStore } from "../../sandbox/store/index.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import { expectDefined, expectOk } from "../../test/assertions.js";
+import { codingAuthSecrets } from "../../test/coding-fixtures.js";
 import { makeStepRun, makeStepSendEvent } from "../../test/factories.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { DrizzleAgentStore } from "../store/index.js";
@@ -342,6 +343,7 @@ function makeDeps(
   return {
     runInTx: tx,
     store,
+    secretsStore: codingAuthSecrets(),
     devbaseImage: "cogmo/devbase:test",
     defaultResourceLimits: RESOURCE_LIMITS,
     taskTtlMs: 60_000,
@@ -416,11 +418,6 @@ describe("runCodingTask", () => {
     expect(planStream.finalized).toEqual(["## Plan\n1. Do X\n"]);
     expect(planStream.failed).toEqual([]);
     expect(stopCalls).toEqual([]);
-    // No secretsStore wired ⇒ no auth env threaded. The supervisor unit
-    // test pins what happens with env present; this test pins the absent
-    // path so adding a `secretsStore` to the deps interface doesn't
-    // silently change the env shape on tests that omit it.
-    expect(createCalls[0]?.env).toBeUndefined();
   });
 
   it("threads CLAUDE_CODE_OAUTH_TOKEN from secretsStore into sandbox.create env", async () => {
@@ -1344,6 +1341,107 @@ describe("runCodingExecute", () => {
     ]);
     expect(stream.completed).toEqual([true]);
     expect(stream.failed).toEqual([]);
+  });
+
+  it("records a non-Error throw as the failure reason", async () => {
+    const repo = await seedRepo();
+    const { task } = await seedExecutableTask(repo);
+    const { sandbox } = fakeSandbox();
+    const backend: CodingBackend = {
+      plan: () => throwingPlan("plan not exercised by this test"),
+      execute: () => ({
+        [Symbol.asyncIterator]: () => ({
+          next: () => Promise.reject("sandbox went away"),
+        }),
+      }),
+    };
+
+    const result = await runCodingExecute({
+      taskId: task.id,
+      runId: "run-test",
+      deps: makeDeps({ sandbox, backend }),
+      stepRun,
+      stepSendEvent,
+      inngest: fakeInngest,
+    });
+
+    expect(result).toEqual({ status: "failed", failureReason: "sandbox went away" });
+    const reloaded = await tx((trx) => store.getTask(trx, task.id));
+    expect(reloaded?.failureReason).toBe("sandbox went away");
+  });
+
+  it("records a thrown error's cause in the failure reason", async () => {
+    const repo = await seedRepo();
+    const { task } = await seedExecutableTask(repo);
+    const { sandbox } = fakeSandbox();
+    const stream = recordingExecuteStream();
+    const thrown = new Error("exec failed", { cause: new Error("socket hang up") });
+    const backend: CodingBackend = {
+      plan: () => throwingPlan("plan not exercised by this test"),
+      execute: () => ({
+        [Symbol.asyncIterator]: () => ({ next: () => Promise.reject(thrown) }),
+      }),
+    };
+
+    const result = await runCodingExecute({
+      taskId: task.id,
+      runId: "run-test",
+      deps: makeDeps({ sandbox, backend, openExecuteStream: async () => stream.handle }),
+      stepRun,
+      stepSendEvent,
+      inngest: fakeInngest,
+    });
+
+    const reason = "exec failed (socket hang up)";
+    expect(result).toEqual({ status: "failed", failureReason: reason });
+    const reloaded = await tx((trx) => store.getTask(trx, task.id));
+    expect(reloaded?.failureReason).toBe(reason);
+    expect(stream.failed).toEqual([reason]);
+  });
+
+  it("stops on a Cancel during the session: stays cancelled, reclaims, no hand-off to verify", async () => {
+    const repo = await seedRepo();
+    const { task } = await seedExecutableTask(repo);
+    const { sandbox, stopCalls } = fakeSandbox();
+    const secrets = codingAuthSecrets();
+    const stream = recordingExecuteStream();
+    fakeInngest.send.mockClear();
+    // A Cancel tap landing while `execute-cli` streams.
+    const backend: CodingBackend = {
+      plan: () => throwingPlan("plan not exercised by this test"),
+      execute: async function* () {
+        yield { kind: "text_delta", text: "Editing\n" };
+        await tx((trx) => store.cancelTaskIfActive(trx, task.id, "user cancelled"));
+        yield { kind: "complete", exitCode: 0, isError: false };
+      },
+    };
+
+    const result = await runCodingExecute({
+      taskId: task.id,
+      runId: "run-test",
+      deps: makeDeps({
+        sandbox,
+        backend,
+        secretsStore: secrets,
+        openExecuteStream: async () => stream.handle,
+      }),
+      stepRun,
+      stepSendEvent,
+      inngest: fakeInngest,
+    });
+
+    expect(result).toEqual({ status: "skipped" });
+    // Worktree teardown is the only thing on this path that looks up the
+    // repo's GitHub identity (for the WIP push).
+    expect(secrets.getSecret).toHaveBeenCalledWith(expect.anything(), "github_identity:default");
+    const reloaded = await tx((trx) => store.getTask(trx, task.id));
+    expect(reloaded?.status).toBe("cancelled");
+    expect(fakeInngest.send).not.toHaveBeenCalledWith(
+      expect.objectContaining({ name: "coding/task/cli-done" }),
+    );
+    expect(stream.completed).toEqual([]);
+    expect(stream.failed).toEqual(["Task cancelled while executing."]);
+    expect(stopCalls).toEqual([task.id]);
   });
 
   it("recreates container when no live one exists (reaper got it during long approval)", async () => {

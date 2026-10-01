@@ -1,34 +1,52 @@
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+/**
+ * The plan (`coding-task-start`) and execute (`coding-task-execute`)
+ * orchestrators. Each is a sequence of named stages over one coding task;
+ * the stages live in their own modules, and this file owns the order, the
+ * early exits and the failure channel around them.
+ *
+ *   plan:    claim → allocate worktree → plan sandbox → plan session →
+ *            persist plan → plan gate
+ *   execute: claim → execute sandbox → execute session → (git-remote)
+ *            push execute changes → hand off to verify
+ */
+
 import type { Inngest } from "inngest";
-import { match } from "ts-pattern";
 import type { Transactor } from "../../db/index.js";
-import { codingTaskFailed, codingTaskPlanApproved, codingTaskStart } from "../../inngest/events.js";
+import { codingTaskPlanApproved, codingTaskStart } from "../../inngest/events.js";
 import type { StepRun, StepSendEvent } from "../../inngest/index.js";
 import { logger } from "../../logger.js";
-import { type AskpassMaterials, cleanupAskpass, provisionAskpass } from "../../sandbox/askpass.js";
-import {
-  isLocalDockerSessionState,
-  type SandboxClient,
-  type SandboxSession,
-} from "../../sandbox/index.js";
+import type { SandboxClient } from "../../sandbox/index.js";
 import type { ResourceLimits } from "../../sandbox/types.js";
-import type { GitHubIdentity } from "../../secrets/github.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
-import { loadCodingSandboxEnv } from "./auth.js";
-import type { BackendUsage, CodingBackend } from "./backend.js";
-import { commitAuthorFor, runCommitAndPush } from "./commit-push.js";
-import { loadIdentity, pushTaskBranchToRemote, runBranchFor } from "./git-as-transport.js";
-import { planGateEmission } from "./plan-gate.js";
+import { describeError } from "../../util/describe-error.js";
+import { allocateTaskWorktree } from "./allocate-task-worktree.js";
+import { AskpassLease } from "./askpass-lease.js";
+import type { loadCodingSandboxEnv } from "./auth.js";
+import type { CodingBackend } from "./backend.js";
+import { type CodingRun, codingRun, loadTaskAndRepo } from "./coding-run.js";
+import {
+  checkExecutable,
+  endExecuteFailed,
+  handOffToVerify,
+  pushExecuteChanges,
+} from "./execute-outcomes.js";
+import { acquireExecuteSandbox } from "./execute-sandbox.js";
+import { persistSessionUsage, runExecuteSession } from "./execute-session.js";
+import { parkPlanAtGate } from "./plan-gate-stage.js";
+import { preparePlanSandbox } from "./plan-sandbox.js";
+import { runPlanSession } from "./plan-session.js";
 import {
   type ExecuteStreamHandle,
   NULL_EXECUTE_STREAM,
   NULL_PLAN_STREAM,
   type PlanStreamHandle,
 } from "./progress-stream.js";
-import type { CodingRepoRow, CodingStore, CodingTaskRow } from "./store/index.js";
+import type { CodingRepoRow, CodingStore } from "./store/index.js";
+import { failTaskFromCatch, recordTaskFailed } from "./task-failure.js";
+import { CLAIMS, claimTask } from "./task-lifecycle.js";
+import { lazySession, reapTaskSandbox } from "./task-sandbox.js";
 import { safeTeardownWorktree } from "./teardown.js";
 import type { WorktreeAssignment } from "./types.js";
-import { allocateWorktree } from "./worktree.js";
 
 const log = logger.child({ component: "coding.orchestrator" });
 
@@ -40,11 +58,11 @@ export interface CodingOrchestratorDeps {
   sandbox: SandboxClient;
   backend: CodingBackend;
   /**
-   * Resolves `github_identity:<name>` rows for the failure-cascade WIP
-   * push (see `teardownWorktree`). When omitted (e.g. tests that don't
-   * exercise teardown), failed worktrees stay on disk.
+   * Resolves the Claude Code subscription token for the sandbox env, and
+   * the `github_identity:<name>` rows behind the git-remote run-branch push
+   * and the failure-cascade WIP push.
    */
-  secretsStore?: SecretsStore;
+  secretsStore: SecretsStore;
   /** Default base image when the repo has no devcontainer override. */
   devbaseImage: string;
   /** Per-task resource caps. P2 reads these from `coding_repos` overrides. */
@@ -54,13 +72,11 @@ export interface CodingOrchestratorDeps {
   /** Host root for per-task git worktrees — `${worktreesDir}/<repo>/<id-short>`. */
   worktreesDir: string;
   /**
-   * Host root for per-task askpass material. The execute orchestrator
-   * provisions an askpass dir before `create-container` when the
-   * transport is `git-remote` and runs `runCommitAndPush` from inside
-   * the execute sandbox after the streaming phase completes — claude's
-   * edits ride to the verify sandbox via the remote, not the orchestrator.
-   * Bind-mount transports share the worktree on the host and don't need
-   * the execute-side push.
+   * Host root for per-task askpass material. On git-remote the plan phase
+   * provisions it on its container, and the execute phase pushes claude's
+   * edits to the run-branch from inside its sandbox — they ride to the
+   * verify sandbox via the remote. Bind-mount transports share the worktree
+   * on the host and need no execute-side push.
    */
   askpassBaseDir: string;
   /** The task's plan progress. Bootstrap passes the registry's; defaults to `NULL_PLAN_STREAM`. */
@@ -87,22 +103,21 @@ export interface CodingOrchestratorResult {
   failureReason?: string;
 }
 
-const HOME_VOLUME_PREFIX = "cogmo-task-home";
-const WORKTREE_DIR_IN_CONTAINER = "/workspace";
+export interface CodingExecuteResult {
+  status: "pending_verify" | "failed" | "skipped";
+  failureReason?: string;
+}
 
+/**
+ * `retries: 0`: the plan-mode `claude` session can't resume mid-stream, so
+ * a retry after the session id is captured would start a fresh CLI session
+ * that doesn't match what's persisted, and replay the streamed plan too.
+ * Failures are terminal for the task; the user re-delegates.
+ */
 export function createCodingOrchestrator(deps: CodingOrchestratorDeps, inngest: Inngest) {
   return inngest.createFunction(
     {
       id: "coding-task-start",
-      // Retries stay at 0 even now that the function is wired into Inngest
-      // (slice 2.0d). The plan-mode `claude` session is non-resumable
-      // from mid-stream — if Inngest replays after the session_id is
-      // captured, a retry would start a fresh CLI session that doesn't
-      // match what's persisted, and the user-visible streamed plan would
-      // be replayed too. Failures within this function are terminal for
-      // the task; the user re-delegates if they want another attempt.
-      // Same constraint applies to the slice 2.0f execute function (file
-      // edits inside the container aren't idempotent under retry).
       triggers: [codingTaskStart],
       retries: 0,
       // Sequentialize per task — guards against duplicate fires.
@@ -120,690 +135,13 @@ export function createCodingOrchestrator(deps: CodingOrchestratorDeps, inngest: 
   );
 }
 
-interface RunParams {
-  taskId: string;
-  /**
-   * Inngest run id, stamped on the ownership claim so a re-executed claim can
-   * tell its own committed write from a duplicate delivery's. Tests pass any
-   * stable string.
-   */
-  runId: string;
-  deps: CodingOrchestratorDeps;
-  stepRun: StepRun;
-  /**
-   * Durable bus emit. Used in the in-worker catch path so a transient
-   * send blip surfaces as a function failure (caught by the
-   * `coding-task-reconcile` system-event subscriber) rather than a
-   * silently-swallowed `coding/task/failed` event. Also used by the
-   * auto-approve path to emit `coding/task/plan-approved`.
-   */
-  stepSendEvent: StepSendEvent;
-}
-
 /**
- * Pure orchestration logic. `stepRun` is Inngest's `step.run` in production
- * and an inline shim in tests — extracting this keeps the function testable
- * without booting Inngest. Type derived from the SDK so the generic
- * `Jsonify<T>` shape is preserved without re-typing it locally.
- *
- * Loads happen outside step boundaries (cheap, idempotent). Writes and
- * irreversible operations (`allocate-worktree`, `create-container`,
- * `teardown`) sit inside `stepRun` for observability and exactly-once on
- * retry.
- */
-export async function runCodingTask(params: RunParams): Promise<CodingOrchestratorResult> {
-  const { taskId, runId, deps, stepRun, stepSendEvent } = params;
-  const taskLog = log.child({ taskId, runId });
-  const {
-    runInTx,
-    store,
-    sandbox,
-    backend,
-    devbaseImage,
-    defaultResourceLimits,
-    taskTtlMs,
-    worktreesDir,
-  } = deps;
-  const openPlanStream = deps.openPlanStream ?? (async () => NULL_PLAN_STREAM);
-
-  const task = await runInTx((tx) => store.getTask(tx, taskId));
-  if (!task) throw new Error(`coding task not found: ${taskId}`);
-  const repo = await runInTx((tx) => store.getRepoById(tx, task.repoId));
-  if (!repo) throw new Error(`coding repo not found: ${task.repoId}`);
-
-  // The run's ownership claim — same contract as the execute and verify
-  // orchestrators, and ahead of the try block for the same reason (a run
-  // that loses the race must not reach the failure machinery). A duplicate
-  // `coding/task/start` matches no row and returns before `sandbox.create`
-  // mints a second container and `plan-cli` pays for a second claude
-  // session. `delegate`'s `task-start-<id>` emit id collapses a re-send
-  // inside the bus's 24h dedup window; this transition holds outside it.
-  // Step id deliberately differs from the `set-status-planning` this
-  // replaces: that id memoized a `void` return, and a run in flight across the
-  // deploy would replay `null` into `claim.kind` and TypeError inside the try,
-  // where the catch would destroy an already-good plan. A new id makes the
-  // stale entry unreachable and reduces the worst case to the rollout note's
-  // `Could not find step`, which reconcile handles.
-  // `stale` at the transition's own target is this run's earlier attempt,
-  // not a rival: the UPDATE committed and the step result was lost before
-  // Inngest recorded it, so the re-run finds its own write. Reading that as
-  // a lost race returns `skipped` with no failure event — the stranded task
-  // this whole change exists to prevent. Per-task `concurrency: 1` means no
-  // rival run can be live to have written it.
-  // `stale` naming this transition's own target is ambiguous by status alone:
-  // it is either this run's earlier attempt (the UPDATE committed, the step
-  // result was lost) or a duplicate delivery arriving after a dead run left
-  // the row here. The first must resume; the second must not mint a second
-  // sandbox and a second paid CLI session. `claimedByRunId` is what separates
-  // them — a fresh delivery is a fresh Inngest run.
-  //
-  // A row already at the target with no claimant — every row predating
-  // migration 0054 — is adopted by the transition itself, which stamps this
-  // run and returns `transitioned`. It never reaches this branch, and the
-  // next delivery finds a claimant that isn't its own.
-  const claim = await stepRun("claim-task-planning", () =>
-    runInTx((tx) => store.transitionTaskStatus(tx, taskId, "queued", "planning", runId)),
-  );
-  if (
-    claim.kind !== "transitioned" &&
-    !(claim.kind === "stale" && claim.status === "planning" && claim.claimedByRunId === runId)
-  ) {
-    taskLog.info(
-      { claim },
-      "plan: status transition lost the race (already started or terminated)",
-    );
-    return { status: "skipped" };
-  }
-
-  // Worktree assignment may be null on a fresh task — derived from the
-  // (DB-generated) task id by the allocate-worktree step below. Local
-  // mutable so the rest of the function reads it without re-loading the row.
-  // Single null check covers both fields (atomic by Zod schema).
-  let assignment = task.worktreeAssignment;
-  // Ahead of the try, so a failure before the CLI streams still reaches it.
-  const stream = await openPlanStream(taskId);
-  // Hoisted so the catch can call cleanupAskpass on plan-phase failure
-  // (success leaves the dir alive — execute's finally owns it once the
-  // task transitions to executing).
-  let askpassProvisioned = false;
-  try {
-    await stepRun("allocate-worktree", async () => {
-      // 12 hex chars = 48-bit prefix of the UUIDv7 = the full unix-ms
-      // timestamp portion. Two tasks created in the same millisecond would
-      // still collide (~1 in 16 chance from the next nibble), but single-
-      // user concurrency makes that effectively impossible. Original 8
-      // chars was just the high-order timestamp bits — every task in the
-      // same ~4096-second window shared a prefix. Bad.
-      const idShort = taskId.replaceAll("-", "").slice(0, 12);
-      const branch = `cogmo/${idShort}`;
-
-      // Idempotent reconcile: if the row already has an assignment (a
-      // previous attempt persisted it), re-use; otherwise derive from the
-      // task id and persist before the worktree itself is materialised.
-      if (sandbox.capabilities.workingTreeTransport === "bind-mount") {
-        if (!assignment) {
-          const candidatePath = join(worktreesDir, repo.name, idShort);
-          // Defense in depth: refuse to create a worktree outside
-          // worktreesDir even if `repo.name` somehow contains traversal
-          // sequences. Repo-name validation in `Transport.repos.add` is the
-          // first line; this is the second. Segment-aware to avoid
-          // rejecting valid relative paths that happen to start with `..`
-          // (e.g. `..foo` is a legal directory name, only `..` and `..<sep>`
-          // mean escape).
-          const root = resolve(worktreesDir);
-          const rel = relative(root, resolve(candidatePath));
-          if (rel === "" || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
-            throw new Error(
-              `worktree path escape: repo.name="${repo.name}" produced path outside worktreesDir`,
-            );
-          }
-          const next: WorktreeAssignment = {
-            type: "host-path",
-            branch,
-            worktreePath: candidatePath,
-          };
-          assignment = next;
-          await runInTx((tx) => store.setTaskWorktreeAssignment(tx, taskId, next));
-        }
-        if (assignment.type !== "host-path") {
-          throw new Error(
-            `bind-mount backend requires host-path worktree assignment, got ${assignment.type}`,
-          );
-        }
-        await allocateWorktree({
-          repoPath: repo.localPath,
-          branch: assignment.branch,
-          worktreePath: assignment.worktreePath,
-          remoteUrl: repo.remoteUrl,
-        });
-      } else {
-        // git-remote: no host worktree. The orchestrator force-pushes the
-        // current default-branch tip to `cogmo/run/<task-id>` so the
-        // sandbox can clone it on `create()`. The slice-4 feature branch
-        // (`cogmo/<idShort>`) is checked out inside the sandbox after
-        // create — see `create-container` step.
-        if (!deps.secretsStore) {
-          throw new Error(
-            "git-remote sandbox requires a secretsStore to resolve the GitHub identity for the run-branch push",
-          );
-        }
-        if (!assignment) {
-          const next: WorktreeAssignment = { type: "git-remote", branch };
-          assignment = next;
-          await runInTx((tx) => store.setTaskWorktreeAssignment(tx, taskId, next));
-        }
-        const identity = await loadIdentity({
-          runInTx,
-          secretsStore: deps.secretsStore,
-          identityName: repo.identityName,
-        });
-        await pushTaskBranchToRemote({
-          localRepoPath: repo.localPath,
-          remoteUrl: repo.remoteUrl,
-          taskId,
-          defaultBranch: repo.defaultBranch,
-          identity,
-        });
-      }
-    });
-
-    if (!assignment) {
-      throw new Error("allocate-worktree completed without setting worktreeAssignment");
-    }
-    // Capture in a const so closures below see the non-null type — TS
-    // doesn't carry `let` narrowing across closures.
-    const wt = assignment;
-
-    // Resolve subscription auth before the durable create-container step
-    // so a missing secret short-circuits without spinning up a worktree-
-    // bound container that `claude -p` would then hang on. Skipped when
-    // the orchestrator is wired without a secrets store (unit tests).
-    // Local-capture narrows the type and avoids `secretsStore!`.
-    const secretsStore = deps.secretsStore;
-    const loadAuth = deps.loadCodingSandboxEnv ?? loadCodingSandboxEnv;
-    let sandboxEnv: Record<string, string> | undefined;
-    if (secretsStore) {
-      const authResult = await runInTx((tx) => loadAuth(tx, secretsStore));
-      if (authResult.isErr()) {
-        throw new Error(authResult.error.message);
-      }
-      sandboxEnv = authResult.value;
-    }
-
-    // Resolve the GitHub identity once — git-remote backends need it
-    // for the sandbox's clone auth AND for the execute-side push step
-    // that runs against the same sandbox. Bind-mount paths skip this
-    // entirely.
-    let gitRemoteIdentityPat: string | undefined;
-    let askpassMaterials: AskpassMaterials | undefined;
-    if (sandbox.capabilities.workingTreeTransport === "git-remote") {
-      if (!deps.secretsStore) {
-        throw new Error("git-remote sandbox requires a secretsStore for clone auth");
-      }
-      const identity = await loadIdentity({
-        runInTx,
-        secretsStore: deps.secretsStore,
-        identityName: repo.identityName,
-      });
-      gitRemoteIdentityPat = identity.pat;
-
-      // Mount askpass on the plan-phase sandbox so an execute resume
-      // (no `sandbox.create()` call on that path) still has the push
-      // creds. Cleanup: plan's catch on failure; execute's `finally`
-      // on success.
-      askpassProvisioned = true;
-      askpassMaterials = await stepRun("provision-askpass", () =>
-        provisionAskpass({ baseDir: deps.askpassBaseDir, rootTaskId: taskId, identity }),
-      );
-    }
-
-    // Cleanup on failure goes through `sandbox.deleteByTaskId(taskId)`
-    // unconditionally in the outer catch — it's contract-bound to be
-    // idempotent (label-indexed lookup, empty set is a no-op). Calling
-    // it even when `sandbox.create()` threw covers managed backends
-    // (Daytona) where provider-side state can outlive a thrown create:
-    // the sandbox row reaches `building_snapshot`/`started` server-side
-    // and carries the `cogmo.task` label, so the label-index sweep
-    // reaps it. Local-Docker's create commits atomically — a thrown
-    // create leaves no rows for the sweep to find, also a no-op.
-    const containerImage = repo.devcontainer?.image ?? devbaseImage;
-    // Snapshot prewarm acts as the delegate-gate: on Daytona, this
-    // resolves once the named snapshot is ACTIVE. Boot fires the same
-    // call non-blocking, so a steady-state task hits a resolved promise;
-    // a task arriving before the warm completes shares the in-flight
-    // promise. Local-Docker `ensureImagePresent` is the cheap pull check.
-    await stepRun("ensure-image-present", async () => {
-      // Pass limits so a task-time first warm (before boot warm
-      // completes, or after a failed boot warm) bakes them in.
-      await sandbox.ensureImagePresent(containerImage, defaultResourceLimits);
-    });
-    const sessionState = await stepRun("create-container", async () => {
-      const session = await sandbox.create({
-        taskId,
-        worktree: buildWorktreeSpec({
-          taskId,
-          capability: sandbox.capabilities.workingTreeTransport,
-          assignment: wt,
-          remoteUrl: repo.remoteUrl,
-          identityPat: gitRemoteIdentityPat,
-        }),
-        // Managed backends (Daytona) auto-persist sandbox FS across
-        // stop/start, so an explicit homeVolume is unnecessary — and the
-        // backend doesn't honor it anyway.
-        ...(sandbox.capabilities.workingTreeTransport === "bind-mount" && {
-          homeVolume: { volumeName: `${HOME_VOLUME_PREFIX}-${taskId}` },
-        }),
-        ...(askpassMaterials && { askpass: askpassMaterials }),
-        image: containerImage,
-        resourceLimits: defaultResourceLimits,
-        expiresAt: new Date(Date.now() + taskTtlMs),
-        allowPrivilegedRunc: task.allowPrivilegedRunc,
-        ...(sandboxEnv && { env: sandboxEnv }),
-      });
-      return session.state;
-    });
-
-    if (isLocalDockerSessionState(sessionState)) {
-      // `containers` is the local-docker FK target; managed backends
-      // (Daytona) leave the column null and rely on the sandbox's own
-      // task-id label for lineage tracking.
-      const containerRowId = sessionState.containerRowId;
-      await stepRun("persist-container-id", () =>
-        runInTx((tx) => store.setTaskContainerId(tx, taskId, containerRowId)),
-      );
-    }
-    if (sandbox.capabilities.workingTreeTransport === "git-remote") {
-      await stepRun("checkout-feature-branch", async () => {
-        // Resume a session handle inside the step — handles aren't
-        // JSON-serializable so they can't cross step boundaries.
-        const session = await sandbox.resume(sessionState);
-        await checkoutFeatureBranchInSandbox(session, wt.branch);
-      });
-    }
-
-    // Durable: a billable claude session with no `--resume` on the plan
-    // flags, so a re-invocation replans from scratch and re-renders the
-    // whole plan into the user's message. The session-id write and the
-    // text pushes live inside the body — live on the invocation that runs
-    // it, suppressed on replay. The result also pins the step graph that
-    // branches on it below.
-    const result = await stepRun("plan-cli", async () => {
-      // Re-attach a session handle inside the step — handles can't cross
-      // step.run because they aren't JSON-serializable, but the state is.
-      const container = await sandbox.resume(sessionState);
-      // Re-load the task so the prompt template sees the row in its
-      // post-allocation state (worktreeAssignment populated, container_id
-      // stamped). buildPlanPrompt only reads goal + worktreeAssignment.branch
-      // today, so spreading `{...task, worktreeAssignment}` would be enough —
-      // but a future prompt change that reads any other lifecycle field
-      // (e.g. container metadata) would silently see stale nulls. The
-      // single point-read is cheap; the footgun isn't worth saving it.
-      const planTask = (await runInTx((tx) => store.getTask(tx, taskId))) ?? task;
-      return runPlanStreaming({
-        task: planTask,
-        repo,
-        container,
-        backend,
-        planStream: stream,
-        store,
-        runInTx,
-      });
-    });
-
-    if (result.isError || !result.plan) {
-      const reason = result.failureReason ?? "plan phase produced no plan";
-      await stepRun("set-status-failed", () =>
-        runInTx((tx) =>
-          store.updateTaskStatus(tx, { id: taskId, status: "failed", failureReason: reason }),
-        ),
-      );
-      await stepSendEvent("emit-task-failed", {
-        ...codingTaskFailed.create({ taskId, reason }),
-        id: `task-failed-${taskId}`,
-      });
-      const a = assignment;
-      if (a) {
-        await stepRun("teardown-worktree", () =>
-          safeTeardownWorktree({
-            runInTx,
-            ...(deps.secretsStore !== undefined && { secretsStore: deps.secretsStore }),
-            repo,
-            taskId,
-            worktreeAssignment: a,
-          }),
-        );
-      }
-      await stepRun("teardown", () => sandbox.deleteByTaskId(taskId).catch(() => {}));
-      // Stream notification post-commit — wrap so a subscriber error
-      // doesn't escape into the outer catch and write a second failed
-      // status that masks the original reason.
-      await stream.fail(reason).catch((streamErr: unknown) => {
-        taskLog.warn({ err: streamErr }, "plan stream fail notification failed");
-      });
-      return { status: "failed", failureReason: reason };
-    }
-
-    await stepRun("persist-plan", () =>
-      runInTx((tx) => store.setTaskPlan(tx, taskId, result.plan ?? "")),
-    );
-
-    // Every trigger parks the plan at `awaiting_approval` — the status
-    // means "plan is ready, the approval gate is what happens next", and
-    // `coding-task-execute` stays the only writer of `executing`. What
-    // differs by trigger is who clears the gate:
-    //
-    //   - `user`, `coding_autoapprove_mode='off'` — the human, by tapping
-    //     Approve on Telegram, which is a separate Inngest run.
-    //   - `user`, `coding_autoapprove_mode='on'` — this run, below.
-    //   - `evolution` / `signal_pipeline` — this run, below. Those triggers
-    //     have no interactive gate by design (the PR merge is their human
-    //     checkpoint), so nobody would ever tap for them.
-    //
-    // Only the user path pays for the autoapprove read: a task without a
-    // conversation resolves to null anyway, and skipping it keeps a step
-    // boundary off the automated path. Wrapped in `stepRun` so a future
-    // loosening of `retries: 0` on this function doesn't quietly turn a
-    // transient DB blip into a fresh CLI invocation on replay.
-    const autoapproveMode =
-      task.triggerSource === "user"
-        ? ((await stepRun("resolve-autoapprove-mode", () =>
-            runInTx((tx) => store.getCodingAutoapproveModeForTask(tx, taskId)),
-          )) ?? "off")
-        : "off";
-    // Conditional on `planning`, not an unguarded write: `plan-cli` is a
-    // durable step that runs for minutes, and a Cancel landing inside it
-    // takes the `FOR UPDATE` path in `cancelTaskIfActive` and writes
-    // `cancelled`. An unconditional UPDATE here resurrects that task,
-    // renders an approval keyboard for work the user already cancelled, and
-    // puts the row back into `countActiveTasksForRepo`. Same race the
-    // `approvePlanIfPending` call below already defends against.
-    // New step id for the same reason as `claim-task-planning` above — the
-    // old `set-status-awaiting` memoized `void`, and replaying that `null`
-    // here would TypeError inside the try and take the catch's destructive
-    // path over a plan that had already completed.
-    //
-    // No `runId`: this is not an ownership claim (the run already holds the
-    // task), and supplying one is what widens the store's predicate to adopt
-    // an unclaimed row at the target — semantics this step doesn't want.
-    const awaiting = await stepRun("set-status-plan-ready", () =>
-      runInTx((tx) => store.transitionTaskStatus(tx, taskId, "planning", "awaiting_approval")),
-    );
-    // `stale` at the target is this step re-executing after a lost result —
-    // carry on. Anything else means the task left `planning` under us, and
-    // what to do next depends on where it went, not merely that it moved:
-    // a task that ENDED (cancelled, or failed by the catch of a sibling run)
-    // has no owner, so this run reclaims the worktree and container it
-    // allocated. A task that moved FORWARD — the auto-approve path hands off
-    // to execute, which claims `executing` — is being actively worked by
-    // another run on those very resources, and tearing them down would kill
-    // it mid-CLI.
-    const ended =
-      awaiting.kind === "stale" &&
-      (awaiting.status === "cancelled" || awaiting.status === "failed");
-    if (
-      awaiting.kind !== "transitioned" &&
-      !(awaiting.kind === "stale" && awaiting.status === "awaiting_approval")
-    ) {
-      taskLog.info({ awaiting, ended }, "plan: task left `planning` mid-session — stopping");
-      if (!ended) {
-        // Moved on under another run's ownership (or the row is gone). Its
-        // resources are not ours to reclaim; the sandbox reaper is the
-        // backstop if nobody ends up owning them.
-        return { status: "skipped" };
-      }
-      // Returning from inside the try skips the catch, which is what does the
-      // cleanup — so do it here. The plan phase has by now allocated a
-      // worktree, created a container and (on git-remote) provisioned
-      // askpass; abandoning them would leak a sandbox and leave the PAT on
-      // disk. The status is left exactly as the canceller wrote it: this run
-      // no longer owns the task, and `safeTeardownWorktree` only reads it.
-      await stepRun("teardown-worktree-cancelled", () =>
-        safeTeardownWorktree({
-          runInTx,
-          ...(deps.secretsStore !== undefined && { secretsStore: deps.secretsStore }),
-          repo,
-          taskId,
-          worktreeAssignment: wt,
-        }).then(() => null),
-      );
-      // Swallowed like every sibling teardown: a Docker blip here would
-      // otherwise reach the outer catch and overwrite the user's `cancelled`
-      // with `failed`, which is what this branch promises not to do. Logged
-      // rather than silent, because the cost of swallowing is a sandbox that
-      // lives until its TTL — the periodic reaper is the backstop, and this
-      // line is how you find out it was needed.
-      await stepRun("teardown-cancelled", () =>
-        sandbox
-          .deleteByTaskId(taskId)
-          .then(() => null)
-          .catch((err: unknown) => {
-            taskLog.warn({ err }, "cancelled-path teardown failed — sandbox left to the reaper");
-            return null;
-          }),
-      );
-      await stream.fail("Task cancelled while planning.").catch(() => {});
-      return { status: "skipped" };
-    }
-    // Who clears this task's plan gate. Exhaustive over
-    // `coding_trigger_source` on purpose: a new member is a compile error
-    // here rather than a silent default into the ungated arm, which would
-    // hand it an unattended `--permission-mode bypassPermissions` session.
-    const gate = match(task.triggerSource)
-      .with("user", () => (autoapproveMode === "on" ? "profile_autoapprove" : "human_tap"))
-      .with("evolution", "signal_pipeline", () => "no_interactive_gate")
-      .exhaustive();
-    const clearsGateInRun = gate !== "human_tap";
-    // Same wrap as the failure-path notification above — once status is
-    // committed, a subscriber error must not regress the task to failed.
-    // Durable because two more boundaries follow when this run clears the
-    // gate, and a bare-body finalize would re-render the plan message on
-    // each.
-    await stepRun("notify-plan-finalized", async () => {
-      await stream
-        .finalize(result.plan ?? "", { autoApproved: clearsGateInRun })
-        .catch((streamErr: unknown) => {
-          taskLog.warn(
-            { err: streamErr },
-            "plan stream finalize notification failed (task already awaiting_approval)",
-          );
-        });
-      return null;
-    });
-    // Clear the gate in-run: same two effects as the Telegram approve
-    // callback — stamp `plan_approved_at`, emit `coding/task/plan-approved`.
-    // The timestamp records when the gate cleared, not that a human cleared
-    // it; `trigger_source` plus the profile's mode is what says who did.
-    // Uses `approvePlanIfPending` so the path is atomic with concurrent
-    // cancels/manual approvals — if the user managed to tap Cancel in the
-    // microseconds between `set-status-plan-ready` and this step, the
-    // approve becomes a no-op and the task stays cancelled.
-    if (clearsGateInRun) {
-      // Mint `approvedAt` INSIDE the step so the cached return on a future
-      // replay carries the original timestamp rather than one from a later
-      // attempt. `planGateEmission` decides what the event carries — the
-      // same decision the Telegram approve callback makes, which is why it
-      // lives in one place; see its docstring for why a stamp that is
-      // already there still owes an emit.
-      const approveResult = await stepRun("auto-approve-plan", async () => {
-        const approvedAt = new Date();
-        const result = await runInTx((tx) => store.approvePlanIfPending(tx, taskId, approvedAt));
-        return { kind: result.kind, emission: planGateEmission(result, approvedAt) };
-      });
-      if (approveResult.emission) {
-        await stepSendEvent("emit-plan-approved", {
-          ...codingTaskPlanApproved.create({
-            taskId,
-            approvedAt: approveResult.emission.approvedAt,
-          }),
-          // Idempotency id follows the same `<verb>-<taskId>` shape as
-          // the catch-path `task-failed-<taskId>` emit. It carries real
-          // weight here: the recovery arm re-emits by design, from this
-          // step and from the Telegram tap alike, and this id is what
-          // collapses those into one execute run inside the bus's window.
-          // Safe across the task's lifetime because a Revise cancels the
-          // task and re-plans under a fresh `taskId` (commands.ts handles
-          // that tap via `cancelTask`), so the id never spans two plans. A
-          // future in-place re-plan flow would need to pick a new one.
-          id: `plan-approved-${taskId}`,
-        });
-        taskLog.info(
-          { gate, kind: approveResult.kind },
-          "plan gate cleared in-run — execute handed off",
-        );
-      } else {
-        // `not_pending` / `not_found`: the task left `awaiting_approval`
-        // under us (a cancel, or a sibling run's failure cascade). Not a
-        // wedge — the row is terminal or owned elsewhere — so the emit is
-        // correctly withheld.
-        taskLog.info(
-          { gate, kind: approveResult.kind },
-          "plan gate not cleared — task no longer awaiting approval",
-        );
-      }
-    }
-    return { status: "awaiting_approval", plan: result.plan ?? "" };
-  } catch (err) {
-    const reason = (err as Error).message;
-    taskLog.error({ err }, "coding task failed");
-    // Deliberately broad: every failure here, `StepError` from a
-    // permanently-failed step included, belongs in the same designed channel
-    // — `status=failed` plus `coding/task/failed` for the subscribers.
-    //
-    // Emit BEFORE the DB status update. If `step.sendEvent` ultimately
-    // fails (SDK exhausts its retry budget on a real bus outage), the
-    // catch throws, the function fails, and `inngest/function.failed`
-    // fires. The `coding-task-reconcile` subscriber sees a still-non-
-    // terminal row and re-emits via its own idempotency id. The DB
-    // status update reaching this catch first would leave the row
-    // terminal and the reconcile would see `already_terminal` and skip.
-    // Idempotency `id` dedups against an unlikely repeat fire for the
-    // same task.
-    await stepSendEvent("emit-task-failed", {
-      ...codingTaskFailed.create({ taskId, reason }),
-      id: `task-failed-${taskId}`,
-    });
-    // Letting this throw is load-bearing: a DB blip after a successful
-    // emit would otherwise return normally to Inngest, suppress
-    // `function.failed`, and leave the row non-terminal forever
-    // (reconcile only fires on function failure).
-    await runInTx((tx) =>
-      store.updateTaskStatus(tx, { id: taskId, status: "failed", failureReason: reason }),
-    );
-    if (assignment) {
-      await safeTeardownWorktree({
-        runInTx,
-        ...(deps.secretsStore !== undefined && { secretsStore: deps.secretsStore }),
-        repo,
-        taskId,
-        worktreeAssignment: assignment,
-      }).catch(() => {});
-    }
-    // Unconditional — see "Cleanup on failure" comment above the
-    // `create-container` step. Idempotent at the label-index layer:
-    // a sandbox that never made it server-side is a no-op sweep.
-    await sandbox.deleteByTaskId(taskId).catch(() => {});
-    // Best-effort — we're already in the catch path, don't let a delivery
-    // failure mask the original error.
-    await stream.fail(reason).catch(() => {});
-    return { status: "failed", failureReason: reason };
-  } finally {
-    // Every exit, not just the throwing one. The plan phase has several early
-    // returns inside the try — CLI failure, cancelled mid-session — and each
-    // skips the catch, which is where this used to live; on git-remote that
-    // left the host askpass dir, holding the PAT in plaintext and the SSH
-    // signing key, on disk after every failed plan. `sandbox.deleteByTaskId`
-    // does not cover it: Local-Docker's supervisor wipes the bind-mount as a
-    // side effect, but a managed backend only clears its own sandbox-side
-    // copy. Safe as a `finally` because a step boundary abandons the function
-    // rather than unwinding it (see .claude/rules/inngest.md), so this runs
-    // once, at the end of the run — never between steps.
-    if (askpassProvisioned) {
-      cleanupAskpass({ baseDir: deps.askpassBaseDir, rootTaskId: taskId });
-    }
-  }
-}
-
-interface PlanStreamingParams {
-  task: CodingTaskRow;
-  repo: CodingRepoRow;
-  container: SandboxSession;
-  backend: CodingBackend;
-  planStream: PlanStreamHandle;
-  store: CodingStore;
-  runInTx: Transactor;
-}
-
-interface PlanStreamingResult {
-  plan?: string;
-  isError: boolean;
-  failureReason?: string;
-}
-
-/**
- * Runs `backend.plan(ctx)` and threads its events into the plan stream and
- * the DB. Persists `session_id` as soon as it's available so a future
- * resume path (slice 2) has it.
- */
-async function runPlanStreaming(params: PlanStreamingParams): Promise<PlanStreamingResult> {
-  const { task, repo, container, backend, planStream, store, runInTx } = params;
-  let plan = "";
-  let isError = false;
-  let failureReason: string | undefined;
-
-  for await (const event of backend.plan({ task, repo, container })) {
-    switch (event.kind) {
-      case "session_started":
-        await runInTx((tx) => store.setTaskSessionId(tx, task.id, event.sessionId));
-        break;
-      case "text_delta":
-        await planStream.appendText(event.text);
-        break;
-      case "plan_ready":
-        plan = event.plan;
-        break;
-      case "complete":
-        if (event.isError) {
-          isError = true;
-          failureReason = `claude exit code ${event.exitCode}`;
-        }
-        break;
-      // tool_call / tool_result fall through to the default no-op — the CLI
-      // emits an `ExitPlanMode` tool_use as part of plan completion, but the
-      // plan stream surfaces the same text via `text_delta` + `plan_ready`,
-      // so the tool_call is redundant noise for the user. permission_request
-      // doesn't reach plan mode: the CLI under `--permission-mode plan` (with
-      // no `--permission-prompt-tool stdio` flag) resolves every tool call
-      // locally and never asks back through the stream-json control channel.
-    }
-  }
-
-  return {
-    isError,
-    ...(plan && { plan }),
-    ...(failureReason !== undefined && { failureReason }),
-  };
-}
-
-// ──────────────────────────────────────────────────────────────────────
-// Execute phase — slice 2.0f
-// ──────────────────────────────────────────────────────────────────────
-
-export interface CodingExecuteResult {
-  status: "pending_verify" | "failed" | "skipped";
-  failureReason?: string;
-}
-
-/**
- * Inngest function that consumes `coding/task/plan-approved` and runs
- * `claude -p --resume <sid> --permission-mode bypassPermissions` in the
- * same task container (recreating it if the reaper got it first).
- * Sandbox isolation is the security boundary; the CLI resolves every
- * tool call locally with no stdio control channel, and the stream-json
- * output drives the user-visible progress feed.
- *
- * Same retries=0 reasoning as the plan function: file edits inside the
- * container are not idempotent under retry. A failed run leaves the
- * task in `failed`; the user re-delegates if they want another attempt.
+ * Consumes `coding/task/plan-approved` and runs `claude -p --resume <sid>
+ * --permission-mode bypassPermissions` in the task container (recreating it
+ * if the reaper got it first). Sandbox isolation is the security boundary;
+ * the CLI resolves every tool call locally. `retries: 0` for the same
+ * reason as the plan function: file edits inside the container are not
+ * idempotent under retry.
  */
 export function createCodingExecuteOrchestrator(deps: CodingOrchestratorDeps, inngest: Inngest) {
   return inngest.createFunction(
@@ -826,625 +164,219 @@ export function createCodingExecuteOrchestrator(deps: CodingOrchestratorDeps, in
   );
 }
 
-/**
- * Build the `WorktreeSpec` the sandbox backend wants. Bind-mount backends
- * get `host-path` pointing at the previously-allocated host worktree;
- * git-remote backends get `cogmo/run/<task-id>` (already pushed to origin
- * by the orchestrator's allocate-worktree step) and HTTPS basic-auth
- * carrying the bot's PAT.
- */
-export function buildWorktreeSpec(args: {
+interface RunParams {
   taskId: string;
-  capability: "bind-mount" | "git-remote";
-  assignment: WorktreeAssignment;
-  remoteUrl: string;
-  /** Required when `capability === "git-remote"`. */
-  identityPat: string | undefined;
-}):
-  | { type: "host-path"; hostPath: string }
-  | {
-      type: "git-remote";
-      url: string;
-      branch: string;
-      auth: { username: string; password: string };
-    } {
-  if (args.capability === "bind-mount") {
-    if (args.assignment.type !== "host-path") {
-      throw new Error("bind-mount sandbox got non-host-path assignment");
-    }
-    return { type: "host-path", hostPath: args.assignment.worktreePath };
-  }
-  if (args.identityPat === undefined) {
-    throw new Error("git-remote WorktreeSpec requires identity.pat");
-  }
-  return {
-    type: "git-remote",
-    url: args.remoteUrl,
-    branch: runBranchFor(args.taskId),
-    auth: { username: "x-access-token", password: args.identityPat },
-  };
-}
-
-/**
- * After cloning `cogmo/run/<task-id>`, move HEAD onto the slice-4 feature
- * branch `cogmo/<idShort>` so `runCommitAndPush(branch)` operates on the
- * right name. Idempotent on retry: `checkout -B` resets the branch to
- * current HEAD if it already exists.
- */
-export async function checkoutFeatureBranchInSandbox(
-  session: SandboxSession,
-  branch: string,
-): Promise<void> {
-  // See design/coding-delegation.md → Per-callsite exec timeouts.
-  // `git checkout -B` is a fast op (~1s in steady state); the caps catch
-  // a wedged transport (Daytona WS half-close, hijacked socket stall) and
-  // surface as a timed_out `ExecError` on `wait()` so the orchestrator's outer
-  // `catch` can mark the task `failed` instead of blocking forever.
-  const handle = await session.execStreaming(["git", "checkout", "-B", branch], {
-    workingDir: WORKTREE_DIR_IN_CONTAINER,
-    timeoutMs: 60_000,
-    idleTimeoutMs: 30_000,
-  });
-  handle.stdout.resume();
-  handle.stderr.resume();
-  const { exitCode } = await handle.wait();
-  if (exitCode !== 0) {
-    throw new Error(`git checkout -B ${branch} failed inside sandbox (exit ${exitCode})`);
-  }
-}
-
-interface ExecuteRunParams {
-  taskId: string;
-  /**
-   * Inngest run id, stamped on the ownership claim so a re-executed claim can
-   * tell its own committed write from a duplicate delivery's. Tests pass any
-   * stable string.
-   */
+  /** See {@link CodingRun.runId}. */
   runId: string;
   deps: CodingOrchestratorDeps;
   stepRun: StepRun;
-  /**
-   * Durable bus emit. Used in the in-worker catch path so a transient
-   * send blip surfaces as a function failure (caught by the reconcile
-   * subscriber) rather than a silently-swallowed
-   * `coding/task/failed` event.
-   */
+  /** See {@link CodingRun.stepSendEvent}. */
   stepSendEvent: StepSendEvent;
-  /** Inngest client — used to emit `coding/task/cli-done` after teardown. */
+}
+
+interface ExecuteRunParams extends RunParams {
+  /** Emits `coding/task/cli-done`, the hand-off to the verify orchestrator. */
   inngest: Pick<Inngest, "send">;
 }
 
 /**
- * Pure execute orchestration — same `stepRun` injection pattern as
- * `runCodingTask`, so unit tests can drive it with an inline shim.
- *
- * Guards before doing real work:
- * - `plan_approved_at` must be set (the approve callback stamped it).
- * - status must be `awaiting_approval` (idempotency: a duplicate event
- *   sees `executing` or terminal and returns `skipped` without
- *   re-running claude).
- * - `session_id` must be present (the plan phase captured it).
- * - `worktree_assignment` must be present (the plan phase allocated it).
+ * The plan orchestration. `stepRun` is Inngest's `step.run` in production
+ * and an inline shim in tests, so this runs without booting Inngest.
+ */
+export async function runCodingTask(params: RunParams): Promise<CodingOrchestratorResult> {
+  const { deps } = params;
+  const run = codingRun(params, log);
+  const { task, repo } = await loadTaskAndRepo(deps, run.taskId);
+
+  // A duplicate `coding/task/start` returns here, before `sandbox.create`
+  // mints a second container and `plan-cli` pays for a second session.
+  // `delegate`'s `task-start-<id>` emit id collapses a re-send inside the
+  // bus's dedup window; this claim holds outside it.
+  const claim = await claimTask(run, deps, CLAIMS.plan);
+  if (claim.kind === "lost") {
+    run.log.info(
+      { claim: claim.transition },
+      "plan: status transition lost the race (already started or terminated)",
+    );
+    return { status: "skipped" };
+  }
+
+  // Null on a fresh task until allocation; the catch tears down whatever
+  // allocation got as far as assigning.
+  let assignment = task.worktreeAssignment;
+  // Ahead of the try, so a failure before the CLI streams still reaches it.
+  const stream = await (deps.openPlanStream ?? (async () => NULL_PLAN_STREAM))(run.taskId);
+  const askpass = new AskpassLease(deps.askpassBaseDir, run.taskId);
+  try {
+    const worktree = await allocateTaskWorktree(run, deps, {
+      repo,
+      persisted: assignment,
+      onAssigned: (next) => {
+        assignment = next;
+      },
+    });
+    const state = await preparePlanSandbox(run, deps, {
+      task,
+      repo,
+      assignment: worktree,
+      askpass,
+    });
+    const result = await runPlanSession(run, deps, { task, repo, state, stream });
+    if (result.isError || !result.plan) {
+      const reason = result.failureReason ?? "plan phase produced no plan";
+      return await endPlanFailed(run, deps, { repo, assignment: worktree, stream }, reason);
+    }
+    const plan = result.plan;
+    await run.stepRun("persist-plan", () =>
+      deps.runInTx((tx) => deps.store.setTaskPlan(tx, run.taskId, plan)),
+    );
+    const gate = await parkPlanAtGate(run, deps, {
+      task,
+      repo,
+      assignment: worktree,
+      plan,
+      stream,
+    });
+    if (gate === "left_planning") return { status: "skipped" };
+    return { status: "awaiting_approval", plan };
+  } catch (err) {
+    const reason = describeError(err);
+    run.log.error({ err }, "coding task failed");
+    await failTaskFromCatch(run, deps, reason);
+    if (assignment) {
+      await safeTeardownWorktree({
+        runInTx: deps.runInTx,
+        secretsStore: deps.secretsStore,
+        repo,
+        taskId: run.taskId,
+        worktreeAssignment: assignment,
+      }).catch(() => {});
+    }
+    await deps.sandbox.deleteByTaskId(run.taskId).catch(() => {});
+    // Best-effort — don't let a delivery failure mask the original error.
+    await stream.fail(reason).catch(() => {});
+    return { status: "failed", failureReason: reason };
+  } finally {
+    askpass.release();
+  }
+}
+
+/** The plan session failed or produced no plan. */
+async function endPlanFailed(
+  run: CodingRun,
+  deps: CodingOrchestratorDeps,
+  args: { repo: CodingRepoRow; assignment: WorktreeAssignment; stream: PlanStreamHandle },
+  reason: string,
+): Promise<CodingOrchestratorResult> {
+  await recordTaskFailed(run, deps, reason, "set-status-failed");
+  await run.stepRun("teardown-worktree", () =>
+    safeTeardownWorktree({
+      runInTx: deps.runInTx,
+      secretsStore: deps.secretsStore,
+      repo: args.repo,
+      taskId: run.taskId,
+      worktreeAssignment: args.assignment,
+    }),
+  );
+  await reapTaskSandbox(run, deps.sandbox, "teardown");
+  // The status is committed: a subscriber error must not reach the catch
+  // and write a second failed status that masks this reason.
+  await args.stream.fail(reason).catch((streamErr: unknown) => {
+    run.log.warn({ err: streamErr }, "plan stream fail notification failed");
+  });
+  return { status: "failed", failureReason: reason };
+}
+
+/**
+ * The execute orchestration. Same `stepRun` injection as `runCodingTask`.
  */
 export async function runCodingExecute(params: ExecuteRunParams): Promise<CodingExecuteResult> {
-  const { taskId, runId, deps, stepRun, stepSendEvent, inngest } = params;
-  const taskLog = log.child({ taskId, runId });
-  const { runInTx, store, sandbox, backend, devbaseImage, defaultResourceLimits, taskTtlMs } = deps;
-  const openExecuteStream = deps.openExecuteStream ?? (async () => NULL_EXECUTE_STREAM);
+  const { deps } = params;
+  const run = codingRun(params, log);
+  const { task, repo } = await loadTaskAndRepo(deps, run.taskId);
 
-  const task = await runInTx((tx) => store.getTask(tx, taskId));
-  if (!task) throw new Error(`coding task not found: ${taskId}`);
-  const repo = await runInTx((tx) => store.getRepoById(tx, task.repoId));
-  if (!repo) throw new Error(`coding repo not found: ${task.repoId}`);
-
-  // No bare-body status guard here — `set-status-executing`'s conditional
-  // UPDATE is the durable form of that check (see the `transition.kind`
-  // branch). The three checks that remain read fields the PLAN phase owns
-  // and this function never writes, so they are stable across replays.
-  const sessionId = task.sessionId;
-  const worktreeAssignment = task.worktreeAssignment;
-  let askpassProvisioned = false;
-  // Identity + askpass live together — bundling encodes "both or
-  // neither" in the type. Set only when `needsExecutePush`.
-  let executePushCtx: { identity: GitHubIdentity; askpass: AskpassMaterials } | undefined;
-  const needsExecutePush = sandbox.capabilities.workingTreeTransport === "git-remote";
-
-  // The run's ownership claim, ahead of the try for the same reason as the
-  // plan and verify orchestrators: a run that loses the race — or one whose
-  // claim step fails outright — must not reach the catch below, which emits
-  // `coding/task/failed`, writes an unguarded `status='failed'`, tears down
-  // the worktree and reaps the sandbox out from under whichever run does own
-  // the task.
-  // `stale` at the transition's own target is this run's earlier attempt,
-  // not a rival: the UPDATE committed and the step result was lost before
-  // Inngest recorded it, so the re-run finds its own write. Reading that as
-  // a lost race returns `skipped` with no failure event — the stranded task
-  // this whole change exists to prevent. Per-task `concurrency: 1` means no
-  // rival run can be live to have written it.
-  // `stale` naming this transition's own target is ambiguous by status alone:
-  // it is either this run's earlier attempt (the UPDATE committed, the step
-  // result was lost) or a duplicate delivery arriving after a dead run left
-  // the row here. The first must resume; the second must not mint a second
-  // sandbox and a second paid CLI session. `claimedByRunId` is what separates
-  // them — a fresh delivery is a fresh Inngest run.
-  const transition = await stepRun("set-status-executing", () =>
-    runInTx((tx) =>
-      store.transitionTaskStatus(tx, taskId, "awaiting_approval", "executing", runId),
-    ),
-  );
-  //
-  // A row already at the target with no claimant — every row predating
-  // migration 0054 — is adopted by the transition itself, which stamps this
-  // run and returns `transitioned`. It never reaches this branch, and the
-  // next delivery finds a claimant that isn't its own.
-  if (
-    transition.kind !== "transitioned" &&
-    !(
-      transition.kind === "stale" &&
-      transition.status === "executing" &&
-      transition.claimedByRunId === runId
-    )
-  ) {
-    taskLog.info(
-      { transition },
+  const claim = await claimTask(run, deps, CLAIMS.execute);
+  if (claim.kind === "lost") {
+    run.log.info(
+      { transition: claim.transition },
       "execute: status transition lost the race (already cancelled or transitioned)",
     );
     return { status: "skipped" };
   }
 
   // Ahead of the checks and the try, so every failure from here reaches it.
-  const stream = await openExecuteStream(taskId);
-  const failedCheck = async (message: string): Promise<Error> => {
-    await stream.fail(message).catch(() => {});
-    return new Error(message);
-  };
+  const stream = await (deps.openExecuteStream ?? (async () => NULL_EXECUTE_STREAM))(run.taskId);
+  const { sessionId, worktreeAssignment: assignment } = await checkExecutable(task, stream);
+  const exit = { repo, assignment, stream };
 
-  // Below the claim on purpose: these read fields the PLAN phase owns, and a
-  // throw here fails the function, which sends `coding-task-reconcile` at a
-  // row that — before the claim — this run has no title to.
-  if (!task.planApprovedAt) {
-    throw await failedCheck(
-      `coding task ${taskId} has no plan_approved_at — execute fired prematurely`,
-    );
-  }
-  if (!sessionId) {
-    throw await failedCheck(
-      `coding task ${taskId} has no session_id — plan phase didn't capture it`,
-    );
-  }
-  if (!worktreeAssignment) {
-    throw await failedCheck(`coding task ${taskId} has no worktree_assignment`);
-  }
-
+  const askpass = new AskpassLease(deps.askpassBaseDir, run.taskId);
   try {
-    // PAT-bearing identity stays out of `step.run` so it never reaches
-    // Inngest's state store. Safe to skip the step boundary only
-    // because this function is `retries: 0` — loosen retries and the
-    // DB+decrypt would replay; cache through a step then.
-    const secretsStore = deps.secretsStore;
-
-    // Get-or-create the task container in two checkpoints:
-    //
-    //   1. `try-resume` — non-null state means a prior sandbox is alive
-    //      (the reaper hasn't gotten to it; or the plan-phase container
-    //      is still warm). No fresh clone or checkout is needed and we
-    //      skip auth resolution entirely.
-    //   2. `create-container` (fresh-only) — sandbox.create() returning
-    //      sessionState. Auth is resolved INSIDE the body so a resume
-    //      hit doesn't pay the DB+decrypt cost, and so the PAT never
-    //      becomes a step return value (Inngest persists step returns
-    //      and we don't want credentials in its state store).
-    //
-    // Cleanup on failure goes through `sandbox.deleteByTaskId(taskId)`
-    // unconditionally in the outer catch — idempotent at the label-index
-    // layer, reaps managed-backend state that survived a thrown create.
-    const resumedState = await stepRun("try-resume", async () => {
-      const existing = await sandbox.tryResumeByTaskId(taskId);
-      return existing?.state ?? null;
+    const sandbox = await acquireExecuteSandbox(run, deps, { task, repo, assignment, askpass });
+    const container = lazySession(deps.sandbox, sandbox.state);
+    const result = await runExecuteSession(run, deps, {
+      task,
+      repo,
+      sessionId,
+      container,
+      stream,
     });
-
-    // Provision askpass for git-remote unconditionally (resume reuses
-    // the plan-phase mount; fresh-create needs it on `sandbox.create`).
-    // `askpassProvisioned` flips before the step body so a partial
-    // provision still triggers cleanup in `finally`.
-    if (needsExecutePush) {
-      if (!deps.secretsStore) {
-        throw new Error("git-remote sandbox requires a secretsStore for clone + push auth");
-      }
-      const pushIdentity = await loadIdentity({
-        runInTx,
-        secretsStore: deps.secretsStore,
-        identityName: repo.identityName,
-      });
-      askpassProvisioned = true;
-      const askpass = await stepRun("provision-askpass", async () =>
-        provisionAskpass({
-          baseDir: deps.askpassBaseDir,
-          rootTaskId: taskId,
-          identity: pushIdentity,
-        }),
-      );
-      executePushCtx = { identity: pushIdentity, askpass };
-    }
-
-    let sessionState: typeof resumedState;
-    let isFreshCreate: boolean;
-    if (resumedState !== null) {
-      sessionState = resumedState;
-      isFreshCreate = false;
-    } else {
-      isFreshCreate = true;
-      // Delegate-gate: await the boot-time snapshot warm (Daytona) or
-      // image pull check (Local-Docker) before paying the create cost.
-      const containerImage = repo.devcontainer?.image ?? devbaseImage;
-      await stepRun("ensure-image-present", async () => {
-        await sandbox.ensureImagePresent(containerImage, defaultResourceLimits);
-      });
-
-      sessionState = await stepRun("create-container", async () => {
-        const loadAuth = deps.loadCodingSandboxEnv ?? loadCodingSandboxEnv;
-        let sandboxEnv: Record<string, string> | undefined;
-        if (secretsStore) {
-          const authResult = await runInTx((tx) => loadAuth(tx, secretsStore));
-          if (authResult.isErr()) {
-            throw new Error(authResult.error.message);
-          }
-          sandboxEnv = authResult.value;
-        }
-
-        const session = await sandbox.create({
-          taskId,
-          worktree: buildWorktreeSpec({
-            taskId,
-            capability: sandbox.capabilities.workingTreeTransport,
-            assignment: worktreeAssignment,
-            remoteUrl: repo.remoteUrl,
-            identityPat: executePushCtx?.identity.pat,
-          }),
-          ...(sandbox.capabilities.workingTreeTransport === "bind-mount" && {
-            homeVolume: { volumeName: `${HOME_VOLUME_PREFIX}-${taskId}` },
-          }),
-          ...(executePushCtx && {
-            askpass: {
-              hostDir: executePushCtx.askpass.hostDir,
-              containerDir: executePushCtx.askpass.containerDir,
-            },
-          }),
-          image: containerImage,
-          resourceLimits: defaultResourceLimits,
-          expiresAt: new Date(Date.now() + taskTtlMs),
-          allowPrivilegedRunc: task.allowPrivilegedRunc,
-          ...(sandboxEnv && { env: sandboxEnv }),
-        });
-        return session.state;
-      });
-      // Honest raw telemetry — backend + start timestamp + reserved
-      // resources. Captured in its own step.run so the timestamp gets
-      // checkpointed (won't get re-stamped on Inngest replay) and so a
-      // failure to write doesn't roll back the sandbox creation.
-      await stepRun("persist-sandbox-created", () =>
-        runInTx((tx) =>
-          store.setTaskResourceUsage(tx, taskId, {
-            sandbox: {
-              backend: sandbox.backendId,
-              created_at: new Date().toISOString(),
-              provisioned: {
-                cpu: defaultResourceLimits.cpus,
-                memory_bytes: defaultResourceLimits.memory_bytes,
-              },
-            },
-          }),
-        ),
-      );
-    }
-
-    // Post-create wiring — only on the fresh-create branch. A resume
-    // hit means a prior attempt already ran these (or they're not
-    // applicable), so re-running them would either be a no-op or
-    // produce confusing logs. Each step is independently checkpointed
-    // and individually idempotent (UPDATE setTaskContainerId,
-    // `git checkout -B` resets the branch to current HEAD).
-    if (isFreshCreate) {
-      if (isLocalDockerSessionState(sessionState)) {
-        const containerRowId = sessionState.containerRowId;
-        await stepRun("persist-container-id", () =>
-          runInTx((tx) => store.setTaskContainerId(tx, taskId, containerRowId)),
-        );
-      }
-      if (sandbox.capabilities.workingTreeTransport === "git-remote") {
-        await stepRun("checkout-feature-branch", async () => {
-          const session = await sandbox.resume(sessionState);
-          await checkoutFeatureBranchInSandbox(session, worktreeAssignment.branch);
-        });
-      }
-    }
-
-    // Const-capture so the closures below see the post-branch non-null type,
-    // then resume lazily and at most once per invocation: handles can't cross
-    // a step boundary, and `sandbox.resume` is a live provider call.
-    const state = sessionState;
-    // Memoizes the PROMISE, not the resolved handle: `??=` on an awaited
-    // value leaves the read and the write either side of a suspension point,
-    // so two concurrent callers would both see null and both resume.
-    let resumed: Promise<SandboxSession> | null = null;
-    const container = (): Promise<SandboxSession> => {
-      resumed ??= sandbox.resume(state);
-      return resumed;
-    };
-
-    // Durable: a billable claude session, and `isError` selects disjoint
-    // step sets below. The `started` banner and the token/tool pushes fire
-    // live from inside the body and are suppressed on replay — one run's
-    // worth of progress, which is what the UI wants.
-    const result = await stepRun("execute-cli", async () => {
-      await stream.started();
-      return runExecuteStreaming({
-        task,
-        repo,
-        container: await container(),
-        backend,
-        executeStream: stream,
-        sessionId,
-      });
-    });
-
     if (result.isError) {
       const reason = result.failureReason ?? "execute phase failed";
-      await stepRun("set-status-failed", () =>
-        runInTx((tx) =>
-          store.updateTaskStatus(tx, { id: taskId, status: "failed", failureReason: reason }),
-        ),
-      );
-      await stepSendEvent("emit-task-failed", {
-        ...codingTaskFailed.create({ taskId, reason }),
-        id: `task-failed-${taskId}`,
-      });
-      await stepRun("teardown-worktree", () =>
-        safeTeardownWorktree({
-          runInTx,
-          ...(deps.secretsStore !== undefined && { secretsStore: deps.secretsStore }),
-          repo,
-          taskId,
-          worktreeAssignment,
-        }),
-      );
-      await stepRun("teardown", () => sandbox.deleteByTaskId(taskId).catch(() => {}));
-      await stepRun("persist-sandbox-deleted", () =>
-        runInTx((tx) => store.setTaskSandboxDeletedAt(tx, taskId, new Date().toISOString())),
-      );
-      // Stream notifications post-commit — wrap so a subscriber failure
-      // doesn't bubble into the outer catch, which would write a second
-      // (less informative) failed-status overwriting the original reason.
-      await stream.complete(false).catch((streamErr: unknown) => {
-        taskLog.warn({ err: streamErr }, "execute stream complete(false) notification failed");
-      });
-      await stream.fail(reason).catch((streamErr: unknown) => {
-        taskLog.warn({ err: streamErr }, "execute stream fail notification failed");
+      await endExecuteFailed(run, deps, exit, reason, {
+        status: "set-status-failed",
+        teardownWorktree: "teardown-worktree",
+        teardown: "teardown",
+        sandboxDeleted: "persist-sandbox-deleted",
+        logSuffix: "",
       });
       return { status: "failed", failureReason: reason };
     }
-
-    if (result.usage) {
-      // Translate the backend's camelCase shape into the snake_case
-      // `resource_usage` schema used at the storage layer.
-      const usage: Record<string, number> = {};
-      if (result.usage.inputTokens != null) usage.tokens_input = result.usage.inputTokens;
-      if (result.usage.outputTokens != null) usage.tokens_output = result.usage.outputTokens;
-      if (result.usage.costUsd != null) usage.cost_usd = result.usage.costUsd;
-      if (Object.keys(usage).length > 0) {
-        await stepRun("persist-usage", () =>
-          runInTx((tx) => store.setTaskResourceUsage(tx, taskId, usage)),
-        );
+    await persistSessionUsage(run, deps, result.usage);
+    if (sandbox.push) {
+      const pushFailure = await pushExecuteChanges(run, {
+        task,
+        assignment,
+        credentials: sandbox.push,
+        container,
+      });
+      if (pushFailure !== null) {
+        // `safeTeardownWorktree` is a no-op for git-remote, the only
+        // transport that pushes here, so no worktree teardown step.
+        await endExecuteFailed(run, deps, exit, pushFailure, {
+          status: "set-status-failed-after-push",
+          teardownWorktree: null,
+          teardown: "teardown-after-push-failure",
+          sandboxDeleted: "persist-sandbox-deleted-after-push-failure",
+          logSuffix: " (push failure)",
+        });
+        return { status: "failed", failureReason: pushFailure };
       }
     }
-
-    // git-remote transport: push claude's commits to origin from inside
-    // the execute sandbox so the verify sandbox (which clones from
-    // origin into a fresh tree) sees the same state. Pushed to the
-    // run-branch (`cogmo/run/<task-id>`) — the same ref the orchestrator
-    // initialized at plan-start and the same ref `buildWorktreeSpec`
-    // points the verify sandbox's clone at. Verify then locally creates
-    // `cogmo/<idShort>` from the run-branch tip and pushes it to origin
-    // as the PR head. Bind-mount transports share the worktree on the
-    // host, so the verify-side `runCommitAndPush` covers the same job.
-    if (executePushCtx) {
-      // The `needsExecutePush` flag is set from the sandbox capability;
-      // the worktree assignment is set by the plan orchestrator and
-      // should match. Narrow the discriminated union so reading
-      // `.branch` is type-safe and a future variant without `branch`
-      // would fail here rather than silently typecheck.
-      if (worktreeAssignment.type !== "git-remote") {
-        throw new Error(
-          `git-remote push step requires a git-remote worktree assignment, got ${worktreeAssignment.type}`,
-        );
-      }
-      const pushCtx = executePushCtx;
-      const runBranch = runBranchFor(taskId);
-      const featureBranch = worktreeAssignment.branch;
-      const pushResult = await stepRun("commit-and-push-execute-changes", async () =>
-        runCommitAndPush({
-          container: await container(),
-          worktreeDir: WORKTREE_DIR_IN_CONTAINER,
-          branch: featureBranch,
-          remoteBranch: runBranch,
-          commitMessage: task.goal,
-          signingKeyPath: pushCtx.askpass.signingKeyPath,
-          askpassEnv: {
-            GIT_ASKPASS: pushCtx.askpass.helperPath,
-            GIT_TERMINAL_PROMPT: "0",
-          },
-          author: commitAuthorFor(pushCtx.identity),
-        }),
-      );
-      if (pushResult.kind !== "pushed" && pushResult.kind !== "nothing_to_commit") {
-        const reason = `execute push failed (${pushResult.kind}):\n\n${pushResult.output}`;
-        await stepRun("set-status-failed-after-push", () =>
-          runInTx((tx) =>
-            store.updateTaskStatus(tx, { id: taskId, status: "failed", failureReason: reason }),
-          ),
-        );
-        await stepSendEvent("emit-task-failed", {
-          ...codingTaskFailed.create({ taskId, reason }),
-          id: `task-failed-${taskId}`,
-        });
-        // No `teardown-worktree` step here — `safeTeardownWorktree`
-        // early-returns for git-remote assignments (no host worktree
-        // exists), and `needsExecutePush` only fires for git-remote.
-        // Mirrors the verify orchestrator's push-failure path.
-        await stepRun("teardown-after-push-failure", () =>
-          sandbox.deleteByTaskId(taskId).catch(() => {}),
-        );
-        await stepRun("persist-sandbox-deleted-after-push-failure", () =>
-          runInTx((tx) => store.setTaskSandboxDeletedAt(tx, taskId, new Date().toISOString())),
-        );
-        await stream.complete(false).catch((streamErr: unknown) => {
-          taskLog.warn(
-            { err: streamErr },
-            "execute stream complete(false) notification failed (push failure)",
-          );
-        });
-        await stream.fail(reason).catch((streamErr: unknown) => {
-          taskLog.warn({ err: streamErr }, "execute stream fail notification failed");
-        });
-        return { status: "failed", failureReason: reason };
-      }
-    }
-
-    await stepRun("set-status-pending-verify", () =>
-      runInTx((tx) => store.updateTaskStatus(tx, { id: taskId, status: "pending_verify" })),
-    );
-    await stepRun("teardown", () => sandbox.deleteByTaskId(taskId).catch(() => {}));
-    await stepRun("persist-sandbox-deleted", () =>
-      runInTx((tx) => store.setTaskSandboxDeletedAt(tx, taskId, new Date().toISOString())),
-    );
-    // Hand off to the slice 4.0h verify orchestrator. The dedicated function
-    // re-creates a container with the askpass mount, runs verify → push → PR,
-    // and tears down on its own. Emitting after the teardown means a concurrent
-    // verify run can't reuse this container, which is good — it gets a fresh
-    // one with the right secrets bound. The step boundary covers replay; the
-    // `cli-done-<taskId>` id covers the crash window it can't (durable buys
-    // replay-safety, not exactly-once — see .claude/rules/inngest.md), and
-    // past the bus's 24h window the verify orchestrator's
-    // `pending_verify -> verifying` claim is what skips a duplicate.
-    await stepRun("emit-cli-done", () =>
-      inngest
-        .send({ name: "coding/task/cli-done", data: { taskId }, id: `cli-done-${taskId}` })
-        .then(() => undefined),
-    );
-    const completionTokens =
-      result.usage?.inputTokens != null && result.usage?.outputTokens != null
-        ? { input: result.usage.inputTokens, output: result.usage.outputTokens }
-        : undefined;
-    // Stream notification AFTER all the durable work has committed. Wrap
-    // in `.catch` so a subscriber failure (e.g. transient Telegram API
-    // error during the final edit) doesn't bubble into the outer catch
-    // and regress the already-committed `pending_verify` status to
-    // `failed`. The DB / sandbox state is correct; the user just won't
-    // see the final progress message edit, which is recoverable on next
-    // interaction.
-    await stream.complete(true, completionTokens).catch((streamErr: unknown) => {
-      taskLog.warn(
-        { err: streamErr },
-        "execute stream complete notification failed (task already pending_verify)",
-      );
+    const handOff = await handOffToVerify(run, deps, params.inngest, {
+      ...exit,
+      usage: result.usage,
     });
-    return { status: "pending_verify" };
+    return handOff === "handed_off" ? { status: "pending_verify" } : { status: "skipped" };
   } catch (err) {
-    const reason = (err as Error).message;
-    taskLog.error({ err }, "coding execute failed");
-    // Deliberately broad — same designed failure channel as the matching
-    // catch in `runCodingTask`, `StepError` from a permanently-failed step
-    // included.
-    //
-    // Emit BEFORE the DB status update — see the rationale on the
-    // matching catch in `runCodingTask`.
-    await stepSendEvent("emit-task-failed", {
-      ...codingTaskFailed.create({ taskId, reason }),
-      id: `task-failed-${taskId}`,
-    });
-    // Letting this throw is load-bearing — see the matching catch in
-    // `runCodingTask`.
-    await runInTx((tx) =>
-      store.updateTaskStatus(tx, { id: taskId, status: "failed", failureReason: reason }),
-    );
+    const reason = describeError(err);
+    run.log.error({ err }, "coding execute failed");
+    await failTaskFromCatch(run, deps, reason);
     await safeTeardownWorktree({
-      runInTx,
-      ...(deps.secretsStore !== undefined && { secretsStore: deps.secretsStore }),
+      runInTx: deps.runInTx,
+      secretsStore: deps.secretsStore,
       repo,
-      taskId,
-      worktreeAssignment,
+      taskId: run.taskId,
+      worktreeAssignment: assignment,
     }).catch(() => {});
-    // Unconditional sandbox reap — see the "Cleanup on failure" comment
-    // above the try-resume / create-container block. Idempotent.
-    await sandbox.deleteByTaskId(taskId).catch(() => {});
-    // Stamp deleted_at so wall_clock = deleted_at - created_at is
-    // computable for tasks that crash mid-execute. The store method's
-    // WHERE gate makes this a no-op when no sandbox block was ever
-    // persisted (e.g. crash before `persist-sandbox-created`
-    // checkpointed) or when deleted_at is already set.
-    await runInTx((tx) =>
-      store.setTaskSandboxDeletedAt(tx, taskId, new Date().toISOString()),
-    ).catch(() => {});
+    await deps.sandbox.deleteByTaskId(run.taskId).catch(() => {});
+    // So wall_clock = deleted_at - created_at is computable for a task that
+    // crashed mid-execute. A no-op when no sandbox block was persisted.
+    await deps
+      .runInTx((tx) => deps.store.setTaskSandboxDeletedAt(tx, run.taskId, new Date().toISOString()))
+      .catch(() => {});
     await stream.fail(reason).catch(() => {});
     return { status: "failed", failureReason: reason };
   } finally {
-    if (askpassProvisioned) {
-      cleanupAskpass({ baseDir: deps.askpassBaseDir, rootTaskId: taskId });
-    }
+    askpass.release();
   }
-}
-
-interface ExecuteStreamingParams {
-  task: CodingTaskRow;
-  repo: CodingRepoRow;
-  container: SandboxSession;
-  backend: CodingBackend;
-  executeStream: ExecuteStreamHandle;
-  sessionId: string;
-}
-
-interface ExecuteStreamingResult {
-  isError: boolean;
-  failureReason?: string;
-  usage?: BackendUsage;
-}
-
-async function runExecuteStreaming(
-  params: ExecuteStreamingParams,
-): Promise<ExecuteStreamingResult> {
-  const { task, repo, container, backend, executeStream, sessionId } = params;
-  let isError = false;
-  let failureReason: string | undefined;
-  let usage: BackendUsage | undefined;
-
-  for await (const event of backend.execute({ task, repo, container }, sessionId)) {
-    switch (event.kind) {
-      case "session_started":
-        // Resumed session — usually equals task.sessionId, but we don't
-        // re-persist (the plan-phase value is authoritative for slice 2).
-        break;
-      case "text_delta":
-        await executeStream.appendText(event.text);
-        break;
-      case "tool_call":
-        await executeStream.toolCall(event.tool);
-        break;
-      case "tool_result":
-        await executeStream.toolResult(event.tool, event.ok, event.summary);
-        break;
-      case "complete":
-        if (event.usage) usage = event.usage;
-        if (event.isError) {
-          isError = true;
-          failureReason = `claude exit code ${event.exitCode}`;
-        }
-        break;
-    }
-  }
-
-  return {
-    isError,
-    ...(failureReason !== undefined && { failureReason }),
-    ...(usage && { usage }),
-  };
 }

@@ -2,7 +2,7 @@ import { Readable } from "node:stream";
 import { ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import type { ExecStreamingHandle, SandboxSession } from "../../sandbox/index.js";
-import { buildWorktreeSpec, checkoutFeatureBranchInSandbox } from "./orchestrator.js";
+import { buildWorktreeSpec, checkoutFeatureBranchInSandbox } from "./task-sandbox.js";
 import type { WorktreeAssignment } from "./types.js";
 
 // `runBranchFor("019d...") === "cogmo/run/019d..."` — pinned by

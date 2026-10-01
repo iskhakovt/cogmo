@@ -378,30 +378,6 @@ describe("runCodingTask — git-remote transport", () => {
     expect(reloaded?.worktreeAssignment?.branch).toBe(`cogmo/${idShort}`);
   });
 
-  it("fails fast when secretsStore is missing (git-remote requires identity for push auth)", async () => {
-    const repo = await seedRepo();
-    const task = await seedTask(repo);
-    const { sandbox } = fakeGitRemoteSandbox();
-
-    const result = await runCodingTask({
-      taskId: task.id,
-      runId: "run-test",
-      deps: makeDeps({
-        sandbox,
-        backend: backendYielding([]),
-        // @ts-expect-error — deliberately undefined to exercise the secretsStore guard
-        secretsStore: undefined,
-      }),
-      stepRun,
-      stepSendEvent,
-    });
-
-    expect(result.status).toBe("failed");
-    expect(result.failureReason).toContain("secretsStore");
-    // Push and clone never happened — fast-fail before any side effect.
-    expect(transportMocks.pushTaskBranchToRemote).not.toHaveBeenCalled();
-  });
-
   it("rolls back the run-branch push on resume — assignment already persisted, push still re-fires", async () => {
     // Inngest replay scenario: a prior plan-phase attempt persisted the
     // assignment but crashed before pushing. The retry should re-derive
