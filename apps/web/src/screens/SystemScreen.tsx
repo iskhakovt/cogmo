@@ -97,9 +97,14 @@ function EvolutionPanel({ onSelect }: { onSelect: (event: EvolutionEventEntry) =
                 <td className={tdMono}>{e.triggeredBy}</td>
                 <td className={tdMono}>
                   +{e.payload.corrections.extracted} / ↻{e.payload.corrections.reinforced} / ↑
-                  {e.payload.corrections.promoted}
+                  {e.payload.corrections.promoted} / ✕{e.payload.corrections.retired}
                 </td>
-                <td className={tdMono}>{e.payload.memories.extracted}</td>
+                <td className={tdMono}>
+                  {e.payload.memories.extracted}
+                  {e.payload.drained.withheld > 0
+                    ? ` (${e.payload.drained.withheld} withheld)`
+                    : null}
+                </td>
                 <td className={tdMono}>{e.payload.messageCount}</td>
                 <td className={td}>
                   <PhaseOutcome failedPhases={e.payload.failedPhases} />
@@ -142,6 +147,7 @@ function EvolutionDetail({ event }: { event: EvolutionEventEntry }) {
             <Field label="retired" value={c.retired} />
             <Field label="promoted" value={c.promoted} />
             <Field label="out-of-scope skipped" value={c.outOfScopeReinforcementsSkipped} />
+            <Field label="out-of-scope contradictions" value={c.outOfScopeContradictionsSkipped} />
             <Field label="unknown-rule skipped" value={c.unknownRuleReinforcementsSkipped} />
             <Field label="consolidation needed" value={String(c.consolidationNeeded)} />
           </>

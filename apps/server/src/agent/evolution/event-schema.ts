@@ -42,6 +42,8 @@ const ExtractionResultSchema = z.object({
   retired: z.number().int().nonnegative().default(0),
   promoted: z.number().int().nonnegative(),
   outOfScopeReinforcementsSkipped: z.number().int().nonnegative(),
+  /** Older rows omit it and read as 0. */
+  outOfScopeContradictionsSkipped: z.number().int().nonnegative().default(0),
   unknownRuleReinforcementsSkipped: z.number().int().nonnegative(),
   consolidationNeeded: z.boolean(),
 });

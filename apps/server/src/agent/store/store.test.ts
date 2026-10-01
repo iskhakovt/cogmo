@@ -3485,6 +3485,33 @@ describe("DrizzleAgentStore", () => {
       // Class MUST NOT leak across the user boundary even though the
       // profile_id points at a real (other-user) profile with a class.
       expect(rows[0]?.profileClass).toBeNull();
+      // Nor does the profile, whose memory rules the drain would apply.
+      expect(rows[0]?.profileId).toBeNull();
+    });
+
+    it("getPendingMemories surfaces an org staging profile, which has no class", async () => {
+      const userId = await seedUser();
+      const org = await tx((trx) =>
+        store.createProfile(trx, {
+          userId: null,
+          name: "org",
+          basePrompt: "p",
+          model: "m",
+          toolSet: [],
+        }),
+      );
+      await tx((trx) =>
+        store.stagePendingMemory(trx, {
+          userId,
+          profileId: org.id,
+          content: "staged by the org profile",
+          source: "live_retain",
+        }),
+      );
+
+      const [row] = await tx((trx) => store.getPendingMemories(trx, userId));
+      expect(row?.profileId).toBe(org.id);
+      expect(row?.profileClass).toBeNull();
     });
 
     it("getPendingMemories surfaces the staging profile's CURRENT class — re-flows on reassignment", async () => {
@@ -4208,6 +4235,7 @@ describe("DrizzleAgentStore", () => {
           retired: 0,
           promoted: 1,
           outOfScopeReinforcementsSkipped: 0,
+          outOfScopeContradictionsSkipped: 0,
           unknownRuleReinforcementsSkipped: 0,
           consolidationNeeded: false,
         },

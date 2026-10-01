@@ -302,7 +302,7 @@ describe.skipIf(LIVE_API_KEY === undefined)(
             expectCompleted(conversation.turns);
             stage = `in the ${label} extraction`;
             // No user row: nothing in this eval sets an instruction rule.
-            const scope = { profileId: EVAL_PROFILE.id, userId: randomUUID() };
+            const scope = { profileId: EVAL_PROFILE.id, userId: randomUUID(), seesUserRules: true };
             const extracted = await extractCorrections(conversation.history, scope, {
               provider: usage.metered(provider),
               model: EXTRACTION_MODEL,

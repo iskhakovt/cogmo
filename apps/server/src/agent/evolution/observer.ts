@@ -31,6 +31,7 @@ import { type LlmProviderResolver, ProviderConfigError } from "../../llm/resolve
 import { logger } from "../../logger.js";
 import type { MemoryProvider } from "../../memory/provider.js";
 import type { TransportStore } from "../../transport/store/index.js";
+import { admitsFirstParty } from "../core-memory/scope.js";
 import type { AgentStore } from "../store/index.js";
 import { consolidateRules } from "./consolidate-rules.js";
 import {
@@ -243,10 +244,14 @@ export async function runObserver(
     throw err;
   }
 
-  // The rules the Observer applies are those the conversation's profile sees,
-  // its user's instruction rules included: the Observer is first-party, so a
-  // third-party profile's withholding doesn't apply to it.
-  const ruleScope = { profileId: conv.profileId, userId: conv.userId };
+  // The Observer runs on the conversation's profile's model, so it shows that
+  // model only the rules the profile's turns see: a third-party profile sees
+  // none of the user's instruction rules (`admitsFirstParty`).
+  const ruleScope = {
+    profileId: conv.profileId,
+    userId: conv.userId,
+    seesUserRules: admitsFirstParty(profile),
+  };
 
   // Phase 1: extract corrections from the transcript into steering rules.
   // A failed extraction reports nothing found, which also rules out
@@ -261,6 +266,7 @@ export async function runObserver(
       retired: 0,
       promoted: 0,
       outOfScopeReinforcementsSkipped: 0,
+      outOfScopeContradictionsSkipped: 0,
       unknownRuleReinforcementsSkipped: 0,
       consolidationNeeded: false,
     },
@@ -298,13 +304,24 @@ export async function runObserver(
     { extracted: 0, byNetwork: {} },
     () =>
       step.run("extract-memories", async () => {
-        const memoryRules = await deps.runInTx((tx) => agentStore.getMemoryRules(tx, ruleScope));
+        const memoryRules = await deps.runInTx((tx) =>
+          agentStore.getMemoryRules(tx, { profileIds: [conv.profileId], userId: conv.userId }),
+        );
+        // A user's rule binds this transcript, but its model may not see it:
+        // extract nothing rather than store what the rule forbids.
+        if (!ruleScope.seesUserRules && memoryRules.some((r) => r.fromUser)) {
+          logger.info(
+            { conversationId, profileId: conv.profileId },
+            "observer: memory extraction skipped — a user's memory rule binds a third-party profile's transcript",
+          );
+          return { extracted: 0, byNetwork: {} };
+        }
         return extractMemories(history, conv.userId, profile.profileClass, {
           provider,
           model,
           memory: deps.memory,
           customCompartments,
-          memoryRules,
+          memoryRules: memoryRules.map((r) => r.rule),
         });
       }),
   );
@@ -333,11 +350,14 @@ export async function runObserver(
           provider,
           model,
           customCompartments,
+          seesUserRules: ruleScope.seesUserRules,
           runInTx: deps.runInTx,
           store: agentStore,
         });
       });
-      const { successful, withheld } = classified;
+      const { successful } = classified;
+      // A classification memoized before results carried `withheld` replays without it.
+      const withheld = classified.withheld ?? [];
       if (successful.length === 0 && withheld.length === 0) {
         return { drained: 0, byNetwork: {}, withheld: 0 };
       }

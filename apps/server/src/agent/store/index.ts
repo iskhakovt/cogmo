@@ -15,6 +15,7 @@ import {
   type SQL,
   sql,
 } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import * as R from "remeda";
 import { single } from "../../db/helpers.js";
 import type { Transaction } from "../../db/index.js";
@@ -187,7 +188,8 @@ export interface ScheduledTask {
  * was unclassed or the lineage isn't available — pre-feature live
  * retains, migration backfill, or rows whose staging profile was deleted
  * (`profile_id` SET NULL). `profileId` is the staging profile, whose
- * `memory`-category rules the drain applies; null where it has none.
+ * `memory`-category rules the drain applies; null where it has none or it
+ * belongs to another user.
  * `skillName` names the staging skill on a `skill` row and is null otherwise.
  */
 export interface PendingMemory {
@@ -499,13 +501,12 @@ function visibleTo(scope: RuleScope): SQL | undefined {
   );
 }
 
-/** The user's live instruction rules the profile sees. */
-function liveInstructionRulesOf(scope: { profileId: string; userId: string }): SQL | undefined {
+/** The user's live instruction rules. */
+function liveInstructionRulesOf(userId: string): SQL | undefined {
   return and(
     eq(steeringRules.source, "instruction"),
     isNull(steeringRules.retractedAt),
-    eq(steeringRules.userId, scope.userId),
-    or(isNull(steeringRules.profileId), eq(steeringRules.profileId, scope.profileId)),
+    eq(steeringRules.userId, userId),
   );
 }
 
@@ -519,6 +520,29 @@ const EXTRACTION_RULE_COLUMNS = {
   priority: steeringRules.priority,
   channelType: steeringRules.channelType,
 };
+
+/** A steering rule as correction extraction reads it. */
+export type ExtractionRule = Pick<
+  typeof steeringRules.$inferSelect,
+  keyof typeof EXTRACTION_RULE_COLUMNS
+>;
+
+/** A live `memory`-category rule, as `getMemoryRules` returns it. */
+export interface MemoryRule {
+  rule: string;
+  /** Null for every profile. */
+  profileId: string | null;
+  /** An instruction rule the user set, which a third-party profile doesn't see. */
+  fromUser: boolean;
+}
+
+/** The rules of `rules` that a staging profile sees; a null profile sees the global ones. */
+export function memoryRulesFor(
+  rules: ReadonlyArray<MemoryRule>,
+  profileId: string | null,
+): ReadonlyArray<MemoryRule> {
+  return rules.filter((r) => r.profileId === null || r.profileId === profileId);
+}
 
 function textMatches(text: string): SQL {
   return eq(normalizedRuleText(steeringRules.rule), normalizedRuleText(sql`${text}`));
@@ -1493,20 +1517,7 @@ export interface AgentStore {
   ): Promise<{ id: string }>;
 
   /** The unretired learned rules, active and learning, for extraction and consolidation. */
-  getCorrections(
-    tx: Transaction,
-    profileId: string,
-  ): Promise<
-    ReadonlyArray<{
-      id: string;
-      rule: string;
-      category: string;
-      active: boolean;
-      observationCount: number;
-      priority: number;
-      channelType: string | null;
-    }>
-  >;
+  getCorrections(tx: Transaction, profileId: string): Promise<ReadonlyArray<ExtractionRule>>;
 
   /**
    * The user's live instruction rules the profile sees, for extraction:
@@ -1515,23 +1526,17 @@ export interface AgentStore {
   getInstructionRules(
     tx: Transaction,
     scope: { profileId: string; userId: string },
-  ): Promise<
-    ReadonlyArray<{
-      id: string;
-      rule: string;
-      category: string;
-      active: boolean;
-      observationCount: number;
-      priority: number;
-      channelType: string | null;
-    }>
-  >;
+  ): Promise<ReadonlyArray<ExtractionRule>>;
 
-  /** Whether one of the rules `getInstructionRules` lists has this text (normalized). */
+  /**
+   * Whether the user holds a live instruction rule with this text
+   * (normalized) in exactly this profile and channel scope: the one a learned
+   * rule with that text and scope would duplicate, as `setInstructionRule`
+   * scopes its supersession.
+   */
   hasInstructionRule(
     tx: Transaction,
-    scope: { profileId: string; userId: string },
-    text: string,
+    params: { userId: string; text: string; profileId: string | null; channelType: string | null },
   ): Promise<boolean>;
 
   /**
@@ -1559,14 +1564,14 @@ export interface AgentStore {
   retireLearningRule(tx: Transaction, id: string): Promise<boolean>;
 
   /**
-   * The text of the live `memory`-category rules a staging profile sees, of
-   * every source: global and `profileId`'s own, among instruction rules only
-   * `userId`'s. A null `profileId` sees the global ones.
+   * The live `memory`-category rules, of every source, that any of
+   * `profileIds` sees: global ones and each profile's own, among instruction
+   * rules only `userId`'s. `memoryRulesFor` picks one profile's out of them.
    */
   getMemoryRules(
     tx: Transaction,
-    scope: { profileId: string | null; userId: string },
-  ): Promise<ReadonlyArray<string>>;
+    scope: { profileIds: ReadonlyArray<string>; userId: string },
+  ): Promise<ReadonlyArray<MemoryRule>>;
 
   /** Count the active learned rules (`correction`, `evolution`) a profile sees: what consolidation merges. */
   countActiveLearnedRules(tx: Transaction, profileId: string): Promise<number>;
@@ -3468,20 +3473,7 @@ export class DrizzleAgentStore implements AgentStore {
 
   // --- Evolution: correction extraction ---
 
-  async getCorrections(
-    tx: Transaction,
-    profileId: string,
-  ): Promise<
-    ReadonlyArray<{
-      id: string;
-      rule: string;
-      category: string;
-      active: boolean;
-      observationCount: number;
-      priority: number;
-      channelType: string | null;
-    }>
-  > {
+  async getCorrections(tx: Transaction, profileId: string): Promise<ReadonlyArray<ExtractionRule>> {
     return tx
       .select(EXTRACTION_RULE_COLUMNS)
       .from(steeringRules)
@@ -3498,33 +3490,33 @@ export class DrizzleAgentStore implements AgentStore {
   async getInstructionRules(
     tx: Transaction,
     scope: { profileId: string; userId: string },
-  ): Promise<
-    ReadonlyArray<{
-      id: string;
-      rule: string;
-      category: string;
-      active: boolean;
-      observationCount: number;
-      priority: number;
-      channelType: string | null;
-    }>
-  > {
+  ): Promise<ReadonlyArray<ExtractionRule>> {
     return tx
       .select(EXTRACTION_RULE_COLUMNS)
       .from(steeringRules)
-      .where(liveInstructionRulesOf(scope))
+      .where(
+        and(
+          liveInstructionRulesOf(scope.userId),
+          or(isNull(steeringRules.profileId), eq(steeringRules.profileId, scope.profileId)),
+        ),
+      )
       .orderBy(asc(steeringRules.priority), asc(steeringRules.id));
   }
 
   async hasInstructionRule(
     tx: Transaction,
-    scope: { profileId: string; userId: string },
-    text: string,
+    params: { userId: string; text: string; profileId: string | null; channelType: string | null },
   ): Promise<boolean> {
     const rows = await tx
       .select({ id: steeringRules.id })
       .from(steeringRules)
-      .where(and(liveInstructionRulesOf(scope), textMatches(text)))
+      .where(
+        and(
+          liveInstructionRulesOf(params.userId),
+          textMatches(params.text),
+          inScope(params.profileId, params.channelType),
+        ),
+      )
       .limit(1);
     return rows.length > 0;
   }
@@ -3547,23 +3539,30 @@ export class DrizzleAgentStore implements AgentStore {
 
   async getMemoryRules(
     tx: Transaction,
-    scope: { profileId: string | null; userId: string },
-  ): Promise<ReadonlyArray<string>> {
+    scope: { profileIds: ReadonlyArray<string>; userId: string },
+  ): Promise<ReadonlyArray<MemoryRule>> {
     const rows = await tx
-      .select({ rule: steeringRules.rule })
+      .select({
+        rule: steeringRules.rule,
+        profileId: steeringRules.profileId,
+        userId: steeringRules.userId,
+      })
       .from(steeringRules)
       .where(
         and(
           eq(steeringRules.active, true),
           eq(steeringRules.category, "memory"),
-          scope.profileId === null
+          scope.profileIds.length === 0
             ? isNull(steeringRules.profileId)
-            : or(isNull(steeringRules.profileId), eq(steeringRules.profileId, scope.profileId)),
+            : or(
+                isNull(steeringRules.profileId),
+                inArray(steeringRules.profileId, [...scope.profileIds]),
+              ),
           or(isNull(steeringRules.userId), eq(steeringRules.userId, scope.userId)),
         ),
       )
       .orderBy(...RULE_ORDER);
-    return rows.map((r) => r.rule);
+    return rows.map((r) => ({ rule: r.rule, profileId: r.profileId, fromUser: r.userId !== null }));
   }
 
   async upsertCorrection(
@@ -3856,6 +3855,7 @@ export class DrizzleAgentStore implements AgentStore {
     userId: string,
     limit?: number,
   ): Promise<ReadonlyArray<PendingMemory>> {
+    const stagingProfiles = alias(profiles, "staging_profiles");
     // LEFT JOIN onto profiles so we surface the staging profile's CURRENT
     // class on each row at drain time. LEFT (not INNER) so rows whose
     // profile was deleted (`profile_id` SET NULL) or never had one
@@ -3869,12 +3869,22 @@ export class DrizzleAgentStore implements AgentStore {
         content: pendingMemories.content,
         context: pendingMemories.context,
         source: pendingMemories.source,
-        profileId: pendingMemories.profileId,
+        profileId: stagingProfiles.id,
         profileClass: profiles.profileClass,
         skillName: pendingMemories.skillName,
         createdAt: pendingMemories.createdAt,
       })
       .from(pendingMemories)
+      // The staging profile whose memory rules the drain applies: the user's
+      // own or an org profile (`user_id` NULL), never another user's. An org
+      // profile has no class, so the class join below keeps to the user's own.
+      .leftJoin(
+        stagingProfiles,
+        and(
+          eq(stagingProfiles.id, pendingMemories.profileId),
+          or(isNull(stagingProfiles.userId), eq(stagingProfiles.userId, pendingMemories.userId)),
+        ),
+      )
       // Defence in depth on the join: require the joined profile to
       // belong to the SAME user as the pending row. The FK on
       // `pending_memories.profile_id → profiles.id` doesn't enforce

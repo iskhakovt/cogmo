@@ -38,15 +38,16 @@ function makeEvent(overrides: Partial<EvolutionEventEntry> = {}): EvolutionEvent
         extracted: 2,
         reinforced: 1,
         contradictions: 0,
-        retired: 0,
+        retired: 1,
         promoted: 1,
         outOfScopeReinforcementsSkipped: 0,
+        outOfScopeContradictionsSkipped: 0,
         unknownRuleReinforcementsSkipped: 0,
         consolidationNeeded: false,
       },
       consolidation: null,
       memories: { extracted: 3, byNetwork: { semantic: 2, episodic: 1 } },
-      drained: { drained: 0, byNetwork: {}, withheld: 0 },
+      drained: { drained: 0, byNetwork: {}, withheld: 2 },
       messageCount: 10,
       profileId: "prof-9",
       durationMs: 1234,
@@ -71,7 +72,8 @@ describe("SystemScreen", () => {
     await expect.element(page.getByText("0 9 * * *")).toBeVisible();
     // Evolution row: trigger + the corrections summary cell.
     await expect.element(page.getByText("manual")).toBeVisible();
-    await expect.element(page.getByText("+2 / ↻1 / ↑1")).toBeVisible();
+    await expect.element(page.getByText("+2 / ↻1 / ↑1 / ✕1")).toBeVisible();
+    await expect.element(page.getByText("3 (2 withheld)")).toBeVisible();
   });
 
   it("opens a detail drawer for the clicked evolution event and closes it again", async () => {

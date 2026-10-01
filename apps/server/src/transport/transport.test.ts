@@ -3131,9 +3131,9 @@ describe("createTransport", () => {
       const trigger = vi.fn().mockResolvedValue({
         status: "processed",
         eventId: "evt-99",
-        corrections: { extracted: 1, reinforced: 2, promoted: 3 },
+        corrections: { extracted: 1, reinforced: 2, promoted: 3, retired: 6 },
         memories: { extracted: 4 },
-        drained: { drained: 5 },
+        drained: { drained: 5, withheld: 7 },
       });
       const { transport } = buildEvolutionTransport({
         identity: { userId: "user-1" },
@@ -3147,7 +3147,8 @@ describe("createTransport", () => {
         eventId: "evt-99",
         memoryCount: 4,
         drained: 5,
-        ruleChanges: { extracted: 1, reinforced: 2, promoted: 3 },
+        withheld: 7,
+        ruleChanges: { extracted: 1, reinforced: 2, promoted: 3, retired: 6 },
       });
     });
   });

@@ -15,6 +15,8 @@ import {
   DrizzleAgentStore,
   INSTRUCTION_RULE_LIMIT,
   type InstructionRuleRow,
+  type MemoryRule,
+  memoryRulesFor,
   type SetInstructionRuleResult,
 } from "./index.js";
 import { type SteeringRuleSourceValue, steeringRules, users } from "./schema.js";
@@ -707,21 +709,37 @@ describe("the Observer's rule reads", () => {
     ]);
   });
 
-  it("hasInstructionRule matches normalized text among the rules getInstructionRules lists", async () => {
+  it("hasInstructionRule matches the user's live instruction rules on normalized text", async () => {
     const userId = await seedUser();
     const otherUserId = await seedUser();
-    const profileId = await seedProfile();
     await row({ rule: "No bullet points", source: "instruction", userId });
     await row({ rule: "Mine withdrawn", source: "instruction", userId, retired: true });
     await row({ rule: "Theirs", source: "instruction", userId: otherUserId });
     await row({ rule: "Learned", source: "correction" });
     const has = (text: string) =>
-      tx((trx) => store.hasInstructionRule(trx, { profileId, userId }, text));
+      tx((trx) =>
+        store.hasInstructionRule(trx, { userId, text, profileId: null, channelType: null }),
+      );
 
     expect(await has("  no BULLET\n points ")).toBe(true);
     expect(await has("Mine withdrawn")).toBe(false);
     expect(await has("Theirs")).toBe(false);
     expect(await has("Learned")).toBe(false);
+  });
+
+  it("hasInstructionRule matches only a rule in exactly the scope asked about", async () => {
+    const userId = await seedUser();
+    const profileId = await seedProfile();
+    await row({ rule: "No emojis", source: "instruction", userId, channelType: "telegram" });
+    await row({ rule: "Short replies", source: "instruction", userId, profileId });
+    const has = (text: string, scope: { profileId: string | null; channelType: string | null }) =>
+      tx((trx) => store.hasInstructionRule(trx, { userId, text, ...scope }));
+
+    expect(await has("No emojis", { profileId: null, channelType: "telegram" })).toBe(true);
+    expect(await has("No emojis", { profileId: null, channelType: "web" })).toBe(false);
+    expect(await has("No emojis", { profileId: null, channelType: null })).toBe(false);
+    expect(await has("Short replies", { profileId, channelType: null })).toBe(true);
+    expect(await has("Short replies", { profileId: null, channelType: null })).toBe(false);
   });
 
   it("upsertCorrection reinforces an instruction rule without promoting it", async () => {
@@ -793,11 +811,12 @@ describe("the Observer's rule reads", () => {
     ]).toEqual(["retired", "live", "retired", "live"]);
   });
 
-  it("getMemoryRules lists the live memory rules a staging profile sees, of every source", async () => {
+  it("getMemoryRules lists the live memory rules the staging profiles see, of every source", async () => {
     const userId = await seedUser();
     const otherUserId = await seedUser();
     const profileId = await seedProfile();
     const otherProfileId = await seedProfile("other");
+    const unseenProfileId = await seedProfile("unseen");
     const memory = { category: "memory" };
     await row({ ...memory, rule: "Operator", source: "manual", observationCount: 0 });
     await row({ ...memory, rule: "Mine", source: "instruction", userId });
@@ -812,12 +831,29 @@ describe("the Observer's rule reads", () => {
     await row({ ...memory, rule: "Theirs", source: "instruction", userId: otherUserId });
     await row({ ...memory, rule: "Learning", source: "correction", active: false });
     await row({ ...memory, rule: "Withdrawn", source: "instruction", userId, retired: true });
+    await row({ ...memory, rule: "Unseen", source: "correction", profileId: unseenProfileId });
     await row({ rule: "Style", source: "instruction", userId });
 
-    const forProfile = await tx((trx) => store.getMemoryRules(trx, { profileId, userId }));
-    const forNoProfile = await tx((trx) => store.getMemoryRules(trx, { profileId: null, userId }));
+    const both = await tx((trx) =>
+      store.getMemoryRules(trx, { profileIds: [profileId, otherProfileId], userId }),
+    );
+    const none = await tx((trx) => store.getMemoryRules(trx, { profileIds: [], userId }));
+    const texts = (rules: ReadonlyArray<MemoryRule>) => rules.map((r) => r.rule).sort();
 
-    expect([...forProfile].sort()).toEqual(["Learned", "Mine", "Operator", "Persona"]);
-    expect([...forNoProfile].sort()).toEqual(["Learned", "Mine", "Operator"]);
+    expect(texts(both)).toEqual(["Learned", "Mine", "Operator", "Other persona", "Persona"]);
+    expect(texts(memoryRulesFor(both, profileId))).toEqual([
+      "Learned",
+      "Mine",
+      "Operator",
+      "Persona",
+    ]);
+    expect(texts(memoryRulesFor(both, null))).toEqual(["Learned", "Mine", "Operator"]);
+    expect(texts(none)).toEqual(["Learned", "Mine", "Operator"]);
+    expect(
+      both
+        .filter((r) => r.fromUser)
+        .map((r) => r.rule)
+        .sort(),
+    ).toEqual(["Mine", "Persona"]);
   });
 });

@@ -2523,15 +2523,21 @@ export async function handleReflect(
       return;
     }
     case "processed": {
-      const { ruleChanges, memoryCount, drained, eventId } = outcome;
+      const { ruleChanges, memoryCount, drained, withheld, eventId } = outcome;
       const ruleSummary =
-        ruleChanges.extracted + ruleChanges.reinforced + ruleChanges.promoted === 0
+        ruleChanges.extracted +
+          ruleChanges.reinforced +
+          ruleChanges.promoted +
+          ruleChanges.retired ===
+        0
           ? "no rule changes"
-          : `${ruleChanges.extracted} new, ${ruleChanges.reinforced} reinforced, ${ruleChanges.promoted} promoted`;
+          : `${ruleChanges.extracted} new, ${ruleChanges.reinforced} reinforced, ${ruleChanges.promoted} promoted` +
+            (ruleChanges.retired > 0 ? `, ${ruleChanges.retired} retired` : "");
       const memorySummary =
-        memoryCount === 0 && drained === 0
+        memoryCount === 0 && drained === 0 && withheld === 0
           ? "no memories"
-          : `${memoryCount} extracted, ${drained} drained`;
+          : `${memoryCount} extracted, ${drained} drained` +
+            (withheld > 0 ? `, ${withheld} withheld` : "");
       await ctx.reply(
         `Reflected. Rules: ${ruleSummary}. Memories: ${memorySummary}.\n` +
           `/learned ${eventId} for the full breakdown.`,
@@ -2611,14 +2617,16 @@ function formatEvolutionDigest(
   const lines = events.map((e, i) => {
     const c = e.payload.corrections;
     const m = e.payload.memories;
-    const ruleDelta = c.extracted + c.reinforced + c.promoted;
+    const ruleDelta = c.extracted + c.reinforced + c.promoted + c.retired;
     const memoryDelta = m.extracted;
+    const withheld = e.payload.drained.withheld;
+    const withheldNote = withheld > 0 ? `, ${withheld} withheld` : "";
     const tag = e.triggeredBy === "manual" ? " [manual]" : "";
     const failed = e.payload.failedPhases ?? [];
     const failedNote = failed.length > 0 ? `; failed: ${failed.join(", ")}` : "";
     return (
       `${i + 1}. ${e.id}${tag}\n` +
-      `   ${formatRelativeTime(e.createdAt, now)} — ${ruleDelta} rule change(s), ${memoryDelta} memory write(s)${failedNote}`
+      `   ${formatRelativeTime(e.createdAt, now)} — ${ruleDelta} rule change(s), ${memoryDelta} memory write(s)${withheldNote}${failedNote}`
     );
   });
   return [header, ...lines].join("\n");
@@ -2638,9 +2646,10 @@ const PHASE_FAILED = "failed after retries";
  */
 function formatEvolutionDetail(event: EvolutionEventEntry, now: Date = new Date()): string {
   const { payload } = event;
-  const skipped =
+  const outOfScope =
     payload.corrections.outOfScopeReinforcementsSkipped +
-    payload.corrections.unknownRuleReinforcementsSkipped;
+    payload.corrections.outOfScopeContradictionsSkipped;
+  const skipped = outOfScope + payload.corrections.unknownRuleReinforcementsSkipped;
   const lines: string[] = [
     `Event ${event.id}`,
     // Both forms: relative for at-a-glance scanning, ISO for log-grep parity.
@@ -2676,7 +2685,7 @@ function formatEvolutionDetail(event: EvolutionEventEntry, now: Date = new Date(
   // gates the whole block so a "0 skipped" line never adds noise.
   if (skipped > 0) {
     lines.push(
-      `  skipped:      ${skipped} (${payload.corrections.outOfScopeReinforcementsSkipped} out-of-scope, ${payload.corrections.unknownRuleReinforcementsSkipped} unknown-rule)`,
+      `  skipped:      ${skipped} (${outOfScope} out-of-scope, ${payload.corrections.unknownRuleReinforcementsSkipped} unknown-rule)`,
     );
   }
   if (phaseFailed(event, "consolidation")) {

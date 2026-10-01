@@ -269,9 +269,11 @@ export type TriggerReflectionOutcome =
   | {
       status: "processed";
       eventId: string;
-      ruleChanges: { extracted: number; reinforced: number; promoted: number };
+      ruleChanges: { extracted: number; reinforced: number; promoted: number; retired: number };
       memoryCount: number;
       drained: number;
+      /** Staged rows a `memory`-category rule forbade. */
+      withheld: number;
     };
 
 /**
@@ -2635,9 +2637,11 @@ export function createTransport(deps: {
             extracted: result.corrections.extracted,
             reinforced: result.corrections.reinforced,
             promoted: result.corrections.promoted,
+            retired: result.corrections.retired,
           },
           memoryCount,
           drained: result.drained.drained,
+          withheld: result.drained.withheld,
         });
       },
     },

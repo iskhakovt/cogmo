@@ -4347,6 +4347,7 @@ describe("handleLearned", () => {
         retired: 0,
         promoted: overrides?.promoted ?? 0,
         outOfScopeReinforcementsSkipped: 0,
+        outOfScopeContradictionsSkipped: 0,
         unknownRuleReinforcementsSkipped: 0,
         consolidationNeeded: false,
       },
@@ -4389,6 +4390,33 @@ describe("handleLearned", () => {
     expect(reply).toContain("[manual]");
     expect(reply).toContain("2 rule change(s)");
     expect(reply).toContain("3 memory write(s)");
+  });
+
+  it("counts a retirement as a rule change and names withheld rows on a digest line", async () => {
+    const payload = makePayload({ extracted: 1 });
+    const transport = transportWith({
+      evolution: {
+        listEvents: vi.fn().mockResolvedValue(
+          ok([
+            {
+              id: EVT_A,
+              conversationId: "c1",
+              triggeredBy: "idle",
+              payload: {
+                ...payload,
+                corrections: { ...payload.corrections, retired: 2 },
+                drained: { ...payload.drained, withheld: 4 },
+              },
+              createdAt: new Date("2026-05-30T08:00:00Z"),
+            },
+          ]),
+        ),
+      },
+    });
+    const ctx = mkCtx();
+    await handleLearned(transport, ctx);
+    const reply = (ctx.reply.mock.calls[0]?.[0] ?? "") as string;
+    expect(reply).toContain("3 rule change(s), 0 memory write(s), 4 withheld");
   });
 
   it("names the failed phases on a digest line, and nothing on a fire without them", async () => {
@@ -4570,9 +4598,10 @@ describe("handleReflect", () => {
           ok({
             status: "processed",
             eventId: "019e2900-0000-7000-8000-0000000000cc",
-            ruleChanges: { extracted: 2, reinforced: 1, promoted: 1 },
+            ruleChanges: { extracted: 2, reinforced: 1, promoted: 1, retired: 0 },
             memoryCount: 3,
             drained: 0,
+            withheld: 0,
           }),
         ),
       },
@@ -4586,6 +4615,30 @@ describe("handleReflect", () => {
     expect(digest).toContain("1 reinforced");
     expect(digest).toContain("3 extracted");
     expect(digest).toContain("/learned 019e2900");
+    expect(digest).not.toContain("retired");
+    expect(digest).not.toContain("withheld");
+  });
+
+  it("reports a retirement and withheld rows, which alone are changes", async () => {
+    const transport = transportWith({
+      evolution: {
+        triggerReflection: vi.fn().mockResolvedValue(
+          ok({
+            status: "processed",
+            eventId: "019e2900-0000-7000-8000-0000000000ee",
+            ruleChanges: { extracted: 0, reinforced: 0, promoted: 0, retired: 1 },
+            memoryCount: 0,
+            drained: 0,
+            withheld: 2,
+          }),
+        ),
+      },
+    });
+    const ctx = mkCtx();
+    await handleReflect(transport, ctx);
+    const digest = (ctx.reply.mock.calls[1]?.[0] ?? "") as string;
+    expect(digest).toContain("0 new, 0 reinforced, 0 promoted, 1 retired");
+    expect(digest).toContain("0 extracted, 0 drained, 2 withheld");
   });
 
   it("reports too-short conversations clearly", async () => {
@@ -4619,9 +4672,10 @@ describe("handleReflect", () => {
           ok({
             status: "processed",
             eventId: "019e2900-0000-7000-8000-0000000000dd",
-            ruleChanges: { extracted: 0, reinforced: 0, promoted: 0 },
+            ruleChanges: { extracted: 0, reinforced: 0, promoted: 0, retired: 0 },
             memoryCount: 0,
             drained: 0,
+            withheld: 0,
           }),
         ),
       },
@@ -4731,6 +4785,7 @@ describe("handleLearned detail rendering", () => {
         retired: overrides.retired ?? 0,
         promoted: 0,
         outOfScopeReinforcementsSkipped: overrides.outOfScope ?? 0,
+        outOfScopeContradictionsSkipped: 0,
         unknownRuleReinforcementsSkipped: overrides.unknownRule ?? 0,
         consolidationNeeded: false,
       },
@@ -4852,6 +4907,7 @@ describe("handleLearned detail rendering", () => {
                 retired: 0,
                 promoted: 0,
                 outOfScopeReinforcementsSkipped: 0,
+                outOfScopeContradictionsSkipped: 0,
                 unknownRuleReinforcementsSkipped: 0,
                 consolidationNeeded: false,
               },

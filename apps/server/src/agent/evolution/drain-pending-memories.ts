@@ -28,7 +28,13 @@ import type { LlmProvider } from "../../llm/provider.js";
 import { chatTyped } from "../../llm/typed.js";
 import { logger } from "../../logger.js";
 import type { MemoryProvider, RetainBatchItem } from "../../memory/provider.js";
-import type { AgentStore, PendingMemory, PendingMemorySource } from "../store/index.js";
+import {
+  type AgentStore,
+  type MemoryRule,
+  memoryRulesFor,
+  type PendingMemory,
+  type PendingMemorySource,
+} from "../store/index.js";
 import {
   buildClassifiedMemorySchema,
   buildPendingClassificationPrompt,
@@ -54,9 +60,18 @@ export interface ClassifyDeps {
    * shares the same schema (one compile per fire, not per row).
    */
   customCompartments: ReadonlyArray<CompartmentDefinition>;
+  /**
+   * Whether the fire's profile, whose model classifies, sees the user's
+   * instruction rules (`admitsFirstParty`). When it doesn't, a row such a
+   * rule binds stays pending for a fire whose profile does.
+   */
+  seesUserRules: boolean;
   runInTx: Transactor;
-  /** Reads the `memory`-category rules each row's staging profile sees. */
-  store: Pick<AgentStore, "getMemoryRules">;
+  /**
+   * Reads the `memory`-category rules each row's staging profile sees, and
+   * re-reads a row's staging profile when a replayed row lacks it.
+   */
+  store: Pick<AgentStore, "getMemoryRules" | "getPendingMemories">;
 }
 
 export interface DrainPendingDeps extends ClassifyDeps {
@@ -113,7 +128,9 @@ export type ClassifierInput = Pick<
  * Run the classifier prompt over a batch of pending rows. A `live_retain` or
  * `skill` row is classified under the `memory`-category rules its staging
  * profile sees, and withheld when one forbids it; a `migration` row is a
- * restaged memory and passes. Single-row failures are skipped, not propagated.
+ * restaged memory and passes. A row stays pending, unclassified, when it is
+ * gone or a rule the fire's model may not see binds it. Single-row failures
+ * are skipped, not propagated.
  */
 export async function classifyPendingMemories(
   pending: ReadonlyArray<ClassifierInput>,
@@ -125,50 +142,71 @@ export async function classifyPendingMemories(
     plain: buildClassifiedMemorySchema(customNames),
     withholding: buildWithholdingClassifiedMemorySchema(customNames),
   };
-  const rulesByProfile = await loadMemoryRules(pending, userId, deps);
+  const rulesOf = await loadMemoryRules(pending, userId, deps);
   const classified: Array<ClassifiedOutcome | null> = [];
   for (const chunk of R.chunk([...pending], CLASSIFIER_CONCURRENCY)) {
     const results = await Promise.all(
       chunk.map((p) => {
-        const rules =
-          p.source === "migration" ? [] : (rulesByProfile.get(stagingProfileOf(p)) ?? []);
+        const rules = rulesOf(p);
+        if (rules === undefined) {
+          logger.info({ pendingId: p.id }, "pending row gone before classification — skipped");
+          return null;
+        }
+        if (!deps.seesUserRules && rules.some((r) => r.fromUser)) {
+          logger.info(
+            { pendingId: p.id },
+            "pending row bound by a user's memory rule this fire's profile may not see — left pending",
+          );
+          return null;
+        }
         return classifyOne(p, rules, schemas, deps);
       }),
     );
     classified.push(...results);
   }
-  const outcomes = R.filter(classified, (c) => c !== null);
-  const successful = outcomes.flatMap((c) => (c.withhold ? [] : [c.row]));
-  const withheld = outcomes.flatMap((c) => (c.withhold ? [c.row.id] : []));
+  const [withheldOutcomes, retained] = R.partition(
+    R.filter(classified, (c) => c !== null),
+    (c) => c.withhold,
+  );
+  const successful = retained.map((c) => c.row);
   const byNetwork = R.countBy(successful, (c) => c.tags.network);
-  return { successful, withheld, byNetwork };
+  return { successful, withheld: withheldOutcomes.map((c) => c.row.id), byNetwork };
 }
 
 /**
- * `typeof`, not `!== null`: a row memoized without `profileId` replays with
- * it `undefined`, which reads as no profile.
+ * The memory rules each row is classified under, from one read: none for a
+ * `migration` row, its staging profile's for the rest, and `undefined` for a
+ * row that is no longer pending. A replayed row memoized without `profileId`
+ * has it `undefined`; its staging profile is read again rather than taken as
+ * none, which would leave its persona's rules out.
  */
-function stagingProfileOf(p: ClassifierInput): string | null {
-  return typeof p.profileId === "string" ? p.profileId : null;
-}
-
-/** The memory rules each staging profile of a rule-bound row sees, one read per profile. */
 async function loadMemoryRules(
   pending: ReadonlyArray<ClassifierInput>,
   userId: string,
   deps: Pick<ClassifyDeps, "runInTx" | "store">,
-): Promise<ReadonlyMap<string | null, ReadonlyArray<string>>> {
-  const profileIds = R.unique(
-    pending.flatMap((p) => (p.source === "migration" ? [] : [stagingProfileOf(p)])),
-  );
-  if (profileIds.length === 0) return new Map();
-  return deps.runInTx(async (tx) => {
-    const rules = new Map<string | null, ReadonlyArray<string>>();
-    for (const profileId of profileIds) {
-      rules.set(profileId, await deps.store.getMemoryRules(tx, { profileId, userId }));
-    }
-    return rules;
+): Promise<(p: ClassifierInput) => ReadonlyArray<MemoryRule> | undefined> {
+  const bound = pending.filter((p) => p.source !== "migration");
+  if (bound.length === 0) return () => [];
+  const { staging, rules } = await deps.runInTx(async (tx) => {
+    const unresolved = bound.some((p) => p.profileId === undefined);
+    const current = unresolved
+      ? new Map((await deps.store.getPendingMemories(tx, userId)).map((r) => [r.id, r.profileId]))
+      : undefined;
+    const staging = new Map(
+      bound.flatMap((p): Array<[string, string | null]> => {
+        if (p.profileId !== undefined) return [[p.id, p.profileId]];
+        const reread = current?.get(p.id);
+        return reread === undefined ? [] : [[p.id, reread]];
+      }),
+    );
+    const profileIds = R.unique([...staging.values()].filter((id) => id !== null));
+    return { staging, rules: await deps.store.getMemoryRules(tx, { profileIds, userId }) };
   });
+  return (p) => {
+    if (p.source === "migration") return [];
+    const profileId = staging.get(p.id);
+    return profileId === undefined ? undefined : memoryRulesFor(rules, profileId);
+  };
 }
 
 /**
@@ -225,7 +263,7 @@ export async function drainPendingMemories(
   const { successful, withheld, byNetwork } = await classifyPendingMemories(pending, userId, deps);
 
   if (successful.length === 0 && withheld.length === 0) {
-    logger.warn({ userId, pendingCount: pending.length }, "all pending classifications failed");
+    logger.warn({ userId, pendingCount: pending.length }, "no pending row classified");
     return { drained: 0, byNetwork: {}, withheld: 0 };
   }
 
@@ -252,13 +290,14 @@ interface ClassifiedOutcome {
 
 async function classifyOne(
   p: ClassifierInput,
-  memoryRules: ReadonlyArray<string>,
+  rules: ReadonlyArray<MemoryRule>,
   schemas: {
     plain: ReturnType<typeof buildClassifiedMemorySchema>;
     withholding: ReturnType<typeof buildWithholdingClassifiedMemorySchema>;
   },
   deps: Pick<ClassifyDeps, "provider" | "model" | "customCompartments">,
 ): Promise<ClassifiedOutcome | null> {
+  const memoryRules = rules.map((r) => r.rule);
   const request = {
     provider: deps.provider,
     model: deps.model,
@@ -281,6 +320,18 @@ async function classifyOne(
       skillName: p.skillName,
       tags,
     };
+    if (withhold) {
+      // The fact itself stays out of the log, as every other drain log keeps it.
+      logger.info(
+        {
+          pendingId: p.id,
+          source: p.source,
+          ...(typeof p.skillName === "string" && { skill: p.skillName }),
+          memoryRules,
+        },
+        "pending memory withheld by a memory rule — deleted without a retain",
+      );
+    }
     return { row, withhold };
   } catch (err) {
     logger.warn({ err, pendingId: p.id }, "pending classification failed — row left in table");

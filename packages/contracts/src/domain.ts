@@ -109,6 +109,7 @@ export interface EvolutionEventPayload {
     retired: number;
     promoted: number;
     outOfScopeReinforcementsSkipped: number;
+    outOfScopeContradictionsSkipped: number;
     unknownRuleReinforcementsSkipped: number;
     consolidationNeeded: boolean;
   };

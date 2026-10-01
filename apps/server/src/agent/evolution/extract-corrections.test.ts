@@ -158,7 +158,7 @@ function mockExtractionDeps(
   };
 }
 
-const SCOPE = { profileId: "profile-1", userId: "user-1" };
+const SCOPE = { profileId: "profile-1", userId: "user-1", seesUserRules: true };
 
 /** A live instruction rule as `getInstructionRules` returns it. */
 function instructionRow(id: string, rule: string, observationCount = 1) {
@@ -217,6 +217,7 @@ describe("extractCorrections", () => {
       retired: 0,
       promoted: 0,
       outOfScopeReinforcementsSkipped: 0,
+      outOfScopeContradictionsSkipped: 0,
       unknownRuleReinforcementsSkipped: 0,
       consolidationNeeded: false,
     });
@@ -224,6 +225,26 @@ describe("extractCorrections", () => {
   });
 
   describe("rules the user set", () => {
+    it("shows a third-party profile's model none of the user's instruction rules", async () => {
+      const deps = mockExtractionDeps(
+        { corrections: [] },
+        {
+          getCorrections: vi.fn().mockResolvedValue([ruleRow("learned", "Be concise")]),
+          getInstructionRules: vi
+            .fn()
+            .mockResolvedValue([instructionRow("mine", "Don't use bullet points")]),
+        },
+      );
+
+      await extractCorrections(sampleHistory, { ...SCOPE, seesUserRules: false }, deps);
+
+      expect(deps.store.getInstructionRules).not.toHaveBeenCalled();
+      const system = systemPromptOf(deps);
+      expect(system).toContain("Be concise");
+      expect(system).not.toContain("Don't use bullet points");
+      expect(system).not.toContain(", set by the user)");
+    });
+
     it("lists the user's instruction rules the profile sees, marked as set by the user", async () => {
       const deps = mockExtractionDeps(
         { corrections: [] },
@@ -237,7 +258,10 @@ describe("extractCorrections", () => {
 
       await extractCorrections(sampleHistory, SCOPE, deps);
 
-      expect(deps.store.getInstructionRules).toHaveBeenCalledWith(expect.anything(), SCOPE);
+      expect(deps.store.getInstructionRules).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ profileId: "profile-1", userId: "user-1" }),
+      );
       const system = systemPromptOf(deps);
       expect(system).toContain("[R1] (style, all channels) Be concise");
       expect(system).toContain(
@@ -305,12 +329,75 @@ describe("extractCorrections", () => {
       );
     });
 
-    it("drops a new correction whose text an instruction rule holds, with a warning", async () => {
+    it("drops a new correction an instruction rule holds in its scope, with a warning", async () => {
       const deps = mockExtractionDeps(
         {
           corrections: [
             {
-              rule: "Don't use bullet points",
+              rule: "No emojis",
+              category: "style",
+              reasoning: "The user asked",
+              matchedExistingRuleId: null,
+              action: "new",
+              channelType: "telegram",
+            },
+          ],
+        },
+        { hasInstructionRule: vi.fn().mockResolvedValue(true) },
+        ["telegram"],
+      );
+      const warn = vi.spyOn(logger, "warn");
+
+      const result = await extractCorrections(sampleHistory, SCOPE, deps);
+
+      expect(result.extracted).toBe(0);
+      expect(deps.store.hasInstructionRule).toHaveBeenCalledWith(expect.anything(), {
+        userId: "user-1",
+        text: "No emojis",
+        profileId: null,
+        channelType: "telegram",
+      });
+      expect(deps.store.upsertCorrection).not.toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({ rule: "No emojis" }),
+        expect.stringContaining("instruction rule"),
+      );
+      warn.mockRestore();
+    });
+
+    it("checks the backstop in the scope the rule would be written to, after channel coercion", async () => {
+      const deps = mockExtractionDeps(
+        {
+          corrections: [
+            {
+              rule: "No emojis",
+              category: "style",
+              reasoning: "The user asked",
+              matchedExistingRuleId: null,
+              action: "new",
+              channelType: "slack",
+            },
+          ],
+        },
+        undefined,
+        ["web"],
+      );
+
+      const result = await extractCorrections(sampleHistory, SCOPE, deps);
+
+      expect(result.extracted).toBe(1);
+      expect(deps.store.hasInstructionRule).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ text: "No emojis", channelType: null }),
+      );
+    });
+
+    it("checks the backstop against the user's rules even when the model doesn't see them", async () => {
+      const deps = mockExtractionDeps(
+        {
+          corrections: [
+            {
+              rule: "No emojis",
               category: "style",
               reasoning: "The user asked",
               matchedExistingRuleId: null,
@@ -321,22 +408,14 @@ describe("extractCorrections", () => {
         },
         { hasInstructionRule: vi.fn().mockResolvedValue(true) },
       );
-      const warn = vi.spyOn(logger, "warn");
 
-      const result = await extractCorrections(sampleHistory, SCOPE, deps);
+      const result = await extractCorrections(
+        sampleHistory,
+        { ...SCOPE, seesUserRules: false },
+        deps,
+      );
 
       expect(result.extracted).toBe(0);
-      expect(deps.store.hasInstructionRule).toHaveBeenCalledWith(
-        expect.anything(),
-        SCOPE,
-        "Don't use bullet points",
-      );
-      expect(deps.store.upsertCorrection).not.toHaveBeenCalled();
-      expect(warn).toHaveBeenCalledWith(
-        expect.objectContaining({ rule: "Don't use bullet points" }),
-        expect.stringContaining("instruction rule"),
-      );
-      warn.mockRestore();
     });
   });
 
@@ -381,11 +460,27 @@ describe("extractCorrections", () => {
         },
         ["web"],
       );
+      const warn = vi.spyOn(logger, "warn");
+      const info = vi.spyOn(logger, "info");
 
       const result = await extractCorrections(sampleHistory, SCOPE, deps);
 
-      expect(result).toMatchObject({ contradictions: 1, retired: 0 });
+      expect(result).toMatchObject({
+        contradictions: 1,
+        retired: 0,
+        outOfScopeContradictionsSkipped: 1,
+      });
       expect(deps.store.retireLearningRule).not.toHaveBeenCalled();
+      const logged = [...warn.mock.calls, ...info.mock.calls].filter(
+        ([fields]) =>
+          typeof fields === "object" &&
+          fields !== null &&
+          "rule" in fields &&
+          fields.rule === "Bullet points are fine",
+      );
+      expect(logged).toHaveLength(1);
+      warn.mockRestore();
+      info.mockRestore();
     });
 
     it("counts no retirement when the rule was promoted or retired since it was listed", async () => {
@@ -1073,6 +1168,7 @@ describe("extractCorrections", () => {
       retired: 0,
       promoted: 0,
       outOfScopeReinforcementsSkipped: 0,
+      outOfScopeContradictionsSkipped: 0,
       unknownRuleReinforcementsSkipped: 0,
       consolidationNeeded: false,
     });

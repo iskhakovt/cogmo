@@ -189,7 +189,9 @@ export type TriggerReflectionOutcome =
   | {
       status: "processed";
       eventId: string;
-      ruleChanges: { extracted: number; reinforced: number; promoted: number };
+      ruleChanges: { extracted: number; reinforced: number; promoted: number; retired: number };
       memoryCount: number;
       drained: number;
+      /** Staged rows a `memory`-category rule forbade. */
+      withheld: number;
     };
