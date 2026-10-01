@@ -4624,7 +4624,7 @@ describe("tool rejections", () => {
     expect(turnLogger.error).not.toHaveBeenCalled();
   });
 
-  it("rejects input that fails the tool's schema instead of throwing", async () => {
+  it("answers schema-invalid input as a rejection: is_error tool_result, handler skipped, no bug logged", async () => {
     const handler = vi.fn(async () => ok("wrote"));
     const tools = new ToolRegistry();
     tools.register(writer(handler));
@@ -4734,6 +4734,31 @@ describe("tool rejections", () => {
     expect(result.messages[2]?.content).toEqual([
       { type: "tool_result", toolUseId: "t1", content: "wrote x" },
     ]);
+  });
+
+  it("answers a memo it can't parse with an is_error tool_result and logs it as a bug", async () => {
+    const handler = vi.fn(async () => ok("fresh"));
+    const tools = new ToolRegistry();
+    tools.register(writer(handler));
+    const turnLogger = mock<Logger>();
+    const stepRun = replaying({ ok: "maybe" });
+
+    const result = await testRunAgentLoop({
+      provider: mockProvider([toolUseResponse("writer", "t1", { path: "x" }), textResponse("ok")]),
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      stepRun,
+      turnLogger,
+    });
+
+    expect(handler).not.toHaveBeenCalled();
+    expect(result.messages[2]?.content).toEqual([
+      expect.objectContaining({ type: "tool_result", toolUseId: "t1", isError: true }),
+    ]);
+    expect(turnLogger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ tool: "writer" }),
+      "tool handler threw",
+    );
   });
 
   it("counts a rejected side-effectful call as no progress, so repeating it trips Class D", async () => {
