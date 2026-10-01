@@ -88,6 +88,44 @@ describe("formatTranscript", () => {
     expect(formatTranscript(messages)).toContain("→ [Error] Not found");
   });
 
+  it("drops the continuation prompt and the volume nudge, and keeps the truncation notice", () => {
+    const messages: Message[] = [
+      { role: "user", content: "Draw a cat" },
+      {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "tu_1", name: "img", input: {} }],
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            toolUseId: "tu_1",
+            content: "Do NOT call `img` again",
+            isError: true,
+            harness: "volume_nudge",
+          },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "Please complete your response.", harness: "continuation" },
+        ],
+      },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "Here is" },
+          { type: "text", text: " [Reply cut off]", harness: "truncation_notice" },
+        ],
+      },
+    ];
+    expect(formatTranscript(messages)).toBe(
+      "User: Draw a cat\n\nAssistant: [Tool: img({})]\n\nAssistant: Here is\n [Reply cut off]",
+    );
+  });
+
   it("strips thinking blocks", () => {
     const messages: Message[] = [
       {
