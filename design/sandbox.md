@@ -139,8 +139,8 @@ type ExecResult = {
  * output is flowing; `exited` reports the outcome either way.
  *
  * `exited` settles once and never rejects. `wait()` is its throwing form:
- * `ExecTimeoutError`, `ExecDisposedError`, the transport's own error, or
- * an `Error` naming why there is no exit code.
+ * the transport's own error, or an `ExecError` whose `failure` is the
+ * `timed_out`, `disposed` or `no_exit_code` value `exited` carries.
  *
  * `dispose()` tears the exec down. Local-Docker stops the command's process
  * group (TERM, then KILL) from a second exec and closes the attach socket;

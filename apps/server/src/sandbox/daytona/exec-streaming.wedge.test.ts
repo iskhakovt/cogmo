@@ -12,7 +12,7 @@
  * — log-stream WS doesn't always close).
  *
  * The contract the test pins:
- *   1. `wait()` rejects with `ExecTimeoutError` within `timeoutMs + ε`,
+ *   1. `wait()` rejects with a timed_out `ExecError` within `timeoutMs + ε`,
  *      not at the vitest default-timeout boundary.
  *   2. The cleanup `DELETE /toolbox/.../session/<sid>` was sent — the
  *      Daytona [#2510] recommended explicit-cleanup path.
@@ -29,7 +29,6 @@ import { Daytona } from "@daytona/sdk";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type WebSocket from "ws";
 import { WebSocketServer } from "ws";
-import { ExecTimeoutError } from "../index.js";
 import { disposeDaytona } from "./dispose.js";
 import { startExecStreaming } from "./exec-streaming.js";
 
@@ -236,9 +235,9 @@ describe("startExecStreaming wedge regression (real @daytona/sdk + real ws)", ()
     const err = await handle.wait().catch((e: Error) => e);
     const elapsed = Date.now() - start;
 
-    expect(err).toBeInstanceOf(ExecTimeoutError);
-    expect((err as ExecTimeoutError).kind).toBe("total");
-    expect((err as ExecTimeoutError).timeoutMs).toBe(200);
+    expect(err).toMatchObject({
+      failure: { kind: "timed_out", deadline: "total", timeoutMs: 200 },
+    });
     // Sanity bound — vitest's default 5s timeout shouldn't be in play.
     expect(elapsed).toBeGreaterThanOrEqual(150);
     expect(elapsed).toBeLessThan(2_000);
@@ -264,8 +263,7 @@ describe("startExecStreaming wedge regression (real @daytona/sdk + real ws)", ()
     handle.stderr.on("error", () => {});
 
     const err = await handle.wait().catch((e: Error) => e);
-    expect(err).toBeInstanceOf(ExecTimeoutError);
-    expect((err as ExecTimeoutError).kind).toBe("idle");
+    expect(err).toMatchObject({ failure: { kind: "timed_out", deadline: "idle" } });
     await handle.dispose();
     expect(stub.deletedSessions).toHaveLength(1);
     expect(stub.deletedSessions[0]).toMatch(/^wedge-idle-/);

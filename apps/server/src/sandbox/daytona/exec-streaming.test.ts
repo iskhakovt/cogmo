@@ -1,6 +1,5 @@
 import { DaytonaNotFoundError, type Process } from "@daytona/sdk";
 import { describe, expect, it, vi } from "vitest";
-import { ExecDisposedError, ExecTimeoutError } from "../index.js";
 import { startExecStreaming } from "./exec-streaming.js";
 
 /**
@@ -198,9 +197,9 @@ describe("startExecStreaming", () => {
     expect(command).toBe("cd '/workspace' && 'git' 'checkout' '-B' 'feature'");
   });
 
-  it("dispose() calls deleteSession and rejects wait() with ExecDisposedError", async () => {
+  it("dispose() calls deleteSession and rejects wait() with a disposed ExecError", async () => {
     // Per the `ExecStreamingHandle` contract, a disposed exec reports
-    // `disposed`, and `wait()` rejects with `ExecDisposedError`, on every
+    // `disposed`, and `wait()` rejects with a disposed `ExecError`, on every
     // backend.
     let stdoutCb: ((c: string) => void) | undefined;
     const proc = fakeProcess({ wsReject: new Error("ws closed") });
@@ -243,7 +242,7 @@ describe("startExecStreaming", () => {
 
     expect(winner).toBe("disposed");
     expect(proc.deleteSession).toHaveBeenCalled();
-    await expect(handle.wait()).rejects.toBeInstanceOf(ExecDisposedError);
+    await expect(handle.wait()).rejects.toMatchObject({ failure: { kind: "disposed" } });
   });
 
   it("rejects opts.user as Phase-3a-unsupported (matches LocalDocker silently honoring; loud diff is better)", async () => {
@@ -261,12 +260,12 @@ describe("startExecStreaming", () => {
     expect(proc.createSession).not.toHaveBeenCalled();
   });
 
-  it("dispose() racing in-flight getSessionCommand rejects with ExecDisposedError, not the raw 404", async () => {
+  it("dispose() racing in-flight getSessionCommand rejects with a disposed ExecError, not the raw 404", async () => {
     // Race window: WS resolves naturally, the success-path
     // `getSessionCommand` is in flight, consumer calls dispose() which
     // deletes the session. The in-flight fetch then 404s. Per the
     // ExecStreamingHandle contract, consumers branching on outcome
-    // must see `ExecDisposedError`, not the raw SDK NotFound.
+    // must see a disposed `ExecError`, not the raw SDK NotFound.
     const proc = fakeProcess({ wsResolve: {} });
     let resolveFetch!: (v: Awaited<ReturnType<Process["getSessionCommand"]>>) => void;
     let rejectFetch!: (e: Error) => void;
@@ -296,7 +295,7 @@ describe("startExecStreaming", () => {
     rejectFetch(new DaytonaNotFoundError("session not found", 404));
     await disposing;
 
-    await expect(handle.wait()).rejects.toBeInstanceOf(ExecDisposedError);
+    await expect(handle.wait()).rejects.toMatchObject({ failure: { kind: "disposed" } });
     // Suppress the unused `resolveFetch` lint signal — kept for symmetry
     // so readers see both halves of the gate.
     void resolveFetch;
@@ -540,7 +539,7 @@ describe("startExecStreaming", () => {
     rejectWs?.(new Error("ws dropped"));
     await new Promise<void>((resolve) => setImmediate(resolve));
 
-    await expect(handle.wait()).rejects.toBeInstanceOf(ExecDisposedError);
+    await expect(handle.wait()).rejects.toMatchObject({ failure: { kind: "disposed" } });
     expect(proc.deleteSession).toHaveBeenCalledTimes(1);
   });
 
@@ -558,7 +557,7 @@ describe("startExecStreaming", () => {
       }).catch((e: unknown) => e);
 
       await vi.advanceTimersByTimeAsync(1_000);
-      expect(await opening).toBeInstanceOf(ExecTimeoutError);
+      expect(await opening).toMatchObject({ failure: { kind: "timed_out" } });
       expect(proc.deleteSession).not.toHaveBeenCalled();
 
       created.resolve();
@@ -584,7 +583,7 @@ describe("startExecStreaming", () => {
     await vi.waitFor(() => expect(proc.executeSessionCommand).toHaveBeenCalled());
 
     controller.abort();
-    expect(await opening).toBeInstanceOf(ExecDisposedError);
+    expect(await opening).toMatchObject({ failure: { kind: "disposed" } });
     executed.resolve({ cmdId: "cmd-late" });
     await new Promise<void>((resolve) => setImmediate(resolve));
 
@@ -599,9 +598,9 @@ describe("startExecStreaming", () => {
   // held open silently — no `onStdout`, no `onStderr`, no close. Without
   // a timeout, `await handle.wait()` blocks forever. These tests model
   // that exact shape (WS opens, never resolves, no chunks emitted) and
-  // assert the cap settles `wait()` with `ExecTimeoutError` + runs
+  // assert the cap settles `wait()` with a timed_out `ExecError` + runs
   // `deleteSession` (the Daytona [#2510] recommended cleanup path).
-  it("timeoutMs: total wall-clock cap fires when WS holds open silently, cleanup runs, wait() rejects with ExecTimeoutError(kind='total')", async () => {
+  it("timeoutMs: total wall-clock cap fires when WS holds open silently, cleanup runs, wait() rejects with a total-deadline ExecError", async () => {
     let resolveWs: (() => void) | undefined;
     const proc = fakeProcess({ wsResolve: {} });
     // Override the WS to a held-open promise — never resolves on its
@@ -632,9 +631,9 @@ describe("startExecStreaming", () => {
     const err = await handle.wait().catch((e: Error) => e);
     const elapsed = Date.now() - start;
 
-    expect(err).toBeInstanceOf(ExecTimeoutError);
-    expect((err as ExecTimeoutError).kind).toBe("total");
-    expect((err as ExecTimeoutError).timeoutMs).toBe(50);
+    expect(err).toMatchObject({
+      failure: { kind: "timed_out", deadline: "total", timeoutMs: 50 },
+    });
     // Sanity: actually waited at least the timeout (no instant fire),
     // and didn't block for 30s by accident.
     expect(elapsed).toBeGreaterThanOrEqual(40);
@@ -667,8 +666,7 @@ describe("startExecStreaming", () => {
     handle.stderr.on("error", () => {});
 
     const err = await handle.wait().catch((e: Error) => e);
-    expect(err).toBeInstanceOf(ExecTimeoutError);
-    expect((err as ExecTimeoutError).kind).toBe("idle");
+    expect(err).toMatchObject({ failure: { kind: "timed_out", deadline: "idle" } });
     expect(proc.deleteSession).toHaveBeenCalled();
   });
 
@@ -734,7 +732,7 @@ describe("startExecStreaming", () => {
 
       await vi.advanceTimersByTimeAsync(1_001);
 
-      expect(settled).toBeInstanceOf(ExecTimeoutError);
+      expect(settled).toMatchObject({ failure: { kind: "timed_out" } });
       expect(proc.deleteSession).toHaveBeenCalled();
     } finally {
       vi.useRealTimers();

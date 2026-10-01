@@ -15,7 +15,7 @@ import { expectDefined } from "../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import type { DockerContainer, DockerFacade, DockerImage, ExecInspect } from "./docker-facade.js";
 import type { ExecOutcome } from "./exec-state.js";
-import { ExecTimeoutError, LocalDockerSandboxClient } from "./index.js";
+import { LocalDockerSandboxClient } from "./index.js";
 import type { CogmoSocketProxy } from "./proxy/index.js";
 import type { TaskScope } from "./proxy/types.js";
 import { DrizzleSandboxStore } from "./store/index.js";
@@ -733,9 +733,9 @@ describe("LocalDockerSandboxClient — execStreaming.dispose()", () => {
   // (kernel keepalive lag, daemon stall) even when the in-container
   // process has stopped writing. The Daytona-wedge equivalent for the
   // Local-Docker backend is the same risk in a different transport. The
-  // total cap rejects `wait()` with `ExecTimeoutError("total")` and
+  // total cap rejects `wait()` with a total-deadline `ExecError` and
   // tears the stream down via the same path `dispose()` uses.
-  it("timeoutMs: total cap on a held-open stream rejects wait() with ExecTimeoutError(kind='total')", async () => {
+  it("timeoutMs: total cap on a held-open stream rejects wait() with a total-deadline ExecError", async () => {
     const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const { PassThrough } = await import("node:stream");
     const hijack = new PassThrough();
@@ -778,10 +778,8 @@ describe("LocalDockerSandboxClient — execStreaming.dispose()", () => {
       timeoutMs: 50,
     });
 
-    const { ExecTimeoutError } = await import("./index.js");
     const err = await handle.wait().catch((e: Error) => e);
-    expect(err).toBeInstanceOf(ExecTimeoutError);
-    expect((err as InstanceType<typeof ExecTimeoutError>).kind).toBe("total");
+    expect(err).toMatchObject({ failure: { kind: "timed_out", deadline: "total" } });
   });
 
   /**
@@ -876,7 +874,7 @@ describe("LocalDockerSandboxClient — execStreaming.dispose()", () => {
       const opening = session.execStreaming(["sleep", "infinity"], { timeoutMs: 100 });
       const failure = opening.catch((e: unknown) => e);
       await vi.advanceTimersByTimeAsync(100);
-      expect(await failure).toBeInstanceOf(ExecTimeoutError);
+      expect(await failure).toMatchObject({ failure: { kind: "timed_out" } });
 
       created.resolve();
       await vi.advanceTimersByTimeAsync(0);
@@ -1025,10 +1023,8 @@ describe("LocalDockerSandboxClient — execStreaming.dispose()", () => {
     handle.stdout.on("error", () => {});
     handle.stderr.on("error", () => {});
 
-    const { ExecTimeoutError } = await import("./index.js");
     const err = await handle.wait().catch((e: Error) => e);
-    expect(err).toBeInstanceOf(ExecTimeoutError);
-    expect((err as InstanceType<typeof ExecTimeoutError>).kind).toBe("idle");
+    expect(err).toMatchObject({ failure: { kind: "timed_out", deadline: "idle" } });
   });
 
   // Chunks demuxed before the consumer attaches its `for await`
