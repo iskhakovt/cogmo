@@ -1,4 +1,3 @@
-import { NonRetriableError } from "inngest";
 import { computeBudget, type ResolvedLimits, resolveLimits } from "../../llm/models.js";
 import type { LlmProvider } from "../../llm/provider.js";
 import {
@@ -9,6 +8,7 @@ import {
 import type { ToolResultClearing } from "../../llm/types.js";
 import { toolResultClearing } from "../context.js";
 import type { StepRunner } from "../loop.js";
+import { asNonRetriable } from "../turn-step-runner.js";
 
 /**
  * Resolve a provider, rewrapping permanent config errors as
@@ -24,9 +24,7 @@ export async function resolveOrFail(
   try {
     return await resolveProvider(model);
   } catch (err) {
-    if (err instanceof ProviderConfigError) {
-      throw new NonRetriableError(err.message, { cause: err });
-    }
+    if (err instanceof ProviderConfigError) throw asNonRetriable(err);
     throw err;
   }
 }
