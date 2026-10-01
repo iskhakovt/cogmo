@@ -83,6 +83,22 @@ export function mapManifestResourceLimits(resources: SkillManifest["resources"] 
   };
 }
 
+/**
+ * Whether a tier-2 skill runs on the warm pool. The pool runs every worker
+ * at the default budget, so a skill declaring its own resources gets a
+ * one-shot container instead.
+ */
+function runsOnPool(manifest: SkillManifest): boolean {
+  const overrides = mapManifestResourceLimits(manifest.resources);
+  return overrides.cpus === undefined && overrides.memory_bytes === undefined;
+}
+
+/** Where a run executes: the tier-1 isolate, the warm pool, or a one-shot container. */
+type SkillRuntime =
+  | { kind: "wasm" }
+  | { kind: "pool"; pool: SysboxWorkerPool }
+  | { kind: "one_shot"; sandbox: SandboxClient };
+
 const log = logger.child({ component: "skills.runner" });
 
 const ZERO_SHA = "0000000000000000000000000000000000000000";
@@ -694,18 +710,12 @@ export class SkillRunnerImpl implements SkillRunner {
    * promise is cleared so the next caller retries — keeps a transient
    * sandbox failure from poisoning the runner permanently.
    */
-  async #ensurePool(): Promise<SysboxWorkerPool> {
+  async #ensurePool(sandbox: SandboxClient): Promise<SysboxWorkerPool> {
     if (this.#disposed) {
       throw new Error("SkillRunnerImpl: tier-2 pool requested after shutdown");
     }
     if (this.#pool) return this.#pool;
     if (this.#poolPromise) return this.#poolPromise;
-    const sandbox = this.#sandbox;
-    if (!sandbox) {
-      // Caller paths gate on `#sandbox` before reaching here; this
-      // guard exists only to narrow `sandbox` for the `create` call.
-      throw new Error("invariant: #ensurePool called without a sandbox");
-    }
     this.#poolPromise = (async () => {
       try {
         const pool = await SysboxWorkerPool.create({
@@ -1293,9 +1303,8 @@ export class SkillRunnerImpl implements SkillRunner {
       return err({ kind: "invalid_inputs", name, issues });
     }
 
-    if (skill.tier === "container" && !this.#sandbox) {
-      return err({ kind: "sandbox_unavailable", name });
-    }
+    const runtime = await this.#selectRuntime(skill.tier, cached.manifest);
+    if (runtime === null) return err({ kind: "sandbox_unavailable", name });
 
     const trigger: SkillRunTrigger = opts.trigger ?? "manual";
 
@@ -1390,7 +1399,14 @@ export class SkillRunnerImpl implements SkillRunner {
         }),
       });
 
-      const result = await this.#dispatchToRuntime(skill, cached, opts.inputs, ctxHandler, runId);
+      const result = await this.#dispatchToRuntime(
+        runtime,
+        skill,
+        cached,
+        opts.inputs,
+        ctxHandler,
+        runId,
+      );
       const finishedAt = new Date();
       // Build the resource_usage blob once — `wallClockMs` is always derived
       // from the host-side timestamps; `peakMemoryBytes` rides whatever the
@@ -1445,11 +1461,26 @@ export class SkillRunnerImpl implements SkillRunner {
   }
 
   /**
-   * Per-tier dispatch to the worker runtime. Extracted from `invoke` so
-   * the execute path stays readable — every line above is pre-flight or
-   * recovery branching, every line after is finalize.
+   * Where a run of this skill executes, or null for a container skill on a
+   * deployment with no sandbox. Settled before the run row is written: a
+   * warm pool that can't start throws here, the sandbox failing rather than
+   * the skill, and leaves no row behind, so a keyed retry runs the skill
+   * instead of finding a `started` row and refusing it as in flight.
    */
+  async #selectRuntime(tier: SkillTier, manifest: SkillManifest): Promise<SkillRuntime | null> {
+    if (tier === "wasm") return { kind: "wasm" };
+    const sandbox = this.#sandbox;
+    if (!sandbox) return null;
+    // A skill declaring its own resources gets a one-shot container at the
+    // ~1-2 s cost of a cold start (see `runsOnPool`); most declare none and
+    // ride the warm pool.
+    if (!runsOnPool(manifest)) return { kind: "one_shot", sandbox };
+    return { kind: "pool", pool: await this.#ensurePool(sandbox) };
+  }
+
+  /** Run the task on the runtime `#selectRuntime` chose. */
   async #dispatchToRuntime(
+    runtime: SkillRuntime,
     skill: SkillRow,
     cached: SkillSourceCacheEntry,
     inputs: unknown,
@@ -1457,90 +1488,50 @@ export class SkillRunnerImpl implements SkillRunner {
     taskId: string,
   ): Promise<RunOnWorkerResult | InvokeResult> {
     const wallClockS = cached.manifest.resources?.wall_clock_s;
-    // Switch + `never` exhaustiveness so a future SkillTier value (added to
-    // the pgEnum) is a compile-time miss here rather than a silent route
-    // through the sysbox path.
-    switch (skill.tier) {
-      case "wasm": {
-        // Specs only (not hashes) — see `design/skills.md` → Security posture
-        // for the WASM-vs-sysbox integrity asymmetry rationale.
-        const packageSpecs = cached.lockfile?.specs ?? [];
-        return runOnWorker({
-          taskId,
-          skillName: skill.name,
-          body: cached.body,
-          inputs,
-          ...(wallClockS !== undefined && { wallClockS }),
-          ...(this.#pyodidePackageCacheDir && {
-            packageCacheDir: this.#pyodidePackageCacheDir,
-          }),
-          ...(packageSpecs.length > 0 && { packageSpecs }),
-          ctxHandler,
-        });
-      }
-      case "container": {
-        const sandbox = this.#sandbox;
-        if (!sandbox) {
-          // Caught above in invoke by `tier === "container" && !sandbox`;
-          // this guard narrows for the call below.
-          throw new Error("invariant: sandbox unset on container tier path");
-        }
-        // Per-skill resource overrides are honoured via a one-shot
-        // container — the pool runs every worker at the default resource
-        // budget, so a skill that wants 2 GB of RAM can't share a 512 MB
-        // worker. Bypass the pool when overrides are declared; pay the
-        // ~1-2s cold-start that pre-pool tier-2 skills paid every time.
-        // This is rare: most skills don't override and ride the warm path.
-        const overrides = mapManifestResourceLimits(cached.manifest.resources);
-        const isolation = cached.manifest.isolation;
-        // Invariant: skill.lockfileHash != null ⇒ cached.lockfile set.
-        let deps: { lockfileHash: string; lockfileContents: string } | undefined;
-        if (skill.lockfileHash !== null) {
-          if (cached.lockfile === undefined) {
-            throw new Error(
-              `invariant: skill '${skill.name}' has lockfile_hash but cache missing lockfile`,
-            );
-          }
-          deps = {
-            lockfileHash: cached.lockfile.hash,
-            lockfileContents: cached.lockfile.contents,
-          };
-        }
-        if (overrides.cpus !== undefined || overrides.memory_bytes !== undefined) {
-          return runOnSysboxContainer({
-            taskId,
-            skillName: skill.name,
-            body: cached.body,
-            inputs,
-            ...(wallClockS !== undefined && { wallClockS }),
-            ...(isolation !== undefined && { isolation }),
-            ...(deps !== undefined && { deps }),
-            ...(this.#depsCacheVolumeName !== undefined && {
-              depsCacheVolumeName: this.#depsCacheVolumeName,
-            }),
-            resourceLimits: overrides,
-            image: this.#tier2Image,
-            sandbox,
-            ctxHandler,
-          });
-        }
-        const pool = await this.#ensurePool();
-        return pool.invoke({
-          taskId,
-          skillName: skill.name,
-          body: cached.body,
-          inputs,
-          ...(wallClockS !== undefined && { wallClockS }),
-          ...(isolation !== undefined && { isolation }),
-          ...(deps !== undefined && { deps }),
-          ctxHandler,
-        });
-      }
-      default: {
-        const _exhaustive: never = skill.tier;
-        throw new Error(`unhandled skill tier: ${_exhaustive as string}`);
-      }
+    const task = {
+      taskId,
+      skillName: skill.name,
+      body: cached.body,
+      inputs,
+      ...(wallClockS !== undefined && { wallClockS }),
+      ctxHandler,
+    };
+    if (runtime.kind === "wasm") {
+      // Specs only (not hashes) — see `design/skills.md` → Security posture
+      // for the WASM-vs-sysbox integrity asymmetry rationale.
+      const packageSpecs = cached.lockfile?.specs ?? [];
+      return runOnWorker({
+        ...task,
+        ...(this.#pyodidePackageCacheDir && { packageCacheDir: this.#pyodidePackageCacheDir }),
+        ...(packageSpecs.length > 0 && { packageSpecs }),
+      });
     }
+    const isolation = cached.manifest.isolation;
+    // Invariant: skill.lockfileHash != null ⇒ cached.lockfile set.
+    let deps: { lockfileHash: string; lockfileContents: string } | undefined;
+    if (skill.lockfileHash !== null) {
+      if (cached.lockfile === undefined) {
+        throw new Error(
+          `invariant: skill '${skill.name}' has lockfile_hash but cache missing lockfile`,
+        );
+      }
+      deps = { lockfileHash: cached.lockfile.hash, lockfileContents: cached.lockfile.contents };
+    }
+    const containerTask = {
+      ...task,
+      ...(isolation !== undefined && { isolation }),
+      ...(deps !== undefined && { deps }),
+    };
+    if (runtime.kind === "pool") return runtime.pool.invoke(containerTask);
+    return runOnSysboxContainer({
+      ...containerTask,
+      ...(this.#depsCacheVolumeName !== undefined && {
+        depsCacheVolumeName: this.#depsCacheVolumeName,
+      }),
+      resourceLimits: mapManifestResourceLimits(cached.manifest.resources),
+      image: this.#tier2Image,
+      sandbox: runtime.sandbox,
+    });
   }
 
   // --- Test-only helper ---

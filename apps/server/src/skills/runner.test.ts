@@ -1073,11 +1073,7 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
       .mockResolvedValueOnce(fakePool);
     const runner = await makeTier2Runner();
 
-    // First invoke fails because pool create rejects. The current
-    // tier-2 path surfaces the failure as a thrown exception (no
-    // outer try/catch wraps `pool.invoke`); the contract under test
-    // here is just that the failure happens AND that the second
-    // invoke retries — not the shape of the failure surface.
+    // First invoke throws because pool create rejects.
     await expect(runner.invoke({ name: "tier2-test", inputs: {}, runAs: runAs() })).rejects.toThrow(
       /daytona unreachable/,
     );
@@ -1090,6 +1086,27 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
     )._unsafeUnwrap();
     expect(ok.status).toBe("success");
     expect(createSpy).toHaveBeenCalledTimes(2);
+    expect(fakePool.invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it("a pool that fails to start writes no run row, so a keyed retry runs the skill", async () => {
+    const fakePool = makeFakePool();
+    createSpy
+      .mockRejectedValueOnce(new Error("daytona unreachable"))
+      .mockResolvedValueOnce(fakePool);
+    const runner = await makeTier2Runner();
+    const keyed = {
+      name: "tier2-test",
+      inputs: {},
+      idempotencyKey: "skill-cron:tier2:retry",
+      runAs: runAs(),
+    };
+
+    await expect(runner.invoke(keyed)).rejects.toThrow(/daytona unreachable/);
+    expect(await db.query.skillRuns.findFirst()).toBeUndefined();
+
+    const retried = (await runner.invoke(keyed))._unsafeUnwrap();
+    expect(retried.status).toBe("success");
     expect(fakePool.invoke).toHaveBeenCalledTimes(1);
   });
 
