@@ -8,35 +8,35 @@
         "hasToolResult": false
       },
       "response": {
-        "content": "That was Taberna da Rua das Flores — you had the bacalhau there and called it the best you'd ever had. Worth booking again for sure."
+        "content": "Taberna da Rua das Flores — that's where you had the bacalhau you said was the best ever. Worth a call ahead since it's a popular spot in that area of Lisbon."
       },
       "recordedTimings": {
-        "ttftMs": 911,
+        "ttftMs": 901,
         "interChunkDelaysMs": [
           0,
           0,
           0,
-          663,
+          317,
           6,
           0,
           0,
           0,
           0,
           0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          3,
+          27,
+          99,
+          1,
+          39,
+          46,
+          195,
+          1,
           0
         ],
-        "totalDurationMs": 1583
+        "totalDurationMs": 1632
       },
       "metadata": {
-        "systemHash": "e23154ff",
-        "toolsHash": "837ba743"
+        "systemHash": "0541abc5",
+        "toolsHash": "80e92520"
       }
     }
   ]

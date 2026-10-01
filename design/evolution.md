@@ -481,7 +481,7 @@ This section moves to `[confirmed]` when both evals meet these targets, with the
 
 ### Implementation Outline
 
-Steps 1, 2 and 4 are in place. Steps 3, 5 and 6 ship in one release, with the tools kept out of the offered built-ins until the last of them lands: without step 5 every instruction also goes to core memory, and step 6 is part of the injection limits. The step that offers the tools re-records the llmock fixtures, as step 5 does for the prompts it changes; step 4's prompt changes are not yet recorded, which replay tolerates since a fixture's key carries no system prompt.
+Steps 1, 2 and 4 are in place. Steps 3, 5 and 6 ship in one release, with the tools kept out of the offered built-ins until the last of them lands: without step 5 every instruction also goes to core memory, and step 6 is part of the injection limits. The step that offers the tools re-records the llmock fixtures, as step 5 does for the prompts it changes. Step 4's prompts are recorded in `learning-loop.integration.test.ts`, which also runs a `memory`-category rule against the model: a third-party fire defers, and a first-party fire withholds the fact the rule forbids.
 
 1. **Source enum and precedence rendering** `[confirmed]`. Migration 0059 ([Data Model](#data-model)) and the sectioned `# Rules` ([Precedence](#precedence-confirmed)); `hasChannelDefaults` counts only `seed` rows, so a user's channel-scoped rule doesn't stop seeding. Its check, the correction-learning probe at `EVAL_REPEATS=3`, followed active rules in 9 of 12 samples, at least as often as the flat list's 4 of 7 ([Stage 1](#stage-1-instruction-evolution-confirmed) → Evaluation).
 2. **Schema and store** `[confirmed]`. Migration 0067 ([Data Model](#data-model)).

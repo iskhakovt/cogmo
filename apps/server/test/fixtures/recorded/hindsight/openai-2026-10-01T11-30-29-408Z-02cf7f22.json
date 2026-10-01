@@ -1,0 +1,33 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "Return valid json only.\n\n## MISSION\n\nTrack anything notable in the new facts — names, numbers, dates, places, events, decisions, claims, relationships, and recurring patterns.\n\n## INPUT\n\n### New facts\n\n[[UUID]] User is learning to play the Portuguese guitar. | Involving: user (mentioned_at=2026-10-01 11:30:25.688685+00:00)\n\n### Existing observations\n\n[\n  {\n    \"id\": \"[UUID]\",\n    \"text\": \"User works at a bakery in Alfama.\",\n    \"proof_count\": 1,\n    \"mentioned_at\": \"[TS]\",\n    \"source_memories\": [\n      {\n        \"text\": \"User works at a bakery in Alfama | Involving: user\",\n        \"context\": \"User mentioned starting a new job\",\n        \"mentioned_at\": \"[TS]\"\n      }\n    ]\n  }\n]",
+        "model": "gpt-4o-mini",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "content": "{\n  \"creates\": [\n    {\n      \"text\": \"User is learning to play the Portuguese guitar.\",\n      \"source_fact_ids\": [\n        \"7e7bc106-3170-456e-a930-89f3c34f28e4\"\n      ],\n      \"reason\": \"This is a distinct facet about the user's learning activity; no existing observation covers it.\"\n    }\n  ],\n  \"updates\": [],\n  \"deletes\": []\n}",
+        "usage": {
+          "prompt_tokens": 3857,
+          "completion_tokens": 95,
+          "total_tokens": 3952,
+          "prompt_tokens_details": {
+            "cached_tokens": 3072,
+            "audio_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0,
+            "audio_tokens": 0,
+            "accepted_prediction_tokens": 0,
+            "rejected_prediction_tokens": 0
+          }
+        }
+      },
+      "metadata": {
+        "systemHash": "a4694c92"
+      }
+    }
+  ]
+}

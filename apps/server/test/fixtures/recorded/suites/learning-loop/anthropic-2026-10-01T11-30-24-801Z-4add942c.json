@@ -1,0 +1,18 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "Fact: Has high blood pressure and takes lisinopril every morning.",
+        "model": "claude-sonnet-5",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "content": "{\"network\":\"bank\",\"compartment\":\"health\",\"trust\":\"first-party\",\"withhold\":true}"
+      },
+      "metadata": {
+        "systemHash": "d0f424d9"
+      }
+    }
+  ]
+}

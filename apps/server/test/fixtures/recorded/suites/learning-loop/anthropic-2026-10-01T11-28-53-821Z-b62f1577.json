@@ -11,57 +11,57 @@
         "toolCalls": [
           {
             "name": "memory_retain",
-            "arguments": "{\"content\": \"T had dinner at Taberna da Rua das Flores in Lisbon and said the bacalhau there was the best they've ever had.\", \"context\": \"Casual conversation about Lisbon food, Sept 2026\"}",
-            "id": "toolu_017LeVSZufk9xPfXkAEbAHqp"
+            "arguments": "{\"content\": \"T had dinner at Taberna da Rua das Flores in Lisbon and said the bacalhau was the best they've ever had.\", \"context\": \"T just moved to Lisbon; chatting about Portuguese food\"}",
+            "id": "toolu_01CZ1WkXfowxo3yn9mkKNoQa"
           }
         ]
       },
       "recordedTimings": {
-        "ttftMs": 866,
+        "ttftMs": 815,
         "interChunkDelaysMs": [
           0,
-          613,
+          506,
           0,
           0,
           0,
           0,
           0,
-          525,
+          386,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          231,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
           1,
           0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          276,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          2,
           0
         ],
-        "totalDurationMs": 2283
+        "totalDurationMs": 1939
       },
       "metadata": {
-        "systemHash": "59627f43",
-        "toolsHash": "837ba743"
+        "systemHash": "0c285651",
+        "toolsHash": "80e92520"
       }
     }
   ]
