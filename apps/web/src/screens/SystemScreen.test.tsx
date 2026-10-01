@@ -46,8 +46,8 @@ function makeEvent(overrides: Partial<EvolutionEventEntry> = {}): EvolutionEvent
         consolidationNeeded: false,
       },
       consolidation: null,
-      memories: { extracted: 3, byNetwork: { semantic: 2, episodic: 1 } },
-      drained: { drained: 0, byNetwork: {}, withheld: 2 },
+      memories: { extracted: 3, byNetwork: { semantic: 2, episodic: 1 }, skippedForUnseenRules: 0 },
+      drained: { drained: 0, byNetwork: {}, withheld: 2, deferredForUnseenRules: 1 },
       messageCount: 10,
       profileId: "prof-9",
       durationMs: 1234,
@@ -85,6 +85,7 @@ describe("SystemScreen", () => {
     // Drawer header uses the 8-char id prefix; detail lists the source ids.
     await expect.element(page.getByText("event e1abc234")).toBeVisible();
     await expect.element(page.getByText("conv-123")).toBeVisible();
+    await expect.element(page.getByText("deferred, unseen user rule")).toBeVisible();
     await expect.element(page.getByText("prof-9")).toBeVisible();
 
     await page.getByRole("button", { name: "Close" }).click();

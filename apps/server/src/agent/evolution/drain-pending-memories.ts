@@ -84,6 +84,8 @@ export interface DrainPendingResult {
   byNetwork: Record<string, number>;
   /** Rows a memory rule forbids, deleted without a retain. */
   withheld: number;
+  /** Rows left pending because a user's memory rule binds them and the fire's profile can't see it. */
+  deferredForUnseenRules: number;
 }
 
 /**
@@ -109,6 +111,8 @@ export interface ClassifyPendingResult {
   /** Ids of rows a memory rule forbids: deleted without a retain. */
   withheld: string[];
   byNetwork: Record<string, number>;
+  /** Rows left pending, unclassified, for a fire whose profile sees the user's rules. */
+  deferredForUnseenRules: number;
 }
 
 /**
@@ -143,20 +147,23 @@ export async function classifyPendingMemories(
     withholding: buildWithholdingClassifiedMemorySchema(customNames),
   };
   const rulesOf = await loadMemoryRules(pending, userId, deps);
+  const [deferred, classifiable] = R.partition(pending, (p) => {
+    const rules = rulesOf(p);
+    return rules !== undefined && !deps.seesUserRules && rules.some((r) => r.fromUser);
+  });
+  if (deferred.length > 0) {
+    logger.info(
+      { pendingIds: deferred.map((p) => p.id) },
+      "pending rows bound by a user's memory rule this fire's profile can't see — left pending",
+    );
+  }
   const classified: Array<ClassifiedOutcome | null> = [];
-  for (const chunk of R.chunk([...pending], CLASSIFIER_CONCURRENCY)) {
+  for (const chunk of R.chunk(classifiable, CLASSIFIER_CONCURRENCY)) {
     const results = await Promise.all(
       chunk.map((p) => {
         const rules = rulesOf(p);
         if (rules === undefined) {
           logger.info({ pendingId: p.id }, "pending row gone before classification — skipped");
-          return null;
-        }
-        if (!deps.seesUserRules && rules.some((r) => r.fromUser)) {
-          logger.info(
-            { pendingId: p.id },
-            "pending row bound by a user's memory rule this fire's profile may not see — left pending",
-          );
           return null;
         }
         return classifyOne(p, rules, schemas, deps);
@@ -170,7 +177,12 @@ export async function classifyPendingMemories(
   );
   const successful = retained.map((c) => c.row);
   const byNetwork = R.countBy(successful, (c) => c.tags.network);
-  return { successful, withheld: withheldOutcomes.map((c) => c.row.id), byNetwork };
+  return {
+    successful,
+    withheld: withheldOutcomes.map((c) => c.row.id),
+    byNetwork,
+    deferredForUnseenRules: deferred.length,
+  };
 }
 
 /**
@@ -257,14 +269,18 @@ export async function drainPendingMemories(
   const pending = await deps.runInTx((tx) => deps.store.getPendingMemories(tx, userId));
   if (pending.length === 0) {
     logger.debug({ userId }, "no pending memories to drain");
-    return { drained: 0, byNetwork: {}, withheld: 0 };
+    return { drained: 0, byNetwork: {}, withheld: 0, deferredForUnseenRules: 0 };
   }
 
-  const { successful, withheld, byNetwork } = await classifyPendingMemories(pending, userId, deps);
+  const { successful, withheld, byNetwork, deferredForUnseenRules } = await classifyPendingMemories(
+    pending,
+    userId,
+    deps,
+  );
 
   if (successful.length === 0 && withheld.length === 0) {
     logger.warn({ userId, pendingCount: pending.length }, "no pending row classified");
-    return { drained: 0, byNetwork: {}, withheld: 0 };
+    return { drained: 0, byNetwork: {}, withheld: 0, deferredForUnseenRules };
   }
 
   if (successful.length > 0) {
@@ -275,11 +291,22 @@ export async function drainPendingMemories(
   );
 
   logger.info(
-    { drained: successful.length, withheld: withheld.length, byNetwork, userId },
+    {
+      drained: successful.length,
+      withheld: withheld.length,
+      deferredForUnseenRules,
+      byNetwork,
+      userId,
+    },
     "pending memory drain complete",
   );
 
-  return { drained: successful.length, byNetwork, withheld: withheld.length };
+  return {
+    drained: successful.length,
+    byNetwork,
+    withheld: withheld.length,
+    deferredForUnseenRules,
+  };
 }
 
 interface ClassifiedOutcome {

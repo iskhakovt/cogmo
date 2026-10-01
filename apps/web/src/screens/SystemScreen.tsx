@@ -169,6 +169,7 @@ function EvolutionDetail({ event }: { event: EvolutionEventEntry }) {
         ) : (
           <>
             <Field label="extracted" value={memories.extracted} />
+            <Field label="skipped, unseen user rule" value={memories.skippedForUnseenRules} />
             <NetworkField byNetwork={memories.byNetwork} />
           </>
         )}
@@ -180,6 +181,7 @@ function EvolutionDetail({ event }: { event: EvolutionEventEntry }) {
           <>
             <Field label="drained" value={drained.drained} />
             <Field label="withheld" value={drained.withheld} />
+            <Field label="deferred, unseen user rule" value={drained.deferredForUnseenRules} />
             <NetworkField byNetwork={drained.byNetwork} />
           </>
         )}

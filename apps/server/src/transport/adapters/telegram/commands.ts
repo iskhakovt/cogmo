@@ -2620,7 +2620,10 @@ function formatEvolutionDigest(
     const ruleDelta = c.extracted + c.reinforced + c.promoted + c.retired;
     const memoryDelta = m.extracted;
     const withheld = e.payload.drained.withheld;
-    const withheldNote = withheld > 0 ? `, ${withheld} withheld` : "";
+    const deferred = e.payload.drained.deferredForUnseenRules;
+    const withheldNote =
+      (withheld > 0 ? `, ${withheld} withheld` : "") +
+      (deferred > 0 ? `, ${deferred} deferred` : "");
     const tag = e.triggeredBy === "manual" ? " [manual]" : "";
     const failed = e.payload.failedPhases ?? [];
     const failedNote = failed.length > 0 ? `; failed: ${failed.join(", ")}` : "";
@@ -2697,21 +2700,36 @@ function formatEvolutionDetail(event: EvolutionEventEntry, now: Date = new Date(
   }
   if (phaseFailed(event, "memories")) {
     lines.push("", `Memories: ${PHASE_FAILED}`);
+  } else if (payload.memories.skippedForUnseenRules > 0) {
+    lines.push(
+      "",
+      "Memories: skipped; a user's memory rule binds it and this profile can't see it",
+    );
   } else {
     lines.push("", `Memories: ${payload.memories.extracted} extracted`);
     for (const [network, count] of Object.entries(payload.memories.byNetwork)) {
       lines.push(`  ${network}: ${count}`);
     }
   }
+  const { deferredForUnseenRules } = payload.drained;
   if (phaseFailed(event, "drain")) {
     lines.push("", `Pending drain: ${PHASE_FAILED}; undrained rows stay pending`);
-  } else if (payload.drained.drained > 0 || payload.drained.withheld > 0) {
+  } else if (
+    payload.drained.drained > 0 ||
+    payload.drained.withheld > 0 ||
+    deferredForUnseenRules > 0
+  ) {
     lines.push("", `Pending drained: ${payload.drained.drained}`);
     for (const [network, count] of Object.entries(payload.drained.byNetwork)) {
       lines.push(`  ${network}: ${count}`);
     }
     if (payload.drained.withheld > 0) {
       lines.push(`  withheld by a memory rule: ${payload.drained.withheld}`);
+    }
+    if (deferredForUnseenRules > 0) {
+      lines.push(
+        `  deferred, a user's memory rule this profile can't see: ${deferredForUnseenRules}`,
+      );
     }
   }
   return lines.join("\n");

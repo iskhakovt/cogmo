@@ -114,9 +114,18 @@ export interface EvolutionEventPayload {
     consolidationNeeded: boolean;
   };
   consolidation: { mergedGroups: number; rulesRemoved: number } | null;
-  memories: { extracted: number; byNetwork: Record<string, number> };
-  /** `withheld`: staged rows a `memory`-category rule forbade, deleted unretained. */
-  drained: { drained: number; byNetwork: Record<string, number>; withheld: number };
+  /** `skippedForUnseenRules`: 1 when a user's memory rule bound a profile that can't see it. */
+  memories: { extracted: number; byNetwork: Record<string, number>; skippedForUnseenRules: number };
+  /**
+   * `withheld`: staged rows a `memory`-category rule forbade, deleted unretained.
+   * `deferredForUnseenRules`: rows left pending for a fire whose profile sees the user's rules.
+   */
+  drained: {
+    drained: number;
+    byNetwork: Record<string, number>;
+    withheld: number;
+    deferredForUnseenRules: number;
+  };
   messageCount: number;
   profileId: string;
   durationMs?: number | undefined;

@@ -458,9 +458,25 @@ describe("runObserver rules", () => {
     expect(promptsOf(provider, "memory extraction engine")).toEqual([]);
     expect(deps.memory.retainBatch).not.toHaveBeenCalled();
     expect(deps.agentStore.deletePendingMemories).not.toHaveBeenCalled();
-    expect(result).toMatchObject({
-      memories: { extracted: 0 },
-      drained: { drained: 0, withheld: 0 },
+    const deferral = {
+      memories: { extracted: 0, skippedForUnseenRules: 1 },
+      drained: { drained: 0, withheld: 0, deferredForUnseenRules: 1 },
+    };
+    expect(result).toMatchObject(deferral);
+    expect(recordedPayload(deps)).toMatchObject(deferral);
+  });
+
+  it("records no deferral on a first-party fire", async () => {
+    const deps = observerDeps({
+      provider: routedProvider(),
+      store: { getMemoryRules: vi.fn().mockResolvedValue([USER_HEALTH_RULE]) },
+    });
+
+    await runObserver(EVENT, exhaustedRetriesStep(), deps);
+
+    expect(recordedPayload(deps)).toMatchObject({
+      memories: { skippedForUnseenRules: 0 },
+      drained: { deferredForUnseenRules: 0 },
     });
   });
 

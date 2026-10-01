@@ -4240,18 +4240,27 @@ describe("DrizzleAgentStore", () => {
           consolidationNeeded: false,
         },
         consolidation: null,
-        memories: { extracted: 3, byNetwork: { world: 1, bank: 2 } },
-        drained: { drained: 0, byNetwork: {}, withheld: 0 },
+        memories: { extracted: 3, byNetwork: { world: 1, bank: 2 }, skippedForUnseenRules: 0 },
+        drained: { drained: 0, byNetwork: {}, withheld: 0, deferredForUnseenRules: 0 },
         messageCount: 12,
         profileId: "11111111-1111-7111-8111-111111111111",
       };
     }
 
-    it("reads a row without retirement or withholding counts as 0 of each", async () => {
+    it("reads a row without retirement, withholding or deferral counts as 0 of each", async () => {
       const { userId, conversationId } = await seedConversation();
-      const { retired: _retired, ...corrections } = samplePayload().corrections;
-      const { withheld: _withheld, ...drained } = samplePayload().drained;
-      const payload = { ...samplePayload(), corrections, drained };
+      const {
+        retired: _retired,
+        outOfScopeContradictionsSkipped: _outOfScope,
+        ...corrections
+      } = samplePayload().corrections;
+      const { skippedForUnseenRules: _skipped, ...memories } = samplePayload().memories;
+      const {
+        withheld: _withheld,
+        deferredForUnseenRules: _deferred,
+        ...drained
+      } = samplePayload().drained;
+      const payload = { ...samplePayload(), corrections, memories, drained };
       await db.execute(sql`
         INSERT INTO evolution_events (conversation_id, user_id, triggered_by, payload)
         VALUES (${conversationId}, ${userId}, 'idle', ${JSON.stringify(payload)}::jsonb)
@@ -4260,7 +4269,10 @@ describe("DrizzleAgentStore", () => {
       const [row] = await tx((trx) => store.listEvolutionEvents(trx, userId));
       const read = expectDefined(row, "older row").payload;
       expect(read.corrections.retired).toBe(0);
+      expect(read.corrections.outOfScopeContradictionsSkipped).toBe(0);
+      expect(read.memories.skippedForUnseenRules).toBe(0);
       expect(read.drained.withheld).toBe(0);
+      expect(read.drained.deferredForUnseenRules).toBe(0);
     });
 
     it("records and lists events newest-first per user", async () => {

@@ -56,6 +56,8 @@ const ConsolidationResultSchema = z.object({
 const MemoryExtractionResultSchema = z.object({
   extracted: z.number().int().nonnegative(),
   byNetwork: z.record(z.string(), z.number().int().nonnegative()),
+  /** Older rows omit it and read as 0. */
+  skippedForUnseenRules: z.number().int().nonnegative().default(0),
 });
 
 const DrainResultSchema = z.object({
@@ -63,6 +65,8 @@ const DrainResultSchema = z.object({
   byNetwork: z.record(z.string(), z.number().int().nonnegative()),
   /** Older rows omit it and read as 0. */
   withheld: z.number().int().nonnegative().default(0),
+  /** Older rows omit it and read as 0. */
+  deferredForUnseenRules: z.number().int().nonnegative().default(0),
 });
 
 export const EvolutionEventPayloadSchema = z.object({

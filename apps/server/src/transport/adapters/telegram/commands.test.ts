@@ -4352,8 +4352,8 @@ describe("handleLearned", () => {
         consolidationNeeded: false,
       },
       consolidation: null,
-      memories: { extracted: overrides?.memories ?? 0, byNetwork: {} },
-      drained: { drained: 0, byNetwork: {}, withheld: 0 },
+      memories: { extracted: overrides?.memories ?? 0, byNetwork: {}, skippedForUnseenRules: 0 },
+      drained: { drained: 0, byNetwork: {}, withheld: 0, deferredForUnseenRules: 0 },
       messageCount: 8,
       profileId: "11111111-1111-7111-8111-111111111111",
     };
@@ -4405,7 +4405,7 @@ describe("handleLearned", () => {
               payload: {
                 ...payload,
                 corrections: { ...payload.corrections, retired: 2 },
-                drained: { ...payload.drained, withheld: 4 },
+                drained: { ...payload.drained, withheld: 4, deferredForUnseenRules: 5 },
               },
               createdAt: new Date("2026-05-30T08:00:00Z"),
             },
@@ -4416,7 +4416,7 @@ describe("handleLearned", () => {
     const ctx = mkCtx();
     await handleLearned(transport, ctx);
     const reply = (ctx.reply.mock.calls[0]?.[0] ?? "") as string;
-    expect(reply).toContain("3 rule change(s), 0 memory write(s), 4 withheld");
+    expect(reply).toContain("3 rule change(s), 0 memory write(s), 4 withheld, 5 deferred");
   });
 
   it("names the failed phases on a digest line, and nothing on a fire without them", async () => {
@@ -4776,6 +4776,8 @@ describe("handleLearned detail rendering", () => {
     durationMs?: number;
     retired?: number;
     withheld?: number;
+    skipped?: number;
+    deferred?: number;
   }) {
     return {
       corrections: {
@@ -4790,8 +4792,13 @@ describe("handleLearned detail rendering", () => {
         consolidationNeeded: false,
       },
       consolidation: null,
-      memories: { extracted: 0, byNetwork: {} },
-      drained: { drained: 0, byNetwork: {}, withheld: overrides.withheld ?? 0 },
+      memories: { extracted: 0, byNetwork: {}, skippedForUnseenRules: overrides.skipped ?? 0 },
+      drained: {
+        drained: 0,
+        byNetwork: {},
+        withheld: overrides.withheld ?? 0,
+        deferredForUnseenRules: overrides.deferred ?? 0,
+      },
       messageCount: 8,
       profileId: "11111111-1111-7111-8111-111111111111",
       ...(overrides.durationMs !== undefined && { durationMs: overrides.durationMs }),
@@ -4826,6 +4833,16 @@ describe("handleLearned detail rendering", () => {
     const quiet = await detailOf(makePayload({}));
     expect(quiet).not.toContain("retired:");
     expect(quiet).not.toContain("Pending drained");
+    expect(quiet).not.toContain("profile can't see");
+  });
+
+  it("shows an extraction skipped and rows deferred for rules the profile can't see", async () => {
+    const reply = await detailOf(makePayload({ skipped: 1, deferred: 3 }));
+    expect(reply).toContain(
+      "Memories: skipped; a user's memory rule binds it and this profile can't see it",
+    );
+    expect(reply).toContain("Pending drained: 0");
+    expect(reply).toContain("  deferred, a user's memory rule this profile can't see: 3");
   });
 
   it("surfaces skipped counters when non-zero", async () => {

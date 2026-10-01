@@ -101,7 +101,12 @@ describe("drainPendingMemories — memory rules", () => {
 
     const result = await drainPendingMemories("user-1", deps);
 
-    expect(result).toEqual({ drained: 1, byNetwork: { world: 1 }, withheld: 1 });
+    expect(result).toEqual({
+      drained: 1,
+      byNetwork: { world: 1 },
+      withheld: 1,
+      deferredForUnseenRules: 0,
+    });
     const items = expectDefined(vi.mocked(deps.memory.retainBatch).mock.calls[0], "retain")[1];
     expect(items.map((i) => i.documentId)).toEqual(["pm-ip"]);
     expect(deps.store.deletePendingMemories).toHaveBeenCalledWith(expect.anything(), [
@@ -128,7 +133,7 @@ describe("drainPendingMemories — memory rules", () => {
 
     const result = await drainPendingMemories("user-1", deps);
 
-    expect(result).toEqual({ drained: 0, byNetwork: {}, withheld: 1 });
+    expect(result).toEqual({ drained: 0, byNetwork: {}, withheld: 1, deferredForUnseenRules: 0 });
     expect(deps.memory.retainBatch).not.toHaveBeenCalled();
     expect(deps.store.deletePendingMemories).toHaveBeenCalledWith(expect.anything(), ["pm-health"]);
   });
@@ -170,7 +175,12 @@ describe("drainPendingMemories — memory rules", () => {
 
     const result = await drainPendingMemories("user-1", deps);
 
-    expect(result).toEqual({ drained: 1, byNetwork: { world: 1 }, withheld: 0 });
+    expect(result).toEqual({
+      drained: 1,
+      byNetwork: { world: 1 },
+      withheld: 0,
+      deferredForUnseenRules: 0,
+    });
     expect(deps.store.getMemoryRules).not.toHaveBeenCalled();
     expect(systemPrompts(deps)[0]).not.toContain("withhold");
   });
@@ -192,12 +202,32 @@ describe("drainPendingMemories — memory rules", () => {
 
     const result = await drainPendingMemories("user-1", deps);
 
-    expect(result).toEqual({ drained: 1, byNetwork: { world: 1 }, withheld: 0 });
+    expect(result).toEqual({
+      drained: 1,
+      byNetwork: { world: 1 },
+      withheld: 0,
+      deferredForUnseenRules: 1,
+    });
     expect(deps.provider.chat).toHaveBeenCalledOnce();
     const [prompt] = systemPrompts(deps);
     expect(prompt).toContain("Never store passwords.");
     expect(prompt).not.toContain(HEALTH_RULE);
     expect(deps.store.deletePendingMemories).toHaveBeenCalledWith(expect.anything(), ["pm-free"]);
+  });
+
+  it("counts the deferred rows when every row waits for a fire that sees the user's rules", async () => {
+    const deps = mockDeps(
+      [pending({ id: "pm-bound", profileId: "profile-a" })],
+      [],
+      [memoryRule(HEALTH_RULE, { profileId: "profile-a" })],
+      false,
+    );
+
+    const result = await drainPendingMemories("user-1", deps);
+
+    expect(result).toEqual({ drained: 0, byNetwork: {}, withheld: 0, deferredForUnseenRules: 1 });
+    expect(deps.provider.chat).not.toHaveBeenCalled();
+    expect(deps.store.deletePendingMemories).not.toHaveBeenCalled();
   });
 
   it("reads again the staging profile of a replayed row that lacks it", async () => {
@@ -231,7 +261,12 @@ describe("drainPendingMemories — memory rules", () => {
       deps,
     );
 
-    expect(result).toEqual({ successful: [], withheld: [], byNetwork: {} });
+    expect(result).toEqual({
+      successful: [],
+      withheld: [],
+      byNetwork: {},
+      deferredForUnseenRules: 0,
+    });
     expect(deps.provider.chat).not.toHaveBeenCalled();
   });
 });
@@ -242,7 +277,7 @@ describe("drainPendingMemories", () => {
 
     const result = await drainPendingMemories("user-1", deps);
 
-    expect(result).toEqual({ drained: 0, byNetwork: {}, withheld: 0 });
+    expect(result).toEqual({ drained: 0, byNetwork: {}, withheld: 0, deferredForUnseenRules: 0 });
     expect(deps.memory.retainBatch).not.toHaveBeenCalled();
     expect(deps.store.deletePendingMemories).not.toHaveBeenCalled();
     expect(deps.provider.chat).not.toHaveBeenCalled();
@@ -401,7 +436,7 @@ describe("drainPendingMemories", () => {
 
     const result = await drainPendingMemories("user-1", deps);
 
-    expect(result).toEqual({ drained: 0, byNetwork: {}, withheld: 0 });
+    expect(result).toEqual({ drained: 0, byNetwork: {}, withheld: 0, deferredForUnseenRules: 0 });
     expect(deps.memory.retainBatch).not.toHaveBeenCalled();
     expect(deps.store.deletePendingMemories).not.toHaveBeenCalled();
   });

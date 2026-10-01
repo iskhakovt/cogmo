@@ -301,27 +301,19 @@ export async function runObserver(
   const memories = await settlePhase(
     "memories",
     conversationId,
-    { extracted: 0, byNetwork: {} },
+    { extracted: 0, byNetwork: {}, skippedForUnseenRules: 0 },
     () =>
       step.run("extract-memories", async () => {
         const memoryRules = await deps.runInTx((tx) =>
           agentStore.getMemoryRules(tx, { profileIds: [conv.profileId], userId: conv.userId }),
         );
-        // A user's rule binds this transcript, but its model may not see it:
-        // extract nothing rather than store what the rule forbids.
-        if (!ruleScope.seesUserRules && memoryRules.some((r) => r.fromUser)) {
-          logger.info(
-            { conversationId, profileId: conv.profileId },
-            "observer: memory extraction skipped — a user's memory rule binds a third-party profile's transcript",
-          );
-          return { extracted: 0, byNetwork: {} };
-        }
         return extractMemories(history, conv.userId, profile.profileClass, {
           provider,
           model,
           memory: deps.memory,
           customCompartments,
-          memoryRules: memoryRules.map((r) => r.rule),
+          memoryRules,
+          seesUserRules: ruleScope.seesUserRules,
         });
       }),
   );
@@ -336,14 +328,16 @@ export async function runObserver(
   const drain = await settlePhase(
     "drain",
     conversationId,
-    { drained: 0, byNetwork: {}, withheld: 0 },
+    { drained: 0, byNetwork: {}, withheld: 0, deferredForUnseenRules: 0 },
     async (): Promise<DrainPendingResult> => {
       const pending = await step.run("load-pending-memories", async () => {
         return deps.runInTx((tx) =>
           agentStore.getPendingMemories(tx, conv.userId, PENDING_DRAIN_BATCH_SIZE),
         );
       });
-      if (pending.length === 0) return { drained: 0, byNetwork: {}, withheld: 0 };
+      if (pending.length === 0) {
+        return { drained: 0, byNetwork: {}, withheld: 0, deferredForUnseenRules: 0 };
+      }
 
       const classified = await step.run("classify-pending-memories", async () => {
         return classifyPendingMemories(pending, conv.userId, {
@@ -356,10 +350,12 @@ export async function runObserver(
         });
       });
       const { successful } = classified;
-      // A classification memoized before results carried `withheld` replays without it.
+      // A classification memoized before results carried `withheld` or
+      // `deferredForUnseenRules` replays without them.
       const withheld = classified.withheld ?? [];
+      const deferredForUnseenRules = classified.deferredForUnseenRules ?? 0;
       if (successful.length === 0 && withheld.length === 0) {
-        return { drained: 0, byNetwork: {}, withheld: 0 };
+        return { drained: 0, byNetwork: {}, withheld: 0, deferredForUnseenRules };
       }
 
       // Each row carries its own staging profile's class (denormalised
@@ -384,6 +380,7 @@ export async function runObserver(
         drained: successful.length,
         byNetwork: classified.byNetwork,
         withheld: withheld.length,
+        deferredForUnseenRules,
       };
     },
   );

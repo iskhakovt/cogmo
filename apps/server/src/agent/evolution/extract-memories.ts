@@ -13,6 +13,7 @@ import { chatTyped } from "../../llm/typed.js";
 import type { Message } from "../../llm/types.js";
 import { logger } from "../../logger.js";
 import type { MemoryProvider, RetainBatchItem } from "../../memory/provider.js";
+import type { MemoryRule } from "../store/index.js";
 import { formatTranscript } from "./extract-corrections.js";
 import {
   buildMemoryExtractionPrompt,
@@ -31,13 +32,28 @@ export interface MemoryExtractionDeps {
    */
   customCompartments: ReadonlyArray<CompartmentDefinition>;
   /** The live `memory`-category rules the conversation's profile sees; extraction stores nothing one forbids. */
-  memoryRules: ReadonlyArray<string>;
+  memoryRules: ReadonlyArray<MemoryRule>;
+  /**
+   * Whether the conversation's profile, whose model extracts, sees the user's
+   * instruction rules (`admitsFirstParty`). When it doesn't and one of the
+   * user's memory rules binds the transcript, extraction is skipped rather
+   * than store what that rule may forbid.
+   */
+  seesUserRules: boolean;
 }
 
 export interface MemoryExtractionResult {
   extracted: number;
   byNetwork: Record<string, number>;
+  /** 1 when extraction was skipped for a user's memory rule the profile can't see, else 0. */
+  skippedForUnseenRules: number;
 }
+
+const NOTHING_EXTRACTED: MemoryExtractionResult = {
+  extracted: 0,
+  byNetwork: {},
+  skippedForUnseenRules: 0,
+};
 
 /**
  * Extract facts from a conversation transcript and retain them to memory.
@@ -59,7 +75,15 @@ export async function extractMemories(
 
   if (transcript.trim().length === 0) {
     logger.debug("empty transcript — skipping memory extraction");
-    return { extracted: 0, byNetwork: {} };
+    return { ...NOTHING_EXTRACTED, byNetwork: {} };
+  }
+
+  if (!deps.seesUserRules && deps.memoryRules.some((r) => r.fromUser)) {
+    logger.info(
+      { bankId },
+      "memory extraction skipped — a user's memory rule binds a profile that can't see it",
+    );
+    return { ...NOTHING_EXTRACTED, byNetwork: {}, skippedForUnseenRules: 1 };
   }
 
   const customNames = deps.customCompartments.map((c) => c.name);
@@ -69,7 +93,10 @@ export async function extractMemories(
     ({ data } = await chatTyped({
       provider: deps.provider,
       model: deps.model,
-      system: buildMemoryExtractionPrompt(deps.customCompartments, deps.memoryRules),
+      system: buildMemoryExtractionPrompt(
+        deps.customCompartments,
+        deps.memoryRules.map((r) => r.rule),
+      ),
       messages: [{ role: "user", content: transcript }],
       schema,
       name: "memory-extraction",
@@ -77,12 +104,12 @@ export async function extractMemories(
     }));
   } catch (err) {
     logger.warn({ err, bankId }, "memory extraction failed — skipping");
-    return { extracted: 0, byNetwork: {} };
+    return { ...NOTHING_EXTRACTED, byNetwork: {} };
   }
 
   if (data.memories.length === 0) {
     logger.debug("no memories extracted from transcript");
-    return { extracted: 0, byNetwork: {} };
+    return { ...NOTHING_EXTRACTED, byNetwork: {} };
   }
 
   const items: RetainBatchItem[] = data.memories.map((mem) => ({
@@ -109,5 +136,5 @@ export async function extractMemories(
 
   logger.info({ extracted: data.memories.length, byNetwork, bankId }, "memory extraction complete");
 
-  return { extracted: data.memories.length, byNetwork };
+  return { extracted: data.memories.length, byNetwork, skippedForUnseenRules: 0 };
 }
