@@ -30,10 +30,8 @@ export async function stepConfigureSkillsRemote(deps: WizardDeps): Promise<void>
   const codingStore = new DrizzleCodingStore();
 
   // Read local state once. Direction (publish vs. adopt) is determined by
-  // this; prompts use it for human-readable text. Industry pattern is
-  // one-directional with explicit mode — auto-detect bidirectional transfer
-  // surprised operators in the original Option-A design and was rejected
-  // in code review.
+  // this; prompts use it for human-readable text. Transfer is one-directional
+  // with an explicit mode, never auto-detected in both directions.
   const localMainSha = await readLocalMainSha(skillsRepoPath);
 
   // If origin is already attached, offer keep / replace. Keep just syncs

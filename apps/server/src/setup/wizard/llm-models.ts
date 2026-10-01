@@ -6,11 +6,9 @@
 import * as p from "@clack/prompts";
 import { addModelRouting } from "../../agent/provider/add-model-routing.js";
 import { type DiscoveredModel, discoverModels } from "../../agent/provider/discover-models.js";
-import type { ProviderType } from "../providers.js";
 import { cancelGuard, WizardCancelled, type WizardDeps } from "./step.js";
 
 interface ProviderRegistrationContext {
-  providerType: ProviderType;
   adapterType: "anthropic" | "openai_compatible";
   baseUrl: string;
   apiKey: string;
@@ -36,21 +34,13 @@ export async function stepAddModelsForProvider(
 
     await registerModelForProvider(deps, ctx, picked);
 
-    if (i === 0) {
-      // First model is required for the wizard to be useful. Default-no
-      // beyond that — bulk additions are still possible via the CLI.
-      const another = await p.confirm({
-        message: `Add another model for "${ctx.providerLabel}"?`,
-        initialValue: false,
-      });
-      if (!cancelGuard(another)) break;
-    } else {
-      const another = await p.confirm({
-        message: "Add another?",
-        initialValue: false,
-      });
-      if (!cancelGuard(another)) break;
-    }
+    // First model is required for the wizard to be useful. Default-no
+    // beyond that — bulk additions are still possible via the CLI.
+    const another = await p.confirm({
+      message: i === 0 ? `Add another model for "${ctx.providerLabel}"?` : "Add another?",
+      initialValue: false,
+    });
+    if (!cancelGuard(another)) break;
   }
 }
 
@@ -86,12 +76,9 @@ export async function stepAddModelToExisting(
     p.log.error(`Secret for provider "${row.name}" not found. Re-run setup.`);
     return;
   }
-  const adapterType = (full.type === "anthropic" ? "anthropic" : "openai_compatible") as
-    | "anthropic"
-    | "openai_compatible";
+  const adapterType = full.type === "anthropic" ? "anthropic" : "openai_compatible";
   const baseUrl = full.baseUrl ?? "";
   await stepAddModelsForProvider(deps, {
-    providerType: "custom",
     adapterType,
     baseUrl,
     apiKey,
@@ -175,13 +162,7 @@ async function pickModelInteractive(
   return match ?? null;
 }
 
-/**
- * Resolve limits for a picked model and insert the routing row. Prompts
- * for explicit limits only when discovery didn't include them — the
- * resolver still has the LiteLLM bundled snapshot to fall through to, and
- * the operator can leave the prompts at their defaults if they don't
- * care.
- */
+/** Insert the routing row for a picked model, with whatever limits discovery reported. */
 async function registerModelForProvider(
   deps: WizardDeps,
   ctx: ProviderRegistrationContext,

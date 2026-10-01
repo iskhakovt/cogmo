@@ -234,9 +234,8 @@ function buildTtsProbe(choice: TtsChoice): TtsProvider {
  * TTS supports OpenAI, OpenAI-compatible (any provider that serves
  * `/v1/audio/speech`, e.g. self-hosted relays), and ElevenLabs. STT
  * supports OpenAI and OpenAI-compatible (Groq's `/v1/audio/transcriptions`
- * is a common pick). Each direction is configured independently — the
- * historical "one key for both" shortcut is offered only when the provider
- * type and base URL match. Config takes effect on the next message; no
+ * is a common pick). Each direction is configured independently — a shared
+ * key is offered only when the provider type and base URL match. Config takes effect on the next message; no
  * restart required (resolver is hot-reloaded).
  */
 export async function stepConfigureVoice(deps: WizardDeps): Promise<void> {
@@ -320,9 +319,8 @@ export async function stepConfigureVoice(deps: WizardDeps): Promise<void> {
   // secret's `description` accurately names its provider.
   const reusedSecret =
     tts.apiKey === stt.apiKey && tts.type === stt.type && tts.baseURL === stt.baseURL;
-  // Naming preserves backwards compatibility with the historical single-key
-  // setup: when both directions share an OpenAI key, keep `openai_voice_key`
-  // so existing rows aren't orphaned by a rename.
+  // Both directions sharing an OpenAI key store it as `openai_voice_key`, the
+  // name existing single-key deployments already hold.
   const ttsSecretName =
     reusedSecret && tts.type === "openai" && stt.type === "openai"
       ? VOICE_SECRET_NAME

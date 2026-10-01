@@ -117,7 +117,7 @@ export async function stepConfigureProvider(deps: WizardDeps): Promise<void> {
 
   const adapterType = providerType === "anthropic" ? "anthropic" : "openai_compatible";
   if (adapterType === "openai_compatible" && !baseUrl) {
-    throw new Error(`Base URL required for ${String(providerType)} but not set`);
+    throw new Error(`Base URL required for ${providerType} but not set`);
   }
 
   // Validate + persist via the shared domain function, so this code path is
@@ -129,13 +129,13 @@ export async function stepConfigureProvider(deps: WizardDeps): Promise<void> {
   const { providerId, validation } = await retryPrompt(
     () =>
       addProvider(deps, {
-        name: providerType as string,
+        name: providerType,
         type: adapterType,
         ...(baseUrl && { baseUrl }),
         apiKey,
         ...(cacheDialect && { cacheDialect }),
       }),
-    `add provider "${String(providerType)}"`,
+    `add provider "${providerType}"`,
   );
 
   if (!validation.valid) {
@@ -150,30 +150,26 @@ export async function stepConfigureProvider(deps: WizardDeps): Promise<void> {
   // operator can add multiple models in one wizard pass; CLI covers the
   // post-setup case.
   await stepAddModelsForProvider(deps, {
-    providerType,
     adapterType,
     baseUrl: baseUrl ?? "",
     apiKey,
     providerId,
-    providerLabel: providerType as string,
+    providerLabel: providerType,
   });
 
-  p.log.success(`Provider "${String(providerType)}" configured.`);
+  p.log.success(`Provider "${providerType}" configured.`);
 }
 
 /**
- * Wrap an external-API call with `retry / skip / abort` prompts on
- * failure. `skip` returns the failure as a rejected promise so the
- * caller's catch handler can decide what to do; most call sites should
- * abort entirely on skip (treat the operator's "skip" as "this provider
- * isn't ready").
+ * Wrap an external-API call with `retry / abort` prompts on failure. Abort
+ * throws `WizardCancelled`, ending the setup run.
  */
 async function retryPrompt<T>(fn: () => Promise<T>, label: string): Promise<T> {
   for (;;) {
     try {
       return await fn();
     } catch (err) {
-      p.log.error(`Failed to ${label}: ${(err as Error).message}`);
+      p.log.error(`Failed to ${label}: ${err instanceof Error ? err.message : String(err)}`);
       const next = await p.select({
         message: "What would you like to do?",
         options: [
