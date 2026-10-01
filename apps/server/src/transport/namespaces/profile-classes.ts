@@ -1,4 +1,5 @@
 import { err, ok, type Result } from "neverthrow";
+import { match } from "ts-pattern";
 import { IDENTITY_BLOCK_KEY } from "../../agent/core-memory/scope.js";
 import type { ProfileClass } from "../../agent/store/index.js";
 import type { TransportError } from "../transport-error.js";
@@ -65,14 +66,19 @@ export function createProfileClasses(deps: TransportContext): ProfileClassesName
           name: input.name,
           description: input.description,
         });
-        if (created.isOk()) return ok(created.value);
-        const e = created.error;
-        switch (e.kind) {
-          case "invalid_name":
-            return err({ code: "profile_class_name_invalid" as const, name: e.name });
-          case "profile_class_name_taken":
-            return err({ code: "profile_class_name_taken" as const, name: e.name });
-        }
+        return created.mapErr((e) =>
+          match(e)
+            .returnType<TransportError>()
+            .with({ kind: "invalid_name" }, ({ name }) => ({
+              code: "profile_class_name_invalid",
+              name,
+            }))
+            .with({ kind: "profile_class_name_taken" }, ({ name }) => ({
+              code: "profile_class_name_taken",
+              name,
+            }))
+            .exhaustive(),
+        );
       });
     },
 

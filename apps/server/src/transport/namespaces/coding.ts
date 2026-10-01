@@ -1,5 +1,6 @@
 import type { Inngest } from "inngest";
 import { err, ok, type Result } from "neverthrow";
+import { match } from "ts-pattern";
 import { planGateEmission } from "../../agent/coding/plan-gate.js";
 import type { CodingStore } from "../../agent/coding/store/index.js";
 import type { TransportError } from "../transport-error.js";
@@ -70,40 +71,33 @@ export function createCoding(
           id: `plan-approved-${taskId}`,
         });
       }
-      switch (result.kind) {
-        case "approved":
-          return ok({ taskId });
-        case "already_approved":
+      return (
+        match(result)
+          .returnType<Result<{ taskId: string }, TransportError>>()
+          .with({ kind: "approved" }, () => ok({ taskId }))
           // The toast still reads "already approved" — accurate whether
           // the emit above was the first one or a recovery.
-          return err({ code: "task_already_approved" as const, taskId });
-        case "not_pending":
-          return err({
-            code: "task_not_pending_approval" as const,
-            taskId,
-            status: result.status,
-          });
-        case "not_found":
-          return err({ code: "task_not_found" as const, taskId });
-      }
+          .with({ kind: "already_approved" }, () => err({ code: "task_already_approved", taskId }))
+          .with({ kind: "not_pending" }, ({ status }) =>
+            err({ code: "task_not_pending_approval", taskId, status }),
+          )
+          .with({ kind: "not_found" }, () => err({ code: "task_not_found", taskId }))
+          .exhaustive()
+      );
     },
     async cancelTask(taskId, tapperPlatformHandle, reason) {
       if (!codingStore) return err({ code: "sandbox_disabled" as const });
       const identityCheck = await checkTaskOwnership(taskId, tapperPlatformHandle);
       if (identityCheck.isErr()) return err(identityCheck.error);
       const result = await runInTx((tx) => codingStore.cancelTaskIfActive(tx, taskId, reason));
-      switch (result.kind) {
-        case "cancelled":
-          return ok({ taskId });
-        case "already_terminal":
-          return err({
-            code: "task_already_terminal" as const,
-            taskId,
-            status: result.status,
-          });
-        case "not_found":
-          return err({ code: "task_not_found" as const, taskId });
-      }
+      return match(result)
+        .returnType<Result<{ taskId: string }, TransportError>>()
+        .with({ kind: "cancelled" }, () => ok({ taskId }))
+        .with({ kind: "already_terminal" }, ({ status }) =>
+          err({ code: "task_already_terminal", taskId, status }),
+        )
+        .with({ kind: "not_found" }, () => err({ code: "task_not_found", taskId }))
+        .exhaustive();
     },
   };
 

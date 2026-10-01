@@ -1,4 +1,5 @@
 import { err, ok, type Result } from "neverthrow";
+import { match } from "ts-pattern";
 import type { SkillDeployOrigin, SkillRunner } from "../../skills/runner.js";
 import type { SkillRiskTier, SkillStore, SkillTier } from "../../skills/store/index.js";
 import type { TransportError } from "../transport-error.js";
@@ -171,23 +172,13 @@ export function createSkills(
       if (identityCheck.isErr()) return err(identityCheck.error);
       if (!skillRunner) return err({ code: "skills_disabled" as const });
       const result = await skillRunner.deregister({ name });
-      switch (result.kind) {
-        case "deregistered":
-          return ok({ name: result.name });
-        case "rejected":
-          switch (result.reason) {
-            case "not_found":
-              return err({ code: "skill_not_found" as const, name: result.name });
-            default: {
-              // Inline-never guard mirrors `runner.ts` /
-              // `sandbox/factory.ts`. TS errors here when a new
-              // DeregisterFailureReason variant is added without a
-              // matching case.
-              const _exhaustive: never = result.reason;
-              throw new Error(`unhandled deregister reason: ${_exhaustive as string}`);
-            }
-          }
-      }
+      return match(result)
+        .returnType<Result<{ name: string }, TransportError>>()
+        .with({ kind: "deregistered" }, (r) => ok({ name: r.name }))
+        .with({ kind: "rejected", reason: "not_found" }, (r) =>
+          err({ code: "skill_not_found", name: r.name }),
+        )
+        .exhaustive();
     },
 
     async enable(platformUserHandle, name, platformAddress) {
@@ -195,32 +186,25 @@ export function createSkills(
       if (!origin) return err({ code: "identity_rejected" as const });
       if (!skillRunner) return err({ code: "skills_disabled" as const });
       const result = await skillRunner.enable({ name, origin });
-      switch (result.kind) {
-        case "enabled":
-          return ok({
-            name: result.name,
+      return match(result)
+        .returnType<
+          Result<{ name: string; alreadyEnabled: boolean; schedule?: string }, TransportError>
+        >()
+        .with({ kind: "enabled" }, (r) =>
+          ok({
+            name: r.name,
             alreadyEnabled: false,
-            ...(result.schedule !== null && { schedule: result.schedule }),
-          });
-        case "already_enabled":
-          return ok({ name: result.name, alreadyEnabled: true });
-        case "rejected":
-          switch (result.reason) {
-            case "not_found":
-              return err({ code: "skill_not_found" as const, name: result.name });
-            case "no_live_deploy":
-              return err({ code: "skill_no_live_deploy" as const, name: result.name });
-            default: {
-              // Inline-never exhaustiveness guard — TS errors here if
-              // a new EnableFailureReason variant is added without a
-              // matching case. Mirrors `runner.ts` /
-              // `sandbox/factory.ts`. Unreachable at runtime; the
-              // throw is a defence-in-depth fallback.
-              const _exhaustive: never = result.reason;
-              throw new Error(`unhandled enable reason: ${_exhaustive as string}`);
-            }
-          }
-      }
+            ...(r.schedule !== null && { schedule: r.schedule }),
+          }),
+        )
+        .with({ kind: "already_enabled" }, (r) => ok({ name: r.name, alreadyEnabled: true }))
+        .with({ kind: "rejected", reason: "not_found" }, (r) =>
+          err({ code: "skill_not_found", name: r.name }),
+        )
+        .with({ kind: "rejected", reason: "no_live_deploy" }, (r) =>
+          err({ code: "skill_no_live_deploy", name: r.name }),
+        )
+        .exhaustive();
     },
   };
 

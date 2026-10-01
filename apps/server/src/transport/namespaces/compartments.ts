@@ -1,4 +1,5 @@
 import { err, ok, type Result } from "neverthrow";
+import { match } from "ts-pattern";
 import type { CustomCompartment } from "../../agent/store/index.js";
 import type { TransportError } from "../transport-error.js";
 import type { TransportContext } from "./context.js";
@@ -42,22 +43,28 @@ export function createCompartments(deps: TransportContext): CompartmentsNamespac
           name: input.name,
           description: input.description,
         });
-        if (created.isOk()) return ok(created.value);
-        const e = created.error;
-        switch (e.kind) {
-          case "invalid_name":
-            return err({ code: "compartment_name_invalid" as const, name: e.name });
-          case "compartment_name_reserved":
-            return err({ code: "compartment_name_reserved" as const, name: e.name });
-          case "compartment_cap_exceeded":
-            return err({
-              code: "compartment_cap_exceeded" as const,
-              limit: e.limit,
-              current: e.current,
-            });
-          case "compartment_name_taken":
-            return err({ code: "compartment_name_taken" as const, name: e.name });
-        }
+        return created.mapErr((e) =>
+          match(e)
+            .returnType<TransportError>()
+            .with({ kind: "invalid_name" }, ({ name }) => ({
+              code: "compartment_name_invalid",
+              name,
+            }))
+            .with({ kind: "compartment_name_reserved" }, ({ name }) => ({
+              code: "compartment_name_reserved",
+              name,
+            }))
+            .with({ kind: "compartment_cap_exceeded" }, ({ limit, current }) => ({
+              code: "compartment_cap_exceeded",
+              limit,
+              current,
+            }))
+            .with({ kind: "compartment_name_taken" }, ({ name }) => ({
+              code: "compartment_name_taken",
+              name,
+            }))
+            .exhaustive(),
+        );
       });
     },
 

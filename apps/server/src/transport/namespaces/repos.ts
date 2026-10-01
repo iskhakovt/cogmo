@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { err, ok, type Result } from "neverthrow";
+import { match } from "ts-pattern";
 import type { CodingStore } from "../../agent/coding/store/index.js";
 import type { Transactor } from "../../db/index.js";
 import { runGit, withGitAskpass } from "../../secrets/git-askpass.js";
@@ -234,17 +235,19 @@ export function createRepos(deps: {
       const repo = await runInTx((tx) => codingStore.getRepoByName(tx, name));
       if (!repo) return err({ code: "repo_not_found" as const, name });
       const result = await runInTx((tx) => codingStore.removeRepoIfIdle(tx, repo.id));
-      switch (result.kind) {
-        case "deleted":
-          return ok(undefined);
-        case "in_use":
-          return err({ code: "repo_in_use" as const, name, activeTasks: result.activeTasks });
-        case "not_found":
+      return (
+        match(result)
+          .returnType<Result<void, TransportError>>()
+          .with({ kind: "deleted" }, () => ok(undefined))
+          .with({ kind: "in_use" }, ({ activeTasks }) =>
+            err({ code: "repo_in_use", name, activeTasks }),
+          )
           // Race window: repo existed at getRepoByName but was deleted
           // between the lookup and the atomic check. Surface as
           // not_found rather than synthesizing a stale success.
-          return err({ code: "repo_not_found" as const, name });
-      }
+          .with({ kind: "not_found" }, () => err({ code: "repo_not_found", name }))
+          .exhaustive()
+      );
     },
   };
 }
