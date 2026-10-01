@@ -201,7 +201,7 @@ interface McpConnection {
 }
 ```
 
-Tool naming: **`mcp__<server>__<tool>`** (Claude Code convention). Stable, glob-friendly, escape-safe through Telegram (already handled by [src/transport/adapters/telegram/index.ts](../../src/transport/adapters/telegram/index.ts) plain-text fallback).
+Tool naming: **`mcp__<server>__<tool>`** (Claude Code convention). Stable, glob-friendly, escape-safe through Telegram (already handled by [src/transport/adapters/telegram/adapter.ts](../../apps/server/src/transport/adapters/telegram/adapter.ts) plain-text fallback).
 
 ## Lifecycle
 

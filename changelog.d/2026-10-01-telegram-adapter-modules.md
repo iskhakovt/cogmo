@@ -1,0 +1,6 @@
+The Telegram adapter is split into one module per concern, and two download bugs are fixed.
+
+- **Modules.** `commands.ts` (~2.8k lines) becomes one module per command family under `commands/` (sessions, conversation, profile, classes, compartments, model, repo, mcp, skills, schedules, evolution, keyboard callbacks), with shared reply and lookup helpers. `setup()` (~700 lines) is ~50 lines of wiring over `adapter.ts`, `command-routes.ts`, `callback-routes.ts`, `message-handlers.ts`, `inbound-dispatch.ts` and `inngest-functions.ts`. Command text and handler registration order are unchanged; tests pin the order.
+- **Self-hosted Bot API servers.** File downloads went to `api.telegram.org` regardless of the channel's `apiRoot`. They use the channel's server, and an empty `apiRoot` falls back to Telegram's for both the bot and downloads. A local-mode server's absolute `file_path` fails as `local_path` naming the path rather than an opaque HTTP error.
+- **Credentials.** `setup()` validates the channel credentials with Zod and names a missing or malformed field before building the bot.
+- File downloads return their expected failures as a `Result`. Test helpers live under `src/test/telegram/`.
