@@ -6,23 +6,20 @@
  * mocked.
  */
 
-import type { Inngest } from "inngest";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
-import type { AgentStore } from "../agent/store/index.js";
-import type { Transactor } from "../db/index.js";
-import { inboundArrived } from "../inngest/events.js";
+import type { AgentStore } from "../../agent/store/index.js";
+import type { Transactor } from "../../db/index.js";
 import type {
   DeregisterResult,
   EnableResult,
   SkillRunner,
   SkillSummary,
-} from "../skills/runner.js";
-import type { SkillDeployRow, SkillStore } from "../skills/store/index.js";
-import { mockAgentStore, mockTransportStore } from "../test/factories.js";
-import type { AttachmentStore } from "./attachment-store.js";
-import type { Session, TransportStore } from "./store/index.js";
-import { createTransport } from "./transport.js";
+} from "../../skills/runner.js";
+import type { SkillDeployRow, SkillStore } from "../../skills/store/index.js";
+import { mockAgentStore, mockTransportStore } from "../../test/factories.js";
+import type { Session, TransportStore } from "../store/index.js";
+import { createSkills } from "./skills.js";
 
 const FAKE_TX = { __mockTx: true } as never;
 const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
@@ -69,28 +66,19 @@ function conversationOf(userId: string, profileId: string) {
   };
 }
 
-function makeTransport(opts: {
+function makeSkills(opts: {
   runner?: SkillRunner;
   store?: SkillStore;
   agentStore?: AgentStore;
   transportStore?: TransportStore;
 }) {
-  const { runner, store } = opts;
-  const inngest = mock<Inngest>();
-  inngest.send.mockResolvedValue({ ids: [] });
-  return createTransport({
+  return createSkills({
     channelId: "ch-1",
-    defaultUserId: USER_ID,
-    defaultProfileId: "019d0000-0000-7000-8000-000000000099",
     runInTx: fakeRunInTx,
     transportStore: opts.transportStore ?? makeTransportStore(),
     agentStore: opts.agentStore ?? mockAgentStore(),
-    ...(runner !== undefined && { skillRunner: runner }),
-    ...(store !== undefined && { skillStore: store }),
-    inngest,
-    inboundArrived,
-    attachments: mock<AttachmentStore>(),
-    idleTimeoutMs: 60_000,
+    skillRunner: opts.runner,
+    skillStore: opts.store,
   });
 }
 
@@ -113,9 +101,9 @@ describe("Transport.skills.list", () => {
         gitSha: "222",
       } satisfies SkillSummary,
     ]);
-    const transport = makeTransport({ runner, store: mock<SkillStore>() });
+    const skills = makeSkills({ runner, store: mock<SkillStore>() });
 
-    const result = await transport.skills.list(KNOWN_HANDLE);
+    const result = await skills.list(KNOWN_HANDLE);
     expect(result.isOk()).toBe(true);
     expect(result._unsafeUnwrap()).toEqual([
       { name: "alpha", tier: "wasm", riskTier: "auto", disabled: false, gitSha: "111" },
@@ -124,18 +112,18 @@ describe("Transport.skills.list", () => {
   });
 
   it("rejects unknown caller with identity_rejected", async () => {
-    const transport = makeTransport({
+    const skills = makeSkills({
       runner: mock<SkillRunner>(),
       store: mock<SkillStore>(),
     });
-    const result = await transport.skills.list(UNKNOWN_HANDLE);
+    const result = await skills.list(UNKNOWN_HANDLE);
     expect(result.isErr()).toBe(true);
     expect(result._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
   });
 
   it("returns skills_disabled when runner is unwired", async () => {
-    const transport = makeTransport({});
-    const result = await transport.skills.list(KNOWN_HANDLE);
+    const skills = makeSkills({});
+    const result = await skills.list(KNOWN_HANDLE);
     expect(result._unsafeUnwrapErr()).toEqual({ code: "skills_disabled" });
   });
 });
@@ -147,9 +135,9 @@ describe("Transport.skills.disable", () => {
       kind: "deregistered",
       name: "echo",
     } satisfies DeregisterResult);
-    const transport = makeTransport({ runner, store: mock<SkillStore>() });
+    const skills = makeSkills({ runner, store: mock<SkillStore>() });
 
-    const result = await transport.skills.disable(KNOWN_HANDLE, "echo");
+    const result = await skills.disable(KNOWN_HANDLE, "echo");
     expect(result._unsafeUnwrap()).toEqual({ name: "echo" });
     expect(runner.deregister).toHaveBeenCalledWith({ name: "echo" });
   });
@@ -161,17 +149,17 @@ describe("Transport.skills.disable", () => {
       name: "ghost",
       reason: "not_found",
     } satisfies DeregisterResult);
-    const transport = makeTransport({ runner, store: mock<SkillStore>() });
+    const skills = makeSkills({ runner, store: mock<SkillStore>() });
 
-    const result = await transport.skills.disable(KNOWN_HANDLE, "ghost");
+    const result = await skills.disable(KNOWN_HANDLE, "ghost");
     expect(result._unsafeUnwrapErr()).toEqual({ code: "skill_not_found", name: "ghost" });
   });
 
   it("rejects unknown caller before calling runner", async () => {
     const runner = mock<SkillRunner>();
-    const transport = makeTransport({ runner, store: mock<SkillStore>() });
+    const skills = makeSkills({ runner, store: mock<SkillStore>() });
 
-    const result = await transport.skills.disable(UNKNOWN_HANDLE, "echo");
+    const result = await skills.disable(UNKNOWN_HANDLE, "echo");
     expect(result._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
     expect(runner.deregister).not.toHaveBeenCalled();
   });
@@ -184,11 +172,9 @@ describe("Transport.skills.disable", () => {
     // 500-class throws upstream."
     const runner = mock<SkillRunner>();
     runner.deregister.mockRejectedValue(new Error("connection refused"));
-    const transport = makeTransport({ runner, store: mock<SkillStore>() });
+    const skills = makeSkills({ runner, store: mock<SkillStore>() });
 
-    await expect(transport.skills.disable(KNOWN_HANDLE, "echo")).rejects.toThrow(
-      /connection refused/,
-    );
+    await expect(skills.disable(KNOWN_HANDLE, "echo")).rejects.toThrow(/connection refused/);
   });
 });
 
@@ -201,9 +187,9 @@ describe("Transport.skills.enable", () => {
       gitSha: "abc",
       schedule: "0 9 * * *",
     } satisfies EnableResult);
-    const transport = makeTransport({ runner, store: mock<SkillStore>() });
+    const skills = makeSkills({ runner, store: mock<SkillStore>() });
 
-    const result = await transport.skills.enable(KNOWN_HANDLE, "echo", CHAT);
+    const result = await skills.enable(KNOWN_HANDLE, "echo", CHAT);
     expect(result._unsafeUnwrap()).toEqual({
       name: "echo",
       alreadyEnabled: false,
@@ -224,14 +210,14 @@ describe("Transport.skills.enable", () => {
     const agentStore = mockAgentStore({
       getConversation: vi.fn().mockResolvedValue(conversationOf(USER_ID, "profile-9")),
     });
-    const transport = makeTransport({
+    const skills = makeSkills({
       runner,
       store: mock<SkillStore>(),
       transportStore,
       agentStore,
     });
 
-    await transport.skills.enable(KNOWN_HANDLE, "echo", CHAT);
+    await skills.enable(KNOWN_HANDLE, "echo", CHAT);
 
     expect(runner.enable).toHaveBeenCalledWith({
       name: "echo",
@@ -250,9 +236,9 @@ describe("Transport.skills.enable", () => {
       name: "echo",
       gitSha: "abc",
     } satisfies EnableResult);
-    const transport = makeTransport({ runner, store: mock<SkillStore>() });
+    const skills = makeSkills({ runner, store: mock<SkillStore>() });
 
-    const result = await transport.skills.enable(KNOWN_HANDLE, "echo", CHAT);
+    const result = await skills.enable(KNOWN_HANDLE, "echo", CHAT);
     expect(result._unsafeUnwrap()).toEqual({ name: "echo", alreadyEnabled: true });
   });
 
@@ -263,9 +249,9 @@ describe("Transport.skills.enable", () => {
       name: "ghost",
       reason: "not_found",
     } satisfies EnableResult);
-    const transport = makeTransport({ runner, store: mock<SkillStore>() });
+    const skills = makeSkills({ runner, store: mock<SkillStore>() });
 
-    const result = await transport.skills.enable(KNOWN_HANDLE, "ghost", CHAT);
+    const result = await skills.enable(KNOWN_HANDLE, "ghost", CHAT);
     expect(result._unsafeUnwrapErr()).toEqual({ code: "skill_not_found", name: "ghost" });
   });
 
@@ -276,9 +262,9 @@ describe("Transport.skills.enable", () => {
       name: "denied-skill",
       reason: "no_live_deploy",
     } satisfies EnableResult);
-    const transport = makeTransport({ runner, store: mock<SkillStore>() });
+    const skills = makeSkills({ runner, store: mock<SkillStore>() });
 
-    const result = await transport.skills.enable(KNOWN_HANDLE, "denied-skill", CHAT);
+    const result = await skills.enable(KNOWN_HANDLE, "denied-skill", CHAT);
     expect(result._unsafeUnwrapErr()).toEqual({
       code: "skill_no_live_deploy",
       name: "denied-skill",
@@ -287,16 +273,16 @@ describe("Transport.skills.enable", () => {
 
   it("rejects unknown caller before calling runner", async () => {
     const runner = mock<SkillRunner>();
-    const transport = makeTransport({ runner, store: mock<SkillStore>() });
+    const skills = makeSkills({ runner, store: mock<SkillStore>() });
 
-    const result = await transport.skills.enable(UNKNOWN_HANDLE, "echo", CHAT);
+    const result = await skills.enable(UNKNOWN_HANDLE, "echo", CHAT);
     expect(result._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
     expect(runner.enable).not.toHaveBeenCalled();
   });
 
   it("returns skills_disabled when runner is unwired", async () => {
-    const transport = makeTransport({});
-    const result = await transport.skills.enable(KNOWN_HANDLE, "echo", CHAT);
+    const skills = makeSkills({});
+    const result = await skills.enable(KNOWN_HANDLE, "echo", CHAT);
     expect(result._unsafeUnwrapErr()).toEqual({ code: "skills_disabled" });
   });
 });
@@ -348,9 +334,9 @@ describe("Transport.skills.approveDeploy", () => {
     });
     const store = mock<SkillStore>();
     store.getDeployById.mockResolvedValue(makeDeployRow());
-    const transport = makeTransport({ runner, store });
+    const skills = makeSkills({ runner, store });
 
-    const result = await transport.skills.approveDeploy(PENDING_ID, KNOWN_HANDLE, CHAT);
+    const result = await skills.approveDeploy(PENDING_ID, KNOWN_HANDLE, CHAT);
 
     expect(result._unsafeUnwrap()).toEqual({
       pendingId: PENDING_ID,
@@ -391,9 +377,9 @@ describe("Transport.skills.approveDeploy", () => {
           id === "conv-9" ? conversationOf(USER_ID, "profile-9") : undefined,
         ),
     });
-    const transport = makeTransport({ runner, store, transportStore, agentStore });
+    const skills = makeSkills({ runner, store, transportStore, agentStore });
 
-    await transport.skills.approveDeploy(PENDING_ID, KNOWN_HANDLE, CHAT);
+    await skills.approveDeploy(PENDING_ID, KNOWN_HANDLE, CHAT);
 
     expect(runner.approveDeploy).toHaveBeenCalledWith({
       pendingId: PENDING_ID,
@@ -406,17 +392,17 @@ describe("Transport.skills.approveDeploy", () => {
   });
 
   it("returns skills_disabled when runner/store are unwired", async () => {
-    const transport = makeTransport({});
-    const result = await transport.skills.approveDeploy(PENDING_ID, KNOWN_HANDLE, CHAT);
+    const skills = makeSkills({});
+    const result = await skills.approveDeploy(PENDING_ID, KNOWN_HANDLE, CHAT);
     expect(result._unsafeUnwrapErr()).toEqual({ code: "skills_disabled" });
   });
 
   it("rejects unknown caller before any store/runner call", async () => {
     const runner = mock<SkillRunner>();
     const store = mock<SkillStore>();
-    const transport = makeTransport({ runner, store });
+    const skills = makeSkills({ runner, store });
 
-    const result = await transport.skills.approveDeploy(PENDING_ID, UNKNOWN_HANDLE, CHAT);
+    const result = await skills.approveDeploy(PENDING_ID, UNKNOWN_HANDLE, CHAT);
 
     expect(result._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
     expect(store.getDeployById).not.toHaveBeenCalled();
@@ -427,9 +413,9 @@ describe("Transport.skills.approveDeploy", () => {
     const runner = mock<SkillRunner>();
     const store = mock<SkillStore>();
     store.getDeployById.mockResolvedValue(undefined);
-    const transport = makeTransport({ runner, store });
+    const skills = makeSkills({ runner, store });
 
-    const result = await transport.skills.approveDeploy(PENDING_ID, KNOWN_HANDLE, CHAT);
+    const result = await skills.approveDeploy(PENDING_ID, KNOWN_HANDLE, CHAT);
 
     expect(result._unsafeUnwrapErr()).toEqual({
       code: "skill_deploy_not_found",
@@ -442,9 +428,9 @@ describe("Transport.skills.approveDeploy", () => {
     const runner = mock<SkillRunner>();
     const store = mock<SkillStore>();
     store.getDeployById.mockResolvedValue(makeDeployRow({ status: "live" }));
-    const transport = makeTransport({ runner, store });
+    const skills = makeSkills({ runner, store });
 
-    const result = await transport.skills.approveDeploy(PENDING_ID, KNOWN_HANDLE, CHAT);
+    const result = await skills.approveDeploy(PENDING_ID, KNOWN_HANDLE, CHAT);
 
     expect(result._unsafeUnwrapErr()).toEqual({
       code: "skill_deploy_not_pending",
@@ -469,9 +455,9 @@ describe("Transport.skills.approveDeploy", () => {
     });
     const store = mock<SkillStore>();
     store.getDeployById.mockResolvedValue(makeDeployRow());
-    const transport = makeTransport({ runner, store });
+    const skills = makeSkills({ runner, store });
 
-    const result = await transport.skills.approveDeploy(PENDING_ID, KNOWN_HANDLE, CHAT);
+    const result = await skills.approveDeploy(PENDING_ID, KNOWN_HANDLE, CHAT);
 
     expect(result._unsafeUnwrapErr()).toEqual({
       code: "skill_deploy_register_failed",
@@ -493,9 +479,9 @@ describe("Transport.skills.approveDeploy", () => {
     });
     const store = mock<SkillStore>();
     store.getDeployById.mockResolvedValue(makeDeployRow());
-    const transport = makeTransport({ runner, store });
+    const skills = makeSkills({ runner, store });
 
-    const result = await transport.skills.approveDeploy(PENDING_ID, KNOWN_HANDLE, CHAT);
+    const result = await skills.approveDeploy(PENDING_ID, KNOWN_HANDLE, CHAT);
 
     const e = result._unsafeUnwrapErr();
     expect(e.code).toBe("skill_deploy_register_failed");
@@ -511,9 +497,9 @@ describe("Transport.skills.denyDeploy", () => {
     runner.denyDeploy.mockResolvedValue(undefined);
     const store = mock<SkillStore>();
     store.getDeployById.mockResolvedValue(makeDeployRow());
-    const transport = makeTransport({ runner, store });
+    const skills = makeSkills({ runner, store });
 
-    const result = await transport.skills.denyDeploy(PENDING_ID, KNOWN_HANDLE);
+    const result = await skills.denyDeploy(PENDING_ID, KNOWN_HANDLE);
 
     expect(result._unsafeUnwrap()).toEqual({ pendingId: PENDING_ID });
     expect(runner.denyDeploy).toHaveBeenCalledWith({ pendingId: PENDING_ID });
@@ -524,9 +510,9 @@ describe("Transport.skills.denyDeploy", () => {
     runner.denyDeploy.mockResolvedValue(undefined);
     const store = mock<SkillStore>();
     store.getDeployById.mockResolvedValue(makeDeployRow());
-    const transport = makeTransport({ runner, store });
+    const skills = makeSkills({ runner, store });
 
-    await transport.skills.denyDeploy(PENDING_ID, KNOWN_HANDLE, "looks unsafe");
+    await skills.denyDeploy(PENDING_ID, KNOWN_HANDLE, "looks unsafe");
 
     expect(runner.denyDeploy).toHaveBeenCalledWith({
       pendingId: PENDING_ID,
@@ -535,17 +521,17 @@ describe("Transport.skills.denyDeploy", () => {
   });
 
   it("returns skills_disabled when runner/store are unwired", async () => {
-    const transport = makeTransport({});
-    const result = await transport.skills.denyDeploy(PENDING_ID, KNOWN_HANDLE);
+    const skills = makeSkills({});
+    const result = await skills.denyDeploy(PENDING_ID, KNOWN_HANDLE);
     expect(result._unsafeUnwrapErr()).toEqual({ code: "skills_disabled" });
   });
 
   it("rejects unknown caller before any store/runner call", async () => {
     const runner = mock<SkillRunner>();
     const store = mock<SkillStore>();
-    const transport = makeTransport({ runner, store });
+    const skills = makeSkills({ runner, store });
 
-    const result = await transport.skills.denyDeploy(PENDING_ID, UNKNOWN_HANDLE);
+    const result = await skills.denyDeploy(PENDING_ID, UNKNOWN_HANDLE);
 
     expect(result._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
     expect(store.getDeployById).not.toHaveBeenCalled();
@@ -556,9 +542,9 @@ describe("Transport.skills.denyDeploy", () => {
     const runner = mock<SkillRunner>();
     const store = mock<SkillStore>();
     store.getDeployById.mockResolvedValue(undefined);
-    const transport = makeTransport({ runner, store });
+    const skills = makeSkills({ runner, store });
 
-    const result = await transport.skills.denyDeploy(PENDING_ID, KNOWN_HANDLE);
+    const result = await skills.denyDeploy(PENDING_ID, KNOWN_HANDLE);
 
     expect(result._unsafeUnwrapErr()).toEqual({
       code: "skill_deploy_not_found",
@@ -574,9 +560,9 @@ describe("Transport.skills.denyDeploy", () => {
     const runner = mock<SkillRunner>();
     const store = mock<SkillStore>();
     store.getDeployById.mockResolvedValue(makeDeployRow({ status: "denied" }));
-    const transport = makeTransport({ runner, store });
+    const skills = makeSkills({ runner, store });
 
-    const result = await transport.skills.denyDeploy(PENDING_ID, KNOWN_HANDLE);
+    const result = await skills.denyDeploy(PENDING_ID, KNOWN_HANDLE);
 
     expect(result._unsafeUnwrapErr()).toEqual({
       code: "skill_deploy_not_pending",
