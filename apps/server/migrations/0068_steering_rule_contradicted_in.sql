@@ -1,2 +1,3 @@
 ALTER TABLE "steering_rules" ADD COLUMN "contradicted_in_conversation_id" uuid;--> statement-breakpoint
-ALTER TABLE "steering_rules" ADD CONSTRAINT "steering_rules_contradicted_in_conversation_id_conversations_id_fk" FOREIGN KEY ("contradicted_in_conversation_id") REFERENCES "public"."conversations"("id") ON DELETE set null ON UPDATE no action;
+ALTER TABLE "steering_rules" ADD CONSTRAINT "steering_rules_contradicted_in_conversation_id_conversations_id_fk" FOREIGN KEY ("contradicted_in_conversation_id") REFERENCES "public"."conversations"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
+CREATE INDEX "idx_steering_rules_contradicted_in_conversation" ON "steering_rules" USING btree ("contradicted_in_conversation_id") WHERE contradicted_in_conversation_id IS NOT NULL;

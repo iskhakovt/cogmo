@@ -836,13 +836,33 @@ describe("the Observer's rule reads", () => {
       expect(await stateOf(id)).toBe("learning");
     });
 
-    it("changes nothing on another contradiction from the same conversation", async () => {
+    it("reports the same reset to a retry from the conversation, writing nothing more", async () => {
       const convA = await conversation();
       const id = await row({ rule: "Learning", source: "correction", active: false });
       await contradict(id, convA);
+      await tx((trx) =>
+        store.upsertCorrection(trx, {
+          rule: "Learning",
+          category: "style",
+          profileId: null,
+          existingRuleId: id,
+        }),
+      );
 
-      expect(await contradict(id, convA)).toBe("unchanged");
+      expect(await contradict(id, convA)).toBe("reset");
+      expect(await countOf(id)).toBe(1);
       expect(await stateOf(id)).toBe("learning");
+    });
+
+    it("reports the same retirement to a retry from the retiring conversation", async () => {
+      const [convA, convB] = [await conversation(), await conversation()];
+      const id = await row({ rule: "Learning", source: "correction", active: false });
+      await contradict(id, convA);
+      await contradict(id, convB);
+
+      expect(await contradict(id, convB)).toBe("retired");
+      expect(await contradict(id, convA)).toBe("unchanged");
+      expect(await stateOf(id)).toBe("retired");
     });
 
     it("retires it on a contradiction from another conversation, reinforced meanwhile or not", async () => {

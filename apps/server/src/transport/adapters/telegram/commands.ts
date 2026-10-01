@@ -2696,16 +2696,16 @@ function formatEvolutionDetail(event: EvolutionEventEntry, now: Date = new Date(
       `  promoted:     ${payload.corrections.promoted}`,
       `  contradicted: ${payload.corrections.contradictions}`,
     );
-    // Both are parts of `contradicted`.
+    // Each is a part of `contradicted`: a first contradiction resets, a second retires.
     if (payload.corrections.retired > 0) {
-      lines.push(`  retired:      ${payload.corrections.retired} (learning, contradicted)`);
+      lines.push(`  retired:      ${payload.corrections.retired} (learning, contradicted twice)`);
     }
     if (payload.corrections.reset > 0) {
       lines.push(`  reset:        ${payload.corrections.reset} (learning, contradicted once)`);
     }
     if (payload.corrections.outOfScopeContradictionsSkipped > 0) {
       lines.push(
-        `  not retired:  ${payload.corrections.outOfScopeContradictionsSkipped} (learning, on another channel)`,
+        `  not applied:  ${payload.corrections.outOfScopeContradictionsSkipped} (learning, on another channel)`,
       );
     }
   }

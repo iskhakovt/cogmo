@@ -97,7 +97,8 @@ function EvolutionPanel({ onSelect }: { onSelect: (event: EvolutionEventEntry) =
                 <td className={tdMono}>{e.triggeredBy}</td>
                 <td className={tdMono}>
                   +{e.payload.corrections.extracted} / ↻{e.payload.corrections.reinforced} / ↑
-                  {e.payload.corrections.promoted} / ✕{e.payload.corrections.retired}
+                  {e.payload.corrections.promoted} / ✕{e.payload.corrections.retired} / ↺
+                  {e.payload.corrections.reset}
                 </td>
                 <td className={tdMono}>
                   {e.payload.memories.extracted}

@@ -1,5 +1,5 @@
 {
-  "id": "ce01211e-5647-4d7f-9a34-473f465aea1f",
+  "id": "baefd0a9-6739-4078-98ac-63b6d5aa9438",
   "prevId": "2f2564ad-44e4-41d6-809a-ba38184d3d85",
   "version": "7",
   "dialect": "postgresql",
@@ -2140,6 +2140,22 @@
           ],
           "isUnique": true,
           "where": "source = 'instruction' AND retracted_at IS NULL",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_steering_rules_contradicted_in_conversation": {
+          "name": "idx_steering_rules_contradicted_in_conversation",
+          "columns": [
+            {
+              "expression": "contradicted_in_conversation_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "contradicted_in_conversation_id IS NOT NULL",
           "concurrently": false,
           "method": "btree",
           "with": {}

@@ -4865,7 +4865,7 @@ describe("handleLearned detail rendering", () => {
     );
     expect(reply).toContain("contradicted: 3");
     expect(reply).toContain("reset:        1 (learning, contradicted once)");
-    expect(reply).toContain("retired:      1 (learning, contradicted)");
+    expect(reply).toContain("retired:      1 (learning, contradicted twice)");
     expect(reply).toContain("Pending drained: 0");
     expect(reply).toContain("withheld by a memory rule: 2");
 
@@ -4914,8 +4914,8 @@ describe("handleLearned detail rendering", () => {
       corrections: { ...payload.corrections, outOfScopeContradictionsSkipped: 2 },
     });
     expect(reply).toContain("contradicted: 3");
-    expect(reply).toContain("retired:      1 (learning, contradicted)");
-    expect(reply).toContain("not retired:  2 (learning, on another channel)");
+    expect(reply).toContain("retired:      1 (learning, contradicted twice)");
+    expect(reply).toContain("not applied:  2 (learning, on another channel)");
     expect(reply).toContain("skipped:      2 reinforcement(s) (2 out-of-scope, 0 unknown-rule)");
   });
 

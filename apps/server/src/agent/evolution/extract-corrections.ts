@@ -343,7 +343,7 @@ async function applyCorrection(
 }
 
 /**
- * Reinforcing a rule, or retiring one still learning on a contradiction, is
+ * Reinforcing a rule, or applying a contradiction to one still learning, is
  * gated on the matched rule's `channelType` matching the conversation's
  * active channel set. The prompt is the steering signal that asks the LLM to
  * emit cross-scope wording matches as `new` with the right `channelType`;

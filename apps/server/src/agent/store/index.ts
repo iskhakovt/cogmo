@@ -1598,10 +1598,12 @@ export interface AgentStore {
   /**
    * Apply a contradiction from `conversationId` to a learned rule still
    * learning. The first resets its observation count to 0 and records the
-   * conversation (`reset`); one from another conversation retires it
-   * (`retired`). One from the recorded conversation, or against a rule that
-   * is active, retired or not learned, writes nothing (`unchanged`), so a
-   * retried or repeated extraction of one conversation applies once.
+   * conversation (`reset`); one from another conversation retires it and
+   * records that conversation instead (`retired`). A contradiction from the
+   * recorded conversation writes nothing and reports what that conversation
+   * did, so a retried or repeated extraction applies once and counts the
+   * same. One against a rule that is active, retired otherwise or not learned
+   * writes nothing (`unchanged`).
    */
   contradictLearningRule(
     tx: Transaction,
@@ -3593,7 +3595,7 @@ export class DrizzleAgentStore implements AgentStore {
     );
     const retired = await tx
       .update(steeringRules)
-      .set({ retractedAt: sql`now()` })
+      .set({ retractedAt: sql`now()`, contradictedInConversationId: params.conversationId })
       .where(
         and(
           learning,
@@ -3608,7 +3610,19 @@ export class DrizzleAgentStore implements AgentStore {
       .set({ observationCount: 0, contradictedInConversationId: params.conversationId })
       .where(and(learning, isNull(steeringRules.contradictedInConversationId)))
       .returning({ id: steeringRules.id });
-    return reset.length > 0 ? "reset" : "unchanged";
+    if (reset.length > 0) return "reset";
+    const [applied] = await tx
+      .select({ active: steeringRules.active, retractedAt: steeringRules.retractedAt })
+      .from(steeringRules)
+      .where(
+        and(
+          eq(steeringRules.id, params.id),
+          eq(steeringRules.contradictedInConversationId, params.conversationId),
+          inArray(steeringRules.source, LEARNED_RULE_SOURCES),
+        ),
+      );
+    if (applied === undefined || applied.active) return "unchanged";
+    return applied.retractedAt === null ? "reset" : "retired";
   }
 
   async getMemoryRules(

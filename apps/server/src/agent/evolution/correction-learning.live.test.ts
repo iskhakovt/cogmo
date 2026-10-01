@@ -287,6 +287,20 @@ describe.skipIf(LIVE_API_KEY === undefined)(
               ({ id: _id, ...row }) => row,
             );
           const channelRules = await activeRules();
+          // The sample's user and profile: each extraction runs in a conversation of
+          // theirs, since a contradiction records the conversation it came from.
+          // Nothing in this eval sets an instruction rule.
+          const owner = await db.tx(async (tx) => {
+            const user = await store.createUser(tx);
+            const profile = await store.createProfile(tx, {
+              userId: null,
+              name: `eval-${nonce}-${scenario.id}`,
+              basePrompt: "",
+              model: EXTRACTION_MODEL,
+              toolSet: [],
+            });
+            return { userId: user.id, profileId: profile.id };
+          });
 
           /** One correcting conversation, then the Observer's extraction on its transcript. */
           const learnFrom = async (messages: ReadonlyArray<string>, label: string) => {
@@ -301,30 +315,10 @@ describe.skipIf(LIVE_API_KEY === undefined)(
             for (const t of conversation.turns) usage.add(t.result.usage);
             expectCompleted(conversation.turns);
             stage = `in the ${label} extraction`;
-            // A conversation row per extraction, since a contradiction records the
-            // conversation it came from. Nothing in this eval sets an instruction rule.
-            const { conversationId, userId } = await db.tx(async (tx) => {
-              const user = await store.createUser(tx);
-              const profile = await store.createProfile(tx, {
-                userId: null,
-                name: `eval-${randomUUID()}`,
-                basePrompt: "",
-                model: EXTRACTION_MODEL,
-                toolSet: [],
-              });
-              const conv = await store.createConversation(tx, {
-                userId: user.id,
-                profileId: profile.id,
-                isPrivate: true,
-              });
-              return { conversationId: conv.id, userId: user.id };
-            });
-            const scope = {
-              conversationId,
-              profileId: EVAL_PROFILE.id,
-              userId,
-              seesUserRules: true,
-            };
+            const conv = await db.tx((tx) =>
+              store.createConversation(tx, { ...owner, isPrivate: true }),
+            );
+            const scope = { ...owner, conversationId: conv.id, seesUserRules: true };
             const extracted = await extractCorrections(conversation.history, scope, {
               provider: usage.metered(provider),
               model: EXTRACTION_MODEL,

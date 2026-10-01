@@ -940,10 +940,10 @@ export const steeringRules = pgTable(
     userId: uuid("user_id").references(() => users.id, { onDelete: "cascade" }),
     quote: text("quote"), // the user's words `rule_set` quoted; set on every instruction row
     // NULL = never contradicted while learning. The conversation whose
-    // contradiction reset the learning rule's count; a contradiction from
-    // another conversation retires it, one from the same changes nothing, so
-    // a retried or repeated extraction of one conversation can't retire it.
-    // A deleted conversation clears it, which only costs one more reset.
+    // contradiction reset the learning rule's count, then the one whose
+    // contradiction retired it; one from the recorded conversation changes
+    // nothing, so a retried or repeated extraction of one conversation applies
+    // once. A deleted conversation clears it, which only costs one more reset.
     contradictedInConversationId: uuid("contradicted_in_conversation_id").references(
       () => conversations.id,
       { onDelete: "set null" },
@@ -961,6 +961,10 @@ export const steeringRules = pgTable(
     uniqueIndex("uq_steering_rules_instruction")
       .on(...INSTRUCTION_RULE_KEY)
       .where(LIVE_INSTRUCTION_RULE),
+    // For the FK's ON DELETE SET NULL: a conversation delete finds its rows.
+    index("idx_steering_rules_contradicted_in_conversation")
+      .on(t.contradictedInConversationId)
+      .where(sql`contradicted_in_conversation_id IS NOT NULL`),
   ],
 );
 

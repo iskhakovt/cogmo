@@ -439,19 +439,18 @@ describe("learning loop", () => {
         memoryScope: { compartments: ["misc"], trust: ["any"] },
       }),
     );
-    // As `rule_set` writes a stated instruction: the user's, on every profile.
-    await db.insert(steeringRules).values({
-      rule: HEALTH_RULE,
-      category: "memory",
-      active: true,
-      source: "instruction",
-      priority: 100,
-      observationCount: 1,
-      profileId: null,
-      channelType: null,
-      userId: owner,
-      quote: HEALTH_RULE,
-    });
+    // As `rule_set` sets a stated instruction: the user's, on every profile.
+    const set = await runInTx((tx) =>
+      agentStore.setInstructionRule(tx, {
+        rule: HEALTH_RULE,
+        category: "memory",
+        userId: owner,
+        profileId: null,
+        channelType: null,
+        quote: HEALTH_RULE,
+      }),
+    );
+    expect(set.kind).toBe("new");
     // Staged by the first-party profile, as `memory_retain` or a skill stages them.
     const staged = await runInTx(async (tx) => ({
       forbidden: await agentStore.stagePendingMemory(tx, {
@@ -503,5 +502,6 @@ describe("learning loop", () => {
     const facts = (await retainedFacts(owner)).join("\n");
     expect(facts).toMatch(/guitar/i);
     expect(facts).not.toMatch(/lisinopril|blood pressure/i);
+    expect(facts).not.toMatch(/cholesterol/i);
   });
 });
