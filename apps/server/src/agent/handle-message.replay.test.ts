@@ -1343,6 +1343,8 @@ describe("handle-message — turn inputs frozen across re-invocations", () => {
       const frozenNonDurable = freezeToolTable(nonDurable);
       const { deps, handler, toolResults } = timeCallingTurn();
       expect(frozenNonDurable).not.toBe(freezeToolTable(deps.tools));
+      const LIVE_TIME = '{"iso":"2026-06-01T12:00:00.000Z"}';
+      handler.mockResolvedValue(LIVE_TIME);
 
       await new InngestTestEngine({
         function: createHandleMessage(deps),
@@ -1358,9 +1360,7 @@ describe("handle-message — turn inputs frozen across re-invocations", () => {
       }).execute();
 
       expect(handler).toHaveBeenCalled();
-      const [result] = toolResults();
-      expect(result).toMatchObject({ type: "tool_result", toolUseId: "t1" });
-      expect(result).not.toMatchObject({ content: CACHED_TIME });
+      expect(toolResults()).toEqual([{ type: "tool_result", toolUseId: "t1", content: LIVE_TIME }]);
     });
   });
 

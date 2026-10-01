@@ -266,7 +266,8 @@ export function createDefaultTools(
         "Returns the current date, time, day of week, and timezone. " +
         "Use for scheduling, deadlines, or time questions. The system prompt includes the time " +
         "when the conversation started — call this tool for long-running sessions or exact time.",
-      // Durable: every re-execution returns a new timestamp.
+      // Durable: a non-durable handler would return a new timestamp on every
+      // later step boundary, which the model never saw.
       durable: true,
       parallelSafe: true,
       sideEffectful: false,

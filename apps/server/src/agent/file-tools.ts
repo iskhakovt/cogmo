@@ -7,8 +7,9 @@ export const readFile = defineTool({
     "Read a file from the workspace. " +
     "Use to review notes, drafts, or any previously saved content. " +
     "Reading a file is also the prerequisite for editing or overwriting it.",
-  // Durable: a re-read after a same-turn `write_file` or `edit_file` returns
-  // content the model never saw.
+  // Durable: re-executed on a later step boundary after a same-turn
+  // `write_file` or `edit_file`, a non-durable handler would record content
+  // the model never saw.
   durable: true,
   parallelSafe: true,
   sideEffectful: false,
@@ -79,8 +80,8 @@ export const listFiles = defineTool({
   description:
     "List files in the workspace, optionally filtered by path prefix. " +
     "Use to see what files exist before reading or to find a specific file.",
-  // Durable: a re-list after a same-turn write shows files and sizes the
-  // model never saw.
+  // Durable: re-executed on a later step boundary after a same-turn write, a
+  // non-durable handler would record files and sizes the model never saw.
   durable: true,
   parallelSafe: true,
   sideEffectful: false,
