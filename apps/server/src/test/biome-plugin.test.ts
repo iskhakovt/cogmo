@@ -132,6 +132,14 @@ describe("biome plugin: no-default-params", () => {
       "export function f({ x = 1 }: { x?: number }) {\n  return x;\n}\n",
     ],
     [
+      "an array destructuring default inside a parameter",
+      "export function f([x = 1]: number[]) {\n  return x;\n}\n",
+    ],
+    [
+      "a nested array destructuring default inside a parameter",
+      "export function f({ xs: [x = 1] }: { xs: number[] }) {\n  return x;\n}\n",
+    ],
+    [
       "a non-empty options default",
       "export function f(opts: { x: number } = { x: 1 }) {\n  return opts;\n}\n",
     ],
@@ -147,6 +155,14 @@ describe("biome plugin: no-default-params", () => {
     [
       "a destructuring default outside a parameter",
       "export function f(o: { x?: number }) {\n  const { x = 1 } = o;\n  return x;\n}\n",
+    ],
+    [
+      "an array destructuring default outside a parameter",
+      "export function f(xs: number[]) {\n  const [x = 1] = xs;\n  return x;\n}\n",
+    ],
+    [
+      "an array destructuring parameter without a default",
+      "export function f([x]: number[]) {\n  return x;\n}\n",
     ],
   ])("does NOT fire on %s", async (_label, source) => {
     const { exitCode, output } = await lintSource("src/clean.ts", source);

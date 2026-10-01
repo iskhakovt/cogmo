@@ -7,8 +7,8 @@
 // optional and branch on `undefined` where absence means something.
 //
 // Flags `function f(x = 1)`, arrow and method parameters, constructor parameter
-// properties, and destructuring defaults inside a parameter
-// (`function f({ x = 1 }: Opts)`). An empty options bag (`opts: Opts = {}`) is
+// properties, and object or array destructuring defaults inside a parameter
+// (`function f({ x = 1 }: Opts)`, `function f([x = 1]: number[])`). An empty options bag (`opts: Opts = {}`) is
 // not flagged: it supplies no value, only the absence of options.
 //
 // Test files are out of scope via `includes` in biome.json. A default that is
@@ -27,6 +27,10 @@ or {
     $node <: within JsFormalParameter()
   },
   JsObjectBindingPatternProperty(init=$init) as $node where {
+    $init <: not .,
+    $node <: within JsFormalParameter()
+  },
+  JsArrayBindingPatternElement(init=$init) as $node where {
     $init <: not .,
     $node <: within JsFormalParameter()
   }
