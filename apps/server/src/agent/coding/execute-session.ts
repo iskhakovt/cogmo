@@ -9,7 +9,7 @@ import type { CodingRun, TaskStoreDeps } from "./coding-run.js";
 import type { ExecuteStreamHandle } from "./progress-stream.js";
 import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
 
-export interface ExecuteSessionResult {
+interface ExecuteSessionResult {
   isError: boolean;
   failureReason?: string;
   usage?: BackendUsage;

@@ -23,7 +23,7 @@ import {
 } from "./task-sandbox.js";
 import type { WorktreeAssignment } from "./types.js";
 
-export interface PlanSandboxDeps extends TaskStoreDeps, SandboxAuthDeps {
+interface PlanSandboxDeps extends TaskStoreDeps, SandboxAuthDeps {
   sandbox: SandboxClient;
   devbaseImage: string;
   defaultResourceLimits: ResourceLimits;

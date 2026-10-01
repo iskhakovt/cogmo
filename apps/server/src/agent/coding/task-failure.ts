@@ -11,7 +11,7 @@ import type { CodingRun, TaskStoreDeps } from "./coding-run.js";
  * Emits `coding/task/failed` under `task-failed-<taskId>`, which collapses a
  * repeat fire for the same task inside the bus's dedup window.
  */
-export async function emitTaskFailed(run: CodingRun, reason: string): Promise<void> {
+async function emitTaskFailed(run: CodingRun, reason: string): Promise<void> {
   await run.stepSendEvent("emit-task-failed", {
     ...codingTaskFailed.create({ taskId: run.taskId, reason }),
     id: `task-failed-${run.taskId}`,

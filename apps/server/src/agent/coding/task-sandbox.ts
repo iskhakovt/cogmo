@@ -21,7 +21,7 @@ import { runBranchFor } from "./git-as-transport.js";
 import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
 import type { WorktreeAssignment } from "./types.js";
 
-export const HOME_VOLUME_PREFIX = "cogmo-task-home";
+const HOME_VOLUME_PREFIX = "cogmo-task-home";
 export const WORKTREE_DIR_IN_CONTAINER = "/workspace";
 
 /**

@@ -9,12 +9,12 @@ import type { CodingRun, TaskStoreDeps } from "./coding-run.js";
 import type { PlanStreamHandle } from "./progress-stream.js";
 import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
 
-export interface PlanSessionDeps extends TaskStoreDeps {
+interface PlanSessionDeps extends TaskStoreDeps {
   sandbox: Pick<SandboxClient, "resume">;
   backend: CodingBackend;
 }
 
-export interface PlanSessionResult {
+interface PlanSessionResult {
   plan?: string;
   isError: boolean;
   failureReason?: string;

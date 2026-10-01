@@ -24,7 +24,7 @@ import {
 } from "./task-sandbox.js";
 import type { WorktreeAssignment } from "./types.js";
 
-export interface ExecuteSandboxDeps extends TaskStoreDeps, SandboxAuthDeps {
+interface ExecuteSandboxDeps extends TaskStoreDeps, SandboxAuthDeps {
   sandbox: SandboxClient;
   devbaseImage: string;
   defaultResourceLimits: ResourceLimits;
@@ -40,7 +40,7 @@ export interface ExecutePushCredentials {
   askpass: AskpassMaterials;
 }
 
-export interface ExecuteSandbox {
+interface ExecuteSandbox {
   state: SandboxSessionState;
   /** Set exactly when the transport is git-remote. */
   push: ExecutePushCredentials | undefined;

@@ -6,7 +6,7 @@
 import type { Transaction } from "../../db/index.js";
 import type { CodingRepoRow, CodingStore, CodingTaskRow } from "./store/index.js";
 
-export type AdmitOutcome =
+type AdmitOutcome =
   | { kind: "admitted"; task: CodingTaskRow }
   /** Same idempotency key as a prior attempt, which already inserted the task. */
   | { kind: "recovered"; task: CodingTaskRow }

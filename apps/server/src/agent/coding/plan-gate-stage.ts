@@ -14,7 +14,7 @@ import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
 import { advanceTask, reclaimEndedTask } from "./task-lifecycle.js";
 import type { WorktreeAssignment } from "./types.js";
 
-export interface PlanGateDeps extends TaskStoreDeps {
+interface PlanGateDeps extends TaskStoreDeps {
   sandbox: Pick<SandboxClient, "deleteByTaskId">;
   secretsStore: SecretsStore;
 }
@@ -27,7 +27,7 @@ type Gate = "human_tap" | "profile_autoapprove" | "no_interactive_gate";
  * execute has been handed off). `left_planning`: the task moved out of
  * `planning` under this run, which no longer owns it.
  */
-export type PlanGateOutcome = "parked" | "left_planning";
+type PlanGateOutcome = "parked" | "left_planning";
 
 /**
  * Every trigger parks the plan at `awaiting_approval` — the status means

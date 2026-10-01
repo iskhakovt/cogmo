@@ -5,6 +5,7 @@
 
 import type { Octokit } from "@octokit/rest";
 import type { Inngest } from "inngest";
+import { err, ok, type Result } from "neverthrow";
 import type { AskpassMaterials } from "../../sandbox/askpass.js";
 import type { SandboxClient, SandboxSession } from "../../sandbox/index.js";
 import type { GitHubIdentity } from "../../secrets/github.js";
@@ -15,9 +16,6 @@ import { runOpenPr } from "./open-pr.js";
 import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
 import { WORKTREE_DIR_IN_CONTAINER } from "./task-sandbox.js";
 import type { PrMetadata, WorktreeAssignment } from "./types.js";
-
-/** A stage either moved the task on, or failed it with a reason. */
-export type PublishOutcome<T> = { kind: "done"; value: T } | { kind: "failed"; reason: string };
 
 /**
  * The `commit-and-push` stage, then `pushed`. Durable: it writes a commit
@@ -39,7 +37,7 @@ export async function pushVerifiedBranch(
     askpass: AskpassMaterials;
     container: () => Promise<SandboxSession>;
   },
-): Promise<PublishOutcome<{ branchSha: string }>> {
+): Promise<Result<{ branchSha: string }, string>> {
   const commit = await run.stepRun("commit-and-push", async () =>
     runCommitAndPush({
       container: await args.container(),
@@ -52,13 +50,13 @@ export async function pushVerifiedBranch(
     }),
   );
   if (commit.kind === "branch_conflict") {
-    return failed(`push rejected — branch conflict on cogmo/<idShort>:\n\n${commit.output}`);
+    return err(`push rejected — branch conflict on cogmo/<idShort>:\n\n${commit.output}`);
   }
   if (commit.kind === "auth_failed") {
-    return failed(`push rejected — GitHub authentication failed:\n\n${commit.output}`);
+    return err(`push rejected — GitHub authentication failed:\n\n${commit.output}`);
   }
   if (commit.kind === "failed") {
-    return failed(`commit+push failed:\n\n${commit.output}`);
+    return err(`commit+push failed:\n\n${commit.output}`);
   }
 
   // A clean tree has no commit sha to reuse. Durable so the PR head is
@@ -80,10 +78,10 @@ export async function pushVerifiedBranch(
       })
       .then(() => undefined),
   );
-  return { kind: "done", value: { branchSha } };
+  return ok({ branchSha });
 }
 
-export interface OpenTaskPrDeps extends TaskStoreDeps {
+interface OpenTaskPrDeps extends TaskStoreDeps {
   sandbox: Pick<SandboxClient, "capabilities">;
   octokitFactory?: (pat: string) => Octokit;
 }
@@ -108,7 +106,7 @@ export async function openTaskPr(
     branchSha: string;
     verifyOutput: string;
   },
-): Promise<PublishOutcome<{ url: string; number: number }>> {
+): Promise<Result<{ url: string; number: number }, string>> {
   const { repo, identity, assignment } = args;
   const pr = await run.stepRun("open-pr", () =>
     runOpenPr({
@@ -124,12 +122,12 @@ export async function openTaskPr(
       ...(deps.octokitFactory && { octokit: deps.octokitFactory(identity.pat) }),
     }),
   );
-  if (pr.kind === "auth_failed") return failed(`PR open failed (auth): ${pr.message}`);
+  if (pr.kind === "auth_failed") return err(`PR open failed (auth): ${pr.message}`);
   if (pr.kind === "validation_failed") {
-    return failed(`PR open failed (validation): ${pr.message}`);
+    return err(`PR open failed (validation): ${pr.message}`);
   }
   // The branch is pushed but has no PR; it stays upstream for a re-delegate.
-  if (pr.kind === "failed") return failed(`PR open failed: ${pr.message}`);
+  if (pr.kind === "failed") return err(`PR open failed: ${pr.message}`);
 
   const metadata: PrMetadata = {
     url: pr.url,
@@ -159,7 +157,7 @@ export async function openTaskPr(
   if (deps.sandbox.capabilities.workingTreeTransport === "git-remote") {
     await fetchBackFeatureBranch(run, { repo, branch: assignment.branch, identity });
   }
-  return { kind: "done", value: { url: pr.url, number: pr.number } };
+  return ok({ url: pr.url, number: pr.number });
 }
 
 /**
@@ -187,11 +185,6 @@ async function fetchBackFeatureBranch(
     }),
   );
 }
-
-function failed(reason: string): { kind: "failed"; reason: string } {
-  return { kind: "failed", reason };
-}
-
 async function readHeadSha(container: Pick<SandboxSession, "execStreaming">): Promise<string> {
   // Same caps `runGit` puts on the identical command in `commit-push.ts`,
   // per design/coding-delegation.md → Per-callsite exec timeouts: the call

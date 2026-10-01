@@ -13,7 +13,7 @@ import type { CodingRepoRow } from "./store/index.js";
 import type { WorktreeAssignment } from "./types.js";
 import { allocateWorktree } from "./worktree.js";
 
-export interface AllocateTaskWorktreeDeps extends TaskStoreDeps {
+interface AllocateTaskWorktreeDeps extends TaskStoreDeps {
   sandbox: Pick<SandboxClient, "capabilities">;
   secretsStore: SecretsStore;
   /** Host root for per-task git worktrees — `${worktreesDir}/<repo>/<id-short>`. */

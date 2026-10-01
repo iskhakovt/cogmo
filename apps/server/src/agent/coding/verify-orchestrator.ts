@@ -17,6 +17,7 @@
 
 import type { Octokit } from "@octokit/rest";
 import type { Inngest } from "inngest";
+import { err, ok, type Result } from "neverthrow";
 import type { Transactor } from "../../db/index.js";
 import { codingTaskCliDone } from "../../inngest/events.js";
 import type { StepRun, StepSendEvent } from "../../inngest/index.js";
@@ -33,7 +34,7 @@ import type { SecretsStore } from "../../secrets/store/index.js";
 import { describeError } from "../../util/describe-error.js";
 import { AskpassLease } from "./askpass-lease.js";
 import type { loadCodingSandboxEnv } from "./auth.js";
-import { type CodingRun, loadTaskAndRepo } from "./coding-run.js";
+import { type CodingRun, codingRun, loadTaskAndRepo } from "./coding-run.js";
 import { parseRemoteUrl } from "./open-pr.js";
 import type { CodingRepoRow, CodingStore, CodingTaskRow } from "./store/index.js";
 import { failTaskFromCatch, recordTaskFailed } from "./task-failure.js";
@@ -127,14 +128,8 @@ interface VerifyFailureContext {
  * and an inline shim in tests.
  */
 export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestratorResult> {
-  const { taskId, runId, deps, inngest } = params;
-  const run: CodingRun = {
-    taskId,
-    runId,
-    stepRun: params.stepRun,
-    stepSendEvent: params.stepSendEvent,
-    log: log.child({ taskId, runId }),
-  };
+  const { taskId, deps, inngest } = params;
+  const run = codingRun(params, log);
   const { task, repo } = await loadTaskAndRepo(deps, taskId);
   if (!task.worktreeAssignment) {
     throw new Error(`coding task ${taskId} has no worktree_assignment`);
@@ -157,10 +152,8 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
 
   const failure: VerifyFailureContext = { repo, assignment };
   const credentials = await resolveVerifyCredentials(deps, repo);
-  if (credentials.kind === "failed") {
-    return await failVerify(run, deps, failure, credentials.reason);
-  }
-  const { remote, identity, env } = credentials;
+  if (credentials.isErr()) return await failVerify(run, deps, failure, credentials.error);
+  const { remote, identity, env } = credentials.value;
 
   const askpassLease = new AskpassLease(deps.askpassBaseDir, taskId);
   try {
@@ -188,7 +181,7 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
       askpass,
       container,
     });
-    if (pushed.kind === "failed") return await failVerify(run, deps, failure, pushed.reason);
+    if (pushed.isErr()) return await failVerify(run, deps, failure, pushed.error);
 
     const pr = await openTaskPr(run, deps, inngest, {
       task,
@@ -199,7 +192,7 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
       branchSha: pushed.value.branchSha,
       verifyOutput: verdict.output,
     });
-    if (pr.kind === "failed") return await failVerify(run, deps, failure, pr.reason);
+    if (pr.isErr()) return await failVerify(run, deps, failure, pr.error);
     return { status: "pr_open", prUrl: pr.value.url, prNumber: pr.value.number };
   } catch (err) {
     const reason = describeError(err);
@@ -227,37 +220,30 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
   }
 }
 
-type VerifyCredentials =
-  | {
-      kind: "ready";
-      remote: { owner: string; repo: string };
-      identity: GitHubIdentity;
-      env: Readonly<Record<string, string>>;
-    }
-  | { kind: "failed"; reason: string };
+interface VerifyCredentials {
+  remote: { owner: string; repo: string };
+  identity: GitHubIdentity;
+  env: Readonly<Record<string, string>>;
+}
 
 /**
  * Resolved before any container work, so a repo the wizard hasn't finished
  * fails fast rather than after spinning up a container to throw away — and
- * before askpass is provisioned on disk.
+ * before askpass is provisioned on disk. The error is the failure reason.
  */
 async function resolveVerifyCredentials(
   deps: VerifyOrchestratorDeps,
   repo: CodingRepoRow,
-): Promise<VerifyCredentials> {
+): Promise<Result<VerifyCredentials, string>> {
   const remote = parseRemoteUrl(repo.remoteUrl);
-  if (!remote) {
-    return { kind: "failed", reason: `cannot parse owner/repo from remote URL: ${repo.remoteUrl}` };
-  }
+  if (!remote) return err(`cannot parse owner/repo from remote URL: ${repo.remoteUrl}`);
   const identity = await deps.runInTx((tx) =>
     resolveGitHubIdentity(tx, deps.secretsStore, repo.identityName),
   );
-  if (identity.isErr()) {
-    return { kind: "failed", reason: describeResolveIdentityError(identity.error) };
-  }
+  if (identity.isErr()) return err(describeResolveIdentityError(identity.error));
   const auth = await loadSandboxEnv(deps);
-  if (auth.isErr()) return { kind: "failed", reason: auth.error.message };
-  return { kind: "ready", remote, identity: identity.value, env: auth.value };
+  if (auth.isErr()) return err(auth.error.message);
+  return ok({ remote, identity: identity.value, env: auth.value });
 }
 
 /**

@@ -21,13 +21,13 @@ import { reapTaskSandbox, WORKTREE_DIR_IN_CONTAINER } from "./task-sandbox.js";
 import { safeTeardownWorktree } from "./teardown.js";
 import type { WorktreeAssignment } from "./types.js";
 
-export interface ExecuteOutcomeDeps extends TaskStoreDeps {
+interface ExecuteOutcomeDeps extends TaskStoreDeps {
   sandbox: Pick<SandboxClient, "deleteByTaskId">;
   secretsStore: SecretsStore;
 }
 
 /** The task's repo, worktree and progress stream, which every exit touches. */
-export interface ExecuteExitContext {
+interface ExecuteExitContext {
   repo: CodingRepoRow;
   assignment: WorktreeAssignment;
   stream: ExecuteStreamHandle;
@@ -105,7 +105,7 @@ export async function pushExecuteChanges(
 }
 
 /** Step ids of one execute failure exit; each exit has its own. */
-export interface ExecuteFailureSteps {
+interface ExecuteFailureSteps {
   status: string;
   /** Null where the transport leaves no host worktree to tear down. */
   teardownWorktree: string | null;
@@ -154,7 +154,7 @@ export async function endExecuteFailed(
  * is out. `left_executing`: the task moved out of `executing` under this
  * run — a Cancel during `execute-cli` — so no hand-off happened.
  */
-export type HandOffOutcome = "handed_off" | "left_executing";
+type HandOffOutcome = "handed_off" | "left_executing";
 
 /**
  * `pending_verify`, then reap this container before emitting
