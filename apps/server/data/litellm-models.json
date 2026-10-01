@@ -463,8 +463,12 @@
     "contextWindow": 922000,
     "maxOutputTokens": 64000
   },
+  "azure_ai/gpt-6.1-sol": {
+    "contextWindow": 922000,
+    "maxOutputTokens": 64000
+  },
   "azure_ai/gpt-5.5": {
-    "contextWindow": 1050000,
+    "contextWindow": 922000,
     "maxOutputTokens": 64000
   },
   "azure_ai/gpt-chat-latest": {
@@ -476,27 +480,27 @@
     "maxOutputTokens": 50000
   },
   "azure_ai/gpt-5.5-2026-04-23": {
-    "contextWindow": 1050000,
+    "contextWindow": 922000,
     "maxOutputTokens": 64000
   },
   "azure_ai/gpt-5.5-2026-04-24": {
-    "contextWindow": 1050000,
+    "contextWindow": 922000,
     "maxOutputTokens": 64000
   },
   "azure_ai/gpt-5.4": {
-    "contextWindow": 1050000,
+    "contextWindow": 922000,
     "maxOutputTokens": 64000
   },
   "azure_ai/gpt-5.4-2026-03-05": {
-    "contextWindow": 1050000,
+    "contextWindow": 922000,
     "maxOutputTokens": 64000
   },
   "azure_ai/gpt-5.4-pro": {
-    "contextWindow": 1050000,
+    "contextWindow": 922000,
     "maxOutputTokens": 64000
   },
   "azure_ai/gpt-5.4-pro-2026-03-05": {
-    "contextWindow": 1050000,
+    "contextWindow": 922000,
     "maxOutputTokens": 64000
   },
   "azure_ai/gpt-5.4-mini": {
@@ -544,8 +548,8 @@
     "maxOutputTokens": 4096
   },
   "azure/eu/gpt-4o-realtime-preview-2024-12-17": {
-    "contextWindow": 128000,
-    "maxOutputTokens": 4096
+    "contextWindow": 16000,
+    "maxOutputTokens": 4000
   },
   "azure/eu/gpt-5-2025-08-07": {
     "contextWindow": 272000,
@@ -780,8 +784,8 @@
     "maxOutputTokens": 4096
   },
   "azure/gpt-4o-realtime-preview-2024-12-17": {
-    "contextWindow": 128000,
-    "maxOutputTokens": 4096
+    "contextWindow": 16000,
+    "maxOutputTokens": 4000
   },
   "azure/gpt-4o-transcribe": {
     "contextWindow": 16000,
@@ -790,6 +794,10 @@
   "azure/gpt-4o-transcribe-diarize": {
     "contextWindow": 16000,
     "maxOutputTokens": 2000
+  },
+  "azure/gpt-realtime-whisper": {
+    "contextWindow": 32000,
+    "maxOutputTokens": 4096
   },
   "azure/gpt-5.1-2025-11-13": {
     "contextWindow": 272000,
@@ -924,35 +932,35 @@
     "maxOutputTokens": 64000
   },
   "azure/gpt-5.4": {
-    "contextWindow": 1050000,
+    "contextWindow": 922000,
     "maxOutputTokens": 64000
   },
   "azure/us/gpt-5.4": {
-    "contextWindow": 1050000,
+    "contextWindow": 922000,
     "maxOutputTokens": 64000
   },
   "azure/eu/gpt-5.4": {
-    "contextWindow": 1050000,
+    "contextWindow": 922000,
     "maxOutputTokens": 64000
   },
   "azure/gpt-5.4-2026-03-05": {
-    "contextWindow": 1050000,
+    "contextWindow": 922000,
     "maxOutputTokens": 64000
   },
   "azure/us/gpt-5.4-2026-03-05": {
-    "contextWindow": 1050000,
+    "contextWindow": 922000,
     "maxOutputTokens": 64000
   },
   "azure/eu/gpt-5.4-2026-03-05": {
-    "contextWindow": 1050000,
+    "contextWindow": 922000,
     "maxOutputTokens": 64000
   },
   "azure/gpt-5.4-pro": {
-    "contextWindow": 1050000,
+    "contextWindow": 922000,
     "maxOutputTokens": 64000
   },
   "azure/gpt-5.4-pro-2026-03-05": {
-    "contextWindow": 1050000,
+    "contextWindow": 922000,
     "maxOutputTokens": 64000
   },
   "azure/gpt-5.6": {
@@ -1004,6 +1012,14 @@
     "maxOutputTokens": 64000
   },
   "azure/gpt-6-sol-2026-09-22": {
+    "contextWindow": 922000,
+    "maxOutputTokens": 64000
+  },
+  "azure/gpt-6.1-sol": {
+    "contextWindow": 922000,
+    "maxOutputTokens": 64000
+  },
+  "azure/gpt-6.1-sol-2026-09-29": {
     "contextWindow": 922000,
     "maxOutputTokens": 64000
   },
@@ -1064,39 +1080,39 @@
     "maxOutputTokens": 64000
   },
   "azure/gpt-5.5": {
-    "contextWindow": 1050000,
+    "contextWindow": 922000,
     "maxOutputTokens": 64000
   },
   "azure/us/gpt-5.5": {
-    "contextWindow": 1050000,
+    "contextWindow": 922000,
     "maxOutputTokens": 64000
   },
   "azure/eu/gpt-5.5": {
-    "contextWindow": 1050000,
+    "contextWindow": 922000,
     "maxOutputTokens": 64000
   },
   "azure/gpt-5.5-2026-04-23": {
-    "contextWindow": 1050000,
+    "contextWindow": 922000,
     "maxOutputTokens": 64000
   },
   "azure/gpt-5.5-2026-04-24": {
-    "contextWindow": 1050000,
+    "contextWindow": 922000,
     "maxOutputTokens": 64000
   },
   "azure/us/gpt-5.5-2026-04-23": {
-    "contextWindow": 1050000,
+    "contextWindow": 922000,
     "maxOutputTokens": 64000
   },
   "azure/us/gpt-5.5-2026-04-24": {
-    "contextWindow": 1050000,
+    "contextWindow": 922000,
     "maxOutputTokens": 64000
   },
   "azure/eu/gpt-5.5-2026-04-23": {
-    "contextWindow": 1050000,
+    "contextWindow": 922000,
     "maxOutputTokens": 64000
   },
   "azure/eu/gpt-5.5-2026-04-24": {
-    "contextWindow": 1050000,
+    "contextWindow": 922000,
     "maxOutputTokens": 64000
   },
   "azure/gpt-5.5-pro": {
@@ -1216,8 +1232,8 @@
     "maxOutputTokens": 4096
   },
   "azure/us/gpt-4o-realtime-preview-2024-12-17": {
-    "contextWindow": 128000,
-    "maxOutputTokens": 4096
+    "contextWindow": 16000,
+    "maxOutputTokens": 4000
   },
   "azure/us/gpt-5-2025-08-07": {
     "contextWindow": 272000,
@@ -1337,7 +1353,7 @@
   },
   "azure_ai/Llama-4-Maverick-17B-128E-Instruct-FP8": {
     "contextWindow": 1000000,
-    "maxOutputTokens": 16384
+    "maxOutputTokens": 64000
   },
   "azure_ai/Llama-4-Scout-17B-16E-Instruct": {
     "contextWindow": 10000000,
@@ -1408,8 +1424,8 @@
     "maxOutputTokens": 8192
   },
   "azure_ai/deepseek-v3.2": {
-    "contextWindow": 163840,
-    "maxOutputTokens": 40960
+    "contextWindow": 128000,
+    "maxOutputTokens": 32000
   },
   "azure_ai/deepseek-v3.2-speciale": {
     "contextWindow": 128000,
@@ -1436,7 +1452,7 @@
     "maxOutputTokens": 32000
   },
   "azure_ai/grok-4": {
-    "contextWindow": 131072,
+    "contextWindow": 262000,
     "maxOutputTokens": 8192
   },
   "azure_ai/grok-4.3": {
@@ -1456,15 +1472,15 @@
     "maxOutputTokens": 8192
   },
   "azure_ai/grok-4-1-fast-non-reasoning": {
-    "contextWindow": 131072,
-    "maxOutputTokens": 32768
+    "contextWindow": 128000,
+    "maxOutputTokens": 32000
   },
   "azure_ai/grok-4-1-fast-reasoning": {
-    "contextWindow": 131072,
-    "maxOutputTokens": 32768
+    "contextWindow": 128000,
+    "maxOutputTokens": 32000
   },
   "azure_ai/grok-code-fast-1": {
-    "contextWindow": 131072,
+    "contextWindow": 256000,
     "maxOutputTokens": 8192
   },
   "azure_ai/jamba-instruct": {
@@ -3904,8 +3920,8 @@
     "maxOutputTokens": 4096
   },
   "gemini/deep-research-pro-preview-12-2025": {
-    "contextWindow": 65536,
-    "maxOutputTokens": 16384
+    "contextWindow": 1048576,
+    "maxOutputTokens": 64000
   },
   "gemini/gemini-2.5-flash-lite": {
     "contextWindow": 1048576,
@@ -6053,7 +6069,7 @@
   },
   "openrouter/nvidia/nemotron-3.5-lightning": {
     "contextWindow": 262144,
-    "maxOutputTokens": 64000
+    "maxOutputTokens": 32768
   },
   "openrouter/openai/gpt-3.5-turbo": {
     "contextWindow": 16385,
@@ -9187,6 +9203,14 @@
     "contextWindow": 200000,
     "maxOutputTokens": 50000
   },
+  "bedrock_mantle/anthropic.claude-opus-5-5": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock_mantle/anthropic.claude-sonnet-5-5": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
   "us.xai.grok-4.6": {
     "contextWindow": 500000,
     "maxOutputTokens": 64000
@@ -9418,6 +9442,10 @@
   "claude-mythos-preview": {
     "contextWindow": 1000000,
     "maxOutputTokens": 64000
+  },
+  "gemini/gemini-robotics-er-2-streaming-preview": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 32768
   },
   "mistral/mistral-small-2603": {
     "contextWindow": 262144,
@@ -10132,7 +10160,7 @@
     "maxOutputTokens": 64000
   },
   "groq/qwen/qwen3.8-27b": {
-    "contextWindow": 131042,
+    "contextWindow": 131072,
     "maxOutputTokens": 16384
   },
   "mistral/mistral-medium-3.5": {
@@ -10398,6 +10426,14 @@
   "bedrock_mantle/us-gov-west-1/openai.gpt-oss-120b": {
     "contextWindow": 131072,
     "maxOutputTokens": 32768
+  },
+  "bedrock_mantle/us-gov-west-1/anthropic.claude-opus-5-5": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock_mantle/us-gov-west-1/anthropic.claude-sonnet-5-5": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
   },
   "bedrock_mantle/us-gov-east-1/openai.gpt-5.4": {
     "contextWindow": 1050000,
@@ -11009,7 +11045,7 @@
   },
   "openrouter/qwen/qwen3-30b-a3b": {
     "contextWindow": 131072,
-    "maxOutputTokens": 8192
+    "maxOutputTokens": 16384
   },
   "openrouter/qwen/qwen3-8b": {
     "contextWindow": 131072,
@@ -11303,6 +11339,10 @@
     "contextWindow": 202752,
     "maxOutputTokens": 50688
   },
+  "azure/eu/gpt-4o-2024-05-13": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 4096
+  },
   "azure/eu/gpt-6-luna": {
     "contextWindow": 922000,
     "maxOutputTokens": 64000
@@ -11311,6 +11351,14 @@
     "contextWindow": 922000,
     "maxOutputTokens": 64000
   },
+  "azure/eu/o3-2025-04-16": {
+    "contextWindow": 200000,
+    "maxOutputTokens": 50000
+  },
+  "azure/eu/o4-mini-2025-04-16": {
+    "contextWindow": 200000,
+    "maxOutputTokens": 50000
+  },
   "gemini/gemini-3.8-live": {
     "contextWindow": 131072,
     "maxOutputTokens": 32768
@@ -11318,6 +11366,10 @@
   "gemini/gemini-3.8-live-extended-thinking": {
     "contextWindow": 131072,
     "maxOutputTokens": 32768
+  },
+  "azure/us/gpt-4o-2024-05-13": {
+    "contextWindow": 128000,
+    "maxOutputTokens": 4096
   },
   "azure/gpt-realtime-2": {
     "contextWindow": 32000,
@@ -11912,7 +11964,7 @@
     "maxOutputTokens": 32768
   },
   "openrouter/inclusionai/ling-3.0-flash-vl": {
-    "contextWindow": 131072,
+    "contextWindow": 262144,
     "maxOutputTokens": 32768
   },
   "openrouter/inclusionai/ling-3.0-flash-vl:free": {
@@ -12292,11 +12344,11 @@
     "maxOutputTokens": 64000
   },
   "openrouter/thinkingmachines/inkling": {
-    "contextWindow": 1048576,
+    "contextWindow": 524288,
     "maxOutputTokens": 64000
   },
   "openrouter/thinkingmachines/inkling-small": {
-    "contextWindow": 1048576,
+    "contextWindow": 524288,
     "maxOutputTokens": 64000
   },
   "openrouter/thinkingmachines/inkling-small:free": {
@@ -12571,6 +12623,22 @@
     "contextWindow": 1050000,
     "maxOutputTokens": 64000
   },
+  "openrouter/openai/gpt-6.1-sol": {
+    "contextWindow": 1050000,
+    "maxOutputTokens": 64000
+  },
+  "openrouter/openai/gpt-6.1-sol-pro": {
+    "contextWindow": 1050000,
+    "maxOutputTokens": 64000
+  },
+  "openrouter/openai/gpt-6.1-sol-pro:batch": {
+    "contextWindow": 1050000,
+    "maxOutputTokens": 64000
+  },
+  "openrouter/openai/gpt-6.1-sol:batch": {
+    "contextWindow": 1050000,
+    "maxOutputTokens": 64000
+  },
   "openrouter/openai/gpt-oss-20b:batch": {
     "contextWindow": 131072,
     "maxOutputTokens": 32768
@@ -12717,6 +12785,54 @@
   },
   "vertex_ai/claude-sonnet-5-5@default": {
     "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "prism/deepseek-v4.1-flash": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "prism/deepseek-v4-flash": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "global.xai.grok-4.7": {
+    "contextWindow": 500000,
+    "maxOutputTokens": 64000
+  },
+  "us.xai.grok-4.7": {
+    "contextWindow": 500000,
+    "maxOutputTokens": 64000
+  },
+  "xai.grok-4.7": {
+    "contextWindow": 500000,
+    "maxOutputTokens": 64000
+  },
+  "openrouter/anthropic/claude-sonnet-5.5:batch": {
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000
+  },
+  "baseten/deepseek-ai/DeepSeek-V4.1-Flash-Fast": {
+    "contextWindow": 1048576,
+    "maxOutputTokens": 32768
+  },
+  "gpt-6.1-sol": {
+    "contextWindow": 922000,
+    "maxOutputTokens": 64000
+  },
+  "global.openai.gpt-6.1-sol": {
+    "contextWindow": 1050000,
+    "maxOutputTokens": 64000
+  },
+  "openai.gpt-6.1-sol": {
+    "contextWindow": 1050000,
+    "maxOutputTokens": 64000
+  },
+  "bedrock_mantle/openai.gpt-6.1-sol": {
+    "contextWindow": 1050000,
+    "maxOutputTokens": 64000
+  },
+  "us.openai.gpt-6.1-sol": {
+    "contextWindow": 1050000,
     "maxOutputTokens": 64000
   }
 }

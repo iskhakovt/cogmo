@@ -1,4 +1,6 @@
 # syntax=docker/dockerfile:1
+# check=skip=InvalidDefaultArgInFrom
+#
 # cogmo-devbase — base task-container image for coding-delegation.
 #
 # Built and published as the `devbase` target of `/docker-bake.hcl` by
@@ -19,11 +21,15 @@
 # Codex CLI and Go/Rust toolchains are deferred to whenever real verify
 # commands need them.
 
-# uv as a stage, shared with cogmo-skills. Defaults are the standalone-build
-# fallback; docker-bake.hcl overrides them for published builds and
-# version-pins.test.ts enforces the match. ARG-in-FROM needs global scope.
-ARG UV_VERSION=0.12.12
-ARG UV_DIGEST=sha256:73d2665b478d8fa2de1cf105c6841f8e9cb6b09e568fc7700440c09f8fcd7ac4
+# Toolchain versions come from docker-bake.hcl alone. No ARG carries a
+# default, so a build outside bake fails at the uv FROM below, and each
+# install expands its version with `:?` because npm reads an empty one as
+# `latest`.
+#
+# uv toolchain as a stage, shared with cogmo-skills. ARG-in-FROM needs
+# global scope.
+ARG UV_VERSION
+ARG UV_DIGEST
 FROM ghcr.io/astral-sh/uv:${UV_VERSION}@${UV_DIGEST} AS uv
 
 FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04@sha256:d94c97dd9cacf183d0a6fd12a8e87b526e9e928307674ae9c94139139c0c6eae
@@ -33,10 +39,9 @@ FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04@sha256:d94c97dd9cacf183d0
 # truncated curl without this.
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-# Toolchain versions — defaults mirror docker-bake.hcl (see the uv note above).
-ARG NPM_VERSION=12.0.2
-ARG PNPM_VERSION=11.21.0
-ARG CLAUDE_CODE_VERSION=2.1.236
+ARG NPM_VERSION
+ARG PNPM_VERSION
+ARG CLAUDE_CODE_VERSION
 
 # devcontainers/base already ships git, gh, curl, jq, ripgrep — but `fd-find`
 # is missing on Ubuntu and the binary is named `fdfind` rather than `fd`.
@@ -61,13 +66,13 @@ RUN apt-get update \
 RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
  && apt-get install -y --no-install-recommends nodejs \
  && rm -rf /var/lib/apt/lists/* \
- && npm install -g "npm@${NPM_VERSION}" \
+ && npm install -g "npm@${NPM_VERSION:?}" \
  && npm cache clean --force
 
 # pnpm via npm, not corepack — corepack's cached pnpm bundle (tar /
 # picomatch / minimatch / brace-expansion) lags upstream and shows up as
 # image CVEs.
-RUN npm install -g "pnpm@${PNPM_VERSION}" \
+RUN npm install -g "pnpm@${PNPM_VERSION:?}" \
  && pnpm --version \
  && npm cache clean --force
 
@@ -78,7 +83,7 @@ RUN npm install -g "pnpm@${PNPM_VERSION}" \
 # allowlist the install "succeeds" and `claude` then fails at runtime with
 # "native binary not installed". Naming the one package we intend to trust
 # keeps the default deny for everything else in the tree.
-RUN npm install -g --allow-scripts=@anthropic-ai/claude-code "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+RUN npm install -g --allow-scripts=@anthropic-ai/claude-code "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION:?}" \
  && claude --version \
  && npm cache clean --force
 

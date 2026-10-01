@@ -35,27 +35,28 @@ variable "VERSION" {
   default = "dev"
 }
 
-// Toolchain versions for the task images. Base-image FROM digests stay
-// literal in each Dockerfile for Dependabot; these are bumped here.
+// Toolchain versions for the task images, and their only copy: the
+// Dockerfiles declare these ARGs without defaults. Base-image FROM digests
+// stay literal in each Dockerfile for Dependabot; these are bumped by hand.
 // uv is shared by devbase + skills.
 variable "UV_VERSION" {
-  default = "0.12.12"
+  default = "0.12.18"
 }
 variable "UV_DIGEST" {
-  default = "sha256:73d2665b478d8fa2de1cf105c6841f8e9cb6b09e568fc7700440c09f8fcd7ac4"
+  default = "sha256:3adc3706091ce7c2fe595e669628caedd6d951551b92b258b7e7dbe06d9440bc"
 }
 // Match package.json packageManager.
 variable "PNPM_VERSION" {
-  default = "11.21.0"
+  default = "11.27.1"
 }
 variable "NPM_VERSION" {
-  default = "12.0.2"
+  default = "12.1.0"
 }
 // Coupled to the claude.ts stream-json parser — bump with it. Tracks the
 // `stable` dist-tag, not `latest`: `latest` and `next` are the same build,
 // so following it puts the sandbox CLI ahead of the stable rollout.
 variable "CLAUDE_CODE_VERSION" {
-  default = "2.1.236"
+  default = "2.1.280"
 }
 
 // Default group builds every image — used by publish.yml on release.

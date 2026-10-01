@@ -14,7 +14,7 @@ import type { ResourceLimits } from "./types.js";
 
 // Tiny image with /bin/sleep + sh + echo. Pulled once, cached on the host.
 const TEST_IMAGE =
-  "mirror.gcr.io/library/alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc";
+  "mirror.gcr.io/library/alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6";
 
 // `/bin/sh` is dash here, as in the devbase (Ubuntu) and skills (Debian) images.
 const DASH_IMAGE =
