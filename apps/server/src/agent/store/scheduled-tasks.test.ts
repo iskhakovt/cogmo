@@ -2,16 +2,19 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
 import { expectOk } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
-import { DrizzleAgentStore, type ScheduledTask } from "./index.js";
+import { DrizzleProfileStore } from "./profiles.js";
+import { DrizzleScheduledTaskStore, type ScheduledTask } from "./scheduled-tasks.js";
+import { DrizzleUserStore } from "./users.js";
 
 let db: Database;
 let tx: Transactor;
 let close: () => Promise<void>;
-let store: DrizzleAgentStore;
+const store = new DrizzleScheduledTaskStore();
+const userStore = new DrizzleUserStore();
+const profileStore = new DrizzleProfileStore();
 
 beforeAll(async () => {
   ({ db, tx, close } = await createTestDatabase());
-  store = new DrizzleAgentStore();
 });
 
 afterEach(async () => {
@@ -23,13 +26,13 @@ afterAll(async () => {
 });
 
 async function seed(): Promise<{ userId: string; profileId: string }> {
-  const userId = (await tx((trx) => store.createUser(trx))).id;
+  const userId = (await tx((trx) => userStore.createUser(trx))).id;
   // Profile is user-scoped so two seed() calls in the same test don't
   // collide on uq_profiles_user_name (nullsNotDistinct = true would
   // reject two org profiles named "test").
   const profileId = (
     await tx((trx) =>
-      store
+      profileStore
         .createProfile(trx, {
           userId,
           name: "test",
@@ -76,7 +79,7 @@ function flattenErrorChain(err: unknown): string {
   return parts.join(" | ");
 }
 
-describe("DrizzleAgentStore — scheduled_tasks", () => {
+describe("DrizzleScheduledTaskStore", () => {
   it("creates a recurring task and round-trips every column", async () => {
     const { userId, profileId } = await seed();
     const created = await tx((trx) =>

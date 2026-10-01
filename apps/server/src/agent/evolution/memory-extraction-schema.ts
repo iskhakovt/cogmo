@@ -47,7 +47,7 @@ export function isCoreCompartment(name: string): boolean {
  * Hindsight tags. The set of valid values is dynamic per user (core ∪ that
  * user's `custom_compartments` rows); validation against the user's actual
  * registry happens at the store boundary on profile create/update — same
- * pattern as `profile_class` (see `src/agent/store/schema.ts:84`). The
+ * pattern as `profile_class` (see `profiles` in `src/agent/store/schema/profiles.ts`). The
  * classifier uses `buildCompartmentSchema(customs)` to lock the LLM to
  * exactly the legal set for the current fire.
  */

@@ -6,16 +6,12 @@
  * `AgentStore` is mocked.
  */
 
-import type { Inngest } from "inngest";
 import { describe, expect, it, vi } from "vitest";
-import { mock } from "vitest-mock-extended";
-import type { AgentStore, ScheduledTask } from "../agent/store/index.js";
-import type { Transactor } from "../db/index.js";
-import { inboundArrived } from "../inngest/events.js";
-import { mockAgentStore, mockTransportStore } from "../test/factories.js";
-import type { AttachmentStore } from "./attachment-store.js";
-import type { TransportStore } from "./store/index.js";
-import { createTransport } from "./transport.js";
+import type { AgentStore, ScheduledTask } from "../../agent/store/index.js";
+import type { Transactor } from "../../db/index.js";
+import { mockAgentStore, mockTransportStore } from "../../test/factories.js";
+import type { TransportStore } from "../store/index.js";
+import { createScheduling } from "./scheduling.js";
 
 const FAKE_TX = { __mockTx: true } as never;
 const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
@@ -53,20 +49,12 @@ function makeTask(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
   };
 }
 
-function makeTransport(opts: { agentStore?: AgentStore; transportStore?: TransportStore } = {}) {
-  const inngest = mock<Inngest>();
-  inngest.send.mockResolvedValue({ ids: [] });
-  return createTransport({
+function makeScheduling(opts: { agentStore?: AgentStore; transportStore?: TransportStore } = {}) {
+  return createScheduling({
     channelId: "ch-1",
-    defaultUserId: USER_ID,
-    defaultProfileId: "019e2900-0000-7000-8000-000000000099",
     runInTx: fakeRunInTx,
     transportStore: opts.transportStore ?? makeTransportStore(),
     agentStore: opts.agentStore ?? mockAgentStore(),
-    inngest,
-    inboundArrived,
-    attachments: mock<AttachmentStore>(),
-    idleTimeoutMs: 60_000,
   });
 }
 
@@ -79,9 +67,9 @@ describe("Transport.scheduling.list", () => {
       makeTask({ id: TASK_ID, prompt: "a" }),
       makeTask({ id: "019e2900-0000-7000-8000-000000000002", prompt: "b", enabled: false }),
     ]);
-    const transport = makeTransport({ agentStore });
+    const scheduling = makeScheduling({ agentStore });
 
-    const result = await transport.scheduling.list(KNOWN_HANDLE);
+    const result = await scheduling.list(KNOWN_HANDLE);
     expect(result.isOk()).toBe(true);
     if (result.isErr()) throw new Error("unreachable");
     expect(result.value).toHaveLength(2);
@@ -96,15 +84,15 @@ describe("Transport.scheduling.list", () => {
   it("scopes the store call to the authenticated user", async () => {
     const agentStore = mockAgentStore();
     vi.mocked(agentStore.listScheduledTasks).mockResolvedValue([]);
-    const transport = makeTransport({ agentStore });
+    const scheduling = makeScheduling({ agentStore });
 
-    await transport.scheduling.list(KNOWN_HANDLE);
+    await scheduling.list(KNOWN_HANDLE);
     expect(agentStore.listScheduledTasks).toHaveBeenCalledWith(expect.anything(), USER_ID);
   });
 
   it("rejects unknown handles with identity_rejected", async () => {
-    const transport = makeTransport();
-    const result = await transport.scheduling.list(UNKNOWN_HANDLE);
+    const scheduling = makeScheduling();
+    const result = await scheduling.list(UNKNOWN_HANDLE);
     expect(result.isErr()).toBe(true);
     if (result.isOk()) throw new Error("unreachable");
     expect(result.error.code).toBe("identity_rejected");
@@ -117,9 +105,9 @@ describe("Transport.scheduling.disable", () => {
   it("flips enabled=false on the user's own task and reports alreadyAtState=false", async () => {
     const agentStore = mockAgentStore();
     vi.mocked(agentStore.getScheduledTask).mockResolvedValue(makeTask({ enabled: true }));
-    const transport = makeTransport({ agentStore });
+    const scheduling = makeScheduling({ agentStore });
 
-    const result = await transport.scheduling.disable(KNOWN_HANDLE, TASK_ID);
+    const result = await scheduling.disable(KNOWN_HANDLE, TASK_ID);
     expect(result.isOk()).toBe(true);
     if (result.isErr()) throw new Error("unreachable");
     expect(result.value).toEqual({ id: TASK_ID, alreadyAtState: false });
@@ -133,9 +121,9 @@ describe("Transport.scheduling.disable", () => {
   it("is idempotent on already-disabled rows (alreadyAtState=true, no store write)", async () => {
     const agentStore = mockAgentStore();
     vi.mocked(agentStore.getScheduledTask).mockResolvedValue(makeTask({ enabled: false }));
-    const transport = makeTransport({ agentStore });
+    const scheduling = makeScheduling({ agentStore });
 
-    const result = await transport.scheduling.disable(KNOWN_HANDLE, TASK_ID);
+    const result = await scheduling.disable(KNOWN_HANDLE, TASK_ID);
     expect(result.isOk()).toBe(true);
     if (result.isErr()) throw new Error("unreachable");
     expect(result.value.alreadyAtState).toBe(true);
@@ -145,9 +133,9 @@ describe("Transport.scheduling.disable", () => {
   it("refuses cross-user ids with schedule_not_found (opaque, doesn't leak existence)", async () => {
     const agentStore = mockAgentStore();
     vi.mocked(agentStore.getScheduledTask).mockResolvedValue(makeTask({ userId: OTHER_USER_ID }));
-    const transport = makeTransport({ agentStore });
+    const scheduling = makeScheduling({ agentStore });
 
-    const result = await transport.scheduling.disable(KNOWN_HANDLE, TASK_ID);
+    const result = await scheduling.disable(KNOWN_HANDLE, TASK_ID);
     expect(result.isErr()).toBe(true);
     if (result.isOk()) throw new Error("unreachable");
     // Same code as unknown id — adversary can't distinguish
@@ -159,9 +147,9 @@ describe("Transport.scheduling.disable", () => {
   it("returns schedule_not_found for unknown ids", async () => {
     const agentStore = mockAgentStore();
     vi.mocked(agentStore.getScheduledTask).mockResolvedValue(undefined);
-    const transport = makeTransport({ agentStore });
+    const scheduling = makeScheduling({ agentStore });
 
-    const result = await transport.scheduling.disable(KNOWN_HANDLE, TASK_ID);
+    const result = await scheduling.disable(KNOWN_HANDLE, TASK_ID);
     expect(result.isErr()).toBe(true);
     if (result.isOk()) throw new Error("unreachable");
     expect(result.error.code).toBe("schedule_not_found");
@@ -169,9 +157,9 @@ describe("Transport.scheduling.disable", () => {
 
   it("rejects non-UUID ids with schedule_id_malformed before any DB hit", async () => {
     const agentStore = mockAgentStore();
-    const transport = makeTransport({ agentStore });
+    const scheduling = makeScheduling({ agentStore });
 
-    const result = await transport.scheduling.disable(KNOWN_HANDLE, "not-a-uuid");
+    const result = await scheduling.disable(KNOWN_HANDLE, "not-a-uuid");
     expect(result.isErr()).toBe(true);
     if (result.isOk()) throw new Error("unreachable");
     expect(result.error).toEqual({ code: "schedule_id_malformed", id: "not-a-uuid" });
@@ -182,8 +170,8 @@ describe("Transport.scheduling.disable", () => {
   });
 
   it("rejects unknown handles with identity_rejected (after UUID-shape check)", async () => {
-    const transport = makeTransport();
-    const result = await transport.scheduling.disable(UNKNOWN_HANDLE, TASK_ID);
+    const scheduling = makeScheduling();
+    const result = await scheduling.disable(UNKNOWN_HANDLE, TASK_ID);
     expect(result.isErr()).toBe(true);
     if (result.isOk()) throw new Error("unreachable");
     expect(result.error.code).toBe("identity_rejected");
@@ -194,9 +182,9 @@ describe("Transport.scheduling.enable", () => {
   it("flips enabled=true on the user's own (currently-disabled) task", async () => {
     const agentStore = mockAgentStore();
     vi.mocked(agentStore.getScheduledTask).mockResolvedValue(makeTask({ enabled: false }));
-    const transport = makeTransport({ agentStore });
+    const scheduling = makeScheduling({ agentStore });
 
-    const result = await transport.scheduling.enable(KNOWN_HANDLE, TASK_ID);
+    const result = await scheduling.enable(KNOWN_HANDLE, TASK_ID);
     expect(result.isOk()).toBe(true);
     if (result.isErr()) throw new Error("unreachable");
     expect(result.value).toEqual({ id: TASK_ID, alreadyAtState: false });
@@ -210,9 +198,9 @@ describe("Transport.scheduling.enable", () => {
   it("is idempotent on already-enabled rows", async () => {
     const agentStore = mockAgentStore();
     vi.mocked(agentStore.getScheduledTask).mockResolvedValue(makeTask({ enabled: true }));
-    const transport = makeTransport({ agentStore });
+    const scheduling = makeScheduling({ agentStore });
 
-    const result = await transport.scheduling.enable(KNOWN_HANDLE, TASK_ID);
+    const result = await scheduling.enable(KNOWN_HANDLE, TASK_ID);
     expect(result.isOk()).toBe(true);
     if (result.isErr()) throw new Error("unreachable");
     expect(result.value.alreadyAtState).toBe(true);
@@ -226,9 +214,9 @@ describe("Transport.scheduling.delete", () => {
   it("deletes the user's own task", async () => {
     const agentStore = mockAgentStore();
     vi.mocked(agentStore.getScheduledTask).mockResolvedValue(makeTask());
-    const transport = makeTransport({ agentStore });
+    const scheduling = makeScheduling({ agentStore });
 
-    const result = await transport.scheduling.delete(KNOWN_HANDLE, TASK_ID);
+    const result = await scheduling.delete(KNOWN_HANDLE, TASK_ID);
     expect(result.isOk()).toBe(true);
     expect(agentStore.deleteScheduledTask).toHaveBeenCalledWith(expect.anything(), TASK_ID);
   });
@@ -236,9 +224,9 @@ describe("Transport.scheduling.delete", () => {
   it("refuses cross-user ids", async () => {
     const agentStore = mockAgentStore();
     vi.mocked(agentStore.getScheduledTask).mockResolvedValue(makeTask({ userId: OTHER_USER_ID }));
-    const transport = makeTransport({ agentStore });
+    const scheduling = makeScheduling({ agentStore });
 
-    const result = await transport.scheduling.delete(KNOWN_HANDLE, TASK_ID);
+    const result = await scheduling.delete(KNOWN_HANDLE, TASK_ID);
     expect(result.isErr()).toBe(true);
     if (result.isOk()) throw new Error("unreachable");
     expect(result.error.code).toBe("schedule_not_found");
@@ -247,9 +235,9 @@ describe("Transport.scheduling.delete", () => {
 
   it("rejects non-UUID ids with schedule_id_malformed before any DB hit", async () => {
     const agentStore = mockAgentStore();
-    const transport = makeTransport({ agentStore });
+    const scheduling = makeScheduling({ agentStore });
 
-    const result = await transport.scheduling.delete(KNOWN_HANDLE, "abc");
+    const result = await scheduling.delete(KNOWN_HANDLE, "abc");
     expect(result.isErr()).toBe(true);
     if (result.isOk()) throw new Error("unreachable");
     expect(result.error.code).toBe("schedule_id_malformed");
@@ -258,8 +246,8 @@ describe("Transport.scheduling.delete", () => {
   });
 
   it("rejects unknown handles", async () => {
-    const transport = makeTransport();
-    const result = await transport.scheduling.delete(UNKNOWN_HANDLE, TASK_ID);
+    const scheduling = makeScheduling();
+    const result = await scheduling.delete(UNKNOWN_HANDLE, TASK_ID);
     expect(result.isErr()).toBe(true);
     if (result.isOk()) throw new Error("unreachable");
     expect(result.error.code).toBe("identity_rejected");
