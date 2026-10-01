@@ -11,6 +11,7 @@ import {
   isNull,
   lte,
   ne,
+  not,
   or,
   type SQL,
   sql,
@@ -19,6 +20,7 @@ import * as R from "remeda";
 import { single } from "../../db/helpers.js";
 import type { Transaction } from "../../db/index.js";
 import type { CacheDialect } from "../../llm/cache-dialect.js";
+import { NOT_TURN_ROW_JSONPATH } from "../../llm/content.js";
 import type { ContentBlock, Message } from "../../llm/types.js";
 import { skills } from "../../skills/store/schema.js";
 import { previewInboundText } from "../../transport/content.js";
@@ -753,10 +755,11 @@ export interface AgentStore {
 
   /**
    * The turn-starting user row whose cursor is `inboundId`: the newest user
-   * row with string content. A turn's tool results are later user rows on the
-   * same cursor, with block-array content. Newest, because an insert re-run
-   * after its commit leaves two string rows on one cursor, and the turn that
-   * looks is the one that wrote the last.
+   * row holding no `tool_result` block and no harness-tagged block. A turn's
+   * tool results and its continuation prompt are later user rows on the same
+   * cursor. Newest, because an insert re-run after its commit leaves two turn
+   * rows on one cursor, and the turn that looks is the one that wrote the
+   * last.
    */
   findUserMessageByInbound(
     tx: Transaction,
@@ -1990,8 +1993,8 @@ export class DrizzleAgentStore implements AgentStore {
     conversationId: string,
     inboundId: string,
   ): Promise<{ id: string; createdAt: Date } | undefined> {
-    // Drizzle has no operator for a JSONB value's type, so `jsonb_typeof` is
-    // raw.
+    // Drizzle has no operator for a JSON path, so the predicate is raw; the
+    // path is `isTurnRowContent`'s rule, bound as a parameter.
     const rows = await tx
       .select({ id: messages.id, createdAt: messages.createdAt })
       .from(messages)
@@ -2000,7 +2003,7 @@ export class DrizzleAgentStore implements AgentStore {
           eq(messages.conversationId, conversationId),
           eq(messages.lastInboundMessageId, inboundId),
           eq(messages.role, "user"),
-          eq(sql`jsonb_typeof(${messages.content})`, "string"),
+          not(sql`jsonb_path_exists(${messages.content}, ${NOT_TURN_ROW_JSONPATH}::jsonpath)`),
         ),
       )
       .orderBy(desc(messages.id))

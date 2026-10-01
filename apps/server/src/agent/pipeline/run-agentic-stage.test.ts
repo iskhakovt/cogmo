@@ -686,6 +686,30 @@ describe("runAgenticStage", () => {
     expect(h.delivery.deliverBatch).not.toHaveBeenCalled();
   });
 
+  it("fails a stage that degraded before keeping anything without writing an empty batch", async () => {
+    // A degrade on the first iteration keeps nothing, and the store refuses
+    // an empty insert: writing it would fail the step instead of the stage.
+    const h = await harness();
+    h.runStreamingAgentLoop.mockResolvedValue(
+      loopResult({
+        text: "",
+        newMessages: [],
+        streamed: { text: "", toolUseIds: [] },
+        degraded: { reason: "model returned an empty turn", subtype: "empty_end_turn" },
+      }),
+    );
+    const steps = recordingSteps();
+
+    const outcome = await runAgenticStage(h.deps, stageArgs(), steps.steps, log);
+
+    expect(outcome).toEqual({
+      kind: "failed",
+      reason: "the stage's agent turn could not finish (model returned an empty turn)",
+    });
+    expect(h.agentStore.insertMessages).not.toHaveBeenCalled();
+    expect(steps.ids).toContain("persist-new-messages");
+  });
+
   // The degrade dropped the iteration that streamed this output — here a tool
   // call cut off at the output cap, which never ran — so the stage's sessions
   // must not keep showing it.

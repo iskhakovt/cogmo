@@ -144,10 +144,10 @@ export interface AgentLoopResult {
    * repair budget exhausted, a subtype was immediate-degrade, or a
    * Class D loop-pathology fingerprint tripped — the orchestrator posts
    * a system-generated apology as the final assistant message rather
-   * than `text`. `text` is `""` and `newMessages` carries only the
-   * successfully completed intermediate iterations (the failing
-   * iteration's content is NOT included; synthetic continuation prompts
-   * are NOT included). See design/agent-resilience.md → Degraded reply.
+   * than `text`. `text` is `""` and `newMessages` carries the successfully
+   * completed intermediate iterations, but not the failing iteration's
+   * content nor a continuation prompt no kept reply follows. See
+   * design/agent-resilience.md → Degraded reply.
    *
    * Class D trips set `subtype: "stuck_loop"` (consecutive) or
    * `"stuck_loop_cumulative"` (alternating-pattern). The iteration-cap
@@ -243,7 +243,7 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
     // tool_result" — content presence is the only safe gate.
     const hasToolUse = content.some((b) => b.type === "tool_use");
     if (!hasToolUse) {
-      return buildResult(messages, initialLength, [], totalUsage, finalModel, iterations, {
+      return buildResult(messages, initialLength, totalUsage, finalModel, iterations, {
         text: "",
         toolUseIds: [],
       });
@@ -268,7 +268,7 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
   }
 
   log.warn({ maxIterations }, "agent loop hit iteration limit");
-  return buildResult(messages, initialLength, [], totalUsage, finalModel, iterations, {
+  return buildResult(messages, initialLength, totalUsage, finalModel, iterations, {
     text: "",
     toolUseIds: [],
   });
@@ -430,6 +430,7 @@ function computeVolumeClusterInterceptions(
         toolUseId: block.id,
         content,
         isError: true,
+        harness: "volume_nudge",
       });
     }
     log.warn(
@@ -623,7 +624,6 @@ async function runOne(
 function buildResult(
   messages: Message[],
   initialLength: number,
-  ephemeralIndices: ReadonlyArray<number>,
   usage: Usage,
   model: string,
   iterations: number,
@@ -632,18 +632,13 @@ function buildResult(
   const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
   const text = lastAssistant ? extractText(lastAssistant.content) : "";
 
-  const ephemeral = new Set(ephemeralIndices);
-  const newMessages = messages
-    .slice(initialLength)
-    .filter((_m, i) => !ephemeral.has(i + initialLength));
-
   // Defensive copy — don't leak the mutable internal array through the interface.
   // newMessages is guaranteed non-empty on the success path: the loop always
   // pushes at least one assistant message before reaching buildResult.
   return {
     text,
     messages: [...messages],
-    newMessages,
+    newMessages: messages.slice(initialLength),
     usage,
     model,
     iterations,
@@ -652,18 +647,20 @@ function buildResult(
 }
 
 /**
- * Build a degraded result for Class C / D off-ramp exits. Drops synthetic
- * continuation prompts from `newMessages` so persistence sees only the
- * successfully completed tool_use+tool_result pairs from prior
- * iterations. The orchestrator overrides `text` with the user-facing
- * apology and appends a single assistant text block on top of these
- * messages; the loop itself doesn't manufacture the apology text — that
- * lives next to the channel-aware delivery code.
+ * Build a degraded result for Class C / D off-ramp exits. The caller has
+ * already dropped the failing iteration, so `newMessages` holds the completed
+ * tool_use+tool_result pairs, and a continuation prompt only when a kept reply
+ * follows it. One left at the tail answered nothing kept — the reply to it
+ * was dropped, or the iteration cap ended the loop before any request carried
+ * it — so it is dropped too, and the turn never ends on it. `messages` keeps
+ * it: it is what the last request sent. The orchestrator overrides `text`
+ * with the user-facing apology and appends a single assistant text block on
+ * top of these messages; the loop itself doesn't manufacture the apology
+ * text — that lives next to the channel-aware delivery code.
  */
 function buildDegradedResult(
   messages: Message[],
   initialLength: number,
-  ephemeralIndices: ReadonlyArray<number>,
   usage: Usage,
   model: string,
   iterations: number,
@@ -671,15 +668,16 @@ function buildDegradedResult(
   subtype: DegradeSubtype | null,
   streamed: EmittedLedger,
 ): AgentLoopResult {
-  const ephemeral = new Set(ephemeralIndices);
-  const newMessages = messages
-    .slice(initialLength)
-    .filter((_m, i) => !ephemeral.has(i + initialLength));
-
+  const kept = messages.slice(initialLength);
+  const last = kept.at(-1);
+  const endsOnContinuation =
+    last?.role === "user" &&
+    Array.isArray(last.content) &&
+    last.content.some((b) => b.type === "text" && b.harness === "continuation");
   return {
     text: "",
     messages: [...messages],
-    newMessages,
+    newMessages: endsOnContinuation ? kept.slice(0, -1) : kept,
     usage,
     model,
     iterations,
@@ -894,13 +892,6 @@ export async function runStreamingAgentLoop(
   const initialLength = messages.length;
   const toolDefs = tools.definitions();
   let totalUsage: Readonly<Usage> = ZERO_USAGE;
-  // Tracks messages that exist only in memory for the next iteration —
-  // synthetic continuation prompts injected by the repair flow. They feed
-  // the model on replay but must NOT be persisted (same convention as
-  // `validateHistory`-synthesized tool_results and compaction's prefix
-  // summary). The index is recomputed every iteration just before
-  // returning so newMessages reflects the persistable slice.
-  const ephemeralIndices: number[] = [];
   const budgets: RepairBudgets = freshBudgets();
   // Class D loop-pathology state. `consecutiveFingerprint` tracks the most
   // recent side-effect-free iteration's fingerprint (paired with a
@@ -956,7 +947,6 @@ export async function runStreamingAgentLoop(
       return buildDegradedResult(
         messages,
         initialLength,
-        ephemeralIndices,
         totalUsage,
         finalModel,
         iterations,
@@ -1001,7 +991,6 @@ export async function runStreamingAgentLoop(
       return buildDegradedResult(
         messages,
         initialLength,
-        ephemeralIndices,
         totalUsage,
         finalModel,
         iterations,
@@ -1023,12 +1012,15 @@ export async function runStreamingAgentLoop(
       if (outcome.instructions.kind === "continuation_prompt") {
         // Drop the just-pushed empty assistant message — it has no
         // content the model can build on and would just confuse next
-        // iteration's view of history. Then append the synthetic user
-        // turn and mark its index as ephemeral so it doesn't make it to
-        // persistence.
+        // iteration's view of history. Then append the continuation
+        // prompt, tagged harness-authored. It persists with the turn, since
+        // the reply's thinking is bound to it, and follows a user row (see
+        // design/context-management.md → Pair-Aware Compaction).
         messages.pop();
-        messages.push({ role: "user", content: outcome.instructions.text });
-        ephemeralIndices.push(messages.length - 1);
+        messages.push({
+          role: "user",
+          content: [{ type: "text", text: outcome.instructions.text, harness: "continuation" }],
+        });
       }
       if (outcome.instructions.kind === "tool_args_cut_off") {
         // The one repair that stays inside the iteration: the cut-off call is
@@ -1066,18 +1058,13 @@ export async function runStreamingAgentLoop(
       messages.pop();
       messages.push({
         role: "assistant",
-        content: [...iterationContent, { type: "text", text: notice }],
+        content: [
+          ...iterationContent,
+          { type: "text", text: notice, harness: "truncation_notice" },
+        ],
       });
       return {
-        ...buildResult(
-          messages,
-          initialLength,
-          ephemeralIndices,
-          totalUsage,
-          finalModel,
-          iterations,
-          streamed,
-        ),
+        ...buildResult(messages, initialLength, totalUsage, finalModel, iterations, streamed),
         truncated: true,
       };
     }
@@ -1085,15 +1072,7 @@ export async function runStreamingAgentLoop(
     // Drive flow on content, not `stop_reason` — see runAgentLoop above.
     const hasToolUse = iterationContent.some((b) => b.type === "tool_use");
     if (!hasToolUse) {
-      return buildResult(
-        messages,
-        initialLength,
-        ephemeralIndices,
-        totalUsage,
-        finalModel,
-        iterations,
-        streamed,
-      );
+      return buildResult(messages, initialLength, totalUsage, finalModel, iterations, streamed);
     }
 
     // Volume-cluster intercept (Class D). For each tool_use in this
@@ -1240,7 +1219,6 @@ export async function runStreamingAgentLoop(
       return buildDegradedResult(
         messages,
         initialLength,
-        ephemeralIndices,
         totalUsage,
         finalModel,
         iterations,
@@ -1259,7 +1237,6 @@ export async function runStreamingAgentLoop(
   return buildDegradedResult(
     messages,
     initialLength,
-    ephemeralIndices,
     totalUsage,
     finalModel,
     iterations,

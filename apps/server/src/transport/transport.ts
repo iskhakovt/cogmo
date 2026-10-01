@@ -44,7 +44,7 @@ import {
   pipelineGateKey,
   pipelineGateResolved,
 } from "../inngest/events.js";
-import { extractText } from "../llm/content.js";
+import { extractText, isHarnessPrompt } from "../llm/content.js";
 import { AllProvidersFailedError, extractStatus } from "../llm/fallback.js";
 import { computeBudget, resolveLimits } from "../llm/models.js";
 import { ProviderConfigError } from "../llm/resolver.js";
@@ -1336,9 +1336,13 @@ export function createTransport(deps: {
           }
           const rows = await agentStore.listMessages(tx, conversationId);
           const history = rows.flatMap((m) => {
-            const text = extractText(m.content);
-            // Drop internal tool-roundtrip turns (tool_use / tool_result only) —
-            // they carry no displayable prose.
+            const text = extractText(
+              typeof m.content === "string"
+                ? m.content
+                : m.content.filter((b) => !isHarnessPrompt(b)),
+            );
+            // Drop turns with no displayable prose: tool roundtrips and the
+            // loop's continuation prompt.
             return text.length > 0 ? [{ id: m.id, role: m.role, text }] : [];
           });
           return ok(history);

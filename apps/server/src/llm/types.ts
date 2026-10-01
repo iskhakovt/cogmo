@@ -14,9 +14,27 @@ import { canonicalKeyOrder } from "../util/canonical-key-order.js";
 
 // --- Content blocks (Zod → inferred types) ---
 
+/**
+ * Marks a block the agent loop wrote rather than the user or the model:
+ * `continuation` is the empty-reply continuation prompt (a user text block),
+ * `volume_nudge` the volume-cluster nudge (a `tool_result`), and
+ * `truncation_notice` the notice on a reply cut off at the output cap (an
+ * assistant text block). Adapters map blocks field by field, so the tag never
+ * reaches the wire. See design/prompt-caching.md → Stored shapes.
+ *
+ * Each of these marks its row as the loop's, so the row is never the turn's
+ * own (`isTurnRowContent`). A tag that rides on the turn's own row joins the
+ * schema's values and not this list.
+ */
+export const HARNESS_ROW_TAGS = ["continuation", "volume_nudge", "truncation_notice"] as const;
+
+export const HarnessTagSchema = z.enum([...HARNESS_ROW_TAGS]);
+export type HarnessTag = z.infer<typeof HarnessTagSchema>;
+
 const TextBlockSchema = z.object({
   type: z.literal("text"),
   text: z.string(),
+  harness: HarnessTagSchema.optional(),
 });
 
 const ToolUseBlockSchema = z.object({
@@ -35,6 +53,7 @@ const ToolResultBlockSchema = z.object({
   toolUseId: z.string(),
   content: z.string(),
   isError: z.boolean().optional(),
+  harness: HarnessTagSchema.optional(),
 });
 
 const ImageBlockSchema = z.object({

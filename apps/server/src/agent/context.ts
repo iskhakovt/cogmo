@@ -11,6 +11,7 @@
  */
 
 import * as R from "remeda";
+import { isTurnRowContent } from "../llm/content.js";
 import type {
   ChatParams,
   ContentBlock,
@@ -502,15 +503,17 @@ function truncateOldest(messages: Message[]): Message[] {
 
 // --- Pair-aware helpers ---
 
-function hasToolResults(content: string | ContentBlock[]): boolean {
-  if (typeof content === "string") return false;
-  return content.some((b) => b.type === "tool_result");
+/** A user row that belongs to the row before it: any user row but a turn's own. */
+function attachesToPrevious(msg: Message): boolean {
+  return msg.role === "user" && !isTurnRowContent(msg.content);
 }
 
 /**
- * Adjust a split index so the suffix (messages[idx:]) never starts with
- * orphaned tool_result blocks. Snaps backward to include the preceding
- * assistant message that produced the tool_uses.
+ * Adjust a split index so the suffix (messages[idx:]) never starts with a
+ * user row that belongs to the row before it. Tool results snap backward to
+ * include the assistant message that produced the tool_uses; a harness-tagged
+ * row (the continuation prompt) to the user row it follows, and on from there
+ * when that is a tool-result row.
  *
  * Used by both summarize (snap = summarize less, keep more) and truncate
  * (snap = drop less, keep more) — both prefer keeping an extra pair over
@@ -520,7 +523,7 @@ export function snapToPairBoundary(messages: ReadonlyArray<Message>, splitIdx: n
   let idx = splitIdx;
   while (idx > 0 && idx < messages.length) {
     const msg = messages[idx];
-    if (msg && msg.role === "user" && hasToolResults(msg.content)) {
+    if (msg && attachesToPrevious(msg)) {
       idx--;
     } else {
       break;
