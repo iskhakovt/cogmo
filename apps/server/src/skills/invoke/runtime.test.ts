@@ -8,7 +8,7 @@ describe("mapManifestResourceLimits", () => {
     );
   });
 
-  it("maps cpu_shares alone — regression: was silently dropped before", () => {
+  it("maps cpu_shares alone", () => {
     expect(mapManifestResourceLimits({ cpu_shares: 3 })).toEqual({ cpus: 3 });
   });
 

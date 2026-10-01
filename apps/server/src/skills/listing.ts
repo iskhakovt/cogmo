@@ -39,9 +39,11 @@ export interface SkillToolDef {
   gitSha: string;
 }
 
-interface ListingDeps {
+/** What the listings read: the skill rows, and the source cache for tool descriptors. */
+export interface ListingDeps {
   store: SkillStore;
   runInTx: Transactor;
+  sourceCache: SkillSourceCache;
 }
 
 function rowToSummary(r: SkillRow): SkillSummary {
@@ -55,21 +57,23 @@ function rowToSummary(r: SkillRow): SkillSummary {
 }
 
 /** Enabled skills, by name. */
-export async function listSkills(deps: ListingDeps): Promise<readonly SkillSummary[]> {
+export async function listSkills(
+  deps: Pick<ListingDeps, "store" | "runInTx">,
+): Promise<readonly SkillSummary[]> {
   const rows = await deps.runInTx((tx) => deps.store.listEnabledSkills(tx));
   return rows.map(rowToSummary);
 }
 
 /** Every skill, disabled ones included, by name. */
-export async function listAllSkills(deps: ListingDeps): Promise<readonly SkillSummary[]> {
+export async function listAllSkills(
+  deps: Pick<ListingDeps, "store" | "runInTx">,
+): Promise<readonly SkillSummary[]> {
   const rows = await deps.runInTx((tx) => deps.store.listAllSkills(tx));
   return rows.map(rowToSummary);
 }
 
 /** The enabled skills as LLM tool descriptors, skipping any whose source is unreadable. */
-export async function listToolDefs(
-  deps: ListingDeps & { sourceCache: SkillSourceCache },
-): Promise<readonly SkillToolDef[]> {
+export async function listToolDefs(deps: ListingDeps): Promise<readonly SkillToolDef[]> {
   const rows = await deps.runInTx((tx) => deps.store.listEnabledSkills(tx));
   const defs: SkillToolDef[] = [];
   for (const row of rows) {

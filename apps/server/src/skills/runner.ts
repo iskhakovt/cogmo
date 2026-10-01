@@ -24,6 +24,7 @@ import type { SkillRunResult } from "./invoke/run-result.js";
 import { LazyWarmPool, type WarmPoolSizing } from "./invoke/warm-pool.js";
 import type { SkillInvokeRejection } from "./invoke-rejection.js";
 import {
+  type ListingDeps,
   listAllSkills,
   listSkills,
   listToolDefs,
@@ -49,7 +50,7 @@ export type { RegisterForTestsParams } from "./seed-for-tests.js";
 
 /**
  * Default tier-2 container image when the constructor doesn't override it.
- * Production wiring (`src/index.ts`) always passes `tier2Image:
+ * Production wiring always passes `tier2Image:
  * env.COGMO_SKILLS_IMAGE`, so this default only matters for tests that
  * construct a runner without an explicit image AND actually invoke a
  * tier-container skill (the integration test does the latter — it overrides).
@@ -181,7 +182,7 @@ export interface SkillRunnerOptions {
    * Named Docker volume that holds per-lockfile-hash skill virtualenvs.
    * Threaded into every tier-2 worker the pool spawns so populated
    * venvs persist across worker recycle + are shared across the pool.
-   * Production wiring (`src/index.ts`) sets this from
+   * Production wiring sets this from
    * `env.COGMO_SKILLS_DEPS_VOLUME`. Omit for tests / tier-1-only paths
    * that don't need the cache.
    */
@@ -236,6 +237,7 @@ export interface SkillRunnerOptions {
 export class SkillRunnerImpl implements SkillRunner {
   #deploy: DeployDeps;
   #invoke: InvokeDeps;
+  #listing: ListingDeps;
   #warmPool: LazyWarmPool;
 
   private constructor(opts: SkillRunnerOptions) {
@@ -288,6 +290,7 @@ export class SkillRunnerImpl implements SkillRunner {
       scheduleNextRunAt: (schedule) =>
         schedule === null ? null : computeNextRun(schedule, opts.userTimezone, clock()),
     };
+    this.#listing = { store: opts.store, runInTx: opts.runInTx, sourceCache };
     this.#invoke = {
       store: opts.store,
       runInTx: opts.runInTx,
@@ -354,15 +357,15 @@ export class SkillRunnerImpl implements SkillRunner {
   }
 
   list(): Promise<readonly SkillSummary[]> {
-    return listSkills(this.#deploy);
+    return listSkills(this.#listing);
   }
 
   listAll(): Promise<readonly SkillSummary[]> {
-    return listAllSkills(this.#deploy);
+    return listAllSkills(this.#listing);
   }
 
   listToolDefs(): Promise<readonly SkillToolDef[]> {
-    return listToolDefs(this.#deploy);
+    return listToolDefs(this.#listing);
   }
 
   invoke(opts: {

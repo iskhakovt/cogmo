@@ -4,8 +4,8 @@ import { DefaultCtxHandler, type DefaultCtxHandlerOptions } from "../ctx-handler
 import type { SkillRunAs } from "../run-as.js";
 import type { SkillSourceCacheEntry } from "../source-cache.js";
 import type { SkillRow, SkillStore } from "../store/index.js";
+import type { ExecutedOutcome } from "./run-result.js";
 import { dispatchToRuntime, type RuntimeConfig, type SkillRuntime } from "./runtime.js";
-import type { ExecutedOutcome } from "./start-run.js";
 
 export interface ExecuteRunDeps {
   store: SkillStore;

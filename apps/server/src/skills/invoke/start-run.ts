@@ -1,12 +1,11 @@
 import { match } from "ts-pattern";
 import type { Transactor } from "../../db/index.js";
 import type { SkillRunRow, SkillRunTrigger, SkillStore } from "../store/index.js";
-import { reconstructFinishedResult, type SkillRunResult } from "./run-result.js";
-
-/** What an executed run produced, as its `executed` row records it. */
-export type ExecutedOutcome =
-  | { kind: "output"; output: unknown | null }
-  | { kind: "error"; error: string };
+import {
+  type ExecutedOutcome,
+  reconstructFinishedResult,
+  type SkillRunResult,
+} from "./run-result.js";
 
 /**
  * Where an invocation takes up its run row, from the row's

@@ -1023,13 +1023,13 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
     const runner = await makeTier2Runner();
 
     // Three invokes fire before the pool finishes constructing — all
-    // three should queue behind one in-flight `#poolPromise`.
+    // three should queue behind one in-flight pool start.
     const pending = [
       runner.invoke({ name: "tier2-test", inputs: {}, runAs: runAs() }),
       runner.invoke({ name: "tier2-test", inputs: {}, runAs: runAs() }),
       runner.invoke({ name: "tier2-test", inputs: {}, runAs: runAs() }),
     ];
-    // Drain microtasks so each invoke reaches `#ensurePool`.
+    // Drain microtasks so each invoke reaches `LazyWarmPool.ensure`.
     await new Promise<void>((r) => setImmediate(r));
 
     expect(createSpy).toHaveBeenCalledTimes(1);
@@ -1044,7 +1044,7 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
     }
   });
 
-  it("clears #poolPromise on init failure — next invoke retries with a fresh create", async () => {
+  it("clears a failed pool start — next invoke retries with a fresh create", async () => {
     const fakePool = makeFakePool();
     createSpy
       .mockRejectedValueOnce(new Error("daytona unreachable"))

@@ -3,8 +3,11 @@ import { match } from "ts-pattern";
 import type { Transactor } from "../../db/index.js";
 import { type SkillSourceCacheEntry, schemaIssues } from "../source-cache.js";
 import type { SkillRunStatus, SkillStore } from "../store/index.js";
-import { reconstructFinishedResult, type SkillRunResult } from "./run-result.js";
-import type { ExecutedOutcome } from "./start-run.js";
+import {
+  type ExecutedOutcome,
+  reconstructFinishedResult,
+  type SkillRunResult,
+} from "./run-result.js";
 
 /**
  * The `executed → finished` transition: validate the executed output against

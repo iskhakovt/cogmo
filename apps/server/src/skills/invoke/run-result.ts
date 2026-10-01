@@ -1,5 +1,10 @@
 import type { SkillRunStatus } from "../store/index.js";
 
+/** What an executed run produced, as its `executed` row records it. */
+export type ExecutedOutcome =
+  | { kind: "output"; output: unknown | null }
+  | { kind: "error"; error: string };
+
 /** A finished run: what the skill returned, or why it failed. */
 export type SkillRunResult =
   | { runId: string; status: "success"; output?: unknown }
