@@ -861,7 +861,10 @@ describe("handle-message — late replies", () => {
    * elapsed cooldown, its loop degraded, the delivery has batch targets and
    * the resume policy flushes.
    */
-  function lateReplyDeps(store: { existingReply?: { id: string }; rebatched: boolean }) {
+  function lateReplyDeps(store: {
+    existingReply?: { id: string; sameContent: boolean };
+    rebatched: boolean;
+  }) {
     const longAgo = new Date(Date.now() - 10 * 60_000).toISOString();
     return mockDeps({
       agentStore: mockAgentStore({
@@ -873,6 +876,9 @@ describe("handle-message — late replies", () => {
           cooldownState: { lastErroredAt: longAgo, cooldownSeconds: 60, consecutiveFailures: 1 },
           voiceMode: null,
         }),
+        getLastAssistantMessage: vi
+          .fn()
+          .mockResolvedValue({ id: "asst-prev", lastInboundMessageId: "inbound-0" }),
         findLastAssistantMessageByInbound: vi.fn().mockResolvedValue(store.existingReply),
         isCursorRebatched: vi.fn().mockResolvedValue(store.rebatched),
       }),
@@ -914,7 +920,7 @@ describe("handle-message — late replies", () => {
     return expectDefined(call, "send-response")[1];
   }
 
-  it("skips every post-persist step when a younger turn re-batched the inbounds", async () => {
+  it("skips delivery and announcements when a younger turn re-batched the inbounds", async () => {
     const deps = lateReplyDeps({ rebatched: true });
 
     const { result, ctx } = await new InngestTestEngine({
@@ -922,12 +928,33 @@ describe("handle-message — late replies", () => {
       events: [event],
     }).execute();
 
-    expect(result).toEqual({ status: "skipped", reason: "stale" });
+    expect(result).toEqual({ status: "skipped", reason: "superseded" });
     expect(deps.agentStore.insertMessages).not.toHaveBeenCalled();
     expect(deps.agentStore.clearCooldown).not.toHaveBeenCalled();
     const planned = plannedSteps(ctx);
     expect(planned).toContain("persist-new-messages");
-    expect(R.intersection(planned, POST_PERSIST_STEPS)).toEqual([]);
+    // The degraded apology streamed, so the degradation is still reported.
+    expect(R.intersection(planned, POST_PERSIST_STEPS)).toEqual(["emit-conversation-degraded"]);
+  });
+
+  it("skips delivery when another run of the same batch persisted a different reply", async () => {
+    // Its delivery would send this run's text while the transcript and
+    // `response/ready` hold the other run's reply.
+    const deps = lateReplyDeps({
+      existingReply: { id: "asst-other-run", sameContent: false },
+      rebatched: false,
+    });
+
+    const { result, ctx } = await new InngestTestEngine({
+      function: createHandleMessage(deps),
+      events: [event],
+    }).execute();
+
+    expect(result).toEqual({ status: "skipped", reason: "superseded" });
+    expect(deps.agentStore.insertMessages).not.toHaveBeenCalled();
+    expect(R.intersection(plannedSteps(ctx), POST_PERSIST_STEPS)).toEqual([
+      "emit-conversation-degraded",
+    ]);
   });
 
   it("plans every post-persist step when no younger turn re-batched the inbounds", async () => {
@@ -942,9 +969,15 @@ describe("handle-message — late replies", () => {
     expect(result).toEqual({ status: "processed", conversationId: "conv-1" });
     expect(deps.agentStore.insertMessages).toHaveBeenCalledTimes(1);
     expect(R.intersection(POST_PERSIST_STEPS, plannedSteps(ctx))).toEqual(POST_PERSIST_STEPS);
+    // The checks read only rows newer than the reply admission found.
+    expect(deps.agentStore.isCursorRebatched).toHaveBeenCalledWith(expect.anything(), {
+      conversationId: "conv-1",
+      cursor: "inbound-1",
+      afterMessageId: "asst-prev",
+    });
   });
 
-  it("replays a persist-new-messages memo from before the deploy as persisted", async () => {
+  it("replays an { id } persist-new-messages memo as persisted", async () => {
     const deps = lateReplyDeps({ rebatched: true });
 
     const { result, ctx } = await new InngestTestEngine({
@@ -964,7 +997,10 @@ describe("handle-message — late replies", () => {
   it("settles a re-run after commit as persisted, even with a younger turn row since", async () => {
     // `persist-new-messages` committed, then failed before Inngest recorded
     // it; a younger turn's row committed before the retry.
-    const deps = lateReplyDeps({ existingReply: { id: "asst-committed" }, rebatched: true });
+    const deps = lateReplyDeps({
+      existingReply: { id: "asst-committed", sameContent: true },
+      rebatched: true,
+    });
 
     const { result, ctx } = await new InngestTestEngine({
       function: createHandleMessage(deps),

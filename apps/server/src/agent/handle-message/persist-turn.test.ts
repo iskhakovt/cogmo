@@ -1,3 +1,4 @@
+import * as R from "remeda";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Transactor } from "../../db/index.js";
@@ -32,6 +33,7 @@ const ARGS: PersistTurnArgs = {
   triggerInboundId: "in-2",
   snapshot: { profileId: "profile", model: "model-a" },
   maxInboundId: "in-2",
+  lastAnsweredMessageId: "asst-prev",
   // An elapsed cooldown and a degraded result, so both emits are planned
   // whenever the turn persists.
   priorCooldown: ELAPSED_COOLDOWN,
@@ -42,7 +44,7 @@ interface Setup {
   /** Step results from an earlier invocation, by step id. */
   memo?: Readonly<Record<string, unknown>>;
   /** The newest assistant row already on the turn's cursor. */
-  existingReply?: { id: string };
+  existingReply?: { id: string; sameContent: boolean };
   rebatched?: boolean;
 }
 
@@ -78,6 +80,8 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+const BOTH_EMITS = ["emit-cooldown-cleared", "emit-conversation-degraded"];
+
 describe("persistTurn", () => {
   it("persists a turn no later turn re-batched, and emits what it settles", async () => {
     const record = vi.spyOn(agentIterations, "record");
@@ -86,7 +90,18 @@ describe("persistTurn", () => {
     const outcome = await persistTurn(step, deps, ARGS);
 
     expect(outcome).toEqual({ kind: "persisted", messageId: "asst-new" });
-    expect(agentStore.isCursorRebatched).toHaveBeenCalledWith(FAKE_TX, "conv", "in-2");
+    // Both reads are bounded to rows newer than the reply admission found.
+    expect(agentStore.findLastAssistantMessageByInbound).toHaveBeenCalledWith(FAKE_TX, {
+      conversationId: "conv",
+      inboundId: "in-2",
+      afterMessageId: "asst-prev",
+      content: [{ type: "text", text: "reply" }],
+    });
+    expect(agentStore.isCursorRebatched).toHaveBeenCalledWith(FAKE_TX, {
+      conversationId: "conv",
+      cursor: "in-2",
+      afterMessageId: "asst-prev",
+    });
     expect(agentStore.insertMessages).toHaveBeenCalledWith(
       FAKE_TX,
       expect.objectContaining({ conversationId: "conv", lastInboundMessageId: "in-2" }),
@@ -94,50 +109,73 @@ describe("persistTurn", () => {
     expect(agentStore.clearCooldown).toHaveBeenCalledWith(FAKE_TX, "conv");
     // The checks and the write share one transaction.
     expect(transactions).toHaveLength(1);
-    expect(emitted()).toEqual(["emit-cooldown-cleared", "emit-conversation-degraded"]);
+    expect(emitted()).toEqual(BOTH_EMITS);
     expect(record).toHaveBeenCalledTimes(1);
   });
 
-  it("writes nothing and emits nothing when a later turn re-batched the cursor", async () => {
+  it("writes nothing when a later turn re-batched the cursor, and reports only the degradation", async () => {
     const record = vi.spyOn(agentIterations, "record");
-    const { step, deps, agentStore, planned, emitted } = setup({ rebatched: true });
+    const { step, deps, agentStore, emitted } = setup({ rebatched: true });
 
     const outcome = await persistTurn(step, deps, ARGS);
 
     expect(outcome).toEqual({ kind: "superseded" });
     expect(agentStore.insertMessages).not.toHaveBeenCalled();
     expect(agentStore.clearCooldown).not.toHaveBeenCalled();
-    expect(planned).toEqual(["persist-new-messages"]);
-    expect(emitted()).toEqual([]);
-    expect(record).not.toHaveBeenCalled();
+    // The degraded apology already streamed; the cooldown was not cleared.
+    expect(emitted()).toEqual(["emit-conversation-degraded"]);
+    // The loop ran in this attempt.
+    expect(record).toHaveBeenCalledTimes(1);
   });
 
-  it("returns the committed reply on a re-run after commit, even with a covering turn since", async () => {
-    // The first attempt committed, then a younger turn's row landed before
-    // the step's retry. The reply check runs first, so the re-run settles
-    // the turn it already persisted.
+  it("emits nothing for a superseded turn that didn't degrade", async () => {
+    const { step, deps, emitted } = setup({ rebatched: true });
+    const undegraded = R.omit(RESULT, ["degraded"]);
+
+    expect(await persistTurn(step, deps, { ...ARGS, result: undegraded })).toEqual({
+      kind: "superseded",
+    });
+    expect(emitted()).toEqual([]);
+  });
+
+  it("is superseded when another run of the same batch already persisted a different reply", async () => {
     const record = vi.spyOn(agentIterations, "record");
     const { step, deps, agentStore, emitted } = setup({
-      existingReply: { id: "asst-final" },
+      existingReply: { id: "asst-other", sameContent: false },
+    });
+
+    const outcome = await persistTurn(step, deps, ARGS);
+
+    expect(outcome).toEqual({ kind: "superseded" });
+    expect(agentStore.isCursorRebatched).not.toHaveBeenCalled();
+    expect(agentStore.insertMessages).not.toHaveBeenCalled();
+    expect(agentStore.clearCooldown).not.toHaveBeenCalled();
+    expect(emitted()).toEqual(["emit-conversation-degraded"]);
+    expect(record).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns its own committed reply on a re-run after commit, even with a covering turn since", async () => {
+    // The first attempt committed, then a younger turn's row landed before
+    // the step's retry. The reply check runs first and finds this run's own
+    // reply, so the re-run settles the turn it already persisted.
+    const record = vi.spyOn(agentIterations, "record");
+    const { step, deps, agentStore, emitted } = setup({
+      existingReply: { id: "asst-final", sameContent: true },
       rebatched: true,
     });
 
     const outcome = await persistTurn(step, deps, ARGS);
 
     expect(outcome).toEqual({ kind: "persisted", messageId: "asst-final" });
-    expect(agentStore.findLastAssistantMessageByInbound).toHaveBeenCalledWith(
-      FAKE_TX,
-      "conv",
-      "in-2",
-    );
     expect(agentStore.isCursorRebatched).not.toHaveBeenCalled();
     expect(agentStore.insertMessages).not.toHaveBeenCalled();
     expect(agentStore.clearCooldown).not.toHaveBeenCalled();
-    expect(emitted()).toEqual(["emit-cooldown-cleared", "emit-conversation-degraded"]);
+    expect(emitted()).toEqual(BOTH_EMITS);
+    // The attempt that wrote the rows recorded the sample.
     expect(record).not.toHaveBeenCalled();
   });
 
-  it("reads a memo from before superseded existed as persisted", async () => {
+  it("reads an { id } memo as persisted", async () => {
     const { step, deps, agentStore, emitted } = setup({
       memo: { "persist-new-messages": { id: "asst-legacy" } },
     });
@@ -147,10 +185,11 @@ describe("persistTurn", () => {
     expect(outcome).toEqual({ kind: "persisted", messageId: "asst-legacy" });
     expect(agentStore.findLastAssistantMessageByInbound).not.toHaveBeenCalled();
     expect(agentStore.insertMessages).not.toHaveBeenCalled();
-    expect(emitted()).toEqual(["emit-cooldown-cleared", "emit-conversation-degraded"]);
+    expect(emitted()).toEqual(BOTH_EMITS);
   });
 
-  it("replays a superseded memo without emitting", async () => {
+  it("replays a superseded memo without recording or clearing", async () => {
+    const record = vi.spyOn(agentIterations, "record");
     const { step, deps, agentStore, emitted } = setup({
       memo: { "persist-new-messages": { kind: "superseded" } },
     });
@@ -159,7 +198,8 @@ describe("persistTurn", () => {
 
     expect(outcome).toEqual({ kind: "superseded" });
     expect(agentStore.insertMessages).not.toHaveBeenCalled();
-    expect(emitted()).toEqual([]);
+    expect(emitted()).toEqual(["emit-conversation-degraded"]);
+    expect(record).not.toHaveBeenCalled();
   });
 
   it("rejects a memo of neither shape", async () => {

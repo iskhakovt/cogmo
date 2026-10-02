@@ -299,16 +299,17 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         triggerInboundId,
         snapshot,
         maxInboundId,
+        lastAnsweredMessageId: lastAssistant?.id ?? null,
         priorCooldown: conv.cooldownState,
         result,
       });
 
       return match(persisted)
         .with({ kind: "superseded" }, async () => {
-          // A later turn re-batched this turn's inbounds and answers them;
-          // nothing was persisted, so nothing is delivered or announced.
-          turnLogger.warn("later turn re-batched this turn's inbounds; reply not persisted");
-          return { status: "skipped" as const, reason: "stale" as const };
+          // Another reply owns this batch's inbounds; nothing was persisted,
+          // so nothing is delivered or announced.
+          turnLogger.warn("another reply owns this turn's inbounds; reply not persisted");
+          return { status: "skipped" as const, reason: "superseded" as const };
         })
         .with({ kind: "persisted" }, async ({ messageId }) => {
           await deliverReply(step, deps, {

@@ -27,6 +27,11 @@ export interface PersistTurnArgs {
   snapshot: { profileId: string; model: string };
   /** The batch's last inbound: the cursor the turn's rows are written with. */
   maxInboundId: string;
+  /**
+   * The reply admission found (`last-assistant`), or null before the first.
+   * Every row this turn's checks look for is newer, so they read no further back.
+   */
+  lastAnsweredMessageId: string | null;
   /** The conversation's cooldown when admission let the turn through: an elapsed one this turn probes. */
   priorCooldown: CooldownState | null;
   result: AgentLoopResult;
@@ -34,16 +39,14 @@ export interface PersistTurnArgs {
 
 /**
  * What `persist-new-messages` settled. `persisted` names the turn's final
- * reply row, written by this attempt or by an earlier run of the same batch.
- * `superseded`: a later turn row re-batched this turn's inbounds, so nothing
- * was written (design/crash-recovery.md → Late replies).
+ * reply row, written by this run. `superseded`: another reply owns the
+ * batch's inbounds — a later turn re-batched them, or another run of the
+ * same batch persisted a different reply — so nothing was written
+ * (design/observation.md → Late replies, PR 0).
  */
 export type PersistOutcome = { kind: "persisted"; messageId: string } | { kind: "superseded" };
 
-/**
- * The step's memo. A run in flight may hold the `{ id }` memo of a build
- * without `superseded`; it reads as `persisted`.
- */
+/** The step's memo. An `{ id }` memo is accepted and reads as `persisted`. */
 const PersistOutcomeSchema = z.union([
   z.discriminatedUnion("kind", [
     z.object({ kind: z.literal("persisted"), messageId: z.string() }),
@@ -54,24 +57,22 @@ const PersistOutcomeSchema = z.union([
     .transform(({ id }): PersistOutcome => ({ kind: "persisted", messageId: id })),
 ]);
 
-/** What the persist transaction did. */
-type PersistWrite =
-  | { kind: "inserted"; messageId: string }
-  | { kind: "recovered"; messageId: string }
-  | { kind: "superseded" };
+const SUPERSEDED: PersistOutcome = { kind: "superseded" };
 
 /**
  * Persist the turn's new messages — tool turns and the final assistant — and
- * emit what the persisted turn settles: a cleared cooldown, a degraded turn.
+ * emit what the turn settles: a cleared cooldown when it persisted, a
+ * degraded turn either way (the apology streamed whether or not it persists).
  *
  * The persist transaction first looks for a reply already on the turn's
- * cursor (a re-run after commit, or another run of the same batch) and
- * returns its newest row without writing. Otherwise it refuses when a later
- * turn row covers the cursor: the turn is `superseded`, nothing is written,
- * no cooldown is cleared and nothing is emitted.
+ * cursor. One whose content is this run's final message is this run's own
+ * earlier write (a re-run after commit): `persisted` with its id, nothing
+ * written. A different one is another run of the same batch: `superseded`.
+ * Otherwise it is `superseded` when a later turn row covers the cursor, and
+ * inserts when none does.
  *
- * Steps, in order: `persist-new-messages`, then only on `persisted`:
- * `emit-cooldown-cleared` (when the turn probed an elapsed cooldown) and
+ * Steps, in order: `persist-new-messages`, `emit-cooldown-cleared` (when
+ * `persisted` and the turn probed an elapsed cooldown),
  * `emit-conversation-degraded` (when the loop degraded).
  */
 export async function persistTurn(
@@ -80,24 +81,38 @@ export async function persistTurn(
   args: PersistTurnArgs,
 ): Promise<PersistOutcome> {
   const { conversationId, snapshot, result, priorCooldown, maxInboundId } = args;
+  const afterMessageId = args.lastAnsweredMessageId;
 
   const memo = await step.run("persist-new-messages", async (): Promise<PersistOutcome> => {
+    const finalMessage = result.newMessages.at(-1);
+    if (finalMessage === undefined) throw new Error("persistTurn: the loop returned no messages");
     // Both checks read in the insert's transaction, so the decision and the
     // write share one snapshot. REPEATABLE READ takes no predicate lock: a
-    // covering turn row committed by a transaction overlapping this one is
-    // missed (design/crash-recovery.md → Late replies, residuals).
-    const written = await deps.runInTx(async (tx): Promise<PersistWrite> => {
-      const existing = await deps.agentStore.findLastAssistantMessageByInbound(
-        tx,
+    // row committed by a transaction overlapping this one is missed
+    // (design/observation.md → Late replies, what PR 0 can't see).
+    const { outcome, ownEarlierWrite } = await deps.runInTx(async (tx) => {
+      const existing = await deps.agentStore.findLastAssistantMessageByInbound(tx, {
         conversationId,
-        maxInboundId,
-      );
+        inboundId: maxInboundId,
+        afterMessageId,
+        content: finalMessage.content,
+      });
       if (existing !== undefined) {
-        return { kind: "recovered", messageId: existing.id };
+        // The final message comes from a memoized step (`llm-iter<N>`,
+        // `degraded-reply`), so this run's own earlier write holds exactly
+        // this content; another run of the batch sampled its own reply. An
+        // identical reply from another run reads as this run's, and the same
+        // text is delivered twice (design/observation.md → Late replies).
+        return existing.sameContent
+          ? { outcome: persisted(existing.id), ownEarlierWrite: true }
+          : { outcome: SUPERSEDED, ownEarlierWrite: false };
       }
-      if (await deps.agentStore.isCursorRebatched(tx, conversationId, maxInboundId)) {
-        return { kind: "superseded" };
-      }
+      const rebatched = await deps.agentStore.isCursorRebatched(tx, {
+        conversationId,
+        cursor: maxInboundId,
+        afterMessageId,
+      });
+      if (rebatched) return { outcome: SUPERSEDED, ownEarlierWrite: false };
       const inserted = await deps.agentStore.insertMessages(tx, {
         conversationId,
         messages: result.newMessages,
@@ -114,68 +129,71 @@ export async function persistTurn(
       if (priorCooldown !== null) {
         await deps.agentStore.clearCooldown(tx, conversationId);
       }
-      return { kind: "inserted", messageId: inserted.id };
+      return { outcome: persisted(inserted.id), ownEarlierWrite: false };
     });
-    return match(written)
-      .returnType<PersistOutcome>()
-      .with({ kind: "inserted" }, ({ messageId }) => {
-        // Inside the step, because the bare body re-executes once per
-        // remaining boundary and would record the same turn 3-6 times; a
-        // step body fires once and is suppressed on replay. After the write,
-        // and only when this attempt wrote, so neither a transaction that
-        // keeps failing nor a re-run after commit adds a sample. A turn
-        // whose persist fails irrecoverably is never sampled: the histogram
-        // counts turns that produced a persisted reply. For a histogram read
-        // to spot runaway iteration counts, repeated copies of one value are
-        // worse than a missing one.
-        agentIterations.record(result.iterations, { model: result.model });
-        return { kind: "persisted", messageId };
-      })
-      .with({ kind: "recovered" }, ({ messageId }) => ({ kind: "persisted", messageId }))
-      .with({ kind: "superseded" }, () => ({ kind: "superseded" }))
-      .exhaustive();
+    // Inside the step, because the bare body re-executes once per remaining
+    // boundary and would record the same turn 3-6 times; a step body fires
+    // once and is suppressed on replay. After the transaction, so a
+    // transaction that keeps failing adds no sample, and for every outcome
+    // except this run's own earlier write, whose attempt already reached
+    // this line or crashed before it. For a histogram read to spot runaway
+    // iteration counts, repeated copies of one value are worse than a
+    // missing one.
+    if (!ownEarlierWrite) {
+      agentIterations.record(result.iterations, { model: result.model });
+    }
+    return outcome;
   });
+  const outcome = PersistOutcomeSchema.parse(memo);
 
-  return match(PersistOutcomeSchema.parse(memo))
-    .returnType<Promise<PersistOutcome>>()
-    .with({ kind: "superseded" }, async (superseded) => superseded)
-    .with({ kind: "persisted" }, async (persisted) => {
-      await emitPersistedTurnEvents(step, args);
-      return persisted;
-    })
+  // The cooldown was cleared only where the turn's rows were written.
+  const clearedCooldown = match(outcome)
+    .with({ kind: "persisted" }, () => priorCooldown)
+    .with({ kind: "superseded" }, () => null)
     .exhaustive();
+  await emitTurnEvents(step, args, clearedCooldown);
+  return outcome;
 }
 
-async function emitPersistedTurnEvents(step: TurnSteps, args: PersistTurnArgs): Promise<void> {
-  const { conversationId, result, priorCooldown } = args;
+function persisted(messageId: string): PersistOutcome {
+  return { kind: "persisted", messageId };
+}
+
+async function emitTurnEvents(
+  step: TurnSteps,
+  args: PersistTurnArgs,
+  clearedCooldown: CooldownState | null,
+): Promise<void> {
+  const { conversationId, result } = args;
 
   // Half-open success: cooldown was cleared inside the persist tx.
   // Emit `conversation/cooldown/cleared` as a separate durable step
   // AFTER persist commits so the event can't fire on a rolled-back
   // tx. Same pattern as the degrade emit below. The pre-tx
-  // `priorCooldown` carries `lastErroredAt` for the elapsed
+  // cooldown carries `lastErroredAt` for the elapsed
   // calculation. Explicit bus-dedup `id` keyed on the cooldown
   // being cleared protects against `step.sendEvent`'s at-least-once
   // delivery contract — a retry after the send registers but before
   // the cache write would otherwise double-fire downstream
   // consumers. See design/agent-resilience.md → Telemetry.
-  if (priorCooldown !== null) {
+  if (clearedCooldown !== null) {
     await step.sendEvent(
       "emit-cooldown-cleared",
       buildConversationCooldownClearedEvent(
         {
           conversationId,
           clearedBy: "success",
-          elapsedCooldownSeconds: calculateElapsedCooldown(priorCooldown.lastErroredAt),
+          elapsedCooldownSeconds: calculateElapsedCooldown(clearedCooldown.lastErroredAt),
         },
-        `cooldown-cleared-${conversationId}-${priorCooldown.lastErroredAt}`,
+        `cooldown-cleared-${conversationId}-${clearedCooldown.lastErroredAt}`,
       ),
     );
   }
 
   // Emit the degrade signal as a separate durable step after persist —
   // `step.sendEvent` provides exactly-once delivery, same pattern as
-  // `conversation/errored` in `onFailure`. See
+  // `conversation/errored` in `onFailure`. A superseded turn emits it too:
+  // the apology already streamed to the user. See
   // design/agent-resilience.md → Telemetry.
   if (result.degraded) {
     const degradedSubtype = result.degraded.subtype;

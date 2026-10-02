@@ -31,8 +31,9 @@ export const messages = pgTable(
     lastInboundMessageId: uuid("last_inbound_message_id").notNull(),
     // Nullable: set only on a `handle-message` turn row, where it is the
     // batch's first inbound (`[first, last_inbound_message_id]` is the batch
-    // the turn re-read). NULL on every other row and on turn rows written
-    // before the column existed.
+    // the turn re-read). NULL on every other row. A NULL on a turn row is an
+    // unknown range start, which `isCursorRebatched` reads as covering every
+    // earlier cursor.
     firstInboundMessageId: uuid("first_inbound_message_id"),
     inputTokens: integer("input_tokens"), // nullable — only set on assistant messages
     // NOT NULL, no default — callers must pass explicitly for assistant rows

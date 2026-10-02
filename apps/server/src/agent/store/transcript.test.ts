@@ -575,8 +575,34 @@ describe("DrizzleTranscriptStore", () => {
       return id;
     }
 
-    function rebatched(conversationId: string, cursor: string): Promise<boolean> {
-      return tx((trx) => store.isCursorRebatched(trx, conversationId, cursor));
+    function rebatched(
+      conversationId: string,
+      cursor: string,
+      afterMessageId: string | null,
+    ): Promise<boolean> {
+      return tx((trx) => store.isCursorRebatched(trx, { conversationId, cursor, afterMessageId }));
+    }
+
+    /** An assistant reply on `cursor`; returns the final row's id. */
+    async function reply(
+      conversationId: string,
+      stamp: { profileId: string; model: string },
+      cursor: string,
+      texts: ReadonlyArray<string>,
+    ): Promise<string> {
+      const { id } = await tx((trx) =>
+        store.insertMessages(trx, {
+          conversationId,
+          messages: texts.map((text) => ({
+            role: "assistant" as const,
+            content: [{ type: "text" as const, text }],
+          })),
+          lastInboundMessageId: cursor,
+          lastMessageOutputTokens: 1,
+          ...stamp,
+        }),
+      );
+      return id;
     }
 
     it("insertMessage stores the batch's first inbound", async () => {
@@ -590,46 +616,83 @@ describe("DrizzleTranscriptStore", () => {
       expect(row).toEqual({ first: IN_1 });
     });
 
-    it("findLastAssistantMessageByInbound returns the newest assistant row on the cursor", async () => {
+    it("findLastAssistantMessageByInbound returns the newest reply on the cursor and whether it matches", async () => {
       const { conversationId, stamp } = await seedConversation(tx);
       await userRow(conversationId, stamp, IN_2, IN_1, "words");
-      await tx((trx) =>
+      await reply(conversationId, stamp, IN_2, ["first reply", "final reply"]);
+      const duplicateFinal = await reply(conversationId, stamp, IN_2, ["rerun reply"]);
+      await reply(conversationId, stamp, IN_3, ["next turn"]);
+
+      const find = (inboundId: string, text: string) =>
+        tx((trx) =>
+          store.findLastAssistantMessageByInbound(trx, {
+            conversationId,
+            inboundId,
+            afterMessageId: null,
+            content: [{ type: "text", text }],
+          }),
+        );
+      expect(await find(IN_2, "rerun reply")).toEqual({ id: duplicateFinal, sameContent: true });
+      expect(await find(IN_2, "another run's reply")).toEqual({
+        id: duplicateFinal,
+        sameContent: false,
+      });
+      expect(await find(IN_4, "rerun reply")).toBeUndefined();
+    });
+
+    it("findLastAssistantMessageByInbound compares content as the column stores it", async () => {
+      // Key order doesn't make a reply different.
+      const { conversationId, stamp } = await seedConversation(tx);
+      const { id } = await tx((trx) =>
         store.insertMessages(trx, {
           conversationId,
           messages: [
-            { role: "assistant", content: [{ type: "text", text: "first reply" }] },
-            { role: "assistant", content: [{ type: "text", text: "final reply" }] },
+            {
+              role: "assistant",
+              content: [{ type: "tool_use", id: "t1", name: "search", input: { b: 1, a: 2 } }],
+            },
           ],
           lastInboundMessageId: IN_2,
           lastMessageOutputTokens: 1,
           ...stamp,
         }),
       );
-      const { id: duplicateFinal } = await tx((trx) =>
-        store.insertMessages(trx, {
-          conversationId,
-          messages: [{ role: "assistant", content: [{ type: "text", text: "rerun reply" }] }],
-          lastInboundMessageId: IN_2,
-          lastMessageOutputTokens: 1,
-          ...stamp,
-        }),
-      );
-      await tx((trx) =>
-        store.insertMessages(trx, {
-          conversationId,
-          messages: [{ role: "assistant", content: [{ type: "text", text: "next turn" }] }],
-          lastInboundMessageId: IN_3,
-          lastMessageOutputTokens: 1,
-          ...stamp,
-        }),
-      );
 
       expect(
-        await tx((trx) => store.findLastAssistantMessageByInbound(trx, conversationId, IN_2)),
-      ).toEqual({ id: duplicateFinal });
+        await tx((trx) =>
+          store.findLastAssistantMessageByInbound(trx, {
+            conversationId,
+            inboundId: IN_2,
+            afterMessageId: null,
+            content: [{ type: "tool_use", id: "t1", name: "search", input: { a: 2, b: 1 } }],
+          }),
+        ),
+      ).toEqual({ id, sameContent: true });
+    });
+
+    it("findLastAssistantMessageByInbound reads only rows newer than afterMessageId", async () => {
+      const { conversationId, stamp } = await seedConversation(tx);
+      const older = await reply(conversationId, stamp, IN_2, ["old reply"]);
+
       expect(
-        await tx((trx) => store.findLastAssistantMessageByInbound(trx, conversationId, IN_4)),
+        await tx((trx) =>
+          store.findLastAssistantMessageByInbound(trx, {
+            conversationId,
+            inboundId: IN_2,
+            afterMessageId: older,
+            content: [{ type: "text", text: "old reply" }],
+          }),
+        ),
       ).toBeUndefined();
+    });
+
+    it("isCursorRebatched reads only rows newer than afterMessageId", async () => {
+      const { conversationId, stamp } = await seedConversation(tx);
+      await userRow(conversationId, stamp, IN_3, IN_1, "words");
+      const answered = await reply(conversationId, stamp, IN_1, ["answer"]);
+
+      expect(await rebatched(conversationId, IN_2, null)).toBe(true);
+      expect(await rebatched(conversationId, IN_2, answered)).toBe(false);
     });
 
     it("isCursorRebatched is false while no later turn row exists", async () => {
@@ -638,7 +701,7 @@ describe("DrizzleTranscriptStore", () => {
       await userRow(conversationId, stamp, IN_2, IN_1, "words");
       await userRow(conversationId, stamp, IN_2, IN_1, "words");
 
-      expect(await rebatched(conversationId, IN_2)).toBe(false);
+      expect(await rebatched(conversationId, IN_2, null)).toBe(false);
     });
 
     it("isCursorRebatched is true when a later turn row's batch holds the cursor", async () => {
@@ -646,9 +709,9 @@ describe("DrizzleTranscriptStore", () => {
       await userRow(conversationId, stamp, IN_2, IN_1, "words");
       await userRow(conversationId, stamp, IN_3, IN_1, "words");
 
-      expect(await rebatched(conversationId, IN_2)).toBe(true);
+      expect(await rebatched(conversationId, IN_2, null)).toBe(true);
       // The range start is inclusive: a batch starting at the cursor holds it.
-      expect(await rebatched(conversationId, IN_1)).toBe(true);
+      expect(await rebatched(conversationId, IN_1, null)).toBe(true);
     });
 
     it("isCursorRebatched is false for a later turn whose batch starts above the cursor", async () => {
@@ -656,16 +719,16 @@ describe("DrizzleTranscriptStore", () => {
       await userRow(conversationId, stamp, IN_2, IN_1, "words");
       await userRow(conversationId, stamp, IN_4, IN_3, "words");
 
-      expect(await rebatched(conversationId, IN_2)).toBe(false);
+      expect(await rebatched(conversationId, IN_2, null)).toBe(false);
     });
 
     it("isCursorRebatched counts a later turn row with no range start", async () => {
-      // A turn row written before the column existed.
+      // A turn row with no range start.
       const { conversationId, stamp } = await seedConversation(tx);
       await userRow(conversationId, stamp, IN_2, IN_1, "words");
       await userRow(conversationId, stamp, IN_3, null, "words");
 
-      expect(await rebatched(conversationId, IN_2)).toBe(true);
+      expect(await rebatched(conversationId, IN_2, null)).toBe(true);
     });
 
     it("isCursorRebatched ignores a later pipeline stage prompt", async () => {
@@ -681,7 +744,7 @@ describe("DrizzleTranscriptStore", () => {
       await userRow(conversationId, stamp, IN_2, IN_1, "words");
       await userRow(conversationId, stamp, IN_3, null, "stage prompt");
 
-      expect(await rebatched(conversationId, IN_2)).toBe(false);
+      expect(await rebatched(conversationId, IN_2, null)).toBe(false);
     });
 
     it("isCursorRebatched ignores later rows that are not turn rows", async () => {
@@ -703,7 +766,7 @@ describe("DrizzleTranscriptStore", () => {
         }),
       );
 
-      expect(await rebatched(conversationId, IN_2)).toBe(false);
+      expect(await rebatched(conversationId, IN_2, null)).toBe(false);
     });
 
     it("isCursorRebatched ignores another conversation's turn rows", async () => {
@@ -714,7 +777,7 @@ describe("DrizzleTranscriptStore", () => {
       await userRow(conversationId, stamp, IN_2, IN_1, "words");
       await userRow(other.id, stamp, IN_3, IN_1, "words");
 
-      expect(await rebatched(conversationId, IN_2)).toBe(false);
+      expect(await rebatched(conversationId, IN_2, null)).toBe(false);
     });
   });
 

@@ -10,6 +10,7 @@ import {
   ne,
   not,
   or,
+  type SQL,
   sql,
 } from "drizzle-orm";
 import * as R from "remeda";
@@ -154,25 +155,35 @@ export interface TranscriptStore {
   ): Promise<{ id: string; lastInboundMessageId: string } | undefined>;
 
   /**
-   * The newest assistant row carrying `inboundId` as its cursor: the final
-   * reply of a turn whose `persist-new-messages` already committed.
+   * The newest assistant row newer than `afterMessageId` (any row when
+   * `null`) carrying `inboundId` as its cursor — the final reply of a
+   * committed `persist-new-messages` for that batch — and whether its content
+   * equals `content`. Equality is `jsonb` equality over the column's encoding
+   * of `content`, so key order and fields the schema drops don't count.
    */
   findLastAssistantMessageByInbound(
     tx: Transaction,
-    conversationId: string,
-    inboundId: string,
-  ): Promise<{ id: string } | undefined>;
+    params: {
+      conversationId: string;
+      inboundId: string;
+      afterMessageId: string | null;
+      content: Message["content"];
+    },
+  ): Promise<{ id: string; sameContent: boolean } | undefined>;
 
   /**
-   * Whether a later non-pipeline turn row re-batched the inbound `cursor`:
-   * its batch range `[first_inbound_message_id, last_inbound_message_id]`
-   * holds `cursor` below its own cursor. A turn row with no range start
-   * (written before the column existed) covers any cursor below its own.
-   * Pipeline stage prompts never count, by the same left join on the cursor's
-   * inbound as `getLastAssistantMessage`. Asked by a turn with no reply yet:
-   * see design/crash-recovery.md → Late replies.
+   * Whether a non-pipeline turn row newer than `afterMessageId` (any row when
+   * `null`) re-batched the inbound `cursor`: its batch range
+   * `[first_inbound_message_id, last_inbound_message_id]` holds `cursor`
+   * below its own cursor. A turn row with no range start covers any cursor
+   * below its own. Pipeline stage prompts never count, by the same left join
+   * on the cursor's inbound as `getLastAssistantMessage`. This is the
+   * Covered test of design/observation.md → The Unit; see Late replies there.
    */
-  isCursorRebatched(tx: Transaction, conversationId: string, cursor: string): Promise<boolean>;
+  isCursorRebatched(
+    tx: Transaction,
+    params: { conversationId: string; cursor: string; afterMessageId: string | null },
+  ): Promise<boolean>;
 
   /**
    * A conversation's complete message history with row ids, ordered by id.
@@ -417,16 +428,25 @@ export class DrizzleTranscriptStore implements TranscriptStore {
 
   async findLastAssistantMessageByInbound(
     tx: Transaction,
-    conversationId: string,
-    inboundId: string,
-  ): Promise<{ id: string } | undefined> {
+    params: {
+      conversationId: string;
+      inboundId: string;
+      afterMessageId: string | null;
+      content: Message["content"];
+    },
+  ): Promise<{ id: string; sameContent: boolean } | undefined> {
     const rows = await tx
-      .select({ id: messages.id })
+      .select({
+        id: messages.id,
+        // `eq` binds `content` through the column's encoder, as an insert would.
+        sameContent: eq(messages.content, params.content).mapWith(Boolean),
+      })
       .from(messages)
       .where(
         and(
-          eq(messages.conversationId, conversationId),
-          eq(messages.lastInboundMessageId, inboundId),
+          eq(messages.conversationId, params.conversationId),
+          afterMessageId(params.afterMessageId),
+          eq(messages.lastInboundMessageId, params.inboundId),
           eq(messages.role, "assistant"),
         ),
       )
@@ -437,9 +457,9 @@ export class DrizzleTranscriptStore implements TranscriptStore {
 
   async isCursorRebatched(
     tx: Transaction,
-    conversationId: string,
-    cursor: string,
+    params: { conversationId: string; cursor: string; afterMessageId: string | null },
   ): Promise<boolean> {
+    const { conversationId, cursor } = params;
     const rows = await tx
       .select({ id: messages.id })
       .from(messages)
@@ -447,6 +467,7 @@ export class DrizzleTranscriptStore implements TranscriptStore {
       .where(
         and(
           eq(messages.conversationId, conversationId),
+          afterMessageId(params.afterMessageId),
           eq(messages.role, "user"),
           // Raw for the JSON path, as in `findUserMessageByInbound`.
           not(sql`jsonb_path_exists(${messages.content}, ${NOT_TURN_ROW_JSONPATH}::jsonpath)`),
@@ -640,4 +661,9 @@ export class DrizzleTranscriptStore implements TranscriptStore {
       .limit(1);
     return rows[0];
   }
+}
+
+/** Rows newer than `id`, or every row when `null`: a range scan on `idx_messages_conv_id`. */
+function afterMessageId(id: string | null): SQL | undefined {
+  return id === null ? undefined : gt(messages.id, id);
 }
