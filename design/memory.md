@@ -353,6 +353,8 @@ Adopted from Mastra's 94.87% LongMemEval approach. The Observer is an Inngest fu
 
 Added as a new step in the existing Observer function, after correction extraction. Uses `chatTyped()` with a Zod schema to extract structured facts.
 
+`[proposed]` Extraction moves to one turn at a time: each turn's facts are stored with the turn's observation row before they are retained, under document ids keyed on the turn and the fact's position, so a re-run replaces rather than duplicates. A Hindsight-side alternative (raw per-turn retains, `entity_labels`) is evaluated there too: [observation.md](observation.md).
+
 ```typescript
 // Extraction schema (chatTyped structured output)
 interface ExtractedMemory {
