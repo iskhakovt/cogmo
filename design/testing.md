@@ -37,8 +37,8 @@ Nothing in the suite leans on the auto-clear today — it passes in full with `c
 Docker services + app wired in-process. Tests the orchestration pipeline — debuggable, injectable, faster than e2e.
 
 **Infrastructure:**
-- Testcontainers (PostgreSQL, Redis, Inngest, Hindsight) — started in vitest `globalSetup`, random ports
-- Container definitions in `dev/containers.ts` (shared with `scripts/dev-infra.ts` for local dev)
+- Testcontainers started in vitest `globalSetup` (`test/integration-setup.ts`), random ports: PostgreSQL, Redis, RustFS, Hindsight (slim), and one Inngest dev server per worker slot
+- Every container definition lives in `dev/containers.ts`, shared with `scripts/dev-infra.ts` for local dev — including those a single test starts itself (`gitea()`, `inngestKeyed()`). The `no-inline-test-container` lint rule keeps them there.
 - llmock (`@copilotkit/aimock`) runs in-process: one per test file for the app's calls, replaying that file's cassette, and one in `globalSetup` for Hindsight's
 - Hindsight reaches its llmock via `host.testcontainers.internal`, published by `exposeHostPort()` in `dev/containers.ts` — not `host-gateway`, which points into the wrong namespace under rootless Docker
 - Each test file runs against its own database, cloned from a template `globalSetup` migrates, and its own seeded user — so its own Hindsight bank
@@ -138,7 +138,7 @@ Cassettes pin the conversation; assertions pin the contract. This is the AgentRR
 
 **Infrastructure status.**
 
-- `gitea` — `startGitea` in `verify-orchestrator.integration.test.ts` already starts one; lift it into `dev/containers.ts` when a second test needs it.
+- `gitea` — `gitea()` in `dev/containers.ts`; `verify-orchestrator.integration.test.ts` starts it and bootstraps the admin user, token and fixture repo.
 - `DaytonaMock` — already proxies HTTP + WS with record/replay and fault injection. The PTY upgrade path needs verification (existing WS support is for `getSessionCommandLogs`; PTY's URL pattern under `wss://proxy.app.daytona.io/toolbox/{sandboxId}/process/...` likely already matches the `TOOLBOX_PATH_PREFIX` routing, but binary frame support may need adding — `WsFrameSchema` carries `text` only today).
 - llmock (`@copilotkit/aimock`) — already wired into `test/llmock-setup.ts`. The orchestrator's claude calls route through `ANTHROPIC_BASE_URL=<llmock>` set on the Daytona sandbox env, same pattern `claude-cli-daytona.integration.test.ts` uses for `ANTHROPIC_MODEL`.
 - No new container types needed.

@@ -26,6 +26,7 @@ Read `design/` for the full picture. Key docs:
 | [architecture.md](design/architecture.md) | Topology, data flow, component map |
 | [memory.md](design/memory.md) | Hindsight, 4 networks, Observer extraction, retrieval |
 | [evolution.md](design/evolution.md) | 6-stage self-evolution ladder, safety patterns |
+| [observation.md](design/observation.md) | Observer by turn — turn unit, per-turn state machine, failure modes, backfill, rollout |
 | [scheduling.md](design/scheduling.md) | Inngest, event-driven orchestration, job types, agent self-scheduling |
 | [agents.md](design/agents.md) | Agentic loop, sub-agents, crash recovery |
 | [crash-recovery.md](design/crash-recovery.md) | Durability map of `handle-message`, what re-executes on retry, test contract |
