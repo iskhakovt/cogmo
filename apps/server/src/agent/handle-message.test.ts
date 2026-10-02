@@ -315,6 +315,31 @@ describe("createHandleMessage", () => {
     );
   });
 
+  it("writes the batch's range on the turn row", async () => {
+    const deps = mockDeps({
+      transportStore: mockTransportStore({
+        getUnbatchedInbound: vi.fn().mockResolvedValue([
+          { id: "inbound-1", content: "first" },
+          { id: "inbound-2", content: "second" },
+        ]),
+      }),
+    });
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    expect(deps.agentStore.insertMessage).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        role: "user",
+        firstInboundMessageId: "inbound-1",
+        lastInboundMessageId: "inbound-2",
+      }),
+    );
+  });
+
   it("emits response/ready with conversationId and messageId", async () => {
     const deps = mockDeps();
     const step = mockStep();

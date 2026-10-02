@@ -40,6 +40,7 @@ describe("DrizzleTranscriptStore", () => {
           role: "user",
           content: "Hello",
           lastInboundMessageId: inboundId,
+          firstInboundMessageId: null,
           ...stamp,
         }),
       );
@@ -49,6 +50,7 @@ describe("DrizzleTranscriptStore", () => {
           role: "assistant",
           content: "Hi there",
           lastInboundMessageId: inboundId,
+          firstInboundMessageId: null,
           ...stamp,
         }),
       );
@@ -71,6 +73,7 @@ describe("DrizzleTranscriptStore", () => {
           role: "user",
           content: "Hello",
           lastInboundMessageId: inboundId,
+          firstInboundMessageId: null,
           ...stamp,
         }),
       );
@@ -81,6 +84,7 @@ describe("DrizzleTranscriptStore", () => {
           role: "assistant",
           content: [{ type: "text", text: "Hi" }],
           lastInboundMessageId: inboundId,
+          firstInboundMessageId: null,
           ...stamp,
         }),
       );
@@ -147,6 +151,7 @@ describe("DrizzleTranscriptStore", () => {
             role: "user",
             content: [{ type: "text", text: "x", harness: "made_up" }] as never,
             lastInboundMessageId: inboundId,
+            firstInboundMessageId: null,
             ...stamp,
           }),
         ),
@@ -163,6 +168,7 @@ describe("DrizzleTranscriptStore", () => {
           role: "user",
           content: [{ type: "text", text: "structured" }],
           lastInboundMessageId: inboundId,
+          firstInboundMessageId: null,
           ...stamp,
         }),
       );
@@ -372,6 +378,7 @@ describe("DrizzleTranscriptStore", () => {
           role: "assistant",
           content: "first",
           lastInboundMessageId: inboundId,
+          firstInboundMessageId: null,
           ...stamp,
         }),
       );
@@ -383,6 +390,7 @@ describe("DrizzleTranscriptStore", () => {
           role: "assistant",
           content: "second",
           lastInboundMessageId: inboundId,
+          firstInboundMessageId: null,
           ...stamp,
         }),
       );
@@ -413,6 +421,7 @@ describe("DrizzleTranscriptStore", () => {
           role: "assistant",
           content: "chat reply",
           lastInboundMessageId: chatCursor,
+          firstInboundMessageId: null,
           ...stamp,
         }),
       );
@@ -433,6 +442,7 @@ describe("DrizzleTranscriptStore", () => {
           role: "assistant",
           content: "stage output",
           lastInboundMessageId: expectDefined(stageInbound, "stage inbound").id,
+          firstInboundMessageId: null,
           ...stamp,
         }),
       );
@@ -520,6 +530,7 @@ describe("DrizzleTranscriptStore", () => {
           role: "user",
           content: "no tokens",
           lastInboundMessageId: inboundId,
+          firstInboundMessageId: null,
           ...stamp,
         }),
       );
@@ -536,6 +547,177 @@ describe("DrizzleTranscriptStore", () => {
     });
   });
 
+  describe("late replies", () => {
+    // Inbound ids in arrival order: UUIDv7s compare as their bytes.
+    const IN_1 = "019d0000-0000-7000-8000-000000000001";
+    const IN_2 = "019d0000-0000-7000-8000-000000000002";
+    const IN_3 = "019d0000-0000-7000-8000-000000000003";
+    const IN_4 = "019d0000-0000-7000-8000-000000000004";
+
+    /** A user row on `cursor`; `first` is the batch's first inbound on a turn row. */
+    async function userRow(
+      conversationId: string,
+      stamp: { profileId: string; model: string },
+      cursor: string,
+      first: string | null,
+      content: Message["content"],
+    ): Promise<string> {
+      const { id } = await tx((trx) =>
+        store.insertMessage(trx, {
+          conversationId,
+          role: "user",
+          content,
+          lastInboundMessageId: cursor,
+          firstInboundMessageId: first,
+          ...stamp,
+        }),
+      );
+      return id;
+    }
+
+    function rebatched(conversationId: string, cursor: string): Promise<boolean> {
+      return tx((trx) => store.isCursorRebatched(trx, conversationId, cursor));
+    }
+
+    it("insertMessage stores the batch's first inbound", async () => {
+      const { conversationId, stamp } = await seedConversation(tx);
+      const id = await userRow(conversationId, stamp, IN_2, IN_1, "words");
+
+      const [row] = await db
+        .select({ first: messages.firstInboundMessageId })
+        .from(messages)
+        .where(eq(messages.id, id));
+      expect(row).toEqual({ first: IN_1 });
+    });
+
+    it("findLastAssistantMessageByInbound returns the newest assistant row on the cursor", async () => {
+      const { conversationId, stamp } = await seedConversation(tx);
+      await userRow(conversationId, stamp, IN_2, IN_1, "words");
+      await tx((trx) =>
+        store.insertMessages(trx, {
+          conversationId,
+          messages: [
+            { role: "assistant", content: [{ type: "text", text: "first reply" }] },
+            { role: "assistant", content: [{ type: "text", text: "final reply" }] },
+          ],
+          lastInboundMessageId: IN_2,
+          lastMessageOutputTokens: 1,
+          ...stamp,
+        }),
+      );
+      const { id: duplicateFinal } = await tx((trx) =>
+        store.insertMessages(trx, {
+          conversationId,
+          messages: [{ role: "assistant", content: [{ type: "text", text: "rerun reply" }] }],
+          lastInboundMessageId: IN_2,
+          lastMessageOutputTokens: 1,
+          ...stamp,
+        }),
+      );
+      await tx((trx) =>
+        store.insertMessages(trx, {
+          conversationId,
+          messages: [{ role: "assistant", content: [{ type: "text", text: "next turn" }] }],
+          lastInboundMessageId: IN_3,
+          lastMessageOutputTokens: 1,
+          ...stamp,
+        }),
+      );
+
+      expect(
+        await tx((trx) => store.findLastAssistantMessageByInbound(trx, conversationId, IN_2)),
+      ).toEqual({ id: duplicateFinal });
+      expect(
+        await tx((trx) => store.findLastAssistantMessageByInbound(trx, conversationId, IN_4)),
+      ).toBeUndefined();
+    });
+
+    it("isCursorRebatched is false while no later turn row exists", async () => {
+      const { conversationId, stamp } = await seedConversation(tx);
+      // The turn's own row, and a duplicate from a re-run insert.
+      await userRow(conversationId, stamp, IN_2, IN_1, "words");
+      await userRow(conversationId, stamp, IN_2, IN_1, "words");
+
+      expect(await rebatched(conversationId, IN_2)).toBe(false);
+    });
+
+    it("isCursorRebatched is true when a later turn row's batch holds the cursor", async () => {
+      const { conversationId, stamp } = await seedConversation(tx);
+      await userRow(conversationId, stamp, IN_2, IN_1, "words");
+      await userRow(conversationId, stamp, IN_3, IN_1, "words");
+
+      expect(await rebatched(conversationId, IN_2)).toBe(true);
+      // The range start is inclusive: a batch starting at the cursor holds it.
+      expect(await rebatched(conversationId, IN_1)).toBe(true);
+    });
+
+    it("isCursorRebatched is false for a later turn whose batch starts above the cursor", async () => {
+      const { conversationId, stamp } = await seedConversation(tx);
+      await userRow(conversationId, stamp, IN_2, IN_1, "words");
+      await userRow(conversationId, stamp, IN_4, IN_3, "words");
+
+      expect(await rebatched(conversationId, IN_2)).toBe(false);
+    });
+
+    it("isCursorRebatched counts a later turn row with no range start", async () => {
+      // A turn row written before the column existed.
+      const { conversationId, stamp } = await seedConversation(tx);
+      await userRow(conversationId, stamp, IN_2, IN_1, "words");
+      await userRow(conversationId, stamp, IN_3, null, "words");
+
+      expect(await rebatched(conversationId, IN_2)).toBe(true);
+    });
+
+    it("isCursorRebatched ignores a later pipeline stage prompt", async () => {
+      const { conversationId, stamp } = await seedConversation(tx);
+      await db.insert(inboundMessages).values({
+        id: IN_3,
+        source: "pipeline",
+        idempotencyKey: "pipeline:run-1:draft:0",
+        conversationId,
+        content: "stage prompt",
+        platformTs: new Date(),
+      });
+      await userRow(conversationId, stamp, IN_2, IN_1, "words");
+      await userRow(conversationId, stamp, IN_3, null, "stage prompt");
+
+      expect(await rebatched(conversationId, IN_2)).toBe(false);
+    });
+
+    it("isCursorRebatched ignores later rows that are not turn rows", async () => {
+      const { conversationId, stamp } = await seedConversation(tx);
+      await userRow(conversationId, stamp, IN_2, IN_1, "words");
+      await userRow(conversationId, stamp, IN_3, null, [
+        { type: "tool_result", toolUseId: "t1", content: "out" },
+      ]);
+      await userRow(conversationId, stamp, IN_3, null, [
+        { type: "text", text: "continue", harness: "continuation" },
+      ]);
+      await tx((trx) =>
+        store.insertMessages(trx, {
+          conversationId,
+          messages: [{ role: "assistant", content: [{ type: "text", text: "reply" }] }],
+          lastInboundMessageId: IN_3,
+          lastMessageOutputTokens: 1,
+          ...stamp,
+        }),
+      );
+
+      expect(await rebatched(conversationId, IN_2)).toBe(false);
+    });
+
+    it("isCursorRebatched ignores another conversation's turn rows", async () => {
+      const { userId, profileId, conversationId, stamp } = await seedConversation(tx);
+      const other = await tx((trx) =>
+        conversationStore.createConversation(trx, { userId, profileId, isPrivate: true }),
+      );
+      await userRow(conversationId, stamp, IN_2, IN_1, "words");
+      await userRow(other.id, stamp, IN_3, IN_1, "words");
+
+      expect(await rebatched(conversationId, IN_2)).toBe(false);
+    });
+  });
+
   describe("getLastMessageTime", () => {
     it("returns the most recent message timestamp", async () => {
       const { conversationId, stamp } = await seedConversation(tx);
@@ -547,6 +729,7 @@ describe("DrizzleTranscriptStore", () => {
           role: "user",
           content: "hello",
           lastInboundMessageId: inboundId,
+          firstInboundMessageId: null,
           ...stamp,
         }),
       );
@@ -579,6 +762,7 @@ describe("conversation summaries", () => {
           role: i % 2 === 0 ? "user" : "assistant",
           content: `m${i}`,
           lastInboundMessageId: INBOUND,
+          firstInboundMessageId: null,
           ...stamp,
         }),
       );
@@ -816,6 +1000,7 @@ describe("turn contexts", () => {
         role: "user",
         content: "hello",
         lastInboundMessageId: INBOUND,
+        firstInboundMessageId: null,
         ...stamp,
       }),
     );
@@ -881,6 +1066,7 @@ describe("turn contexts", () => {
         role: "assistant",
         content: "reply",
         lastInboundMessageId: INBOUND,
+        firstInboundMessageId: null,
         ...stamp,
       }),
     );
@@ -1052,6 +1238,7 @@ describe("turn contexts", () => {
         role: "user",
         content: [{ type: "text", text: "look at this" }],
         lastInboundMessageId: INBOUND,
+        firstInboundMessageId: null,
         ...stamp,
       }),
     );
@@ -1068,6 +1255,7 @@ describe("turn contexts", () => {
         role: "user",
         content: [{ type: "text", text: "x", harness: tag }],
         lastInboundMessageId: INBOUND,
+        firstInboundMessageId: null,
         ...stamp,
       }),
     );
@@ -1086,6 +1274,7 @@ describe("system prompt snapshots", () => {
           role: "user",
           content: "hello",
           lastInboundMessageId: "019d0000-0000-7000-8000-0000000000fe",
+          firstInboundMessageId: null,
           ...stamp,
         }),
       )

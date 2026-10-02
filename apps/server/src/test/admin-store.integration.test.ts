@@ -113,6 +113,7 @@ describe("AgentStore admin (real Postgres)", () => {
         profileId,
         model: TEST_MODEL,
         lastInboundMessageId: inboundId,
+        firstInboundMessageId: null,
       }),
     );
     await tx((trx) =>
@@ -123,6 +124,7 @@ describe("AgentStore admin (real Postgres)", () => {
         profileId,
         model: TEST_MODEL,
         lastInboundMessageId: inboundId,
+        firstInboundMessageId: null,
       }),
     );
     await tx((trx) => store.setAlias(trx, userId, c2, name("groceries")).then(expectOk));
@@ -173,6 +175,7 @@ describe("AgentStore admin (real Postgres)", () => {
           profileId,
           model: TEST_MODEL,
           lastInboundMessageId: inboundId,
+          firstInboundMessageId: null,
         }),
       );
     }
@@ -277,6 +280,7 @@ describe("conversation summaries (real Postgres)", () => {
           role: i % 2 === 0 ? "user" : "assistant",
           content: `m${i}`,
           lastInboundMessageId: INBOUND,
+          firstInboundMessageId: null,
           profileId,
           model: TEST_MODEL,
         }),

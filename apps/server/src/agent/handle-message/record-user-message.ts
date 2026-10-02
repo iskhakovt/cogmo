@@ -24,6 +24,8 @@ export interface RecordUserMessageArgs {
   snapshot: { profileId: string; model: string };
   /** The batch's last inbound: the cursor the user row is written with. */
   maxInboundId: string;
+  /** The batch's first inbound: the start of the range the user row records. */
+  firstInboundId: string;
 }
 
 export interface RecordedUserMessage {
@@ -43,7 +45,8 @@ export async function recordUserMessage(
   deps: RecordUserMessageDeps,
   args: RecordUserMessageArgs,
 ): Promise<RecordedUserMessage> {
-  const { conversationId, inboundMessages, voiceBundle, snapshot, maxInboundId } = args;
+  const { conversationId, inboundMessages, voiceBundle, snapshot, maxInboundId, firstInboundId } =
+    args;
 
   // Voice transcription runs in a durable `step.run` boundary — STT is
   // a billable LLM-adjacent call, so Inngest retries replay from the
@@ -90,6 +93,7 @@ export async function recordUserMessage(
         profileId: snapshot.profileId,
         model: snapshot.model,
         lastInboundMessageId: maxInboundId,
+        firstInboundMessageId: firstInboundId,
       }),
     );
   });

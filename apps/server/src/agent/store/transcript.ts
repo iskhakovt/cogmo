@@ -1,4 +1,17 @@
-import { and, asc, desc, eq, getTableColumns, gt, isNull, ne, not, or, sql } from "drizzle-orm";
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  getTableColumns,
+  gt,
+  isNull,
+  lte,
+  ne,
+  not,
+  or,
+  sql,
+} from "drizzle-orm";
 import * as R from "remeda";
 import { single } from "../../db/helpers.js";
 import type { Transaction } from "../../db/index.js";
@@ -85,6 +98,8 @@ export interface TranscriptStore {
       profileId: string;
       model: string;
       lastInboundMessageId: string;
+      /** The batch's first inbound on a `handle-message` turn row; null on every other row. */
+      firstInboundMessageId: string | null;
       inputTokens?: number;
     },
   ): Promise<{ id: string }>;
@@ -137,6 +152,27 @@ export interface TranscriptStore {
     tx: Transaction,
     conversationId: string,
   ): Promise<{ id: string; lastInboundMessageId: string } | undefined>;
+
+  /**
+   * The newest assistant row carrying `inboundId` as its cursor: the final
+   * reply of a turn whose `persist-new-messages` already committed.
+   */
+  findLastAssistantMessageByInbound(
+    tx: Transaction,
+    conversationId: string,
+    inboundId: string,
+  ): Promise<{ id: string } | undefined>;
+
+  /**
+   * Whether a later non-pipeline turn row re-batched the inbound `cursor`:
+   * its batch range `[first_inbound_message_id, last_inbound_message_id]`
+   * holds `cursor` below its own cursor. A turn row with no range start
+   * (written before the column existed) covers any cursor below its own.
+   * Pipeline stage prompts never count, by the same left join on the cursor's
+   * inbound as `getLastAssistantMessage`. Asked by a turn with no reply yet:
+   * see design/crash-recovery.md → Late replies.
+   */
+  isCursorRebatched(tx: Transaction, conversationId: string, cursor: string): Promise<boolean>;
 
   /**
    * A conversation's complete message history with row ids, ordered by id.
@@ -268,6 +304,7 @@ export class DrizzleTranscriptStore implements TranscriptStore {
       profileId: string;
       model: string;
       lastInboundMessageId: string;
+      firstInboundMessageId: string | null;
       inputTokens?: number;
     },
   ): Promise<{ id: string }> {
@@ -281,6 +318,7 @@ export class DrizzleTranscriptStore implements TranscriptStore {
           profileId: params.profileId,
           model: params.model,
           lastInboundMessageId: params.lastInboundMessageId,
+          firstInboundMessageId: params.firstInboundMessageId,
           ...(params.inputTokens != null && { inputTokens: params.inputTokens }),
           // Singular insert is only used for user rows (and the orchestrator's
           // initial synthesized user message) — they never have an output
@@ -375,6 +413,50 @@ export class DrizzleTranscriptStore implements TranscriptStore {
       .orderBy(desc(messages.id))
       .limit(1);
     return rows[0];
+  }
+
+  async findLastAssistantMessageByInbound(
+    tx: Transaction,
+    conversationId: string,
+    inboundId: string,
+  ): Promise<{ id: string } | undefined> {
+    const rows = await tx
+      .select({ id: messages.id })
+      .from(messages)
+      .where(
+        and(
+          eq(messages.conversationId, conversationId),
+          eq(messages.lastInboundMessageId, inboundId),
+          eq(messages.role, "assistant"),
+        ),
+      )
+      .orderBy(desc(messages.id))
+      .limit(1);
+    return rows[0];
+  }
+
+  async isCursorRebatched(
+    tx: Transaction,
+    conversationId: string,
+    cursor: string,
+  ): Promise<boolean> {
+    const rows = await tx
+      .select({ id: messages.id })
+      .from(messages)
+      .leftJoin(inboundMessages, eq(inboundMessages.id, messages.lastInboundMessageId))
+      .where(
+        and(
+          eq(messages.conversationId, conversationId),
+          eq(messages.role, "user"),
+          // Raw for the JSON path, as in `findUserMessageByInbound`.
+          not(sql`jsonb_path_exists(${messages.content}, ${NOT_TURN_ROW_JSONPATH}::jsonpath)`),
+          or(isNull(inboundMessages.source), ne(inboundMessages.source, "pipeline")),
+          gt(messages.lastInboundMessageId, cursor),
+          or(isNull(messages.firstInboundMessageId), lte(messages.firstInboundMessageId, cursor)),
+        ),
+      )
+      .limit(1);
+    return rows.length > 0;
   }
 
   async listMessages(

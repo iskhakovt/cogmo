@@ -855,6 +855,132 @@ describe("handle-message — crash recovery / step replay", () => {
   });
 });
 
+describe("handle-message — late replies", () => {
+  /**
+   * A turn that plans every post-persist step when it persists: it probes an
+   * elapsed cooldown, its loop degraded, the delivery has batch targets and
+   * the resume policy flushes.
+   */
+  function lateReplyDeps(store: { existingReply?: { id: string }; rebatched: boolean }) {
+    const longAgo = new Date(Date.now() - 10 * 60_000).toISOString();
+    return mockDeps({
+      agentStore: mockAgentStore({
+        getConversation: vi.fn().mockResolvedValue({
+          id: "conv-1",
+          userId: "user-1",
+          profileId: "profile-1",
+          isPrivate: true,
+          cooldownState: { lastErroredAt: longAgo, cooldownSeconds: 60, consecutiveFailures: 1 },
+          voiceMode: null,
+        }),
+        findLastAssistantMessageByInbound: vi.fn().mockResolvedValue(store.existingReply),
+        isCursorRebatched: vi.fn().mockResolvedValue(store.rebatched),
+      }),
+      debounceConfig: { idleTimeoutMs: 0, maxWaitMs: 0, resumePolicy: "flush" },
+      runStreamingAgentLoop: vi.fn().mockResolvedValue({
+        text: "late reply",
+        messages: [],
+        newMessages: [{ role: "assistant", content: [{ type: "text", text: "late reply" }] }],
+        usage: { inputTokens: 10, outputTokens: 5 },
+        model: "mock-model",
+        iterations: 1,
+        streamed: { text: "late reply", toolUseIds: [] },
+        degraded: { reason: "model returned an empty turn", subtype: "empty_end_turn" },
+      }),
+    });
+  }
+
+  const POST_PERSIST_STEPS = [
+    "emit-cooldown-cleared",
+    "emit-conversation-degraded",
+    "batch-delivery",
+    "send-response",
+    "flush",
+  ];
+
+  type EngineCtx = Awaited<ReturnType<InngestTestEngine["execute"]>>["ctx"];
+
+  /** The ids of the steps the run planned, `step.run` and `step.sendEvent` alike. */
+  function plannedSteps(ctx: EngineCtx): string[] {
+    return [
+      ...R.map(ctx.step.run.mock.calls, ([id]) => String(id)),
+      ...R.map(ctx.step.sendEvent.mock.calls, ([id]) => String(id)),
+    ];
+  }
+
+  /** The `data` of the run's `send-response` event. */
+  function announced(ctx: EngineCtx): unknown {
+    const call = ctx.step.sendEvent.mock.calls.find(([id]) => id === "send-response");
+    return expectDefined(call, "send-response")[1];
+  }
+
+  it("skips every post-persist step when a younger turn re-batched the inbounds", async () => {
+    const deps = lateReplyDeps({ rebatched: true });
+
+    const { result, ctx } = await new InngestTestEngine({
+      function: createHandleMessage(deps),
+      events: [event],
+    }).execute();
+
+    expect(result).toEqual({ status: "skipped", reason: "stale" });
+    expect(deps.agentStore.insertMessages).not.toHaveBeenCalled();
+    expect(deps.agentStore.clearCooldown).not.toHaveBeenCalled();
+    const planned = plannedSteps(ctx);
+    expect(planned).toContain("persist-new-messages");
+    expect(R.intersection(planned, POST_PERSIST_STEPS)).toEqual([]);
+  });
+
+  it("plans every post-persist step when no younger turn re-batched the inbounds", async () => {
+    // Non-vacuity check for the test above: the same turn, persisted.
+    const deps = lateReplyDeps({ rebatched: false });
+
+    const { result, ctx } = await new InngestTestEngine({
+      function: createHandleMessage(deps),
+      events: [event],
+    }).execute();
+
+    expect(result).toEqual({ status: "processed", conversationId: "conv-1" });
+    expect(deps.agentStore.insertMessages).toHaveBeenCalledTimes(1);
+    expect(R.intersection(POST_PERSIST_STEPS, plannedSteps(ctx))).toEqual(POST_PERSIST_STEPS);
+  });
+
+  it("replays a persist-new-messages memo from before the deploy as persisted", async () => {
+    const deps = lateReplyDeps({ rebatched: true });
+
+    const { result, ctx } = await new InngestTestEngine({
+      function: createHandleMessage(deps),
+      events: [event],
+      steps: [{ id: "persist-new-messages", handler: () => ({ id: "asst-legacy" }) }],
+    }).execute();
+
+    expect(result).toEqual({ status: "processed", conversationId: "conv-1" });
+    expect(deps.agentStore.insertMessages).not.toHaveBeenCalled();
+    expect(R.intersection(POST_PERSIST_STEPS, plannedSteps(ctx))).toEqual(POST_PERSIST_STEPS);
+    expect(announced(ctx)).toMatchObject({
+      data: { conversationId: "conv-1", messageId: "asst-legacy" },
+    });
+  });
+
+  it("settles a re-run after commit as persisted, even with a younger turn row since", async () => {
+    // `persist-new-messages` committed, then failed before Inngest recorded
+    // it; a younger turn's row committed before the retry.
+    const deps = lateReplyDeps({ existingReply: { id: "asst-committed" }, rebatched: true });
+
+    const { result, ctx } = await new InngestTestEngine({
+      function: createHandleMessage(deps),
+      events: [event],
+    }).execute();
+
+    expect(result).toEqual({ status: "processed", conversationId: "conv-1" });
+    expect(deps.agentStore.insertMessages).not.toHaveBeenCalled();
+    expect(deps.agentStore.clearCooldown).not.toHaveBeenCalled();
+    expect(R.intersection(POST_PERSIST_STEPS, plannedSteps(ctx))).toEqual(POST_PERSIST_STEPS);
+    expect(announced(ctx)).toMatchObject({
+      data: { conversationId: "conv-1", messageId: "asst-committed" },
+    });
+  });
+});
+
 describe("handle-message — replay equality", () => {
   const EPOCH_OPENED_AT = new Date("2026-09-25T08:00:00.000Z");
 

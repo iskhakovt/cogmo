@@ -1,3 +1,5 @@
+import { match } from "ts-pattern";
+import { z } from "zod";
 import type { Transactor } from "../../db/index.js";
 import {
   buildConversationCooldownClearedEvent,
@@ -12,7 +14,10 @@ import type { TurnSteps } from "./turn-steps.js";
 
 export interface PersistTurnDeps {
   runInTx: Transactor;
-  agentStore: Pick<AgentStore, "insertMessages" | "clearCooldown">;
+  agentStore: Pick<
+    AgentStore,
+    "insertMessages" | "clearCooldown" | "findLastAssistantMessageByInbound" | "isCursorRebatched"
+  >;
 }
 
 export interface PersistTurnArgs {
@@ -28,62 +33,121 @@ export interface PersistTurnArgs {
 }
 
 /**
+ * What `persist-new-messages` settled. `persisted` names the turn's final
+ * reply row, written by this attempt or by an earlier run of the same batch.
+ * `superseded`: a later turn row re-batched this turn's inbounds, so nothing
+ * was written (design/crash-recovery.md → Late replies).
+ */
+export type PersistOutcome = { kind: "persisted"; messageId: string } | { kind: "superseded" };
+
+/**
+ * The step's memo. A run in flight may hold the `{ id }` memo of a build
+ * without `superseded`; it reads as `persisted`.
+ */
+const PersistOutcomeSchema = z.union([
+  z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("persisted"), messageId: z.string() }),
+    z.object({ kind: z.literal("superseded") }),
+  ]),
+  z
+    .object({ id: z.string() })
+    .transform(({ id }): PersistOutcome => ({ kind: "persisted", messageId: id })),
+]);
+
+/** What the persist transaction did. */
+type PersistWrite =
+  | { kind: "inserted"; messageId: string }
+  | { kind: "recovered"; messageId: string }
+  | { kind: "superseded" };
+
+/**
  * Persist the turn's new messages — tool turns and the final assistant — and
  * emit what the persisted turn settles: a cleared cooldown, a degraded turn.
- * Returns the id of the last row written.
  *
- * Steps, in order: `persist-new-messages`, `emit-cooldown-cleared` (when the
- * turn probed an elapsed cooldown), `emit-conversation-degraded` (when the
- * loop degraded).
+ * The persist transaction first looks for a reply already on the turn's
+ * cursor (a re-run after commit, or another run of the same batch) and
+ * returns its newest row without writing. Otherwise it refuses when a later
+ * turn row covers the cursor: the turn is `superseded`, nothing is written,
+ * no cooldown is cleared and nothing is emitted.
+ *
+ * Steps, in order: `persist-new-messages`, then only on `persisted`:
+ * `emit-cooldown-cleared` (when the turn probed an elapsed cooldown) and
+ * `emit-conversation-degraded` (when the loop degraded).
  */
 export async function persistTurn(
   step: TurnSteps,
   deps: PersistTurnDeps,
   args: PersistTurnArgs,
-): Promise<string> {
-  const { conversationId, snapshot, result, priorCooldown } = args;
+): Promise<PersistOutcome> {
+  const { conversationId, snapshot, result, priorCooldown, maxInboundId } = args;
 
-  // Half-open success: when the entry guard saw an elapsed cooldown
-  // and admitted this probe turn, clear `cooldown_state` in the same
-  // transaction. Strict prior-cooldown gating avoids a per-turn
-  // pointless UPDATE on Closed conversations.
-  const assistantMsg = await step.run("persist-new-messages", async () => {
-    const persisted = await deps.runInTx(async (tx) => {
+  const memo = await step.run("persist-new-messages", async (): Promise<PersistOutcome> => {
+    // Both checks read in the insert's transaction, so the decision and the
+    // write share one snapshot. REPEATABLE READ takes no predicate lock: a
+    // covering turn row committed by a transaction overlapping this one is
+    // missed (design/crash-recovery.md → Late replies, residuals).
+    const written = await deps.runInTx(async (tx): Promise<PersistWrite> => {
+      const existing = await deps.agentStore.findLastAssistantMessageByInbound(
+        tx,
+        conversationId,
+        maxInboundId,
+      );
+      if (existing !== undefined) {
+        return { kind: "recovered", messageId: existing.id };
+      }
+      if (await deps.agentStore.isCursorRebatched(tx, conversationId, maxInboundId)) {
+        return { kind: "superseded" };
+      }
       const inserted = await deps.agentStore.insertMessages(tx, {
         conversationId,
         messages: result.newMessages,
         profileId: snapshot.profileId,
         model: snapshot.model,
-        lastInboundMessageId: args.maxInboundId,
+        lastInboundMessageId: maxInboundId,
         lastMessageInputTokens: result.usage.inputTokens,
         lastMessageOutputTokens: result.usage.outputTokens,
       });
+      // Half-open success: when the entry guard saw an elapsed cooldown
+      // and admitted this probe turn, clear `cooldown_state` in the same
+      // transaction. Strict prior-cooldown gating avoids a per-turn
+      // pointless UPDATE on Closed conversations.
       if (priorCooldown !== null) {
         await deps.agentStore.clearCooldown(tx, conversationId);
       }
-      return inserted;
+      return { kind: "inserted", messageId: inserted.id };
     });
-    // Inside the step, because the bare body re-executes once per
-    // remaining boundary and would record the same turn 3-6 times; a step
-    // body fires once and is suppressed on replay. After the write,
-    // because a step body re-runs on every retry too — recording first
-    // would add a sample per attempt whenever the transaction is the thing
-    // failing. The turn is durably persisted by the time the sample is
-    // taken, and the step has not returned, so nothing downstream has
-    // moved on.
-    //
-    // The cost is coverage: a turn whose persist fails irrecoverably is
-    // never sampled, so the histogram counts turns that produced a
-    // persisted reply rather than every turn the loop ran. Recording
-    // ahead of the write would not buy back much — a turn that fails
-    // before reaching this step is unsampled either way — and it would
-    // pay in duplicates, N identical samples whenever the transaction is
-    // what keeps retrying. For a histogram read to spot runaway
-    // iteration counts, repeated copies of one value are worse than a
-    // missing one: they invent the pattern it exists to detect.
-    agentIterations.record(result.iterations, { model: result.model });
-    return persisted;
+    return match(written)
+      .returnType<PersistOutcome>()
+      .with({ kind: "inserted" }, ({ messageId }) => {
+        // Inside the step, because the bare body re-executes once per
+        // remaining boundary and would record the same turn 3-6 times; a
+        // step body fires once and is suppressed on replay. After the write,
+        // and only when this attempt wrote, so neither a transaction that
+        // keeps failing nor a re-run after commit adds a sample. A turn
+        // whose persist fails irrecoverably is never sampled: the histogram
+        // counts turns that produced a persisted reply. For a histogram read
+        // to spot runaway iteration counts, repeated copies of one value are
+        // worse than a missing one.
+        agentIterations.record(result.iterations, { model: result.model });
+        return { kind: "persisted", messageId };
+      })
+      .with({ kind: "recovered" }, ({ messageId }) => ({ kind: "persisted", messageId }))
+      .with({ kind: "superseded" }, () => ({ kind: "superseded" }))
+      .exhaustive();
   });
+
+  return match(PersistOutcomeSchema.parse(memo))
+    .returnType<Promise<PersistOutcome>>()
+    .with({ kind: "superseded" }, async (superseded) => superseded)
+    .with({ kind: "persisted" }, async (persisted) => {
+      await emitPersistedTurnEvents(step, args);
+      return persisted;
+    })
+    .exhaustive();
+}
+
+async function emitPersistedTurnEvents(step: TurnSteps, args: PersistTurnArgs): Promise<void> {
+  const { conversationId, result, priorCooldown } = args;
 
   // Half-open success: cooldown was cleared inside the persist tx.
   // Emit `conversation/cooldown/cleared` as a separate durable step
@@ -126,6 +190,4 @@ export async function persistTurn(
       }),
     );
   }
-
-  return assistantMsg.id;
 }

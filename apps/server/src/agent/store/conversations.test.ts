@@ -131,6 +131,7 @@ describe("DrizzleConversationStore", () => {
           role: "user",
           content: "hi",
           lastInboundMessageId: "019d0000-0000-7000-8000-00000000abcd",
+          firstInboundMessageId: null,
           ...stamp,
         }),
       );
@@ -184,6 +185,7 @@ describe("DrizzleConversationStore", () => {
           role: "user",
           content: "hello there this is the last message",
           lastInboundMessageId: inboundId,
+          firstInboundMessageId: null,
           ...stamp,
         }),
       );
@@ -215,6 +217,7 @@ describe("DrizzleConversationStore", () => {
           role: "user",
           content: renderInboundText("see you at 8", forwarded),
           lastInboundMessageId: "019d0000-0000-7000-8000-000000000001",
+          firstInboundMessageId: null,
           ...stamp,
         }),
       );
@@ -240,6 +243,7 @@ describe("DrizzleConversationStore", () => {
           role: "user",
           content: "u1",
           lastInboundMessageId: inboundId,
+          firstInboundMessageId: null,
           profileId,
           model: TEST_MODEL,
         }),
@@ -250,6 +254,7 @@ describe("DrizzleConversationStore", () => {
           role: "user",
           content: "u2",
           lastInboundMessageId: inboundId,
+          firstInboundMessageId: null,
           profileId,
           model: TEST_MODEL,
         }),
@@ -278,6 +283,7 @@ describe("DrizzleConversationStore", () => {
           role: "user",
           content: "noisy",
           lastInboundMessageId: inboundId,
+          firstInboundMessageId: null,
           profileId,
           model: TEST_MODEL,
         }),
@@ -288,6 +294,7 @@ describe("DrizzleConversationStore", () => {
           role: "user",
           content: "real",
           lastInboundMessageId: inboundId,
+          firstInboundMessageId: null,
           profileId,
           model: TEST_MODEL,
         }),
@@ -417,6 +424,7 @@ describe("DrizzleConversationStore", () => {
           profileId,
           model: "claude-sonnet-4-6",
           lastInboundMessageId: "00000000-0000-7000-8000-000000000001",
+          firstInboundMessageId: null,
         }),
       );
       await tx((trx) =>
@@ -427,6 +435,7 @@ describe("DrizzleConversationStore", () => {
           profileId,
           model: "claude-sonnet-4-6",
           lastInboundMessageId: "00000000-0000-7000-8000-000000000001",
+          firstInboundMessageId: null,
         }),
       );
       const stats = await tx((trx) => store.getConversationStats(trx, conversationId));
