@@ -57,7 +57,11 @@ const PersistOutcomeSchema = z.union([
     .transform(({ id }): PersistOutcome => ({ kind: "persisted", messageId: id })),
 ]);
 
-const SUPERSEDED: PersistOutcome = { kind: "superseded" };
+/** What the persist transaction found or did. */
+type PersistWrite =
+  | { kind: "inserted"; messageId: string }
+  | { kind: "own_earlier_write"; messageId: string }
+  | { kind: "superseded" };
 
 /**
  * Persist the turn's new messages — tool turns and the final assistant — and
@@ -90,7 +94,7 @@ export async function persistTurn(
     // write share one snapshot. REPEATABLE READ takes no predicate lock: a
     // row committed by a transaction overlapping this one is missed
     // (design/observation.md → Late replies).
-    const { outcome, ownEarlierWrite } = await deps.runInTx(async (tx) => {
+    const write = await deps.runInTx(async (tx): Promise<PersistWrite> => {
       const existing = await deps.agentStore.findLastAssistantMessageByInbound(tx, {
         conversationId,
         inboundId: maxInboundId,
@@ -104,15 +108,15 @@ export async function persistTurn(
         // identical reply from another run reads as this run's, and the same
         // text is delivered twice (design/observation.md → Late replies).
         return existing.sameContent
-          ? { outcome: persisted(existing.id), ownEarlierWrite: true }
-          : { outcome: SUPERSEDED, ownEarlierWrite: false };
+          ? { kind: "own_earlier_write", messageId: existing.id }
+          : { kind: "superseded" };
       }
       const rebatched = await deps.agentStore.isCursorRebatched(tx, {
         conversationId,
         cursor: maxInboundId,
         afterMessageId,
       });
-      if (rebatched) return { outcome: SUPERSEDED, ownEarlierWrite: false };
+      if (rebatched) return { kind: "superseded" };
       const inserted = await deps.agentStore.insertMessages(tx, {
         conversationId,
         messages: result.newMessages,
@@ -129,7 +133,7 @@ export async function persistTurn(
       if (priorCooldown !== null) {
         await deps.agentStore.clearCooldown(tx, conversationId);
       }
-      return { outcome: persisted(inserted.id), ownEarlierWrite: false };
+      return { kind: "inserted", messageId: inserted.id };
     });
     // Inside the step, because the bare body re-executes once per remaining
     // boundary and would record the same turn 3-6 times; a step body fires
@@ -139,10 +143,18 @@ export async function persistTurn(
     // this line or crashed before it. For a histogram read to spot runaway
     // iteration counts, repeated copies of one value are worse than a
     // missing one.
-    if (!ownEarlierWrite) {
-      agentIterations.record(result.iterations, { model: result.model });
-    }
-    return outcome;
+    return match(write)
+      .returnType<PersistOutcome>()
+      .with({ kind: "inserted" }, ({ messageId }) => {
+        agentIterations.record(result.iterations, { model: result.model });
+        return { kind: "persisted", messageId };
+      })
+      .with({ kind: "own_earlier_write" }, ({ messageId }) => ({ kind: "persisted", messageId }))
+      .with({ kind: "superseded" }, () => {
+        agentIterations.record(result.iterations, { model: result.model });
+        return { kind: "superseded" };
+      })
+      .exhaustive();
   });
   const outcome = PersistOutcomeSchema.parse(memo);
 
@@ -153,10 +165,6 @@ export async function persistTurn(
     .exhaustive();
   await emitTurnEvents(step, args, clearedCooldown);
   return outcome;
-}
-
-function persisted(messageId: string): PersistOutcome {
-  return { kind: "persisted", messageId };
 }
 
 async function emitTurnEvents(
