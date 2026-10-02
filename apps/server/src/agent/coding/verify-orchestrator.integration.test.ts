@@ -33,9 +33,10 @@ import { Readable } from "node:stream";
 import { promisify } from "node:util";
 import type { Octokit } from "@octokit/rest";
 import { ok } from "neverthrow";
-import { GenericContainer, type StartedTestContainer, Wait } from "testcontainers";
+import type { StartedTestContainer } from "testcontainers";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
+import { gitea as giteaContainer } from "../../../dev/containers.js";
 import type { Database, Transactor } from "../../db/index.js";
 import {
   type ExecStreamingHandle,
@@ -75,18 +76,7 @@ let giteaUrl: string;
 let giteaPat: string;
 
 async function startGitea(): Promise<{ url: string; pat: string }> {
-  // `INSTALL_LOCK=true` is the only knob required to skip Gitea's web installer; SQLite + Gitea's
-  // default paths (under `/data/gitea/`) keep this single-container.
-  // Pull from Gitea's own registry rather than Docker Hub — keeps CI off
-  // the Docker Hub rate-limit budget that pgvector + inngest still spend.
-  const container = await new GenericContainer("docker.gitea.com/gitea:1.27.2")
-    .withExposedPorts(3000)
-    .withEnvironment({
-      GITEA__security__INSTALL_LOCK: "true",
-    })
-    .withWaitStrategy(Wait.forHttp("/api/v1/version", 3000))
-    .withStartupTimeout(180_000)
-    .start();
+  const container = await giteaContainer().start();
 
   const host = container.getHost();
   const port = container.getMappedPort(3000);

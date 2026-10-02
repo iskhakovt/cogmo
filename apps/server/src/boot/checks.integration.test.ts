@@ -4,8 +4,9 @@
  * neither, and Hindsight's `ApiKeyTenantExtension` guards the bank list.
  */
 import { randomBytes } from "node:crypto";
-import { GenericContainer, type StartedTestContainer, Wait } from "testcontainers";
+import type { StartedTestContainer } from "testcontainers";
 import { afterAll, beforeAll, describe, expect, inject, it } from "vitest";
+import { inngestKeyed } from "../../dev/containers.js";
 import { workerInngestBaseUrl } from "../test/worker-inngest.js";
 import {
   BootCheckError,
@@ -13,8 +14,6 @@ import {
   checkInngestAuth,
   independentProbeContext,
 } from "./checks.js";
-
-const INNGEST_IMAGE = "mirror.gcr.io/inngest/inngest:v1.45.1";
 
 const probeDeps = { fetch, ...independentProbeContext() };
 
@@ -39,21 +38,7 @@ describe("checkInngestAuth — real Inngest", () => {
   let baseUrl: string;
 
   beforeAll(async () => {
-    // `inngest start`: keyed, in-memory state, no UI — the production shape.
-    container = await new GenericContainer(INNGEST_IMAGE)
-      .withExposedPorts(8288)
-      .withCommand([
-        "inngest",
-        "start",
-        "--no-ui",
-        "--event-key",
-        eventKey,
-        "--signing-key",
-        signingKey,
-      ])
-      .withWaitStrategy(Wait.forHttp("/health", 8288))
-      .withStartupTimeout(60_000)
-      .start();
+    container = await inngestKeyed({ eventKey, signingKey }).start();
     baseUrl = `http://${container.getHost()}:${container.getMappedPort(8288)}`;
   }, 120_000);
 

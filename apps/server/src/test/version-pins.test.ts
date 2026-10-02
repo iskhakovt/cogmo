@@ -1,25 +1,34 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import * as R from "remeda";
 import { describe, expect, it } from "vitest";
 import { repoRoot } from "./repo-root.js";
 
 /**
- * Image pins repeated across test harnesses. Pins that bake resolves are held
- * to it by `docker-bake.integration.test.ts`.
+ * Image pins the test harnesses share. Pins that bake resolves are held to it
+ * by `docker-bake.integration.test.ts`.
  */
 
-function inngestImage(relativePath: string): string {
-  const source = readFileSync(join(repoRoot(), relativePath), "utf8");
-  const match = source.match(/"(mirror\.gcr\.io\/inngest\/inngest:[^"]+)"/);
-  if (!match?.[1]) throw new Error(`could not extract the inngest image in ${relativePath}`);
-  return match[1];
+const SERVER_DIRS = ["dev", "scripts", "src", "test"] as const;
+const INNGEST_IMAGE = /mirror\.gcr\.io\/inngest\/inngest:/;
+
+function serverTsFiles(): ReadonlyArray<string> {
+  const server = join(repoRoot(), "apps/server");
+  return R.flatMap(SERVER_DIRS, (dir) =>
+    readdirSync(join(server, dir), { recursive: true, encoding: "utf8" })
+      .filter((f) => f.endsWith(".ts"))
+      .map((f) => join("apps/server", dir, f)),
+  );
 }
 
-describe("inngest image stays in sync", () => {
-  // The boot-check integration test's premises hold only for the image the harnesses run.
-  it("dev/containers.ts == checks.integration.test.ts", () => {
-    expect(inngestImage("apps/server/src/boot/checks.integration.test.ts")).toBe(
-      inngestImage("apps/server/dev/containers.ts"),
+describe("inngest image has one home", () => {
+  // The boot-check integration test's premises hold only for the image the
+  // harnesses run, so both take it from `dev/containers.ts`.
+  it("only dev/containers.ts pins it", () => {
+    const pinned = serverTsFiles().filter((f) =>
+      INNGEST_IMAGE.test(readFileSync(join(repoRoot(), f), "utf8")),
     );
+
+    expect(pinned).toEqual(["apps/server/dev/containers.ts"]);
   });
 });

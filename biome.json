@@ -19,7 +19,11 @@
       "path": "./biome-plugins/no-default-params.grit",
       "includes": ["**", "!**/*.test.ts", "!**/*.test.tsx", "!**/test/**"]
     },
-    "./biome-plugins/no-discriminant-switch.grit"
+    "./biome-plugins/no-discriminant-switch.grit",
+    {
+      "path": "./biome-plugins/no-inline-test-container.grit",
+      "includes": ["**", "!**/apps/server/dev/containers.ts", "!**/apps/server/test/e2e-setup.ts"]
+    }
   ],
   "formatter": {
     "indentStyle": "space",
