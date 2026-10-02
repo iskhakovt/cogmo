@@ -140,9 +140,11 @@ export async function persistTurn(
     // once and is suppressed on replay. After the transaction, so a
     // transaction that keeps failing adds no sample, and for every outcome
     // except this run's own earlier write, whose attempt already reached
-    // this line or crashed before it. For a histogram read to spot runaway
-    // iteration counts, repeated copies of one value are worse than a
-    // missing one.
+    // this line or crashed before it. A `superseded` attempt has no such
+    // marker, so a step retried after it finished but before Inngest stored
+    // the result records the turn twice. For a histogram read to spot
+    // runaway iteration counts, repeated copies of one value are worse than
+    // a missing one, and that retry window is the only source of them.
     return match(write)
       .returnType<PersistOutcome>()
       .with({ kind: "inserted" }, ({ messageId }) => {
