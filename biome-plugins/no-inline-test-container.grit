@@ -1,0 +1,24 @@
+// Test containers are defined in `apps/server/dev/containers.ts`, so each image
+// pin has one home.
+//
+// A container built inline in a test carries its own copy of the image tag; a
+// version bump then updates one copy and leaves the other running the old
+// image. Add a factory to `dev/containers.ts` (a variant, if the config
+// differs) and import it.
+//
+// Flags `new GenericContainer(...)` and `GenericContainer.fromDockerfile(...)`.
+// No `@testcontainers/*` module packages are installed; add their constructors
+// here when one is.
+//
+// Scoped by `includes` in biome.json: `dev/containers.ts` itself, and
+// `test/e2e-setup.ts`, which runs the app image it bakes (or CI hands it) —
+// no upstream pin to share.
+
+language js
+
+or {
+  `new GenericContainer($...)`,
+  `GenericContainer.fromDockerfile($...)`
+} as $node where {
+  register_diagnostic(span=$node, message="Define test containers in `apps/server/dev/containers.ts` and import the factory, so each image pin has one home.")
+}

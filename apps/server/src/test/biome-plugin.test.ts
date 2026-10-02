@@ -253,3 +253,37 @@ describe("biome plugin: no-discriminant-switch", () => {
     expect(exitCode, `suppression should silence the plugin; output:\n${output}`).toBe(0);
   });
 });
+
+describe("biome plugin: no-inline-test-container", () => {
+  const INLINE = /Define test containers in `apps\/server\/dev\/containers\.ts`/;
+  const GENERIC = [
+    'import { GenericContainer } from "testcontainers";',
+    'export const c = new GenericContainer("mirror.gcr.io/library/redis:8-alpine");',
+    "",
+  ].join("\n");
+
+  it.each([
+    ["`new GenericContainer(...)` in a test", "src/inline.integration.test.ts", GENERIC],
+    ["`new GenericContainer(...)` in a test helper", "src/test/helper.ts", GENERIC],
+    [
+      "`GenericContainer.fromDockerfile(...)`",
+      "src/from-dockerfile.integration.test.ts",
+      'import { GenericContainer } from "testcontainers";\nexport const b = GenericContainer.fromDockerfile(".");\n',
+    ],
+  ])("fires on %s", async (_label, relPath, source) => {
+    const { exitCode, output } = await lintSource(relPath, source);
+
+    expect(exitCode, `biome should exit non-zero; output:\n${output}`).not.toBe(0);
+    expect(output).toMatch(INLINE);
+  });
+
+  it.each([
+    ["dev/containers.ts", "apps/server/dev/containers.ts"],
+    ["the e2e setup exception", "apps/server/test/e2e-setup.ts"],
+  ])("does NOT fire in %s", async (_label, relPath) => {
+    const { exitCode, output } = await lintSource(relPath, GENERIC);
+
+    expect(exitCode, `biome should exit zero; output:\n${output}`).toBe(0);
+    expect(output).not.toMatch(INLINE);
+  });
+});

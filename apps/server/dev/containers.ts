@@ -55,7 +55,7 @@ export async function stopNetwork(network: StartedNetwork): Promise<void> {
   const handle = new Docker().getNetwork(network.getId());
   let attached: string[] = [];
   try {
-    const inspected: { Containers?: Record<string, { Name?: string }> } = await handle.inspect();
+    const inspected = await handle.inspect();
     attached = Object.entries(inspected.Containers ?? {}).map(
       ([id, c]) => `${c.Name ?? "?"}(${id.slice(0, 12)})`,
     );
@@ -108,6 +108,8 @@ export function redis(network: StartedNetwork) {
     .withStartupTimeout(30_000);
 }
 
+const INNGEST_IMAGE = "mirror.gcr.io/inngest/inngest:v1.45.1";
+
 /** `appUrl` pointing at the host must come from `exposeHostPort()` — there is no
  * `host.docker.internal` mapping on these containers. */
 export function inngest(network: StartedNetwork, opts?: { appUrl?: string }) {
@@ -115,13 +117,46 @@ export function inngest(network: StartedNetwork, opts?: { appUrl?: string }) {
   if (opts?.appUrl) {
     cmd.push("-u", opts.appUrl);
   }
-  return new GenericContainer("mirror.gcr.io/inngest/inngest:v1.45.1")
+  return new GenericContainer(INNGEST_IMAGE)
     .withNetwork(network)
     .withNetworkAliases("inngest")
     .withExposedPorts(8288, 8289)
     .withCommand(cmd)
     .withWaitStrategy(Wait.forHttp("/health", 8288))
     .withStartupTimeout(60_000);
+}
+
+/**
+ * `inngest start` — keyed, in-memory state, no UI: the production shape, where
+ * `inngest()` is the unauthenticated dev server.
+ */
+export function inngestKeyed(opts: { eventKey: string; signingKey: string }) {
+  return new GenericContainer(INNGEST_IMAGE)
+    .withExposedPorts(8288)
+    .withCommand([
+      "inngest",
+      "start",
+      "--no-ui",
+      "--event-key",
+      opts.eventKey,
+      "--signing-key",
+      opts.signingKey,
+    ])
+    .withWaitStrategy(Wait.forHttp("/health", 8288))
+    .withStartupTimeout(60_000);
+}
+
+/**
+ * Gitea git server. `INSTALL_LOCK` skips the web installer; SQLite and the
+ * default paths under `/data/gitea/` keep it single-container. Pulled from
+ * Gitea's own registry, off the Docker Hub rate-limit budget.
+ */
+export function gitea() {
+  return new GenericContainer("docker.gitea.com/gitea:1.27.2")
+    .withExposedPorts(3000)
+    .withEnvironment({ GITEA__security__INSTALL_LOCK: "true" })
+    .withWaitStrategy(Wait.forHttp("/api/v1/version", 3000))
+    .withStartupTimeout(180_000);
 }
 
 /** Bearer token dev and test Hindsight containers enforce. */

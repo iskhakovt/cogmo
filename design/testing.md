@@ -138,7 +138,7 @@ Cassettes pin the conversation; assertions pin the contract. This is the AgentRR
 
 **Infrastructure status.**
 
-- `gitea` — `startGitea` in `verify-orchestrator.integration.test.ts` already starts one; lift it into `dev/containers.ts` when a second test needs it.
+- `gitea` — `gitea()` in `dev/containers.ts`; `verify-orchestrator.integration.test.ts` starts it and bootstraps the admin user, token and fixture repo.
 - `DaytonaMock` — already proxies HTTP + WS with record/replay and fault injection. The PTY upgrade path needs verification (existing WS support is for `getSessionCommandLogs`; PTY's URL pattern under `wss://proxy.app.daytona.io/toolbox/{sandboxId}/process/...` likely already matches the `TOOLBOX_PATH_PREFIX` routing, but binary frame support may need adding — `WsFrameSchema` carries `text` only today).
 - llmock (`@copilotkit/aimock`) — already wired into `test/llmock-setup.ts`. The orchestrator's claude calls route through `ANTHROPIC_BASE_URL=<llmock>` set on the Daytona sandbox env, same pattern `claude-cli-daytona.integration.test.ts` uses for `ANTHROPIC_MODEL`.
 - No new container types needed.
