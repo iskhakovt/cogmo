@@ -207,4 +207,13 @@ describe("persistTurn", () => {
 
     await expect(persistTurn(step, deps, ARGS)).rejects.toThrow();
   });
+
+  it("throws without a transaction when the loop returned no messages", async () => {
+    const { step, deps, transactions } = setup({});
+
+    await expect(
+      persistTurn(step, deps, { ...ARGS, result: { ...RESULT, newMessages: [] } }),
+    ).rejects.toThrow("the loop returned no messages");
+    expect(transactions).toEqual([]);
+  });
 });

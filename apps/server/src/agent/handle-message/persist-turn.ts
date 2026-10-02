@@ -42,7 +42,7 @@ export interface PersistTurnArgs {
  * reply row, written by this run. `superseded`: another reply owns the
  * batch's inbounds — a later turn re-batched them, or another run of the
  * same batch persisted a different reply — so nothing was written
- * (design/observation.md → Late replies, PR 0).
+ * (design/observation.md → Late replies).
  */
 export type PersistOutcome = { kind: "persisted"; messageId: string } | { kind: "superseded" };
 
@@ -89,7 +89,7 @@ export async function persistTurn(
     // Both checks read in the insert's transaction, so the decision and the
     // write share one snapshot. REPEATABLE READ takes no predicate lock: a
     // row committed by a transaction overlapping this one is missed
-    // (design/observation.md → Late replies, what PR 0 can't see).
+    // (design/observation.md → Late replies).
     const { outcome, ownEarlierWrite } = await deps.runInTx(async (tx) => {
       const existing = await deps.agentStore.findLastAssistantMessageByInbound(tx, {
         conversationId,
