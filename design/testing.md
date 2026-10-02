@@ -37,8 +37,8 @@ Nothing in the suite leans on the auto-clear today — it passes in full with `c
 Docker services + app wired in-process. Tests the orchestration pipeline — debuggable, injectable, faster than e2e.
 
 **Infrastructure:**
-- Testcontainers (PostgreSQL, Redis, Inngest, Hindsight) — started in vitest `globalSetup`, random ports
-- Container definitions in `dev/containers.ts` (shared with `scripts/dev-infra.ts` for local dev)
+- Testcontainers started in vitest `globalSetup` (`test/integration-setup.ts`), random ports: PostgreSQL, Redis, RustFS, Hindsight (slim), and one Inngest dev server per worker slot
+- Every container definition lives in `dev/containers.ts`, shared with `scripts/dev-infra.ts` for local dev — including those a single test starts itself (`gitea()`, `inngestKeyed()`). The `no-inline-test-container` lint rule keeps them there.
 - llmock (`@copilotkit/aimock`) runs in-process: one per test file for the app's calls, replaying that file's cassette, and one in `globalSetup` for Hindsight's
 - Hindsight reaches its llmock via `host.testcontainers.internal`, published by `exposeHostPort()` in `dev/containers.ts` — not `host-gateway`, which points into the wrong namespace under rootless Docker
 - Each test file runs against its own database, cloned from a template `globalSetup` migrates, and its own seeded user — so its own Hindsight bank
