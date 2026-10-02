@@ -84,6 +84,8 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
       .mockResolvedValue({ id: "msg-1", createdAt: MOCK_MESSAGE_CREATED_AT }),
     insertMessages: vi.fn().mockResolvedValue({ id: "msg-1" }),
     getLastAssistantMessage: vi.fn().mockResolvedValue(null),
+    findLastAssistantMessageByInbound: vi.fn().mockResolvedValue(undefined),
+    isCursorRebatched: vi.fn().mockResolvedValue(false),
     listMessages: vi.fn().mockResolvedValue([{ id: "msg-1", role: "user", content: "hello" }]),
     getLatestSummary: vi.fn().mockResolvedValue(undefined),
     // Echoes the insert, as a first attempt does.

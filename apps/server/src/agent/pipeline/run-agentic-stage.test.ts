@@ -197,6 +197,7 @@ describe("runAgenticStage", () => {
       profileId: "profile-1",
       model: "claude-sonnet-4-6",
       lastInboundMessageId: "inbound-1",
+      firstInboundMessageId: null,
     });
 
     const loopParams = expectDefined(h.runStreamingAgentLoop.mock.calls[0], "loop call")[0];

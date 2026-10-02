@@ -1308,6 +1308,7 @@ describe("DrizzleTransportStore", () => {
           profileId,
           model: "test",
           lastInboundMessageId: "00000000-0000-7000-8000-000000000000",
+          firstInboundMessageId: null,
         }),
       );
     }

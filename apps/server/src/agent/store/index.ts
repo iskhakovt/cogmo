@@ -141,6 +141,9 @@ export class DrizzleAgentStore implements AgentStore {
     this.#transcript,
   );
   readonly insertMessages = this.#transcript.insertMessages.bind(this.#transcript);
+  readonly findLastAssistantMessageByInbound =
+    this.#transcript.findLastAssistantMessageByInbound.bind(this.#transcript);
+  readonly isCursorRebatched = this.#transcript.isCursorRebatched.bind(this.#transcript);
   readonly getLastAssistantMessage = this.#transcript.getLastAssistantMessage.bind(
     this.#transcript,
   );

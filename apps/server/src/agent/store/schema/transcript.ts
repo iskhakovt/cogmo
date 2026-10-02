@@ -29,6 +29,12 @@ export const messages = pgTable(
       .references(() => profiles.id), // profile active for the turn this row belongs to
     model: text("model").notNull(), // model active for the turn; legacy backfill = '<legacy>' sentinel
     lastInboundMessageId: uuid("last_inbound_message_id").notNull(),
+    // Nullable: set only on a `handle-message` turn row, where it is the
+    // batch's first inbound (`[first, last_inbound_message_id]` is the batch
+    // the turn re-read). NULL on every other row. A NULL on a turn row is an
+    // unknown range start, which `isCursorRebatched` reads as covering every
+    // earlier cursor.
+    firstInboundMessageId: uuid("first_inbound_message_id"),
     inputTokens: integer("input_tokens"), // nullable — only set on assistant messages
     // NOT NULL, no default — callers must pass explicitly for assistant rows
     // (via `lastMessageOutputTokens`). Backfilled to -1 for pre-migration rows

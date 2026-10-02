@@ -69,6 +69,7 @@ messages (
   profile_id               UUID FK → profiles NOT NULL,  -- active profile for the turn this row belongs to
   model                    TEXT NOT NULL,        -- model active for the turn; legacy backfill = '<legacy>' sentinel
   last_inbound_message_id  UUID NOT NULL,        -- attribution cursor. See debounce.md.
+  first_inbound_message_id UUID,                 -- handle-message turn rows: the batch's first inbound. See Inbound Message / Message Attribution.
   transcript_head          JSONB,                -- TranscriptHeadSchema; assistant rows. See prompt-caching.md → Head check.
   created_at               TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -168,6 +169,8 @@ WHERE conversation_id = ?
 ```
 
 No join table, no FK from inbound to messages. Both tables stay immutable (insert-only). The cursor is set once at message creation.
+
+**Batch range.** A `handle-message` turn row (the user row `create-user-message` writes) also carries `first_inbound_message_id`, the batch's first inbound, so `[first_inbound_message_id, last_inbound_message_id]` is the batch that turn re-read. It is NULL on every other row (assistant, tool and harness rows, pipeline stage prompts) and on turn rows written before the column existed. `persist-new-messages` reads it to refuse a late reply whose inbounds a later turn re-batched ([crash-recovery.md](../crash-recovery.md#late-replies-confirmed) → Late replies).
 
 **Why ID cursor over timestamp?** Monotonic UUIDv7, no clock skew, no precision edge cases. Same pattern as Kafka offsets and Stripe settlement cursors.
 

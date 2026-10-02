@@ -24,8 +24,12 @@ export interface AdmitTurnArgs {
   turnLogger: Logger;
 }
 
-/** Why a turn ends before doing any work. */
-export type TurnSkipReason = "stale" | "await_input" | "no_messages" | "cooldown";
+/**
+ * Why a turn ends without a reply. Admission's guards skip before any work;
+ * `superseded` is a turn whose loop ran and was billed, but whose reply
+ * `persist-new-messages` refused.
+ */
+export type TurnSkipReason = "stale" | "await_input" | "no_messages" | "cooldown" | "superseded";
 
 /** The conversation row as `load-conversation` returns it. */
 export interface AdmittedConversation {

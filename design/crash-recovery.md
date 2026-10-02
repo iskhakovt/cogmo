@@ -43,11 +43,13 @@ The bug class to catch is #2 — and to catch it you have to **count boundaries,
 | Loop | `truncation-notice-iter<N>` (conditional — final iteration stopped at `max_tokens` with text) | push the truncation notice after the partial reply | **stream push** | ✓ |
 | Degrade | `degraded-reply` (conditional) | `synthesizeDegradedReply` + retract/apology pushes; returns the apology text | **LLM call + stream pushes** | ✓ |
 | Close | `finish-stream` | `delivery.finish`; returns the sessions whose stream failed | **stream writes** | ✓ |
-| Persist | `persist-new-messages` | `agentStore.insertMessages` (batch INSERT: intermediate tool turns + final assistant, single transaction). `[confirmed]` Each assistant row carries its `transcript_head`, whose status comes from the iteration outcomes; an in-turn divergence is counted here (`site: "iteration"`) | **DB write** | ✓ |
-| Deliver | `batch-delivery` (conditional) | image resolution via `Promise.allSettled` + `delivery.deliverBatch` | **S3 GET + network send to batch adapters** | ✓ |
-| Deliver | `redeliver-unstreamed` (conditional — a stream failed at finish) | `delivery.deliverUnstreamed`: the reply's text through those sessions' batch `deliver` | **network send** | ✓ |
-| Notify | `send-response` | `step.sendEvent("response/ready")` | Inngest event | ✓ |
-| Resume | `flush` (conditional) | `step.sendEvent("inbound/ready")` | Inngest event | ✓ |
+| Persist | `persist-new-messages` | In one transaction, reading only rows newer than the `last-assistant` reply: `findLastAssistantMessageByInbound` on the turn's cursor (a reply with this run's final content is its own earlier write: `persisted` with its id; a different one is another run of the batch: `superseded`; neither writes), then `isCursorRebatched` (a later turn row covers the cursor: `superseded`, nothing written), else `agentStore.insertMessages` (batch INSERT: intermediate tool turns + final assistant) and the cooldown clear. Records `cogmo.agent.iterations` unless it found its own earlier write (a `superseded` attempt retried before Inngest stored its result records twice). Returns `{ kind: "persisted"; messageId } \| { kind: "superseded" }`; a `{ id }` memo reads as `persisted` ([Late replies](#late-replies-confirmed)). `[confirmed]` Each assistant row carries its `transcript_head`, whose status comes from the iteration outcomes; an in-turn divergence is counted here (`site: "iteration"`) | **DB write** | ✓ |
+| Persist | `emit-cooldown-cleared` (conditional — `persisted`, the turn probed an elapsed cooldown) | `step.sendEvent("conversation/cooldown/cleared")` | Inngest event | ✓ |
+| Persist | `emit-conversation-degraded` (conditional — the loop degraded, `persisted` or `superseded`: the apology already streamed) | `step.sendEvent("conversation/degraded")` | Inngest event | ✓ |
+| Deliver | `batch-delivery` (conditional — `persisted`, batch targets) | image resolution via `Promise.allSettled` + `delivery.deliverBatch` | **S3 GET + network send to batch adapters** | ✓ |
+| Deliver | `redeliver-unstreamed` (conditional — `persisted`, a stream failed at finish) | `delivery.deliverUnstreamed`: the reply's text through those sessions' batch `deliver` | **network send** | ✓ |
+| Notify | `send-response` (conditional — `persisted`) | `step.sendEvent("response/ready")` for the persisted reply's id | Inngest event | ✓ |
+| Resume | `flush` (conditional — `persisted`, resume policy `flush`) | `step.sendEvent("inbound/ready")` | Inngest event | ✓ |
 
 The handler (`src/agent/handle-message.ts`) runs one module per phase from `src/agent/handle-message/`, in order: `admit-turn`, `record-user-message`, `load-turn-transcript`, `freeze-turn-inputs`, `assemble-turn-context`, `resolve-turn-model`, `compact-turn`, `finalize-turn-context`, `run-turn-loop`, `persist-turn`, `deliver-reply`. `onFailure` is `report-turn-failure`. Each module's doc lists the steps it plans.
 
@@ -71,6 +73,33 @@ The non-durable regions are:
 **Where the turn's row comes from.** The turn context is keyed to the turn's user row and shows its `created_at`. `load-turn-transcript` reads that row in the same transaction as the history, with `findUserMessageByInbound` on the cursor the row was written with: in a chat turn the batch's last inbound, in a stage turn the prompt inbound `persist-stage-prompt` returns. Neither insert step returns the row (why: `.claude/rules/inngest.md` → A memoized result is a contract with runs in flight). The lookup applies the turn-row predicate in [prompt-caching.md](prompt-caching.md#stored-shapes-confirmed) → Stored shapes. A cursor with no row behind it fails the step without retries (`TurnRowMissingError`).
 
 **Batch delivery is durable.** The `batch-delivery` step runs *after* the non-durable streaming section completes and the assistant message is persisted, so it doesn't inherit the streaming constraint. Wrapping it gives exactly-once `sendMessage` / `sendPhoto` to batch adapters on retry + observability in the Inngest UI. Generated-image bytes flow through the step body in memory; the return value is only a small `{ delivered, failed }` record, so state stays lean. The step is gated by the frozen `batchDelivery` decision — for pure-streaming setups (Telegram-only), the block is skipped entirely and no S3 downloads happen.
+
+### Late replies `[confirmed]`
+
+`conversationTurnConcurrency` counts executing steps, not runs (`src/inngest/concurrency.ts`), so a failed turn's retry can run between a younger turn's steps. Admission's staleness guard compares against the memoized `last-assistant`, so the retry doesn't see the younger turn, which re-batched the failed turn's inbounds: `getUnbatchedInbound` loads every non-`pipeline` inbound above the newest answered cursor. Persisting the retry's reply would answer the same words twice. The design, and how the Observer uses the batch range, is in [observation.md](observation.md#late-replies); this section is the durability contract.
+
+`create-user-message` therefore records the batch's range on the turn row (`messages.first_inbound_message_id`, [transport/overview.md](transport/overview.md#inbound-message--message-attribution)). A later non-pipeline turn row B **covers** the cursor C when `B.first_inbound_message_id <= C < B.last_inbound_message_id`; a B with no range start (an unknown range) covers any C below its cursor. Pipeline stage prompts never count, by the same `source <> 'pipeline'` left join as `getLastAssistantMessage`.
+
+`persist-new-messages` reads both conditions in its insert's transaction, over rows newer than the reply `last-assistant` found, so its cost tracks the current turn (a range scan on `idx_messages_conv_id`):
+
+1. An assistant row already carries the cursor: a run of this batch committed. Messages carry no run id, so the newest such row's content tells the runs apart. The turn's final message comes from a memoized step (`llm-iter<N>` or `degraded-reply`), so this run's own earlier write holds exactly that content (`jsonb` equality): it returns `persisted` with that row's id and writes nothing. A different content is another run of the same batch, which owns the cursor: `superseded`.
+2. Otherwise a covering turn row exists: `superseded`, nothing written.
+3. Otherwise it inserts the turn's rows and clears an elapsed cooldown.
+
+On `superseded` the run skips `emit-cooldown-cleared` (no cooldown was cleared), delivery, `send-response` and `flush`, and returns `{ status: "skipped", reason: "superseded" }`. It still runs `emit-conversation-degraded` when the loop degraded, because the apology already streamed. The step records `cogmo.agent.iterations` for every outcome whose loop ran in this run: an insert and both `superseded` cases, not the re-run that finds its own write.
+
+| Crash or retry point | Result |
+|-|-|
+| A run in flight across the deploy, `persist-new-messages` memoized as `{ id }` | Parsed as `persisted`; the run continues as before |
+| `persist-new-messages` re-runs after its first attempt committed, and a covering turn row committed in between | The reply check runs first, finds this run's content and returns `persisted`, so the emits, delivery and `send-response` run for the committed rows |
+| `persist-new-messages` re-runs after its first attempt committed, nothing in between | `persisted`, no duplicate rows |
+| Two runs of the same batch: a queued `inbound/ready` for an earlier inbound of the batch runs between a failed run's step retries, passes the staleness guard, and re-batches the same inbounds under the same cursor | The later persist finds the other run's reply and returns `superseded`: it delivers nothing, and only the first run's reply is announced. Residual: two overlapping REPEATABLE READ persists each miss the other and both write and deliver; a later run whose final content equals the first's reads as its own write and delivers the same text again. |
+
+Residuals:
+
+- **The window before the younger turn row commits.** The younger turn re-batches from its `last-assistant` step through `load-turn-snapshot`, `load-inbound` and `transcribe-voice` until `create-user-message` commits, and none of those writes. A retried persist in that window finds no turn row and persists, and both replies reach the user. The check also relies on the conversation concurrency limit to keep it from overlapping the younger turn's `create-user-message`; that limit is best-effort, and two overlapping REPEATABLE READ transactions each miss the other.
+- **A superseded reply has already streamed.** `runTurnLoop` streams before `persist-new-messages`, so the user saw the late reply and the transcript has no row for it: the next turn's model never sees what the user read. The user has the younger turn's reply to the same words. A pre-stream check is tracked in `todo.md`.
+- **A covering turn that fails for good.** A covering turn counts once its user row exists, before it is answered. If it then fails for good, the older turn's reply was refused and neither persists one: the user saw the older reply stream and then a failure notice. `getLastAssistantMessage` still returns the reply before both, so the next turn's `getUnbatchedInbound` re-batches both turns' inbounds and the words are answered again.
 
 ## Why only summarization's LLM call is durable `[confirmed]`
 
@@ -247,6 +276,10 @@ The cases:
 17. `load-system-prompt` cached → no render and no snapshot read, and the epoch decision follows the cached snapshot.
 18. Replay equality (as 13) on a turn that continues its epoch and announces a core-memory change, the earlier turn's thinking block kept.
 19. Every step before the agent loop cached from a build without the snapshot steps (an `assemble-prompt` memo in their place) → the run completes, no memoized step re-runs, and the new steps run once.
+20. `persist-new-messages` uncached with a covering turn row → no `insertMessages`, of the post-persist steps only `emit-conversation-degraded` planned, `{ status: "skipped", reason: "superseded" }`; the same turn without one plans all of them (non-vacuity check).
+21. `persist-new-messages` cached as a `{ id }` memo (a run from before the deploy) → `persisted`: every post-persist step runs and `send-response` names the memo's id.
+22. `persist-new-messages` re-run after its commit, with a covering turn row since → `persisted` with the committed reply's id: no `insertMessages`, every post-persist step runs.
+23. `persist-new-messages` uncached with another run's different reply on the cursor → `superseded`: no `insertMessages`, of the post-persist steps only `emit-conversation-degraded` planned.
 
 Two tests run a turn with nothing cached while a live read changes between its invocations: a skill that stops loading once its tool step has run (both LLM requests carry the same `tools`, and the follow-up carries the skill's replayed result), and a profile switched off voice after `load-system-prompt` (the turn still delivers the voice reply its prompt was assembled for). `handle-message.test.ts` replays a turn over one step memo while batch targets appear or disappear, and checks both invocations plan the same steps.
 

@@ -1,3 +1,4 @@
+import { match } from "ts-pattern";
 import type { Transactor } from "../db/index.js";
 import { inngest } from "../inngest/client.js";
 import { conversationTurnConcurrency } from "../inngest/concurrency.js";
@@ -187,6 +188,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         voiceBundle,
         snapshot,
         maxInboundId,
+        firstInboundId,
       });
 
       const transcript = await loadTurnTranscript(step, deps, {
@@ -291,50 +293,58 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         "agent loop complete",
       );
 
-      const assistantMessageId = await persistTurn(step, deps, {
+      const persisted = await persistTurn(step, deps, {
         conversationId,
         runId,
         triggerInboundId,
         snapshot,
         maxInboundId,
+        lastAnsweredMessageId: lastAssistant?.id ?? null,
         priorCooldown: conv.cooldownState,
         result,
       });
 
-      await deliverReply(step, deps, {
-        conversationId,
-        delivery,
-        result,
-        batchDelivery: frozen.batchDelivery,
-        unstreamed,
-        voiceMode: frozen.voiceMode,
-        voiceBundle,
-        turnLogger,
-      });
+      return match(persisted)
+        .with({ kind: "superseded" }, async () => {
+          // Another reply owns this batch's inbounds; nothing was persisted,
+          // so nothing is delivered or announced.
+          turnLogger.warn("another reply owns this turn's inbounds; reply not persisted");
+          return { status: "skipped" as const, reason: "superseded" as const };
+        })
+        .with({ kind: "persisted" }, async ({ messageId }) => {
+          await deliverReply(step, deps, {
+            conversationId,
+            delivery,
+            result,
+            batchDelivery: frozen.batchDelivery,
+            unstreamed,
+            voiceMode: frozen.voiceMode,
+            voiceBundle,
+            turnLogger,
+          });
 
-      // ──── DURABLE: notify (Observer, metrics — not delivery) ────
+          // ──── DURABLE: notify (Observer, metrics — not delivery) ────
 
-      await step.sendEvent(
-        "send-response",
-        responseReady.create({
-          conversationId,
-          messageId: assistantMessageId,
-        }),
-      );
+          await step.sendEvent(
+            "send-response",
+            responseReady.create({ conversationId, messageId }),
+          );
 
-      // ──── RESUME POLICY ────
+          // ──── RESUME POLICY ────
 
-      if (deps.debounceConfig.resumePolicy === "flush") {
-        // Process any remaining unbatched messages immediately (no debounce wait)
-        await step.sendEvent(
-          "flush",
-          inboundReady.create({ conversationId, triggerInboundId: null }),
-        );
-      }
-      // "debounce": queued inbound/ready events fire naturally when concurrency lock releases
-      // "await_input": guard 2 catches all buffered events; new input triggers fresh debounce
+          if (deps.debounceConfig.resumePolicy === "flush") {
+            // Process any remaining unbatched messages immediately (no debounce wait)
+            await step.sendEvent(
+              "flush",
+              inboundReady.create({ conversationId, triggerInboundId: null }),
+            );
+          }
+          // "debounce": queued inbound/ready events fire naturally when concurrency lock releases
+          // "await_input": guard 2 catches all buffered events; new input triggers fresh debounce
 
-      return { status: "processed", conversationId };
+          return { status: "processed" as const, conversationId };
+        })
+        .exhaustive();
     },
   );
 }

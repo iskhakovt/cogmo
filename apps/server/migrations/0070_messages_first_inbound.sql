@@ -1,0 +1,1 @@
+ALTER TABLE "messages" ADD COLUMN "first_inbound_message_id" uuid;

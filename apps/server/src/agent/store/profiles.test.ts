@@ -500,6 +500,7 @@ describe("DrizzleProfileStore", () => {
           profileId,
           model: "m",
           lastInboundMessageId: "019d0000-0000-7000-8000-000000000001",
+          firstInboundMessageId: null,
         }),
       );
       expect(await tx((trx) => store.countProfileReferences(trx, profileId))).toEqual({
@@ -587,6 +588,7 @@ describe("DrizzleProfileStore", () => {
           profileId: oldProfileId,
           model: "m",
           lastInboundMessageId: "019d0000-0000-7000-8000-000000000001",
+          firstInboundMessageId: null,
         }),
       );
       // Switch the conversation to new profile — old profile now only referenced by stamped msg

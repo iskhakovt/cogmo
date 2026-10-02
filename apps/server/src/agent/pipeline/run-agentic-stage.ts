@@ -189,6 +189,7 @@ export async function runAgenticStage(
         profileId: ctx.profileId,
         model: ctx.model,
         lastInboundMessageId: inbound.id,
+        firstInboundMessageId: null,
       });
       return { inboundId: inbound.id };
     }),
