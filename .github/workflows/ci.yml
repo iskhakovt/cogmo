@@ -253,7 +253,7 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           flags: unit
           files: apps/server/coverage/unit/lcov.info
-      - uses: dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2 # v3.0.0
+      - uses: dorny/test-reporter@d1b5dff021aa968b288b02285a8bf47471c5928a # v3.2.0
         if: always()
         with:
           name: Unit Test Results
@@ -348,7 +348,7 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           flags: integration
           files: apps/server/coverage/integration/lcov.info
-      - uses: dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2 # v3.0.0
+      - uses: dorny/test-reporter@d1b5dff021aa968b288b02285a8bf47471c5928a # v3.2.0
         if: always()
         with:
           name: Integration Test Results
@@ -422,7 +422,7 @@ jobs:
         env:
           E2E_IMAGE: cogmo:ci
           TESTCONTAINERS_RYUK_DISABLED: "true"
-      - uses: dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2 # v3.0.0
+      - uses: dorny/test-reporter@d1b5dff021aa968b288b02285a8bf47471c5928a # v3.2.0
         if: always()
         with:
           name: E2E Test Results
