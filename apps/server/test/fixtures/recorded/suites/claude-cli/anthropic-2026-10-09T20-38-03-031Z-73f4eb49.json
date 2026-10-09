@@ -13,34 +13,34 @@
           {
             "name": "Bash",
             "arguments": "{\"command\": \"echo verify\"}",
-            "id": "toolu_01UfipA7befaSsS91vN7QToL"
+            "id": "toolu_011V2AhMaihH9sL4DjgYKPX2"
           }
         ]
       },
       "recordedTimings": {
-        "ttftMs": 559,
+        "ttftMs": 467,
         "interChunkDelaysMs": [
           0,
           0,
           0,
-          41,
           160,
-          17,
+          3,
+          80,
           0,
           0,
-          125,
+          217,
           0,
           0,
           0,
           0,
-          0,
+          3,
           0
         ],
-        "totalDurationMs": 902
+        "totalDurationMs": 930
       },
       "metadata": {
-        "systemHash": "dce63215",
-        "toolsHash": "e3f95b91"
+        "systemHash": "df3996db",
+        "toolsHash": "ecf29101"
       }
     }
   ]
