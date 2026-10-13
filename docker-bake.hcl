@@ -40,21 +40,21 @@ variable "VERSION" {
 // stay literal in each Dockerfile for Dependabot; these are bumped by hand.
 // uv is shared by devbase + skills.
 variable "UV_VERSION" {
-  default = "0.12.18"
+  default = "0.12.23"
 }
 variable "UV_DIGEST" {
-  default = "sha256:3adc3706091ce7c2fe595e669628caedd6d951551b92b258b7e7dbe06d9440bc"
+  default = "sha256:61d393e44e249f2e4b526b6c7ddcecce245946826e608e11c93ad4f5bba55b21"
 }
 // Match package.json packageManager. The digest is ghcr.io/pnpm/pnpm's
 // index for that version.
 variable "PNPM_VERSION" {
-  default = "12.8.1"
+  default = "12.10.0"
 }
 variable "PNPM_DIGEST" {
-  default = "sha256:44cfd11d75b901dc7a83a16812d9134e4bf9d82f6b0eb28af6d666ebbf0fb4fb"
+  default = "sha256:333da074a29dcc495459433955e15e03a2715f6ae3f4904139a544e110d2d411"
 }
 variable "NPM_VERSION" {
-  default = "12.1.0"
+  default = "12.2.0"
 }
 // Coupled to the claude.ts stream-json parser — bump with it. Tracks the
 // `stable` dist-tag, not `latest`: `latest` and `next` are the same build,
