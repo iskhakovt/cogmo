@@ -658,7 +658,7 @@ Residuals:
 
 ## Hindsight Raw Retain `[proposed]`
 
-Research against Hindsight 0.10 (cogmo pins `hindsight-api:0.10.1` and `@vectorize-io/hindsight-client` ^0.10.1, `cogmo.hindsightCompat` `>=0.10.0 <0.11.0`):
+Research against Hindsight 0.10.1:
 
 - **`document_id` is a per-bank upsert.** `update_mode: "replace"` (the default) deletes the document and every fact extracted from it before reprocessing. `"append"` concatenates and reprocesses. Both diff chunks by hash, so unchanged chunks keep their facts (hindsight-docs `developer/api/retain.mdx`; client `MemoryItem.update_mode`).
 - **Item `tags` are the document's tag set**, copied to every fact extracted from it (hindsight-api `engine/retain/fact_storage.py`).
