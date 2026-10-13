@@ -232,7 +232,7 @@ export function hindsight(
   // the Control Plane web UI (which Cogmo never talks to). Pinned within
   // `cogmo.hindsightCompat`: a floating `latest` drifts past the range and
   // trips the boot version check.
-  return new GenericContainer("ghcr.io/vectorize-io/hindsight-api:0.10.1")
+  return new GenericContainer("ghcr.io/vectorize-io/hindsight-api:1.0.0")
     .withNetwork(network)
     .withNetworkAliases("hindsight")
     .withExposedPorts(8888)
@@ -301,7 +301,7 @@ export function hindsightSlim(
 
   // Pin version — floating `latest-slim` breaks llmock fixtures when Hindsight
   // changes its LLM request format. Update version + re-record fixtures together.
-  return new GenericContainer("ghcr.io/vectorize-io/hindsight-api:0.10.1-slim")
+  return new GenericContainer("ghcr.io/vectorize-io/hindsight-api:1.0.0-slim")
     .withNetwork(network)
     .withNetworkAliases("hindsight")
     .withExposedPorts(8888)

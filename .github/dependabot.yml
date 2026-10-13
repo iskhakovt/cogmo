@@ -26,9 +26,15 @@ updates:
     # past the floor — `@types/node` declares no `engines` for
     # `engine-ranges.test.ts` to check. Lift with the change that raises
     # `engines.node`.
+    #
+    # The Hindsight client moves by hand, with the hindsight-api image pins and
+    # `cogmo.hindsightCompat` (see pnpm-workspace.yaml). A minor past the range
+    # fails the boot check, so only patches come from here.
     ignore:
       - dependency-name: "@types/node"
         update-types: ["version-update:semver-major"]
+      - dependency-name: "@vectorize-io/hindsight-client"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
     # Group updates so the lockfile only has one merge state to validate
     # at a time. Multiple overlapping PRs touching pnpm-lock.yaml can
     # produce a corrupted lockfile because GitHub's textual auto-rebase
