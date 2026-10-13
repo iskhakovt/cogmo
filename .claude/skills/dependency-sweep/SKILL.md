@@ -22,7 +22,9 @@ single group:
 5. Vendored artefacts no dependency tool watches. `apps/server/data/litellm-models.json`
    is the known one: nothing reports it stale, and a missing model silently
    falls back to `DEFAULT_LIMITS` (128k context, 4096 output) with only a
-   deduplicated WARN.
+   deduplicated WARN. Diff the refresh for removed keys before taking it:
+   upstream has dropped whole provider namespaces (`openrouter/*`), and the
+   snapshot is held until `todo.md`'s OpenRouter limits entry lands.
 
 ## For every major: diff the behaviour, not just the types
 

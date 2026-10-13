@@ -108,7 +108,7 @@ export function redis(network: StartedNetwork) {
     .withStartupTimeout(30_000);
 }
 
-const INNGEST_IMAGE = "mirror.gcr.io/inngest/inngest:v1.45.1";
+const INNGEST_IMAGE = "mirror.gcr.io/inngest/inngest:v1.46.0";
 
 /** `appUrl` pointing at the host must come from `exposeHostPort()` — there is no
  * `host.docker.internal` mapping on these containers. */
