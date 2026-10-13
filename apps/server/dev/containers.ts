@@ -300,7 +300,8 @@ export function hindsightSlim(
   }
 
   // Pin version — floating `latest-slim` breaks llmock fixtures when Hindsight
-  // changes its LLM request format. Update version + re-record fixtures together.
+  // changes its LLM request format. Re-record the `hindsight/` cassette when a
+  // bump changes those requests.
   return new GenericContainer("ghcr.io/vectorize-io/hindsight-api:1.0.0-slim")
     .withNetwork(network)
     .withNetworkAliases("hindsight")
