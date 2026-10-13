@@ -10,7 +10,7 @@ This is the canonical install guide. Cogmo is a single Node.js process distribut
 | pgvector | latest | Postgres extension for vector storage. The `pgvector/pgvector:pg18` image bundles it. |
 | Redis | 7+ | Inngest queue and state store. |
 | Inngest | latest | Self-hosted `inngest start` with an event key and signing key. `inngest dev` is for local development only — see [Securing internal services](#securing-internal-services). |
-| [Hindsight](https://github.com/vectorize-io/hindsight) | 0.10.x, slim recommended | Memory server, HTTP API on port 8888. Cogmo reads the server's version at boot and refuses to start outside `cogmo.hindsightCompat` in `apps/server/package.json`, so upgrade the two together. See [Hindsight image variant](#hindsight-image-variant) for which tag to pick. |
+| [Hindsight](https://github.com/vectorize-io/hindsight) | 1.0.x, slim recommended | Memory server, HTTP API on port 8888. Cogmo reads the server's version at boot and refuses to start outside `cogmo.hindsightCompat` in `apps/server/package.json`, so upgrade the two together. See [Hindsight image variant](#hindsight-image-variant) for which tag to pick. |
 | Docker | latest | For pulling and running the image. |
 
 Cogmo stores its application state in your Postgres; Hindsight stores its vectors in the same Postgres (different schema). One database is enough for personal scale.
@@ -241,7 +241,7 @@ HINDSIGHT_API_TENANT_API_KEY=<same value as HINDSIGHT_API_KEY>
 ```
 
 The key does not cover everything:
-- **Open routes:** `/health`, `/version`, `/metrics`, `/docs` and `/openapi.json` still answer without it (verified on 0.10.1).
+- **Open routes:** `/health`, `/version`, `/metrics`, `/docs` and `/openapi.json` still answer without it (verified on 1.0.0).
 - **MCP endpoint:** uses the same key unless `HINDSIGHT_API_TENANT_MCP_AUTH_DISABLED` is set.
 - **Control Plane UI:** a separate app with its own `HINDSIGHT_CP_ACCESS_KEY`. Cogmo does not use it — use the API-only image.
 

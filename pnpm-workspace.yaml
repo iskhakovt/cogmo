@@ -37,7 +37,7 @@ overrides:
 # releases immediately. Bump in lockstep with the hindsight-api image pins in
 # apps/server/dev/containers.ts and cogmo.hindsightCompat.
 minimumReleaseAgeExclude:
-  - '@vectorize-io/hindsight-client@0.10.1'
+  - '@vectorize-io/hindsight-client@1.0.0'
 
 # Keeps pnpm-lock.yaml a single YAML document. Under the default `download`,
 # pnpm 12 prepends an environment document recording itself, and GitHub's
