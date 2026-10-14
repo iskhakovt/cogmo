@@ -2895,8 +2895,6 @@ describe("AnthropicProvider", () => {
       },
     );
 
-    // The block stays in the conversation's history, so a throw here would
-    // fail every later turn of the conversation.
     it.each([
       [
         "application/zip",
@@ -2932,7 +2930,9 @@ describe("AnthropicProvider", () => {
           ],
         });
 
-        expect(mockCreate.mock.calls[0]![0].messages[0].content).toEqual([
+        expect(
+          expectDefined(mockCreate.mock.calls[0], "create call")[0].messages[0].content,
+        ).toEqual([
           { type: "text", text: "what is this?" },
           { type: "text", text },
         ]);
@@ -3053,7 +3053,9 @@ describe("AnthropicProvider", () => {
     it("translates a base64 image of a supported type", async () => {
       await chatWithImage("image/png");
 
-      expect(mockCreate.mock.calls[0]![0].messages[0].content[0]).toEqual({
+      expect(
+        expectDefined(mockCreate.mock.calls[0], "create call")[0].messages[0].content[0],
+      ).toEqual({
         type: "image",
         source: { type: "base64", media_type: "image/png", data: "AAA=" },
       });
@@ -3062,7 +3064,9 @@ describe("AnthropicProvider", () => {
     it("sends a text placeholder in place of an unsupported base64 image", async () => {
       await chatWithImage("image/bmp");
 
-      expect(mockCreate.mock.calls[0]![0].messages[0].content[0]).toEqual({
+      expect(
+        expectDefined(mockCreate.mock.calls[0], "create call")[0].messages[0].content[0],
+      ).toEqual({
         type: "text",
         text: "[image: image/bmp — not supported on this provider]",
       });

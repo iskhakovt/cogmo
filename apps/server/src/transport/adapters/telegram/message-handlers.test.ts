@@ -1,6 +1,7 @@
 import { ok } from "neverthrow";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { logger } from "../../../logger.js";
+import { expectDefined } from "../../../test/assertions.js";
 import { mockAttachmentStore, mockInngest, mockTransport } from "../../../test/factories.js";
 import { handlers, resetGrammyMock } from "../../../test/telegram/grammy-mock.js";
 import {
@@ -370,6 +371,10 @@ describe("registerMessageHandlers", () => {
       vi.stubGlobal("fetch", mockFetch);
     });
 
+    function documentHandler() {
+      return expectDefined(handlers.get("on:message:document"), "document handler");
+    }
+
     it("uploads a PDF document and emits a document inbound block", async () => {
       const { transport } = await createAdapter();
       const ctx = makeDocumentCtx(111, {
@@ -451,7 +456,7 @@ describe("registerMessageHandlers", () => {
         file_name: "page.html",
         mime_type: "application/octet-stream",
       });
-      await handlers.get("on:message:document")!(ctx);
+      await documentHandler()(ctx);
 
       expect(transport.uploadAttachment).toHaveBeenCalledWith(expect.any(Buffer), "text/html");
       expect(transport.emit).toHaveBeenCalledWith(
@@ -464,7 +469,7 @@ describe("registerMessageHandlers", () => {
     it("infers the media type from the extension when mime_type is missing", async () => {
       const { transport } = await createAdapter();
       const ctx = makeDocumentCtx(111, { file_name: "NOTES.MD" });
-      await handlers.get("on:message:document")!(ctx);
+      await documentHandler()(ctx);
 
       expect(transport.uploadAttachment).toHaveBeenCalledWith(expect.any(Buffer), "text/markdown");
     });
@@ -475,7 +480,7 @@ describe("registerMessageHandlers", () => {
         file_name: "photo.png",
         mime_type: "application/octet-stream",
       });
-      await handlers.get("on:message:document")!(ctx);
+      await documentHandler()(ctx);
 
       expect(transport.emit).toHaveBeenCalledWith(
         "session-1",
@@ -500,7 +505,7 @@ describe("registerMessageHandlers", () => {
         file_name: "script.py",
         mime_type: "application/octet-stream",
       });
-      await handlers.get("on:message:document")!(ctx);
+      await documentHandler()(ctx);
 
       expect(transport.uploadAttachment).toHaveBeenCalledWith(expect.any(Buffer), "text/plain");
     });
@@ -509,6 +514,10 @@ describe("registerMessageHandlers", () => {
       ["control bytes", new Uint8Array([1, 2, 3])],
       ["a NUL byte", Buffer.from("text\0more", "latin1")],
       ["invalid UTF-8", Buffer.from("caf\xe9", "latin1")],
+      [
+        "invalid UTF-8 past the binary-byte window",
+        Buffer.concat([Buffer.alloc(9000, "a"), Buffer.from([0xe9])]),
+      ],
     ])(
       "keeps application/octet-stream for content with %s and no known extension",
       async (_, bytes) => {
@@ -518,7 +527,7 @@ describe("registerMessageHandlers", () => {
           file_name: "Makefile",
           mime_type: "application/octet-stream",
         });
-        await handlers.get("on:message:document")!(ctx);
+        await documentHandler()(ctx);
 
         expect(transport.uploadAttachment).toHaveBeenCalledWith(
           expect.any(Buffer),
@@ -530,7 +539,7 @@ describe("registerMessageHandlers", () => {
     it("keeps a specific mime_type over the one the extension implies", async () => {
       const { transport } = await createAdapter();
       const ctx = makeDocumentCtx(111, { file_name: "data.json", mime_type: "text/plain" });
-      await handlers.get("on:message:document")!(ctx);
+      await documentHandler()(ctx);
 
       expect(transport.uploadAttachment).toHaveBeenCalledWith(expect.any(Buffer), "text/plain");
     });
