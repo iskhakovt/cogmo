@@ -445,6 +445,96 @@ describe("registerMessageHandlers", () => {
       );
     });
 
+    it("infers the media type from the extension when Telegram sends application/octet-stream", async () => {
+      const { transport } = await createAdapter();
+      const ctx = makeDocumentCtx(111, {
+        file_name: "page.html",
+        mime_type: "application/octet-stream",
+      });
+      await handlers.get("on:message:document")!(ctx);
+
+      expect(transport.uploadAttachment).toHaveBeenCalledWith(expect.any(Buffer), "text/html");
+      expect(transport.emit).toHaveBeenCalledWith(
+        "session-1",
+        [{ type: "document", path: "inbound/test.jpg", mediaType: "text/html", name: "page.html" }],
+        expect.any(Date),
+      );
+    });
+
+    it("infers the media type from the extension when mime_type is missing", async () => {
+      const { transport } = await createAdapter();
+      const ctx = makeDocumentCtx(111, { file_name: "NOTES.MD" });
+      await handlers.get("on:message:document")!(ctx);
+
+      expect(transport.uploadAttachment).toHaveBeenCalledWith(expect.any(Buffer), "text/markdown");
+    });
+
+    it("routes an octet-stream file with an image extension to an image inbound block", async () => {
+      const { transport } = await createAdapter();
+      const ctx = makeDocumentCtx(111, {
+        file_name: "photo.png",
+        mime_type: "application/octet-stream",
+      });
+      await handlers.get("on:message:document")!(ctx);
+
+      expect(transport.emit).toHaveBeenCalledWith(
+        "session-1",
+        [{ type: "image", path: "inbound/test.jpg", mediaType: "image/png" }],
+        expect.any(Date),
+      );
+    });
+
+    function serveBytes(bytes: Uint8Array) {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        arrayBuffer: async () => new Uint8Array(bytes).buffer,
+      });
+    }
+
+    it("sniffs UTF-8 text with no known extension as text/plain", async () => {
+      const { transport } = await createAdapter();
+      serveBytes(Buffer.from("def greet():\n    print('héllo')\n", "utf-8"));
+      const ctx = makeDocumentCtx(111, {
+        file_name: "script.py",
+        mime_type: "application/octet-stream",
+      });
+      await handlers.get("on:message:document")!(ctx);
+
+      expect(transport.uploadAttachment).toHaveBeenCalledWith(expect.any(Buffer), "text/plain");
+    });
+
+    it.each([
+      ["control bytes", new Uint8Array([1, 2, 3])],
+      ["a NUL byte", Buffer.from("text\0more", "latin1")],
+      ["invalid UTF-8", Buffer.from("caf\xe9", "latin1")],
+    ])(
+      "keeps application/octet-stream for content with %s and no known extension",
+      async (_, bytes) => {
+        const { transport } = await createAdapter();
+        serveBytes(bytes);
+        const ctx = makeDocumentCtx(111, {
+          file_name: "Makefile",
+          mime_type: "application/octet-stream",
+        });
+        await handlers.get("on:message:document")!(ctx);
+
+        expect(transport.uploadAttachment).toHaveBeenCalledWith(
+          expect.any(Buffer),
+          "application/octet-stream",
+        );
+      },
+    );
+
+    it("keeps a specific mime_type over the one the extension implies", async () => {
+      const { transport } = await createAdapter();
+      const ctx = makeDocumentCtx(111, { file_name: "data.json", mime_type: "text/plain" });
+      await handlers.get("on:message:document")!(ctx);
+
+      expect(transport.uploadAttachment).toHaveBeenCalledWith(expect.any(Buffer), "text/plain");
+    });
+
     it("omits name field when document has no filename", async () => {
       const { transport } = await createAdapter();
       const ctx = makeDocumentCtx(111, { mime_type: "application/pdf" });

@@ -2895,55 +2895,88 @@ describe("AnthropicProvider", () => {
       },
     );
 
-    it("throws a clear error pre-flight on unsupported binary mediaType", async () => {
-      const provider = setup();
-      // application/zip is a real Telegram doc upload type Anthropic can't
-      // ingest. Fail fast rather than burning a 400 round-trip.
-      await expect(
-        provider.chat({
+    // The block stays in the conversation's history, so a throw here would
+    // fail every later turn of the conversation.
+    it.each([
+      [
+        "application/zip",
+        "archive.zip",
+        "[document: archive.zip (application/zip) — not supported on this provider]",
+      ],
+      [
+        "application/octet-stream",
+        undefined,
+        "[document: application/octet-stream — not supported on this provider]",
+      ],
+    ])(
+      "sends a text placeholder in place of an unsupported %s document",
+      async (mediaType, name, text) => {
+        const provider = setup();
+        await provider.chat({
           model: "claude-sonnet-4-6",
           system: "sys",
           messages: [
             {
               role: "user",
               content: [
+                { type: "text", text: "what is this?" },
                 {
                   type: "document",
                   source: "base64",
                   data: "UEsDBA==",
-                  mediaType: "application/zip",
-                  name: "archive.zip",
+                  mediaType,
+                  ...(name !== undefined && { name }),
                 },
               ],
             },
           ],
-        }),
-      ).rejects.toThrow(/unsupported mediaType "application\/zip"/);
-      // Must not even attempt the API call.
-      expect(mockCreate).not.toHaveBeenCalled();
-    });
+        });
 
-    it("throws on application/octet-stream (Telegram fallback for unknown types)", async () => {
-      const provider = setup();
-      await expect(
-        provider.chat({
-          model: "claude-sonnet-4-6",
-          system: "sys",
+        expect(mockCreate.mock.calls[0]![0].messages[0].content).toEqual([
+          { type: "text", text: "what is this?" },
+          { type: "text", text },
+        ]);
+      },
+    );
+
+    it("counts tokens with the placeholder in place of an unsupported document", async () => {
+      const provider = createProvider();
+      mockCountTokens.mockResolvedValueOnce({ input_tokens: 42 });
+
+      await provider.countTokens({
+        model: "claude-sonnet-4-6",
+        system: "sys",
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "document",
+                source: "base64",
+                data: "PGh0bWw+",
+                mediaType: "application/octet-stream",
+                name: "page.html",
+              },
+            ],
+          },
+        ],
+      });
+
+      expect(mockCountTokens).toHaveBeenCalledWith(
+        expect.objectContaining({
           messages: [
             {
               role: "user",
               content: [
                 {
-                  type: "document",
-                  source: "base64",
-                  data: "AAA=",
-                  mediaType: "application/octet-stream",
+                  type: "text",
+                  text: "[document: page.html (application/octet-stream) — not supported on this provider]",
                 },
               ],
             },
           ],
         }),
-      ).rejects.toThrow(/unsupported mediaType/);
+      );
     });
 
     it("translates a url-source document", async () => {
@@ -2996,6 +3029,43 @@ describe("AnthropicProvider", () => {
 
       const block = mockCreate.mock.calls[0]![0].messages[0].content[0];
       expect(block).not.toHaveProperty("title");
+    });
+  });
+
+  describe("image blocks", () => {
+    function chatWithImage(mediaType: string) {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: "ok", citations: null }],
+        stop_reason: "end_turn",
+        model: "claude-sonnet-4-6",
+        usage: { input_tokens: 10, output_tokens: 5 },
+      });
+      return provider.chat({
+        model: "claude-sonnet-4-6",
+        system: "sys",
+        messages: [
+          { role: "user", content: [{ type: "image", source: "base64", data: "AAA=", mediaType }] },
+        ],
+      });
+    }
+
+    it("translates a base64 image of a supported type", async () => {
+      await chatWithImage("image/png");
+
+      expect(mockCreate.mock.calls[0]![0].messages[0].content[0]).toEqual({
+        type: "image",
+        source: { type: "base64", media_type: "image/png", data: "AAA=" },
+      });
+    });
+
+    it("sends a text placeholder in place of an unsupported base64 image", async () => {
+      await chatWithImage("image/bmp");
+
+      expect(mockCreate.mock.calls[0]![0].messages[0].content[0]).toEqual({
+        type: "text",
+        text: "[image: image/bmp — not supported on this provider]",
+      });
     });
   });
 });

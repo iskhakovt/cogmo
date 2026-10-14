@@ -721,20 +721,15 @@ function toAnthropicBlock(block: ContentBlock): Anthropic.Beta.BetaContentBlockP
     case "thinking":
       return { type: "thinking", thinking: block.thinking, signature: block.signature };
     case "image":
+      if (block.source === "url") {
+        return { type: "image", source: { type: "url", url: block.data } };
+      }
+      if (!isAnthropicImageMediaType(block.mediaType)) {
+        return unsupportedAttachmentNote("image", block.mediaType, undefined);
+      }
       return {
         type: "image",
-        source:
-          block.source === "base64"
-            ? {
-                type: "base64",
-                data: block.data,
-                media_type: block.mediaType as
-                  | "image/jpeg"
-                  | "image/png"
-                  | "image/gif"
-                  | "image/webp",
-              }
-            : { type: "url", url: block.data },
+        source: { type: "base64", data: block.data, media_type: block.mediaType },
       };
     case "document": {
       // Anthropic's document block accepts: PDF (base64/url/files), text/plain
@@ -766,14 +761,10 @@ function toAnthropicBlock(block: ContentBlock): Anthropic.Beta.BetaContentBlockP
           ...(block.name && { title: block.name }),
         };
       }
-      // Pre-flight narrow: Anthropic's base64 document source only accepts
-      // application/pdf. Throw with a clear message rather than burning a
-      // 400 round-trip on application/zip, application/octet-stream, etc.
-      // Control flow narrows `mt` to the literal "application/pdf" below.
+      // Anthropic's base64 document source only accepts application/pdf.
+      // Control flow narrows `mt` to that literal below.
       if (mt !== "application/pdf") {
-        throw new Error(
-          `Anthropic document block: unsupported mediaType "${mt}". Expected application/pdf or a text-like type (text/*, application/json|xml|yaml).`,
-        );
+        return unsupportedAttachmentNote("document", mt, block.name);
       }
       return {
         type: "document",
@@ -845,6 +836,32 @@ function logUnmappedBlockOnce(type: string): void {
     `dropping an Anthropic content block of type "${type}" — it has no canonical equivalent, ` +
       `so it will not be sent back in history.`,
   );
+}
+
+/**
+ * The text block sent in place of an attachment Anthropic does not accept.
+ * The attachment stays in the conversation's history and every later turn
+ * replays it, so failing the request would fail each of those turns too.
+ * The note tells the model a file arrived that it cannot read.
+ */
+function unsupportedAttachmentNote(
+  kind: "document" | "image",
+  mediaType: string,
+  name: string | undefined,
+): Anthropic.Beta.BetaTextBlockParam {
+  const label = name ? `${name} (${mediaType})` : mediaType;
+  return { type: "text", text: `[${kind}: ${label} — not supported on this provider]` };
+}
+
+const anthropicImageMediaTypes: ReadonlySet<string> = new Set<
+  Anthropic.Beta.BetaBase64ImageSource["media_type"]
+>(["image/jpeg", "image/png", "image/gif", "image/webp"]);
+
+/** Whether Anthropic's base64 image source accepts `mt`. */
+function isAnthropicImageMediaType(
+  mt: string,
+): mt is Anthropic.Beta.BetaBase64ImageSource["media_type"] {
+  return anthropicImageMediaTypes.has(mt);
 }
 
 /**

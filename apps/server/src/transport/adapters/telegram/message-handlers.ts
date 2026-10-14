@@ -1,6 +1,9 @@
 /** Inbound text, photos, documents and voice notes, packed as `InboundContent` and dispatched. */
 
+import { isUtf8 } from "node:buffer";
 import type { Bot } from "grammy";
+import type { Document } from "grammy/types";
+import { lookup } from "mime-types";
 import { err, ok, type Result } from "neverthrow";
 import { logger } from "../../../logger.js";
 import type { InboundContent } from "../../content.js";
@@ -29,6 +32,47 @@ type FileDownloadError =
   | { kind: "no_file_path"; fileId: string }
   | { kind: "local_path"; fileId: string; path: string }
   | { kind: "http_error"; fileId: string; status: number; statusText: string };
+
+const OCTET_STREAM = "application/octet-stream";
+
+/** How far into a file the binary-byte check reads: git's window for the same test. */
+const TEXT_SNIFF_BYTES = 8000;
+
+/**
+ * A document's media type. Telegram's `mime_type` is the sender's claim: it
+ * is missing for some uploads and generic `application/octet-stream` for
+ * types the sending client didn't recognise (an `.html` file arrives that
+ * way). Either way the file name's extension decides, and failing that the
+ * content: UTF-8 text is `text/plain`, so a source file in a language the
+ * extension table lacks still reaches the model as text.
+ */
+function documentMediaType(
+  doc: Pick<Document, "mime_type" | "file_name">,
+  bytes: Uint8Array,
+): string {
+  if (doc.mime_type && doc.mime_type !== OCTET_STREAM) return doc.mime_type;
+  const byExtension = doc.file_name && lookup(doc.file_name);
+  if (byExtension) return byExtension;
+  return isUtf8Text(bytes) ? "text/plain" : OCTET_STREAM;
+}
+
+/**
+ * Whether `bytes` are valid UTF-8, the encoding the LLM adapters decode text
+ * documents with, and open with none of the control bytes the WHATWG MIME
+ * Sniffing Standard counts as binary data.
+ */
+function isUtf8Text(bytes: Uint8Array): boolean {
+  return isUtf8(bytes) && !bytes.subarray(0, TEXT_SNIFF_BYTES).some(isBinaryDataByte);
+}
+
+function isBinaryDataByte(byte: number): boolean {
+  return (
+    byte <= 0x08 ||
+    byte === 0x0b ||
+    (byte >= 0x0e && byte <= 0x1a) ||
+    (byte >= 0x1c && byte <= 0x1f)
+  );
+}
 
 interface FileDownloadCtx {
   api: { getFile: (fileId: string) => Promise<{ file_path?: string }> };
@@ -142,9 +186,6 @@ export function registerMessageHandlers(
 
     try {
       const doc = ctx.message.document;
-      // Telegram's mime_type is best-effort — fall back to octet-stream so
-      // the LLM call doesn't reject a missing media_type at validation.
-      const mediaType = doc.mime_type ?? "application/octet-stream";
 
       const download = await downloadTelegramFile(ctx, doc.file_id, { apiRoot, token });
       if (download.isErr()) {
@@ -152,6 +193,7 @@ export function registerMessageHandlers(
         return;
       }
       const buffer = download.value;
+      const mediaType = documentMediaType(doc, buffer);
 
       const path = await transport.uploadAttachment(buffer, mediaType);
       const caption = ctx.message.caption ?? "";
