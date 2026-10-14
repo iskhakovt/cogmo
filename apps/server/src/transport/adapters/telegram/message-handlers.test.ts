@@ -510,6 +510,21 @@ describe("registerMessageHandlers", () => {
       );
     });
 
+    it("keeps application/pdf for a PDF whose bytes are all ASCII", async () => {
+      const { transport } = await createAdapter();
+      serveBytes(Buffer.from("%PDF-1.1\n1 0 obj << /Type /Catalog >> endobj\n%%EOF\n", "utf-8"));
+      const ctx = makeDocumentCtx(111, {
+        file_name: "minimal.pdf",
+        mime_type: "application/octet-stream",
+      });
+      await documentHandler()(ctx);
+
+      expect(transport.uploadAttachment).toHaveBeenCalledWith(
+        expect.any(Buffer),
+        "application/pdf",
+      );
+    });
+
     it("routes an octet-stream file with an image extension to an image inbound block", async () => {
       const { transport } = await createAdapter();
       serveBytes(PNG_HEADER);
@@ -589,8 +604,8 @@ describe("registerMessageHandlers", () => {
 
     // Telegram's "Send as file" path delivers images (PNG, full-res JPEG,
     // WEBP, etc.) through message:document instead of message:photo. The
-    // adapter must route image/* MIME types to the image inbound block so
-    // the LLM's vision pipeline picks them up — Anthropic's `document`
+    // adapter must route JPEG, PNG, GIF and WebP to the image inbound block
+    // so the LLM's vision pipeline picks them up — Anthropic's `document`
     // block doesn't accept image media types and would 400-fail.
     it("routes image/png 'send as file' uploads to an image inbound block", async () => {
       const { transport } = await createAdapter();

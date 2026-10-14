@@ -39,7 +39,7 @@ const OCTET_STREAM = "application/octet-stream";
 const TEXT_SNIFF_BYTES = 8000;
 
 /**
- * The image formats every vision route accepts (design/transport/attachments.md
+ * The image formats the vision routes accept (design/transport/attachments.md
  * → Research Base). A document of any other image format stays a document,
  * which each LLM adapter replaces with a note naming the file.
  */
@@ -56,8 +56,9 @@ const VISION_MEDIA_TYPES: ReadonlySet<string> = new Set([
  * types the sending client didn't recognise (an `.html` file arrives that
  * way). Either way the content decides between text and binary, and the file
  * name's extension names the type within each: UTF-8 text keeps a `text/*`
- * type and is otherwise `text/plain`, since mime-db maps some source files
- * to binary types (`.ts` to `video/mp2t`).
+ * type, or `application/pdf` for an all-ASCII PDF, and is otherwise
+ * `text/plain`, since mime-db maps some source files to binary types (`.ts`
+ * to `video/mp2t`).
  */
 function documentMediaType(
   doc: Pick<Document, "mime_type" | "file_name">,
@@ -65,8 +66,10 @@ function documentMediaType(
 ): string {
   if (doc.mime_type && doc.mime_type !== OCTET_STREAM) return doc.mime_type;
   const byExtension = (doc.file_name && lookup(doc.file_name)) || OCTET_STREAM;
-  if (isUtf8Text(bytes)) return byExtension.startsWith("text/") ? byExtension : "text/plain";
-  return byExtension;
+  if (!isUtf8Text(bytes)) return byExtension;
+  return byExtension.startsWith("text/") || byExtension === "application/pdf"
+    ? byExtension
+    : "text/plain";
 }
 
 /**

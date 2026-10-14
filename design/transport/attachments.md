@@ -57,6 +57,8 @@ A turn that fails permanently with a 400 or a 413 while its rows carry attachmen
 
 ## Images `[proposed]`
 
+The Telegram adapter sends only JPEG, PNG, GIF and WebP as image blocks ([telegram.md](telegram.md)), so these steps also take a document whose media type is any other `image/*`, and HEIC reaches step 1.
+
 1. **Sniff.** A HEIC or HEIF file, by media type or by a `heic`, `heix` or `mif1` `ftyp` brand, gets the HEIC placeholder. `heic-decode` is a later option.
 2. **Guard.** Inputs over 20 MB are refused unread. `limitInputPixels` is 100 megapixels, checked on the header before decoding: a 446 KB PNG declaring 12,000 × 12,000 was refused in 1 ms (measured). `failOn: "warning"`, `timeout` 10 s, first frame only (`pages: 1`, the default).
 3. **Decode** through the loader allowlist ([Security](#security-proposed)): JPEG, PNG, WebP and GIF.
