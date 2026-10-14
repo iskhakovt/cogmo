@@ -450,8 +450,20 @@ describe("registerMessageHandlers", () => {
       );
     });
 
-    it("infers the media type from the extension when Telegram sends application/octet-stream", async () => {
+    function serveBytes(bytes: Uint8Array) {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        arrayBuffer: async () => new Uint8Array(bytes).buffer,
+      });
+    }
+
+    const PNG_HEADER = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+    it("names UTF-8 text by its extension when Telegram sends application/octet-stream", async () => {
       const { transport } = await createAdapter();
+      serveBytes(Buffer.from("<!doctype html><p>hi</p>", "utf-8"));
       const ctx = makeDocumentCtx(111, {
         file_name: "page.html",
         mime_type: "application/octet-stream",
@@ -466,16 +478,41 @@ describe("registerMessageHandlers", () => {
       );
     });
 
-    it("infers the media type from the extension when mime_type is missing", async () => {
+    it("names UTF-8 text by its extension when mime_type is missing", async () => {
       const { transport } = await createAdapter();
+      serveBytes(Buffer.from("# Notes\n", "utf-8"));
       const ctx = makeDocumentCtx(111, { file_name: "NOTES.MD" });
       await documentHandler()(ctx);
 
       expect(transport.uploadAttachment).toHaveBeenCalledWith(expect.any(Buffer), "text/markdown");
     });
 
+    // mime-db maps these extensions to a non-text type (video/mp2t,
+    // application/x-sh, image/svg+xml) or to none.
+    it.each([
+      ["index.ts", "export const x: number = 1;\n"],
+      ["build.sh", "#!/bin/sh\necho hi\n"],
+      ["logo.svg", '<svg xmlns="http://www.w3.org/2000/svg"/>'],
+      ["script.py", "def greet():\n    print('héllo')\n"],
+    ])("sniffs UTF-8 text in %s as text/plain", async (fileName, text) => {
+      const { transport } = await createAdapter();
+      serveBytes(Buffer.from(text, "utf-8"));
+      const ctx = makeDocumentCtx(111, {
+        file_name: fileName,
+        mime_type: "application/octet-stream",
+      });
+      await documentHandler()(ctx);
+
+      expect(transport.emit).toHaveBeenCalledWith(
+        "session-1",
+        [{ type: "document", path: "inbound/test.jpg", mediaType: "text/plain", name: fileName }],
+        expect.any(Date),
+      );
+    });
+
     it("routes an octet-stream file with an image extension to an image inbound block", async () => {
       const { transport } = await createAdapter();
+      serveBytes(PNG_HEADER);
       const ctx = makeDocumentCtx(111, {
         file_name: "photo.png",
         mime_type: "application/octet-stream",
@@ -489,25 +526,21 @@ describe("registerMessageHandlers", () => {
       );
     });
 
-    function serveBytes(bytes: Uint8Array) {
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        statusText: "OK",
-        arrayBuffer: async () => new Uint8Array(bytes).buffer,
-      });
-    }
-
-    it("sniffs UTF-8 text with no known extension as text/plain", async () => {
+    // No vision route accepts these, so they stay documents and keep their name.
+    it.each([
+      [{ file_name: "scan.heic", mime_type: "application/octet-stream" }, "image/heic"],
+      [{ file_name: "photo.heic", mime_type: "image/heic" }, "image/heic"],
+      [{ file_name: "scan.bmp" }, "image/bmp"],
+    ])("emits %o as a document of type %s", async (doc, mediaType) => {
       const { transport } = await createAdapter();
-      serveBytes(Buffer.from("def greet():\n    print('héllo')\n", "utf-8"));
-      const ctx = makeDocumentCtx(111, {
-        file_name: "script.py",
-        mime_type: "application/octet-stream",
-      });
-      await documentHandler()(ctx);
+      serveBytes(PNG_HEADER);
+      await documentHandler()(makeDocumentCtx(111, doc));
 
-      expect(transport.uploadAttachment).toHaveBeenCalledWith(expect.any(Buffer), "text/plain");
+      expect(transport.emit).toHaveBeenCalledWith(
+        "session-1",
+        [{ type: "document", path: "inbound/test.jpg", mediaType, name: doc.file_name }],
+        expect.any(Date),
+      );
     });
 
     it.each([

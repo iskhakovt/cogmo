@@ -39,21 +39,34 @@ const OCTET_STREAM = "application/octet-stream";
 const TEXT_SNIFF_BYTES = 8000;
 
 /**
+ * The image formats every vision route accepts (design/transport/attachments.md
+ * → Research Base). A document of any other image format stays a document,
+ * which each LLM adapter replaces with a note naming the file.
+ */
+const VISION_MEDIA_TYPES: ReadonlySet<string> = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/gif",
+  "image/webp",
+]);
+
+/**
  * A document's media type. Telegram's `mime_type` is the sender's claim: it
  * is missing for some uploads and generic `application/octet-stream` for
  * types the sending client didn't recognise (an `.html` file arrives that
- * way). Either way the file name's extension decides, and failing that the
- * content: UTF-8 text is `text/plain`, so a source file in a language the
- * extension table lacks still reaches the model as text.
+ * way). Either way the content decides between text and binary, and the file
+ * name's extension names the type within each: UTF-8 text keeps a `text/*`
+ * type and is otherwise `text/plain`, since mime-db maps some source files
+ * to binary types (`.ts` to `video/mp2t`).
  */
 function documentMediaType(
   doc: Pick<Document, "mime_type" | "file_name">,
   bytes: Uint8Array,
 ): string {
   if (doc.mime_type && doc.mime_type !== OCTET_STREAM) return doc.mime_type;
-  const byExtension = doc.file_name && lookup(doc.file_name);
-  if (byExtension) return byExtension;
-  return isUtf8Text(bytes) ? "text/plain" : OCTET_STREAM;
+  const byExtension = (doc.file_name && lookup(doc.file_name)) || OCTET_STREAM;
+  if (isUtf8Text(bytes)) return byExtension.startsWith("text/") ? byExtension : "text/plain";
+  return byExtension;
 }
 
 /**
@@ -200,11 +213,10 @@ export function registerMessageHandlers(
       const name = doc.file_name;
 
       // Telegram's "Send as file" path delivers images (PNG, full-res JPEG,
-      // etc.) as documents. Route image/* MIME types to the image block so
-      // they hit the LLM's vision pipeline instead of the document pipeline
-      // — Anthropic's `document` content block doesn't accept image media
-      // types and would 400-fail.
-      const isImage = mediaType.startsWith("image/");
+      // etc.) as documents. Route them to the image block so they hit the
+      // LLM's vision pipeline — Anthropic's `document` content block doesn't
+      // accept image media types and would 400-fail.
+      const isImage = VISION_MEDIA_TYPES.has(mediaType);
       const origin = othersOrigin(ctx.message.forward_origin, ctx.from.id);
 
       // Forwarded without a caption, the marked block is empty and names the sender.
