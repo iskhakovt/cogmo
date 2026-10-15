@@ -50,9 +50,10 @@ describe("substituteTranscripts", () => {
       ["first", "second"],
     );
     expect(substituted).toEqual([
-      { content: [{ type: "text", text: "first" }] },
-      { content: "typed" },
+      { id: "a", content: [{ type: "text", text: "first" }] },
+      { id: "b", content: "typed" },
       {
+        id: "c",
         content: [
           { type: "text", text: "hi" },
           { type: "text", text: "second" },
@@ -67,7 +68,7 @@ describe("substituteTranscripts", () => {
       ["said"],
     );
     expect(substituted).toEqual([
-      { content: [{ type: "text", text: "said", forwarded: FORWARDED }] },
+      { id: "a", content: [{ type: "text", text: "said", forwarded: FORWARDED }] },
     ]);
   });
 });
@@ -93,13 +94,5 @@ describe("renderUserContent", () => {
     ]);
     expect(rendered).toContain("<forwarded_message");
     expect(rendered).toContain("quoted");
-  });
-
-  it("JSON-stringifies a row that still carries an attachment", () => {
-    const content = [
-      { type: "text", text: "look" },
-      { type: "image", path: "p", mediaType: "image/png" },
-    ] as const;
-    expect(renderUserContent([{ content: [...content] }])).toBe(JSON.stringify(content));
   });
 });

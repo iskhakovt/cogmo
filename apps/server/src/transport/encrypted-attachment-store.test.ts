@@ -2,7 +2,8 @@ import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import { isEncrypted } from "../secrets/blob-envelope.js";
 import { deriveMasterKey, generateMasterKey, parseMasterKey } from "../secrets/encryption.js";
-import type { AttachmentStore } from "./attachment-store.js";
+import { expectDefined } from "../test/assertions.js";
+import { type AttachmentStore, mediaTypeToExt } from "./attachment-store.js";
 import { wrapAttachmentStoreWithEncryption } from "./encrypted-attachment-store.js";
 
 const PURPOSE = "cogmo/s3-objects/v1";
@@ -19,18 +20,32 @@ interface UploadRecord {
   prefix: string;
 }
 
+interface PutRecord {
+  path: string;
+  data: Buffer;
+  mediaType: string;
+}
+
 function fakeStore(): {
   store: AttachmentStore;
   uploads: UploadRecord[];
+  puts: PutRecord[];
   blobs: Map<string, Buffer>;
 } {
   const blobs = new Map<string, Buffer>();
   const uploads: UploadRecord[] = [];
+  const puts: PutRecord[] = [];
   let i = 0;
   const store: AttachmentStore = {
     upload: vi.fn(async (data: Buffer, mediaType: string, prefix: string) => {
       uploads.push({ data, mediaType, prefix });
       const path = `${prefix}/blob-${i++}.bin`;
+      blobs.set(path, data);
+      return path;
+    }),
+    put: vi.fn(async (stem: string, data: Buffer, mediaType: string) => {
+      const path = `${stem}.${mediaTypeToExt(mediaType)}`;
+      puts.push({ path, data, mediaType });
       blobs.set(path, data);
       return path;
     }),
@@ -44,7 +59,7 @@ function fakeStore(): {
       return blob === undefined ? err({ kind: "missing" as const }) : ok(blob);
     }),
   };
-  return { store, uploads, blobs };
+  return { store, uploads, puts, blobs };
 }
 
 describe("wrapAttachmentStoreWithEncryption", () => {
@@ -253,5 +268,33 @@ describe("wrapAttachmentStoreWithEncryption — read", () => {
 
     const read = await wrapAttachmentStoreWithEncryption(store, testKey()).read(path);
     expect(read._unsafeUnwrapErr()).toEqual({ kind: "undecryptable" });
+  });
+});
+
+describe("wrapAttachmentStoreWithEncryption — put", () => {
+  it("writes ciphertext as an opaque .bin blob under the caller's stem", async () => {
+    const { store, puts } = fakeStore();
+    const wrapped = wrapAttachmentStoreWithEncryption(store, testKey());
+    const plaintext = Buffer.from("normalized photo");
+
+    const path = await wrapped.put("normalized/a", plaintext, "image/jpeg");
+
+    const written = expectDefined(puts[0], "put");
+    expect(path).toBe("normalized/a.bin");
+    expect(written.path).toBe("normalized/a.bin");
+    expect(written.mediaType).toBe("application/octet-stream");
+    expect(written.data.includes(plaintext)).toBe(false);
+    expect(isEncrypted(written.data)).toBe(true);
+  });
+
+  it("reads back what it put", async () => {
+    const { store } = fakeStore();
+    const wrapped = wrapAttachmentStoreWithEncryption(store, testKey());
+    const plaintext = Buffer.from("normalized photo");
+
+    const path = await wrapped.put("normalized/a", plaintext, "image/jpeg");
+
+    const read = await wrapped.read(path);
+    expect(read._unsafeUnwrap().equals(plaintext)).toBe(true);
   });
 });

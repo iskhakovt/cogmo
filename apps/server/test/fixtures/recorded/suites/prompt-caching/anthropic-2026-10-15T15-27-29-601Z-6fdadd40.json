@@ -11,16 +11,25 @@
         "toolCalls": [
           {
             "name": "core_memory_update",
-            "arguments": "{\"key\": \"identity\", \"content\": \"Name: Sam\\nHome: Lisbon, Portugal\"}",
-            "id": "toolu_01KVLDDokFM7vofgGKoLu3gV"
+            "arguments": "{\"key\": \"identity\", \"content\": \"Name: Sam\\nHome: Lisbon, Portugal\\nTimezone: Europe/Lisbon\"}",
+            "id": "toolu_01UALGJfxYFNrhhL1M7G23gM"
           }
         ]
       },
       "recordedTimings": {
-        "ttftMs": 990,
+        "ttftMs": 1660,
         "interChunkDelaysMs": [
           0,
-          1301,
+          932,
+          0,
+          0,
+          0,
+          0,
+          0,
+          199,
+          0,
+          0,
+          304,
           0,
           0,
           0,
@@ -29,22 +38,17 @@
           0,
           0,
           0,
-          2,
-          0,
-          0,
-          0,
-          0,
-          0,
+          1,
           0,
           0,
           3,
           0
         ],
-        "totalDurationMs": 2296
+        "totalDurationMs": 3099
       },
       "metadata": {
-        "systemHash": "b881c548",
-        "toolsHash": "994a1d95"
+        "systemHash": "ccde8242",
+        "toolsHash": "d060a9ae"
       }
     }
   ]

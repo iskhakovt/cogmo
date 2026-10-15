@@ -8,26 +8,27 @@
         "hasToolResult": false
       },
       "response": {
-        "content": "Proxmox — you've got a three-node Proxmox cluster."
+        "content": "You mentioned it runs Proxmox — a three-node cluster."
       },
       "recordedTimings": {
-        "ttftMs": 824,
+        "ttftMs": 1500,
         "interChunkDelaysMs": [
           0,
           0,
           0,
-          512,
+          84,
+          8,
+          36,
+          50,
           0,
-          0,
-          0,
-          1,
+          4,
           0
         ],
-        "totalDurationMs": 1337
+        "totalDurationMs": 1682
       },
       "metadata": {
-        "systemHash": "b881c548",
-        "toolsHash": "994a1d95"
+        "systemHash": "ccde8242",
+        "toolsHash": "d060a9ae"
       }
     }
   ]

@@ -9,6 +9,12 @@ export interface AttachmentLimits {
   requestBytes: number;
   /** The most images one request may carry, resent ones included. */
   images: number;
+  /**
+   * The most UTF-8 bytes of one text document the adapter sends; absent when
+   * it sends every byte. Arrival cuts a text document to it, so the adapter
+   * never cuts one again.
+   */
+  textDocumentBytes?: number;
 }
 
 /** What a request keeps for everything but attachments: system, tools and text. */
@@ -28,9 +34,13 @@ export function attachmentBudget(limits: AttachmentLimits): AttachmentBudget {
 export function strictestLimits(
   candidates: readonly [AttachmentLimits, ...AttachmentLimits[]],
 ): AttachmentLimits {
+  const textCaps = candidates.flatMap((l) =>
+    l.textDocumentBytes === undefined ? [] : [l.textDocumentBytes],
+  );
   return {
     requestBytes: Math.min(...candidates.map((l) => l.requestBytes)),
     images: Math.min(...candidates.map((l) => l.images)),
+    ...(textCaps.length > 0 && { textDocumentBytes: Math.min(...textCaps) }),
   };
 }
 

@@ -4,6 +4,8 @@
  * Hindsight client.
  */
 
+import { checkImageRuntime } from "../agent/attachments/image-runtime.js";
+import { normalizeImage } from "../agent/attachments/normalize-image.js";
 import type { DrizzleAgentStore } from "../agent/store/index.js";
 import { bootstrapLock } from "../db/bootstrap-lock.js";
 import { db, type Transactor, transactor } from "../db/index.js";
@@ -26,6 +28,9 @@ import { createStores } from "./stores.js";
  * (`prepareDataLayer`), so parallel invocations apply them one at a time.
  */
 export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDeps> {
+  // sharp is native code shipped as optional platform packages; an image
+  // without them fails here rather than on its first photo.
+  await checkImageRuntime(normalizeImage);
   const tx = transactor(db);
   const lock = bootstrapLock(db.$client);
   const stores = createStores();

@@ -108,9 +108,9 @@ function buildToolDescription(
     ? [
         "",
         "For models marked `[needs reference image]` or `[optional reference image]`, " +
-          "pass `referenceImage` — an AttachmentStore path (e.g. `inbound/abc.png` from a " +
-          "user-uploaded image, or `generated/xyz.png` from an image you previously " +
-          "generated). The `prompt` describes the edit; the reference image is what " +
+          "pass `referenceImage` — an AttachmentStore path: the one in a user image's " +
+          "`Image <n>: <path>` label, or `generated/xyz.png` from an image you previously " +
+          "generated. The `prompt` describes the edit; the reference image is what " +
           "you're editing.",
       ]
     : [];
@@ -444,7 +444,8 @@ export function createImageTools(deps: {
           .string()
           .optional()
           .describe(
-            "AttachmentStore path of an image to edit. Only valid for models " +
+            "AttachmentStore path of an image to edit: for a user's image, the path in " +
+              "the `Image <n>: <path> (<name>)` label before it. Only valid for models " +
               "marked `[needs reference image]` or `[optional reference image]`.",
           ),
         negativePrompt: z

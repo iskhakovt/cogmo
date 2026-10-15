@@ -8,33 +8,31 @@
         "hasToolResult": false
       },
       "response": {
-        "content": "You run a three-node Proxmox cluster in your homelab. That's what I've got on file — anything you'd like to add or update?"
+        "content": "You run a three-node Proxmox cluster in your homelab. That's the main detail I have on it — happy to dig deeper if you give me more context to search for."
       },
       "recordedTimings": {
-        "ttftMs": 1073,
+        "ttftMs": 5876,
         "interChunkDelaysMs": [
           0,
           0,
           0,
-          632,
-          7,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          10,
-          0,
+          48,
+          69,
+          33,
+          44,
+          47,
+          46,
+          45,
+          31,
+          2,
+          4,
           0
         ],
-        "totalDurationMs": 1722
+        "totalDurationMs": 6245
       },
       "metadata": {
-        "systemHash": "b881c548",
-        "toolsHash": "994a1d95"
+        "systemHash": "ccde8242",
+        "toolsHash": "d060a9ae"
       }
     }
   ]

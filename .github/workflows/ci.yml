@@ -127,6 +127,7 @@ jobs:
               - 'apps/server/src/mcp/config.ts'
               - 'apps/server/src/sandbox/types.ts'
               - 'apps/server/src/skills/types.ts'
+              - 'apps/server/src/transport/attachment-original.ts'
               - 'apps/server/src/transport/content.ts'
             design:
               - 'design/**'

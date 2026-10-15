@@ -6,7 +6,7 @@ import type { Document } from "grammy/types";
 import { lookup } from "mime-types";
 import { err, ok, type Result } from "neverthrow";
 import { logger } from "../../../logger.js";
-import type { InboundContent } from "../../content.js";
+import { type InboundContent, MAX_INBOUND_FILE_BYTES } from "../../content.js";
 import type { Transport } from "../../transport.js";
 import { toCmdCtx } from "./commands/reply.js";
 import { forwardedFrom, inboundTextBlock, othersOrigin } from "./forwarded.js";
@@ -40,8 +40,9 @@ const TEXT_SNIFF_BYTES = 8000;
 
 /**
  * The image formats the vision routes accept (design/transport/attachments.md
- * → Research Base). A document of any other image format stays a document,
- * which each LLM adapter replaces with a note naming the file.
+ * → Research Base), which a document routes to an image block. A document of
+ * any other image format stays a document, which arrival normalizes or turns
+ * into a placeholder (design/transport/attachments.md → Images).
  */
 const VISION_MEDIA_TYPES: ReadonlySet<string> = new Set([
   "image/jpeg",
@@ -58,15 +59,16 @@ const VISION_MEDIA_TYPES: ReadonlySet<string> = new Set([
  * name's extension names the type within each: UTF-8 text keeps a `text/*`
  * type, or `application/pdf` for an all-ASCII PDF, and is otherwise
  * `text/plain`, since mime-db maps some source files to binary types (`.ts`
- * to `video/mp2t`).
+ * to `video/mp2t`). With no bytes to read, a file too large to download takes
+ * the extension's type.
  */
 function documentMediaType(
   doc: Pick<Document, "mime_type" | "file_name">,
-  bytes: Uint8Array,
+  bytes: Uint8Array | undefined,
 ): string {
   if (doc.mime_type && doc.mime_type !== OCTET_STREAM) return doc.mime_type;
   const byExtension = (doc.file_name && lookup(doc.file_name)) || OCTET_STREAM;
-  if (!isUtf8Text(bytes)) return byExtension;
+  if (bytes === undefined || !isUtf8Text(bytes)) return byExtension;
   return byExtension.startsWith("text/") || byExtension === "application/pdf"
     ? byExtension
     : "text/plain";
@@ -202,34 +204,38 @@ export function registerMessageHandlers(
 
     try {
       const doc = ctx.message.document;
-
-      const download = await downloadTelegramFile(ctx, doc.file_id, { apiRoot, token });
-      if (download.isErr()) {
-        logger.error({ error: download.error }, "failed to process document");
-        return;
-      }
-      const buffer = download.value;
-      const mediaType = documentMediaType(doc, buffer);
-
-      const path = await transport.uploadAttachment(buffer, mediaType);
-      const caption = ctx.message.caption ?? "";
       const name = doc.file_name;
-
-      // Telegram's "Send as file" path delivers images (PNG, full-res JPEG,
-      // etc.) as documents. Route them to the image block so they hit the
-      // LLM's vision pipeline — Anthropic's `document` content block doesn't
-      // accept image media types and would 400-fail.
-      const isImage = VISION_MEDIA_TYPES.has(mediaType);
+      const caption = ctx.message.caption ?? "";
       const origin = othersOrigin(ctx.message.forward_origin, ctx.from.id);
 
       // Forwarded without a caption, the marked block is empty and names the sender.
       const content: InboundContent = [];
       if (caption || origin !== undefined) content.push(inboundTextBlock(caption, origin));
-      if (isImage) {
-        content.push({ type: "image", path, mediaType });
-      } else {
+
+      if (doc.file_size !== undefined && doc.file_size > MAX_INBOUND_FILE_BYTES) {
+        // `getFile` refuses it, so the block names the file and its size and
+        // arrival turns it into the too-large placeholder.
         content.push({
           type: "document",
+          mediaType: documentMediaType(doc, undefined),
+          ...(name && { name }),
+          bytes: doc.file_size,
+        });
+      } else {
+        const download = await downloadTelegramFile(ctx, doc.file_id, { apiRoot, token });
+        if (download.isErr()) {
+          logger.error({ error: download.error }, "failed to process document");
+          return;
+        }
+        const buffer = download.value;
+        const mediaType = documentMediaType(doc, buffer);
+        const path = await transport.uploadAttachment(buffer, mediaType);
+
+        // Telegram's "Send as file" delivers images (PNG, full-res JPEG, etc.)
+        // as documents. A vision format goes to the image block, which the
+        // vision routes read; Anthropic's `document` block refuses image types.
+        content.push({
+          type: VISION_MEDIA_TYPES.has(mediaType) ? "image" : "document",
           path,
           mediaType,
           ...(name && { name }),

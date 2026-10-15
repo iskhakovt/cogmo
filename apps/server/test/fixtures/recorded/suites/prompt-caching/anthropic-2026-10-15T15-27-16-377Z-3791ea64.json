@@ -8,30 +8,34 @@
         "hasToolResult": true
       },
       "response": {
-        "content": "Here's your lighthouse on a rocky coast at dusk — hope it suits the study."
+        "content": "Here's your lighthouse scene — a rocky coast at dusk with warm glowing skies and crashing waves, painted in a rich oil-painting style that should suit a study wall nicely."
       },
       "recordedTimings": {
-        "ttftMs": 1079,
+        "ttftMs": 1444,
         "interChunkDelaysMs": [
           0,
           0,
           0,
-          220,
-          7,
-          0,
-          0,
-          40,
-          41,
-          41,
-          34,
+          281,
           4,
+          0,
+          0,
+          0,
+          0,
+          27,
+          48,
+          56,
+          55,
+          41,
+          2,
+          1,
           0
         ],
-        "totalDurationMs": 1466
+        "totalDurationMs": 1959
       },
       "metadata": {
-        "systemHash": "b881c548",
-        "toolsHash": "994a1d95"
+        "systemHash": "ccde8242",
+        "toolsHash": "d060a9ae"
       }
     }
   ]

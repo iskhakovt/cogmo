@@ -28,13 +28,13 @@ RUN test -s apps/server/data/litellm-models.json
 # `build` proxy script, so the image build can't break if that script later
 # fans out to workspace members (e.g. apps/web) whose source isn't COPYed here.
 RUN pnpm --filter cogmo build
-# `--no-optional` reaches optional *peers* too: pnpm materialises those into a
-# snapshot's `optionalDependencies` whatever `peerDependenciesMeta.optional` says
-# (pnpm/pnpm#11155). That is what keeps `typescript` — Go-built `tsc` binary and
-# all — plus PGlite and react out of the image. Whatever the runtime needs is
-# required non-optionally by someone and stays; Inngest is served through
-# `inngest/node`, so its optional express/hono adapters aren't a path taken here.
-RUN pnpm --filter cogmo deploy --prod --no-optional /deploy
+# Optional dependencies stay: sharp's libvips binaries ship as optional platform
+# packages (`@img/sharp-<platform>`, `@img/sharp-libvips-<platform>`), resolved for
+# the platform this stage runs on, and without them sharp fails to load. The
+# devDependency peers (TypeScript, PGlite) stay out under `--prod`. The optional
+# extras that come with them are inert: inngest's react peer, neverthrow's stray
+# rollup binary, and ssh2's cpu-features, which `allowBuilds` leaves unbuilt.
+RUN pnpm --filter cogmo deploy --prod /deploy
 
 # Build the SPA last. Docker invalidates layers forward, so this keeps an
 # SPA-source edit from busting the expensive server build above. A server-source
@@ -47,6 +47,8 @@ RUN pnpm --filter web build
 
 FROM base
 ENV NODE_ENV=production
+# sharp's recommendation on glibc without jemalloc: fewer malloc arenas, less fragmentation.
+ENV MALLOC_ARENA_MAX=2
 WORKDIR /app
 
 # git is required at runtime by `bootstrapSkillsRepo` (`git init --bare`) and

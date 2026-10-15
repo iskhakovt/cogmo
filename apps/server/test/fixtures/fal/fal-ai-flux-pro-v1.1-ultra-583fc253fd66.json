@@ -1,0 +1,16 @@
+{
+  "images": [
+    {
+      "url": "https://fal.media-mock.test/fal-ai-flux-pro-v1.1-ultra-583fc253fd66.jpg",
+      "width": 2752,
+      "height": 1536,
+      "content_type": "image/jpeg"
+    }
+  ],
+  "timings": {},
+  "seed": 2846401777,
+  "has_nsfw_concepts": [
+    false
+  ],
+  "prompt": "A majestic lighthouse standing on a rugged, rocky coastline at dusk. The sky is painted in deep hues of orange, pink, and purple fading into navy blue, with the sun just below the horizon casting a warm glow on scattered clouds. Waves crash against dark, jagged rocks, sending white sea spray into the air. The lighthouse itself is white with a red top, its beacon glowing warmly, casting a faint light beam across the water. A few seabirds fly in the distance. The style is realistic oil painting, rich in detail and texture, with dramatic lighting and a serene yet powerful atmosphere — ideal as fine art for a study wall."
+}

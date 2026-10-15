@@ -1,0 +1,6 @@
+Append-only step 4b: attachments are normalized at arrival and the turn row stores refs, so later turns see an image itself rather than a JSON string, and each request repeats the bytes the turn sent.
+
+- **Arrival.** `create-user-message` normalizes every attachment with `sharp` 0.35.5 (a loader allowlist, byte and pixel guards, EXIF orientation, a 2000-px fit, JPEG or PNG under 3.75 MB, no metadata) and stores each image as an `Image <n>: <path>` label and a ref to its normalized copy, the path `generate_image` takes. PDFs are stored as sent; text documents are cut to the route's caps. What no route reads (HEIC, other binaries, URLs, files over 20 MB, anything past the turn's route budget) becomes a placeholder naming the file, counted in `cogmo.attachments.placeholders{reason}`.
+- **`attachment_originals`** (migration 0072) records each image's decode, so a re-batched turn reuses it, and a decode that kills the process is retried once before it becomes a placeholder.
+- **Telegram** names images sent as files and skips downloading files over 20 MB.
+- **Runtime image.** The deploy keeps optional dependencies so sharp's binaries ship, sets `MALLOC_ARENA_MAX=2`, and boots through a sharp check.

@@ -11,21 +11,20 @@
         "content": "You're welcome!"
       },
       "recordedTimings": {
-        "ttftMs": 971,
+        "ttftMs": 910,
         "interChunkDelaysMs": [
           0,
           0,
           0,
-          443,
-          4,
-          0,
+          22,
+          10,
           0
         ],
-        "totalDurationMs": 1418
+        "totalDurationMs": 942
       },
       "metadata": {
-        "systemHash": "b881c548",
-        "toolsHash": "994a1d95"
+        "systemHash": "ccde8242",
+        "toolsHash": "d060a9ae"
       }
     }
   ]

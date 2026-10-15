@@ -1,5 +1,6 @@
-import { NoSuchKey, type S3Client } from "@aws-sdk/client-s3";
+import { NoSuchKey, PutObjectCommand, type S3Client } from "@aws-sdk/client-s3";
 import { describe, expect, it, vi } from "vitest";
+import { expectDefined } from "../test/assertions.js";
 import { createAttachmentStore, mediaTypeToExt } from "./attachment-store.js";
 
 describe("mediaTypeToExt", () => {
@@ -53,5 +54,28 @@ describe("createAttachmentStore().read", () => {
   it("throws anything else, so the step retries it", async () => {
     const send = vi.fn().mockRejectedValue(new Error("socket hang up"));
     await expect(store(send).read("inbound/a.jpg")).rejects.toThrow("socket hang up");
+  });
+});
+
+describe("createAttachmentStore().put", () => {
+  it("writes the bytes under the caller's stem and the media type's extension", async () => {
+    const send = vi.fn().mockResolvedValue({});
+    const data = Buffer.from([1, 2, 3]);
+    const path = await createAttachmentStore({ send } as unknown as S3Client, "bucket").put(
+      "normalized/a",
+      data,
+      "image/jpeg",
+    );
+
+    expect(path).toBe("normalized/a.jpg");
+
+    const command = expectDefined(send.mock.calls[0], "send call")[0];
+    expect(command).toBeInstanceOf(PutObjectCommand);
+    expect(command.input).toEqual({
+      Bucket: "bucket",
+      Key: "normalized/a.jpg",
+      Body: data,
+      ContentType: "image/jpeg",
+    });
   });
 });

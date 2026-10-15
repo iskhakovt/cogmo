@@ -91,7 +91,8 @@ export class OpenAICompatibleProvider implements LlmProvider {
   }
 
   attachmentLimits(): AttachmentLimits {
-    return openAICompatibleAttachmentLimits();
+    // The inlining below compares UTF-8 bytes first, so a text within this many bytes is sent whole.
+    return { ...openAICompatibleAttachmentLimits(), textDocumentBytes: MAX_INLINED_DOC_CHARS };
   }
 
   /**

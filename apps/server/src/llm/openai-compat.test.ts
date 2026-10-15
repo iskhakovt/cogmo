@@ -2987,6 +2987,32 @@ describe("OpenAICompatibleProvider", () => {
       expect(JSON.stringify(userMsg)).not.toContain("JVBERi0");
     });
 
+    it("inlines whole a text within the text-document cap it declares", async () => {
+      const provider = setup();
+      const cap = expectDefined(provider.attachmentLimits().textDocumentBytes, "text cap");
+      // Two-byte characters: the cap is in bytes, so this is half as many characters.
+      const text = "é".repeat(cap / 2);
+      await provider.chat({
+        model: "m",
+        system: "sys",
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "document",
+                source: "base64",
+                data: Buffer.from(text, "utf-8").toString("base64"),
+                mediaType: "text/plain",
+                name: "notes.txt",
+              },
+            ],
+          },
+        ],
+      });
+      expect(getMessage(firstCreateArgs(), 1).content).toBe(`[document: notes.txt]\n${text}`);
+    });
+
     it("truncates oversized text/* documents and appends an elision marker", async () => {
       const provider = setup();
       // 250k chars decoded — well past the 100k cap. Pad to the boundary so

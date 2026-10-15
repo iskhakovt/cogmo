@@ -22,7 +22,7 @@ The bug class to catch is #2 — and to catch it you have to **count boundaries,
 | Load | `load-conversation` | `agentStore.getConversation` | DB read | ✓ |
 | Load | `last-assistant` | `agentStore.getLastAssistantMessage` | DB read | ✓ |
 | Load | `load-inbound` | `transportStore.getUnbatchedInbound` | DB read | ✓ |
-| Persist | `create-user-message` | `agentStore.insertMessage` (user), cursored on the batch's last inbound — returns nothing. `[proposed]` First normalizes the batch's attachments ([transport/attachments.md](transport/attachments.md)) | **DB write**; `[proposed]` S3 reads and writes, image decoding | ✓ |
+| Persist | `create-user-message` | `agentStore.insertMessage` (user), cursored on the batch's last inbound — returns nothing. First normalizes the batch's attachments ([transport/attachments.md](transport/attachments.md)) | **DB write**; S3 reads and writes, image decoding, `attachment_originals` writes, and `countTokens` for text documents | ✓ |
 | Load | `load-turn-transcript` | `loadTurnHistory` (`findUserMessageByInbound` + `getLatestSummary` + `listMessages` / `getHistoryAfter` + `listTurnContexts`) — returns the compacted view, earlier turns led by their stored turn contexts, positionally-aligned message ids and turn-context inputs, and the turn's own row (id and `created_at`), found by the inbound cursor it was written with | DB read | ✓ |
 | Load | `freeze-core-memory-scope` | `loadCoreMemoryScope` — returns the turn's core-memory scope: none, unclassed, or the profile's class with its restricted flag | freezes non-durable reads (profile, profile classes) | ✓ |
 | Load | `freeze-turn-inputs` | `resolveVoiceMode`, `delivery.hasBatchTargets()` and `freezeToolTable` over the live tool catalog — returns `{ voiceMode, batchDelivery, tools }`, the table (definitions + dispatch policy) as JSON text | freezes non-durable reads (profile, voice config, delivery handle, tool catalogs) | ✓ |
@@ -257,7 +257,7 @@ This is documented as accepted (same trigger class as before durable iterations 
 
 The cases:
 
-1. `create-user-message` cached → no user-role `insertMessage` call, and `[proposed]` no normalization or upload; with the cached result empty, the turn is served from the row `load-turn-transcript` finds on its inbound cursor, which keys the stored turn context and whose `created_at` the context shows.
+1. `create-user-message` cached → no user-role `insertMessage` call, and no normalization or upload; with the cached result empty, the turn is served from the row `load-turn-transcript` finds on its inbound cursor, which keys the stored turn context and whose `created_at` the context shows.
 2. `persist-new-messages` cached → no `insertMessages` call (no persistence of any new messages: tool turns + assistant).
 3. `summarize-prefix-outcome` cached → no `provider.chat` call for summarization, and the cached summary text appears in the history passed to the agent loop (non-vacuity check).
 4. All listed durable steps cached, the snapshot steps included → `runStreamingAgentLoop` is still called (canary: the loop's bare-body glue re-runs per invocation by design), and no message, snapshot or turn context is written.

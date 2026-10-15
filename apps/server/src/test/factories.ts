@@ -6,6 +6,7 @@ import { type Inngest, StepError } from "inngest";
 import { ok } from "neverthrow";
 import { vi } from "vitest";
 import { mock } from "vitest-mock-extended";
+import type { NormalizeArrivalDeps } from "../agent/attachments/normalize-arrival.js";
 import type { HandleMessageDeps } from "../agent/handle-message.js";
 import type { Service } from "../agent/service.js";
 import type { AgentStore } from "../agent/store/index.js";
@@ -24,7 +25,7 @@ import type {
 } from "../llm/types.js";
 import type { MemoryProvider } from "../memory/provider.js";
 import type { SecretsStore } from "../secrets/store/index.js";
-import type { AttachmentStore } from "../transport/attachment-store.js";
+import { type AttachmentStore, mediaTypeToExt } from "../transport/attachment-store.js";
 import type { DeliveryHandle, DeliveryRouter } from "../transport/delivery-router.js";
 import type { TransportStore } from "../transport/store/index.js";
 import type { Transport } from "../transport/transport.js";
@@ -346,6 +347,10 @@ export function mockTransportStore(overrides?: Partial<TransportStore>): Transpo
     appendBoundaryBuffer: vi.fn().mockResolvedValue(undefined),
     deleteBoundaryPending: vi.fn().mockResolvedValue(undefined),
     listExpiredBoundaryPending: vi.fn().mockResolvedValue([]),
+    claimAttachmentDecode: vi.fn().mockResolvedValue({ kind: "claimed", attempt: 1 }),
+    finishAttachmentDecode: vi.fn().mockResolvedValue({ kind: "finished" }),
+    findFinishedAttachmentOriginal: vi.fn().mockResolvedValue(null),
+    abandonAttachmentDecode: vi.fn().mockResolvedValue({ kind: "abandoned" }),
     ...overrides,
   };
 }
@@ -884,9 +889,31 @@ export function mockDeliveryRouter(overrides?: Partial<DeliveryRouter>): Deliver
 export function mockAttachmentStore(overrides?: Partial<AttachmentStore>): AttachmentStore {
   return {
     upload: vi.fn().mockResolvedValue("inbound/test.jpg"),
+    put: vi.fn(
+      async (stem: string, _data: Buffer, mediaType: string) =>
+        `${stem}.${mediaTypeToExt(mediaType)}`,
+    ),
     download: vi.fn().mockResolvedValue(Buffer.from([1, 2, 3])),
     read: vi.fn().mockResolvedValue(ok(Buffer.from([1, 2, 3]))),
     ...overrides,
+  };
+}
+
+/**
+ * Arrival's image steps without sharp: nothing is screened out, and every
+ * image normalizes to a 1000 × 750 JPEG of 100,000 bytes.
+ */
+export function mockImages(): NormalizeArrivalDeps["images"] {
+  return {
+    screen: vi.fn(() => null),
+    normalize: vi.fn(async () =>
+      ok({
+        data: Buffer.alloc(100_000),
+        mediaType: "image/jpeg" as const,
+        width: 1000,
+        height: 750,
+      }),
+    ),
   };
 }
 

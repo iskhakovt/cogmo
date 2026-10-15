@@ -14,6 +14,7 @@ function stubService(): Service {
 function fakeAttachments(uploadedPath = "generated/abc.md"): AttachmentStore {
   return {
     upload: vi.fn().mockResolvedValue(uploadedPath),
+    put: vi.fn(async () => "path"),
     download: vi.fn(),
     read: vi.fn(),
   };

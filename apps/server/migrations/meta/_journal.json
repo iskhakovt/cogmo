@@ -505,6 +505,13 @@
       "when": 1792065613924,
       "tag": "0071_snapshot_attachment_cutoff",
       "breakpoints": true
+    },
+    {
+      "idx": 72,
+      "version": "7",
+      "when": 1792076999064,
+      "tag": "0072_attachment_originals",
+      "breakpoints": true
     }
   ]
 }

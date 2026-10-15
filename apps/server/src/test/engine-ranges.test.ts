@@ -63,13 +63,21 @@ const LockfileSchema = z.object({
   packages: z
     .record(
       z.string(),
-      z.object({ engines: z.object({ node: z.string() }).partial().optional() }).passthrough(),
+      z
+        .object({
+          engines: z.object({ node: z.string() }).partial().optional(),
+          os: z.array(z.string()).optional(),
+        })
+        .passthrough(),
     )
     .optional(),
 });
 
 const serverPkg = manifest(join(SERVER_PKG_DIR, "package.json"));
 const rootPkg = manifest(join(ROOT, "package.json"));
+
+/** The platforms Cogmo runs on: the Linux runtime image and macOS development. */
+const SUPPORTED_OS: ReadonlySet<string> = new Set(["linux", "darwin"]);
 
 interface DependencyRange {
   id: string;
@@ -82,6 +90,9 @@ function declaredNodeRanges(): DependencyRange[] {
   );
   const ranges: DependencyRange[] = [];
   for (const [id, entry] of Object.entries(lockfile.packages ?? {})) {
+    // A platform binary for an OS Cogmo never runs on (sharp's 32-bit Windows
+    // build) is never installed where our range applies.
+    if (entry.os !== undefined && !entry.os.some((os) => SUPPORTED_OS.has(os))) continue;
     const range = entry.engines?.node;
     if (range === undefined) continue;
     // An unparseable range carries no constraint we can evaluate, and there

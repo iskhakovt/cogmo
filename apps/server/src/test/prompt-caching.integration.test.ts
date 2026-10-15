@@ -33,7 +33,7 @@ import { HindsightMemoryProvider } from "../memory/hindsight.js";
 import { DEFAULT_BASE_PROMPT } from "../setup/seed.js";
 import type { InboundContent } from "../transport/content.js";
 import { channelSessions, inboundMessages } from "../transport/store/schema.js";
-import { assertAppendOnly, compareRequests } from "./append-only.js";
+import { assertAppendOnly } from "./append-only.js";
 import { expectDefined, expectOk } from "./assertions.js";
 import { CASSETTE_CHAT_MODEL } from "./cassette-model.js";
 import { createFalFetch } from "./fal-mock.js";
@@ -314,19 +314,21 @@ describe("prompt caching", () => {
       .from(messages)
       .where(eq(messages.conversationId, conversation.id))
       .orderBy(asc(messages.id));
-    const pictureRow = rows.findIndex(
-      (r) => r.role === "user" && JSON.stringify(r.content).includes(PICTURE),
+    // The image turn's row holds its label and a ref to the normalized copy, so
+    // every later request sends the image as that turn did.
+    const pictureRow = expectDefined(
+      rows.find((r) => r.role === "user" && JSON.stringify(r.content).includes(PICTURE)),
+      "picture row",
+    );
+    expect(pictureRow.content).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "text", harness: "image_label" }),
+        expect.objectContaining({ type: "image_ref", mediaType: "image/jpeg" }),
+      ]),
     );
     for (let i = 1; i < requests.length; i++) {
       const prev = expectDefined(requests[i - 1], "previous request");
       const next = expectDefined(requests[i], "request");
-      if (i === throughPicture) {
-        // The one declared exception: the image turn's row reloads as JSON text.
-        expect(compareRequests(prev, next).divergence).toBe(
-          `messages[${pictureRow}].content[1].type`,
-        );
-        continue;
-      }
       try {
         assertAppendOnly(prev, next);
       } catch (err) {

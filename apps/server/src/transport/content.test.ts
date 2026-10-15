@@ -31,6 +31,19 @@ describe("contentToBlocks", () => {
     ).toEqual([{ type: "image_ref", path: "inbound/abc.jpg", mediaType: "image/jpeg" }]);
   });
 
+  it("gives no block for a size-only document", () => {
+    const content = InboundContentSchema.parse([
+      { type: "text", text: "see this" },
+      { type: "document", mediaType: "video/mp4", name: "clip.mp4", bytes: 50_000_000 },
+    ]);
+    expect(contentToBlocks(content)).toEqual([{ type: "text", text: "see this" }]);
+  });
+
+  it("rejects a document with no path, data or bytes", () => {
+    const content = [{ type: "document", mediaType: "application/pdf", name: "x.pdf" }];
+    expect(InboundContentSchema.safeParse(content).success).toBe(false);
+  });
+
   it("converts inline-image array element to ImageBlock", () => {
     expect(
       contentToBlocks([

@@ -13,17 +13,22 @@ const ForwardedOriginSchema = z.object({
 });
 export type ForwardedOrigin = z.infer<typeof ForwardedOriginSchema>;
 
+/** The largest file an adapter downloads: the Bot API's `getFile` limit. */
+export const MAX_INBOUND_FILE_BYTES = 20 * 1024 * 1024;
+
 /**
  * Inbound block shapes — what adapters pack into `inbound_messages.content`.
  * `text` is a plain text run, carrying `forwarded` when someone other than the
- * user wrote it; `image` carries either an S3 path (after `uploadAttachment`)
- * or inline base64/url data.
+ * user wrote it; `image` and `document` carry either an S3 path (after
+ * `uploadAttachment`) or inline base64/url data, and the file's `name` when it
+ * has one. A size-only `document` carries neither, only the `bytes` of a file
+ * too large to download.
  *
- * The two image variants share `type: "image"`, so they live in a single
- * object schema with `path` and `data` both optional and a `refine` that
- * requires at least one. `discriminatedUnion` can't represent overlapping
- * literals, and the alternative — splitting into two object schemas in a
- * `z.union` — would deserialise ambiguously when both keys are present.
+ * The variants of each share one `type`, so they live in a single object
+ * schema with the payload keys optional and a `refine` that requires one.
+ * `discriminatedUnion` can't represent overlapping literals, and the
+ * alternative — one object schema per variant in a `z.union` — would
+ * deserialise ambiguously when several keys are present.
  */
 const InboundTextBlockSchema = z.object({
   type: z.literal("text"),
@@ -39,6 +44,7 @@ const InboundImageBlockSchema = z
     data: z.string().optional(),
     mediaType: z.string(),
     source: z.enum(["base64", "url"]).optional(),
+    name: z.string().optional(),
   })
   .refine((v) => v.path != null || v.data != null, {
     message: "image block requires either path or data",
@@ -52,9 +58,10 @@ const InboundDocumentBlockSchema = z
     mediaType: z.string(),
     source: z.enum(["base64", "url"]).optional(),
     name: z.string().optional(),
+    bytes: z.number().int().nonnegative().optional(),
   })
-  .refine((v) => v.path != null || v.data != null, {
-    message: "document block requires either path or data",
+  .refine((v) => v.path != null || v.data != null || v.bytes != null, {
+    message: "document block requires path, data or bytes",
   });
 
 /**
@@ -127,7 +134,8 @@ export type InboundBlock = ContentBlock | ImageRef | DocumentRef | VoiceRef;
  *
  * Returns a mix of ContentBlock (ready for LLM), ImageRef and DocumentRef
  * (need S3 resolution). The orchestrator resolves *Refs before passing to
- * the agent loop.
+ * the agent loop. A size-only document gives no block: it has nothing to
+ * resolve, and arrival turns it into a placeholder.
  */
 export function contentToBlocks(content: InboundContent): InboundBlock[] {
   if (typeof content === "string") {

@@ -14,6 +14,7 @@ import {
   sql,
 } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
+import { match, P } from "ts-pattern";
 import type { JsonValue } from "type-fest";
 // Cross-module read: scheduled-task fire routing needs conversations.{user_id, profile_id}
 // joined to channel_sessions. Per CLAUDE.md → Store Pattern, store impls may import
@@ -21,8 +22,11 @@ import type { JsonValue } from "type-fest";
 import { aliases, conversations, messages } from "../../agent/store/schema.js";
 import { single } from "../../db/helpers.js";
 import type { Transaction } from "../../db/index.js";
+import type { FinishedOriginal, NormalizedImageResult } from "../attachment-original.js";
 import { type InboundContent, previewInboundText } from "../content.js";
 import {
+  type AttachmentOriginalState,
+  attachmentOriginals,
   type BufferedInboundEntry,
   boundaryPending,
   type ChannelSessionReceive,
@@ -414,6 +418,43 @@ export interface TransportStore {
     tx: Transaction,
     cutoff: Date,
   ): Promise<ReadonlyArray<{ id: string; channelId: string; platformAddress: string }>>;
+
+  /**
+   * none → `decoding`, or a `decoding` record a crashed attempt left →
+   * `decoding` with one more attempt: `claimed` with the attempt's number
+   * (1 on insert). A `ready` or `rejected` record comes back as `existing`.
+   */
+  claimAttachmentDecode(
+    tx: Transaction,
+    originalPath: string,
+  ): Promise<
+    { kind: "claimed"; attempt: number } | { kind: "existing"; original: FinishedOriginal }
+  >;
+
+  /**
+   * `decoding` → `ready` with the decode's result. `stale` when the record
+   * is no longer `decoding`, returning it as it stands; `absent` when
+   * another attempt's abandon deleted it.
+   */
+  finishAttachmentDecode(
+    tx: Transaction,
+    originalPath: string,
+    result: NormalizedImageResult,
+  ): Promise<
+    { kind: "finished" } | { kind: "stale"; original: FinishedOriginal } | { kind: "absent" }
+  >;
+
+  /** The original's record when no attempt is decoding it; null when it has none or is `decoding`. */
+  findFinishedAttachmentOriginal(
+    tx: Transaction,
+    originalPath: string,
+  ): Promise<FinishedOriginal | null>;
+
+  /** `decoding` → deleted, so a retry decodes again; `stale` when the record isn't `decoding`. */
+  abandonAttachmentDecode(
+    tx: Transaction,
+    originalPath: string,
+  ): Promise<{ kind: "abandoned" } | { kind: "stale" }>;
 }
 
 /**
@@ -441,6 +482,33 @@ function snippetFromMessageContent(
 function truncate(s: string, maxChars: number): string {
   if (s.length <= maxChars) return s;
   return `${s.slice(0, Math.max(1, maxChars - 1))}…`;
+}
+
+const ATTACHMENT_ORIGINAL_COLUMNS = {
+  originalPath: attachmentOriginals.originalPath,
+  state: attachmentOriginals.state,
+  result: attachmentOriginals.result,
+};
+
+/**
+ * A record read after an attempt's transition didn't apply. Invariant: it
+ * isn't `decoding` (the transition's guard), and the CHECKs give `ready` a
+ * result.
+ */
+function finishedOriginal(row: {
+  originalPath: string;
+  state: AttachmentOriginalState;
+  result: NormalizedImageResult | null;
+}): FinishedOriginal {
+  return match(row)
+    .with({ state: "ready", result: P.nonNullable }, ({ result }) => ({
+      state: "ready" as const,
+      result,
+    }))
+    .with({ state: "rejected" }, () => ({ state: "rejected" as const }))
+    .otherwise(({ state }) => {
+      throw new Error(`attachment original ${row.originalPath} is ${state} after its transition`);
+    });
 }
 
 export class DrizzleTransportStore implements TransportStore {
@@ -1149,5 +1217,91 @@ export class DrizzleTransportStore implements TransportStore {
         channelSessions.platformAddress,
         desc(channelSessions.id),
       );
+  }
+
+  async claimAttachmentDecode(
+    tx: Transaction,
+    originalPath: string,
+  ): Promise<
+    { kind: "claimed"; attempt: number } | { kind: "existing"; original: FinishedOriginal }
+  > {
+    // Keyed insert (`.claude/rules/inngest.md`) whose conflict arm only
+    // updates a `decoding` record; a `ready` or `rejected` one returns no row.
+    const [claimed] = await tx
+      .insert(attachmentOriginals)
+      .values({ originalPath, state: "decoding", result: null, decodeAttempts: 1 })
+      .onConflictDoUpdate({
+        target: attachmentOriginals.originalPath,
+        set: { decodeAttempts: sql`${attachmentOriginals.decodeAttempts} + 1` },
+        setWhere: eq(attachmentOriginals.state, "decoding"),
+      })
+      .returning({ decodeAttempts: attachmentOriginals.decodeAttempts });
+    if (claimed !== undefined) return { kind: "claimed", attempt: claimed.decodeAttempts };
+    // Invariant: the conflict arm skipped a row the insert collided with, and
+    // only a `decoding` record is ever deleted.
+    const existing = await tx
+      .select(ATTACHMENT_ORIGINAL_COLUMNS)
+      .from(attachmentOriginals)
+      .where(eq(attachmentOriginals.originalPath, originalPath));
+    return { kind: "existing", original: finishedOriginal(single(existing)) };
+  }
+
+  async finishAttachmentDecode(
+    tx: Transaction,
+    originalPath: string,
+    result: NormalizedImageResult,
+  ): Promise<
+    { kind: "finished" } | { kind: "stale"; original: FinishedOriginal } | { kind: "absent" }
+  > {
+    const updated = await tx
+      .update(attachmentOriginals)
+      .set({ state: "ready", result })
+      .where(
+        and(
+          eq(attachmentOriginals.originalPath, originalPath),
+          eq(attachmentOriginals.state, "decoding"),
+        ),
+      )
+      .returning({ id: attachmentOriginals.id });
+    if (updated.length > 0) return { kind: "finished" };
+    const [current] = await tx
+      .select(ATTACHMENT_ORIGINAL_COLUMNS)
+      .from(attachmentOriginals)
+      .where(eq(attachmentOriginals.originalPath, originalPath));
+    return current === undefined
+      ? { kind: "absent" }
+      : { kind: "stale", original: finishedOriginal(current) };
+  }
+
+  async findFinishedAttachmentOriginal(
+    tx: Transaction,
+    originalPath: string,
+  ): Promise<FinishedOriginal | null> {
+    const [row] = await tx
+      .select(ATTACHMENT_ORIGINAL_COLUMNS)
+      .from(attachmentOriginals)
+      .where(
+        and(
+          eq(attachmentOriginals.originalPath, originalPath),
+          ne(attachmentOriginals.state, "decoding"),
+        ),
+      );
+    return row === undefined ? null : finishedOriginal(row);
+  }
+
+  async abandonAttachmentDecode(
+    tx: Transaction,
+    originalPath: string,
+  ): Promise<{ kind: "abandoned" } | { kind: "stale" }> {
+    const deleted = await tx
+      .delete(attachmentOriginals)
+      .where(
+        and(
+          eq(attachmentOriginals.originalPath, originalPath),
+          eq(attachmentOriginals.state, "decoding"),
+        ),
+      )
+      .returning({ id: attachmentOriginals.id });
+    return deleted.length > 0 ? { kind: "abandoned" } : { kind: "stale" };
   }
 }

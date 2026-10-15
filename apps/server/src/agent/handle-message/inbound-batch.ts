@@ -10,6 +10,8 @@ export interface InboundRow {
 
 /** An inbound row's content after voice transcription. */
 export interface SubstitutedInbound {
+  /** The inbound row's id, which keys anything arrival stores for it. */
+  id: string;
   content: InboundContent;
 }
 
@@ -72,7 +74,7 @@ export function substituteTranscripts(
 ): ReadonlyArray<SubstitutedInbound> {
   let cursor = 0;
   return inboundMessages.map((m) => {
-    if (typeof m.content === "string") return { content: m.content };
+    if (typeof m.content === "string") return { id: m.id, content: m.content };
     const blocks = m.content.map((b) => {
       if (b.type !== "voice") return b;
       const text = transcripts[cursor++] ?? "";
@@ -82,29 +84,25 @@ export function substituteTranscripts(
         ...(b.forwarded !== undefined && { forwarded: b.forwarded }),
       } as const;
     });
-    return { content: blocks };
+    return { id: m.id, content: blocks };
   });
 }
 
 /**
- * Per-row text serialization for `messages.content`, forwarded text inside its
- * element. After voice→text substitution, a text-only row joins on newline,
- * so it loads back cleanly as history; a row that still carries image or
- * document blocks is JSON-stringified.
+ * The text of a batch without attachments, as `messages.content` stores it:
+ * each row's text, forwarded text inside its element, joined on newlines.
  */
-export function renderUserContent(substitutedMessages: ReadonlyArray<SubstitutedInbound>): string {
+export function renderUserContent(
+  substitutedMessages: ReadonlyArray<Pick<SubstitutedInbound, "content">>,
+): string {
   return substitutedMessages
-    .map(({ content }) => {
-      if (typeof content === "string") return content;
-      const rendered = content.map((b) =>
-        b.type === "text"
-          ? ({ type: "text", text: renderInboundText(b.text, b.forwarded) } as const)
-          : b,
-      );
-      if (rendered.every((b) => b.type === "text")) {
-        return rendered.map((b) => b.text).join("\n");
-      }
-      return JSON.stringify(rendered);
-    })
+    .map(({ content }) =>
+      typeof content === "string"
+        ? content
+        : content
+            .filter((b) => b.type === "text")
+            .map((b) => renderInboundText(b.text, b.forwarded))
+            .join("\n"),
+    )
     .join("\n");
 }

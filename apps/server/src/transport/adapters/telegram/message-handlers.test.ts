@@ -536,7 +536,7 @@ describe("registerMessageHandlers", () => {
 
       expect(transport.emit).toHaveBeenCalledWith(
         "session-1",
-        [{ type: "image", path: "inbound/test.jpg", mediaType: "image/png" }],
+        [{ type: "image", path: "inbound/test.jpg", mediaType: "image/png", name: "photo.png" }],
         expect.any(Date),
       );
     });
@@ -619,7 +619,7 @@ describe("registerMessageHandlers", () => {
       expect(transport.uploadAttachment).toHaveBeenCalledWith(expect.any(Buffer), "image/png");
       expect(transport.emit).toHaveBeenCalledWith(
         "session-1",
-        [{ type: "image", path: "inbound/test.jpg", mediaType: "image/png" }],
+        [{ type: "image", path: "inbound/test.jpg", mediaType: "image/png", name: "photo.png" }],
         expect.any(Date),
       );
     });
@@ -635,7 +635,18 @@ describe("registerMessageHandlers", () => {
 
       expect(transport.emit).toHaveBeenCalledWith(
         "session-1",
-        [{ type: "image", path: "inbound/test.jpg", mediaType: "image/jpeg" }],
+        [{ type: "image", path: "inbound/test.jpg", mediaType: "image/jpeg", name: "photo.jpg" }],
+        expect.any(Date),
+      );
+    });
+
+    it("emits an image document with no file name as an unnamed image block", async () => {
+      const { transport } = await createAdapter();
+      await documentHandler()(makeDocumentCtx(111, { mime_type: "image/gif" }));
+
+      expect(transport.emit).toHaveBeenCalledWith(
+        "session-1",
+        [{ type: "image", path: "inbound/test.jpg", mediaType: "image/gif" }],
         expect.any(Date),
       );
     });
@@ -653,7 +664,7 @@ describe("registerMessageHandlers", () => {
         "session-1",
         [
           { type: "text", text: "what's this?" },
-          { type: "image", path: "inbound/test.jpg", mediaType: "image/webp" },
+          { type: "image", path: "inbound/test.jpg", mediaType: "image/webp", name: "x.webp" },
         ],
         expect.any(Date),
       );
@@ -672,6 +683,59 @@ describe("registerMessageHandlers", () => {
 
       expect(transport.uploadAttachment).not.toHaveBeenCalled();
       expect(transport.emit).not.toHaveBeenCalled();
+    });
+
+    describe("over the 20 MB download limit", () => {
+      const OVER_LIMIT = 20 * 1024 * 1024 + 1;
+
+      it("emits a size-only block with its caption and downloads nothing", async () => {
+        const { transport } = await createAdapter();
+        const ctx = makeDocumentCtx(
+          111,
+          { file_name: "talk.mp4", mime_type: "video/mp4", file_size: OVER_LIMIT },
+          "watch this",
+        );
+        await documentHandler()(ctx);
+
+        expect(ctx.api.getFile).not.toHaveBeenCalled();
+        expect(mockFetch).not.toHaveBeenCalled();
+        expect(transport.uploadAttachment).not.toHaveBeenCalled();
+        expect(transport.emit).toHaveBeenCalledWith(
+          "session-1",
+          [
+            { type: "text", text: "watch this" },
+            { type: "document", mediaType: "video/mp4", name: "talk.mp4", bytes: OVER_LIMIT },
+          ],
+          expect.any(Date),
+        );
+      });
+
+      it.each([
+        [{ file_name: "scan.png", mime_type: "application/octet-stream" }, "image/png"],
+        [{ file_name: "archive" }, "application/octet-stream"],
+      ])("types %o by its extension as %s", async (doc, mediaType) => {
+        const { transport } = await createAdapter();
+        await documentHandler()(makeDocumentCtx(111, { ...doc, file_size: OVER_LIMIT }));
+
+        expect(transport.emit).toHaveBeenCalledWith(
+          "session-1",
+          [{ type: "document", mediaType, name: doc.file_name, bytes: OVER_LIMIT }],
+          expect.any(Date),
+        );
+      });
+
+      it("downloads a file of exactly 20 MB", async () => {
+        const { transport } = await createAdapter();
+        const ctx = makeDocumentCtx(111, {
+          file_name: "x.pdf",
+          mime_type: "application/pdf",
+          file_size: 20 * 1024 * 1024,
+        });
+        await documentHandler()(ctx);
+
+        expect(ctx.api.getFile).toHaveBeenCalled();
+        expect(transport.uploadAttachment).toHaveBeenCalled();
+      });
     });
 
     // Telegram's CDN can return 4xx/5xx (rate-limit, expired file_id,
