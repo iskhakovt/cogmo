@@ -66,6 +66,7 @@ export function makeDocumentCtx(
     file_id?: string;
     file_name?: string;
     mime_type?: string;
+    file_size?: number;
   } = {},
   caption?: string,
   chatId = 42,
@@ -80,6 +81,7 @@ export function makeDocumentCtx(
         file_id: doc.file_id ?? "doc_id",
         ...(doc.file_name !== undefined && { file_name: doc.file_name }),
         ...(doc.mime_type !== undefined && { mime_type: doc.mime_type }),
+        ...(doc.file_size !== undefined && { file_size: doc.file_size }),
       },
     },
     api: {

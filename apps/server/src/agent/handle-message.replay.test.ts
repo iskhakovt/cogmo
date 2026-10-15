@@ -44,6 +44,7 @@ import {
   mockDeliveryHandle,
   mockDeliveryRouter,
   mockFilesService,
+  mockImages,
   mockMemoryProvider,
   mockProvider,
   mockResolver,
@@ -127,6 +128,7 @@ function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
     }),
     userTimezone: "UTC",
     attachmentReader: createAttachmentReader(mockAttachmentStore(), 24_000_000),
+    images: mockImages(),
     ...overrides,
   };
 }

@@ -1,20 +1,27 @@
-import type { Transactor } from "../../db/index.js";
+import { attachmentBudget } from "../../llm/attachment-limits.js";
+import { computeBudget, resolveLimits } from "../../llm/models.js";
+import type { LlmProviderResolver } from "../../llm/resolver.js";
 import type { AttachmentStore } from "../../transport/attachment-store.js";
 import { contentToBlocks } from "../../transport/content.js";
 import type { VoiceBundle } from "../../voice/resolver.js";
+import {
+  type ArrivalRoute,
+  type NormalizeArrivalDeps,
+  normalizeArrival,
+} from "../attachments/normalize-arrival.js";
 import type { AgentStore } from "../store/index.js";
 import {
   type InboundRow,
-  renderUserContent,
   type SubstitutedInbound,
   substituteTranscripts,
 } from "./inbound-batch.js";
+import { resolveOrFail } from "./resolve-turn-model.js";
 import type { TurnSteps } from "./turn-steps.js";
 
-export interface RecordUserMessageDeps {
-  runInTx: Transactor;
+export interface RecordUserMessageDeps extends Omit<NormalizeArrivalDeps, "attachments"> {
   agentStore: Pick<AgentStore, "insertMessage">;
-  attachments: Pick<AttachmentStore, "download">;
+  attachments: Pick<AttachmentStore, "download" | "read" | "put">;
+  resolveProvider: LlmProviderResolver;
 }
 
 export interface RecordUserMessageArgs {
@@ -30,12 +37,12 @@ export interface RecordUserMessageArgs {
 
 export interface RecordedUserMessage {
   substitutedMessages: ReadonlyArray<SubstitutedInbound>;
-  /** The user row's `messages.content`. */
-  userContentText: string;
 }
 
 /**
- * Transcribe the batch's voice notes and write the turn's user row.
+ * Transcribe the batch's voice notes and write the turn's user row, its
+ * attachments normalized to refs and placeholders capped to the turn's route
+ * (design/transport/attachments.md).
  *
  * Steps, in order: `transcribe-voice` (only when the batch carries voice),
  * `create-user-message`.
@@ -82,14 +89,18 @@ export async function recordUserMessage(
       : [];
 
   const substitutedMessages = substituteTranscripts(inboundMessages, transcripts);
-  const userContentText = renderUserContent(substitutedMessages);
 
   await step.run("create-user-message", async () => {
+    const content = await normalizeArrival(
+      deps,
+      () => arrivalRoute(deps.resolveProvider, snapshot.model),
+      substitutedMessages,
+    );
     await deps.runInTx((tx) =>
       deps.agentStore.insertMessage(tx, {
         conversationId,
         role: "user",
-        content: userContentText,
+        content,
         profileId: snapshot.profileId,
         model: snapshot.model,
         lastInboundMessageId: maxInboundId,
@@ -98,5 +109,26 @@ export async function recordUserMessage(
     );
   });
 
-  return { substitutedMessages, userContentText };
+  return { substitutedMessages };
+}
+
+/**
+ * The route the turn's attachments are capped to: the snapshot's model, as
+ * `freeze-model-limits` will resolve it. A routing change between the two is
+ * a concurrent operator action, and the cutoff absorbs any overrun.
+ */
+async function arrivalRoute(
+  resolveProvider: LlmProviderResolver,
+  model: string,
+): Promise<ArrivalRoute> {
+  const { provider, limits: rowLimits } = await resolveOrFail(resolveProvider, model);
+  const limits = resolveLimits(model, rowLimits);
+  const attachments = provider.attachmentLimits(limits.contextWindow);
+  return {
+    budget: attachmentBudget(attachments),
+    textDocumentBytes: attachments.textDocumentBytes,
+    textDocumentTokens: Math.floor(computeBudget(limits) / 4),
+    countTokens: (text) =>
+      provider.countTokens({ model, system: "", messages: [{ role: "user", content: text }] }),
+  };
 }

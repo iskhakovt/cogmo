@@ -21,8 +21,10 @@ import type { JsonValue } from "type-fest";
 import { aliases, conversations, messages } from "../../agent/store/schema.js";
 import { single } from "../../db/helpers.js";
 import type { Transaction } from "../../db/index.js";
+import type { AttachmentOriginal, NormalizedImageResult } from "../attachment-original.js";
 import { type InboundContent, previewInboundText } from "../content.js";
 import {
+  attachmentOriginals,
   type BufferedInboundEntry,
   boundaryPending,
   type ChannelSessionReceive,
@@ -414,6 +416,34 @@ export interface TransportStore {
     tx: Transaction,
     cutoff: Date,
   ): Promise<ReadonlyArray<{ id: string; channelId: string; platformAddress: string }>>;
+
+  /**
+   * none → `decoding`, or a `decoding` record a crashed attempt left →
+   * `decoding` with one more attempt: `claimed` with the attempt's number
+   * (1 on insert). A `ready` or `rejected` record comes back as `existing`.
+   */
+  claimAttachmentDecode(
+    tx: Transaction,
+    originalPath: string,
+  ): Promise<
+    { kind: "claimed"; attempt: number } | { kind: "existing"; original: AttachmentOriginal }
+  >;
+
+  /**
+   * `decoding` → `ready` with the decode's result. `stale` when the record
+   * is no longer `decoding`, returning it as it stands; `absent` when
+   * another attempt's abandon deleted it.
+   */
+  finishAttachmentDecode(
+    tx: Transaction,
+    originalPath: string,
+    result: NormalizedImageResult,
+  ): Promise<
+    { kind: "finished" } | { kind: "stale"; original: AttachmentOriginal } | { kind: "absent" }
+  >;
+
+  /** `decoding` → deleted, so a retry decodes again. Any other state is left alone. */
+  abandonAttachmentDecode(tx: Transaction, originalPath: string): Promise<void>;
 }
 
 /**
@@ -442,6 +472,12 @@ function truncate(s: string, maxChars: number): string {
   if (s.length <= maxChars) return s;
   return `${s.slice(0, Math.max(1, maxChars - 1))}…`;
 }
+
+const ATTACHMENT_ORIGINAL_COLUMNS = {
+  originalPath: attachmentOriginals.originalPath,
+  state: attachmentOriginals.state,
+  result: attachmentOriginals.result,
+};
 
 export class DrizzleTransportStore implements TransportStore {
   async getAllChannels(
@@ -1148,6 +1184,69 @@ export class DrizzleTransportStore implements TransportStore {
         channelSessions.channelId,
         channelSessions.platformAddress,
         desc(channelSessions.id),
+      );
+  }
+
+  async claimAttachmentDecode(
+    tx: Transaction,
+    originalPath: string,
+  ): Promise<
+    { kind: "claimed"; attempt: number } | { kind: "existing"; original: AttachmentOriginal }
+  > {
+    // Keyed insert (`.claude/rules/inngest.md`) whose conflict arm only
+    // updates a `decoding` record; a `ready` or `rejected` one returns no row.
+    const [claimed] = await tx
+      .insert(attachmentOriginals)
+      .values({ originalPath, state: "decoding", result: null, decodeAttempts: 1 })
+      .onConflictDoUpdate({
+        target: attachmentOriginals.originalPath,
+        set: { decodeAttempts: sql`${attachmentOriginals.decodeAttempts} + 1` },
+        setWhere: eq(attachmentOriginals.state, "decoding"),
+      })
+      .returning({ decodeAttempts: attachmentOriginals.decodeAttempts });
+    if (claimed !== undefined) return { kind: "claimed", attempt: claimed.decodeAttempts };
+    // Invariant: the conflict arm skipped a row the insert collided with, and
+    // only a `decoding` record is ever deleted.
+    const existing = await tx
+      .select(ATTACHMENT_ORIGINAL_COLUMNS)
+      .from(attachmentOriginals)
+      .where(eq(attachmentOriginals.originalPath, originalPath));
+    return { kind: "existing", original: single(existing) };
+  }
+
+  async finishAttachmentDecode(
+    tx: Transaction,
+    originalPath: string,
+    result: NormalizedImageResult,
+  ): Promise<
+    { kind: "finished" } | { kind: "stale"; original: AttachmentOriginal } | { kind: "absent" }
+  > {
+    const updated = await tx
+      .update(attachmentOriginals)
+      .set({ state: "ready", result })
+      .where(
+        and(
+          eq(attachmentOriginals.originalPath, originalPath),
+          eq(attachmentOriginals.state, "decoding"),
+        ),
+      )
+      .returning({ id: attachmentOriginals.id });
+    if (updated.length > 0) return { kind: "finished" };
+    const [current] = await tx
+      .select(ATTACHMENT_ORIGINAL_COLUMNS)
+      .from(attachmentOriginals)
+      .where(eq(attachmentOriginals.originalPath, originalPath));
+    return current === undefined ? { kind: "absent" } : { kind: "stale", original: current };
+  }
+
+  async abandonAttachmentDecode(tx: Transaction, originalPath: string): Promise<void> {
+    await tx
+      .delete(attachmentOriginals)
+      .where(
+        and(
+          eq(attachmentOriginals.originalPath, originalPath),
+          eq(attachmentOriginals.state, "decoding"),
+        ),
       );
   }
 }

@@ -1,4 +1,4 @@
-# Inbound Attachments `[proposed]`
+# Inbound Attachments `[confirmed]`
 
 How a photo or file a user sends becomes part of a stored message: the adapter stores the original, and `create-user-message` normalizes it and writes reference blocks. How the transcript renders, budgets and re-sends those blocks is [prompt-caching.md](../prompt-caching.md#sources-and-fixes) → source (d); the stored block shapes are its [Stored shapes](../prompt-caching.md#stored-shapes-confirmed).
 
@@ -15,12 +15,12 @@ Surveyed September 2026.
 
 - Claude "does not parse or receive any metadata from images", so an EXIF rotation never reaches it. Heavy JPEG compression "can make text difficult to read", "especially when multiple compression passes are applied". For several images, "introduce each one with a short text label".
 - PDFs: "Standard PDF (no passwords/encryption)"; "Binary formats such as .xlsx or .docx are not supported in document blocks and must be converted to text or PDF first". A page costs 1,500–3,000 text tokens plus its image.
-- sharp 0.35.5 (released 2026-09-27) bundles libvips 8.18.7 with mozjpeg, libpng, libwebp and libnsgif ([infrastructure.md](../infrastructure.md#image-processing-proposed)). The prebuilt reads "JPEG, PNG, Ultra HDR, WebP, AVIF, TIFF, GIF and SVG (input)", not HEIC. `failOn`: "Use the default 'warning' level with untrusted input". `limitInputPixels` defaults to 268,402,689 and "Assumes image dimensions contained in the input metadata can be trusted". Output drops all metadata by default and converts to sRGB. `sharp.block` / `unblock` restrict which libvips loaders run: blocking `VipsForeignLoad` blocks "all operations derived from `VipsForeignLoad` (so all loaders)", and unblocking a loader re-admits it alone. Concurrency defaults to one thread per image on glibc "without jemalloc or without `MALLOC_ARENA_MAX`", and to the core count otherwise.
+- sharp 0.35.5 (released 2026-09-27) bundles libvips 8.18.7 with mozjpeg, libpng, libwebp and libnsgif ([infrastructure.md](../infrastructure.md#image-processing-confirmed)). The prebuilt reads "JPEG, PNG, Ultra HDR, WebP, AVIF, TIFF, GIF and SVG (input)", not HEIC. `failOn`: "Use the default 'warning' level with untrusted input". `limitInputPixels` defaults to 268,402,689 and "Assumes image dimensions contained in the input metadata can be trusted". Output drops all metadata by default and converts to sRGB. `sharp.block` / `unblock` restrict which libvips loaders run: blocking `VipsForeignLoad` blocks "all operations derived from `VipsForeignLoad` (so all loaders)", and unblocking a loader re-admits it alone. Concurrency defaults to one thread per image on glibc "without jemalloc or without `MALLOC_ARENA_MAX`", and to the core count otherwise.
 
-## Where it runs `[proposed]`
+## Where it runs `[confirmed]`
 
-- **Adapters store originals.** The Telegram handler uploads the file through `transport.uploadAttachment` and emits a block carrying its `path` and `name`, or a size-only block for a file too large to download, which becomes the too-large placeholder ([telegram.md](telegram.md)). No adapter decodes.
-- **`create-user-message` normalizes** every attachment in the batch, in the step that inserts the row and returns nothing ([Images](#images-proposed), [Documents](#documents-proposed)). An inline attachment (bytes, no `path`) is uploaded there first, keyed by its content digest. A URL attachment, which no adapter produces, becomes a placeholder: fetching a user-supplied URL from the server is an SSRF surface, and its bytes can change.
+- **Adapters store originals.** The Telegram handler uploads the file through `transport.uploadAttachment` and emits a block carrying its `path` and `name`, or a size-only block for a file too large to download (`bytes` and no `path` or `data`), which becomes the too-large placeholder ([telegram.md](telegram.md)). An image block carries the file's `name` when it was sent as a file. No adapter decodes.
+- **`create-user-message` normalizes** every attachment in the batch, in the step that inserts the row and returns nothing ([Images](#images-confirmed), [Documents](#documents-confirmed)). An inline attachment (bytes, no `path`) is uploaded there first, keyed by its content digest. A URL attachment, which no adapter produces, becomes a placeholder: fetching a user-supplied URL from the server is an SSRF surface, and its bytes can change.
 - **Keys.** A normalized copy's key derives from its original's (`inbound/<id>.png` → `normalized/<id>.jpg`), so a retried upload overwrites the same object. An insert that re-runs after its commit leaves two turn rows naming the same objects; the older row's attachments count twice against the budget until the cutoff or a summary passes it.
 - **Per-turn cap.** The step resolves the turn's route (the model `load-turn-snapshot` froze, its `AttachmentLimits` and input budget), so the row records the decision. A turn's attachments are admitted in order while their base64 total stays within the route's attachment budget ([prompt-caching.md](../prompt-caching.md#sources-and-fixes) → source (d)) and their count within its image limit; the rest become placeholders. A routing change between this step and `freeze-model-limits` can still overrun it, a residual of the concurrent-operator-action class.
 
@@ -30,22 +30,56 @@ A failed turn writes no assistant row, so every later turn re-batches its inboun
 
 | State | Set when | Arrival | Rendering |
 |-|-|-|-|
-| `decoding` | committed before an image's decode | the process died decoding it: the decode-failure placeholder, recorded as `ready` | — |
+| `decoding` | committed before an image's first sharp call | a process died decoding it: decode again, or after two deaths the decode-crash placeholder, recorded `ready` | — |
 | `ready` | after the decode, with its `result`: the ref or a placeholder | reuses the result, no decode | the ref |
 | `rejected` | [Rejected attachments](#rejected-attachments-proposed) | the rejection placeholder | the rejection placeholder |
 
-A decode that throws deletes its `decoding` record, so the step's retry decodes again; only a process death leaves one, which costs one crash per poison input. One table carries both markers: each is per original, must commit on its own and outlive a failed run, and is read at arrival and with the transcript's rows. S3 metadata can't change without rewriting the object, and message rows are immutable.
+```mermaid
+stateDiagram-v2
+  [*] --> decoding: claim (attempt 1)
+  decoding --> decoding: claim after a death (attempt + 1)
+  decoding --> ready: decoded, or refused, or attempt 3
+  decoding --> [*]: the decode or upload threw
+  [*] --> rejected: 4c
+  ready --> rejected: 4c
+```
+
+Only the byte-size check and the HEIC brand sniff, both JavaScript, run before the marker commits, so a crafted header that kills the process inside libvips leaves a `decoding` record. sharp refusing an input (an unsupported format, a warning, the timeout, the pixel guard) is an outcome, recorded `ready` with its placeholder. Anything else that throws between the marker and `ready` (the normalized copy's upload, a bug) deletes the record, so the step's retry decodes again. Only a process death leaves one, and a death isn't proof of a poison input (a deploy or an OOM kills a healthy decode too), so a claim that finds `decoding` counts the attempt and decodes again; the third attempt records the decode-crash placeholder without decoding. A poison input therefore costs two crashes. Only images get a record in 4b: every other arrival decision is cheap and deterministic. One table carries both markers: each is per original, must commit on its own and outlive a failed run, and is read at arrival and with the transcript's rows. S3 metadata can't change without rewriting the object, and message rows are immutable.
 
 ```
 attachment_originals
-  id             UUID PRIMARY KEY DEFAULT uuidv7()
-  original_path  TEXT NOT NULL UNIQUE         -- the original's AttachmentStore key
-  state          attachment_original_state NOT NULL   -- decoding | ready | rejected
-  result         JSONB                        -- NormalizedAttachmentSchema: the ref or placeholder; NULL while decoding, and on a document's record
-  created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+  id               UUID PRIMARY KEY DEFAULT uuidv7()
+  original_path    TEXT NOT NULL UNIQUE         -- the original's AttachmentStore key
+  state            attachment_original_state NOT NULL   -- decoding | ready | rejected
+  decode_attempts  INTEGER NOT NULL             -- claims that found no finished record
+  result           JSONB                        -- NormalizedImageResultSchema, set only when ready
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+  CHECK (state <> 'decoding' OR result IS NULL), CHECK (state <> 'ready' OR result IS NOT NULL), CHECK (state <> 'rejected' OR result IS NULL)
 ```
 
-Written through keyed upserts (`.claude/rules/inngest.md`). Owned by `transport/store/`.
+`NormalizedImageResultSchema` is `{ kind: "image", path, mediaType, width, height, bytes }` or `{ kind: "placeholder", reason }`, with `reason` one of `undecodable` (sharp refused it), `too_large` (the pixel guard) and `decode_crashed`. Only per-original outcomes are recorded: the per-turn cap applies to each row after the records are read, so a re-batched turn makes its own cap decision. The result holds no name either; the label and placeholder take it from the inbound block. Written through keyed upserts (`.claude/rules/inngest.md`). Owned by `transport/store/`.
+
+| Transition | Guard | Writes |
+|-|-|-|
+| none → `decoding` | arrival meets an image original with no record | `INSERT … ON CONFLICT (original_path) DO UPDATE SET decode_attempts = decode_attempts + 1 WHERE state = 'decoding'`, returning the attempt; a `ready` or `rejected` record is read and returned instead |
+| `decoding` → `decoding` | the same claim finding a record a dead process left | as above |
+| `decoding` → `ready` | this attempt's decode returned and its normalized copy is uploaded, or sharp refused it, or the claim's attempt is the third | `UPDATE … WHERE state = 'decoding'`; stale returns the record, absent returns nothing |
+| `decoding` → deleted | the decode or upload threw | `DELETE … WHERE state = 'decoding'` |
+| none or `ready` → `rejected` | 4c: [Rejected attachments](#rejected-attachments-proposed) | upsert `SET state = 'rejected', result = NULL WHERE state <> 'decoding'` |
+
+A stale `ready` UPDATE (another attempt finished first) uses the record's result, so every row naming the original agrees. An absent one (another attempt's DELETE ran) uses its own result unrecorded; the next arrival decodes again.
+
+| Crash point | Leaves | Why safe, or residual |
+|-|-|-|
+| Before the `decoding` insert commits | no record | the retry starts over |
+| During the decode or the normalized copy's upload | `decoding` | the retry decodes again; a second death too; residual: two deaths in that window from unrelated causes show a decodable photo as the decode-crash placeholder |
+| Postgres failing at the `ready` UPDATE or the DELETE | `decoding` | the step throws and its retry claims again, counting an attempt: the same residual |
+| After `ready`, before the row insert | `ready` | the retry reuses the result; the derived key makes the upload idempotent |
+| After the row insert commits, before Inngest records the step | `ready`, one row | residual: the retry inserts a second turn row ([Where it runs](#where-it-runs-confirmed) → Keys) |
+| The step fails after its retries | `ready` records | the next turn re-batches the inbound and reuses them |
+| The step outlives its lease (many images) | `ready` for every image it finished | records commit per image, so the retry resumes where it stopped: a typical photo takes about half a second, a batch of 20 about ten, and only an adversarial batch (100 images at the 10 s timeout) needs several attempts |
+| A run in flight across the deploy | none | a memoized `create-user-message` wrote the JSON string, which 4a renders |
+| Two steps on one original at once | one record | the conversation's concurrency key runs one step at a time; past it (a lease lost mid-step), the later claim counts an attempt and decodes too, and whichever UPDATE lands second goes stale and adopts the first's result; residual: the second's DELETE after a throw can remove the first's live marker, which only costs a decode |
 
 ### Rejected attachments `[proposed]`
 
@@ -55,69 +89,70 @@ A turn that fails permanently with a 400 or a 413 while its rows carry attachmen
 - **No epoch.** Only the failed turn's rows can hold a rejected original, so re-rendering them edits nothing a head describes ([prompt-caching.md](../prompt-caching.md#one-renderer-confirmed) → One renderer).
 - **Residual.** An attachment in an earlier turn's row that a newly selected route rejects isn't marked, since that row precedes a stored head: the conversation fails on every turn until `/model` returns to a route that reads it, or `/new`.
 
-## Images `[proposed]`
+## Images `[confirmed]`
 
 The Telegram adapter sends only JPEG, PNG, GIF and WebP as image blocks ([telegram.md](telegram.md)), so these steps also take a document whose media type is any other `image/*`, and HEIC reaches step 1.
 
-1. **Sniff.** A HEIC or HEIF file, by media type or by a `heic`, `heix` or `mif1` `ftyp` brand, gets the HEIC placeholder. `heic-decode` is a later option.
+1. **Sniff.** A HEIC or HEIF file, by media type or by a `heic`, `heix` or `mif1` major `ftyp` brand (AVIF lists `mif1` among its compatible brands, so only the major brand counts), gets the HEIC placeholder. `heic-decode` is a later option.
 2. **Guard.** Inputs over 20 MB are refused unread. `limitInputPixels` is 100 megapixels, checked on the header before decoding: a 446 KB PNG declaring 12,000 × 12,000 was refused in 1 ms (measured). `failOn: "warning"`, `timeout` 10 s, first frame only (`pages: 1`, the default).
-3. **Decode** through the loader allowlist ([Security](#security-proposed)): JPEG, PNG, WebP and GIF.
+3. **Decode** through the loader allowlist ([Security](#security-confirmed)): JPEG, PNG, WebP and GIF.
 4. **Orient** from EXIF (`autoOrient`).
 5. **Resize** to fit 2000 × 2000 (`fit: "inside"`, `withoutEnlargement`). That meets Anthropic's many-image rule on every request, whatever the count, and stays under the high-resolution tier's 2576 px.
 6. **Encode.** PNG when the image has transparency (`hasAlpha` and not `stats().isOpaque`), at compression level 9. Otherwise JPEG, quality 85 with `mozjpeg`: one more lossy pass on an already compressed photo, kept light for legibility. Chroma is 4:4:4 for a PNG or GIF source, where colour fringing blurs screenshot text, and 4:2:0 otherwise, since a lossy source has already lost chroma resolution.
 7. **Metadata.** None is written. EXIF (GPS included), XMP and IPTC are dropped and colour is converted to sRGB, so the model and the providers receive pixels only. The original keeps its metadata in storage.
-8. **Cap** at 3,750,000 bytes, which is 5,000,000 of base64: Bedrock's and Google Cloud's per-image limit, both of which OpenRouter can route Claude to. An image over it is re-encoded at JPEG quality 70 (a PNG is palette-quantized), then its long edge shrinks by a quarter per step until it fits.
+8. **Cap** at 3,750,000 bytes, which is 5,000,000 of base64: Bedrock's and Google Cloud's per-image limit, both of which OpenRouter can route Claude to. An image over it is re-encoded at JPEG quality 70 (a PNG is palette-quantized at `effort: 1`: sharp's default effort takes about 8 s on a 2000-px noise image, near the timeout), then its long edge shrinks by a quarter per step until it fits.
 9. **Label.** A text block tagged `harness: "image_label"`, `Image <n>: <path>` with the file's name when it has one, precedes each image ref and is stored as sent. The path is the normalized copy's, the one `generate_image`'s `referenceImage` takes ([image-generation.md](../image-generation.md)).
 
-A 48-megapixel JPEG normalizes in about half a second on one thread (measured). The worst case the guard admits, a 100-megapixel PNG with alpha and EXIF orientation 6, is unmeasured: 4b measures its time and peak memory before shipping, and lowers the guard if it doesn't fit.
+A 48-megapixel JPEG normalizes in about half a second on one thread. The worst case the guard admits, a 100-megapixel PNG with alpha and EXIF orientation 6, takes 1.0 s and peaks at 217 MB of resident memory when flat; as 418 MB of noise, far past the 20 MB input cap, 2.8 s and 599 MB, 418 MB of it the input (measured, one thread, `MALLOC_ARENA_MAX=2`). The guard stays at 100 megapixels. An Ultra HDR JPEG decodes through the JPEG loader as its SDR base image, so the Ultra HDR loader stays blocked and no gain map is sent.
 
-## Documents `[proposed]`
+## Documents `[confirmed]`
 
 - **PDFs** are stored as sent, as a `document_ref`: no rasterizing and no page count, which would take a second untrusted-input parser. A file without the `%PDF-` header, or with an `/Encrypt` entry, gets a placeholder. A PDF over the route's page limit or window, or one the provider can't parse, is [rejected](#rejected-attachments-proposed) by the provider and marked.
 - **Text-like documents** (`text/*`, JSON, XML, YAML, one predicate both adapters share) are truncated at arrival, with an elision marker, to the lesser of the adapter's per-document cap (100,000 characters on the OpenAI-compatible adapter) and, for the turn's text documents together, a quarter of the route's input budget, counted with its `countTokens`. The text sent is stored as the document's normalized copy beside the original. Anthropic sends it as a text source, and the OpenAI-compatible adapter inlines it.
 - **Other binary documents** (`.docx`, `.xlsx`, archives, `application/octet-stream`) get a placeholder at arrival, not a stub at the wire. No route Cogmo serves reads them. A wire stub would read and base64-encode the bytes on every invocation for each adapter to discard, count them against the attachment budget, and send stub text that a deploy could change under a cached prefix. A placeholder is stored as sent, so the head stays the same on every route and nothing is re-read. The OpenAI-compatible adapter still stubs a PDF, which Anthropic reads. `[confirmed]` Until arrival placeholders ship, and in rows stored before them, such types reach the adapters. Anthropic stubs a document that is neither PDF nor text-like, and a base64 image that isn't JPEG, PNG, GIF or WebP, rather than failing the request: the row replays on every later turn, so a failure would end the conversation.
 
-## Placeholders `[proposed]`
+## Placeholders `[confirmed]`
 
 An arrival placeholder is a text block tagged `harness: "attachment_placeholder"`, stored as sent like a turn context, so rewording one reaches new rows only. The renderer's placeholders are pinned with its contract ([prompt-caching.md](../prompt-caching.md#one-renderer-confirmed) → One renderer). Each names the file, or `photo`, and says what to do:
 
 | Case | Says |
 |-|-|
 | HEIC or HEIF | not supported; send it as a photo |
-| Other image format, decode failure, timeout | couldn't be read; send it as a photo |
+| Other image format, decode failure, timeout, a decode that crashed twice | couldn't be read; send it as a photo |
 | Over 20 MB or 100 megapixels | too large |
+| Original missing from storage | couldn't be stored; send it again |
 | Unreadable PDF (no header, encrypted) | send an unlocked PDF |
 | Other binary document | can't be read; send a PDF or text |
 | URL attachment | not fetched |
 | Past the per-turn cap | not attached; send fewer at a time |
 | Rejected by the provider | the model provider refused it; send it another way |
 
-Each is counted in `cogmo.attachments.placeholders{reason}`.
+Each is counted in `cogmo.attachments.placeholders{reason}`, `reason` one of `heic`, `undecodable`, `decode_crashed`, `too_large`, `missing`, `unreadable_pdf`, `unsupported`, `url`, `turn_cap` and `rejected`; the renderer adds `unreadable`.
 
-## Security `[proposed]`
+## Security `[confirmed]`
 
 libvips and its codecs run native code in the server process over bytes anyone can put in front of the user: a forwarded photo, or a file from a group. The sender is allowlisted, but the content isn't.
 
 - **Loader allowlist.** At module load, `sharp.block({ operation: ["VipsForeignLoad"] })`, then unblock the JPEG, PNG, WebP and GIF buffer loaders. TIFF, AVIF and SVG buffers are refused as an unsupported format (measured). That takes librsvg and its XML parser, libtiff, libheif and libvips' own format, whose loader had CVE-2026-33327, out of reach.
-- **Bounded work.** The pixel and byte caps come before decoding, with `failOn: "warning"`, the timeout, `sharp.cache(false)` (every input is unique), `sharp.concurrency(1)` ([infrastructure.md](../infrastructure.md#image-processing-proposed) → Allocator), and one image at a time.
+- **Bounded work.** The pixel and byte caps come before decoding, with `failOn: "warning"`, the timeout, `sharp.cache(false)` (every input is unique), `sharp.concurrency(1)` ([infrastructure.md](../infrastructure.md#image-processing-confirmed) → Allocator), and one image at a time.
 - **Pixels out.** The output is re-encoded with no input metadata.
 - **Patch channel.** The codecs ship inside `@img/sharp-libvips-*`, not as Debian packages, so the image's `apt-get upgrade` never reaches them. sharp releases, through Dependabot, are the only patch path.
 - **Originals in the web UI.** When the web UI shows originals, it serves allowlisted image types inline with the sniffed type and `nosniff`, and anything else as a download.
 
 **Residual.** A memory-safety bug in an allowed decoder, triggered by a crafted image, runs as the server process, which holds the master key and the database credentials. A crash fails the attempt of every run in flight. `[research]` Decode in a child process with a scrubbed environment, or through sharp's WebAssembly build, which confines a decoder bug to its linear memory at a speed cost.
 
-## Tests `[proposed]`
+## Tests `[confirmed]`
 
 - **Unit**, on fixtures sharp generates in the test:
   - EXIF orientation 6 comes out rotated, without EXIF; 4000 × 3000 becomes 2000 × 1500, and a small image isn't enlarged.
   - Transparency keeps PNG, and a fully opaque alpha channel gives JPEG; an animated GIF gives its first frame; WebP and CMYK come out as sRGB JPEG; chroma follows the source; a noise image over the cap steps down under 3,750,000 bytes.
   - Every placeholder case, HEIC by media type and by brand. TIFF, AVIF and SVG are refused by the allowlist, the regression test for an unblocked loader; a truncated JPEG, zero bytes and a 144-megapixel header are refused before decoding.
-  - A mislabelled media type decodes by content, and an Ultra HDR JPEG decodes, through the JPEG loader or an allowlisted Ultra HDR one.
+  - A mislabelled media type decodes by content, and an Ultra HDR JPEG decodes through the JPEG loader.
   - `create-user-message` uploads inline originals and normalized copies under derived keys and writes refs and labels; cached, it does neither. The cap follows the turn's route, and text documents are truncated to it.
   - Original records: a `decoding` record left behind gives the decode-failure placeholder, a thrown decode leaves no record, and a re-batched original reuses its result without decoding.
   - Rejected attachments: after a 400 on a turn carrying a PDF, the next turn shows the PDF as the rejection placeholder in the failed turn's row and in its own re-batched row, and the head check stays clean under `throw`; a 401 marks nothing.
   - The Telegram adapter emits a named block for an image document, and a size-only block for a file over 20 MB.
-- **Boot.** The boot check covers the built image ([infrastructure.md](../infrastructure.md#image-processing-proposed)).
+- **Boot.** The boot check covers the built image ([infrastructure.md](../infrastructure.md#image-processing-confirmed)).
 - **Integration.** `prompt-caching.integration.test.ts`'s image turn runs through sharp and the test bucket, and the turn after it extends the image turn's request ([prompt-caching.md](../prompt-caching.md#integration-tier-replay-every-pr)).
 - **Live.** One request of 21 normalized 2000-px images returns 200 on Haiku 4.5 and Sonnet 5, which pins the many-image rule for this output. It costs cents.
 

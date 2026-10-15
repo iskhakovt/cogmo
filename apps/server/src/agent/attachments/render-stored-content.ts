@@ -28,7 +28,12 @@ function refName(ref: AttachmentRef): string {
   return ref.name ?? (ref.type === "image_ref" ? "photo" : "document");
 }
 
-function placeholderText(reason: PlaceholderReason, kind: AttachmentRef["type"], name: string) {
+/** A renderer placeholder's text, which arrival also writes for a rejected original. */
+export function placeholderText(
+  reason: PlaceholderReason,
+  kind: AttachmentRef["type"],
+  name: string,
+) {
   const label = `${kind === "image_ref" ? "Image" : "Document"}: ${name}`;
   return match(reason)
     .with("cutoff", () => `[${label}. Sent earlier and no longer attached.]`)

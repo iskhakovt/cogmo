@@ -29,6 +29,7 @@ import {
   mockDeliveryHandle,
   mockDeliveryRouter,
   mockFilesService,
+  mockImages,
   mockMemoryProvider,
   mockProvider,
   mockResolver,
@@ -52,7 +53,7 @@ import type { ImageToolsLoader } from "./image-tools-loader.js";
 import { runStreamingAgentLoop } from "./loop.js";
 import { memoryTools } from "./memory-tools.js";
 import { DefaultPromptSource } from "./prompt.js";
-import type { StoredMessage } from "./stored-content.js";
+import type { StoredContent, StoredMessage } from "./stored-content.js";
 import { ToolRegistry, type ToolSpec } from "./tools.js";
 
 type InboundReadyData = z.infer<typeof inboundReady.schema>;
@@ -113,6 +114,7 @@ function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
     }),
     userTimezone: "UTC",
     attachmentReader: createAttachmentReader(mockAttachmentStore(), 24_000_000),
+    images: mockImages(),
     ...overrides,
   };
 }
@@ -3497,7 +3499,7 @@ describe("createHandleMessage", () => {
     async function persistedUserContent(
       content: InboundContent,
       overrides: Partial<HandleMessageDeps> = {},
-    ): Promise<unknown> {
+    ): Promise<StoredContent> {
       const deps = mockDeps({
         transportStore: mockTransportStore({
           getUnbatchedInbound: vi.fn().mockResolvedValue([{ id: "inbound-1", content }]),
@@ -3522,18 +3524,70 @@ describe("createHandleMessage", () => {
       expect(content).toBe(`${wrapped}\nis this right?`);
     });
 
-    it("persists a forwarded caption beside an attachment inside its element", async () => {
+    it("persists a forwarded caption beside an attachment's label and ref, inside its element", async () => {
       const content = await persistedUserContent([
         { type: "text", text: "meet at 8", forwarded },
         { type: "image", path: "inbound/a.jpg", mediaType: "image/jpeg" },
       ]);
 
-      expect(content).toBe(
-        JSON.stringify([
-          { type: "text", text: wrapped },
+      expect(content).toEqual([
+        { type: "text", text: wrapped },
+        { type: "text", text: "Image 1: normalized/a.jpg", harness: "image_label" },
+        {
+          type: "image_ref",
+          path: "normalized/a.jpg",
+          mediaType: "image/jpeg",
+          width: 1000,
+          height: 750,
+          bytes: 100_000,
+          original: { path: "inbound/a.jpg", mediaType: "image/jpeg" },
+        },
+      ]);
+    });
+
+    it("caps the turn's attachments to the route the snapshot's model resolves to", async () => {
+      const provider = mockProvider({
+        attachmentLimits: () => ({ requestBytes: 32_000_000, images: 1 }),
+      });
+      const content = await persistedUserContent(
+        [
           { type: "image", path: "inbound/a.jpg", mediaType: "image/jpeg" },
-        ]),
+          { type: "image", path: "inbound/b.jpg", mediaType: "image/jpeg", name: "b.jpg" },
+        ],
+        { resolveProvider: mockResolver(provider) },
       );
+
+      expect(content).toContainEqual(expect.objectContaining({ type: "image_ref" }));
+      expect(content).toContainEqual({
+        type: "text",
+        text: "[Image: b.jpg. Not attached; send fewer files at a time.]",
+        harness: "attachment_placeholder",
+      });
+    });
+
+    it("cuts a text document to the route's per-document cap", async () => {
+      const provider = mockProvider({
+        attachmentLimits: () => ({
+          requestBytes: 20_000_000,
+          images: 100,
+          textDocumentBytes: 1_000,
+        }),
+        countTokens: vi.fn().mockResolvedValue(10),
+      });
+      const content = await persistedUserContent(
+        [{ type: "document", path: "inbound/n.txt", mediaType: "text/plain", name: "n.txt" }],
+        {
+          resolveProvider: mockResolver(provider),
+          attachments: mockAttachmentStore({
+            read: vi.fn().mockResolvedValue(ok(Buffer.from("x".repeat(5_000)))),
+          }),
+        },
+      );
+
+      const ref = expectDefined(typeof content === "string" ? undefined : content[0]);
+      if (ref.type !== "document_ref") throw new Error(`expected a document_ref, got ${ref.type}`);
+      expect(ref.original).toEqual({ path: "inbound/n.txt", mediaType: "text/plain" });
+      expect(ref.bytes).toBeLessThanOrEqual(1_000);
     });
 
     it("persists a forwarded voice note's transcript inside its element", async () => {

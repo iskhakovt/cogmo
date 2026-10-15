@@ -1,12 +1,13 @@
-import { sql } from "drizzle-orm";
+import { inArray, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { DrizzleAgentStore } from "../../agent/store/index.js";
 import type { Database, Transactor } from "../../db/index.js";
 import { expectOk } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
+import type { NormalizedImageResult } from "../attachment-original.js";
 import { renderInboundText } from "../content.js";
 import { DrizzleTransportStore } from "./index.js";
-import { inboundMessages as inboundMessagesTable } from "./schema.js";
+import { attachmentOriginals, inboundMessages as inboundMessagesTable } from "./schema.js";
 
 let db: Database;
 let tx: Transactor;
@@ -1598,6 +1599,145 @@ describe("DrizzleTransportStore", () => {
         }),
       );
       // Reaching this point without throwing is the assertion.
+    });
+  });
+
+  describe("attachment originals", () => {
+    const IMAGE: NormalizedImageResult = {
+      kind: "image",
+      path: "inbound/a.normalized.jpg",
+      mediaType: "image/jpeg",
+      width: 2000,
+      height: 1500,
+      bytes: 412_345,
+    };
+    const CRASHED: NormalizedImageResult = { kind: "placeholder", reason: "decode_crashed" };
+
+    /** The records for `paths`, read past the store. */
+    function find(paths: ReadonlyArray<string>) {
+      return tx((trx) =>
+        trx
+          .select({
+            originalPath: attachmentOriginals.originalPath,
+            state: attachmentOriginals.state,
+            result: attachmentOriginals.result,
+          })
+          .from(attachmentOriginals)
+          .where(inArray(attachmentOriginals.originalPath, [...paths]))
+          .orderBy(attachmentOriginals.originalPath),
+      );
+    }
+
+    function claim(path: string) {
+      return tx((trx) => store.claimAttachmentDecode(trx, path));
+    }
+
+    it("claims a decoding record again with one more attempt", async () => {
+      expect(await claim("inbound/a.jpg")).toEqual({ kind: "claimed", attempt: 1 });
+      expect(await claim("inbound/a.jpg")).toEqual({ kind: "claimed", attempt: 2 });
+      expect(await claim("inbound/a.jpg")).toEqual({ kind: "claimed", attempt: 3 });
+      expect(await find(["inbound/a.jpg"])).toEqual([
+        { originalPath: "inbound/a.jpg", state: "decoding", result: null },
+      ]);
+    });
+
+    it("finishes a decoding record as ready, and a claim then returns it as existing", async () => {
+      await claim("inbound/a.jpg");
+
+      expect(await tx((trx) => store.finishAttachmentDecode(trx, "inbound/a.jpg", IMAGE))).toEqual({
+        kind: "finished",
+      });
+      expect(await claim("inbound/a.jpg")).toEqual({
+        kind: "existing",
+        original: { originalPath: "inbound/a.jpg", state: "ready", result: IMAGE },
+      });
+    });
+
+    it("returns a rejected record as existing", async () => {
+      await db.execute(
+        sql`INSERT INTO attachment_originals (original_path, state, decode_attempts)
+          VALUES ('inbound/a.pdf', 'rejected', 0)`,
+      );
+
+      expect(await claim("inbound/a.pdf")).toEqual({
+        kind: "existing",
+        original: { originalPath: "inbound/a.pdf", state: "rejected", result: null },
+      });
+    });
+
+    it("finishes nothing when no record exists", async () => {
+      expect(await tx((trx) => store.finishAttachmentDecode(trx, "inbound/a.jpg", IMAGE))).toEqual({
+        kind: "absent",
+      });
+      expect(await find(["inbound/a.jpg"])).toEqual([]);
+    });
+
+    it("leaves a ready record as it stands and returns it as stale", async () => {
+      await tx((trx) => store.claimAttachmentDecode(trx, "inbound/a.jpg"));
+      await tx((trx) => store.finishAttachmentDecode(trx, "inbound/a.jpg", CRASHED));
+
+      expect(await tx((trx) => store.finishAttachmentDecode(trx, "inbound/a.jpg", IMAGE))).toEqual({
+        kind: "stale",
+        original: { originalPath: "inbound/a.jpg", state: "ready", result: CRASHED },
+      });
+      expect(await find(["inbound/a.jpg"])).toEqual([
+        { originalPath: "inbound/a.jpg", state: "ready", result: CRASHED },
+      ]);
+    });
+
+    it("abandons a decoding record and leaves a ready one alone", async () => {
+      await tx((trx) => store.claimAttachmentDecode(trx, "inbound/a.jpg"));
+      await tx((trx) => store.claimAttachmentDecode(trx, "inbound/b.jpg"));
+      await tx((trx) => store.finishAttachmentDecode(trx, "inbound/b.jpg", IMAGE));
+
+      await tx((trx) => store.abandonAttachmentDecode(trx, "inbound/a.jpg"));
+      await tx((trx) => store.abandonAttachmentDecode(trx, "inbound/b.jpg"));
+
+      expect(await find(["inbound/a.jpg", "inbound/b.jpg"])).toEqual([
+        { originalPath: "inbound/b.jpg", state: "ready", result: IMAGE },
+      ]);
+      expect(await claim("inbound/a.jpg")).toEqual({ kind: "claimed", attempt: 1 });
+    });
+
+    it.each([
+      ["a ready record with no result", "ready", null, "chk_attachment_originals_ready_result"],
+      [
+        "a decoding record with a result",
+        "decoding",
+        CRASHED,
+        "chk_attachment_originals_decoding_result",
+      ],
+      [
+        "a rejected record with a result",
+        "rejected",
+        CRASHED,
+        "chk_attachment_originals_rejected_result",
+      ],
+    ] as const)("rejects %s", async (_, state, result, constraint) => {
+      const json = result === null ? null : JSON.stringify(result);
+      await expect(
+        db.execute(
+          sql`INSERT INTO attachment_originals (original_path, state, result, decode_attempts)
+            VALUES ('inbound/a.jpg', ${state}, ${json}::jsonb, 1)`,
+        ),
+      ).rejects.toMatchObject({ cause: { message: expect.stringContaining(constraint) } });
+    });
+
+    it("validates the result against its schema on write and on read", async () => {
+      await tx((trx) => store.claimAttachmentDecode(trx, "inbound/a.jpg"));
+      const unknownReason = {
+        kind: "placeholder",
+        reason: "corrupt",
+      } as unknown as NormalizedImageResult;
+      await expect(
+        tx((trx) => store.finishAttachmentDecode(trx, "inbound/a.jpg", unknownReason)),
+      ).rejects.toThrow();
+
+      await db.execute(
+        sql`INSERT INTO attachment_originals (original_path, state, result, decode_attempts)
+          VALUES ('inbound/b.jpg', 'ready', '{"kind":"image","path":"inbound/b.jpg"}'::jsonb, 1)`,
+      );
+      await expect(find(["inbound/b.jpg"])).rejects.toThrow();
     });
   });
 });

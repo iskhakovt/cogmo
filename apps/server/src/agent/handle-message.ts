@@ -13,6 +13,7 @@ import type { DeliveryRouter } from "../transport/delivery-router.js";
 import type { TransportStore } from "../transport/store/index.js";
 import type { VoiceProviderResolver } from "../voice/resolver.js";
 import type { AttachmentReader } from "./attachments/attachment-reader.js";
+import type { NormalizeArrivalDeps } from "./attachments/normalize-arrival.js";
 import type { CodingService } from "./coding/service.js";
 import type { DebounceConfig } from "./debounce.js";
 import { admitTurn } from "./handle-message/admit-turn.js";
@@ -36,6 +37,7 @@ import type { PipelineRunStore, PipelineStore } from "./pipeline/store/index.js"
 import type { PromptSource } from "./prompt.js";
 import type { Service } from "./service.js";
 import type { AgentStore } from "./store/index.js";
+import type { StoredContent } from "./stored-content.js";
 import type { ToolRegistry } from "./tools.js";
 import { createTurnStepRunner } from "./turn-step-runner.js";
 
@@ -68,6 +70,8 @@ export interface HandleMessageDeps {
   attachments: AttachmentStore;
   /** Renders stored attachment refs, through the process's memo. */
   attachmentReader: AttachmentReader;
+  /** Screens and normalizes inbound images at arrival. */
+  images: NormalizeArrivalDeps["images"];
   debounceConfig: DebounceConfig;
   deliveryRouter: DeliveryRouter;
   runStreamingAgentLoop: (params: StreamingAgentLoopParams) => Promise<AgentLoopResult>;
@@ -185,7 +189,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // edits between attempts surface on the next non-cached step.
       const voiceBundle = await deps.voiceResolver?.();
 
-      const { substitutedMessages, userContentText } = await recordUserMessage(step, deps, {
+      const { substitutedMessages } = await recordUserMessage(step, deps, {
         conversationId,
         inboundMessages,
         voiceBundle,
@@ -264,7 +268,9 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         messageIds: transcript.history.messageIds,
         storedMessages: transcript.history.messages,
         attachmentCutoff: view.cutoff.cutoff,
-        newContentChars: userContentText.length + context.provisionalTurnContext.length,
+        newContentChars:
+          storedChars(transcript.history.messages[view.turnIndex]?.content ?? "") +
+          context.provisionalTurnContext.length,
         delivery,
         turnLogger,
       });
@@ -360,4 +366,9 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         .exhaustive();
     },
   );
+}
+
+/** A stored row's size in characters, as the compaction estimate reads new content. */
+function storedChars(content: StoredContent): number {
+  return typeof content === "string" ? content.length : JSON.stringify(content).length;
 }

@@ -5,6 +5,7 @@
  */
 
 import { createAttachmentReader } from "../agent/attachments/attachment-reader.js";
+import { normalizeImage, screenImage } from "../agent/attachments/normalize-image.js";
 import { BUILT_IN_SERVICE_GUIDANCE, builtInToolSpecs } from "../agent/built-ins.js";
 import type { CodingService } from "../agent/coding/service.js";
 import { compactConversation } from "../agent/conversation/compact-conversation.js";
@@ -152,6 +153,7 @@ export function createAgentFunctions(
   const handleMessage = createHandleMessage({
     ...turnDeps,
     attachments: core.attachmentStore,
+    images: { screen: screenImage, normalize: normalizeImage },
     debounceConfig: timing.debounceConfig,
     voiceResolver,
     pipelineStore: core.pipelineStore,

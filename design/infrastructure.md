@@ -136,15 +136,15 @@ The web server goes first so no request reaches a stopped dependency. It gets it
 
 **Time budget.** After Inngest's drain, the teardown takes at most 33 s: 8 s for the web server and 5 s each for the adapters, MCP, the skills pool, the sandbox and the instance row; stopping the coding streams' sweep is synchronous. Docker's default stop grace is 10 s, after which it sends `SIGKILL`, so cogmo's container sets a longer one: `--stop-timeout 60` (`stop_grace_period: 60s` in compose), which leaves about 27 s for runs in flight ([DEPLOYMENT.md → Stopping](../DEPLOYMENT.md#stopping)).
 
-## Image processing `[proposed]`
+## Image processing `[confirmed]`
 
 `sharp` 0.35.5 normalizes inbound images ([transport/attachments.md](transport/attachments.md)). It is a runtime dependency with native code: libvips 8.18.7 and its codecs ship as prebuilt binaries in `@img/sharp-linux-{x64,arm64}` and `@img/sharp-libvips-linux-{x64,arm64}`. They suit `node:24-trixie-slim` on both platforms the runtime image builds for: glibc 2.28 or later, and SSE4.2 on x64. No Debian package is added. Loaded, it costs about 20 MB on disk and 24 MB of resident memory (measured).
 
-- **Optional dependencies.** sharp's platform packages are optional dependencies, which the runtime stage's `pnpm deploy --prod --no-optional` skips: sharp then fails to load with `ERR_DLOPEN_FAILED: libvips-cpp.so.8.18.7` (measured, pnpm 11.21). That deploy keeps optional dependencies and excludes, in that stage only, the optional peers `--no-optional` drops (TypeScript, PGlite, React). The implementation PR lists the built image's `node_modules` to confirm sharp's platform packages are present and those peers absent.
-- **Boot check.** `bootstrapCore` loads sharp, applies the loader allowlist and round-trips a 1 × 1 JPEG, so an image without the binary fails its first boot, not its first photo.
-- **Allocator.** The runtime image sets `MALLOC_ARENA_MAX=2`, which sharp recommends on glibc without jemalloc to limit fragmentation. With it set, sharp's default is a thread per core, so the attachment module calls `sharp.concurrency(1)`.
+- **Optional dependencies.** sharp's platform packages are optional dependencies, which `pnpm deploy --prod --no-optional` skips: sharp then fails to load with `ERR_DLOPEN_FAILED: libvips-cpp.so.8.18.7` (measured). The runtime stage deploys with `--prod` alone. Besides sharp's packages (18 MB), that adds React (an Inngest optional peer, 260 KB), a Rollup binary neverthrow lists (2 MB) and ssh2's unbuilt native helpers (1.5 MB); TypeScript and PGlite stay out (measured, pnpm 12.10). Dropping those would take workspace overrides, since `deploy` ignores a stage-only setting.
+- **Boot check.** `bootstrapCore` loads sharp, applies the loader allowlist and round-trips a 1 × 1 JPEG (`checkImageRuntime`), so an image without the binary fails its first boot, not its first photo. sharp loads lazily, so a missing binary fails that check with an explanation rather than the process with `ERR_DLOPEN_FAILED` at import.
+- **Allocator.** The runtime image sets `MALLOC_ARENA_MAX=2`, which sharp recommends on glibc without jemalloc to limit fragmentation. With it set, sharp's default is a thread per core, so `image-runtime.ts` calls `sharp.concurrency(1)`.
 
-How the codecs are patched and confined: [transport/attachments.md](transport/attachments.md#security-proposed) → Security.
+How the codecs are patched and confined: [transport/attachments.md](transport/attachments.md#security-confirmed) → Security.
 
 ## Deployment `[proposed]`
 

@@ -1,7 +1,7 @@
 /**
  * Client-side encryption wrapper around `AttachmentStore`.
  *
- * Wraps `upload` with AES-256-GCM so newly-stored attachments are
+ * Wraps `upload` and `put` with AES-256-GCM so newly-stored attachments are
  * ciphertext. The byte-level envelope format and primitives live in
  * `src/secrets/blob-envelope.ts` and are shared with the encrypted
  * variant of `Service.files` — both use the same wire format and HKDF
@@ -14,15 +14,16 @@
  * stays readable, new uploads are ciphertext, churn converges the
  * bucket over time. No flush, no sweep script.
  *
- * On upload the wrapper pins the inner store's media type to
+ * On a write the wrapper pins the inner store's media type to
  * `application/octet-stream` regardless of the caller's value. That
  * neutralizes two metadata leaks the storage provider would otherwise
  * see — the `Content-Type` header on the S3 object (would have been
  * `image/jpeg` etc., advertising the original file type even though
  * the body is opaque) and the file extension in the path (the
  * `mediaTypeToExt` helper resolves `application/octet-stream` to
- * `.bin`). Matches `rclone crypt`'s convention of `.bin` extensions on
- * the underlying remote when name-encryption is off.
+ * `.bin` on `upload`). Matches `rclone crypt`'s convention of `.bin`
+ * extensions on the underlying remote when name-encryption is off. A `put`
+ * key is the caller's, written as given.
  *
  * Consumers that need the original media type get it from the
  * persisted message metadata (`messages.content`,
@@ -55,6 +56,10 @@ export function wrapAttachmentStoreWithEncryption(
     async upload(data: Buffer, _mediaType: string, prefix: string): Promise<string> {
       const encrypted = encryptBuffer(data, key);
       return inner.upload(encrypted, "application/octet-stream", prefix);
+    },
+
+    async put(path: string, data: Buffer, _mediaType: string): Promise<void> {
+      await inner.put(path, encryptBuffer(data, key), "application/octet-stream");
     },
 
     async download(path: string): Promise<Buffer> {

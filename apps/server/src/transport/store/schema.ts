@@ -16,6 +16,7 @@ import {
 import { z } from "zod";
 import { conversations, profiles, users } from "../../agent/store/schema.js";
 import { jsonbZod, pk, ts } from "../../db/helpers.js";
+import { NormalizedImageResultSchema } from "../attachment-original.js";
 import { InboundContentSchema } from "../content.js";
 
 /**
@@ -44,6 +45,18 @@ export const inboundMessageSource = pgEnum("inbound_message_source", [
   "pipeline",
 ]);
 export type InboundMessageSource = (typeof inboundMessageSource.enumValues)[number];
+
+/**
+ * `attachment_originals.state` — `decoding` is committed before an image's
+ * decode, `ready` carries its result, `rejected` marks an original a provider
+ * refused. See design/transport/attachments.md → Original records.
+ */
+export const attachmentOriginalState = pgEnum("attachment_original_state", [
+  "decoding",
+  "ready",
+  "rejected",
+]);
+export type AttachmentOriginalState = (typeof attachmentOriginalState.enumValues)[number];
 
 /**
  * Predicate of `uq_channels_fixed_type`. An `ON CONFLICT` inferring that
@@ -259,5 +272,40 @@ export const userIdentities = pgTable(
   (t) => [
     unique("uq_identities_channel_handle").on(t.channelId, t.platformHandle).nullsNotDistinct(),
     check("chk_wildcard_handle", sql`is_wildcard = (platform_handle IS NULL)`),
+  ],
+);
+
+/**
+ * One record per attachment original that arrival decoded or a provider
+ * rejected, keyed by the original's AttachmentStore path. Arrival and
+ * rendering both read it, so a re-batched original reuses its result. Written
+ * through keyed upserts; see design/transport/attachments.md → Original records.
+ */
+export const attachmentOriginals = pgTable(
+  "attachment_originals",
+  {
+    id: pk(),
+    originalPath: text("original_path").notNull().unique("uq_attachment_originals_path"),
+    state: attachmentOriginalState("state").notNull(),
+    // NULL while decoding and once rejected.
+    result: jsonbZod("result", NormalizedImageResultSchema),
+    // Claims of a `decoding` record: 1 on insert, +1 each time an attempt
+    // meets the record a crashed attempt left.
+    decodeAttempts: integer("decode_attempts").notNull(),
+    createdAt: ts(),
+  },
+  (t) => [
+    check(
+      "chk_attachment_originals_decoding_result",
+      sql`${t.state} <> 'decoding' OR ${t.result} IS NULL`,
+    ),
+    check(
+      "chk_attachment_originals_ready_result",
+      sql`${t.state} <> 'ready' OR ${t.result} IS NOT NULL`,
+    ),
+    check(
+      "chk_attachment_originals_rejected_result",
+      sql`${t.state} <> 'rejected' OR ${t.result} IS NULL`,
+    ),
   ],
 );

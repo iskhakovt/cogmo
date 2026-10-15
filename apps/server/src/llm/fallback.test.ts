@@ -149,6 +149,24 @@ describe("FallbackLlmProvider constructor", () => {
     });
   });
 
+  it("caps text documents at the smallest cap a candidate declares", () => {
+    const limits = (textDocumentBytes?: number) =>
+      mockProvider({
+        attachmentLimits: () => ({
+          requestBytes: 20_000_000,
+          images: 100,
+          ...(textDocumentBytes !== undefined && { textDocumentBytes }),
+        }),
+      });
+    expect(
+      new FallbackLlmProvider([limits(), limits(100_000), limits(50_000)]).attachmentLimits(1)
+        .textDocumentBytes,
+    ).toBe(50_000);
+    expect(
+      new FallbackLlmProvider([limits(), limits()]).attachmentLimits(1).textDocumentBytes,
+    ).toBeUndefined();
+  });
+
   it("composes names when given multiple providers", () => {
     const p1 = mockProvider({ name: "anthropic" });
     const p2 = mockProvider({ name: "openrouter" });

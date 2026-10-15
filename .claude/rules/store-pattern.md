@@ -9,7 +9,7 @@ Each domain module owns its DB access in a `store/` subdirectory:
 | Store | Tables |
 |-|-|
 | `agent/store/` | conversations, messages, steering_rules, profiles, core_memory_blocks |
-| `transport/store/` | channels, channel_sessions, inbound_messages, user_identities |
+| `transport/store/` | channels, channel_sessions, inbound_messages, user_identities, attachment_originals |
 
 **Interface boundary, not table boundary.** A store implementation can import schemas from any module — JOINs and cross-table transactions are fine. Consumers depend on the store interface and mock it in tests. The schema defines ownership (who creates/migrates the table); the interface defines access (who can read/write what).
 
