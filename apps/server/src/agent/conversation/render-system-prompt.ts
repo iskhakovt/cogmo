@@ -1,5 +1,6 @@
 import type { Transaction, Transactor } from "../../db/index.js";
 import type { ToolDefinition } from "../../llm/types.js";
+import { RENDERER_PLACEHOLDERS } from "../attachments/render-stored-content.js";
 import type { CoreMemoryScope, CoreMemoryView } from "../core-memory/scope.js";
 import type { PromptSource } from "../prompt.js";
 import type {
@@ -55,6 +56,7 @@ export async function renderSystemPrompt(
       toolTable: args.toolTable,
       scope: args.coreMemoryScope,
       identityOverride: hasIdentityOverride(coreMemory),
+      rendererPlaceholders: RENDERER_PLACEHOLDERS,
     }),
     coreMemory,
   };

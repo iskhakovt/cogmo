@@ -12,6 +12,7 @@ import type { AttachmentStore } from "../transport/attachment-store.js";
 import type { DeliveryRouter } from "../transport/delivery-router.js";
 import type { TransportStore } from "../transport/store/index.js";
 import type { VoiceProviderResolver } from "../voice/resolver.js";
+import type { AttachmentReader } from "./attachments/attachment-reader.js";
 import type { CodingService } from "./coding/service.js";
 import type { DebounceConfig } from "./debounce.js";
 import { admitTurn } from "./handle-message/admit-turn.js";
@@ -25,8 +26,8 @@ import { batchCursors, routingKindOf } from "./handle-message/inbound-batch.js";
 import { loadTurnTranscript } from "./handle-message/load-turn-transcript.js";
 import { persistTurn } from "./handle-message/persist-turn.js";
 import { recordUserMessage } from "./handle-message/record-user-message.js";
+import { renderTurnView } from "./handle-message/render-turn-view.js";
 import { reportTurnFailure } from "./handle-message/report-turn-failure.js";
-import { resolveInboundAttachments } from "./handle-message/resolve-attachments.js";
 import { resolveTurnModel } from "./handle-message/resolve-turn-model.js";
 import { runTurnLoop } from "./handle-message/run-turn-loop.js";
 import type { ImageToolsLoader } from "./image-tools-loader.js";
@@ -65,6 +66,8 @@ export interface HandleMessageDeps {
   promptSource: PromptSource;
   fileService: Service["files"];
   attachments: AttachmentStore;
+  /** Renders stored attachment refs, through the process's memo. */
+  attachmentReader: AttachmentReader;
   debounceConfig: DebounceConfig;
   deliveryRouter: DeliveryRouter;
   runStreamingAgentLoop: (params: StreamingAgentLoopParams) => Promise<AgentLoopResult>;
@@ -214,7 +217,6 @@ export function createHandleMessage(deps: HandleMessageDeps) {
 
       // ──── Streaming section: bare-body glue + in-loop durable steps ────
 
-      const resolvedBlocks = await resolveInboundAttachments(deps.attachments, substitutedMessages);
       const service = await buildChatTurnService(deps, {
         conversationId,
         userId,
@@ -229,20 +231,28 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // `createTurnStepRunner`.
       const stepRun = createTurnStepRunner((id, fn) => step.run(id, fn));
 
+      // Ahead of the view, whose attachment cutoff reads the route's frozen limits.
+      const turnModel = await resolveTurnModel(stepRun, deps.resolveProvider, snapshot.model);
+
+      const view = await renderTurnView(deps, {
+        transcript,
+        turnModel,
+        snapshot: loadedSystemPrompt.snapshot,
+        substitutedMessages,
+      });
+
       const context = await assembleTurnContext(stepRun, service, {
         userId,
         autoRecallMode: profile?.autoRecall ?? "heuristic",
         substitutedMessages,
         transcript,
-        resolvedBlocks,
+        view,
         loadedSystemPrompt,
         voiceMode: frozen.voiceMode,
         coreMemoryScope,
         timezone: deps.userTimezone,
         turnLogger,
       });
-
-      const turnModel = await resolveTurnModel(stepRun, deps.resolveProvider, snapshot.model);
 
       const compacted = await compactTurn(stepRun, deps, {
         conversationId,
@@ -252,6 +262,8 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         messages: context.messages,
         toolDefs: frozen.toolDefs,
         messageIds: transcript.history.messageIds,
+        storedMessages: transcript.history.messages,
+        attachmentCutoff: view.cutoff.cutoff,
         newContentChars: userContentText.length + context.provisionalTurnContext.length,
         delivery,
         turnLogger,
@@ -261,6 +273,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         messages: compacted.messages,
         provisionalTurnContext: context.provisionalTurnContext,
         transcript,
+        view,
         continuing: context.continuing,
         storedCutoff: compacted.storedCutoff,
         loadedSystemPrompt,

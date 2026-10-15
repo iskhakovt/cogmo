@@ -3,7 +3,14 @@ import { mock } from "vitest-mock-extended";
 import type { LlmProvider } from "../../llm/provider.js";
 import type { Message } from "../../llm/types.js";
 import { expectDefined } from "../../test/assertions.js";
-import { fakeRunInTx, mockAgentStore, mockProvider, mockResolver } from "../../test/factories.js";
+import {
+  fakeRunInTx,
+  mockAgentStore,
+  mockAttachmentStore,
+  mockProvider,
+  mockResolver,
+} from "../../test/factories.js";
+import { createAttachmentReader } from "../attachments/attachment-reader.js";
 import type { PromptSource } from "../prompt.js";
 import type { AgentStore, CompactionSummary, Profile } from "../store/index.js";
 import { type CompactConversationDeps, compactConversation } from "./compact-conversation.js";
@@ -56,6 +63,7 @@ function deps(
     agentStore: overrides.agentStore ?? mockAgentStore(),
     resolveProvider: mockResolver(overrides.provider ?? mockProvider()),
     promptSource,
+    attachmentReader: createAttachmentReader(mockAttachmentStore(), 24_000_000),
   };
 }
 

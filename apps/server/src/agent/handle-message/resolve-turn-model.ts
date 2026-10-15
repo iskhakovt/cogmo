@@ -1,5 +1,11 @@
+import {
+  type AttachmentBudget,
+  type AttachmentLimits,
+  attachmentBudget,
+} from "../../llm/attachment-limits.js";
 import { computeBudget, type ResolvedLimits, resolveLimits } from "../../llm/models.js";
 import type { LlmProvider } from "../../llm/provider.js";
+import { MAX_VIEW_BYTES, viewBytesFor } from "../../llm/request-size.js";
 import {
   type LlmProviderResolver,
   ProviderConfigError,
@@ -32,11 +38,57 @@ export async function resolveOrFail(
 export interface TurnModel {
   model: string;
   provider: LlmProvider;
-  limits: ResolvedLimits;
+  limits: FrozenLimits;
   /** The input budget compaction sizes the view against. */
   budget: number;
   /** Strategy 1's edit intent, on every request of the turn. */
   clearToolResults: ToolResultClearing;
+  /**
+   * What the view's attachments may weigh; null when the run's
+   * `freeze-model-limits` memo predates attachment limits, which fixes no
+   * cutoff.
+   */
+  attachmentBudget: AttachmentBudget | null;
+  /** The size trigger's cap: the route's request cap less the wire overhead. */
+  maxViewBytes: number;
+}
+
+/** The model's limits and its route's attachment limits, as `freeze-model-limits` memoizes them. */
+export interface FrozenLimits extends ResolvedLimits {
+  /** Absent in a memo written before attachment limits. */
+  attachments?: AttachmentLimits;
+}
+
+/**
+ * Resolve `model`'s limits and its route's attachment limits: the body of
+ * `freeze-model-limits`, in chat and stage turns alike.
+ */
+export function freezeLimits(
+  model: string,
+  provider: Pick<LlmProvider, "attachmentLimits">,
+  rowLimits: Parameters<typeof resolveLimits>[1],
+): FrozenLimits {
+  const limits = resolveLimits(model, rowLimits);
+  return { ...limits, attachments: provider.attachmentLimits(limits.contextWindow) };
+}
+
+/** What a turn derives from its frozen limits. */
+export function limitsPolicy(limits: FrozenLimits): {
+  budget: number;
+  clearToolResults: ToolResultClearing;
+  attachmentBudget: AttachmentBudget | null;
+  maxViewBytes: number;
+} {
+  const budget = computeBudget(limits);
+  return {
+    budget,
+    // Derived from the frozen limits, so every invocation sends the same intent.
+    clearToolResults: toolResultClearing(budget),
+    attachmentBudget: limits.attachments ? attachmentBudget(limits.attachments) : null,
+    maxViewBytes: limits.attachments
+      ? viewBytesFor(limits.attachments.requestBytes)
+      : MAX_VIEW_BYTES,
+  };
 }
 
 /**
@@ -66,9 +118,8 @@ export async function resolveTurnModel(
   // default. Durable: a catalog refresh landing between invocations
   // swaps the in-process catalog, and `budget` decides which
   // compaction steps the run plans.
-  const limits = await stepRun("freeze-model-limits", async () => resolveLimits(model, rowLimits));
-  const budget = computeBudget(limits);
-  // Derived from the frozen limits, so every invocation sends the same intent.
-  const clearToolResults = toolResultClearing(budget);
-  return { model, provider, limits, budget, clearToolResults };
+  const limits = await stepRun("freeze-model-limits", async () =>
+    freezeLimits(model, provider, rowLimits),
+  );
+  return { model, provider, limits, ...limitsPolicy(limits) };
 }

@@ -1,0 +1,2 @@
+ALTER TABLE "system_prompt_snapshots" ADD COLUMN "attachment_cutoff" uuid;--> statement-breakpoint
+ALTER TABLE "system_prompt_snapshots" ADD CONSTRAINT "system_prompt_snapshots_attachment_cutoff_messages_id_fk" FOREIGN KEY ("attachment_cutoff") REFERENCES "public"."messages"("id") ON DELETE no action ON UPDATE no action;

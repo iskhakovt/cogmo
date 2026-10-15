@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { type MockProxy, mock } from "vitest-mock-extended";
 import type { Transactor } from "../../db/index.js";
+import { anthropicAttachmentLimits } from "../../llm/attachment-limits.js";
 import type { LlmProvider } from "../../llm/provider.js";
 import { expectDefined } from "../../test/assertions.js";
 import type { TransportStore } from "../../transport/store/index.js";
@@ -22,7 +23,13 @@ function providerReturning(definitions: ReadonlyArray<object>): LlmProvider {
       usage: { inputTokens: 10, outputTokens: 5 },
     });
   }
-  return { name: "test", chat, chatStream: vi.fn(), countTokens: vi.fn() };
+  return {
+    name: "test",
+    chat,
+    chatStream: vi.fn(),
+    countTokens: vi.fn(),
+    attachmentLimits: anthropicAttachmentLimits,
+  };
 }
 
 function row(overrides: Partial<PipelineDefinitionRow> = {}): PipelineDefinitionRow {

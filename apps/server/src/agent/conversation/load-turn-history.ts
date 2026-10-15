@@ -1,8 +1,8 @@
 import * as R from "remeda";
 import type { Transaction, Transactor } from "../../db/index.js";
-import type { Message } from "../../llm/types.js";
 import { formatSummaryMessage } from "../context.js";
 import type { TranscriptStore } from "../store/index.js";
+import type { StoredMessage } from "../stored-content.js";
 import { type TurnContext, withTurnContext } from "../turn-context.js";
 
 export interface LoadTurnHistoryDeps {
@@ -11,7 +11,8 @@ export interface LoadTurnHistoryDeps {
 }
 
 export interface TurnHistory {
-  messages: Message[];
+  /** Stored content: attachments are refs, which the renderer resolves. */
+  messages: StoredMessage[];
   messageIds: (string | null)[];
   turnContexts: (TurnContext | null)[];
   turn: { id: string; createdAt: string } | null;
@@ -70,7 +71,7 @@ export async function loadTurnHistory(
       ).map((c) => [c.messageId, c] as const),
     );
 
-    const messages = rows.map(({ id, role, content }): Message => {
+    const messages = rows.map(({ id, role, content }): StoredMessage => {
       const context = stored.get(id);
       return context ? withTurnContext({ role, content }, context.rendered) : { role, content };
     });

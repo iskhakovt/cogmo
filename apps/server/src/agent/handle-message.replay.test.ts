@@ -29,6 +29,7 @@ import { mock } from "vitest-mock-extended";
 import { z } from "zod";
 import { inngest } from "../inngest/client.js";
 import { AnthropicProvider } from "../llm/anthropic.js";
+import { openAICompatibleAttachmentLimits } from "../llm/attachment-limits.js";
 import { MAX_REQUEST_BYTES } from "../llm/request-size.js";
 import type { ChatParams, ChatStreamFrame, ContentFrame, ToolDefinition } from "../llm/types.js";
 import { agentIterations, memoryRecallFailures } from "../metrics.js";
@@ -39,6 +40,7 @@ import {
   fakeRunInTx,
   MOCK_MESSAGE_CREATED_AT,
   mockAgentStore,
+  mockAttachmentStore,
   mockDeliveryHandle,
   mockDeliveryRouter,
   mockFilesService,
@@ -55,6 +57,7 @@ import {
 } from "../test/factories.js";
 import { createWireRecorder } from "../test/wire-recorder.js";
 import { canonicalKeyOrder } from "../util/canonical-key-order.js";
+import { createAttachmentReader } from "./attachments/attachment-reader.js";
 import type { HandleMessageDeps } from "./handle-message.js";
 import { createHandleMessage } from "./handle-message.js";
 import { runStreamingAgentLoop } from "./loop.js";
@@ -103,10 +106,10 @@ function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
       configuration: vi.fn().mockResolvedValue("configuration"),
     },
     fileService: mockFilesService(),
-    attachments: {
+    attachments: mockAttachmentStore({
       upload: vi.fn().mockResolvedValue("inbound/test.jpg"),
       download: vi.fn().mockResolvedValue(Buffer.from("fake-image")),
-    },
+    }),
     debounceConfig: { idleTimeoutMs: 0, maxWaitMs: 0, resumePolicy: "debounce" as const },
     deliveryRouter: mockDeliveryRouter({
       prepare: vi.fn().mockResolvedValue(mockDeliveryHandle()),
@@ -123,6 +126,7 @@ function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
       streamed: { text: "", toolUseIds: [] },
     }),
     userTimezone: "UTC",
+    attachmentReader: createAttachmentReader(mockAttachmentStore(), 24_000_000),
     ...overrides,
   };
 }
@@ -348,7 +352,10 @@ describe("handle-message — crash recovery / step replay", () => {
       usage: { inputTokens: 10, outputTokens: 5 },
     });
     const deps = mockDeps({
-      resolveProvider: mockResolver(mockProvider({ countTokens, chat })),
+      // A 20 MB route, whose request cap `huge` is sized against.
+      resolveProvider: mockResolver(
+        mockProvider({ countTokens, chat, attachmentLimits: openAICompatibleAttachmentLimits }),
+      ),
       agentStore: mockAgentStore({
         getLastTokens: vi.fn().mockResolvedValue({ inputTokens: 1_000, outputTokens: 100 }),
         listMessages: vi.fn().mockResolvedValue([
@@ -1216,8 +1223,8 @@ describe("handle-message — replay equality", () => {
     "freeze-core-memory-scope",
     "freeze-turn-inputs",
     "load-system-prompt",
-    "auto-recall",
     "freeze-model-limits",
+    "auto-recall",
     "load-last-tokens",
     "count-tokens-1",
     "open-system-prompt-epoch",
@@ -1234,6 +1241,7 @@ describe("handle-message — replay equality", () => {
   async function replayedIter2(
     epoch: { configDigest: string } | null,
     stepIds: ReadonlyArray<string>,
+    asMemoized: (id: string, result: unknown) => unknown = (_id, result) => result,
   ): Promise<string> {
     const fresh = replayDeps(epoch);
     await new InngestTestEngine({
@@ -1252,7 +1260,7 @@ describe("handle-message — replay equality", () => {
         function: createHandleMessage(source.deps),
         events: [event],
       }).executeStep(id);
-      steps.push({ id, handler: () => canonicalKeyOrder(result) });
+      steps.push({ id, handler: () => canonicalKeyOrder(asMemoized(id, result)) });
     }
 
     const replayed = replayDeps(epoch);
@@ -1288,6 +1296,14 @@ describe("handle-message — replay equality", () => {
     expect(sent.match(/- old fact/g)).toHaveLength(1);
     expect(sent).toContain('"input":{"alpha":"x","zeta":1}');
     expect(sent).not.toContain("earlier-signature");
+  });
+
+  it("replays memos from before attachment limits and cutoffs: no cutoff, the same bytes", async () => {
+    await replayedIter2(null, STEPS_BEFORE_ITER2, (id, result) => {
+      if (id !== "freeze-model-limits") return result;
+      const { attachments: _, ...limits } = z.record(z.string(), z.unknown()).parse(result);
+      return limits;
+    });
   });
 
   it("sends llm-iter2 the same bytes on a continuing epoch, announcing a core-memory change", async () => {

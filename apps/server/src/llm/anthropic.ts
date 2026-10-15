@@ -9,6 +9,11 @@ import {
   restoreLiteralCasing,
   toStructuredOutputSchema,
 } from "./anthropic-output-schema.js";
+import {
+  type AttachmentLimits,
+  anthropicAttachmentLimits,
+  openAICompatibleAttachmentLimits,
+} from "./attachment-limits.js";
 import { cacheMarker } from "./cache-marker.js";
 import { extractText, isTextLikeDocumentMediaType } from "./content.js";
 import {
@@ -258,6 +263,17 @@ export class AnthropicProvider implements LlmProvider {
     }
 
     return generateFrames();
+  }
+
+  /**
+   * Anthropic's own limits on its API. A third-party Anthropic-compatible
+   * endpoint can route to Bedrock, which caps a request at 20 MB, so it gets
+   * the OpenAI-compatible routes' limits.
+   */
+  attachmentLimits(contextWindow: number): AttachmentLimits {
+    return this.#endpoint.firstParty
+      ? anthropicAttachmentLimits(contextWindow)
+      : openAICompatibleAttachmentLimits();
   }
 
   /**

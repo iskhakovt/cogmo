@@ -3,6 +3,10 @@ import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { z } from "zod";
+import {
+  anthropicAttachmentLimits,
+  openAICompatibleAttachmentLimits,
+} from "../../llm/attachment-limits.js";
 import { installLiveCatalog } from "../../llm/litellm-data.js";
 import { computeBudget, resolveLimits } from "../../llm/models.js";
 import type { LlmProvider } from "../../llm/provider.js";
@@ -15,6 +19,7 @@ import {
   FAKE_TX,
   fakeRunInTx,
   mockAgentStore,
+  mockAttachmentStore,
   mockDeliveryHandle,
   mockDeliveryRouter,
   mockFilesService,
@@ -23,6 +28,7 @@ import {
 } from "../../test/factories.js";
 import type { StreamDeliveryError } from "../../transport/delivery-router.js";
 import { canonicalKeyOrder } from "../../util/canonical-key-order.js";
+import { createAttachmentReader } from "../attachments/attachment-reader.js";
 import { toolResultClearing } from "../context.js";
 import type { AgentLoopResult, StepRunner } from "../loop.js";
 import { defineTool, ToolRegistry } from "../tools.js";
@@ -122,7 +128,13 @@ function providerReplying(...texts: string[]): LlmProvider {
       usage: { inputTokens: 1, outputTokens: 1 },
     });
   }
-  return { name: "test", chat, chatStream: vi.fn(), countTokens: vi.fn().mockResolvedValue(10) };
+  return {
+    name: "test",
+    chat,
+    chatStream: vi.fn(),
+    countTokens: vi.fn().mockResolvedValue(10),
+    attachmentLimits: anthropicAttachmentLimits,
+  };
 }
 
 async function harness(opts: { existingInbound?: { id: string; conversationId: string } } = {}) {
@@ -164,6 +176,7 @@ async function harness(opts: { existingInbound?: { id: string; conversationId: s
     deliveryRouter,
     runStreamingAgentLoop,
     userTimezone: "UTC",
+    attachmentReader: createAttachmentReader(mockAttachmentStore(), 24_000_000),
   };
   return { deps, agentStore, transportStore, delivery, deliveryRouter, runStreamingAgentLoop };
 }
@@ -301,6 +314,8 @@ describe("runAgenticStage", () => {
       { id: "msg-1", role: "user", content: "Draft a plan." },
     ]);
     const { provider } = await h.deps.resolveProvider("claude-sonnet-4-6");
+    // A 20 MB route, whose request cap `huge` is sized against.
+    vi.spyOn(provider, "attachmentLimits").mockImplementation(openAICompatibleAttachmentLimits);
     vi.mocked(provider.chat).mockResolvedValueOnce({
       content: [{ type: "text", text: "Summary of the run so far." }],
       stopReason: "end_turn",

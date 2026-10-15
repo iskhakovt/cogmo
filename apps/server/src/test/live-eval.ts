@@ -43,7 +43,7 @@ import {
 import { createWebTools } from "../agent/web-tools.js";
 import { resolveLimits } from "../llm/models.js";
 import type { LlmProvider } from "../llm/provider.js";
-import type { Message, Usage } from "../llm/types.js";
+import type { ContentBlock, Message, Usage } from "../llm/types.js";
 import { sumUsage, ZERO_USAGE } from "../llm/usage.js";
 import { logger } from "../logger.js";
 import { DEFAULT_BASE_PROMPT } from "../setup/seed.js";
@@ -264,7 +264,7 @@ export async function runEvalTurn(params: {
     coreMemory: await coreMemory.get(),
     toolDefinitions: tools.definitions(),
   });
-  const userMessage = withTurnContext(
+  const userMessage = withTurnContext<ContentBlock>(
     { role: "user", content: params.message },
     renderTurnContext({
       handledAt: new Date(),
@@ -387,6 +387,7 @@ export function createUsageMeter(): UsageMeter {
       },
       chatStream: (params, options) => provider.chatStream(params, options),
       countTokens: (params) => provider.countTokens(params),
+      attachmentLimits: (contextWindow) => provider.attachmentLimits(contextWindow),
     }),
     summary: () =>
       `input ${total.inputTokens} (cache read ${total.cacheReadTokens ?? 0}, ` +

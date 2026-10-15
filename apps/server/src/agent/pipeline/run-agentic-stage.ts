@@ -25,14 +25,13 @@ import type { Logger } from "pino";
 import type { Transactor } from "../../db/index.js";
 import { inngest } from "../../inngest/client.js";
 import { isRetriableProviderError } from "../../llm/fallback.js";
-import { computeBudget, resolveLimits } from "../../llm/models.js";
-import { MAX_VIEW_BYTES } from "../../llm/request-size.js";
+import { resolveLimits } from "../../llm/models.js";
 import {
   type LlmProviderResolver,
   ProviderConfigError,
   type ResolvedLlm,
 } from "../../llm/resolver.js";
-import type { CountTokensParams } from "../../llm/types.js";
+import type { ContentBlock, CountTokensParams } from "../../llm/types.js";
 import type { McpRegistry } from "../../mcp/registry.js";
 import type { MemoryProvider } from "../../memory/provider.js";
 import type { SkillRunner } from "../../skills/runner.js";
@@ -40,13 +39,16 @@ import { buildSkillTools, composeTurnTools } from "../../skills/skill-tool-build
 import { createSkillsService } from "../../skills/skills-service.js";
 import { type DeliveryRouter, pushOrThrow } from "../../transport/delivery-router.js";
 import type { TransportStore } from "../../transport/store/index.js";
+import { type FixedCutoff, fixAttachmentCutoff } from "../attachments/attachment-cutoff.js";
+import type { AttachmentReader } from "../attachments/attachment-reader.js";
+import { renderForkSpan } from "../attachments/render-fork-span.js";
+import { renderStoredMessages } from "../attachments/render-stored-content.js";
 import type { CodingService } from "../coding/service.js";
 import {
   compactMessages,
   extractSummaryText,
   shouldSkipCounting,
   summarizationRequest,
-  toolResultClearing,
 } from "../context.js";
 import { loadConversationContext } from "../conversation/load-conversation-context.js";
 import {
@@ -57,6 +59,7 @@ import {
 import { storeTurnContext } from "../conversation/store-turn-context.js";
 import { loadCoreMemoryScope } from "../core-memory/load-core-memory-scope.js";
 import { offeredBuiltIns } from "../core-memory-tools.js";
+import { freezeLimits, limitsPolicy } from "../handle-message/resolve-turn-model.js";
 import type { ImageToolsLoader } from "../image-tools-loader.js";
 import type { AgentLoopResult, StepRunner, StreamingAgentLoopParams } from "../loop.js";
 import type { PromptSource } from "../prompt.js";
@@ -64,7 +67,9 @@ import { computeRetraction } from "../retraction.js";
 import { createSchedulingService } from "../scheduling/scheduling-service.js";
 import type { Service } from "../service.js";
 import type { AgentStore } from "../store/index.js";
+import { toStoredMessage } from "../stored-content.js";
 import { buildSubAgentTools } from "../subagent/sub-agent-tool-builder.js";
+import { stripThinkingBefore } from "../system-prompt-snapshot.js";
 import type { ToolRegistry } from "../tools.js";
 import { turnCacheIntent } from "../turn-cache-intent.js";
 import {
@@ -93,6 +98,8 @@ export interface AgenticStageDeps {
   memory: MemoryProvider;
   promptSource: PromptSource;
   fileService: Service["files"];
+  /** Renders stored attachment refs, through the process's memo. */
+  attachmentReader: AttachmentReader;
   deliveryRouter: DeliveryRouter;
   runStreamingAgentLoop: (params: StreamingAgentLoopParams) => Promise<AgentLoopResult>;
   codingServiceFactory?: (conversationId: string) => CodingService;
@@ -230,10 +237,6 @@ export async function runAgenticStage(
     coreMemoryUpdates: NO_CORE_MEMORY_UPDATES,
   };
   const provisionalTurnContext = renderTurnContext(turnContextInput);
-  const history = turnHistory.messages.with(
-    turnIndex,
-    withTurnContext(turnRow, provisionalTurnContext),
-  );
 
   const profile = await deps.runInTx((tx) => deps.agentStore.getProfile(tx, ctx.profileId));
   // Frozen for the stage, as in a chat turn (see `handle-message`).
@@ -327,11 +330,43 @@ export async function runAgenticStage(
   // Frozen for the run: a catalog refresh can swap the in-process catalog
   // between invocations, and the budget decides which compaction steps exist.
   const limits = await steps.stepRun("freeze-model-limits", async () =>
-    resolveLimits(ctx.model, rowLimits),
+    freezeLimits(ctx.model, provider, rowLimits),
   );
-  const budget = computeBudget(limits);
-  // Strategy 1, on every request of the stage turn: counts, iterations and the fork.
-  const clearToolResults = toolResultClearing(budget);
+  // Strategy 1's intent is on every request of the stage turn: counts,
+  // iterations and the fork.
+  const { budget, clearToolResults, attachmentBudget, maxViewBytes } = limitsPolicy(limits);
+
+  // Until one prefix per conversation, a stage's prefix is its own, so it
+  // fixes its own attachment cutoff from none and stores nothing; an advance
+  // shows placeholders earlier requests didn't, so the thinking before the
+  // stage's row goes with it (design/prompt-caching.md → source (d) → Stage
+  // turns).
+  const fixed: FixedCutoff =
+    attachmentBudget === null
+      ? { kind: "kept", cutoff: null }
+      : fixAttachmentCutoff({
+          messages: turnHistory.messages,
+          messageIds: turnHistory.messageIds,
+          end: turnIndex,
+          current: null,
+          budget: attachmentBudget,
+          extra: { bytes: 0, images: 0 },
+        });
+  const attachmentCutoff = fixed.cutoff;
+  const renderedView = await renderStoredMessages(
+    turnHistory.messages,
+    turnHistory.messageIds,
+    deps.attachmentReader,
+    attachmentCutoff,
+  );
+  const rendered =
+    fixed.kind === "advanced" ? stripThinkingBefore(renderedView, turnIndex) : renderedView;
+  const renderedTurn = rendered[turnIndex];
+  if (renderedTurn === undefined) throw new Error(`stage prompt message ${turn.id} did not render`);
+  const history = rendered.with(
+    turnIndex,
+    withTurnContext<ContentBlock>(renderedTurn, provisionalTurnContext),
+  );
 
   // Frozen for the run: the persist step below rewrites the row this reads.
   const lastTokens = await steps.stepRun("load-last-tokens", () =>
@@ -360,7 +395,7 @@ export async function runAgenticStage(
       },
       budget,
       clearToolResults,
-      maxViewBytes: MAX_VIEW_BYTES,
+      maxViewBytes,
       canSummarizePrefix: (candidate) => summarizedSpan(turnHistory.messageIds, candidate) !== null,
       summarize: async (system, msgs) => {
         const resolved =
@@ -373,11 +408,18 @@ export async function runAgenticStage(
           : limits;
         // `compactMessages` calls `summarize` at most once per invocation.
         const summarized = await steps.stepRun("summarize-prefix-outcome", async () => {
+          const span = await renderForkSpan(deps.attachmentReader, {
+            messages: turnHistory.messages.slice(0, msgs.length),
+            messageIds: turnHistory.messageIds.slice(0, msgs.length),
+            cutoff: attachmentCutoff,
+            limits: summarizationProvider.attachmentLimits(summarizationLimits.contextWindow),
+            sent: msgs,
+          });
           const response = await summarizationProvider.chat(
             summarizationRequest({
               model: ctx.summarizationModel,
               system,
-              messages: msgs,
+              messages: span,
               maxOutputTokens: summarizationLimits.maxOutputTokens,
               clearToolResults,
             }),
@@ -516,7 +558,7 @@ export async function runAgenticStage(
     const { id } = await deps.runInTx((tx) =>
       deps.agentStore.insertMessages(tx, {
         conversationId,
-        messages: result.newMessages,
+        messages: result.newMessages.map(toStoredMessage),
         profileId: ctx.profileId,
         model: ctx.model,
         lastInboundMessageId: inboundId,

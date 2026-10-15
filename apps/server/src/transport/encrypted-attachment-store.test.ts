@@ -1,3 +1,4 @@
+import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import { isEncrypted } from "../secrets/blob-envelope.js";
 import { deriveMasterKey, generateMasterKey, parseMasterKey } from "../secrets/encryption.js";
@@ -37,6 +38,10 @@ function fakeStore(): {
       const blob = blobs.get(path);
       if (!blob) throw new Error(`Attachment not found: ${path}`);
       return blob;
+    }),
+    read: vi.fn(async (path: string) => {
+      const blob = blobs.get(path);
+      return blob === undefined ? err({ kind: "missing" as const }) : ok(blob);
     }),
   };
   return { store, uploads, blobs };
@@ -207,5 +212,46 @@ describe("wrapAttachmentStoreWithEncryption — plaintext passthrough on read", 
     blobs.set("legacy/collision", fakeMagicMatch);
 
     await expect(wrapped.download("legacy/collision")).rejects.toThrow();
+  });
+});
+
+describe("wrapAttachmentStoreWithEncryption — read", () => {
+  it("decrypts what the wrapper wrote", async () => {
+    const { store } = fakeStore();
+    const wrapped = wrapAttachmentStoreWithEncryption(store, testKey());
+    const plaintext = Buffer.from("photo bytes");
+    const path = await wrapped.upload(plaintext, "image/jpeg", "inbound");
+
+    const read = await wrapped.read(path);
+    expect(read._unsafeUnwrap().equals(plaintext)).toBe(true);
+  });
+
+  it("passes a plaintext object through", async () => {
+    const { store, blobs } = fakeStore();
+    const wrapped = wrapAttachmentStoreWithEncryption(store, testKey());
+    const jpegBytes = Buffer.from([0xff, 0xd8, 0xff, 0xe0]);
+    blobs.set("inbound/legacy.jpg", jpegBytes);
+
+    const read = await wrapped.read("inbound/legacy.jpg");
+    expect(read._unsafeUnwrap().equals(jpegBytes)).toBe(true);
+  });
+
+  it("propagates the inner store's missing", async () => {
+    const { store } = fakeStore();
+    const wrapped = wrapAttachmentStoreWithEncryption(store, testKey());
+
+    expect((await wrapped.read("missing/path"))._unsafeUnwrapErr()).toEqual({ kind: "missing" });
+  });
+
+  it("reports an object another key wrote as undecryptable", async () => {
+    const { store } = fakeStore();
+    const path = await wrapAttachmentStoreWithEncryption(store, testKey()).upload(
+      Buffer.from("secret"),
+      "text/plain",
+      "inbound",
+    );
+
+    const read = await wrapAttachmentStoreWithEncryption(store, testKey()).read(path);
+    expect(read._unsafeUnwrapErr()).toEqual({ kind: "undecryptable" });
   });
 });

@@ -144,6 +144,9 @@ importers:
       jsonrepair:
         specifier: ^3.15.0
         version: 3.15.0
+      lru-cache:
+        specifier: ^11.5.3
+        version: 11.5.3
       marked:
         specifier: ^18.0.14
         version: 18.0.14

@@ -9,7 +9,8 @@ import { z } from "zod";
 
 // The `Schema ⇒ design doc` CI job lists the files that define stored shape.
 // Its list of Zod schema modules is hand-written; this test derives the same
-// set from the `jsonbZod(` call sites and fails when the two drift.
+// set from the `jsonbZod(` call sites and the schema modules they import, and
+// fails when the two drift.
 
 const REPO_ROOT = fileURLToPath(new URL("../../../..", import.meta.url));
 const SERVER_SRC = resolve(REPO_ROOT, "apps/server/src");
@@ -88,16 +89,44 @@ function jsonbZodSchemaModules(): ReadonlyArray<{ schema: string; module: string
   );
 }
 
+/**
+ * The modules a schema module imports Zod schemas from, by the `…Schema`
+ * naming convention: a stored shape built from another module's block
+ * schemas changes when that module does.
+ */
+function composedSchemaModules(modules: ReadonlyArray<string>): ReadonlyArray<string> {
+  return R.pipe(
+    modules,
+    R.flatMap((file) => {
+      const source = readFileSync(file, "utf8");
+      return [...source.matchAll(/import\s+\{([^}]*)\}\s+from\s+"(\.[^"]+)"/g)].flatMap(
+        ([, names = "", from = ""]) =>
+          names.split(",").some((n) => /^(?!type\s)\s*\w+Schema\s*$/.test(n.trim()))
+            ? [resolve(dirname(file), from.replace(/\.js$/, ".ts"))]
+            : [],
+      );
+    }),
+    R.unique(),
+  );
+}
+
 describe("schema-docs CI filter", () => {
   const { globs, matches } = schemaFilter();
-  const sources = jsonbZodSchemaModules();
+  const declared = jsonbZodSchemaModules();
+  const sources = [
+    ...declared,
+    ...composedSchemaModules(R.unique(declared.map((s) => s.module))).map((module) => ({
+      schema: "",
+      module,
+    })),
+  ];
 
   it("finds the jsonbZod call sites", () => {
     expect(sources.length).toBeGreaterThan(20);
   });
 
   it("resolves every jsonbZod schema to a module that declares it", () => {
-    const unresolved = sources.filter(
+    const unresolved = declared.filter(
       ({ schema, module }) =>
         !new RegExp(`\\b(?:const|let|var)\\s+${schema}\\b`).test(readFileSync(module, "utf8")),
     );

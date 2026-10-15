@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { anthropicAttachmentLimits } from "../../llm/attachment-limits.js";
 import type { LlmProvider } from "../../llm/provider.js";
 import { expectDefined } from "../../test/assertions.js";
 import { type CompileDeps, compilePipeline, MAX_VALIDATION_RETRIES } from "./compile.js";
@@ -18,7 +19,16 @@ function mockProvider(responses: ReadonlyArray<object>): {
       usage: { inputTokens: 10, outputTokens: 5 },
     });
   }
-  return { provider: { name: "test", chat, chatStream: vi.fn(), countTokens: vi.fn() }, chat };
+  return {
+    provider: {
+      name: "test",
+      chat,
+      chatStream: vi.fn(),
+      countTokens: vi.fn(),
+      attachmentLimits: anthropicAttachmentLimits,
+    },
+    chat,
+  };
 }
 
 function deps(provider: LlmProvider): CompileDeps {

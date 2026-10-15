@@ -4,6 +4,7 @@ import OpenAI from "openai";
 import * as R from "remeda";
 import { logger } from "../logger.js";
 import { abortReasonOr } from "./abort.js";
+import { type AttachmentLimits, openAICompatibleAttachmentLimits } from "./attachment-limits.js";
 import type { CacheDialect } from "./cache-dialect.js";
 import { cacheMarker } from "./cache-marker.js";
 import { isTextLikeDocumentMediaType } from "./content.js";
@@ -87,6 +88,10 @@ export class OpenAICompatibleProvider implements LlmProvider {
       defaultHeaders: config.headers,
       fetch: withFailureLogging(config.fetch ?? globalThis.fetch, logger, name),
     });
+  }
+
+  attachmentLimits(): AttachmentLimits {
+    return openAICompatibleAttachmentLimits();
   }
 
   /**

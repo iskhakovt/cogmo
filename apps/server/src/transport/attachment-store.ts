@@ -1,5 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { GetObjectCommand, NoSuchKey, PutObjectCommand, type S3Client } from "@aws-sdk/client-s3";
+import { err, ok, type Result } from "neverthrow";
+
+/**
+ * Why an object can never be read: its key is gone, or its bytes don't
+ * decrypt. Retrying changes neither.
+ */
+export type AttachmentUnreadable = { kind: "missing" } | { kind: "undecryptable" };
 
 /**
  * Binary attachment storage — system-facing, not exposed to agent tools.
@@ -16,6 +23,11 @@ export interface AttachmentStore {
    */
   upload(data: Buffer, mediaType: string, prefix: string): Promise<string>;
   download(path: string): Promise<Buffer>;
+  /**
+   * The object's bytes, or why it can never be read. A transient failure (the
+   * bucket unreachable, a timeout) throws, so a retry reads it.
+   */
+  read(path: string): Promise<Result<Buffer, AttachmentUnreadable>>;
 }
 
 const MIME_EXT: Record<string, string> = {
@@ -36,6 +48,18 @@ export function mediaTypeToExt(mediaType: string): string {
  * S3-backed attachment store.
  */
 export function createAttachmentStore(client: S3Client, bucket: string): AttachmentStore {
+  async function read(path: string): Promise<Result<Buffer, AttachmentUnreadable>> {
+    try {
+      const response = await client.send(new GetObjectCommand({ Bucket: bucket, Key: path }));
+      const body = response.Body;
+      if (!body) throw new Error(`Empty response for: ${path}`);
+      return ok(Buffer.from(await body.transformToByteArray()));
+    } catch (e) {
+      if (e instanceof NoSuchKey) return err({ kind: "missing" });
+      throw e;
+    }
+  }
+
   return {
     async upload(data: Buffer, mediaType: string, prefix: string): Promise<string> {
       const ext = mediaTypeToExt(mediaType);
@@ -52,15 +76,11 @@ export function createAttachmentStore(client: S3Client, bucket: string): Attachm
     },
 
     async download(path: string): Promise<Buffer> {
-      try {
-        const response = await client.send(new GetObjectCommand({ Bucket: bucket, Key: path }));
-        const body = response.Body;
-        if (!body) throw new Error(`Empty response for: ${path}`);
-        return Buffer.from(await body.transformToByteArray());
-      } catch (err) {
-        if (err instanceof NoSuchKey) throw new Error(`Attachment not found: ${path}`);
-        throw err;
-      }
+      const bytes = await read(path);
+      if (bytes.isErr()) throw new Error(`Attachment not found: ${path}`);
+      return bytes.value;
     },
+
+    read,
   };
 }

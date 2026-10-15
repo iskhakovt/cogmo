@@ -1,6 +1,6 @@
 import { index, integer, pgEnum, pgTable, text, unique, uuid } from "drizzle-orm/pg-core";
 import { jsonbZod, pk, ts } from "../../../db/helpers.js";
-import { MessageContentSchema } from "../../../llm/types.js";
+import { StoredMessageContentSchema } from "../../stored-content.js";
 import { TurnContextSchema } from "../../turn-context.js";
 import { conversations } from "./conversations.js";
 import { profiles } from "./profiles.js";
@@ -23,7 +23,7 @@ export const messages = pgTable(
       .notNull()
       .references(() => conversations.id),
     role: text("role").notNull(), // 'user' | 'assistant'
-    content: jsonbZod("content", MessageContentSchema).notNull(),
+    content: jsonbZod("content", StoredMessageContentSchema).notNull(),
     profileId: uuid("profile_id")
       .notNull()
       .references(() => profiles.id), // profile active for the turn this row belongs to
@@ -152,6 +152,11 @@ export const systemPromptSnapshots = pgTable(
     rendered: text("rendered").notNull(),
     /** Digest of everything `rendered` holds but core memory. */
     configDigest: text("config_digest").notNull(),
+    /**
+     * The last row whose attachments the epoch renders as placeholders;
+     * nullable: NULL is no cutoff.
+     */
+    attachmentCutoff: uuid("attachment_cutoff").references(() => messages.id),
     createdAt: ts(),
   },
   // `opened_by` alone identifies an epoch, since a message belongs to one

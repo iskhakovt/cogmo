@@ -20,4 +20,9 @@ const WIRE_OVERHEAD_BYTES = 64 * 1024;
  * it where truncation can, and to it where only that fits
  * (design/context-management.md → Strategy 2 → Size trigger).
  */
-export const MAX_VIEW_BYTES = MAX_REQUEST_BYTES - WIRE_OVERHEAD_BYTES;
+export const MAX_VIEW_BYTES = viewBytesFor(MAX_REQUEST_BYTES);
+
+/** The most a view's canonical JSON may weigh for a request within `requestBytes`. */
+export function viewBytesFor(requestBytes: number): number {
+  return requestBytes - WIRE_OVERHEAD_BYTES;
+}

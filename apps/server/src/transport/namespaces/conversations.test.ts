@@ -146,8 +146,8 @@ describe("conversations.getMessages", () => {
     const { conversations } = setup({ agentStore });
     const res = await conversations.getMessages("handle", "c1");
     expect(res._unsafeUnwrap()).toEqual([
-      { id: "m1", role: "user", text: "hello" },
-      { id: "m2", role: "assistant", text: "hi there" },
+      { id: "m1", role: "user", text: "hello", attachments: [] },
+      { id: "m2", role: "assistant", text: "hi there", attachments: [] },
     ]);
   });
 });

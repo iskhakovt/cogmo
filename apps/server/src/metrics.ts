@@ -16,6 +16,7 @@ interface Instruments {
   agentIterations: Histogram;
   memoryRecallFailures: Counter;
   coreMemoryEdits: Counter;
+  attachmentPlaceholders: Counter;
 }
 
 let cached: Instruments | null = null;
@@ -42,6 +43,10 @@ function instruments(): Instruments {
     coreMemoryEdits: meter.createCounter("cogmo.core_memory.edits", {
       description: "core_memory_update writes that changed a block",
       unit: "{edit}",
+    }),
+    attachmentPlaceholders: meter.createCounter("cogmo.attachments.placeholders", {
+      description: "Attachments sent as a placeholder instead of their content",
+      unit: "{attachment}",
     }),
   };
   return cached;
@@ -111,6 +116,19 @@ export const memoryRecallFailures = {
 export const coreMemoryEdits = {
   add(value: number, attrs?: MetricAttributes): void {
     instruments().coreMemoryEdits.add(value, attrs);
+  },
+};
+
+/**
+ * Attachments sent as a placeholder, labeled by `reason`. `unreadable` is an
+ * object the renderer can never read (its key gone, its bytes undecryptable),
+ * counted the first time a process meets it, since every request that shows
+ * the row renders it again. Design: design/transport/attachments.md →
+ * Placeholders.
+ */
+export const attachmentPlaceholders = {
+  add(value: number, attrs?: MetricAttributes): void {
+    instruments().attachmentPlaceholders.add(value, attrs);
   },
 };
 

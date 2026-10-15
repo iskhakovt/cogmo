@@ -22,6 +22,11 @@ export interface EpochSnapshot {
   historyStart: string;
   rendered: string;
   configDigest: string;
+  /**
+   * The last row whose attachments the epoch renders as placeholders. Absent
+   * in a memo written before the column, when no snapshot had one.
+   */
+  attachmentCutoff?: string | null;
 }
 
 export function epochOf(row: SystemPromptSnapshot): EpochSnapshot {
@@ -30,6 +35,7 @@ export function epochOf(row: SystemPromptSnapshot): EpochSnapshot {
     historyStart: row.historyStart,
     rendered: row.rendered,
     configDigest: row.configDigest,
+    attachmentCutoff: row.attachmentCutoff,
   };
 }
 
@@ -51,6 +57,8 @@ export function configDigest(args: {
   toolTable: string;
   scope: CoreMemoryScope;
   identityOverride: boolean;
+  /** The renderer's placeholder wording, which rows the epoch sends can show. */
+  rendererPlaceholders: string;
 }): string {
   // Positional, so a scope whose keys a replayed step returns sorted digests the same.
   const scope =
@@ -58,7 +66,15 @@ export function configDigest(args: {
       ? [args.scope.kind, args.scope.profileClass, args.scope.restricted]
       : [args.scope.kind];
   return createHash("sha256")
-    .update(JSON.stringify([args.configuration, args.toolTable, scope, args.identityOverride]))
+    .update(
+      JSON.stringify([
+        args.configuration,
+        args.toolTable,
+        scope,
+        args.identityOverride,
+        args.rendererPlaceholders,
+      ]),
+    )
     .digest("hex");
 }
 

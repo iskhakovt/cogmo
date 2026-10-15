@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
+import { anthropicAttachmentLimits } from "../../llm/attachment-limits.js";
 import type { LlmProvider } from "../../llm/provider.js";
 import type { LlmResponse } from "../../llm/types.js";
 import { logger } from "../../logger.js";
@@ -59,6 +60,7 @@ function scriptedProvider(responses: LlmResponse[]): LlmProvider {
       throw new Error("chatStream not used");
     },
     countTokens: vi.fn(),
+    attachmentLimits: anthropicAttachmentLimits,
   };
 }
 

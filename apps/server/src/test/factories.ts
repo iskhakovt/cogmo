@@ -767,6 +767,7 @@ export function mockProvider(overrides?: Partial<LlmProvider>): LlmProvider {
       throw new Error("chatStream not implemented in mock");
     },
     countTokens: vi.fn().mockResolvedValue(100),
+    attachmentLimits: vi.fn().mockReturnValue({ requestBytes: 32_000_000, images: 100 }),
     ...overrides,
   };
 }
@@ -884,6 +885,7 @@ export function mockAttachmentStore(overrides?: Partial<AttachmentStore>): Attac
   return {
     upload: vi.fn().mockResolvedValue("inbound/test.jpg"),
     download: vi.fn().mockResolvedValue(Buffer.from([1, 2, 3])),
+    read: vi.fn().mockResolvedValue(ok(Buffer.from([1, 2, 3]))),
     ...overrides,
   };
 }

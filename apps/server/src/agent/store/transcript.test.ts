@@ -1,11 +1,12 @@
 import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
-import { HARNESS_ROW_TAGS, type Message } from "../../llm/types.js";
+import { HARNESS_ROW_TAGS } from "../../llm/types.js";
 import { seedConversation } from "../../test/agent-store-fixtures.js";
 import { expectDefined } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { inboundMessages } from "../../transport/store/schema.js";
+import type { StoredContent, StoredMessage } from "../stored-content.js";
 import { DrizzleConversationStore } from "./conversations.js";
 import { conversationSummaries, messages, systemPromptSnapshots } from "./schema.js";
 import { DrizzleTranscriptStore } from "./transcript.js";
@@ -96,11 +97,35 @@ describe("DrizzleTranscriptStore", () => {
       ]);
     });
 
-    it("keeps harness tags through a write and a reload, and rejects an unknown one", async () => {
+    it("keeps harness tags and attachment refs through a write and a reload, and rejects an unknown tag", async () => {
       const { conversationId, stamp } = await seedConversation(tx);
       const inboundId = "019d0000-0000-7000-8000-000000000001";
-      const written: Message[] = [
+      const written: StoredMessage[] = [
         { role: "user", content: "Hello" },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "Image 1:", harness: "image_label" },
+            {
+              type: "image_ref",
+              path: "inbound/a.jpg",
+              mediaType: "image/jpeg",
+              width: 800,
+              height: 600,
+              bytes: 1234,
+              name: "a.heic",
+              original: { path: "inbound/a.heic", mediaType: "image/heic" },
+            },
+            {
+              type: "document_ref",
+              path: "inbound/r.pdf",
+              mediaType: "application/pdf",
+              name: "report.pdf",
+              bytes: 99,
+            },
+            { type: "text", text: "clip.mp4 is not supported", harness: "attachment_placeholder" },
+          ],
+        },
         {
           role: "assistant",
           content: [{ type: "tool_use", id: "t1", name: "img", input: {} }],
@@ -560,7 +585,7 @@ describe("DrizzleTranscriptStore", () => {
       stamp: { profileId: string; model: string },
       cursor: string,
       first: string | null,
-      content: Message["content"],
+      content: StoredContent,
     ): Promise<string> {
       const { id } = await tx((trx) =>
         store.insertMessage(trx, {
@@ -1351,6 +1376,7 @@ describe("system prompt snapshots", () => {
       historyStart: openedBy,
       rendered,
       configDigest: `digest of ${rendered}`,
+      attachmentCutoff: null,
     };
   }
 
@@ -1416,6 +1442,22 @@ describe("system prompt snapshots", () => {
     await expect(
       tx((trx) => store.getLatestSystemPromptSnapshot(trx, none)),
     ).resolves.toBeUndefined();
+  });
+
+  it("keeps the attachment cutoff an epoch opens with", async () => {
+    const { conversationId, stamp } = await seedConversation(tx);
+    const earlier = await userRow(conversationId, stamp);
+    const opener = await userRow(conversationId, stamp);
+
+    await tx((trx) =>
+      store.insertOrRecoverSystemPromptSnapshot(trx, {
+        ...snapshot(conversationId, opener, "first"),
+        attachmentCutoff: earlier,
+      }),
+    );
+
+    const latest = await tx((trx) => store.getLatestSystemPromptSnapshot(trx, conversationId));
+    expect(latest?.attachmentCutoff).toBe(earlier);
   });
 
   it("refuses a snapshot opened by a message that doesn't exist", async () => {

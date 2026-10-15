@@ -2,10 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Transactor } from "../../db/index.js";
 import type { LlmProvider } from "../../llm/provider.js";
-import type { Message } from "../../llm/types.js";
 import type { MemoryProvider } from "../../memory/provider.js";
 import type { TransportStore } from "../../transport/store/index.js";
 import type { AgentStore } from "../store/index.js";
+import type { StoredMessage } from "../stored-content.js";
 import { triggerReflection } from "./trigger-reflection.js";
 
 const FAKE_TX = { __mockTx: true } as never;
@@ -15,7 +15,7 @@ const CONV_ID = "11111111-1111-7111-8111-111111111111";
 const USER_ID = "22222222-2222-7222-8222-222222222222";
 const PROFILE_ID = "33333333-3333-7333-8333-333333333333";
 
-function emptyHistory(): (Message & { id: string })[] {
+function emptyHistory(): (StoredMessage & { id: string })[] {
   return [];
 }
 
