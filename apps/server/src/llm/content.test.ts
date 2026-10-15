@@ -3,6 +3,7 @@ import {
   canonicalizeToolInputs,
   extractText,
   isHarnessPrompt,
+  isTextLikeDocumentMediaType,
   isTurnRowContent,
   NOT_TURN_ROW_JSONPATH,
 } from "./content.js";
@@ -119,5 +120,23 @@ describe("isHarnessPrompt", () => {
     ).toBe(true);
     expect(isHarnessPrompt({ type: "text", text: "x", harness: "truncation_notice" })).toBe(false);
     expect(isHarnessPrompt({ type: "text", text: "x" })).toBe(false);
+  });
+});
+
+describe("isTextLikeDocumentMediaType", () => {
+  it.each([
+    ["text/plain", true],
+    ["text/markdown", true],
+    ["application/json", true],
+    ["application/xml", true],
+    ["application/yaml", true],
+    ["application/x-yaml", true],
+    ["application/json; charset=utf-8", true],
+    ["Text/CSV; charset=UTF-8", true],
+    ["application/pdf", false],
+    ["application/octet-stream", false],
+    ["application/jsonl", false],
+  ])("reads %s as text-like: %s", (mediaType, textLike) => {
+    expect(isTextLikeDocumentMediaType(mediaType)).toBe(textLike);
   });
 });

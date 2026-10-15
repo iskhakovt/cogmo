@@ -6,9 +6,11 @@ import { logger } from "../logger.js";
 import { abortReasonOr } from "./abort.js";
 import type { CacheDialect } from "./cache-dialect.js";
 import { cacheMarker } from "./cache-marker.js";
+import { isTextLikeDocumentMediaType } from "./content.js";
 import { type ProviderProtocolError, parseToolArgs, ToolArgsCutOffError } from "./errors.js";
 import type { ExtraBody } from "./extra-body.js";
 import { RefusalError } from "./fallback.js";
+import { estimateImageTokens } from "./image-tokens.js";
 import { withFailureLogging } from "./logging-fetch.js";
 import { fitsStrictMode } from "./openai-output-schema.js";
 import { failChatSpan, recordChatUsage, recordReasoningChars, startChatSpan } from "./otel.js";
@@ -466,28 +468,32 @@ function requestOptions(hints: CacheHints, signal: AbortSignal | undefined): Ope
 /** Message framing overhead (role, separators). */
 const MESSAGE_FRAMING_TOKENS = 4;
 
-/**
- * Images: ~85 tokens base for low-detail, more for high-detail.
- * Conservative estimate since we don't know the detail setting.
- */
-const IMAGE_TOKENS = 85;
-
 const REPLY_PRIMING_TOKENS = 3;
 
 /**
- * The request's prompt tokens, as sent, a slice at a time: each message as it
- * reaches the wire, with its framing, then each tool definition and the reply
- * priming.
+ * The request's prompt tokens, as sent, a slice at a time: each message's text
+ * as it reaches the wire, with its framing, then each image, each tool
+ * definition and the reply priming. Images are sized from the canonical
+ * blocks, whose dimensions the wire part doesn't carry.
  */
 function* promptParts(
   tokens: TextTokens,
-  params: Pick<CountTokensParams, "system" | "messages" | "tools">,
+  params: Pick<CountTokensParams, "model" | "system" | "messages" | "tools">,
 ): Generator<number> {
   for (const msg of buildMessages(params.system, params.messages, undefined)) {
     yield* messageParts(tokens, msg);
   }
+  for (const msg of params.messages) yield* imageParts(params.model, msg);
   for (const tool of params.tools ?? []) yield* tokens(JSON.stringify(tool));
   yield REPLY_PRIMING_TOKENS;
+}
+
+/** Each image `msg` sends, at `model`'s estimate. Only a user message sends its images. */
+function* imageParts(model: string, msg: Message): Generator<number> {
+  if (msg.role !== "user" || typeof msg.content === "string") return;
+  for (const block of msg.content) {
+    if (block.type === "image") yield estimateImageTokens(model, block);
+  }
 }
 
 // --- Tool-result clearing ---
@@ -505,7 +511,11 @@ function clearedMessages(params: CountTokensParams, tokens: TextTokens): Message
   );
 }
 
-/** A tool result is a `tool` message with string content, so the content term covers it. */
+/**
+ * One wire message's framing and text. A tool result is a `tool` message with
+ * string content, so the content term covers it; {@link imageParts} counts
+ * the images.
+ */
 function* messageParts(
   tokens: TextTokens,
   msg: OpenAI.ChatCompletionMessageParam,
@@ -517,7 +527,6 @@ function* messageParts(
   } else if (Array.isArray(content)) {
     for (const part of content) {
       if (part.type === "text") yield* tokens(part.text);
-      else if (part.type === "image_url") yield IMAGE_TOKENS;
     }
   }
   if (msg.role === "assistant" && msg.tool_calls) {
@@ -665,12 +674,11 @@ function toOpenAIMessages(msg: Message): OpenAI.ChatCompletionMessageParam[] {
   }));
 
   // Documents: most OpenAI-compatible Chat Completions endpoints don't
-  // accept document content parts. Inline text/* documents into a text
-  // block so the model still sees them; binary documents (PDFs etc.)
-  // get a stub note. Only Anthropic gets the rich `document` block via
-  // its own adapter.
+  // accept document content parts. Text-like documents are inlined into a
+  // text block so the model still sees them; any other document (a PDF,
+  // which only Anthropic reads) becomes a stub naming the file.
   const documentTextBlocks: TextBlock[] = documentBlocks.flatMap((d) => {
-    if (d.mediaType.startsWith("text/") && d.source === "base64") {
+    if (isTextLikeDocumentMediaType(d.mediaType) && d.source === "base64") {
       // Pre-decode slice: cap base64 input before allocating its UTF-8
       // expansion so a 20MB Telegram upload doesn't materialize 30MB of
       // string memory just to be truncated. base64 ratio is 4 chars per

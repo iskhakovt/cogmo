@@ -226,6 +226,7 @@ describe("textTokens", () => {
 describe("canonicalPromptParts", () => {
   it("sums the system prompt, each message's framing and blocks, and each tool", () => {
     const params = {
+      model: "claude-sonnet-4-6",
       system: "Be brief.",
       messages: [
         { role: "user", content: "read the log" },
@@ -241,6 +242,14 @@ describe("canonicalPromptParts", () => {
           role: "user",
           content: [
             { type: "tool_result", toolUseId: "t1", content: "all quiet" },
+            {
+              type: "image",
+              source: "base64",
+              data: "a".repeat(10_000),
+              mediaType: "image/png",
+              width: 280,
+              height: 560,
+            },
             { type: "image", source: "base64", data: "a".repeat(10_000), mediaType: "image/png" },
             {
               type: "document",
@@ -252,7 +261,7 @@ describe("canonicalPromptParts", () => {
         },
       ] satisfies Message[],
       tools: [{ name: "read", description: "Read a file.", parameters: { type: "object" } }],
-    } satisfies Pick<CountTokensParams, "system" | "messages" | "tools">;
+    } satisfies Pick<CountTokensParams, "model" | "system" | "messages" | "tools">;
 
     expect([...canonicalPromptParts(params, textTokens(enc))]).toEqual([
       whole("Be brief."),
@@ -265,8 +274,11 @@ describe("canonicalPromptParts", () => {
       whole(JSON.stringify({ path: "/var/log/app" })),
       4,
       whole("all quiet"),
-      // Images and documents at a flat 85, whatever their size.
-      85,
+      // Images at the model's estimate: 10 × 20 patches, then Claude's
+      // ceiling for one without dimensions.
+      200,
+      4_784,
+      // A document at a flat 85, whatever its size.
       85,
       whole(JSON.stringify(params.tools[0])),
     ]);
@@ -383,6 +395,34 @@ describe("withClearedToolResults", () => {
     );
 
     expect(read.size).toBe(0);
+  });
+
+  it("clears past a trigger the request's images carry it over, though its bytes are under it", () => {
+    const params = {
+      model: "claude-sonnet-4-6",
+      system: "sys",
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "image", source: "url", data: "https://x/a.png", mediaType: "image/png" },
+          ],
+        },
+        { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "read", input: {} }] },
+        { role: "user", content: [{ type: "tool_result", toolUseId: "t1", content: "all quiet" }] },
+      ] satisfies Message[],
+    };
+    const bytes = Buffer.byteLength(JSON.stringify([params.system, params.messages, []]));
+    const clearing = { triggerTokens: 1_000, keep: 0, clearAtLeastTokens: 1 };
+    expect(bytes).toBeLessThan(clearing.triggerTokens);
+
+    const cleared = withClearedToolResults(
+      { ...params, clearToolResults: clearing },
+      (messages, sliceTokens) => canonicalPromptParts({ ...params, messages }, sliceTokens),
+      textTokens(enc),
+    );
+
+    expect(placeholders(cleared)).toBe(1);
   });
 
   it("clears results that hold no tokens when the minimum is zero", () => {

@@ -78,3 +78,21 @@ export function extractText(content: string | ReadonlyArray<ContentBlock>): stri
     .map((b) => b.text)
     .join("");
 }
+
+const textLikeApplicationTypes: ReadonlySet<string> = new Set([
+  "application/json",
+  "application/xml",
+  "application/yaml",
+  "application/x-yaml",
+]);
+
+/**
+ * Whether a document of this media type is one both adapters send as text:
+ * `text/*`, JSON, XML or YAML, read case-insensitively and without
+ * parameters (`; charset=utf-8`). Anthropic sends it as a `text/plain`
+ * source, and the OpenAI-compatible adapter inlines it.
+ */
+export function isTextLikeDocumentMediaType(mediaType: string): boolean {
+  const essence = (mediaType.split(";")[0] ?? "").trim().toLowerCase();
+  return essence.startsWith("text/") || textLikeApplicationTypes.has(essence);
+}

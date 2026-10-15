@@ -7,6 +7,8 @@
  */
 
 import { getEncoding, type Tiktoken } from "js-tiktoken";
+import * as R from "remeda";
+import { estimateImageTokens } from "./image-tokens.js";
 import type { ContentBlock, CountTokensParams, Message } from "./types.js";
 
 let encoder: Tiktoken | null = null;
@@ -157,12 +159,17 @@ export function withClearedToolResults(
   const clearing = params.clearToolResults;
   if (!clearing) return params.messages;
   // Every cl100k token covers at least one UTF-8 byte, so a request whose
-  // JSON fits under the trigger in bytes is under it in tokens, and needs no
-  // encoding pass.
+  // JSON bytes plus its attachments' estimates fit under the trigger is under
+  // it in tokens, and needs no encoding pass. An attachment's estimate is
+  // unrelated to its bytes, so it is added rather than bounded by them.
   const bytes = Buffer.byteLength(
     JSON.stringify([params.system, params.messages, params.tools ?? []]),
   );
-  if (bytes <= clearing.triggerTokens) return params.messages;
+  const attachments = R.sumBy(
+    params.messages.flatMap((msg) => (typeof msg.content === "string" ? [] : msg.content)),
+    (block) => attachmentTokens(params.model, block),
+  );
+  if (bytes + attachments <= clearing.triggerTokens) return params.messages;
   if (!sumPasses(promptParts(params.messages, tokens), (sum) => sum > clearing.triggerTokens)) {
     return params.messages;
   }
@@ -218,8 +225,17 @@ function withPlaceholders(
 /** Per-message framing, per the OpenAI-compatible count's. */
 const MESSAGE_FRAMING_TOKENS = 4;
 
-/** An image or document, at the OpenAI-compatible count's flat image figure. */
-const ATTACHMENT_TOKENS = 85;
+/**
+ * A document's figure, whatever its size. No local count reads a PDF, and the
+ * OpenAI-compatible adapter's stub for one is a few dozen tokens.
+ */
+const DOCUMENT_TOKENS = 85;
+
+/** An image's tokens at `model`'s estimate, a document's at {@link DOCUMENT_TOKENS}, else 0. */
+function attachmentTokens(model: string, block: ContentBlock): number {
+  if (block.type === "image") return estimateImageTokens(model, block);
+  return block.type === "document" ? DOCUMENT_TOKENS : 0;
+}
 
 /**
  * A cl100k estimate of a request's prompt over its canonical blocks, a slice
@@ -230,7 +246,7 @@ const ATTACHMENT_TOKENS = 85;
  * rests on it; the count compaction reads is the endpoint's own.
  */
 export function* canonicalPromptParts(
-  params: Pick<CountTokensParams, "system" | "messages" | "tools">,
+  params: Pick<CountTokensParams, "model" | "system" | "messages" | "tools">,
   tokens: TextTokens,
 ): Generator<number> {
   yield* tokens(params.system);
@@ -240,12 +256,12 @@ export function* canonicalPromptParts(
       yield* tokens(msg.content);
       continue;
     }
-    for (const block of msg.content) yield* blockParts(block, tokens);
+    for (const block of msg.content) yield* blockParts(params.model, block, tokens);
   }
   for (const tool of params.tools ?? []) yield* tokens(JSON.stringify(tool));
 }
 
-function* blockParts(block: ContentBlock, tokens: TextTokens): Generator<number> {
+function* blockParts(model: string, block: ContentBlock, tokens: TextTokens): Generator<number> {
   switch (block.type) {
     case "text":
       yield* tokens(block.text);
@@ -262,7 +278,7 @@ function* blockParts(block: ContentBlock, tokens: TextTokens): Generator<number>
       return;
     case "image":
     case "document":
-      yield ATTACHMENT_TOKENS;
+      yield attachmentTokens(model, block);
       return;
   }
 }
