@@ -10,7 +10,7 @@ import {
   toStructuredOutputSchema,
 } from "./anthropic-output-schema.js";
 import { cacheMarker } from "./cache-marker.js";
-import { extractText } from "./content.js";
+import { extractText, isTextLikeDocumentMediaType } from "./content.js";
 import {
   MissingToolCallError,
   type ProviderProtocolError,
@@ -733,12 +733,10 @@ function toAnthropicBlock(block: ContentBlock): Anthropic.Beta.BetaContentBlockP
       };
     case "document": {
       // Anthropic's document block accepts: PDF (base64/url/files), text/plain
-      // (text source / files / url), and url-source for any URL.
-      // We expand the supported text family by transcoding text-like inputs
-      // (text/*, application/json|xml|yaml) into the `text` source variant —
-      // Anthropic's API only labels them `text/plain` but Claude reads them
-      // as code/markdown/CSV/etc. just fine; the original filename rides on
-      // `title` so the model still knows what it was.
+      // (text source / files / url), and url-source for any URL. Text-like
+      // inputs go as the `text` source variant, labelled `text/plain`; Claude
+      // reads them as code/markdown/CSV/etc. just fine, and the original
+      // filename rides on `title` so the model still knows what it was.
       const mt = block.mediaType;
       if (block.source === "url") {
         return {
@@ -862,24 +860,6 @@ function isAnthropicImageMediaType(
   mt: string,
 ): mt is Anthropic.Beta.BetaBase64ImageSource["media_type"] {
   return anthropicImageMediaTypes.has(mt);
-}
-
-/**
- * Document mediaTypes we route through Anthropic's `text` source variant.
- *
- * Anthropic only labels the wire type `text/plain` (per API contract), but
- * Claude reads structured text (markdown, csv, json, xml, yaml) just fine —
- * the original filename is surfaced via `title` so the model still knows
- * what kind of text it was.
- */
-function isTextLikeDocumentMediaType(mt: string): boolean {
-  if (mt.startsWith("text/")) return true;
-  return (
-    mt === "application/json" ||
-    mt === "application/xml" ||
-    mt === "application/yaml" ||
-    mt === "application/x-yaml"
-  );
 }
 
 /**

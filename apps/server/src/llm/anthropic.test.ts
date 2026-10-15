@@ -3061,6 +3061,42 @@ describe("AnthropicProvider", () => {
       });
     });
 
+    it("keeps an image's dimensions off the wire", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: "ok", citations: null }],
+        stop_reason: "end_turn",
+        model: "claude-sonnet-4-6",
+        usage: { input_tokens: 10, output_tokens: 5 },
+      });
+      await provider.chat({
+        model: "claude-sonnet-4-6",
+        system: "sys",
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "image",
+                source: "base64",
+                data: "AAA=",
+                mediaType: "image/png",
+                width: 640,
+                height: 480,
+              },
+            ],
+          },
+        ],
+      });
+
+      expect(
+        expectDefined(mockCreate.mock.calls[0], "create call")[0].messages[0].content[0],
+      ).toEqual({
+        type: "image",
+        source: { type: "base64", media_type: "image/png", data: "AAA=" },
+      });
+    });
+
     it("sends a text placeholder in place of an unsupported base64 image", async () => {
       await chatWithImage("image/bmp");
 

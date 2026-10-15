@@ -18,6 +18,7 @@ import type {
   CacheIntent,
   ChatParams,
   ChatStreamFrame,
+  CountTokensParams,
   ImageBlock,
   Message,
   ToolDefinition,
@@ -2404,20 +2405,63 @@ describe("OpenAICompatibleProvider", () => {
         return getEncoding("cl100k_base").encode(text).length;
       }
 
-      it("counts an image-only user message as its framing plus the flat image estimate", async () => {
+      it.each([
+        ["claude-sonnet-4-6", { width: 1000, height: 500 }, 36 * 18],
+        ["claude-sonnet-4-6", {}, 4_784],
+        ["gpt-4o", { width: 1000, height: 500 }, 85 + 170 * 2],
+        ["openai/gpt-5.4", {}, 4_763],
+      ])(
+        "counts an image-only user message to %s as its framing plus the image estimate",
+        async (model, size, imageTokens) => {
+          const provider = createProvider();
+          const params = { ...base, model };
+          const empty = await provider.countTokens({ ...params, messages: [] });
+          const emptyUser = await provider.countTokens({
+            ...params,
+            messages: [{ role: "user", content: "" }],
+          });
+          const imageOnly = await provider.countTokens({
+            ...params,
+            messages: [{ role: "user", content: [{ ...image, ...size }] }],
+          });
+
+          const messageFraming = emptyUser - empty;
+          expect(imageOnly - empty).toBe(messageFraming + imageTokens);
+        },
+      );
+
+      it("counts each image a merged user message carries", async () => {
         const provider = createProvider();
-        const empty = await provider.countTokens({ ...base, messages: [] });
-        const emptyUser = await provider.countTokens({
-          ...base,
-          messages: [{ role: "user", content: "" }],
+        const sized: ImageBlock = { ...image, width: 280, height: 280 };
+        const params = { ...base, model: "claude-sonnet-4-6" };
+        const one = await provider.countTokens({
+          ...params,
+          messages: [{ role: "user", content: [sized] }],
         });
-        const imageOnly = await provider.countTokens({
-          ...base,
-          messages: [{ role: "user", content: [image] }],
+        const two = await provider.countTokens({
+          ...params,
+          messages: [
+            { role: "user", content: [sized] },
+            { role: "user", content: [sized] },
+          ],
         });
 
-        const messageFraming = emptyUser - empty;
-        expect(imageOnly - empty).toBe(messageFraming + 85);
+        expect(two - one).toBe(100);
+      });
+
+      it("stops past `countUpTo` on an image's estimate", async () => {
+        const provider = createProvider();
+        const params: CountTokensParams = {
+          ...base,
+          model: "claude-sonnet-4-6",
+          messages: [{ role: "user", content: [image] }],
+          tools: [{ name: "t", description: "d ".repeat(2_000), parameters: { type: "object" } }],
+        };
+        const exact = await provider.countTokens(params);
+        const stopped = await provider.countTokens({ ...params, countUpTo: 4_000 });
+
+        expect(stopped).toBeGreaterThan(4_000);
+        expect(stopped).toBeLessThan(exact);
       });
 
       it("counts an assistant call's name and arguments", async () => {
@@ -2884,6 +2928,35 @@ describe("OpenAICompatibleProvider", () => {
       expect(userMsg.content).toBe("[document: text/markdown]\nhello");
     });
 
+    it.each([
+      ["application/json", "data.json", '{"a":1}'],
+      ["application/xml", "feed.xml", "<a/>"],
+      ["application/yaml", "config.yaml", "k: v"],
+      ["application/x-yaml", "config.yml", "k: v"],
+    ])("inlines a %s document as text", async (mediaType, name, text) => {
+      const provider = setup();
+      await provider.chat({
+        model: "m",
+        system: "sys",
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "document",
+                source: "base64",
+                data: Buffer.from(text).toString("base64"),
+                mediaType,
+                name,
+              },
+            ],
+          },
+        ],
+      });
+
+      expect(getMessage(firstCreateArgs(), 1).content).toBe(`[document: ${name}]\n${text}`);
+    });
+
     it("stubs binary documents (e.g. PDF) with a placeholder text", async () => {
       const provider = setup();
       await provider.chat({
@@ -3022,6 +3095,33 @@ describe("OpenAICompatibleProvider", () => {
         type: "image_url",
         image_url: { url: "data:image/png;base64,aW1n" },
       });
+    });
+
+    it("keeps an image's dimensions off the wire", async () => {
+      const provider = setup();
+      await provider.chat({
+        model: "m",
+        system: "sys",
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "image",
+                source: "base64",
+                data: "aW1n",
+                mediaType: "image/png",
+                width: 640,
+                height: 480,
+              },
+            ],
+          },
+        ],
+      });
+
+      expect(getMessage(firstCreateArgs(), 1).content).toEqual([
+        { type: "image_url", image_url: { url: "data:image/png;base64,aW1n" } },
+      ]);
     });
 
     it("sends a base64 image as a data URL and a url image's URL as it is", async () => {

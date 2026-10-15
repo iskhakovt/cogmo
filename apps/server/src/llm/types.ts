@@ -61,6 +61,12 @@ const ImageBlockSchema = z.object({
   source: z.enum(["base64", "url"]),
   data: z.string(),
   mediaType: z.string(),
+  /**
+   * Pixel size, for the local token count on routes that size images by it.
+   * Adapters map blocks field by field, so neither reaches the wire.
+   */
+  width: z.number().int().positive().optional(),
+  height: z.number().int().positive().optional(),
 });
 
 const DocumentBlockSchema = z.object({
