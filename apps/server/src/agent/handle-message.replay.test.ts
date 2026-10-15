@@ -1223,8 +1223,8 @@ describe("handle-message — replay equality", () => {
     "freeze-core-memory-scope",
     "freeze-turn-inputs",
     "load-system-prompt",
-    "auto-recall",
     "freeze-model-limits",
+    "auto-recall",
     "load-last-tokens",
     "count-tokens-1",
     "open-system-prompt-epoch",
@@ -1241,6 +1241,7 @@ describe("handle-message — replay equality", () => {
   async function replayedIter2(
     epoch: { configDigest: string } | null,
     stepIds: ReadonlyArray<string>,
+    asMemoized: (id: string, result: unknown) => unknown = (_id, result) => result,
   ): Promise<string> {
     const fresh = replayDeps(epoch);
     await new InngestTestEngine({
@@ -1259,7 +1260,7 @@ describe("handle-message — replay equality", () => {
         function: createHandleMessage(source.deps),
         events: [event],
       }).executeStep(id);
-      steps.push({ id, handler: () => canonicalKeyOrder(result) });
+      steps.push({ id, handler: () => canonicalKeyOrder(asMemoized(id, result)) });
     }
 
     const replayed = replayDeps(epoch);
@@ -1295,6 +1296,14 @@ describe("handle-message — replay equality", () => {
     expect(sent.match(/- old fact/g)).toHaveLength(1);
     expect(sent).toContain('"input":{"alpha":"x","zeta":1}');
     expect(sent).not.toContain("earlier-signature");
+  });
+
+  it("replays memos from before attachment limits and cutoffs: no cutoff, the same bytes", async () => {
+    await replayedIter2(null, STEPS_BEFORE_ITER2, (id, result) => {
+      if (id !== "freeze-model-limits") return result;
+      const { attachments: _, ...limits } = z.record(z.string(), z.unknown()).parse(result);
+      return limits;
+    });
   });
 
   it("sends llm-iter2 the same bytes on a continuing epoch, announcing a core-memory change", async () => {

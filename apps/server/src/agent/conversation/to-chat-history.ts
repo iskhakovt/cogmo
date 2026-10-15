@@ -1,3 +1,4 @@
+import { match } from "ts-pattern";
 import { extractText, isHarnessPrompt } from "../../llm/content.js";
 import type { TextBlock } from "../../llm/types.js";
 import type { ChatHistoryAttachment, ChatHistoryMessage } from "../store/index.js";
@@ -29,16 +30,17 @@ export function toChatHistory(
 }
 
 function toAttachment(block: StoredContentBlock): ChatHistoryAttachment[] {
-  if (block.type === "image_ref") {
-    return [{ kind: "image", name: block.name ?? null, mediaType: block.original.mediaType }];
-  }
-  if (block.type === "document_ref") {
-    return [{ kind: "document", name: block.name, mediaType: block.mediaType }];
-  }
-  if (block.type === "text" && block.harness === "attachment_placeholder") {
-    return [{ kind: "placeholder", text: block.text }];
-  }
-  return [];
+  return match(block)
+    .with({ type: "image_ref" }, (image): ChatHistoryAttachment[] => [
+      { kind: "image", name: image.name ?? null, mediaType: image.original.mediaType },
+    ])
+    .with({ type: "document_ref" }, (document): ChatHistoryAttachment[] => [
+      { kind: "document", name: document.name, mediaType: document.mediaType },
+    ])
+    .with({ type: "text", harness: "attachment_placeholder" }, (note): ChatHistoryAttachment[] => [
+      { kind: "placeholder", text: note.text },
+    ])
+    .otherwise(() => []);
 }
 
 /** Whether `block` is prose of the message: text that isn't an arrival label or placeholder. */

@@ -7,7 +7,7 @@ import {
   isTurnRowContent,
   NOT_TURN_ROW_JSONPATH,
 } from "./content.js";
-import { type ContentBlock, HARNESS_ARRIVAL_TAGS, HARNESS_ROW_TAGS } from "./types.js";
+import { type ContentBlock, HARNESS_ROW_TAGS } from "./types.js";
 
 describe("canonicalizeToolInputs", () => {
   it("sorts every tool_use input's keys and keeps the values", () => {
@@ -101,9 +101,12 @@ describe("isTurnRowContent", () => {
     expect(isTurnRowContent([block({ type: "text", text: "x", harness: tag })])).toBe(false);
   });
 
-  it.each(HARNESS_ARRIVAL_TAGS)("takes the turn's own row carrying a %s block", (tag) => {
-    expect(isTurnRowContent([block({ type: "text", text: "x", harness: tag })])).toBe(true);
-  });
+  it.each(["image_label", "attachment_placeholder"] as const)(
+    "takes the turn's own row carrying a %s block",
+    (tag) => {
+      expect(isTurnRowContent([block({ type: "text", text: "x", harness: tag })])).toBe(true);
+    },
+  );
 
   it("refuses a tool-result row", () => {
     expect(isTurnRowContent([block({ type: "tool_result", toolUseId: "t1", content: "ok" })])).toBe(

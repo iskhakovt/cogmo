@@ -136,6 +136,19 @@ describe("FallbackLlmProvider constructor", () => {
     expect(new FallbackLlmProvider([only]).name).toBe("anthropic");
   });
 
+  it("declares the strictest attachment limits across its candidates", () => {
+    const anthropic = mockProvider({
+      attachmentLimits: () => ({ requestBytes: 32_000_000, images: 600 }),
+    });
+    const openrouter = mockProvider({
+      attachmentLimits: () => ({ requestBytes: 20_000_000, images: 1_000 }),
+    });
+    expect(new FallbackLlmProvider([anthropic, openrouter]).attachmentLimits(1_000_000)).toEqual({
+      requestBytes: 20_000_000,
+      images: 600,
+    });
+  });
+
   it("composes names when given multiple providers", () => {
     const p1 = mockProvider({ name: "anthropic" });
     const p2 = mockProvider({ name: "openrouter" });

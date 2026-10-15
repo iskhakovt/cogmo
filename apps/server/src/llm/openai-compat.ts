@@ -90,14 +90,14 @@ export class OpenAICompatibleProvider implements LlmProvider {
     });
   }
 
-  /**
-   * The request's prompt tokens, after the tool-result clearing it asks for.
-   * Once the sum passes `countUpTo`, it stops and returns the sum so far.
-   */
   attachmentLimits(): AttachmentLimits {
     return openAICompatibleAttachmentLimits();
   }
 
+  /**
+   * The request's prompt tokens, after the tool-result clearing it asks for.
+   * Once the sum passes `countUpTo`, it stops and returns the sum so far.
+   */
   async countTokens(params: CountTokensParams): Promise<number> {
     // One memory for both, so the count reads the slices the clearing already encoded.
     const tokens = textTokens(cl100k());

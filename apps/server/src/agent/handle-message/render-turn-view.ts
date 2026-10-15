@@ -53,7 +53,7 @@ export async function renderTurnView(
   const current = args.snapshot?.attachmentCutoff ?? null;
   const cutoff: FixedCutoff =
     args.turnModel.attachmentBudget === null
-      ? { cutoff: null, advanced: false }
+      ? { kind: "kept", cutoff: current }
       : fixAttachmentCutoff({
           messages: history.messages,
           messageIds: history.messageIds,

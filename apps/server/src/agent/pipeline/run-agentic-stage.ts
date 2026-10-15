@@ -39,7 +39,7 @@ import { buildSkillTools, composeTurnTools } from "../../skills/skill-tool-build
 import { createSkillsService } from "../../skills/skills-service.js";
 import { type DeliveryRouter, pushOrThrow } from "../../transport/delivery-router.js";
 import type { TransportStore } from "../../transport/store/index.js";
-import { fixAttachmentCutoff } from "../attachments/attachment-cutoff.js";
+import { type FixedCutoff, fixAttachmentCutoff } from "../attachments/attachment-cutoff.js";
 import type { AttachmentReader } from "../attachments/attachment-reader.js";
 import { renderForkSpan } from "../attachments/render-fork-span.js";
 import { renderStoredMessages } from "../attachments/render-stored-content.js";
@@ -69,6 +69,7 @@ import type { Service } from "../service.js";
 import type { AgentStore } from "../store/index.js";
 import { toStoredMessage } from "../stored-content.js";
 import { buildSubAgentTools } from "../subagent/sub-agent-tool-builder.js";
+import { stripThinkingBefore } from "../system-prompt-snapshot.js";
 import type { ToolRegistry } from "../tools.js";
 import { turnCacheIntent } from "../turn-cache-intent.js";
 import {
@@ -336,11 +337,13 @@ export async function runAgenticStage(
   const { budget, clearToolResults, attachmentBudget, maxViewBytes } = limitsPolicy(limits);
 
   // Until one prefix per conversation, a stage's prefix is its own, so it
-  // fixes its own attachment cutoff from none and stores nothing
-  // (design/prompt-caching.md → source (d) → Stage turns).
-  const attachmentCutoff =
+  // fixes its own attachment cutoff from none and stores nothing; an advance
+  // shows placeholders earlier requests didn't, so the thinking before the
+  // stage's row goes with it (design/prompt-caching.md → source (d) → Stage
+  // turns).
+  const fixed: FixedCutoff =
     attachmentBudget === null
-      ? null
+      ? { kind: "kept", cutoff: null }
       : fixAttachmentCutoff({
           messages: turnHistory.messages,
           messageIds: turnHistory.messageIds,
@@ -348,13 +351,16 @@ export async function runAgenticStage(
           current: null,
           budget: attachmentBudget,
           extra: { bytes: 0, images: 0 },
-        }).cutoff;
-  const rendered = await renderStoredMessages(
+        });
+  const attachmentCutoff = fixed.cutoff;
+  const renderedView = await renderStoredMessages(
     turnHistory.messages,
     turnHistory.messageIds,
     deps.attachmentReader,
     attachmentCutoff,
   );
+  const rendered =
+    fixed.kind === "advanced" ? stripThinkingBefore(renderedView, turnIndex) : renderedView;
   const renderedTurn = rendered[turnIndex];
   if (renderedTurn === undefined) throw new Error(`stage prompt message ${turn.id} did not render`);
   const history = rendered.with(

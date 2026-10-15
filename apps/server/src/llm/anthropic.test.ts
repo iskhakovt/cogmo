@@ -1699,6 +1699,21 @@ describe("AnthropicProvider", () => {
       for (const body of Object.values(bodies)) expect(body.betas).toEqual([BINDING]);
     });
 
+    it("declares Anthropic's attachment limits first-party and 20 MB on a third-party endpoint", () => {
+      expect(provider(undefined).attachmentLimits(200_000)).toEqual({
+        requestBytes: 32_000_000,
+        images: 100,
+      });
+      expect(provider(undefined).attachmentLimits(1_000_000)).toEqual({
+        requestBytes: 32_000_000,
+        images: 600,
+      });
+      expect(provider("https://openrouter.ai/api").attachmentLimits(1_000_000)).toEqual({
+        requestBytes: 20_000_000,
+        images: 100,
+      });
+    });
+
     it.each([
       "https://openrouter.ai/api",
       // Ends in `anthropic.com` without being Anthropic's API.

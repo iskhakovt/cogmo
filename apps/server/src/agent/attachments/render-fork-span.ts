@@ -2,7 +2,7 @@ import { type AttachmentLimits, attachmentBudget } from "../../llm/attachment-li
 import type { Message } from "../../llm/types.js";
 import type { StoredMessage } from "../stored-content.js";
 import { stripThinkingBefore } from "../system-prompt-snapshot.js";
-import { fixAttachmentCutoff } from "./attachment-cutoff.js";
+import { type FixedCutoff, fixAttachmentCutoff } from "./attachment-cutoff.js";
 import type { AttachmentReader } from "./attachment-reader.js";
 import { renderStoredMessages } from "./render-stored-content.js";
 
@@ -30,9 +30,9 @@ export async function renderForkSpan(
     sent?: ReadonlyArray<Message>;
   },
 ): Promise<Message[]> {
-  const fixed =
+  const fixed: FixedCutoff =
     args.limits === null
-      ? { cutoff: args.cutoff, advanced: false }
+      ? { kind: "kept", cutoff: args.cutoff }
       : fixAttachmentCutoff({
           messages: args.messages,
           messageIds: args.messageIds,
@@ -41,7 +41,7 @@ export async function renderForkSpan(
           budget: attachmentBudget(args.limits),
           extra: { bytes: 0, images: 0 },
         });
-  if (!fixed.advanced && args.sent !== undefined) return [...args.sent];
+  if (fixed.kind === "kept" && args.sent !== undefined) return [...args.sent];
   const rendered = await renderStoredMessages(args.messages, args.messageIds, reader, fixed.cutoff);
-  return fixed.advanced ? stripThinkingBefore(rendered, rendered.length) : rendered;
+  return fixed.kind === "advanced" ? stripThinkingBefore(rendered, rendered.length) : rendered;
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ImageRefBlock, StoredMessage } from "../stored-content.js";
-import { attachmentLoad, fixAttachmentCutoff } from "./attachment-cutoff.js";
+import { fixAttachmentCutoff } from "./attachment-cutoff.js";
 
 function image(path: string, bytes: number): ImageRefBlock {
   return {
@@ -36,33 +36,6 @@ function sixPhotos(): { messages: StoredMessage[]; messageIds: string[] } {
   return { messages, messageIds };
 }
 
-describe("attachmentLoad", () => {
-  it("counts each ref at its base64 size and each image once", () => {
-    const load = attachmentLoad({
-      role: "user",
-      content: [
-        image("a.jpg", 3),
-        image("b.jpg", 4),
-        {
-          type: "document_ref",
-          path: "d.pdf",
-          mediaType: "application/pdf",
-          name: "d.pdf",
-          bytes: 10,
-        },
-      ],
-    });
-    expect(load).toEqual({ bytes: 4 + 8 + 16, images: 2 });
-  });
-
-  it("counts nothing in a string row", () => {
-    expect(attachmentLoad({ role: "user", content: '[{"type":"image"}]' })).toEqual({
-      bytes: 0,
-      images: 0,
-    });
-  });
-});
-
 describe("fixAttachmentCutoff", () => {
   const none = { bytes: 0, images: 0 };
 
@@ -77,7 +50,7 @@ describe("fixAttachmentCutoff", () => {
         budget: { bytes: 24_000_000, images: 100 },
         extra: none,
       }),
-    ).toEqual({ cutoff: null, advanced: false });
+    ).toEqual({ kind: "kept", cutoff: null });
   });
 
   it("advances oldest first until the view is within half the budget", () => {
@@ -91,7 +64,7 @@ describe("fixAttachmentCutoff", () => {
       budget: { bytes: 20_000_000, images: 100 },
       extra: none,
     });
-    expect(fixed).toEqual({ cutoff: messageIds[6], advanced: true });
+    expect(fixed).toEqual({ kind: "advanced", cutoff: messageIds[6] });
   });
 
   it("advances on the image count as well as bytes", () => {
@@ -105,7 +78,7 @@ describe("fixAttachmentCutoff", () => {
       extra: none,
     });
     // Six images over four: cut to two.
-    expect(fixed).toEqual({ cutoff: messageIds[6], advanced: true });
+    expect(fixed).toEqual({ kind: "advanced", cutoff: messageIds[6] });
   });
 
   it("counts nothing at or before the epoch's cutoff, so later turns of the epoch keep it", () => {
@@ -127,7 +100,7 @@ describe("fixAttachmentCutoff", () => {
       budget,
       extra: none,
     });
-    expect(next).toEqual({ cutoff: first.cutoff, advanced: false });
+    expect(next).toEqual({ kind: "kept", cutoff: first.cutoff });
   });
 
   it("never cuts the turn's own row or past it", () => {
@@ -140,7 +113,7 @@ describe("fixAttachmentCutoff", () => {
       budget: { bytes: 4_000_000, images: 100 },
       extra: none,
     });
-    expect(fixed).toEqual({ cutoff: messageIds[1], advanced: true });
+    expect(fixed).toEqual({ kind: "advanced", cutoff: messageIds[0] });
   });
 
   it("counts what no ref records, a JSON-string turn's resolved attachments", () => {
@@ -153,7 +126,7 @@ describe("fixAttachmentCutoff", () => {
       budget: { bytes: 24_000_000, images: 100 },
       extra: { bytes: 1, images: 0 },
     });
-    expect(fixed.advanced).toBe(true);
+    expect(fixed.kind).toBe("advanced");
   });
 
   it("skips the synthetic summary entry", () => {
@@ -166,6 +139,51 @@ describe("fixAttachmentCutoff", () => {
       budget: { bytes: 20_000_000, images: 100 },
       extra: none,
     });
-    expect(fixed).toEqual({ cutoff: messageIds[6], advanced: true });
+    expect(fixed).toEqual({ kind: "advanced", cutoff: messageIds[6] });
+  });
+
+  it("counts each ref at its base64 size and each image once", () => {
+    const report = {
+      type: "document_ref",
+      path: "d.pdf",
+      mediaType: "application/pdf",
+      name: "d.pdf",
+      bytes: 3_000_000,
+    } as const;
+    const messages: StoredMessage[] = [
+      { role: "user", content: [image("a.jpg", 3_000_000), report] },
+      { role: "user", content: "now" },
+    ];
+    const at = (bytes: number, images: number) =>
+      fixAttachmentCutoff({
+        messages,
+        messageIds: ["id-1", "id-2"],
+        end: 1,
+        current: null,
+        budget: { bytes, images },
+        extra: none,
+      }).kind;
+    // 8,000,000 bytes of base64 and one image.
+    expect(at(8_000_000, 1)).toBe("kept");
+    expect(at(7_999_999, 1)).toBe("advanced");
+    expect(at(8_000_000, 0)).toBe("advanced");
+  });
+
+  it("keeps the cutoff when only the turn's own attachments are over the budget", () => {
+    const messages: StoredMessage[] = [
+      { role: "user", content: "hello" },
+      reply,
+      { role: "user", content: '[{"type":"document","path":"inbound/big.pdf"}]' },
+    ];
+    expect(
+      fixAttachmentCutoff({
+        messages,
+        messageIds: ["id-1", "id-2", "id-3"],
+        end: 2,
+        current: null,
+        budget: { bytes: 12_000_000, images: 100 },
+        extra: { bytes: 13_000_000, images: 0 },
+      }),
+    ).toEqual({ kind: "kept", cutoff: null });
   });
 });

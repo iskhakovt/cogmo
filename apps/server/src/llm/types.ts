@@ -33,7 +33,7 @@ export const HARNESS_ROW_TAGS = ["continuation", "volume_nudge", "truncation_not
  * `image_label` names the image ref after it, and `attachment_placeholder`
  * stands in for an attachment arrival didn't store.
  */
-export const HARNESS_ARRIVAL_TAGS = ["image_label", "attachment_placeholder"] as const;
+const HARNESS_ARRIVAL_TAGS = ["image_label", "attachment_placeholder"] as const;
 
 export const HarnessTagSchema = z.enum([...HARNESS_ROW_TAGS, ...HARNESS_ARRIVAL_TAGS]);
 export type HarnessTag = z.infer<typeof HarnessTagSchema>;

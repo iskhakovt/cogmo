@@ -8,7 +8,12 @@
 
 import { match } from "ts-pattern";
 import type { ContentBlock, Message } from "../../llm/types.js";
-import type { AttachmentRef, StoredContent, StoredMessage } from "../stored-content.js";
+import {
+  type AttachmentRef,
+  isAttachmentRef,
+  type StoredContent,
+  type StoredMessage,
+} from "../stored-content.js";
 import type { AttachmentReader } from "./attachment-reader.js";
 
 /**
@@ -92,9 +97,7 @@ export async function renderStoredContent(
   if (typeof content === "string") return content;
   return Promise.all(
     content.map((block) =>
-      block.type === "image_ref" || block.type === "document_ref"
-        ? renderRef(block, reader, beforeCutoff)
-        : Promise.resolve(block),
+      isAttachmentRef(block) ? renderRef(block, reader, beforeCutoff) : Promise.resolve(block),
     ),
   );
 }

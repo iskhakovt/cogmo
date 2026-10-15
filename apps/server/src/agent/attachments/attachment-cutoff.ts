@@ -18,7 +18,7 @@ interface AttachmentLoad {
 }
 
 /** The base64 bytes and image count of a row's refs. */
-export function attachmentLoad(message: StoredMessage): AttachmentLoad {
+function attachmentLoad(message: StoredMessage): AttachmentLoad {
   if (typeof message.content === "string") return { bytes: 0, images: 0 };
   return message.content.filter(isAttachmentRef).reduce(
     (load, ref) => ({
@@ -33,11 +33,13 @@ function within(load: AttachmentLoad, budget: AttachmentBudget, fraction: number
   return load.bytes <= budget.bytes * fraction && load.images <= budget.images * fraction;
 }
 
-export interface FixedCutoff {
-  cutoff: string | null;
-  /** Whether the cutoff moved past `current`: the turn opens an `attachments` epoch. */
-  advanced: boolean;
-}
+/**
+ * The cutoff a view renders under: the epoch's, `kept`, or one moved past it,
+ * `advanced`, for which the turn opens an `attachments` epoch.
+ */
+export type FixedCutoff =
+  | { kind: "kept"; cutoff: string | null }
+  | { kind: "advanced"; cutoff: string };
 
 /**
  * The cutoff a view renders under. `end` is the first position that can't be
@@ -63,17 +65,21 @@ export function fixAttachmentCutoff(args: {
     (sum, load) => ({ bytes: sum.bytes + load.bytes, images: sum.images + load.images }),
     args.extra,
   );
-  if (within(total, budget, 1)) return { cutoff: args.current, advanced: false };
+  if (within(total, budget, 1)) return { kind: "kept", cutoff: args.current };
 
   let remaining = total;
   let cutoff = args.current;
   for (let i = 0; i < Math.min(args.end, messages.length); i++) {
     const id = messageIds[i] ?? null;
     const load = loads[i];
-    if (id === null || load === undefined || isAtOrBefore(id, cutoff)) continue;
+    // Only a row with attachments moves the cutoff: one that removes nothing
+    // would open an epoch for nothing.
+    if (id === null || load === undefined || (load.bytes === 0 && load.images === 0)) continue;
     if (within(remaining, budget, 0.5)) break;
     remaining = { bytes: remaining.bytes - load.bytes, images: remaining.images - load.images };
     cutoff = id;
   }
-  return { cutoff, advanced: cutoff !== args.current };
+  return cutoff === null || cutoff === args.current
+    ? { kind: "kept", cutoff: args.current }
+    : { kind: "advanced", cutoff };
 }

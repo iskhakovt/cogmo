@@ -266,11 +266,6 @@ export class AnthropicProvider implements LlmProvider {
   }
 
   /**
-   * The request's input tokens, after the edits it asks for: the endpoint
-   * applies `context_management` as it does on a message, and runs the same
-   * prefix check, so the count carries the same controls.
-   */
-  /**
    * Anthropic's own limits on its API. A third-party Anthropic-compatible
    * endpoint can route to Bedrock, which caps a request at 20 MB, so it gets
    * the OpenAI-compatible routes' limits.
@@ -281,6 +276,11 @@ export class AnthropicProvider implements LlmProvider {
       : openAICompatibleAttachmentLimits();
   }
 
+  /**
+   * The request's input tokens, after the edits it asks for: the endpoint
+   * applies `context_management` as it does on a message, and runs the same
+   * prefix check, so the count carries the same controls.
+   */
   async countTokens(params: CountTokensParams): Promise<number> {
     const built = buildCreateParams(
       { ...params, maxTokens: 1 },

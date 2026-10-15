@@ -98,7 +98,7 @@ export async function assembleTurnContext(
   // bound to an earlier system prompt or history.
   const loadedStart = historyStart(turnHistory.messageIds, null);
   const continuing =
-    !args.view.cutoff.advanced &&
+    args.view.cutoff.kind === "kept" &&
     continuesEpoch(loadedSystemPrompt.snapshot, {
       configDigest: loadedSystemPrompt.configDigest,
       historyStart: loadedStart,

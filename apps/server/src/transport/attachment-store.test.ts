@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
-import { mediaTypeToExt } from "./attachment-store.js";
+import { NoSuchKey, type S3Client } from "@aws-sdk/client-s3";
+import { describe, expect, it, vi } from "vitest";
+import { createAttachmentStore, mediaTypeToExt } from "./attachment-store.js";
 
 describe("mediaTypeToExt", () => {
   it.each([
@@ -26,5 +27,31 @@ describe("mediaTypeToExt", () => {
   it("falls back to bin for malformed input", () => {
     expect(mediaTypeToExt("garbage")).toBe("bin");
     expect(mediaTypeToExt("")).toBe("bin");
+  });
+});
+
+describe("createAttachmentStore().read", () => {
+  function store(send: (command: unknown) => Promise<unknown>) {
+    // Only `send` is exercised.
+    return createAttachmentStore({ send } as unknown as S3Client, "bucket");
+  }
+
+  it("returns the object's bytes", async () => {
+    const read = await store(async () => ({
+      Body: { transformToByteArray: async () => new Uint8Array([1, 2, 3]) },
+    })).read("inbound/a.jpg");
+    expect(read._unsafeUnwrap()).toEqual(Buffer.from([1, 2, 3]));
+  });
+
+  it("reports a missing key as missing, which no retry changes", async () => {
+    const read = await store(async () => {
+      throw new NoSuchKey({ message: "gone", $metadata: {} });
+    }).read("inbound/a.jpg");
+    expect(read._unsafeUnwrapErr()).toEqual({ kind: "missing" });
+  });
+
+  it("throws anything else, so the step retries it", async () => {
+    const send = vi.fn().mockRejectedValue(new Error("socket hang up"));
+    await expect(store(send).read("inbound/a.jpg")).rejects.toThrow("socket hang up");
   });
 });
