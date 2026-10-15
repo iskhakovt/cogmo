@@ -34,6 +34,7 @@
  */
 
 import { logger } from "../logger.js";
+import { type AttachmentLimits, strictestLimits } from "./attachment-limits.js";
 import { ProviderProtocolError } from "./errors.js";
 import type { LlmProvider } from "./provider.js";
 import type {
@@ -163,6 +164,13 @@ export class FallbackLlmProvider implements LlmProvider {
 
   async countTokens(params: CountTokensParams): Promise<number> {
     return this.#runWithFallback("countTokens", undefined, (p) => p.countTokens(params));
+  }
+
+  /** The strictest of the candidates' limits, since any of them may serve the request. */
+  attachmentLimits(contextWindow: number): AttachmentLimits {
+    const [first, ...rest] = this.#providers.map((p) => p.attachmentLimits(contextWindow));
+    if (first === undefined) throw new Error("unreachable: no provider");
+    return strictestLimits([first, ...rest]);
   }
 
   /**

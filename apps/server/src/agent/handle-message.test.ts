@@ -6,6 +6,7 @@ import { mock } from "vitest-mock-extended";
 import type { z } from "zod";
 import { conversationTurnConcurrency } from "../inngest/concurrency.js";
 import type { inboundReady } from "../inngest/events.js";
+import { openAICompatibleAttachmentLimits } from "../llm/attachment-limits.js";
 import { MAX_REQUEST_BYTES, MAX_VIEW_BYTES } from "../llm/request-size.js";
 import { ProviderConfigError } from "../llm/resolver.js";
 import type { ChatParams, ChatStreamFrame, Message, StopReason } from "../llm/types.js";
@@ -24,6 +25,7 @@ import {
   MOCK_MESSAGE_CREATED_AT,
   type MockStep,
   mockAgentStore,
+  mockAttachmentStore,
   mockDeliveryHandle,
   mockDeliveryRouter,
   mockFilesService,
@@ -40,6 +42,7 @@ import {
 } from "../test/factories.js";
 import type { InboundContent } from "../transport/content.js";
 import type { StreamDeliveryError } from "../transport/delivery-router.js";
+import { createAttachmentReader } from "./attachments/attachment-reader.js";
 import { toolResultClearing } from "./context.js";
 import { coreMemoryTools } from "./core-memory-tools.js";
 import { readFile } from "./file-tools.js";
@@ -49,6 +52,7 @@ import type { ImageToolsLoader } from "./image-tools-loader.js";
 import { runStreamingAgentLoop } from "./loop.js";
 import { memoryTools } from "./memory-tools.js";
 import { DefaultPromptSource } from "./prompt.js";
+import type { StoredMessage } from "./stored-content.js";
 import { ToolRegistry, type ToolSpec } from "./tools.js";
 
 type InboundReadyData = z.infer<typeof inboundReady.schema>;
@@ -90,10 +94,10 @@ function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
       configuration: vi.fn().mockResolvedValue("configuration"),
     },
     fileService: mockFilesService(),
-    attachments: {
+    attachments: mockAttachmentStore({
       upload: vi.fn().mockResolvedValue("inbound/test.jpg"),
       download: vi.fn().mockResolvedValue(Buffer.from("fake-image")),
-    },
+    }),
     debounceConfig: { idleTimeoutMs: 0, maxWaitMs: 0, resumePolicy: "debounce" as const },
     deliveryRouter: mockDeliveryRouter(),
     runStreamingAgentLoop: vi.fn().mockResolvedValue({
@@ -108,6 +112,7 @@ function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
       streamed: { text: "", toolUseIds: [] },
     }),
     userTimezone: "UTC",
+    attachmentReader: createAttachmentReader(mockAttachmentStore(), 24_000_000),
     ...overrides,
   };
 }
@@ -800,10 +805,10 @@ describe("createHandleMessage", () => {
           },
         ]),
       }),
-      attachments: {
+      attachments: mockAttachmentStore({
         upload: vi.fn().mockResolvedValue("inbound/x"),
         download: vi.fn().mockResolvedValue(docBytes),
-      },
+      }),
     });
 
     await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
@@ -852,10 +857,10 @@ describe("createHandleMessage", () => {
           },
         ]),
       }),
-      attachments: {
+      attachments: mockAttachmentStore({
         upload: vi.fn().mockResolvedValue("inbound/x"),
         download: vi.fn().mockResolvedValue(Buffer.from("x")),
-      },
+      }),
     });
 
     await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
@@ -881,10 +886,10 @@ describe("createHandleMessage", () => {
     });
     const deps = mockDeps({
       deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
-      attachments: {
+      attachments: mockAttachmentStore({
         upload: vi.fn().mockResolvedValue("inbound/x"),
         download: vi.fn().mockResolvedValue(docBytes),
-      },
+      }),
       runStreamingAgentLoop: vi.fn().mockResolvedValue({
         text: "here you go",
         messages: [],
@@ -949,7 +954,10 @@ describe("createHandleMessage", () => {
 
     const deps = mockDeps({
       deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
-      attachments: { upload: vi.fn().mockResolvedValue("inbound/x"), download },
+      attachments: mockAttachmentStore({
+        upload: vi.fn().mockResolvedValue("inbound/x"),
+        download,
+      }),
       runStreamingAgentLoop: vi.fn().mockResolvedValue({
         text: "here",
         messages: [],
@@ -1020,7 +1028,10 @@ describe("createHandleMessage", () => {
     });
     const deps = mockDeps({
       deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
-      attachments: { upload: vi.fn().mockResolvedValue("inbound/x"), download },
+      attachments: mockAttachmentStore({
+        upload: vi.fn().mockResolvedValue("inbound/x"),
+        download,
+      }),
       runStreamingAgentLoop: vi.fn().mockResolvedValue({
         text: "pictures",
         messages: [],
@@ -1565,11 +1576,14 @@ describe("createHandleMessage", () => {
       model: "mock",
       usage: { inputTokens: 10, outputTokens: 5 },
     });
-    // Past 80% of the view cap, within 80% of the request cap it leaves the wire room under.
+    // On a 20 MB route: past 80% of the view cap, within 80% of the request
+    // cap it leaves the wire room under.
     const huge = "x".repeat(Math.floor(MAX_REQUEST_BYTES * 0.8) - 20_000);
     expect(huge.length).toBeGreaterThan(MAX_VIEW_BYTES * 0.8);
     const deps = mockDeps({
-      resolveProvider: mockResolver(mockProvider({ countTokens, chat })),
+      resolveProvider: mockResolver(
+        mockProvider({ countTokens, chat, attachmentLimits: openAICompatibleAttachmentLimits }),
+      ),
       agentStore: mockAgentStore({
         getLastTokens: vi.fn().mockResolvedValue({ inputTokens: 1000, outputTokens: 100 }),
         listMessages: vi.fn().mockResolvedValue([
@@ -2549,10 +2563,10 @@ describe("createHandleMessage", () => {
             .fn()
             .mockResolvedValue([{ id: "msg-1", role: "user", content: "hello there" }]),
         }),
-        attachments: {
+        attachments: mockAttachmentStore({
           upload: vi.fn().mockResolvedValue("inbound/x"),
           download: vi.fn().mockResolvedValue(Buffer.from("ogg-bytes")),
-        },
+        }),
         transportStore: mockTransportStore({
           getUnbatchedInbound: vi.fn().mockResolvedValue([
             {
@@ -2591,10 +2605,10 @@ describe("createHandleMessage", () => {
             .fn()
             .mockResolvedValue([{ id: "msg-1", role: "user", content: "speak" }]),
         }),
-        attachments: {
+        attachments: mockAttachmentStore({
           upload: vi.fn().mockResolvedValue("inbound/x"),
           download: vi.fn().mockResolvedValue(Buffer.from("bytes")),
-        },
+        }),
         transportStore: mockTransportStore({
           getUnbatchedInbound: vi.fn().mockResolvedValue([
             {
@@ -2798,10 +2812,10 @@ describe("createHandleMessage", () => {
               { id: "msg-1", role: "user", content: "check this out\nthe meeting was rescheduled" },
             ]),
         }),
-        attachments: {
+        attachments: mockAttachmentStore({
           upload: vi.fn().mockResolvedValue("inbound/x"),
           download: vi.fn().mockResolvedValue(Buffer.from("ogg-bytes")),
-        },
+        }),
         transportStore: mockTransportStore({
           getUnbatchedInbound: vi.fn().mockResolvedValue([
             {
@@ -2876,10 +2890,10 @@ describe("createHandleMessage", () => {
             .fn()
             .mockResolvedValue([{ id: "msg-1", role: "user", content: "what's the weather" }]),
         }),
-        attachments: {
+        attachments: mockAttachmentStore({
           upload: vi.fn().mockResolvedValue("inbound/x"),
           download: vi.fn().mockResolvedValue(Buffer.from("ogg-bytes")),
-        },
+        }),
         deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
         transportStore: mockTransportStore({
           // Voice inbound — last inbound was voice, so auto mirrors true.
@@ -2945,10 +2959,10 @@ describe("createHandleMessage", () => {
             memoryScope: null,
           }),
         }),
-        attachments: {
+        attachments: mockAttachmentStore({
           upload: vi.fn().mockResolvedValue("inbound/x"),
           download: vi.fn().mockResolvedValue(Buffer.from("ogg-bytes")),
-        },
+        }),
         deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
         transportStore: mockTransportStore({
           getUnbatchedInbound: vi.fn().mockResolvedValue([
@@ -3011,10 +3025,10 @@ describe("createHandleMessage", () => {
             memoryScope: null,
           }),
         }),
-        attachments: {
+        attachments: mockAttachmentStore({
           upload: vi.fn().mockResolvedValue("inbound/x"),
           download: vi.fn().mockResolvedValue(Buffer.from("ogg-bytes")),
-        },
+        }),
         deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
         transportStore: mockTransportStore({
           getUnbatchedInbound: vi.fn().mockResolvedValue([
@@ -3076,10 +3090,10 @@ describe("createHandleMessage", () => {
             memoryScope: null,
           }),
         }),
-        attachments: {
+        attachments: mockAttachmentStore({
           upload: vi.fn().mockResolvedValue("inbound/x"),
           download: vi.fn().mockResolvedValue(Buffer.from("ogg-bytes")),
-        },
+        }),
         deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
         transportStore: mockTransportStore({
           getUnbatchedInbound: vi.fn().mockResolvedValue([
@@ -3528,10 +3542,10 @@ describe("createHandleMessage", () => {
         [{ type: "voice", path: "inbound/v.ogg", mediaType: "audio/ogg", forwarded }],
         {
           voiceResolver: mockVoiceResolver(mockVoiceBundle({ stt })),
-          attachments: {
+          attachments: mockAttachmentStore({
             upload: vi.fn().mockResolvedValue("inbound/x"),
             download: vi.fn().mockResolvedValue(Buffer.from("ogg-bytes")),
-          },
+          }),
         },
       );
 
@@ -3572,10 +3586,10 @@ describe("createHandleMessage", () => {
         [{ type: "voice", path: "inbound/v.ogg", mediaType: "audio/ogg", forwarded }],
         {
           voiceResolver: mockVoiceResolver(mockVoiceBundle({ stt })),
-          attachments: {
+          attachments: mockAttachmentStore({
             upload: vi.fn().mockResolvedValue("inbound/x"),
             download: vi.fn().mockResolvedValue(Buffer.from("ogg-bytes")),
-          },
+          }),
         },
       );
 
@@ -4493,7 +4507,7 @@ describe("createHandleMessage", () => {
 
 describe("durable conversation summaries", () => {
   /** `n` alternating messages carrying the ids the loader aligns against. */
-  function rows(n: number): (Message & { id: string })[] {
+  function rows(n: number): (StoredMessage & { id: string })[] {
     return Array.from({ length: n }, (_, i) => ({
       id: `m${i + 1}`,
       role: i % 2 === 0 ? ("user" as const) : ("assistant" as const),
@@ -4895,7 +4909,7 @@ describe("system prompt snapshot", () => {
   }
 
   /** An earlier turn whose reply carries a thinking block, then this turn's row. */
-  const HISTORY: (Message & { id: string })[] = [
+  const HISTORY: (StoredMessage & { id: string })[] = [
     { id: "m1", role: "user", content: "first" },
     { id: "m2", role: "assistant", content: [thinking, { type: "text", text: "reply" }] },
     { id: "msg-1", role: "user", content: "hello" },
@@ -4919,9 +4933,118 @@ describe("system prompt snapshot", () => {
         historyStart: "msg-1",
         rendered: "FIRST PROMPT",
         configDigest: expect.any(String),
+        attachmentCutoff: null,
       },
     );
     expect(loopParams(deps).systemPrompt).toBe("FIRST PROMPT");
+  });
+
+  /** A normalized photo of `bytes` (base64 4/3 of it), stored under `path`. */
+  function photoRef(path: string, bytes: number) {
+    return {
+      type: "image_ref",
+      path,
+      mediaType: "image/jpeg",
+      width: 2000,
+      height: 1500,
+      bytes,
+      original: { path: `inbound/${path}`, mediaType: "image/jpeg" },
+    } as const;
+  }
+
+  /** Three photo turns of 12 MB base64 each, then this turn's text row: 36 MB over a 24 MB budget. */
+  const PHOTO_HISTORY: (StoredMessage & { id: string })[] = [
+    { id: "m1", role: "user", content: [photoRef("normalized/1.jpg", 9_000_000)] },
+    { id: "m2", role: "assistant", content: [thinking, { type: "text", text: "one" }] },
+    { id: "m3", role: "user", content: [photoRef("normalized/3.jpg", 9_000_000)] },
+    { id: "m4", role: "assistant", content: [thinking, { type: "text", text: "three" }] },
+    { id: "m5", role: "user", content: [photoRef("normalized/5.jpg", 9_000_000)] },
+    { id: "m6", role: "assistant", content: [{ type: "text", text: "five" }] },
+    { id: "msg-1", role: "user", content: "which was best?" },
+  ];
+
+  const CUT = "[Image: photo. Sent earlier and no longer attached.]";
+
+  it("renders a turn row holding refs from the row, not from its inbound batch", async () => {
+    const read = vi.fn().mockResolvedValue(ok(Buffer.from("pixels")));
+    const attachments = mockAttachmentStore({ read });
+    const deps = mockDeps({
+      attachments,
+      attachmentReader: createAttachmentReader(attachments, 24_000_000),
+      agentStore: mockAgentStore({
+        listMessages: vi.fn().mockResolvedValue([
+          {
+            id: "msg-1",
+            role: "user",
+            content: [
+              { type: "text", text: "Image 1: normalized/1.jpg", harness: "image_label" },
+              photoRef("normalized/1.jpg", 6),
+            ],
+          },
+        ]),
+      }),
+    });
+
+    await run(deps);
+
+    const [turn] = loopParams(deps).messages;
+    expect(turn?.content).toEqual([
+      expect.objectContaining({ type: "text" }),
+      { type: "text", text: "Image 1: normalized/1.jpg", harness: "image_label" },
+      {
+        type: "image",
+        source: "base64",
+        data: Buffer.from("pixels").toString("base64"),
+        mediaType: "image/jpeg",
+        width: 2000,
+        height: 1500,
+      },
+    ]);
+    expect(read).toHaveBeenCalledWith("normalized/1.jpg");
+    expect(attachments.download).not.toHaveBeenCalled();
+  });
+
+  it("advances the attachment cutoff past the budget and opens an epoch storing it", async () => {
+    const configDigest = await defaultDigest();
+    const deps = mockDeps({
+      agentStore: mockAgentStore({
+        listMessages: vi.fn().mockResolvedValue(PHOTO_HISTORY),
+        getLatestSystemPromptSnapshot: vi.fn().mockResolvedValue(snapshot({ configDigest })),
+      }),
+    });
+
+    await run(deps);
+
+    expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ openedBy: "msg-1", attachmentCutoff: "m3" }),
+    );
+    const { messages } = loopParams(deps);
+    expect(messages[0]?.content).toEqual([{ type: "text", text: CUT }]);
+    expect(messages[2]?.content).toEqual([{ type: "text", text: CUT }]);
+    expect(messages[4]?.content).toEqual([expect.objectContaining({ type: "image" })]);
+    // The opening turn strips the thinking bound to the epoch before it.
+    expect(messages[1]?.content).toEqual([{ type: "text", text: "one" }]);
+  });
+
+  it("keeps the epoch's cutoff while the view fits, continuing the epoch", async () => {
+    const configDigest = await defaultDigest();
+    const deps = mockDeps({
+      agentStore: mockAgentStore({
+        listMessages: vi.fn().mockResolvedValue(PHOTO_HISTORY),
+        getLatestSystemPromptSnapshot: vi
+          .fn()
+          .mockResolvedValue({ ...snapshot({ configDigest }), attachmentCutoff: "m3" }),
+      }),
+    });
+
+    await run(deps);
+
+    expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).not.toHaveBeenCalled();
+    const { messages } = loopParams(deps);
+    expect(messages[0]?.content).toEqual([{ type: "text", text: CUT }]);
+    expect(messages[2]?.content).toEqual([{ type: "text", text: CUT }]);
+    expect(messages[3]?.content).toEqual([thinking, { type: "text", text: "three" }]);
   });
 
   it("continues the epoch: sends its prompt and keeps the thinking after its opening row", async () => {

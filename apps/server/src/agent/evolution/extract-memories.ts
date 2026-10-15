@@ -10,10 +10,10 @@ import * as R from "remeda";
 import type { z } from "zod";
 import type { LlmProvider } from "../../llm/provider.js";
 import { chatTyped } from "../../llm/typed.js";
-import type { Message } from "../../llm/types.js";
 import { logger } from "../../logger.js";
 import type { MemoryProvider, RetainBatchItem } from "../../memory/provider.js";
 import { bindsUnseenUserRule, type MemoryRule } from "../store/index.js";
+import type { StoredMessage } from "../stored-content.js";
 import type { ObserverFire } from "./drain-pending-memories.js";
 import { formatTranscript } from "./extract-corrections.js";
 import {
@@ -64,7 +64,7 @@ function nothingExtracted(skippedForUnseenRules: number): MemoryExtractionResult
  * filter uses for speaker-driven isolation.
  */
 export async function extractMemories(
-  history: ReadonlyArray<Message>,
+  history: ReadonlyArray<StoredMessage>,
   bankId: string,
   profileClass: string | null,
   deps: MemoryExtractionDeps,

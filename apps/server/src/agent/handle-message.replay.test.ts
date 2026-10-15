@@ -29,6 +29,7 @@ import { mock } from "vitest-mock-extended";
 import { z } from "zod";
 import { inngest } from "../inngest/client.js";
 import { AnthropicProvider } from "../llm/anthropic.js";
+import { openAICompatibleAttachmentLimits } from "../llm/attachment-limits.js";
 import { MAX_REQUEST_BYTES } from "../llm/request-size.js";
 import type { ChatParams, ChatStreamFrame, ContentFrame, ToolDefinition } from "../llm/types.js";
 import { agentIterations, memoryRecallFailures } from "../metrics.js";
@@ -39,6 +40,7 @@ import {
   fakeRunInTx,
   MOCK_MESSAGE_CREATED_AT,
   mockAgentStore,
+  mockAttachmentStore,
   mockDeliveryHandle,
   mockDeliveryRouter,
   mockFilesService,
@@ -55,6 +57,7 @@ import {
 } from "../test/factories.js";
 import { createWireRecorder } from "../test/wire-recorder.js";
 import { canonicalKeyOrder } from "../util/canonical-key-order.js";
+import { createAttachmentReader } from "./attachments/attachment-reader.js";
 import type { HandleMessageDeps } from "./handle-message.js";
 import { createHandleMessage } from "./handle-message.js";
 import { runStreamingAgentLoop } from "./loop.js";
@@ -103,10 +106,10 @@ function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
       configuration: vi.fn().mockResolvedValue("configuration"),
     },
     fileService: mockFilesService(),
-    attachments: {
+    attachments: mockAttachmentStore({
       upload: vi.fn().mockResolvedValue("inbound/test.jpg"),
       download: vi.fn().mockResolvedValue(Buffer.from("fake-image")),
-    },
+    }),
     debounceConfig: { idleTimeoutMs: 0, maxWaitMs: 0, resumePolicy: "debounce" as const },
     deliveryRouter: mockDeliveryRouter({
       prepare: vi.fn().mockResolvedValue(mockDeliveryHandle()),
@@ -123,6 +126,7 @@ function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
       streamed: { text: "", toolUseIds: [] },
     }),
     userTimezone: "UTC",
+    attachmentReader: createAttachmentReader(mockAttachmentStore(), 24_000_000),
     ...overrides,
   };
 }
@@ -348,7 +352,10 @@ describe("handle-message — crash recovery / step replay", () => {
       usage: { inputTokens: 10, outputTokens: 5 },
     });
     const deps = mockDeps({
-      resolveProvider: mockResolver(mockProvider({ countTokens, chat })),
+      // A 20 MB route, whose request cap `huge` is sized against.
+      resolveProvider: mockResolver(
+        mockProvider({ countTokens, chat, attachmentLimits: openAICompatibleAttachmentLimits }),
+      ),
       agentStore: mockAgentStore({
         getLastTokens: vi.fn().mockResolvedValue({ inputTokens: 1_000, outputTokens: 100 }),
         listMessages: vi.fn().mockResolvedValue([

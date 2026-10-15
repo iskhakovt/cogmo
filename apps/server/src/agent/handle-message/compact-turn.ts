@@ -1,10 +1,11 @@
 import type { Logger } from "pino";
 import type { Transactor } from "../../db/index.js";
 import { resolveLimits } from "../../llm/models.js";
-import { MAX_VIEW_BYTES } from "../../llm/request-size.js";
 import type { LlmProviderResolver } from "../../llm/resolver.js";
 import type { CountTokensParams, Message, ToolDefinition } from "../../llm/types.js";
 import { type DeliveryHandle, pushOrThrow } from "../../transport/delivery-router.js";
+import type { AttachmentReader } from "../attachments/attachment-reader.js";
+import { renderForkSpan } from "../attachments/render-fork-span.js";
 import {
   compactMessages,
   extractSummaryText,
@@ -14,10 +15,12 @@ import {
 import { summarizedSpan } from "../conversation/load-turn-history.js";
 import type { StepRunner } from "../loop.js";
 import type { AgentStore } from "../store/index.js";
+import type { StoredMessage } from "../stored-content.js";
 import { resolveOrFail, type TurnModel } from "./resolve-turn-model.js";
 
 export interface CompactTurnDeps {
   runInTx: Transactor;
+  attachmentReader: AttachmentReader;
   agentStore: Pick<AgentStore, "getLastTokens" | "insertOrRecoverSummary">;
   resolveProvider: LlmProviderResolver;
 }
@@ -32,6 +35,14 @@ export interface CompactTurnArgs {
   toolDefs: ToolDefinition[];
   /** `load-turn-transcript`'s message ids, positionally aligned with `messages`. */
   messageIds: ReadonlyArray<string | null>;
+  /**
+   * `load-turn-transcript`'s stored rows, positionally aligned with
+   * `messages`: the summarization fork re-renders its span from them when its
+   * route's attachment budget is smaller (a placeholder names a ref's file).
+   */
+  storedMessages: ReadonlyArray<StoredMessage>;
+  /** The attachment cutoff the view renders under. */
+  attachmentCutoff: string | null;
   /** The characters this turn adds that no earlier request's usage counted. */
   newContentChars: number;
   /** The status banner a summarizing turn shows goes here. */
@@ -88,7 +99,7 @@ export async function compactTurn(
     budget,
   );
 
-  const summarizer = prefixSummarizer(stepRun, deps.resolveProvider, args);
+  const summarizer = prefixSummarizer(stepRun, deps, args);
 
   // The skip-counting decision flows in as `skipBudgetStrategies`, which
   // spares compactMessages the provider.countTokens round-trip when budget
@@ -101,7 +112,7 @@ export async function compactTurn(
       countTokens: countTokensSteps(stepRun, turnModel),
       budget,
       clearToolResults: turnModel.clearToolResults,
-      maxViewBytes: MAX_VIEW_BYTES,
+      maxViewBytes: turnModel.maxViewBytes,
       // Refuse a split that buys nothing durable — the shape where the
       // prefix is the previously-stored summary and nothing else.
       canSummarizePrefix: (candidate) => summarizedSpan(args.messageIds, candidate) !== null,
@@ -175,8 +186,17 @@ interface PrefixSummary {
  */
 function prefixSummarizer(
   stepRun: StepRunner,
-  resolveProvider: LlmProviderResolver,
-  args: Pick<CompactTurnArgs, "turnModel" | "summarizationModel" | "delivery" | "turnLogger">,
+  deps: Pick<CompactTurnDeps, "resolveProvider" | "attachmentReader">,
+  args: Pick<
+    CompactTurnArgs,
+    | "turnModel"
+    | "summarizationModel"
+    | "delivery"
+    | "turnLogger"
+    | "storedMessages"
+    | "messageIds"
+    | "attachmentCutoff"
+  >,
 ): {
   summarize: (system: string, msgs: Message[]) => Promise<string>;
   outcome: () => PrefixSummary | null;
@@ -199,7 +219,7 @@ function prefixSummarizer(
     const resolvedSummarization =
       summarizationModel === turnModel.model
         ? null
-        : await resolveOrFail(resolveProvider, summarizationModel);
+        : await resolveOrFail(deps.resolveProvider, summarizationModel);
     const summarizationProvider = resolvedSummarization?.provider ?? turnModel.provider;
     const summarizationLimits = resolvedSummarization
       ? resolveLimits(summarizationModel, resolvedSummarization.limits)
@@ -219,11 +239,20 @@ function prefixSummarizer(
         type: "status",
         message: "Summarizing conversation...",
       });
+      // Decided in the body, so the fork's cutoff and its reads happen once:
+      // the summarization route's limits come from a bare-body resolve.
+      const span = await renderForkSpan(deps.attachmentReader, {
+        messages: args.storedMessages.slice(0, msgs.length),
+        messageIds: args.messageIds.slice(0, msgs.length),
+        cutoff: args.attachmentCutoff,
+        limits: summarizationProvider.attachmentLimits(summarizationLimits.contextWindow),
+        sent: msgs,
+      });
       const response = await summarizationProvider.chat(
         summarizationRequest({
           model: summarizationModel,
           system,
-          messages: msgs,
+          messages: span,
           maxOutputTokens: summarizationLimits.maxOutputTokens,
           clearToolResults: turnModel.clearToolResults,
         }),

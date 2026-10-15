@@ -19,7 +19,9 @@ const harnessPromptTags: ReadonlySet<HarnessTag> = new Set<HarnessTag>([
  * row to its tool call, the continuation prompt to the row it follows.
  * {@link NOT_TURN_ROW_JSONPATH} is the same rule in SQL.
  */
-export function isTurnRowContent(content: string | ReadonlyArray<ContentBlock>): boolean {
+export function isTurnRowContent(
+  content: string | ReadonlyArray<{ type: string; harness?: HarnessTag | undefined }>,
+): boolean {
   if (typeof content === "string") return true;
   return !content.some(
     (b) =>
@@ -57,7 +59,10 @@ export function canonicalizeToolInputs(content: ReadonlyArray<ContentBlock>): Co
  * (the web history, the Observer) drop these; the truncation notice is part of
  * the reply and stays.
  */
-export function isHarnessPrompt(block: ContentBlock): boolean {
+export function isHarnessPrompt(block: {
+  type: string;
+  harness?: HarnessTag | undefined;
+}): boolean {
   return (
     (block.type === "text" || block.type === "tool_result") &&
     block.harness !== undefined &&

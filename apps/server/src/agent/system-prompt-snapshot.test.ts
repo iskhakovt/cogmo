@@ -18,6 +18,7 @@ describe("configDigest", () => {
     toolTable: '[{"name":"web_search"}]',
     scope: { kind: "classed", profileClass: "game", restricted: true },
     identityOverride: false,
+    rendererPlaceholders: '["[Image: {name}. Sent earlier and no longer attached.]"]',
   };
 
   it("is stable for the same inputs", () => {
@@ -34,6 +35,7 @@ describe("configDigest", () => {
     ],
     ["whether the turn has core memory", { scope: { kind: "none" } }],
     ["whether a restricted class has its own identity", { identityOverride: true }],
+    ["the renderer's placeholder wording", { rendererPlaceholders: '["[Image: {name}.]"]' }],
   ] as const)("changes with %s", (_, change) => {
     expect(configDigest({ ...base, ...change })).not.toBe(configDigest(base));
   });

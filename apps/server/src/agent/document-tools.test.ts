@@ -15,6 +15,7 @@ function fakeAttachments(uploadedPath = "generated/abc.md"): AttachmentStore {
   return {
     upload: vi.fn().mockResolvedValue(uploadedPath),
     download: vi.fn(),
+    read: vi.fn(),
   };
 }
 

@@ -72,6 +72,7 @@ import { createTestDatabase } from "../../test/pglite.js";
 import type { SectionedRule } from "../rule-sections.js";
 import type { CoreMemoryBlock } from "../service.js";
 import { DrizzleAgentStore } from "../store/index.js";
+import { toStoredMessage } from "../stored-content.js";
 import { type ExtractionResult, extractCorrections } from "./extract-corrections.js";
 
 const CheckSchema = z.enum([
@@ -321,13 +322,17 @@ describe.skipIf(LIVE_API_KEY === undefined)(
               store.createConversation(tx, { ...owner, isPrivate: true }),
             );
             const scope = { ...owner, conversationId: conv.id, seesUserRules: true };
-            const extracted = await extractCorrections(conversation.history, scope, {
-              provider: usage.metered(provider),
-              model: EXTRACTION_MODEL,
-              runInTx: db.tx,
-              store,
-              activeChannelTypes: CHANNEL_TYPES,
-            });
+            const extracted = await extractCorrections(
+              conversation.history.map(toStoredMessage),
+              scope,
+              {
+                provider: usage.metered(provider),
+                model: EXTRACTION_MODEL,
+                runInTx: db.tx,
+                store,
+                activeChannelTypes: CHANNEL_TYPES,
+              },
+            );
             return {
               extracted,
               stored: await corrections(),

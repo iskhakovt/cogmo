@@ -4,6 +4,7 @@
  * and scheduled tasks.
  */
 
+import { createAttachmentReader } from "../agent/attachments/attachment-reader.js";
 import { BUILT_IN_SERVICE_GUIDANCE, builtInToolSpecs } from "../agent/built-ins.js";
 import type { CodingService } from "../agent/coding/service.js";
 import { compactConversation } from "../agent/conversation/compact-conversation.js";
@@ -24,6 +25,7 @@ import { createScheduledTaskTicker } from "../agent/scheduling/ticker.js";
 import { createDefaultTools, type ToolSpec } from "../agent/tools.js";
 import { env } from "../env.js";
 import { inngest } from "../inngest/index.js";
+import { LARGEST_ATTACHMENT_BUDGET_BYTES } from "../llm/attachment-limits.js";
 import type { McpRegistryImpl } from "../mcp/registry.js";
 import type { SkillRunnerImpl } from "../skills/runner.js";
 import { adapterModules } from "../transport/adapters/index.js";
@@ -59,13 +61,21 @@ export function createAgentTools(
   const promptSource = new DefaultPromptSource({
     serviceGuidance: BUILT_IN_SERVICE_GUIDANCE,
   });
-  return { imageToolsLoader, tools, promptSource };
+  // One memo per process, shared by chat turns, stages and `/compact`.
+  const attachmentReader = createAttachmentReader(
+    core.attachmentStore,
+    LARGEST_ATTACHMENT_BUDGET_BYTES,
+  );
+  return { imageToolsLoader, tools, promptSource, attachmentReader };
 }
 
 type AgentTools = ReturnType<typeof createAgentTools>;
 
 /** In-process `/reflect` and `/compact`, injected into every Transport. */
-export function createConversationTriggers(core: CoreDeps, promptSource: DefaultPromptSource) {
+export function createConversationTriggers(
+  core: CoreDeps,
+  { promptSource, attachmentReader }: Pick<AgentTools, "promptSource" | "attachmentReader">,
+) {
   // Sync Observer driver injected into every Transport so `/reflect` can
   // run the Observer in-process and reply with the digest in the same turn.
   // Shares deps with `createObserver` — the autonomous Inngest path and the
@@ -82,6 +92,7 @@ export function createConversationTriggers(core: CoreDeps, promptSource: Default
       agentStore: core.agentStore,
       resolveProvider: core.resolveProvider,
       promptSource,
+      attachmentReader,
     });
 
   return { reflectionTrigger, compactionTrigger };
@@ -129,6 +140,7 @@ export function createAgentFunctions(
     memory: core.memory,
     promptSource,
     fileService: core.fileService,
+    attachmentReader: agentTools.attachmentReader,
     deliveryRouter,
     runStreamingAgentLoop,
     codingServiceFactory,

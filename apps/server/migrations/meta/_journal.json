@@ -498,6 +498,13 @@
       "when": 1790925629810,
       "tag": "0070_messages_first_inbound",
       "breakpoints": true
+    },
+    {
+      "idx": 71,
+      "version": "7",
+      "when": 1792065613924,
+      "tag": "0071_snapshot_attachment_cutoff",
+      "breakpoints": true
     }
   ]
 }

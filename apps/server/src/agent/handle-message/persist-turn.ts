@@ -10,6 +10,7 @@ import { agentIterations } from "../../metrics.js";
 import type { AgentLoopResult } from "../loop.js";
 import type { AgentStore } from "../store/index.js";
 import type { CooldownState } from "../store/schema.js";
+import { toStoredContent, toStoredMessage } from "../stored-content.js";
 import type { TurnSteps } from "./turn-steps.js";
 
 export interface PersistTurnDeps {
@@ -99,7 +100,7 @@ export async function persistTurn(
         conversationId,
         inboundId: maxInboundId,
         afterMessageId,
-        content: finalMessage.content,
+        content: toStoredContent(finalMessage.content),
       });
       if (existing !== undefined) {
         // The final message comes from a memoized step (`llm-iter<N>`,
@@ -119,7 +120,7 @@ export async function persistTurn(
       if (rebatched) return { kind: "superseded" };
       const inserted = await deps.agentStore.insertMessages(tx, {
         conversationId,
-        messages: result.newMessages,
+        messages: result.newMessages.map(toStoredMessage),
         profileId: snapshot.profileId,
         model: snapshot.model,
         lastInboundMessageId: maxInboundId,

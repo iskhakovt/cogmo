@@ -78,6 +78,15 @@ export interface ConversationSummary {
 }
 
 /**
+ * An attachment a history message carried: an image or a document by name,
+ * or the placeholder arrival stored in place of one it couldn't keep.
+ */
+export type ChatHistoryAttachment =
+  | { kind: "image"; name: string | null; mediaType: string }
+  | { kind: "document"; name: string; mediaType: string }
+  | { kind: "placeholder"; text: string };
+
+/**
  * One past turn for the web chat history read. Lean by design: `text` is the
  * displayable prose of the message (concatenated text blocks). Tool-call cards
  * render live during streaming; reconstructing them from history is deferred to
@@ -87,6 +96,7 @@ export interface ChatHistoryMessage {
   id: string;
   role: "user" | "assistant";
   text: string;
+  attachments: readonly ChatHistoryAttachment[];
 }
 
 export interface ScheduledTaskSummary {

@@ -13,7 +13,12 @@ import {
  */
 export async function openSystemPromptEpoch(
   deps: SystemPromptDeps,
-  args: RenderSystemPromptArgs & { conversationId: string; openedBy: string; historyStart: string },
+  args: RenderSystemPromptArgs & {
+    conversationId: string;
+    openedBy: string;
+    historyStart: string;
+    attachmentCutoff: string | null;
+  },
 ): Promise<EpochSnapshot> {
   return deps.runInTx(async (tx) => {
     const { rendered, configDigest } = await renderSystemPrompt(tx, deps, args);
@@ -24,6 +29,7 @@ export async function openSystemPromptEpoch(
         historyStart: args.historyStart,
         rendered,
         configDigest,
+        attachmentCutoff: args.attachmentCutoff,
       }),
     );
   });

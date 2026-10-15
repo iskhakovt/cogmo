@@ -130,12 +130,28 @@ describe("convertMessage", () => {
 
 describe("historyToUi", () => {
   it("maps a history turn to a tool-less ui message", () => {
-    expect(historyToUi({ id: "m1", role: "user", text: "hi" })).toEqual({
+    expect(historyToUi({ id: "m1", role: "user", text: "hi", attachments: [] })).toEqual({
       id: "m1",
       role: "user",
       text: "hi",
       tools: [],
     });
+  });
+
+  it("shows each attachment as a line after the text", () => {
+    const ui = historyToUi({
+      id: "m2",
+      role: "user",
+      text: "",
+      attachments: [
+        { kind: "image", name: null, mediaType: "image/heic" },
+        { kind: "document", name: "report.pdf", mediaType: "application/pdf" },
+        { kind: "placeholder", text: "[photo: not supported; send it as a photo]" },
+      ],
+    });
+    expect(ui.text).toBe(
+      "[Image: photo]\n[Document: report.pdf]\n[photo: not supported; send it as a photo]",
+    );
   });
 });
 

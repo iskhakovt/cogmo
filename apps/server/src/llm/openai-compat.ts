@@ -4,6 +4,7 @@ import OpenAI from "openai";
 import * as R from "remeda";
 import { logger } from "../logger.js";
 import { abortReasonOr } from "./abort.js";
+import { type AttachmentLimits, openAICompatibleAttachmentLimits } from "./attachment-limits.js";
 import type { CacheDialect } from "./cache-dialect.js";
 import { cacheMarker } from "./cache-marker.js";
 import { isTextLikeDocumentMediaType } from "./content.js";
@@ -93,6 +94,10 @@ export class OpenAICompatibleProvider implements LlmProvider {
    * The request's prompt tokens, after the tool-result clearing it asks for.
    * Once the sum passes `countUpTo`, it stops and returns the sum so far.
    */
+  attachmentLimits(): AttachmentLimits {
+    return openAICompatibleAttachmentLimits();
+  }
+
   async countTokens(params: CountTokensParams): Promise<number> {
     // One memory for both, so the count reads the slices the clearing already encoded.
     const tokens = textTokens(cl100k());

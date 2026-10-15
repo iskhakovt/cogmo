@@ -17,8 +17,8 @@ import * as R from "remeda";
 import { single } from "../../db/helpers.js";
 import type { Transaction } from "../../db/index.js";
 import { NOT_TURN_ROW_JSONPATH } from "../../llm/content.js";
-import type { ContentBlock, Message } from "../../llm/types.js";
 import { inboundMessages } from "../../transport/store/schema.js";
+import type { StoredContent, StoredMessage } from "../stored-content.js";
 import type { TurnContext } from "../turn-context.js";
 import {
   conversationSummaries,
@@ -69,8 +69,19 @@ export interface SystemPromptSnapshot {
   historyStart: string;
   rendered: string;
   configDigest: string;
+  /** The last row whose attachments render as placeholders; null: none. */
+  attachmentCutoff: string | null;
   createdAt: Date;
 }
+
+/**
+ * An attachment a history message carried: an image or a document by name,
+ * or the placeholder arrival stored in place of one it couldn't keep.
+ */
+export type ChatHistoryAttachment =
+  | { kind: "image"; name: string | null; mediaType: string }
+  | { kind: "document"; name: string; mediaType: string }
+  | { kind: "placeholder"; text: string };
 
 /**
  * One past turn for the web chat history read — `text` is the message's
@@ -81,6 +92,7 @@ export interface ChatHistoryMessage {
   id: string;
   role: "user" | "assistant";
   text: string;
+  attachments: readonly ChatHistoryAttachment[];
 }
 
 /**
@@ -95,7 +107,7 @@ export interface TranscriptStore {
     params: {
       conversationId: string;
       role: "user" | "assistant";
-      content: string | ContentBlock[];
+      content: StoredContent;
       profileId: string;
       model: string;
       lastInboundMessageId: string;
@@ -133,7 +145,7 @@ export interface TranscriptStore {
     tx: Transaction,
     params: {
       conversationId: string;
-      messages: ReadonlyArray<Message>;
+      messages: ReadonlyArray<StoredMessage>;
       profileId: string;
       model: string;
       lastInboundMessageId: string;
@@ -167,7 +179,7 @@ export interface TranscriptStore {
       conversationId: string;
       inboundId: string;
       afterMessageId: string | null;
-      content: Message["content"];
+      content: StoredContent;
     },
   ): Promise<{ id: string; sameContent: boolean } | undefined>;
 
@@ -195,7 +207,7 @@ export interface TranscriptStore {
   listMessages(
     tx: Transaction,
     conversationId: string,
-  ): Promise<ReadonlyArray<Message & { id: string }>>;
+  ): Promise<ReadonlyArray<StoredMessage & { id: string }>>;
 
   /**
    * Widest durable summary for a conversation, or undefined when it has never
@@ -274,13 +286,13 @@ export interface TranscriptStore {
     tx: Transaction,
     conversationId: string,
     afterMessageId: string,
-  ): Promise<ReadonlyArray<Message & { id: string }>>;
+  ): Promise<ReadonlyArray<StoredMessage & { id: string }>>;
 
   /** Load a single message by ID. */
   getMessage(
     tx: Transaction,
     messageId: string,
-  ): Promise<{ id: string; role: string; content: string | ContentBlock[] } | undefined>;
+  ): Promise<{ id: string; role: string; content: StoredContent } | undefined>;
 
   /** Get the timestamp of the most recent message in a conversation (any role). `undefined` when no messages. */
   getLastMessageTime(tx: Transaction, conversationId: string): Promise<Date | undefined>;
@@ -311,7 +323,7 @@ export class DrizzleTranscriptStore implements TranscriptStore {
     params: {
       conversationId: string;
       role: "user" | "assistant";
-      content: string | ContentBlock[];
+      content: StoredContent;
       profileId: string;
       model: string;
       lastInboundMessageId: string;
@@ -368,7 +380,7 @@ export class DrizzleTranscriptStore implements TranscriptStore {
     tx: Transaction,
     params: {
       conversationId: string;
-      messages: ReadonlyArray<Message>; // must be non-empty
+      messages: ReadonlyArray<StoredMessage>; // must be non-empty
       profileId: string;
       model: string;
       lastInboundMessageId: string;
@@ -432,7 +444,7 @@ export class DrizzleTranscriptStore implements TranscriptStore {
       conversationId: string;
       inboundId: string;
       afterMessageId: string | null;
-      content: Message["content"];
+      content: StoredContent;
     },
   ): Promise<{ id: string; sameContent: boolean } | undefined> {
     const rows = await tx
@@ -483,13 +495,13 @@ export class DrizzleTranscriptStore implements TranscriptStore {
   async listMessages(
     tx: Transaction,
     conversationId: string,
-  ): Promise<ReadonlyArray<Message & { id: string }>> {
+  ): Promise<ReadonlyArray<StoredMessage & { id: string }>> {
     const rows = await tx
       .select({ id: messages.id, role: messages.role, content: messages.content })
       .from(messages)
       .where(eq(messages.conversationId, conversationId))
       .orderBy(asc(messages.id));
-    return rows as ReadonlyArray<Message & { id: string }>;
+    return rows as ReadonlyArray<StoredMessage & { id: string }>;
   }
 
   async getLatestSummary(
@@ -609,19 +621,19 @@ export class DrizzleTranscriptStore implements TranscriptStore {
     tx: Transaction,
     conversationId: string,
     afterMessageId: string,
-  ): Promise<ReadonlyArray<Message & { id: string }>> {
+  ): Promise<ReadonlyArray<StoredMessage & { id: string }>> {
     const rows = await tx
       .select({ id: messages.id, role: messages.role, content: messages.content })
       .from(messages)
       .where(and(eq(messages.conversationId, conversationId), gt(messages.id, afterMessageId)))
       .orderBy(asc(messages.id));
-    return rows as ReadonlyArray<Message & { id: string }>;
+    return rows as ReadonlyArray<StoredMessage & { id: string }>;
   }
 
   async getMessage(
     tx: Transaction,
     messageId: string,
-  ): Promise<{ id: string; role: string; content: string | ContentBlock[] } | undefined> {
+  ): Promise<{ id: string; role: string; content: StoredContent } | undefined> {
     const rows = await tx
       .select({ id: messages.id, role: messages.role, content: messages.content })
       .from(messages)

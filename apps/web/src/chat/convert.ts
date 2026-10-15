@@ -1,5 +1,5 @@
 import type { ThreadMessageLike } from "@assistant-ui/react";
-import type { ChatHistoryMessage, StreamEvent } from "@cogmo/contracts";
+import type { ChatHistoryAttachment, ChatHistoryMessage, StreamEvent } from "@cogmo/contracts";
 
 /** A tool call accumulated from `tool_start` (+ a later `tool_result`) during a turn. */
 export interface UiToolCall {
@@ -73,9 +73,21 @@ function decodeEntities(value: string): string {
     .replace(/&amp;/g, "&");
 }
 
-/** Map a persisted history turn into the live message model (text only — no tool history). */
+/**
+ * Map a persisted history turn into the live message model: its text, each
+ * attachment as a bracketed line after it, and no tool history.
+ */
 export function historyToUi(message: ChatHistoryMessage): UiMessage {
-  return { id: message.id, role: message.role, text: message.text, tools: [] };
+  const text = [message.text, ...message.attachments.map(attachmentLine)]
+    .filter((line) => line !== "")
+    .join("\n");
+  return { id: message.id, role: message.role, text, tools: [] };
+}
+
+function attachmentLine(attachment: ChatHistoryAttachment): string {
+  if (attachment.kind === "image") return `[Image: ${attachment.name ?? "photo"}]`;
+  if (attachment.kind === "document") return `[Document: ${attachment.name}]`;
+  return attachment.text;
 }
 
 /**

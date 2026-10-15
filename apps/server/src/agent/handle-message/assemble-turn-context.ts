@@ -15,6 +15,7 @@ import {
 import { renderTurnContext, withTurnContext } from "../turn-context.js";
 import type { SubstitutedInbound } from "./inbound-batch.js";
 import type { TurnTranscript } from "./load-turn-transcript.js";
+import type { TurnView } from "./render-turn-view.js";
 
 export interface AssembleTurnContextArgs {
   /** The conversation's user, who owns the memory bank. */
@@ -22,8 +23,8 @@ export interface AssembleTurnContextArgs {
   autoRecallMode: AutoRecallMode;
   substitutedMessages: ReadonlyArray<SubstitutedInbound>;
   transcript: TurnTranscript;
-  /** The turn's inbound with its attachments resolved. */
-  resolvedBlocks: ReadonlyArray<ContentBlock>;
+  /** The history as sent, before the turn context and the thinking strip. */
+  view: TurnView;
   loadedSystemPrompt: LoadedSystemPrompt;
   voiceMode: boolean;
   coreMemoryScope: CoreMemoryScope;
@@ -64,15 +65,11 @@ export async function assembleTurnContext(
   // This turn's message, led by a provisional block carrying every
   // recalled memory: compaction counts that upper bound, and
   // `render-turn-context` swaps in the stored, deduplicated block.
-  const history: Message[] = turnHistory.messages;
-  const turnIndex = turnHistory.messageIds.lastIndexOf(turn.id);
+  const { messages: history, turnIndex } = args.view;
   const turnRow = history[turnIndex];
   if (turnRow === undefined) {
     throw new Error(`user message ${turn.id} is missing from the turn's history`);
   }
-  const hasAttachments = args.resolvedBlocks.some(
-    (b) => b.type === "image" || b.type === "document",
-  );
   const handledAt = new Date(turn.createdAt);
   const { channelTypes, coreMemoryChanges } = loadedSystemPrompt;
   // An upper bound on the stored block, which compaction counts: every
@@ -94,28 +91,27 @@ export async function assembleTurnContext(
     coreMemoryUpdates: { scope: args.coreMemoryScope, blocks: coreMemoryChanges },
   });
 
-  // The epoch continues unless the configuration or the summary the history
-  // starts from changed; compaction below can still open one. The turns
+  // The epoch continues unless the configuration, the summary the history
+  // starts from or the attachment cutoff changed; compaction below can still
+  // open one. The turns
   // before the epoch's opening row lose their thinking blocks, which are
   // bound to an earlier system prompt or history.
   const loadedStart = historyStart(turnHistory.messageIds, null);
-  const continuing = continuesEpoch(loadedSystemPrompt.snapshot, {
-    configDigest: loadedSystemPrompt.configDigest,
-    historyStart: loadedStart,
-  })
-    ? loadedSystemPrompt.snapshot
-    : null;
+  const continuing =
+    !args.view.cutoff.advanced &&
+    continuesEpoch(loadedSystemPrompt.snapshot, {
+      configDigest: loadedSystemPrompt.configDigest,
+      historyStart: loadedStart,
+    })
+      ? loadedSystemPrompt.snapshot
+      : null;
   // An opener missing from the history belongs to a concurrent turn's epoch,
   // which opened after everything before this turn.
   const openerIndex =
     continuing === null ? -1 : turnHistory.messageIds.indexOf(continuing.openedBy);
-  // The row's content, or the resolved image and document blocks it names.
   const messages = stripThinkingBefore(history, openerIndex === -1 ? turnIndex : openerIndex).with(
     turnIndex,
-    withTurnContext(
-      { role: "user", content: hasAttachments ? [...args.resolvedBlocks] : turnRow.content },
-      provisionalTurnContext,
-    ),
+    withTurnContext<ContentBlock>(turnRow, provisionalTurnContext),
   );
 
   return { messages, provisionalTurnContext, recalledMemories, handledAt, continuing };

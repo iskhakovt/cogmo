@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { ProviderProtocolError } from "../../llm/errors.js";
-import type { Message } from "../../llm/types.js";
 import { logger } from "../../logger.js";
 import { expectDefined } from "../../test/assertions.js";
 import { mockProvider } from "../../test/factories.js";
 import type { MemoryRule } from "../store/index.js";
+import type { StoredMessage } from "../stored-content.js";
 import type { ObserverFire } from "./drain-pending-memories.js";
 import { extractMemories, type MemoryExtractionDeps } from "./extract-memories.js";
 
@@ -48,7 +48,7 @@ function mockExtractionDeps(
   };
 }
 
-const sampleHistory: Message[] = [
+const sampleHistory: StoredMessage[] = [
   { role: "user", content: "My homelab IP is 10.0.10.10 and I prefer dark mode." },
   { role: "assistant", content: "Got it! I'll remember your homelab IP and preference." },
   { role: "user", content: "Also, I usually work on infrastructure stuff on weekends." },

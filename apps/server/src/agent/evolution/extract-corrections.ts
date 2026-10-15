@@ -12,9 +12,9 @@ import type { Transactor } from "../../db/index.js";
 import { isHarnessPrompt } from "../../llm/content.js";
 import type { LlmProvider } from "../../llm/provider.js";
 import { chatTyped } from "../../llm/typed.js";
-import type { ContentBlock, Message } from "../../llm/types.js";
 import { logger } from "../../logger.js";
 import type { AgentStore } from "../store/index.js";
+import type { StoredContentBlock, StoredMessage } from "../stored-content.js";
 import {
   buildExtractionPrompt,
   CorrectionExtractionSchema,
@@ -89,7 +89,7 @@ export interface ExtractionScope {
  * Pure function — all I/O goes through deps.
  */
 export async function extractCorrections(
-  history: ReadonlyArray<Message>,
+  history: ReadonlyArray<StoredMessage>,
   scope: ExtractionScope,
   deps: ExtractionDeps,
 ): Promise<ExtractionResult> {
@@ -388,13 +388,14 @@ function coerceChannelType(
 // --- Transcript formatting ---
 
 /**
- * Format a Message[] array into human-readable transcript text.
+ * Format stored messages into human-readable transcript text.
  *
- * Strips images, thinking blocks and the loop's harness prompts (the
+ * Names each attachment, shows an arrival placeholder as a note, and strips
+ * thinking blocks, image labels and the loop's harness prompts (the
  * continuation prompt and the volume-cluster nudge), none of which the user
  * said. Preserves tool_use/tool_result as compact notation.
  */
-export function formatTranscript(messages: ReadonlyArray<Message>): string {
+export function formatTranscript(messages: ReadonlyArray<StoredMessage>): string {
   return R.pipe(
     messages,
     R.map(formatMessage),
@@ -402,7 +403,7 @@ export function formatTranscript(messages: ReadonlyArray<Message>): string {
   ).join("\n\n");
 }
 
-function formatMessage(msg: Message): string {
+function formatMessage(msg: StoredMessage): string {
   if (typeof msg.content === "string") {
     return `${roleLabel(msg.role)}: ${msg.content}`;
   }
@@ -421,19 +422,21 @@ function roleLabel(role: "user" | "assistant"): string {
   return role === "user" ? "User" : "Assistant";
 }
 
-function formatBlock(block: ContentBlock): string {
+function formatBlock(block: StoredContentBlock): string {
   if (isHarnessPrompt(block)) return "";
   switch (block.type) {
     case "text":
+      if (block.harness === "image_label") return "";
+      if (block.harness === "attachment_placeholder") return `[Note: ${block.text}]`;
       return block.text;
     case "tool_use":
       return `[Tool: ${block.name}(${JSON.stringify(block.input)})]`;
     case "tool_result":
       return block.isError ? `→ [Error] ${block.content}` : `→ ${block.content}`;
-    case "image":
-      return "[Image]";
-    case "document":
-      return `[Document: ${block.name ?? block.mediaType}]`;
+    case "image_ref":
+      return `[Image: ${block.name ?? "photo"}]`;
+    case "document_ref":
+      return `[Document: ${block.name}]`;
     case "thinking":
       return ""; // strip thinking blocks
   }

@@ -3,6 +3,7 @@ import type { Logger } from "pino";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { z } from "zod";
+import { anthropicAttachmentLimits } from "../llm/attachment-limits.js";
 import { ProviderProtocolError, ToolArgsCutOffError } from "../llm/errors.js";
 import { RefusalError } from "../llm/fallback.js";
 import type { LlmProvider } from "../llm/provider.js";
@@ -57,6 +58,7 @@ function mockProvider(responses: LlmResponse[]): LlmProvider {
       throw new Error("chatStream not implemented in mock");
     },
     countTokens: vi.fn(),
+    attachmentLimits: anthropicAttachmentLimits,
   };
 }
 
@@ -694,6 +696,7 @@ function mockStreamProvider(turns: MockStreamTurn[]): LlmProvider {
     chat: vi.fn(),
     chatStream,
     countTokens: vi.fn(),
+    attachmentLimits: anthropicAttachmentLimits,
   };
 }
 
@@ -1285,6 +1288,7 @@ describe("runStreamingAgentLoop", () => {
       name: "failing-stream",
       chat: vi.fn(),
       countTokens: vi.fn(),
+      attachmentLimits: anthropicAttachmentLimits,
       chatStream: () => failing(),
     };
 
@@ -1313,6 +1317,7 @@ describe("runStreamingAgentLoop", () => {
       name: "mock-stream",
       chat: vi.fn(),
       countTokens: vi.fn(),
+      attachmentLimits: anthropicAttachmentLimits,
       chatStream: () => stream(),
     };
     const pushFailed = new Error("push failed");
@@ -1338,6 +1343,7 @@ describe("runStreamingAgentLoop", () => {
       name: "truncated-stream",
       chat: vi.fn(),
       countTokens: vi.fn(),
+      attachmentLimits: anthropicAttachmentLimits,
       chatStream: () => truncated(),
     };
 
@@ -1365,6 +1371,7 @@ describe("runStreamingAgentLoop", () => {
       name: "overrun-stream",
       chat: vi.fn(),
       countTokens: vi.fn(),
+      attachmentLimits: anthropicAttachmentLimits,
       chatStream: () => overrun(),
     };
 
@@ -1935,6 +1942,7 @@ describe("durable LLM iterations (stepRun)", () => {
       chat: vi.fn(),
       chatStream,
       countTokens: vi.fn(),
+      attachmentLimits: anthropicAttachmentLimits,
     };
     const collected: StreamEvent[] = [];
 
@@ -1976,6 +1984,7 @@ describe("durable LLM iterations (stepRun)", () => {
       chat: vi.fn(),
       chatStream,
       countTokens: vi.fn(),
+      attachmentLimits: anthropicAttachmentLimits,
     };
 
     const result = await testRunStreamingAgentLoop({
@@ -2862,6 +2871,7 @@ function repairStreamProvider(turns: ReadonlyArray<RepairTurn>): {
     chat,
     chatStream,
     countTokens: vi.fn(),
+    attachmentLimits: anthropicAttachmentLimits,
   };
   return { provider, chatCalls, streamCalls };
 }

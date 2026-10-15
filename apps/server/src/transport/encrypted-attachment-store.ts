@@ -38,8 +38,9 @@
  * protecting.
  */
 
+import { err, ok, type Result } from "neverthrow";
 import { decryptBuffer, encryptBuffer, isEncrypted } from "../secrets/blob-envelope.js";
-import type { AttachmentStore } from "./attachment-store.js";
+import type { AttachmentStore, AttachmentUnreadable } from "./attachment-store.js";
 
 /**
  * Wrap an `AttachmentStore` so bytes are encrypted before reaching the
@@ -59,6 +60,18 @@ export function wrapAttachmentStoreWithEncryption(
     async download(path: string): Promise<Buffer> {
       const blob = await inner.download(path);
       return isEncrypted(blob) ? decryptBuffer(blob, key) : blob;
+    },
+
+    async read(path: string): Promise<Result<Buffer, AttachmentUnreadable>> {
+      const blob = await inner.read(path);
+      if (blob.isErr() || !isEncrypted(blob.value)) return blob;
+      // Every failure here is a property of the bytes: a truncated header, an
+      // unknown version, a tag that doesn't verify under this key.
+      try {
+        return ok(decryptBuffer(blob.value, key));
+      } catch {
+        return err({ kind: "undecryptable" });
+      }
     },
   };
 }

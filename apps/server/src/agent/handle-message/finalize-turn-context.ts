@@ -19,6 +19,7 @@ import {
 } from "../turn-context.js";
 import type { TurnSystemPromptArgs } from "./freeze-turn-inputs.js";
 import type { TurnTranscript } from "./load-turn-transcript.js";
+import type { TurnView } from "./render-turn-view.js";
 import type { TurnSteps } from "./turn-steps.js";
 
 export interface FinalizeTurnContextArgs {
@@ -26,6 +27,8 @@ export interface FinalizeTurnContextArgs {
   messages: Message[];
   provisionalTurnContext: string;
   transcript: TurnTranscript;
+  /** The history as sent, and the attachment cutoff an epoch the turn opens stores. */
+  view: TurnView;
   /** The conversation's epoch, when the turn continued it before compaction. */
   continuing: EpochSnapshot | null;
   /** The cutoff of the summary compaction stored, if it stored one. */
@@ -75,6 +78,7 @@ export async function finalizeTurnContext(
             ...args.systemPromptArgs,
             openedBy: turn.id,
             historyStart: epochStart,
+            attachmentCutoff: args.view.cutoff.cutoff,
           }),
         );
   const opensEpoch = epoch.openedBy === turn.id;
@@ -87,11 +91,15 @@ export async function finalizeTurnContext(
   // opening turn's snapshot shows core memory as it is, so it announces
   // nothing.
   const earlierInView = historyMessages.toSpliced(turnPosition, 1);
+  const sentHistory = {
+    messages: args.view.messages,
+    turnContexts: turnHistory.turnContexts,
+  };
   const announced = opensEpoch
     ? []
     : unannounced(
         args.loadedSystemPrompt.coreMemoryChanges,
-        announcedInView(earlierInView, turnHistory),
+        announcedInView(earlierInView, sentHistory),
       );
   const renderedTurnContext = await step.run("render-turn-context", () =>
     storeTurnContext(
@@ -103,7 +111,7 @@ export async function finalizeTurnContext(
         context: {
           recalledMemories: newMemories(
             args.recalledMemories,
-            shownMemories(earlierInView, turnHistory),
+            shownMemories(earlierInView, sentHistory),
           ),
           voiceMode: args.voiceMode,
           channelTypes: args.loadedSystemPrompt.channelTypes,

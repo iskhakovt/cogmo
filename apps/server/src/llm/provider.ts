@@ -1,3 +1,4 @@
+import type { AttachmentLimits } from "./attachment-limits.js";
 import type {
   ChatOptions,
   ChatParams,
@@ -22,4 +23,6 @@ export interface LlmProvider {
    */
   chatStream(params: ChatParams, options?: ChatOptions): AsyncIterable<ChatStreamFrame>;
   countTokens(params: CountTokensParams): Promise<number>;
+  /** What one request may carry in attachments, for a model with this context window. */
+  attachmentLimits(contextWindow: number): AttachmentLimits;
 }

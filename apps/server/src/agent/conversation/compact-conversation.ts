@@ -1,6 +1,8 @@
 import type { Transactor } from "../../db/index.js";
 import { resolveLimits } from "../../llm/models.js";
 import type { LlmProviderResolver } from "../../llm/resolver.js";
+import type { AttachmentReader } from "../attachments/attachment-reader.js";
+import { renderForkSpan } from "../attachments/render-fork-span.js";
 import {
   DEFAULT_KEEP_TURNS,
   extractSummaryText,
@@ -19,6 +21,8 @@ export interface CompactConversationDeps {
   agentStore: AgentStore;
   resolveProvider: LlmProviderResolver;
   promptSource: PromptSource;
+  /** Renders the prefix's attachment refs. */
+  attachmentReader: AttachmentReader;
 }
 
 /**
@@ -128,9 +132,6 @@ export async function compactConversation(
     return { status: "skipped", reason: "too_short" };
   }
 
-  // The summarizer reads the prefix as it was sent, every tool result verbatim.
-  const prefix = messages.slice(0, splitIdx);
-
   const coreMemoryScope = await loadCoreMemoryScope(
     { runInTx: deps.runInTx, agentStore: deps.agentStore },
     { userId, profile },
@@ -152,6 +153,18 @@ export async function compactConversation(
   const model = profile.summarizationModel ?? profile.model;
   const { provider, limits: rowLimits } = await deps.resolveProvider(model);
   const limits = resolveLimits(model, rowLimits);
+
+  // The summarizer reads the prefix as the conversation's turns send it,
+  // every tool result verbatim, under the epoch's attachment cutoff.
+  const epoch = await deps.runInTx((tx) =>
+    deps.agentStore.getLatestSystemPromptSnapshot(tx, conversationId),
+  );
+  const prefix = await renderForkSpan(deps.attachmentReader, {
+    messages: messages.slice(0, splitIdx),
+    messageIds: messageIds.slice(0, splitIdx),
+    cutoff: epoch?.attachmentCutoff ?? null,
+    limits: provider.attachmentLimits(limits.contextWindow),
+  });
 
   const response = await provider.chat(
     summarizationRequest({

@@ -16,6 +16,7 @@ import type {
   ChatParams,
   ContentBlock,
   CountTokensParams,
+  HarnessTag,
   Message,
   ToolDefinition,
   ToolResultClearing,
@@ -226,7 +227,7 @@ export function extractSummaryText(content: ReadonlyArray<ContentBlock>): string
  * replay of a persisted summary, so a stored summary re-enters the context in
  * exactly the shape the model saw when it was produced.
  */
-export function formatSummaryMessage(summary: string): Message {
+export function formatSummaryMessage(summary: string): { role: "user"; content: string } {
   return { role: "user", content: `[Previous conversation summary]\n\n${summary}` };
 }
 
@@ -503,8 +504,13 @@ function truncateOldest(messages: Message[]): Message[] {
 
 // --- Pair-aware helpers ---
 
+/** A sent or a stored message: what pairing reads is the same in both. */
+type PairedMessage = Pick<Message, "role"> & {
+  content: string | ReadonlyArray<{ type: string; harness?: HarnessTag | undefined }>;
+};
+
 /** A user row that belongs to the row before it: any user row but a turn's own. */
-function attachesToPrevious(msg: Message): boolean {
+function attachesToPrevious(msg: PairedMessage): boolean {
   return msg.role === "user" && !isTurnRowContent(msg.content);
 }
 
@@ -519,7 +525,10 @@ function attachesToPrevious(msg: Message): boolean {
  * (snap = drop less, keep more) — both prefer keeping an extra pair over
  * violating Anthropic's pairing invariant.
  */
-export function snapToPairBoundary(messages: ReadonlyArray<Message>, splitIdx: number): number {
+export function snapToPairBoundary(
+  messages: ReadonlyArray<PairedMessage>,
+  splitIdx: number,
+): number {
   let idx = splitIdx;
   while (idx > 0 && idx < messages.length) {
     const msg = messages[idx];

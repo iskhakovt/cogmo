@@ -47,7 +47,7 @@ export async function bootstrapRuntime(
   const agentTools = createAgentTools(core, webTools, opts);
   const timing = sessionTiming();
   const mcpRegistry = await startMcpRegistry(core);
-  const triggers = createConversationTriggers(core, agentTools.promptSource);
+  const triggers = createConversationTriggers(core, agentTools);
 
   const transport = await startTransport(core, {
     idleTimeoutMs: timing.idleTimeoutMs,

@@ -391,6 +391,7 @@ describe("durability policy invariant", () => {
       ...createDocumentTools({
         upload: async () => "path",
         download: async () => Buffer.from(""),
+        read: async () => ok(Buffer.from("")),
       }),
       ...createDefaultTools([], "UTC").snapshot(),
     ];

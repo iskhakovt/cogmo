@@ -30,7 +30,12 @@ import {
 import { AnthropicProvider } from "../llm/anthropic.js";
 import { computeBudget, resolveLimits } from "../llm/models.js";
 import type { PrefixMismatchBehavior } from "../llm/prefix-mismatch-behavior.js";
-import { type Message, MessageContentSchema, type ToolResultClearing } from "../llm/types.js";
+import {
+  type ContentBlock,
+  type Message,
+  MessageContentSchema,
+  type ToolResultClearing,
+} from "../llm/types.js";
 import { logger } from "../logger.js";
 import { DEFAULT_BASE_PROMPT, DEFAULT_PROFILE_MODEL } from "../setup/seed.js";
 import { expectDefined } from "./assertions.js";
@@ -198,7 +203,7 @@ async function converse(params: {
   let history: Message[] = [];
   for (const [i, turn] of params.turns.entries()) {
     await params.beforeTurn?.(i);
-    const message = withTurnContext(
+    const message = withTurnContext<ContentBlock>(
       { role: "user", content: turn.text },
       renderTurnContext({
         handledAt: new Date(),

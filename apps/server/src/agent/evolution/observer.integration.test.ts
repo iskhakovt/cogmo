@@ -22,6 +22,7 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Database } from "../../db/index.js";
+import { anthropicAttachmentLimits } from "../../llm/attachment-limits.js";
 import type { LlmProvider } from "../../llm/provider.js";
 import type { ChatParams, ChatStreamFrame, LlmResponse } from "../../llm/types.js";
 import type { MemoryProvider, RetainBatchItem } from "../../memory/provider.js";
@@ -268,6 +269,7 @@ function buildStubProvider(opts: {
     async countTokens(): Promise<number> {
       return 0;
     },
+    attachmentLimits: anthropicAttachmentLimits,
   };
 
   return { provider, calls };
@@ -785,6 +787,7 @@ describe("runObserver — real PG + recording memory mock", () => {
       async countTokens(): Promise<number> {
         return 0;
       },
+      attachmentLimits: anthropicAttachmentLimits,
     };
     const recorder = buildRecordingMemory();
 
@@ -871,6 +874,7 @@ describe("runObserver — real PG + recording memory mock", () => {
       async countTokens(): Promise<number> {
         return 0;
       },
+      attachmentLimits: anthropicAttachmentLimits,
     };
     const recorder = buildRecordingMemory();
 

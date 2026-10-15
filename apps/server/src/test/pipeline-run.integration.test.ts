@@ -35,6 +35,7 @@ import {
   pipelineStageDue,
   responseReady,
 } from "../inngest/events.js";
+import { anthropicAttachmentLimits } from "../llm/attachment-limits.js";
 import type { LlmProvider } from "../llm/provider.js";
 import type { ChatParams, LlmResponse } from "../llm/types.js";
 import { channelSessions, channels, inboundMessages } from "../transport/store/schema.js";
@@ -98,6 +99,7 @@ const stubProvider: LlmProvider = {
   async countTokens() {
     return 100;
   },
+  attachmentLimits: anthropicAttachmentLimits,
 };
 
 let app: Awaited<ReturnType<typeof bootstrap>>;

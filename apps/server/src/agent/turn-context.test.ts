@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { Message } from "../llm/types.js";
+import type { ContentBlock, Message } from "../llm/types.js";
 import { expectDefined } from "../test/assertions.js";
 import type { CoreMemoryView } from "./core-memory/scope.js";
 import { formatUserContext } from "./prompt.js";
@@ -309,8 +309,8 @@ describe("findTurnContext / replaceTurnContext", () => {
 });
 
 describe("shownMemories / newMemories", () => {
-  const earlier = withTurnContext({ role: "user", content: "q1" }, "CTX-1");
-  const later = withTurnContext({ role: "user", content: "q2" }, "CTX-2");
+  const earlier = withTurnContext<ContentBlock>({ role: "user", content: "q1" }, "CTX-1");
+  const later = withTurnContext<ContentBlock>({ role: "user", content: "q2" }, "CTX-2");
   const history = {
     messages: [earlier, { role: "assistant", content: "a1" } as Message, later],
     turnContexts: [
@@ -347,8 +347,8 @@ describe("announcedInView", () => {
     key,
     updatedAt: "2026-09-27T10:01:00.000Z",
   });
-  const earlier = withTurnContext({ role: "user", content: "q1" }, "CTX-1");
-  const later = withTurnContext({ role: "user", content: "q2" }, "CTX-2");
+  const earlier = withTurnContext<ContentBlock>({ role: "user", content: "q1" }, "CTX-1");
+  const later = withTurnContext<ContentBlock>({ role: "user", content: "q2" }, "CTX-2");
   const history = {
     messages: [earlier, { role: "assistant", content: "a1" } as Message, later],
     turnContexts: [

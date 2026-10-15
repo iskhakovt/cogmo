@@ -2,6 +2,7 @@ import { Marked } from "marked";
 import type { Logger } from "pino";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
+import { anthropicAttachmentLimits } from "../llm/attachment-limits.js";
 import { ProviderProtocolError, ToolArgsCutOffError } from "../llm/errors.js";
 import { RefusalError } from "../llm/fallback.js";
 import type { LlmProvider } from "../llm/provider.js";
@@ -936,6 +937,7 @@ describe("synthesizeDegradedReply", () => {
       chat: vi.fn(chat),
       chatStream: vi.fn(),
       countTokens: vi.fn(),
+      attachmentLimits: anthropicAttachmentLimits,
     };
   }
 
@@ -980,6 +982,7 @@ describe("synthesizeDegradedReply", () => {
       chat: chatFn,
       chatStream: vi.fn(),
       countTokens: vi.fn(),
+      attachmentLimits: anthropicAttachmentLimits,
     };
     await synthesizeDegradedReply({ ...baseDeps(), provider });
     expect(chatFn).toHaveBeenCalledTimes(1);
@@ -1026,6 +1029,7 @@ describe("synthesizeDegradedReply", () => {
       chat: chatFn,
       chatStream: vi.fn(),
       countTokens: vi.fn(),
+      attachmentLimits: anthropicAttachmentLimits,
     };
     await synthesizeDegradedReply({
       ...baseDeps(),
@@ -1187,6 +1191,7 @@ describe("synthesizeDegradedReply", () => {
       chat: chatFn,
       chatStream: vi.fn(),
       countTokens: vi.fn(),
+      attachmentLimits: anthropicAttachmentLimits,
     };
     await synthesizeDegradedReply({
       ...baseDeps(),
@@ -1205,6 +1210,7 @@ describe("synthesizeDegradedReply", () => {
       chat: chatFn,
       chatStream: vi.fn(),
       countTokens: vi.fn(),
+      attachmentLimits: anthropicAttachmentLimits,
     };
     await synthesizeDegradedReply({
       ...baseDeps(),

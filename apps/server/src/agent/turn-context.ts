@@ -5,7 +5,7 @@
 
 import * as R from "remeda";
 import { z } from "zod";
-import type { ContentBlock, Message } from "../llm/types.js";
+import type { Message, TextBlock } from "../llm/types.js";
 import { escapeClosingTags } from "../util/string.js";
 import { blockGroups, formatBlockGroups } from "./core-memory/groups.js";
 import type { CoreMemoryView, ScopedCoreMemoryBlock } from "./core-memory/scope.js";
@@ -134,9 +134,15 @@ function escapeEnvelope(text: string): string {
   return escapeClosingTags(text, ["recalled_memories", "core_memory_updates", "turn_context"]);
 }
 
-/** `message` with `rendered` as its leading block, ahead of the user's own content. */
-export function withTurnContext(message: Message, rendered: string): Message {
-  const block: ContentBlock = { type: "text", text: rendered };
+/**
+ * `message` with `rendered` as its leading block, ahead of the user's own
+ * content: a sent message, or a stored one, whose blocks a text block joins.
+ */
+export function withTurnContext<B>(
+  message: { role: Message["role"]; content: string | ReadonlyArray<B> },
+  rendered: string,
+): { role: Message["role"]; content: (B | TextBlock)[] } {
+  const block: TextBlock = { type: "text", text: rendered };
   if (typeof message.content !== "string") {
     return { role: message.role, content: [block, ...message.content] };
   }

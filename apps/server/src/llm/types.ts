@@ -28,16 +28,23 @@ import { canonicalKeyOrder } from "../util/canonical-key-order.js";
  */
 export const HARNESS_ROW_TAGS = ["continuation", "volume_nudge", "truncation_notice"] as const;
 
-export const HarnessTagSchema = z.enum([...HARNESS_ROW_TAGS]);
+/**
+ * Tags arrival writes on the turn's own row (design/transport/attachments.md):
+ * `image_label` names the image ref after it, and `attachment_placeholder`
+ * stands in for an attachment arrival didn't store.
+ */
+export const HARNESS_ARRIVAL_TAGS = ["image_label", "attachment_placeholder"] as const;
+
+export const HarnessTagSchema = z.enum([...HARNESS_ROW_TAGS, ...HARNESS_ARRIVAL_TAGS]);
 export type HarnessTag = z.infer<typeof HarnessTagSchema>;
 
-const TextBlockSchema = z.object({
+export const TextBlockSchema = z.object({
   type: z.literal("text"),
   text: z.string(),
   harness: HarnessTagSchema.optional(),
 });
 
-const ToolUseBlockSchema = z.object({
+export const ToolUseBlockSchema = z.object({
   type: z.literal("tool_use"),
   id: z.string(),
   name: z.string(),
@@ -48,7 +55,7 @@ const ToolUseBlockSchema = z.object({
   input: z.unknown().transform(canonicalKeyOrder),
 });
 
-const ToolResultBlockSchema = z.object({
+export const ToolResultBlockSchema = z.object({
   type: z.literal("tool_result"),
   toolUseId: z.string(),
   content: z.string(),
@@ -79,7 +86,7 @@ const DocumentBlockSchema = z.object({
   name: z.string().optional(),
 });
 
-const ThinkingBlockSchema = z.object({
+export const ThinkingBlockSchema = z.object({
   type: z.literal("thinking"),
   thinking: z.string(),
   /** Opaque signature for multi-turn thinking continuity (Anthropic). Must be preserved in history. */

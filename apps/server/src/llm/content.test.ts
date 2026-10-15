@@ -7,7 +7,7 @@ import {
   isTurnRowContent,
   NOT_TURN_ROW_JSONPATH,
 } from "./content.js";
-import { type ContentBlock, HARNESS_ROW_TAGS } from "./types.js";
+import { type ContentBlock, HARNESS_ARRIVAL_TAGS, HARNESS_ROW_TAGS } from "./types.js";
 
 describe("canonicalizeToolInputs", () => {
   it("sorts every tool_use input's keys and keeps the values", () => {
@@ -86,18 +86,29 @@ describe("extractText", () => {
   });
 });
 
+/** A block as the canonical type, so a literal's extra fields pass the structural parameter. */
+function block(b: ContentBlock): ContentBlock {
+  return b;
+}
+
 describe("isTurnRowContent", () => {
   it("takes a string, or a block array with no tool result and no harness-row tag", () => {
     expect(isTurnRowContent("hello")).toBe(true);
-    expect(isTurnRowContent([{ type: "text", text: "look at this" }])).toBe(true);
+    expect(isTurnRowContent([block({ type: "text", text: "look at this" })])).toBe(true);
   });
 
   it.each(HARNESS_ROW_TAGS)("refuses a row carrying a %s block", (tag) => {
-    expect(isTurnRowContent([{ type: "text", text: "x", harness: tag }])).toBe(false);
+    expect(isTurnRowContent([block({ type: "text", text: "x", harness: tag })])).toBe(false);
+  });
+
+  it.each(HARNESS_ARRIVAL_TAGS)("takes the turn's own row carrying a %s block", (tag) => {
+    expect(isTurnRowContent([block({ type: "text", text: "x", harness: tag })])).toBe(true);
   });
 
   it("refuses a tool-result row", () => {
-    expect(isTurnRowContent([{ type: "tool_result", toolUseId: "t1", content: "ok" }])).toBe(false);
+    expect(isTurnRowContent([block({ type: "tool_result", toolUseId: "t1", content: "ok" })])).toBe(
+      false,
+    );
   });
 
   it("names every harness-row tag in the SQL path", () => {
@@ -109,17 +120,21 @@ describe("isTurnRowContent", () => {
 
 describe("isHarnessPrompt", () => {
   it("reports the continuation prompt and the nudge, not the truncation notice", () => {
-    expect(isHarnessPrompt({ type: "text", text: "x", harness: "continuation" })).toBe(true);
+    expect(isHarnessPrompt(block({ type: "text", text: "x", harness: "continuation" }))).toBe(true);
     expect(
-      isHarnessPrompt({
-        type: "tool_result",
-        toolUseId: "t1",
-        content: "x",
-        harness: "volume_nudge",
-      }),
+      isHarnessPrompt(
+        block({
+          type: "tool_result",
+          toolUseId: "t1",
+          content: "x",
+          harness: "volume_nudge",
+        }),
+      ),
     ).toBe(true);
-    expect(isHarnessPrompt({ type: "text", text: "x", harness: "truncation_notice" })).toBe(false);
-    expect(isHarnessPrompt({ type: "text", text: "x" })).toBe(false);
+    expect(isHarnessPrompt(block({ type: "text", text: "x", harness: "truncation_notice" }))).toBe(
+      false,
+    );
+    expect(isHarnessPrompt(block({ type: "text", text: "x" }))).toBe(false);
   });
 });
 

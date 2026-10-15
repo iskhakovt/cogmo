@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { anthropicAttachmentLimits } from "../../llm/attachment-limits.js";
 import type { LlmProvider } from "../../llm/provider.js";
 import { expectDefined } from "../../test/assertions.js";
 import { extractStageArtifact } from "./extract-artifact.js";
@@ -19,7 +20,13 @@ function providerReplying(...texts: string[]): LlmProvider & { chat: ReturnType<
       usage: { inputTokens: 1, outputTokens: 1 },
     });
   }
-  return { name: "test", chat, chatStream: vi.fn(), countTokens: vi.fn() };
+  return {
+    name: "test",
+    chat,
+    chatStream: vi.fn(),
+    countTokens: vi.fn(),
+    attachmentLimits: anthropicAttachmentLimits,
+  };
 }
 
 const base = {

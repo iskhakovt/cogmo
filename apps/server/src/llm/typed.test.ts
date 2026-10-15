@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { expectDefined } from "../test/assertions.js";
+import { anthropicAttachmentLimits } from "./attachment-limits.js";
 import { MissingToolCallError, OutputCutOffError, ProviderProtocolError } from "./errors.js";
 import { RefusalError } from "./fallback.js";
 import type { LlmProvider } from "./provider.js";
@@ -22,6 +23,7 @@ function mockProvider(responses: Array<{ text: string; stopReason?: StopReason }
     chat: chatFn,
     chatStream: vi.fn(),
     countTokens: vi.fn(),
+    attachmentLimits: anthropicAttachmentLimits,
   };
 }
 
@@ -64,7 +66,13 @@ describe("chatTyped", () => {
         model: "test-model",
         usage: { inputTokens: 950, outputTokens: 7, cacheReadTokens: 800, cacheCreationTokens: 40 },
       });
-    const provider: LlmProvider = { name: "test", chat, chatStream: vi.fn(), countTokens: vi.fn() };
+    const provider: LlmProvider = {
+      name: "test",
+      chat,
+      chatStream: vi.fn(),
+      countTokens: vi.fn(),
+      attachmentLimits: anthropicAttachmentLimits,
+    };
 
     const result = await chatTyped({
       provider,
@@ -320,7 +328,13 @@ describe("chatTyped", () => {
     }
 
     function providerWith(chat: LlmProvider["chat"]): LlmProvider {
-      return { name: "test", chat, chatStream: vi.fn(), countTokens: vi.fn() };
+      return {
+        name: "test",
+        chat,
+        chatStream: vi.fn(),
+        countTokens: vi.fn(),
+        attachmentLimits: anthropicAttachmentLimits,
+      };
     }
 
     const VALID = {

@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Transactor } from "../../db/index.js";
-import type { Message } from "../../llm/types.js";
 import { logger } from "../../logger.js";
 import { expectDefined } from "../../test/assertions.js";
 import { mockProvider } from "../../test/factories.js";
+import type { StoredMessage } from "../stored-content.js";
 import {
   type ExtractionDeps,
   extractCorrections,
@@ -52,7 +52,7 @@ const LABELLED_RULES = [
 
 describe("formatTranscript", () => {
   it("formats text messages", () => {
-    const messages: Message[] = [
+    const messages: StoredMessage[] = [
       { role: "user", content: "Hello" },
       { role: "assistant", content: "Hi there" },
     ];
@@ -60,7 +60,7 @@ describe("formatTranscript", () => {
   });
 
   it("formats tool_use and tool_result blocks", () => {
-    const messages: Message[] = [
+    const messages: StoredMessage[] = [
       {
         role: "assistant",
         content: [
@@ -79,7 +79,7 @@ describe("formatTranscript", () => {
   });
 
   it("formats error tool results", () => {
-    const messages: Message[] = [
+    const messages: StoredMessage[] = [
       {
         role: "user",
         content: [{ type: "tool_result", toolUseId: "tu_1", content: "Not found", isError: true }],
@@ -89,7 +89,7 @@ describe("formatTranscript", () => {
   });
 
   it("drops the continuation prompt and the volume nudge, and keeps the truncation notice", () => {
-    const messages: Message[] = [
+    const messages: StoredMessage[] = [
       { role: "user", content: "Draw a cat" },
       {
         role: "assistant",
@@ -127,7 +127,7 @@ describe("formatTranscript", () => {
   });
 
   it("strips thinking blocks", () => {
-    const messages: Message[] = [
+    const messages: StoredMessage[] = [
       {
         role: "assistant",
         content: [
@@ -141,18 +141,55 @@ describe("formatTranscript", () => {
     expect(result).toContain("Here's my answer");
   });
 
-  it("replaces images with placeholder", () => {
-    const messages: Message[] = [
+  it("names attachment refs instead of carrying them", () => {
+    const image = {
+      type: "image_ref" as const,
+      path: "inbound/a.png",
+      mediaType: "image/png" as const,
+      width: 10,
+      height: 10,
+      bytes: 3,
+      original: { path: "inbound/a.png", mediaType: "image/png" },
+    };
+    const messages: StoredMessage[] = [
       {
         role: "user",
-        content: [{ type: "image", source: "base64", data: "abc", mediaType: "image/png" }],
+        content: [
+          image,
+          { ...image, name: "cat.png" },
+          {
+            type: "document_ref",
+            path: "inbound/r.pdf",
+            mediaType: "application/pdf",
+            name: "report.pdf",
+            bytes: 3,
+          },
+        ],
       },
     ];
-    expect(formatTranscript(messages)).toContain("[Image]");
+    expect(formatTranscript(messages)).toBe(
+      "User: [Image: photo]\n[Image: cat.png]\n[Document: report.pdf]",
+    );
+  });
+
+  it("drops image labels and renders attachment placeholders as notes", () => {
+    const messages: StoredMessage[] = [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "Image 1:", harness: "image_label" },
+          { type: "text", text: "clip.mp4 is not supported", harness: "attachment_placeholder" },
+          { type: "text", text: "what is this?" },
+        ],
+      },
+    ];
+    expect(formatTranscript(messages)).toBe(
+      "User: [Note: clip.mp4 is not supported]\nwhat is this?",
+    );
   });
 
   it("skips messages with only stripped blocks", () => {
-    const messages: Message[] = [
+    const messages: StoredMessage[] = [
       {
         role: "assistant",
         content: [{ type: "thinking", thinking: "hmm", signature: "sig" }],
@@ -232,7 +269,7 @@ function systemPromptOf(deps: ExtractionDeps): string {
   return call[0].system;
 }
 
-const sampleHistory: Message[] = [
+const sampleHistory: StoredMessage[] = [
   { role: "user", content: "Search for weather" },
   {
     role: "assistant",
@@ -1212,7 +1249,7 @@ describe("extractCorrections", () => {
 
   it("skips extraction for empty transcript", async () => {
     const deps = mockExtractionDeps({ corrections: [] });
-    const thinkingOnly: Message[] = [
+    const thinkingOnly: StoredMessage[] = [
       {
         role: "assistant",
         content: [{ type: "thinking", thinking: "hmm", signature: "sig" }],
