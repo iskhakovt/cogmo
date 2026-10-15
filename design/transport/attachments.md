@@ -21,7 +21,8 @@ Surveyed September 2026.
 
 - **Adapters store originals.** The Telegram handler uploads the file through `transport.uploadAttachment` and emits a block carrying its `path` and `name`, or a size-only block for a file too large to download (`bytes` and no `path` or `data`), which becomes the too-large placeholder ([telegram.md](telegram.md)). An image block carries the file's `name` when it was sent as a file. No adapter decodes.
 - **`create-user-message` normalizes** every attachment in the batch, in the step that inserts the row and returns nothing ([Images](#images-confirmed), [Documents](#documents-confirmed)). An inline attachment (bytes, no `path`) is uploaded there first, keyed by its content digest. A URL attachment, which no adapter produces, becomes a placeholder: fetching a user-supplied URL from the server is an SSRF surface, and its bytes can change.
-- **Keys.** A normalized copy's key derives from its original's (`inbound/<id>.png` → `normalized/<id>.jpg`), so a retried upload overwrites the same object. An insert that re-runs after its commit leaves two turn rows naming the same objects; the older row's attachments count twice against the budget until the cutoff or a summary passes it.
+- **The row.** A batch without attachments stores its text as it always has. With attachments, the row is blocks in inbound order: the user's text joined by newlines between attachments, blank text dropped (a provider refuses an empty block, and the row replays on every turn), then each attachment's label and ref or its placeholder.
+- **Keys.** A normalized copy's key derives from its original's (`inbound/<id>.png` → `normalized/<id>.jpg`), so a retried upload overwrites the same object. Arrival names the stem and the store adds the extension (`AttachmentStore.put`), so the encrypted store writes `.bin` as for every upload. An insert that re-runs after its commit leaves two turn rows naming the same objects; the older row's attachments count twice against the budget until the cutoff or a summary passes it.
 - **Per-turn cap.** The step resolves the turn's route (the model `load-turn-snapshot` froze, its `AttachmentLimits` and input budget), so the row records the decision. A turn's attachments are admitted in order while their base64 total stays within the route's attachment budget ([prompt-caching.md](../prompt-caching.md#sources-and-fixes) → source (d)) and their count within its image limit; the rest become placeholders. A routing change between this step and `freeze-model-limits` can still overrun it, a residual of the concurrent-operator-action class.
 
 ### Original records
@@ -44,7 +45,7 @@ stateDiagram-v2
   ready --> rejected: 4c
 ```
 
-Only the byte-size check and the HEIC brand sniff, both JavaScript, run before the marker commits, so a crafted header that kills the process inside libvips leaves a `decoding` record. sharp refusing an input (an unsupported format, a warning, the timeout, the pixel guard) is an outcome, recorded `ready` with its placeholder. Anything else that throws between the marker and `ready` (the normalized copy's upload, a bug) deletes the record, so the step's retry decodes again. Only a process death leaves one, and a death isn't proof of a poison input (a deploy or an OOM kills a healthy decode too), so a claim that finds `decoding` counts the attempt and decodes again; the third attempt records the decode-crash placeholder without decoding. A poison input therefore costs two crashes. Only images get a record in 4b: every other arrival decision is cheap and deterministic. One table carries both markers: each is per original, must commit on its own and outlive a failed run, and is read at arrival and with the transcript's rows. S3 metadata can't change without rewriting the object, and message rows are immutable.
+Only JavaScript checks (the byte cap, the HEIC brand sniff) run before the marker commits, so a crafted header that kills the process inside libvips leaves a `decoding` record. sharp refusing an input is an outcome, recorded `ready` with its placeholder; a timeout says as much about the host's load as about the input, so it deletes the record and the row gets its placeholder unrecorded. A process death isn't proof of a poison input either (a deploy or an OOM kills a healthy decode too), hence the second decode. Only images get a record in 4b. One table carries both markers because each is per original, must commit on its own and outlive a failed run, and is read at arrival and with the transcript's rows; S3 metadata can't change without rewriting the object, and message rows are immutable.
 
 ```
 attachment_originals
@@ -64,7 +65,7 @@ attachment_originals
 | none → `decoding` | arrival meets an image original with no record | `INSERT … ON CONFLICT (original_path) DO UPDATE SET decode_attempts = decode_attempts + 1 WHERE state = 'decoding'`, returning the attempt; a `ready` or `rejected` record is read and returned instead |
 | `decoding` → `decoding` | the same claim finding a record a dead process left | as above |
 | `decoding` → `ready` | this attempt's decode returned and its normalized copy is uploaded, or sharp refused it, or the claim's attempt is the third | `UPDATE … WHERE state = 'decoding'`; stale returns the record, absent returns nothing |
-| `decoding` → deleted | the decode or upload threw | `DELETE … WHERE state = 'decoding'` |
+| `decoding` → deleted | the decode or upload threw, or the decode timed out | `DELETE … WHERE state = 'decoding'`, returning whether it happened |
 | none or `ready` → `rejected` | 4c: [Rejected attachments](#rejected-attachments-proposed) | upsert `SET state = 'rejected', result = NULL WHERE state <> 'decoding'` |
 
 A stale `ready` UPDATE (another attempt finished first) uses the record's result, so every row naming the original agrees. An absent one (another attempt's DELETE ran) uses its own result unrecorded; the next arrival decodes again.
@@ -108,7 +109,7 @@ A 48-megapixel JPEG normalizes in about half a second on one thread. The worst c
 ## Documents `[confirmed]`
 
 - **PDFs** are stored as sent, as a `document_ref`: no rasterizing and no page count, which would take a second untrusted-input parser. A file without the `%PDF-` header, or with an `/Encrypt` entry, gets a placeholder. A PDF over the route's page limit or window, or one the provider can't parse, is [rejected](#rejected-attachments-proposed) by the provider and marked.
-- **Text-like documents** (`text/*`, JSON, XML, YAML, one predicate both adapters share) are truncated at arrival, with an elision marker, to the lesser of the adapter's per-document cap (100,000 characters on the OpenAI-compatible adapter) and, for the turn's text documents together, a quarter of the route's input budget, counted with its `countTokens`. The text sent is stored as the document's normalized copy beside the original. Anthropic sends it as a text source, and the OpenAI-compatible adapter inlines it.
+- **Text-like documents** (`text/*`, JSON, XML, YAML, one predicate both adapters share) are truncated at arrival, with an elision marker, to the lesser of the adapter's per-document cap (100,000 UTF-8 bytes on the OpenAI-compatible adapter, `AttachmentLimits.textDocumentBytes`) and, for the turn's text documents together, a quarter of the route's input budget, counted with its `countTokens`. The text sent is stored as the document's normalized copy beside the original. Anthropic sends it as a text source, and the OpenAI-compatible adapter inlines it.
 - **Other binary documents** (`.docx`, `.xlsx`, archives, `application/octet-stream`) get a placeholder at arrival, not a stub at the wire. No route Cogmo serves reads them. A wire stub would read and base64-encode the bytes on every invocation for each adapter to discard, count them against the attachment budget, and send stub text that a deploy could change under a cached prefix. A placeholder is stored as sent, so the head stays the same on every route and nothing is re-read. The OpenAI-compatible adapter still stubs a PDF, which Anthropic reads. `[confirmed]` Until arrival placeholders ship, and in rows stored before them, such types reach the adapters. Anthropic stubs a document that is neither PDF nor text-like, and a base64 image that isn't JPEG, PNG, GIF or WebP, rather than failing the request: the row replays on every later turn, so a failure would end the conversation.
 
 ## Placeholders `[confirmed]`
@@ -118,16 +119,18 @@ An arrival placeholder is a text block tagged `harness: "attachment_placeholder"
 | Case | Says |
 |-|-|
 | HEIC or HEIF | not supported; send it as a photo |
-| Other image format, decode failure, timeout, a decode that crashed twice | couldn't be read; send it as a photo |
+| Other image format, decode failure, a decode that crashed twice | couldn't be read; send it as a photo |
+| Decode timeout | took too long to process; send it again |
 | Over 20 MB or 100 megapixels | too large |
 | Original missing from storage | couldn't be stored; send it again |
 | Unreadable PDF (no header, encrypted) | send an unlocked PDF |
+| Blank text document | empty |
 | Other binary document | can't be read; send a PDF or text |
 | URL attachment | not fetched |
 | Past the per-turn cap | not attached; send fewer at a time |
 | Rejected by the provider | the model provider refused it; send it another way |
 
-Each is counted in `cogmo.attachments.placeholders{reason}`, `reason` one of `heic`, `undecodable`, `decode_crashed`, `too_large`, `missing`, `unreadable_pdf`, `unsupported`, `url`, `turn_cap` and `rejected`; the renderer adds `unreadable`.
+Each is counted in `cogmo.attachments.placeholders{reason}`, `reason` one of `heic`, `undecodable`, `decode_crashed`, `timeout`, `too_large`, `empty`, `missing`, `unreadable_pdf`, `unsupported`, `url`, `turn_cap` and `rejected`; the renderer adds `unreadable`.
 
 ## Security `[confirmed]`
 
@@ -149,7 +152,7 @@ libvips and its codecs run native code in the server process over bytes anyone c
   - Every placeholder case, HEIC by media type and by brand. TIFF, AVIF and SVG are refused by the allowlist, the regression test for an unblocked loader; a truncated JPEG, zero bytes and a 144-megapixel header are refused before decoding.
   - A mislabelled media type decodes by content, and an Ultra HDR JPEG decodes through the JPEG loader.
   - `create-user-message` uploads inline originals and normalized copies under derived keys and writes refs and labels; cached, it does neither. The cap follows the turn's route, and text documents are truncated to it.
-  - Original records: a `decoding` record left behind gives the decode-failure placeholder, a thrown decode leaves no record, and a re-batched original reuses its result without decoding.
+  - Original records: a `decoding` record left behind decodes again and after two deaths records the decode-crash placeholder, a thrown or timed-out decode leaves no record, and a re-batched original reuses its result without decoding.
   - Rejected attachments: after a 400 on a turn carrying a PDF, the next turn shows the PDF as the rejection placeholder in the failed turn's row and in its own re-batched row, and the head check stays clean under `throw`; a 401 marks nothing.
   - The Telegram adapter emits a named block for an image document, and a size-only block for a file over 20 MB.
 - **Boot.** The boot check covers the built image ([infrastructure.md](../infrastructure.md#image-processing-confirmed)).

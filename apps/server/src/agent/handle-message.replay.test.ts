@@ -197,6 +197,31 @@ describe("handle-message — crash recovery / step replay", () => {
     expect(deps.agentStore.insertMessages).toHaveBeenCalledTimes(1);
   });
 
+  it("neither normalizes nor uploads a photo when create-user-message is cached", async () => {
+    const deps = mockDeps({
+      transportStore: mockTransportStore({
+        getUnbatchedInbound: vi.fn().mockResolvedValue([
+          {
+            id: "inbound-1",
+            content: [{ type: "image", path: "inbound/a.jpg", mediaType: "image/jpeg" }],
+            source: "user",
+          },
+        ]),
+      }),
+    });
+    const engine = new InngestTestEngine({
+      function: createHandleMessage(deps),
+      events: [event],
+      steps: [{ id: "create-user-message", handler: () => undefined }],
+    });
+
+    await engine.execute();
+
+    expect(deps.images.normalize).not.toHaveBeenCalled();
+    expect(deps.attachments.put).not.toHaveBeenCalled();
+    expect(deps.transportStore.claimAttachmentDecode).not.toHaveBeenCalled();
+  });
+
   it("does not re-insert the assistant message when persist-new-messages is cached", async () => {
     const deps = mockDeps();
     const fn = createHandleMessage(deps);

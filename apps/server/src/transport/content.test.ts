@@ -31,16 +31,6 @@ describe("contentToBlocks", () => {
     ).toEqual([{ type: "image_ref", path: "inbound/abc.jpg", mediaType: "image/jpeg" }]);
   });
 
-  it("carries an image's name onto its ImageRef", () => {
-    expect(
-      contentToBlocks([
-        { type: "image", path: "inbound/abc.png", mediaType: "image/png", name: "cat.png" },
-      ]),
-    ).toEqual([
-      { type: "image_ref", path: "inbound/abc.png", mediaType: "image/png", name: "cat.png" },
-    ]);
-  });
-
   it("gives no block for a size-only document", () => {
     const content = InboundContentSchema.parse([
       { type: "text", text: "see this" },

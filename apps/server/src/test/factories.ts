@@ -25,7 +25,7 @@ import type {
 } from "../llm/types.js";
 import type { MemoryProvider } from "../memory/provider.js";
 import type { SecretsStore } from "../secrets/store/index.js";
-import type { AttachmentStore } from "../transport/attachment-store.js";
+import { type AttachmentStore, mediaTypeToExt } from "../transport/attachment-store.js";
 import type { DeliveryHandle, DeliveryRouter } from "../transport/delivery-router.js";
 import type { TransportStore } from "../transport/store/index.js";
 import type { Transport } from "../transport/transport.js";
@@ -888,7 +888,10 @@ export function mockDeliveryRouter(overrides?: Partial<DeliveryRouter>): Deliver
 export function mockAttachmentStore(overrides?: Partial<AttachmentStore>): AttachmentStore {
   return {
     upload: vi.fn().mockResolvedValue("inbound/test.jpg"),
-    put: vi.fn().mockResolvedValue(undefined),
+    put: vi.fn(
+      async (stem: string, _data: Buffer, mediaType: string) =>
+        `${stem}.${mediaTypeToExt(mediaType)}`,
+    ),
     download: vi.fn().mockResolvedValue(Buffer.from([1, 2, 3])),
     read: vi.fn().mockResolvedValue(ok(Buffer.from([1, 2, 3]))),
     ...overrides,
@@ -897,13 +900,18 @@ export function mockAttachmentStore(overrides?: Partial<AttachmentStore>): Attac
 
 /**
  * Arrival's image steps without sharp: nothing is screened out, and every
- * image normalizes to a 1000 × 750 JPEG of `bytes` bytes.
+ * image normalizes to a 1000 × 750 JPEG of 100,000 bytes.
  */
-export function mockImages(bytes = 100_000): NormalizeArrivalDeps["images"] {
+export function mockImages(): NormalizeArrivalDeps["images"] {
   return {
     screen: vi.fn(() => null),
     normalize: vi.fn(async () =>
-      ok({ data: Buffer.alloc(bytes), mediaType: "image/jpeg" as const, width: 1000, height: 750 }),
+      ok({
+        data: Buffer.alloc(100_000),
+        mediaType: "image/jpeg" as const,
+        width: 1000,
+        height: 750,
+      }),
     ),
   };
 }

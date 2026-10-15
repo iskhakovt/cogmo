@@ -105,7 +105,6 @@ export interface ImageRef {
   type: "image_ref";
   path: string;
   mediaType: string;
-  name?: string;
 }
 
 /** Inbound document reference — S3 path, needs resolution before sending to LLM. */
@@ -149,14 +148,7 @@ export function contentToBlocks(content: InboundContent): InboundBlock[] {
     }
     if (block.type === "image") {
       if (block.path != null) {
-        return [
-          {
-            type: "image_ref",
-            path: block.path,
-            mediaType: block.mediaType,
-            ...(block.name && { name: block.name }),
-          },
-        ];
+        return [{ type: "image_ref", path: block.path, mediaType: block.mediaType }];
       }
       if (block.data != null) {
         return [

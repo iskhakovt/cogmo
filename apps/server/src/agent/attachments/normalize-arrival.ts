@@ -13,15 +13,15 @@ import { isTextLikeDocumentMediaType } from "../../llm/content.js";
 import { logger } from "../../logger.js";
 import { attachmentPlaceholders } from "../../metrics.js";
 import type {
-  AttachmentOriginal,
+  FinishedOriginal,
   NormalizedImageResult,
 } from "../../transport/attachment-original.js";
-import { type AttachmentStore, mediaTypeToExt } from "../../transport/attachment-store.js";
-import { renderInboundText } from "../../transport/content.js";
+import type { AttachmentStore } from "../../transport/attachment-store.js";
+import { MAX_INBOUND_FILE_BYTES, renderInboundText } from "../../transport/content.js";
 import type { TransportStore } from "../../transport/store/index.js";
 import { renderUserContent, type SubstitutedInbound } from "../handle-message/inbound-batch.js";
 import type { StoredContent, StoredContentBlock } from "../stored-content.js";
-import { MAX_IMAGE_INPUT_BYTES, type normalizeImage, type screenImage } from "./normalize-image.js";
+import type { normalizeImage, screenImage } from "./normalize-image.js";
 import { placeholderText as rendererPlaceholderText } from "./render-stored-content.js";
 
 /** Why arrival stores a placeholder instead of an attachment. */
@@ -29,6 +29,8 @@ type ArrivalPlaceholderReason =
   | "heic"
   | "undecodable"
   | "decode_crashed"
+  | "timeout"
+  | "empty"
   | "too_large"
   | "unreadable_pdf"
   | "unsupported"
@@ -39,12 +41,21 @@ type ArrivalPlaceholderReason =
 
 type AttachmentKind = "image" | "document";
 
+/** How a placeholder names each kind: its label, the name of an unnamed file, and its ref. */
+const KINDS = {
+  image: { label: "Image", unnamed: "photo", ref: "image_ref" },
+  document: { label: "Document", unnamed: "document", ref: "document_ref" },
+} as const satisfies Record<
+  AttachmentKind,
+  { label: string; unnamed: string; ref: "image_ref" | "document_ref" }
+>;
+
 function arrivalPlaceholderText(
   reason: ArrivalPlaceholderReason,
   kind: AttachmentKind,
   name: string,
 ): string {
-  const label = `${kind === "image" ? "Image" : "Document"}: ${name}`;
+  const label = `${KINDS[kind].label}: ${name}`;
   return match(reason)
     .with("heic", () => `[${label}. HEIC isn't supported; send it as a photo.]`)
     .with(
@@ -52,15 +63,15 @@ function arrivalPlaceholderText(
       "decode_crashed",
       () => `[${label}. The image couldn't be read; send it as a photo.]`,
     )
+    .with("timeout", () => `[${label}. The image took too long to process; send it again.]`)
     .with("too_large", () => `[${label}. Too large to attach.]`)
+    .with("empty", () => `[${label}. The file is empty.]`)
     .with("unreadable_pdf", () => `[${label}. The PDF couldn't be read; send an unlocked PDF.]`)
     .with("unsupported", () => `[${label}. This file type can't be read; send a PDF or text.]`)
     .with("url", () => `[${label}. Linked files aren't fetched.]`)
     .with("turn_cap", () => `[${label}. Not attached; send fewer files at a time.]`)
     .with("missing", () => `[${label}. The file couldn't be stored; send it again.]`)
-    .with("rejected", () =>
-      rendererPlaceholderText("rejected", kind === "image" ? "image_ref" : "document_ref", name),
-    )
+    .with("rejected", () => rendererPlaceholderText("rejected", KINDS[kind].ref, name))
     .exhaustive();
 }
 
@@ -132,12 +143,12 @@ export async function normalizeArrival(
   // Sequential: one image decodes at a time, and the cap admits in order.
   for (const { content } of inbound) {
     if (typeof content === "string") {
-      blocks.push({ type: "text", text: content });
+      pushText(blocks, content);
       continue;
     }
     for (const block of content) {
       if (block.type === "text") {
-        blocks.push({ type: "text", text: renderInboundText(block.text, block.forwarded) });
+        pushText(blocks, renderInboundText(block.text, block.forwarded));
       } else if (block.type === "image" || block.type === "document") {
         blocks.push(...(await arriveAttachment(deps, route, load, block)));
       }
@@ -147,12 +158,27 @@ export async function normalizeArrival(
   return blocks;
 }
 
+/**
+ * Append the user's `text`, joined by a newline to the user text before it as
+ * a batch without attachments joins its rows. Blank text is dropped: a
+ * provider refuses an empty text block, and the row replays on every turn.
+ */
+function pushText(blocks: StoredContentBlock[], text: string): void {
+  if (text.trim() === "") return;
+  const last = blocks.at(-1);
+  if (last?.type === "text" && last.harness === undefined) {
+    blocks[blocks.length - 1] = { type: "text", text: `${last.text}\n${text}` };
+  } else {
+    blocks.push({ type: "text", text });
+  }
+}
+
 function placeholder(
   reason: ArrivalPlaceholderReason,
   kind: AttachmentKind,
   attachment: InboundAttachment,
 ): StoredContentBlock[] {
-  const name = attachment.name ?? (kind === "image" ? "photo" : "document");
+  const name = attachment.name ?? KINDS[kind].unnamed;
   attachmentPlaceholders.add(1, { reason });
   logger.info({ reason, mediaType: attachment.mediaType }, "attachment stored as a placeholder");
   return [
@@ -185,17 +211,29 @@ async function arriveAttachment(
 
   const original = await readOriginal(deps, attachment);
   if (original === null) return placeholder("missing", kind, attachment);
-  if (original.bytes.length > MAX_IMAGE_INPUT_BYTES) {
+  if (original.bytes.length > MAX_INBOUND_FILE_BYTES) {
     return placeholder("too_large", kind, attachment);
   }
 
-  if (kind === "image") return arriveImage(deps, route, load, attachment, original);
+  return match(kind)
+    .with("image", () => arriveImage(deps, route, load, attachment, original))
+    .with("document", () => arriveDocument(deps, route, load, attachment, original))
+    .exhaustive();
+}
+
+async function arriveDocument(
+  deps: NormalizeArrivalDeps,
+  route: ArrivalRoute,
+  load: TurnLoad,
+  attachment: InboundAttachment,
+  original: { path: string; bytes: Buffer },
+): Promise<StoredContentBlock[]> {
   const essence = (attachment.mediaType.split(";")[0] ?? "").trim().toLowerCase();
   if (essence === "application/pdf") return arrivePdf(route, load, attachment, original);
   if (isTextLikeDocumentMediaType(attachment.mediaType)) {
     return arriveText(deps, route, load, attachment, original);
   }
-  return placeholder("unsupported", kind, attachment);
+  return placeholder("unsupported", "document", attachment);
 }
 
 /** The original's key and bytes; an inline original is stored first, keyed by its digest. */
@@ -209,16 +247,15 @@ async function readOriginal(
   }
   const bytes = Buffer.from(attachment.data ?? "", "base64");
   const digest = createHash("sha256").update(bytes).digest("hex");
-  const path = `inbound/${digest}.${mediaTypeToExt(attachment.mediaType)}`;
-  await deps.attachments.put(path, bytes, attachment.mediaType);
+  const path = await deps.attachments.put(`inbound/${digest}`, bytes, attachment.mediaType);
   return { path, bytes };
 }
 
 /**
- * A normalized copy's key, derived from its original's so a retried upload
- * overwrites the same object: `inbound/<id>.png` → `normalized/<id><suffix>`.
+ * A normalized copy's key stem, derived from its original's so a retried
+ * upload overwrites the same object: `inbound/<id>.png` → `normalized/<id><suffix>`.
  */
-function normalizedKey(originalPath: string, suffix: string): string {
+function normalizedStem(originalPath: string, suffix: string): string {
   const slash = originalPath.indexOf("/");
   const rest = slash === -1 ? originalPath : originalPath.slice(slash + 1);
   const dot = rest.lastIndexOf(".");
@@ -250,6 +287,7 @@ async function arriveImage(
   return match(result)
     .with({ kind: "placeholder" }, ({ reason }) => placeholder(reason, "image", attachment))
     .with({ kind: "rejected" }, () => placeholder("rejected", "image", attachment))
+    .with({ kind: "timeout" }, () => placeholder("timeout", "image", attachment))
     .with({ kind: "image" }, (image): StoredContentBlock[] => {
       if (!admit(route, load, image.bytes, true)) {
         return placeholder("turn_cap", "image", attachment);
@@ -285,52 +323,86 @@ async function arriveImage(
 async function normalizedResult(
   deps: NormalizeArrivalDeps,
   original: { path: string; bytes: Buffer },
-): Promise<NormalizedImageResult | { kind: "rejected" }> {
+): Promise<ImageOutcome> {
   const { runInTx, transportStore } = deps;
   const claim = await runInTx((tx) => transportStore.claimAttachmentDecode(tx, original.path));
-  if (claim.kind === "existing") return recorded(claim.original);
-  if (claim.attempt > MAX_DECODE_ATTEMPTS) {
-    // Every earlier attempt died decoding it.
-    return finish(deps, original.path, { kind: "placeholder", reason: "decode_crashed" });
-  }
+  return match(claim)
+    .with({ kind: "existing" }, ({ original: record }) => recorded(record))
+    .with({ kind: "claimed" }, ({ attempt }) =>
+      attempt > MAX_DECODE_ATTEMPTS
+        ? // Every earlier attempt died decoding it.
+          finish(deps, original.path, { kind: "placeholder", reason: "decode_crashed" })
+        : decode(deps, original),
+    )
+    .exhaustive();
+}
 
-  let result: NormalizedImageResult;
+/**
+ * Decode under this attempt's `decoding` marker. A throw abandons the
+ * marker, so the retry decodes again; so does a timeout, which records
+ * nothing, since it may say more about the host's load than the input.
+ */
+async function decode(
+  deps: NormalizeArrivalDeps,
+  original: { path: string; bytes: Buffer },
+): Promise<ImageOutcome> {
+  const abandon = () =>
+    deps.runInTx((tx) => deps.transportStore.abandonAttachmentDecode(tx, original.path));
+  let decoded: NormalizedImageResult | { kind: "timeout" };
   try {
-    const decoded = await deps.images.normalize(original.bytes);
-    if (decoded.isErr()) {
-      result = { kind: "placeholder", reason: decoded.error };
-    } else {
-      const image = decoded.value;
-      const path = normalizedKey(original.path, `.${mediaTypeToExt(image.mediaType)}`);
-      await deps.attachments.put(path, image.data, image.mediaType);
-      result = {
-        kind: "image",
-        path,
-        mediaType: image.mediaType,
-        width: image.width,
-        height: image.height,
-        bytes: image.data.length,
-      };
-    }
+    decoded = await decodeAndStore(deps, original);
   } catch (error) {
-    await runInTx((tx) => transportStore.abandonAttachmentDecode(tx, original.path));
+    await abandon();
     throw error;
   }
-  return finish(deps, original.path, result);
+  return match(decoded)
+    .with({ kind: "timeout" }, async (timeout) => {
+      await abandon();
+      return timeout;
+    })
+    .otherwise((result) => finish(deps, original.path, result));
 }
+
+/** The decode's result, its normalized copy stored. */
+async function decodeAndStore(
+  deps: NormalizeArrivalDeps,
+  original: { path: string; bytes: Buffer },
+): Promise<NormalizedImageResult | { kind: "timeout" }> {
+  const decoded = await deps.images.normalize(original.bytes);
+  if (decoded.isErr()) {
+    return match(decoded.error)
+      .with("timeout", () => ({ kind: "timeout" as const }))
+      .with("undecodable", "too_large", (reason) => ({ kind: "placeholder" as const, reason }))
+      .exhaustive();
+  }
+  const image = decoded.value;
+  const path = await deps.attachments.put(
+    normalizedStem(original.path, ""),
+    image.data,
+    image.mediaType,
+  );
+  return {
+    kind: "image",
+    path,
+    mediaType: image.mediaType,
+    width: image.width,
+    height: image.height,
+    bytes: image.data.length,
+  };
+}
+
+/** What arrival makes of an image original: its record's result, a rejection, or a timeout. */
+type ImageOutcome = NormalizedImageResult | { kind: "rejected" } | { kind: "timeout" };
 
 /** Decodes a `decoding` record gets before its next claim records the decode-crash placeholder. */
 const MAX_DECODE_ATTEMPTS = 2;
 
 /** A finished record's outcome. */
-function recorded(original: AttachmentOriginal): NormalizedImageResult | { kind: "rejected" } {
-  if (original.state === "rejected") return { kind: "rejected" };
-  if (original.result === null) {
-    throw new Error(
-      `attachment original ${original.originalPath} is ${original.state} without a result`,
-    );
-  }
-  return original.result;
+function recorded(original: FinishedOriginal): ImageOutcome {
+  return match(original)
+    .with({ state: "ready" }, ({ result }) => result)
+    .with({ state: "rejected" }, () => ({ kind: "rejected" as const }))
+    .exhaustive();
 }
 
 /**
@@ -342,7 +414,7 @@ async function finish(
   deps: NormalizeArrivalDeps,
   originalPath: string,
   result: NormalizedImageResult,
-): Promise<NormalizedImageResult | { kind: "rejected" }> {
+): Promise<ImageOutcome> {
   const finished = await deps.runInTx((tx) =>
     deps.transportStore.finishAttachmentDecode(tx, originalPath, result),
   );
@@ -390,6 +462,8 @@ async function arriveText(
   original: { path: string; bytes: Buffer },
 ): Promise<StoredContentBlock[]> {
   const full = original.bytes.toString("utf8");
+  // A provider refuses an empty text, at counting and at sending alike.
+  if (full.trim() === "") return placeholder("empty", "document", attachment);
   const allowance = route.textDocumentTokens - load.textTokens;
   const fitted = await fitText(full, route.textDocumentBytes, allowance, route.countTokens);
   if (fitted === null) return placeholder("turn_cap", "document", attachment);
@@ -412,8 +486,11 @@ async function arriveText(
     ];
   }
   // Keyed by what it keeps, so a different cut on another route is another object.
-  const path = normalizedKey(original.path, `.${fitted.kept}.txt`);
-  await deps.attachments.put(path, sent, attachment.mediaType);
+  const path = await deps.attachments.put(
+    normalizedStem(original.path, `.${fitted.kept}`),
+    sent,
+    attachment.mediaType,
+  );
   return [
     {
       type: "document_ref",
@@ -449,8 +526,14 @@ async function fitText(
     if (kept === 0) return null;
     // Proportional, with a margin so one recount usually suffices.
     kept = Math.floor((kept * Math.max(0, allowance)) / tokens / 1.05);
+    // Never end on the high half of a surrogate pair.
+    if (kept > 0 && isHighSurrogate(text.charCodeAt(kept - 1))) kept -= 1;
   }
   return null;
+}
+
+function isHighSurrogate(code: number): boolean {
+  return code >= 0xd800 && code <= 0xdbff;
 }
 
 function elided(text: string, kept: number): string {

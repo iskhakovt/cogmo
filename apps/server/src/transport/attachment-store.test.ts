@@ -58,20 +58,22 @@ describe("createAttachmentStore().read", () => {
 });
 
 describe("createAttachmentStore().put", () => {
-  it("writes the bytes under the caller's key with the media type", async () => {
+  it("writes the bytes under the caller's stem and the media type's extension", async () => {
     const send = vi.fn().mockResolvedValue({});
     const data = Buffer.from([1, 2, 3]);
-    await createAttachmentStore({ send } as unknown as S3Client, "bucket").put(
-      "inbound/a.normalized.jpg",
+    const path = await createAttachmentStore({ send } as unknown as S3Client, "bucket").put(
+      "normalized/a",
       data,
       "image/jpeg",
     );
+
+    expect(path).toBe("normalized/a.jpg");
 
     const command = expectDefined(send.mock.calls[0], "send call")[0];
     expect(command).toBeInstanceOf(PutObjectCommand);
     expect(command.input).toEqual({
       Bucket: "bucket",
-      Key: "inbound/a.normalized.jpg",
+      Key: "normalized/a.jpg",
       Body: data,
       ContentType: "image/jpeg",
     });

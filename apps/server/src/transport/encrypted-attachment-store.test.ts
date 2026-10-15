@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { isEncrypted } from "../secrets/blob-envelope.js";
 import { deriveMasterKey, generateMasterKey, parseMasterKey } from "../secrets/encryption.js";
 import { expectDefined } from "../test/assertions.js";
-import type { AttachmentStore } from "./attachment-store.js";
+import { type AttachmentStore, mediaTypeToExt } from "./attachment-store.js";
 import { wrapAttachmentStoreWithEncryption } from "./encrypted-attachment-store.js";
 
 const PURPOSE = "cogmo/s3-objects/v1";
@@ -43,9 +43,11 @@ function fakeStore(): {
       blobs.set(path, data);
       return path;
     }),
-    put: vi.fn(async (path: string, data: Buffer, mediaType: string) => {
+    put: vi.fn(async (stem: string, data: Buffer, mediaType: string) => {
+      const path = `${stem}.${mediaTypeToExt(mediaType)}`;
       puts.push({ path, data, mediaType });
       blobs.set(path, data);
+      return path;
     }),
     download: vi.fn(async (path: string) => {
       const blob = blobs.get(path);
@@ -270,15 +272,16 @@ describe("wrapAttachmentStoreWithEncryption — read", () => {
 });
 
 describe("wrapAttachmentStoreWithEncryption — put", () => {
-  it("writes ciphertext as an opaque blob under the caller's key", async () => {
+  it("writes ciphertext as an opaque .bin blob under the caller's stem", async () => {
     const { store, puts } = fakeStore();
     const wrapped = wrapAttachmentStoreWithEncryption(store, testKey());
     const plaintext = Buffer.from("normalized photo");
 
-    await wrapped.put("inbound/a.normalized.jpg", plaintext, "image/jpeg");
+    const path = await wrapped.put("normalized/a", plaintext, "image/jpeg");
 
     const written = expectDefined(puts[0], "put");
-    expect(written.path).toBe("inbound/a.normalized.jpg");
+    expect(path).toBe("normalized/a.bin");
+    expect(written.path).toBe("normalized/a.bin");
     expect(written.mediaType).toBe("application/octet-stream");
     expect(written.data.includes(plaintext)).toBe(false);
     expect(isEncrypted(written.data)).toBe(true);
@@ -289,9 +292,9 @@ describe("wrapAttachmentStoreWithEncryption — put", () => {
     const wrapped = wrapAttachmentStoreWithEncryption(store, testKey());
     const plaintext = Buffer.from("normalized photo");
 
-    await wrapped.put("inbound/a.normalized.jpg", plaintext, "image/jpeg");
+    const path = await wrapped.put("normalized/a", plaintext, "image/jpeg");
 
-    const read = await wrapped.read("inbound/a.normalized.jpg");
+    const read = await wrapped.read(path);
     expect(read._unsafeUnwrap().equals(plaintext)).toBe(true);
   });
 });

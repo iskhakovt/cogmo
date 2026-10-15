@@ -3,10 +3,10 @@ import { describe, expect, it, vi } from "vitest";
 import type { Transactor } from "../../db/index.js";
 import { mockAttachmentStore } from "../../test/factories.js";
 import type {
-  AttachmentOriginal,
+  FinishedOriginal,
   NormalizedImageResult,
 } from "../../transport/attachment-original.js";
-import type { InboundContent } from "../../transport/content.js";
+import { type InboundContent, MAX_INBOUND_FILE_BYTES } from "../../transport/content.js";
 import {
   type ArrivalRoute,
   type NormalizeArrivalDeps,
@@ -16,31 +16,36 @@ import {
 const FAKE_TX = { __mockTx: true } as never;
 const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
 
-/** `attachment_originals` in memory, with the store's transition rules. */
-function originalsStore(initial: ReadonlyArray<AttachmentOriginal & { attempts?: number }> = []) {
-  const records = new Map(initial.map((r) => [r.originalPath, { attempts: 1, ...r }]));
+type FakeRecord = { state: "decoding"; attempts: number } | FinishedOriginal;
+
+/** `attachment_originals` in memory, keyed by original path, with the store's transition rules. */
+function originalsStore(initial: Record<string, FakeRecord> = {}) {
+  const records = new Map<string, FakeRecord>(Object.entries(initial));
   const store: NormalizeArrivalDeps["transportStore"] = {
     claimAttachmentDecode: vi.fn(async (_tx, originalPath: string) => {
       const record = records.get(originalPath);
       if (record === undefined) {
-        records.set(originalPath, { originalPath, state: "decoding", result: null, attempts: 1 });
+        records.set(originalPath, { state: "decoding", attempts: 1 });
         return { kind: "claimed" as const, attempt: 1 };
       }
       if (record.state !== "decoding") return { kind: "existing" as const, original: record };
-      record.attempts += 1;
-      return { kind: "claimed" as const, attempt: record.attempts };
+      const attempt = record.attempts + 1;
+      records.set(originalPath, { state: "decoding", attempts: attempt });
+      return { kind: "claimed" as const, attempt };
     }),
     finishAttachmentDecode: vi.fn(
       async (_tx, originalPath: string, result: NormalizedImageResult) => {
         const record = records.get(originalPath);
         if (record === undefined) return { kind: "absent" as const };
         if (record.state !== "decoding") return { kind: "stale" as const, original: record };
-        records.set(originalPath, { ...record, state: "ready", result });
+        records.set(originalPath, { state: "ready", result });
         return { kind: "finished" as const };
       },
     ),
     abandonAttachmentDecode: vi.fn(async (_tx, originalPath: string) => {
-      if (records.get(originalPath)?.state === "decoding") records.delete(originalPath);
+      if (records.get(originalPath)?.state !== "decoding") return { kind: "stale" as const };
+      records.delete(originalPath);
+      return { kind: "abandoned" as const };
     }),
   };
   return { store, records };
@@ -120,7 +125,7 @@ describe("normalizeArrival", () => {
       },
     ]);
     expect(d.attachments.put).toHaveBeenCalledWith(
-      "normalized/abc.jpg",
+      "normalized/abc",
       expect.any(Buffer),
       "image/jpeg",
     );
@@ -128,9 +133,8 @@ describe("normalizeArrival", () => {
   });
 
   it("reuses a ready record without decoding or uploading", async () => {
-    const { store } = originalsStore([
-      {
-        originalPath: "inbound/abc.jpg",
+    const { store } = originalsStore({
+      "inbound/abc.jpg": {
         state: "ready",
         result: {
           kind: "image",
@@ -141,7 +145,7 @@ describe("normalizeArrival", () => {
           bytes: 99,
         },
       },
-    ]);
+    });
     const { deps: d } = deps({ transportStore: store });
     const content = await normalizeArrival(d, async () => route, [
       { content: photo("inbound/abc.jpg") },
@@ -154,23 +158,21 @@ describe("normalizeArrival", () => {
   });
 
   it("decodes again after one death, and records the crash placeholder after two", async () => {
-    const left = { originalPath: "inbound/abc.jpg", state: "decoding" as const, result: null };
-    const once = originalsStore([{ ...left, attempts: 1 }]);
+    const path = "inbound/abc.jpg";
+    const once = originalsStore({ [path]: { state: "decoding", attempts: 1 } });
     const retried = deps({ transportStore: once.store });
-    await normalizeArrival(retried.deps, async () => route, [
-      { content: photo(left.originalPath) },
-    ]);
+    await normalizeArrival(retried.deps, async () => route, [{ content: photo(path) }]);
     expect(retried.deps.images.normalize).toHaveBeenCalledOnce();
 
-    const twice = originalsStore([{ ...left, attempts: 2 }]);
+    const twice = originalsStore({ [path]: { state: "decoding", attempts: 2 } });
     const crashed = deps({ transportStore: twice.store });
     const content = await normalizeArrival(crashed.deps, async () => route, [
-      { content: photo(left.originalPath) },
+      { content: photo(path) },
     ]);
     expect(crashed.deps.images.normalize).not.toHaveBeenCalled();
-    expect(twice.records.get(left.originalPath)?.result).toEqual({
-      kind: "placeholder",
-      reason: "decode_crashed",
+    expect(twice.records.get(path)).toEqual({
+      state: "ready",
+      result: { kind: "placeholder", reason: "decode_crashed" },
     });
     expect(content).toContainEqual({
       type: "text",
@@ -185,12 +187,10 @@ describe("normalizeArrival", () => {
     const content = await normalizeArrival(d, async () => route, [
       { content: photo("inbound/big.png", "big.png") },
     ]);
-    expect(records.get("inbound/big.png")).toEqual(
-      expect.objectContaining({
-        state: "ready",
-        result: { kind: "placeholder", reason: "too_large" },
-      }),
-    );
+    expect(records.get("inbound/big.png")).toEqual({
+      state: "ready",
+      result: { kind: "placeholder", reason: "too_large" },
+    });
     expect(content).toContainEqual(
       expect.objectContaining({ text: "[Image: big.png. Too large to attach.]" }),
     );
@@ -212,18 +212,94 @@ describe("normalizeArrival", () => {
     const other: NormalizedImageResult = { kind: "placeholder", reason: "undecodable" };
     const { deps: d } = deps({ transportStore: store });
     d.images.normalize = vi.fn(async () => {
-      records.set("inbound/abc.jpg", {
-        originalPath: "inbound/abc.jpg",
-        state: "ready",
-        result: other,
-        attempts: 1,
-      });
+      records.set("inbound/abc.jpg", { state: "ready", result: other });
       return ok({ data: Buffer.alloc(10), mediaType: "image/jpeg" as const, width: 1, height: 1 });
     });
     const content = await normalizeArrival(d, async () => route, [
       { content: photo("inbound/abc.jpg") },
     ]);
     expect(content).toContainEqual(expect.objectContaining({ harness: "attachment_placeholder" }));
+  });
+
+  it("keeps its own result unrecorded when another attempt abandoned the record", async () => {
+    const { store, records } = originalsStore();
+    const { deps: d } = deps({ transportStore: store });
+    d.images.normalize = vi.fn(async () => {
+      records.delete("inbound/abc.jpg");
+      return ok({ data: Buffer.alloc(10), mediaType: "image/jpeg" as const, width: 1, height: 1 });
+    });
+    const content = await normalizeArrival(d, async () => route, [
+      { content: photo("inbound/abc.jpg") },
+    ]);
+    expect(content).toContainEqual(expect.objectContaining({ type: "image_ref", bytes: 10 }));
+    expect(records.has("inbound/abc.jpg")).toBe(false);
+  });
+
+  it("stores a rejected original as the rejection placeholder without decoding", async () => {
+    const { store } = originalsStore({ "inbound/abc.jpg": { state: "rejected" } });
+    const { deps: d } = deps({ transportStore: store });
+    const content = await normalizeArrival(d, async () => route, [
+      { content: photo("inbound/abc.jpg", "a.jpg") },
+    ]);
+    expect(d.images.normalize).not.toHaveBeenCalled();
+    expect(content).toContainEqual({
+      type: "text",
+      text: "[Image: a.jpg. The model provider refused this file; ask for it another way.]",
+      harness: "attachment_placeholder",
+    });
+  });
+
+  it("stores a missing original as a placeholder", async () => {
+    const { deps: d } = deps();
+    d.attachments.read = vi.fn(async () => err({ kind: "missing" as const }));
+    const content = await normalizeArrival(d, async () => route, [
+      { content: photo("inbound/gone.jpg") },
+    ]);
+    expect(content).toContainEqual({
+      type: "text",
+      text: "[Image: photo. The file couldn't be stored; send it again.]",
+      harness: "attachment_placeholder",
+    });
+  });
+
+  it("refuses an original over 20 MB before any decode", async () => {
+    const { deps: d } = deps();
+    d.attachments.read = vi.fn(async () => ok(Buffer.alloc(MAX_INBOUND_FILE_BYTES + 1)));
+    const content = await normalizeArrival(d, async () => route, [
+      { content: photo("inbound/huge.jpg") },
+    ]);
+    expect(content).toContainEqual(
+      expect.objectContaining({ text: "[Image: photo. Too large to attach.]" }),
+    );
+    expect(d.transportStore.claimAttachmentDecode).not.toHaveBeenCalled();
+  });
+
+  it("stores a timed-out decode as a placeholder and leaves no record to reuse", async () => {
+    const { deps: d, records } = deps();
+    d.images.normalize = vi.fn(async () => err("timeout" as const));
+    const content = await normalizeArrival(d, async () => route, [
+      { content: photo("inbound/slow.jpg") },
+    ]);
+    expect(records.has("inbound/slow.jpg")).toBe(false);
+    expect(content).toContainEqual({
+      type: "text",
+      text: "[Image: photo. The image took too long to process; send it again.]",
+      harness: "attachment_placeholder",
+    });
+  });
+
+  it("joins the batch's text by newlines and drops blank text", async () => {
+    const { deps: d } = deps();
+    const content = await normalizeArrival(d, async () => route, [
+      { content: "hello" },
+      { content: [{ type: "text", text: "  " }] },
+      { content: photo("inbound/a.jpg") },
+    ]);
+    expect(content).toEqual([
+      { type: "text", text: "hello\nlook" },
+      expect.objectContaining({ harness: "image_label" }),
+      expect.objectContaining({ type: "image_ref" }),
+    ]);
   });
 
   it("caps the turn's images to the route, numbering only those stored", async () => {
@@ -271,7 +347,7 @@ describe("normalizeArrival", () => {
       },
     ]);
     expect(d.attachments.put).toHaveBeenCalledWith(
-      expect.stringMatching(/^inbound\/[0-9a-f]{64}\.jpg$/),
+      expect.stringMatching(/^inbound\/[0-9a-f]{64}$/),
       JPEG,
       "image/jpeg",
     );
@@ -379,6 +455,30 @@ describe("normalizeArrival", () => {
       return { d, content };
     }
 
+    it("stores a blank text as a placeholder without counting it", async () => {
+      const countTokens = vi.fn(async () => 0);
+      const { content } = text(" \n", { countTokens });
+      expect(await content).toEqual([
+        {
+          type: "text",
+          text: "[Document: n.txt. The file is empty.]",
+          harness: "attachment_placeholder",
+        },
+      ]);
+      expect(countTokens).not.toHaveBeenCalled();
+    });
+
+    it("never cuts between the halves of a surrogate pair", async () => {
+      // Every character is a pair, so a proportional cut lands mid-pair half the time.
+      const { d, content } = text("😀".repeat(1_001), {
+        textDocumentTokens: 333,
+        countTokens: async (t) => t.length,
+      });
+      await content;
+      const sent = vi.mocked(d.attachments.put).mock.calls[0]?.[1]?.toString("utf8") ?? "";
+      expect(sent).not.toContain("\uFFFD");
+    });
+
     it("stores a text that fits as the original", async () => {
       const { d, content } = text("hello", {});
       expect(await content).toEqual([
@@ -398,7 +498,7 @@ describe("normalizeArrival", () => {
       const [ref] = await content;
       expect(ref).toMatchObject({
         type: "document_ref",
-        path: expect.stringMatching(/^normalized\/n\.\d+\.txt$/),
+        path: expect.stringMatching(/^normalized\/n\.\d+\.plain$/),
         original: { path: "inbound/n.txt", mediaType: "text/plain" },
       });
       const sent = vi.mocked(d.attachments.put).mock.calls[0]?.[1];

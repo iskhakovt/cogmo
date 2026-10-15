@@ -5,7 +5,7 @@ import { expectDefined } from "../../test/assertions.js";
 import { loadSharp, type Sharp } from "./image-runtime.js";
 import {
   type DecodeFailure,
-  MAX_IMAGE_INPUT_BYTES,
+  decodeFailure,
   type NormalizedImage,
   normalizeImage,
   screenImage,
@@ -106,11 +106,6 @@ describe("screenImage", () => {
 
   it("passes another ftyp brand to the decoder", () => {
     expect(screenImage(ftyp("avif"), "image/avif")).toBeNull();
-  });
-
-  it("refuses bytes over the input cap unread", () => {
-    expect(screenImage(new Uint8Array(MAX_IMAGE_INPUT_BYTES + 1), "image/jpeg")).toBe("too_large");
-    expect(screenImage(new Uint8Array(MAX_IMAGE_INPUT_BYTES), "image/jpeg")).toBeNull();
   });
 });
 
@@ -245,5 +240,16 @@ describe("normalizeImage", () => {
     const out = expectOk(await normalizeImage(ultraHdr));
     expect([out.mediaType, out.width, out.height]).toEqual(["image/jpeg", 64, 48]);
     expect(out.data.includes("21496")).toBe(false);
+  });
+});
+
+describe("decodeFailure", () => {
+  it.each([
+    [new Error("Input image exceeds pixel limit"), "too_large"],
+    [new Error("timeout: 42% complete"), "timeout"],
+    [new Error("Input buffer contains unsupported image format"), "undecodable"],
+    ["not an error", "undecodable"],
+  ])("classifies %s as %s", (cause, failure) => {
+    expect(decodeFailure(cause)).toBe(failure);
   });
 });

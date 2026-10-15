@@ -21,9 +21,8 @@
  * `image/jpeg` etc., advertising the original file type even though
  * the body is opaque) and the file extension in the path (the
  * `mediaTypeToExt` helper resolves `application/octet-stream` to
- * `.bin` on `upload`). Matches `rclone crypt`'s convention of `.bin`
- * extensions on the underlying remote when name-encryption is off. A `put`
- * key is the caller's, written as given.
+ * `.bin` on `upload` and `put`). Matches `rclone crypt`'s convention of
+ * `.bin` extensions on the underlying remote when name-encryption is off.
  *
  * Consumers that need the original media type get it from the
  * persisted message metadata (`messages.content`,
@@ -58,8 +57,8 @@ export function wrapAttachmentStoreWithEncryption(
       return inner.upload(encrypted, "application/octet-stream", prefix);
     },
 
-    async put(path: string, data: Buffer, _mediaType: string): Promise<void> {
-      await inner.put(path, encryptBuffer(data, key), "application/octet-stream");
+    async put(stem: string, data: Buffer, _mediaType: string): Promise<string> {
+      return inner.put(stem, encryptBuffer(data, key), "application/octet-stream");
     },
 
     async download(path: string): Promise<Buffer> {

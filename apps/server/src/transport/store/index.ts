@@ -14,6 +14,7 @@ import {
   sql,
 } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
+import { match, P } from "ts-pattern";
 import type { JsonValue } from "type-fest";
 // Cross-module read: scheduled-task fire routing needs conversations.{user_id, profile_id}
 // joined to channel_sessions. Per CLAUDE.md → Store Pattern, store impls may import
@@ -21,9 +22,10 @@ import type { JsonValue } from "type-fest";
 import { aliases, conversations, messages } from "../../agent/store/schema.js";
 import { single } from "../../db/helpers.js";
 import type { Transaction } from "../../db/index.js";
-import type { AttachmentOriginal, NormalizedImageResult } from "../attachment-original.js";
+import type { FinishedOriginal, NormalizedImageResult } from "../attachment-original.js";
 import { type InboundContent, previewInboundText } from "../content.js";
 import {
+  type AttachmentOriginalState,
   attachmentOriginals,
   type BufferedInboundEntry,
   boundaryPending,
@@ -426,7 +428,7 @@ export interface TransportStore {
     tx: Transaction,
     originalPath: string,
   ): Promise<
-    { kind: "claimed"; attempt: number } | { kind: "existing"; original: AttachmentOriginal }
+    { kind: "claimed"; attempt: number } | { kind: "existing"; original: FinishedOriginal }
   >;
 
   /**
@@ -439,11 +441,14 @@ export interface TransportStore {
     originalPath: string,
     result: NormalizedImageResult,
   ): Promise<
-    { kind: "finished" } | { kind: "stale"; original: AttachmentOriginal } | { kind: "absent" }
+    { kind: "finished" } | { kind: "stale"; original: FinishedOriginal } | { kind: "absent" }
   >;
 
-  /** `decoding` → deleted, so a retry decodes again. Any other state is left alone. */
-  abandonAttachmentDecode(tx: Transaction, originalPath: string): Promise<void>;
+  /** `decoding` → deleted, so a retry decodes again; `stale` when the record isn't `decoding`. */
+  abandonAttachmentDecode(
+    tx: Transaction,
+    originalPath: string,
+  ): Promise<{ kind: "abandoned" } | { kind: "stale" }>;
 }
 
 /**
@@ -478,6 +483,27 @@ const ATTACHMENT_ORIGINAL_COLUMNS = {
   state: attachmentOriginals.state,
   result: attachmentOriginals.result,
 };
+
+/**
+ * A record read after an attempt's transition didn't apply. Invariant: it
+ * isn't `decoding` (the transition's guard), and the CHECKs give `ready` a
+ * result.
+ */
+function finishedOriginal(row: {
+  originalPath: string;
+  state: AttachmentOriginalState;
+  result: NormalizedImageResult | null;
+}): FinishedOriginal {
+  return match(row)
+    .with({ state: "ready", result: P.nonNullable }, ({ result }) => ({
+      state: "ready" as const,
+      result,
+    }))
+    .with({ state: "rejected" }, () => ({ state: "rejected" as const }))
+    .otherwise(({ state }) => {
+      throw new Error(`attachment original ${row.originalPath} is ${state} after its transition`);
+    });
+}
 
 export class DrizzleTransportStore implements TransportStore {
   async getAllChannels(
@@ -1191,7 +1217,7 @@ export class DrizzleTransportStore implements TransportStore {
     tx: Transaction,
     originalPath: string,
   ): Promise<
-    { kind: "claimed"; attempt: number } | { kind: "existing"; original: AttachmentOriginal }
+    { kind: "claimed"; attempt: number } | { kind: "existing"; original: FinishedOriginal }
   > {
     // Keyed insert (`.claude/rules/inngest.md`) whose conflict arm only
     // updates a `decoding` record; a `ready` or `rejected` one returns no row.
@@ -1211,7 +1237,7 @@ export class DrizzleTransportStore implements TransportStore {
       .select(ATTACHMENT_ORIGINAL_COLUMNS)
       .from(attachmentOriginals)
       .where(eq(attachmentOriginals.originalPath, originalPath));
-    return { kind: "existing", original: single(existing) };
+    return { kind: "existing", original: finishedOriginal(single(existing)) };
   }
 
   async finishAttachmentDecode(
@@ -1219,7 +1245,7 @@ export class DrizzleTransportStore implements TransportStore {
     originalPath: string,
     result: NormalizedImageResult,
   ): Promise<
-    { kind: "finished" } | { kind: "stale"; original: AttachmentOriginal } | { kind: "absent" }
+    { kind: "finished" } | { kind: "stale"; original: FinishedOriginal } | { kind: "absent" }
   > {
     const updated = await tx
       .update(attachmentOriginals)
@@ -1236,17 +1262,24 @@ export class DrizzleTransportStore implements TransportStore {
       .select(ATTACHMENT_ORIGINAL_COLUMNS)
       .from(attachmentOriginals)
       .where(eq(attachmentOriginals.originalPath, originalPath));
-    return current === undefined ? { kind: "absent" } : { kind: "stale", original: current };
+    return current === undefined
+      ? { kind: "absent" }
+      : { kind: "stale", original: finishedOriginal(current) };
   }
 
-  async abandonAttachmentDecode(tx: Transaction, originalPath: string): Promise<void> {
-    await tx
+  async abandonAttachmentDecode(
+    tx: Transaction,
+    originalPath: string,
+  ): Promise<{ kind: "abandoned" } | { kind: "stale" }> {
+    const deleted = await tx
       .delete(attachmentOriginals)
       .where(
         and(
           eq(attachmentOriginals.originalPath, originalPath),
           eq(attachmentOriginals.state, "decoding"),
         ),
-      );
+      )
+      .returning({ id: attachmentOriginals.id });
+    return deleted.length > 0 ? { kind: "abandoned" } : { kind: "stale" };
   }
 }

@@ -1,5 +1,4 @@
 import { z } from "zod";
-import type { AttachmentOriginalState } from "./store/schema.js";
 
 /**
  * What arrival made of an image original: the normalized copy's ref, or the
@@ -27,9 +26,10 @@ export const NormalizedImageResultSchema = z.discriminatedUnion("kind", [
 ]);
 export type NormalizedImageResult = z.infer<typeof NormalizedImageResultSchema>;
 
-/** One `attachment_originals` record, keyed by the original's AttachmentStore path. */
-export interface AttachmentOriginal {
-  originalPath: string;
-  state: AttachmentOriginalState;
-  result: NormalizedImageResult | null;
-}
+/**
+ * A record no attempt is decoding, with its state's data: what arrival
+ * reuses, or the provider's refusal.
+ */
+export type FinishedOriginal =
+  | { state: "ready"; result: NormalizedImageResult }
+  | { state: "rejected" };

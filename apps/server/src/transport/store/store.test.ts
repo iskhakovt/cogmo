@@ -1649,7 +1649,7 @@ describe("DrizzleTransportStore", () => {
       });
       expect(await claim("inbound/a.jpg")).toEqual({
         kind: "existing",
-        original: { originalPath: "inbound/a.jpg", state: "ready", result: IMAGE },
+        original: { state: "ready", result: IMAGE },
       });
     });
 
@@ -1661,7 +1661,7 @@ describe("DrizzleTransportStore", () => {
 
       expect(await claim("inbound/a.pdf")).toEqual({
         kind: "existing",
-        original: { originalPath: "inbound/a.pdf", state: "rejected", result: null },
+        original: { state: "rejected" },
       });
     });
 
@@ -1678,7 +1678,7 @@ describe("DrizzleTransportStore", () => {
 
       expect(await tx((trx) => store.finishAttachmentDecode(trx, "inbound/a.jpg", IMAGE))).toEqual({
         kind: "stale",
-        original: { originalPath: "inbound/a.jpg", state: "ready", result: CRASHED },
+        original: { state: "ready", result: CRASHED },
       });
       expect(await find(["inbound/a.jpg"])).toEqual([
         { originalPath: "inbound/a.jpg", state: "ready", result: CRASHED },
@@ -1690,8 +1690,12 @@ describe("DrizzleTransportStore", () => {
       await tx((trx) => store.claimAttachmentDecode(trx, "inbound/b.jpg"));
       await tx((trx) => store.finishAttachmentDecode(trx, "inbound/b.jpg", IMAGE));
 
-      await tx((trx) => store.abandonAttachmentDecode(trx, "inbound/a.jpg"));
-      await tx((trx) => store.abandonAttachmentDecode(trx, "inbound/b.jpg"));
+      expect(await tx((trx) => store.abandonAttachmentDecode(trx, "inbound/a.jpg"))).toEqual({
+        kind: "abandoned",
+      });
+      expect(await tx((trx) => store.abandonAttachmentDecode(trx, "inbound/b.jpg"))).toEqual({
+        kind: "stale",
+      });
 
       expect(await find(["inbound/a.jpg", "inbound/b.jpg"])).toEqual([
         { originalPath: "inbound/b.jpg", state: "ready", result: IMAGE },

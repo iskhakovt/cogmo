@@ -390,7 +390,7 @@ describe("durability policy invariant", () => {
       ...createWebTools("tavily-key", "openrouter-key"),
       ...createDocumentTools({
         upload: async () => "path",
-        put: async () => {},
+        put: async () => "path",
         download: async () => Buffer.from(""),
         read: async () => ok(Buffer.from("")),
       }),

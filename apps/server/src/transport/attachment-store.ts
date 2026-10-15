@@ -23,11 +23,13 @@ export interface AttachmentStore {
    */
   upload(data: Buffer, mediaType: string, prefix: string): Promise<string>;
   /**
-   * Write bytes under a caller-chosen key, replacing any object there. A key
-   * derived from durable state (an original's key, a content digest) makes a
-   * retried write land on the same object.
+   * Write bytes under a caller-chosen key stem, replacing any object there,
+   * and return the path: the stem plus the extension the store gives
+   * `mediaType`, as `upload` does. A stem derived from durable state (an
+   * original's key, a content digest) makes a retried write land on the same
+   * object.
    */
-  put(path: string, data: Buffer, mediaType: string): Promise<void>;
+  put(stem: string, data: Buffer, mediaType: string): Promise<string>;
   download(path: string): Promise<Buffer>;
   /**
    * The object's bytes, or why it can never be read. A transient failure (the
@@ -66,17 +68,17 @@ export function createAttachmentStore(client: S3Client, bucket: string): Attachm
     }
   }
 
-  async function put(path: string, data: Buffer, mediaType: string): Promise<void> {
+  async function put(stem: string, data: Buffer, mediaType: string): Promise<string> {
+    const path = `${stem}.${mediaTypeToExt(mediaType)}`;
     await client.send(
       new PutObjectCommand({ Bucket: bucket, Key: path, Body: data, ContentType: mediaType }),
     );
+    return path;
   }
 
   return {
     async upload(data: Buffer, mediaType: string, prefix: string): Promise<string> {
-      const path = `${prefix}/${randomUUID()}.${mediaTypeToExt(mediaType)}`;
-      await put(path, data, mediaType);
-      return path;
+      return put(`${prefix}/${randomUUID()}`, data, mediaType);
     },
 
     put,

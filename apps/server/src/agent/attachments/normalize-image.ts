@@ -8,10 +8,12 @@ import type { Channels } from "sharp";
 import { match } from "ts-pattern";
 import { loadSharp, type Sharp } from "./image-runtime.js";
 
-/** Why an image becomes a placeholder rather than a ref. */
-export type ImagePlaceholderReason = "heic" | "undecodable" | "too_large";
-/** Why `normalizeImage` refused an image; HEIC is screened before it. */
-export type DecodeFailure = Exclude<ImagePlaceholderReason, "heic">;
+/**
+ * Why `normalizeImage` refused an image: sharp couldn't read it, it is over
+ * the pixel guard, or it outran the timeout, which says as much about the
+ * host's load as about the input.
+ */
+export type DecodeFailure = "undecodable" | "too_large" | "timeout";
 
 export interface NormalizedImage {
   data: Buffer;
@@ -20,8 +22,6 @@ export interface NormalizedImage {
   height: number;
 }
 
-/** Telegram's `getFile` limit. */
-export const MAX_IMAGE_INPUT_BYTES = 20 * 1024 * 1024;
 const MAX_INPUT_PIXELS = 100_000_000;
 const TIMEOUT_SECONDS = 10;
 const MAX_EDGE = 2000;
@@ -37,11 +37,13 @@ const HEIF_MEDIA_TYPES: ReadonlySet<string> = new Set([
 ]);
 const HEIF_BRANDS: ReadonlySet<string> = new Set(["heic", "heix", "mif1"]);
 
-/** The checks that need no decode: HEIC/HEIF by media type or ftyp brand (heic, heix, mif1), and bytes over MAX_IMAGE_INPUT_BYTES. null: decode it. */
-export function screenImage(bytes: Uint8Array, mediaType: string): ImagePlaceholderReason | null {
-  if (isHeif(bytes, mediaType)) return "heic";
-  if (bytes.byteLength > MAX_IMAGE_INPUT_BYTES) return "too_large";
-  return null;
+/**
+ * The check that needs no decode, run before any sharp call: HEIC or HEIF by
+ * media type or major `ftyp` brand. null: decode it. Arrival has already
+ * refused an input over the byte cap.
+ */
+export function screenImage(bytes: Uint8Array, mediaType: string): "heic" | null {
+  return isHeif(bytes, mediaType) ? "heic" : null;
 }
 
 /** By the media type's essence, or by the major brand of an ISO-BMFF `ftyp` box. */
@@ -96,8 +98,11 @@ export async function normalizeImage(
   const first: Encoding = transparent.value
     ? { kind: "png", palette: false }
     : { kind: "jpeg", quality: 85, chroma: lossless ? "4:4:4" : "4:2:0" };
-  const reduced: Encoding =
-    first.kind === "png" ? { kind: "png", palette: true } : { ...first, quality: 70 };
+  const reduced = match(first)
+    .returnType<Encoding>()
+    .with({ kind: "png" }, () => ({ kind: "png", palette: true }))
+    .with({ kind: "jpeg" }, (jpeg) => ({ ...jpeg, quality: 70 }))
+    .exhaustive();
   return capped(sharp, raster, first, reduced);
 }
 
@@ -171,9 +176,14 @@ function fromRaster(sharp: Sharp, raster: Raster) {
 
 /** A libvips failure is a verdict on the input: over the pixel guard, or unreadable. */
 function vips<T>(work: Promise<T>): ResultAsync<T, DecodeFailure> {
-  return ResultAsync.fromPromise(work, (cause) =>
-    cause instanceof Error && cause.message.includes("exceeds pixel limit")
-      ? "too_large"
-      : "undecodable",
-  );
+  return ResultAsync.fromPromise(work, decodeFailure);
+}
+
+/** A sharp rejection as the failure it stands for. */
+export function decodeFailure(cause: unknown): DecodeFailure {
+  const message = cause instanceof Error ? cause.message : "";
+  if (message.includes("exceeds pixel limit")) return "too_large";
+  // libvips' progress callback kills the pipeline with `timeout: <n>% complete`.
+  if (message.startsWith("timeout:")) return "timeout";
+  return "undecodable";
 }
