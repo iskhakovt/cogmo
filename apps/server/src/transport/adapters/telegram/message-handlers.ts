@@ -1,6 +1,9 @@
 /** Inbound text, photos, documents and voice notes, packed as `InboundContent` and dispatched. */
 
+import { isUtf8 } from "node:buffer";
 import type { Bot } from "grammy";
+import type { Document } from "grammy/types";
+import { lookup } from "mime-types";
 import { err, ok, type Result } from "neverthrow";
 import { logger } from "../../../logger.js";
 import type { InboundContent } from "../../content.js";
@@ -29,6 +32,63 @@ type FileDownloadError =
   | { kind: "no_file_path"; fileId: string }
   | { kind: "local_path"; fileId: string; path: string }
   | { kind: "http_error"; fileId: string; status: number; statusText: string };
+
+const OCTET_STREAM = "application/octet-stream";
+
+/** How far into a file the binary-byte check reads: git's window for the same test. */
+const TEXT_SNIFF_BYTES = 8000;
+
+/**
+ * The image formats the vision routes accept (design/transport/attachments.md
+ * → Research Base). A document of any other image format stays a document,
+ * which each LLM adapter replaces with a note naming the file.
+ */
+const VISION_MEDIA_TYPES: ReadonlySet<string> = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/gif",
+  "image/webp",
+]);
+
+/**
+ * A document's media type. Telegram's `mime_type` is the sender's claim: it
+ * is missing for some uploads and generic `application/octet-stream` for
+ * types the sending client didn't recognise (an `.html` file arrives that
+ * way). Either way the content decides between text and binary, and the file
+ * name's extension names the type within each: UTF-8 text keeps a `text/*`
+ * type, or `application/pdf` for an all-ASCII PDF, and is otherwise
+ * `text/plain`, since mime-db maps some source files to binary types (`.ts`
+ * to `video/mp2t`).
+ */
+function documentMediaType(
+  doc: Pick<Document, "mime_type" | "file_name">,
+  bytes: Uint8Array,
+): string {
+  if (doc.mime_type && doc.mime_type !== OCTET_STREAM) return doc.mime_type;
+  const byExtension = (doc.file_name && lookup(doc.file_name)) || OCTET_STREAM;
+  if (!isUtf8Text(bytes)) return byExtension;
+  return byExtension.startsWith("text/") || byExtension === "application/pdf"
+    ? byExtension
+    : "text/plain";
+}
+
+/**
+ * Whether `bytes` are valid UTF-8, the encoding the LLM adapters decode text
+ * documents with, and open with none of the control bytes the WHATWG MIME
+ * Sniffing Standard counts as binary data.
+ */
+function isUtf8Text(bytes: Uint8Array): boolean {
+  return isUtf8(bytes) && !bytes.subarray(0, TEXT_SNIFF_BYTES).some(isBinaryDataByte);
+}
+
+function isBinaryDataByte(byte: number): boolean {
+  return (
+    byte <= 0x08 ||
+    byte === 0x0b ||
+    (byte >= 0x0e && byte <= 0x1a) ||
+    (byte >= 0x1c && byte <= 0x1f)
+  );
+}
 
 interface FileDownloadCtx {
   api: { getFile: (fileId: string) => Promise<{ file_path?: string }> };
@@ -142,9 +202,6 @@ export function registerMessageHandlers(
 
     try {
       const doc = ctx.message.document;
-      // Telegram's mime_type is best-effort — fall back to octet-stream so
-      // the LLM call doesn't reject a missing media_type at validation.
-      const mediaType = doc.mime_type ?? "application/octet-stream";
 
       const download = await downloadTelegramFile(ctx, doc.file_id, { apiRoot, token });
       if (download.isErr()) {
@@ -152,17 +209,17 @@ export function registerMessageHandlers(
         return;
       }
       const buffer = download.value;
+      const mediaType = documentMediaType(doc, buffer);
 
       const path = await transport.uploadAttachment(buffer, mediaType);
       const caption = ctx.message.caption ?? "";
       const name = doc.file_name;
 
       // Telegram's "Send as file" path delivers images (PNG, full-res JPEG,
-      // etc.) as documents. Route image/* MIME types to the image block so
-      // they hit the LLM's vision pipeline instead of the document pipeline
-      // — Anthropic's `document` content block doesn't accept image media
-      // types and would 400-fail.
-      const isImage = mediaType.startsWith("image/");
+      // etc.) as documents. Route them to the image block so they hit the
+      // LLM's vision pipeline — Anthropic's `document` content block doesn't
+      // accept image media types and would 400-fail.
+      const isImage = VISION_MEDIA_TYPES.has(mediaType);
       const origin = othersOrigin(ctx.message.forward_origin, ctx.from.id);
 
       // Forwarded without a caption, the marked block is empty and names the sender.

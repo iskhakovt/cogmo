@@ -1,6 +1,7 @@
 import { ok } from "neverthrow";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { logger } from "../../../logger.js";
+import { expectDefined } from "../../../test/assertions.js";
 import { mockAttachmentStore, mockInngest, mockTransport } from "../../../test/factories.js";
 import { handlers, resetGrammyMock } from "../../../test/telegram/grammy-mock.js";
 import {
@@ -370,6 +371,10 @@ describe("registerMessageHandlers", () => {
       vi.stubGlobal("fetch", mockFetch);
     });
 
+    function documentHandler() {
+      return expectDefined(handlers.get("on:message:document"), "document handler");
+    }
+
     it("uploads a PDF document and emits a document inbound block", async () => {
       const { transport } = await createAdapter();
       const ctx = makeDocumentCtx(111, {
@@ -445,6 +450,148 @@ describe("registerMessageHandlers", () => {
       );
     });
 
+    function serveBytes(bytes: Uint8Array) {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        arrayBuffer: async () => new Uint8Array(bytes).buffer,
+      });
+    }
+
+    const PNG_HEADER = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+    it("names UTF-8 text by its extension when Telegram sends application/octet-stream", async () => {
+      const { transport } = await createAdapter();
+      serveBytes(Buffer.from("<!doctype html><p>hi</p>", "utf-8"));
+      const ctx = makeDocumentCtx(111, {
+        file_name: "page.html",
+        mime_type: "application/octet-stream",
+      });
+      await documentHandler()(ctx);
+
+      expect(transport.uploadAttachment).toHaveBeenCalledWith(expect.any(Buffer), "text/html");
+      expect(transport.emit).toHaveBeenCalledWith(
+        "session-1",
+        [{ type: "document", path: "inbound/test.jpg", mediaType: "text/html", name: "page.html" }],
+        expect.any(Date),
+      );
+    });
+
+    it("names UTF-8 text by its extension when mime_type is missing", async () => {
+      const { transport } = await createAdapter();
+      serveBytes(Buffer.from("# Notes\n", "utf-8"));
+      const ctx = makeDocumentCtx(111, { file_name: "NOTES.MD" });
+      await documentHandler()(ctx);
+
+      expect(transport.uploadAttachment).toHaveBeenCalledWith(expect.any(Buffer), "text/markdown");
+    });
+
+    // mime-db maps these extensions to a non-text type (video/mp2t,
+    // application/x-sh, image/svg+xml) or to none.
+    it.each([
+      ["index.ts", "export const x: number = 1;\n"],
+      ["build.sh", "#!/bin/sh\necho hi\n"],
+      ["logo.svg", '<svg xmlns="http://www.w3.org/2000/svg"/>'],
+      ["script.py", "def greet():\n    print('héllo')\n"],
+    ])("sniffs UTF-8 text in %s as text/plain", async (fileName, text) => {
+      const { transport } = await createAdapter();
+      serveBytes(Buffer.from(text, "utf-8"));
+      const ctx = makeDocumentCtx(111, {
+        file_name: fileName,
+        mime_type: "application/octet-stream",
+      });
+      await documentHandler()(ctx);
+
+      expect(transport.emit).toHaveBeenCalledWith(
+        "session-1",
+        [{ type: "document", path: "inbound/test.jpg", mediaType: "text/plain", name: fileName }],
+        expect.any(Date),
+      );
+    });
+
+    it("keeps application/pdf for a PDF whose bytes are all ASCII", async () => {
+      const { transport } = await createAdapter();
+      serveBytes(Buffer.from("%PDF-1.1\n1 0 obj << /Type /Catalog >> endobj\n%%EOF\n", "utf-8"));
+      const ctx = makeDocumentCtx(111, {
+        file_name: "minimal.pdf",
+        mime_type: "application/octet-stream",
+      });
+      await documentHandler()(ctx);
+
+      expect(transport.uploadAttachment).toHaveBeenCalledWith(
+        expect.any(Buffer),
+        "application/pdf",
+      );
+    });
+
+    it("routes an octet-stream file with an image extension to an image inbound block", async () => {
+      const { transport } = await createAdapter();
+      serveBytes(PNG_HEADER);
+      const ctx = makeDocumentCtx(111, {
+        file_name: "photo.png",
+        mime_type: "application/octet-stream",
+      });
+      await documentHandler()(ctx);
+
+      expect(transport.emit).toHaveBeenCalledWith(
+        "session-1",
+        [{ type: "image", path: "inbound/test.jpg", mediaType: "image/png" }],
+        expect.any(Date),
+      );
+    });
+
+    // No vision route accepts these, so they stay documents and keep their name.
+    it.each([
+      [{ file_name: "scan.heic", mime_type: "application/octet-stream" }, "image/heic"],
+      [{ file_name: "photo.heic", mime_type: "image/heic" }, "image/heic"],
+      [{ file_name: "scan.bmp" }, "image/bmp"],
+    ])("emits %o as a document of type %s", async (doc, mediaType) => {
+      const { transport } = await createAdapter();
+      serveBytes(PNG_HEADER);
+      await documentHandler()(makeDocumentCtx(111, doc));
+
+      expect(transport.emit).toHaveBeenCalledWith(
+        "session-1",
+        [{ type: "document", path: "inbound/test.jpg", mediaType, name: doc.file_name }],
+        expect.any(Date),
+      );
+    });
+
+    it.each([
+      ["control bytes", new Uint8Array([1, 2, 3])],
+      ["a NUL byte", Buffer.from("text\0more", "latin1")],
+      ["invalid UTF-8", Buffer.from("caf\xe9", "latin1")],
+      [
+        "invalid UTF-8 past the binary-byte window",
+        Buffer.concat([Buffer.alloc(9000, "a"), Buffer.from([0xe9])]),
+      ],
+    ])(
+      "keeps application/octet-stream for content with %s and no known extension",
+      async (_, bytes) => {
+        const { transport } = await createAdapter();
+        serveBytes(bytes);
+        const ctx = makeDocumentCtx(111, {
+          file_name: "Makefile",
+          mime_type: "application/octet-stream",
+        });
+        await documentHandler()(ctx);
+
+        expect(transport.uploadAttachment).toHaveBeenCalledWith(
+          expect.any(Buffer),
+          "application/octet-stream",
+        );
+      },
+    );
+
+    it("keeps a specific mime_type over the one the extension implies", async () => {
+      const { transport } = await createAdapter();
+      const ctx = makeDocumentCtx(111, { file_name: "data.json", mime_type: "text/plain" });
+      await documentHandler()(ctx);
+
+      expect(transport.uploadAttachment).toHaveBeenCalledWith(expect.any(Buffer), "text/plain");
+    });
+
     it("omits name field when document has no filename", async () => {
       const { transport } = await createAdapter();
       const ctx = makeDocumentCtx(111, { mime_type: "application/pdf" });
@@ -457,8 +604,8 @@ describe("registerMessageHandlers", () => {
 
     // Telegram's "Send as file" path delivers images (PNG, full-res JPEG,
     // WEBP, etc.) through message:document instead of message:photo. The
-    // adapter must route image/* MIME types to the image inbound block so
-    // the LLM's vision pipeline picks them up — Anthropic's `document`
+    // adapter must route JPEG, PNG, GIF and WebP to the image inbound block
+    // so the LLM's vision pipeline picks them up — Anthropic's `document`
     // block doesn't accept image media types and would 400-fail.
     it("routes image/png 'send as file' uploads to an image inbound block", async () => {
       const { transport } = await createAdapter();

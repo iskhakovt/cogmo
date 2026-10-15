@@ -150,6 +150,9 @@ importers:
       micro-key-producer:
         specifier: ^0.10.2
         version: 0.10.2
+      mime-types:
+        specifier: ^3.0.2
+        version: 3.0.2
       neverthrow:
         specifier: ^8.2.0
         version: 8.2.0
@@ -223,6 +226,9 @@ importers:
       '@types/jsdom':
         specifier: ^30.0.0
         version: 30.0.0
+      '@types/mime-types':
+        specifier: ^3.0.1
+        version: 3.0.1
       '@types/node':
         specifier: ^24.19.1
         version: 24.19.1
@@ -3834,6 +3840,9 @@ packages:
 
   '@types/memcached@2.2.10':
     resolution: {integrity: sha512-AM9smvZN55Gzs2wRrqeMHVP7KE8KWgCJO/XL5yCly2xF6EKa4YlbpK+cLSAH4NG/Ah64HrlegmGqW8kYws7Vxg==}
+
+  '@types/mime-types@3.0.1':
+    resolution: {integrity: sha512-xRMsfuQbnRq1Ef+C+RKaENOxXX87Ygl38W1vDfPHRku02TgQr+Qd8iivLtAMcR0KF5/29xlnFihkTlbqFrGOVQ==}
 
   '@types/ms@2.1.0':
     resolution: {integrity: sha512-GsCCIZDE/p3i96vtEqx+7dBUGXrc7zeSK3wwPHIaRThS+9OhWIXRqzs4d6k1SVU8g91DrNRWxWUGhp5KXQb2VA==}
@@ -9988,6 +9997,8 @@ snapshots:
   '@types/memcached@2.2.10':
     dependencies:
       '@types/node': 24.19.1
+
+  '@types/mime-types@3.0.1': {}
 
   '@types/ms@2.1.0': {}
 

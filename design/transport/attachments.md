@@ -57,6 +57,8 @@ A turn that fails permanently with a 400 or a 413 while its rows carry attachmen
 
 ## Images `[proposed]`
 
+The Telegram adapter sends only JPEG, PNG, GIF and WebP as image blocks ([telegram.md](telegram.md)), so these steps also take a document whose media type is any other `image/*`, and HEIC reaches step 1.
+
 1. **Sniff.** A HEIC or HEIF file, by media type or by a `heic`, `heix` or `mif1` `ftyp` brand, gets the HEIC placeholder. `heic-decode` is a later option.
 2. **Guard.** Inputs over 20 MB are refused unread. `limitInputPixels` is 100 megapixels, checked on the header before decoding: a 446 KB PNG declaring 12,000 × 12,000 was refused in 1 ms (measured). `failOn: "warning"`, `timeout` 10 s, first frame only (`pages: 1`, the default).
 3. **Decode** through the loader allowlist ([Security](#security-proposed)): JPEG, PNG, WebP and GIF.
@@ -73,7 +75,7 @@ A 48-megapixel JPEG normalizes in about half a second on one thread (measured). 
 
 - **PDFs** are stored as sent, as a `document_ref`: no rasterizing and no page count, which would take a second untrusted-input parser. A file without the `%PDF-` header, or with an `/Encrypt` entry, gets a placeholder. A PDF over the route's page limit or window, or one the provider can't parse, is [rejected](#rejected-attachments-proposed) by the provider and marked.
 - **Text-like documents** (`text/*`, JSON, XML, YAML, one predicate both adapters share) are truncated at arrival, with an elision marker, to the lesser of the adapter's per-document cap (100,000 characters on the OpenAI-compatible adapter) and, for the turn's text documents together, a quarter of the route's input budget, counted with its `countTokens`. The text sent is stored as the document's normalized copy beside the original. Anthropic sends it as a text source, and the OpenAI-compatible adapter inlines it.
-- **Other binary documents** (`.docx`, `.xlsx`, archives, `application/octet-stream`) get a placeholder at arrival, not a stub at the wire. No route Cogmo serves reads them. A wire stub would read and base64-encode the bytes on every invocation for each adapter to discard, count them against the attachment budget, and send stub text that a deploy could change under a cached prefix. A placeholder is stored as sent, so the head stays the same on every route and nothing is re-read. The OpenAI-compatible adapter still stubs a PDF, which Anthropic reads.
+- **Other binary documents** (`.docx`, `.xlsx`, archives, `application/octet-stream`) get a placeholder at arrival, not a stub at the wire. No route Cogmo serves reads them. A wire stub would read and base64-encode the bytes on every invocation for each adapter to discard, count them against the attachment budget, and send stub text that a deploy could change under a cached prefix. A placeholder is stored as sent, so the head stays the same on every route and nothing is re-read. The OpenAI-compatible adapter still stubs a PDF, which Anthropic reads. `[confirmed]` Until arrival placeholders ship, and in rows stored before them, such types reach the adapters. Anthropic stubs a document that is neither PDF nor text-like, and a base64 image that isn't JPEG, PNG, GIF or WebP, rather than failing the request: the row replays on every later turn, so a failure would end the conversation.
 
 ## Placeholders `[proposed]`
 
