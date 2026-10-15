@@ -8,24 +8,25 @@
         "hasToolResult": true
       },
       "response": {
-        "content": "Got it — saved Lisbon as your home. Welcome to your new city!"
+        "content": "Got it — saved that you're now based in Lisbon."
       },
       "recordedTimings": {
-        "ttftMs": 2618,
+        "ttftMs": 1123,
         "interChunkDelaysMs": [
           0,
           0,
           0,
-          285,
-          8,
-          4,
-          1
+          57,
+          49,
+          40,
+          2,
+          0
         ],
-        "totalDurationMs": 2916
+        "totalDurationMs": 1271
       },
       "metadata": {
-        "systemHash": "b881c548",
-        "toolsHash": "994a1d95"
+        "systemHash": "ccde8242",
+        "toolsHash": "d060a9ae"
       }
     }
   ]

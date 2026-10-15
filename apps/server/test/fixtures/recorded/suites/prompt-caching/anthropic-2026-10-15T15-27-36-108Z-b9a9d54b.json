@@ -1,0 +1,42 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "<turn_context>\nCurrent time: [NOW]\n\nReply modality: text\n</turn_context>\n\nImage 1: normalized/[UUID].jpgHere's the picture I ended up printing. What's in it?",
+        "model": "claude-sonnet-5",
+        "turnIndex": 6,
+        "hasToolResult": false
+      },
+      "response": {
+        "content": "That's a cute cartoon-style orange tabby kitten with big green eyes, wearing an oversized purple top hat with a red band — grinning happily against a warm golden background."
+      },
+      "recordedTimings": {
+        "ttftMs": 1515,
+        "interChunkDelaysMs": [
+          0,
+          0,
+          0,
+          271,
+          7,
+          0,
+          0,
+          0,
+          0,
+          34,
+          51,
+          46,
+          58,
+          53,
+          0,
+          0,
+          0
+        ],
+        "totalDurationMs": 2035
+      },
+      "metadata": {
+        "systemHash": "ccde8242",
+        "toolsHash": "d060a9ae"
+      }
+    }
+  ]
+}
