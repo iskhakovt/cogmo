@@ -88,9 +88,11 @@ const textLikeApplicationTypes: ReadonlySet<string> = new Set([
 
 /**
  * Whether a document of this media type is one both adapters send as text:
- * `text/*`, JSON, XML or YAML. Anthropic sends it as a `text/plain` source,
- * and the OpenAI-compatible adapter inlines it.
+ * `text/*`, JSON, XML or YAML, read case-insensitively and without
+ * parameters (`; charset=utf-8`). Anthropic sends it as a `text/plain`
+ * source, and the OpenAI-compatible adapter inlines it.
  */
 export function isTextLikeDocumentMediaType(mediaType: string): boolean {
-  return mediaType.startsWith("text/") || textLikeApplicationTypes.has(mediaType);
+  const essence = (mediaType.split(";")[0] ?? "").trim().toLowerCase();
+  return essence.startsWith("text/") || textLikeApplicationTypes.has(essence);
 }

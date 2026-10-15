@@ -3,32 +3,38 @@
  * design/context-management.md → Images on OpenAI-compatible routes.
  */
 
+import * as R from "remeda";
 import { match } from "ts-pattern";
 import type { ImageBlock } from "./types.js";
 
 /** An image's pixel size, when its block carries one. */
 type ImageSize = Pick<ImageBlock, "width" | "height">;
 
-type ImageFamily =
+type ImageFamily = Readonly<
   | { kind: "claude" }
   | { kind: "gemini" }
   // The multiplier in hundredths, so the product is exact.
   | { kind: "openai-patch"; multiplierPct: number }
   | { kind: "openai-tile"; base: number; perTile: number }
-  | { kind: "other" };
+  | { kind: "other" }
+>;
 
 /** Claude's per-image cap, in tokens: the most 28-px patches it keeps. */
 const CLAUDE_MAX_TOKENS = 4_784;
 /** Gemini 3's default per-image budget, the floor of the Gemini estimate. */
 const GEMINI_MIN_TOKENS = 1_120;
+/**
+ * Gemini 3's largest per-image budget (`ultra_high`), the cap of the Gemini
+ * estimate: the tiling formula grows without bound as an image thins.
+ */
+const GEMINI_MAX_TOKENS = 2_240;
 const GEMINI_TILE_TOKENS = 258;
 
 /**
  * Stored images are normalized to at most 2000 px a side. An image without
  * dimensions counts at its formula's most over that range: 4,784 on Claude,
- * the larger of Claude's and Gemini's on any other model. Gemini's tiling
- * grows without bound as the aspect ratio does, so it counts at 2000 × 2000,
- * 1,120. OpenAI's patch count peaks at 2000 × 2000, 3,969 patches times the
+ * Gemini's cap of 2,240, and the larger of the two on any other model.
+ * OpenAI's patch count peaks at 2000 × 2000, 3,969 patches times the
  * multiplier (4,763 at 1.2). Its tile count peaks at 8 tiles, as for
  * 2000 × 800, which fits to 1920 × 768.
  */
@@ -64,13 +70,11 @@ function claudeTokens(size: { w: number; h: number } | undefined): number {
 }
 
 function geminiTokens(size: { w: number; h: number } | undefined): number {
-  const { w, h } = size ?? { w: NORMALIZED_MAX_PX, h: NORMALIZED_MAX_PX };
+  if (!size) return GEMINI_MAX_TOKENS;
   // A side under 2 px would make the unit zero.
-  const unit = Math.max(1, Math.floor(Math.min(w, h) / 1.5));
-  return Math.max(
-    GEMINI_MIN_TOKENS,
-    Math.ceil(w / unit) * Math.ceil(h / unit) * GEMINI_TILE_TOKENS,
-  );
+  const unit = Math.max(1, Math.floor(Math.min(size.w, size.h) / 1.5));
+  const tiles = Math.ceil(size.w / unit) * Math.ceil(size.h / unit);
+  return R.clamp(tiles * GEMINI_TILE_TOKENS, { min: GEMINI_MIN_TOKENS, max: GEMINI_MAX_TOKENS });
 }
 
 /** 512-px tiles after fitting within 2048 × 2048, then to a short side of at most 768. */
@@ -92,6 +96,8 @@ function imageFamily(model: string): ImageFamily {
 
 /** OpenAI's rows, longest id first so `gpt-5.1` doesn't read as `gpt-5`. */
 const OPENAI_FAMILIES: ReadonlyArray<readonly [RegExp, ImageFamily]> = [
+  [/^gpt-5-mini/, { kind: "openai-patch", multiplierPct: 120 }],
+  [/^gpt-5-nano/, { kind: "openai-patch", multiplierPct: 150 }],
   [/^gpt-4\.1-mini/, { kind: "openai-patch", multiplierPct: 162 }],
   [/^gpt-4\.1-nano/, { kind: "openai-patch", multiplierPct: 246 }],
   [/^o4-mini/, { kind: "openai-patch", multiplierPct: 172 }],
@@ -102,6 +108,7 @@ const OPENAI_FAMILIES: ReadonlyArray<readonly [RegExp, ImageFamily]> = [
   [/^gpt-4\.1(?![.\d])/, { kind: "openai-tile", base: 85, perTile: 170 }],
   [/^gpt-5\.1(?!\d)/, { kind: "openai-tile", base: 70, perTile: 140 }],
   [/^gpt-5(?![.\d])/, { kind: "openai-tile", base: 70, perTile: 140 }],
+  [/^o[13](?!\d)/, { kind: "openai-tile", base: 75, perTile: 150 }],
 ];
 
 function openAIFamily(id: string): ImageFamily | undefined {
