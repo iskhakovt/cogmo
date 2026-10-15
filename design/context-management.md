@@ -25,7 +25,7 @@ These mean compaction can be more aggressive than a system without external memo
 
 **Why not optional / heuristic-only:** Heuristic estimation (chars/4) has 20-40% error depending on content type. Tool definitions, images, and structured content skew heavily. Inaccurate counting leads to either premature compaction (wasted cost, cache invalidation) or late compaction (API rejection, degraded quality). Both providers have accurate, free counting methods — use them.
 
-**Images on OpenAI-compatible routes** `[proposed]`. `countTokens` estimates each image from the dimensions its block carries, by the request's model id, per each vendor's vision docs ([transport/attachments.md](transport/attachments.md#sources)). The adapter sends no `detail`, so OpenAI models size at `auto`. A normalized image is at most 2000 × 2000 px, 3,969 patches: within every `auto` patch budget the docs list except GPT-5.4's 2,500, which the uncapped count over-counts.
+**Images on OpenAI-compatible routes** `[confirmed]`. `countTokens` estimates each image from the dimensions its block carries, by the request's model id, per each vendor's vision docs ([transport/attachments.md](transport/attachments.md#sources)). The adapter sends no `detail`, so OpenAI models size at `auto`. An image without dimensions counts at its formula's most for a normalized image: 4,784 on Claude, 1,120 on Gemini (2000 × 2000, since its tiling grows with the aspect ratio), 3,969 patches times the multiplier, or 8 tiles (2000 × 800 fits to 1920 × 768). A normalized image is at most 2000 × 2000 px, 3,969 patches: within every `auto` patch budget the docs list except GPT-5.4's 2,500, which the uncapped count over-counts.
 
 | Model id | Tokens per image |
 |-|-|
