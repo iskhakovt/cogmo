@@ -444,6 +444,12 @@ export interface TransportStore {
     { kind: "finished" } | { kind: "stale"; original: FinishedOriginal } | { kind: "absent" }
   >;
 
+  /** The original's record when no attempt is decoding it; null when it has none or is `decoding`. */
+  findFinishedAttachmentOriginal(
+    tx: Transaction,
+    originalPath: string,
+  ): Promise<FinishedOriginal | null>;
+
   /** `decoding` → deleted, so a retry decodes again; `stale` when the record isn't `decoding`. */
   abandonAttachmentDecode(
     tx: Transaction,
@@ -1265,6 +1271,22 @@ export class DrizzleTransportStore implements TransportStore {
     return current === undefined
       ? { kind: "absent" }
       : { kind: "stale", original: finishedOriginal(current) };
+  }
+
+  async findFinishedAttachmentOriginal(
+    tx: Transaction,
+    originalPath: string,
+  ): Promise<FinishedOriginal | null> {
+    const [row] = await tx
+      .select(ATTACHMENT_ORIGINAL_COLUMNS)
+      .from(attachmentOriginals)
+      .where(
+        and(
+          eq(attachmentOriginals.originalPath, originalPath),
+          ne(attachmentOriginals.state, "decoding"),
+        ),
+      );
+    return row === undefined ? null : finishedOriginal(row);
   }
 
   async abandonAttachmentDecode(

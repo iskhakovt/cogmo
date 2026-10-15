@@ -1,5 +1,3 @@
-import { attachmentBudget } from "../../llm/attachment-limits.js";
-import { computeBudget, resolveLimits } from "../../llm/models.js";
 import type { LlmProviderResolver } from "../../llm/resolver.js";
 import type { AttachmentStore } from "../../transport/attachment-store.js";
 import { contentToBlocks } from "../../transport/content.js";
@@ -15,7 +13,7 @@ import {
   type SubstitutedInbound,
   substituteTranscripts,
 } from "./inbound-batch.js";
-import { resolveOrFail } from "./resolve-turn-model.js";
+import { freezeLimits, limitsPolicy, resolveOrFail } from "./resolve-turn-model.js";
 import type { TurnSteps } from "./turn-steps.js";
 
 export interface RecordUserMessageDeps extends Omit<NormalizeArrivalDeps, "attachments"> {
@@ -122,12 +120,15 @@ async function arrivalRoute(
   model: string,
 ): Promise<ArrivalRoute> {
   const { provider, limits: rowLimits } = await resolveOrFail(resolveProvider, model);
-  const limits = resolveLimits(model, rowLimits);
-  const attachments = provider.attachmentLimits(limits.contextWindow);
+  const limits = freezeLimits(model, provider, rowLimits);
+  const { budget, attachmentBudget } = limitsPolicy(limits);
+  if (attachmentBudget === null) {
+    throw new Error("freezeLimits resolved no attachment limits");
+  }
   return {
-    budget: attachmentBudget(attachments),
-    textDocumentBytes: attachments.textDocumentBytes,
-    textDocumentTokens: Math.floor(computeBudget(limits) / 4),
+    budget: attachmentBudget,
+    textDocumentBytes: limits.attachments?.textDocumentBytes,
+    textDocumentTokens: Math.floor(budget / 4),
     countTokens: (text) =>
       provider.countTokens({ model, system: "", messages: [{ role: "user", content: text }] }),
   };

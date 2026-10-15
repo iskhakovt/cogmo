@@ -349,7 +349,8 @@ export function mockTransportStore(overrides?: Partial<TransportStore>): Transpo
     listExpiredBoundaryPending: vi.fn().mockResolvedValue([]),
     claimAttachmentDecode: vi.fn().mockResolvedValue({ kind: "claimed", attempt: 1 }),
     finishAttachmentDecode: vi.fn().mockResolvedValue({ kind: "finished" }),
-    abandonAttachmentDecode: vi.fn().mockResolvedValue(undefined),
+    findFinishedAttachmentOriginal: vi.fn().mockResolvedValue(null),
+    abandonAttachmentDecode: vi.fn().mockResolvedValue({ kind: "abandoned" }),
     ...overrides,
   };
 }

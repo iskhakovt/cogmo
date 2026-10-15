@@ -1632,6 +1632,16 @@ describe("DrizzleTransportStore", () => {
       return tx((trx) => store.claimAttachmentDecode(trx, path));
     }
 
+    it("finds a finished record, and none while it decodes or before it exists", async () => {
+      const findFinished = (path: string) =>
+        tx((trx) => store.findFinishedAttachmentOriginal(trx, path));
+      expect(await findFinished("inbound/a.jpg")).toBeNull();
+      await claim("inbound/a.jpg");
+      expect(await findFinished("inbound/a.jpg")).toBeNull();
+      await tx((trx) => store.finishAttachmentDecode(trx, "inbound/a.jpg", IMAGE));
+      expect(await findFinished("inbound/a.jpg")).toEqual({ state: "ready", result: IMAGE });
+    });
+
     it("claims a decoding record again with one more attempt", async () => {
       expect(await claim("inbound/a.jpg")).toEqual({ kind: "claimed", attempt: 1 });
       expect(await claim("inbound/a.jpg")).toEqual({ kind: "claimed", attempt: 2 });

@@ -22,8 +22,8 @@ export interface TurnView {
  * The turn's history as sent (design/prompt-caching.md → One renderer): the
  * attachment cutoff fixed from memoized values (the refs' sizes, the frozen
  * limits, the epoch's cutoff), then every row rendered under it. A turn row
- * holding refs renders from the row; a JSON-string turn row, which arrival
- * writes for an attachment turn until refs are written, sends its inbound
+ * holding refs renders from the row. A JSON-string turn row, which only a run
+ * whose `create-user-message` memo predates refs can hold, sends its inbound
  * batch's attachments resolved.
  *
  * Bare body, on every invocation: the rendered attachments must stay out of
