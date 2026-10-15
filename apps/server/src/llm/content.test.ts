@@ -158,3 +158,21 @@ describe("isTextLikeDocumentMediaType", () => {
     expect(isTextLikeDocumentMediaType(mediaType)).toBe(textLike);
   });
 });
+
+describe("isTextLikeDocumentMediaType", () => {
+  it.each([
+    ["text/plain", true],
+    ["text/markdown", true],
+    ["application/json", true],
+    ["application/xml", true],
+    ["application/yaml", true],
+    ["application/x-yaml", true],
+    ["application/json; charset=utf-8", true],
+    ["Text/CSV; charset=UTF-8", true],
+    ["application/pdf", false],
+    ["application/octet-stream", false],
+    ["application/jsonl", false],
+  ])("reads %s as text-like: %s", (mediaType, textLike) => {
+    expect(isTextLikeDocumentMediaType(mediaType)).toBe(textLike);
+  });
+});
