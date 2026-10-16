@@ -30,11 +30,18 @@ updates:
     # The Hindsight client moves by hand, with the hindsight-api image pins and
     # `cogmo.hindsightCompat` (see pnpm-workspace.yaml). A minor past the range
     # fails the boot check, so only patches come from here.
+    #
+    # Biome 2.5.15 panics linting a file outside the project root while
+    # `vcs.useIgnoreFile` is on (biomejs/biome#12158), which is what
+    # `biome-plugin.test.ts` does with its tempdir fixtures. Only that version
+    # is skipped; drop the entry once the lockfile is past it.
     ignore:
       - dependency-name: "@types/node"
         update-types: ["version-update:semver-major"]
       - dependency-name: "@vectorize-io/hindsight-client"
         update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "@biomejs/biome"
+        versions: ["2.5.15"]
     # Group updates so the lockfile only has one merge state to validate
     # at a time. Multiple overlapping PRs touching pnpm-lock.yaml can
     # produce a corrupted lockfile because GitHub's textual auto-rebase
