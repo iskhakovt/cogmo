@@ -69,7 +69,7 @@
     "cmd-ts": "0.15.0",
     "croner": "^10.0.1",
     "dockerode": "5.0.1",
-    "drizzle-orm": "^0.45.3",
+    "drizzle-orm": "^0.45.4",
     "grammy": "^1.46.0",
     "inngest": "^4.21.1",
     "js-tiktoken": "^1.0.21",
