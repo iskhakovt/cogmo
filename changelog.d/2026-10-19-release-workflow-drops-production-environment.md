@@ -1,0 +1,1 @@
+The release job runs outside any GitHub environment. The manual dispatch, which takes write access, is the approval; the job runs only on `main` of `iskhakovt/cogmo` and waits for CI green on HEAD unless `skip_ci_check` is set.
