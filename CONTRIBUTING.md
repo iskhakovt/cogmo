@@ -95,7 +95,6 @@ Releases are cut on demand, not on every merge. The version is never bumped by h
 1. Merge PRs with Conventional Commit titles. A breaking change needs `!` (`feat(infra)!: …`) or a `BREAKING CHANGE:` footer to produce a major.
 2. Dispatch `.github/workflows/release.yml` from `main` — Actions → Release → Run workflow, or `gh workflow run release.yml --ref main`. The run:
    - Waits for every check on `main` HEAD to be green (the `skip_ci_check` input bypasses this when an external check is stuck).
-   - Pauses for approval on the `production` environment.
    - Runs `semantic-release`: reads commits since the last tag, computes the next version, generates release notes, and creates the GitHub release and `vX.Y.Z` tag.
 3. If a release was published, the same run calls `.github/workflows/publish.yml`:
    - Derives the version from the tag at HEAD (Dunamai).

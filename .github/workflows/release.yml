@@ -28,15 +28,8 @@ jobs:
     if: github.ref == 'refs/heads/main' && github.repository == 'iskhakovt/cogmo'
     runs-on: ubuntu-latest
     # Covers the 5-min wait-for-status-checks step + ~1 min of semantic-release
-    # work + buffer. The Environment-approval pause does not count against
-    # `timeout-minutes` (it's pre-job, not in-job).
+    # work + buffer.
     timeout-minutes: 10
-    # Approval gate: GitHub pauses this job until the required reviewer
-    # (configured in Settings → Environments → production) clicks Approve.
-    # Matches the pattern Anthropic's TS SDK uses on `publish-npm.yml`.
-    # Publish runs after Release on the same dispatch — one approval covers
-    # both, no second gate.
-    environment: production
     permissions:
       contents: write
       issues: write
