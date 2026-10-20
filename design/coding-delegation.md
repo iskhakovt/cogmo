@@ -688,7 +688,7 @@ This reuses the whole coding-delegation pipeline (sandbox, plan gate for user tr
 **`cogmo/devbase`** — the default task container image when a repo has no `.devcontainer/`. Contents:
 
 - Node 24 LTS + pnpm
-- uv, resolving on cogmo-skills' Python minor (`UV_PYTHON`; the base has no Python, so uv downloads it on first use)
+- uv + cogmo-skills' Python minor as a uv-managed install, which uv prefers to Ubuntu's system 3.12 unless a repo pins its own
 - Go, Rust toolchains (via version managers, not pre-installed)
 - Common CLIs: git, gh, ripgrep, fd, jq, yq, curl, docker client
 - Claude Code CLI and Codex CLI preinstalled

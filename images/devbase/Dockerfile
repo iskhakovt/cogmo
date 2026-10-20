@@ -15,8 +15,8 @@
 # register time):
 #   - Node 24 + pnpm + git + gh + ripgrep + fd + jq + curl
 #   - @anthropic-ai/claude-code (pinned)
-#   - uv (pinned to match cogmo-skills), resolving on cogmo-skills' Python
-#     minor; the base image has no Python, so uv downloads it on first use
+#   - uv (pinned to match cogmo-skills) + cogmo-skills' Python minor as a
+#     uv-managed install; Ubuntu's python3 3.12 comes in with nodejs
 #   - Non-root user `vscode` (UID 1000) inherited from the devcontainers base.
 #
 # Codex CLI and Go/Rust toolchains are deferred to whenever real verify
@@ -101,11 +101,18 @@ RUN npm install -g --allow-scripts=@anthropic-ai/claude-code "@anthropic-ai/clau
 
 # uv — shared pin with cogmo-skills so author-side `uv pip compile` produces
 # lockfiles byte-identical to what cogmo-skills re-resolves at register time.
-# Resolution also depends on the interpreter, so uv resolves on cogmo-skills'
-# Python minor.
+# Resolution also depends on the interpreter, and the python3 on PATH is
+# Ubuntu's 3.12, which the nodejs package pulls in. cogmo-skills' minor is
+# installed as a uv-managed Python, which uv prefers to a system one when
+# nothing asks for another; a repo's own `.python-version` or
+# `requires-python` still wins. The install dir sits outside /home/vscode,
+# which is a per-task volume, and belongs to vscode so a task can add the
+# Python its repo pins.
 COPY --from=uv /uv /uvx /usr/local/bin/
 ARG SKILLS_PYTHON
-ENV UV_PYTHON=${SKILLS_PYTHON}
+ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python
+RUN uv --no-cache python install --no-bin "${SKILLS_PYTHON:?}" \
+ && chown -R vscode:vscode /opt/uv
 
 # Drop privileges. Cogmo's supervisor mounts the worktree at /workspace and
 # always overrides Entrypoint/Cmd at create-container time, so we leave the
