@@ -35,9 +35,11 @@ variable "VERSION" {
   default = "dev"
 }
 
-// Toolchain versions for the task images, and their only copy: the
-// Dockerfiles declare these ARGs without defaults. Base-image FROM digests
-// stay literal in each Dockerfile for Dependabot; these are bumped by hand.
+// Toolchain versions for the task images. The Dockerfiles declare these ARGs
+// without defaults, so a build reads them from here alone; the mirrors bake
+// can't feed are held to them by docker-bake.integration.test.ts. Base-image
+// FROM digests stay literal in each Dockerfile for Dependabot; these are
+// bumped by hand.
 // uv is shared by devbase + skills.
 variable "UV_VERSION" {
   default = "0.13.4"
