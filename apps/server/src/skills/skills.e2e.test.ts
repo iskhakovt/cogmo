@@ -11,9 +11,9 @@
  *   2. Does a tier-1 skill run from the bundled build? `host.ts` spawns its
  *      worker from `new URL("./worker-entry.js", import.meta.url)`, which
  *      resolves only if tsup emits the worker entry beside the bundle the
- *      host landed in. Source-tier tests load the host from `src/` and never
- *      take that path; registering and running a skill through the shipped
- *      CLI does.
+ *      host landed in, and the worker reads `py/` beside itself as it loads.
+ *      Source-tier tests load the host from `src/` and never take that path;
+ *      registering and running a skill through the shipped CLI does.
  *
  * The app container boots in `serve` mode (per the e2e setup), so we drive
  * the skills surface via `docker exec` invoking `node dist/main.js skills …`.
@@ -238,16 +238,6 @@ describe("skills e2e (production Docker image)", { timeout: 120_000 }, () => {
       code: 0,
       output: { runId: expect.any(String), status: "success", output: { echo: 8 } },
     });
-  });
-
-  it("the build copied the worker's Python next to worker-entry.js", async () => {
-    // `worker-entry.js` reads these at load; only tsup's copy step puts them in dist.
-    const r = await dockerExec([
-      "node",
-      "-e",
-      'const fs=require("fs");process.stdout.write(JSON.stringify(["ctx.py","install_deps.py"].map((f)=>fs.existsSync("/app/dist/skills/worker-wasm/py/"+f))))',
-    ]);
-    expect(JSON.parse(r.stdout)).toEqual([true, true]);
   });
 
   it("Pyodide loads inside the production image", async () => {

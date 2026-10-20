@@ -2,6 +2,5 @@
 # (Pyodide 314 runs Python 3.14). CI's `skills-runtime` job checks this
 # directory with the ruff that `images/skills/uv.lock` pins.
 extend = "../../../../../../images/skills/pyproject.toml"
-# The base's `include` globs resolve against this directory, where they
-# match nothing.
+# The base's `include` globs match nothing here.
 include = ["*.py"]

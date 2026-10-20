@@ -60,7 +60,7 @@ export const TaskInvokeSchema = z.object({
    * stays unchanged.
    *
    * The task process constructs the path from the hash + its own
-   * `sys.version_info` so an image upgrade that changes Python minor
+   * `python_abi_tag()` (`cogmo_skills_runtime.abi`) so an image upgrade that changes Python minor
    * (e.g. `python:3.14-slim` -> `python:3.15-slim`) automatically
    * routes to a fresh `<hash>-py3.15/` venv; the stale `<hash>-py3.14/`
    * dir is reaped by the per-hash sweep on its next cron tick. Host

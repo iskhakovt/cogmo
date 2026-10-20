@@ -982,7 +982,7 @@ def run(inputs: dict, ctx) -> dict:
     ...
 ```
 
-`ctx` is a thin Python SDK shipped into every skill worker: tier 1 runs `src/skills/worker-wasm/py/ctx.py` in the Pyodide globals the skill body shares, and tier 2's lives in `cogmo_skills_runtime/runner.py` in the image. Each method is an RPC back to the host over the same stdin/stdout pipe that dispatched the task. This mirrors the TS `Service` pattern used by in-process tools — same shape, projected over a pipe.
+`ctx` is a thin Python SDK shipped into every skill worker: tier 1 runs `src/skills/worker-wasm/py/ctx.py` in the Pyodide globals the skill body shares, and tier 2's lives in `cogmo_skills_runtime/runner.py` in the image. Each method is an RPC back to the host over the channel that dispatched the task: tier 2's stdin/stdout pipe, tier 1's worker `MessagePort`. This mirrors the TS `Service` pattern used by in-process tools — same shape, projected over a pipe.
 
 ### v1 surface
 

@@ -104,9 +104,8 @@ async function runTask(invoke: { id: string; inputs: unknown }): Promise<TaskRes
 
   // Materialize ctx SDK + skill body into module-level globals. One task
   // runs per thread — the port transport's synthetic `task_exited` relies
-  // on it — so module-level globals are safe. The glue between them stays
-  // inline: it names the bridge module registered above, and the final
-  // top-level `await` runs only as `runPythonAsync` input.
+  // on it — so module-level globals are safe. The glue between them is
+  // inline because it names the bridge module registered above.
   await py.runPythonAsync(CTX_PY);
   await py.runPythonAsync(
     "from __cogmo_bridge__ import bridge as __cogmo_bridge\n_ctx = _build_ctx(__cogmo_bridge)\n",
@@ -116,6 +115,7 @@ async function runTask(invoke: { id: string; inputs: unknown }): Promise<TaskRes
   // Inject inputs as a Python dict and await `run(inputs, ctx)`.
   const inputsPy = py.toPy(invoke.inputs);
   py.globals.set("__cogmo_inputs", inputsPy);
+  // A top-level `await` is valid only as `runPythonAsync` input, not in a `.py` file.
   const resultPy = await py.runPythonAsync("await run(__cogmo_inputs, _ctx)");
 
   // Convert PyProxy → plain JS for postMessage cloning. Plain values
@@ -184,8 +184,7 @@ port.on("message", (raw: unknown) => {
     await pyodide.loadPackage("micropip");
     await pyodide.runPythonAsync(INSTALL_DEPS_PY);
     pyodide.globals.set("__cogmo_skill_deps", init.packageSpecs);
-    // A top-level `await` is valid only as `runPythonAsync` input, not in
-    // a module file, so the call stays here.
+    // A top-level `await` is valid only as `runPythonAsync` input.
     await pyodide.runPythonAsync(
       "await _install_and_verify(list(__cogmo_skill_deps))\ndel __cogmo_skill_deps\n",
     );

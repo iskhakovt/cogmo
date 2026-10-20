@@ -388,9 +388,9 @@ export interface EnsureVenvPopulatedOptions {
  * changes Python minor populates a fresh venv (and orphans the old
  * one for the reaper). The host doesn't need to know the image's
  * ABI: the populate script reads it from
- * `python3 -m cogmo_skills_runtime.abi`, the function the supervisor
- * builds the same path from on activation. Same image, same Python ->
- * same path, by construction.
+ * `python3 -m cogmo_skills_runtime.abi`, which prints the
+ * `python_abi_tag()` the supervisor builds the same path from on
+ * activation. Same image, same Python -> same path, by construction.
  *
  * The venv lives on the `/skill-venvs` Docker / Daytona volume shared
  * across every tier-2 worker the pool spawns: a venv populated by one
