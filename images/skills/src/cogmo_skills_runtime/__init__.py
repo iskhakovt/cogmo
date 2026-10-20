@@ -10,9 +10,8 @@ Two modules carry the runtime:
 
 The TS host (`src/skills/worker-sysbox/worker.ts`) spawns this package
 via `python3 -u -m cogmo_skills_runtime`. See `design/skills.md` ->
-"Warm pool" for the protocol contract.
+"Warm pool" for the protocol contract. Its shell scripts run
+`python3 -m cogmo_skills_runtime.abi` for the venv ABI tag on every
+tier-2 task with dependencies, which is why importing the package
+imports none of its modules.
 """
-
-from cogmo_skills_runtime import runner, supervisor
-
-__all__ = ["runner", "supervisor"]

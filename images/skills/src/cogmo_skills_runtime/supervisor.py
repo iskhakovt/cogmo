@@ -59,6 +59,7 @@ import traceback
 from collections.abc import Mapping
 from typing import Any
 
+from cogmo_skills_runtime.abi import python_abi_tag
 from cogmo_skills_runtime.runner import _main as _run_main
 
 # Wire protocol version announced in `supervisor_ready`. The host refuses
@@ -297,8 +298,8 @@ def _skill_venv_path(lockfile_hash: str) -> str:
 
     The path includes the runtime's Python ABI so an image bump that
     changes Python minor (or major) routes to a fresh venv. The
-    populate script computes the same suffix from its own
-    `sys.version_info`; same image -> same Python -> same path.
+    populate script reads the same tag from `python3 -m
+    cogmo_skills_runtime.abi`; same image -> same Python -> same path.
 
     Raises RuntimeError if `lockfile_hash` isn't a sha256-hex string;
     `os.path.join` doesn't normalise `..` and would otherwise compose
@@ -308,8 +309,7 @@ def _skill_venv_path(lockfile_hash: str) -> str:
         raise RuntimeError(
             f"skill_venv: lockfile_hash must be sha256 hex (got {lockfile_hash!r})"
         )
-    py_abi = f"py{sys.version_info.major}.{sys.version_info.minor}"
-    return os.path.join(SKILL_VENVS_ROOT, f"{lockfile_hash}-{py_abi}")
+    return os.path.join(SKILL_VENVS_ROOT, f"{lockfile_hash}-{python_abi_tag()}")
 
 
 def _activate_skill_venv(lockfile_hash: str) -> None:

@@ -17,7 +17,8 @@ export interface SkillDepsReaperDeps {
    */
   sandbox: SandboxClient | undefined;
   /**
-   * Skills runtime image. Must carry `sh`, `find`, `grep`. Mirrors the
+   * Skills runtime image. Must carry `sh`, `find`, `grep` and the
+   * `cogmo_skills_runtime` package. Mirrors the
    * value the runner passes to `runOnSysboxContainer` for tier-2
    * workers, so both share image lifecycle and snapshot caches.
    */

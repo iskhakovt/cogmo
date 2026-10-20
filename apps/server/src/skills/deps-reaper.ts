@@ -45,7 +45,7 @@ GRACE_DAYS="$1"
 # weight. Solution: build the EXPECTED reachable dir-name set
 # (\`<hash>-py<CURRENT_ABI>\` for every hash in REACHABLE) and compare
 # candidate dirs against that set, not against the bare-hash set.
-PY_ABI=$(python3 -c "import sys; print(f'py{sys.version_info.major}.{sys.version_info.minor}')")
+PY_ABI=$(python3 -m cogmo_skills_runtime.abi)
 REACHABLE=$(mktemp)
 EXPECTED=$(mktemp)
 trap 'rm -f "$REACHABLE" "$EXPECTED"' EXIT
@@ -74,7 +74,10 @@ done
 
 export interface ReapSkillVenvsOptions {
   sandbox: SandboxClient;
-  /** Same image used by tier-2 workers; carries `sh`, `find`, `grep`. */
+  /**
+   * Same image used by tier-2 workers; carries `sh`, `find`, `grep`, and
+   * the `cogmo_skills_runtime` package the script reads the ABI tag from.
+   */
   image: string;
   depsCacheVolumeName: string;
   /** Lockfile hashes that must NOT be reaped (every live or disabled skill). */
