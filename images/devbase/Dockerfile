@@ -15,7 +15,8 @@
 # register time):
 #   - Node 24 + pnpm + git + gh + ripgrep + fd + jq + curl
 #   - @anthropic-ai/claude-code (pinned)
-#   - Python 3 (from devcontainers/base) + uv (pinned to match cogmo-skills)
+#   - uv (pinned to match cogmo-skills), resolving on cogmo-skills' Python
+#     minor; the base image has no Python, so uv downloads it on first use
 #   - Non-root user `vscode` (UID 1000) inherited from the devcontainers base.
 #
 # Codex CLI and Go/Rust toolchains are deferred to whenever real verify
@@ -100,7 +101,11 @@ RUN npm install -g --allow-scripts=@anthropic-ai/claude-code "@anthropic-ai/clau
 
 # uv — shared pin with cogmo-skills so author-side `uv pip compile` produces
 # lockfiles byte-identical to what cogmo-skills re-resolves at register time.
+# Resolution also depends on the interpreter, so uv resolves on cogmo-skills'
+# Python minor.
 COPY --from=uv /uv /uvx /usr/local/bin/
+ARG SKILLS_PYTHON
+ENV UV_PYTHON=${SKILLS_PYTHON}
 
 # Drop privileges. Cogmo's supervisor mounts the worktree at /workspace and
 # always overrides Entrypoint/Cmd at create-container time, so we leave the

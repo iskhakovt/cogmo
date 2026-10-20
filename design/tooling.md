@@ -209,6 +209,7 @@ pnpm lint                 # biome check, whole workspace
 The TypeScript host is the primary stack, but tier-2 skills run inside a python container and the runtime ships with that image as a real `cogmo_skills_runtime` package (`images/skills/`). Convention for any python that lives in the codebase:
 
 - **uv** for dep management. `pyproject.toml` + `uv.lock`, `uv sync --locked` in CI and Dockerfiles. uv binary copied out of `ghcr.io/astral-sh/uv:<pinned>` in multi-stage Docker builds — no apt install of uv at runtime.
+- **`.python-version`** holds the Python minor the image runs. CI's `uv sync` reads it; the Dockerfile builder copies it and syncs with `UV_PYTHON_DOWNLOADS=0`, so a base image on another minor fails the build.
 - **ruff** for lint + format. Single tool replaces flake8/black/isort. `select = ["F", "E", "W", "I", "B", "UP", "RUF"]` — tight at the small scale we run.
 - **pyrefly** for typechecking — Meta's Rust typechecker, replaces Pyre. Picked over `mypy` (slower, weaker inference on partial annotations) and Astral's `ty` (still beta, ~53% spec conformance vs pyrefly's ~88% as of May 2026). Re-evaluate when `ty` hits 1.0 (Astral's track record on `ruff` / `uv` makes it the long-term favourite).
 - **pytest** + `pytest-asyncio` (`asyncio_mode = "auto"`).

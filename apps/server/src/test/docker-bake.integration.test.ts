@@ -11,9 +11,11 @@ import { repoRoot } from "./repo-root.js";
  * functions count the way they do in a real build.
  *
  * The task images' toolchain pins live in bake alone: their Dockerfiles
- * declare the ARGs without defaults. Two pins have a mirror bake can't feed —
- * package.json pins pnpm via `packageManager`, and ci.yml pins uv for the
- * skills-runtime job — so those are held to the bake values here.
+ * declare the ARGs without defaults. Three pins have a mirror bake can't feed —
+ * package.json pins pnpm via `packageManager`, ci.yml pins uv for the
+ * skills-runtime job, and `images/skills/.python-version` pins that job's and
+ * the skills image build's Python minor — so those are held to the bake values
+ * here.
  */
 
 function read(relativePath: string): string {
@@ -65,6 +67,12 @@ describe("toolchain pins", () => {
     // cogmo-skills re-resolves at register time, byte for byte.
     expect(arg("devbase", "UV_VERSION")).toBe(arg("skills", "UV_VERSION"));
     expect(arg("devbase", "UV_DIGEST")).toBe(arg("skills", "UV_DIGEST"));
+  });
+
+  it("devbase's uv resolves on the skills image's Python minor", () => {
+    // Same reason as the shared uv: `uv pip compile` output depends on the
+    // interpreter it resolves for.
+    expect(arg("devbase", "SKILLS_PYTHON")).toBe(read("images/skills/.python-version").trim());
   });
 
   it("ci.yml's setup-uv matches bake", () => {

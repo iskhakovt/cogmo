@@ -45,6 +45,12 @@ variable "UV_VERSION" {
 variable "UV_DIGEST" {
   default = "sha256:9f130421e930bfbdc563c00740466603f8723158e90297d07957c2294640262b"
 }
+// The Python minor devbase's uv resolves on, so an author's `uv pip compile`
+// matches the one cogmo-skills runs at register time. Equal to
+// images/skills/.python-version.
+variable "SKILLS_PYTHON" {
+  default = "3.14"
+}
 // Match package.json packageManager. The digest is ghcr.io/pnpm/pnpm's
 // index for that version.
 variable "PNPM_VERSION" {
@@ -150,6 +156,7 @@ target "devbase" {
     CLAUDE_CODE_VERSION = "${CLAUDE_CODE_VERSION}"
     UV_VERSION          = "${UV_VERSION}"
     UV_DIGEST           = "${UV_DIGEST}"
+    SKILLS_PYTHON       = "${SKILLS_PYTHON}"
   }
   // Sysbox amd64-only today — see _common comment. Single-platform cache
   // scope matches the platform.
