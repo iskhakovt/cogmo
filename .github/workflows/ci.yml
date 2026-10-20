@@ -220,6 +220,13 @@ jobs:
       - run: uv sync --locked
       - name: ruff (lint + format)
         run: uv run ruff check
+      # The tier-1 Pyodide worker's Python, kept beside its TS host. Its
+      # ruff.toml extends this project's config. No pyrefly: `pyodide.ffi`,
+      # `js` and `micropip` resolve only inside Pyodide.
+      - name: ruff, Pyodide worker (lint + format)
+        run: |
+          uv run ruff check ../../apps/server/src/skills/worker-wasm/py
+          uv run ruff format --check ../../apps/server/src/skills/worker-wasm/py
       - name: pyrefly (typecheck)
         run: uv run pyrefly check
       - name: pytest

@@ -216,3 +216,4 @@ The TypeScript host is the primary stack, but tier-2 skills run inside a python 
 - src layout: `src/<package_name>/`, `tests/`, `py.typed` marker.
 - Every python sub-project ships its CI in `.github/workflows/ci.yml` as a separate job that runs `uv sync --locked`, `ruff check`, `pyrefly check`, `pytest`.
 - Multi-stage Dockerfile: builder syncs locked deps into a venv; runtime stage copies just the venv to `/opt/<name>/.venv` and adds it to `PATH`. `UV_NO_DEV=1`, `UV_NO_EDITABLE=1`, `UV_COMPILE_BYTECODE=1`. No build deps in the runtime stage.
+- Python that runs inside the TypeScript host's Pyodide worker is a `.py` file beside its host, not a string in TS: `apps/server/src/skills/worker-wasm/py/`. Its `ruff.toml` extends `images/skills/pyproject.toml`, and the `skills-runtime` job runs `ruff check` and `ruff format --check` over it. No pyrefly: `pyodide.ffi`, `js` and `micropip` resolve only inside Pyodide.

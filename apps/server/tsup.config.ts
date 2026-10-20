@@ -1,4 +1,19 @@
+import { copyFileSync, mkdirSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { defineConfig } from "tsup";
+
+/**
+ * The tier-1 worker reads its Python from `py/` beside its own module, so the
+ * `.py` files go next to the built `worker-entry.js`.
+ */
+function copyWorkerPython(): void {
+  const from = "src/skills/worker-wasm/py";
+  const to = "dist/skills/worker-wasm/py";
+  mkdirSync(to, { recursive: true });
+  for (const file of readdirSync(from).filter((name) => name.endsWith(".py"))) {
+    copyFileSync(join(from, file), join(to, file));
+  }
+}
 
 export default defineConfig({
   // Each key is a bundle's path under `dist/`, so every bundle sits at the
@@ -24,4 +39,5 @@ export default defineConfig({
   // runtime — `@orpc/contract` is imported only by that bundled code, not by
   // `src/`, so don't drop it as "unused".
   noExternal: [/^@cogmo\//],
+  onSuccess: async () => copyWorkerPython(),
 });

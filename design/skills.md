@@ -983,7 +983,7 @@ def run(inputs: dict, ctx) -> dict:
     ...
 ```
 
-`ctx` is a thin Python SDK shipped into every skill worker. Each method is an RPC back to the host over the same stdin/stdout pipe that dispatched the task. This mirrors the TS `Service` pattern used by in-process tools — same shape, projected over a pipe.
+`ctx` is a thin Python SDK shipped into every skill worker: tier 1 runs `src/skills/worker-wasm/py/ctx.py` in the Pyodide globals the skill body shares, and tier 2's lives in `cogmo_skills_runtime/runner.py` in the image. Each method is an RPC back to the host over the same stdin/stdout pipe that dispatched the task. This mirrors the TS `Service` pattern used by in-process tools — same shape, projected over a pipe.
 
 ### v1 surface
 
@@ -1306,7 +1306,7 @@ UPDATE recovery_point='finished', status='success'|'error'  ← transitionToFini
 | Manifest + classifier | `manifest.ts`, `classifier.ts`, `ast-classifier.ts`, `ast-rules.ts` | `SKILL.md` frontmatter parsing + risk-tier assignment (tree-sitter static analysis) |
 | Dependency stack | `deps.ts`, `deps-reaper*.ts`, `pyodide-compat.ts` | Lockfile compile + verify at register, venv populate + activate at invoke, unreachable-venv reaper, tier-1 Pyodide compat check |
 | Workers (tier 2) | `worker-sysbox/` | sysbox container host + in-container supervisor + warm pool |
-| Workers (tier 1) | `worker-wasm/` | Pyodide isolate host + Node Worker entry + WASM-import lint + bundled `ctx` Python SDK |
+| Workers (tier 1) | `worker-wasm/` | Pyodide isolate host + Node Worker entry + WASM-import lint; the worker's Python in `py/` (the `ctx` SDK, the dependency installer), which the entry reads at load and the build copies beside `worker-entry.js` |
 | Worker channel + ctx RPC | `worker-state.ts`, `dispatcher.ts`, `ctx-handler.ts`, `protocol.ts` | Worker channel state machine and the shell that drives it, ctx RPC serving, Zod-validated frames |
 | Cron scheduler | `cron-ticker.ts`, `cron-fire-handler.ts` | Per-minute Inngest tick + per-skill cron invocation |
 | Git plumbing | `git-ops.ts`, `repo.ts` | Bare-repo bootstrap, remote configuration, plumbing wrappers |

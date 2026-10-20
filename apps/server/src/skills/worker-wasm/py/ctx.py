@@ -1,16 +1,16 @@
-/**
- * Embedded Python source for the Tier-1 `ctx` SDK. Materialized into the
- * Pyodide instance at worker boot via `pyodide.runPythonAsync`. Kept in TS
- * (rather than a `.py` resource) so it ships inside the bundled `dist/` tree
- * with no extra build step and is co-located with its only consumer.
- *
- * Skills declare `async def run(inputs, ctx)`; ctx methods return JsPromise
- * objects that Pyodide makes awaitable in Python. This avoids the
- * SharedArrayBuffer + Atomics.wait dance a sync ctx API would require.
- */
-export const CTX_PY: string = `
+# The tier-1 `ctx` SDK: the object a skill's `async def run(inputs, ctx)`
+# receives. `worker-entry.ts` runs this file in the Pyodide globals the
+# skill body shares, so the body can name `CtxError`, and hands each task
+# the `Ctx` that `_build_ctx(bridge)` returns.
+#
+# Each ctx method awaits a JS Promise from the host bridge, which Pyodide
+# makes awaitable in Python, so no call needs the SharedArrayBuffer and
+# Atomics.wait handshake a synchronous API would.
+
+
 class CtxError(Exception):
     """Base class for typed ctx errors raised by the host."""
+
     def __init__(self, kind, message):
         super().__init__(f"{kind}: {message}")
         self.kind = kind
@@ -63,10 +63,10 @@ class _Files:
 class _Http:
     """Outbound HTTP, performed by the host.
 
-    Pyodide has no sockets, so \`urllib\` and \`http.client\` cannot reach the
+    Pyodide has no sockets, so `urllib` and `http.client` cannot reach the
     network from inside the sandbox — these methods are the way a tier-1
-    skill makes a request. Responses come back as a dict with \`status\`,
-    \`headers\` and \`body\`; a 4xx or 5xx arrives as a normal return value
+    skill makes a request. Responses come back as a dict with `status`,
+    `headers` and `body`; a 4xx or 5xx arrives as a normal return value
     with that status, and only a failure to obtain a response at all
     raises.
     """
@@ -101,6 +101,7 @@ class _Log:
 
 class Ctx:
     """Host context object passed to async def run(inputs, ctx)."""
+
     def __init__(self, bridge):
         self._bridge = bridge
         self.secrets = _Secrets(self)
@@ -110,8 +111,9 @@ class Ctx:
         self.log = _Log(self)
 
     async def _call(self, method, args):
-        from pyodide.ffi import jsnull, to_js
         from js import Object
+        from pyodide.ffi import jsnull, to_js
+
         # Convert Python dict -> plain JS object so structured clone passes
         # cleanly through postMessage.
         js_args = to_js(args, dict_converter=Object.fromEntries)
@@ -132,4 +134,3 @@ class Ctx:
 def _build_ctx(bridge):
     """Called by the worker entry to construct the per-task Ctx."""
     return Ctx(bridge)
-`;
