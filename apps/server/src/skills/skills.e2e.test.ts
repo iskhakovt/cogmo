@@ -240,6 +240,16 @@ describe("skills e2e (production Docker image)", { timeout: 120_000 }, () => {
     });
   });
 
+  it("the build copied the worker's Python next to worker-entry.js", async () => {
+    // `worker-entry.js` reads these at load; only tsup's copy step puts them in dist.
+    const r = await dockerExec([
+      "node",
+      "-e",
+      'const fs=require("fs");process.stdout.write(JSON.stringify(["ctx.py","install_deps.py"].map((f)=>fs.existsSync("/app/dist/skills/worker-wasm/py/"+f))))',
+    ]);
+    expect(JSON.parse(r.stdout)).toEqual([true, true]);
+  });
+
   it("Pyodide loads inside the production image", async () => {
     // Spin up Pyodide directly inside the container via dynamic import. This
     // is the load-bearing assertion: if WASM init or libc deps fail in the
