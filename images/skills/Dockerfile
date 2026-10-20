@@ -39,8 +39,10 @@ WORKDIR /app
 
 # Lock-only sync first (without project source) — keeps the heavy deps
 # layer cached when only src/ changes. README is required by hatchling
-# for the package metadata even though we don't ship it.
-COPY pyproject.toml uv.lock README.md /app/
+# for the package metadata even though we don't ship it. `.python-version`
+# is the Python minor CI tests against; with downloads off, a FROM on any
+# other minor fails this sync instead of shipping an untested runtime.
+COPY pyproject.toml uv.lock README.md .python-version /app/
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-install-project
 

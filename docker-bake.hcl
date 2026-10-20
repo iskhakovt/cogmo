@@ -40,10 +40,10 @@ variable "VERSION" {
 // stay literal in each Dockerfile for Dependabot; these are bumped by hand.
 // uv is shared by devbase + skills.
 variable "UV_VERSION" {
-  default = "0.12.23"
+  default = "0.13.4"
 }
 variable "UV_DIGEST" {
-  default = "sha256:61d393e44e249f2e4b526b6c7ddcecce245946826e608e11c93ad4f5bba55b21"
+  default = "sha256:9f130421e930bfbdc563c00740466603f8723158e90297d07957c2294640262b"
 }
 // Match package.json packageManager. The digest is ghcr.io/pnpm/pnpm's
 // index for that version.
