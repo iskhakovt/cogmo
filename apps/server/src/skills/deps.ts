@@ -314,7 +314,7 @@ WORKERID="$2"
 # python:3.15 produces a different PY_ABI -> different VENV path ->
 # fresh populate; the stale 3.14 dir orphans and the reaper cleans
 # it up on its next tick. The supervisor builds the same path from
-# the same function on activation.
+# the module's python_abi_tag() on activation.
 # Must run before any stdin-consuming step (uv pip sync at step 3
 # below) so the command substitution doesn't race the lockfile read.
 PY_ABI=$(python3 -m cogmo_skills_runtime.abi)
