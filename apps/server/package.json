@@ -38,11 +38,11 @@
   "dependencies": {
     "@ai-sdk/fal": "^3.0.59",
     "@ai-sdk/openai-compatible": "^3.0.67",
-    "@anthropic-ai/sdk": "^0.132.1",
-    "@aws-sdk/client-s3": "^3.1148.0",
+    "@anthropic-ai/sdk": "^0.133.0",
+    "@aws-sdk/client-s3": "^3.1151.0",
     "@clack/prompts": "^1.8.1",
     "@cogmo/contracts": "workspace:*",
-    "@daytona/sdk": "^0.223.0",
+    "@daytona/sdk": "^0.224.0",
     "@modelcontextprotocol/sdk": "^1.32.1",
     "@mozilla/readability": "^0.6.0",
     "@noble/ciphers": "^2.4.0",
@@ -80,7 +80,7 @@
     "micro-key-producer": "^0.10.2",
     "mime-types": "^3.0.2",
     "neverthrow": "^8.2.0",
-    "openai": "^7.31.0",
+    "openai": "^7.32.0",
     "p-retry": "^8.0.1",
     "picomatch": "^4.0.7",
     "pino": "^10.4.0",
@@ -97,7 +97,7 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
-    "@copilotkit/aimock": "^1.44.0",
+    "@copilotkit/aimock": "^1.45.1",
     "@electric-sql/pglite": "^0.5.8",
     "@inngest/test": "^1.0.0",
     "@modelcontextprotocol/server-everything": "^2026.8.31",
