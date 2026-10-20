@@ -217,11 +217,12 @@ function fromTaskResult(result: TaskResult): RunOnWorkerResult {
 }
 
 /**
- * Resolve the worker entry. tsup builds `worker-entry.ts` →
- * `dist/skills/worker-wasm/worker-entry.js` for production. In dev/tests we
- * point Node at the `boot.mjs` wrapper that registers tsx's ESM loader
- * inside the worker thread (Node 22.2+ disallows custom loaders via parent
- * `execArgv`/inheritance, so the worker has to register them itself —
+ * Resolve the worker entry. In the build, this module is bundled into a file
+ * at the `dist/` root and tsup emits `worker-entry.ts` as
+ * `dist/worker-entry.js` beside it (the named entry in `tsup.config.ts`). In
+ * dev/tests we point Node at the `boot.mjs` wrapper that registers tsx's ESM
+ * loader inside the worker thread (Node 22.2+ disallows custom loaders via
+ * parent `execArgv`/inheritance, so the worker has to register them itself —
  * see nodejs/node#53195).
  */
 function workerEntryUrl(): URL {

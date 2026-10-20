@@ -1,15 +1,17 @@
 import { defineConfig } from "tsup";
 
 export default defineConfig({
-  entry: [
-    "src/index.ts",
-    "src/main.ts",
-    "src/otel.ts",
-    // Tier-1 skills worker — loaded by `new Worker(<this file>)` from
-    // `src/skills/worker-wasm/host.ts`. Must be a standalone module so the
-    // worker thread can resolve it without the parent's import map.
-    "src/skills/worker-wasm/worker-entry.ts",
-  ],
+  // Each key is a bundle's path under `dist/`, so every bundle sits at the
+  // dist root beside the shared chunks. The Dockerfile's ENTRYPOINT runs
+  // `dist/main.js` with `dist/otel.js` preloaded.
+  entry: {
+    index: "src/index.ts",
+    main: "src/main.ts",
+    otel: "src/otel.ts",
+    // Tier-1 skills worker. `host.ts` spawns it from `./worker-entry.js`
+    // relative to the bundle the host is bundled into.
+    "worker-entry": "src/skills/worker-wasm/worker-entry.ts",
+  },
   format: ["esm"],
   target: "node24",
   outDir: "dist",

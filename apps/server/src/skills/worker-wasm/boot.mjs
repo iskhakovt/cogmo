@@ -1,8 +1,8 @@
-// Worker boot wrapper. Loads the TypeScript worker-entry by registering
-// tsx's ESM loader inside this worker thread. In production (post-tsup
-// build) this file lives next to worker-entry.js and tsx isn't installed,
-// so the import will resolve to the compiled .js sibling — but we keep
-// the register() call gated so production doesn't try to load tsx.
+// Worker boot wrapper for source runs (dev, tests). `host.ts` loaded from
+// `src/` spawns this file, which registers tsx's ESM loader inside the
+// worker thread and then imports the TypeScript worker-entry. The build
+// doesn't ship it: the bundled host spawns `dist/worker-entry.js` directly.
+// register() runs only from a `src/` checkout, where tsx is installed.
 const isSource = import.meta.url.includes("/src/");
 if (isSource) {
   const { register } = await import("tsx/esm/api");
