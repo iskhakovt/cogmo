@@ -92,11 +92,11 @@ async function dockerExec(args: readonly string[]): Promise<DockerExec> {
 }
 
 /**
- * Run the shipped CLI (`node dist/main.js …`) in the app container. Settles
- * with the exit code instead of rejecting on a nonzero one: the CLI prints a
- * failed command's result on stdout, and that is what an assertion needs to
- * show. `LOG_LEVEL=fatal` keeps the logger, which also writes to stdout, out
- * of it.
+ * Run the shipped CLI in the app container, with the image ENTRYPOINT's
+ * command line (a worker thread inherits its `execArgv`). Settles with the
+ * exit code instead of rejecting on a nonzero one: the CLI prints a failed
+ * command's result on stdout, and that is what an assertion needs to show.
+ * `LOG_LEVEL=fatal` keeps the logger, which also writes to stdout, out of it.
  */
 async function runCogmo(args: readonly string[]): Promise<CliRun> {
   const containerId = await findAppContainer();
@@ -107,6 +107,8 @@ async function runCogmo(args: readonly string[]): Promise<CliRun> {
       "LOG_LEVEL=fatal",
       containerId,
       "node",
+      "--import",
+      "./dist/otel.js",
       "dist/main.js",
       ...args,
     ]);
