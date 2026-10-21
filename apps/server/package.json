@@ -80,7 +80,7 @@
     "micro-key-producer": "^0.10.2",
     "mime-types": "^3.0.2",
     "neverthrow": "^8.2.0",
-    "openai": "^7.32.0",
+    "openai": "^7.33.0",
     "p-retry": "^8.0.1",
     "picomatch": "^4.0.7",
     "pino": "^10.4.0",
