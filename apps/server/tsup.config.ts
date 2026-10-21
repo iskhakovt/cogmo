@@ -2,13 +2,15 @@ import { copyFileSync, mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { defineConfig } from "tsup";
 
+const OUT_DIR = "dist";
+
 /**
  * The tier-1 worker reads its Python from `py/` beside its own module, so the
  * `.py` files go next to the built `worker-entry.js`.
  */
 function copyWorkerPython(): void {
   const from = "src/skills/worker-wasm/py";
-  const to = "dist/skills/worker-wasm/py";
+  const to = join(OUT_DIR, "py");
   mkdirSync(to, { recursive: true });
   for (const file of readdirSync(from).filter((name) => name.endsWith(".py"))) {
     copyFileSync(join(from, file), join(to, file));
@@ -29,7 +31,7 @@ export default defineConfig({
   },
   format: ["esm"],
   target: "node24",
-  outDir: "dist",
+  outDir: OUT_DIR,
   clean: true,
   sourcemap: true,
   // Bundle the workspace `@cogmo/contracts` (shipped as TS source) into the

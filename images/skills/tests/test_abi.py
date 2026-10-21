@@ -2,6 +2,7 @@
 shell scripts both read it."""
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -14,8 +15,11 @@ _SRC_DIR = str(Path(cogmo_skills_runtime.__file__).resolve().parent.parent)
 
 def test_tag_is_the_running_python_major_and_minor() -> None:
     """`deps-reaper.ts` deletes only `<hash>` and
-    `<hash>-py<major>.<minor>` directories, so the tag keeps that shape."""
-    assert python_abi_tag() == f"py{sys.version_info.major}.{sys.version_info.minor}"
+    `<hash>-py<major>.<minor>` directories, so the tag keeps that shape,
+    and a venv is per Python minor, so the tag names the running one."""
+    tag = python_abi_tag()
+    assert re.fullmatch(r"py[0-9]+\.[0-9]+", tag)
+    assert tag == f"py{sys.version_info.major}.{sys.version_info.minor}"
 
 
 def test_module_entry_point_prints_the_tag_and_nothing_else() -> None:

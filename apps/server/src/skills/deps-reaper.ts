@@ -76,7 +76,7 @@ export interface ReapSkillVenvsOptions {
   sandbox: SandboxClient;
   /**
    * Same image used by tier-2 workers; carries `sh`, `find`, `grep`, and
-   * the `cogmo_skills_runtime` package the script reads the ABI tag from.
+   * the `cogmo_skills_runtime.abi` module the script reads the ABI tag from.
    */
   image: string;
   depsCacheVolumeName: string;

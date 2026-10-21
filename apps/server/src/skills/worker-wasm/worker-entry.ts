@@ -115,7 +115,7 @@ async function runTask(invoke: { id: string; inputs: unknown }): Promise<TaskRes
   // Inject inputs as a Python dict and await `run(inputs, ctx)`.
   const inputsPy = py.toPy(invoke.inputs);
   py.globals.set("__cogmo_inputs", inputsPy);
-  // A top-level `await` is valid only as `runPythonAsync` input, not in a `.py` file.
+  // A top-level `await` isn't valid Python in a module, so it can't live in `py/`.
   const resultPy = await py.runPythonAsync("await run(__cogmo_inputs, _ctx)");
 
   // Convert PyProxy → plain JS for postMessage cloning. Plain values
@@ -184,7 +184,7 @@ port.on("message", (raw: unknown) => {
     await pyodide.loadPackage("micropip");
     await pyodide.runPythonAsync(INSTALL_DEPS_PY);
     pyodide.globals.set("__cogmo_skill_deps", init.packageSpecs);
-    // A top-level `await` is valid only as `runPythonAsync` input.
+    // A top-level `await` isn't valid Python in a module, so it can't live in `py/`.
     await pyodide.runPythonAsync(
       "await _install_and_verify(list(__cogmo_skill_deps))\ndel __cogmo_skill_deps\n",
     );
