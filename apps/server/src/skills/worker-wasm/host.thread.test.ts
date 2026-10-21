@@ -225,6 +225,9 @@ describe("runOnThread", () => {
           "worker init failed: worker crashed: ENOENT: no such file or directory, open '/nonexistent/py/ctx.py'",
       });
     } finally {
+      // A failed assertion or a hang must not leave the thread or a port open.
+      await worker.terminate();
+      channel.port1.close();
       channel.port2.close();
     }
   });
