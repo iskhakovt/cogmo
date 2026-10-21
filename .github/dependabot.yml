@@ -35,6 +35,9 @@ updates:
     # `vcs.useIgnoreFile` is on (biomejs/biome#12158), which is what
     # `biome-plugin.test.ts` does with its tempdir fixtures. Only that version
     # is skipped; drop the entry once the lockfile is past it.
+    #
+    # A pyodide major is a Python minor (314 → 3.14), which the skills image
+    # has to move with; see the docker `*python` entry.
     ignore:
       - dependency-name: "@types/node"
         update-types: ["version-update:semver-major"]
@@ -42,6 +45,8 @@ updates:
         update-types: ["version-update:semver-minor", "version-update:semver-major"]
       - dependency-name: "@biomejs/biome"
         versions: ["2.5.15"]
+      - dependency-name: "pyodide"
+        update-types: ["version-update:semver-major"]
     # Group updates so the lockfile only has one merge state to validate
     # at a time. Multiple overlapping PRs touching pnpm-lock.yaml can
     # produce a corrupted lockfile because GitHub's textual auto-rebase
@@ -124,12 +129,8 @@ updates:
       # both keeps the rule from going inert on a registry change.
       - dependency-name: "*node"
         update-types: ["version-update:semver-major"]
-      # Hold the skills image's Python minor (only images/skills uses this
-      # image); patch bumps still arrive. The tier-1 runtime is Pyodide,
-      # whose Python moves only with the `pyodide` package, and the register
-      # compile resolves both tiers on the tier-2 interpreter, so the two
-      # move together, by hand. todo.md → Blocked has the conditions and the
-      # files a minor bump touches. Same glob reasoning as Node's.
+      # The skills image's Python minor moves by hand with `pyodide`'s major
+      # (todo.md → Blocked); patches still arrive. Glob as for Node.
       - dependency-name: "*python"
         update-types: ["version-update:semver-minor"]
   - package-ecosystem: github-actions
