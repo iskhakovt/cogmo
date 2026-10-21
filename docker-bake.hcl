@@ -48,19 +48,21 @@ variable "UV_DIGEST" {
 // Match package.json packageManager. The digest is ghcr.io/pnpm/pnpm's
 // index for that version.
 variable "PNPM_VERSION" {
-  default = "12.10.0"
+  default = "12.13.0"
 }
 variable "PNPM_DIGEST" {
-  default = "sha256:333da074a29dcc495459433955e15e03a2715f6ae3f4904139a544e110d2d411"
+  default = "sha256:8ebb7ad694024b47535f6c2cd6bbeb532836e314609e8d90df0ef1f25661f8f4"
 }
 variable "NPM_VERSION" {
   default = "12.2.0"
 }
-// Coupled to the claude.ts stream-json parser — bump with it. Tracks the
+// Coupled to the claude.ts stream-json parser — bump with it, and check the
+// CLI still exits at its `result` with a background command left running
+// (CLAUDE_CODE_DISABLE_BACKGROUND_TASKS); no replay shows that. Tracks the
 // `stable` dist-tag, not `latest`: `latest` and `next` are the same build,
 // so following it puts the sandbox CLI ahead of the stable rollout.
 variable "CLAUDE_CODE_VERSION" {
-  default = "2.1.287"
+  default = "2.1.304"
 }
 
 // Default group builds every image — used by publish.yml on release.

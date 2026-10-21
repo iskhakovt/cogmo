@@ -12,35 +12,42 @@
         "toolCalls": [
           {
             "name": "Bash",
-            "arguments": "{\"command\": \"echo verify\"}",
-            "id": "toolu_011V2AhMaihH9sL4DjgYKPX2"
+            "arguments": "{\"command\": \"echo verify\", \"description\": \"Run the verify command\"}",
+            "id": "toolu_01TUod7Hj2kmtRXHBrXNA9cB"
           }
         ]
       },
       "recordedTimings": {
-        "ttftMs": 467,
+        "ttftMs": 518,
         "interChunkDelaysMs": [
           0,
           0,
           0,
-          160,
-          3,
-          80,
+          147,
+          6,
+          0,
+          112,
           0,
           0,
-          217,
+          227,
+          0,
+          0,
+          0,
+          178,
           0,
           0,
           0,
           0,
-          3,
+          0,
+          0,
+          0,
           0
         ],
-        "totalDurationMs": 930
+        "totalDurationMs": 1188
       },
       "metadata": {
-        "systemHash": "df3996db",
-        "toolsHash": "ecf29101"
+        "systemHash": "3ff6a07d",
+        "toolsHash": "7ffc6334"
       }
     }
   ]

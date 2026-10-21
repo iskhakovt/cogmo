@@ -2,6 +2,7 @@ import { PassThrough, type Writable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import type {
+  ExecOptions,
   ExecStreamingHandle,
   LocalDockerSessionState,
   SandboxSession,
@@ -25,9 +26,7 @@ const TaggedFrameSchema = z.object({ type: z.string() }).passthrough();
  * the configured exit code once the script `end()`s the stdout.
  */
 type ExecStreamingMock = ReturnType<
-  typeof vi.fn<
-    (cmd: ReadonlyArray<string>, opts?: { attachStdin?: boolean }) => Promise<ExecStreamingHandle>
-  >
+  typeof vi.fn<(cmd: ReadonlyArray<string>, opts?: ExecOptions) => Promise<ExecStreamingHandle>>
 >;
 
 function fakeContainer(
@@ -203,6 +202,7 @@ describe("ClaudeCodeBackend.plan", () => {
     // see design/coding-delegation.md → Per-callsite exec timeouts.
     expect(opts).toEqual({
       attachStdin: true,
+      env: { CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1" },
       timeoutMs: 30 * 60 * 1000,
       idleTimeoutMs: 5 * 60 * 1000,
     });
@@ -384,6 +384,20 @@ describe("ClaudeCodeBackend.execute", () => {
     expect(cmd).not.toContain("--permission-prompt-tool");
     expect(cmd).not.toContain("acceptEdits");
     expect(cmd).not.toContain("plan");
+  });
+
+  it("runs with background tasks disabled and the timeout pair", async () => {
+    const { container, execStreaming } = fakeContainer(EXECUTE_FIXTURE);
+    const backend = new ClaudeCodeBackend();
+    await collect(backend.execute({ task: taskWithSession, repo, container }, sessionId));
+
+    const [, opts] = expectDefined(execStreaming.mock.calls[0], "execStreaming call");
+    expect(opts).toEqual({
+      attachStdin: true,
+      env: { CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1" },
+      timeoutMs: 30 * 60 * 1000,
+      idleTimeoutMs: 5 * 60 * 1000,
+    });
   });
 
   it("sends the execute prompt (not the plan prompt) on stdin", async () => {

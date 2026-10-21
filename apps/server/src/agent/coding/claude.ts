@@ -133,6 +133,14 @@ const EXECUTE_FLAGS: readonly string[] = [
 const CLAUDE_TOTAL_TIMEOUT_MS = 30 * 60 * 1000;
 const CLAUDE_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 
+/**
+ * Background tasks off, so the CLI exits at its `result`. See
+ * design/coding-delegation.md → CLI invocation contract.
+ */
+const CLAUDE_ENV: Readonly<Record<string, string>> = {
+  CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1",
+};
+
 interface ClaudeCodeBackendOptions {
   /** Override the binary name. Defaults to `claude` (must be on PATH inside the container). */
   binary?: string;
@@ -180,6 +188,7 @@ async function* runClaudeSession(
 ): AsyncIterable<CodingEvent> {
   const exec = await container.execStreaming([binary, ...flags], {
     attachStdin: true,
+    env: CLAUDE_ENV,
     timeoutMs: CLAUDE_TOTAL_TIMEOUT_MS,
     idleTimeoutMs: CLAUDE_IDLE_TIMEOUT_MS,
   });
