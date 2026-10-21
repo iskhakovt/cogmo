@@ -124,6 +124,14 @@ updates:
       # both keeps the rule from going inert on a registry change.
       - dependency-name: "*node"
         update-types: ["version-update:semver-major"]
+      # Hold the skills image's Python minor (only images/skills uses this
+      # image); patch bumps still arrive. The tier-1 runtime is Pyodide,
+      # whose Python moves only with the `pyodide` package, and the register
+      # compile resolves both tiers on the tier-2 interpreter, so the two
+      # move together, by hand. todo.md → Blocked has the conditions and the
+      # files a minor bump touches. Same glob reasoning as Node's.
+      - dependency-name: "*python"
+        update-types: ["version-update:semver-minor"]
   - package-ecosystem: github-actions
     directory: /
     schedule:

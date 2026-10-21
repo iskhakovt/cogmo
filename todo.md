@@ -370,6 +370,11 @@
 
 ## Blocked
 
+- [ ] `p3` Move both skills tiers to Python 3.15. Blocked on two things. Checked 2026-10-21:
+  - **A stable Pyodide 315.** The tier-1 runtime is the `pyodide` npm package, whose `latest` was 314.0.7 (CPython 3.14), with `315.0.0-alpha.2` on `next`. The register-time `uv pip compile` resolves both tiers on the tier-2 interpreter, so moving tier 2 alone would lock tier-1 skills for a Python they don't run.
+  - **cp315 wheels for common binary dependencies.** Tier-2 populate is `--only-binary=:all:`, and PyYAML 6.0.3 and zstandard 0.25.0 had none.
+  - **To bump:** both `FROM`s in `images/skills/Dockerfile`, `images/skills/.python-version`, `requires-python` and ruff's `target-version` in `images/skills/pyproject.toml` (the Pyodide worker's `py/` lint inherits it), and `pyodide` in `apps/server/package.json` with `pyodide-version.test.ts`'s pin. `version-pins.test.ts` and the image build fail if the `FROM`s and `.python-version` disagree.
+  - **Also:** re-lock skills whose pinned binary dependencies predate cp315 wheels, and drop the `*python` minor ignore in `.github/dependabot.yml`.
 - [ ] `p2` Run the prompt-caching live tier on a schedule ([design/prompt-caching.md](design/prompt-caching.md) → Test Plan → Live tier) — blocked on Anthropic, OpenAI and OpenRouter API keys being added as repository secrets. OpenRouter carries scenario D's Claude route and, until a direct xAI key exists, its xAI one too, so an xAI secret is optional. The tier exists (`pnpm test:live`, the `live` Vitest project; `src/test/prompt-caching.live.test.ts` for scenarios A–C across a conversation, `src/llm/openai-compat.live.test.ts` for D); until the secrets exist it runs locally with the keys from the root `.env`, which has no direct xAI key. With the secrets in place: a nightly workflow (scenarios A, B and D, plus C's six-minute TTL wait) and `workflow_dispatch`, never on PRs.
 - [ ] `p3` Validate `x-grok-conv-id` against xAI's real endpoint: it goes out as documented but scenario D reaches xAI only through OpenRouter. Add a direct xAI route once a key exists ([design/prompt-caching.md](design/prompt-caching.md) → Open questions).
 - [ ] `p3` Switch Hindsight LLM to gpt-5-nano — blocked on Hindsight emitting `max_completion_tokens` for GPT-5 models. Currently on gpt-4o-mini (~$10/mo vs ~$6/mo target). See `design/memory.md` → Known Gaps.
