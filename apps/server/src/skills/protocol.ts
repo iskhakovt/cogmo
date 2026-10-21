@@ -62,12 +62,13 @@ export const TaskInvokeSchema = z.object({
    * stays unchanged.
    *
    * The task process constructs the path from the hash + its own
-   * `python_abi_tag()` (`cogmo_skills_runtime.abi`) so an image upgrade that changes Python minor
-   * (e.g. `python:3.14-slim` -> `python:3.15-slim`) automatically
-   * routes to a fresh `<hash>-py3.15/` venv; the stale `<hash>-py3.14/`
-   * dir is reaped by the per-hash sweep on its next cron tick. Host
-   * doesn't need to know the image's Python ABI -- the task process +
-   * populate script (same image, same runtime) agree by construction.
+   * `python_abi_tag()` (`cogmo_skills_runtime.abi`) so an image upgrade
+   * that changes Python minor (e.g. `python:3.14-slim` ->
+   * `python:3.15-slim`) automatically routes to a fresh `<hash>-py3.15/`
+   * venv; the stale `<hash>-py3.14/` dir is reaped by the per-hash sweep
+   * on its next cron tick. Host doesn't need to know the image's Python
+   * ABI -- the task process + populate script (same image, same runtime)
+   * agree by construction.
    *
    * Populated by the host via `ensureVenvPopulated` (see deps.ts) when the
    * skill declares dependencies. Absent for skills with empty
