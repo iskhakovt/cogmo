@@ -386,16 +386,18 @@ describe("ClaudeCodeBackend.execute", () => {
     expect(cmd).not.toContain("plan");
   });
 
-  it("runs with background tasks disabled, so the CLI exits at its result", async () => {
+  it("runs with background tasks disabled and the timeout pair", async () => {
     const { container, execStreaming } = fakeContainer(EXECUTE_FIXTURE);
     const backend = new ClaudeCodeBackend();
     await collect(backend.execute({ task: taskWithSession, repo, container }, sessionId));
 
-    // A background command still running after the result holds a `-p` run
-    // open and earns another turn once it ends; with stdout silent meanwhile,
-    // the idle cap fails a task whose work is done.
     const [, opts] = expectDefined(execStreaming.mock.calls[0], "execStreaming call");
-    expect(opts?.env).toEqual({ CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1" });
+    expect(opts).toEqual({
+      attachStdin: true,
+      env: { CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1" },
+      timeoutMs: 30 * 60 * 1000,
+      idleTimeoutMs: 5 * 60 * 1000,
+    });
   });
 
   it("sends the execute prompt (not the plan prompt) on stdin", async () => {

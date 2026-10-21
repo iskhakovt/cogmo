@@ -56,7 +56,9 @@ variable "PNPM_DIGEST" {
 variable "NPM_VERSION" {
   default = "12.2.0"
 }
-// Coupled to the claude.ts stream-json parser — bump with it. Tracks the
+// Coupled to the claude.ts stream-json parser — bump with it, and check the
+// CLI still exits at its `result` with a background command left running
+// (CLAUDE_CODE_DISABLE_BACKGROUND_TASKS); no replay shows that. Tracks the
 // `stable` dist-tag, not `latest`: `latest` and `next` are the same build,
 // so following it puts the sandbox CLI ahead of the stable rollout.
 variable "CLAUDE_CODE_VERSION" {
