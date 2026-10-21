@@ -32,3 +32,20 @@ describe("inngest image has one home", () => {
     expect(pinned).toEqual(["apps/server/dev/containers.ts"]);
   });
 });
+
+describe("the skills runtime's Python minor", () => {
+  // `.python-version` is the minor CI's skills-runtime job tests and devbase
+  // installs; the skills image's FROM is the one it runs. A Dependabot bump of
+  // the FROM alone fails here rather than only in the image build.
+  it("is a bare minor in .python-version that every skills FROM runs", () => {
+    const minor = readFileSync(join(repoRoot(), "images/skills/.python-version"), "utf8").trim();
+    const dockerfile = readFileSync(join(repoRoot(), "images/skills/Dockerfile"), "utf8");
+    const fromMinors = Array.from(
+      dockerfile.matchAll(/^FROM\s+\S*\/python:(\d+\.\d+)\b/gm),
+      (match) => match[1],
+    );
+
+    expect(minor).toMatch(/^\d+\.\d+$/);
+    expect(fromMinors).toEqual([minor, minor]);
+  });
+});

@@ -112,18 +112,6 @@ jobs:
           targets: skills,devbase
           load: true
 
-      # A skill author's `uv pip compile` in devbase resolves on the Python uv
-      # finds there, and register's byte compare needs it on cogmo-skills'
-      # minor.
-      - name: Check devbase's uv finds the skills Python minor
-        run: |
-          want="$(cat images/skills/.python-version)"
-          got="$(docker run --rm --entrypoint uv ghcr.io/iskhakovt/cogmo-devbase:test python find --show-version)"
-          case "$got" in
-            "$want".*) echo "devbase uv finds Python $got" ;;
-            *) echo "::error::devbase uv finds Python $got, cogmo-skills runs $want"; exit 1 ;;
-          esac
-
       - name: Run sysbox-flavoured supervisor + skills + coding-CLI tests
         env:
           SANDBOX_RUNTIME: sysbox
