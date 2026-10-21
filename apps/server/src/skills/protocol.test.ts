@@ -320,7 +320,7 @@ describe("WorkerMessageSchema (discriminated union)", () => {
   it.each([
     {
       name: "supervisor_ready",
-      msg: { type: "supervisor_ready", protocolVersion: 2 },
+      msg: { type: "supervisor_ready", protocolVersion: 3 },
     },
     {
       name: "ready",

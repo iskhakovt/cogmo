@@ -11,9 +11,9 @@
  *   2. Does a tier-1 skill run from the bundled build? `host.ts` spawns its
  *      worker from `new URL("./worker-entry.js", import.meta.url)`, which
  *      resolves only if tsup emits the worker entry beside the bundle the
- *      host landed in. Source-tier tests load the host from `src/` and never
- *      take that path; registering and running a skill through the shipped
- *      CLI does.
+ *      host landed in, and the worker reads `py/` beside itself as it loads.
+ *      Source-tier tests load the host from `src/` and never take that path;
+ *      registering and running a skill through the shipped CLI does.
  *
  * The app container boots in `serve` mode (per the e2e setup), so we drive
  * the skills surface via `docker exec` invoking `node dist/main.js skills …`.

@@ -1,8 +1,21 @@
+import { readFileSync } from "node:fs";
 import type { MessagePort } from "node:worker_threads";
 import { parentPort, workerData } from "node:worker_threads";
 import { loadPyodide, type PyodideInterface } from "pyodide";
 import { CtxResultSchema, TaskInvokeSchema, type TaskResult } from "../protocol.js";
-import { CTX_PY } from "./ctx.py.js";
+
+/**
+ * The worker's Python, from `py/` beside this module: the `ctx` SDK each
+ * task runs against, and the installer for a skill's dependencies. The
+ * build copies `py/` next to the built entry (`tsup.config.ts`). A file
+ * missing there fails the worker as it loads, before it can signal ready.
+ */
+const CTX_PY = readPython("ctx.py");
+const INSTALL_DEPS_PY = readPython("install_deps.py");
+
+function readPython(file: string): string {
+  return readFileSync(new URL(`./py/${file}`, import.meta.url), "utf8");
+}
 
 interface WorkerInit {
   port: MessagePort;
@@ -25,7 +38,7 @@ if (!parentPort) {
 }
 
 /**
- * A ctx call's answer as it reaches Python. `Ctx._call` in ctx.py returns
+ * A ctx call's answer as it reaches Python. `Ctx._call` in `py/ctx.py` returns
  * the value or raises `CtxError(kind, message)`, the class tier 2 raises: a
  * plain value crosses into Pyodide intact, where a rejected promise arrives
  * as a `JsException` carrying only the error's name and message.
@@ -91,7 +104,8 @@ async function runTask(invoke: { id: string; inputs: unknown }): Promise<TaskRes
 
   // Materialize ctx SDK + skill body into module-level globals. One task
   // runs per thread — the port transport's synthetic `task_exited` relies
-  // on it — so module-level globals are safe.
+  // on it — so module-level globals are safe. The glue between them is
+  // inline because it names the bridge module registered above.
   await py.runPythonAsync(CTX_PY);
   await py.runPythonAsync(
     "from __cogmo_bridge__ import bridge as __cogmo_bridge\n_ctx = _build_ctx(__cogmo_bridge)\n",
@@ -101,6 +115,7 @@ async function runTask(invoke: { id: string; inputs: unknown }): Promise<TaskRes
   // Inject inputs as a Python dict and await `run(inputs, ctx)`.
   const inputsPy = py.toPy(invoke.inputs);
   py.globals.set("__cogmo_inputs", inputsPy);
+  // A top-level `await` isn't valid Python in a module, so it can't live in `py/`.
   const resultPy = await py.runPythonAsync("await run(__cogmo_inputs, _ctx)");
 
   // Convert PyProxy → plain JS for postMessage cloning. Plain values
@@ -162,39 +177,17 @@ port.on("message", (raw: unknown) => {
     pyodide.setInterruptBuffer(new Uint8Array(init.interruptBuffer));
   }
 
-  // No `--require-hashes` equivalent in micropip; WASM-tier trusts
-  // PyPI wire integrity. See `design/skills.md` → Security posture.
-  // Pyodide-incompatible deps surface as a `fatal` init error here
-  // because register-time pre-check against `pyodide-lock.json` is
-  // deferred (todo.md). Post-install version verification catches
-  // silent resolver skips and any bundled-vs-pin drift.
+  // A dependency micropip can't install fails the boot as `fatal`. Register
+  // rejects a Pyodide-incompatible pin up front (`pyodide-compat.ts`), but
+  // lets the skill through when that check can't reach its sources.
   if (init.packageSpecs && init.packageSpecs.length > 0) {
     await pyodide.loadPackage("micropip");
+    await pyodide.runPythonAsync(INSTALL_DEPS_PY);
     pyodide.globals.set("__cogmo_skill_deps", init.packageSpecs);
-    await pyodide.runPythonAsync(`
-import micropip
-import importlib.metadata as _md
-
-async def _install_and_verify(specs):
-    await micropip.install(specs, keep_going=False)
-    mismatches = []
-    for spec in specs:
-        name, _, version = spec.partition("==")
-        if not version:
-            continue
-        try:
-            installed = _md.version(name)
-        except _md.PackageNotFoundError:
-            mismatches.append(f"{name}: not installed")
-            continue
-        if installed != version:
-            mismatches.append(f"{name}: requested {version}, installed {installed}")
-    if mismatches:
-        raise RuntimeError("dep version verification failed: " + "; ".join(mismatches))
-
-await _install_and_verify(list(__cogmo_skill_deps))
-del __cogmo_skill_deps
-`);
+    // A top-level `await` isn't valid Python in a module, so it can't live in `py/`.
+    await pyodide.runPythonAsync(
+      "await _install_and_verify(list(__cogmo_skill_deps))\ndel __cogmo_skill_deps\n",
+    );
   }
 
   // Tell the host the worker is ready to receive task_invoke.

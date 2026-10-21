@@ -290,7 +290,7 @@ def _descendant_pids(root: int) -> list[int]:
 
 class TestSupervisorProtocol:
     def test_announces_its_protocol_version_first(self, sup: _Supervisor) -> None:
-        assert sup.next_frame(10) == {"type": "supervisor_ready", "protocolVersion": 2}
+        assert sup.next_frame(10) == {"type": "supervisor_ready", "protocolVersion": 3}
 
     def test_confirms_each_task_exited_and_serves_the_next(self, sup: _Supervisor) -> None:
         first = sup.run_task("t-1", _ECHO, {"n": 1})

@@ -281,6 +281,15 @@ export function makeSandboxLockfileCompiler(
 const DEFAULT_POPULATE_TIMEOUT_MS = 180_000;
 
 /**
+ * Prints the image's `py<major>.<minor>` tag, which names skill venvs. The
+ * populate script and the reaper's both run it, so the two always agree on
+ * which venvs are live. `-I` keeps the exec's cwd off `sys.path`: on a warm
+ * worker that is `$HOME`, which tasks can write, and `-m` alone would import
+ * a `cogmo_skills_runtime` planted there.
+ */
+export const PYTHON_ABI_TAG_COMMAND = "python3 -I -m cogmo_skills_runtime.abi";
+
+/**
  * Shell program that the populator invokes inside the worker
  * container. Idempotent: if `$VENV/.ready` exists, exits 0 immediately.
  * Otherwise creates a tmp venv adjacent to the target, syncs the
@@ -309,15 +318,15 @@ const DEFAULT_POPULATE_TIMEOUT_MS = 180_000;
 const POPULATE_SCRIPT = `set -eu
 HASH="$1"
 WORKERID="$2"
-# Compute the runtime's Python ABI inline so the venv path varies
-# with the image's Python version. An image bump from python:3.14 to
+# The runtime's Python ABI tag, so the venv path varies with the
+# image's Python version. An image bump from python:3.14 to
 # python:3.15 produces a different PY_ABI -> different VENV path ->
 # fresh populate; the stale 3.14 dir orphans and the reaper cleans
-# it up on its next tick. The supervisor reads its own
-# sys.version_info to construct the same path on activation.
+# it up on its next tick. The supervisor builds the same path from
+# the module's python_abi_tag() on activation.
 # Must run before any stdin-consuming step (uv pip sync at step 3
 # below) so the command substitution doesn't race the lockfile read.
-PY_ABI=$(python3 -c "import sys; print(f'py{sys.version_info.major}.{sys.version_info.minor}')")
+PY_ABI=$(${PYTHON_ABI_TAG_COMMAND})
 VENV="${DEPS_CACHE_VOLUME_TARGET}/$HASH-$PY_ABI"
 TMP="${DEPS_CACHE_VOLUME_TARGET}/$HASH-$PY_ABI.tmp.$WORKERID"
 # Dotted so it can't be mistaken for a lockfile-hash dir (sha256 hex
@@ -387,10 +396,10 @@ export interface EnsureVenvPopulatedOptions {
  * The path includes the runtime's Python ABI so an image bump that
  * changes Python minor populates a fresh venv (and orphans the old
  * one for the reaper). The host doesn't need to know the image's
- * ABI: the populate script computes it inline from
- * `python3 -c "...sys.version_info..."`, and the supervisor reads its
- * own `sys.version_info` to construct the same path on activation.
- * Same image, same Python -> same path, by construction.
+ * ABI: the populate script reads it from `PYTHON_ABI_TAG_COMMAND`,
+ * which prints the `python_abi_tag()` the supervisor builds the same
+ * path from on activation. Same image, same Python -> same path, by
+ * construction.
  *
  * The venv lives on the `/skill-venvs` Docker / Daytona volume shared
  * across every tier-2 worker the pool spawns: a venv populated by one

@@ -50,7 +50,7 @@ const COMMANDS = {
 
 const FACTS = {
   ready: { type: "ready" },
-  supervisor_ready: { type: "supervisor_ready", protocolVersion: 2 },
+  supervisor_ready: { type: "supervisor_ready", protocolVersion: 3 },
   fatal: { type: "fatal", error: "boom" },
   malformed: { type: "malformed", issues: ["Invalid input"] },
   ctx_call_own: { type: "ctx_call", taskId: "t1", id: "c1", method: "now", args: {} },

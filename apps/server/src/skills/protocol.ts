@@ -12,9 +12,10 @@ import { z } from "zod";
  * Tier 2 supervisor protocol version. The supervisor announces it in
  * `supervisor_ready`; the worker refuses a supervisor announcing anything
  * else. Bump with `PROTOCOL_VERSION` in
- * `images/skills/src/cogmo_skills_runtime/supervisor.py`.
+ * `images/skills/src/cogmo_skills_runtime/supervisor.py` on a protocol
+ * change, and when the host comes to run something new in the image.
  */
-export const SUPERVISOR_PROTOCOL_VERSION = 2;
+export const SUPERVISOR_PROTOCOL_VERSION = 3;
 
 /** Tier 2 only: the supervisor's first frame, announcing its protocol version. */
 const SupervisorReadySchema = z.object({
@@ -60,12 +61,13 @@ export const TaskInvokeSchema = z.object({
    * stays unchanged.
    *
    * The task process constructs the path from the hash + its own
-   * `sys.version_info` so an image upgrade that changes Python minor
-   * (e.g. `python:3.14-slim` -> `python:3.15-slim`) automatically
-   * routes to a fresh `<hash>-py3.15/` venv; the stale `<hash>-py3.14/`
-   * dir is reaped by the per-hash sweep on its next cron tick. Host
-   * doesn't need to know the image's Python ABI -- the task process +
-   * populate script (same image, same runtime) agree by construction.
+   * `python_abi_tag()` (`cogmo_skills_runtime.abi`) so an image upgrade
+   * that changes Python minor (e.g. `python:3.14-slim` ->
+   * `python:3.15-slim`) automatically routes to a fresh `<hash>-py3.15/`
+   * venv; the stale `<hash>-py3.14/` dir is reaped by the per-hash sweep
+   * on its next cron tick. Host doesn't need to know the image's Python
+   * ABI -- the task process + populate script (same image, same runtime)
+   * agree by construction.
    *
    * Populated by the host via `ensureVenvPopulated` (see deps.ts) when the
    * skill declares dependencies. Absent for skills with empty

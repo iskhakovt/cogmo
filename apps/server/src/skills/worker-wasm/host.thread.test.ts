@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { MessageChannel, type MessagePort } from "node:worker_threads";
+import { MessageChannel, type MessagePort, Worker } from "node:worker_threads";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { CtxHandler } from "../dispatcher.js";
@@ -191,6 +191,45 @@ describe("runOnThread", () => {
       ok: false,
       error: "worker init failed: worker exited (code 7)",
     });
+  });
+
+  it("reports a real thread that throws as it loads, without waiting out its deadline", async () => {
+    // A `py/` file missing beside worker-entry throws at module load. Node
+    // reports that as the thread's `error`, then its `exit`. The deadline's
+    // timer is faked, so only the thread's death can settle the task.
+    const worker = new Worker(`require("node:fs").readFileSync("/nonexistent/py/ctx.py");`, {
+      eval: true,
+    });
+    const channel = new MessageChannel();
+    try {
+      const result = await runOnThread(
+        {
+          port: channel.port1,
+          events: worker,
+          interrupt: () => {},
+          terminate: () => worker.terminate(),
+        },
+        {
+          taskId: "task-1",
+          skillName: "skill",
+          body: "",
+          inputs: {},
+          readyTimeoutMs: 5_000,
+          ctxHandler: mock<CtxHandler>(),
+        },
+      );
+
+      expect(result).toEqual({
+        ok: false,
+        error:
+          "worker init failed: worker crashed: ENOENT: no such file or directory, open '/nonexistent/py/ctx.py'",
+      });
+    } finally {
+      // A failed assertion or a hang must not leave the thread or a port open.
+      await worker.terminate();
+      channel.port1.close();
+      channel.port2.close();
+    }
   });
 
   it("reports a thread that is not ready by its deadline", async () => {

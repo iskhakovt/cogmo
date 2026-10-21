@@ -55,7 +55,7 @@ function buildFakeSandbox(): FakeSandboxBundle {
     exec: vi.fn(),
     execStreaming: vi.fn(async (cmd) => {
       calls.push(`exec:${cmd[0]}:${cmd[1]}`);
-      stdout.write(`${JSON.stringify({ type: "supervisor_ready", protocolVersion: 2 })}\n`);
+      stdout.write(`${JSON.stringify({ type: "supervisor_ready", protocolVersion: 3 })}\n`);
       return exec;
     }),
   };

@@ -16,6 +16,9 @@ Owns the supervisor + runner for tier-2 skills — see `design/skills.md`.
   RPCs over its stdin/stdout, emits one `task_result`.
 - `src/cogmo_skills_runtime/__main__.py` — entry point. The TS worker
   spawns this via `python3 -u -m cogmo_skills_runtime`.
+- `src/cogmo_skills_runtime/abi.py` — the `py<major>.<minor>` tag that
+  names skill venvs. The supervisor calls it; the host's populate and
+  reap scripts run `python3 -I -m cogmo_skills_runtime.abi`.
 - `tests/` — pytest suite; `test_task_isolation.py` runs the supervisor
   as a subprocess and speaks the host protocol to it.
 
@@ -40,4 +43,5 @@ The supervisor announces `PROTOCOL_VERSION` on startup and the host
 refuses any other (`SUPERVISOR_PROTOCOL_VERSION` in
 `apps/server/src/skills/protocol.ts`), so an image speaking another
 protocol version fails at worker creation. Bump both together on a
-protocol change.
+protocol change, and when the host comes to run something new in the
+image.

@@ -148,7 +148,7 @@ A worker has one task in flight and possibly several `ctx_call`s nested inside i
 
 ```json
 // worker → host (startup)
-{"type": "supervisor_ready", "protocolVersion": 2}
+{"type": "supervisor_ready", "protocolVersion": 3}
 
 // host → worker
 {"type": "task_invoke", "id": "run-7f3", "skill": "summarize-email", "inputs": {...}}
@@ -166,7 +166,12 @@ A worker has one task in flight and possibly several `ctx_call`s nested inside i
 
 stdin/stdout chosen over HTTP / Unix socket for simplicity — one process per worker, no port allocation, no service discovery. Inside the container the host channel never reaches skill code; see [State reset between tasks](#state-reset-between-tasks-confirmed).
 
-The supervisor ships in the `cogmo-skills:<version>` image published with each release. In the release image `COGMO_SKILLS_IMAGE` defaults to the matching tag; elsewhere to `:latest`. A supervisor announcing another protocol version, or none, fails worker creation; a protocol change bumps `SUPERVISOR_PROTOCOL_VERSION` and `PROTOCOL_VERSION` together. A newer image under a host that predates the handshake runs, since that host checks no version, but every task that calls `ctx` fails with `host_protocol_mismatch`: the host answers without a `taskId`, and the relay fails the task rather than let each call stall until the wall clock.
+The supervisor ships in the `cogmo-skills:<version>` image published with each release. In the release image `COGMO_SKILLS_IMAGE` defaults to the matching tag; elsewhere to `:latest`. A supervisor announcing another protocol version, or none, fails worker creation; a protocol change bumps `SUPERVISOR_PROTOCOL_VERSION` and `PROTOCOL_VERSION` together, and so does the host coming to run something new in the image. Across versions:
+
+- An image older than v3 lacks the `cogmo_skills_runtime.abi` module the dependency scripts run, so the handshake refuses it when the worker is created, before a populate can fail on it. The deps reaper starts no supervisor: against such an image its script fails with `No module named cogmo_skills_runtime.abi`, and it deletes nothing.
+- A newer image under a host that predates the handshake runs, since that host checks no version, but every task that calls `ctx` fails with `host_protocol_mismatch`: the host answers without a `taskId`, and the relay fails the task rather than let each call stall until the wall clock.
+
+A cached `:latest` from before the host's release needs a `docker pull`.
 
 ### Host-side worker lifecycle `[confirmed]`
 
@@ -753,14 +758,14 @@ The trade-off on `per-sandbox`: each pool worker pays one cold populate per `(lo
 
 > **Coverage gap to rebuild if a POSIX-volume Daytona tier ever materialises.** The previous design exercised the wire surface for the `volumes` field on `daytona.create` + the `volume.get` resolve via the `wrapper-volume-mount` conformance scenario (`src/test/daytona-conformance.integration.test.ts`, `test/fixtures/daytona/wrapper-volume-mount.json`). Both were deleted alongside the production code path — no point recording fixtures for a code path that throws. If Daytona later offers a non-S3 volume tier (block-storage, EBS-style, anything POSIX-clean) and we re-enable `depsCacheSharing: "shared-volume"` on the Daytona backend, that conformance coverage needs to be rebuilt from scratch: a fresh scenario that creates two sessions, writes a sentinel in one, deletes it, and reads the sentinel back from the other. The unit-level test in `src/sandbox/daytona/client.test.ts` is not a substitute — it mocks the SDK and so misses contract drift on the real wire (field rename, `volume.get` 4xx semantics, mount-path quirks).
 
-The `-py<major>.<minor>` suffix encodes the runtime's Python ABI so an image bump that changes Python minor (e.g. `python:3.14-slim` -> `python:3.15-slim`) routes to a fresh venv: populate writes `<hash>-py3.15/`, the task process activates the same. The stale `<hash>-py3.14/` orphans cleanly and (on `shared-volume` backends) the reaper sweeps it on the next tick. Host doesn't need to know the image's ABI — populator (`python3 -c "..."`) + task process (`sys.version_info`) compute it from the runtime they share.
+The `-py<major>.<minor>` suffix encodes the runtime's Python ABI so an image bump that changes Python minor (e.g. `python:3.14-slim` -> `python:3.15-slim`) routes to a fresh venv: populate writes `<hash>-py3.15/`, the task process activates the same. The stale `<hash>-py3.14/` orphans cleanly and (on `shared-volume` backends) the reaper sweeps it on the next tick. Host doesn't need to know the image's ABI: the populator and the reaper run `python3 -I -m cogmo_skills_runtime.abi` (`PYTHON_ABI_TAG_COMMAND` in `deps.ts`), and the task process calls the same `python_abi_tag()`, in the runtime they share. `-I` keeps the exec's cwd off `sys.path`: on a warm worker that is `$HOME`, which tasks share ([State reset between tasks](#state-reset-between-tasks-confirmed)), and `-m` alone would import a `cogmo_skills_runtime` a task planted there.
 
 ### Populate
 
 First task using a given lockfile hash populates the venv. Concurrent populators on the same lockfile hash are serialised by `.ready` + `mv -T` rename failure — the marker file plus atomic rename is the synchronisation point; the loser of the race detects `.ready` on the target after its own rename fails and exits success without redundant work. No Postgres advisory lock is used.
 
 ```text
-0. PY_ABI=$(python3 -c "import sys; print(f'py{sys.version_info.major}.{sys.version_info.minor}')")
+0. PY_ABI=$(python3 -I -m cogmo_skills_runtime.abi)
 1. if /skill-venvs/<hash>-$PY_ABI/.ready exists → done
 2. uv venv /skill-venvs/<hash>-$PY_ABI.tmp.<workerId>
 3. uv pip sync --require-hashes --only-binary=:all: \
@@ -786,8 +791,7 @@ Failure during steps 2-4 leaves an orphaned `<hash>-py<X.Y>.tmp.<workerId>/` dir
 Before running the skill, the task process activates the skill venv. The path is constructed from the lockfile hash + the runtime's Python ABI — the populator (running in the same image) produces the same path, so the two agree without coordinating through the host:
 
 ```python
-py_abi = f"py{sys.version_info.major}.{sys.version_info.minor}"
-venv = f"/skill-venvs/{lockfile_hash}-{py_abi}"
+venv = f"/skill-venvs/{lockfile_hash}-{python_abi_tag()}"  # py<major>.<minor>
 os.environ["VIRTUAL_ENV"] = venv
 os.environ["PATH"] = f"{venv}/bin:{os.environ['PATH']}"
 sys.path[:0] = [f"{venv}/lib/python{sys.version_info[0]}.{sys.version_info[1]}/site-packages"]
@@ -807,7 +811,7 @@ Worker init (Pyodide load + micropip install + version verify) is capped at 60s 
 
 ### Cache reachability
 
-A `<hash>-py<X.Y>/` directory is reachable iff some `skills` row (enabled or disabled, since disabled skills can re-enable) has `lockfile_hash = <hash>` AND `<X.Y>` matches the reaper sandbox's own Python ABI. The reaper computes `PY_ABI` from its own `sys.version_info` and builds the expected reachable set as `<hash>-$PY_ABI` per row; candidate dirs are compared against that full-name set. Stale ABI variants (e.g. `<hash>-py3.14/` left behind after an image bump to py3.15) don't match the current expected set, so they're unreachable from the current runtime and sweep on the next reaper tick once they age past the 7-day grace window. Same logic reaps legacy bare `<hash>/` dirs left over from before the ABI suffix shipped.
+A `<hash>-py<X.Y>/` directory is reachable iff some `skills` row (enabled or disabled, since disabled skills can re-enable) has `lockfile_hash = <hash>` AND `<X.Y>` matches the reaper sandbox's own Python ABI. The reaper reads `PY_ABI` from `python3 -I -m cogmo_skills_runtime.abi` in its own sandbox and builds the expected reachable set as `<hash>-$PY_ABI` per row; candidate dirs are compared against that full-name set. Stale ABI variants (e.g. `<hash>-py3.14/` left behind after an image bump to py3.15) don't match the current expected set, so they're unreachable from the current runtime and sweep on the next reaper tick once they age past the 7-day grace window. Same logic reaps legacy bare `<hash>/` dirs left over from before the ABI suffix shipped.
 
 `skills.lockfile_hash` is denormalised from git for cheap reachability queries — updated atomically in the same transaction that advances `git_sha`. LRU is the wrong policy on this volume: a rarely-used but live skill would lose its venv and pay a multi-second cold start on the next invocation. Reachability with a grace period is correct.
 
@@ -983,7 +987,7 @@ def run(inputs: dict, ctx) -> dict:
     ...
 ```
 
-`ctx` is a thin Python SDK shipped into every skill worker. Each method is an RPC back to the host over the same stdin/stdout pipe that dispatched the task. This mirrors the TS `Service` pattern used by in-process tools — same shape, projected over a pipe.
+`ctx` is a thin Python SDK shipped into every skill worker: tier 1 runs `src/skills/worker-wasm/py/ctx.py` in the Pyodide globals the skill body shares, and tier 2's lives in `cogmo_skills_runtime/runner.py` in the image. Each method is an RPC back to the host over the channel that dispatched the task: tier 2's stdin/stdout pipe, tier 1's worker `MessagePort`. This mirrors the TS `Service` pattern used by in-process tools — same shape, projected over a pipe.
 
 ### v1 surface
 
@@ -1306,7 +1310,7 @@ UPDATE recovery_point='finished', status='success'|'error'  ← transitionToFini
 | Manifest + classifier | `manifest.ts`, `classifier.ts`, `ast-classifier.ts`, `ast-rules.ts` | `SKILL.md` frontmatter parsing + risk-tier assignment (tree-sitter static analysis) |
 | Dependency stack | `deps.ts`, `deps-reaper*.ts`, `pyodide-compat.ts` | Lockfile compile + verify at register, venv populate + activate at invoke, unreachable-venv reaper, tier-1 Pyodide compat check |
 | Workers (tier 2) | `worker-sysbox/` | sysbox container host + in-container supervisor + warm pool |
-| Workers (tier 1) | `worker-wasm/` | Pyodide isolate host + Node Worker entry + WASM-import lint + bundled `ctx` Python SDK |
+| Workers (tier 1) | `worker-wasm/` | Pyodide isolate host + Node Worker entry + WASM-import lint; the worker's Python in `py/` (the `ctx` SDK, the dependency installer), which the entry reads at load and the build copies beside `worker-entry.js` |
 | Worker channel + ctx RPC | `worker-state.ts`, `dispatcher.ts`, `ctx-handler.ts`, `protocol.ts` | Worker channel state machine and the shell that drives it, ctx RPC serving, Zod-validated frames |
 | Cron scheduler | `cron-ticker.ts`, `cron-fire-handler.ts` | Per-minute Inngest tick + per-skill cron invocation |
 | Git plumbing | `git-ops.ts`, `repo.ts` | Bare-repo bootstrap, remote configuration, plumbing wrappers |

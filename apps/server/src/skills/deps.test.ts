@@ -8,6 +8,7 @@ import { err, ok } from "neverthrow";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { type MockProxy, mock } from "vitest-mock-extended";
 import type { ExecStreamingHandle, SandboxClient, SandboxSession } from "../sandbox/index.js";
+import { expectDefined } from "../test/assertions.js";
 import {
   ensureVenvPopulated,
   makeSandboxLockfileCompiler,
@@ -568,6 +569,27 @@ describe("ensureVenvPopulated", () => {
     expect(argv[4]).toBe("abc123");
     expect(argv[5]).toBe("worker-1");
     expect(call[1]?.attachStdin).toBe(true);
+  });
+
+  it("reads the ABI tag with the exec's cwd off sys.path", async () => {
+    // Why `-I`: see `PYTHON_ABI_TAG_COMMAND`.
+    const exec = makeFakeExec();
+    const session = mock<SandboxSession>();
+    session.execStreaming.mockResolvedValue(exec.handle);
+
+    const promise = ensureVenvPopulated({
+      session,
+      lockfileHash: "abc123",
+      lockfileContents: "httpx==0.27.0\n",
+      workerId: "worker-1",
+    });
+    await new Promise((r) => setImmediate(r));
+    exec.waitResolve(0);
+    await promise;
+
+    const [argv] = expectDefined(session.execStreaming.mock.calls[0], "populate exec");
+    const script = expectDefined(argv[2], "populate script");
+    expect(/^PY_ABI=\$\((.*)\)$/m.exec(script)?.[1]).toBe("python3 -I -m cogmo_skills_runtime.abi");
   });
 
   it("returns populate_failed with stderr on non-zero exit", async () => {

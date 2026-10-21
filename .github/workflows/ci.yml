@@ -220,6 +220,11 @@ jobs:
       - run: uv sync --locked
       - name: ruff (lint + format)
         run: uv run ruff check
+      # The tier-1 Pyodide worker's Python; design/tooling.md -> Python sub-projects.
+      - name: ruff, Pyodide worker (lint + format)
+        run: |
+          uv run ruff check ../../apps/server/src/skills/worker-wasm/py
+          uv run ruff format --check ../../apps/server/src/skills/worker-wasm/py
       - name: pyrefly (typecheck)
         run: uv run pyrefly check
       - name: pytest
