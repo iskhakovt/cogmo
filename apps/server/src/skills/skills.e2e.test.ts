@@ -48,6 +48,9 @@ const ExitedSchema = z.object({
   stderr: z.string(),
 });
 
+/** `skills register`'s output for a deploy that put the skill live. */
+const LiveDeploySchema = z.object({ status: z.literal("live") });
+
 /** The bare skills repo the image creates and `bootstrap()` initializes. */
 const SKILLS_REPO = "/var/lib/cogmo/skills";
 
@@ -90,9 +93,11 @@ async function dockerExec(args: readonly string[]): Promise<DockerExec> {
 /**
  * Run the shipped CLI in the app container, with the image ENTRYPOINT's
  * command line (a worker thread inherits its `execArgv`). Settles with the
- * exit code instead of rejecting on a nonzero one: the CLI prints a failed
- * command's result on stdout, and that is what an assertion needs to show.
- * `LOG_LEVEL=fatal` keeps the logger, which also writes to stdout, out of it.
+ * exit code instead of rejecting on a nonzero one: a command that returns a
+ * failed result prints it on stdout, and that is what an assertion needs to
+ * show. One that throws writes only to stderr, which `cliOutcome`'s error
+ * carries. `LOG_LEVEL=fatal` keeps the logger, which also writes to stdout,
+ * out of it.
  */
 async function runCogmo(args: readonly string[]): Promise<CliRun> {
   try {
@@ -215,11 +220,15 @@ describe("skills e2e (production Docker image)", { timeout: 120_000 }, () => {
     const branch = `skill/${ECHO_SKILL}`;
     const sha = await pushSkillBranch(branch, ECHO_MANIFEST, ECHO_BODY);
 
-    const registered = await runCogmo(["skills", "register", branch]);
-    // Exit 0 means a skills row exists. A hook's failure is reported beside
-    // the test's own, not in place of it.
-    if (registered.code === 0) onTestFinished(() => deregisterSkill(ECHO_SKILL));
-    expect(cliOutcome(registered)).toEqual({
+    const registered = cliOutcome(await runCogmo(["skills", "register", branch]));
+    // Only a live deploy leaves a skill to take down, so files that run after
+    // this one don't offer it as a tool; one running in parallel can still
+    // see it, which replay ignores (llmock keys on the last user message). A
+    // hook's failure is reported beside the test's own, not in place of it.
+    if (registered.code === 0 && LiveDeploySchema.safeParse(registered.output).success) {
+      onTestFinished(() => deregisterSkill(ECHO_SKILL));
+    }
+    expect(registered).toEqual({
       code: 0,
       output: { name: ECHO_SKILL, riskTier: expect.any(String), gitSha: sha, status: "live" },
     });
