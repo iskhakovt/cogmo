@@ -17,10 +17,7 @@ const containers: StartedTestContainer[] = [];
 let network: Awaited<ReturnType<InstanceType<typeof Network>["start"]>> | null = null;
 let mock: LLMock | null = null;
 
-/**
- * Tag the local build produces, mirrored from the `cogmo-e2e` bake target.
- * Also the image name `skills.e2e.test.ts` filters containers by.
- */
+/** Tag the local build produces, mirrored from the `cogmo-e2e` bake target. */
 const E2E_IMAGE_FALLBACK = "cogmo-e2e";
 
 /** Ceiling on the local image build. See `bakeAppImage`. */
@@ -278,11 +275,11 @@ export async function setup({ provide }: GlobalSetupContext) {
   provide("hindsightUrl", hindsightUrl);
   provide("hindsightApiKey", c.HINDSIGHT_TEST_API_KEY);
   provide("e2eDefaultUserId", defaultUserId);
-  // Exposed so tests can `docker exec` against the bundled binary — used
-  // by the LiteLLM-snapshot smoke check that proves the resolver can find
-  // `data/litellm-models.json` after tsup bundling. There's no way to
-  // pass the testcontainers handle itself through `provide` (not JSON),
-  // so we hand back the raw ID and the test uses the host docker CLI.
+  // Exposed so tests can `docker exec` against the bundled binary — the
+  // smoke file's LiteLLM-snapshot check and the skills file's CLI runs.
+  // There's no way to pass the testcontainers handle itself through
+  // `provide` (not JSON), so we hand back the raw ID and the test uses the
+  // host docker CLI.
   provide("appContainerId", appContainer.getId());
 
   console.log(`E2E environment ready — ${JSON.stringify({ ...urls, hindsightUrl })}`);

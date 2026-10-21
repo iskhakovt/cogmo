@@ -19,9 +19,9 @@
  * the skills surface via `docker exec` invoking `node dist/main.js skills …`.
  */
 
-import { execFile as execFileCb, spawn } from "node:child_process";
+import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
-import { describe, expect, it } from "vitest";
+import { describe, expect, inject, it } from "vitest";
 import { z } from "zod";
 
 const execFile = promisify(execFileCb);
@@ -36,10 +36,25 @@ interface CliRun extends DockerExec {
   code: number | null;
 }
 
+/**
+ * What promisified `execFile` rejects with once the process has run: its exit
+ * code (`null` on a signal) and both streams. A process that never started
+ * carries an errno string as its `code` instead.
+ */
+const ExitedSchema = z.object({
+  code: z.number().nullable(),
+  stdout: z.string(),
+  stderr: z.string(),
+});
+
 /** The bare skills repo the image creates and `bootstrap()` initializes. */
 const SKILLS_REPO = "/var/lib/cogmo/skills";
 
-const ECHO_SKILL = "e2e-echo";
+/**
+ * Per run, so a rerun against the same stack commits a manifest `main`
+ * doesn't already hold, and registers a skill of its own.
+ */
+const ECHO_SKILL = `e2e-echo-${Date.now()}`;
 
 const ECHO_MANIFEST = `---
 name: ${ECHO_SKILL}
@@ -61,33 +76,13 @@ async def run(inputs, ctx):
 `;
 
 /**
- * Find the running app container by image ancestor. Image name comes from the
- * same `E2E_IMAGE` env var the e2e setup uses (CI: `cogmo:ci`, local default:
- * `cogmo-e2e`) — testcontainers picks a random container name, so filter by
- * the image instead.
+ * `docker exec` in the app container the e2e setup started. Don't swallow
+ * failures — non-zero exit codes signal real container-side errors that
+ * should fail the test loudly. Tests that exercise an in-container failure
+ * path can `await expect(...).rejects.…`.
  */
-async function findAppContainer(): Promise<string> {
-  const imageName = process.env.E2E_IMAGE ?? "cogmo-e2e";
-  const { stdout } = await execFile("docker", [
-    "ps",
-    "--filter",
-    `ancestor=${imageName}`,
-    "--format",
-    "{{.ID}}",
-  ]);
-  const id = stdout.trim().split("\n")[0];
-  if (!id) {
-    throw new Error(`no container found via 'docker ps --filter ancestor=${imageName}'`);
-  }
-  return id;
-}
-
 async function dockerExec(args: readonly string[]): Promise<DockerExec> {
-  const containerId = await findAppContainer();
-  // Don't swallow `docker exec` failures — non-zero exit codes signal real
-  // container-side errors that should fail the test loudly. Tests that
-  // exercise an in-container failure path can `await expect(...).rejects.…`.
-  const { stdout, stderr } = await execFile("docker", ["exec", containerId, ...args]);
+  const { stdout, stderr } = await execFile("docker", ["exec", inject("appContainerId"), ...args]);
   return { stdout, stderr };
 }
 
@@ -99,30 +94,24 @@ async function dockerExec(args: readonly string[]): Promise<DockerExec> {
  * `LOG_LEVEL=fatal` keeps the logger, which also writes to stdout, out of it.
  */
 async function runCogmo(args: readonly string[]): Promise<CliRun> {
-  const containerId = await findAppContainer();
-  return new Promise((resolve, reject) => {
-    const proc = spawn("docker", [
+  try {
+    const { stdout, stderr } = await execFile("docker", [
       "exec",
       "--env",
       "LOG_LEVEL=fatal",
-      containerId,
+      inject("appContainerId"),
       "node",
       "--import",
       "./dist/otel.js",
       "dist/main.js",
       ...args,
     ]);
-    let stdout = "";
-    let stderr = "";
-    proc.stdout.on("data", (d) => {
-      stdout += d.toString();
-    });
-    proc.stderr.on("data", (d) => {
-      stderr += d.toString();
-    });
-    proc.on("error", reject);
-    proc.on("close", (code) => resolve({ code, stdout, stderr }));
-  });
+    return { code: 0, stdout, stderr };
+  } catch (e) {
+    const exited = ExitedSchema.safeParse(e);
+    if (!exited.success) throw e;
+    return exited.data;
+  }
 }
 
 /** The run's exit code and the JSON it printed, as one value to assert on. */
@@ -140,7 +129,8 @@ function cliOutcome(run: CliRun): { code: number | null; output: unknown } {
 /**
  * Commit `SKILL.md` + `skill.py` in a scratch clone of the skills repo inside
  * the container, on top of `main` if it exists, and push the commit to
- * `branch` for `skills register` to deploy. Returns the pushed sha.
+ * `branch` for `skills register` to deploy. Returns the pushed sha. The
+ * scratch clone stays behind in the container, which the stack discards.
  */
 async function pushSkillBranch(branch: string, manifest: string, body: string): Promise<string> {
   const work = (await dockerExec(["mktemp", "-d"])).stdout.trim();
@@ -153,27 +143,34 @@ async function pushSkillBranch(branch: string, manifest: string, body: string): 
       `${work}/${file}`,
       content,
     ]);
-  try {
-    await dockerExec(["git", "clone", "--quiet", SKILLS_REPO, work]);
-    await write("SKILL.md", manifest);
-    await write("skill.py", body);
-    await git("add", "SKILL.md", "skill.py");
-    await git(
-      "-c",
-      "user.name=cogmo-e2e",
-      "-c",
-      "user.email=e2e@cogmo.invalid",
-      "commit",
-      "--quiet",
-      "--message",
-      `add ${branch}`,
-    );
-    const sha = (await git("rev-parse", "HEAD")).stdout.trim();
-    await git("push", "--quiet", "origin", `HEAD:refs/heads/${branch}`);
-    return sha;
-  } finally {
-    await dockerExec(["rm", "-rf", work]);
-  }
+  await dockerExec(["git", "clone", "--quiet", SKILLS_REPO, work]);
+  await write("SKILL.md", manifest);
+  await write("skill.py", body);
+  await git("add", "SKILL.md", "skill.py");
+  await git(
+    "-c",
+    "user.name=cogmo-e2e",
+    "-c",
+    "user.email=e2e@cogmo.invalid",
+    "commit",
+    "--quiet",
+    "--message",
+    `add ${branch}`,
+  );
+  const sha = (await git("rev-parse", "HEAD")).stdout.trim();
+  await git("push", "--quiet", "origin", `HEAD:refs/heads/${branch}`);
+  return sha;
+}
+
+/**
+ * Soft-disable a skill a test put live. Every turn the stack runs offers a
+ * live skill as a tool, `smoke.e2e.test.ts`'s included.
+ */
+async function deregisterSkill(name: string): Promise<void> {
+  expect(cliOutcome(await runCogmo(["skills", "deregister", name]))).toEqual({
+    code: 0,
+    output: { name, status: "disabled" },
+  });
 }
 
 describe("skills e2e (production Docker image)", { timeout: 120_000 }, () => {
@@ -208,7 +205,9 @@ describe("skills e2e (production Docker image)", { timeout: 120_000 }, () => {
     expect(meta.size).toBeGreaterThan(0);
   });
 
-  it("a tier-1 skill registered through the shipped CLI runs on a Pyodide worker", async () => {
+  it("a tier-1 skill registered through the shipped CLI runs on a Pyodide worker", async ({
+    onTestFinished,
+  }) => {
     // Separate processes, as in production: `run` reads the source `register`
     // put live back out of the bare repo, then spawns the worker from the
     // bundled host.
@@ -216,6 +215,9 @@ describe("skills e2e (production Docker image)", { timeout: 120_000 }, () => {
     const sha = await pushSkillBranch(branch, ECHO_MANIFEST, ECHO_BODY);
 
     const registered = await runCogmo(["skills", "register", branch]);
+    // Exit 0 means a skills row exists. A hook's failure is reported beside
+    // the test's own, not in place of it.
+    if (registered.code === 0) onTestFinished(() => deregisterSkill(ECHO_SKILL));
     expect(cliOutcome(registered)).toEqual({
       code: 0,
       output: { name: ECHO_SKILL, riskTier: expect.any(String), gitSha: sha, status: "live" },
