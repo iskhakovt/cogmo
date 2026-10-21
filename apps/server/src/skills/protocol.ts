@@ -12,9 +12,11 @@ import { z } from "zod";
  * Tier 2 supervisor protocol version. The supervisor announces it in
  * `supervisor_ready`; the worker refuses a supervisor announcing anything
  * else. Bump with `PROTOCOL_VERSION` in
- * `images/skills/src/cogmo_skills_runtime/supervisor.py`.
+ * `images/skills/src/cogmo_skills_runtime/supervisor.py` on a protocol
+ * change, and when the host comes to run something new in the image: v3
+ * is the dependency scripts' `PYTHON_ABI_TAG_COMMAND` (`deps.ts`).
  */
-export const SUPERVISOR_PROTOCOL_VERSION = 2;
+export const SUPERVISOR_PROTOCOL_VERSION = 3;
 
 /** Tier 2 only: the supervisor's first frame, announcing its protocol version. */
 const SupervisorReadySchema = z.object({

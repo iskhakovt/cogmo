@@ -14,7 +14,7 @@ import type { CtxHandler } from "../dispatcher.js";
 import { type TaskInvoke, TaskInvokeSchema } from "../protocol.js";
 import { type InvokeParams, SysboxSkillWorker } from "./worker.js";
 
-const SUPERVISOR_READY = JSON.stringify({ type: "supervisor_ready", protocolVersion: 2 });
+const SUPERVISOR_READY = JSON.stringify({ type: "supervisor_ready", protocolVersion: 3 });
 
 /** sha256-shaped, as `task_invoke.lockfileHash` requires. */
 const LOCKFILE_HASH = "ab".repeat(32);
@@ -267,12 +267,13 @@ describe("SysboxSkillWorker", () => {
     }
 
     it("refuses a supervisor announcing another protocol version", async () => {
+      // v2 images predate `cogmo_skills_runtime.abi`, which the dependency scripts run.
       const bundle = buildFakeSandbox();
       silentSupervisor(bundle);
-      bundle.stdout.write(`${JSON.stringify({ type: "supervisor_ready", protocolVersion: 1 })}\n`);
+      bundle.stdout.write(`${JSON.stringify({ type: "supervisor_ready", protocolVersion: 2 })}\n`);
 
       await expect(create(bundle)).rejects.toThrow(
-        /supervisor speaks protocol v1; this Cogmo requires v2/,
+        /supervisor speaks protocol v2; this Cogmo requires v3 — use the skills image matching this Cogmo version/,
       );
       expect(bundle.execDisposeCalls.count).toBe(1);
       expect(bundle.sandbox.delete).toHaveBeenCalledWith(bundle.session);
@@ -285,7 +286,7 @@ describe("SysboxSkillWorker", () => {
         silentSupervisor(bundle);
         const created = create(bundle);
         const outcome = expect(created).rejects.toThrow(
-          /did not announce protocol v2 within 30s; a skills image without the handshake never does/,
+          /did not announce protocol v3 within 30s; a skills image without the handshake never does/,
         );
         await vi.advanceTimersByTimeAsync(30_000);
         await outcome;
