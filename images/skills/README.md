@@ -18,7 +18,7 @@ Owns the supervisor + runner for tier-2 skills — see `design/skills.md`.
   spawns this via `python3 -u -m cogmo_skills_runtime`.
 - `src/cogmo_skills_runtime/abi.py` — the `py<major>.<minor>` tag that
   names skill venvs. The supervisor calls it; the host's populate and
-  reap scripts run `python3 -m cogmo_skills_runtime.abi`.
+  reap scripts run `python3 -I -m cogmo_skills_runtime.abi`.
 - `tests/` — pytest suite; `test_task_isolation.py` runs the supervisor
   as a subprocess and speaks the host protocol to it.
 

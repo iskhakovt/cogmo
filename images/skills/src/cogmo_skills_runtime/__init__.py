@@ -13,7 +13,7 @@ via `python3 -u -m cogmo_skills_runtime`. See `design/skills.md` ->
 "Warm pool" for the protocol contract.
 
 Importing the package imports none of its modules. The host's populate
-script runs `python3 -m cogmo_skills_runtime.abi` on every tier-2 task
+script runs `python3 -I -m cogmo_skills_runtime.abi` on every tier-2 task
 with dependencies; an eager `supervisor` import here would import `abi`
 first, and runpy would warn on stderr that it was already loaded.
 """

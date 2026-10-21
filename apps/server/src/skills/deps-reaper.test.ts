@@ -3,6 +3,7 @@ import { ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { ExecStreamingHandle, SandboxClient, SandboxSession } from "../sandbox/index.js";
+import { expectDefined } from "../test/assertions.js";
 import { reapSkillVenvs } from "./deps-reaper.js";
 
 interface FakeExec {
@@ -250,5 +251,23 @@ describe("reapSkillVenvs", () => {
     await promise;
     const execArgs = vi.mocked(h.session.execStreaming).mock.calls[0]?.[0];
     expect(execArgs).toEqual(expect.arrayContaining(["14"]));
+  });
+
+  it("reads the ABI tag as the populate script does, with the exec's cwd off sys.path", async () => {
+    // A tag that differs from populate's makes every live venv unreachable.
+    const h = buildHarness();
+    const promise = reapSkillVenvs({
+      sandbox: h.sandbox,
+      image: "cogmo-skills:test",
+      depsCacheVolumeName: "deps-vol-x",
+      reachableHashes: new Set(),
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    h.exec.finish("", 0);
+    await promise;
+
+    const [argv] = expectDefined(vi.mocked(h.session.execStreaming).mock.calls[0], "reap exec");
+    const script = expectDefined(argv[2], "reap script");
+    expect(/^PY_ABI=\$\((.*)\)$/m.exec(script)?.[1]).toBe("python3 -I -m cogmo_skills_runtime.abi");
   });
 });

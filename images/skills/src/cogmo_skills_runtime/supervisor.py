@@ -298,7 +298,7 @@ def _skill_venv_path(lockfile_hash: str) -> str:
 
     The path includes the runtime's Python ABI so an image bump that
     changes Python minor (or major) routes to a fresh venv. The
-    populate script reads the same tag from `python3 -m
+    populate script reads the same tag from `python3 -I -m
     cogmo_skills_runtime.abi`; same image -> same Python -> same path.
 
     Raises RuntimeError if `lockfile_hash` isn't a sha256-hex string;
