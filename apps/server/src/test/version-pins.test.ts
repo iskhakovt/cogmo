@@ -5,8 +5,8 @@ import { describe, expect, it } from "vitest";
 import { repoRoot } from "./repo-root.js";
 
 /**
- * Image pins the test harnesses share. Pins that bake resolves are held to it
- * by `docker-bake.integration.test.ts`.
+ * Image pins the test harnesses share, and the skills image's Python minor.
+ * Pins that bake resolves are held to it by `docker-bake.integration.test.ts`.
  */
 
 const SERVER_DIRS = ["dev", "scripts", "src", "test"] as const;
@@ -40,13 +40,15 @@ describe("the skills runtime's Python minor", () => {
   it("is a bare minor in .python-version that every python FROM in the skills image runs", () => {
     const minor = readFileSync(join(repoRoot(), "images/skills/.python-version"), "utf8").trim();
     const dockerfile = readFileSync(join(repoRoot(), "images/skills/Dockerfile"), "utf8");
-    const fromMinors = Array.from(
-      dockerfile.matchAll(/^FROM\s+(?:--\S+\s+)*(?:\S*\/)?python:(\d+\.\d+)\b/gm),
-      (match) => match[1],
+    const pythonFroms = dockerfile.split("\n").filter((line) => /^from\s.*\bpython:/i.test(line));
+    // A python FROM the pattern can't read (a variable tag, a bare major) fails
+    // the parse rather than dropping out of the check.
+    const fromMinors = pythonFroms.map(
+      (line) => line.match(/^FROM\s+(?:--\S+\s+)*(?:\S*\/)?python:(\d+\.\d+)\b/i)?.[1],
     );
 
     expect(minor).toMatch(/^\d+\.\d+$/);
-    expect(fromMinors.length).toBeGreaterThan(0);
+    expect(pythonFroms.length).toBeGreaterThan(0);
     expect(fromMinors.filter((m) => m !== minor)).toEqual([]);
   });
 });

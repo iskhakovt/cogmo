@@ -76,10 +76,15 @@ RUN useradd -m -u 1000 -s /bin/bash cogmo
 COPY --from=builder --chown=cogmo:cogmo /app/.venv /opt/cogmo-skills/.venv
 ENV PATH="/opt/cogmo-skills/.venv/bin:${PATH}"
 ENV VIRTUAL_ENV="/opt/cogmo-skills/.venv"
+# The venv links to the builder's interpreter, so a runtime FROM on another
+# minor fails here rather than at the first task.
+RUN "${VIRTUAL_ENV}/bin/python" --version
 
 # uv in the runtime image too — the host runs `uv pip compile` at register
-# and `uv venv` + `uv pip sync` at first invoke.
+# and `uv venv` + `uv pip sync` at first invoke. Downloads stay off so they
+# resolve on this image's Python instead of fetching another.
 COPY --from=uv /uv /uvx /usr/local/bin/
+ENV UV_PYTHON_DOWNLOADS=0
 
 # Pre-create /skill-venvs owned by `cogmo`. A fresh Docker named volume
 # inherits this ownership on first mount, so the non-root supervisor
