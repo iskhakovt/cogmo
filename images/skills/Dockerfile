@@ -39,8 +39,10 @@ WORKDIR /app
 
 # Lock-only sync first (without project source) — keeps the heavy deps
 # layer cached when only src/ changes. README is required by hatchling
-# for the package metadata even though we don't ship it.
-COPY pyproject.toml uv.lock README.md /app/
+# for the package metadata even though we don't ship it. `.python-version`
+# is the Python minor CI tests against; with downloads off, a FROM on any
+# other minor fails this sync instead of shipping an untested runtime.
+COPY pyproject.toml uv.lock README.md .python-version /app/
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-install-project
 
@@ -74,10 +76,15 @@ RUN useradd -m -u 1000 -s /bin/bash cogmo
 COPY --from=builder --chown=cogmo:cogmo /app/.venv /opt/cogmo-skills/.venv
 ENV PATH="/opt/cogmo-skills/.venv/bin:${PATH}"
 ENV VIRTUAL_ENV="/opt/cogmo-skills/.venv"
+# The venv links to the builder's interpreter, so a runtime FROM on another
+# minor fails here rather than at the first task.
+RUN "${VIRTUAL_ENV}/bin/python" --version
 
 # uv in the runtime image too — the host runs `uv pip compile` at register
-# and `uv venv` + `uv pip sync` at first invoke.
+# and `uv venv` + `uv pip sync` at first invoke. Downloads stay off so they
+# resolve on this image's Python instead of fetching another.
 COPY --from=uv /uv /uvx /usr/local/bin/
+ENV UV_PYTHON_DOWNLOADS=0
 
 # Pre-create /skill-venvs owned by `cogmo`. A fresh Docker named volume
 # inherits this ownership on first mount, so the non-root supervisor

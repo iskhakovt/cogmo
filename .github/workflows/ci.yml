@@ -212,9 +212,11 @@ jobs:
           # Keep in sync with UV_VERSION in docker-bake.hcl — the single
           # source for the image's uv pin. (GitHub Actions can't read the
           # HCL variable, so this literal is the one manual mirror.)
-          version: "0.12.23"
+          version: "0.13.4"
           enable-cache: true
-          cache-dependency-glob: "images/skills/uv.lock"
+          cache-dependency-glob: |
+            images/skills/uv.lock
+            images/skills/.python-version
       - run: uv sync --locked
       - name: ruff (lint + format)
         run: uv run ruff check
