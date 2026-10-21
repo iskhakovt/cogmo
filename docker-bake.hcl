@@ -35,11 +35,9 @@ variable "VERSION" {
   default = "dev"
 }
 
-// Toolchain versions for the task images. The Dockerfiles declare these ARGs
-// without defaults, so a build reads them from here alone; the mirrors bake
-// can't feed are held to them by docker-bake.integration.test.ts. Base-image
-// FROM digests stay literal in each Dockerfile for Dependabot; these are
-// bumped by hand.
+// Toolchain versions for the task images, and their only copy: the
+// Dockerfiles declare these ARGs without defaults. Base-image FROM digests
+// stay literal in each Dockerfile for Dependabot; these are bumped by hand.
 // uv is shared by devbase + skills.
 variable "UV_VERSION" {
   default = "0.13.4"
@@ -152,11 +150,6 @@ target "devbase" {
     CLAUDE_CODE_VERSION = "${CLAUDE_CODE_VERSION}"
     UV_VERSION          = "${UV_VERSION}"
     UV_DIGEST           = "${UV_DIGEST}"
-  }
-  // devbase installs the Python minor in images/skills/.python-version, so an
-  // author's `uv pip compile` resolves on cogmo-skills' interpreter.
-  contexts = {
-    skills-src = "./images/skills"
   }
   // Sysbox amd64-only today — see _common comment. Single-platform cache
   // scope matches the platform.

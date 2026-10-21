@@ -100,7 +100,7 @@ jobs:
       # pollution); `cache-from` shares the GHA cache populated by
       # `publish.yml` on release, so steady-state cost is roughly a
       # `docker pull`. `VERSION=test` tags the images as
-      # `ghcr.io/iskhakovt/cogmo-{skills,devbase}:test` (matched by the
+      # `cogmo-skills:test` and `cogmo-devbase:test` (matched by the
       # integration tests' image constants).
       - name: Build cogmo-skills + cogmo-devbase (load locally for tests)
         uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0

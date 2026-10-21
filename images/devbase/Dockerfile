@@ -15,8 +15,7 @@
 # register time):
 #   - Node 24 + pnpm + git + gh + ripgrep + fd + jq + curl
 #   - @anthropic-ai/claude-code (pinned)
-#   - uv (pinned to match cogmo-skills) + cogmo-skills' Python minor as a
-#     uv-managed install; Ubuntu's python3 3.12 comes in with nodejs
+#   - Python 3 (from devcontainers/base) + uv (pinned to match cogmo-skills)
 #   - Non-root user `vscode` (UID 1000) inherited from the devcontainers base.
 #
 # Codex CLI and Go/Rust toolchains are deferred to whenever real verify
@@ -25,8 +24,7 @@
 # Toolchain versions come from docker-bake.hcl alone. No ARG carries a
 # default, so a build outside bake fails at the uv FROM below, and each
 # install expands its version with `:?` because npm reads an empty one as
-# `latest`. Bake also supplies the `skills-src` build context
-# (`images/skills`).
+# `latest`.
 #
 # uv and pnpm come in as stages copied from their official images. ARGs in a
 # FROM need global scope, so they precede the first one. uv is shared with
@@ -102,21 +100,7 @@ RUN npm install -g --allow-scripts=@anthropic-ai/claude-code "@anthropic-ai/clau
 
 # uv — shared pin with cogmo-skills so author-side `uv pip compile` produces
 # lockfiles byte-identical to what cogmo-skills re-resolves at register time.
-# Resolution also depends on the interpreter, and the python3 on PATH is
-# Ubuntu's 3.12, which the nodejs package pulls in. cogmo-skills' minor
-# (`.python-version` from bake's `skills-src` context) is installed as a
-# uv-managed Python, which uv prefers to a system one when nothing asks for
-# another; a repo's `.python-version`, `requires-python` or virtualenv still
-# wins. The build fails unless uv then finds that minor. The install dir sits
-# outside /home/vscode, which is a per-task volume, and belongs to vscode so a
-# task can add the Python its repo pins.
 COPY --from=uv /uv /uvx /usr/local/bin/
-ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python
-RUN --mount=type=bind,from=skills-src,source=.python-version,target=/tmp/skills-python-version \
-    minor="$(cat /tmp/skills-python-version)" \
- && uv --no-cache python install --no-bin "${minor:?}" \
- && uv python find --show-version | grep -q "^${minor}\." \
- && chown -R vscode:vscode /opt/uv
 
 # Drop privileges. Cogmo's supervisor mounts the worktree at /workspace and
 # always overrides Entrypoint/Cmd at create-container time, so we leave the
