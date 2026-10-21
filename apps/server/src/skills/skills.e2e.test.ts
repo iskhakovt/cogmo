@@ -8,10 +8,12 @@
  *      bootstrap depends on something the base image doesn't ship, every
  *      skill invocation in production crashes.
  *
- *   2. Does `host.ts`'s `import.meta.url`-relative resolution find the
- *      bundled `worker-entry.js` correctly post-tsup-build? Production
- *      uses the `worker-entry.js` sibling path; this is the only test that
- *      catches a regression in the build emitting it elsewhere.
+ *   2. Does a tier-1 skill run from the bundled build? `host.ts` spawns its
+ *      worker from `new URL("./worker-entry.js", import.meta.url)`, which
+ *      resolves only if tsup emits the worker entry beside the bundle the
+ *      host landed in. Source-tier tests load the host from `src/` and never
+ *      take that path; registering and running a skill through the shipped
+ *      CLI does.
  *
  * The app container boots in `serve` mode (per the e2e setup), so we drive
  * the skills surface via `docker exec` invoking `node dist/main.js skills …`.
@@ -19,7 +21,7 @@
 
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
-import { describe, expect, it } from "vitest";
+import { describe, expect, inject, it } from "vitest";
 import { z } from "zod";
 
 const execFile = promisify(execFileCb);
@@ -29,35 +31,152 @@ interface DockerExec {
   stderr: string;
 }
 
-/**
- * Find the running app container by image ancestor. Image name comes from the
- * same `E2E_IMAGE` env var the e2e setup uses (CI: `cogmo:ci`, local default:
- * `cogmo-e2e`) — testcontainers picks a random container name, so filter by
- * the image instead.
- */
-async function findAppContainer(): Promise<string> {
-  const imageName = process.env.E2E_IMAGE ?? "cogmo-e2e";
-  const { stdout } = await execFile("docker", [
-    "ps",
-    "--filter",
-    `ancestor=${imageName}`,
-    "--format",
-    "{{.ID}}",
-  ]);
-  const id = stdout.trim().split("\n")[0];
-  if (!id) {
-    throw new Error(`no container found via 'docker ps --filter ancestor=${imageName}'`);
-  }
-  return id;
+interface CliRun extends DockerExec {
+  /** `null` when the process ended on a signal. */
+  code: number | null;
 }
 
+/**
+ * What promisified `execFile` rejects with when the process exits by itself:
+ * its exit code (`null` on a signal) and both streams. Any other failure, such
+ * as a process that never started or one killed for overrunning `maxBuffer`,
+ * carries a string `code`.
+ */
+const ExitedSchema = z.object({
+  code: z.number().nullable(),
+  stdout: z.string(),
+  stderr: z.string(),
+});
+
+/** `skills register`'s output for a deploy that put the skill live. */
+const LiveDeploySchema = z.object({ status: z.literal("live") });
+
+/** The bare skills repo the image creates and `bootstrap()` initializes. */
+const SKILLS_REPO = "/var/lib/cogmo/skills";
+
+/**
+ * Per run, so a rerun against the same stack commits a manifest `main`
+ * doesn't already hold, and registers a skill of its own.
+ */
+const ECHO_SKILL = `e2e-echo-${Date.now()}`;
+
+const ECHO_MANIFEST = `---
+name: ${ECHO_SKILL}
+description: e2e tier-1 echo skill
+tier: wasm
+inputs:
+  type: object
+  properties:
+    x:
+      type: integer
+  required:
+    - x
+---
+`;
+
+const ECHO_BODY = `
+async def run(inputs, ctx):
+    return {"echo": inputs["x"] + 1}
+`;
+
+/**
+ * `docker exec` in the app container the e2e setup started. Don't swallow
+ * failures — non-zero exit codes signal real container-side errors that
+ * should fail the test loudly. Tests that exercise an in-container failure
+ * path can `await expect(...).rejects.…`.
+ */
 async function dockerExec(args: readonly string[]): Promise<DockerExec> {
-  const containerId = await findAppContainer();
-  // Don't swallow `docker exec` failures — non-zero exit codes signal real
-  // container-side errors that should fail the test loudly. Tests that
-  // exercise an in-container failure path can `await expect(...).rejects.…`.
-  const { stdout, stderr } = await execFile("docker", ["exec", containerId, ...args]);
+  const { stdout, stderr } = await execFile("docker", ["exec", inject("appContainerId"), ...args]);
   return { stdout, stderr };
+}
+
+/**
+ * Run the shipped CLI in the app container, with the image ENTRYPOINT's
+ * command line (a worker thread inherits its `execArgv`). Settles with the
+ * exit code instead of rejecting on a nonzero one: a command that returns a
+ * failed result prints it on stdout, and that is what an assertion needs to
+ * show. One that throws writes only to stderr, which `cliOutcome`'s error
+ * carries. `LOG_LEVEL=fatal` keeps the logger, which also writes to stdout,
+ * out of it.
+ */
+async function runCogmo(args: readonly string[]): Promise<CliRun> {
+  try {
+    const { stdout, stderr } = await execFile("docker", [
+      "exec",
+      "--env",
+      "LOG_LEVEL=fatal",
+      inject("appContainerId"),
+      "node",
+      "--import",
+      "./dist/otel.js",
+      "dist/main.js",
+      ...args,
+    ]);
+    return { code: 0, stdout, stderr };
+  } catch (e) {
+    const exited = ExitedSchema.safeParse(e);
+    if (!exited.success) throw e;
+    return exited.data;
+  }
+}
+
+/** The run's exit code and the JSON it printed, as one value to assert on. */
+function cliOutcome(run: CliRun): { code: number | null; output: unknown } {
+  try {
+    return { code: run.code, output: JSON.parse(run.stdout) };
+  } catch (e) {
+    throw new Error(
+      `expected JSON on stdout (exit ${run.code})\nstdout: ${run.stdout}\nstderr: ${run.stderr}`,
+      { cause: e },
+    );
+  }
+}
+
+/**
+ * Commit `SKILL.md` + `skill.py` in a scratch clone of the skills repo inside
+ * the container, on top of `main` if it exists, and push the commit to
+ * `branch` for `skills register` to deploy. Returns the pushed sha. The
+ * scratch clone stays behind in the container, which the stack discards.
+ */
+async function pushSkillBranch(branch: string, manifest: string, body: string): Promise<string> {
+  const work = (await dockerExec(["mktemp", "-d"])).stdout.trim();
+  const git = (...args: string[]) => dockerExec(["git", "-C", work, ...args]);
+  const write = (file: string, content: string) =>
+    dockerExec([
+      "node",
+      "-e",
+      "require('fs').writeFileSync(process.argv[1], process.argv[2])",
+      `${work}/${file}`,
+      content,
+    ]);
+  await dockerExec(["git", "clone", "--quiet", SKILLS_REPO, work]);
+  await write("SKILL.md", manifest);
+  await write("skill.py", body);
+  await git("add", "SKILL.md", "skill.py");
+  await git(
+    "-c",
+    "user.name=cogmo-e2e",
+    "-c",
+    "user.email=e2e@cogmo.invalid",
+    "commit",
+    "--quiet",
+    "--message",
+    `add ${branch}`,
+  );
+  const sha = (await git("rev-parse", "HEAD")).stdout.trim();
+  await git("push", "--quiet", "origin", `HEAD:refs/heads/${branch}`);
+  return sha;
+}
+
+/**
+ * Soft-disable a skill a test put live. While it is live, every turn the
+ * stack runs offers it as a tool.
+ */
+async function deregisterSkill(name: string): Promise<void> {
+  expect(cliOutcome(await runCogmo(["skills", "deregister", name]))).toEqual({
+    code: 0,
+    output: { name, status: "disabled" },
+  });
 }
 
 describe("skills e2e (production Docker image)", { timeout: 120_000 }, () => {
@@ -92,13 +211,33 @@ describe("skills e2e (production Docker image)", { timeout: 120_000 }, () => {
     expect(meta.size).toBeGreaterThan(0);
   });
 
-  it("dist/skills/worker-wasm/worker-entry.js was bundled by tsup", async () => {
-    const r = await dockerExec([
-      "node",
-      "-e",
-      'process.stdout.write(String(require("fs").existsSync("/app/dist/skills/worker-wasm/worker-entry.js")))',
-    ]);
-    expect(r.stdout.trim()).toBe("true");
+  it("a tier-1 skill registered through the shipped CLI runs on a Pyodide worker", async ({
+    onTestFinished,
+  }) => {
+    // Separate processes, as in production: `run` reads the source `register`
+    // put live back out of the bare repo, then spawns the worker from the
+    // bundled host.
+    const branch = `skill/${ECHO_SKILL}`;
+    const sha = await pushSkillBranch(branch, ECHO_MANIFEST, ECHO_BODY);
+
+    const registered = cliOutcome(await runCogmo(["skills", "register", branch]));
+    // Only a live deploy leaves a skill to take down, so files that run after
+    // this one don't offer it as a tool; one running in parallel can still
+    // see it, which replay ignores (llmock keys on the last user message). A
+    // hook's failure is reported beside the test's own, not in place of it.
+    if (registered.code === 0 && LiveDeploySchema.safeParse(registered.output).success) {
+      onTestFinished(() => deregisterSkill(ECHO_SKILL));
+    }
+    expect(registered).toEqual({
+      code: 0,
+      output: { name: ECHO_SKILL, riskTier: expect.any(String), gitSha: sha, status: "live" },
+    });
+
+    const ran = await runCogmo(["skills", "run", ECHO_SKILL, JSON.stringify({ x: 7 })]);
+    expect(cliOutcome(ran)).toEqual({
+      code: 0,
+      output: { runId: expect.any(String), status: "success", output: { echo: 8 } },
+    });
   });
 
   it("Pyodide loads inside the production image", async () => {

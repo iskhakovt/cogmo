@@ -78,6 +78,7 @@ Full deployment-like stack — cogmo runs from its release image, in connect mod
 |-|-|
 | Migrations | The app container applies migrations on boot. Verify tables queryable. |
 | Smoke | Emit one event via Inngest API -> assert assistant response in DB |
+| Skills | `cogmo skills register`, then `cogmo skills run` in a second process, for a tier-1 skill in the app container -> the bundled host spawns its Pyodide worker |
 
 ## Live Tests `[confirmed]`
 
@@ -94,7 +95,7 @@ Real provider APIs, for behaviour a replayed fixture can't show — recorded fix
 
 Single integration test that exercises the full chat -> delegate_coding -> skill register -> skill invoke flow against `DaytonaMock` + `llmock` + a `gitea` testcontainer hosting the cogmo-skills repo. Proves end-to-end that a user asking for a new skill in chat results in a tool the agent can call on the next turn.
 
-**Why this tier.** Existing tiers leave seams uncovered. `claude-cli-daytona.integration.test.ts` is skipped (manual run) and only covers `plan`. `daytona-conformance.integration.test.ts` stops at the SDK wire surface. `pipeline.integration.test.ts` mocks all coding-delegation work. `skills.e2e.test.ts` only proves Pyodide boots in the production image. The seam that hosts most production failure modes — PTY stream parsing, snapshot lifecycle races, lockfile compile+verify, venv populate, deps reaper, skill-tool registration — has zero composed coverage. v2.1.0's PTY-pollution and snapshot-prewarm bugs are both seam failures.
+**Why this tier.** Existing tiers leave seams uncovered. `claude-cli-daytona.integration.test.ts` is skipped (manual run) and only covers `plan`. `daytona-conformance.integration.test.ts` stops at the SDK wire surface. `pipeline.integration.test.ts` mocks all coding-delegation work. `skills.e2e.test.ts` stops at a no-deps tier-1 skill registered and run through the CLI. The seam that hosts most production failure modes — PTY stream parsing, snapshot lifecycle races, lockfile compile+verify, venv populate, deps reaper, skill-tool registration — has zero composed coverage. v2.1.0's PTY-pollution and snapshot-prewarm bugs are both seam failures.
 
 **Scope.** One scenario, one cassette, top to bottom. Lives in `src/test/skill-authoring.integration.test.ts`.
 
