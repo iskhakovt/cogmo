@@ -37,9 +37,10 @@ interface CliRun extends DockerExec {
 }
 
 /**
- * What promisified `execFile` rejects with once the process has run: its exit
- * code (`null` on a signal) and both streams. A process that never started
- * carries an errno string as its `code` instead.
+ * What promisified `execFile` rejects with when the process exits by itself:
+ * its exit code (`null` on a signal) and both streams. Any other failure, such
+ * as a process that never started or one killed for overrunning `maxBuffer`,
+ * carries a string `code`.
  */
 const ExitedSchema = z.object({
   code: z.number().nullable(),
@@ -163,8 +164,8 @@ async function pushSkillBranch(branch: string, manifest: string, body: string): 
 }
 
 /**
- * Soft-disable a skill a test put live. Every turn the stack runs offers a
- * live skill as a tool, `smoke.e2e.test.ts`'s included.
+ * Soft-disable a skill a test put live. While it is live, every turn the
+ * stack runs offers it as a tool.
  */
 async function deregisterSkill(name: string): Promise<void> {
   expect(cliOutcome(await runCogmo(["skills", "deregister", name]))).toEqual({

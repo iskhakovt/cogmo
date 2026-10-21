@@ -275,11 +275,9 @@ export async function setup({ provide }: GlobalSetupContext) {
   provide("hindsightUrl", hindsightUrl);
   provide("hindsightApiKey", c.HINDSIGHT_TEST_API_KEY);
   provide("e2eDefaultUserId", defaultUserId);
-  // Exposed so tests can `docker exec` against the bundled binary — the
-  // smoke file's LiteLLM-snapshot check and the skills file's CLI runs.
-  // There's no way to pass the testcontainers handle itself through
-  // `provide` (not JSON), so we hand back the raw ID and the test uses the
-  // host docker CLI.
+  // Exposed so tests can `docker exec` into the app container. There's no
+  // way to pass the testcontainers handle itself through `provide` (not
+  // JSON), so we hand back the raw ID and tests use the host docker CLI.
   provide("appContainerId", appContainer.getId());
 
   console.log(`E2E environment ready — ${JSON.stringify({ ...urls, hindsightUrl })}`);

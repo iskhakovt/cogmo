@@ -2,10 +2,11 @@ import { execFile as execFileCb } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, relative, resolve } from "node:path";
+import { join, relative } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { repoRoot } from "./repo-root.js";
 
 const execFile = promisify(execFileCb);
 
@@ -18,7 +19,7 @@ const execFile = promisify(execFileCb);
  */
 
 /** The server package: tsup resolves its config, entries and externals from the cwd. */
-const SERVER = resolve(import.meta.dirname, "../..");
+const SERVER = join(repoRoot(), "apps/server");
 
 /** The specifier `host.ts` resolves against its module URL in the build. */
 const WORKER_SPECIFIER = "./worker-entry.js";
