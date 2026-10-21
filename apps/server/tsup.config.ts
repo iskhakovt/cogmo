@@ -1,20 +1,24 @@
-import { copyFileSync, mkdirSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { cpSync, statSync } from "node:fs";
+import { basename, join } from "node:path";
 import { defineConfig } from "tsup";
 
 const OUT_DIR = "dist";
 
 /**
  * The tier-1 worker reads its Python from `py/` beside its own module, so the
- * `.py` files go next to the built `worker-entry.js`.
+ * `.py` files go next to the built `worker-entry.js`, subpackages included.
+ * Tool caches (`.ruff_cache/`, `__pycache__/`) and config stay behind.
  */
 function copyWorkerPython(): void {
-  const from = "src/skills/worker-wasm/py";
-  const to = join(OUT_DIR, "py");
-  mkdirSync(to, { recursive: true });
-  for (const file of readdirSync(from).filter((name) => name.endsWith(".py"))) {
-    copyFileSync(join(from, file), join(to, file));
-  }
+  cpSync("src/skills/worker-wasm/py", join(OUT_DIR, "py"), {
+    recursive: true,
+    filter: (source) => {
+      const name = basename(source);
+      return statSync(source).isDirectory()
+        ? !name.startsWith(".") && name !== "__pycache__"
+        : name.endsWith(".py");
+    },
+  });
 }
 
 export default defineConfig({
