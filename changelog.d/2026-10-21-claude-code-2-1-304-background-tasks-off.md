@@ -1,0 +1,6 @@
+**The devbase image runs Claude Code 2.1.304, its current `stable` dist-tag, and both runners start the CLI with `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`.** A `-p` run stays open while a background command the model started is still running, then takes another turn with its outcome. A foreground command that reaches its timeout moves to the background rather than stopping. With stdout silent during that wait, an execute run that left a dev server up would trip the 5-minute idle cap and fail a task whose work was done, while the server kept writing to `/workspace` as the orchestrator committed it. With background tasks off, every command finishes or stops within the turn and the CLI exits at its `result`. The `claude-cli` cassette is recorded from scratch against it. What else reaches coding tasks:
+
+- Execute's `--resume` of a session compacted after a cut-off or retried reply restores its summary and the messages the compaction kept.
+- `claude -p` offers fork subagents (`subagent_type: "fork"`), and they run in the foreground.
+
+pnpm 12.13.0 builds the workspace, the `cogmo` image and devbase, and leaves `pnpm-lock.yaml` byte-identical. The test harness runs Gitea 28.1.0 and RustFS 1.0.1, the skills runtime's ruff is 0.17.0, and the dev shell follows the current nixos-unstable. Each is the newest release at least seven days old.
