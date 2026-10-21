@@ -44,4 +44,4 @@ refuses any other (`SUPERVISOR_PROTOCOL_VERSION` in
 `apps/server/src/skills/protocol.ts`), so an image speaking another
 protocol version fails at worker creation. Bump both together on a
 protocol change, and when the host comes to run something new in the
-image (v3: the `abi` module).
+image.

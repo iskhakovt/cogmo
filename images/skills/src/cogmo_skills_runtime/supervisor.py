@@ -65,7 +65,7 @@ from cogmo_skills_runtime.runner import _main as _run_main
 # Wire protocol version announced in `supervisor_ready`. The host refuses
 # a supervisor announcing any other version (`SUPERVISOR_PROTOCOL_VERSION`
 # in `src/skills/protocol.ts`), so it also marks what else the host runs
-# in this image: from v3, the `abi` module.
+# in this image.
 PROTOCOL_VERSION = 3
 
 DEFAULT_WALL_CLOCK_S = 60

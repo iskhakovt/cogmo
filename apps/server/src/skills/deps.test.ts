@@ -572,8 +572,7 @@ describe("ensureVenvPopulated", () => {
   });
 
   it("reads the ABI tag with the exec's cwd off sys.path", async () => {
-    // On a warm worker the exec runs in `$HOME`, which tasks can write, and
-    // `python3 -m` would import a `cogmo_skills_runtime` planted there.
+    // Why `-I`: see `PYTHON_ABI_TAG_COMMAND`.
     const exec = makeFakeExec();
     const session = mock<SandboxSession>();
     session.execStreaming.mockResolvedValue(exec.handle);

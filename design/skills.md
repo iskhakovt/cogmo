@@ -166,7 +166,12 @@ A worker has one task in flight and possibly several `ctx_call`s nested inside i
 
 stdin/stdout chosen over HTTP / Unix socket for simplicity — one process per worker, no port allocation, no service discovery. Inside the container the host channel never reaches skill code; see [State reset between tasks](#state-reset-between-tasks-confirmed).
 
-The supervisor ships in the `cogmo-skills:<version>` image published with each release. In the release image `COGMO_SKILLS_IMAGE` defaults to the matching tag; elsewhere to `:latest`. A supervisor announcing another protocol version, or none, fails worker creation; a protocol change bumps `SUPERVISOR_PROTOCOL_VERSION` and `PROTOCOL_VERSION` together, and so does the host coming to run something new in the image. v3 marks the `cogmo_skills_runtime.abi` module the dependency scripts run, so the handshake refuses an older image when the worker is created, before a populate can fail on it. The deps reaper starts no supervisor: against an older image its script fails with `No module named cogmo_skills_runtime.abi`, and it deletes nothing. A newer image under a host that predates the handshake runs, since that host checks no version, but every task that calls `ctx` fails with `host_protocol_mismatch`: the host answers without a `taskId`, and the relay fails the task rather than let each call stall until the wall clock. A cached `:latest` from before the release needs a `docker pull`.
+The supervisor ships in the `cogmo-skills:<version>` image published with each release. In the release image `COGMO_SKILLS_IMAGE` defaults to the matching tag; elsewhere to `:latest`. A supervisor announcing another protocol version, or none, fails worker creation; a protocol change bumps `SUPERVISOR_PROTOCOL_VERSION` and `PROTOCOL_VERSION` together, and so does the host coming to run something new in the image. Across versions:
+
+- An image older than v3 lacks the `cogmo_skills_runtime.abi` module the dependency scripts run, so the handshake refuses it when the worker is created, before a populate can fail on it. The deps reaper starts no supervisor: against such an image its script fails with `No module named cogmo_skills_runtime.abi`, and it deletes nothing.
+- A newer image under a host that predates the handshake runs, since that host checks no version, but every task that calls `ctx` fails with `host_protocol_mismatch`: the host answers without a `taskId`, and the relay fails the task rather than let each call stall until the wall clock.
+
+A cached `:latest` from before the host's release needs a `docker pull`.
 
 ### Host-side worker lifecycle `[confirmed]`
 

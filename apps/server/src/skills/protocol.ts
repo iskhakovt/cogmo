@@ -13,8 +13,7 @@ import { z } from "zod";
  * `supervisor_ready`; the worker refuses a supervisor announcing anything
  * else. Bump with `PROTOCOL_VERSION` in
  * `images/skills/src/cogmo_skills_runtime/supervisor.py` on a protocol
- * change, and when the host comes to run something new in the image: v3
- * is the dependency scripts' `PYTHON_ABI_TAG_COMMAND` (`deps.ts`).
+ * change, and when the host comes to run something new in the image.
  */
 export const SUPERVISOR_PROTOCOL_VERSION = 3;
 

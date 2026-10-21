@@ -267,7 +267,7 @@ describe("SysboxSkillWorker", () => {
     }
 
     it("refuses a supervisor announcing another protocol version", async () => {
-      // v2 images predate `cogmo_skills_runtime.abi`, which the dependency scripts run.
+      // A v2 image has no `cogmo_skills_runtime.abi`, which the dependency scripts run.
       const bundle = buildFakeSandbox();
       silentSupervisor(bundle);
       bundle.stdout.write(`${JSON.stringify({ type: "supervisor_ready", protocolVersion: 2 })}\n`);
