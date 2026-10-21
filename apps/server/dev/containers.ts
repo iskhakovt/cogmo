@@ -152,7 +152,7 @@ export function inngestKeyed(opts: { eventKey: string; signingKey: string }) {
  * Gitea's own registry, off the Docker Hub rate-limit budget.
  */
 export function gitea() {
-  return new GenericContainer("docker.gitea.com/gitea:1.27.2")
+  return new GenericContainer("docker.gitea.com/gitea:28.1.0")
     .withExposedPorts(3000)
     .withEnvironment({ GITEA__security__INSTALL_LOCK: "true" })
     .withWaitStrategy(Wait.forHttp("/api/v1/version", 3000))
@@ -177,7 +177,7 @@ export const S3_TEST_SECRET_KEY = "cogmo-test-s3-secret";
 /** S3-compatible object store. Serves `/data`, the image's default volume. */
 export function rustfs(network: StartedNetwork) {
   return new GenericContainer(
-    "mirror.gcr.io/rustfs/rustfs:1.0.0@sha256:8cc9801755448b71a786705ce76692c77e14936cccd87cf2fc31842e58f4d1ff",
+    "mirror.gcr.io/rustfs/rustfs:1.0.1@sha256:1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c",
   )
     .withNetwork(network)
     .withNetworkAliases("rustfs")
