@@ -133,6 +133,20 @@ const EXECUTE_FLAGS: readonly string[] = [
 const CLAUDE_TOTAL_TIMEOUT_MS = 30 * 60 * 1000;
 const CLAUDE_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 
+/**
+ * A `-p` run stays open while a background command the model started is
+ * still running, then takes another turn with its outcome; a foreground
+ * command that reaches its timeout moves to the background rather than
+ * stopping. Either way the process outlives the turn's `result`, silent on
+ * stdout, until the idle cap fails it, and the command is still writing to
+ * `/workspace` when the orchestrator commits it. Disabling background tasks
+ * makes every command finish or stop within the turn, so the CLI exits at
+ * its result.
+ */
+const CLAUDE_ENV: Readonly<Record<string, string>> = {
+  CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1",
+};
+
 interface ClaudeCodeBackendOptions {
   /** Override the binary name. Defaults to `claude` (must be on PATH inside the container). */
   binary?: string;
@@ -180,6 +194,7 @@ async function* runClaudeSession(
 ): AsyncIterable<CodingEvent> {
   const exec = await container.execStreaming([binary, ...flags], {
     attachStdin: true,
+    env: CLAUDE_ENV,
     timeoutMs: CLAUDE_TOTAL_TIMEOUT_MS,
     idleTimeoutMs: CLAUDE_IDLE_TIMEOUT_MS,
   });
