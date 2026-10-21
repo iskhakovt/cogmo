@@ -5,20 +5,24 @@ import { join, relative } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { build } from "tsup";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import config from "../../tsup.config.js";
+import { tsupOptions } from "../../tsup.config.js";
 
 /**
  * `tsup.config.ts` against the layout the bundled skills host depends on.
  * `host.ts` spawns the tier-1 worker from `./worker-entry.js` relative to its
  * own module URL, so the build has to emit the worker entry beside whichever
- * bundle the host lands in. Only the label-gated e2e tier runs the image
- * build, so this runs the build itself: in-process, through tsup's API, so
- * no bundled copy of the config lands beside it in the source tree. Entries
- * resolve from the cwd, which Vitest sets to the server package.
+ * bundle the host lands in, and the worker reads its Python from `py/` beside
+ * itself. Only the label-gated e2e tier runs the image build, so this runs the
+ * build itself: in-process, through tsup's API, so no bundled copy of the
+ * config lands beside it in the source tree. Entries resolve from the cwd,
+ * which Vitest sets to the server package.
  */
 
 /** The specifier `host.ts` resolves against its module URL in the build. */
 const WORKER_SPECIFIER = "./worker-entry.js";
+
+/** The worker's Python in the source tree, relative to the server package. */
+const WORKER_PYTHON_SRC = "src/skills/worker-wasm/py";
 
 /** A full bundle; generous so a loaded runner doesn't fail it on time. */
 const BUILD_TIMEOUT_MS = 120_000;
@@ -27,8 +31,14 @@ let outDir: string;
 
 beforeAll(async () => {
   outDir = await mkdtemp(join(tmpdir(), "cogmo-tsup-"));
-  await build({ ...config, outDir, silent: true });
+  await build({ ...tsupOptions(outDir), silent: true });
 }, BUILD_TIMEOUT_MS);
+
+function pythonFiles(dir: string): ReadonlyArray<string> {
+  return readdirSync(dir, { recursive: true, encoding: "utf8" })
+    .filter((f) => f.endsWith(".py"))
+    .sort();
+}
 
 afterAll(async () => {
   await rm(outDir, { recursive: true, force: true });
@@ -56,5 +66,12 @@ describe("tsup build", () => {
 
     expect(spawners).not.toEqual([]);
     expect(missing, `worker-entry.js emitted at: ${workers.join(", ") || "nowhere"}`).toEqual([]);
+  });
+
+  it("copies the worker's Python, subpackages included, into py/ beside the worker entry", () => {
+    const sources = pythonFiles(WORKER_PYTHON_SRC);
+
+    expect(sources).not.toEqual([]);
+    expect(pythonFiles(join(outDir, "py"))).toEqual(sources);
   });
 });
