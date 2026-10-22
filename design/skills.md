@@ -1254,7 +1254,7 @@ skill_context_calls (
 
 `skills` is derived state — authoritative source is the git repo. Row synced from `SKILL.md` on deploy. `skill_runs` is append-only audit trail. `skill_context_calls` records every `ctx.*` RPC from the worker, scoped to a run — secret names and memory-bank names only, never values.
 
-**JSONB schemas validated at the store boundary** (per AGENTS.md — every JSONB column has a Zod schema parsed on read and write):
+**JSONB schemas validated at the store boundary** (per [architecture-rules.md](../.agents/rules/architecture-rules.md) — every JSONB column has a Zod schema parsed on read and write):
 
 - `skills.inputs` / `skills.outputs` — `SkillIoSchema = z.record(z.unknown())`. Opaque at the Zod layer; the actual JSON Schema is enforced against task inputs/outputs at invoke time via `ajv`, not at the store boundary.
 - `skills.effects` — `SkillEffectsSchema = z.array(z.enum(SKILL_EFFECTS))`.
