@@ -4,7 +4,7 @@ Personal agent runtime — modular system with persistent memory and self-evolut
 
 Glossary of core terms (Tool, Agent, Service, Channel, Conversation, Profile, Orchestrator, Steering Rules, Observer, etc.): see [design/overview.md](design/overview.md) → Glossary.
 
-The rules in [`.agents/rules/`](.agents/rules/) are part of these instructions. Each section below that links one summarizes it; the file is the rule, so read it before working in its area.
+The rules in [`.agents/rules/`](.agents/rules/) are part of these instructions. Each section below that links one summarizes it; the file is the rule, so read it before working in its area. A new rule file gets a section here and an `@` import in `CLAUDE.md`.
 
 ## Design Doc Confidence Markers
 

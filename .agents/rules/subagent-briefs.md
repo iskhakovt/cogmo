@@ -44,7 +44,7 @@ absence cost real work in this repo.
   sequentially or each in its own git worktree.
 - **Never read an artefact an agent is still writing.** A grep that raced a
   fixture write once produced a confident and wrong "the fix didn't work".
-  Wait for the completion notification.
+  Wait until the agent has reported.
 
 ## Reading their reports
 

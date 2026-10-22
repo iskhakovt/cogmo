@@ -1,4 +1,4 @@
-<!-- AGENTS.md is the instruction file every agent reads; edit it, not this one. The imports below put it and the rules into Claude Code's context at launch; other agents reach the rules through AGENTS.md's links. -->
+<!-- AGENTS.md is the instruction file every agent reads; edit it, not this one, except to import a new `.agents/rules/` file. The imports below put it and the rules into Claude Code's context at launch; other agents reach the rules through AGENTS.md's links. -->
 
 @AGENTS.md
 
