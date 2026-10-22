@@ -52,11 +52,9 @@ Read `design/` for the full picture. Key docs:
 | [tooling.md](design/tooling.md) | Dev stack — runtime, build, ORM, testing, logging, linting, Kotlin-feel patterns |
 | [decisions.md](design/decisions.md) | All decisions with rationale, eliminated options, adopted patterns |
 
-## Custom Commands
+## Skills
 
-Claude Code commands, each a Markdown file another agent can follow directly.
-
-- `/next` ([.claude/commands/next.md](.claude/commands/next.md)) — pick up the next task from `todo.md`
+Skills live in [`.agents/skills/`](.agents/skills/), one `SKILL.md` folder each: `next` picks up the next task from `todo.md`, `cogmo-review` runs the conformance review, `dependency-sweep` bumps dependencies, `html` renders a Markdown file to HTML. Codex reads them there and invokes one as `$<name>`; Claude Code reads each through a symlink in `.claude/skills/` and invokes it as `/<name>`, so a new skill needs that symlink too.
 
 ## Task Tracking
 
@@ -149,7 +147,7 @@ Constraints every sub-agent brief must carry, and how to run several without the
 
 After making changes, run: `pnpm typecheck && pnpm lint && pnpm test`
 
-**Conformance review:** the checklist in [.claude/agents/cogmo-reviewer.md](.claude/agents/cogmo-reviewer.md) checks a change against these rules (idioms, architecture, state machines, Inngest, data, tests, bookkeeping) in `code` mode, and a design doc against [state-machines.md](.agents/rules/state-machines.md) in `design` mode. Claude Code runs it as `/cogmo-review code <PR | branch | range>` and `/cogmo-review design <path>`; another agent walks the checklist itself. Run it before opening a PR and before approving a design, alongside a bug review (`/code-review` in Claude Code).
+**Conformance review:** the `cogmo-review` skill checks a change against these rules (idioms, architecture, state machines, Inngest, data, tests, bookkeeping) with `cogmo-review code <PR | branch | range>`, and a design doc against [state-machines.md](.agents/rules/state-machines.md) with `cogmo-review design <path>`. Its checklist is [reviewer.md](.agents/skills/cogmo-review/reviewer.md); Claude Code runs it in the read-only `cogmo-reviewer` agent. Run it before opening a PR and before approving a design, alongside a bug review (`/code-review` in Claude Code).
 
 **Bug fixes: verify-then-act.** Prove the symptom (failing test or repro steps), identify root cause, propose fix, write a regression test. No shotgun debugging.
 

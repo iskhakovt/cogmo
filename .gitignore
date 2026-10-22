@@ -13,7 +13,6 @@ test-results/
 !*.tfvars.example
 .claude/*
 !.claude/agents/
-!.claude/commands/
 !.claude/hooks/
 !.claude/settings.json
 !.claude/skills/

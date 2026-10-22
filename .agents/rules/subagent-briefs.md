@@ -24,8 +24,8 @@ absence cost real work in this repo.
   `PROGRESS.md`, or `changelog.d/`." Parallel agents each editing the changelog
   produces conflicts; the orchestrator owns those files.
 - **Self-audit before reporting.** "Walk the `code` checklist in
-  `.claude/agents/cogmo-reviewer.md` over your own diff (in Claude Code, run
-  the `cogmo-reviewer` agent), and state each item in your report as
+  `.agents/skills/cogmo-review/reviewer.md` over your own diff (in Claude Code,
+  run the `cogmo-reviewer` agent), and state each item in your report as
   compliant, n/a, or a violation with its justification." A builder that has
   checked its own work against the rules hands back fewer review rounds.
 

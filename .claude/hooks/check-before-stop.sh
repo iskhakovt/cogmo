@@ -9,7 +9,7 @@
 # Typecheck is deliberately absent. It measures 30–37s on this repo even warm,
 # and filtering to one package is no cheaper because the server is the bulk of
 # it — too much to charge every turn end. `pnpm typecheck` belongs in the
-# pre-PR gate list; see .claude/skills/dependency-sweep.
+# pre-PR gate list; see .agents/skills/dependency-sweep.
 set -uo pipefail
 
 # shellcheck source=lib/find-biome.sh
