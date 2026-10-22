@@ -199,7 +199,7 @@ export const skillRuns = pgTable(
      * is terminal.
      */
     recoveryPoint: skillRunRecoveryPoint("recovery_point").notNull().default("started"),
-    // CLAUDE.md mandates `created_at` on every table; for an append-only run
+    // AGENTS.md mandates `created_at` on every table; for an append-only run
     // log the row's creation time IS the start-of-execution time.
     createdAt: ts(),
     finishedAt: timestamp("finished_at", { withTimezone: true }),
@@ -230,7 +230,7 @@ export const skillContextCalls = pgTable(
     target: text("target"), // null when the method takes no target (e.g. `now()`)
     ok: boolean("ok").notNull(),
     error: text("error"),
-    // CLAUDE.md mandates `created_at`; for this audit log the creation time
+    // AGENTS.md mandates `created_at`; for this audit log the creation time
     // IS the call time.
     createdAt: ts(),
   },

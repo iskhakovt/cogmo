@@ -226,7 +226,7 @@ export async function ensureSkillsCodingRepo(
     }
 
     // On a miss, a keyed insert, so concurrent bootstraps converge on one row
-    // (`.claude/rules/inngest.md`).
+    // (`.agents/rules/inngest.md`).
     const { kind, row } =
       existing === undefined
         ? await deps.codingStore.insertOrRecoverRepo(tx, {

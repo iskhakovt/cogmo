@@ -734,7 +734,7 @@ describe("runCodingTask", () => {
   });
 
   it("re-executed approve step emits anyway, carrying the stamp the row already holds", async () => {
-    // The recovery contract from .claude/rules/inngest.md: an attempt that
+    // The recovery contract from .agents/rules/inngest.md: an attempt that
     // commits `plan_approved_at` and loses its step result before Inngest
     // records it leaves the re-run seeing `already_approved`. Reading that
     // as "someone else finished the job" skips the only trigger of the

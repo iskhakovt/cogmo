@@ -206,7 +206,7 @@ export interface RecordContextCallParams {
  * runs the no-op + pending-deploy checks, writes DB rows, then invokes the
  * callback. The lock queues concurrent registers but doesn't refresh the
  * loser's snapshot, so those checks can read state from before the winner's
- * commit (`.claude/rules/store-pattern.md`; audit filed in todo.md). Both
+ * commit (`.agents/rules/store-pattern.md`; audit filed in todo.md). Both
  * DB-write failure and filesystem failure roll the entire transaction back.
  * The only remaining inconsistency window is "tx commit fails after
  * applyFilesystem succeeded" — narrower than the reverse ordering, where any
@@ -1010,7 +1010,7 @@ export class DrizzleSkillStore implements SkillStore {
     if (params.inputs === null || params.inputs === undefined) {
       throw new Error("startOrRecoverRun: inputs must not be null/undefined");
     }
-    // Keyed insert: see `.claude/rules/inngest.md`.
+    // Keyed insert: see `.agents/rules/inngest.md`.
     const rows = await tx
       .insert(skillRuns)
       .values({

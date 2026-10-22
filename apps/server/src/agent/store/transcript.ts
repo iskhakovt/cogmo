@@ -529,7 +529,7 @@ export class DrizzleTranscriptStore implements TranscriptStore {
       source: SummarySourceValue;
     },
   ): Promise<{ kind: "new" | "recovered"; row: CompactionSummary }> {
-    // Keyed insert: see `.claude/rules/inngest.md`.
+    // Keyed insert: see `.agents/rules/inngest.md`.
     const rows = await tx
       .insert(conversationSummaries)
       .values(params)
@@ -549,7 +549,7 @@ export class DrizzleTranscriptStore implements TranscriptStore {
     tx: Transaction,
     params: StoredTurnContext,
   ): Promise<StoredTurnContext> {
-    // Keyed insert: see `.claude/rules/inngest.md`.
+    // Keyed insert: see `.agents/rules/inngest.md`.
     return single(
       await tx
         .insert(turnContexts)
@@ -604,7 +604,7 @@ export class DrizzleTranscriptStore implements TranscriptStore {
     tx: Transaction,
     params: Omit<SystemPromptSnapshot, "id" | "createdAt">,
   ): Promise<SystemPromptSnapshot> {
-    // Keyed insert: see `.claude/rules/inngest.md`.
+    // Keyed insert: see `.agents/rules/inngest.md`.
     return single(
       await tx
         .insert(systemPromptSnapshots)

@@ -484,7 +484,7 @@ export class DrizzleCodingStore implements CodingStore {
     tx: Transaction,
     params: InsertRepoParams,
   ): Promise<{ kind: "new" | "recovered"; row: CodingRepoRow }> {
-    // Keyed insert: see `.claude/rules/inngest.md`.
+    // Keyed insert: see `.agents/rules/inngest.md`.
     const rows = await tx
       .insert(codingRepos)
       .values(repoValues(params))
@@ -551,7 +551,7 @@ export class DrizzleCodingStore implements CodingStore {
     tx: Transaction,
     params: InsertTaskParams & { idempotencyKey: string },
   ): Promise<InsertTaskResult> {
-    // Keyed insert: see `.claude/rules/inngest.md`.
+    // Keyed insert: see `.agents/rules/inngest.md`.
     const rows = await tx
       .insert(codingTasks)
       .values({ ...taskValues(params), idempotencyKey: params.idempotencyKey })

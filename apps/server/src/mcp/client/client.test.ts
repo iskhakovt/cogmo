@@ -238,7 +238,7 @@ describe("SdkMcpConnection", () => {
 /**
  * The HTTP tests need a real {@link StreamableHTTPClientTransport} so the
  * `instanceof` guard in `SdkMcpConnection.close()` fires; the SDK Client
- * is fully mocked via `mock<T>()` (per CLAUDE.md mocking guidance), with
+ * is fully mocked via `mock<T>()` (per AGENTS.md mocking guidance), with
  * `client.close()` wired to propagate into the transport so the existing
  * `onclose` plumbing still fires.
  */

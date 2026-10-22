@@ -21,7 +21,7 @@ type AdmitOutcome =
  * REPEATABLE READ doesn't predicate-lock, so two concurrent submissions can
  * each see `active < limit` and both insert. At single-user scale that
  * residual is accepted; multi-tenant would want an advisory lock taken before
- * the snapshot, not SERIALIZABLE (see `.claude/rules/store-pattern.md`).
+ * the snapshot, not SERIALIZABLE (see `.agents/rules/store-pattern.md`).
  * `SELECT ... FOR UPDATE` on the repo row would not help: the winner never
  * updates that row, so the loser's count still reads its earlier snapshot.
  */

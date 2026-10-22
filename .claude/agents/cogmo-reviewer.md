@@ -25,15 +25,15 @@ or `design <path>[ @ <ref>]`. If it names neither, say so and stop.
 Read these before judging anything, every run. Cite them; never paraphrase a
 rule from memory as if it were the rule.
 
-- `CLAUDE.md` — Module Structure, Commits & PRs, Task Tracking, Design Philosophy.
-- Every file in `.claude/rules/`.
+- `AGENTS.md` — Module Structure, Commits & PRs, Task Tracking, Design Philosophy.
+- Every file in `.agents/rules/`.
 - `design/tooling.md` — the approved stack and the Kotlin-feel idioms.
 - `biome.json` and `biome-plugins/*.grit` — what the linter already enforces.
   **Do not report anything a linter enforces** (formatting, import order,
   biome recommended rules, `as unknown as` in production, direct `p-retry`
   imports). If a `knip` config exists, the same goes for what it reports.
 - The design docs owning the touched modules — map paths to docs through the
-  Architecture table in `CLAUDE.md` (e.g. `src/agent/evolution/` →
+  Architecture table in `AGENTS.md` (e.g. `src/agent/evolution/` →
   `design/evolution.md`, `design/memory.md`; `src/sandbox/` → `design/sandbox.md`).
 
 `src/...` paths in the rules are relative to `apps/server/`.
@@ -71,7 +71,7 @@ Report every item as **compliant**, **violation**, or **n/a** (the diff does
 not touch that concern). One row per item; a violation names `file:line` and
 the rule (`file` + a short exact quote).
 
-**1. Idioms** — `.claude/rules/code-style.md`, `design/tooling.md`
+**1. Idioms** — `.agents/rules/code-style.md`, `design/tooling.md`
 - 1a Expected failures are tagged values — a discriminated union in a
   `Result` (neverthrow), not an `Error` subclass told apart with `instanceof`
   (code-style.md → Error handling). A throw is right only where it is the
@@ -114,7 +114,7 @@ the rule (`file` + a short exact quote).
   tests import (grep the ref for production callers), unused branches,
   parameters every caller passes identically.
 
-**2. Architecture & DDD, as the repo defines it** — `CLAUDE.md`, `store-pattern.md`, `state-machines.md`
+**2. Architecture & DDD, as the repo defines it** — `AGENTS.md`, `store-pattern.md`, `state-machines.md`
 - 2a Infrastructure modules (`db/`, `inngest/`, `llm/`, `memory/`, `util/`)
   hold no domain logic.
 - 2b Inngest functions are thin controllers: receive, call domain use cases,
@@ -130,7 +130,7 @@ the rule (`file` + a short exact quote).
   the interface.
 - 2h Dependencies are injected, not hard-imported.
 
-**3. State machines** — `.claude/rules/state-machines.md` (n/a only if the diff adds or changes no lifecycle)
+**3. State machines** — `.agents/rules/state-machines.md` (n/a only if the diff adds or changes no lifecycle)
 - 3a A durable unit with a stable id keys every write.
 - 3b Status is a `pgEnum`.
 - 3c Transitions are conditional UPDATEs returning whether they happened;
@@ -140,7 +140,7 @@ the rule (`file` + a short exact quote).
 - 3f No implicit state: a boolean, a nullable-column combination, a string
   outcome or a cursor standing in for a status.
 
-**4. Inngest** — `.claude/rules/inngest.md`
+**4. Inngest** — `.agents/rules/inngest.md`
 - 4a Every added step: state the replay cost (what the bare body re-runs).
 - 4b Expensive, billable or non-deterministic work is inside a step.
 - 4c Step ids and idempotency keys derive from durable state only — never
@@ -153,7 +153,7 @@ the rule (`file` + a short exact quote).
 - 4g No broad catch around `step.run` outside the rule's carve-outs; StepError
   rethrown unwrapped.
 
-**5. Data** — `.claude/rules/architecture-rules.md`
+**5. Data** — `.agents/rules/architecture-rules.md`
 - 5a Migrations and snapshots from `pnpm db:generate` (custom data
   migrations via `--custom`); journal edited only to rename a tag.
 - 5b New columns NOT NULL unless the nullability is justified in a comment or
@@ -162,7 +162,7 @@ the rule (`file` + a short exact quote).
 - 5d The owning design doc's schema updated in the same diff.
 - 5e `pgEnum` for closed value sets; UUIDv7 `id` + `created_at` on new tables.
 
-**6. Tests** — `.claude/rules/testing.md`, `CLAUDE.md` → Commits & PRs
+**6. Tests** — `.agents/rules/testing.md`, `AGENTS.md` → Commits & PRs
 - 6a Red is behavioural: each new test would fail against the old code for the
   behaviour it names — not merely because a new symbol is missing.
 - 6b Tests target the contract, one module per file.
@@ -171,7 +171,7 @@ the rule (`file` + a short exact quote).
 - 6e `expectDefined` / `assertKind` instead of `!` and `as` narrowing.
 - 6f Inngest functions with new steps have replay tests.
 
-**7. Bookkeeping** — `CLAUDE.md` → Task Tracking, Commits & PRs
+**7. Bookkeeping** — `AGENTS.md` → Task Tracking, Commits & PRs
 - 7a Completed `todo.md` entry deleted; PROGRESS.md checked off where one exists.
 - 7b One new `changelog.d/YYYY-MM-DD-<slug>.md` fragment; present tense; no
   existing fragment edited.
@@ -183,7 +183,7 @@ the rule (`file` + a short exact quote).
 
 Read the doc at the ref (`git show <ref>:<path>`), plus the code it claims
 things about. Same three statuses. Sources: `state-machines.md` → "Design
-before code", `inngest.md`, `architecture-rules.md`, `CLAUDE.md` confidence
+before code", `inngest.md`, `architecture-rules.md`, `AGENTS.md` confidence
 markers.
 
 - D1 The unit and its durable id; bounds cannot shift on a re-plan.

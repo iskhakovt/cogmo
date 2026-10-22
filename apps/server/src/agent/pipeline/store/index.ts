@@ -198,7 +198,7 @@ export class DrizzlePipelineStore implements PipelineStore {
     | { kind: "not_found" }
   > {
     // The lock queues activations but can't refresh the loser's snapshot
-    // (`.claude/rules/store-pattern.md`). A loser retries on 40001 only when it
+    // (`.agents/rules/store-pattern.md`). A loser retries on 40001 only when it
     // writes a row the winner changed — this version (FOR UPDATE) or the one
     // the winner deactivated. With no version active the loser gets 23505 on
     // `uq_pipeline_definitions_active` (todo.md).
@@ -309,7 +309,7 @@ export interface PipelineRunStore {
    * retry of that call — a step replay, or the re-execution after a crash
    * between commit and Inngest recording the step — returns the existing row
    * as `recovered` instead of opening a second run. Keyed insert
-   * (`.claude/rules/inngest.md`).
+   * (`.agents/rules/inngest.md`).
    */
   insertOrRecoverRun(
     tx: Transaction,
@@ -425,7 +425,7 @@ export class DrizzlePipelineRunStore implements PipelineRunStore {
       idempotencyKey: string;
     },
   ): Promise<{ kind: "new" | "recovered"; row: PipelineRunRow }> {
-    // Keyed insert: see `.claude/rules/inngest.md`.
+    // Keyed insert: see `.agents/rules/inngest.md`.
     const rows = await tx
       .insert(pipelineRuns)
       .values({

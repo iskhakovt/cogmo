@@ -8,7 +8,7 @@
 // worker run one after another, so worker-scoped state would carry one file's
 // rows and recordings into the next. Inngest is per worker slot, since each
 // dev server is a container; each file registers under its own app id. See
-// `.claude/rules/testing.md` → Integration Test Isolation.
+// `.agents/rules/testing.md` → Integration Test Isolation.
 
 import { randomUUID } from "node:crypto";
 import { mkdtempSync } from "node:fs";

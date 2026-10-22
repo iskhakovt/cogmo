@@ -7,7 +7,7 @@ This is a private personal project, but the conventions below apply to anyone (h
 | If you need... | Look at |
 |-|-|
 | How to run the app locally | [README.md](README.md) |
-| Architecture, code style, module boundaries | [CLAUDE.md](CLAUDE.md) |
+| Architecture, code style, module boundaries | [AGENTS.md](AGENTS.md) |
 | Design intent for a subsystem | [`design/`](design/) |
 | What's queued / in progress | [todo.md](todo.md), [PROGRESS.md](PROGRESS.md) |
 | What changed and when | [`changelog.d/`](changelog.d/) (one Markdown fragment per PR) |
@@ -107,4 +107,4 @@ A commit whose message contains `[skip release]` (or `[release skip]`) is ignore
 
 ## Code style
 
-See [CLAUDE.md](CLAUDE.md) for the full style guide. The short version: idiomatic TypeScript, `function` declarations for named exports, ESM with `.js` extensions, `Result<T, E>` at boundaries, dependency injection over hard imports, strict encapsulation with `#private` fields, no dead code.
+See [AGENTS.md](AGENTS.md) for the full style guide. The short version: idiomatic TypeScript, `function` declarations for named exports, ESM with `.js` extensions, `Result<T, E>` at boundaries, dependency injection over hard imports, strict encapsulation with `#private` fields, no dead code.

@@ -1,7 +1,7 @@
 /// <reference path="../../../../test/vitest.d.ts" />
 
 /**
- * The keyed-insert rule in `.claude/rules/inngest.md`, raced on two real
+ * The keyed-insert rule in `.agents/rules/inngest.md`, raced on two real
  * connections: PGlite has one, so the unit tier cannot. Each loser's
  * REPEATABLE READ snapshot predates the winner's commit.
  */

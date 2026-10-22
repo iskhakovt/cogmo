@@ -41,7 +41,7 @@ import { expectDefined } from "./assertions.js";
  * preserved (every store method takes `tx: Transaction` first; we hand it
  * an opaque placeholder when there's no real DB behind the test).
  *
- * See CLAUDE.md → Store Pattern.
+ * See AGENTS.md → Store Pattern.
  */
 export const FAKE_TX = { __mockTx: true } as never;
 

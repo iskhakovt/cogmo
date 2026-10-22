@@ -17,7 +17,7 @@ import { alias } from "drizzle-orm/pg-core";
 import { match, P } from "ts-pattern";
 import type { JsonValue } from "type-fest";
 // Cross-module read: scheduled-task fire routing needs conversations.{user_id, profile_id}
-// joined to channel_sessions. Per CLAUDE.md → Store Pattern, store impls may import
+// joined to channel_sessions. Per AGENTS.md → Store Pattern, store impls may import
 // any schema; the access boundary is the TransportStore interface.
 import { aliases, conversations, messages } from "../../agent/store/schema.js";
 import { single } from "../../db/helpers.js";
@@ -149,7 +149,7 @@ export interface TransportStore {
 
   /**
    * Keyed insert of a single-owner (`fixed`) channel of `type` on
-   * `uq_channels_fixed_type` (`.claude/rules/inngest.md`): a repeated `type`
+   * `uq_channels_fixed_type` (`.agents/rules/inngest.md`): a repeated `type`
    * returns the stored channel's id as `recovered`.
    */
   insertOrRecoverFixedChannel(
@@ -564,7 +564,7 @@ export class DrizzleTransportStore implements TransportStore {
     tx: Transaction,
     type: string,
   ): Promise<{ kind: "new" | "recovered"; id: string }> {
-    // Keyed insert: see `.claude/rules/inngest.md`.
+    // Keyed insert: see `.agents/rules/inngest.md`.
     const rows = await tx
       .insert(channels)
       .values({ type, credentials: {}, identityMode: "fixed" })
@@ -1225,7 +1225,7 @@ export class DrizzleTransportStore implements TransportStore {
   ): Promise<
     { kind: "claimed"; attempt: number } | { kind: "existing"; original: FinishedOriginal }
   > {
-    // Keyed insert (`.claude/rules/inngest.md`) whose conflict arm only
+    // Keyed insert (`.agents/rules/inngest.md`) whose conflict arm only
     // updates a `decoding` record; a `ready` or `rejected` one returns no row.
     const [claimed] = await tx
       .insert(attachmentOriginals)

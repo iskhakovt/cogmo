@@ -2,7 +2,7 @@
 //
 // A default hides a value from the call site: the reader of `f(x)` cannot see
 // the `timeout = 30_000` or `trigger = "idle"` it runs with, and a new caller
-// inherits an assumption nobody chose for it (.claude/rules/architecture-rules.md
+// inherits an assumption nobody chose for it (.agents/rules/architecture-rules.md
 // → "Avoid default values"). Pass the value explicitly, or make the parameter
 // optional and branch on `undefined` where absence means something.
 //

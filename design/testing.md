@@ -44,7 +44,7 @@ Docker services + app wired in-process. Tests the orchestration pipeline — deb
 - Each test file runs against its own database, cloned from a template `globalSetup` migrates, and its own seeded user — so its own Hindsight bank
 - App modules imported directly — `bootstrap()` from `src/index.ts` wires everything
 
-**Isolation:** `test/integration-setup-per-file.ts` gives each file its own database, seeded user (so its own Hindsight bank), llmock and skills repo, and points it at its worker slot's Inngest dev server — one per slot, so one fork's events never run in another. Hindsight, Redis, RustFS, the Docker daemon and the MCP echo and Telegram mocks stay shared. `.claude/rules/testing.md` → Integration Test Isolation and Cassettes has the detail, the unmatched-request and unused-recording checks included.
+**Isolation:** `test/integration-setup-per-file.ts` gives each file its own database, seeded user (so its own Hindsight bank), llmock and skills repo, and points it at its worker slot's Inngest dev server — one per slot, so one fork's events never run in another. Hindsight, Redis, RustFS, the Docker daemon and the MCP echo and Telegram mocks stay shared. `.agents/rules/testing.md` → Integration Test Isolation and Cassettes has the detail, the unmatched-request and unused-recording checks included.
 
 **Env injection:** `process.env` mutations in `globalSetup` propagate to Vitest test workers. Dynamic container URLs set via `process.env`, per-file values by the per-file setup, static values in `vitest.config.ts` `test.env`. Test files use normal top-level imports — `createEnv()` in `env.ts` sees all values.
 
@@ -162,7 +162,7 @@ Concrete test recipes that should be applied alongside the tier guidance above. 
 
 ### JSONB raw-SQL bypass tests
 
-Every JSONB column has a Zod schema enforced at the store boundary on **both** read and write (CLAUDE.md → Architecture Rules). Tests must exercise both directions — write-side via `insertX({ malformed })` is the easy half; read-side requires bypassing the writer:
+Every JSONB column has a Zod schema enforced at the store boundary on **both** read and write (AGENTS.md → Architecture Rules). Tests must exercise both directions — write-side via `insertX({ malformed })` is the easy half; read-side requires bypassing the writer:
 
 ```ts
 await db.execute(sql`UPDATE <table> SET <col> = '{"junk":true}'::jsonb WHERE id = ${id}`);

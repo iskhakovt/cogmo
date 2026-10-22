@@ -7,7 +7,7 @@
  * Lives in `src/llm/` because providers throw into this vocabulary;
  * the post-generation inspector (`detectImageFailure`) lives in
  * `src/agent/image-failure.ts` and imports `ImageFailure` from here —
- * agent → llm is the documented direction (CLAUDE.md → Module
+ * agent → llm is the documented direction (AGENTS.md → Module
  * Structure).
  */
 

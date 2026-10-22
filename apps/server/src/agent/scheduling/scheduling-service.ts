@@ -219,7 +219,7 @@ export function createSchedulingService(deps: SchedulingServiceDeps): Scheduling
       // cap by one. Accepted at single-user scale (cap exceeded by 1 is
       // benign). When multi-tenant arrives, prevent it with an advisory
       // lock taken before the snapshot, not SERIALIZABLE — see
-      // `.claude/rules/store-pattern.md`.
+      // `.agents/rules/store-pattern.md`.
       //
       // Count includes disabled rows so a graveyard can't bypass the
       // cap by toggling. Uses `countScheduledTasks` (SELECT COUNT(*))

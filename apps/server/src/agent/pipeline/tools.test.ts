@@ -11,7 +11,7 @@ import {
   startPipelineTool,
 } from "./tools.js";
 
-// Optional sub-namespace caveat (see .claude/rules/testing.md): mock<Service>()
+// Optional sub-namespace caveat (see .agents/rules/testing.md): mock<Service>()
 // auto-mocks `pipelines` on access, so the absent-namespace test hand-builds
 // the stub with conditional spread instead.
 function serviceWith(pipelines?: PipelinesService): Service {

@@ -85,7 +85,7 @@ Then message your bot on Telegram. Liveness is exposed at `GET /health` on port 
 | If you want to... | See |
 |-|-|
 | Run Cogmo locally for development | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
-| Understand module boundaries and code style | [`CLAUDE.md`](CLAUDE.md) |
+| Understand module boundaries and code style | [`AGENTS.md`](AGENTS.md) |
 | Read the architecture and design docs | [`design/`](design/) |
 | Track what's queued / in progress | [`todo.md`](todo.md), [`PROGRESS.md`](PROGRESS.md) |
 | Deploy to your own host | [`DEPLOYMENT.md`](DEPLOYMENT.md) |

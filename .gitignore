@@ -15,7 +15,6 @@ test-results/
 !.claude/agents/
 !.claude/commands/
 !.claude/hooks/
-!.claude/rules/
 !.claude/settings.json
 !.claude/skills/
 notes/

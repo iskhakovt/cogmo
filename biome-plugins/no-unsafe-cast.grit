@@ -9,7 +9,7 @@
 //
 // Test files are exempt: stubbing partial interfaces is the dominant use and
 // `mock<T>()` / `mockDeep<T>()` from vitest-mock-extended is the preferred
-// replacement (see .claude/rules/testing.md).
+// replacement (see .agents/rules/testing.md).
 //
 // The exemption is a substring match on `.test.` and `/test/`, which tracks
 // the project's actual layout (`*.test.ts` suffix + `src/test/` helper

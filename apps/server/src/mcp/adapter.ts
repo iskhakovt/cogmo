@@ -32,7 +32,7 @@ export function mcpDescriptorToToolSpec(opts: McpToolAdapterOptions): ToolSpec {
     // step result re-runs it. Closing that would need the server to accept an
     // idempotency token, which the MCP tool contract has no slot for; the
     // `ToolCallContext` this handler could forward is available if one ever
-    // does. See .claude/rules/inngest.md.
+    // does. See .agents/rules/inngest.md.
     durable: true,
     handler: async (input) => {
       const conn = await opts.pool.getConnection(opts.server.id);

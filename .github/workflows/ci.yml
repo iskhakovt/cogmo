@@ -84,7 +84,7 @@ jobs:
             commitlint
 
   # A PR that changes stored shape changes the design doc that owns it
-  # (.claude/rules/architecture-rules.md → "No table design is final").
+  # (.agents/rules/architecture-rules.md → "No table design is final").
   # Stored shape is the Drizzle schemas, the migrations, and the modules
   # declaring the Zod schemas behind `jsonbZod` columns; that module list is
   # kept complete by src/test/schema-docs-filter.test.ts. Any design/ change

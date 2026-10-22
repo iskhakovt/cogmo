@@ -248,7 +248,7 @@ export type ClassifierLog = z.infer<typeof ClassifierLogSchema>;
  * here we just guarantee "valid JSON-shaped" — using `JsonValueSchema`
  * rather than `z.unknown()` so a bypass writer (future bug, store called
  * from another path) can't slip a `Date`/`BigInt`/`undefined` past the
- * JSONB boundary. CLAUDE.md mandates Zod on read AND write for every JSONB
+ * JSONB boundary. AGENTS.md mandates Zod on read AND write for every JSONB
  * column.
  */
 export const SkillInvocationInputsSchema = JsonValueSchema;

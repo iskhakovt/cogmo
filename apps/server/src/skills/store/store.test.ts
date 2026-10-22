@@ -224,7 +224,7 @@ describe("DrizzleSkillStore", () => {
     it("read-side Zod parse rejects a JSONB blob written via raw SQL with garbage shape", async () => {
       // Insert a row with intentionally bad `effects` JSONB via raw SQL,
       // bypassing the store's write-side parse. Read-side `parseSkillRow`
-      // should throw — proves CLAUDE.md "Zod on read AND write" invariant.
+      // should throw — proves AGENTS.md "Zod on read AND write" invariant.
       const row = await seedSkill();
       await db.execute(
         sql`UPDATE skills SET effects = ${'["not_a_real_effect"]'}::jsonb WHERE id = ${row.id}`,
