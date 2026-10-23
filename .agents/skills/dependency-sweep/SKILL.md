@@ -1,4 +1,5 @@
 ---
+name: dependency-sweep
 description: Runs a workspace-wide dependency sweep — bumping packages, majors, toolchain pins and base images — with the behavioural-diff and verification steps that a green build does not cover. Use when bumping dependencies, taking a major, refreshing pins, or acting on a batch of Dependabot PRs.
 when_to_use: "Trigger phrases: bump the deps, dependency sweep, update everything, take the majors, refresh the pins, we haven't touched this repo in a while, handle the Dependabot PRs."
 argument-hint: "[scope, e.g. 'minors only' or 'everything including majors']"
@@ -91,7 +92,7 @@ Two traps:
 
 | Command | Time | Covers |
 |-|-|-|
-| `pnpm lint` | ~2s | Biome across the workspace. Also enforced by the Stop hook. |
+| `pnpm lint` | ~2s | Biome across the workspace. Also enforced by Claude Code's Stop hook. |
 | `pnpm typecheck` | 30–37s | All three packages. Deliberately not in a hook — too slow per turn. |
 | `pnpm test` | ~140s | Unit tier only. |
 | `pnpm test:integration` | ~3min | Needs Docker. Run peers together, not one file alone. |

@@ -15,7 +15,7 @@ export type BootstrapLock = <T>(fn: () => Promise<T>) => Promise<T>;
  * inside `fn` then sees the previous holder's rows.
  *
  * Session-level, on a reserved connection, taken before `fn` opens a
- * transaction (`.claude/rules/store-pattern.md`). `fn` runs on the pool's
+ * transaction (`.agents/rules/store-pattern.md`). `fn` runs on the pool's
  * other connections, so `sql` needs at least two; a smaller pool throws here.
  */
 export function bootstrapLock(sql: Sql): BootstrapLock {

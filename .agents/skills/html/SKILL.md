@@ -1,4 +1,5 @@
 ---
+name: html
 description: Compile a markdown file to a styled, self-contained HTML report
 argument-hint: <path-to-md-file>
 allowed-tools: [Read, Write, Bash, Glob]
@@ -8,7 +9,7 @@ allowed-tools: [Read, Write, Bash, Glob]
 
 The user wants to compile a markdown file into a polished, self-contained HTML document using pandoc.
 
-**Input:** $ARGUMENTS (a markdown file path, relative to repo root or absolute)
+**Input:** $ARGUMENTS (a markdown file path, relative to repo root or absolute; where that placeholder is not filled in, take the path from the request)
 
 ## Instructions
 

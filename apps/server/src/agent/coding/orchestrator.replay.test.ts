@@ -11,7 +11,7 @@
  * progress once; neither orchestrator short-circuits on a status its own
  * step wrote; a genuinely duplicate event still skips.
  *
- * See .claude/rules/inngest.md and design/crash-recovery.md.
+ * See .agents/rules/inngest.md and design/crash-recovery.md.
  */
 
 import { execFile } from "node:child_process";

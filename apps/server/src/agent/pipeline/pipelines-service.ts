@@ -149,7 +149,7 @@ export function createPipelinesService(deps: PipelinesServiceDeps): PipelinesSer
       // Cap check + insert in one tx. Same predicate-race caveat as the
       // scheduling cap: REPEATABLE READ doesn't predicate-lock, two
       // concurrent defines can exceed the cap by one — benign at this
-      // scale (see .claude/rules/store-pattern.md).
+      // scale (see .agents/rules/store-pattern.md).
       const result = await deps.runInTx(async (tx) => {
         const current = await deps.store.countDefinitions(tx, deps.userId);
         if (current >= definitionCap) {

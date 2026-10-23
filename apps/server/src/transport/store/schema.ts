@@ -72,7 +72,7 @@ export const channels = pgTable(
     // OPAQUE — encrypted ciphertext or plaintext credentials handed back to the
     // adapter SDK unchanged (Telegram bot token, OAuth bundle, etc.). Cogmo
     // never inspects the contents, so it stays raw `jsonb` rather than being
-    // gated by a Zod schema (the JSONB rule in `.claude/rules/architecture-rules.md`
+    // gated by a Zod schema (the JSONB rule in `.agents/rules/architecture-rules.md`
     // exempts opaque payloads).
     credentials: jsonb("credentials").notNull(),
     identityMode: text("identity_mode").notNull(), // 'fixed' | 'mapped' | 'create'

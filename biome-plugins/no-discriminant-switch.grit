@@ -2,7 +2,7 @@
 //
 // A `switch` over a discriminant compiles fine when a new variant is
 // added and the switch has no case for it; `match(x).with(...).exhaustive()`
-// does not (.claude/rules/state-machines.md → "Outcomes are discriminated
+// does not (.agents/rules/state-machines.md → "Outcomes are discriminated
 // unions matched with ts-pattern's `.exhaustive()`").
 //
 // Flags `switch (x.kind)` and `switch (x["kind"])`, likewise for `status`.

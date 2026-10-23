@@ -23,7 +23,7 @@ import type { Transaction } from "../db/transactor.js";
  * and replays another model's recording.
  *
  * Changing this id means re-recording those suites (`pnpm test:record`) —
- * see `.claude/rules/testing.md` → Record/replay mocks.
+ * see `.agents/rules/testing.md` → Record/replay mocks.
  */
 export const CASSETTE_CHAT_MODEL = "claude-sonnet-5";
 

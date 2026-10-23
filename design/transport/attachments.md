@@ -58,7 +58,7 @@ attachment_originals
   CHECK (state <> 'decoding' OR result IS NULL), CHECK (state <> 'ready' OR result IS NOT NULL), CHECK (state <> 'rejected' OR result IS NULL)
 ```
 
-`NormalizedImageResultSchema` is `{ kind: "image", path, mediaType, width, height, bytes }` or `{ kind: "placeholder", reason }`, with `reason` one of `undecodable` (sharp refused it), `too_large` (the pixel guard) and `decode_crashed`. Only per-original outcomes are recorded: the per-turn cap applies to each row after the records are read, so a re-batched turn makes its own cap decision. The result holds no name either; the label and placeholder take it from the inbound block. Written through keyed upserts (`.claude/rules/inngest.md`). Owned by `transport/store/`.
+`NormalizedImageResultSchema` is `{ kind: "image", path, mediaType, width, height, bytes }` or `{ kind: "placeholder", reason }`, with `reason` one of `undecodable` (sharp refused it), `too_large` (the pixel guard) and `decode_crashed`. Only per-original outcomes are recorded: the per-turn cap applies to each row after the records are read, so a re-batched turn makes its own cap decision. The result holds no name either; the label and placeholder take it from the inbound block. Written through keyed upserts (`.agents/rules/inngest.md`). Owned by `transport/store/`.
 
 | Transition | Guard | Writes |
 |-|-|-|

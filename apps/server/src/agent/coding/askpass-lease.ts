@@ -11,7 +11,7 @@ import type { CodingRun } from "./coding-run.js";
  * Askpass material this run may have written to the host. An orchestrator
  * releases it in its `finally`: every exit, early returns included. Safe
  * there because a step boundary abandons the function rather than unwinding
- * it (see .claude/rules/inngest.md), so the release runs once, at the end of
+ * it (see .agents/rules/inngest.md), so the release runs once, at the end of
  * the run. `sandbox.deleteByTaskId` does not cover it: Local-Docker's
  * supervisor wipes the bind-mount source as a side effect, but a managed
  * backend clears only its own sandbox-side copy.

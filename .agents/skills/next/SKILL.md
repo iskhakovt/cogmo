@@ -1,3 +1,8 @@
+---
+name: next
+description: Lists up to 10 tasks from the Next section of todo.md, highest priority first, and asks which one to work on. Use when picking up the next task.
+---
+
 Read `todo.md`. Pick up to 10 tasks from "Next", highest priority first (`p1` > `p2` > `p3`).
 
 Present them as a numbered list, each with:

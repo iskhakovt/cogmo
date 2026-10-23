@@ -247,7 +247,7 @@ export class DrizzleScheduledTaskStore implements ScheduledTaskStore {
     },
   ): Promise<{ kind: "new" | "recovered"; row: ScheduledTask }> {
     const key = params.idempotencyKey;
-    // Keyed insert: see `.claude/rules/inngest.md`.
+    // Keyed insert: see `.agents/rules/inngest.md`.
     //
     // `xmax = 0` distinguishes the outcomes, so the caller can recover a retry
     // inside the same transaction as its cap check rather than pre-reading in

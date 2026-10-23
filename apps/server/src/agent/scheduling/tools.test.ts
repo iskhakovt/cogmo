@@ -23,7 +23,7 @@ import type {
 import { listTasks, removeTask, scheduleTask } from "./tools.js";
 
 /**
- * Hand-built Service stub with `scheduling` populated. Per CLAUDE.md →
+ * Hand-built Service stub with `scheduling` populated. Per AGENTS.md →
  * Testing, optional sub-namespaces are spread conditionally rather
  * than assigned to a `mock<Service>()` Proxy — `mock<Service>()`
  * auto-mocks every field on access (including the optional ones),

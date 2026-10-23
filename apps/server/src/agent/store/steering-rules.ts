@@ -240,7 +240,7 @@ function inScope(profileId: string | null, channelType: string | null): SQL | un
 }
 
 /**
- * Keyed insert on `uq_steering_rules_instruction`: see `.claude/rules/inngest.md`.
+ * Keyed insert on `uq_steering_rules_instruction`: see `.agents/rules/inngest.md`.
  * Raw SQL because `onConflictDoUpdate` takes column targets only, and the
  * index's key is expressions.
  */

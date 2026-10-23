@@ -52,7 +52,7 @@ export interface CompartmentStore {
    * scale + UI-only writes the residual race (concurrent inserts both
    * seeing count=N-1) is acceptable; when multi-tenant lands, prevent it
    * with an advisory lock taken before the snapshot, not SERIALIZABLE —
-   * see `.claude/rules/store-pattern.md`.
+   * see `.agents/rules/store-pattern.md`.
    */
   createCustomCompartment(
     tx: Transaction,

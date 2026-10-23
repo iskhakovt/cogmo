@@ -14,7 +14,7 @@
  * skips before reaching the failure machinery; and the `finally` fires once,
  * at the end.
  *
- * See .claude/rules/inngest.md and design/crash-recovery.md.
+ * See .agents/rules/inngest.md and design/crash-recovery.md.
  */
 
 import { InngestTestEngine } from "@inngest/test";

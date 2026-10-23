@@ -62,7 +62,7 @@ export async function ensureDefaultUser(
 /**
  * Create the default org profile if none exists. Returns the profile ID. Org profiles have `userId: null` — visible to all users, read-only via Transport.
  *
- * A miss writes through a keyed insert (`.claude/rules/inngest.md`), so
+ * A miss writes through a keyed insert (`.agents/rules/inngest.md`), so
  * concurrent seeds converge on one profile.
  */
 export async function ensureDefaultProfile(
@@ -90,7 +90,7 @@ export async function ensureDefaultProfile(
  * single-owner with the same fixed/wildcard wiring; a future single-owner
  * channel type reuses this directly.
  *
- * A miss writes through a keyed insert (`.claude/rules/inngest.md`), so
+ * A miss writes through a keyed insert (`.agents/rules/inngest.md`), so
  * concurrent seeds converge on one channel; only the inserting seed creates
  * the wildcard identity.
  */

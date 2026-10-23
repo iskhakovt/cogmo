@@ -4715,7 +4715,7 @@ describe("durable conversation summaries", () => {
   });
 
   it("delivers the turn when the summary write fails", async () => {
-    // The write is a cache fill sitting between compaction and the loop. CLAUDE.md
+    // The write is a cache fill sitting between compaction and the loop. AGENTS.md
     // requires a test for any catch that degrades into a return value; this is it.
     const { deps } = summarizingDeps();
     vi.mocked(deps.agentStore.insertOrRecoverSummary).mockRejectedValue(

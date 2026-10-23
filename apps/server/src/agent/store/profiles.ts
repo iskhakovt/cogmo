@@ -103,7 +103,7 @@ export interface ProfileStore {
   ): Promise<Result<Profile, ProfileNameTaken>>;
 
   /**
-   * Keyed insert on `uq_profiles_user_name` (`.claude/rules/inngest.md`): a
+   * Keyed insert on `uq_profiles_user_name` (`.agents/rules/inngest.md`): a
    * repeated `(userId, name)`, including `userId: null`, returns the stored
    * profile's id as `recovered`, leaving the row as it was.
    */
@@ -232,7 +232,7 @@ export class DrizzleProfileStore implements ProfileStore {
       toolSet: ToolSet;
     },
   ): Promise<{ kind: "new" | "recovered"; id: string }> {
-    // Keyed insert: see `.claude/rules/inngest.md`.
+    // Keyed insert: see `.agents/rules/inngest.md`.
     const rows = await tx
       .insert(profiles)
       .values(params)

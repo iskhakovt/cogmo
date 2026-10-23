@@ -2,7 +2,7 @@
 
 The Observer ([evolution.md](evolution.md#observer-and-consolidation-confirmed), [memory.md](memory.md#observer-pattern-post-conversation-extraction-confirmed)) extracts corrections and memories from a conversation's **turns**, one turn at a time and in order. Each turn and phase has a state row. Every write is keyed on the turn's durable identity, and nothing the model produces is used as a key. The idle trigger stays as the debounce. Each fire works through the turns not yet observed, up to a cap, and asks for a follow-up fire while a backlog remains.
 
-This is a document of its own because it specifies a data model, a state machine and a failure contract that both extraction phases share ([state-machines.md](../.claude/rules/state-machines.md)). evolution.md and memory.md keep the extraction semantics (what a correction is, what a fact is, the rules each obeys) and link here for how the Observer moves through a conversation.
+This is a document of its own because it specifies a data model, a state machine and a failure contract that both extraction phases share ([state-machines.md](../.agents/rules/state-machines.md)). evolution.md and memory.md keep the extraction semantics (what a correction is, what a fact is, the rules each obeys) and link here for how the Observer moves through a conversation.
 
 Industry practice it follows:
 
@@ -170,7 +170,7 @@ Constraints and indexes:
   AND (skip_reason <> 'superseded' OR turn_kind <> 'pipeline')
   ```
 
-`extraction` groups atomic state ([architecture rules](../.claude/rules/architecture-rules.md)): the items, the run that wrote them, what rendering dropped (truncation), and what the evidence check dropped are written together, once, and never rewritten or erased. Hindsight document ids are positioned on it.
+`extraction` groups atomic state ([architecture rules](../.agents/rules/architecture-rules.md)): the items, the run that wrote them, what rendering dropped (truncation), and what the evidence check dropped are written together, once, and never rewritten or erased. Hindsight document ids are positioned on it.
 
 `held` and `held_extracted` are two states because they release to different states. `failed` with or without an extraction is one state: it is terminal, and no transition or plan reads which it is, so the extraction there is data kept for the audit, not lifecycle.
 
@@ -199,7 +199,7 @@ stateDiagram-v2
 
 | From | To | By | Guard | Writes |
 |-|-|-|-|-|
-| — | `pending` / `skipped` | `discoverTurns` | `INSERT … ON CONFLICT (conversation_id, turn_cursor, phase) DO UPDATE SET updated_at = turn_observations.updated_at RETURNING (xmax = 0)`, the no-op-SET shape from [inngest.md](../.claude/rules/inngest.md) | Row, `attempts = 0` |
+| — | `pending` / `skipped` | `discoverTurns` | `INSERT … ON CONFLICT (conversation_id, turn_cursor, phase) DO UPDATE SET updated_at = turn_observations.updated_at RETURNING (xmax = 0)`, the no-op-SET shape from [inngest.md](../.agents/rules/inngest.md) | Row, `attempts = 0` |
 | `skipped` (`unanswered`) | `pending`, or `skipped` (`superseded`, or `not_user_speech` for a non-chat corrections row) | `discoverTurns` | `WHERE id = ANY($1) AND status = 'skipped' AND skip_reason = 'unanswered'`, for turns now answered. The target follows the disposition table, as at insert; a turn covered by an unanswered last turn stays `unanswered` until a later fire. | `status`, `skip_reason` |
 | `pending` | `held` | `extractTurn` (memories) | `WHERE id = $1 AND status = 'pending'` | — |
 | `extracted` | `held_extracted` | `retainTurnMemories` | `WHERE id = $1 AND status = 'extracted'` | — (extraction kept) |
@@ -220,7 +220,7 @@ stateDiagram-v2
 - `pending → applied` without an extraction;
 - `held` or `held_extracted` in the corrections phase, which the CHECK rejects.
 
-Every transition is a store method returning whether it moved, `{ kind: "transitioned" } | { kind: "stale"; status }`, the shape of `DrizzleCodingStore.transitionTaskStatus`. A stale transition is an expected outcome, not an `Err`. Each use case owns one group of transitions, as [Files](#types-and-boundaries-proposed) lists. Re-entry guards live inside the steps, and the bare body branches only on memoized outcomes ([inngest.md](../.claude/rules/inngest.md) → Never gate the bare body on state your own steps mutate).
+Every transition is a store method returning whether it moved, `{ kind: "transitioned" } | { kind: "stale"; status }`, the shape of `DrizzleCodingStore.transitionTaskStatus`. A stale transition is an expected outcome, not an `Err`. Each use case owns one group of transitions, as [Files](#types-and-boundaries-proposed) lists. Re-entry guards live inside the steps, and the bare body branches only on memoized outcomes ([inngest.md](../.agents/rules/inngest.md) → Never gate the bare body on state your own steps mutate).
 
 ### One turn, one phase, one fire
 
@@ -253,7 +253,7 @@ Stopping at a `failed` turn bounds a misclassified account-wide error to one `fa
 
 ## Types and Boundaries `[proposed]`
 
-Sealed unions, matched with ts-pattern `.exhaustive()`. Expected failures are tagged values in a `Result`; a throw is a step failure for Inngest to retry or an invariant violation ([code-style.md](../.claude/rules/code-style.md) → Error handling). Branded value types and readonly data, as in [tooling.md](tooling.md#kotlin-developer-patterns).
+Sealed unions, matched with ts-pattern `.exhaustive()`. Expected failures are tagged values in a `Result`; a throw is a step failure for Inngest to retry or an invariant violation ([code-style.md](../.agents/rules/code-style.md) → Error handling). Branded value types and readonly data, as in [tooling.md](tooling.md#kotlin-developer-patterns).
 
 ```typescript
 // Value types
@@ -418,10 +418,10 @@ Rows match top to bottom. `OutputCutOffError`, `ToolArgsCutOffError` and `Missin
 
 **Where a throw lands.** A `"transient"` failure or an invariant violation throws out of the step. The harness is `ObserverStepHarness`:
 
-- **Inngest** retries the step. When it fails for good, its `StepError` reaches the body, which catches it around extract and apply only and stops the phase as `paused` (`unavailable`), logged at error and listed in `failedPhases`. That is the [inngest.md](../.claude/rules/inngest.md) carve-out: every expected non-transient failure is an `Err` value, so the catch target is exactly "threw, out of retries", the designed pause channel.
+- **Inngest** retries the step. When it fails for good, its `StepError` reaches the body, which catches it around extract and apply only and stops the phase as `paused` (`unavailable`), logged at error and listed in `failedPhases`. That is the [inngest.md](../.agents/rules/inngest.md) carve-out: every expected non-transient failure is an `Err` value, so the catch target is exactly "threw, out of retries", the designed pause channel.
 - **Sync** (`/reflect`, `src/agent/evolution/trigger-reflection.ts`) calls the body once with no retries and no memoization. A throw is caught at the same place and pauses the phase. Attempts never depend on the throw path: they come from `turn_failure` errors, which both harnesses return alike.
 
-**Files** (`src/agent/evolution/observation/`), each a pure module or the use case for one group of transitions ([state-machines.md](../.claude/rules/state-machines.md)):
+**Files** (`src/agent/evolution/observation/`), each a pure module or the use case for one group of transitions ([state-machines.md](../.agents/rules/state-machines.md)):
 
 | File | Contents | Transitions |
 |-|-|-|
@@ -439,7 +439,7 @@ Rows match top to bottom. `OutputCutOffError`, `ToolArgsCutOffError` and `Missin
 
 `observer.ts` keeps only Inngest wiring and the per-fire loop, with consolidation and the drain unchanged.
 
-**Store.** `TurnObservationStore` / `DrizzleTurnObservationStore` in `src/agent/store/turn-observations.ts`, with `turn-observations.test.ts` beside it: stateless, `tx` first, per [store-pattern.md](../.claude/rules/store-pattern.md). The Observer's use cases depend on it directly, with the narrow `TranscriptStore` and `SteeringRuleStore` they also call. Its reads are `listOpenTurnGroups`, `listTurnObservations` and `getTurnObservation`, plus one method per row of the transition table. The daily budget reads `EvolutionEventStore.countTurnCallsSince` ([Follow-ups](#follow-ups-proposed)). `listOpenTurnGroups` groups in SQL (`GROUP BY last_inbound_message_id`, with min row id, first assistant id, batch range, whether the turn is answered, whether it is last (no later non-pipeline turn row, as in [Disposition at discovery](#disposition-at-discovery)), and the cursors of the later non-pipeline turn rows covering it, with the row-order fallback, the turn-row test being `NOT_TURN_ROW_JSONPATH`), restricted by `notExists` to cursors lacking a terminal row in some phase. A terminal row is `applied`, `failed`, or `skipped` with a reason other than `unanswered`, the complement of the partial index. `listTurnObservations` reads the rows of those groups and of their covering turns, and the aggregate decides `superseded` from both. Rendering reads a turn and its context through a new `TranscriptStore.listTurnMessages(tx, conversationId, cursors)`. A fire reads its open turns, not the transcript.
+**Store.** `TurnObservationStore` / `DrizzleTurnObservationStore` in `src/agent/store/turn-observations.ts`, with `turn-observations.test.ts` beside it: stateless, `tx` first, per [store-pattern.md](../.agents/rules/store-pattern.md). The Observer's use cases depend on it directly, with the narrow `TranscriptStore` and `SteeringRuleStore` they also call. Its reads are `listOpenTurnGroups`, `listTurnObservations` and `getTurnObservation`, plus one method per row of the transition table. The daily budget reads `EvolutionEventStore.countTurnCallsSince` ([Follow-ups](#follow-ups-proposed)). `listOpenTurnGroups` groups in SQL (`GROUP BY last_inbound_message_id`, with min row id, first assistant id, batch range, whether the turn is answered, whether it is last (no later non-pipeline turn row, as in [Disposition at discovery](#disposition-at-discovery)), and the cursors of the later non-pipeline turn rows covering it, with the row-order fallback, the turn-row test being `NOT_TURN_ROW_JSONPATH`), restricted by `notExists` to cursors lacking a terminal row in some phase. A terminal row is `applied`, `failed`, or `skipped` with a reason other than `unanswered`, the complement of the partial index. `listTurnObservations` reads the rows of those groups and of their covering turns, and the aggregate decides `superseded` from both. Rendering reads a turn and its context through a new `TranscriptStore.listTurnMessages(tx, conversationId, cursors)`. A fire reads its open turns, not the transcript.
 
 ## Context `[proposed]`
 

@@ -34,7 +34,7 @@ Full source list at the bottom.
 
 ## Core Decision: Compile the Envelope, Interpret the Prose `[proposed]`
 
-The user's free text is compiled **once, at definition time**, by an LLM with a typed contract (Zod in/out, retry + feedback injection — the existing pattern from [architecture-rules](../.claude/rules/architecture-rules.md)) into a `PipelineDefinition`. Two layers with different determinism:
+The user's free text is compiled **once, at definition time**, by an LLM with a typed contract (Zod in/out, retry + feedback injection — the existing pattern from [architecture-rules](../.agents/rules/architecture-rules.md)) into a `PipelineDefinition`. Two layers with different determinism:
 
 - **Envelope (compiled, frozen per version):** trigger, stage sequence, gate placement, loop bounds, per-stage tool allowlists, budgets. Deterministic, reviewable, enforced by code.
 - **Stage instructions (prose, interpreted per run):** each stage's `instructions` field carries the user's own words, handed to the agent loop at execution time. This preserves gh-aw's "productive ambiguity" — the user writes *what*, the agent decides *how*, the envelope decides *whether/when/with-what*.
