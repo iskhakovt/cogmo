@@ -284,6 +284,18 @@ type DirectFetchFailure =
   | { kind: "permanent"; message: string }
   | { kind: "transient"; message: string };
 
+/**
+ * A failed attempt the next one may clear: the resolver briefly unavailable
+ * (`EAI_AGAIN`, or no answer within `LOOKUP_TIMEOUT_MS`), or the attempt's
+ * budget spent mid-lookup. Once the retries run out, the first is
+ * `unresolvable` and the second `transient`.
+ */
+type RetryableFailure =
+  | { kind: "lookup_unavailable"; host: string; message: string }
+  | { kind: "attempt_timed_out"; message: string };
+
+type AttemptFailure = DirectFetchFailure | RetryableFailure;
+
 interface Reached {
   response: Response;
   finalUrl: URL;
@@ -315,23 +327,40 @@ function afterDirectFailure(
 
 /**
  * Fetch `url` directly. A throw inside the retried attempt is only
- * `withRetry`'s signal to try again; what is left when the retries run out
- * is `unresolvable` after {@link LookupUnavailable}, else `transient`.
+ * `withRetry`'s signal to try again; the attempt records a
+ * {@link RetryableFailure} before throwing, and that record is what the
+ * last attempt's throw ends as.
  */
 async function directFetch(
   url: URL,
   resolveHost: ResolveHost,
 ): Promise<Result<string, DirectFetchFailure>> {
   let attempt = 0;
+  let retrying: RetryableFailure | undefined;
   const reached = await withRetry(
     async (): Promise<Result<Reached, DirectFetchFailure>> => {
       attempt += 1;
+      retrying = undefined;
       // First attempt looks like a typed-URL navigation. Subsequent
       // attempts add a same-origin Referer + flip Sec-Fetch-Site to
       // cross-site — some bot filters reject only no-referer hits.
       const headers = attempt === 1 ? BROWSER_HEADERS : retryHeaders(url.href);
       const hops = await fetchCheckingEachHop(url, headers, resolveHost);
-      if (hops.isErr()) return hops;
+      if (hops.isErr()) {
+        return match(hops.error)
+          .with({ kind: "lookup_unavailable" }, { kind: "attempt_timed_out" }, (failure) => {
+            retrying = failure;
+            throw new Error(failure.message);
+          })
+          .with(
+            { kind: "refused" },
+            { kind: "unresolvable" },
+            { kind: "permanent" },
+            { kind: "transient" },
+            (failure) => err(failure),
+          )
+          .exhaustive();
+      }
       const r = hops.value.response;
       // 403/429 are retryable here: many bot filters return them on
       // a no-referer first hit and let the retry-with-Referer
@@ -343,7 +372,7 @@ async function directFetch(
       if (!r.ok) {
         return err({ kind: "permanent", message: `Fetch failed: ${r.status} ${r.statusText}` });
       }
-      return hops;
+      return ok(hops.value);
     },
     // retries: 2 — fetch_url is user-facing through the agent, so no
     // attempt starts after 20s and a slow upstream can't make the user
@@ -353,11 +382,7 @@ async function directFetch(
     { retries: 2, maxRetryTimeMs: 20_000, context: `fetch_url ${url.hostname}` },
   ).catch(
     (e: unknown): Result<Reached, DirectFetchFailure> =>
-      err(
-        e instanceof LookupUnavailable
-          ? { kind: "unresolvable", host: e.host }
-          : transientFailure(e),
-      ),
+      err(retrying === undefined ? transientFailure(e) : retriesExhausted(retrying)),
   );
   if (reached.isErr()) return err(reached.error);
 
@@ -373,30 +398,25 @@ async function directFetch(
     : ok(body.value);
 }
 
-function transientFailure(e: unknown): DirectFetchFailure {
-  return { kind: "transient", message: e instanceof Error ? e.message : String(e) };
+function retriesExhausted(failure: RetryableFailure): DirectFetchFailure {
+  return match<RetryableFailure, DirectFetchFailure>(failure)
+    .with({ kind: "lookup_unavailable" }, ({ host }) => ({ kind: "unresolvable", host }))
+    .with({ kind: "attempt_timed_out" }, ({ message }) => ({ kind: "transient", message }))
+    .exhaustive();
 }
 
-/**
- * Thrown inside a retried attempt when the resolver is briefly unavailable,
- * so the attempt runs again; {@link directFetch} turns it into `unresolvable`
- * once the retries run out.
- */
-class LookupUnavailable extends Error {
-  constructor(
-    readonly host: string,
-    cause: unknown,
-  ) {
-    super(`resolver unavailable for ${host}`, { cause });
-    this.name = "LookupUnavailable";
-  }
+function transientFailure(e: unknown): DirectFetchFailure {
+  return { kind: "transient", message: messageOf(e) };
+}
+
+function messageOf(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
 }
 
 /**
  * GET `url`, following redirects here rather than in `fetch` so every hop
  * passes {@link checkDestination} before it is connected to: a public page
- * redirecting inward is the standard way around a guard like this. One
- * timeout spans resolution and every hop.
+ * redirecting inward is the standard way around a guard like this.
  *
  * A loop past the cap or an unparseable Location is `transient`, returned
  * rather than thrown so it isn't retried: every hop passed the check, and
@@ -407,7 +427,7 @@ async function fetchCheckingEachHop(
   url: URL,
   headers: Record<string, string>,
   resolveHost: ResolveHost,
-): Promise<Result<Reached, DirectFetchFailure>> {
+): Promise<Result<Reached, AttemptFailure>> {
   const signal = AbortSignal.timeout(ATTEMPT_BUDGET_MS);
   let current = url;
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
@@ -441,7 +461,7 @@ async function checkDestination(
   url: URL,
   resolveHost: ResolveHost,
   signal: AbortSignal,
-): Promise<Result<void, DirectFetchFailure>> {
+): Promise<Result<void, AttemptFailure>> {
   // `permanent`, not `transient`: neither `fetch` nor Tavily, which would
   // follow the same redirect, reaches a page outside HTTP.
   if (url.protocol !== "http:" && url.protocol !== "https:") {
@@ -461,31 +481,31 @@ async function checkDestination(
   });
 }
 
-/**
- * An IP literal as written; a name by every address it resolves to. A
- * resolver that is briefly unavailable (`EAI_AGAIN`, or no answer within
- * `LOOKUP_TIMEOUT_MS`) throws {@link LookupUnavailable} so the attempt is
- * retried; any other resolver failure is final. The attempt's own budget
- * running out mid-lookup rethrows as the timeout it is.
- */
+/** An IP literal as written; a name by every address it resolves to. */
 async function addressesOf(
   url: URL,
   resolveHost: ResolveHost,
   signal: AbortSignal,
-): Promise<Result<ReadonlyArray<LookupAddress>, DirectFetchFailure>> {
+): Promise<Result<ReadonlyArray<LookupAddress>, AttemptFailure>> {
   // `URL.hostname` keeps an IPv6 literal's brackets.
   const host = url.hostname.replace(/^\[(.*)\]$/, "$1");
   const family = isIP(host);
   if (family !== 0) return ok([{ address: host, family }]);
   const deadline = AbortSignal.any([signal, AbortSignal.timeout(LOOKUP_TIMEOUT_MS)]);
-  try {
-    return ok(await abortable(resolveHost(host), deadline));
-  } catch (e) {
-    if (signal.aborted) throw signal.reason;
-    logger.info({ host, err: describeError(e) }, "fetch_url could not resolve a host");
-    if (isLookupTimeout(e) || errorCode(e) === "EAI_AGAIN") throw new LookupUnavailable(host, e);
-    return err({ kind: "unresolvable", host });
+  return abortable(resolveHost(host), deadline).then(
+    (addresses) => ok(addresses),
+    (e: unknown) => err(lookupFailure(host, e, signal)),
+  );
+}
+
+function lookupFailure(host: string, e: unknown, attemptSignal: AbortSignal): AttemptFailure {
+  if (attemptSignal.aborted) {
+    return { kind: "attempt_timed_out", message: messageOf(attemptSignal.reason) };
   }
+  logger.info({ host, err: describeError(e) }, "fetch_url could not resolve a host");
+  return isLookupTimeout(e) || errorCode(e) === "EAI_AGAIN"
+    ? { kind: "lookup_unavailable", host, message: describeError(e) }
+    : { kind: "unresolvable", host };
 }
 
 function isLookupTimeout(e: unknown): boolean {

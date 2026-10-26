@@ -506,6 +506,21 @@ describe("fetch_url", () => {
     expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 
+  it("ends a redirect status with no Location as permanent, without Tavily", async () => {
+    mockFetch.mockImplementation(async (url: string) =>
+      url === TAVILY_EXTRACT
+        ? tavilyExtracts("unreachable")
+        : // `Headers`, not a `Map`: a missing header reads as `null`, not `undefined`.
+          { ok: false, status: 302, statusText: "Found", headers: new Headers() },
+    );
+    const fetchUrl = fetchUrlTool("tavily-key", publicHost);
+
+    const outcome = await fetchUrl.handler({ url: "https://example.com/start" }, stubService());
+
+    expect(outcome._unsafeUnwrapErr().message).toBe("Fetch failed: 302 Found");
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
   it("retries a resolver that is briefly unavailable", async () => {
     mockFetch.mockResolvedValue(textResponse("recovered"));
     const resolveHost = vi
@@ -624,24 +639,18 @@ describe("fetch_url", () => {
   });
 
   it("falls back to Tavily Extract when the body fails mid-read", async () => {
-    mockFetch.mockImplementation(async (url: string) => {
-      if (url === "https://api.tavily.com/extract") {
-        return {
-          ok: true,
-          json: async () => ({
-            results: [{ url: "https://example.com/page", raw_content: "via Tavily" }],
-          }),
-        };
-      }
-      return {
-        ok: true,
-        status: 200,
-        headers: new Map([["content-type", "text/plain"]]),
-        text: async () => {
-          throw new TypeError("terminated");
-        },
-      };
-    });
+    mockFetch.mockImplementation(async (url: string) =>
+      url === TAVILY_EXTRACT
+        ? tavilyExtracts("via Tavily")
+        : {
+            ok: true,
+            status: 200,
+            headers: new Map([["content-type", "text/plain"]]),
+            text: async () => {
+              throw new TypeError("terminated");
+            },
+          },
+    );
     const fetchUrl = fetchUrlTool("tavily-key", publicHost);
 
     const result = (
