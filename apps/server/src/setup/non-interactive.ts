@@ -203,9 +203,8 @@ export async function persistNonInteractive(
   );
 
   if (generatedSshPublicKey) {
-    // Stdout (not the logger) so the operator's wrapper script can capture it.
-    // Non-interactive runs typically log JSON; a clear delimiter makes parsing
-    // unambiguous without forcing the operator to filter logger output.
+    // Stdout, which `cogmo setup` leaves to its output (logs go to stderr), so
+    // the operator's wrapper script can capture it between the delimiters.
     process.stdout.write(
       [
         "",

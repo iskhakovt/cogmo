@@ -3,8 +3,8 @@ import type { AddressInfo } from "node:net";
 import { Writable } from "node:stream";
 import { Bot, HttpError } from "grammy";
 import pino from "pino";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createLogger } from "./logger.js";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { createLogger, createLogRouter, type LogStream } from "./logger.js";
 
 /** Shaped like a Bot API token (numeric id, colon, URL-safe base64), but not one. */
 const FAKE_SECRET = "AAFake-TokenForTests_0123456789abcdef";
@@ -88,5 +88,48 @@ describe("createLogger", () => {
     pino(stream).error({ err: networkFailure }, "telegram polling loop failed");
 
     expect(lines.join("")).toContain(FAKE_SECRET);
+  });
+});
+
+describe("createLogRouter", () => {
+  /** A router over two captured streams, and the spy that opens them. */
+  function routed() {
+    const streams = { stdout: capture(), stderr: capture() };
+    const open = vi.fn((name: LogStream) => streams[name].stream);
+    const router = createLogRouter(open);
+    return { router, open, logger: createLogger(router), streams };
+  }
+
+  it("writes to stdout when no stream is selected", () => {
+    const { logger, open, streams } = routed();
+
+    logger.info("first");
+    logger.info("second");
+
+    expect(open).toHaveBeenCalledExactlyOnceWith("stdout");
+    expect(streams.stdout.lines).toHaveLength(2);
+  });
+
+  it("writes every line to the stream selected before the first", () => {
+    const { router, logger, open, streams } = routed();
+
+    router.select("stderr");
+    logger.info("first");
+    logger.warn("second");
+
+    expect(open).toHaveBeenCalledExactlyOnceWith("stderr");
+    expect(streams.stderr.lines.join("")).toMatch(/first[\s\S]*second/);
+    expect(streams.stdout.lines).toEqual([]);
+  });
+
+  it("refuses a selection after the first line, which went to the earlier stream", () => {
+    const { router, logger, streams } = routed();
+
+    logger.info("first");
+
+    expect(() => router.select("stderr")).toThrow("after the first line went to stdout");
+    logger.info("second");
+    expect(streams.stdout.lines).toHaveLength(2);
+    expect(streams.stderr.lines).toEqual([]);
   });
 });

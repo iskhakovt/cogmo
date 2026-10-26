@@ -340,6 +340,8 @@ The image entrypoint dispatches based on the first arg:
 | `seed` | Legacy idempotent seed (default user + profile + direct channel). `setup` does this and more; prefer it. |
 | `gen-key` | Print a fresh `COGMO_MASTER_KEY` to stdout. |
 
+`serve` logs to stdout. Every other command logs to stderr, so its stdout carries only its output.
+
 ## Health check
 
 `GET /health` on port 9090 returns 200 with an `application/health+json` body (IETF draft schema: `status`, `version`, `releaseId`, `description`, `notes`). Liveness only — a Postgres blip will not flap the container. Wire it to your supervisor (Docker `HEALTHCHECK`, k8s `livenessProbe`, systemd, etc.).
@@ -369,7 +371,7 @@ The image entrypoint always launches with `node --import ./dist/otel.js`, which 
 Telegram's Bot API authenticates by URL path (`/bot<id>:<secret>/<method>`, and `/file/bot<id>:<secret>/…` for downloads), so the bot token is part of every Telegram request URL. Cogmo redacts it before anything leaves the process, so a backend that takes OTLP directly needs no scrubbing of its own:
 
 - **Spans.** The trace exporter is wrapped (`src/otel-redaction.ts`), whichever instrumentation produced the span. URL attributes (`url.full`, `url.original`, `http.url`, `http.target`) are exported without their query or fragment, and `url.query` and `url.fragment` are dropped, so a query-string credential never reaches a URL attribute, whatever its parameter is called. In every string — names, status messages, attributes, `exception.message` and `exception.stacktrace` — `bot<id>:<secret>` path segments become `bot<redacted>`.
-- **Logs.** Every serialized pino line goes through the same token redaction before it's written (`src/logger.ts`), so stdout and the OTLP log export carry the same redacted line. A grammY network failure is where this matters: its `HttpError` keeps node-fetch's error, whose message names the full request URL.
+- **Logs.** Every serialized pino line goes through the same token redaction before it's written (`src/logger.ts`), so the log stream and the OTLP log export carry the same redacted line. A grammY network failure is where this matters: its `HttpError` keeps node-fetch's error, whose message names the full request URL.
 
 Free text isn't cut at queries: a URL with a query-string credential inside an error message is exported as written, and so is a credential in another URL's path, such as an MCP server URL with a token in it.
 
