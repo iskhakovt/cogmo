@@ -17,6 +17,7 @@
  * checks and summaries live in `eval-checks.ts`.
  */
 
+import { lookup } from "node:dns/promises";
 import { ok } from "neverthrow";
 import * as R from "remeda";
 import { mock } from "vitest-mock-extended";
@@ -210,7 +211,7 @@ export class EvalCoreMemory implements CoreMemoryNamespace {
 function evalTools(): ToolRegistry {
   const production = createDefaultTools(
     builtInToolSpecs({
-      webTools: createWebTools(undefined, undefined),
+      webTools: createWebTools(undefined, undefined, (hostname) => lookup(hostname, { all: true })),
       documentTools: createDocumentTools(mock<AttachmentStore>()),
     }),
     EVAL_TIMEZONE,

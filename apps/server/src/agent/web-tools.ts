@@ -1,12 +1,33 @@
+import type { LookupAddress } from "node:dns";
+import { isIP } from "node:net";
 import { Readability } from "@mozilla/readability";
 import { JSDOM } from "jsdom";
-import { type Err, err, ok, type Result } from "neverthrow";
+import { type Err, err, ok, Result } from "neverthrow";
+import { match } from "ts-pattern";
 import { z } from "zod";
 import { logger } from "../logger.js";
+import { abortable } from "../util/abortable.js";
+import { isBlockedAddress, type ResolveHost } from "../util/blocked-address.js";
+import { describeError } from "../util/describe-error.js";
 import { AbortError, withRetry } from "../util/with-retry.js";
 import { defineTool, reject, type ToolRejection, type ToolSpec } from "./tools.js";
 
 const MAX_CONTENT_LENGTH = 50_000;
+
+const MAX_REDIRECTS = 10;
+
+/** One attempt's budget, spanning resolution, every redirect hop and the body read. */
+const ATTEMPT_BUDGET_MS = 15_000;
+
+/**
+ * Past glibc's 5 s resend interval, so a lookup that needs one resend or
+ * skips a dead nameserver still answers; under the attempt's budget, so a
+ * hung resolver ends the attempt and the next one retries it.
+ */
+const LOOKUP_TIMEOUT_MS = 10_000;
+
+/** The statuses `fetch` itself would follow (Fetch Standard, "redirect status"). */
+const REDIRECT_STATUSES: ReadonlySet<number> = new Set([301, 302, 303, 307, 308]);
 
 // Chrome desktop navigation headers. Together these defeat the cheap
 // "is this curl/undici/python-requests?" filters used by Cloudflare's
@@ -68,15 +89,18 @@ function retryHeaders(targetUrl: string): Record<string, string> {
  * Keys are optional — a tool whose key is missing rejects every call.
  * This keeps the tools registered (LLM sees them) so it can explain
  * why a capability is unavailable rather than silently lacking it.
+ *
+ * `resolveHost` answers `fetch_url`'s destination check.
  */
 export function createWebTools(
   tavilyApiKey: string | undefined,
   openRouterApiKey: string | undefined,
+  resolveHost: ResolveHost,
 ): ToolSpec[] {
   return [
     createWebSearch(tavilyApiKey),
     createWebAnswer(openRouterApiKey),
-    createFetchUrl(tavilyApiKey),
+    createFetchUrl(tavilyApiKey, resolveHost),
   ];
 }
 
@@ -214,7 +238,7 @@ function createWebAnswer(apiKey: string | undefined): ToolSpec {
 
 // --- fetch_url ---
 
-function createFetchUrl(tavilyApiKey: string | undefined): ToolSpec {
+function createFetchUrl(tavilyApiKey: string | undefined, resolveHost: ResolveHost): ToolSpec {
   return defineTool({
     name: "fetch_url",
     description:
@@ -231,29 +255,12 @@ function createFetchUrl(tavilyApiKey: string | undefined): ToolSpec {
       url: z.string().url().describe("The URL to fetch (http or https only)"),
     }),
     handler: async (input) => {
-      const urlCheck = validateUrl(input.url);
-      if (urlCheck.isErr()) return err(urlCheck.error);
-
-      let content: string;
-      try {
-        content = await directFetch(input.url);
-      } catch (e) {
-        // A page that can't be fetched is the model's to handle, not a bug.
-        // Fall back to Tavily Extract when the failure looks like a bot
-        // block (403/429 after our retry-with-Referer round, or a 503
-        // / network timeout that often indicates an anti-bot WAF).
-        // Permanent failures like 404 / 401 reject as-is — Tavily
-        // can't conjure pages that don't exist or unauthenticated ones.
-        const errMsg = e instanceof Error ? e.message : String(e);
-        if (!tavilyApiKey || !looksLikeBotBlock(e)) return reject(errMsg);
-        logger.info(
-          { url: new URL(input.url).hostname, originalError: errMsg },
-          "fetch_url falling back to Tavily Extract",
-        );
-        const extracted = await tavilyExtract(input.url, tavilyApiKey, errMsg);
-        if (extracted.isErr()) return err(extracted.error);
-        content = extracted.value;
-      }
+      const direct = await directFetch(new URL(input.url), resolveHost);
+      const fetched: Result<string, ToolRejection> = direct.isOk()
+        ? ok(direct.value)
+        : await afterDirectFailure(direct.error, input.url, tavilyApiKey);
+      if (fetched.isErr()) return err(fetched.error);
+      let content = fetched.value;
 
       if (content.length > MAX_CONTENT_LENGTH) {
         content = `${content.slice(0, MAX_CONTENT_LENGTH)}\n\n[Content truncated at ${MAX_CONTENT_LENGTH} characters]`;
@@ -264,86 +271,253 @@ function createFetchUrl(tavilyApiKey: string | undefined): ToolSpec {
   });
 }
 
-async function directFetch(url: string): Promise<string> {
+/**
+ * Why a direct fetch ended without a page. `refused` is a destination off the
+ * public internet and `unresolvable` a host the resolver had no answer for.
+ * `permanent` is a page that isn't there to fetch over HTTP. `transient` is
+ * one Tavily might still reach: a bot block or flaky server that outlasted
+ * the retries, a redirect loop, a body or page that failed to read.
+ */
+type DirectFetchFailure =
+  | { kind: "refused"; message: string }
+  | { kind: "unresolvable"; host: string }
+  | { kind: "permanent"; message: string }
+  | { kind: "transient"; message: string };
+
+/**
+ * A failed attempt the next one may clear: the resolver briefly unavailable
+ * (`EAI_AGAIN`, or no answer within `LOOKUP_TIMEOUT_MS`), or the attempt's
+ * budget spent mid-lookup. Once the retries run out, the first is
+ * `unresolvable` and the second `transient`.
+ */
+type RetryableFailure =
+  | { kind: "lookup_unavailable"; host: string; message: string }
+  | { kind: "attempt_timed_out"; message: string };
+
+type AttemptFailure = DirectFetchFailure | RetryableFailure;
+
+interface Reached {
+  response: Response;
+  finalUrl: URL;
+}
+
+/**
+ * The model's answer when the direct fetch failed. Only a `transient` failure
+ * goes to Tavily Extract: it can't conjure a page that isn't there, and a
+ * refused or unresolvable host, query string and all, is not one to hand it.
+ */
+function afterDirectFailure(
+  failure: DirectFetchFailure,
+  url: string,
+  tavilyApiKey: string | undefined,
+): Promise<Result<string, ToolRejection>> {
+  return match(failure)
+    .with({ kind: "refused" }, { kind: "permanent" }, async ({ message }) => reject(message))
+    .with({ kind: "unresolvable" }, async ({ host }) => reject(`Could not resolve ${host}.`))
+    .with({ kind: "transient" }, async ({ message }) => {
+      if (!tavilyApiKey) return reject(message);
+      logger.info(
+        { url: new URL(url).hostname, originalError: message },
+        "fetch_url falling back to Tavily Extract",
+      );
+      return tavilyExtract(url, tavilyApiKey, message);
+    })
+    .exhaustive();
+}
+
+/**
+ * Fetch `url` directly. A throw inside the retried attempt is only
+ * `withRetry`'s signal to try again; the attempt records a
+ * {@link RetryableFailure} before throwing, and that record is what the
+ * last attempt's throw ends as; a throw with no record (a retryable status,
+ * `fetch` itself) ends `transient`.
+ */
+async function directFetch(
+  url: URL,
+  resolveHost: ResolveHost,
+): Promise<Result<string, DirectFetchFailure>> {
   let attempt = 0;
-  const res = await withRetry(
-    async () => {
+  let retrying: RetryableFailure | undefined;
+  const reached = await withRetry(
+    async (): Promise<Result<Reached, DirectFetchFailure>> => {
       attempt += 1;
+      retrying = undefined;
       // First attempt looks like a typed-URL navigation. Subsequent
       // attempts add a same-origin Referer + flip Sec-Fetch-Site to
       // cross-site — some bot filters reject only no-referer hits.
-      const headers = attempt === 1 ? BROWSER_HEADERS : retryHeaders(url);
-      const r = await fetch(url, {
-        headers,
-        redirect: "follow",
-        signal: AbortSignal.timeout(15_000),
-      });
+      const headers = attempt === 1 ? BROWSER_HEADERS : retryHeaders(url.href);
+      const hops = await fetchCheckingEachHop(url, headers, resolveHost);
+      if (hops.isErr()) {
+        return match(hops.error)
+          .with({ kind: "lookup_unavailable" }, { kind: "attempt_timed_out" }, (failure) => {
+            retrying = failure;
+            throw new Error(failure.message);
+          })
+          .with(
+            { kind: "refused" },
+            { kind: "unresolvable" },
+            { kind: "permanent" },
+            { kind: "transient" },
+            (failure) => err(failure),
+          )
+          .exhaustive();
+      }
+      const r = hops.value.response;
       // 403/429 are retryable here: many bot filters return them on
       // a no-referer first hit and let the retry-with-Referer
       // through. 5xx is the usual transient-server case. Other 4xx
-      // (404, 401, etc.) are permanent — abort.
+      // (404, 401, etc.) are permanent.
       if (r.status >= 500 || r.status === 403 || r.status === 429) {
         throw new Error(`Fetch failed: ${r.status} ${r.statusText}`);
       }
       if (!r.ok) {
-        throw new PermanentFetchError(r.status, r.statusText);
+        return err({ kind: "permanent", message: `Fetch failed: ${r.status} ${r.statusText}` });
       }
-      return r;
+      return ok(hops.value);
     },
-    // retries: 2 — fetch_url is user-facing through the agent, cap
-    // total wall-clock at 20s so a slow upstream can't make the
-    // user wait through three full 15s timeouts. Context uses only
-    // the hostname so query-string secrets (api keys, signed URLs)
-    // don't end up in the logs.
-    {
-      retries: 2,
-      maxRetryTimeMs: 20_000,
-      context: `fetch_url ${new URL(url).hostname}`,
-      // `shouldRetry` rather than `AbortError` because the caller has to
-      // tell the two failure shapes apart afterwards, and only this path
-      // reaches it with its class intact — see `withRetry`'s note on
-      // AbortError being unwrapped to a plain `Error`.
-      shouldRetry: (err) => !(err instanceof PermanentFetchError),
-    },
+    // retries: 2 — fetch_url is user-facing through the agent, so no
+    // attempt starts after 20s and a slow upstream can't make the user
+    // wait through three full 15s timeouts. Context uses only the
+    // hostname so query-string secrets (api keys, signed URLs) don't
+    // end up in the logs.
+    { retries: 2, maxRetryTimeMs: 20_000, context: `fetch_url ${url.hostname}` },
+  ).catch(
+    (e: unknown): Result<Reached, DirectFetchFailure> =>
+      err(retrying === undefined ? transientFailure(e) : retriesExhausted(retrying)),
   );
+  if (reached.isErr()) return err(reached.error);
 
-  const contentType = res.headers.get("content-type") ?? "";
-  const body = await res.text();
-  return contentType.includes("text/html") ? extractArticle(body, url) : body;
+  const { response, finalUrl } = reached.value;
+  const body = await response.text().then(
+    (text) => ok(text),
+    (e: unknown) => err(transientFailure(e)),
+  );
+  if (body.isErr()) return err(body.error);
+  const contentType = response.headers.get("content-type") ?? "";
+  return contentType.includes("text/html")
+    ? Result.fromThrowable(extractArticle, transientFailure)(body.value, finalUrl.href)
+    : ok(body.value);
+}
+
+function retriesExhausted(failure: RetryableFailure): DirectFetchFailure {
+  return match<RetryableFailure, DirectFetchFailure>(failure)
+    .with({ kind: "lookup_unavailable" }, ({ host }) => ({ kind: "unresolvable", host }))
+    .with({ kind: "attempt_timed_out" }, ({ message }) => ({ kind: "transient", message }))
+    .exhaustive();
+}
+
+function transientFailure(e: unknown): DirectFetchFailure {
+  return { kind: "transient", message: messageOf(e) };
+}
+
+function messageOf(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
 }
 
 /**
- * A response `directFetch` will not retry: 404, 401 and the other 4xx
- * statuses that mean the page genuinely isn't there or isn't ours to read,
- * as opposed to 403/429 which bot filters hand out on a no-referer first hit.
+ * GET `url`, following redirects here rather than in `fetch` so every hop
+ * passes {@link checkDestination} before it is connected to: a public page
+ * redirecting inward is the standard way around a guard like this.
  *
- * A distinct class rather than an `AbortError` because the class has to
- * survive out of `withRetry` for `looksLikeBotBlock` to read it — p-retry
- * unwraps `AbortError` to its `originalError`, which for a string message is
- * a plain `Error`.
+ * A loop past the cap or an unparseable Location is `transient`, returned
+ * rather than thrown so it isn't retried: every hop passed the check, and
+ * Tavily gets past a cookie wall (`302 Location: /article` plus a cookie,
+ * repeating) that `fetch`, with no cookie jar, loops on.
  */
-class PermanentFetchError extends Error {
-  constructor(
-    readonly status: number,
-    statusText: string,
-  ) {
-    super(`Fetch failed: ${status} ${statusText}`);
-    this.name = "PermanentFetchError";
+async function fetchCheckingEachHop(
+  url: URL,
+  headers: Record<string, string>,
+  resolveHost: ResolveHost,
+): Promise<Result<Reached, AttemptFailure>> {
+  const signal = AbortSignal.timeout(ATTEMPT_BUDGET_MS);
+  let current = url;
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+    const allowed = await checkDestination(current, resolveHost, signal);
+    if (allowed.isErr()) return err(allowed.error);
+    const response = await fetch(current.href, { headers, redirect: "manual", signal });
+    const location = REDIRECT_STATUSES.has(response.status)
+      ? response.headers.get("location")
+      : null;
+    if (location === null) return ok({ response, finalUrl: current });
+    await response.body?.cancel();
+    const next = URL.parse(location, current);
+    if (next === null) {
+      return err({
+        kind: "transient",
+        message: `Fetch failed: ${current.hostname} redirected to an unparseable location.`,
+      });
+    }
+    current = next;
   }
+  return err({ kind: "transient", message: `Fetch failed: more than ${MAX_REDIRECTS} redirects.` });
 }
 
 /**
- * Decide whether a `directFetch` failure is bot-block-shaped enough to
- * be worth retrying via Tavily Extract. `directFetch` encodes the
- * dichotomy: permanent failures carry {@link PermanentFetchError},
- * retryable ones (403 / 429 / 5xx after exhausting retries, network
- * timeouts, undici-level fetch errors) arrive as a plain `Error`. Tavily
- * can only help with the latter — it can't conjure pages that don't exist
- * or unauthenticated ones, and falling back there burns a credit to relay
- * the same 404.
+ * Refuse a destination off the public internet. Why, and the DNS-rebinding
+ * residual: design/agents.md → Security: `fetch_url` Destinations. The
+ * address stays out of the refusal, which the model reads, and goes to the
+ * log for the operator.
  */
-function looksLikeBotBlock(error: unknown): boolean {
-  return error instanceof Error && !(error instanceof PermanentFetchError);
+async function checkDestination(
+  url: URL,
+  resolveHost: ResolveHost,
+  signal: AbortSignal,
+): Promise<Result<void, AttemptFailure>> {
+  // `permanent`, not `transient`: neither `fetch` nor Tavily, which would
+  // follow the same redirect, reaches a page outside HTTP.
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    return err({ kind: "permanent", message: `Unsupported protocol: ${url.protocol}` });
+  }
+  const addresses = await addressesOf(url, resolveHost, signal);
+  if (addresses.isErr()) return err(addresses.error);
+  const blocked = addresses.value.find((a) => isBlockedAddress(a.address, a.family));
+  if (blocked === undefined) return ok(undefined);
+  logger.info(
+    { host: url.hostname, address: blocked.address },
+    "fetch_url refused a non-public destination",
+  );
+  return err({
+    kind: "refused",
+    message: `Fetching private/internal URLs is not allowed (${url.hostname}).`,
+  });
+}
+
+/** An IP literal as written; a name by every address it resolves to. */
+async function addressesOf(
+  url: URL,
+  resolveHost: ResolveHost,
+  signal: AbortSignal,
+): Promise<Result<ReadonlyArray<LookupAddress>, AttemptFailure>> {
+  // `URL.hostname` keeps an IPv6 literal's brackets.
+  const host = url.hostname.replace(/^\[(.*)\]$/, "$1");
+  const family = isIP(host);
+  if (family !== 0) return ok([{ address: host, family }]);
+  const deadline = AbortSignal.any([signal, AbortSignal.timeout(LOOKUP_TIMEOUT_MS)]);
+  return abortable(
+    Promise.resolve().then(() => resolveHost(host)),
+    deadline,
+  ).then(
+    (addresses) => ok(addresses),
+    (e: unknown) => err(lookupFailure(host, e, signal)),
+  );
+}
+
+function lookupFailure(host: string, e: unknown, attemptSignal: AbortSignal): AttemptFailure {
+  if (attemptSignal.aborted) {
+    return { kind: "attempt_timed_out", message: messageOf(attemptSignal.reason) };
+  }
+  logger.info({ host, err: describeError(e) }, "fetch_url could not resolve a host");
+  return isLookupTimeout(e) || errorCode(e) === "EAI_AGAIN"
+    ? { kind: "lookup_unavailable", host, message: describeError(e) }
+    : { kind: "unresolvable", host };
+}
+
+function isLookupTimeout(e: unknown): boolean {
+  return e instanceof Error && e.name === "TimeoutError";
+}
+
+function errorCode(e: unknown): unknown {
+  return e instanceof Error && "code" in e ? e.code : undefined;
 }
 
 const TavilySearchResponseSchema = z.object({
@@ -431,37 +605,4 @@ function extractArticle(html: string, url: string): string {
   const reader = new Readability(dom.window.document);
   const article = reader.parse();
   return article?.textContent?.trim() ?? "";
-}
-
-function validateUrl(url: string): Result<void, ToolRejection> {
-  const parsed = new URL(url);
-
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    return reject(`Unsupported protocol: ${parsed.protocol}`);
-  }
-
-  // Reject private/internal IPs (string-level check — does not resolve DNS,
-  // so a public hostname resolving to a private IP bypasses this).
-  const hostname = parsed.hostname;
-  if (
-    hostname === "localhost" ||
-    hostname === "127.0.0.1" ||
-    hostname === "0.0.0.0" ||
-    hostname.startsWith("10.") ||
-    hostname.startsWith("192.168.") ||
-    isPrivate172(hostname) ||
-    hostname === "::1" ||
-    hostname.endsWith(".local") ||
-    hostname.endsWith(".internal")
-  ) {
-    return reject("Fetching private/internal URLs is not allowed.");
-  }
-  return ok(undefined);
-}
-
-/** 172.16.0.0/12 = 172.16.x.x through 172.31.x.x */
-function isPrivate172(hostname: string): boolean {
-  if (!hostname.startsWith("172.")) return false;
-  const second = Number.parseInt(hostname.split(".")[1] ?? "", 10);
-  return second >= 16 && second <= 31;
 }

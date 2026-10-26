@@ -1,3 +1,4 @@
+import type { LookupAddress } from "node:dns";
 import { lookup } from "node:dns/promises";
 import { err, ok, type Result } from "neverthrow";
 import { match } from "ts-pattern";
@@ -6,6 +7,7 @@ import { describeFileError } from "../agent/files.js";
 import type { Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
 import type { SecretsStore } from "../secrets/store/index.js";
+import { isBlockedAddress, type ResolveHost } from "../util/blocked-address.js";
 import { describeError } from "../util/describe-error.js";
 import type { CtxFailure, CtxHandler } from "./dispatcher.js";
 import type { SkillRunServices } from "./run-as.js";
@@ -73,7 +75,7 @@ export interface DefaultCtxHandlerOptions {
    * Injected so tests can pin an address without a real DNS round-trip,
    * the same reason `now` is pluggable.
    */
-  resolveHost?: (hostname: string) => Promise<Array<{ address: string; family: number }>>;
+  resolveHost?: ResolveHost;
   /**
    * Sends the `http.request` once the destination has passed the allowlist
    * and address checks. Injected so a test can answer a skill's request
@@ -153,122 +155,6 @@ const HttpRequestArgsSchema = z.object({
   body: z.string().optional(),
   timeoutMs: z.number().int().positive().max(MAX_HTTP_TIMEOUT_MS).optional(),
 });
-
-/**
- * Addresses a skill must not reach. `fetch` runs in the Cogmo server
- * process, so `ctx.http` carries the host's network position — which
- * includes every internal service the deployment can see. Hindsight and
- * Inngest require keys a skill never holds, but still answer some routes
- * without one (see DEPLOYMENT.md → Securing internal services); the web UI,
- * cloud metadata at 169.254.169.254 and any unkeyed service are the same
- * shape of target.
- *
- * This is the one place tier 1 is not at parity with tier 2: a tier-2
- * skill has real sockets but runs in a remote Daytona sandbox with no
- * route to the host's network, so without this check tier 1 would reach
- * strictly more than the less-isolated tier.
- *
- * Checked against resolved addresses rather than the literal, because the
- * interesting targets are names — `hindsight`, `localhost` — not dotted
- * quads. A name that resolves to anything private is refused.
- *
- * The check is not atomic with the connection: `fetch` resolves the name
- * again, so a server answering public first and private second defeats
- * this. Closing that needs a dispatcher that resolves, checks and
- * connects as one step; tracked in todo.md, since it turns on adding
- * undici as a runtime dependency.
- */
-function parseIpv6(input: string): Uint8Array | null {
-  let addr = input.split("%")[0] ?? ""; // drop any zone id
-  // A trailing dotted quad (::ffff:127.0.0.1) is two hex groups wearing
-  // another notation; fold it in so the rest of the parse is uniform.
-  const embedded = addr.match(/^(.*:)(\d{1,3}(?:\.\d{1,3}){3})$/);
-  if (embedded) {
-    const octets = (embedded[2] ?? "").split(".").map(Number);
-    if (octets.some((o) => !Number.isInteger(o) || o < 0 || o > 255)) return null;
-    const hi = (((octets[0] ?? 0) << 8) | (octets[1] ?? 0)).toString(16);
-    const lo = (((octets[2] ?? 0) << 8) | (octets[3] ?? 0)).toString(16);
-    addr = `${embedded[1]}${hi}:${lo}`;
-  }
-  const halves = addr.split("::");
-  if (halves.length > 2) return null;
-  const left = halves[0] ? halves[0].split(":").filter((g) => g !== "") : [];
-  const right =
-    halves.length === 2 && halves[1] ? halves[1].split(":").filter((g) => g !== "") : [];
-  const fill = halves.length === 2 ? 8 - left.length - right.length : 0;
-  if (fill < 0) return null;
-  const groups = [...left, ...Array<string>(fill).fill("0"), ...right];
-  if (groups.length !== 8) return null;
-  const bytes = new Uint8Array(16);
-  for (let i = 0; i < 8; i++) {
-    const g = groups[i] ?? "";
-    if (!/^[0-9a-fA-F]{1,4}$/.test(g)) return null;
-    const v = Number.parseInt(g, 16);
-    bytes[i * 2] = v >> 8;
-    bytes[i * 2 + 1] = v & 0xff;
-  }
-  return bytes;
-}
-
-function isBlockedV4(a: number, b: number): boolean {
-  if (a === 0 || a === 127) return true; // this-host, loopback
-  if (a === 10) return true; // private
-  if (a === 172 && b >= 16 && b <= 31) return true; // private
-  if (a === 192 && b === 168) return true; // private
-  if (a === 169 && b === 254) return true; // link-local, incl. cloud metadata
-  if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
-  if (a === 192 && b === 0) return true; // 192.0.0.0/24 IETF protocol assignments
-  if (a === 198 && (b === 18 || b === 19)) return true; // 198.18.0.0/15 benchmarking
-  if (a === 192 && b === 88) return true; // 192.88.99.0/24 6to4 relay anycast
-  if (a >= 224) return true; // multicast, reserved, broadcast
-  return false;
-}
-
-function isBlockedAddress(address: string, family: number): boolean {
-  if (family === 6) {
-    const bytes = parseIpv6(address);
-    // Unparseable is refused rather than allowed: an address shape this
-    // does not understand is not one it can vouch for.
-    if (!bytes) return true;
-    // v4-mapped (::ffff:7f00:1 and ::ffff:127.0.0.1 are the same address
-    // in different notations) is a v4 address, so judge it as one.
-    const mapped =
-      bytes.slice(0, 10).every((b) => b === 0) && bytes[10] === 0xff && bytes[11] === 0xff;
-    if (mapped) return isBlockedV4(bytes[12] ?? 0, bytes[13] ?? 0);
-    // Other ways an IPv4 address arrives wearing a v6 shape. NAT64 is the
-    // live one: a DNS64 resolver synthesises an AAAA under 64:ff9b::/96
-    // from a private A record, so the guard would wave through an address
-    // the gateway then translates straight back to 10.x.
-    const nat64 =
-      bytes[0] === 0x00 &&
-      bytes[1] === 0x64 &&
-      bytes[2] === 0xff &&
-      bytes[3] === 0x9b &&
-      bytes.slice(4, 12).every((b) => b === 0);
-    if (nat64) return isBlockedV4(bytes[12] ?? 0, bytes[13] ?? 0);
-    // 2002::/16 6to4 carries the v4 address in the next four bytes.
-    if (bytes[0] === 0x20 && bytes[1] === 0x02) {
-      return isBlockedV4(bytes[2] ?? 0, bytes[3] ?? 0);
-    }
-    // ::a.b.c.d (IPv4-compatible, deprecated but still parsed).
-    if (bytes.slice(0, 12).every((b) => b === 0) && !(bytes[12] === 0 && bytes[13] === 0)) {
-      return isBlockedV4(bytes[12] ?? 0, bytes[13] ?? 0);
-    }
-    // fec0::/10 site-local, deprecated but still routed by some stacks.
-    if (bytes[0] === 0xfe && ((bytes[1] ?? 0) & 0xc0) === 0xc0) return true;
-    // ::1 loopback and :: unspecified, in any notation that expands to them.
-    if (bytes.slice(0, 15).every((b) => b === 0) && (bytes[15] === 1 || bytes[15] === 0)) {
-      return true;
-    }
-    if (((bytes[0] ?? 0) & 0xfe) === 0xfc) return true; // fc00::/7 unique-local
-    if (bytes[0] === 0xfe && ((bytes[1] ?? 0) & 0xc0) === 0x80) return true; // fe80::/10
-    return false;
-  }
-  const parts = address.split(".").map(Number);
-  if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255))
-    return true;
-  return isBlockedV4(parts[0] ?? 0, parts[1] ?? 0);
-}
 
 /**
  * Bound a promise that has no abort signal of its own. `dns.lookup` takes
@@ -686,7 +572,7 @@ export class DefaultCtxHandler implements CtxHandler {
     // allowlist entry can match, so anything arriving here is a name or an
     // IPv4 literal — either of which the resolver takes as written.
     const hostname = parsedUrl.hostname;
-    let resolved: Array<{ address: string; family: number }>;
+    let resolved: ReadonlyArray<LookupAddress>;
     try {
       resolved = await withDeadline(
         this.#resolveHost(hostname),
@@ -703,6 +589,9 @@ export class DefaultCtxHandler implements CtxHandler {
         target,
       );
     }
+    // Judged on resolved addresses because the targets worth reaching are
+    // names (`hindsight`, `localhost`), not dotted quads. Why, and the
+    // DNS-rebinding residual: design/skills.md → `ctx.http.request`.
     const blocked = resolved.find((r) => isBlockedAddress(r.address, r.family));
     if (blocked) {
       return refused(

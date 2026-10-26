@@ -148,6 +148,10 @@ This satisfies **Security: Orchestrator Holds Secrets** trivially — the specia
 
 Sub-agents never see API keys — the orchestrator makes all external calls. In v0 a sub-agent runs tool-free and returns only text (see Routing: Agents-as-Tools above). The deferred nested-loop variant would instead return tool calls for the orchestrator to validate and execute — still never holding a key itself.
 
+## Security: `fetch_url` Destinations `[confirmed]`
+
+`fetch_url` runs in the server process, so a URL taken from a page or a message would otherwise reach whatever the deployment can: Hindsight, Inngest, cloud metadata. Every hop is checked before it is connected to, and must be `http`/`https`. An IP literal is judged as written and a name by every address it resolves to; any non-public one refuses the call (`isBlockedAddress` in `src/util/blocked-address.ts`, shared with `ctx.http`). Redirects are followed by hand, up to 10. A refusal names the host but not the address, which goes to the log. Neither a refusal nor a host that does not resolve falls back to Tavily, which would hand the full URL to a third party. A refusal is final. A lookup is retried only while the resolver reports itself unavailable (`EAI_AGAIN`, or no answer within 10s). A later hop's lookup cut off by the attempt's 15s budget is retried as an attempt timeout and, if that keeps happening, ends `transient`, so Tavily gets the original, public URL. The residual is the DNS-rebinding gap described under `ctx.http.request` in [skills.md](skills.md).
+
 ## Messaging Architecture
 
 How messages flow from platform to agent and back. See [`design/transport/`](transport/overview.md).

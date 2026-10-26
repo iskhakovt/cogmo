@@ -7,6 +7,7 @@
  * exists before any Transport is built over it.
  */
 
+import { lookup } from "node:dns/promises";
 import { createWebTools } from "../agent/web-tools.js";
 import { env } from "../env.js";
 import type { SkillRunnerImpl } from "../skills/runner.js";
@@ -30,7 +31,9 @@ export async function bootstrapRuntime(
 
   // Tool clients live with the agent loop that consumes them. Core
   // exposes credentials as strings; runtime turns them into clients.
-  const webTools = createWebTools(core.tavilyKey, core.openrouterKey);
+  const webTools = createWebTools(core.tavilyKey, core.openrouterKey, (hostname) =>
+    lookup(hostname, { all: true }),
+  );
 
   // Fal image catalog + web channel, under the bootstrap lock; the web channel
   // must exist before `startChannels` matches its placeholder adapter.

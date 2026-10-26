@@ -21,6 +21,11 @@ const stubService: Service = (() => {
   return svc;
 })();
 
+/** These tests read tool metadata only; `fetch_url` never resolves a host. */
+async function unusedResolver(): Promise<never> {
+  throw new Error("tools.test does not resolve hosts");
+}
+
 const TimeResultSchema = z.object({
   iso: z.string(),
   dayOfWeek: z.string(),
@@ -263,7 +268,7 @@ describe("ToolSpec.sideEffectful", () => {
   // If a tool drifts away from `sideEffectful: false` (or is renamed) this
   // test fails — Class D's progress gate (PR 6) would silently regress.
   it("marks the documented read-only tools as sideEffectful: false", () => {
-    const webTools = createWebTools("tavily-key", "openrouter-key");
+    const webTools = createWebTools("tavily-key", "openrouter-key", unusedResolver);
     const webByName = new Map(webTools.map((t) => [t.name, t]));
     const defaults = createDefaultTools([], "UTC");
 
@@ -387,7 +392,7 @@ describe("durability policy invariant", () => {
       ...pipelineTools,
       delegateCodingTool,
       registerSkillTool,
-      ...createWebTools("tavily-key", "openrouter-key"),
+      ...createWebTools("tavily-key", "openrouter-key", unusedResolver),
       ...createDocumentTools({
         upload: async () => "path",
         put: async () => "path",
