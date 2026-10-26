@@ -5,6 +5,8 @@ import type { Bot } from "grammy";
 import type { Document } from "grammy/types";
 import { lookup } from "mime-types";
 import { err, ok, type Result } from "neverthrow";
+import { match, P } from "ts-pattern";
+import { z } from "zod";
 import { logger } from "../../../logger.js";
 import { type InboundContent, MAX_INBOUND_FILE_BYTES } from "../../content.js";
 import type { Transport } from "../../transport.js";
@@ -15,12 +17,15 @@ import type { ProfileDialogs } from "./profile-dialog.js";
 import type { RepoDialogs } from "./repo-dialog.js";
 
 /**
- * Why a Telegram-hosted file couldn't be downloaded. Either way the caller
- * logs and skips the message rather than persisting a bogus attachment:
+ * Why a Telegram-hosted file couldn't be downloaded. The caller skips the
+ * message rather than persisting a bogus attachment, telling the user about
+ * `too_large` and logging the rest:
  *
- *   - `no_file_path`: `getFile()` returns no `file_path` for files over
- *     20MB and for certain media types. The URL would end in `/undefined`,
- *     and the 404 page behind it would be uploaded as the user's file.
+ *   - `too_large`: over the Bot API's download limit, by the size Telegram
+ *     declared or, when it declared none, by `getFile`'s refusal.
+ *   - `no_file_path`: `getFile()` answered without a `file_path`, which the
+ *     Bot API marks optional. The URL would end in `/undefined`, and the 404
+ *     page behind it would be uploaded as the user's file.
  *   - `local_path`: a Bot API server run with `--local` answers with an
  *     absolute path on its own disk instead of a path under `/file/`.
  *     Reading it needs that disk, which this process doesn't have.
@@ -29,9 +34,21 @@ import type { RepoDialogs } from "./repo-dialog.js";
  *     error body just the same.
  */
 type FileDownloadError =
+  | { kind: "too_large"; fileId: string }
   | { kind: "no_file_path"; fileId: string }
   | { kind: "local_path"; fileId: string; path: string }
   | { kind: "http_error"; fileId: string; status: number; statusText: string };
+
+/**
+ * The Bot API's answer to `getFile` for a file over its download limit. Only a
+ * server run with `--local` lifts the limit, and its files can't be read here.
+ */
+const FileTooBigSchema = z.object({
+  error_code: z.literal(400),
+  description: z.string().includes("file is too big"),
+});
+
+const TOO_LARGE_REPLY = `That file is too large to open. Telegram bots can download files up to ${MAX_INBOUND_FILE_BYTES / 2 ** 20} MB.`;
 
 const OCTET_STREAM = "application/octet-stream";
 
@@ -96,18 +113,39 @@ interface FileDownloadCtx {
   api: { getFile: (fileId: string) => Promise<{ file_path?: string }> };
 }
 
-/** Download a Telegram-hosted file (photo / document / voice / etc.) by file_id. */
-async function downloadTelegramFile(
+/** A photo size, document or voice note: its id, and its size when Telegram declares one. */
+interface TelegramFile {
+  file_id: string;
+  file_size?: number;
+}
+
+async function getFile(
   ctx: FileDownloadCtx,
   fileId: string,
+): Promise<Result<{ file_path?: string }, FileDownloadError>> {
+  try {
+    return ok(await ctx.api.getFile(fileId));
+  } catch (error) {
+    if (FileTooBigSchema.safeParse(error).success) return err({ kind: "too_large", fileId });
+    throw error;
+  }
+}
+
+/** Download a Telegram-hosted file (photo / document / voice / etc.). */
+async function downloadTelegramFile(
+  ctx: FileDownloadCtx,
+  { file_id: fileId, file_size: declaredBytes }: TelegramFile,
   { apiRoot, token }: { apiRoot: string; token: string },
 ): Promise<Result<Buffer, FileDownloadError>> {
-  const file = await ctx.api.getFile(fileId);
-  if (!file.file_path) return err({ kind: "no_file_path", fileId });
-  if (file.file_path.startsWith("/")) {
-    return err({ kind: "local_path", fileId, path: file.file_path });
+  if (declaredBytes !== undefined && declaredBytes > MAX_INBOUND_FILE_BYTES) {
+    return err({ kind: "too_large", fileId });
   }
-  const url = `${apiRoot}/file/bot${token}/${file.file_path}`;
+  const file = await getFile(ctx, fileId);
+  if (file.isErr()) return err(file.error);
+  const path = file.value.file_path;
+  if (!path) return err({ kind: "no_file_path", fileId });
+  if (path.startsWith("/")) return err({ kind: "local_path", fileId, path });
+  const url = `${apiRoot}/file/bot${token}/${path}`;
   const response = await fetch(url);
   if (!response.ok) {
     return err({
@@ -118,6 +156,22 @@ async function downloadTelegramFile(
     });
   }
   return ok(Buffer.from(await response.arrayBuffer()));
+}
+
+/** Tell the user a file is over the download limit; log any other failure as `message`. */
+function reportDownloadFailure(
+  ctx: { reply: (text: string) => Promise<unknown> },
+  error: FileDownloadError,
+  message: string,
+): Promise<void> {
+  return match(error)
+    .with({ kind: "too_large" }, async () => {
+      await ctx.reply(TOO_LARGE_REPLY);
+    })
+    .with({ kind: P.union("no_file_path", "local_path", "http_error") }, async () => {
+      logger.error({ error }, message);
+    })
+    .exhaustive();
 }
 
 export interface MessageHandlerDeps {
@@ -173,9 +227,9 @@ export function registerMessageHandlers(
       const photo = ctx.message.photo.at(-1);
       if (!photo) return;
 
-      const download = await downloadTelegramFile(ctx, photo.file_id, { apiRoot, token });
+      const download = await downloadTelegramFile(ctx, photo, { apiRoot, token });
       if (download.isErr()) {
-        logger.error({ error: download.error }, "failed to process photo");
+        await reportDownloadFailure(ctx, download.error, "failed to process photo");
         return;
       }
       const buffer = download.value;
@@ -222,9 +276,9 @@ export function registerMessageHandlers(
           bytes: doc.file_size,
         });
       } else {
-        const download = await downloadTelegramFile(ctx, doc.file_id, { apiRoot, token });
+        const download = await downloadTelegramFile(ctx, doc, { apiRoot, token });
         if (download.isErr()) {
-          logger.error({ error: download.error }, "failed to process document");
+          await reportDownloadFailure(ctx, download.error, "failed to process document");
           return;
         }
         const buffer = download.value;
@@ -265,9 +319,9 @@ export function registerMessageHandlers(
       // mime_type field is informational. Hardcode rather than relying on it.
       const mediaType = "audio/ogg";
 
-      const download = await downloadTelegramFile(ctx, voice.file_id, { apiRoot, token });
+      const download = await downloadTelegramFile(ctx, voice, { apiRoot, token });
       if (download.isErr()) {
-        logger.error({ error: download.error }, "failed to process voice message");
+        await reportDownloadFailure(ctx, download.error, "failed to process voice message");
         return;
       }
       const buffer = download.value;
