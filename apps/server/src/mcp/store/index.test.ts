@@ -239,14 +239,18 @@ describe("DrizzleMcpStore", () => {
   });
 
   describe("listApprovedToolPins", () => {
-    async function pin(serverId: string, toolName: string, approved: boolean) {
+    async function pin(
+      serverId: string,
+      toolName: string,
+      approvalStatus: "approved" | "pending" | "rejected",
+    ) {
       await tx((trx) =>
         store.upsertToolPin(trx, {
           serverId,
           toolName,
           schemaHash: "h",
           schemaSnapshot: { description: "d", inputSchema: {} },
-          approvalStatus: approved ? "approved" : "pending",
+          approvalStatus,
         }),
       );
     }
@@ -259,18 +263,19 @@ describe("DrizzleMcpStore", () => {
 
     it("lists approved pins of enabled, approved servers by server name, then tool name", async () => {
       const zeta = await approvedServer("zeta", true);
-      await pin(zeta.id, "b", true);
-      await pin(zeta.id, "a", true);
-      await pin(zeta.id, "c", false);
+      await pin(zeta.id, "b", "approved");
+      await pin(zeta.id, "a", "approved");
+      await pin(zeta.id, "c", "pending");
+      await pin(zeta.id, "d", "rejected");
       const alpha = await approvedServer("alpha", true);
-      await pin(alpha.id, "x", true);
+      await pin(alpha.id, "x", "approved");
       const disabled = await approvedServer("beta", false);
-      await pin(disabled.id, "y", true);
+      await pin(disabled.id, "y", "approved");
       const pending = await seedServer("gamma", true);
-      await pin(pending.id, "z", true);
+      await pin(pending.id, "z", "approved");
       const reapproval = await approvedServer("delta", true);
       await tx((trx) => store.setServerApprovalStatus(trx, reapproval.id, "needs_reapproval"));
-      await pin(reapproval.id, "w", true);
+      await pin(reapproval.id, "w", "approved");
 
       const listed = await tx((trx) => store.listApprovedToolPins(trx));
 

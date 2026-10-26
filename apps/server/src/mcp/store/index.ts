@@ -18,6 +18,12 @@ import { mcpServers, mcpServerTools } from "./schema.js";
 /** The unique constraint on `mcp_servers.name`. */
 export const MCP_SERVER_NAME_CONSTRAINT = "mcp_servers_name_unique";
 
+/** An approved tool pin with the server it belongs to. */
+export interface ApprovedToolPin {
+  server: McpServer;
+  pin: McpToolPin;
+}
+
 export interface McpStore {
   /**
    * Insert a new server. A taken name raises the driver's unique violation on
@@ -48,7 +54,7 @@ export interface McpStore {
    * The approved pins of every enabled, approved server, each with its server,
    * ordered by server name, then tool name. Hot path: called from resolveTools.
    */
-  listApprovedToolPins(tx: Transaction): Promise<readonly { server: McpServer; pin: McpToolPin }[]>;
+  listApprovedToolPins(tx: Transaction): Promise<readonly ApprovedToolPin[]>;
 
   setEnabled(tx: Transaction, id: string, enabled: boolean): Promise<void>;
 
@@ -176,9 +182,7 @@ export class DrizzleMcpStore implements McpStore {
     }));
   }
 
-  async listApprovedToolPins(
-    tx: Transaction,
-  ): Promise<readonly { server: McpServer; pin: McpToolPin }[]> {
+  async listApprovedToolPins(tx: Transaction): Promise<readonly ApprovedToolPin[]> {
     const rows = await tx
       .select({ server: mcpServers, pin: mcpServerTools })
       .from(mcpServerTools)
