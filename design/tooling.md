@@ -115,7 +115,7 @@ const activeRules = await db
   .orderBy(steeringRules.createdAt);
 ```
 
-drizzle-kit generates migration SQL from schema diffs (`pnpm db:generate`, then review the `.sql`). Boot and `cogmo seed` apply pending migrations through `src/db/migrate-per-file.ts`, one transaction per file.
+drizzle-kit generates migration SQL from schema diffs (`pnpm db:generate`, then review the `.sql`). Boot, `cogmo seed` and `pnpm db:migrate` apply pending migrations through `src/db/migrate-per-file.ts`, one transaction per file under the bootstrap advisory lock, so a file that adds an enum value commits before the file that uses it. `drizzle-kit migrate` applies every pending file in one transaction, which rejects that pair whenever the enum predates the run.
 
 ## Utility Libraries
 
