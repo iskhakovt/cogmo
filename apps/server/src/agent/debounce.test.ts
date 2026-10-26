@@ -160,31 +160,30 @@ describe("native router — handler behavior", () => {
     );
   });
 
-  it("records a debounceWaitMs sample with kind=native when event.ts is present", async () => {
-    const { debounceWaitMs } = await import("../metrics.js");
+  it("records one kind=native debounceWaitMs sample per fire, the trigger event's age", async () => {
+    // Driven through the engine, which re-invokes the body at every step
+    // boundary as the executor does.
     const recordSpy = vi.spyOn(debounceWaitMs, "record");
+    const sendSpy = spyOnInngestSend(inngest).mockResolvedValue({ ids: ["fake"] });
+    try {
+      const [router] = createDebounceFunctions({
+        idleTimeoutMs: 3000,
+        maxWaitMs: 30000,
+        resumePolicy: "debounce",
+      });
+      const { result } = await new InngestTestEngine({
+        function: expectDefined(router, "router"),
+        events: [{ name: "inbound/arrived", data: baseEvent.data, ts: Date.now() - 2500 }],
+      }).execute();
 
-    const [router] = createDebounceFunctions({
-      idleTimeoutMs: 3000,
-      maxWaitMs: 30000,
-      resumePolicy: "debounce",
-    });
-    const step = mockStep();
-    const eventWithTs = {
-      ...baseEvent,
-      ts: Date.now() - 2500, // pretend the trigger event was created 2.5s ago
-    };
-    await invokeInngestFn<DebounceRouterCtx>(expectDefined(router, "router"), {
-      event: eventWithTs,
-      step,
-    });
-
-    expect(recordSpy).toHaveBeenCalledWith(expect.any(Number), { kind: "native" });
-    const recordedMs = recordSpy.mock.calls[0]?.[0] as number;
-    // Sampled wall-clock gap should be at least the synthetic 2.5s offset.
-    expect(recordedMs).toBeGreaterThanOrEqual(2500);
-
-    recordSpy.mockRestore();
+      expect(result).toEqual({ mode: "native", triggerInboundId: "inbound-1" });
+      expect(recordSpy).toHaveBeenCalledExactlyOnceWith(expect.any(Number), { kind: "native" });
+      const [recordedMs] = expectDefined(recordSpy.mock.calls[0], "record call");
+      expect(recordedMs).toBeGreaterThanOrEqual(2500);
+    } finally {
+      recordSpy.mockRestore();
+      sendSpy.mockRestore();
+    }
   });
 });
 
@@ -412,7 +411,7 @@ describe("legacy timers — durable sleep floor", () => {
       "1m30s",
     ],
   ])(
-    "%s timer records the wait Inngest performs, not the one requested (%#)",
+    "%s timer records one sample per fire, the wait Inngest performs, not the one requested (%#)",
     async (kind, fnIndex, config, eventName, timeoutMs, expectedDuration) => {
       const recordSpy = vi.spyOn(debounceWaitMs, "record");
       try {
@@ -434,12 +433,15 @@ describe("legacy timers — durable sleep floor", () => {
         expect(sleepDuration).toBe(expectedDuration);
 
         // Memoize the sleep as already elapsed so the run continues into the
-        // record + emit tail; the engine has no clock to advance.
+        // emit and the record; the engine has no clock to advance. It re-invokes
+        // the body at every step boundary, as the executor does.
         await new InngestTestEngine({ function: timer, events }).execute({
           steps: [{ id: "wait", handler: () => null }],
         });
 
-        expect(recordSpy).toHaveBeenCalledWith(inngestDurationToMs(sleepDuration), { kind });
+        expect(recordSpy).toHaveBeenCalledExactlyOnceWith(inngestDurationToMs(sleepDuration), {
+          kind,
+        });
       } finally {
         recordSpy.mockRestore();
       }
