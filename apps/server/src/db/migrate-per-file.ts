@@ -26,10 +26,10 @@
  * file atomicity rarely matters: stock `migrate()` leaves the same partial
  * state when the process exits before its outer commit.
  *
- * **Serialization.** The runner takes no lock itself. Its production callers
- * (`bootstrapCore`, `migrateAndSeed`) run it under the bootstrap advisory
- * lock (`bootstrapLock`), so concurrent `cogmo serve` / `cogmo seed` /
- * `cogmo setup` runs migrate one at a time.
+ * **Serialization.** The runner takes no lock itself. Its callers
+ * (`bootstrapCore`, `migrateAndSeed`, `scripts/migrate.ts`) run it under the
+ * bootstrap advisory lock (`bootstrapLock`), so concurrent `cogmo serve` /
+ * `cogmo seed` / `cogmo setup` / `pnpm db:migrate` runs migrate one at a time.
  *
  * **Hash validation.** Before applying any pending migration, the
  * already-applied rows are compared against the on-disk files' hashes.

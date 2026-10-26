@@ -180,9 +180,7 @@ class _Http:
             args["timeoutMs"] = timeout_ms
         return await self._b.call("http.request", args)
 
-    async def get(
-        self, url: str, headers: dict[str, str] | None = None, timeout_ms: int | None = None
-    ) -> Any:
+    async def get(self, url: str, headers: dict[str, str] | None = None, timeout_ms: int | None = None) -> Any:
         return await self.request("GET", url, headers=headers, timeout_ms=timeout_ms)
 
     async def post(
@@ -391,5 +389,5 @@ async def _main(
         stdin_task.cancel()
         try:
             await stdin_task
-        except (asyncio.CancelledError, Exception):
+        except asyncio.CancelledError, Exception:
             pass

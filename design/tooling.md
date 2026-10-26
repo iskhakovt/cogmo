@@ -115,7 +115,7 @@ const activeRules = await db
   .orderBy(steeringRules.createdAt);
 ```
 
-drizzle-kit generates migration SQL from schema diffs (`pnpm db:generate`, then review the `.sql`). Boot and `cogmo seed` apply pending migrations through `src/db/migrate-per-file.ts`, one transaction per file.
+drizzle-kit generates migration SQL from schema diffs (`pnpm db:generate`, then review the `.sql`). Boot, `cogmo seed` and `pnpm db:migrate` apply pending migrations through `src/db/migrate-per-file.ts`, one transaction per file under the bootstrap advisory lock, so a file that adds an enum value commits before the file that uses it. `drizzle-kit migrate` applies every pending file in one transaction, which rejects that pair whenever the enum predates the run.
 
 ## Utility Libraries
 
@@ -214,6 +214,6 @@ The TypeScript host is the primary stack, but tier-2 skills run inside a python 
 - **pyrefly** for typechecking — Meta's Rust typechecker, replaces Pyre. Picked over `mypy` (slower, weaker inference on partial annotations) and Astral's `ty` (still beta, ~53% spec conformance vs pyrefly's ~88% as of May 2026). Re-evaluate when `ty` hits 1.0 (Astral's track record on `ruff` / `uv` makes it the long-term favourite).
 - **pytest** + `pytest-asyncio` (`asyncio_mode = "auto"`).
 - src layout: `src/<package_name>/`, `tests/`, `py.typed` marker.
-- Every python sub-project ships its CI in `.github/workflows/ci.yml` as a separate job that runs `uv sync --locked`, `ruff check`, `pyrefly check`, `pytest`.
+- Every python sub-project ships its CI in `.github/workflows/ci.yml` as a separate job that runs `uv sync --locked`, `ruff check`, `ruff format --check`, `pyrefly check`, `pytest`.
 - Multi-stage Dockerfile: builder syncs locked deps into a venv; runtime stage copies just the venv to `/opt/<name>/.venv` and adds it to `PATH`. `UV_NO_DEV=1`, `UV_NO_EDITABLE=1`, `UV_COMPILE_BYTECODE=1`. No build deps in the runtime stage.
 - Python that runs inside the TypeScript host's Pyodide worker is a `.py` file beside its host, not a string in TS: `apps/server/src/skills/worker-wasm/py/`. Its `ruff.toml` extends `images/skills/pyproject.toml`, and the `skills-runtime` job runs `ruff check` and `ruff format --check` over it. No pyrefly: `pyodide.ffi`, `js` and `micropip` resolve only inside Pyodide.
