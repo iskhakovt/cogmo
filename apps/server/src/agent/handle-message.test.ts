@@ -22,6 +22,7 @@ import {
   fakeRunInTx,
   invokeInngestFn,
   invokeInngestOnFailure,
+  loopResult,
   MOCK_MESSAGE_CREATED_AT,
   type MockStep,
   mockAgentStore,
@@ -101,17 +102,14 @@ function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
     }),
     debounceConfig: { idleTimeoutMs: 0, maxWaitMs: 0, resumePolicy: "debounce" as const },
     deliveryRouter: mockDeliveryRouter(),
-    runStreamingAgentLoop: vi.fn().mockResolvedValue({
-      text: "Hello from assistant",
-      messages: [],
-      newMessages: [
-        { role: "assistant", content: [{ type: "text", text: "Hello from assistant" }] },
-      ],
-      usage: { inputTokens: 10, outputTokens: 5 },
-      model: "mock-model",
-      iterations: 1,
-      streamed: { text: "", toolUseIds: [] },
-    }),
+    runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
+      loopResult({
+        text: "Hello from assistant",
+        newMessages: [
+          { role: "assistant", content: [{ type: "text", text: "Hello from assistant" }] },
+        ],
+      }),
+    ),
     userTimezone: "UTC",
     attachmentReader: createAttachmentReader(mockAttachmentStore(), 24_000_000),
     images: mockImages(),
@@ -422,17 +420,12 @@ describe("createHandleMessage", () => {
     const handle = mockDeliveryHandle();
     const deps = mockDeps({
       deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
-      runStreamingAgentLoop: vi.fn().mockImplementation(async (params) => {
+      runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>(async (params) => {
         await params.onEvent({ type: "text_delta", text: "hi" });
-        return {
+        return loopResult({
           text: "hi",
-          messages: [],
           newMessages: [{ role: "assistant", content: [{ type: "text", text: "hi" }] }],
-          usage: { inputTokens: 10, outputTokens: 5 },
-          model: "mock",
-          iterations: 1,
-          streamed: { text: "", toolUseIds: [] },
-        };
+        });
       }),
     });
 
@@ -892,42 +885,39 @@ describe("createHandleMessage", () => {
         upload: vi.fn().mockResolvedValue("inbound/x"),
         download: vi.fn().mockResolvedValue(docBytes),
       }),
-      runStreamingAgentLoop: vi.fn().mockResolvedValue({
-        text: "here you go",
-        messages: [],
-        newMessages: [
-          {
-            role: "assistant",
-            content: [
-              {
-                type: "tool_use",
-                id: "tu_1",
-                name: "send_document",
-                input: { filename: "report.md", content: "# Hello" },
-              },
-            ],
-          },
-          {
-            role: "user",
-            content: [
-              {
-                type: "tool_result",
-                toolUseId: "tu_1",
-                content: JSON.stringify({
-                  path: "generated/abc.md",
-                  mediaType: "text/markdown",
-                  name: "report.md",
-                }),
-              },
-            ],
-          },
-          { role: "assistant", content: [{ type: "text", text: "here you go" }] },
-        ],
-        usage: { inputTokens: 10, outputTokens: 5 },
-        model: "mock-model",
-        iterations: 1,
-        streamed: { text: "", toolUseIds: [] },
-      }),
+      runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
+        loopResult({
+          text: "here you go",
+          newMessages: [
+            {
+              role: "assistant",
+              content: [
+                {
+                  type: "tool_use",
+                  id: "tu_1",
+                  name: "send_document",
+                  input: { filename: "report.md", content: "# Hello" },
+                },
+              ],
+            },
+            {
+              role: "user",
+              content: [
+                {
+                  type: "tool_result",
+                  toolUseId: "tu_1",
+                  content: JSON.stringify({
+                    path: "generated/abc.md",
+                    mediaType: "text/markdown",
+                    name: "report.md",
+                  }),
+                },
+              ],
+            },
+            { role: "assistant", content: [{ type: "text", text: "here you go" }] },
+          ],
+        }),
+      ),
     });
 
     await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
@@ -960,46 +950,43 @@ describe("createHandleMessage", () => {
         upload: vi.fn().mockResolvedValue("inbound/x"),
         download,
       }),
-      runStreamingAgentLoop: vi.fn().mockResolvedValue({
-        text: "here",
-        messages: [],
-        newMessages: [
-          {
-            role: "assistant",
-            content: [
-              { type: "tool_use", id: "tu_a", name: "send_document", input: {} },
-              { type: "tool_use", id: "tu_b", name: "send_document", input: {} },
-            ],
-          },
-          {
-            role: "user",
-            content: [
-              {
-                type: "tool_result",
-                toolUseId: "tu_a",
-                content: JSON.stringify({
-                  path: "generated/a.md",
-                  mediaType: "text/markdown",
-                  name: "a.md",
-                }),
-              },
-              {
-                type: "tool_result",
-                toolUseId: "tu_b",
-                content: JSON.stringify({
-                  path: "generated/b.md",
-                  mediaType: "text/markdown",
-                  name: "b.md",
-                }),
-              },
-            ],
-          },
-        ],
-        usage: { inputTokens: 1, outputTokens: 1 },
-        model: "mock-model",
-        iterations: 1,
-        streamed: { text: "", toolUseIds: [] },
-      }),
+      runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
+        loopResult({
+          text: "here",
+          newMessages: [
+            {
+              role: "assistant",
+              content: [
+                { type: "tool_use", id: "tu_a", name: "send_document", input: {} },
+                { type: "tool_use", id: "tu_b", name: "send_document", input: {} },
+              ],
+            },
+            {
+              role: "user",
+              content: [
+                {
+                  type: "tool_result",
+                  toolUseId: "tu_a",
+                  content: JSON.stringify({
+                    path: "generated/a.md",
+                    mediaType: "text/markdown",
+                    name: "a.md",
+                  }),
+                },
+                {
+                  type: "tool_result",
+                  toolUseId: "tu_b",
+                  content: JSON.stringify({
+                    path: "generated/b.md",
+                    mediaType: "text/markdown",
+                    name: "b.md",
+                  }),
+                },
+              ],
+            },
+          ],
+        }),
+      ),
     });
 
     await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
@@ -1034,30 +1021,27 @@ describe("createHandleMessage", () => {
         upload: vi.fn().mockResolvedValue("inbound/x"),
         download,
       }),
-      runStreamingAgentLoop: vi.fn().mockResolvedValue({
-        text: "pictures",
-        messages: [],
-        newMessages: [
-          {
-            role: "assistant",
-            content: [
-              { type: "tool_use", id: "tu_a", name: "generate_image", input: {} },
-              { type: "tool_use", id: "tu_b", name: "generate_image", input: {} },
-            ],
-          },
-          {
-            role: "user",
-            content: [
-              imageResult("tu_a", "generated/a.png"),
-              imageResult("tu_b", "generated/b.png"),
-            ],
-          },
-        ],
-        usage: { inputTokens: 1, outputTokens: 1 },
-        model: "mock-model",
-        iterations: 1,
-        streamed: { text: "", toolUseIds: [] },
-      }),
+      runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
+        loopResult({
+          text: "pictures",
+          newMessages: [
+            {
+              role: "assistant",
+              content: [
+                { type: "tool_use", id: "tu_a", name: "generate_image", input: {} },
+                { type: "tool_use", id: "tu_b", name: "generate_image", input: {} },
+              ],
+            },
+            {
+              role: "user",
+              content: [
+                imageResult("tu_a", "generated/a.png"),
+                imageResult("tu_b", "generated/b.png"),
+              ],
+            },
+          ],
+        }),
+      ),
     });
     const step = mockStep();
 
@@ -1466,22 +1450,20 @@ describe("createHandleMessage", () => {
     // conversation's size. That adapters report the total is pinned in their
     // own tests (anthropic.test.ts → usage totals).
     const deps = mockDeps({
-      runStreamingAgentLoop: vi.fn().mockResolvedValue({
-        text: "Hello from assistant",
-        messages: [],
-        newMessages: [
-          { role: "assistant", content: [{ type: "text", text: "Hello from assistant" }] },
-        ],
-        usage: {
-          inputTokens: 600_000,
-          outputTokens: 400,
-          cacheReadTokens: 598_000,
-          cacheCreationTokens: 1_900,
-        },
-        model: "mock-model",
-        iterations: 1,
-        streamed: { text: "", toolUseIds: [] },
-      }),
+      runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
+        loopResult({
+          text: "Hello from assistant",
+          newMessages: [
+            { role: "assistant", content: [{ type: "text", text: "Hello from assistant" }] },
+          ],
+          usage: {
+            inputTokens: 600_000,
+            outputTokens: 400,
+            cacheReadTokens: 598_000,
+            cacheCreationTokens: 1_900,
+          },
+        }),
+      ),
     });
     await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
       event: testEvent,
@@ -3788,16 +3770,12 @@ describe("createHandleMessage", () => {
     const deps = mockDeps({
       resolveProvider: mockResolver(synthesisProvider),
       deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
-      runStreamingAgentLoop: vi.fn().mockResolvedValue({
-        text: "",
-        messages: [],
-        newMessages: [],
-        usage: { inputTokens: 10, outputTokens: 5 },
-        model: "mock-model",
-        iterations: 2,
-        streamed: { text: "", toolUseIds: [] },
-        degraded: { reason: "model returned an empty turn", subtype: "empty_end_turn" },
-      }),
+      runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
+        loopResult({
+          iterations: 2,
+          degraded: { reason: "model returned an empty turn", subtype: "empty_end_turn" },
+        }),
+      ),
     });
 
     await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
@@ -3821,7 +3799,7 @@ describe("createHandleMessage", () => {
     const textPushes = vi
       .mocked(handle.push)
       .mock.calls.flat()
-      .filter((e) => (e as { type: string }).type === "text_delta");
+      .filter((e) => e.type === "text_delta");
     expect(textPushes).toHaveLength(1);
     expect(textPushes[0]).toEqual({
       type: "text_delta",
@@ -3871,21 +3849,15 @@ describe("createHandleMessage", () => {
     const deps = mockDeps({
       resolveProvider: mockResolver(synthesisProvider),
       deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
-      runStreamingAgentLoop: vi.fn().mockImplementation(async (params) => {
+      runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>(async (params) => {
         await params.onEvent({ type: "text_delta", text: "The three key points are: (1) the dep" });
-        return {
-          text: "",
-          messages: [],
-          newMessages: [],
-          usage: { inputTokens: 10, outputTokens: 5 },
-          model: "mock-model",
-          iterations: 1,
+        return loopResult({
           streamed: { text: "The three key points are: (1) the dep", toolUseIds: [] },
           degraded: {
             reason: "request exceeded the model's context window",
             subtype: "context_overflow",
           },
-        };
+        });
       }),
     });
 
@@ -3931,7 +3903,7 @@ describe("createHandleMessage", () => {
         usage: { inputTokens: 100, outputTokens: 12 },
       }),
     });
-    const persisted = [
+    const persisted: Message[] = [
       {
         role: "assistant",
         content: [
@@ -3947,7 +3919,7 @@ describe("createHandleMessage", () => {
     const deps = mockDeps({
       resolveProvider: mockResolver(synthesisProvider),
       deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
-      runStreamingAgentLoop: vi.fn().mockImplementation(async (params) => {
+      runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>(async (params) => {
         // Iteration 1 — narration + a tool call that ran to completion.
         await params.onEvent({ type: "text_delta", text: "Let me check the weather." });
         await params.onEvent({
@@ -3966,12 +3938,8 @@ describe("createHandleMessage", () => {
           name: "get_weather",
           input: { city: "Tokyo" },
         });
-        return {
-          text: "",
-          messages: [],
+        return loopResult({
           newMessages: persisted,
-          usage: { inputTokens: 10, outputTokens: 5 },
-          model: "mock-model",
           iterations: 2,
           streamed: {
             text: "Let me check the weather. It's 18C in Paris and",
@@ -3981,7 +3949,7 @@ describe("createHandleMessage", () => {
             reason: "request exceeded the model's context window",
             subtype: "context_overflow",
           },
-        };
+        });
       }),
     });
 
@@ -4033,13 +4001,11 @@ describe("createHandleMessage", () => {
     const deps = mockDeps({
       resolveProvider: mockResolver(synthesisProvider),
       deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
-      runStreamingAgentLoop: vi.fn().mockImplementation(async (params) => {
+      runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>(async (params) => {
         await params.onEvent({ type: "text_delta", text: "Still working on it." });
         await params.onEvent({ type: "tool_start", id: "t1", name: "get_weather", input: {} });
         await params.onEvent({ type: "tool_result", name: "get_weather", output: "18C" });
-        return {
-          text: "",
-          messages: [],
+        return loopResult({
           newMessages: [
             {
               role: "assistant",
@@ -4050,12 +4016,10 @@ describe("createHandleMessage", () => {
             },
             { role: "user", content: [{ type: "tool_result", toolUseId: "t1", content: "18C" }] },
           ],
-          usage: { inputTokens: 10, outputTokens: 5 },
-          model: "mock-model",
           iterations: 20,
           streamed: { text: "Still working on it.", toolUseIds: ["t1"] },
           degraded: { reason: "iteration_cap", subtype: null },
-        };
+        });
       }),
     });
 
@@ -4093,16 +4057,12 @@ describe("createHandleMessage", () => {
     const deps = mockDeps({
       resolveProvider: mockResolver(failingSynthesis),
       deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
-      runStreamingAgentLoop: vi.fn().mockResolvedValue({
-        text: "",
-        messages: [],
-        newMessages: [],
-        usage: { inputTokens: 10, outputTokens: 5 },
-        model: "mock-model",
-        iterations: 2,
-        streamed: { text: "", toolUseIds: [] },
-        degraded: { reason: "model returned an empty turn", subtype: "empty_end_turn" },
-      }),
+      runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
+        loopResult({
+          iterations: 2,
+          degraded: { reason: "model returned an empty turn", subtype: "empty_end_turn" },
+        }),
+      ),
     });
 
     await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
@@ -4119,7 +4079,7 @@ describe("createHandleMessage", () => {
     const textPushes = vi
       .mocked(handle.push)
       .mock.calls.flat()
-      .filter((e) => (e as { type: string }).type === "text_delta");
+      .filter((e) => e.type === "text_delta");
     expect(textPushes[0]).toEqual({
       type: "text_delta",
       text: "I had trouble generating a clean response — the model returned an output I couldn't process. Could you rephrase or try again?",
@@ -4134,16 +4094,11 @@ describe("createHandleMessage", () => {
     const deps = mockDeps({
       resolveProvider: mockResolver(failingSynthesis),
       deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
-      runStreamingAgentLoop: vi.fn().mockResolvedValue({
-        text: "",
-        messages: [],
-        newMessages: [],
-        usage: { inputTokens: 10, outputTokens: 5 },
-        model: "mock-model",
-        iterations: 1,
-        streamed: { text: "", toolUseIds: [] },
-        degraded: { reason: "model refused the request", subtype: "refusal" },
-      }),
+      runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
+        loopResult({
+          degraded: { reason: "model refused the request", subtype: "refusal" },
+        }),
+      ),
     });
 
     await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
@@ -4155,7 +4110,7 @@ describe("createHandleMessage", () => {
     const textPushes = vi
       .mocked(handle.push)
       .mock.calls.flat()
-      .filter((e) => (e as { type: string }).type === "text_delta");
+      .filter((e) => e.type === "text_delta");
     expect(textPushes[0]).toEqual({
       type: "text_delta",
       text: "The model declined that request. Try rephrasing, or switch model with `/model`.",
@@ -4164,19 +4119,15 @@ describe("createHandleMessage", () => {
 
   it("emits conversation/degraded with subtype, reason, runId, conversationId, triggerInboundId", async () => {
     const deps = mockDeps({
-      runStreamingAgentLoop: vi.fn().mockResolvedValue({
-        text: "",
-        messages: [],
-        newMessages: [],
-        usage: { inputTokens: 10, outputTokens: 5 },
-        model: "mock-model",
-        iterations: 2,
-        streamed: { text: "", toolUseIds: [] },
-        degraded: {
-          reason: "streamed tool-call arguments could not be parsed",
-          subtype: "stream_truncation",
-        },
-      }),
+      runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
+        loopResult({
+          iterations: 2,
+          degraded: {
+            reason: "streamed tool-call arguments could not be parsed",
+            subtype: "stream_truncation",
+          },
+        }),
+      ),
     });
 
     const step = mockStep();
@@ -4207,16 +4158,12 @@ describe("createHandleMessage", () => {
 
   it("emits conversation/degraded with subtype: stuck_loop for the Class D consecutive trip", async () => {
     const deps = mockDeps({
-      runStreamingAgentLoop: vi.fn().mockResolvedValue({
-        text: "",
-        messages: [],
-        newMessages: [],
-        usage: { inputTokens: 10, outputTokens: 5 },
-        model: "mock-model",
-        iterations: 3,
-        streamed: { text: "", toolUseIds: [] },
-        degraded: { reason: "stuck_loop", subtype: "stuck_loop" },
-      }),
+      runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
+        loopResult({
+          iterations: 3,
+          degraded: { reason: "stuck_loop", subtype: "stuck_loop" },
+        }),
+      ),
     });
 
     const step = mockStep();
@@ -4243,16 +4190,12 @@ describe("createHandleMessage", () => {
 
   it("emits conversation/degraded with subtype: stuck_loop_cumulative for the Class D cumulative trip", async () => {
     const deps = mockDeps({
-      runStreamingAgentLoop: vi.fn().mockResolvedValue({
-        text: "",
-        messages: [],
-        newMessages: [],
-        usage: { inputTokens: 10, outputTokens: 5 },
-        model: "mock-model",
-        iterations: 9,
-        streamed: { text: "", toolUseIds: [] },
-        degraded: { reason: "stuck_loop", subtype: "stuck_loop_cumulative" },
-      }),
+      runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
+        loopResult({
+          iterations: 9,
+          degraded: { reason: "stuck_loop", subtype: "stuck_loop_cumulative" },
+        }),
+      ),
     });
 
     const step = mockStep();
@@ -4307,19 +4250,16 @@ describe("createHandleMessage", () => {
     const deps = mockDeps({
       resolveProvider: mockResolver(synthesisProvider),
       deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
-      runStreamingAgentLoop: vi.fn().mockResolvedValue({
-        text: "",
-        messages: [],
-        // The successful tool round IS persisted; the apology is appended.
-        // The failing iteration's assistant content is already excluded
-        // upstream by the loop.
-        newMessages: successfulToolRound,
-        usage: { inputTokens: 10, outputTokens: 5 },
-        model: "mock-model",
-        iterations: 3,
-        streamed: { text: "", toolUseIds: [] },
-        degraded: { reason: "model returned an empty turn", subtype: "empty_end_turn" },
-      }),
+      runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
+        loopResult({
+          // The successful tool round IS persisted; the apology is appended.
+          // The failing iteration's assistant content is already excluded
+          // upstream by the loop.
+          newMessages: successfulToolRound,
+          iterations: 3,
+          degraded: { reason: "model returned an empty turn", subtype: "empty_end_turn" },
+        }),
+      ),
     });
 
     await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
@@ -4351,16 +4291,11 @@ describe("createHandleMessage", () => {
 
   it("still emits response/ready on the degraded path so downstream consumers run", async () => {
     const deps = mockDeps({
-      runStreamingAgentLoop: vi.fn().mockResolvedValue({
-        text: "",
-        messages: [],
-        newMessages: [],
-        usage: { inputTokens: 10, outputTokens: 5 },
-        model: "mock-model",
-        iterations: 1,
-        streamed: { text: "", toolUseIds: [] },
-        degraded: { reason: "model refused the request", subtype: "refusal" },
-      }),
+      runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
+        loopResult({
+          degraded: { reason: "model refused the request", subtype: "refusal" },
+        }),
+      ),
     });
 
     const step = mockStep();
@@ -4387,17 +4322,12 @@ describe("createHandleMessage", () => {
     async function captureStepRun(): Promise<<T>(id: string, fn: () => Promise<T>) => Promise<T>> {
       let captured: (<T>(id: string, fn: () => Promise<T>) => Promise<T>) | undefined;
       const deps = mockDeps({
-        runStreamingAgentLoop: vi.fn().mockImplementation(async (params) => {
+        runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>(async (params) => {
           captured = params.stepRun;
-          return {
+          return loopResult({
             text: "ok",
-            messages: [],
             newMessages: [{ role: "assistant", content: [{ type: "text", text: "ok" }] }],
-            usage: { inputTokens: 1, outputTokens: 1 },
-            model: "mock-model",
-            iterations: 1,
-            streamed: { text: "", toolUseIds: [] },
-          };
+          });
         }),
       });
       await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
@@ -4543,7 +4473,7 @@ describe("createHandleMessage", () => {
       const handle = mockDeliveryHandle({ push: vi.fn().mockResolvedValue(err(deliveryFailed)) });
       const deps = mockDeps({
         deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
-        runStreamingAgentLoop: vi.fn().mockImplementation(async (params) => {
+        runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>(async (params) => {
           pushOutcome = await params.onEvent({ type: "text_delta", text: "hi" }).then(
             () => "resolved",
             (e: unknown) => e,
