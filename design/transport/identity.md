@@ -14,7 +14,7 @@ Each channel has an identity mode controlling how platform users map to internal
 
 Identity resolution is internal to the transport layer — adapters pass `platformUserHandle`, the transport resolves it. See [adapters.md](adapters.md).
 
-The mode determines which query to run — no fallback logic:
+`resolveUser` matches the channel's wildcard row first, then the handle's row. The Invariant below keeps a wildcard row off `mapped` and `create` channels, so each mode reduces to one query:
 
 | Mode | Query | On miss |
 |-|-|-|

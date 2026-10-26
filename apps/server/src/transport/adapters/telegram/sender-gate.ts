@@ -3,12 +3,12 @@ import { logger } from "../../../logger.js";
 import type { Transport } from "../../transport.js";
 
 /**
- * Drop an update unless the channel admits its sender, and answer nothing:
- * any answer tells a stranger the bot is live (design/transport/identity.md →
- * Allowlist enforcement). An update with no sender (a channel post) has no
- * identity to admit, and no handler takes one. A failed check drops the
- * update too: grammY has already marked it handled, and rethrowing would
- * hand the whole update, content included, to `bot.catch`'s log.
+ * Drop an update unless the channel admits its sender, and answer nothing
+ * (design/transport/identity.md → Allowlist enforcement). An update with no
+ * sender (a channel post) has no identity to admit, and no handler takes one.
+ * A failed check drops the update too: rethrowing buys no redelivery, since
+ * polling has already moved past it, and would hand the whole update, content
+ * included, to `bot.catch`'s log.
  */
 export function senderGate(transport: Pick<Transport, "senders">): MiddlewareFn<Context> {
   return async (ctx, next) => {

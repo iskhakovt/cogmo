@@ -2,13 +2,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Transactor } from "../../db/index.js";
 import { logger } from "../../logger.js";
 import { mockTransportStore } from "../../test/factories.js";
+import type { ChannelIdentityMode } from "../store/schema.js";
 import { createSenders } from "./senders.js";
 
 const FAKE_TX = { __mockTx: true } as never;
 const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
 
 /** The namespace on channel `ch-1`, whose mode is `mode` and whose identity rows are `known`. */
-function sendersOn(mode: "fixed" | "mapped" | "create" | undefined, known: ReadonlyArray<string>) {
+function sendersOn(mode: ChannelIdentityMode | undefined, known: ReadonlyArray<string>) {
   const transportStore = mockTransportStore({
     getChannelIdentityMode: vi.fn().mockResolvedValue(mode),
     resolveUser: vi.fn(async (_tx, _channelId, handle: string) =>
