@@ -23,7 +23,7 @@ const URL_KEYS: ReadonlySet<string> = new Set([
   "http.target",
 ]);
 
-/** `url` cut at its query or fragment, with Bot API token segments redacted. */
+/** `url` cut at its query or fragment, with `redactSecretsInText` applied. */
 function redactUrl(url: string): string {
   const end = url.search(/[?#]/);
   return redactSecretsInText(end === -1 ? url : url.slice(0, end));
@@ -46,8 +46,9 @@ function redactUrl(url: string): string {
  * Queries are dropped rather than scrubbed by parameter name: a credential
  * can sit under any name (`key`, `token`, a presigned URL's signature), and
  * which endpoint a span called is in the path, not the query. Free text —
- * span names, status messages, `exception.*` — has only the token segment
- * redacted; a URL embedded in prose has no reliable end to cut at.
+ * span names, status messages, `exception.*` — keeps its queries and gets
+ * only `redactSecretsInText` (URL userinfo, access tokens, Bot API token
+ * segments); a URL embedded in prose has no reliable end to cut at.
  */
 export class RedactingSpanExporter implements SpanExporter {
   readonly #inner: SpanExporter;

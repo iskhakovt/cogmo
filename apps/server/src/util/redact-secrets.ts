@@ -14,8 +14,9 @@
  * and tool output can carry a bare GitHub or Anthropic token.
  *
  * No pattern is anchored on a word boundary: a token can follow a letter, a
- * digit or an underscore (`MY_TOKEN_ghp_…`, a JSON-escaped `\nghp_…`). Each
- * starts with a literal and has one quantifier, so a pass is linear.
+ * digit or an underscore (`MY_TOKEN_ghp_…`, a JSON-escaped `\nghp_…`, a
+ * colour code's `m`). Tokens are told from words by their body instead. Each
+ * pattern starts with a literal and no quantifier nests, so a pass is linear.
  */
 
 /** What a token-shaped path segment is replaced with. */
@@ -33,19 +34,22 @@ const BOT_TOKEN_SEGMENT = /\/bot\d+(?::|%3[Aa])[A-Za-z0-9_-]+/g;
 
 /**
  * A URL's userinfo under any scheme, up to the last `@` before the host: a
- * user, a password, either alone or empty. It can't hold whitespace, a
- * delimiter that ends the authority (`/?#`), or a character a URL must
- * percent-encode (quotes, backslash, angle brackets), so a candidate never
- * runs past its host into the surrounding text or JSON. The `/` ending each
- * candidate also keeps candidates from overlapping.
+ * user, a password, either alone or empty. It stops at whitespace and at the
+ * delimiters that end the authority (`/?#`), and at `"` and `\`, so it never
+ * runs on through a JSON string's closing quote or escape into the rest of a
+ * log line. The `/` ending each candidate also keeps candidates from
+ * overlapping.
  */
-const URL_USERINFO = /:\/\/[^\s/?#"'`<>\\{}|^]*@/g;
+const URL_USERINFO = /:\/\/[^\s/?#"\\]*@/g;
 
-/** GitHub classic, OAuth, user-to-server, server-to-server, refresh and fine-grained tokens. */
-const GITHUB_TOKEN = /(gh[pousr]|github_pat)_[A-Za-z0-9_]{20,}/g;
+/** GitHub classic, OAuth, user-to-server, server-to-server and refresh tokens: 36+ base62 characters. */
+const GITHUB_TOKEN = /(gh[pousr])_[A-Za-z0-9]{36,}/g;
 
-/** Anthropic API keys and OAuth tokens: `sk-ant-api03-…`, `sk-ant-oat01-…`. */
-const ANTHROPIC_KEY = /sk-ant-[A-Za-z0-9_-]{20,}/g;
+/** GitHub fine-grained tokens. */
+const GITHUB_FINE_GRAINED_TOKEN = /github_pat_[A-Za-z0-9_]{36,}/g;
+
+/** Anthropic API keys and OAuth tokens: a kind and version (`api03`, `oat01`), then the secret. */
+const ANTHROPIC_KEY = /sk-ant-[a-z]+\d+-[A-Za-z0-9_-]{20,}/g;
 
 /**
  * `text` with URL userinfo, GitHub and Anthropic tokens, and Bot API token
@@ -57,6 +61,7 @@ export function redactSecretsInText(text: string): string {
   return text
     .replace(URL_USERINFO, "://REDACTED@")
     .replace(GITHUB_TOKEN, "$1_REDACTED")
+    .replace(GITHUB_FINE_GRAINED_TOKEN, "github_pat_REDACTED")
     .replace(ANTHROPIC_KEY, "sk-ant-REDACTED")
     .replace(BOT_TOKEN_SEGMENT, `/${REDACTED_BOT_SEGMENT}`);
 }

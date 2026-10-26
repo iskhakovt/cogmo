@@ -98,6 +98,11 @@ describe("redactSecretsInText", () => {
       "connect through http://REDACTED@proxy.internal:3128/ failed",
     ],
     [
+      "punctuation a URL must percent-encode inside the password",
+      "connect through http://operator:it's<{|^}>`@proxy.internal:3128/ failed",
+      "connect through http://REDACTED@proxy.internal:3128/ failed",
+    ],
+    [
       "a URL glued to a JSON-escaped newline",
       String.raw`{"msg":"push failed\nhttps://u:p@h/x"}`,
       String.raw`{"msg":"push failed\nhttps://REDACTED@h/x"}`,
@@ -107,8 +112,8 @@ describe("redactSecretsInText", () => {
     expect(redactSecretsInText(input)).toBe(expected);
   });
 
-  it.each(["ghp", "gho", "ghu", "ghs", "ghr", "github_pat"])("masks %s_ tokens", (prefix) => {
-    const token = `${prefix}_${"A1b2_".repeat(8)}`;
+  it.each(["ghp", "gho", "ghu", "ghs", "ghr"])("masks %s_ tokens", (prefix) => {
+    const token = `${prefix}_${"A1b2".repeat(9)}`;
     expect(redactSecretsInText(`GH_TOKEN=${token} rest`)).toBe(`GH_TOKEN=${prefix}_REDACTED rest`);
   });
 
@@ -116,6 +121,12 @@ describe("redactSecretsInText", () => {
     ["after an identifier", `MY_TOKEN_${PAT}`, "MY_TOKEN_ghp_REDACTED"],
     ["after a digit", `1${PAT}`, "1ghp_REDACTED"],
     ["after a JSON-escaped newline", String.raw`"a\n${PAT}"`, String.raw`"a\nghp_REDACTED"`],
+    ["after a colour code", `\u001b[31m${PAT}\u001b[0m`, "\u001b[31mghp_REDACTED\u001b[0m"],
+    [
+      "a fine-grained token",
+      `x github_pat_${"A".repeat(22)}_${"b".repeat(59)} y`,
+      "x github_pat_REDACTED y",
+    ],
     [
       "an Anthropic OAuth token",
       `CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-${"Ab9_-".repeat(20)}`,
@@ -134,12 +145,17 @@ describe("redactSecretsInText", () => {
     ["a URL then an address in a JSON line", '{"url":"https://github.com","user":"a@b.c"}'],
     ["a push rejection", " ! [rejected]        cogmo/abc -> cogmo/abc (non-fast-forward)"],
     ["a short token-like word", "ghp_short and sk-ant-short"],
+    ["a word ending in a token prefix", "highs_and_lows_of_the_quarterly_report"],
+    ["another such word", "laughs_per_minute_aggregate_counter_v2"],
+    ["a hyphenated word ending in sk", "task-ant-colony-simulation-config-file"],
   ])("leaves %s untouched", (_label, input) => {
     expect(redactSecretsInText(input)).toBe(input);
   });
 
   it("is idempotent", () => {
-    const once = redactSecretsInText(`https://u:${PAT}@github.com ${PAT} sk-ant-${"y".repeat(30)}`);
+    const once = redactSecretsInText(
+      `https://u:${PAT}@github.com ${PAT} sk-ant-api03-${"y".repeat(30)}`,
+    );
     expect(redactSecretsInText(once)).toBe(once);
   });
 

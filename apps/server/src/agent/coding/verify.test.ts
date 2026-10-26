@@ -169,6 +169,21 @@ describe("runVerifyStreaming", () => {
     expect(result.output).not.toContain(pat.slice(0, 15));
   });
 
+  it("keeps none of a credential the capture stops inside, however masking shrinks what's before it", async () => {
+    // Masking shortens each key by ~90 characters; the password runs from
+    // just before the cap to well past anything the capture reads.
+    const keys = `ANTHROPIC_API_KEY=sk-ant-api03-${"k".repeat(90)}\n`.repeat(12);
+    const filler = `${"x".repeat(OUTPUT_CAP_BYTES - keys.length - 600)}\n`;
+    const remote = `remote: https://deploy:${"SuperSecretPassw0rd".repeat(400)}@github.com/o/r\n`;
+    const container = fakeContainer({ stdoutChunks: [keys, filler, remote], exitCode: 1 });
+
+    const result = await runVerifyStreaming({ container, verifyCommand: "t", timeoutSeconds: 60 });
+
+    expect(result.output).toMatch(/output truncated at \d+ bytes/);
+    expect(result.output).toContain("ANTHROPIC_API_KEY=sk-ant-REDACTED\n");
+    expect(result.output).not.toMatch(/SuperSecret|deploy:/);
+  });
+
   it("returns timedOut=true with TIMEOUT_EXIT_CODE when the wait exceeds the budget", async () => {
     const container = fakeContainer({
       stdoutChunks: ["working...\n"],

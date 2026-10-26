@@ -8,6 +8,7 @@ import type { Transactor } from "../../db/index.js";
 import { codingTaskStart } from "../../inngest/events.js";
 import { logger } from "../../logger.js";
 import { describeError } from "../../util/describe-error.js";
+import { redactSecretsInText } from "../../util/redact-secrets.js";
 import type { CodingStore } from "./store/index.js";
 
 const log = logger.child({ component: "coding.service" });
@@ -50,7 +51,7 @@ export async function startCodingTask(
         deps.codingStore.failQueuedTask(
           tx,
           taskId,
-          `inngest.send failed: ${describeError(sendErr)}`,
+          redactSecretsInText(`inngest.send failed: ${describeError(sendErr)}`),
         ),
       )
       .then((freed) => {
