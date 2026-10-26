@@ -7,6 +7,7 @@ import type { MigrateSkillsRemoteCliDeps } from "./cli/migrate-skills-remote.js"
 import type { ModelCliDeps } from "./cli/model.js";
 import { CONSOLE_IO, type CommandTree, loadCommandGroups, runCli } from "./cli/run.js";
 import type { SkillsCliDeps } from "./cli/skills.js";
+import { sendLogsTo } from "./logger.js";
 import { RESET_SCOPES, type ResetScope } from "./setup/reset-scopes.js";
 
 // Each imports what it runs inside its handler, so `gen-key` and `web-token`
@@ -72,6 +73,9 @@ const GROUPS: Record<string, () => Promise<CommandTree>> = {
 };
 
 const argv = process.argv.length > 2 ? process.argv.slice(2) : ["serve"];
+// `serve`'s stdout is where its container runtime or systemd collects logs;
+// every other command keeps stdout for output a caller may pipe.
+sendLogsTo(argv[0] === "serve" ? "stdout" : "stderr");
 const cogmo = subcommands({
   name: "cogmo",
   description: "Personal agent runtime. With no command, runs `serve`.",

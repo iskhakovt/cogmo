@@ -8,20 +8,24 @@
  */
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+const repoRoot = fileURLToPath(new URL("../../../", import.meta.url));
 
 function generatedPatterns(): string[] {
-  const lines = readFileSync(".gitattributes", "utf8").split("\n");
+  const lines = readFileSync(`${repoRoot}.gitattributes`, "utf8").split("\n");
   return lines.flatMap((line) => {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("#")) return [];
-    const tokens = trimmed.split(/\s+/);
-    if (!tokens.slice(1).includes("linguist-generated=true")) return [];
-    return [tokens[0]];
+    const [pattern, ...attributes] = trimmed.split(/\s+/);
+    if (pattern === undefined || !attributes.includes("linguist-generated=true")) return [];
+    return [pattern];
   });
 }
 
 const excludes = generatedPatterns().flatMap((p) => ["--exclude", p]);
 const result = spawnSync("tokei", [...excludes, ...process.argv.slice(2)], {
+  cwd: repoRoot,
   stdio: "inherit",
 });
 process.exit(result.status ?? 1);

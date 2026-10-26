@@ -1,6 +1,8 @@
+import { createHash } from "node:crypto";
 import Anthropic, { BadRequestError } from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { logger } from "../logger.js";
+import { canonicalKeyOrder } from "../util/canonical-key-order.js";
 import { abortReasonOr } from "./abort.js";
 import {
   hasOpenObject,
@@ -40,6 +42,7 @@ import {
   type ContentBlock,
   type CountTokensParams,
   DEFAULT_MAX_TOKENS,
+  type JsonSchema,
   type LlmResponse,
   type Message,
   type ResponseFormat,
@@ -91,6 +94,11 @@ export class AnthropicProvider implements LlmProvider {
   readonly name = "anthropic";
   #client: Anthropic;
   #endpoint: Endpoint;
+  /**
+   * Digests ({@link schemaDigest}) of schemas the grammar couldn't compile;
+   * `chat` sends them straight on the tool path.
+   */
+  readonly #grammarRejected = new Set<string>();
 
   constructor(apiKey: string, baseURL?: string, options?: AnthropicProviderOptions) {
     this.#client = new Anthropic({
@@ -363,7 +371,8 @@ export class AnthropicProvider implements LlmProvider {
   /**
    * Send a non-streaming request. A structured-output schema past the
    * grammar's compile limits ({@link isGrammarLimitError}) goes once more on
-   * the tool path: a pre-check can't foresee the internal grammar-size limit.
+   * the tool path, since a pre-check can't foresee the internal grammar-size
+   * limit, and on the tool path alone after that.
    */
   async #create(
     params: ChatParams,
@@ -373,13 +382,17 @@ export class AnthropicProvider implements LlmProvider {
       this.#client.beta.messages.create(buildCreateParams(params, toolPath, this.#endpoint), {
         signal,
       });
-    const toolPath = takesToolPath(params);
+    const format = params.responseFormat;
+    const toolPath =
+      takesToolPath(params) ||
+      (format !== undefined && this.#grammarRejected.has(schemaDigest(format.schema)));
     try {
       return { response: await send(toolPath), toolPath };
     } catch (err) {
-      if (toolPath || params.responseFormat === undefined || !isGrammarLimitError(err)) throw err;
+      if (toolPath || format === undefined || !isGrammarLimitError(err)) throw err;
+      this.#grammarRejected.add(schemaDigest(format.schema));
       logger.warn(
-        { model: params.model, format: params.responseFormat.name, err },
+        { model: params.model, format: format.name, err },
         "structured output can't compile the schema, retrying on the tool path",
       );
       return { response: await send(true), toolPath: true };
@@ -667,6 +680,13 @@ function isGrammarLimitError(err: unknown): boolean {
     body.success &&
     GRAMMAR_LIMIT_MESSAGES.some((message) => body.data.error.message.includes(message))
   );
+}
+
+/** A SHA-256 of `schema` that its key order doesn't change. */
+function schemaDigest(schema: JsonSchema): string {
+  return createHash("sha256")
+    .update(JSON.stringify(canonicalKeyOrder(schema)))
+    .digest("hex");
 }
 
 /**

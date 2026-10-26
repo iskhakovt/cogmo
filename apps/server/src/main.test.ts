@@ -1,7 +1,8 @@
 /**
- * Runs `src/main.ts` as a subprocess with an empty environment: each command
- * group reaches its own tree, and the built-in commands parse without a
- * configured runtime. Every case exits before a handler needs the database.
+ * Runs `src/main.ts` as a subprocess with no environment beyond `PATH` and
+ * `NODE_ENV`: each command group reaches its own tree, the built-in commands
+ * parse without a configured runtime, and logs reach the stream picked for the
+ * command. Every case exits before a handler needs the database.
  */
 
 import { spawn } from "node:child_process";
@@ -10,6 +11,22 @@ import { describe, expect, it } from "vitest";
 
 const PACKAGE_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
+const EXIT_LINE = "logged on exit";
+
+/**
+ * Preloaded ahead of `src/main.ts`: logs {@link EXIT_LINE} through `logger`
+ * as the command exits, after the entrypoint has chosen where logs go. Every
+ * command that logs on its own needs Postgres, which this tier doesn't run.
+ */
+const LOG_ON_EXIT = `data:text/javascript,${encodeURIComponent(`
+  import { logger } from ${JSON.stringify(new URL("logger.ts", import.meta.url).href)};
+  const exit = process.exit;
+  process.exit = (code) => {
+    logger.info(${JSON.stringify(EXIT_LINE)});
+    return exit(code);
+  };
+`)}`;
+
 interface Exit {
   code: number | null;
   stdout: string;
@@ -17,10 +34,23 @@ interface Exit {
 }
 
 function cogmo(...args: string[]): Promise<Exit> {
+  return launch([], {}, args);
+}
+
+/** `cogmo` with {@link LOG_ON_EXIT} preloaded, under `NODE_ENV=nodeEnv`. */
+function cogmoLogging(nodeEnv: string, ...args: string[]): Promise<Exit> {
+  return launch(["--import", LOG_ON_EXIT], { NODE_ENV: nodeEnv }, args);
+}
+
+function launch(
+  nodeArgs: readonly string[],
+  env: Readonly<Record<string, string>>,
+  args: readonly string[],
+): Promise<Exit> {
   return new Promise((resolve, reject) => {
-    const proc = spawn(process.execPath, ["--import", "tsx", "src/main.ts", ...args], {
+    const proc = spawn(process.execPath, ["--import", "tsx", ...nodeArgs, "src/main.ts", ...args], {
       cwd: PACKAGE_ROOT,
-      env: { PATH: process.env.PATH },
+      env: { PATH: process.env.PATH, ...env },
     });
     let stdout = "";
     let stderr = "";
@@ -79,6 +109,26 @@ describe.concurrent("cogmo entrypoint", { timeout: 60_000 }, () => {
 
     expect(code).toBe(0);
     expect(stdout).toMatch(/^COGMO_MASTER_KEY=\S+$/m);
+  });
+
+  it.each(["production", "development"])(
+    "logs a command to stderr, leaving stdout to its output (NODE_ENV=%s)",
+    async (nodeEnv) => {
+      const { code, stdout, stderr } = await cogmoLogging(nodeEnv, "gen-key");
+
+      expect(code).toBe(0);
+      expect(stdout).toMatch(/^COGMO_MASTER_KEY=\S+$/m);
+      expect(stdout).not.toContain(EXIT_LINE);
+      expect(stderr).toContain(EXIT_LINE);
+    },
+  );
+
+  it("logs `serve` to stdout", async () => {
+    const { code, stdout, stderr } = await cogmoLogging("production", "serve", "--help");
+
+    expect(code).toBe(0);
+    expect(stdout).toContain(EXIT_LINE);
+    expect(stderr).not.toContain(EXIT_LINE);
   });
 
   it("refuses to print a web token without the master key", async () => {

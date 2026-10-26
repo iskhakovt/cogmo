@@ -1,3 +1,4 @@
+import { NonRetriableError } from "inngest";
 import type { LlmProviderResolver } from "../../llm/resolver.js";
 import type { AttachmentStore } from "../../transport/attachment-store.js";
 import { contentToBlocks } from "../../transport/content.js";
@@ -68,7 +69,9 @@ export async function recordUserMessage(
       ? await step.run("transcribe-voice", async () => {
           const stt = voiceBundle?.stt;
           if (!stt) {
-            throw new Error(
+            // The resolver returns no bundle only for absent or invalid
+            // config, which a retry would find unchanged.
+            throw new NonRetriableError(
               "voice block received but no STT provider configured — run `cogmo setup` and configure voice, or insert a `voice_config` row pointing at valid `secrets` entries",
             );
           }

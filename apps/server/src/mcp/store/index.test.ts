@@ -117,17 +117,14 @@ describe("DrizzleMcpStore", () => {
     });
   });
 
-  describe("listServers / listEnabledServers", () => {
-    it("orders by name and filters by enabled", async () => {
+  describe("listServers", () => {
+    it("orders by name, disabled servers included", async () => {
       await seedServer("zeta", true);
       await seedServer("alpha", false);
       await seedServer("beta", true);
 
       const all = await tx((trx) => store.listServers(trx));
       expect(all.map((s) => s.name)).toEqual(["alpha", "beta", "zeta"]);
-
-      const enabled = await tx((trx) => store.listEnabledServers(trx));
-      expect(enabled.map((s) => s.name)).toEqual(["beta", "zeta"]);
     });
   });
 
@@ -214,8 +211,8 @@ describe("DrizzleMcpStore", () => {
     });
   });
 
-  describe("getToolPins / getApprovedToolPins", () => {
-    it("returns pins ordered by tool name and filters approved", async () => {
+  describe("getToolPins", () => {
+    it("returns pins ordered by tool name, whatever their approval", async () => {
       const server = await seedServer();
       await tx((trx) =>
         store.upsertToolPin(trx, {
@@ -238,9 +235,60 @@ describe("DrizzleMcpStore", () => {
 
       const all = await tx((trx) => store.getToolPins(trx, server.id));
       expect(all.map((p) => p.toolName)).toEqual(["create_pr", "list_issues"]);
+    });
+  });
 
-      const approved = await tx((trx) => store.getApprovedToolPins(trx, server.id));
-      expect(approved.map((p) => p.toolName)).toEqual(["list_issues"]);
+  describe("listApprovedToolPins", () => {
+    async function pin(
+      serverId: string,
+      toolName: string,
+      approvalStatus: "approved" | "pending" | "rejected",
+    ) {
+      await tx((trx) =>
+        store.upsertToolPin(trx, {
+          serverId,
+          toolName,
+          schemaHash: "h",
+          schemaSnapshot: { description: "d", inputSchema: {} },
+          approvalStatus,
+        }),
+      );
+    }
+
+    async function approvedServer(name: string, enabled: boolean) {
+      const server = await seedServer(name, enabled);
+      await tx((trx) => store.setServerApprovalStatus(trx, server.id, "approved"));
+      return server;
+    }
+
+    it("lists approved pins of enabled, approved servers by server name, then tool name", async () => {
+      const zeta = await approvedServer("zeta", true);
+      await pin(zeta.id, "b", "approved");
+      await pin(zeta.id, "a", "approved");
+      await pin(zeta.id, "c", "pending");
+      await pin(zeta.id, "d", "rejected");
+      const alpha = await approvedServer("alpha", true);
+      await pin(alpha.id, "x", "approved");
+      const disabled = await approvedServer("beta", false);
+      await pin(disabled.id, "y", "approved");
+      const pending = await seedServer("gamma", true);
+      await pin(pending.id, "z", "approved");
+      const reapproval = await approvedServer("delta", true);
+      await tx((trx) => store.setServerApprovalStatus(trx, reapproval.id, "needs_reapproval"));
+      await pin(reapproval.id, "w", "approved");
+
+      const listed = await tx((trx) => store.listApprovedToolPins(trx));
+
+      expect(listed.map(({ server, pin }) => [server.name, pin.toolName])).toEqual([
+        ["alpha", "x"],
+        ["zeta", "a"],
+        ["zeta", "b"],
+      ]);
+      expect(listed.map(({ server, pin }) => [server.id, pin.serverId])).toEqual([
+        [alpha.id, alpha.id],
+        [zeta.id, zeta.id],
+        [zeta.id, zeta.id],
+      ]);
     });
   });
 
@@ -260,8 +308,8 @@ describe("DrizzleMcpStore", () => {
         store.setToolApproval(trx, server.id, "create_pr", "approved"),
       );
       expect(updated).toBe(true);
-      const pins = await tx((trx) => store.getApprovedToolPins(trx, server.id));
-      expect(pins.map((p) => p.toolName)).toEqual(["create_pr"]);
+      const pins = await tx((trx) => store.getToolPins(trx, server.id));
+      expect(pins.map((p) => [p.toolName, p.approvalStatus])).toEqual([["create_pr", "approved"]]);
     });
 
     it("returns false when no pin exists for the tool name", async () => {

@@ -329,7 +329,9 @@ debounce sleep completes → sendEvent starts executing → inbound/arrived arri
 Both paths feed the `debounceWaitMs` histogram, but with different semantics:
 
 - **Legacy path:** `kind: "idle" | "maxwait"` — exact sleep duration recorded by the timer function.
-- **Native path:** `kind: "native"` — approximated as `Date.now() - event.ts` for the trigger event (last-event-to-handler-fire). Inngest doesn't expose internal debounce timing, so this is the best proxy. For idle-dominated bursts it's close to the actual debounce period; for maxwait-dominated bursts it under-reports because the trigger event is the most recent one, not the first.
+- **Native path:** `kind: "native"` — approximated as `Date.now() - event.ts` for the trigger event, read in the step after the `inbound/ready` emit. Inngest doesn't expose internal debounce timing, so this is the best proxy. For idle-dominated bursts it's close to the actual debounce period; for maxwait-dominated bursts it under-reports because the trigger event is the most recent one, not the first.
+
+Each fire records at most one sample, in its own `record-wait` step after the emit, so a replay doesn't record it again (`.agents/rules/inngest.md`). A legacy idle timer cancelled between its `fire` and `record-wait` steps sends `inbound/ready` without one.
 
 ### Are the guards now obsolete?
 
