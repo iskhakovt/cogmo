@@ -186,9 +186,7 @@ class TestActivateSkillVenv:
     _HASH = "a" * 64
 
     @pytest.fixture(autouse=True)
-    def _redirect_skill_venvs_root(
-        self, tmp_path: object, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def _redirect_skill_venvs_root(self, tmp_path: object, monkeypatch: pytest.MonkeyPatch) -> None:
         """Point `SKILL_VENVS_ROOT` at the per-test tmpdir so the
         supervisor's `_skill_venv_path` computes a path under our
         control. Production wiring uses `/skill-venvs/`, which tests
@@ -292,9 +290,7 @@ class TestActivateSkillVenv:
         with open(os.path.join(site_packages, "skillvenv_marker.py"), "w") as f:
             f.write("ANSWER = 42\n")
         body = (
-            "async def run(inputs, ctx):\n"
-            "    import skillvenv_marker\n"
-            "    return {'answer': skillvenv_marker.ANSWER}\n"
+            "async def run(inputs, ctx):\n    import skillvenv_marker\n    return {'answer': skillvenv_marker.ANSWER}\n"
         )
         task = {
             "type": "task_invoke",
