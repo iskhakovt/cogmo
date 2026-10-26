@@ -14,7 +14,7 @@ Telegram is the primary interactive channel. Personal DM with the bot — single
 
 Implements `AdapterModule` contract (`channelType` + `setup()`). Token extracted from `channel.credentials`. See [adapters.md](adapters.md) for the `Adapter` / `Transport` interfaces.
 
-**Sender gate:** the middleware ahead of every handler asks `transport.senders.admits(String(ctx.from.id))` and stops an update the channel doesn't admit, with no reply, typing indicator or download ([identity.md](identity.md) → Allowlist enforcement). An update with no `from` (a channel post) stops there too: it has no sender to admit, and no handler takes one. A dropped update counts as handled, so `stop()` confirms it and a restart doesn't redeliver it.
+**Sender gate:** the middleware ahead of every handler asks `transport.senders.admits(String(ctx.from.id))` and drops an update the channel doesn't admit ([identity.md](identity.md) → Allowlist enforcement). An update with no `from` (a channel post) stops there too: it has no sender to admit, and no handler takes one. A dropped update counts as handled, so `stop()` confirms it and a restart doesn't redeliver it.
 
 **Inbound:**
 1. `bot.on("message:text")` — resolve/create session via `transport.resolveSession()` / `transport.createConversation()`

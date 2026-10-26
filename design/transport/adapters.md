@@ -108,7 +108,7 @@ Identity resolution is internal — the adapter passes `platformUserHandle`, the
 
 ### Admission
 
-- `senders.admits` — whether the channel admits a sender at all: anyone on `fixed` and `create`, an identity row's handle on `mapped`. An adapter asks it before doing any work for an inbound update and drops the update silently on `false` ([identity.md](identity.md) → Allowlist enforcement).
+- `senders.admits` — whether the channel admits a sender at all, asked before any work for an inbound update by an adapter whose channel can be `mapped` ([identity.md](identity.md) → Allowlist enforcement).
 
 ### Session management
 

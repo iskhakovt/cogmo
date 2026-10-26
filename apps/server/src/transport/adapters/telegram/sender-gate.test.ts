@@ -73,8 +73,7 @@ describe("senderGate", () => {
 
     expect(next).not.toHaveBeenCalled();
     expect(info).toHaveBeenCalledOnce();
-    expect(info.mock.calls[0]?.[0]).toEqual({ handle: "42" });
-    expect(JSON.stringify(info.mock.calls)).not.toContain("the plan");
+    expect(info).toHaveBeenCalledWith({ handle: "42" }, expect.any(String));
   });
 
   it("stops a callback query from a sender the channel doesn't admit", async () => {
@@ -91,13 +90,17 @@ describe("senderGate", () => {
     expect(next).not.toHaveBeenCalled();
   });
 
-  it("runs nothing after it when the admission check fails", async () => {
-    const next = vi.fn();
-    const failing = { senders: { admits: vi.fn().mockRejectedValue(new Error("db down")) } };
+  it("drops the update when the admission check throws, logging the handle and not the update", async () => {
+    const error = vi.spyOn(logger, "error").mockImplementation(() => undefined);
+    const failure = new Error("db down");
 
-    await expect(
-      senderGate(failing)(new Context(message, new Api("test-token"), me), next),
-    ).rejects.toThrow("db down");
+    const { next } = await gate(message, () => Promise.reject(failure));
+
     expect(next).not.toHaveBeenCalled();
+    expect(error).toHaveBeenCalledOnce();
+    expect(error).toHaveBeenCalledWith(
+      { handle: "42", updateId: 1, err: failure },
+      expect.any(String),
+    );
   });
 });

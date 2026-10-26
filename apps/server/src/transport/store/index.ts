@@ -145,7 +145,10 @@ export interface TransportStore {
   getChannelByType(tx: Transaction, type: string): Promise<Omit<ChannelRow, "type"> | undefined>;
 
   /** The channel's `identity_mode`, or `undefined` when no channel has `channelId`. */
-  getChannelIdentityMode(tx: Transaction, channelId: string): Promise<string | undefined>;
+  getChannelIdentityMode(
+    tx: Transaction,
+    channelId: string,
+  ): Promise<ChannelIdentityMode | undefined>;
 
   /** Create a channel. */
   createChannel(
@@ -552,7 +555,10 @@ export class DrizzleTransportStore implements TransportStore {
     return rows[0] as Omit<ChannelRow, "type"> | undefined;
   }
 
-  async getChannelIdentityMode(tx: Transaction, channelId: string): Promise<string | undefined> {
+  async getChannelIdentityMode(
+    tx: Transaction,
+    channelId: string,
+  ): Promise<ChannelIdentityMode | undefined> {
     const rows = await tx
       .select({ identityMode: channels.identityMode })
       .from(channels)

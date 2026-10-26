@@ -1,87 +1,54 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { DrizzleAgentStore } from "../../agent/store/index.js";
-import type { Database, Transactor } from "../../db/index.js";
-import { createTestDatabase, truncateAll } from "../../test/pglite.js";
-import { DrizzleTransportStore } from "../store/index.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { Transactor } from "../../db/index.js";
+import { logger } from "../../logger.js";
+import { mockTransportStore } from "../../test/factories.js";
 import { createSenders } from "./senders.js";
 
-let db: Database;
-let tx: Transactor;
-let close: () => Promise<void>;
-const transportStore = new DrizzleTransportStore();
-const agentStore = new DrizzleAgentStore();
+const FAKE_TX = { __mockTx: true } as never;
+const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
 
-beforeAll(async () => {
-  ({ db, tx, close } = await createTestDatabase());
-});
-
-afterEach(async () => {
-  await truncateAll(db);
-});
-
-afterAll(async () => {
-  await close();
-});
-
-async function createChannel(identityMode: string): Promise<string> {
-  const { id } = await tx((trx) =>
-    transportStore.createChannel(trx, { type: "telegram", credentials: {}, identityMode }),
-  );
-  return id;
-}
-
-async function addUser(channelId: string, platformHandle: string): Promise<void> {
-  await tx(async (trx) => {
-    const { id: userId } = await agentStore.createUser(trx);
-    await transportStore.createIdentity(trx, { userId, channelId, platformHandle });
+/** The namespace on channel `ch-1`, whose mode is `mode` and whose identity rows are `known`. */
+function sendersOn(mode: "fixed" | "mapped" | "create" | undefined, known: ReadonlyArray<string>) {
+  const transportStore = mockTransportStore({
+    getChannelIdentityMode: vi.fn().mockResolvedValue(mode),
+    resolveUser: vi.fn(async (_tx, _channelId, handle: string) =>
+      known.includes(handle) ? { userId: `user-${handle}` } : undefined,
+    ),
   });
-}
-
-function sendersOf(channelId: string) {
-  return createSenders({ channelId, runInTx: tx, transportStore });
+  const senders = createSenders({ channelId: "ch-1", runInTx: fakeRunInTx, transportStore });
+  return { senders, transportStore };
 }
 
 describe("senders.admits", () => {
-  it("admits a handle with an identity row on a mapped channel, and no other", async () => {
-    const channelId = await createChannel("mapped");
-    await addUser(channelId, "111");
-
-    expect(await sendersOf(channelId).admits("111")).toBe(true);
-    expect(await sendersOf(channelId).admits("999")).toBe(false);
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
-  it("refuses a handle whose identity row is on another channel", async () => {
-    const other = await createChannel("mapped");
-    await addUser(other, "111");
-    const channelId = await createChannel("mapped");
+  it("admits anyone on a fixed channel without resolving the handle", async () => {
+    const { senders, transportStore } = sendersOn("fixed", []);
 
-    expect(await sendersOf(channelId).admits("111")).toBe(false);
+    expect(await senders.admits("999")).toBe(true);
+    expect(transportStore.resolveUser).not.toHaveBeenCalled();
   });
 
-  it("admits anyone on a fixed channel", async () => {
-    const channelId = await createChannel("fixed");
-    await tx(async (trx) => {
-      const { id: userId } = await agentStore.createUser(trx);
-      await transportStore.createWildcardIdentity(trx, { userId, channelId });
-    });
+  it.each(["mapped", "create"] as const)(
+    "admits a handle with an identity row on a %s channel, and no other",
+    async (mode) => {
+      const { senders, transportStore } = sendersOn(mode, ["111"]);
 
-    expect(await sendersOf(channelId).admits("999")).toBe(true);
-  });
+      expect(await senders.admits("111")).toBe(true);
+      expect(await senders.admits("999")).toBe(false);
+      expect(transportStore.getChannelIdentityMode).toHaveBeenCalledWith(FAKE_TX, "ch-1");
+      expect(transportStore.resolveUser).toHaveBeenCalledWith(FAKE_TX, "ch-1", "999");
+    },
+  );
 
-  it("admits a handle with no identity row on a create channel", async () => {
-    const channelId = await createChannel("create");
+  it("admits no one for a channel with no row, and warns", async () => {
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
+    const { senders } = sendersOn(undefined, ["111"]);
 
-    expect(await sendersOf(channelId).admits("999")).toBe(true);
-  });
-
-  it("admits no one on a channel whose mode it doesn't know", async () => {
-    const channelId = await createChannel("open");
-    await addUser(channelId, "111");
-
-    expect(await sendersOf(channelId).admits("111")).toBe(false);
-  });
-
-  it("admits no one for a channel id with no row", async () => {
-    expect(await sendersOf("00000000-0000-7000-8000-000000000000").admits("111")).toBe(false);
+    expect(await senders.admits("111")).toBe(false);
+    expect(warn).toHaveBeenCalledOnce();
+    expect(warn).toHaveBeenCalledWith({ channelId: "ch-1" }, expect.any(String));
   });
 });

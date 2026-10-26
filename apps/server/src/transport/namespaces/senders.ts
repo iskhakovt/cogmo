@@ -1,12 +1,13 @@
 import { match } from "ts-pattern";
+import { logger } from "../../logger.js";
 import type { TransportContext } from "./context.js";
 
 /** Who may use the channel at all, asked before an adapter does any work for an update. */
 export interface SendersNamespace {
   /**
-   * Whether `platformUserHandle` may use this channel: anyone on a `fixed` or
-   * `create` channel, and on a `mapped` one only a handle with an identity
-   * row. A channel with any other mode, or no row, admits no one.
+   * Whether `platformUserHandle` may use this channel: anyone on a `fixed`
+   * channel, and on a `mapped` or `create` one only a handle with an identity
+   * row. A channel with no row admits no one.
    */
   admits(platformUserHandle: string): Promise<boolean>;
 }
@@ -17,15 +18,20 @@ export function createSenders(deps: Omit<TransportContext, "agentStore">): Sende
     async admits(platformUserHandle) {
       return runInTx(async (tx) => {
         const mode = await transportStore.getChannelIdentityMode(tx, channelId);
-        // `identity_mode` is free text, so a value outside the three modes falls to `otherwise`.
+        if (mode === undefined) {
+          logger.warn({ channelId }, "senders: the adapter's channel has no row");
+          return false;
+        }
+        // `create` admits only known handles until something auto-creates identities.
         return match(mode)
-          .with("fixed", "create", async () => true)
+          .with("fixed", async () => true)
           .with(
             "mapped",
+            "create",
             async () =>
               (await transportStore.resolveUser(tx, channelId, platformUserHandle)) !== undefined,
           )
-          .otherwise(async () => false);
+          .exhaustive();
       });
     },
   };

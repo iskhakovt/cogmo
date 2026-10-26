@@ -63,11 +63,11 @@ The `user_identities` table IS the allowlist. No separate allowlist mechanism ne
 
 ### Allowlist enforcement `[confirmed]`
 
-An adapter asks `transport.senders.admits(platformUserHandle)` before any handler runs for an inbound update. A `fixed` or `create` channel admits every sender; a `mapped` channel (e.g., Telegram with a configured allowlist) admits a handle with a `user_identities` row on it. A channel with any other mode admits no one.
+An adapter on a channel that can be `mapped` (Telegram today) asks `transport.senders.admits(platformUserHandle)` before any handler runs for an inbound update; adapters whose channel is always `fixed` (Direct, web) skip it. A `fixed` channel admits every sender, and a `mapped` channel a handle with a `user_identities` row on it. Nothing auto-creates identities yet, so a `create` channel admits only such a handle too. A channel with no row admits no one, logged at warn.
 
-An update from a sender the channel doesn't admit is dropped silently, whatever it is: a message, media, a command (`/start` included) or a callback tap. It gets no reply, no typing indicator and no download, and nothing is dispatched; the adapter logs the handle, never the content, once at info. A bot is publicly discoverable, so any reply confirms it is live and tells a stranger what it accepts, and any work done before the check, such as downloading a file into the attachment store, is an abuse path.
+An update from a sender the channel doesn't admit is dropped silently, whatever it is: a message, media, a command (`/start` included) or a callback tap. It gets no reply, no typing indicator and no download, and nothing is dispatched; the adapter logs the handle, never the content, once at info. A bot is publicly discoverable, so any reply confirms it is live and tells a stranger what it accepts, and any work done before the check, such as downloading a file into the attachment store, is an abuse path. A DB error during the check drops that update unprocessed: failing open would answer strangers.
 
-Each Transport method also resolves the caller's identity, since an admitted user is refused (`identity_rejected`) on someone else's conversation, coding task or pipeline run.
+Transport methods that take the caller's handle check it as well: an admitted user gets `access_denied` on someone else's conversation, and `identity_rejected` on someone else's coding task or pipeline run. The session path (`resolveSession`, `emit`, `boundary.append`, `boundary.resolve`) takes no sender, so two admitted users in one group chat share whatever session is active there.
 
 The setup wizard populates `user_identities` rows for each Telegram user ID in the allowlist. The `TELEGRAM_ALLOWED_USERS` env var is superseded by these DB rows.
 
