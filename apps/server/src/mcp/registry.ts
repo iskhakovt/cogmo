@@ -15,6 +15,7 @@ import {
   type McpServer,
   type McpServerSpec,
   type McpServerStatus,
+  type McpToolPin,
   validateServerName,
 } from "./config.js";
 import {
@@ -125,41 +126,41 @@ export class McpRegistryImpl implements McpRegistry {
     const matcher = compileToolMatchers(params.toolGlobs);
     if (params.toolGlobs.length === 0) return [];
 
-    const enabled = await this.#runInTx((tx) => this.#store.listEnabledServers(tx));
-    const approvedServers = enabled.filter((s) => s.approvalStatus === "approved");
-
-    const tools: ToolSpec[] = [];
-    for (const server of approvedServers) {
-      const pins = await this.#runInTx((tx) => this.#store.getApprovedToolPins(tx, server.id));
-      for (const pin of pins) {
-        const composed = composeMcpToolName(server.name, pin.toolName);
-        if (!matcher(composed)) continue;
-        tools.push(
-          mcpDescriptorToToolSpec({
-            server,
-            descriptor: {
-              name: pin.toolName,
-              description: pin.schemaSnapshot.description,
-              inputSchema: pin.schemaSnapshot.inputSchema,
-            },
-            pool: this.#pool,
-            timeoutMs: this.#callTimeoutMs,
-          }),
-        );
+    const pinned = await this.#runInTx(async (tx) => {
+      const enabled = await this.#store.listEnabledServers(tx);
+      const servers: { server: McpServer; pins: readonly McpToolPin[] }[] = [];
+      for (const server of enabled.filter((s) => s.approvalStatus === "approved")) {
+        servers.push({ server, pins: await this.#store.getApprovedToolPins(tx, server.id) });
       }
-    }
+      return servers;
+    });
 
-    tools.sort((a, b) => a.name.localeCompare(b.name));
+    const tools = pinned
+      .flatMap(({ server, pins }) =>
+        pins
+          .filter((pin) => matcher(composeMcpToolName(server.name, pin.toolName)))
+          .map((pin) =>
+            mcpDescriptorToToolSpec({
+              server,
+              descriptor: {
+                name: pin.toolName,
+                description: pin.schemaSnapshot.description,
+                inputSchema: pin.schemaSnapshot.inputSchema,
+              },
+              pool: this.#pool,
+              timeoutMs: this.#callTimeoutMs,
+            }),
+          ),
+      )
+      .toSorted((a, b) => a.name.localeCompare(b.name));
     const budget = params.budget ?? this.#toolBudget;
     if (tools.length > budget) {
-      const dropped = tools.slice(budget).map((t) => t.name);
       logger.warn(
-        { dropped, budget, total: tools.length },
+        { dropped: tools.slice(budget).map((t) => t.name), budget, total: tools.length },
         "MCP tool budget exceeded; dropping alphabetically",
       );
-      tools.length = budget;
     }
-    return tools;
+    return tools.slice(0, budget);
   }
 
   async addServer(spec: McpServerSpec): Promise<Result<McpServer, McpAddServerError>> {
