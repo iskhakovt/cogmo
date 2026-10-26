@@ -19,10 +19,10 @@ import type { RepoDialogs } from "./repo-dialog.js";
 /**
  * Why a Telegram-hosted file couldn't be downloaded. The caller skips the
  * message rather than persisting a bogus attachment, telling the user about
- * `too_large` and logging the rest:
+ * `too_large` and logging the rest at error:
  *
- *   - `too_large`: over the Bot API's download limit, by the size Telegram
- *     declared or, when it declared none, by `getFile`'s refusal.
+ *   - `too_large`: over the Bot API's download limit, by its declared size or
+ *     by `getFile`'s refusal.
  *   - `no_file_path`: `getFile()` answered without a `file_path`, which the
  *     Bot API marks optional. The URL would end in `/undefined`, and the 404
  *     page behind it would be uploaded as the user's file.
@@ -39,10 +39,7 @@ type FileDownloadError =
   | { kind: "local_path"; fileId: string; path: string }
   | { kind: "http_error"; fileId: string; status: number; statusText: string };
 
-/**
- * The Bot API's answer to `getFile` for a file over its download limit. Only a
- * server run with `--local` lifts the limit, and its files can't be read here.
- */
+/** The Bot API's answer to `getFile` for a file over its download limit. */
 const FileTooBigSchema = z.object({
   error_code: z.literal(400),
   description: z.string().includes("file is too big"),
@@ -113,7 +110,7 @@ interface FileDownloadCtx {
   api: { getFile: (fileId: string) => Promise<{ file_path?: string }> };
 }
 
-/** A photo size, document or voice note: its id, and its size when Telegram declares one. */
+/** A photo size, document or voice note. */
 interface TelegramFile {
   file_id: string;
   file_size?: number;
@@ -158,7 +155,7 @@ async function downloadTelegramFile(
   return ok(Buffer.from(await response.arrayBuffer()));
 }
 
-/** Tell the user a file is over the download limit; log any other failure as `message`. */
+/** Tell the user a file is over the download limit, and log the failure as `message`. */
 function reportDownloadFailure(
   ctx: { reply: (text: string) => Promise<unknown> },
   error: FileDownloadError,
@@ -166,6 +163,7 @@ function reportDownloadFailure(
 ): Promise<void> {
   return match(error)
     .with({ kind: "too_large" }, async () => {
+      logger.info({ error }, message);
       await ctx.reply(TOO_LARGE_REPLY);
     })
     .with({ kind: P.union("no_file_path", "local_path", "http_error") }, async () => {

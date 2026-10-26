@@ -683,9 +683,6 @@ describe("registerMessageHandlers", () => {
       );
     });
 
-    // The Bot API's file_path is optional. Without a guard the URL becomes
-    // `.../bot<token>/undefined`, fetch returns a 404 HTML page, and we'd
-    // upload that HTML as the user's "document".
     it("does not upload or emit when getFile returns no file_path", async () => {
       const { transport } = await createAdapter();
       const ctx = makeDocumentCtx(111, { mime_type: "application/pdf", file_name: "huge.pdf" });
@@ -804,14 +801,26 @@ describe("registerMessageHandlers", () => {
     });
 
     it("replies to a voice note declared over the limit without asking for the file", async () => {
-      const { transport } = await createAdapter();
-      const ctx = makeVoiceCtx(111, { file_size: MAX_INBOUND_FILE_BYTES + 1 });
+      const info = vi.spyOn(logger, "info").mockImplementation(() => {});
+      try {
+        const { transport } = await createAdapter();
+        const ctx = makeVoiceCtx(111, {
+          file_id: "big_voice",
+          file_size: MAX_INBOUND_FILE_BYTES + 1,
+        });
 
-      await expectDefined(handlers.get("on:message:voice"), "voice handler")(ctx);
+        await expectDefined(handlers.get("on:message:voice"), "voice handler")(ctx);
 
-      expect(ctx.reply).toHaveBeenCalledWith(TOO_LARGE_REPLY);
-      expect(ctx.api.getFile).not.toHaveBeenCalled();
-      expect(transport.emit).not.toHaveBeenCalled();
+        expect(ctx.reply).toHaveBeenCalledWith(TOO_LARGE_REPLY);
+        expect(ctx.api.getFile).not.toHaveBeenCalled();
+        expect(transport.emit).not.toHaveBeenCalled();
+        expect(info).toHaveBeenCalledWith(
+          { error: { kind: "too_large", fileId: "big_voice" } },
+          "failed to process voice message",
+        );
+      } finally {
+        info.mockRestore();
+      }
     });
 
     it("downloads a voice note of exactly 20 MB", async () => {
