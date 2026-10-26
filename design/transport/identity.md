@@ -63,9 +63,11 @@ The `user_identities` table IS the allowlist. No separate allowlist mechanism ne
 
 ### Allowlist enforcement `[confirmed]`
 
-Channel adapters check identity on each inbound message before routing to the orchestrator. For channels in `mapped` mode (e.g., Telegram with a configured allowlist), the adapter calls `transportStore.resolveUser(channelId, platformHandle)`. If no identity row matches, the message is rejected with a user-facing reply ("Not authorized").
+An adapter asks `transport.senders.admits(platformUserHandle)` before any handler runs for an inbound update. A `fixed` or `create` channel admits every sender; a `mapped` channel (e.g., Telegram with a configured allowlist) admits a handle with a `user_identities` row on it. A channel with any other mode admits no one.
 
-For `fixed` mode channels (e.g., Direct), the wildcard identity accepts all messages — no per-message check needed.
+An update from a sender the channel doesn't admit is dropped silently, whatever it is: a message, media, a command (`/start` included) or a callback tap. It gets no reply, no typing indicator and no download, and nothing is dispatched; the adapter logs the handle, never the content, once at info. A bot is publicly discoverable, so any reply confirms it is live and tells a stranger what it accepts, and any work done before the check, such as downloading a file into the attachment store, is an abuse path.
+
+Each Transport method also resolves the caller's identity, since an admitted user is refused (`identity_rejected`) on someone else's conversation, coding task or pipeline run.
 
 The setup wizard populates `user_identities` rows for each Telegram user ID in the allowlist. The `TELEGRAM_ALLOWED_USERS` env var is superseded by these DB rows.
 

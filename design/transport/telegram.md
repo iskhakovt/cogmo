@@ -14,6 +14,8 @@ Telegram is the primary interactive channel. Personal DM with the bot — single
 
 Implements `AdapterModule` contract (`channelType` + `setup()`). Token extracted from `channel.credentials`. See [adapters.md](adapters.md) for the `Adapter` / `Transport` interfaces.
 
+**Sender gate:** the middleware ahead of every handler asks `transport.senders.admits(String(ctx.from.id))` and stops an update the channel doesn't admit, with no reply, typing indicator or download ([identity.md](identity.md) → Allowlist enforcement). An update with no `from` (a channel post) stops there too: it has no sender to admit, and no handler takes one. A dropped update still counts as handled, so polling doesn't redeliver it.
+
 **Inbound:**
 1. `bot.on("message:text")` — resolve/create session via `transport.resolveSession()` / `transport.createConversation()`
 2. Send `sendChatAction("typing")` immediately
@@ -105,6 +107,7 @@ A forwarded message never runs a bot command. It keeps its `bot_command` entity,
 | Module | Holds |
 |-|-|
 | `adapter.ts` | `TelegramAdapter`: delivery, stream handles, voice, and a `stop()` that confirms handled updates |
+| `sender-gate.ts` | The middleware ahead of every handler that drops an update the channel doesn't admit |
 | `command-routes.ts` | Command registration on the forward-dropping composer, `/start`, `/cancel`, the command menu |
 | `callback-routes.ts` | Inline-keyboard taps: boundary prompt, `/sessions`, plan, pipeline gate, skills approval |
 | `message-handlers.ts` | Text, photo, document and voice inbound, packed as `InboundContent` |
@@ -125,7 +128,8 @@ The adapter starts if a Telegram channel row exists in the DB. `channels.credent
 ## Testing
 
 Unit tests use grammY transformers to capture outgoing API calls — no network, no bot token needed. Test:
-- Rejects messages when identity resolution fails (unknown user in `mapped` mode)
+- Answers a text message, `/start`, `/new`, a photo, voice note or document, and a callback tap from a sender the channel doesn't admit with nothing: no reply, typing indicator, download, upload or dispatch
+- Drops an update with no sender without asking the transport, and counts a dropped update as handled
 - Calls `transport.emit()` with correct `InboundContent` for resolved users
 - Marks forwarded text, captions, captionless media and voice notes with `forwarded`, and leaves self-forwards unmarked
 - Routes a forwarded `/cmd` past the command handlers (real grammY `Composer`), and registers every command on the forward-dropping composer
