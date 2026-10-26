@@ -537,6 +537,19 @@ describe("fetch_url", () => {
     expect(resolveHost).toHaveBeenCalledTimes(2);
   });
 
+  it("ends on the last attempt's failure, not an earlier attempt's lookup", async () => {
+    mockFetch.mockResolvedValue({ ok: false, status: 503, statusText: "Service Unavailable" });
+    const resolveHost = vi
+      .fn<ResolveHost>()
+      .mockRejectedValueOnce(eaiAgain("example.com"))
+      .mockResolvedValue([{ address: "93.184.215.14", family: 4 }]);
+    const fetchUrl = fetchUrlTool(undefined, resolveHost);
+
+    const outcome = await fetchUrl.handler({ url: "https://example.com/x" }, stubService());
+
+    expect(outcome._unsafeUnwrapErr().message).toBe("Fetch failed: 503 Service Unavailable");
+  });
+
   it("reports a resolver that stays unavailable as unresolvable, without Tavily", async () => {
     const resolveHost = vi.fn<ResolveHost>().mockRejectedValue(eaiAgain("example.com"));
     const fetchUrl = fetchUrlTool("tavily-key", resolveHost);

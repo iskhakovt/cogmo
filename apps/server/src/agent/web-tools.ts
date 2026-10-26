@@ -329,7 +329,8 @@ function afterDirectFailure(
  * Fetch `url` directly. A throw inside the retried attempt is only
  * `withRetry`'s signal to try again; the attempt records a
  * {@link RetryableFailure} before throwing, and that record is what the
- * last attempt's throw ends as.
+ * last attempt's throw ends as; a throw with no record (a retryable status,
+ * `fetch` itself) ends `transient`.
  */
 async function directFetch(
   url: URL,
@@ -492,7 +493,10 @@ async function addressesOf(
   const family = isIP(host);
   if (family !== 0) return ok([{ address: host, family }]);
   const deadline = AbortSignal.any([signal, AbortSignal.timeout(LOOKUP_TIMEOUT_MS)]);
-  return abortable(resolveHost(host), deadline).then(
+  return abortable(
+    Promise.resolve().then(() => resolveHost(host)),
+    deadline,
+  ).then(
     (addresses) => ok(addresses),
     (e: unknown) => err(lookupFailure(host, e, signal)),
   );
