@@ -1,11 +1,13 @@
 /**
  * The coding orchestrators' failure channel: `status = failed` plus
  * `coding/task/failed`, which the cleanup subscribers (run-branch deletion)
- * hook into without polling the row.
+ * hook into without polling the row. Both persist the reason, which can carry
+ * git or SDK error text, so both get it through `redactCredentials`.
  */
 
 import { codingTaskFailed } from "../../inngest/events.js";
 import type { CodingRun, TaskStoreDeps } from "./coding-run.js";
+import { redactCredentials } from "./redact-credentials.js";
 
 /**
  * Emits `coding/task/failed` under `task-failed-<taskId>`, which collapses a
@@ -28,12 +30,13 @@ export async function recordTaskFailed(
   reason: string,
   statusStepId: string,
 ): Promise<void> {
+  const failureReason = redactCredentials(reason);
   await run.stepRun(statusStepId, () =>
     deps.runInTx((tx) =>
-      deps.store.updateTaskStatus(tx, { id: run.taskId, status: "failed", failureReason: reason }),
+      deps.store.updateTaskStatus(tx, { id: run.taskId, status: "failed", failureReason }),
     ),
   );
-  await emitTaskFailed(run, reason);
+  await emitTaskFailed(run, failureReason);
 }
 
 /**
@@ -56,8 +59,9 @@ export async function failTaskFromCatch(
   deps: TaskStoreDeps,
   reason: string,
 ): Promise<void> {
-  await emitTaskFailed(run, reason);
+  const failureReason = redactCredentials(reason);
+  await emitTaskFailed(run, failureReason);
   await deps.runInTx((tx) =>
-    deps.store.updateTaskStatus(tx, { id: run.taskId, status: "failed", failureReason: reason }),
+    deps.store.updateTaskStatus(tx, { id: run.taskId, status: "failed", failureReason }),
   );
 }

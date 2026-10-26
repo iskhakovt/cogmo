@@ -31,6 +31,7 @@
 import { type SandboxSession, unwrapExit } from "../../sandbox/index.js";
 import type { GitHubIdentity } from "../../secrets/github.js";
 import { NO_BACKGROUND_MAINTENANCE_FLAGS } from "./git-maintenance.js";
+import { redactCredentials } from "./redact-credentials.js";
 
 const REMOTE = "origin";
 
@@ -258,14 +259,17 @@ async function runGit(
   };
 }
 
-// `output` ends up in `failure_reason` + the Inngest event payload —
-// cap from the tail so the actionable stderr survives.
+// `output` is a step result and ends up in `failure_reason`, the Inngest
+// event payload and the chat's failure message — cap from the tail so the
+// actionable stderr survives.
 const MAX_OUTPUT_BYTES = 8 * 1024;
 const OUTPUT_TRUNCATED_PREFIX = "[cogmo: output truncated to last 8 KiB]\n";
 
 function combine(c: ExecCapture): string {
-  const raw =
-    c.stdout && c.stderr ? `${c.stdout.trimEnd()}\n${c.stderr.trimEnd()}` : c.stdout || c.stderr;
+  // Redacted ahead of the cap, which could cut a credential past recognition.
+  const raw = redactCredentials(
+    c.stdout && c.stderr ? `${c.stdout.trimEnd()}\n${c.stderr.trimEnd()}` : c.stdout || c.stderr,
+  );
   if (raw.length <= MAX_OUTPUT_BYTES) return raw;
   return `${OUTPUT_TRUNCATED_PREFIX}${raw.slice(-MAX_OUTPUT_BYTES)}`;
 }
