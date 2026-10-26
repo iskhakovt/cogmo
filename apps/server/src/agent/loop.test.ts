@@ -111,6 +111,27 @@ function testRunStreamingAgentLoop(overrides: StreamingLoopOverrides): Promise<A
   });
 }
 
+/**
+ * Inngest-cache stand-in: a cached id resolves without running the body, and
+ * a body that runs caches its result. `calls` records every id in order. The
+ * cache is untyped the way Inngest's state store is, so the cast to `T`
+ * mirrors the SDK handing back whatever JSON it stored.
+ */
+function cachingStepRun(cache: Map<string, unknown>): {
+  stepRun: StepRunner;
+  calls: ReadonlyArray<string>;
+} {
+  const calls: string[] = [];
+  const stepRun: StepRunner = async <T>(id: string, fn: () => Promise<T>): Promise<T> => {
+    calls.push(id);
+    if (cache.has(id)) return cache.get(id) as T;
+    const fresh = await fn();
+    cache.set(id, fresh);
+    return fresh;
+  };
+  return { stepRun, calls };
+}
+
 describe("runAgentLoop", () => {
   it("returns text on single-turn end_turn", async () => {
     const provider = mockProvider([textResponse("Hello!")]);
@@ -1861,18 +1882,11 @@ describe("tool durability (stepRun)", () => {
       handler: async () => ok("contents-of-B"),
     });
 
-    // Simulate Inngest's cache: stepRun returns a prior attempt's value
-    // when the id matches, regardless of what the handler body would do.
-    // The cache is untyped the way Inngest's own state store is — the
-    // cast to T mirrors the SDK handing back whatever JSON it stored.
-    const cache = new Map<string, unknown>([["tool-iter1-0", "contents-of-A"]]);
-    const stepRun: StepRunner = async <T>(id: string, fn: () => Promise<T>): Promise<T> => {
-      const cached = cache.get(id);
-      if (cached !== undefined) return cached as T;
-      const fresh = await fn();
-      cache.set(id, fresh);
-      return fresh;
-    };
+    // Attempt 0 cached read_a's result at position 0; the cache returns it
+    // regardless of what the handler body would do.
+    const { stepRun } = cachingStepRun(
+      new Map<string, unknown>([["tool-iter1-0", "contents-of-A"]]),
+    );
 
     const result = await testRunAgentLoop({
       // Attempt 1: the model emits read_b at position 0 (different tool
@@ -1898,22 +1912,6 @@ describe("tool durability (stepRun)", () => {
 });
 
 describe("durable LLM iterations (stepRun)", () => {
-  /** Inngest-cache stand-in: cached ids resolve without running the body. */
-  function cachingStepRun(cache: Map<string, unknown>): {
-    stepRun: StepRunner;
-    calls: string[];
-  } {
-    const calls: string[] = [];
-    const stepRun: StepRunner = async <T>(id: string, fn: () => Promise<T>): Promise<T> => {
-      calls.push(id);
-      if (cache.has(id)) return cache.get(id) as T;
-      const fresh = await fn();
-      cache.set(id, fresh);
-      return fresh;
-    };
-    return { stepRun, calls };
-  }
-
   it("serves a cached iteration without calling the provider or re-emitting", async () => {
     // The core of the durable-iteration contract: on an Inngest replay the
     // cached `llm-iter<N>` outcome must reproduce the iteration without a
@@ -4548,8 +4546,7 @@ describe("canonical tool inputs", () => {
         },
       ],
     ]);
-    const stepRun: StepRunner = async <T>(id: string, fn: () => Promise<T>): Promise<T> =>
-      cache.has(id) ? (cache.get(id) as T) : fn();
+    const { stepRun } = cachingStepRun(cache);
     const { provider, streamCalls } = repairStreamProvider([
       { kind: "stream", events: [{ type: "text_delta", text: "done" }], stopReason: "end_turn" },
     ]);

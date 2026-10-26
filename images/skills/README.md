@@ -28,6 +28,7 @@ Owns the supervisor + runner for tier-2 skills — see `design/skills.md`.
 cd images/skills
 uv sync
 uv run ruff check
+uv run ruff format --check
 uv run pyrefly check
 uv run pytest
 ```

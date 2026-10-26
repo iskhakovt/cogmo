@@ -33,11 +33,15 @@ How messages flow from platform to agent and back, across all channels.
 Source of truth is the Drizzle ORM schema in `src/<module>/store/schema.ts`. These capture design intent — validate against code before treating as final. Transport-specific tables (`channel_sessions`, `inbound_messages`, `user_identities`) are documented in their respective docs.
 
 ```sql
+-- Enums
+channel_identity_mode  AS ENUM ('fixed', 'mapped', 'create');  -- See identity.md.
+message_role           AS ENUM ('user', 'assistant');
+
 channels (
   id               UUID v7 PK,
   type             TEXT NOT NULL,              -- 'direct', 'telegram', 'slack', 'web'
   credentials      JSONB NOT NULL,             -- encrypted: token, OAuth, etc.
-  identity_mode    TEXT NOT NULL,              -- 'fixed' | 'mapped' | 'create'. See identity.md.
+  identity_mode    channel_identity_mode NOT NULL,
   created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (type) WHERE identity_mode = 'fixed'  -- one fixed-identity channel per type; key of `insertOrRecoverFixedChannel`
 );
@@ -64,7 +68,7 @@ conversations (
 messages (
   id                       UUID v7 PK,
   conversation_id          UUID FK → conversations NOT NULL,
-  role                     TEXT NOT NULL,        -- 'user' | 'assistant'
+  role                     message_role NOT NULL,
   content                  JSONB NOT NULL,       -- StoredMessageContentSchema: ContentBlock[] without base64 attachments, plus image_ref / document_ref. See prompt-caching.md → Stored shapes.
   profile_id               UUID FK → profiles NOT NULL,  -- active profile for the turn this row belongs to
   model                    TEXT NOT NULL,        -- model active for the turn; legacy backfill = '<legacy>' sentinel

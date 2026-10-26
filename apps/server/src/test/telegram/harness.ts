@@ -28,6 +28,7 @@ export function makePhotoCtx(fromId: number, caption?: string, chatId = 42) {
         { file_id: "large_id", width: 800, height: 600 },
       ],
     },
+    reply: vi.fn().mockResolvedValue({}),
     api: {
       sendChatAction: vi.fn().mockResolvedValue(true),
       getFile: vi.fn().mockResolvedValue({ file_path: "photos/file_1.jpg" }),
@@ -37,7 +38,7 @@ export function makePhotoCtx(fromId: number, caption?: string, chatId = 42) {
 
 export function makeVoiceCtx(
   fromId: number,
-  voice: { file_id?: string; duration?: number; mime_type?: string } = {},
+  voice: { file_id?: string; duration?: number; mime_type?: string; file_size?: number } = {},
   caption?: string,
   chatId = 42,
 ) {
@@ -51,8 +52,10 @@ export function makeVoiceCtx(
         file_id: voice.file_id ?? "voice_id",
         duration: voice.duration ?? 5,
         ...(voice.mime_type !== undefined && { mime_type: voice.mime_type }),
+        ...(voice.file_size !== undefined && { file_size: voice.file_size }),
       },
     },
+    reply: vi.fn().mockResolvedValue({}),
     api: {
       sendChatAction: vi.fn().mockResolvedValue(true),
       getFile: vi.fn().mockResolvedValue({ file_path: "voice/file_1.ogg" }),
@@ -84,6 +87,7 @@ export function makeDocumentCtx(
         ...(doc.file_size !== undefined && { file_size: doc.file_size }),
       },
     },
+    reply: vi.fn().mockResolvedValue({}),
     api: {
       sendChatAction: vi.fn().mockResolvedValue(true),
       getFile: vi.fn().mockResolvedValue({ file_path: "documents/file_1" }),

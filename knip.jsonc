@@ -21,9 +21,7 @@
       "ignoreDependencies": [
         // Imported only by the bundled `@cogmo/contracts` source (tsup
         // `noExternal`); see tsup.config.ts.
-        "@orpc/contract",
-        // Loaded by name as a pino transport target in src/logger.ts.
-        "pino-pretty"
+        "@orpc/contract"
       ],
       // Host tool spawned by scripts/tokei.ts, not an npm package.
       "ignoreBinaries": ["tokei"]

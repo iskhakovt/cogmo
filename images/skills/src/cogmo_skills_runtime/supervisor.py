@@ -274,7 +274,7 @@ def _sweep_descendants(deadline_s: float) -> bool:
         for pid in pids:
             try:
                 os.kill(pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
+            except ProcessLookupError, PermissionError:
                 pass
         time.sleep(0.001)
 
@@ -307,9 +307,7 @@ def _skill_venv_path(lockfile_hash: str) -> str:
     a path outside `SKILL_VENVS_ROOT` for hostile input.
     """
     if not _LOCKFILE_HASH_RE.match(lockfile_hash):
-        raise RuntimeError(
-            f"skill_venv: lockfile_hash must be sha256 hex (got {lockfile_hash!r})"
-        )
+        raise RuntimeError(f"skill_venv: lockfile_hash must be sha256 hex (got {lockfile_hash!r})")
     return os.path.join(SKILL_VENVS_ROOT, f"{lockfile_hash}-{python_abi_tag()}")
 
 
@@ -361,9 +359,7 @@ def _run_one_task_in_child(task: Mapping[str, object]) -> None:
         # this catches BaseException (KeyboardInterrupt, SystemExit) and
         # surfaces a synthetic task_result so the host doesn't hang.
         try:
-            sys.stdout.write(
-                json.dumps(_failure(task_id, f"supervisor_child_aborted: {type(e).__name__}: {e}")) + "\n"
-            )
+            sys.stdout.write(json.dumps(_failure(task_id, f"supervisor_child_aborted: {type(e).__name__}: {e}")) + "\n")
             sys.stdout.flush()
         except Exception:
             pass

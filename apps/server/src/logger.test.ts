@@ -3,23 +3,25 @@ import type { AddressInfo } from "node:net";
 import { Writable } from "node:stream";
 import { Bot, HttpError } from "grammy";
 import pino from "pino";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createLogger } from "./logger.js";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { createLogger, createLogRouter, type LogStream } from "./logger.js";
 
 /** Shaped like a Bot API token (numeric id, colon, URL-safe base64), but not one. */
 const FAKE_SECRET = "AAFake-TokenForTests_0123456789abcdef";
 const FAKE_TOKEN = `123456789:${FAKE_SECRET}`;
 
-/** A destination that keeps every line written to it. */
-function capture(): { stream: Writable; lines: string[] } {
+/** A destination that keeps every line written to it, and every `message` event pino emits on it. */
+function capture(): { stream: Writable; lines: string[]; messages: unknown[] } {
   const lines: string[] = [];
+  const messages: unknown[] = [];
   const stream = new Writable({
     write(chunk: Buffer, _encoding, callback) {
       lines.push(chunk.toString());
       callback();
     },
   });
-  return { stream, lines };
+  stream.on("message", (message: unknown) => messages.push(message));
+  return { stream, lines, messages };
 }
 
 /**
@@ -103,5 +105,74 @@ describe("createLogger", () => {
     pino(stream).error({ err: networkFailure }, "telegram polling loop failed");
 
     expect(lines.join("")).toContain(FAKE_SECRET);
+  });
+});
+
+describe("createLogRouter", () => {
+  /** A router over two captured streams, and the spy that opens them. */
+  function routed() {
+    const streams = { stdout: capture(), stderr: capture() };
+    const open = vi.fn((name: LogStream) => streams[name].stream);
+    const router = createLogRouter(open, "stdout");
+    return { router, open, logger: createLogger(router), streams };
+  }
+
+  it("opens the selected stream at selection, before any line", () => {
+    const { router, open } = routed();
+
+    router.select("stderr");
+
+    expect(open).toHaveBeenCalledExactlyOnceWith("stderr");
+  });
+
+  it("throws from the selection when the stream fails to open", () => {
+    const failure = new Error("pino-pretty is not installed");
+    const router = createLogRouter(() => {
+      throw failure;
+    }, "stdout");
+    createLogger(router);
+
+    expect(() => router.select("stderr")).toThrow(failure);
+  });
+
+  it("hands the stream it opens pino's config message", () => {
+    const { router, streams } = routed();
+
+    router.select("stderr");
+
+    expect(streams.stderr.messages).toEqual([expect.objectContaining({ code: "PINO_CONFIG" })]);
+  });
+
+  it("writes to stdout when no stream is selected", () => {
+    const { logger, open, streams } = routed();
+
+    logger.info("first");
+    logger.info("second");
+
+    expect(open).toHaveBeenCalledExactlyOnceWith("stdout");
+    expect(streams.stdout.lines).toHaveLength(2);
+  });
+
+  it("writes every line to the stream selected before the first", () => {
+    const { router, logger, open, streams } = routed();
+
+    router.select("stderr");
+    logger.info("first");
+    logger.warn("second");
+
+    expect(open).toHaveBeenCalledExactlyOnceWith("stderr");
+    expect(streams.stderr.lines.join("")).toMatch(/first[\s\S]*second/);
+    expect(streams.stdout.lines).toEqual([]);
+  });
+
+  it("refuses a selection after the first line, which went to the earlier stream", () => {
+    const { router, logger, streams } = routed();
+
+    logger.info("first");
+
+    expect(() => router.select("stderr")).toThrow("log stream already open on stdout");
+    logger.info("second");
+    expect(streams.stdout.lines).toHaveLength(2);
+    expect(streams.stderr.lines).toEqual([]);
   });
 });

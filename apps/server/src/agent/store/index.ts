@@ -160,7 +160,6 @@ export class DrizzleAgentStore implements AgentStore {
     this.#transcript.insertOrRecoverSystemPromptSnapshot.bind(this.#transcript);
   readonly insertOrRecoverSummary = this.#transcript.insertOrRecoverSummary.bind(this.#transcript);
   readonly getHistoryAfter = this.#transcript.getHistoryAfter.bind(this.#transcript);
-  readonly getMessage = this.#transcript.getMessage.bind(this.#transcript);
   readonly getLastMessageTime = this.#transcript.getLastMessageTime.bind(this.#transcript);
   readonly getLastTokens = this.#transcript.getLastTokens.bind(this.#transcript);
 

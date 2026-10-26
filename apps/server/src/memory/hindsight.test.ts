@@ -281,7 +281,6 @@ describe("HindsightMemoryProvider", () => {
     mockReflect.mockResolvedValueOnce(okReflect("answer"));
 
     await provider.reflect("bank-1", "query", {
-      context: "conversation about food",
       tags: ["preference"],
       tagsMatch: "any",
       budget: "high",
@@ -292,11 +291,25 @@ describe("HindsightMemoryProvider", () => {
       path: { bank_id: "bank-1" },
       body: {
         query: "query",
-        context: "conversation about food",
         tags: ["preference"],
         tags_match: "any",
         budget: "high",
       },
+    });
+  });
+
+  it("reflect leaves Hindsight's deprecated context field out of the request body", async () => {
+    const provider = createProvider();
+    mockReflect.mockResolvedValueOnce(okReflect("answer"));
+
+    // Not a literal, so it may carry a field `ReflectOptions` doesn't name.
+    const options = { budget: "low" as const, context: "conversation about food" };
+    await provider.reflect("bank-1", "query", options);
+
+    expect(mockReflect).toHaveBeenCalledWith({
+      client: fakeSdkClient,
+      path: { bank_id: "bank-1" },
+      body: { query: "query", budget: "low" },
     });
   });
 

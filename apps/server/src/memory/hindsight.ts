@@ -318,7 +318,6 @@ function buildRecallBody(query: string, options?: RecallOptions): RecallBody {
 
 function buildReflectBody(query: string, options?: ReflectOptions): ReflectBody {
   const body: ReflectBody = { query };
-  if (options?.context !== undefined) body.context = options.context;
   if (options?.tags !== undefined) body.tags = options.tags;
   if (options?.tagsMatch !== undefined) body.tags_match = options.tagsMatch;
   if (options?.tagGroups !== undefined) body.tag_groups = options.tagGroups;

@@ -11,7 +11,8 @@ export type BootstrapLock = <T>(fn: () => Promise<T>) => Promise<T>;
 
 /**
  * The bootstrap lock on `sql`, so concurrent `cogmo serve`, `cogmo seed` and
- * `cogmo setup` runs migrate and seed one at a time. Every read-then-insert
+ * `cogmo setup` runs migrate and seed one at a time, and `pnpm db:migrate`
+ * (`scripts/migrate.ts`) migrates in turn with them. Every read-then-insert
  * inside `fn` then sees the previous holder's rows.
  *
  * Session-level, on a reserved connection, taken before `fn` opens a
