@@ -95,9 +95,8 @@ export class AnthropicProvider implements LlmProvider {
   #client: Anthropic;
   #endpoint: Endpoint;
   /**
-   * Digests ({@link schemaDigest}) of the schemas the grammar couldn't
-   * compile, which `chat` sends straight on the tool path. The resolver keeps
-   * one adapter per model for the process, so the verdict lasts as long.
+   * Digests ({@link schemaDigest}) of schemas the grammar couldn't compile;
+   * `chat` sends them straight on the tool path.
    */
   readonly #grammarRejected = new Set<string>();
 
@@ -372,8 +371,8 @@ export class AnthropicProvider implements LlmProvider {
   /**
    * Send a non-streaming request. A structured-output schema past the
    * grammar's compile limits ({@link isGrammarLimitError}) goes once more on
-   * the tool path, and on the tool path alone after that: a pre-check can't
-   * foresee the internal grammar-size limit.
+   * the tool path, since a pre-check can't foresee the internal grammar-size
+   * limit, and on the tool path alone after that.
    */
   async #create(
     params: ChatParams,
