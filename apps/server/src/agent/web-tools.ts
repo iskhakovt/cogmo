@@ -16,11 +16,15 @@ const MAX_CONTENT_LENGTH = 50_000;
 
 const MAX_REDIRECTS = 10;
 
-/** One attempt's budget, spanning resolution and every redirect hop. */
+/** One attempt's budget, spanning resolution, every redirect hop and the body read. */
 const ATTEMPT_BUDGET_MS = 15_000;
 
-/** Under the attempt's budget, so a hung resolver is retried within it. */
-const LOOKUP_TIMEOUT_MS = 5_000;
+/**
+ * Past glibc's 5 s resend interval, so a lookup that needs one resend or
+ * skips a dead nameserver still answers; under the attempt's budget, so a
+ * hung resolver ends the attempt and the next one retries it.
+ */
+const LOOKUP_TIMEOUT_MS = 10_000;
 
 /** The statuses `fetch` itself would follow (Fetch Standard, "redirect status"). */
 const REDIRECT_STATUSES: ReadonlySet<number> = new Set([301, 302, 303, 307, 308]);
@@ -341,11 +345,11 @@ async function directFetch(
       }
       return hops;
     },
-    // retries: 2 — fetch_url is user-facing through the agent, cap
-    // total wall-clock at 20s so a slow upstream can't make the
-    // user wait through three full 15s timeouts. Context uses only
-    // the hostname so query-string secrets (api keys, signed URLs)
-    // don't end up in the logs.
+    // retries: 2 — fetch_url is user-facing through the agent, so no
+    // attempt starts after 20s and a slow upstream can't make the user
+    // wait through three full 15s timeouts. Context uses only the
+    // hostname so query-string secrets (api keys, signed URLs) don't
+    // end up in the logs.
     { retries: 2, maxRetryTimeMs: 20_000, context: `fetch_url ${url.hostname}` },
   ).catch(
     (e: unknown): Result<Reached, DirectFetchFailure> =>
@@ -394,10 +398,10 @@ class LookupUnavailable extends Error {
  * redirecting inward is the standard way around a guard like this. One
  * timeout spans resolution and every hop.
  *
- * A chain this can't follow is `transient`, returned rather than thrown so
- * it isn't retried: every hop passed the check, and Tavily gets past a
- * cookie wall (`302 Location: /article` plus a cookie, repeating) that
- * `fetch`, with no cookie jar, loops on.
+ * A loop past the cap or an unparseable Location is `transient`, returned
+ * rather than thrown so it isn't retried: every hop passed the check, and
+ * Tavily gets past a cookie wall (`302 Location: /article` plus a cookie,
+ * repeating) that `fetch`, with no cookie jar, loops on.
  */
 async function fetchCheckingEachHop(
   url: URL,
