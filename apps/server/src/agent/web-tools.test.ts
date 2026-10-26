@@ -363,7 +363,6 @@ describe("fetch_url", () => {
     ["fd00::1", 6],
     ["ff02::1", 6],
   ])("refuses a hostname resolving to %s", async (address, family) => {
-    // A public-looking name is only as public as what it resolves to.
     mockFetch.mockResolvedValue(textResponse("internal data"));
     const fetchUrl = fetchUrlTool(undefined, resolvesTo({ address, family }));
 
@@ -469,6 +468,23 @@ describe("fetch_url", () => {
 
     expect(outcome._unsafeUnwrapErr().message).toBe("getaddrinfo ENOTFOUND nowhere.example");
     expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it("bounds a resolver that never answers by the attempt's timeout", async () => {
+    // `dns.lookup` takes no signal. The attempt's 15s budget, shortened here,
+    // is what ends the wait.
+    const timeout = AbortSignal.timeout.bind(AbortSignal);
+    const shortened = vi.spyOn(AbortSignal, "timeout").mockImplementation(() => timeout(20));
+    try {
+      const fetchUrl = fetchUrlTool(undefined, () => new Promise(() => {}));
+
+      const outcome = await fetchUrl.handler({ url: "https://hung-dns.example/x" }, stubService());
+
+      expect(outcome._unsafeUnwrapErr().message).toMatch(/timeout/);
+      expect(mockFetch).not.toHaveBeenCalled();
+    } finally {
+      shortened.mockRestore();
+    }
   });
 
   it("rejects non-http protocols", async () => {

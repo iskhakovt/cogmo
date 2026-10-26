@@ -279,6 +279,9 @@ describe("DefaultCtxHandler", () => {
       ["::1", 6],
       ["fd00::1", 6],
       ["ff02::1", 6],
+      ["2001:0:4136:e378:8000:63bf:80ff:fffe", 6],
+      ["::ffff:0:127.0.0.1", 6],
+      ["::0.0.1.2", 6],
     ])(
       "refuses a host resolving to %s, which is the deployment's own network",
       async (address, family) => {

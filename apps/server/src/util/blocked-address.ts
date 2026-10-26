@@ -2,17 +2,14 @@ import type { LookupAddress } from "node:dns";
 
 /**
  * Every address a hostname resolves to, as `dns.promises.lookup(hostname,
- * { all: true })` answers. The guards that call {@link isBlockedAddress} take
- * one as a parameter, so a test can pin an address without a DNS round-trip.
+ * { all: true })` answers.
  */
 export type ResolveHost = (hostname: string) => Promise<ReadonlyArray<LookupAddress>>;
 
 /**
  * Whether an address is off the public internet: this-host, loopback,
  * private, link-local, CGNAT, multicast or reserved, or an IPv4 address in
- * one of those ranges carried inside an IPv6 one. For guards on requests the
- * server makes for someone else (`ctx.http`, `fetch_url`): the server's
- * network position reaches internal services an outside caller cannot.
+ * one of those ranges carried inside an IPv6 one.
  *
  * `family` is the resolver's (4 or 6). An address that does not parse as its
  * family is blocked: a shape this does not understand is not one it can

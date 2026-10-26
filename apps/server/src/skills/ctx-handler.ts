@@ -571,7 +571,7 @@ export class DefaultCtxHandler implements CtxHandler {
     // allowlist entry can match, so anything arriving here is a name or an
     // IPv4 literal — either of which the resolver takes as written.
     const hostname = parsedUrl.hostname;
-    let resolved: ReadonlyArray<{ address: string; family: number }>;
+    let resolved: Awaited<ReturnType<ResolveHost>>;
     try {
       resolved = await withDeadline(
         this.#resolveHost(hostname),
@@ -588,17 +588,9 @@ export class DefaultCtxHandler implements CtxHandler {
         target,
       );
     }
-    // `fetch` runs in the server process, so `ctx.http` carries the host's
-    // network position: Hindsight, Inngest, the web UI and cloud metadata at
-    // 169.254.169.254. A tier-2 skill's remote sandbox has no route to any of
-    // them, so without this check tier 1 would reach strictly more than the
-    // less-isolated tier. Judged on resolved addresses because the targets
-    // worth reaching are names (`hindsight`, `localhost`), not dotted quads.
-    //
-    // Not atomic with the connection: `fetch` resolves the name again, so a
-    // server answering public first and private second defeats this. Closing
-    // that needs a dispatcher that resolves, checks and connects as one step,
-    // which turns on adding undici as a runtime dependency (todo.md).
+    // Judged on resolved addresses because the targets worth reaching are
+    // names (`hindsight`, `localhost`), not dotted quads. Why, and the
+    // DNS-rebinding residual: design/skills.md → `ctx.http.request`.
     const blocked = resolved.find((r) => isBlockedAddress(r.address, r.family));
     if (blocked) {
       return refused(

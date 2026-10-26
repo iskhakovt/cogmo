@@ -79,7 +79,6 @@ describe("isBlockedAddress", () => {
 
   it.each([
     // Loopback and unspecified, in the notations that expand to them.
-    // Prefix matching on the text catches only the first.
     ["::1"],
     ["0:0:0:0:0:0:0:1"],
     ["::0:0:1"],

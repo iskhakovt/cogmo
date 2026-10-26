@@ -12,7 +12,6 @@ import { defineTool, reject, type ToolRejection, type ToolSpec } from "./tools.j
 
 const MAX_CONTENT_LENGTH = 50_000;
 
-/** Redirects `fetch_url` follows before giving up on a chain. */
 const MAX_REDIRECTS = 10;
 
 /** The statuses `fetch` itself would follow (Fetch Standard, "redirect status"). */
@@ -79,8 +78,7 @@ function retryHeaders(targetUrl: string): Record<string, string> {
  * This keeps the tools registered (LLM sees them) so it can explain
  * why a capability is unavailable rather than silently lacking it.
  *
- * `opts.resolveHost` answers `fetch_url`'s destination check, defaulting to
- * `dns.promises.lookup`; injected so tests can pin an address.
+ * `opts.resolveHost` is injected so tests can pin an address.
  */
 export function createWebTools(
   tavilyApiKey: string | undefined,
@@ -366,14 +364,9 @@ async function fetchCheckingEachHop(
 }
 
 /**
- * Refuse a destination off the public internet. `fetch_url` runs in the
- * server process, so a URL taken from a page or a message would otherwise
- * reach whatever the deployment can: Hindsight, Inngest, cloud metadata. An
- * IP literal is judged as written, a name by every address it resolves to.
- *
- * Not atomic with the connection: `fetch` resolves the name again, so a
- * server answering public first and private second defeats this, the same
- * DNS-rebinding residual `ctx.http` carries.
+ * Refuse a destination off the public internet: an IP literal as written, a
+ * name by every address it resolves to. Why, and the DNS-rebinding residual:
+ * design/agents.md → Security: `fetch_url` Destinations.
  */
 async function checkDestination(
   url: URL,
