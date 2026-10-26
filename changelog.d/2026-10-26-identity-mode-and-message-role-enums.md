@@ -1,0 +1,3 @@
+**`channels.identity_mode` and `messages.role` are pgEnums** (`channel_identity_mode`: `fixed` / `mapped` / `create`; `message_role`: `user` / `assistant`), so the database rejects any other value and the store reads drop their casts. Migration 0073 creates the types, converts both columns with `USING` casts, and drops and recreates `uq_channels_fixed_type`: the type change rebuilds the partial index, whose stored predicate compared `identity_mode` to text, so the index is recreated with `identity_mode = 'fixed'::channel_identity_mode`. `MessageRole` types the transcript, and the unused `TranscriptStore.getMessage` is gone.
+
+The `messages` table is rewritten under an exclusive lock during the migration, which takes moments at single-user scale.

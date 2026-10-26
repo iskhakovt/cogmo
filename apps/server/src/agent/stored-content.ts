@@ -16,6 +16,7 @@ import {
   ToolResultBlockSchema,
   ToolUseBlockSchema,
 } from "../llm/types.js";
+import type { MessageRole } from "./store/schema.js";
 
 const OriginalSchema = z.object({
   path: z.string().min(1),
@@ -68,7 +69,7 @@ export const StoredMessageContentSchema = z.union([z.string(), z.array(StoredCon
 export type StoredContent = z.infer<typeof StoredMessageContentSchema>;
 
 export interface StoredMessage {
-  role: "user" | "assistant";
+  role: MessageRole;
   content: StoredContent;
 }
 

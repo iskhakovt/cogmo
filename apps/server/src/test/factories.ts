@@ -152,7 +152,6 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
     ),
     insertOrRecoverProfile: vi.fn().mockResolvedValue({ kind: "new", id: "profile-1" }),
     getActiveRules: vi.fn().mockResolvedValue([]),
-    getMessage: vi.fn().mockResolvedValue({ id: "msg-1", role: "assistant", content: "test" }),
     getCoreMemoryBlocks: vi.fn().mockResolvedValue([]),
     getCoreMemoryUpdateTimes: vi.fn().mockResolvedValue([]),
     upsertCoreMemoryBlock: vi.fn().mockResolvedValue("created"),
