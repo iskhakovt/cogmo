@@ -20,6 +20,6 @@
     "skipLibCheck": true,
     "sourceMap": true
   },
-  "include": ["src", "dev"],
+  "include": ["src", "dev", "scripts"],
   "exclude": ["node_modules", "dist", "build"]
 }

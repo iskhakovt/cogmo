@@ -13,13 +13,19 @@
  */
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { z } from "zod";
 
 const FIXTURE_DIR = "./test/fixtures/recorded";
 
+/** The fields this script rewrites; every other key is written back as read. */
+const FixtureFileSchema = z.looseObject({
+  fixtures: z.array(z.looseObject({ match: z.record(z.string(), z.unknown()) })),
+});
+
 function simplifyUserMessage(msg: string): string {
   // For extraction prompts: match on the input text content
-  const textMatch = msg.match(/Text:\n(.+?)$/s);
-  if (textMatch) return textMatch[1].trim();
+  const inputText = msg.match(/Text:\n(.+?)$/s)?.[1];
+  if (inputText !== undefined) return inputText.trim();
 
   // For consolidation prompts: match on a stable prefix
   if (msg.includes("memory consolidation system")) return "memory consolidation system";
@@ -43,7 +49,7 @@ const files = readdirSync(FIXTURE_DIR).filter((f) => f.endsWith(".json") && f !=
 let modified = 0;
 for (const file of files) {
   const path = join(FIXTURE_DIR, file);
-  const data = JSON.parse(readFileSync(path, "utf-8"));
+  const data = FixtureFileSchema.parse(JSON.parse(readFileSync(path, "utf-8")));
 
   for (const fixture of data.fixtures) {
     const match = fixture.match;

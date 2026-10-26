@@ -14,9 +14,9 @@ function generatedPatterns(): string[] {
   return lines.flatMap((line) => {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("#")) return [];
-    const tokens = trimmed.split(/\s+/);
-    if (!tokens.slice(1).includes("linguist-generated=true")) return [];
-    return [tokens[0]];
+    const [pattern, ...attributes] = trimmed.split(/\s+/);
+    if (pattern === undefined || !attributes.includes("linguist-generated=true")) return [];
+    return [pattern];
   });
 }
 
