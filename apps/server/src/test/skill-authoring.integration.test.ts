@@ -1,7 +1,7 @@
 /// <reference path="../../test/vitest.d.ts" />
 
 /**
- * Skill-authoring e2e — chat -> delegate_coding -> register_skill -> invoke.
+ * Skill-authoring e2e — chat -> delegate_coding -> auto-register -> invoke.
  *
  * The single integration that proves: a user asking for a skill in chat
  * results in a new tool the agent can call on the next turn. Drives the
@@ -19,12 +19,12 @@
  *     stand-in network (`skillCtxHttpOverride`) in both modes, so the
  *     suite never reaches CoinGecko. The skill's allowlist and address
  *     checks still run against what the stand-in answers.
- *   - The cogmo-skills coding-repo points at a real GitHub repo set via
- *     `COGMO_TEST_SKILLS_REMOTE` (a throwaway repo the operator
- *     authorized). All test branches sit under
- *     `cogmo/run/skill-author-<uuid>*` + `refs/cogmo-wip/skill-author-<uuid>*`
- *     orphan namespaces — main is never touched. `afterAll` deletes
- *     branches + closes the PR.
+ *   - Record mode points the cogmo-skills coding repo at the throwaway
+ *     GitHub repo `COGMO_TEST_SKILLS_REMOTE` names. `beforeAll`
+ *     force-resets its main to an empty commit and register mirror-pushes
+ *     the new skill onto it; `afterAll` closes the PR and deletes the test
+ *     branches and `refs/cogmo-wip/` refs. Replay uses a local bare remote
+ *     and a stub Octokit (`makeStubOctokitFactory`).
  *
  * See `design/testing.md` -> Skill-Authoring Integration for the
  * contract.
@@ -39,8 +39,12 @@
  *   2. `gh auth status` — the PAT comes from gh CLI's keyring. Scope
  *      requirements: `repo` (push branches, open + close PRs).
  *   3. `RECORD=1 pnpm test:integration src/test/skill-authoring.integration.test.ts`
- *   4. Re-run without `RECORD=1` to confirm replay is byte-stable.
- *   5. Commit the refreshed fixture + any llmock recordings under
+ *   4. Copy `SKILL.md` and `skill.py` from the recorded PR's head commit
+ *      into `test/fixtures/skill-authoring-branch/`. `afterAll` deletes
+ *      the branch, so fetch `pull/<n>/head`; `<n>` is in the `closed PR`
+ *      log line.
+ *   5. Re-run without `RECORD=1` to confirm replay is byte-stable.
+ *   6. Commit the refreshed fixtures + any llmock recordings under
  *      `test/fixtures/recorded/` that bear today's date.
  *
  * The first record run is expected to surface adjustments to the
@@ -375,9 +379,8 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
     createdBranches.push(`cogmo/run/${task.id}`);
     if (task.prMetadata) createdPrNumbers.push(task.prMetadata.number);
 
-    // Skill registered. `lockfileHash` is null on this stdlib-only path —
-    // the deps-bearing flow is a separate follow-up cassette blocked on
-    // the slow uv compile in the lockfile-compile sandbox.
+    // Skill registered. It is stdlib-only, so `lockfileHash` is null;
+    // `runner.sysbox.integration.test.ts` covers a skill with a lockfile.
     const skillRow = await waitForSkill(db, "btc-spot", 60_000);
     expect(skillRow.name).toBe("btc-spot");
 

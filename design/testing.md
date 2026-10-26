@@ -95,12 +95,12 @@ Real provider APIs, for behaviour a replayed fixture can't show — recorded fix
 
 `src/test/skill-authoring.integration.test.ts` drives chat -> `delegate_coding` -> auto-register -> skill invoke against `DaytonaMock`, llmock and a git remote. It proves that a user asking for a skill in chat gets a tool the agent calls on the next turn.
 
-**Why this tier.** The other tiers stop short of the composed seam. `claude-cli-daytona.integration.test.ts` is manual (`describe.skip`) and covers only `plan`; `daytona-conformance.integration.test.ts` stops at the SDK wire surface; `pipeline.integration.test.ts` mocks all coding-delegation work; `skills.e2e.test.ts` registers and runs a tier-1 skill through the CLI. This suite composes PTY stream parsing, the snapshot lifecycle, the coding task from plan to PR, auto-register and skill-tool registration.
+**Why this tier.** The other tiers stop short of the composed seam. `claude-cli-daytona.integration.test.ts` is manual (`describe.skip`) and covers only `plan`; `daytona-conformance.integration.test.ts` stops at the SDK and wrapper wire surface; `pipeline.integration.test.ts` doesn't exercise coding delegation; `skills.e2e.test.ts` registers and runs a tier-1 skill through the CLI. This suite composes PTY stream parsing, the snapshot lookup, the coding task from plan to PR, auto-register and skill-tool registration.
 
 **Scenario.**
 
 1. Turn 1 asks for `btc-spot`: fetch the CoinGecko BTC/USD price with `ctx.http.get`, return `{ price }`. The prompt forbids third-party HTTP libraries, declared dependencies and a `requirements.lock`.
-2. The agent calls `delegate_coding` against the auto-registered `skills` repo. The profile's `codingAutoapproveMode` is `on`, so the plan is approved without a gate.
+2. The agent calls `delegate_coding` against the auto-registered `skills` repo. The profile's `codingAutoapproveMode` is `on`, so the plan gate clears without a human tap.
 3. The task runs in a Daytona sandbox on `cogmo-devbase:<v>` through `DaytonaMock`: plan and execute drive the in-sandbox `claude` CLI over the production PTY path, then verify, push and PR open. The task ends `pr_open`.
 4. `coding/task/pr-opened` triggers `coding-auto-register-skill`, which fetches the PR head branch into the bare skills repo and registers it. The skill is stdlib-only `tier: wasm`, so register compiles no lockfile.
 5. Turn 2 ("What's bitcoin at?") lists the `btc-spot` tool and calls it; the skill runs in the tier-1 Pyodide worker.
@@ -119,7 +119,7 @@ Real provider APIs, for behaviour a replayed fixture can't show — recorded fix
 
 **Git remote.** Record mode pushes to the throwaway GitHub repo `COGMO_TEST_SKILLS_REMOTE` names, with the PAT from `gh auth token`. It resets that repo's `main` to an empty commit first and afterwards closes the PR and deletes the test branches and `refs/cogmo-wip/` refs. Replay uses a local bare `file://` remote and a stub Octokit. Its `POST /pulls` commits `test/fixtures/skill-authoring-branch/` onto the PR's head branch in the bare remote, standing in for the sandbox push the cassette swallows, so the verify fetch-back and the register fetch run their production path. It accepts the run-branch `DELETE` and throws on any other call.
 
-**Fixtures.** Refreshed together under `RECORD=1`:
+**Fixtures.** `RECORD=1` writes the Daytona cassette and the llmock misses; the branch fixture is copied by hand from the recorded PR's head branch:
 
 | Fixture | What | Re-record trigger |
 |-|-|-|
@@ -127,13 +127,13 @@ Real provider APIs, for behaviour a replayed fixture can't show — recorded fix
 | `test/fixtures/recorded/suites/skill-authoring/` | Anthropic `/v1/messages` for the host agent loop's two turns | Agent prompt change, model swap, tool registry change |
 | `test/fixtures/skill-authoring-branch/` | The `SKILL.md` and `skill.py` the recorded sandbox pushed | Any Daytona cassette refresh |
 
-Recording needs `DAYTONA_API_KEY`, `ANTHROPIC_API_KEY`, `COGMO_TEST_SKILLS_REMOTE`, a `COGMO_DEVBASE_IMAGE` with a non-`latest` tag and an authenticated `gh`. It builds the devbase snapshot from the bake target and waits for the deps-cache volume before the run; the test file's header has the steps. The suite skips unless the Daytona cassette exists or `RECORD=1` runs with those inputs set.
+The suite skips unless the Daytona cassette exists or `RECORD=1` runs with `DAYTONA_API_KEY`, `ANTHROPIC_API_KEY` and `COGMO_TEST_SKILLS_REMOTE` set. A record run also needs a `COGMO_DEVBASE_IMAGE` with a non-`latest` tag and an authenticated `gh`; without them it fails in setup. It builds the devbase snapshot from the bake target and waits for the deps-cache volume before the run; the test file's header has the steps.
 
 **Cost and cadence.** Replay costs nothing and runs in the integration tier on every PR that changes code. A record run costs ~$1-2 of Daytona compute and Anthropic tokens; it runs locally and the operator commits the refreshed fixtures.
 
 **Non-goals.**
 
-- Not a regression test for the `claude` CLI. A change in its output fails the suite as a break in the orchestrator's contract with it; SDK drift stays with the version-pinning canaries.
+- Not a regression test for the `claude` CLI. In replay its output is the cassette, so a change in the CLI shows only when a re-record breaks the orchestrator's contract with it.
 - Not a perf benchmark. No duration threshold.
 - One stdlib-only skill. The deps path is not composed here: `runner.sysbox.integration.test.ts` covers a tier-2 skill populating its venv from a lockfile.
 
