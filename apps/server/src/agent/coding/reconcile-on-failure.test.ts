@@ -195,6 +195,29 @@ describe("reconcileCodingTaskFailure", () => {
     expect(result.failureReason).toMatch(/function_id coding-task-execute/);
     expect(result.failureReason).toContain("The worker stopped responding");
   });
+
+  it("masks credentials the error message quotes, in the row and the returned reason alike", async () => {
+    const store = mock<CodingStore>();
+    store.failTaskIfNonTerminal.mockResolvedValue({ kind: "failed" });
+    const pat = `ghp_${"e5F6".repeat(9)}`;
+
+    const result = await reconcileCodingTaskFailure(
+      { runInTx: fakeRunInTx, store },
+      basePayload({
+        taskId: "abc-123",
+        errorMessage: `clone https://x-access-token:${pat}@github.com/o/r failed`,
+      }),
+    );
+
+    if (result.status !== "reconciled") throw new Error("expected reconciled");
+    expect(result.failureReason).toContain("clone https://REDACTED@github.com/o/r failed");
+    expect(result.failureReason).not.toContain(pat);
+    expect(store.failTaskIfNonTerminal).toHaveBeenCalledWith(
+      expect.anything(),
+      "abc-123",
+      result.failureReason,
+    );
+  });
 });
 
 // ─── Wrapper-level: createCodingTaskReconcile ────────────────────────

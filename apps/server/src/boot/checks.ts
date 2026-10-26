@@ -25,13 +25,14 @@ import { logger } from "../logger.js";
 import type { HindsightMemoryProvider } from "../memory/hindsight.js";
 import { abortable } from "../util/abortable.js";
 import { describeError } from "../util/describe-error.js";
+import { redactSecretsInText } from "../util/redact-secrets.js";
 
 export class BootCheckError extends Error {
   override readonly name = "BootCheckError";
 
-  /** Scrubs `user:password@` from any URL the message quotes. */
+  /** Masks secrets the message quotes, URL credentials among them. */
   constructor(message: string, options?: ErrorOptions) {
-    super(scrubUrlCredentials(message), options);
+    super(redactSecretsInText(message), options);
   }
 }
 
@@ -43,11 +44,6 @@ const BOOT_PROBE_MIN_DELAY_MS = 1_000;
 const BOOT_PROBE_MAX_DELAY_MS = 10_000;
 /** Least time worth giving a retry: less would only time out and hide the real reason. */
 const BOOT_PROBE_MIN_ATTEMPT_MS = 1_000;
-
-/** Replace the userinfo of any URL in `text`, up to the last `@` before the host. */
-function scrubUrlCredentials(text: string): string {
-  return text.replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/?#]*@/gi, "$1REDACTED@");
-}
 
 /** Time source for boot probes — injected so retry and timeout tests do not wait. */
 export interface BootClock {
@@ -179,7 +175,7 @@ async function retryUntilConclusive<T>(
       AbortSignal.any([clock.timeout(Math.min(BOOT_PROBE_ATTEMPT_TIMEOUT_MS, remaining)), cancel]),
     );
     if (result.conclusive) return result.value;
-    lastReason = scrubUrlCredentials(result.reason);
+    lastReason = redactSecretsInText(result.reason);
     if (cancel.aborted) continue;
     const left = deadline - clock.now();
     if (left < BOOT_PROBE_MIN_DELAY_MS + BOOT_PROBE_MIN_ATTEMPT_MS) throw failClosed(lastReason);

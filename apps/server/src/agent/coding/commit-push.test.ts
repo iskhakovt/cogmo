@@ -432,12 +432,12 @@ describe("runCommitAndPush", () => {
     expect(result.output).toContain("trailing diagnostic line");
   });
 
-  it("redacts URL credentials and GitHub tokens from git output", async () => {
+  it("redacts URL credentials and access tokens from git output", async () => {
     const pat = `ghp_${"a1".repeat(18)}`;
     const { container } = fakeContainer({
       status: { stdout: "" },
       push: {
-        stderr: `fatal: unable to access 'https://x-access-token:${pat}@github.com/o/r.git/': The requested URL returned error: 500\nGH_TOKEN=${pat}\n`,
+        stderr: `fatal: unable to access 'https://x-access-token:${pat}@github.com/o/r.git/': The requested URL returned error: 500\nMY_TOKEN_${pat}\n`,
         exitCode: 128,
       },
     });
@@ -454,8 +454,8 @@ describe("runCommitAndPush", () => {
 
     expect(result.kind).toBe("failed");
     expect(result.output).not.toContain(pat);
-    expect(result.output).toContain("'https://***:***@github.com/o/r.git/'");
-    expect(result.output).toContain("GH_TOKEN=<REDACTED>");
+    expect(result.output).toContain("'https://REDACTED@github.com/o/r.git/'");
+    expect(result.output).toContain("MY_TOKEN_ghp_REDACTED");
   });
 
   it("redacts a token the 8 KiB tail cut runs through", async () => {

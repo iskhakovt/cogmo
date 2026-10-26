@@ -30,8 +30,8 @@
 
 import { type SandboxSession, unwrapExit } from "../../sandbox/index.js";
 import type { GitHubIdentity } from "../../secrets/github.js";
+import { redactSecretsInText } from "../../util/redact-secrets.js";
 import { NO_BACKGROUND_MAINTENANCE_FLAGS } from "./git-maintenance.js";
-import { redactCredentials } from "./redact-credentials.js";
 
 const REMOTE = "origin";
 
@@ -266,8 +266,8 @@ const MAX_OUTPUT_BYTES = 8 * 1024;
 const OUTPUT_TRUNCATED_PREFIX = "[cogmo: output truncated to last 8 KiB]\n";
 
 function combine(c: ExecCapture): string {
-  // Redacted ahead of the cap, which could cut a credential past recognition.
-  const raw = redactCredentials(
+  // Masked ahead of the cap, which could cut a credential past recognition.
+  const raw = redactSecretsInText(
     c.stdout && c.stderr ? `${c.stdout.trimEnd()}\n${c.stderr.trimEnd()}` : c.stdout || c.stderr,
   );
   if (raw.length <= MAX_OUTPUT_BYTES) return raw;

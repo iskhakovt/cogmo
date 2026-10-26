@@ -240,9 +240,8 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     if (gate === "left_planning") return { status: "skipped" };
     return { status: "awaiting_approval", plan };
   } catch (err) {
-    const reason = describeError(err);
     run.log.error({ err }, "coding task failed");
-    await failTaskFromCatch(run, deps, reason);
+    const reason = await failTaskFromCatch(run, deps, describeError(err));
     if (assignment) {
       await safeTeardownWorktree({
         runInTx: deps.runInTx,
@@ -266,9 +265,9 @@ async function endPlanFailed(
   run: CodingRun,
   deps: CodingOrchestratorDeps,
   args: { repo: CodingRepoRow; assignment: WorktreeAssignment; stream: PlanStreamHandle },
-  reason: string,
+  rawReason: string,
 ): Promise<CodingOrchestratorResult> {
-  await recordTaskFailed(run, deps, reason, "set-status-failed");
+  const reason = await recordTaskFailed(run, deps, rawReason, "set-status-failed");
   await run.stepRun("teardown-worktree", () =>
     safeTeardownWorktree({
       runInTx: deps.runInTx,
@@ -321,8 +320,8 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       stream,
     });
     if (result.isError) {
-      const reason = result.failureReason ?? "execute phase failed";
-      await endExecuteFailed(run, deps, exit, reason, {
+      const rawReason = result.failureReason ?? "execute phase failed";
+      const reason = await endExecuteFailed(run, deps, exit, rawReason, {
         status: "set-status-failed",
         teardownWorktree: "teardown-worktree",
         teardown: "teardown",
@@ -342,14 +341,14 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       if (pushFailure !== null) {
         // `safeTeardownWorktree` is a no-op for git-remote, the only
         // transport that pushes here, so no worktree teardown step.
-        await endExecuteFailed(run, deps, exit, pushFailure, {
+        const reason = await endExecuteFailed(run, deps, exit, pushFailure, {
           status: "set-status-failed-after-push",
           teardownWorktree: null,
           teardown: "teardown-after-push-failure",
           sandboxDeleted: "persist-sandbox-deleted-after-push-failure",
           logSuffix: " (push failure)",
         });
-        return { status: "failed", failureReason: pushFailure };
+        return { status: "failed", failureReason: reason };
       }
     }
     const handOff = await handOffToVerify(run, deps, params.inngest, {
@@ -358,9 +357,8 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
     });
     return handOff === "handed_off" ? { status: "pending_verify" } : { status: "skipped" };
   } catch (err) {
-    const reason = describeError(err);
     run.log.error({ err }, "coding execute failed");
-    await failTaskFromCatch(run, deps, reason);
+    const reason = await failTaskFromCatch(run, deps, describeError(err));
     await safeTeardownWorktree({
       runInTx: deps.runInTx,
       secretsStore: deps.secretsStore,

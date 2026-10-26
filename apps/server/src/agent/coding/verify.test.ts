@@ -153,6 +153,22 @@ describe("runVerifyStreaming", () => {
     expect(xCount).toBe(OUTPUT_CAP_BYTES);
   });
 
+  it("masks credentials, including a token the cap cuts through", async () => {
+    const pat = `ghp_${"c3D4".repeat(9)}`;
+    // On the unmasked output, the cap falls 15 characters into the second token.
+    const head = `GH_TOKEN=${pat}\n${"x".repeat(OUTPUT_CAP_BYTES - 15 - (pat.length + 10))}`;
+    const container = fakeContainer({
+      stdoutChunks: [head, `${pat}\n`, "y".repeat(64)],
+      exitCode: 1,
+    });
+
+    const result = await runVerifyStreaming({ container, verifyCommand: "t", timeoutSeconds: 60 });
+
+    expect(result.output).toMatch(/output truncated at \d+ bytes/);
+    expect(result.output).toContain("GH_TOKEN=ghp_REDACTED\n");
+    expect(result.output).not.toContain(pat.slice(0, 15));
+  });
+
   it("returns timedOut=true with TIMEOUT_EXIT_CODE when the wait exceeds the budget", async () => {
     const container = fakeContainer({
       stdoutChunks: ["working...\n"],

@@ -1,13 +1,15 @@
 /**
  * The coding orchestrators' failure channel: `status = failed` plus
  * `coding/task/failed`, which the cleanup subscribers (run-branch deletion)
- * hook into without polling the row. Both persist the reason, which can carry
- * git or SDK error text, so both get it through `redactCredentials`.
+ * hook into without polling the row. Both functions mask the reason with
+ * `redactSecretsInText` before writing or emitting it, since it can carry git
+ * or SDK error text, and resolve to the masked reason so the caller's chat
+ * message and return value carry the same text.
  */
 
 import { codingTaskFailed } from "../../inngest/events.js";
+import { redactSecretsInText } from "../../util/redact-secrets.js";
 import type { CodingRun, TaskStoreDeps } from "./coding-run.js";
-import { redactCredentials } from "./redact-credentials.js";
 
 /**
  * Emits `coding/task/failed` under `task-failed-<taskId>`, which collapses a
@@ -29,14 +31,15 @@ export async function recordTaskFailed(
   deps: TaskStoreDeps,
   reason: string,
   statusStepId: string,
-): Promise<void> {
-  const failureReason = redactCredentials(reason);
+): Promise<string> {
+  const failureReason = redactSecretsInText(reason);
   await run.stepRun(statusStepId, () =>
     deps.runInTx((tx) =>
       deps.store.updateTaskStatus(tx, { id: run.taskId, status: "failed", failureReason }),
     ),
   );
   await emitTaskFailed(run, failureReason);
+  return failureReason;
 }
 
 /**
@@ -58,10 +61,11 @@ export async function failTaskFromCatch(
   run: CodingRun,
   deps: TaskStoreDeps,
   reason: string,
-): Promise<void> {
-  const failureReason = redactCredentials(reason);
+): Promise<string> {
+  const failureReason = redactSecretsInText(reason);
   await emitTaskFailed(run, failureReason);
   await deps.runInTx((tx) =>
     deps.store.updateTaskStatus(tx, { id: run.taskId, status: "failed", failureReason }),
   );
+  return failureReason;
 }

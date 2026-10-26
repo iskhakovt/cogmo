@@ -82,6 +82,21 @@ describe("createLogger", () => {
     expect(record).toMatchObject({ url: "https://api.anthropic.com/v1/messages", msg: "plain" });
   });
 
+  it("masks URL credentials and access tokens in a record", () => {
+    const { stream, lines } = capture();
+    const pat = `ghp_${"a1B2".repeat(9)}`;
+
+    createLogger(stream).warn(
+      { err: new Error(`fatal: unable to access 'https://x-access-token:${pat}@github.com/o/r/'`) },
+      `push failed\nGH_TOKEN=${pat}`,
+    );
+
+    const line = lines.join("");
+    expect(line).not.toContain(pat.slice(4));
+    expect(line).toContain("https://REDACTED@github.com/o/r/");
+    expect(line).toContain(String.raw`push failed\nGH_TOKEN=ghp_REDACTED`);
+  });
+
   it("would otherwise write the token: pino's err serializer reaches node-fetch's message", () => {
     const { stream, lines } = capture();
 

@@ -8,9 +8,9 @@ import type { CodingStore } from "./store/index.js";
 import { failTaskFromCatch, recordTaskFailed } from "./task-failure.js";
 
 const PAT = `ghp_${"c3".repeat(18)}`;
-const REASON = `execute push failed (failed):\n\nfatal: unable to access 'https://x-access-token:${PAT}@github.com/o/r.git/'`;
-const REDACTED =
-  "execute push failed (failed):\n\nfatal: unable to access 'https://***:***@github.com/o/r.git/'";
+const REASON = `execute push failed (failed):\n\nfatal: unable to access 'ssh://git:${PAT}@github.com/o/r.git/'\nMY_TOKEN_${PAT}`;
+const MASKED =
+  "execute push failed (failed):\n\nfatal: unable to access 'ssh://REDACTED@github.com/o/r.git/'\nMY_TOKEN_ghp_REDACTED";
 
 function harness() {
   const store = mock<CodingStore>();
@@ -27,38 +27,31 @@ function harness() {
 }
 
 describe("task failure channel", () => {
-  it("recordTaskFailed persists and emits the reason with credentials redacted", async () => {
-    const { run, deps, inngest, store } = harness();
+  it.each([
+    [
+      "recordTaskFailed",
+      (h: ReturnType<typeof harness>) =>
+        recordTaskFailed(h.run, h.deps, REASON, "set-status-failed"),
+    ],
+    [
+      "failTaskFromCatch",
+      (h: ReturnType<typeof harness>) => failTaskFromCatch(h.run, h.deps, REASON),
+    ],
+  ])("%s persists, emits and returns the masked reason", async (_name, fail) => {
+    const h = harness();
 
-    await recordTaskFailed(run, deps, REASON, "set-status-failed");
+    const recorded = await fail(h);
 
-    expect(store.updateTaskStatus).toHaveBeenCalledWith(expect.anything(), {
+    expect(recorded).toBe(MASKED);
+    expect(h.store.updateTaskStatus).toHaveBeenCalledWith(expect.anything(), {
       id: "task-1",
       status: "failed",
-      failureReason: REDACTED,
+      failureReason: MASKED,
     });
-    expect(inngest.send).toHaveBeenCalledWith(
+    expect(h.inngest.send).toHaveBeenCalledWith(
       expect.objectContaining({
         name: "coding/task/failed",
-        data: { taskId: "task-1", reason: REDACTED },
-      }),
-    );
-  });
-
-  it("failTaskFromCatch persists and emits the reason with credentials redacted", async () => {
-    const { run, deps, inngest, store } = harness();
-
-    await failTaskFromCatch(run, deps, REASON);
-
-    expect(store.updateTaskStatus).toHaveBeenCalledWith(expect.anything(), {
-      id: "task-1",
-      status: "failed",
-      failureReason: REDACTED,
-    });
-    expect(inngest.send).toHaveBeenCalledWith(
-      expect.objectContaining({
-        name: "coding/task/failed",
-        data: { taskId: "task-1", reason: REDACTED },
+        data: { taskId: "task-1", reason: MASKED },
       }),
     );
   });

@@ -71,4 +71,86 @@ describe("redactSecretsInText", () => {
   ])("leaves %s untouched", (_label, input) => {
     expect(redactSecretsInText(input)).toBe(input);
   });
+
+  const PAT = `ghp_${"a1B2".repeat(9)}`;
+
+  it.each([
+    [
+      "a user and password",
+      "fatal: unable to access 'https://x-access-token:s3cret@github.com/o/r.git/'",
+      "fatal: unable to access 'https://REDACTED@github.com/o/r.git/'",
+    ],
+    ["an ssh URL", "ssh://git:PW@host:22/o/r.git", "ssh://REDACTED@host:22/o/r.git"],
+    [
+      "a token as the user, with no password",
+      "https://glpat-abcdefghij0123456789@gitlab.com/o/r",
+      "https://REDACTED@gitlab.com/o/r",
+    ],
+    [
+      "a 40-hex token as the user",
+      "https://0123456789abcdef0123456789abcdef01234567@github.com/o/r",
+      "https://REDACTED@github.com/o/r",
+    ],
+    ["an empty user", "https://:SECRET@host/x", "https://REDACTED@host/x"],
+    [
+      "an @ inside the password, up to the last @ before the host",
+      "connect through http://operator:p@ss@proxy.internal:3128/ failed",
+      "connect through http://REDACTED@proxy.internal:3128/ failed",
+    ],
+    [
+      "a URL glued to a JSON-escaped newline",
+      String.raw`{"msg":"push failed\nhttps://u:p@h/x"}`,
+      String.raw`{"msg":"push failed\nhttps://REDACTED@h/x"}`,
+    ],
+    ["two URLs", "a://u:p@h1/ b://u:p@h2/", "a://REDACTED@h1/ b://REDACTED@h2/"],
+  ])("masks URL credentials: %s", (_label, input, expected) => {
+    expect(redactSecretsInText(input)).toBe(expected);
+  });
+
+  it.each(["ghp", "gho", "ghu", "ghs", "ghr", "github_pat"])("masks %s_ tokens", (prefix) => {
+    const token = `${prefix}_${"A1b2_".repeat(8)}`;
+    expect(redactSecretsInText(`GH_TOKEN=${token} rest`)).toBe(`GH_TOKEN=${prefix}_REDACTED rest`);
+  });
+
+  it.each([
+    ["after an identifier", `MY_TOKEN_${PAT}`, "MY_TOKEN_ghp_REDACTED"],
+    ["after a digit", `1${PAT}`, "1ghp_REDACTED"],
+    ["after a JSON-escaped newline", String.raw`"a\n${PAT}"`, String.raw`"a\nghp_REDACTED"`],
+    [
+      "an Anthropic OAuth token",
+      `CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-${"Ab9_-".repeat(20)}`,
+      "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-REDACTED",
+    ],
+    ["an Anthropic API key", `key sk-ant-api03-${"x".repeat(90)}.`, "key sk-ant-REDACTED."],
+  ])("masks a token %s", (_label, input, expected) => {
+    expect(redactSecretsInText(input)).toBe(expected);
+  });
+
+  it.each([
+    ["an scp-style remote", "To git@github.com:o/r.git"],
+    ["a URL with no userinfo", "remote: https://github.com/o/r/pull/new/cogmo/abc"],
+    ["a port after the host", "https://github.com:443/o/r"],
+    ["an address after a URL", "see https://github.com: denied for user@example.com"],
+    ["a URL then an address in a JSON line", '{"url":"https://github.com","user":"a@b.c"}'],
+    ["a push rejection", " ! [rejected]        cogmo/abc -> cogmo/abc (non-fast-forward)"],
+    ["a short token-like word", "ghp_short and sk-ant-short"],
+  ])("leaves %s untouched", (_label, input) => {
+    expect(redactSecretsInText(input)).toBe(input);
+  });
+
+  it("is idempotent", () => {
+    const once = redactSecretsInText(`https://u:${PAT}@github.com ${PAT} sk-ant-${"y".repeat(30)}`);
+    expect(redactSecretsInText(once)).toBe(once);
+  });
+
+  it.each([
+    ["a long word", "a".repeat(200_000)],
+    ["repeated scheme separators", "://x".repeat(50_000)],
+    ["repeated token prefixes", "ghp_".repeat(50_000)],
+    ["repeated key prefixes", "sk-ant-".repeat(30_000)],
+  ])("stays linear on %s", (_label, input) => {
+    const start = performance.now();
+    redactSecretsInText(input);
+    expect(performance.now() - start).toBeLessThan(1_000);
+  });
 });

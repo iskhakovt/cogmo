@@ -538,6 +538,52 @@ describe("runCodingVerify", () => {
     expect(deps.sandbox.create).not.toHaveBeenCalled();
   });
 
+  it.each([
+    [
+      "a failure the run observes",
+      async () =>
+        (await seedTask({ remoteUrl: "https://x-access-token:SECRET@github.com" })).taskId,
+      (handle: SandboxSession<LocalDockerSessionState>) => handle,
+      "cannot parse owner/repo from remote URL: https://REDACTED@github.com",
+    ],
+    [
+      "a failure that reaches the catch",
+      async () => (await seedTask()).taskId,
+      (
+        handle: SandboxSession<LocalDockerSessionState>,
+      ): SandboxSession<LocalDockerSessionState> => ({
+        ...handle,
+        execStreaming: vi.fn(async () => {
+          throw new Error("exec via ssh://git:SECRET@sandbox.internal/x failed");
+        }),
+      }),
+      "exec via ssh://REDACTED@sandbox.internal/x failed",
+    ],
+  ])(
+    "%s: the return value, row and event carry one masked reason",
+    async (_label, seed, wrap, masked) => {
+      const deps = makeDeps(wrap(fakeContainerHandle(successScript)));
+      const inngestSend = vi.fn().mockResolvedValue(undefined);
+      const inngest = { send: inngestSend } as unknown as Pick<import("inngest").Inngest, "send">;
+      const taskId = await seed();
+
+      const result = await runCodingVerify({
+        taskId,
+        runId: "run-test",
+        deps,
+        stepRun,
+        stepSendEvent: makeStepSendEvent(inngest),
+        inngest,
+      });
+
+      expect(result).toEqual({ status: "failed", failureReason: masked });
+      expect((await tx((trx) => store.getTask(trx, taskId)))?.failureReason).toBe(masked);
+      expect(inngestSend).toHaveBeenCalledWith(
+        expect.objectContaining({ name: "coding/task/failed", data: { taskId, reason: masked } }),
+      );
+    },
+  );
+
   it("task not in pending_verify → returns skipped without changes", async () => {
     const handle = fakeContainerHandle(successScript);
     const deps = makeDeps(handle);

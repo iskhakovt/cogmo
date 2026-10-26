@@ -195,9 +195,8 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
     if (pr.isErr()) return await failVerify(run, deps, failure, pr.error);
     return { status: "pr_open", prUrl: pr.value.url, prNumber: pr.value.number };
   } catch (err) {
-    const reason = describeError(err);
     run.log.error({ err }, "coding verify failed");
-    await failTaskFromCatch(run, deps, reason);
+    const reason = await failTaskFromCatch(run, deps, describeError(err));
     await safeTeardownWorktree({
       secretsStore: deps.secretsStore,
       runInTx: deps.runInTx,
@@ -255,9 +254,9 @@ async function failVerify(
   run: CodingRun,
   deps: VerifyOrchestratorDeps,
   failure: VerifyFailureContext,
-  reason: string,
+  rawReason: string,
 ): Promise<VerifyOrchestratorResult> {
-  await recordTaskFailed(run, deps, reason, "set-status-failed");
+  const reason = await recordTaskFailed(run, deps, rawReason, "set-status-failed");
   await run
     .stepRun("teardown-worktree", () =>
       safeTeardownWorktree({

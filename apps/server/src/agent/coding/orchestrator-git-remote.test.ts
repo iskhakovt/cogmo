@@ -131,6 +131,8 @@ const stepRun = makeStepRun();
 const stepSendEvent = nullStepSendEvent();
 const RESOURCE_LIMITS = { cpus: 0.5, memory_bytes: 256 * 1024 * 1024, pids: 64 };
 const fakeInngest = { send: vi.fn().mockResolvedValue(undefined) };
+/** Shaped like a classic GitHub PAT, but not one. */
+const PAT = `ghp_${"k9L0".repeat(9)}`;
 
 async function seedRepo(): Promise<CodingRepoRow> {
   return tx((trx) =>
@@ -634,8 +636,7 @@ describe("runCodingExecute — git-remote transport", () => {
       if (gitSubcommand(cmd) === "push") {
         return {
           exitCode: 128,
-          stderr:
-            "remote: Invalid username or password.\nfatal: Authentication failed for 'https://github.com/...'\n",
+          stderr: `remote: Invalid username or password.\nfatal: Authentication failed for 'https://github.com/...'\nMY_TOKEN_${PAT}\n`,
         };
       }
       return undefined;
@@ -648,6 +649,7 @@ describe("runCodingExecute — git-remote transport", () => {
 
     const sendSpy = vi.fn().mockResolvedValue(undefined);
     const inngest = { send: sendSpy };
+    const streamFailures: string[] = [];
 
     const result = await runCodingExecute({
       taskId: task.id,
@@ -659,6 +661,12 @@ describe("runCodingExecute — git-remote transport", () => {
           { kind: "complete", exitCode: 0, isError: false },
         ]),
         secretsStore,
+        openExecuteStream: async () => ({
+          ...NULL_EXECUTE_STREAM,
+          fail: async (reason) => {
+            streamFailures.push(reason);
+          },
+        }),
       }),
       stepRun,
       stepSendEvent,
@@ -667,6 +675,10 @@ describe("runCodingExecute — git-remote transport", () => {
 
     expect(result.status).toBe("failed");
     expect(result.failureReason).toContain("execute push failed (auth_failed)");
+    // The chat message, the return value and the row carry one masked text.
+    expect(result.failureReason).toContain("MY_TOKEN_ghp_REDACTED");
+    expect(result.failureReason).not.toContain(PAT);
+    expect(streamFailures).toEqual([result.failureReason]);
 
     // Push was attempted before the failure handler kicked in.
     const pushCall = execCalls.find((c) => gitSubcommand(c.cmd) === "push");
@@ -676,7 +688,7 @@ describe("runCodingExecute — git-remote transport", () => {
     // `pending_verify`.
     const reloaded = await tx((trx) => store.getTask(trx, task.id));
     expect(reloaded?.status).toBe("failed");
-    expect(reloaded?.failureReason).toContain("auth_failed");
+    expect(reloaded?.failureReason).toBe(result.failureReason);
 
     // Sandbox cleanup was invoked through the push-failure path.
     expect(sandbox.deleteByTaskId).toHaveBeenCalledWith(task.id);
