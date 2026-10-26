@@ -107,6 +107,19 @@ describe("DrizzleTransportStore", () => {
       expect(await tx((trx) => store.getChannelByType(trx, "nonexistent"))).toBeUndefined();
     });
 
+    it("reads a channel's identity mode by id, and undefined for an id with no row", async () => {
+      const { id } = await tx((trx) =>
+        store.createChannel(trx, { type: "telegram", credentials: {}, identityMode: "mapped" }),
+      );
+
+      expect(await tx((trx) => store.getChannelIdentityMode(trx, id))).toBe("mapped");
+      expect(
+        await tx((trx) =>
+          store.getChannelIdentityMode(trx, "00000000-0000-7000-8000-000000000000"),
+        ),
+      ).toBeUndefined();
+    });
+
     it("getChannelByType stays on the oldest channel of a type after it is updated", async () => {
       const telegram = () =>
         tx((trx) =>

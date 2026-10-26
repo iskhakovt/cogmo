@@ -137,6 +137,9 @@ export interface TransportStore {
     type: string,
   ): Promise<{ id: string; identityMode: string; credentials: JsonValue } | undefined>;
 
+  /** The channel's `identity_mode`, or `undefined` when no channel has `channelId`. */
+  getChannelIdentityMode(tx: Transaction, channelId: string): Promise<string | undefined>;
+
   /** Create a channel. */
   createChannel(
     tx: Transaction,
@@ -547,6 +550,14 @@ export class DrizzleTransportStore implements TransportStore {
     // so Drizzle infers it as `unknown`; cast restores the JsonValue
     // contract the adapter wire format depends on.
     return rows[0] as { id: string; identityMode: string; credentials: JsonValue } | undefined;
+  }
+
+  async getChannelIdentityMode(tx: Transaction, channelId: string): Promise<string | undefined> {
+    const rows = await tx
+      .select({ identityMode: channels.identityMode })
+      .from(channels)
+      .where(eq(channels.id, channelId));
+    return rows[0]?.identityMode;
   }
 
   async createChannel(

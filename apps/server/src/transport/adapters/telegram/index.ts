@@ -12,6 +12,7 @@ import { registerMessageHandlers } from "./message-handlers.js";
 import { ProfileDialogs } from "./profile-dialog.js";
 import { renderTelegramHtml } from "./render.js";
 import { RepoDialogs } from "./repo-dialog.js";
+import { senderGate } from "./sender-gate.js";
 
 export const channelType = "telegram";
 
@@ -38,6 +39,8 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   const adapter = new TelegramAdapter(bot, attachments);
   const profileDialogs = new ProfileDialogs();
   const repoDialogs = new RepoDialogs();
+  // Ahead of every handler, so nothing runs for a sender the channel doesn't admit.
+  bot.use(senderGate(transport));
   // Forwarded messages never run commands; they reach the message handlers below.
   registerCommands(commandComposer(bot), { transport, profileDialogs, repoDialogs });
   registerCallbackQueries(bot, transport);
