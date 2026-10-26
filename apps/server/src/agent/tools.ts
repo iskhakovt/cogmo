@@ -292,8 +292,9 @@ export function createDefaultTools(extraTools: ToolSpec[], defaultTimezone: stri
       name: "get_current_time",
       description:
         "Returns the current date, time, day of week, and timezone. " +
-        "Use for scheduling, deadlines, or time questions. The system prompt includes the time " +
-        "when the conversation started — call this tool for long-running sessions or exact time.",
+        "Use for scheduling, deadlines, or time questions. Each user message's turn context gives " +
+        "the minute it was handled — call this tool for the exact time, later in a long turn, " +
+        "or in another timezone.",
       // Durable: a non-durable handler would return a new timestamp on every
       // later step boundary, which the model never saw.
       durable: true,
