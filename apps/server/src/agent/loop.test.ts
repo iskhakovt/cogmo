@@ -117,7 +117,10 @@ function testRunStreamingAgentLoop(overrides: StreamingLoopOverrides): Promise<A
  * cache is untyped the way Inngest's state store is, so the cast to `T`
  * mirrors the SDK handing back whatever JSON it stored.
  */
-function cachingStepRun(cache: Map<string, unknown>): { stepRun: StepRunner; calls: string[] } {
+function cachingStepRun(cache: Map<string, unknown>): {
+  stepRun: StepRunner;
+  calls: ReadonlyArray<string>;
+} {
   const calls: string[] = [];
   const stepRun: StepRunner = async <T>(id: string, fn: () => Promise<T>): Promise<T> => {
     calls.push(id);

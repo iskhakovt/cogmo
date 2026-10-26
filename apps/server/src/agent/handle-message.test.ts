@@ -457,7 +457,9 @@ describe("createHandleMessage", () => {
     const handle = mockDeliveryHandle();
     const deps = mockDeps({
       deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
-      runStreamingAgentLoop: vi.fn().mockRejectedValue(new Error("LLM failed")),
+      runStreamingAgentLoop: vi
+        .fn<typeof runStreamingAgentLoop>()
+        .mockRejectedValue(new Error("LLM failed")),
     });
 
     await expect(
@@ -480,7 +482,7 @@ describe("createHandleMessage", () => {
     const apiError = Object.assign(new Error("Bad Request"), { status: 400 });
     const deps = mockDeps({
       deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
-      runStreamingAgentLoop: vi.fn().mockRejectedValue(apiError),
+      runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockRejectedValue(apiError),
     });
 
     let caught: unknown;
@@ -675,7 +677,9 @@ describe("createHandleMessage", () => {
     const transientError = Object.assign(new Error("rate limited"), { status: 429 });
     const deps = mockDeps({
       deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
-      runStreamingAgentLoop: vi.fn().mockRejectedValue(transientError),
+      runStreamingAgentLoop: vi
+        .fn<typeof runStreamingAgentLoop>()
+        .mockRejectedValue(transientError),
     });
 
     let caught: unknown;
@@ -4405,7 +4409,7 @@ describe("createHandleMessage", () => {
       const handle = mockDeliveryHandle({ abort: vi.fn().mockResolvedValue(err(deliveryFailed)) });
       const deps = mockDeps({
         deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
-        runStreamingAgentLoop: vi.fn().mockRejectedValue(badRequest),
+        runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockRejectedValue(badRequest),
       });
 
       const caught = await runTurn(deps);
@@ -4420,7 +4424,7 @@ describe("createHandleMessage", () => {
       const handle = mockDeliveryHandle({ abort: vi.fn().mockResolvedValue(err(deliveryFailed)) });
       const deps = mockDeps({
         deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
-        runStreamingAgentLoop: vi.fn().mockRejectedValue(transient),
+        runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockRejectedValue(transient),
       });
 
       expect(await runTurn(deps)).toBe(transient);
@@ -4587,11 +4591,8 @@ describe("durable conversation summaries", () => {
     });
 
     expect(deps.agentStore.insertOrRecoverSummary).not.toHaveBeenCalled();
-    const loopCalls = (deps.runStreamingAgentLoop as ReturnType<typeof vi.fn>).mock.calls;
-    const loopMessages: Array<{ content: unknown }> = expectDefined(
-      loopCalls[0],
-      "agent loop call",
-    )[0].messages;
+    const loopCalls = vi.mocked(deps.runStreamingAgentLoop).mock.calls;
+    const loopMessages = expectDefined(loopCalls[0], "agent loop call")[0].messages;
     expect(loopMessages[0]?.content).toContain("the earlier discussion");
   });
 
@@ -4637,8 +4638,8 @@ describe("durable conversation summaries", () => {
     });
 
     expect(deps.agentStore.getHistoryAfter).toHaveBeenCalledWith(expect.anything(), "conv-1", "m4");
-    const loopCalls = (deps.runStreamingAgentLoop as ReturnType<typeof vi.fn>).mock.calls;
-    const messages = loopCalls[0]?.[0]?.messages as Array<{ content: unknown }>;
+    const loopCalls = vi.mocked(deps.runStreamingAgentLoop).mock.calls;
+    const messages = expectDefined(loopCalls[0], "agent loop call")[0].messages;
     expect(messages[0]?.content).toContain("everything before this");
     // The covered span is gone — only the summary and what followed remain.
     expect(deps.agentStore.listMessages).not.toHaveBeenCalled();

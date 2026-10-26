@@ -187,9 +187,9 @@ describe("handle-message — crash recovery / step replay", () => {
 
     // Assistant messages are still inserted (via insertMessages, not cached), but the
     // user message is NOT — that step's body never runs.
-    const userInserts = (
-      deps.agentStore.insertMessage as ReturnType<typeof vi.fn>
-    ).mock.calls.filter(([params]) => params.role === "user");
+    const userInserts = vi
+      .mocked(deps.agentStore.insertMessage)
+      .mock.calls.filter(([, params]) => params.role === "user");
     expect(userInserts).toHaveLength(0);
 
     expect(deps.agentStore.insertMessages).toHaveBeenCalledTimes(1);
@@ -301,9 +301,9 @@ describe("handle-message — crash recovery / step replay", () => {
     // the message history as a synthetic user message ("[Previous conversation
     // summary]\n\n…"). If we see our cached marker in the history passed to
     // the agent loop, the cached step was hit.
-    const loopCalls = (deps.runStreamingAgentLoop as ReturnType<typeof vi.fn>).mock.calls;
+    const loopCalls = vi.mocked(deps.runStreamingAgentLoop).mock.calls;
     expect(loopCalls.length).toBeGreaterThanOrEqual(1);
-    const messages = loopCalls[0]?.[0]?.messages as Array<{ content: unknown }>;
+    const messages = expectDefined(loopCalls[0], "agent loop call")[0].messages;
     const summaryMessage = messages.find(
       (m) =>
         typeof m.content === "string" && m.content.includes("[cached summary from prior attempt]"),
@@ -455,11 +455,9 @@ describe("handle-message — crash recovery / step replay", () => {
     // Cached step → body never runs.
     expect(handlerBody).not.toHaveBeenCalled();
     // The cached value flowed back through stepRun's return into the
-    // loop. Persisting confirms the loop actually consumed it
-    // — insertMessages call shape is (tx, { messages, ... }).
-    const insertArgs = (deps.agentStore.insertMessages as ReturnType<typeof vi.fn>).mock
-      .calls[0]?.[1] as { messages: Array<{ content: unknown }> } | undefined;
-    expect(insertArgs?.messages?.[0]?.content).toEqual([
+    // loop. Persisting confirms the loop actually consumed it.
+    const insertArgs = vi.mocked(deps.agentStore.insertMessages).mock.calls[0]?.[1];
+    expect(insertArgs?.messages[0]?.content).toEqual([
       { type: "text", text: "cached-tool-output" },
     ]);
   });
@@ -528,8 +526,7 @@ describe("handle-message — crash recovery / step replay", () => {
     // Upper bound: <10 catches a regression where the loop runs on every step
     // boundary (8 step.run calls + 1 sendEvent currently → would explode if
     // someone added expensive setup to the function body). Currently 2.
-    const loopCallCount = (deps.runStreamingAgentLoop as ReturnType<typeof vi.fn>).mock.calls
-      .length;
+    const loopCallCount = vi.mocked(deps.runStreamingAgentLoop).mock.calls.length;
     expect(loopCallCount).toBeGreaterThanOrEqual(1);
     expect(loopCallCount).toBeLessThan(10);
     // No DB writes happened — every persist step was cached.
@@ -619,9 +616,8 @@ describe("handle-message — crash recovery / step replay", () => {
       .filter((e) => e.type === "text_delta");
     expect(textPushes).toHaveLength(0);
     // The cached iteration's content still reaches persistence.
-    const insertArgs = (deps.agentStore.insertMessages as ReturnType<typeof vi.fn>).mock
-      .calls[0]?.[1] as { messages: Array<{ content: unknown }> } | undefined;
-    expect(insertArgs?.messages?.[0]?.content).toEqual([{ type: "text", text: "cached reply" }]);
+    const insertArgs = vi.mocked(deps.agentStore.insertMessages).mock.calls[0]?.[1];
+    expect(insertArgs?.messages[0]?.content).toEqual([{ type: "text", text: "cached reply" }]);
   });
 
   it("records the turn's iteration count from inside the persist step", async () => {
@@ -718,9 +714,8 @@ describe("handle-message — crash recovery / step replay", () => {
     expect(pushes.filter((e) => e.type === "retract")).toHaveLength(0);
     expect(pushes.filter((e) => e.type === "text_delta")).toHaveLength(0);
     // The cached apology is what gets persisted.
-    const insertArgs = (deps.agentStore.insertMessages as ReturnType<typeof vi.fn>).mock
-      .calls[0]?.[1] as { messages: Array<{ content: unknown }> } | undefined;
-    expect(insertArgs?.messages?.at(-1)?.content).toEqual([
+    const insertArgs = vi.mocked(deps.agentStore.insertMessages).mock.calls[0]?.[1];
+    expect(insertArgs?.messages.at(-1)?.content).toEqual([
       { type: "text", text: "cached apology from prior attempt" },
     ]);
   });
