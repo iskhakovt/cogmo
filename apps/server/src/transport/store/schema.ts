@@ -59,6 +59,13 @@ export const attachmentOriginalState = pgEnum("attachment_original_state", [
 export type AttachmentOriginalState = (typeof attachmentOriginalState.enumValues)[number];
 
 /**
+ * `channels.identity_mode` — how a platform handle resolves to a user. See
+ * design/transport/identity.md.
+ */
+export const channelIdentityMode = pgEnum("channel_identity_mode", ["fixed", "mapped", "create"]);
+export type ChannelIdentityMode = (typeof channelIdentityMode.enumValues)[number];
+
+/**
  * Predicate of `uq_channels_fixed_type`. An `ON CONFLICT` inferring that
  * partial index repeats it as `targetWhere`.
  */
@@ -75,7 +82,7 @@ export const channels = pgTable(
     // gated by a Zod schema (the JSONB rule in `.agents/rules/architecture-rules.md`
     // exempts opaque payloads).
     credentials: jsonb("credentials").notNull(),
-    identityMode: text("identity_mode").notNull(), // 'fixed' | 'mapped' | 'create'
+    identityMode: channelIdentityMode("identity_mode").notNull(),
     /**
      * Per-channel cap on TTS reply length. Above the cap, the orchestrator
      * skips TTS and sends a "(too long for voice)" follow-up note instead;

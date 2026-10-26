@@ -292,7 +292,7 @@ export interface TranscriptStore {
   getMessage(
     tx: Transaction,
     messageId: string,
-  ): Promise<{ id: string; role: string; content: StoredContent } | undefined>;
+  ): Promise<(StoredMessage & { id: string }) | undefined>;
 
   /** Get the timestamp of the most recent message in a conversation (any role). `undefined` when no messages. */
   getLastMessageTime(tx: Transaction, conversationId: string): Promise<Date | undefined>;
@@ -501,7 +501,7 @@ export class DrizzleTranscriptStore implements TranscriptStore {
       .from(messages)
       .where(eq(messages.conversationId, conversationId))
       .orderBy(asc(messages.id));
-    return rows as ReadonlyArray<StoredMessage & { id: string }>;
+    return rows;
   }
 
   async getLatestSummary(
@@ -627,13 +627,13 @@ export class DrizzleTranscriptStore implements TranscriptStore {
       .from(messages)
       .where(and(eq(messages.conversationId, conversationId), gt(messages.id, afterMessageId)))
       .orderBy(asc(messages.id));
-    return rows as ReadonlyArray<StoredMessage & { id: string }>;
+    return rows;
   }
 
   async getMessage(
     tx: Transaction,
     messageId: string,
-  ): Promise<{ id: string; role: string; content: StoredContent } | undefined> {
+  ): Promise<(StoredMessage & { id: string }) | undefined> {
     const rows = await tx
       .select({ id: messages.id, role: messages.role, content: messages.content })
       .from(messages)

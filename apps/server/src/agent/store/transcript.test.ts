@@ -570,6 +570,22 @@ describe("DrizzleTranscriptStore", () => {
       // And getLastTokens still returns null — no assistant row exists.
       expect(await tx((trx) => store.getLastTokens(trx, conversationId))).toBeUndefined();
     });
+
+    it("refuses a role other than user or assistant", async () => {
+      const { conversationId, stamp } = await seedConversation(tx);
+
+      // Adversarial setup: past the store, whose types admit only the two roles.
+      await expect(
+        db.execute(sql`
+          INSERT INTO messages
+            (conversation_id, role, content, profile_id, model, last_inbound_message_id, output_tokens)
+          VALUES (${conversationId}, 'system', '"x"', ${stamp.profileId}, ${stamp.model},
+            '019d0000-0000-7000-8000-000000000001', -1)
+        `),
+      ).rejects.toMatchObject({
+        cause: { message: expect.stringMatching(/invalid input value for enum message_role/) },
+      });
+    });
   });
 
   describe("late replies", () => {

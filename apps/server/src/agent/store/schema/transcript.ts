@@ -15,6 +15,9 @@ import { profiles } from "./profiles.js";
 export const summarySource = pgEnum("summary_source", ["turn", "manual"]);
 export type SummarySourceValue = (typeof summarySource.enumValues)[number];
 
+/** `messages.role` — the role a row carries in an LLM request. */
+export const messageRole = pgEnum("message_role", ["user", "assistant"]);
+
 export const messages = pgTable(
   "messages",
   {
@@ -22,7 +25,7 @@ export const messages = pgTable(
     conversationId: uuid("conversation_id")
       .notNull()
       .references(() => conversations.id),
-    role: text("role").notNull(), // 'user' | 'assistant'
+    role: messageRole("role").notNull(),
     content: jsonbZod("content", StoredMessageContentSchema).notNull(),
     profileId: uuid("profile_id")
       .notNull()
