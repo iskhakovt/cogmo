@@ -7,6 +7,7 @@
  *
  * Usage:
  *   pnpm console
+ *   echo "hello" | pnpm console   # replies to each piped line, then exits
  *
  * Requires:
  *   DATABASE_URL — PostgreSQL connection
@@ -117,76 +118,85 @@ async function main() {
     console.log("No active conversation. Send a message to start one.");
   }
 
+  async function send(text: string): Promise<void> {
+    if (text === "/new") {
+      await sendEvent("adapter/direct/inbound", {
+        platformAddress: PLATFORM_ADDRESS,
+        text: "/new",
+        platformTs: new Date().toISOString(),
+      });
+      conversationId = null;
+      lastAssistantId = null;
+      console.log("New conversation started.\n");
+      return;
+    }
+
+    await sendEvent("adapter/direct/inbound", {
+      platformAddress: PLATFORM_ADDRESS,
+      text,
+      platformTs: new Date().toISOString(),
+    });
+
+    // Wait for session/conversation to be created if this is the first message
+    if (!conversationId) {
+      await new Promise((r) => setTimeout(r, 1000));
+      conversationId = await getActiveConversationId(channelId);
+      if (!conversationId) {
+        console.log("(waiting for conversation to be created...)\n");
+        await new Promise((r) => setTimeout(r, 2000));
+        conversationId = await getActiveConversationId(channelId);
+      }
+    }
+
+    if (!conversationId) {
+      console.log("(could not find conversation — is the app running?)\n");
+      return;
+    }
+
+    process.stdout.write("...");
+    const response = await waitForResponse(conversationId, lastAssistantId, 30_000);
+    process.stdout.write("\r");
+    console.log(`\n${response}\n`);
+
+    lastAssistantId = await getLastAssistantMessageId(conversationId);
+  }
+
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
     prompt: "> ",
   });
+  // readline throws on a prompt after `close`.
+  let inputEnded = false;
+  rl.on("close", () => {
+    inputEnded = true;
+  });
+  // Ctrl+C leaves at once; the end of input (Ctrl+D, a drained pipe) waits
+  // for the reply in flight.
+  rl.on("SIGINT", bye);
 
   rl.prompt();
 
-  rl.on("line", async (line) => {
+  // One line at a time, each after the previous reply. The loop ends after
+  // the reply to the last line, so `echo msg | pnpm console` prints it.
+  for await (const line of rl) {
     const text = line.trim();
-    if (!text) {
-      rl.prompt();
-      return;
+    if (text) {
+      try {
+        await send(text);
+      } catch (err) {
+        console.error("Error:", err instanceof Error ? err.message : err);
+      }
     }
+    if (!inputEnded) rl.prompt();
+  }
+  await bye();
+}
 
-    try {
-      if (text === "/new") {
-        await sendEvent("adapter/direct/inbound", {
-          platformAddress: PLATFORM_ADDRESS,
-          text: "/new",
-          platformTs: new Date().toISOString(),
-        });
-        conversationId = null;
-        lastAssistantId = null;
-        console.log("New conversation started.\n");
-        rl.prompt();
-        return;
-      }
-
-      await sendEvent("adapter/direct/inbound", {
-        platformAddress: PLATFORM_ADDRESS,
-        text,
-        platformTs: new Date().toISOString(),
-      });
-
-      // Wait for session/conversation to be created if this is the first message
-      if (!conversationId) {
-        await new Promise((r) => setTimeout(r, 1000));
-        conversationId = await getActiveConversationId(channelId);
-        if (!conversationId) {
-          console.log("(waiting for conversation to be created...)\n");
-          await new Promise((r) => setTimeout(r, 2000));
-          conversationId = await getActiveConversationId(channelId);
-        }
-      }
-
-      if (!conversationId) {
-        console.log("(could not find conversation — is the app running?)\n");
-        rl.prompt();
-        return;
-      }
-
-      process.stdout.write("...");
-      const response = await waitForResponse(conversationId, lastAssistantId, 30_000);
-      process.stdout.write("\r");
-      console.log(`\n${response}\n`);
-
-      lastAssistantId = await getLastAssistantMessageId(conversationId);
-    } catch (err) {
-      console.error("Error:", err instanceof Error ? err.message : err);
-    }
-
-    rl.prompt();
-  });
-
-  rl.on("close", async () => {
-    await db.$client.end();
-    console.log("\nBye.");
-    process.exit(0);
-  });
+async function bye(): Promise<never> {
+  await db.$client.end();
+  console.log("\nBye.");
+  process.exit(0);
 }
 
 main().catch((err) => {
