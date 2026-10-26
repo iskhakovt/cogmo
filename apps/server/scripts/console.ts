@@ -7,7 +7,8 @@
  *
  * Usage:
  *   pnpm console
- *   echo "hello" | pnpm console   # replies to each piped line, then exits
+ *   echo "hello" | pnpm console   # replies to each piped line, then exits;
+ *                                 # nonzero if a line went unanswered
  *
  * Requires:
  *   DATABASE_URL — PostgreSQL connection
@@ -64,11 +65,12 @@ async function getActiveConversationId(channelId: string): Promise<string | null
   return rows[0]?.conversationId ?? null;
 }
 
+/** The newest assistant reply after `afterMessageId`, or null if none lands within `timeoutMs`. */
 async function waitForResponse(
   conversationId: string,
   afterMessageId: string | null,
   timeoutMs: number,
-): Promise<string> {
+): Promise<string | null> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     const conditions = [
@@ -93,7 +95,7 @@ async function waitForResponse(
 
     await new Promise((r) => setTimeout(r, 400));
   }
-  return "(timeout — no response received)";
+  return null;
 }
 
 async function getLastAssistantMessageId(conversationId: string): Promise<string | null> {
@@ -118,7 +120,8 @@ async function main() {
     console.log("No active conversation. Send a message to start one.");
   }
 
-  async function send(text: string): Promise<void> {
+  /** Resolves whether the line was delivered and, unless it is `/new`, answered. */
+  async function send(text: string): Promise<boolean> {
     if (text === "/new") {
       await sendEvent("adapter/direct/inbound", {
         platformAddress: PLATFORM_ADDRESS,
@@ -128,7 +131,7 @@ async function main() {
       conversationId = null;
       lastAssistantId = null;
       console.log("New conversation started.\n");
-      return;
+      return true;
     }
 
     await sendEvent("adapter/direct/inbound", {
@@ -150,15 +153,16 @@ async function main() {
 
     if (!conversationId) {
       console.log("(could not find conversation — is the app running?)\n");
-      return;
+      return false;
     }
 
     process.stdout.write("...");
     const response = await waitForResponse(conversationId, lastAssistantId, 30_000);
     process.stdout.write("\r");
-    console.log(`\n${response}\n`);
+    console.log(`\n${response ?? "(timeout — no response received)"}\n`);
 
     lastAssistantId = await getLastAssistantMessageId(conversationId);
+    return response !== null;
   }
 
   const rl = readline.createInterface({
@@ -171,9 +175,17 @@ async function main() {
   rl.on("close", () => {
     inputEnded = true;
   });
+  let unanswered = false;
   // Ctrl+C leaves at once; the end of input (Ctrl+D, a drained pipe) waits
-  // for the reply in flight.
-  rl.on("SIGINT", bye);
+  // for the reply in flight. readline keeps the terminal raw while it listens,
+  // so Ctrl+C never kills the process: a second one quits without waiting for
+  // the database to close.
+  let interrupted = false;
+  rl.on("SIGINT", () => {
+    if (interrupted) process.exit(130);
+    interrupted = true;
+    bye(unanswered ? 1 : 0).catch(fatal);
+  });
 
   rl.prompt();
 
@@ -183,23 +195,27 @@ async function main() {
     const text = line.trim();
     if (text) {
       try {
-        await send(text);
+        const answered = await send(text);
+        if (!answered) unanswered = true;
       } catch (err) {
         console.error("Error:", err instanceof Error ? err.message : err);
+        unanswered = true;
       }
     }
     if (!inputEnded) rl.prompt();
   }
-  await bye();
+  await bye(unanswered ? 1 : 0);
 }
 
-async function bye(): Promise<never> {
+async function bye(exitCode: number): Promise<never> {
   await db.$client.end();
   console.log("\nBye.");
-  process.exit(0);
+  process.exit(exitCode);
 }
 
-main().catch((err) => {
+function fatal(err: unknown): never {
   console.error("Fatal:", err);
   process.exit(1);
-});
+}
+
+main().catch(fatal);
