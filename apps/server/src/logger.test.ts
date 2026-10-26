@@ -10,16 +10,18 @@ import { createLogger, createLogRouter, type LogStream } from "./logger.js";
 const FAKE_SECRET = "AAFake-TokenForTests_0123456789abcdef";
 const FAKE_TOKEN = `123456789:${FAKE_SECRET}`;
 
-/** A destination that keeps every line written to it. */
-function capture(): { stream: Writable; lines: string[] } {
+/** A destination that keeps every line written to it, and every `message` event pino emits on it. */
+function capture(): { stream: Writable; lines: string[]; messages: unknown[] } {
   const lines: string[] = [];
+  const messages: unknown[] = [];
   const stream = new Writable({
     write(chunk: Buffer, _encoding, callback) {
       lines.push(chunk.toString());
       callback();
     },
   });
-  return { stream, lines };
+  stream.on("message", (message: unknown) => messages.push(message));
+  return { stream, lines, messages };
 }
 
 /**
@@ -96,9 +98,35 @@ describe("createLogRouter", () => {
   function routed() {
     const streams = { stdout: capture(), stderr: capture() };
     const open = vi.fn((name: LogStream) => streams[name].stream);
-    const router = createLogRouter(open);
+    const router = createLogRouter(open, "stdout");
     return { router, open, logger: createLogger(router), streams };
   }
+
+  it("opens the selected stream at selection, before any line", () => {
+    const { router, open } = routed();
+
+    router.select("stderr");
+
+    expect(open).toHaveBeenCalledExactlyOnceWith("stderr");
+  });
+
+  it("throws from the selection when the stream fails to open", () => {
+    const failure = new Error("pino-pretty is not installed");
+    const router = createLogRouter(() => {
+      throw failure;
+    }, "stdout");
+    createLogger(router);
+
+    expect(() => router.select("stderr")).toThrow(failure);
+  });
+
+  it("hands the stream it opens pino's config message", () => {
+    const { router, streams } = routed();
+
+    router.select("stderr");
+
+    expect(streams.stderr.messages).toEqual([expect.objectContaining({ code: "PINO_CONFIG" })]);
+  });
 
   it("writes to stdout when no stream is selected", () => {
     const { logger, open, streams } = routed();
@@ -127,7 +155,7 @@ describe("createLogRouter", () => {
 
     logger.info("first");
 
-    expect(() => router.select("stderr")).toThrow("after the first line went to stdout");
+    expect(() => router.select("stderr")).toThrow("log stream already open on stdout");
     logger.info("second");
     expect(streams.stdout.lines).toHaveLength(2);
     expect(streams.stderr.lines).toEqual([]);
