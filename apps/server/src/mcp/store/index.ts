@@ -18,6 +18,12 @@ import { mcpServers, mcpServerTools } from "./schema.js";
 /** The unique constraint on `mcp_servers.name`. */
 export const MCP_SERVER_NAME_CONSTRAINT = "mcp_servers_name_unique";
 
+/** An approved tool pin with the server it belongs to. */
+export interface ApprovedToolPin {
+  server: McpServer;
+  pin: McpToolPin;
+}
+
 export interface McpStore {
   /**
    * Insert a new server. A taken name raises the driver's unique violation on
@@ -44,8 +50,11 @@ export interface McpStore {
    */
   listServerStatuses(tx: Transaction): Promise<readonly McpServerStatus[]>;
 
-  /** Enabled servers only, ordered by name. Hot path: called from resolveTools. */
-  listEnabledServers(tx: Transaction): Promise<readonly McpServer[]>;
+  /**
+   * The approved pins of every enabled, approved server, each with its server,
+   * ordered by server name, then tool name. Hot path: called from resolveTools.
+   */
+  listApprovedToolPins(tx: Transaction): Promise<readonly ApprovedToolPin[]>;
 
   setEnabled(tx: Transaction, id: string, enabled: boolean): Promise<void>;
 
@@ -73,9 +82,6 @@ export interface McpStore {
 
   /** All pins for a server, ordered by tool name. */
   getToolPins(tx: Transaction, serverId: string): Promise<readonly McpToolPin[]>;
-
-  /** All approved pins for a server, ordered by tool name. Hot path. */
-  getApprovedToolPins(tx: Transaction, serverId: string): Promise<readonly McpToolPin[]>;
 
   /**
    * Update a single pin's approval status. Returns `true` if the row existed
@@ -176,13 +182,20 @@ export class DrizzleMcpStore implements McpStore {
     }));
   }
 
-  async listEnabledServers(tx: Transaction): Promise<readonly McpServer[]> {
+  async listApprovedToolPins(tx: Transaction): Promise<readonly ApprovedToolPin[]> {
     const rows = await tx
-      .select()
-      .from(mcpServers)
-      .where(eq(mcpServers.enabled, true))
-      .orderBy(mcpServers.name);
-    return rows.map(rowToServer);
+      .select({ server: mcpServers, pin: mcpServerTools })
+      .from(mcpServerTools)
+      .innerJoin(mcpServers, eq(mcpServerTools.serverId, mcpServers.id))
+      .where(
+        and(
+          eq(mcpServers.enabled, true),
+          eq(mcpServers.approvalStatus, "approved"),
+          eq(mcpServerTools.approvalStatus, "approved"),
+        ),
+      )
+      .orderBy(mcpServers.name, mcpServerTools.toolName);
+    return rows.map((row) => ({ server: rowToServer(row.server), pin: rowToToolPin(row.pin) }));
   }
 
   async setEnabled(tx: Transaction, id: string, enabled: boolean): Promise<void> {
@@ -246,17 +259,6 @@ export class DrizzleMcpStore implements McpStore {
       .select()
       .from(mcpServerTools)
       .where(eq(mcpServerTools.serverId, serverId))
-      .orderBy(mcpServerTools.toolName);
-    return rows.map(rowToToolPin);
-  }
-
-  async getApprovedToolPins(tx: Transaction, serverId: string): Promise<readonly McpToolPin[]> {
-    const rows = await tx
-      .select()
-      .from(mcpServerTools)
-      .where(
-        and(eq(mcpServerTools.serverId, serverId), eq(mcpServerTools.approvalStatus, "approved")),
-      )
       .orderBy(mcpServerTools.toolName);
     return rows.map(rowToToolPin);
   }

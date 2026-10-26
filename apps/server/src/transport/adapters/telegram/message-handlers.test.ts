@@ -11,9 +11,22 @@ import {
   makePhotoCtx,
   makeVoiceCtx,
 } from "../../../test/telegram/harness.js";
+import { MAX_INBOUND_FILE_BYTES } from "../../content.js";
 import { setup } from "./index.js";
 
 vi.mock("grammy", async () => (await import("../../../test/telegram/grammy-mock.js")).grammyModule);
+
+const { GrammyError } = await vi.importActual<typeof import("grammy")>("grammy");
+
+/** The Bot API's answer to a `getFile` call, as grammY throws it. */
+function getFileRefusal(description: string): InstanceType<typeof GrammyError> {
+  return new GrammyError(
+    `Call to 'getFile' failed! (400: ${description})`,
+    { ok: false, error_code: 400, description },
+    "getFile",
+    {},
+  );
+}
 
 describe("registerMessageHandlers", () => {
   beforeEach(() => {
@@ -323,7 +336,7 @@ describe("registerMessageHandlers", () => {
       );
     });
 
-    it("does not upload or emit on missing file_path (>20MB Telegram cap)", async () => {
+    it("does not upload or emit on missing file_path", async () => {
       const { transport } = await createAdapter();
       const ctx = makeVoiceCtx(111);
       ctx.api.getFile = vi.fn().mockResolvedValue({ file_path: undefined });
@@ -670,10 +683,6 @@ describe("registerMessageHandlers", () => {
       );
     });
 
-    // The Telegram Bot API can return file_path: undefined for files >20MB
-    // and for some media types. Without a guard the URL becomes
-    // `.../bot<token>/undefined`, fetch returns a 404 HTML page, and we'd
-    // upload that HTML as the user's "document".
     it("does not upload or emit when getFile returns no file_path", async () => {
       const { transport } = await createAdapter();
       const ctx = makeDocumentCtx(111, { mime_type: "application/pdf", file_name: "huge.pdf" });
@@ -755,6 +764,90 @@ describe("registerMessageHandlers", () => {
 
       expect(transport.uploadAttachment).not.toHaveBeenCalled();
       expect(transport.emit).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("a file Telegram won't serve as over its 20 MB download limit", () => {
+    const TOO_LARGE_REPLY =
+      "That file is too large to open. Telegram bots can download files up to 20 MB.";
+    const mockFetch = vi.fn();
+
+    beforeEach(() => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
+      });
+      vi.stubGlobal("fetch", mockFetch);
+    });
+
+    it.each([
+      ["photo", () => makePhotoCtx(111)],
+      ["voice", () => makeVoiceCtx(111)],
+      // No declared size: a document with one over the limit takes the size-only block.
+      ["document", () => makeDocumentCtx(111, { file_name: "big.pdf" })],
+    ])("replies with the limit when getFile refuses a %s as too big", async (kind, makeCtx) => {
+      const { transport } = await createAdapter();
+      const ctx = makeCtx();
+      ctx.api.getFile = vi.fn().mockRejectedValue(getFileRefusal("Bad Request: file is too big"));
+
+      await expectDefined(handlers.get(`on:message:${kind}`), kind)(ctx);
+
+      expect(ctx.reply).toHaveBeenCalledWith(TOO_LARGE_REPLY);
+      expect(mockFetch).not.toHaveBeenCalled();
+      expect(transport.uploadAttachment).not.toHaveBeenCalled();
+      expect(transport.emit).not.toHaveBeenCalled();
+    });
+
+    it("replies to a voice note declared over the limit without asking for the file", async () => {
+      const info = vi.spyOn(logger, "info").mockImplementation(() => {});
+      try {
+        const { transport } = await createAdapter();
+        const ctx = makeVoiceCtx(111, {
+          file_id: "big_voice",
+          file_size: MAX_INBOUND_FILE_BYTES + 1,
+        });
+
+        await expectDefined(handlers.get("on:message:voice"), "voice handler")(ctx);
+
+        expect(ctx.reply).toHaveBeenCalledWith(TOO_LARGE_REPLY);
+        expect(ctx.api.getFile).not.toHaveBeenCalled();
+        expect(transport.emit).not.toHaveBeenCalled();
+        expect(info).toHaveBeenCalledWith(
+          { error: { kind: "too_large", fileId: "big_voice" } },
+          "failed to process voice message",
+        );
+      } finally {
+        info.mockRestore();
+      }
+    });
+
+    it("downloads a voice note of exactly 20 MB", async () => {
+      const { transport } = await createAdapter();
+      const ctx = makeVoiceCtx(111, { file_size: MAX_INBOUND_FILE_BYTES });
+
+      await expectDefined(handlers.get("on:message:voice"), "voice handler")(ctx);
+
+      expect(ctx.reply).not.toHaveBeenCalled();
+      expect(transport.emit).toHaveBeenCalled();
+    });
+
+    it("logs any other getFile refusal without replying", async () => {
+      const error = vi.spyOn(logger, "error").mockImplementation(() => {});
+      try {
+        await createAdapter();
+        const ctx = makeVoiceCtx(111);
+        const refusal = getFileRefusal("Bad Request: invalid file_id");
+        ctx.api.getFile = vi.fn().mockRejectedValue(refusal);
+
+        await expectDefined(handlers.get("on:message:voice"), "voice handler")(ctx);
+
+        expect(ctx.reply).not.toHaveBeenCalled();
+        expect(error).toHaveBeenCalledWith({ err: refusal }, "failed to process voice message");
+      } finally {
+        error.mockRestore();
+      }
     });
   });
 
