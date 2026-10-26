@@ -512,6 +512,13 @@
       "when": 1792076999064,
       "tag": "0072_attachment_originals",
       "breakpoints": true
+    },
+    {
+      "idx": 73,
+      "version": "7",
+      "when": 1793014399928,
+      "tag": "0073_identity_mode_and_role_enums",
+      "breakpoints": true
     }
   ]
 }

@@ -156,6 +156,19 @@ describe("DrizzleTransportStore", () => {
       expect(fixed.kind).toBe("new");
       await expect(seedChannel("web")).rejects.toThrow();
     });
+
+    it("refuses an identity mode other than fixed, mapped or create", async () => {
+      // Adversarial setup: past the store, whose types admit only the three modes.
+      await expect(
+        db.execute(sql`
+          INSERT INTO channels (type, credentials, identity_mode) VALUES ('web', '{}', 'shared')
+        `),
+      ).rejects.toMatchObject({
+        cause: {
+          message: expect.stringMatching(/invalid input value for enum channel_identity_mode/),
+        },
+      });
+    });
   });
 
   describe("sessions", () => {

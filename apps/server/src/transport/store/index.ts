@@ -29,6 +29,7 @@ import {
   attachmentOriginals,
   type BufferedInboundEntry,
   boundaryPending,
+  type ChannelIdentityMode,
   type ChannelSessionReceive,
   type ChannelSessionStatus,
   channelSessions,
@@ -110,6 +111,19 @@ export interface PriorClosedConversation {
   firstUserSnippet: string | null;
 }
 
+/**
+ * A `channels` row as `getAllChannels` returns it; `getChannelByType` omits
+ * `type`. `credentials` is opaque ciphertext in raw `jsonb()`, which Drizzle
+ * infers as `unknown`, so both reads cast it to the `JsonValue` the adapter
+ * wire format depends on.
+ */
+export interface ChannelRow {
+  id: string;
+  type: string;
+  credentials: JsonValue;
+  identityMode: ChannelIdentityMode;
+}
+
 /** A held boundary-prompt row — see schema.ts → boundary_pending. */
 export interface BoundaryPendingRow {
   id: string;
@@ -125,17 +139,10 @@ export interface BoundaryPendingRow {
 
 export interface TransportStore {
   /** List all channels. */
-  getAllChannels(
-    tx: Transaction,
-  ): Promise<
-    ReadonlyArray<{ id: string; type: string; credentials: JsonValue; identityMode: string }>
-  >;
+  getAllChannels(tx: Transaction): Promise<ReadonlyArray<ChannelRow>>;
 
   /** The oldest channel of `type` by `id` (UUIDv7); `type` is not unique. */
-  getChannelByType(
-    tx: Transaction,
-    type: string,
-  ): Promise<{ id: string; identityMode: string; credentials: JsonValue } | undefined>;
+  getChannelByType(tx: Transaction, type: string): Promise<Omit<ChannelRow, "type"> | undefined>;
 
   /** The channel's `identity_mode`, or `undefined` when no channel has `channelId`. */
   getChannelIdentityMode(tx: Transaction, channelId: string): Promise<string | undefined>;
@@ -146,7 +153,7 @@ export interface TransportStore {
     params: {
       type: string;
       credentials: JsonValue;
-      identityMode: string;
+      identityMode: ChannelIdentityMode;
     },
   ): Promise<{ id: string }>;
 
@@ -515,11 +522,8 @@ function finishedOriginal(row: {
 }
 
 export class DrizzleTransportStore implements TransportStore {
-  async getAllChannels(
-    tx: Transaction,
-  ): Promise<
-    ReadonlyArray<{ id: string; type: string; credentials: JsonValue; identityMode: string }>
-  > {
+  async getAllChannels(tx: Transaction): Promise<ReadonlyArray<ChannelRow>> {
+    // Cast for `credentials`: see `ChannelRow`.
     return tx
       .select({
         id: channels.id,
@@ -527,15 +531,13 @@ export class DrizzleTransportStore implements TransportStore {
         credentials: channels.credentials,
         identityMode: channels.identityMode,
       })
-      .from(channels) as Promise<
-      ReadonlyArray<{ id: string; type: string; credentials: JsonValue; identityMode: string }>
-    >;
+      .from(channels) as Promise<ReadonlyArray<ChannelRow>>;
   }
 
   async getChannelByType(
     tx: Transaction,
     type: string,
-  ): Promise<{ id: string; identityMode: string; credentials: JsonValue } | undefined> {
+  ): Promise<Omit<ChannelRow, "type"> | undefined> {
     const rows = await tx
       .select({
         id: channels.id,
@@ -546,10 +548,8 @@ export class DrizzleTransportStore implements TransportStore {
       .where(eq(channels.type, type))
       .orderBy(asc(channels.id))
       .limit(1);
-    // `credentials` is opaque ciphertext (raw `jsonb()`, no Zod schema),
-    // so Drizzle infers it as `unknown`; cast restores the JsonValue
-    // contract the adapter wire format depends on.
-    return rows[0] as { id: string; identityMode: string; credentials: JsonValue } | undefined;
+    // Cast for `credentials`: see `ChannelRow`.
+    return rows[0] as Omit<ChannelRow, "type"> | undefined;
   }
 
   async getChannelIdentityMode(tx: Transaction, channelId: string): Promise<string | undefined> {
@@ -565,7 +565,7 @@ export class DrizzleTransportStore implements TransportStore {
     params: {
       type: string;
       credentials: JsonValue;
-      identityMode: string;
+      identityMode: ChannelIdentityMode;
     },
   ): Promise<{ id: string }> {
     return single(await tx.insert(channels).values(params).returning({ id: channels.id }));
