@@ -41,10 +41,13 @@ export const commandComposer = {
   command: vi.fn((cmd: string, handler: Handler) => handlers.set(`command:${cmd}`, handler)),
 };
 
-type UpdateMiddleware = (
-  ctx: { update: { update_id: number } },
-  next: () => Promise<void>,
-) => Promise<void>;
+/** The part of a grammY context the bot's middleware reads: the update's id and its sender. */
+interface UpdateCtx {
+  update: { update_id: number };
+  from?: { id: number };
+}
+
+type UpdateMiddleware = (ctx: UpdateCtx, next: () => Promise<void>) => Promise<void>;
 
 /**
  * What the mocked `bot.start()` (the polling loop) and `bot.stop()` (the
@@ -61,9 +64,22 @@ export const botLifecycle = {
   registrations: [] as string[],
 };
 
-/** Run one update through the registered middleware, then `handler`, as grammY composes them. */
+/**
+ * Run one update from sender 1 through the registered middleware, then
+ * `handler`, as grammY composes them.
+ */
 export function runUpdate(updateId: number, handler: () => Promise<void>): Promise<void> {
-  const ctx = { update: { update_id: updateId } };
+  return compose({ update: { update_id: updateId }, from: { id: 1 } }, handler);
+}
+
+/** Run `ctx` through the registered middleware, then the handler registered under `key`. */
+export function deliverUpdate(key: string, ctx: UpdateCtx): Promise<void> {
+  const handler = handlers.get(key);
+  if (handler === undefined) throw new Error(`no handler registered under ${key}`);
+  return compose(ctx, () => handler(ctx));
+}
+
+function compose(ctx: UpdateCtx, handler: () => Promise<void>): Promise<void> {
   const run = (index: number): Promise<void> => {
     const middleware = botLifecycle.middleware[index];
     return middleware ? middleware(ctx, () => run(index + 1)) : handler();

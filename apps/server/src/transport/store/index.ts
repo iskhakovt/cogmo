@@ -144,6 +144,12 @@ export interface TransportStore {
   /** The oldest channel of `type` by `id` (UUIDv7); `type` is not unique. */
   getChannelByType(tx: Transaction, type: string): Promise<Omit<ChannelRow, "type"> | undefined>;
 
+  /** The channel's `identity_mode`, or `undefined` when no channel has `channelId`. */
+  getChannelIdentityMode(
+    tx: Transaction,
+    channelId: string,
+  ): Promise<ChannelIdentityMode | undefined>;
+
   /** Create a channel. */
   createChannel(
     tx: Transaction,
@@ -266,7 +272,7 @@ export interface TransportStore {
   /** Find active sessions with receive='all' for a conversation. */
   getReceiveAllSessions(tx: Transaction, conversationId: string): Promise<ReadonlyArray<Session>>;
 
-  /** Resolve user by platform handle on a channel. Stub — identity resolution is a future feature. */
+  /** The user a platform handle maps to on a channel: the channel's wildcard identity if it has one, else the handle's own row. */
   resolveUser(
     tx: Transaction,
     channelId: string,
@@ -547,6 +553,17 @@ export class DrizzleTransportStore implements TransportStore {
       .limit(1);
     // Cast for `credentials`: see `ChannelRow`.
     return rows[0] as Omit<ChannelRow, "type"> | undefined;
+  }
+
+  async getChannelIdentityMode(
+    tx: Transaction,
+    channelId: string,
+  ): Promise<ChannelIdentityMode | undefined> {
+    const rows = await tx
+      .select({ identityMode: channels.identityMode })
+      .from(channels)
+      .where(eq(channels.id, channelId));
+    return rows[0]?.identityMode;
   }
 
   async createChannel(

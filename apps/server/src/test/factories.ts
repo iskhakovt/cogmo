@@ -313,6 +313,7 @@ export function mockTransportStore(overrides?: Partial<TransportStore>): Transpo
   return {
     getAllChannels: vi.fn().mockResolvedValue([]),
     getChannelByType: vi.fn().mockResolvedValue(null),
+    getChannelIdentityMode: vi.fn().mockResolvedValue("fixed"),
     createChannel: vi.fn().mockResolvedValue({ id: "ch-1" }),
     insertOrRecoverFixedChannel: vi.fn().mockResolvedValue({ kind: "new", id: "ch-1" }),
     resolveSession: vi.fn().mockResolvedValue(null),
@@ -374,6 +375,7 @@ export function mockTransportDeep(overrides: DeepPartial<Transport> = {}): Trans
   return {
     ...base,
     ...overrides,
+    senders: { ...base.senders, ...(overrides.senders ?? {}) },
     boundary: { ...base.boundary, ...(overrides.boundary ?? {}) },
     conversations: { ...base.conversations, ...(overrides.conversations ?? {}) },
     chats: { ...base.chats, ...(overrides.chats ?? {}) },
@@ -394,6 +396,7 @@ export function mockTransportDeep(overrides: DeepPartial<Transport> = {}): Trans
 export function mockTransport(overrides?: Partial<Transport>): Transport {
   return {
     resolveSession: vi.fn().mockResolvedValue(null),
+    senders: { admits: vi.fn().mockResolvedValue(true) },
     boundary: {
       peek: vi.fn().mockResolvedValue(null),
       findActive: vi.fn().mockResolvedValue(null),

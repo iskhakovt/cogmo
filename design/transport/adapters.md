@@ -13,12 +13,15 @@ This boundary also enables future permission tuning — e.g. restricting a third
 Contract pseudocode — return types shown as `Promise<T>` for readability. Actual return semantics vary by method:
 
 - **Result-based** (`Promise<Result<T, TransportError>>`): `createConversation`, `resumeConversation`, `emit`, and all admin mutators (`conversations.{list, getCurrent, setAlias, setProfile}`, `profiles.{list, create, update, delete}`).
-- **Raw values** (no Result wrapper): `resolveSession` (`Session | null`), `closeSession` (`void`), `extendSession` (`void`), `uploadAttachment` (`string`), `models.list` (`string[]`).
+- **Raw values** (no Result wrapper): `senders.admits` (`boolean`), `resolveSession` (`Session | null`), `closeSession` (`void`), `extendSession` (`void`), `uploadAttachment` (`string`), `models.list` (`string[]`).
 
 Adapter authors should not assume uniform Result behavior — check the interface for each method.
 
 ```typescript
 interface Transport {
+  // Admission (hot path) — asked before any work for an inbound update
+  senders: { admits(platformUserHandle: string): Promise<boolean> };
+
   // Sessions (hot path — top-level)
   resolveSession(platformAddress: string): Promise<Session | null>;
   createConversation(platformAddress: string, platformUserHandle: string, opts: {
@@ -95,13 +98,17 @@ type TransportError =
   | { code: "access_denied"; reason: string };
 ```
 
-The adapter maps errors to platform-appropriate responses ("I don't know you", "No conversation named 'work'", etc.).
+The adapter maps errors to platform-appropriate responses ("No conversation named 'work'", etc.).
 
 `channelId` is not a parameter — it's baked into the context when the runtime creates it for the adapter.
 
 Identity resolution is internal — the adapter passes `platformUserHandle`, the transport resolves it based on the channel's identity mode (`fixed`, `mapped`, `create`). The adapter never sees userIds or touches `user_identities`.
 
 ## Operations
+
+### Admission
+
+- `senders.admits` — whether the channel admits a sender at all, asked before any work for an inbound update by an adapter whose channel can be `mapped` ([identity.md](identity.md) → Allowlist enforcement).
 
 ### Session management
 

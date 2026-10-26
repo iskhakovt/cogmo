@@ -28,6 +28,7 @@ import {
 import { createProfiles, type ProfilesNamespace } from "./namespaces/profiles.js";
 import { createRepos, type ReposNamespace } from "./namespaces/repos.js";
 import { createScheduling, type SchedulingNamespace } from "./namespaces/scheduling.js";
+import { createSenders, type SendersNamespace } from "./namespaces/senders.js";
 import { createSessions, type TransportSessions } from "./namespaces/sessions.js";
 import { createSkills, type SkillsNamespace } from "./namespaces/skills.js";
 import type { TransportStore } from "./store/index.js";
@@ -52,6 +53,7 @@ export type { TransportError } from "./transport-error.js";
  * Returns Result<T, TransportError> — adapters handle errors gracefully.
  */
 export interface Transport extends TransportSessions {
+  senders: SendersNamespace;
   boundary: BoundaryNamespace;
   conversations: ConversationsNamespace;
   chats: ChatsNamespace;
@@ -168,6 +170,7 @@ export function createTransport(deps: TransportDeps): Transport {
       idleTimeoutMs: deps.idleTimeoutMs,
       sessionReceive: deps.sessionReceive ?? "routed",
     }),
+    senders: createSenders(ctx),
     boundary: createBoundary({ ...ctx, inngest, defaultProfileId: deps.defaultProfileId }),
     conversations: createConversations({
       ...ctx,
