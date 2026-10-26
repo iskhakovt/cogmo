@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { REDACTED_BOT_SEGMENT, redactSecretsInText } from "./redact-secrets.js";
+import {
+  REDACTED_BOT_SEGMENT,
+  redactSecretsInText,
+  truncationSafeLength,
+} from "./redact-secrets.js";
 
 /** Shaped like a Bot API token (numeric id, colon, URL-safe base64), but not one. */
 const FAKE_SECRET = "AAFake-TokenForTests_0123456789abcdef";
@@ -133,7 +137,36 @@ describe("redactSecretsInText", () => {
       "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-REDACTED",
     ],
     ["an Anthropic API key", `key sk-ant-api03-${"x".repeat(90)}.`, "key sk-ant-REDACTED."],
+    [
+      "a classic token cut short of its checksum",
+      `candidate: ${PAT.slice(0, 4 + 30)}`,
+      "candidate: ghp_REDACTED",
+    ],
   ])("masks a token %s", (_label, input, expected) => {
+    expect(redactSecretsInText(input)).toBe(expected);
+  });
+
+  /** An installation token in GitHub's app-id-and-JWT format. */
+  const INSTALLATION_TOKEN = [
+    "ghs_1234567_eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9",
+    "eyJpc3MiOiIxMjM0NTY3IiwiZXhwIjoxNzc3MjkxMjAwfQ",
+    "Qx7-_bL9".repeat(43),
+  ].join(".");
+
+  it.each([
+    ["alone", INSTALLATION_TOKEN, "ghs_REDACTED"],
+    ["after =", `GITHUB_TOKEN=${INSTALLATION_TOKEN} rest`, "GITHUB_TOKEN=ghs_REDACTED rest"],
+    [
+      "in JSON-escaped text",
+      String.raw`{"msg":"env\nGITHUB_TOKEN=${INSTALLATION_TOKEN}\n"}`,
+      String.raw`{"msg":"env\nGITHUB_TOKEN=ghs_REDACTED\n"}`,
+    ],
+    [
+      "after a colour code",
+      `\u001b[33m${INSTALLATION_TOKEN}\u001b[0m`,
+      "\u001b[33mghs_REDACTED\u001b[0m",
+    ],
+  ])("masks an app-id-and-JWT installation token %s", (_label, input, expected) => {
     expect(redactSecretsInText(input)).toBe(expected);
   });
 
@@ -145,6 +178,7 @@ describe("redactSecretsInText", () => {
     ["a URL then an address in a JSON line", '{"url":"https://github.com","user":"a@b.c"}'],
     ["a push rejection", " ! [rejected]        cogmo/abc -> cogmo/abc (non-fast-forward)"],
     ["a short token-like word", "ghp_short and sk-ant-short"],
+    ["a token-like word just under the length", `ghp_${"a1B2".repeat(4)}abc`],
     ["a word ending in a token prefix", "highs_and_lows_of_the_quarterly_report"],
     ["another such word", "laughs_per_minute_aggregate_counter_v2"],
     ["a hyphenated word ending in sk", "task-ant-colony-simulation-config-file"],
@@ -167,6 +201,23 @@ describe("redactSecretsInText", () => {
   ])("stays linear on %s", (_label, input) => {
     const start = performance.now();
     redactSecretsInText(input);
+    truncationSafeLength(input);
     expect(performance.now() - start).toBeLessThan(1_000);
+  });
+});
+
+describe("truncationSafeLength", () => {
+  it.each([
+    ["the empty text", "", 0],
+    ["a last run with no secret start", 'tests ran\n{"report":[1,2,3]', 27],
+    ["a start only in an earlier run", "https://u:p@h/ ok\ntrailing", 26],
+    ["a start cut off before it is whole", "push to https:/", 15],
+    ["a URL the cut ran through", "push to https://deploy:Sup", 13],
+    ["a token the cut ran through", "env\nGH_TOKEN=ghp_a1B2", 13],
+    ["the earliest of several starts", "env\nX=sk-ant-oat01-ab://u", 6],
+    ["a last run after a tab", "a\tghs_123", 2],
+    ["a whole text that is one run", "/bot123:abc", 0],
+  ])("keeps all before a cut secret could begin: %s", (_label, text, expected) => {
+    expect(truncationSafeLength(text)).toBe(expected);
   });
 });

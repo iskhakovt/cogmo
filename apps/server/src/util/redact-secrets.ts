@@ -13,43 +13,71 @@
  * Git and HTTP clients quote URLs that carry credentials in their userinfo,
  * and tool output can carry a bare GitHub or Anthropic token.
  *
- * No pattern is anchored on a word boundary: a token can follow a letter, a
+ * No shape is anchored on a word boundary: a token can follow a letter, a
  * digit or an underscore (`MY_TOKEN_ghp_…`, a JSON-escaped `\nghp_…`, a
  * colour code's `m`). Tokens are told from words by their body instead. Each
- * pattern starts with a literal and no quantifier nests, so a pass is linear.
+ * shape opens with a literal start and no quantifier nests, so a pass is
+ * linear; none spans whitespace, which is what `truncationSafeLength` rests on.
  */
 
 /** What a token-shaped path segment is replaced with. */
 export const REDACTED_BOT_SEGMENT = "bot<redacted>";
 
 /**
- * A Bot API token as a path segment: `/bot`, the numeric bot id, a colon
- * (literal or percent-encoded) and the secret's URL-safe base64 characters.
- * Anchored on the `/` so `bot` inside a longer segment doesn't match, and
- * host-agnostic so a self-hosted Bot API server (`apiRoot`) is covered too.
- * There is no trailing boundary: in running text a token can be followed by
- * any punctuation, and replacing a token-shaped prefix is the safe failure.
+ * A secret's shape, as regex sources: the `start` every match opens with and
+ * the `rest`, neither matching whitespace. `replacement` stands for the whole
+ * match, with `$1` for the start.
  */
-const BOT_TOKEN_SEGMENT = /\/bot\d+(?::|%3[Aa])[A-Za-z0-9_-]+/g;
+interface SecretShape {
+  start: string;
+  rest: string;
+  replacement: string;
+}
 
-/**
- * A URL's userinfo under any scheme, up to the last `@` before the host: a
- * user, a password, either alone or empty. It stops at whitespace and at the
- * delimiters that end the authority (`/?#`), and at `"` and `\`, so it never
- * runs on through a JSON string's closing quote or escape into the rest of a
- * log line. The `/` ending each candidate also keeps candidates from
- * overlapping.
- */
-const URL_USERINFO = /:\/\/[^\s/?#"\\]*@/g;
+const SECRET_SHAPES: ReadonlyArray<SecretShape> = [
+  // A URL's userinfo under any scheme, up to the last `@` before the host: a
+  // user, a password, either alone or empty. It stops at whitespace, at the
+  // delimiters that end the authority (`/?#`), and at `"` and `\`, so it never
+  // runs on through a JSON string's closing quote or escape into the rest of a
+  // log line. The `/` ending each candidate keeps candidates from overlapping.
+  { start: "://", rest: String.raw`[^\s/?#"\\]*@`, replacement: "$1REDACTED@" },
+  // A GitHub App installation token in its app-id-and-JWT form: the app id,
+  // then base64url segments joined by `.`.
+  { start: "ghs_", rest: String.raw`\d+_[A-Za-z0-9._-]{36,}`, replacement: "$1REDACTED" },
+  // GitHub's base62 tokens: personal (`ghp_`), OAuth (`gho_`), user-to-server
+  // (`ghu_`), installation tokens in their base62 form (`ghs_`) and refresh
+  // (`ghr_`), each 30 random characters and a 6-character checksum. A body
+  // without `_` is what tells one from a word like `highs_and_lows`; 20
+  // characters still masks one cut short of its checksum.
+  { start: "gh[pousr]_", rest: "[A-Za-z0-9]{20,}", replacement: "$1REDACTED" },
+  // GitHub fine-grained tokens.
+  { start: "github_pat_", rest: "[A-Za-z0-9_]{36,}", replacement: "$1REDACTED" },
+  // Anthropic API keys and OAuth tokens: a kind and version (`api03`,
+  // `oat01`), then the secret.
+  { start: "sk-ant-", rest: String.raw`[a-z]+\d+-[A-Za-z0-9_-]{20,}`, replacement: "$1REDACTED" },
+  // A Bot API token as a path segment: `/bot`, the numeric bot id, a colon
+  // (literal or percent-encoded) and the secret's URL-safe base64 characters.
+  // Anchored on the `/` so `bot` inside a longer segment doesn't match, and
+  // host-agnostic so a self-hosted Bot API server (`apiRoot`) is covered too.
+  // There is no trailing boundary: in running text a token can be followed
+  // by any punctuation, and replacing a token-shaped prefix is the safe
+  // failure.
+  {
+    start: "/bot",
+    rest: String.raw`\d+(?::|%3[Aa])[A-Za-z0-9_-]+`,
+    replacement: `/${REDACTED_BOT_SEGMENT}`,
+  },
+];
 
-/** GitHub classic, OAuth, user-to-server, server-to-server and refresh tokens: 36+ base62 characters. */
-const GITHUB_TOKEN = /(gh[pousr])_[A-Za-z0-9]{36,}/g;
+const MASKS = SECRET_SHAPES.map((shape) => ({
+  pattern: new RegExp(`(${shape.start})${shape.rest}`, "g"),
+  replacement: shape.replacement,
+}));
 
-/** GitHub fine-grained tokens. */
-const GITHUB_FINE_GRAINED_TOKEN = /github_pat_[A-Za-z0-9_]{36,}/g;
+/** Any shape's start; no `g` flag, so `search` carries no state between calls. */
+const SECRET_START = new RegExp(SECRET_SHAPES.map((shape) => shape.start).join("|"));
 
-/** Anthropic API keys and OAuth tokens: a kind and version (`api03`, `oat01`), then the secret. */
-const ANTHROPIC_KEY = /sk-ant-[a-z]+\d+-[A-Za-z0-9_-]{20,}/g;
+const WHITESPACE = /\s/;
 
 /**
  * `text` with URL userinfo, GitHub and Anthropic tokens, and Bot API token
@@ -58,10 +86,19 @@ const ANTHROPIC_KEY = /sk-ant-[a-z]+\d+-[A-Za-z0-9_-]{20,}/g;
  * own output unchanged.
  */
 export function redactSecretsInText(text: string): string {
-  return text
-    .replace(URL_USERINFO, "://REDACTED@")
-    .replace(GITHUB_TOKEN, "$1_REDACTED")
-    .replace(GITHUB_FINE_GRAINED_TOKEN, "github_pat_REDACTED")
-    .replace(ANTHROPIC_KEY, "sk-ant-REDACTED")
-    .replace(BOT_TOKEN_SEGMENT, `/${REDACTED_BOT_SEGMENT}`);
+  return MASKS.reduce((out, mask) => out.replace(mask.pattern, mask.replacement), text);
+}
+
+/**
+ * How much of `text`, cut off at its end, can be kept for masking. A secret
+ * the cut ran through can end too early to be recognised, however long it is.
+ * It lies in the last whitespace-free run and opens with a shape's start, so
+ * everything before the first start in that run is safe, and all of `text` is
+ * when the run holds none.
+ */
+export function truncationSafeLength(text: string): number {
+  let runStart = text.length;
+  while (runStart > 0 && !WHITESPACE.test(text.charAt(runStart - 1))) runStart -= 1;
+  const start = text.slice(runStart).search(SECRET_START);
+  return start === -1 ? text.length : runStart + start;
 }

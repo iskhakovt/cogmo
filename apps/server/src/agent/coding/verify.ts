@@ -23,20 +23,18 @@ import {
   execFailureError,
   type SandboxSession,
 } from "../../sandbox/index.js";
-import { redactSecretsInText } from "../../util/redact-secrets.js";
+import { redactSecretsInText, truncationSafeLength } from "../../util/redact-secrets.js";
 
 /** Cap for the captured verify output (8 KiB). */
 export const OUTPUT_CAP_BYTES = 8 * 1024;
 
 /**
- * Read past the cap, so a credential the cap cuts through is still whole when
- * masked, and the kept text still fills the cap once masking has shortened it
- * and `maskCapture` has dropped the capture's unfinished last run.
+ * How far the capture reads past the cap. A credential that ends within it is
+ * masked whole even when the cap cuts through it, and the slack lets the kept
+ * text still fill the cap after masking shortens it and `maskCapture` drops a
+ * secret the capture stopped inside.
  */
 const MASK_LOOKAHEAD_BYTES = 1024;
-
-/** Characters no masked shape spans: each credential lies whole between two of them. */
-const RUN_BREAKS = [" ", "\n", "\t", "\r"] as const;
 
 /** Synthetic exit code returned when the verify exceeds its wall-clock budget. */
 export const TIMEOUT_EXIT_CODE = 124;
@@ -141,14 +139,13 @@ async function captureVerify(
 }
 
 /**
- * The capture masked, then cut to the cap. A capture that dropped output stops
- * mid-run, where a credential can end too early to be recognised, however
- * long it is; its last unbroken run is dropped before masking, so everything
- * masked is whole. A capture with no run break keeps nothing.
+ * The capture masked, then cut to the cap. A capture that dropped output may
+ * stop inside a secret, of any length, that masking can't recognise there;
+ * `truncationSafeLength` drops it whole before masking.
  */
 function maskCapture(captured: string, dropped: boolean): { kept: string; truncated: boolean } {
-  const lastBreak = Math.max(...RUN_BREAKS.map((c) => captured.lastIndexOf(c)));
-  const masked = redactSecretsInText(dropped ? captured.slice(0, lastBreak + 1) : captured);
+  const complete = dropped ? captured.slice(0, truncationSafeLength(captured)) : captured;
+  const masked = redactSecretsInText(complete);
   return {
     kept: masked.slice(0, OUTPUT_CAP_BYTES),
     truncated: dropped || masked.length > OUTPUT_CAP_BYTES,
