@@ -96,8 +96,8 @@ async function dockerExec(args: readonly string[]): Promise<DockerExec> {
  * exit code instead of rejecting on a nonzero one: a command that returns a
  * failed result prints it on stdout, and that is what an assertion needs to
  * show. One that throws writes only to stderr, which `cliOutcome`'s error
- * carries. `LOG_LEVEL=fatal` keeps the logger, which also writes to stdout,
- * out of it.
+ * carries. `LOG_LEVEL=fatal` keeps the logger's lines, also on stderr, out of
+ * that error.
  */
 async function runCogmo(args: readonly string[]): Promise<CliRun> {
   try {

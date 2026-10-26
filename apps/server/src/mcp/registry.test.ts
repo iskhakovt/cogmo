@@ -326,6 +326,35 @@ describe("McpRegistryImpl.resolveTools", () => {
     await reg.stop();
   });
 
+  it("reads every server's pins in one transaction", async () => {
+    const first = await seedApprovedServer("github", [
+      { name: "a", description: "d", inputSchema: { type: "object" } },
+    ]);
+    const second = await seedApprovedServer("linear", [
+      { name: "b", description: "d", inputSchema: { type: "object" } },
+    ]);
+    let transactions = 0;
+    const counting: Transactor = (cb) => {
+      transactions += 1;
+      return tx(cb);
+    };
+    const reg = new McpRegistryImpl({
+      store,
+      secrets: dummySecrets,
+      runInTx: counting,
+      runner: makeRunner({}),
+      callTimeoutMs: 30_000,
+      idleEvictionMs: 60_000,
+      toolBudget: 25,
+    });
+
+    const tools = await reg.resolveTools({ toolGlobs: ["mcp__*"] });
+
+    expect(tools.map((t) => t.name)).toEqual(["mcp__github__a", "mcp__linear__b"]);
+    expect(transactions).toBe(1);
+    await Promise.all([first.reg.stop(), second.reg.stop(), reg.stop()]);
+  });
+
   it("caps at the budget alphabetically and drops the tail", async () => {
     const { reg } = await seedApprovedServer("github", [
       { name: "a", description: "d", inputSchema: { type: "object" } },

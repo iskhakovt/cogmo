@@ -8,6 +8,7 @@ import { vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { NormalizeArrivalDeps } from "../agent/attachments/normalize-arrival.js";
 import type { HandleMessageDeps } from "../agent/handle-message.js";
+import type { AgentLoopResult } from "../agent/loop.js";
 import type { Service } from "../agent/service.js";
 import type { AgentStore } from "../agent/store/index.js";
 import type { ToolRegistry } from "../agent/tools.js";
@@ -775,6 +776,20 @@ export function mockProvider(overrides?: Partial<LlmProvider>): LlmProvider {
     },
     countTokens: vi.fn().mockResolvedValue(100),
     attachmentLimits: vi.fn().mockReturnValue({ requestBytes: 32_000_000, images: 100 }),
+    ...overrides,
+  };
+}
+
+/** An agent-loop result: an empty one-iteration turn that streamed nothing, unless overridden. */
+export function loopResult(overrides?: Partial<AgentLoopResult>): AgentLoopResult {
+  return {
+    text: "",
+    messages: [],
+    newMessages: [],
+    usage: { inputTokens: 10, outputTokens: 5 },
+    model: "mock-model",
+    iterations: 1,
+    streamed: { text: "", toolUseIds: [] },
     ...overrides,
   };
 }

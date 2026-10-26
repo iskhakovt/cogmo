@@ -219,7 +219,9 @@ jobs:
             images/skills/.python-version
       - run: uv sync --locked
       - name: ruff (lint + format)
-        run: uv run ruff check
+        run: |
+          uv run ruff check
+          uv run ruff format --check
       # The tier-1 Pyodide worker's Python; design/tooling.md -> Python sub-projects.
       - name: ruff, Pyodide worker (lint + format)
         run: |

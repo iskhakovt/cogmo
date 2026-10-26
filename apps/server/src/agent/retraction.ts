@@ -2,20 +2,7 @@ import type { Logger } from "pino";
 import * as R from "remeda";
 import { extractText } from "../llm/content.js";
 import type { Message } from "../llm/types.js";
-
-/**
- * What the streaming adapters were shown during one turn. Sourced from
- * `AgentLoopResult.streamed`, which the loop derives from its durable
- * iteration outcomes — identical on every Inngest re-invocation, unlike a
- * ledger of this invocation's live emissions (empty when the iterations
- * replay from the step cache).
- */
-export interface StreamedOutput {
-  /** Every `text_delta` forwarded this turn, concatenated in order. */
-  text: string;
-  /** Every `tool_start` id forwarded this turn, in order. */
-  toolUseIds: ReadonlyArray<string>;
-}
+import type { AgentLoopResult } from "./loop.js";
 
 /** The payload of a `retract` stream event. */
 export interface Retraction {
@@ -46,7 +33,7 @@ export interface Retraction {
  * degrade drops nothing) — there is no retraction to push.
  */
 export function computeRetraction(
-  streamed: StreamedOutput,
+  streamed: AgentLoopResult["streamed"],
   newMessages: ReadonlyArray<Message>,
   log: Logger,
 ): Retraction | null {

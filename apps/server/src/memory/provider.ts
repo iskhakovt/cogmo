@@ -86,7 +86,6 @@ export interface Memory {
 }
 
 export interface ReflectOptions {
-  context?: string;
   tags?: string[];
   tagsMatch?: TagsMatch;
   /** Compound tag filter — passed through to Hindsight's `tag_groups`. Combine with simple `tags` only when intentional. */

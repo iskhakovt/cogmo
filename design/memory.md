@@ -128,7 +128,7 @@ One Hindsight bank per user, tags for memory networks. Networks are **not** sepa
 
 Usage: `bankId = userId` (e.g. `"ti"`), retain with `tags: ["network:world"]`, recall with tags to filter or omit for full-brain search. Hindsight's `tagsMatch` modes (`any`, `all`, `any_strict`, `all_strict`) and compound `tag_groups` provide fine-grained filtering.
 
-**Interface:** `MemoryProvider` exposes `tags` and `tagsMatch` on `RecallOptions` and `ReflectOptions`. `tag_groups` (compound boolean filters) deferred until compartment/trust ACL is implemented — simple `tags` + `tagsMatch` is sufficient for network filtering.
+**Interface:** `MemoryProvider` exposes `tags`, `tagsMatch` and `tagGroups` (compound boolean filters) on `RecallOptions` and `ReflectOptions`; the Service's access control folds its scope into `tagGroups` (Memory Access Control via Tags below).
 
 ## Memory Access Control via Tags `[confirmed]`
 

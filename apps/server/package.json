@@ -30,7 +30,7 @@
     "test:watch": "vitest --project unit --project unit-pyodide",
     "tokei": "tsx scripts/tokei.ts",
     "db:generate": "drizzle-kit generate",
-    "db:migrate": "drizzle-kit migrate"
+    "db:migrate": "tsx --env-file-if-exists=../../.env --env-file-if-exists=.dev/env scripts/migrate.ts"
   },
   "engines": {
     "node": "^24.15.0 || >=26.0.0"

@@ -457,9 +457,7 @@ class TestSupervisorProtocol:
         ],
         ids=["exit", "signal", "own-process-group"],
     )
-    def test_reports_a_task_process_that_died_without_a_result(
-        self, sup: _Supervisor, body: str, error: str
-    ) -> None:
+    def test_reports_a_task_process_that_died_without_a_result(self, sup: _Supervisor, body: str, error: str) -> None:
         result = sup.run_task("t-die", body, {})
         assert result == {"type": "task_result", "id": "t-die", "ok": False, "error": error}
         assert sup.await_exit("t-die") is not None
