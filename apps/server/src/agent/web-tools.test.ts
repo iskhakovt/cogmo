@@ -1,3 +1,4 @@
+import { Readability } from "@mozilla/readability";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { z } from "zod";
@@ -121,6 +122,22 @@ function redirectTo(location: string): unknown {
     headers: new Map([["location", location]]),
   };
 }
+
+const TAVILY_EXTRACT = "https://api.tavily.com/extract";
+
+function tavilyExtracts(content: string): unknown {
+  return {
+    ok: true,
+    json: async () => ({ results: [{ url: "https://example.com/", raw_content: content }] }),
+  };
+}
+
+function eaiAgain(hostname: string): Error {
+  return Object.assign(new Error(`getaddrinfo EAI_AGAIN ${hostname}`), { code: "EAI_AGAIN" });
+}
+
+/** The budget `fetch_url` gives one attempt, which the timeout tests tell apart by value. */
+const ATTEMPT_BUDGET_MS = 15_000;
 
 function fetchInit(index: number): FetchInit | undefined {
   return expectDefined(mockFetch.mock.calls[index], `fetch call ${index}`)[1];
@@ -449,7 +466,7 @@ describe("fetch_url", () => {
     expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 
-  it("gives up on a redirect chain longer than its hop cap", async () => {
+  it("gives up on a redirect chain longer than its hop cap, without retrying it", async () => {
     mockFetch.mockResolvedValue(redirectTo("/again"));
     const fetchUrl = fetchUrlTool(undefined, publicHost);
 
@@ -460,16 +477,60 @@ describe("fetch_url", () => {
   });
 
   it.each([
-    ["file:///etc/passwd", "Unsupported protocol: file:"],
-    ["http://[oops", "unparseable location"],
-  ])("refuses a redirect to %s", async (location, message) => {
-    mockFetch.mockResolvedValue(redirectTo(location));
-    const fetchUrl = fetchUrlTool(undefined, publicHost);
+    // A cookie wall: `302 Location: /article` plus a cookie, repeating,
+    // since `fetch` keeps no cookie jar.
+    ["/article"],
+    ["http://[oops"],
+  ])("hands a redirect to %s it cannot follow to Tavily", async (location) => {
+    mockFetch.mockImplementation(async (url: string) =>
+      url === TAVILY_EXTRACT ? tavilyExtracts("the article") : redirectTo(location),
+    );
+    const fetchUrl = fetchUrlTool("tavily-key", publicHost);
+
+    const result = (
+      await fetchUrl.handler({ url: "https://example.com/article" }, stubService())
+    )._unsafeUnwrap();
+
+    expect(result).toBe("the article");
+  });
+
+  it("does not hand a redirect to a non-http scheme to Tavily", async () => {
+    mockFetch.mockImplementation(async (url: string) =>
+      url === TAVILY_EXTRACT ? tavilyExtracts("unreachable") : redirectTo("file:///etc/passwd"),
+    );
+    const fetchUrl = fetchUrlTool("tavily-key", publicHost);
 
     const outcome = await fetchUrl.handler({ url: "https://example.com/start" }, stubService());
 
-    expect(outcome._unsafeUnwrapErr().message).toContain(message);
+    expect(outcome._unsafeUnwrapErr().message).toBe("Unsupported protocol: file:");
     expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries a resolver that is briefly unavailable", async () => {
+    mockFetch.mockResolvedValue(textResponse("recovered"));
+    const resolveHost = vi
+      .fn<ResolveHost>()
+      .mockRejectedValueOnce(eaiAgain("example.com"))
+      .mockResolvedValue([{ address: "93.184.215.14", family: 4 }]);
+    const fetchUrl = fetchUrlTool(undefined, resolveHost);
+
+    const result = (
+      await fetchUrl.handler({ url: "https://example.com/x" }, stubService())
+    )._unsafeUnwrap();
+
+    expect(result).toBe("recovered");
+    expect(resolveHost).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports a resolver that stays unavailable as unresolvable, without Tavily", async () => {
+    const resolveHost = vi.fn<ResolveHost>().mockRejectedValue(eaiAgain("example.com"));
+    const fetchUrl = fetchUrlTool("tavily-key", resolveHost);
+
+    const outcome = await fetchUrl.handler({ url: "https://example.com/x" }, stubService());
+
+    expect(outcome._unsafeUnwrapErr().message).toBe("Could not resolve example.com.");
+    expect(resolveHost).toHaveBeenCalledTimes(3);
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 
   it("refuses a host that does not resolve, once, without handing the URL to Tavily", async () => {
@@ -490,20 +551,75 @@ describe("fetch_url", () => {
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
-  it("bounds a resolver that never answers by the attempt's timeout, without Tavily", async () => {
-    // `dns.lookup` takes no signal. The attempt's 15s budget, shortened here,
-    // is what ends the wait.
+  it("retries a lookup that outlasts its own timeout, then reports the host unresolvable", async () => {
+    // `dns.lookup` takes no signal. The per-lookup timeout, shortened here,
+    // ends the wait; the attempt's 15s budget is left long.
     const timeout = AbortSignal.timeout.bind(AbortSignal);
-    const shortened = vi.spyOn(AbortSignal, "timeout").mockImplementation(() => timeout(20));
+    const shortened = vi
+      .spyOn(AbortSignal, "timeout")
+      .mockImplementation((ms) => timeout(ms === ATTEMPT_BUDGET_MS ? 60_000 : 20));
     try {
-      const fetchUrl = fetchUrlTool("tavily-key", () => new Promise(() => {}));
+      const resolveHost = vi.fn<ResolveHost>(() => new Promise(() => {}));
+      const fetchUrl = fetchUrlTool("tavily-key", resolveHost);
 
       const outcome = await fetchUrl.handler({ url: "https://hung-dns.example/x" }, stubService());
 
       expect(outcome._unsafeUnwrapErr().message).toBe("Could not resolve hung-dns.example.");
+      expect(resolveHost).toHaveBeenCalledTimes(3);
       expect(mockFetch).not.toHaveBeenCalled();
     } finally {
       shortened.mockRestore();
+    }
+  });
+
+  it("reports the attempt's budget running out during a later hop's lookup as a timeout", async () => {
+    const budget = new AbortController();
+    const timeout = AbortSignal.timeout.bind(AbortSignal);
+    const controlled = vi
+      .spyOn(AbortSignal, "timeout")
+      .mockImplementation((ms) => (ms === ATTEMPT_BUDGET_MS ? budget.signal : timeout(60_000)));
+    try {
+      mockFetch.mockResolvedValue(redirectTo("https://cdn.example/final"));
+      const fetchUrl = fetchUrlTool(undefined, async (hostname) => {
+        if (hostname !== "cdn.example") return [{ address: "93.184.215.14", family: 4 }];
+        budget.abort(new DOMException("The operation was aborted due to timeout", "TimeoutError"));
+        return new Promise<never>(() => {});
+      });
+
+      const outcome = await fetchUrl.handler({ url: "https://example.com/x" }, stubService());
+
+      const message = outcome._unsafeUnwrapErr().message;
+      expect(message).toMatch(/timeout/);
+      expect(message).not.toContain("Could not resolve");
+    } finally {
+      controlled.mockRestore();
+    }
+  });
+
+  it("falls back to Tavily Extract when article extraction throws", async () => {
+    const parse = vi.spyOn(Readability.prototype, "parse").mockImplementation(() => {
+      throw new Error("readability failed");
+    });
+    try {
+      mockFetch.mockImplementation(async (url: string) =>
+        url === TAVILY_EXTRACT
+          ? tavilyExtracts("via Tavily")
+          : {
+              ok: true,
+              status: 200,
+              headers: new Map([["content-type", "text/html"]]),
+              text: async () => "<html><body><p>page</p></body></html>",
+            },
+      );
+      const fetchUrl = fetchUrlTool("tavily-key", publicHost);
+
+      const result = (
+        await fetchUrl.handler({ url: "https://example.com/page" }, stubService())
+      )._unsafeUnwrap();
+
+      expect(result).toBe("via Tavily");
+    } finally {
+      parse.mockRestore();
     }
   });
 

@@ -2,7 +2,7 @@ import type { LookupAddress } from "node:dns";
 import { isIP } from "node:net";
 import { Readability } from "@mozilla/readability";
 import { JSDOM } from "jsdom";
-import { type Err, err, ok, type Result } from "neverthrow";
+import { type Err, err, ok, Result } from "neverthrow";
 import { match } from "ts-pattern";
 import { z } from "zod";
 import { logger } from "../logger.js";
@@ -15,6 +15,12 @@ import { defineTool, reject, type ToolRejection, type ToolSpec } from "./tools.j
 const MAX_CONTENT_LENGTH = 50_000;
 
 const MAX_REDIRECTS = 10;
+
+/** One attempt's budget, spanning resolution and every redirect hop. */
+const ATTEMPT_BUDGET_MS = 15_000;
+
+/** Under the attempt's budget, so a hung resolver is retried within it. */
+const LOOKUP_TIMEOUT_MS = 5_000;
 
 /** The statuses `fetch` itself would follow (Fetch Standard, "redirect status"). */
 const REDIRECT_STATUSES: ReadonlySet<number> = new Set([301, 302, 303, 307, 308]);
@@ -262,10 +268,11 @@ function createFetchUrl(tavilyApiKey: string | undefined, resolveHost: ResolveHo
 }
 
 /**
- * Why a direct fetch ended without a page. `refused` and `unresolvable` are
- * final. `permanent` is a page that isn't there or isn't ours to read.
- * `transient` is a retryable status or transport failure that outlasted the
- * retries, which is how a bot block looks.
+ * Why a direct fetch ended without a page. `refused` is a destination off the
+ * public internet and `unresolvable` a host the resolver had no answer for.
+ * `permanent` is a page that isn't there to fetch over HTTP. `transient` is
+ * one Tavily might still reach: a bot block or flaky server that outlasted
+ * the retries, a redirect loop, a body or page that failed to read.
  */
 type DirectFetchFailure =
   | { kind: "refused"; message: string }
@@ -305,7 +312,7 @@ function afterDirectFailure(
 /**
  * Fetch `url` directly. A throw inside the retried attempt is only
  * `withRetry`'s signal to try again; what is left when the retries run out
- * is a `transient` failure.
+ * is `unresolvable` after {@link LookupUnavailable}, else `transient`.
  */
 async function directFetch(
   url: URL,
@@ -340,7 +347,14 @@ async function directFetch(
     // the hostname so query-string secrets (api keys, signed URLs)
     // don't end up in the logs.
     { retries: 2, maxRetryTimeMs: 20_000, context: `fetch_url ${url.hostname}` },
-  ).catch((e: unknown) => err(transientFailure(e)));
+  ).catch(
+    (e: unknown): Result<Reached, DirectFetchFailure> =>
+      err(
+        e instanceof LookupUnavailable
+          ? { kind: "unresolvable", host: e.host }
+          : transientFailure(e),
+      ),
+  );
   if (reached.isErr()) return err(reached.error);
 
   const { response, finalUrl } = reached.value;
@@ -350,9 +364,9 @@ async function directFetch(
   );
   if (body.isErr()) return err(body.error);
   const contentType = response.headers.get("content-type") ?? "";
-  return ok(
-    contentType.includes("text/html") ? extractArticle(body.value, finalUrl.href) : body.value,
-  );
+  return contentType.includes("text/html")
+    ? Result.fromThrowable(extractArticle, transientFailure)(body.value, finalUrl.href)
+    : ok(body.value);
 }
 
 function transientFailure(e: unknown): DirectFetchFailure {
@@ -360,17 +374,37 @@ function transientFailure(e: unknown): DirectFetchFailure {
 }
 
 /**
+ * Thrown inside a retried attempt when the resolver is briefly unavailable,
+ * so the attempt runs again; {@link directFetch} turns it into `unresolvable`
+ * once the retries run out.
+ */
+class LookupUnavailable extends Error {
+  constructor(
+    readonly host: string,
+    cause: unknown,
+  ) {
+    super(`resolver unavailable for ${host}`, { cause });
+    this.name = "LookupUnavailable";
+  }
+}
+
+/**
  * GET `url`, following redirects here rather than in `fetch` so every hop
  * passes {@link checkDestination} before it is connected to: a public page
  * redirecting inward is the standard way around a guard like this. One
  * timeout spans resolution and every hop.
+ *
+ * A chain this can't follow is `transient`, returned rather than thrown so
+ * it isn't retried: every hop passed the check, and Tavily gets past a
+ * cookie wall (`302 Location: /article` plus a cookie, repeating) that
+ * `fetch`, with no cookie jar, loops on.
  */
 async function fetchCheckingEachHop(
   url: URL,
   headers: Record<string, string>,
   resolveHost: ResolveHost,
 ): Promise<Result<Reached, DirectFetchFailure>> {
-  const signal = AbortSignal.timeout(15_000);
+  const signal = AbortSignal.timeout(ATTEMPT_BUDGET_MS);
   let current = url;
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
     const allowed = await checkDestination(current, resolveHost, signal);
@@ -384,13 +418,13 @@ async function fetchCheckingEachHop(
     const next = URL.parse(location, current);
     if (next === null) {
       return err({
-        kind: "refused",
+        kind: "transient",
         message: `Fetch failed: ${current.hostname} redirected to an unparseable location.`,
       });
     }
     current = next;
   }
-  return err({ kind: "refused", message: `Fetch failed: more than ${MAX_REDIRECTS} redirects.` });
+  return err({ kind: "transient", message: `Fetch failed: more than ${MAX_REDIRECTS} redirects.` });
 }
 
 /**
@@ -404,8 +438,10 @@ async function checkDestination(
   resolveHost: ResolveHost,
   signal: AbortSignal,
 ): Promise<Result<void, DirectFetchFailure>> {
+  // `permanent`, not `transient`: neither `fetch` nor Tavily, which would
+  // follow the same redirect, reaches a page outside HTTP.
   if (url.protocol !== "http:" && url.protocol !== "https:") {
-    return err({ kind: "refused", message: `Unsupported protocol: ${url.protocol}` });
+    return err({ kind: "permanent", message: `Unsupported protocol: ${url.protocol}` });
   }
   const addresses = await addressesOf(url, resolveHost, signal);
   if (addresses.isErr()) return err(addresses.error);
@@ -423,7 +459,10 @@ async function checkDestination(
 
 /**
  * An IP literal as written; a name by every address it resolves to. A
- * resolver failure of any kind, the deadline included, is `unresolvable`.
+ * resolver that is briefly unavailable (`EAI_AGAIN`, or no answer within
+ * `LOOKUP_TIMEOUT_MS`) throws {@link LookupUnavailable} so the attempt is
+ * retried; any other resolver failure is final. The attempt's own budget
+ * running out mid-lookup rethrows as the timeout it is.
  */
 async function addressesOf(
   url: URL,
@@ -434,13 +473,23 @@ async function addressesOf(
   const host = url.hostname.replace(/^\[(.*)\]$/, "$1");
   const family = isIP(host);
   if (family !== 0) return ok([{ address: host, family }]);
-  return abortable(resolveHost(host), signal).then(
-    (addresses) => ok(addresses),
-    (e: unknown): Result<ReadonlyArray<LookupAddress>, DirectFetchFailure> => {
-      logger.info({ host, err: describeError(e) }, "fetch_url could not resolve a host");
-      return err({ kind: "unresolvable", host });
-    },
-  );
+  const deadline = AbortSignal.any([signal, AbortSignal.timeout(LOOKUP_TIMEOUT_MS)]);
+  try {
+    return ok(await abortable(resolveHost(host), deadline));
+  } catch (e) {
+    if (signal.aborted) throw signal.reason;
+    logger.info({ host, err: describeError(e) }, "fetch_url could not resolve a host");
+    if (isLookupTimeout(e) || errorCode(e) === "EAI_AGAIN") throw new LookupUnavailable(host, e);
+    return err({ kind: "unresolvable", host });
+  }
+}
+
+function isLookupTimeout(e: unknown): boolean {
+  return e instanceof Error && e.name === "TimeoutError";
+}
+
+function errorCode(e: unknown): unknown {
+  return e instanceof Error && "code" in e ? e.code : undefined;
 }
 
 const TavilySearchResponseSchema = z.object({
