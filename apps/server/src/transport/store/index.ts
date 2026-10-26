@@ -272,7 +272,7 @@ export interface TransportStore {
   /** Find active sessions with receive='all' for a conversation. */
   getReceiveAllSessions(tx: Transaction, conversationId: string): Promise<ReadonlyArray<Session>>;
 
-  /** Resolve user by platform handle on a channel. Stub — identity resolution is a future feature. */
+  /** The user a platform handle maps to on a channel: the channel's wildcard identity if it has one, else the handle's own row. */
   resolveUser(
     tx: Transaction,
     channelId: string,

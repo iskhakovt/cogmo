@@ -47,7 +47,7 @@ The minimum useful system: talk to it, it remembers things.
 - [x] Full tool invocation history — messages.content stores ContentBlock[] (text, tool_use, tool_result, image, thinking), not just final text
 - [x] Message batching — debounce-router, debounce-idle, debounce-maxwait with entry guards and resume policy
 - [x] Response routing — source routing via DeliveryRouter, getSourceSessions + getReceiveAllSessions
-- [x] Telegram auth — user ID allowlist via `user_identities` DB rows, enforced in adapter via `resolveUser`
+- [x] Telegram auth — user ID allowlist via `user_identities` DB rows, enforced by the adapter's sender gate (`senders.admits`), which drops a stranger's update silently
 - [x] System prompt assembly — auto-generated from tool registry + service guidance + conditional onboarding
 - [x] Streaming responses — unified DeliveryRouter, StreamingAdapter/StreamHandle, TelegramStreamHandle
 - [x] Web tools — web_search (Tavily), web_answer (Perplexity Sonar), fetch_url (readability + SSRF)
