@@ -120,10 +120,12 @@ function createNativeRouter(config: DebounceConfig) {
         inboundReady.create({ conversationId, triggerInboundId: inboundMessageId }),
       );
       // Native debounce exposes no internal timing, so the sample is a proxy:
-      // time from the burst's last event to the emit. After the last step so
-      // it records once (design/transport/debounce.md → Observability).
-      if (typeof event.ts === "number") {
-        debounceWaitMs.record(Math.max(0, Date.now() - event.ts), { kind: "native" });
+      // time from the burst's last event to the emit.
+      const triggeredAt = event.ts;
+      if (typeof triggeredAt === "number") {
+        await step.run("record-wait", () => {
+          debounceWaitMs.record(Math.max(0, Date.now() - triggeredAt), { kind: "native" });
+        });
       }
       return { mode: "native" as const, triggerInboundId: inboundMessageId };
     },
@@ -197,7 +199,9 @@ function createLegacyStateMachine(config: DebounceConfig) {
           triggerInboundId: event.data.inboundMessageId,
         }),
       );
-      debounceWaitMs.record(ms, { kind: "idle" });
+      await step.run("record-wait", () => {
+        debounceWaitMs.record(ms, { kind: "idle" });
+      });
     },
   );
 
@@ -219,7 +223,9 @@ function createLegacyStateMachine(config: DebounceConfig) {
           triggerInboundId: event.data.inboundMessageId,
         }),
       );
-      debounceWaitMs.record(ms, { kind: "maxwait" });
+      await step.run("record-wait", () => {
+        debounceWaitMs.record(ms, { kind: "maxwait" });
+      });
     },
   );
 
