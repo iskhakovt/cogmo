@@ -24,26 +24,31 @@ export function isBlockedAddress(address: string, family: number): boolean {
   if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) {
     return true;
   }
-  return isBlockedV4(parts[0] ?? 0, parts[1] ?? 0);
+  return isBlockedV4(parts[0] ?? 0, parts[1] ?? 0, parts[2] ?? 0);
 }
 
-function isBlockedV4(a: number, b: number): boolean {
+/** The first three octets: every range below is a /24 or wider. */
+function isBlockedV4(a: number, b: number, c: number): boolean {
   if (a === 0 || a === 127) return true; // this-host, loopback
   if (a === 10) return true; // private
   if (a === 172 && b >= 16 && b <= 31) return true; // private
   if (a === 192 && b === 168) return true; // private
   if (a === 169 && b === 254) return true; // link-local, incl. cloud metadata
   if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
-  if (a === 192 && b === 0) return true; // 192.0.0.0/24 IETF protocol assignments
   if (a === 198 && (b === 18 || b === 19)) return true; // 198.18.0.0/15 benchmarking
-  if (a === 192 && b === 88) return true; // 192.88.99.0/24 6to4 relay anycast
+  if (a === 192 && b === 0 && c === 0) return true; // 192.0.0.0/24 IETF protocol assignments
+  if (a === 192 && b === 0 && c === 2) return true; // 192.0.2.0/24 documentation
+  if (a === 192 && b === 88 && c === 99) return true; // 192.88.99.0/24 6to4 relay anycast
+  if (a === 198 && b === 51 && c === 100) return true; // 198.51.100.0/24 documentation
+  if (a === 203 && b === 0 && c === 113) return true; // 203.0.113.0/24 documentation
   if (a >= 224) return true; // multicast, reserved, broadcast
   return false;
 }
 
 function isBlockedV6(bytes: Uint8Array): boolean {
   const zeroThrough = (end: number) => bytes.subarray(0, end).every((b) => b === 0);
-  const embeddedV4At = (i: number) => isBlockedV4(bytes[i] ?? 0, bytes[i + 1] ?? 0);
+  const embeddedV4At = (i: number) =>
+    isBlockedV4(bytes[i] ?? 0, bytes[i + 1] ?? 0, bytes[i + 2] ?? 0);
 
   // ::/96, IPv4-compatible. `::` and `::1` land here as 0.0.0.0 and 0.0.0.1,
   // which the v4 arm refuses as this-host.

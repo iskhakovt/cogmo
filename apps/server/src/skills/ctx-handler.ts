@@ -1,3 +1,4 @@
+import type { LookupAddress } from "node:dns";
 import { lookup } from "node:dns/promises";
 import { err, ok, type Result } from "neverthrow";
 import { match } from "ts-pattern";
@@ -571,7 +572,7 @@ export class DefaultCtxHandler implements CtxHandler {
     // allowlist entry can match, so anything arriving here is a name or an
     // IPv4 literal — either of which the resolver takes as written.
     const hostname = parsedUrl.hostname;
-    let resolved: Awaited<ReturnType<ResolveHost>>;
+    let resolved: ReadonlyArray<LookupAddress>;
     try {
       resolved = await withDeadline(
         this.#resolveHost(hostname),

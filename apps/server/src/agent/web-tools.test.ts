@@ -12,17 +12,11 @@ import { createWebTools } from "./web-tools.js";
 // real exponential backoff. The retry mechanics themselves are covered in
 // src/util/with-retry.test.ts.
 //
-// Two details of p-retry's contract are reproduced deliberately, because
-// `fetch_url` branches on both and a double that got either wrong would let
-// a production defect through green:
-//
-//   - An `AbortError` reaches the caller as its `originalError`, NOT as
-//     itself. p-retry constructs that from the message when the abort was
-//     built from a string, so the class is lost and `instanceof AbortError`
-//     is false downstream.
-//   - `shouldRetry` returning false stops the loop and rethrows the error
-//     unchanged, preserving its class. That is the only way a caller gets a
-//     typed error back out.
+// One detail of p-retry's contract is reproduced deliberately, because the
+// rejection messages these tests assert on depend on it: an `AbortError`
+// reaches the caller as its `originalError`, NOT as itself. p-retry
+// constructs that from the message when the abort was built from a string,
+// so the class is lost and `instanceof AbortError` is false downstream.
 //
 // Tests that mock a 5xx (retryable) response must use mockResolvedValue
 // instead of mockResolvedValueOnce — otherwise the second attempt sees
@@ -32,10 +26,7 @@ vi.mock("../util/with-retry.js", async () => {
     await vi.importActual<typeof import("../util/with-retry.js")>("../util/with-retry.js");
   return {
     ...actual,
-    withRetry: async <T>(
-      fn: () => Promise<T>,
-      opts?: { retries?: number; shouldRetry?: (err: unknown) => boolean },
-    ): Promise<T> => {
+    withRetry: async <T>(fn: () => Promise<T>, opts?: { retries?: number }): Promise<T> => {
       const maxAttempts = (opts?.retries ?? 3) + 1;
       let lastError: unknown;
       for (let i = 0; i < maxAttempts; i++) {
@@ -46,7 +37,6 @@ vi.mock("../util/with-retry.js", async () => {
           if (e instanceof actual.AbortError) {
             throw (e as { originalError?: unknown }).originalError ?? e;
           }
-          if (opts?.shouldRetry && !opts.shouldRetry(e)) throw e;
         }
       }
       throw lastError;
@@ -109,7 +99,7 @@ const publicHost = resolvesTo({ address: "93.184.215.14", family: 4 });
  */
 function fetchUrlTool(tavilyKey: string | undefined, resolveHost: ResolveHost): ToolSpec {
   return expectDefined(
-    createWebTools(tavilyKey, undefined, { resolveHost }).find((t) => t.name === "fetch_url"),
+    createWebTools(tavilyKey, undefined, resolveHost).find((t) => t.name === "fetch_url"),
     "fetch_url",
   );
 }
@@ -138,7 +128,7 @@ function fetchInit(index: number): FetchInit | undefined {
 
 describe("web_search", () => {
   it("returns formatted search results", async () => {
-    const [search] = createWebTools("tavily-key", undefined);
+    const [search] = createWebTools("tavily-key", undefined, publicHost);
 
     mockFetch.mockResolvedValueOnce({
       ok: true,
@@ -168,7 +158,7 @@ describe("web_search", () => {
   });
 
   it("rejects when API key is missing", async () => {
-    const [search] = createWebTools(undefined, undefined);
+    const [search] = createWebTools(undefined, undefined, publicHost);
     const outcome = await search!.handler({ query: "test" }, stubService());
 
     expect(outcome._unsafeUnwrapErr().message).toBe(
@@ -178,7 +168,7 @@ describe("web_search", () => {
   });
 
   it("rejects on a client error (4xx) and logs it at warn", async () => {
-    const [search] = createWebTools("key", undefined);
+    const [search] = createWebTools("key", undefined, publicHost);
     mockFetch.mockResolvedValueOnce({ ok: false, status: 429, text: async () => "rate limited" });
     const warn = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
 
@@ -195,7 +185,7 @@ describe("web_search", () => {
   });
 
   it("rejects on a server error (5xx) after the retry budget", async () => {
-    const [search] = createWebTools("key", undefined);
+    const [search] = createWebTools("key", undefined, publicHost);
     mockFetch.mockResolvedValue({ ok: false, status: 503, text: async () => "down" });
 
     const outcome = await search!.handler({ query: "test" }, stubService());
@@ -206,7 +196,7 @@ describe("web_search", () => {
   });
 
   it("handles empty results", async () => {
-    const [search] = createWebTools("key", undefined);
+    const [search] = createWebTools("key", undefined, publicHost);
     mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ results: [] }) });
 
     const result = (await search!.handler({ query: "obscure" }, stubService()))._unsafeUnwrap();
@@ -216,7 +206,7 @@ describe("web_search", () => {
 
 describe("web_answer", () => {
   it("returns answer with citations", async () => {
-    const tools = createWebTools(undefined, "or-key");
+    const tools = createWebTools(undefined, "or-key", publicHost);
     const answer = tools[1]!;
 
     mockFetch.mockResolvedValueOnce({
@@ -240,7 +230,7 @@ describe("web_answer", () => {
   });
 
   it("returns answer without citations when none provided", async () => {
-    const tools = createWebTools(undefined, "or-key");
+    const tools = createWebTools(undefined, "or-key", publicHost);
     const answer = tools[1]!;
 
     mockFetch.mockResolvedValueOnce({
@@ -256,7 +246,7 @@ describe("web_answer", () => {
   });
 
   it("rejects when API key is missing", async () => {
-    const tools = createWebTools(undefined, undefined);
+    const tools = createWebTools(undefined, undefined, publicHost);
     const answer = tools[1]!;
     const outcome = await answer.handler({ question: "test" }, stubService());
 
@@ -266,7 +256,7 @@ describe("web_answer", () => {
   });
 
   it("rejects on a server error (5xx) after the retry budget", async () => {
-    const tools = createWebTools(undefined, "or-key");
+    const tools = createWebTools(undefined, "or-key", publicHost);
     const answer = tools[1]!;
     mockFetch.mockResolvedValue({ ok: false, status: 502, text: async () => "bad gateway" });
 
@@ -278,7 +268,7 @@ describe("web_answer", () => {
   });
 
   it("rejects on a client error (4xx)", async () => {
-    const tools = createWebTools(undefined, "or-key");
+    const tools = createWebTools(undefined, "or-key", publicHost);
     const answer = tools[1]!;
     mockFetch.mockResolvedValueOnce({ ok: false, status: 401, text: async () => "unauthorized" });
 
@@ -290,7 +280,7 @@ describe("web_answer", () => {
   });
 
   it("falls back to a placeholder when the model returns null content", async () => {
-    const tools = createWebTools(undefined, "or-key");
+    const tools = createWebTools(undefined, "or-key", publicHost);
     const answer = tools[1]!;
     mockFetch.mockResolvedValueOnce({
       ok: true,
@@ -375,17 +365,40 @@ describe("fetch_url", () => {
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
-  it("refuses a hostname when any of its addresses is private", async () => {
+  it("names the host but not the internal address it resolved to, which goes to the log", async () => {
     mockFetch.mockResolvedValue(textResponse("internal data"));
-    const fetchUrl = fetchUrlTool(
-      undefined,
-      resolvesTo({ address: "93.184.215.14", family: 4 }, { address: "10.0.0.5", family: 4 }),
-    );
+    const info = vi.spyOn(logger, "info").mockImplementation(() => undefined);
+    try {
+      const fetchUrl = fetchUrlTool(
+        undefined,
+        resolvesTo({ address: "93.184.215.14", family: 4 }, { address: "10.0.0.5", family: 4 }),
+      );
 
-    const outcome = await fetchUrl.handler({ url: "https://split.example/x" }, stubService());
+      const outcome = await fetchUrl.handler({ url: "https://split.example/x" }, stubService());
 
-    expect(outcome._unsafeUnwrapErr().message).toContain("10.0.0.5");
-    expect(mockFetch).not.toHaveBeenCalled();
+      const message = outcome._unsafeUnwrapErr().message;
+      expect(message).toContain("split.example");
+      expect(message).not.toContain("10.0.0.5");
+      expect(info).toHaveBeenCalledWith(
+        expect.objectContaining({ host: "split.example", address: "10.0.0.5" }),
+        expect.any(String),
+      );
+      expect(mockFetch).not.toHaveBeenCalled();
+    } finally {
+      info.mockRestore();
+    }
+  });
+
+  it("fetches a host resolving beside a reserved /24 in an otherwise public /16", async () => {
+    // wordpress.com answers from 192.0.78.0/24, next to 192.0.0.0/24.
+    mockFetch.mockResolvedValue(textResponse("blog"));
+    const fetchUrl = fetchUrlTool(undefined, resolvesTo({ address: "192.0.78.9", family: 4 }));
+
+    const result = (
+      await fetchUrl.handler({ url: "https://wordpress.com/" }, stubService())
+    )._unsafeUnwrap();
+
+    expect(result).toBe("blog");
   });
 
   it.each([
@@ -459,32 +472,67 @@ describe("fetch_url", () => {
     expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 
-  it("rejects with the resolver's error when a host does not resolve, without fetching", async () => {
-    const fetchUrl = fetchUrlTool(undefined, async () => {
-      throw new Error("getaddrinfo ENOTFOUND nowhere.example");
+  it("refuses a host that does not resolve, once, without handing the URL to Tavily", async () => {
+    // A name only the local network knows: Tavily would receive the full
+    // URL, query string included, and could not resolve it either.
+    const resolveHost = vi.fn<ResolveHost>(async () => {
+      throw Object.assign(new Error("getaddrinfo ENOTFOUND printer.local"), { code: "ENOTFOUND" });
     });
+    const fetchUrl = fetchUrlTool("tavily-key", resolveHost);
 
-    const outcome = await fetchUrl.handler({ url: "https://nowhere.example/x" }, stubService());
+    const outcome = await fetchUrl.handler(
+      { url: "http://printer.local/status?token=secret" },
+      stubService(),
+    );
 
-    expect(outcome._unsafeUnwrapErr().message).toBe("getaddrinfo ENOTFOUND nowhere.example");
+    expect(outcome._unsafeUnwrapErr().message).toBe("Could not resolve printer.local.");
+    expect(resolveHost).toHaveBeenCalledTimes(1);
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
-  it("bounds a resolver that never answers by the attempt's timeout", async () => {
+  it("bounds a resolver that never answers by the attempt's timeout, without Tavily", async () => {
     // `dns.lookup` takes no signal. The attempt's 15s budget, shortened here,
     // is what ends the wait.
     const timeout = AbortSignal.timeout.bind(AbortSignal);
     const shortened = vi.spyOn(AbortSignal, "timeout").mockImplementation(() => timeout(20));
     try {
-      const fetchUrl = fetchUrlTool(undefined, () => new Promise(() => {}));
+      const fetchUrl = fetchUrlTool("tavily-key", () => new Promise(() => {}));
 
       const outcome = await fetchUrl.handler({ url: "https://hung-dns.example/x" }, stubService());
 
-      expect(outcome._unsafeUnwrapErr().message).toMatch(/timeout/);
+      expect(outcome._unsafeUnwrapErr().message).toBe("Could not resolve hung-dns.example.");
       expect(mockFetch).not.toHaveBeenCalled();
     } finally {
       shortened.mockRestore();
     }
+  });
+
+  it("falls back to Tavily Extract when the body fails mid-read", async () => {
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url === "https://api.tavily.com/extract") {
+        return {
+          ok: true,
+          json: async () => ({
+            results: [{ url: "https://example.com/page", raw_content: "via Tavily" }],
+          }),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        headers: new Map([["content-type", "text/plain"]]),
+        text: async () => {
+          throw new TypeError("terminated");
+        },
+      };
+    });
+    const fetchUrl = fetchUrlTool("tavily-key", publicHost);
+
+    const result = (
+      await fetchUrl.handler({ url: "https://example.com/page" }, stubService())
+    )._unsafeUnwrap();
+
+    expect(result).toBe("via Tavily");
   });
 
   it("rejects non-http protocols", async () => {

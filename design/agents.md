@@ -150,7 +150,7 @@ Sub-agents never see API keys — the orchestrator makes all external calls. In 
 
 ## Security: `fetch_url` Destinations `[confirmed]`
 
-`fetch_url` runs in the server process, so a URL taken from a page or a message would otherwise reach whatever the deployment can: Hindsight, Inngest, cloud metadata. Every hop is checked before it is connected to, and must be `http`/`https`. An IP literal is judged as written and a name by every address it resolves to; any non-public one refuses the call (`isBlockedAddress` in `src/util/blocked-address.ts`, shared with `ctx.http`). Redirects are followed by hand, up to 10. A refusal is final: no retry, no Tavily fallback. Residual, shared with `ctx.http`: `fetch` resolves the name again, so DNS rebinding between the check and the connection is open until connections are pinned to the checked address.
+`fetch_url` runs in the server process, so a URL taken from a page or a message would otherwise reach whatever the deployment can: Hindsight, Inngest, cloud metadata. Every hop is checked before it is connected to, and must be `http`/`https`. An IP literal is judged as written and a name by every address it resolves to; any non-public one refuses the call (`isBlockedAddress` in `src/util/blocked-address.ts`, shared with `ctx.http`). Redirects are followed by hand, up to 10. A refusal names the host but not the address, which goes to the log. A refusal or a host that does not resolve is final: no retry, and no Tavily fallback, which would hand the full URL to a third party. The residual is the DNS-rebinding gap described under `ctx.http.request` in [skills.md](skills.md).
 
 ## Messaging Architecture
 
