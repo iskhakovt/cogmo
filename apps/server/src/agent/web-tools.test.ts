@@ -2,7 +2,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { z } from "zod";
 import { logger } from "../logger.js";
+import { expectDefined } from "../test/assertions.js";
+import type { ResolveHost } from "../util/blocked-address.js";
 import type { Service } from "./service.js";
+import type { ToolSpec } from "./tools.js";
 import { createWebTools } from "./web-tools.js";
 
 // Mock withRetry as a no-delay retry loop, so these tests don't pay the
@@ -55,7 +58,12 @@ vi.mock("../util/with-retry.js", async () => {
 // so tests can return partial { ok, status, headers, json, text } shapes
 // without the full Response surface. headers passed in are always plain
 // records here.
-type FetchInit = { headers?: Record<string, string>; body?: string; method?: string };
+type FetchInit = {
+  headers?: Record<string, string>;
+  body?: string;
+  method?: string;
+  redirect?: string;
+};
 const mockFetch = vi.fn<(input: string, init?: FetchInit) => Promise<unknown>>();
 vi.stubGlobal("fetch", mockFetch);
 
@@ -87,6 +95,46 @@ const OpenRouterRequestBodySchema = z.object({ model: z.string() }).passthrough(
 const TavilyExtractBodySchema = z
   .object({ urls: z.string(), extract_depth: z.string() })
   .passthrough();
+
+/** A resolver answering every name with `addresses`. */
+function resolvesTo(...addresses: Array<{ address: string; family: number }>): ResolveHost {
+  return async () => addresses;
+}
+
+const publicHost = resolvesTo({ address: "93.184.215.14", family: 4 });
+
+/**
+ * `fetch_url` with an injected resolver. Every test passes one, so none of
+ * them depends on real DNS answering for the hosts it names.
+ */
+function fetchUrlTool(tavilyKey: string | undefined, resolveHost: ResolveHost): ToolSpec {
+  return expectDefined(
+    createWebTools(tavilyKey, undefined, { resolveHost }).find((t) => t.name === "fetch_url"),
+    "fetch_url",
+  );
+}
+
+function textResponse(body: string): unknown {
+  return {
+    ok: true,
+    status: 200,
+    headers: new Map([["content-type", "text/plain"]]),
+    text: async () => body,
+  };
+}
+
+function redirectTo(location: string): unknown {
+  return {
+    ok: false,
+    status: 302,
+    statusText: "Found",
+    headers: new Map([["location", location]]),
+  };
+}
+
+function fetchInit(index: number): FetchInit | undefined {
+  return expectDefined(mockFetch.mock.calls[index], `fetch call ${index}`)[1];
+}
 
 describe("web_search", () => {
   it("returns formatted search results", async () => {
@@ -257,8 +305,7 @@ describe("web_answer", () => {
 
 describe("fetch_url", () => {
   it("extracts article content from HTML", async () => {
-    const tools = createWebTools(undefined, undefined);
-    const fetchUrl = tools[2]!;
+    const fetchUrl = fetchUrlTool(undefined, publicHost);
 
     const html = `
       <html><body>
@@ -283,8 +330,7 @@ describe("fetch_url", () => {
   });
 
   it("returns raw text for non-HTML", async () => {
-    const tools = createWebTools(undefined, undefined);
-    const fetchUrl = tools[2]!;
+    const fetchUrl = fetchUrlTool(undefined, publicHost);
 
     mockFetch.mockResolvedValueOnce({
       ok: true,
@@ -299,8 +345,7 @@ describe("fetch_url", () => {
   });
 
   it("rejects private IPs", async () => {
-    const tools = createWebTools(undefined, undefined);
-    const fetchUrl = tools[2]!;
+    const fetchUrl = fetchUrlTool(undefined, resolvesTo({ address: "127.0.0.1", family: 4 }));
 
     const privateIp = await fetchUrl.handler({ url: "https://192.168.1.1/secret" }, stubService());
     expect(privateIp._unsafeUnwrapErr().message).toContain("private/internal");
@@ -310,9 +355,124 @@ describe("fetch_url", () => {
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["127.0.0.1", 4],
+    ["10.0.0.5", 4],
+    ["169.254.169.254", 4],
+    ["::1", 6],
+    ["fd00::1", 6],
+    ["ff02::1", 6],
+  ])("refuses a hostname resolving to %s", async (address, family) => {
+    // A public-looking name is only as public as what it resolves to.
+    mockFetch.mockResolvedValue(textResponse("internal data"));
+    const fetchUrl = fetchUrlTool(undefined, resolvesTo({ address, family }));
+
+    const outcome = await fetchUrl.handler(
+      { url: "https://looks-public.example/x" },
+      stubService(),
+    );
+
+    expect(outcome._unsafeUnwrapErr().message).toContain("private/internal");
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it("refuses a hostname when any of its addresses is private", async () => {
+    mockFetch.mockResolvedValue(textResponse("internal data"));
+    const fetchUrl = fetchUrlTool(
+      undefined,
+      resolvesTo({ address: "93.184.215.14", family: 4 }, { address: "10.0.0.5", family: 4 }),
+    );
+
+    const outcome = await fetchUrl.handler({ url: "https://split.example/x" }, stubService());
+
+    expect(outcome._unsafeUnwrapErr().message).toContain("10.0.0.5");
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["http://169.254.169.254/latest/meta-data/"],
+    ["http://127.0.0.2/"],
+    ["http://100.64.0.1/"],
+    ["http://[::1]:8080/"],
+    ["http://[::ffff:127.0.0.1]/"],
+    ["http://[fd00::1]/"],
+  ])("refuses the IP literal %s without resolving it", async (url) => {
+    mockFetch.mockResolvedValue(textResponse("internal data"));
+    const resolveHost = vi.fn(publicHost);
+    const fetchUrl = fetchUrlTool(undefined, resolveHost);
+
+    const outcome = await fetchUrl.handler({ url }, stubService());
+
+    expect(outcome._unsafeUnwrapErr().message).toContain("private/internal");
+    expect(resolveHost).not.toHaveBeenCalled();
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it("follows a redirect to a public host, checking it first", async () => {
+    mockFetch
+      .mockResolvedValueOnce(redirectTo("https://cdn.example/final"))
+      .mockResolvedValueOnce(textResponse("landed"));
+    const resolveHost = vi.fn(publicHost);
+    const fetchUrl = fetchUrlTool(undefined, resolveHost);
+
+    const result = (
+      await fetchUrl.handler({ url: "https://example.com/start" }, stubService())
+    )._unsafeUnwrap();
+
+    expect(result).toBe("landed");
+    expect(fetchCall(1).url).toBe("https://cdn.example/final");
+    expect(resolveHost.mock.calls).toEqual([["example.com"], ["cdn.example"]]);
+    // Followed here rather than by `fetch`, which would skip the check.
+    expect(fetchInit(0)?.redirect).toBe("manual");
+    expect(fetchInit(1)?.redirect).toBe("manual");
+  });
+
+  it("refuses a redirect to a private address and does not fall back to Tavily", async () => {
+    mockFetch.mockResolvedValue(redirectTo("http://127.0.0.1:8888/admin"));
+    const fetchUrl = fetchUrlTool("tavily-key", publicHost);
+
+    const outcome = await fetchUrl.handler({ url: "https://example.com/start" }, stubService());
+
+    expect(outcome._unsafeUnwrapErr().message).toContain("private/internal");
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("gives up on a redirect chain longer than its hop cap", async () => {
+    mockFetch.mockResolvedValue(redirectTo("/again"));
+    const fetchUrl = fetchUrlTool(undefined, publicHost);
+
+    const outcome = await fetchUrl.handler({ url: "https://example.com/loop" }, stubService());
+
+    expect(outcome._unsafeUnwrapErr().message).toMatch(/redirects/);
+    expect(mockFetch).toHaveBeenCalledTimes(11);
+  });
+
+  it.each([
+    ["file:///etc/passwd", "Unsupported protocol: file:"],
+    ["http://[oops", "unparseable location"],
+  ])("refuses a redirect to %s", async (location, message) => {
+    mockFetch.mockResolvedValue(redirectTo(location));
+    const fetchUrl = fetchUrlTool(undefined, publicHost);
+
+    const outcome = await fetchUrl.handler({ url: "https://example.com/start" }, stubService());
+
+    expect(outcome._unsafeUnwrapErr().message).toContain(message);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects with the resolver's error when a host does not resolve, without fetching", async () => {
+    const fetchUrl = fetchUrlTool(undefined, async () => {
+      throw new Error("getaddrinfo ENOTFOUND nowhere.example");
+    });
+
+    const outcome = await fetchUrl.handler({ url: "https://nowhere.example/x" }, stubService());
+
+    expect(outcome._unsafeUnwrapErr().message).toBe("getaddrinfo ENOTFOUND nowhere.example");
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
   it("rejects non-http protocols", async () => {
-    const tools = createWebTools(undefined, undefined);
-    const fetchUrl = tools[2]!;
+    const fetchUrl = fetchUrlTool(undefined, publicHost);
 
     const outcome = await fetchUrl.handler({ url: "file:///etc/passwd" }, stubService());
     expect(outcome._unsafeUnwrapErr().message).toBe("Unsupported protocol: file:");
@@ -320,8 +480,7 @@ describe("fetch_url", () => {
   });
 
   it("truncates large content", async () => {
-    const tools = createWebTools(undefined, undefined);
-    const fetchUrl = tools[2]!;
+    const fetchUrl = fetchUrlTool(undefined, publicHost);
 
     const largeContent = "x".repeat(60_000);
     mockFetch.mockResolvedValueOnce({
@@ -338,8 +497,7 @@ describe("fetch_url", () => {
   });
 
   it("rejects on HTTP errors", async () => {
-    const tools = createWebTools(undefined, undefined);
-    const fetchUrl = tools[2]!;
+    const fetchUrl = fetchUrlTool(undefined, publicHost);
 
     mockFetch.mockResolvedValueOnce({
       ok: false,
@@ -352,8 +510,7 @@ describe("fetch_url", () => {
   });
 
   it("rejects on server error (5xx) after the retry budget", async () => {
-    const tools = createWebTools(undefined, undefined);
-    const fetchUrl = tools[2]!;
+    const fetchUrl = fetchUrlTool(undefined, publicHost);
 
     mockFetch.mockResolvedValue({
       ok: false,
@@ -367,8 +524,7 @@ describe("fetch_url", () => {
   });
 
   it("sends Chrome-like browser headers on the first attempt", async () => {
-    const tools = createWebTools(undefined, undefined);
-    const fetchUrl = tools[2]!;
+    const fetchUrl = fetchUrlTool(undefined, publicHost);
 
     mockFetch.mockResolvedValueOnce({
       ok: true,
@@ -394,8 +550,7 @@ describe("fetch_url", () => {
   });
 
   it("retries 403 with a Referer and cross-site Sec-Fetch-Site", async () => {
-    const tools = createWebTools(undefined, undefined);
-    const fetchUrl = tools[2]!;
+    const fetchUrl = fetchUrlTool(undefined, publicHost);
 
     mockFetch
       .mockResolvedValueOnce({ ok: false, status: 403, statusText: "Forbidden" })
@@ -424,8 +579,7 @@ describe("fetch_url", () => {
   });
 
   it("retries 429 (rate limited)", async () => {
-    const tools = createWebTools(undefined, undefined);
-    const fetchUrl = tools[2]!;
+    const fetchUrl = fetchUrlTool(undefined, publicHost);
 
     mockFetch
       .mockResolvedValueOnce({ ok: false, status: 429, statusText: "Too Many Requests" })
@@ -443,8 +597,7 @@ describe("fetch_url", () => {
   });
 
   it("falls back to Tavily Extract when direct fetch is bot-blocked", async () => {
-    const tools = createWebTools("tavily-key", undefined);
-    const fetchUrl = tools[2]!;
+    const fetchUrl = fetchUrlTool("tavily-key", publicHost);
 
     // 3 direct attempts all return 403 → withRetry exhausts → fallback fires.
     mockFetch.mockImplementation(async (url: string) => {
@@ -484,8 +637,7 @@ describe("fetch_url", () => {
   });
 
   it("does NOT fall back to Tavily on a 404", async () => {
-    const tools = createWebTools("tavily-key", undefined);
-    const fetchUrl = tools[2]!;
+    const fetchUrl = fetchUrlTool("tavily-key", publicHost);
 
     mockFetch.mockResolvedValueOnce({
       ok: false,
@@ -502,8 +654,7 @@ describe("fetch_url", () => {
   });
 
   it("does NOT fall back when Tavily key is not configured", async () => {
-    const tools = createWebTools(undefined, undefined);
-    const fetchUrl = tools[2]!;
+    const fetchUrl = fetchUrlTool(undefined, publicHost);
 
     mockFetch.mockResolvedValue({ ok: false, status: 403, statusText: "Forbidden" });
 
@@ -519,8 +670,7 @@ describe("fetch_url", () => {
     // HTTP status — fetch throws a DOMException("TimeoutError") in that
     // case. The fallback must still kick in: a 200/markdown answer from
     // Tavily, not a re-thrown timeout.
-    const tools = createWebTools("tavily-key", undefined);
-    const fetchUrl = tools[2]!;
+    const fetchUrl = fetchUrlTool("tavily-key", publicHost);
 
     mockFetch.mockImplementation(async (url: string) => {
       if (url === "https://walled.example.com/page") {
@@ -551,8 +701,7 @@ describe("fetch_url", () => {
   });
 
   it("surfaces both errors when direct fetch and Tavily both fail", async () => {
-    const tools = createWebTools("tavily-key", undefined);
-    const fetchUrl = tools[2]!;
+    const fetchUrl = fetchUrlTool("tavily-key", publicHost);
 
     mockFetch.mockImplementation(async (url: string) => {
       if (url === "https://api.tavily.com/extract") {
@@ -579,8 +728,7 @@ describe("fetch_url", () => {
   });
 
   it("rejects with both errors when Tavily Extract itself fails upstream", async () => {
-    const tools = createWebTools("tavily-key", undefined);
-    const fetchUrl = tools[2]!;
+    const fetchUrl = fetchUrlTool("tavily-key", publicHost);
 
     mockFetch.mockImplementation(async (url: string) => {
       if (url === "https://api.tavily.com/extract") {

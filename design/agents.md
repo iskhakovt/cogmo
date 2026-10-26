@@ -148,6 +148,10 @@ This satisfies **Security: Orchestrator Holds Secrets** trivially — the specia
 
 Sub-agents never see API keys — the orchestrator makes all external calls. In v0 a sub-agent runs tool-free and returns only text (see Routing: Agents-as-Tools above). The deferred nested-loop variant would instead return tool calls for the orchestrator to validate and execute — still never holding a key itself.
 
+## Security: `fetch_url` Destinations `[confirmed]`
+
+`fetch_url` runs in the server process, so a URL taken from a page or a message would otherwise reach whatever the deployment can: Hindsight, Inngest, cloud metadata. Every hop is checked before it is connected to: `http`/`https` only, an IP literal judged as written and a name by every address it resolves to, any non-public one refusing the call (`isBlockedAddress` in `src/util/blocked-address.ts`, the check `ctx.http` applies too). Redirects are followed by hand, up to 10, so each hop passes the same check. A refusal is final: no retry, no Tavily fallback. Residual, shared with `ctx.http`: `fetch` resolves the name again, so DNS rebinding between the check and the connection is open until connections are pinned to the checked address.
+
 ## Messaging Architecture
 
 How messages flow from platform to agent and back. See [`design/transport/`](transport/overview.md).

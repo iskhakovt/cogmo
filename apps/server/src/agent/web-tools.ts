@@ -1,12 +1,22 @@
+import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
 import { Readability } from "@mozilla/readability";
 import { JSDOM } from "jsdom";
 import { type Err, err, ok, type Result } from "neverthrow";
 import { z } from "zod";
 import { logger } from "../logger.js";
+import { abortable } from "../util/abortable.js";
+import { isBlockedAddress, type ResolveHost } from "../util/blocked-address.js";
 import { AbortError, withRetry } from "../util/with-retry.js";
 import { defineTool, reject, type ToolRejection, type ToolSpec } from "./tools.js";
 
 const MAX_CONTENT_LENGTH = 50_000;
+
+/** Redirects `fetch_url` follows before giving up on a chain. */
+const MAX_REDIRECTS = 10;
+
+/** The statuses `fetch` itself would follow (Fetch Standard, "redirect status"). */
+const REDIRECT_STATUSES: ReadonlySet<number> = new Set([301, 302, 303, 307, 308]);
 
 // Chrome desktop navigation headers. Together these defeat the cheap
 // "is this curl/undici/python-requests?" filters used by Cloudflare's
@@ -68,15 +78,20 @@ function retryHeaders(targetUrl: string): Record<string, string> {
  * Keys are optional — a tool whose key is missing rejects every call.
  * This keeps the tools registered (LLM sees them) so it can explain
  * why a capability is unavailable rather than silently lacking it.
+ *
+ * `opts.resolveHost` answers `fetch_url`'s destination check, defaulting to
+ * `dns.promises.lookup`; injected so tests can pin an address.
  */
 export function createWebTools(
   tavilyApiKey: string | undefined,
   openRouterApiKey: string | undefined,
+  opts: { resolveHost?: ResolveHost } = {},
 ): ToolSpec[] {
+  const resolveHost = opts.resolveHost ?? ((hostname) => lookup(hostname, { all: true }));
   return [
     createWebSearch(tavilyApiKey),
     createWebAnswer(openRouterApiKey),
-    createFetchUrl(tavilyApiKey),
+    createFetchUrl(tavilyApiKey, resolveHost),
   ];
 }
 
@@ -214,7 +229,7 @@ function createWebAnswer(apiKey: string | undefined): ToolSpec {
 
 // --- fetch_url ---
 
-function createFetchUrl(tavilyApiKey: string | undefined): ToolSpec {
+function createFetchUrl(tavilyApiKey: string | undefined, resolveHost: ResolveHost): ToolSpec {
   return defineTool({
     name: "fetch_url",
     description:
@@ -231,12 +246,11 @@ function createFetchUrl(tavilyApiKey: string | undefined): ToolSpec {
       url: z.string().url().describe("The URL to fetch (http or https only)"),
     }),
     handler: async (input) => {
-      const urlCheck = validateUrl(input.url);
-      if (urlCheck.isErr()) return err(urlCheck.error);
-
       let content: string;
       try {
-        content = await directFetch(input.url);
+        const fetched = await directFetch(new URL(input.url), resolveHost);
+        if (fetched.isErr()) return err(fetched.error);
+        content = fetched.value;
       } catch (e) {
         // A page that can't be fetched is the model's to handle, not a bug.
         // Fall back to Tavily Extract when the failure looks like a bot
@@ -264,7 +278,15 @@ function createFetchUrl(tavilyApiKey: string | undefined): ToolSpec {
   });
 }
 
-async function directFetch(url: string): Promise<string> {
+/**
+ * Fetch `url` directly. Errs when a destination on the way is refused, which
+ * is final: neither a retry nor Tavily applies. Throws on everything else, as
+ * {@link PermanentFetchError} when the page is not there to fetch.
+ */
+async function directFetch(
+  url: URL,
+  resolveHost: ResolveHost,
+): Promise<Result<string, ToolRejection>> {
   let attempt = 0;
   const res = await withRetry(
     async () => {
@@ -272,12 +294,10 @@ async function directFetch(url: string): Promise<string> {
       // First attempt looks like a typed-URL navigation. Subsequent
       // attempts add a same-origin Referer + flip Sec-Fetch-Site to
       // cross-site — some bot filters reject only no-referer hits.
-      const headers = attempt === 1 ? BROWSER_HEADERS : retryHeaders(url);
-      const r = await fetch(url, {
-        headers,
-        redirect: "follow",
-        signal: AbortSignal.timeout(15_000),
-      });
+      const headers = attempt === 1 ? BROWSER_HEADERS : retryHeaders(url.href);
+      const reached = await fetchCheckingEachHop(url, headers, resolveHost);
+      if (reached.isErr()) return reached;
+      const r = reached.value.response;
       // 403/429 are retryable here: many bot filters return them on
       // a no-referer first hit and let the retry-with-Referer
       // through. 5xx is the usual transient-server case. Other 4xx
@@ -288,7 +308,7 @@ async function directFetch(url: string): Promise<string> {
       if (!r.ok) {
         throw new PermanentFetchError(r.status, r.statusText);
       }
-      return r;
+      return reached;
     },
     // retries: 2 — fetch_url is user-facing through the agent, cap
     // total wall-clock at 20s so a slow upstream can't make the
@@ -298,7 +318,7 @@ async function directFetch(url: string): Promise<string> {
     {
       retries: 2,
       maxRetryTimeMs: 20_000,
-      context: `fetch_url ${new URL(url).hostname}`,
+      context: `fetch_url ${url.hostname}`,
       // `shouldRetry` rather than `AbortError` because the caller has to
       // tell the two failure shapes apart afterwards, and only this path
       // reaches it with its class intact — see `withRetry`'s note on
@@ -307,9 +327,73 @@ async function directFetch(url: string): Promise<string> {
     },
   );
 
-  const contentType = res.headers.get("content-type") ?? "";
-  const body = await res.text();
-  return contentType.includes("text/html") ? extractArticle(body, url) : body;
+  if (res.isErr()) return err(res.error);
+  const { response, finalUrl } = res.value;
+  const contentType = response.headers.get("content-type") ?? "";
+  const body = await response.text();
+  return ok(contentType.includes("text/html") ? extractArticle(body, finalUrl.href) : body);
+}
+
+/**
+ * GET `url`, following redirects here rather than in `fetch` so every hop
+ * passes {@link checkDestination} before it is connected to: a public page
+ * redirecting inward is the standard way around a guard like this. One
+ * timeout spans resolution and every hop.
+ */
+async function fetchCheckingEachHop(
+  url: URL,
+  headers: Record<string, string>,
+  resolveHost: ResolveHost,
+): Promise<Result<{ response: Response; finalUrl: URL }, ToolRejection>> {
+  const signal = AbortSignal.timeout(15_000);
+  let current = url;
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+    const allowed = await checkDestination(current, resolveHost, signal);
+    if (allowed.isErr()) return err(allowed.error);
+    const response = await fetch(current.href, { headers, redirect: "manual", signal });
+    const location = REDIRECT_STATUSES.has(response.status)
+      ? response.headers.get("location")
+      : null;
+    if (location === null) return ok({ response, finalUrl: current });
+    await response.body?.cancel();
+    const next = URL.parse(location, current);
+    if (next === null) {
+      return reject(`Fetch failed: ${current.hostname} redirected to an unparseable location.`);
+    }
+    current = next;
+  }
+  return reject(`Fetch failed: more than ${MAX_REDIRECTS} redirects.`);
+}
+
+/**
+ * Refuse a destination off the public internet. `fetch_url` runs in the
+ * server process, so a URL taken from a page or a message would otherwise
+ * reach whatever the deployment can: Hindsight, Inngest, cloud metadata. An
+ * IP literal is judged as written, a name by every address it resolves to.
+ *
+ * Not atomic with the connection: `fetch` resolves the name again, so a
+ * server answering public first and private second defeats this, the same
+ * DNS-rebinding residual `ctx.http` carries.
+ */
+async function checkDestination(
+  url: URL,
+  resolveHost: ResolveHost,
+  signal: AbortSignal,
+): Promise<Result<void, ToolRejection>> {
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    return reject(`Unsupported protocol: ${url.protocol}`);
+  }
+  // `URL.hostname` keeps an IPv6 literal's brackets.
+  const host = url.hostname.replace(/^\[(.*)\]$/, "$1");
+  const family = isIP(host);
+  const addresses =
+    family === 0 ? await abortable(resolveHost(host), signal) : [{ address: host, family }];
+  const blocked = addresses.find((a) => isBlockedAddress(a.address, a.family));
+  return blocked === undefined
+    ? ok(undefined)
+    : reject(
+        `Fetching private/internal URLs is not allowed: ${url.hostname} resolves to ${blocked.address}.`,
+      );
 }
 
 /**
@@ -431,37 +515,4 @@ function extractArticle(html: string, url: string): string {
   const reader = new Readability(dom.window.document);
   const article = reader.parse();
   return article?.textContent?.trim() ?? "";
-}
-
-function validateUrl(url: string): Result<void, ToolRejection> {
-  const parsed = new URL(url);
-
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    return reject(`Unsupported protocol: ${parsed.protocol}`);
-  }
-
-  // Reject private/internal IPs (string-level check — does not resolve DNS,
-  // so a public hostname resolving to a private IP bypasses this).
-  const hostname = parsed.hostname;
-  if (
-    hostname === "localhost" ||
-    hostname === "127.0.0.1" ||
-    hostname === "0.0.0.0" ||
-    hostname.startsWith("10.") ||
-    hostname.startsWith("192.168.") ||
-    isPrivate172(hostname) ||
-    hostname === "::1" ||
-    hostname.endsWith(".local") ||
-    hostname.endsWith(".internal")
-  ) {
-    return reject("Fetching private/internal URLs is not allowed.");
-  }
-  return ok(undefined);
-}
-
-/** 172.16.0.0/12 = 172.16.x.x through 172.31.x.x */
-function isPrivate172(hostname: string): boolean {
-  if (!hostname.startsWith("172.")) return false;
-  const second = Number.parseInt(hostname.split(".")[1] ?? "", 10);
-  return second >= 16 && second <= 31;
 }

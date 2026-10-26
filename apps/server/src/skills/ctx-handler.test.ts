@@ -278,6 +278,7 @@ describe("DefaultCtxHandler", () => {
       ["169.254.169.254", 4],
       ["::1", 6],
       ["fd00::1", 6],
+      ["ff02::1", 6],
     ])(
       "refuses a host resolving to %s, which is the deployment's own network",
       async (address, family) => {
@@ -307,48 +308,6 @@ describe("DefaultCtxHandler", () => {
         }
       },
     );
-
-    it.each([
-      // Same loopback, four notations. Prefix matching on the text catches
-      // only the first.
-      ["0:0:0:0:0:0:0:1"],
-      ["::0:0:1"],
-      // v4-mapped loopback, dotted and hex.
-      ["::ffff:127.0.0.1"],
-      ["::ffff:7f00:1"],
-      // Expanded unique-local and link-local.
-      ["fd00:0:0:0:0:0:0:1"],
-      ["fe80:0:0:0:0:0:0:1"],
-      // IPv4-compatible, the other v4-in-v6 shape.
-      ["::127.0.0.1"],
-      ["::7f00:1"],
-      // NAT64: a DNS64 resolver synthesises these from a private A record,
-      // and the gateway translates them straight back.
-      ["64:ff9b::7f00:1"],
-      ["64:ff9b::a00:1"],
-      // 6to4 carries the v4 address inline.
-      ["2002:7f00:1::"],
-      // Site-local, deprecated but still routed by some stacks.
-      ["fec0::1"],
-    ])("refuses %s, however it is written", async (address) => {
-      const fetchMock = vi.spyOn(globalThis, "fetch");
-      try {
-        const h = makeHandler(httpManifest(), deps(), async () => [{ address, family: 6 }]);
-        expect(
-          (
-            await refusal(
-              h.handle({
-                method: "http.request",
-                args: { method: "GET", url: "http://internal.example/x" },
-              }),
-            )
-          ).message,
-        ).toMatch(/host's own network/);
-        expect(fetchMock).not.toHaveBeenCalled();
-      } finally {
-        fetchMock.mockRestore();
-      }
-    });
 
     it.each([["2606:4700:4700::1111"], ["2001:db8::1"]])(
       "allows the public v6 address %s",
