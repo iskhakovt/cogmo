@@ -1,3 +1,4 @@
+import { match } from "ts-pattern";
 import type { TransportContext } from "./context.js";
 
 /** Who may use the channel at all, asked before an adapter does any work for an update. */
@@ -16,10 +17,15 @@ export function createSenders(deps: Omit<TransportContext, "agentStore">): Sende
     async admits(platformUserHandle) {
       return runInTx(async (tx) => {
         const mode = await transportStore.getChannelIdentityMode(tx, channelId);
-        if (mode === "fixed" || mode === "create") return true;
-        if (mode !== "mapped") return false;
-        const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
-        return identity !== undefined;
+        // `identity_mode` is free text, so a value outside the three modes falls to `otherwise`.
+        return match(mode)
+          .with("fixed", "create", async () => true)
+          .with(
+            "mapped",
+            async () =>
+              (await transportStore.resolveUser(tx, channelId, platformUserHandle)) !== undefined,
+          )
+          .otherwise(async () => false);
       });
     },
   };

@@ -25,10 +25,13 @@ import { setup } from "./index.js";
 
 vi.mock("grammy", async () => (await import("../../../test/telegram/grammy-mock.js")).grammyModule);
 
-function setupWith(
-  credentials: Parameters<typeof setup>[0]["credentials"],
-  transport: Transport = mockTransport(),
-) {
+type Credentials = Parameters<typeof setup>[0]["credentials"];
+
+function setupWith(credentials: Credentials) {
+  return setupOn(mockTransport(), credentials);
+}
+
+function setupOn(transport: Transport, credentials: Credentials) {
   return setup({
     channelId: "tg-ch",
     credentials,
@@ -107,7 +110,7 @@ describe("setup", () => {
   it("counts an update the sender gate drops as handled", async () => {
     const handler = vi.fn(async () => {});
     botLifecycle.polling = () => runUpdate(5, handler);
-    const { adapter } = await setupWith({ token: "fake" }, strangerTransport());
+    const { adapter } = await setupOn(strangerTransport(), { token: "fake" });
 
     await adapter.stop();
 
@@ -120,11 +123,11 @@ const STRANGER = 999;
 const TASK_ID = "00000000-0000-0000-0000-000000000001";
 
 /** Paths of the mock functions under `value` that were called, e.g. `api.getFile`. */
-function calledMocks(value: object, prefix = ""): string[] {
+function calledMocks(value: object): string[] {
   return Object.entries(value).flatMap(([key, member]) => {
-    const path = `${prefix}${key}`;
-    if (vi.isMockFunction(member)) return member.mock.calls.length > 0 ? [path] : [];
-    return typeof member === "object" && member !== null ? calledMocks(member, `${path}.`) : [];
+    if (vi.isMockFunction(member)) return member.mock.calls.length > 0 ? [key] : [];
+    if (typeof member !== "object" || member === null) return [];
+    return calledMocks(member).map((path) => `${key}.${path}`);
   });
 }
 
@@ -192,7 +195,7 @@ describe("the sender gate", () => {
     ],
   ])("answers %s from a sender the channel doesn't admit with nothing", async (_, key, ctx) => {
     const transport = strangerTransport();
-    await setupWith({ token: "fake" }, transport);
+    await setupOn(transport, { token: "fake" });
     const stranger = update(ctx());
 
     await deliverUpdate(key, stranger);
@@ -215,7 +218,7 @@ describe("the sender gate", () => {
         receive: "routed",
       }),
     });
-    await setupWith({ token: "fake" }, transport);
+    await setupOn(transport, { token: "fake" });
     const known = update(makeCtx(111, "hello", 42));
 
     await deliverUpdate("on:message:text", known);
@@ -227,7 +230,7 @@ describe("the sender gate", () => {
 
   it("passes an admitted sender's photo on to be downloaded and uploaded", async () => {
     const transport = mockTransport();
-    await setupWith({ token: "fake" }, transport);
+    await setupOn(transport, { token: "fake" });
 
     await deliverUpdate("on:message:photo", update(makePhotoCtx(111)));
 

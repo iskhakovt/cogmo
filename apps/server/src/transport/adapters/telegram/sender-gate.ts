@@ -5,11 +5,10 @@ import { logger } from "../../../logger.js";
 import type { Transport } from "../../transport.js";
 
 /**
- * Drop an update unless the channel admits its sender, before any handler
- * runs: no reply, no typing indicator, no download. A bot is publicly
- * discoverable, so any answer confirms it is live and tells a stranger what
- * it accepts. An update with no sender (a channel post) has no identity to
- * admit, and no handler takes one.
+ * Drop an update unless the channel admits its sender, and answer nothing:
+ * any answer tells a stranger the bot is live (design/transport/identity.md →
+ * Allowlist enforcement). An update with no sender (a channel post) has no
+ * identity to admit, and no handler takes one.
  */
 export function senderGate(transport: Pick<Transport, "senders">): MiddlewareFn<Context> {
   return async (ctx, next) => {
