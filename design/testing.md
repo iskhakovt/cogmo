@@ -91,70 +91,51 @@ Real provider APIs, for behaviour a replayed fixture can't show — recorded fix
 - Each run costs real money — keep prompts small and requests few. See `design/prompt-caching.md` → Test Plan → Live tier for the caching scenarios.
 - **Evals** measure model behaviour against a labelled fixture set under `test/fixtures/evals/` and report per-case results and summary rates rather than asserting thresholds: one sample per case on a non-deterministic model makes a threshold either too loose to catch a regression or flaky. They fail only when a turn doesn't complete, and the doc that owns the behaviour records the numbers. `core-memory-routing.live.test.ts` and `core-memory-multiturn.live.test.ts` report to [memory.md](memory.md) → Core Memory vs Hindsight, `correction-learning.live.test.ts` to [evolution.md](evolution.md) → Stage 1. They share `src/test/live-eval.ts`, which runs the production prompt, tools and agent loop with core memory held in process and every other tool handler stubbed. The routing and multi-turn evals run with no steering rules; the correction eval seeds the Telegram channel rules its conversations would carry. `EVAL_REPEATS=N` samples every case N times; each case reports its pass count, and each summary row its rate over all samples followed by each run's own rate. A sample that throws or degrades counts against a `completed` row and is left out of the others. The deterministic checks and the rate summary live in `src/test/eval-checks.ts`, unit-tested. Their cases are written by hand; [Evaluation Dataset](#evaluation-dataset-research) is a planned held-out set to build from real conversations.
 
-## Skill-Authoring Integration `[proposed]`
+## Skill-Authoring Integration `[confirmed]`
 
-Single integration test that exercises the full chat -> delegate_coding -> skill register -> skill invoke flow against `DaytonaMock` + `llmock` + a `gitea` testcontainer hosting the cogmo-skills repo. Proves end-to-end that a user asking for a new skill in chat results in a tool the agent can call on the next turn.
+`src/test/skill-authoring.integration.test.ts` drives chat -> `delegate_coding` -> auto-register -> skill invoke against `DaytonaMock`, llmock and a git remote. It proves that a user asking for a skill in chat gets a tool the agent calls on the next turn.
 
-**Why this tier.** Existing tiers leave seams uncovered. `claude-cli-daytona.integration.test.ts` is skipped (manual run) and only covers `plan`. `daytona-conformance.integration.test.ts` stops at the SDK wire surface. `pipeline.integration.test.ts` mocks all coding-delegation work. `skills.e2e.test.ts` stops at a no-deps tier-1 skill registered and run through the CLI. The seam that hosts most production failure modes — PTY stream parsing, snapshot lifecycle races, lockfile compile+verify, venv populate, deps reaper, skill-tool registration — has zero composed coverage. v2.1.0's PTY-pollution and snapshot-prewarm bugs are both seam failures.
+**Why this tier.** The other tiers stop short of the composed seam. `claude-cli-daytona.integration.test.ts` is manual (`describe.skip`) and covers only `plan`; `daytona-conformance.integration.test.ts` stops at the SDK wire surface; `pipeline.integration.test.ts` mocks all coding-delegation work; `skills.e2e.test.ts` registers and runs a tier-1 skill through the CLI. This suite composes PTY stream parsing, the snapshot lifecycle, the coding task from plan to PR, auto-register and skill-tool registration.
 
-**Scope.** One scenario, one cassette, top to bottom. Lives in `src/test/skill-authoring.integration.test.ts`.
+**Scenario.**
 
-1. Inbound message arrives via Inngest (`inbound/arrived`) asking for a new skill ("create a skill that fetches the current BTC spot price").
-2. Agent loop reaches tool-use, calls `delegate_coding` against the auto-registered `skills` repo.
-3. Orchestrator emits `coding/task/start`, allocates a worktree branch, books a Daytona sandbox against `cogmo-devbase:<v>` (via `DaytonaMock`).
-4. Plan: `ClaudeCodeBackend.plan` streams stream-json through the production PTY path, emits `ExitPlanMode`.
-5. Plan auto-approved (test rig advances the plan-approval gate).
-6. Execute: claude writes `skills/btc-spot/SKILL.md`, `skill.py`, and `requirements.lock` with httpx pinned (exercises deps mgmt).
-7. Commit + push to the gitea testcontainer hosting cogmo-skills.
-8. Agent's next turn calls `register_skill` — lockfile compile + byte-compare runs in an ephemeral Daytona session, classifier tags `notify`, register advances main.
-9. Second inbound message ("what's bitcoin at?") arrives. Agent's tool registry rebuild picks up the new skill.
-10. Skill invocation: runner pool spawns a `cogmo-skills:<v>` worker (tier-2 sysbox), populates the venv from the deps cache (cache miss exercises `deps.ts`), executes the skill, returns a result.
-11. Assistant reply lands in the DB.
+1. Turn 1 asks for `btc-spot`: fetch the CoinGecko BTC/USD price with `ctx.http.get`, return `{ price }`. The prompt forbids third-party HTTP libraries, declared dependencies and a `requirements.lock`.
+2. The agent calls `delegate_coding` against the auto-registered `skills` repo. The profile's `codingAutoapproveMode` is `on`, so the plan is approved without a gate.
+3. The task runs in a Daytona sandbox on `cogmo-devbase:<v>` through `DaytonaMock`: plan and execute drive the in-sandbox `claude` CLI over the production PTY path, then verify, push and PR open. The task ends `pr_open`.
+4. `coding/task/pr-opened` triggers `coding-auto-register-skill`, which fetches the PR head branch into the bare skills repo and registers it. The skill is stdlib-only `tier: wasm`, so register compiles no lockfile.
+5. Turn 2 ("What's bitcoin at?") lists the `btc-spot` tool and calls it; the skill runs in the tier-1 Pyodide worker.
+6. The reply goes out as `adapter/direct/outbound`.
 
-**What's asserted vs what's input noise.** Treat the LLM as input noise and assert only the deterministic orchestrator contract:
+**What's asserted vs what's input noise.** The LLM is input noise; assertions pin the deterministic contract.
 
 | Assert (deterministic) | Don't assert (model-drift bait) |
 |-|-|
-| `register_skill` returns `status: "live"` | Exact text of the SKILL.md description |
-| `requirements.lock` byte-equals re-compiled output | Plan-mode summary wording |
-| Skill tool appears in tool list on next turn | Specific tool argument shape claude chose |
-| Skill invocation returns the stand-in network's price | Exact format of the assistant's final reply |
-| `coding/task/completed` then `skill/registered` emitted | Number of edit calls claude makes |
-| `skill_runs` row has `status: "succeeded"` | Wall-clock duration |
+| Coding task reaches `pr_open` | Plan and `SKILL.md` wording |
+| A `skills` row named `btc-spot` exists | Tool arguments the model chose |
+| The skill's newest finished `skill_runs` row has `status: "success"` and `output.price` equal to the stand-in network's figure | Number of edits the CLI makes |
+| An `adapter/direct/outbound` event to the session carries a price-shaped number | Exact reply text, wall-clock duration |
 
 **Skill network.** The authored skill's `ctx.http` call is answered in-process by a stand-in network: a resolver and a `fetch` passed through `BootstrapOptions.skillCtxHttpOverride`, serving the one CoinGecko endpoint the skill calls. It applies in record mode as well as replay. The cassettes cover the chat and the sandbox, not the skill's own request, so without it the suite would depend on a public API's uptime and rate limits and fail offline. The allowlist and address checks still run against what the stand-in answers, since the override replaces the network, not the policy. A loopback stub server is not an alternative. A manifest can list `127.0.0.1` in `network.allow`, but the resolved-address check refuses loopback, so reaching a local server would take an injected resolver that misreports its address. That goes around the guard instead of through it. For the same reason the override takes both halves or neither: a resolver alone would pass the guard on its own answer while the global `fetch` connects wherever the name really points.
 
-Cassettes pin the conversation; assertions pin the contract. This is the AgentRR pattern (record/replay derived experience, not raw token streams) — replay the pinned plan + edit sequence, assert structural invariants around it.
+**Git remote.** Record mode pushes to the throwaway GitHub repo `COGMO_TEST_SKILLS_REMOTE` names, with the PAT from `gh auth token`. It resets that repo's `main` to an empty commit first and afterwards closes the PR and deletes the test branches and `refs/cogmo-wip/` refs. Replay uses a local bare `file://` remote and a stub Octokit. Its `POST /pulls` commits `test/fixtures/skill-authoring-branch/` onto the PR's head branch in the bare remote, standing in for the sandbox push the cassette swallows, so the verify fetch-back and the register fetch run their production path. It accepts the run-branch `DELETE` and throws on any other call.
 
-**Fixtures.** Two cassettes share the existing `RECORD=1` switch:
+**Fixtures.** Refreshed together under `RECORD=1`:
 
 | Fixture | What | Re-record trigger |
 |-|-|-|
-| `test/fixtures/daytona/skill-authoring.json` | Daytona HTTP + WS (snapshot lifecycle, sandbox create, fs upload, PTY frames, git clone, exec sessions, delete) | New `cogmo-devbase:<v>`, SDK bump |
-| `test/fixtures/recorded/suites/skill-authoring/` | Anthropic `/v1/messages` for the orchestrator's plan + execute prompts and the agent loop's two turns | Coding or agent prompt change, model swap, claude-cli flag change, tool registry change |
+| `test/fixtures/daytona/skill-authoring.json` | Daytona HTTP + WS: snapshot lookup, sandbox create and delete, file upload, git clone, exec sessions, and the PTY frames carrying the in-sandbox CLI's stream-json (`claude-haiku-4-5-20251001`, thinking off) | New `cogmo-devbase:<v>`, `@daytona/sdk` bump, coding prompt or CLI flag change |
+| `test/fixtures/recorded/suites/skill-authoring/` | Anthropic `/v1/messages` for the host agent loop's two turns | Agent prompt change, model swap, tool registry change |
+| `test/fixtures/skill-authoring-branch/` | The `SKILL.md` and `skill.py` the recorded sandbox pushed | Any Daytona cassette refresh |
 
-**Cost envelope.** Replay: zero (standard runner + testcontainers + llmock, same shape as `pipeline.integration.test.ts`). Record: ~$1-2 per refresh (~3-5 min Daytona compute + ~30k Anthropic tokens + one PyPI fetch). Operator-triggered locally, expected cadence ~monthly when releases align.
+Recording needs `DAYTONA_API_KEY`, `ANTHROPIC_API_KEY`, `COGMO_TEST_SKILLS_REMOTE`, a `COGMO_DEVBASE_IMAGE` with a non-`latest` tag and an authenticated `gh`. It builds the devbase snapshot from the bake target and waits for the deps-cache volume before the run; the test file's header has the steps. The suite skips unless the Daytona cassette exists or `RECORD=1` runs with those inputs set.
 
-**CI cadence.** Replay runs on every PR touching `src/sandbox/**`, `src/skills/**`, `src/agent/coding/**`, `src/agent/store/**`, `src/inngest/**`. Path filter keeps it off PRs that can't plausibly break the surface. Nightly `workflow_dispatch`-gated job re-runs replay against the latest cogmo-devbase tag for image-side drift detection. Record mode runs locally only; operator commits the refreshed fixtures.
-
-**Infrastructure status.**
-
-- `gitea` — `gitea()` in `dev/containers.ts`; `verify-orchestrator.integration.test.ts` starts it and bootstraps the admin user, token and fixture repo.
-- `DaytonaMock` — already proxies HTTP + WS with record/replay and fault injection. The PTY upgrade path needs verification (existing WS support is for `getSessionCommandLogs`; PTY's URL pattern under `wss://proxy.app.daytona.io/toolbox/{sandboxId}/process/...` likely already matches the `TOOLBOX_PATH_PREFIX` routing, but binary frame support may need adding — `WsFrameSchema` carries `text` only today).
-- llmock (`@copilotkit/aimock`) — already wired into `test/llmock-setup.ts`. The orchestrator's claude calls route through `ANTHROPIC_BASE_URL=<llmock>` set on the Daytona sandbox env, same pattern `claude-cli-daytona.integration.test.ts` uses for `ANTHROPIC_MODEL`.
-- No new container types needed.
+**Cost and cadence.** Replay costs nothing and runs in the integration tier on every PR that changes code. A record run costs ~$1-2 of Daytona compute and Anthropic tokens; it runs locally and the operator commits the refreshed fixtures.
 
 **Non-goals.**
 
-- Not a regression test for claude's behaviour. If claude stops emitting `ExitPlanMode` the test fails, but that's the orchestrator's contract under test, not claude itself. Anthropic SDK drift is caught here as a side-effect; the canonical test for SDK drift remains the version-pinning canaries.
-- Not a perf benchmark. Runtime visible in CI duration; no hard threshold asserted.
-- Not a multi-skill scenario. One skill per cassette keeps re-record cost bounded.
-
-**Open questions** (resolved before the test body lands; tracked in the per-PR TODOs):
-
-- **PTY binary frames** — `WsFrameSchema` is text-only. Verified by recording a tiny PTY echo against real Daytona before scaling out.
-- **Lockfile determinism** — pin `requirements.in` to specific patch versions so the byte-compare stays stable across re-records when PyPI ships new patches.
-- **Skill invoke tier** — tier-2 (sysbox) for this test to exercise the deps-cache + venv-populate path. Tier-1 (Pyodide WASM micropip) stays in the existing skills tests.
+- Not a regression test for the `claude` CLI. A change in its output fails the suite as a break in the orchestrator's contract with it; SDK drift stays with the version-pinning canaries.
+- Not a perf benchmark. No duration threshold.
+- One stdlib-only skill. The deps path is not composed here: `runner.sysbox.integration.test.ts` covers a tier-2 skill populating its venv from a lockfile.
 
 ## Coverage Patterns `[confirmed]`
 
