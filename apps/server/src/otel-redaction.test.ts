@@ -200,6 +200,24 @@ describe("RedactingSpanExporter with the HTTP instrumentations", () => {
     expect(exportedText(span)).not.toContain(FAKE_SECRET);
   });
 
+  it("masks URL credentials and access tokens in a URL attribute and free text", () => {
+    const pat = `ghp_${"a1B2".repeat(9)}`;
+    const message = `push to https://x-access-token:${pat}@github.com/o/r failed; GH_TOKEN=${pat}`;
+    trace.getTracer("test").startActiveSpan("caller", (span) => {
+      span.setAttribute("url.full", `https://x-access-token:${pat}@github.com/o/r?x=1`);
+      span.recordException(new Error(message));
+      span.setStatus({ code: SpanStatusCode.ERROR, message });
+      span.end();
+    });
+
+    const span = expectDefined(harness.getSpans()[0], "span");
+    const masked = "push to https://REDACTED@github.com/o/r failed; GH_TOKEN=ghp_REDACTED";
+    expect(span.attributes["url.full"]).toBe("https://REDACTED@github.com/o/r");
+    expect(span.status).toEqual({ code: SpanStatusCode.ERROR, message: masked });
+    expect(span.events[0]?.attributes?.["exception.message"]).toBe(masked);
+    expect(exportedText(span)).not.toContain(pat.slice(4));
+  });
+
   it("redacts a span name and string array attributes", async () => {
     const tracer = trace.getTracer("test");
     tracer

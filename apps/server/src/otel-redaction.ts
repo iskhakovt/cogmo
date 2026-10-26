@@ -47,8 +47,8 @@ function redactUrl(url: string): string {
  * can sit under any name (`key`, `token`, a presigned URL's signature), and
  * which endpoint a span called is in the path, not the query. Free text —
  * span names, status messages, `exception.*` — keeps its queries and gets
- * only `redactSecretsInText` (URL userinfo, access tokens, Bot API token
- * segments); a URL embedded in prose has no reliable end to cut at.
+ * only `redactSecretsInText`; a URL embedded in prose has no reliable end to
+ * cut at.
  */
 export class RedactingSpanExporter implements SpanExporter {
   readonly #inner: SpanExporter;

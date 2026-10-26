@@ -1,7 +1,5 @@
 /**
- * Secrets masked in text before it leaves the process or is stored: log
- * lines, exported spans, boot errors, and the coding orchestrators' failure
- * reasons and PR bodies.
+ * Secrets masked in text before it leaves the process or is stored.
  *
  * Telegram's Bot API authenticates by path: a method call is
  * `<apiRoot>/bot<bot id>:<secret>/<method>` and a file download is
@@ -13,11 +11,13 @@
  * Git and HTTP clients quote URLs that carry credentials in their userinfo,
  * and tool output can carry a bare GitHub or Anthropic token.
  *
- * No shape is anchored on a word boundary: a token can follow a letter, a
- * digit or an underscore (`MY_TOKEN_ghp_…`, a JSON-escaped `\nghp_…`, a
- * colour code's `m`). Tokens are told from words by their body instead. Each
- * shape opens with a literal start and no quantifier nests, so a pass is
- * linear; none spans whitespace, which is what `truncationSafeLength` rests on.
+ * No shape is anchored on a word boundary, so one matches inside an
+ * identifier too: a token can follow a letter, a digit or an underscore
+ * (`MY_TOKEN_ghp_…`, a JSON-escaped `\nghp_…`, a colour code's `m`). Tokens
+ * are told from words by their body instead. Each shape opens with a fixed
+ * start (`://`, `gh[pousr]_`, `sk-ant-`, …) and no quantifier nests, so a pass
+ * is linear; none spans whitespace, which is what `truncationSafeLength` rests
+ * on.
  */
 
 /** What a token-shaped path segment is replaced with. */
@@ -74,7 +74,7 @@ const MASKS = SECRET_SHAPES.map((shape) => ({
   replacement: shape.replacement,
 }));
 
-/** Any shape's start; no `g` flag, so `search` carries no state between calls. */
+/** Any shape's start. */
 const SECRET_START = new RegExp(SECRET_SHAPES.map((shape) => shape.start).join("|"));
 
 const WHITESPACE = /\s/;

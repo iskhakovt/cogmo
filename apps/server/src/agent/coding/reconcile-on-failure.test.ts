@@ -304,6 +304,43 @@ describe("createCodingTaskReconcile — durable wrapper", () => {
     });
   });
 
+  it("masks a reason a step stored unmasked before it emits", async () => {
+    const store = mock<CodingStore>();
+    const fn = createCodingTaskReconcile(
+      { runInTx: ((cb) => cb({ __mockTx: true } as never)) as Transactor, store },
+      inngest,
+    );
+    const engine = new InngestTestEngine({
+      function: fn,
+      events: [
+        makeFailureEvent({
+          taskId: "task-002",
+          runId: "run-bbb",
+          functionId: "cogmo-coding-task-execute",
+        }),
+      ],
+      steps: [
+        {
+          id: "reconcile",
+          handler: () => ({
+            status: "reconciled" as const,
+            taskId: "task-002",
+            failureReason: "clone https://x-access-token:s3cret@github.com/o/r failed",
+          }),
+        },
+      ],
+    });
+
+    await engine.execute();
+
+    expect(sendSpy.mock.calls[0]?.[0]).toMatchObject({
+      payload: {
+        name: "coding/task/failed",
+        data: { taskId: "task-002", reason: "clone https://REDACTED@github.com/o/r failed" },
+      },
+    });
+  });
+
   it.each(["already_terminal", "not_coding_orchestrator", "missing_task_id", "task_not_found"])(
     "on skipped (reason=%s): does NOT emit coding/task/failed",
     async (reason) => {

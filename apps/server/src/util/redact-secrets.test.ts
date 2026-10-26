@@ -193,6 +193,10 @@ describe("redactSecretsInText", () => {
     expect(redactSecretsInText(once)).toBe(once);
   });
 
+  // A linear pass over 200k characters takes milliseconds, a quadratic one
+  // tens of seconds, so a 5 s bound holds under any test load. A regex runs
+  // synchronously, out of reach of the test timeout, so a larger input would
+  // only make a regression block its worker for longer before failing.
   it.each([
     ["a long word", "a".repeat(200_000)],
     ["repeated scheme separators", "://x".repeat(50_000)],
@@ -202,7 +206,7 @@ describe("redactSecretsInText", () => {
     const start = performance.now();
     redactSecretsInText(input);
     truncationSafeLength(input);
-    expect(performance.now() - start).toBeLessThan(1_000);
+    expect(performance.now() - start).toBeLessThan(5_000);
   });
 });
 

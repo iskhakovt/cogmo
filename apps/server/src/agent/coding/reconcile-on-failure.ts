@@ -129,7 +129,9 @@ export function createCodingTaskReconcile(deps: CodingTaskReconcileDeps, inngest
         await step.sendEvent("emit-failed", {
           ...codingTaskFailed.create({
             taskId: result.taskId,
-            reason: result.failureReason,
+            // Masked again: a run resumed on a newer build replays the
+            // `reconcile` result an older one stored.
+            reason: redactSecretsInText(result.failureReason),
           }),
           id: `reconcile-${run_id}`,
         });

@@ -7,7 +7,9 @@
  */
 
 import type { Octokit } from "@octokit/rest";
+import type { Inngest } from "inngest";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { mock } from "vitest-mock-extended";
 import type { Database, Transactor } from "../../db/index.js";
 import {
   type ExecOptions,
@@ -563,8 +565,8 @@ describe("runCodingVerify", () => {
     "%s: the return value, row and event carry one masked reason",
     async (_label, seed, wrap, masked) => {
       const deps = makeDeps(wrap(fakeContainerHandle(successScript)));
-      const inngestSend = vi.fn().mockResolvedValue(undefined);
-      const inngest = { send: inngestSend } as unknown as Pick<import("inngest").Inngest, "send">;
+      const inngest = mock<Pick<Inngest, "send">>();
+      inngest.send.mockResolvedValue({ ids: [] });
       const taskId = await seed();
 
       const result = await runCodingVerify({
@@ -578,7 +580,7 @@ describe("runCodingVerify", () => {
 
       expect(result).toEqual({ status: "failed", failureReason: masked });
       expect((await tx((trx) => store.getTask(trx, taskId)))?.failureReason).toBe(masked);
-      expect(inngestSend).toHaveBeenCalledWith(
+      expect(inngest.send).toHaveBeenCalledWith(
         expect.objectContaining({ name: "coding/task/failed", data: { taskId, reason: masked } }),
       );
     },

@@ -842,9 +842,7 @@ describe("runCodingTask", () => {
     const repo = await seedRepo();
     const task = await seedTask(repo);
     const { sandbox, stopCalls } = fakeSandbox();
-    (sandbox.create as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
-      new Error("docker daemon down"),
-    );
+    vi.mocked(sandbox.create).mockRejectedValueOnce(new Error("docker daemon down"));
     const result = await runCodingTask({
       taskId: task.id,
       runId: "run-test",
@@ -862,9 +860,7 @@ describe("runCodingTask", () => {
     const repo = await seedRepo();
     const task = await seedTask(repo);
     const { sandbox } = fakeSandbox();
-    (sandbox.create as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
-      new Error("docker daemon down"),
-    );
+    vi.mocked(sandbox.create).mockRejectedValueOnce(new Error("docker daemon down"));
     const planStream = recordingPlanStream();
 
     const result = await runCodingTask({
@@ -887,7 +883,7 @@ describe("runCodingTask", () => {
     const repo = await seedRepo();
     const task = await seedTask(repo);
     const { sandbox } = fakeSandbox();
-    (sandbox.create as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+    vi.mocked(sandbox.create).mockRejectedValueOnce(
       new Error(`clone https://x-access-token:${PAT}@github.com/o/r failed`),
     );
     const planStream = recordingPlanStream();
@@ -1972,9 +1968,7 @@ describe("runCodingExecute", () => {
     const repo = await seedRepo();
     const { task } = await seedExecutableTask(repo);
     const { sandbox } = fakeSandbox();
-    (sandbox.create as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
-      new Error("docker daemon down"),
-    );
+    vi.mocked(sandbox.create).mockRejectedValueOnce(new Error("docker daemon down"));
     const stream = recordingExecuteStream();
 
     const result = await runCodingExecute({
