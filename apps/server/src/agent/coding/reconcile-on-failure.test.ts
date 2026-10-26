@@ -306,10 +306,7 @@ describe("createCodingTaskReconcile — durable wrapper", () => {
 
   it("masks a reason a step stored unmasked before it emits", async () => {
     const store = mock<CodingStore>();
-    const fn = createCodingTaskReconcile(
-      { runInTx: ((cb) => cb({ __mockTx: true } as never)) as Transactor, store },
-      inngest,
-    );
+    const fn = createCodingTaskReconcile({ runInTx: fakeRunInTx, store }, inngest);
     const engine = new InngestTestEngine({
       function: fn,
       events: [
