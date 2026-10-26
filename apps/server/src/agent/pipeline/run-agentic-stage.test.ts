@@ -18,6 +18,7 @@ import { expectDefined } from "../../test/assertions.js";
 import {
   FAKE_TX,
   fakeRunInTx,
+  loopResult,
   mockAgentStore,
   mockAttachmentStore,
   mockDeliveryHandle,
@@ -70,17 +71,15 @@ function stageArgs(stage: Stage = expectDefined(DEFINITION.stages[0], "draft")):
   };
 }
 
-function loopResult(overrides: Partial<AgentLoopResult> = {}): AgentLoopResult {
-  return {
+/** The draft stage's loop result: a plan streamed and persisted, unless overridden. */
+function planResult(overrides?: Partial<AgentLoopResult>): AgentLoopResult {
+  return loopResult({
     text: "Here is the plan.",
-    messages: [],
     newMessages: [{ role: "assistant", content: [{ type: "text", text: "Here is the plan." }] }],
-    usage: { inputTokens: 10, outputTokens: 5 },
     model: "claude-sonnet-4-6",
-    iterations: 1,
     streamed: { text: "Here is the plan.", toolUseIds: [] },
     ...overrides,
-  };
+  });
 }
 
 function toolNamed(name: string) {
@@ -158,7 +157,9 @@ async function harness(opts: { existingInbound?: { id: string; conversationId: s
   const deliveryRouter = mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(delivery) });
   const tools = new ToolRegistry();
   for (const name of ["web_search", "read_file", "start_pipeline"]) tools.register(toolNamed(name));
-  const runStreamingAgentLoop = vi.fn().mockResolvedValue(loopResult());
+  const runStreamingAgentLoop = vi
+    .fn<AgenticStageDeps["runStreamingAgentLoop"]>()
+    .mockResolvedValue(planResult());
   const provider = providerReplying();
 
   const deps: AgenticStageDeps = {
@@ -510,7 +511,7 @@ describe("runAgenticStage", () => {
     const h = await harness();
     h.runStreamingAgentLoop.mockImplementation(async ({ service }) => {
       await service.coreMemory.update("preferences", "Dice");
-      return loopResult();
+      return planResult();
     });
     const { memo, steps } = memoizingSteps();
     memo.set("freeze-core-memory-scope", {
@@ -693,7 +694,7 @@ describe("runAgenticStage", () => {
   it("fails the stage when the loop degrades, after persisting what it produced", async () => {
     const h = await harness();
     h.runStreamingAgentLoop.mockResolvedValue(
-      loopResult({ text: "", degraded: { reason: "iteration_cap", subtype: null } }),
+      planResult({ text: "", degraded: { reason: "iteration_cap", subtype: null } }),
     );
 
     const outcome = await runAgenticStage(h.deps, stageArgs(), recordingSteps().steps, log);
@@ -712,7 +713,7 @@ describe("runAgenticStage", () => {
     // an empty insert: writing it would fail the step instead of the stage.
     const h = await harness();
     h.runStreamingAgentLoop.mockResolvedValue(
-      loopResult({
+      planResult({
         text: "",
         newMessages: [],
         streamed: { text: "", toolUseIds: [] },
@@ -737,7 +738,7 @@ describe("runAgenticStage", () => {
   it("retracts a degraded turn's dropped output before closing the stream", async () => {
     const h = await harness();
     h.runStreamingAgentLoop.mockResolvedValue(
-      loopResult({
+      planResult({
         text: "",
         newMessages: [],
         streamed: { text: "Writing it now.", toolUseIds: ["t1"] },
@@ -765,7 +766,7 @@ describe("runAgenticStage", () => {
   it("pushes no retraction when a degraded turn persists everything it streamed", async () => {
     const h = await harness();
     h.runStreamingAgentLoop.mockResolvedValue(
-      loopResult({ text: "", degraded: { reason: "iteration_cap", subtype: null } }),
+      planResult({ text: "", degraded: { reason: "iteration_cap", subtype: null } }),
     );
     const steps = recordingSteps();
 
@@ -782,7 +783,7 @@ describe("runAgenticStage", () => {
     // the next stage a result that looks finished.
     const h = await harness();
     const partial = "Here is the pl\n\n[Reply cut off: it reached the model's output limit.]";
-    h.runStreamingAgentLoop.mockResolvedValue(loopResult({ text: partial, truncated: true }));
+    h.runStreamingAgentLoop.mockResolvedValue(planResult({ text: partial, truncated: true }));
     const steps = recordingSteps();
 
     const outcome = await runAgenticStage(h.deps, stageArgs(), steps.steps, log);
@@ -857,7 +858,7 @@ describe("runAgenticStage", () => {
       expect(h.agentStore.insertMessages).toHaveBeenCalled();
       expect(h.delivery.deliverUnstreamed).toHaveBeenCalledExactlyOnceWith(
         ["session-tg"],
-        loopResult().text,
+        planResult().text,
       );
       expect(ids).toContain("finish-stream");
       expect(ids.indexOf("redeliver-unstreamed")).toBeGreaterThan(

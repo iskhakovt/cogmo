@@ -38,6 +38,7 @@ import { expectDefined } from "../test/assertions.js";
 import {
   doneFrame,
   fakeRunInTx,
+  loopResult,
   MOCK_MESSAGE_CREATED_AT,
   mockAgentStore,
   mockAttachmentStore,
@@ -115,17 +116,14 @@ function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
     deliveryRouter: mockDeliveryRouter({
       prepare: vi.fn().mockResolvedValue(mockDeliveryHandle()),
     }),
-    runStreamingAgentLoop: vi.fn().mockResolvedValue({
-      text: "Hello from assistant",
-      messages: [],
-      newMessages: [
-        { role: "assistant", content: [{ type: "text", text: "Hello from assistant" }] },
-      ],
-      usage: { inputTokens: 10, outputTokens: 5 },
-      model: "mock-model",
-      iterations: 1,
-      streamed: { text: "", toolUseIds: [] },
-    }),
+    runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
+      loopResult({
+        text: "Hello from assistant",
+        newMessages: [
+          { role: "assistant", content: [{ type: "text", text: "Hello from assistant" }] },
+        ],
+      }),
+    ),
     userTimezone: "UTC",
     attachmentReader: createAttachmentReader(mockAttachmentStore(), 24_000_000),
     images: mockImages(),
@@ -189,9 +187,9 @@ describe("handle-message — crash recovery / step replay", () => {
 
     // Assistant messages are still inserted (via insertMessages, not cached), but the
     // user message is NOT — that step's body never runs.
-    const userInserts = (
-      deps.agentStore.insertMessage as ReturnType<typeof vi.fn>
-    ).mock.calls.filter(([params]) => params.role === "user");
+    const userInserts = vi
+      .mocked(deps.agentStore.insertMessage)
+      .mock.calls.filter(([, params]) => params.role === "user");
     expect(userInserts).toHaveLength(0);
 
     expect(deps.agentStore.insertMessages).toHaveBeenCalledTimes(1);
@@ -303,9 +301,9 @@ describe("handle-message — crash recovery / step replay", () => {
     // the message history as a synthetic user message ("[Previous conversation
     // summary]\n\n…"). If we see our cached marker in the history passed to
     // the agent loop, the cached step was hit.
-    const loopCalls = (deps.runStreamingAgentLoop as ReturnType<typeof vi.fn>).mock.calls;
+    const loopCalls = vi.mocked(deps.runStreamingAgentLoop).mock.calls;
     expect(loopCalls.length).toBeGreaterThanOrEqual(1);
-    const messages = loopCalls[0]?.[0]?.messages as Array<{ content: unknown }>;
+    const messages = expectDefined(loopCalls[0], "agent loop call")[0].messages;
     const summaryMessage = messages.find(
       (m) =>
         typeof m.content === "string" && m.content.includes("[cached summary from prior attempt]"),
@@ -433,19 +431,15 @@ describe("handle-message — crash recovery / step replay", () => {
     // Inngest's cache returns the stored value and skips the handler
     // body. The id format itself is asserted in `loop.test.ts`; this
     // test covers the handle-message ⇄ Inngest cache wire only.
-    const handlerBody = vi.fn().mockResolvedValue("fresh-result");
+    const handlerBody = vi.fn(async () => "fresh-result");
     const deps = mockDeps({
-      runStreamingAgentLoop: vi.fn().mockImplementation(async (params) => {
-        const cached = await params.stepRun("tool-iter1-0", handlerBody);
-        return {
+      runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>(async (params) => {
+        const stepRun = expectDefined(params.stepRun, "stepRun");
+        const cached = await stepRun("tool-iter1-0", handlerBody);
+        return loopResult({
           text: cached,
-          messages: [],
           newMessages: [{ role: "assistant", content: [{ type: "text", text: cached }] }],
-          usage: { inputTokens: 10, outputTokens: 5 },
-          model: "mock-model",
-          iterations: 1,
-          streamed: { text: "", toolUseIds: [] },
-        };
+        });
       }),
     });
     const fn = createHandleMessage(deps);
@@ -461,11 +455,9 @@ describe("handle-message — crash recovery / step replay", () => {
     // Cached step → body never runs.
     expect(handlerBody).not.toHaveBeenCalled();
     // The cached value flowed back through stepRun's return into the
-    // loop. Persisting confirms the loop actually consumed it
-    // — insertMessages call shape is (tx, { messages, ... }).
-    const insertArgs = (deps.agentStore.insertMessages as ReturnType<typeof vi.fn>).mock
-      .calls[0]?.[1] as { messages: Array<{ content: unknown }> } | undefined;
-    expect(insertArgs?.messages?.[0]?.content).toEqual([
+    // loop. Persisting confirms the loop actually consumed it.
+    const insertArgs = vi.mocked(deps.agentStore.insertMessages).mock.calls[0]?.[1];
+    expect(insertArgs?.messages[0]?.content).toEqual([
       { type: "text", text: "cached-tool-output" },
     ]);
   });
@@ -534,8 +526,7 @@ describe("handle-message — crash recovery / step replay", () => {
     // Upper bound: <10 catches a regression where the loop runs on every step
     // boundary (8 step.run calls + 1 sendEvent currently → would explode if
     // someone added expensive setup to the function body). Currently 2.
-    const loopCallCount = (deps.runStreamingAgentLoop as ReturnType<typeof vi.fn>).mock.calls
-      .length;
+    const loopCallCount = vi.mocked(deps.runStreamingAgentLoop).mock.calls.length;
     expect(loopCallCount).toBeGreaterThanOrEqual(1);
     expect(loopCallCount).toBeLessThan(10);
     // No DB writes happened — every persist step was cached.
@@ -622,12 +613,11 @@ describe("handle-message — crash recovery / step replay", () => {
     const textPushes = vi
       .mocked(handle.push)
       .mock.calls.flat()
-      .filter((e) => (e as { type: string }).type === "text_delta");
+      .filter((e) => e.type === "text_delta");
     expect(textPushes).toHaveLength(0);
     // The cached iteration's content still reaches persistence.
-    const insertArgs = (deps.agentStore.insertMessages as ReturnType<typeof vi.fn>).mock
-      .calls[0]?.[1] as { messages: Array<{ content: unknown }> } | undefined;
-    expect(insertArgs?.messages?.[0]?.content).toEqual([{ type: "text", text: "cached reply" }]);
+    const insertArgs = vi.mocked(deps.agentStore.insertMessages).mock.calls[0]?.[1];
+    expect(insertArgs?.messages[0]?.content).toEqual([{ type: "text", text: "cached reply" }]);
   });
 
   it("records the turn's iteration count from inside the persist step", async () => {
@@ -700,16 +690,12 @@ describe("handle-message — crash recovery / step replay", () => {
     const deps = mockDeps({
       resolveProvider: mockResolver(provider),
       deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
-      runStreamingAgentLoop: vi.fn().mockResolvedValue({
-        text: "",
-        messages: [],
-        newMessages: [],
-        usage: { inputTokens: 10, outputTokens: 5 },
-        model: "mock-model",
-        iterations: 1,
-        streamed: { text: "dangling fragment", toolUseIds: [] },
-        degraded: { reason: "model refused the request", subtype: "refusal" },
-      }),
+      runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
+        loopResult({
+          streamed: { text: "dangling fragment", toolUseIds: [] },
+          degraded: { reason: "model refused the request", subtype: "refusal" },
+        }),
+      ),
     });
     const fn = createHandleMessage(deps);
 
@@ -724,13 +710,12 @@ describe("handle-message — crash recovery / step replay", () => {
     // No synthesis round trip, no retraction, no apology delta — all of it
     // lives inside the cached step.
     expect(chat).not.toHaveBeenCalled();
-    const pushes = vi.mocked(handle.push).mock.calls.flat() as Array<{ type: string }>;
+    const pushes = vi.mocked(handle.push).mock.calls.flat();
     expect(pushes.filter((e) => e.type === "retract")).toHaveLength(0);
     expect(pushes.filter((e) => e.type === "text_delta")).toHaveLength(0);
     // The cached apology is what gets persisted.
-    const insertArgs = (deps.agentStore.insertMessages as ReturnType<typeof vi.fn>).mock
-      .calls[0]?.[1] as { messages: Array<{ content: unknown }> } | undefined;
-    expect(insertArgs?.messages?.at(-1)?.content).toEqual([
+    const insertArgs = vi.mocked(deps.agentStore.insertMessages).mock.calls[0]?.[1];
+    expect(insertArgs?.messages.at(-1)?.content).toEqual([
       { type: "text", text: "cached apology from prior attempt" },
     ]);
   });
@@ -917,16 +902,14 @@ describe("handle-message — late replies", () => {
         isCursorRebatched: vi.fn().mockResolvedValue(store.rebatched),
       }),
       debounceConfig: { idleTimeoutMs: 0, maxWaitMs: 0, resumePolicy: "flush" },
-      runStreamingAgentLoop: vi.fn().mockResolvedValue({
-        text: "late reply",
-        messages: [],
-        newMessages: [{ role: "assistant", content: [{ type: "text", text: "late reply" }] }],
-        usage: { inputTokens: 10, outputTokens: 5 },
-        model: "mock-model",
-        iterations: 1,
-        streamed: { text: "late reply", toolUseIds: [] },
-        degraded: { reason: "model returned an empty turn", subtype: "empty_end_turn" },
-      }),
+      runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>().mockResolvedValue(
+        loopResult({
+          text: "late reply",
+          newMessages: [{ role: "assistant", content: [{ type: "text", text: "late reply" }] }],
+          streamed: { text: "late reply", toolUseIds: [] },
+          degraded: { reason: "model returned an empty turn", subtype: "empty_end_turn" },
+        }),
+      ),
     });
   }
 
@@ -1727,17 +1710,12 @@ describe("handle-message — core-memory scope frozen across re-invocations", ()
         getProfile: vi.fn().mockResolvedValue(gameProfile(profileClass)),
         listProfileClasses: vi.fn().mockResolvedValue([{ name: "game", restricted: true }]),
       }),
-      runStreamingAgentLoop: vi.fn().mockImplementation(async ({ service }) => {
+      runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>(async ({ service }) => {
         await service.coreMemory.update("identity", "Name: Thorin");
-        return {
+        return loopResult({
           text: "Saved.",
-          messages: [],
           newMessages: [{ role: "assistant", content: [{ type: "text", text: "Saved." }] }],
-          usage: { inputTokens: 10, outputTokens: 5 },
-          model: "mock-model",
-          iterations: 1,
-          streamed: { text: "", toolUseIds: [] },
-        };
+        });
       }),
     });
   }
