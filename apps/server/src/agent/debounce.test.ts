@@ -13,7 +13,7 @@ import { createDebounceFunctions, durableSleepMs } from "./debounce.js";
 type InboundArrivedData = z.infer<typeof inboundArrived.schema>;
 
 interface DebounceRouterCtx {
-  event: { data: InboundArrivedData; ts?: number };
+  event: { data: InboundArrivedData };
   step: MockStep;
 }
 

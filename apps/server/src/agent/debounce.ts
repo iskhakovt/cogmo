@@ -120,9 +120,8 @@ function createNativeRouter(config: DebounceConfig) {
         inboundReady.create({ conversationId, triggerInboundId: inboundMessageId }),
       );
       // Native debounce exposes no internal timing, so the sample is a proxy:
-      // the trigger event's age once `inbound/ready` is out (last event to
-      // fire), close to the period for an idle-dominated burst. It follows
-      // the last step, the only bare-body code a run executes once.
+      // time from the burst's last event to the emit. After the last step so
+      // it records once (design/transport/debounce.md → Observability).
       if (typeof event.ts === "number") {
         debounceWaitMs.record(Math.max(0, Date.now() - event.ts), { kind: "native" });
       }
@@ -188,9 +187,7 @@ function createLegacyStateMachine(config: DebounceConfig) {
       // whole number of seconds, so "how long did debounce hold this turn"
       // reads the same on the wire as in the metric. A configured duration
       // finer than one second is quantised by {@link durableSleepMs} first —
-      // the metric reports the honoured wait, not the requested one. The
-      // sample follows the last step, the only bare-body code a run executes
-      // once.
+      // the metric reports the honoured wait, not the requested one.
       const ms = durableSleepMs(event.data.timeoutMs);
       await step.sleep("wait", `${ms}ms`);
       await step.sendEvent(

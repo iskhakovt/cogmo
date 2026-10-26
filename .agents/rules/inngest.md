@@ -141,8 +141,10 @@ contract**. Design every function for the per-boundary model.
 - **Bare-body wall-clocks and metrics are per-invocation.** `Date.now()`
   captured at the top of the function restarts on every boundary — a
   "duration" computed from it in a late step measures the final replay,
-  not the run. Record timings and counters inside steps, or derive them
-  from step-stored timestamps.
+  not the run. Record timings and counters inside steps, derive them
+  from step-stored timestamps, or record them after the function's last
+  step — the one bare-body spot a clean run executes once, so a step
+  added after it moves the sample.
 
 See `design/crash-recovery.md` for the worked contract on `handle-message`
 (durability map, durable LLM iterations, tool durability policy, test
