@@ -17,6 +17,7 @@ export type SummarySourceValue = (typeof summarySource.enumValues)[number];
 
 /** `messages.role` — the role a row carries in an LLM request. */
 export const messageRole = pgEnum("message_role", ["user", "assistant"]);
+export type MessageRole = (typeof messageRole.enumValues)[number];
 
 export const messages = pgTable(
   "messages",

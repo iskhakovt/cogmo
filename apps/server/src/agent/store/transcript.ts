@@ -22,6 +22,7 @@ import type { StoredContent, StoredMessage } from "../stored-content.js";
 import type { TurnContext } from "../turn-context.js";
 import {
   conversationSummaries,
+  type MessageRole,
   messages,
   type SummarySourceValue,
   systemPromptSnapshots,
@@ -90,7 +91,7 @@ export type ChatHistoryAttachment =
  */
 export interface ChatHistoryMessage {
   id: string;
-  role: "user" | "assistant";
+  role: MessageRole;
   text: string;
   attachments: readonly ChatHistoryAttachment[];
 }
@@ -106,7 +107,7 @@ export interface TranscriptStore {
     tx: Transaction,
     params: {
       conversationId: string;
-      role: "user" | "assistant";
+      role: MessageRole;
       content: StoredContent;
       profileId: string;
       model: string;
@@ -288,12 +289,6 @@ export interface TranscriptStore {
     afterMessageId: string,
   ): Promise<ReadonlyArray<StoredMessage & { id: string }>>;
 
-  /** Load a single message by ID. */
-  getMessage(
-    tx: Transaction,
-    messageId: string,
-  ): Promise<(StoredMessage & { id: string }) | undefined>;
-
   /** Get the timestamp of the most recent message in a conversation (any role). `undefined` when no messages. */
   getLastMessageTime(tx: Transaction, conversationId: string): Promise<Date | undefined>;
 
@@ -322,7 +317,7 @@ export class DrizzleTranscriptStore implements TranscriptStore {
     tx: Transaction,
     params: {
       conversationId: string;
-      role: "user" | "assistant";
+      role: MessageRole;
       content: StoredContent;
       profileId: string;
       model: string;
@@ -496,12 +491,11 @@ export class DrizzleTranscriptStore implements TranscriptStore {
     tx: Transaction,
     conversationId: string,
   ): Promise<ReadonlyArray<StoredMessage & { id: string }>> {
-    const rows = await tx
+    return tx
       .select({ id: messages.id, role: messages.role, content: messages.content })
       .from(messages)
       .where(eq(messages.conversationId, conversationId))
       .orderBy(asc(messages.id));
-    return rows;
   }
 
   async getLatestSummary(
@@ -622,24 +616,11 @@ export class DrizzleTranscriptStore implements TranscriptStore {
     conversationId: string,
     afterMessageId: string,
   ): Promise<ReadonlyArray<StoredMessage & { id: string }>> {
-    const rows = await tx
+    return tx
       .select({ id: messages.id, role: messages.role, content: messages.content })
       .from(messages)
       .where(and(eq(messages.conversationId, conversationId), gt(messages.id, afterMessageId)))
       .orderBy(asc(messages.id));
-    return rows;
-  }
-
-  async getMessage(
-    tx: Transaction,
-    messageId: string,
-  ): Promise<(StoredMessage & { id: string }) | undefined> {
-    const rows = await tx
-      .select({ id: messages.id, role: messages.role, content: messages.content })
-      .from(messages)
-      .where(eq(messages.id, messageId))
-      .limit(1);
-    return rows[0];
   }
 
   async getLastMessageTime(tx: Transaction, conversationId: string): Promise<Date | undefined> {

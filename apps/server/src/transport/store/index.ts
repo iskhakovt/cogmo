@@ -111,7 +111,12 @@ export interface PriorClosedConversation {
   firstUserSnippet: string | null;
 }
 
-/** A `channels` row as `getAllChannels` and `getChannelByType` return it. */
+/**
+ * A `channels` row as `getAllChannels` returns it; `getChannelByType` omits
+ * `type`. `credentials` is opaque ciphertext in raw `jsonb()`, which Drizzle
+ * infers as `unknown`, so both reads cast it to the `JsonValue` the adapter
+ * wire format depends on.
+ */
 export interface ChannelRow {
   id: string;
   type: string;
@@ -515,6 +520,7 @@ function finishedOriginal(row: {
 
 export class DrizzleTransportStore implements TransportStore {
   async getAllChannels(tx: Transaction): Promise<ReadonlyArray<ChannelRow>> {
+    // Cast for `credentials`: see `ChannelRow`.
     return tx
       .select({
         id: channels.id,
@@ -539,9 +545,7 @@ export class DrizzleTransportStore implements TransportStore {
       .where(eq(channels.type, type))
       .orderBy(asc(channels.id))
       .limit(1);
-    // `credentials` is opaque ciphertext (raw `jsonb()`, no Zod schema),
-    // so Drizzle infers it as `unknown`; cast restores the JsonValue
-    // contract the adapter wire format depends on.
+    // Cast for `credentials`: see `ChannelRow`.
     return rows[0] as Omit<ChannelRow, "type"> | undefined;
   }
 

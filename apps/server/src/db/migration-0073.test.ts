@@ -1,12 +1,11 @@
 /**
- * Migrations 0073–0074 move `messages.role` to `message_role` and
- * `channels.identity_mode` to `channel_identity_mode`. 0073 drops
- * `uq_channels_fixed_type` before the type change and 0074 recreates it: an
- * `ALTER COLUMN TYPE` rebuilds the partial index from its stored predicate,
- * which compares the column with a `text` literal, and Postgres has no
- * enum = text operator. Runs the raw migration SQL against PGlite over rows
- * written in the pre-migration shape (the pushed schema's enums reverted to
- * `text` first).
+ * Migration 0073 moves `messages.role` to `message_role` and
+ * `channels.identity_mode` to `channel_identity_mode`, dropping
+ * `uq_channels_fixed_type` around the type change: `ALTER COLUMN TYPE`
+ * rebuilds a partial index from its stored predicate, which compares the
+ * column with a `text` literal, and Postgres has no enum = text operator.
+ * Runs the raw migration SQL against PGlite over rows written in the
+ * pre-migration shape (the pushed schema's enums reverted to `text` first).
  */
 
 import { readFile } from "node:fs/promises";
@@ -20,10 +19,9 @@ import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import { DrizzleTransportStore } from "../transport/store/index.js";
 import type { Database, Transactor } from "./index.js";
 
-const MIGRATIONS = await Promise.all(
-  ["0073_identity_mode_and_role_enums.sql", "0074_channels_fixed_type_unique_enum.sql"].map(
-    (file) => readFile(fileURLToPath(new URL(`../../migrations/${file}`, import.meta.url)), "utf8"),
-  ),
+const MIGRATION_SQL = await readFile(
+  fileURLToPath(new URL("../../migrations/0073_identity_mode_and_role_enums.sql", import.meta.url)),
+  "utf8",
 );
 
 const IdRowsSchema = z.object({ rows: z.array(z.object({ id: z.string() })) });
@@ -55,8 +53,8 @@ afterAll(async () => {
   await close();
 });
 
-async function applyMigrations(): Promise<void> {
-  const statements = MIGRATIONS.flatMap((file) => file.split("--> statement-breakpoint"))
+async function applyMigration(): Promise<void> {
+  const statements = MIGRATION_SQL.split("--> statement-breakpoint")
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
   for (const stmt of statements) {
@@ -97,7 +95,7 @@ async function valuesById(query: SQL): Promise<Record<string, string>> {
   return Object.fromEntries(rows.map((r) => [r.id, r.value]));
 }
 
-describe("migrations 0073–0074 — identity mode and role enums", () => {
+describe("migration 0073 — identity mode and role enums", () => {
   it("keeps every row's identity mode and role", async () => {
     const channels = {
       [await insertChannel("direct", "fixed")]: "fixed",
@@ -111,7 +109,7 @@ describe("migrations 0073–0074 — identity mode and role enums", () => {
       [await insertMessage(conversation, "assistant")]: "assistant",
     };
 
-    await applyMigrations();
+    await applyMigration();
 
     expect(await valuesById(sql`SELECT id, identity_mode::text AS value FROM channels`)).toEqual(
       channels,
@@ -122,7 +120,7 @@ describe("migrations 0073–0074 — identity mode and role enums", () => {
   it("then keys fixed channels, and only those, on their type", async () => {
     const direct = await insertChannel("direct", "fixed");
 
-    await applyMigrations();
+    await applyMigration();
 
     const recovered = await tx((trx) =>
       new DrizzleTransportStore().insertOrRecoverFixedChannel(trx, "direct"),
@@ -136,7 +134,7 @@ describe("migrations 0073–0074 — identity mode and role enums", () => {
 
   it("then refuses an identity mode or role outside its enum", async () => {
     const conversation = await seedConversation(tx);
-    await applyMigrations();
+    await applyMigration();
 
     await expect(insertChannel("web", "shared")).rejects.toMatchObject({
       cause: {

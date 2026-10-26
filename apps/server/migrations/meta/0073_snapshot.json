@@ -1,5 +1,5 @@
 {
-  "id": "8df9b1f2-e7ab-42e8-9e28-a1dcd437d2c3",
+  "id": "fa062aa9-5130-4e99-b42c-8908c1e4cae4",
   "prevId": "345b1af3-6335-4671-bfae-1587cb37cd8a",
   "version": "7",
   "dialect": "postgresql",
@@ -4178,7 +4178,24 @@
           "default": "now()"
         }
       },
-      "indexes": {},
+      "indexes": {
+        "uq_channels_fixed_type": {
+          "name": "uq_channels_fixed_type",
+          "columns": [
+            {
+              "expression": "type",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "identity_mode = 'fixed'::channel_identity_mode",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},

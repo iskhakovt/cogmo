@@ -66,10 +66,10 @@ export const channelIdentityMode = pgEnum("channel_identity_mode", ["fixed", "ma
 export type ChannelIdentityMode = (typeof channelIdentityMode.enumValues)[number];
 
 /**
- * Predicate of `uq_channels_fixed_type`. An `ON CONFLICT` inferring that
- * partial index repeats it as `targetWhere`.
+ * Predicate of `uq_channels_fixed_type`, spelled as Postgres stores it. An
+ * `ON CONFLICT` inferring that partial index repeats it as `targetWhere`.
  */
-export const FIXED_IDENTITY_CHANNEL = sql`identity_mode = 'fixed'`;
+export const FIXED_IDENTITY_CHANNEL = sql`identity_mode = 'fixed'::channel_identity_mode`;
 
 export const channels = pgTable(
   "channels",
