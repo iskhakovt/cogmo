@@ -2683,6 +2683,53 @@ describe("AnthropicProvider", () => {
       expect(mockCreate).toHaveBeenCalledTimes(2);
     });
 
+    it("sends a schema the grammar rejected straight on the tool path from then on", async () => {
+      const provider = createProvider();
+      const reply = toolReply("claude-opus-5-5", "extract_data", { name: "Alice", age: 30 });
+      mockCreate
+        .mockRejectedValueOnce(
+          apiError(400, "invalid_request_error", "Schema is too complex for compilation."),
+        )
+        .mockResolvedValueOnce(reply)
+        .mockResolvedValueOnce(reply)
+        .mockResolvedValueOnce(textReply("claude-opus-5-5", '{"rule":"Be brief"}'));
+      const request = {
+        model: "claude-opus-5-5",
+        system: "Extract structured data",
+        messages: [{ role: "user" as const, content: "Alice is 30" }],
+      };
+      const reordered: ResponseFormat = {
+        ...PERSON_FORMAT,
+        schema: {
+          additionalProperties: false,
+          required: ["name", "age"],
+          properties: { age: { type: "number" }, name: { minLength: 1, type: "string" } },
+          type: "object",
+          $schema: "https://json-schema.org/draft/2020-12/schema",
+        },
+      };
+
+      await provider.chat({ ...request, responseFormat: PERSON_FORMAT });
+      const again = await provider.chat({ ...request, responseFormat: reordered });
+      await provider.chat({
+        ...request,
+        responseFormat: {
+          type: "json_schema",
+          name: "rule",
+          schema: toObjectJsonSchema(z.object({ rule: z.string() })),
+        },
+      });
+
+      expect(mockCreate).toHaveBeenCalledTimes(4);
+      const repeat = expectDefined(mockCreate.mock.calls[2], "repeat")[0];
+      expect(repeat).not.toHaveProperty("output_config");
+      expect(repeat.tools).toEqual([expect.objectContaining({ name: "extract_data" })]);
+      expect(again.content).toEqual([{ type: "text", text: '{"name":"Alice","age":30}' }]);
+      expect(expectDefined(mockCreate.mock.calls[3], "other schema")[0]).toHaveProperty(
+        "output_config",
+      );
+    });
+
     it("restores the capitalization of a structured-output reply's enum and const values", async () => {
       const provider = createProvider();
       const correction = {
