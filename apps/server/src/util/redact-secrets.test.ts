@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { REDACTED_BOT_SEGMENT, redactSecretsInText } from "./redact-secrets.js";
+import {
+  REDACTED_BOT_SEGMENT,
+  redactSecretsInText,
+  truncationSafeLength,
+} from "./redact-secrets.js";
 
 /** Shaped like a Bot API token (numeric id, colon, URL-safe base64), but not one. */
 const FAKE_SECRET = "AAFake-TokenForTests_0123456789abcdef";
@@ -70,5 +74,154 @@ describe("redactSecretsInText", () => {
     ["text with no URL", "telegram polling loop failed"],
   ])("leaves %s untouched", (_label, input) => {
     expect(redactSecretsInText(input)).toBe(input);
+  });
+
+  const PAT = `ghp_${"a1B2".repeat(9)}`;
+
+  it.each([
+    [
+      "a user and password",
+      "fatal: unable to access 'https://x-access-token:s3cret@github.com/o/r.git/'",
+      "fatal: unable to access 'https://REDACTED@github.com/o/r.git/'",
+    ],
+    ["an ssh URL", "ssh://git:PW@host:22/o/r.git", "ssh://REDACTED@host:22/o/r.git"],
+    [
+      "a token as the user, with no password",
+      "https://glpat-abcdefghij0123456789@gitlab.com/o/r",
+      "https://REDACTED@gitlab.com/o/r",
+    ],
+    [
+      "a 40-hex token as the user",
+      "https://0123456789abcdef0123456789abcdef01234567@github.com/o/r",
+      "https://REDACTED@github.com/o/r",
+    ],
+    ["an empty user", "https://:SECRET@host/x", "https://REDACTED@host/x"],
+    [
+      "an @ inside the password, up to the last @ before the host",
+      "connect through http://operator:p@ss@proxy.internal:3128/ failed",
+      "connect through http://REDACTED@proxy.internal:3128/ failed",
+    ],
+    [
+      "punctuation a URL must percent-encode inside the password",
+      "connect through http://operator:it's<{|^}>`@proxy.internal:3128/ failed",
+      "connect through http://REDACTED@proxy.internal:3128/ failed",
+    ],
+    [
+      "a URL glued to a JSON-escaped newline",
+      String.raw`{"msg":"push failed\nhttps://u:p@h/x"}`,
+      String.raw`{"msg":"push failed\nhttps://REDACTED@h/x"}`,
+    ],
+    ["two URLs", "a://u:p@h1/ b://u:p@h2/", "a://REDACTED@h1/ b://REDACTED@h2/"],
+  ])("masks URL credentials: %s", (_label, input, expected) => {
+    expect(redactSecretsInText(input)).toBe(expected);
+  });
+
+  it.each(["ghp", "gho", "ghu", "ghs", "ghr"])("masks %s_ tokens", (prefix) => {
+    const token = `${prefix}_${"A1b2".repeat(9)}`;
+    expect(redactSecretsInText(`GH_TOKEN=${token} rest`)).toBe(`GH_TOKEN=${prefix}_REDACTED rest`);
+  });
+
+  it.each([
+    ["after an identifier", `MY_TOKEN_${PAT}`, "MY_TOKEN_ghp_REDACTED"],
+    ["after a digit", `1${PAT}`, "1ghp_REDACTED"],
+    ["after a JSON-escaped newline", String.raw`"a\n${PAT}"`, String.raw`"a\nghp_REDACTED"`],
+    ["after a colour code", `\u001b[31m${PAT}\u001b[0m`, "\u001b[31mghp_REDACTED\u001b[0m"],
+    [
+      "a fine-grained token",
+      `x github_pat_${"A".repeat(22)}_${"b".repeat(59)} y`,
+      "x github_pat_REDACTED y",
+    ],
+    [
+      "an Anthropic OAuth token",
+      `CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-${"Ab9_-".repeat(20)}`,
+      "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-REDACTED",
+    ],
+    ["an Anthropic API key", `key sk-ant-api03-${"x".repeat(90)}.`, "key sk-ant-REDACTED."],
+    [
+      "a classic token cut short of its checksum",
+      `candidate: ${PAT.slice(0, 4 + 30)}`,
+      "candidate: ghp_REDACTED",
+    ],
+  ])("masks a token %s", (_label, input, expected) => {
+    expect(redactSecretsInText(input)).toBe(expected);
+  });
+
+  /** An installation token in GitHub's app-id-and-JWT format. */
+  const INSTALLATION_TOKEN = [
+    "ghs_1234567_eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9",
+    "eyJpc3MiOiIxMjM0NTY3IiwiZXhwIjoxNzc3MjkxMjAwfQ",
+    "Qx7-_bL9".repeat(43),
+  ].join(".");
+
+  it.each([
+    ["alone", INSTALLATION_TOKEN, "ghs_REDACTED"],
+    ["after =", `GITHUB_TOKEN=${INSTALLATION_TOKEN} rest`, "GITHUB_TOKEN=ghs_REDACTED rest"],
+    [
+      "in JSON-escaped text",
+      String.raw`{"msg":"env\nGITHUB_TOKEN=${INSTALLATION_TOKEN}\n"}`,
+      String.raw`{"msg":"env\nGITHUB_TOKEN=ghs_REDACTED\n"}`,
+    ],
+    [
+      "after a colour code",
+      `\u001b[33m${INSTALLATION_TOKEN}\u001b[0m`,
+      "\u001b[33mghs_REDACTED\u001b[0m",
+    ],
+  ])("masks an app-id-and-JWT installation token %s", (_label, input, expected) => {
+    expect(redactSecretsInText(input)).toBe(expected);
+  });
+
+  it.each([
+    ["an scp-style remote", "To git@github.com:o/r.git"],
+    ["a URL with no userinfo", "remote: https://github.com/o/r/pull/new/cogmo/abc"],
+    ["a port after the host", "https://github.com:443/o/r"],
+    ["an address after a URL", "see https://github.com: denied for user@example.com"],
+    ["a URL then an address in a JSON line", '{"url":"https://github.com","user":"a@b.c"}'],
+    ["a push rejection", " ! [rejected]        cogmo/abc -> cogmo/abc (non-fast-forward)"],
+    ["a short token-like word", "ghp_short and sk-ant-short"],
+    ["a token-like word just under the length", `ghp_${"a1B2".repeat(4)}abc`],
+    ["a word ending in a token prefix", "highs_and_lows_of_the_quarterly_report"],
+    ["another such word", "laughs_per_minute_aggregate_counter_v2"],
+    ["a hyphenated word ending in sk", "task-ant-colony-simulation-config-file"],
+  ])("leaves %s untouched", (_label, input) => {
+    expect(redactSecretsInText(input)).toBe(input);
+  });
+
+  it("is idempotent", () => {
+    const once = redactSecretsInText(
+      `https://u:${PAT}@github.com ${PAT} sk-ant-api03-${"y".repeat(30)}`,
+    );
+    expect(redactSecretsInText(once)).toBe(once);
+  });
+
+  // A linear pass over 200k characters takes milliseconds, a quadratic one
+  // tens of seconds, so a 5 s bound holds under any test load. A regex runs
+  // synchronously, out of reach of the test timeout, so a larger input would
+  // only make a regression block its worker for longer before failing.
+  it.each([
+    ["a long word", "a".repeat(200_000)],
+    ["repeated scheme separators", "://x".repeat(50_000)],
+    ["repeated token prefixes", "ghp_".repeat(50_000)],
+    ["repeated key prefixes", "sk-ant-".repeat(30_000)],
+  ])("stays linear on %s", (_label, input) => {
+    const start = performance.now();
+    redactSecretsInText(input);
+    truncationSafeLength(input);
+    expect(performance.now() - start).toBeLessThan(5_000);
+  });
+});
+
+describe("truncationSafeLength", () => {
+  it.each([
+    ["the empty text", "", 0],
+    ["a last run with no secret start", 'tests ran\n{"report":[1,2,3]', 27],
+    ["a start only in an earlier run", "https://u:p@h/ ok\ntrailing", 26],
+    ["a start cut off before it is whole", "push to https:/", 15],
+    ["a URL the cut ran through", "push to https://deploy:Sup", 13],
+    ["a token the cut ran through", "env\nGH_TOKEN=ghp_a1B2", 13],
+    ["the earliest of several starts", "env\nX=sk-ant-oat01-ab://u", 6],
+    ["a last run after a tab", "a\tghs_123", 2],
+    ["a whole text that is one run", "/bot123:abc", 0],
+  ])("keeps all before a cut secret could begin: %s", (_label, text, expected) => {
+    expect(truncationSafeLength(text)).toBe(expected);
   });
 });

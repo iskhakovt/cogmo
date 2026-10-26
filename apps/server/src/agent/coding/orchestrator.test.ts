@@ -360,6 +360,8 @@ function makeDeps(
 // can share it.
 const fakeInngestShared = { send: vi.fn().mockResolvedValue(undefined) };
 const stepSendEvent = makeStepSendEvent(fakeInngestShared);
+/** Shaped like a classic GitHub PAT, but not one. */
+const PAT = `ghp_${"m1N2".repeat(9)}`;
 
 describe("runCodingTask", () => {
   it("happy path: plan streamed, session_id persisted, status → awaiting_approval (user trigger)", async () => {
@@ -840,9 +842,7 @@ describe("runCodingTask", () => {
     const repo = await seedRepo();
     const task = await seedTask(repo);
     const { sandbox, stopCalls } = fakeSandbox();
-    (sandbox.create as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
-      new Error("docker daemon down"),
-    );
+    vi.mocked(sandbox.create).mockRejectedValueOnce(new Error("docker daemon down"));
     const result = await runCodingTask({
       taskId: task.id,
       runId: "run-test",
@@ -860,9 +860,7 @@ describe("runCodingTask", () => {
     const repo = await seedRepo();
     const task = await seedTask(repo);
     const { sandbox } = fakeSandbox();
-    (sandbox.create as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
-      new Error("docker daemon down"),
-    );
+    vi.mocked(sandbox.create).mockRejectedValueOnce(new Error("docker daemon down"));
     const planStream = recordingPlanStream();
 
     const result = await runCodingTask({
@@ -879,6 +877,36 @@ describe("runCodingTask", () => {
 
     expect(result.status).toBe("failed");
     expect(planStream.failed).toEqual([expect.stringMatching(/docker daemon down/)]);
+  });
+
+  it("catch path: the chat message, return value, row and event carry one masked reason", async () => {
+    const repo = await seedRepo();
+    const task = await seedTask(repo);
+    const { sandbox } = fakeSandbox();
+    vi.mocked(sandbox.create).mockRejectedValueOnce(
+      new Error(`clone https://x-access-token:${PAT}@github.com/o/r failed`),
+    );
+    const planStream = recordingPlanStream();
+
+    const result = await runCodingTask({
+      taskId: task.id,
+      runId: "run-test",
+      deps: makeDeps({
+        sandbox,
+        backend: backendYielding([]),
+        openPlanStream: async () => planStream.handle,
+      }),
+      stepRun,
+      stepSendEvent,
+    });
+
+    const masked = "clone https://REDACTED@github.com/o/r failed";
+    expect(result).toEqual({ status: "failed", failureReason: masked });
+    expect(planStream.failed).toEqual([masked]);
+    expect((await tx((trx) => store.getTask(trx, task.id)))?.failureReason).toBe(masked);
+    expect(fakeInngestShared.send).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { taskId: task.id, reason: masked } }),
+    );
   });
 
   it("ensureImagePresent throws → status=failed, deleteByTaskId sweep still fires", async () => {
@@ -1399,6 +1427,39 @@ describe("runCodingExecute", () => {
     expect(stream.failed).toEqual([reason]);
   });
 
+  it("catch path: the chat message, return value, row and event carry one masked reason", async () => {
+    const repo = await seedRepo();
+    const { task } = await seedExecutableTask(repo);
+    const { sandbox } = fakeSandbox();
+    const stream = recordingExecuteStream();
+    const thrown = new Error(
+      `sandbox env dump: CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-${"z".repeat(40)}`,
+    );
+    const backend: CodingBackend = {
+      plan: () => throwingPlan("plan not exercised by this test"),
+      execute: () => ({
+        [Symbol.asyncIterator]: () => ({ next: () => Promise.reject(thrown) }),
+      }),
+    };
+
+    const result = await runCodingExecute({
+      taskId: task.id,
+      runId: "run-test",
+      deps: makeDeps({ sandbox, backend, openExecuteStream: async () => stream.handle }),
+      stepRun,
+      stepSendEvent,
+      inngest: fakeInngest,
+    });
+
+    const masked = "sandbox env dump: CLAUDE_CODE_OAUTH_TOKEN=sk-ant-REDACTED";
+    expect(result).toEqual({ status: "failed", failureReason: masked });
+    expect(stream.failed).toEqual([masked]);
+    expect((await tx((trx) => store.getTask(trx, task.id)))?.failureReason).toBe(masked);
+    expect(fakeInngestShared.send).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { taskId: task.id, reason: masked } }),
+    );
+  });
+
   it("stops on a Cancel during the session: stays cancelled, reclaims, no hand-off to verify", async () => {
     const repo = await seedRepo();
     const { task } = await seedExecutableTask(repo);
@@ -1907,9 +1968,7 @@ describe("runCodingExecute", () => {
     const repo = await seedRepo();
     const { task } = await seedExecutableTask(repo);
     const { sandbox } = fakeSandbox();
-    (sandbox.create as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
-      new Error("docker daemon down"),
-    );
+    vi.mocked(sandbox.create).mockRejectedValueOnce(new Error("docker daemon down"));
     const stream = recordingExecuteStream();
 
     const result = await runCodingExecute({

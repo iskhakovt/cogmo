@@ -215,6 +215,31 @@ describe("createCodingService", () => {
     expect(tasks[0]?.failureReason).toMatch(/inngest gateway unreachable/);
   });
 
+  it("masks credentials the send error quotes before writing the failure reason", async () => {
+    await seedRepo("cogmo");
+    const inngest = {
+      send: vi
+        .fn()
+        .mockRejectedValue(new Error("POST https://ingest:s3cret@inngest.internal/e failed")),
+    };
+    const service = createCodingService(
+      {
+        runInTx: tx,
+        codingStore: store,
+        inngest: inngest as unknown as Inngest,
+        sandboxAvailable: true,
+      },
+      conversationId,
+    );
+
+    await expect(service.delegate({ goal: "x".repeat(20), repoName: "cogmo" })).rejects.toThrow();
+
+    const tasks = await tx((trx) => store.listTasksForConversation(trx, conversationId));
+    expect(tasks[0]?.failureReason).toBe(
+      "inngest.send failed: POST https://REDACTED@inngest.internal/e failed",
+    );
+  });
+
   it("recovers the original task when a keyed submission is retried", async () => {
     // The crash window the key exists for: `delegate` runs inside the
     // tool's durable `step.run`, so a process death between this row

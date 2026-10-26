@@ -7,6 +7,7 @@ import type { Inngest } from "inngest";
 import type { Transactor } from "../../db/index.js";
 import { codingTaskFailed, inngestFunctionFailed } from "../../inngest/events.js";
 import { logger } from "../../logger.js";
+import { redactSecretsInText } from "../../util/redact-secrets.js";
 import type { CodingStore } from "./store/index.js";
 
 const log = logger.child({ component: "coding.reconcile-on-failure" });
@@ -57,7 +58,9 @@ export async function reconcileCodingTaskFailure(
     return { status: "skipped", reason: "missing_task_id" };
   }
   const taskId = payload.taskId;
-  const failureReason = `inngest run terminated abnormally (run_id ${payload.runId}, function_id ${payload.functionId}): ${payload.errorMessage}`;
+  const failureReason = redactSecretsInText(
+    `inngest run terminated abnormally (run_id ${payload.runId}, function_id ${payload.functionId}): ${payload.errorMessage}`,
+  );
 
   const result = await deps.runInTx((tx) =>
     deps.store.failTaskIfNonTerminal(tx, taskId, failureReason),
@@ -126,7 +129,9 @@ export function createCodingTaskReconcile(deps: CodingTaskReconcileDeps, inngest
         await step.sendEvent("emit-failed", {
           ...codingTaskFailed.create({
             taskId: result.taskId,
-            reason: result.failureReason,
+            // Masked again: a run resumed on a newer build replays the
+            // `reconcile` result an older one stored.
+            reason: redactSecretsInText(result.failureReason),
           }),
           id: `reconcile-${run_id}`,
         });

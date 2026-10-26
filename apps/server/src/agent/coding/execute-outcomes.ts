@@ -115,14 +115,15 @@ interface ExecuteFailureSteps {
   logSuffix: string;
 }
 
+/** Records the failure and tears the task down; resolves to the reason as recorded, masked. */
 export async function endExecuteFailed(
   run: CodingRun,
   deps: ExecuteOutcomeDeps,
   exit: ExecuteExitContext,
-  reason: string,
+  rawReason: string,
   steps: ExecuteFailureSteps,
-): Promise<void> {
-  await recordTaskFailed(run, deps, reason, steps.status);
+): Promise<string> {
+  const reason = await recordTaskFailed(run, deps, rawReason, steps.status);
   if (steps.teardownWorktree !== null) {
     await run.stepRun(steps.teardownWorktree, () =>
       safeTeardownWorktree({
@@ -147,6 +148,7 @@ export async function endExecuteFailed(
   await exit.stream.fail(reason).catch((streamErr: unknown) => {
     run.log.warn({ err: streamErr }, "execute stream fail notification failed");
   });
+  return reason;
 }
 
 /**

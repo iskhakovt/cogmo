@@ -106,6 +106,17 @@ describe("buildBody", () => {
     // Outer fence must be at least 5 backticks.
     expect(body).toMatch(/\n`````\n````\ndeep\n````\n`````\n/);
   });
+
+  it("masks credentials in the plan and the verify output", () => {
+    const pat = `ghp_${"g7H8".repeat(9)}`;
+    const body = buildBody({
+      plan: `1. export GH_TOKEN=${pat}`,
+      verifyOutput: `FAIL fetching https://x-access-token:${pat}@github.com/o/r`,
+    });
+    expect(body).not.toContain(pat);
+    expect(body).toContain("1. export GH_TOKEN=ghp_REDACTED");
+    expect(body).toContain("FAIL fetching https://REDACTED@github.com/o/r");
+  });
 });
 
 const BASE_PARAMS = {

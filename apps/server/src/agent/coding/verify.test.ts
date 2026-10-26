@@ -153,6 +153,62 @@ describe("runVerifyStreaming", () => {
     expect(xCount).toBe(OUTPUT_CAP_BYTES);
   });
 
+  it("masks credentials, including a token the cap cuts through", async () => {
+    const pat = `ghp_${"c3D4".repeat(9)}`;
+    // On the unmasked output, the cap falls 15 characters into the second token.
+    const head = `GH_TOKEN=${pat}\n${"x".repeat(OUTPUT_CAP_BYTES - 15 - (pat.length + 10))}`;
+    const container = fakeContainer({
+      stdoutChunks: [head, `${pat}\n`, "y".repeat(64)],
+      exitCode: 1,
+    });
+
+    const result = await runVerifyStreaming({ container, verifyCommand: "t", timeoutSeconds: 60 });
+
+    expect(result.output).toMatch(/output truncated at \d+ bytes/);
+    expect(result.output).toContain("GH_TOKEN=ghp_REDACTED\n");
+    expect(result.output).not.toContain(pat.slice(0, 15));
+  });
+
+  it("keeps none of a credential the capture stops inside, however masking shrinks what's before it", async () => {
+    // Masking shortens each key by ~90 characters; the password runs from
+    // just before the cap to well past anything the capture reads.
+    const keys = `ANTHROPIC_API_KEY=sk-ant-api03-${"k".repeat(90)}\n`.repeat(12);
+    const filler = `${"x".repeat(OUTPUT_CAP_BYTES - keys.length - 600)}\n`;
+    const remote = `remote: https://deploy:${"SuperSecretPassw0rd".repeat(400)}@github.com/o/r\n`;
+    const container = fakeContainer({ stdoutChunks: [keys, filler, remote], exitCode: 1 });
+
+    const result = await runVerifyStreaming({ container, verifyCommand: "t", timeoutSeconds: 60 });
+
+    expect(result.output).toMatch(/output truncated at \d+ bytes/);
+    expect(result.output).toContain("ANTHROPIC_API_KEY=sk-ant-REDACTED\n");
+    expect(result.output).not.toMatch(/SuperSecret|deploy:/);
+  });
+
+  /** A single-line JSON report: one whitespace-free run, with no place a secret could start. */
+  const report = (cases: number) =>
+    `{"report":[${Array.from({ length: cases }, (_, i) => `{"name":"case_${i}","ok":true}`).join(",")}]`;
+
+  it("keeps a long last line the capture stops inside when nothing in it could start a secret", async () => {
+    const output = `Running tests\n${report(1000)}}\n`;
+    const container = fakeContainer({ stdoutChunks: [output], exitCode: 1 });
+
+    const result = await runVerifyStreaming({ container, verifyCommand: "t", timeoutSeconds: 60 });
+
+    expect(result.output).toBe(
+      `${output.slice(0, OUTPUT_CAP_BYTES)}\n\n[output truncated at ${OUTPUT_CAP_BYTES} bytes]`,
+    );
+  });
+
+  it("keeps a last line up to where a secret the capture stops inside starts", async () => {
+    const before = `Running tests\n${report(200)},"remote":"https`;
+    const output = `${before}://deploy:${"SuperSecretPassw0rd".repeat(400)}@github.com/o/r"}\n`;
+    const container = fakeContainer({ stdoutChunks: [output], exitCode: 1 });
+
+    const result = await runVerifyStreaming({ container, verifyCommand: "t", timeoutSeconds: 60 });
+
+    expect(result.output).toBe(`${before}\n\n[output truncated at ${OUTPUT_CAP_BYTES} bytes]`);
+  });
+
   it("returns timedOut=true with TIMEOUT_EXIT_CODE when the wait exceeds the budget", async () => {
     const container = fakeContainer({
       stdoutChunks: ["working...\n"],

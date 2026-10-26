@@ -431,4 +431,53 @@ describe("runCommitAndPush", () => {
     // The cap-from-the-end preserves the most-recent trailing lines.
     expect(result.output).toContain("trailing diagnostic line");
   });
+
+  it("redacts URL credentials and access tokens from git output", async () => {
+    const pat = `ghp_${"a1".repeat(18)}`;
+    const { container } = fakeContainer({
+      status: { stdout: "" },
+      push: {
+        stderr: `fatal: unable to access 'https://x-access-token:${pat}@github.com/o/r.git/': The requested URL returned error: 500\nMY_TOKEN_${pat}\n`,
+        exitCode: 128,
+      },
+    });
+
+    const result = await runCommitAndPush({
+      container,
+      worktreeDir: "/workspace",
+      branch: "cogmo/abc",
+      commitMessage: "x",
+      signingKeyPath: "/tmp/cogmo-askpass/signing-key",
+      askpassEnv,
+      author,
+    });
+
+    expect(result.kind).toBe("failed");
+    expect(result.output).not.toContain(pat);
+    expect(result.output).toContain("'https://REDACTED@github.com/o/r.git/'");
+    expect(result.output).toContain("MY_TOKEN_ghp_REDACTED");
+  });
+
+  it("redacts a token the 8 KiB tail cut runs through", async () => {
+    const pat = `ghp_${"b2".repeat(18)}`;
+    // The kept tail starts 10 characters into the token.
+    const tail = `\n${"y".repeat(8 * 1024 - (pat.length - 10) - 1)}`;
+    const { container } = fakeContainer({
+      status: { stdout: "" },
+      push: { stderr: `${"x".repeat(1024)}\n${pat}${tail}`, exitCode: 1 },
+    });
+
+    const result = await runCommitAndPush({
+      container,
+      worktreeDir: "/workspace",
+      branch: "cogmo/abc",
+      commitMessage: "x",
+      signingKeyPath: "/tmp/cogmo-askpass/signing-key",
+      askpassEnv,
+      author,
+    });
+
+    expect(result.output).toContain("[cogmo: output truncated to last 8 KiB]");
+    expect(result.output).not.toContain(pat.slice(10));
+  });
 });

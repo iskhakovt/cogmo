@@ -2,8 +2,8 @@
  * Post-hoc verify runner — slice 4.0e.
  *
  * Executes `bash -lc <verify_command>` inside the task container exactly
- * once, captures the combined stdout+stderr for storage (truncated to
- * `OUTPUT_CAP_BYTES`), and returns the exit code + wall time.
+ * once, captures the combined stdout+stderr for storage (secrets masked,
+ * truncated to `OUTPUT_CAP_BYTES`), and returns the exit code + wall time.
  *
  * No retry loop. Iterating on failure was the CLI's job during execute
  * per `design/coding-delegation.md → Self-verify clause`; this step exists
@@ -23,9 +23,18 @@ import {
   execFailureError,
   type SandboxSession,
 } from "../../sandbox/index.js";
+import { redactSecretsInText, truncationSafeLength } from "../../util/redact-secrets.js";
 
 /** Cap for the captured verify output (8 KiB). */
 export const OUTPUT_CAP_BYTES = 8 * 1024;
+
+/**
+ * How far the capture reads past the cap. A credential that ends within it is
+ * masked whole even when the cap cuts through it, and the slack lets the kept
+ * text still fill the cap after masking shortens it and `maskCapture` drops a
+ * secret the capture stopped inside.
+ */
+const MASK_LOOKAHEAD_BYTES = 1024;
 
 /** Synthetic exit code returned when the verify exceeds its wall-clock budget. */
 export const TIMEOUT_EXIT_CODE = 124;
@@ -43,7 +52,7 @@ export interface VerifyResult {
   ok: boolean;
   /** `TIMEOUT_EXIT_CODE` when timed out. */
   exitCode: number;
-  /** Combined stdout+stderr, truncated at `OUTPUT_CAP_BYTES`. */
+  /** Combined stdout+stderr, secrets masked, truncated at `OUTPUT_CAP_BYTES`. */
   output: string;
   /** Wall-clock duration in milliseconds. */
   durationMs: number;
@@ -85,20 +94,16 @@ async function captureVerify(
   const stdoutDecoder = new TextDecoder("utf8");
   const stderrDecoder = new TextDecoder("utf8");
   let captured = "";
-  let truncated = false;
+  let dropped = false;
 
   function record(text: string): void {
-    if (truncated) return;
-    const remaining = OUTPUT_CAP_BYTES - captured.length;
-    if (remaining <= 0) {
-      truncated = true;
-      return;
-    }
+    if (dropped) return;
+    const remaining = OUTPUT_CAP_BYTES + MASK_LOOKAHEAD_BYTES - captured.length;
     if (text.length <= remaining) {
       captured += text;
     } else {
       captured += text.slice(0, remaining);
-      truncated = true;
+      dropped = true;
     }
   }
 
@@ -115,10 +120,11 @@ async function captureVerify(
   await pumped;
 
   const durationMs = Math.round(performance.now() - start);
+  const { kept, truncated } = maskCapture(captured, dropped);
   if (exited.isErr()) {
     if (exited.error.kind !== "timed_out") throw execFailureError(exited.error);
     const note = `\n\n[verify timed out after ${timeoutSeconds}s]`;
-    const output = appendNote(captured, note, truncated);
+    const output = appendNote(kept, note, truncated);
     return { ok: false, exitCode: TIMEOUT_EXIT_CODE, output, durationMs, timedOut: true };
   }
 
@@ -126,9 +132,23 @@ async function captureVerify(
   return {
     ok: exitCode === 0,
     exitCode,
-    output: truncated ? `${captured}\n\n[output truncated at ${OUTPUT_CAP_BYTES} bytes]` : captured,
+    output: truncated ? `${kept}\n\n[output truncated at ${OUTPUT_CAP_BYTES} bytes]` : kept,
     durationMs,
     timedOut: false,
+  };
+}
+
+/**
+ * The capture masked, then cut to the cap. A capture that dropped output may
+ * stop inside a secret, of any length, that masking can't recognise there;
+ * `truncationSafeLength` drops it whole before masking.
+ */
+function maskCapture(captured: string, dropped: boolean): { kept: string; truncated: boolean } {
+  const complete = dropped ? captured.slice(0, truncationSafeLength(captured)) : captured;
+  const masked = redactSecretsInText(complete);
+  return {
+    kept: masked.slice(0, OUTPUT_CAP_BYTES),
+    truncated: dropped || masked.length > OUTPUT_CAP_BYTES,
   };
 }
 
