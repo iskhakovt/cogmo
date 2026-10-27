@@ -964,12 +964,10 @@ outputs:
   });
 
   describe("deny", () => {
-    it("denies a deploy by id (idempotent on missing/already-resolved id)", async () => {
+    it("reports an unknown id as not_found", async () => {
       const runner = await makeRunner();
-      // No real pending deploy exists — denyDeploy is idempotent.
-      await expect(
-        runner.denyDeploy({ pendingId: "00000000-0000-0000-0000-000000000000" }),
-      ).resolves.toBeUndefined();
+      const pendingId = "00000000-0000-0000-0000-000000000000";
+      expect(await runner.denyDeploy({ pendingId })).toEqual(err({ kind: "not_found", pendingId }));
     });
   });
 
@@ -1941,7 +1939,9 @@ effects:
       expect(beforeDeny?.disabled).toBe(true);
       expect(beforeDeny?.gitSha).toBe(sha);
 
-      await runner.denyDeploy({ pendingId: reg.pendingId, reason: "not now" });
+      expect(await runner.denyDeploy({ pendingId: reg.pendingId, reason: "not now" })).toEqual(
+        ok(undefined),
+      );
 
       // Row stays at sha, disabled=true; deploy resolved to denied. The
       // bare repo's feature branch is untouched (deleteRef only runs in

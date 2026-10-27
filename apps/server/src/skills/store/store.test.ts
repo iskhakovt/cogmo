@@ -1,7 +1,8 @@
 import { eq, sql } from "drizzle-orm";
+import type { PgTable } from "drizzle-orm/pg-core";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { profiles, users } from "../../agent/store/schema.js";
-import type { Database, Transactor } from "../../db/index.js";
+import type { Database, Transaction, Transactor } from "../../db/index.js";
 import { assertKind, expectDefined } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import type { ClassifierLog, SkillInputs } from "../types.js";
@@ -1239,4 +1240,169 @@ describe("DrizzleSkillStore", () => {
       expect(await tx((trx) => store.getSkillById(trx, row.id))).toBeDefined();
     });
   });
+
+  describe("deploy transitions", () => {
+    const APPROVE_LOG: ClassifierLog = { ...STUB_LOG, risk_tier: "approve" };
+    const noFs = async () => {};
+    const UNKNOWN_ID = "019d0000-0000-7000-8000-0000000000ff";
+
+    function register(overrides: Partial<ExecuteRegisterParams> = {}) {
+      return tx((trx) =>
+        store.executeRegister(trx, {
+          name: "echo",
+          tier: "wasm",
+          riskTier: "notify",
+          effects: [],
+          schedule: null,
+          scheduleNextRunAt: null,
+          branchTipSha: SHA,
+          lockfileHash: null,
+          inputs: INPUTS_SCHEMA,
+          outputs: null,
+          classifierLog: STUB_LOG,
+          runAs: owner,
+          applyFilesystem: noFs,
+          ...overrides,
+        }),
+      );
+    }
+
+    /** A live `echo` at `SHA` with an approve-tier upgrade to `SHA_NEW` pending. */
+    async function pendingUpgrade(): Promise<{ pendingId: string; skill: SkillRow }> {
+      await register();
+      const pending = await register({
+        branchTipSha: SHA_NEW,
+        riskTier: "approve",
+        classifierLog: APPROVE_LOG,
+      });
+      assertKind(pending, "pending_approval");
+      return { pendingId: pending.deploy.id, skill: pending.skill };
+    }
+
+    function approve(trx: Transaction, pendingId: string) {
+      return store.executeApprove(trx, {
+        pendingId,
+        approvedBy: null,
+        tier: "wasm",
+        riskTier: "approve",
+        effects: [],
+        schedule: null,
+        scheduleNextRunAt: null,
+        lockfileHash: null,
+        inputs: INPUTS_SCHEMA,
+        outputs: null,
+        runAs: owner,
+        applyFilesystem: noFs,
+      });
+    }
+
+    async function deployStatus(id: string) {
+      return expectDefined(await tx((trx) => store.getDeployById(trx, id)), "deploy");
+    }
+
+    it("deny resolves a pending deploy and leaves the skills row alone", async () => {
+      const { pendingId, skill } = await pendingUpgrade();
+      const outcome = await tx((trx) => store.denyPendingDeploy(trx, { pendingId }));
+      expect(outcome).toEqual({ kind: "transitioned" });
+      const deploy = await deployStatus(pendingId);
+      expect(deploy.status).toBe("denied");
+      expect(deploy.resolvedAt).toBeInstanceOf(Date);
+      expect(await tx((trx) => store.getSkillById(trx, skill.id))).toEqual(skill);
+    });
+
+    it("deny of an unknown id is not_found", async () => {
+      const outcome = await tx((trx) => store.denyPendingDeploy(trx, { pendingId: UNKNOWN_ID }));
+      expect(outcome).toEqual({ kind: "not_found" });
+    });
+
+    it("deny of an approved deploy is not_pending with the row's status", async () => {
+      const { pendingId } = await pendingUpgrade();
+      assertKind(await tx((trx) => approve(trx, pendingId)), "live");
+      const outcome = await tx((trx) => store.denyPendingDeploy(trx, { pendingId }));
+      expect(outcome).toEqual({ kind: "not_pending", status: "live" });
+      expect((await deployStatus(pendingId)).status).toBe("live");
+    });
+
+    it("deny of a denied deploy is not_pending, and the row keeps its first resolution", async () => {
+      const { pendingId } = await pendingUpgrade();
+      await tx((trx) => store.denyPendingDeploy(trx, { pendingId }));
+      const first = await deployStatus(pendingId);
+      const outcome = await tx((trx) => store.denyPendingDeploy(trx, { pendingId }));
+      expect(outcome).toEqual({ kind: "not_pending", status: "denied" });
+      expect(await deployStatus(pendingId)).toEqual(first);
+    });
+
+    it("approve of a denied deploy is rejected and leaves the skills row alone", async () => {
+      const { pendingId, skill } = await pendingUpgrade();
+      await tx((trx) => store.denyPendingDeploy(trx, { pendingId }));
+      const outcome = await tx((trx) => approve(trx, pendingId));
+      assertKind(outcome, "rejected");
+      expect(outcome.reason).toBe("deploy_not_pending: status is 'denied'");
+      expect(await tx((trx) => store.getSkillById(trx, skill.id))).toEqual(skill);
+    });
+
+    it("approve whose deploy is resolved between its reads and its guarded write commits nothing", async () => {
+      // The second tap of a race: this approve read the row as pending, but a
+      // deny landed before its conditional UPDATE. The hook denies the row on
+      // the same connection right before that statement executes, which is
+      // where a concurrent resolution surfaces to a transaction that cannot
+      // see it any earlier.
+      const { pendingId, skill } = await pendingUpgrade();
+      const outcome = await tx((trx) =>
+        approve(
+          hookBeforeUpdate(trx, skillDeploys, async () => {
+            await trx
+              .update(skillDeploys)
+              .set({ status: "denied", resolvedAt: new Date() })
+              .where(eq(skillDeploys.id, pendingId));
+          }),
+          pendingId,
+        ),
+      );
+      assertKind(outcome, "rejected");
+      expect(await tx((trx) => store.getSkillById(trx, skill.id))).toEqual(skill);
+      expect((await deployStatus(pendingId)).status).toBe("denied");
+      expect(outcome.reason).toBe("deploy_not_pending: status is 'denied'");
+    });
+  });
 });
+
+/**
+ * `trx` with one seam: `beforeUpdate` runs, on the same connection, right
+ * before each UPDATE on `table` executes. Everything else passes through.
+ * Stands in for a concurrent transaction committing between a use case's
+ * reads and its guarded write, which one PGlite connection cannot do.
+ */
+function hookBeforeUpdate(
+  trx: Transaction,
+  table: PgTable,
+  beforeUpdate: () => Promise<void>,
+): Transaction {
+  const hookExecute = <Q extends object>(query: Q): Q =>
+    new Proxy(query, {
+      get(target, prop, receiver) {
+        const value: unknown = Reflect.get(target, prop, receiver);
+        if (prop !== "execute" || typeof value !== "function") return value;
+        return async (...args: unknown[]) => {
+          await beforeUpdate();
+          return value.apply(target, args);
+        };
+      },
+    });
+  return new Proxy(trx, {
+    get(target, prop, receiver) {
+      if (prop !== "update") return Reflect.get(target, prop, receiver);
+      return (updated: PgTable) => {
+        const builder = target.update(updated);
+        if (updated !== table) return builder;
+        return new Proxy(builder, {
+          get(b, p, r) {
+            const value: unknown = Reflect.get(b, p, r);
+            if (p !== "set" || typeof value !== "function") return value;
+            return (values: unknown) => hookExecute(value.call(b, values));
+          },
+        });
+      };
+    },
+  });
+}

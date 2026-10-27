@@ -635,7 +635,7 @@ interface SkillRunner {
     signal?: AbortSignal;
   }): Promise<RegisterResult>;
   approveDeploy(opts: { pendingId: string; origin: SkillDeployOrigin }): Promise<RegisterResult>;
-  denyDeploy(opts: { pendingId: string; reason?: string }): Promise<void>;
+  denyDeploy(opts: { pendingId: string; reason?: string }): Promise<Result<void, DenyDeployError>>;
   rollback(opts: { name: string; toGitSha: string; origin: SkillDeployOrigin }): Promise<RegisterResult>;
   deregister(opts: { name: string }): Promise<DeregisterResult>;
   enable(opts: { name: string; origin: SkillDeployOrigin }): Promise<EnableResult>;
@@ -671,6 +671,11 @@ type EnableResult =
   | { kind: "already_enabled"; name: string; gitSha: string }
   | { kind: "rejected"; name: string; reason: "not_found" | "no_live_deploy" };
 
+// Why a deny resolved nothing; `status` is what the row holds instead.
+type DenyDeployError =
+  | { kind: "not_found"; pendingId: string }
+  | { kind: "not_pending"; pendingId: string; status: SkillDeployStatus };
+
 // Why `invoke` declined to run; nothing executed. A skill run that fails is
 // not a rejection: it is a `SkillRunResult` with `status: "error"`.
 type SkillInvokeRejection =
@@ -680,6 +685,33 @@ type SkillInvokeRejection =
   | { kind: "sandbox_unavailable"; name: string }
   | { kind: "inflight"; name: string; runId: string };  // see Exactly-once invocation
 ```
+
+### Deploy lifecycle `[proposed]`
+
+The unit is a `skill_deploys` row, keyed by its id; its `status` is the `skill_deploy_status` enum. `approved` is in the enum and no transition writes it: an approval puts the deploy live in the same transaction. While a row is pending, the `skills` row projects `main`, not the pending deploy: a live skill stays live through the approval window and a first deploy waits disabled.
+
+```
+register (auto, notify) ──────────────────────────────▶ live
+register (approve) ──▶ pending_approval ──approve──▶ live
+                                        └──deny────▶ denied
+rollback ─────────────────────────────────────────────▶ rolled_back   (a new row; the one it supersedes keeps `live`)
+```
+
+| Transition | Guard | Writes, in order, in one transaction | Outcome |
+|-|-|-|-|
+| `register` → `live` | advisory lock on the name; no `pending_approval` row for the skill; `main` fast-forwards to the tip | upsert `skills` at the tip; insert the row `live`; `update-ref main` | `live`, `no_op`, `rejected`; `main_moved` rolls back |
+| `register` → `pending_approval` | the same two checks | insert `skills` disabled for a first deploy, else leave it; insert the row | `pending_approval` |
+| `approve`: `pending_approval` → `live` | advisory lock; `UPDATE skill_deploys SET status = 'live' … WHERE id = $1 AND status = 'pending_approval'`, the transaction's first write | the row (`approved_by`, `resolved_at`); then `skills` at the deploy's sha and manifest; then `update-ref main` | `live`; `rejected` with `deploy_not_found`, `skill_not_found`, or `deploy_not_pending: status is '<status>'` after a zero-row match, nothing written; `main_moved` rolls back |
+| `deny`: `pending_approval` → `denied` | `UPDATE … WHERE id = $1 AND status = 'pending_approval'`; a zero-row match re-reads the row | the row (`resolved_at`); `skills` and `main` untouched | `transitioned`; `not_found`; `not_pending` with the row's status |
+| `rollback` → `rolled_back` | advisory lock; `main` unchanged since the pre-transaction read | `skills` at the target sha; insert the row; `update-ref main` | `live`, `no_op`, `rejected`; `main_moved` rolls back |
+
+Every outcome is a value its caller matches exhaustively: `denyDeploy` returns `Result<void, DenyDeployError>`, `cogmo skills deny` exits 1 naming the miss, and a keyboard tap toasts `skill_deploy_not_found` or `skill_deploy_not_pending`. Nothing reports a resolution that did not happen.
+
+| Failure mode | State left | Why it is safe |
+|-|-|-|
+| `deny` of an unknown id, or of a row already `live`, `denied` or `rolled_back` (a second tap, a stale CLI call) | nothing written | the conditional UPDATE matches no row; the caller gets `not_found`, or `not_pending` with the status the row holds |
+| `approve` racing a deny or another approve of the same row (two taps; a tap and the CLI) | one resolution wins and commits; the loser writes nothing | under REPEATABLE READ the loser's UPDATE matches zero rows, or raises `40001` and the transactor's retry matches zero rows; the `skills` projection follows the match, so `skills.git_sha` never rests at a sha whose deploy is not `live` |
+| `main` moves between a deploy's checks and its `update-ref` (another skill's deploy landed) | nothing committed | `advanceMain` throws inside the transaction, which rolls back the row and the projection; the caller gets `main_moved` |
 
 **Approval-gate guard on `enable`.** Re-enabling refuses (`reason: "no_live_deploy"`) when the skill's current `gitSha` has no `skill_deploys` row with `status = 'live'`. Without the guard, a denied first deploy (`skills.disabled = true`, `skill_deploys.status = 'denied'` at the rejected sha) could be smuggled past the approval gate via `/disable foo` then `/enable foo` — flipping `disabled = false` would activate code that never passed human review. Rolled-back skills still pass because the prior live deploy row remains in the append-only history.
 
@@ -1324,7 +1356,7 @@ Public interface (canonical — see [Where the classifier runs](#where-the-class
 interface SkillRunner {
   register(opts: { branch: string; origin: SkillDeployOrigin }): Promise<RegisterResult>;
   approveDeploy(opts: { pendingId: string; origin: SkillDeployOrigin }): Promise<RegisterResult>;
-  denyDeploy(opts: { pendingId: string; reason?: string }): Promise<void>;
+  denyDeploy(opts: { pendingId: string; reason?: string }): Promise<Result<void, DenyDeployError>>;
   rollback(opts: { name: string; toGitSha: string; origin: SkillDeployOrigin }): Promise<RegisterResult>;
   deregister(opts: { name: string }): Promise<DeregisterResult>;
   enable(opts: { name: string; origin: SkillDeployOrigin }): Promise<EnableResult>;

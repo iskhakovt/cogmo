@@ -41,8 +41,11 @@ export interface SkillsNamespace {
   ): Promise<Result<{ pendingId: string; skillName: string; gitSha: string }, TransportError>>;
   /**
    * Deny a pending-approval deploy. Resolves the row to `denied`; the
-   * skills row stays at its existing state (live skill stays live, never-
-   * activated skill stays disabled). Idempotent.
+   * skills row stays as it is (a live skill stays live, a never-activated
+   * skill stays disabled) and main does not move. An unknown id is
+   * `skill_deploy_not_found`; a row already resolved is
+   * `skill_deploy_not_pending` with its status, so a second tap reads as
+   * already resolved rather than as a denial.
    */
   denyDeploy(
     pendingId: string,
@@ -128,29 +131,27 @@ export function createSkills(
       });
     },
     async denyDeploy(pendingId, tapperPlatformHandle, reason) {
-      if (!skillRunner || !skillStore) return err({ code: "skills_disabled" as const });
+      if (!skillRunner) return err({ code: "skills_disabled" as const });
       const identityCheck = await checkSkillsTapper(tapperPlatformHandle);
       if (identityCheck.isErr()) return err(identityCheck.error);
 
-      const deploy = await runInTx((tx) => skillStore.getDeployById(tx, pendingId));
-      if (!deploy) return err({ code: "skill_deploy_not_found" as const, pendingId });
-      // denyDeploy is idempotent on already-resolved deploys (the store
-      // method skips the update + returns silently). We still surface a
-      // distinct error code for clarity at this layer — a tap on an
-      // already-denied keyboard should toast "already resolved", not
-      // "denied successfully".
-      if (deploy.status !== "pending_approval") {
-        return err({
-          code: "skill_deploy_not_pending" as const,
-          pendingId,
-          status: deploy.status,
-        });
-      }
-      await skillRunner.denyDeploy({
+      const denied = await skillRunner.denyDeploy({
         pendingId,
         ...(reason !== undefined && { reason }),
       });
-      return ok({ pendingId });
+      return denied
+        .map(() => ({ pendingId }))
+        .mapErr((e) =>
+          match(e)
+            .returnType<TransportError>()
+            .with({ kind: "not_found" }, () => ({ code: "skill_deploy_not_found", pendingId }))
+            .with({ kind: "not_pending" }, ({ status }) => ({
+              code: "skill_deploy_not_pending",
+              pendingId,
+              status,
+            }))
+            .exhaustive(),
+        );
     },
 
     async list(platformUserHandle) {

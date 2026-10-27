@@ -247,7 +247,7 @@ describe("skillsCli", () => {
 
     it("`deny <pendingId> reason words` joins reason and exits 0", async () => {
       const { io, out } = captureIo();
-      const denyDeploy = vi.fn().mockResolvedValue(undefined);
+      const denyDeploy = vi.fn().mockResolvedValue(ok(undefined));
       const code = await run(
         ["deny", "deploy-1", "looks", "sketchy"],
         depsFor(makeRunner({ denyDeploy })),
@@ -259,6 +259,30 @@ describe("skillsCli", () => {
       });
       expect(code).toBe(0);
       expect(out.join("\n")).toContain('"reason": "looks sketchy"');
+    });
+
+    it("`deny` of an unknown id exits 1 naming the miss, and prints no denial", async () => {
+      const { io, out, err: stderr } = captureIo();
+      const denyDeploy = vi
+        .fn()
+        .mockResolvedValue(err({ kind: "not_found", pendingId: "deploy-404" }));
+      const code = await run(["deny", "deploy-404"], depsFor(makeRunner({ denyDeploy })), io);
+      expect(code).toBe(1);
+      expect(stderr.join("\n")).toMatch(/deny failed: deploy not found: deploy-404/);
+      expect(out).toEqual([]);
+    });
+
+    it("`deny` of a resolved deploy exits 1 naming its status", async () => {
+      const { io, out, err: stderr } = captureIo();
+      const denyDeploy = vi
+        .fn()
+        .mockResolvedValue(err({ kind: "not_pending", pendingId: "deploy-1", status: "live" }));
+      const code = await run(["deny", "deploy-1"], depsFor(makeRunner({ denyDeploy })), io);
+      expect(code).toBe(1);
+      expect(stderr.join("\n")).toMatch(
+        /deny failed: deploy deploy-1 is not pending: status is 'live'/,
+      );
+      expect(out).toEqual([]);
     });
 
     it("`rollback <name> <sha>` calls runner.rollback", async () => {
@@ -349,7 +373,7 @@ describe("skillsCli", () => {
 
   it("`deny` without reason words emits reason=null in the JSON", async () => {
     const { io, out } = captureIo();
-    const denyDeploy = vi.fn().mockResolvedValue(undefined);
+    const denyDeploy = vi.fn().mockResolvedValue(ok(undefined));
     const code = await run(["deny", "p-1"], depsFor(makeRunner({ denyDeploy })), io);
     expect(code).toBe(0);
     expect(denyDeploy).toHaveBeenCalledWith({ pendingId: "p-1" });

@@ -12,6 +12,7 @@ import {
   subcommands,
   type Type,
 } from "cmd-ts";
+import { describeDenyDeployError } from "../skills/deploy/approve.js";
 import { describeInvokeRejection } from "../skills/invoke-rejection.js";
 import type { SkillRunAs } from "../skills/run-as.js";
 import type { RegisterResult, SkillDeployOrigin, SkillRunner } from "../skills/runner.js";
@@ -186,7 +187,14 @@ async function denyDeploy(
 ): Promise<number> {
   const { pendingId } = args;
   const reason = args.reason.length > 0 ? args.reason.join(" ") : undefined;
-  await deps.runner.denyDeploy({ pendingId, ...(reason !== undefined && { reason }) });
+  const denied = await deps.runner.denyDeploy({
+    pendingId,
+    ...(reason !== undefined && { reason }),
+  });
+  if (denied.isErr()) {
+    io.err(`deny failed: ${describeDenyDeployError(denied.error)}`);
+    return 1;
+  }
   io.out(JSON.stringify({ pendingId, status: "denied", reason: reason ?? null }, null, 2));
   return 0;
 }

@@ -1,6 +1,9 @@
+import { err, ok, type Result } from "neverthrow";
+import { match } from "ts-pattern";
 import { logger } from "../../logger.js";
 import { getMainSha, isAncestor } from "../git-ops.js";
 import { readSkillSource } from "../skill-source.js";
+import type { SkillDeployStatus } from "../store/index.js";
 import { advanceMain, runDeployTx } from "./advance-main.js";
 import { type DeployDeps, requireRepoPath } from "./deploy-deps.js";
 import { readManifestLockfile } from "./lockfile-check.js";
@@ -122,20 +125,45 @@ export async function approveDeploy(
   return rejectedResult(deploy.gitSha, result.kind === "rejected" ? result.reason : result.kind);
 }
 
-/** Resolve a pending deploy as denied; main does not move. */
+/**
+ * Why a deny resolved nothing. `not_pending` carries the status the row
+ * holds, so a second tap or a late CLI call reads as "already resolved".
+ */
+export type DenyDeployError =
+  | { kind: "not_found"; pendingId: string }
+  | { kind: "not_pending"; pendingId: string; status: SkillDeployStatus };
+
+/** One line naming the miss, for the CLI and logs. */
+export function describeDenyDeployError(error: DenyDeployError): string {
+  return match(error)
+    .with({ kind: "not_found" }, ({ pendingId }) => `deploy not found: ${pendingId}`)
+    .with(
+      { kind: "not_pending" },
+      ({ pendingId, status }) => `deploy ${pendingId} is not pending: status is '${status}'`,
+    )
+    .exhaustive();
+}
+
+/**
+ * Resolve a pending deploy as denied; main does not move. The reason has no
+ * column on the row, so the log line of the transition is its record.
+ */
 export async function denyDeploy(
   deps: Pick<DeployDeps, "store" | "runInTx">,
   opts: { pendingId: string; reason?: string },
-): Promise<void> {
-  // Log the reason here — denyPendingDeploy drops it (no `denied_reason`
-  // column) and the CLI accepts a multi-word reason that would otherwise
-  // vanish without a trace. The audit trail is the log line until a real
-  // consumer needs to query it.
-  log.info({ pendingId: opts.pendingId, reason: opts.reason ?? null }, "denying skill deploy");
-  await deps.runInTx((tx) =>
-    deps.store.denyPendingDeploy(tx, {
-      pendingId: opts.pendingId,
-      reason: opts.reason ?? null,
-    }),
+): Promise<Result<void, DenyDeployError>> {
+  const transition = await deps.runInTx((tx) =>
+    deps.store.denyPendingDeploy(tx, { pendingId: opts.pendingId }),
   );
+  return match(transition)
+    .returnType<Result<void, DenyDeployError>>()
+    .with({ kind: "transitioned" }, () => {
+      log.info({ pendingId: opts.pendingId, reason: opts.reason ?? null }, "skill deploy denied");
+      return ok(undefined);
+    })
+    .with({ kind: "not_found" }, () => err({ kind: "not_found", pendingId: opts.pendingId }))
+    .with({ kind: "not_pending" }, ({ status }) =>
+      err({ kind: "not_pending", pendingId: opts.pendingId, status }),
+    )
+    .exhaustive();
 }
