@@ -5,9 +5,11 @@ import { describe, expect, it, vi } from "vitest";
 // the SSE handler is unit-testable without a real socket (the disconnect race is
 // otherwise non-deterministic over the wire).
 import { mock } from "vitest-mock-extended";
+import { logger } from "../logger.js";
 import { expectDefined } from "../test/assertions.js";
 import { mockTransportDeep } from "../test/factories.js";
 import { WebStreamRegistry } from "../transport/adapters/web/stream-registry.js";
+import type { CloseSessionOutcome } from "../transport/store/index.js";
 import { type ChatRouteDeps, handleChat, SessionCloses, serializeFrame } from "./chat.js";
 
 const OWNER = "web-owner";
@@ -133,9 +135,28 @@ describe("handleChat — stream route", () => {
 });
 
 describe("SessionCloses", () => {
+  it("treats a session the stream open already replaced as closed", async () => {
+    const transport = mockTransportDeep({
+      closeSession: vi.fn().mockResolvedValue({ kind: "stale", status: "closed" }),
+    });
+    const debug = vi.spyOn(logger, "debug").mockImplementation(() => undefined);
+
+    try {
+      const closes = new SessionCloses();
+      closes.start(transport, "session-a");
+      await closes.settled();
+      expect(debug).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: "session-a", kind: "stale" }),
+        expect.stringContaining("already closed"),
+      );
+    } finally {
+      debug.mockRestore();
+    }
+  });
+
   it("settles once every close in flight has, a failed one included", async () => {
-    const first = Promise.withResolvers<void>();
-    const second = Promise.withResolvers<void>();
+    const first = Promise.withResolvers<CloseSessionOutcome>();
+    const second = Promise.withResolvers<CloseSessionOutcome>();
     const transport = mockTransportDeep({
       closeSession: vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise),
     });
@@ -147,7 +168,7 @@ describe("SessionCloses", () => {
     const settling = closes.settled().then(() => {
       settled = true;
     });
-    first.resolve();
+    first.resolve({ kind: "closed" });
     await new Promise((resolve) => setImmediate(resolve));
     expect(settled).toBe(false);
     second.reject(new Error("db gone"));

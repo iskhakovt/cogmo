@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { match } from "ts-pattern";
 import { z } from "zod";
 import { logger } from "../logger.js";
 import type {
@@ -57,6 +58,15 @@ export class SessionCloses {
   start(transport: Transport, sessionId: string): void {
     const closing: Promise<void> = transport
       .closeSession(sessionId)
+      .then((outcome) =>
+        match(outcome)
+          .with({ kind: "closed" }, () => undefined)
+          // The stream open that replaced this session closed it already.
+          .with({ kind: "stale" }, { kind: "not_found" }, ({ kind }) =>
+            logger.debug({ sessionId, kind }, "web chat: session was already closed"),
+          )
+          .exhaustive(),
+      )
       .catch((err: unknown) =>
         logger.debug({ err, sessionId }, "web chat: closeSession on disconnect failed"),
       )
@@ -181,6 +191,18 @@ async function handleCreate(
   } catch (err) {
     sendBodyError(res, err);
     return;
+  }
+  // The tab may still hold the session of the conversation it is leaving:
+  // `createConversation` joins an active session rather than superseding it,
+  // so close it first or the tab gets its current conversation back.
+  const current = await deps.transport.resolveSession(tab);
+  if (current) {
+    match(await deps.transport.closeSession(current.id))
+      .with({ kind: "closed" }, () => undefined)
+      .with({ kind: "stale" }, { kind: "not_found" }, ({ kind }) =>
+        logger.debug({ tab, sessionId: current.id, kind }, "web chat: tab session already closed"),
+      )
+      .exhaustive();
   }
   const result = await deps.transport.createConversation(tab, deps.ownerHandle, {
     isPrivate: true,

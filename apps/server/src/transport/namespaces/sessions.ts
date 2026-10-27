@@ -1,34 +1,43 @@
 import type { Inngest } from "inngest";
 import { err, ok, type Result } from "neverthrow";
+import { match } from "ts-pattern";
+import type { Transaction } from "../../db/index.js";
 import type { inboundArrived as InboundArrivedEvent } from "../../inngest/events.js";
 import { logger } from "../../logger.js";
 import type { AttachmentStore } from "../attachment-store.js";
 import type { InboundContent } from "../content.js";
-import type { Session } from "../store/index.js";
+import type { CloseSessionOutcome, Session } from "../store/index.js";
 import type { TransportError } from "../transport-error.js";
 import type { TransportContext } from "./context.js";
 
 /** The session lifecycle and inbound emission — the chat path every adapter drives. */
 export interface TransportSessions {
+  /**
+   * The active session on `platformAddress`, or null. When the session's
+   * conversation has been quiet past the idle window, closes it and returns
+   * null — the lookup, the idle check and the close share one transaction.
+   */
   resolveSession(platformAddress: string): Promise<Session | null>;
 
   /**
-   * Create a new conversation and the channel session that points at it.
+   * Open a fresh conversation on `platformAddress`, or join the active
+   * session already there. The address holds at most one active session, so
+   * two opens racing on it converge on one conversation: the second finds
+   * the first's row (on its retry, when the first committed after its
+   * snapshot) and returns it instead of inserting. A caller that means to
+   * supersede the active session closes it first.
    *
-   * Returns the new session augmented with `profileName` — the name of the
-   * profile actually used, resolved inside the same transaction as the
-   * conversation insert. Callers that surface "started with profile X" use
-   * this directly instead of doing a follow-up `getCurrent` lookup, which
-   * would be racy against a concurrent `createConversation` on the same
-   * `(channelId, platformAddress)` swapping the active session out from
-   * under them.
+   * Returns the session augmented with `profileName` — the name of the
+   * profile of the conversation it points at, read in the same transaction,
+   * so a caller that surfaces "started with profile X" names the right one.
    */
   createConversation(
     platformAddress: string,
     platformUserHandle: string,
     opts: { isPrivate: boolean; profileId?: string },
   ): Promise<Result<Session & { profileName: string }, TransportError>>;
-  closeSession(sessionId: string): Promise<void>;
+  /** Close a session; `stale` when something else closed it first. */
+  closeSession(sessionId: string): Promise<CloseSessionOutcome>;
   emit(
     sessionId: string,
     content: InboundContent,
@@ -37,7 +46,7 @@ export interface TransportSessions {
   /** Upload an attachment (image, file) as raw bytes to storage. Returns the storage path. */
   uploadAttachment(data: Buffer, mediaType: string): Promise<string>;
 
-  /** Resume an existing conversation by alias or id. Closes any active session on this address, then opens a new one pointing at the resolved conversation. Rejects non-private conversations and conversations not owned by the caller. */
+  /** Resume an existing conversation by alias or id. Swaps the address's active session for a new one pointing at the resolved conversation. Rejects non-private conversations and conversations not owned by the caller. */
   resumeConversation(
     platformAddress: string,
     platformUserHandle: string,
@@ -67,29 +76,53 @@ export function createSessions(
     idleTimeoutMs,
     sessionReceive,
   } = deps;
+  /**
+   * The session plus the name of its conversation's profile. Foreign keys
+   * from a session row this transaction can see guarantee both rows, so a
+   * miss is an invariant violation.
+   */
+  async function withProfileName(
+    tx: Transaction,
+    session: Session,
+  ): Promise<Session & { profileName: string }> {
+    const conv = await agentStore.getConversation(tx, session.conversationId);
+    const profile = conv ? await agentStore.getProfile(tx, conv.profileId) : null;
+    if (!profile) {
+      throw new Error(`session ${session.id}: its conversation's profile row is missing`);
+    }
+    return { ...session, profileName: profile.name };
+  }
+
   return {
     async resolveSession(platformAddress) {
-      const session = await runInTx((tx) =>
-        transportStore.resolveSession(tx, channelId, platformAddress),
-      );
-      if (!session) return null;
+      return runInTx(async (tx) => {
+        const session = await transportStore.resolveSession(tx, channelId, platformAddress);
+        if (!session) return null;
+        if (idleTimeoutMs <= 0) return session;
 
-      // Safety net: expire stale sessions missed by idle timer
-      if (idleTimeoutMs > 0) {
-        const lastActivity = await runInTx((tx) =>
-          agentStore.getLastMessageTime(tx, session.conversationId),
-        );
-        if (lastActivity && Date.now() - lastActivity.getTime() > idleTimeoutMs) {
-          await runInTx((tx) => transportStore.closeSession(tx, session.id));
-          logger.warn(
-            { sessionId: session.id, conversationId: session.conversationId },
-            "session idle-expired via safety net (idle timer may have failed)",
-          );
-          return null;
+        // Lazy rotation: a conversation quiet past the idle window ends here,
+        // and the inbound that found it starts a fresh one. The close is
+        // conditional; two inbounds reading the same stale session both end
+        // up with null, whichever one's close lands.
+        const lastActivity = await agentStore.getLastMessageTime(tx, session.conversationId);
+        if (!lastActivity || Date.now() - lastActivity.getTime() <= idleTimeoutMs) {
+          return session;
         }
-      }
-
-      return session;
+        const outcome = await transportStore.closeSession(tx, session.id);
+        const fields = { sessionId: session.id, conversationId: session.conversationId };
+        match(outcome)
+          .with({ kind: "closed" }, () =>
+            logger.warn(fields, "session idle-expired via safety net (idle timer may have failed)"),
+          )
+          .with({ kind: "stale" }, ({ status }) =>
+            logger.info({ ...fields, status }, "idle session was already closed"),
+          )
+          .with({ kind: "not_found" }, () =>
+            logger.warn(fields, "idle session vanished between lookup and close"),
+          )
+          .exhaustive();
+        return null;
+      });
     },
 
     async createConversation(platformAddress, platformUserHandle, opts) {
@@ -101,6 +134,11 @@ export function createSessions(
         if (!identity) {
           return err({ code: "identity_rejected" as const });
         }
+        // Join the address's active session when there is one. On the retry
+        // after a concurrent open's `40001`, this read sees that open's row,
+        // so the retry inserts nothing of its own.
+        const active = await transportStore.resolveSession(tx, channelId, platformAddress);
+        if (active) return ok(await withProfileName(tx, active));
         // Fallback chain for the profile used by the new conversation:
         //   explicit `opts.profileId` > per-chat default > global default.
         // The per-chat default is set via `/profile default <name>` and
@@ -133,13 +171,26 @@ export function createSessions(
           status: "active" as const,
           receive: sessionReceive,
         };
-        const { id } = await transportStore.createSession(tx, params);
-        return ok({ id, ...params, profileName: profile.name });
+        const created = await transportStore.createSession(tx, params);
+        return match(created)
+          .with({ kind: "new" }, ({ id }) => ok({ id, ...params, profileName: profile.name }))
+          .with({ kind: "recovered" }, async () => {
+            // The address's active row is one the read above does not
+            // return — past its `expires_at`, so unreachable. The fresh
+            // conversation supersedes it: the `expire` transition.
+            const swapped = await transportStore.swapSession(tx, channelId, platformAddress, {
+              conversationId: conv.id,
+              status: "active",
+              receive: sessionReceive,
+            });
+            return ok({ id: swapped.id, ...params, profileName: profile.name });
+          })
+          .exhaustive();
       });
     },
 
     async closeSession(sessionId) {
-      await runInTx((tx) => transportStore.closeSession(tx, sessionId));
+      return runInTx((tx) => transportStore.closeSession(tx, sessionId));
     },
 
     async resumeConversation(platformAddress, platformUserHandle, target) {
@@ -173,16 +224,22 @@ export function createSessions(
           });
         }
 
-        // Atomic close-old + open-new in one transaction, with the "what's active" lookup
-        // happening INSIDE the tx so no concurrent createSession / swapSession on this address
-        // can slip between resolve and swap. Failure of the insert rolls back the close.
+        // Close-old + open-new in one transaction; a failed insert rolls back
+        // the close. A concurrent open or swap on the address that commits
+        // after this snapshot raises `40001` here, and the retry closes it.
         const newParams = {
           conversationId,
           status: "active" as const,
           receive: sessionReceive,
         };
-        const { id } = await transportStore.swapSession(tx, channelId, platformAddress, newParams);
-        return ok({ id, channelId, platformAddress, ...newParams });
+        const swapped = await transportStore.swapSession(tx, channelId, platformAddress, newParams);
+        if (swapped.closedIds.length > 0) {
+          logger.info(
+            { platformAddress, sessionId: swapped.id, closedSessionIds: swapped.closedIds },
+            "resume closed the address's active session",
+          );
+        }
+        return ok({ id: swapped.id, channelId, platformAddress, ...newParams });
       });
     },
 

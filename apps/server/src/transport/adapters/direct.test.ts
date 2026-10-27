@@ -1,5 +1,6 @@
 import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
+import { logger } from "../../logger.js";
 import { asBatchAdapter, expectDefined } from "../../test/assertions.js";
 import {
   makeStepRun,
@@ -85,6 +86,29 @@ describe("direct adapter", () => {
 
       expect(transport.closeSession).toHaveBeenCalledWith("session-1");
       expect(result).toEqual({ status: "new_conversation" });
+    });
+
+    it("handles /new whose close finds the session already closed", async () => {
+      const transport = makeTransport({
+        closeSession: vi.fn().mockResolvedValue({ kind: "stale", status: "closed" }),
+      });
+      const info = vi.spyOn(logger, "info").mockImplementation(() => undefined);
+
+      try {
+        const result = await handleDirectInbound(
+          { transport },
+          { ...baseEvent.data, text: "/new" },
+          makeStepRun(),
+        );
+
+        expect(result).toEqual({ status: "new_conversation" });
+        expect(info).toHaveBeenCalledWith(
+          expect.objectContaining({ kind: "stale" }),
+          expect.stringContaining("already closed"),
+        );
+      } finally {
+        info.mockRestore();
+      }
     });
 
     it("completes as rejected, emitting nothing, when the sender has no identity", async () => {

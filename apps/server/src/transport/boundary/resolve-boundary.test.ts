@@ -39,8 +39,10 @@ function makeDeps(
       .fn()
       .mockResolvedValueOnce({ id: "inbound-1" })
       .mockResolvedValueOnce({ id: "inbound-2" }),
-    swapSession: vi.fn().mockResolvedValue({ id: "session-resumed" }),
-    createSession: vi.fn().mockResolvedValue({ id: "session-fresh" }),
+    swapSession: vi.fn().mockResolvedValue({ id: "session-resumed", closedIds: [] }),
+    createSession: vi
+      .fn()
+      .mockResolvedValue({ kind: "new", id: "session-fresh", conversationId: "conv-1" }),
     deleteBoundaryPending: vi.fn().mockResolvedValue(undefined),
     getChatDefaultProfile: vi.fn().mockResolvedValue(undefined),
     ...overrides.transportOverrides,
@@ -173,6 +175,48 @@ describe("resolveBoundary", () => {
       expect.anything(),
       expect.objectContaining({
         channelSessionId: "session-fresh",
+        conversationId: "conv-fresh",
+      }),
+    );
+  });
+
+  it("fresh: supersedes a session that opened on the held address during the hold", async () => {
+    // The keyed insert recovers that session's row; the fresh conversation
+    // must not drain its inbounds into another conversation's session.
+    const { deps, transportStore } = makeDeps({
+      transportOverrides: {
+        createSession: vi.fn().mockResolvedValue({
+          kind: "recovered",
+          id: "session-fire",
+          conversationId: "conv-fire",
+        }),
+        swapSession: vi
+          .fn()
+          .mockResolvedValue({ id: "session-superseding", closedIds: ["session-fire"] }),
+      },
+    });
+
+    const res = await resolveBoundary(deps, {
+      boundaryId: "b1",
+      choice: { kind: "fresh" },
+      reason: "waiter_timeout",
+    });
+
+    expect(res._unsafeUnwrap()).toMatchObject({
+      sessionId: "session-superseding",
+      conversationId: "conv-fresh",
+    });
+    expect(transportStore.swapSession).toHaveBeenCalledWith(
+      expect.anything(),
+      "ch-1",
+      "chat-X",
+      expect.objectContaining({ conversationId: "conv-fresh" }),
+    );
+    expect(transportStore.persistInbound).toHaveBeenNthCalledWith(
+      1,
+      expect.anything(),
+      expect.objectContaining({
+        channelSessionId: "session-superseding",
         conversationId: "conv-fresh",
       }),
     );

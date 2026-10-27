@@ -519,6 +519,20 @@
       "when": 1793014399928,
       "tag": "0073_identity_mode_and_role_enums",
       "breakpoints": true
+    },
+    {
+      "idx": 74,
+      "version": "7",
+      "when": 1793145055539,
+      "tag": "0074_sessions_close_duplicate_active",
+      "breakpoints": true
+    },
+    {
+      "idx": 75,
+      "version": "7",
+      "when": 1793145253436,
+      "tag": "0075_sessions_one_active_per_address",
+      "breakpoints": true
     }
   ]
 }

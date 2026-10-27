@@ -27,6 +27,12 @@ export const channelSessionStatus = pgEnum("channel_session_status", ["active", 
 export type ChannelSessionStatus = (typeof channelSessionStatus.enumValues)[number];
 
 /**
+ * Predicate of `uq_sessions_active_address`, spelled as Postgres stores it. An
+ * `ON CONFLICT` inferring that partial index repeats it as `targetWhere`.
+ */
+export const ACTIVE_SESSION = sql`status = 'active'::channel_session_status`;
+
+/**
  * `channel_sessions.receive` — which responses this session gets.
  * `routed` is normal source/lastInbound routing; `all` is Web-UI-style
  * "watch everything" (private only); `none` is input-only (muted).
@@ -115,6 +121,11 @@ export const channelSessions = pgTable(
     createdAt: ts(),
   },
   (t) => [
+    // One active session per address; key of the keyed insert in
+    // `createSession` / `swapSession`. See design/transport/sessions.md → Lifecycle.
+    uniqueIndex("uq_sessions_active_address")
+      .on(t.channelId, t.platformAddress)
+      .where(ACTIVE_SESSION),
     index("idx_sessions_channel_address").on(t.channelId, t.platformAddress, t.id),
     index("idx_sessions_receive_all")
       .on(t.conversationId)

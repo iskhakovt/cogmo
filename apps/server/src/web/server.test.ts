@@ -12,6 +12,7 @@ import { expectDefined, resolvesWithin } from "../test/assertions.js";
 import { mockTransportDeep } from "../test/factories.js";
 import { createTestDatabase } from "../test/pglite.js";
 import { WebStreamRegistry } from "../transport/adapters/web/stream-registry.js";
+import type { CloseSessionOutcome } from "../transport/store/index.js";
 import type { webRouter } from "./rpc/router.js";
 import { createWebServer, startWebServer, type WebServer } from "./server.js";
 import { hashSessionToken } from "./session/token.js";
@@ -335,6 +336,22 @@ describe("web chat routes", () => {
     expect(transport.closeSession).toHaveBeenCalledWith("session-1");
   });
 
+  it("closes the tab's live session before creating, so the create does not join it", async () => {
+    await start({ resolveSession: vi.fn().mockResolvedValue(session) });
+    const cookie = await login();
+    const res = await fetch(`${chatBase}/api/chat?tab=tab-1`, {
+      method: "POST",
+      headers: jsonHeaders({ cookie }),
+      body: "{}",
+    });
+    expect(res.status).toBe(200);
+    expect(transport.closeSession).toHaveBeenNthCalledWith(1, "sess-1");
+    expect(vi.mocked(transport.closeSession).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(transport.createConversation).mock.invocationCallOrder[0] ?? -1,
+    );
+    expect(transport.closeSession).toHaveBeenNthCalledWith(2, "session-1");
+  });
+
   it("emits a user turn to the resolved session (202)", async () => {
     await start({ resolveSession: vi.fn().mockResolvedValue(session) });
     const cookie = await login();
@@ -465,7 +482,7 @@ describe("web chat routes", () => {
   });
 
   it("close() waits for the session closes of the streams it ends", async () => {
-    const sessionClosed = Promise.withResolvers<void>();
+    const sessionClosed = Promise.withResolvers<CloseSessionOutcome>();
     await start({ closeSession: vi.fn(() => sessionClosed.promise) });
     const cookie = await login();
     const res = await fetch(`${chatBase}/api/chat/conv-1/stream?tab=tab-1`, {
@@ -483,7 +500,7 @@ describe("web chat routes", () => {
 
     expect(transport.closeSession).toHaveBeenCalledWith("session-resumed");
     expect(closed).toBe(false);
-    sessionClosed.resolve();
+    sessionClosed.resolve({ kind: "closed" });
     await resolvesWithin(closing, 2_500, "close");
   });
 

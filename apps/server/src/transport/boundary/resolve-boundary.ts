@@ -1,5 +1,6 @@
 import type { Inngest } from "inngest";
 import { err, ok, type Result } from "neverthrow";
+import { match } from "ts-pattern";
 import type { AgentStore } from "../../agent/store/index.js";
 import type { Transactor } from "../../db/index.js";
 import {
@@ -132,7 +133,20 @@ export async function resolveBoundary(
         status: "active",
         receive: "routed",
       });
-      sessionId = created.id;
+      sessionId = await match(created)
+        .with({ kind: "new" }, async ({ id }) => id)
+        .with({ kind: "recovered" }, async () => {
+          // A session opened on the held address during the hold — a
+          // scheduled fire rotating the user's reachable channels onto its
+          // conversation. The user chose fresh: supersede it.
+          const swapped = await transportStore.swapSession(tx, channelId, row.platformAddress, {
+            conversationId: conv.id,
+            status: "active",
+            receive: "routed",
+          });
+          return swapped.id;
+        })
+        .exhaustive();
       conversationId = conv.id;
     }
 

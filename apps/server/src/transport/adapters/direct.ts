@@ -1,3 +1,4 @@
+import { match } from "ts-pattern";
 import type { z } from "zod";
 import { directInbound, directOutbound } from "../../inngest/events.js";
 import type { StepRun } from "../../inngest/index.js";
@@ -43,10 +44,14 @@ export async function handleDirectInbound(
   if (text === "/new") {
     await stepRun("close-session", async () => {
       const session = await transport.resolveSession(platformAddress);
-      if (session) {
-        await transport.closeSession(session.id);
-        logger.info({ platformAddress }, "direct: session closed");
-      }
+      if (!session) return;
+      const outcome = await transport.closeSession(session.id);
+      match(outcome)
+        .with({ kind: "closed" }, () => logger.info({ platformAddress }, "direct: session closed"))
+        .with({ kind: "stale" }, { kind: "not_found" }, ({ kind }) =>
+          logger.info({ platformAddress, kind }, "direct: session already closed"),
+        )
+        .exhaustive();
     });
     return { status: "new_conversation" };
   }

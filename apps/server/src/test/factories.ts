@@ -317,9 +317,11 @@ export function mockTransportStore(overrides?: Partial<TransportStore>): Transpo
     createChannel: vi.fn().mockResolvedValue({ id: "ch-1" }),
     insertOrRecoverFixedChannel: vi.fn().mockResolvedValue({ kind: "new", id: "ch-1" }),
     resolveSession: vi.fn().mockResolvedValue(null),
-    createSession: vi.fn().mockResolvedValue({ id: "session-1" }),
-    closeSession: vi.fn().mockResolvedValue(undefined),
-    swapSession: vi.fn().mockResolvedValue({ id: "session-swapped" }),
+    createSession: vi
+      .fn()
+      .mockResolvedValue({ kind: "new", id: "session-1", conversationId: "conv-1" }),
+    closeSession: vi.fn().mockResolvedValue({ kind: "closed" }),
+    swapSession: vi.fn().mockResolvedValue({ id: "session-swapped", closedIds: [] }),
     getSession: vi.fn().mockResolvedValue(null),
     persistInbound: vi.fn().mockResolvedValue({ id: "inbound-1" }),
     getUnbatchedInbound: vi
@@ -422,7 +424,7 @@ export function mockTransport(overrides?: Partial<Transport>): Transport {
         profileName: "assistant",
       }),
     ),
-    closeSession: vi.fn().mockResolvedValue(undefined),
+    closeSession: vi.fn().mockResolvedValue({ kind: "closed" }),
     resumeConversation: vi.fn().mockResolvedValue(
       ok({
         id: "session-resumed",

@@ -23,7 +23,7 @@ How messages flow from platform to agent and back, across all channels.
 | `users` | id | Conversation owners. |
 | `user_identities` | userId, channelId, platformHandle | Maps platform handle on a channel to internal UUID. IS the allowlist. |
 | `profiles` | name, model | Org-scoped — shared across users. |
-| `channel_sessions` | id, channelId, platformAddress, conversationId, status, receive, expiresAt | Maps platform address to conversation. `status`: `active` \| `closed`. `receive`: `none` \| `routed` \| `all`. See [sessions.md](sessions.md). |
+| `channel_sessions` | id, channelId, platformAddress, conversationId, status, receive, expiresAt | Maps platform address to conversation. `status`: `active` \| `closed`, at most one `active` row per `(channelId, platformAddress)` (`uq_sessions_active_address`). `receive`: `none` \| `routed` \| `all`. See [sessions.md](sessions.md). |
 | `conversations` | id, userId, profileId, isPrivate | Agent-side. No reference to channels. `isPrivate` controls memory scope. |
 | `messages` | id, conversationId, role, content, profileId, model, lastInboundMessageId | Immutable. `lastInboundMessageId` on all messages for attribution. `profileId` + `model` stamp which profile+model was active — required because a conversation's profile can change and a profile's model can change, so neither alone identifies what produced a given turn. |
 | `inbound_messages` | id, channelSessionId, conversationId, content, platformTs | Immutable. `platformTs` = when user sent it (from platform API). `conversationId` denormalized from channel_sessions for query performance. User derived from `conversation.userId`. |

@@ -1,5 +1,7 @@
 /** `/new`, `/sessions`, `/resume`, `/name`, `/end`: which conversation this chat is in. */
 
+import { match } from "ts-pattern";
+import { logger } from "../../../../logger.js";
 import type { Transport } from "../../../transport.js";
 import { renderSessionsList } from "../sessions-ux.js";
 import { ambiguityMessage, looksLikeUuid, resolveProfileByName } from "./lookup.js";
@@ -143,8 +145,18 @@ export async function handleEnd(transport: Transport, ctx: TelegramCommandContex
     await ctx.reply("No active conversation.");
     return;
   }
-  await transport.closeSession(session.id);
-  await ctx.reply("Conversation ended. Send a message to start a new one.");
+  const outcome = await transport.closeSession(session.id);
+  // A close that lost to a swap or rotation in between is not an error: the
+  // conversation the user saw is over either way.
+  const reply = match(outcome)
+    .with({ kind: "closed" }, () => "Conversation ended. Send a message to start a new one.")
+    .with(
+      { kind: "stale" },
+      { kind: "not_found" },
+      () => "That conversation had already ended. Send a message to start a new one.",
+    )
+    .exhaustive();
+  await ctx.reply(reply);
 }
 
 /** Callback-query handler for inline-keyboard taps from /sessions. */
@@ -213,8 +225,18 @@ export async function handleNew(transport: Transport, ctx: TelegramCommandContex
     return;
   }
 
+  // Supersede the chat's active session. Whichever outcome the close has,
+  // the address is free of it; the create below joins anything that opened
+  // on the chat in between rather than starting a second conversation.
   const existing = await transport.resolveSession(addr);
-  if (existing) await transport.closeSession(existing.id);
+  if (existing) {
+    match(await transport.closeSession(existing.id))
+      .with({ kind: "closed" }, () => undefined)
+      .with({ kind: "stale" }, { kind: "not_found" }, ({ kind }) =>
+        logger.info({ addr, sessionId: existing.id, kind }, "/new: session was already closed"),
+      )
+      .exhaustive();
+  }
   const result = await transport.createConversation(
     addr,
     handle,

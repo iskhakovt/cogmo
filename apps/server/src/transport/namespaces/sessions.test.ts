@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Transactor } from "../../db/index.js";
 import type { inboundArrived } from "../../inngest/events.js";
+import { logger } from "../../logger.js";
 import { mockAgentStore, mockTransportStore } from "../../test/factories.js";
 import type { AttachmentStore } from "../attachment-store.js";
 import { createSessions } from "./sessions.js";
@@ -13,6 +14,7 @@ function setup(overrides?: {
   transportStore?: ReturnType<typeof mockTransportStore>;
   agentStore?: ReturnType<typeof mockAgentStore>;
   idleTimeoutMs?: number;
+  runInTx?: Transactor;
 }) {
   const transportStore = overrides?.transportStore ?? mockTransportStore();
   const agentStore = overrides?.agentStore ?? mockAgentStore();
@@ -24,7 +26,7 @@ function setup(overrides?: {
 
   const sessions = createSessions({
     channelId: "ch-1",
-    runInTx: fakeRunInTx,
+    runInTx: overrides?.runInTx ?? fakeRunInTx,
     transportStore,
     agentStore,
     defaultProfileId: "profile-1",
@@ -179,6 +181,63 @@ describe("createConversation", () => {
     expect(result._unsafeUnwrap()).toMatchObject({ profileName: "doc-mode" });
   });
 
+  it("joins the address's active session instead of opening a second conversation", async () => {
+    const activeSession = {
+      id: "session-live",
+      channelId: "ch-1",
+      platformAddress: "addr-1",
+      conversationId: "conv-live",
+      status: "active" as const,
+      receive: "routed" as const,
+    };
+    const ts = mockTransportStore({
+      resolveSession: vi.fn().mockResolvedValue(activeSession),
+    });
+    const agentStore = mockAgentStore({
+      getConversation: vi.fn().mockResolvedValue({
+        id: "conv-live",
+        userId: "user-1",
+        profileId: "p-live",
+        isPrivate: true,
+      }),
+      getProfile: vi.fn().mockResolvedValue({ id: "p-live", name: "live-profile" }),
+    });
+    const { sessions } = setup({ transportStore: ts, agentStore });
+
+    const result = await sessions.createConversation("addr-1", "handle-1", { isPrivate: true });
+
+    expect(result._unsafeUnwrap()).toEqual({ ...activeSession, profileName: "live-profile" });
+    expect(agentStore.createConversation).not.toHaveBeenCalled();
+    expect(ts.createSession).not.toHaveBeenCalled();
+    expect(agentStore.getProfile).toHaveBeenCalledWith(expect.anything(), "p-live");
+  });
+
+  it("supersedes an expired active row when the keyed insert recovers one", async () => {
+    // `resolveSession` skips a row past its `expires_at`, the unique index does
+    // not: the insert recovers it, and the fresh conversation swaps it out.
+    const ts = mockTransportStore({
+      createSession: vi.fn().mockResolvedValue({
+        kind: "recovered",
+        id: "session-expired",
+        conversationId: "conv-old",
+      }),
+    });
+    const { sessions } = setup({ transportStore: ts });
+
+    const result = await sessions.createConversation("addr-1", "handle-1", { isPrivate: true });
+
+    expect(ts.swapSession).toHaveBeenCalledWith(expect.anything(), "ch-1", "addr-1", {
+      conversationId: "conv-1",
+      status: "active",
+      receive: "routed",
+    });
+    expect(result._unsafeUnwrap()).toMatchObject({
+      id: "session-swapped",
+      conversationId: "conv-1",
+      profileName: "assistant",
+    });
+  });
+
   it("returns profile_not_found when getProfile resolves to null after insert", async () => {
     // Defensive: agentStore.createConversation just succeeded with this id
     // under the same FK, so getProfile returning null would mean a torn tx
@@ -193,10 +252,14 @@ describe("createConversation", () => {
 });
 
 describe("closeSession", () => {
-  it("delegates to transportStore", async () => {
-    const { sessions, transportStore } = setup();
-    await sessions.closeSession("session-1");
+  it("delegates to transportStore and returns its outcome", async () => {
+    const transportStore = mockTransportStore({
+      closeSession: vi.fn().mockResolvedValue({ kind: "stale", status: "closed" }),
+    });
+    const { sessions } = setup({ transportStore });
+    const outcome = await sessions.closeSession("session-1");
     expect(transportStore.closeSession).toHaveBeenCalledWith(expect.anything(), "session-1");
+    expect(outcome).toEqual({ kind: "stale", status: "closed" });
   });
 });
 
@@ -268,6 +331,60 @@ describe("idle timeout", () => {
     const result = await sessions.resolveSession("addr-1");
     expect(result).toBeNull();
     expect(ts.closeSession).toHaveBeenCalledWith(expect.anything(), "session-1");
+  });
+
+  it("runs the lookup, the idle check and the close in one transaction", async () => {
+    const staleTime = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    const ts = mockTransportStore({
+      resolveSession: vi.fn().mockResolvedValue(activeSession),
+    });
+    const as = mockAgentStore({
+      getLastMessageTime: vi.fn().mockResolvedValue(staleTime),
+    });
+    let transactions = 0;
+    const countingRunInTx: Transactor = (cb) => {
+      transactions += 1;
+      return cb(FAKE_TX);
+    };
+
+    const { sessions } = setup({
+      transportStore: ts,
+      agentStore: as,
+      idleTimeoutMs: 60 * 60 * 1000,
+      runInTx: countingRunInTx,
+    });
+
+    expect(await sessions.resolveSession("addr-1")).toBeNull();
+    expect(ts.closeSession).toHaveBeenCalledWith(expect.anything(), "session-1");
+    expect(transactions).toBe(1);
+  });
+
+  it("returns null and logs when the stale session's close lost to another closer", async () => {
+    const staleTime = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    const ts = mockTransportStore({
+      resolveSession: vi.fn().mockResolvedValue(activeSession),
+      closeSession: vi.fn().mockResolvedValue({ kind: "stale", status: "closed" }),
+    });
+    const as = mockAgentStore({
+      getLastMessageTime: vi.fn().mockResolvedValue(staleTime),
+    });
+    const info = vi.spyOn(logger, "info").mockImplementation(() => undefined);
+
+    try {
+      const { sessions } = setup({
+        transportStore: ts,
+        agentStore: as,
+        idleTimeoutMs: 60 * 60 * 1000,
+      });
+
+      expect(await sessions.resolveSession("addr-1")).toBeNull();
+      expect(info).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: "session-1", status: "closed" }),
+        expect.stringContaining("already closed"),
+      );
+    } finally {
+      info.mockRestore();
+    }
   });
 
   it("returns session when within timeout", async () => {

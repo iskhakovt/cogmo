@@ -119,7 +119,7 @@ describe("createScheduledTaskFireHandler", () => {
           { channelId: "ch-tg", platformAddress: "chat-42", receive: "routed" },
           { channelId: "ch-web", platformAddress: "tab-7", receive: "all" },
         ]),
-        swapSession: vi.fn().mockResolvedValue({ id: "session-new" }),
+        swapSession: vi.fn().mockResolvedValue({ id: "session-new", closedIds: [] }),
         persistInbound: vi.fn().mockResolvedValue({ id: "inbound-9" }),
       },
     });
@@ -182,7 +182,7 @@ describe("createScheduledTaskFireHandler", () => {
           .mockResolvedValue([
             { channelId: "ch-tg", platformAddress: "chat-42", receive: "routed" },
           ]),
-        swapSession: vi.fn().mockResolvedValue({ id: "session-new" }),
+        swapSession: vi.fn().mockResolvedValue({ id: "session-new", closedIds: [] }),
         persistInbound: vi.fn().mockResolvedValue({ id: "inbound-1" }),
       },
     });

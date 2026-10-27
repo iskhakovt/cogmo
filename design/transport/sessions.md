@@ -8,7 +8,46 @@ A channel session is a row in `channel_sessions` that links a platform address (
 
 `status` records **reachability** — whether we can deliver to the user on this channel right now. It is not a record of conversational engagement; that is inferred from `messages.created_at` on the conversation. A Telegram chat that has been quiet for hours keeps `status='active'` indefinitely, because the bot can still DM the chat_id — the user is "idle," not "unreachable." Web UI sessions additionally carry `expires_at` driven by heartbeats; an unexpired `active` Web UI session means a tab is alive.
 
-**Session resolution:** `resolveSession(platformAddress)` returns the most recent session for that address that is not closed and not expired. If the conversation has been quiet longer than the idle window, `resolveSession` lazy-rotates — it closes the stale session and returns null, prompting the caller to create a fresh conversation for the inbound that just arrived.
+**Session resolution:** `resolveSession(platformAddress)` returns the address's active session, if it is not expired. If the conversation has been quiet longer than the idle window, `resolveSession` lazy-rotates — it closes the stale session and returns null, prompting the caller to create a fresh conversation for the inbound that just arrived. The lookup, the idle check and the close run in one transaction (see [Lifecycle](#lifecycle-proposed)).
+
+## Lifecycle `[proposed]`
+
+A session is a state machine ([state-machines.md](../../.agents/rules/state-machines.md)). The unit is one `channel_sessions` row; its durable id is `channel_sessions.id`. Every transition is keyed on it except *create*, which is keyed on the address: the partial unique index `uq_sessions_active_address` on `(channel_id, platform_address) WHERE status = 'active'` allows one active row per address, so two creates racing on an address converge on one row instead of both inserting.
+
+```
+          create
+  ∅ ───────────────▶ active ───────────────▶ closed   (terminal)
+                          close · swap · expire
+```
+
+`status` has two values. `expires_at` is not a state: an `active` row past it is unreachable to every reader (`resolveSession`, routing, reachability) but still holds the address under the index — the *expire* transition below is what frees it. Reading reachability off a nullable column rather than the enum is an accepted residual while nothing writes the column; a writer must come with a state for it.
+
+### Transitions
+
+| Transition | From → To | Guard | Writes | Where |
+|-|-|-|-|-|
+| create | ∅ → active | no active row on the address (the index) | `INSERT … ON CONFLICT (channel_id, platform_address) WHERE status = 'active' DO UPDATE` with a no-op SET, `RETURNING (xmax = 0)`: `new` on insert, `recovered` with the holder's id and conversation on conflict ([inngest.md](../../.agents/rules/inngest.md) → keyed insert) | `createSession` |
+| close | active → closed | `status = 'active'` | conditional `UPDATE … WHERE id = $1 AND status = 'active'`; an empty RETURNING is `stale` (the status the row holds) or `not_found` | `closeSession` |
+| swap | active → closed, then ∅ → active | the close takes every active row on the address, expired or not (at most one, by the index); the insert as *create* | one transaction: set-wise conditional UPDATE returning the closed ids, then the keyed insert. A `recovered` insert here is an invariant violation (the close just freed the address in the same snapshot) and throws | `swapSession` |
+| expire | active (expired) → closed | `expires_at <= now()` | none of its own: no code writes `expires_at` today, so the state is only producible by hand. `createConversation` applies it lazily — when its insert *recovers* a row its lookup did not return (the only way is an expired one), it swaps that row out for the fresh conversation. A writer for `expires_at` must keep that path, or add an eager close | `createConversation` |
+
+Transitions not in the table are illegal; nothing reopens a closed row.
+
+`createConversation` (the Transport method behind the first-message path, `/new` and the Web UI) is *lookup, then create*: it reads the address's active session in its transaction and returns it when there is one, inserting a conversation and session only when there is none. Under REPEATABLE READ a concurrent create that commits after the snapshot raises `40001` on the insert, the transactor retries, and the retry's lookup sees the committed row — so the race converges with no orphan conversation. A caller that means to supersede the active session (`/new`, the Web UI's new-chat) closes it first, in its own transaction.
+
+### Failure modes
+
+| Crash point or race | State left | Why it is safe |
+|-|-|-|
+| Two inbounds race a lazy rotation | both read the same stale session; one close commits, the other's UPDATE hits a row changed after its snapshot → `40001` → retry → the lookup finds no active row → null. Both callers then `createConversation`; the second's insert conflicts → `40001` → its retry joins the first's session | one conversation, one active row; the second inbound lands in it |
+| Crash between the close and the create of a `/new` (two transactions) | the address has no active row | the next inbound takes the first-message path, which opens the fresh conversation the user asked for; the same state a lazy rotation leaves on purpose |
+| Concurrent `/new` and `/resume` | `/new` is close + create, `/resume` one swap. Swap first: the create's lookup (or its retry) finds the resumed session and joins it. Create first: the swap's insert conflicts → `40001` → the retry closes the new session and inserts the resumed one | one active row either way, matching one serial order of the two commands. Residual: in the first order `/new` replies with the resumed conversation's profile — the user issued two contradictory commands at once |
+| Stale close — `/end`, a Web UI disconnect, or a reset against a session a swap or rotation already closed | unchanged | `closeSession` returns `stale`; `/end` tells the user the conversation had already ended, the other callers log it |
+| Crash inside a swap | nothing — one transaction | — |
+| `createConversation` retried after `40001` | the first attempt's conversation insert rolled back with its transaction | the retry's lookup joins the committed session before inserting anything |
+| An expired `active` row holds the address | `resolveSession` ignores it, the index does not | `createConversation`'s insert recovers it and swaps it out (*expire*); a swap closes it with the rest. Not producible today: nothing writes `expires_at` |
+| A session opens on a held address during the hold — a scheduled fire rotating the user's reachable channels (closed sessions included) onto its conversation — and the hold resolves `fresh` | `resolveBoundary`'s keyed insert recovers the fire's row | the resolver swaps that row out for the fresh conversation, as `createConversation` does, and drains the buffered inbounds into the session it opened |
+| Rows written before the index exist at deploy, two of them active on one address | `CREATE UNIQUE INDEX` would fail with `23505` | migration `0074_sessions_close_duplicate_active` closes every active row but the newest per address (highest UUIDv7 id — the one `resolveSession` returned) in its own transaction before `0075_sessions_one_active_per_address` builds the index |
 
 ## Session Properties
 
@@ -29,7 +68,7 @@ A channel session is a row in `channel_sessions` that links a platform address (
 
 `status` flips to `closed` in three places:
 
-1. **Explicit end** — `/new`, `/end`, or profile change. `swapSession` closes the old row and opens a fresh one in a single transaction.
+1. **Explicit end** — `/new`, `/end`, or profile change. `/resume` swaps: `swapSession` closes the old row and opens a fresh one in a single transaction. `/new` closes, then `createConversation` opens, each in its own transaction.
 2. **Lazy rotation on stale inbound** — when a new inbound arrives on a session whose conversation's last message is older than the idle window. The next inbound starts a fresh conversation (or, when the prior was substantial, fires the [boundary hold](#boundary-hold-resume--start-fresh-prompt-confirmed) instead).
 3. **Scheduled fire into an idle conversation** — the fire handler treats this like a synthetic `/new`, rotating every reachable channel for the user+profile onto a fresh conversation (see [scheduling.md](../scheduling.md) → *Synthetic conversation turn*).
 
@@ -127,17 +166,17 @@ These gate the prompt to cases where continuation is plausibly worth the tap; ev
 
 ## Session Creation
 
-Adapters manage session lifecycle. Two invariants:
+Adapters manage session lifecycle. Three invariants:
 
 - A `user`-source inbound message points at an originating session (`inbound_messages.channel_session_id` not null). `scheduled`-source inbounds have no originating session — their `channel_session_id` is null and a check constraint enforces the link.
 - A session must exist to receive a response (routing resolves target sessions).
+- An address holds at most one active session (`uq_sessions_active_address`); see [Lifecycle](#lifecycle-proposed).
 
 Session lifecycle is adapter-specific: Telegram creates a long-lived session on first message, Slack team chats spawn a session per thread, Web UI maintains a session while a tab is open.
 
 ### `/new` Command
-1. Close current session (`status = 'closed'`)
-2. Create new conversation via `createConversation()`
-3. Insert new session row (active, pointing to new conversation)
+1. Close current session (`status = 'closed'`); a `stale` outcome means something else closed it first and is not an error
+2. `createConversation()`: open a new conversation and its active session — or, if a session opened on the chat in between, join that one
 
 Closing the old session stops pending responses from the old conversation from being delivered. Any in-flight `outbound/deliver` events check session status before sending — closed = skip silently. This handles the "response arrives after `/new`" edge case without cancelling orchestrator runs.
 
@@ -235,5 +274,6 @@ CREATE UNIQUE INDEX uq_inbound_idempotency_key
 ```
 
 Indexes:
+- `uq_sessions_active_address` — UNIQUE `(channel_id, platform_address) WHERE status = 'active'`: one active session per address, the key of the *create* transition's keyed insert
 - `(channel_id, platform_address, id DESC)` — active session lookup
 - `(conversation_id) WHERE status = 'active' AND receive = 'all'` — receive-all session lookup for routing

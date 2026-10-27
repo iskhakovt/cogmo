@@ -208,7 +208,7 @@ describe("handleName", () => {
 
 describe("handleEnd", () => {
   it("closes the active session", async () => {
-    const closeSession = vi.fn().mockResolvedValue(undefined);
+    const closeSession = vi.fn().mockResolvedValue({ kind: "closed" });
     const transport = transportWith({
       resolveSession: vi.fn().mockResolvedValue({
         id: "s1",
@@ -224,6 +224,24 @@ describe("handleEnd", () => {
     await handleEnd(transport, ctx);
     expect(closeSession).toHaveBeenCalledWith("s1");
     expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("ended"));
+  });
+
+  it("treats a close that lost to a swap or rotation as already ended, not an error", async () => {
+    const transport = transportWith({
+      resolveSession: vi.fn().mockResolvedValue({
+        id: "s1",
+        channelId: "ch",
+        platformAddress: "42",
+        conversationId: "c1",
+        status: "active",
+        receive: "routed",
+      }),
+      closeSession: vi.fn().mockResolvedValue({ kind: "stale", status: "closed" }),
+    });
+    const ctx = mkCtx();
+    await handleEnd(transport, ctx);
+    expect(ctx.reply).toHaveBeenCalledTimes(1);
+    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("already ended"));
   });
 
   it("handles no active session gracefully", async () => {
@@ -321,7 +339,7 @@ describe("handleNew", () => {
   });
 
   it("closes the existing session before creating a new conversation", async () => {
-    const closeSession = vi.fn().mockResolvedValue(undefined);
+    const closeSession = vi.fn().mockResolvedValue({ kind: "closed" });
     const transport = transportWith({
       resolveSession: vi.fn().mockResolvedValue({
         id: "s-old",

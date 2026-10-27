@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Transactor } from "../db/index.js";
+import { logger } from "../logger.js";
 import { mockTransportStore } from "../test/factories.js";
 import { createCommandService } from "./command-service.js";
 
@@ -24,6 +25,31 @@ describe("createCommandService", () => {
 
     expect(store.resolveSession).toHaveBeenCalledWith(expect.anything(), "ch-1", "12345");
     expect(store.closeSession).toHaveBeenCalledWith(expect.anything(), "session-1");
+  });
+
+  it("logs, rather than fails, a reset whose close finds the session already closed", async () => {
+    const store = mockTransportStore({
+      resolveSession: vi.fn().mockResolvedValue({
+        id: "session-1",
+        channelId: "ch-1",
+        platformAddress: "addr",
+        conversationId: "conv-1",
+        status: "active",
+        receive: "routed",
+      }),
+      closeSession: vi.fn().mockResolvedValue({ kind: "stale", status: "closed" }),
+    });
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
+
+    try {
+      await createCommandService(fakeRunInTx, store).resetConversation("ch-1", "12345");
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: "session-1", status: "closed" }),
+        expect.any(String),
+      );
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("does nothing when no active session exists", async () => {

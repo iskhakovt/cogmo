@@ -78,7 +78,9 @@ describe("createBoundaryJanitor", () => {
         .fn()
         .mockImplementation(async (_tx, id: string) => fullRowsById.get(id)),
       resolveUser: vi.fn().mockResolvedValue({ userId: "u-7" }),
-      createSession: vi.fn().mockResolvedValue({ id: "session-new" }),
+      createSession: vi
+        .fn()
+        .mockResolvedValue({ kind: "new", id: "session-new", conversationId: "conv-1" }),
       persistInbound: vi.fn().mockResolvedValue({ id: "inbound-new" }),
       getChatDefaultProfile: vi.fn().mockResolvedValue(undefined),
       deleteBoundaryPending: vi.fn().mockResolvedValue(undefined),

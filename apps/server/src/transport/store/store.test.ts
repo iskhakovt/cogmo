@@ -1,4 +1,4 @@
-import { inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { DrizzleAgentStore } from "../../agent/store/index.js";
 import type { Database, Transactor } from "../../db/index.js";
@@ -7,7 +7,11 @@ import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import type { NormalizedImageResult } from "../attachment-original.js";
 import { renderInboundText } from "../content.js";
 import { DrizzleTransportStore } from "./index.js";
-import { attachmentOriginals, inboundMessages as inboundMessagesTable } from "./schema.js";
+import {
+  attachmentOriginals,
+  channelSessions,
+  inboundMessages as inboundMessagesTable,
+} from "./schema.js";
 
 let db: Database;
 let tx: Transactor;
@@ -80,6 +84,20 @@ async function seedSession(
       }),
     )
   ).id;
+}
+
+async function activeSessionIds(channelId: string, platformAddress: string): Promise<string[]> {
+  const rows = await db
+    .select({ id: channelSessions.id })
+    .from(channelSessions)
+    .where(
+      and(
+        eq(channelSessions.channelId, channelId),
+        eq(channelSessions.platformAddress, platformAddress),
+        eq(channelSessions.status, "active"),
+      ),
+    );
+  return rows.map((row) => row.id);
 }
 
 // --- Tests ---
@@ -254,13 +272,98 @@ describe("DrizzleTransportStore", () => {
       expect(active[0]?.platformAddress).toBe("addr-2");
     });
 
+    it("createSession on an address with an active session recovers that row instead of inserting a second", async () => {
+      const channelId = await seedChannel();
+      const { conversationId } = await seedConversation();
+      const { conversationId: conv2 } = await seedConversation();
+      const first = await tx((trx) =>
+        store.createSession(trx, {
+          channelId,
+          platformAddress: "addr-race",
+          conversationId,
+          status: "active",
+          receive: "routed",
+        }),
+      );
+
+      const second = await tx((trx) =>
+        store.createSession(trx, {
+          channelId,
+          platformAddress: "addr-race",
+          conversationId: conv2,
+          status: "active",
+          receive: "routed",
+        }),
+      );
+
+      expect(await activeSessionIds(channelId, "addr-race")).toEqual([first.id]);
+      expect(first).toEqual({ kind: "new", id: first.id, conversationId });
+      expect(second).toEqual({ kind: "recovered", id: first.id, conversationId });
+    });
+
+    it("the active-address key is per channel: two channels may hold the same address", async () => {
+      const channelA = await seedChannel("direct");
+      const channelB = await seedChannel("telegram");
+      const { conversationId } = await seedConversation();
+
+      await seedSession(channelA, conversationId, "shared-addr");
+      const onB = await tx((trx) =>
+        store.createSession(trx, {
+          channelId: channelB,
+          platformAddress: "shared-addr",
+          conversationId,
+          status: "active",
+          receive: "routed",
+        }),
+      );
+
+      expect(onB.kind).toBe("new");
+    });
+
+    it("closeSession is a conditional transition: closed, then stale, and not_found for an unknown id", async () => {
+      const channelId = await seedChannel();
+      const { conversationId } = await seedConversation();
+      const sessionId = await seedSession(channelId, conversationId);
+
+      expect(await tx((trx) => store.closeSession(trx, sessionId))).toEqual({ kind: "closed" });
+      expect(await tx((trx) => store.closeSession(trx, sessionId))).toEqual({
+        kind: "stale",
+        status: "closed",
+      });
+      expect(
+        await tx((trx) => store.closeSession(trx, "00000000-0000-7000-8000-000000000000")),
+      ).toEqual({ kind: "not_found" });
+    });
+
+    it("a closed session frees the address: the next createSession inserts a new row", async () => {
+      const channelId = await seedChannel();
+      const { conversationId } = await seedConversation();
+      const { conversationId: conv2 } = await seedConversation();
+      const first = await seedSession(channelId, conversationId, "addr-rotate");
+      await tx((trx) => store.closeSession(trx, first));
+
+      const second = await tx((trx) =>
+        store.createSession(trx, {
+          channelId,
+          platformAddress: "addr-rotate",
+          conversationId: conv2,
+          status: "active",
+          receive: "routed",
+        }),
+      );
+
+      expect(second.kind).toBe("new");
+      expect(second.id).not.toBe(first);
+      expect(await activeSessionIds(channelId, "addr-rotate")).toEqual([second.id]);
+    });
+
     it("swapSession closes all prior active sessions on (channelId, platformAddress) and opens a new one", async () => {
       const channelId = await seedChannel();
       const { conversationId } = await seedConversation();
       const { conversationId: conv2 } = await seedConversation();
       const oldId = await seedSession(channelId, conversationId, "addr-swap");
 
-      const { id: newId } = await tx((trx) =>
+      const { id: newId, closedIds } = await tx((trx) =>
         store.swapSession(trx, channelId, "addr-swap", {
           conversationId: conv2,
           status: "active",
@@ -268,7 +371,9 @@ describe("DrizzleTransportStore", () => {
         }),
       );
 
+      expect(closedIds).toEqual([oldId]);
       expect(newId).not.toBe(oldId);
+      expect(await activeSessionIds(channelId, "addr-swap")).toEqual([newId]);
       expect((await tx((trx) => store.getSession(trx, oldId)))?.status).toBe("closed");
       expect((await tx((trx) => store.getSession(trx, newId)))?.status).toBe("active");
       // resolveSession returns the new one (most recent)
@@ -281,7 +386,7 @@ describe("DrizzleTransportStore", () => {
       const channelId = await seedChannel();
       const { conversationId } = await seedConversation();
 
-      const { id } = await tx((trx) =>
+      const { id, closedIds } = await tx((trx) =>
         store.swapSession(trx, channelId, "fresh-addr", {
           conversationId,
           status: "active",
@@ -289,6 +394,7 @@ describe("DrizzleTransportStore", () => {
         }),
       );
 
+      expect(closedIds).toEqual([]);
       expect((await tx((trx) => store.getSession(trx, id)))?.status).toBe("active");
       expect((await tx((trx) => store.resolveSession(trx, channelId, "fresh-addr")))?.id).toBe(id);
     });
@@ -1128,9 +1234,9 @@ describe("DrizzleTransportStore", () => {
     });
 
     it("dedups on (channelId, platformAddress) — newest session's receive mode wins", async () => {
-      // /new on the same chat rotates sessions: the old row is closed,
-      // a fresh row is opened with the same (channelId, platformAddress).
-      // The query must collapse them and return the newer `receive` mode.
+      // A rotation on the same chat closes the old row and opens a fresh one
+      // with the same (channelId, platformAddress). The query must collapse
+      // them and return the newer `receive` mode.
       const { userId, profileId, conversationId } = await seedConversation();
       const channelId = await seedChannel();
       // First session: receive='all' (Web UI style)
@@ -1144,11 +1250,9 @@ describe("DrizzleTransportStore", () => {
         }),
       );
       await new Promise((r) => setTimeout(r, 5));
-      // Second session on same address: receive='routed'
+      // Rotation onto the same address: receive='routed'
       await tx((trx) =>
-        store.createSession(trx, {
-          channelId,
-          platformAddress: "shared-addr",
+        store.swapSession(trx, channelId, "shared-addr", {
           conversationId,
           status: "active",
           receive: "routed",
