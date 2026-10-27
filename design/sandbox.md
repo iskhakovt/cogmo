@@ -448,7 +448,7 @@ Every reap kills and removes the daemon object *before* the transition (Failure 
 
 The transition is `SandboxStore.transitionContainerStatus(tx, { id, from, to, at })`, returning `{ kind: "transitioned" } | { kind: "stale"; status }`, the shape of `DrizzleCodingStore.transitionTaskStatus`; a missing row throws, since every caller holds a row it read and rows are never deleted. One use case per terminal transition: `reapContainer` (`src/sandbox/reap-container.ts`; `reapDiscoveredContainer` for a daemon object whose row may be missing or already `reaped`) and `markContainerExited` (`src/sandbox/mark-container-exited.ts`). `stale` is an expected outcome: another path finished the row first. It is logged at debug, never an error, and a DB-driven pass does not count it.
 
-**Reason.** The reap reason — `ttl_expired | cascade | dead_instance | crash_reconcile | start_failed` — travels with the `reapContainer` call and is logged on the transition; `exited` has one cause, missing from the daemon. The planned datum is a `reaped_reason` pgEnum column, nullable and CHECK-tied to `status = 'reaped'`, written by the same UPDATE (state-machines.md → "A failed or skipped state records why"). It is a schema change and lands separately.
+**Reason.** The reap reason — `ttl_expired | cascade | dead_instance | crash_reconcile | start_failed` — travels with the `reapContainer` call and is logged on the transition; `exited` has one cause, missing from the daemon. The planned datum is a `reaped_reason` pgEnum column, nullable and CHECK-tied to `status = 'reaped'`, written by the same UPDATE (state-machines.md → "A failed or skipped state records why"). It is a schema change and lands separately; tracked in `todo.md`.
 
 **Failure modes.**
 
@@ -460,7 +460,8 @@ The transition is `SandboxStore.transitionContainerStatus(tx, { id, from, to, at
 | `start` throws | `reaped` | removed | `start_failed`. Residual: if the kill + remove throws, the row stays `starting` over a stopped container, and the TTL pass reaps it at expiry |
 | `starting → running` is `stale` | `reaped` | removed by the other path | A TTL pass (short TTL) or a cascade finished the row mid-start. `create` releases the proxy scope and throws |
 | `deleteByTaskId` and a reaper pass race on one row | `reaped` once | removed once; the second kill/remove sees 304/409/404, which both tolerate | The second transition is `stale`, logged at debug. `exited_at` is the first writer's |
-| A reaper tick overlaps the next | as above | as above | Both read the same rows; the loser's transitions are `stale` and not counted, so counts are exact per row. Inngest's cron runs one tick at a time in production |
+| The daemon refuses a kill or remove (not 304/409/404) | unchanged | container | `killAndRemoveContainer` returns `DaemonError`; the row keeps its status, so the next tick retries. The reaper and reconcile log it and move to the next container; `deleteByTaskId` rethrows it at the `SandboxClient` boundary |
+| A reaper tick overlaps the next | as above | as above | Both read the same rows; the loser's transitions are `stale` and not counted, so counts are exact per row. `createSandboxReaper` sets no concurrency limit; overlap is safe by construction |
 | Crash between kill + remove and the transition | `starting` / `running` | gone | The next tick's stale pass marks it `exited`. The row over-reports a live container for at most one tick |
 | Remove returns 409 (daemon removal in progress) | `reaped` | finishing removal | Self-heals as the daemon completes. Until then a `reaped` row with a live instance label is not an orphan and is left alone |
 | `docker rm` outside Cogmo | `running` | gone | Stale pass → `exited` |

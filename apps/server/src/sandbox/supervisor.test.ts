@@ -414,6 +414,9 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
     // back together.
     expect(registers).toHaveLength(2);
     expect(unregisters).toEqual(["019d0000-0000-7000-8000-000000000ddd"]);
+    // The supervisor removed the container, so the row is `reaped`.
+    const row = await tx((trx) => store.getContainerByDockerId(trx, "docker-fail-start"));
+    expect(row?.status).toBe("reaped");
   });
 
   it("works without a proxy (no socket mount, no register calls)", async () => {
@@ -721,6 +724,28 @@ describe("LocalDockerSandboxClient — container row transitions", () => {
     expect(calls.create).toHaveLength(1);
     expect(calls.start).toBe(0);
     expect(calls.remove).toBe(1);
+    expect(unregisters).toEqual([TASK_ID]);
+  });
+
+  it("create surfaces the insert error, not the remove error, when both fail", async () => {
+    const { docker, container } = fakeDocker({ dockerId: "docker-rowless-stuck" });
+    container.remove.mockRejectedValue(
+      Object.assign(new Error("daemon i/o error"), { statusCode: 500 }),
+    );
+    const { proxy, unregisters } = fakeProxy();
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tx,
+      runtime: "runc",
+      instanceId: "019d0000-0000-7000-8000-000000000bad",
+      proxy,
+    });
+
+    // The FK violation from `insertContainer` is what the caller sees; the
+    // failed remove is logged and left to the orphan pass.
+    await expect(sandbox.create(SPEC)).rejects.toThrow(/insert into "containers"/);
+    expect(container.remove).toHaveBeenCalledTimes(1);
     expect(unregisters).toEqual([TASK_ID]);
   });
 });

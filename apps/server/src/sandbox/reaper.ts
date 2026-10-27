@@ -89,18 +89,20 @@ export async function runReap(deps: ReaperDeps): Promise<ReapResult> {
     .filter(isLiveContainer)
     .sort((a, b) => b.depth - a.depth);
   for (const row of expired) {
-    try {
-      const outcome = await reapContainer(deps, {
-        id: row.id,
-        dockerId: row.dockerId,
-        from: row.status,
-        reason: "ttl_expired",
-        at: now,
-      });
-      result.ttlReaped += counted(outcome);
-    } catch (err) {
-      log.warn({ err, dockerId: row.dockerId }, "reaper ttl pass: kill+remove failed");
-    }
+    const outcome = await reapContainer(deps, {
+      id: row.id,
+      dockerId: row.dockerId,
+      from: row.status,
+      reason: "ttl_expired",
+      at: now,
+    });
+    result.ttlReaped += outcome.match(counted, (e) => {
+      log.warn(
+        { err: e.error, op: e.op, dockerId: row.dockerId },
+        "reaper ttl pass: kill+remove failed",
+      );
+      return 0;
+    });
   }
 
   // 2. Orphan pass — discover from Docker side. The dockerListOk flag
@@ -130,19 +132,24 @@ export async function runReap(deps: ReaperDeps): Promise<ReapResult> {
     // OR no DB row exists at all (rare orphaned create).
     const isOrphan = !stamped || !liveInstanceIds.has(stamped) || !dbRow;
     if (!isOrphan) continue;
-    try {
-      // Counted per daemon object: the listing proved it existed, whatever
-      // its row says.
-      await reapDiscoveredContainer(deps, {
-        dockerId: c.Id,
-        row: dbRow,
-        reason: "dead_instance",
-        at: now,
-      });
-      result.orphansReaped += 1;
-    } catch (err) {
-      log.warn({ err, dockerId: c.Id }, "reaper orphan pass: kill+remove failed");
-    }
+    // Counted per daemon object: the listing proved it existed, whatever
+    // its row says.
+    const outcome = await reapDiscoveredContainer(deps, {
+      dockerId: c.Id,
+      row: dbRow,
+      reason: "dead_instance",
+      at: now,
+    });
+    result.orphansReaped += outcome.match(
+      () => 1,
+      (e) => {
+        log.warn(
+          { err: e.error, op: e.op, dockerId: c.Id },
+          "reaper orphan pass: kill+remove failed",
+        );
+        return 0;
+      },
+    );
   }
 
   // 3. Stale DB pass — rows we think are live but Docker doesn't know about.

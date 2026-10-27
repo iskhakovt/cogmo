@@ -174,13 +174,19 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
       if (!stamped || !reapTargets.has(stamped)) continue;
       log.warn({ dockerId: c.Id, stampedInstance: stamped }, "reaping orphan container");
       const row = await this.#runInTx((tx) => this.#store.getContainerByDockerId(tx, c.Id));
-      await reapDiscoveredContainer(this.#reapDeps, {
+      const outcome = await reapDiscoveredContainer(this.#reapDeps, {
         dockerId: c.Id,
         row,
         reason: "crash_reconcile",
         at: new Date(),
       });
-      reaped += 1;
+      reaped += outcome.match(
+        () => 1,
+        (e) => {
+          log.warn({ err: e.error, op: e.op, dockerId: c.Id }, "reconcile: kill+remove failed");
+          return 0;
+        },
+      );
     }
     return { orphansReaped: reaped };
   }
@@ -304,9 +310,7 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
         },
       });
     } catch (err) {
-      if (this.#proxy) {
-        await this.#proxy.unregisterTask(spec.taskId).catch(() => {});
-      }
+      await this.#releaseProxyScope(spec.taskId);
       throw err;
     }
 
@@ -337,9 +341,7 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
           "removing the rowless container failed",
         );
       });
-      if (this.#proxy) {
-        await this.#proxy.unregisterTask(spec.taskId).catch(() => {});
-      }
+      await this.#releaseProxyScope(spec.taskId);
       throw err;
     }
 
@@ -359,21 +361,22 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
       await container.start();
     } catch (err) {
       log.error({ err, dockerId: container.id }, "container start failed, removing");
-      await reapContainer(this.#reapDeps, {
+      const reaped = await reapContainer(this.#reapDeps, {
         id: containerRow.id,
         dockerId: container.id,
         from: "starting",
         reason: "start_failed",
         at: new Date(),
-      }).catch((reapErr: unknown) => {
-        log.warn(
-          { err: reapErr, dockerId: container.id },
-          "reaping the unstarted container failed",
-        );
       });
-      if (this.#proxy) {
-        await this.#proxy.unregisterTask(spec.taskId).catch(() => {});
-      }
+      reaped.match(
+        () => undefined,
+        (e) =>
+          log.warn(
+            { err: e.error, op: e.op, dockerId: container.id },
+            "reaping the unstarted container failed",
+          ),
+      );
+      await this.#releaseProxyScope(spec.taskId);
       throw err;
     }
 
@@ -388,11 +391,12 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
     await match(started)
       .with({ kind: "transitioned" }, async () => {})
       .with({ kind: "stale" }, async ({ status }) => {
-        // The reaper or a cascade finished the row while the daemon was
-        // starting the container, and removed the container with it.
-        if (this.#proxy) {
-          await this.#proxy.unregisterTask(spec.taskId).catch(() => {});
-        }
+        // Another path finished the row while the daemon was starting the
+        // container: a reaper pass or a cascade reaped it, or the stale pass
+        // found it missing from the daemon. There is no session to hand
+        // back, and `create` is the `SandboxClient` boundary — callers run
+        // it inside an Inngest step, whose failure channel is a rejection.
+        await this.#releaseProxyScope(spec.taskId);
         throw new Error(`container ${container.id} was ${status} before it finished starting`);
       })
       .exhaustive();
@@ -463,13 +467,16 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
     try {
       for (const row of ordered) {
         if (row.status === "reaped") continue;
-        await reapContainer(this.#reapDeps, {
+        const reaped = await reapContainer(this.#reapDeps, {
           id: row.id,
           dockerId: row.dockerId,
           from: row.status,
           reason: "cascade",
           at: new Date(),
         });
+        // `deleteByTaskId` is the `SandboxClient` boundary, whose contract is
+        // a rejection; the daemon's error is rethrown as it came, once, here.
+        if (reaped.isErr()) throw reaped.error.error;
       }
     } finally {
       // Tear down the per-task proxy socket regardless of whether the
@@ -508,6 +515,14 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
         log.warn({ err }, "proxy close failed during shutdown");
       });
     }
+  }
+
+  /** Drop the per-task proxy scope on a failed `create`; a failure here is logged, not raised over the original error. */
+  async #releaseProxyScope(taskId: string): Promise<void> {
+    if (!this.#proxy) return;
+    await this.#proxy.unregisterTask(taskId).catch((err: unknown) => {
+      log.warn({ err, taskId }, "proxy unregisterTask failed during create rollback");
+    });
   }
 
   #wrapSession(state: LocalDockerSessionState): SandboxSession<LocalDockerSessionState> {

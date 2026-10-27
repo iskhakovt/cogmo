@@ -1,10 +1,11 @@
 import type Docker from "dockerode";
 import { sql } from "drizzle-orm";
+import { match } from "ts-pattern";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Database, Transactor } from "../db/index.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import { runReap } from "./reaper.js";
-import { DrizzleSandboxStore } from "./store/index.js";
+import { type ContainerTransition, DrizzleSandboxStore } from "./store/index.js";
 import type { ContainerLabels, ResourceLimits } from "./types.js";
 
 const RESOURCE_LIMITS: ResourceLimits = {
@@ -150,21 +151,20 @@ async function insertContainer(opts: {
     }),
   );
   // Walk the row through the state machine to the requested status.
-  const at = NOW();
-  if (opts.status === "running" || opts.status === "exited" || opts.status === "reaped") {
-    await tx((trx) =>
-      store.transitionContainerStatus(trx, { id: row.id, from: "starting", to: "running", at }),
-    );
-  }
-  if (opts.status === "exited") {
-    await tx((trx) =>
-      store.transitionContainerStatus(trx, { id: row.id, from: "running", to: "exited", at }),
-    );
-  }
-  if (opts.status === "reaped") {
-    await tx((trx) =>
-      store.transitionContainerStatus(trx, { id: row.id, from: "running", to: "reaped", at }),
-    );
+  const steps: ContainerTransition[] = match(opts.status)
+    .with(undefined, "starting", () => [])
+    .with("running", () => [{ from: "starting" as const, to: "running" as const }])
+    .with("exited", () => [
+      { from: "starting" as const, to: "running" as const },
+      { from: "running" as const, to: "exited" as const },
+    ])
+    .with("reaped", () => [
+      { from: "starting" as const, to: "running" as const },
+      { from: "running" as const, to: "reaped" as const },
+    ])
+    .exhaustive();
+  for (const step of steps) {
+    await tx((trx) => store.transitionContainerStatus(trx, { id: row.id, at: NOW(), ...step }));
   }
   return row.id;
 }
@@ -603,12 +603,10 @@ describe("runReap — concurrent invocation", () => {
   // What this suite intentionally does NOT pin: that each Docker
   // `kill` call happens exactly once, or that the totals sum to
   // exactly N. With no advisory lock around the TTL pass, both calls
-  // can read the same `running` rows before either writes `reaped`,
-  // so each row gets killed twice and counted twice. That's the
-  // observed behaviour and is acceptable because (a) `killAndRemove`
-  // tolerates a 304/404 (already-killed/already-gone) and (b) the
-  // singleton scheduler keeps it out of production. If we ever add a
-  // row-level lock, these tests will tighten.
+  // can read the same `running` rows before either writes `reaped`, so
+  // each row can be killed twice — `killAndRemoveContainer` tolerates
+  // the 304/404 of an already-gone container — but the conditional
+  // transition lets only one of them count it.
 
   it("two interleaved runReap calls reach a consistent terminal DB state", async () => {
     const dockerSide: DockerSideContainer[] = [
@@ -637,11 +635,9 @@ describe("runReap — concurrent invocation", () => {
     expect(new Set(killCalls)).toEqual(new Set(["c-a", "c-b"]));
     expect(new Set(removeCalls)).toEqual(new Set(["c-a", "c-b"]));
 
-    // Sum of ttlReaped covers every container at least once. Without an
-    // advisory lock, both calls can read the same `running` rows and
-    // each claims an increment, so the sum can be up to 2 * N.
-    expect(r1.ttlReaped + r2.ttlReaped).toBeGreaterThanOrEqual(2);
-    expect(r1.ttlReaped + r2.ttlReaped).toBeLessThanOrEqual(4);
+    // Each row is counted exactly once across both calls: the second
+    // writer's transition is `stale`, which does not count.
+    expect(r1.ttlReaped + r2.ttlReaped).toBe(2);
   });
 
   it("a second runReap after the first finished sees nothing to do", async () => {
