@@ -8,7 +8,7 @@ import {
   isVoiceContent,
   previewInboundText,
   renderInboundText,
-} from "./content.js";
+} from "./inbound-content.js";
 
 describe("contentToText", () => {
   it("passes strings through", () => {

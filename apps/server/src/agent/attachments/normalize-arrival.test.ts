@@ -6,7 +6,7 @@ import type {
   FinishedOriginal,
   NormalizedImageResult,
 } from "../../transport/attachment-original.js";
-import { type InboundContent, MAX_INBOUND_FILE_BYTES } from "../../transport/content.js";
+import { type InboundContent, MAX_INBOUND_FILE_BYTES } from "../conversation/inbound-content.js";
 import {
   type ArrivalRoute,
   type NormalizeArrivalDeps,

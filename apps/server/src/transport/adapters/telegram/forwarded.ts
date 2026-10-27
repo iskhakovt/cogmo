@@ -1,7 +1,10 @@
 import { type Composer, type Context, matchFilter } from "grammy";
 import type { Chat, MessageOrigin } from "grammy/types";
 import { match } from "ts-pattern";
-import type { ForwardedOrigin, InboundTextBlock } from "../../content.js";
+import type {
+  ForwardedOrigin,
+  InboundTextBlock,
+} from "../../../agent/conversation/inbound-content.js";
 
 /**
  * The part of `bot` commands register on: every update except a forwarded

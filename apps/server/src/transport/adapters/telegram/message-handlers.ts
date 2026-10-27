@@ -7,8 +7,11 @@ import { lookup } from "mime-types";
 import { err, ok, type Result } from "neverthrow";
 import { match, P } from "ts-pattern";
 import { z } from "zod";
+import {
+  type InboundContent,
+  MAX_INBOUND_FILE_BYTES,
+} from "../../../agent/conversation/inbound-content.js";
 import { logger } from "../../../logger.js";
-import { type InboundContent, MAX_INBOUND_FILE_BYTES } from "../../content.js";
 import type { Transport } from "../../transport.js";
 import { toCmdCtx } from "./commands/reply.js";
 import { forwardedFrom, inboundTextBlock, othersOrigin } from "./forwarded.js";

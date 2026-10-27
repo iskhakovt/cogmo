@@ -63,7 +63,7 @@ The threshold is a constant in the adapter (start with `10`, tune by feel).
 
 ## Forwarded Messages
 
-Forwarded text is someone else's words, never the user's: not their statements, not their instructions. When a message carries `forward_origin` naming anyone but the sender, the adapter marks what it packs with `forwarded` (`ForwardedOriginSchema` in `src/transport/content.ts`). A forward of the user's own message, from Saved Messages or an earlier message of theirs (`origin` `user` with the sender's id), is their own words and stays unmarked.
+Forwarded text is someone else's words, never the user's: not their statements, not their instructions. When a message carries `forward_origin` naming anyone but the sender, the adapter marks what it packs with `forwarded` (`ForwardedOriginSchema` in `src/agent/conversation/inbound-content.ts`). A forward of the user's own message, from Saved Messages or an earlier message of theirs (`origin` `user` with the sender's id), is their own words and stays unmarked.
 
 | Field | Value |
 |-|-|

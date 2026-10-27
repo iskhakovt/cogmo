@@ -14,10 +14,10 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 import { z } from "zod";
+import { InboundContentSchema } from "../../agent/conversation/inbound-content.js";
 import { conversations, profiles, users } from "../../agent/store/schema.js";
 import { jsonbZod, pk, ts } from "../../db/helpers.js";
 import { NormalizedImageResultSchema } from "../attachment-original.js";
-import { InboundContentSchema } from "../content.js";
 
 /**
  * `channel_sessions.status` records reachability — whether we can deliver
