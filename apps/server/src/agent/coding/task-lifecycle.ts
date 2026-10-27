@@ -71,9 +71,14 @@ export async function claimTask(
  * failure) — no owner left, so the run reclaims what it allocated — rather
  * than forward, where another run is working on those very resources.
  */
-type AdvanceOutcome =
-  | { kind: "advanced" }
-  | { kind: "left"; ended: boolean; transition: TransitionResult };
+type AdvanceOutcome = { kind: "advanced" } | TaskLeft;
+
+/** The task moved out of the status a stage expected, under the run that expected it. */
+export interface TaskLeft {
+  kind: "left";
+  ended: boolean;
+  transition: TransitionResult;
+}
 
 /**
  * A conditional `from → to` UPDATE inside an already-owned run, as a step
@@ -110,6 +115,9 @@ export async function advanceTask(
  * delete failure is logged rather than thrown, since reaching the catch
  * would overwrite `cancelled` with `failed`. The periodic reaper is the
  * backstop.
+ *
+ * `notify` is the run's progress stream and the message it fails with; null
+ * for the verify run, which has no stream of its own.
  */
 export async function reclaimEndedTask(
   run: CodingRun,
@@ -120,8 +128,7 @@ export async function reclaimEndedTask(
   args: {
     repo: CodingRepoRow;
     assignment: WorktreeAssignment;
-    stream: { fail(message: string): Promise<void> };
-    message: string;
+    notify: { stream: { fail(message: string): Promise<void> }; message: string } | null;
   },
 ): Promise<void> {
   await run.stepRun("teardown-worktree-cancelled", () =>
@@ -142,5 +149,5 @@ export async function reclaimEndedTask(
         return null;
       }),
   );
-  await args.stream.fail(args.message).catch(() => {});
+  if (args.notify) await args.notify.stream.fail(args.notify.message).catch(() => {});
 }

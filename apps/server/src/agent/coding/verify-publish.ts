@@ -15,8 +15,37 @@ import { commitAuthorFor, runCommitAndPush } from "./commit-push.js";
 import { fetchFeatureBranch } from "./git-as-transport.js";
 import { runOpenPr } from "./open-pr.js";
 import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
+import { advanceTask, type TaskLeft } from "./task-lifecycle.js";
 import { WORKTREE_DIR_IN_CONTAINER } from "./task-sandbox.js";
 import type { PrMetadata, WorktreeAssignment } from "./types.js";
+
+/**
+ * `pushed`: the branch is upstream, the task reads `pushed` and
+ * `coding/task/pushed` is out. `left`: the task moved out of `verifying`
+ * under the run (a Cancel during the suite or the push), so neither the
+ * event nor the PR follows; the branch stays upstream for a re-delegate.
+ */
+export type PushOutcome = { kind: "pushed"; branchSha: string } | TaskLeft;
+
+/**
+ * `opened`: the PR is open, recorded on the task, and announced. `left`: the
+ * task moved out of `pushed` under the run between `commit-and-push` and
+ * here. The PR may already be open — `open-pr` runs ahead of the transition,
+ * and GitHub offers nothing to make the two atomic — in which case
+ * `pr_metadata` records it and `coding/task/pr-opened` is withheld.
+ */
+export type PrOutcome = { kind: "opened"; url: string; number: number } | TaskLeft;
+
+/** What the `open-pr` stage publishes, and where. */
+export interface OpenTaskPrArgs {
+  task: CodingTaskRow;
+  repo: CodingRepoRow;
+  remote: { owner: string; repo: string };
+  assignment: WorktreeAssignment;
+  identity: GitHubIdentity;
+  branchSha: string;
+  verifyOutput: string;
+}
 
 /**
  * The `commit-and-push` stage, then `pushed`. Durable: it writes a commit
@@ -38,7 +67,7 @@ export async function pushVerifiedBranch(
     askpass: AskpassMaterials;
     container: () => Promise<SandboxSession>;
   },
-): Promise<Result<{ branchSha: string }, string>> {
+): Promise<Result<PushOutcome, string>> {
   const commit = await run.stepRun("commit-and-push", async () =>
     runCommitAndPush({
       container: await args.container(),
@@ -67,15 +96,21 @@ export async function pushVerifiedBranch(
     (commit.kind === "pushed" ? commit.commitSha : "") ||
     (await run.stepRun("read-head-sha", async () => readHeadSha(await args.container())));
 
-  await run.stepRun("set-status-pushed", () =>
-    deps.runInTx((tx) => deps.store.updateTaskStatus(tx, { id: run.taskId, status: "pushed" })),
-  );
+  // Conditional on `verifying`: the suite runs for minutes, and a Cancel
+  // landing inside it must not be overwritten by the push that follows.
+  // `stale` at `pushed` is this step re-executing after a lost result.
+  const pushed = await advanceTask(run, deps, {
+    stepId: "transition-pushed",
+    from: "verifying",
+    to: "pushed",
+  });
+  if (pushed.kind === "left") return ok(pushed);
   await run.stepRun("emit-pushed", () =>
     inngest
       .send(buildCodingTaskPushedEvent({ taskId: run.taskId, branchSha }))
       .then(() => undefined),
   );
-  return ok({ branchSha });
+  return ok({ kind: "pushed", branchSha });
 }
 
 interface OpenTaskPrDeps extends TaskStoreDeps {
@@ -94,16 +129,8 @@ export async function openTaskPr(
   run: CodingRun,
   deps: OpenTaskPrDeps,
   inngest: Pick<Inngest, "send">,
-  args: {
-    task: CodingTaskRow;
-    repo: CodingRepoRow;
-    remote: { owner: string; repo: string };
-    assignment: WorktreeAssignment;
-    identity: GitHubIdentity;
-    branchSha: string;
-    verifyOutput: string;
-  },
-): Promise<Result<{ url: string; number: number }, string>> {
+  args: OpenTaskPrArgs,
+): Promise<Result<PrOutcome, string>> {
   const { repo, identity, assignment } = args;
   const pr = await run.stepRun("open-pr", () =>
     runOpenPr({
@@ -135,9 +162,15 @@ export async function openTaskPr(
   await run.stepRun("set-pr-metadata", () =>
     deps.runInTx((tx) => deps.store.setTaskPrMetadata(tx, run.taskId, metadata)),
   );
-  await run.stepRun("set-status-pr-open", () =>
-    deps.runInTx((tx) => deps.store.updateTaskStatus(tx, { id: run.taskId, status: "pr_open" })),
-  );
+  // Conditional on `pushed`: a Cancel between the push and here stands, with
+  // `pr_metadata` recording the PR that is already open. `stale` at
+  // `pr_open` is this step re-executing after a lost result.
+  const opened = await advanceTask(run, deps, {
+    stepId: "transition-pr-open",
+    from: "pushed",
+    to: "pr_open",
+  });
+  if (opened.kind === "left") return ok(opened);
   await run.stepRun("emit-pr-opened", () =>
     inngest
       .send({
@@ -154,7 +187,7 @@ export async function openTaskPr(
   if (deps.sandbox.capabilities.workingTreeTransport === "git-remote") {
     await fetchBackFeatureBranch(run, { repo, branch: assignment.branch, identity });
   }
-  return ok({ url: pr.url, number: pr.number });
+  return ok({ kind: "opened", url: pr.url, number: pr.number });
 }
 
 /**

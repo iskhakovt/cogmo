@@ -26,21 +26,63 @@ function harness() {
   return { run, deps, inngest, store };
 }
 
+const FAILED_EVENT = expect.objectContaining({
+  name: "coding/task/failed",
+  data: { taskId: "task-1", reason: MASKED },
+});
+
 describe("task failure channel", () => {
-  it.each([
-    [
-      "recordTaskFailed",
-      (h: ReturnType<typeof harness>) =>
-        recordTaskFailed(h.run, h.deps, REASON, "set-status-failed"),
-    ],
-    [
-      "failTaskFromCatch",
-      (h: ReturnType<typeof harness>) => failTaskFromCatch(h.run, h.deps, REASON),
-    ],
-  ])("%s persists, emits and returns the masked reason", async (_name, fail) => {
+  it("recordTaskFailed transitions a live task to failed, emits and returns the masked reason", async () => {
+    const h = harness();
+    h.store.failTaskIfNonTerminal.mockResolvedValue({ kind: "failed" });
+
+    const recorded = await recordTaskFailed(h.run, h.deps, REASON, "transition-failed");
+
+    expect(recorded).toEqual({ kind: "recorded", reason: MASKED });
+    expect(h.store.failTaskIfNonTerminal).toHaveBeenCalledWith(expect.anything(), "task-1", MASKED);
+    expect(h.inngest.send).toHaveBeenCalledWith(FAILED_EVENT);
+  });
+
+  it("recordTaskFailed treats a row already at failed as recorded and still emits", async () => {
+    // The step re-executing after a lost result, or reconcile got there
+    // first; the `task-failed-<taskId>` id absorbs the repeat emit.
+    const h = harness();
+    h.store.failTaskIfNonTerminal.mockResolvedValue({ kind: "already_terminal", status: "failed" });
+
+    const recorded = await recordTaskFailed(h.run, h.deps, REASON, "transition-failed");
+
+    expect(recorded).toEqual({ kind: "recorded", reason: MASKED });
+    expect(h.inngest.send).toHaveBeenCalledWith(FAILED_EVENT);
+  });
+
+  it("recordTaskFailed leaves a cancelled task alone: no write, no emit, reports ended", async () => {
+    const h = harness();
+    h.store.failTaskIfNonTerminal.mockResolvedValue({
+      kind: "already_terminal",
+      status: "cancelled",
+    });
+
+    const recorded = await recordTaskFailed(h.run, h.deps, REASON, "transition-failed");
+
+    expect(recorded).toEqual({ kind: "ended", status: "cancelled" });
+    expect(h.store.updateTaskStatus).not.toHaveBeenCalled();
+    expect(h.inngest.send).not.toHaveBeenCalled();
+  });
+
+  it("recordTaskFailed throws on a vanished row — the run's own claim guarantees it exists", async () => {
+    const h = harness();
+    h.store.failTaskIfNonTerminal.mockResolvedValue({ kind: "not_found" });
+
+    await expect(recordTaskFailed(h.run, h.deps, REASON, "transition-failed")).rejects.toThrow(
+      /vanished/,
+    );
+    expect(h.inngest.send).not.toHaveBeenCalled();
+  });
+
+  it("failTaskFromCatch persists, emits and returns the masked reason", async () => {
     const h = harness();
 
-    const recorded = await fail(h);
+    const recorded = await failTaskFromCatch(h.run, h.deps, REASON);
 
     expect(recorded).toBe(MASKED);
     expect(h.store.updateTaskStatus).toHaveBeenCalledWith(expect.anything(), {
@@ -48,11 +90,6 @@ describe("task failure channel", () => {
       status: "failed",
       failureReason: MASKED,
     });
-    expect(h.inngest.send).toHaveBeenCalledWith(
-      expect.objectContaining({
-        name: "coding/task/failed",
-        data: { taskId: "task-1", reason: MASKED },
-      }),
-    );
+    expect(h.inngest.send).toHaveBeenCalledWith(FAILED_EVENT);
   });
 });

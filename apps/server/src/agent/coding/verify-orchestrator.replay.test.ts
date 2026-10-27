@@ -242,6 +242,47 @@ describe("coding-task-verify — Inngest replay", () => {
     expect(body?.body).toContain("[cached PASS]");
   });
 
+  it("a run in flight across the deploy that replaced `set-status-pushed` carries on from `pushed`", async () => {
+    // The superseded step wrote `pushed` and memoized `void`; the run's state
+    // holds its claim, the suite's verdict and the push. `transition-pushed`
+    // is new to this run, so it executes, finds the row `stale` at its own
+    // target, and the run goes on to open the PR rather than re-pushing or
+    // stopping.
+    const h = setup(verifiableTask({ status: "pushed" }));
+    const fn = createCodingVerifyOrchestrator(h.deps, inngest);
+
+    const engine = new InngestTestEngine({
+      function: fn,
+      events: [cliDoneEvent],
+      steps: [
+        { id: "set-status-verifying", handler: () => ({ kind: "transitioned" }) },
+        {
+          id: "run-verify",
+          handler: () => ({
+            ok: true,
+            exitCode: 0,
+            output: "PASS",
+            durationMs: 1,
+            timedOut: false,
+          }),
+        },
+        { id: "emit-verify-complete", handler: () => null },
+        {
+          id: "commit-and-push",
+          handler: () => ({ kind: "pushed", commitSha: HEAD_SHA, output: "" }),
+        },
+        { id: "emit-pushed", handler: () => null },
+      ],
+    });
+    const { result, error } = await engine.execute();
+
+    expect(error).toBeUndefined();
+    expect(result).toMatchObject({ status: "pr_open", prNumber: 7 });
+    expect(h.store.current().status).toBe("pr_open");
+    expect(h.log.push).toBe(0);
+    expect(h.create).toHaveBeenCalledTimes(1);
+  });
+
   it("skips a duplicate event before reaching the failure machinery", async () => {
     // A duplicate `cli-done` for a task that already finished. The
     // conditional UPDATE matches no row, so the run must return `skipped`

@@ -132,6 +132,13 @@ export function statefulCodingStore(
     task = { ...task, status: to, ...(claimedByRunId !== undefined && { claimedByRunId }) };
     return { kind: "transitioned" };
   });
+  store.failTaskIfNonTerminal.mockImplementation(async (_tx, _id, failureReason) => {
+    if (task.status === "pr_open" || task.status === "failed" || task.status === "cancelled") {
+      return { kind: "already_terminal", status: task.status };
+    }
+    task = { ...task, status: "failed", failureReason };
+    return { kind: "failed" };
+  });
   store.setTaskWorktreeAssignment.mockImplementation(async (_tx, _id, assignment) => {
     task = { ...task, worktreeAssignment: assignment };
   });

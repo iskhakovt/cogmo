@@ -71,8 +71,7 @@ export async function parkPlanAtGate(
       await reclaimEndedTask(run, deps, {
         repo: args.repo,
         assignment: args.assignment,
-        stream,
-        message: "Task cancelled while planning.",
+        notify: { stream, message: "Task cancelled while planning." },
       });
     }
     return "left_planning";

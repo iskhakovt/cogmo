@@ -11,6 +11,7 @@
  */
 
 import type { Inngest } from "inngest";
+import { match } from "ts-pattern";
 import type { Transactor } from "../../db/index.js";
 import { codingTaskPlanApproved, codingTaskStart } from "../../inngest/events.js";
 import type { StepRun, StepSendEvent } from "../../inngest/index.js";
@@ -42,8 +43,8 @@ import {
   type PlanStreamHandle,
 } from "./progress-stream.js";
 import type { CodingRepoRow, CodingStore } from "./store/index.js";
-import { failTaskFromCatch, recordTaskFailed } from "./task-failure.js";
-import { CLAIMS, claimTask } from "./task-lifecycle.js";
+import { failTaskFromCatch, type RecordedFailure, recordTaskFailed } from "./task-failure.js";
+import { CLAIMS, claimTask, reclaimEndedTask } from "./task-lifecycle.js";
 import { lazySession, reapTaskSandbox } from "./task-sandbox.js";
 import { safeTeardownWorktree } from "./teardown.js";
 import type { WorktreeAssignment } from "./types.js";
@@ -260,14 +261,26 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
   }
 }
 
-/** The plan session failed or produced no plan. */
+/**
+ * The plan session failed or produced no plan. A task that already ended
+ * under the run (a Cancel during `plan-cli`) is reclaimed, not failed.
+ */
 async function endPlanFailed(
   run: CodingRun,
   deps: CodingOrchestratorDeps,
   args: { repo: CodingRepoRow; assignment: WorktreeAssignment; stream: PlanStreamHandle },
   rawReason: string,
 ): Promise<CodingOrchestratorResult> {
-  const reason = await recordTaskFailed(run, deps, rawReason, "set-status-failed");
+  const recorded = await recordTaskFailed(run, deps, rawReason, "transition-failed");
+  if (recorded.kind === "ended") {
+    await reclaimEndedTask(run, deps, {
+      repo: args.repo,
+      assignment: args.assignment,
+      notify: { stream: args.stream, message: "Task cancelled while planning." },
+    });
+    return { status: "skipped" };
+  }
+  const { reason } = recorded;
   await run.stepRun("teardown-worktree", () =>
     safeTeardownWorktree({
       runInTx: deps.runInTx,
@@ -284,6 +297,20 @@ async function endPlanFailed(
     run.log.warn({ err: streamErr }, "plan stream fail notification failed");
   });
   return { status: "failed", failureReason: reason };
+}
+
+/** How an execute failure exit reads to the run's caller. */
+function executeResultOf(ended: RecordedFailure): CodingExecuteResult {
+  return match(ended)
+    .with(
+      { kind: "recorded" },
+      ({ reason }): CodingExecuteResult => ({
+        status: "failed",
+        failureReason: reason,
+      }),
+    )
+    .with({ kind: "ended" }, (): CodingExecuteResult => ({ status: "skipped" }))
+    .exhaustive();
 }
 
 /**
@@ -321,14 +348,14 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
     });
     if (result.isError) {
       const rawReason = result.failureReason ?? "execute phase failed";
-      const reason = await endExecuteFailed(run, deps, exit, rawReason, {
-        status: "set-status-failed",
+      const ended = await endExecuteFailed(run, deps, exit, rawReason, {
+        transition: "transition-failed",
         teardownWorktree: "teardown-worktree",
         teardown: "teardown",
         sandboxDeleted: "persist-sandbox-deleted",
         logSuffix: "",
       });
-      return { status: "failed", failureReason: reason };
+      return executeResultOf(ended);
     }
     await persistSessionUsage(run, deps, result.usage);
     if (sandbox.push) {
@@ -341,14 +368,14 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       if (pushFailure !== null) {
         // `safeTeardownWorktree` is a no-op for git-remote, the only
         // transport that pushes here, so no worktree teardown step.
-        const reason = await endExecuteFailed(run, deps, exit, pushFailure, {
-          status: "set-status-failed-after-push",
+        const ended = await endExecuteFailed(run, deps, exit, pushFailure, {
+          transition: "transition-failed-after-push",
           teardownWorktree: null,
           teardown: "teardown-after-push-failure",
           sandboxDeleted: "persist-sandbox-deleted-after-push-failure",
           logSuffix: " (push failure)",
         });
-        return { status: "failed", failureReason: reason };
+        return executeResultOf(ended);
       }
     }
     const handOff = await handOffToVerify(run, deps, params.inngest, {

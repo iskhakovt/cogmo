@@ -15,7 +15,7 @@ import { completionTokens } from "./execute-session.js";
 import { runBranchFor } from "./git-as-transport.js";
 import type { ExecuteStreamHandle } from "./progress-stream.js";
 import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
-import { recordTaskFailed } from "./task-failure.js";
+import { type RecordedFailure, recordTaskFailed } from "./task-failure.js";
 import { advanceTask, reclaimEndedTask } from "./task-lifecycle.js";
 import { reapTaskSandbox, WORKTREE_DIR_IN_CONTAINER } from "./task-sandbox.js";
 import { safeTeardownWorktree } from "./teardown.js";
@@ -106,7 +106,8 @@ export async function pushExecuteChanges(
 
 /** Step ids of one execute failure exit; each exit has its own. */
 interface ExecuteFailureSteps {
-  status: string;
+  /** The conditional `→ failed` transition. */
+  transition: string;
   /** Null where the transport leaves no host worktree to tear down. */
   teardownWorktree: string | null;
   teardown: string;
@@ -115,15 +116,29 @@ interface ExecuteFailureSteps {
   logSuffix: string;
 }
 
-/** Records the failure and tears the task down; resolves to the reason as recorded, masked. */
+/**
+ * Records the failure and tears the task down, resolving to the reason as
+ * recorded, masked. When the task had already ended under the run (a Cancel
+ * during `execute-cli`), nothing is recorded: the run reclaims its worktree
+ * and sandbox and resolves to `ended`.
+ */
 export async function endExecuteFailed(
   run: CodingRun,
   deps: ExecuteOutcomeDeps,
   exit: ExecuteExitContext,
   rawReason: string,
   steps: ExecuteFailureSteps,
-): Promise<string> {
-  const reason = await recordTaskFailed(run, deps, rawReason, steps.status);
+): Promise<RecordedFailure> {
+  const recorded = await recordTaskFailed(run, deps, rawReason, steps.transition);
+  if (recorded.kind === "ended") {
+    await reclaimEndedTask(run, deps, {
+      repo: exit.repo,
+      assignment: exit.assignment,
+      notify: { stream: exit.stream, message: "Task cancelled while executing." },
+    });
+    return recorded;
+  }
+  const { reason } = recorded;
   if (steps.teardownWorktree !== null) {
     await run.stepRun(steps.teardownWorktree, () =>
       safeTeardownWorktree({
@@ -148,7 +163,7 @@ export async function endExecuteFailed(
   await exit.stream.fail(reason).catch((streamErr: unknown) => {
     run.log.warn({ err: streamErr }, "execute stream fail notification failed");
   });
-  return reason;
+  return recorded;
 }
 
 /**
@@ -194,8 +209,7 @@ export async function handOffToVerify(
       await reclaimEndedTask(run, deps, {
         repo: exit.repo,
         assignment: exit.assignment,
-        stream: exit.stream,
-        message: "Task cancelled while executing.",
+        notify: { stream: exit.stream, message: "Task cancelled while executing." },
       });
     }
     return "left_executing";

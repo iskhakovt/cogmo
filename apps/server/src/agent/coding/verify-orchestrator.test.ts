@@ -586,6 +586,82 @@ describe("runCodingVerify", () => {
     },
   );
 
+  it("a Cancel during the suite stands: no pushed event, no PR, worktree reclaimed", async () => {
+    const { taskId } = await seedTask();
+    const scripted = fakeContainerHandle(successScript);
+    // The Cancel lands while `run-verify` is still executing the suite.
+    const handle: SandboxSession<LocalDockerSessionState> = {
+      ...scripted,
+      execStreaming: async (cmd, opts) => {
+        if (cmd[0] === "bash") {
+          await tx((trx) => store.cancelTaskIfActive(trx, taskId, "user cancelled"));
+        }
+        return scripted.execStreaming(cmd, opts);
+      },
+    };
+    const deps = makeDeps(handle);
+    const create = vi.fn(async () => ({
+      data: { html_url: "https://github.com/user/cogmo/pull/42", number: 42 },
+    }));
+    deps.octokitFactory = fakeOctokitFactory(create);
+    const inngestSend = vi.fn().mockResolvedValue(undefined);
+    const inngest = { send: inngestSend } as unknown as Pick<import("inngest").Inngest, "send">;
+
+    const result = await runCodingVerify({
+      taskId,
+      runId: "run-test",
+      deps,
+      stepRun,
+      stepSendEvent: makeStepSendEvent(inngest),
+      inngest,
+    });
+
+    expect(result).toEqual({ status: "skipped" });
+    const reloaded = await tx((trx) => store.getTask(trx, taskId));
+    expect(reloaded?.status).toBe("cancelled");
+    expect(reloaded?.failureReason).toBe("user cancelled");
+    expect(reloaded?.prMetadata).toBeNull();
+    const eventNames = inngestSend.mock.calls.map((c) => c[0].name);
+    expect(eventNames).toEqual(["coding/task/verify-complete"]);
+    expect(create).not.toHaveBeenCalled();
+    expect(deps.sandbox.deleteByTaskId).toHaveBeenCalledWith(taskId);
+  });
+
+  it("a Cancel during the PR open stands: pr_metadata records the PR, no pr-opened event", async () => {
+    const handle = fakeContainerHandle(successScript);
+    const deps = makeDeps(handle);
+    const { taskId } = await seedTask();
+    // The Cancel lands while `open-pr` is waiting on GitHub, which has
+    // already opened the PR by the time the step returns.
+    const create = vi.fn(async () => {
+      await tx((trx) => store.cancelTaskIfActive(trx, taskId, "user cancelled"));
+      return { data: { html_url: "https://github.com/user/cogmo/pull/42", number: 42 } };
+    });
+    deps.octokitFactory = fakeOctokitFactory(create);
+    const inngestSend = vi.fn().mockResolvedValue(undefined);
+    const inngest = { send: inngestSend } as unknown as Pick<import("inngest").Inngest, "send">;
+
+    const result = await runCodingVerify({
+      taskId,
+      runId: "run-test",
+      deps,
+      stepRun,
+      stepSendEvent: makeStepSendEvent(inngest),
+      inngest,
+    });
+
+    expect(result).toEqual({ status: "skipped" });
+    const reloaded = await tx((trx) => store.getTask(trx, taskId));
+    expect(reloaded?.status).toBe("cancelled");
+    expect(reloaded?.prMetadata).toMatchObject({
+      url: "https://github.com/user/cogmo/pull/42",
+      number: 42,
+    });
+    const eventNames = inngestSend.mock.calls.map((c) => c[0].name);
+    expect(eventNames).toEqual(["coding/task/verify-complete", "coding/task/pushed"]);
+    expect(deps.sandbox.deleteByTaskId).toHaveBeenCalledWith(taskId);
+  });
+
   it("task not in pending_verify → returns skipped without changes", async () => {
     const handle = fakeContainerHandle(successScript);
     const deps = makeDeps(handle);
