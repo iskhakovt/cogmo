@@ -161,8 +161,8 @@ Logic moves before interfaces change, so the split is mechanical. `main` is cons
 ### Slice 0 — content model (one PR) `[confirmed]`
 
 - `git mv transport/content.ts agent/conversation/inbound-content.ts`, tests alongside. Nothing is split out: schema, block types, `contentToBlocks`, `contentToText`, `isVoiceContent`, `renderInboundText`, `previewInboundText`, `MAX_INBOUND_FILE_BYTES` all move.
-- `transport/store/schema.ts` imports `InboundContentSchema` from the new path; the other importers (`agent/handle-message/*`, `agent/recall-gate.ts`, `agent/attachments/normalize-arrival.ts`, `agent/store/conversations.ts`, `transport/namespaces/sessions.ts`, `transport/store/index.ts`) update their import lines only.
-- Docs: `transport/overview.md` Data Model notes where the schema lives; `data-model.md` `inbound_messages` row. Changelog fragment.
+- `transport/store/schema.ts` imports `InboundContentSchema` from the new path; the other importers (`agent/handle-message/*`, `agent/recall-gate.ts`, `agent/attachments/normalize-arrival.ts`, `agent/store/conversations.ts`, `transport/namespaces/sessions.ts`, `transport/store/index.ts`, `transport/adapters/telegram/{forwarded,inbound-dispatch,message-handlers}.ts`) update their import lines only. The `schema-docs` filter in `.github/workflows/ci.yml` names the module at its new path.
+- Docs: `transport/overview.md` Data Model and `data-model.md` `inbound_messages` rows and `debounce.md`'s column comment name where the schema lives; `voice.md` and `transport/telegram.md` point at the new path. Changelog fragment.
 - Test: a PGlite store test that `inbound_messages.content` rejects a malformed block through `jsonbZod`. This is a characterization test (it passes before and after); it exists because the import direction changed.
 
 ### Slice 1 — hoist facade logic into use cases (one PR per namespace) `[proposed]`

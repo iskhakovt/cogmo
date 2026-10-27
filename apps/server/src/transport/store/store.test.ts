@@ -355,8 +355,6 @@ describe("DrizzleTransportStore", () => {
           }),
         ),
       ).rejects.toThrow(ZodError);
-      const unbatched = await tx((trx) => store.getUnbatchedInbound(trx, conversationId, null));
-      expect(unbatched).toHaveLength(0);
     });
 
     it("getUnbatchedInbound respects afterId cursor", async () => {

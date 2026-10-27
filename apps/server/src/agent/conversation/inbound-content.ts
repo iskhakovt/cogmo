@@ -14,9 +14,8 @@ const ForwardedOriginSchema = z.object({
 export type ForwardedOrigin = z.infer<typeof ForwardedOriginSchema>;
 
 /**
- * The largest inbound file: what an adapter downloads and what arrival reads
- * from the attachment store, on every channel. Equals the Bot API's `getFile`
- * limit.
+ * The largest file an adapter downloads (the Bot API's `getFile` limit) and
+ * the bound arrival enforces on every channel's originals.
  */
 export const MAX_INBOUND_FILE_BYTES = 20 * 1024 * 1024;
 
