@@ -4,7 +4,7 @@ Splitting `Transport` into the channel contract adapters need and the operator-c
 
 ## Problem
 
-`Transport` (`src/transport/transport.ts`) is a 17-line interface over fifteen namespaces, built once per channel by `startChannels`. On main at e2962085:
+`Transport` (`src/transport/transport.ts`) is a 17-line interface over fifteen namespaces, built once per channel by `startChannels`:
 
 | Fact | Consequence |
 |-|-|
@@ -156,7 +156,7 @@ A namespace method validates its id arguments (`invalid_id`), calls one use case
 12. **Test factories.** `mockTransport*` is used directly in 15 files (41 call sites) and by 18 more through `telegram/{harness,command-fixtures}.ts`. The factory gets an `Operator` twin; the churn lands with the signature change (slice 2), not the split.
 13. **Identity resolution is mode-agnostic** (`resolveIdentity` tries the wildcard row first regardless of channel mode; no CHECK ties `is_wildcard` to the mode). `transport.identify` queries only the channel mode's row type, with a red-first test for the stray-wildcard case.
 14. **`transport/command-service.ts`** is a second control-command surface with no production caller. Slice 3 deletes it.
-15. **Prerequisite.** `EventPublisher` is defined in `src/inngest/durable.ts` by the Inngest step port (PR #693, not yet merged). Slice 1's cooldown and coding/pipelines rows depend on it; slice 0 does not.
+15. **Prerequisite.** `EventPublisher` is defined in `src/inngest/durable.ts` by the Inngest step port. Slice 1's cooldown and coding/pipelines rows depend on it; slice 0 does not.
 
 ## Migration plan
 
@@ -167,7 +167,7 @@ Logic moves before interfaces change, so the split is mechanical. `main` is cons
 - `git mv transport/content.ts agent/conversation/inbound-content.ts`, tests alongside. Nothing is split out: schema, block types, `contentToBlocks`, `contentToText`, `isVoiceContent`, `renderInboundText`, `previewInboundText`, `MAX_INBOUND_FILE_BYTES` all move.
 - `transport/store/schema.ts` imports `InboundContentSchema` from the new path; the other importers (`agent/handle-message/*`, `agent/recall-gate.ts`, `agent/attachments/normalize-arrival.ts`, `agent/store/conversations.ts`, `transport/namespaces/sessions.ts`, `transport/store/index.ts`, `transport/adapters/telegram/{forwarded,inbound-dispatch,message-handlers}.ts`) update their import lines only. The `schema-docs` filter in `.github/workflows/ci.yml` names the module at its new path.
 - Docs: `transport/overview.md` Data Model and `data-model.md` `inbound_messages` rows and `debounce.md`'s column comment name where the schema lives; `voice.md` and `transport/telegram.md` point at the new path. Changelog fragment.
-- Test: a PGlite store test that `inbound_messages.content` rejects a malformed block through `jsonbZod`. This is a characterization test (it passes before and after); it exists because the import direction changed.
+- Test: a PGlite store test that `inbound_messages.content` rejects a malformed block through `jsonbZod`. This is a characterization test (it passes before and after): the column's first write-side rejection test, added while the schema's home moved.
 
 ### Slice 1 — hoist facade logic into use cases (one PR per namespace) `[proposed]`
 
@@ -195,7 +195,7 @@ Still one facade. `principal.ts` with the class and `resolvePrincipal` (`ownerPr
 - `AdapterDeps` gains `operator`; `startChannels` builds one `Operator` and hands it to every adapter; `boot/web.ts` and the RPC context carry both. `ownerPrincipal` is added and the CLI dependency loaders in `main.ts` build an `Operator` the same way `boot/` does (`createOperator` with the features the env enables), so the CLI commands that duplicate facade operations (`skills`, `scheduling`, `subagent`) call `operator.*` with the owner principal.
 - `packages/contracts`: `TransportErrorSchema` → `OperatorErrorSchema`, `TRANSPORT_ERROR` → `OPERATOR_ERROR`, parity assert kept.
 - `transport/command-service.ts` deleted.
-- Docs in the same PR: AGENTS.md `src/operator/` row and the shrunk `src/transport/` row; the namespace rule in `store-pattern.md`; `adapters.md` Adapter Interface and Trust Boundary sections rewritten to point at the two interface files; `web-ui.md` Admin path; `overview.md` glossary (`Operator`, `Principal`); this doc's sections → `[confirmed]`; a `todo.md` entry per slice is added when this doc merges and deleted as each lands.
+- Docs in the same PR: AGENTS.md `src/operator/` row and the shrunk `src/transport/` row; the namespace rule in `store-pattern.md`; `adapters.md` Adapter Interface and Trust Boundary sections rewritten to point at the two interface files; `web-ui.md` Admin path; `overview.md` glossary (`Operator`, `Principal`); this doc's sections → `[confirmed]`. `todo.md` carries one entry per remaining slice under "Operator facade"; each is deleted as its slice lands.
 
 ## Test strategy
 
