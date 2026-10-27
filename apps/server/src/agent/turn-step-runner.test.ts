@@ -1,17 +1,7 @@
 import { NonRetriableError } from "inngest";
 import { describe, expect, it } from "vitest";
-import type { StepRunner } from "./loop.js";
+import { fakeDurable } from "../test/fake-durable.js";
 import { asNonRetriable, createTurnStepRunner } from "./turn-step-runner.js";
-
-/** A `step.run` stand-in that runs the body inline, recording the id. */
-function inlineRun() {
-  const ids: string[] = [];
-  const run: StepRunner = (id, fn) => {
-    ids.push(id);
-    return fn();
-  };
-  return { ids, run };
-}
 
 function withStatus(status: number): Error {
   return Object.assign(new Error(`HTTP ${status}`), { status });
@@ -19,18 +9,18 @@ function withStatus(status: number): Error {
 
 describe("createTurnStepRunner", () => {
   it("runs the body under the given step id and returns its value", async () => {
-    const { ids, run } = inlineRun();
-    const stepRun = createTurnStepRunner(run);
+    const step = fakeDurable();
+    const stepRun = createTurnStepRunner(step.run);
 
     await expect(stepRun("llm-iter1", async () => ({ ok: true }))).resolves.toEqual({ ok: true });
-    expect(ids).toEqual(["llm-iter1"]);
+    expect(step.stepIds()).toEqual(["llm-iter1"]);
   });
 
   it.each([
     ["a deterministic failure", new Error("zod: expected string")],
     ["an outage", withStatus(503)],
   ])("makes %s in a tool step non-retriable — the model is the retry", async (_label, error) => {
-    const stepRun = createTurnStepRunner(inlineRun().run);
+    const stepRun = createTurnStepRunner(fakeDurable().run);
 
     const thrown = await stepRun("tool-iter2-0", async () => {
       throw error;
@@ -41,7 +31,7 @@ describe("createTurnStepRunner", () => {
   });
 
   it("fails fast on a deterministic provider error outside tool steps", async () => {
-    const stepRun = createTurnStepRunner(inlineRun().run);
+    const stepRun = createTurnStepRunner(fakeDurable().run);
     const error = withStatus(400);
 
     const thrown = await stepRun("llm-iter1", async () => {
@@ -57,7 +47,7 @@ describe("createTurnStepRunner", () => {
     ["a server error", withStatus(502)],
     ["a network failure", new Error("ECONNRESET")],
   ])("rethrows %s unchanged so Inngest retries the step", async (_label, error) => {
-    const stepRun = createTurnStepRunner(inlineRun().run);
+    const stepRun = createTurnStepRunner(fakeDurable().run);
 
     await expect(
       stepRun("summarize-prefix-outcome", async () => {

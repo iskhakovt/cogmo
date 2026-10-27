@@ -146,6 +146,10 @@ describe("Durable.run's JSON check", () => {
     await durable.run("method", async () => ({ describe: () => "x" }));
     // @ts-expect-error `undefined` in a union comes back as `null`
     await durable.run("maybe", async () => maybe());
+    // @ts-expect-error a bigint makes JSON.stringify throw
+    await durable.run("bigint", async () => ({ size: 1n }));
+    // @ts-expect-error a symbol is dropped
+    await durable.run("symbol", async () => ({ tag: Symbol("x") }));
   });
 });
 

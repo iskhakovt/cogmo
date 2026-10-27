@@ -2,7 +2,6 @@ import * as R from "remeda";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Transactor } from "../../db/index.js";
-
 import { agentIterations } from "../../metrics.js";
 import { FAKE_TX } from "../../test/factories.js";
 import { fakeDurable } from "../../test/fake-durable.js";

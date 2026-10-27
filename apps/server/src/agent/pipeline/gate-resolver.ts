@@ -27,7 +27,6 @@ import {
   pipelineGateResolved,
   pipelineGateSettled,
 } from "../../inngest/events.js";
-
 import { logger } from "../../logger.js";
 import type { DeliveryRouter } from "../../transport/delivery-router.js";
 import { notifyAfterRetries } from "./notify.js";

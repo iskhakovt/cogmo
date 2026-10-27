@@ -11,6 +11,9 @@ import {
 } from "../../test/factories.js";
 import { createBoundaryJanitor } from "./janitor.js";
 
+/** The event a cron trigger delivers to its function. */
+const CRON_TICK = { name: "inngest/scheduled.timer", data: { cron: "* * * * *" } };
+
 // Event emission shape (dedup ids, inboundArrived per buffered entry) is
 // covered by resolve-boundary.test.ts; these tests focus on the janitor
 // scan + delegation contract.
@@ -98,13 +101,10 @@ describe("createBoundaryJanitor", () => {
       gracePeriodMs: 60_000,
     });
 
-    const result = (await new InngestTestEngine({
-      function: fn,
-      events: [{ name: "inngest/function.invoked", data: {} } as never],
-    }).execute()) as { result?: { resolved: number; scanned: number } };
+    const { result } = await new InngestTestEngine({ function: fn, events: [CRON_TICK] }).execute();
 
     // Both rows resolved fresh — the orphan-recovery contract.
-    expect(result.result).toEqual({ resolved: 2, scanned: 2 });
+    expect(result).toEqual({ resolved: 2, scanned: 2 });
 
     // listExpiredBoundaryPending invoked once with a cutoff ~60s in the past.
     expect(listExpired).toHaveBeenCalledTimes(1);
@@ -129,12 +129,9 @@ describe("createBoundaryJanitor", () => {
       defaultProfileId: "profile-default",
     });
 
-    const result = (await new InngestTestEngine({
-      function: fn,
-      events: [{ name: "inngest/function.invoked", data: {} } as never],
-    }).execute()) as { result?: { resolved: number; scanned?: number } };
+    const { result } = await new InngestTestEngine({ function: fn, events: [CRON_TICK] }).execute();
 
-    expect(result.result).toEqual({ resolved: 0 });
+    expect(result).toEqual({ resolved: 0 });
   });
 
   it("treats boundary_not_found as a benign race (resolved count stays accurate)", async () => {
@@ -155,12 +152,9 @@ describe("createBoundaryJanitor", () => {
       defaultProfileId: "profile-default",
     });
 
-    const result = (await new InngestTestEngine({
-      function: fn,
-      events: [{ name: "inngest/function.invoked", data: {} } as never],
-    }).execute()) as { result?: { resolved: number; scanned: number } };
+    const { result } = await new InngestTestEngine({ function: fn, events: [CRON_TICK] }).execute();
 
-    expect(result.result).toEqual({ resolved: 0, scanned: 1 });
+    expect(result).toEqual({ resolved: 0, scanned: 1 });
     // No drain happened — getBoundaryPendingById returned undefined.
     expect(transportStore.persistInbound).not.toHaveBeenCalled();
   });
@@ -199,12 +193,9 @@ describe("createBoundaryJanitor", () => {
       defaultProfileId: "profile-default",
     });
 
-    const result = (await new InngestTestEngine({
-      function: fn,
-      events: [{ name: "inngest/function.invoked", data: {} } as never],
-    }).execute()) as { result?: { resolved: number; scanned: number } };
+    const { result } = await new InngestTestEngine({ function: fn, events: [CRON_TICK] }).execute();
 
-    expect(result.result).toEqual({ resolved: 1, scanned: 1 });
+    expect(result).toEqual({ resolved: 1, scanned: 1 });
     const sent = publisher.send.mock.calls.flatMap(([batch]) =>
       (Array.isArray(batch) ? batch : [batch]).map((event) => event.name),
     );

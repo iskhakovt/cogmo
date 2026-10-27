@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Transactor } from "../../db/index.js";
-
 import { logger } from "../../logger.js";
 import { fakeDurable } from "../../test/fake-durable.js";
 import type { DeliveryRouter } from "../../transport/delivery-router.js";

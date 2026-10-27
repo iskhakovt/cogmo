@@ -3,7 +3,6 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { mock } from "vitest-mock-extended";
 import type { Database, Transactor } from "../../db/index.js";
 import { inngest } from "../../inngest/client.js";
-
 import { expectOk } from "../../test/assertions.js";
 import { fakeRunInTx, makeStepRun, spyOnInngestSend } from "../../test/factories.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
@@ -29,8 +28,7 @@ afterAll(async () => {
   await close();
 });
 
-// Inline step.run shim — same pattern as cleanup-orphan-run-branches.test.ts.
-// Strips Inngest's JSON memoization round-trip (preserves Date instances).
+// Runs each step body inline, as the orchestrator tests do.
 const stepRun = makeStepRun();
 
 async function seedUserAndProfile(): Promise<{ userId: string; profileId: string }> {

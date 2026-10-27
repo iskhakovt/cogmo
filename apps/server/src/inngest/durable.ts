@@ -83,10 +83,10 @@ type JsonSafeValue<T> = T extends Unserializable
  * change it: a `Date`, an `Error`, a `Map` or a class with methods anywhere in
  * `T`, or `undefined` as one arm of a top-level union (a replay returns `null`
  * for it), fails `run` at the call site. A result that is only `undefined` or
- * `void` passes: nothing reads it. What it can't see passes too: `unknown`,
- * `undefined` inside an array (it comes back `null`), and a class instance's
- * prototype; design/crash-recovery.md → State serialization owns the rule for
- * those.
+ * `void` passes: nothing reads it. What it can't see passes too: `unknown`
+ * and `any` (including an explicit `run<unknown>`), `undefined` inside an
+ * array (it comes back `null`), and a class instance's prototype;
+ * design/crash-recovery.md → State serialization owns the rule for those.
  */
 type JsonSafe<T> = [T] extends [undefined] ? T : T extends undefined ? never : JsonSafeValue<T>;
 

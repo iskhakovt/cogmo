@@ -9,16 +9,17 @@
 
 import type { DefinedEvent, Durable } from "../inngest/durable.js";
 
-/** One step a use case planned, as the fake recorded it. */
-export type PlannedStep =
+/** One step a use case planned, as the fake recorded it. Immutable once recorded. */
+type PlannedStep = Readonly<
   | { kind: "run"; id: string }
-  | { kind: "sendEvent"; id: string; events: DefinedEvent[] }
+  | { kind: "sendEvent"; id: string; events: ReadonlyArray<DefinedEvent> }
   | { kind: "sleep"; id: string; duration: string }
-  | { kind: "waitForEvent"; id: string; event: string };
+  | { kind: "waitForEvent"; id: string; event: string }
+>;
 
 export interface FakeDurable extends Durable {
   /** Every step planned so far, in call order. */
-  planned(): PlannedStep[];
+  planned(): ReadonlyArray<PlannedStep>;
   /** The ids of `planned()`, for asserting on step order alone. */
   stepIds(): string[];
 }
@@ -57,10 +58,7 @@ export function fakeDurable(options: FakeDurableOptions = {}): FakeDurable {
       planned.push({ kind: "waitForEvent", id, event: waitOptions.event.name });
       return null;
     },
-    planned: () =>
-      planned.map((step) =>
-        step.kind === "sendEvent" ? { ...step, events: [...step.events] } : { ...step },
-      ),
+    planned: () => [...planned],
     stepIds: () => planned.map((step) => step.id),
   };
 }

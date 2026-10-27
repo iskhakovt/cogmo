@@ -156,6 +156,39 @@ describe("native router — handler behavior", () => {
   });
 });
 
+describe("legacy router — handler behavior", () => {
+  it("starts the timers the config names, with the configured timeouts", async () => {
+    // Driven through the engine, so the handler's mapping from `DebounceConfig`
+    // onto `routeInbound` is what reaches the emit.
+    const sendSpy = spyOnInngestSend(inngest).mockResolvedValue({ ids: ["fake"] });
+    try {
+      const [router] = createDebounceFunctions({
+        idleTimeoutMs: 500,
+        maxWaitMs: 0,
+        resumePolicy: "debounce",
+      });
+      const { result } = await new InngestTestEngine({
+        function: expectDefined(router, "router"),
+        events: [{ name: "inbound/arrived", data: baseEvent.data }],
+      }).execute();
+
+      expect(result).toEqual({ mode: "legacy", emitted: ["debounce/idle"] });
+      expect(sendSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          payload: [
+            expect.objectContaining({
+              name: "debounce/idle",
+              data: { ...baseEvent.data, timeoutMs: 500 },
+            }),
+          ],
+        }),
+      );
+    } finally {
+      sendSpy.mockRestore();
+    }
+  });
+});
+
 /**
  * Durable waits have a one-second resolution, which the SDK applies by
  * rewriting a sleep's duration (`durable-sleep.test.ts` pins that upstream
