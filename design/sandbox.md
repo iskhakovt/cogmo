@@ -438,13 +438,13 @@ stateDiagram-v2
 |-|-|-|-|-|
 | — | `starting` | `create` | `INSERT`; `docker_id` UNIQUE | row |
 | `starting` | `running` | `create`, after `start` | `WHERE id = $1 AND status = 'starting'` | `started_at` |
-| `starting` | `reaped` | `create` (`start_failed`), after kill + remove | `status = 'starting'` | `exited_at` |
-| `starting`, `running` | `reaped` | reaper TTL pass (`ttl_expired`) | `status = <read status>` | `exited_at` |
-| `starting`, `running`, `exited` | `reaped` | `deleteByTaskId` (`cascade`) | `status = <read status>` | `exited_at`, kept when the row was `exited` |
+| `starting` | `reaped` | `create` (`start_failed`), after kill + remove | `status <> 'reaped'` | `exited_at` |
+| `starting`, `running` | `reaped` | reaper TTL pass (`ttl_expired`) | `status <> 'reaped'` | `exited_at` |
+| `starting`, `running`, `exited` | `reaped` | `deleteByTaskId` (`cascade`) | `status <> 'reaped'` | `exited_at` (`coalesce`: kept when the row was `exited`) |
 | `starting`, `running`, `exited` | `reaped` | reaper orphan pass (`dead_instance`), boot `reconcileCrashedInstances` (`crash_reconcile`), for a listed daemon object with a row | same | same |
 | `starting`, `running` | `exited` | reaper stale pass | `status = <read status>` | `exited_at` |
 
-Every reap kills and removes the daemon object *before* the transition (Failure modes below). **Illegal**, so the store's `ContainerTransition` type does not express them: anything out of `reaped`; `exited → running`; `running → starting`.
+Every reap kills and removes the daemon object *before* the transition (Failure modes below), and its guard is `status <> 'reaped'` rather than the status the pass read: a reap is legal from every live state, and a row another path moved forward meanwhile (`create` committing `starting → running` while a cascade kills) must still land on `reaped` — the container is gone. **Illegal**, so the store's `ContainerTransition` type does not express them: anything out of `reaped`; `exited → running`; `running → starting`.
 
 The transition is `SandboxStore.transitionContainerStatus(tx, { id, from, to, at })`, returning `{ kind: "transitioned" } | { kind: "stale"; status }`, the shape of `DrizzleCodingStore.transitionTaskStatus`; a missing row throws, since every caller holds a row it read and rows are never deleted. One use case per terminal transition: `reapContainer` (`src/sandbox/reap-container.ts`; `reapDiscoveredContainer` for a daemon object whose row may be missing or already `reaped`) and `markContainerExited` (`src/sandbox/mark-container-exited.ts`). `stale` is an expected outcome: another path finished the row first. It is logged at debug, never an error, and a DB-driven pass does not count it.
 
@@ -456,9 +456,11 @@ The transition is `SandboxStore.transitionContainerStatus(tx, { id, from, to, at
 |-|-|-|-|
 | Daemon create succeeds, row insert fails | none | container | `create` force-removes it and releases the proxy scope. If the remove fails too, the orphan pass removes a labelled container with no row on its next tick |
 | Process dies between create and insert | none | container | Orphan pass: no row ⇒ orphan |
+| A live `create` is between `createContainer` and the row insert when the orphan pass lists the daemon | none, yet | container | Residual: the same rule kills a container `create` is about to record; its insert then succeeds and the first `start` or exec fails. The window is one DB round trip against a once-a-minute tick. A fix is a grace window on `created_at` from the daemon or row-first ordering; tracked with the proxy-child entry in `todo.md` |
 | Process dies between insert and `running` | `starting` | created or running | The restarted process has a new instance id, so the row's instance is dead: `reconcileCrashedInstances` and the orphan pass reap it (`starting` counts as live for both). `tryResumeByTaskId` resumes only a daemon container that reports `running` |
 | `start` throws | `reaped` | removed | `start_failed`. Residual: if the kill + remove throws, the row stays `starting` over a stopped container, and the TTL pass reaps it at expiry |
-| `starting → running` is `stale` | `reaped` | removed by the other path | A TTL pass (short TTL) or a cascade finished the row mid-start. `create` releases the proxy scope and throws |
+| `starting → running` is `stale` | `reaped` or `exited` | removed by `create` | A TTL pass (short TTL) or a cascade reaped the row mid-start, or the stale pass found it missing. `create` kills and removes the container it started — no pass looks at a terminal row again — releases the proxy scope and throws |
+| `deleteByTaskId` or a TTL pass reads a `starting` row, then `create` commits `starting → running` before the reap's transition | `reaped` | removed by the reap | The reap's guard is `status <> 'reaped'`, so it lands. Residual: `create` has already handed back a session over a removed container; the task's first exec fails with a 404 and the task fails rather than running on a removed container |
 | `deleteByTaskId` and a reaper pass race on one row | `reaped` once | removed once; the second kill/remove sees 304/409/404, which both tolerate | The second transition is `stale`, logged at debug. `exited_at` is the first writer's |
 | The daemon refuses a kill or remove (not 304/409/404) | unchanged | container | `killAndRemoveContainer` returns `DaemonError`; the row keeps its status, so the next tick retries. The reaper and reconcile log it and move to the next container; `deleteByTaskId` rethrows it at the `SandboxClient` boundary |
 | A reaper tick overlaps the next | as above | as above | Both read the same rows; the loser's transitions are `stale` and not counted, so counts are exact per row. `createSandboxReaper` sets no concurrency limit; overlap is safe by construction |

@@ -225,9 +225,7 @@ describe("DrizzleSandboxStore", () => {
         await tx((trx) =>
           store.transitionContainerStatus(trx, { id, from: "starting", to: "running", at: T0 }),
         );
-        await tx((trx) =>
-          store.transitionContainerStatus(trx, { id, from: "running", to: "reaped", at: T1 }),
-        );
+        await tx((trx) => store.transitionContainerStatus(trx, { id, to: "reaped", at: T1 }));
 
         const late = await tx((trx) =>
           store.transitionContainerStatus(trx, { id, from: "running", to: "exited", at: T2 }),
@@ -249,12 +247,41 @@ describe("DrizzleSandboxStore", () => {
         );
 
         const reaped = await tx((trx) =>
-          store.transitionContainerStatus(trx, { id, from: "exited", to: "reaped", at: T2 }),
+          store.transitionContainerStatus(trx, { id, to: "reaped", at: T2 }),
         );
         expect(reaped).toEqual({ kind: "transitioned" });
         const row = await tx((trx) => store.getContainer(trx, id));
         expect(row?.status).toBe("reaped");
         expect(row?.exitedAt?.toISOString()).toBe(T1.toISOString());
+      });
+
+      it("→ reaped lands from any live state and is stale only on a reaped row", async () => {
+        const instanceId = await seedInstance();
+        const fromStarting = await insertTaskContainer({ instanceId });
+        const fromRunning = await insertTaskContainer({ instanceId });
+        await tx((trx) =>
+          store.transitionContainerStatus(trx, {
+            id: fromRunning,
+            from: "starting",
+            to: "running",
+            at: T0,
+          }),
+        );
+
+        for (const id of [fromStarting, fromRunning]) {
+          const first = await tx((trx) =>
+            store.transitionContainerStatus(trx, { id, to: "reaped", at: T1 }),
+          );
+          expect(first).toEqual({ kind: "transitioned" });
+          const row = await tx((trx) => store.getContainer(trx, id));
+          expect(row?.status).toBe("reaped");
+          expect(row?.exitedAt?.toISOString()).toBe(T1.toISOString());
+
+          const again = await tx((trx) =>
+            store.transitionContainerStatus(trx, { id, to: "reaped", at: T2 }),
+          );
+          expect(again).toEqual({ kind: "stale", status: "reaped" });
+        }
       });
 
       it("throws on an id with no row — callers hold a row they read", async () => {

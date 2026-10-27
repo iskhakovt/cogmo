@@ -20,6 +20,7 @@ import type {
   SessionSpec,
 } from "./index.js";
 import { DEPS_CACHE_VOLUME_TARGET, LocalDockerSessionStateSchema } from "./index.js";
+import { killAndRemoveContainer, statusCodeOf } from "./kill-and-remove-container.js";
 import type { CogmoSocketProxy } from "./proxy/index.js";
 import {
   type ReapContainerDeps,
@@ -104,13 +105,11 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
   #instanceId: string;
   #proxy?: CogmoSocketProxy;
   #askpassBaseDir?: string;
-  #reapDeps: ReapContainerDeps;
 
   private constructor(opts: CreateOptions) {
     this.#docker = opts.docker;
     this.#store = opts.store;
     this.#runInTx = opts.runInTx;
-    this.#reapDeps = { docker: opts.docker, store: opts.store, runInTx: opts.runInTx };
     this.#runtime = opts.runtime;
     this.#instanceId = opts.instanceId;
     if (opts.proxy) this.#proxy = opts.proxy;
@@ -138,7 +137,7 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
       await this.#docker.getImage(image).inspect();
       return;
     } catch (err) {
-      const statusCode = (err as { statusCode?: number }).statusCode;
+      const statusCode = statusCodeOf(err);
       if (statusCode !== 404) throw err;
     }
     log.info({ image }, "image not present locally — pulling");
@@ -174,7 +173,7 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
       if (!stamped || !reapTargets.has(stamped)) continue;
       log.warn({ dockerId: c.Id, stampedInstance: stamped }, "reaping orphan container");
       const row = await this.#runInTx((tx) => this.#store.getContainerByDockerId(tx, c.Id));
-      const outcome = await reapDiscoveredContainer(this.#reapDeps, {
+      const outcome = await reapDiscoveredContainer(this.#reapDeps(), {
         dockerId: c.Id,
         row,
         reason: "crash_reconcile",
@@ -361,21 +360,31 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
       await container.start();
     } catch (err) {
       log.error({ err, dockerId: container.id }, "container start failed, removing");
-      const reaped = await reapContainer(this.#reapDeps, {
-        id: containerRow.id,
-        dockerId: container.id,
-        from: "starting",
-        reason: "start_failed",
-        at: new Date(),
-      });
-      reaped.match(
-        () => undefined,
-        (e) =>
-          log.warn(
-            { err: e.error, op: e.op, dockerId: container.id },
-            "reaping the unstarted container failed",
-          ),
-      );
+      // The start error is the one the caller gets, and the proxy scope is
+      // released whatever the reap does: a daemon refusal comes back as a
+      // value, and a DB failure in the transition is caught here for the
+      // same reason.
+      try {
+        const reaped = await reapContainer(this.#reapDeps(), {
+          id: containerRow.id,
+          dockerId: container.id,
+          reason: "start_failed",
+          at: new Date(),
+        });
+        reaped.match(
+          () => undefined,
+          (e) =>
+            log.warn(
+              { err: e.error, op: e.op, dockerId: container.id },
+              "reaping the unstarted container failed",
+            ),
+        );
+      } catch (reapErr) {
+        log.warn(
+          { err: reapErr, dockerId: container.id },
+          "reaping the unstarted container failed",
+        );
+      }
       await this.#releaseProxyScope(spec.taskId);
       throw err;
     }
@@ -393,9 +402,19 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
       .with({ kind: "stale" }, async ({ status }) => {
         // Another path finished the row while the daemon was starting the
         // container: a reaper pass or a cascade reaped it, or the stale pass
-        // found it missing from the daemon. There is no session to hand
-        // back, and `create` is the `SandboxClient` boundary — callers run
+        // found it missing. The container this call started goes too — no
+        // pass looks at a terminal row again — and there is no session to
+        // hand back. `create` is the `SandboxClient` boundary: callers run
         // it inside an Inngest step, whose failure channel is a rejection.
+        const removed = await killAndRemoveContainer(this.#docker, container.id);
+        removed.match(
+          () => undefined,
+          (e) =>
+            log.warn(
+              { err: e.error, op: e.op, dockerId: container.id },
+              "removing the container of a finished row failed",
+            ),
+        );
         await this.#releaseProxyScope(spec.taskId);
         throw new Error(`container ${container.id} was ${status} before it finished starting`);
       })
@@ -448,7 +467,7 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
       } catch (err) {
         // 404 = container gone (reaper got it); skip to the next
         // candidate or fall through to "no live session".
-        const statusCode = (err as { statusCode?: number }).statusCode;
+        const statusCode = statusCodeOf(err);
         if (statusCode !== 404) throw err;
       }
     }
@@ -467,10 +486,9 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
     try {
       for (const row of ordered) {
         if (row.status === "reaped") continue;
-        const reaped = await reapContainer(this.#reapDeps, {
+        const reaped = await reapContainer(this.#reapDeps(), {
           id: row.id,
           dockerId: row.dockerId,
-          from: row.status,
           reason: "cascade",
           at: new Date(),
         });
@@ -515,6 +533,10 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
         log.warn({ err }, "proxy close failed during shutdown");
       });
     }
+  }
+
+  #reapDeps(): ReapContainerDeps {
+    return { docker: this.#docker, store: this.#store, runInTx: this.#runInTx };
   }
 
   /** Drop the per-task proxy scope on a failed `create`; a failure here is logged, not raised over the original error. */

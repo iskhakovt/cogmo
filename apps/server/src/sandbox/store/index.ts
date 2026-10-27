@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, isNull } from "drizzle-orm";
+import { and, asc, desc, eq, isNull, ne, sql } from "drizzle-orm";
 import { match } from "ts-pattern";
 import { single } from "../../db/helpers.js";
 import type { Transaction } from "../../db/index.js";
@@ -13,15 +13,19 @@ export type ContainerStatus = "starting" | "running" | "exited" | "reaped";
  * state machine). `at` stamps `started_at` on the way into `running` and
  * `exited_at` on the way into a terminal state; a row that is already
  * `exited` keeps its `exited_at` when it is reaped.
+ *
+ * A reap names no `from`: it is legal from every state but `reaped`, and it
+ * must land on a row another path moved forward (`starting → running`)
+ * between the reaper's read and its kill — the container is gone either way.
  */
 export type ContainerTransition =
   | { from: "starting"; to: "running" }
   | { from: "starting" | "running"; to: "exited" }
-  | { from: "starting" | "running" | "exited"; to: "reaped" };
+  | { to: "reaped" };
 
 export type ContainerTransitionResult =
   | { kind: "transitioned" }
-  /** The row is not in `from`; `status` is what it holds instead. */
+  /** The row is not in `from` (for a reap: is already `reaped`); `status` is what it holds. */
   | { kind: "stale"; status: ContainerStatus };
 export type NetworkStatus = "created" | "reaped";
 export type VolumeStatus = "created" | "reaped";
@@ -135,11 +139,12 @@ export interface SandboxStore {
   ): Promise<ContainerRow>;
 
   /**
-   * Move a container from `from` to `to` in one conditional UPDATE. `stale`
-   * means another path (the reaper, a cascade, the supervisor) finished the
-   * row first; the caller decides whether that matters. A missing row is an
-   * invariant violation and throws — callers hold a row they just read, and
-   * rows are never deleted.
+   * Move a container to `to` in one conditional UPDATE, guarded on `from`
+   * (or on `status <> 'reaped'` for a reap). `stale` means another path (the
+   * reaper, a cascade, the supervisor) finished the row first; the caller
+   * decides whether that matters. A missing row is an invariant violation
+   * and throws — callers hold a row they just read, and rows are never
+   * deleted.
    */
   transitionContainerStatus(
     tx: Transaction,
@@ -299,16 +304,26 @@ export class DrizzleSandboxStore implements SandboxStore {
     tx: Transaction,
     params: { id: string; at: Date } & ContainerTransition,
   ): Promise<ContainerTransitionResult> {
+    // `coalesce` keeps the `exited_at` an `exited` row already carries. The
+    // ISO string, not the Date, goes into the fragment: raw `sql` skips the
+    // column's driver mapping, and postgres-js rejects a Date bind.
     const set = match(params)
       .with({ to: "running" }, ({ to }) => ({ status: to, startedAt: params.at }))
       .with({ to: "exited" }, ({ to }) => ({ status: to, exitedAt: params.at }))
-      .with({ from: "exited", to: "reaped" }, ({ to }) => ({ status: to }))
-      .with({ to: "reaped" }, ({ to }) => ({ status: to, exitedAt: params.at }))
+      .with({ to: "reaped" }, ({ to }) => ({
+        status: to,
+        exitedAt: sql`coalesce(${containers.exitedAt}, ${params.at.toISOString()}::timestamptz)`,
+      }))
+      .exhaustive();
+    const guard = match(params)
+      .with({ to: "reaped" }, () => ne(containers.status, "reaped"))
+      .with({ to: "running" }, ({ from }) => eq(containers.status, from))
+      .with({ to: "exited" }, ({ from }) => eq(containers.status, from))
       .exhaustive();
     const updated = await tx
       .update(containers)
       .set(set)
-      .where(and(eq(containers.id, params.id), eq(containers.status, params.from)))
+      .where(and(eq(containers.id, params.id), guard))
       .returning({ id: containers.id });
     if (updated.length > 0) return { kind: "transitioned" };
     const current = await tx

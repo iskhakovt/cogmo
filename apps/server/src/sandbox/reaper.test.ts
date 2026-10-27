@@ -160,7 +160,7 @@ async function insertContainer(opts: {
     ])
     .with("reaped", () => [
       { from: "starting" as const, to: "running" as const },
-      { from: "running" as const, to: "reaped" as const },
+      { to: "reaped" as const },
     ])
     .exhaustive();
   for (const step of steps) {
@@ -438,6 +438,32 @@ describe("runReap — a row another path already finished", () => {
     const row = await tx((trx) => store.getContainer(trx, cogmoId));
     expect(row?.status).toBe("reaped");
     expect(row?.exitedAt?.toISOString()).toBe(EARLIER);
+  });
+});
+
+describe("runReap — a row another path moved forward", () => {
+  // `create()` holds a `starting` row between `createContainer` and the
+  // running transition. A pass that read it as `starting` and then kills the
+  // container must still land the reap when `create()` committed
+  // `starting → running` in between: the container is gone either way.
+  it("TTL pass: a starting row that became running during its kill is reaped", async () => {
+    const cogmoId = await insertContainer({ dockerId: "c-fwd", ttlMs: -1000, status: "starting" });
+    const { docker } = fakeDocker({
+      containers: [{ Id: "c-fwd", Labels: labels() }],
+      onKill: async () => {
+        await tx((trx) =>
+          store.transitionContainerStatus(trx, {
+            id: cogmoId,
+            from: "starting",
+            to: "running",
+            at: NOW(),
+          }),
+        );
+      },
+    });
+    const result = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
+    expect(result.ttlReaped).toBe(1);
+    expect((await tx((trx) => store.getContainer(trx, cogmoId)))?.status).toBe("reaped");
   });
 });
 

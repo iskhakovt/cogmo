@@ -41,7 +41,7 @@ export async function killAndRemoveContainer(
 }
 
 /** The HTTP status dockerode attaches to a daemon error, if the error carries one. */
-function statusCodeOf(error: unknown): number | undefined {
+export function statusCodeOf(error: unknown): number | undefined {
   if (typeof error === "object" && error !== null && "statusCode" in error) {
     return typeof error.statusCode === "number" ? error.statusCode : undefined;
   }

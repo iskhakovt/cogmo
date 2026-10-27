@@ -3,6 +3,7 @@ import type { Inngest } from "inngest";
 import { match } from "ts-pattern";
 import type { Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
+import { statusCodeOf } from "./kill-and-remove-container.js";
 import { markContainerExited } from "./mark-container-exited.js";
 import { reapContainer, reapDiscoveredContainer } from "./reap-container.js";
 import {
@@ -92,7 +93,6 @@ export async function runReap(deps: ReaperDeps): Promise<ReapResult> {
     const outcome = await reapContainer(deps, {
       id: row.id,
       dockerId: row.dockerId,
-      from: row.status,
       reason: "ttl_expired",
       at: now,
     });
@@ -184,8 +184,8 @@ export async function runReap(deps: ReaperDeps): Promise<ReapResult> {
       await deps.docker
         .getNetwork(net.dockerId)
         .remove()
-        .catch((err: { statusCode?: number }) => {
-          if (err.statusCode !== 404) throw err;
+        .catch((err: unknown) => {
+          if (statusCodeOf(err) !== 404) throw err;
         });
       await deps.runInTx((tx) =>
         deps.store.updateNetworkStatus(tx, { id: net.id, status: "reaped" }),
@@ -206,8 +206,8 @@ export async function runReap(deps: ReaperDeps): Promise<ReapResult> {
       await deps.docker
         .getVolume(vol.dockerId)
         .remove()
-        .catch((err: { statusCode?: number }) => {
-          if (err.statusCode !== 404) throw err;
+        .catch((err: unknown) => {
+          if (statusCodeOf(err) !== 404) throw err;
         });
       await deps.runInTx((tx) =>
         deps.store.updateVolumeStatus(tx, { id: vol.id, status: "reaped" }),

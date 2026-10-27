@@ -8,6 +8,8 @@ import type { ContainerRow, SandboxStore } from "./store/index.js";
 const FAKE_TX = { __mockTx: true } as never;
 const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
 const AT = new Date("2026-04-27T12:00:00Z");
+const TASK_ID = "019d0000-0000-7000-8000-000000000001";
+const INSTANCE_ID = "019d0000-0000-7000-8000-000000000002";
 
 function deps(opts: { killFails?: boolean } = {}): {
   deps: { docker: DockerFacade; store: SandboxStore; runInTx: Transactor };
@@ -29,55 +31,58 @@ function deps(opts: { killFails?: boolean } = {}): {
 }
 
 function row(status: ContainerRow["status"]): ContainerRow {
-  const r = mock<ContainerRow>();
-  Object.defineProperty(r, "id", { value: "row-1", configurable: true });
-  Object.defineProperty(r, "status", { value: status, configurable: true });
-  return r;
+  return {
+    id: "row-1",
+    dockerId: "c1",
+    parentId: null,
+    rootTaskId: TASK_ID,
+    depth: 0,
+    image: "alpine",
+    runtime: "runc",
+    labels: {
+      "cogmo.managed": "true",
+      "cogmo.instance": INSTANCE_ID,
+      "cogmo.root_task": TASK_ID,
+      "cogmo.parent": "",
+      "cogmo.depth": "0",
+    },
+    resourceLimits: { cpus: 1, memory_bytes: 256 * 1024 * 1024, pids: 64 },
+    status,
+    exitCode: null,
+    ttlExpiresAt: new Date("2026-04-27T13:00:00Z"),
+    startedAt: status === "starting" ? null : AT,
+    exitedAt: null,
+    instanceId: INSTANCE_ID,
+    createdAt: new Date("2026-04-27T11:00:00Z"),
+  };
 }
+
+const ARGS = { id: "row-1", dockerId: "c1", reason: "ttl_expired" as const, at: AT };
 
 describe("reapContainer", () => {
   it("kills and removes the container, then moves the row to reaped", async () => {
     const { deps: d, store, container } = deps();
-    const result = await reapContainer(d, {
-      id: "row-1",
-      dockerId: "c1",
-      from: "running",
-      reason: "ttl_expired",
-      at: AT,
-    });
+    const result = await reapContainer(d, ARGS);
     expect(result.isOk() && result.value).toEqual({ kind: "transitioned" });
     expect(container.kill).toHaveBeenCalledWith({ signal: "SIGTERM" });
     expect(container.remove).toHaveBeenCalledWith({ force: true });
     expect(store.transitionContainerStatus).toHaveBeenCalledWith(expect.anything(), {
       id: "row-1",
-      from: "running",
       to: "reaped",
       at: AT,
     });
   });
 
-  it("returns stale when another path finished the row", async () => {
+  it("returns stale when another path reaped the row", async () => {
     const { deps: d, store } = deps();
     store.transitionContainerStatus.mockResolvedValue({ kind: "stale", status: "reaped" });
-    const result = await reapContainer(d, {
-      id: "row-1",
-      dockerId: "c1",
-      from: "running",
-      reason: "cascade",
-      at: AT,
-    });
+    const result = await reapContainer(d, { ...ARGS, reason: "cascade" });
     expect(result.isOk() && result.value).toEqual({ kind: "stale", status: "reaped" });
   });
 
   it("returns the daemon error and leaves the row alone when the kill is refused", async () => {
     const { deps: d, store } = deps({ killFails: true });
-    const result = await reapContainer(d, {
-      id: "row-1",
-      dockerId: "c1",
-      from: "running",
-      reason: "ttl_expired",
-      at: AT,
-    });
+    const result = await reapContainer(d, ARGS);
     expect(result.isErr() && result.error).toMatchObject({
       kind: "daemon_error",
       op: "kill",
@@ -101,33 +106,20 @@ describe("reapDiscoveredContainer", () => {
     expect(store.transitionContainerStatus).not.toHaveBeenCalled();
   });
 
-  it("only removes the daemon object when the row is already reaped", async () => {
-    const { deps: d, store, container } = deps();
-    const result = await reapDiscoveredContainer(d, {
-      dockerId: "c1",
-      row: row("reaped"),
-      reason: "crash_reconcile",
-      at: AT,
-    });
-    expect(result.isOk()).toBe(true);
-    expect(container.remove).toHaveBeenCalledTimes(1);
-    expect(store.transitionContainerStatus).not.toHaveBeenCalled();
-  });
-
-  it.each(["starting", "running", "exited"] as const)(
-    "reaps a %s row from its read status",
+  it.each(["starting", "running", "exited", "reaped"] as const)(
+    "reaps a %s row through the store's guard",
     async (status) => {
-      const { deps: d, store } = deps();
+      const { deps: d, store, container } = deps();
       const result = await reapDiscoveredContainer(d, {
         dockerId: "c1",
         row: row(status),
-        reason: "dead_instance",
+        reason: "crash_reconcile",
         at: AT,
       });
       expect(result.isOk()).toBe(true);
+      expect(container.remove).toHaveBeenCalledTimes(1);
       expect(store.transitionContainerStatus).toHaveBeenCalledWith(expect.anything(), {
         id: "row-1",
-        from: status,
         to: "reaped",
         at: AT,
       });

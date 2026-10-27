@@ -705,6 +705,78 @@ describe("LocalDockerSandboxClient — container row transitions", () => {
     expect(row?.exitedAt?.toISOString()).toBe(EARLIER);
   });
 
+  it("deleteByTaskId reaps a row that create() moved to running during the kill", async () => {
+    const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+    const { docker, container } = fakeDocker({ dockerId: "docker-fwd" });
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tx,
+      runtime: "runc",
+      instanceId: inst.id,
+    });
+    // A `starting` row: the daemon has the container and a `create()` is
+    // between `createContainer` and its running transition.
+    const row = await tx((trx) =>
+      store.insertContainer(trx, {
+        dockerId: "docker-fwd",
+        parentId: null,
+        rootTaskId: TASK_ID,
+        depth: 0,
+        image: "alpine",
+        runtime: "runc",
+        labels: {
+          [LABEL_MANAGED]: "true",
+          [LABEL_INSTANCE]: inst.id,
+          "cogmo.root_task": TASK_ID,
+          "cogmo.parent": "",
+          "cogmo.depth": "0",
+        },
+        resourceLimits: RESOURCE_LIMITS,
+        ttlExpiresAt: new Date(Date.now() + 60_000),
+        instanceId: inst.id,
+      }),
+    );
+    // `create()` commits `starting → running` while the cascade is killing.
+    container.kill.mockImplementation(async () => {
+      await tx((trx) =>
+        store.transitionContainerStatus(trx, {
+          id: row.id,
+          from: "starting",
+          to: "running",
+          at: new Date(),
+        }),
+      );
+    });
+
+    await sandbox.deleteByTaskId(TASK_ID);
+
+    expect((await tx((trx) => store.getContainer(trx, row.id)))?.status).toBe("reaped");
+  });
+
+  it("create kills and removes the container it started when its row was finished mid-start", async () => {
+    const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+    const { docker, container } = fakeDocker({ dockerId: "docker-midstart" });
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tx,
+      runtime: "runc",
+      instanceId: inst.id,
+    });
+    // A cascade finishes the row between `start` being issued and the
+    // running transition.
+    container.start.mockImplementation(async () => {
+      await db.execute(
+        sql`UPDATE containers SET status = 'reaped', exited_at = now() WHERE docker_id = 'docker-midstart'`,
+      );
+    });
+
+    await expect(sandbox.create(SPEC)).rejects.toThrow(/was reaped before it finished starting/);
+    expect(container.kill).toHaveBeenCalledWith({ signal: "SIGTERM" });
+    expect(container.remove).toHaveBeenCalledWith({ force: true });
+  });
+
   it("create removes the container and releases the proxy when the row insert fails", async () => {
     // No `cogmo_instances` row for this id, so `insertContainer` fails on the
     // FK after the daemon has already created the container.
