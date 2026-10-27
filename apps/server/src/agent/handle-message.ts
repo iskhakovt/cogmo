@@ -2,6 +2,7 @@ import { match } from "ts-pattern";
 import type { Transactor } from "../db/index.js";
 import { inngest } from "../inngest/client.js";
 import { conversationTurnConcurrency } from "../inngest/concurrency.js";
+import { fromStepTools } from "../inngest/durable.js";
 import { inboundReady, responseReady } from "../inngest/events.js";
 import type { LlmProviderResolver } from "../llm/resolver.js";
 import { logger } from "../logger.js";
@@ -152,7 +153,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       concurrency: conversationTurnConcurrency,
       onFailure: async ({ event, error, step }) => {
         const { conversationId, triggerInboundId } = event.data.event.data;
-        await reportTurnFailure(step, deps.deliveryRouter, {
+        await reportTurnFailure(fromStepTools(step), deps.deliveryRouter, {
           conversationId,
           triggerInboundId,
           runId: event.data.run_id,
@@ -162,6 +163,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
     },
     async ({ event, step, runId }) => {
       const { conversationId, triggerInboundId } = event.data;
+      const durable = fromStepTools(step);
 
       // Per-turn child logger — every emission inside the agent loop inherits
       // `runId` + `conversationId` so the evolution failure-reflector can join
@@ -169,7 +171,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       const turnLogger = logger.child({ runId, conversationId });
 
       const admission = await admitTurn(
-        step,
+        durable,
         { ...deps, resumePolicy: deps.debounceConfig.resumePolicy },
         { conversationId, triggerInboundId, turnLogger },
       );
@@ -189,7 +191,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // edits between attempts surface on the next non-cached step.
       const voiceBundle = await deps.voiceResolver?.();
 
-      const { substitutedMessages } = await recordUserMessage(step, deps, {
+      const { substitutedMessages } = await recordUserMessage(durable, deps, {
         conversationId,
         inboundMessages,
         voiceBundle,
@@ -198,12 +200,12 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         firstInboundId,
       });
 
-      const transcript = await loadTurnTranscript(step, deps, {
+      const transcript = await loadTurnTranscript(durable, deps, {
         conversationId,
         turnInboundId: maxInboundId,
       });
 
-      const frozen = await freezeTurnInputs(step, deps, {
+      const frozen = await freezeTurnInputs(durable, deps, {
         conversationId,
         runId,
         userId,
@@ -233,7 +235,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
 
       // In-turn durable boundary wrapper — per-step-kind retry policy lives in
       // `createTurnStepRunner`.
-      const stepRun = createTurnStepRunner((id, fn) => step.run(id, fn));
+      const stepRun = createTurnStepRunner(durable.run);
 
       // Ahead of the view, whose attachment cutoff reads the route's frozen limits.
       const turnModel = await resolveTurnModel(stepRun, deps.resolveProvider, snapshot.model);
@@ -275,7 +277,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         turnLogger,
       });
 
-      const finalized = await finalizeTurnContext(step, frozen.systemPromptDeps, {
+      const finalized = await finalizeTurnContext(durable, frozen.systemPromptDeps, {
         messages: compacted.messages,
         provisionalTurnContext: context.provisionalTurnContext,
         transcript,
@@ -291,17 +293,22 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         timezone: deps.userTimezone,
       });
 
-      const { result, unstreamed } = await runTurnLoop(step, stepRun, deps.runStreamingAgentLoop, {
-        conversationId,
-        turnModel,
-        systemPrompt: finalized.systemPrompt,
-        messages: finalized.messages,
-        tools: frozen.turnTools,
-        service,
-        delivery,
-        firstInboundId,
-        turnLogger,
-      });
+      const { result, unstreamed } = await runTurnLoop(
+        durable,
+        stepRun,
+        deps.runStreamingAgentLoop,
+        {
+          conversationId,
+          turnModel,
+          systemPrompt: finalized.systemPrompt,
+          messages: finalized.messages,
+          tools: frozen.turnTools,
+          service,
+          delivery,
+          firstInboundId,
+          turnLogger,
+        },
+      );
 
       turnLogger.info(
         {
@@ -312,7 +319,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         "agent loop complete",
       );
 
-      const persisted = await persistTurn(step, deps, {
+      const persisted = await persistTurn(durable, deps, {
         conversationId,
         runId,
         triggerInboundId,
@@ -331,7 +338,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           return { status: "skipped" as const, reason: "superseded" as const };
         })
         .with({ kind: "persisted" }, async ({ messageId }) => {
-          await deliverReply(step, deps, {
+          await deliverReply(durable, deps, {
             conversationId,
             delivery,
             result,
@@ -344,7 +351,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
 
           // ──── DURABLE: notify (Observer, metrics — not delivery) ────
 
-          await step.sendEvent(
+          await durable.sendEvent(
             "send-response",
             responseReady.create({ conversationId, messageId }),
           );
@@ -353,7 +360,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
 
           if (deps.debounceConfig.resumePolicy === "flush") {
             // Process any remaining unbatched messages immediately (no debounce wait)
-            await step.sendEvent(
+            await durable.sendEvent(
               "flush",
               inboundReady.create({ conversationId, triggerInboundId: null }),
             );

@@ -4,9 +4,9 @@ import { mock } from "vitest-mock-extended";
 import { profiles, users } from "../agent/store/schema.js";
 import type { Database, Transactor } from "../db/index.js";
 import { inngest } from "../inngest/client.js";
-import type { StepRun } from "../inngest/index.js";
+
 import { expectDefined } from "../test/assertions.js";
-import { fakeRunInTx, spyOnInngestSend } from "../test/factories.js";
+import { fakeRunInTx, makeStepRun, spyOnInngestSend } from "../test/factories.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import { createSkillCronTicker, runSkillCronTick } from "./cron-ticker.js";
 import {
@@ -48,7 +48,7 @@ afterAll(async () => {
 
 // Same shim as scheduling/ticker.test.ts — strips Inngest's JSON memoization
 // round-trip so Date instances survive into the test body.
-const stepRun = ((_: string, fn: () => Promise<unknown>) => fn()) as unknown as StepRun;
+const stepRun = makeStepRun();
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 

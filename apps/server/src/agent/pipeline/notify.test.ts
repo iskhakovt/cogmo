@@ -5,7 +5,7 @@ import { notifyAfterRetries } from "./notify.js";
 describe("notifyAfterRetries", () => {
   it("delivers the notice inside the named step", async () => {
     const notifyConversation = vi.fn().mockResolvedValue(undefined);
-    const run = vi.fn((_id: string, body: () => Promise<unknown>) => body());
+    const run = vi.fn().mockImplementation((_id: string, body: () => Promise<unknown>) => body());
 
     await notifyAfterRetries(
       { run },

@@ -3,8 +3,8 @@
  * the hand-off fails.
  */
 
-import type { Inngest } from "inngest";
 import type { Transactor } from "../../db/index.js";
+import type { EventPublisher } from "../../inngest/durable.js";
 import { codingTaskStart } from "../../inngest/events.js";
 import { logger } from "../../logger.js";
 import { describeError } from "../../util/describe-error.js";
@@ -36,7 +36,7 @@ const log = logger.child({ component: "coding.service" });
  * ambiguity wants a transactional outbox (tracked in `todo.md`).
  */
 export async function startCodingTask(
-  deps: { runInTx: Transactor; codingStore: CodingStore; inngest: Pick<Inngest, "send"> },
+  deps: { runInTx: Transactor; codingStore: CodingStore; inngest: EventPublisher },
   taskId: string,
 ): Promise<void> {
   try {

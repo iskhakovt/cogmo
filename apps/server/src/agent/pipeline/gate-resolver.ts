@@ -20,16 +20,17 @@
 
 import { match, P } from "ts-pattern";
 import { inngest as inngestClient } from "../../inngest/client.js";
+import { type Durable, fromStepTools } from "../../inngest/durable.js";
 import {
   buildPipelineStageDueEvent,
   type PipelineGateDecision,
   pipelineGateResolved,
   pipelineGateSettled,
 } from "../../inngest/events.js";
-import type { StepSendEvent } from "../../inngest/index.js";
+
 import { logger } from "../../logger.js";
 import type { DeliveryRouter } from "../../transport/delivery-router.js";
-import { type NoticeStep, notifyAfterRetries } from "./notify.js";
+import { notifyAfterRetries } from "./notify.js";
 import {
   inspectFailedResolution,
   type ResolveGateDeps,
@@ -56,10 +57,6 @@ interface GateResolution {
   gateKey: string;
   conversationId: string;
   decision: PipelineGateDecision;
-}
-
-interface FollowUpStep extends NoticeStep {
-  sendEvent: StepSendEvent;
 }
 
 function isTap(decision: PipelineGateDecision): boolean {
@@ -160,7 +157,7 @@ export function gateNotice(
  * the run cursor), and deliver the notice.
  */
 async function sendFollowUps(
-  step: FollowUpStep,
+  step: Pick<Durable, "run" | "sendEvent">,
   deliveryRouter: PipelineGateResolverDeps["deliveryRouter"],
   resolution: GateResolution,
   outcome: ResolveGateOutcome,
@@ -207,8 +204,9 @@ export function createPipelineGateResolver(deps: PipelineGateResolverDeps) {
       onFailure: async ({ event, error, step }) => {
         const resolution = event.data.event.data;
         const { runId, gateKey, conversationId, decision } = resolution;
+        const durable = fromStepTools(step);
         log.error({ err: error, runId, gateKey, decision }, "gate resolution failed after retries");
-        const inspection = await step.run("inspect-gate", () =>
+        const inspection = await durable.run("inspect-gate", () =>
           inspectFailedResolution(deps, {
             runId,
             gateKey,
@@ -222,7 +220,7 @@ export function createPipelineGateResolver(deps: PipelineGateResolverDeps) {
         await match(inspection)
           .with({ kind: "parked" }, () =>
             notifyAfterRetries(
-              step,
+              durable,
               "notify-tap-failed",
               deps.deliveryRouter,
               conversationId,
@@ -232,7 +230,7 @@ export function createPipelineGateResolver(deps: PipelineGateResolverDeps) {
           )
           .with({ kind: "failed" }, () =>
             notifyAfterRetries(
-              step,
+              durable,
               "notify-run-failed",
               deps.deliveryRouter,
               conversationId,
@@ -241,7 +239,7 @@ export function createPipelineGateResolver(deps: PipelineGateResolverDeps) {
             ),
           )
           .with({ kind: P.union("stale", "not_found") }, (outcome) =>
-            sendFollowUps(step, deps.deliveryRouter, resolution, outcome),
+            sendFollowUps(durable, deps.deliveryRouter, resolution, outcome),
           )
           .exhaustive();
       },
@@ -249,10 +247,11 @@ export function createPipelineGateResolver(deps: PipelineGateResolverDeps) {
     async ({ event, step, runId: resolverRunId }) => {
       const resolution = event.data;
       const { runId, gateKey, decision } = resolution;
-      const outcome = await step.run("resolve-gate", () =>
+      const durable = fromStepTools(step);
+      const outcome = await durable.run("resolve-gate", () =>
         resolveGate(deps, { runId, gateKey, decision, resolverRunId }),
       );
-      await sendFollowUps(step, deps.deliveryRouter, resolution, outcome);
+      await sendFollowUps(durable, deps.deliveryRouter, resolution, outcome);
       return outcome;
     },
   );

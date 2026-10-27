@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Transactor } from "../../db/index.js";
-import type { StepRun } from "../../inngest/index.js";
+
 import { logger } from "../../logger.js";
-import { makeStepRun, nullStepSendEvent } from "../../test/factories.js";
+import { fakeDurable } from "../../test/fake-durable.js";
 import type { DeliveryRouter } from "../../transport/delivery-router.js";
 import type { TransportStore } from "../../transport/store/index.js";
 import type { DebounceConfig } from "../debounce.js";
@@ -40,13 +40,7 @@ function setup(opts: Setup = {}) {
     opts.inbound ?? [{ id: "in-2", content: "hello", source: "user" }],
   );
   const deliveryRouter = mock<DeliveryRouter>();
-  const stepIds: string[] = [];
-  const inline = makeStepRun();
-  const run: StepRun = (idOrOptions, fn, ...input) => {
-    stepIds.push(String(idOrOptions));
-    return inline(idOrOptions, fn, ...input);
-  };
-  const step = { run, sendEvent: nullStepSendEvent() };
+  const step = fakeDurable();
   const deps = {
     runInTx: fakeRunInTx,
     agentStore,
@@ -54,7 +48,7 @@ function setup(opts: Setup = {}) {
     deliveryRouter,
     resumePolicy: opts.resumePolicy ?? "debounce",
   };
-  return { step, stepIds, deps, agentStore, transportStore, deliveryRouter };
+  return { step, stepIds: step.stepIds, deps, agentStore, transportStore, deliveryRouter };
 }
 
 const args = (triggerInboundId: string | null) => ({
@@ -79,7 +73,7 @@ describe("admitTurn", () => {
       "conv",
       "in-1",
     );
-    expect(stepIds).toEqual([
+    expect(stepIds()).toEqual([
       "load-conversation",
       "last-assistant",
       "load-turn-snapshot",
@@ -92,7 +86,7 @@ describe("admitTurn", () => {
       lastAssistant: { id: "msg-1", lastInboundMessageId: "in-5" },
     });
     expect(await admitTurn(step, deps, args("in-3"))).toEqual({ kind: "skipped", reason: "stale" });
-    expect(stepIds).not.toContain("load-inbound");
+    expect(stepIds()).not.toContain("load-inbound");
   });
 
   it("skips a trigger older than the last reply under await_input", async () => {
@@ -126,7 +120,7 @@ describe("admitTurn", () => {
       kind: "skipped",
       reason: "cooldown",
     });
-    expect(stepIds.at(-1)).toBe("in-cooldown-reply");
+    expect(stepIds().at(-1)).toBe("in-cooldown-reply");
     expect(deliveryRouter.notifyConversation).toHaveBeenCalledWith("conv", expect.any(String));
   });
 

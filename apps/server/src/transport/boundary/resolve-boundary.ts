@@ -1,7 +1,7 @@
-import type { Inngest } from "inngest";
 import { err, ok, type Result } from "neverthrow";
 import type { AgentStore } from "../../agent/store/index.js";
 import type { Transactor } from "../../db/index.js";
+import type { EventPublisher } from "../../inngest/durable.js";
 import {
   type BoundaryResolvedReason,
   buildBoundaryResolvedEvent,
@@ -31,7 +31,7 @@ export interface ResolveBoundaryDeps {
   runInTx: Transactor;
   transportStore: TransportStore;
   agentStore: AgentStore;
-  inngest: Inngest;
+  inngest: EventPublisher;
   channelId: string;
   defaultProfileId: string;
 }

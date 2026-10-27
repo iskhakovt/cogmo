@@ -1,4 +1,5 @@
 import type { Transactor } from "../../db/index.js";
+import type { Durable } from "../../inngest/durable.js";
 import type { ToolDefinition } from "../../llm/types.js";
 import { type InboundContent, isVoiceContent } from "../../transport/content.js";
 import type {
@@ -21,7 +22,6 @@ import type { AgentStore, Profile, VoiceMode } from "../store/index.js";
 import type { ToolRegistry } from "../tools.js";
 import { bindFrozenTools, freezeToolTable } from "../turn-tools.js";
 import { buildLiveToolCatalog, type LiveToolCatalogDeps } from "./live-tool-catalog.js";
-import type { TurnSteps } from "./turn-steps.js";
 
 export interface FreezeTurnInputsDeps extends Omit<LiveToolCatalogDeps, "agentStore"> {
   runInTx: Transactor;
@@ -73,7 +73,7 @@ export interface FrozenTurnInputs {
  * `load-system-prompt`.
  */
 export async function freezeTurnInputs(
-  step: TurnSteps,
+  step: Durable,
   deps: FreezeTurnInputsDeps,
   args: FreezeTurnInputsArgs,
 ): Promise<FrozenTurnInputs> {

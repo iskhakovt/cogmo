@@ -34,8 +34,8 @@
 
 import type { Inngest } from "inngest";
 import type { Transactor } from "../../db/index.js";
+import { type Durable, fromStepTools } from "../../inngest/durable.js";
 import { scheduledTaskFire } from "../../inngest/events.js";
-import type { StepRun } from "../../inngest/index.js";
 import { logger } from "../../logger.js";
 import type { AgentStore, ScheduledTask } from "../store/index.js";
 import { computeNextRun } from "./cron.js";
@@ -92,12 +92,13 @@ export function createScheduledTaskTicker(deps: SchedulingTickerDeps, inngest: I
       triggers: [{ cron: "* * * * *" }],
     },
     async ({ step }) => {
-      const events = await runScheduledTaskTick(deps, step.run);
+      const durable = fromStepTools(step);
+      const events = await runScheduledTaskTick(deps, durable.run);
       if (events.length === 0) return { picked: 0 };
       // `step.sendEvent` is itself a durable step — a ticker retry won't
       // re-emit because the per-event idempotency keys (set on `.id`
       // below) dedup at Inngest's event bus.
-      await step.sendEvent(
+      await durable.sendEvent(
         "fan-out",
         events.map((e) => ({
           ...scheduledTaskFire.create(e),
@@ -117,7 +118,7 @@ export function createScheduledTaskTicker(deps: SchedulingTickerDeps, inngest: I
  */
 export async function runScheduledTaskTick(
   deps: SchedulingTickerDeps,
-  stepRun: StepRun,
+  stepRun: Durable["run"],
 ): Promise<FirePayload[]> {
   const now = (deps.now ?? (() => new Date()))();
   const batchSize = deps.batchSize ?? TICK_BATCH_SIZE;

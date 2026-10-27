@@ -1,14 +1,15 @@
 import { NonRetriableError } from "inngest";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
+import type { StepRunner } from "./loop.js";
 import { asNonRetriable, createTurnStepRunner } from "./turn-step-runner.js";
 
 /** A `step.run` stand-in that runs the body inline, recording the id. */
 function inlineRun() {
   const ids: string[] = [];
-  const run = vi.fn((id: string, fn: () => Promise<unknown>) => {
+  const run: StepRunner = (id, fn) => {
     ids.push(id);
     return fn();
-  });
+  };
   return { ids, run };
 }
 

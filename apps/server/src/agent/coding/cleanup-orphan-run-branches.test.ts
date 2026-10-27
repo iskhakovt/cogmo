@@ -6,9 +6,10 @@ import { sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Database, Transactor } from "../../db/index.js";
-import type { StepRun } from "../../inngest/index.js";
+
 import type { SecretsStore } from "../../secrets/store/index.js";
 import { expectOk } from "../../test/assertions.js";
+import { makeStepRun } from "../../test/factories.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { sweepRepo } from "./cleanup-orphan-run-branches.js";
 import { type CodingRepoRow, type CodingTaskRow, DrizzleCodingStore } from "./store/index.js";
@@ -44,7 +45,7 @@ const validIdentity = JSON.stringify({
 
 // Inline `step.run` shim — replays the body inline, mirroring the
 // orchestrator test pattern. Cast at the seam per the project convention.
-const stepRun = ((_: string, fn: () => Promise<unknown>) => fn()) as unknown as StepRun;
+const stepRun = makeStepRun();
 
 async function seedRepo(): Promise<CodingRepoRow> {
   return tx((trx) =>

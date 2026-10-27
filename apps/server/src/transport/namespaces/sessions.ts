@@ -1,5 +1,5 @@
-import type { Inngest } from "inngest";
 import { err, ok, type Result } from "neverthrow";
+import type { EventPublisher } from "../../inngest/durable.js";
 import type { inboundArrived as InboundArrivedEvent } from "../../inngest/events.js";
 import { logger } from "../../logger.js";
 import type { AttachmentStore } from "../attachment-store.js";
@@ -48,7 +48,7 @@ export interface TransportSessions {
 export function createSessions(
   deps: TransportContext & {
     defaultProfileId: string;
-    inngest: Inngest;
+    inngest: EventPublisher;
     inboundArrived: typeof InboundArrivedEvent;
     attachments: AttachmentStore;
     idleTimeoutMs: number;

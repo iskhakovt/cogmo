@@ -3,9 +3,9 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { mock } from "vitest-mock-extended";
 import type { Database, Transactor } from "../../db/index.js";
 import { inngest } from "../../inngest/client.js";
-import type { StepRun } from "../../inngest/index.js";
+
 import { expectOk } from "../../test/assertions.js";
-import { fakeRunInTx, spyOnInngestSend } from "../../test/factories.js";
+import { fakeRunInTx, makeStepRun, spyOnInngestSend } from "../../test/factories.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import type { AgentStore } from "../store/index.js";
 import { DrizzleAgentStore } from "../store/index.js";
@@ -31,7 +31,7 @@ afterAll(async () => {
 
 // Inline step.run shim — same pattern as cleanup-orphan-run-branches.test.ts.
 // Strips Inngest's JSON memoization round-trip (preserves Date instances).
-const stepRun = ((_: string, fn: () => Promise<unknown>) => fn()) as unknown as StepRun;
+const stepRun = makeStepRun();
 
 async function seedUserAndProfile(): Promise<{ userId: string; profileId: string }> {
   const userId = (await tx((trx) => store.createUser(trx))).id;

@@ -162,4 +162,48 @@ describe("createBoundaryJanitor", () => {
     // No drain happened — getBoundaryPendingById returned undefined.
     expect(transportStore.persistInbound).not.toHaveBeenCalled();
   });
+
+  it("emits a resolution's events through the injected publisher, not the client the function runs on", async () => {
+    const publisher = { send: vi.fn().mockResolvedValue(undefined) };
+    const transportStore = mockTransportStore({
+      listExpiredBoundaryPending: vi
+        .fn()
+        .mockResolvedValue([{ id: "b1", channelId: "ch-1", platformAddress: "chat-A" }]),
+      getBoundaryPendingById: vi.fn().mockResolvedValue({
+        id: "b1",
+        channelId: "ch-1",
+        platformAddress: "chat-A",
+        platformUserHandle: "tg-7",
+        priorConversationId: "conv-prior",
+        promptMessageId: "tg-msg:1",
+        bufferedInbounds: [{ content: "hi", platformTs: "2026-05-19T12:00:00.000Z" }],
+        expiresAt: new Date("2026-05-19T11:00:00.000Z"),
+        createdAt: new Date("2026-05-19T10:00:00.000Z"),
+      }),
+      resolveUser: vi.fn().mockResolvedValue({ userId: "u-7" }),
+      createSession: vi.fn().mockResolvedValue({ id: "session-new" }),
+      persistInbound: vi.fn().mockResolvedValue({ id: "inbound-new" }),
+      getChatDefaultProfile: vi.fn().mockResolvedValue(undefined),
+      deleteBoundaryPending: vi.fn().mockResolvedValue(undefined),
+    });
+    const fn = createBoundaryJanitor({
+      runInTx: fakeRunInTx,
+      transportStore,
+      agentStore: mockAgentStore({
+        createConversation: vi.fn().mockResolvedValue({ id: "conv-new" }),
+      }),
+      inngest: publisher,
+      defaultProfileId: "profile-default",
+    });
+
+    const result = (await new InngestTestEngine({
+      function: fn,
+      events: [{ name: "inngest/function.invoked", data: {} } as never],
+    }).execute()) as { result?: { resolved: number; scanned: number } };
+
+    expect(result.result).toEqual({ resolved: 1, scanned: 1 });
+    const sent = publisher.send.mock.calls.map(([event]) => event.name);
+    expect(sent).toEqual(["inbound/arrived", "conversation/boundary/resolved"]);
+    expect(sendSpy).not.toHaveBeenCalled();
+  });
 });

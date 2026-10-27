@@ -1,4 +1,5 @@
 import { NonRetriableError } from "inngest";
+import type { Durable } from "../../inngest/durable.js";
 import type { LlmProviderResolver } from "../../llm/resolver.js";
 import type { AttachmentStore } from "../../transport/attachment-store.js";
 import { contentToBlocks } from "../../transport/content.js";
@@ -15,7 +16,6 @@ import {
   substituteTranscripts,
 } from "./inbound-batch.js";
 import { freezeLimits, limitsPolicy, resolveOrFail } from "./resolve-turn-model.js";
-import type { TurnSteps } from "./turn-steps.js";
 
 export interface RecordUserMessageDeps extends Omit<NormalizeArrivalDeps, "attachments"> {
   agentStore: Pick<AgentStore, "insertMessage">;
@@ -47,7 +47,7 @@ export interface RecordedUserMessage {
  * `create-user-message`.
  */
 export async function recordUserMessage(
-  step: TurnSteps,
+  step: Durable,
   deps: RecordUserMessageDeps,
   args: RecordUserMessageArgs,
 ): Promise<RecordedUserMessage> {
