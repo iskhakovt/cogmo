@@ -39,7 +39,13 @@ import { type CodingRun, codingRun, loadTaskAndRepo } from "./coding-run.js";
 import { parseRemoteUrl } from "./open-pr.js";
 import type { CodingRepoRow, CodingStore, CodingTaskRow } from "./store/index.js";
 import { failTaskFromCatch, recordTaskFailed } from "./task-failure.js";
-import { CLAIMS, claimTask, reclaimEndedTask, type TaskLeft } from "./task-lifecycle.js";
+import {
+  CLAIMS,
+  claimTask,
+  reclaimEndedTask,
+  reclaimIfEnded,
+  type TaskLeft,
+} from "./task-lifecycle.js";
 import {
   checkoutFeatureBranchStep,
   lazySession,
@@ -285,16 +291,14 @@ async function leaveVerify(
   stage: string,
 ): Promise<VerifyOrchestratorResult> {
   run.log.info(
-    { transition: left.transition, ended: left.ended },
+    { transition: left.transition, via: left.via },
     `verify: task left its status before ${stage} was recorded — stopping`,
   );
-  if (left.ended) {
-    await reclaimEndedTask(run, deps, {
-      repo: failure.repo,
-      assignment: failure.assignment,
-      notify: null,
-    });
-  }
+  await reclaimIfEnded(run, deps, left, {
+    repo: failure.repo,
+    assignment: failure.assignment,
+    notify: null,
+  });
   return { status: "skipped" };
 }
 
@@ -310,27 +314,30 @@ async function failVerify(
   rawReason: string,
 ): Promise<VerifyOrchestratorResult> {
   const recorded = await recordTaskFailed(run, deps, rawReason, "transition-failed");
-  if (recorded.kind === "ended") {
-    await reclaimEndedTask(run, deps, {
-      repo: failure.repo,
-      assignment: failure.assignment,
-      notify: null,
-    });
-    return { status: "skipped" };
-  }
-  const { reason } = recorded;
-  await run
-    .stepRun("teardown-worktree", () =>
-      safeTeardownWorktree({
-        secretsStore: deps.secretsStore,
-        runInTx: deps.runInTx,
+  return await match(recorded)
+    .with({ kind: "ended" }, async (): Promise<VerifyOrchestratorResult> => {
+      await reclaimEndedTask(run, deps, {
         repo: failure.repo,
-        taskId: run.taskId,
-        worktreeAssignment: failure.assignment,
-      }),
-    )
-    .catch(() => undefined);
-  return { status: "failed", failureReason: reason };
+        assignment: failure.assignment,
+        notify: null,
+      });
+      return { status: "skipped" };
+    })
+    .with({ kind: "recorded" }, async ({ reason }): Promise<VerifyOrchestratorResult> => {
+      await run
+        .stepRun("teardown-worktree", () =>
+          safeTeardownWorktree({
+            secretsStore: deps.secretsStore,
+            runInTx: deps.runInTx,
+            repo: failure.repo,
+            taskId: run.taskId,
+            worktreeAssignment: failure.assignment,
+          }),
+        )
+        .catch(() => undefined);
+      return { status: "failed", failureReason: reason };
+    })
+    .exhaustive();
 }
 
 /** A fresh container with the askpass dir mounted read-only. */

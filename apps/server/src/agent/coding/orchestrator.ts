@@ -272,15 +272,29 @@ async function endPlanFailed(
   rawReason: string,
 ): Promise<CodingOrchestratorResult> {
   const recorded = await recordTaskFailed(run, deps, rawReason, "transition-failed");
-  if (recorded.kind === "ended") {
-    await reclaimEndedTask(run, deps, {
-      repo: args.repo,
-      assignment: args.assignment,
-      notify: { stream: args.stream, message: "Task cancelled while planning." },
-    });
-    return { status: "skipped" };
-  }
-  const { reason } = recorded;
+  return await match(recorded)
+    .with({ kind: "ended" }, async (): Promise<CodingOrchestratorResult> => {
+      await reclaimEndedTask(run, deps, {
+        repo: args.repo,
+        assignment: args.assignment,
+        notify: { stream: args.stream, message: "Task cancelled while planning." },
+      });
+      return { status: "skipped" };
+    })
+    .with({ kind: "recorded" }, async ({ reason }): Promise<CodingOrchestratorResult> => {
+      await tearDownFailedPlan(run, deps, args, reason);
+      return { status: "failed", failureReason: reason };
+    })
+    .exhaustive();
+}
+
+/** The failure is committed: reap the worktree and sandbox, then tell the stream. */
+async function tearDownFailedPlan(
+  run: CodingRun,
+  deps: CodingOrchestratorDeps,
+  args: { repo: CodingRepoRow; assignment: WorktreeAssignment; stream: PlanStreamHandle },
+  reason: string,
+): Promise<void> {
   await run.stepRun("teardown-worktree", () =>
     safeTeardownWorktree({
       runInTx: deps.runInTx,
@@ -296,12 +310,11 @@ async function endPlanFailed(
   await args.stream.fail(reason).catch((streamErr: unknown) => {
     run.log.warn({ err: streamErr }, "plan stream fail notification failed");
   });
-  return { status: "failed", failureReason: reason };
 }
 
 /** How an execute failure exit reads to the run's caller. */
-function executeResultOf(ended: RecordedFailure): CodingExecuteResult {
-  return match(ended)
+function executeResultOf(recorded: RecordedFailure): CodingExecuteResult {
+  return match(recorded)
     .with(
       { kind: "recorded" },
       ({ reason }): CodingExecuteResult => ({
@@ -348,14 +361,14 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
     });
     if (result.isError) {
       const rawReason = result.failureReason ?? "execute phase failed";
-      const ended = await endExecuteFailed(run, deps, exit, rawReason, {
+      const recorded = await endExecuteFailed(run, deps, exit, rawReason, {
         transition: "transition-failed",
         teardownWorktree: "teardown-worktree",
         teardown: "teardown",
         sandboxDeleted: "persist-sandbox-deleted",
         logSuffix: "",
       });
-      return executeResultOf(ended);
+      return executeResultOf(recorded);
     }
     await persistSessionUsage(run, deps, result.usage);
     if (sandbox.push) {
@@ -368,14 +381,14 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       if (pushFailure !== null) {
         // `safeTeardownWorktree` is a no-op for git-remote, the only
         // transport that pushes here, so no worktree teardown step.
-        const ended = await endExecuteFailed(run, deps, exit, pushFailure, {
+        const recorded = await endExecuteFailed(run, deps, exit, pushFailure, {
           transition: "transition-failed-after-push",
           teardownWorktree: null,
           teardown: "teardown-after-push-failure",
           sandboxDeleted: "persist-sandbox-deleted-after-push-failure",
           logSuffix: " (push failure)",
         });
-        return executeResultOf(ended);
+        return executeResultOf(recorded);
       }
     }
     const handOff = await handOffToVerify(run, deps, params.inngest, {

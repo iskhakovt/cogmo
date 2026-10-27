@@ -26,10 +26,11 @@ async function emitTaskFailed(run: CodingRun, reason: string): Promise<void> {
 
 /**
  * `recorded`: the task reads `failed` and `coding/task/failed` is out;
- * `reason` is the masked text the row, the event and the caller's chat
- * message share. `ended`: the task was already terminal under another
- * writer — a Cancel during the session — so nothing was written or emitted,
- * and the run reclaims what it holds instead of reporting a failure.
+ * `reason` is the masked text this run emitted and reports, and the row's
+ * `failure_reason` unless reconcile wrote `failed` first. `ended`: the task
+ * was already terminal under another writer — a Cancel during the session —
+ * so nothing was written or emitted, and the run reclaims what it holds
+ * instead of reporting a failure.
  */
 export type RecordedFailure =
   | { kind: "recorded"; reason: string }
@@ -55,26 +56,24 @@ export async function recordTaskFailed(
   const transition = await run.stepRun(transitionStepId, () =>
     deps.runInTx((tx) => deps.store.failTaskIfNonTerminal(tx, run.taskId, failureReason)),
   );
-  const outcome = match(transition)
-    .with({ kind: "failed" }, { kind: "already_terminal", status: "failed" }, () => ({
-      kind: "recorded" as const,
-      reason: failureReason,
-    }))
-    .with({ kind: "already_terminal" }, ({ status }) => ({ kind: "ended" as const, status }))
+  return await match(transition)
+    .with(
+      { kind: "failed" },
+      { kind: "already_terminal", status: "failed" },
+      async (): Promise<RecordedFailure> => {
+        await emitTaskFailed(run, failureReason);
+        return { kind: "recorded", reason: failureReason };
+      },
+    )
+    .with({ kind: "already_terminal" }, async ({ status }): Promise<RecordedFailure> => {
+      run.log.info({ status }, "task ended under the run before its failure — not recorded");
+      return { kind: "ended", status };
+    })
     .with({ kind: "not_found" }, () => {
       // The row this run claimed at its head cannot have gone missing.
       throw new Error(`coding task ${run.taskId} vanished before its failure was recorded`);
     })
     .exhaustive();
-  if (outcome.kind === "ended") {
-    run.log.info(
-      { status: outcome.status },
-      "task ended under the run before its failure — not recorded",
-    );
-    return outcome;
-  }
-  await emitTaskFailed(run, failureReason);
-  return outcome;
 }
 
 /**

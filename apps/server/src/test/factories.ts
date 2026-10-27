@@ -681,6 +681,16 @@ export function makeStepRun(): StepRun {
   return ((_id: string, fn: () => Promise<unknown>) => fn()) as unknown as StepRun;
 }
 
+/** `makeStepRun`, recording each step id it runs, so a test can assert which steps a path took. */
+export function recordingStepRun(): { ids: string[]; stepRun: StepRun } {
+  const ids: string[] = [];
+  const stepRun = ((id: string, fn: () => Promise<unknown>) => {
+    ids.push(id);
+    return fn();
+  }) as unknown as StepRun;
+  return { ids, stepRun };
+}
+
 /**
  * `step.sendEvent` shim that forwards each emission to `inngest.send`
  * on the supplied client. Lets orchestrator tests written against

@@ -6,6 +6,7 @@
  * lifecycle.
  */
 
+import { match, P } from "ts-pattern";
 import type { SandboxClient } from "../../sandbox/index.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import type { CodingRun, TaskStoreDeps } from "./coding-run.js";
@@ -65,18 +66,18 @@ export async function claimTask(
   return owned ? { kind: "owned" } : { kind: "lost", transition };
 }
 
-/**
- * `advanced`: the task is at `to`. `left`: it moved out of `from` under this
- * run. `ended` says whether it went terminal (a Cancel, or a sibling run's
- * failure) — no owner left, so the run reclaims what it allocated — rather
- * than forward, where another run is working on those very resources.
- */
+/** `advanced`: the task is at `to`. `left`: it moved out of `from` under this run. */
 type AdvanceOutcome = { kind: "advanced" } | TaskLeft;
 
-/** The task moved out of the status a stage expected, under the run that expected it. */
+/**
+ * The task moved out of the status a stage expected, under the run that
+ * expected it. `ended`: it went terminal (a Cancel, or a sibling run's
+ * failure) — no owner left, so the run reclaims what it allocated. `moved`:
+ * it went forward, and another run is working on those very resources.
+ */
 export interface TaskLeft {
   kind: "left";
-  ended: boolean;
+  via: "ended" | "moved";
   transition: TransitionResult;
 }
 
@@ -101,11 +102,43 @@ export async function advanceTask(
   ) {
     return { kind: "advanced" };
   }
-  const ended =
-    transition.kind === "stale" &&
-    (transition.status === "cancelled" || transition.status === "failed");
-  return { kind: "left", ended, transition };
+  const via = match(transition)
+    .with({ kind: "stale", status: P.union("cancelled", "failed") }, () => "ended" as const)
+    .otherwise(() => "moved" as const);
+  return { kind: "left", via, transition };
 }
+
+/** What `reclaimEndedTask` reclaims, and whom it tells. */
+interface ReclaimArgs {
+  repo: CodingRepoRow;
+  assignment: WorktreeAssignment;
+  /**
+   * The run's progress stream and the message it fails with; null for the
+   * verify run, which has no stream of its own.
+   */
+  notify: { stream: { fail(message: string): Promise<void> }; message: string } | null;
+}
+
+/**
+ * Reclaims the task's resources when it left by ending. A task that moved
+ * forward belongs to another run, whose resources this one must not touch.
+ */
+export async function reclaimIfEnded(
+  run: CodingRun,
+  deps: ReclaimDeps,
+  left: TaskLeft,
+  args: ReclaimArgs,
+): Promise<void> {
+  await match(left.via)
+    .with("ended", () => reclaimEndedTask(run, deps, args))
+    .with("moved", () => Promise.resolve())
+    .exhaustive();
+}
+
+type ReclaimDeps = TaskStoreDeps & {
+  sandbox: Pick<SandboxClient, "deleteByTaskId">;
+  secretsStore: SecretsStore;
+};
 
 /**
  * Reclaims the worktree, sandbox and stream of a task that ended under this
@@ -115,21 +148,11 @@ export async function advanceTask(
  * delete failure is logged rather than thrown, since reaching the catch
  * would overwrite `cancelled` with `failed`. The periodic reaper is the
  * backstop.
- *
- * `notify` is the run's progress stream and the message it fails with; null
- * for the verify run, which has no stream of its own.
  */
 export async function reclaimEndedTask(
   run: CodingRun,
-  deps: TaskStoreDeps & {
-    sandbox: Pick<SandboxClient, "deleteByTaskId">;
-    secretsStore: SecretsStore;
-  },
-  args: {
-    repo: CodingRepoRow;
-    assignment: WorktreeAssignment;
-    notify: { stream: { fail(message: string): Promise<void> }; message: string } | null;
-  },
+  deps: ReclaimDeps,
+  args: ReclaimArgs,
 ): Promise<void> {
   await run.stepRun("teardown-worktree-cancelled", () =>
     safeTeardownWorktree({

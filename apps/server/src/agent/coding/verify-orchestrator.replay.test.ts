@@ -283,6 +283,63 @@ describe("coding-task-verify — Inngest replay", () => {
     expect(h.create).toHaveBeenCalledTimes(1);
   });
 
+  it("a run in flight across the deploy that replaced `set-status-pr-open` finishes at `pr_open`", async () => {
+    // The superseded step wrote `pr_open` and memoized `void`; everything up
+    // to and including `set-pr-metadata` and `emit-pr-opened` is in state.
+    // `transition-pr-open` executes once, reads `stale` at its own target,
+    // and the run finishes without a second `pulls.create`.
+    const h = setup(verifiableTask({ status: "pr_open" }));
+    const fn = createCodingVerifyOrchestrator(h.deps, inngest);
+
+    const engine = new InngestTestEngine({
+      function: fn,
+      events: [cliDoneEvent],
+      steps: [
+        { id: "set-status-verifying", handler: () => ({ kind: "transitioned" }) },
+        {
+          id: "run-verify",
+          handler: () => ({
+            ok: true,
+            exitCode: 0,
+            output: "PASS",
+            durationMs: 1,
+            timedOut: false,
+          }),
+        },
+        { id: "emit-verify-complete", handler: () => null },
+        {
+          id: "commit-and-push",
+          handler: () => ({ kind: "pushed", commitSha: HEAD_SHA, output: "" }),
+        },
+        { id: "transition-pushed", handler: () => ({ kind: "transitioned" }) },
+        { id: "emit-pushed", handler: () => null },
+        {
+          id: "open-pr",
+          handler: () => ({
+            kind: "opened",
+            url: "https://github.com/user/cogmo/pull/7",
+            number: 7,
+            branchSha: HEAD_SHA,
+            openedAt: "2026-08-20T00:02:00Z",
+          }),
+        },
+        { id: "set-pr-metadata", handler: () => null },
+        { id: "emit-pr-opened", handler: () => null },
+      ],
+    });
+    const { result, error } = await engine.execute();
+
+    expect(error).toBeUndefined();
+    expect(result).toEqual({
+      status: "pr_open",
+      prUrl: "https://github.com/user/cogmo/pull/7",
+      prNumber: 7,
+    });
+    expect(h.store.current().status).toBe("pr_open");
+    expect(h.log.push).toBe(0);
+    expect(h.create).not.toHaveBeenCalled();
+  });
+
   it("skips a duplicate event before reaching the failure machinery", async () => {
     // A duplicate `cli-done` for a task that already finished. The
     // conditional UPDATE matches no row, so the run must return `skipped`

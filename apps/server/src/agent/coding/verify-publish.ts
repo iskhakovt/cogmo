@@ -6,6 +6,7 @@
 import type { Octokit } from "@octokit/rest";
 import type { Inngest } from "inngest";
 import { err, ok, type Result } from "neverthrow";
+import { match } from "ts-pattern";
 import { buildCodingTaskPushedEvent } from "../../inngest/events.js";
 import type { AskpassMaterials } from "../../sandbox/askpass.js";
 import type { SandboxClient, SandboxSession } from "../../sandbox/index.js";
@@ -104,13 +105,17 @@ export async function pushVerifiedBranch(
     from: "verifying",
     to: "pushed",
   });
-  if (pushed.kind === "left") return ok(pushed);
-  await run.stepRun("emit-pushed", () =>
-    inngest
-      .send(buildCodingTaskPushedEvent({ taskId: run.taskId, branchSha }))
-      .then(() => undefined),
-  );
-  return ok({ kind: "pushed", branchSha });
+  return await match(pushed)
+    .with({ kind: "left" }, (left): Result<PushOutcome, string> => ok(left))
+    .with({ kind: "advanced" }, async (): Promise<Result<PushOutcome, string>> => {
+      await run.stepRun("emit-pushed", () =>
+        inngest
+          .send(buildCodingTaskPushedEvent({ taskId: run.taskId, branchSha }))
+          .then(() => undefined),
+      );
+      return ok({ kind: "pushed", branchSha });
+    })
+    .exhaustive();
 }
 
 interface OpenTaskPrDeps extends TaskStoreDeps {
@@ -170,24 +175,28 @@ export async function openTaskPr(
     from: "pushed",
     to: "pr_open",
   });
-  if (opened.kind === "left") return ok(opened);
-  await run.stepRun("emit-pr-opened", () =>
-    inngest
-      .send({
-        name: "coding/task/pr-opened",
-        data: { taskId: run.taskId, prUrl: pr.url, prNumber: pr.number },
-        // Matters more than its siblings: `auto-register-skill` subscribes
-        // to this one, and a re-send re-enters the register flow (mostly
-        // absorbed by its `no_op` tip resolution) alongside any user-facing
-        // notification firing twice.
-        id: `pr-opened-${run.taskId}`,
-      })
-      .then(() => undefined),
-  );
-  if (deps.sandbox.capabilities.workingTreeTransport === "git-remote") {
-    await fetchBackFeatureBranch(run, { repo, branch: assignment.branch, identity });
-  }
-  return ok({ kind: "opened", url: pr.url, number: pr.number });
+  return await match(opened)
+    .with({ kind: "left" }, (left): Result<PrOutcome, string> => ok(left))
+    .with({ kind: "advanced" }, async (): Promise<Result<PrOutcome, string>> => {
+      await run.stepRun("emit-pr-opened", () =>
+        inngest
+          .send({
+            name: "coding/task/pr-opened",
+            data: { taskId: run.taskId, prUrl: pr.url, prNumber: pr.number },
+            // Matters more than its siblings: `auto-register-skill`
+            // subscribes to this one, and a re-send re-enters the register
+            // flow (mostly absorbed by its `no_op` tip resolution) alongside
+            // any user-facing notification firing twice.
+            id: `pr-opened-${run.taskId}`,
+          })
+          .then(() => undefined),
+      );
+      if (deps.sandbox.capabilities.workingTreeTransport === "git-remote") {
+        await fetchBackFeatureBranch(run, { repo, branch: assignment.branch, identity });
+      }
+      return ok({ kind: "opened", url: pr.url, number: pr.number });
+    })
+    .exhaustive();
 }
 
 /**

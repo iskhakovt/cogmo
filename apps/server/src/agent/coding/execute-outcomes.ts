@@ -5,6 +5,7 @@
  */
 
 import type { Inngest } from "inngest";
+import { match } from "ts-pattern";
 import type { SandboxClient, SandboxSession } from "../../sandbox/index.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import type { BackendUsage } from "./backend.js";
@@ -16,7 +17,7 @@ import { runBranchFor } from "./git-as-transport.js";
 import type { ExecuteStreamHandle } from "./progress-stream.js";
 import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
 import { type RecordedFailure, recordTaskFailed } from "./task-failure.js";
-import { advanceTask, reclaimEndedTask } from "./task-lifecycle.js";
+import { advanceTask, reclaimEndedTask, reclaimIfEnded } from "./task-lifecycle.js";
 import { reapTaskSandbox, WORKTREE_DIR_IN_CONTAINER } from "./task-sandbox.js";
 import { safeTeardownWorktree } from "./teardown.js";
 import type { WorktreeAssignment } from "./types.js";
@@ -130,15 +131,29 @@ export async function endExecuteFailed(
   steps: ExecuteFailureSteps,
 ): Promise<RecordedFailure> {
   const recorded = await recordTaskFailed(run, deps, rawReason, steps.transition);
-  if (recorded.kind === "ended") {
-    await reclaimEndedTask(run, deps, {
-      repo: exit.repo,
-      assignment: exit.assignment,
-      notify: { stream: exit.stream, message: "Task cancelled while executing." },
-    });
-    return recorded;
-  }
-  const { reason } = recorded;
+  await match(recorded)
+    .with({ kind: "ended" }, () =>
+      reclaimEndedTask(run, deps, {
+        repo: exit.repo,
+        assignment: exit.assignment,
+        notify: { stream: exit.stream, message: "Task cancelled while executing." },
+      }),
+    )
+    .with({ kind: "recorded" }, ({ reason }) =>
+      tearDownFailedExecute(run, deps, exit, reason, steps),
+    )
+    .exhaustive();
+  return recorded;
+}
+
+/** The failure is committed: reap the worktree and sandbox, then tell the stream. */
+async function tearDownFailedExecute(
+  run: CodingRun,
+  deps: ExecuteOutcomeDeps,
+  exit: ExecuteExitContext,
+  reason: string,
+  steps: ExecuteFailureSteps,
+): Promise<void> {
   if (steps.teardownWorktree !== null) {
     await run.stepRun(steps.teardownWorktree, () =>
       safeTeardownWorktree({
@@ -163,7 +178,6 @@ export async function endExecuteFailed(
   await exit.stream.fail(reason).catch((streamErr: unknown) => {
     run.log.warn({ err: streamErr }, "execute stream fail notification failed");
   });
-  return recorded;
 }
 
 /**
@@ -202,16 +216,14 @@ export async function handOffToVerify(
   });
   if (pendingVerify.kind === "left") {
     run.log.info(
-      { transition: pendingVerify.transition, ended: pendingVerify.ended },
+      { transition: pendingVerify.transition, via: pendingVerify.via },
       "execute: task left `executing` mid-session — stopping",
     );
-    if (pendingVerify.ended) {
-      await reclaimEndedTask(run, deps, {
-        repo: exit.repo,
-        assignment: exit.assignment,
-        notify: { stream: exit.stream, message: "Task cancelled while executing." },
-      });
-    }
+    await reclaimIfEnded(run, deps, pendingVerify, {
+      repo: exit.repo,
+      assignment: exit.assignment,
+      notify: { stream: exit.stream, message: "Task cancelled while executing." },
+    });
     return "left_executing";
   }
   await reapTaskSandbox(run, deps.sandbox, "teardown");

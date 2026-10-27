@@ -27,7 +27,7 @@ import {
 import type { SecretsStore } from "../../secrets/store/index.js";
 import { expectOk } from "../../test/assertions.js";
 import { fakeExecHandle } from "../../test/coding-fixtures.js";
-import { makeStepRun, makeStepSendEvent } from "../../test/factories.js";
+import { makeStepRun, makeStepSendEvent, recordingStepRun } from "../../test/factories.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { type CodingBackend, DrizzleCodingStore } from "./store/index.js";
 import { runCodingVerify, type VerifyOrchestratorDeps } from "./verify-orchestrator.js";
@@ -606,12 +606,13 @@ describe("runCodingVerify", () => {
     deps.octokitFactory = fakeOctokitFactory(create);
     const inngestSend = vi.fn().mockResolvedValue(undefined);
     const inngest = { send: inngestSend } as unknown as Pick<import("inngest").Inngest, "send">;
+    const steps = recordingStepRun();
 
     const result = await runCodingVerify({
       taskId,
       runId: "run-test",
       deps,
-      stepRun,
+      stepRun: steps.stepRun,
       stepSendEvent: makeStepSendEvent(inngest),
       inngest,
     });
@@ -624,7 +625,56 @@ describe("runCodingVerify", () => {
     const eventNames = inngestSend.mock.calls.map((c) => c[0].name);
     expect(eventNames).toEqual(["coding/task/verify-complete"]);
     expect(create).not.toHaveBeenCalled();
+    // The cancelled path's own reclaim, not just the `finally`'s sweep.
+    expect(steps.ids).toContain("teardown-worktree-cancelled");
+    expect(steps.ids).not.toContain("emit-pushed");
     expect(deps.sandbox.deleteByTaskId).toHaveBeenCalledWith(taskId);
+  });
+
+  it("a Cancel during the suite, then the suite fails: stays cancelled, no failure recorded", async () => {
+    const { taskId } = await seedTask();
+    const scripted = fakeContainerHandle({
+      verify: { stdout: "FAIL\n", exitCode: 1 },
+      git: {},
+    });
+    const handle: SandboxSession<LocalDockerSessionState> = {
+      ...scripted,
+      execStreaming: async (cmd, opts) => {
+        if (cmd[0] === "bash") {
+          await tx((trx) => store.cancelTaskIfActive(trx, taskId, "user cancelled"));
+        }
+        return scripted.execStreaming(cmd, opts);
+      },
+    };
+    const deps = makeDeps(handle);
+    const sent: { name: string }[] = [];
+    const stepSendEvent = (async (_: string, payload: { name: string }) => {
+      sent.push(payload);
+      return { ids: [] };
+    }) as never;
+    const inngest = { send: vi.fn().mockResolvedValue(undefined) } as unknown as Pick<
+      import("inngest").Inngest,
+      "send"
+    >;
+    const steps = recordingStepRun();
+
+    const result = await runCodingVerify({
+      taskId,
+      runId: "run-test",
+      deps,
+      stepRun: steps.stepRun,
+      stepSendEvent,
+      inngest,
+    });
+
+    expect(result).toEqual({ status: "skipped" });
+    const reloaded = await tx((trx) => store.getTask(trx, taskId));
+    expect(reloaded?.status).toBe("cancelled");
+    expect(reloaded?.failureReason).toBe("user cancelled");
+    expect(sent).toEqual([]);
+    expect(steps.ids).toContain("transition-failed");
+    expect(steps.ids).toContain("teardown-worktree-cancelled");
+    expect(steps.ids).not.toContain("teardown-worktree");
   });
 
   it("a Cancel during the PR open stands: pr_metadata records the PR, no pr-opened event", async () => {
@@ -640,12 +690,13 @@ describe("runCodingVerify", () => {
     deps.octokitFactory = fakeOctokitFactory(create);
     const inngestSend = vi.fn().mockResolvedValue(undefined);
     const inngest = { send: inngestSend } as unknown as Pick<import("inngest").Inngest, "send">;
+    const steps = recordingStepRun();
 
     const result = await runCodingVerify({
       taskId,
       runId: "run-test",
       deps,
-      stepRun,
+      stepRun: steps.stepRun,
       stepSendEvent: makeStepSendEvent(inngest),
       inngest,
     });
@@ -659,6 +710,8 @@ describe("runCodingVerify", () => {
     });
     const eventNames = inngestSend.mock.calls.map((c) => c[0].name);
     expect(eventNames).toEqual(["coding/task/verify-complete", "coding/task/pushed"]);
+    expect(steps.ids).toContain("teardown-worktree-cancelled");
+    expect(steps.ids).not.toContain("emit-pr-opened");
     expect(deps.sandbox.deleteByTaskId).toHaveBeenCalledWith(taskId);
   });
 
