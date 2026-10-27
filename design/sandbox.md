@@ -384,29 +384,88 @@ Inngest cron, runs every 30s. Three passes:
 
 1. **TTL expired** — `WHERE ttl_expires_at < now() AND status IN ('starting','running')`. Kill post-order: children first (sort by `depth DESC`), then parent.
 2. **Orphan detection** — `docker ps --filter label=cogmo.managed=true`. Anything present on the daemon but missing from the DB, or labelled with a dead `cogmo.instance`, gets killed.
-3. **Stale DB rows** — containers in DB with `status != 'reaped'` but missing from `docker ps` get marked exited with no exit code.
+3. **Stale DB rows** — containers in DB with `status IN ('starting','running')` but missing from `docker ps` get marked exited with no exit code.
 
 Root-task cascade (not on cron — triggered by task completion/failure): `WHERE root_task_id = $t AND status != 'reaped' ORDER BY depth DESC` → stop + remove.
+
+Every status write is a conditional transition from the status the pass read (Container state machine below), so a row a cascade or an overlapping tick finished first is left as it is and not counted.
 
 Networks and volumes reaped last, after all containers in the root task are gone.
 
 ### Lifecycle `[confirmed]`
 
-Task startup:
+Task startup (`LocalDockerSandboxClient.create`):
 
-1. Supervisor allocates a task id `T`.
-2. Supervisor inserts placeholder row for the task container (depth 0, no `docker_id` yet).
-3. Supervisor creates `${SANDBOX_PROXY_SOCKET_DIR}/T.sock`, registers `T.sock → {parent: null, root_task: T}` in the proxy's in-memory map. The task container's own docker id is written back once Docker returns it.
-4. Supervisor creates the task container via host daemon: `HostConfig.Runtime = "sysbox-runc"`, mounts `${SANDBOX_PROXY_SOCKET_DIR}/T.sock` → `/var/run/docker.sock`, injects labels.
-5. Supervisor starts the container.
-6. Updates placeholder row with `docker_id`; updates proxy map entry with task container's `docker_id` for ownership checks on `DELETE` etc.
+1. The proxy registers `${SANDBOX_PROXY_SOCKET_DIR}/T.sock` with a placeholder scope (the task container's docker id is not known yet) so the container can mount it at `/var/run/docker.sock` from its first instant.
+2. The daemon creates the task container: `HostConfig.Runtime`, labels, binds, cgroup parent. A failure releases the proxy registration.
+3. A `containers` row is inserted with the daemon's `docker_id`, `status = 'starting'`. A failure force-removes the container and releases the registration before the error propagates.
+4. The proxy scope is upserted with the row id and docker id, for ownership checks on `DELETE` etc.
+5. The daemon starts the container and the row moves `starting → running`. A start failure reaps the container (`start_failed`).
 
-Task teardown:
+Task teardown (`deleteByTaskId`):
 
-1. Supervisor triggers root-task cascade.
+1. Cascade reap of every row in the task scope that is not `reaped`, depth DESC (`cascade`).
 2. Removes the socket's entry from the proxy's map.
 3. Ends every connection made through the socket and its upstream leg to the daemon — hijacked streams (`logs -f`, `events`, attach) included, so teardown never waits on a running container.
 4. Closes the socket's listener and removes the socket file.
+
+### Container state machine `[proposed]`
+
+**Unit.** One `containers` row, keyed by its `id`; `docker_id` is the daemon's name for the same object and is UNIQUE. Every status write is a conditional UPDATE on `id`.
+
+**States** — the `container_status` pgEnum:
+
+| State | Meaning |
+|-|-|
+| `starting` | Row inserted; the daemon has the container; `start` has not completed |
+| `running` | `start` completed; `started_at` set |
+| `exited` | The daemon no longer has the container and Cogmo did not remove it. `exit_code` is NULL: no path records one |
+| `reaped` | Cogmo killed and removed the daemon object. Terminal |
+
+```mermaid
+stateDiagram-v2
+  [*] --> starting: create (daemon has the id)
+  starting --> running: start completed
+  starting --> reaped: start failed / TTL / cascade / orphan / reconcile
+  running --> reaped: TTL / cascade / orphan / reconcile
+  running --> exited: missing from the daemon
+  starting --> exited: missing from the daemon
+  exited --> reaped: cascade / orphan / reconcile
+  reaped --> [*]
+```
+
+| From | To | By (reason) | Guard | Writes |
+|-|-|-|-|-|
+| — | `starting` | `create` | `INSERT`; `docker_id` UNIQUE | row |
+| `starting` | `running` | `create`, after `start` | `WHERE id = $1 AND status = 'starting'` | `started_at` |
+| `starting` | `reaped` | `create` (`start_failed`), after kill + remove | `status = 'starting'` | `exited_at` |
+| `starting`, `running` | `reaped` | reaper TTL pass (`ttl_expired`) | `status = <read status>` | `exited_at` |
+| `starting`, `running`, `exited` | `reaped` | `deleteByTaskId` (`cascade`) | `status = <read status>` | `exited_at`, kept when the row was `exited` |
+| `starting`, `running`, `exited` | `reaped` | reaper orphan pass (`dead_instance`), boot `reconcileCrashedInstances` (`crash_reconcile`), for a listed daemon object with a row | same | same |
+| `starting`, `running` | `exited` | reaper stale pass | `status = <read status>` | `exited_at` |
+
+Every reap kills and removes the daemon object *before* the transition (Failure modes below). **Illegal**, so the store's `ContainerTransition` type does not express them: anything out of `reaped`; `exited → running`; `running → starting`.
+
+The transition is `SandboxStore.transitionContainerStatus(tx, { id, from, to, at })`, returning `{ kind: "transitioned" } | { kind: "stale"; status }`, the shape of `DrizzleCodingStore.transitionTaskStatus`; a missing row throws, since every caller holds a row it read and rows are never deleted. One use case per terminal transition: `reapContainer` (`src/sandbox/reap-container.ts`; `reapDiscoveredContainer` for a daemon object whose row may be missing or already `reaped`) and `markContainerExited` (`src/sandbox/mark-container-exited.ts`). `stale` is an expected outcome: another path finished the row first. It is logged at debug, never an error, and a DB-driven pass does not count it.
+
+**Reason.** The reap reason — `ttl_expired | cascade | dead_instance | crash_reconcile | start_failed` — travels with the `reapContainer` call and is logged on the transition; `exited` has one cause, missing from the daemon. The planned datum is a `reaped_reason` pgEnum column, nullable and CHECK-tied to `status = 'reaped'`, written by the same UPDATE (state-machines.md → "A failed or skipped state records why"). It is a schema change and lands separately.
+
+**Failure modes.**
+
+| Crash point or race | Row | Daemon | Why safe, or the residual |
+|-|-|-|-|
+| Daemon create succeeds, row insert fails | none | container | `create` force-removes it and releases the proxy scope. If the remove fails too, the orphan pass removes a labelled container with no row on its next tick |
+| Process dies between create and insert | none | container | Orphan pass: no row ⇒ orphan |
+| Process dies between insert and `running` | `starting` | created or running | The restarted process has a new instance id, so the row's instance is dead: `reconcileCrashedInstances` and the orphan pass reap it (`starting` counts as live for both). `tryResumeByTaskId` resumes only a daemon container that reports `running` |
+| `start` throws | `reaped` | removed | `start_failed`. Residual: if the kill + remove throws, the row stays `starting` over a stopped container, and the TTL pass reaps it at expiry |
+| `starting → running` is `stale` | `reaped` | removed by the other path | A TTL pass (short TTL) or a cascade finished the row mid-start. `create` releases the proxy scope and throws |
+| `deleteByTaskId` and a reaper pass race on one row | `reaped` once | removed once; the second kill/remove sees 304/409/404, which both tolerate | The second transition is `stale`, logged at debug. `exited_at` is the first writer's |
+| A reaper tick overlaps the next | as above | as above | Both read the same rows; the loser's transitions are `stale` and not counted, so counts are exact per row. Inngest's cron runs one tick at a time in production |
+| Crash between kill + remove and the transition | `starting` / `running` | gone | The next tick's stale pass marks it `exited`. The row over-reports a live container for at most one tick |
+| Remove returns 409 (daemon removal in progress) | `reaped` | finishing removal | Self-heals as the daemon completes. Until then a `reaped` row with a live instance label is not an orphan and is left alone |
+| `docker rm` outside Cogmo | `running` | gone | Stale pass → `exited` |
+| `listContainers` fails in a tick | unchanged | unchanged | The stale pass is skipped: an empty listing is indistinguishable from "all gone" |
+| Proxy-created child | none | container, labelled with the live instance | Residual. The proxy injects labels but writes no row, so the orphan pass treats the child as an orphan on its next tick. The row insert the proxy design table promises at `POST /containers/create` is the fix; tracked in `todo.md` |
 
 ### Crash Recovery `[confirmed]`
 
@@ -415,7 +474,7 @@ At Cogmo boot:
 1. Generate new `instance_id` for this run.
 2. List containers matching `label=cogmo.managed=true` via Docker daemon.
 3. For each found container:
-   - If its `cogmo.instance` ≠ current instance → orphan from a previous run. Stop + remove. Mark any matching DB row `reaped`.
+   - If its `cogmo.instance` ≠ current instance → orphan from a previous run. Stop + remove. Move any matching DB row to `reaped` (`crash_reconcile`), from whichever non-terminal status it holds.
    - If a DB row exists and matches the current instance → crash during task execution. Mark status according to Docker's report; if still running, let the task resume (session_id in `coding_tasks` lets us rejoin).
 4. Same pass for networks and volumes.
 

@@ -1,4 +1,5 @@
 import { and, asc, desc, eq, isNull } from "drizzle-orm";
+import { match } from "ts-pattern";
 import { single } from "../../db/helpers.js";
 import type { Transaction } from "../../db/index.js";
 import type { ContainerLabels, ResourceLimits } from "../types.js";
@@ -6,6 +7,22 @@ import { cogmoInstances, containers, networks, volumes } from "./schema.js";
 
 export type ContainerRuntime = "sysbox-runc" | "runc";
 export type ContainerStatus = "starting" | "running" | "exited" | "reaped";
+
+/**
+ * The legal `containers.status` transitions (design/sandbox.md → Container
+ * state machine). `at` stamps `started_at` on the way into `running` and
+ * `exited_at` on the way into a terminal state; a row that is already
+ * `exited` keeps its `exited_at` when it is reaped.
+ */
+export type ContainerTransition =
+  | { from: "starting"; to: "running" }
+  | { from: "starting" | "running"; to: "exited" }
+  | { from: "starting" | "running" | "exited"; to: "reaped" };
+
+export type ContainerTransitionResult =
+  | { kind: "transitioned" }
+  /** The row is not in `from`; `status` is what it holds instead. */
+  | { kind: "stale"; status: ContainerStatus };
 export type NetworkStatus = "created" | "reaped";
 export type VolumeStatus = "created" | "reaped";
 
@@ -34,6 +51,13 @@ export interface ContainerRow {
   exitedAt: Date | null;
   instanceId: string;
   createdAt: Date;
+}
+
+/** A row whose container the DB still expects to find on the daemon. */
+export type LiveContainerRow = ContainerRow & { status: "starting" | "running" };
+
+export function isLiveContainer(row: ContainerRow): row is LiveContainerRow {
+  return row.status === "starting" || row.status === "running";
 }
 
 export interface NetworkRow {
@@ -110,17 +134,17 @@ export interface SandboxStore {
     },
   ): Promise<ContainerRow>;
 
-  /** Update lifecycle fields on a container. Used as Docker reports state changes. */
-  updateContainerStatus(
+  /**
+   * Move a container from `from` to `to` in one conditional UPDATE. `stale`
+   * means another path (the reaper, a cascade, the supervisor) finished the
+   * row first; the caller decides whether that matters. A missing row is an
+   * invariant violation and throws — callers hold a row they just read, and
+   * rows are never deleted.
+   */
+  transitionContainerStatus(
     tx: Transaction,
-    params: {
-      id: string;
-      status: ContainerStatus;
-      exitCode?: number | null;
-      startedAt?: Date | null;
-      exitedAt?: Date | null;
-    },
-  ): Promise<void>;
+    params: { id: string; at: Date } & ContainerTransition,
+  ): Promise<ContainerTransitionResult>;
 
   /** Load a container row by Cogmo id. */
   getContainer(tx: Transaction, id: string): Promise<ContainerRow | undefined>;
@@ -271,26 +295,32 @@ export class DrizzleSandboxStore implements SandboxStore {
     return row;
   }
 
-  async updateContainerStatus(
+  async transitionContainerStatus(
     tx: Transaction,
-    params: {
-      id: string;
-      status: ContainerStatus;
-      exitCode?: number | null;
-      startedAt?: Date | null;
-      exitedAt?: Date | null;
-    },
-  ): Promise<void> {
-    const set: {
-      status: ContainerStatus;
-      exitCode?: number | null;
-      startedAt?: Date | null;
-      exitedAt?: Date | null;
-    } = { status: params.status };
-    if (params.exitCode !== undefined) set.exitCode = params.exitCode;
-    if (params.startedAt !== undefined) set.startedAt = params.startedAt;
-    if (params.exitedAt !== undefined) set.exitedAt = params.exitedAt;
-    await tx.update(containers).set(set).where(eq(containers.id, params.id));
+    params: { id: string; at: Date } & ContainerTransition,
+  ): Promise<ContainerTransitionResult> {
+    const set = match(params)
+      .with({ to: "running" }, ({ to }) => ({ status: to, startedAt: params.at }))
+      .with({ to: "exited" }, ({ to }) => ({ status: to, exitedAt: params.at }))
+      .with({ from: "exited", to: "reaped" }, ({ to }) => ({ status: to }))
+      .with({ to: "reaped" }, ({ to }) => ({ status: to, exitedAt: params.at }))
+      .exhaustive();
+    const updated = await tx
+      .update(containers)
+      .set(set)
+      .where(and(eq(containers.id, params.id), eq(containers.status, params.from)))
+      .returning({ id: containers.id });
+    if (updated.length > 0) return { kind: "transitioned" };
+    const current = await tx
+      .select({ status: containers.status })
+      .from(containers)
+      .where(eq(containers.id, params.id))
+      .limit(1);
+    const row = current[0];
+    if (row === undefined) {
+      throw new Error(`transitionContainerStatus: no containers row with id ${params.id}`);
+    }
+    return { kind: "stale", status: row.status };
   }
 
   async getContainer(tx: Transaction, id: string): Promise<ContainerRow | undefined> {

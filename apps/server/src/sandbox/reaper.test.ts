@@ -1,4 +1,5 @@
 import type Docker from "dockerode";
+import { sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Database, Transactor } from "../db/index.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
@@ -63,6 +64,10 @@ function fakeDocker(
     containers?: DockerSideContainer[];
     failKill?: Map<string, number>;
     failRemove?: Map<string, number>;
+    /** Runs before a kill is recorded — simulates another path finishing the row mid-pass. */
+    onKill?: (id: string) => Promise<void>;
+    /** Runs before `listContainers` answers — same purpose, between the TTL read and the stale pass. */
+    onList?: () => Promise<void>;
   } = {},
 ): {
   docker: Docker;
@@ -77,9 +82,13 @@ function fakeDocker(
   const volumeRemoveCalls: string[] = [];
   const containers = opts.containers ?? [];
   const docker = {
-    listContainers: vi.fn(async () => containers),
+    listContainers: vi.fn(async () => {
+      await opts.onList?.();
+      return containers;
+    }),
     getContainer: (id: string) => ({
       kill: vi.fn(async () => {
+        await opts.onKill?.(id);
         const code = opts.failKill?.get(id);
         if (code !== undefined) {
           throw Object.assign(new Error("nope"), { statusCode: code });
@@ -140,9 +149,22 @@ async function insertContainer(opts: {
       instanceId: opts.instanceId ?? instanceId,
     }),
   );
-  if (opts.status && opts.status !== "starting") {
-    const status = opts.status;
-    await tx((trx) => store.updateContainerStatus(trx, { id: row.id, status }));
+  // Walk the row through the state machine to the requested status.
+  const at = NOW();
+  if (opts.status === "running" || opts.status === "exited" || opts.status === "reaped") {
+    await tx((trx) =>
+      store.transitionContainerStatus(trx, { id: row.id, from: "starting", to: "running", at }),
+    );
+  }
+  if (opts.status === "exited") {
+    await tx((trx) =>
+      store.transitionContainerStatus(trx, { id: row.id, from: "running", to: "exited", at }),
+    );
+  }
+  if (opts.status === "reaped") {
+    await tx((trx) =>
+      store.transitionContainerStatus(trx, { id: row.id, from: "running", to: "reaped", at }),
+    );
   }
   return row.id;
 }
@@ -376,6 +398,49 @@ describe("runReap — stale DB pass", () => {
   });
 });
 
+describe("runReap — a row another path already finished", () => {
+  // Between a pass reading a row and writing its terminal status, a cascade
+  // (`deleteByTaskId`) or the previous tick can finish the same row. The
+  // write is conditional on the status the pass read, so the row keeps the
+  // terminal state and timestamp the other path gave it.
+  const EARLIER = "2026-04-27T11:00:00.000Z";
+
+  async function reapedElsewhere(id: string): Promise<void> {
+    await db.execute(
+      sql`UPDATE containers SET status = 'reaped', exited_at = ${EARLIER}::timestamptz WHERE id = ${id}`,
+    );
+  }
+
+  it("TTL pass: a row reaped during its kill is neither re-written nor counted", async () => {
+    const cogmoId = await insertContainer({ dockerId: "c-raced", ttlMs: -1000, status: "running" });
+    const { docker } = fakeDocker({
+      containers: [{ Id: "c-raced", Labels: labels() }],
+      onKill: () => reapedElsewhere(cogmoId),
+    });
+    const result = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
+    expect(result.ttlReaped).toBe(0);
+    const row = await tx((trx) => store.getContainer(trx, cogmoId));
+    expect(row?.status).toBe("reaped");
+    expect(row?.exitedAt?.toISOString()).toBe(EARLIER);
+  });
+
+  it("stale pass: a row reaped after the TTL read is not marked exited", async () => {
+    const cogmoId = await insertContainer({
+      dockerId: "c-gone-mid-tick",
+      ttlMs: 60_000,
+      status: "running",
+    });
+    // The cascade removed the container and marked the row before the orphan
+    // pass listed the daemon, so the listing no longer has it.
+    const { docker } = fakeDocker({ containers: [], onList: () => reapedElsewhere(cogmoId) });
+    const result = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
+    expect(result.staleMarked).toBe(0);
+    const row = await tx((trx) => store.getContainer(trx, cogmoId));
+    expect(row?.status).toBe("reaped");
+    expect(row?.exitedAt?.toISOString()).toBe(EARLIER);
+  });
+});
+
 describe("runReap — networks + volumes", () => {
   it("reaps expired networks", async () => {
     const net = await tx((trx) =>
@@ -559,10 +624,9 @@ describe("runReap — concurrent invocation", () => {
       runReap({ docker, store, runInTx: tx, instanceId, now: NOW }),
     ]);
 
-    // Terminal DB state is identical to a single-run terminal state.
-    // `updateContainerStatus({status: "reaped"})` is idempotent at the
-    // row level — a second write of the same value is a no-op-equivalent
-    // — so whichever call commits last lands the same row contents.
+    // Terminal DB state is identical to a single-run terminal state: the
+    // second writer's transition finds the row already `reaped` and
+    // leaves it, so whichever call commits last lands the same row.
     expect((await tx((trx) => store.getContainer(trx, idA)))?.status).toBe("reaped");
     expect((await tx((trx) => store.getContainer(trx, idB)))?.status).toBe("reaped");
 

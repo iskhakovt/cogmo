@@ -3,6 +3,7 @@ import { type Duplex, Writable } from "node:stream";
 import { finished } from "node:stream/promises";
 import type Docker from "dockerode";
 import { err, ok, type Result } from "neverthrow";
+import { match } from "ts-pattern";
 import type { Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
 import { cleanupAskpass } from "./askpass.js";
@@ -20,8 +21,13 @@ import type {
 } from "./index.js";
 import { DEPS_CACHE_VOLUME_TARGET, LocalDockerSessionStateSchema } from "./index.js";
 import type { CogmoSocketProxy } from "./proxy/index.js";
+import {
+  type ReapContainerDeps,
+  reapContainer,
+  reapDiscoveredContainer,
+} from "./reap-container.js";
 import { assertRuntimeAvailable, dockerRuntimeName, type SandboxRuntime } from "./runtime.js";
-import type { SandboxStore } from "./store/index.js";
+import type { ContainerRow, SandboxStore } from "./store/index.js";
 import type { ContainerLabels } from "./types.js";
 
 // Dockerode's `Container.create` accepts `Mounts` typed as `MountSettings[]`.
@@ -98,11 +104,13 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
   #instanceId: string;
   #proxy?: CogmoSocketProxy;
   #askpassBaseDir?: string;
+  #reapDeps: ReapContainerDeps;
 
   private constructor(opts: CreateOptions) {
     this.#docker = opts.docker;
     this.#store = opts.store;
     this.#runInTx = opts.runInTx;
+    this.#reapDeps = { docker: opts.docker, store: opts.store, runInTx: opts.runInTx };
     this.#runtime = opts.runtime;
     this.#instanceId = opts.instanceId;
     if (opts.proxy) this.#proxy = opts.proxy;
@@ -165,17 +173,13 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
       const stamped = c.Labels?.[LABEL_INSTANCE];
       if (!stamped || !reapTargets.has(stamped)) continue;
       log.warn({ dockerId: c.Id, stampedInstance: stamped }, "reaping orphan container");
-      await this.#killAndRemove(c.Id);
       const row = await this.#runInTx((tx) => this.#store.getContainerByDockerId(tx, c.Id));
-      if (row) {
-        await this.#runInTx((tx) =>
-          this.#store.updateContainerStatus(tx, {
-            id: row.id,
-            status: "reaped",
-            exitedAt: new Date(),
-          }),
-        );
-      }
+      await reapDiscoveredContainer(this.#reapDeps, {
+        dockerId: c.Id,
+        row,
+        reason: "crash_reconcile",
+        at: new Date(),
+      });
       reaped += 1;
     }
     return { orphansReaped: reaped };
@@ -306,20 +310,38 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
       throw err;
     }
 
-    const containerRow = await this.#runInTx((tx) =>
-      this.#store.insertContainer(tx, {
-        dockerId: container.id,
-        parentId: null,
-        rootTaskId: spec.taskId,
-        depth: 0,
-        image: spec.image,
-        runtime,
-        labels,
-        resourceLimits: spec.resourceLimits,
-        ttlExpiresAt: spec.expiresAt,
-        instanceId: this.#instanceId,
-      }),
-    );
+    let containerRow: ContainerRow;
+    try {
+      containerRow = await this.#runInTx((tx) =>
+        this.#store.insertContainer(tx, {
+          dockerId: container.id,
+          parentId: null,
+          rootTaskId: spec.taskId,
+          depth: 0,
+          image: spec.image,
+          runtime,
+          labels,
+          resourceLimits: spec.resourceLimits,
+          ttlExpiresAt: spec.expiresAt,
+          instanceId: this.#instanceId,
+        }),
+      );
+    } catch (err) {
+      // The daemon has the container but no row records it. Remove it here;
+      // should that fail, the reaper's orphan pass removes a container with
+      // no row on its next tick.
+      log.error({ err, dockerId: container.id }, "container row insert failed, removing");
+      await container.remove({ force: true }).catch((removeErr: unknown) => {
+        log.warn(
+          { err: removeErr, dockerId: container.id },
+          "removing the rowless container failed",
+        );
+      });
+      if (this.#proxy) {
+        await this.#proxy.unregisterTask(spec.taskId).catch(() => {});
+      }
+      throw err;
+    }
 
     if (this.#proxy) {
       await this.#proxy.registerTask({
@@ -335,32 +357,45 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
 
     try {
       await container.start();
-      await this.#runInTx((tx) =>
-        this.#store.updateContainerStatus(tx, {
-          id: containerRow.id,
-          status: "running",
-          startedAt: new Date(),
-        }),
-      );
     } catch (err) {
       log.error({ err, dockerId: container.id }, "container start failed, removing");
-      await this.#runInTx((tx) =>
-        this.#store.updateContainerStatus(tx, {
-          id: containerRow.id,
-          status: "exited",
-          exitedAt: new Date(),
-        }),
-      ).catch(() => {
-        /* best effort */
-      });
-      await container.remove({ force: true }).catch(() => {
-        /* best effort */
+      await reapContainer(this.#reapDeps, {
+        id: containerRow.id,
+        dockerId: container.id,
+        from: "starting",
+        reason: "start_failed",
+        at: new Date(),
+      }).catch((reapErr: unknown) => {
+        log.warn(
+          { err: reapErr, dockerId: container.id },
+          "reaping the unstarted container failed",
+        );
       });
       if (this.#proxy) {
         await this.#proxy.unregisterTask(spec.taskId).catch(() => {});
       }
       throw err;
     }
+
+    const started = await this.#runInTx((tx) =>
+      this.#store.transitionContainerStatus(tx, {
+        id: containerRow.id,
+        from: "starting",
+        to: "running",
+        at: new Date(),
+      }),
+    );
+    await match(started)
+      .with({ kind: "transitioned" }, async () => {})
+      .with({ kind: "stale" }, async ({ status }) => {
+        // The reaper or a cascade finished the row while the daemon was
+        // starting the container, and removed the container with it.
+        if (this.#proxy) {
+          await this.#proxy.unregisterTask(spec.taskId).catch(() => {});
+        }
+        throw new Error(`container ${container.id} was ${status} before it finished starting`);
+      })
+      .exhaustive();
 
     return this.#wrapSession({
       type: "local-docker",
@@ -428,14 +463,13 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
     try {
       for (const row of ordered) {
         if (row.status === "reaped") continue;
-        await this.#killAndRemove(row.dockerId);
-        await this.#runInTx((tx) =>
-          this.#store.updateContainerStatus(tx, {
-            id: row.id,
-            status: "reaped",
-            exitedAt: new Date(),
-          }),
-        );
+        await reapContainer(this.#reapDeps, {
+          id: row.id,
+          dockerId: row.dockerId,
+          from: row.status,
+          reason: "cascade",
+          at: new Date(),
+        });
       }
     } finally {
       // Tear down the per-task proxy socket regardless of whether the
@@ -483,24 +517,6 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
       exec: (cmd, opts) => execBuffered(docker, state.dockerId, cmd, opts),
       execStreaming: (cmd, opts) => execStreaming(docker, state.dockerId, cmd, opts),
     };
-  }
-
-  async #killAndRemove(dockerId: string): Promise<void> {
-    // 304/409/404 on kill and 409/404 on remove all collapse to "container
-    // is gone" — `runReap` and `deleteByTaskId` can race on the same id.
-    const c = this.#docker.getContainer(dockerId);
-    try {
-      await c.kill({ signal: "SIGTERM" });
-    } catch (err) {
-      const e = err as { statusCode?: number };
-      if (e.statusCode !== 304 && e.statusCode !== 409 && e.statusCode !== 404) throw err;
-    }
-    try {
-      await c.remove({ force: true });
-    } catch (err) {
-      const e = err as { statusCode?: number };
-      if (e.statusCode !== 404 && e.statusCode !== 409) throw err;
-    }
   }
 }
 

@@ -192,23 +192,83 @@ describe("DrizzleSandboxStore", () => {
       await expect(insertTaskContainer({ instanceId, dockerId: "dup" })).rejects.toThrow();
     });
 
-    it("updateContainerStatus updates lifecycle fields", async () => {
-      const instanceId = await seedInstance();
-      const id = await insertTaskContainer({ instanceId });
-      const startedAt = new Date("2026-04-25T10:00:00Z");
-      await tx((trx) => store.updateContainerStatus(trx, { id, status: "running", startedAt }));
-      let row = await tx((trx) => store.getContainer(trx, id));
-      expect(row?.status).toBe("running");
-      expect(row?.startedAt?.toISOString()).toBe(startedAt.toISOString());
+    describe("transitionContainerStatus", () => {
+      const T0 = new Date("2026-04-25T10:00:00Z");
+      const T1 = new Date("2026-04-25T10:05:00Z");
+      const T2 = new Date("2026-04-25T10:10:00Z");
 
-      const exitedAt = new Date("2026-04-25T10:05:00Z");
-      await tx((trx) =>
-        store.updateContainerStatus(trx, { id, status: "exited", exitCode: 0, exitedAt }),
-      );
-      row = await tx((trx) => store.getContainer(trx, id));
-      expect(row?.status).toBe("exited");
-      expect(row?.exitCode).toBe(0);
-      expect(row?.exitedAt?.toISOString()).toBe(exitedAt.toISOString());
+      it("stamps started_at on starting → running and exited_at on running → exited", async () => {
+        const instanceId = await seedInstance();
+        const id = await insertTaskContainer({ instanceId });
+
+        const started = await tx((trx) =>
+          store.transitionContainerStatus(trx, { id, from: "starting", to: "running", at: T0 }),
+        );
+        expect(started).toEqual({ kind: "transitioned" });
+        let row = await tx((trx) => store.getContainer(trx, id));
+        expect(row?.status).toBe("running");
+        expect(row?.startedAt?.toISOString()).toBe(T0.toISOString());
+        expect(row?.exitedAt).toBeNull();
+
+        const exited = await tx((trx) =>
+          store.transitionContainerStatus(trx, { id, from: "running", to: "exited", at: T1 }),
+        );
+        expect(exited).toEqual({ kind: "transitioned" });
+        row = await tx((trx) => store.getContainer(trx, id));
+        expect(row?.status).toBe("exited");
+        expect(row?.exitedAt?.toISOString()).toBe(T1.toISOString());
+      });
+
+      it("from the wrong state returns stale with the row's status and changes nothing", async () => {
+        const instanceId = await seedInstance();
+        const id = await insertTaskContainer({ instanceId });
+        await tx((trx) =>
+          store.transitionContainerStatus(trx, { id, from: "starting", to: "running", at: T0 }),
+        );
+        await tx((trx) =>
+          store.transitionContainerStatus(trx, { id, from: "running", to: "reaped", at: T1 }),
+        );
+
+        const late = await tx((trx) =>
+          store.transitionContainerStatus(trx, { id, from: "running", to: "exited", at: T2 }),
+        );
+        expect(late).toEqual({ kind: "stale", status: "reaped" });
+        const row = await tx((trx) => store.getContainer(trx, id));
+        expect(row?.status).toBe("reaped");
+        expect(row?.exitedAt?.toISOString()).toBe(T1.toISOString());
+      });
+
+      it("exited → reaped keeps the exited_at the exit recorded", async () => {
+        const instanceId = await seedInstance();
+        const id = await insertTaskContainer({ instanceId });
+        await tx((trx) =>
+          store.transitionContainerStatus(trx, { id, from: "starting", to: "running", at: T0 }),
+        );
+        await tx((trx) =>
+          store.transitionContainerStatus(trx, { id, from: "running", to: "exited", at: T1 }),
+        );
+
+        const reaped = await tx((trx) =>
+          store.transitionContainerStatus(trx, { id, from: "exited", to: "reaped", at: T2 }),
+        );
+        expect(reaped).toEqual({ kind: "transitioned" });
+        const row = await tx((trx) => store.getContainer(trx, id));
+        expect(row?.status).toBe("reaped");
+        expect(row?.exitedAt?.toISOString()).toBe(T1.toISOString());
+      });
+
+      it("throws on an id with no row — callers hold a row they read", async () => {
+        await expect(
+          tx((trx) =>
+            store.transitionContainerStatus(trx, {
+              id: "019d0000-0000-7000-8000-000000000099",
+              from: "starting",
+              to: "running",
+              at: T0,
+            }),
+          ),
+        ).rejects.toThrow(/no containers row/);
+      });
     });
 
     it("getContainerByDockerId returns the row", async () => {

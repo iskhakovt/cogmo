@@ -203,7 +203,14 @@ function fakeSandbox(): {
           instanceId,
         }),
       );
-      await tx((trx) => sandboxStore.updateContainerStatus(trx, { id: row.id, status: "running" }));
+      await tx((trx) =>
+        sandboxStore.transitionContainerStatus(trx, {
+          id: row.id,
+          from: "starting",
+          to: "running",
+          at: new Date(),
+        }),
+      );
       liveContainerDockerIds.add(row.dockerId);
       lastSessionState = {
         type: "local-docker",

@@ -7,6 +7,7 @@
  */
 import { PassThrough, type Writable } from "node:stream";
 import type { ContainerInfo } from "dockerode";
+import { sql } from "drizzle-orm";
 import { err, ok } from "neverthrow";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { mock, mockDeep } from "vitest-mock-extended";
@@ -91,6 +92,7 @@ interface DockerCreateCallArgs {
  */
 function fakeDocker(opts: { dockerId: string; failStart?: boolean } = { dockerId: "docker-abc" }): {
   docker: ReturnType<typeof mock<DockerFacade>>;
+  container: ReturnType<typeof mock<DockerContainer>>;
   calls: { create: DockerCreateCallArgs[]; start: number; remove: number };
 } {
   const calls: { create: DockerCreateCallArgs[]; start: number; remove: number } = {
@@ -119,7 +121,7 @@ function fakeDocker(opts: { dockerId: string; failStart?: boolean } = { dockerId
     return container;
   });
   docker.getContainer.mockReturnValue(container);
-  return { docker, calls };
+  return { docker, container, calls };
 }
 
 /**
@@ -660,6 +662,66 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
     });
     await sandbox.shutdown();
     expect(proxy.close).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("LocalDockerSandboxClient — container row transitions", () => {
+  const TASK_ID = "019d0000-0000-7000-8000-00000000f00d";
+  const SPEC = {
+    taskId: TASK_ID,
+    worktree: { type: "host-path" as const, hostPath: "/tmp/wt" },
+    homeVolume: { volumeName: "vol-race" },
+    image: "alpine",
+    resourceLimits: RESOURCE_LIMITS,
+    expiresAt: new Date(Date.now() + 60_000),
+  };
+
+  it("deleteByTaskId leaves a row the reaper finished during the kill untouched", async () => {
+    const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+    const { docker, container } = fakeDocker({ dockerId: "docker-raced" });
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tx,
+      runtime: "runc",
+      instanceId: inst.id,
+    });
+    const session = await sandbox.create(SPEC);
+    const EARLIER = "2026-04-27T11:00:00.000Z";
+    // The reaper's TTL pass reaps the row while the cascade is killing the container.
+    container.kill.mockImplementation(async () => {
+      await db.execute(
+        sql`UPDATE containers SET status = 'reaped', exited_at = ${EARLIER}::timestamptz WHERE id = ${session.state.containerRowId}`,
+      );
+    });
+
+    await sandbox.deleteByTaskId(TASK_ID);
+
+    const row = await tx((trx) => store.getContainer(trx, session.state.containerRowId));
+    expect(row?.status).toBe("reaped");
+    expect(row?.exitedAt?.toISOString()).toBe(EARLIER);
+  });
+
+  it("create removes the container and releases the proxy when the row insert fails", async () => {
+    // No `cogmo_instances` row for this id, so `insertContainer` fails on the
+    // FK after the daemon has already created the container.
+    const { docker, calls } = fakeDocker({ dockerId: "docker-rowless" });
+    const { proxy, unregisters } = fakeProxy();
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tx,
+      runtime: "runc",
+      instanceId: "019d0000-0000-7000-8000-000000000bad",
+      proxy,
+    });
+
+    await expect(sandbox.create(SPEC)).rejects.toThrow();
+
+    expect(calls.create).toHaveLength(1);
+    expect(calls.start).toBe(0);
+    expect(calls.remove).toBe(1);
+    expect(unregisters).toEqual([TASK_ID]);
   });
 });
 
