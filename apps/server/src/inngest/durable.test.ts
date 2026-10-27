@@ -105,6 +105,50 @@ describe("fromStepTools", () => {
   });
 });
 
+/**
+ * `run`'s JSON check is a compile-time contract: each `@ts-expect-error`
+ * below fails `pnpm typecheck` if the check stops rejecting that shape. The
+ * bodies also run, through a pass-through step, so the file stays honest
+ * about what it calls.
+ */
+describe("Durable.run's JSON check", () => {
+  function passThrough() {
+    const step = mock<InngestStep>();
+    step.run.mockImplementation(async (_id, body) => body());
+    return fromStepTools(step);
+  }
+
+  it("accepts plain JSON: objects, arrays, strings, null, and results nothing reads", async () => {
+    const durable = passThrough();
+    const row: { id: string; tags: string[]; at: string; parent: string | null } = {
+      id: "r1",
+      tags: ["a"],
+      at: "2026-10-27T00:00:00.000Z",
+      parent: null,
+    };
+
+    await expect(durable.run("row", async () => row)).resolves.toBe(row);
+    await expect(durable.run("void", async () => {})).resolves.toBeUndefined();
+    await expect(durable.run("opaque", async (): Promise<unknown> => 1)).resolves.toBe(1);
+  });
+
+  it("rejects shapes the round-trip changes", async () => {
+    const durable = passThrough();
+    const maybe = (): string | undefined => undefined;
+
+    // @ts-expect-error a Date comes back as a string
+    await durable.run("date", async () => ({ at: new Date() }));
+    // @ts-expect-error a Map comes back as `{}`
+    await durable.run("map", async () => new Map<string, number>());
+    // @ts-expect-error an Error comes back as `{}`
+    await durable.run("error", async () => ({ failure: new Error("x") }));
+    // @ts-expect-error methods are dropped
+    await durable.run("method", async () => ({ describe: () => "x" }));
+    // @ts-expect-error `undefined` in a union comes back as `null`
+    await durable.run("maybe", async () => maybe());
+  });
+});
+
 describe("fromStepTools over Inngest's execution engine", () => {
   let sendSpy: ReturnType<typeof spyOnInngestSend>;
 
@@ -127,7 +171,7 @@ describe("fromStepTools over Inngest's execution engine", () => {
     },
   );
 
-  it("plans the same steps, in order, as the step tools called directly", async () => {
+  it("runs each primitive through the real step tools, to the function's result", async () => {
     const engine = new InngestTestEngine({ function: fn, events: [{ name: "test/durable-port" }] });
 
     const { result } = await engine.execute({ steps: [{ id: "wait", handler: () => null }] });

@@ -1,6 +1,8 @@
 import { InngestTestEngine } from "@inngest/test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mock } from "vitest-mock-extended";
 import { inngest } from "../../inngest/client.js";
+import type { EventPublisher } from "../../inngest/durable.js";
 import {
   fakeRunInTx,
   mockAgentStore,
@@ -164,7 +166,8 @@ describe("createBoundaryJanitor", () => {
   });
 
   it("emits a resolution's events through the injected publisher, not the client the function runs on", async () => {
-    const publisher = { send: vi.fn().mockResolvedValue(undefined) };
+    const publisher = mock<EventPublisher>();
+    publisher.send.mockResolvedValue(undefined);
     const transportStore = mockTransportStore({
       listExpiredBoundaryPending: vi
         .fn()
@@ -202,7 +205,9 @@ describe("createBoundaryJanitor", () => {
     }).execute()) as { result?: { resolved: number; scanned: number } };
 
     expect(result.result).toEqual({ resolved: 1, scanned: 1 });
-    const sent = publisher.send.mock.calls.map(([event]) => event.name);
+    const sent = publisher.send.mock.calls.flatMap(([batch]) =>
+      (Array.isArray(batch) ? batch : [batch]).map((event) => event.name),
+    );
     expect(sent).toEqual(["inbound/arrived", "conversation/boundary/resolved"]);
     expect(sendSpy).not.toHaveBeenCalled();
   });

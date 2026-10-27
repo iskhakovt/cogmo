@@ -43,8 +43,7 @@ const validIdentity = JSON.stringify({
   id: "12345",
 });
 
-// Inline `step.run` shim — replays the body inline, mirroring the
-// orchestrator test pattern. Cast at the seam per the project convention.
+// Runs each step body inline, as the orchestrator tests do.
 const stepRun = makeStepRun();
 
 async function seedRepo(): Promise<CodingRepoRow> {

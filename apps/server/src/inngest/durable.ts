@@ -2,7 +2,7 @@
  * The durable-execution port the domain plans its work through, and the one
  * adapter that maps Inngest's `step` onto it.
  *
- * Orchestration is Inngest (design/architecture.md → Orchestration coupling):
+ * Orchestration is Inngest (design/architecture.md → Orchestration Coupling):
  * functions are defined with `inngest.createFunction` in the domain module
  * that owns them, as thin controllers. A controller calls `fromStepTools(step)`
  * once and hands the resulting `Durable` to its use cases, which see only the
@@ -62,6 +62,7 @@ export interface EventPublisher {
 /** Values JSON does not carry unchanged: a `Date` becomes a string, a `bigint` throws, the rest are dropped or become `{}`. */
 type Unserializable =
   | Date
+  | Error
   | Map<unknown, unknown>
   | Set<unknown>
   | Uint8Array
@@ -78,13 +79,14 @@ type JsonSafeValue<T> = T extends Unserializable
       : T;
 
 /**
- * `T` itself when a JSON round-trip returns it unchanged, and a type `T` does
- * not satisfy when it would not: a `Date`, a `Map` or a class with methods
- * anywhere in `T`, or `undefined` as one arm of a union (a replay returns
- * `null` for it), fails `run` at the call site. A result that is only
- * `undefined` or `void` passes: nothing reads it. `unknown` passes, since the
- * compiler can't see into it; design/crash-recovery.md → State serialization
- * owns the rule for those.
+ * `T` itself, or a type `T` does not satisfy where the JSON round-trip would
+ * change it: a `Date`, an `Error`, a `Map` or a class with methods anywhere in
+ * `T`, or `undefined` as one arm of a top-level union (a replay returns `null`
+ * for it), fails `run` at the call site. A result that is only `undefined` or
+ * `void` passes: nothing reads it. What it can't see passes too: `unknown`,
+ * `undefined` inside an array (it comes back `null`), and a class instance's
+ * prototype; design/crash-recovery.md → State serialization owns the rule for
+ * those.
  */
 type JsonSafe<T> = [T] extends [undefined] ? T : T extends undefined ? never : JsonSafeValue<T>;
 
@@ -148,9 +150,10 @@ export function fromStepTools(step: InngestStep): Durable {
   return {
     // Inngest types a step result as `Jsonify<T>`, what `T` becomes after the
     // JSON round-trip through its state store. `run`'s `JsonSafe<T>` check
-    // admits only types that round-trip unchanged, so the two coincide for
-    // every `T` that reaches here; the cast restates that for a compiler that
-    // can't relate `Jsonify<T>` to an unresolved `T`.
+    // rejects the shapes that round-trip changes, so for a `T` that passes it
+    // the two coincide, up to the cases `JsonSafe` lists as unseen; the cast
+    // restates that for a compiler that can't relate `Jsonify<T>` to an
+    // unresolved `T`.
     run: <T>(id: string, body: () => Promise<T & JsonSafe<T>>) => step.run(id, body) as Promise<T>,
     sendEvent: async (id, batch) => {
       await step.sendEvent(id, batch);

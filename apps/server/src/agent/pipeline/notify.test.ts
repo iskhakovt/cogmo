@@ -1,11 +1,16 @@
 import { StepError } from "inngest";
 import { describe, expect, it, vi } from "vitest";
+import type { Durable } from "../../inngest/durable.js";
 import { notifyAfterRetries } from "./notify.js";
 
 describe("notifyAfterRetries", () => {
   it("delivers the notice inside the named step", async () => {
     const notifyConversation = vi.fn().mockResolvedValue(undefined);
-    const run = vi.fn().mockImplementation((_id: string, body: () => Promise<unknown>) => body());
+    const ids: string[] = [];
+    const run: Durable["run"] = (id, body) => {
+      ids.push(id);
+      return body();
+    };
 
     await notifyAfterRetries(
       { run },
@@ -16,7 +21,7 @@ describe("notifyAfterRetries", () => {
       { runId: "run-1" },
     );
 
-    expect(run).toHaveBeenCalledWith("notify-completed", expect.any(Function));
+    expect(ids).toEqual(["notify-completed"]);
     expect(notifyConversation).toHaveBeenCalledWith("conv-1", "done");
   });
 
