@@ -519,7 +519,7 @@ describe("Transport.skills.denyDeploy", () => {
     });
   });
 
-  it("returns skills_disabled when runner/store are unwired", async () => {
+  it("returns skills_disabled when the runner is unwired", async () => {
     const skills = makeSkills({});
     const result = await skills.denyDeploy(PENDING_ID, KNOWN_HANDLE);
     expect(result._unsafeUnwrapErr()).toEqual({ code: "skills_disabled" });
@@ -533,7 +533,6 @@ describe("Transport.skills.denyDeploy", () => {
     const result = await skills.denyDeploy(PENDING_ID, UNKNOWN_HANDLE);
 
     expect(result._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
-    expect(store.getDeployById).not.toHaveBeenCalled();
     expect(runner.denyDeploy).not.toHaveBeenCalled();
   });
 
@@ -548,6 +547,7 @@ describe("Transport.skills.denyDeploy", () => {
       code: "skill_deploy_not_found",
       pendingId: PENDING_ID,
     });
+    expect(runner.denyDeploy).toHaveBeenCalledWith({ pendingId: PENDING_ID });
   });
 
   it("maps the runner's not_pending onto skill_deploy_not_pending with the row's status", async () => {

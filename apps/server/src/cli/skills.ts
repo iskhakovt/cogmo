@@ -12,7 +12,7 @@ import {
   subcommands,
   type Type,
 } from "cmd-ts";
-import { describeDenyDeployError } from "../skills/deploy/approve.js";
+import { describeDenyDeployError } from "../skills/deploy/deny.js";
 import { describeInvokeRejection } from "../skills/invoke-rejection.js";
 import type { SkillRunAs } from "../skills/run-as.js";
 import type { RegisterResult, SkillDeployOrigin, SkillRunner } from "../skills/runner.js";

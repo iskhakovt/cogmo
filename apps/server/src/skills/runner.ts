@@ -12,7 +12,8 @@ import {
   type EnableResult,
   enableSkill,
 } from "./deploy/activation.js";
-import { approveDeploy, type DenyDeployError, denyDeploy } from "./deploy/approve.js";
+import { approveDeploy } from "./deploy/approve.js";
+import { type DenyDeployError, denyDeploy } from "./deploy/deny.js";
 import type { DeployDeps } from "./deploy/deploy-deps.js";
 import type { SkillDeployOrigin } from "./deploy/origin.js";
 import { registerSkill } from "./deploy/register.js";
@@ -40,7 +41,7 @@ export type {
   DeregisterResult,
   EnableResult,
 } from "./deploy/activation.js";
-export type { DenyDeployError } from "./deploy/approve.js";
+export type { DenyDeployError } from "./deploy/deny.js";
 export type { SkillActor, SkillDeployOrigin } from "./deploy/origin.js";
 export type { RegisterResult } from "./deploy/register-result.js";
 export type { SkillRunResult } from "./invoke/run-result.js";

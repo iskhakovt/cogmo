@@ -90,6 +90,28 @@ async function seedSkill(overrides: Partial<InsertSkillParams> = {}): Promise<Sk
   return tx((trx) => store.insertSkill(trx, makeSkillParams(overrides)));
 }
 
+/** A notify-tier, unscheduled `echo` at `SHA`, deployed by the owner. */
+function executeRegisterParams(
+  overrides: Partial<ExecuteRegisterParams> = {},
+): ExecuteRegisterParams {
+  return {
+    name: "echo",
+    tier: "wasm",
+    riskTier: "notify",
+    effects: [],
+    schedule: null,
+    scheduleNextRunAt: null,
+    branchTipSha: SHA,
+    lockfileHash: null,
+    inputs: INPUTS_SCHEMA,
+    outputs: null,
+    classifierLog: STUB_LOG,
+    runAs: owner,
+    applyFilesystem: async () => {},
+    ...overrides,
+  };
+}
+
 describe("DrizzleSkillStore", () => {
   describe("skills", () => {
     it("inserts a skill and round-trips JSONB through Zod", async () => {
@@ -1016,22 +1038,13 @@ describe("DrizzleSkillStore", () => {
     const noFs = async () => {};
 
     function registerParams(overrides: Partial<ExecuteRegisterParams> = {}): ExecuteRegisterParams {
-      return {
+      return executeRegisterParams({
         name: "cron-skill",
-        tier: "wasm",
-        riskTier: "notify",
-        effects: [],
         schedule: "0 9 * * *",
         scheduleNextRunAt: new Date("2026-06-01T09:00:00Z"),
-        branchTipSha: SHA,
-        lockfileHash: null,
-        inputs: INPUTS_SCHEMA,
-        outputs: null,
         classifierLog: NOTIFY_LOG,
-        runAs: owner,
-        applyFilesystem: noFs,
         ...overrides,
-      };
+      });
     }
 
     function register(overrides: Partial<ExecuteRegisterParams> = {}) {
@@ -1247,24 +1260,7 @@ describe("DrizzleSkillStore", () => {
     const UNKNOWN_ID = "019d0000-0000-7000-8000-0000000000ff";
 
     function register(overrides: Partial<ExecuteRegisterParams> = {}) {
-      return tx((trx) =>
-        store.executeRegister(trx, {
-          name: "echo",
-          tier: "wasm",
-          riskTier: "notify",
-          effects: [],
-          schedule: null,
-          scheduleNextRunAt: null,
-          branchTipSha: SHA,
-          lockfileHash: null,
-          inputs: INPUTS_SCHEMA,
-          outputs: null,
-          classifierLog: STUB_LOG,
-          runAs: owner,
-          applyFilesystem: noFs,
-          ...overrides,
-        }),
-      );
+      return tx((trx) => store.executeRegister(trx, executeRegisterParams(overrides)));
     }
 
     /** A live `echo` at `SHA` with an approve-tier upgrade to `SHA_NEW` pending. */
@@ -1296,7 +1292,7 @@ describe("DrizzleSkillStore", () => {
       });
     }
 
-    async function deployStatus(id: string) {
+    async function reloadDeploy(id: string) {
       return expectDefined(await tx((trx) => store.getDeployById(trx, id)), "deploy");
     }
 
@@ -1304,7 +1300,7 @@ describe("DrizzleSkillStore", () => {
       const { pendingId, skill } = await pendingUpgrade();
       const outcome = await tx((trx) => store.denyPendingDeploy(trx, { pendingId }));
       expect(outcome).toEqual({ kind: "transitioned" });
-      const deploy = await deployStatus(pendingId);
+      const deploy = await reloadDeploy(pendingId);
       expect(deploy.status).toBe("denied");
       expect(deploy.resolvedAt).toBeInstanceOf(Date);
       expect(await tx((trx) => store.getSkillById(trx, skill.id))).toEqual(skill);
@@ -1320,16 +1316,16 @@ describe("DrizzleSkillStore", () => {
       assertKind(await tx((trx) => approve(trx, pendingId)), "live");
       const outcome = await tx((trx) => store.denyPendingDeploy(trx, { pendingId }));
       expect(outcome).toEqual({ kind: "not_pending", status: "live" });
-      expect((await deployStatus(pendingId)).status).toBe("live");
+      expect((await reloadDeploy(pendingId)).status).toBe("live");
     });
 
     it("deny of a denied deploy is not_pending, and the row keeps its first resolution", async () => {
       const { pendingId } = await pendingUpgrade();
       await tx((trx) => store.denyPendingDeploy(trx, { pendingId }));
-      const first = await deployStatus(pendingId);
+      const first = await reloadDeploy(pendingId);
       const outcome = await tx((trx) => store.denyPendingDeploy(trx, { pendingId }));
       expect(outcome).toEqual({ kind: "not_pending", status: "denied" });
-      expect(await deployStatus(pendingId)).toEqual(first);
+      expect(await reloadDeploy(pendingId)).toEqual(first);
     });
 
     it("approve of a denied deploy is rejected and leaves the skills row alone", async () => {
@@ -1341,12 +1337,13 @@ describe("DrizzleSkillStore", () => {
       expect(await tx((trx) => store.getSkillById(trx, skill.id))).toEqual(skill);
     });
 
-    it("approve whose deploy is resolved between its reads and its guarded write commits nothing", async () => {
-      // The second tap of a race: this approve read the row as pending, but a
-      // deny landed before its conditional UPDATE. The hook denies the row on
-      // the same connection right before that statement executes, which is
-      // where a concurrent resolution surfaces to a transaction that cannot
-      // see it any earlier.
+    it("approve whose guarded UPDATE matches no row commits nothing", async () => {
+      // Pins that the conditional UPDATE is the transaction's first write: a
+      // zero-row match leaves `skills` untouched because nothing precedes it.
+      // The hook denies the row on the same connection right before that
+      // statement executes. The real race converges here too, by a longer
+      // path — under REPEATABLE READ the loser's UPDATE raises `40001` and
+      // the transactor's retry reads the row as `denied`.
       const { pendingId, skill } = await pendingUpgrade();
       const outcome = await tx((trx) =>
         approve(
@@ -1361,7 +1358,7 @@ describe("DrizzleSkillStore", () => {
       );
       assertKind(outcome, "rejected");
       expect(await tx((trx) => store.getSkillById(trx, skill.id))).toEqual(skill);
-      expect((await deployStatus(pendingId)).status).toBe("denied");
+      expect((await reloadDeploy(pendingId)).status).toBe("denied");
       expect(outcome.reason).toBe("deploy_not_pending: status is 'denied'");
     });
   });
@@ -1370,8 +1367,8 @@ describe("DrizzleSkillStore", () => {
 /**
  * `trx` with one seam: `beforeUpdate` runs, on the same connection, right
  * before each UPDATE on `table` executes. Everything else passes through.
- * Stands in for a concurrent transaction committing between a use case's
- * reads and its guarded write, which one PGlite connection cannot do.
+ * Puts a use case's guarded write in front of a row it did not read, which
+ * one PGlite connection cannot otherwise arrange.
  */
 function hookBeforeUpdate(
   trx: Transaction,
