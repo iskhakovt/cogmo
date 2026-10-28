@@ -692,6 +692,7 @@ inputs:
           declared_dependencies: [],
           validation_errors: [],
         },
+        resolvedAt: new Date(),
       }),
     );
 
@@ -1121,9 +1122,7 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
     await tx((trx) =>
       store.transitionToFinished(trx, {
         id: row.id,
-        status: "success",
-        output: { x: 7 },
-        error: null,
+        verdict: { status: "success", output: { x: 7 } },
       }),
     );
     const cached = { runId: row.id, status: "success", output: { x: 7 } };

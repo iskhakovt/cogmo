@@ -50,8 +50,10 @@ export const skillRunTrigger = pgEnum("skill_run_trigger", ["manual", "cron", "e
  *   - `finished` — `status` set, audit row terminal. A retry returns the
  *     cached result without touching the runtime.
  *
- * See `design/skills.md` → Exactly-once invocation. Pattern derives from
- * brandur.org/idempotency-keys (atomic phases + recovery points).
+ * The columns each point sets are pinned by the `chk_skill_runs_*` CHECKs
+ * on the table (design/skills.md → Exactly-once invocation, per-state
+ * data). Pattern derives from brandur.org/idempotency-keys (atomic phases
+ * + recovery points).
  */
 export const skillRunRecoveryPoint = pgEnum("skill_run_recovery_point", [
   "started",
@@ -59,9 +61,13 @@ export const skillRunRecoveryPoint = pgEnum("skill_run_recovery_point", [
   "finished",
 ]);
 
+/**
+ * `pending_approval` is the one non-terminal state; `live`, `denied` and
+ * `rolled_back` are terminal. Approval puts the deploy `live` in the same
+ * transaction, so there is no state between them.
+ */
 export const skillDeployStatus = pgEnum("skill_deploy_status", [
   "pending_approval",
-  "approved",
   "denied",
   "live",
   "rolled_back",
@@ -138,9 +144,13 @@ export const skills = pgTable(
 /**
  * Append-only deploy history. One row per `register` attempt that produces a
  * classified result. `prior_git_sha` is null on first deploy and used by
- * `rollback` to find the previous live SHA. `approved_by` is null for `auto`
- * and `notify` tiers (no human in the loop) and set when an `approve`-tier
- * deploy resolves via the Telegram approval flow.
+ * `rollback` to find the previous live SHA. The per-state columns follow
+ * `status` (design/skills.md → Deploy lifecycle, per-state data):
+ * `resolved_at` is set iff the row is terminal
+ * (`chk_skill_deploys_resolved_at_iff_terminal`), and `approved_by` — the
+ * identity that approved an `approve`-tier deploy — is set only on a `live`
+ * row (`chk_skill_deploys_approved_by_only_live`); it stays null on a row
+ * that went live without a human in the loop.
  */
 export const skillDeploys = pgTable(
   "skill_deploys",
@@ -158,13 +168,27 @@ export const skillDeploys = pgTable(
     createdAt: ts(),
     resolvedAt: timestamp("resolved_at", { withTimezone: true }),
   },
-  (t) => [index("idx_skill_deploys_skill_id").on(t.skillId)],
+  (t) => [
+    index("idx_skill_deploys_skill_id").on(t.skillId),
+    check(
+      "chk_skill_deploys_resolved_at_iff_terminal",
+      sql`(${t.status} = 'pending_approval') = (${t.resolvedAt} IS NULL)`,
+    ),
+    check(
+      "chk_skill_deploys_approved_by_only_live",
+      sql`${t.approvedBy} IS NULL OR ${t.status} = 'live'`,
+    ),
+  ],
 );
 
 /**
  * Append-only invocation log. `inputs` / `output` are validated at invoke time
  * against the per-skill JSON Schema in the manifest (ajv); the store layer
  * round-trips them as opaque JSON.
+ *
+ * The lifecycle is `recovery_point` (the phase) with `status` (the verdict);
+ * the `chk_skill_runs_*` CHECKs pin which columns each phase has set
+ * (design/skills.md → Exactly-once invocation → Per-state data).
  */
 export const skillRuns = pgTable(
   "skill_runs",
@@ -180,7 +204,7 @@ export const skillRuns = pgTable(
     error: text("error"),
     /**
      * Per-run wall-clock + peak-memory metrics. Null while the run is in
-     * `status='running'`; written at finalisation time by the host. Shape
+     * `recovery_point='started'`; written by `transitionToExecuted`. Shape
      * defined by {@link SkillRunResourceUsageSchema} in `../types.ts`.
      */
     resourceUsage: jsonbZod("resource_usage", SkillRunResourceUsageSchema),
@@ -203,6 +227,7 @@ export const skillRuns = pgTable(
     // append-only run log the row's creation time IS the start-of-execution
     // time.
     createdAt: ts(),
+    /** When the worker returned; null while `recovery_point='started'`. */
     finishedAt: timestamp("finished_at", { withTimezone: true }),
   },
   (t) => [
@@ -211,6 +236,24 @@ export const skillRuns = pgTable(
     // default unique semantics, so multiple null-key rows (CLI / tests)
     // coexist freely while non-null keys are constrained to one row.
     unique("uniq_skill_runs_idempotency_key").on(t.idempotencyKey),
+    // A terminal verdict exists exactly in the `finished` phase.
+    check(
+      "chk_skill_runs_status_iff_finished",
+      sql`(${t.recoveryPoint} = 'finished') = (${t.status} <> 'running')`,
+    ),
+    // The executed payload (`finished_at`, `resource_usage`, and whichever of
+    // `output` / `error` the worker produced) arrives with the `executed`
+    // phase and is absent before it.
+    check(
+      "chk_skill_runs_executed_payload",
+      sql`(${t.recoveryPoint} = 'started') = (${t.finishedAt} IS NULL) AND (${t.recoveryPoint} = 'started') = (${t.resourceUsage} IS NULL) AND (${t.recoveryPoint} <> 'started' OR (${t.output} IS NULL AND ${t.error} IS NULL))`,
+    ),
+    // `output` and `error` are alternatives; an `error` verdict names its
+    // reason and keeps no output, a `success` verdict has no error.
+    check(
+      "chk_skill_runs_outcome",
+      sql`NOT (${t.output} IS NOT NULL AND ${t.error} IS NOT NULL) AND (${t.status} <> 'success' OR ${t.error} IS NULL) AND (${t.status} <> 'error' OR (${t.error} IS NOT NULL AND ${t.output} IS NULL))`,
+    ),
   ],
 );
 
