@@ -16,7 +16,7 @@
 # matches the builder resolver byte-for-byte.
 #
 # `cogmo_skills_runtime` itself has zero third-party python deps; only
-# the per-skill venvs populated by `uv pip sync --target …` against a
+# the per-skill venvs populated by `uv venv` + `uv pip sync` against a
 # manifest's `requirements.lock` introduce wheels into the runtime.
 
 # uv toolchain as a stage — version + digest from docker-bake.hcl, shared
@@ -67,10 +67,10 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 # Nothing here uses the base image's pip: the supervisor and every skill run
-# in venvs without system site-packages, and uv does all installs. Kept, the
-# copies it vendors (certifi, urllib3, msgpack, pkg_resources) would show in
-# every scan, fixable only by a pip release.
-RUN python3 -m pip uninstall --yes --no-cache-dir --root-user-action=ignore pip
+# in venvs without system site-packages, and uv does all resolves and
+# installs. Left installed, the copies it vendors (certifi, urllib3, msgpack,
+# setuptools) would show in every scan, fixable only by a pip release.
+RUN python3 -m pip uninstall --yes --root-user-action=ignore pip
 
 # Non-root user (UID 1000, regular-user range — matches devbase's `vscode`
 # user). Sysbox already maps the in-container root to a non-root host uid
