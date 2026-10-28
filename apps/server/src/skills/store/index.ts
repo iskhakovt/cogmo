@@ -1,4 +1,5 @@
 import { and, asc, eq, getTableColumns, isNotNull, lte, sql } from "drizzle-orm";
+import { match } from "ts-pattern";
 import { single } from "../../db/helpers.js";
 import type { Transaction } from "../../db/index.js";
 import type {
@@ -8,7 +9,18 @@ import type {
   SkillIo,
   SkillRunResourceUsage,
 } from "../types.js";
-import { skillContextCalls, skillDeploys, skillRuns, skills } from "./schema.js";
+import {
+  skillContextCalls,
+  type skillDeployStatus,
+  skillDeploys,
+  type skillRiskTier,
+  type skillRunRecoveryPoint,
+  type skillRunStatus,
+  skillRuns,
+  type skillRunTrigger,
+  skills,
+  type skillTier,
+} from "./schema.js";
 
 /**
  * Throws if `schedule` and `scheduleNextRunAt` aren't both null or both
@@ -49,13 +61,13 @@ function runAsColumns(
     : { runAsUserId: runAs.userId, runAsProfileId: runAs.profileId };
 }
 
-export type SkillTier = "wasm" | "container";
-export type SkillRiskTier = "auto" | "notify" | "approve";
-export type SkillRunStatus = "running" | "success" | "error";
-export type SkillRunTrigger = "manual" | "cron" | "event";
-export type SkillDeployStatus = "pending_approval" | "approved" | "denied" | "live" | "rolled_back";
+export type SkillTier = (typeof skillTier.enumValues)[number];
+export type SkillRiskTier = (typeof skillRiskTier.enumValues)[number];
+export type SkillRunStatus = (typeof skillRunStatus.enumValues)[number];
+export type SkillRunTrigger = (typeof skillRunTrigger.enumValues)[number];
+export type SkillDeployStatus = (typeof skillDeployStatus.enumValues)[number];
 /** See {@link skillRunRecoveryPoint} in schema.ts for the per-state contract. */
-export type SkillRunRecoveryPoint = "started" | "executed" | "finished";
+export type SkillRunRecoveryPoint = (typeof skillRunRecoveryPoint.enumValues)[number];
 
 export interface SkillRow {
   id: string;
@@ -175,6 +187,8 @@ export interface InsertDeployParams {
   riskTier: SkillRiskTier;
   status: SkillDeployStatus;
   classifierLog: ClassifierLog;
+  /** Set iff `status` is terminal (`chk_skill_deploys_resolved_at_iff_terminal`). */
+  resolvedAt: Date | null;
 }
 
 export interface InsertRunParams {
@@ -312,6 +326,24 @@ export interface ExecuteRollbackParams {
   applyFilesystem(): Promise<void>;
 }
 
+/**
+ * What an executed run produced, as `transitionToExecuted` writes it and the
+ * `executed` row records it: an output or an error, never both
+ * (`chk_skill_runs_outcome`).
+ */
+export type ExecutedOutcome =
+  | { kind: "output"; output: unknown | null }
+  | { kind: "error"; error: string };
+
+/**
+ * A finished run's verdict, one shape per terminal status: the columns
+ * `transitionToFinished` writes, and the shape `chk_skill_runs_outcome` pins
+ * on the row.
+ */
+export type SkillRunVerdict =
+  | { status: "success"; output: unknown | null }
+  | { status: "error"; error: string };
+
 /** Outcome of {@link SkillStore.transitionToFinished}. */
 export type FinishRunTransition =
   | { kind: "transitioned" }
@@ -416,15 +448,6 @@ export interface SkillStore {
   getPendingDeploy(tx: Transaction, skillId: string): Promise<SkillDeployRow | undefined>;
   /** Returns the deploy row by id, or null. */
   getDeployById(tx: Transaction, id: string): Promise<SkillDeployRow | undefined>;
-  resolveDeploy(
-    tx: Transaction,
-    params: {
-      id: string;
-      status: SkillDeployStatus;
-      approvedBy: string | null;
-      resolvedAt: Date;
-    },
-  ): Promise<void>;
 
   // --- skill_runs ---
   insertRun(tx: Transaction, params: InsertRunParams): Promise<SkillRunRow>;
@@ -447,28 +470,27 @@ export interface SkillStore {
   ): Promise<{ kind: "new" | "recovered"; row: SkillRunRow }>;
 
   /**
-   * Atomic transition `started → executed`. Writes the executed payload
-   * (output / error / rusage / finished_at) in the same UPDATE that
-   * advances `recovery_point`. Caller wraps in `runInTx`. A retry whose
-   * cached `executed` row already exists short-circuits this write via
-   * the row-state check inside `runner.invoke`.
+   * Atomic transition `started → executed`. Writes the executed payload —
+   * the worker's outcome, `resource_usage` and `finished_at` — in the same
+   * UPDATE that advances `recovery_point`. Caller wraps in `runInTx`. A
+   * retry whose cached `executed` row already exists short-circuits this
+   * write via the row-state check inside `runner.invoke`.
    */
   transitionToExecuted(
     tx: Transaction,
     params: {
       id: string;
-      output: unknown | null;
-      error: string | null;
+      outcome: ExecutedOutcome;
       resourceUsage: SkillRunResourceUsage;
       finishedAt: Date;
     },
   ): Promise<void>;
 
   /**
-   * Atomic transition `executed → finished`. Writes the terminal `status`
-   * (which the execute step doesn't have — output validation runs after)
-   * and flips `recovery_point` to `finished`. Output is overwritten with
-   * `null` when output validation rejected the executed payload.
+   * Atomic transition `executed → finished`. Writes the verdict — the
+   * terminal `status` the execute step doesn't have, since output validation
+   * runs after it, with the output a `success` keeps or the reason an
+   * `error` records — and flips `recovery_point` to `finished`.
    *
    * Two keyed retries that both recovered the row at `executed` race here;
    * the loser gets `already_finished` with the row the winner settled. A row
@@ -476,12 +498,7 @@ export interface SkillStore {
    */
   transitionToFinished(
     tx: Transaction,
-    params: {
-      id: string;
-      status: SkillRunStatus;
-      output: unknown | null;
-      error: string | null;
-    },
+    params: { id: string; verdict: SkillRunVerdict },
   ): Promise<FinishRunTransition>;
 
   // --- skill_context_calls ---
@@ -959,6 +976,7 @@ export class DrizzleSkillStore implements SkillStore {
           riskTier: params.riskTier,
           status: params.status,
           classifierLog: params.classifierLog,
+          resolvedAt: params.resolvedAt,
         })
         .returning(),
     );
@@ -976,25 +994,6 @@ export class DrizzleSkillStore implements SkillStore {
   async getDeployById(tx: Transaction, id: string): Promise<SkillDeployRow | undefined> {
     const rows = await tx.select().from(skillDeploys).where(eq(skillDeploys.id, id)).limit(1);
     return rows[0];
-  }
-
-  async resolveDeploy(
-    tx: Transaction,
-    params: {
-      id: string;
-      status: SkillDeployStatus;
-      approvedBy: string | null;
-      resolvedAt: Date;
-    },
-  ): Promise<void> {
-    await tx
-      .update(skillDeploys)
-      .set({
-        status: params.status,
-        approvedBy: params.approvedBy,
-        resolvedAt: params.resolvedAt,
-      })
-      .where(eq(skillDeploys.id, params.id));
   }
 
   // --- skill_runs ---
@@ -1051,12 +1050,16 @@ export class DrizzleSkillStore implements SkillStore {
     tx: Transaction,
     params: {
       id: string;
-      output: unknown | null;
-      error: string | null;
+      outcome: ExecutedOutcome;
       resourceUsage: SkillRunResourceUsage;
       finishedAt: Date;
     },
   ): Promise<void> {
+    const outcomeColumns = match(params.outcome)
+      .returnType<{ output: unknown | null; error: string | null }>()
+      .with({ kind: "output" }, ({ output }) => ({ output, error: null }))
+      .with({ kind: "error" }, ({ error }) => ({ output: null, error }))
+      .exhaustive();
     // Guard the transition on the current recovery_point so a
     // programmer error (calling transitionToExecuted on a row that has
     // already moved past 'started') surfaces as an assertion failure
@@ -1066,8 +1069,7 @@ export class DrizzleSkillStore implements SkillStore {
     const updated = await tx
       .update(skillRuns)
       .set({
-        output: params.output,
-        error: params.error,
+        ...outcomeColumns,
         resourceUsage: params.resourceUsage,
         finishedAt: params.finishedAt,
         recoveryPoint: "executed",
@@ -1083,24 +1085,19 @@ export class DrizzleSkillStore implements SkillStore {
 
   async transitionToFinished(
     tx: Transaction,
-    params: {
-      id: string;
-      status: SkillRunStatus;
-      output: unknown | null;
-      error: string | null;
-    },
+    params: { id: string; verdict: SkillRunVerdict },
   ): Promise<FinishRunTransition> {
+    const verdictColumns = match(params.verdict)
+      .returnType<{ status: SkillRunStatus; output: unknown | null; error: string | null }>()
+      .with({ status: "success" }, ({ output }) => ({ status: "success", output, error: null }))
+      .with({ status: "error" }, ({ error }) => ({ status: "error", output: null, error }))
+      .exhaustive();
     // Guard the transition on `recovery_point='executed'`. Same
     // rationale as transitionToExecuted — catch out-of-order calls
     // at the DB layer instead of silently regressing the row.
     const updated = await tx
       .update(skillRuns)
-      .set({
-        status: params.status,
-        output: params.output,
-        error: params.error,
-        recoveryPoint: "finished",
-      })
+      .set({ ...verdictColumns, recoveryPoint: "finished" })
       .where(and(eq(skillRuns.id, params.id), eq(skillRuns.recoveryPoint, "executed")))
       .returning({ id: skillRuns.id });
     if (updated.length > 0) return { kind: "transitioned" };

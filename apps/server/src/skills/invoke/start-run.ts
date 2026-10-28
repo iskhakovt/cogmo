@@ -1,11 +1,7 @@
-import { match } from "ts-pattern";
+import { match, P } from "ts-pattern";
 import type { Transactor } from "../../db/index.js";
-import type { SkillRunRow, SkillRunTrigger, SkillStore } from "../store/index.js";
-import {
-  type ExecutedOutcome,
-  reconstructFinishedResult,
-  type SkillRunResult,
-} from "./run-result.js";
+import type { ExecutedOutcome, SkillRunRow, SkillRunTrigger, SkillStore } from "../store/index.js";
+import { finishedVerdictOf, reconstructFinishedResult, type SkillRunResult } from "./run-result.js";
 
 /**
  * Where an invocation takes up its run row, from the row's
@@ -23,9 +19,11 @@ export type RunStart =
 
 /** The outcome an `executed` or `finished` row holds. */
 export function executedOutcomeOf(row: Pick<SkillRunRow, "output" | "error">): ExecutedOutcome {
-  return row.error !== null
-    ? { kind: "error", error: row.error }
-    : { kind: "output", output: row.output };
+  return match(row)
+    .returnType<ExecutedOutcome>()
+    .with({ error: P.string }, ({ error }) => ({ kind: "error", error }))
+    .with({ error: null }, ({ output }) => ({ kind: "output", output }))
+    .exhaustive();
 }
 
 /**
@@ -68,7 +66,7 @@ export async function startRun(
     }))
     .with("finished", () => ({
       kind: "replay",
-      result: reconstructFinishedResult(row.id, row.status, row.output, row.error),
+      result: reconstructFinishedResult(row.id, finishedVerdictOf(row)),
     }))
     .exhaustive();
 }

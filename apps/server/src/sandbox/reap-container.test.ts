@@ -61,7 +61,7 @@ function row(status: ContainerRow["status"]): ContainerRow {
     },
     resourceLimits: { cpus: 1, memory_bytes: 256 * 1024 * 1024, pids: 64 },
     status,
-    exitCode: null,
+    reapedReason: status === "reaped" ? "cascade" : null,
     ttlExpiresAt: new Date("2026-04-27T13:00:00Z"),
     startedAt: status === "starting" ? null : AT,
     exitedAt: null,
@@ -86,6 +86,7 @@ describe("reapContainer", () => {
     expect(store.transitionContainerStatus).toHaveBeenCalledWith(expect.anything(), {
       id: "row-1",
       to: "reaped",
+      reason: "ttl_expired",
       at: AT,
     });
   });
@@ -135,6 +136,7 @@ describe("reapDiscoveredContainer", () => {
       expect(store.transitionContainerStatus).toHaveBeenCalledWith(expect.anything(), {
         id: "row-1",
         to: "reaped",
+        reason: "crash_reconcile",
         at: AT,
       });
     },

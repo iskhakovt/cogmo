@@ -1,5 +1,5 @@
 {
-  "id": "f70f4210-4d60-4631-a5a2-9faf5eadf592",
+  "id": "08722e83-e61b-455b-bf4c-93207fc640dc",
   "prevId": "ad97c0a1-2a6e-4167-98df-2b2e0bd51386",
   "version": "7",
   "dialect": "postgresql",
@@ -1826,10 +1826,9 @@
           "primaryKey": false,
           "notNull": true
         },
-        "status": {
-          "name": "status",
-          "type": "steering_rule_status",
-          "typeSchema": "public",
+        "active": {
+          "name": "active",
+          "type": "boolean",
           "primaryKey": false,
           "notNull": true
         },
@@ -1867,13 +1866,6 @@
         "retracted_at": {
           "name": "retracted_at",
           "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "retired_reason": {
-          "name": "retired_reason",
-          "type": "steering_rule_retired_reason",
-          "typeSchema": "public",
           "primaryKey": false,
           "notNull": false
         },
@@ -1933,7 +1925,7 @@
             }
           ],
           "isUnique": true,
-          "where": "source = 'instruction' AND status = 'live'",
+          "where": "source = 'instruction' AND retracted_at IS NULL",
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -1990,7 +1982,7 @@
       "checkConstraints": {
         "chk_steering_rules_lifecycle": {
           "name": "chk_steering_rules_lifecycle",
-          "value": "((\"steering_rules\".\"status\" = 'retired') = (\"steering_rules\".\"retracted_at\" IS NOT NULL))\n        AND ((\"steering_rules\".\"status\" = 'retired') = (\"steering_rules\".\"retired_reason\" IS NOT NULL))\n        AND (\"steering_rules\".\"contradicted_in_conversation_id\" IS NULL OR \"steering_rules\".\"status\" IN ('learning', 'retired'))\n        AND (\"steering_rules\".\"status\" <> 'learning' OR \"steering_rules\".\"source\" IN ('correction', 'evolution'))\n        AND (\"steering_rules\".\"status\" <> 'disabled' OR \"steering_rules\".\"source\" IN ('manual', 'seed'))\n        AND ((\"steering_rules\".\"source\" = 'instruction') = (\"steering_rules\".\"user_id\" IS NOT NULL))\n        AND ((\"steering_rules\".\"source\" = 'instruction') = (\"steering_rules\".\"quote\" IS NOT NULL))"
+          "value": "NOT (\"steering_rules\".\"active\" AND \"steering_rules\".\"retracted_at\" IS NOT NULL)\n        AND (\"steering_rules\".\"source\" <> 'instruction' OR \"steering_rules\".\"active\" OR \"steering_rules\".\"retracted_at\" IS NOT NULL)\n        AND ((\"steering_rules\".\"source\" = 'instruction') = (\"steering_rules\".\"user_id\" IS NOT NULL))\n        AND ((\"steering_rules\".\"source\" = 'instruction') = (\"steering_rules\".\"quote\" IS NOT NULL))"
         }
       },
       "isRLSEnabled": false
@@ -2873,9 +2865,10 @@
           "primaryKey": false,
           "notNull": true
         },
-        "exit_code": {
-          "name": "exit_code",
-          "type": "integer",
+        "reaped_reason": {
+          "name": "reaped_reason",
+          "type": "container_reaped_reason",
+          "typeSchema": "public",
           "primaryKey": false,
           "notNull": false
         },
@@ -2993,7 +2986,12 @@
         }
       },
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "chk_containers_reaped_reason": {
+          "name": "chk_containers_reaped_reason",
+          "value": "(\"containers\".\"status\" = 'reaped') = (\"containers\".\"reaped_reason\" IS NOT NULL)"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.networks": {
@@ -4680,20 +4678,10 @@
       "schema": "public",
       "values": ["agent", "wizard", "manual"]
     },
-    "public.steering_rule_retired_reason": {
-      "name": "steering_rule_retired_reason",
-      "schema": "public",
-      "values": ["contradicted", "superseded", "removed_by_user", "unknown"]
-    },
     "public.steering_rule_source": {
       "name": "steering_rule_source",
       "schema": "public",
       "values": ["manual", "seed", "instruction", "correction", "evolution"]
-    },
-    "public.steering_rule_status": {
-      "name": "steering_rule_status",
-      "schema": "public",
-      "values": ["live", "learning", "disabled", "retired"]
     },
     "public.message_role": {
       "name": "message_role",
@@ -4724,6 +4712,18 @@
       "name": "mcp_tool_approval_status",
       "schema": "public",
       "values": ["pending", "approved", "rejected"]
+    },
+    "public.container_reaped_reason": {
+      "name": "container_reaped_reason",
+      "schema": "public",
+      "values": [
+        "ttl_expired",
+        "cascade",
+        "dead_instance",
+        "crash_reconcile",
+        "start_failed",
+        "unknown"
+      ]
     },
     "public.container_runtime": {
       "name": "container_runtime",

@@ -2,12 +2,8 @@ import { err, ok, type Result } from "neverthrow";
 import { match } from "ts-pattern";
 import type { Transactor } from "../../db/index.js";
 import { type SkillSourceCacheEntry, schemaIssues } from "../source-cache.js";
-import type { SkillRunStatus, SkillStore } from "../store/index.js";
-import {
-  type ExecutedOutcome,
-  reconstructFinishedResult,
-  type SkillRunResult,
-} from "./run-result.js";
+import type { ExecutedOutcome, SkillRunVerdict, SkillStore } from "../store/index.js";
+import { finishedVerdictOf, reconstructFinishedResult, type SkillRunResult } from "./run-result.js";
 
 /**
  * The `executed → finished` transition: validate the executed output against
@@ -25,42 +21,26 @@ export async function finishRun(
     executed: ExecutedOutcome;
   },
 ): Promise<SkillRunResult> {
-  const { runId, executed } = args;
-  let finalStatus: SkillRunStatus;
-  let finalOutput: unknown | null;
-  let finalError: string | null;
-  if (executed.kind === "error") {
-    finalStatus = "error";
-    finalOutput = null;
-    finalError = executed.error;
-  } else {
-    const valid = validateOutput(args.cached, executed.output, args.skillName);
-    if (valid.isErr()) {
-      finalStatus = "error";
-      finalOutput = null;
-      finalError = valid.error;
-    } else {
-      finalStatus = "success";
-      finalOutput = executed.output;
-      finalError = null;
-    }
-  }
+  const { runId } = args;
+  const verdict = match(args.executed)
+    .returnType<SkillRunVerdict>()
+    .with({ kind: "error" }, ({ error }) => ({ status: "error", error }))
+    .with({ kind: "output" }, ({ output }) =>
+      validateOutput(args.cached, output, args.skillName).match(
+        () => ({ status: "success", output }),
+        (error) => ({ status: "error", error }),
+      ),
+    )
+    .exhaustive();
 
   const transition = await deps.runInTx((tx) =>
-    deps.store.transitionToFinished(tx, {
-      id: runId,
-      status: finalStatus,
-      output: finalOutput,
-      error: finalError,
-    }),
+    deps.store.transitionToFinished(tx, { id: runId, verdict }),
   );
 
   return match(transition)
-    .with({ kind: "transitioned" }, () =>
-      reconstructFinishedResult(runId, finalStatus, finalOutput, finalError),
-    )
+    .with({ kind: "transitioned" }, () => reconstructFinishedResult(runId, verdict))
     .with({ kind: "already_finished" }, ({ row }) =>
-      reconstructFinishedResult(runId, row.status, row.output, row.error),
+      reconstructFinishedResult(runId, finishedVerdictOf(row)),
     )
     .exhaustive();
 }

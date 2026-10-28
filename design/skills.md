@@ -688,7 +688,7 @@ type SkillInvokeRejection =
 
 ### Deploy lifecycle `[confirmed]`
 
-The unit is a `skill_deploys` row, keyed by its id; its `status` is the `skill_deploy_status` enum. `live`, `denied` and `rolled_back` are terminal, and `live` means the deploy went live, not that it is current — the enable guard below reads it that way. `approved` is in the enum and no transition writes it; dropping it is a migration (todo). `resolved_at` and `approved_by` are per-state nullable columns with no CHECK tying them to `status` (todo). While a deploy of an enabled skill is pending, its `skills` row keeps the skill's last live sha, so the live version stays live through the approval window. A first deploy has no live version: its `skills` row is inserted disabled at the pending tip and stays there if the deploy is denied, and the enable guard keeps that sha from going live without a review.
+The unit is a `skill_deploys` row, keyed by its id; its `status` is the `skill_deploy_status` enum. `live`, `denied` and `rolled_back` are terminal, and `live` means the deploy went live, not that it is current — the enable guard below reads it that way. While a deploy of an enabled skill is pending, its `skills` row keeps the skill's last live sha, so the live version stays live through the approval window. A first deploy has no live version: its `skills` row is inserted disabled at the pending tip and stays there if the deploy is denied, and the enable guard keeps that sha from going live without a review.
 
 Activation is a second lifecycle this section does not model: `skills.disabled` together with whether a `live` row exists at the skill's current sha — a first deploy pending (disabled, no live row), a first deploy denied (the same), live (enabled), deregistered (disabled, live row), and the planned failure breaker — with `deregister`, `enable`, `approve` and `rollback` as its transitions. Naming it as its own state machine is a todo; until then it is an accepted residual, and the enable guard is its one explicit rule.
 
@@ -710,6 +710,28 @@ Register, approve and rollback take the skill name's `pg_advisory_xact_lock` ins
 | `rollback` → `rolled_back` | `main` unchanged since the pre-transaction read. The target is any commit whose manifest names the skill: no prior `live` row is required and nothing checks for a pending deploy — rollback is an owner-only CLI override of the approval gate (failure modes) | `skills` at the target sha; insert the row; `update-ref main` to the target, which rewinds past every commit after it, other skills' deploys included (failure modes). After the commit, best-effort: mirror with `--force-with-lease` | `live`, `no_op`, `rejected`; a moved `main` rolls back as `main_moved` |
 
 Deny's outcomes are values its callers match exhaustively: `denyDeploy` returns `Result<void, DenyDeployError>`, `cogmo skills deny` exits 1 naming the miss, and a keyboard tap toasts `skill_deploy_not_found` or `skill_deploy_not_pending`. Nothing reports a resolution that did not happen. Approve and rollback carry a rejection as the `reason` string of `ExecuteRegisterResult`, which the use cases flatten into `RegisterResult.errors`: untyped, with no split between a failure that is terminal for the deploy (a manifest error) and one that only pauses it (PyPI unreachable during the lockfile compile), and the first-deploy `23505` race surfaces as a throw. `transport.skills.approveDeploy` recovers the two codes it can name by prefix and renders the rest as `skill_deploy_register_failed`. A residual (todo: tag the deploy rejection).
+
+#### Per-state data `[confirmed]`
+
+`resolved_at` and `approved_by` are per-state data, so two CHECKs tie them to `status` and no transition can leave a row between states.
+
+| `status` | `resolved_at` | `approved_by` |
+|-|-|-|
+| `pending_approval` | null | null |
+| `live` | set | the approver's identity when `approve` ran for a user; null when it ran for the owner from the CLI, and on a `register` row, which no human approved |
+| `denied` | set | null |
+| `rolled_back` | set | null |
+
+- `chk_skill_deploys_resolved_at_iff_terminal` (Data model): `resolved_at` is set iff the row is terminal.
+- `chk_skill_deploys_approved_by_only_live`: an approver only on a `live` row. One direction only: a `live` row without an approver is a `register` or an owner-CLI `approve`.
+
+Each is a single field — a timestamp, a foreign key — so it keeps its natural type under CHECK rather than moving into a per-state JSONB blob ([architecture-rules](../.agents/rules/architecture-rules.md)). The `skill_deploy_status` enum holds the four states above. `0077_skill_run_and_deploy_state_checks` rewrites the type without `approved` and adds the CHECKs of both tables; its failure modes are under Exactly-once invocation → Per-state data and hold for this table too — every shipped writer (`executeRegister`, `executeApprove`, `denyPendingDeploy`, `executeRollback`) sets `resolved_at` with a terminal status and `approved_by` only with `live`. Deploy-specific:
+
+| Failure mode | State left | Why it is safe, or the residual |
+|-|-|-|
+| a row holds `approved` when the migration runs | the cast to the rewritten type fails and the file rolls back whole | refused: no build has written `approved` |
+| a deploy transaction in flight across the migration | its row `pending_approval` or terminal, both legal | the two `ALTER COLUMN … TYPE` steps rewrite `skill_deploys`, and a table rewrite is not MVCC-safe: a REPEATABLE READ transaction whose snapshot predates the rewrite and first reads `skill_deploys` after the migration commits sees it empty — register's pending guard sees no pending row (the duplicate-pending case under "two `register`s of one skill at once" below), approve's pre-read returns `deploy_not_found`, deny reports `not_found`. **Residual**, benign at single-user scale. `skill_runs` is altered in place and is unaffected |
+| a future writer violates a CHECK at runtime (`23514`) | the deploy transaction rolls back before `applyFilesystem`, so `main` and `skills` are untouched | the error surfaces as the throw it is — a bug in the writer, not a value |
 
 Who repeats a deploy: the Inngest auto-register caller runs `register` in one step with `retries: 0`. The `register_skill` tool is `durable: true` inside `handle-message`'s tool step (`retries: 2`); the loop hands it a `ToolCallContext.idempotencyKey`, which the handler drops, and `register` takes no key, so a crash after the commit and before Inngest records the step runs `register` again (failure modes). Every other repeat is an operator's.
 
@@ -1238,7 +1260,7 @@ CREATE TYPE skill_tier AS ENUM ('wasm', 'container');
 CREATE TYPE skill_risk_tier AS ENUM ('auto', 'notify', 'approve');
 CREATE TYPE skill_run_status AS ENUM ('running', 'success', 'error');
 CREATE TYPE skill_run_trigger AS ENUM ('manual', 'cron', 'event');
-CREATE TYPE skill_deploy_status AS ENUM ('pending_approval', 'approved', 'denied', 'live', 'rolled_back');
+CREATE TYPE skill_deploy_status AS ENUM ('pending_approval', 'denied', 'live', 'rolled_back');
 
 skills (
   id                UUID v7 PK,
@@ -1267,10 +1289,12 @@ skill_deploys (
   prior_git_sha   TEXT,                    -- nullable: null for first deploy; used for rollback
   risk_tier       skill_risk_tier NOT NULL,
   status          skill_deploy_status NOT NULL,
-  approved_by     UUID REFERENCES user_identities(id),  -- nullable: null for auto/notify-tier (no human approval); set only when a human clicks Approve on approve-tier
+  approved_by     UUID REFERENCES user_identities(id),  -- nullable: the identity that approved an approve-tier deploy for a user; null for auto/notify-tier and owner-CLI approvals
   classifier_log  JSONB NOT NULL,          -- ClassifierLogSchema (classifier output + static analysis findings)
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-  resolved_at     TIMESTAMPTZ              -- nullable: set when status transitions to live / denied / rolled_back
+  resolved_at     TIMESTAMPTZ,             -- nullable: set iff status is terminal (live / denied / rolled_back)
+  CHECK ((status = 'pending_approval') = (resolved_at IS NULL)),          -- chk_skill_deploys_resolved_at_iff_terminal
+  CHECK (approved_by IS NULL OR status = 'live')                           -- chk_skill_deploys_approved_by_only_live
 )
 
 skill_runs (
@@ -1281,11 +1305,19 @@ skill_runs (
   status          skill_run_status NOT NULL,
   output          JSONB,                    -- nullable: null on error. SkillInvocationOutputSchema when present (matches skill's declared output JSON Schema).
   error           TEXT,                     -- nullable: null on success
-  resource_usage  JSONB,                    -- nullable: SkillRunResourceUsageSchema. { wallClockMs, peakMemoryBytes }. Written at finalisation; null while running.
+  resource_usage  JSONB,                    -- nullable: SkillRunResourceUsageSchema. { wallClockMs, peakMemoryBytes }. Null while recovery_point = 'started'.
   idempotency_key TEXT,                     -- nullable: null for one-shot CLI/test invocations. UNIQUE(idempotency_key) — Postgres NULLs-are-not-equal default allows multiple null rows; see Exactly-once invocation.
   recovery_point  skill_run_recovery_point NOT NULL DEFAULT 'started',  -- 'started' | 'executed' | 'finished' — drives the replay branches in runner.invoke.
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-  finished_at     TIMESTAMPTZ               -- nullable: null while running
+  finished_at     TIMESTAMPTZ,              -- nullable: null while recovery_point = 'started'
+  -- Per-state data (see Exactly-once invocation → Per-state data):
+  CHECK ((recovery_point = 'finished') = (status <> 'running')),          -- chk_skill_runs_status_iff_finished
+  CHECK ((recovery_point = 'started') = (finished_at IS NULL)
+     AND (recovery_point = 'started') = (resource_usage IS NULL)
+     AND (recovery_point <> 'started' OR (output IS NULL AND error IS NULL))),  -- chk_skill_runs_executed_payload
+  CHECK (NOT (output IS NOT NULL AND error IS NOT NULL)
+     AND (status <> 'success' OR error IS NULL)
+     AND (status <> 'error' OR (error IS NOT NULL AND output IS NULL)))   -- chk_skill_runs_outcome
 )
 
 skill_context_calls (
@@ -1307,7 +1339,7 @@ skill_context_calls (
 - `skills.effects` — `SkillEffectsSchema = z.array(z.enum(SKILL_EFFECTS))`.
 - `skill_deploys.classifier_log` — `ClassifierLogSchema = z.object({ risk_tier, declared_effects, detected_effects, declared_secrets, validation_errors, classifier_version })`. Fully Cogmo-controlled, fully schema'd.
 - `skill_runs.inputs` / `skill_runs.output` — `SkillInvocationInputsSchema` / `SkillInvocationOutputSchema`. Pass-through `z.unknown()` wrappers at the store layer; the per-skill schema is whatever the skill declared in its manifest and is validated at invoke (the store just needs "valid JSON").
-- `skill_runs.resource_usage` — `SkillRunResourceUsageSchema = z.object({ wallClockMs: z.number().int().nonnegative(), peakMemoryBytes: z.number().int().nonnegative().nullable() })`. Populated at finalisation; null while running. Extensible to CPU / IO / fork counts via Zod-schema additions without a migration.
+- `skill_runs.resource_usage` — `SkillRunResourceUsageSchema = z.object({ wallClockMs: z.number().int().nonnegative(), peakMemoryBytes: z.number().int().nonnegative().nullable() })`. Written by `transitionToExecuted`; null while `recovery_point = 'started'`. Extensible to CPU / IO / fork counts via Zod-schema additions without a migration.
 
 ## Exactly-once invocation `[confirmed]`
 
@@ -1322,6 +1354,42 @@ UPDATE recovery_point='executed', output/error/resource_usage/finished_at  ← t
   ↓ output validation (pure, deterministic)
 UPDATE recovery_point='finished', status='success'|'error'  ← transitionToFinished, atomic
 ```
+
+#### Per-state data `[confirmed]`
+
+`recovery_point` is the phase and `status` the verdict; the other nullable columns are per-state data. Three CHECKs on the table pin, from every writer, which columns each phase has set, so the combinations no transition writes are unrepresentable and the readers (`finishedVerdictOf`, `executedOutcomeOf`) match the shapes exhaustively.
+
+| Transition | Guard | Writes, in one statement | Outcome |
+|-|-|-|-|
+| insert → `started` | none; with a key, `ON CONFLICT (idempotency_key) DO UPDATE` with a no-op SET recovers the row the key already has | `skill_id`, `trigger`, `inputs`, `status = 'running'`, the key; `recovery_point` by default | the row, as `new` or `recovered` |
+| `started` → `executed` | `WHERE id = $1 AND recovery_point = 'started'` | `recovery_point`, the worker's `output` or `error`, `resource_usage`, `finished_at` | a zero-row match throws: the row was not at `started`, which no retry path reaches |
+| `executed` → `finished` | `WHERE id = $1 AND recovery_point = 'executed'` | `recovery_point`, `status`, and the verdict's `output` or `error` | `transitioned`; `already_finished` with the row another attempt settled; a row at `started` or missing throws |
+
+| `recovery_point` | `status` | `output` / `error` | `resource_usage` | `finished_at` |
+|-|-|-|-|-|
+| `started` | `running` | both null | null | null |
+| `executed` | `running` | what the worker produced: `output` (null when the skill returned nothing) with `error` null, or `error` with `output` null | set | set |
+| `finished` | `success` | `output` (possibly null), `error` null | set | set |
+| `finished` | `error` | `error` set, `output` null | set | set |
+
+- `chk_skill_runs_status_iff_finished` (Data model): a terminal `status` exists exactly in the `finished` phase.
+- `chk_skill_runs_executed_payload`: `finished_at`, `resource_usage` and the worker's `output` or `error` arrive with `executed` and are absent before it.
+- `chk_skill_runs_outcome`: `output` and `error` are alternatives; an `error` verdict names its reason and keeps no output, a `success` verdict has no error.
+
+The `executed` payload stays in its existing columns under CHECK, a deviation from [state-machines.md](../.agents/rules/state-machines.md)'s per-state JSONB blob: the columns are populated in production, the CHECK gives the same all-or-none invariant, moving them would cost a data migration with no reader to benefit, and `chk_skills_run_as_iff_live_schedule` is the same accepted shape. `error` is free text, so a worker failure and an output-schema rejection cannot be told apart by query; an `error_kind` enum is a residual (todo).
+
+In code the transitions take values — `ExecutedOutcome` (`{ kind: "output", output } | { kind: "error", error }`) and `SkillRunVerdict` (`{ status: "success", output } | { status: "error", error }`) — which the store maps onto the columns, so no caller can write a half-payload. `finishedVerdictOf` reads a `finished` row back into its verdict and throws on a row outside the shape: an invariant the CHECKs hold, so a bug, not a value.
+
+`0077_skill_run_and_deploy_state_checks` adds the CHECKs of both tables and, before the one that needs it, repairs the one shape a shipped build wrote that they reject — one transaction, so a failure leaves the repair unapplied too, boot fails naming the constraint, and the next boot retries the file.
+
+| Failure mode | State left | Why it is safe, or the residual |
+|-|-|-|
+| rows that finished before `0042` added `resource_usage` | `recovery_point = 'finished'` with `resource_usage` null | the migration writes what the runner records: `wallClockMs` as the wall clock from `created_at` to `finished_at`, `peakMemoryBytes` null, the value the WASM tier reports |
+| a row in a shape no shipped build wrote — past `started` without `finished_at`; `error` without a reason or with an output; `success` with an error; a terminal `status` outside `finished` | the file rolls back whole | refused, not repaired: every shipped writer set `finished_at` and a reason together with the verdict, and 0043 moved every terminal row to `finished`, so such a row has no faithful repair; the operator fixes it |
+| a run in flight across the deploy | its row at `started` or `executed`, both legal | `ALTER TABLE` waits for the run's transaction to end and the run's next transition waits for the migration; the retiring build writes the same shapes |
+| a keyed retry replays a `finished` row written by an earlier build | the row as that build left it | every shape an earlier build wrote passes the CHECKs once the file has run, so `finishedVerdictOf` reads it |
+| a future writer violates a CHECK at runtime (`23514`) in `started → executed` | the row stays at `started`, the rejected write undone | the error surfaces as the throw it is — a bug in the writer, not a value. A keyed retry is refused as `inflight`, the conservative reading of a `started` row (Recovery branches); an unkeyed row stays at `started` for good |
+| the same in `executed → finished` | the row stays at `executed` | a keyed retry recovers it as `finish`, re-runs `transitionToFinished` and hits the same `23514`: a repeating throw, not a refusal, until the writer is fixed |
 
 **Recovery branches.** Every `runner.invoke({idempotencyKey})` calls `startOrRecoverRun` first. `invoke/start-run.ts` maps the row to a `RunStart` (`execute`, `finish`, `replay`, `inflight`), matched exhaustively. A warm-pool skill whose key has no row yet starts the pool before that write, so a pool that can't start leaves no row and the keyed retry runs the skill; a key that already has a row is settled from it without starting the pool.
 

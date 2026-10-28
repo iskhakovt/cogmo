@@ -3,8 +3,7 @@ import type { SecretsStore } from "../../secrets/store/index.js";
 import { DefaultCtxHandler, type DefaultCtxHandlerOptions } from "../ctx-handler.js";
 import type { SkillRunAs } from "../run-as.js";
 import type { SkillSourceCacheEntry } from "../source-cache.js";
-import type { SkillRow, SkillStore } from "../store/index.js";
-import type { ExecutedOutcome } from "./run-result.js";
+import type { ExecutedOutcome, SkillRow, SkillStore } from "../store/index.js";
 import { dispatchToRuntime, type RuntimeConfig, type SkillRuntime } from "./runtime.js";
 
 export interface ExecuteRunDeps {
@@ -76,8 +75,7 @@ export async function executeRun(
   await deps.runInTx((tx) =>
     deps.store.transitionToExecuted(tx, {
       id: run.id,
-      output: executed.kind === "output" ? executed.output : null,
-      error: executed.kind === "error" ? executed.error : null,
+      outcome: executed,
       resourceUsage,
       finishedAt,
     }),
