@@ -10,6 +10,7 @@
 
 import type { TextOptions } from "@clack/prompts";
 import type { Result } from "neverthrow";
+import { expect } from "vitest";
 
 import type { Adapter, StreamingAdapter } from "../transport/types.js";
 
@@ -57,6 +58,26 @@ export function expectOk<T, E>(result: Result<T, E>): T {
  * expect(ev.plan).toBe("..."); // ev: Extract<CodingEvent, { kind: "plan_ready" }>
  * ```
  */
+/**
+ * Assert that `error` — a rejection from a store or raw query — carries the
+ * Postgres SQLSTATE `code` somewhere in its cause chain. A mismatch reports
+ * the code actually found, and a value with no Postgres error in it reports
+ * the value, so an unexpected rejection never reads as a bare `undefined`.
+ */
+export function expectSqlState(error: unknown, code: string): void {
+  let cur: unknown = error;
+  while (typeof cur === "object" && cur !== null) {
+    if ("code" in cur && typeof cur.code === "string") {
+      expect(cur.code).toBe(code);
+      return;
+    }
+    cur = "cause" in cur ? cur.cause : undefined;
+  }
+  expect.fail(
+    `expected SQLSTATE ${code}, got a rejection with no Postgres error: ${String(error)}`,
+  );
+}
+
 export function assertKind<U extends { kind: string }, K extends U["kind"]>(
   value: U | null | undefined,
   kind: K,

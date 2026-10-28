@@ -186,7 +186,7 @@ describe("createPipelineStageRunner", () => {
 
   it("parks on a gate stage and emits gate.pending with the parsed timeout", async () => {
     const { fn, runStore, executeAgenticStage } = harness();
-    runStore.transitionStatus.mockResolvedValue({ kind: "transitioned" });
+    runStore.parkAtGate.mockResolvedValue({ kind: "transitioned" });
     const t = new InngestTestEngine({ function: fn, events: [stageDue("approve")] });
 
     const { result, ctx } = await t.execute({
@@ -194,12 +194,7 @@ describe("createPipelineStageRunner", () => {
     });
 
     expect(result).toEqual({ status: "waiting_gate" });
-    expect(runStore.transitionStatus).toHaveBeenCalledWith(
-      expect.anything(),
-      RUN_ID,
-      "running",
-      "waiting_gate",
-    );
+    expect(runStore.parkAtGate).toHaveBeenCalledWith(expect.anything(), RUN_ID);
     expect(executeAgenticStage).not.toHaveBeenCalled();
     expect(ctx.step.sendEvent).toHaveBeenCalledWith(
       "emit-gate-pending",
@@ -253,7 +248,7 @@ describe("createPipelineStageRunner", () => {
   it("fails the run with the stage's reason and tells the conversation", async () => {
     const failure = { reason: "artifact_invalid", detail: "/title is required" } as const;
     const { fn, runStore, notifyConversation } = harness({ kind: "failed", failure });
-    runStore.failRun.mockResolvedValue({ kind: "failed", conversationId: "conv-1" });
+    runStore.failRunAt.mockResolvedValue({ kind: "failed", conversationId: "conv-1" });
     const t = new InngestTestEngine({ function: fn, events: [stageDue("draft")] });
 
     const { result, ctx } = await t.execute({
@@ -261,13 +256,55 @@ describe("createPipelineStageRunner", () => {
     });
 
     expect(result).toEqual({ status: "failed", failure });
-    expect(runStore.failRun).toHaveBeenCalledWith(expect.anything(), RUN_ID, failure);
+    expect(runStore.failRunAt).toHaveBeenCalledWith(
+      expect.anything(),
+      { runId: RUN_ID, stageId: "draft", iteration: 0 },
+      failure,
+    );
     expect(runStore.advanceStage).not.toHaveBeenCalled();
     expect(ctx.step.sendEvent).not.toHaveBeenCalled();
     expect(notifyConversation).toHaveBeenCalledWith(
       "conv-1",
       '❌ Pipeline "plan-then-build" failed at stage "draft": the stage\'s result did not match its declared output (/title is required)',
     );
+  });
+
+  it("still tells the conversation when its failure had committed before the step was recorded", async () => {
+    const failure = { reason: "turn_truncated", detail: null } as const;
+    const { fn, runStore, notifyConversation } = harness({ kind: "failed", failure });
+    runStore.failRunAt.mockResolvedValue({ kind: "already_failed", conversationId: "conv-1" });
+    const t = new InngestTestEngine({ function: fn, events: [stageDue("draft")] });
+
+    const { result } = await t.execute({
+      steps: [{ id: "load-run", handler: () => snapshot() }],
+    });
+
+    expect(result).toEqual({ status: "failed", failure });
+    expect(notifyConversation).toHaveBeenCalledWith(
+      "conv-1",
+      expect.stringContaining('failed at stage "draft"'),
+    );
+  });
+
+  it("skips the failure when the run is no longer on the stage", async () => {
+    const { fn, runStore, notifyConversation } = harness({
+      kind: "failed",
+      failure: { reason: "turn_truncated", detail: null },
+    });
+    runStore.failRunAt.mockResolvedValue({
+      kind: "stale",
+      status: "cancelled",
+      currentStage: "draft",
+      iteration: 0,
+    });
+    const t = new InngestTestEngine({ function: fn, events: [stageDue("draft")] });
+
+    const { result } = await t.execute({
+      steps: [{ id: "load-run", handler: () => snapshot() }],
+    });
+
+    expect(result).toEqual({ status: "skipped", reason: "stale" });
+    expect(notifyConversation).not.toHaveBeenCalled();
   });
 
   it("doesn't emit the next stage when the cursor already moved under the advance", async () => {
@@ -304,7 +341,7 @@ describe("createPipelineStageRunner", () => {
       ],
     };
     const { fn, runStore } = harness();
-    runStore.failRun.mockResolvedValue({ kind: "failed", conversationId: "conv-1" });
+    runStore.failRunAt.mockResolvedValue({ kind: "failed", conversationId: "conv-1" });
     const t = new InngestTestEngine({ function: fn, events: [stageDue("draft")] });
 
     const { result } = await t.execute({
@@ -355,7 +392,7 @@ describe("createPipelineStageRunner", () => {
 
   it("onFailure fails the run with the error class and tells the conversation", async () => {
     const { fn, runStore, notifyConversation } = harness();
-    runStore.failRun.mockResolvedValue({ kind: "failed", conversationId: "conv-1" });
+    runStore.failRunAt.mockResolvedValue({ kind: "failed", conversationId: "conv-1" });
 
     await invokeInngestOnFailure<FailureCtx>(fn, {
       event: { data: { event: { data: { runId: RUN_ID, stageId: "draft", iteration: 0 } } } },
@@ -364,19 +401,43 @@ describe("createPipelineStageRunner", () => {
     });
 
     // The class only: messages can carry query text or payloads.
-    expect(runStore.failRun).toHaveBeenCalledWith(expect.anything(), RUN_ID, {
-      reason: "stage_error",
-      detail: "TypeError",
-    });
+    expect(runStore.failRunAt).toHaveBeenCalledWith(
+      expect.anything(),
+      { runId: RUN_ID, stageId: "draft", iteration: 0 },
+      { reason: "stage_error", detail: "TypeError" },
+    );
     expect(notifyConversation).toHaveBeenCalledWith(
       "conv-1",
       '❌ The pipeline run failed at stage "draft" and has stopped.',
     );
   });
 
-  it("onFailure stays quiet for a run that was already terminal", async () => {
+  it("onFailure still tells the conversation when its failure had already committed", async () => {
     const { fn, runStore, notifyConversation } = harness();
-    runStore.failRun.mockResolvedValue({ kind: "already_terminal", status: "cancelled" });
+    runStore.failRunAt.mockResolvedValue({ kind: "already_failed", conversationId: "conv-1" });
+
+    await invokeInngestOnFailure<FailureCtx>(fn, {
+      event: { data: { event: { data: { runId: RUN_ID, stageId: "draft", iteration: 0 } } } },
+      error: new Error("boom"),
+      step: { run: (_id, body) => body() },
+    });
+
+    expect(notifyConversation).toHaveBeenCalledWith(
+      "conv-1",
+      '❌ The pipeline run failed at stage "draft" and has stopped.',
+    );
+  });
+
+  it("onFailure leaves a run that has moved past the failed stage alone", async () => {
+    // The advance committed and only the emit failed: the run is healthy on
+    // the next stage, and failing it would blame a stage that never ran.
+    const { fn, runStore, notifyConversation } = harness();
+    runStore.failRunAt.mockResolvedValue({
+      kind: "stale",
+      status: "running",
+      currentStage: "approve",
+      iteration: 0,
+    });
 
     await invokeInngestOnFailure<FailureCtx>(fn, {
       event: { data: { event: { data: { runId: RUN_ID, stageId: "draft", iteration: 0 } } } },
@@ -399,7 +460,7 @@ describe("createPipelineStageRunner", () => {
 
     it("re-sends gate.pending when the park had already committed for this gate", async () => {
       const { fn, runStore } = harness();
-      runStore.transitionStatus.mockResolvedValue(at("waiting_gate", "approve", 0));
+      runStore.parkAtGate.mockResolvedValue(at("waiting_gate", "approve", 0));
       const t = new InngestTestEngine({ function: fn, events: [stageDue("approve")] });
 
       const { result, ctx } = await t.execute({
@@ -415,7 +476,7 @@ describe("createPipelineStageRunner", () => {
 
     it("stays skipped when the run is parked somewhere else", async () => {
       const { fn, runStore } = harness();
-      runStore.transitionStatus.mockResolvedValue(at("waiting_gate", "sign-off", 0));
+      runStore.parkAtGate.mockResolvedValue(at("waiting_gate", "sign-off", 0));
       const t = new InngestTestEngine({ function: fn, events: [stageDue("approve")] });
 
       const { result, ctx } = await t.execute({
@@ -524,7 +585,7 @@ describe("createPipelineStageRunner", () => {
 
   it("onFailure still resolves when the failure notice can't be delivered", async () => {
     const { fn, runStore, notifyConversation } = harness();
-    runStore.failRun.mockResolvedValue({ kind: "failed", conversationId: "conv-1" });
+    runStore.failRunAt.mockResolvedValue({ kind: "failed", conversationId: "conv-1" });
 
     await expect(
       invokeInngestOnFailure<FailureCtx>(fn, {
@@ -533,7 +594,7 @@ describe("createPipelineStageRunner", () => {
         step: directStep({}, "notify-failure"),
       }),
     ).resolves.toBeUndefined();
-    expect(runStore.failRun).toHaveBeenCalled();
+    expect(runStore.failRunAt).toHaveBeenCalled();
     expect(notifyConversation).not.toHaveBeenCalled();
   });
 });

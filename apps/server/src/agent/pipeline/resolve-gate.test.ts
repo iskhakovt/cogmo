@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
 import { pipelineGateKey } from "../../inngest/events.js";
@@ -79,7 +80,7 @@ async function parkedRun(stage: "approve" | "sign-off") {
       currentStage: stage,
     }),
   );
-  await tx((trx) => runStore.transitionStatus(trx, run.id, "running", "waiting_gate"));
+  await tx((trx) => runStore.parkAtGate(trx, run.id));
   return {
     runId: run.id,
     conversationId: conversation.id,
@@ -208,7 +209,8 @@ describe("resolveGate", () => {
 
   it("a run that is not parked is stale", async () => {
     const { runId, gateKey } = await parkedRun("approve");
-    await tx((trx) => runStore.transitionStatus(trx, runId, "waiting_gate", "running"));
+    // No store path moves a parked run back to `running` on the same gate.
+    await db.execute(sql`UPDATE pipeline_runs SET status = 'running' WHERE id = ${runId}`);
 
     expect(
       await resolveGate(deps(), { runId, gateKey, decision: "approved", resolverRunId: "r-1" }),
@@ -302,7 +304,7 @@ describe("resolveGate", () => {
         toStage: "sign-off",
       }),
     );
-    await tx((trx) => runStore.transitionStatus(trx, runId, "running", "waiting_gate"));
+    await tx((trx) => runStore.parkAtGate(trx, runId));
     await resolveGate(deps(), {
       runId,
       gateKey: pipelineGateKey(runId, "sign-off", 0),

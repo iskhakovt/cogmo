@@ -19,10 +19,18 @@ describe("describePipelineRunFailure", () => {
   });
 
   it("has prose for every failed reason", () => {
-    const described = PIPELINE_RUN_FAILED_REASONS.map((reason) =>
-      describePipelineRunFailure({ reason, detail: null }),
-    );
-    expect(new Set(described).size).toBe(PIPELINE_RUN_FAILED_REASONS.length);
-    for (const text of described) expect(text).toMatch(/^[a-z]/);
+    expect(
+      PIPELINE_RUN_FAILED_REASONS.map((reason) =>
+        describePipelineRunFailure({ reason, detail: null }),
+      ),
+    ).toEqual([
+      "the stage failed",
+      "the stage is not in the pinned definition",
+      "wait stages are not supported yet",
+      "the stage's agent turn could not finish",
+      "the stage's reply was cut off at the model's output limit",
+      "the stage's result did not match its declared output",
+      "the checkpoint's timeout could not be applied",
+    ]);
   });
 });

@@ -2,8 +2,8 @@ import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database, Transactor } from "../../../db/index.js";
-import { findPgErrorByCode } from "../../../db/pg-errors.js";
-import { expectOk } from "../../../test/assertions.js";
+
+import { expectOk, expectSqlState } from "../../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../../test/pglite.js";
 import { DrizzleAgentStore } from "../../store/index.js";
 import type { PipelineRunCancellation, PipelineRunFailure } from "../run-failure.js";
@@ -106,45 +106,105 @@ describe("DrizzlePipelineRunStore", () => {
     expect(fetched?.currentStage).toBe("plan-gate");
   });
 
-  describe("transitionStatus", () => {
-    it("flips running → waiting_gate when the from-status matches", async () => {
+  describe("parkAtGate", () => {
+    it("flips running → waiting_gate", async () => {
       const { run } = await seedRun();
-      const result = await tx((trx) =>
-        runStore.transitionStatus(trx, run.id, "running", "waiting_gate"),
-      );
+      const result = await tx((trx) => runStore.parkAtGate(trx, run.id));
       expect(result).toEqual({ kind: "transitioned" });
       expect((await tx((trx) => runStore.getRun(trx, run.id)))?.status).toBe("waiting_gate");
     });
 
-    it("reports stale with the actual status on a mismatched from", async () => {
+    it("is stale, with the cursor, for a run already parked", async () => {
       const { run } = await seedRun();
-      const result = await tx((trx) =>
-        runStore.transitionStatus(trx, run.id, "waiting_gate", "running"),
-      );
+      await tx((trx) => runStore.parkAtGate(trx, run.id));
+      const result = await tx((trx) => runStore.parkAtGate(trx, run.id));
       expect(result).toEqual({
         kind: "stale",
-        status: "running",
+        status: "waiting_gate",
         currentStage: "gather-context",
         iteration: 0,
       });
     });
 
     it("reports not_found for an unknown run", async () => {
-      const result = await tx((trx) =>
-        runStore.transitionStatus(trx, randomUUID(), "running", "waiting_gate"),
-      );
+      const result = await tx((trx) => runStore.parkAtGate(trx, randomUUID()));
       expect(result).toEqual({ kind: "not_found" });
     });
 
-    it("refuses to flip a terminal run, even when a terminal from is passed", async () => {
+    it("refuses a terminal run", async () => {
       const { run } = await seedRun();
       await tx((trx) => runStore.cancelRunIfActive(trx, run.id, USER_CANCELLED));
-      // A caller naming the terminal status as `from` must not reopen it.
-      const result = await tx((trx) =>
-        runStore.transitionStatus(trx, run.id, "cancelled", "running"),
-      );
+      const result = await tx((trx) => runStore.parkAtGate(trx, run.id));
       expect(result).toMatchObject({ kind: "stale", status: "cancelled", iteration: 0 });
       expect((await tx((trx) => runStore.getRun(trx, run.id)))?.status).toBe("cancelled");
+    });
+  });
+
+  describe("failRunAt", () => {
+    const cursor = (runId: string) => ({ runId, stageId: "gather-context", iteration: 0 });
+
+    it("fails a run still on the stage, parked or running, and leaves the cursor", async () => {
+      const { run, conversationId } = await seedRun();
+      await tx((trx) => runStore.parkAtGate(trx, run.id));
+      const result = await tx((trx) => runStore.failRunAt(trx, cursor(run.id), STAGE_THREW));
+      expect(result).toEqual({ kind: "failed", conversationId });
+      expect(await tx((trx) => runStore.getRun(trx, run.id))).toMatchObject({
+        status: "failed",
+        currentStage: "gather-context",
+        failureReason: "stage_error",
+        failureDetail: "TypeError",
+      });
+    });
+
+    it("reports its own earlier commit as already_failed", async () => {
+      const { run, conversationId } = await seedRun();
+      await tx((trx) => runStore.failRunAt(trx, cursor(run.id), STAGE_THREW));
+      const again = await tx((trx) =>
+        runStore.failRunAt(trx, cursor(run.id), { reason: "stage_error", detail: "RangeError" }),
+      );
+      expect(again).toEqual({ kind: "already_failed", conversationId });
+      expect((await tx((trx) => runStore.getRun(trx, run.id)))?.failureDetail).toBe("TypeError");
+    });
+
+    it("is stale once the run has moved past the stage", async () => {
+      const { run } = await seedRun();
+      await tx((trx) =>
+        runStore.advanceStage(trx, {
+          runId: run.id,
+          fromStage: "gather-context",
+          output: null,
+          toStage: "plan-gate",
+        }),
+      );
+      const result = await tx((trx) => runStore.failRunAt(trx, cursor(run.id), STAGE_THREW));
+      expect(result).toEqual({
+        kind: "stale",
+        status: "running",
+        currentStage: "plan-gate",
+        iteration: 0,
+      });
+      expect((await tx((trx) => runStore.getRun(trx, run.id)))?.status).toBe("running");
+    });
+
+    it("is stale for a run that ended on the stage some other way", async () => {
+      const { run } = await seedRun();
+      await tx((trx) => runStore.cancelRunIfActive(trx, run.id, USER_CANCELLED));
+      expect(await tx((trx) => runStore.failRunAt(trx, cursor(run.id), STAGE_THREW))).toMatchObject(
+        { kind: "stale", status: "cancelled" },
+      );
+      const { run: other } = await seedRun();
+      await tx((trx) =>
+        runStore.failRunAt(trx, cursor(other.id), { reason: "turn_truncated", detail: null }),
+      );
+      expect(
+        await tx((trx) => runStore.failRunAt(trx, cursor(other.id), STAGE_THREW)),
+      ).toMatchObject({ kind: "stale", status: "failed" });
+    });
+
+    it("reports not_found for an unknown run", async () => {
+      expect(await tx((trx) => runStore.failRunAt(trx, cursor(randomUUID()), STAGE_THREW))).toEqual(
+        { kind: "not_found" },
+      );
     });
   });
 
@@ -154,7 +214,7 @@ describe("DrizzlePipelineRunStore", () => {
     it("flips waiting_gate → running and records which resolution claimed the gate", async () => {
       const { run } = await seedRun();
       expect(run.gateResolution).toBeNull();
-      await tx((trx) => runStore.transitionStatus(trx, run.id, "running", "waiting_gate"));
+      await tx((trx) => runStore.parkAtGate(trx, run.id));
 
       const result = await tx((trx) => runStore.claimGate(trx, run.id, claim));
 
@@ -166,7 +226,7 @@ describe("DrizzlePipelineRunStore", () => {
 
     it("is stale for a run that isn't parked, and leaves the recorded claim alone", async () => {
       const { run } = await seedRun();
-      await tx((trx) => runStore.transitionStatus(trx, run.id, "running", "waiting_gate"));
+      await tx((trx) => runStore.parkAtGate(trx, run.id));
       await tx((trx) => runStore.claimGate(trx, run.id, claim));
 
       const second = await tx((trx) =>
@@ -199,9 +259,8 @@ describe("DrizzlePipelineRunStore", () => {
   });
 
   describe("advanceStage", () => {
-    it("records the output, moves the cursor, and resets status to running", async () => {
+    it("records the output and moves the cursor", async () => {
       const { run } = await seedRun();
-      await tx((trx) => runStore.transitionStatus(trx, run.id, "running", "waiting_gate"));
       const result = await tx((trx) =>
         runStore.advanceStage(trx, {
           runId: run.id,
@@ -293,6 +352,26 @@ describe("DrizzlePipelineRunStore", () => {
         }),
       );
       expect(result).toEqual({ kind: "not_found" });
+    });
+
+    it("refuses to move a run parked on the stage — a resolution claims the gate first", async () => {
+      const { run } = await seedRun("plan-gate");
+      await tx((trx) => runStore.parkAtGate(trx, run.id));
+      const result = await tx((trx) =>
+        runStore.advanceStage(trx, {
+          runId: run.id,
+          fromStage: "plan-gate",
+          output: null,
+          toStage: "implement",
+        }),
+      );
+      expect(result).toEqual({
+        kind: "stale",
+        status: "waiting_gate",
+        currentStage: "plan-gate",
+        iteration: 0,
+      });
+      expect((await tx((trx) => runStore.getRun(trx, run.id)))?.currentStage).toBe("plan-gate");
     });
 
     it("refuses to resurrect a terminal run whose cursor still matches fromStage", async () => {
@@ -400,7 +479,7 @@ describe("pipeline_runs CHECK constraints", () => {
     const error = await rejected(
       db.execute(sql`UPDATE pipeline_runs SET failure_reason = 'stage_error' WHERE id = ${run.id}`),
     );
-    expect(findPgErrorByCode(error, ["23514"])).toMatchObject({ code: "23514" });
+    expectSqlState(error, "23514");
   });
 
   it("refuses a failed run without a reason", async () => {
@@ -409,7 +488,7 @@ describe("pipeline_runs CHECK constraints", () => {
     const error = await rejected(
       db.execute(sql`UPDATE pipeline_runs SET failure_reason = NULL WHERE id = ${run.id}`),
     );
-    expect(findPgErrorByCode(error, ["23514"])).toMatchObject({ code: "23514" });
+    expectSqlState(error, "23514");
   });
 
   it("refuses a cancellation reason on a failed run", async () => {
@@ -420,7 +499,7 @@ describe("pipeline_runs CHECK constraints", () => {
         sql`UPDATE pipeline_runs SET failure_reason = 'cancelled_by_user' WHERE id = ${run.id}`,
       ),
     );
-    expect(findPgErrorByCode(error, ["23514"])).toMatchObject({ code: "23514" });
+    expectSqlState(error, "23514");
   });
 
   it("refuses a run parked on a gate it holds the claim on", async () => {
@@ -431,7 +510,7 @@ describe("pipeline_runs CHECK constraints", () => {
         sql`UPDATE pipeline_runs SET status = 'waiting_gate', gate_resolution = ${claim}::jsonb WHERE id = ${run.id}`,
       ),
     );
-    expect(findPgErrorByCode(error, ["23514"])).toMatchObject({ code: "23514" });
+    expectSqlState(error, "23514");
   });
 });
 

@@ -11,6 +11,7 @@
  * resolution that failed, failing a still-parked run in the same transaction.
  */
 
+import { match, P } from "ts-pattern";
 import type { Transactor } from "../../db/index.js";
 import {
   type PipelineGateDecision,
@@ -141,9 +142,9 @@ export async function inspectFailedResolution(
       pipelineGateKey(run.id, run.currentStage, run.iteration) === args.gateKey;
     if (!parked) {
       // This check's own failure, committed by an earlier run of the step
-      // whose result was lost: report it, so the notice still goes out. The
-      // failure leaves the cursor on this gate; its detail can differ between
-      // attempts and is not compared.
+      // whose result was lost: report it, so the notice still goes out.
+      // Recognised by reason and cursor — the failure leaves the cursor on
+      // this gate — never by the detail's wording.
       const failedByThis =
         args.failParkedRunWith !== null &&
         run.status === "failed" &&
@@ -182,11 +183,13 @@ export async function resolveGate(
 
     const base = { conversationId: run.conversationId, pipelineName: definition.name };
 
-    if (args.decision === "cancelled" || args.decision === "timeout_abort") {
-      await deps.runStore.cancelRunIfActive(tx, run.id, {
-        reason: args.decision === "cancelled" ? "cancelled_by_user" : "gate_timeout",
-        detail: null,
-      });
+    const cancelReason = match(args.decision)
+      .with("cancelled", () => "cancelled_by_user" as const)
+      .with("timeout_abort", () => "gate_timeout" as const)
+      .with(P.union("approved", "timeout_proceed"), () => null)
+      .exhaustive();
+    if (cancelReason !== null) {
+      await deps.runStore.cancelRunIfActive(tx, run.id, { reason: cancelReason, detail: null });
       return { kind: "cancelled", ...base };
     }
 

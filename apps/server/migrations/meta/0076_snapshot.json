@@ -1,5 +1,5 @@
 {
-  "id": "f0f9bae8-cc37-4a21-8e4a-7fd6d314f9fe",
+  "id": "e6d7a64f-f467-432a-a0e9-7065d21d0fc4",
   "prevId": "ad97c0a1-2a6e-4167-98df-2b2e0bd51386",
   "version": "7",
   "dialect": "postgresql",
@@ -490,7 +490,8 @@
         },
         "failure_reason": {
           "name": "failure_reason",
-          "type": "text",
+          "type": "pipeline_run_failure_reason",
+          "typeSchema": "public",
           "primaryKey": false,
           "notNull": false
         },
@@ -550,7 +551,16 @@
         }
       },
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "chk_pipeline_runs_failure_reason_by_status": {
+          "name": "chk_pipeline_runs_failure_reason_by_status",
+          "value": "CASE \"pipeline_runs\".\"status\" WHEN 'failed' THEN \"pipeline_runs\".\"failure_reason\" IS NOT NULL AND \"pipeline_runs\".\"failure_reason\" IN ('stage_error', 'unknown_stage', 'unsupported_stage', 'turn_degraded', 'turn_truncated', 'artifact_invalid', 'gate_resolution_error') WHEN 'cancelled' THEN \"pipeline_runs\".\"failure_reason\" IS NOT NULL AND \"pipeline_runs\".\"failure_reason\" IN ('cancelled_by_user', 'gate_timeout') ELSE \"pipeline_runs\".\"failure_reason\" IS NULL AND \"pipeline_runs\".\"failure_detail\" IS NULL END"
+        },
+        "chk_pipeline_runs_parked_gate_unclaimed": {
+          "name": "chk_pipeline_runs_parked_gate_unclaimed",
+          "value": "\"pipeline_runs\".\"status\" <> 'waiting_gate' OR \"pipeline_runs\".\"gate_resolution\" IS NULL OR (\"pipeline_runs\".\"gate_resolution\" ->> 'gateKey') <> (\"pipeline_runs\".\"id\"::text || ':' || \"pipeline_runs\".\"current_stage\" || ':' || \"pipeline_runs\".\"iteration\"::text)"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.custom_compartments": {

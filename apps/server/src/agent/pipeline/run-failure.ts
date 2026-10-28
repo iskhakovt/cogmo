@@ -11,8 +11,8 @@ import type {
   PIPELINE_RUN_FAILED_REASONS,
 } from "./store/schema.js";
 
-export type PipelineRunFailedReason = (typeof PIPELINE_RUN_FAILED_REASONS)[number];
-export type PipelineRunCancelledReason = (typeof PIPELINE_RUN_CANCELLED_REASONS)[number];
+type PipelineRunFailedReason = (typeof PIPELINE_RUN_FAILED_REASONS)[number];
+type PipelineRunCancelledReason = (typeof PIPELINE_RUN_CANCELLED_REASONS)[number];
 
 /** How a run came to be `failed`. */
 export interface PipelineRunFailure {
@@ -20,10 +20,13 @@ export interface PipelineRunFailure {
   detail: string | null;
 }
 
-/** How a run came to be `cancelled`. */
+/**
+ * How a run came to be `cancelled`. No cancellation carries a detail; the
+ * field keeps the terminal write one shape with {@link PipelineRunFailure}.
+ */
 export interface PipelineRunCancellation {
   reason: PipelineRunCancelledReason;
-  detail: string | null;
+  detail: null;
 }
 
 /** The failure as the run's conversation hears it. */

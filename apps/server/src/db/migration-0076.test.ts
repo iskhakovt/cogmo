@@ -1,11 +1,11 @@
 /**
- * Migrations 0076–0078 move `pipeline_runs.failure_reason` from free text to
- * the `pipeline_run_failure_reason` enum: 0076 creates the type and adds
- * `failure_detail`, 0077 copies each text into the detail and rewrites it to
- * the label its writer's message shape maps to, 0078 casts the column and
- * adds the CHECKs. Runs the three files' raw SQL against PGlite over rows in
- * the pre-migration shape (the pushed schema reverted to a bare `text`
- * column), one row per message shape the writers produced.
+ * Migration 0076 moves `pipeline_runs.failure_reason` from free text to the
+ * `pipeline_run_failure_reason` enum in one transaction: create the type, add
+ * `failure_detail`, copy each recorded text into the detail and rewrite it to
+ * the label its writer's message shape maps to, cast the column, add the
+ * CHECKs. Runs the raw SQL against PGlite over rows in the pre-migration
+ * shape (the pushed schema reverted to a bare `text` column), one row per
+ * message shape the writers produced, and over a row the file must reject.
  */
 
 import { readFile } from "node:fs/promises";
@@ -16,23 +16,24 @@ import { z } from "zod";
 import { DrizzlePipelineStore } from "../agent/pipeline/store/index.js";
 import { validPipelineDefinition } from "../agent/pipeline/test-fixtures.js";
 import { seedConversation } from "../test/agent-store-fixtures.js";
-import { expectDefined } from "../test/assertions.js";
+import { expectDefined, expectSqlState } from "../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import type { Database, Transactor } from "./index.js";
-import { findPgErrorByCode } from "./pg-errors.js";
 
-async function migrationSql(file: string): Promise<string> {
-  return readFile(fileURLToPath(new URL(`../../migrations/${file}`, import.meta.url)), "utf8");
-}
-const ADD_TYPE_SQL = await migrationSql("0076_pipeline_run_failure_reason_enum.sql");
-const BACKFILL_SQL = await migrationSql("0077_pipeline_run_failure_reason_backfill.sql");
-const CAST_AND_CHECK_SQL = await migrationSql("0078_pipeline_run_failure_reason_checks.sql");
+const MIGRATION_SQL = await readFile(
+  fileURLToPath(new URL("../../migrations/0076_pipeline_run_failure_reason.sql", import.meta.url)),
+  "utf8",
+);
 
 const IdRowsSchema = z.object({ rows: z.array(z.object({ id: z.string() })) });
 const ReasonRowsSchema = z.object({
   rows: z.array(
     z.object({ id: z.string(), reason: z.string().nullable(), detail: z.string().nullable() }),
   ),
+});
+const TextRowsSchema = z.object({ rows: z.array(z.object({ text: z.string().nullable() })) });
+const ColumnRowsSchema = z.object({
+  rows: z.array(z.object({ column_name: z.string(), data_type: z.string() })),
 });
 
 let db: Database;
@@ -61,20 +62,16 @@ afterAll(async () => {
   await close();
 });
 
-async function apply(migration: string): Promise<void> {
-  const statements = migration
-    .split("--> statement-breakpoint")
+/** The file as `migratePerFile` runs it: every statement in one transaction. */
+async function applyMigration(): Promise<void> {
+  const statements = MIGRATION_SQL.split("--> statement-breakpoint")
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
-  for (const stmt of statements) {
-    await db.execute(sql.raw(stmt));
-  }
-}
-
-async function applyAll(): Promise<void> {
-  await apply(ADD_TYPE_SQL);
-  await apply(BACKFILL_SQL);
-  await apply(CAST_AND_CHECK_SQL);
+  await db.transaction(async (trx) => {
+    for (const stmt of statements) {
+      await trx.execute(sql.raw(stmt));
+    }
+  });
 }
 
 async function seedDefinition(): Promise<{ definitionId: string; conversationId: string }> {
@@ -94,13 +91,14 @@ async function insertRun(
   seeded: { definitionId: string; conversationId: string },
   status: string,
   reason: string | null,
+  gateResolution: string | null = null,
 ): Promise<string> {
   const { rows } = IdRowsSchema.parse(
     await db.execute(sql`
       INSERT INTO pipeline_runs
-        (definition_id, conversation_id, status, current_stage, iteration, stage_outputs, failure_reason)
+        (definition_id, conversation_id, status, current_stage, iteration, stage_outputs, failure_reason, gate_resolution)
       VALUES
-        (${seeded.definitionId}, ${seeded.conversationId}, ${status}::pipeline_run_status, 'gather-context', 0, '{}'::jsonb, ${reason})
+        (${seeded.definitionId}, ${seeded.conversationId}, ${status}::pipeline_run_status, 'gather-context', 0, '{}'::jsonb, ${reason}, ${gateResolution}::jsonb)
       RETURNING id
     `),
   );
@@ -116,6 +114,16 @@ async function reasonsById(): Promise<
     ),
   );
   return Object.fromEntries(rows.map((r) => [r.id, { reason: r.reason, detail: r.detail }]));
+}
+
+async function failureColumns(): Promise<Record<string, string>> {
+  const { rows } = ColumnRowsSchema.parse(
+    await db.execute(sql`
+      SELECT column_name, data_type FROM information_schema.columns
+      WHERE table_name = 'pipeline_runs' AND column_name IN ('failure_reason', 'failure_detail')
+    `),
+  );
+  return Object.fromEntries(rows.map((r) => [r.column_name, r.data_type]));
 }
 
 /** Every message shape a writer produced, with the label it maps to. */
@@ -135,19 +143,19 @@ const WRITTEN_REASONS = [
   ["cancelled", 'gate "approve" timed out', "gate_timeout"],
 ] as const;
 
-describe("migrations 0076–0078 — pipeline_runs.failure_reason enum", () => {
+describe("migration 0076 — pipeline_runs.failure_reason enum", () => {
   it("maps every written reason onto its label and keeps the text as the detail", async () => {
     const seeded = await seedDefinition();
     const ids = await Promise.all(
       WRITTEN_REASONS.map(([status, text]) => insertRun(seeded, status, text)),
     );
 
-    await applyAll();
+    await applyMigration();
 
     const after = await reasonsById();
-    for (const [index, [, text, label]] of WRITTEN_REASONS.entries()) {
-      expect(after[expectDefined(ids[index], "run id")]).toEqual({ reason: label, detail: text });
-    }
+    expect(ids.map((id) => after[id])).toEqual(
+      WRITTEN_REASONS.map(([, text, label]) => ({ reason: label, detail: text })),
+    );
   });
 
   it("gives a text no writer produced its status's generic reason, and a terminal row without one too", async () => {
@@ -157,7 +165,7 @@ describe("migrations 0076–0078 — pipeline_runs.failure_reason enum", () => {
     const bareFailed = await insertRun(seeded, "failed", null);
     const bareCancelled = await insertRun(seeded, "cancelled", null);
 
-    await applyAll();
+    await applyMigration();
 
     expect(await reasonsById()).toEqual({
       [unknownFailed]: { reason: "stage_error", detail: "something else entirely" },
@@ -173,7 +181,7 @@ describe("migrations 0076–0078 — pipeline_runs.failure_reason enum", () => {
     const parked = await insertRun(seeded, "waiting_gate", null);
     const completed = await insertRun(seeded, "completed", null);
 
-    await applyAll();
+    await applyMigration();
 
     expect(await reasonsById()).toEqual({
       [movingWithReason]: { reason: null, detail: null },
@@ -182,17 +190,79 @@ describe("migrations 0076–0078 — pipeline_runs.failure_reason enum", () => {
     });
   });
 
-  it("then holds the CHECK the backfill satisfied", async () => {
+  it("then holds both CHECKs the backfill satisfied", async () => {
     const seeded = await seedDefinition();
     const running = await insertRun(seeded, "running", null);
-    await applyAll();
+    const failed = await insertRun(seeded, "failed", 'stage "draft" failed (TypeError)');
+    await applyMigration();
 
-    const reasonWhileMoving = await db
-      .execute(sql`UPDATE pipeline_runs SET failure_reason = 'stage_error' WHERE id = ${running}`)
-      .then(
+    const rejected = (statement: Promise<unknown>) =>
+      statement.then(
         () => null,
         (error: unknown) => error,
       );
-    expect(findPgErrorByCode(reasonWhileMoving, ["23514"])).toMatchObject({ code: "23514" });
+    expectSqlState(
+      await rejected(
+        db.execute(
+          sql`UPDATE pipeline_runs SET failure_reason = 'stage_error' WHERE id = ${running}`,
+        ),
+      ),
+      "23514",
+    );
+    expectSqlState(
+      await rejected(
+        db.execute(
+          sql`UPDATE pipeline_runs SET failure_reason = 'cancelled_by_user' WHERE id = ${failed}`,
+        ),
+      ),
+      "23514",
+    );
+    const ownClaim = JSON.stringify({ gateKey: `${running}:gather-context:0`, resolverRunId: "r" });
+    expectSqlState(
+      await rejected(
+        db.execute(
+          sql`UPDATE pipeline_runs SET status = 'waiting_gate', gate_resolution = ${ownClaim}::jsonb WHERE id = ${running}`,
+        ),
+      ),
+      "23514",
+    );
+  });
+
+  it("rolls the whole file back on a row it cannot constrain, and applies once the row is fixed", async () => {
+    // Every reason text maps, so the only row the file rejects is one the
+    // gate CHECK refuses: parked on a gate while holding that gate's claim.
+    const seeded = await seedDefinition();
+    const mapped = await insertRun(seeded, "failed", 'gate "approve" timed out');
+    const parkedWithOwnClaim = await insertRun(seeded, "waiting_gate", null, "{}");
+    await db.execute(sql`
+      UPDATE pipeline_runs
+      SET gate_resolution = jsonb_build_object('gateKey', id::text || ':gather-context:0', 'resolverRunId', 'r-1')
+      WHERE id = ${parkedWithOwnClaim}
+    `);
+
+    const failure = await applyMigration().then(
+      () => null,
+      (error: unknown) => error,
+    );
+
+    expectSqlState(failure, "23514");
+    expect(await failureColumns()).toEqual({ failure_reason: "text" });
+    const { rows: untouched } = TextRowsSchema.parse(
+      await db.execute(sql`SELECT failure_reason AS text FROM pipeline_runs WHERE id = ${mapped}`),
+    );
+    expect(untouched).toEqual([{ text: 'gate "approve" timed out' }]);
+
+    await db.execute(
+      sql`UPDATE pipeline_runs SET gate_resolution = NULL WHERE id = ${parkedWithOwnClaim}`,
+    );
+    await applyMigration();
+    expect(await failureColumns()).toEqual({
+      failure_reason: "USER-DEFINED",
+      failure_detail: "text",
+    });
+    expect((await reasonsById())[mapped]).toEqual({
+      reason: "stage_error",
+      detail: 'gate "approve" timed out',
+    });
   });
 });

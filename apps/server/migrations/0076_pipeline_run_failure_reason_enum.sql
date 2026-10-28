@@ -1,2 +1,0 @@
-CREATE TYPE "public"."pipeline_run_failure_reason" AS ENUM('stage_error', 'unknown_stage', 'unsupported_stage', 'turn_degraded', 'turn_truncated', 'artifact_invalid', 'gate_resolution_error', 'cancelled_by_user', 'gate_timeout');--> statement-breakpoint
-ALTER TABLE "pipeline_runs" ADD COLUMN "failure_detail" text;
