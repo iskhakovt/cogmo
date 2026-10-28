@@ -1,23 +1,2 @@
-import type { GetStepTools } from "inngest";
-import type { inngest as inngestClient } from "./client.js";
-
 export { inngest } from "./client.js";
 export { inboundArrived } from "./events.js";
-
-/**
- * The exact shape of `step.run` from the SDK — derived rather than re-typed
- * so it tracks Inngest version bumps (including `Jsonify<T>` return shape
- * and any middleware-aware transforms). Use as the type for orchestrator
- * deps that wrap `step.run` so unit tests can pass an inline shim.
- */
-export type StepRun = GetStepTools<typeof inngestClient>["run"];
-
-/**
- * The exact shape of `step.sendEvent` — used by catch-path emits where
- * `inngest.send().catch(() => {})` silently loses events on a transient
- * bus blip. The Inngest SDK retries the underlying HTTP call with
- * backoff; a terminal failure surfaces as a throw, letting the function
- * fail and the `coding-task-reconcile` system-event subscriber take
- * over.
- */
-export type StepSendEvent = GetStepTools<typeof inngestClient>["sendEvent"];

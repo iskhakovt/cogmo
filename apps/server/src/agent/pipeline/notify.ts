@@ -6,18 +6,14 @@
  */
 
 import { StepError } from "inngest";
+import type { Durable } from "../../inngest/durable.js";
 import { logger } from "../../logger.js";
 import type { DeliveryRouter } from "../../transport/delivery-router.js";
 
 const log = logger.child({ component: "pipeline.notify" });
 
-/** The part of Inngest's `step` a notice uses. */
-export interface NoticeStep {
-  run(id: string, body: () => Promise<unknown>): Promise<unknown>;
-}
-
 export async function notifyAfterRetries(
-  step: NoticeStep,
+  step: Pick<Durable, "run">,
   stepId: string,
   deliveryRouter: Pick<DeliveryRouter, "notifyConversation">,
   conversationId: string,

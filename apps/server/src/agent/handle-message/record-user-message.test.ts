@@ -1,7 +1,8 @@
 import { NonRetriableError } from "inngest";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
-import { fakeRunInTx, makeStepRun, nullStepSendEvent } from "../../test/factories.js";
+import { fakeRunInTx } from "../../test/factories.js";
+import { fakeDurable } from "../../test/fake-durable.js";
 import {
   type RecordUserMessageArgs,
   type RecordUserMessageDeps,
@@ -41,11 +42,7 @@ describe("recordUserMessage", () => {
   it("fails a voice batch non-retriably when no STT provider is configured, writing no user row", async () => {
     const { deps, agentStore, attachments } = setup();
 
-    const recorded = recordUserMessage(
-      { run: makeStepRun(), sendEvent: nullStepSendEvent() },
-      deps,
-      VOICE_BATCH,
-    );
+    const recorded = recordUserMessage(fakeDurable(), deps, VOICE_BATCH);
 
     await expect(recorded).rejects.toBeInstanceOf(NonRetriableError);
     await expect(recorded).rejects.toThrow("no STT provider configured");

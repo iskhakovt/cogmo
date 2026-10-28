@@ -1,5 +1,5 @@
-import type { Inngest } from "inngest";
 import type { CooldownState } from "../../agent/store/schema.js";
+import type { EventPublisher } from "../../inngest/durable.js";
 import {
   buildConversationCooldownClearedEvent,
   type CooldownClearedBy,
@@ -23,7 +23,7 @@ import {
  * See design/agent-resilience.md → Telemetry.
  */
 export async function emitCooldownClearedIfAny(
-  inngest: Inngest,
+  inngest: EventPublisher,
   priorState: CooldownState | null,
   conversationId: string,
   clearedBy: CooldownClearedBy,

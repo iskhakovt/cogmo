@@ -1,7 +1,7 @@
 import { match } from "ts-pattern";
 import type { z } from "zod";
+import { type Durable, fromStepTools } from "../../inngest/durable.js";
 import { directInbound, directOutbound } from "../../inngest/events.js";
-import type { StepRun } from "../../inngest/index.js";
 import { logger } from "../../logger.js";
 import {
   type AdapterDeps,
@@ -36,7 +36,7 @@ export type DirectInboundResult =
 export async function handleDirectInbound(
   deps: { transport: Transport },
   event: DirectInboundData,
-  stepRun: StepRun,
+  stepRun: Durable["run"],
 ): Promise<DirectInboundResult> {
   const { transport } = deps;
   const { platformAddress, text, platformTs } = event;
@@ -111,7 +111,8 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
 
   const inboundFn = inngest.createFunction(
     { id: "direct-inbound", triggers: [directInbound] },
-    async ({ event, step }) => handleDirectInbound({ transport }, event.data, step.run),
+    async ({ event, step }) =>
+      handleDirectInbound({ transport }, event.data, fromStepTools(step).run),
   );
 
   return {

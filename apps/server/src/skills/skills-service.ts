@@ -1,4 +1,4 @@
-import type { Inngest } from "inngest";
+import type { EventPublisher } from "../inngest/durable.js";
 import { skillsDeployApprovalRequested } from "../inngest/events.js";
 import { logger } from "../logger.js";
 import type { RegisterResult, SkillRunner } from "./runner.js";
@@ -34,7 +34,7 @@ export interface SkillsService {
 export interface SkillsServiceDeps {
   runner: SkillRunner;
   /** Inngest client used to fire approval-requested events. */
-  inngest: Inngest;
+  inngest: EventPublisher;
   /**
    * Conversation that originated this turn — used as the recipient hint for
    * the approval keyboard so the per-channel Telegram function knows which

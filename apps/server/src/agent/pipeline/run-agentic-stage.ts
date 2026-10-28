@@ -369,9 +369,10 @@ export async function runAgenticStage(
   );
 
   // Frozen for the run: the persist step below rewrites the row this reads.
-  const lastTokens = await steps.stepRun("load-last-tokens", () =>
-    deps.runInTx((tx) => deps.agentStore.getLastTokens(tx, conversationId)),
-  );
+  const lastTokens = await steps.stepRun("load-last-tokens", async () => {
+    const last = await deps.runInTx((tx) => deps.agentStore.getLastTokens(tx, conversationId));
+    return last ?? null;
+  });
   const skipBudgetStrategies = shouldSkipCounting(
     lastTokens?.inputTokens ?? null,
     lastTokens?.outputTokens ?? null,

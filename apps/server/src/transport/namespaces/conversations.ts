@@ -1,4 +1,3 @@
-import type { Inngest } from "inngest";
 import { err, ok, type Result } from "neverthrow";
 import type { CompactConversationResult } from "../../agent/conversation/compact-conversation.js";
 import { toChatHistory } from "../../agent/conversation/to-chat-history.js";
@@ -10,6 +9,7 @@ import type {
   VoiceMode,
 } from "../../agent/store/index.js";
 import type { CooldownState, ProfileMemoryScope } from "../../agent/store/schema.js";
+import type { EventPublisher } from "../../inngest/durable.js";
 import { AllProvidersFailedError, extractStatus } from "../../llm/fallback.js";
 import { computeBudget, resolveLimits } from "../../llm/models.js";
 import { ProviderConfigError } from "../../llm/resolver.js";
@@ -193,7 +193,7 @@ export interface ConversationsNamespace {
 export function createConversations(
   deps: TransportContext & {
     defaultProfileId: string;
-    inngest: Inngest;
+    inngest: EventPublisher;
     mcpRegistry: McpRegistry | undefined;
     compactConversation:
       | ((conversationId: string) => Promise<CompactConversationResult>)

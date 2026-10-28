@@ -6,9 +6,10 @@ import { sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Database, Transactor } from "../../db/index.js";
-import type { StepRun } from "../../inngest/index.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import { expectOk } from "../../test/assertions.js";
+import { makeStepRun } from "../../test/factories.js";
+import { fakeDurable } from "../../test/fake-durable.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { sweepRepo } from "./cleanup-orphan-run-branches.js";
 import { type CodingRepoRow, type CodingTaskRow, DrizzleCodingStore } from "./store/index.js";
@@ -42,9 +43,8 @@ const validIdentity = JSON.stringify({
   id: "12345",
 });
 
-// Inline `step.run` shim — replays the body inline, mirroring the
-// orchestrator test pattern. Cast at the seam per the project convention.
-const stepRun = ((_: string, fn: () => Promise<unknown>) => fn()) as unknown as StepRun;
+// Runs each step body inline, as the orchestrator tests do.
+const stepRun = makeStepRun();
 
 async function seedRepo(): Promise<CodingRepoRow> {
   return tx((trx) =>
@@ -377,5 +377,48 @@ describe("sweepRepo", () => {
 
     expect(result.deleted).toBe(2); // counted as deleted (ref ended up gone)
     expect(result.errors).toBe(0); // 404/422 are NOT errors
+  });
+
+  it("replays the full rows an earlier build memoized for load-repo and load-tasks", async () => {
+    // An earlier build returned whole rows from both steps; a run in flight
+    // replays them, `Date`s already turned to ISO strings by the round-trip.
+    const repo = await seedRepo();
+    const oldTask = await insertTaskWithStatus(repo.id, "pr_open");
+    const recentTask = await insertTaskWithStatus(repo.id, "failed");
+    const eightDaysAgo = new Date(Date.now() - 8 * 24 * 3600 * 1000);
+    await db.execute(
+      sql`UPDATE coding_tasks SET created_at = ${eightDaysAgo} WHERE id = ${oldTask.id}`,
+    );
+    const tasks = await tx((trx) => store.getTasksByIds(trx, [oldTask.id, recentTask.id]));
+    const memo = {
+      "load-repo": JSON.parse(JSON.stringify(repo)),
+      "load-tasks": JSON.parse(JSON.stringify(tasks)),
+    };
+    // Only the memo knows these rows now: a body that re-ran would find no
+    // repo and return zeros.
+    await truncateAll(db);
+
+    const step = fakeDurable({ memo });
+    const oct = fakeOctokit([
+      `refs/heads/cogmo/run/${oldTask.id}`,
+      `refs/heads/cogmo/run/${recentTask.id}`,
+    ]);
+    const result = await sweepRepo(
+      {
+        runInTx: tx,
+        store,
+        secretsStore: fakeSecretsStore(),
+        octokitFactory: oct.factory as never,
+      },
+      repo.id,
+      step.run,
+    );
+
+    expect(result).toEqual({ repoId: repo.id, deleted: 1, skipped: 1, errors: 0 });
+    expect(oct.calls.deleteRef).toHaveBeenCalledExactlyOnceWith({
+      owner: "owner",
+      repo: "example",
+      ref: `heads/cogmo/run/${oldTask.id}`,
+    });
   });
 });

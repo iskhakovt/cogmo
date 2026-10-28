@@ -1,5 +1,6 @@
 import type { Logger } from "pino";
 import type { Transactor } from "../../db/index.js";
+import type { Durable } from "../../inngest/durable.js";
 import type { DeliveryRouter } from "../../transport/delivery-router.js";
 import type { TransportStore } from "../../transport/store/index.js";
 import { buildInCooldownReply, isInCooldown } from "../cooldown.js";
@@ -7,7 +8,6 @@ import type { DebounceConfig } from "../debounce.js";
 import type { AgentStore, VoiceMode } from "../store/index.js";
 import type { CooldownState } from "../store/schema.js";
 import type { InboundRow } from "./inbound-batch.js";
-import type { TurnSteps } from "./turn-steps.js";
 
 export interface AdmitTurnDeps {
   runInTx: Transactor;
@@ -73,7 +73,7 @@ export type Admission =
  * the cooldown guard skips).
  */
 export async function admitTurn(
-  step: TurnSteps,
+  step: Durable,
   deps: AdmitTurnDeps,
   args: AdmitTurnArgs,
 ): Promise<Admission> {
@@ -81,14 +81,18 @@ export async function admitTurn(
   const { conversationId, triggerInboundId, turnLogger } = args;
 
   const conv = await step.run("load-conversation", async () => {
-    return deps.runInTx((tx) => agentStore.getConversation(tx, conversationId));
+    const found = await deps.runInTx((tx) => agentStore.getConversation(tx, conversationId));
+    return found ?? null;
   });
   if (!conv) throw new Error(`Conversation not found: ${conversationId}`);
 
   const { profileId } = conv;
 
   const lastAssistant = await step.run("last-assistant", async () => {
-    return deps.runInTx((tx) => agentStore.getLastAssistantMessage(tx, conversationId));
+    const found = await deps.runInTx((tx) =>
+      agentStore.getLastAssistantMessage(tx, conversationId),
+    );
+    return found ?? null;
   });
 
   // Turn snapshot — read profile + model once at turn-start and stamp them on

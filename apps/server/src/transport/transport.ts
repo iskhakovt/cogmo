@@ -1,10 +1,10 @@
-import type { Inngest } from "inngest";
 import type { CodingStore } from "../agent/coding/store/index.js";
 import type { CompactConversationResult } from "../agent/conversation/compact-conversation.js";
 import type { TriggerReflectionResult } from "../agent/evolution/trigger-reflection.js";
 import type { PipelineRunStore } from "../agent/pipeline/store/index.js";
 import type { AgentStore } from "../agent/store/index.js";
 import type { Transactor } from "../db/index.js";
+import type { EventPublisher } from "../inngest/durable.js";
 import type { inboundArrived as InboundArrivedEvent } from "../inngest/events.js";
 import type { McpRegistry } from "../mcp/registry.js";
 import type { SecretsStore } from "../secrets/store/index.js";
@@ -134,7 +134,7 @@ export interface TransportDeps {
    * `compaction_unavailable`.
    */
   compactConversation?: (conversationId: string) => Promise<CompactConversationResult>;
-  inngest: Inngest;
+  inngest: EventPublisher;
   inboundArrived: typeof InboundArrivedEvent;
   attachments: AttachmentStore;
   idleTimeoutMs: number;

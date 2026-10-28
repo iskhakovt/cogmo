@@ -87,9 +87,10 @@ export async function compactTurn(
   // existence of the conditional `summarize-prefix-outcome` / `count-tokens-*`
   // steps. Freezing the read pins the whole compaction decision tree
   // for the run.
-  const lastTokens = await stepRun("load-last-tokens", () =>
-    deps.runInTx((tx) => deps.agentStore.getLastTokens(tx, args.conversationId)),
-  );
+  const lastTokens = await stepRun("load-last-tokens", async () => {
+    const last = await deps.runInTx((tx) => deps.agentStore.getLastTokens(tx, args.conversationId));
+    return last ?? null;
+  });
   // The turn context is new input too: recalled memories are in no earlier
   // request's usage.
   const skipBudgetStrategies = shouldSkipCounting(
