@@ -16,6 +16,10 @@ import {
 import { alias } from "drizzle-orm/pg-core";
 import { match, P } from "ts-pattern";
 import type { JsonValue } from "type-fest";
+import {
+  type InboundContent,
+  previewInboundText,
+} from "../../agent/conversation/inbound-content.js";
 // Cross-module read: scheduled-task fire routing needs conversations.{user_id, profile_id}
 // joined to channel_sessions. Per AGENTS.md → Store Pattern, store impls may import
 // any schema; the access boundary is the TransportStore interface.
@@ -23,7 +27,6 @@ import { aliases, conversations, messages } from "../../agent/store/schema.js";
 import { single } from "../../db/helpers.js";
 import type { Transaction } from "../../db/index.js";
 import type { FinishedOriginal, NormalizedImageResult } from "../attachment-original.js";
-import { type InboundContent, previewInboundText } from "../content.js";
 import {
   type AttachmentOriginalState,
   attachmentOriginals,

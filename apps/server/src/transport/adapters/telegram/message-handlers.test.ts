@@ -1,5 +1,6 @@
 import { ok } from "neverthrow";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { MAX_INBOUND_FILE_BYTES } from "../../../agent/conversation/inbound-content.js";
 import { logger } from "../../../logger.js";
 import { expectDefined } from "../../../test/assertions.js";
 import { mockAttachmentStore, mockInngest, mockTransport } from "../../../test/factories.js";
@@ -11,7 +12,6 @@ import {
   makePhotoCtx,
   makeVoiceCtx,
 } from "../../../test/telegram/harness.js";
-import { MAX_INBOUND_FILE_BYTES } from "../../content.js";
 import { setup } from "./index.js";
 
 vi.mock("grammy", async () => (await import("../../../test/telegram/grammy-mock.js")).grammyModule);

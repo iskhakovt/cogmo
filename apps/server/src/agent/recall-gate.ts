@@ -6,7 +6,7 @@
  * call based on the profile's auto_recall setting.
  */
 
-import type { InboundContent } from "../transport/content.js";
+import type { InboundContent } from "./conversation/inbound-content.js";
 
 export type AutoRecallMode = "off" | "always" | "heuristic" | "llm";
 
