@@ -271,7 +271,7 @@ Owned by `src/sandbox/store/`.
 -- Enumerated types (Drizzle pgEnum in the store schema)
 CREATE TYPE container_runtime AS ENUM ('sysbox-runc', 'runc');
 CREATE TYPE container_status  AS ENUM ('starting', 'running', 'exited', 'reaped');
--- [proposed] `unknown` is written only by the migration that added the column, on rows reaped before it existed
+-- `unknown` is written only by the migration that added the column, on rows reaped before it existed
 CREATE TYPE container_reaped_reason AS ENUM ('ttl_expired', 'cascade', 'dead_instance', 'crash_reconcile', 'start_failed', 'unknown');
 
 containers (
@@ -285,7 +285,7 @@ containers (
   labels           JSONB NOT NULL,                  -- ContainerLabelsSchema = z.record(z.string(), z.string())
   resource_limits  JSONB NOT NULL,                  -- ResourceLimitsSchema = z.object({ cpus, memory_bytes, pids })
   status           container_status NOT NULL,
-  reaped_reason    container_reaped_reason,         -- [proposed] why the row is `reaped`; CHECK chk_containers_reaped_reason: (status = 'reaped') = (reaped_reason IS NOT NULL)
+  reaped_reason    container_reaped_reason,         -- why the row is `reaped`; CHECK chk_containers_reaped_reason: (status = 'reaped') = (reaped_reason IS NOT NULL)
   ttl_expires_at   TIMESTAMPTZ NOT NULL,
   created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
   started_at       TIMESTAMPTZ,
@@ -423,8 +423,8 @@ Task teardown (`deleteByTaskId`):
 |-|-|
 | `starting` | Row inserted; the daemon has the container; `start` has not completed |
 | `running` | `start` completed; `started_at` set |
-| `exited` | The daemon no longer has the container and Cogmo did not remove it. Its one cause needs no reason column, and it carries no exit code (Data Model) |
-| `reaped` | Cogmo killed and removed the daemon object; `reaped_reason` says why `[proposed]`. Terminal |
+| `exited` | The daemon no longer has the container and Cogmo did not remove it |
+| `reaped` | Cogmo killed and removed the daemon object; `reaped_reason` says why. Terminal |
 
 ```mermaid
 stateDiagram-v2
@@ -442,9 +442,9 @@ stateDiagram-v2
 |-|-|-|-|-|
 | — | `starting` | `create` | `INSERT`; `docker_id` UNIQUE | row |
 | `starting` | `running` | `create`, after `start` | `WHERE id = $1 AND status = 'starting'` | `started_at` |
-| `starting` | `reaped` | `create` (`start_failed`), after kill + remove | `status <> 'reaped'` | `exited_at`, `reaped_reason` `[proposed]` |
-| `starting`, `running` | `reaped` | reaper TTL pass (`ttl_expired`) | `status <> 'reaped'` | `exited_at`, `reaped_reason` `[proposed]` |
-| `starting`, `running`, `exited` | `reaped` | `deleteByTaskId` (`cascade`) | `status <> 'reaped'` | `exited_at` (`coalesce`: kept when the row was `exited`), `reaped_reason` `[proposed]` |
+| `starting` | `reaped` | `create` (`start_failed`), after kill + remove | `status <> 'reaped'` | `exited_at`, `reaped_reason` |
+| `starting`, `running` | `reaped` | reaper TTL pass (`ttl_expired`) | `status <> 'reaped'` | `exited_at`, `reaped_reason` |
+| `starting`, `running`, `exited` | `reaped` | `deleteByTaskId` (`cascade`) | `status <> 'reaped'` | `exited_at` (`coalesce`: kept when the row was `exited`), `reaped_reason` |
 | `starting`, `running`, `exited` | `reaped` | reaper orphan pass (`dead_instance`), boot `reconcileCrashedInstances` (`crash_reconcile`), for a listed daemon object with a row | same | same |
 | `starting`, `running` | `exited` | reaper stale pass | `status = <read status>` | `exited_at` |
 
@@ -452,7 +452,7 @@ Every reap kills and removes the daemon object *before* the transition (Failure 
 
 The transition is `SandboxStore.transitionContainerStatus(tx, { id, at } & ContainerTransition)` — `{ from, to }` for `running` and `exited`, `{ to: "reaped", reason }` for a reap — returning `{ kind: "transitioned" } | { kind: "stale"; status }`, the shape of `DrizzleCodingStore.transitionTaskStatus`; a missing row throws, since every caller holds a row it read and rows are never deleted. One use case per transition: `markContainerRunning` (`src/sandbox/mark-container-running.ts`), `markContainerExited` (`src/sandbox/mark-container-exited.ts`) and `reapContainer` (`src/sandbox/reap-container.ts`; `reapDiscoveredContainer` for a daemon object whose row may be missing). `stale` is an expected outcome, never an `Err`: another path finished the row first. A reap or the stale pass logs it at debug and does not count it; `markContainerRunning` logs it at warn, because `create` then removes the container it started and throws.
 
-**Reason** `[proposed]`. A reap carries its reason — `ttl_expired | cascade | dead_instance | crash_reconcile | start_failed`, the store's `ContainerReapReason` — and the transition's UPDATE writes it to `reaped_reason`, a nullable `container_reaped_reason` column that `chk_containers_reaped_reason` ties to the status: `(status = 'reaped') = (reaped_reason IS NOT NULL)` (state-machines.md → "A failed or skipped state records why"). The enum's sixth value, `unknown`, is the reason of rows reaped before the column existed, written by the migration that added it and by no code path; `ContainerReapReason` excludes it, so a reap cannot write it. A stale reap leaves the first writer's reason, as it leaves its `exited_at`. `exited` has one cause, missing from the daemon, and records none.
+**Reason.** A reap carries its reason — `ttl_expired | cascade | dead_instance | crash_reconcile | start_failed`, the store's `ContainerReapReason` — and the transition's UPDATE writes it to `reaped_reason`, a nullable `container_reaped_reason` column that `chk_containers_reaped_reason` ties to the status: `(status = 'reaped') = (reaped_reason IS NOT NULL)` (state-machines.md → "A failed or skipped state records why"). Nothing on a row reaped before the column existed records why, so the enum's sixth value, `unknown`, is theirs: the migration writes it, and `ContainerReapReason` excludes it so no reap can. A stale reap leaves the first writer's reason, as it leaves its `exited_at`. `exited` has one cause, missing from the daemon, and records none.
 
 **Failure modes.**
 
@@ -472,9 +472,9 @@ The transition is `SandboxStore.transitionContainerStatus(tx, { id, at } & Conta
 | A reaper tick overlaps the next | as above | as above | Both read the same rows; the loser's transitions are `stale` and not counted, so counts are exact per row. `createSandboxReaper` sets no concurrency limit; overlap is safe by construction |
 | Crash between kill + remove and the transition | `starting` / `running` | gone | A step or tick failing: the next tick's stale pass marks it `exited`, so the row over-reports a live container for at most one tick. Residual when the process itself dies: the row belongs to a dead instance, whose rows the TTL and stale passes never read, so it stays live-looking with no container. `tryResumeByTaskId` skips it on the inspect 404; nothing else reads it |
 | Remove returns 409 (daemon removal in progress) | `reaped` | finishing removal | Self-heals as the daemon completes. Until then a `reaped` row with a live instance label is not an orphan and is left alone |
-| Rows reaped before `reaped_reason` existed `[proposed]` | `reaped`, reason `unknown` | gone | Three migration files, each its own transaction: the enum and nullable column; the backfill `UPDATE containers SET reaped_reason = 'unknown' WHERE status = 'reaped' AND reaped_reason IS NULL`; then the CHECK, which validates every row. A reap that lands between the backfill and the CHECK can only come from a second live process on the old build, and fails the CHECK migration at boot (rerunning the backfill repairs it) |
-| A process on the build without `reaped_reason` reaps after the CHECK is applied `[proposed]` | `starting` / `running` | gone | Its UPDATE sets `status = 'reaped'` with no reason and the CHECK rejects it, after the kill + remove: the same live-looking row as "Crash between kill + remove and the transition", with the same residual. Reachable only when old and new processes overlap on a deploy — the invariant above is one `cogmo serve` per database |
-| A coding task's teardown step is retried by the new build `[proposed]` | `reaped` once | removed once | `deleteByTaskId` re-reads the task's rows and skips those already `reaped`; the rows the old build reaped keep the reason it wrote, or `unknown` from the backfill |
+| Rows reaped before `reaped_reason` existed | `reaped`, reason `unknown` | gone | One migration, one transaction: the column, a backfill of `unknown` on reaped rows, the `exit_code` drop, then the CHECK, which validates every row. A reaped row with no reason committed between the backfill and the CHECK — only a second live process on the old build can write one — fails the file, which rolls back whole and succeeds on the next boot |
+| A process on the old build runs after the migration | its rows, unchanged | its containers | Every old-build container read and insert names `exit_code` and fails with `42703`, and a reap that reaches the UPDATE fails the CHECK after the kill + remove: the same live-looking row as "Crash between kill + remove and the transition". Reachable only when old and new processes overlap on a deploy — the invariant above is one `cogmo serve` per database. For the same reason a rollback to the previous build is not supported past this migration; observation.md sequences column drops a release later, and at single-user scale the simpler path is accepted |
+| A coding task's teardown step is retried by the new build | `reaped` once | removed once | `deleteByTaskId` re-reads the task's rows and skips those already `reaped`; a row the old build reaped carries `unknown` from the backfill, or was rejected by the CHECK and is reaped now |
 | `docker rm` outside Cogmo | `running` | gone | Stale pass → `exited` |
 | `listContainers` fails in a tick | unchanged | unchanged | The stale pass is skipped: an empty listing is indistinguishable from "all gone" |
 | Proxy-created child | none | container, labelled with the live instance | Residual. The proxy injects labels but writes no row, so the orphan pass treats the child as an orphan on its next tick. The row insert the proxy design table promises at `POST /containers/create` is the fix; tracked in `todo.md` |

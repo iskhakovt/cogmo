@@ -28,8 +28,7 @@ export interface ReapContainerArgs {
 
 /**
  * Kill and remove the daemon object, then move the row to `reaped` from
- * whatever live state it holds, recording `reason` on it. The daemon goes
- * first: a crash between the
+ * whatever live state it holds. The daemon goes first: a crash between the
  * two leaves a live-looking row with no container, which the reaper's stale
  * pass marks `exited`; the other order would leave a `reaped` row over a
  * running container that no pass looks at again. A daemon refusal is

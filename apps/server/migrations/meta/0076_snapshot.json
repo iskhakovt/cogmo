@@ -1,5 +1,5 @@
 {
-  "id": "5a6f4ff5-7a02-4076-b92a-bb39da0ed8a6",
+  "id": "08722e83-e61b-455b-bf4c-93207fc640dc",
   "prevId": "ad97c0a1-2a6e-4167-98df-2b2e0bd51386",
   "version": "7",
   "dialect": "postgresql",
@@ -2865,12 +2865,6 @@
           "primaryKey": false,
           "notNull": true
         },
-        "exit_code": {
-          "name": "exit_code",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
         "reaped_reason": {
           "name": "reaped_reason",
           "type": "container_reaped_reason",
@@ -2992,7 +2986,12 @@
         }
       },
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "chk_containers_reaped_reason": {
+          "name": "chk_containers_reaped_reason",
+          "value": "(\"containers\".\"status\" = 'reaped') = (\"containers\".\"reaped_reason\" IS NOT NULL)"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.networks": {

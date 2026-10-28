@@ -14,11 +14,7 @@ import {
 export type ContainerRuntime = "sysbox-runc" | "runc";
 export type ContainerStatus = "starting" | "running" | "exited" | "reaped";
 
-/**
- * What a `reaped` row records as its reason: the `container_reaped_reason`
- * pgEnum. `unknown` is the value of rows reaped before the column existed,
- * written by the migration that added it; no code path writes it.
- */
+/** What a `reaped` row records as its reason: the `container_reaped_reason` pgEnum. */
 export type ContainerReapedReason = (typeof containerReapedReason.enumValues)[number];
 
 /** Why a container is being reaped — what a reap transition carries. */
@@ -33,7 +29,6 @@ export type ContainerReapReason = Exclude<ContainerReapedReason, "unknown">;
  * A reap names no `from`: it is legal from every state but `reaped`, and it
  * must land on a row another path moved forward (`starting → running`)
  * between the reaper's read and its kill — the container is gone either way.
- * It carries its `reason`, which the same UPDATE writes to `reaped_reason`.
  */
 export type ContainerTransition =
   | { from: "starting"; to: "running" }
