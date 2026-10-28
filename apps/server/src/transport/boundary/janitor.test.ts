@@ -1,6 +1,8 @@
 import { InngestTestEngine } from "@inngest/test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mock } from "vitest-mock-extended";
 import { inngest } from "../../inngest/client.js";
+import type { EventPublisher } from "../../inngest/durable.js";
 import {
   fakeRunInTx,
   mockAgentStore,
@@ -8,6 +10,9 @@ import {
   spyOnInngestSend,
 } from "../../test/factories.js";
 import { createBoundaryJanitor } from "./janitor.js";
+
+/** The event a cron trigger delivers to its function. */
+const CRON_TICK = { name: "inngest/scheduled.timer", data: { cron: "* * * * *" } };
 
 // Event emission shape (dedup ids, inboundArrived per buffered entry) is
 // covered by resolve-boundary.test.ts; these tests focus on the janitor
@@ -96,13 +101,10 @@ describe("createBoundaryJanitor", () => {
       gracePeriodMs: 60_000,
     });
 
-    const result = (await new InngestTestEngine({
-      function: fn,
-      events: [{ name: "inngest/function.invoked", data: {} } as never],
-    }).execute()) as { result?: { resolved: number; scanned: number } };
+    const { result } = await new InngestTestEngine({ function: fn, events: [CRON_TICK] }).execute();
 
     // Both rows resolved fresh — the orphan-recovery contract.
-    expect(result.result).toEqual({ resolved: 2, scanned: 2 });
+    expect(result).toEqual({ resolved: 2, scanned: 2 });
 
     // listExpiredBoundaryPending invoked once with a cutoff ~60s in the past.
     expect(listExpired).toHaveBeenCalledTimes(1);
@@ -127,12 +129,9 @@ describe("createBoundaryJanitor", () => {
       defaultProfileId: "profile-default",
     });
 
-    const result = (await new InngestTestEngine({
-      function: fn,
-      events: [{ name: "inngest/function.invoked", data: {} } as never],
-    }).execute()) as { result?: { resolved: number; scanned?: number } };
+    const { result } = await new InngestTestEngine({ function: fn, events: [CRON_TICK] }).execute();
 
-    expect(result.result).toEqual({ resolved: 0 });
+    expect(result).toEqual({ resolved: 0 });
   });
 
   it("treats boundary_not_found as a benign race (resolved count stays accurate)", async () => {
@@ -153,13 +152,54 @@ describe("createBoundaryJanitor", () => {
       defaultProfileId: "profile-default",
     });
 
-    const result = (await new InngestTestEngine({
-      function: fn,
-      events: [{ name: "inngest/function.invoked", data: {} } as never],
-    }).execute()) as { result?: { resolved: number; scanned: number } };
+    const { result } = await new InngestTestEngine({ function: fn, events: [CRON_TICK] }).execute();
 
-    expect(result.result).toEqual({ resolved: 0, scanned: 1 });
+    expect(result).toEqual({ resolved: 0, scanned: 1 });
     // No drain happened — getBoundaryPendingById returned undefined.
     expect(transportStore.persistInbound).not.toHaveBeenCalled();
+  });
+
+  it("emits a resolution's events through the injected publisher, not the client the function runs on", async () => {
+    const publisher = mock<EventPublisher>();
+    publisher.send.mockResolvedValue(undefined);
+    const transportStore = mockTransportStore({
+      listExpiredBoundaryPending: vi
+        .fn()
+        .mockResolvedValue([{ id: "b1", channelId: "ch-1", platformAddress: "chat-A" }]),
+      getBoundaryPendingById: vi.fn().mockResolvedValue({
+        id: "b1",
+        channelId: "ch-1",
+        platformAddress: "chat-A",
+        platformUserHandle: "tg-7",
+        priorConversationId: "conv-prior",
+        promptMessageId: "tg-msg:1",
+        bufferedInbounds: [{ content: "hi", platformTs: "2026-05-19T12:00:00.000Z" }],
+        expiresAt: new Date("2026-05-19T11:00:00.000Z"),
+        createdAt: new Date("2026-05-19T10:00:00.000Z"),
+      }),
+      resolveUser: vi.fn().mockResolvedValue({ userId: "u-7" }),
+      createSession: vi.fn().mockResolvedValue({ id: "session-new" }),
+      persistInbound: vi.fn().mockResolvedValue({ id: "inbound-new" }),
+      getChatDefaultProfile: vi.fn().mockResolvedValue(undefined),
+      deleteBoundaryPending: vi.fn().mockResolvedValue(undefined),
+    });
+    const fn = createBoundaryJanitor({
+      runInTx: fakeRunInTx,
+      transportStore,
+      agentStore: mockAgentStore({
+        createConversation: vi.fn().mockResolvedValue({ id: "conv-new" }),
+      }),
+      inngest: publisher,
+      defaultProfileId: "profile-default",
+    });
+
+    const { result } = await new InngestTestEngine({ function: fn, events: [CRON_TICK] }).execute();
+
+    expect(result).toEqual({ resolved: 1, scanned: 1 });
+    const sent = publisher.send.mock.calls.flatMap(([batch]) =>
+      (Array.isArray(batch) ? batch : [batch]).map((event) => event.name),
+    );
+    expect(sent).toEqual(["inbound/arrived", "conversation/boundary/resolved"]);
+    expect(sendSpy).not.toHaveBeenCalled();
   });
 });

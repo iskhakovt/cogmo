@@ -1,4 +1,5 @@
 import type { Transactor } from "../../db/index.js";
+import type { Durable } from "../../inngest/durable.js";
 import {
   type LoadTurnHistoryDeps,
   loadTurnHistory,
@@ -6,7 +7,6 @@ import {
   TurnRowMissingError,
 } from "../conversation/load-turn-history.js";
 import { asNonRetriable } from "../turn-step-runner.js";
-import type { TurnSteps } from "./turn-steps.js";
 
 export interface TurnTranscript {
   /** The compacted view with stored turn contexts. */
@@ -23,7 +23,7 @@ export interface TurnTranscript {
  * Step: `load-turn-transcript`.
  */
 export async function loadTurnTranscript(
-  step: TurnSteps,
+  step: Durable,
   deps: { runInTx: Transactor; agentStore: LoadTurnHistoryDeps["agentStore"] },
   args: { conversationId: string; turnInboundId: string },
 ): Promise<TurnTranscript> {

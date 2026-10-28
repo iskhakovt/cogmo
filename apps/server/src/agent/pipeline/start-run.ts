@@ -10,9 +10,9 @@
  * run cursor.
  */
 
-import type { Inngest } from "inngest";
 import { err, ok, type Result } from "neverthrow";
 import type { Transactor } from "../../db/index.js";
+import type { EventPublisher } from "../../inngest/durable.js";
 import { buildPipelineStageDueEvent } from "../../inngest/events.js";
 import type { TransportStore } from "../../transport/store/index.js";
 import type { AgentStore } from "../store/index.js";
@@ -29,7 +29,7 @@ export interface StartPipelineRunDeps {
   >;
   agentStore: Pick<AgentStore, "createConversation">;
   transportStore: Pick<TransportStore, "findReachableChannelsForUserProfile" | "swapSession">;
-  inngest: Pick<Inngest, "send">;
+  inngest: EventPublisher;
   /** Channel types whose adapter posts gate keyboards (`AdapterModule.pipelineGates`). */
   gateChannelTypes: ReadonlySet<string>;
 }

@@ -5,7 +5,7 @@
  * that drives `runStreamingAgentLoop` — `handle-message` and the pipeline
  * stage turn — so the retry policy has one definition.
  *
- * It injects Inngest's `step.run` without making the loop depend on Inngest,
+ * It wraps the port's `Durable.run` without making the loop depend on Inngest,
  * and applies the retry policy per step kind INSIDE the body:
  *
  * - `tool-iter*` gets NO step retries at all. A tool's expected failures
@@ -32,14 +32,8 @@ export function asNonRetriable(err: unknown): NonRetriableError {
   return new NonRetriableError(message, { cause: err });
 }
 
-export function createTurnStepRunner(
-  run: (id: string, fn: () => Promise<unknown>) => Promise<unknown>,
-): StepRunner {
-  // The cast erases Inngest's `Jsonify<T>` return type: every payload passed
-  // through this wrapper is JSON-safe by construction (see
-  // design/crash-recovery.md → State serialization), so `Jsonify<T>` and `T`
-  // coincide at runtime but not for the compiler.
-  return <T>(id: string, fn: () => Promise<T>): Promise<T> =>
+export function createTurnStepRunner(run: StepRunner): StepRunner {
+  return (id, fn) =>
     run(id, async () => {
       try {
         return await fn();
@@ -48,5 +42,5 @@ export function createTurnStepRunner(
         if (!isRetriableProviderError(err)) throw asNonRetriable(err);
         throw err;
       }
-    }) as Promise<T>;
+    });
 }

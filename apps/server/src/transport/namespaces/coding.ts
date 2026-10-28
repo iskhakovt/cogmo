@@ -1,8 +1,8 @@
-import type { Inngest } from "inngest";
 import { err, ok, type Result } from "neverthrow";
 import { match } from "ts-pattern";
 import { planGateEmission } from "../../agent/coding/plan-gate.js";
 import type { CodingStore } from "../../agent/coding/store/index.js";
+import type { EventPublisher } from "../../inngest/durable.js";
 import type { TransportError } from "../transport-error.js";
 import type { TransportContext } from "./context.js";
 
@@ -39,7 +39,7 @@ export interface CodingNamespace {
 }
 
 export function createCoding(
-  deps: TransportContext & { inngest: Inngest; codingStore: CodingStore | undefined },
+  deps: TransportContext & { inngest: EventPublisher; codingStore: CodingStore | undefined },
 ): CodingNamespace {
   const { channelId, runInTx, transportStore, agentStore, inngest, codingStore } = deps;
   return {

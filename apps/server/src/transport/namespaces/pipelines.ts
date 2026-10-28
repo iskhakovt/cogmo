@@ -1,7 +1,7 @@
-import type { Inngest } from "inngest";
 import { err, ok, type Result } from "neverthrow";
 import { gateToken } from "../../agent/pipeline/gate-keyboard.js";
 import type { PipelineRunStore } from "../../agent/pipeline/store/index.js";
+import type { EventPublisher } from "../../inngest/durable.js";
 import { pipelineGateKey, pipelineGateResolved } from "../../inngest/events.js";
 import type { TransportError } from "../transport-error.js";
 import type { TransportContext } from "./context.js";
@@ -29,7 +29,7 @@ export interface PipelinesNamespace {
 
 export function createPipelines(
   deps: Omit<TransportContext, "agentStore"> & {
-    inngest: Inngest;
+    inngest: EventPublisher;
     pipelineRunStore: PipelineRunStore | undefined;
   },
 ): PipelinesNamespace {

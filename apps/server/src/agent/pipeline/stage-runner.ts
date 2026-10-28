@@ -25,6 +25,7 @@ import { NonRetriableError } from "inngest";
 import type { Transactor } from "../../db/index.js";
 import { inngest as inngestClient } from "../../inngest/client.js";
 import { conversationTurnConcurrency } from "../../inngest/concurrency.js";
+import { fromStepTools } from "../../inngest/durable.js";
 import {
   buildPipelineGatePendingEvent,
   buildPipelineStageDueEvent,
@@ -34,7 +35,6 @@ import {
 } from "../../inngest/events.js";
 import { logger } from "../../logger.js";
 import type { DeliveryRouter } from "../../transport/delivery-router.js";
-import type { StepRunner } from "../loop.js";
 import { createTurnStepRunner } from "../turn-step-runner.js";
 import { notifyAfterRetries } from "./notify.js";
 import type {
@@ -75,18 +75,19 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
       // or payloads, and the full error is in the log.
       onFailure: async ({ event, error, step }) => {
         const { runId, stageId } = event.data.event.data;
+        const durable = fromStepTools(step);
         logger.error(
           { err: error, runId, stageId, component: "pipeline.stage-runner" },
           "pipeline stage failed after retries",
         );
-        const failed = await step.run("fail-run", () =>
+        const failed = await durable.run("fail-run", () =>
           deps.runInTx((tx) =>
             deps.runStore.failRun(tx, runId, `stage "${stageId}" failed (${error.name})`),
           ),
         );
         if (failed.kind === "failed") {
           await notifyAfterRetries(
-            step,
+            durable,
             "notify-failure",
             deps.deliveryRouter,
             failed.conversationId,
@@ -98,6 +99,7 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
     },
     async ({ event, step, runId: inngestRunId }) => {
       const { runId, stageId, iteration } = event.data;
+      const durable = fromStepTools(step);
       const log = logger.child({
         component: "pipeline.stage-runner",
         runId,
@@ -105,7 +107,7 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
         inngestRunId,
       });
 
-      const snapshot = await step.run("load-run", async () => {
+      const snapshot = await durable.run("load-run", async () => {
         const loaded = await deps.runInTx((tx) => deps.runStore.getRunWithDefinition(tx, runId));
         if (!loaded) return { found: false as const };
         return {
@@ -143,12 +145,12 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
       const next = definition.stages[index + 1];
 
       const failRun = async (reason: string) => {
-        const failed = await step.run("fail-run", () =>
+        const failed = await durable.run("fail-run", () =>
           deps.runInTx((tx) => deps.runStore.failRun(tx, runId, reason)),
         );
         if (failed.kind === "failed") {
           await notifyAfterRetries(
-            step,
+            durable,
             "notify-failure",
             deps.deliveryRouter,
             conversationId,
@@ -169,7 +171,7 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
       // never comes, the stage starts after the timeout anyway.
       const origin = event.data.originConversationId;
       if (origin !== undefined && index === 0) {
-        await step.waitForEvent("wait-for-origin-turn", {
+        await durable.waitForEvent("wait-for-origin-turn", {
           event: responseReady,
           timeout: "30s",
           if: `async.data.conversationId == ${JSON.stringify(origin)}`,
@@ -186,7 +188,7 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
           // The compiler's validation pass requires `gate` on gate stages.
           throw new NonRetriableError(`gate stage "${stageId}" has no gate configuration`);
         }
-        const parked = await step.run("park-on-gate", () =>
+        const parked = await durable.run("park-on-gate", () =>
           deps.runInTx((tx) =>
             deps.runStore.transitionStatus(tx, runId, "running", "waiting_gate"),
           ),
@@ -201,7 +203,7 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
             return { status: "skipped" as const, reason: "stale" as const };
           }
         }
-        await step.sendEvent(
+        await durable.sendEvent(
           "emit-gate-pending",
           buildPipelineGatePendingEvent({
             runId,
@@ -217,12 +219,7 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
         return { status: "waiting_gate" as const };
       }
 
-      // The cast erases Inngest's `Jsonify<T>`: every value these steps return
-      // is JSON-safe by construction, so `Jsonify<T>` and `T` coincide at
-      // runtime but not for the compiler.
-      const run: StepRunner = <T>(id: string, fn: () => Promise<T>) =>
-        step.run(id, fn) as Promise<T>;
-      const stepRun = createTurnStepRunner((id, fn) => step.run(id, fn));
+      const stepRun = createTurnStepRunner(durable.run);
 
       const outcome = await deps.executeAgenticStage(
         {
@@ -235,13 +232,13 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
           stageOutputs,
           inngestRunId,
         },
-        { run, stepRun },
+        { run: durable.run, stepRun },
         log,
       );
       if (outcome.kind === "failed") return failRun(outcome.reason);
 
       const { artifact } = outcome;
-      const moved = await step.run("advance-run", () =>
+      const moved = await durable.run("advance-run", () =>
         deps.runInTx((tx) =>
           next === undefined
             ? deps.runStore.completeRun(tx, { runId, fromStage: stageId, output: artifact })
@@ -266,7 +263,7 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
       }
 
       if (next !== undefined) {
-        await step.sendEvent(
+        await durable.sendEvent(
           "emit-next-stage",
           buildPipelineStageDueEvent({ runId, conversationId, stageId: next.id, iteration }),
         );
@@ -274,7 +271,7 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
       }
 
       await notifyAfterRetries(
-        step,
+        durable,
         "notify-completed",
         deps.deliveryRouter,
         conversationId,

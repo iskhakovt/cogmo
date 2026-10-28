@@ -87,6 +87,22 @@ Additive-only writes. Never fail a write. Hindsight consolidates each `retain()`
 | Interfaces | Channel adapters (`AdapterModule` contract) | Table-driven: direct (Inngest events), Telegram (long polling), future: webhooks, SSE |
 | MCP integrations | MCP client SDK | Per-integration MCP servers |
 
+## Orchestration Coupling `[confirmed]`
+
+Orchestration is Inngest ([scheduling.md](scheduling.md)), and the code depends on it on purpose, in three layers:
+
+| Layer | Where | Depends on |
+|-|-|-|
+| Functions | `inngest.createFunction` in the domain module that owns the work (`agent/handle-message.ts`, `agent/debounce.ts`, `transport/boundary/janitor.ts`, …) | Inngest directly: triggers, concurrency, debounce, `cancelOn`, retries and `onFailure` are its configuration |
+| Controllers | Each function's handler | Reads the event, calls `fromStepTools(step)` once and hands the port to the use cases, where the logic lives |
+| Use cases | One file per action in the domain module | The `Durable` port in `src/inngest/durable.ts` — `run`, `sendEvent`, `sleep`, `waitForEvent` — typed against the events `src/inngest/events.ts` defines, and `EventPublisher` (`send`) where a deps bag only emits |
+
+The port narrows what a use case can reach and makes it testable with an in-memory fake (`src/test/fake-durable.ts`). `Durable.run` also checks at compile time that a step's result survives the JSON round-trip through Inngest's state store, so it returns `T`, not Inngest's `Jsonify<T>`. It does not hide Inngest's execution model: replays, step-id determinism and memoized results as a contract with runs in flight ([.agents/rules/inngest.md](../.agents/rules/inngest.md)) apply through it unchanged, and `NonRetriableError` and `StepError` stay Inngest's.
+
+A handler that plans at most one step inline (`coding-auto-register-skill`, `coding-cleanup-run-branch`, `model-catalog-refresh`, `skill-cron-fire`, `handle-message-reconcile`, `sandbox-reaper`) may call `step` directly. Multi-step handlers not yet on the port are tracked in `todo.md`: `idle-timer`, `recover-conversation`, `coding-task-reconcile`, `scheduled-task-fire`, `skill-venvs-reaper`, the orphan-branch sweep's cron, `boundary-waiter` and `boundary-janitor` call `step` directly, and the Observer (`agent/evolution/observer.ts`) plans through its own `run`-only harness bridged with a cast, because several of its step results carry rows with `Date` fields the JSON check rejects.
+
+A fully engine-neutral layer is not built. Replacing Inngest would mean re-deciding function configuration, failure handling and replay semantics, not swapping an adapter, and the alternatives were eliminated for reasons a wrapper doesn't change ([decisions.md](decisions.md) → Decision Table: Orchestration abstraction, and Eliminated Options: Temporal, DBOS Transact). An abstraction over every engine's model would cost each feature now for a migration nobody has planned.
+
 ## Hindsight Deployment `[confirmed]`
 
 Hindsight is a **client-server system**. `@vectorize-io/hindsight-client` is a pure HTTP client; the server (`ghcr.io/vectorize-io/hindsight`) is a self-hosted Python service that manages its own PostgreSQL + pgvector storage. Runs as a Docker service alongside our app.

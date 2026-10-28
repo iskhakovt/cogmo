@@ -5,7 +5,7 @@
 
 import type { Logger } from "pino";
 import type { Transactor } from "../../db/index.js";
-import type { StepRun, StepSendEvent } from "../../inngest/index.js";
+import type { Durable } from "../../inngest/durable.js";
 import type { CodingRepoRow, CodingStore, CodingTaskRow } from "./store/index.js";
 
 export interface CodingRun {
@@ -16,14 +16,14 @@ export interface CodingRun {
    * stable string.
    */
   runId: string;
-  stepRun: StepRun;
+  stepRun: Durable["run"];
   /**
    * Durable bus emit. The failure channel uses it so a transient send blip
    * surfaces as a function failure (caught by the `coding-task-reconcile`
    * system-event subscriber) rather than a silently-swallowed
    * `coding/task/failed` event.
    */
-  stepSendEvent: StepSendEvent;
+  stepSendEvent: Durable["sendEvent"];
   log: Logger;
 }
 

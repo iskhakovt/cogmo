@@ -17,6 +17,7 @@
  */
 
 import { inngest as inngestClient } from "../../inngest/client.js";
+import { fromStepTools } from "../../inngest/durable.js";
 import {
   type PipelineGateDecision,
   type PipelineGatePendingData,
@@ -54,13 +55,14 @@ export function createPipelineGateWaiter(deps: PipelineGateWaiterDeps) {
       const { runId, gateKey, conversationId, pipelineName, stageId, timeoutMs, onTimeout } =
         event.data;
       const reminders = reminderCount(onTimeout);
+      const durable = fromStepTools(step);
 
       for (let i = 1; i <= reminders; i++) {
-        await step.sleep(`wait-${i}`, `${timeoutMs}ms`);
+        await durable.sleep(`wait-${i}`, `${timeoutMs}ms`);
         // A reminder is a courtesy: one that fails for good is dropped, never
         // allowed to fail the waiter and keep the gate from its timeout action.
         await notifyAfterRetries(
-          step,
+          durable,
           `remind-${i}`,
           deps.deliveryRouter,
           conversationId,
@@ -68,10 +70,10 @@ export function createPipelineGateWaiter(deps: PipelineGateWaiterDeps) {
           { runId, gateKey },
         );
       }
-      await step.sleep(`wait-${reminders + 1}`, `${timeoutMs}ms`);
+      await durable.sleep(`wait-${reminders + 1}`, `${timeoutMs}ms`);
 
       const decision = timeoutDecision(onTimeout);
-      await step.sendEvent(
+      await durable.sendEvent(
         "emit-timeout-resolution",
         pipelineGateResolved.create({ runId, gateKey, conversationId, decision }),
       );

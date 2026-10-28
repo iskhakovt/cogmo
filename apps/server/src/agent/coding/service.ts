@@ -1,5 +1,5 @@
-import type { Inngest } from "inngest";
 import type { Transactor } from "../../db/index.js";
+import type { EventPublisher } from "../../inngest/durable.js";
 import { logger } from "../../logger.js";
 import { admitCodingTask } from "./admit-coding-task.js";
 import { startCodingTask } from "./start-coding-task.js";
@@ -15,7 +15,7 @@ export interface CodingServiceDeps {
    * function ({@link createCodingOrchestrator}) consumes the event and
    * runs the durable plan flow.
    */
-  inngest: Inngest;
+  inngest: EventPublisher;
   /**
    * Whether the sandbox module is initialized. The service itself doesn't
    * touch the sandbox — the orchestrator (running inside Inngest) does.
