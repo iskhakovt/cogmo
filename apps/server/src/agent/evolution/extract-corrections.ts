@@ -41,7 +41,7 @@ export interface ExtractionDeps {
     | "hasInstructionRule"
     | "upsertCorrection"
     | "contradictLearningRule"
-    | "countActiveLearnedRules"
+    | "countLiveLearnedRules"
   >;
   /**
    * Distinct channel types active for the conversation when this Observer
@@ -171,11 +171,7 @@ export async function extractCorrections(
       // `# Rules` doesn't show, has its count reset by a first contradiction
       // and is retired by a second from another conversation: a single
       // mislabelled contradiction costs its evidence, not the rule.
-      const stillLearning = match(contradictedRule.status)
-        .with("learning", () => true)
-        .with("live", "disabled", "retired", () => false)
-        .exhaustive();
-      if (!stillLearning) {
+      if (contradictedRule.status !== "learning") {
         logger.info(log, "correction contradicts a live rule — logged, not applied");
         continue;
       }
@@ -303,7 +299,7 @@ export async function extractCorrections(
   }
 
   const activeCount = await deps.runInTx((tx) =>
-    deps.store.countActiveLearnedRules(tx, scope.profileId),
+    deps.store.countLiveLearnedRules(tx, scope.profileId),
   );
   const consolidationNeeded = activeCount > CONSOLIDATION_THRESHOLD;
 

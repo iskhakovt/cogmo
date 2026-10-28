@@ -28,6 +28,7 @@ import {
   INSTRUCTION_RULE_KEY,
   LIVE_INSTRUCTION_RULE,
   normalizedRuleText,
+  type SteeringRuleRetireReason,
   type SteeringRuleSourceValue,
   type SteeringRuleStatusValue,
   steeringRules,
@@ -129,9 +130,6 @@ export interface RuleReview {
   retired: ReadonlyArray<ReviewedRule>;
 }
 
-/** A conditional status UPDATE's outcome: the row moved, or no longer held the status it leaves. */
-type RuleTransition = { kind: "transitioned" } | { kind: "stale" };
-
 /**
  * What `upsertCorrection` did: wrote a learning row, counted a reinforcement,
  * promoted a learning rule to live, or found no live or learning row to
@@ -154,10 +152,10 @@ const REMOVABLE_RULE_SOURCES: ReadonlyArray<SteeringRuleSourceValue> = [
 const LEARNED_RULE_SOURCES: ReadonlyArray<SteeringRuleSourceValue> = ["correction", "evolution"];
 
 /**
- * The statuses short of retirement that the Observer reads, reinforces and
- * consolidates: live or learning. A disabled rule is the operator's.
+ * The statuses the Observer reads, reinforces and consolidates: live or
+ * learning. A disabled rule is the operator's, a retired one the record.
  */
-const UNRETIRED_STATUSES: ReadonlyArray<SteeringRuleStatusValue> = ["live", "learning"];
+const OBSERVER_STATUSES: ReadonlyArray<SteeringRuleStatusValue> = ["live", "learning"];
 
 /**
  * `# Rules` order within a section: `safety` first (only operators write it),
@@ -292,14 +290,9 @@ async function upsertInstructionRule(
   return { kind: inserted ? "new" : "existing", ...row };
 }
 
-/** Move a learning rule to live, where it still holds `learning`. */
-async function graduateRule(tx: Transaction, id: string): Promise<RuleTransition> {
-  const moved = await tx
-    .update(steeringRules)
-    .set({ status: "live" })
-    .where(and(eq(steeringRules.id, id), eq(steeringRules.status, "learning")))
-    .returning({ id: steeringRules.id });
-  return moved.length > 0 ? { kind: "transitioned" } : { kind: "stale" };
+/** The columns a retirement writes; a contradiction's also records its conversation. */
+function retirement(reason: SteeringRuleRetireReason) {
+  return { status: "retired" as const, retractedAt: sql`now()`, retiredReason: reason };
 }
 
 const RULE_MATCH_COLUMNS = {
@@ -377,9 +370,10 @@ export interface SteeringRuleStore {
   /**
    * Insert a new correction, learning (`inserted`), or reinforce an existing
    * rule (`reinforced`), which promotes a learning rule to live when its
-   * observation count reaches 2 (`promoted`); reinforcing a live rule only
-   * counts. `stale` when `existingRuleId` names no live or learning rule: it
-   * was retired or merged since the caller read it, and nothing is written.
+   * observation count reaches 2 and clears its contradiction record
+   * (`promoted`); reinforcing a live rule only counts. `stale` when
+   * `existingRuleId` names no live or learning rule: it was retired or merged
+   * since the caller read it, and nothing is written.
    */
   upsertCorrection(
     tx: Transaction,
@@ -418,7 +412,7 @@ export interface SteeringRuleStore {
   ): Promise<ReadonlyArray<MemoryRule>>;
 
   /** Count the live learned rules (`correction`, `evolution`) a profile sees: what consolidation merges. */
-  countActiveLearnedRules(tx: Transaction, profileId: string): Promise<number>;
+  countLiveLearnedRules(tx: Transaction, profileId: string): Promise<number>;
 
   /**
    * Replace a group of learned rules with one consolidated rule, or, when a
@@ -538,7 +532,7 @@ export class DrizzleSteeringRuleStore implements SteeringRuleStore {
       .where(
         and(
           inArray(steeringRules.source, LEARNED_RULE_SOURCES),
-          inArray(steeringRules.status, UNRETIRED_STATUSES),
+          inArray(steeringRules.status, OBSERVER_STATUSES),
           or(isNull(steeringRules.profileId), eq(steeringRules.profileId, profileId)),
         ),
       )
@@ -596,11 +590,7 @@ export class DrizzleSteeringRuleStore implements SteeringRuleStore {
     );
     const retired = await tx
       .update(steeringRules)
-      .set({
-        status: "retired",
-        retractedAt: sql`now()`,
-        contradictedInConversationId: params.conversationId,
-      })
+      .set({ ...retirement("contradicted"), contradictedInConversationId: params.conversationId })
       .where(
         and(
           learning,
@@ -630,7 +620,11 @@ export class DrizzleSteeringRuleStore implements SteeringRuleStore {
     return match(applied.status)
       .with("learning", () => "reset" as const)
       .with("retired", () => "retired" as const)
-      .with("live", "disabled", () => "unchanged" as const)
+      .with("live", () => "unchanged" as const)
+      .with("disabled", () => {
+        // The CHECK keeps a learned rule out of `disabled`.
+        throw new Error(`learned rule ${params.id} is disabled`);
+      })
       .exhaustive();
   }
 
@@ -673,38 +667,32 @@ export class DrizzleSteeringRuleStore implements SteeringRuleStore {
     },
   ): Promise<UpsertCorrectionResult> {
     if (params.existingRuleId) {
+      // A learning rule graduates at its second observation, and leaves the
+      // conversation of its reset behind; a live one, an instruction included,
+      // is reinforced in place. One statement, so `old` and `new` tell them
+      // apart.
+      const graduates = sql`${steeringRules.status} = 'learning' AND ${steeringRules.observationCount} + 1 >= 2`;
       const [reinforced] = await tx
         .update(steeringRules)
-        .set({ observationCount: sql`${steeringRules.observationCount} + 1` })
+        .set({
+          observationCount: sql`${steeringRules.observationCount} + 1`,
+          status: sql`CASE WHEN ${graduates} THEN 'live' ELSE ${steeringRules.status} END`,
+          contradictedInConversationId: sql`CASE WHEN ${graduates} THEN NULL ELSE ${steeringRules.contradictedInConversationId} END`,
+        })
         .where(
           and(
             eq(steeringRules.id, params.existingRuleId),
-            inArray(steeringRules.status, UNRETIRED_STATUSES),
+            inArray(steeringRules.status, OBSERVER_STATUSES),
           ),
         )
         .returning({
           id: steeringRules.id,
-          status: steeringRules.status,
-          observationCount: steeringRules.observationCount,
+          promoted: sql<boolean>`(old.status = 'learning' AND new.status = 'live')`,
         });
       if (reinforced === undefined) return { kind: "stale" };
-      // Only a learning rule graduates; a live one, an instruction included,
-      // is reinforced in place. The reinforce UPDATE holds the row's lock, so
-      // the graduation can't go stale under it.
-      const counted: UpsertCorrectionResult = { kind: "reinforced", id: reinforced.id };
-      return match(reinforced.status)
-        .with("learning", async (): Promise<UpsertCorrectionResult> => {
-          if (reinforced.observationCount < 2) return counted;
-          return match(await graduateRule(tx, reinforced.id))
-            .with({ kind: "transitioned" }, () => ({
-              kind: "promoted" as const,
-              id: reinforced.id,
-            }))
-            .with({ kind: "stale" }, () => counted)
-            .exhaustive();
-        })
-        .with("live", "disabled", "retired", async () => counted)
-        .exhaustive();
+      return reinforced.promoted
+        ? { kind: "promoted", id: reinforced.id }
+        : { kind: "reinforced", id: reinforced.id };
     }
 
     const row = single(
@@ -725,7 +713,7 @@ export class DrizzleSteeringRuleStore implements SteeringRuleStore {
     return { kind: "inserted", id: row.id };
   }
 
-  async countActiveLearnedRules(tx: Transaction, profileId: string): Promise<number> {
+  async countLiveLearnedRules(tx: Transaction, profileId: string): Promise<number> {
     const rows = await tx
       .select({ value: count() })
       .from(steeringRules)
@@ -764,7 +752,7 @@ export class DrizzleSteeringRuleStore implements SteeringRuleStore {
           and(
             inArray(steeringRules.id, params.oldIds),
             inArray(steeringRules.source, LEARNED_RULE_SOURCES),
-            inArray(steeringRules.status, UNRETIRED_STATUSES),
+            inArray(steeringRules.status, OBSERVER_STATUSES),
           ),
         )
         .returning({ id: steeringRules.id });
@@ -824,11 +812,11 @@ export class DrizzleSteeringRuleStore implements SteeringRuleStore {
     await tx
       .update(steeringRules)
       // Not a contradiction's retirement: no conversation recorded it.
-      .set({ status: "retired", retractedAt: sql`now()`, contradictedInConversationId: null })
+      .set({ ...retirement("superseded"), contradictedInConversationId: null })
       .where(
         and(
           inArray(steeringRules.source, LEARNED_RULE_SOURCES),
-          inArray(steeringRules.status, UNRETIRED_STATUSES),
+          inArray(steeringRules.status, OBSERVER_STATUSES),
           textMatches(params.rule),
           inScope(params.profileId, params.channelType),
         ),
@@ -844,7 +832,7 @@ export class DrizzleSteeringRuleStore implements SteeringRuleStore {
     const retired = await tx
       .update(steeringRules)
       // Not a contradiction's retirement: no conversation recorded it.
-      .set({ status: "retired", retractedAt: sql`now()`, contradictedInConversationId: null })
+      .set({ ...retirement("removed_by_user"), contradictedInConversationId: null })
       .where(
         and(
           textMatches(params.text),

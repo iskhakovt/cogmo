@@ -38,7 +38,7 @@ export type SteeringRuleSourceValue = (typeof steeringRuleSource.enumValues)[num
  * `# Rules`; `learning` is a learned rule short of its second observation;
  * `disabled` is an operator's rule or a channel default switched off by hand;
  * `retired` keeps the row as the record of a withdrawn rule, with
- * `retracted_at` set.
+ * `retracted_at` and `retired_reason` set.
  */
 export const steeringRuleStatus = pgEnum("steering_rule_status", [
   "live",
@@ -47,6 +47,22 @@ export const steeringRuleStatus = pgEnum("steering_rule_status", [
   "retired",
 ]);
 export type SteeringRuleStatusValue = (typeof steeringRuleStatus.enumValues)[number];
+
+/**
+ * Why a rule is `retired`: a second contradiction while learning, an
+ * instruction with its text and scope superseding it, or the user's removal
+ * (`rule_remove`, `/rules`). `unknown` is written by nothing but the status
+ * migration, on rows retired before the column existed.
+ */
+export const steeringRuleRetiredReason = pgEnum("steering_rule_retired_reason", [
+  "contradicted",
+  "superseded",
+  "removed_by_user",
+  "unknown",
+]);
+export type SteeringRuleRetiredReasonValue = (typeof steeringRuleRetiredReason.enumValues)[number];
+/** The reasons a retirement in code records. */
+export type SteeringRuleRetireReason = Exclude<SteeringRuleRetiredReasonValue, "unknown">;
 
 /**
  * A rule's text as rules compare: lower-cased, trimmed, each run of whitespace
@@ -75,9 +91,10 @@ export const LIVE_INSTRUCTION_RULE: SQL = sql`source = 'instruction' AND status 
  * Which statuses each source can hold, as `chk_steering_rules_lifecycle`
  * enforces it: a learned rule (`correction`, `evolution`) is live, learning or
  * retired; an operator's rule or a channel default (`manual`, `seed`) is live,
- * disabled or retired; an instruction is live or retired. `retracted_at` is
- * set on a retired row and on no other. `user_id` and `quote` belong to
- * `instruction` rows.
+ * disabled or retired; an instruction is live or retired. `retracted_at` and
+ * `retired_reason` are set on a retired row and on no other;
+ * `contradicted_in_conversation_id` only on a learning or retired one.
+ * `user_id` and `quote` belong to `instruction` rows.
  */
 export const steeringRules = pgTable(
   "steering_rules",
@@ -92,6 +109,7 @@ export const steeringRules = pgTable(
     profileId: uuid("profile_id").references(() => profiles.id), // NULL = applies to all profiles
     channelType: text("channel_type"), // NULL = applies to all channels
     retractedAt: timestamp("retracted_at", { withTimezone: true }), // when a retired row was retired; NULL otherwise
+    retiredReason: steeringRuleRetiredReason("retired_reason"), // why a retired row was retired; NULL otherwise
     // NULL = every user; set on every instruction row, so one user's
     // instructions stay out of another's prompt.
     userId: uuid("user_id").references(() => users.id, { onDelete: "cascade" }),
@@ -100,8 +118,8 @@ export const steeringRules = pgTable(
     // contradiction reset the learning rule's count, then the one whose
     // contradiction retired it; one from the recorded conversation changes
     // nothing, so a retried or repeated extraction of one conversation applies
-    // once. Any other retirement, and a deleted conversation, clears it; the
-    // latter only costs one more reset.
+    // once. Graduation, any other retirement, and a deleted conversation clear
+    // it; the last only costs one more reset.
     contradictedInConversationId: uuid("contradicted_in_conversation_id").references(
       () => conversations.id,
       { onDelete: "set null" },
@@ -112,6 +130,8 @@ export const steeringRules = pgTable(
     check(
       "chk_steering_rules_lifecycle",
       sql`((${t.status} = 'retired') = (${t.retractedAt} IS NOT NULL))
+        AND ((${t.status} = 'retired') = (${t.retiredReason} IS NOT NULL))
+        AND (${t.contradictedInConversationId} IS NULL OR ${t.status} IN ('learning', 'retired'))
         AND (${t.status} <> 'learning' OR ${t.source} IN ('correction', 'evolution'))
         AND (${t.status} <> 'disabled' OR ${t.source} IN ('manual', 'seed'))
         AND ((${t.source} = 'instruction') = (${t.userId} IS NOT NULL))

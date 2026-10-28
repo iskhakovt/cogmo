@@ -178,9 +178,10 @@ steering_rules (
   profile_id        UUID FK → profiles,       -- nullable: null = applies to all profiles
   channel_type      TEXT,                     -- nullable: null = applies to all channels
   retracted_at      TIMESTAMPTZ,              -- nullable: when a retired row was retired; set exactly when status = 'retired'
+  retired_reason    steering_rule_retired_reason, -- nullable: 'contradicted' | 'superseded' | 'removed_by_user' | 'unknown'; set exactly when status = 'retired'
   user_id           UUID FK → users ON DELETE CASCADE, -- nullable: null = every user; set on every instruction row
   quote             TEXT,                     -- nullable: the user's words; set on every instruction row
-  contradicted_in_conversation_id UUID FK → conversations ON DELETE SET NULL, -- nullable: null = never contradicted while learning
+  contradicted_in_conversation_id UUID FK → conversations ON DELETE SET NULL, -- nullable: null = never contradicted while learning; only on a learning or retired row
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 -- chk_steering_rules_lifecycle, uq_steering_rules_instruction: evolution.md → Explicit Instructions → Data Model

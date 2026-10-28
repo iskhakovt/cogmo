@@ -227,7 +227,7 @@ function mockExtractionDeps(
       hasInstructionRule: vi.fn().mockResolvedValue(false),
       upsertCorrection: vi.fn().mockResolvedValue({ kind: "reinforced", id: "rule-1" }),
       contradictLearningRule: vi.fn().mockResolvedValue("reset"),
-      countActiveLearnedRules: vi.fn().mockResolvedValue(5),
+      countLiveLearnedRules: vi.fn().mockResolvedValue(5),
       ...storeOverrides,
     },
     activeChannelTypes,
@@ -886,18 +886,18 @@ describe("extractCorrections", () => {
   it("flags consolidationNeeded once the active learned rules pass 20", async () => {
     const deps = mockExtractionDeps(
       { corrections: [] },
-      { countActiveLearnedRules: vi.fn().mockResolvedValue(21) },
+      { countLiveLearnedRules: vi.fn().mockResolvedValue(21) },
     );
 
     const result = await extractCorrections(sampleHistory, SCOPE, deps);
     expect(result.consolidationNeeded).toBe(true);
-    expect(deps.store.countActiveLearnedRules).toHaveBeenCalledWith(FAKE_TX, "profile-1");
+    expect(deps.store.countLiveLearnedRules).toHaveBeenCalledWith(FAKE_TX, "profile-1");
   });
 
   it("does not flag consolidation at 20", async () => {
     const deps = mockExtractionDeps(
       { corrections: [] },
-      { countActiveLearnedRules: vi.fn().mockResolvedValue(20) },
+      { countLiveLearnedRules: vi.fn().mockResolvedValue(20) },
     );
 
     const result = await extractCorrections(sampleHistory, SCOPE, deps);

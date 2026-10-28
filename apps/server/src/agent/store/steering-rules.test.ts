@@ -96,6 +96,7 @@ async function row(params: RowParams): Promise<string> {
       userId: instruction ? expectDefined(params.userId, "instruction user") : null,
       quote: instruction ? `quoted: ${params.rule}` : null,
       retractedAt: params.status === "retired" ? (params.retiredAt ?? new Date()) : null,
+      retiredReason: params.status === "retired" ? "removed_by_user" : null,
     })
     .returning({ id: steeringRules.id });
   return expectDefined(inserted, params.rule).id;
@@ -107,6 +108,17 @@ async function stateOf(id: string): Promise<SteeringRuleStatusValue> {
     .from(steeringRules)
     .where(eq(steeringRules.id, id));
   return expectDefined(state, id).status;
+}
+
+async function reasonOf(id: string) {
+  const [state] = await db
+    .select({
+      retiredReason: steeringRules.retiredReason,
+      contradictedIn: steeringRules.contradictedInConversationId,
+    })
+    .from(steeringRules)
+    .where(eq(steeringRules.id, id));
+  return expectDefined(state, id);
 }
 
 function set(params: {
@@ -273,7 +285,7 @@ describe("setInstructionRule", () => {
     expect(result.id).not.toBe(retired);
   });
 
-  it("retires a learned rule with the same text and scope, active or learning", async () => {
+  it("retires a learned rule with the same text and scope, live or learning", async () => {
     const userId = await seedUser();
     const profileId = await seedProfile();
     const active = await row({ rule: "no emoji", source: "correction" });
@@ -309,6 +321,7 @@ describe("setInstructionRule", () => {
       otherProfile: "live",
       operator: "live",
     });
+    expect(await reasonOf(learning)).toEqual({ retiredReason: "superseded", contradictedIn: null });
   });
 
   describe("the limit", () => {
@@ -476,6 +489,10 @@ describe("retireRulesByText", () => {
     for (const r of result.retired) {
       expect(r.retractedAt).toBeInstanceOf(Date);
       expect(await stateOf(r.id)).toBe("retired");
+      expect(await reasonOf(r.id)).toEqual({
+        retiredReason: "removed_by_user",
+        contradictedIn: null,
+      });
     }
     expect(await rendered({ profileId, userId })).toEqual([]);
   });
@@ -740,7 +757,7 @@ describe("learned rules skip a retired row", () => {
     expect(await stateOf(id)).toBe("retired");
   });
 
-  it("countActiveLearnedRules counts only live correction and evolution rules", async () => {
+  it("countLiveLearnedRules counts only live correction and evolution rules", async () => {
     const userId = await seedUser();
     const profileId = await seedProfile();
     await row({ rule: "Learned", source: "correction" });
@@ -751,7 +768,7 @@ describe("learned rules skip a retired row", () => {
     await row({ rule: "Operator", source: "manual", observationCount: 0 });
     await row({ rule: "Default", source: "seed", channelType: "telegram" });
 
-    expect(await tx((trx) => store.countActiveLearnedRules(trx, profileId))).toBe(2);
+    expect(await tx((trx) => store.countLiveLearnedRules(trx, profileId))).toBe(2);
   });
 
   describe("replaceRules", () => {
@@ -891,6 +908,32 @@ describe("the Observer's rule reads", () => {
       .where(eq(steeringRules.id, id));
     expect(after?.observationCount).toBe(2);
     expect(await stateOf(id)).toBe("live");
+  });
+
+  it("upsertCorrection leaves a disabled operator rule disabled and reports stale", async () => {
+    const id = await row({
+      rule: "Off",
+      source: "manual",
+      status: "disabled",
+      observationCount: 1,
+    });
+
+    const result = await tx((trx) =>
+      store.upsertCorrection(trx, {
+        rule: "Off",
+        category: "style",
+        profileId: null,
+        existingRuleId: id,
+      }),
+    );
+
+    expect(result).toEqual({ kind: "stale" });
+    expect(await stateOf(id)).toBe("disabled");
+    const [after] = await db
+      .select({ observationCount: steeringRules.observationCount })
+      .from(steeringRules)
+      .where(eq(steeringRules.id, id));
+    expect(after?.observationCount).toBe(1);
   });
 
   it("upsertCorrection reports a promotion only when a learning rule goes live", async () => {
@@ -1046,9 +1089,49 @@ describe("the Observer's rule reads", () => {
 
       expect(await contradict(id, convB)).toBe("retired");
       expect(await stateOf(id)).toBe("retired");
+      expect(await reasonOf(id)).toEqual({ retiredReason: "contradicted", contradictedIn: convB });
     });
 
-    it("leaves an active, retired or instruction rule alone", async () => {
+    it("graduation clears the conversation of a reset, so a live rule carries no learning data", async () => {
+      const convA = await conversation();
+      const id = await row({ rule: "Learning", source: "correction", status: "learning" });
+      await contradict(id, convA);
+      const reinforce = () =>
+        tx((trx) =>
+          store.upsertCorrection(trx, {
+            rule: "Learning",
+            category: "style",
+            profileId: null,
+            existingRuleId: id,
+          }),
+        );
+
+      expect(await reinforce()).toEqual({ kind: "reinforced", id });
+      expect(await reasonOf(id)).toEqual({ retiredReason: null, contradictedIn: convA });
+      expect(await reinforce()).toEqual({ kind: "promoted", id });
+      expect(await stateOf(id)).toBe("live");
+      expect(await reasonOf(id)).toEqual({ retiredReason: null, contradictedIn: null });
+    });
+
+    it("refuses a live rule that carries a contradiction record", async () => {
+      const convA = await conversation();
+
+      await expect(
+        db.insert(steeringRules).values({
+          rule: "Live, marked",
+          category: "style",
+          status: "live",
+          source: "correction",
+          priority: 100,
+          observationCount: 2,
+          contradictedInConversationId: convA,
+        }),
+      ).rejects.toMatchObject({
+        cause: { message: expect.stringMatching(/chk_steering_rules_lifecycle/) },
+      });
+    });
+
+    it("leaves a live, retired or instruction rule alone", async () => {
       const userId = await seedUser();
       const convA = await conversation();
       const active = await row({ rule: "Active", source: "correction" });
@@ -1115,7 +1198,7 @@ describe("the Observer's rule reads", () => {
 
 describe("DrizzleSteeringRuleStore", () => {
   describe("steering rules", () => {
-    it("returns active rules for profile + global, safety first", async () => {
+    it("returns live rules for profile + global, safety first", async () => {
       const profileId = await seedProfile();
       const otherProfileId = (
         await tx((trx) =>
@@ -1290,7 +1373,7 @@ describe("DrizzleSteeringRuleStore", () => {
       ]);
     });
 
-    it("insertSeedRule writes an active, global channel default", async () => {
+    it("insertSeedRule writes a live, global channel default", async () => {
       const { id } = await tx((trx) =>
         store.insertSeedRule(trx, {
           rule: "Avoid tables",
@@ -1380,7 +1463,7 @@ describe("DrizzleSteeringRuleStore", () => {
       ]);
     });
 
-    it("returns empty array when no active rules", async () => {
+    it("returns empty array when no live rules", async () => {
       const profileId = await seedProfile();
       expect(await tx((trx) => store.getActiveRules(trx, { profileId, userId: null }))).toEqual([]);
     });
@@ -1479,7 +1562,7 @@ describe("DrizzleSteeringRuleStore", () => {
       ]);
     });
 
-    it("upsertCorrection inserts new rule as inactive with observationCount 1", async () => {
+    it("upsertCorrection inserts new rule as learning with observationCount 1", async () => {
       const result = applied(
         await tx((trx) =>
           store.upsertCorrection(trx, {
@@ -1577,7 +1660,7 @@ describe("DrizzleSteeringRuleStore", () => {
       expect(rows[0]).toEqual({ observationCount: 1, status: "learning" });
     });
 
-    it("upsertCorrection graduates rule to active when observationCount reaches 2", async () => {
+    it("upsertCorrection graduates rule to live when observationCount reaches 2", async () => {
       // Insert with observationCount = 1 — next increment crosses the threshold
       const { steeringRules } = await import("./schema.js");
       const [inserted] = await db
@@ -1616,7 +1699,7 @@ describe("DrizzleSteeringRuleStore", () => {
       expect(rows[0]).toEqual({ observationCount: 2, status: "live" });
     });
 
-    it("upsertCorrection does not re-promote already active rule", async () => {
+    it("upsertCorrection does not re-promote an already live rule", async () => {
       const { steeringRules } = await import("./schema.js");
       const [inserted] = await db
         .insert(steeringRules)
@@ -1651,7 +1734,7 @@ describe("DrizzleSteeringRuleStore", () => {
       expect(rows[0]!.observationCount).toBe(6);
     });
 
-    it("countActiveLearnedRules counts global + profile-specific", async () => {
+    it("countLiveLearnedRules counts global + profile-specific", async () => {
       const profileId = await seedProfile();
 
       const { steeringRules } = await import("./schema.js");
@@ -1685,7 +1768,7 @@ describe("DrizzleSteeringRuleStore", () => {
         },
       ]);
 
-      expect(await tx((trx) => store.countActiveLearnedRules(trx, profileId))).toBe(2);
+      expect(await tx((trx) => store.countLiveLearnedRules(trx, profileId))).toBe(2);
     });
 
     it("replaceRules deletes old and inserts new atomically", async () => {

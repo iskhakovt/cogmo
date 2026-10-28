@@ -1,5 +1,5 @@
 {
-  "id": "97eb31fd-4315-4c93-8fd6-46c13d13735f",
+  "id": "f70f4210-4d60-4631-a5a2-9faf5eadf592",
   "prevId": "ad97c0a1-2a6e-4167-98df-2b2e0bd51386",
   "version": "7",
   "dialect": "postgresql",
@@ -1870,6 +1870,13 @@
           "primaryKey": false,
           "notNull": false
         },
+        "retired_reason": {
+          "name": "retired_reason",
+          "type": "steering_rule_retired_reason",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": false
+        },
         "user_id": {
           "name": "user_id",
           "type": "uuid",
@@ -1983,7 +1990,7 @@
       "checkConstraints": {
         "chk_steering_rules_lifecycle": {
           "name": "chk_steering_rules_lifecycle",
-          "value": "((\"steering_rules\".\"status\" = 'retired') = (\"steering_rules\".\"retracted_at\" IS NOT NULL))\n        AND (\"steering_rules\".\"status\" <> 'learning' OR \"steering_rules\".\"source\" IN ('correction', 'evolution'))\n        AND (\"steering_rules\".\"status\" <> 'disabled' OR \"steering_rules\".\"source\" IN ('manual', 'seed'))\n        AND ((\"steering_rules\".\"source\" = 'instruction') = (\"steering_rules\".\"user_id\" IS NOT NULL))\n        AND ((\"steering_rules\".\"source\" = 'instruction') = (\"steering_rules\".\"quote\" IS NOT NULL))"
+          "value": "((\"steering_rules\".\"status\" = 'retired') = (\"steering_rules\".\"retracted_at\" IS NOT NULL))\n        AND ((\"steering_rules\".\"status\" = 'retired') = (\"steering_rules\".\"retired_reason\" IS NOT NULL))\n        AND (\"steering_rules\".\"contradicted_in_conversation_id\" IS NULL OR \"steering_rules\".\"status\" IN ('learning', 'retired'))\n        AND (\"steering_rules\".\"status\" <> 'learning' OR \"steering_rules\".\"source\" IN ('correction', 'evolution'))\n        AND (\"steering_rules\".\"status\" <> 'disabled' OR \"steering_rules\".\"source\" IN ('manual', 'seed'))\n        AND ((\"steering_rules\".\"source\" = 'instruction') = (\"steering_rules\".\"user_id\" IS NOT NULL))\n        AND ((\"steering_rules\".\"source\" = 'instruction') = (\"steering_rules\".\"quote\" IS NOT NULL))"
         }
       },
       "isRLSEnabled": false
@@ -4672,6 +4679,11 @@
       "name": "schedule_source",
       "schema": "public",
       "values": ["agent", "wizard", "manual"]
+    },
+    "public.steering_rule_retired_reason": {
+      "name": "steering_rule_retired_reason",
+      "schema": "public",
+      "values": ["contradicted", "superseded", "removed_by_user", "unknown"]
     },
     "public.steering_rule_source": {
       "name": "steering_rule_source",

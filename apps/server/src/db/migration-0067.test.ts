@@ -3,9 +3,9 @@
  * `steering_rules`, with `chk_steering_rules_lifecycle` and
  * `uq_steering_rules_instruction`. Runs the raw migration SQL against PGlite
  * over rows written in the pre-migration shape (the pushed schema's columns,
- * CHECK and index dropped first; 0076's `active` put back and its `status`
- * defaulted) and asserts that every existing row survives
- * with the new columns NULL, that the constraints hold afterwards, and that an
+ * CHECK and index dropped first; the status migration's `active` put back and
+ * its `status` defaulted) and asserts that every existing row survives with
+ * the new columns NULL, that the constraints hold afterwards, and that an
  * `instruction` row, which no pre-migration writer produces, fails the CHECK.
  */
 
@@ -66,8 +66,9 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   await truncateAll(db);
-  // The rows carry the lifecycle flag of their time; `status`, which 0078 makes
-  // NOT NULL, defaults to live so the store can read them afterwards.
+  // The rows carry the lifecycle flag of their time; `status`, which the
+  // `steering_rule_status` migration makes NOT NULL, defaults to live so the
+  // store can read them afterwards.
   await db.execute(sql`
     ALTER TABLE steering_rules ADD COLUMN IF NOT EXISTS active boolean NOT NULL DEFAULT true
   `);
