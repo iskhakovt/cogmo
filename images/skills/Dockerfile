@@ -66,6 +66,12 @@ RUN apt-get update \
  && apt-get upgrade -y \
  && rm -rf /var/lib/apt/lists/*
 
+# Nothing here uses the base image's pip: the supervisor and every skill run
+# in venvs without system site-packages, and uv does all installs. Kept, the
+# copies it vendors (certifi, urllib3, msgpack, pkg_resources) would show in
+# every scan, fixable only by a pip release.
+RUN python3 -m pip uninstall --yes --no-cache-dir --root-user-action=ignore pip
+
 # Non-root user (UID 1000, regular-user range — matches devbase's `vscode`
 # user). Sysbox already maps the in-container root to a non-root host uid
 # via user namespaces; this is defense in depth.
