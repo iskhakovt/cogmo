@@ -1,5 +1,5 @@
 /**
- * Migration 0076 rewrites `skill_deploy_status` without `approved`, gives
+ * Migration 0077 rewrites `skill_deploy_status` without `approved`, gives
  * runs that finished before `resource_usage` existed the usage the runner
  * records, and adds the per-state CHECKs on `skill_runs` and `skill_deploys`,
  * all in one transaction. Runs the raw SQL against PGlite over rows in the
@@ -21,7 +21,7 @@ import { constraintNameOf, findPgErrorByCode } from "./pg-errors.js";
 
 const MIGRATION_SQL = await readFile(
   fileURLToPath(
-    new URL("../../migrations/0076_skill_run_and_deploy_state_checks.sql", import.meta.url),
+    new URL("../../migrations/0077_skill_run_and_deploy_state_checks.sql", import.meta.url),
   ),
   "utf8",
 );
@@ -293,7 +293,7 @@ async function installedChecks(): Promise<string[]> {
   return rows.map((r) => r.name).filter((name) => CHECK_NAMES.includes(name));
 }
 
-describe("migration 0076 — skill run and deploy per-state CHECKs", () => {
+describe("migration 0077 — skill run and deploy per-state CHECKs", () => {
   it("repairs runs that finished without resource_usage and keeps every legal row", async () => {
     const skillId = await insertSkill();
     const approver = await insertIdentity();
