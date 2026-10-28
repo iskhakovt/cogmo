@@ -150,14 +150,14 @@ describe("createScheduledTaskFireHandler", () => {
       expect.anything(),
       "ch-tg",
       "chat-42",
-      { conversationId: "conv-fresh", status: "active", receive: "routed" },
+      { conversationId: "conv-fresh", receive: "routed" },
     );
     expect(d.transportStore.swapSession).toHaveBeenNthCalledWith(
       2,
       expect.anything(),
       "ch-web",
       "tab-7",
-      { conversationId: "conv-fresh", status: "active", receive: "all" },
+      { conversationId: "conv-fresh", receive: "all" },
     );
 
     // Synthetic inbound on the new conversation, no originating session

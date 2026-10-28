@@ -317,9 +317,6 @@ export function mockTransportStore(overrides?: Partial<TransportStore>): Transpo
     createChannel: vi.fn().mockResolvedValue({ id: "ch-1" }),
     insertOrRecoverFixedChannel: vi.fn().mockResolvedValue({ kind: "new", id: "ch-1" }),
     resolveSession: vi.fn().mockResolvedValue(null),
-    createSession: vi
-      .fn()
-      .mockResolvedValue({ kind: "new", id: "session-1", conversationId: "conv-1" }),
     closeSession: vi.fn().mockResolvedValue({ kind: "closed" }),
     swapSession: vi.fn().mockResolvedValue({ id: "session-swapped", closedIds: [] }),
     getSession: vi.fn().mockResolvedValue(null),
@@ -422,6 +419,7 @@ export function mockTransport(overrides?: Partial<Transport>): Transport {
         status: "active",
         receive: "routed",
         profileName: "assistant",
+        kind: "created",
       }),
     ),
     closeSession: vi.fn().mockResolvedValue({ kind: "closed" }),
@@ -438,6 +436,7 @@ export function mockTransport(overrides?: Partial<Transport>): Transport {
     emit: vi.fn().mockResolvedValue(ok(undefined)),
     uploadAttachment: vi.fn().mockResolvedValue("inbound/test.jpg"),
     conversations: {
+      create: vi.fn().mockResolvedValue(ok({ conversationId: "conv-1", profileName: "assistant" })),
       list: vi.fn().mockResolvedValue(ok([])),
       getMessages: vi.fn().mockResolvedValue(ok([])),
       getCurrent: vi.fn().mockResolvedValue(ok(null)),

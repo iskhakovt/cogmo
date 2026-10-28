@@ -1,6 +1,5 @@
 import type { Inngest } from "inngest";
 import { err, ok, type Result } from "neverthrow";
-import { match } from "ts-pattern";
 import type { AgentStore } from "../../agent/store/index.js";
 import type { Transactor } from "../../db/index.js";
 import {
@@ -9,6 +8,8 @@ import {
   buildInboundArrivedEvent,
 } from "../../inngest/events.js";
 import { logger } from "../../logger.js";
+import { resumeSession } from "../sessions/resume-session.js";
+import { supersedeSession } from "../sessions/supersede-session.js";
 import type { TransportStore } from "../store/index.js";
 
 /**
@@ -74,6 +75,7 @@ export async function resolveBoundary(
   args: ResolveBoundaryArgs,
 ): Promise<Result<BoundaryResolved, ResolveBoundaryError>> {
   const { runInTx, transportStore, agentStore, channelId, defaultProfileId } = deps;
+  const stores = { transportStore, agentStore };
 
   const dbResult = await runInTx(async (tx) => {
     const row = await transportStore.getBoundaryPendingById(tx, args.boundaryId);
@@ -91,63 +93,36 @@ export async function resolveBoundary(
       const identity = await transportStore.resolveUser(tx, channelId, row.platformUserHandle);
       if (!identity) return { kind: "err", code: "identity_rejected" } as const;
 
-      const conv = await agentStore.getConversation(tx, targetConvId);
-      if (!conv) return { kind: "err", code: "conversation_not_found" } as const;
-      if (identity.userId !== conv.userId) {
-        return { kind: "err", code: "access_denied" } as const;
-      }
-
-      const swapped = await transportStore.swapSession(tx, channelId, row.platformAddress, {
+      const resumed = await resumeSession(stores, tx, {
+        channelId,
+        platformAddress: row.platformAddress,
+        userId: identity.userId,
         conversationId: targetConvId,
-        status: "active",
         receive: "routed",
       });
-      sessionId = swapped.id;
+      if (resumed.isErr()) return { kind: "err", code: resumed.error.code } as const;
+      sessionId = resumed.value.id;
       conversationId = targetConvId;
     } else {
       const identity = await transportStore.resolveUser(tx, channelId, row.platformUserHandle);
       if (!identity) return { kind: "err", code: "identity_rejected" } as const;
 
-      // Explicit profile from `/new <name>` wins; else fall through to the
-      // chat-default → global-default chain so `boundary.resolve({ kind: "fresh" })`
-      // matches `transport.createConversation`'s implicit choice.
-      let profileId = args.choice.profileId;
-      if (!profileId) {
-        const chatDefault = await transportStore.getChatDefaultProfile(
-          tx,
-          channelId,
-          row.platformAddress,
-        );
-        profileId = chatDefault?.profileId ?? defaultProfileId;
-      }
-
-      const conv = await agentStore.createConversation(tx, {
-        userId: identity.userId,
-        profileId,
-        isPrivate: true,
-      });
-      const created = await transportStore.createSession(tx, {
+      // The user chose fresh: whatever opened on the chat during the hold (a
+      // scheduled fire rotating onto its conversation) is superseded, so the
+      // buffered inbounds drain into the session this opens.
+      const { session } = await supersedeSession(stores, tx, {
         channelId,
         platformAddress: row.platformAddress,
-        conversationId: conv.id,
-        status: "active",
+        userId: identity.userId,
+        isPrivate: true,
+        // Explicit profile from `/new <name>` wins; else the chat-default →
+        // global-default chain, matching `transport.createConversation`.
+        profileId: args.choice.profileId,
+        defaultProfileId,
         receive: "routed",
       });
-      sessionId = await match(created)
-        .with({ kind: "new" }, async ({ id }) => id)
-        .with({ kind: "recovered" }, async () => {
-          // A session opened on the held address during the hold — a
-          // scheduled fire rotating the user's reachable channels onto its
-          // conversation. The user chose fresh: supersede it.
-          const swapped = await transportStore.swapSession(tx, channelId, row.platformAddress, {
-            conversationId: conv.id,
-            status: "active",
-            receive: "routed",
-          });
-          return swapped.id;
-        })
-        .exhaustive();
-      conversationId = conv.id;
+      sessionId = session.id;
+      conversationId = session.conversationId;
     }
 
     const inboundIds: string[] = [];

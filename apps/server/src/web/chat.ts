@@ -1,5 +1,4 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { match } from "ts-pattern";
 import { z } from "zod";
 import { logger } from "../logger.js";
 import type {
@@ -7,6 +6,7 @@ import type {
   SseFrame,
   WebStreamRegistry,
 } from "../transport/adapters/web/stream-registry.js";
+import { missedClose } from "../transport/sessions/close-session.js";
 import type { Transport, TransportError } from "../transport/transport.js";
 import { readJsonBody, sendBodyError } from "./body.js";
 
@@ -58,15 +58,11 @@ export class SessionCloses {
   start(transport: Transport, sessionId: string): void {
     const closing: Promise<void> = transport
       .closeSession(sessionId)
-      .then((outcome) =>
-        match(outcome)
-          .with({ kind: "closed" }, () => undefined)
-          // The stream open that replaced this session closed it already.
-          .with({ kind: "stale" }, { kind: "not_found" }, ({ kind }) =>
-            logger.debug({ sessionId, kind }, "web chat: session was already closed"),
-          )
-          .exhaustive(),
-      )
+      .then((outcome) => {
+        // The stream open that replaced this session closed it already.
+        const missed = missedClose(outcome);
+        if (missed) logger.debug({ sessionId, ...missed }, "web chat: session was already closed");
+      })
       .catch((err: unknown) =>
         logger.debug({ err, sessionId }, "web chat: closeSession on disconnect failed"),
       )
@@ -192,30 +188,16 @@ async function handleCreate(
     sendBodyError(res, err);
     return;
   }
-  // The tab may still hold the session of the conversation it is leaving:
-  // `createConversation` joins an active session rather than superseding it,
-  // so close it first or the tab gets its current conversation back.
-  const current = await deps.transport.resolveSession(tab);
-  if (current) {
-    match(await deps.transport.closeSession(current.id))
-      .with({ kind: "closed" }, () => undefined)
-      .with({ kind: "stale" }, { kind: "not_found" }, ({ kind }) =>
-        logger.debug({ tab, sessionId: current.id, kind }, "web chat: tab session already closed"),
-      )
-      .exhaustive();
-  }
-  const result = await deps.transport.createConversation(tab, deps.ownerHandle, {
+  // A conversation row only. The tab keeps the stream session of the
+  // conversation it is leaving until the new stream opens and resumes onto
+  // this one, so an in-flight reply there still lands.
+  const result = await deps.transport.conversations.create(tab, deps.ownerHandle, {
     isPrivate: true,
   });
   if (result.isErr()) {
     sendText(res, transportErrorStatus(result.error), result.error.code);
     return;
   }
-  // `createConversation` opens a session as a side effect, but the stream open
-  // (`resumeConversation`) is the real session owner. Close the one we just
-  // opened so a create-without-streaming doesn't orphan a `receive:"all"`
-  // session until the idle timer reclaims it; the stream open mints a fresh one.
-  deps.sessionCloses.start(deps.transport, result.value.id);
   sendJson(res, 200, { conversationId: result.value.conversationId });
 }
 

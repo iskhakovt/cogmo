@@ -332,11 +332,15 @@ describe("web chat routes", () => {
     });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ conversationId: "conv-1" });
-    // The side-effect session create opens is closed — the stream open owns it.
-    expect(transport.closeSession).toHaveBeenCalledWith("session-1");
+    // A conversation row only; the stream open binds the tab to it.
+    expect(transport.conversations.create).toHaveBeenCalledWith("tab-1", expect.any(String), {
+      isPrivate: true,
+    });
+    expect(transport.createConversation).not.toHaveBeenCalled();
+    expect(transport.closeSession).not.toHaveBeenCalled();
   });
 
-  it("closes the tab's live session before creating, so the create does not join it", async () => {
+  it("leaves the tab's live stream session alone, so an in-flight reply there still lands", async () => {
     await start({ resolveSession: vi.fn().mockResolvedValue(session) });
     const cookie = await login();
     const res = await fetch(`${chatBase}/api/chat?tab=tab-1`, {
@@ -345,11 +349,8 @@ describe("web chat routes", () => {
       body: "{}",
     });
     expect(res.status).toBe(200);
-    expect(transport.closeSession).toHaveBeenNthCalledWith(1, "sess-1");
-    expect(vi.mocked(transport.closeSession).mock.invocationCallOrder[0]).toBeLessThan(
-      vi.mocked(transport.createConversation).mock.invocationCallOrder[0] ?? -1,
-    );
-    expect(transport.closeSession).toHaveBeenNthCalledWith(2, "session-1");
+    expect(transport.closeSession).not.toHaveBeenCalled();
+    expect(transport.resumeConversation).not.toHaveBeenCalled();
   });
 
   it("emits a user turn to the resolved session (202)", async () => {

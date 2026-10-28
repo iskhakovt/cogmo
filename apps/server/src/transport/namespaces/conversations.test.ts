@@ -38,6 +38,7 @@ function setup(overrides?: {
     transportStore,
     agentStore,
     inngest,
+    defaultProfileId: "profile-1",
     mcpRegistry: undefined,
     compactConversation: undefined,
   });
@@ -742,6 +743,7 @@ describe("conversations.compact", () => {
       transportStore,
       agentStore,
       inngest: { send: vi.fn().mockResolvedValue(undefined) } as never,
+      defaultProfileId: "profile-1",
       mcpRegistry: undefined,
       compactConversation: opts.compactConversation,
     });

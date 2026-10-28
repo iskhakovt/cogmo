@@ -108,7 +108,6 @@ describe("startPipelineRun", () => {
     });
     expect(transportStore.swapSession).toHaveBeenCalledWith(expect.anything(), "tg", "42", {
       conversationId: "conv-new",
-      status: "active",
       receive: "routed",
     });
     expect(runStore.insertOrRecoverRun).toHaveBeenCalledWith(expect.anything(), {

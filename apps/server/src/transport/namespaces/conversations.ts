@@ -15,6 +15,7 @@ import { computeBudget, resolveLimits } from "../../llm/models.js";
 import { ProviderConfigError } from "../../llm/resolver.js";
 import { logger } from "../../logger.js";
 import type { McpRegistry } from "../../mcp/registry.js";
+import { openConversation } from "../sessions/open-conversation.js";
 import type { TransportError } from "../transport-error.js";
 import { resolveOwnedConversation, type TransportContext } from "./context.js";
 import { emitCooldownClearedIfAny } from "./cooldown-cleared.js";
@@ -99,6 +100,16 @@ export interface ConversationsNamespace {
     platformUserHandle: string,
   ): Promise<Result<ReadonlyArray<ConversationSummary>, TransportError>>;
   /**
+   * Open a conversation for the caller with no session bound to any address
+   * — the Web UI's new-chat, whose stream open resumes the tab onto it
+   * afterwards. `platformAddress` only selects the chat's default profile.
+   */
+  create(
+    platformAddress: string,
+    platformUserHandle: string,
+    opts: { isPrivate: boolean; profileId?: string },
+  ): Promise<Result<{ conversationId: string; profileName: string }, TransportError>>;
+  /**
    * Ordered message history of a conversation the caller owns — the web chat
    * history read. Each turn is flattened to displayable `text`. Identity- and
    * ownership-checked: `access_denied` when the conversation isn't the caller's.
@@ -181,6 +192,7 @@ export interface ConversationsNamespace {
 
 export function createConversations(
   deps: TransportContext & {
+    defaultProfileId: string;
     inngest: Inngest;
     mcpRegistry: McpRegistry | undefined;
     compactConversation:
@@ -193,11 +205,29 @@ export function createConversations(
     runInTx,
     transportStore,
     agentStore,
+    defaultProfileId,
     inngest,
     mcpRegistry,
     compactConversation,
   } = deps;
   return {
+    async create(platformAddress, platformUserHandle, opts) {
+      return runInTx(async (tx) => {
+        const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
+        if (!identity) return err({ code: "identity_rejected" as const });
+        return ok(
+          await openConversation({ transportStore, agentStore }, tx, {
+            channelId,
+            platformAddress,
+            userId: identity.userId,
+            isPrivate: opts.isPrivate,
+            profileId: opts.profileId,
+            defaultProfileId,
+          }),
+        );
+      });
+    },
+
     async list(platformUserHandle) {
       return runInTx(async (tx) => {
         const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);

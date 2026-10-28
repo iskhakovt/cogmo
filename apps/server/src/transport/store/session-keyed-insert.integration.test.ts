@@ -1,11 +1,11 @@
 /// <reference path="../../../test/vitest.d.ts" />
 
 /**
- * The session `create` and `swap` transitions raced on two real connections,
- * against `uq_sessions_active_address`: PGlite has one connection, so the unit
- * tier cannot. Each loser's REPEATABLE READ snapshot predates the winner's
- * commit, so its conflict raises `40001` and the transactor retries it onto
- * the committed state (design/transport/sessions.md → Lifecycle).
+ * Two session opens raced on two real connections against
+ * `uq_sessions_active_address`: PGlite has one connection, so the unit tier
+ * cannot. The loser's REPEATABLE READ snapshot predates the winner's commit,
+ * so its keyed insert raises `40001` and the transactor retries it onto the
+ * committed state (design/transport/sessions.md → Lifecycle).
  */
 
 import { randomBytes } from "node:crypto";
@@ -20,7 +20,7 @@ import * as schema from "../../db/schemas.js";
 import { type Transaction, transactor } from "../../db/transactor.js";
 import { assertKind, expectDefined, expectOk } from "../../test/assertions.js";
 import { fileDatabaseUrl, fileDefaultUserId } from "../../test/integration-file.js";
-import { type CreateSessionParams, DrizzleTransportStore } from "./index.js";
+import { DrizzleTransportStore } from "./index.js";
 import { channelSessions, channels } from "./schema.js";
 
 const PREFIX = `it-${randomBytes(4).toString("hex")}-`;
@@ -81,24 +81,21 @@ afterAll(async () => {
   await Promise.all([winnerSql.end(), loserSql.end(), observerSql.end()]);
 });
 
-function session(tag: string, conversation: 0 | 1): CreateSessionParams {
-  return {
-    channelId,
-    platformAddress: `${PREFIX}${tag}`,
-    conversationId: expectDefined(conversationIds[conversation], "conversation"),
-    status: "active",
-    receive: "routed",
-  };
+function conversation(index: 0 | 1): string {
+  return expectDefined(conversationIds[index], "conversation");
 }
 
 /**
- * The winner runs `createSession(params)` and commits once `loser`, run
- * through the transactor, is waiting on the uncommitted row.
+ * The winner swaps `platformAddress` onto conversation 0 and commits once
+ * `loser`, run through the transactor, is waiting on the uncommitted row.
  */
-async function race<T>(params: CreateSessionParams, loser: (trx: Transaction) => Promise<T>) {
+async function race<T>(platformAddress: string, loser: (trx: Transaction) => Promise<T>) {
   let attempts = 0;
   const { winner, outcome } = await drizzle(winnerSql, { schema }).transaction(async (trx) => {
-    const winner = await store.createSession(trx, params);
+    const winner = await store.swapSession(trx, channelId, platformAddress, {
+      conversationId: conversation(0),
+      receive: "routed",
+    });
     const outcome = transactor(drizzle(loserSql, { schema }))((t) => {
       attempts += 1;
       return loser(t);
@@ -133,42 +130,33 @@ async function activeIds(platformAddress: string): Promise<string[]> {
   return rows.map((row) => row.id);
 }
 
-describe("session transitions against a concurrent writer (real Postgres)", () => {
-  it("create vs create: the loser retries past 40001 and recovers the winner's row", async () => {
-    const params = session("create", 0);
-    const { winner, loser, attempts } = await race(params, (trx) =>
-      store.createSession(trx, session("create", 1)),
-    );
-
-    expect(winner.kind).toBe("new");
-    expect(loser).toEqual({
-      kind: "fulfilled",
-      value: { kind: "recovered", id: winner.id, conversationId: params.conversationId },
-    });
-    expect(attempts).toBe(2);
-    expect(await activeIds(params.platformAddress)).toEqual([winner.id]);
-  });
-
-  it("create vs swap: the loser retries past 40001 and closes the winner's row", async () => {
-    const params = session("swap", 0);
-    const { winner, loser, attempts } = await race(params, (trx) =>
-      store.swapSession(trx, channelId, params.platformAddress, {
-        conversationId: expectDefined(conversationIds[1], "conversation"),
-        status: "active",
+describe("session opens against a concurrent writer (real Postgres)", () => {
+  it("swap vs swap: the loser retries past 40001 and closes the winner's row", async () => {
+    const address = `${PREFIX}swap`;
+    const { winner, loser, attempts } = await race(address, (trx) =>
+      store.swapSession(trx, channelId, address, {
+        conversationId: conversation(1),
         receive: "routed",
       }),
     );
 
+    expect(winner.closedIds).toEqual([]);
     assertKind(loser, "fulfilled");
     expect(loser.value.closedIds).toEqual([winner.id]);
     expect(attempts).toBe(2);
-    expect(await activeIds(params.platformAddress)).toEqual([loser.value.id]);
+    expect(await activeIds(address)).toEqual([loser.value.id]);
   });
 
   it("a plain insert, the control: the loser fails with 23505, which is not retried", async () => {
-    const params = session("plain", 0);
-    const { loser, attempts } = await race(params, (trx) =>
-      trx.insert(channelSessions).values(session("plain", 1)),
+    const address = `${PREFIX}plain`;
+    const { winner, loser, attempts } = await race(address, (trx) =>
+      trx.insert(channelSessions).values({
+        channelId,
+        platformAddress: address,
+        conversationId: conversation(1),
+        status: "active",
+        receive: "routed",
+      }),
     );
 
     assertKind(loser, "rejected");
@@ -176,5 +164,6 @@ describe("session transitions against a concurrent writer (real Postgres)", () =
       constraint_name: "uq_sessions_active_address",
     });
     expect(attempts).toBe(1);
+    expect(await activeIds(address)).toEqual([winner.id]);
   });
 });

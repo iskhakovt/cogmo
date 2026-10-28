@@ -113,7 +113,6 @@ export async function startPipelineRun(
       for (const ch of channels) {
         await deps.transportStore.swapSession(tx, ch.channelId, ch.platformAddress, {
           conversationId: conversation.id,
-          status: "active",
           receive: ch.receive,
         });
       }

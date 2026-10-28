@@ -37,8 +37,10 @@ describe("createTransport", () => {
 
     await transport.createConversation("addr-1", "handle-1", { isPrivate: true });
 
-    expect(transportStore.createSession).toHaveBeenCalledWith(
+    expect(transportStore.swapSession).toHaveBeenCalledWith(
       expect.anything(),
+      expect.any(String),
+      "addr-1",
       expect.objectContaining({ receive: "routed" }),
     );
   });
@@ -48,8 +50,10 @@ describe("createTransport", () => {
 
     await transport.createConversation("addr-1", "handle-1", { isPrivate: true });
 
-    expect(transportStore.createSession).toHaveBeenCalledWith(
+    expect(transportStore.swapSession).toHaveBeenCalledWith(
       expect.anything(),
+      expect.any(String),
+      "addr-1",
       expect.objectContaining({ receive: "all" }),
     );
   });

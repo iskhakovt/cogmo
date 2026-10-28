@@ -124,7 +124,6 @@ async function rotateAndCreateConversation(
   for (const ch of channels) {
     await deps.transportStore.swapSession(tx, ch.channelId, ch.platformAddress, {
       conversationId: newConv.id,
-      status: "active",
       receive: ch.receive,
     });
   }

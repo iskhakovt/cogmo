@@ -2,13 +2,21 @@ import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Transactor } from "../../db/index.js";
 import type { inboundArrived } from "../../inngest/events.js";
-import { logger } from "../../logger.js";
 import { mockAgentStore, mockTransportStore } from "../../test/factories.js";
 import type { AttachmentStore } from "../attachment-store.js";
 import { createSessions } from "./sessions.js";
 
 const FAKE_TX = { __mockTx: true } as never;
 const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
+
+const activeSession = {
+  id: "session-live",
+  channelId: "ch-1",
+  platformAddress: "addr-1",
+  conversationId: "conv-live",
+  status: "active" as const,
+  receive: "routed" as const,
+};
 
 function setup(overrides?: {
   transportStore?: ReturnType<typeof mockTransportStore>;
@@ -41,218 +49,122 @@ function setup(overrides?: {
 }
 
 describe("resolveSession", () => {
-  it("delegates to transportStore with scoped channelId", async () => {
-    const { sessions, transportStore } = setup();
-    await sessions.resolveSession("addr-1");
-    expect(transportStore.resolveSession).toHaveBeenCalledWith(expect.anything(), "ch-1", "addr-1");
+  it("runs the lookup, the idle check and any rotation in one transaction", async () => {
+    const ts = mockTransportStore({
+      resolveSession: vi.fn().mockResolvedValue(activeSession),
+    });
+    const as = mockAgentStore({
+      getLastMessageTime: vi.fn().mockResolvedValue(new Date(Date.now() - 2 * 60 * 60 * 1000)),
+    });
+    let transactions = 0;
+    const countingRunInTx: Transactor = (cb) => {
+      transactions += 1;
+      return cb(FAKE_TX);
+    };
+    const { sessions } = setup({
+      transportStore: ts,
+      agentStore: as,
+      idleTimeoutMs: 60 * 60 * 1000,
+      runInTx: countingRunInTx,
+    });
+
+    expect(await sessions.resolveSession("addr-1")).toBeNull();
+    expect(ts.resolveSession).toHaveBeenCalledWith(expect.anything(), "ch-1", "addr-1");
+    expect(ts.closeSession).toHaveBeenCalledWith(expect.anything(), "session-live");
+    expect(transactions).toBe(1);
   });
 });
 
 describe("createConversation", () => {
-  it("creates conversation via agentStore and session via transportStore", async () => {
-    const { sessions, agentStore, transportStore } = setup();
-
-    const session = await sessions.createConversation("addr-1", "handle-1", { isPrivate: true });
-
-    expect(agentStore.createConversation).toHaveBeenCalledWith(expect.anything(), {
-      userId: "user-1",
-      profileId: "profile-1",
-      isPrivate: true,
-    });
-    expect(transportStore.createSession).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({
-        channelId: "ch-1",
-        platformAddress: "addr-1",
-        status: "active",
-        receive: "routed",
-      }),
-    );
-    expect(session.isOk()).toBe(true);
-    if (session.isOk()) {
-      expect(session.value.platformAddress).toBe("addr-1");
-      expect(session.value.channelId).toBe("ch-1");
-    }
-  });
-
-  it("returns identity_rejected when resolveUser returns null", async () => {
-    const ts = mockTransportStore({
-      resolveUser: vi.fn().mockResolvedValue(null),
-    });
-    const { sessions } = setup({ transportStore: ts });
+  it("returns identity_rejected when resolveUser returns null, touching nothing", async () => {
+    const ts = mockTransportStore({ resolveUser: vi.fn().mockResolvedValue(null) });
+    const { sessions, agentStore } = setup({ transportStore: ts });
 
     const result = await sessions.createConversation("addr-1", "unknown-user", {
       isPrivate: true,
     });
 
-    expect(result.isErr()).toBe(true);
-    if (result.isErr()) {
-      expect(result.error.code).toBe("identity_rejected");
-    }
+    expect(result._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
+    expect(agentStore.createConversation).not.toHaveBeenCalled();
+    expect(ts.swapSession).not.toHaveBeenCalled();
   });
 
-  it("uses resolved userId from identity (not defaultUserId)", async () => {
+  it("opens a conversation for the resolved user and swaps the free address onto it", async () => {
     const ts = mockTransportStore({
       resolveUser: vi.fn().mockResolvedValue({ userId: "resolved-user-42" }),
     });
-    const { sessions } = setup({ transportStore: ts, agentStore: mockAgentStore() });
+    const { sessions, agentStore } = setup({ transportStore: ts });
 
-    await sessions.createConversation("addr-1", "handle-1", { isPrivate: true });
+    const result = await sessions.createConversation("addr-1", "handle-1", {
+      isPrivate: true,
+      profileId: "profile-explicit",
+    });
 
     expect(ts.resolveUser).toHaveBeenCalledWith(expect.anything(), "ch-1", "handle-1");
-  });
-
-  it("falls back to the per-chat default profile when none is passed", async () => {
-    const ts = mockTransportStore({
-      getChatDefaultProfile: vi.fn().mockResolvedValue({ profileId: "profile-chat-default" }),
-    });
-    const agentStore = mockAgentStore();
-    const { sessions } = setup({ transportStore: ts, agentStore });
-
-    await sessions.createConversation("addr-1", "handle-1", { isPrivate: true });
-
-    expect(ts.getChatDefaultProfile).toHaveBeenCalledWith(expect.anything(), "ch-1", "addr-1");
     expect(agentStore.createConversation).toHaveBeenCalledWith(expect.anything(), {
-      userId: "user-1",
-      profileId: "profile-chat-default",
-      isPrivate: true,
-    });
-  });
-
-  it("explicit profileId wins over the per-chat default", async () => {
-    const ts = mockTransportStore({
-      getChatDefaultProfile: vi.fn().mockResolvedValue({ profileId: "profile-chat-default" }),
-    });
-    const agentStore = mockAgentStore();
-    const { sessions } = setup({ transportStore: ts, agentStore });
-
-    await sessions.createConversation("addr-1", "handle-1", {
-      isPrivate: true,
-      profileId: "profile-explicit",
-    });
-
-    expect(ts.getChatDefaultProfile).not.toHaveBeenCalled();
-    expect(agentStore.createConversation).toHaveBeenCalledWith(expect.anything(), {
-      userId: "user-1",
+      userId: "resolved-user-42",
       profileId: "profile-explicit",
       isPrivate: true,
     });
-  });
-
-  it("falls through to the global default when neither explicit nor chat default is set", async () => {
-    // mockTransportStore returns `undefined` from getChatDefaultProfile by default.
-    const agentStore = mockAgentStore();
-    const { sessions } = setup({ agentStore });
-
-    await sessions.createConversation("addr-1", "handle-1", { isPrivate: true });
-
-    expect(agentStore.createConversation).toHaveBeenCalledWith(expect.anything(), {
-      userId: "user-1",
-      profileId: "profile-1", // setup() defaults defaultProfileId to "profile-1"
-      isPrivate: true,
+    expect(ts.swapSession).toHaveBeenCalledWith(expect.anything(), "ch-1", "addr-1", {
+      conversationId: "conv-1",
+      receive: "routed",
     });
-  });
-
-  it("returns the resolved profile name on the success value", async () => {
-    // The reply layer in handleNew consumes this to surface the profile
-    // actually used — atomic with the insert, so it's race-free against
-    // a concurrent /new swapping the active session.
-    const agentStore = mockAgentStore({
-      getProfile: vi.fn().mockResolvedValue({
-        id: "profile-1",
-        userId: null,
-        name: "doc-mode",
-        basePrompt: "",
-        model: "claude-sonnet-4-6",
-        summarizationModel: null,
-        extractionModel: null,
-        autoRecall: "heuristic",
-        voiceMode: "auto",
-        toolSet: [],
-        memoryScope: null,
-        profileClass: null,
-        streamChunkChars: 4000,
-        streamEdits: true,
-        codingAutoapproveMode: "off",
-      }),
-    });
-    const { sessions } = setup({ agentStore });
-    const result = await sessions.createConversation("addr-1", "handle-1", { isPrivate: true });
-    expect(result._unsafeUnwrap()).toMatchObject({ profileName: "doc-mode" });
-  });
-
-  it("joins the address's active session instead of opening a second conversation", async () => {
-    const activeSession = {
-      id: "session-live",
+    expect(result._unsafeUnwrap()).toEqual({
+      id: "session-swapped",
       channelId: "ch-1",
       platformAddress: "addr-1",
-      conversationId: "conv-live",
-      status: "active" as const,
-      receive: "routed" as const,
-    };
-    const ts = mockTransportStore({
-      resolveSession: vi.fn().mockResolvedValue(activeSession),
-    });
-    const agentStore = mockAgentStore({
-      getConversation: vi.fn().mockResolvedValue({
-        id: "conv-live",
-        userId: "user-1",
-        profileId: "p-live",
-        isPrivate: true,
-      }),
-      getProfile: vi.fn().mockResolvedValue({ id: "p-live", name: "live-profile" }),
-    });
-    const { sessions } = setup({ transportStore: ts, agentStore });
-
-    const result = await sessions.createConversation("addr-1", "handle-1", { isPrivate: true });
-
-    expect(result._unsafeUnwrap()).toEqual({ ...activeSession, profileName: "live-profile" });
-    expect(agentStore.createConversation).not.toHaveBeenCalled();
-    expect(ts.createSession).not.toHaveBeenCalled();
-    expect(agentStore.getProfile).toHaveBeenCalledWith(expect.anything(), "p-live");
-  });
-
-  it("supersedes an expired active row when the keyed insert recovers one", async () => {
-    // `resolveSession` skips a row past its `expires_at`, the unique index does
-    // not: the insert recovers it, and the fresh conversation swaps it out.
-    const ts = mockTransportStore({
-      createSession: vi.fn().mockResolvedValue({
-        kind: "recovered",
-        id: "session-expired",
-        conversationId: "conv-old",
-      }),
-    });
-    const { sessions } = setup({ transportStore: ts });
-
-    const result = await sessions.createConversation("addr-1", "handle-1", { isPrivate: true });
-
-    expect(ts.swapSession).toHaveBeenCalledWith(expect.anything(), "ch-1", "addr-1", {
       conversationId: "conv-1",
       status: "active",
       receive: "routed",
-    });
-    expect(result._unsafeUnwrap()).toMatchObject({
-      id: "session-swapped",
-      conversationId: "conv-1",
       profileName: "assistant",
+      kind: "created",
     });
   });
 
-  it("returns profile_not_found when getProfile resolves to null after insert", async () => {
-    // Defensive: agentStore.createConversation just succeeded with this id
-    // under the same FK, so getProfile returning null would mean a torn tx
-    // or schema bug. Surface a typed error rather than crashing on null.
-    const agentStore = mockAgentStore({
-      getProfile: vi.fn().mockResolvedValue(null),
+  it("joins the address's active session when there is one", async () => {
+    const ts = mockTransportStore({
+      resolveSession: vi.fn().mockResolvedValue(activeSession),
     });
-    const { sessions } = setup({ agentStore });
+    const { sessions, agentStore } = setup({ transportStore: ts });
+
     const result = await sessions.createConversation("addr-1", "handle-1", { isPrivate: true });
-    expect(result._unsafeUnwrapErr()).toEqual({ code: "profile_not_found" });
+
+    expect(result._unsafeUnwrap()).toMatchObject({ ...activeSession, kind: "joined" });
+    expect(agentStore.createConversation).not.toHaveBeenCalled();
+    expect(ts.swapSession).not.toHaveBeenCalled();
+  });
+
+  it("with supersede, swaps the address onto the fresh conversation without consulting what is active", async () => {
+    const ts = mockTransportStore({
+      resolveSession: vi.fn().mockResolvedValue(activeSession),
+      swapSession: vi.fn().mockResolvedValue({ id: "session-new", closedIds: ["session-live"] }),
+    });
+    const { sessions, agentStore } = setup({ transportStore: ts });
+
+    const result = await sessions.createConversation("addr-1", "handle-1", {
+      isPrivate: true,
+      supersede: true,
+    });
+
+    expect(ts.resolveSession).not.toHaveBeenCalled();
+    expect(ts.closeSession).not.toHaveBeenCalled();
+    expect(agentStore.createConversation).toHaveBeenCalledTimes(1);
+    expect(ts.swapSession).toHaveBeenCalledWith(expect.anything(), "ch-1", "addr-1", {
+      conversationId: "conv-1",
+      receive: "routed",
+    });
+    expect(result._unsafeUnwrap()).toMatchObject({
+      id: "session-new",
+      conversationId: "conv-1",
+      profileName: "assistant",
+      kind: "created",
+    });
   });
 });
 
 describe("closeSession", () => {
-  it("delegates to transportStore and returns its outcome", async () => {
+  it("delegates to the store transition and returns its outcome", async () => {
     const transportStore = mockTransportStore({
       closeSession: vi.fn().mockResolvedValue({ kind: "stale", status: "closed" }),
     });
@@ -296,163 +208,26 @@ describe("emit", () => {
   it("returns error when session not found", async () => {
     const { sessions } = setup();
     const result = await sessions.emit("nonexistent", "hello", new Date());
-    expect(result.isErr()).toBe(true);
-    if (result.isErr()) {
-      expect(result.error.code).toBe("session_not_found");
-    }
-  });
-});
-
-describe("idle timeout", () => {
-  const activeSession = {
-    id: "session-1",
-    channelId: "ch-1",
-    platformAddress: "addr-1",
-    conversationId: "conv-1",
-    status: "active",
-    receive: "routed",
-  };
-
-  it("returns null and closes stale session", async () => {
-    const staleTime = new Date(Date.now() - 2 * 60 * 60 * 1000); // 2 hours ago
-    const ts = mockTransportStore({
-      resolveSession: vi.fn().mockResolvedValue(activeSession),
-    });
-    const as = mockAgentStore({
-      getLastMessageTime: vi.fn().mockResolvedValue(staleTime),
-    });
-
-    const { sessions } = setup({
-      transportStore: ts,
-      agentStore: as,
-      idleTimeoutMs: 60 * 60 * 1000, // 1 hour
-    });
-
-    const result = await sessions.resolveSession("addr-1");
-    expect(result).toBeNull();
-    expect(ts.closeSession).toHaveBeenCalledWith(expect.anything(), "session-1");
-  });
-
-  it("runs the lookup, the idle check and the close in one transaction", async () => {
-    const staleTime = new Date(Date.now() - 2 * 60 * 60 * 1000);
-    const ts = mockTransportStore({
-      resolveSession: vi.fn().mockResolvedValue(activeSession),
-    });
-    const as = mockAgentStore({
-      getLastMessageTime: vi.fn().mockResolvedValue(staleTime),
-    });
-    let transactions = 0;
-    const countingRunInTx: Transactor = (cb) => {
-      transactions += 1;
-      return cb(FAKE_TX);
-    };
-
-    const { sessions } = setup({
-      transportStore: ts,
-      agentStore: as,
-      idleTimeoutMs: 60 * 60 * 1000,
-      runInTx: countingRunInTx,
-    });
-
-    expect(await sessions.resolveSession("addr-1")).toBeNull();
-    expect(ts.closeSession).toHaveBeenCalledWith(expect.anything(), "session-1");
-    expect(transactions).toBe(1);
-  });
-
-  it("returns null and logs when the stale session's close lost to another closer", async () => {
-    const staleTime = new Date(Date.now() - 2 * 60 * 60 * 1000);
-    const ts = mockTransportStore({
-      resolveSession: vi.fn().mockResolvedValue(activeSession),
-      closeSession: vi.fn().mockResolvedValue({ kind: "stale", status: "closed" }),
-    });
-    const as = mockAgentStore({
-      getLastMessageTime: vi.fn().mockResolvedValue(staleTime),
-    });
-    const info = vi.spyOn(logger, "info").mockImplementation(() => undefined);
-
-    try {
-      const { sessions } = setup({
-        transportStore: ts,
-        agentStore: as,
-        idleTimeoutMs: 60 * 60 * 1000,
-      });
-
-      expect(await sessions.resolveSession("addr-1")).toBeNull();
-      expect(info).toHaveBeenCalledWith(
-        expect.objectContaining({ sessionId: "session-1", status: "closed" }),
-        expect.stringContaining("already closed"),
-      );
-    } finally {
-      info.mockRestore();
-    }
-  });
-
-  it("returns session when within timeout", async () => {
-    const recentTime = new Date(Date.now() - 5 * 60 * 1000); // 5 min ago
-    const ts = mockTransportStore({
-      resolveSession: vi.fn().mockResolvedValue(activeSession),
-    });
-    const as = mockAgentStore({
-      getLastMessageTime: vi.fn().mockResolvedValue(recentTime),
-    });
-
-    const { sessions } = setup({
-      transportStore: ts,
-      agentStore: as,
-      idleTimeoutMs: 60 * 60 * 1000, // 1 hour
-    });
-
-    const result = await sessions.resolveSession("addr-1");
-    expect(result).toEqual(activeSession);
-    expect(ts.closeSession).not.toHaveBeenCalled();
-  });
-
-  it("skips check when timeout is 0 (disabled)", async () => {
-    const ts = mockTransportStore({
-      resolveSession: vi.fn().mockResolvedValue(activeSession),
-    });
-
-    const { sessions, agentStore } = setup({
-      transportStore: ts,
-      idleTimeoutMs: 0,
-    });
-
-    const result = await sessions.resolveSession("addr-1");
-    expect(result).toEqual(activeSession);
-    expect(agentStore.getLastMessageTime).not.toHaveBeenCalled();
-  });
-
-  it("returns session when no messages yet (new conversation)", async () => {
-    const ts = mockTransportStore({
-      resolveSession: vi.fn().mockResolvedValue(activeSession),
-    });
-    const as = mockAgentStore({
-      getLastMessageTime: vi.fn().mockResolvedValue(null),
-    });
-
-    const { sessions } = setup({
-      transportStore: ts,
-      agentStore: as,
-      idleTimeoutMs: 60 * 60 * 1000,
-    });
-
-    const result = await sessions.resolveSession("addr-1");
-    expect(result).toEqual(activeSession);
+    expect(result._unsafeUnwrapErr()).toMatchObject({ code: "session_not_found" });
   });
 });
 
 describe("resumeConversation", () => {
-  it("resolves alias, verifies ownership, and swaps session atomically", async () => {
+  const ownedPrivate = {
+    getConversation: vi
+      .fn()
+      .mockResolvedValue({ id: "conv-1", userId: "user-1", profileId: "p1", isPrivate: true }),
+  };
+
+  it("resolves the alias for the caller and swaps the address onto the conversation", async () => {
     const agentStore = mockAgentStore({
+      ...ownedPrivate,
       findConversationByAlias: vi.fn().mockResolvedValue({ conversationId: "conv-1" }),
-      getConversation: vi
-        .fn()
-        .mockResolvedValue({ id: "conv-1", userId: "user-1", profileId: "p1", isPrivate: true }),
     });
     const { sessions, transportStore } = setup({ agentStore });
 
     const res = await sessions.resumeConversation("addr-1", "handle-1", { alias: "work" });
-    expect(res.isOk()).toBe(true);
+
     expect(agentStore.findConversationByAlias).toHaveBeenCalledWith(
       expect.anything(),
       "user-1",
@@ -460,60 +235,49 @@ describe("resumeConversation", () => {
     );
     expect(transportStore.swapSession).toHaveBeenCalledWith(expect.anything(), "ch-1", "addr-1", {
       conversationId: "conv-1",
-      status: "active",
       receive: "routed",
     });
+    expect(res._unsafeUnwrap()).toMatchObject({ id: "session-swapped", conversationId: "conv-1" });
   });
 
-  it("accepts conversationId target directly (skips alias lookup)", async () => {
-    const agentStore = mockAgentStore({
-      getConversation: vi
-        .fn()
-        .mockResolvedValue({ id: "conv-1", userId: "user-1", profileId: "p1", isPrivate: true }),
-    });
+  it("accepts a conversationId target directly, skipping the alias lookup", async () => {
+    const agentStore = mockAgentStore(ownedPrivate);
     const { sessions } = setup({ agentStore });
 
     const res = await sessions.resumeConversation("addr-1", "handle-1", {
       conversationId: "conv-1",
     });
+
     expect(res.isOk()).toBe(true);
     expect(agentStore.findConversationByAlias).not.toHaveBeenCalled();
   });
 
-  it("returns conversation_not_found when alias lookup fails", async () => {
+  it("returns identity_rejected for an unknown handle", async () => {
+    const ts = mockTransportStore({ resolveUser: vi.fn().mockResolvedValue(null) });
+    const { sessions } = setup({ transportStore: ts });
+    const res = await sessions.resumeConversation("addr-1", "nobody", { alias: "work" });
+    expect(res._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
+  });
+
+  it("returns conversation_not_found when the alias resolves to nothing", async () => {
     const { sessions } = setup();
     const res = await sessions.resumeConversation("addr-1", "handle-1", { alias: "ghost" });
     expect(res._unsafeUnwrapErr()).toEqual({ code: "conversation_not_found" });
   });
 
-  it("returns access_denied when caller does not own the conversation", async () => {
+  it("passes the resume transition's refusal through", async () => {
     const agentStore = mockAgentStore({
       getConversation: vi
         .fn()
         .mockResolvedValue({ id: "c1", userId: "someone-else", profileId: "p", isPrivate: true }),
     });
-    const { sessions } = setup({ agentStore });
+    const { sessions, transportStore } = setup({ agentStore });
 
     const res = await sessions.resumeConversation("addr-1", "handle-1", {
       conversationId: "c1",
     });
+
     expect(res._unsafeUnwrapErr()).toMatchObject({ code: "access_denied" });
-  });
-
-  it("rejects non-private conversation with access_denied", async () => {
-    const agentStore = mockAgentStore({
-      getConversation: vi
-        .fn()
-        .mockResolvedValue({ id: "c1", userId: "user-1", profileId: "p", isPrivate: false }),
-    });
-    const { sessions } = setup({ agentStore });
-
-    const res = await sessions.resumeConversation("addr-1", "handle-1", {
-      conversationId: "c1",
-    });
-    expect(res._unsafeUnwrapErr()).toMatchObject({
-      code: "access_denied",
-      reason: expect.stringContaining("non-private"),
-    });
+    expect(transportStore.swapSession).not.toHaveBeenCalled();
   });
 });

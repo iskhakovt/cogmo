@@ -1,4 +1,3 @@
-import { match } from "ts-pattern";
 import type { z } from "zod";
 import { directInbound, directOutbound } from "../../inngest/events.js";
 import type { StepRun } from "../../inngest/index.js";
@@ -9,6 +8,7 @@ import {
   type AdapterSetupResult,
   isRenderedMessage,
 } from "../adapter-module.js";
+import { missedClose } from "../sessions/close-session.js";
 import type { Transport, TransportError } from "../transport.js";
 
 export const channelType = "direct";
@@ -45,13 +45,12 @@ export async function handleDirectInbound(
     await stepRun("close-session", async () => {
       const session = await transport.resolveSession(platformAddress);
       if (!session) return;
-      const outcome = await transport.closeSession(session.id);
-      match(outcome)
-        .with({ kind: "closed" }, () => logger.info({ platformAddress }, "direct: session closed"))
-        .with({ kind: "stale" }, { kind: "not_found" }, ({ kind }) =>
-          logger.info({ platformAddress, kind }, "direct: session already closed"),
-        )
-        .exhaustive();
+      const missed = missedClose(await transport.closeSession(session.id));
+      if (missed) {
+        logger.info({ platformAddress, ...missed }, "direct: session already closed");
+      } else {
+        logger.info({ platformAddress }, "direct: session closed");
+      }
     });
     return { status: "new_conversation" };
   }

@@ -1,6 +1,6 @@
-import { match } from "ts-pattern";
 import type { Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
+import { missedClose } from "./sessions/close-session.js";
 import type { TransportStore } from "./store/index.js";
 
 /**
@@ -22,18 +22,11 @@ export function createCommandService(
       await runInTx(async (tx) => {
         const session = await transportStore.resolveSession(tx, channelId, platformAddress);
         if (!session) return;
-        const outcome = await transportStore.closeSession(tx, session.id);
         // The lookup and the close share a snapshot, so only `closed` is
-        // expected; the other outcomes leave the same state and are logged.
-        match(outcome)
-          .with({ kind: "closed" }, () => undefined)
-          .with({ kind: "stale" }, ({ status }) =>
-            logger.warn({ sessionId: session.id, status }, "reset found the session not active"),
-          )
-          .with({ kind: "not_found" }, () =>
-            logger.warn({ sessionId: session.id }, "reset found no session row"),
-          )
-          .exhaustive();
+        // expected; a miss leaves the same state and is logged.
+        const missed = missedClose(await transportStore.closeSession(tx, session.id));
+        if (missed)
+          logger.warn({ sessionId: session.id, ...missed }, "reset found no active session");
       });
     },
   };
