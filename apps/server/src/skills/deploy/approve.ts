@@ -1,4 +1,3 @@
-import { logger } from "../../logger.js";
 import { getMainSha, isAncestor } from "../git-ops.js";
 import { readSkillSource } from "../skill-source.js";
 import { advanceMain, runDeployTx } from "./advance-main.js";
@@ -7,8 +6,6 @@ import { readManifestLockfile } from "./lockfile-check.js";
 import { mirrorMainToRemote } from "./mirror.js";
 import { deployRunAs, type SkillDeployOrigin } from "./origin.js";
 import { type RegisterResult, rejectedResult, targetSourceRejection } from "./register-result.js";
-
-const log = logger.child({ component: "skills.runner" });
 
 /**
  * Put a pending deploy live: re-check it against main and its source, then
@@ -120,22 +117,4 @@ export async function approveDeploy(
     };
   }
   return rejectedResult(deploy.gitSha, result.kind === "rejected" ? result.reason : result.kind);
-}
-
-/** Resolve a pending deploy as denied; main does not move. */
-export async function denyDeploy(
-  deps: Pick<DeployDeps, "store" | "runInTx">,
-  opts: { pendingId: string; reason?: string },
-): Promise<void> {
-  // Log the reason here — denyPendingDeploy drops it (no `denied_reason`
-  // column) and the CLI accepts a multi-word reason that would otherwise
-  // vanish without a trace. The audit trail is the log line until a real
-  // consumer needs to query it.
-  log.info({ pendingId: opts.pendingId, reason: opts.reason ?? null }, "denying skill deploy");
-  await deps.runInTx((tx) =>
-    deps.store.denyPendingDeploy(tx, {
-      pendingId: opts.pendingId,
-      reason: opts.reason ?? null,
-    }),
-  );
 }

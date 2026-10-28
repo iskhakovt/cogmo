@@ -12,7 +12,8 @@ import {
   type EnableResult,
   enableSkill,
 } from "./deploy/activation.js";
-import { approveDeploy, denyDeploy } from "./deploy/approve.js";
+import { approveDeploy } from "./deploy/approve.js";
+import { type DenyDeployError, denyDeploy } from "./deploy/deny.js";
 import type { DeployDeps } from "./deploy/deploy-deps.js";
 import type { SkillDeployOrigin } from "./deploy/origin.js";
 import { registerSkill } from "./deploy/register.js";
@@ -40,6 +41,7 @@ export type {
   DeregisterResult,
   EnableResult,
 } from "./deploy/activation.js";
+export type { DenyDeployError } from "./deploy/deny.js";
 export type { SkillActor, SkillDeployOrigin } from "./deploy/origin.js";
 export type { RegisterResult } from "./deploy/register-result.js";
 export type { SkillRunResult } from "./invoke/run-result.js";
@@ -83,7 +85,8 @@ export interface SkillRunner {
   }): Promise<RegisterResult>;
   /** A `user` origin is also recorded as the deploy's `approved_by`. */
   approveDeploy(opts: { pendingId: string; origin: SkillDeployOrigin }): Promise<RegisterResult>;
-  denyDeploy(opts: { pendingId: string; reason?: string }): Promise<void>;
+  /** `not_found` or `not_pending` (with the row's status) when nothing was pending to deny. */
+  denyDeploy(opts: { pendingId: string; reason?: string }): Promise<Result<void, DenyDeployError>>;
   rollback(opts: {
     name: string;
     toGitSha: string;
@@ -334,7 +337,7 @@ export class SkillRunnerImpl implements SkillRunner {
     return approveDeploy(this.#deploy, opts);
   }
 
-  denyDeploy(opts: { pendingId: string; reason?: string }): Promise<void> {
+  denyDeploy(opts: { pendingId: string; reason?: string }): Promise<Result<void, DenyDeployError>> {
     return denyDeploy(this.#deploy, opts);
   }
 

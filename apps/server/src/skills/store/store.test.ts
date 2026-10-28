@@ -1,7 +1,8 @@
 import { eq, sql } from "drizzle-orm";
+import type { PgTable } from "drizzle-orm/pg-core";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { profiles, users } from "../../agent/store/schema.js";
-import type { Database, Transactor } from "../../db/index.js";
+import type { Database, Transaction, Transactor } from "../../db/index.js";
 import { assertKind, expectDefined } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import type { ClassifierLog, SkillInputs } from "../types.js";
@@ -87,6 +88,28 @@ function makeSkillParams(overrides: Partial<InsertSkillParams> = {}): InsertSkil
 
 async function seedSkill(overrides: Partial<InsertSkillParams> = {}): Promise<SkillRow> {
   return tx((trx) => store.insertSkill(trx, makeSkillParams(overrides)));
+}
+
+/** A notify-tier, unscheduled `echo` at `SHA`, deployed by the owner. */
+function executeRegisterParams(
+  overrides: Partial<ExecuteRegisterParams> = {},
+): ExecuteRegisterParams {
+  return {
+    name: "echo",
+    tier: "wasm",
+    riskTier: "notify",
+    effects: [],
+    schedule: null,
+    scheduleNextRunAt: null,
+    branchTipSha: SHA,
+    lockfileHash: null,
+    inputs: INPUTS_SCHEMA,
+    outputs: null,
+    classifierLog: STUB_LOG,
+    runAs: owner,
+    applyFilesystem: async () => {},
+    ...overrides,
+  };
 }
 
 describe("DrizzleSkillStore", () => {
@@ -1015,22 +1038,13 @@ describe("DrizzleSkillStore", () => {
     const noFs = async () => {};
 
     function registerParams(overrides: Partial<ExecuteRegisterParams> = {}): ExecuteRegisterParams {
-      return {
+      return executeRegisterParams({
         name: "cron-skill",
-        tier: "wasm",
-        riskTier: "notify",
-        effects: [],
         schedule: "0 9 * * *",
         scheduleNextRunAt: new Date("2026-06-01T09:00:00Z"),
-        branchTipSha: SHA,
-        lockfileHash: null,
-        inputs: INPUTS_SCHEMA,
-        outputs: null,
         classifierLog: NOTIFY_LOG,
-        runAs: owner,
-        applyFilesystem: noFs,
         ...overrides,
-      };
+      });
     }
 
     function register(overrides: Partial<ExecuteRegisterParams> = {}) {
@@ -1239,4 +1253,153 @@ describe("DrizzleSkillStore", () => {
       expect(await tx((trx) => store.getSkillById(trx, row.id))).toBeDefined();
     });
   });
+
+  describe("deploy transitions", () => {
+    const APPROVE_LOG: ClassifierLog = { ...STUB_LOG, risk_tier: "approve" };
+    const noFs = async () => {};
+    const UNKNOWN_ID = "019d0000-0000-7000-8000-0000000000ff";
+
+    function register(overrides: Partial<ExecuteRegisterParams> = {}) {
+      return tx((trx) => store.executeRegister(trx, executeRegisterParams(overrides)));
+    }
+
+    /** A live `echo` at `SHA` with an approve-tier upgrade to `SHA_NEW` pending. */
+    async function pendingUpgrade(): Promise<{ pendingId: string; skill: SkillRow }> {
+      await register();
+      const pending = await register({
+        branchTipSha: SHA_NEW,
+        riskTier: "approve",
+        classifierLog: APPROVE_LOG,
+      });
+      assertKind(pending, "pending_approval");
+      return { pendingId: pending.deploy.id, skill: pending.skill };
+    }
+
+    function approve(trx: Transaction, pendingId: string) {
+      return store.executeApprove(trx, {
+        pendingId,
+        approvedBy: null,
+        tier: "wasm",
+        riskTier: "approve",
+        effects: [],
+        schedule: null,
+        scheduleNextRunAt: null,
+        lockfileHash: null,
+        inputs: INPUTS_SCHEMA,
+        outputs: null,
+        runAs: owner,
+        applyFilesystem: noFs,
+      });
+    }
+
+    async function reloadDeploy(id: string) {
+      return expectDefined(await tx((trx) => store.getDeployById(trx, id)), "deploy");
+    }
+
+    it("deny resolves a pending deploy and leaves the skills row alone", async () => {
+      const { pendingId, skill } = await pendingUpgrade();
+      const outcome = await tx((trx) => store.denyPendingDeploy(trx, { pendingId }));
+      expect(outcome).toEqual({ kind: "transitioned" });
+      const deploy = await reloadDeploy(pendingId);
+      expect(deploy.status).toBe("denied");
+      expect(deploy.resolvedAt).toBeInstanceOf(Date);
+      expect(await tx((trx) => store.getSkillById(trx, skill.id))).toEqual(skill);
+    });
+
+    it("deny of an unknown id is not_found", async () => {
+      const outcome = await tx((trx) => store.denyPendingDeploy(trx, { pendingId: UNKNOWN_ID }));
+      expect(outcome).toEqual({ kind: "not_found" });
+    });
+
+    it("deny of an approved deploy is not_pending with the row's status", async () => {
+      const { pendingId } = await pendingUpgrade();
+      assertKind(await tx((trx) => approve(trx, pendingId)), "live");
+      const outcome = await tx((trx) => store.denyPendingDeploy(trx, { pendingId }));
+      expect(outcome).toEqual({ kind: "not_pending", status: "live" });
+      expect((await reloadDeploy(pendingId)).status).toBe("live");
+    });
+
+    it("deny of a denied deploy is not_pending, and the row keeps its first resolution", async () => {
+      const { pendingId } = await pendingUpgrade();
+      await tx((trx) => store.denyPendingDeploy(trx, { pendingId }));
+      const first = await reloadDeploy(pendingId);
+      const outcome = await tx((trx) => store.denyPendingDeploy(trx, { pendingId }));
+      expect(outcome).toEqual({ kind: "not_pending", status: "denied" });
+      expect(await reloadDeploy(pendingId)).toEqual(first);
+    });
+
+    it("approve of a denied deploy is rejected and leaves the skills row alone", async () => {
+      const { pendingId, skill } = await pendingUpgrade();
+      await tx((trx) => store.denyPendingDeploy(trx, { pendingId }));
+      const outcome = await tx((trx) => approve(trx, pendingId));
+      assertKind(outcome, "rejected");
+      expect(outcome.reason).toBe("deploy_not_pending: status is 'denied'");
+      expect(await tx((trx) => store.getSkillById(trx, skill.id))).toEqual(skill);
+    });
+
+    it("approve writes nothing when its guarded UPDATE matches no row", async () => {
+      // Pins that the conditional UPDATE is the transaction's first write: a
+      // zero-row match leaves `skills` untouched because nothing precedes it.
+      // The hook denies the row on the same connection right before that
+      // statement executes. The real race converges here too, by a longer
+      // path — under REPEATABLE READ the loser's UPDATE raises `40001` and
+      // the transactor's retry reads the row as `denied`.
+      const { pendingId, skill } = await pendingUpgrade();
+      const outcome = await tx((trx) =>
+        approve(
+          hookBeforeUpdate(trx, skillDeploys, async () => {
+            await trx
+              .update(skillDeploys)
+              .set({ status: "denied", resolvedAt: new Date() })
+              .where(eq(skillDeploys.id, pendingId));
+          }),
+          pendingId,
+        ),
+      );
+      assertKind(outcome, "rejected");
+      expect(await tx((trx) => store.getSkillById(trx, skill.id))).toEqual(skill);
+      expect((await reloadDeploy(pendingId)).status).toBe("denied");
+      expect(outcome.reason).toBe("deploy_not_pending: status is 'denied'");
+    });
+  });
 });
+
+/**
+ * `trx` with one seam: `beforeUpdate` runs, on the same connection, right
+ * before each UPDATE on `table` executes. Everything else passes through.
+ * Puts a use case's guarded write in front of a row it did not read, which
+ * one PGlite connection cannot otherwise arrange.
+ */
+function hookBeforeUpdate(
+  trx: Transaction,
+  table: PgTable,
+  beforeUpdate: () => Promise<void>,
+): Transaction {
+  const hookExecute = <Q extends object>(query: Q): Q =>
+    new Proxy(query, {
+      get(target, prop, receiver) {
+        const value: unknown = Reflect.get(target, prop, receiver);
+        if (prop !== "execute" || typeof value !== "function") return value;
+        return async (...args: unknown[]) => {
+          await beforeUpdate();
+          return value.apply(target, args);
+        };
+      },
+    });
+  return new Proxy(trx, {
+    get(target, prop, receiver) {
+      if (prop !== "update") return Reflect.get(target, prop, receiver);
+      return (updated: PgTable) => {
+        const builder = target.update(updated);
+        if (updated !== table) return builder;
+        return new Proxy(builder, {
+          get(b, p, r) {
+            const value: unknown = Reflect.get(b, p, r);
+            if (p !== "set" || typeof value !== "function") return value;
+            return (values: unknown) => hookExecute(value.call(b, values));
+          },
+        });
+      };
+    },
+  });
+}

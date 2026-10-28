@@ -1,4 +1,4 @@
-import { ok } from "neverthrow";
+import { err, ok } from "neverthrow";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Service } from "../agent/service.js";
@@ -593,11 +593,11 @@ inputs:
       runner.rollback({ name: "x", toGitSha: "y", origin: { kind: "owner" } }),
     ).rejects.toThrow(/skillsRepoPath/);
     // denyDeploy + deregister are pure DB updates — no git access needed.
-    // denyDeploy is idempotent on a missing pending id; deregister
-    // returns rejected:not_found via DeregisterResult.
-    await expect(
-      runner.denyDeploy({ pendingId: "00000000-0000-0000-0000-000000000000" }),
-    ).resolves.toBeUndefined();
+    // Both report a missing target as a value.
+    const unknownId = "00000000-0000-0000-0000-000000000000";
+    expect(await runner.denyDeploy({ pendingId: unknownId })).toEqual(
+      err({ kind: "not_found", pendingId: unknownId }),
+    );
     const dereg = await runner.deregister({ name: "x" });
     expect(dereg).toEqual({ kind: "rejected", name: "x", reason: "not_found" });
   });

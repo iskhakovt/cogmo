@@ -21,7 +21,7 @@ import { channels, userIdentities } from "../transport/store/schema.js";
 import { bootstrapSkillsRepo } from "./repo.js";
 import type { SkillRunAs, SkillRunServices } from "./run-as.js";
 import { type SkillActor, type SkillDeployOrigin, SkillRunnerImpl } from "./runner.js";
-import { DrizzleSkillStore, type SkillRunIdentity } from "./store/index.js";
+import { DrizzleSkillStore, type SkillRunIdentity, type SkillStore } from "./store/index.js";
 
 const execFileP = promisify(execFile);
 
@@ -245,6 +245,73 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
     await expect(
       execFileP("git", ["-C", repo.bare, "rev-parse", "refs/heads/skill/echo"]),
     ).rejects.toThrow();
+  });
+
+  it("a register whose transaction fails after update-ref keeps its branch, and the repeat goes live", async () => {
+    // The commit fails after `applyFilesystem` moved main: the database rolls
+    // back while main stays at the tip. The branch is deleted only after a
+    // commit, so the repeat still has something to register and converges.
+    const sha = await pushFeatureBranch({
+      work: repo.work,
+      branch: "skill/echo",
+      manifest: ECHO_MANIFEST,
+      body: ECHO_BODY,
+    });
+    const failingCommit: SkillStore = new Proxy(store, {
+      get(target, prop, receiver) {
+        if (prop === "executeRegister") {
+          return async (...args: Parameters<SkillStore["executeRegister"]>) => {
+            await target.executeRegister(...args);
+            throw new Error("commit failed");
+          };
+        }
+        const value: unknown = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const failing = await makeRunner({ store: failingCommit });
+    await expect(failing.register({ branch: "skill/echo", origin: OWNER })).rejects.toThrow(
+      /commit failed/,
+    );
+    expect(await getMainSha(repo.bare)).toBe(sha);
+    expect(await tx((trx) => store.getSkillByName(trx, "echo"))).toBeUndefined();
+    await expect(
+      execFileP("git", ["-C", repo.bare, "rev-parse", "refs/heads/skill/echo"]),
+    ).resolves.toBeDefined();
+
+    const runner = await makeRunner();
+    const repeat = await runner.register({ branch: "skill/echo", origin: OWNER });
+    assertStatus(repeat, "live");
+    expect(repeat.gitSha).toBe(sha);
+    expect((await tx((trx) => store.getSkillByName(trx, "echo")))?.gitSha).toBe(sha);
+    await expect(
+      execFileP("git", ["-C", repo.bare, "rev-parse", "refs/heads/skill/echo"]),
+    ).rejects.toThrow();
+  });
+
+  it("a branch delete that fails after the commit is logged, and the deploy is still live", async () => {
+    const sha = await pushFeatureBranch({
+      work: repo.work,
+      branch: "skill/echo",
+      manifest: ECHO_MANIFEST,
+      body: ECHO_BODY,
+    });
+    // The branch's ref directory read-only: `update-ref -d` cannot take the
+    // lock to unlink the loose ref, while `refs/heads/main` in the parent
+    // directory stays writable for the deploy itself.
+    const refDir = join(repo.bare, "refs", "heads", "skill");
+    await chmod(refDir, 0o555);
+    try {
+      const runner = await makeRunner();
+      const result = await runner.register({ branch: "skill/echo", origin: OWNER });
+      assertStatus(result, "live");
+      expect(await getMainSha(repo.bare)).toBe(sha);
+      await expect(
+        execFileP("git", ["-C", repo.bare, "rev-parse", "refs/heads/skill/echo"]),
+      ).resolves.toBeDefined();
+    } finally {
+      await chmod(refDir, 0o755);
+    }
   });
 
   it("re-register with same branch tip is a no-op (idempotent)", async () => {
@@ -964,12 +1031,10 @@ outputs:
   });
 
   describe("deny", () => {
-    it("denies a deploy by id (idempotent on missing/already-resolved id)", async () => {
+    it("reports an unknown id as not_found", async () => {
       const runner = await makeRunner();
-      // No real pending deploy exists — denyDeploy is idempotent.
-      await expect(
-        runner.denyDeploy({ pendingId: "00000000-0000-0000-0000-000000000000" }),
-      ).resolves.toBeUndefined();
+      const pendingId = "00000000-0000-0000-0000-000000000000";
+      expect(await runner.denyDeploy({ pendingId })).toEqual(err({ kind: "not_found", pendingId }));
     });
   });
 
@@ -1941,7 +2006,9 @@ effects:
       expect(beforeDeny?.disabled).toBe(true);
       expect(beforeDeny?.gitSha).toBe(sha);
 
-      await runner.denyDeploy({ pendingId: reg.pendingId, reason: "not now" });
+      expect(await runner.denyDeploy({ pendingId: reg.pendingId, reason: "not now" })).toEqual(
+        ok(undefined),
+      );
 
       // Row stays at sha, disabled=true; deploy resolved to denied. The
       // bare repo's feature branch is untouched (deleteRef only runs in

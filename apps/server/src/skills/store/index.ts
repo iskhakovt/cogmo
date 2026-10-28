@@ -317,6 +317,12 @@ export type FinishRunTransition =
   | { kind: "transitioned" }
   | { kind: "already_finished"; row: SkillRunRow };
 
+/** Outcome of {@link SkillStore.denyPendingDeploy}. */
+export type DenyDeployTransition =
+  | { kind: "transitioned" }
+  | { kind: "not_found" }
+  | { kind: "not_pending"; status: SkillDeployStatus };
+
 export interface SkillStore {
   // --- skills ---
   insertSkill(tx: Transaction, params: InsertSkillParams): Promise<SkillRow>;
@@ -391,15 +397,16 @@ export interface SkillStore {
   executeRegister(tx: Transaction, params: ExecuteRegisterParams): Promise<ExecuteRegisterResult>;
   /** P3.3: atomic approve flow for an `approve`-tier pending deploy. */
   executeApprove(tx: Transaction, params: ExecuteApproveParams): Promise<ExecuteRegisterResult>;
-  /** P3.3: atomic deny flow — resolves the pending row to `denied`, no main update. */
-  denyPendingDeploy(
-    tx: Transaction,
-    params: { pendingId: string; reason: string | null },
-  ): Promise<void>;
+  /**
+   * `pending_approval` → `denied` as one conditional UPDATE; `skills` and
+   * main are untouched. A zero-row match re-reads the row to tell an
+   * unknown id from one already resolved.
+   */
+  denyPendingDeploy(tx: Transaction, params: { pendingId: string }): Promise<DenyDeployTransition>;
   /**
    * P3.3: atomic rollback — re-points `main` and `skills.git_sha` to a prior
-   * sha while inserting a new `skill_deploys` row with status `live` and
-   * `prior_git_sha` set to the previous live sha.
+   * sha while inserting a new `skill_deploys` row with status `rolled_back`
+   * and `prior_git_sha` set to the previous live sha.
    */
   executeRollback(tx: Transaction, params: ExecuteRollbackParams): Promise<ExecuteRegisterResult>;
 
@@ -765,11 +772,13 @@ export class DrizzleSkillStore implements SkillStore {
       .from(skillDeploys)
       .where(eq(skillDeploys.id, params.pendingId))
       .limit(1);
-    const deployRowRaw = deployRows[0];
-    if (!deployRowRaw) {
+    const deploy = deployRows[0];
+    if (!deploy) {
       return { kind: "rejected", reason: "deploy_not_found" } as const;
     }
-    const deploy = deployRowRaw;
+    // A row this snapshot already shows resolved is refused before the
+    // advisory lock, so a second tap on a live deploy does not queue behind
+    // an in-flight register's update-ref.
     if (deploy.status !== "pending_approval") {
       return {
         kind: "rejected",
@@ -778,14 +787,48 @@ export class DrizzleSkillStore implements SkillStore {
     }
 
     const skillRows = await tx.select().from(skills).where(eq(skills.id, deploy.skillId)).limit(1);
-    const skillRowRaw = skillRows[0];
-    if (!skillRowRaw) {
+    const skill = skillRows[0];
+    if (!skill) {
       return { kind: "rejected", reason: "skill_not_found" } as const;
     }
-    const skill = skillRowRaw;
     await tx.execute(
       sql`SELECT pg_advisory_xact_lock(hashtext(${`skill_register:${skill.name}`})::bigint)`,
     );
+
+    // The transition is the transaction's first write: `pending_approval` →
+    // `live` as one conditional UPDATE. A resolution committed after this
+    // snapshot raises `40001` here under REPEATABLE READ, and the transactor
+    // retries from a fresh snapshot, which the check above refuses. The
+    // zero-row match below is hardening for a path REPEATABLE READ does not
+    // reach: nothing precedes it, so returning the rejection commits nothing.
+    const resolvedDeployRows = await tx
+      .update(skillDeploys)
+      .set({
+        status: "live",
+        approvedBy: params.approvedBy,
+        resolvedAt: new Date(),
+      })
+      .where(
+        and(eq(skillDeploys.id, params.pendingId), eq(skillDeploys.status, "pending_approval")),
+      )
+      .returning();
+    const resolvedDeploy = resolvedDeployRows[0];
+    if (!resolvedDeploy) {
+      // Under REPEATABLE READ only a write in this same transaction reaches
+      // this branch (a committed concurrent resolution raises `40001` at the
+      // UPDATE instead), and the re-read names what that write set; under
+      // READ COMMITTED the UPDATE re-evaluates its WHERE after a lock wait,
+      // and the re-read names what it saw.
+      const current = await tx
+        .select({ status: skillDeploys.status })
+        .from(skillDeploys)
+        .where(eq(skillDeploys.id, params.pendingId))
+        .limit(1);
+      return {
+        kind: "rejected",
+        reason: `deploy_not_pending: status is '${single(current).status}'`,
+      } as const;
+    }
 
     // Project the full manifest into the skills row alongside gitSha +
     // disabled. Approving an `approve`-tier deploy promotes the source on
@@ -815,30 +858,6 @@ export class DrizzleSkillStore implements SkillStore {
       .returning();
     const updatedSkill = single(updatedSkillRows);
 
-    // Guard the promote on `status = 'pending_approval'`. The earlier
-    // SELECT + advisory lock narrows the race, but Tx B's stale SELECT
-    // result (read before Tx A committed) is still in scope when Tx B
-    // gets the lock — without the guard, B happily writes over A's
-    // already-promoted state. 0 rows means we lost the race; bail.
-    const resolvedDeployRows = await tx
-      .update(skillDeploys)
-      .set({
-        status: "live",
-        approvedBy: params.approvedBy,
-        resolvedAt: new Date(),
-      })
-      .where(
-        and(eq(skillDeploys.id, params.pendingId), eq(skillDeploys.status, "pending_approval")),
-      )
-      .returning();
-    if (resolvedDeployRows.length === 0) {
-      return {
-        kind: "rejected",
-        reason: "deploy_not_pending_at_commit: lost concurrent approval race",
-      } as const;
-    }
-    const resolvedDeploy = single(resolvedDeployRows);
-
     await params.applyFilesystem();
 
     return { kind: "live", skill: updatedSkill, deploy: resolvedDeploy };
@@ -846,25 +865,24 @@ export class DrizzleSkillStore implements SkillStore {
 
   async denyPendingDeploy(
     tx: Transaction,
-    params: { pendingId: string; reason: string | null },
-  ): Promise<void> {
-    const rows = await tx
+    params: { pendingId: string },
+  ): Promise<DenyDeployTransition> {
+    const denied = await tx
       .update(skillDeploys)
       .set({ status: "denied", resolvedAt: new Date() })
       .where(
         and(eq(skillDeploys.id, params.pendingId), eq(skillDeploys.status, "pending_approval")),
       )
-      .returning();
-    if (rows.length === 0) {
-      // Either the id is unknown or it's already resolved. Caller can
-      // distinguish by following up with getDeployById; for the deny path
-      // it's acceptable to be idempotent here.
-      return;
-    }
-    // The reason is logged via the ctx-call audit / runner-side log; not
-    // stored on the deploy row to keep the schema lean. Future work can
-    // add a `denied_reason` column if recall becomes useful.
-    void params.reason;
+      .returning({ id: skillDeploys.id });
+    if (denied.length > 0) return { kind: "transitioned" };
+
+    const current = await tx
+      .select({ status: skillDeploys.status })
+      .from(skillDeploys)
+      .where(eq(skillDeploys.id, params.pendingId))
+      .limit(1);
+    const row = current[0];
+    return row ? { kind: "not_pending", status: row.status } : { kind: "not_found" };
   }
 
   async executeRollback(
