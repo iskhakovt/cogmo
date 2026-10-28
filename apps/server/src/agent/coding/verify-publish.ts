@@ -18,7 +18,7 @@ import { runOpenPr } from "./open-pr.js";
 import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
 import { advanceTask, type TaskLeft } from "./task-lifecycle.js";
 import { WORKTREE_DIR_IN_CONTAINER } from "./task-sandbox.js";
-import type { PrMetadata, WorktreeAssignment } from "./types.js";
+import type { PrMetadata, TaskFailure, WorktreeAssignment } from "./types.js";
 
 /**
  * `pushed`: the branch is upstream, the task reads `pushed` and
@@ -68,7 +68,7 @@ export async function pushVerifiedBranch(
     askpass: AskpassMaterials;
     container: () => Promise<SandboxSession>;
   },
-): Promise<Result<PushOutcome, string>> {
+): Promise<Result<PushOutcome, TaskFailure>> {
   const commit = await run.stepRun("commit-and-push", async () =>
     runCommitAndPush({
       container: await args.container(),
@@ -81,14 +81,10 @@ export async function pushVerifiedBranch(
     }),
   );
   if (commit.kind === "branch_conflict") {
-    return err(`push rejected — branch conflict on cogmo/<idShort>:\n\n${commit.output}`);
+    return err({ reason: "branch_conflict", detail: commit.output });
   }
-  if (commit.kind === "auth_failed") {
-    return err(`push rejected — GitHub authentication failed:\n\n${commit.output}`);
-  }
-  if (commit.kind === "failed") {
-    return err(`commit+push failed:\n\n${commit.output}`);
-  }
+  if (commit.kind === "auth_failed") return err({ reason: "auth_failed", detail: commit.output });
+  if (commit.kind === "failed") return err({ reason: "push_failed", detail: commit.output });
 
   // A clean tree has no commit sha to reuse. Durable so the PR head is
   // pinned to one value; conditional on the memoized `kind`, so the step
@@ -112,8 +108,8 @@ export async function pushVerifiedBranch(
     settledAt: ["pr_open"],
   });
   return await match(pushed)
-    .with({ kind: "left" }, (left): Result<PushOutcome, string> => ok(left))
-    .with({ kind: "advanced" }, async (): Promise<Result<PushOutcome, string>> => {
+    .with({ kind: "left" }, (left): Result<PushOutcome, TaskFailure> => ok(left))
+    .with({ kind: "advanced" }, async (): Promise<Result<PushOutcome, TaskFailure>> => {
       await run.stepRun("emit-pushed", () =>
         inngest
           .send(buildCodingTaskPushedEvent({ taskId: run.taskId, branchSha }))
@@ -141,7 +137,7 @@ export async function openTaskPr(
   deps: OpenTaskPrDeps,
   inngest: EventPublisher,
   args: OpenTaskPrArgs,
-): Promise<Result<PrOutcome, string>> {
+): Promise<Result<PrOutcome, TaskFailure>> {
   const { repo, identity, assignment } = args;
   const pr = await run.stepRun("open-pr", () =>
     runOpenPr({
@@ -157,12 +153,12 @@ export async function openTaskPr(
       ...(deps.octokitFactory && { octokit: deps.octokitFactory(identity.pat) }),
     }),
   );
-  if (pr.kind === "auth_failed") return err(`PR open failed (auth): ${pr.message}`);
+  if (pr.kind === "auth_failed") return err({ reason: "pr_auth_failed", detail: pr.message });
   if (pr.kind === "validation_failed") {
-    return err(`PR open failed (validation): ${pr.message}`);
+    return err({ reason: "pr_validation_failed", detail: pr.message });
   }
   // The branch is pushed but has no PR; it stays upstream for a re-delegate.
-  if (pr.kind === "failed") return err(`PR open failed: ${pr.message}`);
+  if (pr.kind === "failed") return err({ reason: "pr_open_failed", detail: pr.message });
 
   const metadata: PrMetadata = {
     url: pr.url,
@@ -182,8 +178,8 @@ export async function openTaskPr(
     to: "pr_open",
   });
   return await match(opened)
-    .with({ kind: "left" }, (left): Result<PrOutcome, string> => ok(left))
-    .with({ kind: "advanced" }, async (): Promise<Result<PrOutcome, string>> => {
+    .with({ kind: "left" }, (left): Result<PrOutcome, TaskFailure> => ok(left))
+    .with({ kind: "advanced" }, async (): Promise<Result<PrOutcome, TaskFailure>> => {
       await run.stepRun("emit-pr-opened", () =>
         inngest
           .send({

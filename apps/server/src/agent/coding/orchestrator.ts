@@ -19,7 +19,6 @@ import { logger } from "../../logger.js";
 import type { SandboxClient } from "../../sandbox/index.js";
 import type { ResourceLimits } from "../../sandbox/types.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
-import { describeError } from "../../util/describe-error.js";
 import { allocateTaskWorktree } from "./allocate-task-worktree.js";
 import { AskpassLease } from "./askpass-lease.js";
 import type { loadCodingSandboxEnv } from "./auth.js";
@@ -43,11 +42,16 @@ import {
   type PlanStreamHandle,
 } from "./progress-stream.js";
 import type { CodingRepoRow, CodingStore } from "./store/index.js";
-import { failTaskFromCatch, type RecordedFailure, recordTaskFailed } from "./task-failure.js";
+import {
+  describeTaskFailure,
+  failTaskFromCatch,
+  type RecordedFailure,
+  recordTaskFailed,
+} from "./task-failure.js";
 import { CLAIMS, claimTask, reclaimEndedTask } from "./task-lifecycle.js";
 import { lazySession, reapTaskSandbox } from "./task-sandbox.js";
 import { safeTeardownWorktree } from "./teardown.js";
-import type { WorktreeAssignment } from "./types.js";
+import type { TaskFailure, WorktreeAssignment } from "./types.js";
 
 const log = logger.child({ component: "coding.orchestrator" });
 
@@ -99,13 +103,25 @@ export interface CodingOrchestratorResult {
    */
   status: "awaiting_approval" | "failed" | "skipped";
   plan?: string;
-  failureReason?: string;
+  failure?: TaskFailure;
 }
 
 export interface CodingExecuteResult {
   status: "pending_verify" | "failed" | "skipped";
-  failureReason?: string;
+  failure?: TaskFailure;
 }
+
+/** A plan session that ended cleanly without a plan. */
+const NO_PLAN_PRODUCED: TaskFailure = {
+  reason: "no_plan_produced",
+  detail: "plan phase produced no plan",
+};
+
+/** A session memo that reports an error without saying which: nothing a run writes today. */
+const EXECUTE_SESSION_FAILED: TaskFailure = {
+  reason: "cli_exit_error",
+  detail: "execute phase failed",
+};
 
 /**
  * `retries: 0`: the plan-mode `claude` session can't resume mid-stream, so
@@ -224,8 +240,8 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     });
     const result = await runPlanSession(run, deps, { task, repo, state, stream });
     if (result.isError || !result.plan) {
-      const reason = result.failureReason ?? "plan phase produced no plan";
-      return await endPlanFailed(run, deps, { repo, assignment: worktree, stream }, reason);
+      const failure = result.failure ?? NO_PLAN_PRODUCED;
+      return await endPlanFailed(run, deps, { repo, assignment: worktree, stream }, failure);
     }
     const plan = result.plan;
     await run.stepRun("persist-plan", () =>
@@ -242,7 +258,7 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     return { status: "awaiting_approval", plan };
   } catch (err) {
     run.log.error({ err }, "coding task failed");
-    const reason = await failTaskFromCatch(run, deps, describeError(err));
+    const failure = await failTaskFromCatch(run, deps, err);
     if (assignment) {
       await safeTeardownWorktree({
         runInTx: deps.runInTx,
@@ -254,8 +270,8 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     }
     await deps.sandbox.deleteByTaskId(run.taskId).catch(() => {});
     // Best-effort — don't let a delivery failure mask the original error.
-    await stream.fail(reason).catch(() => {});
-    return { status: "failed", failureReason: reason };
+    await stream.fail(describeTaskFailure(failure)).catch(() => {});
+    return { status: "failed", failure };
   } finally {
     askpass.release();
   }
@@ -269,9 +285,9 @@ async function endPlanFailed(
   run: CodingRun,
   deps: CodingOrchestratorDeps,
   args: { repo: CodingRepoRow; assignment: WorktreeAssignment; stream: PlanStreamHandle },
-  rawReason: string,
+  failure: TaskFailure,
 ): Promise<CodingOrchestratorResult> {
-  const recorded = await recordTaskFailed(run, deps, rawReason, "transition-failed");
+  const recorded = await recordTaskFailed(run, deps, failure, "transition-failed");
   return await match(recorded)
     .with({ kind: "ended" }, async (): Promise<CodingOrchestratorResult> => {
       await reclaimEndedTask(run, deps, {
@@ -282,10 +298,13 @@ async function endPlanFailed(
       });
       return { status: "skipped" };
     })
-    .with({ kind: "recorded" }, async ({ reason }): Promise<CodingOrchestratorResult> => {
-      await tearDownFailedPlan(run, deps, args, reason);
-      return { status: "failed", failureReason: reason };
-    })
+    .with(
+      { kind: "recorded" },
+      async ({ failure: recorded }): Promise<CodingOrchestratorResult> => {
+        await tearDownFailedPlan(run, deps, args, recorded);
+        return { status: "failed", failure: recorded };
+      },
+    )
     .exhaustive();
 }
 
@@ -294,7 +313,7 @@ async function tearDownFailedPlan(
   run: CodingRun,
   deps: CodingOrchestratorDeps,
   args: { repo: CodingRepoRow; assignment: WorktreeAssignment; stream: PlanStreamHandle },
-  reason: string,
+  failure: TaskFailure,
 ): Promise<void> {
   await run.stepRun("teardown-worktree", () =>
     safeTeardownWorktree({
@@ -308,7 +327,7 @@ async function tearDownFailedPlan(
   await reapTaskSandbox(run, deps.sandbox, "teardown");
   // The status is committed: a subscriber error must not reach the catch
   // and write a second failed status that masks this reason.
-  await args.stream.fail(reason).catch((streamErr: unknown) => {
+  await args.stream.fail(describeTaskFailure(failure)).catch((streamErr: unknown) => {
     run.log.warn({ err: streamErr }, "plan stream fail notification failed");
   });
 }
@@ -318,10 +337,7 @@ function executeResultOf(recorded: RecordedFailure): CodingExecuteResult {
   return match(recorded)
     .with(
       { kind: "recorded" },
-      ({ reason }): CodingExecuteResult => ({
-        status: "failed",
-        failureReason: reason,
-      }),
+      ({ failure }): CodingExecuteResult => ({ status: "failed", failure }),
     )
     .with({ kind: "ended" }, (): CodingExecuteResult => ({ status: "skipped" }))
     .exhaustive();
@@ -361,8 +377,8 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       stream,
     });
     if (result.isError) {
-      const rawReason = result.failureReason ?? "execute phase failed";
-      const recorded = await endExecuteFailed(run, deps, exit, rawReason, {
+      const failure = result.failure ?? EXECUTE_SESSION_FAILED;
+      const recorded = await endExecuteFailed(run, deps, exit, failure, {
         transition: "transition-failed",
         teardownWorktree: "teardown-worktree",
         teardown: "teardown",
@@ -399,7 +415,7 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
     return handOff === "handed_off" ? { status: "pending_verify" } : { status: "skipped" };
   } catch (err) {
     run.log.error({ err }, "coding execute failed");
-    const reason = await failTaskFromCatch(run, deps, describeError(err));
+    const failure = await failTaskFromCatch(run, deps, err);
     await safeTeardownWorktree({
       runInTx: deps.runInTx,
       secretsStore: deps.secretsStore,
@@ -413,8 +429,8 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
     await deps
       .runInTx((tx) => deps.store.setTaskSandboxDeletedAt(tx, run.taskId, new Date().toISOString()))
       .catch(() => {});
-    await stream.fail(reason).catch(() => {});
-    return { status: "failed", failureReason: reason };
+    await stream.fail(describeTaskFailure(failure)).catch(() => {});
+    return { status: "failed", failure };
   } finally {
     askpass.release();
   }

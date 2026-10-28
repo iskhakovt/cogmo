@@ -215,6 +215,7 @@ function makeTask(taskId: string): CodingTaskRow {
     prMetadata: null,
     status: "queued",
     failureReason: null,
+    failureDetail: null,
     resourceUsage: null,
     idempotencyKey: null,
     claimedByRunId: null,

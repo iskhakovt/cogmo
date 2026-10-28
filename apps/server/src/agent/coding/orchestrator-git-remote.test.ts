@@ -36,6 +36,7 @@ import {
   serializeGitHubIdentity,
 } from "../../secrets/github.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
+import { parkCodingTaskAt } from "../../test/coding-fixtures.js";
 import { makeStepRun, makeStepSendEvent, nullStepSendEvent } from "../../test/factories.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { CLAUDE_CODE_OAUTH_TOKEN_SECRET } from "./auth.js";
@@ -389,6 +390,7 @@ describe("runCodingTask — git-remote transport", () => {
     const task = await seedTask(repo);
     const idShort = task.id.replaceAll("-", "").slice(0, 12);
     // Pre-populate the assignment as if a prior attempt got there.
+    await parkCodingTaskAt(tx, store, task.id, "planning");
     await tx((trx) =>
       store.setTaskWorktreeAssignment(trx, task.id, {
         type: "git-remote",
@@ -430,6 +432,7 @@ describe("runCodingExecute — git-remote transport", () => {
     const repo = await seedRepo();
     const task = await seedTask(repo);
     const idShort = task.id.replaceAll("-", "").slice(0, 12);
+    await parkCodingTaskAt(tx, store, task.id, "planning");
     await tx((trx) =>
       store.setTaskWorktreeAssignment(trx, task.id, {
         type: "git-remote",
@@ -437,13 +440,8 @@ describe("runCodingExecute — git-remote transport", () => {
       }),
     );
     await tx((trx) => store.setTaskSessionId(trx, task.id, "sess-from-plan"));
-    await tx((trx) =>
-      store.updateTaskStatus(trx, {
-        id: task.id,
-        status: "awaiting_approval",
-        planApprovedAt: new Date(),
-      }),
-    );
+    await parkCodingTaskAt(tx, store, task.id, "awaiting_approval");
+    await tx((trx) => store.approvePlanIfPending(trx, task.id, new Date()));
 
     const { sandbox, createSpecs, execCalls } = fakeGitRemoteSandbox();
     // Resume hit — tryResumeByTaskId returns the existing session
@@ -536,6 +534,7 @@ describe("runCodingExecute — git-remote transport", () => {
     const repo = await seedRepo();
     const task = await seedTask(repo);
     const idShort = task.id.replaceAll("-", "").slice(0, 12);
+    await parkCodingTaskAt(tx, store, task.id, "planning");
     await tx((trx) =>
       store.setTaskWorktreeAssignment(trx, task.id, {
         type: "git-remote",
@@ -543,13 +542,8 @@ describe("runCodingExecute — git-remote transport", () => {
       }),
     );
     await tx((trx) => store.setTaskSessionId(trx, task.id, "sess-from-plan"));
-    await tx((trx) =>
-      store.updateTaskStatus(trx, {
-        id: task.id,
-        status: "awaiting_approval",
-        planApprovedAt: new Date(),
-      }),
-    );
+    await parkCodingTaskAt(tx, store, task.id, "awaiting_approval");
+    await tx((trx) => store.approvePlanIfPending(trx, task.id, new Date()));
 
     // Default fake — no resume hit, falls through to create-container.
     // Simulate one tracked-but-unstaged edit so runCommitAndPush hits
@@ -611,6 +605,7 @@ describe("runCodingExecute — git-remote transport", () => {
     const repo = await seedRepo();
     const task = await seedTask(repo);
     const idShort = task.id.replaceAll("-", "").slice(0, 12);
+    await parkCodingTaskAt(tx, store, task.id, "planning");
     await tx((trx) =>
       store.setTaskWorktreeAssignment(trx, task.id, {
         type: "git-remote",
@@ -618,13 +613,8 @@ describe("runCodingExecute — git-remote transport", () => {
       }),
     );
     await tx((trx) => store.setTaskSessionId(trx, task.id, "sess-from-plan"));
-    await tx((trx) =>
-      store.updateTaskStatus(trx, {
-        id: task.id,
-        status: "awaiting_approval",
-        planApprovedAt: new Date(),
-      }),
-    );
+    await parkCodingTaskAt(tx, store, task.id, "awaiting_approval");
+    await tx((trx) => store.approvePlanIfPending(trx, task.id, new Date()));
 
     // status shows a tracked edit (so we commit), then push returns a
     // non-zero exit with stderr that runCommitAndPush classifies as
@@ -674,11 +664,13 @@ describe("runCodingExecute — git-remote transport", () => {
     });
 
     expect(result.status).toBe("failed");
-    expect(result.failureReason).toContain("execute push failed (auth_failed)");
+    expect(result.failure?.reason).toBe("auth_failed");
     // The chat message, the return value and the row carry one masked text.
-    expect(result.failureReason).toContain("MY_TOKEN_ghp_REDACTED");
-    expect(result.failureReason).not.toContain(PAT);
-    expect(streamFailures).toEqual([result.failureReason]);
+    expect(result.failure?.detail).toContain("MY_TOKEN_ghp_REDACTED");
+    expect(result.failure?.detail).not.toContain(PAT);
+    expect(streamFailures).toEqual([
+      `The push was rejected: GitHub authentication failed: ${result.failure?.detail}`,
+    ]);
 
     // Push was attempted before the failure handler kicked in.
     const pushCall = execCalls.find((c) => gitSubcommand(c.cmd) === "push");
@@ -688,7 +680,8 @@ describe("runCodingExecute — git-remote transport", () => {
     // `pending_verify`.
     const reloaded = await tx((trx) => store.getTask(trx, task.id));
     expect(reloaded?.status).toBe("failed");
-    expect(reloaded?.failureReason).toBe(result.failureReason);
+    expect(reloaded?.failureReason).toBe("auth_failed");
+    expect(reloaded?.failureDetail).toBe(result.failure?.detail);
 
     // Sandbox cleanup was invoked through the push-failure path.
     expect(sandbox.deleteByTaskId).toHaveBeenCalledWith(task.id);
@@ -705,6 +698,7 @@ describe("runCodingExecute — git-remote transport", () => {
     const repo = await seedRepo();
     const task = await seedTask(repo);
     const idShort = task.id.replaceAll("-", "").slice(0, 12);
+    await parkCodingTaskAt(tx, store, task.id, "planning");
     await tx((trx) =>
       store.setTaskWorktreeAssignment(trx, task.id, {
         type: "git-remote",
@@ -712,13 +706,8 @@ describe("runCodingExecute — git-remote transport", () => {
       }),
     );
     await tx((trx) => store.setTaskSessionId(trx, task.id, "sess-from-plan"));
-    await tx((trx) =>
-      store.updateTaskStatus(trx, {
-        id: task.id,
-        status: "awaiting_approval",
-        planApprovedAt: new Date(),
-      }),
-    );
+    await parkCodingTaskAt(tx, store, task.id, "awaiting_approval");
+    await tx((trx) => store.approvePlanIfPending(trx, task.id, new Date()));
     const { sandbox } = fakeGitRemoteSandbox((cmd) => {
       if (gitSubcommand(cmd) === "status" && cmd.includes("--porcelain")) {
         return { exitCode: 0, stdout: "M src/foo.ts\n" };
@@ -750,7 +739,7 @@ describe("runCodingExecute — git-remote transport", () => {
           // follows is then rejected.
           execute: async function* () {
             yield { kind: "session_started", sessionId: "sess-from-plan" };
-            await tx((trx) => store.cancelTaskIfActive(trx, task.id, "user cancelled"));
+            await tx((trx) => store.cancelTaskIfActive(trx, task.id, "user_cancelled"));
             yield { kind: "complete", exitCode: 0, isError: false };
           },
         },
@@ -770,7 +759,7 @@ describe("runCodingExecute — git-remote transport", () => {
     expect(result).toEqual({ status: "skipped" });
     const reloaded = await tx((trx) => store.getTask(trx, task.id));
     expect(reloaded?.status).toBe("cancelled");
-    expect(reloaded?.failureReason).toBe("user cancelled");
+    expect(reloaded?.failureReason).toBe("user_cancelled");
     // No `coding/task/failed` for a task the user cancelled.
     expect(sent).toEqual([]);
     expect(streamFailures).toEqual(["Task cancelled while executing."]);
@@ -834,9 +823,9 @@ async function seedTaskReadyForVerify(): Promise<{ task: CodingTaskRow; branch: 
   const repo = await seedRepo();
   const task = await seedTask(repo);
   const branch = `cogmo/${task.id.replaceAll("-", "").slice(0, 12)}`;
+  await parkCodingTaskAt(tx, store, task.id, "planning");
   await tx((trx) => store.setTaskWorktreeAssignment(trx, task.id, { type: "git-remote", branch }));
-  await tx((trx) => store.setTaskPlan(trx, task.id, "1. step\n2. step"));
-  await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "pending_verify" }));
+  await parkCodingTaskAt(tx, store, task.id, "pending_verify");
   return { task, branch };
 }
 

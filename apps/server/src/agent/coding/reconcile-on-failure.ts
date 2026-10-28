@@ -4,11 +4,13 @@
  */
 
 import type { Inngest } from "inngest";
+import { z } from "zod";
 import type { Transactor } from "../../db/index.js";
 import { codingTaskFailed, inngestFunctionFailed } from "../../inngest/events.js";
 import { logger } from "../../logger.js";
-import { redactSecretsInText } from "../../util/redact-secrets.js";
 import type { CodingStore } from "./store/index.js";
+import { maskTaskFailure } from "./task-failure.js";
+import { type TaskFailure, TaskFailureSchema } from "./types.js";
 
 const log = logger.child({ component: "coding.reconcile-on-failure" });
 
@@ -30,13 +32,37 @@ export interface CodingTaskReconcileDeps {
   store: CodingStore;
 }
 
-/** `failureReason` lives on the `reconciled` variant so the durable wrapper passes it to `step.sendEvent`. */
-export type ReconcileResult =
-  | { status: "reconciled"; taskId: string; failureReason: string }
-  | { status: "skipped"; reason: "not_coding_orchestrator" }
-  | { status: "skipped"; reason: "missing_task_id" }
-  | { status: "skipped"; reason: "task_not_found" }
-  | { status: "skipped"; reason: "already_terminal"; priorStatus: string };
+/**
+ * What the `reconcile` step memoizes. `failure` lives on the `reconciled`
+ * variant so the durable wrapper passes it to `step.sendEvent`. A run in
+ * flight may hold a memo with `failureReason`, the text alone; it reads as
+ * the `run_terminated` failure with that text as the detail, the only
+ * failure this function writes.
+ */
+const ReconcileResultSchema = z.union([
+  z
+    .object({
+      status: z.literal("reconciled"),
+      taskId: z.string(),
+      failure: TaskFailureSchema.optional(),
+      failureReason: z.string().optional(),
+    })
+    .transform(({ failure, failureReason, ...rest }) => ({
+      ...rest,
+      failure: failure ?? { reason: "run_terminated" as const, detail: failureReason ?? "" },
+    })),
+  z.object({
+    status: z.literal("skipped"),
+    reason: z.enum(["not_coding_orchestrator", "missing_task_id", "task_not_found"]),
+  }),
+  z.object({
+    status: z.literal("skipped"),
+    reason: z.literal("already_terminal"),
+    priorStatus: z.string(),
+  }),
+]);
+
+export type ReconcileResult = z.output<typeof ReconcileResultSchema>;
 
 export async function reconcileCodingTaskFailure(
   deps: CodingTaskReconcileDeps,
@@ -58,13 +84,12 @@ export async function reconcileCodingTaskFailure(
     return { status: "skipped", reason: "missing_task_id" };
   }
   const taskId = payload.taskId;
-  const failureReason = redactSecretsInText(
-    `inngest run terminated abnormally (run_id ${payload.runId}, function_id ${payload.functionId}): ${payload.errorMessage}`,
-  );
+  const failure: TaskFailure = maskTaskFailure({
+    reason: "run_terminated",
+    detail: `inngest run terminated abnormally (run_id ${payload.runId}, function_id ${payload.functionId}): ${payload.errorMessage}`,
+  });
 
-  const result = await deps.runInTx((tx) =>
-    deps.store.failTaskIfNonTerminal(tx, taskId, failureReason),
-  );
+  const result = await deps.runInTx((tx) => deps.store.failTaskIfNonTerminal(tx, taskId, failure));
 
   if (result.kind === "not_found") {
     log.warn(
@@ -99,7 +124,7 @@ export async function reconcileCodingTaskFailure(
     },
     "reconcile: coding task marked failed from inngest/function.failed",
   );
-  return { status: "reconciled", taskId, failureReason };
+  return { status: "reconciled", taskId, failure };
 }
 
 export function createCodingTaskReconcile(deps: CodingTaskReconcileDeps, inngest: Inngest) {
@@ -117,13 +142,17 @@ export function createCodingTaskReconcile(deps: CodingTaskReconcileDeps, inngest
       // DB write and event emit are separate durable steps so a retry
       // after a transient send failure doesn't re-run the cached
       // UPDATE. Bus-level dedup via the explicit `id`.
-      const result = await step.run("reconcile", () =>
-        reconcileCodingTaskFailure(deps, {
-          functionId: function_id,
-          runId: run_id,
-          errorMessage,
-          taskId,
-        }),
+      // Parsed on every invocation, so a memo an older build stored reads
+      // the same as a live result.
+      const result = ReconcileResultSchema.parse(
+        await step.run("reconcile", () =>
+          reconcileCodingTaskFailure(deps, {
+            functionId: function_id,
+            runId: run_id,
+            errorMessage,
+            taskId,
+          }),
+        ),
       );
       if (result.status === "reconciled") {
         await step.sendEvent("emit-failed", {
@@ -131,7 +160,7 @@ export function createCodingTaskReconcile(deps: CodingTaskReconcileDeps, inngest
             taskId: result.taskId,
             // Masked again: a run resumed on a newer build replays the
             // `reconcile` result an older one stored.
-            reason: redactSecretsInText(result.failureReason),
+            ...maskTaskFailure(result.failure),
           }),
           id: `reconcile-${run_id}`,
         });

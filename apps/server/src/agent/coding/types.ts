@@ -133,3 +133,54 @@ export const ResourceUsageSchema = z
   })
   .strict();
 export type ResourceUsage = z.infer<typeof ResourceUsageSchema>;
+
+/**
+ * Why a task ended at `failed` or `cancelled`, as `coding_tasks.failure_reason`
+ * stores it. One value per writer branch, so the row says which branch ended
+ * the task without parsing text; `failure_detail` carries the masked text
+ * that branch had (a CLI exit code, a suite's output, a thrown error's
+ * message). `claude_auth_failed` is reserved by design/coding-delegation.md →
+ * Subscription Auth: no writer produces it yet, since the CLI runner does not
+ * tell an expired token from any other non-zero exit. `unknown` is what the
+ * backfill gives a stored reason it cannot classify.
+ */
+export const CODING_TASK_FAILURE_REASONS = [
+  "cli_exit_error",
+  "no_plan_produced",
+  "claude_auth_failed",
+  "push_failed",
+  "branch_conflict",
+  "auth_failed",
+  "verify_failed",
+  "verify_timed_out",
+  "pr_auth_failed",
+  "pr_validation_failed",
+  "pr_open_failed",
+  "credentials_unavailable",
+  "run_terminated",
+  "start_emit_failed",
+  "unexpected_error",
+  "user_cancelled",
+  "user_requested_revisions",
+  "unknown",
+] as const;
+export const CodingTaskFailureReasonSchema = z.enum(CODING_TASK_FAILURE_REASONS);
+export type CodingTaskFailureReason = z.infer<typeof CodingTaskFailureReasonSchema>;
+
+/** The reasons a Cancel writes; `cancelTaskIfActive` accepts no other. */
+export type CodingTaskCancelReason = Extract<
+  CodingTaskFailureReason,
+  "user_cancelled" | "user_requested_revisions"
+>;
+
+/**
+ * A failure as its writer records it: the reason, and the masked text the
+ * writer had. Step results and events carry it in this shape.
+ */
+export const TaskFailureSchema = z
+  .object({
+    reason: CodingTaskFailureReasonSchema,
+    detail: z.string(),
+  })
+  .strict();
+export type TaskFailure = z.infer<typeof TaskFailureSchema>;

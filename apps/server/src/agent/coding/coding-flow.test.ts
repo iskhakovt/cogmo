@@ -15,7 +15,7 @@ import {
 } from "../../sandbox/index.js";
 import { DrizzleSandboxStore } from "../../sandbox/store/index.js";
 import { expectDefined, expectOk } from "../../test/assertions.js";
-import { codingAuthSecrets } from "../../test/coding-fixtures.js";
+import { codingAuthSecrets, parkCodingTaskAt } from "../../test/coding-fixtures.js";
 import {
   makeStepRun,
   mockAgentStore,
@@ -568,7 +568,7 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
         allowPrivilegedRunc: false,
       }),
     );
-    await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "awaiting_approval" }));
+    await parkCodingTaskAt(tx, store, task.id, "awaiting_approval");
 
     const transportInngestSend = vi.fn();
     const transport = createTransport({
@@ -719,7 +719,7 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
     // Awaiting approval: the stream stays for the execute phase.
     await sweep();
     await sweep();
-    await tx((trx) => store.cancelTaskIfActive(trx, task.id, "user requested revisions"));
+    await tx((trx) => store.cancelTaskIfActive(trx, task.id, "user_requested_revisions"));
     // Found cancelled twice, then released: the fifth sweep has nothing to ask.
     await sweep();
     await sweep();

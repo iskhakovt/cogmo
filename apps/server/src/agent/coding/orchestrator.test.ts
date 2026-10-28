@@ -18,7 +18,7 @@ import {
 import { DrizzleSandboxStore } from "../../sandbox/store/index.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import { expectDefined, expectOk } from "../../test/assertions.js";
-import { codingAuthSecrets } from "../../test/coding-fixtures.js";
+import { codingAuthSecrets, parkCodingTaskAt } from "../../test/coding-fixtures.js";
 import { makeStepRun, makeStepSendEvent } from "../../test/factories.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { DrizzleAgentStore } from "../store/index.js";
@@ -464,7 +464,8 @@ describe("runCodingTask", () => {
     });
     expect(result.status).toBe("failed");
     if (result.status === "failed") {
-      expect(result.failureReason).toMatch(/claude_code_oauth_token/);
+      expect(result.failure?.reason).toBe("unexpected_error");
+      expect(result.failure?.detail).toMatch(/claude_code_oauth_token/);
     }
     expect(createCalls).toHaveLength(0);
   });
@@ -598,7 +599,7 @@ describe("runCodingTask", () => {
     // `cancelled` directly via the store (no Telegram round trip).
     const interceptingStepRun = (async (id: string, fn: () => Promise<unknown>) => {
       if (id === "auto-approve-plan") {
-        await tx((trx) => store.cancelTaskIfActive(trx, task.id, "user cancelled"));
+        await tx((trx) => store.cancelTaskIfActive(trx, task.id, "user_cancelled"));
       }
       return fn();
     }) as unknown as typeof stepRun;
@@ -796,9 +797,12 @@ describe("runCodingTask", () => {
       stepSendEvent,
     });
     expect(result.status).toBe("failed");
-    expect(result.failureReason).toMatch(/exit code 2/);
+    expect(result.failure).toEqual({ reason: "cli_exit_error", detail: "claude exit code 2" });
     expect((await tx((trx) => store.getTask(trx, task.id)))?.status).toBe("failed");
-    expect((await tx((trx) => store.getTask(trx, task.id)))?.failureReason).toMatch(/exit code 2/);
+    expect((await tx((trx) => store.getTask(trx, task.id)))?.failureReason).toBe("cli_exit_error");
+    expect((await tx((trx) => store.getTask(trx, task.id)))?.failureDetail).toBe(
+      "claude exit code 2",
+    );
     expect((await tx((trx) => store.getTask(trx, task.id)))?.sessionId).toBe("sess-X");
     expect(stopCalls).toEqual([task.id]);
     expect(planStream.failed).toHaveLength(1);
@@ -816,7 +820,7 @@ describe("runCodingTask", () => {
     const backend: CodingBackend = {
       plan: async function* () {
         yield { kind: "session_started", sessionId: "sess-A" };
-        await tx((trx) => store.cancelTaskIfActive(trx, task.id, "user cancelled"));
+        await tx((trx) => store.cancelTaskIfActive(trx, task.id, "user_cancelled"));
         yield { kind: "complete", exitCode: 2, isError: true };
       },
       execute: () => throwingPlan("execute not used in this test"),
@@ -833,7 +837,7 @@ describe("runCodingTask", () => {
     expect(result).toEqual({ status: "skipped" });
     const reloaded = await tx((trx) => store.getTask(trx, task.id));
     expect(reloaded?.status).toBe("cancelled");
-    expect(reloaded?.failureReason).toBe("user cancelled");
+    expect(reloaded?.failureReason).toBe("user_cancelled");
     expect(fakeInngestShared.send).not.toHaveBeenCalledWith(
       expect.objectContaining({ name: "coding/task/failed" }),
     );
@@ -841,7 +845,7 @@ describe("runCodingTask", () => {
     expect(stopCalls).toEqual([task.id]);
   });
 
-  it("empty plan with success exit → status=failed (treated as nothing-to-show)", async () => {
+  it("empty plan with success exit → failed as no_plan_produced", async () => {
     const repo = await seedRepo();
     const task = await seedTask(repo);
     const { sandbox, stopCalls } = fakeSandbox();
@@ -857,7 +861,10 @@ describe("runCodingTask", () => {
       stepSendEvent,
     });
     expect(result.status).toBe("failed");
-    expect((await tx((trx) => store.getTask(trx, task.id)))?.status).toBe("failed");
+    expect(result.failure?.reason).toBe("no_plan_produced");
+    const reloaded = await tx((trx) => store.getTask(trx, task.id));
+    expect(reloaded?.status).toBe("failed");
+    expect(reloaded?.failureReason).toBe("no_plan_produced");
     expect(stopCalls).toEqual([task.id]);
   });
 
@@ -882,7 +889,8 @@ describe("runCodingTask", () => {
       stepSendEvent,
     });
     expect(result.status).toBe("failed");
-    expect(result.failureReason).toMatch(/docker daemon down/);
+    expect(result.failure?.reason).toBe("unexpected_error");
+    expect(result.failure?.detail).toMatch(/docker daemon down/);
     expect((await tx((trx) => store.getTask(trx, task.id)))?.status).toBe("failed");
     expect(stopCalls).toEqual([task.id]);
   });
@@ -932,11 +940,12 @@ describe("runCodingTask", () => {
     });
 
     const masked = "clone https://REDACTED@github.com/o/r failed";
-    expect(result).toEqual({ status: "failed", failureReason: masked });
-    expect(planStream.failed).toEqual([masked]);
-    expect((await tx((trx) => store.getTask(trx, task.id)))?.failureReason).toBe(masked);
+    const failure = { reason: "unexpected_error", detail: masked };
+    expect(result).toEqual({ status: "failed", failure });
+    expect(planStream.failed).toEqual([`Unexpected error: ${masked}`]);
+    expect((await tx((trx) => store.getTask(trx, task.id)))?.failureDetail).toBe(masked);
     expect(fakeInngestShared.send).toHaveBeenCalledWith(
-      expect.objectContaining({ data: { taskId: task.id, reason: masked } }),
+      expect.objectContaining({ data: { taskId: task.id, ...failure } }),
     );
   });
 
@@ -963,7 +972,7 @@ describe("runCodingTask", () => {
       stepSendEvent,
     });
     expect(result.status).toBe("failed");
-    expect(result.failureReason).toMatch(/snapshot build_failed/);
+    expect(result.failure?.detail).toMatch(/snapshot build_failed/);
     expect(createCalls).toHaveLength(0);
     expect(stopCalls).toEqual([task.id]);
   });
@@ -1286,6 +1295,7 @@ async function seedExecutableTask(
       allowPrivilegedRunc: false,
     }),
   );
+  await parkCodingTaskAt(tx, store, task.id, "planning");
   await tx((trx) =>
     store.setTaskWorktreeAssignment(trx, task.id, {
       type: "host-path",
@@ -1296,7 +1306,7 @@ async function seedExecutableTask(
   await tx((trx) => store.setTaskSessionId(trx, task.id, "sess-from-plan"));
   // Stamp plan_approved_at via the atomic helper so the test exercises
   // the same path the callback handler uses in production.
-  await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "awaiting_approval" }));
+  await parkCodingTaskAt(tx, store, task.id, "awaiting_approval");
   const approval = await tx((trx) => store.approvePlanIfPending(trx, task.id, new Date()));
   expect(approval.kind).toBe("approved");
 
@@ -1332,6 +1342,7 @@ async function seedExecutableTask(
       at: new Date(),
     }),
   );
+  await parkCodingTaskAt(tx, store, task.id, "planning");
   await tx((trx) => store.setTaskContainerId(trx, task.id, containerRow.id));
 
   const reloaded = await tx((trx) => store.getTask(trx, task.id));
@@ -1429,9 +1440,13 @@ describe("runCodingExecute", () => {
       inngest: fakeInngest,
     });
 
-    expect(result).toEqual({ status: "failed", failureReason: "sandbox went away" });
+    expect(result).toEqual({
+      status: "failed",
+      failure: { reason: "unexpected_error", detail: "sandbox went away" },
+    });
     const reloaded = await tx((trx) => store.getTask(trx, task.id));
-    expect(reloaded?.failureReason).toBe("sandbox went away");
+    expect(reloaded?.failureReason).toBe("unexpected_error");
+    expect(reloaded?.failureDetail).toBe("sandbox went away");
   });
 
   it("records a thrown error's cause in the failure reason", async () => {
@@ -1456,11 +1471,12 @@ describe("runCodingExecute", () => {
       inngest: fakeInngest,
     });
 
-    const reason = "exec failed (socket hang up)";
-    expect(result).toEqual({ status: "failed", failureReason: reason });
+    const detail = "exec failed (socket hang up)";
+    expect(result).toEqual({ status: "failed", failure: { reason: "unexpected_error", detail } });
     const reloaded = await tx((trx) => store.getTask(trx, task.id));
-    expect(reloaded?.failureReason).toBe(reason);
-    expect(stream.failed).toEqual([reason]);
+    expect(reloaded?.failureReason).toBe("unexpected_error");
+    expect(reloaded?.failureDetail).toBe(detail);
+    expect(stream.failed).toEqual([`Unexpected error: ${detail}`]);
   });
 
   it("catch path: the chat message, return value, row and event carry one masked reason", async () => {
@@ -1488,11 +1504,12 @@ describe("runCodingExecute", () => {
     });
 
     const masked = "sandbox env dump: CLAUDE_CODE_OAUTH_TOKEN=sk-ant-REDACTED";
-    expect(result).toEqual({ status: "failed", failureReason: masked });
-    expect(stream.failed).toEqual([masked]);
-    expect((await tx((trx) => store.getTask(trx, task.id)))?.failureReason).toBe(masked);
+    const failure = { reason: "unexpected_error", detail: masked };
+    expect(result).toEqual({ status: "failed", failure });
+    expect(stream.failed).toEqual([`Unexpected error: ${masked}`]);
+    expect((await tx((trx) => store.getTask(trx, task.id)))?.failureDetail).toBe(masked);
     expect(fakeInngestShared.send).toHaveBeenCalledWith(
-      expect.objectContaining({ data: { taskId: task.id, reason: masked } }),
+      expect.objectContaining({ data: { taskId: task.id, ...failure } }),
     );
   });
 
@@ -1508,7 +1525,7 @@ describe("runCodingExecute", () => {
       plan: () => throwingPlan("plan not exercised by this test"),
       execute: async function* () {
         yield { kind: "text_delta", text: "Editing\n" };
-        await tx((trx) => store.cancelTaskIfActive(trx, task.id, "user cancelled"));
+        await tx((trx) => store.cancelTaskIfActive(trx, task.id, "user_cancelled"));
         yield { kind: "complete", exitCode: 0, isError: false };
       },
     };
@@ -1552,7 +1569,7 @@ describe("runCodingExecute", () => {
       plan: () => throwingPlan("plan not exercised by this test"),
       execute: async function* () {
         yield { kind: "text_delta", text: "Editing\n" };
-        await tx((trx) => store.cancelTaskIfActive(trx, task.id, "user cancelled"));
+        await tx((trx) => store.cancelTaskIfActive(trx, task.id, "user_cancelled"));
         yield { kind: "complete", exitCode: 2, isError: true };
       },
     };
@@ -1569,7 +1586,7 @@ describe("runCodingExecute", () => {
     expect(result).toEqual({ status: "skipped" });
     const reloaded = await tx((trx) => store.getTask(trx, task.id));
     expect(reloaded?.status).toBe("cancelled");
-    expect(reloaded?.failureReason).toBe("user cancelled");
+    expect(reloaded?.failureReason).toBe("user_cancelled");
     expect(fakeInngest.send).not.toHaveBeenCalledWith(
       expect.objectContaining({ name: "coding/task/failed" }),
     );
@@ -1648,7 +1665,7 @@ describe("runCodingExecute", () => {
     });
 
     expect(result.status).toBe("failed");
-    expect(result.failureReason).toMatch(/exit code 2/);
+    expect(result.failure).toEqual({ reason: "cli_exit_error", detail: "claude exit code 2" });
     expect((await tx((trx) => store.getTask(trx, task.id)))?.status).toBe("failed");
     expect(stopCalls).toEqual([task.id]);
     expect(stream.completed).toEqual([false]);
@@ -1798,7 +1815,7 @@ describe("runCodingExecute", () => {
       plan: async function* () {
         yield { kind: "session_started", sessionId: "sess-A" };
         // Execute claims the task while the plan session is still streaming.
-        await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "executing" }));
+        await parkCodingTaskAt(tx, store, task.id, "executing");
         yield { kind: "plan_ready", plan: "## Plan" };
         yield { kind: "complete", exitCode: 0, isError: false };
       },
@@ -1830,7 +1847,7 @@ describe("runCodingExecute", () => {
       plan: async function* () {
         yield { kind: "session_started", sessionId: "sess-A" };
         // Cancel lands while the plan session is streaming.
-        await tx((trx) => store.cancelTaskIfActive(trx, task.id, "user cancelled"));
+        await tx((trx) => store.cancelTaskIfActive(trx, task.id, "user_cancelled"));
         yield { kind: "plan_ready", plan: "## Plan" };
         yield { kind: "complete", exitCode: 0, isError: false };
       },
@@ -1856,9 +1873,12 @@ describe("runCodingExecute", () => {
     expect(stopCalls).toContain(task.id);
   });
 
-  it("throws when plan_approved_at is missing (event fired before approve handler stamped it)", async () => {
+  it("the execute claim is refused for a plan that was never approved (event fired before the approve handler stamped it)", async () => {
+    // `chk_coding_tasks_approval_after_gate` holds `plan_approved_at` set at
+    // `executing`, so the claim's UPDATE fails before the run reads the row.
     const repo = await seedRepo();
     const task = await seedTask(repo);
+    await parkCodingTaskAt(tx, store, task.id, "planning");
     await tx((trx) => store.setTaskSessionId(trx, task.id, "sess-x"));
     await tx((trx) =>
       store.setTaskWorktreeAssignment(trx, task.id, {
@@ -1867,8 +1887,8 @@ describe("runCodingExecute", () => {
         worktreePath: join(baseDir, "wt"),
       }),
     );
-    await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "awaiting_approval" }));
-    const { sandbox } = fakeSandbox();
+    await parkCodingTaskAt(tx, store, task.id, "awaiting_approval");
+    const { sandbox, createCalls } = fakeSandbox();
     await expect(
       runCodingExecute({
         taskId: task.id,
@@ -1882,13 +1902,17 @@ describe("runCodingExecute", () => {
         stepSendEvent,
         inngest: fakeInngest,
       }),
-    ).rejects.toThrow(/plan_approved_at/);
+    ).rejects.toMatchObject({
+      cause: { message: expect.stringMatching(/chk_coding_tasks_approval_after_gate/) },
+    });
+    expect((await tx((trx) => store.getTask(trx, task.id)))?.status).toBe("awaiting_approval");
+    expect(createCalls).toHaveLength(0);
   });
 
-  it("a missing plan_approved_at reaches the execute stream before the throw", async () => {
+  it("throws when session_id is missing (plan phase didn't capture it)", async () => {
     const repo = await seedRepo();
     const task = await seedTask(repo);
-    await tx((trx) => store.setTaskSessionId(trx, task.id, "sess-x"));
+    await parkCodingTaskAt(tx, store, task.id, "planning");
     await tx((trx) =>
       store.setTaskWorktreeAssignment(trx, task.id, {
         type: "host-path",
@@ -1896,10 +1920,10 @@ describe("runCodingExecute", () => {
         worktreePath: join(baseDir, "wt"),
       }),
     );
-    await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "awaiting_approval" }));
+    await parkCodingTaskAt(tx, store, task.id, "awaiting_approval");
+    await tx((trx) => store.approvePlanIfPending(trx, task.id, new Date()));
     const { sandbox } = fakeSandbox();
     const stream = recordingExecuteStream();
-
     await expect(
       runCodingExecute({
         taskId: task.id,
@@ -1913,33 +1937,9 @@ describe("runCodingExecute", () => {
         stepSendEvent,
         inngest: fakeInngest,
       }),
-    ).rejects.toThrow(/plan_approved_at/);
-    expect(stream.failed).toEqual([expect.stringMatching(/plan_approved_at/)]);
-  });
-
-  it("throws when session_id is missing (plan phase didn't capture it)", async () => {
-    const repo = await seedRepo();
-    const task = await seedTask(repo);
-    await tx((trx) =>
-      store.setTaskWorktreeAssignment(trx, task.id, {
-        type: "host-path",
-        branch: "cogmo/x",
-        worktreePath: join(baseDir, "wt"),
-      }),
-    );
-    await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "awaiting_approval" }));
-    await tx((trx) => store.approvePlanIfPending(trx, task.id, new Date()));
-    const { sandbox } = fakeSandbox();
-    await expect(
-      runCodingExecute({
-        taskId: task.id,
-        runId: "run-test",
-        deps: makeDeps({ sandbox, backend: executeBackendYielding([]) }),
-        stepRun,
-        stepSendEvent,
-        inngest: fakeInngest,
-      }),
     ).rejects.toThrow(/no session_id/);
+    // The miss reaches the execute stream before the throw.
+    expect(stream.failed).toEqual([expect.stringMatching(/no session_id/)]);
   });
 
   it("throws when task not found", async () => {
@@ -2034,7 +2034,8 @@ describe("runCodingExecute", () => {
 
     expect(result.status).toBe("failed");
     if (result.status === "failed") {
-      expect(result.failureReason).toMatch(/claude_code_oauth_token/);
+      expect(result.failure?.reason).toBe("unexpected_error");
+      expect(result.failure?.detail).toMatch(/claude_code_oauth_token/);
     }
     expect(createCalls).toHaveLength(0);
     expect(stopCalls).toEqual([task.id]);

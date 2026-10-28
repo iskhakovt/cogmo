@@ -101,7 +101,9 @@ describe("createTransport", () => {
     const { transport } = setup({ codingStore });
 
     expect((await transport.repos.list())._unsafeUnwrap()).toEqual([]);
-    expect((await transport.coding.cancelTask("t-1", "handle-1", "r"))._unsafeUnwrapErr()).toEqual({
+    expect(
+      (await transport.coding.cancelTask("t-1", "handle-1", "user_cancelled"))._unsafeUnwrapErr(),
+    ).toEqual({
       code: "task_not_found",
       taskId: "t-1",
     });

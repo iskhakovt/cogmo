@@ -219,7 +219,11 @@ describe("coding-task-start — Inngest replay", () => {
     // once, finds the row `already_terminal` at `failed`, and the failure
     // flow — the event, the teardown — carries on as recorded.
     const { store, current } = statefulCodingStore(
-      codingTaskRow({ status: "failed", failureReason: "plan exited with code 2" }),
+      codingTaskRow({
+        status: "failed",
+        failureReason: "cli_exit_error",
+        failureDetail: "plan exited with code 2",
+      }),
       localRepo(),
     );
     const backend = countingBackend({ plan: PLAN_EVENTS });
@@ -243,7 +247,12 @@ describe("coding-task-start — Inngest replay", () => {
     const { result, error } = await engine.execute();
 
     expect(error).toBeUndefined();
-    expect(result).toEqual({ status: "failed", failureReason: "plan exited with code 2" });
+    // The memoized `plan-cli` result predates `failure`: its `failureReason`
+    // text reads as the `cli_exit_error` detail.
+    expect(result).toEqual({
+      status: "failed",
+      failure: { reason: "cli_exit_error", detail: "plan exited with code 2" },
+    });
     expect(current().status).toBe("failed");
     expect(backend.planCalls()).toBe(0);
     expect(emittedEventNames(sendSpy)).toContain("coding/task/failed");
@@ -325,6 +334,40 @@ describe("coding-task-execute — Inngest replay", () => {
     expect(backend.executeCalls()).toBe(1);
     expect(stream.started()).toBe(1);
     expect(stream.text()).toEqual(["Editing foo.ts\n"]);
+  });
+
+  it("reads an `execute-cli` memo predating `failure` as a cli_exit_error", async () => {
+    // A run in flight across the deploy memoized `{ isError, failureReason }`;
+    // the failure it records carries that text as the detail.
+    const { store, current } = statefulCodingStore(approvedTask(), localRepo());
+    const backend = countingBackend({ execute: EXECUTE_EVENTS });
+    const fn = createCodingExecuteOrchestrator(
+      makeDeps({ store, backend: backend.backend }),
+      inngest,
+    );
+
+    const engine = new InngestTestEngine({
+      function: fn,
+      events: [approvedEvent],
+      steps: [
+        { id: "set-status-executing", handler: () => ({ kind: "transitioned" }) },
+        { id: "try-resume", handler: () => null },
+        {
+          id: "execute-cli",
+          handler: () => ({ isError: true, failureReason: "claude exit code 2" }),
+        },
+      ],
+    });
+    const { result, error } = await engine.execute();
+
+    expect(error).toBeUndefined();
+    expect(result).toEqual({
+      status: "failed",
+      failure: { reason: "cli_exit_error", detail: "claude exit code 2" },
+    });
+    expect(current().failureReason).toBe("cli_exit_error");
+    expect(current().failureDetail).toBe("claude exit code 2");
+    expect(backend.executeCalls()).toBe(0);
   });
 
   it("still skips a duplicate event, because the conditional UPDATE matches no row", async () => {

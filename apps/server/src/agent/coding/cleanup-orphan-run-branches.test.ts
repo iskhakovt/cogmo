@@ -8,6 +8,7 @@ import { mock } from "vitest-mock-extended";
 import type { Database, Transactor } from "../../db/index.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import { expectOk } from "../../test/assertions.js";
+import { parkCodingTaskAt } from "../../test/coding-fixtures.js";
 import { makeStepRun } from "../../test/factories.js";
 import { fakeDurable } from "../../test/fake-durable.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
@@ -78,7 +79,7 @@ async function insertTaskWithStatus(
       allowPrivilegedRunc: false,
     }),
   );
-  await tx((trx) => store.updateTaskStatus(trx, { id: t.id, status }));
+  if (status !== "queued") await parkCodingTaskAt(tx, store, t.id, status);
   return t;
 }
 

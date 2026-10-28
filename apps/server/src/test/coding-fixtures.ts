@@ -10,15 +10,20 @@
 
 import { PassThrough, type Readable, type Writable } from "node:stream";
 import { err, ok } from "neverthrow";
+import { match } from "ts-pattern";
 import { vi } from "vitest";
 import { type MockProxy, mock } from "vitest-mock-extended";
 import { CLAUDE_CODE_OAUTH_TOKEN_SECRET } from "../agent/coding/auth.js";
 import {
   type CodingRepoRow,
   type CodingStore,
+  type CodingTaskForwardStatus,
   type CodingTaskRow,
+  type CodingTaskStatus,
   isTerminalCodingTaskStatus,
 } from "../agent/coding/store/index.js";
+import type { PrMetadata } from "../agent/coding/types.js";
+import type { Transactor } from "../db/index.js";
 import {
   type ExecStreamingHandle,
   type LocalDockerSessionState,
@@ -72,6 +77,7 @@ export function codingTaskRow(overrides: Partial<CodingTaskRow> = {}): CodingTas
     prMetadata: null,
     status: "queued",
     failureReason: null,
+    failureDetail: null,
     resourceUsage: null,
     idempotencyKey: null,
     claimedByRunId: null,
@@ -120,8 +126,10 @@ export function statefulCodingStore(
     task = {
       ...task,
       status: params.status,
-      ...(params.failureReason !== undefined && { failureReason: params.failureReason }),
-      ...(params.planApprovedAt !== undefined && { planApprovedAt: params.planApprovedAt }),
+      ...("failure" in params && {
+        failureReason: params.failure.reason,
+        failureDetail: params.failure.detail,
+      }),
     };
   });
   store.transitionTaskStatus.mockImplementation(async (_tx, _id, from, to, claimedByRunId) => {
@@ -137,11 +145,16 @@ export function statefulCodingStore(
     task = { ...task, status: to, ...(claimedByRunId !== undefined && { claimedByRunId }) };
     return { kind: "transitioned" };
   });
-  store.failTaskIfNonTerminal.mockImplementation(async (_tx, _id, failureReason) => {
+  store.failTaskIfNonTerminal.mockImplementation(async (_tx, _id, failure) => {
     if (isTerminalCodingTaskStatus(task.status)) {
       return { kind: "already_terminal", status: task.status };
     }
-    task = { ...task, status: "failed", failureReason };
+    task = {
+      ...task,
+      status: "failed",
+      failureReason: failure.reason,
+      failureDetail: failure.detail,
+    };
     return { kind: "failed" };
   });
   store.setTaskWorktreeAssignment.mockImplementation(async (_tx, _id, assignment) => {
@@ -310,4 +323,81 @@ export function fakeCodingSandbox(
       resumable = next;
     },
   };
+}
+const FORWARD_PATH: ReadonlyArray<CodingTaskForwardStatus> = [
+  "queued",
+  "planning",
+  "awaiting_approval",
+  "executing",
+  "pending_verify",
+  "verifying",
+  "pushed",
+  "pr_open",
+];
+
+/** The PR a parked `pr_open` row records. */
+export const PARKED_PR_METADATA: PrMetadata = {
+  url: "https://github.com/user/cogmo/pull/1",
+  number: 1,
+  branchSha: "a".repeat(40),
+  openedAt: "2026-08-20T00:00:00.000Z",
+};
+
+/**
+ * Drives a task row from its current status to `status` through the store's
+ * own writers, so the row carries the per-state data its CHECKs tie to each
+ * status: a plan from `awaiting_approval`, an approval from `executing`, PR
+ * metadata at `pr_open`. A `failed` row records `unexpected_error`; a
+ * `cancelled` row `user_cancelled`. The claim writers are called without a
+ * run id, so `claimed_by_run_id` stays null.
+ */
+export async function parkCodingTaskAt(
+  runInTx: Transactor,
+  store: CodingStore,
+  taskId: string,
+  status: CodingTaskStatus,
+): Promise<void> {
+  const row = await runInTx((tx) => store.getTask(tx, taskId));
+  if (!row) throw new Error(`parkCodingTaskAt: task ${taskId} not found`);
+  if (isTerminalCodingTaskStatus(row.status)) {
+    throw new Error(`parkCodingTaskAt: task ${taskId} is already ${row.status}`);
+  }
+  const forwardTarget = match(status)
+    .with("failed", "cancelled", () => row.status)
+    .otherwise((forward) => forward);
+  const path = FORWARD_PATH.slice(
+    FORWARD_PATH.indexOf(row.status) + 1,
+    FORWARD_PATH.indexOf(forwardTarget) + 1,
+  );
+  const approve = FORWARD_PATH.indexOf(forwardTarget) > FORWARD_PATH.indexOf("awaiting_approval");
+  let from = row.status;
+  for (const to of path) {
+    if (to === "awaiting_approval" && row.plan === null) {
+      await runInTx((tx) => store.setTaskPlan(tx, taskId, "1. step\n2. step"));
+    }
+    if (to === "pr_open") {
+      await runInTx((tx) => store.setTaskPrMetadata(tx, taskId, PARKED_PR_METADATA));
+    }
+    const transition = await runInTx((tx) => store.transitionTaskStatus(tx, taskId, from, to));
+    if (transition.kind !== "transitioned") {
+      throw new Error(`parkCodingTaskAt: ${from} → ${to} read ${transition.kind}`);
+    }
+    if (to === "awaiting_approval" && approve) {
+      await runInTx((tx) => store.approvePlanIfPending(tx, taskId, new Date()));
+    }
+    from = to;
+  }
+  await match(status)
+    .with("failed", () =>
+      runInTx((tx) =>
+        store.failTaskIfNonTerminal(tx, taskId, {
+          reason: "unexpected_error",
+          detail: "parked by the test",
+        }),
+      ),
+    )
+    .with("cancelled", () =>
+      runInTx((tx) => store.cancelTaskIfActive(tx, taskId, "user_cancelled")),
+    )
+    .otherwise(() => Promise.resolve());
 }

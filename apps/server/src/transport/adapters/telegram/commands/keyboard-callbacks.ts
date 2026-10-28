@@ -43,8 +43,7 @@ export async function handlePlanCallback(
   // what to change, and the agent issues a fresh delegate_coding next
   // turn. In-place plan editing requires an editor surface Telegram
   // doesn't have.
-  const reason =
-    parsed.action === "revise" ? "user requested revisions" : "user cancelled the plan";
+  const reason = parsed.action === "revise" ? "user_requested_revisions" : "user_cancelled";
   const res = await transport.coding.cancelTask(parsed.taskId, tapperPlatformHandle, reason);
   if (res.isErr()) return { editText: errorMessage(res.error), toast: errorMessage(res.error) };
 

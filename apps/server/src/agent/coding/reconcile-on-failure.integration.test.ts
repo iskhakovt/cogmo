@@ -34,6 +34,7 @@ import { afterAll, beforeAll, describe, expect, inject, it, vi } from "vitest";
 import { db, transactor } from "../../db/index.js";
 import { codingTaskFailed } from "../../inngest/events.js";
 import { expectOk } from "../../test/assertions.js";
+import { parkCodingTaskAt } from "../../test/coding-fixtures.js";
 import { workerInngestBaseUrl } from "../../test/worker-inngest.js";
 import { createCodingTaskReconcile } from "./reconcile-on-failure.js";
 import { DrizzleCodingStore } from "./store/index.js";
@@ -50,7 +51,12 @@ let testInngest: Inngest;
 // `id` stays `string | undefined` so a missing-id regression fails
 // the explicit `toBeDefined` assertion below with a clear diagnostic
 // rather than a misleading regex mismatch on an empty string.
-const capturedFailedEvents: Array<{ id: string | undefined; taskId: string; reason: string }> = [];
+const capturedFailedEvents: Array<{
+  id: string | undefined;
+  taskId: string;
+  reason: string;
+  detail: string;
+}> = [];
 
 beforeAll(async () => {
   // Match the app's client id — the `inngest/function.failed` system event
@@ -147,7 +153,7 @@ async function seedRepoAndTask(initialStatus: "planning" | "executing" | "failed
     }),
   );
   // Insert returns the row in `queued` — bump to the requested status.
-  await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: initialStatus }));
+  await parkCodingTaskAt(tx, store, task.id, initialStatus);
   return { taskId: task.id, repoId: repo.id };
 }
 
@@ -177,11 +183,15 @@ const TRIGGER_EXECUTE = "test/reconcile/trigger-execute";
 async function waitForTaskStatus(
   taskId: string,
   status: "failed",
-): Promise<{ status: string; failureReason: string | null }> {
+): Promise<{ status: string; failureReason: string | null; failureDetail: string | null }> {
   return vi.waitFor(
     async () => {
       const rows = await db
-        .select({ status: codingTasks.status, failureReason: codingTasks.failureReason })
+        .select({
+          status: codingTasks.status,
+          failureReason: codingTasks.failureReason,
+          failureDetail: codingTasks.failureDetail,
+        })
         .from(codingTasks)
         .where(eq(codingTasks.id, taskId));
       const row = rows[0];
@@ -196,7 +206,7 @@ async function waitForTaskStatus(
 
 async function waitForFailedEvent(
   taskId: string,
-): Promise<{ id: string | undefined; taskId: string; reason: string }> {
+): Promise<{ id: string | undefined; taskId: string; reason: string; detail: string }> {
   return vi.waitFor(
     () => {
       const match = capturedFailedEvents.find((e) => e.taskId === taskId);
@@ -220,12 +230,14 @@ describe("coding-task-reconcile — Inngest integration", () => {
 
     const reloaded = await waitForTaskStatus(taskId, "failed");
     expect(reloaded.status).toBe("failed");
-    expect(reloaded.failureReason).toMatch(/decoy coding-task-start failure/);
-    expect(reloaded.failureReason).toMatch(/run_id [^\s)]+/);
-    expect(reloaded.failureReason).toMatch(/function_id [^\s)]*coding-task-start/);
+    expect(reloaded.failureReason).toBe("run_terminated");
+    expect(reloaded.failureDetail).toMatch(/decoy coding-task-start failure/);
+    expect(reloaded.failureDetail).toMatch(/run_id [^\s)]+/);
+    expect(reloaded.failureDetail).toMatch(/function_id [^\s)]*coding-task-start/);
 
     const failedEvent = await waitForFailedEvent(taskId);
-    expect(failedEvent.reason).toMatch(/decoy coding-task-start failure/);
+    expect(failedEvent.reason).toBe("run_terminated");
+    expect(failedEvent.detail).toMatch(/decoy coding-task-start failure/);
     // Pin the bus-level idempotency `id` so a retry of the emit step
     // dedups instead of double-firing `cleanup-run-branch`. The
     // run_id portion is opaque (minted per run by Inngest) so the
@@ -248,7 +260,7 @@ describe("coding-task-reconcile — Inngest integration", () => {
       store.updateTaskStatus(trx, {
         id: taskId,
         status: "failed",
-        failureReason: "claude exit code 2",
+        failure: { reason: "cli_exit_error", detail: "claude exit code 2" },
       }),
     );
 
@@ -263,12 +275,16 @@ describe("coding-task-reconcile — Inngest integration", () => {
     await new Promise((r) => setTimeout(r, 4_000));
 
     const rows = await db
-      .select({ status: codingTasks.status, failureReason: codingTasks.failureReason })
+      .select({
+        failureReason: codingTasks.failureReason,
+        failureDetail: codingTasks.failureDetail,
+      })
       .from(codingTasks)
       .where(eq(codingTasks.id, taskId));
-    // Original reason preserved — reconcile saw `already_terminal` and
+    // Original failure preserved — reconcile saw `already_terminal` and
     // didn't stomp on it.
-    expect(rows[0]?.failureReason).toBe("claude exit code 2");
+    expect(rows[0]?.failureReason).toBe("cli_exit_error");
+    expect(rows[0]?.failureDetail).toBe("claude exit code 2");
     const eventsAfter = capturedFailedEvents.filter((e) => e.taskId === taskId).length;
     expect(eventsAfter).toBe(eventsBefore);
   });

@@ -8,13 +8,9 @@ import type { SandboxSession } from "../../sandbox/index.js";
 import type { BackendUsage, CodingBackend } from "./backend.js";
 import type { CodingRun, TaskStoreDeps } from "./coding-run.js";
 import type { ExecuteStreamHandle } from "./progress-stream.js";
+import { fromSessionResult, type SessionResult } from "./session-result.js";
 import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
-
-interface ExecuteSessionResult {
-  isError: boolean;
-  failureReason?: string;
-  usage?: BackendUsage;
-}
+import type { TaskFailure } from "./types.js";
 
 /**
  * Durable: a billable session, and `isError` selects disjoint step sets
@@ -32,8 +28,8 @@ export async function runExecuteSession(
     container: () => Promise<SandboxSession>;
     stream: ExecuteStreamHandle;
   },
-): Promise<ExecuteSessionResult> {
-  return run.stepRun("execute-cli", async () => {
+): Promise<SessionResult> {
+  const memo = await run.stepRun("execute-cli", async () => {
     await args.stream.started();
     return streamExecute(deps.backend, {
       task: args.task,
@@ -43,6 +39,7 @@ export async function runExecuteSession(
       sessionId: args.sessionId,
     });
   });
+  return fromSessionResult(memo);
 }
 
 /**
@@ -83,10 +80,10 @@ async function streamExecute(
     stream: ExecuteStreamHandle;
     sessionId: string;
   },
-): Promise<ExecuteSessionResult> {
+): Promise<SessionResult> {
   const { task, repo, container, stream, sessionId } = args;
   let isError = false;
-  let failureReason: string | undefined;
+  let failure: TaskFailure | undefined;
   let usage: BackendUsage | undefined;
 
   for await (const event of backend.execute({ task, repo, container }, sessionId)) {
@@ -101,7 +98,7 @@ async function streamExecute(
         if (e.usage) usage = e.usage;
         if (e.isError) {
           isError = true;
-          failureReason = `claude exit code ${e.exitCode}`;
+          failure = { reason: "cli_exit_error", detail: `claude exit code ${e.exitCode}` };
         }
       })
       // Execute mode never presents a plan; a stray `plan_ready` carries nothing to stream.
@@ -111,7 +108,7 @@ async function streamExecute(
 
   return {
     isError,
-    ...(failureReason !== undefined && { failureReason }),
+    ...(failure && { failure }),
     ...(usage && { usage }),
   };
 }

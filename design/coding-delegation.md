@@ -55,7 +55,7 @@ The *Execution Model* table claims "User's Max/Pro subscription". This subsectio
 
 **Why not `ANTHROPIC_API_KEY`.** Bills against Console (API), not the user's Max/Pro subscription — defeats the entire premise of *Execution Model*. It also wins precedence over `CLAUDE_CODE_OAUTH_TOKEN` if both are set ([authentication docs](https://code.claude.com/docs/en/authentication) → *Authentication precedence*), so Cogmo must never set `ANTHROPIC_API_KEY` on the coding container's env, even by accident from the host shell.
 
-**Token rotation.** 1-year TTL. The secrets row already carries `created_at`; re-running the wizard's auth step replaces the secret in place. Token expiry at runtime surfaces as `claude -p` exiting with an auth failure on the next task — recorded into `coding_tasks.failure_reason` as a new `claude_auth_failed` discriminator alongside the existing `auth_failed` (push-PAT-specific, defined in *Flow → push step*) and `branch_conflict` arms. **Pro-active expiry warning is deferred** — surfacing "X days to rotation" via `/status` belongs in a follow-up once the conversation-status `/status` command grows a configuration-health section. Tracked in `todo.md` as a `p3`.
+**Token rotation.** 1-year TTL. The secrets row already carries `created_at`; re-running the wizard's auth step replaces the secret in place. Token expiry at runtime surfaces as `claude -p` exiting with an auth failure on the next task — `coding_tasks.failure_reason = 'claude_auth_failed'` (*Task lifecycle → Failure reasons*). The value is reserved: the CLI runner does not yet tell an expired token from any other non-zero exit, so such a task records `cli_exit_error` with the exit code as its `failure_detail`. **Pro-active expiry warning is deferred** — surfacing "X days to rotation" via `/status` belongs in a follow-up once the conversation-status `/status` command grows a configuration-health section. Tracked in `todo.md` as a `p3`.
 
 **Codex parallel.** Out of scope for slice 2. Codex CLI does not currently have a headless-token equivalent of `claude setup-token`; the Codex auth path will likely require seeding `~/.codex/auth.json` into the per-task home volume from a value held in the secrets table — same "freshly seeded per task, never bind-mounted" discipline. Tracked as a P2 follow-up; design slot reserved here so the secrets-table key namespace stays consistent (`codex_auth_json` alongside `claude_code_oauth_token`).
 
@@ -180,7 +180,7 @@ Concrete payoff: when Stage 1 evolution observes a correction during a coding ta
 
 Wiring this into `DefaultPromptSource` is P2 — P1 prompts are hardcoded templates with runtime slot fills.
 
-## Task Model `[confirmed]` (slice 1 — `coding_repos` + `coding_tasks` with the slice-1 column set; `conversation_id` added to track triggering conversation)
+## Task Model `[confirmed; failure_reason enum, failure_detail and the per-state CHECKs proposed]` (slice 1 — `coding_repos` + `coding_tasks` with the slice-1 column set; `conversation_id` added to track triggering conversation)
 
 **One coding task = one working tree + one branch + one CLI session + one PR.** The task container from [sandbox.md](sandbox.md) is the execution environment; the working tree lives inside it (mounted from the host's worktree path). On bind-mount backends the tree is a **standalone clone** of the registered parent repo (`git clone --no-hardlinks`, `origin` set to `remote_url`), never a linked `git worktree`: a linked worktree's `.git` is a file pointing at an absolute gitdir inside the parent repo, which doesn't exist in the container once the tree is mounted at `/workspace` — and mounting the parent `.git` read-write would hand the sandbox write access to config/hooks that host-side git later executes. The self-contained clone is the same shape the Daytona backend gets from cloning inside the sandbox.
 
@@ -195,6 +195,15 @@ CREATE TYPE coding_trigger_source AS ENUM ('user', 'evolution', 'signal_pipeline
 CREATE TYPE coding_task_status AS ENUM (
   'queued', 'planning', 'awaiting_approval', 'executing',
   'pending_verify', 'verifying', 'pushed', 'pr_open', 'failed', 'cancelled'
+);
+-- Why a task ended; one label per writer branch. See Task lifecycle → Failure reasons.
+CREATE TYPE coding_task_failure_reason AS ENUM (
+  'cli_exit_error', 'no_plan_produced', 'claude_auth_failed',
+  'push_failed', 'branch_conflict', 'auth_failed',
+  'verify_failed', 'verify_timed_out',
+  'pr_auth_failed', 'pr_validation_failed', 'pr_open_failed',
+  'credentials_unavailable', 'run_terminated', 'start_emit_failed', 'unexpected_error',
+  'user_cancelled', 'user_requested_revisions', 'unknown'
 );
 
 coding_tasks (
@@ -213,11 +222,19 @@ coding_tasks (
   plan_approved_at        TIMESTAMPTZ,                            -- when the plan gate cleared: human tap, profile autoapprove, or an automated trigger that has no gate. Null until then
   pr_metadata             JSONB,                                  -- PrMetadataSchema = { url, number, branchSha, openedAt }; null until 4.0g opens the PR. Atomic-by-Zod — no half-recorded state. Replaces the previous `pr_url TEXT` column.
   status                  coding_task_status NOT NULL,
-  failure_reason          TEXT,
+  failure_reason          coding_task_failure_reason,             -- set exactly when status is failed or cancelled (chk_coding_tasks_reason_with_end)
+  failure_detail          TEXT,                                   -- the masked text the writer of failure_reason had (a CLI exit code, the suite's output, a thrown error's message); null for a Cancel, and whenever failure_reason is null (chk_coding_tasks_detail_with_reason)
   resource_usage          JSONB,                                  -- ResourceUsageSchema; nullable = no stats poll yet; populated by sandbox aggregator from turn.completed events
   claimed_by_run_id       TEXT,                                   -- Inngest run that most recently claimed this task via a status transition. A claim step whose result is lost re-runs and reads its own committed write as `stale`, which status alone cannot tell apart from a duplicate delivery finding a dead run's row — and the two want opposite handling (resume vs. don't mint a second sandbox). A claim also adopts a row sitting at its target with a NULL claimant, which is how rows predating migration 0054 get bound to exactly one run.
   idempotency_key         TEXT UNIQUE,                            -- caller-supplied deterministic-per-submission token (`delegate_coding:<turnKey>:i<N>:p<P>:<digest of tool name + normalized args>`); null for callers with no retry semantics, and Postgres's NULL-not-equal unique semantics let those coexist. See Flow → Inngest step boundaries.
-  created_at              TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- Per-state data tied to the status that writes it; see Task lifecycle → Per-state data.
+  CONSTRAINT chk_coding_tasks_reason_with_end CHECK ((failure_reason IS NOT NULL) = (status IN ('failed', 'cancelled'))),
+  CONSTRAINT chk_coding_tasks_detail_with_reason CHECK (failure_detail IS NULL OR failure_reason IS NOT NULL),
+  CONSTRAINT chk_coding_tasks_queued_bare CHECK (status <> 'queued' OR (worktree_assignment IS NULL AND session_id IS NULL AND container_id IS NULL AND plan IS NULL AND plan_approved_at IS NULL AND pr_metadata IS NULL AND resource_usage IS NULL AND claimed_by_run_id IS NULL)),
+  CONSTRAINT chk_coding_tasks_plan_at_gate CHECK (status NOT IN ('awaiting_approval', 'executing', 'pending_verify', 'verifying', 'pushed', 'pr_open') OR plan IS NOT NULL),
+  CONSTRAINT chk_coding_tasks_approval_after_gate CHECK ((plan_approved_at IS NULL OR status <> 'planning') AND (status NOT IN ('executing', 'pending_verify', 'verifying', 'pushed', 'pr_open') OR plan_approved_at IS NOT NULL)),
+  CONSTRAINT chk_coding_tasks_pr_metadata_after_push CHECK ((pr_metadata IS NULL OR status IN ('pushed', 'pr_open', 'failed', 'cancelled')) AND (status <> 'pr_open' OR pr_metadata IS NOT NULL))
 )
 
 coding_repos (
@@ -259,11 +276,47 @@ The unit is the `coding_tasks` row, keyed on its id. Each orchestrator opens wit
 | `pending_verify → verifying` | verify, `set-status-verifying` | conditional; stamps `claimed_by_run_id` |
 | `verifying → pushed` | verify, `transition-pushed` (`advanceTask`) | conditional on `verifying`; `coding/task/pushed` follows only when it fires |
 | `pushed → pr_open` | verify, `transition-pr-open` (`advanceTask`) | conditional on `pushed`; `pr_metadata` is written ahead of it, and `coding/task/pr-opened` follows only when it fires |
-| non-terminal → `failed` | each orchestrator's in-run failure exit, `transition-failed` / `transition-failed-after-push` (`recordTaskFailed` → `failTaskIfNonTerminal`) | conditional on non-terminal; writes `failure_reason`; `coding/task/failed` follows when it fires, and when the row already reads `failed` |
-| non-terminal → `failed` | each orchestrator's catch (`failTaskFromCatch`) | unconditional; the emit goes first (`task-failure.ts`) |
-| non-terminal → `failed` | `coding-task-reconcile`, `failTaskIfNonTerminal` | conditional on non-terminal |
-| `queued → failed` | `delegate`, when the start emit throws (`failQueuedTask`) | conditional on `queued` |
-| non-terminal → `cancelled` | the plan keyboard's Cancel / Revise, `cancelTaskIfActive` | conditional on non-terminal |
+| non-terminal → `failed` | each orchestrator's in-run failure exit, `transition-failed` / `transition-failed-after-push` (`recordTaskFailed` → `failTaskIfNonTerminal`) | conditional on non-terminal; writes `failure_reason` + `failure_detail`; `coding/task/failed` follows when it fires, and when the row already reads `failed` |
+| non-terminal → `failed` | each orchestrator's catch (`failTaskFromCatch`) | unconditional; writes `unexpected_error` + the error's text; the emit goes first (`task-failure.ts`) |
+| non-terminal → `failed` | `coding-task-reconcile`, `failTaskIfNonTerminal` | conditional on non-terminal; writes `run_terminated` + the run and error text |
+| `queued → failed` | `delegate`, when the start emit throws (`failQueuedTask`) | conditional on `queued`; writes `start_emit_failed` + the error's text |
+| non-terminal → `cancelled` | the plan keyboard's Cancel / Revise, `cancelTaskIfActive` | conditional on non-terminal; writes `user_cancelled` / `user_requested_revisions`, `failure_detail` null |
+
+
+#### Per-state data `[proposed]`
+
+Each nullable column is set by one phase and stays set; the CHECKs in the schema tie each to the statuses that can hold it. A write that would leave a row outside this table is refused by the database, so no run reads such a row.
+
+| Status | Set | Null |
+|-|-|-|
+| `queued` | — | every lifecycle column (`chk_coding_tasks_queued_bare`) |
+| `planning` | `claimed_by_run_id`; then `worktree_assignment`, `container_id`, `session_id` as the run allocates | `plan_approved_at`, `pr_metadata`, `failure_reason` |
+| `awaiting_approval` | the above, `plan` (`chk_coding_tasks_plan_at_gate`); `plan_approved_at` once the gate clears | `pr_metadata`, `failure_reason` |
+| `executing`, `pending_verify`, `verifying` | `plan`, `plan_approved_at` (`chk_coding_tasks_approval_after_gate`); `resource_usage` as execute reports | `pr_metadata`, `failure_reason` |
+| `pushed` | the above; `pr_metadata` once `set-pr-metadata` runs | `failure_reason` |
+| `pr_open` | the above, `pr_metadata` (`chk_coding_tasks_pr_metadata_after_push`) | `failure_reason` |
+| `failed`, `cancelled` | `failure_reason` (`chk_coding_tasks_reason_with_end`); `failure_detail` where the writer had text; whatever the phases before it set | — |
+
+`session_id` has no CHECK: the plan run advances to `awaiting_approval` whether or not the backend reported a session id, so `executing` without one is a state the code reaches (`checkExecutable` fails the task there). Tying it down means failing the plan when no id was captured, a behaviour change this table does not make.
+
+#### Failure reasons `[proposed]`
+
+`failure_reason` is the label of the writer branch that ended the task; `failure_detail` is the masked text that branch had (`redactSecretsInText`, applied once in `task-failure.ts`). Every writer passes a `TaskFailure = { reason, detail }`; `coding/task/failed` carries both fields, and the chat message is `describeTaskFailure(failure)`: the reason's label, then the detail.
+
+| Reason | Writer | Detail |
+|-|-|-|
+| `cli_exit_error` | `plan-cli` / `execute-cli` session reporting `isError` | `claude exit code <n>` |
+| `no_plan_produced` | plan session ending cleanly without a `plan_ready` | fixed text |
+| `claude_auth_failed` | reserved (*Subscription Auth*); no writer yet | — |
+| `branch_conflict`, `auth_failed`, `push_failed` | `commit-and-push-execute-changes` (execute, git-remote) and `commit-and-push` (verify), from `runCommitAndPush`'s kind | the push output |
+| `verify_failed`, `verify_timed_out` | `run-verify` verdict, by `timedOut` | `exit <code>` and the suite's output |
+| `pr_auth_failed`, `pr_validation_failed`, `pr_open_failed` | `open-pr`, from `runOpenPr`'s kind (401/403, 422, anything else) | GitHub's message |
+| `credentials_unavailable` | verify's pre-container gate: unparsable remote URL, missing or malformed GitHub identity, missing Claude OAuth token | the operator-actionable message |
+| `run_terminated` | `coding-task-reconcile` on `inngest/function.failed` | the run id, function id and error message |
+| `start_emit_failed` | `delegate`, `failQueuedTask` | the send error |
+| `unexpected_error` | every orchestrator's catch, `failTaskFromCatch` | `describeError(err)`; the plan and execute runs' missing-OAuth-token throw lands here, with its operator message |
+| `user_cancelled`, `user_requested_revisions` | the plan keyboard, `cancelTaskIfActive` | null |
+| `unknown` | migration 0076's backfill, for stored text no branch is known to have written, and for a `failed` / `cancelled` row with no text | the stored text, or null |
 
 `transition-pending-verify` supersedes `set-status-pending-verify`, an unconditional write that memoized `void`. A run in flight that already ran the old step never requests it again: it runs the new one, finds the row `stale` at `pending_verify` (verify can't claim it before `emit-cli-done`), and carries on. The same shape retires `set-status-pushed`, `set-status-pr-open`, `set-status-failed` and `set-status-failed-after-push`. A verify run in flight across that deploy executes `transition-pushed` wherever it had got to, since nothing memoized it: `stale` at `pushed` is advanced, and so is `stale` at `pr_open` (`settledAt`) — a verifying task reaches `pr_open` only through this run's own retired `set-status-pr-open` — so the run carries on through its memoized `open-pr` and `set-pr-metadata` to `transition-pr-open`, which reads `stale` at its target, and on to the `emit-pr-opened` and `fetch-feature-branch` it may still owe. `transition-failed*` read `already_terminal` at `failed` as recorded and go on to the emit. The emit steps keep their ids, so nothing is re-sent. **Residual, for one deploy:** a verify run past `set-status-pushed` whose PR open failed, with `set-status-failed` run and `emit-task-failed` not, finds `stale` at `failed` in `transition-pushed`, reclaims and returns `skipped`: the task reads `failed` and is never announced, so its run branch waits for the weekly sweep.
 
@@ -283,6 +336,9 @@ The unit is the `coding_tasks` row, keyed on its id. Each orchestrator opens wit
 | Cancel, then the body throws (any orchestrator) | **Residual:** `failed` | the catch's write is unconditional: its emit goes first so a bus outage still reaches reconcile, and a conditional write behind that emit would leave `coding/task/failed` out for a task that reads `cancelled` |
 | `delegate`'s start emit throws | `failed` if still `queued` | `failQueuedTask` is conditional, so a run that already claimed the task is left alone |
 | Run in flight across a deploy that replaced an unconditional status step (`set-status-pending-verify`, `set-status-pushed`, `set-status-pr-open`, `set-status-failed`, `set-status-failed-after-push`) | the status the run had reached | see above: the new step reads `stale` at its target or at a status settled by the run's own later steps, or `already_terminal` at `failed`, and carries on to the steps it has not run. **Residual, one deploy:** a verify run at `failed` after a failed PR open, before its `emit-task-failed`, stops in `transition-pushed` unannounced |
+| Deploy of migration 0076 (`failure_reason` typed, `failure_detail` added, the CHECKs) over existing rows | migrated, or untouched | one file, one transaction: `CREATE TYPE`, `ADD COLUMN`, the backfill (text → `failure_detail`, mapped by the prefix each writer branch wrote → `failure_reason`, `unknown` otherwise; a `failed` / `cancelled` row with no text → `unknown`), the type change, the CHECKs. A row the CHECKs refuse — a combination no writer produces — fails the file, which rolls the backfill back too; the next boot retries the whole file against the same rows, so nothing is half-migrated and the fix is a row repair, not a migration repair (`migration-0076.test.ts`) |
+| Run in flight across the deploy of 0076, holding a `plan-cli` / `execute-cli` memo of `{ isError, failureReason: <text> }` or a `reconcile` memo of `{ status: "reconciled", failureReason: <text> }` | `failed`, with a typed reason | the memo is parsed on every invocation (`fromSessionResult`, `ReconcileResultSchema`): the text reads as the detail of the one reason that step can produce, `cli_exit_error` or `run_terminated` |
+| A `coding/task/failed` emitted by the old build and delivered to the new one | `failed`, announced in the old shape | **Residual, one deploy:** the trigger schema wants `reason` from the enum and `detail`, so `coding-cleanup-run-branch` rejects the event and the run branch waits for the weekly orphan sweep |
 
 Each orchestrator is a sequence of named stages, one module per stage:
 
@@ -518,7 +574,7 @@ That transition is also the durable half of duplicate-event protection. Every ha
 | `try-resume` | `step.run` (execute) | Calls `sandbox.tryResumeByTaskId` and returns the state or null. A non-null return means the execute orchestrator skips the create-fresh branch entirely — no fresh clone, no checkout, no auth resolution. |
 | `execute-cli` | `step.run` | `claude -p --resume <sid>`, permission responses over stdin. Durable for the same reason as `plan-cli` — a billable session, re-run once per remaining boundary if left bare. Emits the `execute_started` banner and all text/tool pushes from inside the body, so the user sees one run's worth of progress. Returns `{isError, failureReason?, usage?}`. |
 | `provision-askpass` | `step.run` (git-remote only) | Writes the per-task askpass dir on the host (PAT + signing key + helper script) before `create-container` so the execute sandbox can mount it. Returns the safe-to-persist paths (no secrets in the step return). Skipped on bind-mount: the host worktree is shared with the verify sandbox via the bind mount, so no separate transport step is needed and the verify orchestrator's own `provision-askpass` is the only call site. |
-| `commit-and-push-execute-changes` | `step.run` (git-remote only) | After execute streaming succeeds and before `transition-pending-verify`. Calls `runCommitAndPush` from inside the execute sandbox with `branch=cogmo/<idShort>` (local) and `remoteBranch=cogmo/run/<task-id>` (push refspec). claude's edits land on the run-branch on origin, where the verify sandbox's fresh clone will pick them up. Push failure marks the task `failed` with a descriptive `failure_reason` and skips the pending-verify transition. The returned `output` is masked as in `commit-and-push`. |
+| `commit-and-push-execute-changes` | `step.run` (git-remote only) | After execute streaming succeeds and before `transition-pending-verify`. Calls `runCommitAndPush` from inside the execute sandbox with `branch=cogmo/<idShort>` (local) and `remoteBranch=cogmo/run/<task-id>` (push refspec). claude's edits land on the run-branch on origin, where the verify sandbox's fresh clone will pick them up. Push failure marks the task `failed` as `branch_conflict`, `auth_failed` or `push_failed` with the push output as `failure_detail`, and skips the pending-verify transition. The returned `output` is masked as in `commit-and-push`. |
 | `transition-pending-verify` | `step.run` | Conditional `executing → pending_verify`, returning the transition result. When the task left `executing` under the run (a Cancel during `execute-cli`), the run reclaims its worktree and sandbox in `teardown-worktree-cancelled` / `teardown-cancelled`, fails the stream, emits no `cli-done` and returns `skipped`. Supersedes `set-status-pending-verify`; see Task lifecycle. |
 | `emit-cli-done` | `step.run` | Hand-off to the verify orchestrator via `coding/task/cli-done` event. Emitted after the durable `pending_verify` transition. |
 | `run-verify` | `step.run` | Single post-hoc execution of `<coding_repos.verify_command>` inside the container (via `bash -lc`). **No retry loop in this step.** Iterating on failure was the CLI's job during the execute phase per *Prompt Construction → Self-verify clause*; this step exists only to confirm the CLI's "done" claim. Pass → proceed to push + PR; fail → mark task failed with the verify output. Budget caps (`task_token_budget`, `task_wall_time_seconds`) enforce termination of the execute phase upstream; this step is bounded by `coding_repos.verify_timeout_seconds`. Durable because it runs the repo's entire test suite — minutes of compute that a bare body would repeat at every later boundary — and because `ok` selects disjoint step sets downstream. `runVerifyStreaming` masks the captured `output` and caps it at 8 KiB, so the step return stays small; how it masks output it cut short is in `verify.ts` (`maskCapture`). |
@@ -529,7 +585,7 @@ That transition is also the durable half of duplicate-event protection. Every ha
 | `transition-pr-open` | `step.run` | Conditional `pushed → pr_open` after `set-pr-metadata`, returning the transition result; `emit-pr-opened` and `fetch-feature-branch` follow only when it fires. Supersedes `set-status-pr-open`; see Task lifecycle. |
 | `fetch-feature-branch` | `step.run` (git-remote only) | After PR open, host-side `fetchFeatureBranch` updates `refs/remotes/origin/cogmo/<idShort>` in the local mirror so the host's commit graph reflects the sandbox's push. Best-effort — origin is the source of truth. Skipped on bind-mount (the host worktree IS the source of truth). |
 | `transition-failed`, `transition-failed-after-push` | `step.run` | The in-run failure exits' conditional `→ failed` (`failTaskIfNonTerminal`), returning the result. `already_terminal` at `failed` is this step re-executing after a lost result, or reconcile getting there first, and the failure flow continues; any other terminal status (a Cancel, or `pr_open`) ends the run, which reclaims and returns `skipped` instead. Supersede `set-status-failed` / `set-status-failed-after-push`. |
-| `emit-task-failed` | `step.run` | After `transition-failed` fires or finds the row already `failed`, and from every catch, emits `coding/task/failed` so cleanup subscribers (run-branch deletion, future telemetry) hook in without polling the row. `task-failure.ts` masks the reason (`redactSecretsInText`) once and hands it back, so the event, `failure_reason`, the chat message and the run's return value carry the same text. |
+| `emit-task-failed` | `step.run` | After `transition-failed` fires or finds the row already `failed`, and from every catch, emits `coding/task/failed` so cleanup subscribers (run-branch deletion, future telemetry) hook in without polling the row. `task-failure.ts` masks the failure's detail (`redactSecretsInText`) once and hands the `TaskFailure` back, so the event (`reason`, `detail`), the row (`failure_reason`, `failure_detail`), the chat message and the run's return value carry the same values. |
 | `teardown-worktree` | `step.run` (host-path assignments only) | `safeTeardownWorktree` removes the clone on clean, `git add -A && commit && force-push HEAD:refs/cogmo-wip/<task-id>` on dirty/unpushed. git-remote assignments have no host worktree — the helper early-returns. |
 | `teardown` | step, or `catch`/`finally` | `sandbox.deleteByTaskId(taskId)` cascades the sandbox kill. A step on the in-run failure exits and the execute hand-off; `teardown-cancelled` on the plan and execute runs' reclaim of a task that ended under them (the verify run's reclaim leaves the sandbox to its `finally`); unconditional in every catch (and in verify's `finally`), since the sweep is idempotent by task label and also reaps a managed sandbox that outlived a thrown create. The host askpass dir is released separately, by each orchestrator's `AskpassLease` in its `finally`. |
 
@@ -546,9 +602,9 @@ Every `execStreaming()` call inside the orchestrator pair (plan + execute) and t
 | `checkoutFeatureBranchInSandbox` (`git checkout -B`) | 60 s | 30 s | Fast op (~1 s in steady state). Both timeouts tight because there is no legitimate slow path. |
 | `runClaudePlan` / `runClaudeExecute` (plan + execute streams) | 30 min | 5 min | Total cap is the absolute upper bound for one CLI invocation against current models. Idle cap catches WS-wedged-mid-stream while still allowing legitimate gaps between tool calls and thinking blocks. |
 | `runCommitAndPush` (`git add`, `git commit -S`, `git push`) | 60 s for local-mutating commands; 5 min for `git push` (network upload) | 30 s | Push can take longer on a large delta; idle cap protects against a hung TLS connection mid-upload. |
-| `run-verify` (`bash -lc <verify_command>`) | `coding_repos.verify_timeout_seconds` (default 600 s) | — | A timeout once the command runs is a verdict, not an error: `runVerifyStreaming` reads `exited` and maps `timed_out` to `exitCode = TIMEOUT_EXIT_CODE (124)`, persisted as the row's `failure_reason`. A start that outlasts the cap leaves nothing to judge: `execStreaming()` throws a timed_out `ExecError`, which fails the `run-verify` step. No idle cap yet (tracked in `todo.md`). |
+| `run-verify` (`bash -lc <verify_command>`) | `coding_repos.verify_timeout_seconds` (default 600 s) | — | A timeout once the command runs is a verdict, not an error: `runVerifyStreaming` reads `exited` and maps `timed_out` to `exitCode = TIMEOUT_EXIT_CODE (124)` and `timedOut: true`, recorded as `failure_reason = 'verify_timed_out'` with the output as `failure_detail`. A start that outlasts the cap leaves nothing to judge: `execStreaming()` throws a timed_out `ExecError`, which fails the `run-verify` step. No idle cap yet (tracked in `todo.md`). |
 
-A timeout fire is mapped to a task-level failure by the caller — `checkoutFeatureBranchInSandbox` rethrows the timed_out `ExecError` so the orchestrator's outer `catch` sees it (which writes `failure_reason: "git checkout -B … timed out after 60s"` and emits `coding/task/failed`); `runCommitAndPush` rethrows; the claude runners turn it into a `complete` event with `isError: true` and a `failureReason` describing the cap.
+A timeout fire is mapped to a task-level failure by the caller — `checkoutFeatureBranchInSandbox` rethrows the timed_out `ExecError` so the orchestrator's outer `catch` sees it (which records `unexpected_error` with `failure_detail: "git checkout -B … timed out after 60s"` and emits `coding/task/failed`); `runCommitAndPush` rethrows; the claude runners turn it into a `complete` event with `isError: true`, which the session records as `cli_exit_error`.
 
 ## Autonomy Gates `[proposed]`
 
@@ -769,7 +825,7 @@ A per-function `onFailure` handler is **not** the right hook for this. Inngest's
 
 A dedicated Inngest function `coding-task-reconcile` subscribes to that event with a CEL filter pinning it to the coding orchestrators (`coding-task-start`, `coding-task-execute`, `coding-task-verify`). The function body uses **two separate durable steps**, not one:
 
-1. `step.run("reconcile", …)` — pull `function_id` + `event.data.event.data.taskId`, conditional UPDATE: flip non-terminal → `failed` with `failure_reason = "inngest run terminated abnormally (run_id <id>, function_id <fn>): <error.message>"`, masked with `redactSecretsInText`. Returns a discriminated result; the `reconciled` variant carries `failureReason` so the next step has the payload.
+1. `step.run("reconcile", …)` — pull `function_id` + `event.data.event.data.taskId`, conditional UPDATE: flip non-terminal → `failed` with `failure_reason = 'run_terminated'` and `failure_detail = "inngest run terminated abnormally (run_id <id>, function_id <fn>): <error.message>"`, masked with `redactSecretsInText`. Returns a discriminated result; the `reconciled` variant carries the `failure` so the next step has the payload.
 2. `step.sendEvent("emit-failed", { …codingTaskFailed.create({…}), id: \`reconcile-${run_id}\` })` — durable bus emit with an explicit idempotency `id` so a retry of this step after a transient send blip is deduplicated at the bus.
 
 The split is load-bearing. Putting the emit inside the cached `step.run` is a durability bug: a transient `inngest.send` failure inside the body throws the step, Inngest retries, but the DB UPDATE committed on the first attempt — so the retry's conditional UPDATE returns `already_terminal` and the function returns `skipped`. The event never gets emitted. `cleanup-run-branch` never fires. Discovered in PR #267 review; pinned by the wrapper-level tests in `reconcile-on-failure.test.ts`.

@@ -1,9 +1,11 @@
 import { sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database, Transactor } from "../../../db/index.js";
+import { findPgErrorByCode } from "../../../db/pg-errors.js";
 import { DrizzleSandboxStore } from "../../../sandbox/store/index.js";
 import type { ContainerLabels, ResourceLimits } from "../../../sandbox/types.js";
 import { expectOk } from "../../../test/assertions.js";
+import { PARKED_PR_METADATA, parkCodingTaskAt } from "../../../test/coding-fixtures.js";
 import { createTestDatabase, truncateAll } from "../../../test/pglite.js";
 import { DrizzleAgentStore } from "../../store/index.js";
 import { type CodingBackend, type CodingTaskStatus, DrizzleCodingStore } from "./index.js";
@@ -437,7 +439,7 @@ describe("DrizzleCodingStore", () => {
         );
       const queued = await insert();
       const corrupt = await insert();
-      await tx((trx) => store.updateTaskStatus(trx, { id: corrupt.id, status: "cancelled" }));
+      await tx((trx) => store.cancelTaskIfActive(trx, corrupt.id, "user_cancelled"));
       // Bypass the store: a JSONB value its schema rejects on read.
       await db.execute(
         sql`UPDATE coding_tasks SET worktree_assignment = '{"type":"bogus"}'::jsonb WHERE id = ${corrupt.id}`,
@@ -470,6 +472,7 @@ describe("DrizzleCodingStore", () => {
           allowPrivilegedRunc: false,
         }),
       );
+      await parkCodingTaskAt(tx, store, t.id, "planning");
       await tx((trx) =>
         store.setTaskWorktreeAssignment(trx, t.id, {
           type: "host-path",
@@ -501,6 +504,7 @@ describe("DrizzleCodingStore", () => {
           allowPrivilegedRunc: false,
         }),
       );
+      await parkCodingTaskAt(tx, store, t.id, "planning");
       await tx((trx) =>
         store.setTaskWorktreeAssignment(trx, t.id, {
           type: "host-path",
@@ -559,7 +563,7 @@ describe("DrizzleCodingStore", () => {
       ).rejects.toThrow();
     });
 
-    it("updateTaskStatus transitions through states with optional fields", async () => {
+    it("updateTaskStatus writes a forward status bare and a failed status with its reason", async () => {
       const repoId = await seedRepo();
       const t = await tx((trx) =>
         store.insertTask(trx, {
@@ -574,28 +578,17 @@ describe("DrizzleCodingStore", () => {
       await tx((trx) => store.updateTaskStatus(trx, { id: t.id, status: "planning" }));
       expect((await tx((trx) => store.getTask(trx, t.id)))?.status).toBe("planning");
 
-      const approvedAt = new Date("2026-04-26T10:00:00Z");
-      await tx((trx) =>
-        store.updateTaskStatus(trx, {
-          id: t.id,
-          status: "executing",
-          planApprovedAt: approvedAt,
-        }),
-      );
-      const after = await tx((trx) => store.getTask(trx, t.id));
-      expect(after?.status).toBe("executing");
-      expect(after?.planApprovedAt?.toISOString()).toBe(approvedAt.toISOString());
-
       await tx((trx) =>
         store.updateTaskStatus(trx, {
           id: t.id,
           status: "failed",
-          failureReason: "verify failed: 3 tests",
+          failure: { reason: "verify_failed", detail: "exit 1\n\n3 tests failed" },
         }),
       );
       const failed = await tx((trx) => store.getTask(trx, t.id));
       expect(failed?.status).toBe("failed");
-      expect(failed?.failureReason).toBe("verify failed: 3 tests");
+      expect(failed?.failureReason).toBe("verify_failed");
+      expect(failed?.failureDetail).toBe("exit 1\n\n3 tests failed");
     });
 
     it("setTaskSessionId / setTaskContainerId / setTaskPlan / setTaskPrMetadata persist their fields", async () => {
@@ -609,6 +602,7 @@ describe("DrizzleCodingStore", () => {
           allowPrivilegedRunc: false,
         }),
       );
+      await parkCodingTaskAt(tx, store, t.id, "pushed");
       const containerId = await seedContainer();
 
       await tx((trx) => store.setTaskSessionId(trx, t.id, "sess-uuid-1"));
@@ -669,6 +663,7 @@ describe("DrizzleCodingStore", () => {
           allowPrivilegedRunc: false,
         }),
       );
+      await parkCodingTaskAt(tx, store, t.id, "planning");
       await tx((trx) =>
         store.setTaskResourceUsage(trx, t.id, {
           memory_bytes: { managed: 1024, user: 2048, project: 512 },
@@ -713,6 +708,7 @@ describe("DrizzleCodingStore", () => {
           allowPrivilegedRunc: false,
         }),
       );
+      await parkCodingTaskAt(tx, store, t.id, "planning");
       // First write: sandbox lifecycle at create-container time.
       await tx((trx) =>
         store.setTaskResourceUsage(trx, t.id, {
@@ -769,6 +765,7 @@ describe("DrizzleCodingStore", () => {
           allowPrivilegedRunc: false,
         }),
       );
+      await parkCodingTaskAt(tx, store, t.id, "planning");
       await tx((trx) =>
         store.setTaskResourceUsage(trx, t.id, {
           sandbox: {
@@ -801,6 +798,7 @@ describe("DrizzleCodingStore", () => {
           allowPrivilegedRunc: false,
         }),
       );
+      await parkCodingTaskAt(tx, store, t.id, "planning");
       // No sandbox block was ever written — resume-path task or legacy row.
       await tx((trx) => store.setTaskResourceUsage(trx, t.id, { tokens_input: 500 }));
       await tx((trx) => store.setTaskSandboxDeletedAt(trx, t.id, "2026-05-11T13:00:00.000Z"));
@@ -820,6 +818,7 @@ describe("DrizzleCodingStore", () => {
           allowPrivilegedRunc: false,
         }),
       );
+      await parkCodingTaskAt(tx, store, t.id, "planning");
       await tx((trx) =>
         store.setTaskResourceUsage(trx, t.id, {
           sandbox: {
@@ -848,6 +847,7 @@ describe("DrizzleCodingStore", () => {
           allowPrivilegedRunc: false,
         }),
       );
+      await parkCodingTaskAt(tx, store, t.id, "planning");
       await tx((trx) =>
         store.setTaskWorktreeAssignment(trx, t.id, {
           type: "host-path",
@@ -872,6 +872,7 @@ describe("DrizzleCodingStore", () => {
           allowPrivilegedRunc: false,
         }),
       );
+      await parkCodingTaskAt(tx, store, t.id, "pushed");
       await db.execute(
         sql`UPDATE coding_tasks SET pr_metadata = '{"junk":true}'::jsonb WHERE id = ${t.id}`,
       );
@@ -889,6 +890,7 @@ describe("DrizzleCodingStore", () => {
           allowPrivilegedRunc: false,
         }),
       );
+      await parkCodingTaskAt(tx, store, t.id, "planning");
       await db.execute(
         sql`UPDATE coding_tasks SET resource_usage = '{"junk":true}'::jsonb WHERE id = ${t.id}`,
       );
@@ -907,8 +909,7 @@ describe("DrizzleCodingStore", () => {
             allowPrivilegedRunc: false,
           }),
         );
-        if (status !== "queued")
-          await tx((trx) => store.updateTaskStatus(trx, { id: t.id, status }));
+        if (status !== "queued") await parkCodingTaskAt(tx, store, t.id, status);
       };
 
       await mkTask("queued");
@@ -1050,7 +1051,7 @@ describe("DrizzleCodingStore", () => {
           allowPrivilegedRunc: false,
         }),
       );
-      await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "awaiting_approval" }));
+      await parkCodingTaskAt(tx, store, task.id, "awaiting_approval");
 
       const result = await tx((trx) =>
         store.approvePlanIfPending(trx, task.id, new Date("2026-04-26T12:00:00Z")),
@@ -1074,7 +1075,7 @@ describe("DrizzleCodingStore", () => {
           allowPrivilegedRunc: false,
         }),
       );
-      await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "awaiting_approval" }));
+      await parkCodingTaskAt(tx, store, task.id, "awaiting_approval");
       const first = new Date("2026-04-26T12:00:00Z");
       const second = new Date("2026-04-26T13:00:00Z");
       await tx((trx) => store.approvePlanIfPending(trx, task.id, first));
@@ -1088,7 +1089,7 @@ describe("DrizzleCodingStore", () => {
       expect(reloaded?.planApprovedAt?.toISOString()).toBe(first.toISOString());
     });
 
-    it("approve returns not_pending when status is past awaiting_approval", async () => {
+    it("approve returns not_pending when status is short of awaiting_approval", async () => {
       const repoId = await seedRepo();
       const task = await tx((trx) =>
         store.insertTask(trx, {
@@ -1099,11 +1100,11 @@ describe("DrizzleCodingStore", () => {
           allowPrivilegedRunc: false,
         }),
       );
-      await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "executing" }));
+      await parkCodingTaskAt(tx, store, task.id, "planning");
       const result = await tx((trx) => store.approvePlanIfPending(trx, task.id, new Date()));
       expect(result.kind).toBe("not_pending");
       if (result.kind !== "not_pending") return;
-      expect(result.status).toBe("executing");
+      expect(result.status).toBe("planning");
     });
 
     it("approve returns not_found for unknown id", async () => {
@@ -1124,14 +1125,15 @@ describe("DrizzleCodingStore", () => {
           allowPrivilegedRunc: false,
         }),
       );
-      await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "awaiting_approval" }));
+      await parkCodingTaskAt(tx, store, task.id, "awaiting_approval");
 
-      const result = await tx((trx) => store.cancelTaskIfActive(trx, task.id, "user cancelled"));
+      const result = await tx((trx) => store.cancelTaskIfActive(trx, task.id, "user_cancelled"));
       expect(result.kind).toBe("cancelled");
 
       const reloaded = await tx((trx) => store.getTask(trx, task.id));
       expect(reloaded?.status).toBe("cancelled");
-      expect(reloaded?.failureReason).toBe("user cancelled");
+      expect(reloaded?.failureReason).toBe("user_cancelled");
+      expect(reloaded?.failureDetail).toBeNull();
     });
 
     it("transitionTaskStatus: success path swaps status atomically", async () => {
@@ -1145,7 +1147,8 @@ describe("DrizzleCodingStore", () => {
           allowPrivilegedRunc: false,
         }),
       );
-      await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "awaiting_approval" }));
+      await parkCodingTaskAt(tx, store, task.id, "awaiting_approval");
+      await tx((trx) => store.approvePlanIfPending(trx, task.id, new Date()));
 
       const result = await tx((trx) =>
         store.transitionTaskStatus(trx, task.id, "awaiting_approval", "executing"),
@@ -1207,13 +1210,17 @@ describe("DrizzleCodingStore", () => {
       await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "planning" }));
 
       const result = await tx((trx) =>
-        store.failTaskIfNonTerminal(trx, task.id, "inngest run terminated abnormally"),
+        store.failTaskIfNonTerminal(trx, task.id, {
+          reason: "run_terminated",
+          detail: "inngest run terminated abnormally",
+        }),
       );
       expect(result.kind).toBe("failed");
 
       const reloaded = await tx((trx) => store.getTask(trx, task.id));
       expect(reloaded?.status).toBe("failed");
-      expect(reloaded?.failureReason).toBe("inngest run terminated abnormally");
+      expect(reloaded?.failureReason).toBe("run_terminated");
+      expect(reloaded?.failureDetail).toBe("inngest run terminated abnormally");
     });
 
     it("failTaskIfNonTerminal: returns already_terminal without rewriting an already-failed row (preserves original failure_reason)", async () => {
@@ -1232,21 +1239,25 @@ describe("DrizzleCodingStore", () => {
         store.updateTaskStatus(trx, {
           id: task.id,
           status: "failed",
-          failureReason: "claude exit code 2",
+          failure: { reason: "cli_exit_error", detail: "claude exit code 2" },
         }),
       );
 
       const result = await tx((trx) =>
-        store.failTaskIfNonTerminal(trx, task.id, "reconcile-injected reason"),
+        store.failTaskIfNonTerminal(trx, task.id, {
+          reason: "run_terminated",
+          detail: "reconcile-injected reason",
+        }),
       );
       expect(result.kind).toBe("already_terminal");
       if (result.kind !== "already_terminal") return;
       expect(result.status).toBe("failed");
 
       const reloaded = await tx((trx) => store.getTask(trx, task.id));
-      // The original (worker-supplied) failure_reason wins — reconcile
-      // must not stomp on a more accurate message.
-      expect(reloaded?.failureReason).toBe("claude exit code 2");
+      // The original (worker-supplied) failure wins — reconcile must not
+      // stomp on a more accurate one.
+      expect(reloaded?.failureReason).toBe("cli_exit_error");
+      expect(reloaded?.failureDetail).toBe("claude exit code 2");
     });
 
     it.each<{ terminal: "pr_open" | "failed" | "cancelled" }>([
@@ -1266,15 +1277,20 @@ describe("DrizzleCodingStore", () => {
             allowPrivilegedRunc: false,
           }),
         );
-        await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: terminal }));
-        const result = await tx((trx) => store.failTaskIfNonTerminal(trx, task.id, "ignored"));
+        await parkCodingTaskAt(tx, store, task.id, terminal);
+        const result = await tx((trx) =>
+          store.failTaskIfNonTerminal(trx, task.id, { reason: "unknown", detail: "ignored" }),
+        );
         expect(result.kind).toBe("already_terminal");
       },
     );
 
     it("failTaskIfNonTerminal: not_found for unknown id", async () => {
       const result = await tx((trx) =>
-        store.failTaskIfNonTerminal(trx, "019d0000-0000-7000-8000-000000000099", "x"),
+        store.failTaskIfNonTerminal(trx, "019d0000-0000-7000-8000-000000000099", {
+          reason: "unknown",
+          detail: "x",
+        }),
       );
       expect(result.kind).toBe("not_found");
     });
@@ -1294,11 +1310,11 @@ describe("DrizzleCodingStore", () => {
         store.updateTaskStatus(trx, {
           id: task.id,
           status: "failed",
-          failureReason: "claude exit code 2",
+          failure: { reason: "cli_exit_error", detail: "claude exit code 2" },
         }),
       );
 
-      const result = await tx((trx) => store.cancelTaskIfActive(trx, task.id, "ignored"));
+      const result = await tx((trx) => store.cancelTaskIfActive(trx, task.id, "user_cancelled"));
       expect(result.kind).toBe("already_terminal");
       if (result.kind !== "already_terminal") return;
       expect(result.status).toBe("failed");
@@ -1306,7 +1322,8 @@ describe("DrizzleCodingStore", () => {
       const reloaded = await tx((trx) => store.getTask(trx, task.id));
       // Original failure preserved — cancel didn't overwrite it.
       expect(reloaded?.status).toBe("failed");
-      expect(reloaded?.failureReason).toBe("claude exit code 2");
+      expect(reloaded?.failureReason).toBe("cli_exit_error");
+      expect(reloaded?.failureDetail).toBe("claude exit code 2");
     });
   });
 
@@ -1382,6 +1399,113 @@ describe("DrizzleCodingStore", () => {
         store.getCodingAutoapproveModeForTask(trx, "00000000-0000-7000-8000-deadbeef0000"),
       );
       expect(mode).toBeNull();
+    });
+  });
+  describe("per-state CHECKs", () => {
+    /** The CHECK a rejected write names; the rejection itself when it is not a CHECK violation. */
+    async function violatedCheck(promise: Promise<unknown>): Promise<string | undefined> {
+      try {
+        await promise;
+      } catch (err: unknown) {
+        const pg = findPgErrorByCode(err, ["23514"]);
+        if (pg) return pg.constraint ?? pg.constraint_name;
+        throw err;
+      }
+      throw new Error("expected the write to be refused");
+    }
+
+    async function seedTask(): Promise<string> {
+      const repoId = await seedRepo();
+      const row = await tx((trx) =>
+        store.insertTask(trx, {
+          repoId,
+          goal: "g",
+          triggerSource: "user",
+          backend: "claude",
+          allowPrivilegedRunc: false,
+        }),
+      );
+      return row.id;
+    }
+
+    it("refuses failed without a reason, and a reason on a live task", async () => {
+      const id = await seedTask();
+      expect(
+        await violatedCheck(
+          db.execute(sql`UPDATE coding_tasks SET status = 'failed' WHERE id = ${id}`),
+        ),
+      ).toBe("chk_coding_tasks_reason_with_end");
+      expect(
+        await violatedCheck(
+          db.execute(
+            sql`UPDATE coding_tasks SET status = 'planning', failure_reason = 'unknown' WHERE id = ${id}`,
+          ),
+        ),
+      ).toBe("chk_coding_tasks_reason_with_end");
+    });
+
+    it("refuses a detail without a reason", async () => {
+      const id = await seedTask();
+      expect(
+        await violatedCheck(
+          db.execute(sql`UPDATE coding_tasks SET failure_detail = 'x' WHERE id = ${id}`),
+        ),
+      ).toBe("chk_coding_tasks_detail_with_reason");
+    });
+
+    it("refuses lifecycle data on a queued task", async () => {
+      const id = await seedTask();
+      expect(await violatedCheck(tx((trx) => store.setTaskPlan(trx, id, "1. step")))).toBe(
+        "chk_coding_tasks_queued_bare",
+      );
+      expect(await violatedCheck(tx((trx) => store.setTaskSessionId(trx, id, "sess")))).toBe(
+        "chk_coding_tasks_queued_bare",
+      );
+    });
+
+    it("refuses awaiting_approval without a plan", async () => {
+      const id = await seedTask();
+      await parkCodingTaskAt(tx, store, id, "planning");
+      expect(
+        await violatedCheck(
+          tx((trx) => store.transitionTaskStatus(trx, id, "planning", "awaiting_approval")),
+        ),
+      ).toBe("chk_coding_tasks_plan_at_gate");
+    });
+
+    it("refuses executing without an approval", async () => {
+      const id = await seedTask();
+      await parkCodingTaskAt(tx, store, id, "awaiting_approval");
+      expect(
+        await violatedCheck(
+          tx((trx) => store.transitionTaskStatus(trx, id, "awaiting_approval", "executing")),
+        ),
+      ).toBe("chk_coding_tasks_approval_after_gate");
+    });
+
+    it("refuses pr_open without PR metadata, and PR metadata before the push", async () => {
+      const id = await seedTask();
+      await parkCodingTaskAt(tx, store, id, "planning");
+      expect(
+        await violatedCheck(tx((trx) => store.setTaskPrMetadata(trx, id, PARKED_PR_METADATA))),
+      ).toBe("chk_coding_tasks_pr_metadata_after_push");
+      await parkCodingTaskAt(tx, store, id, "pushed");
+      expect(
+        await violatedCheck(tx((trx) => store.transitionTaskStatus(trx, id, "pushed", "pr_open"))),
+      ).toBe("chk_coding_tasks_pr_metadata_after_push");
+    });
+
+    it("failQueuedTask writes the reason and detail on a queued task only", async () => {
+      const id = await seedTask();
+      const failure = { reason: "start_emit_failed" as const, detail: "fetch failed" };
+      expect(await tx((trx) => store.failQueuedTask(trx, id, failure))).toBe(true);
+      const row = await tx((trx) => store.getTask(trx, id));
+      expect([row?.status, row?.failureReason, row?.failureDetail]).toEqual([
+        "failed",
+        "start_emit_failed",
+        "fetch failed",
+      ]);
+      expect(await tx((trx) => store.failQueuedTask(trx, id, failure))).toBe(false);
     });
   });
 });

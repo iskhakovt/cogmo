@@ -13,6 +13,7 @@ import type { CodingRun, TaskStoreDeps } from "./coding-run.js";
 import {
   type CodingRepoRow,
   type CodingStore,
+  type CodingTaskForwardStatus,
   type CodingTaskStatus,
   isTerminalCodingTaskStatus,
 } from "./store/index.js";
@@ -22,7 +23,7 @@ import type { WorktreeAssignment } from "./types.js";
 interface Claim {
   stepId: string;
   from: CodingTaskStatus;
-  to: CodingTaskStatus;
+  to: CodingTaskForwardStatus;
 }
 
 /** Step ids are a contract with runs in flight: never rename one. */

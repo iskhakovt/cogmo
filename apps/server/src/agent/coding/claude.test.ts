@@ -110,6 +110,7 @@ const task: CodingTaskRow = {
   prMetadata: null,
   status: "queued",
   failureReason: null,
+  failureDetail: null,
   resourceUsage: null,
   idempotencyKey: null,
   claimedByRunId: null,

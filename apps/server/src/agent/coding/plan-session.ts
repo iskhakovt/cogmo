@@ -8,17 +8,13 @@ import type { SandboxClient, SandboxSession, SandboxSessionState } from "../../s
 import type { CodingBackend } from "./backend.js";
 import type { CodingRun, TaskStoreDeps } from "./coding-run.js";
 import type { PlanStreamHandle } from "./progress-stream.js";
+import { fromSessionResult, type SessionResult } from "./session-result.js";
 import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
+import type { TaskFailure } from "./types.js";
 
 interface PlanSessionDeps extends TaskStoreDeps {
   sandbox: Pick<SandboxClient, "resume">;
   backend: CodingBackend;
-}
-
-interface PlanSessionResult {
-  plan?: string;
-  isError: boolean;
-  failureReason?: string;
 }
 
 /**
@@ -37,8 +33,8 @@ export async function runPlanSession(
     state: SandboxSessionState;
     stream: PlanStreamHandle;
   },
-): Promise<PlanSessionResult> {
-  return run.stepRun("plan-cli", async () => {
+): Promise<SessionResult> {
+  const memo = await run.stepRun("plan-cli", async () => {
     const container = await deps.sandbox.resume(args.state);
     // Re-read so the prompt sees the row as allocation left it
     // (worktree assignment populated, container id stamped), not the
@@ -46,6 +42,7 @@ export async function runPlanSession(
     const planTask = (await deps.runInTx((tx) => deps.store.getTask(tx, run.taskId))) ?? args.task;
     return streamPlan(deps, { task: planTask, repo: args.repo, container, stream: args.stream });
   });
+  return fromSessionResult(memo);
 }
 
 /**
@@ -61,11 +58,11 @@ async function streamPlan(
     container: SandboxSession;
     stream: PlanStreamHandle;
   },
-): Promise<PlanSessionResult> {
+): Promise<SessionResult> {
   const { task, repo, container, stream } = args;
   let plan = "";
   let isError = false;
-  let failureReason: string | undefined;
+  let failure: TaskFailure | undefined;
 
   for await (const event of deps.backend.plan({ task, repo, container })) {
     await match(event)
@@ -79,7 +76,7 @@ async function streamPlan(
       .with({ kind: "complete" }, (e) => {
         if (e.isError) {
           isError = true;
-          failureReason = `claude exit code ${e.exitCode}`;
+          failure = { reason: "cli_exit_error", detail: `claude exit code ${e.exitCode}` };
         }
       })
       // tool_call / tool_result are no-ops — the CLI emits an `ExitPlanMode`
@@ -96,6 +93,6 @@ async function streamPlan(
   return {
     isError,
     ...(plan && { plan }),
-    ...(failureReason !== undefined && { failureReason }),
+    ...(failure && { failure }),
   };
 }

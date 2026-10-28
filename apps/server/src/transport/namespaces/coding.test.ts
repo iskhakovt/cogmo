@@ -218,9 +218,9 @@ describe("coding (plan-callback surface)", () => {
       cancelTaskIfActive: cancel,
     });
 
-    const res = await coding.cancelTask(taskId, "owner-tg-id", "user cancelled");
+    const res = await coding.cancelTask(taskId, "owner-tg-id", "user_requested_revisions");
     expect(res.isOk()).toBe(true);
-    expect(cancel).toHaveBeenCalledWith(expect.anything(), taskId, "user cancelled");
+    expect(cancel).toHaveBeenCalledWith(expect.anything(), taskId, "user_requested_revisions");
   });
 
   it("cancelTask: identity_rejected blocks store call", async () => {
@@ -231,7 +231,7 @@ describe("coding (plan-callback surface)", () => {
       tapperUserId: "different-user",
       cancelTaskIfActive: cancel,
     });
-    const res = await coding.cancelTask(taskId, "stranger-tg-id", "x");
+    const res = await coding.cancelTask(taskId, "stranger-tg-id", "user_cancelled");
     expect(res._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
     expect(cancel).not.toHaveBeenCalled();
   });
@@ -244,7 +244,7 @@ describe("coding (plan-callback surface)", () => {
       tapperUserId: ownerUserId,
       cancelTaskIfActive: cancel,
     });
-    const res = await coding.cancelTask(taskId, "owner-tg-id", "x");
+    const res = await coding.cancelTask(taskId, "owner-tg-id", "user_cancelled");
     expect(res._unsafeUnwrapErr()).toEqual({
       code: "task_already_terminal",
       taskId,
@@ -263,7 +263,7 @@ describe("coding (plan-callback surface)", () => {
     });
     const a = await coding.approvePlan(taskId, "x");
     expect(a._unsafeUnwrapErr()).toEqual({ code: "sandbox_disabled" });
-    const c = await coding.cancelTask(taskId, "x", "y");
+    const c = await coding.cancelTask(taskId, "x", "user_cancelled");
     expect(c._unsafeUnwrapErr()).toEqual({ code: "sandbox_disabled" });
   });
 });
