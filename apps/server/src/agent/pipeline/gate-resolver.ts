@@ -212,7 +212,7 @@ export function createPipelineGateResolver(deps: PipelineGateResolverDeps) {
             resolverRunId: event.data.run_id,
             failParkedRunWith: isTap(decision)
               ? null
-              : `gate timeout could not be applied (${error.name})`,
+              : { reason: "gate_resolution_error", detail: error.name },
           }),
         );
 

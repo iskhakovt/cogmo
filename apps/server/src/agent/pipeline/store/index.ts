@@ -1,9 +1,15 @@
 import { and, count, desc, eq, getTableColumns, max, sql } from "drizzle-orm";
 import { single } from "../../../db/helpers.js";
 import type { Transaction } from "../../../db/index.js";
+import type { PipelineRunCancellation, PipelineRunFailure } from "../run-failure.js";
 import type { GateResolution, StageArtifact, StageOutputs } from "../run-types.js";
 import type { PipelineDefinition } from "../types.js";
-import { pipelineDefinitions, type pipelineRunStatus, pipelineRuns } from "./schema.js";
+import {
+  pipelineDefinitions,
+  type pipelineRunFailureReason,
+  type pipelineRunStatus,
+  pipelineRuns,
+} from "./schema.js";
 
 export interface PipelineDefinitionRow {
   id: string;
@@ -239,6 +245,7 @@ export class DrizzlePipelineStore implements PipelineStore {
 // hand-maintained union to drift from the DB type (architecture-rules: pgEnum
 // → TypeScript union).
 export type PipelineRunStatus = (typeof pipelineRunStatus.enumValues)[number];
+type PipelineRunFailureReason = (typeof pipelineRunFailureReason.enumValues)[number];
 
 const TERMINAL_RUN_STATUSES: ReadonlyArray<PipelineRunStatus> = [
   "completed",
@@ -259,7 +266,8 @@ export interface PipelineRunRow {
   currentStage: string;
   iteration: number;
   stageOutputs: StageOutputs;
-  failureReason: string | null;
+  failureReason: PipelineRunFailureReason | null;
+  failureDetail: string | null;
   gateResolution: GateResolution | null;
   idempotencyKey: string | null;
   createdAt: Date;
@@ -290,6 +298,24 @@ type RunTransition =
 
 /** Result of recording a stage output and moving the run forward. */
 type RunAdvance = { kind: "advanced" } | ({ kind: "stale" } & RunCursor) | { kind: "not_found" };
+
+/** The stage execution a `pipeline/stage.due` delivery names. */
+export interface StageCursor {
+  runId: string;
+  stageId: string;
+  iteration: number;
+}
+
+/**
+ * Result of failing a run from a stage execution. `already_failed` is the
+ * failure this execution committed before its step result was lost: the run
+ * is `failed` with the same reason, cursor unmoved.
+ */
+export type StageFailure =
+  | { kind: "failed"; conversationId: string }
+  | { kind: "already_failed"; conversationId: string }
+  | ({ kind: "stale" } & RunCursor)
+  | { kind: "not_found" };
 
 /**
  * Run-state access for the pipeline run engine. Separate interface from
@@ -333,15 +359,10 @@ export interface PipelineRunStore {
   getRunWithDefinition(tx: Transaction, id: string): Promise<PipelineRunWithDefinition | undefined>;
 
   /**
-   * Flip status conditionally (e.g. `running` → `waiting_gate` when a gate
-   * parks). Conditional on `from`, so a duplicate delivery is a no-op `stale`.
+   * Park the run on the gate stage it sits on: `running` → `waiting_gate`.
+   * Conditional on `running`, so a duplicate delivery is a no-op `stale`.
    */
-  transitionStatus(
-    tx: Transaction,
-    id: string,
-    from: PipelineRunStatus,
-    to: PipelineRunStatus,
-  ): Promise<RunTransition>;
+  parkAtGate(tx: Transaction, id: string): Promise<RunTransition>;
 
   /**
    * Claim the gate a run is parked on for one resolution: flip
@@ -373,22 +394,37 @@ export interface PipelineRunStore {
     params: { runId: string; fromStage: string; output: StageArtifact | null },
   ): Promise<RunAdvance>;
 
-  /** Terminal failure from any non-terminal state. */
+  /**
+   * Terminal failure from any non-terminal state, for a caller that has
+   * already checked where the run is in the same transaction.
+   */
   failRun(
     tx: Transaction,
     id: string,
-    reason: string,
+    failure: PipelineRunFailure,
   ): Promise<
     | { kind: "failed"; conversationId: string }
     | { kind: "already_terminal"; status: PipelineRunStatus }
     | { kind: "not_found" }
   >;
 
+  /**
+   * {@link failRun} from a stage execution: fails the run only while its
+   * cursor still points at `cursor`'s stage and iteration, so a delivery the
+   * run has moved past cannot fail it. A run already `failed` there with the
+   * same reason is this execution's own earlier commit (`already_failed`).
+   */
+  failRunAt(
+    tx: Transaction,
+    cursor: StageCursor,
+    failure: PipelineRunFailure,
+  ): Promise<StageFailure>;
+
   /** Cancel if not already terminal (user/abort path). */
   cancelRunIfActive(
     tx: Transaction,
     id: string,
-    reason: string,
+    cancellation: PipelineRunCancellation,
   ): Promise<
     | { kind: "cancelled"; conversationId: string }
     | { kind: "already_terminal"; status: PipelineRunStatus }
@@ -473,13 +509,8 @@ export class DrizzlePipelineRunStore implements PipelineRunStore {
     return rows[0];
   }
 
-  async transitionStatus(
-    tx: Transaction,
-    id: string,
-    from: PipelineRunStatus,
-    to: PipelineRunStatus,
-  ): Promise<RunTransition> {
-    return this.#transition(tx, id, from, { status: to });
+  async parkAtGate(tx: Transaction, id: string): Promise<RunTransition> {
+    return this.#transition(tx, id, "running", { status: "waiting_gate" });
   }
 
   async claimGate(tx: Transaction, id: string, claim: GateResolution): Promise<RunTransition> {
@@ -489,12 +520,12 @@ export class DrizzlePipelineRunStore implements PipelineRunStore {
   async #transition(
     tx: Transaction,
     id: string,
-    from: PipelineRunStatus,
+    from: "running" | "waiting_gate",
     set: { status: PipelineRunStatus; gateResolution?: GateResolution },
   ): Promise<RunTransition> {
-    // `.for("update")` row-locks, and the terminal guard makes "terminal is
-    // final" hold store-wide: a flip out of completed/failed/cancelled is
-    // refused even if a caller passes a terminal `from`.
+    // `.for("update")` row-locks, so two flips of one run serialize: the
+    // second raises `40001` once the first commits, and reads the first's
+    // status when the transactor retries it.
     const rows = await tx
       .select({
         status: pipelineRuns.status,
@@ -507,7 +538,7 @@ export class DrizzlePipelineRunStore implements PipelineRunStore {
       .for("update");
     const row = rows[0];
     if (!row) return { kind: "not_found" as const };
-    if (isTerminalPipelineRunStatus(row.status) || row.status !== from) {
+    if (row.status !== from) {
       return {
         kind: "stale" as const,
         status: row.status,
@@ -549,11 +580,11 @@ export class DrizzlePipelineRunStore implements PipelineRunStore {
   /**
    * Shared read-merge-write for `advanceStage` / `completeRun`. `.for("update")`
    * row-locks so a duplicate delivery for the same run serializes; the
-   * terminal-status and `current_stage === fromStage` guards make a retried
-   * persist idempotent. The terminal guard matters because the terminal
-   * paths leave `current_stage` untouched — without it, a stage.due replay
-   * that arrives after a cancel/fail would match `fromStage` and resurrect
-   * the run.
+   * `running` and `current_stage === fromStage` guards make a retried persist
+   * idempotent. `running` matters twice over: the terminal paths leave
+   * `current_stage` untouched, so a stage.due replay after a cancel/fail
+   * would otherwise match `fromStage` and resurrect the run, and a run parked
+   * at `waiting_gate` on `fromStage` leaves only through a gate claim.
    */
   async #recordAndMove(
     tx: Transaction,
@@ -579,7 +610,7 @@ export class DrizzlePipelineRunStore implements PipelineRunStore {
     // this guard must also match `iteration`, or a replayed stage.due for
     // (stageA, iter 0) could re-fire against a run that legitimately looped
     // back to (stageA, iter 1). Sufficient now: iteration is invariantly 0.
-    if (isTerminalPipelineRunStatus(row.status) || row.currentStage !== fromStage) {
+    if (row.status !== "running" || row.currentStage !== fromStage) {
       return {
         kind: "stale" as const,
         status: row.status,
@@ -599,25 +630,48 @@ export class DrizzlePipelineRunStore implements PipelineRunStore {
   async failRun(
     tx: Transaction,
     id: string,
-    reason: string,
+    failure: PipelineRunFailure,
   ): Promise<
     | { kind: "failed"; conversationId: string }
     | { kind: "already_terminal"; status: PipelineRunStatus }
     | { kind: "not_found" }
   > {
-    return this.#terminate(tx, id, "failed", reason);
+    return this.#terminate(tx, id, "failed", failure);
+  }
+
+  async failRunAt(
+    tx: Transaction,
+    cursor: StageCursor,
+    failure: PipelineRunFailure,
+  ): Promise<StageFailure> {
+    const row = await this.#lockForEnd(tx, cursor.runId);
+    if (!row) return { kind: "not_found" as const };
+    const atCursor = row.currentStage === cursor.stageId && row.iteration === cursor.iteration;
+    if (atCursor && row.status === "failed" && row.failureReason === failure.reason) {
+      return { kind: "already_failed" as const, conversationId: row.conversationId };
+    }
+    if (!atCursor || isTerminalPipelineRunStatus(row.status)) {
+      return {
+        kind: "stale" as const,
+        status: row.status,
+        currentStage: row.currentStage,
+        iteration: row.iteration,
+      };
+    }
+    await this.#end(tx, cursor.runId, "failed", failure);
+    return { kind: "failed" as const, conversationId: row.conversationId };
   }
 
   async cancelRunIfActive(
     tx: Transaction,
     id: string,
-    reason: string,
+    cancellation: PipelineRunCancellation,
   ): Promise<
     | { kind: "cancelled"; conversationId: string }
     | { kind: "already_terminal"; status: PipelineRunStatus }
     | { kind: "not_found" }
   > {
-    const result = await this.#terminate(tx, id, "cancelled", reason);
+    const result = await this.#terminate(tx, id, "cancelled", cancellation);
     if (result.kind === "failed") {
       return { kind: "cancelled" as const, conversationId: result.conversationId };
     }
@@ -625,11 +679,11 @@ export class DrizzlePipelineRunStore implements PipelineRunStore {
   }
 
   /**
-   * Move a non-terminal run to a terminal status with a reason. The race
+   * Move a non-terminal run to a terminal status with why it ended. The race
    * between two concurrent terminations (cancel vs. abort) resolves through
    * the store's isolation contract: `.for("update")` blocks the second tx on
    * the row lock, then REPEATABLE READ raises a 40001 on it when the first
-   * commits, and the transactor's one-shot retry re-reads the now-terminal
+   * commits, and the transactor's retry (up to twice) re-reads the now-terminal
    * row and returns `already_terminal`. Returns `kind: "failed"` on success
    * regardless of target status — the public methods relabel.
    */
@@ -637,27 +691,48 @@ export class DrizzlePipelineRunStore implements PipelineRunStore {
     tx: Transaction,
     id: string,
     status: "failed" | "cancelled",
-    reason: string,
+    end: PipelineRunFailure | PipelineRunCancellation,
   ): Promise<
     | { kind: "failed"; conversationId: string }
     | { kind: "already_terminal"; status: PipelineRunStatus }
     | { kind: "not_found" }
   > {
-    const rows = await tx
-      .select({ status: pipelineRuns.status, conversationId: pipelineRuns.conversationId })
-      .from(pipelineRuns)
-      .where(eq(pipelineRuns.id, id))
-      .limit(1)
-      .for("update");
-    const row = rows[0];
+    const row = await this.#lockForEnd(tx, id);
     if (!row) return { kind: "not_found" as const };
     if (isTerminalPipelineRunStatus(row.status)) {
       return { kind: "already_terminal" as const, status: row.status };
     }
+    await this.#end(tx, id, status, end);
+    return { kind: "failed" as const, conversationId: row.conversationId };
+  }
+
+  /** Row-lock a run for a terminal flip and read what the guards check. */
+  async #lockForEnd(tx: Transaction, id: string) {
+    const rows = await tx
+      .select({
+        status: pipelineRuns.status,
+        currentStage: pipelineRuns.currentStage,
+        iteration: pipelineRuns.iteration,
+        failureReason: pipelineRuns.failureReason,
+        conversationId: pipelineRuns.conversationId,
+      })
+      .from(pipelineRuns)
+      .where(eq(pipelineRuns.id, id))
+      .limit(1)
+      .for("update");
+    return rows[0];
+  }
+
+  /** The terminal write: the status and why the run ended. */
+  async #end(
+    tx: Transaction,
+    id: string,
+    status: "failed" | "cancelled",
+    end: PipelineRunFailure | PipelineRunCancellation,
+  ): Promise<void> {
     await tx
       .update(pipelineRuns)
-      .set({ status, failureReason: reason })
+      .set({ status, failureReason: end.reason, failureDetail: end.detail })
       .where(eq(pipelineRuns.id, id));
-    return { kind: "failed" as const, conversationId: row.conversationId };
   }
 }

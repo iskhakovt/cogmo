@@ -223,6 +223,7 @@ describe("PipelinesService.start", () => {
         iteration: 0,
         stageOutputs: {},
         failureReason: null,
+        failureDetail: null,
         gateResolution: null,
         idempotencyKey: "k1",
         createdAt: new Date("2026-09-12T00:00:00Z"),

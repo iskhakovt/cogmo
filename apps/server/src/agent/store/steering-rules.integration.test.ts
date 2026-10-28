@@ -109,7 +109,7 @@ async function learned(rule: string): Promise<string> {
     .values({
       rule: `${PREFIX}${rule}`,
       category: "style",
-      active: true,
+      status: "live",
       source: "correction",
       priority: 100,
       observationCount: 2,
@@ -169,10 +169,10 @@ describe("instruction rules against a concurrent writer (real Postgres)", () => 
     expect(lost.value).toEqual(err({ kind: "rule_group_changed", deleted: 1 }));
     expect(attempts).toBe(2);
     const survivors = await drizzle(observerSql, { schema })
-      .select({ id: steeringRules.id, active: steeringRules.active })
+      .select({ id: steeringRules.id, status: steeringRules.status })
       .from(steeringRules)
       .where(eq(steeringRules.rule, `${PREFIX}Keep it short.`));
-    expect(survivors).toEqual([{ id: kept, active: true }]);
+    expect(survivors).toEqual([{ id: kept, status: "live" }]);
   });
 
   it("upsertCorrection: a reinforcement of a rule retired meanwhile writes nothing", async () => {
@@ -195,7 +195,7 @@ describe("instruction rules against a concurrent writer (real Postgres)", () => 
         }),
     );
 
-    expect(lost).toEqual({ kind: "fulfilled", value: null });
+    expect(lost).toEqual({ kind: "fulfilled", value: { kind: "stale" } });
     expect(attempts).toBe(2);
   });
 });

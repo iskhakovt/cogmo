@@ -160,7 +160,7 @@ async function insertContainer(opts: {
     ])
     .with("reaped", () => [
       { from: "starting" as const, to: "running" as const },
-      { to: "reaped" as const },
+      { to: "reaped" as const, reason: "cascade" as const },
     ])
     .exhaustive();
   for (const step of steps) {
@@ -185,6 +185,7 @@ describe("runReap — TTL pass", () => {
     expect(removeCalls).toEqual(["c1"]);
     const reloaded = await tx((trx) => store.getContainer(trx, cogmoId));
     expect(reloaded?.status).toBe("reaped");
+    expect(reloaded?.reapedReason).toBe("ttl_expired");
   });
 
   it.each([
@@ -370,7 +371,9 @@ describe("runReap — orphan pass", () => {
     });
     const result = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
     expect(result.orphansReaped).toBe(1);
-    expect((await tx((trx) => store.getContainer(trx, cogmoId)))?.status).toBe("reaped");
+    const row = await tx((trx) => store.getContainer(trx, cogmoId));
+    expect(row?.status).toBe("reaped");
+    expect(row?.reapedReason).toBe("dead_instance");
   });
 });
 
@@ -407,7 +410,7 @@ describe("runReap — a row another path already finished", () => {
 
   async function reapedElsewhere(id: string): Promise<void> {
     await db.execute(
-      sql`UPDATE containers SET status = 'reaped', exited_at = ${EARLIER}::timestamptz WHERE id = ${id}`,
+      sql`UPDATE containers SET status = 'reaped', reaped_reason = 'cascade', exited_at = ${EARLIER}::timestamptz WHERE id = ${id}`,
     );
   }
 

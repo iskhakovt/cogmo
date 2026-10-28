@@ -72,6 +72,7 @@ import { createTestDatabase } from "../../test/pglite.js";
 import type { SectionedRule } from "../rule-sections.js";
 import type { CoreMemoryBlock } from "../service.js";
 import { DrizzleAgentStore } from "../store/index.js";
+import type { SteeringRuleStatusValue } from "../store/schema.js";
 import { toStoredMessage } from "../stored-content.js";
 import { type ExtractionResult, extractCorrections } from "./extract-corrections.js";
 
@@ -119,7 +120,7 @@ const CHANNEL_TYPES = [CHANNEL];
 interface StoredCorrection {
   rule: string;
   category: string;
-  active: boolean;
+  status: SteeringRuleStatusValue;
   observationCount: number;
   channelType: string | null;
 }
@@ -204,7 +205,7 @@ function stored(rows: ReadonlyArray<StoredCorrection>): string {
   return rows
     .map(
       (r) =>
-        `[${r.active ? "active" : "learning"} ×${r.observationCount} ${r.category} ` +
+        `[${r.status} ×${r.observationCount} ${r.category} ` +
         `${r.channelType ?? "all channels"}] ${r.rule}`,
     )
     .join("\n           ");
@@ -342,7 +343,7 @@ describe.skipIf(LIVE_API_KEY === undefined)(
 
           const first = await learnFrom(scenario.first, "first");
           const second = await learnFrom(scenario.second, "second");
-          const activeCorrections = second.stored.filter((r) => r.active);
+          const activeCorrections = second.stored.filter((r) => r.status === "live");
 
           stage = "in the probes";
           const probe = async (rules: ReadonlyArray<SectionedRule>, label: string) =>

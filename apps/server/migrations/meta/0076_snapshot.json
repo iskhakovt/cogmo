@@ -1,5 +1,5 @@
 {
-  "id": "d601bf21-6ea9-4116-b8b2-b2c99a3ecb64",
+  "id": "08722e83-e61b-455b-bf4c-93207fc640dc",
   "prevId": "ad97c0a1-2a6e-4167-98df-2b2e0bd51386",
   "version": "7",
   "dialect": "postgresql",
@@ -212,13 +212,6 @@
         },
         "failure_reason": {
           "name": "failure_reason",
-          "type": "coding_task_failure_reason",
-          "typeSchema": "public",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "failure_detail": {
-          "name": "failure_detail",
           "type": "text",
           "primaryKey": false,
           "notNull": false
@@ -288,32 +281,7 @@
         }
       },
       "policies": {},
-      "checkConstraints": {
-        "chk_coding_tasks_reason_with_end": {
-          "name": "chk_coding_tasks_reason_with_end",
-          "value": "(\"coding_tasks\".\"failure_reason\" IS NOT NULL) = (\"coding_tasks\".\"status\" IN ('failed', 'cancelled'))"
-        },
-        "chk_coding_tasks_detail_with_reason": {
-          "name": "chk_coding_tasks_detail_with_reason",
-          "value": "\"coding_tasks\".\"failure_detail\" IS NULL OR \"coding_tasks\".\"failure_reason\" IS NOT NULL"
-        },
-        "chk_coding_tasks_queued_bare": {
-          "name": "chk_coding_tasks_queued_bare",
-          "value": "\"coding_tasks\".\"status\" <> 'queued' OR (\"coding_tasks\".\"worktree_assignment\" IS NULL AND \"coding_tasks\".\"session_id\" IS NULL AND \"coding_tasks\".\"container_id\" IS NULL AND \"coding_tasks\".\"plan\" IS NULL AND \"coding_tasks\".\"plan_approved_at\" IS NULL AND \"coding_tasks\".\"pr_metadata\" IS NULL AND \"coding_tasks\".\"resource_usage\" IS NULL AND \"coding_tasks\".\"claimed_by_run_id\" IS NULL)"
-        },
-        "chk_coding_tasks_plan_at_gate": {
-          "name": "chk_coding_tasks_plan_at_gate",
-          "value": "\"coding_tasks\".\"status\" NOT IN ('awaiting_approval', 'executing', 'pending_verify', 'verifying', 'pushed', 'pr_open') OR \"coding_tasks\".\"plan\" IS NOT NULL"
-        },
-        "chk_coding_tasks_approval_after_gate": {
-          "name": "chk_coding_tasks_approval_after_gate",
-          "value": "(\"coding_tasks\".\"plan_approved_at\" IS NULL OR \"coding_tasks\".\"status\" <> 'planning') AND (\"coding_tasks\".\"status\" NOT IN ('executing', 'pending_verify', 'verifying', 'pushed', 'pr_open') OR \"coding_tasks\".\"plan_approved_at\" IS NOT NULL)"
-        },
-        "chk_coding_tasks_pr_metadata_after_push": {
-          "name": "chk_coding_tasks_pr_metadata_after_push",
-          "value": "(\"coding_tasks\".\"pr_metadata\" IS NULL OR \"coding_tasks\".\"status\" IN ('pushed', 'pr_open', 'failed', 'cancelled')) AND (\"coding_tasks\".\"status\" <> 'pr_open' OR \"coding_tasks\".\"pr_metadata\" IS NOT NULL)"
-        }
-      },
+      "checkConstraints": {},
       "isRLSEnabled": false
     },
     "public.model_catalogs": {
@@ -2897,9 +2865,10 @@
           "primaryKey": false,
           "notNull": true
         },
-        "exit_code": {
-          "name": "exit_code",
-          "type": "integer",
+        "reaped_reason": {
+          "name": "reaped_reason",
+          "type": "container_reaped_reason",
+          "typeSchema": "public",
           "primaryKey": false,
           "notNull": false
         },
@@ -3017,7 +2986,12 @@
         }
       },
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "chk_containers_reaped_reason": {
+          "name": "chk_containers_reaped_reason",
+          "value": "(\"containers\".\"status\" = 'reaped') = (\"containers\".\"reaped_reason\" IS NOT NULL)"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.networks": {
@@ -4625,30 +4599,6 @@
       "schema": "public",
       "values": ["claude", "codex"]
     },
-    "public.coding_task_failure_reason": {
-      "name": "coding_task_failure_reason",
-      "schema": "public",
-      "values": [
-        "cli_exit_error",
-        "no_plan_produced",
-        "claude_auth_failed",
-        "push_failed",
-        "branch_conflict",
-        "auth_failed",
-        "verify_failed",
-        "verify_timed_out",
-        "pr_auth_failed",
-        "pr_validation_failed",
-        "pr_open_failed",
-        "credentials_unavailable",
-        "run_terminated",
-        "start_emit_failed",
-        "unexpected_error",
-        "user_cancelled",
-        "user_requested_revisions",
-        "unknown"
-      ]
-    },
     "public.coding_task_status": {
       "name": "coding_task_status",
       "schema": "public",
@@ -4762,6 +4712,18 @@
       "name": "mcp_tool_approval_status",
       "schema": "public",
       "values": ["pending", "approved", "rejected"]
+    },
+    "public.container_reaped_reason": {
+      "name": "container_reaped_reason",
+      "schema": "public",
+      "values": [
+        "ttl_expired",
+        "cascade",
+        "dead_instance",
+        "crash_reconcile",
+        "start_failed",
+        "unknown"
+      ]
     },
     "public.container_runtime": {
       "name": "container_runtime",

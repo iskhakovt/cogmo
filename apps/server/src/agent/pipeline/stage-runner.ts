@@ -22,6 +22,7 @@
  */
 
 import { NonRetriableError } from "inngest";
+import { match, P } from "ts-pattern";
 import type { Transactor } from "../../db/index.js";
 import { inngest as inngestClient } from "../../inngest/client.js";
 import { conversationTurnConcurrency } from "../../inngest/concurrency.js";
@@ -42,15 +43,39 @@ import type {
   AgenticStageOutcome,
   AgenticStageSteps,
 } from "./run-agentic-stage.js";
+import { describePipelineRunFailure, type PipelineRunFailure } from "./run-failure.js";
 import { StageOutputsSchema } from "./run-types.js";
-import type { PipelineRunStore } from "./store/index.js";
+import {
+  isTerminalPipelineRunStatus,
+  type PipelineRunStatus,
+  type PipelineRunStore,
+  type StageFailure,
+} from "./store/index.js";
 import { PipelineDefinitionSchema, parseDurationMs } from "./types.js";
+
+/**
+ * What the `fail-run` step can replay. A run in flight across a deploy
+ * replays the result an earlier build's step stored (`.agents/rules/inngest.md`
+ * → a memoized result is a contract), and that build's `fail-run` returned
+ * `failRun`'s `already_terminal`; it means the same as `stale`.
+ */
+type FailRunStepResult = StageFailure | { kind: "already_terminal"; status: PipelineRunStatus };
+
+/**
+ * Why `fail-run` left the run alone: a terminal run ended another way;
+ * any other status means the run moved off the stage.
+ */
+function staleFailureNote(status: PipelineRunStatus): string {
+  return isTerminalPipelineRunStatus(status)
+    ? "the run already ended another way"
+    : "the run is no longer on the failed stage";
+}
 
 export interface PipelineStageRunnerDeps {
   runInTx: Transactor;
   runStore: Pick<
     PipelineRunStore,
-    "getRunWithDefinition" | "transitionStatus" | "advanceStage" | "completeRun" | "failRun"
+    "getRunWithDefinition" | "parkAtGate" | "advanceStage" | "completeRun" | "failRunAt"
   >;
   deliveryRouter: Pick<DeliveryRouter, "notifyConversation">;
   executeAgenticStage: (
@@ -69,32 +94,44 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
       // A run owns its conversation, so the shared key also runs one stage of
       // a run at a time.
       concurrency: conversationTurnConcurrency,
-      // Retries exhausted (or non-retriable): the run cannot advance past this
-      // stage, so it fails rather than sitting `running` with nothing scheduled.
-      // The reason carries the error class only — messages can hold query text
-      // or payloads, and the full error is in the log.
+      // Retries exhausted (or non-retriable): a run still on this stage cannot
+      // advance past it, so it fails rather than sitting `running` with nothing
+      // scheduled. A run that has moved on — the advance committed and only
+      // the emit failed — is left where it is. The detail carries the error
+      // class only — messages can hold query text or payloads, and the full
+      // error is in the log.
       onFailure: async ({ event, error, step }) => {
-        const { runId, stageId } = event.data.event.data;
+        const { runId, stageId, iteration } = event.data.event.data;
         const durable = fromStepTools(step);
-        logger.error(
-          { err: error, runId, stageId, component: "pipeline.stage-runner" },
-          "pipeline stage failed after retries",
-        );
-        const failed = await durable.run("fail-run", () =>
+        const log = logger.child({ component: "pipeline.stage-runner", runId, stageId });
+        log.error({ err: error }, "pipeline stage failed after retries");
+        const failed = await durable.run<FailRunStepResult>("fail-run", () =>
           deps.runInTx((tx) =>
-            deps.runStore.failRun(tx, runId, `stage "${stageId}" failed (${error.name})`),
+            deps.runStore.failRunAt(
+              tx,
+              { runId, stageId, iteration },
+              { reason: "stage_error", detail: error.name },
+            ),
           ),
         );
-        if (failed.kind === "failed") {
-          await notifyAfterRetries(
-            durable,
-            "notify-failure",
-            deps.deliveryRouter,
-            failed.conversationId,
-            `❌ The pipeline run failed at stage "${stageId}" and has stopped.`,
-            { runId, stageId },
-          );
-        }
+        await match(failed)
+          .with({ kind: P.union("failed", "already_failed") }, (f) =>
+            notifyAfterRetries(
+              durable,
+              "notify-failure",
+              deps.deliveryRouter,
+              f.conversationId,
+              `❌ The pipeline run failed at stage "${stageId}" and has stopped.`,
+              { runId, stageId },
+            ),
+          )
+          .with({ kind: P.union("stale", "already_terminal") }, (f) => {
+            log.info({ runStatus: f.status }, `${staleFailureNote(f.status)} — leaving it`);
+          })
+          .with({ kind: "not_found" }, () => {
+            log.warn("stage failed for a run that does not exist");
+          })
+          .exhaustive();
       },
     },
     async ({ event, step, runId: inngestRunId }) => {
@@ -144,25 +181,35 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
       const stage = definition.stages[index];
       const next = definition.stages[index + 1];
 
-      const failRun = async (reason: string) => {
-        const failed = await durable.run("fail-run", () =>
-          deps.runInTx((tx) => deps.runStore.failRun(tx, runId, reason)),
+      const failRun = async (failure: PipelineRunFailure) => {
+        const failed = await durable.run<FailRunStepResult>("fail-run", () =>
+          deps.runInTx((tx) => deps.runStore.failRunAt(tx, { runId, stageId, iteration }, failure)),
         );
-        if (failed.kind === "failed") {
-          await notifyAfterRetries(
-            durable,
-            "notify-failure",
-            deps.deliveryRouter,
-            conversationId,
-            `❌ Pipeline "${definition.name}" failed at stage "${stageId}": ${reason}`,
-            { runId, stageId },
-          );
-        }
-        return { status: "failed" as const, reason };
+        return match(failed)
+          .with({ kind: P.union("failed", "already_failed") }, async () => {
+            await notifyAfterRetries(
+              durable,
+              "notify-failure",
+              deps.deliveryRouter,
+              conversationId,
+              `❌ Pipeline "${definition.name}" failed at stage "${stageId}": ${describePipelineRunFailure(failure)}`,
+              { runId, stageId },
+            );
+            return { status: "failed" as const, failure };
+          })
+          .with({ kind: P.union("stale", "already_terminal") }, async (f) => {
+            log.info({ runStatus: f.status }, `${staleFailureNote(f.status)} — skipping`);
+            return { status: "skipped" as const, reason: "stale" as const };
+          })
+          .with({ kind: "not_found" }, async () => ({
+            status: "skipped" as const,
+            reason: "not_found" as const,
+          }))
+          .exhaustive();
       };
 
       if (stage === undefined) {
-        return failRun(`stage "${stageId}" is not in the pinned definition`);
+        return failRun({ reason: "unknown_stage", detail: null });
       }
 
       // A run started from chat: its first stage would otherwise stream into
@@ -179,7 +226,7 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
       }
 
       if (stage.kind === "wait") {
-        return failRun("wait stages are not supported yet");
+        return failRun({ reason: "unsupported_stage", detail: null });
       }
 
       if (stage.kind === "gate") {
@@ -189,9 +236,7 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
           throw new NonRetriableError(`gate stage "${stageId}" has no gate configuration`);
         }
         const parked = await durable.run("park-on-gate", () =>
-          deps.runInTx((tx) =>
-            deps.runStore.transitionStatus(tx, runId, "running", "waiting_gate"),
-          ),
+          deps.runInTx((tx) => deps.runStore.parkAtGate(tx, runId)),
         );
         if (parked.kind !== "transitioned") {
           const alreadyParkedHere =
@@ -235,7 +280,7 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
         { run: durable.run, stepRun },
         log,
       );
-      if (outcome.kind === "failed") return failRun(outcome.reason);
+      if (outcome.kind === "failed") return failRun(outcome.failure);
 
       const { artifact } = outcome;
       const moved = await durable.run("advance-run", () =>

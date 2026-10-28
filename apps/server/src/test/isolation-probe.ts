@@ -38,7 +38,7 @@ export function describeIsolationProbe(name: string): void {
         tx.insert(schema.steeringRules).values({
           rule: `${PROBE} ${name}`,
           category: "style",
-          active: true,
+          status: "live",
           source: "manual",
           priority: 50,
           observationCount: 0,

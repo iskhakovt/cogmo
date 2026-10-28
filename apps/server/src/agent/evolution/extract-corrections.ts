@@ -8,12 +8,13 @@
  */
 
 import * as R from "remeda";
+import { match } from "ts-pattern";
 import type { Transactor } from "../../db/index.js";
 import { isHarnessPrompt } from "../../llm/content.js";
 import type { LlmProvider } from "../../llm/provider.js";
 import { chatTyped } from "../../llm/typed.js";
 import { logger } from "../../logger.js";
-import type { AgentStore } from "../store/index.js";
+import type { AgentStore, UpsertCorrectionResult } from "../store/index.js";
 import type { StoredContentBlock, StoredMessage } from "../stored-content.js";
 import {
   buildExtractionPrompt,
@@ -23,7 +24,7 @@ import {
 } from "./extraction-schema.js";
 
 /**
- * Consolidation runs once the active learned rules pass this, matching the
+ * Consolidation runs once the live learned rules pass this, matching the
  * limit on a user's instruction rules so `# Rules` stays near 45 rules
  * (design/evolution.md → Explicit Instructions → Tools).
  */
@@ -40,7 +41,7 @@ export interface ExtractionDeps {
     | "hasInstructionRule"
     | "upsertCorrection"
     | "contradictLearningRule"
-    | "countActiveLearnedRules"
+    | "countLiveLearnedRules"
   >;
   /**
    * Distinct channel types active for the conversation when this Observer
@@ -170,7 +171,7 @@ export async function extractCorrections(
       // `# Rules` doesn't show, has its count reset by a first contradiction
       // and is retired by a second from another conversation: a single
       // mislabelled contradiction costs its evidence, not the rule.
-      if (contradictedRule.active) {
+      if (contradictedRule.status !== "learning") {
         logger.info(log, "correction contradicts a live rule — logged, not applied");
         continue;
       }
@@ -192,18 +193,25 @@ export async function extractCorrections(
           conversationId: scope.conversationId,
         }),
       );
-      if (outcome === "retired") {
-        retired++;
-        logger.info(log, "correction contradicts a rule still learning a second time — retired it");
-      } else if (outcome === "reset") {
-        reset++;
-        logger.info(log, "correction contradicts a rule still learning — reset its count");
-      } else {
-        logger.info(
-          log,
-          "extraction: contradiction already applied from this conversation, or the rule was promoted or retired since it was listed",
-        );
-      }
+      match(outcome)
+        .with("retired", () => {
+          retired++;
+          logger.info(
+            log,
+            "correction contradicts a rule still learning a second time — retired it",
+          );
+        })
+        .with("reset", () => {
+          reset++;
+          logger.info(log, "correction contradicts a rule still learning — reset its count");
+        })
+        .with("unchanged", () => {
+          logger.info(
+            log,
+            "extraction: contradiction already applied from this conversation, or the rule was promoted or retired since it was listed",
+          );
+        })
+        .exhaustive();
       continue;
     }
 
@@ -270,21 +278,28 @@ export async function extractCorrections(
       deps.runInTx,
       deps.store,
     );
-    if (result === null) {
-      logger.warn(
-        { rule: correction.rule, matchedId: existingRuleId },
-        "extraction: reinforce targets a rule retired or merged since it was listed — skipping",
-      );
-      unknownRuleReinforcementsSkipped++;
-      continue;
-    }
-    if (correction.action === "new") extracted++;
-    if (correction.action === "reinforce") reinforced++;
-    if (result.promoted) promoted++;
+    const countApplied = () => {
+      if (correction.action === "new") extracted++;
+      if (correction.action === "reinforce") reinforced++;
+    };
+    match(result)
+      .with({ kind: "stale" }, () => {
+        logger.warn(
+          { rule: correction.rule, matchedId: existingRuleId },
+          "extraction: reinforce targets a rule retired or merged since it was listed — skipping",
+        );
+        unknownRuleReinforcementsSkipped++;
+      })
+      .with({ kind: "inserted" }, { kind: "reinforced" }, countApplied)
+      .with({ kind: "promoted" }, () => {
+        countApplied();
+        promoted++;
+      })
+      .exhaustive();
   }
 
   const activeCount = await deps.runInTx((tx) =>
-    deps.store.countActiveLearnedRules(tx, scope.profileId),
+    deps.store.countLiveLearnedRules(tx, scope.profileId),
   );
   const consolidationNeeded = activeCount > CONSOLIDATION_THRESHOLD;
 
@@ -321,8 +336,8 @@ export async function extractCorrections(
 
 /**
  * Delegates to the store's upsert; the caller has already gated scope and
- * resolved the model's label to `existingRuleId` (null for a new rule). Null
- * when that rule is no longer unretired.
+ * resolved the model's label to `existingRuleId` (null for a new rule).
+ * `stale` when that rule is no longer live or learning.
  */
 async function applyCorrection(
   correction: CorrectionItem,
@@ -330,7 +345,7 @@ async function applyCorrection(
   existingRuleId: string | null,
   runInTx: Transactor,
   store: Pick<AgentStore, "upsertCorrection">,
-): Promise<{ promoted: boolean } | null> {
+): Promise<UpsertCorrectionResult> {
   return runInTx((tx) =>
     store.upsertCorrection(tx, {
       rule: correction.rule,

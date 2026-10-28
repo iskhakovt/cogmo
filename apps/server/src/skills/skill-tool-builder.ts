@@ -90,7 +90,7 @@ export function buildSkillToolSpec(
         )
         .andThen((run) =>
           run.status === "error"
-            ? reject(`skill ${def.name} failed (run ${run.runId}): ${run.error ?? "unknown_error"}`)
+            ? reject(`skill ${def.name} failed (run ${run.runId}): ${run.error}`)
             : ok(JSON.stringify({ ok: true, runId: run.runId, output: run.output ?? null })),
         );
     },

@@ -537,8 +537,36 @@
     {
       "idx": 76,
       "version": "7",
-      "when": 1793189141878,
-      "tag": "0076_coding_task_failure_reason",
+      "when": 1793189023860,
+      "tag": "0076_containers_reaped_reason",
+      "breakpoints": true
+    },
+    {
+      "idx": 77,
+      "version": "7",
+      "when": 1793194839282,
+      "tag": "0077_skill_run_and_deploy_state_checks",
+      "breakpoints": true
+    },
+    {
+      "idx": 78,
+      "version": "7",
+      "when": 1793213344632,
+      "tag": "0078_steering_rule_status",
+      "breakpoints": true
+    },
+    {
+      "idx": 79,
+      "version": "7",
+      "when": 1793214526663,
+      "tag": "0079_pipeline_run_failure_reason",
+      "breakpoints": true
+    },
+    {
+      "idx": 80,
+      "version": "7",
+      "when": 1793216388305,
+      "tag": "0080_coding_task_failure_reason",
       "breakpoints": true
     }
   ]
