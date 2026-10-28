@@ -4,8 +4,8 @@
  * failed, or abandoned to a task that ended under the run.
  */
 
-import type { Inngest } from "inngest";
 import { match } from "ts-pattern";
+import type { EventPublisher } from "../../inngest/durable.js";
 import type { SandboxClient, SandboxSession } from "../../sandbox/index.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import type { BackendUsage } from "./backend.js";
@@ -207,7 +207,7 @@ type HandOffOutcome = "handed_off" | "left_executing";
 export async function handOffToVerify(
   run: CodingRun,
   deps: ExecuteOutcomeDeps,
-  inngest: Pick<Inngest, "send">,
+  inngest: EventPublisher,
   exit: ExecuteExitContext & { usage: BackendUsage | undefined },
 ): Promise<HandOffOutcome> {
   // `transition-pending-verify` supersedes `set-status-pending-verify`, an

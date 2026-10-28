@@ -20,8 +20,8 @@ import type { Inngest } from "inngest";
 import { err, ok, type Result } from "neverthrow";
 import { match } from "ts-pattern";
 import type { Transactor } from "../../db/index.js";
+import { type EventPublisher, fromStepTools } from "../../inngest/durable.js";
 import { buildCodingTaskVerifyCompleteEvent, codingTaskCliDone } from "../../inngest/events.js";
-import type { StepRun, StepSendEvent } from "../../inngest/index.js";
 import { logger } from "../../logger.js";
 import type { AskpassMaterials } from "../../sandbox/askpass.js";
 import type { SandboxClient, SandboxSession, SandboxSessionState } from "../../sandbox/index.js";
@@ -101,12 +101,13 @@ export function createCodingVerifyOrchestrator(deps: VerifyOrchestratorDeps, inn
       concurrency: { limit: 1, key: "event.data.taskId" },
     },
     async ({ event, step, runId }) => {
+      const durable = fromStepTools(step);
       return runCodingVerify({
         taskId: event.data.taskId,
         runId,
         deps,
-        stepRun: step.run,
-        stepSendEvent: step.sendEvent,
+        stepRun: durable.run,
+        stepSendEvent: durable.sendEvent,
         inngest,
       });
     },
@@ -118,10 +119,10 @@ interface RunParams {
   /** See {@link CodingRun.runId}. */
   runId: string;
   deps: VerifyOrchestratorDeps;
-  stepRun: StepRun;
+  stepRun: CodingRun["stepRun"];
   /** See {@link CodingRun.stepSendEvent}. */
-  stepSendEvent: StepSendEvent;
-  inngest: Pick<Inngest, "send">;
+  stepSendEvent: CodingRun["stepSendEvent"];
+  inngest: EventPublisher;
 }
 
 /** What a run fails with: the task's repo and worktree, for teardown. */
@@ -258,7 +259,7 @@ async function resolveVerifyCredentials(
 async function openPr(
   run: CodingRun,
   deps: VerifyOrchestratorDeps,
-  inngest: Pick<Inngest, "send">,
+  inngest: EventPublisher,
   failure: VerifyFailureContext,
   args: OpenTaskPrArgs,
 ): Promise<VerifyOrchestratorResult> {
@@ -393,7 +394,7 @@ async function createVerifySandbox(
  */
 async function runVerifyStage(
   run: CodingRun,
-  inngest: Pick<Inngest, "send">,
+  inngest: EventPublisher,
   args: { repo: CodingRepoRow; container: () => Promise<SandboxSession> },
 ): Promise<VerifyResult> {
   const verdict = await run.stepRun("run-verify", async () =>

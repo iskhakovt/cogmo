@@ -4,9 +4,9 @@
  */
 
 import type { Octokit } from "@octokit/rest";
-import type { Inngest } from "inngest";
 import { err, ok, type Result } from "neverthrow";
 import { match } from "ts-pattern";
+import type { EventPublisher } from "../../inngest/durable.js";
 import { buildCodingTaskPushedEvent } from "../../inngest/events.js";
 import type { AskpassMaterials } from "../../sandbox/askpass.js";
 import type { SandboxClient, SandboxSession } from "../../sandbox/index.js";
@@ -60,7 +60,7 @@ export interface OpenTaskPrArgs {
 export async function pushVerifiedBranch(
   run: CodingRun,
   deps: TaskStoreDeps,
-  inngest: Pick<Inngest, "send">,
+  inngest: EventPublisher,
   args: {
     task: CodingTaskRow;
     branch: string;
@@ -139,7 +139,7 @@ interface OpenTaskPrDeps extends TaskStoreDeps {
 export async function openTaskPr(
   run: CodingRun,
   deps: OpenTaskPrDeps,
-  inngest: Pick<Inngest, "send">,
+  inngest: EventPublisher,
   args: OpenTaskPrArgs,
 ): Promise<Result<PrOutcome, string>> {
   const { repo, identity, assignment } = args;

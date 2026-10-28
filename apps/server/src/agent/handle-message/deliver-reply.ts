@@ -1,12 +1,12 @@
 import type { Logger } from "pino";
 import type { Transactor } from "../../db/index.js";
+import type { Durable } from "../../inngest/durable.js";
 import type { AttachmentStore } from "../../transport/attachment-store.js";
 import type { DeliveryHandle, DeliveryRouter } from "../../transport/delivery-router.js";
 import type { TransportStore } from "../../transport/store/index.js";
 import type { VoiceBundle } from "../../voice/resolver.js";
 import { extractGeneratedDocuments, extractGeneratedImages } from "../extract-images.js";
 import type { AgentLoopResult } from "../loop.js";
-import type { TurnSteps } from "./turn-steps.js";
 
 export interface DeliverReplyDeps {
   runInTx: Transactor;
@@ -37,7 +37,7 @@ export interface DeliverReplyArgs {
  * `voice-delivery`.
  */
 export async function deliverReply(
-  step: TurnSteps,
+  step: Durable,
   deps: DeliverReplyDeps,
   args: DeliverReplyArgs,
 ): Promise<void> {

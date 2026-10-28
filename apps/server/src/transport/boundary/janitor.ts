@@ -1,7 +1,7 @@
-import type { Inngest } from "inngest";
 import type { AgentStore } from "../../agent/store/index.js";
 import type { Transactor } from "../../db/index.js";
 import { inngest as inngestClient } from "../../inngest/client.js";
+import type { EventPublisher } from "../../inngest/durable.js";
 import { logger } from "../../logger.js";
 import type { TransportStore } from "../store/index.js";
 import { resolveBoundary } from "./resolve-boundary.js";
@@ -10,7 +10,7 @@ export interface BoundaryJanitorDeps {
   runInTx: Transactor;
   transportStore: TransportStore;
   agentStore: AgentStore;
-  inngest: Inngest;
+  inngest: EventPublisher;
   defaultProfileId: string;
   /**
    * How long past `expires_at` to wait before the janitor claims a row.
