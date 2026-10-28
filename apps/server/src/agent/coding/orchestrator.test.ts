@@ -481,12 +481,12 @@ describe("runCodingTask", () => {
     fakeSecrets.getSecret.mockResolvedValue(undefined);
     const deps = makeDeps({ sandbox, backend: backendYielding([]), secretsStore: fakeSecrets });
     // The Cancel lands just before the gate runs.
-    const cancellingStepRun = (async (id: string, body: () => Promise<unknown>) => {
+    const cancellingStepRun: typeof stepRun = async (id, body) => {
       if (id === "check-credentials") {
         await tx((trx) => store.cancelTaskIfActive(trx, task.id, "user_cancelled"));
       }
       return stepRun(id, body);
-    }) as typeof stepRun;
+    };
 
     const result = await runCodingTask({
       taskId: task.id,
@@ -1088,15 +1088,11 @@ describe("runCodingTask", () => {
     ).rejects.toThrow(/task not found/);
   });
 
-  // Catch-path durability — the in-worker catch emits via
-  // `step.sendEvent` BEFORE writing `status='failed'`. If the emit
-  // were swallowed silently AFTER the DB UPDATE (the old shape), a
-  // transient send blip would leave the row terminal with no event
-  // on the bus — `cleanup-run-branch` would never fire and the
-  // `coding-task-reconcile` subscriber would see `already_terminal`
-  // and skip. Letting the emit throw lets the function fail, which
-  // fires `inngest/function.failed` and lets the reconcile pick up a
-  // still-non-terminal row.
+  // Catch-path ordering — the catch writes `failed` conditionally in
+  // `record-catch-failure`, then emits. An emit that fails is not
+  // swallowed: it fails the function, and the task reads `failed`
+  // unannounced, the residual the in-run exits share (reconcile reads
+  // `already_terminal` and skips).
   it("catch path: the conditional write commits before the emit; an emit failure propagates with the row failed", async () => {
     const repo = await seedRepo();
     const task = await seedTask(repo);
@@ -1206,8 +1202,9 @@ describe("runCodingTask", () => {
 
   // If the DB UPDATE in the catch swallowed its error, a transient DB
   // blip would suppress `function.failed` and leave the row stuck
-  // non-terminal — the reconcile subscriber would never see it. Letting the UPDATE throw propagates the failure and
-  // hands off to the reconcile.
+  // non-terminal — the reconcile subscriber would never see it. Letting
+  // the UPDATE throw propagates the failure and hands off to the
+  // reconcile.
   it("catch path: DB update throw in catch propagates so reconcile can recover", async () => {
     const repo = await seedRepo();
     const task = await seedTask(repo);
@@ -2120,9 +2117,8 @@ describe("runCodingExecute", () => {
     expect(stream.completed).toEqual([]);
   });
 
-  // Mirror of the runCodingTask catch-path contract — emit-first
-  // ordering pins the reconcile handoff for the execute orchestrator
-  // too.
+  // Mirror of the runCodingTask catch-path contract — write, then
+  // emit — for the execute orchestrator.
   it("catch path: the conditional write commits before the emit; an emit failure propagates with the row failed", async () => {
     const repo = await seedRepo();
     const { task } = await seedExecutableTask(repo);

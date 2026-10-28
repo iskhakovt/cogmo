@@ -130,17 +130,21 @@ export async function recordTaskFailed(
  * `unexpected_error`. Deliberately broad: every throw, `StepError` from a
  * permanently-failed step included, belongs in this one designed channel.
  *
- * Conditional like {@link recordTaskFailed}, but outside a step: the catch
- * runs once, at the end of the run. A task already terminal — `pr_open`
- * after a failed `emit-pr-opened`, `failed` after a failed in-run
- * `emit-task-failed`, `cancelled` under the run — keeps its status and
- * reason, and nothing is emitted. Otherwise the write commits, then the
- * emit; an emit that exhausts its retries fails the function, and the task
- * reads `failed` unannounced, the in-run exits' residual.
+ * The same shape as {@link recordTaskFailed}: a conditional `→ failed` in its
+ * own step, `record-catch-failure`, then the emit, planned on the memoized
+ * outcome. The catch body re-runs at every later boundary (the failed step
+ * replays its `StepError`, and the emit is a boundary of its own), so a
+ * bare-body write would read itself back as terminal on the next invocation.
+ * The step's id is its own: an in-run exit may already have memoized
+ * `transition-failed`.
  *
- * Letting the status write throw is load-bearing: a DB blip would otherwise
- * return normally to Inngest, suppress `function.failed`, and leave the row
- * non-terminal for good.
+ * A task already terminal — `pr_open` after a failed `emit-pr-opened`,
+ * `failed` after a failed in-run `emit-task-failed`, `cancelled` under the
+ * run — keeps its status and reason, and nothing is emitted. Otherwise the
+ * write commits, then the emit; an emit that exhausts its retries fails the
+ * function, and the task reads `failed` unannounced, the in-run exits'
+ * residual. A write that throws fails the function, and reconcile, which
+ * finds the row non-terminal, finishes the job.
  */
 export async function failTaskFromCatch(
   run: CodingRun,
@@ -148,17 +152,22 @@ export async function failTaskFromCatch(
   err: unknown,
 ): Promise<RecordedFailure> {
   const failure = maskTaskFailure(unexpectedFailure(err));
-  const written = await deps.runInTx((tx) =>
-    deps.store.failTaskIfNonTerminal(tx, run.taskId, failure),
-  );
-  return await match(written)
+  // The failure rides in the result, so every invocation reports the text
+  // the write committed.
+  const written = await run.stepRun("record-catch-failure", async () => ({
+    transition: await deps.runInTx((tx) =>
+      deps.store.failTaskIfNonTerminal(tx, run.taskId, failure),
+    ),
+    failure,
+  }));
+  return await match(written.transition)
     .with({ kind: "failed" }, async (): Promise<RecordedFailure> => {
-      await emitTaskFailed(run, failure);
-      return { kind: "recorded", failure };
+      await emitTaskFailed(run, written.failure);
+      return { kind: "recorded", failure: written.failure };
     })
     .with({ kind: "already_terminal" }, ({ status }): RecordedFailure => {
       run.log.warn(
-        { status, failure },
+        { status, failure: written.failure },
         "run threw on a task already terminal — status and reason kept, not announced",
       );
       return { kind: "ended", status };

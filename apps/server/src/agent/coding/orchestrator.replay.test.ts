@@ -120,12 +120,19 @@ function countingBackend(events: { plan?: CodingEvent[]; execute?: CodingEvent[]
   };
 }
 
-function recordingPlanStream(): { handle: PlanStreamHandle; text: string[]; finalized: string[] } {
+function recordingPlanStream(): {
+  handle: PlanStreamHandle;
+  text: string[];
+  finalized: string[];
+  failed: string[];
+} {
   const text: string[] = [];
   const finalized: string[] = [];
+  const failed: string[] = [];
   return {
     text,
     finalized,
+    failed,
     handle: {
       appendText: async (delta) => {
         text.push(delta);
@@ -133,7 +140,9 @@ function recordingPlanStream(): { handle: PlanStreamHandle; text: string[]; fina
       finalize: async (plan) => {
         finalized.push(plan);
       },
-      fail: async () => {},
+      fail: async (message) => {
+        failed.push(message);
+      },
     },
   };
 }
@@ -310,6 +319,88 @@ describe("coding-task-start — Inngest replay", () => {
     expect(current().status).toBe("failed");
     expect(sandbox.teardownCalls()).toBe(1);
     expect(backend.planCalls()).toBe(0);
+  });
+
+  describe("a step that throws reaches the catch", () => {
+    // A `plan-cli` memo no session wrote: the bare body's parse throws on
+    // every invocation, as a replayed `StepError` would, and reaches the catch.
+    const planCliFailed = { id: "plan-cli", handler: () => ({ isError: true }) };
+    const CAUGHT = {
+      reason: "unexpected_error",
+      detail: expect.stringContaining("an errored session memo carries its failure"),
+    };
+
+    it("records the failure once, emits it once, and tells the stream", async () => {
+      const { store, current } = statefulCodingStore(codingTaskRow(), localRepo());
+      const planStream = recordingPlanStream();
+      const fn = createCodingOrchestrator(
+        makeDeps({
+          store,
+          backend: countingBackend({ plan: PLAN_EVENTS }).backend,
+          openPlanStream: async () => planStream.handle,
+        }),
+        inngest,
+      );
+
+      const engine = new InngestTestEngine({
+        function: fn,
+        events: [{ name: "coding/task/start", data: { taskId: FIXTURE_TASK_ID } }],
+        steps: [planCliFailed],
+      });
+      const { result, error } = await engine.execute();
+
+      expect(error).toBeUndefined();
+      expect(result).toEqual({ status: "failed", failure: CAUGHT });
+      expect(current().status).toBe("failed");
+      expect(current().failureReason).toBe("unexpected_error");
+      expect(
+        emittedEventNames(sendSpy).filter((name) => name === "coding/task/failed"),
+      ).toHaveLength(1);
+      expect(planStream.failed).toEqual([
+        expect.stringMatching(/^Unexpected error: .*an errored session memo carries its failure/s),
+      ]);
+    });
+
+    it("a later invocation with the write and the emit memoized reports the failure without re-emitting", async () => {
+      const { store } = statefulCodingStore(
+        codingTaskRow({
+          status: "failed",
+          failureReason: "unexpected_error",
+          failureDetail: "backend exploded",
+        }),
+        localRepo(),
+      );
+      const planStream = recordingPlanStream();
+      const fn = createCodingOrchestrator(
+        makeDeps({
+          store,
+          backend: countingBackend({ plan: PLAN_EVENTS }).backend,
+          openPlanStream: async () => planStream.handle,
+        }),
+        inngest,
+      );
+      const failure = { reason: "unexpected_error", detail: "backend exploded" };
+
+      const engine = new InngestTestEngine({
+        function: fn,
+        events: [{ name: "coding/task/start", data: { taskId: FIXTURE_TASK_ID } }],
+        steps: [
+          { id: "claim-task-planning", handler: () => ({ kind: "transitioned" }) },
+          planCliFailed,
+          {
+            id: "record-catch-failure",
+            handler: () => ({ transition: { kind: "failed" }, failure }),
+          },
+          { id: "emit-task-failed", handler: () => ({ ids: [] }) },
+        ],
+      });
+      const { result, error } = await engine.execute();
+
+      expect(error).toBeUndefined();
+      expect(result).toEqual({ status: "failed", failure });
+      expect(emittedEventNames(sendSpy)).not.toContain("coding/task/failed");
+      expect(planStream.failed).toEqual(["Unexpected error: backend exploded"]);
+    });
   });
 
   it("skips a duplicate start event instead of re-planning", async () => {

@@ -886,9 +886,8 @@ describe("runCodingVerify", () => {
     expect(deps.sandbox.deleteByTaskId).toHaveBeenCalledWith(taskId);
   });
 
-  // Mirror of the runCodingTask catch-path contract — emit-first
-  // ordering pins the reconcile handoff for the verify orchestrator
-  // too.
+  // Mirror of the runCodingTask catch-path contract — write, then
+  // emit — for the verify orchestrator.
   it("catch path: the write commits before the emit; an emit failure propagates with the row failed", async () => {
     // Inject a failure during verify by handing the orchestrator a
     // container whose `bash -lc <verifyCmd>` exec throws (mirrors a
