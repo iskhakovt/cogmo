@@ -137,6 +137,7 @@ export const pipelineRuns = pgTable(
       "chk_pipeline_runs_failure_reason_by_status",
       sql`CASE ${t.status} WHEN 'failed' THEN ${t.failureReason} IS NOT NULL AND ${t.failureReason} IN (${enumLiterals(PIPELINE_RUN_FAILED_REASONS)}) WHEN 'cancelled' THEN ${t.failureReason} IS NOT NULL AND ${t.failureReason} IN (${enumLiterals(PIPELINE_RUN_CANCELLED_REASONS)}) ELSE ${t.failureReason} IS NULL AND ${t.failureDetail} IS NULL END`,
     ),
+    // The gate-key format is `pipelineGateKey`'s (src/inngest/events.ts).
     check(
       "chk_pipeline_runs_parked_gate_unclaimed",
       sql`${t.status} <> 'waiting_gate' OR ${t.gateResolution} IS NULL OR (${t.gateResolution} ->> 'gateKey') <> (${t.id}::text || ':' || ${t.currentStage} || ':' || ${t.iteration}::text)`,

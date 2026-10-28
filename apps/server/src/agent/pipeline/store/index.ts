@@ -520,12 +520,11 @@ export class DrizzlePipelineRunStore implements PipelineRunStore {
   async #transition(
     tx: Transaction,
     id: string,
-    from: PipelineRunStatus,
+    from: "running" | "waiting_gate",
     set: { status: PipelineRunStatus; gateResolution?: GateResolution },
   ): Promise<RunTransition> {
-    // `.for("update")` row-locks, and the terminal guard makes "terminal is
-    // final" hold store-wide: a flip out of completed/failed/cancelled is
-    // refused even if a caller passes a terminal `from`.
+    // `.for("update")` row-locks, so two flips of one run serialize and the
+    // second reads the first's status.
     const rows = await tx
       .select({
         status: pipelineRuns.status,
@@ -538,7 +537,7 @@ export class DrizzlePipelineRunStore implements PipelineRunStore {
       .for("update");
     const row = rows[0];
     if (!row) return { kind: "not_found" as const };
-    if (isTerminalPipelineRunStatus(row.status) || row.status !== from) {
+    if (row.status !== from) {
       return {
         kind: "stale" as const,
         status: row.status,
@@ -644,19 +643,7 @@ export class DrizzlePipelineRunStore implements PipelineRunStore {
     cursor: StageCursor,
     failure: PipelineRunFailure,
   ): Promise<StageFailure> {
-    const rows = await tx
-      .select({
-        status: pipelineRuns.status,
-        currentStage: pipelineRuns.currentStage,
-        iteration: pipelineRuns.iteration,
-        failureReason: pipelineRuns.failureReason,
-        conversationId: pipelineRuns.conversationId,
-      })
-      .from(pipelineRuns)
-      .where(eq(pipelineRuns.id, cursor.runId))
-      .limit(1)
-      .for("update");
-    const row = rows[0];
+    const row = await this.#lockForEnd(tx, cursor.runId);
     if (!row) return { kind: "not_found" as const };
     const atCursor = row.currentStage === cursor.stageId && row.iteration === cursor.iteration;
     if (atCursor && row.status === "failed" && row.failureReason === failure.reason) {
@@ -670,10 +657,7 @@ export class DrizzlePipelineRunStore implements PipelineRunStore {
         iteration: row.iteration,
       };
     }
-    await tx
-      .update(pipelineRuns)
-      .set({ status: "failed", failureReason: failure.reason, failureDetail: failure.detail })
-      .where(eq(pipelineRuns.id, cursor.runId));
+    await this.#end(tx, cursor.runId, "failed", failure);
     return { kind: "failed" as const, conversationId: row.conversationId };
   }
 
@@ -712,21 +696,42 @@ export class DrizzlePipelineRunStore implements PipelineRunStore {
     | { kind: "already_terminal"; status: PipelineRunStatus }
     | { kind: "not_found" }
   > {
-    const rows = await tx
-      .select({ status: pipelineRuns.status, conversationId: pipelineRuns.conversationId })
-      .from(pipelineRuns)
-      .where(eq(pipelineRuns.id, id))
-      .limit(1)
-      .for("update");
-    const row = rows[0];
+    const row = await this.#lockForEnd(tx, id);
     if (!row) return { kind: "not_found" as const };
     if (isTerminalPipelineRunStatus(row.status)) {
       return { kind: "already_terminal" as const, status: row.status };
     }
+    await this.#end(tx, id, status, end);
+    return { kind: "failed" as const, conversationId: row.conversationId };
+  }
+
+  /** Row-lock a run for a terminal flip and read what the guards check. */
+  async #lockForEnd(tx: Transaction, id: string) {
+    const rows = await tx
+      .select({
+        status: pipelineRuns.status,
+        currentStage: pipelineRuns.currentStage,
+        iteration: pipelineRuns.iteration,
+        failureReason: pipelineRuns.failureReason,
+        conversationId: pipelineRuns.conversationId,
+      })
+      .from(pipelineRuns)
+      .where(eq(pipelineRuns.id, id))
+      .limit(1)
+      .for("update");
+    return rows[0];
+  }
+
+  /** The terminal write: the status and why the run ended. */
+  async #end(
+    tx: Transaction,
+    id: string,
+    status: "failed" | "cancelled",
+    end: PipelineRunFailure | PipelineRunCancellation,
+  ): Promise<void> {
     await tx
       .update(pipelineRuns)
       .set({ status, failureReason: end.reason, failureDetail: end.detail })
       .where(eq(pipelineRuns.id, id));
-    return { kind: "failed" as const, conversationId: row.conversationId };
   }
 }

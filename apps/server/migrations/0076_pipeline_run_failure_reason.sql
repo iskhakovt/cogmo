@@ -1,11 +1,12 @@
 CREATE TYPE "public"."pipeline_run_failure_reason" AS ENUM('stage_error', 'unknown_stage', 'unsupported_stage', 'turn_degraded', 'turn_truncated', 'artifact_invalid', 'gate_resolution_error', 'cancelled_by_user', 'gate_timeout');--> statement-breakpoint
 ALTER TABLE "pipeline_runs" ADD COLUMN "failure_detail" text;--> statement-breakpoint
--- Carry the recorded text of every reason into `failure_detail`, then rewrite
+-- Carry the recorded text of every failure into `failure_detail`, then rewrite
 -- `failure_reason` to the label the cast below needs. The labels come from the
 -- writers' message shapes; a text none of them produced keeps its status's
--- generic reason, with the original text still in the detail.
+-- generic reason, with the original text still in the detail. A cancellation
+-- carries no detail: its text named only the gate, which is `current_stage`.
 UPDATE "pipeline_runs" SET "failure_detail" = "failure_reason"
-WHERE "failure_reason" IS NOT NULL;--> statement-breakpoint
+WHERE "failure_reason" IS NOT NULL AND "status" <> 'cancelled';--> statement-breakpoint
 UPDATE "pipeline_runs" SET "failure_reason" = CASE
   WHEN "status" = 'cancelled' THEN CASE
     WHEN "failure_reason" LIKE 'gate "%" timed out' THEN 'gate_timeout'

@@ -2,8 +2,8 @@ import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database, Transactor } from "../../../db/index.js";
-
-import { expectOk, expectSqlState } from "../../../test/assertions.js";
+import { pipelineGateKey } from "../../../inngest/events.js";
+import { expectOk, expectPgError } from "../../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../../test/pglite.js";
 import { DrizzleAgentStore } from "../../store/index.js";
 import type { PipelineRunCancellation, PipelineRunFailure } from "../run-failure.js";
@@ -479,7 +479,7 @@ describe("pipeline_runs CHECK constraints", () => {
     const error = await rejected(
       db.execute(sql`UPDATE pipeline_runs SET failure_reason = 'stage_error' WHERE id = ${run.id}`),
     );
-    expectSqlState(error, "23514");
+    expectPgError(error, "23514", "chk_pipeline_runs_failure_reason_by_status");
   });
 
   it("refuses a failed run without a reason", async () => {
@@ -488,7 +488,7 @@ describe("pipeline_runs CHECK constraints", () => {
     const error = await rejected(
       db.execute(sql`UPDATE pipeline_runs SET failure_reason = NULL WHERE id = ${run.id}`),
     );
-    expectSqlState(error, "23514");
+    expectPgError(error, "23514", "chk_pipeline_runs_failure_reason_by_status");
   });
 
   it("refuses a cancellation reason on a failed run", async () => {
@@ -499,18 +499,36 @@ describe("pipeline_runs CHECK constraints", () => {
         sql`UPDATE pipeline_runs SET failure_reason = 'cancelled_by_user' WHERE id = ${run.id}`,
       ),
     );
-    expectSqlState(error, "23514");
+    expectPgError(error, "23514", "chk_pipeline_runs_failure_reason_by_status");
   });
 
   it("refuses a run parked on a gate it holds the claim on", async () => {
     const { run } = await seedRun("plan-gate");
-    const claim = JSON.stringify({ gateKey: `${run.id}:plan-gate:0`, resolverRunId: "r-1" });
+    const claim = JSON.stringify({
+      gateKey: pipelineGateKey(run.id, "plan-gate", 0),
+      resolverRunId: "r-1",
+    });
     const error = await rejected(
       db.execute(
         sql`UPDATE pipeline_runs SET status = 'waiting_gate', gate_resolution = ${claim}::jsonb WHERE id = ${run.id}`,
       ),
     );
-    expectSqlState(error, "23514");
+    expectPgError(error, "23514", "chk_pipeline_runs_parked_gate_unclaimed");
+  });
+
+  it("refuses to park a run again on the gate whose claim the store wrote", async () => {
+    const { run } = await seedRun("plan-gate");
+    await tx((trx) => runStore.parkAtGate(trx, run.id));
+    await tx((trx) =>
+      runStore.claimGate(trx, run.id, {
+        gateKey: pipelineGateKey(run.id, "plan-gate", 0),
+        resolverRunId: "r-1",
+      }),
+    );
+    const error = await rejected(
+      db.execute(sql`UPDATE pipeline_runs SET status = 'waiting_gate' WHERE id = ${run.id}`),
+    );
+    expectPgError(error, "23514", "chk_pipeline_runs_parked_gate_unclaimed");
   });
 });
 

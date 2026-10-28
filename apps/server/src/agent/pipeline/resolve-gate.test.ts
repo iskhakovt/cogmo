@@ -381,8 +381,7 @@ describe("inspectFailedResolution", () => {
   });
 
   it("recognises its own failure by its reason, not its detail", async () => {
-    // The step may fail with a different error class on the re-run than on
-    // the attempt that committed; the committed failure is still this check's.
+    // Recognition is by reason and cursor; the detail's wording plays no part.
     const { runId, gateKey, conversationId } = await parkedRun("approve");
     await tx((trx) =>
       runStore.failRun(trx, runId, { reason: "gate_resolution_error", detail: "RangeError" }),

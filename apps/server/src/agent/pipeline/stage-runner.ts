@@ -45,8 +45,31 @@ import type {
 } from "./run-agentic-stage.js";
 import { describePipelineRunFailure, type PipelineRunFailure } from "./run-failure.js";
 import { StageOutputsSchema } from "./run-types.js";
-import type { PipelineRunStore } from "./store/index.js";
+import {
+  isTerminalPipelineRunStatus,
+  type PipelineRunStatus,
+  type PipelineRunStore,
+  type StageFailure,
+} from "./store/index.js";
 import { PipelineDefinitionSchema, parseDurationMs } from "./types.js";
+
+/**
+ * What the `fail-run` step can replay. A run in flight across a deploy
+ * replays the result an earlier build's step stored (`.agents/rules/inngest.md`
+ * → a memoized result is a contract), and that build's `fail-run` returned
+ * `failRun`'s `already_terminal`; it means the same as `stale`.
+ */
+type FailRunStepResult = StageFailure | { kind: "already_terminal"; status: PipelineRunStatus };
+
+/**
+ * Why `fail-run` left the run alone: a terminal run on the stage ended
+ * another way; any other status means the run moved off the stage.
+ */
+function staleFailureNote(status: PipelineRunStatus): string {
+  return isTerminalPipelineRunStatus(status)
+    ? "the run already ended another way"
+    : "the run is no longer on the failed stage";
+}
 
 export interface PipelineStageRunnerDeps {
   runInTx: Transactor;
@@ -82,7 +105,7 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
         const durable = fromStepTools(step);
         const log = logger.child({ component: "pipeline.stage-runner", runId, stageId });
         log.error({ err: error }, "pipeline stage failed after retries");
-        const failed = await durable.run("fail-run", () =>
+        const failed = await durable.run<FailRunStepResult>("fail-run", () =>
           deps.runInTx((tx) =>
             deps.runStore.failRunAt(
               tx,
@@ -102,11 +125,8 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
               { runId, stageId },
             ),
           )
-          .with({ kind: "stale" }, (f) => {
-            log.info(
-              { runStatus: f.status, runStage: f.currentStage },
-              "the run is no longer on the failed stage — leaving it",
-            );
+          .with({ kind: P.union("stale", "already_terminal") }, (f) => {
+            log.info({ runStatus: f.status }, `${staleFailureNote(f.status)} — leaving it`);
           })
           .with({ kind: "not_found" }, () => {
             log.warn("stage failed for a run that does not exist");
@@ -162,7 +182,7 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
       const next = definition.stages[index + 1];
 
       const failRun = async (failure: PipelineRunFailure) => {
-        const failed = await durable.run("fail-run", () =>
+        const failed = await durable.run<FailRunStepResult>("fail-run", () =>
           deps.runInTx((tx) => deps.runStore.failRunAt(tx, { runId, stageId, iteration }, failure)),
         );
         return match(failed)
@@ -177,11 +197,8 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
             );
             return { status: "failed" as const, failure };
           })
-          .with({ kind: "stale" }, async (f) => {
-            log.info(
-              { runStatus: f.status, runStage: f.currentStage },
-              "the run is no longer on the failed stage — skipping",
-            );
+          .with({ kind: P.union("stale", "already_terminal") }, async (f) => {
+            log.info({ runStatus: f.status }, `${staleFailureNote(f.status)} — skipping`);
             return { status: "skipped" as const, reason: "stale" as const };
           })
           .with({ kind: "not_found" }, async () => ({
