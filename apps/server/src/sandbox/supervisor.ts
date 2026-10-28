@@ -21,6 +21,7 @@ import type {
 } from "./index.js";
 import { DEPS_CACHE_VOLUME_TARGET, LocalDockerSessionStateSchema } from "./index.js";
 import { killAndRemoveContainer, statusCodeOf } from "./kill-and-remove-container.js";
+import { markContainerRunning } from "./mark-container-running.js";
 import type { CogmoSocketProxy } from "./proxy/index.js";
 import {
   type ReapContainerDeps,
@@ -187,6 +188,14 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
         },
       );
     }
+    // Close the instance rows this pass targeted. A crashed instance keeps
+    // `stopped_at` NULL (shutdown leaves it open when a teardown did not
+    // finish), and the reaper's orphan pass counts an open instance as live,
+    // so a container this pass could not kill is retried by that pass only
+    // once its instance row is closed.
+    await this.#runInTx(async (tx) => {
+      for (const id of reapTargets) await this.#store.closeInstance(tx, id);
+    });
     return { orphansReaped: reaped };
   }
 
@@ -389,13 +398,9 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
       throw err;
     }
 
-    const started = await this.#runInTx((tx) =>
-      this.#store.transitionContainerStatus(tx, {
-        id: containerRow.id,
-        from: "starting",
-        to: "running",
-        at: new Date(),
-      }),
+    const started = await markContainerRunning(
+      { store: this.#store, runInTx: this.#runInTx },
+      { id: containerRow.id, dockerId: container.id, at: new Date() },
     );
     await match(started)
       .with({ kind: "transitioned" }, async () => {})

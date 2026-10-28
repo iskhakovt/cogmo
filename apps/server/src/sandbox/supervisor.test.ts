@@ -799,6 +799,48 @@ describe("LocalDockerSandboxClient — container row transitions", () => {
     expect(unregisters).toEqual([TASK_ID]);
   });
 
+  it("a start failure whose kill the daemon refuses leaves the row starting and surfaces the start error", async () => {
+    const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+    const { docker, container, calls } = fakeDocker({ dockerId: "docker-refuse", failStart: true });
+    container.kill.mockRejectedValue(Object.assign(new Error("daemon i/o"), { statusCode: 500 }));
+    const { proxy, unregisters } = fakeProxy();
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tx,
+      runtime: "runc",
+      instanceId: inst.id,
+      proxy,
+    });
+
+    await expect(sandbox.create(SPEC)).rejects.toThrow("boom");
+
+    // The refusal is a value: no remove, no transition, and the TTL pass
+    // reaps the row at expiry.
+    expect(calls.remove).toBe(0);
+    const row = await tx((trx) => store.getContainerByDockerId(trx, "docker-refuse"));
+    expect(row?.status).toBe("starting");
+    expect(unregisters).toEqual([TASK_ID]);
+  });
+
+  it("a failing proxy release does not mask the start error", async () => {
+    const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+    const { docker } = fakeDocker({ dockerId: "docker-busy-sock", failStart: true });
+    const { proxy } = fakeProxy();
+    vi.mocked(proxy.unregisterTask).mockRejectedValue(new Error("socket busy"));
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tx,
+      runtime: "runc",
+      instanceId: inst.id,
+      proxy,
+    });
+
+    await expect(sandbox.create(SPEC)).rejects.toThrow("boom");
+    expect(proxy.unregisterTask).toHaveBeenCalledWith(TASK_ID);
+  });
+
   it("create surfaces the insert error, not the remove error, when both fail", async () => {
     const { docker, container } = fakeDocker({ dockerId: "docker-rowless-stuck" });
     container.remove.mockRejectedValue(
@@ -1615,6 +1657,88 @@ describe("LocalDockerSandboxClient — reconcileCrashedInstances", () => {
     expect(result.orphansReaped).toBe(1);
     expect(container.kill).toHaveBeenCalledWith({ signal: "SIGTERM" });
     expect(container.remove).toHaveBeenCalledWith({ force: true });
+  });
+
+  it("closes the stale instance rows it targeted, so the orphan pass retries what it could not kill", async () => {
+    const stale = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+    const current = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 2 }));
+    const { docker, container } = mockDockerFacade();
+    docker.listContainers.mockResolvedValue([
+      containerInfoStub("docker-stale-close", {
+        [LABEL_MANAGED]: "true",
+        [LABEL_INSTANCE]: stale.id,
+      }),
+    ]);
+    container.kill.mockResolvedValue(undefined);
+    container.remove.mockResolvedValue(undefined);
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tx,
+      runtime: "runc",
+      instanceId: current.id,
+    });
+
+    await sandbox.reconcileCrashedInstances(current.id);
+
+    expect((await tx((trx) => store.getInstance(trx, stale.id)))?.stoppedAt).not.toBeNull();
+    expect((await tx((trx) => store.getInstance(trx, current.id)))?.stoppedAt).toBeNull();
+  });
+
+  it("logs a refused kill, reaps the next container, and still closes the instance", async () => {
+    const stale = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+    const current = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 2 }));
+    const insertRow = (dockerId: string) =>
+      tx((trx) =>
+        store.insertContainer(trx, {
+          dockerId,
+          parentId: null,
+          rootTaskId: "019d0000-0000-7000-8000-00000000c0de",
+          depth: 0,
+          image: "alpine",
+          runtime: "runc",
+          labels: {
+            [LABEL_MANAGED]: "true",
+            [LABEL_INSTANCE]: stale.id,
+            "cogmo.root_task": "019d0000-0000-7000-8000-00000000c0de",
+            "cogmo.parent": "",
+            "cogmo.depth": "0",
+          },
+          resourceLimits: RESOURCE_LIMITS,
+          ttlExpiresAt: new Date(Date.now() + 60_000),
+          instanceId: stale.id,
+        }),
+      );
+    const refusedRow = await insertRow("docker-refused");
+    const fineRow = await insertRow("docker-fine");
+
+    const { docker } = mockDockerFacade();
+    const refused = mock<DockerContainer>();
+    refused.kill.mockRejectedValue(Object.assign(new Error("daemon i/o"), { statusCode: 500 }));
+    const fine = mock<DockerContainer>();
+    fine.kill.mockResolvedValue(undefined);
+    fine.remove.mockResolvedValue(undefined);
+    docker.getContainer.mockImplementation((id) => (id === "docker-refused" ? refused : fine));
+    docker.listContainers.mockResolvedValue([
+      containerInfoStub("docker-refused", { [LABEL_MANAGED]: "true", [LABEL_INSTANCE]: stale.id }),
+      containerInfoStub("docker-fine", { [LABEL_MANAGED]: "true", [LABEL_INSTANCE]: stale.id }),
+    ]);
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tx,
+      runtime: "runc",
+      instanceId: current.id,
+    });
+
+    const result = await sandbox.reconcileCrashedInstances(current.id);
+
+    expect(result.orphansReaped).toBe(1);
+    expect(refused.remove).not.toHaveBeenCalled();
+    expect(fine.remove).toHaveBeenCalledWith({ force: true });
+    expect((await tx((trx) => store.getContainer(trx, refusedRow.id)))?.status).toBe("starting");
+    expect((await tx((trx) => store.getContainer(trx, fineRow.id)))?.status).toBe("reaped");
+    expect((await tx((trx) => store.getInstance(trx, stale.id)))?.stoppedAt).not.toBeNull();
   });
 
   it("skips listContainers entirely when no peer instance rows exist", async () => {
