@@ -35,6 +35,6 @@
   "devDependencies": {
     "@biomejs/biome": "^2.5.14",
     "husky": "^9.1.7",
-    "knip": "6.41.0"
+    "knip": "6.42.1"
   }
 }
