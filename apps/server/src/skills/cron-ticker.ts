@@ -30,8 +30,8 @@
 import type { Inngest } from "inngest";
 import { computeNextRun } from "../agent/scheduling/cron.js";
 import type { Transactor } from "../db/index.js";
+import { type Durable, fromStepTools } from "../inngest/durable.js";
 import { skillCronFire } from "../inngest/events.js";
-import type { StepRun } from "../inngest/index.js";
 import { logger } from "../logger.js";
 import type { SkillRow, SkillStore } from "./store/index.js";
 
@@ -83,9 +83,10 @@ export function createSkillCronTicker(deps: SkillCronTickerDeps, inngest: Innges
       triggers: [{ cron: "* * * * *" }],
     },
     async ({ step }) => {
-      const events = await runSkillCronTick(deps, step.run);
+      const durable = fromStepTools(step);
+      const events = await runSkillCronTick(deps, durable.run);
       if (events.length === 0) return { picked: 0 };
-      await step.sendEvent(
+      await durable.sendEvent(
         "fan-out",
         events.map((e) => ({
           ...skillCronFire.create(e),
@@ -105,7 +106,7 @@ export function createSkillCronTicker(deps: SkillCronTickerDeps, inngest: Innges
  */
 export async function runSkillCronTick(
   deps: SkillCronTickerDeps,
-  stepRun: StepRun,
+  stepRun: Durable["run"],
 ): Promise<FirePayload[]> {
   const now = (deps.now ?? (() => new Date()))();
   const batchSize = deps.batchSize ?? TICK_BATCH_SIZE;

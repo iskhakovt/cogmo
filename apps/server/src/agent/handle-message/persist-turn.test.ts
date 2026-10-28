@@ -2,9 +2,9 @@ import * as R from "remeda";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Transactor } from "../../db/index.js";
-import type { StepRun } from "../../inngest/index.js";
 import { agentIterations } from "../../metrics.js";
-import { FAKE_TX, nullStepSendEvent } from "../../test/factories.js";
+import { FAKE_TX } from "../../test/factories.js";
+import { fakeDurable } from "../../test/fake-durable.js";
 import type { AgentLoopResult } from "../loop.js";
 import type { AgentStore } from "../store/index.js";
 import type { CooldownState } from "../store/schema.js";
@@ -58,21 +58,17 @@ function setup(opts: Setup) {
     transactions.push("tx");
     return cb(FAKE_TX);
   };
-  const memo = opts.memo ?? {};
-  const planned: string[] = [];
-  // Runs a step body inline unless the memo holds its result.
-  const run = (async (id: string, body: () => Promise<unknown>) => {
-    planned.push(id);
-    return id in memo ? memo[id] : body();
-  }) as unknown as StepRun;
-  const sendEvent = vi.fn(nullStepSendEvent());
+  const step = fakeDurable({ memo: opts.memo ?? {} });
   return {
-    step: { run, sendEvent },
+    step,
     deps: { runInTx, agentStore },
     agentStore,
     transactions,
-    planned,
-    emitted: () => sendEvent.mock.calls.map(([id]) => id),
+    emitted: () =>
+      step
+        .planned()
+        .filter((s) => s.kind === "sendEvent")
+        .map((s) => s.id),
   };
 }
 

@@ -1,3 +1,4 @@
+import type { Durable } from "../../inngest/durable.js";
 import type { Message } from "../../llm/types.js";
 import type { LoadedSystemPrompt } from "../conversation/load-system-prompt.js";
 import { openSystemPromptEpoch } from "../conversation/open-system-prompt-epoch.js";
@@ -20,7 +21,6 @@ import {
 import type { TurnSystemPromptArgs } from "./freeze-turn-inputs.js";
 import type { TurnTranscript } from "./load-turn-transcript.js";
 import type { TurnView } from "./render-turn-view.js";
-import type { TurnSteps } from "./turn-steps.js";
 
 export interface FinalizeTurnContextArgs {
   /** The compacted history, the turn's message led by its provisional turn context. */
@@ -57,7 +57,7 @@ export interface FinalizedTurnContext {
  * epoch), `render-turn-context`.
  */
 export async function finalizeTurnContext(
-  step: TurnSteps,
+  step: Durable,
   deps: SystemPromptDeps,
   args: FinalizeTurnContextArgs,
 ): Promise<FinalizedTurnContext> {

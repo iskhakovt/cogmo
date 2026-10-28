@@ -51,7 +51,7 @@ import { readFile } from "./file-tools.js";
 import type { HandleMessageDeps } from "./handle-message.js";
 import { createHandleMessage } from "./handle-message.js";
 import type { ImageToolsLoader } from "./image-tools-loader.js";
-import { runStreamingAgentLoop } from "./loop.js";
+import { runStreamingAgentLoop, type StepRunner } from "./loop.js";
 import { memoryTools } from "./memory-tools.js";
 import { DefaultPromptSource } from "./prompt.js";
 import type { StoredContent, StoredMessage } from "./stored-content.js";
@@ -4323,8 +4323,8 @@ describe("createHandleMessage", () => {
   // directly: mockStep's passthrough runs the wrapper body, so the
   // rejection type IS what Inngest would see.
   describe("stepRun wrapper retry policy", () => {
-    async function captureStepRun(): Promise<<T>(id: string, fn: () => Promise<T>) => Promise<T>> {
-      let captured: (<T>(id: string, fn: () => Promise<T>) => Promise<T>) | undefined;
+    async function captureStepRun(): Promise<StepRunner> {
+      let captured: StepRunner | undefined;
       const deps = mockDeps({
         runStreamingAgentLoop: vi.fn<typeof runStreamingAgentLoop>(async (params) => {
           captured = params.stepRun;

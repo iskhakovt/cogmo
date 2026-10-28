@@ -1,12 +1,15 @@
 import { inngest } from "../inngest/client.js";
+import { fromStepTools } from "../inngest/durable.js";
 import {
   debounceCancel,
   debounceIdle,
   debounceMaxwait,
   inboundArrived,
-  inboundReady,
 } from "../inngest/events.js";
-import { debounceWaitMs } from "../metrics.js";
+import { durableSleepSeconds } from "./debounce/durable-sleep.js";
+import { emitNativeReady } from "./debounce/emit-native-ready.js";
+import { fireDebounceTimer } from "./debounce/fire-debounce-timer.js";
+import { routeInbound } from "./debounce/route-inbound.js";
 
 export interface DebounceConfig {
   idleTimeoutMs: number; // 0 = disabled
@@ -32,7 +35,7 @@ export interface DebounceConfig {
  *    + `debounce-maxwait`, with the documented cancel-listener race that
  *    handle-message's stale-trigger guard mops up after the fact. A
  *    sub-second timeout buys no extra responsiveness on this path either:
- *    durable sleeps have a one-second resolution (see {@link durableSleepMs}),
+ *    durable sleeps have a one-second resolution (see `durableSleepMs`),
  *    so the wait matches what the native path would have given.
  *
  * Future direction (`design/transport/debounce.md` → "Future migration"):
@@ -56,41 +59,6 @@ function canUseNativeDebounce(config: DebounceConfig): boolean {
   return config.idleTimeoutMs >= 1000 && (config.maxWaitMs === 0 || config.maxWaitMs >= 1000);
 }
 
-const MS_PER_SECOND = 1000;
-
-/**
- * Whole seconds `step.sleep` will really wait for a requested duration.
- *
- * Inngest's durable waits have a one-second resolution. `step.sleep` runs its
- * argument through the SDK's `timeStr`, which decomposes the duration into
- * whole `w`/`d`/`h`/`m`/`s` units — there is no millisecond unit to carry a
- * remainder. So a positive duration below one second rounds up to one second,
- * and anything longer keeps only its whole seconds: a request for `"2500ms"`
- * is a two-second wait on the wire.
- */
-function durableSleepSeconds(requestedMs: number): number {
-  return Math.max(1, Math.floor(requestedMs / MS_PER_SECOND));
-}
-
-/**
- * The wait `step.sleep` will actually perform for a requested duration,
- * quantised to the resolution described on {@link durableSleepSeconds}.
- *
- * Timer handlers sleep for this value and record it on the histogram, so the
- * durable wait and the observed sample are the same number. Passing the raw
- * request through instead would leave the histogram claiming a precision the
- * platform cannot hold — a sub-second hold that never happened, or a
- * fractional-second tail that was dropped before the op left the SDK.
- *
- * Non-positive values pass through untouched: the resolution applies to
- * positive durations only, and a timeout of zero or less means the timer isn't
- * scheduled at all.
- */
-export function durableSleepMs(requestedMs: number): number {
-  if (requestedMs <= 0) return requestedMs;
-  return durableSleepSeconds(requestedMs) * MS_PER_SECOND;
-}
-
 function msToSeconds(ms: number): `${number}s` {
   // Native debounce period/timeout types accept whole-second strings only.
   // Floor on the way down so "3500ms" debounces for 3s, not 4s — under-shooting
@@ -109,64 +77,20 @@ function createNativeRouter(config: DebounceConfig) {
         key: "event.data.conversationId",
       },
     },
-    async ({ event, step }) => {
-      // Inngest hands us the LAST event in the burst (matching the legacy
-      // semantics where the most recent inboundMessageId became triggerInboundId
-      // via the idle timer's reset). The orchestrator loads all unbatched
-      // inbound rows from the DB, so receiving only the last id is sufficient.
-      const { conversationId, inboundMessageId } = event.data;
-      await step.sendEvent(
-        "ready",
-        inboundReady.create({ conversationId, triggerInboundId: inboundMessageId }),
-      );
-      // Native debounce exposes no internal timing, so the sample is a proxy:
-      // time from the burst's last event to the emit.
-      const triggeredAt = event.ts;
-      if (typeof triggeredAt === "number") {
-        await step.run("record-wait", () => {
-          debounceWaitMs.record(Math.max(0, Date.now() - triggeredAt), { kind: "native" });
-        });
-      }
-      return { mode: "native" as const, triggerInboundId: inboundMessageId };
-    },
+    async ({ event, step }) =>
+      emitNativeReady(fromStepTools(step), { ...event.data, triggeredAt: event.ts }),
   );
 }
 
 function createLegacyStateMachine(config: DebounceConfig) {
   const router = inngest.createFunction(
     { id: "debounce-router", triggers: [inboundArrived] },
-    async ({ event, step }) => {
-      const { conversationId, inboundMessageId } = event.data;
-      // biome-ignore lint/suspicious/noExplicitAny: Inngest event types vary
-      const events: any[] = [];
-
-      if (config.idleTimeoutMs > 0) {
-        events.push(
-          debounceIdle.create({
-            conversationId,
-            inboundMessageId,
-            timeoutMs: config.idleTimeoutMs,
-          }),
-        );
-      }
-      if (config.maxWaitMs > 0) {
-        events.push(
-          debounceMaxwait.create({
-            conversationId,
-            inboundMessageId,
-            timeoutMs: config.maxWaitMs,
-          }),
-        );
-      }
-
-      // No debounce configured — fire immediately
-      if (events.length === 0) {
-        events.push(inboundReady.create({ conversationId, triggerInboundId: inboundMessageId }));
-      }
-
-      await step.sendEvent("route", events);
-      return { mode: "legacy" as const, emitted: events.map((e) => e.name) };
-    },
+    async ({ event, step }) =>
+      routeInbound(fromStepTools(step), {
+        ...event.data,
+        idleTimeoutMs: config.idleTimeoutMs,
+        maxWaitMs: config.maxWaitMs,
+      }),
   );
 
   // Idle timer: cancelled by next debounce/idle (same conversation) — resets on each message.
@@ -185,23 +109,7 @@ function createLegacyStateMachine(config: DebounceConfig) {
       ],
     },
     async ({ event, step }) => {
-      // Sleep and histogram sample share one millisecond value, and it is a
-      // whole number of seconds, so "how long did debounce hold this turn"
-      // reads the same on the wire as in the metric. A configured duration
-      // finer than one second is quantised by {@link durableSleepMs} first —
-      // the metric reports the honoured wait, not the requested one.
-      const ms = durableSleepMs(event.data.timeoutMs);
-      await step.sleep("wait", `${ms}ms`);
-      await step.sendEvent(
-        "fire",
-        inboundReady.create({
-          conversationId: event.data.conversationId,
-          triggerInboundId: event.data.inboundMessageId,
-        }),
-      );
-      await step.run("record-wait", () => {
-        debounceWaitMs.record(ms, { kind: "idle" });
-      });
+      await fireDebounceTimer(fromStepTools(step), { kind: "idle", ...event.data });
     },
   );
 
@@ -214,18 +122,7 @@ function createLegacyStateMachine(config: DebounceConfig) {
       cancelOn: [{ event: debounceCancel, match: "data.conversationId" }],
     },
     async ({ event, step }) => {
-      const ms = durableSleepMs(event.data.timeoutMs);
-      await step.sleep("wait", `${ms}ms`);
-      await step.sendEvent(
-        "fire",
-        inboundReady.create({
-          conversationId: event.data.conversationId,
-          triggerInboundId: event.data.inboundMessageId,
-        }),
-      );
-      await step.run("record-wait", () => {
-        debounceWaitMs.record(ms, { kind: "maxwait" });
-      });
+      await fireDebounceTimer(fromStepTools(step), { kind: "maxwait", ...event.data });
     },
   );
 

@@ -1,5 +1,5 @@
-import type { Inngest } from "inngest";
 import type { Result } from "neverthrow";
+import type { EventPublisher } from "../../inngest/durable.js";
 import { type BoundaryResolvedReason, buildBoundaryPendingEvent } from "../../inngest/events.js";
 import {
   type BoundaryChoice,
@@ -70,7 +70,7 @@ export interface BoundaryNamespace {
 }
 
 export function createBoundary(
-  deps: TransportContext & { inngest: Inngest; defaultProfileId: string },
+  deps: TransportContext & { inngest: EventPublisher; defaultProfileId: string },
 ): BoundaryNamespace {
   const { channelId, runInTx, transportStore, agentStore, inngest, defaultProfileId } = deps;
   return {

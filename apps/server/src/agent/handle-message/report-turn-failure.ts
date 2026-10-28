@@ -1,7 +1,7 @@
+import type { Durable } from "../../inngest/durable.js";
 import { buildConversationErroredEvent } from "../../inngest/events.js";
 import { logger } from "../../logger.js";
 import type { DeliveryRouter } from "../../transport/delivery-router.js";
-import type { TurnSteps } from "./turn-steps.js";
 
 export interface TurnFailure {
   conversationId: string;
@@ -27,7 +27,7 @@ export interface TurnFailure {
  * Steps, in order: `emit-conversation-errored`, `notify-user`.
  */
 export async function reportTurnFailure(
-  step: TurnSteps,
+  step: Durable,
   deliveryRouter: Pick<DeliveryRouter, "notifyConversation">,
   failure: TurnFailure,
 ): Promise<void> {

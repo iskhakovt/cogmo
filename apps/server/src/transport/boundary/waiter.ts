@@ -1,7 +1,7 @@
-import type { Inngest } from "inngest";
 import type { AgentStore } from "../../agent/store/index.js";
 import type { Transactor } from "../../db/index.js";
 import { inngest as inngestClient } from "../../inngest/client.js";
+import type { EventPublisher } from "../../inngest/durable.js";
 import { boundaryPendingEvent, boundaryResolvedEvent } from "../../inngest/events.js";
 import { logger } from "../../logger.js";
 import type { TransportStore } from "../store/index.js";
@@ -11,7 +11,7 @@ export interface BoundaryWaiterDeps {
   runInTx: Transactor;
   transportStore: TransportStore;
   agentStore: AgentStore;
-  inngest: Inngest;
+  inngest: EventPublisher;
   defaultProfileId: string;
 }
 
