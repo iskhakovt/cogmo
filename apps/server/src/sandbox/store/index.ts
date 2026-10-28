@@ -3,10 +3,22 @@ import { match } from "ts-pattern";
 import { single } from "../../db/helpers.js";
 import type { Transaction } from "../../db/index.js";
 import type { ContainerLabels, ResourceLimits } from "../types.js";
-import { cogmoInstances, containers, networks, volumes } from "./schema.js";
+import {
+  cogmoInstances,
+  type containerReapedReason,
+  containers,
+  networks,
+  volumes,
+} from "./schema.js";
 
 export type ContainerRuntime = "sysbox-runc" | "runc";
 export type ContainerStatus = "starting" | "running" | "exited" | "reaped";
+
+/** What a `reaped` row records as its reason: the `container_reaped_reason` pgEnum. */
+export type ContainerReapedReason = (typeof containerReapedReason.enumValues)[number];
+
+/** Why a container is being reaped — what a reap transition carries. */
+export type ContainerReapReason = Exclude<ContainerReapedReason, "unknown">;
 
 /**
  * The legal `containers.status` transitions (design/sandbox.md → Container
@@ -21,7 +33,7 @@ export type ContainerStatus = "starting" | "running" | "exited" | "reaped";
 export type ContainerTransition =
   | { from: "starting"; to: "running" }
   | { from: "starting" | "running"; to: "exited" }
-  | { to: "reaped" };
+  | { to: "reaped"; reason: ContainerReapReason };
 
 export type ContainerTransitionResult =
   | { kind: "transitioned" }
@@ -49,7 +61,8 @@ export interface ContainerRow {
   labels: ContainerLabels;
   resourceLimits: ResourceLimits;
   status: ContainerStatus;
-  exitCode: number | null;
+  /** Set exactly when `status` is `reaped` (`chk_containers_reaped_reason`). */
+  reapedReason: ContainerReapedReason | null;
   ttlExpiresAt: Date;
   startedAt: Date | null;
   exitedAt: Date | null;
@@ -147,11 +160,11 @@ export interface SandboxStore {
 
   /**
    * Move a container to `to` in one conditional UPDATE, guarded on `from`
-   * (or on `status <> 'reaped'` for a reap). `stale` means another path (the
-   * reaper, a cascade, the supervisor) finished the row first; the caller
-   * decides whether that matters. A missing row is an invariant violation
-   * and throws — callers hold a row they just read, and rows are never
-   * deleted.
+   * (or on `status <> 'reaped'` for a reap, which also writes its `reason`
+   * to `reaped_reason`). `stale` means another path (the reaper, a cascade,
+   * the supervisor) finished the row first; the caller decides whether that
+   * matters. A missing row is an invariant violation and throws — callers
+   * hold a row they just read, and rows are never deleted.
    */
   transitionContainerStatus(
     tx: Transaction,
@@ -325,8 +338,9 @@ export class DrizzleSandboxStore implements SandboxStore {
     const set = match(params)
       .with({ to: "running" }, ({ to }) => ({ status: to, startedAt: params.at }))
       .with({ to: "exited" }, ({ to }) => ({ status: to, exitedAt: params.at }))
-      .with({ to: "reaped" }, ({ to }) => ({
+      .with({ to: "reaped" }, ({ to, reason }) => ({
         status: to,
+        reapedReason: reason,
         exitedAt: sql`coalesce(${containers.exitedAt}, ${params.at.toISOString()}::timestamptz)`,
       }))
       .exhaustive();
