@@ -1576,6 +1576,9 @@ describe("runCodingExecute", () => {
     expect(stream.completed).toEqual([]);
     expect(stream.failed).toEqual(["Task cancelled while executing."]);
     expect(stopCalls).toEqual([task.id]);
+    // The reclaim reaped the sandbox, so the usage record says when.
+    const sb = expectDefined(reloaded?.resourceUsage?.sandbox, "resource_usage.sandbox");
+    expect(Number.isFinite(Date.parse(expectDefined(sb.deleted_at, "deleted_at")))).toBe(true);
   });
 
   it("recreates container when no live one exists (reaper got it during long approval)", async () => {

@@ -132,13 +132,15 @@ export async function endExecuteFailed(
 ): Promise<RecordedFailure> {
   const recorded = await recordTaskFailed(run, deps, rawReason, steps.transition);
   await match(recorded)
-    .with({ kind: "ended" }, () =>
-      reclaimEndedTask(run, deps, {
+    .with({ kind: "ended" }, async () => {
+      await reclaimEndedTask(run, deps, {
         repo: exit.repo,
         assignment: exit.assignment,
+        sandbox: "reap",
         notify: { stream: exit.stream, message: "Task cancelled while executing." },
-      }),
-    )
+      });
+      await stampSandboxDeleted(run, deps, steps.sandboxDeleted);
+    })
     .with({ kind: "recorded" }, ({ reason }) =>
       tearDownFailedExecute(run, deps, exit, reason, steps),
     )
@@ -222,6 +224,7 @@ export async function handOffToVerify(
     await reclaimIfEnded(run, deps, pendingVerify, {
       repo: exit.repo,
       assignment: exit.assignment,
+      sandbox: "reap",
       notify: { stream: exit.stream, message: "Task cancelled while executing." },
     });
     return "left_executing";

@@ -30,7 +30,7 @@ import {
   fakeCodingSandbox,
   statefulCodingStore,
 } from "../../test/coding-fixtures.js";
-import { fakeRunInTx, spyOnInngestSend } from "../../test/factories.js";
+import { emittedEventNames, fakeRunInTx, spyOnInngestSend } from "../../test/factories.js";
 import type { CodingBackend, CodingEvent } from "./backend.js";
 import {
   type CodingOrchestratorDeps,
@@ -246,12 +246,7 @@ describe("coding-task-start — Inngest replay", () => {
     expect(result).toEqual({ status: "failed", failureReason: "plan exited with code 2" });
     expect(current().status).toBe("failed");
     expect(backend.planCalls()).toBe(0);
-    // `_send` takes `{ payload, fn, … }`; `fn` carries the client, so read the payload alone.
-    const emitted = sendSpy.mock.calls.flatMap(([arg]) => {
-      const { payload } = arg as { payload: unknown };
-      return Array.isArray(payload) ? payload : [payload];
-    });
-    expect(emitted).toContainEqual(expect.objectContaining({ name: "coding/task/failed" }));
+    expect(emittedEventNames(sendSpy)).toContain("coding/task/failed");
     expect(sandbox.teardownCalls()).toBe(1);
   });
 

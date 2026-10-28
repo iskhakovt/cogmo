@@ -192,7 +192,7 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
     return await match(pushed.value)
       .with({ kind: "left" }, (left) => leaveVerify(run, deps, failure, left, "the push"))
       .with({ kind: "pushed" }, ({ branchSha }) =>
-        openPr(run, deps, inngest, {
+        openPr(run, deps, inngest, failure, {
           task,
           repo,
           remote,
@@ -259,10 +259,10 @@ async function openPr(
   run: CodingRun,
   deps: VerifyOrchestratorDeps,
   inngest: Pick<Inngest, "send">,
+  failure: VerifyFailureContext,
   args: OpenTaskPrArgs,
 ): Promise<VerifyOrchestratorResult> {
   const pr = await openTaskPr(run, deps, inngest, args);
-  const failure: VerifyFailureContext = { repo: args.repo, assignment: args.assignment };
   if (pr.isErr()) return await failVerify(run, deps, failure, pr.error);
   return await match(pr.value)
     .with({ kind: "left" }, (left) => leaveVerify(run, deps, failure, left, "the PR open"))
@@ -297,6 +297,7 @@ async function leaveVerify(
   await reclaimIfEnded(run, deps, left, {
     repo: failure.repo,
     assignment: failure.assignment,
+    sandbox: "swept_by_caller",
     notify: null,
   });
   return { status: "skipped" };
@@ -319,6 +320,7 @@ async function failVerify(
       await reclaimEndedTask(run, deps, {
         repo: failure.repo,
         assignment: failure.assignment,
+        sandbox: "swept_by_caller",
         notify: null,
       });
       return { status: "skipped" };

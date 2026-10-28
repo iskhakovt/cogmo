@@ -100,10 +100,16 @@ export async function pushVerifiedBranch(
   // Conditional on `verifying`: the suite runs for minutes, and a Cancel
   // landing inside it must not be overwritten by the push that follows.
   // `stale` at `pushed` is this step re-executing after a lost result.
+  // `stale` at `pr_open` is a run in flight across the deploy that
+  // introduced this step: a verifying task reaches `pr_open` only through
+  // this run's own retired `set-status-pr-open`, and the run has to carry
+  // on through its memoized `open-pr` to the `emit-pr-opened` it may still
+  // owe.
   const pushed = await advanceTask(run, deps, {
     stepId: "transition-pushed",
     from: "verifying",
     to: "pushed",
+    settledAt: ["pr_open"],
   });
   return await match(pushed)
     .with({ kind: "left" }, (left): Result<PushOutcome, string> => ok(left))

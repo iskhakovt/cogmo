@@ -277,6 +277,7 @@ async function endPlanFailed(
       await reclaimEndedTask(run, deps, {
         repo: args.repo,
         assignment: args.assignment,
+        sandbox: "reap",
         notify: { stream: args.stream, message: "Task cancelled while planning." },
       });
       return { status: "skipped" };

@@ -37,7 +37,7 @@ import {
   type StatefulCodingStore,
   statefulCodingStore,
 } from "../../test/coding-fixtures.js";
-import { fakeRunInTx, spyOnInngestSend } from "../../test/factories.js";
+import { emittedEventNames, fakeRunInTx, spyOnInngestSend } from "../../test/factories.js";
 import type { CodingTaskRow } from "./store/index.js";
 import {
   createCodingVerifyOrchestrator,
@@ -283,11 +283,13 @@ describe("coding-task-verify — Inngest replay", () => {
     expect(h.create).toHaveBeenCalledTimes(1);
   });
 
-  it("a run in flight across the deploy that replaced `set-status-pr-open` finishes at `pr_open`", async () => {
+  it("a run in flight across the deploy that replaced `set-status-pr-open` still sends pr-opened", async () => {
     // The superseded step wrote `pr_open` and memoized `void`; everything up
-    // to and including `set-pr-metadata` and `emit-pr-opened` is in state.
-    // `transition-pr-open` executes once, reads `stale` at its own target,
-    // and the run finishes without a second `pulls.create`.
+    // to `set-pr-metadata` is in state and `emit-pr-opened` is not. Neither
+    // new step is memoized: `transition-pushed` executes first, reads `stale`
+    // at `pr_open` — settled by this run's own retired step — and carries
+    // on; `transition-pr-open` reads `stale` at its own target; the run then
+    // sends the `pr-opened` it owes, without a second `pulls.create`.
     const h = setup(verifiableTask({ status: "pr_open" }));
     const fn = createCodingVerifyOrchestrator(h.deps, inngest);
 
@@ -311,7 +313,6 @@ describe("coding-task-verify — Inngest replay", () => {
           id: "commit-and-push",
           handler: () => ({ kind: "pushed", commitSha: HEAD_SHA, output: "" }),
         },
-        { id: "transition-pushed", handler: () => ({ kind: "transitioned" }) },
         { id: "emit-pushed", handler: () => null },
         {
           id: "open-pr",
@@ -324,7 +325,6 @@ describe("coding-task-verify — Inngest replay", () => {
           }),
         },
         { id: "set-pr-metadata", handler: () => null },
-        { id: "emit-pr-opened", handler: () => null },
       ],
     });
     const { result, error } = await engine.execute();
@@ -338,6 +338,7 @@ describe("coding-task-verify — Inngest replay", () => {
     expect(h.store.current().status).toBe("pr_open");
     expect(h.log.push).toBe(0);
     expect(h.create).not.toHaveBeenCalled();
+    expect(emittedEventNames(sendSpy)).toEqual(["coding/task/pr-opened"]);
   });
 
   it("skips a duplicate event before reaching the failure machinery", async () => {
