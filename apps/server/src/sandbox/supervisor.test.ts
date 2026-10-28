@@ -417,6 +417,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
     // The supervisor removed the container, so the row is `reaped`.
     const row = await tx((trx) => store.getContainerByDockerId(trx, "docker-fail-start"));
     expect(row?.status).toBe("reaped");
+    expect(row?.reapedReason).toBe("start_failed");
   });
 
   it("works without a proxy (no socket mount, no register calls)", async () => {
@@ -694,7 +695,7 @@ describe("LocalDockerSandboxClient — container row transitions", () => {
     // The reaper's TTL pass reaps the row while the cascade is killing the container.
     container.kill.mockImplementation(async () => {
       await db.execute(
-        sql`UPDATE containers SET status = 'reaped', exited_at = ${EARLIER}::timestamptz WHERE id = ${session.state.containerRowId}`,
+        sql`UPDATE containers SET status = 'reaped', reaped_reason = 'ttl_expired', exited_at = ${EARLIER}::timestamptz WHERE id = ${session.state.containerRowId}`,
       );
     });
 
@@ -751,7 +752,9 @@ describe("LocalDockerSandboxClient — container row transitions", () => {
 
     await sandbox.deleteByTaskId(TASK_ID);
 
-    expect((await tx((trx) => store.getContainer(trx, row.id)))?.status).toBe("reaped");
+    const reaped = await tx((trx) => store.getContainer(trx, row.id));
+    expect(reaped?.status).toBe("reaped");
+    expect(reaped?.reapedReason).toBe("cascade");
   });
 
   it("create kills and removes the container it started when its row was finished mid-start", async () => {
@@ -768,7 +771,7 @@ describe("LocalDockerSandboxClient — container row transitions", () => {
     // running transition.
     container.start.mockImplementation(async () => {
       await db.execute(
-        sql`UPDATE containers SET status = 'reaped', exited_at = now() WHERE docker_id = 'docker-midstart'`,
+        sql`UPDATE containers SET status = 'reaped', reaped_reason = 'ttl_expired', exited_at = now() WHERE docker_id = 'docker-midstart'`,
       );
     });
 
@@ -867,7 +870,7 @@ describe("LocalDockerSandboxClient — container row transitions", () => {
     });
     container.start.mockImplementation(async () => {
       await db.execute(
-        sql`UPDATE containers SET status = 'reaped', exited_at = now() WHERE docker_id = 'docker-midstart-refused'`,
+        sql`UPDATE containers SET status = 'reaped', reaped_reason = 'ttl_expired', exited_at = now() WHERE docker_id = 'docker-midstart-refused'`,
       );
     });
     container.kill.mockRejectedValue(Object.assign(new Error("daemon i/o"), { statusCode: 500 }));
@@ -1794,7 +1797,9 @@ describe("LocalDockerSandboxClient — reconcileCrashedInstances", () => {
     expect(refused.remove).not.toHaveBeenCalled();
     expect(fine.remove).toHaveBeenCalledWith({ force: true });
     expect((await tx((trx) => store.getContainer(trx, refusedRow.id)))?.status).toBe("starting");
-    expect((await tx((trx) => store.getContainer(trx, fineRow.id)))?.status).toBe("reaped");
+    const reaped = await tx((trx) => store.getContainer(trx, fineRow.id));
+    expect(reaped?.status).toBe("reaped");
+    expect(reaped?.reapedReason).toBe("crash_reconcile");
     expect((await tx((trx) => store.getInstance(trx, stale.id)))?.stoppedAt).not.toBeNull();
   });
 

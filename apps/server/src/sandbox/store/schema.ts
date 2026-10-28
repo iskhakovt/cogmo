@@ -1,5 +1,7 @@
+import { sql } from "drizzle-orm";
 import {
   type AnyPgColumn,
+  check,
   index,
   integer,
   pgEnum,
@@ -19,6 +21,18 @@ export const containerStatus = pgEnum("container_status", [
   "running",
   "exited",
   "reaped",
+]);
+/**
+ * Why a row is `reaped`. `unknown` is written by nothing but the migration
+ * that added the column, on rows reaped before it existed.
+ */
+export const containerReapedReason = pgEnum("container_reaped_reason", [
+  "ttl_expired",
+  "cascade",
+  "dead_instance",
+  "crash_reconcile",
+  "start_failed",
+  "unknown",
 ]);
 export const networkStatus = pgEnum("network_status", ["created", "reaped"]);
 export const volumeStatus = pgEnum("volume_status", ["created", "reaped"]);
@@ -62,7 +76,7 @@ export const containers = pgTable(
     labels: jsonbZod("labels", ContainerLabelsSchema).notNull(),
     resourceLimits: jsonbZod("resource_limits", ResourceLimitsSchema).notNull(),
     status: containerStatus("status").notNull(),
-    exitCode: integer("exit_code"),
+    reapedReason: containerReapedReason("reaped_reason"),
     ttlExpiresAt: timestamp("ttl_expires_at", { withTimezone: true }).notNull(),
     startedAt: timestamp("started_at", { withTimezone: true }),
     exitedAt: timestamp("exited_at", { withTimezone: true }),
@@ -75,6 +89,10 @@ export const containers = pgTable(
     index("idx_containers_instance_id").on(t.instanceId),
     index("idx_containers_root_task_id").on(t.rootTaskId),
     index("idx_containers_status_ttl").on(t.status, t.ttlExpiresAt),
+    check(
+      "chk_containers_reaped_reason",
+      sql`(${t.status} = 'reaped') = (${t.reapedReason} IS NOT NULL)`,
+    ),
   ],
 );
 

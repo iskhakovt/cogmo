@@ -1,5 +1,5 @@
 {
-  "id": "83a3ba31-d648-4a12-b22c-a11951f2b78d",
+  "id": "08722e83-e61b-455b-bf4c-93207fc640dc",
   "prevId": "ad97c0a1-2a6e-4167-98df-2b2e0bd51386",
   "version": "7",
   "dialect": "postgresql",
@@ -2865,9 +2865,10 @@
           "primaryKey": false,
           "notNull": true
         },
-        "exit_code": {
-          "name": "exit_code",
-          "type": "integer",
+        "reaped_reason": {
+          "name": "reaped_reason",
+          "type": "container_reaped_reason",
+          "typeSchema": "public",
           "primaryKey": false,
           "notNull": false
         },
@@ -2985,7 +2986,12 @@
         }
       },
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "chk_containers_reaped_reason": {
+          "name": "chk_containers_reaped_reason",
+          "value": "(\"containers\".\"status\" = 'reaped') = (\"containers\".\"reaped_reason\" IS NOT NULL)"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.networks": {
@@ -3549,16 +3555,7 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {
-        "chk_skill_deploys_resolved_at_iff_terminal": {
-          "name": "chk_skill_deploys_resolved_at_iff_terminal",
-          "value": "(\"skill_deploys\".\"status\" = 'pending_approval') = (\"skill_deploys\".\"resolved_at\" IS NULL)"
-        },
-        "chk_skill_deploys_approved_by_only_live": {
-          "name": "chk_skill_deploys_approved_by_only_live",
-          "value": "\"skill_deploys\".\"approved_by\" IS NULL OR \"skill_deploys\".\"status\" = 'live'"
-        }
-      },
+      "checkConstraints": {},
       "isRLSEnabled": false
     },
     "public.skill_runs": {
@@ -3681,20 +3678,7 @@
         }
       },
       "policies": {},
-      "checkConstraints": {
-        "chk_skill_runs_status_iff_finished": {
-          "name": "chk_skill_runs_status_iff_finished",
-          "value": "(\"skill_runs\".\"recovery_point\" = 'finished') = (\"skill_runs\".\"status\" <> 'running')"
-        },
-        "chk_skill_runs_executed_payload": {
-          "name": "chk_skill_runs_executed_payload",
-          "value": "(\"skill_runs\".\"recovery_point\" = 'started') = (\"skill_runs\".\"finished_at\" IS NULL) AND (\"skill_runs\".\"recovery_point\" = 'started') = (\"skill_runs\".\"resource_usage\" IS NULL) AND (\"skill_runs\".\"recovery_point\" <> 'started' OR (\"skill_runs\".\"output\" IS NULL AND \"skill_runs\".\"error\" IS NULL))"
-        },
-        "chk_skill_runs_outcome": {
-          "name": "chk_skill_runs_outcome",
-          "value": "NOT (\"skill_runs\".\"output\" IS NOT NULL AND \"skill_runs\".\"error\" IS NOT NULL) AND (\"skill_runs\".\"status\" <> 'success' OR \"skill_runs\".\"error\" IS NULL) AND (\"skill_runs\".\"status\" <> 'error' OR (\"skill_runs\".\"error\" IS NOT NULL AND \"skill_runs\".\"output\" IS NULL))"
-        }
-      },
+      "checkConstraints": {},
       "isRLSEnabled": false
     },
     "public.skills": {
@@ -4729,6 +4713,18 @@
       "schema": "public",
       "values": ["pending", "approved", "rejected"]
     },
+    "public.container_reaped_reason": {
+      "name": "container_reaped_reason",
+      "schema": "public",
+      "values": [
+        "ttl_expired",
+        "cascade",
+        "dead_instance",
+        "crash_reconcile",
+        "start_failed",
+        "unknown"
+      ]
+    },
     "public.container_runtime": {
       "name": "container_runtime",
       "schema": "public",
@@ -4752,7 +4748,7 @@
     "public.skill_deploy_status": {
       "name": "skill_deploy_status",
       "schema": "public",
-      "values": ["pending_approval", "denied", "live", "rolled_back"]
+      "values": ["pending_approval", "approved", "denied", "live", "rolled_back"]
     },
     "public.skill_risk_tier": {
       "name": "skill_risk_tier",

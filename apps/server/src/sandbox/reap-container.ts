@@ -4,21 +4,14 @@ import type { Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
 import type { DockerFacade } from "./docker-facade.js";
 import { type DaemonError, killAndRemoveContainer } from "./kill-and-remove-container.js";
-import type { ContainerRow, ContainerTransitionResult, SandboxStore } from "./store/index.js";
+import type {
+  ContainerReapReason,
+  ContainerRow,
+  ContainerTransitionResult,
+  SandboxStore,
+} from "./store/index.js";
 
 const log = logger.child({ component: "sandbox" });
-
-/**
- * Why a container is being reaped. Carried on the transition's log line; the
- * planned `reaped_reason` column (design/sandbox.md → Container state
- * machine, tracked in todo.md) will record it on the row.
- */
-export type ContainerReapReason =
-  | "ttl_expired"
-  | "cascade"
-  | "dead_instance"
-  | "crash_reconcile"
-  | "start_failed";
 
 export interface ReapContainerDeps {
   docker: DockerFacade;
@@ -50,7 +43,12 @@ export async function reapContainer(
   const removed = await killAndRemoveContainer(deps.docker, args.dockerId);
   if (removed.isErr()) return err(removed.error);
   const result = await deps.runInTx((tx) =>
-    deps.store.transitionContainerStatus(tx, { id: args.id, to: "reaped", at: args.at }),
+    deps.store.transitionContainerStatus(tx, {
+      id: args.id,
+      to: "reaped",
+      reason: args.reason,
+      at: args.at,
+    }),
   );
   const fields = { dockerId: args.dockerId, reason: args.reason };
   match(result)
