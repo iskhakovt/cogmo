@@ -1,5 +1,6 @@
 import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
+import { logger } from "../../logger.js";
 import { asBatchAdapter, expectDefined } from "../../test/assertions.js";
 import {
   makeStepRun,
@@ -74,7 +75,7 @@ describe("direct adapter", () => {
       });
     });
 
-    it("handles /new by closing session", async () => {
+    it("handles /new by closing the address's active session in one statement", async () => {
       const transport = makeTransport();
 
       const result = await handleDirectInbound(
@@ -83,8 +84,32 @@ describe("direct adapter", () => {
         makeStepRun(),
       );
 
-      expect(transport.closeSession).toHaveBeenCalledWith("session-1");
+      expect(transport.closeActiveSession).toHaveBeenCalledWith(baseEvent.data.platformAddress);
+      expect(transport.resolveSession).not.toHaveBeenCalled();
       expect(result).toEqual({ status: "new_conversation" });
+    });
+
+    it("handles /new when the address has no active session", async () => {
+      const transport = makeTransport({
+        closeActiveSession: vi.fn().mockResolvedValue({ kind: "none" }),
+      });
+      const info = vi.spyOn(logger, "info").mockImplementation(() => undefined);
+
+      try {
+        const result = await handleDirectInbound(
+          { transport },
+          { ...baseEvent.data, text: "/new" },
+          makeStepRun(),
+        );
+
+        expect(result).toEqual({ status: "new_conversation" });
+        expect(info).toHaveBeenCalledWith(
+          expect.objectContaining({ platformAddress: baseEvent.data.platformAddress }),
+          expect.stringContaining("no active session"),
+        );
+      } finally {
+        info.mockRestore();
+      }
     });
 
     it("completes as rejected, emitting nothing, when the sender has no identity", async () => {
@@ -109,6 +134,42 @@ describe("direct adapter", () => {
       expect(result).toEqual({
         status: "rejected",
         reason: { code: "session_not_found", sessionId: "session-1" },
+      });
+    });
+
+    it("re-resolves the address once when the session closed between the two steps", async () => {
+      const current = { ...activeSession, id: "session-current", conversationId: "conv-current" };
+      const transport = makeTransport({
+        resolveSession: vi.fn().mockResolvedValueOnce(activeSession).mockResolvedValueOnce(current),
+        emit: vi
+          .fn()
+          .mockResolvedValueOnce(err({ code: "session_closed", sessionId: "session-1" }))
+          .mockResolvedValueOnce(ok(undefined)),
+      });
+
+      const result = await handleDirectInbound({ transport }, baseEvent.data, makeStepRun());
+
+      expect(transport.emit).toHaveBeenNthCalledWith(
+        2,
+        "session-current",
+        "hello",
+        expect.any(Date),
+      );
+      expect(result).toEqual({ status: "emitted", conversationId: "conv-current" });
+    });
+
+    it("completes as rejected when the address has no session left to re-resolve", async () => {
+      const transport = makeTransport({
+        resolveSession: vi.fn().mockResolvedValueOnce(activeSession).mockResolvedValueOnce(null),
+        emit: vi.fn().mockResolvedValue(err({ code: "session_closed", sessionId: "session-1" })),
+      });
+
+      const result = await handleDirectInbound({ transport }, baseEvent.data, makeStepRun());
+
+      expect(transport.emit).toHaveBeenCalledOnce();
+      expect(result).toEqual({
+        status: "rejected",
+        reason: { code: "session_closed", sessionId: "session-1" },
       });
     });
   });

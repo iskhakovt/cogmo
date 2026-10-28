@@ -6,6 +6,7 @@ import type {
   SseFrame,
   WebStreamRegistry,
 } from "../transport/adapters/web/stream-registry.js";
+import { logMissedClose } from "../transport/sessions/log-missed-close.js";
 import type { Transport, TransportError } from "../transport/transport.js";
 import { readJsonBody, sendBodyError } from "./body.js";
 
@@ -57,6 +58,8 @@ export class SessionCloses {
   start(transport: Transport, sessionId: string): void {
     const closing: Promise<void> = transport
       .closeSession(sessionId)
+      // Missed: the stream open that replaced this session closed it already.
+      .then((outcome) => void logMissedClose({ sessionId }, outcome))
       .catch((err: unknown) =>
         logger.debug({ err, sessionId }, "web chat: closeSession on disconnect failed"),
       )
@@ -122,8 +125,10 @@ function transportErrorStatus(error: TransportError): number {
     case "identity_rejected":
       return 403;
     case "session_not_found":
-      // The send route's session can be closed between resolve and emit (e.g. a
-      // racing disconnect cleanup) — a benign 409, same as the no-session case.
+    case "session_closed":
+      // The send route's session can close between its resolve and its emit (a
+      // disconnect cleanup, a reconnect's resume) — a benign 409; the SPA's
+      // next send resolves the tab's session again.
       return 409;
     default:
       return 500;
@@ -182,18 +187,16 @@ async function handleCreate(
     sendBodyError(res, err);
     return;
   }
-  const result = await deps.transport.createConversation(tab, deps.ownerHandle, {
+  // A conversation row only. The tab keeps the stream session of the
+  // conversation it is leaving until the new stream opens and resumes onto
+  // this one, so an in-flight reply there still lands.
+  const result = await deps.transport.conversations.create(tab, deps.ownerHandle, {
     isPrivate: true,
   });
   if (result.isErr()) {
     sendText(res, transportErrorStatus(result.error), result.error.code);
     return;
   }
-  // `createConversation` opens a session as a side effect, but the stream open
-  // (`resumeConversation`) is the real session owner. Close the one we just
-  // opened so a create-without-streaming doesn't orphan a `receive:"all"`
-  // session until the idle timer reclaims it; the stream open mints a fresh one.
-  deps.sessionCloses.start(deps.transport, result.value.id);
   sendJson(res, 200, { conversationId: result.value.conversationId });
 }
 

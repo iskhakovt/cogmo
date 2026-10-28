@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "uq_sessions_active_address" ON "channel_sessions" USING btree ("channel_id","platform_address") WHERE status = 'active'::channel_session_status;

@@ -1,3 +1,4 @@
+import { match } from "ts-pattern";
 import type { z } from "zod";
 import { type Durable, fromStepTools } from "../../inngest/durable.js";
 import { directInbound, directOutbound } from "../../inngest/events.js";
@@ -42,11 +43,15 @@ export async function handleDirectInbound(
 
   if (text === "/new") {
     await stepRun("close-session", async () => {
-      const session = await transport.resolveSession(platformAddress);
-      if (session) {
-        await transport.closeSession(session.id);
-        logger.info({ platformAddress }, "direct: session closed");
-      }
+      // One statement on the address: no lookup for a concurrent swap to stale.
+      match(await transport.closeActiveSession(platformAddress))
+        .with({ kind: "closed" }, ({ sessionId }) =>
+          logger.info({ platformAddress, sessionId }, "direct: session closed"),
+        )
+        .with({ kind: "none" }, () =>
+          logger.info({ platformAddress }, "direct: no active session to close"),
+        )
+        .exhaustive();
     });
     return { status: "new_conversation" };
   }
@@ -66,15 +71,26 @@ export async function handleDirectInbound(
   const { session } = resolved;
 
   const emitted = await stepRun("emit-inbound", async () => {
-    const result = await transport.emit(session.id, text, new Date(platformTs));
-    return result.match(
-      () => ({ ok: true as const }),
-      (reason) => ({ ok: false as const, reason }),
-    );
+    const first = await transport.emit(session.id, text, new Date(platformTs));
+    if (first.isOk()) return { ok: true as const, conversationId: session.conversationId };
+    return match(first.error)
+      .with({ code: "session_closed" }, async (reason) => {
+        // The session closed between the resolve step and this one — a
+        // rotation or `/new` landed. The message belongs to whatever is active
+        // on the address now; one more lookup finds it.
+        const current = await transport.resolveSession(platformAddress);
+        if (!current) return { ok: false as const, reason };
+        const retry = await transport.emit(current.id, text, new Date(platformTs));
+        return retry.match(
+          () => ({ ok: true as const, conversationId: current.conversationId }),
+          (again) => ({ ok: false as const, reason: again }),
+        );
+      })
+      .otherwise((reason) => ({ ok: false as const, reason }));
   });
   if (!emitted.ok) return rejected(platformAddress, emitted.reason);
 
-  return { status: "emitted", conversationId: session.conversationId };
+  return { status: "emitted", conversationId: emitted.conversationId };
 }
 
 function rejected(platformAddress: string, reason: TransportError): DirectInboundResult {

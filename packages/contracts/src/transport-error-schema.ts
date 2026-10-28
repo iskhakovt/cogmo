@@ -11,6 +11,7 @@ import type { TransportError } from "./transport.js";
  */
 export const TransportErrorSchema = z.discriminatedUnion("code", [
   z.object({ code: z.literal("session_not_found"), sessionId: z.string() }),
+  z.object({ code: z.literal("session_closed"), sessionId: z.string() }),
   z.object({ code: z.literal("identity_rejected") }),
   z.object({ code: z.literal("conversation_not_found") }),
   z.object({ code: z.literal("profile_not_found") }),

@@ -14,6 +14,7 @@ import { err, ok, type Result } from "neverthrow";
 import type { Transactor } from "../../db/index.js";
 import type { EventPublisher } from "../../inngest/durable.js";
 import { buildPipelineStageDueEvent } from "../../inngest/events.js";
+import { rotateSessions } from "../../transport/sessions/rotate-sessions.js";
 import type { TransportStore } from "../../transport/store/index.js";
 import type { AgentStore } from "../store/index.js";
 import { findUnsupportedFeatures } from "./run-support.js";
@@ -110,13 +111,7 @@ export async function startPipelineRun(
         profileId: args.profileId,
         isPrivate: true,
       });
-      for (const ch of channels) {
-        await deps.transportStore.swapSession(tx, ch.channelId, ch.platformAddress, {
-          conversationId: conversation.id,
-          status: "active",
-          receive: ch.receive,
-        });
-      }
+      await rotateSessions(deps, tx, { conversationId: conversation.id, channels });
 
       const { kind, row } = await deps.runStore.insertOrRecoverRun(tx, {
         definitionId: definition.id,

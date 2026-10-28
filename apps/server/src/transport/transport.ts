@@ -174,6 +174,7 @@ export function createTransport(deps: TransportDeps): Transport {
     boundary: createBoundary({ ...ctx, inngest, defaultProfileId: deps.defaultProfileId }),
     conversations: createConversations({
       ...ctx,
+      defaultProfileId: deps.defaultProfileId,
       inngest,
       mcpRegistry: deps.mcpRegistry,
       compactConversation: deps.compactConversation,

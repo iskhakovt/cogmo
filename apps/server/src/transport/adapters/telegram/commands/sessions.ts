@@ -1,5 +1,6 @@
 /** `/new`, `/sessions`, `/resume`, `/name`, `/end`: which conversation this chat is in. */
 
+import { match } from "ts-pattern";
 import type { Transport } from "../../../transport.js";
 import { renderSessionsList } from "../sessions-ux.js";
 import { ambiguityMessage, looksLikeUuid, resolveProfileByName } from "./lookup.js";
@@ -138,13 +139,12 @@ export async function handleName(transport: Transport, ctx: TelegramCommandConte
 
 export async function handleEnd(transport: Transport, ctx: TelegramCommandContext): Promise<void> {
   const addr = String(ctx.chat.id);
-  const session = await transport.resolveSession(addr);
-  if (!session) {
-    await ctx.reply("No active conversation.");
-    return;
-  }
-  await transport.closeSession(session.id);
-  await ctx.reply("Conversation ended. Send a message to start a new one.");
+  // One statement on the chat's address: nothing to go stale between a lookup and a close.
+  const reply = match(await transport.closeActiveSession(addr))
+    .with({ kind: "closed" }, () => "Conversation ended. Send a message to start a new one.")
+    .with({ kind: "none" }, () => "No active conversation.")
+    .exhaustive();
+  await ctx.reply(reply);
 }
 
 /** Callback-query handler for inline-keyboard taps from /sessions. */
@@ -213,22 +213,16 @@ export async function handleNew(transport: Transport, ctx: TelegramCommandContex
     return;
   }
 
-  const existing = await transport.resolveSession(addr);
-  if (existing) await transport.closeSession(existing.id);
-  const result = await transport.createConversation(
-    addr,
-    handle,
-    profileId ? { isPrivate: true, profileId } : { isPrivate: true },
-  );
+  // One transaction closes the chat's active session and opens the fresh
+  // conversation; the reply names the profile of the conversation it opened.
+  const result = await transport.createConversation(addr, handle, {
+    isPrivate: true,
+    supersede: true,
+    ...(profileId !== undefined && { profileId }),
+  });
   if (result.isErr()) {
     await ctx.reply(errorMessage(result.error));
     return;
   }
-  // Surface the profile actually used. createConversation returns the
-  // resolved name in its success value, so the reply names the profile of
-  // the conversation we just created — atomic with the insert, and
-  // race-free against a concurrent /new on the same chat (which would
-  // otherwise swap the "current" session out from under us if we asked
-  // getCurrent after the fact).
   await ctx.reply(`New conversation started with profile "${result.value.profileName}".`);
 }

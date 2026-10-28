@@ -38,6 +38,7 @@ function setup(overrides?: {
     transportStore,
     agentStore,
     inngest,
+    defaultProfileId: "profile-1",
     mcpRegistry: undefined,
     compactConversation: undefined,
   });
@@ -742,6 +743,7 @@ describe("conversations.compact", () => {
       transportStore,
       agentStore,
       inngest: { send: vi.fn().mockResolvedValue(undefined) } as never,
+      defaultProfileId: "profile-1",
       mcpRegistry: undefined,
       compactConversation: opts.compactConversation,
     });
@@ -921,5 +923,40 @@ describe("conversations.compact", () => {
     const { conversations } = buildCompactTransport({ ...OWNED, compactConversation: driver });
     const res = await conversations.compact("h", "addr");
     expect(res._unsafeUnwrapErr()).toEqual({ code: "profile_not_found" });
+  });
+});
+
+describe("conversations.create", () => {
+  it("returns identity_rejected for an unknown handle and inserts nothing", async () => {
+    const transportStore = mockTransportStore({ resolveUser: vi.fn().mockResolvedValue(null) });
+    const { conversations, agentStore } = setup({ transportStore });
+
+    const res = await conversations.create("tab-1", "nobody", { isPrivate: true });
+
+    expect(res._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
+    expect(agentStore.createConversation).not.toHaveBeenCalled();
+  });
+
+  it("opens a conversation for the resolved user with the caller's privacy, and binds no session", async () => {
+    const transportStore = mockTransportStore({
+      resolveUser: vi.fn().mockResolvedValue({ userId: "user-7" }),
+    });
+    const { conversations, agentStore } = setup({ transportStore });
+
+    const res = await conversations.create("tab-1", "handle-7", { isPrivate: false });
+
+    expect(res._unsafeUnwrap()).toEqual({ conversationId: "conv-1" });
+    expect(agentStore.createConversation).toHaveBeenCalledWith(expect.anything(), {
+      userId: "user-7",
+      profileId: "profile-1",
+      isPrivate: false,
+    });
+    expect(transportStore.getChatDefaultProfile).toHaveBeenCalledWith(
+      expect.anything(),
+      "ch-1",
+      "tab-1",
+    );
+    expect(transportStore.swapSession).not.toHaveBeenCalled();
+    expect(transportStore.resolveSession).not.toHaveBeenCalled();
   });
 });

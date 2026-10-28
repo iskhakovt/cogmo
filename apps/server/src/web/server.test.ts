@@ -12,6 +12,7 @@ import { expectDefined, resolvesWithin } from "../test/assertions.js";
 import { mockTransportDeep } from "../test/factories.js";
 import { createTestDatabase } from "../test/pglite.js";
 import { WebStreamRegistry } from "../transport/adapters/web/stream-registry.js";
+import type { CloseSessionOutcome } from "../transport/store/index.js";
 import type { webRouter } from "./rpc/router.js";
 import { createWebServer, startWebServer, type WebServer } from "./server.js";
 import { hashSessionToken } from "./session/token.js";
@@ -331,8 +332,25 @@ describe("web chat routes", () => {
     });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ conversationId: "conv-1" });
-    // The side-effect session create opens is closed — the stream open owns it.
-    expect(transport.closeSession).toHaveBeenCalledWith("session-1");
+    // A conversation row only; the stream open binds the tab to it.
+    expect(transport.conversations.create).toHaveBeenCalledWith("tab-1", expect.any(String), {
+      isPrivate: true,
+    });
+    expect(transport.createConversation).not.toHaveBeenCalled();
+    expect(transport.closeSession).not.toHaveBeenCalled();
+  });
+
+  it("leaves the tab's live stream session alone, so an in-flight reply there still lands", async () => {
+    await start({ resolveSession: vi.fn().mockResolvedValue(session) });
+    const cookie = await login();
+    const res = await fetch(`${chatBase}/api/chat?tab=tab-1`, {
+      method: "POST",
+      headers: jsonHeaders({ cookie }),
+      body: "{}",
+    });
+    expect(res.status).toBe(200);
+    expect(transport.closeSession).not.toHaveBeenCalled();
+    expect(transport.resumeConversation).not.toHaveBeenCalled();
   });
 
   it("emits a user turn to the resolved session (202)", async () => {
@@ -465,7 +483,7 @@ describe("web chat routes", () => {
   });
 
   it("close() waits for the session closes of the streams it ends", async () => {
-    const sessionClosed = Promise.withResolvers<void>();
+    const sessionClosed = Promise.withResolvers<CloseSessionOutcome>();
     await start({ closeSession: vi.fn(() => sessionClosed.promise) });
     const cookie = await login();
     const res = await fetch(`${chatBase}/api/chat/conv-1/stream?tab=tab-1`, {
@@ -483,7 +501,7 @@ describe("web chat routes", () => {
 
     expect(transport.closeSession).toHaveBeenCalledWith("session-resumed");
     expect(closed).toBe(false);
-    sessionClosed.resolve();
+    sessionClosed.resolve({ kind: "closed" });
     await resolvesWithin(closing, 2_500, "close");
   });
 

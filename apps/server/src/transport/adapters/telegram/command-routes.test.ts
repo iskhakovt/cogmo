@@ -56,12 +56,17 @@ describe("registerCommands", () => {
     expect(ctx.reply).toHaveBeenCalled();
   });
 
-  it("/new closes session", async () => {
+  it("/new supersedes the chat's session in one call", async () => {
     const { transport } = await createAdapter();
     const ctx = makeCtx(111, "/new", 42);
     await handlers.get("command:new")!(ctx);
 
-    expect(transport.closeSession).toHaveBeenCalledWith("session-1");
+    expect(transport.closeSession).not.toHaveBeenCalled();
+    expect(transport.createConversation).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.any(String),
+      expect.objectContaining({ supersede: true }),
+    );
     // handleNew names the profile it used in the reply; the mocked createConversation default returns profileName "assistant".
     expect(ctx.reply.mock.calls[0]?.[0]).toBe('New conversation started with profile "assistant".');
   });

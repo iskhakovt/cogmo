@@ -83,7 +83,6 @@ describe("createBoundaryJanitor", () => {
         .fn()
         .mockImplementation(async (_tx, id: string) => fullRowsById.get(id)),
       resolveUser: vi.fn().mockResolvedValue({ userId: "u-7" }),
-      createSession: vi.fn().mockResolvedValue({ id: "session-new" }),
       persistInbound: vi.fn().mockResolvedValue({ id: "inbound-new" }),
       getChatDefaultProfile: vi.fn().mockResolvedValue(undefined),
       deleteBoundaryPending: vi.fn().mockResolvedValue(undefined),
@@ -178,7 +177,17 @@ describe("createBoundaryJanitor", () => {
         createdAt: new Date("2026-05-19T10:00:00.000Z"),
       }),
       resolveUser: vi.fn().mockResolvedValue({ userId: "u-7" }),
-      createSession: vi.fn().mockResolvedValue({ id: "session-new" }),
+      swapSession: vi.fn().mockResolvedValue({
+        session: {
+          id: "session-new",
+          channelId: "ch-1",
+          platformAddress: "chat-A",
+          conversationId: "conv-new",
+          status: "active",
+          receive: "routed",
+        },
+        closedIds: [],
+      }),
       persistInbound: vi.fn().mockResolvedValue({ id: "inbound-new" }),
       getChatDefaultProfile: vi.fn().mockResolvedValue(undefined),
       deleteBoundaryPending: vi.fn().mockResolvedValue(undefined),

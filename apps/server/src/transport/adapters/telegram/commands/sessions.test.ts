@@ -207,28 +207,19 @@ describe("handleName", () => {
 });
 
 describe("handleEnd", () => {
-  it("closes the active session", async () => {
-    const closeSession = vi.fn().mockResolvedValue(undefined);
-    const transport = transportWith({
-      resolveSession: vi.fn().mockResolvedValue({
-        id: "s1",
-        channelId: "ch",
-        platformAddress: "42",
-        conversationId: "c1",
-        status: "active",
-        receive: "routed",
-      }),
-      closeSession,
-    });
+  it("closes the chat's active session in one statement", async () => {
+    const closeActiveSession = vi.fn().mockResolvedValue({ kind: "closed", sessionId: "s1" });
+    const transport = transportWith({ closeActiveSession });
     const ctx = mkCtx();
     await handleEnd(transport, ctx);
-    expect(closeSession).toHaveBeenCalledWith("s1");
+    expect(closeActiveSession).toHaveBeenCalledWith("42");
+    expect(transport.resolveSession).not.toHaveBeenCalled();
     expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("ended"));
   });
 
   it("handles no active session gracefully", async () => {
     const transport = transportWith({
-      resolveSession: vi.fn().mockResolvedValue(null),
+      closeActiveSession: vi.fn().mockResolvedValue({ kind: "none" }),
     });
     const ctx = mkCtx();
     await handleEnd(transport, ctx);
@@ -281,7 +272,10 @@ describe("handleNew", () => {
     });
     const ctx = mkCtx();
     await handleNew(transport, ctx);
-    expect(createConversation).toHaveBeenCalledWith("42", "1", { isPrivate: true });
+    expect(createConversation).toHaveBeenCalledWith("42", "1", {
+      isPrivate: true,
+      supersede: true,
+    });
   });
 
   it("passes the resolved profileId through when the user names a profile", async () => {
@@ -295,6 +289,7 @@ describe("handleNew", () => {
     await handleNew(transport, ctx);
     expect(createConversation).toHaveBeenCalledWith("42", "1", {
       isPrivate: true,
+      supersede: true,
       profileId: "p1",
     });
     expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('with profile "coder"'));
@@ -320,8 +315,20 @@ describe("handleNew", () => {
     expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('with profile "doc-mode"'));
   });
 
-  it("closes the existing session before creating a new conversation", async () => {
-    const closeSession = vi.fn().mockResolvedValue(undefined);
+  it("supersedes the chat's session inside the create itself, with no separate close", async () => {
+    const closeSession = vi.fn();
+    const createConversation = vi.fn().mockResolvedValue(
+      ok({
+        id: "s-new",
+        channelId: "ch",
+        platformAddress: "42",
+        conversationId: "c-new",
+        status: "active",
+        receive: "routed",
+        profileName: "assistant",
+        kind: "created",
+      }),
+    );
     const transport = transportWith({
       resolveSession: vi.fn().mockResolvedValue({
         id: "s-old",
@@ -332,10 +339,14 @@ describe("handleNew", () => {
         receive: "routed",
       }),
       closeSession,
+      createConversation,
     });
-    const ctx = mkCtx();
-    await handleNew(transport, ctx);
-    expect(closeSession).toHaveBeenCalledWith("s-old");
+    await handleNew(transport, mkCtx());
+    expect(createConversation).toHaveBeenCalledWith("42", "1", {
+      isPrivate: true,
+      supersede: true,
+    });
+    expect(closeSession).not.toHaveBeenCalled();
   });
 
   it("rejects an unknown profile name without creating a conversation", async () => {

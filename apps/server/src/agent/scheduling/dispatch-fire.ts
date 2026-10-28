@@ -12,6 +12,7 @@
  */
 
 import type { Transaction, Transactor } from "../../db/index.js";
+import { rotateSessions } from "../../transport/sessions/rotate-sessions.js";
 import type { TransportStore } from "../../transport/store/index.js";
 import type { AgentStore } from "../store/index.js";
 
@@ -121,13 +122,7 @@ async function rotateAndCreateConversation(
     isPrivate: true,
   });
 
-  for (const ch of channels) {
-    await deps.transportStore.swapSession(tx, ch.channelId, ch.platformAddress, {
-      conversationId: newConv.id,
-      status: "active",
-      receive: ch.receive,
-    });
-  }
+  await rotateSessions(deps, tx, { conversationId: newConv.id, channels });
 
   return newConv.id;
 }

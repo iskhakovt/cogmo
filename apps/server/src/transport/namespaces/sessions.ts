@@ -1,34 +1,62 @@
 import { err, ok, type Result } from "neverthrow";
+import { match } from "ts-pattern";
 import type { InboundContent } from "../../agent/conversation/inbound-content.js";
 import type { EventPublisher } from "../../inngest/durable.js";
 import type { inboundArrived as InboundArrivedEvent } from "../../inngest/events.js";
-import { logger } from "../../logger.js";
 import type { AttachmentStore } from "../attachment-store.js";
-import type { Session } from "../store/index.js";
+import { createSession, type OpenedSession } from "../sessions/create-session.js";
+import { resolveSession } from "../sessions/resolve-session.js";
+import { resumeSession } from "../sessions/resume-session.js";
+import { supersedeSession } from "../sessions/supersede-session.js";
+import type { CloseActiveSessionOutcome, CloseSessionOutcome, Session } from "../store/index.js";
 import type { TransportError } from "../transport-error.js";
 import type { TransportContext } from "./context.js";
 
+/**
+ * How `createConversation` treats a session already active on the address:
+ * join it (the first-message path, which has no profile to apply), or
+ * supersede it with the fresh conversation, under an explicit profile if any.
+ */
+export type CreateConversationOpts =
+  | { isPrivate: boolean; supersede?: false }
+  | { isPrivate: boolean; supersede: true; profileId?: string };
+
 /** The session lifecycle and inbound emission — the chat path every adapter drives. */
 export interface TransportSessions {
+  /**
+   * The active session on `platformAddress`, or null. When the session's
+   * conversation has been quiet past the idle window, closes it and returns
+   * null — the lookup, the idle check and the close share one transaction.
+   */
   resolveSession(platformAddress: string): Promise<Session | null>;
 
   /**
-   * Create a new conversation and the channel session that points at it.
+   * Open a fresh conversation on `platformAddress` and return its session,
+   * with the name of the profile it runs under.
    *
-   * Returns the new session augmented with `profileName` — the name of the
-   * profile actually used, resolved inside the same transaction as the
-   * conversation insert. Callers that surface "started with profile X" use
-   * this directly instead of doing a follow-up `getCurrent` lookup, which
-   * would be racy against a concurrent `createConversation` on the same
-   * `(channelId, platformAddress)` swapping the active session out from
-   * under them.
+   * Without `supersede`, an active session already on the address is
+   * returned instead — two first inbounds racing on an address converge on
+   * one conversation. With `supersede`, whatever is active on the address is
+   * closed and the fresh conversation takes it, in one transaction (`/new`).
    */
   createConversation(
     platformAddress: string,
     platformUserHandle: string,
-    opts: { isPrivate: boolean; profileId?: string },
-  ): Promise<Result<Session & { profileName: string }, TransportError>>;
-  closeSession(sessionId: string): Promise<void>;
+    opts: CreateConversationOpts,
+  ): Promise<Result<OpenedSession, TransportError>>;
+  /** Close a session by id; `stale` when something else closed it first. */
+  closeSession(sessionId: string): Promise<CloseSessionOutcome>;
+  /** Close the address's active session, if any, in one statement. */
+  closeActiveSession(platformAddress: string): Promise<CloseActiveSessionOutcome>;
+  /**
+   * Persist an inbound on an active session and emit `inbound/arrived`.
+   * The session row is read under a share lock, so a close that commits
+   * between the caller's `resolveSession` and this write is seen (or raises
+   * `40001` and is seen on the retry): a closed session is refused as
+   * `session_closed`, a missing one as `session_not_found`, and nothing is
+   * written. An address-keyed caller re-resolves the address and emits to
+   * its current session; a conversation-scoped one reports the refusal.
+   */
   emit(
     sessionId: string,
     content: InboundContent,
@@ -37,7 +65,7 @@ export interface TransportSessions {
   /** Upload an attachment (image, file) as raw bytes to storage. Returns the storage path. */
   uploadAttachment(data: Buffer, mediaType: string): Promise<string>;
 
-  /** Resume an existing conversation by alias or id. Closes any active session on this address, then opens a new one pointing at the resolved conversation. Rejects non-private conversations and conversations not owned by the caller. */
+  /** Resume an existing conversation by alias or id. Swaps the address's active session for a new one pointing at the resolved conversation. Rejects non-private conversations and conversations not owned by the caller. */
   resumeConversation(
     platformAddress: string,
     platformUserHandle: string,
@@ -67,29 +95,12 @@ export function createSessions(
     idleTimeoutMs,
     sessionReceive,
   } = deps;
+  const stores = { transportStore, agentStore };
   return {
     async resolveSession(platformAddress) {
-      const session = await runInTx((tx) =>
-        transportStore.resolveSession(tx, channelId, platformAddress),
+      return runInTx((tx) =>
+        resolveSession(stores, tx, { channelId, platformAddress, idleTimeoutMs }),
       );
-      if (!session) return null;
-
-      // Safety net: expire stale sessions missed by idle timer
-      if (idleTimeoutMs > 0) {
-        const lastActivity = await runInTx((tx) =>
-          agentStore.getLastMessageTime(tx, session.conversationId),
-        );
-        if (lastActivity && Date.now() - lastActivity.getTime() > idleTimeoutMs) {
-          await runInTx((tx) => transportStore.closeSession(tx, session.id));
-          logger.warn(
-            { sessionId: session.id, conversationId: session.conversationId },
-            "session idle-expired via safety net (idle timer may have failed)",
-          );
-          return null;
-        }
-      }
-
-      return session;
     },
 
     async createConversation(platformAddress, platformUserHandle, opts) {
@@ -98,48 +109,28 @@ export function createSessions(
       // Explicit identities (Telegram with allowlist) reject unknown handles.
       return runInTx(async (tx) => {
         const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
-        if (!identity) {
-          return err({ code: "identity_rejected" as const });
-        }
-        // Fallback chain for the profile used by the new conversation:
-        //   explicit `opts.profileId` > per-chat default > global default.
-        // The per-chat default is set via `/profile default <name>` and
-        // persists across `/new`, so a Telegram chat can be pinned to a
-        // specific profile without the user re-stating it every time.
-        let profileId = opts.profileId;
-        if (!profileId) {
-          const chatDefault = await transportStore.getChatDefaultProfile(
-            tx,
-            channelId,
-            platformAddress,
-          );
-          profileId = chatDefault?.profileId ?? defaultProfileId;
-        }
-        const conv = await agentStore.createConversation(tx, {
-          userId: identity.userId,
-          profileId,
-          isPrivate: opts.isPrivate,
-        });
-        // Profile must exist — agentStore.createConversation just succeeded
-        // with this id under the same FK, so the only way `getProfile`
-        // returns null is a torn tx or schema bug. Surface it as
-        // profile_not_found rather than crashing on a null deref.
-        const profile = await agentStore.getProfile(tx, profileId);
-        if (!profile) return err({ code: "profile_not_found" as const });
-        const params = {
+        if (!identity) return err({ code: "identity_rejected" as const });
+        const args = {
           channelId,
           platformAddress,
-          conversationId: conv.id,
-          status: "active" as const,
+          userId: identity.userId,
+          isPrivate: opts.isPrivate,
+          defaultProfileId,
           receive: sessionReceive,
         };
-        const { id } = await transportStore.createSession(tx, params);
-        return ok({ id, ...params, profileName: profile.name });
+        if (opts.supersede === true) {
+          return ok(await supersedeSession(stores, tx, { ...args, profileId: opts.profileId }));
+        }
+        return ok(await createSession(stores, tx, args));
       });
     },
 
     async closeSession(sessionId) {
-      await runInTx((tx) => transportStore.closeSession(tx, sessionId));
+      return runInTx((tx) => transportStore.closeSession(tx, sessionId));
+    },
+
+    async closeActiveSession(platformAddress) {
+      return runInTx((tx) => transportStore.closeActiveSession(tx, channelId, platformAddress));
     },
 
     async resumeConversation(platformAddress, platformUserHandle, target) {
@@ -147,7 +138,6 @@ export function createSessions(
         const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
         if (!identity) return err({ code: "identity_rejected" as const });
 
-        // Resolve target to a conversationId
         let conversationId: string;
         if ("conversationId" in target) {
           conversationId = target.conversationId;
@@ -157,64 +147,49 @@ export function createSessions(
           conversationId = row.conversationId;
         }
 
-        // Verify ownership + privacy
-        const conv = await agentStore.getConversation(tx, conversationId);
-        if (!conv) return err({ code: "conversation_not_found" as const });
-        if (conv.userId !== identity.userId) {
-          return err({
-            code: "access_denied" as const,
-            reason: "conversation not owned by caller",
-          });
-        }
-        if (!conv.isPrivate) {
-          return err({
-            code: "access_denied" as const,
-            reason: "cannot resume non-private conversation",
-          });
-        }
-
-        // Atomic close-old + open-new in one transaction, with the "what's active" lookup
-        // happening INSIDE the tx so no concurrent createSession / swapSession on this address
-        // can slip between resolve and swap. Failure of the insert rolls back the close.
-        const newParams = {
+        return resumeSession(stores, tx, {
+          channelId,
+          platformAddress,
+          userId: identity.userId,
           conversationId,
-          status: "active" as const,
           receive: sessionReceive,
-        };
-        const { id } = await transportStore.swapSession(tx, channelId, platformAddress, newParams);
-        return ok({ id, channelId, platformAddress, ...newParams });
+        });
       });
     },
 
     async emit(sessionId, content, platformTs) {
-      const inbound = await runInTx(async (tx) => {
-        const session = await transportStore.getSession(tx, sessionId);
-        if (!session) {
-          return null;
-        }
-
-        const inbound = await transportStore.persistInbound(tx, {
-          channelSessionId: sessionId,
-          conversationId: session.conversationId,
-          content,
-          platformTs,
-          source: "user",
-        });
-        return { conversationId: session.conversationId, inboundId: inbound.id };
+      const outcome = await runInTx(async (tx) => {
+        const session = await transportStore.lockSession(tx, sessionId);
+        if (!session) return { kind: "not_found" } as const;
+        return match(session.status)
+          .with("closed", () => ({ kind: "closed" }) as const)
+          .with("active", async () => {
+            const inbound = await transportStore.persistInbound(tx, {
+              channelSessionId: sessionId,
+              conversationId: session.conversationId,
+              content,
+              platformTs,
+              source: "user",
+            });
+            return {
+              kind: "persisted",
+              conversationId: session.conversationId,
+              inboundId: inbound.id,
+            } as const;
+          })
+          .exhaustive();
       });
 
-      if (!inbound) {
-        return err({ code: "session_not_found" as const, sessionId });
-      }
-
-      await inngest.send(
-        inboundArrived.create({
-          conversationId: inbound.conversationId,
-          inboundMessageId: inbound.inboundId,
-        }),
-      );
-
-      return ok(undefined);
+      return match(outcome)
+        .with({ kind: "not_found" }, () => err({ code: "session_not_found" as const, sessionId }))
+        .with({ kind: "closed" }, () => err({ code: "session_closed" as const, sessionId }))
+        .with({ kind: "persisted" }, async ({ conversationId, inboundId }) => {
+          await inngest.send(
+            inboundArrived.create({ conversationId, inboundMessageId: inboundId }),
+          );
+          return ok(undefined);
+        })
+        .exhaustive();
     },
 
     async uploadAttachment(data: Buffer, mediaType: string): Promise<string> {

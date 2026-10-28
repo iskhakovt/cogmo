@@ -75,6 +75,8 @@ export function errorMessage(err: TransportError): string {
       return "Operation not permitted.";
     case "session_not_found":
       return "Session not found.";
+    case "session_closed":
+      return "That conversation just ended — please send your message again.";
     case "repo_not_found":
       return `No repo named "${err.name}". Use /repo list to see available repos.`;
     case "repo_name_taken":

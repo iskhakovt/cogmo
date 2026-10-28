@@ -30,6 +30,7 @@ import type { SecretsStore } from "../secrets/store/index.js";
 import { type AttachmentStore, mediaTypeToExt } from "../transport/attachment-store.js";
 import type { DeliveryHandle, DeliveryRouter } from "../transport/delivery-router.js";
 import type { TransportStore } from "../transport/store/index.js";
+import type { ChannelSessionReceive } from "../transport/store/schema.js";
 import type { Transport } from "../transport/transport.js";
 import type { Adapter, StreamHandle, StreamingAdapter } from "../transport/types.js";
 import type { VoiceBundle, VoiceProviderResolver } from "../voice/resolver.js";
@@ -318,10 +319,28 @@ export function mockTransportStore(overrides?: Partial<TransportStore>): Transpo
     createChannel: vi.fn().mockResolvedValue({ id: "ch-1" }),
     insertOrRecoverFixedChannel: vi.fn().mockResolvedValue({ kind: "new", id: "ch-1" }),
     resolveSession: vi.fn().mockResolvedValue(null),
-    createSession: vi.fn().mockResolvedValue({ id: "session-1" }),
-    closeSession: vi.fn().mockResolvedValue(undefined),
-    swapSession: vi.fn().mockResolvedValue({ id: "session-swapped" }),
+    closeSession: vi.fn().mockResolvedValue({ kind: "closed" }),
+    closeActiveSession: vi.fn().mockResolvedValue({ kind: "closed", sessionId: "session-1" }),
+    swapSession: vi.fn(
+      (
+        _tx: unknown,
+        channelId: string,
+        platformAddress: string,
+        params: { conversationId: string; receive: ChannelSessionReceive },
+      ) =>
+        Promise.resolve({
+          session: {
+            id: "session-swapped",
+            channelId,
+            platformAddress,
+            ...params,
+            status: "active" as const,
+          },
+          closedIds: [],
+        }),
+    ),
     getSession: vi.fn().mockResolvedValue(null),
+    lockSession: vi.fn().mockResolvedValue(null),
     persistInbound: vi.fn().mockResolvedValue({ id: "inbound-1" }),
     getUnbatchedInbound: vi
       .fn()
@@ -423,7 +442,8 @@ export function mockTransport(overrides?: Partial<Transport>): Transport {
         profileName: "assistant",
       }),
     ),
-    closeSession: vi.fn().mockResolvedValue(undefined),
+    closeSession: vi.fn().mockResolvedValue({ kind: "closed" }),
+    closeActiveSession: vi.fn().mockResolvedValue({ kind: "closed", sessionId: "session-1" }),
     resumeConversation: vi.fn().mockResolvedValue(
       ok({
         id: "session-resumed",
@@ -437,6 +457,7 @@ export function mockTransport(overrides?: Partial<Transport>): Transport {
     emit: vi.fn().mockResolvedValue(ok(undefined)),
     uploadAttachment: vi.fn().mockResolvedValue("inbound/test.jpg"),
     conversations: {
+      create: vi.fn().mockResolvedValue(ok({ conversationId: "conv-1" })),
       list: vi.fn().mockResolvedValue(ok([])),
       getMessages: vi.fn().mockResolvedValue(ok([])),
       getCurrent: vi.fn().mockResolvedValue(ok(null)),

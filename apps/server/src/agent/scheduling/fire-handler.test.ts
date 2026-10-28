@@ -119,7 +119,7 @@ describe("createScheduledTaskFireHandler", () => {
           { channelId: "ch-tg", platformAddress: "chat-42", receive: "routed" },
           { channelId: "ch-web", platformAddress: "tab-7", receive: "all" },
         ]),
-        swapSession: vi.fn().mockResolvedValue({ id: "session-new" }),
+        swapSession: vi.fn().mockResolvedValue({ id: "session-new", closedIds: [] }),
         persistInbound: vi.fn().mockResolvedValue({ id: "inbound-9" }),
       },
     });
@@ -150,14 +150,14 @@ describe("createScheduledTaskFireHandler", () => {
       expect.anything(),
       "ch-tg",
       "chat-42",
-      { conversationId: "conv-fresh", status: "active", receive: "routed" },
+      { conversationId: "conv-fresh", receive: "routed" },
     );
     expect(d.transportStore.swapSession).toHaveBeenNthCalledWith(
       2,
       expect.anything(),
       "ch-web",
       "tab-7",
-      { conversationId: "conv-fresh", status: "active", receive: "all" },
+      { conversationId: "conv-fresh", receive: "all" },
     );
 
     // Synthetic inbound on the new conversation, no originating session
@@ -182,7 +182,7 @@ describe("createScheduledTaskFireHandler", () => {
           .mockResolvedValue([
             { channelId: "ch-tg", platformAddress: "chat-42", receive: "routed" },
           ]),
-        swapSession: vi.fn().mockResolvedValue({ id: "session-new" }),
+        swapSession: vi.fn().mockResolvedValue({ id: "session-new", closedIds: [] }),
         persistInbound: vi.fn().mockResolvedValue({ id: "inbound-1" }),
       },
     });

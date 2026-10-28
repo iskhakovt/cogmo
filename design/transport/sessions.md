@@ -6,9 +6,49 @@ How platform addresses map to conversations. Lifecycle, types, and cleanup.
 
 A channel session is a row in `channel_sessions` that links a platform address (Telegram chat ID, Slack thread ts, Web UI tab) to a conversation. Sessions track `status` and `receive` mode but have no lifecycle events or callbacks. The agent never sees sessions.
 
-`status` records **reachability** — whether we can deliver to the user on this channel right now. It is not a record of conversational engagement; that is inferred from `messages.created_at` on the conversation. A Telegram chat that has been quiet for hours keeps `status='active'` indefinitely, because the bot can still DM the chat_id — the user is "idle," not "unreachable." Web UI sessions additionally carry `expires_at` driven by heartbeats; an unexpired `active` Web UI session means a tab is alive.
+`status` records **reachability** — whether we can deliver to the user on this channel right now. It is not a record of conversational engagement; that is inferred from `messages.created_at` on the conversation. A Telegram chat that has been quiet for hours keeps `status='active'` indefinitely, because the bot can still DM the chat_id — the user is "idle," not "unreachable." Web UI sessions are closed when their stream disconnects; `expires_at` exists on the row but nothing reads or writes it (see [Lifecycle](#lifecycle-confirmed)).
 
-**Session resolution:** `resolveSession(platformAddress)` returns the most recent session for that address that is not closed and not expired. If the conversation has been quiet longer than the idle window, `resolveSession` lazy-rotates — it closes the stale session and returns null, prompting the caller to create a fresh conversation for the inbound that just arrived.
+**Session resolution:** `resolveSession(platformAddress)` returns the address's active session. If the conversation has been quiet longer than the idle window, `resolveSession` lazy-rotates — it closes the stale session and returns null, prompting the caller to create a fresh conversation for the inbound that just arrived. The lookup, the idle check and the close run in one transaction (see [Lifecycle](#lifecycle-confirmed)).
+
+## Lifecycle `[confirmed]`
+
+A session is a state machine ([state-machines.md](../../.agents/rules/state-machines.md)). The unit is one `channel_sessions` row; its durable id is `channel_sessions.id`. Every transition that opens a session is one store write, `swapSession`: close every active row on the address, then insert the new one. The partial unique index `uq_sessions_active_address` on `(channel_id, platform_address) WHERE status = 'active'` allows one active row per address, and the insert is keyed on it ([inngest.md](../../.agents/rules/inngest.md) → keyed insert), so an open that races another raises `40001` rather than `23505`, and the transactor's retry closes the row that won.
+
+```
+       create · supersede · resume
+  ∅ ──────────────────────────────▶ active ──────────────────────────────▶ closed   (terminal)
+                                          close · supersede · resume · lazy rotation
+```
+
+`status` has two values. `expires_at` has no writer and, since nothing writes it, no reader: no query on `channel_sessions` filters on it. The column stays until a writer arrives with an explicit state for an expired session and a transition that frees its address, or is dropped — tracked in `todo.md`.
+
+Each open is a use case under `src/transport/sessions/`, composed inside the caller's transaction; `Transport`, the boundary resolver, the scheduled-fire dispatcher and the pipeline start call the same files. A close is one conditional UPDATE on the store and has no use case.
+
+### Transitions
+
+| Transition | From → To | Guard | Writes | Where |
+|-|-|-|-|-|
+| create | ∅ → active, or nothing | the address's active session, read in the same transaction: present → returned as is and nothing is written (the caller's `isPrivate` did not apply; create takes no profile, so nothing else can disagree); absent → the open | conversation insert, then `swapSession` (which closes nothing) | `create-session.ts`, behind `Transport.createConversation` — the first-message path |
+| supersede | active → closed, ∅ → active | none: whatever is active on the address goes | conversation insert, then `swapSession`; the closed id is logged — a reply in flight to it will be skipped at delivery, and that line is the record | `supersede-session.ts`, behind `createConversation(…, { supersede: true })` (`/new`) and a hold resolved fresh |
+| resume | active → closed, ∅ → active | the target conversation exists, is the caller's and is private | `swapSession` onto it; the closed id is logged | `resume-session.ts`, behind `resumeConversation` (`/resume`, the Web UI stream open) and a hold resolved as resume |
+| rotate | active → closed, ∅ → active, on every reachable channel of a user+profile | none: the caller created the conversation for that user in this transaction, so there is no ownership to check and no caller identity | `swapSession` per channel, keeping each channel's `receive`; each closed id is logged | `rotate-sessions.ts`, behind the scheduled-fire dispatcher and the pipeline run start |
+| close | active → closed | by id: `status = 'active'`, a conditional `UPDATE … WHERE id = $1 AND status = 'active'` whose empty RETURNING is `stale` (with the status the row holds) or `not_found`; by address: the address's active row, `none` when there is none | one conditional UPDATE each: `closeSession` / `closeActiveSession` on the store, no use case | by id: `Transport.closeSession` (Web UI stream disconnect) and the lazy rotation in `resolve-session.ts`; by address: `Transport.closeActiveSession` (`/end`, direct `/new`), with no lookup to go stale against |
+
+Transitions not in the table are illegal; nothing reopens a closed row. A `swapSession` whose insert lands on an existing row is an invariant violation — the close in the same transaction freed the address — and throws.
+
+### Failure modes
+
+| Crash point or race | State left | Why it is safe |
+|-|-|-|
+| Two inbounds race a lazy rotation | both read the same stale session; one close commits, the other's UPDATE hits a row changed after its snapshot → `40001` → retry → the lookup finds no active row → null. Both callers then *create*; the second's insert conflicts → `40001` → its retry's lookup joins the first's session | one conversation, one active row; the second inbound lands in it |
+| Two opens race on one address and both write — supersede, resume, rotate, or a create whose lookup saw nothing | the loser's insert blocks on the winner's uncommitted row, then raises `40001`; its retry closes the winner's row (supersede, resume, rotate) or joins it (create) | one active row, the last committer's: the state one serial order of the two would leave |
+| A create whose snapshot predates a supersede or resume that closed session A | its lookup still returns A, it joins A with no write, so nothing raises `40001`; the caller then `emit`s on A | `emit` reads A's row under a share lock, finds it closed and refuses with `session_closed`, writing nothing; the next row says what each adapter does with that |
+| `resolveSession` returns A, then a rotate, a supersede or a by-id close commits, then `emit` on A. The direct adapter has this window between its two steps and the Web UI's send route between its resolve and its emit; Telegram awaits a chat's handlers one at a time, so there only a scheduled-fire or pipeline rotate can land in it | `emit`'s share-locked read sees the closed row, or — if the close commits after `emit`'s snapshot — raises `40001` and the transactor's retry sees it; either way `emit` refuses with `session_closed` and persists nothing | Telegram and the direct adapter re-resolve the address once and emit to its current session, where the message would have landed a moment later; if that fails too, Telegram tells the user to resend and the direct run completes as rejected. The Web UI's send is scoped to a conversation, so it answers 409 and the SPA's next send resolves the tab's session again |
+| Stale close — a Web UI disconnect, or a lazy rotation, closing by id a session a swap already closed | unchanged | `closeSession` returns `stale`, which the caller logs. The by-address closes (`/end`, direct `/new`) are one statement and have no window |
+| Crash inside an open | nothing: the conversation insert and the swap are one transaction | — |
+| A scheduled fire rotates the user's reachable channels onto its conversation (`findReachableChannelsForUserProfile` includes closed sessions) while a boundary hold is open on one of them, and the hold resolves fresh | the hold's supersede closes the fire's session and opens the fresh conversation; the buffered inbounds drain into it | consistent, at a cost: the fire's reply is skipped at delivery because its session is closed — the same outcome as a reply arriving after `/new` |
+| Rows written before the index exist at deploy, two of them active on one address | `CREATE UNIQUE INDEX` would fail with `23505` | migration `0074_sessions_close_duplicate_active` closes every active row but the newest per address (highest UUIDv7 id) in its own transaction before `0075_sessions_one_active_per_address` builds the index |
+| A process running the previous code while 0074–0075 apply | a plain insert of a second active row between 0074 and 0075 fails the index build and halts the migration; one after 0075 fails with `23505`, which the transactor does not retry, so that turn fails | residual: the single process is stopped before it migrates, so the window is empty in practice; a halted 0075 reruns once the duplicate is closed |
 
 ## Session Properties
 
@@ -16,22 +56,22 @@ A channel session is a row in `channel_sessions` that links a platform address (
 |-|-|
 | `status` | `active` \| `closed` — reachability lifecycle. Closed sessions are excluded from routing and delivery. |
 | `receive` | `none` \| `routed` \| `all` — how this session receives responses |
-| `expiresAt` | Session auto-expires after TTL, refreshed by heartbeat. Null = never expires. |
+| `expiresAt` | Nullable; nothing reads or writes it. See [Lifecycle](#lifecycle-confirmed). |
 
-| receive | expiresAt | Example |
-|-|-|-|
-| `routed` | null | Telegram DM, Slack thread, Direct — normal routing, lives forever |
-| `all` | set | Web UI tab — receives everything, cleaned up when tab closes |
-| `all` | null | Monitoring dashboard — receives everything, never expires |
-| `none` | null | Muted session — input only, no responses delivered |
+| receive | Example |
+|-|-|
+| `routed` | Telegram DM, Slack thread, Direct — normal routing |
+| `all` | Web UI tab — receives everything, closed when its stream disconnects |
+| `none` | Muted session — input only, no responses delivered |
 
 ## Session Close Paths
 
-`status` flips to `closed` in three places:
+Every open goes through `swapSession`, which closes whatever is active on the address first; the explicit closes are a separate transition. `status` flips to `closed` by:
 
-1. **Explicit end** — `/new`, `/end`, or profile change. `swapSession` closes the old row and opens a fresh one in a single transaction.
-2. **Lazy rotation on stale inbound** — when a new inbound arrives on a session whose conversation's last message is older than the idle window. The next inbound starts a fresh conversation (or, when the prior was substantial, fires the [boundary hold](#boundary-hold-resume--start-fresh-prompt-confirmed) instead).
-3. **Scheduled fire into an idle conversation** — the fire handler treats this like a synthetic `/new`, rotating every reachable channel for the user+profile onto a fresh conversation (see [scheduling.md](../scheduling.md) → *Synthetic conversation turn*).
+1. **Supersede** — `/new`, a boundary hold resolved as fresh, a scheduled fire into an idle conversation (which rotates every reachable channel for the user+profile; see [scheduling.md](../scheduling.md) → *Synthetic conversation turn*) and a pipeline run's start.
+2. **Resume** — `/resume`, the Web UI's stream open, a boundary hold resolved as resume.
+3. **Lazy rotation on stale inbound** — `resolveSession` closes a session whose conversation's last message is older than the idle window and returns null; the next inbound starts a fresh conversation (or, when the prior was substantial, fires the [boundary hold](#boundary-hold-resume--start-fresh-prompt-confirmed) instead).
+4. **Explicit close** — by address, in one statement: `/end`, the direct adapter's `/new`; by id: the Web UI's stream disconnect.
 
 The idle timer does **not** close sessions. Its only job is emitting `conversation/idle` for the Observer; reachability is unrelated to whether the user is mid-conversation.
 
@@ -127,40 +167,38 @@ These gate the prompt to cases where continuation is plausibly worth the tap; ev
 
 ## Session Creation
 
-Adapters manage session lifecycle. Two invariants:
+Adapters manage session lifecycle. Three invariants:
 
 - A `user`-source inbound message points at an originating session (`inbound_messages.channel_session_id` not null). `scheduled`-source inbounds have no originating session — their `channel_session_id` is null and a check constraint enforces the link.
 - A session must exist to receive a response (routing resolves target sessions).
+- An address holds at most one active session (`uq_sessions_active_address`); see [Lifecycle](#lifecycle-confirmed).
 
 Session lifecycle is adapter-specific: Telegram creates a long-lived session on first message, Slack team chats spawn a session per thread, Web UI maintains a session while a tab is open.
 
 ### `/new` Command
-1. Close current session (`status = 'closed'`)
-2. Create new conversation via `createConversation()`
-3. Insert new session row (active, pointing to new conversation)
+
+One call, `createConversation(address, handle, { supersede: true })`: in a single transaction, open the new conversation and swap the chat's active session for one pointing at it.
 
 Closing the old session stops pending responses from the old conversation from being delivered. Any in-flight `outbound/deliver` events check session status before sending — closed = skip silently. This handles the "response arrives after `/new`" edge case without cancelling orchestrator runs.
 
 ### `/end` Command
 
-Close current session (`status = 'closed'`) without creating a new one. The next inbound message will create a fresh conversation via the normal first-message flow (`resolveSession` returns null → `createConversation`). Same in-flight behavior as `/new`.
+`closeActiveSession(address)`: one conditional UPDATE on the chat's active session, with no lookup to go stale against; `none` replies "No active conversation." The next inbound message will create a fresh conversation via the normal first-message flow (`resolveSession` returns null → `createConversation`). Same in-flight behavior as `/new`.
 
 **TODO:** Consider halting in-flight processing (orchestrator run) on session closure. Currently the orchestrator finishes and the response is silently dropped at delivery. Halting would save compute but adds complexity (cancellation signal from adapter to orchestrator).
 
 
 ### Web UI Sessions
 
-Created when the user opens a conversation in the Web UI:
+The SPA mints a per-tab id, which is the session's `platform_address`:
 
-1. User navigates to conversation → adapter inserts session (`receive: "all", expiresAt: now + TTL`)
-2. Client sends heartbeat every N seconds → adapter updates `expiresAt = now + TTL`
-3. User closes tab / navigates away → heartbeats stop → session expires
-
-Web UI sessions use `receive: "all"` (get all responses) and `expiresAt` TTL (cleaned up when tab closes).
+1. `POST /api/chat` opens a conversation row only (`conversations.create`). The tab keeps the stream session of the conversation it is leaving, so an in-flight reply there still lands.
+2. The stream open resumes the tab onto the conversation with `receive: "all"`, closing the previous stream session.
+3. The stream's disconnect closes the session.
 
 ## Reachability Lookups
 
-`findReachableChannelsForUserProfile(userId, profileId)` returns distinct `(channelId, platformAddress, receive)` tuples for every channel the user has ever used on this profile, ordered with the latest `receive` mode per address. Closed sessions are included as a source of `(channelId, platformAddress)` tuples — a `/end`-ed Telegram chat is still reachable, and a rotation can `swapSession` onto a fresh conversation. Sessions with `expires_at` in the past are excluded (Web UI heartbeat stopped).
+`findReachableChannelsForUserProfile(userId, profileId)` returns distinct `(channelId, platformAddress, receive)` tuples for every channel the user has ever used on this profile, ordered with the latest `receive` mode per address. Closed sessions are included as a source of `(channelId, platformAddress)` tuples — a `/end`-ed Telegram chat is still reachable, and a rotation can `swapSession` onto a fresh conversation.
 
 This is the canonical "where can we reach this user for this profile?" query, used by the scheduled-fire dispatcher when it rotates onto a fresh conversation.
 
@@ -235,5 +273,6 @@ CREATE UNIQUE INDEX uq_inbound_idempotency_key
 ```
 
 Indexes:
+- `uq_sessions_active_address` — UNIQUE `(channel_id, platform_address) WHERE status = 'active'`: one active session per address, the key of the keyed insert behind every open (`swapSession`)
 - `(channel_id, platform_address, id DESC)` — active session lookup
 - `(conversation_id) WHERE status = 'active' AND receive = 'all'` — receive-all session lookup for routing

@@ -74,6 +74,17 @@ function makeDeps() {
   transportStore.findReachableChannelsForUserProfile.mockResolvedValue([
     { channelId: "tg", channelType: "telegram", platformAddress: "42", receive: "routed" },
   ]);
+  transportStore.swapSession.mockResolvedValue({
+    session: {
+      id: "session-new",
+      channelId: "tg",
+      platformAddress: "42",
+      conversationId: "conv-new",
+      status: "active",
+      receive: "routed",
+    },
+    closedIds: [],
+  });
 
   const deps: StartPipelineRunDeps = {
     runInTx: fakeRunInTx,
@@ -108,7 +119,6 @@ describe("startPipelineRun", () => {
     });
     expect(transportStore.swapSession).toHaveBeenCalledWith(expect.anything(), "tg", "42", {
       conversationId: "conv-new",
-      status: "active",
       receive: "routed",
     });
     expect(runStore.insertOrRecoverRun).toHaveBeenCalledWith(expect.anything(), {
