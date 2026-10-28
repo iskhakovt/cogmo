@@ -1,7 +1,7 @@
 /**
  * Rule consolidation — merges semantically similar learned rules.
  *
- * Triggered when the active learned rules pass the threshold (20). Loads
+ * Triggered when the live learned rules pass the threshold (20). Loads
  * `correction` and `evolution` rows only, so it never touches an instruction
  * rule. An LLM groups similar rules and produces merged versions. Old rules
  * are atomically replaced via store.replaceRules(); a group a retirement
@@ -87,8 +87,8 @@ export async function consolidateRules(
   // scope. `replaceRules` writes the merged row with the same channelType
   // it was called with, so per-scope runs preserve scope without giving
   // the LLM any opportunity to propose a cross-scope merge.
-  const activeRules = allRules.filter((r) => r.active);
-  const byChannel = R.groupBy(activeRules, (r) => r.channelType ?? "");
+  const liveRules = allRules.filter((r) => r.status === "live");
+  const byChannel = R.groupBy(liveRules, (r) => r.channelType ?? "");
 
   let mergedGroups = 0;
   let rulesRemoved = 0;

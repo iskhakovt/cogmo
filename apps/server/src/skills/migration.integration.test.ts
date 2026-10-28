@@ -22,7 +22,7 @@ afterAll(async () => {
   await sql.end();
 });
 
-describe("migration 0017_tough_bedlam (skills foundation)", () => {
+describe("skills schema as migrated (tables, enums, constraints)", () => {
   it.each(["skills", "skill_deploys", "skill_runs", "skill_context_calls"])(
     "table %s exists",
     async (table) => {
@@ -38,7 +38,7 @@ describe("migration 0017_tough_bedlam (skills foundation)", () => {
     ["skill_risk_tier", ["auto", "notify", "approve"]],
     ["skill_run_status", ["running", "success", "error"]],
     ["skill_run_trigger", ["manual", "cron", "event"]],
-    ["skill_deploy_status", ["pending_approval", "approved", "denied", "live", "rolled_back"]],
+    ["skill_deploy_status", ["pending_approval", "denied", "live", "rolled_back"]],
   ] as const)("enum %s has expected values", async (typeName, expected) => {
     const rows = await sql<{ enumlabel: string }[]>`
       SELECT e.enumlabel

@@ -1,5 +1,5 @@
 {
-  "id": "e6d7a64f-f467-432a-a0e9-7065d21d0fc4",
+  "id": "08722e83-e61b-455b-bf4c-93207fc640dc",
   "prevId": "ad97c0a1-2a6e-4167-98df-2b2e0bd51386",
   "version": "7",
   "dialect": "postgresql",
@@ -490,13 +490,6 @@
         },
         "failure_reason": {
           "name": "failure_reason",
-          "type": "pipeline_run_failure_reason",
-          "typeSchema": "public",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "failure_detail": {
-          "name": "failure_detail",
           "type": "text",
           "primaryKey": false,
           "notNull": false
@@ -551,16 +544,7 @@
         }
       },
       "policies": {},
-      "checkConstraints": {
-        "chk_pipeline_runs_failure_reason_by_status": {
-          "name": "chk_pipeline_runs_failure_reason_by_status",
-          "value": "CASE \"pipeline_runs\".\"status\" WHEN 'failed' THEN \"pipeline_runs\".\"failure_reason\" IS NOT NULL AND \"pipeline_runs\".\"failure_reason\" IN ('stage_error', 'unknown_stage', 'unsupported_stage', 'turn_degraded', 'turn_truncated', 'artifact_invalid', 'gate_resolution_error') WHEN 'cancelled' THEN \"pipeline_runs\".\"failure_reason\" IS NOT NULL AND \"pipeline_runs\".\"failure_reason\" IN ('cancelled_by_user', 'gate_timeout') ELSE \"pipeline_runs\".\"failure_reason\" IS NULL AND \"pipeline_runs\".\"failure_detail\" IS NULL END"
-        },
-        "chk_pipeline_runs_parked_gate_unclaimed": {
-          "name": "chk_pipeline_runs_parked_gate_unclaimed",
-          "value": "\"pipeline_runs\".\"status\" <> 'waiting_gate' OR \"pipeline_runs\".\"gate_resolution\" IS NULL OR (\"pipeline_runs\".\"gate_resolution\" ->> 'gateKey') <> (\"pipeline_runs\".\"id\"::text || ':' || \"pipeline_runs\".\"current_stage\" || ':' || \"pipeline_runs\".\"iteration\"::text)"
-        }
-      },
+      "checkConstraints": {},
       "isRLSEnabled": false
     },
     "public.custom_compartments": {
@@ -2881,9 +2865,10 @@
           "primaryKey": false,
           "notNull": true
         },
-        "exit_code": {
-          "name": "exit_code",
-          "type": "integer",
+        "reaped_reason": {
+          "name": "reaped_reason",
+          "type": "container_reaped_reason",
+          "typeSchema": "public",
           "primaryKey": false,
           "notNull": false
         },
@@ -3001,7 +2986,12 @@
         }
       },
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "chk_containers_reaped_reason": {
+          "name": "chk_containers_reaped_reason",
+          "value": "(\"containers\".\"status\" = 'reaped') = (\"containers\".\"reaped_reason\" IS NOT NULL)"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.networks": {
@@ -4630,21 +4620,6 @@
       "schema": "public",
       "values": ["user", "evolution", "signal_pipeline"]
     },
-    "public.pipeline_run_failure_reason": {
-      "name": "pipeline_run_failure_reason",
-      "schema": "public",
-      "values": [
-        "stage_error",
-        "unknown_stage",
-        "unsupported_stage",
-        "turn_degraded",
-        "turn_truncated",
-        "artifact_invalid",
-        "gate_resolution_error",
-        "cancelled_by_user",
-        "gate_timeout"
-      ]
-    },
     "public.pipeline_run_status": {
       "name": "pipeline_run_status",
       "schema": "public",
@@ -4737,6 +4712,18 @@
       "name": "mcp_tool_approval_status",
       "schema": "public",
       "values": ["pending", "approved", "rejected"]
+    },
+    "public.container_reaped_reason": {
+      "name": "container_reaped_reason",
+      "schema": "public",
+      "values": [
+        "ttl_expired",
+        "cascade",
+        "dead_instance",
+        "crash_reconcile",
+        "start_failed",
+        "unknown"
+      ]
     },
     "public.container_runtime": {
       "name": "container_runtime",

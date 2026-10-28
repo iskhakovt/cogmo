@@ -107,6 +107,7 @@ export async function seedSkillForTests(
       riskTier: "auto",
       status: "live",
       classifierLog: testClassifierLog,
+      resolvedAt: new Date(),
     }),
   );
 
