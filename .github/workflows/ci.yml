@@ -113,6 +113,7 @@ jobs:
               # Modules declaring a schema behind a `jsonbZod` column, and the
               # modules those schemas import theirs from.
               - 'apps/server/src/agent/coding/types.ts'
+              - 'apps/server/src/agent/conversation/inbound-content.ts'
               - 'apps/server/src/agent/stored-content.ts'
               - 'apps/server/src/agent/evolution/event-schema.ts'
               - 'apps/server/src/agent/evolution/memory-extraction-schema.ts'
@@ -128,7 +129,6 @@ jobs:
               - 'apps/server/src/sandbox/types.ts'
               - 'apps/server/src/skills/types.ts'
               - 'apps/server/src/transport/attachment-original.ts'
-              - 'apps/server/src/transport/content.ts'
             design:
               - 'design/**'
       - name: Require a design doc change alongside the schema change

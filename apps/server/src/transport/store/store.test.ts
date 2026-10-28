@@ -1,11 +1,15 @@
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { ZodError } from "zod";
+import {
+  type InboundContent,
+  renderInboundText,
+} from "../../agent/conversation/inbound-content.js";
 import { DrizzleAgentStore } from "../../agent/store/index.js";
 import type { Database, Transactor } from "../../db/index.js";
 import { expectOk } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import type { NormalizedImageResult } from "../attachment-original.js";
-import { renderInboundText } from "../content.js";
 import { DrizzleTransportStore } from "./index.js";
 import {
   attachmentOriginals,
@@ -411,6 +415,28 @@ describe("DrizzleTransportStore", () => {
       const unbatched = await tx((trx) => store.getUnbatchedInbound(trx, conversationId, null));
       expect(unbatched).toHaveLength(1);
       expect(unbatched[0]).toEqual({ id, content: "Hello", source: "user" });
+    });
+
+    it("rejects a malformed block at the content column", async () => {
+      const channelId = await seedChannel();
+      const { conversationId } = await seedConversation();
+      const sessionId = await seedSession(channelId, conversationId);
+      // A document with no path, data or bytes: the shape the schema's refine refuses.
+      const malformed = [
+        { type: "document", mediaType: "application/pdf", name: "x.pdf" },
+      ] as unknown as InboundContent;
+
+      await expect(
+        tx((trx) =>
+          store.persistInbound(trx, {
+            channelSessionId: sessionId,
+            conversationId,
+            content: malformed,
+            platformTs: new Date("2026-01-01T12:00:00Z"),
+            source: "user",
+          }),
+        ),
+      ).rejects.toThrow(ZodError);
     });
 
     it("getUnbatchedInbound respects afterId cursor", async () => {

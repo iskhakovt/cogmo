@@ -1,9 +1,9 @@
 import type { Inngest } from "inngest";
 import { err, ok, type Result } from "neverthrow";
 import { match } from "ts-pattern";
+import type { InboundContent } from "../../agent/conversation/inbound-content.js";
 import type { inboundArrived as InboundArrivedEvent } from "../../inngest/events.js";
 import type { AttachmentStore } from "../attachment-store.js";
-import type { InboundContent } from "../content.js";
 import { createSession, type OpenedSession } from "../sessions/create-session.js";
 import { resolveSession } from "../sessions/resolve-session.js";
 import { resumeSession } from "../sessions/resume-session.js";
