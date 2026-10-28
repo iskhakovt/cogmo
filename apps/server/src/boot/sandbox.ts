@@ -49,11 +49,14 @@ export function scheduleReconcileCrashedInstances(client: SandboxClient, instanc
  * Stage 2: sandbox client + crash-instance reconciliation. Inserts a row
  * into `cogmo_instances` (local-docker backend) so other Cogmo processes
  * can see this instance is live, then schedules an asynchronous pass that
- * reaps any container labeled with a dead instance id. The reaping is
- * fire-and-forget — see `scheduleReconcileCrashedInstances`. Only `cogmo
- * serve` should call this stage — running it from a one-shot CLI reaps the
- * live `cogmo serve`'s coding-task containers (no liveness check on other
- * instance rows).
+ * reaps any container labeled with a dead instance id and then closes those
+ * instance rows, so the reaper's orphan pass retries what the pass could not
+ * kill. The reaping is fire-and-forget — see
+ * `scheduleReconcileCrashedInstances`. Only `cogmo serve` should call this
+ * stage, and only one per database — running it from a one-shot CLI, or from
+ * a second live process, reaps the live `cogmo serve`'s coding-task
+ * containers and closes its instance row, after which the orphan pass kills
+ * every container it creates (no liveness check on other instance rows).
  *
  * Returns `NO_SANDBOX` (all-null) when the configured backend is
  * unavailable: `local-docker` requires `SANDBOX_RUNTIME`; `daytona`

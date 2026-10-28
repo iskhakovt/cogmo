@@ -89,6 +89,14 @@ export interface DockerModem {
   ): void;
 }
 
+/** The HTTP status dockerode attaches to a daemon error, if the error carries one. */
+export function statusCodeOf(error: unknown): number | undefined {
+  if (typeof error === "object" && error !== null && "statusCode" in error) {
+    return typeof error.statusCode === "number" ? error.statusCode : undefined;
+  }
+  return undefined;
+}
+
 export interface DockerFacade {
   info(): Promise<DockerInfo>;
   getContainer(id: string): DockerContainer;

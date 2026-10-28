@@ -1,9 +1,11 @@
 import type Docker from "dockerode";
+import { sql } from "drizzle-orm";
+import { match } from "ts-pattern";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Database, Transactor } from "../db/index.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import { runReap } from "./reaper.js";
-import { DrizzleSandboxStore } from "./store/index.js";
+import { type ContainerTransition, DrizzleSandboxStore } from "./store/index.js";
 import type { ContainerLabels, ResourceLimits } from "./types.js";
 
 const RESOURCE_LIMITS: ResourceLimits = {
@@ -63,6 +65,10 @@ function fakeDocker(
     containers?: DockerSideContainer[];
     failKill?: Map<string, number>;
     failRemove?: Map<string, number>;
+    /** Runs before a kill is recorded — simulates another path finishing the row mid-pass. */
+    onKill?: (id: string) => Promise<void>;
+    /** Runs before `listContainers` answers — same purpose, between the TTL read and the stale pass. */
+    onList?: () => Promise<void>;
   } = {},
 ): {
   docker: Docker;
@@ -77,9 +83,13 @@ function fakeDocker(
   const volumeRemoveCalls: string[] = [];
   const containers = opts.containers ?? [];
   const docker = {
-    listContainers: vi.fn(async () => containers),
+    listContainers: vi.fn(async () => {
+      await opts.onList?.();
+      return containers;
+    }),
     getContainer: (id: string) => ({
       kill: vi.fn(async () => {
+        await opts.onKill?.(id);
         const code = opts.failKill?.get(id);
         if (code !== undefined) {
           throw Object.assign(new Error("nope"), { statusCode: code });
@@ -140,9 +150,21 @@ async function insertContainer(opts: {
       instanceId: opts.instanceId ?? instanceId,
     }),
   );
-  if (opts.status && opts.status !== "starting") {
-    const status = opts.status;
-    await tx((trx) => store.updateContainerStatus(trx, { id: row.id, status }));
+  // Walk the row through the state machine to the requested status.
+  const steps: ContainerTransition[] = match(opts.status)
+    .with(undefined, "starting", () => [])
+    .with("running", () => [{ from: "starting" as const, to: "running" as const }])
+    .with("exited", () => [
+      { from: "starting" as const, to: "running" as const },
+      { from: "running" as const, to: "exited" as const },
+    ])
+    .with("reaped", () => [
+      { from: "starting" as const, to: "running" as const },
+      { to: "reaped" as const },
+    ])
+    .exhaustive();
+  for (const step of steps) {
+    await tx((trx) => store.transitionContainerStatus(trx, { id: row.id, at: NOW(), ...step }));
   }
   return row.id;
 }
@@ -376,6 +398,75 @@ describe("runReap — stale DB pass", () => {
   });
 });
 
+describe("runReap — a row another path already finished", () => {
+  // Between a pass reading a row and writing its terminal status, a cascade
+  // (`deleteByTaskId`) or the previous tick can finish the same row. The
+  // write is conditional on the status the pass read, so the row keeps the
+  // terminal state and timestamp the other path gave it.
+  const EARLIER = "2026-04-27T11:00:00.000Z";
+
+  async function reapedElsewhere(id: string): Promise<void> {
+    await db.execute(
+      sql`UPDATE containers SET status = 'reaped', exited_at = ${EARLIER}::timestamptz WHERE id = ${id}`,
+    );
+  }
+
+  it("TTL pass: a row reaped during its kill is neither re-written nor counted", async () => {
+    const cogmoId = await insertContainer({ dockerId: "c-raced", ttlMs: -1000, status: "running" });
+    const { docker } = fakeDocker({
+      containers: [{ Id: "c-raced", Labels: labels() }],
+      onKill: () => reapedElsewhere(cogmoId),
+    });
+    const result = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
+    expect(result.ttlReaped).toBe(0);
+    const row = await tx((trx) => store.getContainer(trx, cogmoId));
+    expect(row?.status).toBe("reaped");
+    expect(row?.exitedAt?.toISOString()).toBe(EARLIER);
+  });
+
+  it("stale pass: a row reaped after the TTL read is not marked exited", async () => {
+    const cogmoId = await insertContainer({
+      dockerId: "c-gone-mid-tick",
+      ttlMs: 60_000,
+      status: "running",
+    });
+    // The cascade removed the container and marked the row before the orphan
+    // pass listed the daemon, so the listing no longer has it.
+    const { docker } = fakeDocker({ containers: [], onList: () => reapedElsewhere(cogmoId) });
+    const result = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
+    expect(result.staleMarked).toBe(0);
+    const row = await tx((trx) => store.getContainer(trx, cogmoId));
+    expect(row?.status).toBe("reaped");
+    expect(row?.exitedAt?.toISOString()).toBe(EARLIER);
+  });
+});
+
+describe("runReap — a row another path moved forward", () => {
+  // `create()` holds a `starting` row between `createContainer` and the
+  // running transition. A pass that read it as `starting` and then kills the
+  // container must still land the reap when `create()` committed
+  // `starting → running` in between: the container is gone either way.
+  it("TTL pass: a starting row that became running during its kill is reaped", async () => {
+    const cogmoId = await insertContainer({ dockerId: "c-fwd", ttlMs: -1000, status: "starting" });
+    const { docker } = fakeDocker({
+      containers: [{ Id: "c-fwd", Labels: labels() }],
+      onKill: async () => {
+        await tx((trx) =>
+          store.transitionContainerStatus(trx, {
+            id: cogmoId,
+            from: "starting",
+            to: "running",
+            at: NOW(),
+          }),
+        );
+      },
+    });
+    const result = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
+    expect(result.ttlReaped).toBe(1);
+    expect((await tx((trx) => store.getContainer(trx, cogmoId)))?.status).toBe("reaped");
+  });
+});
+
 describe("runReap — networks + volumes", () => {
   it("reaps expired networks", async () => {
     const net = await tx((trx) =>
@@ -538,12 +629,10 @@ describe("runReap — concurrent invocation", () => {
   // What this suite intentionally does NOT pin: that each Docker
   // `kill` call happens exactly once, or that the totals sum to
   // exactly N. With no advisory lock around the TTL pass, both calls
-  // can read the same `running` rows before either writes `reaped`,
-  // so each row gets killed twice and counted twice. That's the
-  // observed behaviour and is acceptable because (a) `killAndRemove`
-  // tolerates a 304/404 (already-killed/already-gone) and (b) the
-  // singleton scheduler keeps it out of production. If we ever add a
-  // row-level lock, these tests will tighten.
+  // can read the same `running` rows before either writes `reaped`, so
+  // each row can be killed twice — `killAndRemoveContainer` tolerates
+  // the 304/404 of an already-gone container — but the conditional
+  // transition lets only one of them count it.
 
   it("two interleaved runReap calls reach a consistent terminal DB state", async () => {
     const dockerSide: DockerSideContainer[] = [
@@ -559,10 +648,9 @@ describe("runReap — concurrent invocation", () => {
       runReap({ docker, store, runInTx: tx, instanceId, now: NOW }),
     ]);
 
-    // Terminal DB state is identical to a single-run terminal state.
-    // `updateContainerStatus({status: "reaped"})` is idempotent at the
-    // row level — a second write of the same value is a no-op-equivalent
-    // — so whichever call commits last lands the same row contents.
+    // Terminal DB state is identical to a single-run terminal state: the
+    // second writer's transition finds the row already `reaped` and
+    // leaves it, so whichever call commits last lands the same row.
     expect((await tx((trx) => store.getContainer(trx, idA)))?.status).toBe("reaped");
     expect((await tx((trx) => store.getContainer(trx, idB)))?.status).toBe("reaped");
 
@@ -573,11 +661,9 @@ describe("runReap — concurrent invocation", () => {
     expect(new Set(killCalls)).toEqual(new Set(["c-a", "c-b"]));
     expect(new Set(removeCalls)).toEqual(new Set(["c-a", "c-b"]));
 
-    // Sum of ttlReaped covers every container at least once. Without an
-    // advisory lock, both calls can read the same `running` rows and
-    // each claims an increment, so the sum can be up to 2 * N.
-    expect(r1.ttlReaped + r2.ttlReaped).toBeGreaterThanOrEqual(2);
-    expect(r1.ttlReaped + r2.ttlReaped).toBeLessThanOrEqual(4);
+    // Each row is counted exactly once across both calls: the second
+    // writer's transition is `stale`, which does not count.
+    expect(r1.ttlReaped + r2.ttlReaped).toBe(2);
   });
 
   it("a second runReap after the first finished sees nothing to do", async () => {

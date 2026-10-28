@@ -1,8 +1,16 @@
 import type Docker from "dockerode";
 import type { Inngest } from "inngest";
+import { match } from "ts-pattern";
 import type { Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
-import type { SandboxStore } from "./store/index.js";
+import { statusCodeOf } from "./docker-facade.js";
+import { markContainerExited } from "./mark-container-exited.js";
+import { reapContainer, reapDiscoveredContainer } from "./reap-container.js";
+import {
+  type ContainerTransitionResult,
+  isLiveContainer,
+  type SandboxStore,
+} from "./store/index.js";
 import { LABEL_INSTANCE, LABEL_MANAGED } from "./supervisor.js";
 
 const log = logger.child({ component: "sandbox.reaper" });
@@ -31,9 +39,11 @@ const log = logger.child({ component: "sandbox.reaper" });
  *    daemon never reported one) so admission accounting frees the
  *    slot.
  *
- * Idempotent: every state transition lands on the terminal `reaped`
- * or `exited` row. A second tick re-running for the same row is a
- * no-op (the filter excludes rows already in those states).
+ * Every status write is a conditional transition from the status the
+ * pass read (design/sandbox.md → Container state machine), so a row a
+ * cascade or an overlapping tick finished first is left as it is and
+ * not counted. A second tick for the same row is a no-op: the filters
+ * exclude rows already terminal.
  *
  * Scoped to the **current instance** for the TTL + stale passes — two
  * Cogmo instances on the same host shouldn't race each other for
@@ -76,26 +86,23 @@ export async function runReap(deps: ReaperDeps): Promise<ReapResult> {
     deps.store.listContainersForInstance(tx, deps.instanceId),
   );
   const expired = ourContainers
-    .filter(
-      (c) =>
-        c.ttlExpiresAt.getTime() < now.getTime() &&
-        (c.status === "running" || c.status === "starting"),
-    )
+    .filter((c) => c.ttlExpiresAt.getTime() < now.getTime())
+    .filter(isLiveContainer)
     .sort((a, b) => b.depth - a.depth);
   for (const row of expired) {
-    try {
-      await killAndRemove(deps.docker, row.dockerId);
-      await deps.runInTx((tx) =>
-        deps.store.updateContainerStatus(tx, {
-          id: row.id,
-          status: "reaped",
-          exitedAt: now,
-        }),
+    const outcome = await reapContainer(deps, {
+      id: row.id,
+      dockerId: row.dockerId,
+      reason: "ttl_expired",
+      at: now,
+    });
+    result.ttlReaped += outcome.match(counted, (e) => {
+      log.warn(
+        { err: e.error, op: e.op, dockerId: row.dockerId },
+        "reaper ttl pass: kill+remove failed",
       );
-      result.ttlReaped += 1;
-    } catch (err) {
-      log.warn({ err, dockerId: row.dockerId }, "reaper ttl pass: kill+remove failed");
-    }
+      return 0;
+    });
   }
 
   // 2. Orphan pass — discover from Docker side. The dockerListOk flag
@@ -125,21 +132,24 @@ export async function runReap(deps: ReaperDeps): Promise<ReapResult> {
     // OR no DB row exists at all (rare orphaned create).
     const isOrphan = !stamped || !liveInstanceIds.has(stamped) || !dbRow;
     if (!isOrphan) continue;
-    try {
-      await killAndRemove(deps.docker, c.Id);
-      if (dbRow && dbRow.status !== "reaped") {
-        await deps.runInTx((tx) =>
-          deps.store.updateContainerStatus(tx, {
-            id: dbRow.id,
-            status: "reaped",
-            exitedAt: now,
-          }),
+    // Counted per daemon object: the listing proved it existed, whatever
+    // its row says.
+    const outcome = await reapDiscoveredContainer(deps, {
+      dockerId: c.Id,
+      row: dbRow,
+      reason: "dead_instance",
+      at: now,
+    });
+    result.orphansReaped += outcome.match(
+      () => 1,
+      (e) => {
+        log.warn(
+          { err: e.error, op: e.op, dockerId: c.Id },
+          "reaper orphan pass: kill+remove failed",
         );
-      }
-      result.orphansReaped += 1;
-    } catch (err) {
-      log.warn({ err, dockerId: c.Id }, "reaper orphan pass: kill+remove failed");
-    }
+        return 0;
+      },
+    );
   }
 
   // 3. Stale DB pass — rows we think are live but Docker doesn't know about.
@@ -148,20 +158,18 @@ export async function runReap(deps: ReaperDeps): Promise<ReapResult> {
   if (dockerListOk) {
     const dockerIdSet = new Set(dockerContainers.map((c) => c.Id));
     for (const row of ourContainers) {
-      if (row.status !== "running" && row.status !== "starting") continue;
-      // Skip rows the TTL pass just marked reaped — re-reading is cheaper
-      // than threading the freshly-reaped set through, and the next tick
-      // sees the consistent state regardless.
+      if (!isLiveContainer(row)) continue;
+      // Rows the TTL pass handled this tick are its outcome, not this
+      // pass's: reaped, or left for the next tick after a failed kill.
       if (expired.some((e) => e.id === row.id)) continue;
       if (dockerIdSet.has(row.dockerId)) continue;
-      await deps.runInTx((tx) =>
-        deps.store.updateContainerStatus(tx, {
-          id: row.id,
-          status: "exited",
-          exitedAt: now,
-        }),
-      );
-      result.staleMarked += 1;
+      const outcome = await markContainerExited(deps, {
+        id: row.id,
+        dockerId: row.dockerId,
+        from: row.status,
+        at: now,
+      });
+      result.staleMarked += counted(outcome);
     }
   }
 
@@ -176,8 +184,8 @@ export async function runReap(deps: ReaperDeps): Promise<ReapResult> {
       await deps.docker
         .getNetwork(net.dockerId)
         .remove()
-        .catch((err: { statusCode?: number }) => {
-          if (err.statusCode !== 404) throw err;
+        .catch((err: unknown) => {
+          if (statusCodeOf(err) !== 404) throw err;
         });
       await deps.runInTx((tx) =>
         deps.store.updateNetworkStatus(tx, { id: net.id, status: "reaped" }),
@@ -198,8 +206,8 @@ export async function runReap(deps: ReaperDeps): Promise<ReapResult> {
       await deps.docker
         .getVolume(vol.dockerId)
         .remove()
-        .catch((err: { statusCode?: number }) => {
-          if (err.statusCode !== 404) throw err;
+        .catch((err: unknown) => {
+          if (statusCodeOf(err) !== 404) throw err;
         });
       await deps.runInTx((tx) =>
         deps.store.updateVolumeStatus(tx, { id: vol.id, status: "reaped" }),
@@ -213,21 +221,12 @@ export async function runReap(deps: ReaperDeps): Promise<ReapResult> {
   return result;
 }
 
-async function killAndRemove(docker: Docker, dockerId: string): Promise<void> {
-  // Same idempotency contract as `LocalDockerSupervisor.#killAndRemove`.
-  const c = docker.getContainer(dockerId);
-  try {
-    await c.kill({ signal: "SIGTERM" });
-  } catch (err) {
-    const e = err as { statusCode?: number };
-    if (e.statusCode !== 304 && e.statusCode !== 409 && e.statusCode !== 404) throw err;
-  }
-  try {
-    await c.remove({ force: true });
-  } catch (err) {
-    const e = err as { statusCode?: number };
-    if (e.statusCode !== 404 && e.statusCode !== 409) throw err;
-  }
+/** A DB-driven pass counts the rows it finished; a row another path finished is its count. */
+function counted(outcome: ContainerTransitionResult): 0 | 1 {
+  return match(outcome)
+    .with({ kind: "transitioned" }, () => 1 as const)
+    .with({ kind: "stale" }, () => 0 as const)
+    .exhaustive();
 }
 
 /**

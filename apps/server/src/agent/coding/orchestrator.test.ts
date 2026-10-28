@@ -1289,7 +1289,12 @@ async function seedExecutableTask(
     }),
   );
   await tx((trx) =>
-    sandboxStore.updateContainerStatus(trx, { id: containerRow.id, status: "running" }),
+    sandboxStore.transitionContainerStatus(trx, {
+      id: containerRow.id,
+      from: "starting",
+      to: "running",
+      at: new Date(),
+    }),
   );
   await tx((trx) => store.setTaskContainerId(trx, task.id, containerRow.id));
 

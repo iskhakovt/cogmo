@@ -27,7 +27,8 @@ export const volumeStatus = pgEnum("volume_status", ["created", "reaped"]);
 
 /**
  * One row per Cogmo process lifetime. `created_at` is the boot time;
- * `stopped_at` is set on graceful shutdown. Crash detection joins
+ * `stopped_at` is set on graceful shutdown, or by the next boot's reconcile
+ * once it has reaped the instance's containers. Crash detection joins
  * `containers.instance_id → cogmo_instances.id` — any container whose instance
  * row has a non-null `stopped_at` (or whose pid is no longer alive on the host)
  * is an orphan.

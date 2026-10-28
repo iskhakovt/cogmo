@@ -72,6 +72,28 @@ async function insertTaskContainer(opts: {
 
 describe("DrizzleSandboxStore", () => {
   describe("instances", () => {
+    it("closeInstance keeps a stopped_at another path already set", async () => {
+      const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+      await tx((trx) => store.closeInstance(trx, inst.id));
+      const first = (await tx((trx) => store.getInstance(trx, inst.id)))?.stoppedAt;
+      expect(first).not.toBeNull();
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      await tx((trx) => store.closeInstance(trx, inst.id));
+      const second = (await tx((trx) => store.getInstance(trx, inst.id)))?.stoppedAt;
+      expect(second?.toISOString()).toBe(first?.toISOString());
+    });
+
+    it("closeInstances closes only the listed open instances", async () => {
+      const a = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+      const b = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 2 }));
+      const c = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 3 }));
+      await tx((trx) => store.closeInstances(trx, [a.id, b.id]));
+      expect((await tx((trx) => store.getInstance(trx, a.id)))?.stoppedAt).not.toBeNull();
+      expect((await tx((trx) => store.getInstance(trx, b.id)))?.stoppedAt).not.toBeNull();
+      expect((await tx((trx) => store.getInstance(trx, c.id)))?.stoppedAt).toBeNull();
+      expect(await tx((trx) => store.listLiveInstances(trx))).toHaveLength(1);
+    });
+
     it("inserts an instance with stoppedAt null", async () => {
       const inst = await tx((trx) => store.insertInstance(trx, { host: "host-1", pid: 1234 }));
       expect(inst.host).toBe("host-1");
@@ -192,23 +214,110 @@ describe("DrizzleSandboxStore", () => {
       await expect(insertTaskContainer({ instanceId, dockerId: "dup" })).rejects.toThrow();
     });
 
-    it("updateContainerStatus updates lifecycle fields", async () => {
-      const instanceId = await seedInstance();
-      const id = await insertTaskContainer({ instanceId });
-      const startedAt = new Date("2026-04-25T10:00:00Z");
-      await tx((trx) => store.updateContainerStatus(trx, { id, status: "running", startedAt }));
-      let row = await tx((trx) => store.getContainer(trx, id));
-      expect(row?.status).toBe("running");
-      expect(row?.startedAt?.toISOString()).toBe(startedAt.toISOString());
+    describe("transitionContainerStatus", () => {
+      const T0 = new Date("2026-04-25T10:00:00Z");
+      const T1 = new Date("2026-04-25T10:05:00Z");
+      const T2 = new Date("2026-04-25T10:10:00Z");
 
-      const exitedAt = new Date("2026-04-25T10:05:00Z");
-      await tx((trx) =>
-        store.updateContainerStatus(trx, { id, status: "exited", exitCode: 0, exitedAt }),
-      );
-      row = await tx((trx) => store.getContainer(trx, id));
-      expect(row?.status).toBe("exited");
-      expect(row?.exitCode).toBe(0);
-      expect(row?.exitedAt?.toISOString()).toBe(exitedAt.toISOString());
+      it("stamps started_at on starting → running and exited_at on running → exited", async () => {
+        const instanceId = await seedInstance();
+        const id = await insertTaskContainer({ instanceId });
+
+        const started = await tx((trx) =>
+          store.transitionContainerStatus(trx, { id, from: "starting", to: "running", at: T0 }),
+        );
+        expect(started).toEqual({ kind: "transitioned" });
+        let row = await tx((trx) => store.getContainer(trx, id));
+        expect(row?.status).toBe("running");
+        expect(row?.startedAt?.toISOString()).toBe(T0.toISOString());
+        expect(row?.exitedAt).toBeNull();
+
+        const exited = await tx((trx) =>
+          store.transitionContainerStatus(trx, { id, from: "running", to: "exited", at: T1 }),
+        );
+        expect(exited).toEqual({ kind: "transitioned" });
+        row = await tx((trx) => store.getContainer(trx, id));
+        expect(row?.status).toBe("exited");
+        expect(row?.exitedAt?.toISOString()).toBe(T1.toISOString());
+      });
+
+      it("from the wrong state returns stale with the row's status and changes nothing", async () => {
+        const instanceId = await seedInstance();
+        const id = await insertTaskContainer({ instanceId });
+        await tx((trx) =>
+          store.transitionContainerStatus(trx, { id, from: "starting", to: "running", at: T0 }),
+        );
+        await tx((trx) => store.transitionContainerStatus(trx, { id, to: "reaped", at: T1 }));
+
+        const late = await tx((trx) =>
+          store.transitionContainerStatus(trx, { id, from: "running", to: "exited", at: T2 }),
+        );
+        expect(late).toEqual({ kind: "stale", status: "reaped" });
+        const row = await tx((trx) => store.getContainer(trx, id));
+        expect(row?.status).toBe("reaped");
+        expect(row?.exitedAt?.toISOString()).toBe(T1.toISOString());
+      });
+
+      it("exited → reaped keeps the exited_at the exit recorded", async () => {
+        const instanceId = await seedInstance();
+        const id = await insertTaskContainer({ instanceId });
+        await tx((trx) =>
+          store.transitionContainerStatus(trx, { id, from: "starting", to: "running", at: T0 }),
+        );
+        await tx((trx) =>
+          store.transitionContainerStatus(trx, { id, from: "running", to: "exited", at: T1 }),
+        );
+
+        const reaped = await tx((trx) =>
+          store.transitionContainerStatus(trx, { id, to: "reaped", at: T2 }),
+        );
+        expect(reaped).toEqual({ kind: "transitioned" });
+        const row = await tx((trx) => store.getContainer(trx, id));
+        expect(row?.status).toBe("reaped");
+        expect(row?.exitedAt?.toISOString()).toBe(T1.toISOString());
+      });
+
+      it("→ reaped lands from any live state and is stale only on a reaped row", async () => {
+        const instanceId = await seedInstance();
+        const fromStarting = await insertTaskContainer({ instanceId });
+        const fromRunning = await insertTaskContainer({ instanceId });
+        await tx((trx) =>
+          store.transitionContainerStatus(trx, {
+            id: fromRunning,
+            from: "starting",
+            to: "running",
+            at: T0,
+          }),
+        );
+
+        for (const id of [fromStarting, fromRunning]) {
+          const first = await tx((trx) =>
+            store.transitionContainerStatus(trx, { id, to: "reaped", at: T1 }),
+          );
+          expect(first).toEqual({ kind: "transitioned" });
+          const row = await tx((trx) => store.getContainer(trx, id));
+          expect(row?.status).toBe("reaped");
+          expect(row?.exitedAt?.toISOString()).toBe(T1.toISOString());
+
+          const again = await tx((trx) =>
+            store.transitionContainerStatus(trx, { id, to: "reaped", at: T2 }),
+          );
+          expect(again).toEqual({ kind: "stale", status: "reaped" });
+        }
+      });
+
+      it("throws on an id with no row — callers hold a row they read", async () => {
+        await expect(
+          tx((trx) =>
+            store.transitionContainerStatus(trx, {
+              id: "019d0000-0000-7000-8000-000000000099",
+              from: "starting",
+              to: "running",
+              at: T0,
+            }),
+          ),
+        ).rejects.toThrow(/no containers row/);
+      });
     });
 
     it("getContainerByDockerId returns the row", async () => {
