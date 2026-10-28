@@ -547,6 +547,13 @@
       "when": 1793194839282,
       "tag": "0077_skill_run_and_deploy_state_checks",
       "breakpoints": true
+    },
+    {
+      "idx": 78,
+      "version": "7",
+      "when": 1793213344632,
+      "tag": "0078_steering_rule_status",
+      "breakpoints": true
     }
   ]
 }

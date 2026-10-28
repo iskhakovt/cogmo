@@ -3,6 +3,7 @@ import type { Transactor } from "../../db/index.js";
 import { logger } from "../../logger.js";
 import { expectDefined } from "../../test/assertions.js";
 import { mockProvider } from "../../test/factories.js";
+import type { ExtractionRule } from "../store/index.js";
 import type { StoredMessage } from "../stored-content.js";
 import {
   type ExtractionDeps,
@@ -14,12 +15,12 @@ const FAKE_TX = { __mockTx: true } as never;
 const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
 
 /** A global style rule as `getCorrections` returns it. */
-function ruleRow(id: string, rule: string) {
+function ruleRow(id: string, rule: string): ExtractionRule {
   return {
     id,
     rule,
     category: "style",
-    active: true,
+    status: "live",
     observationCount: 1,
     priority: 100,
     channelType: null,
@@ -27,12 +28,12 @@ function ruleRow(id: string, rule: string) {
 }
 
 /** Two global rules whose ids look nothing like the labels the prompt gives them. */
-const LABELLED_RULES = [
+const LABELLED_RULES: ExtractionRule[] = [
   {
     id: "rule-a",
     rule: "Be concise",
     category: "style",
-    active: true,
+    status: "live",
     observationCount: 2,
     priority: 100,
     channelType: null,
@@ -41,7 +42,7 @@ const LABELLED_RULES = [
     id: "rule-b",
     rule: "Keep replies short",
     category: "style",
-    active: false,
+    status: "learning",
     observationCount: 1,
     priority: 100,
     channelType: null,
@@ -224,9 +225,9 @@ function mockExtractionDeps(
       getCorrections: vi.fn().mockResolvedValue([]),
       getInstructionRules: vi.fn().mockResolvedValue([]),
       hasInstructionRule: vi.fn().mockResolvedValue(false),
-      upsertCorrection: vi.fn().mockResolvedValue({ id: "rule-1", promoted: false }),
+      upsertCorrection: vi.fn().mockResolvedValue({ kind: "reinforced", id: "rule-1" }),
       contradictLearningRule: vi.fn().mockResolvedValue("reset"),
-      countActiveLearnedRules: vi.fn().mockResolvedValue(5),
+      countLiveLearnedRules: vi.fn().mockResolvedValue(5),
       ...storeOverrides,
     },
     activeChannelTypes,
@@ -246,8 +247,8 @@ function instructionRow(id: string, rule: string, observationCount = 1) {
 }
 
 /** A learned rule still learning, as `getCorrections` returns it. */
-function learningRow(id: string, rule: string, channelType: string | null = null) {
-  return { ...ruleRow(id, rule), active: false, channelType };
+function learningRow(id: string, rule: string, channelType: string | null = null): ExtractionRule {
+  return { ...ruleRow(id, rule), status: "learning", channelType };
 }
 
 function contradiction(label: string) {
@@ -799,7 +800,7 @@ describe("extractCorrections", () => {
             id: "existing-rule-1",
             rule: "Use fetch_url for weather",
             category: "domain",
-            active: true,
+            status: "live",
             observationCount: 1,
             priority: 100,
             channelType: null,
@@ -866,13 +867,13 @@ describe("extractCorrections", () => {
             id: "rule-1",
             rule: "Be concise",
             category: "style",
-            active: true,
+            status: "live",
             observationCount: 1,
             priority: 100,
             channelType: null,
           },
         ]),
-        upsertCorrection: vi.fn().mockResolvedValue({ id: "rule-1", promoted: true }),
+        upsertCorrection: vi.fn().mockResolvedValue({ kind: "promoted", id: "rule-1" }),
       },
     );
 
@@ -885,18 +886,18 @@ describe("extractCorrections", () => {
   it("flags consolidationNeeded once the active learned rules pass 20", async () => {
     const deps = mockExtractionDeps(
       { corrections: [] },
-      { countActiveLearnedRules: vi.fn().mockResolvedValue(21) },
+      { countLiveLearnedRules: vi.fn().mockResolvedValue(21) },
     );
 
     const result = await extractCorrections(sampleHistory, SCOPE, deps);
     expect(result.consolidationNeeded).toBe(true);
-    expect(deps.store.countActiveLearnedRules).toHaveBeenCalledWith(FAKE_TX, "profile-1");
+    expect(deps.store.countLiveLearnedRules).toHaveBeenCalledWith(FAKE_TX, "profile-1");
   });
 
   it("does not flag consolidation at 20", async () => {
     const deps = mockExtractionDeps(
       { corrections: [] },
-      { countActiveLearnedRules: vi.fn().mockResolvedValue(20) },
+      { countLiveLearnedRules: vi.fn().mockResolvedValue(20) },
     );
 
     const result = await extractCorrections(sampleHistory, SCOPE, deps);
@@ -918,7 +919,7 @@ describe("extractCorrections", () => {
       },
       {
         getCorrections: vi.fn().mockResolvedValue([ruleRow("rule-1", "Be concise")]),
-        upsertCorrection: vi.fn().mockResolvedValue(null),
+        upsertCorrection: vi.fn().mockResolvedValue({ kind: "stale" }),
       },
     );
     const warn = vi.spyOn(logger, "warn");
@@ -972,7 +973,7 @@ describe("extractCorrections", () => {
             id: "rule-2",
             rule: "Reinforced rule",
             category: "domain",
-            active: true,
+            status: "live",
             observationCount: 1,
             priority: 100,
             channelType: null,
@@ -1068,7 +1069,7 @@ describe("extractCorrections", () => {
             id: "rule-global",
             rule: "Be concise",
             category: "style",
-            active: true,
+            status: "live",
             observationCount: 1,
             priority: 100,
             channelType: null,
@@ -1111,7 +1112,7 @@ describe("extractCorrections", () => {
             id: "rule-tg",
             rule: "Avoid markdown headings",
             category: "style",
-            active: true,
+            status: "live",
             observationCount: 1,
             priority: 100,
             channelType: "telegram",
@@ -1154,7 +1155,7 @@ describe("extractCorrections", () => {
             id: "rule-slack",
             rule: "Avoid markdown headings",
             category: "style",
-            active: true,
+            status: "live",
             observationCount: 1,
             priority: 100,
             channelType: "slack",
@@ -1208,7 +1209,7 @@ describe("extractCorrections", () => {
             id: "rule-1",
             rule: "Be concise",
             category: "style",
-            active: true,
+            status: "live",
             observationCount: 3,
             priority: 100,
             channelType: null,
@@ -1217,7 +1218,7 @@ describe("extractCorrections", () => {
             id: "rule-2",
             rule: "Avoid markdown headings on Telegram",
             category: "style",
-            active: true,
+            status: "live",
             observationCount: 2,
             priority: 100,
             channelType: "telegram",

@@ -4,28 +4,19 @@ import type { Transactor } from "../../db/index.js";
 import { logger } from "../../logger.js";
 import { expectDefined } from "../../test/assertions.js";
 import { mockProvider } from "../../test/factories.js";
+import type { ExtractionRule } from "../store/index.js";
 import { type ConsolidationDeps, consolidateRules } from "./consolidate-rules.js";
 
 const FAKE_TX = { __mockTx: true } as never;
 const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
 
-interface CorrectionRow {
-  id: string;
-  rule: string;
-  category: string;
-  active: boolean;
-  observationCount: number;
-  priority: number;
-  channelType: string | null;
-}
-
 /** Three global rules whose ids look nothing like the labels the prompt gives them. */
-const LABELLED_RULES: CorrectionRow[] = [
+const LABELLED_RULES: ExtractionRule[] = [
   {
     id: "rule-a",
     rule: "Be concise",
     category: "style",
-    active: true,
+    status: "live",
     observationCount: 3,
     priority: 100,
     channelType: null,
@@ -34,7 +25,7 @@ const LABELLED_RULES: CorrectionRow[] = [
     id: "rule-b",
     rule: "Use tables for data",
     category: "domain",
-    active: true,
+    status: "live",
     observationCount: 4,
     priority: 100,
     channelType: null,
@@ -43,7 +34,7 @@ const LABELLED_RULES: CorrectionRow[] = [
     id: "rule-c",
     rule: "Keep replies short",
     category: "style",
-    active: true,
+    status: "live",
     observationCount: 2,
     priority: 100,
     channelType: null,
@@ -72,12 +63,12 @@ function mockConsolidationDeps(
 
   const provider = mockProvider({ chat: chatMock });
 
-  const defaultRules: CorrectionRow[] = [
+  const defaultRules: ExtractionRule[] = [
     {
       id: "r1",
       rule: "Be concise",
       category: "style",
-      active: true,
+      status: "live",
       observationCount: 3,
       priority: 100,
       channelType: null,
@@ -86,7 +77,7 @@ function mockConsolidationDeps(
       id: "r2",
       rule: "Keep it short",
       category: "style",
-      active: true,
+      status: "live",
       observationCount: 2,
       priority: 100,
       channelType: null,
@@ -95,7 +86,7 @@ function mockConsolidationDeps(
       id: "r3",
       rule: "Use tables for data",
       category: "domain",
-      active: true,
+      status: "live",
       observationCount: 4,
       priority: 100,
       channelType: null,
@@ -147,7 +138,7 @@ describe("consolidateRules", () => {
 
   describe("a group a retirement changed", () => {
     /** Two style rules and two domain rules, labelled R1–R4 in that order. */
-    const PAIRS: CorrectionRow[] = [
+    const PAIRS: ExtractionRule[] = [
       { ...expectDefined(LABELLED_RULES[0], "a"), id: "s1", rule: "A style" },
       { ...expectDefined(LABELLED_RULES[0], "a"), id: "s2", rule: "B style" },
       { ...expectDefined(LABELLED_RULES[1], "b"), id: "d1", rule: "C domain" },
@@ -212,12 +203,12 @@ describe("consolidateRules", () => {
           id: "r1",
           rule: "Only one",
           category: "style",
-          active: true,
+          status: "live",
           observationCount: 1,
           priority: 100,
           channelType: null,
         },
-      ] satisfies CorrectionRow[]),
+      ] satisfies ExtractionRule[]),
     });
 
     const result = await consolidateRules("profile-1", deps);
@@ -255,7 +246,7 @@ describe("consolidateRules", () => {
 
   it("labels rules by priority, then text, whatever order their ids sort in", async () => {
     // Ids and creation order differ between runs; labels must not.
-    const rules: CorrectionRow[] = [
+    const rules: ExtractionRule[] = [
       { ...expectDefined(LABELLED_RULES[0], "rule-a"), rule: "Zebra rule" },
       { ...expectDefined(LABELLED_RULES[2], "rule-c"), rule: "Alpha rule" },
       { ...expectDefined(LABELLED_RULES[1], "rule-b"), priority: 50 },
@@ -340,7 +331,7 @@ describe("consolidateRules", () => {
           id: "r1",
           rule: "Active",
           category: "style",
-          active: true,
+          status: "live",
           observationCount: 2,
           priority: 100,
           channelType: null,
@@ -349,12 +340,12 @@ describe("consolidateRules", () => {
           id: "r2",
           rule: "Learning",
           category: "style",
-          active: false,
+          status: "learning",
           observationCount: 1,
           priority: 100,
           channelType: null,
         },
-      ] satisfies CorrectionRow[]),
+      ] satisfies ExtractionRule[]),
     });
 
     const result = await consolidateRules("profile-1", deps);
@@ -383,7 +374,7 @@ describe("consolidateRules", () => {
             id: "r1",
             rule: "Don't use markdown headings on Telegram",
             category: "style",
-            active: true,
+            status: "live",
             observationCount: 3,
             priority: 100,
             channelType: "telegram",
@@ -392,12 +383,12 @@ describe("consolidateRules", () => {
             id: "r2",
             rule: "Skip section headings in Telegram messages",
             category: "style",
-            active: true,
+            status: "live",
             observationCount: 2,
             priority: 100,
             channelType: "telegram",
           },
-        ] satisfies CorrectionRow[]),
+        ] satisfies ExtractionRule[]),
       },
     );
 
@@ -463,7 +454,7 @@ describe("consolidateRules", () => {
             id: "g1",
             rule: "Be concise",
             category: "style",
-            active: true,
+            status: "live",
             observationCount: 3,
             priority: 100,
             channelType: null,
@@ -472,7 +463,7 @@ describe("consolidateRules", () => {
             id: "g2",
             rule: "Keep it short",
             category: "style",
-            active: true,
+            status: "live",
             observationCount: 2,
             priority: 100,
             channelType: null,
@@ -481,7 +472,7 @@ describe("consolidateRules", () => {
             id: "t1",
             rule: "Don't use markdown headings on Telegram",
             category: "style",
-            active: true,
+            status: "live",
             observationCount: 4,
             priority: 100,
             channelType: "telegram",
@@ -490,12 +481,12 @@ describe("consolidateRules", () => {
             id: "t2",
             rule: "Skip section headings in Telegram messages",
             category: "style",
-            active: true,
+            status: "live",
             observationCount: 1,
             priority: 100,
             channelType: "telegram",
           },
-        ] satisfies CorrectionRow[]),
+        ] satisfies ExtractionRule[]),
         replaceRules: vi.fn().mockResolvedValue(ok({ id: "new-rule-1" })),
       },
     };
@@ -563,7 +554,7 @@ describe("consolidateRules", () => {
             id: "g1",
             rule: "Be concise",
             category: "style",
-            active: true,
+            status: "live",
             observationCount: 3,
             priority: 100,
             channelType: null,
@@ -572,7 +563,7 @@ describe("consolidateRules", () => {
             id: "g2",
             rule: "Keep it short",
             category: "style",
-            active: true,
+            status: "live",
             observationCount: 2,
             priority: 100,
             channelType: null,
@@ -581,12 +572,12 @@ describe("consolidateRules", () => {
             id: "t1",
             rule: "Don't use markdown headings on Telegram",
             category: "style",
-            active: true,
+            status: "live",
             observationCount: 4,
             priority: 100,
             channelType: "telegram",
           },
-        ] satisfies CorrectionRow[]),
+        ] satisfies ExtractionRule[]),
       },
     );
 
@@ -623,7 +614,7 @@ describe("consolidateRules", () => {
             id: "r1",
             rule: "Be concise",
             category: "style",
-            active: true,
+            status: "live",
             observationCount: 3,
             priority: 100,
             channelType: null,
@@ -632,12 +623,12 @@ describe("consolidateRules", () => {
             id: "r2",
             rule: "Keep it short",
             category: "style",
-            active: true,
+            status: "live",
             observationCount: 2,
             priority: 100,
             channelType: null,
           },
-        ] satisfies CorrectionRow[]),
+        ] satisfies ExtractionRule[]),
         replaceRules: vi.fn().mockResolvedValue(ok({ id: "new-rule-1" })),
       },
     };

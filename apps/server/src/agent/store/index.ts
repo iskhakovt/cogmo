@@ -174,7 +174,7 @@ export class DrizzleAgentStore implements AgentStore {
     this.#steeringRules,
   );
   readonly getMemoryRules = this.#steeringRules.getMemoryRules.bind(this.#steeringRules);
-  readonly countActiveLearnedRules = this.#steeringRules.countActiveLearnedRules.bind(
+  readonly countLiveLearnedRules = this.#steeringRules.countLiveLearnedRules.bind(
     this.#steeringRules,
   );
   readonly replaceRules = this.#steeringRules.replaceRules.bind(this.#steeringRules);

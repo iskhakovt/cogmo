@@ -50,7 +50,7 @@ const RULES = [
     id: "rule-a",
     rule: "Be concise",
     category: "style",
-    active: true,
+    status: "live",
     observationCount: 2,
     priority: 100,
     channelType: null,
@@ -59,7 +59,7 @@ const RULES = [
     id: "rule-b",
     rule: "Keep replies short",
     category: "style",
-    active: true,
+    status: "live",
     observationCount: 3,
     priority: 100,
     channelType: null,
@@ -252,7 +252,7 @@ describe("runObserver phase isolation", () => {
       provider: routedProvider({ consolidation: { groups: "not-an-array" } }),
       store: {
         getCorrections: vi.fn().mockResolvedValue(RULES),
-        countActiveLearnedRules: vi.fn().mockResolvedValue(21),
+        countLiveLearnedRules: vi.fn().mockResolvedValue(21),
       },
     });
 
@@ -371,7 +371,7 @@ describe("runObserver phase outcomes", () => {
       provider: routedProvider({ consolidation: { groups: "not-an-array" } }),
       store: {
         getCorrections: vi.fn().mockResolvedValue(RULES),
-        countActiveLearnedRules: vi.fn().mockResolvedValue(21),
+        countLiveLearnedRules: vi.fn().mockResolvedValue(21),
         deletePendingMemories: vi.fn().mockRejectedValue(new Error("connection reset")),
       },
       memory: { retainBatch },

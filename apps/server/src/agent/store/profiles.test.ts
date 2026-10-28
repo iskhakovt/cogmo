@@ -648,7 +648,7 @@ describe("DrizzleProfileStore", () => {
       await db.insert(steeringRules).values({
         rule: "Be concise",
         category: "style",
-        active: true,
+        status: "live",
         source: "manual",
         priority: 2,
         observationCount: 0,

@@ -367,8 +367,8 @@ describe("learning loop", () => {
     const firstObservation = await observe(first);
     expect(firstObservation.corrections.extracted).toBeGreaterThanOrEqual(1);
     const learning = await bulletPointRule();
-    expect(learning).toMatchObject({ active: false, observationCount: 1, profileId: null });
-    // Scoped to this file's profile while still inactive, so the rule it
+    expect(learning).toMatchObject({ status: "learning", observationCount: 1, profileId: null });
+    // Scoped to this file's profile while still learning, so the rule it
     // graduates to renders only in this file's conversations.
     await db
       .update(steeringRules)
@@ -388,7 +388,7 @@ describe("learning loop", () => {
     const rule = await bulletPointRule();
     expect(rule).toMatchObject({
       id: learning.id,
-      active: true,
+      status: "live",
       observationCount: 2,
       profileId: profile.id,
     });
