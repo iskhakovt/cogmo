@@ -71,6 +71,11 @@ describe("startRun", () => {
       { status: "success", output: { n: 1 } },
       { kind: "replay", result: { runId: "run-1", status: "success", output: { n: 1 } } },
     ],
+    [
+      "finished",
+      { status: "error", error: "boom" },
+      { kind: "replay", result: { runId: "run-1", status: "error", error: "boom" } },
+    ],
   ])("takes up a recovered row at %s", async (recoveryPoint, fields, expected) => {
     const store = keyedStore("recovered", runRow({ recoveryPoint, ...fields }));
 
@@ -80,5 +85,16 @@ describe("startRun", () => {
     );
 
     expect(start).toEqual(expected);
+  });
+
+  it("rejects a recovered finished error row with no reason as an invariant violation", async () => {
+    const store = keyedStore(
+      "recovered",
+      runRow({ recoveryPoint: "finished", status: "error", error: null }),
+    );
+
+    await expect(
+      startRun({ store, runInTx: fakeRunInTx }, { ...ARGS, idempotencyKey: "key-1" }),
+    ).rejects.toThrow(/run-1 finished with status 'error' and no error/);
   });
 });

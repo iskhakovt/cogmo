@@ -5,15 +5,18 @@ import { profiles, users } from "../../agent/store/schema.js";
 import type { Database, Transaction, Transactor } from "../../db/index.js";
 import { assertKind, expectDefined } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
+import { channels, userIdentities } from "../../transport/store/schema.js";
 import type { ClassifierLog, SkillInputs } from "../types.js";
 import {
   DrizzleSkillStore,
   type ExecuteRegisterParams,
+  type InsertDeployParams,
   type InsertSkillParams,
+  type SkillDeployStatus,
   type SkillRow,
   type SkillRunIdentity,
 } from "./index.js";
-import { skillDeploys, skills } from "./schema.js";
+import { skillDeploys, skillRuns, skills } from "./schema.js";
 
 let db: Database;
 let tx: Transactor;
@@ -35,6 +38,25 @@ async function seedIdentity(name: string): Promise<SkillRunIdentity> {
     .values({ userId: null, name, basePrompt: "", model: "m", toolSet: [] })
     .returning({ id: profiles.id });
   return { userId: expectDefined(user, "user").id, profileId: expectDefined(profile, name).id };
+}
+
+/** The owner's identity on a fresh telegram channel, as `approved_by` references it. */
+async function seedUserIdentity(): Promise<string> {
+  const [channel] = await db
+    .insert(channels)
+    .values({ type: "telegram", credentials: {}, identityMode: "mapped" })
+    .returning({ id: channels.id });
+  const [identity] = await db
+    .insert(userIdentities)
+    .values({
+      userId: owner.userId,
+      channelId: expectDefined(channel, "channel").id,
+      platformHandle: "tg-approver",
+      isWildcard: false,
+      autoCreated: false,
+    })
+    .returning({ id: userIdentities.id });
+  return expectDefined(identity, "identity").id;
 }
 
 beforeEach(async () => {
@@ -178,6 +200,7 @@ describe("DrizzleSkillStore", () => {
           riskTier: "approve",
           status: "denied",
           classifierLog: STUB_LOG,
+          resolvedAt: new Date(),
         }),
       );
       expect(
@@ -193,6 +216,7 @@ describe("DrizzleSkillStore", () => {
           riskTier: "auto",
           status: "live",
           classifierLog: STUB_LOG,
+          resolvedAt: new Date(),
         }),
       );
       expect(
@@ -258,7 +282,7 @@ describe("DrizzleSkillStore", () => {
   });
 
   describe("skill_deploys", () => {
-    it("records a pending-approval deploy and resolves it", async () => {
+    it("records a pending-approval deploy and finds it", async () => {
       const skill = await seedSkill();
       const deploy = await tx((trx) =>
         store.insertDeploy(trx, {
@@ -268,24 +292,17 @@ describe("DrizzleSkillStore", () => {
           riskTier: "approve",
           status: "pending_approval",
           classifierLog: STUB_LOG,
+          resolvedAt: null,
         }),
       );
       expect(deploy.status).toBe("pending_approval");
+      expect(deploy.resolvedAt).toBeNull();
       expect(deploy.classifierLog.classifier_version).toBe("stub-0");
 
       const pending = await tx((trx) => store.getPendingDeploy(trx, skill.id));
       expect(pending?.id).toBe(deploy.id);
 
-      const resolvedAt = new Date();
-      await tx((trx) =>
-        store.resolveDeploy(trx, {
-          id: deploy.id,
-          status: "approved",
-          approvedBy: null,
-          resolvedAt,
-        }),
-      );
-
+      await tx((trx) => store.denyPendingDeploy(trx, { pendingId: deploy.id }));
       expect(await tx((trx) => store.getPendingDeploy(trx, skill.id))).toBeUndefined();
     });
 
@@ -299,43 +316,63 @@ describe("DrizzleSkillStore", () => {
           riskTier: "auto",
           status: "live",
           classifierLog: STUB_LOG,
+          resolvedAt: new Date(),
         }),
       );
       expect(await tx((trx) => store.getPendingDeploy(trx, skill.id))).toBeUndefined();
     });
 
-    it("resolveDeploy updates approvedBy + resolvedAt", async () => {
+    function deployParams(
+      skillId: string,
+      status: SkillDeployStatus,
+      resolvedAt: Date | null,
+    ): InsertDeployParams {
+      return {
+        skillId,
+        gitSha: SHA,
+        priorGitSha: null,
+        riskTier: "approve",
+        status,
+        classifierLog: STUB_LOG,
+        resolvedAt,
+      };
+    }
+
+    it("the CHECK refuses a terminal row without resolved_at and a pending row with one", async () => {
       const skill = await seedSkill();
-      const deploy = await tx((trx) =>
-        store.insertDeploy(trx, {
-          skillId: skill.id,
-          gitSha: SHA,
-          priorGitSha: null,
-          riskTier: "approve",
-          status: "pending_approval",
-          classifierLog: STUB_LOG,
-        }),
+      await expect(
+        tx((trx) => store.insertDeploy(trx, deployParams(skill.id, "live", null))),
+      ).rejects.toMatchObject({
+        cause: { message: expect.stringMatching(/chk_skill_deploys_resolved_at_iff_terminal/) },
+      });
+      await expect(
+        tx((trx) =>
+          store.insertDeploy(trx, deployParams(skill.id, "pending_approval", new Date())),
+        ),
+      ).rejects.toMatchObject({
+        cause: { message: expect.stringMatching(/chk_skill_deploys_resolved_at_iff_terminal/) },
+      });
+    });
+
+    it("the CHECK refuses approved_by on a row that is not live", async () => {
+      const skill = await seedSkill();
+      const approver = await seedUserIdentity();
+      const denied = await tx((trx) =>
+        store.insertDeploy(trx, deployParams(skill.id, "denied", new Date())),
       );
-      const resolvedAt = new Date("2026-04-28T12:00:00Z");
-      await tx((trx) =>
-        store.resolveDeploy(trx, {
-          id: deploy.id,
-          status: "approved",
-          approvedBy: null,
-          resolvedAt,
-        }),
+      await expect(
+        db.update(skillDeploys).set({ approvedBy: approver }).where(eq(skillDeploys.id, denied.id)),
+      ).rejects.toMatchObject({
+        cause: { message: expect.stringMatching(/chk_skill_deploys_approved_by_only_live/) },
+      });
+      const live = await tx((trx) =>
+        store.insertDeploy(trx, deployParams(skill.id, "live", new Date())),
       );
-      expect(await tx((trx) => store.getPendingDeploy(trx, skill.id))).toBeUndefined();
-      // No public getter for skill_deploys today (P3.3 will add one); read
-      // back via the schema directly to assert the audit fields landed.
-      const rows = await db
-        .select()
-        .from(skillDeploys)
-        .where(eq(skillDeploys.id, deploy.id))
-        .limit(1);
-      expect(rows[0]?.status).toBe("approved");
-      expect(rows[0]?.resolvedAt).toBeInstanceOf(Date);
-      expect(rows[0]?.approvedBy).toBeNull();
+      await db
+        .update(skillDeploys)
+        .set({ approvedBy: approver })
+        .where(eq(skillDeploys.id, live.id));
+      expect((await tx((trx) => store.getDeployById(trx, live.id)))?.approvedBy).toBe(approver);
     });
 
     it("rejects malformed classifier_log via raw SQL on read", async () => {
@@ -348,6 +385,7 @@ describe("DrizzleSkillStore", () => {
           riskTier: "auto",
           status: "live",
           classifierLog: STUB_LOG,
+          resolvedAt: new Date(),
         }),
       );
       await db.execute(
@@ -364,6 +402,7 @@ describe("DrizzleSkillStore", () => {
           riskTier: "approve",
           status: "pending_approval",
           classifierLog: STUB_LOG,
+          resolvedAt: null,
         }),
       );
       await db.execute(
@@ -415,8 +454,7 @@ describe("DrizzleSkillStore", () => {
       await tx((trx) =>
         store.transitionToExecuted(trx, {
           id: run.id,
-          output: { echo: 8 },
-          error: null,
+          outcome: { kind: "output", output: { echo: 8 } },
           resourceUsage: { wallClockMs: 42, peakMemoryBytes: 1_048_576 },
           finishedAt: new Date(),
         }),
@@ -424,9 +462,7 @@ describe("DrizzleSkillStore", () => {
       await tx((trx) =>
         store.transitionToFinished(trx, {
           id: run.id,
-          status: "success",
-          output: { echo: 8 },
-          error: null,
+          verdict: { status: "success", output: { echo: 8 } },
         }),
       );
 
@@ -449,8 +485,7 @@ describe("DrizzleSkillStore", () => {
       await tx((trx) =>
         store.transitionToExecuted(trx, {
           id: run.id,
-          output: null,
-          error: "Boom",
+          outcome: { kind: "error", error: "Boom" },
           resourceUsage: { wallClockMs: 7, peakMemoryBytes: null },
           finishedAt: new Date(),
         }),
@@ -458,9 +493,7 @@ describe("DrizzleSkillStore", () => {
       await tx((trx) =>
         store.transitionToFinished(trx, {
           id: run.id,
-          status: "error",
-          output: null,
-          error: "Boom",
+          verdict: { status: "error", error: "Boom" },
         }),
       );
       const reloaded = await tx((trx) => store.getRun(trx, run.id));
@@ -551,8 +584,7 @@ describe("DrizzleSkillStore", () => {
       await tx((trx) =>
         store.transitionToExecuted(trx, {
           id: run.id,
-          output: null,
-          error: null,
+          outcome: { kind: "output", output: null },
           resourceUsage: { wallClockMs: 1, peakMemoryBytes: null },
           finishedAt: new Date(),
         }),
@@ -560,9 +592,7 @@ describe("DrizzleSkillStore", () => {
       await tx((trx) =>
         store.transitionToFinished(trx, {
           id: run.id,
-          status: "success",
-          output: null,
-          error: null,
+          verdict: { status: "success", output: null },
         }),
       );
       const after = await tx((trx) => store.getRun(trx, run.id));
@@ -588,8 +618,7 @@ describe("DrizzleSkillStore", () => {
       await tx((trx) =>
         store.transitionToExecuted(trx, {
           id: run.id,
-          output: { ok: true },
-          error: null,
+          outcome: { kind: "output", output: { ok: true } },
           resourceUsage: { wallClockMs: 123, peakMemoryBytes: 5_242_880 },
           finishedAt: new Date(),
         }),
@@ -606,8 +635,7 @@ describe("DrizzleSkillStore", () => {
       await tx((trx) =>
         store.transitionToExecuted(trx, {
           id: run.id,
-          output: null,
-          error: "wall_clock_exceeded",
+          outcome: { kind: "error", error: "wall_clock_exceeded" },
           resourceUsage: { wallClockMs: 30_000, peakMemoryBytes: null },
           finishedAt: new Date(),
         }),
@@ -627,8 +655,7 @@ describe("DrizzleSkillStore", () => {
         tx((trx) =>
           store.transitionToExecuted(trx, {
             id: run.id,
-            output: null,
-            error: null,
+            outcome: { kind: "output", output: null },
             resourceUsage: { wallClockMs: -1, peakMemoryBytes: null },
             finishedAt: new Date(),
           }),
@@ -857,8 +884,7 @@ describe("DrizzleSkillStore", () => {
       await tx((trx) =>
         store.transitionToExecuted(trx, {
           id: first.row.id,
-          output: { echo: 1 },
-          error: null,
+          outcome: { kind: "output", output: { echo: 1 } },
           resourceUsage: { wallClockMs: 3, peakMemoryBytes: null },
           finishedAt: new Date("2026-06-01T09:00:03Z"),
         }),
@@ -892,8 +918,7 @@ describe("DrizzleSkillStore", () => {
       await tx((trx) =>
         store.transitionToExecuted(trx, {
           id: row.id,
-          output: { echo: 42 },
-          error: null,
+          outcome: { kind: "output", output: { echo: 42 } },
           resourceUsage: { wallClockMs: 42, peakMemoryBytes: 1_048_576 },
           finishedAt,
         }),
@@ -923,8 +948,7 @@ describe("DrizzleSkillStore", () => {
       await tx((trx) =>
         store.transitionToExecuted(trx, {
           id: row.id,
-          output: { echo: 1 },
-          error: null,
+          outcome: { kind: "output", output: { echo: 1 } },
           resourceUsage: { wallClockMs: 1, peakMemoryBytes: null },
           finishedAt: new Date(),
         }),
@@ -932,9 +956,7 @@ describe("DrizzleSkillStore", () => {
       await tx((trx) =>
         store.transitionToFinished(trx, {
           id: row.id,
-          status: "success",
-          output: { echo: 1 },
-          error: null,
+          verdict: { status: "success", output: { echo: 1 } },
         }),
       );
       const reloaded = await tx((trx) => store.getRun(trx, row.id));
@@ -955,8 +977,7 @@ describe("DrizzleSkillStore", () => {
       await tx((trx) =>
         store.transitionToExecuted(trx, {
           id: row.id,
-          output: { echo: 1 },
-          error: null,
+          outcome: { kind: "output", output: { echo: 1 } },
           resourceUsage: { wallClockMs: 1, peakMemoryBytes: null },
           finishedAt: new Date(),
         }),
@@ -965,9 +986,7 @@ describe("DrizzleSkillStore", () => {
         tx((trx) =>
           store.transitionToFinished(trx, {
             id: row.id,
-            status: "success",
-            output: { echo: 1 },
-            error: null,
+            verdict: { status: "success", output: { echo: 1 } },
           }),
         );
 
@@ -992,12 +1011,82 @@ describe("DrizzleSkillStore", () => {
         tx((trx) =>
           store.transitionToFinished(trx, {
             id: row.id,
-            status: "success",
-            output: null,
-            error: null,
+            verdict: { status: "success", output: null },
           }),
         ),
       ).rejects.toThrow(/recovery_point != 'executed'/);
+    });
+
+    describe("per-state CHECKs", () => {
+      /** A one-shot run at `recovery_point='executed'` holding an output. */
+      async function executedRun(): Promise<string> {
+        const skill = await seedSkill();
+        const run = await tx((trx) =>
+          store.insertRun(trx, { skillId: skill.id, trigger: "manual", inputs: {} }),
+        );
+        await tx((trx) =>
+          store.transitionToExecuted(trx, {
+            id: run.id,
+            outcome: { kind: "output", output: { echo: 1 } },
+            resourceUsage: { wallClockMs: 1, peakMemoryBytes: null },
+            finishedAt: new Date(),
+          }),
+        );
+        return run.id;
+      }
+
+      function rejectedBy(constraint: string) {
+        return { cause: { message: expect.stringMatching(new RegExp(constraint)) } };
+      }
+
+      it("a started row cannot carry the executed payload", async () => {
+        const skill = await seedSkill();
+        const run = await tx((trx) =>
+          store.insertRun(trx, { skillId: skill.id, trigger: "manual", inputs: {} }),
+        );
+        await expect(
+          db.update(skillRuns).set({ finishedAt: new Date() }).where(eq(skillRuns.id, run.id)),
+        ).rejects.toMatchObject(rejectedBy("chk_skill_runs_executed_payload"));
+        await expect(
+          db.update(skillRuns).set({ error: "boom" }).where(eq(skillRuns.id, run.id)),
+        ).rejects.toMatchObject(rejectedBy("chk_skill_runs_executed_payload"));
+      });
+
+      it("a terminal status exists only in the finished phase, and finished is never running", async () => {
+        const id = await executedRun();
+        await expect(
+          db.update(skillRuns).set({ status: "success" }).where(eq(skillRuns.id, id)),
+        ).rejects.toMatchObject(rejectedBy("chk_skill_runs_status_iff_finished"));
+        await expect(
+          db.update(skillRuns).set({ recoveryPoint: "finished" }).where(eq(skillRuns.id, id)),
+        ).rejects.toMatchObject(rejectedBy("chk_skill_runs_status_iff_finished"));
+      });
+
+      it("an error verdict records its reason and keeps no output", async () => {
+        const id = await executedRun();
+        await expect(
+          db
+            .update(skillRuns)
+            .set({ status: "error", recoveryPoint: "finished" })
+            .where(eq(skillRuns.id, id)),
+        ).rejects.toMatchObject(rejectedBy("chk_skill_runs_outcome"));
+        await expect(
+          db
+            .update(skillRuns)
+            .set({ status: "error", recoveryPoint: "finished", error: "boom" })
+            .where(eq(skillRuns.id, id)),
+        ).rejects.toMatchObject(rejectedBy("chk_skill_runs_outcome"));
+      });
+
+      it("a success verdict carries no error", async () => {
+        const id = await executedRun();
+        await expect(
+          db
+            .update(skillRuns)
+            .set({ status: "success", recoveryPoint: "finished", error: "boom" })
+            .where(eq(skillRuns.id, id)),
+        ).rejects.toMatchObject(rejectedBy("chk_skill_runs_outcome"));
+      });
     });
 
     it("UNIQUE constraint allows multiple null-key rows for the same skill", async () => {
