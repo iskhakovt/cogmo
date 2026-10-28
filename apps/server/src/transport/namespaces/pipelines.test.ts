@@ -42,6 +42,7 @@ function loaded(overrides: Partial<PipelineRunRow> = {}): PipelineRunWithDefinit
       iteration: 0,
       stageOutputs: {},
       failureReason: null,
+      failureDetail: null,
       gateResolution: null,
       idempotencyKey: null,
       createdAt: new Date("2026-09-12T00:00:00Z"),

@@ -251,10 +251,8 @@ describe("createPipelineStageRunner", () => {
   });
 
   it("fails the run with the stage's reason and tells the conversation", async () => {
-    const { fn, runStore, notifyConversation } = harness({
-      kind: "failed",
-      reason: "the stage's result did not match its declared output: /title is required",
-    });
+    const failure = { reason: "artifact_invalid", detail: "/title is required" } as const;
+    const { fn, runStore, notifyConversation } = harness({ kind: "failed", failure });
     runStore.failRun.mockResolvedValue({ kind: "failed", conversationId: "conv-1" });
     const t = new InngestTestEngine({ function: fn, events: [stageDue("draft")] });
 
@@ -262,17 +260,13 @@ describe("createPipelineStageRunner", () => {
       steps: [{ id: "load-run", handler: () => snapshot() }],
     });
 
-    expect(result).toMatchObject({ status: "failed" });
-    expect(runStore.failRun).toHaveBeenCalledWith(
-      expect.anything(),
-      RUN_ID,
-      "the stage's result did not match its declared output: /title is required",
-    );
+    expect(result).toEqual({ status: "failed", failure });
+    expect(runStore.failRun).toHaveBeenCalledWith(expect.anything(), RUN_ID, failure);
     expect(runStore.advanceStage).not.toHaveBeenCalled();
     expect(ctx.step.sendEvent).not.toHaveBeenCalled();
     expect(notifyConversation).toHaveBeenCalledWith(
       "conv-1",
-      expect.stringContaining('failed at stage "draft"'),
+      '❌ Pipeline "plan-then-build" failed at stage "draft": the stage\'s result did not match its declared output (/title is required)',
     );
   });
 
@@ -317,7 +311,10 @@ describe("createPipelineStageRunner", () => {
       steps: [{ id: "load-run", handler: () => snapshot({ compiled: withWait }) }],
     });
 
-    expect(result).toEqual({ status: "failed", reason: "wait stages are not supported yet" });
+    expect(result).toEqual({
+      status: "failed",
+      failure: { reason: "unsupported_stage", detail: null },
+    });
   });
 
   it("parks a run's first stage on the starting chat turn before running it", async () => {
@@ -367,11 +364,10 @@ describe("createPipelineStageRunner", () => {
     });
 
     // The class only: messages can carry query text or payloads.
-    expect(runStore.failRun).toHaveBeenCalledWith(
-      expect.anything(),
-      RUN_ID,
-      'stage "draft" failed (TypeError)',
-    );
+    expect(runStore.failRun).toHaveBeenCalledWith(expect.anything(), RUN_ID, {
+      reason: "stage_error",
+      detail: "TypeError",
+    });
     expect(notifyConversation).toHaveBeenCalledWith(
       "conv-1",
       '❌ The pipeline run failed at stage "draft" and has stopped.',
@@ -509,7 +505,8 @@ describe("createPipelineStageRunner", () => {
     });
 
     it("still reports the failure when the failure notice can't be delivered", async () => {
-      const { fn } = harness({ kind: "failed", reason: "schema mismatch" });
+      const failure = { reason: "artifact_invalid", detail: "schema mismatch" } as const;
+      const { fn } = harness({ kind: "failed", failure });
       const step = directStep(
         {
           "load-run": snapshot(),
@@ -521,7 +518,7 @@ describe("createPipelineStageRunner", () => {
       const result = await invokeInngestFn(fn, { event: due("draft"), step, runId: "inngest-1" });
 
       expect(step.run).toHaveBeenCalledWith("notify-failure", expect.any(Function));
-      expect(result).toEqual({ status: "failed", reason: "schema mismatch" });
+      expect(result).toEqual({ status: "failed", failure });
     });
   });
 

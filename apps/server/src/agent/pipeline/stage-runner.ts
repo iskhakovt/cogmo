@@ -42,6 +42,7 @@ import type {
   AgenticStageOutcome,
   AgenticStageSteps,
 } from "./run-agentic-stage.js";
+import { describePipelineRunFailure, type PipelineRunFailure } from "./run-failure.js";
 import { StageOutputsSchema } from "./run-types.js";
 import type { PipelineRunStore } from "./store/index.js";
 import { PipelineDefinitionSchema, parseDurationMs } from "./types.js";
@@ -71,7 +72,7 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
       concurrency: conversationTurnConcurrency,
       // Retries exhausted (or non-retriable): the run cannot advance past this
       // stage, so it fails rather than sitting `running` with nothing scheduled.
-      // The reason carries the error class only — messages can hold query text
+      // The detail carries the error class only — messages can hold query text
       // or payloads, and the full error is in the log.
       onFailure: async ({ event, error, step }) => {
         const { runId, stageId } = event.data.event.data;
@@ -82,7 +83,7 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
         );
         const failed = await durable.run("fail-run", () =>
           deps.runInTx((tx) =>
-            deps.runStore.failRun(tx, runId, `stage "${stageId}" failed (${error.name})`),
+            deps.runStore.failRun(tx, runId, { reason: "stage_error", detail: error.name }),
           ),
         );
         if (failed.kind === "failed") {
@@ -144,9 +145,9 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
       const stage = definition.stages[index];
       const next = definition.stages[index + 1];
 
-      const failRun = async (reason: string) => {
+      const failRun = async (failure: PipelineRunFailure) => {
         const failed = await durable.run("fail-run", () =>
-          deps.runInTx((tx) => deps.runStore.failRun(tx, runId, reason)),
+          deps.runInTx((tx) => deps.runStore.failRun(tx, runId, failure)),
         );
         if (failed.kind === "failed") {
           await notifyAfterRetries(
@@ -154,15 +155,15 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
             "notify-failure",
             deps.deliveryRouter,
             conversationId,
-            `❌ Pipeline "${definition.name}" failed at stage "${stageId}": ${reason}`,
+            `❌ Pipeline "${definition.name}" failed at stage "${stageId}": ${describePipelineRunFailure(failure)}`,
             { runId, stageId },
           );
         }
-        return { status: "failed" as const, reason };
+        return { status: "failed" as const, failure };
       };
 
       if (stage === undefined) {
-        return failRun(`stage "${stageId}" is not in the pinned definition`);
+        return failRun({ reason: "unknown_stage", detail: null });
       }
 
       // A run started from chat: its first stage would otherwise stream into
@@ -179,7 +180,7 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
       }
 
       if (stage.kind === "wait") {
-        return failRun("wait stages are not supported yet");
+        return failRun({ reason: "unsupported_stage", detail: null });
       }
 
       if (stage.kind === "gate") {
@@ -235,7 +236,7 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
         { run: durable.run, stepRun },
         log,
       );
-      if (outcome.kind === "failed") return failRun(outcome.reason);
+      if (outcome.kind === "failed") return failRun(outcome.failure);
 
       const { artifact } = outcome;
       const moved = await durable.run("advance-run", () =>

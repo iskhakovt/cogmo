@@ -5,6 +5,7 @@ import { expectOk } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { DrizzleAgentStore } from "../store/index.js";
 import { inspectFailedResolution, resolveGate } from "./resolve-gate.js";
+import type { PipelineRunFailure } from "./run-failure.js";
 import { DrizzlePipelineRunStore, DrizzlePipelineStore } from "./store/index.js";
 import type { PipelineDefinition } from "./types.js";
 
@@ -130,8 +131,8 @@ describe("resolveGate", () => {
   });
 
   it.each([
-    ["cancelled", 'cancelled by the user at gate "approve"'],
-    ["timeout_abort", 'gate "approve" timed out'],
+    ["cancelled", "cancelled_by_user"],
+    ["timeout_abort", "gate_timeout"],
   ] as const)("%s cancels the run with its reason", async (decision, reason) => {
     const { runId, conversationId, gateKey } = await parkedRun("approve");
 
@@ -141,6 +142,7 @@ describe("resolveGate", () => {
     expect(await tx((trx) => runStore.getRun(trx, runId))).toMatchObject({
       status: "cancelled",
       failureReason: reason,
+      failureDetail: null,
     });
   });
 
@@ -249,7 +251,7 @@ describe("resolveGate", () => {
   it("a run that failed on a later stage still counts as past the gate", async () => {
     const { runId, gateKey } = await parkedRun("approve");
     await resolveGate(deps(), { runId, gateKey, decision: "approved", resolverRunId: "r-1" });
-    await tx((trx) => runStore.failRun(trx, runId, "build failed"));
+    await tx((trx) => runStore.failRun(trx, runId, { reason: "stage_error", detail: "Error" }));
 
     expect(
       await resolveGate(deps(), { runId, gateKey, decision: "approved", resolverRunId: "r-1" }),
@@ -327,7 +329,8 @@ describe("resolveGate", () => {
 });
 
 describe("inspectFailedResolution", () => {
-  const REASON = "gate timeout could not be applied (TypeError)";
+  const REASON: PipelineRunFailure = { reason: "gate_resolution_error", detail: "TypeError" };
+  const BUILD_FAILED: PipelineRunFailure = { reason: "stage_error", detail: "Error" };
 
   it("reports a run still parked on the gate, without claiming or failing it", async () => {
     const { runId, gateKey } = await parkedRun("approve");
@@ -359,7 +362,8 @@ describe("inspectFailedResolution", () => {
     ).toEqual({ kind: "failed", conversationId });
     expect(await tx((trx) => runStore.getRun(trx, runId))).toMatchObject({
       status: "failed",
-      failureReason: REASON,
+      failureReason: "gate_resolution_error",
+      failureDetail: "TypeError",
     });
   });
 
@@ -374,9 +378,41 @@ describe("inspectFailedResolution", () => {
     expect(await inspectFailedResolution(deps(), args)).toEqual({ kind: "failed", conversationId });
   });
 
+  it("recognises its own failure by its reason, not its detail", async () => {
+    // The step may fail with a different error class on the re-run than on
+    // the attempt that committed; the committed failure is still this check's.
+    const { runId, gateKey, conversationId } = await parkedRun("approve");
+    await tx((trx) =>
+      runStore.failRun(trx, runId, { reason: "gate_resolution_error", detail: "RangeError" }),
+    );
+
+    expect(
+      await inspectFailedResolution(deps(), {
+        runId,
+        gateKey,
+        resolverRunId: "r-1",
+        failParkedRunWith: REASON,
+      }),
+    ).toEqual({ kind: "failed", conversationId });
+  });
+
+  it("doesn't claim a failure another gate's check committed", async () => {
+    const { runId } = await parkedRun("sign-off");
+    await tx((trx) => runStore.failRun(trx, runId, REASON));
+
+    expect(
+      await inspectFailedResolution(deps(), {
+        runId,
+        gateKey: pipelineGateKey(runId, "approve", 0),
+        resolverRunId: "r-1",
+        failParkedRunWith: REASON,
+      }),
+    ).toMatchObject({ kind: "stale", status: "failed", currentStage: "sign-off" });
+  });
+
   it("doesn't claim a run failed for another reason", async () => {
     const { runId, gateKey } = await parkedRun("approve");
-    await tx((trx) => runStore.failRun(trx, runId, "build failed"));
+    await tx((trx) => runStore.failRun(trx, runId, BUILD_FAILED));
 
     expect(
       await inspectFailedResolution(deps(), {

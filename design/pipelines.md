@@ -147,6 +147,48 @@ Shape:
 - **Failure.** A degraded loop, a reply cut off at the output cap, or a result that still fails its JSON Schema fails the run with the reason. A degraded turn first retracts the output its dropped iteration streamed (`retract-degraded-output`), as `handle-message` does before its apology; a cut-off reply stays in the transcript and is delivered, but no artifact is extracted from it.
 - **Turn serialization.** The stage runner and `handle-message` share one env-scoped concurrency key on the conversation id (`conversationTurnConcurrency`; `pipeline/stage.due` carries the run's `conversationId`). A message sent into the run conversation mid-stage waits for the stage turn, and a stage due while a chat turn is in flight waits for it. The limit counts executing steps, ordered best-effort by run age: a first stage parked in its origin-turn wait frees the slot, and once woken lets a chat turn already in flight finish. A step retried after an error can run between two steps of a younger turn. Both functions must use that one object: Inngest shares the queue only through an identical key expression. A `pipeline/stage.due` without `conversationId` still runs, but isn't guaranteed to queue with chat turns.
 
+### Run lifecycle `[proposed]`
+
+The unit is the run, `pipeline_runs.id`. Every write is keyed on it, and every transition is a conditional UPDATE under the row's lock, guarded by the cursor `(status, current_stage, iteration)` and returning `transitioned` / `advanced`, `stale` with the cursor it found, or `not_found`. A terminal status is final: no transition leaves `completed`, `failed` or `cancelled`, whatever `from` a caller names.
+
+```
+start_pipeline ──► running ──advance──► running ─ … ─complete──► completed
+                     │ ▲
+                park │ │ claim: approved / timeout_proceed (then advance or complete, same tx)
+                     ▼ │
+                 waiting_gate ──claim: cancelled / timeout_abort──► cancelled
+                     │
+                     └─ timeout resolution fails for good ──► failed
+                 running ──stage fails for good / unrunnable stage──► failed
+```
+
+`queued` and `waiting_event` are declared for slice 3 and unused.
+
+| Transition | From → To | Guard | Writes |
+|-|-|-|-|
+| Start (`insertOrRecoverRun`) | — → `running` | keyed insert on `idempotency_key`; a conflict returns the existing row as `recovered` | first stage, `iteration = 0`, `stage_outputs = {}` |
+| Stage advance (`advanceStage`) | `running` → `running` | not terminal, `current_stage = fromStage` | `stage_outputs[fromStage]`, `current_stage = toStage` |
+| Complete (`completeRun`) | `running` → `completed` | as advance | `stage_outputs[fromStage]`; the cursor stays on the final stage |
+| Park at gate (`transitionStatus`) | `running` → `waiting_gate` | `status = running` | `status` |
+| Gate claimed (`claimGate`) | `waiting_gate` → `running` | `status = waiting_gate` | `gate_resolution = { gateKey, resolverRunId }`; the same transaction then advances, completes or cancels. A tap and a timeout are both this transition, differing in the decision |
+| Cancel (`cancelRunIfActive`) | any non-terminal → `cancelled` | not terminal | `failure_reason ∈ {cancelled_by_user, gate_timeout}`, `failure_detail = null`; the cursor stays. Called only from a gate claim today — a run mid-stage has no cancel surface (todo.md) |
+| Fail (`failRun`) | any non-terminal → `failed` | not terminal | `failure_reason` from the failed set, `failure_detail` its variable part; the cursor stays |
+| Loop iteration (slice 3) | `running` → `running` | `iteration < maxIterations` | `current_stage = backTo`, `iteration + 1`; the advance guard then keys on `(stage, iteration)` |
+
+`failure_reason` is the `pipeline_run_failure_reason` enum and `failure_detail` free text, both set by the terminal flip and null in every other status (`chk_pipeline_runs_failure_reason_by_status`, which also pins each reason to its status). A `failed` run carries `stage_error` (a stage's function failed after retries; detail the error class), `unknown_stage` (the due stage is not in the pinned definition), `unsupported_stage` (a `wait` stage), `turn_degraded` (detail the loop's degrade reason), `turn_truncated`, `artifact_invalid` (detail the schema errors) or `gate_resolution_error` (a timeout could not be applied; detail the error class). A `cancelled` run carries `cancelled_by_user` or `gate_timeout`. The gate resolver's failure handler recognises a failure it committed by reason and cursor, not by detail, since the error class can differ between attempts.
+
+| Crash point | Row left | Outcome |
+|-|-|-|
+| A stage's function fails after retries | `running` on the stage | `onFailure` → `failRun(stage_error)` and a notice; `already_terminal` stays silent |
+| A stage fails after retries on a delivery whose cursor the run has already left | wherever the run is | `onFailure` fails the run anyway: `failRun` is keyed on the run, not the delivery's cursor. Reachable only when `load-run` itself fails every attempt, so a database outage during a stale delivery can fail a healthy run. Residual |
+| Gate timeout racing a tap | one claim committed, under the row lock | the loser reads `stale`; a losing tap is told, a losing timeout stays silent; `gate.settled` cancels the waiter |
+| Cancel during a stage | — | no caller today; `advance-run` would read `stale` on the terminal row and skip, after the turn had run and streamed |
+| Crash between the stage output write and the advance | — | they are one UPDATE |
+| `advance-run` commits, Inngest never records it | `running` on the next stage, no `stage.due` sent | the re-run reads `stale` with the cursor at its target and sends the event; if that send fails for good too the run is stranded (todo.md → reconcile) |
+| Two `start_pipeline` attempts share a key | one row | the keyed insert returns it to the second; a conflict with a row committed after the loser's snapshot is a `40001` the transactor retries, rolling back the loser's conversation and session swaps, and the retry finds the run by key before creating anything |
+| A run in flight across the deploy that introduces the enum | a stage turn running, or a waiter asleep | the backfill rewrites the row under it; the next write uses the enum. A failure handler re-run after the deploy compares its reason to the backfilled label, which the backfill derived from the same message shape |
+| A `stage.due` replay after `failed` / `cancelled` | the terminal row, cursor unchanged | the terminal guard in the advance refuses to resurrect it, even though `fromStage` still matches |
+
 ### Loops `[proposed]`
 
 The back-edge is code-owned: the runner checks `iteration < maxIterations` and emits `pipeline/stage.due` for `backTo`. Loop scopes are flat — the validation pass rejects nested or crossing back-edges — so the single `iteration` counter on the run suffices; it resets to 0 when the run advances past the loop's back-edge stage (exits the scope). The `until` condition is evaluated by an LLM step (structured `{ done: boolean, reason: string }`), but the LLM cannot raise `maxIterations` — exhausting the cap surfaces to the user as a gate ("5 review rounds done, threads still open — continue?"). Temporal's "deterministic but not predetermined."
@@ -185,6 +227,12 @@ CREATE TYPE pipeline_run_status AS ENUM (
 );
 -- 'queued' (admission control) and 'waiting_event' (wait stages) are declared for slice 3 and unused.
 
+CREATE TYPE pipeline_run_failure_reason AS ENUM (
+  'stage_error', 'unknown_stage', 'unsupported_stage', 'turn_degraded', 'turn_truncated',
+  'artifact_invalid', 'gate_resolution_error',   -- failed
+  'cancelled_by_user', 'gate_timeout'            -- cancelled
+);
+
 pipeline_definitions (
   id            UUID v7 PK,
   user_id       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -204,10 +252,13 @@ pipeline_runs (
   current_stage      TEXT NOT NULL,             -- stage id from the pinned definition
   iteration          INT NOT NULL,              -- loop counter for current_stage's loop scope; 0 until loops land
   stage_outputs      JSONB NOT NULL,            -- StageOutputsSchema: stageId → typed artifact; latest loop iteration wins (see Context handoff)
-  failure_reason     TEXT,
-  gate_resolution    JSONB,                     -- GateResolutionSchema: { gateKey, resolverRunId } of the resolution that claimed the latest gate; null until one does
+  failure_reason     pipeline_run_failure_reason,  -- why the run ended (Run lifecycle); set with the flip to failed / cancelled, null otherwise
+  failure_detail     TEXT,                      -- the reason's variable part: an error class, the schema errors; null when the reason has none
+  gate_resolution    JSONB,                     -- GateResolutionSchema: { gateKey, resolverRunId } of the resolution that claimed the latest gate; null until one does, kept while the run moves on
   idempotency_key    TEXT UNIQUE,               -- the start_pipeline tool call's key, so a retried call recovers its run; null when opened outside a retrying context
   created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+  -- chk_pipeline_runs_failure_reason_by_status: failed ⇒ a failed reason, cancelled ⇒ a cancelled reason, otherwise reason and detail null
+  -- chk_pipeline_runs_parked_gate_unclaimed: a run at waiting_gate never holds the claim on the gate it is parked on
 )
 ```
 

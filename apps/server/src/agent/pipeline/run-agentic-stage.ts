@@ -83,6 +83,7 @@ import { buildTurnService } from "../turn-service.js";
 import { asNonRetriable } from "../turn-step-runner.js";
 import { bindFrozenTools, freezeToolTable } from "../turn-tools.js";
 import { extractStageArtifact } from "./extract-artifact.js";
+import type { PipelineRunFailure } from "./run-failure.js";
 import type { StageArtifact, StageOutputs } from "./run-types.js";
 import { buildStagePrompt } from "./stage-prompt.js";
 import { restrictToStage } from "./stage-tools.js";
@@ -132,7 +133,7 @@ export interface AgenticStageSteps {
 
 export type AgenticStageOutcome =
   | { kind: "completed"; artifact: StageArtifact | null }
-  | { kind: "failed"; reason: string };
+  | { kind: "failed"; failure: PipelineRunFailure };
 
 export function stageInboundKey(runId: string, stageId: string, iteration: number): string {
   return `pipeline:${runId}:${stageId}:${iteration}`;
@@ -588,15 +589,12 @@ export async function runAgenticStage(
   }
 
   if (result.degraded) {
-    return {
-      kind: "failed",
-      reason: `the stage's agent turn could not finish (${result.degraded.reason})`,
-    };
+    return { kind: "failed", failure: { reason: "turn_degraded", detail: result.degraded.reason } };
   }
   // The partial reply stands in the transcript and was delivered, but it is
   // not the stage's output: an artifact extracted from it would look finished.
   if (result.truncated) {
-    return { kind: "failed", reason: "the stage's reply was cut off at the model's output limit" };
+    return { kind: "failed", failure: { reason: "turn_truncated", detail: null } };
   }
 
   const extracted = await steps.stepRun("extract-artifact", async () => {
@@ -612,10 +610,7 @@ export async function runAgenticStage(
       : { ok: false as const, detail: artifact.error.detail };
   });
   if (!extracted.ok) {
-    return {
-      kind: "failed",
-      reason: `the stage's result did not match its declared output: ${extracted.detail}`,
-    };
+    return { kind: "failed", failure: { reason: "artifact_invalid", detail: extracted.detail } };
   }
   return { kind: "completed", artifact: extracted.artifact };
 }

@@ -1,9 +1,12 @@
 import { randomUUID } from "node:crypto";
+import { sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database, Transactor } from "../../../db/index.js";
+import { findPgErrorByCode } from "../../../db/pg-errors.js";
 import { expectOk } from "../../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../../test/pglite.js";
 import { DrizzleAgentStore } from "../../store/index.js";
+import type { PipelineRunCancellation, PipelineRunFailure } from "../run-failure.js";
 import type { StageArtifact } from "../run-types.js";
 import { validPipelineDefinition } from "../test-fixtures.js";
 import { DrizzlePipelineRunStore, DrizzlePipelineStore } from "./index.js";
@@ -72,6 +75,8 @@ async function seedRun(currentStage = "gather-context") {
 }
 
 const textArtifact: StageArtifact = { kind: "text", text: "gathered context" };
+const STAGE_THREW: PipelineRunFailure = { reason: "stage_error", detail: "TypeError" };
+const USER_CANCELLED: PipelineRunCancellation = { reason: "cancelled_by_user", detail: null };
 
 describe("DrizzlePipelineRunStore", () => {
   it("createRun opens a running run at iteration 0 with no outputs", async () => {
@@ -83,6 +88,7 @@ describe("DrizzlePipelineRunStore", () => {
     expect(run.conversationId).toBe(conversationId);
     expect(run.definitionId).toBe(definitionId);
     expect(run.failureReason).toBeNull();
+    expect(run.failureDetail).toBeNull();
   });
 
   it("getRun round-trips stage outputs through jsonbZod", async () => {
@@ -132,7 +138,7 @@ describe("DrizzlePipelineRunStore", () => {
 
     it("refuses to flip a terminal run, even when a terminal from is passed", async () => {
       const { run } = await seedRun();
-      await tx((trx) => runStore.cancelRunIfActive(trx, run.id, "done"));
+      await tx((trx) => runStore.cancelRunIfActive(trx, run.id, USER_CANCELLED));
       // A caller naming the terminal status as `from` must not reopen it.
       const result = await tx((trx) =>
         runStore.transitionStatus(trx, run.id, "cancelled", "running"),
@@ -178,7 +184,7 @@ describe("DrizzlePipelineRunStore", () => {
 
     it("refuses a terminal run", async () => {
       const { run } = await seedRun();
-      await tx((trx) => runStore.cancelRunIfActive(trx, run.id, "done"));
+      await tx((trx) => runStore.cancelRunIfActive(trx, run.id, USER_CANCELLED));
       expect(await tx((trx) => runStore.claimGate(trx, run.id, claim))).toMatchObject({
         kind: "stale",
         status: "cancelled",
@@ -293,7 +299,7 @@ describe("DrizzlePipelineRunStore", () => {
       const { run } = await seedRun();
       // fail/cancel leave current_stage untouched, so a replayed stage.due for
       // the same stage must not advance the now-terminal run.
-      await tx((trx) => runStore.cancelRunIfActive(trx, run.id, "user cancelled"));
+      await tx((trx) => runStore.cancelRunIfActive(trx, run.id, USER_CANCELLED));
       const result = await tx((trx) =>
         runStore.advanceStage(trx, {
           runId: run.id,
@@ -340,35 +346,92 @@ describe("DrizzlePipelineRunStore", () => {
   describe("failRun / cancelRunIfActive", () => {
     it("failRun terminates a non-terminal run with the reason and conversation", async () => {
       const { run, conversationId } = await seedRun();
-      const result = await tx((trx) => runStore.failRun(trx, run.id, "stage threw"));
+      const result = await tx((trx) => runStore.failRun(trx, run.id, STAGE_THREW));
       expect(result).toEqual({ kind: "failed", conversationId });
       const after = await tx((trx) => runStore.getRun(trx, run.id));
       expect(after?.status).toBe("failed");
-      expect(after?.failureReason).toBe("stage threw");
+      expect(after?.failureReason).toBe("stage_error");
+      expect(after?.failureDetail).toBe("TypeError");
     });
 
     it("failRun is a no-op on an already-terminal run", async () => {
       const { run } = await seedRun();
-      await tx((trx) => runStore.failRun(trx, run.id, "first"));
-      const second = await tx((trx) => runStore.failRun(trx, run.id, "second"));
+      await tx((trx) => runStore.failRun(trx, run.id, { reason: "turn_truncated", detail: null }));
+      const second = await tx((trx) => runStore.failRun(trx, run.id, STAGE_THREW));
       expect(second).toEqual({ kind: "already_terminal", status: "failed" });
-      expect((await tx((trx) => runStore.getRun(trx, run.id)))?.failureReason).toBe("first");
+      expect((await tx((trx) => runStore.getRun(trx, run.id)))?.failureReason).toBe(
+        "turn_truncated",
+      );
     });
 
     it("cancelRunIfActive cancels an active run and reports already_terminal otherwise", async () => {
       const { run, conversationId } = await seedRun();
-      const first = await tx((trx) => runStore.cancelRunIfActive(trx, run.id, "user cancelled"));
+      const first = await tx((trx) => runStore.cancelRunIfActive(trx, run.id, USER_CANCELLED));
       expect(first).toEqual({ kind: "cancelled", conversationId });
-      expect((await tx((trx) => runStore.getRun(trx, run.id)))?.status).toBe("cancelled");
+      expect(await tx((trx) => runStore.getRun(trx, run.id))).toMatchObject({
+        status: "cancelled",
+        failureReason: "cancelled_by_user",
+        failureDetail: null,
+      });
 
-      const again = await tx((trx) => runStore.cancelRunIfActive(trx, run.id, "again"));
+      const again = await tx((trx) => runStore.cancelRunIfActive(trx, run.id, USER_CANCELLED));
       expect(again).toEqual({ kind: "already_terminal", status: "cancelled" });
     });
 
     it("cancelRunIfActive reports not_found for an unknown run", async () => {
-      const result = await tx((trx) => runStore.cancelRunIfActive(trx, randomUUID(), "x"));
+      const result = await tx((trx) =>
+        runStore.cancelRunIfActive(trx, randomUUID(), USER_CANCELLED),
+      );
       expect(result).toEqual({ kind: "not_found" });
     });
+  });
+});
+
+describe("pipeline_runs CHECK constraints", () => {
+  async function rejected(statement: Promise<unknown>): Promise<unknown> {
+    return statement.then(
+      () => null,
+      (error: unknown) => error,
+    );
+  }
+
+  it("refuses a reason on a run that is still moving", async () => {
+    const { run } = await seedRun();
+    const error = await rejected(
+      db.execute(sql`UPDATE pipeline_runs SET failure_reason = 'stage_error' WHERE id = ${run.id}`),
+    );
+    expect(findPgErrorByCode(error, ["23514"])).toMatchObject({ code: "23514" });
+  });
+
+  it("refuses a failed run without a reason", async () => {
+    const { run } = await seedRun();
+    await tx((trx) => runStore.failRun(trx, run.id, STAGE_THREW));
+    const error = await rejected(
+      db.execute(sql`UPDATE pipeline_runs SET failure_reason = NULL WHERE id = ${run.id}`),
+    );
+    expect(findPgErrorByCode(error, ["23514"])).toMatchObject({ code: "23514" });
+  });
+
+  it("refuses a cancellation reason on a failed run", async () => {
+    const { run } = await seedRun();
+    await tx((trx) => runStore.failRun(trx, run.id, STAGE_THREW));
+    const error = await rejected(
+      db.execute(
+        sql`UPDATE pipeline_runs SET failure_reason = 'cancelled_by_user' WHERE id = ${run.id}`,
+      ),
+    );
+    expect(findPgErrorByCode(error, ["23514"])).toMatchObject({ code: "23514" });
+  });
+
+  it("refuses a run parked on a gate it holds the claim on", async () => {
+    const { run } = await seedRun("plan-gate");
+    const claim = JSON.stringify({ gateKey: `${run.id}:plan-gate:0`, resolverRunId: "r-1" });
+    const error = await rejected(
+      db.execute(
+        sql`UPDATE pipeline_runs SET status = 'waiting_gate', gate_resolution = ${claim}::jsonb WHERE id = ${run.id}`,
+      ),
+    );
+    expect(findPgErrorByCode(error, ["23514"])).toMatchObject({ code: "23514" });
   });
 });
 

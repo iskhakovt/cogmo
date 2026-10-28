@@ -14,7 +14,7 @@ import { MAX_REQUEST_BYTES, MAX_VIEW_BYTES } from "../../llm/request-size.js";
 import type { ToolDefinition } from "../../llm/types.js";
 import { logger } from "../../logger.js";
 import type { SkillRunner } from "../../skills/runner.js";
-import { expectDefined } from "../../test/assertions.js";
+import { assertKind, expectDefined } from "../../test/assertions.js";
 import {
   FAKE_TX,
   fakeRunInTx,
@@ -701,7 +701,7 @@ describe("runAgenticStage", () => {
 
     expect(outcome).toEqual({
       kind: "failed",
-      reason: "the stage's agent turn could not finish (iteration_cap)",
+      failure: { reason: "turn_degraded", detail: "iteration_cap" },
     });
     expect(h.agentStore.insertMessages).toHaveBeenCalled();
     // Nothing to deliver: a degraded turn's text is empty.
@@ -726,7 +726,7 @@ describe("runAgenticStage", () => {
 
     expect(outcome).toEqual({
       kind: "failed",
-      reason: "the stage's agent turn could not finish (model returned an empty turn)",
+      failure: { reason: "turn_degraded", detail: "model returned an empty turn" },
     });
     expect(h.agentStore.insertMessages).not.toHaveBeenCalled();
     expect(steps.ids).toContain("persist-new-messages");
@@ -790,7 +790,7 @@ describe("runAgenticStage", () => {
 
     expect(outcome).toEqual({
       kind: "failed",
-      reason: "the stage's reply was cut off at the model's output limit",
+      failure: { reason: "turn_truncated", detail: null },
     });
     expect(h.agentStore.insertMessages).toHaveBeenCalled();
     expect(h.delivery.deliverBatch).toHaveBeenCalledWith(partial);
@@ -813,8 +813,11 @@ describe("runAgenticStage", () => {
 
     const outcome = await runAgenticStage(h.deps, stageArgs(stage), recordingSteps().steps, log);
 
-    expect(outcome.kind).toBe("failed");
-    expect(outcome.kind === "failed" && outcome.reason).toContain("/title must be string");
+    assertKind(outcome, "failed");
+    expect(outcome.failure).toEqual({
+      reason: "artifact_invalid",
+      detail: expect.stringContaining("/title must be string"),
+    });
   });
 
   it("aborts delivery and rethrows when the loop throws", async () => {

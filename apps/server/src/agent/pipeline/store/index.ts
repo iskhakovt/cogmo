@@ -1,9 +1,15 @@
 import { and, count, desc, eq, getTableColumns, max, sql } from "drizzle-orm";
 import { single } from "../../../db/helpers.js";
 import type { Transaction } from "../../../db/index.js";
+import type { PipelineRunCancellation, PipelineRunFailure } from "../run-failure.js";
 import type { GateResolution, StageArtifact, StageOutputs } from "../run-types.js";
 import type { PipelineDefinition } from "../types.js";
-import { pipelineDefinitions, type pipelineRunStatus, pipelineRuns } from "./schema.js";
+import {
+  pipelineDefinitions,
+  type pipelineRunFailureReason,
+  type pipelineRunStatus,
+  pipelineRuns,
+} from "./schema.js";
 
 export interface PipelineDefinitionRow {
   id: string;
@@ -239,6 +245,7 @@ export class DrizzlePipelineStore implements PipelineStore {
 // hand-maintained union to drift from the DB type (architecture-rules: pgEnum
 // → TypeScript union).
 export type PipelineRunStatus = (typeof pipelineRunStatus.enumValues)[number];
+export type PipelineRunFailureReason = (typeof pipelineRunFailureReason.enumValues)[number];
 
 const TERMINAL_RUN_STATUSES: ReadonlyArray<PipelineRunStatus> = [
   "completed",
@@ -259,7 +266,8 @@ export interface PipelineRunRow {
   currentStage: string;
   iteration: number;
   stageOutputs: StageOutputs;
-  failureReason: string | null;
+  failureReason: PipelineRunFailureReason | null;
+  failureDetail: string | null;
   gateResolution: GateResolution | null;
   idempotencyKey: string | null;
   createdAt: Date;
@@ -377,7 +385,7 @@ export interface PipelineRunStore {
   failRun(
     tx: Transaction,
     id: string,
-    reason: string,
+    failure: PipelineRunFailure,
   ): Promise<
     | { kind: "failed"; conversationId: string }
     | { kind: "already_terminal"; status: PipelineRunStatus }
@@ -388,7 +396,7 @@ export interface PipelineRunStore {
   cancelRunIfActive(
     tx: Transaction,
     id: string,
-    reason: string,
+    cancellation: PipelineRunCancellation,
   ): Promise<
     | { kind: "cancelled"; conversationId: string }
     | { kind: "already_terminal"; status: PipelineRunStatus }
@@ -599,25 +607,25 @@ export class DrizzlePipelineRunStore implements PipelineRunStore {
   async failRun(
     tx: Transaction,
     id: string,
-    reason: string,
+    failure: PipelineRunFailure,
   ): Promise<
     | { kind: "failed"; conversationId: string }
     | { kind: "already_terminal"; status: PipelineRunStatus }
     | { kind: "not_found" }
   > {
-    return this.#terminate(tx, id, "failed", reason);
+    return this.#terminate(tx, id, "failed", failure);
   }
 
   async cancelRunIfActive(
     tx: Transaction,
     id: string,
-    reason: string,
+    cancellation: PipelineRunCancellation,
   ): Promise<
     | { kind: "cancelled"; conversationId: string }
     | { kind: "already_terminal"; status: PipelineRunStatus }
     | { kind: "not_found" }
   > {
-    const result = await this.#terminate(tx, id, "cancelled", reason);
+    const result = await this.#terminate(tx, id, "cancelled", cancellation);
     if (result.kind === "failed") {
       return { kind: "cancelled" as const, conversationId: result.conversationId };
     }
@@ -625,7 +633,7 @@ export class DrizzlePipelineRunStore implements PipelineRunStore {
   }
 
   /**
-   * Move a non-terminal run to a terminal status with a reason. The race
+   * Move a non-terminal run to a terminal status with why it ended. The race
    * between two concurrent terminations (cancel vs. abort) resolves through
    * the store's isolation contract: `.for("update")` blocks the second tx on
    * the row lock, then REPEATABLE READ raises a 40001 on it when the first
@@ -637,7 +645,7 @@ export class DrizzlePipelineRunStore implements PipelineRunStore {
     tx: Transaction,
     id: string,
     status: "failed" | "cancelled",
-    reason: string,
+    end: PipelineRunFailure | PipelineRunCancellation,
   ): Promise<
     | { kind: "failed"; conversationId: string }
     | { kind: "already_terminal"; status: PipelineRunStatus }
@@ -656,7 +664,7 @@ export class DrizzlePipelineRunStore implements PipelineRunStore {
     }
     await tx
       .update(pipelineRuns)
-      .set({ status, failureReason: reason })
+      .set({ status, failureReason: end.reason, failureDetail: end.detail })
       .where(eq(pipelineRuns.id, id));
     return { kind: "failed" as const, conversationId: row.conversationId };
   }
