@@ -1,14 +1,27 @@
 CREATE TYPE "public"."coding_task_failure_reason" AS ENUM('cli_exit_error', 'no_plan_produced', 'claude_auth_failed', 'push_failed', 'branch_conflict', 'auth_failed', 'verify_failed', 'verify_timed_out', 'pr_auth_failed', 'pr_validation_failed', 'pr_open_failed', 'credentials_unavailable', 'run_terminated', 'start_emit_failed', 'unexpected_error', 'user_cancelled', 'user_requested_revisions', 'unknown');--> statement-breakpoint
 ALTER TABLE "coding_tasks" ADD COLUMN "failure_detail" text;--> statement-breakpoint
--- The stored text moves to `failure_detail` whole, and `failure_reason`
--- becomes the label of the writer branch that produced it, matched on the
--- text each branch wrote: a CLI exit code, the push and PR-open prefixes, the
--- verify verdict (exit 124 is the timeout cap), the credential gates, the
--- reconciler's and the start emit's prefixes, and the two Cancel texts. Text
--- no branch is known to have written becomes `unknown`, its detail kept; a
--- `failed` or `cancelled` row with no text at all becomes `unknown` too.
+-- A reason under a status that is not `failed` or `cancelled` is a Cancel's
+-- text that an unconditional status write of an earlier build
+-- (`set-status-pending-verify`, `set-status-pushed`, `set-status-pr-open`)
+-- carried forward; the task went on, so the reason goes.
 UPDATE "coding_tasks"
-SET "failure_detail" = "failure_reason",
+SET "failure_reason" = NULL
+WHERE "failure_reason" IS NOT NULL AND "status" NOT IN ('failed', 'cancelled');--> statement-breakpoint
+-- The stored text moves to `failure_detail` whole — except a Cancel's, whose
+-- reason says everything — and `failure_reason` becomes the label of the
+-- writer branch that produced it, matched on the text each branch wrote: a
+-- CLI exit code, the push and PR-open prefixes, the verify verdict (exit 124
+-- is the timeout cap), the credential gates, the reconciler's and the start
+-- emit's prefixes, and the two Cancel texts. Any other text on a `failed` row
+-- is the free text of an orchestrator's catch, which has no prefix, and
+-- becomes `unexpected_error`; on a `cancelled` row it becomes `unknown`. Either
+-- way the detail is kept. A `failed` or `cancelled` row with no text at all
+-- becomes `unknown`.
+UPDATE "coding_tasks"
+SET "failure_detail" = CASE
+      WHEN "failure_reason" IN ('user cancelled the plan', 'user requested revisions') THEN NULL
+      ELSE "failure_reason"
+    END,
     "failure_reason" = CASE
       WHEN "failure_reason" ~ '^claude exit code ' THEN 'cli_exit_error'
       WHEN "failure_reason" = 'execute phase failed' THEN 'cli_exit_error'
@@ -31,6 +44,7 @@ SET "failure_detail" = "failure_reason",
       WHEN "failure_reason" ~ '^inngest\.send failed: ' THEN 'start_emit_failed'
       WHEN "failure_reason" = 'user cancelled the plan' THEN 'user_cancelled'
       WHEN "failure_reason" = 'user requested revisions' THEN 'user_requested_revisions'
+      WHEN "status" = 'failed' THEN 'unexpected_error'
       ELSE 'unknown'
     END
 WHERE "failure_reason" IS NOT NULL;--> statement-breakpoint

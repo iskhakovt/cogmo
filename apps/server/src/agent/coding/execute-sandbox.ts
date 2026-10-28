@@ -3,6 +3,7 @@
  * container if it is still alive, otherwise create a fresh one.
  */
 
+import { err, ok, type Result } from "neverthrow";
 import type { AskpassMaterials } from "../../sandbox/askpass.js";
 import {
   isLocalDockerSessionState,
@@ -22,7 +23,7 @@ import {
   taskImage,
   taskSessionSpec,
 } from "./task-sandbox.js";
-import type { WorktreeAssignment } from "./types.js";
+import type { TaskFailure, WorktreeAssignment } from "./types.js";
 
 interface ExecuteSandboxDeps extends TaskStoreDeps, SandboxAuthDeps {
   sandbox: SandboxClient;
@@ -40,7 +41,7 @@ export interface ExecutePushCredentials {
   askpass: AskpassMaterials;
 }
 
-interface ExecuteSandbox {
+export interface ExecuteSandbox {
   state: SandboxSessionState;
   /** Set exactly when the transport is git-remote. */
   push: ExecutePushCredentials | undefined;
@@ -50,9 +51,10 @@ interface ExecuteSandbox {
  * Get-or-create in two checkpoints. `try-resume` returns a live sandbox's
  * state — the plan phase's container is still warm, or the reaper hasn't
  * reached it — and then no clone, checkout or auth resolution is needed.
- * Otherwise `create-container` makes a fresh one, resolving auth inside its
- * body so a resume hit doesn't pay the DB+decrypt and the PAT never becomes
- * a step return value.
+ * Otherwise `create-container` makes a fresh one. The Claude OAuth token is
+ * resolved ahead of that step as the run's credentials gate — a miss is the
+ * task's `credentials_unavailable` failure before any container exists —
+ * and reaches the spec through the closure, never a step return value.
  *
  * On git-remote, askpass is provisioned either way: a resume reuses the plan
  * phase's mount, a fresh create mounts it. The identity loads outside any
@@ -69,7 +71,7 @@ export async function acquireExecuteSandbox(
     assignment: WorktreeAssignment;
     askpass: AskpassLease;
   },
-): Promise<ExecuteSandbox> {
+): Promise<Result<ExecuteSandbox, TaskFailure>> {
   const { sandbox } = deps;
   const resumed = await run.stepRun("try-resume", async () => {
     const existing = await sandbox.tryResumeByTaskId(run.taskId);
@@ -86,8 +88,10 @@ export async function acquireExecuteSandbox(
     push = { identity, askpass: await args.askpass.provision(run, identity) };
   }
 
-  if (resumed !== null) return { state: resumed, push };
-  const state = await createExecuteSandbox(run, deps, { ...args, push });
+  if (resumed !== null) return ok({ state: resumed, push });
+  const auth = await loadSandboxEnv(deps);
+  if (auth.isErr()) return err({ reason: "credentials_unavailable", detail: auth.error.message });
+  const state = await createExecuteSandbox(run, deps, { ...args, push, env: auth.value });
   // A resume hit skips these: a prior attempt already ran them, or they
   // don't apply. Each is idempotent on its own (an UPDATE; `checkout -B`).
   if (isLocalDockerSessionState(state)) {
@@ -99,7 +103,7 @@ export async function acquireExecuteSandbox(
   if (sandbox.capabilities.workingTreeTransport === "git-remote") {
     await checkoutFeatureBranchStep(run, sandbox, state, args.assignment.branch);
   }
-  return { state, push };
+  return ok({ state, push });
 }
 
 async function createExecuteSandbox(
@@ -110,6 +114,7 @@ async function createExecuteSandbox(
     repo: CodingRepoRow;
     assignment: WorktreeAssignment;
     push: ExecutePushCredentials | undefined;
+    env: Readonly<Record<string, string>>;
   },
 ): Promise<SandboxSessionState> {
   const { sandbox, defaultResourceLimits } = deps;
@@ -120,10 +125,6 @@ async function createExecuteSandbox(
     await sandbox.ensureImagePresent(image, defaultResourceLimits);
   });
   const state = await run.stepRun("create-container", async () => {
-    const auth = await loadSandboxEnv(deps);
-    if (auth.isErr()) {
-      throw new Error(auth.error.message);
-    }
     const session = await sandbox.create(
       taskSessionSpec({
         sandbox,
@@ -135,7 +136,7 @@ async function createExecuteSandbox(
         image,
         resourceLimits: defaultResourceLimits,
         taskTtlMs: deps.taskTtlMs,
-        env: auth.value,
+        env: args.env,
       }),
     );
     return session.state;

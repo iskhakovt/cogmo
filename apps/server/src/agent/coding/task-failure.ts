@@ -23,7 +23,7 @@ export function maskTaskFailure(failure: TaskFailure): TaskFailure {
 }
 
 /** A thrown error as a failure: the orchestrators' catch path. */
-export function unexpectedFailure(err: unknown): TaskFailure {
+function unexpectedFailure(err: unknown): TaskFailure {
   return { reason: "unexpected_error", detail: describeError(err) };
 }
 

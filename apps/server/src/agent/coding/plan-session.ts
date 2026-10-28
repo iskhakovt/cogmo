@@ -8,7 +8,7 @@ import type { SandboxClient, SandboxSession, SandboxSessionState } from "../../s
 import type { CodingBackend } from "./backend.js";
 import type { CodingRun, TaskStoreDeps } from "./coding-run.js";
 import type { PlanStreamHandle } from "./progress-stream.js";
-import { fromSessionResult, type SessionResult } from "./session-result.js";
+import { fromSessionResult, type SessionMemo, type SessionResult } from "./session-result.js";
 import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
 import type { TaskFailure } from "./types.js";
 
@@ -58,7 +58,7 @@ async function streamPlan(
     container: SandboxSession;
     stream: PlanStreamHandle;
   },
-): Promise<SessionResult> {
+): Promise<SessionMemo> {
   const { task, repo, container, stream } = args;
   let plan = "";
   let isError = false;

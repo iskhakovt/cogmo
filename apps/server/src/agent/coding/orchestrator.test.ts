@@ -464,10 +464,13 @@ describe("runCodingTask", () => {
     });
     expect(result.status).toBe("failed");
     if (result.status === "failed") {
-      expect(result.failure?.reason).toBe("unexpected_error");
+      expect(result.failure?.reason).toBe("credentials_unavailable");
       expect(result.failure?.detail).toMatch(/claude_code_oauth_token/);
     }
     expect(createCalls).toHaveLength(0);
+    expect((await tx((trx) => store.getTask(trx, task.id)))?.failureReason).toBe(
+      "credentials_unavailable",
+    );
   });
 
   async function seedUserTaskWithAutoapprove(
@@ -2002,16 +2005,12 @@ describe("runCodingExecute", () => {
     expect(fakeSecrets.getSecret).not.toHaveBeenCalled();
   });
 
-  it("create branch + missing OAuth → status=failed, no createCalls, deleteByTaskId sweep still fires", async () => {
-    // When no container exists (reaper got it during long approval) and
-    // the OAuth check fails inside `create-container`, the catch path
-    // still fires `deleteByTaskId(taskId)` unconditionally. The sweep is
-    // label-indexed and idempotent — if no sandbox was created server-
-    // side, the label query returns empty and the call is a no-op. The
-    // unconditional call covers the managed-backend case where create()
-    // can throw AFTER provider-side state was committed (e.g. Daytona
-    // 60s SDK timeout fires while the snapshot build is still running
-    // server-side, leaving a labelled sandbox alive).
+  it("create branch + missing OAuth → failed as credentials_unavailable, no createCalls, deleteByTaskId sweep still fires", async () => {
+    // When no container exists (reaper got it during long approval) the
+    // token is resolved ahead of `create-container`; a miss takes the
+    // failure exit, whose teardown still fires `deleteByTaskId(taskId)`.
+    // The sweep is label-indexed and idempotent — with no sandbox created
+    // server-side, the label query returns empty and the call is a no-op.
     const repo = await seedRepo();
     const { task } = await seedExecutableTask(repo);
     const { sandbox, createCalls, stopCalls } = fakeSandbox();
@@ -2034,11 +2033,14 @@ describe("runCodingExecute", () => {
 
     expect(result.status).toBe("failed");
     if (result.status === "failed") {
-      expect(result.failure?.reason).toBe("unexpected_error");
+      expect(result.failure?.reason).toBe("credentials_unavailable");
       expect(result.failure?.detail).toMatch(/claude_code_oauth_token/);
     }
     expect(createCalls).toHaveLength(0);
     expect(stopCalls).toEqual([task.id]);
+    expect((await tx((trx) => store.getTask(trx, task.id)))?.failureReason).toBe(
+      "credentials_unavailable",
+    );
   });
 
   it("a failure before the CLI streams still reaches the execute stream", async () => {

@@ -203,6 +203,8 @@ const RECONCILE =
   "inngest run terminated abnormally (run_id 01X, function_id coding-task-execute): gone";
 const START = "inngest.send failed: fetch failed";
 const CATCH = "git checkout -B cogmo/abc timed out after 60s";
+const TOKEN =
+  'Claude Code subscription auth missing — secret "claude_code_oauth_token" is not set.';
 
 describe("migration 0076 — coding task failure reason", () => {
   it("moves the stored text to failure_detail and maps it to the writer's reason", async () => {
@@ -215,9 +217,11 @@ describe("migration 0076 — coding task failure reason", () => {
       "verify timeout": { status: "failed", failureReason: VERIFY_TIMEOUT },
       "pr 422": { status: "failed", failureReason: PR_422 },
       identity: { status: "failed", failureReason: IDENTITY },
+      token: { status: "failed", failureReason: TOKEN },
       reconcile: { status: "failed", failureReason: RECONCILE },
       start: { status: "failed", failureReason: START },
       catch: { status: "failed", failureReason: CATCH },
+      "cancelled, unmatched text": { status: "cancelled", failureReason: "stopped by hand" },
       "failed, no text": { status: "failed", failureReason: null },
       cancelled: { status: "cancelled", failureReason: "user cancelled the plan" },
       revised: { status: "cancelled", failureReason: "user requested revisions" },
@@ -233,13 +237,52 @@ describe("migration 0076 — coding task failure reason", () => {
       "verify timeout": { reason: "verify_timed_out", detail: VERIFY_TIMEOUT },
       "pr 422": { reason: "pr_validation_failed", detail: PR_422 },
       identity: { reason: "credentials_unavailable", detail: IDENTITY },
+      token: { reason: "credentials_unavailable", detail: TOKEN },
       reconcile: { reason: "run_terminated", detail: RECONCILE },
       start: { reason: "start_emit_failed", detail: START },
-      catch: { reason: "unknown", detail: CATCH },
+      catch: { reason: "unexpected_error", detail: CATCH },
+      "cancelled, unmatched text": { reason: "unknown", detail: "stopped by hand" },
       "failed, no text": { reason: "unknown", detail: null },
-      cancelled: { reason: "user_cancelled", detail: "user cancelled the plan" },
-      revised: { reason: "user_requested_revisions", detail: "user requested revisions" },
+      cancelled: { reason: "user_cancelled", detail: null },
+      revised: { reason: "user_requested_revisions", detail: null },
     });
+  });
+
+  it("clears a Cancel's text an unconditional status write carried past the Cancel", async () => {
+    // Before `transition-pushed` and its siblings, a Cancel during the suite
+    // was overwritten by `set-status-pushed` and the reason stayed.
+    const repoId = await seedRepo();
+    const labels = await insert(repoId, {
+      "pushed after cancel": {
+        status: "pushed",
+        failureReason: "user cancelled the plan",
+        plan: "p",
+        approved: true,
+      },
+      "pr open after cancel": {
+        status: "pr_open",
+        failureReason: "user requested revisions",
+        plan: "p",
+        approved: true,
+        prMetadata: true,
+      },
+      "pending verify after cancel": {
+        status: "pending_verify",
+        failureReason: "user cancelled the plan",
+        plan: "p",
+        approved: true,
+      },
+    });
+
+    await applyMigration();
+
+    expect(await failuresBy(labels)).toEqual({
+      "pushed after cancel": { reason: null, detail: null },
+      "pr open after cancel": { reason: null, detail: null },
+      "pending verify after cancel": { reason: null, detail: null },
+    });
+    const rows = await tx((trx) => store.getTasksByIds(trx, [...labels.keys()]));
+    expect(rows.map((r) => r.status).sort()).toEqual(["pending_verify", "pr_open", "pushed"]);
   });
 
   it("accepts every row the orchestrators wrote, at every status, and the store reads them back", async () => {
@@ -274,6 +317,7 @@ describe("migration 0076 — coding task failure reason", () => {
         approved: true,
         prMetadata: true,
       },
+      "cancelled, no text": { status: "cancelled", failureReason: null },
     });
 
     await applyMigration();
@@ -289,29 +333,26 @@ describe("migration 0076 — coding task failure reason", () => {
     );
     expect(byLabel["pr open"]).toEqual(["pr_open", null, null]);
     expect(byLabel["failed early"]).toEqual(["failed", "cli_exit_error", CLI]);
-    expect(byLabel["cancelled late"]).toEqual([
-      "cancelled",
-      "user_cancelled",
-      "user cancelled the plan",
-    ]);
+    expect(byLabel["cancelled late"]).toEqual(["cancelled", "user_cancelled", null]);
+    expect(byLabel["cancelled, no text"]).toEqual(["cancelled", "unknown", null]);
   });
 
   it("rolls the whole file back on a row the CHECKs refuse, leaving the next boot to retry", async () => {
     const repoId = await seedRepo();
     const labels = await insert(repoId, {
       fine: { status: "failed", failureReason: CLI },
-      // A non-terminal row carrying a reason: no writer produces one.
-      impossible: { status: "planning", failureReason: "boom" },
+      // `pr_open` without PR metadata: a shape no build's writers produce.
+      impossible: { status: "pr_open", failureReason: null, plan: "p", approved: true },
     });
 
     expect(await pgFailureOf(applyMigration())).toEqual({
       code: "23514",
-      constraint: "chk_coding_tasks_reason_with_end",
+      constraint: "chk_coding_tasks_pr_metadata_after_push",
     });
 
     // Nothing of the file landed: the column is still text, the detail column
     // absent, the backfill undone.
     expect(await failureReasonColumn()).toEqual({ failure_reason: "text" });
-    expect(await legacyReasonsBy(labels)).toEqual({ fine: CLI, impossible: "boom" });
+    expect(await legacyReasonsBy(labels)).toEqual({ fine: CLI, impossible: null });
   });
 });

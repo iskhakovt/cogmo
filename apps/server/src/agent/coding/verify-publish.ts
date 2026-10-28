@@ -80,17 +80,26 @@ export async function pushVerifiedBranch(
       author: commitAuthorFor(args.identity),
     }),
   );
-  if (commit.kind === "branch_conflict") {
-    return err({ reason: "branch_conflict", detail: commit.output });
-  }
-  if (commit.kind === "auth_failed") return err({ reason: "auth_failed", detail: commit.output });
-  if (commit.kind === "failed") return err({ reason: "push_failed", detail: commit.output });
+  const landed = match(commit)
+    .with({ kind: "branch_conflict" }, ({ output }) =>
+      err<string, TaskFailure>({ reason: "branch_conflict", detail: output }),
+    )
+    .with({ kind: "auth_failed" }, ({ output }) =>
+      err<string, TaskFailure>({ reason: "auth_failed", detail: output }),
+    )
+    .with({ kind: "failed" }, ({ output }) =>
+      err<string, TaskFailure>({ reason: "push_failed", detail: output }),
+    )
+    .with({ kind: "pushed" }, ({ commitSha }) => ok<string, TaskFailure>(commitSha))
+    .with({ kind: "nothing_to_commit" }, () => ok<string, TaskFailure>(""))
+    .exhaustive();
+  if (landed.isErr()) return err(landed.error);
 
   // A clean tree has no commit sha to reuse. Durable so the PR head is
   // pinned to one value; conditional on the memoized `kind`, so the step
   // plan is identical on every replay.
   const branchSha =
-    (commit.kind === "pushed" ? commit.commitSha : "") ||
+    landed.value ||
     (await run.stepRun("read-head-sha", async () => readHeadSha(await args.container())));
 
   // Conditional on `verifying`: the suite runs for minutes, and a Cancel
@@ -153,19 +162,24 @@ export async function openTaskPr(
       ...(deps.octokitFactory && { octokit: deps.octokitFactory(identity.pat) }),
     }),
   );
-  if (pr.kind === "auth_failed") return err({ reason: "pr_auth_failed", detail: pr.message });
-  if (pr.kind === "validation_failed") {
-    return err({ reason: "pr_validation_failed", detail: pr.message });
-  }
-  // The branch is pushed but has no PR; it stays upstream for a re-delegate.
-  if (pr.kind === "failed") return err({ reason: "pr_open_failed", detail: pr.message });
-
-  const metadata: PrMetadata = {
-    url: pr.url,
-    number: pr.number,
-    branchSha: pr.branchSha,
-    openedAt: pr.openedAt,
-  };
+  // On every failure the branch is pushed but has no PR; it stays upstream
+  // for a re-delegate.
+  const prResult = match(pr)
+    .with({ kind: "auth_failed" }, ({ message }) =>
+      err<PrMetadata, TaskFailure>({ reason: "pr_auth_failed", detail: message }),
+    )
+    .with({ kind: "validation_failed" }, ({ message }) =>
+      err<PrMetadata, TaskFailure>({ reason: "pr_validation_failed", detail: message }),
+    )
+    .with({ kind: "failed" }, ({ message }) =>
+      err<PrMetadata, TaskFailure>({ reason: "pr_open_failed", detail: message }),
+    )
+    .with({ kind: "opened" }, ({ url, number, branchSha, openedAt }) =>
+      ok<PrMetadata, TaskFailure>({ url, number, branchSha, openedAt }),
+    )
+    .exhaustive();
+  if (prResult.isErr()) return err(prResult.error);
+  const metadata = prResult.value;
   await run.stepRun("set-pr-metadata", () =>
     deps.runInTx((tx) => deps.store.setTaskPrMetadata(tx, run.taskId, metadata)),
   );
@@ -184,7 +198,7 @@ export async function openTaskPr(
         inngest
           .send({
             name: "coding/task/pr-opened",
-            data: { taskId: run.taskId, prUrl: pr.url, prNumber: pr.number },
+            data: { taskId: run.taskId, prUrl: metadata.url, prNumber: metadata.number },
             // Matters more than its siblings: `auto-register-skill`
             // subscribes to this one, and a re-send re-enters the register
             // flow (mostly absorbed by its `no_op` tip resolution) alongside
@@ -196,7 +210,7 @@ export async function openTaskPr(
       if (deps.sandbox.capabilities.workingTreeTransport === "git-remote") {
         await fetchBackFeatureBranch(run, { repo, branch: assignment.branch, identity });
       }
-      return ok({ kind: "opened", url: pr.url, number: pr.number });
+      return ok({ kind: "opened", url: metadata.url, number: metadata.number });
     })
     .exhaustive();
 }

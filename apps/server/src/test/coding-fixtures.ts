@@ -10,7 +10,7 @@
 
 import { PassThrough, type Readable, type Writable } from "node:stream";
 import { err, ok } from "neverthrow";
-import { match } from "ts-pattern";
+import { match, P } from "ts-pattern";
 import { vi } from "vitest";
 import { type MockProxy, mock } from "vitest-mock-extended";
 import { CLAUDE_CODE_OAUTH_TOKEN_SECRET } from "../agent/coding/auth.js";
@@ -324,7 +324,7 @@ export function fakeCodingSandbox(
     },
   };
 }
-const FORWARD_PATH: ReadonlyArray<CodingTaskForwardStatus> = [
+const FORWARD_STATUSES = [
   "queued",
   "planning",
   "awaiting_approval",
@@ -333,7 +333,8 @@ const FORWARD_PATH: ReadonlyArray<CodingTaskForwardStatus> = [
   "verifying",
   "pushed",
   "pr_open",
-];
+] as const satisfies ReadonlyArray<CodingTaskForwardStatus>;
+const FORWARD_PATH: ReadonlyArray<CodingTaskForwardStatus> = FORWARD_STATUSES;
 
 /** The PR a parked `pr_open` row records. */
 export const PARKED_PR_METADATA: PrMetadata = {
@@ -364,12 +365,14 @@ export async function parkCodingTaskAt(
   }
   const forwardTarget = match(status)
     .with("failed", "cancelled", () => row.status)
-    .otherwise((forward) => forward);
+    .with(P.union(...FORWARD_STATUSES), (forward) => forward)
+    .exhaustive();
   const path = FORWARD_PATH.slice(
-    FORWARD_PATH.indexOf(row.status) + 1,
-    FORWARD_PATH.indexOf(forwardTarget) + 1,
+    FORWARD_PATH.findIndex((s) => s === row.status) + 1,
+    FORWARD_PATH.findIndex((s) => s === forwardTarget) + 1,
   );
-  const approve = FORWARD_PATH.indexOf(forwardTarget) > FORWARD_PATH.indexOf("awaiting_approval");
+  const approve =
+    FORWARD_PATH.findIndex((s) => s === forwardTarget) > FORWARD_PATH.indexOf("awaiting_approval");
   let from = row.status;
   for (const to of path) {
     if (to === "awaiting_approval" && row.plan === null) {
@@ -399,5 +402,6 @@ export async function parkCodingTaskAt(
     .with("cancelled", () =>
       runInTx((tx) => store.cancelTaskIfActive(tx, taskId, "user_cancelled")),
     )
-    .otherwise(() => Promise.resolve());
+    .with(P.union(...FORWARD_STATUSES), () => Promise.resolve())
+    .exhaustive();
 }

@@ -10,7 +10,6 @@ import {
   failTaskFromCatch,
   maskTaskFailure,
   recordTaskFailed,
-  unexpectedFailure,
 } from "./task-failure.js";
 import type { TaskFailure } from "./types.js";
 
@@ -108,12 +107,12 @@ describe("task failure channel", () => {
     expect(h.inngest.send).toHaveBeenCalledWith(failedEvent(expected));
   });
 
-  it("unexpectedFailure describes a non-Error throw too", () => {
-    expect(unexpectedFailure("boom")).toEqual({ reason: "unexpected_error", detail: "boom" });
-    expect(unexpectedFailure(new Error("db blip"))).toEqual({
-      reason: "unexpected_error",
-      detail: "db blip",
-    });
+  it("failTaskFromCatch describes a non-Error throw too", async () => {
+    const h = harness();
+
+    const recorded = await failTaskFromCatch(h.run, h.deps, "boom");
+
+    expect(recorded).toEqual({ reason: "unexpected_error", detail: "boom" });
   });
 
   it("maskTaskFailure masks the detail and keeps the reason", () => {

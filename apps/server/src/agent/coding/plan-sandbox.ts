@@ -3,6 +3,7 @@
  * create the task container the plan session runs in.
  */
 
+import { err, ok, type Result } from "neverthrow";
 import type { AskpassMaterials } from "../../sandbox/askpass.js";
 import {
   isLocalDockerSessionState,
@@ -21,7 +22,7 @@ import {
   taskImage,
   taskSessionSpec,
 } from "./task-sandbox.js";
-import type { WorktreeAssignment } from "./types.js";
+import type { TaskFailure, WorktreeAssignment } from "./types.js";
 
 interface PlanSandboxDeps extends TaskStoreDeps, SandboxAuthDeps {
   sandbox: SandboxClient;
@@ -50,13 +51,13 @@ export async function preparePlanSandbox(
     assignment: WorktreeAssignment;
     askpass: AskpassLease;
   },
-): Promise<SandboxSessionState> {
+): Promise<Result<SandboxSessionState, TaskFailure>> {
   const { sandbox } = deps;
   const { task, repo, assignment } = args;
+  // The run's credentials gate: a missing token is the task's
+  // `credentials_unavailable` failure, before any container exists.
   const auth = await loadSandboxEnv(deps);
-  if (auth.isErr()) {
-    throw new Error(auth.error.message);
-  }
+  if (auth.isErr()) return err({ reason: "credentials_unavailable", detail: auth.error.message });
   const env = auth.value;
 
   let identityPat: string | undefined;
@@ -109,5 +110,5 @@ export async function preparePlanSandbox(
   if (sandbox.capabilities.workingTreeTransport === "git-remote") {
     await checkoutFeatureBranchStep(run, sandbox, state, assignment.branch);
   }
-  return state;
+  return ok(state);
 }

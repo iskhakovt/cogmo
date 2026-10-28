@@ -11,18 +11,18 @@
  */
 
 import type { Inngest } from "inngest";
-import { match } from "ts-pattern";
+import { match, P } from "ts-pattern";
 import type { Transactor } from "../../db/index.js";
 import { type EventPublisher, fromStepTools } from "../../inngest/durable.js";
 import { codingTaskPlanApproved, codingTaskStart } from "../../inngest/events.js";
 import { logger } from "../../logger.js";
-import type { SandboxClient } from "../../sandbox/index.js";
+import type { SandboxClient, SandboxSession } from "../../sandbox/index.js";
 import type { ResourceLimits } from "../../sandbox/types.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import { allocateTaskWorktree } from "./allocate-task-worktree.js";
 import { AskpassLease } from "./askpass-lease.js";
 import type { loadCodingSandboxEnv } from "./auth.js";
-import type { CodingBackend } from "./backend.js";
+import type { BackendUsage, CodingBackend } from "./backend.js";
 import { type CodingRun, codingRun, loadTaskAndRepo } from "./coding-run.js";
 import {
   checkExecutable,
@@ -30,7 +30,7 @@ import {
   handOffToVerify,
   pushExecuteChanges,
 } from "./execute-outcomes.js";
-import { acquireExecuteSandbox } from "./execute-sandbox.js";
+import { acquireExecuteSandbox, type ExecuteSandbox } from "./execute-sandbox.js";
 import { persistSessionUsage, runExecuteSession } from "./execute-session.js";
 import { parkPlanAtGate } from "./plan-gate-stage.js";
 import { preparePlanSandbox } from "./plan-sandbox.js";
@@ -41,7 +41,7 @@ import {
   NULL_PLAN_STREAM,
   type PlanStreamHandle,
 } from "./progress-stream.js";
-import type { CodingRepoRow, CodingStore } from "./store/index.js";
+import type { CodingRepoRow, CodingStore, CodingTaskRow } from "./store/index.js";
 import {
   describeTaskFailure,
   failTaskFromCatch,
@@ -115,12 +115,6 @@ export interface CodingExecuteResult {
 const NO_PLAN_PRODUCED: TaskFailure = {
   reason: "no_plan_produced",
   detail: "plan phase produced no plan",
-};
-
-/** A session memo that reports an error without saying which: nothing a run writes today. */
-const EXECUTE_SESSION_FAILED: TaskFailure = {
-  reason: "cli_exit_error",
-  detail: "execute phase failed",
 };
 
 /**
@@ -232,30 +226,27 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
         assignment = next;
       },
     });
-    const state = await preparePlanSandbox(run, deps, {
+    const exit = { repo, assignment: worktree, stream };
+    const prepared = await preparePlanSandbox(run, deps, {
       task,
       repo,
       assignment: worktree,
       askpass,
     });
-    const result = await runPlanSession(run, deps, { task, repo, state, stream });
-    if (result.isError || !result.plan) {
-      const failure = result.failure ?? NO_PLAN_PRODUCED;
-      return await endPlanFailed(run, deps, { repo, assignment: worktree, stream }, failure);
-    }
-    const plan = result.plan;
-    await run.stepRun("persist-plan", () =>
-      deps.runInTx((tx) => deps.store.setTaskPlan(tx, run.taskId, plan)),
-    );
-    const gate = await parkPlanAtGate(run, deps, {
+    if (prepared.isErr()) return await endPlanFailed(run, deps, exit, prepared.error);
+    const session = await runPlanSession(run, deps, {
       task,
       repo,
-      assignment: worktree,
-      plan,
+      state: prepared.value,
       stream,
     });
-    if (gate === "left_planning") return { status: "skipped" };
-    return { status: "awaiting_approval", plan };
+    return await match(session)
+      .with({ kind: "errored" }, ({ failure }) => endPlanFailed(run, deps, exit, failure))
+      .with({ kind: "completed", plan: P.string.minLength(1) }, ({ plan }) =>
+        parkPlan(run, deps, { task, repo, assignment: worktree, plan, stream }),
+      )
+      .with({ kind: "completed" }, () => endPlanFailed(run, deps, exit, NO_PLAN_PRODUCED))
+      .exhaustive();
   } catch (err) {
     run.log.error({ err }, "coding task failed");
     const failure = await failTaskFromCatch(run, deps, err);
@@ -277,9 +268,35 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
   }
 }
 
+/** The plan is in: persist it, then park the task at the gate. */
+async function parkPlan(
+  run: CodingRun,
+  deps: CodingOrchestratorDeps,
+  args: {
+    task: CodingTaskRow;
+    repo: CodingRepoRow;
+    assignment: WorktreeAssignment;
+    plan: string;
+    stream: PlanStreamHandle;
+  },
+): Promise<CodingOrchestratorResult> {
+  await run.stepRun("persist-plan", () =>
+    deps.runInTx((tx) => deps.store.setTaskPlan(tx, run.taskId, args.plan)),
+  );
+  const gate = await parkPlanAtGate(run, deps, args);
+  return match(gate)
+    .with("left_planning", (): CodingOrchestratorResult => ({ status: "skipped" }))
+    .with(
+      "parked",
+      (): CodingOrchestratorResult => ({ status: "awaiting_approval", plan: args.plan }),
+    )
+    .exhaustive();
+}
+
 /**
- * The plan session failed or produced no plan. A task that already ended
- * under the run (a Cancel during `plan-cli`) is reclaimed, not failed.
+ * The plan session failed or produced no plan, or its credentials were
+ * missing. A task that already ended under the run (a Cancel during
+ * `plan-cli`) is reclaimed, not failed.
  */
 async function endPlanFailed(
   run: CodingRun,
@@ -344,6 +361,51 @@ function executeResultOf(recorded: RecordedFailure): CodingExecuteResult {
 }
 
 /**
+ * The session completed: record its usage, push its commits on git-remote,
+ * and hand off to verify.
+ */
+async function publishExecute(
+  run: CodingRun,
+  deps: CodingOrchestratorDeps,
+  inngest: EventPublisher,
+  args: {
+    task: CodingTaskRow;
+    exit: { repo: CodingRepoRow; assignment: WorktreeAssignment; stream: ExecuteStreamHandle };
+    sandbox: ExecuteSandbox;
+    container: () => Promise<SandboxSession>;
+    usage: BackendUsage | undefined;
+  },
+): Promise<CodingExecuteResult> {
+  const { task, exit, sandbox, container, usage } = args;
+  await persistSessionUsage(run, deps, usage);
+  if (sandbox.push) {
+    const pushFailure = await pushExecuteChanges(run, {
+      task,
+      assignment: exit.assignment,
+      credentials: sandbox.push,
+      container,
+    });
+    if (pushFailure !== null) {
+      // `safeTeardownWorktree` is a no-op for git-remote, the only
+      // transport that pushes here, so no worktree teardown step.
+      const recorded = await endExecuteFailed(run, deps, exit, pushFailure, {
+        transition: "transition-failed-after-push",
+        teardownWorktree: null,
+        teardown: "teardown-after-push-failure",
+        sandboxDeleted: "persist-sandbox-deleted-after-push-failure",
+        logSuffix: " (push failure)",
+      });
+      return executeResultOf(recorded);
+    }
+  }
+  const handOff = await handOffToVerify(run, deps, inngest, { ...exit, usage });
+  return match(handOff)
+    .with("handed_off", (): CodingExecuteResult => ({ status: "pending_verify" }))
+    .with("left_executing", (): CodingExecuteResult => ({ status: "skipped" }))
+    .exhaustive();
+}
+
+/**
  * The execute orchestration. Same `stepRun` injection as `runCodingTask`.
  */
 export async function runCodingExecute(params: ExecuteRunParams): Promise<CodingExecuteResult> {
@@ -367,52 +429,33 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
 
   const askpass = new AskpassLease(deps.askpassBaseDir, run.taskId);
   try {
-    const sandbox = await acquireExecuteSandbox(run, deps, { task, repo, assignment, askpass });
+    const failSession = async (failure: TaskFailure): Promise<CodingExecuteResult> =>
+      executeResultOf(
+        await endExecuteFailed(run, deps, exit, failure, {
+          transition: "transition-failed",
+          teardownWorktree: "teardown-worktree",
+          teardown: "teardown",
+          sandboxDeleted: "persist-sandbox-deleted",
+          logSuffix: "",
+        }),
+      );
+    const acquired = await acquireExecuteSandbox(run, deps, { task, repo, assignment, askpass });
+    if (acquired.isErr()) return await failSession(acquired.error);
+    const sandbox = acquired.value;
     const container = lazySession(deps.sandbox, sandbox.state);
-    const result = await runExecuteSession(run, deps, {
+    const session = await runExecuteSession(run, deps, {
       task,
       repo,
       sessionId,
       container,
       stream,
     });
-    if (result.isError) {
-      const failure = result.failure ?? EXECUTE_SESSION_FAILED;
-      const recorded = await endExecuteFailed(run, deps, exit, failure, {
-        transition: "transition-failed",
-        teardownWorktree: "teardown-worktree",
-        teardown: "teardown",
-        sandboxDeleted: "persist-sandbox-deleted",
-        logSuffix: "",
-      });
-      return executeResultOf(recorded);
-    }
-    await persistSessionUsage(run, deps, result.usage);
-    if (sandbox.push) {
-      const pushFailure = await pushExecuteChanges(run, {
-        task,
-        assignment,
-        credentials: sandbox.push,
-        container,
-      });
-      if (pushFailure !== null) {
-        // `safeTeardownWorktree` is a no-op for git-remote, the only
-        // transport that pushes here, so no worktree teardown step.
-        const recorded = await endExecuteFailed(run, deps, exit, pushFailure, {
-          transition: "transition-failed-after-push",
-          teardownWorktree: null,
-          teardown: "teardown-after-push-failure",
-          sandboxDeleted: "persist-sandbox-deleted-after-push-failure",
-          logSuffix: " (push failure)",
-        });
-        return executeResultOf(recorded);
-      }
-    }
-    const handOff = await handOffToVerify(run, deps, params.inngest, {
-      ...exit,
-      usage: result.usage,
-    });
-    return handOff === "handed_off" ? { status: "pending_verify" } : { status: "skipped" };
+    return await match(session)
+      .with({ kind: "errored" }, ({ failure }) => failSession(failure))
+      .with({ kind: "completed" }, ({ usage }) =>
+        publishExecute(run, deps, params.inngest, { task, exit, sandbox, container, usage }),
+      )
+      .exhaustive();
   } catch (err) {
     run.log.error({ err }, "coding execute failed");
     const failure = await failTaskFromCatch(run, deps, err);

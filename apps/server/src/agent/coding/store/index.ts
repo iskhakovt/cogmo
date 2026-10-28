@@ -659,7 +659,8 @@ export class DrizzleCodingStore implements CodingStore {
         status,
         ...failureColumns(failure),
       }))
-      .otherwise(({ status }) => ({ status }));
+      .with({ status: P.not(P.union("failed", "cancelled")) }, ({ status }) => ({ status }))
+      .exhaustive();
     await tx.update(codingTasks).set(set).where(eq(codingTasks.id, params.id));
   }
 

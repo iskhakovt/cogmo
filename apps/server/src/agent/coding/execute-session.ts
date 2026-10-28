@@ -8,7 +8,7 @@ import type { SandboxSession } from "../../sandbox/index.js";
 import type { BackendUsage, CodingBackend } from "./backend.js";
 import type { CodingRun, TaskStoreDeps } from "./coding-run.js";
 import type { ExecuteStreamHandle } from "./progress-stream.js";
-import { fromSessionResult, type SessionResult } from "./session-result.js";
+import { fromSessionResult, type SessionMemo, type SessionResult } from "./session-result.js";
 import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
 import type { TaskFailure } from "./types.js";
 
@@ -80,7 +80,7 @@ async function streamExecute(
     stream: ExecuteStreamHandle;
     sessionId: string;
   },
-): Promise<SessionResult> {
+): Promise<SessionMemo> {
   const { task, repo, container, stream, sessionId } = args;
   let isError = false;
   let failure: TaskFailure | undefined;
