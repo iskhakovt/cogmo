@@ -59,7 +59,7 @@ export class SessionCloses {
     const closing: Promise<void> = transport
       .closeSession(sessionId)
       // Missed: the stream open that replaced this session closed it already.
-      .then((outcome) => void logMissedClose("debug", { sessionId }, outcome))
+      .then((outcome) => void logMissedClose({ sessionId }, outcome))
       .catch((err: unknown) =>
         logger.debug({ err, sessionId }, "web chat: closeSession on disconnect failed"),
       )
@@ -125,8 +125,10 @@ function transportErrorStatus(error: TransportError): number {
     case "identity_rejected":
       return 403;
     case "session_not_found":
-      // The send route's session can be closed between resolve and emit (e.g. a
-      // racing disconnect cleanup) — a benign 409, same as the no-session case.
+    case "session_closed":
+      // The send route's session can close between its resolve and its emit (a
+      // disconnect cleanup, a reconnect's resume) — a benign 409; the SPA's
+      // next send resolves the tab's session again.
       return 409;
     default:
       return 500;

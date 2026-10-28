@@ -66,6 +66,62 @@ describe("createInboundDispatch", () => {
 
       expect(transport.emit).toHaveBeenCalledOnce();
     });
+
+    it("transport.emit → session_closed: re-resolves the chat once and emits to its current session", async () => {
+      const stale = {
+        id: "session-stale",
+        channelId: "tg-ch",
+        platformAddress: "42",
+        conversationId: "conv-stale",
+        status: "active" as const,
+        receive: "routed" as const,
+      };
+      const current = { ...stale, id: "session-current", conversationId: "conv-current" };
+      const { transport } = await createAdapter({
+        resolveSession: vi.fn().mockResolvedValueOnce(stale).mockResolvedValueOnce(current),
+        emit: vi
+          .fn()
+          .mockResolvedValueOnce(
+            err({ code: "session_closed" as const, sessionId: "session-stale" }),
+          )
+          .mockResolvedValueOnce(ok(undefined)),
+      });
+      const ctx = makeCtx(111, "test", 42);
+
+      await handlers.get("on:message:text")(ctx);
+
+      expect(transport.emit).toHaveBeenNthCalledWith(
+        2,
+        "session-current",
+        "test",
+        expect.any(Date),
+      );
+      expect(transport.createConversation).not.toHaveBeenCalled();
+      expect(ctx.reply).not.toHaveBeenCalled();
+    });
+
+    it("transport.emit → session_closed twice: asks the user to resend", async () => {
+      const stale = {
+        id: "session-stale",
+        channelId: "tg-ch",
+        platformAddress: "42",
+        conversationId: "conv-stale",
+        status: "active" as const,
+        receive: "routed" as const,
+      };
+      const { transport } = await createAdapter({
+        resolveSession: vi.fn().mockResolvedValueOnce(stale).mockResolvedValueOnce(null),
+        emit: vi
+          .fn()
+          .mockResolvedValue(err({ code: "session_closed" as const, sessionId: "session-stale" })),
+      });
+      const ctx = makeCtx(111, "test", 42);
+
+      await handlers.get("on:message:text")(ctx);
+
+      expect(transport.emit).toHaveBeenCalledOnce();
+      expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("send it again"));
+    });
   });
 
   describe("boundary hold", () => {

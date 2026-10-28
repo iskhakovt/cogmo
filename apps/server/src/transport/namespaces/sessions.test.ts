@@ -193,7 +193,7 @@ describe("closeActiveSession", () => {
 describe("emit", () => {
   it("persists inbound and sends inngest event", async () => {
     const ts = mockTransportStore({
-      getSession: vi.fn().mockResolvedValue({
+      lockSession: vi.fn().mockResolvedValue({
         id: "session-1",
         channelId: "ch-1",
         platformAddress: "addr-1",
@@ -220,15 +220,20 @@ describe("emit", () => {
     expect(inngestSend).toHaveBeenCalled();
   });
 
-  it("returns error when session not found", async () => {
-    const { sessions } = setup();
+  it("returns session_not_found when no row exists", async () => {
+    const { sessions, transportStore } = setup();
     const result = await sessions.emit("nonexistent", "hello", new Date());
-    expect(result._unsafeUnwrapErr()).toMatchObject({ code: "session_not_found" });
+    expect(result._unsafeUnwrapErr()).toEqual({
+      code: "session_not_found",
+      sessionId: "nonexistent",
+    });
+    expect(transportStore.lockSession).toHaveBeenCalledWith(expect.anything(), "nonexistent");
+    expect(transportStore.getSession).not.toHaveBeenCalled();
   });
 
-  it("refuses a closed session instead of persisting into its superseded conversation", async () => {
+  it("refuses a closed session as session_closed instead of persisting into its superseded conversation", async () => {
     const ts = mockTransportStore({
-      getSession: vi.fn().mockResolvedValue({
+      lockSession: vi.fn().mockResolvedValue({
         id: "session-1",
         channelId: "ch-1",
         platformAddress: "addr-1",
@@ -241,10 +246,7 @@ describe("emit", () => {
 
     const result = await sessions.emit("session-1", "hello", new Date());
 
-    expect(result._unsafeUnwrapErr()).toEqual({
-      code: "session_not_found",
-      sessionId: "session-1",
-    });
+    expect(result._unsafeUnwrapErr()).toEqual({ code: "session_closed", sessionId: "session-1" });
     expect(ts.persistInbound).not.toHaveBeenCalled();
     expect(inngestSend).not.toHaveBeenCalled();
   });

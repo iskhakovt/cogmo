@@ -2,6 +2,7 @@ import type { PipelineRunStatus } from "../agent/pipeline/store/index.js";
 
 export type TransportError =
   | { code: "session_not_found"; sessionId: string }
+  | { code: "session_closed"; sessionId: string }
   | { code: "identity_rejected" }
   | { code: "conversation_not_found" }
   | { code: "profile_not_found" }

@@ -339,6 +339,7 @@ export function mockTransportStore(overrides?: Partial<TransportStore>): Transpo
         }),
     ),
     getSession: vi.fn().mockResolvedValue(null),
+    lockSession: vi.fn().mockResolvedValue(null),
     persistInbound: vi.fn().mockResolvedValue({ id: "inbound-1" }),
     getUnbatchedInbound: vi
       .fn()

@@ -185,6 +185,14 @@ export interface TransportStore {
   closeSession(tx: Transaction, sessionId: string): Promise<CloseSessionOutcome>;
 
   /**
+   * A session row under a share lock. A close that commits after this
+   * transaction's snapshot raises `40001` here instead of going unseen, so
+   * the transactor's retry reads the closed row — `emit`'s guard against
+   * writing an inbound past a swap or rotation.
+   */
+  lockSession(tx: Transaction, sessionId: string): Promise<Session | undefined>;
+
+  /**
    * The `close` transition keyed on the address: close its active session,
    * if any, in one conditional UPDATE — no lookup for a concurrent swap or
    * rotation to go stale against.
@@ -670,6 +678,22 @@ export class DrizzleTransportStore implements TransportStore {
       .returning({ id: channelSessions.id });
     const row = closed[0];
     return row ? { kind: "closed", sessionId: row.id } : { kind: "none" };
+  }
+
+  async lockSession(tx: Transaction, sessionId: string): Promise<Session | undefined> {
+    const rows = await tx
+      .select({
+        id: channelSessions.id,
+        channelId: channelSessions.channelId,
+        platformAddress: channelSessions.platformAddress,
+        conversationId: channelSessions.conversationId,
+        status: channelSessions.status,
+        receive: channelSessions.receive,
+      })
+      .from(channelSessions)
+      .where(eq(channelSessions.id, sessionId))
+      .for("share");
+    return rows[0];
   }
 
   async closeSession(tx: Transaction, sessionId: string): Promise<CloseSessionOutcome> {

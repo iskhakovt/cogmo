@@ -71,15 +71,26 @@ export async function handleDirectInbound(
   const { session } = resolved;
 
   const emitted = await stepRun("emit-inbound", async () => {
-    const result = await transport.emit(session.id, text, new Date(platformTs));
-    return result.match(
-      () => ({ ok: true as const }),
-      (reason) => ({ ok: false as const, reason }),
-    );
+    const first = await transport.emit(session.id, text, new Date(platformTs));
+    if (first.isOk()) return { ok: true as const, conversationId: session.conversationId };
+    return match(first.error)
+      .with({ code: "session_closed" }, async (reason) => {
+        // The session closed between the resolve step and this one — a
+        // rotation or `/new` landed. The message belongs to whatever is active
+        // on the address now; one more lookup finds it.
+        const current = await transport.resolveSession(platformAddress);
+        if (!current) return { ok: false as const, reason };
+        const retry = await transport.emit(current.id, text, new Date(platformTs));
+        return retry.match(
+          () => ({ ok: true as const, conversationId: current.conversationId }),
+          (again) => ({ ok: false as const, reason: again }),
+        );
+      })
+      .otherwise((reason) => ({ ok: false as const, reason }));
   });
   if (!emitted.ok) return rejected(platformAddress, emitted.reason);
 
-  return { status: "emitted", conversationId: session.conversationId };
+  return { status: "emitted", conversationId: emitted.conversationId };
 }
 
 function rejected(platformAddress: string, reason: TransportError): DirectInboundResult {

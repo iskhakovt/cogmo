@@ -74,6 +74,17 @@ function makeDeps() {
   transportStore.findReachableChannelsForUserProfile.mockResolvedValue([
     { channelId: "tg", channelType: "telegram", platformAddress: "42", receive: "routed" },
   ]);
+  transportStore.swapSession.mockResolvedValue({
+    session: {
+      id: "session-new",
+      channelId: "tg",
+      platformAddress: "42",
+      conversationId: "conv-new",
+      status: "active",
+      receive: "routed",
+    },
+    closedIds: [],
+  });
 
   const deps: StartPipelineRunDeps = {
     runInTx: fakeRunInTx,

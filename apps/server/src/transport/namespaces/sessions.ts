@@ -1,5 +1,6 @@
 import type { Inngest } from "inngest";
 import { err, ok, type Result } from "neverthrow";
+import { match } from "ts-pattern";
 import type { inboundArrived as InboundArrivedEvent } from "../../inngest/events.js";
 import type { AttachmentStore } from "../attachment-store.js";
 import type { InboundContent } from "../content.js";
@@ -49,8 +50,12 @@ export interface TransportSessions {
   closeActiveSession(platformAddress: string): Promise<CloseActiveSessionOutcome>;
   /**
    * Persist an inbound on an active session and emit `inbound/arrived`.
-   * A closed session is refused as `session_not_found`: the conversation it
-   * pointed at is superseded, and a reply there would be skipped.
+   * The session row is read under a share lock, so a close that commits
+   * between the caller's `resolveSession` and this write is seen (or raises
+   * `40001` and is seen on the retry): a closed session is refused as
+   * `session_closed`, a missing one as `session_not_found`, and nothing is
+   * written. An address-keyed caller re-resolves the address and emits to
+   * its current session; a conversation-scoped one reports the refusal.
    */
   emit(
     sessionId: string,
@@ -153,32 +158,38 @@ export function createSessions(
     },
 
     async emit(sessionId, content, platformTs) {
-      const inbound = await runInTx(async (tx) => {
-        const session = await transportStore.getSession(tx, sessionId);
-        if (session?.status !== "active") return null;
-
-        const inbound = await transportStore.persistInbound(tx, {
-          channelSessionId: sessionId,
-          conversationId: session.conversationId,
-          content,
-          platformTs,
-          source: "user",
-        });
-        return { conversationId: session.conversationId, inboundId: inbound.id };
+      const outcome = await runInTx(async (tx) => {
+        const session = await transportStore.lockSession(tx, sessionId);
+        if (!session) return { kind: "not_found" } as const;
+        return match(session.status)
+          .with("closed", () => ({ kind: "closed" }) as const)
+          .with("active", async () => {
+            const inbound = await transportStore.persistInbound(tx, {
+              channelSessionId: sessionId,
+              conversationId: session.conversationId,
+              content,
+              platformTs,
+              source: "user",
+            });
+            return {
+              kind: "persisted",
+              conversationId: session.conversationId,
+              inboundId: inbound.id,
+            } as const;
+          })
+          .exhaustive();
       });
 
-      if (!inbound) {
-        return err({ code: "session_not_found" as const, sessionId });
-      }
-
-      await inngest.send(
-        inboundArrived.create({
-          conversationId: inbound.conversationId,
-          inboundMessageId: inbound.inboundId,
-        }),
-      );
-
-      return ok(undefined);
+      return match(outcome)
+        .with({ kind: "not_found" }, () => err({ code: "session_not_found" as const, sessionId }))
+        .with({ kind: "closed" }, () => err({ code: "session_closed" as const, sessionId }))
+        .with({ kind: "persisted" }, async ({ conversationId, inboundId }) => {
+          await inngest.send(
+            inboundArrived.create({ conversationId, inboundMessageId: inboundId }),
+          );
+          return ok(undefined);
+        })
+        .exhaustive();
     },
 
     async uploadAttachment(data: Buffer, mediaType: string): Promise<string> {

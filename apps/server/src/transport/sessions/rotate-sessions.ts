@@ -1,4 +1,5 @@
 import type { Transaction } from "../../db/index.js";
+import { logger } from "../../logger.js";
 import type { ReachableChannel, TransportStore } from "../store/index.js";
 
 export interface RotateSessionsDeps {
@@ -25,9 +26,20 @@ export async function rotateSessions(
   args: RotateSessionsArgs,
 ): Promise<void> {
   for (const ch of args.channels) {
-    await deps.transportStore.swapSession(tx, ch.channelId, ch.platformAddress, {
+    const swapped = await deps.transportStore.swapSession(tx, ch.channelId, ch.platformAddress, {
       conversationId: args.conversationId,
       receive: ch.receive,
     });
+    if (swapped.closedIds.length > 0) {
+      logger.info(
+        {
+          channelId: ch.channelId,
+          platformAddress: ch.platformAddress,
+          sessionId: swapped.session.id,
+          closedSessionIds: swapped.closedIds,
+        },
+        "rotate closed the address's active session",
+      );
+    }
   }
 }

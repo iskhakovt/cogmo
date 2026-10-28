@@ -292,6 +292,25 @@ describe("DrizzleTransportStore", () => {
       expect((await tx((trx) => store.getSession(trx, other)))?.status).toBe("active");
     });
 
+    it("lockSession reads the row whatever its status, and undefined for an unknown id", async () => {
+      const channelId = await seedChannel();
+      const { conversationId } = await seedConversation();
+      const sessionId = await seedSession(channelId, conversationId, "addr-lock");
+
+      expect(await tx((trx) => store.lockSession(trx, sessionId))).toMatchObject({
+        id: sessionId,
+        status: "active",
+      });
+      await tx((trx) => store.closeSession(trx, sessionId));
+      expect(await tx((trx) => store.lockSession(trx, sessionId))).toMatchObject({
+        id: sessionId,
+        status: "closed",
+      });
+      expect(
+        await tx((trx) => store.lockSession(trx, "00000000-0000-7000-8000-000000000000")),
+      ).toBeUndefined();
+    });
+
     it("a closed session frees the address: the next swap closes nothing and opens a new row", async () => {
       const channelId = await seedChannel();
       const { conversationId } = await seedConversation();

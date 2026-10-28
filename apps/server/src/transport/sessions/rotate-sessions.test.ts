@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { logger } from "../../logger.js";
 import { mockTransportStore } from "../../test/factories.js";
 import { rotateSessions } from "./rotate-sessions.js";
 
@@ -31,6 +32,41 @@ describe("rotateSessions", () => {
       "tab-7",
       { conversationId: "conv-fresh", receive: "all" },
     );
+  });
+
+  it("logs the session each swap closed", async () => {
+    const transportStore = mockTransportStore({
+      swapSession: vi.fn().mockResolvedValue({
+        session: {
+          id: "session-new",
+          channelId: "ch-tg",
+          platformAddress: "chat-42",
+          conversationId: "conv-fresh",
+          status: "active",
+          receive: "routed",
+        },
+        closedIds: ["session-old"],
+      }),
+    });
+    const info = vi.spyOn(logger, "info").mockImplementation(() => undefined);
+
+    try {
+      await rotateSessions({ transportStore }, FAKE_TX, {
+        conversationId: "conv-fresh",
+        channels: [{ channelId: "ch-tg", platformAddress: "chat-42", receive: "routed" }],
+      });
+      expect(info).toHaveBeenCalledWith(
+        {
+          channelId: "ch-tg",
+          platformAddress: "chat-42",
+          sessionId: "session-new",
+          closedSessionIds: ["session-old"],
+        },
+        expect.stringContaining("rotate closed"),
+      );
+    } finally {
+      info.mockRestore();
+    }
   });
 
   it("swaps nothing for no channels", async () => {

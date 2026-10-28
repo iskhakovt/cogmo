@@ -117,7 +117,8 @@ export const channelSessions = pgTable(
       .references(() => conversations.id),
     status: channelSessionStatus("status").notNull(),
     receive: channelSessionReceive("receive").notNull(),
-    expiresAt: timestamp("expires_at", { withTimezone: true }), // NULL = never expires
+    // Nothing reads or writes it; see design/transport/sessions.md → Lifecycle.
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
     createdAt: ts(),
   },
   (t) => [

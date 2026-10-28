@@ -201,6 +201,17 @@ describe("PipelinesService.start", () => {
     transportStore.findReachableChannelsForUserProfile.mockResolvedValue([
       { channelId: "tg", channelType: "telegram", platformAddress: "42", receive: "routed" },
     ]);
+    transportStore.swapSession.mockResolvedValue({
+      session: {
+        id: "session-run",
+        channelId: "tg",
+        platformAddress: "42",
+        conversationId: "conv-run",
+        status: "active",
+        receive: "routed",
+      },
+      closedIds: [],
+    });
     runStore.insertOrRecoverRun.mockResolvedValue({
       kind: "new",
       row: {

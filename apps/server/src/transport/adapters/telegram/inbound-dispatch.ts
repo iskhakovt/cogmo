@@ -4,6 +4,7 @@
  */
 
 import type { Bot } from "grammy";
+import { match } from "ts-pattern";
 import { logger } from "../../../logger.js";
 import type { AdapterDeps } from "../../adapter-module.js";
 import type { InboundContent } from "../../content.js";
@@ -166,9 +167,22 @@ async function doDispatch(
   }
 
   const emitResult = await transport.emit(session.id, content, platformTs);
-  if (emitResult.isErr()) {
-    logger.error({ error: emitResult.error }, "failed to emit message");
-  }
+  if (emitResult.isOk()) return;
+  await match(emitResult.error)
+    .with({ code: "session_closed" }, async () => {
+      // The session closed between the lookup and the write — a scheduled
+      // fire or pipeline rotated the chat. The message belongs to whatever is
+      // active on the chat now; one more lookup finds it.
+      const current = await transport.resolveSession(addr);
+      const retried = current ? await transport.emit(current.id, content, platformTs) : null;
+      if (retried?.isOk()) return;
+      logger.warn(
+        { addr, error: retried?.isErr() ? retried.error : emitResult.error },
+        "telegram: inbound lost its session twice",
+      );
+      await ctx.reply("That message didn't go through — please send it again.");
+    })
+    .otherwise((error) => logger.error({ error }, "failed to emit message"));
 }
 
 /**
