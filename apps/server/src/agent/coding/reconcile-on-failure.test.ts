@@ -54,12 +54,18 @@ describe("reconcileCodingTaskFailure", () => {
     expect(result).toEqual({
       status: "reconciled",
       taskId: "019e2875-2076-7730-b552-3cbbfb9b45d2",
-      failureReason: expect.stringContaining("connect_worker_stopped_responding"),
+      failure: {
+        reason: "run_terminated",
+        detail: expect.stringContaining("connect_worker_stopped_responding"),
+      },
     });
     expect(store.failTaskIfNonTerminal).toHaveBeenCalledWith(
       expect.anything(),
       "019e2875-2076-7730-b552-3cbbfb9b45d2",
-      expect.stringContaining("connect_worker_stopped_responding"),
+      {
+        reason: "run_terminated",
+        detail: expect.stringContaining("connect_worker_stopped_responding"),
+      },
     );
   });
 
@@ -175,25 +181,16 @@ describe("reconcileCodingTaskFailure", () => {
     // two MUST be the same string — divergence would mean the
     // post-mortem reason in `coding_tasks.failure_reason` and the
     // event payload disagree.
-    expect(store.failTaskIfNonTerminal).toHaveBeenCalledWith(
-      expect.anything(),
-      "abc-123",
-      expect.stringMatching(/run_id 01XYZ/),
-    );
-    expect(store.failTaskIfNonTerminal).toHaveBeenCalledWith(
-      expect.anything(),
-      "abc-123",
-      expect.stringMatching(/function_id coding-task-execute/),
-    );
-    expect(store.failTaskIfNonTerminal).toHaveBeenCalledWith(
-      expect.anything(),
-      "abc-123",
-      expect.stringContaining("The worker stopped responding"),
-    );
     if (result.status !== "reconciled") throw new Error("expected reconciled");
-    expect(result.failureReason).toMatch(/run_id 01XYZ/);
-    expect(result.failureReason).toMatch(/function_id coding-task-execute/);
-    expect(result.failureReason).toContain("The worker stopped responding");
+    expect(store.failTaskIfNonTerminal).toHaveBeenCalledWith(
+      expect.anything(),
+      "abc-123",
+      result.failure,
+    );
+    expect(result.failure.reason).toBe("run_terminated");
+    expect(result.failure.detail).toMatch(/run_id 01XYZ/);
+    expect(result.failure.detail).toMatch(/function_id coding-task-execute/);
+    expect(result.failure.detail).toContain("The worker stopped responding");
   });
 
   it("masks credentials the error message quotes, in the row and the returned reason alike", async () => {
@@ -210,12 +207,12 @@ describe("reconcileCodingTaskFailure", () => {
     );
 
     if (result.status !== "reconciled") throw new Error("expected reconciled");
-    expect(result.failureReason).toContain("clone https://REDACTED@github.com/o/r failed");
-    expect(result.failureReason).not.toContain(pat);
+    expect(result.failure.detail).toContain("clone https://REDACTED@github.com/o/r failed");
+    expect(result.failure.detail).not.toContain(pat);
     expect(store.failTaskIfNonTerminal).toHaveBeenCalledWith(
       expect.anything(),
       "abc-123",
-      result.failureReason,
+      result.failure,
     );
   });
 });
@@ -257,7 +254,7 @@ describe("createCodingTaskReconcile — durable wrapper", () => {
     sendSpy.mockRestore();
   });
 
-  it("on reconciled: invokes step.sendEvent exactly once with idempotency id 'reconcile-' + run_id", async () => {
+  it("on a reconciled memo predating `failure`: reads its text as the run_terminated detail and emits once under 'reconcile-' + run_id", async () => {
     const store = mock<CodingStore>();
     const fn = createCodingTaskReconcile(
       { runInTx: ((cb) => cb({ __mockTx: true } as never)) as Transactor, store },
@@ -299,7 +296,69 @@ describe("createCodingTaskReconcile — durable wrapper", () => {
       payload: {
         name: "coding/task/failed",
         id: "reconcile-run-aaa",
-        data: { taskId: "task-001", reason: "decoy reason" },
+        data: { taskId: "task-001", reason: "run_terminated", detail: "decoy reason" },
+      },
+    });
+  });
+
+  it("refuses a reconciled memo that carries no failure instead of emitting an empty one", async () => {
+    const store = mock<CodingStore>();
+    const fn = createCodingTaskReconcile({ runInTx: fakeRunInTx, store }, inngest);
+    const engine = new InngestTestEngine({
+      function: fn,
+      events: [
+        makeFailureEvent({
+          taskId: "task-002",
+          runId: "run-bbb",
+          functionId: "cogmo-coding-task-execute",
+        }),
+      ],
+      steps: [
+        {
+          id: "reconcile",
+          handler: () => ({ status: "reconciled" as const, taskId: "task-002" }),
+        },
+      ],
+    });
+
+    const { error } = await engine.execute();
+
+    expect(error).toBeDefined();
+    expect(sendSpy).not.toHaveBeenCalled();
+  });
+
+  it("on reconciled: invokes step.sendEvent exactly once with the memoized failure", async () => {
+    const store = mock<CodingStore>();
+    const fn = createCodingTaskReconcile({ runInTx: fakeRunInTx, store }, inngest);
+    const engine = new InngestTestEngine({
+      function: fn,
+      events: [
+        makeFailureEvent({
+          taskId: "task-003",
+          runId: "run-ccc",
+          functionId: "cogmo-coding-task-verify",
+        }),
+      ],
+      steps: [
+        {
+          id: "reconcile",
+          handler: () => ({
+            status: "reconciled" as const,
+            taskId: "task-003",
+            failure: { reason: "run_terminated" as const, detail: "worker gone" },
+          }),
+        },
+      ],
+    });
+
+    await engine.execute();
+
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    expect(sendSpy.mock.calls[0]?.[0]).toMatchObject({
+      payload: {
+        name: "coding/task/failed",
+        id: "reconcile-run-ccc",
+        data: { taskId: "task-003", reason: "run_terminated", detail: "worker gone" },
       },
     });
   });
@@ -333,7 +392,11 @@ describe("createCodingTaskReconcile — durable wrapper", () => {
     expect(sendSpy.mock.calls[0]?.[0]).toMatchObject({
       payload: {
         name: "coding/task/failed",
-        data: { taskId: "task-002", reason: "clone https://REDACTED@github.com/o/r failed" },
+        data: {
+          taskId: "task-002",
+          reason: "run_terminated",
+          detail: "clone https://REDACTED@github.com/o/r failed",
+        },
       },
     });
   });

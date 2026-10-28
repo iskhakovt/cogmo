@@ -16,7 +16,7 @@ import { loadIdentity } from "./git-as-transport.js";
 import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
 import {
   checkoutFeatureBranchStep,
-  loadSandboxEnv,
+  loadSandboxEnvOrThrow,
   type SandboxAuthDeps,
   taskImage,
   taskSessionSpec,
@@ -31,10 +31,12 @@ interface PlanSandboxDeps extends TaskStoreDeps, SandboxAuthDeps {
 }
 
 /**
- * Subscription auth resolves first, outside any step, so a missing secret
- * short-circuits before a container exists for `claude -p` to hang in. On
- * git-remote the GitHub identity follows, for the sandbox's clone, and
- * askpass is mounted on this container: an execute run that resumes it (no
+ * The run's `check-credentials` step has already found the Claude OAuth token
+ * and, on git-remote, the GitHub identity. Each loads inside the step body
+ * that uses it — the token and the clone's PAT in `create-container`, the
+ * identity for askpass in `provision-askpass` — so neither becomes a step
+ * return value and the bare body depends only on the memoized verdict.
+ * Askpass is mounted on this container: an execute run that resumes it (no
  * `sandbox.create` on that path) re-provisions the same directory.
  *
  * On failure the caller's catch reaps the sandbox by task label whether or
@@ -53,23 +55,20 @@ export async function preparePlanSandbox(
 ): Promise<SandboxSessionState> {
   const { sandbox } = deps;
   const { task, repo, assignment } = args;
-  const auth = await loadSandboxEnv(deps);
-  if (auth.isErr()) {
-    throw new Error(auth.error.message);
-  }
-  const env = auth.value;
 
-  let identityPat: string | undefined;
-  let askpassMaterials: AskpassMaterials | undefined;
-  if (sandbox.capabilities.workingTreeTransport === "git-remote") {
-    const identity = await loadIdentity({
-      runInTx: deps.runInTx,
-      secretsStore: deps.secretsStore,
-      identityName: repo.identityName,
-    });
-    identityPat = identity.pat;
-    askpassMaterials = await args.askpass.provision(run, identity);
-  }
+  // Called only inside the step bodies that consume it.
+  const identity =
+    sandbox.capabilities.workingTreeTransport === "git-remote"
+      ? () =>
+          loadIdentity({
+            runInTx: deps.runInTx,
+            secretsStore: deps.secretsStore,
+            identityName: repo.identityName,
+          })
+      : undefined;
+  const askpassMaterials: AskpassMaterials | undefined = identity
+    ? await args.askpass.provision(run, identity)
+    : undefined;
 
   const image = taskImage(repo, deps.devbaseImage);
   // The delegate-gate: on Daytona this resolves once the named snapshot is
@@ -86,12 +85,12 @@ export async function preparePlanSandbox(
         task,
         repo,
         assignment,
-        identityPat,
+        identityPat: identity ? (await identity()).pat : undefined,
         askpass: askpassMaterials,
         image,
         resourceLimits: deps.defaultResourceLimits,
         taskTtlMs: deps.taskTtlMs,
-        env,
+        env: await loadSandboxEnvOrThrow(deps),
       }),
     );
     return session.state;

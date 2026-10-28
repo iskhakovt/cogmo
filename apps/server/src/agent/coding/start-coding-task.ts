@@ -8,8 +8,8 @@ import type { EventPublisher } from "../../inngest/durable.js";
 import { codingTaskStart } from "../../inngest/events.js";
 import { logger } from "../../logger.js";
 import { describeError } from "../../util/describe-error.js";
-import { redactSecretsInText } from "../../util/redact-secrets.js";
 import type { CodingStore } from "./store/index.js";
+import { maskTaskFailure } from "./task-failure.js";
 
 const log = logger.child({ component: "coding.service" });
 
@@ -51,7 +51,7 @@ export async function startCodingTask(
         deps.codingStore.failQueuedTask(
           tx,
           taskId,
-          redactSecretsInText(`inngest.send failed: ${describeError(sendErr)}`),
+          maskTaskFailure({ reason: "start_emit_failed", detail: describeError(sendErr) }),
         ),
       )
       .then((freed) => {

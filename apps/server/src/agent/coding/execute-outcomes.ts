@@ -4,7 +4,8 @@
  * failed, or abandoned to a task that ended under the run.
  */
 
-import { match } from "ts-pattern";
+import { err, ok, type Result } from "neverthrow";
+import { match, P } from "ts-pattern";
 import type { EventPublisher } from "../../inngest/durable.js";
 import type { SandboxClient, SandboxSession } from "../../sandbox/index.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
@@ -16,7 +17,7 @@ import { completionTokens } from "./execute-session.js";
 import { runBranchFor } from "./git-as-transport.js";
 import type { ExecuteStreamHandle } from "./progress-stream.js";
 import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
-import { type RecordedFailure, recordTaskFailed } from "./task-failure.js";
+import { describeTaskFailure, type RecordedFailure, recordTaskFailed } from "./task-failure.js";
 import {
   advanceTask,
   reclaimEndedTask,
@@ -25,7 +26,7 @@ import {
 } from "./task-lifecycle.js";
 import { reapTaskSandbox, WORKTREE_DIR_IN_CONTAINER } from "./task-sandbox.js";
 import { safeTeardownWorktree } from "./teardown.js";
-import type { WorktreeAssignment } from "./types.js";
+import type { TaskFailure, WorktreeAssignment } from "./types.js";
 
 interface ExecuteOutcomeDeps extends TaskStoreDeps {
   sandbox: Pick<SandboxClient, "deleteByTaskId">;
@@ -43,7 +44,10 @@ interface ExecuteExitContext {
  * Below the claim on purpose: a throw here fails the function, which sends
  * `coding-task-reconcile` at a row that — before the claim — this run has no
  * title to. The three fields are the plan phase's and this run never writes
- * them, so checking them in the bare body is stable across replays.
+ * them, so checking them in the bare body is stable across replays. The
+ * row's CHECKs hold `plan_approved_at` set at `executing`; `session_id` and
+ * `worktree_assignment` have no CHECK, since the plan run advances to
+ * `awaiting_approval` whether or not the backend reported a session id.
  */
 export async function checkExecutable(
   task: CodingTaskRow,
@@ -73,8 +77,7 @@ export async function checkExecutable(
  * git-remote: push claude's commits from inside the execute sandbox to the
  * run-branch `cogmo/run/<task-id>` — the ref the verify sandbox clones.
  * Verify then creates `cogmo/<idShort>` from its tip and pushes that as the
- * PR head. Returns the failure reason, or null when the push landed (or
- * there was nothing to commit).
+ * PR head. Ok when the push landed or there was nothing to commit.
  */
 export async function pushExecuteChanges(
   run: CodingRun,
@@ -84,7 +87,7 @@ export async function pushExecuteChanges(
     credentials: ExecutePushCredentials;
     container: () => Promise<SandboxSession>;
   },
-): Promise<string | null> {
+): Promise<Result<void, TaskFailure>> {
   const { assignment, credentials } = args;
   if (assignment.type !== "git-remote") {
     throw new Error(
@@ -103,11 +106,21 @@ export async function pushExecuteChanges(
         GIT_ASKPASS: credentials.askpass.helperPath,
         GIT_TERMINAL_PROMPT: "0",
       },
-      author: commitAuthorFor(credentials.identity),
+      author: commitAuthorFor(await credentials.identity()),
     }),
   );
-  if (result.kind === "pushed" || result.kind === "nothing_to_commit") return null;
-  return `execute push failed (${result.kind}):\n\n${result.output}`;
+  return match(result)
+    .with({ kind: P.union("pushed", "nothing_to_commit") }, () => ok<void, TaskFailure>(undefined))
+    .with({ kind: "branch_conflict" }, ({ output }) =>
+      err<void, TaskFailure>({ reason: "branch_conflict", detail: output }),
+    )
+    .with({ kind: "auth_failed" }, ({ output }) =>
+      err<void, TaskFailure>({ reason: "auth_failed", detail: output }),
+    )
+    .with({ kind: "failed" }, ({ output }) =>
+      err<void, TaskFailure>({ reason: "push_failed", detail: output }),
+    )
+    .exhaustive();
 }
 
 /** Step ids of one execute failure exit; each exit has its own. */
@@ -123,7 +136,7 @@ interface ExecuteFailureSteps {
 }
 
 /**
- * Records the failure and tears the task down, resolving to the reason as
+ * Records the failure and tears the task down, resolving to the failure as
  * recorded, masked. When the task had already ended under the run (a Cancel
  * during `execute-cli`), nothing is recorded: the run reclaims its worktree
  * and sandbox and resolves to `ended`.
@@ -132,10 +145,10 @@ export async function endExecuteFailed(
   run: CodingRun,
   deps: ExecuteOutcomeDeps,
   exit: ExecuteExitContext,
-  rawReason: string,
+  failure: TaskFailure,
   steps: ExecuteFailureSteps,
 ): Promise<RecordedFailure> {
-  const recorded = await recordTaskFailed(run, deps, rawReason, steps.transition);
+  const recorded = await recordTaskFailed(run, deps, failure, steps.transition);
   await match(recorded)
     .with({ kind: "ended" }, () =>
       reclaimEndedTask(run, deps, {
@@ -145,8 +158,8 @@ export async function endExecuteFailed(
         notify: { stream: exit.stream, message: "Task cancelled while executing." },
       }),
     )
-    .with({ kind: "recorded" }, ({ reason }) =>
-      tearDownFailedExecute(run, deps, exit, reason, steps),
+    .with({ kind: "recorded" }, ({ failure: recordedFailure }) =>
+      tearDownFailedExecute(run, deps, exit, recordedFailure, steps),
     )
     .exhaustive();
   return recorded;
@@ -157,7 +170,7 @@ async function tearDownFailedExecute(
   run: CodingRun,
   deps: ExecuteOutcomeDeps,
   exit: ExecuteExitContext,
-  reason: string,
+  failure: TaskFailure,
   steps: ExecuteFailureSteps,
 ): Promise<void> {
   if (steps.teardownWorktree !== null) {
@@ -181,7 +194,7 @@ async function tearDownFailedExecute(
       `execute stream complete(false) notification failed${steps.logSuffix}`,
     );
   });
-  await exit.stream.fail(reason).catch((streamErr: unknown) => {
+  await exit.stream.fail(describeTaskFailure(failure)).catch((streamErr: unknown) => {
     run.log.warn({ err: streamErr }, "execute stream fail notification failed");
   });
 }

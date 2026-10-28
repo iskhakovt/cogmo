@@ -62,7 +62,7 @@ describe("registerCallbackQueries", () => {
       expect(transport.coding.cancelTask).toHaveBeenCalledWith(
         TASK_ID,
         "111",
-        "user requested revisions",
+        "user_requested_revisions",
       );
       expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("what you'd like changed"));
       expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({ text: "Revising" });

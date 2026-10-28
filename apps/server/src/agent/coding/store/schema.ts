@@ -1,5 +1,7 @@
+import { sql } from "drizzle-orm";
 import {
   boolean,
+  check,
   integer,
   pgEnum,
   pgTable,
@@ -12,6 +14,7 @@ import { jsonbZod, pk, ts } from "../../../db/helpers.js";
 import { containers } from "../../../sandbox/store/schema.js";
 import { conversations } from "../../store/schema.js";
 import {
+  CODING_TASK_FAILURE_REASONS,
   DevcontainerSpecSchema,
   PrMetadataSchema,
   ResourceUsageSchema,
@@ -40,6 +43,12 @@ export const codingTaskStatus = pgEnum("coding_task_status", [
   "failed",
   "cancelled",
 ]);
+
+/** See `CODING_TASK_FAILURE_REASONS` in `../types.ts`. */
+export const codingTaskFailureReason = pgEnum(
+  "coding_task_failure_reason",
+  CODING_TASK_FAILURE_REASONS,
+);
 
 // --- Tables ---
 
@@ -126,7 +135,13 @@ export const codingTasks = pgTable(
     // populate PR state).
     prMetadata: jsonbZod("pr_metadata", PrMetadataSchema),
     status: codingTaskStatus("status").notNull(),
-    failureReason: text("failure_reason"),
+    // Why the task ended; set with `failed` and `cancelled`, null otherwise
+    // (`chk_coding_tasks_reason_with_end`).
+    failureReason: codingTaskFailureReason("failure_reason"),
+    // The masked text the writer of `failure_reason` had: a CLI exit code,
+    // the suite's output, a thrown error's message. Null when the reason
+    // says everything (a Cancel), and whenever the reason is null.
+    failureDetail: text("failure_detail"),
     resourceUsage: jsonbZod("resource_usage", ResourceUsageSchema), // null = no stats poll yet
     // Caller-supplied deterministic-per-submission token, so a `step.run`
     // body that crashes after this row commits but before Inngest records the
@@ -144,5 +159,39 @@ export const codingTasks = pgTable(
     claimedByRunId: text("claimed_by_run_id"),
     createdAt: ts(),
   },
-  (t) => [unique("uniq_coding_tasks_idempotency_key").on(t.idempotencyKey)],
+  (t) => [
+    unique("uniq_coding_tasks_idempotency_key").on(t.idempotencyKey),
+    // Per-state data, tied to the status that writes it. The table is in
+    // design/coding-delegation.md → Task lifecycle → Per-state data.
+    check(
+      "chk_coding_tasks_reason_with_end",
+      sql`(${t.failureReason} IS NOT NULL) = (${t.status} IN ('failed', 'cancelled'))`,
+    ),
+    check(
+      "chk_coding_tasks_detail_with_reason",
+      sql`${t.failureDetail} IS NULL OR ${t.failureReason} IS NOT NULL`,
+    ),
+    // Nothing is allocated, captured or claimed before the plan run's claim.
+    check(
+      "chk_coding_tasks_queued_bare",
+      sql`${t.status} <> 'queued' OR (${t.worktreeAssignment} IS NULL AND ${t.sessionId} IS NULL AND ${t.containerId} IS NULL AND ${t.plan} IS NULL AND ${t.planApprovedAt} IS NULL AND ${t.prMetadata} IS NULL AND ${t.resourceUsage} IS NULL AND ${t.claimedByRunId} IS NULL)`,
+    ),
+    // `persist-plan` precedes `set-status-plan-ready`.
+    check(
+      "chk_coding_tasks_plan_at_gate",
+      sql`${t.status} NOT IN ('awaiting_approval', 'executing', 'pending_verify', 'verifying', 'pushed', 'pr_open') OR ${t.plan} IS NOT NULL`,
+    ),
+    // `approvePlanIfPending` stamps it at `awaiting_approval`, and only
+    // `coding/task/plan-approved` triggers the execute claim.
+    check(
+      "chk_coding_tasks_approval_after_gate",
+      sql`(${t.planApprovedAt} IS NULL OR ${t.status} <> 'planning') AND (${t.status} NOT IN ('executing', 'pending_verify', 'verifying', 'pushed', 'pr_open') OR ${t.planApprovedAt} IS NOT NULL)`,
+    ),
+    // `set-pr-metadata` runs at `pushed`, ahead of `transition-pr-open`; a
+    // Cancel or a failure can land between the two.
+    check(
+      "chk_coding_tasks_pr_metadata_after_push",
+      sql`(${t.prMetadata} IS NULL OR ${t.status} IN ('pushed', 'pr_open', 'failed', 'cancelled')) AND (${t.status} <> 'pr_open' OR ${t.prMetadata} IS NOT NULL)`,
+    ),
+  ],
 );

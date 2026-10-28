@@ -21,7 +21,9 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { InngestTestEngine } from "@inngest/test";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { mock } from "vitest-mock-extended";
 import { inngest } from "../../inngest/client.js";
+import type { SecretsStore } from "../../secrets/store/index.js";
 import {
   codingAuthSecrets,
   codingRepoRow,
@@ -118,12 +120,19 @@ function countingBackend(events: { plan?: CodingEvent[]; execute?: CodingEvent[]
   };
 }
 
-function recordingPlanStream(): { handle: PlanStreamHandle; text: string[]; finalized: string[] } {
+function recordingPlanStream(): {
+  handle: PlanStreamHandle;
+  text: string[];
+  finalized: string[];
+  failed: string[];
+} {
   const text: string[] = [];
   const finalized: string[] = [];
+  const failed: string[] = [];
   return {
     text,
     finalized,
+    failed,
     handle: {
       appendText: async (delta) => {
         text.push(delta);
@@ -131,7 +140,9 @@ function recordingPlanStream(): { handle: PlanStreamHandle; text: string[]; fina
       finalize: async (plan) => {
         finalized.push(plan);
       },
-      fail: async () => {},
+      fail: async (message) => {
+        failed.push(message);
+      },
     },
   };
 }
@@ -219,7 +230,11 @@ describe("coding-task-start — Inngest replay", () => {
     // once, finds the row `already_terminal` at `failed`, and the failure
     // flow — the event, the teardown — carries on as recorded.
     const { store, current } = statefulCodingStore(
-      codingTaskRow({ status: "failed", failureReason: "plan exited with code 2" }),
+      codingTaskRow({
+        status: "failed",
+        failureReason: "cli_exit_error",
+        failureDetail: "plan exited with code 2",
+      }),
       localRepo(),
     );
     const backend = countingBackend({ plan: PLAN_EVENTS });
@@ -243,11 +258,149 @@ describe("coding-task-start — Inngest replay", () => {
     const { result, error } = await engine.execute();
 
     expect(error).toBeUndefined();
-    expect(result).toEqual({ status: "failed", failureReason: "plan exited with code 2" });
+    // The memoized `plan-cli` result predates `failure`: its `failureReason`
+    // text reads as the `cli_exit_error` detail.
+    expect(result).toEqual({
+      status: "failed",
+      failure: { reason: "cli_exit_error", detail: "plan exited with code 2" },
+    });
     expect(current().status).toBe("failed");
     expect(backend.planCalls()).toBe(0);
     expect(emittedEventNames(sendSpy)).toContain("coding/task/failed");
     expect(sandbox.teardownCalls()).toBe(1);
+  });
+
+  it("a run in flight that allocated before `check-credentials` existed tears down on a missing token", async () => {
+    // Allocation and the container are memoized from before the deploy; the
+    // new step runs for the first time and finds the token gone. The failure
+    // exit must reap the worktree and sandbox those steps left.
+    const worktreePath = join(baseDir, "worktrees", "cogmo", "in-flight");
+    const { store, current } = statefulCodingStore(
+      codingTaskRow({
+        status: "planning",
+        worktreeAssignment: { type: "host-path", branch: "cogmo/abc", worktreePath },
+      }),
+      localRepo(),
+    );
+    const backend = countingBackend({ plan: PLAN_EVENTS });
+    const sandbox = fakeCodingSandbox();
+    const secretsStore = mock<SecretsStore>();
+    secretsStore.getSecret.mockResolvedValue(undefined);
+    const fn = createCodingOrchestrator(
+      makeDeps({ store, backend: backend.backend, sandbox: sandbox.sandbox, secretsStore }),
+      inngest,
+    );
+
+    const engine = new InngestTestEngine({
+      function: fn,
+      events: [{ name: "coding/task/start", data: { taskId: FIXTURE_TASK_ID } }],
+      steps: [
+        { id: "claim-task-planning", handler: () => ({ kind: "transitioned" }) },
+        { id: "allocate-worktree", handler: () => null },
+        { id: "ensure-image-present", handler: () => null },
+        {
+          id: "create-container",
+          handler: () => ({
+            type: "local-docker",
+            taskId: FIXTURE_TASK_ID,
+            containerRowId: "row-1",
+            dockerId: "docker-1",
+          }),
+        },
+      ],
+    });
+    const { result, error } = await engine.execute();
+
+    expect(error).toBeUndefined();
+    expect(result).toMatchObject({
+      status: "failed",
+      failure: { reason: "credentials_unavailable" },
+    });
+    expect(current().status).toBe("failed");
+    expect(sandbox.teardownCalls()).toBe(1);
+    expect(backend.planCalls()).toBe(0);
+  });
+
+  describe("a step that throws reaches the catch", () => {
+    // A `plan-cli` memo no session wrote: the bare body's parse throws on
+    // every invocation, as a replayed `StepError` would, and reaches the catch.
+    const planCliFailed = { id: "plan-cli", handler: () => ({ isError: true }) };
+    const CAUGHT = {
+      reason: "unexpected_error",
+      detail: expect.stringContaining("an errored session memo carries its failure"),
+    };
+
+    it("records the failure once, emits it once, and tells the stream", async () => {
+      const { store, current } = statefulCodingStore(codingTaskRow(), localRepo());
+      const planStream = recordingPlanStream();
+      const fn = createCodingOrchestrator(
+        makeDeps({
+          store,
+          backend: countingBackend({ plan: PLAN_EVENTS }).backend,
+          openPlanStream: async () => planStream.handle,
+        }),
+        inngest,
+      );
+
+      const engine = new InngestTestEngine({
+        function: fn,
+        events: [{ name: "coding/task/start", data: { taskId: FIXTURE_TASK_ID } }],
+        steps: [planCliFailed],
+      });
+      const { result, error } = await engine.execute();
+
+      expect(error).toBeUndefined();
+      expect(result).toEqual({ status: "failed", failure: CAUGHT });
+      expect(current().status).toBe("failed");
+      expect(current().failureReason).toBe("unexpected_error");
+      expect(
+        emittedEventNames(sendSpy).filter((name) => name === "coding/task/failed"),
+      ).toHaveLength(1);
+      expect(planStream.failed).toEqual([
+        expect.stringMatching(/^Unexpected error: .*an errored session memo carries its failure/s),
+      ]);
+    });
+
+    it("a later invocation with the write and the emit memoized reports the failure without re-emitting", async () => {
+      const { store } = statefulCodingStore(
+        codingTaskRow({
+          status: "failed",
+          failureReason: "unexpected_error",
+          failureDetail: "backend exploded",
+        }),
+        localRepo(),
+      );
+      const planStream = recordingPlanStream();
+      const fn = createCodingOrchestrator(
+        makeDeps({
+          store,
+          backend: countingBackend({ plan: PLAN_EVENTS }).backend,
+          openPlanStream: async () => planStream.handle,
+        }),
+        inngest,
+      );
+      const failure = { reason: "unexpected_error", detail: "backend exploded" };
+
+      const engine = new InngestTestEngine({
+        function: fn,
+        events: [{ name: "coding/task/start", data: { taskId: FIXTURE_TASK_ID } }],
+        steps: [
+          { id: "claim-task-planning", handler: () => ({ kind: "transitioned" }) },
+          planCliFailed,
+          {
+            id: "record-catch-failure",
+            handler: () => ({ transition: { kind: "failed" }, failure }),
+          },
+          { id: "emit-task-failed", handler: () => ({ ids: [] }) },
+        ],
+      });
+      const { result, error } = await engine.execute();
+
+      expect(error).toBeUndefined();
+      expect(result).toEqual({ status: "failed", failure });
+      expect(emittedEventNames(sendSpy)).not.toContain("coding/task/failed");
+      expect(planStream.failed).toEqual(["Unexpected error: backend exploded"]);
+    });
   });
 
   it("skips a duplicate start event instead of re-planning", async () => {
@@ -325,6 +478,117 @@ describe("coding-task-execute — Inngest replay", () => {
     expect(backend.executeCalls()).toBe(1);
     expect(stream.started()).toBe(1);
     expect(stream.text()).toEqual(["Editing foo.ts\n"]);
+  });
+
+  it("reads an `execute-cli` memo predating `failure` as a cli_exit_error", async () => {
+    // A run in flight across the deploy memoized `{ isError, failureReason }`;
+    // the failure it records carries that text as the detail.
+    const { store, current } = statefulCodingStore(approvedTask(), localRepo());
+    const backend = countingBackend({ execute: EXECUTE_EVENTS });
+    const fn = createCodingExecuteOrchestrator(
+      makeDeps({ store, backend: backend.backend }),
+      inngest,
+    );
+
+    const engine = new InngestTestEngine({
+      function: fn,
+      events: [approvedEvent],
+      steps: [
+        { id: "set-status-executing", handler: () => ({ kind: "transitioned" }) },
+        { id: "try-resume", handler: () => null },
+        {
+          id: "execute-cli",
+          handler: () => ({ isError: true, failureReason: "claude exit code 2" }),
+        },
+      ],
+    });
+    const { result, error } = await engine.execute();
+
+    expect(error).toBeUndefined();
+    expect(result).toEqual({
+      status: "failed",
+      failure: { reason: "cli_exit_error", detail: "claude exit code 2" },
+    });
+    expect(current().failureReason).toBe("cli_exit_error");
+    expect(current().failureDetail).toBe("claude exit code 2");
+    expect(backend.executeCalls()).toBe(0);
+  });
+
+  it("carries on past a memoized `check-credentials` when the OAuth token is removed later in the run", async () => {
+    // The verdict is memoized: a token deleted after `create-container`
+    // does not send a replay down the credentials failure exit, which would
+    // fail a task that has already moved on and tear down its worktree.
+    const { store, current } = statefulCodingStore(approvedTask(), localRepo());
+    const backend = countingBackend({ execute: EXECUTE_EVENTS });
+    const secretsStore = mock<SecretsStore>();
+    secretsStore.getSecret.mockResolvedValue(undefined);
+    const fn = createCodingExecuteOrchestrator(
+      makeDeps({ store, backend: backend.backend, secretsStore }),
+      inngest,
+    );
+
+    const engine = new InngestTestEngine({
+      function: fn,
+      events: [approvedEvent],
+      steps: [
+        { id: "try-resume", handler: () => null },
+        { id: "check-credentials", handler: () => ({ kind: "present" }) },
+        {
+          id: "create-container",
+          handler: () => ({
+            type: "local-docker",
+            taskId: FIXTURE_TASK_ID,
+            containerRowId: "row-1",
+            dockerId: "docker-1",
+          }),
+        },
+        {
+          id: "execute-cli",
+          handler: () => ({ kind: "completed", usage: { inputTokens: 100, outputTokens: 20 } }),
+        },
+      ],
+    });
+    const { result, error } = await engine.execute();
+
+    expect(error).toBeUndefined();
+    expect(result).toEqual({ status: "pending_verify" });
+    expect(current().status).toBe("pending_verify");
+    expect(current().failureReason).toBeNull();
+    expect(backend.executeCalls()).toBe(0);
+  });
+
+  it("reads an `execute-cli` memo of the errored shape as its failure", async () => {
+    const { store, current } = statefulCodingStore(approvedTask(), localRepo());
+    const backend = countingBackend({ execute: EXECUTE_EVENTS });
+    const fn = createCodingExecuteOrchestrator(
+      makeDeps({ store, backend: backend.backend }),
+      inngest,
+    );
+
+    const engine = new InngestTestEngine({
+      function: fn,
+      events: [approvedEvent],
+      steps: [
+        { id: "set-status-executing", handler: () => ({ kind: "transitioned" }) },
+        { id: "try-resume", handler: () => null },
+        {
+          id: "execute-cli",
+          handler: () => ({
+            kind: "errored",
+            failure: { reason: "cli_exit_error", detail: "claude exit code 3" },
+          }),
+        },
+      ],
+    });
+    const { result, error } = await engine.execute();
+
+    expect(error).toBeUndefined();
+    expect(result).toEqual({
+      status: "failed",
+      failure: { reason: "cli_exit_error", detail: "claude exit code 3" },
+    });
+    expect(current().failureReason).toBe("cli_exit_error");
+    expect(backend.executeCalls()).toBe(0);
   });
 
   it("still skips a duplicate event, because the conditional UPDATE matches no row", async () => {

@@ -32,7 +32,6 @@ import {
   resolveGitHubIdentity,
 } from "../../secrets/github.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
-import { describeError } from "../../util/describe-error.js";
 import { AskpassLease } from "./askpass-lease.js";
 import type { loadCodingSandboxEnv } from "./auth.js";
 import { type CodingRun, codingRun, loadTaskAndRepo } from "./coding-run.js";
@@ -54,7 +53,7 @@ import {
   taskSessionSpec,
 } from "./task-sandbox.js";
 import { safeTeardownWorktree } from "./teardown.js";
-import type { WorktreeAssignment } from "./types.js";
+import type { TaskFailure, WorktreeAssignment } from "./types.js";
 import { runVerifyStreaming, type VerifyResult } from "./verify.js";
 import { type OpenTaskPrArgs, openTaskPr, pushVerifiedBranch } from "./verify-publish.js";
 
@@ -85,7 +84,7 @@ export interface VerifyOrchestratorDeps {
 
 export interface VerifyOrchestratorResult {
   status: "pr_open" | "pushed" | "failed" | "skipped";
-  failureReason?: string;
+  failure?: TaskFailure;
   prUrl?: string;
   prNumber?: number;
 }
@@ -165,7 +164,7 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
 
   const askpassLease = new AskpassLease(deps.askpassBaseDir, taskId);
   try {
-    const askpass = await askpassLease.provision(run, identity);
+    const askpass = await askpassLease.provision(run, async () => identity);
     const state = await createVerifySandbox(run, deps, {
       task,
       repo,
@@ -177,10 +176,7 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
     const container = lazySession(deps.sandbox, state);
 
     const verdict = await runVerifyStage(run, inngest, { repo, container });
-    if (!verdict.ok) {
-      const reason = `verify failed (exit ${verdict.exitCode})\n\n${verdict.output}`;
-      return await failVerify(run, deps, failure, reason);
-    }
+    if (!verdict.ok) return await failVerify(run, deps, failure, verifyFailure(verdict));
 
     const pushed = await pushVerifiedBranch(run, deps, inngest, {
       task,
@@ -206,7 +202,7 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
       .exhaustive();
   } catch (err) {
     run.log.error({ err }, "coding verify failed");
-    const reason = await failTaskFromCatch(run, deps, describeError(err));
+    const recorded = await failTaskFromCatch(run, deps, err);
     await safeTeardownWorktree({
       secretsStore: deps.secretsStore,
       runInTx: deps.runInTx,
@@ -214,7 +210,13 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
       taskId,
       worktreeAssignment: assignment,
     }).catch(() => undefined);
-    return { status: "failed", failureReason: reason };
+    return match(recorded)
+      .with(
+        { kind: "recorded" },
+        ({ failure }): VerifyOrchestratorResult => ({ status: "failed", failure }),
+      )
+      .with({ kind: "ended" }, (): VerifyOrchestratorResult => ({ status: "skipped" }))
+      .exhaustive();
   } finally {
     // Unconditional sweep — idempotent at the label-index layer, reaps
     // managed-backend state that survived a thrown create, and a no-op when
@@ -235,23 +237,39 @@ interface VerifyCredentials {
   env: Readonly<Record<string, string>>;
 }
 
+/** A non-zero verdict: the suite failed, or the cap killed it. */
+function verifyFailure(verdict: VerifyResult): TaskFailure {
+  return {
+    reason: verdict.timedOut ? "verify_timed_out" : "verify_failed",
+    detail: `exit ${verdict.exitCode}\n\n${verdict.output}`,
+  };
+}
+
 /**
  * Resolved before any container work, so a repo the wizard hasn't finished
  * fails fast rather than after spinning up a container to throw away — and
- * before askpass is provisioned on disk. The error is the failure reason.
+ * before askpass is provisioned on disk. Each miss is the task's
+ * `credentials_unavailable` failure, with the operator-actionable message as
+ * its detail.
  */
 async function resolveVerifyCredentials(
   deps: VerifyOrchestratorDeps,
   repo: CodingRepoRow,
-): Promise<Result<VerifyCredentials, string>> {
+): Promise<Result<VerifyCredentials, TaskFailure>> {
+  const unavailable = (detail: string): TaskFailure => ({
+    reason: "credentials_unavailable",
+    detail,
+  });
   const remote = parseRemoteUrl(repo.remoteUrl);
-  if (!remote) return err(`cannot parse owner/repo from remote URL: ${repo.remoteUrl}`);
+  if (!remote) {
+    return err(unavailable(`cannot parse owner/repo from remote URL: ${repo.remoteUrl}`));
+  }
   const identity = await deps.runInTx((tx) =>
     resolveGitHubIdentity(tx, deps.secretsStore, repo.identityName),
   );
-  if (identity.isErr()) return err(describeResolveIdentityError(identity.error));
+  if (identity.isErr()) return err(unavailable(describeResolveIdentityError(identity.error)));
   const auth = await loadSandboxEnv(deps);
-  if (auth.isErr()) return err(auth.error.message);
+  if (auth.isErr()) return err(unavailable(auth.error.message));
   return ok({ remote, identity: identity.value, env: auth.value });
 }
 
@@ -313,9 +331,9 @@ async function failVerify(
   run: CodingRun,
   deps: VerifyOrchestratorDeps,
   failure: VerifyFailureContext,
-  rawReason: string,
+  taskFailure: TaskFailure,
 ): Promise<VerifyOrchestratorResult> {
-  const recorded = await recordTaskFailed(run, deps, rawReason, "transition-failed");
+  const recorded = await recordTaskFailed(run, deps, taskFailure, "transition-failed");
   return await match(recorded)
     .with({ kind: "ended" }, async (): Promise<VerifyOrchestratorResult> => {
       await reclaimEndedTask(run, deps, {
@@ -326,7 +344,7 @@ async function failVerify(
       });
       return { status: "skipped" };
     })
-    .with({ kind: "recorded" }, async ({ reason }): Promise<VerifyOrchestratorResult> => {
+    .with({ kind: "recorded" }, async (recordedFailure): Promise<VerifyOrchestratorResult> => {
       await run
         .stepRun("teardown-worktree", () =>
           safeTeardownWorktree({
@@ -338,7 +356,7 @@ async function failVerify(
           }),
         )
         .catch(() => undefined);
-      return { status: "failed", failureReason: reason };
+      return { status: "failed", failure: recordedFailure.failure };
     })
     .exhaustive();
 }

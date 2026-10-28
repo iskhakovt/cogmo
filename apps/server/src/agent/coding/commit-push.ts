@@ -259,7 +259,7 @@ async function runGit(
   };
 }
 
-// `output` is a step result and ends up in `failure_reason`, the Inngest
+// `output` is a step result and ends up in `failure_detail`, the Inngest
 // event payload and the chat's failure message — cap from the tail so the
 // actionable stderr survives.
 const MAX_OUTPUT_BYTES = 8 * 1024;

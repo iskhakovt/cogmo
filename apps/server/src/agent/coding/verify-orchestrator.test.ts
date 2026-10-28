@@ -6,8 +6,10 @@
  * catch wiring bugs (env threading, branch flow, status transitions).
  */
 
+import { RequestError } from "@octokit/request-error";
 import type { Octokit } from "@octokit/rest";
 import type { Inngest } from "inngest";
+import { err } from "neverthrow";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Database, Transactor } from "../../db/index.js";
@@ -26,7 +28,7 @@ import {
 } from "../../secrets/github.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import { expectOk } from "../../test/assertions.js";
-import { fakeExecHandle } from "../../test/coding-fixtures.js";
+import { fakeExecHandle, parkCodingTaskAt } from "../../test/coding-fixtures.js";
 import { makeStepRun, makeStepSendEvent, recordingStepRun } from "../../test/factories.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { type CodingBackend, DrizzleCodingStore } from "./store/index.js";
@@ -58,6 +60,8 @@ interface FakeExecResult {
   exitCode?: number;
   /** The transport fails: both streams fail with this error, and so does the exec. */
   transportError?: Error;
+  /** The exec's outcome, when it is not a plain exit. */
+  exited?: ExecStreamingHandle["exited"];
 }
 
 function fakeExec(result: FakeExecResult): ExecStreamingHandle {
@@ -158,7 +162,8 @@ beforeEach(() => {
 
 async function seedTask(opts?: {
   remoteUrl?: string;
-  status?: "pending_verify" | "queued";
+  /** Where the row is parked once allocated; `pending_verify` unless given. */
+  status?: "pending_verify" | "awaiting_approval";
 }): Promise<{ taskId: string; repoId: string }> {
   const repo = await tx((trx) =>
     store
@@ -186,6 +191,8 @@ async function seedTask(opts?: {
       allowPrivilegedRunc: false,
     }),
   );
+  // The plan run allocates after its claim (`chk_coding_tasks_queued_bare`).
+  await parkCodingTaskAt(tx, store, task.id, "planning");
   await tx((trx) =>
     store.setTaskWorktreeAssignment(trx, task.id, {
       type: "host-path",
@@ -194,9 +201,7 @@ async function seedTask(opts?: {
     }),
   );
   await tx((trx) => store.setTaskPlan(trx, task.id, "1. step\n2. step"));
-  if (opts?.status !== "queued") {
-    await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "pending_verify" }));
-  }
+  await parkCodingTaskAt(tx, store, task.id, opts?.status ?? "pending_verify");
   return { taskId: task.id, repoId: repo.id };
 }
 
@@ -341,6 +346,116 @@ describe("runCodingVerify", () => {
     }
   });
 
+  it("verify hitting its cap → failed as verify_timed_out", async () => {
+    const handle = fakeContainerHandle({
+      verify: {
+        stdout: "running…\n",
+        exited: Promise.resolve(err({ kind: "timed_out", deadline: "total", timeoutMs: 1_000 })),
+      },
+      git: {},
+    });
+    const deps = makeDeps(handle);
+    const inngest = { send: vi.fn().mockResolvedValue(undefined) } as unknown as Pick<
+      import("inngest").Inngest,
+      "send"
+    >;
+
+    const { taskId } = await seedTask();
+    const result = await runCodingVerify({
+      taskId,
+      runId: "run-test",
+      deps,
+      stepRun,
+      stepSendEvent: makeStepSendEvent(inngest),
+      inngest,
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.failure?.reason).toBe("verify_timed_out");
+    expect(result.failure?.detail).toMatch(/^exit 124\n/);
+    expect(result.failure?.detail).toMatch(/verify timed out/);
+    expect((await tx((trx) => store.getTask(trx, taskId)))?.failureReason).toBe("verify_timed_out");
+  });
+
+  it.each([
+    [
+      "auth_failed",
+      "remote: Invalid username or password.\nfatal: Authentication failed for 'https://github.com/u/c/'\n",
+    ],
+    ["branch_conflict", "! [rejected]        cogmo/abc12345 -> cogmo/abc12345 (fetch first)\n"],
+    ["push_failed", "fatal: unable to access 'https://github.com/u/c/': Could not resolve host\n"],
+  ] as const)(
+    "a push the remote rejects → failed as %s with the push output",
+    async (reason, stderr) => {
+      const handle = fakeContainerHandle({
+        ...successScript,
+        git: { ...successScript.git, push: { exitCode: 128, stderr } },
+      });
+      const deps = makeDeps(handle);
+      const create = vi.fn();
+      deps.octokitFactory = fakeOctokitFactory(create);
+      const inngest = { send: vi.fn().mockResolvedValue(undefined) } as unknown as Pick<
+        import("inngest").Inngest,
+        "send"
+      >;
+
+      const { taskId } = await seedTask();
+      const result = await runCodingVerify({
+        taskId,
+        runId: "run-test",
+        deps,
+        stepRun,
+        stepSendEvent: makeStepSendEvent(inngest),
+        inngest,
+      });
+
+      expect(result.status).toBe("failed");
+      expect(result.failure?.reason).toBe(reason);
+      expect(result.failure?.detail).toContain(stderr.trim());
+      expect(create).not.toHaveBeenCalled();
+      const reloaded = await tx((trx) => store.getTask(trx, taskId));
+      expect(reloaded?.status).toBe("failed");
+      expect(reloaded?.failureReason).toBe(reason);
+    },
+  );
+
+  it.each([
+    [401, "pr_auth_failed", "Bad credentials"],
+    [422, "pr_validation_failed", "A pull request already exists for cogmo/abc12345."],
+    [502, "pr_open_failed", "Server Error"],
+  ] as const)("a PR open GitHub answers %s → failed as %s", async (status, reason, message) => {
+    const handle = fakeContainerHandle(successScript);
+    const deps = makeDeps(handle);
+    const create = vi.fn(async () => {
+      throw new RequestError(message, status, {
+        request: { method: "POST", url: "https://api.github.com/repos/u/c/pulls", headers: {} },
+      });
+    });
+    deps.octokitFactory = fakeOctokitFactory(create);
+    const inngest = { send: vi.fn().mockResolvedValue(undefined) } as unknown as Pick<
+      import("inngest").Inngest,
+      "send"
+    >;
+
+    const { taskId } = await seedTask();
+    const result = await runCodingVerify({
+      taskId,
+      runId: "run-test",
+      deps,
+      stepRun,
+      stepSendEvent: makeStepSendEvent(inngest),
+      inngest,
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.failure?.reason).toBe(reason);
+    expect(result.failure?.detail).toContain(message);
+    const reloaded = await tx((trx) => store.getTask(trx, taskId));
+    expect(reloaded?.status).toBe("failed");
+    expect(reloaded?.failureReason).toBe(reason);
+    expect(reloaded?.prMetadata).toBeNull();
+  });
+
   it("verify failure → status=failed, no commit/push attempted", async () => {
     const handle = fakeContainerHandle({
       verify: { stdout: "FAIL\n  Test failed\n", exitCode: 1 },
@@ -362,8 +477,9 @@ describe("runCodingVerify", () => {
 
     expect(result.status).toBe("failed");
     if (result.status === "failed") {
-      expect(result.failureReason).toMatch(/verify failed \(exit 1\)/);
-      expect(result.failureReason).toMatch(/Test failed/);
+      expect(result.failure?.reason).toBe("verify_failed");
+      expect(result.failure?.detail).toMatch(/^exit 1\n/);
+      expect(result.failure?.detail).toMatch(/Test failed/);
     }
     const eventNames = inngestSend.mock.calls.map((c) => c[0].name);
     expect(eventNames).toContain("coding/task/verify-complete");
@@ -442,7 +558,8 @@ describe("runCodingVerify", () => {
 
     expect(result.status).toBe("failed");
     if (result.status === "failed") {
-      expect(result.failureReason).toMatch(/not configured/i);
+      expect(result.failure?.reason).toBe("credentials_unavailable");
+      expect(result.failure?.detail).toMatch(/not configured/i);
     }
     expect(deps.sandbox.create).not.toHaveBeenCalled();
   });
@@ -507,7 +624,8 @@ describe("runCodingVerify", () => {
 
     expect(result.status).toBe("failed");
     if (result.status === "failed") {
-      expect(result.failureReason).toMatch(/claude_code_oauth_token/);
+      expect(result.failure?.reason).toBe("credentials_unavailable");
+      expect(result.failure?.detail).toMatch(/claude_code_oauth_token/);
     }
     // OAuth check runs as a fail-fast gate alongside identity resolution
     // (see verify-orchestrator.ts), so we never spin up a container or
@@ -535,7 +653,8 @@ describe("runCodingVerify", () => {
 
     expect(result.status).toBe("failed");
     if (result.status === "failed") {
-      expect(result.failureReason).toMatch(/cannot parse owner\/repo/);
+      expect(result.failure?.reason).toBe("credentials_unavailable");
+      expect(result.failure?.detail).toMatch(/cannot parse owner\/repo/);
     }
     expect(deps.sandbox.create).not.toHaveBeenCalled();
   });
@@ -546,6 +665,7 @@ describe("runCodingVerify", () => {
       async () =>
         (await seedTask({ remoteUrl: "https://x-access-token:SECRET@github.com" })).taskId,
       (handle: SandboxSession<LocalDockerSessionState>) => handle,
+      "credentials_unavailable",
       "cannot parse owner/repo from remote URL: https://REDACTED@github.com",
     ],
     [
@@ -559,11 +679,12 @@ describe("runCodingVerify", () => {
           throw new Error("exec via ssh://git:SECRET@sandbox.internal/x failed");
         }),
       }),
+      "unexpected_error",
       "exec via ssh://REDACTED@sandbox.internal/x failed",
     ],
   ])(
     "%s: the return value, row and event carry one masked reason",
-    async (_label, seed, wrap, masked) => {
+    async (_label, seed, wrap, reason, masked) => {
       const deps = makeDeps(wrap(fakeContainerHandle(successScript)));
       const inngest = mock<Pick<Inngest, "send">>();
       inngest.send.mockResolvedValue({ ids: [] });
@@ -578,10 +699,11 @@ describe("runCodingVerify", () => {
         inngest,
       });
 
-      expect(result).toEqual({ status: "failed", failureReason: masked });
-      expect((await tx((trx) => store.getTask(trx, taskId)))?.failureReason).toBe(masked);
+      const failure = { reason, detail: masked };
+      expect(result).toEqual({ status: "failed", failure });
+      expect((await tx((trx) => store.getTask(trx, taskId)))?.failureDetail).toBe(masked);
       expect(inngest.send).toHaveBeenCalledWith(
-        expect.objectContaining({ name: "coding/task/failed", data: { taskId, reason: masked } }),
+        expect.objectContaining({ name: "coding/task/failed", data: { taskId, ...failure } }),
       );
     },
   );
@@ -594,7 +716,7 @@ describe("runCodingVerify", () => {
       ...scripted,
       execStreaming: async (cmd, opts) => {
         if (cmd[0] === "bash") {
-          await tx((trx) => store.cancelTaskIfActive(trx, taskId, "user cancelled"));
+          await tx((trx) => store.cancelTaskIfActive(trx, taskId, "user_cancelled"));
         }
         return scripted.execStreaming(cmd, opts);
       },
@@ -620,7 +742,7 @@ describe("runCodingVerify", () => {
     expect(result).toEqual({ status: "skipped" });
     const reloaded = await tx((trx) => store.getTask(trx, taskId));
     expect(reloaded?.status).toBe("cancelled");
-    expect(reloaded?.failureReason).toBe("user cancelled");
+    expect(reloaded?.failureReason).toBe("user_cancelled");
     expect(reloaded?.prMetadata).toBeNull();
     const eventNames = inngestSend.mock.calls.map((c) => c[0].name);
     expect(eventNames).toEqual(["coding/task/verify-complete"]);
@@ -641,7 +763,7 @@ describe("runCodingVerify", () => {
       ...scripted,
       execStreaming: async (cmd, opts) => {
         if (cmd[0] === "bash") {
-          await tx((trx) => store.cancelTaskIfActive(trx, taskId, "user cancelled"));
+          await tx((trx) => store.cancelTaskIfActive(trx, taskId, "user_cancelled"));
         }
         return scripted.execStreaming(cmd, opts);
       },
@@ -670,7 +792,7 @@ describe("runCodingVerify", () => {
     expect(result).toEqual({ status: "skipped" });
     const reloaded = await tx((trx) => store.getTask(trx, taskId));
     expect(reloaded?.status).toBe("cancelled");
-    expect(reloaded?.failureReason).toBe("user cancelled");
+    expect(reloaded?.failureReason).toBe("user_cancelled");
     expect(sent).toEqual([]);
     expect(steps.ids).toContain("transition-failed");
     expect(steps.ids).toContain("teardown-worktree-cancelled");
@@ -684,7 +806,7 @@ describe("runCodingVerify", () => {
     // The Cancel lands while `open-pr` is waiting on GitHub, which has
     // already opened the PR by the time the step returns.
     const create = vi.fn(async () => {
-      await tx((trx) => store.cancelTaskIfActive(trx, taskId, "user cancelled"));
+      await tx((trx) => store.cancelTaskIfActive(trx, taskId, "user_cancelled"));
       return { data: { html_url: "https://github.com/user/cogmo/pull/42", number: 42 } };
     });
     deps.octokitFactory = fakeOctokitFactory(create);
@@ -723,7 +845,7 @@ describe("runCodingVerify", () => {
       "send"
     >;
 
-    const { taskId } = await seedTask({ status: "queued" });
+    const { taskId } = await seedTask({ status: "awaiting_approval" });
     const result = await runCodingVerify({
       taskId,
       runId: "run-test",
@@ -737,7 +859,7 @@ describe("runCodingVerify", () => {
     expect(deps.sandbox.create).not.toHaveBeenCalled();
 
     const reloaded = await tx((trx) => store.getTask(trx, taskId));
-    expect(reloaded?.status).toBe("queued");
+    expect(reloaded?.status).toBe("awaiting_approval");
   });
 
   it("calls stopTask in the finally even when verify fails", async () => {
@@ -764,10 +886,9 @@ describe("runCodingVerify", () => {
     expect(deps.sandbox.deleteByTaskId).toHaveBeenCalledWith(taskId);
   });
 
-  // Mirror of the runCodingTask catch-path contract — emit-first
-  // ordering pins the reconcile handoff for the verify orchestrator
-  // too.
-  it("catch path: emit fires BEFORE DB update; emit failure propagates leaving the row non-terminal", async () => {
+  // Mirror of the runCodingTask catch-path contract — write, then
+  // emit — for the verify orchestrator.
+  it("catch path: the write commits before the emit; an emit failure propagates with the row failed", async () => {
     // Inject a failure during verify by handing the orchestrator a
     // container whose `bash -lc <verifyCmd>` exec throws (mirrors a
     // sandbox-side failure).
@@ -807,13 +928,46 @@ describe("runCodingVerify", () => {
       }),
     ).rejects.toThrow(/bus down/);
 
-    // Emit attempted while row was still `verifying` (or its prior
-    // state) — the catch fell through to the emit before touching
-    // the DB.
-    expect(sendCalls).toHaveLength(1);
-    expect(sendCalls[0]?.eventName).toBe("coding/task/failed");
-    // Row stays non-terminal for the reconcile subscriber to flip.
+    // The conditional write landed first; the emit then failed the run,
+    // leaving the task `failed` and unannounced.
+    expect(sendCalls).toEqual([{ eventName: "coding/task/failed", whenStatus: "failed" }]);
     const reloaded = await tx((trx) => store.getTask(trx, taskId));
-    expect(reloaded?.status).not.toBe("failed");
+    expect(reloaded?.status).toBe("failed");
+    expect(reloaded?.failureReason).toBe("unexpected_error");
+  });
+
+  it("a throw after the PR opened leaves the task pr_open: no failure written, none announced", async () => {
+    // `emit-pr-opened` exhausting its retries reaches the catch with the row
+    // already at `pr_open`; the catch's write is conditional, so it stands.
+    const handle = fakeContainerHandle(successScript);
+    const deps = makeDeps(handle);
+    deps.octokitFactory = fakeOctokitFactory(
+      vi.fn(async () => ({
+        data: { html_url: "https://github.com/user/cogmo/pull/42", number: 42 },
+      })),
+    );
+    const inngestSend = vi.fn(async (payload: { name: string }) => {
+      if (payload.name === "coding/task/pr-opened") throw new Error("bus down");
+      return undefined;
+    });
+    const inngest = { send: inngestSend } as unknown as Pick<import("inngest").Inngest, "send">;
+
+    const { taskId } = await seedTask();
+    const result = await runCodingVerify({
+      taskId,
+      runId: "run-test",
+      deps,
+      stepRun,
+      stepSendEvent: makeStepSendEvent(inngest),
+      inngest,
+    });
+
+    expect(result).toEqual({ status: "skipped" });
+    const sent = inngestSend.mock.calls.map((c) => c[0].name);
+    expect(sent).toContain("coding/task/pr-opened");
+    expect(sent).not.toContain("coding/task/failed");
+    const reloaded = await tx((trx) => store.getTask(trx, taskId));
+    expect(reloaded?.status).toBe("pr_open");
+    expect(reloaded?.failureReason).toBeNull();
   });
 });

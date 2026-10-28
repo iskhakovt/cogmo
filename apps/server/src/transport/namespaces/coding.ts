@@ -2,6 +2,7 @@ import { err, ok, type Result } from "neverthrow";
 import { match } from "ts-pattern";
 import { planGateEmission } from "../../agent/coding/plan-gate.js";
 import type { CodingStore } from "../../agent/coding/store/index.js";
+import type { CodingTaskCancelReason } from "../../agent/coding/types.js";
 import type { EventPublisher } from "../../inngest/durable.js";
 import type { TransportError } from "../transport-error.js";
 import type { TransportContext } from "./context.js";
@@ -34,7 +35,7 @@ export interface CodingNamespace {
   cancelTask(
     taskId: string,
     tapperPlatformHandle: string,
-    reason: string,
+    reason: CodingTaskCancelReason,
   ): Promise<Result<{ taskId: string }, TransportError>>;
 }
 

@@ -18,10 +18,13 @@ import type { Transaction } from "../../../db/index.js";
 import { inSavepoint, uniqueViolationAs } from "../../store/errors.js";
 import { conversations, profiles } from "../../store/schema.js";
 import {
+  type CodingTaskCancelReason,
+  type CodingTaskFailureReason,
   type DevcontainerSpec,
   type PrMetadata,
   type ResourceUsage,
   ResourceUsageSchema,
+  type TaskFailure,
   type WorktreeAssignment,
 } from "../types.js";
 import { codingRepos, codingTasks } from "./schema.js";
@@ -52,6 +55,25 @@ export type CodingTaskStatus =
   | "pr_open"
   | "failed"
   | "cancelled";
+
+/**
+ * A status a forward transition can write. `failed` and `cancelled` carry a
+ * reason (`chk_coding_tasks_reason_with_end`), so only the writers that
+ * take one — `failTaskIfNonTerminal`, `cancelTaskIfActive`, `failQueuedTask` —
+ * reach them.
+ */
+export type CodingTaskForwardStatus = Exclude<CodingTaskStatus, "failed" | "cancelled">;
+
+/** The two failure columns as one write; a failure with no text has a null detail. */
+function failureColumns(failure: TaskFailure): {
+  failureReason: CodingTaskFailureReason;
+  failureDetail: string | null;
+} {
+  return {
+    failureReason: failure.reason,
+    failureDetail: failure.detail === "" ? null : failure.detail,
+  };
+}
 
 const TERMINAL_STATUSES: ReadonlyArray<CodingTaskStatus> = [
   "pr_open",
@@ -146,7 +168,10 @@ export interface CodingTaskRow {
   /** PR state, atomic — null until 4.0g's PR step populates it. */
   prMetadata: PrMetadata | null;
   status: CodingTaskStatus;
-  failureReason: string | null;
+  /** Why the task ended; set exactly when `status` is `failed` or `cancelled`. */
+  failureReason: CodingTaskFailureReason | null;
+  /** The masked text behind `failureReason`; null without a reason, and for a Cancel. */
+  failureDetail: string | null;
   resourceUsage: ResourceUsage | null;
   /**
    * Caller-supplied deterministic-per-submission token, or null when the
@@ -252,7 +277,7 @@ export interface CodingStore {
    * already have claimed the row and started work. Gating on `queued` means
    * the cleanup can only ever fail a task nobody owns.
    */
-  failQueuedTask(tx: Transaction, id: string, failureReason: string): Promise<boolean>;
+  failQueuedTask(tx: Transaction, id: string, failure: TaskFailure): Promise<boolean>;
 
   /** List tasks for a conversation, ordered by createdAt DESC (newest first). */
   listTasksForConversation(
@@ -289,20 +314,6 @@ export interface CodingStore {
     tx: Transaction,
     id: string,
     assignment: WorktreeAssignment,
-  ): Promise<void>;
-
-  /**
-   * Update a task's status and optionally its `failure_reason` and
-   * `plan_approved_at`. Used at every state transition.
-   */
-  updateTaskStatus(
-    tx: Transaction,
-    params: {
-      id: string;
-      status: CodingTaskStatus;
-      failureReason?: string | null;
-      planApprovedAt?: Date | null;
-    },
   ): Promise<void>;
 
   /** Persist the CLI session id captured on the first stream event. */
@@ -345,7 +356,7 @@ export interface CodingStore {
 
   /**
    * Atomic conditional fail: flip status → `failed` with the supplied
-   * `failureReason` iff the row's current status is non-terminal
+   * `failure` iff the row's current status is non-terminal
    * (`!= pr_open && != failed && != cancelled`). Single SQL `UPDATE ... WHERE
    * status NOT IN (...)`, returns whether the row was actually written
    * (caller can short-circuit the cleanup-event emit when it lost the race
@@ -357,7 +368,7 @@ export interface CodingStore {
   failTaskIfNonTerminal(
     tx: Transaction,
     id: string,
-    failureReason: string,
+    failure: TaskFailure,
   ): Promise<
     | { kind: "failed" }
     | { kind: "already_terminal"; status: CodingTaskStatus }
@@ -376,7 +387,7 @@ export interface CodingStore {
     tx: Transaction,
     id: string,
     from: CodingTaskStatus,
-    to: CodingTaskStatus,
+    to: CodingTaskForwardStatus,
     /**
      * Inngest run making the claim. Stamped on success and echoed back on
      * `stale`, so a caller can tell its own re-executed claim (resume) from a
@@ -405,14 +416,14 @@ export interface CodingStore {
   approvePlanIfPending(tx: Transaction, id: string, approvedAt: Date): Promise<ApprovePlanResult>;
 
   /**
-   * Atomic cancel: set status=`cancelled` iff the task is non-terminal.
-   * Mirrors `approvePlanIfPending` — read+write in one transaction so a
-   * concurrent state transition can't race.
+   * Atomic cancel: set status=`cancelled` with `reason` iff the task is
+   * non-terminal. Mirrors `approvePlanIfPending` — read+write in one
+   * transaction so a concurrent state transition can't race.
    */
   cancelTaskIfActive(
     tx: Transaction,
     id: string,
-    reason: string,
+    reason: CodingTaskCancelReason,
   ): Promise<
     | { kind: "cancelled"; conversationId: string | null }
     | { kind: "already_terminal"; status: CodingTaskStatus }
@@ -564,10 +575,10 @@ export class DrizzleCodingStore implements CodingStore {
     return { kind: inserted ? "new" : "recovered", row };
   }
 
-  async failQueuedTask(tx: Transaction, id: string, failureReason: string): Promise<boolean> {
+  async failQueuedTask(tx: Transaction, id: string, failure: TaskFailure): Promise<boolean> {
     const updated = await tx
       .update(codingTasks)
-      .set({ status: "failed", failureReason })
+      .set({ status: "failed", ...failureColumns(failure) })
       .where(and(eq(codingTasks.id, id), eq(codingTasks.status, "queued")))
       .returning({ id: codingTasks.id });
     return updated.length > 0;
@@ -629,25 +640,6 @@ export class DrizzleCodingStore implements CodingStore {
       .select({ id: codingTasks.id, status: codingTasks.status })
       .from(codingTasks)
       .where(inArray(codingTasks.id, [...ids]));
-  }
-
-  async updateTaskStatus(
-    tx: Transaction,
-    params: {
-      id: string;
-      status: CodingTaskStatus;
-      failureReason?: string | null;
-      planApprovedAt?: Date | null;
-    },
-  ): Promise<void> {
-    const set: {
-      status: CodingTaskStatus;
-      failureReason?: string | null;
-      planApprovedAt?: Date | null;
-    } = { status: params.status };
-    if (params.failureReason !== undefined) set.failureReason = params.failureReason;
-    if (params.planApprovedAt !== undefined) set.planApprovedAt = params.planApprovedAt;
-    await tx.update(codingTasks).set(set).where(eq(codingTasks.id, params.id));
   }
 
   async setTaskSessionId(tx: Transaction, id: string, sessionId: string): Promise<void> {
@@ -724,7 +716,7 @@ export class DrizzleCodingStore implements CodingStore {
   async failTaskIfNonTerminal(
     tx: Transaction,
     id: string,
-    failureReason: string,
+    failure: TaskFailure,
   ): Promise<
     | { kind: "failed" }
     | { kind: "already_terminal"; status: CodingTaskStatus }
@@ -737,7 +729,7 @@ export class DrizzleCodingStore implements CodingStore {
     // returns `already_terminal`).
     const updated = await tx
       .update(codingTasks)
-      .set({ status: "failed", failureReason })
+      .set({ status: "failed", ...failureColumns(failure) })
       .where(and(eq(codingTasks.id, id), notInArray(codingTasks.status, [...TERMINAL_STATUSES])))
       .returning({ id: codingTasks.id });
     if (updated.length > 0) return { kind: "failed" as const };
@@ -756,7 +748,7 @@ export class DrizzleCodingStore implements CodingStore {
     tx: Transaction,
     id: string,
     from: CodingTaskStatus,
-    to: CodingTaskStatus,
+    to: CodingTaskForwardStatus,
     claimedByRunId?: string,
   ): Promise<
     | { kind: "transitioned" }
@@ -836,7 +828,7 @@ export class DrizzleCodingStore implements CodingStore {
   async cancelTaskIfActive(
     tx: Transaction,
     id: string,
-    reason: string,
+    reason: CodingTaskCancelReason,
   ): Promise<
     | { kind: "cancelled"; conversationId: string | null }
     | { kind: "already_terminal"; status: CodingTaskStatus }
@@ -862,7 +854,7 @@ export class DrizzleCodingStore implements CodingStore {
     }
     await tx
       .update(codingTasks)
-      .set({ status: "cancelled", failureReason: reason })
+      .set({ status: "cancelled", failureReason: reason, failureDetail: null })
       .where(eq(codingTasks.id, id));
     return { kind: "cancelled" as const, conversationId: row.conversationId };
   }

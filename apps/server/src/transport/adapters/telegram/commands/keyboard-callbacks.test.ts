@@ -39,7 +39,7 @@ describe("handlePlanCallback", () => {
 
     const outcome = await handlePlanCallback(transport, { taskId, action: "cancel" }, "user-tg-1");
 
-    expect(cancel).toHaveBeenCalledWith(taskId, "user-tg-1", "user cancelled the plan");
+    expect(cancel).toHaveBeenCalledWith(taskId, "user-tg-1", "user_cancelled");
     expect(outcome.editText).toMatch(/Plan cancelled/);
     expect(outcome.toast).toBe("Cancelled");
   });
@@ -55,7 +55,7 @@ describe("handlePlanCallback", () => {
 
     const outcome = await handlePlanCallback(transport, { taskId, action: "revise" }, "user-tg-1");
 
-    expect(cancel).toHaveBeenCalledWith(taskId, "user-tg-1", "user requested revisions");
+    expect(cancel).toHaveBeenCalledWith(taskId, "user-tg-1", "user_requested_revisions");
     expect(outcome.editText).toMatch(/Plan revised/);
     expect(outcome.followUp).toMatch(/what you'd like changed/);
     expect(outcome.toast).toBe("Revising");

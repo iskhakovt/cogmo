@@ -29,11 +29,20 @@ export class AskpassLease {
   /**
    * The `provision-askpass` step. Marks the lease before the body runs, so
    * a partial provision (the mkdir landed, a write threw) is still released.
+   * `identity` is called inside the body, so a replay neither loads nor
+   * needs it.
    */
-  async provision(run: CodingRun, identity: GitHubIdentity): Promise<AskpassMaterials> {
+  async provision(
+    run: CodingRun,
+    identity: () => Promise<GitHubIdentity>,
+  ): Promise<AskpassMaterials> {
     this.#provisioned = true;
     return run.stepRun("provision-askpass", async () =>
-      provisionAskpass({ baseDir: this.#baseDir, rootTaskId: this.#taskId, identity }),
+      provisionAskpass({
+        baseDir: this.#baseDir,
+        rootTaskId: this.#taskId,
+        identity: await identity(),
+      }),
     );
   }
 

@@ -517,17 +517,45 @@ export const codingTaskPrOpened = eventType("coding/task/pr-opened", {
 });
 
 /**
+ * `coding_tasks.failure_reason`'s labels (`CODING_TASK_FAILURE_REASONS` in
+ * `src/agent/coding/types.ts`). The event schema doesn't import domain code;
+ * events.test.ts pins the two together.
+ */
+const codingTaskFailureReasons = [
+  "cli_exit_error",
+  "no_plan_produced",
+  "claude_auth_failed",
+  "push_failed",
+  "branch_conflict",
+  "auth_failed",
+  "verify_failed",
+  "verify_timed_out",
+  "pr_auth_failed",
+  "pr_validation_failed",
+  "pr_open_failed",
+  "credentials_unavailable",
+  "run_terminated",
+  "start_emit_failed",
+  "unexpected_error",
+  "user_cancelled",
+  "user_requested_revisions",
+  "unknown",
+] as const;
+
+/**
  * Coding delegation — task entered the `failed` terminal state in any
  * orchestrator (plan, execute, verify). Cleanup subscribers (run-branch
  * deletion, future telemetry) consume this without re-checking the row.
- * `reason` mirrors the row's `failure_reason` so subscribers don't have
- * to fetch it. Emitted exactly once per terminal-failure transition;
- * the conditional UPDATE upstream guarantees idempotency.
+ * `reason` and `detail` mirror the row's `failure_reason` and
+ * `failure_detail` so subscribers don't have to fetch them. Emitted exactly
+ * once per terminal-failure transition; the conditional UPDATE upstream
+ * guarantees idempotency.
  */
 export const codingTaskFailed = eventType("coding/task/failed", {
   schema: z.object({
     taskId: z.string(),
-    reason: z.string(),
+    reason: z.enum(codingTaskFailureReasons),
+    detail: z.string(),
   }),
 });
 

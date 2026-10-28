@@ -212,7 +212,8 @@ describe("createCodingService", () => {
     const tasks = await tx((trx) => store.listTasksForConversation(trx, conversationId));
     expect(tasks).toHaveLength(1);
     expect(tasks[0]?.status).toBe("failed");
-    expect(tasks[0]?.failureReason).toMatch(/inngest gateway unreachable/);
+    expect(tasks[0]?.failureReason).toBe("start_emit_failed");
+    expect(tasks[0]?.failureDetail).toMatch(/inngest gateway unreachable/);
   });
 
   it("masks credentials the send error quotes before writing the failure reason", async () => {
@@ -235,9 +236,7 @@ describe("createCodingService", () => {
     await expect(service.delegate({ goal: "x".repeat(20), repoName: "cogmo" })).rejects.toThrow();
 
     const tasks = await tx((trx) => store.listTasksForConversation(trx, conversationId));
-    expect(tasks[0]?.failureReason).toBe(
-      "inngest.send failed: POST https://REDACTED@inngest.internal/e failed",
-    );
+    expect(tasks[0]?.failureDetail).toBe("POST https://REDACTED@inngest.internal/e failed");
   });
 
   it("recovers the original task when a keyed submission is retried", async () => {
@@ -477,7 +476,7 @@ describe("createCodingService", () => {
     });
     const taskId = expectDefined(first.taskId, "first taskId");
     await tx((trx) =>
-      store.updateTaskStatus(trx, { id: taskId, status: "failed", failureReason: "boom" }),
+      store.failTaskIfNonTerminal(trx, taskId, { reason: "unexpected_error", detail: "boom" }),
     );
     inngest.send.mockClear();
 
@@ -517,7 +516,7 @@ describe("createCodingService", () => {
     });
     const taskId = expectDefined(first.taskId, "first taskId");
     // The orchestrator picked it up and is mid-plan.
-    await tx((trx) => store.updateTaskStatus(trx, { id: taskId, status: "planning" }));
+    await tx((trx) => store.transitionTaskStatus(trx, taskId, "queued", "planning"));
     inngest.send.mockRejectedValue(new Error("bus down"));
 
     const retry = await service.delegate({

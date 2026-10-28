@@ -11,6 +11,7 @@ import type { SecretsStore } from "../../secrets/store/index.js";
 import { bootstrapSkillsRepo, SKILLS_CODING_REPO_NAME } from "../../skills/repo.js";
 import type { RegisterResult, SkillRunner } from "../../skills/runner.js";
 import { expectOk } from "../../test/assertions.js";
+import { parkCodingTaskAt } from "../../test/coding-fixtures.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { DrizzleAgentStore } from "../store/index.js";
 import { autoRegisterSkill } from "./auto-register-skill.js";
@@ -107,6 +108,7 @@ async function seedRepoAndTask(
   );
   const branch = `cogmo/${task.id.replace(/-/g, "").slice(0, 12)}`;
   if (opts.withWorktreeAssignment !== false) {
+    await parkCodingTaskAt(tx, store, task.id, "planning");
     await tx((trx) =>
       store.setTaskWorktreeAssignment(trx, task.id, { type: "git-remote", branch }),
     );

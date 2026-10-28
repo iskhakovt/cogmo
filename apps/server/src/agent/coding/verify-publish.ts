@@ -18,7 +18,7 @@ import { runOpenPr } from "./open-pr.js";
 import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
 import { advanceTask, type TaskLeft } from "./task-lifecycle.js";
 import { WORKTREE_DIR_IN_CONTAINER } from "./task-sandbox.js";
-import type { PrMetadata, WorktreeAssignment } from "./types.js";
+import type { PrMetadata, TaskFailure, WorktreeAssignment } from "./types.js";
 
 /**
  * `pushed`: the branch is upstream, the task reads `pushed` and
@@ -68,7 +68,7 @@ export async function pushVerifiedBranch(
     askpass: AskpassMaterials;
     container: () => Promise<SandboxSession>;
   },
-): Promise<Result<PushOutcome, string>> {
+): Promise<Result<PushOutcome, TaskFailure>> {
   const commit = await run.stepRun("commit-and-push", async () =>
     runCommitAndPush({
       container: await args.container(),
@@ -80,21 +80,26 @@ export async function pushVerifiedBranch(
       author: commitAuthorFor(args.identity),
     }),
   );
-  if (commit.kind === "branch_conflict") {
-    return err(`push rejected — branch conflict on cogmo/<idShort>:\n\n${commit.output}`);
-  }
-  if (commit.kind === "auth_failed") {
-    return err(`push rejected — GitHub authentication failed:\n\n${commit.output}`);
-  }
-  if (commit.kind === "failed") {
-    return err(`commit+push failed:\n\n${commit.output}`);
-  }
+  const landed = match(commit)
+    .with({ kind: "branch_conflict" }, ({ output }) =>
+      err<string, TaskFailure>({ reason: "branch_conflict", detail: output }),
+    )
+    .with({ kind: "auth_failed" }, ({ output }) =>
+      err<string, TaskFailure>({ reason: "auth_failed", detail: output }),
+    )
+    .with({ kind: "failed" }, ({ output }) =>
+      err<string, TaskFailure>({ reason: "push_failed", detail: output }),
+    )
+    .with({ kind: "pushed" }, ({ commitSha }) => ok<string, TaskFailure>(commitSha))
+    .with({ kind: "nothing_to_commit" }, () => ok<string, TaskFailure>(""))
+    .exhaustive();
+  if (landed.isErr()) return err(landed.error);
 
   // A clean tree has no commit sha to reuse. Durable so the PR head is
   // pinned to one value; conditional on the memoized `kind`, so the step
   // plan is identical on every replay.
   const branchSha =
-    (commit.kind === "pushed" ? commit.commitSha : "") ||
+    landed.value ||
     (await run.stepRun("read-head-sha", async () => readHeadSha(await args.container())));
 
   // Conditional on `verifying`: the suite runs for minutes, and a Cancel
@@ -112,8 +117,8 @@ export async function pushVerifiedBranch(
     settledAt: ["pr_open"],
   });
   return await match(pushed)
-    .with({ kind: "left" }, (left): Result<PushOutcome, string> => ok(left))
-    .with({ kind: "advanced" }, async (): Promise<Result<PushOutcome, string>> => {
+    .with({ kind: "left" }, (left): Result<PushOutcome, TaskFailure> => ok(left))
+    .with({ kind: "advanced" }, async (): Promise<Result<PushOutcome, TaskFailure>> => {
       await run.stepRun("emit-pushed", () =>
         inngest
           .send(buildCodingTaskPushedEvent({ taskId: run.taskId, branchSha }))
@@ -141,7 +146,7 @@ export async function openTaskPr(
   deps: OpenTaskPrDeps,
   inngest: EventPublisher,
   args: OpenTaskPrArgs,
-): Promise<Result<PrOutcome, string>> {
+): Promise<Result<PrOutcome, TaskFailure>> {
   const { repo, identity, assignment } = args;
   const pr = await run.stepRun("open-pr", () =>
     runOpenPr({
@@ -157,19 +162,24 @@ export async function openTaskPr(
       ...(deps.octokitFactory && { octokit: deps.octokitFactory(identity.pat) }),
     }),
   );
-  if (pr.kind === "auth_failed") return err(`PR open failed (auth): ${pr.message}`);
-  if (pr.kind === "validation_failed") {
-    return err(`PR open failed (validation): ${pr.message}`);
-  }
-  // The branch is pushed but has no PR; it stays upstream for a re-delegate.
-  if (pr.kind === "failed") return err(`PR open failed: ${pr.message}`);
-
-  const metadata: PrMetadata = {
-    url: pr.url,
-    number: pr.number,
-    branchSha: pr.branchSha,
-    openedAt: pr.openedAt,
-  };
+  // On every failure the branch is pushed but has no PR; it stays upstream
+  // for a re-delegate.
+  const prResult = match(pr)
+    .with({ kind: "auth_failed" }, ({ message }) =>
+      err<PrMetadata, TaskFailure>({ reason: "pr_auth_failed", detail: message }),
+    )
+    .with({ kind: "validation_failed" }, ({ message }) =>
+      err<PrMetadata, TaskFailure>({ reason: "pr_validation_failed", detail: message }),
+    )
+    .with({ kind: "failed" }, ({ message }) =>
+      err<PrMetadata, TaskFailure>({ reason: "pr_open_failed", detail: message }),
+    )
+    .with({ kind: "opened" }, ({ url, number, branchSha, openedAt }) =>
+      ok<PrMetadata, TaskFailure>({ url, number, branchSha, openedAt }),
+    )
+    .exhaustive();
+  if (prResult.isErr()) return err(prResult.error);
+  const metadata = prResult.value;
   await run.stepRun("set-pr-metadata", () =>
     deps.runInTx((tx) => deps.store.setTaskPrMetadata(tx, run.taskId, metadata)),
   );
@@ -182,13 +192,13 @@ export async function openTaskPr(
     to: "pr_open",
   });
   return await match(opened)
-    .with({ kind: "left" }, (left): Result<PrOutcome, string> => ok(left))
-    .with({ kind: "advanced" }, async (): Promise<Result<PrOutcome, string>> => {
+    .with({ kind: "left" }, (left): Result<PrOutcome, TaskFailure> => ok(left))
+    .with({ kind: "advanced" }, async (): Promise<Result<PrOutcome, TaskFailure>> => {
       await run.stepRun("emit-pr-opened", () =>
         inngest
           .send({
             name: "coding/task/pr-opened",
-            data: { taskId: run.taskId, prUrl: pr.url, prNumber: pr.number },
+            data: { taskId: run.taskId, prUrl: metadata.url, prNumber: metadata.number },
             // Matters more than its siblings: `auto-register-skill`
             // subscribes to this one, and a re-send re-enters the register
             // flow (mostly absorbed by its `no_op` tip resolution) alongside
@@ -200,7 +210,7 @@ export async function openTaskPr(
       if (deps.sandbox.capabilities.workingTreeTransport === "git-remote") {
         await fetchBackFeatureBranch(run, { repo, branch: assignment.branch, identity });
       }
-      return ok({ kind: "opened", url: pr.url, number: pr.number });
+      return ok({ kind: "opened", url: metadata.url, number: metadata.number });
     })
     .exhaustive();
 }

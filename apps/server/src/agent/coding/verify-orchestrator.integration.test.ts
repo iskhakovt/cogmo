@@ -54,6 +54,7 @@ import {
 import { generateSshKeyPair } from "../../secrets/ssh-keygen.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import { expectOk } from "../../test/assertions.js";
+import { parkCodingTaskAt } from "../../test/coding-fixtures.js";
 import { FakeDaytonaSandboxClient } from "../../test/daytona-sandbox-fake.js";
 import { makeStepRun, makeStepSendEvent } from "../../test/factories.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
@@ -484,6 +485,7 @@ async function seedTask(opts?: {
   const branch = `cogmo/${task.id.slice(0, 8)}`;
   await execFileP("git", ["-C", worktreePath, "checkout", "-b", branch]);
 
+  await parkCodingTaskAt(tx, store, task.id, "planning");
   await tx((trx) =>
     store.setTaskWorktreeAssignment(trx, task.id, {
       type: "host-path",
@@ -492,7 +494,7 @@ async function seedTask(opts?: {
     }),
   );
   await tx((trx) => store.setTaskPlan(trx, task.id, "1. add a file\n2. verify"));
-  await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "pending_verify" }));
+  await parkCodingTaskAt(tx, store, task.id, "pending_verify");
 
   return { taskId: task.id, branch };
 }
@@ -602,7 +604,8 @@ describe("verify orchestrator integration — gitea + scoped octokit", () => {
 
     expect(result.status).toBe("failed");
     if (result.status === "failed") {
-      expect(result.failureReason).toMatch(/verify failed \(exit 7\)/);
+      expect(result.failure?.reason).toBe("verify_failed");
+      expect(result.failure?.detail).toMatch(/^exit 7\n/);
     }
 
     // Branch must NOT exist on Gitea.
@@ -660,9 +663,10 @@ async function seedTaskGitRemote(): Promise<{ taskId: string; branch: string; ru
 
   const branch = `cogmo/${task.id.slice(0, 8)}`;
   const runRef = `cogmo/run/${task.id}`;
+  await parkCodingTaskAt(tx, store, task.id, "planning");
   await tx((trx) => store.setTaskWorktreeAssignment(trx, task.id, { type: "git-remote", branch }));
   await tx((trx) => store.setTaskPlan(trx, task.id, "1. add a file\n2. verify"));
-  await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "pending_verify" }));
+  await parkCodingTaskAt(tx, store, task.id, "pending_verify");
 
   return { taskId: task.id, branch, runRef };
 }

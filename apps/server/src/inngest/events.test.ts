@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { CODING_TASK_FAILURE_REASONS } from "../agent/coding/types.js";
 import { MAX_GATE_REMINDERS, MAX_SLUG_LENGTH } from "../agent/pipeline/types.js";
 import {
   buildConversationCooldownClearedEvent,
   calculateElapsedCooldown,
+  codingTaskFailed,
   deriveCauseClass,
   inboundArrived,
   pipelineGatePending,
@@ -123,6 +125,23 @@ describe("pipeline/gate.pending bounds", () => {
     });
     expect(accepts(remind(MAX_GATE_REMINDERS))).toBe(true);
     expect(accepts(remind(MAX_GATE_REMINDERS + 1))).toBe(false);
+  });
+});
+
+describe("coding/task/failed", () => {
+  it("accepts exactly the reasons coding_tasks.failure_reason stores", () => {
+    expect(codingTaskFailed.schema.shape.reason.options).toEqual([...CODING_TASK_FAILURE_REASONS]);
+    expect(
+      codingTaskFailed.schema.safeParse({ taskId: "t", reason: "verify_failed", detail: "exit 1" })
+        .success,
+    ).toBe(true);
+    expect(
+      codingTaskFailed.schema.safeParse({
+        taskId: "t",
+        reason: "verify failed (exit 1)",
+        detail: "",
+      }).success,
+    ).toBe(false);
   });
 });
 

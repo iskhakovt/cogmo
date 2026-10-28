@@ -1,5 +1,6 @@
 /** Taps on the plan, pipeline-gate and skills-approval keyboards, as what the adapter writes back. */
 
+import { match } from "ts-pattern";
 import type { Transport } from "../../../transport.js";
 import { errorMessage } from "./reply.js";
 
@@ -43,8 +44,10 @@ export async function handlePlanCallback(
   // what to change, and the agent issues a fresh delegate_coding next
   // turn. In-place plan editing requires an editor surface Telegram
   // doesn't have.
-  const reason =
-    parsed.action === "revise" ? "user requested revisions" : "user cancelled the plan";
+  const reason = match(parsed.action)
+    .with("revise", () => "user_requested_revisions" as const)
+    .with("cancel", () => "user_cancelled" as const)
+    .exhaustive();
   const res = await transport.coding.cancelTask(parsed.taskId, tapperPlatformHandle, reason);
   if (res.isErr()) return { editText: errorMessage(res.error), toast: errorMessage(res.error) };
 

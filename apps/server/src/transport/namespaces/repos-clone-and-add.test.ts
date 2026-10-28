@@ -82,7 +82,6 @@ function fakeCodingStore(overrides: Partial<CodingStore> = {}): CodingStore {
     listTasksForConversation: vi.fn(async () => []),
     getTask: vi.fn(),
     setTaskWorktreeAssignment: vi.fn(),
-    updateTaskStatus: vi.fn(),
     setTaskSessionId: vi.fn(),
     setTaskContainerId: vi.fn(),
     setTaskPlan: vi.fn(),

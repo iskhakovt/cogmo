@@ -13,7 +13,7 @@
  * (handles both `git@github.com:owner/repo.git` and
  * `https://github.com/owner/repo.git`). Returns a discriminated result
  * so the orchestrator can render the right Telegram message and persist
- * the right `failure_reason`.
+ * the right `failure_reason`, with `message` as the `failure_detail`.
  *
  * Title: `task.goal` truncated to 70 chars (no prefix).
  * Body: markdown — `## Plan\n\n<plan>\n\n## Verify output\n\n` + fenced
@@ -179,7 +179,7 @@ export async function runOpenPr(params: OpenPrParams): Promise<OpenPrResult> {
       if (error.status === 422) {
         // Validation failure — most commonly "A pull request already exists
         // for <branch>" or "Head sha does not exist". Surface the message
-        // so the orchestrator's failure_reason carries it verbatim.
+        // so the task's `failure_detail` carries it verbatim.
         return { kind: "validation_failed", status: error.status, message: error.message };
       }
       return { kind: "failed", message: `${error.status} ${error.message}` };

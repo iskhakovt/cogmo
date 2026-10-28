@@ -357,7 +357,7 @@ describe("coding-task-verify — Inngest replay", () => {
     expect(h.store.current().status).toBe("pr_open");
     expect(h.log.verify).toBe(0);
     expect(h.create).not.toHaveBeenCalled();
-    expect(h.deps.store.updateTaskStatus).not.toHaveBeenCalled();
+    expect(h.deps.store.failTaskIfNonTerminal).not.toHaveBeenCalled();
     // Returning ahead of the try block means the loser doesn't sweep the
     // sandbox either — relevant the day per-task concurrency is relaxed.
     expect(h.sandbox.teardownCalls()).toBe(0);

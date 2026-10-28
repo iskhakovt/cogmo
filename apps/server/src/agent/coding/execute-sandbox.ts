@@ -3,6 +3,7 @@
  * container if it is still alive, otherwise create a fresh one.
  */
 
+import { err, ok, type Result } from "neverthrow";
 import type { AskpassMaterials } from "../../sandbox/askpass.js";
 import {
   isLocalDockerSessionState,
@@ -17,12 +18,13 @@ import { loadIdentity } from "./git-as-transport.js";
 import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
 import {
   checkoutFeatureBranchStep,
-  loadSandboxEnv,
+  checkTaskCredentials,
+  loadSandboxEnvOrThrow,
   type SandboxAuthDeps,
   taskImage,
   taskSessionSpec,
 } from "./task-sandbox.js";
-import type { WorktreeAssignment } from "./types.js";
+import type { TaskFailure, WorktreeAssignment } from "./types.js";
 
 interface ExecuteSandboxDeps extends TaskStoreDeps, SandboxAuthDeps {
   sandbox: SandboxClient;
@@ -36,11 +38,15 @@ interface ExecuteSandboxDeps extends TaskStoreDeps, SandboxAuthDeps {
  * together, so "both or neither" is in the type.
  */
 export interface ExecutePushCredentials {
-  identity: GitHubIdentity;
+  /**
+   * Loads the GitHub identity. Called only inside the step bodies that use
+   * it, so the PAT stays out of the bare body and out of step results.
+   */
+  identity: () => Promise<GitHubIdentity>;
   askpass: AskpassMaterials;
 }
 
-interface ExecuteSandbox {
+export interface ExecuteSandbox {
   state: SandboxSessionState;
   /** Set exactly when the transport is git-remote. */
   push: ExecutePushCredentials | undefined;
@@ -49,16 +55,18 @@ interface ExecuteSandbox {
 /**
  * Get-or-create in two checkpoints. `try-resume` returns a live sandbox's
  * state — the plan phase's container is still warm, or the reaper hasn't
- * reached it — and then no clone, checkout or auth resolution is needed.
- * Otherwise `create-container` makes a fresh one, resolving auth inside its
- * body so a resume hit doesn't pay the DB+decrypt and the PAT never becomes
- * a step return value.
+ * reached it — and then no clone, checkout or Claude token is needed.
+ * Otherwise `create-container` makes a fresh one, loading the token inside
+ * its body so it never becomes a step return value.
+ *
+ * `check-credentials` sits between them: it needs the token only on the
+ * create path, and the GitHub identity on git-remote either way. A miss is
+ * the task's `credentials_unavailable` failure before any container exists.
  *
  * On git-remote, askpass is provisioned either way: a resume reuses the plan
- * phase's mount, a fresh create mounts it. The identity loads outside any
- * step so the PAT never reaches Inngest's state store — safe without a step
- * only because the function is `retries: 0`; loosen that and the decrypt
- * would replay.
+ * phase's mount, a fresh create mounts it. The identity loads inside each
+ * step body that uses it, never as a step result, so the bare body depends
+ * only on the memoized verdict.
  */
 export async function acquireExecuteSandbox(
   run: CodingRun,
@@ -69,24 +77,32 @@ export async function acquireExecuteSandbox(
     assignment: WorktreeAssignment;
     askpass: AskpassLease;
   },
-): Promise<ExecuteSandbox> {
+): Promise<Result<ExecuteSandbox, TaskFailure>> {
   const { sandbox } = deps;
   const resumed = await run.stepRun("try-resume", async () => {
     const existing = await sandbox.tryResumeByTaskId(run.taskId);
     return existing?.state ?? null;
   });
 
+  const gitRemote = sandbox.capabilities.workingTreeTransport === "git-remote";
+  const credentials = await checkTaskCredentials(run, deps, {
+    token: resumed === null,
+    identityName: gitRemote ? args.repo.identityName : null,
+  });
+  if (credentials.isErr()) return err(credentials.error);
+
   let push: ExecutePushCredentials | undefined;
-  if (sandbox.capabilities.workingTreeTransport === "git-remote") {
-    const identity = await loadIdentity({
-      runInTx: deps.runInTx,
-      secretsStore: deps.secretsStore,
-      identityName: args.repo.identityName,
-    });
+  if (gitRemote) {
+    const identity = () =>
+      loadIdentity({
+        runInTx: deps.runInTx,
+        secretsStore: deps.secretsStore,
+        identityName: args.repo.identityName,
+      });
     push = { identity, askpass: await args.askpass.provision(run, identity) };
   }
 
-  if (resumed !== null) return { state: resumed, push };
+  if (resumed !== null) return ok({ state: resumed, push });
   const state = await createExecuteSandbox(run, deps, { ...args, push });
   // A resume hit skips these: a prior attempt already ran them, or they
   // don't apply. Each is idempotent on its own (an UPDATE; `checkout -B`).
@@ -96,10 +112,10 @@ export async function acquireExecuteSandbox(
       deps.runInTx((tx) => deps.store.setTaskContainerId(tx, run.taskId, containerRowId)),
     );
   }
-  if (sandbox.capabilities.workingTreeTransport === "git-remote") {
+  if (gitRemote) {
     await checkoutFeatureBranchStep(run, sandbox, state, args.assignment.branch);
   }
-  return { state, push };
+  return ok({ state, push });
 }
 
 async function createExecuteSandbox(
@@ -120,22 +136,18 @@ async function createExecuteSandbox(
     await sandbox.ensureImagePresent(image, defaultResourceLimits);
   });
   const state = await run.stepRun("create-container", async () => {
-    const auth = await loadSandboxEnv(deps);
-    if (auth.isErr()) {
-      throw new Error(auth.error.message);
-    }
     const session = await sandbox.create(
       taskSessionSpec({
         sandbox,
         task: args.task,
         repo: args.repo,
         assignment: args.assignment,
-        identityPat: args.push?.identity.pat,
+        identityPat: args.push ? (await args.push.identity()).pat : undefined,
         askpass: args.push?.askpass,
         image,
         resourceLimits: defaultResourceLimits,
         taskTtlMs: deps.taskTtlMs,
-        env: auth.value,
+        env: await loadSandboxEnvOrThrow(deps),
       }),
     );
     return session.state;

@@ -18,7 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, type Readable } from "node:stream";
 import type { Octokit } from "@octokit/rest";
-import { ok } from "neverthrow";
+import { err, ok, type Result } from "neverthrow";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Database, Transactor } from "../../db/index.js";
@@ -36,6 +36,7 @@ import {
   serializeGitHubIdentity,
 } from "../../secrets/github.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
+import { parkCodingTaskAt } from "../../test/coding-fixtures.js";
 import { makeStepRun, makeStepSendEvent, nullStepSendEvent } from "../../test/factories.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { CLAUDE_CODE_OAUTH_TOKEN_SECRET } from "./auth.js";
@@ -48,10 +49,19 @@ import type { CodingBackend, CodingEvent } from "./backend.js";
 // internal calls can be observed and the orchestrator never reaches a
 // real git command.
 
+const IDENTITY: GitHubIdentity = {
+  pat: "ghp_test",
+  sshPrivateKey: "-----BEGIN OPENSSH PRIVATE KEY-----",
+  sshPublicKey: "ssh-ed25519 AAAA",
+  login: "cogmo-bot",
+  id: "12345",
+};
+
 const transportMocks = vi.hoisted(() => ({
   pushTaskBranchToRemote: vi.fn<(p: unknown) => Promise<void>>(),
   fetchFeatureBranch: vi.fn<(p: unknown) => Promise<void>>(),
   loadIdentity: vi.fn<(p: unknown) => Promise<GitHubIdentity>>(),
+  findIdentity: vi.fn<(p: unknown) => Promise<Result<GitHubIdentity, string>>>(),
   runBranchFor: (taskId: string) => `cogmo/run/${taskId}`,
 }));
 
@@ -59,6 +69,7 @@ vi.mock("./git-as-transport.js", () => ({
   pushTaskBranchToRemote: transportMocks.pushTaskBranchToRemote,
   fetchFeatureBranch: transportMocks.fetchFeatureBranch,
   loadIdentity: transportMocks.loadIdentity,
+  findIdentity: transportMocks.findIdentity,
   runBranchFor: transportMocks.runBranchFor,
 }));
 
@@ -106,16 +117,12 @@ beforeEach(async () => {
   transportMocks.pushTaskBranchToRemote.mockReset();
   transportMocks.fetchFeatureBranch.mockReset();
   transportMocks.loadIdentity.mockReset();
+  transportMocks.findIdentity.mockReset();
   worktreeMocks.allocateWorktree.mockReset();
   worktreeMocks.removeWorktree.mockReset();
 
-  transportMocks.loadIdentity.mockResolvedValue({
-    pat: "ghp_test",
-    sshPrivateKey: "-----BEGIN OPENSSH PRIVATE KEY-----",
-    sshPublicKey: "ssh-ed25519 AAAA",
-    login: "cogmo-bot",
-    id: "12345",
-  });
+  transportMocks.loadIdentity.mockResolvedValue(IDENTITY);
+  transportMocks.findIdentity.mockResolvedValue(ok(IDENTITY));
 });
 
 afterEach(async () => {
@@ -299,6 +306,15 @@ function gitSubcommand(cmd: ReadonlyArray<string>): string | undefined {
   return cmd[i];
 }
 
+const MISSING_IDENTITY =
+  "GitHub identity 'default' is not configured. Run the setup wizard (or set COGMO_GITHUB_PAT for non-interactive setup) to install it.";
+
+/** The identity row is gone: the Result lookup misses and the throwing load throws its message. */
+function removeIdentity(): void {
+  transportMocks.findIdentity.mockResolvedValue(err(MISSING_IDENTITY));
+  transportMocks.loadIdentity.mockRejectedValue(new Error(MISSING_IDENTITY));
+}
+
 describe("runCodingTask — git-remote transport", () => {
   it("happy path: pushes run-branch, clones via WorktreeSpec.git-remote, checks out feature branch", async () => {
     const repo = await seedRepo();
@@ -333,9 +349,10 @@ describe("runCodingTask — git-remote transport", () => {
     // host worktree, only an in-sandbox checkout.
     expect(worktreeMocks.allocateWorktree).not.toHaveBeenCalled();
 
-    // (2) loadIdentity called twice (once in allocate-worktree to push,
-    // once in create-container for clone auth).
-    expect(transportMocks.loadIdentity).toHaveBeenCalledTimes(2);
+    // (2) loadIdentity called once in each step body that consumes it —
+    // allocate-worktree (push), provision-askpass, create-container (clone
+    // auth) — and never in the bare body.
+    expect(transportMocks.loadIdentity).toHaveBeenCalledTimes(3);
     expect(transportMocks.loadIdentity.mock.calls[0]?.[0]).toMatchObject({
       identityName: "default",
     });
@@ -389,6 +406,7 @@ describe("runCodingTask — git-remote transport", () => {
     const task = await seedTask(repo);
     const idShort = task.id.replaceAll("-", "").slice(0, 12);
     // Pre-populate the assignment as if a prior attempt got there.
+    await parkCodingTaskAt(tx, store, task.id, "planning");
     await tx((trx) =>
       store.setTaskWorktreeAssignment(trx, task.id, {
         type: "git-remote",
@@ -423,13 +441,41 @@ describe("runCodingTask — git-remote transport", () => {
     // make resume safe.
     expect(transportMocks.pushTaskBranchToRemote).toHaveBeenCalledTimes(1);
   });
+  it("a missing GitHub identity fails the task as credentials_unavailable before allocation", async () => {
+    const repo = await seedRepo();
+    const task = await seedTask(repo);
+    const { sandbox, createSpecs } = fakeGitRemoteSandbox();
+    const secretsStore = mock<SecretsStore>();
+    secretsStore.getSecret.mockImplementation(async (_tx, name) =>
+      name === CLAUDE_CODE_OAUTH_TOKEN_SECRET ? "test-oauth-token" : undefined,
+    );
+    removeIdentity();
+
+    const result = await runCodingTask({
+      taskId: task.id,
+      runId: "run-test",
+      deps: makeDeps({ sandbox, backend: backendYielding([]), secretsStore }),
+      stepRun,
+      stepSendEvent,
+    });
+
+    expect(result).toEqual({
+      status: "failed",
+      failure: { reason: "credentials_unavailable", detail: MISSING_IDENTITY },
+    });
+    expect(transportMocks.pushTaskBranchToRemote).not.toHaveBeenCalled();
+    expect(createSpecs).toHaveLength(0);
+    const row = await tx((trx) => store.getTask(trx, task.id));
+    expect(row?.failureReason).toBe("credentials_unavailable");
+  });
 });
 
 describe("runCodingExecute — git-remote transport", () => {
-  it("happy path: tryResumeByTaskId hit → no fresh clone, no checkout (sandbox already on feature branch)", async () => {
+  it("a missing GitHub identity fails the task as credentials_unavailable before the session", async () => {
     const repo = await seedRepo();
     const task = await seedTask(repo);
     const idShort = task.id.replaceAll("-", "").slice(0, 12);
+    await parkCodingTaskAt(tx, store, task.id, "planning");
     await tx((trx) =>
       store.setTaskWorktreeAssignment(trx, task.id, {
         type: "git-remote",
@@ -437,13 +483,50 @@ describe("runCodingExecute — git-remote transport", () => {
       }),
     );
     await tx((trx) => store.setTaskSessionId(trx, task.id, "sess-from-plan"));
+    await parkCodingTaskAt(tx, store, task.id, "awaiting_approval");
+    await tx((trx) => store.approvePlanIfPending(trx, task.id, new Date()));
+    const { sandbox, createSpecs } = fakeGitRemoteSandbox();
+    const secretsStore = mock<SecretsStore>();
+    secretsStore.getSecret.mockImplementation(async (_tx, name) =>
+      name === CLAUDE_CODE_OAUTH_TOKEN_SECRET ? "test-oauth-token" : undefined,
+    );
+    removeIdentity();
+    const backend = backendYielding([{ kind: "complete", exitCode: 0, isError: false }]);
+    const execute = vi.spyOn(backend, "execute");
+
+    const result = await runCodingExecute({
+      taskId: task.id,
+      runId: "run-test",
+      deps: makeDeps({ sandbox, backend, secretsStore }),
+      stepRun,
+      stepSendEvent,
+      inngest: fakeInngest,
+    });
+
+    expect(result).toEqual({
+      status: "failed",
+      failure: { reason: "credentials_unavailable", detail: MISSING_IDENTITY },
+    });
+    expect(execute).not.toHaveBeenCalled();
+    expect(createSpecs).toHaveLength(0);
+    const row = await tx((trx) => store.getTask(trx, task.id));
+    expect(row?.failureReason).toBe("credentials_unavailable");
+  });
+
+  it("happy path: tryResumeByTaskId hit → no fresh clone, no checkout (sandbox already on feature branch)", async () => {
+    const repo = await seedRepo();
+    const task = await seedTask(repo);
+    const idShort = task.id.replaceAll("-", "").slice(0, 12);
+    await parkCodingTaskAt(tx, store, task.id, "planning");
     await tx((trx) =>
-      store.updateTaskStatus(trx, {
-        id: task.id,
-        status: "awaiting_approval",
-        planApprovedAt: new Date(),
+      store.setTaskWorktreeAssignment(trx, task.id, {
+        type: "git-remote",
+        branch: `cogmo/${idShort}`,
       }),
     );
+    await tx((trx) => store.setTaskSessionId(trx, task.id, "sess-from-plan"));
+    await parkCodingTaskAt(tx, store, task.id, "awaiting_approval");
+    await tx((trx) => store.approvePlanIfPending(trx, task.id, new Date()));
 
     const { sandbox, createSpecs, execCalls } = fakeGitRemoteSandbox();
     // Resume hit — tryResumeByTaskId returns the existing session
@@ -536,6 +619,7 @@ describe("runCodingExecute — git-remote transport", () => {
     const repo = await seedRepo();
     const task = await seedTask(repo);
     const idShort = task.id.replaceAll("-", "").slice(0, 12);
+    await parkCodingTaskAt(tx, store, task.id, "planning");
     await tx((trx) =>
       store.setTaskWorktreeAssignment(trx, task.id, {
         type: "git-remote",
@@ -543,13 +627,8 @@ describe("runCodingExecute — git-remote transport", () => {
       }),
     );
     await tx((trx) => store.setTaskSessionId(trx, task.id, "sess-from-plan"));
-    await tx((trx) =>
-      store.updateTaskStatus(trx, {
-        id: task.id,
-        status: "awaiting_approval",
-        planApprovedAt: new Date(),
-      }),
-    );
+    await parkCodingTaskAt(tx, store, task.id, "awaiting_approval");
+    await tx((trx) => store.approvePlanIfPending(trx, task.id, new Date()));
 
     // Default fake — no resume hit, falls through to create-container.
     // Simulate one tracked-but-unstaged edit so runCommitAndPush hits
@@ -584,8 +663,9 @@ describe("runCodingExecute — git-remote transport", () => {
 
     expect(result.status).toBe("pending_verify");
 
-    // Identity loaded for askpass + clone auth.
-    expect(transportMocks.loadIdentity).toHaveBeenCalledTimes(1);
+    // Identity loaded inside provision-askpass, create-container (clone
+    // auth) and the push step (commit author).
+    expect(transportMocks.loadIdentity).toHaveBeenCalledTimes(3);
 
     // Fresh-create branch: sandbox.create called with askpass mount.
     expect(createSpecs).toHaveLength(1);
@@ -611,6 +691,7 @@ describe("runCodingExecute — git-remote transport", () => {
     const repo = await seedRepo();
     const task = await seedTask(repo);
     const idShort = task.id.replaceAll("-", "").slice(0, 12);
+    await parkCodingTaskAt(tx, store, task.id, "planning");
     await tx((trx) =>
       store.setTaskWorktreeAssignment(trx, task.id, {
         type: "git-remote",
@@ -618,13 +699,8 @@ describe("runCodingExecute — git-remote transport", () => {
       }),
     );
     await tx((trx) => store.setTaskSessionId(trx, task.id, "sess-from-plan"));
-    await tx((trx) =>
-      store.updateTaskStatus(trx, {
-        id: task.id,
-        status: "awaiting_approval",
-        planApprovedAt: new Date(),
-      }),
-    );
+    await parkCodingTaskAt(tx, store, task.id, "awaiting_approval");
+    await tx((trx) => store.approvePlanIfPending(trx, task.id, new Date()));
 
     // status shows a tracked edit (so we commit), then push returns a
     // non-zero exit with stderr that runCommitAndPush classifies as
@@ -674,11 +750,13 @@ describe("runCodingExecute — git-remote transport", () => {
     });
 
     expect(result.status).toBe("failed");
-    expect(result.failureReason).toContain("execute push failed (auth_failed)");
+    expect(result.failure?.reason).toBe("auth_failed");
     // The chat message, the return value and the row carry one masked text.
-    expect(result.failureReason).toContain("MY_TOKEN_ghp_REDACTED");
-    expect(result.failureReason).not.toContain(PAT);
-    expect(streamFailures).toEqual([result.failureReason]);
+    expect(result.failure?.detail).toContain("MY_TOKEN_ghp_REDACTED");
+    expect(result.failure?.detail).not.toContain(PAT);
+    expect(streamFailures).toEqual([
+      `The push was rejected: GitHub authentication failed: ${result.failure?.detail}`,
+    ]);
 
     // Push was attempted before the failure handler kicked in.
     const pushCall = execCalls.find((c) => gitSubcommand(c.cmd) === "push");
@@ -688,7 +766,8 @@ describe("runCodingExecute — git-remote transport", () => {
     // `pending_verify`.
     const reloaded = await tx((trx) => store.getTask(trx, task.id));
     expect(reloaded?.status).toBe("failed");
-    expect(reloaded?.failureReason).toBe(result.failureReason);
+    expect(reloaded?.failureReason).toBe("auth_failed");
+    expect(reloaded?.failureDetail).toBe(result.failure?.detail);
 
     // Sandbox cleanup was invoked through the push-failure path.
     expect(sandbox.deleteByTaskId).toHaveBeenCalledWith(task.id);
@@ -705,6 +784,7 @@ describe("runCodingExecute — git-remote transport", () => {
     const repo = await seedRepo();
     const task = await seedTask(repo);
     const idShort = task.id.replaceAll("-", "").slice(0, 12);
+    await parkCodingTaskAt(tx, store, task.id, "planning");
     await tx((trx) =>
       store.setTaskWorktreeAssignment(trx, task.id, {
         type: "git-remote",
@@ -712,13 +792,8 @@ describe("runCodingExecute — git-remote transport", () => {
       }),
     );
     await tx((trx) => store.setTaskSessionId(trx, task.id, "sess-from-plan"));
-    await tx((trx) =>
-      store.updateTaskStatus(trx, {
-        id: task.id,
-        status: "awaiting_approval",
-        planApprovedAt: new Date(),
-      }),
-    );
+    await parkCodingTaskAt(tx, store, task.id, "awaiting_approval");
+    await tx((trx) => store.approvePlanIfPending(trx, task.id, new Date()));
     const { sandbox } = fakeGitRemoteSandbox((cmd) => {
       if (gitSubcommand(cmd) === "status" && cmd.includes("--porcelain")) {
         return { exitCode: 0, stdout: "M src/foo.ts\n" };
@@ -750,7 +825,7 @@ describe("runCodingExecute — git-remote transport", () => {
           // follows is then rejected.
           execute: async function* () {
             yield { kind: "session_started", sessionId: "sess-from-plan" };
-            await tx((trx) => store.cancelTaskIfActive(trx, task.id, "user cancelled"));
+            await tx((trx) => store.cancelTaskIfActive(trx, task.id, "user_cancelled"));
             yield { kind: "complete", exitCode: 0, isError: false };
           },
         },
@@ -770,7 +845,7 @@ describe("runCodingExecute — git-remote transport", () => {
     expect(result).toEqual({ status: "skipped" });
     const reloaded = await tx((trx) => store.getTask(trx, task.id));
     expect(reloaded?.status).toBe("cancelled");
-    expect(reloaded?.failureReason).toBe("user cancelled");
+    expect(reloaded?.failureReason).toBe("user_cancelled");
     // No `coding/task/failed` for a task the user cancelled.
     expect(sent).toEqual([]);
     expect(streamFailures).toEqual(["Task cancelled while executing."]);
@@ -834,9 +909,9 @@ async function seedTaskReadyForVerify(): Promise<{ task: CodingTaskRow; branch: 
   const repo = await seedRepo();
   const task = await seedTask(repo);
   const branch = `cogmo/${task.id.replaceAll("-", "").slice(0, 12)}`;
+  await parkCodingTaskAt(tx, store, task.id, "planning");
   await tx((trx) => store.setTaskWorktreeAssignment(trx, task.id, { type: "git-remote", branch }));
-  await tx((trx) => store.setTaskPlan(trx, task.id, "1. step\n2. step"));
-  await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "pending_verify" }));
+  await parkCodingTaskAt(tx, store, task.id, "pending_verify");
   return { task, branch };
 }
 
