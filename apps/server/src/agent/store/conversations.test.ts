@@ -9,7 +9,7 @@ import {
 } from "../../test/agent-store-fixtures.js";
 import { expectOk } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
-import { renderInboundText } from "../../transport/content.js";
+import { renderInboundText } from "../conversation/inbound-content.js";
 import { DrizzleConversationStore } from "./conversations.js";
 import { DrizzleProfileStore } from "./profiles.js";
 import { DrizzleTranscriptStore } from "./transcript.js";

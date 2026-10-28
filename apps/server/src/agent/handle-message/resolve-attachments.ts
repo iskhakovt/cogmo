@@ -1,6 +1,6 @@
 import type { ContentBlock } from "../../llm/types.js";
 import type { AttachmentStore } from "../../transport/attachment-store.js";
-import { contentToBlocks } from "../../transport/content.js";
+import { contentToBlocks } from "../conversation/inbound-content.js";
 import type { SubstitutedInbound } from "./inbound-batch.js";
 
 /**

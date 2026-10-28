@@ -1,5 +1,5 @@
-import { type InboundContent, renderInboundText } from "../../transport/content.js";
 import type { InboundMessageSource } from "../../transport/store/schema.js";
+import { type InboundContent, renderInboundText } from "../conversation/inbound-content.js";
 
 /** One row of the turn's inbound batch, as `load-inbound` returns it. */
 export interface InboundRow {

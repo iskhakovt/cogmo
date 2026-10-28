@@ -16,12 +16,12 @@ import type {
   NormalizedImageResult,
 } from "../../transport/attachment-original.js";
 import type { AttachmentStore } from "../../transport/attachment-store.js";
+import type { TransportStore } from "../../transport/store/index.js";
 import {
   type InboundContent,
   MAX_INBOUND_FILE_BYTES,
   renderInboundText,
-} from "../../transport/content.js";
-import type { TransportStore } from "../../transport/store/index.js";
+} from "../conversation/inbound-content.js";
 import { renderUserContent, type SubstitutedInbound } from "../handle-message/inbound-batch.js";
 import type { StoredContent, StoredContentBlock } from "../stored-content.js";
 import type { normalizeImage, screenImage } from "./normalize-image.js";

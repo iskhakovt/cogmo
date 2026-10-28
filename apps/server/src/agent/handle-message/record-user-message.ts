@@ -2,13 +2,13 @@ import { NonRetriableError } from "inngest";
 import type { Durable } from "../../inngest/durable.js";
 import type { LlmProviderResolver } from "../../llm/resolver.js";
 import type { AttachmentStore } from "../../transport/attachment-store.js";
-import { contentToBlocks } from "../../transport/content.js";
 import type { VoiceBundle } from "../../voice/resolver.js";
 import {
   type ArrivalRoute,
   type NormalizeArrivalDeps,
   normalizeArrival,
 } from "../attachments/normalize-arrival.js";
+import { contentToBlocks } from "../conversation/inbound-content.js";
 import type { AgentStore } from "../store/index.js";
 import {
   type InboundRow,
