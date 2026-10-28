@@ -164,7 +164,7 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
 
   const askpassLease = new AskpassLease(deps.askpassBaseDir, taskId);
   try {
-    const askpass = await askpassLease.provision(run, identity);
+    const askpass = await askpassLease.provision(run, async () => identity);
     const state = await createVerifySandbox(run, deps, {
       task,
       repo,
@@ -210,7 +210,13 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
       taskId,
       worktreeAssignment: assignment,
     }).catch(() => undefined);
-    return { status: "failed", failure: recorded };
+    return match(recorded)
+      .with(
+        { kind: "recorded" },
+        ({ failure }): VerifyOrchestratorResult => ({ status: "failed", failure }),
+      )
+      .with({ kind: "ended" }, (): VerifyOrchestratorResult => ({ status: "skipped" }))
+      .exhaustive();
   } finally {
     // Unconditional sweep — idempotent at the label-index layer, reaps
     // managed-backend state that survived a thrown create, and a no-op when

@@ -261,6 +261,57 @@ describe("coding-task-start — Inngest replay", () => {
     expect(sandbox.teardownCalls()).toBe(1);
   });
 
+  it("a run in flight that allocated before `check-credentials` existed tears down on a missing token", async () => {
+    // Allocation and the container are memoized from before the deploy; the
+    // new step runs for the first time and finds the token gone. The failure
+    // exit must reap the worktree and sandbox those steps left.
+    const worktreePath = join(baseDir, "worktrees", "cogmo", "in-flight");
+    const { store, current } = statefulCodingStore(
+      codingTaskRow({
+        status: "planning",
+        worktreeAssignment: { type: "host-path", branch: "cogmo/abc", worktreePath },
+      }),
+      localRepo(),
+    );
+    const backend = countingBackend({ plan: PLAN_EVENTS });
+    const sandbox = fakeCodingSandbox();
+    const secretsStore = mock<SecretsStore>();
+    secretsStore.getSecret.mockResolvedValue(undefined);
+    const fn = createCodingOrchestrator(
+      makeDeps({ store, backend: backend.backend, sandbox: sandbox.sandbox, secretsStore }),
+      inngest,
+    );
+
+    const engine = new InngestTestEngine({
+      function: fn,
+      events: [{ name: "coding/task/start", data: { taskId: FIXTURE_TASK_ID } }],
+      steps: [
+        { id: "claim-task-planning", handler: () => ({ kind: "transitioned" }) },
+        { id: "allocate-worktree", handler: () => null },
+        { id: "ensure-image-present", handler: () => null },
+        {
+          id: "create-container",
+          handler: () => ({
+            type: "local-docker",
+            taskId: FIXTURE_TASK_ID,
+            containerRowId: "row-1",
+            dockerId: "docker-1",
+          }),
+        },
+      ],
+    });
+    const { result, error } = await engine.execute();
+
+    expect(error).toBeUndefined();
+    expect(result).toMatchObject({
+      status: "failed",
+      failure: { reason: "credentials_unavailable" },
+    });
+    expect(current().status).toBe("failed");
+    expect(sandbox.teardownCalls()).toBe(1);
+    expect(backend.planCalls()).toBe(0);
+  });
+
   it("skips a duplicate start event instead of re-planning", async () => {
     // What a re-delivered `coding/task/start` finds once the first run has
     // moved the row past `queued`. Without the conditional transition this

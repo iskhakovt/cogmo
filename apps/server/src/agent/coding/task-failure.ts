@@ -54,6 +54,14 @@ export function describeTaskFailure(failure: TaskFailure): string {
   return failure.detail === "" ? label : `${label}: ${failure.detail}`;
 }
 
+/** What the progress stream says once a run's failure is settled. */
+export function describeRecordedFailure(recorded: RecordedFailure): string {
+  return match(recorded)
+    .with({ kind: "recorded" }, ({ failure }) => describeTaskFailure(failure))
+    .with({ kind: "ended" }, ({ status }) => `The task had already ended (${status}).`)
+    .exhaustive();
+}
+
 /**
  * Emits `coding/task/failed` under `task-failed-<taskId>`, which collapses a
  * repeat fire for the same task inside the bus's dedup window.
@@ -122,25 +130,42 @@ export async function recordTaskFailed(
  * `unexpected_error`. Deliberately broad: every throw, `StepError` from a
  * permanently-failed step included, belongs in this one designed channel.
  *
- * The emit goes first. If `step.sendEvent` exhausts its retries on a real bus
- * outage, the catch throws, the function fails, and `inngest/function.failed`
- * reaches `coding-task-reconcile`, which re-emits for a row it still finds
- * non-terminal. A status write landing first would leave the row terminal,
- * and reconcile would skip it as `already_terminal`.
+ * Conditional like {@link recordTaskFailed}, but outside a step: the catch
+ * runs once, at the end of the run. A task already terminal — `pr_open`
+ * after a failed `emit-pr-opened`, `failed` after a failed in-run
+ * `emit-task-failed`, `cancelled` under the run — keeps its status and
+ * reason, and nothing is emitted. Otherwise the write commits, then the
+ * emit; an emit that exhausts its retries fails the function, and the task
+ * reads `failed` unannounced, the in-run exits' residual.
  *
- * Letting the status write throw is load-bearing too: a DB blip after a
- * successful emit would otherwise return normally to Inngest, suppress
- * `function.failed`, and leave the row non-terminal for good.
+ * Letting the status write throw is load-bearing: a DB blip would otherwise
+ * return normally to Inngest, suppress `function.failed`, and leave the row
+ * non-terminal for good.
  */
 export async function failTaskFromCatch(
   run: CodingRun,
   deps: TaskStoreDeps,
   err: unknown,
-): Promise<TaskFailure> {
+): Promise<RecordedFailure> {
   const failure = maskTaskFailure(unexpectedFailure(err));
-  await emitTaskFailed(run, failure);
-  await deps.runInTx((tx) =>
-    deps.store.updateTaskStatus(tx, { id: run.taskId, status: "failed", failure }),
+  const written = await deps.runInTx((tx) =>
+    deps.store.failTaskIfNonTerminal(tx, run.taskId, failure),
   );
-  return failure;
+  return await match(written)
+    .with({ kind: "failed" }, async (): Promise<RecordedFailure> => {
+      await emitTaskFailed(run, failure);
+      return { kind: "recorded", failure };
+    })
+    .with({ kind: "already_terminal" }, ({ status }): RecordedFailure => {
+      run.log.warn(
+        { status, failure },
+        "run threw on a task already terminal — status and reason kept, not announced",
+      );
+      return { kind: "ended", status };
+    })
+    .with({ kind: "not_found" }, () => {
+      // The row this run claimed at its head cannot have gone missing.
+      throw new Error(`coding task ${run.taskId} vanished before its error was recorded`);
+    })
+    .exhaustive();
 }

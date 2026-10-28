@@ -59,17 +59,10 @@ export type CodingTaskStatus =
 /**
  * A status a forward transition can write. `failed` and `cancelled` carry a
  * reason (`chk_coding_tasks_reason_with_end`), so only the writers that
- * take one — `failTaskIfNonTerminal`, `cancelTaskIfActive`, `failQueuedTask`,
- * `updateTaskStatus` — reach them.
+ * take one — `failTaskIfNonTerminal`, `cancelTaskIfActive`, `failQueuedTask` —
+ * reach them.
  */
 export type CodingTaskForwardStatus = Exclude<CodingTaskStatus, "failed" | "cancelled">;
-
-/** What {@link CodingStore.updateTaskStatus} writes: an end status and the failure behind it. */
-export interface TaskStatusWrite {
-  id: string;
-  status: "failed" | "cancelled";
-  failure: TaskFailure;
-}
 
 /** The two failure columns as one write; a failure with no text has a null detail. */
 function failureColumns(failure: TaskFailure): {
@@ -322,13 +315,6 @@ export interface CodingStore {
     id: string,
     assignment: WorktreeAssignment,
   ): Promise<void>;
-
-  /**
-   * Unconditional write of an end status with its failure. The orchestrators'
-   * catch path (`failTaskFromCatch`) is its one production caller; everything
-   * else transitions conditionally.
-   */
-  updateTaskStatus(tx: Transaction, params: TaskStatusWrite): Promise<void>;
 
   /** Persist the CLI session id captured on the first stream event. */
   setTaskSessionId(tx: Transaction, id: string, sessionId: string): Promise<void>;
@@ -654,13 +640,6 @@ export class DrizzleCodingStore implements CodingStore {
       .select({ id: codingTasks.id, status: codingTasks.status })
       .from(codingTasks)
       .where(inArray(codingTasks.id, [...ids]));
-  }
-
-  async updateTaskStatus(tx: Transaction, params: TaskStatusWrite): Promise<void> {
-    await tx
-      .update(codingTasks)
-      .set({ status: params.status, ...failureColumns(params.failure) })
-      .where(eq(codingTasks.id, params.id));
   }
 
   async setTaskSessionId(tx: Transaction, id: string, sessionId: string): Promise<void> {

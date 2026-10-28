@@ -32,11 +32,12 @@ interface PlanSandboxDeps extends TaskStoreDeps, SandboxAuthDeps {
 
 /**
  * The run's `check-credentials` step has already found the Claude OAuth token
- * and, on git-remote, the GitHub identity. The token loads inside
- * `create-container`, so it never becomes a step return value. On git-remote
- * the identity loads for the sandbox's clone, and askpass is mounted on this
- * container: an execute run that resumes it (no `sandbox.create` on that
- * path) re-provisions the same directory.
+ * and, on git-remote, the GitHub identity. Each loads inside the step body
+ * that uses it — the token and the clone's PAT in `create-container`, the
+ * identity for askpass in `provision-askpass` — so neither becomes a step
+ * return value and the bare body depends only on the memoized verdict.
+ * Askpass is mounted on this container: an execute run that resumes it (no
+ * `sandbox.create` on that path) re-provisions the same directory.
  *
  * On failure the caller's catch reaps the sandbox by task label whether or
  * not `create` returned, which also covers a managed backend whose
@@ -55,17 +56,19 @@ export async function preparePlanSandbox(
   const { sandbox } = deps;
   const { task, repo, assignment } = args;
 
-  let identityPat: string | undefined;
-  let askpassMaterials: AskpassMaterials | undefined;
-  if (sandbox.capabilities.workingTreeTransport === "git-remote") {
-    const identity = await loadIdentity({
-      runInTx: deps.runInTx,
-      secretsStore: deps.secretsStore,
-      identityName: repo.identityName,
-    });
-    identityPat = identity.pat;
-    askpassMaterials = await args.askpass.provision(run, identity);
-  }
+  // Called only inside the step bodies that consume it.
+  const identity =
+    sandbox.capabilities.workingTreeTransport === "git-remote"
+      ? () =>
+          loadIdentity({
+            runInTx: deps.runInTx,
+            secretsStore: deps.secretsStore,
+            identityName: repo.identityName,
+          })
+      : undefined;
+  const askpassMaterials: AskpassMaterials | undefined = identity
+    ? await args.askpass.provision(run, identity)
+    : undefined;
 
   const image = taskImage(repo, deps.devbaseImage);
   // The delegate-gate: on Daytona this resolves once the named snapshot is
@@ -82,7 +85,7 @@ export async function preparePlanSandbox(
         task,
         repo,
         assignment,
-        identityPat,
+        identityPat: identity ? (await identity()).pat : undefined,
         askpass: askpassMaterials,
         image,
         resourceLimits: deps.defaultResourceLimits,

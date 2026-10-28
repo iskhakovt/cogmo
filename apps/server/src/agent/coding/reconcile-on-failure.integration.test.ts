@@ -257,10 +257,9 @@ describe("coding-task-reconcile — Inngest integration", () => {
     const store = new DrizzleCodingStore();
     // Simulate the in-worker catch path winning the race.
     await tx((trx) =>
-      store.updateTaskStatus(trx, {
-        id: taskId,
-        status: "failed",
-        failure: { reason: "cli_exit_error", detail: "claude exit code 2" },
+      store.failTaskIfNonTerminal(trx, taskId, {
+        reason: "cli_exit_error",
+        detail: "claude exit code 2",
       }),
     );
 

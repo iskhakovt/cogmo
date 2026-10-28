@@ -473,6 +473,61 @@ describe("runCodingTask", () => {
     );
   });
 
+  it("missing token after a Cancel since the claim: the task stays cancelled, nothing recorded", async () => {
+    const repo = await seedRepo();
+    const task = await seedTask(repo);
+    const { sandbox, createCalls } = fakeSandbox();
+    const fakeSecrets = mock<SecretsStore>();
+    fakeSecrets.getSecret.mockResolvedValue(undefined);
+    const deps = makeDeps({ sandbox, backend: backendYielding([]), secretsStore: fakeSecrets });
+    // The Cancel lands just before the gate runs.
+    const cancellingStepRun = (async (id: string, body: () => Promise<unknown>) => {
+      if (id === "check-credentials") {
+        await tx((trx) => store.cancelTaskIfActive(trx, task.id, "user_cancelled"));
+      }
+      return stepRun(id, body);
+    }) as typeof stepRun;
+
+    const result = await runCodingTask({
+      taskId: task.id,
+      runId: "run-test",
+      deps,
+      stepRun: cancellingStepRun,
+      stepSendEvent,
+    });
+
+    expect(result).toEqual({ status: "skipped" });
+    const row = await tx((trx) => store.getTask(trx, task.id));
+    expect(row?.status).toBe("cancelled");
+    expect(row?.failureReason).toBe("user_cancelled");
+    expect(createCalls).toHaveLength(0);
+  });
+
+  it("a token removed between check-credentials and create-container fails through the catch", async () => {
+    const repo = await seedRepo();
+    const task = await seedTask(repo);
+    const { sandbox, createCalls } = fakeSandbox();
+    const fakeSecrets = mock<SecretsStore>();
+    // Present for the gate, gone by the time the container is created.
+    fakeSecrets.getSecret.mockResolvedValueOnce("sk-test-oauth").mockResolvedValue(undefined);
+    const deps = makeDeps({ sandbox, backend: backendYielding([]), secretsStore: fakeSecrets });
+
+    const result = await runCodingTask({
+      taskId: task.id,
+      runId: "run-test",
+      deps,
+      stepRun,
+      stepSendEvent,
+    });
+
+    expect(result.status).toBe("failed");
+    if (result.status === "failed") {
+      expect(result.failure?.reason).toBe("unexpected_error");
+      expect(result.failure?.detail).toMatch(/claude_code_oauth_token/);
+    }
+    expect(createCalls).toHaveLength(0);
+  });
+
   async function seedUserTaskWithAutoapprove(
     repo: CodingRepoRow,
     mode: "off" | "on",
@@ -1042,7 +1097,7 @@ describe("runCodingTask", () => {
   // and skip. Letting the emit throw lets the function fail, which
   // fires `inngest/function.failed` and lets the reconcile pick up a
   // still-non-terminal row.
-  it("catch path: emit fires BEFORE DB update; emit failure propagates leaving the row non-terminal", async () => {
+  it("catch path: the conditional write commits before the emit; an emit failure propagates with the row failed", async () => {
     const repo = await seedRepo();
     const task = await seedTask(repo);
 
@@ -1074,13 +1129,11 @@ describe("runCodingTask", () => {
       }),
     ).rejects.toThrow(/bus down/);
 
-    // Emit was attempted exactly once, with status STILL non-terminal —
-    // pins the "emit before DB UPDATE" ordering.
-    expect(sendCalls).toEqual([{ eventName: "coding/task/failed", whenStatus: "planning" }]);
-    // Row stays non-terminal because the catch threw before the DB
-    // update — the reconcile subscriber can now flip + re-emit.
+    // The write lands first, so the emit sees `failed`; its failure then
+    // fails the run, leaving the task failed and unannounced.
+    expect(sendCalls).toEqual([{ eventName: "coding/task/failed", whenStatus: "failed" }]);
     const reloaded = await tx((trx) => store.getTask(trx, task.id));
-    expect(reloaded?.status).toBe("planning");
+    expect(reloaded?.status).toBe("failed");
   });
 
   it("catch path: emit payload carries idempotency id 'task-failed-' + taskId for bus-level dedup", async () => {
@@ -1152,9 +1205,8 @@ describe("runCodingTask", () => {
   });
 
   // If the DB UPDATE in the catch swallowed its error, a transient DB
-  // blip after a successful emit would suppress `function.failed` and
-  // leave the row stuck non-terminal — the reconcile subscriber would
-  // never see it. Letting the UPDATE throw propagates the failure and
+  // blip would suppress `function.failed` and leave the row stuck
+  // non-terminal — the reconcile subscriber would never see it. Letting the UPDATE throw propagates the failure and
   // hands off to the reconcile.
   it("catch path: DB update throw in catch propagates so reconcile can recover", async () => {
     const repo = await seedRepo();
@@ -1167,18 +1219,18 @@ describe("runCodingTask", () => {
       },
       execute: () => throwingPlan("execute not used in this test"),
     };
-    // The task is claimed by `set-status-planning`'s conditional
-    // transition, which passes through; the catch path's status="failed"
-    // write is the only `updateTaskStatus` call, and it throws. This
-    // isolates the test to the precise contract under exam: that the
-    // catch's UPDATE throw propagates instead of being swallowed.
+    // The task is claimed by the conditional transition, which passes
+    // through; the catch path's conditional `failed` write is the only
+    // `failTaskIfNonTerminal` call, and it throws. This isolates the test
+    // to the precise contract under exam: that the catch's UPDATE throw
+    // propagates instead of being swallowed.
     let updateCalls = 0;
     const dbThrowingStore = {
       ...store,
       getTask: store.getTask.bind(store),
       getRepoById: store.getRepoById.bind(store),
       transitionTaskStatus: store.transitionTaskStatus.bind(store),
-      updateTaskStatus: async () => {
+      failTaskIfNonTerminal: async () => {
         updateCalls += 1;
         throw new Error("db blip");
       },
@@ -1201,9 +1253,9 @@ describe("runCodingTask", () => {
 
     // One UPDATE attempt — the catch's `failed` write, which threw.
     expect(updateCalls).toBe(1);
-    // Emit fired before the catch's UPDATE attempt — the bus has the
-    // event already.
-    expect(captured).toHaveLength(1);
+    // The emit follows the write, so nothing is announced for a row the
+    // write never reached.
+    expect(captured).toHaveLength(0);
     // Row is in `planning` from the claim transition — the catch's
     // status="failed" write was rejected, so the row stays non-terminal
     // for the reconcile subscriber to pick up.
@@ -2071,7 +2123,7 @@ describe("runCodingExecute", () => {
   // Mirror of the runCodingTask catch-path contract — emit-first
   // ordering pins the reconcile handoff for the execute orchestrator
   // too.
-  it("catch path: emit fires BEFORE DB update; emit failure propagates leaving the row non-terminal", async () => {
+  it("catch path: the conditional write commits before the emit; an emit failure propagates with the row failed", async () => {
     const repo = await seedRepo();
     const { task } = await seedExecutableTask(repo);
 
@@ -2107,12 +2159,10 @@ describe("runCodingExecute", () => {
       }),
     ).rejects.toThrow(/bus down/);
 
-    // Emit attempted while status was still `executing` — the catch
-    // ran the transition before falling through to the emit.
-    expect(sendCalls).toEqual([{ eventName: "coding/task/failed", whenStatus: "executing" }]);
-    // Row stays `executing` (non-terminal) so the reconcile can flip
-    // it via `failTaskIfNonTerminal`.
+    // The write lands first, so the emit sees `failed`; its failure then
+    // fails the run, leaving the task failed and unannounced.
+    expect(sendCalls).toEqual([{ eventName: "coding/task/failed", whenStatus: "failed" }]);
     const reloaded = await tx((trx) => store.getTask(trx, task.id));
-    expect(reloaded?.status).toBe("executing");
+    expect(reloaded?.status).toBe("failed");
   });
 });

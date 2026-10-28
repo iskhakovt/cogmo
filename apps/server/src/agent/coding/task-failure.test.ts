@@ -78,7 +78,6 @@ describe("task failure channel", () => {
     const recorded = await recordTaskFailed(h.run, h.deps, FAILURE, "transition-failed");
 
     expect(recorded).toEqual({ kind: "ended", status: "cancelled" });
-    expect(h.store.updateTaskStatus).not.toHaveBeenCalled();
     expect(h.inngest.send).not.toHaveBeenCalled();
   });
 
@@ -94,25 +93,51 @@ describe("task failure channel", () => {
 
   it("failTaskFromCatch records the thrown error as unexpected_error, masked, and emits", async () => {
     const h = harness();
+    h.store.failTaskIfNonTerminal.mockResolvedValue({ kind: "failed" });
     const expected: TaskFailure = { reason: "unexpected_error", detail: MASKED };
 
     const recorded = await failTaskFromCatch(h.run, h.deps, new Error(DETAIL));
 
-    expect(recorded).toEqual(expected);
-    expect(h.store.updateTaskStatus).toHaveBeenCalledWith(expect.anything(), {
-      id: "task-1",
-      status: "failed",
-      failure: expected,
-    });
+    expect(recorded).toEqual({ kind: "recorded", failure: expected });
+    expect(h.store.failTaskIfNonTerminal).toHaveBeenCalledWith(
+      expect.anything(),
+      "task-1",
+      expected,
+    );
     expect(h.inngest.send).toHaveBeenCalledWith(failedEvent(expected));
   });
 
   it("failTaskFromCatch describes a non-Error throw too", async () => {
     const h = harness();
+    h.store.failTaskIfNonTerminal.mockResolvedValue({ kind: "failed" });
 
     const recorded = await failTaskFromCatch(h.run, h.deps, "boom");
 
-    expect(recorded).toEqual({ reason: "unexpected_error", detail: "boom" });
+    expect(recorded).toEqual({
+      kind: "recorded",
+      failure: { reason: "unexpected_error", detail: "boom" },
+    });
+  });
+
+  it.each(["pr_open", "failed", "cancelled"] as const)(
+    "failTaskFromCatch keeps a task already at %s: no failure recorded, nothing emitted",
+    async (status) => {
+      const h = harness();
+      h.store.failTaskIfNonTerminal.mockResolvedValue({ kind: "already_terminal", status });
+
+      const recorded = await failTaskFromCatch(h.run, h.deps, new Error("late throw"));
+
+      expect(recorded).toEqual({ kind: "ended", status });
+      expect(h.inngest.send).not.toHaveBeenCalled();
+    },
+  );
+
+  it("failTaskFromCatch throws on a vanished row", async () => {
+    const h = harness();
+    h.store.failTaskIfNonTerminal.mockResolvedValue({ kind: "not_found" });
+
+    await expect(failTaskFromCatch(h.run, h.deps, new Error("x"))).rejects.toThrow(/vanished/);
+    expect(h.inngest.send).not.toHaveBeenCalled();
   });
 
   it("maskTaskFailure masks the detail and keeps the reason", () => {

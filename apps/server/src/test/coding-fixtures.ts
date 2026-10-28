@@ -122,14 +122,6 @@ export function statefulCodingStore(
   const store = mock<CodingStore>();
   store.getTask.mockImplementation(async () => task);
   store.getRepoById.mockImplementation(async () => repo);
-  store.updateTaskStatus.mockImplementation(async (_tx, params) => {
-    task = {
-      ...task,
-      status: params.status,
-      failureReason: params.failure.reason,
-      failureDetail: params.failure.detail,
-    };
-  });
   store.transitionTaskStatus.mockImplementation(async (_tx, _id, from, to, claimedByRunId) => {
     // Mirrors the real store, including the claim's adoption arm: a row
     // already at the target with no claimant is bound to this run. Without
@@ -151,7 +143,8 @@ export function statefulCodingStore(
       ...task,
       status: "failed",
       failureReason: failure.reason,
-      failureDetail: failure.detail,
+      // The real store writes an empty detail as null (`failureColumns`).
+      failureDetail: failure.detail === "" ? null : failure.detail,
     };
     return { kind: "failed" };
   });

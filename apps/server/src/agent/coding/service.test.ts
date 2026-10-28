@@ -476,11 +476,7 @@ describe("createCodingService", () => {
     });
     const taskId = expectDefined(first.taskId, "first taskId");
     await tx((trx) =>
-      store.updateTaskStatus(trx, {
-        id: taskId,
-        status: "failed",
-        failure: { reason: "unexpected_error", detail: "boom" },
-      }),
+      store.failTaskIfNonTerminal(trx, taskId, { reason: "unexpected_error", detail: "boom" }),
     );
     inngest.send.mockClear();
 

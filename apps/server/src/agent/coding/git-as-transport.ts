@@ -173,8 +173,9 @@ export async function findIdentity(
 
 /**
  * {@link findIdentity} where the run's `check-credentials` step already found
- * the identity, so a miss is an identity removed mid-run: it throws, and the
- * orchestrator's catch records it.
+ * the identity, so a miss is an identity removed mid-run. Every caller is a
+ * step body, where a throw is the framework's failure channel: the step
+ * fails and the orchestrator's catch records it.
  */
 export async function loadIdentity(args: LoadIdentityArgs): Promise<GitHubIdentity> {
   const result = await findIdentity(args);

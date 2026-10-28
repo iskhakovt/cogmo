@@ -38,7 +38,11 @@ interface ExecuteSandboxDeps extends TaskStoreDeps, SandboxAuthDeps {
  * together, so "both or neither" is in the type.
  */
 export interface ExecutePushCredentials {
-  identity: GitHubIdentity;
+  /**
+   * Loads the GitHub identity. Called only inside the step bodies that use
+   * it, so the PAT stays out of the bare body and out of step results.
+   */
+  identity: () => Promise<GitHubIdentity>;
   askpass: AskpassMaterials;
 }
 
@@ -60,9 +64,9 @@ export interface ExecuteSandbox {
  * the task's `credentials_unavailable` failure before any container exists.
  *
  * On git-remote, askpass is provisioned either way: a resume reuses the plan
- * phase's mount, a fresh create mounts it. The identity loads outside any
- * step so the PAT never reaches Inngest's state store; the decrypt re-runs
- * at every later boundary.
+ * phase's mount, a fresh create mounts it. The identity loads inside each
+ * step body that uses it, never as a step result, so the bare body depends
+ * only on the memoized verdict.
  */
 export async function acquireExecuteSandbox(
   run: CodingRun,
@@ -89,11 +93,12 @@ export async function acquireExecuteSandbox(
 
   let push: ExecutePushCredentials | undefined;
   if (gitRemote) {
-    const identity = await loadIdentity({
-      runInTx: deps.runInTx,
-      secretsStore: deps.secretsStore,
-      identityName: args.repo.identityName,
-    });
+    const identity = () =>
+      loadIdentity({
+        runInTx: deps.runInTx,
+        secretsStore: deps.secretsStore,
+        identityName: args.repo.identityName,
+      });
     push = { identity, askpass: await args.askpass.provision(run, identity) };
   }
 
@@ -137,7 +142,7 @@ async function createExecuteSandbox(
         task: args.task,
         repo: args.repo,
         assignment: args.assignment,
-        identityPat: args.push?.identity.pat,
+        identityPat: args.push ? (await args.push.identity()).pat : undefined,
         askpass: args.push?.askpass,
         image,
         resourceLimits: defaultResourceLimits,

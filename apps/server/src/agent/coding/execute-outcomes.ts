@@ -106,7 +106,7 @@ export async function pushExecuteChanges(
         GIT_ASKPASS: credentials.askpass.helperPath,
         GIT_TERMINAL_PROMPT: "0",
       },
-      author: commitAuthorFor(credentials.identity),
+      author: commitAuthorFor(await credentials.identity()),
     }),
   );
   return match(result)

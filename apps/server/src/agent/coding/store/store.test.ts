@@ -563,7 +563,7 @@ describe("DrizzleCodingStore", () => {
       ).rejects.toThrow();
     });
 
-    it("updateTaskStatus writes an end status with its reason, and an empty detail as null", async () => {
+    it("failTaskIfNonTerminal writes the reason and detail, and an empty detail as null", async () => {
       const repoId = await seedRepo();
       const t = await tx((trx) =>
         store.insertTask(trx, {
@@ -576,10 +576,9 @@ describe("DrizzleCodingStore", () => {
       );
 
       await tx((trx) =>
-        store.updateTaskStatus(trx, {
-          id: t.id,
-          status: "failed",
-          failure: { reason: "verify_failed", detail: "exit 1\n\n3 tests failed" },
+        store.failTaskIfNonTerminal(trx, t.id, {
+          reason: "verify_failed",
+          detail: "exit 1\n\n3 tests failed",
         }),
       );
       const failed = await tx((trx) => store.getTask(trx, t.id));
@@ -587,14 +586,19 @@ describe("DrizzleCodingStore", () => {
       expect(failed?.failureReason).toBe("verify_failed");
       expect(failed?.failureDetail).toBe("exit 1\n\n3 tests failed");
 
-      await tx((trx) =>
-        store.updateTaskStatus(trx, {
-          id: t.id,
-          status: "failed",
-          failure: { reason: "run_terminated", detail: "" },
+      const other = await tx((trx) =>
+        store.insertTask(trx, {
+          repoId,
+          goal: "g",
+          triggerSource: "user",
+          backend: "claude",
+          allowPrivilegedRunc: false,
         }),
       );
-      const blank = await tx((trx) => store.getTask(trx, t.id));
+      await tx((trx) =>
+        store.failTaskIfNonTerminal(trx, other.id, { reason: "run_terminated", detail: "" }),
+      );
+      const blank = await tx((trx) => store.getTask(trx, other.id));
       expect(blank?.failureReason).toBe("run_terminated");
       expect(blank?.failureDetail).toBeNull();
     });
@@ -1244,10 +1248,9 @@ describe("DrizzleCodingStore", () => {
       );
       // Simulate the in-worker catch path winning the race.
       await tx((trx) =>
-        store.updateTaskStatus(trx, {
-          id: task.id,
-          status: "failed",
-          failure: { reason: "cli_exit_error", detail: "claude exit code 2" },
+        store.failTaskIfNonTerminal(trx, task.id, {
+          reason: "cli_exit_error",
+          detail: "claude exit code 2",
         }),
       );
 
@@ -1315,10 +1318,9 @@ describe("DrizzleCodingStore", () => {
         }),
       );
       await tx((trx) =>
-        store.updateTaskStatus(trx, {
-          id: task.id,
-          status: "failed",
-          failure: { reason: "cli_exit_error", detail: "claude exit code 2" },
+        store.failTaskIfNonTerminal(trx, task.id, {
+          reason: "cli_exit_error",
+          detail: "claude exit code 2",
         }),
       );
 

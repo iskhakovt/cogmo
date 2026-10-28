@@ -43,6 +43,7 @@ import {
 } from "./progress-stream.js";
 import type { CodingRepoRow, CodingStore, CodingTaskRow } from "./store/index.js";
 import {
+  describeRecordedFailure,
   describeTaskFailure,
   failTaskFromCatch,
   type RecordedFailure,
@@ -224,8 +225,19 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
       identityName:
         deps.sandbox.capabilities.workingTreeTransport === "git-remote" ? repo.identityName : null,
     });
-    if (credentials.isErr())
-      return await endPlanUncredentialed(run, deps, stream, credentials.error);
+    if (credentials.isErr()) {
+      // A run in flight across the deploy that added `check-credentials`
+      // meets it after allocation, maybe with a container: tear those down.
+      const allocated = task.worktreeAssignment;
+      return allocated === null
+        ? await endPlanUncredentialed(run, deps, stream, credentials.error)
+        : await endPlanFailed(
+            run,
+            deps,
+            { repo, assignment: allocated, stream },
+            credentials.error,
+          );
+    }
     const worktree = await allocateTaskWorktree(run, deps, {
       repo,
       persisted: assignment,
@@ -250,7 +262,7 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
       .exhaustive();
   } catch (err) {
     run.log.error({ err }, "coding task failed");
-    const failure = await failTaskFromCatch(run, deps, err);
+    const recorded = await failTaskFromCatch(run, deps, err);
     if (assignment) {
       await safeTeardownWorktree({
         runInTx: deps.runInTx,
@@ -262,11 +274,22 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     }
     await deps.sandbox.deleteByTaskId(run.taskId).catch(() => {});
     // Best-effort — don't let a delivery failure mask the original error.
-    await stream.fail(describeTaskFailure(failure)).catch(() => {});
-    return { status: "failed", failure };
+    await stream.fail(describeRecordedFailure(recorded)).catch(() => {});
+    return planResultOf(recorded);
   } finally {
     askpass.release();
   }
+}
+
+/** How a plan failure exit reads to the run's caller. */
+function planResultOf(recorded: RecordedFailure): CodingOrchestratorResult {
+  return match(recorded)
+    .with(
+      { kind: "recorded" },
+      ({ failure }): CodingOrchestratorResult => ({ status: "failed", failure }),
+    )
+    .with({ kind: "ended" }, (): CodingOrchestratorResult => ({ status: "skipped" }))
+    .exhaustive();
 }
 
 /** The plan is in: persist it, then park the task at the gate. */
@@ -295,9 +318,9 @@ async function parkPlan(
 }
 
 /**
- * `check-credentials` found a credential missing, before any worktree or
- * sandbox exists, so there is nothing to tear down. A task cancelled since
- * the claim stays cancelled.
+ * `check-credentials` found a credential missing before allocation, so no
+ * worktree or sandbox exists to tear down. A task cancelled since the claim
+ * stays cancelled.
  */
 async function endPlanUncredentialed(
   run: CodingRun,
@@ -308,7 +331,9 @@ async function endPlanUncredentialed(
   const recorded = await recordTaskFailed(run, deps, failure, "transition-failed");
   return await match(recorded)
     .with({ kind: "ended" }, async (): Promise<CodingOrchestratorResult> => {
-      await stream.fail("Task cancelled while planning.").catch(() => {});
+      await stream.fail("Task cancelled while planning.").catch((streamErr: unknown) => {
+        run.log.warn({ err: streamErr }, "plan stream fail notification failed");
+      });
       return { status: "skipped" };
     })
     .with(
@@ -487,7 +512,7 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       .exhaustive();
   } catch (err) {
     run.log.error({ err }, "coding execute failed");
-    const failure = await failTaskFromCatch(run, deps, err);
+    const recorded = await failTaskFromCatch(run, deps, err);
     await safeTeardownWorktree({
       runInTx: deps.runInTx,
       secretsStore: deps.secretsStore,
@@ -501,8 +526,8 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
     await deps
       .runInTx((tx) => deps.store.setTaskSandboxDeletedAt(tx, run.taskId, new Date().toISOString()))
       .catch(() => {});
-    await stream.fail(describeTaskFailure(failure)).catch(() => {});
-    return { status: "failed", failure };
+    await stream.fail(describeRecordedFailure(recorded)).catch(() => {});
+    return executeResultOf(recorded);
   } finally {
     askpass.release();
   }

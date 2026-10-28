@@ -349,9 +349,10 @@ describe("runCodingTask — git-remote transport", () => {
     // host worktree, only an in-sandbox checkout.
     expect(worktreeMocks.allocateWorktree).not.toHaveBeenCalled();
 
-    // (2) loadIdentity called twice (once in allocate-worktree to push,
-    // once in create-container for clone auth).
-    expect(transportMocks.loadIdentity).toHaveBeenCalledTimes(2);
+    // (2) loadIdentity called once in each step body that consumes it —
+    // allocate-worktree (push), provision-askpass, create-container (clone
+    // auth) — and never in the bare body.
+    expect(transportMocks.loadIdentity).toHaveBeenCalledTimes(3);
     expect(transportMocks.loadIdentity.mock.calls[0]?.[0]).toMatchObject({
       identityName: "default",
     });
@@ -662,8 +663,9 @@ describe("runCodingExecute — git-remote transport", () => {
 
     expect(result.status).toBe("pending_verify");
 
-    // Identity loaded for askpass + clone auth.
-    expect(transportMocks.loadIdentity).toHaveBeenCalledTimes(1);
+    // Identity loaded inside provision-askpass, create-container (clone
+    // auth) and the push step (commit author).
+    expect(transportMocks.loadIdentity).toHaveBeenCalledTimes(3);
 
     // Fresh-create branch: sandbox.create called with askpass mount.
     expect(createSpecs).toHaveLength(1);

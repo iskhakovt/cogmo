@@ -889,7 +889,7 @@ describe("runCodingVerify", () => {
   // Mirror of the runCodingTask catch-path contract — emit-first
   // ordering pins the reconcile handoff for the verify orchestrator
   // too.
-  it("catch path: emit fires BEFORE DB update; emit failure propagates leaving the row non-terminal", async () => {
+  it("catch path: the write commits before the emit; an emit failure propagates with the row failed", async () => {
     // Inject a failure during verify by handing the orchestrator a
     // container whose `bash -lc <verifyCmd>` exec throws (mirrors a
     // sandbox-side failure).
@@ -929,13 +929,46 @@ describe("runCodingVerify", () => {
       }),
     ).rejects.toThrow(/bus down/);
 
-    // Emit attempted while row was still `verifying` (or its prior
-    // state) — the catch fell through to the emit before touching
-    // the DB.
-    expect(sendCalls).toHaveLength(1);
-    expect(sendCalls[0]?.eventName).toBe("coding/task/failed");
-    // Row stays non-terminal for the reconcile subscriber to flip.
+    // The conditional write landed first; the emit then failed the run,
+    // leaving the task `failed` and unannounced.
+    expect(sendCalls).toEqual([{ eventName: "coding/task/failed", whenStatus: "failed" }]);
     const reloaded = await tx((trx) => store.getTask(trx, taskId));
-    expect(reloaded?.status).not.toBe("failed");
+    expect(reloaded?.status).toBe("failed");
+    expect(reloaded?.failureReason).toBe("unexpected_error");
+  });
+
+  it("a throw after the PR opened leaves the task pr_open: no failure written, none announced", async () => {
+    // `emit-pr-opened` exhausting its retries reaches the catch with the row
+    // already at `pr_open`; the catch's write is conditional, so it stands.
+    const handle = fakeContainerHandle(successScript);
+    const deps = makeDeps(handle);
+    deps.octokitFactory = fakeOctokitFactory(
+      vi.fn(async () => ({
+        data: { html_url: "https://github.com/user/cogmo/pull/42", number: 42 },
+      })),
+    );
+    const inngestSend = vi.fn(async (payload: { name: string }) => {
+      if (payload.name === "coding/task/pr-opened") throw new Error("bus down");
+      return undefined;
+    });
+    const inngest = { send: inngestSend } as unknown as Pick<import("inngest").Inngest, "send">;
+
+    const { taskId } = await seedTask();
+    const result = await runCodingVerify({
+      taskId,
+      runId: "run-test",
+      deps,
+      stepRun,
+      stepSendEvent: makeStepSendEvent(inngest),
+      inngest,
+    });
+
+    expect(result).toEqual({ status: "skipped" });
+    const sent = inngestSend.mock.calls.map((c) => c[0].name);
+    expect(sent).toContain("coding/task/pr-opened");
+    expect(sent).not.toContain("coding/task/failed");
+    const reloaded = await tx((trx) => store.getTask(trx, taskId));
+    expect(reloaded?.status).toBe("pr_open");
+    expect(reloaded?.failureReason).toBeNull();
   });
 });
