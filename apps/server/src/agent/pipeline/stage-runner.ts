@@ -62,8 +62,8 @@ import { PipelineDefinitionSchema, parseDurationMs } from "./types.js";
 type FailRunStepResult = StageFailure | { kind: "already_terminal"; status: PipelineRunStatus };
 
 /**
- * Why `fail-run` left the run alone: a terminal run on the stage ended
- * another way; any other status means the run moved off the stage.
+ * Why `fail-run` left the run alone: a terminal run ended another way;
+ * any other status means the run moved off the stage.
  */
 function staleFailureNote(status: PipelineRunStatus): string {
   return isTerminalPipelineRunStatus(status)

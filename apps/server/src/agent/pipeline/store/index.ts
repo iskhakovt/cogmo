@@ -523,8 +523,9 @@ export class DrizzlePipelineRunStore implements PipelineRunStore {
     from: "running" | "waiting_gate",
     set: { status: PipelineRunStatus; gateResolution?: GateResolution },
   ): Promise<RunTransition> {
-    // `.for("update")` row-locks, so two flips of one run serialize and the
-    // second reads the first's status.
+    // `.for("update")` row-locks, so two flips of one run serialize: the
+    // second raises `40001` once the first commits, and reads the first's
+    // status when the transactor retries it.
     const rows = await tx
       .select({
         status: pipelineRuns.status,
@@ -682,7 +683,7 @@ export class DrizzlePipelineRunStore implements PipelineRunStore {
    * between two concurrent terminations (cancel vs. abort) resolves through
    * the store's isolation contract: `.for("update")` blocks the second tx on
    * the row lock, then REPEATABLE READ raises a 40001 on it when the first
-   * commits, and the transactor's one-shot retry re-reads the now-terminal
+   * commits, and the transactor's retry (up to twice) re-reads the now-terminal
    * row and returns `already_terminal`. Returns `kind: "failed"` on success
    * regardless of target status — the public methods relabel.
    */

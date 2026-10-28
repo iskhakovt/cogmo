@@ -24,17 +24,20 @@ import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import type { Database, Transactor } from "./index.js";
 
 const JournalSchema = z.object({ entries: z.array(z.object({ tag: z.string() })) });
-const MIGRATION_TAG = expectDefined(
-  JournalSchema.parse(
-    JSON.parse(
-      await readFile(
-        fileURLToPath(new URL("../../migrations/meta/_journal.json", import.meta.url)),
-        "utf8",
-      ),
+const FAILURE_REASON_ENTRIES = JournalSchema.parse(
+  JSON.parse(
+    await readFile(
+      fileURLToPath(new URL("../../migrations/meta/_journal.json", import.meta.url)),
+      "utf8",
     ),
-  ).entries.find((e) => e.tag.endsWith("_pipeline_run_failure_reason")),
-  "the failure-reason migration's journal entry",
-).tag;
+  ),
+).entries.filter((e) => e.tag.endsWith("_pipeline_run_failure_reason"));
+if (FAILURE_REASON_ENTRIES.length !== 1) {
+  throw new Error(
+    `expected one _pipeline_run_failure_reason journal entry, found ${FAILURE_REASON_ENTRIES.length}`,
+  );
+}
+const MIGRATION_TAG = expectDefined(FAILURE_REASON_ENTRIES[0], "the journal entry").tag;
 const MIGRATION_SQL = await readFile(
   fileURLToPath(new URL(`../../migrations/${MIGRATION_TAG}.sql`, import.meta.url)),
   "utf8",
