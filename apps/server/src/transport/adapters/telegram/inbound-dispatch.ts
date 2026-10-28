@@ -4,9 +4,9 @@
  */
 
 import type { Bot } from "grammy";
+import type { InboundContent } from "../../../agent/conversation/inbound-content.js";
 import { logger } from "../../../logger.js";
 import type { AdapterDeps } from "../../adapter-module.js";
-import type { InboundContent } from "../../content.js";
 import type { BufferedInboundEntry, PriorClosedConversation } from "../../store/index.js";
 import type { Transport } from "../../transport.js";
 

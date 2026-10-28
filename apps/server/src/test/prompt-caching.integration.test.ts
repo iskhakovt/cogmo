@@ -16,6 +16,7 @@ import { connect } from "inngest/connect";
 import { afterAll, beforeAll, describe, expect, inject, it, vi } from "vitest";
 import { z } from "zod";
 import { toolResultClearing } from "../agent/context.js";
+import type { InboundContent } from "../agent/conversation/inbound-content.js";
 import type { Profile } from "../agent/store/index.js";
 import {
   coreMemoryBlocks,
@@ -31,7 +32,6 @@ import { BINDING_CONTROLS_BETA } from "../llm/anthropic.js";
 import { computeBudget, resolveLimits } from "../llm/models.js";
 import { HindsightMemoryProvider } from "../memory/hindsight.js";
 import { DEFAULT_BASE_PROMPT } from "../setup/seed.js";
-import type { InboundContent } from "../transport/content.js";
 import { channelSessions, inboundMessages } from "../transport/store/schema.js";
 import { assertAppendOnly } from "./append-only.js";
 import { expectDefined, expectOk } from "./assertions.js";

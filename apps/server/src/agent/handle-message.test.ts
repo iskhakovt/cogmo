@@ -42,10 +42,10 @@ import {
   scriptedStream,
   turnContextSent,
 } from "../test/factories.js";
-import type { InboundContent } from "../transport/content.js";
 import type { StreamDeliveryError } from "../transport/delivery-router.js";
 import { createAttachmentReader } from "./attachments/attachment-reader.js";
 import { toolResultClearing } from "./context.js";
+import type { InboundContent } from "./conversation/inbound-content.js";
 import { coreMemoryTools } from "./core-memory-tools.js";
 import { readFile } from "./file-tools.js";
 import type { HandleMessageDeps } from "./handle-message.js";

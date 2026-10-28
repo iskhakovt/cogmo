@@ -1,9 +1,9 @@
 import type { Inngest } from "inngest";
 import { err, ok, type Result } from "neverthrow";
+import type { InboundContent } from "../../agent/conversation/inbound-content.js";
 import type { inboundArrived as InboundArrivedEvent } from "../../inngest/events.js";
 import { logger } from "../../logger.js";
 import type { AttachmentStore } from "../attachment-store.js";
-import type { InboundContent } from "../content.js";
 import type { Session } from "../store/index.js";
 import type { TransportError } from "../transport-error.js";
 import type { TransportContext } from "./context.js";

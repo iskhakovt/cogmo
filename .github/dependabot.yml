@@ -16,7 +16,11 @@ updates:
     # (bump the instant a version is published) produces lockfiles that
     # fail `pnpm install --frozen-lockfile` whenever a release is fresh.
     # 7 days clears that gate with margin and gives a real soak window.
-    # Applies to version-updates only — security updates are exempt.
+    # Applies to version-updates only; security updates are exempt. Dependabot
+    # passes it to pnpm as a non-strict `minimum-release-age`, so a version
+    # update re-resolves any lockfile entry under 7 days old to an older
+    # release — a freshly landed security patch included. Floor such a patch
+    # in `overrides:` (pnpm-workspace.yaml).
     cooldown:
       default-days: 7
     # `@types/node` tracks the LOWEST Node major we support, not the newest:

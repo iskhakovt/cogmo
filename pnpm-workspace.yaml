@@ -14,12 +14,17 @@ allowBuilds:
 # Dependabot has no manifest entry to bump. Drop each once every parent's
 # minimum range is patched.
 #
+# A floor also holds a security patch younger than Dependabot's `cooldown`,
+# which the next version update would otherwise resolve below
+# (.github/dependabot.yml).
+#
 # Both bounds are load-bearing: unbounded, `fast-uri >=3.1.6` resolves to 4.1.4
 # against ajv's `^3.0.1`, and a bare `<4.13.5` selector would drag a hono 3.x
 # across a major. One major per entry — which does leave a sub-6 qs unpatched
 # against GHSA-4mjr-xmp4-gh2g (spans >=2.2.5); none is in the tree, and one
 # arriving wants investigating rather than a silent major bump.
 overrides:
+  "body-parser@>=2 <2.4.0": ">=2.4.0 <3" # GHSA-27r3-jxmh-p828 (high) via express
   "fast-uri@>=3 <3.1.6": ">=3.1.6 <4" # GHSA-5jgf-p345-68v8, -f65p-4m7j-42xc, -fph4-wmhf-6fwf, -jqff-g426-hqxp (high) via ajv
   "hono@>=4 <4.13.5": ">=4.13.5 <5" # GHSA-gqvv-2mrq-wpjv, -g6gw-c38x-mqfc, -crvj-82cr-hjcx (moderate) via @modelcontextprotocol/sdk, inngest
   "qs@>=6 <6.16.0": ">=6.16.0 <7" # GHSA-x5fp-wj9c-mxmx, GHSA-4mjr-xmp4-gh2g (moderate) via express, body-parser

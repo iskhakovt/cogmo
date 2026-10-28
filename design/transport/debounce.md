@@ -374,7 +374,7 @@ inbound_messages (
   id                UUID v7 PK,
   channel_session_id UUID FK → channel_sessions NOT NULL,
   conversation_id   UUID FK → conversations NOT NULL,  -- denormalized for query performance
-  content           JSONB NOT NULL,                     -- structured content (text, images, files, voice)
+  content           JSONB NOT NULL,                     -- InboundContentSchema (src/agent/conversation/inbound-content.ts): text, images, files, voice
   platform_ts       TIMESTAMPTZ NOT NULL,               -- when the user sent it (from platform API)
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now()   -- when we persisted it
 );
