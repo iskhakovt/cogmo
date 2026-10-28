@@ -405,8 +405,8 @@ export interface SkillStore {
   denyPendingDeploy(tx: Transaction, params: { pendingId: string }): Promise<DenyDeployTransition>;
   /**
    * P3.3: atomic rollback — re-points `main` and `skills.git_sha` to a prior
-   * sha while inserting a new `skill_deploys` row with status `live` and
-   * `prior_git_sha` set to the previous live sha.
+   * sha while inserting a new `skill_deploys` row with status `rolled_back`
+   * and `prior_git_sha` set to the previous live sha.
    */
   executeRollback(tx: Transaction, params: ExecuteRollbackParams): Promise<ExecuteRegisterResult>;
 
@@ -776,6 +776,15 @@ export class DrizzleSkillStore implements SkillStore {
     if (!deploy) {
       return { kind: "rejected", reason: "deploy_not_found" } as const;
     }
+    // A row this snapshot already shows resolved is refused before the
+    // advisory lock, so a second tap on a live deploy does not queue behind
+    // an in-flight register's update-ref.
+    if (deploy.status !== "pending_approval") {
+      return {
+        kind: "rejected",
+        reason: `deploy_not_pending: status is '${deploy.status}'`,
+      } as const;
+    }
 
     const skillRows = await tx.select().from(skills).where(eq(skills.id, deploy.skillId)).limit(1);
     const skill = skillRows[0];
@@ -786,12 +795,12 @@ export class DrizzleSkillStore implements SkillStore {
       sql`SELECT pg_advisory_xact_lock(hashtext(${`skill_register:${skill.name}`})::bigint)`,
     );
 
-    // The transition is the guard, and it is the first write: `pending_approval`
-    // → `live` as one conditional UPDATE. A zero-row match means another
-    // approve or a deny resolved the row — before this snapshot, or (under
-    // REPEATABLE READ) in a commit whose `40001` the transactor retried into
-    // this fresh one. Nothing is written before it, so returning the
-    // rejection leaves `skills` and main exactly as the other resolution did.
+    // The transition is the transaction's first write: `pending_approval` →
+    // `live` as one conditional UPDATE. A resolution committed after this
+    // snapshot raises `40001` here under REPEATABLE READ, and the transactor
+    // retries from a fresh snapshot, which the check above refuses. The
+    // zero-row match below is hardening for a path REPEATABLE READ does not
+    // reach: nothing precedes it, so returning the rejection commits nothing.
     const resolvedDeployRows = await tx
       .update(skillDeploys)
       .set({
@@ -805,6 +814,9 @@ export class DrizzleSkillStore implements SkillStore {
       .returning();
     const resolvedDeploy = resolvedDeployRows[0];
     if (!resolvedDeploy) {
+      // Under REPEATABLE READ this re-read equals `deploy.status`; under READ
+      // COMMITTED the UPDATE re-evaluates its WHERE after a lock wait, and
+      // only a re-read names the status it saw.
       const current = await tx
         .select({ status: skillDeploys.status })
         .from(skillDeploys)

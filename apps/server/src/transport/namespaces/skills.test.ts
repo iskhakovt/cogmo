@@ -441,6 +441,32 @@ describe("Transport.skills.approveDeploy", () => {
     expect(runner.approveDeploy).not.toHaveBeenCalled();
   });
 
+  it.each([
+    [
+      "deploy_not_pending: status is 'denied'",
+      { code: "skill_deploy_not_pending", pendingId: PENDING_ID, status: "denied" },
+    ],
+    ["deploy_not_found", { code: "skill_deploy_not_found", pendingId: PENDING_ID }],
+  ])("maps the runner's `%s` rejection onto its error code", async (reason, expected) => {
+    // A resolution landing between the pre-read and the approve reaches the
+    // runner's own guard; its reason is a string, recovered by prefix.
+    const runner = mock<SkillRunner>();
+    runner.approveDeploy.mockResolvedValue({
+      name: "echo",
+      riskTier: "approve",
+      status: "rejected",
+      gitSha: "abc",
+      errors: [reason],
+    });
+    const store = mock<SkillStore>();
+    store.getDeployById.mockResolvedValue(makeDeployRow());
+    const skills = makeSkills({ runner, store });
+
+    const result = await skills.approveDeploy(PENDING_ID, KNOWN_HANDLE, CHAT);
+
+    expect(result._unsafeUnwrapErr()).toEqual(expected);
+  });
+
   it("maps runner result status=rejected → skill_deploy_register_failed with reason", async () => {
     // The runner can race past the pre-check (deploy resolved between the
     // getDeployById read and the approveDeploy call). The transport

@@ -28,11 +28,12 @@ export interface SkillListEntry {
 export interface SkillsNamespace {
   /**
    * Approve a pending-approval deploy by its `skill_deploys.id`. Calls
-   * `runner.approveDeploy` which advances main + flips the row live.
-   * Idempotent on already-resolved deploys via the underlying store
-   * method. The tapper is the approver; the conversation in
-   * `platformAddress`, the chat the tap came from, is the approval's
-   * origin.
+   * `runner.approveDeploy`, which advances main and flips the row live. An
+   * unknown id is `skill_deploy_not_found`; a row already resolved is
+   * `skill_deploy_not_pending` with its status; any other rejection is
+   * `skill_deploy_register_failed` with the runner's reason. The tapper is
+   * the approver; the conversation in `platformAddress`, the chat the tap
+   * came from, is the approval's origin.
    */
   approveDeploy(
     pendingId: string,
@@ -95,13 +96,9 @@ export function createSkills(
       const origin = await resolveSkillsActor(tapperPlatformHandle, platformAddress);
       if (!origin) return err({ code: "identity_rejected" as const });
 
-      // Pre-check the deploy's status so we can return a precise error
-      // code when it's already resolved (avoids the `runner.approveDeploy
-      // → "rejected"` → string-parsing dance). Race window: the deploy
-      // could resolve between this read and the actual approve call;
-      // that's fine — runner.approveDeploy is itself atomic and the
-      // worst case is we return "live" when the user expected
-      // already-resolved.
+      // Pre-read the row for a precise code without any git work. A
+      // resolution landing between this read and the approve is caught by
+      // the runner's own guard and mapped from its reason below.
       const deploy = await runInTx((tx) => skillStore.getDeployById(tx, pendingId));
       if (!deploy) return err({ code: "skill_deploy_not_found" as const, pendingId });
       if (deploy.status !== "pending_approval") {
@@ -120,15 +117,20 @@ export function createSkills(
           gitSha: result.gitSha,
         });
       }
-      // Runner rejected — surface the runner's reason verbatim so the
-      // Telegram callback handler can show a useful toast.
-      return err({
-        code: "skill_deploy_register_failed" as const,
-        pendingId,
-        reason:
-          (result.status === "rejected" ? result.errors[0] : undefined) ??
-          `unexpected status '${result.status}'`,
-      });
+      const reason =
+        (result.status === "rejected" ? result.errors[0] : undefined) ??
+        `unexpected status '${result.status}'`;
+      // The runner's rejection is a string; the two codes the keyboard can
+      // name are recovered by prefix until `ExecuteRegisterResult` carries a
+      // tagged reason (todo.md → tag the deploy rejection).
+      if (reason.startsWith("deploy_not_found")) {
+        return err({ code: "skill_deploy_not_found" as const, pendingId });
+      }
+      const notPending = /^deploy_not_pending: status is '([a-z_]+)'$/.exec(reason);
+      if (notPending?.[1] !== undefined) {
+        return err({ code: "skill_deploy_not_pending" as const, pendingId, status: notPending[1] });
+      }
+      return err({ code: "skill_deploy_register_failed" as const, pendingId, reason });
     },
     async denyDeploy(pendingId, tapperPlatformHandle, reason) {
       if (!skillRunner) return err({ code: "skills_disabled" as const });

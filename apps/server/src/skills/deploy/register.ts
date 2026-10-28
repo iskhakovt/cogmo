@@ -1,5 +1,7 @@
 import { err, ok, type Result } from "neverthrow";
 import { match } from "ts-pattern";
+import { logger } from "../../logger.js";
+import { describeError } from "../../util/describe-error.js";
 import { classifyManifest } from "../classifier.js";
 import { type LockfileSnapshot, parseLockfilePackageSpecs } from "../deps.js";
 import { deleteRef, getMainSha, isAncestor, revParse } from "../git-ops.js";
@@ -16,6 +18,8 @@ import { deployRunAs, type SkillDeployOrigin } from "./origin.js";
 import { type RegisterResult, rejectedResult } from "./register-result.js";
 
 const NON_FAST_FORWARD = "non_fast_forward: rebase branch onto main and retry";
+
+const log = logger.child({ component: "skills.runner" });
 
 /** A branch that passed every check `register` makes before its transaction. */
 interface PreparedRegister {
@@ -63,7 +67,6 @@ export async function registerSkill(
       runAs: deployRunAs(deps.defaultRunAs, opts.origin),
       applyFilesystem: async () => {
         await advanceMain(repoPath, branchSha, { kind: "fast_forward" });
-        await deleteRef(repoPath, `refs/heads/${opts.branch}`);
       },
     }),
   );
@@ -71,10 +74,13 @@ export async function registerSkill(
   if (executed.isErr()) return rejectedResult(branchSha, NON_FAST_FORWARD);
   const result = executed.value;
 
-  // Mirror the new main SHA to the configured remote so a Daytona-backed
-  // coding task cloning from origin sees the just-registered skill. Best-
-  // effort — local state is authoritative.
   if (result.kind === "live") {
+    // Both after the commit and best-effort: local state is authoritative.
+    // The branch goes once the deploy is committed, so a register repeated
+    // after a failed commit still has a branch to register; one left behind
+    // re-registers as `no_op`. The mirror lets a Daytona-backed coding task
+    // cloning from origin see the just-registered skill.
+    await deleteFeatureBranch(repoPath, opts.branch);
     await mirrorMainToRemote(deps, repoPath, branchSha, {
       ...(opts.signal && { signal: opts.signal }),
     });
@@ -89,6 +95,17 @@ export async function registerSkill(
     body,
     lockfile,
   });
+}
+
+async function deleteFeatureBranch(repoPath: string, branch: string): Promise<void> {
+  try {
+    await deleteRef(repoPath, `refs/heads/${branch}`);
+  } catch (e) {
+    log.warn(
+      { branch, error: describeError(e) },
+      "skills feature branch not deleted after register; main is authoritative",
+    );
+  }
 }
 
 /**

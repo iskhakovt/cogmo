@@ -42,9 +42,19 @@ export async function denyDeploy(
       log.info({ pendingId: opts.pendingId, reason: opts.reason ?? null }, "skill deploy denied");
       return ok(undefined);
     })
-    .with({ kind: "not_found" }, () => err({ kind: "not_found", pendingId: opts.pendingId }))
-    .with({ kind: "not_pending" }, ({ status }) =>
-      err({ kind: "not_pending", pendingId: opts.pendingId, status }),
-    )
+    .with({ kind: "not_found" }, () => {
+      log.warn(
+        { pendingId: opts.pendingId, reason: opts.reason ?? null },
+        "skill deploy deny: no such deploy",
+      );
+      return err({ kind: "not_found", pendingId: opts.pendingId });
+    })
+    .with({ kind: "not_pending" }, ({ status }) => {
+      log.warn(
+        { pendingId: opts.pendingId, reason: opts.reason ?? null, status },
+        "skill deploy deny: deploy is not pending",
+      );
+      return err({ kind: "not_pending", pendingId: opts.pendingId, status });
+    })
     .exhaustive();
 }

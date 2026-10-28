@@ -21,7 +21,7 @@ import { channels, userIdentities } from "../transport/store/schema.js";
 import { bootstrapSkillsRepo } from "./repo.js";
 import type { SkillRunAs, SkillRunServices } from "./run-as.js";
 import { type SkillActor, type SkillDeployOrigin, SkillRunnerImpl } from "./runner.js";
-import { DrizzleSkillStore, type SkillRunIdentity } from "./store/index.js";
+import { DrizzleSkillStore, type SkillRunIdentity, type SkillStore } from "./store/index.js";
 
 const execFileP = promisify(execFile);
 
@@ -242,6 +242,48 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
     expect(skill?.disabled).toBe(false);
 
     // Feature branch deleted.
+    await expect(
+      execFileP("git", ["-C", repo.bare, "rev-parse", "refs/heads/skill/echo"]),
+    ).rejects.toThrow();
+  });
+
+  it("a register whose transaction fails after update-ref keeps its branch, and the repeat goes live", async () => {
+    // The commit fails after `applyFilesystem` moved main: the database rolls
+    // back while main stays at the tip. The branch is deleted only after a
+    // commit, so the repeat still has something to register and converges.
+    const sha = await pushFeatureBranch({
+      work: repo.work,
+      branch: "skill/echo",
+      manifest: ECHO_MANIFEST,
+      body: ECHO_BODY,
+    });
+    const failingCommit: SkillStore = new Proxy(store, {
+      get(target, prop, receiver) {
+        if (prop === "executeRegister") {
+          return async (...args: Parameters<SkillStore["executeRegister"]>) => {
+            await target.executeRegister(...args);
+            throw new Error("commit failed");
+          };
+        }
+        const value: unknown = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const failing = await makeRunner({ store: failingCommit });
+    await expect(failing.register({ branch: "skill/echo", origin: OWNER })).rejects.toThrow(
+      /commit failed/,
+    );
+    expect(await getMainSha(repo.bare)).toBe(sha);
+    expect(await tx((trx) => store.getSkillByName(trx, "echo"))).toBeUndefined();
+    await expect(
+      execFileP("git", ["-C", repo.bare, "rev-parse", "refs/heads/skill/echo"]),
+    ).resolves.toBeDefined();
+
+    const runner = await makeRunner();
+    const repeat = await runner.register({ branch: "skill/echo", origin: OWNER });
+    assertStatus(repeat, "live");
+    expect(repeat.gitSha).toBe(sha);
+    expect((await tx((trx) => store.getSkillByName(trx, "echo")))?.gitSha).toBe(sha);
     await expect(
       execFileP("git", ["-C", repo.bare, "rev-parse", "refs/heads/skill/echo"]),
     ).rejects.toThrow();

@@ -1337,7 +1337,7 @@ describe("DrizzleSkillStore", () => {
       expect(await tx((trx) => store.getSkillById(trx, skill.id))).toEqual(skill);
     });
 
-    it("approve whose guarded UPDATE matches no row commits nothing", async () => {
+    it("approve writes nothing when its guarded UPDATE matches no row", async () => {
       // Pins that the conditional UPDATE is the transaction's first write: a
       // zero-row match leaves `skills` untouched because nothing precedes it.
       // The hook denies the row on the same connection right before that
