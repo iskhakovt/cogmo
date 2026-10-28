@@ -2,7 +2,7 @@ import type { AgentStore } from "../../agent/store/index.js";
 import type { Transaction } from "../../db/index.js";
 import { logger } from "../../logger.js";
 import type { Session, TransportStore } from "../store/index.js";
-import { closeSession, missedClose } from "./close-session.js";
+import { logMissedClose } from "./log-missed-close.js";
 
 export interface ResolveSessionDeps {
   transportStore: Pick<TransportStore, "resolveSession" | "closeSession">;
@@ -42,10 +42,8 @@ export async function resolveSession(
     return session;
   }
   const fields = { sessionId: session.id, conversationId: session.conversationId };
-  const missed = missedClose(await closeSession(deps, tx, session.id));
-  if (missed) {
-    logger.info({ ...fields, ...missed }, "idle session was already closed");
-  } else {
+  const outcome = await deps.transportStore.closeSession(tx, session.id);
+  if (!logMissedClose("info", fields, outcome)) {
     logger.warn(fields, "session idle-expired via safety net (idle timer may have failed)");
   }
   return null;

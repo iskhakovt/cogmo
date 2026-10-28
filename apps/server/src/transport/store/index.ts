@@ -1,18 +1,4 @@
-import {
-  and,
-  asc,
-  desc,
-  eq,
-  gt,
-  inArray,
-  isNull,
-  lt,
-  lte,
-  ne,
-  notExists,
-  or,
-  sql,
-} from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, lt, lte, ne, notExists, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { match, P } from "ts-pattern";
 import type { JsonValue } from "type-fest";
@@ -57,11 +43,13 @@ export type CloseSessionOutcome =
   | { kind: "not_found" };
 
 export interface SwapSessionOutcome {
-  /** The new active session. */
-  id: string;
+  /** The new active session, as inserted. */
+  session: Session;
   /** The sessions the swap closed — none when the address was free. */
   closedIds: ReadonlyArray<string>;
 }
+
+export type CloseActiveSessionOutcome = { kind: "closed"; sessionId: string } | { kind: "none" };
 
 /**
  * Discriminated input for `persistInbound`. `user` rows carry their
@@ -183,7 +171,7 @@ export interface TransportStore {
     type: string,
   ): Promise<{ kind: "new" | "recovered"; id: string }>;
 
-  /** Find the active session for a platform address (not closed, not expired). */
+  /** The address's active session, if any. */
   resolveSession(
     tx: Transaction,
     channelId: string,
@@ -195,6 +183,17 @@ export interface TransportStore {
    * being `active`. `stale` carries the status the row holds instead.
    */
   closeSession(tx: Transaction, sessionId: string): Promise<CloseSessionOutcome>;
+
+  /**
+   * The `close` transition keyed on the address: close its active session,
+   * if any, in one conditional UPDATE — no lookup for a concurrent swap or
+   * rotation to go stale against.
+   */
+  closeActiveSession(
+    tx: Transaction,
+    channelId: string,
+    platformAddress: string,
+  ): Promise<CloseActiveSessionOutcome>;
 
   /**
    * The write behind every open (design/transport/sessions.md → Lifecycle):
@@ -355,8 +354,7 @@ export interface TransportStore {
    * `(channelId, platformAddress)` with the newest row's `receive` mode.
    * Closed sessions are included — a `/end`-ed Telegram chat is still
    * reachable, the rotation just opens a fresh session against the same
-   * `(channelId, platformAddress)`. Sessions with `expires_at` in the past
-   * are excluded (Web UI client gone).
+   * `(channelId, platformAddress)`.
    */
   findReachableChannelsForUserProfile(
     tx: Transaction,
@@ -632,7 +630,7 @@ export class DrizzleTransportStore implements TransportStore {
       conversationId: string;
       receive: ChannelSessionReceive;
     },
-  ): Promise<{ id: string; inserted: boolean }> {
+  ): Promise<{ session: Session; inserted: boolean }> {
     const rows = await tx
       .insert(channelSessions)
       .values({ ...params, status: "active" })
@@ -641,8 +639,37 @@ export class DrizzleTransportStore implements TransportStore {
         targetWhere: ACTIVE_SESSION,
         set: { channelId: params.channelId },
       })
-      .returning({ id: channelSessions.id, inserted: sql<boolean>`(xmax = 0)` });
-    return single(rows);
+      .returning({
+        id: channelSessions.id,
+        channelId: channelSessions.channelId,
+        platformAddress: channelSessions.platformAddress,
+        conversationId: channelSessions.conversationId,
+        status: channelSessions.status,
+        receive: channelSessions.receive,
+        inserted: sql<boolean>`(xmax = 0)`,
+      });
+    const { inserted, ...session } = single(rows);
+    return { session, inserted };
+  }
+
+  async closeActiveSession(
+    tx: Transaction,
+    channelId: string,
+    platformAddress: string,
+  ): Promise<CloseActiveSessionOutcome> {
+    const closed = await tx
+      .update(channelSessions)
+      .set({ status: "closed" })
+      .where(
+        and(
+          eq(channelSessions.channelId, channelId),
+          eq(channelSessions.platformAddress, platformAddress),
+          eq(channelSessions.status, "active"),
+        ),
+      )
+      .returning({ id: channelSessions.id });
+    const row = closed[0];
+    return row ? { kind: "closed", sessionId: row.id } : { kind: "none" };
   }
 
   async closeSession(tx: Transaction, sessionId: string): Promise<CloseSessionOutcome> {
@@ -679,7 +706,7 @@ export class DrizzleTransportStore implements TransportStore {
         ),
       )
       .returning({ id: channelSessions.id });
-    const { id, inserted } = await this.#insertActiveSession(tx, {
+    const { session, inserted } = await this.#insertActiveSession(tx, {
       channelId,
       platformAddress,
       ...newParams,
@@ -688,9 +715,9 @@ export class DrizzleTransportStore implements TransportStore {
       // The close above freed the address within this transaction, so the
       // insert can only land on a row this transaction's snapshot cannot
       // see — a state the row lock and `40001` rule out.
-      throw new Error(`swapSession: active session ${id} survived the close`);
+      throw new Error(`swapSession: active session ${session.id} survived the close`);
     }
-    return { id, closedIds: closed.map((row) => row.id) };
+    return { session, closedIds: closed.map((row) => row.id) };
   }
 
   async persistInbound(tx: Transaction, params: PersistInboundParams): Promise<{ id: string }> {
@@ -786,7 +813,6 @@ export class DrizzleTransportStore implements TransportStore {
         and(
           eq(channelSessions.conversationId, conversationId),
           eq(channelSessions.status, "active"),
-          or(isNull(channelSessions.expiresAt), gt(channelSessions.expiresAt, sql`now()`)),
         ),
       );
   }
@@ -803,7 +829,6 @@ export class DrizzleTransportStore implements TransportStore {
         and(
           eq(channelSessions.conversationId, conversationId),
           eq(channelSessions.status, "active"),
-          or(isNull(channelSessions.expiresAt), gt(channelSessions.expiresAt, sql`now()`)),
         ),
       )
       .orderBy(asc(channels.type));
@@ -819,7 +844,6 @@ export class DrizzleTransportStore implements TransportStore {
         and(
           eq(channelSessions.conversationId, conversationId),
           eq(channelSessions.status, "active"),
-          or(isNull(channelSessions.expiresAt), gt(channelSessions.expiresAt, sql`now()`)),
         ),
       );
     const first = rows[0];
@@ -843,7 +867,6 @@ export class DrizzleTransportStore implements TransportStore {
       lte(inboundMessages.id, params.maxInboundId),
       eq(channelSessions.status, "active"),
       ne(channelSessions.receive, "none"),
-      or(isNull(channelSessions.expiresAt), gt(channelSessions.expiresAt, sql`now()`)),
     ];
     if (params.prevCursor) {
       conditions.push(gt(inboundMessages.id, params.prevCursor));
@@ -881,7 +904,6 @@ export class DrizzleTransportStore implements TransportStore {
           eq(channelSessions.conversationId, conversationId),
           eq(channelSessions.status, "active"),
           eq(channelSessions.receive, "all"),
-          or(isNull(channelSessions.expiresAt), gt(channelSessions.expiresAt, sql`now()`)),
         ),
       );
   }
@@ -1202,9 +1224,8 @@ export class DrizzleTransportStore implements TransportStore {
   ): Promise<ReadonlyArray<ReachableChannel>> {
     // `status` is intentionally not filtered — closed sessions still
     // carry a reachable `(channelId, platformAddress)` and the rotation
-    // overwrites them with a fresh active row. `expires_at` is filtered as
-    // in the routing reads; nothing writes the column
-    // (design/transport/sessions.md → Lifecycle).
+    // overwrites them with a fresh active row. Nothing reads or writes
+    // `expires_at` (design/transport/sessions.md → Lifecycle).
     //
     // The notExists clause excludes addresses currently bound to an
     // active session on a different profile for the same user. Without
@@ -1228,7 +1249,6 @@ export class DrizzleTransportStore implements TransportStore {
         and(
           eq(conversations.userId, userId),
           eq(conversations.profileId, profileId),
-          or(isNull(channelSessions.expiresAt), gt(channelSessions.expiresAt, sql`now()`)),
           notExists(
             tx
               .select({ x: sql<number>`1` })

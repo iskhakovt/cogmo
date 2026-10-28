@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import type { Transaction, Transactor } from "../../db/index.js";
+import type { Transactor } from "../../db/index.js";
 import { mockAgentStore, mockTransportStore } from "../../test/factories.js";
 import type { BoundaryPendingRow } from "../store/index.js";
 import { resolveBoundary } from "./resolve-boundary.js";
 
-const FAKE_TX = { __mockTx: true } as never as Transaction;
+const FAKE_TX = { __mockTx: true } as never;
 const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
 
 const baseRow: BoundaryPendingRow = {
@@ -39,7 +39,24 @@ function makeDeps(
       .fn()
       .mockResolvedValueOnce({ id: "inbound-1" })
       .mockResolvedValueOnce({ id: "inbound-2" }),
-    swapSession: vi.fn().mockResolvedValue({ id: "session-resumed", closedIds: [] }),
+    swapSession: vi.fn(
+      (
+        _tx: unknown,
+        channelId: string,
+        platformAddress: string,
+        params: { conversationId: string; receive: "none" | "routed" | "all" },
+      ) =>
+        Promise.resolve({
+          session: {
+            id: "session-resumed",
+            channelId,
+            platformAddress,
+            ...params,
+            status: "active" as const,
+          },
+          closedIds: [],
+        }),
+    ),
     deleteBoundaryPending: vi.fn().mockResolvedValue(undefined),
     getChatDefaultProfile: vi.fn().mockResolvedValue(undefined),
     ...overrides.transportOverrides,
@@ -231,6 +248,29 @@ describe("resolveBoundary", () => {
     expect(res.isErr()).toBe(true);
     expect(res._unsafeUnwrapErr()).toEqual({ code: "access_denied" });
     expect(sendSpy).not.toHaveBeenCalled();
+  });
+
+  it("resume: returns access_denied for a non-private target, as /resume does", async () => {
+    const { deps, transportStore } = makeDeps({
+      agentOverrides: {
+        getConversation: vi.fn().mockResolvedValue({
+          id: "conv-group",
+          userId: "user-7",
+          profileId: "profile-1",
+          isPrivate: false,
+        }),
+      },
+    });
+
+    const res = await resolveBoundary(deps, {
+      boundaryId: "b1",
+      choice: { kind: "resume-target", conversationId: "conv-group" },
+      reason: "user_resume",
+    });
+
+    expect(res._unsafeUnwrapErr()).toEqual({ code: "access_denied" });
+    expect(transportStore.swapSession).not.toHaveBeenCalled();
+    expect(transportStore.deleteBoundaryPending).not.toHaveBeenCalled();
   });
 
   it("resume: returns identity_rejected when the handle isn't known on this channel", async () => {

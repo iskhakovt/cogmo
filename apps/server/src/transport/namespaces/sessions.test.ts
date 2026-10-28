@@ -95,15 +95,12 @@ describe("createConversation", () => {
     });
     const { sessions, agentStore } = setup({ transportStore: ts });
 
-    const result = await sessions.createConversation("addr-1", "handle-1", {
-      isPrivate: true,
-      profileId: "profile-explicit",
-    });
+    const result = await sessions.createConversation("addr-1", "handle-1", { isPrivate: true });
 
     expect(ts.resolveUser).toHaveBeenCalledWith(expect.anything(), "ch-1", "handle-1");
     expect(agentStore.createConversation).toHaveBeenCalledWith(expect.anything(), {
       userId: "resolved-user-42",
-      profileId: "profile-explicit",
+      profileId: "profile-1",
       isPrivate: true,
     });
     expect(ts.swapSession).toHaveBeenCalledWith(expect.anything(), "ch-1", "addr-1", {
@@ -118,11 +115,10 @@ describe("createConversation", () => {
       status: "active",
       receive: "routed",
       profileName: "assistant",
-      kind: "created",
     });
   });
 
-  it("joins the address's active session when there is one", async () => {
+  it("returns the address's active session when there is one", async () => {
     const ts = mockTransportStore({
       resolveSession: vi.fn().mockResolvedValue(activeSession),
     });
@@ -130,35 +126,38 @@ describe("createConversation", () => {
 
     const result = await sessions.createConversation("addr-1", "handle-1", { isPrivate: true });
 
-    expect(result._unsafeUnwrap()).toMatchObject({ ...activeSession, kind: "joined" });
+    expect(result._unsafeUnwrap()).toMatchObject(activeSession);
     expect(agentStore.createConversation).not.toHaveBeenCalled();
     expect(ts.swapSession).not.toHaveBeenCalled();
   });
 
-  it("with supersede, swaps the address onto the fresh conversation without consulting what is active", async () => {
+  it("with supersede, swaps the address onto the fresh conversation under the explicit profile, consulting nothing", async () => {
     const ts = mockTransportStore({
       resolveSession: vi.fn().mockResolvedValue(activeSession),
-      swapSession: vi.fn().mockResolvedValue({ id: "session-new", closedIds: ["session-live"] }),
     });
     const { sessions, agentStore } = setup({ transportStore: ts });
 
     const result = await sessions.createConversation("addr-1", "handle-1", {
       isPrivate: true,
       supersede: true,
+      profileId: "profile-explicit",
     });
 
     expect(ts.resolveSession).not.toHaveBeenCalled();
     expect(ts.closeSession).not.toHaveBeenCalled();
-    expect(agentStore.createConversation).toHaveBeenCalledTimes(1);
+    expect(agentStore.createConversation).toHaveBeenCalledWith(expect.anything(), {
+      userId: "user-1",
+      profileId: "profile-explicit",
+      isPrivate: true,
+    });
     expect(ts.swapSession).toHaveBeenCalledWith(expect.anything(), "ch-1", "addr-1", {
       conversationId: "conv-1",
       receive: "routed",
     });
     expect(result._unsafeUnwrap()).toMatchObject({
-      id: "session-new",
+      id: "session-swapped",
       conversationId: "conv-1",
       profileName: "assistant",
-      kind: "created",
     });
   });
 });
@@ -172,6 +171,22 @@ describe("closeSession", () => {
     const outcome = await sessions.closeSession("session-1");
     expect(transportStore.closeSession).toHaveBeenCalledWith(expect.anything(), "session-1");
     expect(outcome).toEqual({ kind: "stale", status: "closed" });
+  });
+});
+
+describe("closeActiveSession", () => {
+  it("closes by address on the scoped channel and returns the store's outcome", async () => {
+    const transportStore = mockTransportStore({
+      closeActiveSession: vi.fn().mockResolvedValue({ kind: "none" }),
+    });
+    const { sessions } = setup({ transportStore });
+    const outcome = await sessions.closeActiveSession("addr-1");
+    expect(transportStore.closeActiveSession).toHaveBeenCalledWith(
+      expect.anything(),
+      "ch-1",
+      "addr-1",
+    );
+    expect(outcome).toEqual({ kind: "none" });
   });
 });
 
@@ -209,6 +224,29 @@ describe("emit", () => {
     const { sessions } = setup();
     const result = await sessions.emit("nonexistent", "hello", new Date());
     expect(result._unsafeUnwrapErr()).toMatchObject({ code: "session_not_found" });
+  });
+
+  it("refuses a closed session instead of persisting into its superseded conversation", async () => {
+    const ts = mockTransportStore({
+      getSession: vi.fn().mockResolvedValue({
+        id: "session-1",
+        channelId: "ch-1",
+        platformAddress: "addr-1",
+        conversationId: "conv-old",
+        status: "closed",
+        receive: "routed",
+      }),
+    });
+    const { sessions, inngestSend } = setup({ transportStore: ts });
+
+    const result = await sessions.emit("session-1", "hello", new Date());
+
+    expect(result._unsafeUnwrapErr()).toEqual({
+      code: "session_not_found",
+      sessionId: "session-1",
+    });
+    expect(ts.persistInbound).not.toHaveBeenCalled();
+    expect(inngestSend).not.toHaveBeenCalled();
   });
 });
 

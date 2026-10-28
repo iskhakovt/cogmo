@@ -3,16 +3,22 @@ import { err, ok, type Result } from "neverthrow";
 import type { inboundArrived as InboundArrivedEvent } from "../../inngest/events.js";
 import type { AttachmentStore } from "../attachment-store.js";
 import type { InboundContent } from "../content.js";
-import { closeSession } from "../sessions/close-session.js";
 import { createSession, type OpenedSession } from "../sessions/create-session.js";
 import { resolveSession } from "../sessions/resolve-session.js";
 import { resumeSession } from "../sessions/resume-session.js";
 import { supersedeSession } from "../sessions/supersede-session.js";
-import type { CloseSessionOutcome, Session } from "../store/index.js";
+import type { CloseActiveSessionOutcome, CloseSessionOutcome, Session } from "../store/index.js";
 import type { TransportError } from "../transport-error.js";
 import type { TransportContext } from "./context.js";
 
-export type { OpenedSession } from "../sessions/create-session.js";
+/**
+ * How `createConversation` treats a session already active on the address:
+ * join it (the first-message path, which has no profile to apply), or
+ * supersede it with the fresh conversation, under an explicit profile if any.
+ */
+export type CreateConversationOpts =
+  | { isPrivate: boolean; supersede?: false }
+  | { isPrivate: boolean; supersede: true; profileId?: string };
 
 /** The session lifecycle and inbound emission — the chat path every adapter drives. */
 export interface TransportSessions {
@@ -28,18 +34,24 @@ export interface TransportSessions {
    * with the name of the profile it runs under.
    *
    * Without `supersede`, an active session already on the address is
-   * returned instead, as `kind: "joined"` — two first inbounds racing on an
-   * address converge on one conversation. With `supersede`, whatever is
-   * active on the address is closed and the fresh conversation takes it, in
-   * one transaction (`/new`).
+   * returned instead — two first inbounds racing on an address converge on
+   * one conversation. With `supersede`, whatever is active on the address is
+   * closed and the fresh conversation takes it, in one transaction (`/new`).
    */
   createConversation(
     platformAddress: string,
     platformUserHandle: string,
-    opts: { isPrivate: boolean; profileId?: string; supersede?: boolean },
+    opts: CreateConversationOpts,
   ): Promise<Result<OpenedSession, TransportError>>;
-  /** Close a session; `stale` when something else closed it first. */
+  /** Close a session by id; `stale` when something else closed it first. */
   closeSession(sessionId: string): Promise<CloseSessionOutcome>;
+  /** Close the address's active session, if any, in one statement. */
+  closeActiveSession(platformAddress: string): Promise<CloseActiveSessionOutcome>;
+  /**
+   * Persist an inbound on an active session and emit `inbound/arrived`.
+   * A closed session is refused as `session_not_found`: the conversation it
+   * pointed at is superseded, and a reply there would be skipped.
+   */
   emit(
     sessionId: string,
     content: InboundContent,
@@ -98,20 +110,22 @@ export function createSessions(
           platformAddress,
           userId: identity.userId,
           isPrivate: opts.isPrivate,
-          profileId: opts.profileId,
           defaultProfileId,
           receive: sessionReceive,
         };
         if (opts.supersede === true) {
-          const { session } = await supersedeSession(stores, tx, args);
-          return ok({ ...session, kind: "created" as const });
+          return ok(await supersedeSession(stores, tx, { ...args, profileId: opts.profileId }));
         }
         return ok(await createSession(stores, tx, args));
       });
     },
 
     async closeSession(sessionId) {
-      return runInTx((tx) => closeSession(stores, tx, sessionId));
+      return runInTx((tx) => transportStore.closeSession(tx, sessionId));
+    },
+
+    async closeActiveSession(platformAddress) {
+      return runInTx((tx) => transportStore.closeActiveSession(tx, channelId, platformAddress));
     },
 
     async resumeConversation(platformAddress, platformUserHandle, target) {
@@ -141,9 +155,7 @@ export function createSessions(
     async emit(sessionId, content, platformTs) {
       const inbound = await runInTx(async (tx) => {
         const session = await transportStore.getSession(tx, sessionId);
-        if (!session) {
-          return null;
-        }
+        if (session?.status !== "active") return null;
 
         const inbound = await transportStore.persistInbound(tx, {
           channelSessionId: sessionId,

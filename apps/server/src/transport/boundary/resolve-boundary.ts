@@ -110,7 +110,7 @@ export async function resolveBoundary(
       // The user chose fresh: whatever opened on the chat during the hold (a
       // scheduled fire rotating onto its conversation) is superseded, so the
       // buffered inbounds drain into the session this opens.
-      const { session } = await supersedeSession(stores, tx, {
+      const session = await supersedeSession(stores, tx, {
         channelId,
         platformAddress: row.platformAddress,
         userId: identity.userId,

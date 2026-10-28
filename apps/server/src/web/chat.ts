@@ -6,7 +6,7 @@ import type {
   SseFrame,
   WebStreamRegistry,
 } from "../transport/adapters/web/stream-registry.js";
-import { missedClose } from "../transport/sessions/close-session.js";
+import { logMissedClose } from "../transport/sessions/log-missed-close.js";
 import type { Transport, TransportError } from "../transport/transport.js";
 import { readJsonBody, sendBodyError } from "./body.js";
 
@@ -58,11 +58,8 @@ export class SessionCloses {
   start(transport: Transport, sessionId: string): void {
     const closing: Promise<void> = transport
       .closeSession(sessionId)
-      .then((outcome) => {
-        // The stream open that replaced this session closed it already.
-        const missed = missedClose(outcome);
-        if (missed) logger.debug({ sessionId, ...missed }, "web chat: session was already closed");
-      })
+      // Missed: the stream open that replaced this session closed it already.
+      .then((outcome) => void logMissedClose("debug", { sessionId }, outcome))
       .catch((err: unknown) =>
         logger.debug({ err, sessionId }, "web chat: closeSession on disconnect failed"),
       )

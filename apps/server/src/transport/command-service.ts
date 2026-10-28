@@ -1,6 +1,4 @@
 import type { Transactor } from "../db/index.js";
-import { logger } from "../logger.js";
-import { missedClose } from "./sessions/close-session.js";
 import type { TransportStore } from "./store/index.js";
 
 /**
@@ -19,15 +17,8 @@ export function createCommandService(
 ): CommandService {
   return {
     async resetConversation(channelId, platformAddress) {
-      await runInTx(async (tx) => {
-        const session = await transportStore.resolveSession(tx, channelId, platformAddress);
-        if (!session) return;
-        // The lookup and the close share a snapshot, so only `closed` is
-        // expected; a miss leaves the same state and is logged.
-        const missed = missedClose(await transportStore.closeSession(tx, session.id));
-        if (missed)
-          logger.warn({ sessionId: session.id, ...missed }, "reset found no active session");
-      });
+      // One statement on the address: no lookup for a concurrent swap to go stale against.
+      await runInTx((tx) => transportStore.closeActiveSession(tx, channelId, platformAddress));
     },
   };
 }

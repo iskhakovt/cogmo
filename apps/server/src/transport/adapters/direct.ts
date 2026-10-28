@@ -1,3 +1,4 @@
+import { match } from "ts-pattern";
 import type { z } from "zod";
 import { directInbound, directOutbound } from "../../inngest/events.js";
 import type { StepRun } from "../../inngest/index.js";
@@ -8,7 +9,6 @@ import {
   type AdapterSetupResult,
   isRenderedMessage,
 } from "../adapter-module.js";
-import { missedClose } from "../sessions/close-session.js";
 import type { Transport, TransportError } from "../transport.js";
 
 export const channelType = "direct";
@@ -43,14 +43,15 @@ export async function handleDirectInbound(
 
   if (text === "/new") {
     await stepRun("close-session", async () => {
-      const session = await transport.resolveSession(platformAddress);
-      if (!session) return;
-      const missed = missedClose(await transport.closeSession(session.id));
-      if (missed) {
-        logger.info({ platformAddress, ...missed }, "direct: session already closed");
-      } else {
-        logger.info({ platformAddress }, "direct: session closed");
-      }
+      // One statement on the address: no lookup for a concurrent swap to stale.
+      match(await transport.closeActiveSession(platformAddress))
+        .with({ kind: "closed" }, ({ sessionId }) =>
+          logger.info({ platformAddress, sessionId }, "direct: session closed"),
+        )
+        .with({ kind: "none" }, () =>
+          logger.info({ platformAddress }, "direct: no active session to close"),
+        )
+        .exhaustive();
     });
     return { status: "new_conversation" };
   }

@@ -121,8 +121,8 @@ export const channelSessions = pgTable(
     createdAt: ts(),
   },
   (t) => [
-    // One active session per address; key of the keyed insert in
-    // `createSession` / `swapSession`. See design/transport/sessions.md → Lifecycle.
+    // One active session per address; key of the keyed insert behind
+    // `swapSession`. See design/transport/sessions.md → Lifecycle.
     uniqueIndex("uq_sessions_active_address")
       .on(t.channelId, t.platformAddress)
       .where(ACTIVE_SESSION),

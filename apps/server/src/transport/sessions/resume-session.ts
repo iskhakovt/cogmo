@@ -50,18 +50,11 @@ export async function resumeSession(
     logger.info(
       {
         platformAddress: args.platformAddress,
-        sessionId: swapped.id,
+        sessionId: swapped.session.id,
         closedSessionIds: swapped.closedIds,
       },
       "resume closed the address's active session",
     );
   }
-  return ok({
-    id: swapped.id,
-    channelId: args.channelId,
-    platformAddress: args.platformAddress,
-    conversationId: conv.id,
-    status: "active",
-    receive: args.receive,
-  });
+  return ok(swapped.session);
 }

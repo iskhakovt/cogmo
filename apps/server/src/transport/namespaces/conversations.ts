@@ -107,8 +107,8 @@ export interface ConversationsNamespace {
   create(
     platformAddress: string,
     platformUserHandle: string,
-    opts: { isPrivate: boolean; profileId?: string },
-  ): Promise<Result<{ conversationId: string; profileName: string }, TransportError>>;
+    opts: { isPrivate: boolean },
+  ): Promise<Result<{ conversationId: string }, TransportError>>;
   /**
    * Ordered message history of a conversation the caller owns — the web chat
    * history read. Each turn is flattened to displayable `text`. Identity- and
@@ -215,16 +215,15 @@ export function createConversations(
       return runInTx(async (tx) => {
         const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
         if (!identity) return err({ code: "identity_rejected" as const });
-        return ok(
-          await openConversation({ transportStore, agentStore }, tx, {
-            channelId,
-            platformAddress,
-            userId: identity.userId,
-            isPrivate: opts.isPrivate,
-            profileId: opts.profileId,
-            defaultProfileId,
-          }),
-        );
+        const opened = await openConversation({ transportStore, agentStore }, tx, {
+          channelId,
+          platformAddress,
+          userId: identity.userId,
+          isPrivate: opts.isPrivate,
+          profileId: undefined,
+          defaultProfileId,
+        });
+        return ok({ conversationId: opened.conversationId });
       });
     },
 

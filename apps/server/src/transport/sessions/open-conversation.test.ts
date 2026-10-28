@@ -1,9 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import type { Transaction } from "../../db/index.js";
 import { mockAgentStore, mockTransportStore } from "../../test/factories.js";
 import { openConversation } from "./open-conversation.js";
 
-const FAKE_TX = { __mockTx: true } as never as Transaction;
+const FAKE_TX = { __mockTx: true } as never;
 
 const args = {
   channelId: "ch-1",

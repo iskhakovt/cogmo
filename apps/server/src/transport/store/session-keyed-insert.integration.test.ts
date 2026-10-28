@@ -142,9 +142,9 @@ describe("session opens against a concurrent writer (real Postgres)", () => {
 
     expect(winner.closedIds).toEqual([]);
     assertKind(loser, "fulfilled");
-    expect(loser.value.closedIds).toEqual([winner.id]);
+    expect(loser.value.closedIds).toEqual([winner.session.id]);
     expect(attempts).toBe(2);
-    expect(await activeIds(address)).toEqual([loser.value.id]);
+    expect(await activeIds(address)).toEqual([loser.value.session.id]);
   });
 
   it("a plain insert, the control: the loser fails with 23505, which is not retried", async () => {
@@ -164,6 +164,6 @@ describe("session opens against a concurrent writer (real Postgres)", () => {
       constraint_name: "uq_sessions_active_address",
     });
     expect(attempts).toBe(1);
-    expect(await activeIds(address)).toEqual([winner.id]);
+    expect(await activeIds(address)).toEqual([winner.session.id]);
   });
 });

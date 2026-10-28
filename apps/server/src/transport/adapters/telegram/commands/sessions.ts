@@ -139,21 +139,10 @@ export async function handleName(transport: Transport, ctx: TelegramCommandConte
 
 export async function handleEnd(transport: Transport, ctx: TelegramCommandContext): Promise<void> {
   const addr = String(ctx.chat.id);
-  const session = await transport.resolveSession(addr);
-  if (!session) {
-    await ctx.reply("No active conversation.");
-    return;
-  }
-  const outcome = await transport.closeSession(session.id);
-  // A close that lost to a swap or rotation in between is not an error: the
-  // conversation the user saw is over either way.
-  const reply = match(outcome)
+  // One statement on the chat's address: nothing to go stale between a lookup and a close.
+  const reply = match(await transport.closeActiveSession(addr))
     .with({ kind: "closed" }, () => "Conversation ended. Send a message to start a new one.")
-    .with(
-      { kind: "stale" },
-      { kind: "not_found" },
-      () => "That conversation had already ended. Send a message to start a new one.",
-    )
+    .with({ kind: "none" }, () => "No active conversation.")
     .exhaustive();
   await ctx.reply(reply);
 }

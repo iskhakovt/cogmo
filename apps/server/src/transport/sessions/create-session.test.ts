@@ -1,16 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
-import type { Transaction } from "../../db/index.js";
 import { mockAgentStore, mockTransportStore } from "../../test/factories.js";
 import { createSession } from "./create-session.js";
 
-const FAKE_TX = { __mockTx: true } as never as Transaction;
+const FAKE_TX = { __mockTx: true } as never;
 
 const args = {
   channelId: "ch-1",
   platformAddress: "addr-1",
   userId: "user-1",
   isPrivate: true,
-  profileId: undefined,
   defaultProfileId: "profile-1",
   receive: "routed" as const,
 };
@@ -48,11 +46,10 @@ describe("createSession", () => {
       status: "active",
       receive: "routed",
       profileName: "assistant",
-      kind: "created",
     });
   });
 
-  it("joins the address's active session as is, inserting nothing", async () => {
+  it("returns the address's active session as is, inserting nothing", async () => {
     const transportStore = mockTransportStore({
       resolveSession: vi.fn().mockResolvedValue(activeSession),
     });
@@ -68,11 +65,10 @@ describe("createSession", () => {
 
     const opened = await createSession({ transportStore, agentStore }, FAKE_TX, {
       ...args,
-      profileId: "profile-wanted",
       isPrivate: false,
     });
 
-    expect(opened).toEqual({ ...activeSession, profileName: "live-profile", kind: "joined" });
+    expect(opened).toEqual({ ...activeSession, profileName: "live-profile" });
     expect(agentStore.createConversation).not.toHaveBeenCalled();
     expect(transportStore.swapSession).not.toHaveBeenCalled();
     expect(agentStore.getProfile).toHaveBeenCalledWith(expect.anything(), "p-live");

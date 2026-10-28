@@ -1,10 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import type { Transaction } from "../../db/index.js";
 import { logger } from "../../logger.js";
 import { mockAgentStore, mockTransportStore } from "../../test/factories.js";
 import { resumeSession } from "./resume-session.js";
 
-const FAKE_TX = { __mockTx: true } as never as Transaction;
+const FAKE_TX = { __mockTx: true } as never;
 
 const args = {
   channelId: "ch-1",
@@ -26,7 +25,7 @@ function owned(overrides: { userId?: string; isPrivate?: boolean } = {}) {
 }
 
 describe("resumeSession", () => {
-  it("swaps the address onto the caller's private conversation", async () => {
+  it("swaps the address onto the caller's private conversation and returns the row", async () => {
     const transportStore = mockTransportStore();
 
     const resumed = await resumeSession({ transportStore, agentStore: owned() }, FAKE_TX, args);
@@ -46,8 +45,16 @@ describe("resumeSession", () => {
   });
 
   it("logs the session the swap closed", async () => {
+    const session = {
+      id: "session-new",
+      channelId: "ch-1",
+      platformAddress: "addr-1",
+      conversationId: "conv-1",
+      status: "active" as const,
+      receive: "routed" as const,
+    };
     const transportStore = mockTransportStore({
-      swapSession: vi.fn().mockResolvedValue({ id: "session-new", closedIds: ["session-old"] }),
+      swapSession: vi.fn().mockResolvedValue({ session, closedIds: ["session-old"] }),
     });
     const info = vi.spyOn(logger, "info").mockImplementation(() => undefined);
 

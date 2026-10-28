@@ -1,10 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import type { Transaction } from "../../db/index.js";
 import { logger } from "../../logger.js";
 import { mockAgentStore, mockTransportStore } from "../../test/factories.js";
 import { resolveSession } from "./resolve-session.js";
 
-const FAKE_TX = { __mockTx: true } as never as Transaction;
+const FAKE_TX = { __mockTx: true } as never;
 const HOUR_MS = 60 * 60 * 1000;
 
 const activeSession = {

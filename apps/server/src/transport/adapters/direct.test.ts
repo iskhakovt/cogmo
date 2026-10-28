@@ -75,7 +75,7 @@ describe("direct adapter", () => {
       });
     });
 
-    it("handles /new by closing session", async () => {
+    it("handles /new by closing the address's active session in one statement", async () => {
       const transport = makeTransport();
 
       const result = await handleDirectInbound(
@@ -84,13 +84,14 @@ describe("direct adapter", () => {
         makeStepRun(),
       );
 
-      expect(transport.closeSession).toHaveBeenCalledWith("session-1");
+      expect(transport.closeActiveSession).toHaveBeenCalledWith(baseEvent.data.platformAddress);
+      expect(transport.resolveSession).not.toHaveBeenCalled();
       expect(result).toEqual({ status: "new_conversation" });
     });
 
-    it("handles /new whose close finds the session already closed", async () => {
+    it("handles /new when the address has no active session", async () => {
       const transport = makeTransport({
-        closeSession: vi.fn().mockResolvedValue({ kind: "stale", status: "closed" }),
+        closeActiveSession: vi.fn().mockResolvedValue({ kind: "none" }),
       });
       const info = vi.spyOn(logger, "info").mockImplementation(() => undefined);
 
@@ -103,8 +104,8 @@ describe("direct adapter", () => {
 
         expect(result).toEqual({ status: "new_conversation" });
         expect(info).toHaveBeenCalledWith(
-          expect.objectContaining({ kind: "stale" }),
-          expect.stringContaining("already closed"),
+          expect.objectContaining({ platformAddress: baseEvent.data.platformAddress }),
+          expect.stringContaining("no active session"),
         );
       } finally {
         info.mockRestore();
