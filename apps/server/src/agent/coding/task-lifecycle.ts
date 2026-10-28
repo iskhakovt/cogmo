@@ -76,8 +76,9 @@ type AdvanceOutcome = { kind: "advanced" } | TaskLeft;
 
 /**
  * The task moved out of the status a stage expected, under the run that
- * expected it. `ended`: it went terminal (a Cancel, or a sibling run's
- * failure) — no owner left, so the run reclaims what it allocated. `moved`:
+ * expected it. `ended`: it went terminal (a Cancel, a sibling run's
+ * failure, or `pr_open` where the advance does not settle it) — no owner
+ * left, so the run reclaims what it allocated. `moved`:
  * it went forward, and another run is working on those very resources.
  */
 export interface TaskLeft {
@@ -140,11 +141,14 @@ interface ReclaimArgs {
   repo: CodingRepoRow;
   assignment: WorktreeAssignment;
   /**
-   * `reap`: delete the task's sandbox here. `swept_by_caller`: the run's
-   * own `finally` sweeps it unconditionally (the verify run), so a second
-   * delete here would only double the provider round-trip.
+   * `reap`: delete the task's sandbox here, then stamp
+   * `resource_usage.sandbox.deleted_at` under `stampStepId` (a no-op when
+   * the task never persisted a sandbox block, as on the plan run).
+   * `swept_by_caller`: the verify run, whose `finally` sweeps the sandbox
+   * unconditionally — or, on its pre-`try` credentials exit, has created
+   * none yet — so a delete here would only double the provider round-trip.
    */
-  sandbox: "reap" | "swept_by_caller";
+  sandbox: { kind: "reap"; stampStepId: string } | { kind: "swept_by_caller" };
   /**
    * The run's progress stream and the message it fails with; null for the
    * verify run, which has no stream of its own.
@@ -197,8 +201,8 @@ export async function reclaimEndedTask(
     }).then(() => null),
   );
   await match(args.sandbox)
-    .with("reap", () =>
-      run.stepRun("teardown-cancelled", () =>
+    .with({ kind: "reap" }, async ({ stampStepId }) => {
+      await run.stepRun("teardown-cancelled", () =>
         deps.sandbox
           .deleteByTaskId(run.taskId)
           .then(() => null)
@@ -206,9 +210,28 @@ export async function reclaimEndedTask(
             run.log.warn({ err }, "cancelled-path teardown failed — sandbox left to the reaper");
             return null;
           }),
-      ),
-    )
-    .with("swept_by_caller", () => Promise.resolve(null))
+      );
+      await stampSandboxDeleted(run, deps, stampStepId);
+    })
+    .with({ kind: "swept_by_caller" }, () => Promise.resolve())
     .exhaustive();
+  // Last, after the durable work: a bare-body notify re-fires once per
+  // later boundary, and nothing follows it here.
   if (args.notify) await args.notify.stream.fail(args.notify.message).catch(() => {});
+}
+
+/**
+ * Stamps `resource_usage.sandbox.deleted_at`; a no-op when no sandbox block
+ * was persisted or the stamp is already there.
+ */
+export async function stampSandboxDeleted(
+  run: CodingRun,
+  deps: TaskStoreDeps,
+  stepId: string,
+): Promise<void> {
+  await run.stepRun(stepId, () =>
+    deps.runInTx((tx) =>
+      deps.store.setTaskSandboxDeletedAt(tx, run.taskId, new Date().toISOString()),
+    ),
+  );
 }

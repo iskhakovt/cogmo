@@ -17,7 +17,12 @@ import { runBranchFor } from "./git-as-transport.js";
 import type { ExecuteStreamHandle } from "./progress-stream.js";
 import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
 import { type RecordedFailure, recordTaskFailed } from "./task-failure.js";
-import { advanceTask, reclaimEndedTask, reclaimIfEnded } from "./task-lifecycle.js";
+import {
+  advanceTask,
+  reclaimEndedTask,
+  reclaimIfEnded,
+  stampSandboxDeleted,
+} from "./task-lifecycle.js";
 import { reapTaskSandbox, WORKTREE_DIR_IN_CONTAINER } from "./task-sandbox.js";
 import { safeTeardownWorktree } from "./teardown.js";
 import type { WorktreeAssignment } from "./types.js";
@@ -132,15 +137,14 @@ export async function endExecuteFailed(
 ): Promise<RecordedFailure> {
   const recorded = await recordTaskFailed(run, deps, rawReason, steps.transition);
   await match(recorded)
-    .with({ kind: "ended" }, async () => {
-      await reclaimEndedTask(run, deps, {
+    .with({ kind: "ended" }, () =>
+      reclaimEndedTask(run, deps, {
         repo: exit.repo,
         assignment: exit.assignment,
-        sandbox: "reap",
+        sandbox: { kind: "reap", stampStepId: steps.sandboxDeleted },
         notify: { stream: exit.stream, message: "Task cancelled while executing." },
-      });
-      await stampSandboxDeleted(run, deps, steps.sandboxDeleted);
-    })
+      }),
+    )
     .with({ kind: "recorded" }, ({ reason }) =>
       tearDownFailedExecute(run, deps, exit, reason, steps),
     )
@@ -224,7 +228,7 @@ export async function handOffToVerify(
     await reclaimIfEnded(run, deps, pendingVerify, {
       repo: exit.repo,
       assignment: exit.assignment,
-      sandbox: "reap",
+      sandbox: { kind: "reap", stampStepId: "persist-sandbox-deleted" },
       notify: { stream: exit.stream, message: "Task cancelled while executing." },
     });
     return "left_executing";
@@ -249,20 +253,4 @@ export async function handOffToVerify(
     );
   });
   return "handed_off";
-}
-
-/**
- * Stamps `resource_usage.sandbox.deleted_at`; a no-op when no sandbox block
- * was persisted or the stamp is already there.
- */
-async function stampSandboxDeleted(
-  run: CodingRun,
-  deps: TaskStoreDeps,
-  stepId: string,
-): Promise<void> {
-  await run.stepRun(stepId, () =>
-    deps.runInTx((tx) =>
-      deps.store.setTaskSandboxDeletedAt(tx, run.taskId, new Date().toISOString()),
-    ),
-  );
 }

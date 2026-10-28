@@ -70,7 +70,7 @@ export async function parkPlanAtGate(
     await reclaimIfEnded(run, deps, awaiting, {
       repo: args.repo,
       assignment: args.assignment,
-      sandbox: "reap",
+      sandbox: { kind: "reap", stampStepId: "persist-sandbox-deleted" },
       notify: { stream, message: "Task cancelled while planning." },
     });
     return "left_planning";

@@ -297,7 +297,7 @@ async function leaveVerify(
   await reclaimIfEnded(run, deps, left, {
     repo: failure.repo,
     assignment: failure.assignment,
-    sandbox: "swept_by_caller",
+    sandbox: { kind: "swept_by_caller" },
     notify: null,
   });
   return { status: "skipped" };
@@ -320,7 +320,7 @@ async function failVerify(
       await reclaimEndedTask(run, deps, {
         repo: failure.repo,
         assignment: failure.assignment,
-        sandbox: "swept_by_caller",
+        sandbox: { kind: "swept_by_caller" },
         notify: null,
       });
       return { status: "skipped" };
