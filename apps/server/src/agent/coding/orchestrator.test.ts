@@ -7,6 +7,7 @@ import { ok } from "neverthrow";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Database, Transactor } from "../../db/index.js";
+import type { Durable } from "../../inngest/durable.js";
 import {
   type ExecStreamingHandle,
   type LocalDockerSessionState,
@@ -22,12 +23,7 @@ import { makeStepRun, makeStepSendEvent } from "../../test/factories.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { DrizzleAgentStore } from "../store/index.js";
 import type { CodingBackend, CodingEvent } from "./backend.js";
-import {
-  type CodingOrchestratorDeps,
-  runCodingExecute,
-  runCodingTask,
-  type StepSendEvent,
-} from "./orchestrator.js";
+import { type CodingOrchestratorDeps, runCodingExecute, runCodingTask } from "./orchestrator.js";
 import {
   type ExecuteStreamHandle,
   NULL_EXECUTE_STREAM,
@@ -279,12 +275,11 @@ interface RecordedEvent {
  * `stepSendEvent` shim that records each payload instead of forwarding it.
  * Tests assert on `sent`; the orchestrator sees a normal durable emit.
  */
-function recordingSendEvent(): { sent: RecordedEvent[]; handle: StepSendEvent } {
+function recordingSendEvent(): { sent: RecordedEvent[]; handle: Durable["sendEvent"] } {
   const sent: RecordedEvent[] = [];
-  const handle = (async (_: string, payload: unknown) => {
-    sent.push(payload as RecordedEvent);
-    return { ids: [] };
-  }) as unknown as StepSendEvent;
+  const handle: Durable["sendEvent"] = async (_id, events) => {
+    sent.push(...(Array.isArray(events) ? events : [events]));
+  };
   return { sent, handle };
 }
 

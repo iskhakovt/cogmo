@@ -1,6 +1,7 @@
 import { SpanStatusCode, trace } from "@opentelemetry/api";
 import type { Logger } from "pino";
 import * as R from "remeda";
+import type { Durable } from "../inngest/durable.js";
 import { canonicalizeToolInputs, extractText } from "../llm/content.js";
 import { ProviderProtocolError, ToolArgsCutOffError } from "../llm/errors.js";
 import { RefusalError } from "../llm/fallback.js";
@@ -47,7 +48,7 @@ import {
 const tracer = trace.getTracer("cogmo.agent");
 
 /**
- * Wraps one durable unit of work in a boundary backed by Inngest `step.run`.
+ * Wraps one durable unit of work in a step: the port's {@link Durable.run}.
  * The agent loop creates two kinds of steps through it: each streaming LLM
  * iteration (`llm-iter<N>`, returning an {@link LlmIterationOutcome}) and each
  * durable tool handler (`tool-iter<N>-<P>`, returning a `ToolStepResult`,
@@ -56,16 +57,15 @@ const tracer = trace.getTracer("cogmo.agent");
  * per-step retries fire first, then the error bubbles up — a cached failure
  * re-throws).
  *
- * Injected rather than depending on Inngest's `step` directly — keeps the
- * loop testable without an Inngest context. When undefined, all work runs
- * directly and nothing is memoized.
+ * Injected as a bare function, so the loop runs without an Inngest context
+ * in tests. When undefined, all work runs directly and nothing is memoized.
  *
  * Contract: the resolved value of `fn` must survive a JSON round-trip
- * unchanged (Inngest stores step results as JSON). Every payload shape the
- * loop passes satisfies this by construction — see design/crash-recovery.md →
- * State serialization.
+ * unchanged (Inngest stores step results as JSON). `JsonSafe` enforces it for
+ * every type the compiler can see into; see design/crash-recovery.md →
+ * State serialization for the `unknown` fields it can't.
  */
-export type StepRunner = <T>(id: string, fn: () => Promise<T>) => Promise<T>;
+export type StepRunner = Durable["run"];
 
 export interface AgentLoopParams {
   provider: LlmProvider;

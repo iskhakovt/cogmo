@@ -12,8 +12,8 @@
 
 import type { Inngest } from "inngest";
 import type { Transactor } from "../../db/index.js";
+import { type EventPublisher, fromStepTools } from "../../inngest/durable.js";
 import { codingTaskPlanApproved, codingTaskStart } from "../../inngest/events.js";
-import type { StepRun, StepSendEvent } from "../../inngest/index.js";
 import { logger } from "../../logger.js";
 import type { SandboxClient } from "../../sandbox/index.js";
 import type { ResourceLimits } from "../../sandbox/types.js";
@@ -49,8 +49,6 @@ import { safeTeardownWorktree } from "./teardown.js";
 import type { WorktreeAssignment } from "./types.js";
 
 const log = logger.child({ component: "coding.orchestrator" });
-
-export type { StepSendEvent } from "../../inngest/index.js";
 
 export interface CodingOrchestratorDeps {
   runInTx: Transactor;
@@ -124,12 +122,13 @@ export function createCodingOrchestrator(deps: CodingOrchestratorDeps, inngest: 
       concurrency: { limit: 1, key: "event.data.taskId" },
     },
     async ({ event, step, runId }) => {
+      const durable = fromStepTools(step);
       return runCodingTask({
         taskId: event.data.taskId,
         runId,
         deps,
-        stepRun: step.run,
-        stepSendEvent: step.sendEvent,
+        stepRun: durable.run,
+        stepSendEvent: durable.sendEvent,
       });
     },
   );
@@ -152,12 +151,13 @@ export function createCodingExecuteOrchestrator(deps: CodingOrchestratorDeps, in
       concurrency: { limit: 1, key: "event.data.taskId" },
     },
     async ({ event, step, runId }) => {
+      const durable = fromStepTools(step);
       return runCodingExecute({
         taskId: event.data.taskId,
         runId,
         deps,
-        stepRun: step.run,
-        stepSendEvent: step.sendEvent,
+        stepRun: durable.run,
+        stepSendEvent: durable.sendEvent,
         inngest,
       });
     },
@@ -169,14 +169,14 @@ interface RunParams {
   /** See {@link CodingRun.runId}. */
   runId: string;
   deps: CodingOrchestratorDeps;
-  stepRun: StepRun;
+  stepRun: CodingRun["stepRun"];
   /** See {@link CodingRun.stepSendEvent}. */
-  stepSendEvent: StepSendEvent;
+  stepSendEvent: CodingRun["stepSendEvent"];
 }
 
 interface ExecuteRunParams extends RunParams {
   /** Emits `coding/task/cli-done`, the hand-off to the verify orchestrator. */
-  inngest: Pick<Inngest, "send">;
+  inngest: EventPublisher;
 }
 
 /**

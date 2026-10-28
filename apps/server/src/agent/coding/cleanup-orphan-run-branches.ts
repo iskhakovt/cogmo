@@ -24,8 +24,8 @@ import { RequestError } from "@octokit/request-error";
 import { Octokit } from "@octokit/rest";
 import type { Inngest } from "inngest";
 import type { Transactor } from "../../db/index.js";
+import { type Durable, fromStepTools } from "../../inngest/durable.js";
 import { codingRunBranchSweepRepo } from "../../inngest/events.js";
-import type { StepRun } from "../../inngest/index.js";
 import { logger } from "../../logger.js";
 import { describeResolveIdentityError, resolveGitHubIdentity } from "../../secrets/github.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
@@ -98,7 +98,7 @@ export function createOrphanRunBranchSweepFunctions(
       triggers: [codingRunBranchSweepRepo],
     },
     async ({ event, step }) => {
-      return await sweepRepo(deps, event.data.repoId, step.run);
+      return await sweepRepo(deps, event.data.repoId, fromStepTools(step).run);
     },
   );
 
@@ -109,14 +109,18 @@ export function createOrphanRunBranchSweepFunctions(
 export async function sweepRepo(
   deps: CleanupOrphanRunBranchesDeps,
   repoId: string,
-  stepRun: StepRun,
+  stepRun: Durable["run"],
 ): Promise<{ repoId: string; deleted: number; skipped: number; errors: number }> {
   const now = (deps.now ?? (() => new Date()))();
   const repoLog = log.child({ repoId });
 
-  const repo = await stepRun("load-repo", () =>
-    deps.runInTx((tx) => deps.store.getRepoById(tx, repoId)),
-  );
+  // The fields the sweep reads, so the step result is plain JSON.
+  const repo = await stepRun("load-repo", async () => {
+    const row = await deps.runInTx((tx) => deps.store.getRepoById(tx, repoId));
+    return row
+      ? { name: row.name, remoteUrl: row.remoteUrl, identityName: row.identityName }
+      : null;
+  });
   if (!repo) {
     // Transient race with concurrent repo deletion — not warn-worthy,
     // the cron will skip this fan-out event and pick up survivors next
@@ -169,9 +173,10 @@ export async function sweepRepo(
   // Batch task lookup — one query for every ref. Avoids N round-trips
   // through Inngest's executor and stays well under any per-function
   // step-count cap. Map by id for O(1) lookup in the loop below.
-  const tasks = await stepRun("load-tasks", () =>
-    deps.runInTx((tx) => deps.store.getTasksByIds(tx, taskIds)),
-  );
+  const tasks = await stepRun("load-tasks", async () => {
+    const rows = await deps.runInTx((tx) => deps.store.getTasksByIds(tx, taskIds));
+    return rows.map((t) => ({ id: t.id, status: t.status, createdAt: t.createdAt.toISOString() }));
+  });
   const tasksById = new Map(tasks.map((t) => [t.id, t] as const));
 
   let deleted = 0;
@@ -191,8 +196,8 @@ export async function sweepRepo(
     } else if (!isTerminalCodingTaskStatus(task.status)) {
       stale = false;
     } else {
-      // `stepRun` round-trips through JSON, so `createdAt` arrives as an
-      // ISO string. `new Date(string)` parses it back.
+      // `load-tasks` carries `createdAt` as an ISO string, the form a
+      // `Date` takes in JSON.
       const createdAt = new Date(task.createdAt);
       const ageMs = now.getTime() - createdAt.getTime();
       stale = ageMs >= RETENTION_MS;

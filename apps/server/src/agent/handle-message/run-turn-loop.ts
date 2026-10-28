@@ -1,4 +1,5 @@
 import type { Logger } from "pino";
+import type { Durable } from "../../inngest/durable.js";
 import { isRetriableProviderError } from "../../llm/fallback.js";
 import type { Message, StreamEvent } from "../../llm/types.js";
 import { type DeliveryHandle, pushOrThrow } from "../../transport/delivery-router.js";
@@ -10,7 +11,6 @@ import type { ToolRegistry } from "../tools.js";
 import { turnCacheIntent } from "../turn-cache-intent.js";
 import { asNonRetriable } from "../turn-step-runner.js";
 import type { TurnModel } from "./resolve-turn-model.js";
-import type { TurnSteps } from "./turn-steps.js";
 
 export interface RunTurnLoopArgs {
   conversationId: string;
@@ -41,7 +41,7 @@ export interface TurnLoopOutcome {
  * `degraded-reply` (when the loop degraded), `finish-stream`.
  */
 export async function runTurnLoop(
-  step: TurnSteps,
+  step: Durable,
   stepRun: StepRunner,
   runStreamingAgentLoop: (params: StreamingAgentLoopParams) => Promise<AgentLoopResult>,
   args: RunTurnLoopArgs,
@@ -133,7 +133,7 @@ export async function runTurnLoop(
  * Step: `degraded-reply`.
  */
 async function withDegradedReply(
-  step: TurnSteps,
+  step: Durable,
   result: AgentLoopResult,
   degraded: NonNullable<AgentLoopResult["degraded"]>,
   args: Pick<RunTurnLoopArgs, "turnModel" | "delivery" | "turnLogger">,

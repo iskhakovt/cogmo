@@ -1,6 +1,7 @@
 import { match } from "ts-pattern";
 import { z } from "zod";
 import type { Transactor } from "../../db/index.js";
+import type { Durable } from "../../inngest/durable.js";
 import {
   buildConversationCooldownClearedEvent,
   calculateElapsedCooldown,
@@ -11,7 +12,6 @@ import type { AgentLoopResult } from "../loop.js";
 import type { AgentStore } from "../store/index.js";
 import type { CooldownState } from "../store/schema.js";
 import { toStoredContent, toStoredMessage } from "../stored-content.js";
-import type { TurnSteps } from "./turn-steps.js";
 
 export interface PersistTurnDeps {
   runInTx: Transactor;
@@ -81,7 +81,7 @@ type PersistWrite =
  * `emit-conversation-degraded` (when the loop degraded).
  */
 export async function persistTurn(
-  step: TurnSteps,
+  step: Durable,
   deps: PersistTurnDeps,
   args: PersistTurnArgs,
 ): Promise<PersistOutcome> {
@@ -171,7 +171,7 @@ export async function persistTurn(
 }
 
 async function emitTurnEvents(
-  step: TurnSteps,
+  step: Durable,
   args: PersistTurnArgs,
   clearedCooldown: CooldownState | null,
 ): Promise<void> {

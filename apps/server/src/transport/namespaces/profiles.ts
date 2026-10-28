@@ -1,8 +1,8 @@
-import type { Inngest } from "inngest";
 import { err, ok, type Result } from "neverthrow";
 import { findUnknownCompartment } from "../../agent/evolution/find-unknown-compartment.js";
 import type { CodingAutoapproveMode, Profile } from "../../agent/store/index.js";
 import type { CooldownState, ProfileMemoryScope, ToolSet } from "../../agent/store/schema.js";
+import type { EventPublisher } from "../../inngest/durable.js";
 import type { TransportError } from "../transport-error.js";
 import type { TransportContext } from "./context.js";
 import { emitCooldownClearedIfAny } from "./cooldown-cleared.js";
@@ -71,7 +71,9 @@ export interface ProfilesNamespace {
   ): Promise<Result<void, TransportError>>;
 }
 
-export function createProfiles(deps: TransportContext & { inngest: Inngest }): ProfilesNamespace {
+export function createProfiles(
+  deps: TransportContext & { inngest: EventPublisher },
+): ProfilesNamespace {
   const { channelId, runInTx, transportStore, agentStore, inngest } = deps;
   return {
     async list(platformUserHandle) {
