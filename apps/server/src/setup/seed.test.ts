@@ -304,7 +304,7 @@ describe("seedChannelRules", () => {
       .select({
         rule: steeringRules.rule,
         source: steeringRules.source,
-        active: steeringRules.active,
+        status: steeringRules.status,
       })
       .from(steeringRules)
       .where(eq(steeringRules.channelType, "telegram"))
@@ -327,20 +327,20 @@ describe("seedChannelRules", () => {
 
   it("doesn't reseed defaults an operator switched off", async () => {
     await seedChannelRules(tx, agentStore, "telegram");
-    await db.update(steeringRules).set({ active: false });
+    await db.update(steeringRules).set({ status: "disabled" });
 
     await seedChannelRules(tx, agentStore, "telegram");
 
     const rows = await telegramRules();
     expect(rows).toHaveLength(3);
-    expect(rows.every((r) => !r.active)).toBe(true);
+    expect(rows.every((r) => r.status === "disabled")).toBe(true);
   });
 
   it("seeds past a rule the user's corrections scoped to the channel", async () => {
     await db.insert(steeringRules).values({
       rule: "Don't use bullet points",
       category: "style",
-      active: true,
+      status: "live",
       source: "correction",
       priority: 100,
       observationCount: 2,

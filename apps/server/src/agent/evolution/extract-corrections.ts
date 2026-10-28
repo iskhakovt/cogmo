@@ -8,6 +8,7 @@
  */
 
 import * as R from "remeda";
+import { match } from "ts-pattern";
 import type { Transactor } from "../../db/index.js";
 import { isHarnessPrompt } from "../../llm/content.js";
 import type { LlmProvider } from "../../llm/provider.js";
@@ -23,7 +24,7 @@ import {
 } from "./extraction-schema.js";
 
 /**
- * Consolidation runs once the active learned rules pass this, matching the
+ * Consolidation runs once the live learned rules pass this, matching the
  * limit on a user's instruction rules so `# Rules` stays near 45 rules
  * (design/evolution.md → Explicit Instructions → Tools).
  */
@@ -170,7 +171,7 @@ export async function extractCorrections(
       // `# Rules` doesn't show, has its count reset by a first contradiction
       // and is retired by a second from another conversation: a single
       // mislabelled contradiction costs its evidence, not the rule.
-      if (contradictedRule.active) {
+      if (contradictedRule.status === "live") {
         logger.info(log, "correction contradicts a live rule — logged, not applied");
         continue;
       }
@@ -192,18 +193,25 @@ export async function extractCorrections(
           conversationId: scope.conversationId,
         }),
       );
-      if (outcome === "retired") {
-        retired++;
-        logger.info(log, "correction contradicts a rule still learning a second time — retired it");
-      } else if (outcome === "reset") {
-        reset++;
-        logger.info(log, "correction contradicts a rule still learning — reset its count");
-      } else {
-        logger.info(
-          log,
-          "extraction: contradiction already applied from this conversation, or the rule was promoted or retired since it was listed",
-        );
-      }
+      match(outcome)
+        .with("retired", () => {
+          retired++;
+          logger.info(
+            log,
+            "correction contradicts a rule still learning a second time — retired it",
+          );
+        })
+        .with("reset", () => {
+          reset++;
+          logger.info(log, "correction contradicts a rule still learning — reset its count");
+        })
+        .with("unchanged", () => {
+          logger.info(
+            log,
+            "extraction: contradiction already applied from this conversation, or the rule was promoted or retired since it was listed",
+          );
+        })
+        .exhaustive();
       continue;
     }
 

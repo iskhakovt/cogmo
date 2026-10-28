@@ -171,13 +171,13 @@ steering_rules (
   id                UUID v7 PK,
   rule              TEXT NOT NULL,
   category          TEXT NOT NULL,            -- 'safety' | 'style' | 'domain' | 'memory'
-  active            BOOLEAN NOT NULL,
+  status            steering_rule_status NOT NULL, -- 'live' | 'learning' | 'disabled' | 'retired'; evolution.md → Explicit Instructions → Lifecycle
   source            steering_rule_source NOT NULL, -- 'manual' | 'seed' | 'instruction' | 'correction' | 'evolution'; decides the `# Rules` section
   priority          INT NOT NULL,             -- ordering within a section, after scope; ties broken by id
   observation_count INT NOT NULL,             -- rule graduation (2+ = promoted)
   profile_id        UUID FK → profiles,       -- nullable: null = applies to all profiles
   channel_type      TEXT,                     -- nullable: null = applies to all channels
-  retracted_at      TIMESTAMPTZ,              -- nullable: null = not retired
+  retracted_at      TIMESTAMPTZ,              -- nullable: when a retired row was retired; set exactly when status = 'retired'
   user_id           UUID FK → users ON DELETE CASCADE, -- nullable: null = every user; set on every instruction row
   quote             TEXT,                     -- nullable: the user's words; set on every instruction row
   contradicted_in_conversation_id UUID FK → conversations ON DELETE SET NULL, -- nullable: null = never contradicted while learning
@@ -186,7 +186,7 @@ steering_rules (
 -- chk_steering_rules_lifecycle, uq_steering_rules_instruction: evolution.md → Explicit Instructions → Data Model
 ```
 
-Query at prompt assembly: `(profile_id = $p OR profile_id IS NULL) AND (user_id = $u OR user_id IS NULL) AND active = true`, every channel's rules included, and no user's rules where the turn's scope has no core memory. `# Rules` renders the result in sections by `source`, and within a section by scope, then priority, then id, newest first ([evolution.md](evolution.md#precedence-confirmed) → Precedence), each channel-scoped rule labelled with its channel ("On telegram: …"); the turn context names the channels a reply goes to, so sessions coming and going leave the system prompt as it is ([prompt-caching.md](prompt-caching.md#system-prompt-snapshot-confirmed) → System Prompt Snapshot). The `id` tie-breaker keeps the rendered rules byte-stable: priorities are shared, and an in-place update moves a row in the heap.
+Query at prompt assembly: `(profile_id = $p OR profile_id IS NULL) AND (user_id = $u OR user_id IS NULL) AND status = 'live'`, every channel's rules included, and no user's rules where the turn's scope has no core memory. `# Rules` renders the result in sections by `source`, and within a section by scope, then priority, then id, newest first ([evolution.md](evolution.md#precedence-confirmed) → Precedence), each channel-scoped rule labelled with its channel ("On telegram: …"); the turn context names the channels a reply goes to, so sessions coming and going leave the system prompt as it is ([prompt-caching.md](prompt-caching.md#system-prompt-snapshot-confirmed) → System Prompt Snapshot). The `id` tie-breaker keeps the rendered rules byte-stable: priorities are shared, and an in-place update moves a row in the heap.
 
 All behavioral instructions — global, profile-scoped, and channel-scoped — live in this one table. Default channel rules (e.g., "avoid tables on Telegram", "prefer concise replies") are seeded as `seed` rows when a channel is configured, same pattern as profile seeding. Adapters own only mechanical output rendering (`renderOutput`), not behavioral guidance. See [transport/adapters.md](transport/adapters.md) → Response Rendering.
 

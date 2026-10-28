@@ -1,6 +1,5 @@
 import { type SQL, type SQLWrapper, sql } from "drizzle-orm";
 import {
-  boolean,
   check,
   index,
   integer,
@@ -34,6 +33,22 @@ export const steeringRuleSource = pgEnum("steering_rule_source", [
 export type SteeringRuleSourceValue = (typeof steeringRuleSource.enumValues)[number];
 
 /**
+ * `steering_rules.status` — where a rule is in its lifecycle
+ * (design/evolution.md → Explicit Instructions → Lifecycle). `live` renders in
+ * `# Rules`; `learning` is a learned rule short of its second observation;
+ * `disabled` is an operator's rule or a channel default switched off by hand;
+ * `retired` keeps the row as the record of a withdrawn rule, with
+ * `retracted_at` set.
+ */
+export const steeringRuleStatus = pgEnum("steering_rule_status", [
+  "live",
+  "learning",
+  "disabled",
+  "retired",
+]);
+export type SteeringRuleStatusValue = (typeof steeringRuleStatus.enumValues)[number];
+
+/**
  * A rule's text as rules compare: lower-cased, trimmed, each run of whitespace
  * one space. The one normalization, for the instruction index and every match
  * by text (design/evolution.md → Explicit Instructions → Data Model).
@@ -54,14 +69,15 @@ export const INSTRUCTION_RULE_KEY: readonly [SQL, SQL, SQL, SQL] = [
   sql`COALESCE(profile_id, '00000000-0000-0000-0000-000000000000'::uuid)`,
   sql`COALESCE(channel_type, '')`,
 ];
-export const LIVE_INSTRUCTION_RULE: SQL = sql`source = 'instruction' AND retracted_at IS NULL`;
+export const LIVE_INSTRUCTION_RULE: SQL = sql`source = 'instruction' AND status = 'live'`;
 
 /**
- * A live rule is active and unretired. An inactive, unretired rule is learning
- * when learned (`correction`, `evolution`) and switched off when an operator's
- * or a channel default (`manual`, `seed`), which review leaves out. A retired
- * one is inactive with `retracted_at` set. `user_id` and `quote` belong to
- * `instruction` rows, which are never inactive unless retired.
+ * Which statuses each source can hold, as `chk_steering_rules_lifecycle`
+ * enforces it: a learned rule (`correction`, `evolution`) is live, learning or
+ * retired; an operator's rule or a channel default (`manual`, `seed`) is live,
+ * disabled or retired; an instruction is live or retired. `retracted_at` is
+ * set on a retired row and on no other. `user_id` and `quote` belong to
+ * `instruction` rows.
  */
 export const steeringRules = pgTable(
   "steering_rules",
@@ -69,13 +85,13 @@ export const steeringRules = pgTable(
     id: pk(),
     rule: text("rule").notNull(),
     category: text("category").notNull(), // 'safety' | 'style' | 'domain' | 'memory'
-    active: boolean("active").notNull(),
+    status: steeringRuleStatus("status").notNull(),
     source: steeringRuleSource("source").notNull(),
     priority: integer("priority").notNull(),
     observationCount: integer("observation_count").notNull(),
     profileId: uuid("profile_id").references(() => profiles.id), // NULL = applies to all profiles
     channelType: text("channel_type"), // NULL = applies to all channels
-    retractedAt: timestamp("retracted_at", { withTimezone: true }), // NULL = not retired
+    retractedAt: timestamp("retracted_at", { withTimezone: true }), // when a retired row was retired; NULL otherwise
     // NULL = every user; set on every instruction row, so one user's
     // instructions stay out of another's prompt.
     userId: uuid("user_id").references(() => users.id, { onDelete: "cascade" }),
@@ -95,8 +111,9 @@ export const steeringRules = pgTable(
   (t) => [
     check(
       "chk_steering_rules_lifecycle",
-      sql`NOT (${t.active} AND ${t.retractedAt} IS NOT NULL)
-        AND (${t.source} <> 'instruction' OR ${t.active} OR ${t.retractedAt} IS NOT NULL)
+      sql`((${t.status} = 'retired') = (${t.retractedAt} IS NOT NULL))
+        AND (${t.status} <> 'learning' OR ${t.source} IN ('correction', 'evolution'))
+        AND (${t.status} <> 'disabled' OR ${t.source} IN ('manual', 'seed'))
         AND ((${t.source} = 'instruction') = (${t.userId} IS NOT NULL))
         AND ((${t.source} = 'instruction') = (${t.quote} IS NOT NULL))`,
     ),

@@ -3,8 +3,9 @@
  * enum and moves the channel defaults `seedChannelRules` wrote as `manual` to
  * `seed`. Runs the raw migration SQL against PGlite over rows written in the
  * pre-migration shape (the column put back to text first, since the pushed
- * schema already has the enum, and 0067's index and CHECK dropped) and asserts
- * which rows become `seed`, and that a source outside the enum fails the cast.
+ * schema already has the enum; 0067's index and CHECK dropped; 0076's `active`
+ * put back and its `status` defaulted) and asserts which rows become `seed`,
+ * and that a source outside the enum fails the cast.
  */
 
 import { readFile } from "node:fs/promises";
@@ -54,6 +55,12 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   await truncateAll(db);
+  // The rows carry the lifecycle flag of their time; `status`, which 0078 makes
+  // NOT NULL, defaults to live so the store can read them afterwards.
+  await db.execute(sql`
+    ALTER TABLE steering_rules ADD COLUMN IF NOT EXISTS active boolean NOT NULL DEFAULT true
+  `);
+  await db.execute(sql`ALTER TABLE steering_rules ALTER COLUMN status SET DEFAULT 'live'`);
   // Migration 0067's index and CHECK compare `source` with enum values, so
   // they block turning it back to text.
   await db.execute(sql`DROP INDEX IF EXISTS uq_steering_rules_instruction`);
