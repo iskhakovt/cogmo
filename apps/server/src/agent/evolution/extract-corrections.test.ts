@@ -3,6 +3,7 @@ import type { Transactor } from "../../db/index.js";
 import { logger } from "../../logger.js";
 import { expectDefined } from "../../test/assertions.js";
 import { mockProvider } from "../../test/factories.js";
+import type { ExtractionRule } from "../store/index.js";
 import type { StoredMessage } from "../stored-content.js";
 import {
   type ExtractionDeps,
@@ -14,7 +15,7 @@ const FAKE_TX = { __mockTx: true } as never;
 const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
 
 /** A global style rule as `getCorrections` returns it. */
-function ruleRow(id: string, rule: string) {
+function ruleRow(id: string, rule: string): ExtractionRule {
   return {
     id,
     rule,
@@ -27,7 +28,7 @@ function ruleRow(id: string, rule: string) {
 }
 
 /** Two global rules whose ids look nothing like the labels the prompt gives them. */
-const LABELLED_RULES = [
+const LABELLED_RULES: ExtractionRule[] = [
   {
     id: "rule-a",
     rule: "Be concise",
@@ -224,7 +225,7 @@ function mockExtractionDeps(
       getCorrections: vi.fn().mockResolvedValue([]),
       getInstructionRules: vi.fn().mockResolvedValue([]),
       hasInstructionRule: vi.fn().mockResolvedValue(false),
-      upsertCorrection: vi.fn().mockResolvedValue({ id: "rule-1", promoted: false }),
+      upsertCorrection: vi.fn().mockResolvedValue({ kind: "reinforced", id: "rule-1" }),
       contradictLearningRule: vi.fn().mockResolvedValue("reset"),
       countActiveLearnedRules: vi.fn().mockResolvedValue(5),
       ...storeOverrides,
@@ -246,7 +247,7 @@ function instructionRow(id: string, rule: string, observationCount = 1) {
 }
 
 /** A learned rule still learning, as `getCorrections` returns it. */
-function learningRow(id: string, rule: string, channelType: string | null = null) {
+function learningRow(id: string, rule: string, channelType: string | null = null): ExtractionRule {
   return { ...ruleRow(id, rule), status: "learning", channelType };
 }
 
@@ -872,7 +873,7 @@ describe("extractCorrections", () => {
             channelType: null,
           },
         ]),
-        upsertCorrection: vi.fn().mockResolvedValue({ id: "rule-1", promoted: true }),
+        upsertCorrection: vi.fn().mockResolvedValue({ kind: "promoted", id: "rule-1" }),
       },
     );
 
@@ -918,7 +919,7 @@ describe("extractCorrections", () => {
       },
       {
         getCorrections: vi.fn().mockResolvedValue([ruleRow("rule-1", "Be concise")]),
-        upsertCorrection: vi.fn().mockResolvedValue(null),
+        upsertCorrection: vi.fn().mockResolvedValue({ kind: "stale" }),
       },
     );
     const warn = vi.spyOn(logger, "warn");

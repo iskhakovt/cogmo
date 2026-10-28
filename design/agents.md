@@ -174,7 +174,7 @@ steering_rules (
   status            steering_rule_status NOT NULL, -- 'live' | 'learning' | 'disabled' | 'retired'; evolution.md → Explicit Instructions → Lifecycle
   source            steering_rule_source NOT NULL, -- 'manual' | 'seed' | 'instruction' | 'correction' | 'evolution'; decides the `# Rules` section
   priority          INT NOT NULL,             -- ordering within a section, after scope; ties broken by id
-  observation_count INT NOT NULL,             -- rule graduation (2+ = promoted)
+  observation_count INT NOT NULL,             -- observations behind the rule; a learning rule's second graduates it
   profile_id        UUID FK → profiles,       -- nullable: null = applies to all profiles
   channel_type      TEXT,                     -- nullable: null = applies to all channels
   retracted_at      TIMESTAMPTZ,              -- nullable: when a retired row was retired; set exactly when status = 'retired'

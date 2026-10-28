@@ -195,7 +195,7 @@ describe("instruction rules against a concurrent writer (real Postgres)", () => 
         }),
     );
 
-    expect(lost).toEqual({ kind: "fulfilled", value: null });
+    expect(lost).toEqual({ kind: "fulfilled", value: { kind: "stale" } });
     expect(attempts).toBe(2);
   });
 });

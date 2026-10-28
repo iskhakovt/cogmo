@@ -26,6 +26,7 @@ import {
   type MemoryRule,
   memoryRulesFor,
   type SetInstructionRuleResult,
+  type UpsertCorrectionResult,
 } from "./steering-rules.js";
 import { DrizzleUserStore } from "./users.js";
 
@@ -129,6 +130,12 @@ function set(params: {
 /** Narrow a set's result to a rule it wrote. */
 function assertNew(result: SetInstructionRuleResult): asserts result is InstructionRuleRow {
   if (result.kind !== "new") throw new Error(`expected a new rule, got ${result.kind}`);
+}
+
+/** Narrow a correction's result to one that names the rule it wrote or counted. */
+function applied(result: UpsertCorrectionResult): Extract<UpsertCorrectionResult, { id: string }> {
+  if (result.kind === "stale") throw new Error("expected an applied correction, got stale");
+  return result;
 }
 
 async function rendered(scope: { profileId: string; userId: string | null }) {
@@ -724,7 +731,7 @@ describe("learned rules skip a retired row", () => {
       }),
     );
 
-    expect(result).toBeNull();
+    expect(result).toEqual({ kind: "stale" });
     const [after] = await db
       .select({ observationCount: steeringRules.observationCount })
       .from(steeringRules)
@@ -877,7 +884,7 @@ describe("the Observer's rule reads", () => {
       }),
     );
 
-    expect(result).toEqual({ id, promoted: false });
+    expect(result).toEqual({ kind: "reinforced", id });
     const [after] = await db
       .select({ observationCount: steeringRules.observationCount })
       .from(steeringRules)
@@ -899,7 +906,7 @@ describe("the Observer's rule reads", () => {
       }),
     );
 
-    expect(result).toEqual({ id, promoted: false });
+    expect(result).toEqual({ kind: "reinforced", id });
     expect(await stateOf(id)).toBe("live");
   });
 
@@ -920,7 +927,7 @@ describe("the Observer's rule reads", () => {
       }),
     );
 
-    expect(result).toEqual({ id, promoted: true });
+    expect(result).toEqual({ kind: "promoted", id });
     expect(await stateOf(id)).toBe("live");
   });
 
@@ -1348,7 +1355,7 @@ describe("DrizzleSteeringRuleStore", () => {
       // moves its row in the heap. Graduating the first last leaves the rows in
       // id order on disk, the reverse of the rendered order.
       const observe = async (rule: string, existingRuleId?: string) =>
-        expectDefined(
+        applied(
           await tx((trx) =>
             store.upsertCorrection(trx, {
               rule,
@@ -1357,7 +1364,6 @@ describe("DrizzleSteeringRuleStore", () => {
               ...(existingRuleId !== undefined && { existingRuleId }),
             }),
           ),
-          rule,
         );
       const first = await observe("First rule");
       const second = await observe("Second rule");
@@ -1474,7 +1480,7 @@ describe("DrizzleSteeringRuleStore", () => {
     });
 
     it("upsertCorrection inserts new rule as inactive with observationCount 1", async () => {
-      const result = expectDefined(
+      const result = applied(
         await tx((trx) =>
           store.upsertCorrection(trx, {
             rule: "Prefer bullet points",
@@ -1482,10 +1488,9 @@ describe("DrizzleSteeringRuleStore", () => {
             profileId: null,
           }),
         ),
-        "upsert",
       );
 
-      expect(result.promoted).toBe(false);
+      expect(result.kind).toBe("inserted");
 
       const { steeringRules } = await import("./schema.js");
       const rows = await db
@@ -1511,7 +1516,7 @@ describe("DrizzleSteeringRuleStore", () => {
     });
 
     it("upsertCorrection persists channelType on a new rule when supplied", async () => {
-      const result = expectDefined(
+      const result = applied(
         await tx((trx) =>
           store.upsertCorrection(trx, {
             rule: "Skip markdown headings here",
@@ -1520,7 +1525,6 @@ describe("DrizzleSteeringRuleStore", () => {
             channelType: "telegram",
           }),
         ),
-        "upsert",
       );
 
       const { steeringRules } = await import("./schema.js");
@@ -1549,7 +1553,7 @@ describe("DrizzleSteeringRuleStore", () => {
         })
         .returning({ id: steeringRules.id });
 
-      const result = expectDefined(
+      const result = applied(
         await tx((trx) =>
           store.upsertCorrection(trx, {
             rule: "Test rule",
@@ -1558,10 +1562,9 @@ describe("DrizzleSteeringRuleStore", () => {
             existingRuleId: inserted!.id,
           }),
         ),
-        "upsert",
       );
 
-      expect(result.promoted).toBe(false);
+      expect(result.kind).toBe("reinforced");
 
       const rows = await db
         .select({
@@ -1589,7 +1592,7 @@ describe("DrizzleSteeringRuleStore", () => {
         })
         .returning({ id: steeringRules.id });
 
-      const result = expectDefined(
+      const result = applied(
         await tx((trx) =>
           store.upsertCorrection(trx, {
             rule: "Be concise",
@@ -1598,10 +1601,9 @@ describe("DrizzleSteeringRuleStore", () => {
             existingRuleId: inserted!.id,
           }),
         ),
-        "upsert",
       );
 
-      expect(result.promoted).toBe(true);
+      expect(result.kind).toBe("promoted");
 
       const rows = await db
         .select({
@@ -1628,7 +1630,7 @@ describe("DrizzleSteeringRuleStore", () => {
         })
         .returning({ id: steeringRules.id });
 
-      const result = expectDefined(
+      const result = applied(
         await tx((trx) =>
           store.upsertCorrection(trx, {
             rule: "Already active",
@@ -1637,10 +1639,9 @@ describe("DrizzleSteeringRuleStore", () => {
             existingRuleId: inserted!.id,
           }),
         ),
-        "upsert",
       );
 
-      expect(result.promoted).toBe(false);
+      expect(result.kind).toBe("reinforced");
 
       const rows = await db
         .select({ observationCount: steeringRules.observationCount })
