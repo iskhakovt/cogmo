@@ -823,6 +823,63 @@ describe("LocalDockerSandboxClient — container row transitions", () => {
     expect(unregisters).toEqual([TASK_ID]);
   });
 
+  it("a start failure whose reap throws still releases the proxy and surfaces the start error", async () => {
+    const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+    const { docker, calls } = fakeDocker({ dockerId: "docker-reap-throws", failStart: true });
+    const { proxy, unregisters } = fakeProxy();
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tx,
+      runtime: "runc",
+      instanceId: inst.id,
+      proxy,
+    });
+    // The first transition after the insert is the start-failure reap's.
+    const spy = vi
+      .spyOn(store, "transitionContainerStatus")
+      .mockRejectedValueOnce(new Error("connection reset"));
+    try {
+      await expect(sandbox.create(SPEC)).rejects.toThrow("boom");
+    } finally {
+      spy.mockRestore();
+    }
+
+    // The daemon object went before the transition threw; the row stays
+    // `starting` and the TTL pass reaps it at expiry.
+    expect(calls.remove).toBe(1);
+    const row = await tx((trx) => store.getContainerByDockerId(trx, "docker-reap-throws"));
+    expect(row?.status).toBe("starting");
+    expect(unregisters).toEqual([TASK_ID]);
+  });
+
+  it("a finished row after a successful start with a refused kill still throws and releases the proxy", async () => {
+    const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+    const { docker, container, calls } = fakeDocker({ dockerId: "docker-midstart-refused" });
+    const { proxy, unregisters } = fakeProxy();
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tx,
+      runtime: "runc",
+      instanceId: inst.id,
+      proxy,
+    });
+    container.start.mockImplementation(async () => {
+      await db.execute(
+        sql`UPDATE containers SET status = 'reaped', exited_at = now() WHERE docker_id = 'docker-midstart-refused'`,
+      );
+    });
+    container.kill.mockRejectedValue(Object.assign(new Error("daemon i/o"), { statusCode: 500 }));
+
+    await expect(sandbox.create(SPEC)).rejects.toThrow(/was reaped before it finished starting/);
+
+    // Residual (design/sandbox.md → Container state machine): the container
+    // stays on the daemon under a terminal row until the instance row closes.
+    expect(calls.remove).toBe(0);
+    expect(unregisters).toEqual([TASK_ID]);
+  });
+
   it("a failing proxy release does not mask the start error", async () => {
     const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const { docker } = fakeDocker({ dockerId: "docker-busy-sock", failStart: true });

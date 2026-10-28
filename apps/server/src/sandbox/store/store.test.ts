@@ -72,6 +72,28 @@ async function insertTaskContainer(opts: {
 
 describe("DrizzleSandboxStore", () => {
   describe("instances", () => {
+    it("closeInstance keeps a stopped_at another path already set", async () => {
+      const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+      await tx((trx) => store.closeInstance(trx, inst.id));
+      const first = (await tx((trx) => store.getInstance(trx, inst.id)))?.stoppedAt;
+      expect(first).not.toBeNull();
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      await tx((trx) => store.closeInstance(trx, inst.id));
+      const second = (await tx((trx) => store.getInstance(trx, inst.id)))?.stoppedAt;
+      expect(second?.toISOString()).toBe(first?.toISOString());
+    });
+
+    it("closeInstances closes only the listed open instances", async () => {
+      const a = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+      const b = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 2 }));
+      const c = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 3 }));
+      await tx((trx) => store.closeInstances(trx, [a.id, b.id]));
+      expect((await tx((trx) => store.getInstance(trx, a.id)))?.stoppedAt).not.toBeNull();
+      expect((await tx((trx) => store.getInstance(trx, b.id)))?.stoppedAt).not.toBeNull();
+      expect((await tx((trx) => store.getInstance(trx, c.id)))?.stoppedAt).toBeNull();
+      expect(await tx((trx) => store.listLiveInstances(trx))).toHaveLength(1);
+    });
+
     it("inserts an instance with stoppedAt null", async () => {
       const inst = await tx((trx) => store.insertInstance(trx, { host: "host-1", pid: 1234 }));
       expect(inst.host).toBe("host-1");

@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, isNull, ne, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, ne, sql } from "drizzle-orm";
 import { match } from "ts-pattern";
 import { single } from "../../db/helpers.js";
 import type { Transaction } from "../../db/index.js";
@@ -106,8 +106,15 @@ export interface SandboxStore {
   /** Insert a new Cogmo instance row. Called once at boot. */
   insertInstance(tx: Transaction, params: { host: string; pid: number }): Promise<CogmoInstance>;
 
-  /** Mark an instance as stopped. Called on graceful shutdown. */
+  /** Mark an instance as stopped, if it is still open. Called on graceful shutdown. */
   closeInstance(tx: Transaction, id: string): Promise<void>;
+
+  /**
+   * Mark every listed instance that is still open as stopped. Called by
+   * boot-time reconcile on the prior instances whose containers it reaped;
+   * a `stopped_at` another path already set is kept.
+   */
+  closeInstances(tx: Transaction, ids: readonly string[]): Promise<void>;
 
   /** Load an instance row by id. */
   getInstance(tx: Transaction, id: string): Promise<CogmoInstance | undefined>;
@@ -230,7 +237,15 @@ export class DrizzleSandboxStore implements SandboxStore {
   }
 
   async closeInstance(tx: Transaction, id: string): Promise<void> {
-    await tx.update(cogmoInstances).set({ stoppedAt: new Date() }).where(eq(cogmoInstances.id, id));
+    await this.closeInstances(tx, [id]);
+  }
+
+  async closeInstances(tx: Transaction, ids: readonly string[]): Promise<void> {
+    if (ids.length === 0) return;
+    await tx
+      .update(cogmoInstances)
+      .set({ stoppedAt: new Date() })
+      .where(and(inArray(cogmoInstances.id, [...ids]), isNull(cogmoInstances.stoppedAt)));
   }
 
   async getInstance(tx: Transaction, id: string): Promise<CogmoInstance | undefined> {

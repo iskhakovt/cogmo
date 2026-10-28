@@ -1,5 +1,5 @@
 import { err, ok, type Result } from "neverthrow";
-import type { DockerFacade } from "./docker-facade.js";
+import { type DockerFacade, statusCodeOf } from "./docker-facade.js";
 
 /** The daemon refused a kill or remove with something other than "already gone". */
 export interface DaemonError {
@@ -38,12 +38,4 @@ export async function killAndRemoveContainer(
     }
   }
   return ok(undefined);
-}
-
-/** The HTTP status dockerode attaches to a daemon error, if the error carries one. */
-export function statusCodeOf(error: unknown): number | undefined {
-  if (typeof error === "object" && error !== null && "statusCode" in error) {
-    return typeof error.statusCode === "number" ? error.statusCode : undefined;
-  }
-  return undefined;
 }

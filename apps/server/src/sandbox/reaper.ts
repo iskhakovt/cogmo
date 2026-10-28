@@ -3,7 +3,7 @@ import type { Inngest } from "inngest";
 import { match } from "ts-pattern";
 import type { Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
-import { statusCodeOf } from "./kill-and-remove-container.js";
+import { statusCodeOf } from "./docker-facade.js";
 import { markContainerExited } from "./mark-container-exited.js";
 import { reapContainer, reapDiscoveredContainer } from "./reap-container.js";
 import {

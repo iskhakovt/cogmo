@@ -8,7 +8,12 @@ import type { Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
 import { cleanupAskpass } from "./askpass.js";
 import { taskSliceName } from "./cgroup-parent.js";
-import type { DockerContainer, DockerExec, DockerFacade } from "./docker-facade.js";
+import {
+  type DockerContainer,
+  type DockerExec,
+  type DockerFacade,
+  statusCodeOf,
+} from "./docker-facade.js";
 import type { ExecOptions, ExecResult, ExecStreamingHandle } from "./exec.js";
 import { type ExecBackend, type ExecSink, type ExecStarted, runExec } from "./exec-run.js";
 import type { ExecStreamName } from "./exec-state.js";
@@ -20,7 +25,7 @@ import type {
   SessionSpec,
 } from "./index.js";
 import { DEPS_CACHE_VOLUME_TARGET, LocalDockerSessionStateSchema } from "./index.js";
-import { killAndRemoveContainer, statusCodeOf } from "./kill-and-remove-container.js";
+import { killAndRemoveContainer } from "./kill-and-remove-container.js";
 import { markContainerRunning } from "./mark-container-running.js";
 import type { CogmoSocketProxy } from "./proxy/index.js";
 import {
@@ -192,10 +197,10 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
     // `stopped_at` NULL (shutdown leaves it open when a teardown did not
     // finish), and the reaper's orphan pass counts an open instance as live,
     // so a container this pass could not kill is retried by that pass only
-    // once its instance row is closed.
-    await this.#runInTx(async (tx) => {
-      for (const id of reapTargets) await this.#store.closeInstance(tx, id);
-    });
+    // once its instance row is closed. This assumes one `cogmo serve` per
+    // database: a second live process's row is closed too, and the orphan
+    // pass then kills every container it creates.
+    await this.#runInTx((tx) => this.#store.closeInstances(tx, [...reapTargets]));
     return { orphansReaped: reaped };
   }
 
