@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import {
   boolean,
+  check,
   integer,
   pgEnum,
   pgTable,
@@ -62,6 +63,30 @@ export const pipelineRunStatus = pgEnum("pipeline_run_status", [
 ]);
 
 /**
+ * Why a run ended (design/pipelines.md → Run lifecycle). A `failed` run
+ * carries one of the first group, a `cancelled` run one of the second;
+ * `chk_pipeline_runs_failure_reason_by_status` holds the pairing, and
+ * `failure_detail` carries the variable part (an error class, a validation
+ * message) when the reason has one.
+ */
+export const PIPELINE_RUN_FAILED_REASONS = [
+  "stage_error",
+  "unknown_stage",
+  "unsupported_stage",
+  "turn_degraded",
+  "turn_truncated",
+  "artifact_invalid",
+  "gate_resolution_error",
+] as const;
+
+export const PIPELINE_RUN_CANCELLED_REASONS = ["cancelled_by_user", "gate_timeout"] as const;
+
+export const pipelineRunFailureReason = pgEnum("pipeline_run_failure_reason", [
+  ...PIPELINE_RUN_FAILED_REASONS,
+  ...PIPELINE_RUN_CANCELLED_REASONS,
+]);
+
+/**
  * One pipeline run — the source of truth for an in-flight execution. The
  * pinned `definition_id` carries the stages (in its `compiled` blob) and the
  * owning `user_id`, so no `user_id` is denormalized here (design/pipelines.md
@@ -89,9 +114,15 @@ export const pipelineRuns = pgTable(
     // unsupported; part of the `pipeline/stage.due` cursor.
     iteration: integer("iteration").notNull(),
     stageOutputs: jsonbZod("stage_outputs", StageOutputsSchema).notNull(),
-    failureReason: text("failure_reason"),
+    // Set with the terminal flip to `failed` / `cancelled`, null in every
+    // other status (`chk_pipeline_runs_failure_reason_by_status`).
+    failureReason: pipelineRunFailureReason("failure_reason"),
+    failureDetail: text("failure_detail"),
     // Which resolution claimed the run's most recent gate. Nullable: a run
-    // that hasn't resolved a gate yet has no claim.
+    // that hasn't resolved a gate yet has no claim. The claim outlives the
+    // gate — it stays while the run moves on, and through a later park — but
+    // a run parked on a gate never holds the claim on that gate
+    // (`chk_pipeline_runs_parked_gate_unclaimed`).
     gateResolution: jsonbZod("gate_resolution", GateResolutionSchema),
     // Caller-supplied key for `start_pipeline`'s durable tool step — the
     // `ToolCallContext.idempotencyKey` of the call that opened the run.
@@ -100,5 +131,21 @@ export const pipelineRuns = pgTable(
     idempotencyKey: text("idempotency_key"),
     createdAt: ts(),
   },
-  (t) => [unique("uniq_pipeline_runs_idempotency_key").on(t.idempotencyKey)],
+  (t) => [
+    unique("uniq_pipeline_runs_idempotency_key").on(t.idempotencyKey),
+    check(
+      "chk_pipeline_runs_failure_reason_by_status",
+      sql`CASE ${t.status} WHEN 'failed' THEN ${t.failureReason} IS NOT NULL AND ${t.failureReason} IN (${enumLiterals(PIPELINE_RUN_FAILED_REASONS)}) WHEN 'cancelled' THEN ${t.failureReason} IS NOT NULL AND ${t.failureReason} IN (${enumLiterals(PIPELINE_RUN_CANCELLED_REASONS)}) ELSE ${t.failureReason} IS NULL AND ${t.failureDetail} IS NULL END`,
+    ),
+    // The gate-key format is `pipelineGateKey`'s (src/inngest/events.ts).
+    check(
+      "chk_pipeline_runs_parked_gate_unclaimed",
+      sql`${t.status} <> 'waiting_gate' OR ${t.gateResolution} IS NULL OR (${t.gateResolution} ->> 'gateKey') <> (${t.id}::text || ':' || ${t.currentStage} || ':' || ${t.iteration}::text)`,
+    ),
+  ],
 );
+
+/** The enum labels as a SQL literal list — our own constants, so raw is safe. */
+function enumLiterals(values: ReadonlyArray<string>) {
+  return sql.raw(values.map((value) => `'${value}'`).join(", "));
+}

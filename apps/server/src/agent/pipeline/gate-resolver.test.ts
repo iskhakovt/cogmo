@@ -84,6 +84,7 @@ function runAt(
     iteration: 0,
     stageOutputs: {},
     failureReason: null,
+    failureDetail: null,
     gateResolution,
     idempotencyKey: "k1",
     createdAt: new Date("2026-09-12T00:00:00Z"),
@@ -437,7 +438,11 @@ describe("createPipelineGateResolver onFailure", () => {
 
     const readTx = runStore.getRunWithDefinition.mock.calls[0]?.[0];
     expect(readTx).toBeDefined();
-    expect(runStore.failRun).toHaveBeenCalledWith(readTx, "run-1", expect.any(String));
+    expect(runStore.failRun).toHaveBeenCalledWith(
+      readTx,
+      "run-1",
+      expect.objectContaining({ reason: "gate_resolution_error" }),
+    );
   });
 
   it("fails the run when a timeout can't be applied, since no waiter remains", async () => {
@@ -447,11 +452,10 @@ describe("createPipelineGateResolver onFailure", () => {
 
     await invokeInngestOnFailure<FailureCtx>(fn, failureCtx("timeout_proceed", null));
 
-    expect(runStore.failRun).toHaveBeenCalledWith(
-      expect.anything(),
-      "run-1",
-      "gate timeout could not be applied (TypeError)",
-    );
+    expect(runStore.failRun).toHaveBeenCalledWith(expect.anything(), "run-1", {
+      reason: "gate_resolution_error",
+      detail: "TypeError",
+    });
     expect(notifyConversation).toHaveBeenCalledWith(
       "conv-1",
       expect.stringContaining("the run has stopped"),

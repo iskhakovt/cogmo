@@ -10,6 +10,8 @@
 
 import type { TextOptions } from "@clack/prompts";
 import type { Result } from "neverthrow";
+import { expect } from "vitest";
+import { constraintNameOf, findPgErrorByCode } from "../db/pg-errors.js";
 
 import type { Adapter, StreamingAdapter } from "../transport/types.js";
 
@@ -84,6 +86,30 @@ export function assertStatus<U extends { status: string }, S extends U["status"]
   if (value.status !== status) {
     throw new Error(`expected status '${status}', got ${JSON.stringify(value)}`);
   }
+}
+
+/**
+ * Assert that `error` — a rejection from a store or raw query — carries the
+ * Postgres SQLSTATE `code` raised by `constraint`. A rejection carrying
+ * another code reports that code; one with no Postgres error reports the
+ * value, so a miss never reads as a bare `undefined`.
+ */
+export function expectPgError(error: unknown, code: string, constraint: string): void {
+  const pg = findPgErrorByCode(error, [code]);
+  if (pg === null) {
+    expect.fail(`expected SQLSTATE ${code}, got ${describePgRejection(error)}`);
+  }
+  expect(constraintNameOf(pg)).toBe(constraint);
+}
+
+/** The SQLSTATE in `error`'s cause chain, or the value itself when none carries one. */
+function describePgRejection(error: unknown): string {
+  let cur: unknown = error;
+  while (typeof cur === "object" && cur !== null) {
+    if ("code" in cur && typeof cur.code === "string") return `SQLSTATE ${cur.code}`;
+    cur = "cause" in cur ? cur.cause : undefined;
+  }
+  return `a rejection with no Postgres error: ${String(error)}`;
 }
 
 /**

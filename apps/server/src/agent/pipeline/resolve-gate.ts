@@ -11,12 +11,14 @@
  * resolution that failed, failing a still-parked run in the same transaction.
  */
 
+import { match, P } from "ts-pattern";
 import type { Transactor } from "../../db/index.js";
 import {
   type PipelineGateDecision,
   parsePipelineGateKey,
   pipelineGateKey,
 } from "../../inngest/events.js";
+import type { PipelineRunFailure } from "./run-failure.js";
 import type {
   PipelineRunRow,
   PipelineRunStatus,
@@ -129,7 +131,7 @@ export async function inspectFailedResolution(
   deps: Pick<ResolveGateDeps, "runInTx"> & {
     runStore: Pick<PipelineRunStore, "getRunWithDefinition" | "failRun">;
   },
-  args: GateClaimArgs & { failParkedRunWith: string | null },
+  args: GateClaimArgs & { failParkedRunWith: PipelineRunFailure | null },
 ): Promise<FailedResolutionInspection> {
   return deps.runInTx(async (tx): Promise<FailedResolutionInspection> => {
     const loaded = await deps.runStore.getRunWithDefinition(tx, args.runId);
@@ -141,10 +143,13 @@ export async function inspectFailedResolution(
     if (!parked) {
       // This check's own failure, committed by an earlier run of the step
       // whose result was lost: report it, so the notice still goes out.
+      // Recognised by reason and cursor — the failure leaves the cursor on
+      // this gate — never by the detail's wording.
       const failedByThis =
         args.failParkedRunWith !== null &&
         run.status === "failed" &&
-        run.failureReason === args.failParkedRunWith;
+        run.failureReason === args.failParkedRunWith.reason &&
+        pipelineGateKey(run.id, run.currentStage, run.iteration) === args.gateKey;
       return failedByThis
         ? { kind: "failed", conversationId: run.conversationId }
         : staleOutcome(run, definition, args);
@@ -178,12 +183,13 @@ export async function resolveGate(
 
     const base = { conversationId: run.conversationId, pipelineName: definition.name };
 
-    if (args.decision === "cancelled" || args.decision === "timeout_abort") {
-      const reason =
-        args.decision === "cancelled"
-          ? `cancelled by the user at gate "${run.currentStage}"`
-          : `gate "${run.currentStage}" timed out`;
-      await deps.runStore.cancelRunIfActive(tx, run.id, reason);
+    const cancelReason = match(args.decision)
+      .with("cancelled", () => "cancelled_by_user" as const)
+      .with("timeout_abort", () => "gate_timeout" as const)
+      .with(P.union("approved", "timeout_proceed"), () => null)
+      .exhaustive();
+    if (cancelReason !== null) {
+      await deps.runStore.cancelRunIfActive(tx, run.id, { reason: cancelReason, detail: null });
       return { kind: "cancelled", ...base };
     }
 
