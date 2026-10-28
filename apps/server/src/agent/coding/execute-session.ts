@@ -8,12 +8,12 @@ import type { SandboxSession } from "../../sandbox/index.js";
 import type { BackendUsage, CodingBackend } from "./backend.js";
 import type { CodingRun, TaskStoreDeps } from "./coding-run.js";
 import type { ExecuteStreamHandle } from "./progress-stream.js";
-import { fromSessionResult, type SessionMemo, type SessionResult } from "./session-result.js";
+import { fromSessionResult, type SessionResult } from "./session-result.js";
 import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
 import type { TaskFailure } from "./types.js";
 
 /**
- * Durable: a billable session, and `isError` selects disjoint step sets
+ * Durable: a billable session, and its `kind` selects disjoint step sets
  * downstream. The `started` banner and the token/tool pushes fire live from
  * inside the body and are suppressed on replay — one run's worth of
  * progress, which is what the UI wants.
@@ -80,9 +80,8 @@ async function streamExecute(
     stream: ExecuteStreamHandle;
     sessionId: string;
   },
-): Promise<SessionMemo> {
+): Promise<SessionResult> {
   const { task, repo, container, stream, sessionId } = args;
-  let isError = false;
   let failure: TaskFailure | undefined;
   let usage: BackendUsage | undefined;
 
@@ -97,7 +96,6 @@ async function streamExecute(
       .with({ kind: "complete" }, (e) => {
         if (e.usage) usage = e.usage;
         if (e.isError) {
-          isError = true;
           failure = { reason: "cli_exit_error", detail: `claude exit code ${e.exitCode}` };
         }
       })
@@ -106,9 +104,6 @@ async function streamExecute(
       .exhaustive();
   }
 
-  return {
-    isError,
-    ...(failure && { failure }),
-    ...(usage && { usage }),
-  };
+  if (failure) return { kind: "errored", failure };
+  return { kind: "completed", ...(usage && { usage }) };
 }

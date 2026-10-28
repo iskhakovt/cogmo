@@ -18,7 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, type Readable } from "node:stream";
 import type { Octokit } from "@octokit/rest";
-import { ok } from "neverthrow";
+import { err, ok, type Result } from "neverthrow";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Database, Transactor } from "../../db/index.js";
@@ -49,10 +49,19 @@ import type { CodingBackend, CodingEvent } from "./backend.js";
 // internal calls can be observed and the orchestrator never reaches a
 // real git command.
 
+const IDENTITY: GitHubIdentity = {
+  pat: "ghp_test",
+  sshPrivateKey: "-----BEGIN OPENSSH PRIVATE KEY-----",
+  sshPublicKey: "ssh-ed25519 AAAA",
+  login: "cogmo-bot",
+  id: "12345",
+};
+
 const transportMocks = vi.hoisted(() => ({
   pushTaskBranchToRemote: vi.fn<(p: unknown) => Promise<void>>(),
   fetchFeatureBranch: vi.fn<(p: unknown) => Promise<void>>(),
   loadIdentity: vi.fn<(p: unknown) => Promise<GitHubIdentity>>(),
+  findIdentity: vi.fn<(p: unknown) => Promise<Result<GitHubIdentity, string>>>(),
   runBranchFor: (taskId: string) => `cogmo/run/${taskId}`,
 }));
 
@@ -60,6 +69,7 @@ vi.mock("./git-as-transport.js", () => ({
   pushTaskBranchToRemote: transportMocks.pushTaskBranchToRemote,
   fetchFeatureBranch: transportMocks.fetchFeatureBranch,
   loadIdentity: transportMocks.loadIdentity,
+  findIdentity: transportMocks.findIdentity,
   runBranchFor: transportMocks.runBranchFor,
 }));
 
@@ -107,16 +117,12 @@ beforeEach(async () => {
   transportMocks.pushTaskBranchToRemote.mockReset();
   transportMocks.fetchFeatureBranch.mockReset();
   transportMocks.loadIdentity.mockReset();
+  transportMocks.findIdentity.mockReset();
   worktreeMocks.allocateWorktree.mockReset();
   worktreeMocks.removeWorktree.mockReset();
 
-  transportMocks.loadIdentity.mockResolvedValue({
-    pat: "ghp_test",
-    sshPrivateKey: "-----BEGIN OPENSSH PRIVATE KEY-----",
-    sshPublicKey: "ssh-ed25519 AAAA",
-    login: "cogmo-bot",
-    id: "12345",
-  });
+  transportMocks.loadIdentity.mockResolvedValue(IDENTITY);
+  transportMocks.findIdentity.mockResolvedValue(ok(IDENTITY));
 });
 
 afterEach(async () => {
@@ -300,6 +306,15 @@ function gitSubcommand(cmd: ReadonlyArray<string>): string | undefined {
   return cmd[i];
 }
 
+const MISSING_IDENTITY =
+  "GitHub identity 'default' is not configured. Run the setup wizard (or set COGMO_GITHUB_PAT for non-interactive setup) to install it.";
+
+/** The identity row is gone: the Result lookup misses and the throwing load throws its message. */
+function removeIdentity(): void {
+  transportMocks.findIdentity.mockResolvedValue(err(MISSING_IDENTITY));
+  transportMocks.loadIdentity.mockRejectedValue(new Error(MISSING_IDENTITY));
+}
+
 describe("runCodingTask — git-remote transport", () => {
   it("happy path: pushes run-branch, clones via WorktreeSpec.git-remote, checks out feature branch", async () => {
     const repo = await seedRepo();
@@ -425,9 +440,78 @@ describe("runCodingTask — git-remote transport", () => {
     // make resume safe.
     expect(transportMocks.pushTaskBranchToRemote).toHaveBeenCalledTimes(1);
   });
+  it("a missing GitHub identity fails the task as credentials_unavailable before allocation", async () => {
+    const repo = await seedRepo();
+    const task = await seedTask(repo);
+    const { sandbox, createSpecs } = fakeGitRemoteSandbox();
+    const secretsStore = mock<SecretsStore>();
+    secretsStore.getSecret.mockImplementation(async (_tx, name) =>
+      name === CLAUDE_CODE_OAUTH_TOKEN_SECRET ? "test-oauth-token" : undefined,
+    );
+    removeIdentity();
+
+    const result = await runCodingTask({
+      taskId: task.id,
+      runId: "run-test",
+      deps: makeDeps({ sandbox, backend: backendYielding([]), secretsStore }),
+      stepRun,
+      stepSendEvent,
+    });
+
+    expect(result).toEqual({
+      status: "failed",
+      failure: { reason: "credentials_unavailable", detail: MISSING_IDENTITY },
+    });
+    expect(transportMocks.pushTaskBranchToRemote).not.toHaveBeenCalled();
+    expect(createSpecs).toHaveLength(0);
+    const row = await tx((trx) => store.getTask(trx, task.id));
+    expect(row?.failureReason).toBe("credentials_unavailable");
+  });
 });
 
 describe("runCodingExecute — git-remote transport", () => {
+  it("a missing GitHub identity fails the task as credentials_unavailable before the session", async () => {
+    const repo = await seedRepo();
+    const task = await seedTask(repo);
+    const idShort = task.id.replaceAll("-", "").slice(0, 12);
+    await parkCodingTaskAt(tx, store, task.id, "planning");
+    await tx((trx) =>
+      store.setTaskWorktreeAssignment(trx, task.id, {
+        type: "git-remote",
+        branch: `cogmo/${idShort}`,
+      }),
+    );
+    await tx((trx) => store.setTaskSessionId(trx, task.id, "sess-from-plan"));
+    await parkCodingTaskAt(tx, store, task.id, "awaiting_approval");
+    await tx((trx) => store.approvePlanIfPending(trx, task.id, new Date()));
+    const { sandbox, createSpecs } = fakeGitRemoteSandbox();
+    const secretsStore = mock<SecretsStore>();
+    secretsStore.getSecret.mockImplementation(async (_tx, name) =>
+      name === CLAUDE_CODE_OAUTH_TOKEN_SECRET ? "test-oauth-token" : undefined,
+    );
+    removeIdentity();
+    const backend = backendYielding([{ kind: "complete", exitCode: 0, isError: false }]);
+    const execute = vi.spyOn(backend, "execute");
+
+    const result = await runCodingExecute({
+      taskId: task.id,
+      runId: "run-test",
+      deps: makeDeps({ sandbox, backend, secretsStore }),
+      stepRun,
+      stepSendEvent,
+      inngest: fakeInngest,
+    });
+
+    expect(result).toEqual({
+      status: "failed",
+      failure: { reason: "credentials_unavailable", detail: MISSING_IDENTITY },
+    });
+    expect(execute).not.toHaveBeenCalled();
+    expect(createSpecs).toHaveLength(0);
+    const row = await tx((trx) => store.getTask(trx, task.id));
+    expect(row?.failureReason).toBe("credentials_unavailable");
+  });
+
   it("happy path: tryResumeByTaskId hit → no fresh clone, no checkout (sandbox already on feature branch)", async () => {
     const repo = await seedRepo();
     const task = await seedTask(repo);

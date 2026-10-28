@@ -13,7 +13,6 @@ import {
   sql,
 } from "drizzle-orm";
 import type { Result } from "neverthrow";
-import { match, P } from "ts-pattern";
 import { single } from "../../../db/helpers.js";
 import type { Transaction } from "../../../db/index.js";
 import { inSavepoint, uniqueViolationAs } from "../../store/errors.js";
@@ -65,17 +64,22 @@ export type CodingTaskStatus =
  */
 export type CodingTaskForwardStatus = Exclude<CodingTaskStatus, "failed" | "cancelled">;
 
-/** What {@link CodingStore.updateTaskStatus} writes: a reason exactly at the two reasoned statuses. */
-export type TaskStatusWrite =
-  | { id: string; status: CodingTaskForwardStatus }
-  | { id: string; status: "failed" | "cancelled"; failure: TaskFailure };
+/** What {@link CodingStore.updateTaskStatus} writes: an end status and the failure behind it. */
+export interface TaskStatusWrite {
+  id: string;
+  status: "failed" | "cancelled";
+  failure: TaskFailure;
+}
 
-/** The two failure columns as one write. */
+/** The two failure columns as one write; a failure with no text has a null detail. */
 function failureColumns(failure: TaskFailure): {
   failureReason: CodingTaskFailureReason;
-  failureDetail: string;
+  failureDetail: string | null;
 } {
-  return { failureReason: failure.reason, failureDetail: failure.detail };
+  return {
+    failureReason: failure.reason,
+    failureDetail: failure.detail === "" ? null : failure.detail,
+  };
 }
 
 const TERMINAL_STATUSES: ReadonlyArray<CodingTaskStatus> = [
@@ -320,10 +324,9 @@ export interface CodingStore {
   ): Promise<void>;
 
   /**
-   * Unconditional status write. `failure` is required at `failed` and
-   * `cancelled` and refused elsewhere, which is what the row's CHECK says.
-   * The orchestrators' catch path (`failTaskFromCatch`) is its one
-   * production caller; everything else transitions conditionally.
+   * Unconditional write of an end status with its failure. The orchestrators'
+   * catch path (`failTaskFromCatch`) is its one production caller; everything
+   * else transitions conditionally.
    */
   updateTaskStatus(tx: Transaction, params: TaskStatusWrite): Promise<void>;
 
@@ -654,14 +657,10 @@ export class DrizzleCodingStore implements CodingStore {
   }
 
   async updateTaskStatus(tx: Transaction, params: TaskStatusWrite): Promise<void> {
-    const set = match(params)
-      .with({ status: P.union("failed", "cancelled") }, ({ status, failure }) => ({
-        status,
-        ...failureColumns(failure),
-      }))
-      .with({ status: P.not(P.union("failed", "cancelled")) }, ({ status }) => ({ status }))
-      .exhaustive();
-    await tx.update(codingTasks).set(set).where(eq(codingTasks.id, params.id));
+    await tx
+      .update(codingTasks)
+      .set({ status: params.status, ...failureColumns(params.failure) })
+      .where(eq(codingTasks.id, params.id));
   }
 
   async setTaskSessionId(tx: Transaction, id: string, sessionId: string): Promise<void> {

@@ -126,10 +126,8 @@ export function statefulCodingStore(
     task = {
       ...task,
       status: params.status,
-      ...("failure" in params && {
-        failureReason: params.failure.reason,
-        failureDetail: params.failure.detail,
-      }),
+      failureReason: params.failure.reason,
+      failureDetail: params.failure.detail,
     };
   });
   store.transitionTaskStatus.mockImplementation(async (_tx, _id, from, to, claimedByRunId) => {

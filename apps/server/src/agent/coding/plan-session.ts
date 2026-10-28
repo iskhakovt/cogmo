@@ -8,7 +8,7 @@ import type { SandboxClient, SandboxSession, SandboxSessionState } from "../../s
 import type { CodingBackend } from "./backend.js";
 import type { CodingRun, TaskStoreDeps } from "./coding-run.js";
 import type { PlanStreamHandle } from "./progress-stream.js";
-import { fromSessionResult, type SessionMemo, type SessionResult } from "./session-result.js";
+import { fromSessionResult, type SessionResult } from "./session-result.js";
 import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
 import type { TaskFailure } from "./types.js";
 
@@ -58,10 +58,9 @@ async function streamPlan(
     container: SandboxSession;
     stream: PlanStreamHandle;
   },
-): Promise<SessionMemo> {
+): Promise<SessionResult> {
   const { task, repo, container, stream } = args;
   let plan = "";
-  let isError = false;
   let failure: TaskFailure | undefined;
 
   for await (const event of deps.backend.plan({ task, repo, container })) {
@@ -75,7 +74,6 @@ async function streamPlan(
       })
       .with({ kind: "complete" }, (e) => {
         if (e.isError) {
-          isError = true;
           failure = { reason: "cli_exit_error", detail: `claude exit code ${e.exitCode}` };
         }
       })
@@ -90,9 +88,6 @@ async function streamPlan(
       .exhaustive();
   }
 
-  return {
-    isError,
-    ...(plan && { plan }),
-    ...(failure && { failure }),
-  };
+  if (failure) return { kind: "errored", failure };
+  return { kind: "completed", ...(plan && { plan }) };
 }

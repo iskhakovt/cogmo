@@ -5,6 +5,8 @@
  * git-remote backends, and reaping it.
  */
 
+import { err, ok, type Result } from "neverthrow";
+import { match } from "ts-pattern";
 import type { Transactor } from "../../db/index.js";
 import type {
   AskpassSpec,
@@ -17,9 +19,9 @@ import type { ResourceLimits } from "../../sandbox/types.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import { loadCodingSandboxEnv } from "./auth.js";
 import type { CodingRun } from "./coding-run.js";
-import { runBranchFor } from "./git-as-transport.js";
+import { findIdentity, runBranchFor } from "./git-as-transport.js";
 import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
-import type { WorktreeAssignment } from "./types.js";
+import type { TaskFailure, WorktreeAssignment } from "./types.js";
 
 const HOME_VOLUME_PREFIX = "cogmo-task-home";
 export const WORKTREE_DIR_IN_CONTAINER = "/workspace";
@@ -78,6 +80,56 @@ export interface SandboxAuthDeps {
 export function loadSandboxEnv(deps: SandboxAuthDeps): ReturnType<typeof loadCodingSandboxEnv> {
   const load = deps.loadCodingSandboxEnv ?? loadCodingSandboxEnv;
   return deps.runInTx((tx) => load(tx, deps.secretsStore));
+}
+
+/** The env, inside the `create-container` body; a token gone since `check-credentials` is a step error. */
+export async function loadSandboxEnvOrThrow(
+  deps: SandboxAuthDeps,
+): Promise<Readonly<Record<string, string>>> {
+  const auth = await loadSandboxEnv(deps);
+  if (auth.isErr()) throw new Error(auth.error.message);
+  return auth.value;
+}
+
+/** What `check-credentials` memoizes: the verdict, never a secret. */
+type CredentialsVerdict = { kind: "present" } | { kind: "missing"; message: string };
+
+/**
+ * The run's credentials gate, ahead of anything that needs them: the Claude
+ * OAuth token when the run will create a container, and the repo's GitHub
+ * identity when it will clone or push (`identityName`). A miss is the task's
+ * `credentials_unavailable` failure. Memoized, so a secret changed later in
+ * the run does not change which steps it plans. With nothing to check (a
+ * bind-mount resume) there is no step.
+ */
+export async function checkTaskCredentials(
+  run: CodingRun,
+  deps: SandboxAuthDeps,
+  args: { token: boolean; identityName: string | null },
+): Promise<Result<void, TaskFailure>> {
+  const { token, identityName } = args;
+  if (!token && identityName === null) return ok(undefined);
+  const verdict = await run.stepRun("check-credentials", async (): Promise<CredentialsVerdict> => {
+    if (token) {
+      const auth = await loadSandboxEnv(deps);
+      if (auth.isErr()) return { kind: "missing", message: auth.error.message };
+    }
+    if (identityName !== null) {
+      const identity = await findIdentity({
+        runInTx: deps.runInTx,
+        secretsStore: deps.secretsStore,
+        identityName,
+      });
+      if (identity.isErr()) return { kind: "missing", message: identity.error };
+    }
+    return { kind: "present" };
+  });
+  return match(verdict)
+    .with({ kind: "present" }, () => ok<void, TaskFailure>(undefined))
+    .with({ kind: "missing" }, ({ message }) =>
+      err<void, TaskFailure>({ reason: "credentials_unavailable", detail: message }),
+    )
+    .exhaustive();
 }
 
 /** The repo's devcontainer image, else the default base image. */

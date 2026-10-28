@@ -3,7 +3,6 @@
  * create the task container the plan session runs in.
  */
 
-import { err, ok, type Result } from "neverthrow";
 import type { AskpassMaterials } from "../../sandbox/askpass.js";
 import {
   isLocalDockerSessionState,
@@ -17,12 +16,12 @@ import { loadIdentity } from "./git-as-transport.js";
 import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
 import {
   checkoutFeatureBranchStep,
-  loadSandboxEnv,
+  loadSandboxEnvOrThrow,
   type SandboxAuthDeps,
   taskImage,
   taskSessionSpec,
 } from "./task-sandbox.js";
-import type { TaskFailure, WorktreeAssignment } from "./types.js";
+import type { WorktreeAssignment } from "./types.js";
 
 interface PlanSandboxDeps extends TaskStoreDeps, SandboxAuthDeps {
   sandbox: SandboxClient;
@@ -32,11 +31,12 @@ interface PlanSandboxDeps extends TaskStoreDeps, SandboxAuthDeps {
 }
 
 /**
- * Subscription auth resolves first, outside any step, so a missing secret
- * short-circuits before a container exists for `claude -p` to hang in. On
- * git-remote the GitHub identity follows, for the sandbox's clone, and
- * askpass is mounted on this container: an execute run that resumes it (no
- * `sandbox.create` on that path) re-provisions the same directory.
+ * The run's `check-credentials` step has already found the Claude OAuth token
+ * and, on git-remote, the GitHub identity. The token loads inside
+ * `create-container`, so it never becomes a step return value. On git-remote
+ * the identity loads for the sandbox's clone, and askpass is mounted on this
+ * container: an execute run that resumes it (no `sandbox.create` on that
+ * path) re-provisions the same directory.
  *
  * On failure the caller's catch reaps the sandbox by task label whether or
  * not `create` returned, which also covers a managed backend whose
@@ -51,14 +51,9 @@ export async function preparePlanSandbox(
     assignment: WorktreeAssignment;
     askpass: AskpassLease;
   },
-): Promise<Result<SandboxSessionState, TaskFailure>> {
+): Promise<SandboxSessionState> {
   const { sandbox } = deps;
   const { task, repo, assignment } = args;
-  // The run's credentials gate: a missing token is the task's
-  // `credentials_unavailable` failure, before any container exists.
-  const auth = await loadSandboxEnv(deps);
-  if (auth.isErr()) return err({ reason: "credentials_unavailable", detail: auth.error.message });
-  const env = auth.value;
 
   let identityPat: string | undefined;
   let askpassMaterials: AskpassMaterials | undefined;
@@ -92,7 +87,7 @@ export async function preparePlanSandbox(
         image,
         resourceLimits: deps.defaultResourceLimits,
         taskTtlMs: deps.taskTtlMs,
-        env,
+        env: await loadSandboxEnvOrThrow(deps),
       }),
     );
     return session.state;
@@ -110,5 +105,5 @@ export async function preparePlanSandbox(
   if (sandbox.capabilities.workingTreeTransport === "git-remote") {
     await checkoutFeatureBranchStep(run, sandbox, state, assignment.branch);
   }
-  return ok(state);
+  return state;
 }

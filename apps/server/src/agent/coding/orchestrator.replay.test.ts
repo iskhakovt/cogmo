@@ -21,7 +21,9 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { InngestTestEngine } from "@inngest/test";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { mock } from "vitest-mock-extended";
 import { inngest } from "../../inngest/client.js";
+import type { SecretsStore } from "../../secrets/store/index.js";
 import {
   codingAuthSecrets,
   codingRepoRow,
@@ -367,6 +369,83 @@ describe("coding-task-execute — Inngest replay", () => {
     });
     expect(current().failureReason).toBe("cli_exit_error");
     expect(current().failureDetail).toBe("claude exit code 2");
+    expect(backend.executeCalls()).toBe(0);
+  });
+
+  it("carries on past a memoized `check-credentials` when the OAuth token is removed later in the run", async () => {
+    // The verdict is memoized: a token deleted after `create-container`
+    // does not send a replay down the credentials failure exit, which would
+    // fail a task that has already moved on and tear down its worktree.
+    const { store, current } = statefulCodingStore(approvedTask(), localRepo());
+    const backend = countingBackend({ execute: EXECUTE_EVENTS });
+    const secretsStore = mock<SecretsStore>();
+    secretsStore.getSecret.mockResolvedValue(undefined);
+    const fn = createCodingExecuteOrchestrator(
+      makeDeps({ store, backend: backend.backend, secretsStore }),
+      inngest,
+    );
+
+    const engine = new InngestTestEngine({
+      function: fn,
+      events: [approvedEvent],
+      steps: [
+        { id: "try-resume", handler: () => null },
+        { id: "check-credentials", handler: () => ({ kind: "present" }) },
+        {
+          id: "create-container",
+          handler: () => ({
+            type: "local-docker",
+            taskId: FIXTURE_TASK_ID,
+            containerRowId: "row-1",
+            dockerId: "docker-1",
+          }),
+        },
+        {
+          id: "execute-cli",
+          handler: () => ({ kind: "completed", usage: { inputTokens: 100, outputTokens: 20 } }),
+        },
+      ],
+    });
+    const { result, error } = await engine.execute();
+
+    expect(error).toBeUndefined();
+    expect(result).toEqual({ status: "pending_verify" });
+    expect(current().status).toBe("pending_verify");
+    expect(current().failureReason).toBeNull();
+    expect(backend.executeCalls()).toBe(0);
+  });
+
+  it("reads an `execute-cli` memo of the errored shape as its failure", async () => {
+    const { store, current } = statefulCodingStore(approvedTask(), localRepo());
+    const backend = countingBackend({ execute: EXECUTE_EVENTS });
+    const fn = createCodingExecuteOrchestrator(
+      makeDeps({ store, backend: backend.backend }),
+      inngest,
+    );
+
+    const engine = new InngestTestEngine({
+      function: fn,
+      events: [approvedEvent],
+      steps: [
+        { id: "set-status-executing", handler: () => ({ kind: "transitioned" }) },
+        { id: "try-resume", handler: () => null },
+        {
+          id: "execute-cli",
+          handler: () => ({
+            kind: "errored",
+            failure: { reason: "cli_exit_error", detail: "claude exit code 3" },
+          }),
+        },
+      ],
+    });
+    const { result, error } = await engine.execute();
+
+    expect(error).toBeUndefined();
+    expect(result).toEqual({
+      status: "failed",
+      failure: { reason: "cli_exit_error", detail: "claude exit code 3" },
+    });
+    expect(current().failureReason).toBe("cli_exit_error");
     expect(backend.executeCalls()).toBe(0);
   });
 

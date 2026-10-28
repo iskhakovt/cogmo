@@ -13,6 +13,7 @@
  * `resolveGitHubIdentity`) live in `src/secrets/`.
  */
 
+import type { Result } from "neverthrow";
 import type { Transactor } from "../../db/index.js";
 import { runGit, withGitAskpass } from "../../secrets/git-askpass.js";
 import {
@@ -158,17 +159,25 @@ export interface LoadIdentityArgs {
 }
 
 /**
- * Resolve a `github_identity:<name>` row to a validated bundle. Throws
- * with the human-readable message from `describeResolveIdentityError`
- * — the orchestrator catches this at the durability boundary so the
- * task fails fast rather than silently skipping the push.
+ * Resolve a `github_identity:<name>` row to a validated bundle, or the
+ * operator-actionable message from `describeResolveIdentityError`.
  */
-export async function loadIdentity(args: LoadIdentityArgs): Promise<GitHubIdentity> {
+export async function findIdentity(
+  args: LoadIdentityArgs,
+): Promise<Result<GitHubIdentity, string>> {
   const result = await args.runInTx((tx) =>
     resolveGitHubIdentity(tx, args.secretsStore, args.identityName),
   );
-  if (result.isErr()) {
-    throw new Error(describeResolveIdentityError(result.error));
-  }
+  return result.mapErr(describeResolveIdentityError);
+}
+
+/**
+ * {@link findIdentity} where the run's `check-credentials` step already found
+ * the identity, so a miss is an identity removed mid-run: it throws, and the
+ * orchestrator's catch records it.
+ */
+export async function loadIdentity(args: LoadIdentityArgs): Promise<GitHubIdentity> {
+  const result = await findIdentity(args);
+  if (result.isErr()) throw new Error(result.error);
   return result.value;
 }

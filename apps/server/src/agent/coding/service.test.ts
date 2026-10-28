@@ -520,7 +520,7 @@ describe("createCodingService", () => {
     });
     const taskId = expectDefined(first.taskId, "first taskId");
     // The orchestrator picked it up and is mid-plan.
-    await tx((trx) => store.updateTaskStatus(trx, { id: taskId, status: "planning" }));
+    await tx((trx) => store.transitionTaskStatus(trx, taskId, "queued", "planning"));
     inngest.send.mockRejectedValue(new Error("bus down"));
 
     const retry = await service.delegate({

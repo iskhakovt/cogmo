@@ -18,7 +18,8 @@ import { loadIdentity } from "./git-as-transport.js";
 import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
 import {
   checkoutFeatureBranchStep,
-  loadSandboxEnv,
+  checkTaskCredentials,
+  loadSandboxEnvOrThrow,
   type SandboxAuthDeps,
   taskImage,
   taskSessionSpec,
@@ -50,17 +51,18 @@ export interface ExecuteSandbox {
 /**
  * Get-or-create in two checkpoints. `try-resume` returns a live sandbox's
  * state — the plan phase's container is still warm, or the reaper hasn't
- * reached it — and then no clone, checkout or auth resolution is needed.
- * Otherwise `create-container` makes a fresh one. The Claude OAuth token is
- * resolved ahead of that step as the run's credentials gate — a miss is the
- * task's `credentials_unavailable` failure before any container exists —
- * and reaches the spec through the closure, never a step return value.
+ * reached it — and then no clone, checkout or Claude token is needed.
+ * Otherwise `create-container` makes a fresh one, loading the token inside
+ * its body so it never becomes a step return value.
+ *
+ * `check-credentials` sits between them: it needs the token only on the
+ * create path, and the GitHub identity on git-remote either way. A miss is
+ * the task's `credentials_unavailable` failure before any container exists.
  *
  * On git-remote, askpass is provisioned either way: a resume reuses the plan
  * phase's mount, a fresh create mounts it. The identity loads outside any
- * step so the PAT never reaches Inngest's state store — safe without a step
- * only because the function is `retries: 0`; loosen that and the decrypt
- * would replay.
+ * step so the PAT never reaches Inngest's state store; the decrypt re-runs
+ * at every later boundary.
  */
 export async function acquireExecuteSandbox(
   run: CodingRun,
@@ -78,8 +80,15 @@ export async function acquireExecuteSandbox(
     return existing?.state ?? null;
   });
 
+  const gitRemote = sandbox.capabilities.workingTreeTransport === "git-remote";
+  const credentials = await checkTaskCredentials(run, deps, {
+    token: resumed === null,
+    identityName: gitRemote ? args.repo.identityName : null,
+  });
+  if (credentials.isErr()) return err(credentials.error);
+
   let push: ExecutePushCredentials | undefined;
-  if (sandbox.capabilities.workingTreeTransport === "git-remote") {
+  if (gitRemote) {
     const identity = await loadIdentity({
       runInTx: deps.runInTx,
       secretsStore: deps.secretsStore,
@@ -89,9 +98,7 @@ export async function acquireExecuteSandbox(
   }
 
   if (resumed !== null) return ok({ state: resumed, push });
-  const auth = await loadSandboxEnv(deps);
-  if (auth.isErr()) return err({ reason: "credentials_unavailable", detail: auth.error.message });
-  const state = await createExecuteSandbox(run, deps, { ...args, push, env: auth.value });
+  const state = await createExecuteSandbox(run, deps, { ...args, push });
   // A resume hit skips these: a prior attempt already ran them, or they
   // don't apply. Each is idempotent on its own (an UPDATE; `checkout -B`).
   if (isLocalDockerSessionState(state)) {
@@ -100,7 +107,7 @@ export async function acquireExecuteSandbox(
       deps.runInTx((tx) => deps.store.setTaskContainerId(tx, run.taskId, containerRowId)),
     );
   }
-  if (sandbox.capabilities.workingTreeTransport === "git-remote") {
+  if (gitRemote) {
     await checkoutFeatureBranchStep(run, sandbox, state, args.assignment.branch);
   }
   return ok({ state, push });
@@ -114,7 +121,6 @@ async function createExecuteSandbox(
     repo: CodingRepoRow;
     assignment: WorktreeAssignment;
     push: ExecutePushCredentials | undefined;
-    env: Readonly<Record<string, string>>;
   },
 ): Promise<SandboxSessionState> {
   const { sandbox, defaultResourceLimits } = deps;
@@ -136,7 +142,7 @@ async function createExecuteSandbox(
         image,
         resourceLimits: defaultResourceLimits,
         taskTtlMs: deps.taskTtlMs,
-        env: args.env,
+        env: await loadSandboxEnvOrThrow(deps),
       }),
     );
     return session.state;

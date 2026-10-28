@@ -4,6 +4,7 @@
  * failed, or abandoned to a task that ended under the run.
  */
 
+import { err, ok, type Result } from "neverthrow";
 import { match, P } from "ts-pattern";
 import type { EventPublisher } from "../../inngest/durable.js";
 import type { SandboxClient, SandboxSession } from "../../sandbox/index.js";
@@ -76,8 +77,7 @@ export async function checkExecutable(
  * git-remote: push claude's commits from inside the execute sandbox to the
  * run-branch `cogmo/run/<task-id>` — the ref the verify sandbox clones.
  * Verify then creates `cogmo/<idShort>` from its tip and pushes that as the
- * PR head. Returns the failure, or null when the push landed (or there was
- * nothing to commit).
+ * PR head. Ok when the push landed or there was nothing to commit.
  */
 export async function pushExecuteChanges(
   run: CodingRun,
@@ -87,7 +87,7 @@ export async function pushExecuteChanges(
     credentials: ExecutePushCredentials;
     container: () => Promise<SandboxSession>;
   },
-): Promise<TaskFailure | null> {
+): Promise<Result<void, TaskFailure>> {
   const { assignment, credentials } = args;
   if (assignment.type !== "git-remote") {
     throw new Error(
@@ -110,18 +110,15 @@ export async function pushExecuteChanges(
     }),
   );
   return match(result)
-    .with({ kind: P.union("pushed", "nothing_to_commit") }, () => null)
-    .with(
-      { kind: "branch_conflict" },
-      ({ output }): TaskFailure => ({ reason: "branch_conflict", detail: output }),
+    .with({ kind: P.union("pushed", "nothing_to_commit") }, () => ok<void, TaskFailure>(undefined))
+    .with({ kind: "branch_conflict" }, ({ output }) =>
+      err<void, TaskFailure>({ reason: "branch_conflict", detail: output }),
     )
-    .with(
-      { kind: "auth_failed" },
-      ({ output }): TaskFailure => ({ reason: "auth_failed", detail: output }),
+    .with({ kind: "auth_failed" }, ({ output }) =>
+      err<void, TaskFailure>({ reason: "auth_failed", detail: output }),
     )
-    .with(
-      { kind: "failed" },
-      ({ output }): TaskFailure => ({ reason: "push_failed", detail: output }),
+    .with({ kind: "failed" }, ({ output }) =>
+      err<void, TaskFailure>({ reason: "push_failed", detail: output }),
     )
     .exhaustive();
 }

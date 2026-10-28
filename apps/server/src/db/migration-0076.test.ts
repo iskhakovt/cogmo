@@ -198,6 +198,9 @@ const PUSH_CONFLICT = "push rejected — branch conflict on cogmo/<idShort>:\n\n
 const VERIFY = "verify failed (exit 1)\n\nFAIL src/x.test.ts";
 const VERIFY_TIMEOUT = "verify failed (exit 124)\n\n[verify timed out after 600s]";
 const PR_422 = "PR open failed (validation): A pull request already exists for cogmo/abc.";
+const DRAFT_PR_AUTH = "draft PR open failed (auth): Bad credentials";
+const DRAFT_PR_422 = "draft PR open failed (validation): A pull request already exists";
+const DRAFT_PR = "draft PR open failed: Server Error";
 const IDENTITY = "GitHub identity 'default' is not configured. Run the setup wizard.";
 const RECONCILE =
   "inngest run terminated abnormally (run_id 01X, function_id coding-task-execute): gone";
@@ -216,6 +219,9 @@ describe("migration 0076 — coding task failure reason", () => {
       verify: { status: "failed", failureReason: VERIFY },
       "verify timeout": { status: "failed", failureReason: VERIFY_TIMEOUT },
       "pr 422": { status: "failed", failureReason: PR_422 },
+      "draft pr auth": { status: "failed", failureReason: DRAFT_PR_AUTH },
+      "draft pr 422": { status: "failed", failureReason: DRAFT_PR_422 },
+      "draft pr": { status: "failed", failureReason: DRAFT_PR },
       identity: { status: "failed", failureReason: IDENTITY },
       token: { status: "failed", failureReason: TOKEN },
       reconcile: { status: "failed", failureReason: RECONCILE },
@@ -223,6 +229,7 @@ describe("migration 0076 — coding task failure reason", () => {
       catch: { status: "failed", failureReason: CATCH },
       "cancelled, unmatched text": { status: "cancelled", failureReason: "stopped by hand" },
       "failed, no text": { status: "failed", failureReason: null },
+      "failed, empty text": { status: "failed", failureReason: "" },
       cancelled: { status: "cancelled", failureReason: "user cancelled the plan" },
       revised: { status: "cancelled", failureReason: "user requested revisions" },
     });
@@ -236,6 +243,9 @@ describe("migration 0076 — coding task failure reason", () => {
       verify: { reason: "verify_failed", detail: VERIFY },
       "verify timeout": { reason: "verify_timed_out", detail: VERIFY_TIMEOUT },
       "pr 422": { reason: "pr_validation_failed", detail: PR_422 },
+      "draft pr auth": { reason: "pr_auth_failed", detail: DRAFT_PR_AUTH },
+      "draft pr 422": { reason: "pr_validation_failed", detail: DRAFT_PR_422 },
+      "draft pr": { reason: "pr_open_failed", detail: DRAFT_PR },
       identity: { reason: "credentials_unavailable", detail: IDENTITY },
       token: { reason: "credentials_unavailable", detail: TOKEN },
       reconcile: { reason: "run_terminated", detail: RECONCILE },
@@ -243,6 +253,7 @@ describe("migration 0076 — coding task failure reason", () => {
       catch: { reason: "unexpected_error", detail: CATCH },
       "cancelled, unmatched text": { reason: "unknown", detail: "stopped by hand" },
       "failed, no text": { reason: "unknown", detail: null },
+      "failed, empty text": { reason: "unknown", detail: null },
       cancelled: { reason: "user_cancelled", detail: null },
       revised: { reason: "user_requested_revisions", detail: null },
     });

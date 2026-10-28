@@ -1721,9 +1721,9 @@ describe("runCodingExecute", () => {
     // to exactly one run.
     const repo = await seedRepo();
     const { task } = await seedExecutableTask(repo);
-    // `updateTaskStatus` writes no claimant — what a pre-0054 row looks like
-    // after its claim step ran on the old code.
-    await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "executing" }));
+    // A transition without a run id writes no claimant — what a pre-0054 row
+    // looks like after its claim step ran on the old code.
+    await tx((trx) => store.transitionTaskStatus(trx, task.id, "awaiting_approval", "executing"));
     expect((await tx((trx) => store.getTask(trx, task.id)))?.claimedByRunId).toBeNull();
 
     const backend = executeBackendYielding([{ kind: "complete", exitCode: 0, isError: false }]);
@@ -1739,7 +1739,7 @@ describe("runCodingExecute", () => {
 
     // Put it back to `executing` to model a second delivery arriving while
     // the row still carries the first run's claim.
-    await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "executing" }));
+    await tx((trx) => store.transitionTaskStatus(trx, task.id, "pending_verify", "executing"));
     expect((await tx((trx) => store.getTask(trx, task.id)))?.claimedByRunId).toBe("run-first");
 
     const second = fakeSandbox();

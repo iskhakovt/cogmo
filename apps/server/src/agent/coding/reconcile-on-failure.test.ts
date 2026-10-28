@@ -301,6 +301,32 @@ describe("createCodingTaskReconcile — durable wrapper", () => {
     });
   });
 
+  it("refuses a reconciled memo that carries no failure instead of emitting an empty one", async () => {
+    const store = mock<CodingStore>();
+    const fn = createCodingTaskReconcile({ runInTx: fakeRunInTx, store }, inngest);
+    const engine = new InngestTestEngine({
+      function: fn,
+      events: [
+        makeFailureEvent({
+          taskId: "task-002",
+          runId: "run-bbb",
+          functionId: "cogmo-coding-task-execute",
+        }),
+      ],
+      steps: [
+        {
+          id: "reconcile",
+          handler: () => ({ status: "reconciled" as const, taskId: "task-002" }),
+        },
+      ],
+    });
+
+    const { error } = await engine.execute();
+
+    expect(error).toBeDefined();
+    expect(sendSpy).not.toHaveBeenCalled();
+  });
+
   it("on reconciled: invokes step.sendEvent exactly once with the memoized failure", async () => {
     const store = mock<CodingStore>();
     const fn = createCodingTaskReconcile({ runInTx: fakeRunInTx, store }, inngest);

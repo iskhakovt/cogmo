@@ -563,7 +563,7 @@ describe("DrizzleCodingStore", () => {
       ).rejects.toThrow();
     });
 
-    it("updateTaskStatus writes a forward status bare and a failed status with its reason", async () => {
+    it("updateTaskStatus writes an end status with its reason, and an empty detail as null", async () => {
       const repoId = await seedRepo();
       const t = await tx((trx) =>
         store.insertTask(trx, {
@@ -574,9 +574,6 @@ describe("DrizzleCodingStore", () => {
           allowPrivilegedRunc: false,
         }),
       );
-
-      await tx((trx) => store.updateTaskStatus(trx, { id: t.id, status: "planning" }));
-      expect((await tx((trx) => store.getTask(trx, t.id)))?.status).toBe("planning");
 
       await tx((trx) =>
         store.updateTaskStatus(trx, {
@@ -589,6 +586,17 @@ describe("DrizzleCodingStore", () => {
       expect(failed?.status).toBe("failed");
       expect(failed?.failureReason).toBe("verify_failed");
       expect(failed?.failureDetail).toBe("exit 1\n\n3 tests failed");
+
+      await tx((trx) =>
+        store.updateTaskStatus(trx, {
+          id: t.id,
+          status: "failed",
+          failure: { reason: "run_terminated", detail: "" },
+        }),
+      );
+      const blank = await tx((trx) => store.getTask(trx, t.id));
+      expect(blank?.failureReason).toBe("run_terminated");
+      expect(blank?.failureDetail).toBeNull();
     });
 
     it("setTaskSessionId / setTaskContainerId / setTaskPlan / setTaskPrMetadata persist their fields", async () => {
@@ -1207,7 +1215,7 @@ describe("DrizzleCodingStore", () => {
           allowPrivilegedRunc: false,
         }),
       );
-      await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "planning" }));
+      await tx((trx) => store.transitionTaskStatus(trx, task.id, "queued", "planning"));
 
       const result = await tx((trx) =>
         store.failTaskIfNonTerminal(trx, task.id, {

@@ -10,17 +10,18 @@ WHERE "failure_reason" IS NOT NULL AND "status" NOT IN ('failed', 'cancelled');-
 -- The stored text moves to `failure_detail` whole — except a Cancel's, whose
 -- reason says everything — and `failure_reason` becomes the label of the
 -- writer branch that produced it, matched on the text each branch wrote: a
--- CLI exit code, the push and PR-open prefixes, the verify verdict (exit 124
--- is the timeout cap), the credential gates, the reconciler's and the start
--- emit's prefixes, and the two Cancel texts. Any other text on a `failed` row
+-- CLI exit code, the push and PR-open prefixes (`draft PR open failed` before
+-- PRs opened ready for review), the verify verdict (exit 124 is the timeout
+-- cap; a suite that itself exits 124 reads as one too), the credential gates,
+-- the reconciler's and the start emit's prefixes, and the two Cancel texts. Any other text on a `failed` row
 -- is the free text of an orchestrator's catch, which has no prefix, and
 -- becomes `unexpected_error`; on a `cancelled` row it becomes `unknown`. Either
--- way the detail is kept. A `failed` or `cancelled` row with no text at all
--- becomes `unknown`.
+-- way the detail is kept. A `failed` or `cancelled` row with no text at all,
+-- or empty text, becomes `unknown` with a null detail.
 UPDATE "coding_tasks"
 SET "failure_detail" = CASE
       WHEN "failure_reason" IN ('user cancelled the plan', 'user requested revisions') THEN NULL
-      ELSE "failure_reason"
+      ELSE NULLIF("failure_reason", '')
     END,
     "failure_reason" = CASE
       WHEN "failure_reason" ~ '^claude exit code ' THEN 'cli_exit_error'
@@ -34,9 +35,9 @@ SET "failure_detail" = CASE
       WHEN "failure_reason" ~ '^commit\+push failed' THEN 'push_failed'
       WHEN "failure_reason" ~ '^verify failed \(exit 124\)' THEN 'verify_timed_out'
       WHEN "failure_reason" ~ '^verify failed \(exit ' THEN 'verify_failed'
-      WHEN "failure_reason" ~ '^PR open failed \(auth\)' THEN 'pr_auth_failed'
-      WHEN "failure_reason" ~ '^PR open failed \(validation\)' THEN 'pr_validation_failed'
-      WHEN "failure_reason" ~ '^PR open failed' THEN 'pr_open_failed'
+      WHEN "failure_reason" ~ '^(draft )?PR open failed \(auth\)' THEN 'pr_auth_failed'
+      WHEN "failure_reason" ~ '^(draft )?PR open failed \(validation\)' THEN 'pr_validation_failed'
+      WHEN "failure_reason" ~ '^(draft )?PR open failed' THEN 'pr_open_failed'
       WHEN "failure_reason" ~ '^cannot parse owner/repo from remote URL' THEN 'credentials_unavailable'
       WHEN "failure_reason" ~ '^GitHub identity ''[^'']*'' is (not configured|corrupt|malformed)' THEN 'credentials_unavailable'
       WHEN "failure_reason" ~ '^Claude Code subscription auth missing' THEN 'credentials_unavailable'
@@ -44,6 +45,7 @@ SET "failure_detail" = CASE
       WHEN "failure_reason" ~ '^inngest\.send failed: ' THEN 'start_emit_failed'
       WHEN "failure_reason" = 'user cancelled the plan' THEN 'user_cancelled'
       WHEN "failure_reason" = 'user requested revisions' THEN 'user_requested_revisions'
+      WHEN "failure_reason" = '' THEN 'unknown'
       WHEN "status" = 'failed' THEN 'unexpected_error'
       ELSE 'unknown'
     END

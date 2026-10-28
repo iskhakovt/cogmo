@@ -47,6 +47,9 @@ const ReconcileResultSchema = z.union([
       failure: TaskFailureSchema.optional(),
       failureReason: z.string().optional(),
     })
+    .refine((memo) => memo.failure !== undefined || memo.failureReason !== undefined, {
+      message: "a reconciled memo carries its failure",
+    })
     .transform(({ failure, failureReason, ...rest }) => ({
       ...rest,
       failure: failure ?? { reason: "run_terminated" as const, detail: failureReason ?? "" },

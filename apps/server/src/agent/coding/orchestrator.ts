@@ -49,7 +49,7 @@ import {
   recordTaskFailed,
 } from "./task-failure.js";
 import { CLAIMS, claimTask, reclaimEndedTask } from "./task-lifecycle.js";
-import { lazySession, reapTaskSandbox } from "./task-sandbox.js";
+import { checkTaskCredentials, lazySession, reapTaskSandbox } from "./task-sandbox.js";
 import { safeTeardownWorktree } from "./teardown.js";
 import type { TaskFailure, WorktreeAssignment } from "./types.js";
 
@@ -219,6 +219,13 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
   const stream = await (deps.openPlanStream ?? (async () => NULL_PLAN_STREAM))(run.taskId);
   const askpass = new AskpassLease(deps.askpassBaseDir, run.taskId);
   try {
+    const credentials = await checkTaskCredentials(run, deps, {
+      token: true,
+      identityName:
+        deps.sandbox.capabilities.workingTreeTransport === "git-remote" ? repo.identityName : null,
+    });
+    if (credentials.isErr())
+      return await endPlanUncredentialed(run, deps, stream, credentials.error);
     const worktree = await allocateTaskWorktree(run, deps, {
       repo,
       persisted: assignment,
@@ -227,19 +234,13 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
       },
     });
     const exit = { repo, assignment: worktree, stream };
-    const prepared = await preparePlanSandbox(run, deps, {
+    const state = await preparePlanSandbox(run, deps, {
       task,
       repo,
       assignment: worktree,
       askpass,
     });
-    if (prepared.isErr()) return await endPlanFailed(run, deps, exit, prepared.error);
-    const session = await runPlanSession(run, deps, {
-      task,
-      repo,
-      state: prepared.value,
-      stream,
-    });
+    const session = await runPlanSession(run, deps, { task, repo, state, stream });
     return await match(session)
       .with({ kind: "errored" }, ({ failure }) => endPlanFailed(run, deps, exit, failure))
       .with({ kind: "completed", plan: P.string.minLength(1) }, ({ plan }) =>
@@ -294,9 +295,37 @@ async function parkPlan(
 }
 
 /**
- * The plan session failed or produced no plan, or its credentials were
- * missing. A task that already ended under the run (a Cancel during
- * `plan-cli`) is reclaimed, not failed.
+ * `check-credentials` found a credential missing, before any worktree or
+ * sandbox exists, so there is nothing to tear down. A task cancelled since
+ * the claim stays cancelled.
+ */
+async function endPlanUncredentialed(
+  run: CodingRun,
+  deps: CodingOrchestratorDeps,
+  stream: PlanStreamHandle,
+  failure: TaskFailure,
+): Promise<CodingOrchestratorResult> {
+  const recorded = await recordTaskFailed(run, deps, failure, "transition-failed");
+  return await match(recorded)
+    .with({ kind: "ended" }, async (): Promise<CodingOrchestratorResult> => {
+      await stream.fail("Task cancelled while planning.").catch(() => {});
+      return { status: "skipped" };
+    })
+    .with(
+      { kind: "recorded" },
+      async ({ failure: recorded }): Promise<CodingOrchestratorResult> => {
+        await stream.fail(describeTaskFailure(recorded)).catch((streamErr: unknown) => {
+          run.log.warn({ err: streamErr }, "plan stream fail notification failed");
+        });
+        return { status: "failed", failure: recorded };
+      },
+    )
+    .exhaustive();
+}
+
+/**
+ * The plan session failed or produced no plan. A task that already ended
+ * under the run (a Cancel during `plan-cli`) is reclaimed, not failed.
  */
 async function endPlanFailed(
   run: CodingRun,
@@ -379,16 +408,16 @@ async function publishExecute(
   const { task, exit, sandbox, container, usage } = args;
   await persistSessionUsage(run, deps, usage);
   if (sandbox.push) {
-    const pushFailure = await pushExecuteChanges(run, {
+    const pushed = await pushExecuteChanges(run, {
       task,
       assignment: exit.assignment,
       credentials: sandbox.push,
       container,
     });
-    if (pushFailure !== null) {
+    if (pushed.isErr()) {
       // `safeTeardownWorktree` is a no-op for git-remote, the only
       // transport that pushes here, so no worktree teardown step.
-      const recorded = await endExecuteFailed(run, deps, exit, pushFailure, {
+      const recorded = await endExecuteFailed(run, deps, exit, pushed.error, {
         transition: "transition-failed-after-push",
         teardownWorktree: null,
         teardown: "teardown-after-push-failure",
