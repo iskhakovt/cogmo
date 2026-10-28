@@ -163,7 +163,7 @@ Decided once per turn at turn-start, fed to the turn context AND delivery. The a
 
 ### Inbound content shape `[confirmed]`
 
-Extend `InboundContentSchema` in `src/transport/content.ts` with a voice block:
+Extend `InboundContentSchema` in `src/agent/conversation/inbound-content.ts` with a voice block:
 
 ```typescript
 const InboundVoiceBlockSchema = z.object({

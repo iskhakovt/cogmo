@@ -1,6 +1,5 @@
 import type { Transactor } from "../../db/index.js";
 import type { ToolDefinition } from "../../llm/types.js";
-import { type InboundContent, isVoiceContent } from "../../transport/content.js";
 import type {
   DeliveryHandle,
   DeliveryRouter,
@@ -9,6 +8,7 @@ import type {
 import type { TransportStore } from "../../transport/store/index.js";
 import { resolveVoiceMode } from "../../voice/mode.js";
 import type { VoiceBundle } from "../../voice/resolver.js";
+import { type InboundContent, isVoiceContent } from "../conversation/inbound-content.js";
 import { type LoadedSystemPrompt, loadSystemPrompt } from "../conversation/load-system-prompt.js";
 import type {
   RenderSystemPromptArgs,
