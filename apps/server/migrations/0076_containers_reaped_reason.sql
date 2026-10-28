@@ -1,0 +1,2 @@
+CREATE TYPE "public"."container_reaped_reason" AS ENUM('ttl_expired', 'cascade', 'dead_instance', 'crash_reconcile', 'start_failed', 'unknown');--> statement-breakpoint
+ALTER TABLE "containers" ADD COLUMN "reaped_reason" "container_reaped_reason";

@@ -1,6 +1,8 @@
 import { sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
+import { constraintNameOf, findPgErrorByCode } from "../../db/pg-errors.js";
+import { expectDefined } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import type { ContainerLabels, ResourceLimits } from "../types.js";
 import { DrizzleSandboxStore } from "./index.js";
@@ -149,7 +151,7 @@ describe("DrizzleSandboxStore", () => {
       expect(row.resourceLimits.cpus).toBe(2);
       expect(row.startedAt).toBeNull();
       expect(row.exitedAt).toBeNull();
-      expect(row.exitCode).toBeNull();
+      expect(row.reapedReason).toBeNull();
     });
 
     it("rejects malformed labels at the store boundary", async () => {
@@ -247,7 +249,9 @@ describe("DrizzleSandboxStore", () => {
         await tx((trx) =>
           store.transitionContainerStatus(trx, { id, from: "starting", to: "running", at: T0 }),
         );
-        await tx((trx) => store.transitionContainerStatus(trx, { id, to: "reaped", at: T1 }));
+        await tx((trx) =>
+          store.transitionContainerStatus(trx, { id, to: "reaped", reason: "cascade", at: T1 }),
+        );
 
         const late = await tx((trx) =>
           store.transitionContainerStatus(trx, { id, from: "running", to: "exited", at: T2 }),
@@ -269,7 +273,7 @@ describe("DrizzleSandboxStore", () => {
         );
 
         const reaped = await tx((trx) =>
-          store.transitionContainerStatus(trx, { id, to: "reaped", at: T2 }),
+          store.transitionContainerStatus(trx, { id, to: "reaped", reason: "cascade", at: T2 }),
         );
         expect(reaped).toEqual({ kind: "transitioned" });
         const row = await tx((trx) => store.getContainer(trx, id));
@@ -292,7 +296,12 @@ describe("DrizzleSandboxStore", () => {
 
         for (const id of [fromStarting, fromRunning]) {
           const first = await tx((trx) =>
-            store.transitionContainerStatus(trx, { id, to: "reaped", at: T1 }),
+            store.transitionContainerStatus(trx, {
+              id,
+              to: "reaped",
+              reason: "ttl_expired",
+              at: T1,
+            }),
           );
           expect(first).toEqual({ kind: "transitioned" });
           const row = await tx((trx) => store.getContainer(trx, id));
@@ -300,10 +309,75 @@ describe("DrizzleSandboxStore", () => {
           expect(row?.exitedAt?.toISOString()).toBe(T1.toISOString());
 
           const again = await tx((trx) =>
-            store.transitionContainerStatus(trx, { id, to: "reaped", at: T2 }),
+            store.transitionContainerStatus(trx, {
+              id,
+              to: "reaped",
+              reason: "ttl_expired",
+              at: T2,
+            }),
           );
           expect(again).toEqual({ kind: "stale", status: "reaped" });
         }
+      });
+
+      it.each([
+        "ttl_expired",
+        "cascade",
+        "dead_instance",
+        "crash_reconcile",
+        "start_failed",
+      ] as const)("→ reaped records %s as the row's reason", async (reason) => {
+        const instanceId = await seedInstance();
+        const id = await insertTaskContainer({ instanceId });
+        expect((await tx((trx) => store.getContainer(trx, id)))?.reapedReason).toBeNull();
+
+        const reaped = await tx((trx) =>
+          store.transitionContainerStatus(trx, { id, to: "reaped", reason, at: T1 }),
+        );
+        expect(reaped).toEqual({ kind: "transitioned" });
+        const row = await tx((trx) => store.getContainer(trx, id));
+        expect(row?.status).toBe("reaped");
+        expect(row?.reapedReason).toBe(reason);
+      });
+
+      it("a stale reap keeps the reason the first reap recorded", async () => {
+        const instanceId = await seedInstance();
+        const id = await insertTaskContainer({ instanceId });
+        await tx((trx) =>
+          store.transitionContainerStatus(trx, { id, to: "reaped", reason: "cascade", at: T1 }),
+        );
+
+        const again = await tx((trx) =>
+          store.transitionContainerStatus(trx, { id, to: "reaped", reason: "ttl_expired", at: T2 }),
+        );
+        expect(again).toEqual({ kind: "stale", status: "reaped" });
+        expect((await tx((trx) => store.getContainer(trx, id)))?.reapedReason).toBe("cascade");
+      });
+
+      it("the database rejects a reaped row with no reason and a live row with one", async () => {
+        const instanceId = await seedInstance();
+        const id = await insertTaskContainer({ instanceId });
+
+        const rejectedBy = async (statement: Promise<unknown>): Promise<string> => {
+          const error = await statement.then(
+            () => null,
+            (e: unknown) => e,
+          );
+          return constraintNameOf(expectDefined(findPgErrorByCode(error, ["23514"]), "pg error"));
+        };
+        expect(
+          await rejectedBy(
+            db.execute(sql`UPDATE containers SET status = 'reaped' WHERE id = ${id}`),
+          ),
+        ).toBe("chk_containers_reaped_reason");
+        expect(
+          await rejectedBy(
+            db.execute(sql`UPDATE containers SET reaped_reason = 'cascade' WHERE id = ${id}`),
+          ),
+        ).toBe("chk_containers_reaped_reason");
+        const row = await tx((trx) => store.getContainer(trx, id));
+        expect(row?.status).toBe("starting");
+        expect(row?.reapedReason).toBeNull();
       });
 
       it("throws on an id with no row — callers hold a row they read", async () => {

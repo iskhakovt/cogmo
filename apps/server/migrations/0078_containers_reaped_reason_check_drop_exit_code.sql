@@ -1,0 +1,2 @@
+ALTER TABLE "containers" DROP COLUMN "exit_code";--> statement-breakpoint
+ALTER TABLE "containers" ADD CONSTRAINT "chk_containers_reaped_reason" CHECK (("containers"."status" = 'reaped') = ("containers"."reaped_reason" IS NOT NULL));
