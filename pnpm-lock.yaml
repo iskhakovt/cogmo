@@ -134,8 +134,8 @@ importers:
         specifier: ^1.46.0
         version: 1.46.0(supports-color@7.2.0)
       inngest:
-        specifier: ^4.23.0
-        version: 4.23.0(@opentelemetry/core@2.12.0(@opentelemetry/api@1.9.1))(express@5.2.1(supports-color@7.2.0))(hono@4.13.13)(react@19.3.0)(supports-color@7.2.0)(typescript@7.0.2)(zod@4.6.7)
+        specifier: ^4.25.0
+        version: 4.25.0(@opentelemetry/core@2.12.0(@opentelemetry/api@1.9.1))(express@5.2.1(supports-color@7.2.0))(hono@4.13.13)(react@19.3.0)(supports-color@7.2.0)(typescript@7.0.2)(zod@4.6.7)
       js-tiktoken:
         specifier: ^1.0.21
         version: 1.0.21
@@ -214,7 +214,7 @@ importers:
         version: 0.5.9
       '@inngest/test':
         specifier: ^1.0.0
-        version: 1.0.0(inngest@4.23.0(@opentelemetry/core@2.12.0(@opentelemetry/api@1.9.1))(express@5.2.1(supports-color@7.2.0))(hono@4.13.13)(react@19.3.0)(supports-color@7.2.0)(typescript@7.0.2)(zod@4.6.7))
+        version: 1.0.0(inngest@4.25.0(@opentelemetry/core@2.12.0(@opentelemetry/api@1.9.1))(express@5.2.1(supports-color@7.2.0))(hono@4.13.13)(react@19.3.0)(supports-color@7.2.0)(typescript@7.0.2)(zod@4.6.7))
       '@modelcontextprotocol/server-everything':
         specifier: ^2026.8.31
         version: 2026.8.31(supports-color@7.2.0)
@@ -5212,8 +5212,8 @@ packages:
   inherits@2.0.4:
     resolution: {integrity: sha512-k/vGaX4/Yla3WzyMCvTQOXYeIHvqOKtnqBduzTHpzpQZzAskKMhZ2K+EnBiSM9zGSoIFeMpXKxa4dYeZIQqewQ==}
 
-  inngest@4.23.0:
-    resolution: {integrity: sha512-83VREC+uwpBKAzA5esq2mfBKGZXJ47eWgJ33L4uCeysf/AptTFoNwNkueeEWV1BgiV8HKkotgWcGrTDMdSc2UQ==}
+  inngest@4.25.0:
+    resolution: {integrity: sha512-WLrGXEiCBGFpEne6nBOj7+2joUKcGNb05AljK2/X6Hf+A0CLc694IzH7hVIn4IlUN6+7cCEcS4iJjoz6eS0fiA==}
     engines: {node: '>=20'}
     peerDependencies:
       '@sveltejs/kit': '>=1.27.3'
@@ -7757,9 +7757,9 @@ snapshots:
 
   '@inngest/ai@0.1.8': {}
 
-  '@inngest/test@1.0.0(inngest@4.23.0(@opentelemetry/core@2.12.0(@opentelemetry/api@1.9.1))(express@5.2.1(supports-color@7.2.0))(hono@4.13.13)(react@19.3.0)(supports-color@7.2.0)(typescript@7.0.2)(zod@4.6.7))':
+  '@inngest/test@1.0.0(inngest@4.25.0(@opentelemetry/core@2.12.0(@opentelemetry/api@1.9.1))(express@5.2.1(supports-color@7.2.0))(hono@4.13.13)(react@19.3.0)(supports-color@7.2.0)(typescript@7.0.2)(zod@4.6.7))':
     dependencies:
-      inngest: 4.23.0(@opentelemetry/core@2.12.0(@opentelemetry/api@1.9.1))(express@5.2.1(supports-color@7.2.0))(hono@4.13.13)(react@19.3.0)(supports-color@7.2.0)(typescript@7.0.2)(zod@4.6.7)
+      inngest: 4.25.0(@opentelemetry/core@2.12.0(@opentelemetry/api@1.9.1))(express@5.2.1(supports-color@7.2.0))(hono@4.13.13)(react@19.3.0)(supports-color@7.2.0)(typescript@7.0.2)(zod@4.6.7)
       tinyspy: 3.0.2
       ulid: 2.4.0
 
@@ -11550,7 +11550,7 @@ snapshots:
 
   inherits@2.0.4: {}
 
-  inngest@4.23.0(@opentelemetry/core@2.12.0(@opentelemetry/api@1.9.1))(express@5.2.1(supports-color@7.2.0))(hono@4.13.13)(react@19.3.0)(supports-color@7.2.0)(typescript@7.0.2)(zod@4.6.7):
+  inngest@4.25.0(@opentelemetry/core@2.12.0(@opentelemetry/api@1.9.1))(express@5.2.1(supports-color@7.2.0))(hono@4.13.13)(react@19.3.0)(supports-color@7.2.0)(typescript@7.0.2)(zod@4.6.7):
     dependencies:
       '@bufbuild/protobuf': 2.14.1
       '@inngest/ai': 0.1.8
