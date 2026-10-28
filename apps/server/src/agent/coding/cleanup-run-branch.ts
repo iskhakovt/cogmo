@@ -9,7 +9,7 @@
  * This module subscribes to both terminal events and deletes the ref via
  * `octokit.git.deleteRef`. The weekly cleanup cron (`cleanup-orphan-run-
  * branches.ts`) is the safety net for events that never fired (crash
- * between `set-status-failed` and `emit-task-failed`, network blip, etc.).
+ * between `transition-failed` and `emit-task-failed`, network blip, etc.).
  */
 
 import { RequestError } from "@octokit/request-error";

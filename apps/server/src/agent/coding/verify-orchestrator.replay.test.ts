@@ -37,7 +37,7 @@ import {
   type StatefulCodingStore,
   statefulCodingStore,
 } from "../../test/coding-fixtures.js";
-import { fakeRunInTx, spyOnInngestSend } from "../../test/factories.js";
+import { emittedEventNames, fakeRunInTx, spyOnInngestSend } from "../../test/factories.js";
 import type { CodingTaskRow } from "./store/index.js";
 import {
   createCodingVerifyOrchestrator,
@@ -240,6 +240,105 @@ describe("coding-task-verify — Inngest replay", () => {
     expect(h.create).toHaveBeenCalledTimes(1);
     const body = h.create.mock.calls[0]?.[0] as { body: string } | undefined;
     expect(body?.body).toContain("[cached PASS]");
+  });
+
+  it("a run in flight across the deploy that replaced `set-status-pushed` carries on from `pushed`", async () => {
+    // The superseded step wrote `pushed` and memoized `void`; the run's state
+    // holds its claim, the suite's verdict and the push. `transition-pushed`
+    // is new to this run, so it executes, finds the row `stale` at its own
+    // target, and the run goes on to open the PR rather than re-pushing or
+    // stopping.
+    const h = setup(verifiableTask({ status: "pushed" }));
+    const fn = createCodingVerifyOrchestrator(h.deps, inngest);
+
+    const engine = new InngestTestEngine({
+      function: fn,
+      events: [cliDoneEvent],
+      steps: [
+        { id: "set-status-verifying", handler: () => ({ kind: "transitioned" }) },
+        {
+          id: "run-verify",
+          handler: () => ({
+            ok: true,
+            exitCode: 0,
+            output: "PASS",
+            durationMs: 1,
+            timedOut: false,
+          }),
+        },
+        { id: "emit-verify-complete", handler: () => null },
+        {
+          id: "commit-and-push",
+          handler: () => ({ kind: "pushed", commitSha: HEAD_SHA, output: "" }),
+        },
+        { id: "emit-pushed", handler: () => null },
+      ],
+    });
+    const { result, error } = await engine.execute();
+
+    expect(error).toBeUndefined();
+    expect(result).toMatchObject({ status: "pr_open", prNumber: 7 });
+    expect(h.store.current().status).toBe("pr_open");
+    expect(h.log.push).toBe(0);
+    expect(h.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("a run in flight across the deploy that replaced `set-status-pr-open` still sends pr-opened", async () => {
+    // The superseded step wrote `pr_open` and memoized `void`; everything up
+    // to `set-pr-metadata` is in state and `emit-pr-opened` is not. Neither
+    // new step is memoized: `transition-pushed` executes first, reads `stale`
+    // at `pr_open` — settled by this run's own retired step — and carries
+    // on; `transition-pr-open` reads `stale` at its own target; the run then
+    // sends the `pr-opened` it owes, without a second `pulls.create`.
+    const h = setup(verifiableTask({ status: "pr_open" }));
+    const fn = createCodingVerifyOrchestrator(h.deps, inngest);
+
+    const engine = new InngestTestEngine({
+      function: fn,
+      events: [cliDoneEvent],
+      steps: [
+        { id: "set-status-verifying", handler: () => ({ kind: "transitioned" }) },
+        {
+          id: "run-verify",
+          handler: () => ({
+            ok: true,
+            exitCode: 0,
+            output: "PASS",
+            durationMs: 1,
+            timedOut: false,
+          }),
+        },
+        { id: "emit-verify-complete", handler: () => null },
+        {
+          id: "commit-and-push",
+          handler: () => ({ kind: "pushed", commitSha: HEAD_SHA, output: "" }),
+        },
+        { id: "emit-pushed", handler: () => null },
+        {
+          id: "open-pr",
+          handler: () => ({
+            kind: "opened",
+            url: "https://github.com/user/cogmo/pull/7",
+            number: 7,
+            branchSha: HEAD_SHA,
+            openedAt: "2026-08-20T00:02:00Z",
+          }),
+        },
+        { id: "set-pr-metadata", handler: () => null },
+      ],
+    });
+    const { result, error } = await engine.execute();
+
+    expect(error).toBeUndefined();
+    expect(result).toEqual({
+      status: "pr_open",
+      prUrl: "https://github.com/user/cogmo/pull/7",
+      prNumber: 7,
+    });
+    expect(h.store.current().status).toBe("pr_open");
+    expect(h.log.push).toBe(0);
+    expect(h.create).not.toHaveBeenCalled();
+    expect(emittedEventNames(sendSpy)).toEqual(["coding/task/pr-opened"]);
   });
 
   it("skips a duplicate event before reaching the failure machinery", async () => {

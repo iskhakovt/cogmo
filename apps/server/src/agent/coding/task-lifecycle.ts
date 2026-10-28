@@ -6,10 +6,16 @@
  * lifecycle.
  */
 
+import { match, P } from "ts-pattern";
 import type { SandboxClient } from "../../sandbox/index.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import type { CodingRun, TaskStoreDeps } from "./coding-run.js";
-import type { CodingRepoRow, CodingStore, CodingTaskStatus } from "./store/index.js";
+import {
+  type CodingRepoRow,
+  type CodingStore,
+  type CodingTaskStatus,
+  isTerminalCodingTaskStatus,
+} from "./store/index.js";
 import { safeTeardownWorktree } from "./teardown.js";
 import type { WorktreeAssignment } from "./types.js";
 
@@ -65,42 +71,111 @@ export async function claimTask(
   return owned ? { kind: "owned" } : { kind: "lost", transition };
 }
 
+/** `advanced`: the task is at `to`. `left`: it moved out of `from` under this run. */
+type AdvanceOutcome = { kind: "advanced" } | TaskLeft;
+
 /**
- * `advanced`: the task is at `to`. `left`: it moved out of `from` under this
- * run. `ended` says whether it went terminal (a Cancel, or a sibling run's
- * failure) — no owner left, so the run reclaims what it allocated — rather
- * than forward, where another run is working on those very resources.
+ * The task moved out of the status a stage expected, under the run that
+ * expected it. `ended`: it went terminal (a Cancel, a sibling run's
+ * failure, or `pr_open` where the advance does not settle it) — no owner
+ * left, so the run reclaims what it allocated. `moved`:
+ * it went forward, and another run is working on those very resources.
  */
-type AdvanceOutcome =
-  | { kind: "advanced" }
-  | { kind: "left"; ended: boolean; transition: TransitionResult };
+export interface TaskLeft {
+  kind: "left";
+  via: "ended" | "moved";
+  transition: TransitionResult;
+}
+
+interface Advance extends Claim {
+  /**
+   * Statuses past `to` that only this run's own later steps write. `stale`
+   * at one of them is this step executing after the run already moved on —
+   * a run in flight across the deploy that introduced the step — and reads
+   * as advanced, so the run carries on through its memoized later steps to
+   * the ones it has not run yet.
+   */
+  settledAt?: ReadonlyArray<CodingTaskStatus>;
+}
 
 /**
  * A conditional `from → to` UPDATE inside an already-owned run, as a step
  * whose result the bare body branches on. No `runId`: it is not an
  * ownership claim, and supplying one would widen the store's predicate to
  * adopt an unclaimed row at the target. `stale` at `to` is this step
- * re-executing after a lost result.
+ * re-executing after a lost result; `stale` at any other terminal status
+ * (`isTerminalCodingTaskStatus`) is a task that ended under the run.
  */
 export async function advanceTask(
   run: CodingRun,
   deps: TaskStoreDeps,
-  advance: Claim,
+  advance: Advance,
 ): Promise<AdvanceOutcome> {
   const transition = await run.stepRun(advance.stepId, () =>
     deps.runInTx((tx) => deps.store.transitionTaskStatus(tx, run.taskId, advance.from, advance.to)),
   );
-  if (
-    transition.kind === "transitioned" ||
-    (transition.kind === "stale" && transition.status === advance.to)
-  ) {
-    return { kind: "advanced" };
-  }
-  const ended =
-    transition.kind === "stale" &&
-    (transition.status === "cancelled" || transition.status === "failed");
-  return { kind: "left", ended, transition };
+  const settled = [advance.to, ...(advance.settledAt ?? [])];
+  return match(transition)
+    .with({ kind: "transitioned" }, (): AdvanceOutcome => ({ kind: "advanced" }))
+    .with(
+      { kind: "stale", status: P.when((status) => settled.includes(status)) },
+      (): AdvanceOutcome => ({ kind: "advanced" }),
+    )
+    .with(
+      { kind: "stale", status: P.when(isTerminalCodingTaskStatus) },
+      (left): AdvanceOutcome => ({ kind: "left", via: "ended", transition: left }),
+    )
+    .with(
+      { kind: "stale" },
+      (left): AdvanceOutcome => ({ kind: "left", via: "moved", transition: left }),
+    )
+    .with({ kind: "not_found" }, () => {
+      // The row this run claimed at its head cannot have gone missing.
+      throw new Error(`coding task ${run.taskId} vanished before ${advance.stepId}`);
+    })
+    .exhaustive();
 }
+
+/** What `reclaimEndedTask` reclaims, and whom it tells. */
+interface ReclaimArgs {
+  repo: CodingRepoRow;
+  assignment: WorktreeAssignment;
+  /**
+   * `reap`: delete the task's sandbox here, then stamp
+   * `resource_usage.sandbox.deleted_at` under `stampStepId` (a no-op when
+   * the task never persisted a sandbox block, as on the plan run).
+   * `swept_by_caller`: the verify run, whose `finally` sweeps the sandbox
+   * unconditionally — or, on its pre-`try` credentials exit, has created
+   * none yet — so a delete here would only double the provider round-trip.
+   */
+  sandbox: { kind: "reap"; stampStepId: string } | { kind: "swept_by_caller" };
+  /**
+   * The run's progress stream and the message it fails with; null for the
+   * verify run, which has no stream of its own.
+   */
+  notify: { stream: { fail(message: string): Promise<void> }; message: string } | null;
+}
+
+/**
+ * Reclaims the task's resources when it left by ending. A task that moved
+ * forward belongs to another run, whose resources this one must not touch.
+ */
+export async function reclaimIfEnded(
+  run: CodingRun,
+  deps: ReclaimDeps,
+  left: TaskLeft,
+  args: ReclaimArgs,
+): Promise<void> {
+  await match(left.via)
+    .with("ended", () => reclaimEndedTask(run, deps, args))
+    .with("moved", () => Promise.resolve())
+    .exhaustive();
+}
+
+type ReclaimDeps = TaskStoreDeps & {
+  sandbox: Pick<SandboxClient, "deleteByTaskId">;
+  secretsStore: SecretsStore;
+};
 
 /**
  * Reclaims the worktree, sandbox and stream of a task that ended under this
@@ -113,16 +188,8 @@ export async function advanceTask(
  */
 export async function reclaimEndedTask(
   run: CodingRun,
-  deps: TaskStoreDeps & {
-    sandbox: Pick<SandboxClient, "deleteByTaskId">;
-    secretsStore: SecretsStore;
-  },
-  args: {
-    repo: CodingRepoRow;
-    assignment: WorktreeAssignment;
-    stream: { fail(message: string): Promise<void> };
-    message: string;
-  },
+  deps: ReclaimDeps,
+  args: ReclaimArgs,
 ): Promise<void> {
   await run.stepRun("teardown-worktree-cancelled", () =>
     safeTeardownWorktree({
@@ -133,14 +200,38 @@ export async function reclaimEndedTask(
       worktreeAssignment: args.assignment,
     }).then(() => null),
   );
-  await run.stepRun("teardown-cancelled", () =>
-    deps.sandbox
-      .deleteByTaskId(run.taskId)
-      .then(() => null)
-      .catch((err: unknown) => {
-        run.log.warn({ err }, "cancelled-path teardown failed — sandbox left to the reaper");
-        return null;
-      }),
+  await match(args.sandbox)
+    .with({ kind: "reap" }, async ({ stampStepId }) => {
+      await run.stepRun("teardown-cancelled", () =>
+        deps.sandbox
+          .deleteByTaskId(run.taskId)
+          .then(() => null)
+          .catch((err: unknown) => {
+            run.log.warn({ err }, "cancelled-path teardown failed — sandbox left to the reaper");
+            return null;
+          }),
+      );
+      await stampSandboxDeleted(run, deps, stampStepId);
+    })
+    .with({ kind: "swept_by_caller" }, () => Promise.resolve())
+    .exhaustive();
+  // Last, after the durable work: a bare-body notify re-fires once per
+  // later boundary, and nothing follows it here.
+  if (args.notify) await args.notify.stream.fail(args.notify.message).catch(() => {});
+}
+
+/**
+ * Stamps `resource_usage.sandbox.deleted_at`; a no-op when no sandbox block
+ * was persisted or the stamp is already there.
+ */
+export async function stampSandboxDeleted(
+  run: CodingRun,
+  deps: TaskStoreDeps,
+  stepId: string,
+): Promise<void> {
+  await run.stepRun(stepId, () =>
+    deps.runInTx((tx) =>
+      deps.store.setTaskSandboxDeletedAt(tx, run.taskId, new Date().toISOString()),
+    ),
   );
-  await args.stream.fail(args.message).catch(() => {});
 }

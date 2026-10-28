@@ -13,7 +13,12 @@ import { err, ok } from "neverthrow";
 import { vi } from "vitest";
 import { type MockProxy, mock } from "vitest-mock-extended";
 import { CLAUDE_CODE_OAUTH_TOKEN_SECRET } from "../agent/coding/auth.js";
-import type { CodingRepoRow, CodingStore, CodingTaskRow } from "../agent/coding/store/index.js";
+import {
+  type CodingRepoRow,
+  type CodingStore,
+  type CodingTaskRow,
+  isTerminalCodingTaskStatus,
+} from "../agent/coding/store/index.js";
 import {
   type ExecStreamingHandle,
   type LocalDockerSessionState,
@@ -131,6 +136,13 @@ export function statefulCodingStore(
     }
     task = { ...task, status: to, ...(claimedByRunId !== undefined && { claimedByRunId }) };
     return { kind: "transitioned" };
+  });
+  store.failTaskIfNonTerminal.mockImplementation(async (_tx, _id, failureReason) => {
+    if (isTerminalCodingTaskStatus(task.status)) {
+      return { kind: "already_terminal", status: task.status };
+    }
+    task = { ...task, status: "failed", failureReason };
+    return { kind: "failed" };
   });
   store.setTaskWorktreeAssignment.mockImplementation(async (_tx, _id, assignment) => {
     task = { ...task, worktreeAssignment: assignment };

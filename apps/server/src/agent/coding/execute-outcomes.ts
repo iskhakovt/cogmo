@@ -4,6 +4,7 @@
  * failed, or abandoned to a task that ended under the run.
  */
 
+import { match } from "ts-pattern";
 import type { EventPublisher } from "../../inngest/durable.js";
 import type { SandboxClient, SandboxSession } from "../../sandbox/index.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
@@ -15,8 +16,13 @@ import { completionTokens } from "./execute-session.js";
 import { runBranchFor } from "./git-as-transport.js";
 import type { ExecuteStreamHandle } from "./progress-stream.js";
 import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
-import { recordTaskFailed } from "./task-failure.js";
-import { advanceTask, reclaimEndedTask } from "./task-lifecycle.js";
+import { type RecordedFailure, recordTaskFailed } from "./task-failure.js";
+import {
+  advanceTask,
+  reclaimEndedTask,
+  reclaimIfEnded,
+  stampSandboxDeleted,
+} from "./task-lifecycle.js";
 import { reapTaskSandbox, WORKTREE_DIR_IN_CONTAINER } from "./task-sandbox.js";
 import { safeTeardownWorktree } from "./teardown.js";
 import type { WorktreeAssignment } from "./types.js";
@@ -106,7 +112,8 @@ export async function pushExecuteChanges(
 
 /** Step ids of one execute failure exit; each exit has its own. */
 interface ExecuteFailureSteps {
-  status: string;
+  /** The conditional `→ failed` transition. */
+  transition: string;
   /** Null where the transport leaves no host worktree to tear down. */
   teardownWorktree: string | null;
   teardown: string;
@@ -115,15 +122,44 @@ interface ExecuteFailureSteps {
   logSuffix: string;
 }
 
-/** Records the failure and tears the task down; resolves to the reason as recorded, masked. */
+/**
+ * Records the failure and tears the task down, resolving to the reason as
+ * recorded, masked. When the task had already ended under the run (a Cancel
+ * during `execute-cli`), nothing is recorded: the run reclaims its worktree
+ * and sandbox and resolves to `ended`.
+ */
 export async function endExecuteFailed(
   run: CodingRun,
   deps: ExecuteOutcomeDeps,
   exit: ExecuteExitContext,
   rawReason: string,
   steps: ExecuteFailureSteps,
-): Promise<string> {
-  const reason = await recordTaskFailed(run, deps, rawReason, steps.status);
+): Promise<RecordedFailure> {
+  const recorded = await recordTaskFailed(run, deps, rawReason, steps.transition);
+  await match(recorded)
+    .with({ kind: "ended" }, () =>
+      reclaimEndedTask(run, deps, {
+        repo: exit.repo,
+        assignment: exit.assignment,
+        sandbox: { kind: "reap", stampStepId: steps.sandboxDeleted },
+        notify: { stream: exit.stream, message: "Task cancelled while executing." },
+      }),
+    )
+    .with({ kind: "recorded" }, ({ reason }) =>
+      tearDownFailedExecute(run, deps, exit, reason, steps),
+    )
+    .exhaustive();
+  return recorded;
+}
+
+/** The failure is committed: reap the worktree and sandbox, then tell the stream. */
+async function tearDownFailedExecute(
+  run: CodingRun,
+  deps: ExecuteOutcomeDeps,
+  exit: ExecuteExitContext,
+  reason: string,
+  steps: ExecuteFailureSteps,
+): Promise<void> {
   if (steps.teardownWorktree !== null) {
     await run.stepRun(steps.teardownWorktree, () =>
       safeTeardownWorktree({
@@ -148,7 +184,6 @@ export async function endExecuteFailed(
   await exit.stream.fail(reason).catch((streamErr: unknown) => {
     run.log.warn({ err: streamErr }, "execute stream fail notification failed");
   });
-  return reason;
 }
 
 /**
@@ -187,17 +222,15 @@ export async function handOffToVerify(
   });
   if (pendingVerify.kind === "left") {
     run.log.info(
-      { transition: pendingVerify.transition, ended: pendingVerify.ended },
+      { transition: pendingVerify.transition, via: pendingVerify.via },
       "execute: task left `executing` mid-session — stopping",
     );
-    if (pendingVerify.ended) {
-      await reclaimEndedTask(run, deps, {
-        repo: exit.repo,
-        assignment: exit.assignment,
-        stream: exit.stream,
-        message: "Task cancelled while executing.",
-      });
-    }
+    await reclaimIfEnded(run, deps, pendingVerify, {
+      repo: exit.repo,
+      assignment: exit.assignment,
+      sandbox: { kind: "reap", stampStepId: "persist-sandbox-deleted" },
+      notify: { stream: exit.stream, message: "Task cancelled while executing." },
+    });
     return "left_executing";
   }
   await reapTaskSandbox(run, deps.sandbox, "teardown");
@@ -220,20 +253,4 @@ export async function handOffToVerify(
     );
   });
   return "handed_off";
-}
-
-/**
- * Stamps `resource_usage.sandbox.deleted_at`; a no-op when no sandbox block
- * was persisted or the stamp is already there.
- */
-async function stampSandboxDeleted(
-  run: CodingRun,
-  deps: TaskStoreDeps,
-  stepId: string,
-): Promise<void> {
-  await run.stepRun(stepId, () =>
-    deps.runInTx((tx) =>
-      deps.store.setTaskSandboxDeletedAt(tx, run.taskId, new Date().toISOString()),
-    ),
-  );
 }

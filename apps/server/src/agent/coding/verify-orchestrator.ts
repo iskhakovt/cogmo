@@ -18,6 +18,7 @@
 import type { Octokit } from "@octokit/rest";
 import type { Inngest } from "inngest";
 import { err, ok, type Result } from "neverthrow";
+import { match } from "ts-pattern";
 import type { Transactor } from "../../db/index.js";
 import { type EventPublisher, fromStepTools } from "../../inngest/durable.js";
 import { buildCodingTaskVerifyCompleteEvent, codingTaskCliDone } from "../../inngest/events.js";
@@ -38,7 +39,13 @@ import { type CodingRun, codingRun, loadTaskAndRepo } from "./coding-run.js";
 import { parseRemoteUrl } from "./open-pr.js";
 import type { CodingRepoRow, CodingStore, CodingTaskRow } from "./store/index.js";
 import { failTaskFromCatch, recordTaskFailed } from "./task-failure.js";
-import { CLAIMS, claimTask } from "./task-lifecycle.js";
+import {
+  CLAIMS,
+  claimTask,
+  reclaimEndedTask,
+  reclaimIfEnded,
+  type TaskLeft,
+} from "./task-lifecycle.js";
 import {
   checkoutFeatureBranchStep,
   lazySession,
@@ -49,7 +56,7 @@ import {
 import { safeTeardownWorktree } from "./teardown.js";
 import type { WorktreeAssignment } from "./types.js";
 import { runVerifyStreaming, type VerifyResult } from "./verify.js";
-import { openTaskPr, pushVerifiedBranch } from "./verify-publish.js";
+import { type OpenTaskPrArgs, openTaskPr, pushVerifiedBranch } from "./verify-publish.js";
 
 const log = logger.child({ component: "coding.verify-orchestrator" });
 
@@ -183,18 +190,20 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
       container,
     });
     if (pushed.isErr()) return await failVerify(run, deps, failure, pushed.error);
-
-    const pr = await openTaskPr(run, deps, inngest, {
-      task,
-      repo,
-      remote,
-      assignment,
-      identity,
-      branchSha: pushed.value.branchSha,
-      verifyOutput: verdict.output,
-    });
-    if (pr.isErr()) return await failVerify(run, deps, failure, pr.error);
-    return { status: "pr_open", prUrl: pr.value.url, prNumber: pr.value.number };
+    return await match(pushed.value)
+      .with({ kind: "left" }, (left) => leaveVerify(run, deps, failure, left, "the push"))
+      .with({ kind: "pushed" }, ({ branchSha }) =>
+        openPr(run, deps, inngest, failure, {
+          task,
+          repo,
+          remote,
+          assignment,
+          identity,
+          branchSha,
+          verifyOutput: verdict.output,
+        }),
+      )
+      .exhaustive();
   } catch (err) {
     run.log.error({ err }, "coding verify failed");
     const reason = await failTaskFromCatch(run, deps, describeError(err));
@@ -246,10 +255,59 @@ async function resolveVerifyCredentials(
   return ok({ remote, identity: identity.value, env: auth.value });
 }
 
+/** The `open-pr` stage; the PR's identity on success. */
+async function openPr(
+  run: CodingRun,
+  deps: VerifyOrchestratorDeps,
+  inngest: EventPublisher,
+  failure: VerifyFailureContext,
+  args: OpenTaskPrArgs,
+): Promise<VerifyOrchestratorResult> {
+  const pr = await openTaskPr(run, deps, inngest, args);
+  if (pr.isErr()) return await failVerify(run, deps, failure, pr.error);
+  return await match(pr.value)
+    .with({ kind: "left" }, (left) => leaveVerify(run, deps, failure, left, "the PR open"))
+    .with(
+      { kind: "opened" },
+      ({ url, number }): VerifyOrchestratorResult => ({
+        status: "pr_open",
+        prUrl: url,
+        prNumber: number,
+      }),
+    )
+    .exhaustive();
+}
+
+/**
+ * The task moved out of the status a publishing stage expected. A task that
+ * ended (a Cancel) has no owner left, so the run reclaims its worktree and
+ * sandbox and leaves the status as the canceller wrote it; one that moved
+ * forward belongs to another run, whose resources this one must not touch.
+ */
+async function leaveVerify(
+  run: CodingRun,
+  deps: VerifyOrchestratorDeps,
+  failure: VerifyFailureContext,
+  left: TaskLeft,
+  stage: string,
+): Promise<VerifyOrchestratorResult> {
+  run.log.info(
+    { transition: left.transition, via: left.via },
+    `verify: task left its status before ${stage} was recorded — stopping`,
+  );
+  await reclaimIfEnded(run, deps, left, {
+    repo: failure.repo,
+    assignment: failure.assignment,
+    sandbox: { kind: "swept_by_caller" },
+    notify: null,
+  });
+  return { status: "skipped" };
+}
+
 /**
  * The failure exit for every failure this run observes: status, event, and
  * worktree teardown. The sandbox and askpass are reaped by the caller's
- * `finally`.
+ * `finally`. A task that already ended under the run is reclaimed instead.
  */
 async function failVerify(
   run: CodingRun,
@@ -257,19 +315,32 @@ async function failVerify(
   failure: VerifyFailureContext,
   rawReason: string,
 ): Promise<VerifyOrchestratorResult> {
-  const reason = await recordTaskFailed(run, deps, rawReason, "set-status-failed");
-  await run
-    .stepRun("teardown-worktree", () =>
-      safeTeardownWorktree({
-        secretsStore: deps.secretsStore,
-        runInTx: deps.runInTx,
+  const recorded = await recordTaskFailed(run, deps, rawReason, "transition-failed");
+  return await match(recorded)
+    .with({ kind: "ended" }, async (): Promise<VerifyOrchestratorResult> => {
+      await reclaimEndedTask(run, deps, {
         repo: failure.repo,
-        taskId: run.taskId,
-        worktreeAssignment: failure.assignment,
-      }),
-    )
-    .catch(() => undefined);
-  return { status: "failed", failureReason: reason };
+        assignment: failure.assignment,
+        sandbox: { kind: "swept_by_caller" },
+        notify: null,
+      });
+      return { status: "skipped" };
+    })
+    .with({ kind: "recorded" }, async ({ reason }): Promise<VerifyOrchestratorResult> => {
+      await run
+        .stepRun("teardown-worktree", () =>
+          safeTeardownWorktree({
+            secretsStore: deps.secretsStore,
+            runInTx: deps.runInTx,
+            repo: failure.repo,
+            taskId: run.taskId,
+            worktreeAssignment: failure.assignment,
+          }),
+        )
+        .catch(() => undefined);
+      return { status: "failed", failureReason: reason };
+    })
+    .exhaustive();
 }
 
 /** A fresh container with the askpass dir mounted read-only. */

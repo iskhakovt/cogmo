@@ -11,7 +11,7 @@ import type { CodingRun, TaskStoreDeps } from "./coding-run.js";
 import { planGateEmission } from "./plan-gate.js";
 import type { PlanStreamHandle } from "./progress-stream.js";
 import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
-import { advanceTask, reclaimEndedTask } from "./task-lifecycle.js";
+import { advanceTask, reclaimIfEnded } from "./task-lifecycle.js";
 import type { WorktreeAssignment } from "./types.js";
 
 interface PlanGateDeps extends TaskStoreDeps {
@@ -64,17 +64,15 @@ export async function parkPlanAtGate(
   });
   if (awaiting.kind === "left") {
     run.log.info(
-      { awaiting: awaiting.transition, ended: awaiting.ended },
+      { awaiting: awaiting.transition, via: awaiting.via },
       "plan: task left `planning` mid-session — stopping",
     );
-    if (awaiting.ended) {
-      await reclaimEndedTask(run, deps, {
-        repo: args.repo,
-        assignment: args.assignment,
-        stream,
-        message: "Task cancelled while planning.",
-      });
-    }
+    await reclaimIfEnded(run, deps, awaiting, {
+      repo: args.repo,
+      assignment: args.assignment,
+      sandbox: { kind: "reap", stampStepId: "persist-sandbox-deleted" },
+      notify: { stream, message: "Task cancelled while planning." },
+    });
     return "left_planning";
   }
 

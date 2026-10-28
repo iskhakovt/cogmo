@@ -700,6 +700,82 @@ describe("runCodingExecute — git-remote transport", () => {
     );
     expect(cliDoneSends).toHaveLength(0);
   });
+
+  it("push failure after a Cancel during the session: stays cancelled, reclaims, no failure recorded", async () => {
+    const repo = await seedRepo();
+    const task = await seedTask(repo);
+    const idShort = task.id.replaceAll("-", "").slice(0, 12);
+    await tx((trx) =>
+      store.setTaskWorktreeAssignment(trx, task.id, {
+        type: "git-remote",
+        branch: `cogmo/${idShort}`,
+      }),
+    );
+    await tx((trx) => store.setTaskSessionId(trx, task.id, "sess-from-plan"));
+    await tx((trx) =>
+      store.updateTaskStatus(trx, {
+        id: task.id,
+        status: "awaiting_approval",
+        planApprovedAt: new Date(),
+      }),
+    );
+    const { sandbox } = fakeGitRemoteSandbox((cmd) => {
+      if (gitSubcommand(cmd) === "status" && cmd.includes("--porcelain")) {
+        return { exitCode: 0, stdout: "M src/foo.ts\n" };
+      }
+      if (gitSubcommand(cmd) === "push") {
+        return { exitCode: 128, stderr: "fatal: Authentication failed\n" };
+      }
+      return undefined;
+    });
+    const secretsStore = mock<SecretsStore>();
+    secretsStore.getSecret.mockImplementation(async (_tx, name) =>
+      name === CLAUDE_CODE_OAUTH_TOKEN_SECRET ? "test-oauth-token" : undefined,
+    );
+    const sent: unknown[] = [];
+    const capturingStepSendEvent = (async (_: string, payload: unknown) => {
+      sent.push(payload);
+      return { ids: [] };
+    }) as never;
+    const streamFailures: string[] = [];
+
+    const result = await runCodingExecute({
+      taskId: task.id,
+      runId: "run-test",
+      deps: makeDeps({
+        sandbox,
+        backend: {
+          plan: backendYielding([]).plan,
+          // A Cancel tap lands while `execute-cli` streams; the push that
+          // follows is then rejected.
+          execute: async function* () {
+            yield { kind: "session_started", sessionId: "sess-from-plan" };
+            await tx((trx) => store.cancelTaskIfActive(trx, task.id, "user cancelled"));
+            yield { kind: "complete", exitCode: 0, isError: false };
+          },
+        },
+        secretsStore,
+        openExecuteStream: async () => ({
+          ...NULL_EXECUTE_STREAM,
+          fail: async (reason) => {
+            streamFailures.push(reason);
+          },
+        }),
+      }),
+      stepRun,
+      stepSendEvent: capturingStepSendEvent,
+      inngest: { send: vi.fn().mockResolvedValue(undefined) },
+    });
+
+    expect(result).toEqual({ status: "skipped" });
+    const reloaded = await tx((trx) => store.getTask(trx, task.id));
+    expect(reloaded?.status).toBe("cancelled");
+    expect(reloaded?.failureReason).toBe("user cancelled");
+    // No `coding/task/failed` for a task the user cancelled.
+    expect(sent).toEqual([]);
+    expect(streamFailures).toEqual(["Task cancelled while executing."]);
+    expect(sandbox.deleteByTaskId).toHaveBeenCalledWith(task.id);
+  });
 });
 
 // --- Verify phase ---------------------------------------------------------

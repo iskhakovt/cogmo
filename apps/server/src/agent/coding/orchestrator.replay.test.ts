@@ -30,7 +30,7 @@ import {
   fakeCodingSandbox,
   statefulCodingStore,
 } from "../../test/coding-fixtures.js";
-import { fakeRunInTx, spyOnInngestSend } from "../../test/factories.js";
+import { emittedEventNames, fakeRunInTx, spyOnInngestSend } from "../../test/factories.js";
 import type { CodingBackend, CodingEvent } from "./backend.js";
 import {
   type CodingOrchestratorDeps,
@@ -211,6 +211,43 @@ describe("coding-task-start — Inngest replay", () => {
     expect(backend.planCalls()).toBe(1);
     expect(planStream.text).toEqual(["## Plan\n"]);
     expect(planStream.finalized).toEqual(["## Plan\n1. Do X\n"]);
+  });
+
+  it("a run in flight across the deploy that replaced `set-status-failed` still announces the failure", async () => {
+    // The superseded step wrote `failed` and memoized `void`; the claim and
+    // the failed plan session are in state. `transition-failed` executes
+    // once, finds the row `already_terminal` at `failed`, and the failure
+    // flow — the event, the teardown — carries on as recorded.
+    const { store, current } = statefulCodingStore(
+      codingTaskRow({ status: "failed", failureReason: "plan exited with code 2" }),
+      localRepo(),
+    );
+    const backend = countingBackend({ plan: PLAN_EVENTS });
+    const sandbox = fakeCodingSandbox();
+    const fn = createCodingOrchestrator(
+      makeDeps({ store, backend: backend.backend, sandbox: sandbox.sandbox }),
+      inngest,
+    );
+
+    const engine = new InngestTestEngine({
+      function: fn,
+      events: [{ name: "coding/task/start", data: { taskId: FIXTURE_TASK_ID } }],
+      steps: [
+        { id: "claim-task-planning", handler: () => ({ kind: "transitioned" }) },
+        {
+          id: "plan-cli",
+          handler: () => ({ isError: true, failureReason: "plan exited with code 2" }),
+        },
+      ],
+    });
+    const { result, error } = await engine.execute();
+
+    expect(error).toBeUndefined();
+    expect(result).toEqual({ status: "failed", failureReason: "plan exited with code 2" });
+    expect(current().status).toBe("failed");
+    expect(backend.planCalls()).toBe(0);
+    expect(emittedEventNames(sendSpy)).toContain("coding/task/failed");
+    expect(sandbox.teardownCalls()).toBe(1);
   });
 
   it("skips a duplicate start event instead of re-planning", async () => {

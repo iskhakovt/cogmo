@@ -6,6 +6,7 @@ import { type Inngest, StepError } from "inngest";
 import { ok } from "neverthrow";
 import { vi } from "vitest";
 import { mock } from "vitest-mock-extended";
+import { z } from "zod";
 import type { NormalizeArrivalDeps } from "../agent/attachments/normalize-arrival.js";
 import type { HandleMessageDeps } from "../agent/handle-message.js";
 import type { AgentLoopResult } from "../agent/loop.js";
@@ -679,6 +680,16 @@ export function makeStepRun(): Durable["run"] {
   return (_id, fn) => fn();
 }
 
+/** `makeStepRun`, recording each step id it runs, so a test can assert which steps a path took. */
+export function recordingStepRun(): { ids: string[]; stepRun: Durable["run"] } {
+  const ids: string[] = [];
+  const stepRun: Durable["run"] = (id, fn) => {
+    ids.push(id);
+    return fn();
+  };
+  return { ids, stepRun };
+}
+
 /**
  * `Durable.sendEvent` that forwards each emission to `inngest.send` on the
  * supplied publisher, so an orchestrator test asserts on `send` calls.
@@ -994,6 +1005,19 @@ export function mockSecretsStore(overrides?: Partial<SecretsStore>): SecretsStor
 export function spyOnInngestSend(client: Inngest) {
   type InngestSendShape = { _send(args: unknown): Promise<{ ids: string[] }> };
   return vi.spyOn(client as unknown as InngestSendShape, "_send");
+}
+
+/** `_send` takes `{ payload, fn, … }`; `fn` carries the client, so only the payload is read. */
+const InngestSendArgsSchema = z.object({
+  payload: z.union([z.array(z.object({ name: z.string() })), z.object({ name: z.string() })]),
+});
+
+/** The names of every event a `spyOnInngestSend` spy saw, in order. */
+export function emittedEventNames(spy: ReturnType<typeof spyOnInngestSend>): string[] {
+  return spy.mock.calls.flatMap(([arg]) => {
+    const { payload } = InngestSendArgsSchema.parse(arg);
+    return (Array.isArray(payload) ? payload : [payload]).map((event) => event.name);
+  });
 }
 
 /**

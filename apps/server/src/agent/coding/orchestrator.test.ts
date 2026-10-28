@@ -805,6 +805,42 @@ describe("runCodingTask", () => {
     expect(planStream.finalized).toEqual([]);
   });
 
+  it("cancelled during a failing plan-cli: stays cancelled, reclaims, no failure recorded", async () => {
+    // A Cancel lands while the plan session streams, and the session then
+    // exits with an error. The failure exit must neither overwrite the
+    // user's `cancelled` with `failed` nor announce a failure for it.
+    const repo = await seedRepo();
+    const task = await seedTask(repo);
+    const { sandbox, stopCalls } = fakeSandbox();
+    const planStream = recordingPlanStream();
+    const backend: CodingBackend = {
+      plan: async function* () {
+        yield { kind: "session_started", sessionId: "sess-A" };
+        await tx((trx) => store.cancelTaskIfActive(trx, task.id, "user cancelled"));
+        yield { kind: "complete", exitCode: 2, isError: true };
+      },
+      execute: () => throwingPlan("execute not used in this test"),
+    };
+
+    const result = await runCodingTask({
+      taskId: task.id,
+      runId: "run-test",
+      deps: makeDeps({ sandbox, backend, openPlanStream: async () => planStream.handle }),
+      stepRun,
+      stepSendEvent,
+    });
+
+    expect(result).toEqual({ status: "skipped" });
+    const reloaded = await tx((trx) => store.getTask(trx, task.id));
+    expect(reloaded?.status).toBe("cancelled");
+    expect(reloaded?.failureReason).toBe("user cancelled");
+    expect(fakeInngestShared.send).not.toHaveBeenCalledWith(
+      expect.objectContaining({ name: "coding/task/failed" }),
+    );
+    expect(planStream.failed).toEqual(["Task cancelled while planning."]);
+    expect(stopCalls).toEqual([task.id]);
+  });
+
   it("empty plan with success exit → status=failed (treated as nothing-to-show)", async () => {
     const repo = await seedRepo();
     const task = await seedTask(repo);
@@ -1151,7 +1187,7 @@ describe("runCodingTask", () => {
       }),
     ).rejects.toThrow(/db blip/);
 
-    // One UPDATE attempt — the catch's set-status-failed, which threw.
+    // One UPDATE attempt — the catch's `failed` write, which threw.
     expect(updateCalls).toBe(1);
     // Emit fired before the catch's UPDATE attempt — the bus has the
     // event already.
@@ -1503,6 +1539,46 @@ describe("runCodingExecute", () => {
     expect(stream.completed).toEqual([]);
     expect(stream.failed).toEqual(["Task cancelled while executing."]);
     expect(stopCalls).toEqual([task.id]);
+  });
+
+  it("stops on a Cancel during a failing session: stays cancelled, reclaims, no failure recorded", async () => {
+    const repo = await seedRepo();
+    const { task } = await seedExecutableTask(repo);
+    const { sandbox, stopCalls } = fakeSandbox();
+    const stream = recordingExecuteStream();
+    // A Cancel tap lands while `execute-cli` streams, and the session then
+    // exits with an error.
+    const backend: CodingBackend = {
+      plan: () => throwingPlan("plan not exercised by this test"),
+      execute: async function* () {
+        yield { kind: "text_delta", text: "Editing\n" };
+        await tx((trx) => store.cancelTaskIfActive(trx, task.id, "user cancelled"));
+        yield { kind: "complete", exitCode: 2, isError: true };
+      },
+    };
+
+    const result = await runCodingExecute({
+      taskId: task.id,
+      runId: "run-test",
+      deps: makeDeps({ sandbox, backend, openExecuteStream: async () => stream.handle }),
+      stepRun,
+      stepSendEvent,
+      inngest: fakeInngest,
+    });
+
+    expect(result).toEqual({ status: "skipped" });
+    const reloaded = await tx((trx) => store.getTask(trx, task.id));
+    expect(reloaded?.status).toBe("cancelled");
+    expect(reloaded?.failureReason).toBe("user cancelled");
+    expect(fakeInngest.send).not.toHaveBeenCalledWith(
+      expect.objectContaining({ name: "coding/task/failed" }),
+    );
+    expect(stream.completed).toEqual([]);
+    expect(stream.failed).toEqual(["Task cancelled while executing."]);
+    expect(stopCalls).toEqual([task.id]);
+    // The reclaim reaped the sandbox, so the usage record says when.
+    const sb = expectDefined(reloaded?.resourceUsage?.sandbox, "resource_usage.sandbox");
+    expect(Number.isFinite(Date.parse(expectDefined(sb.deleted_at, "deleted_at")))).toBe(true);
   });
 
   it("recreates container when no live one exists (reaper got it during long approval)", async () => {
