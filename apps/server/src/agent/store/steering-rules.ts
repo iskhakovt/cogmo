@@ -155,7 +155,8 @@ const LEARNED_RULE_SOURCES: ReadonlyArray<SteeringRuleSourceValue> = ["correctio
  * The statuses the Observer reads, reinforces and consolidates: live or
  * learning. A disabled rule is the operator's, a retired one the record.
  */
-const OBSERVER_STATUSES: ReadonlyArray<SteeringRuleStatusValue> = ["live", "learning"];
+const OBSERVER_STATUSES: ReadonlyArray<ObserverStatus> = ["live", "learning"];
+type ObserverStatus = Extract<SteeringRuleStatusValue, "live" | "learning">;
 
 /**
  * `# Rules` order within a section: `safety` first (only operators write it),
@@ -201,11 +202,25 @@ const EXTRACTION_RULE_COLUMNS = {
   channelType: steeringRules.channelType,
 };
 
-/** A steering rule as correction extraction reads it. */
-export type ExtractionRule = Pick<
+type ExtractionRuleRow = Pick<
   typeof steeringRules.$inferSelect,
   keyof typeof EXTRACTION_RULE_COLUMNS
 >;
+
+/** A steering rule as correction extraction reads it: live or learning. */
+export interface ExtractionRule extends Omit<ExtractionRuleRow, "status"> {
+  status: ObserverStatus;
+}
+
+/** A row an extraction read selected, its status narrowed to the ones its WHERE admits. */
+function toExtractionRule(row: ExtractionRuleRow): ExtractionRule {
+  return match(row.status)
+    .with("live", "learning", (status) => ({ ...row, status }))
+    .with("disabled", "retired", (status) => {
+      throw new Error(`steering rule ${row.id} read for extraction as ${status}`);
+    })
+    .exhaustive();
+}
 
 /** A live `memory`-category rule, as `getMemoryRules` returns it. */
 export interface MemoryRule {
@@ -536,7 +551,8 @@ export class DrizzleSteeringRuleStore implements SteeringRuleStore {
           or(isNull(steeringRules.profileId), eq(steeringRules.profileId, profileId)),
         ),
       )
-      .orderBy(asc(steeringRules.priority), asc(steeringRules.id));
+      .orderBy(asc(steeringRules.priority), asc(steeringRules.id))
+      .then(R.map(toExtractionRule));
   }
 
   async getInstructionRules(
@@ -552,7 +568,8 @@ export class DrizzleSteeringRuleStore implements SteeringRuleStore {
           or(isNull(steeringRules.profileId), eq(steeringRules.profileId, scope.profileId)),
         ),
       )
-      .orderBy(asc(steeringRules.priority), asc(steeringRules.id));
+      .orderBy(asc(steeringRules.priority), asc(steeringRules.id))
+      .then(R.map(toExtractionRule));
   }
 
   async hasInstructionRule(
@@ -620,10 +637,9 @@ export class DrizzleSteeringRuleStore implements SteeringRuleStore {
     return match(applied.status)
       .with("learning", () => "reset" as const)
       .with("retired", () => "retired" as const)
-      .with("live", () => "unchanged" as const)
-      .with("disabled", () => {
-        // The CHECK keeps a learned rule out of `disabled`.
-        throw new Error(`learned rule ${params.id} is disabled`);
+      .with("live", "disabled", (status) => {
+        // The CHECK keeps a contradiction record to learning and retired rows.
+        throw new Error(`steering rule ${params.id} is ${status} with a contradiction record`);
       })
       .exhaustive();
   }

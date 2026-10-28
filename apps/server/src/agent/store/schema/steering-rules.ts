@@ -50,9 +50,10 @@ export type SteeringRuleStatusValue = (typeof steeringRuleStatus.enumValues)[num
 
 /**
  * Why a rule is `retired`: a second contradiction while learning, an
- * instruction with its text and scope superseding it, or the user's removal
- * (`rule_remove`, `/rules`). `unknown` is written by nothing but the status
- * migration, on rows retired before the column existed.
+ * instruction superseding it (its text and scope, or `replaces`), or the
+ * user's removal (`rule_remove`, `/rules`, a Transport or `cogmo rules`
+ * retire; the operator is the user). `unknown` is written by nothing but the
+ * status migration, on rows retired before the column existed.
  */
 export const steeringRuleRetiredReason = pgEnum("steering_rule_retired_reason", [
   "contradicted",

@@ -16,9 +16,9 @@ UPDATE "steering_rules" SET "status" = CASE
   WHEN "source" IN ('correction', 'evolution') THEN 'learning'
   ELSE 'disabled'
 END::"steering_rule_status";--> statement-breakpoint
--- A rule that graduated while carrying the conversation of its reset keeps no
--- learning data once live.
-UPDATE "steering_rules" SET "contradicted_in_conversation_id" = NULL WHERE "status" = 'live';--> statement-breakpoint
+-- A contradiction record is learning data: a rule that graduated with it, or
+-- any other row neither learning nor retired, keeps none.
+UPDATE "steering_rules" SET "contradicted_in_conversation_id" = NULL WHERE "status" NOT IN ('learning', 'retired');--> statement-breakpoint
 -- Rows retired before the column existed: a recorded contradicting
 -- conversation names the reason; nothing else does, so the rest get the value
 -- no code path writes.

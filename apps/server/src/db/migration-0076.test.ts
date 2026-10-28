@@ -3,14 +3,15 @@
  * `active` and `retracted_at` to the `steering_rule_status` enum and records
  * why a rule is retired, in one transaction: it adds `status` and
  * `retired_reason`, backfills both from `(active, retracted_at, source)` and
- * the contradiction record, clears that record on live rows, makes `status`
- * NOT NULL, rebuilds `uq_steering_rules_instruction` on it, drops `active` and
- * adds the status `chk_steering_rules_lifecycle`. Runs the file's SQL against
- * PGlite over rows in the pre-migration shape (the pushed schema's new columns
- * and enums dropped, `active` put back, the 0067 CHECK and index restored) and
- * asserts where every combination the 0067 CHECK allowed lands, that the new
- * CHECK holds each status to its sources and its data, that a row written past
- * the 0067 CHECK rolls the whole file back, and that the store reads the rows.
+ * the contradiction record, clears that record on rows neither learning nor
+ * retired, makes `status` NOT NULL, rebuilds `uq_steering_rules_instruction`
+ * on it, drops `active` and adds the status `chk_steering_rules_lifecycle`.
+ * Runs the file's SQL against PGlite over rows in the pre-migration shape
+ * (the pushed schema's new columns and enums dropped, `active` put back, the
+ * 0067 CHECK and index restored) and asserts where every combination the 0067
+ * CHECK allowed lands, that the new CHECK holds each status to its sources and
+ * its data, that a hand-edited row the CHECK refuses rolls the whole file
+ * back, and that the store reads the rows.
  */
 
 import { readFile } from "node:fs/promises";
@@ -303,6 +304,12 @@ describe("migration steering_rule_status", () => {
         active: false,
         observationCount: 0,
       }),
+      "operator, off, marked": legacy("Sign with initials.", {
+        source: "manual",
+        active: false,
+        observationCount: 0,
+        contradictedIn: convA,
+      }),
       "operator, retired": legacy("Use emoji.", {
         source: "manual",
         active: false,
@@ -350,6 +357,7 @@ describe("migration steering_rule_status", () => {
     expect(await landedBy(labels)).toEqual({
       operator: live("live"),
       "operator, off": live("disabled"),
+      "operator, off, marked": live("disabled"),
       "operator, retired": retired("unknown", null),
       default: live("live"),
       "default, off": live("disabled"),
@@ -367,9 +375,9 @@ describe("migration steering_rule_status", () => {
     expect(await lifecycleColumns()).toEqual(["retired_reason", "status"]);
   });
 
-  it("rolls the whole file back on a row written past the 0067 CHECK", async () => {
-    // An inactive, unretired instruction row, which the 0067 CHECK refuses:
-    // written past it, it backfills to `disabled`, which the status CHECK
+  it("rolls the whole file back on a hand-edited row the CHECK refuses", async () => {
+    // An inactive, unretired instruction row, which no build writes and the
+    // 0067 CHECK refuses: written past it by hand, it backfills to `disabled`, which the status CHECK
     // refuses on an instruction.
     const userId = await seedUser();
     await db.execute(sql`ALTER TABLE steering_rules DROP CONSTRAINT chk_steering_rules_lifecycle`);

@@ -411,7 +411,7 @@ describe("setInstructionRule", () => {
     expect(await stateOf(twin)).toBe("retired");
   });
 
-  it("keeps an already retired learned twin's retirement time", async () => {
+  it("keeps an already retired learned twin's retirement time and reason", async () => {
     const userId = await seedUser();
     const retiredAt = new Date("2026-01-01T00:00:00Z");
     const twin = await row({
@@ -428,6 +428,10 @@ describe("setInstructionRule", () => {
       .from(steeringRules)
       .where(eq(steeringRules.id, twin));
     expect(after?.retractedAt).toEqual(retiredAt);
+    expect(await reasonOf(twin)).toEqual({
+      retiredReason: "removed_by_user",
+      contradictedIn: null,
+    });
   });
 
   it("rejects an empty channel type, which the index can't tell from every channel", async () => {
