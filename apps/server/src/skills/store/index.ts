@@ -814,9 +814,11 @@ export class DrizzleSkillStore implements SkillStore {
       .returning();
     const resolvedDeploy = resolvedDeployRows[0];
     if (!resolvedDeploy) {
-      // Under REPEATABLE READ this re-read equals `deploy.status`; under READ
-      // COMMITTED the UPDATE re-evaluates its WHERE after a lock wait, and
-      // only a re-read names the status it saw.
+      // Under REPEATABLE READ only a write in this same transaction reaches
+      // this branch (a committed concurrent resolution raises `40001` at the
+      // UPDATE instead), and the re-read names what that write set; under
+      // READ COMMITTED the UPDATE re-evaluates its WHERE after a lock wait,
+      // and the re-read names what it saw.
       const current = await tx
         .select({ status: skillDeploys.status })
         .from(skillDeploys)

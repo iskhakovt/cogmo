@@ -289,6 +289,31 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
     ).rejects.toThrow();
   });
 
+  it("a branch delete that fails after the commit is logged, and the deploy is still live", async () => {
+    const sha = await pushFeatureBranch({
+      work: repo.work,
+      branch: "skill/echo",
+      manifest: ECHO_MANIFEST,
+      body: ECHO_BODY,
+    });
+    // The branch's ref directory read-only: `update-ref -d` cannot take the
+    // lock to unlink the loose ref, while `refs/heads/main` in the parent
+    // directory stays writable for the deploy itself.
+    const refDir = join(repo.bare, "refs", "heads", "skill");
+    await chmod(refDir, 0o555);
+    try {
+      const runner = await makeRunner();
+      const result = await runner.register({ branch: "skill/echo", origin: OWNER });
+      assertStatus(result, "live");
+      expect(await getMainSha(repo.bare)).toBe(sha);
+      await expect(
+        execFileP("git", ["-C", repo.bare, "rev-parse", "refs/heads/skill/echo"]),
+      ).resolves.toBeDefined();
+    } finally {
+      await chmod(refDir, 0o755);
+    }
+  });
+
   it("re-register with same branch tip is a no-op (idempotent)", async () => {
     const runner = await makeRunner();
     await pushFeatureBranch({

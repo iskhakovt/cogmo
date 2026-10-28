@@ -79,9 +79,14 @@ export async function mirrorMainToRemote(
     await (pat ? withGitAskpass(pat, push) : push());
     log.info({ newSha, remoteUrl }, "mirrored skills main to remote");
   } catch (e) {
+    // After a rollback the remote is ahead of local main, so only a forced
+    // push with the lease the rollback expected reconciles it.
+    const retry = options?.force
+      ? `git -C $COGMO_SKILLS_PATH push --force-with-lease=refs/heads/main:${options.force.expectedRemoteSha} origin main`
+      : "git -C $COGMO_SKILLS_PATH push origin main";
     log.warn(
       { newSha, repoPath, error: describeError(e) },
-      "skills remote mirror failed; local state is authoritative — retry with `git -C $COGMO_SKILLS_PATH push origin main`",
+      `skills remote mirror failed; local state is authoritative — retry with \`${retry}\``,
     );
   }
 }

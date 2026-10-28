@@ -78,8 +78,9 @@ export async function registerSkill(
     // Both after the commit and best-effort: local state is authoritative.
     // The branch goes once the deploy is committed, so a register repeated
     // after a failed commit still has a branch to register; one left behind
-    // re-registers as `no_op`. The mirror lets a Daytona-backed coding task
-    // cloning from origin see the just-registered skill.
+    // re-registers as `no_op` while its tip is main, and as non-fast-forward
+    // once another skill has deployed. The mirror lets a Daytona-backed
+    // coding task cloning from origin see the just-registered skill.
     await deleteFeatureBranch(repoPath, opts.branch);
     await mirrorMainToRemote(deps, repoPath, branchSha, {
       ...(opts.signal && { signal: opts.signal }),
@@ -120,11 +121,11 @@ async function prepareRegister(
   signal: AbortSignal | undefined,
 ): Promise<Result<PreparedRegister, RegisterResult>> {
   // Reject branch=main at the boundary. Without this guard, the register
-  // flow would (a) "fast-forward" main onto itself (no-op) and then
-  // (b) call `deleteRef("refs/heads/main")` in the same applyFilesystem
-  // step, which would drop the only authoritative ref. The deleteRef
-  // helper refuses too (defense in depth), but rejecting at the entry
-  // gives a clear error before any git/DB work runs.
+  // flow would "fast-forward" main onto itself (no-op) and then, after the
+  // commit, call `deleteRef("refs/heads/main")`, which would drop the only
+  // authoritative ref. The deleteRef helper refuses too (defense in depth),
+  // but rejecting at the entry gives a clear error before any git/DB work
+  // runs.
   if (branch === "main" || branch === "refs/heads/main") {
     return err(rejectedResult("", "invalid_branch: cannot register from 'main' itself"));
   }
