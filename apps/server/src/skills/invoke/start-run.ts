@@ -1,12 +1,7 @@
 import { match, P } from "ts-pattern";
 import type { Transactor } from "../../db/index.js";
-import type { SkillRunRow, SkillRunTrigger, SkillStore } from "../store/index.js";
-import {
-  type ExecutedOutcome,
-  finishedVerdictOf,
-  reconstructFinishedResult,
-  type SkillRunResult,
-} from "./run-result.js";
+import type { ExecutedOutcome, SkillRunRow, SkillRunTrigger, SkillStore } from "../store/index.js";
+import { finishedVerdictOf, reconstructFinishedResult, type SkillRunResult } from "./run-result.js";
 
 /**
  * Where an invocation takes up its run row, from the row's

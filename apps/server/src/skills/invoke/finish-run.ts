@@ -2,13 +2,8 @@ import { err, ok, type Result } from "neverthrow";
 import { match } from "ts-pattern";
 import type { Transactor } from "../../db/index.js";
 import { type SkillSourceCacheEntry, schemaIssues } from "../source-cache.js";
-import type { SkillRunVerdict, SkillStore } from "../store/index.js";
-import {
-  type ExecutedOutcome,
-  finishedVerdictOf,
-  reconstructFinishedResult,
-  type SkillRunResult,
-} from "./run-result.js";
+import type { ExecutedOutcome, SkillRunVerdict, SkillStore } from "../store/index.js";
+import { finishedVerdictOf, reconstructFinishedResult, type SkillRunResult } from "./run-result.js";
 
 /**
  * The `executed → finished` transition: validate the executed output against

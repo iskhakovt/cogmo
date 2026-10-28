@@ -860,8 +860,7 @@ inputs:
       await tx((trx) =>
         store.transitionToExecuted(trx, {
           id: row.id,
-          output: { echo: 999 },
-          error: null,
+          outcome: { kind: "output", output: { echo: 999 } },
           resourceUsage: { wallClockMs: 5, peakMemoryBytes: 1024 },
           finishedAt: new Date(),
         }),
@@ -1113,8 +1112,7 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
     await tx((trx) =>
       store.transitionToExecuted(trx, {
         id: row.id,
-        output: { x: 7 },
-        error: null,
+        outcome: { kind: "output", output: { x: 7 } },
         resourceUsage: { wallClockMs: 5, peakMemoryBytes: null },
         finishedAt: new Date(),
       }),

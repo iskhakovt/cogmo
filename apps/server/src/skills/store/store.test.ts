@@ -454,8 +454,7 @@ describe("DrizzleSkillStore", () => {
       await tx((trx) =>
         store.transitionToExecuted(trx, {
           id: run.id,
-          output: { echo: 8 },
-          error: null,
+          outcome: { kind: "output", output: { echo: 8 } },
           resourceUsage: { wallClockMs: 42, peakMemoryBytes: 1_048_576 },
           finishedAt: new Date(),
         }),
@@ -486,8 +485,7 @@ describe("DrizzleSkillStore", () => {
       await tx((trx) =>
         store.transitionToExecuted(trx, {
           id: run.id,
-          output: null,
-          error: "Boom",
+          outcome: { kind: "error", error: "Boom" },
           resourceUsage: { wallClockMs: 7, peakMemoryBytes: null },
           finishedAt: new Date(),
         }),
@@ -586,8 +584,7 @@ describe("DrizzleSkillStore", () => {
       await tx((trx) =>
         store.transitionToExecuted(trx, {
           id: run.id,
-          output: null,
-          error: null,
+          outcome: { kind: "output", output: null },
           resourceUsage: { wallClockMs: 1, peakMemoryBytes: null },
           finishedAt: new Date(),
         }),
@@ -621,8 +618,7 @@ describe("DrizzleSkillStore", () => {
       await tx((trx) =>
         store.transitionToExecuted(trx, {
           id: run.id,
-          output: { ok: true },
-          error: null,
+          outcome: { kind: "output", output: { ok: true } },
           resourceUsage: { wallClockMs: 123, peakMemoryBytes: 5_242_880 },
           finishedAt: new Date(),
         }),
@@ -639,8 +635,7 @@ describe("DrizzleSkillStore", () => {
       await tx((trx) =>
         store.transitionToExecuted(trx, {
           id: run.id,
-          output: null,
-          error: "wall_clock_exceeded",
+          outcome: { kind: "error", error: "wall_clock_exceeded" },
           resourceUsage: { wallClockMs: 30_000, peakMemoryBytes: null },
           finishedAt: new Date(),
         }),
@@ -660,8 +655,7 @@ describe("DrizzleSkillStore", () => {
         tx((trx) =>
           store.transitionToExecuted(trx, {
             id: run.id,
-            output: null,
-            error: null,
+            outcome: { kind: "output", output: null },
             resourceUsage: { wallClockMs: -1, peakMemoryBytes: null },
             finishedAt: new Date(),
           }),
@@ -890,8 +884,7 @@ describe("DrizzleSkillStore", () => {
       await tx((trx) =>
         store.transitionToExecuted(trx, {
           id: first.row.id,
-          output: { echo: 1 },
-          error: null,
+          outcome: { kind: "output", output: { echo: 1 } },
           resourceUsage: { wallClockMs: 3, peakMemoryBytes: null },
           finishedAt: new Date("2026-06-01T09:00:03Z"),
         }),
@@ -925,8 +918,7 @@ describe("DrizzleSkillStore", () => {
       await tx((trx) =>
         store.transitionToExecuted(trx, {
           id: row.id,
-          output: { echo: 42 },
-          error: null,
+          outcome: { kind: "output", output: { echo: 42 } },
           resourceUsage: { wallClockMs: 42, peakMemoryBytes: 1_048_576 },
           finishedAt,
         }),
@@ -956,8 +948,7 @@ describe("DrizzleSkillStore", () => {
       await tx((trx) =>
         store.transitionToExecuted(trx, {
           id: row.id,
-          output: { echo: 1 },
-          error: null,
+          outcome: { kind: "output", output: { echo: 1 } },
           resourceUsage: { wallClockMs: 1, peakMemoryBytes: null },
           finishedAt: new Date(),
         }),
@@ -986,8 +977,7 @@ describe("DrizzleSkillStore", () => {
       await tx((trx) =>
         store.transitionToExecuted(trx, {
           id: row.id,
-          output: { echo: 1 },
-          error: null,
+          outcome: { kind: "output", output: { echo: 1 } },
           resourceUsage: { wallClockMs: 1, peakMemoryBytes: null },
           finishedAt: new Date(),
         }),
@@ -1037,8 +1027,7 @@ describe("DrizzleSkillStore", () => {
         await tx((trx) =>
           store.transitionToExecuted(trx, {
             id: run.id,
-            output: { echo: 1 },
-            error: null,
+            outcome: { kind: "output", output: { echo: 1 } },
             resourceUsage: { wallClockMs: 1, peakMemoryBytes: null },
             finishedAt: new Date(),
           }),

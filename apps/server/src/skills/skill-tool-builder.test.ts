@@ -88,15 +88,6 @@ describe("buildSkillToolSpec", () => {
     expect(rejection.message).toBe("skill echo failed (run run-2): kaboom");
   });
 
-  it("handler rejects with unknown_error when an error result carries no error text", async () => {
-    const invoke = vi.fn().mockResolvedValue(ok({ runId: "run-3", status: "error" }));
-    const runner = makeRunner({ invoke });
-    const spec = buildSkillToolSpec(ECHO_DEF, runner, TURN);
-
-    const rejection = (await spec.handler({ x: 1 }, TURN_SERVICE))._unsafeUnwrapErr();
-    expect(rejection.message).toBe("skill echo failed (run run-3): unknown_error");
-  });
-
   it("handler rejects an in-flight refusal with a verdict naming the run", async () => {
     const invoke = vi
       .fn()

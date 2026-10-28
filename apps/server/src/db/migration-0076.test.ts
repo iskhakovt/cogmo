@@ -279,7 +279,9 @@ async function deployStatusLabels(): Promise<string[]> {
   return rows.map((r) => r.name);
 }
 
-/** The per-state CHECKs present on the two tables. */
+const CHECK_NAMES = CHECKS.map(([, name]) => name).sort();
+
+/** Which of the migration's five CHECKs are installed, sorted. */
 async function installedChecks(): Promise<string[]> {
   const { rows } = NameRowsSchema.parse(
     await db.execute(sql`
@@ -288,7 +290,7 @@ async function installedChecks(): Promise<string[]> {
       ORDER BY conname
     `),
   );
-  return rows.map((r) => r.name);
+  return rows.map((r) => r.name).filter((name) => CHECK_NAMES.includes(name));
 }
 
 describe("migration 0076 — skill run and deploy per-state CHECKs", () => {
@@ -337,7 +339,7 @@ describe("migration 0076 — skill run and deploy per-state CHECKs", () => {
       "live",
       "rolled_back",
     ]);
-    expect(await installedChecks()).toEqual(CHECKS.map(([, name]) => name).sort());
+    expect(await installedChecks()).toEqual(CHECK_NAMES);
   });
 
   it("then each CHECK rejects a combination the old shape accepted", async () => {

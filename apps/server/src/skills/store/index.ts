@@ -9,7 +9,18 @@ import type {
   SkillIo,
   SkillRunResourceUsage,
 } from "../types.js";
-import { skillContextCalls, skillDeploys, skillRuns, skills } from "./schema.js";
+import {
+  skillContextCalls,
+  type skillDeployStatus,
+  skillDeploys,
+  type skillRiskTier,
+  type skillRunRecoveryPoint,
+  type skillRunStatus,
+  skillRuns,
+  type skillRunTrigger,
+  skills,
+  type skillTier,
+} from "./schema.js";
 
 /**
  * Throws if `schedule` and `scheduleNextRunAt` aren't both null or both
@@ -50,13 +61,13 @@ function runAsColumns(
     : { runAsUserId: runAs.userId, runAsProfileId: runAs.profileId };
 }
 
-export type SkillTier = "wasm" | "container";
-export type SkillRiskTier = "auto" | "notify" | "approve";
-export type SkillRunStatus = "running" | "success" | "error";
-export type SkillRunTrigger = "manual" | "cron" | "event";
-export type SkillDeployStatus = "pending_approval" | "denied" | "live" | "rolled_back";
+export type SkillTier = (typeof skillTier.enumValues)[number];
+export type SkillRiskTier = (typeof skillRiskTier.enumValues)[number];
+export type SkillRunStatus = (typeof skillRunStatus.enumValues)[number];
+export type SkillRunTrigger = (typeof skillRunTrigger.enumValues)[number];
+export type SkillDeployStatus = (typeof skillDeployStatus.enumValues)[number];
 /** See {@link skillRunRecoveryPoint} in schema.ts for the per-state contract. */
-export type SkillRunRecoveryPoint = "started" | "executed" | "finished";
+export type SkillRunRecoveryPoint = (typeof skillRunRecoveryPoint.enumValues)[number];
 
 export interface SkillRow {
   id: string;
@@ -316,6 +327,15 @@ export interface ExecuteRollbackParams {
 }
 
 /**
+ * What an executed run produced, as `transitionToExecuted` writes it and the
+ * `executed` row records it: an output or an error, never both
+ * (`chk_skill_runs_outcome`).
+ */
+export type ExecutedOutcome =
+  | { kind: "output"; output: unknown | null }
+  | { kind: "error"; error: string };
+
+/**
  * A finished run's verdict, one shape per terminal status: the columns
  * `transitionToFinished` writes, and the shape `chk_skill_runs_outcome` pins
  * on the row.
@@ -450,18 +470,17 @@ export interface SkillStore {
   ): Promise<{ kind: "new" | "recovered"; row: SkillRunRow }>;
 
   /**
-   * Atomic transition `started → executed`. Writes the executed payload
-   * (output / error / rusage / finished_at) in the same UPDATE that
-   * advances `recovery_point`. Caller wraps in `runInTx`. A retry whose
-   * cached `executed` row already exists short-circuits this write via
-   * the row-state check inside `runner.invoke`.
+   * Atomic transition `started → executed`. Writes the executed payload —
+   * the worker's outcome, `resource_usage` and `finished_at` — in the same
+   * UPDATE that advances `recovery_point`. Caller wraps in `runInTx`. A
+   * retry whose cached `executed` row already exists short-circuits this
+   * write via the row-state check inside `runner.invoke`.
    */
   transitionToExecuted(
     tx: Transaction,
     params: {
       id: string;
-      output: unknown | null;
-      error: string | null;
+      outcome: ExecutedOutcome;
       resourceUsage: SkillRunResourceUsage;
       finishedAt: Date;
     },
@@ -1031,12 +1050,16 @@ export class DrizzleSkillStore implements SkillStore {
     tx: Transaction,
     params: {
       id: string;
-      output: unknown | null;
-      error: string | null;
+      outcome: ExecutedOutcome;
       resourceUsage: SkillRunResourceUsage;
       finishedAt: Date;
     },
   ): Promise<void> {
+    const outcomeColumns = match(params.outcome)
+      .returnType<{ output: unknown | null; error: string | null }>()
+      .with({ kind: "output" }, ({ output }) => ({ output, error: null }))
+      .with({ kind: "error" }, ({ error }) => ({ output: null, error }))
+      .exhaustive();
     // Guard the transition on the current recovery_point so a
     // programmer error (calling transitionToExecuted on a row that has
     // already moved past 'started') surfaces as an assertion failure
@@ -1046,8 +1069,7 @@ export class DrizzleSkillStore implements SkillStore {
     const updated = await tx
       .update(skillRuns)
       .set({
-        output: params.output,
-        error: params.error,
+        ...outcomeColumns,
         resourceUsage: params.resourceUsage,
         finishedAt: params.finishedAt,
         recoveryPoint: "executed",

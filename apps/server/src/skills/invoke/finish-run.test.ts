@@ -68,8 +68,7 @@ async function executedRun(output: unknown): Promise<string> {
   await tx((trx) =>
     store.transitionToExecuted(trx, {
       id: row.id,
-      output,
-      error: null,
+      outcome: { kind: "output", output },
       resourceUsage: { wallClockMs: 1, peakMemoryBytes: null },
       finishedAt: new Date(),
     }),

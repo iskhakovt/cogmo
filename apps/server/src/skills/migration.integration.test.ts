@@ -22,7 +22,7 @@ afterAll(async () => {
   await sql.end();
 });
 
-describe("migration 0017_tough_bedlam (skills foundation)", () => {
+describe("skills schema as migrated (tables, enums, constraints)", () => {
   it.each(["skills", "skill_deploys", "skill_runs", "skill_context_calls"])(
     "table %s exists",
     async (table) => {
