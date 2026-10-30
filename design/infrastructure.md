@@ -9,7 +9,7 @@
 | Hindsight | latest | Self-hosted memory server (`ghcr.io/vectorize-io/hindsight`), HTTP API on port 8888 |
 | Redis | 7+ | Inngest queue + state store (production); not needed in dev mode |
 | Inngest | latest | Event-driven orchestration — `inngest dev` locally, `inngest start` in production |
-| Node.js | 24+ (LTS Krypton) | Runtime |
+| Node.js | 26+ (LTS Lithium) | Runtime |
 
 ## Local Development `[confirmed]`
 
@@ -138,7 +138,7 @@ The web server goes first so no request reaches a stopped dependency. It gets it
 
 ## Image processing `[confirmed]`
 
-`sharp` 0.35.5 normalizes inbound images ([transport/attachments.md](transport/attachments.md)). It is a runtime dependency with native code: libvips 8.18.7 and its codecs ship as prebuilt binaries in `@img/sharp-linux-{x64,arm64}` and `@img/sharp-libvips-linux-{x64,arm64}`. They suit `node:24-trixie-slim` on both platforms the runtime image builds for: glibc 2.28 or later, and SSE4.2 on x64. No Debian package is added. Loaded, it costs about 20 MB on disk and 24 MB of resident memory (measured).
+`sharp` 0.35.5 normalizes inbound images ([transport/attachments.md](transport/attachments.md)). It is a runtime dependency with native code: libvips 8.18.7 and its codecs ship as prebuilt binaries in `@img/sharp-linux-{x64,arm64}` and `@img/sharp-libvips-linux-{x64,arm64}`. They suit `node:26-trixie-slim` on both platforms the runtime image builds for: glibc 2.28 or later, and SSE4.2 on x64. No Debian package is added. Loaded, it costs about 20 MB on disk and 24 MB of resident memory (measured).
 
 - **Optional dependencies.** sharp's platform packages are optional dependencies, which `pnpm deploy --prod --no-optional` skips: sharp then fails to load with `ERR_DLOPEN_FAILED: libvips-cpp.so.8.18.7` (measured). The runtime stage deploys with `--prod` alone. Besides sharp's packages (18 MB), that adds React (an Inngest optional peer, 260 KB), a Rollup binary neverthrow lists (2 MB) and ssh2's unbuilt native helpers (1.5 MB); TypeScript and PGlite stay out (measured, pnpm 12.10). Dropping those would take workspace overrides, since `deploy` ignores a stage-only setting. Declaring sharp's platform packages as regular dependencies doesn't restore `--no-optional`: each still finds libvips through its own optional link, which the flag drops (measured), and every platform's binary would ship. So `optional-deps.test.ts` pins instead what the production graph reaches only through optional edges, and fails when a dependency bump adds one.
 - **Boot check.** `bootstrapCore` loads sharp, applies the loader allowlist and round-trips a 1 × 1 JPEG (`checkImageRuntime`), so an image without the binary fails its first boot, not its first photo. sharp loads lazily, so a missing binary fails that check with an explanation rather than the process with `ERR_DLOPEN_FAILED` at import.

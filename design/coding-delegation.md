@@ -768,7 +768,7 @@ This reuses the whole coding-delegation pipeline (sandbox, plan gate for user tr
 
 **`cogmo/devbase`** — the default task container image when a repo has no `.devcontainer/`. Contents:
 
-- Node 24 LTS + pnpm
+- Node 26 LTS + pnpm
 - Python 3.12 + uv
 - Go, Rust toolchains (via version managers, not pre-installed)
 - Common CLIs: git, gh, ripgrep, fd, jq, yq, curl, docker client

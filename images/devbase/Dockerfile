@@ -13,7 +13,7 @@
 # toolchain skill-authoring tasks rely on (`uv pip compile` to produce a
 # `requirements.lock` byte-identical to what `cogmo-skills` resolves at
 # register time):
-#   - Node 24 + pnpm + git + gh + ripgrep + fd + jq + curl
+#   - Node 26 + pnpm + git + gh + ripgrep + fd + jq + curl
 #   - @anthropic-ai/claude-code (pinned)
 #   - Python 3 (from devcontainers/base) + uv (pinned to match cogmo-skills)
 #   - Non-root user `vscode` (UID 1000) inherited from the devcontainers base.
@@ -64,10 +64,10 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* \
  && ln -s /usr/bin/fdfind /usr/local/bin/fd
 
-# Node 24 LTS via NodeSource. Upgrade npm past the bundled version — its
+# Node 26 LTS via NodeSource. Upgrade npm past the bundled version — its
 # bundled deps (picomatch / ip-address / brace-expansion) lag upstream and
 # show up as image CVEs.
-RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
+RUN curl -fsSL https://deb.nodesource.com/setup_26.x | bash - \
  && apt-get install -y --no-install-recommends nodejs \
  && rm -rf /var/lib/apt/lists/* \
  && npm install -g "npm@${NPM_VERSION:?}" \

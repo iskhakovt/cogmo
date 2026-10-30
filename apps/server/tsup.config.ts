@@ -40,7 +40,7 @@ export function tsupOptions(outDir: string): Options {
       "worker-entry": "src/skills/worker-wasm/worker-entry.ts",
     },
     format: ["esm"],
-    target: "node24",
+    target: "node26",
     outDir,
     clean: true,
     sourcemap: true,

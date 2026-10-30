@@ -198,7 +198,7 @@ describe("computeNextRun", () => {
   });
 
   describe("timezone validation policy", () => {
-    // Policy: accept whatever Intl.DateTimeFormat accepts. Node 24's
+    // Policy: accept whatever Intl.DateTimeFormat accepts. Node's
     // Intl is permissive — it accepts legacy abbreviations (EST,
     // PST8PDT), fixed offsets (+01:00), and full IANA names. Users
     // who pass legacy strings get whatever DST behaviour those strings

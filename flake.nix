@@ -80,7 +80,7 @@
           default = pkgs.mkShell (
             {
               packages = with pkgs; [
-                nodejs_24
+                nodejs_26
                 # Corepack activates the `packageManager` pin in package.json,
                 # so the pnpm version comes from the repo, not from nixpkgs.
                 corepack
