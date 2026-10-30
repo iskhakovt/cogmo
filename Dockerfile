@@ -1,18 +1,28 @@
+# pnpm comes from its official image, pinned in docker-bake.hcl. These defaults
+# serve a plain `docker build`; docker-bake.integration.test.ts holds them to
+# bake's values. ARGs in a FROM need global scope.
+ARG PNPM_VERSION=12.13.0
+ARG PNPM_DIGEST=sha256:8ebb7ad694024b47535f6c2cd6bbeb532836e314609e8d90df0ef1f25661f8f4
+FROM ghcr.io/pnpm/pnpm:${PNPM_VERSION}@${PNPM_DIGEST} AS pnpm
+
 FROM mirror.gcr.io/library/node:24-trixie-slim@sha256:6950b66b4c0cb0151ce89fa75074673850763d096b044f422c6729b588dd4956 AS base
 
 FROM base AS build
 WORKDIR /app
+# All of /opt/pnpm, since pnpm reads its bundled `dist/` beside the executable.
+COPY --from=pnpm /opt/pnpm /opt/pnpm
+RUN ln -s /opt/pnpm/pnpm /usr/local/bin/pnpm
 # Root workspace manifest + every member package.json must be present before
 # the frozen install so pnpm can resolve the workspace lockfile.
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps/server/package.json apps/server/
 COPY apps/web/package.json apps/web/
 COPY packages/contracts/package.json packages/contracts/
-# Corepack runs only in this stage; `prepare --activate` verifies the +sha512 hash from packageManager.
-RUN corepack enable \
- && corepack prepare --activate "$(node -p "require('./package.json').packageManager")"
+# `pmOnFail: ignore` lets pnpm run whatever version it is, so the install first
+# checks it against packageManager.
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
-    pnpm install --frozen-lockfile
+    test "pnpm@$(pnpm --version)" = "$(node -p "require('./package.json').packageManager.split('+')[0]")" \
+ && pnpm install --frozen-lockfile
 COPY apps/server/tsconfig.json apps/server/tsup.config.ts apps/server/
 COPY apps/server/src/ apps/server/src/
 COPY apps/server/migrations/ apps/server/migrations/

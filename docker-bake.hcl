@@ -35,18 +35,18 @@ variable "VERSION" {
   default = "dev"
 }
 
-// Toolchain versions for the task images, and their only copy: the
-// Dockerfiles declare these ARGs without defaults. Base-image FROM digests
-// stay literal in each Dockerfile for Dependabot; these are bumped by hand.
-// uv is shared by devbase + skills.
+// Toolchain versions, bumped by hand. The task images' Dockerfiles declare
+// these ARGs without defaults, so this is their only copy. Base-image FROM
+// digests stay literal in each Dockerfile for Dependabot. uv is shared by
+// devbase + skills.
 variable "UV_VERSION" {
   default = "0.13.4"
 }
 variable "UV_DIGEST" {
   default = "sha256:9f130421e930bfbdc563c00740466603f8723158e90297d07957c2294640262b"
 }
-// Match package.json packageManager. The digest is ghcr.io/pnpm/pnpm's
-// index for that version.
+// Match package.json packageManager and the root Dockerfile's ARG defaults
+// (test-enforced). The digest is ghcr.io/pnpm/pnpm's index for that version.
 variable "PNPM_VERSION" {
   default = "12.13.0"
 }
@@ -104,7 +104,9 @@ target "_cogmo-build" {
   context    = "."
   dockerfile = "Dockerfile"
   args = {
-    VERSION = "${VERSION}"
+    VERSION      = "${VERSION}"
+    PNPM_VERSION = "${PNPM_VERSION}"
+    PNPM_DIGEST  = "${PNPM_DIGEST}"
   }
 }
 
