@@ -11,6 +11,7 @@ This is the canonical install guide. Cogmo is a single Node.js process distribut
 | Redis | 7+ | Inngest queue and state store. |
 | Inngest | latest | Self-hosted `inngest start` with an event key and signing key. `inngest dev` is for local development only — see [Securing internal services](#securing-internal-services). |
 | [Hindsight](https://github.com/vectorize-io/hindsight) | 1.1.x, slim recommended | Memory server, HTTP API on port 8888. Cogmo reads the server's version at boot and refuses to start outside `cogmo.hindsightCompat` in `apps/server/package.json`, so upgrade the two together. See [Hindsight image variant](#hindsight-image-variant) for which tag to pick. |
+| S3-compatible object storage | any | A bucket for files and attachments. `serve` checks it at boot. See [Object storage](#object-storage). |
 | Docker | latest | For pulling and running the image. |
 
 Cogmo stores its application state in your Postgres; Hindsight stores its vectors in the same Postgres (different schema). One database is enough for personal scale.
@@ -162,6 +163,8 @@ Defaults below match the in-image expectations: every host-state path sits under
 
 #### Object storage
 
+Required by `serve`, which checks the bucket at boot. With `S3_ENDPOINT` unset the client targets AWS S3, and with no key pair set it uses ambient AWS credentials.
+
 | Variable | Default | Purpose |
 |-|-|-|
 | `S3_ENDPOINT`, `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_REGION` | — / `cogmo-files` / — / — / `us-east-1` | Object storage for the file tools and image attachments. Any S3-compatible store works; dev and tests run RustFS. |
@@ -186,6 +189,7 @@ Defaults below match the in-image expectations: every host-state path sits under
 | `WEB_PORT` | `9090` | Port for the web UI and `/health`. |
 | `WEB_SESSION_TTL_DAYS` | `30` | Absolute lifetime of a web UI login session. |
 | `WEB_STATIC_ROOT` | `./apps/web/dist` | Built SPA directory. The image ships it at the default. |
+| `WEB_INSECURE_COOKIES`, `WEB_DEV_ALLOW_ORIGIN` | — | Local dev only: drop the `__Host-`/`Secure` cookie hardening and allow a cross-origin SPA. Leave unset in production. |
 
 #### Sandbox backend
 
@@ -319,7 +323,7 @@ Neither is probed by Cogmo, so key them yourself:
      ghcr.io/iskhakovt/cogmo:<version> setup
    ```
 
-   The wizard validates credentials live (Anthropic/OpenAI `/v1/models`, Telegram `getMe`, Tavily ping, GitHub `/user`, Claude Code OAuth, Daytona, Hindsight `/health`). An LLM key that fails validation can still be saved after a warning; fal.ai has no cheap check, so its key is stored unvalidated. It is re-runnable — running it again on an existing deployment lets you add a channel, rotate a key, or swap providers. Use `--reset secrets|channels|all` to wipe scoped state and re-prompt. See [`design/setup.md`](design/setup.md) for the full UX contract.
+   The wizard validates credentials live (Anthropic/OpenAI `/v1/models`, Telegram `getMe`, Tavily ping, GitHub `/user`, Claude Code OAuth, Daytona, Hindsight `/health`). An LLM, Claude Code, Daytona or voice credential that fails validation can still be saved after a warning; fal.ai has no cheap check, so its key is stored unvalidated. It is re-runnable — running it again on an existing deployment lets you add a channel, rotate a key, or swap providers. Use `--reset secrets|channels|all` to wipe scoped state and re-prompt. See [`design/setup.md`](design/setup.md) for the full UX contract.
 
 3. **Start the long-running process:**
 
@@ -334,6 +338,7 @@ Neither is probed by Cogmo, so key them yourself:
      -e INNGEST_BASE_URL=http://inngest:8288 \
      -e INNGEST_EVENT_KEY=... \
      -e INNGEST_SIGNING_KEY=... \
+     -e S3_ENDPOINT=... -e S3_BUCKET=... -e S3_ACCESS_KEY=... -e S3_SECRET_KEY=... \
      -v /var/lib/cogmo:/var/lib/cogmo \
      -p 127.0.0.1:9090:9090 \
      ghcr.io/iskhakovt/cogmo:<version>
@@ -439,7 +444,7 @@ docker run -d --name cogmo \
   -e INNGEST_SIGNING_KEY=... \
   -e OTEL_EXPORTER_OTLP_ENDPOINT=http://lgtm:4318 \
   -e OTEL_SERVICE_NAME=cogmo \
-  -p 9090:9090 \
+  -p 127.0.0.1:9090:9090 \
   ghcr.io/iskhakovt/cogmo:<version>
 ```
 
@@ -468,7 +473,7 @@ docker run -d --name cogmo \
   -e OTEL_EXPORTER_OTLP_HEADERS="Authorization=Basic $(printf '%s' '<instance-id>:<token>' | base64)" \
   -e OTEL_SERVICE_NAME=cogmo \
   -e OTEL_RESOURCE_ATTRIBUTES=deployment.environment=prod \
-  -p 9090:9090 \
+  -p 127.0.0.1:9090:9090 \
   ghcr.io/iskhakovt/cogmo:<version>
 ```
 

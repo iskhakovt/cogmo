@@ -60,8 +60,8 @@ INGESTION (scheduled, planned)               RETRIEVAL (interactive)
 
 | Path | Trigger | Method |
 |-|-|-|
-| Real-time | User says "remember X" | User intent, immediate `retain()` |
-| Post-conversation (Observer) | Chat idle ~5 min | Bot code extracts facts from transcript |
+| Real-time | User says "remember X" | User intent, staged in `pending_memories` at once; the Observer classifies and retains it |
+| Post-conversation (Observer) | Chat idle for `SESSION_IDLE_TIMEOUT_MINUTES` (default 60) | Bot code extracts facts from transcript |
 | Scheduled ingestion | `scheduled_tasks` row + ticker fan-out (see [scheduling.md](scheduling.md)) | Pull email/calendar/etc, extract, `retain()` |
 
 ## Two-Tier Memory `[confirmed]`
@@ -90,7 +90,7 @@ Additive-only writes. Never fail a write. Hindsight consolidates each `retain()`
 | Interfaces | Channel adapters (`AdapterModule` contract) | Table-driven: direct (Inngest events), Telegram (long polling), Web UI (oRPC + SSE from the in-process server, [web-ui.md](web-ui.md)) |
 | MCP integrations | MCP client SDK | Per-integration MCP servers |
 | Skills runtime | Pyodide workers and sysbox containers ([skills.md](skills.md)) | Worker threads in main process; sibling containers |
-| Sandbox | sysbox or Daytona containers behind a Docker API proxy ([sandbox.md](sandbox.md)) | Sibling containers, reaped by `sandbox-reaper` |
+| Sandbox | sysbox containers behind a Docker API proxy, or remote Daytona sandboxes ([sandbox.md](sandbox.md)) | Sibling containers reaped by `sandbox-reaper`; Daytona on its own API |
 | Coding delegation | `coding-task-*` functions driving `claude -p` ([coding-delegation.md](coding-delegation.md)) | CLI subprocess inside a sandbox container |
 | Pipelines | `pipeline-stage-runner` and gate functions ([pipelines.md](pipelines.md)) | Durable steps in main process |
 

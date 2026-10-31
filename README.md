@@ -39,6 +39,7 @@ Cogmo runs as a single container that talks to your own infrastructure. You prov
 - **Redis 7+** (Inngest queue and state)
 - **[Inngest](https://www.inngest.com/)**, self-hosted
 - **[Hindsight](https://github.com/vectorize-io/hindsight)** memory server, in the version range Cogmo checks at boot
+- **An S3-compatible bucket** for files and attachments; `serve` checks it at boot
 
 Cogmo provides:
 
@@ -79,9 +80,9 @@ It applies migrations, seeds the default user and profile, then walks you throug
 4. **Coding delegation** — GitHub identity, Claude Code auth, Daytona sandbox, skills repo remote.
 5. **Hindsight check** and a summary of what was configured.
 
-Credentials are checked against the live service where one offers a cheap check (an LLM key that fails can still be saved after a warning) and stored encrypted (AES-256-GCM, HKDF-derived from `COGMO_MASTER_KEY`) in the `secrets` table. `cogmo setup` is re-runnable: each step offers Keep / Modify / Skip, and `--reset secrets|channels|all` wipes scoped state first. `--non-interactive` reads the provider, Telegram and optional credentials from `COGMO_*` env vars instead. See [`design/setup.md`](design/setup.md) for the full UX contract.
+Credentials are checked against the live service where one offers a cheap check (an LLM, Claude Code, Daytona or voice credential that fails can still be saved after a warning) and stored encrypted (AES-256-GCM, HKDF-derived from `COGMO_MASTER_KEY`) in the `secrets` table. `cogmo setup` is re-runnable: each step offers Keep / Modify / Skip, and `--reset secrets|channels|all` wipes scoped state first. `--non-interactive` reads the provider, Telegram and optional credentials from `COGMO_*` env vars instead. See [`design/setup.md`](design/setup.md) for the full UX contract.
 
-Then start the long-running process with the same env vars, a persistent state directory, and room for a graceful shutdown:
+Then start the long-running process with the same env vars plus the bucket, a persistent state directory, and room for a graceful shutdown. Create `/var/lib/cogmo` on the host owned by UID 1000 first ([`deploy.md` → Bind-mount permissions](deploy.md#bind-mount-permissions)):
 
 ```bash
 docker run -d \
@@ -95,6 +96,7 @@ docker run -d \
   -e INNGEST_BASE_URL=... \
   -e INNGEST_EVENT_KEY=... \
   -e INNGEST_SIGNING_KEY=... \
+  -e S3_ENDPOINT=... -e S3_BUCKET=... -e S3_ACCESS_KEY=... -e S3_SECRET_KEY=... \
   -p 127.0.0.1:9090:9090 \
   ghcr.io/iskhakovt/cogmo:<version>
 ```

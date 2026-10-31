@@ -3,7 +3,7 @@
 Each domain module owns its DB access in a `store/` subdirectory:
 
 - **`<module>/store/schema.ts`** — Drizzle table definitions owned by this module (a large module splits them into `store/schema/*.ts` behind a `schema.ts` barrel, as `agent/store/` does)
-- **`<module>/store/index.ts`** — Store interface + implementation. All DB reads/writes go through this.
+- **`<module>/store/index.ts`** — Store interface + implementation. All DB reads/writes go through this. A large store keeps its queries in per-table files beside it, as `agent/store/` does.
 - **`src/db/schemas.ts`** — Barrel file re-exporting all module schemas (for drizzle-kit migrations only)
 
 | Store | Tables |

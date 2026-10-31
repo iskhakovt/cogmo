@@ -21,6 +21,8 @@ Before pushing, run:
 pnpm typecheck && pnpm lint && pnpm knip && pnpm test && pnpm --filter web test
 ```
 
+The web tests need Chromium once per checkout: `pnpm --filter web exec playwright install chromium`.
+
 For changes that affect prompts, tools, or LLM/embedding requests, also re-record fixtures and run integration tests:
 
 ```bash
