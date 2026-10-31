@@ -241,7 +241,7 @@ HINDSIGHT_API_TENANT_API_KEY=<same value as HINDSIGHT_API_KEY>
 ```
 
 The key does not cover everything:
-- **Open routes:** `/health`, `/version`, `/metrics`, `/docs` and `/openapi.json` still answer without it (verified on 1.0.0).
+- **Open routes:** `/health`, `/version`, `/metrics`, `/docs`, `/redoc` and `/openapi.json` still answer without it (verified on 1.1.0).
 - **MCP endpoint:** uses the same key unless `HINDSIGHT_API_TENANT_MCP_AUTH_DISABLED` is set.
 - **Control Plane UI:** a separate app with its own `HINDSIGHT_CP_ACCESS_KEY`. Cogmo does not use it — use the API-only image.
 
