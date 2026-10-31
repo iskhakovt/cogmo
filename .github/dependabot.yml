@@ -27,7 +27,8 @@ updates:
     # the types say what the code may call, and the floor is what it runs on.
     # Nothing else catches a bump past the floor — `@types/node` declares no
     # `engines` for `engine-ranges.test.ts` to check. Bump it by hand with the
-    # change that raises `engines.node`.
+    # change that raises `engines.node`, together with the `@types/ssh2`
+    # override in pnpm-workspace.yaml that keeps it the tree's only copy.
     #
     # The Hindsight client moves by hand, with the hindsight-api image pins and
     # `cogmo.hindsightCompat` (see pnpm-workspace.yaml). A minor past the range

@@ -28,6 +28,11 @@ overrides:
   "fast-uri@>=3 <3.1.6": ">=3.1.6 <4" # GHSA-5jgf-p345-68v8, -f65p-4m7j-42xc, -fph4-wmhf-6fwf, -jqff-g426-hqxp (high) via ajv
   "hono@>=4 <4.13.5": ">=4.13.5 <5" # GHSA-gqvv-2mrq-wpjv, -g6gw-c38x-mqfc, -crvj-82cr-hjcx (moderate) via @modelcontextprotocol/sdk, inngest
   "qs@>=6 <6.16.0": ">=6.16.0 <7" # GHSA-x5fp-wj9c-mxmx, GHSA-4mjr-xmp4-gh2g (moderate) via express, body-parser
+  # Not a floor: @types/ssh2 alone asks for @types/node ^18. With that second
+  # copy in the tree, a package taking any @types/node (`*`) binds to whichever
+  # copy the resolver reuses, and Dependabot's re-resolution picks 18. One copy
+  # leaves `*` one candidate. Move it with apps/server's @types/node.
+  "@types/ssh2>@types/node": "^26.6.6"
 
 # The Hindsight client is a first-party dependency (we contribute upstream and
 # pin the server to the matching image), so the supply-chain soak that guards
