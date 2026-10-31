@@ -4,6 +4,7 @@ import semver from "semver";
 import { describe, expect, it } from "vitest";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
+import { expectDefined } from "./assertions.js";
 import { repoRoot } from "./repo-root.js";
 
 /**
@@ -84,10 +85,12 @@ interface DependencyRange {
   range: string;
 }
 
+function readLockfile() {
+  return LockfileSchema.parse(parseYaml(readFileSync(join(ROOT, "pnpm-lock.yaml"), "utf8")));
+}
+
 function declaredNodeRanges(): DependencyRange[] {
-  const lockfile = LockfileSchema.parse(
-    parseYaml(readFileSync(join(ROOT, "pnpm-lock.yaml"), "utf8")),
-  );
+  const lockfile = readLockfile();
   const ranges: DependencyRange[] = [];
   for (const [id, entry] of Object.entries(lockfile.packages ?? {})) {
     // A platform binary for an OS Cogmo never runs on (sharp's 32-bit Windows
@@ -158,5 +161,28 @@ describe("engines.node stays within every dependency's range", () => {
     // stopped producing usable ranges and the assertion above is passing
     // vacuously.
     expect(conflicts(">=1.0.0", declaredNodeRanges())).not.toEqual([]);
+  });
+});
+
+/**
+ * `@types/node` says what the code may call, so the graph holds the one copy
+ * apps/server declares. A second copy lets a package that takes any
+ * `@types/node` (`*`) bind to either, and a resolver re-resolving part of the
+ * tree, as Dependabot does, moves it to the other.
+ */
+describe("@types/node", () => {
+  it("resolves to one version, the one apps/server declares", () => {
+    const declared = z
+      .object({ devDependencies: z.object({ "@types/node": z.string() }) })
+      .parse(JSON.parse(readFileSync(join(SERVER_PKG_DIR, "package.json"), "utf8")))
+      .devDependencies["@types/node"];
+    const versions = Object.keys(readLockfile().packages ?? {})
+      .filter((id) => id.startsWith("@types/node@"))
+      .map((id) => id.slice("@types/node@".length));
+
+    expect(versions).toHaveLength(1);
+    expect(semver.satisfies(expectDefined(versions[0], "@types/node version"), declared)).toBe(
+      true,
+    );
   });
 });

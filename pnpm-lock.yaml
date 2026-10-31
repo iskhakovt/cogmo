@@ -10,6 +10,7 @@ overrides:
   fast-uri@>=3 <3.1.6: '>=3.1.6 <4'
   hono@>=4 <4.13.5: '>=4.13.5 <5'
   qs@>=6 <6.16.0: '>=6.16.0 <7'
+  '@types/ssh2>@types/node': ^26.6.6
 
 importers:
 
@@ -4036,9 +4037,6 @@ packages:
   '@types/ms@2.1.0':
     resolution: {integrity: sha512-GsCCIZDE/p3i96vtEqx+7dBUGXrc7zeSK3wwPHIaRThS+9OhWIXRqzs4d6k1SVU8g91DrNRWxWUGhp5KXQb2VA==}
 
-  '@types/node@18.19.130':
-    resolution: {integrity: sha512-GRaXQx6jGfL8sKfaIDD6OupbIHBr9jv7Jnaml9tB7l4v068PAOXqfcujMMo5PhbIs6ggR1XODELqahT2R8v0fg==}
-
   '@types/node@26.6.6':
     resolution: {integrity: sha512-MzQj+8Kx3XI40OmUAE6Qoh58ZMNstNNMwn2nfd3qWsfe7nDNSqJNzes4njhz6AHwrSHOffSLwXU6yb474Q4aog==}
 
@@ -6468,9 +6466,6 @@ packages:
   unbash@6.0.1:
     resolution: {integrity: sha512-0db9eS5iqybux41zLkX69nk90KTci7F7eZ+gXzEG/Q7E0tAqEBhRh5fkZvk1N7jT7QkGWqq34i8SFGPFEe1V8A==}
     engines: {node: '>=14'}
-
-  undici-types@5.26.5:
-    resolution: {integrity: sha512-JlCMO+ehdEIKqlFxk6IfVoAUVmgz7cU7zD/h9XZ0qzeosSHmUJVOzSQvvYSYWXkFXC+IfLKSIffhv0sVZup6pA==}
 
   undici-types@8.10.0:
     resolution: {integrity: sha512-ibvdovq3nCFs8Msrd95BW+zUOq+aOVbT+wpHUoPWhztbHEoPc6oof51iFDB6Es8lTKvNvVW9jNSAB8dwrKTMGg==}
@@ -10341,10 +10336,6 @@ snapshots:
 
   '@types/ms@2.1.0': {}
 
-  '@types/node@18.19.130':
-    dependencies:
-      undici-types: 5.26.5
-
   '@types/node@26.6.6':
     dependencies:
       undici-types: 8.9.0
@@ -10386,7 +10377,7 @@ snapshots:
 
   '@types/ssh2@1.15.5':
     dependencies:
-      '@types/node': 18.19.130
+      '@types/node': 26.6.6
 
   '@types/tough-cookie@4.0.5': {}
 
@@ -12892,8 +12883,6 @@ snapshots:
   ulid@2.4.0: {}
 
   unbash@6.0.1: {}
-
-  undici-types@5.26.5: {}
 
   undici-types@8.10.0: {}
 
