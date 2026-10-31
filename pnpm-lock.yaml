@@ -10299,7 +10299,7 @@ snapshots:
 
   '@types/connect@3.4.38':
     dependencies:
-      '@types/node': 18.19.130
+      '@types/node': 26.6.6
 
   '@types/debug@4.1.13':
     dependencies:
@@ -10335,7 +10335,7 @@ snapshots:
 
   '@types/memcached@2.2.10':
     dependencies:
-      '@types/node': 18.19.130
+      '@types/node': 26.6.6
 
   '@types/mime-types@3.0.1': {}
 
@@ -10355,7 +10355,7 @@ snapshots:
 
   '@types/pg@8.15.6':
     dependencies:
-      '@types/node': 18.19.130
+      '@types/node': 26.6.6
       pg-protocol: 1.16.0
       pg-types: 2.2.0
 
