@@ -10,7 +10,6 @@ overrides:
   fast-uri@>=3 <3.1.6: '>=3.1.6 <4'
   hono@>=4 <4.13.5: '>=4.13.5 <5'
   qs@>=6 <6.16.0: '>=6.16.0 <7'
-  '@daytona/sdk>fast-glob': '-'
 
 importers:
 
