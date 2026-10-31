@@ -60,7 +60,7 @@ variable "NPM_VERSION" {
 // `stable` dist-tag, not `latest`: `latest` and `next` are the same build,
 // so following it puts the sandbox CLI ahead of the stable rollout.
 variable "CLAUDE_CODE_VERSION" {
-  default = "2.1.304"
+  default = "2.1.309"
 }
 
 // Default group builds every image — used by publish.yml on release.
