@@ -18,9 +18,9 @@ First-class feature from day one. Six stages, each a complete working system. St
 
 ### Stage 2: Skill Library `[research]`
 **Trigger:** When agent repeatedly does the same multi-step task
-**What:** Agent writes reusable code tools. Human reviews before promotion.
+**What:** Agent writes reusable code tools. The human approves each skill's spec; agent reviewers check its code ([skills.md → Authoring pipeline](skills.md#authoring-pipeline-proposed)).
 **Implementation:** Voyager pattern — `skills/code/` + `skills/description/`. Description embedding is retrieval key. Skills are compositional (new skills build on old ones).
-**Review gate:** Inngest `waitForEvent()` pauses until human approves via Telegram callback.
+**Review gate:** the spec card, mechanical verify gates and a cross-family reviewer panel ([skills.md → Review stage](skills.md#review-stage)).
 **Standard:** SKILL.md progressive disclosure:
 - Tier 1: Name + description (~50 tokens, always loaded)
 - Tier 2: Full instructions (~500 tokens, on trigger)
@@ -120,7 +120,7 @@ CREATE TABLE signals (
 | Max 5 evolutions per cycle | Wang & Dorchen proof: unbounded self-improvement breaks learnability |
 | Allowlist not denylist | For tool/capability access |
 | Test before trust | Run on held-out set before promoting |
-| Human review for code changes | Inngest `waitForEvent()` + Telegram approval |
+| Human review for code changes | Coding tasks: the PR merge gate. Skills: the human approves the spec and agent reviewers check the code ([skills.md → Review stage](skills.md#review-stage)) |
 | Overfitting guard | Forbid referencing specific examples in optimized prompts (Dropbox lesson) |
 
 ## Stage 4 Graduation Features `[research]`
