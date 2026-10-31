@@ -1,0 +1,1 @@
+**Biome formats the repo's YAML too**, which the Biome 2.6 entry left off. pnpm's own files, `pnpm-lock.yaml` and `pnpm-workspace.yaml`, stay out of it. Markdown formatting stays off: on 2.6.3 and 2.6.4 it corrupts content (`todo.md`, Blocked).
