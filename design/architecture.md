@@ -4,9 +4,9 @@
 
 **Memory is a dumb store** — all intelligence lives in Claude sessions. Hindsight stores and retrieves; Claude decides what matters.
 
-**Stateless per invocation** — the Node.js process stays up (HTTP server, Inngest Connect workers), but each agent invocation is stateless. Webhook triggers fresh agent call, agent reads latest config/memory from DB, calls tools via MCP, responds, done. No in-memory state carries between invocations. This means framework "immutable at runtime" limitations don't apply — self-evolution is just "edit config/prompts between invocations."
+**Stateless per invocation** — the Node.js process stays up (HTTP server, Inngest Connect workers), but each agent invocation is stateless. Webhook triggers fresh agent call, agent reads latest config/memory from DB, calls tools (in-process, skills, MCP), responds, done. No in-memory state carries between invocations. This means framework "immutable at runtime" limitations don't apply — self-evolution is just "edit config/prompts between invocations."
 
-**Model-agnostic API tier** — orchestrator uses raw SDK calls. Interactive tier can be Claude Sonnet, GPT, or Grok — swap providers without touching orchestration. Background tasks use `claude -p` headless (subscription, $0).
+**Model-agnostic API tier** — orchestrator uses raw SDK calls. Interactive tier can be Claude Sonnet, GPT, or Grok — swap providers without touching orchestration. Background work (Observer extraction, scheduled turns) goes through the same provider routing; `claude -p` headless (subscription) runs only coding delegation ([coding-delegation.md](coding-delegation.md)).
 
 ## Topology: Orchestrator-Worker (Hub-and-Spoke) `[confirmed]`
 
@@ -36,14 +36,16 @@ No peer mesh (17x error amplification in Google/MIT research, 0 production succe
     +-------------+   +-------------+   +-------------+
 ```
 
+The Evolution Supervisor and Ingestion Agents are planned ([evolution.md](evolution.md), [scheduling.md](scheduling.md)). Workers built so far beside the Conversation and Extraction agents: scheduled tasks, skills, coding delegation, sub-agents and pipelines.
+
 ## Data Flow `[confirmed]`
 
 ```
-INGESTION (scheduled, headless)              RETRIEVAL (interactive)
+INGESTION (scheduled, planned)               RETRIEVAL (interactive)
 
   [Email / Calendar / Strava / ...]            [User on Telegram]
               |                                        |
-     claude -p (background)                   anthropic SDK (per-token)
+     provider-routed API (background)         provider-routed API (per-token)
      "extract important facts"                "answer using memory"
               |                                        |
      hindsight.retain(fact, network)          hindsight.recall(query)
@@ -58,8 +60,8 @@ INGESTION (scheduled, headless)              RETRIEVAL (interactive)
 
 | Path | Trigger | Method |
 |-|-|-|
-| Real-time | User says "remember X" | User intent, immediate `retain()` |
-| Post-conversation (Observer) | Chat idle ~5 min | Bot code extracts facts from transcript |
+| Real-time | User says "remember X" | User intent, staged in `pending_memories` at once; the Observer classifies and retains it |
+| Post-conversation (Observer) | Chat idle for `SESSION_IDLE_TIMEOUT_MINUTES` (default 60) | Bot code extracts facts from transcript |
 | Scheduled ingestion | `scheduled_tasks` row + ticker fan-out (see [scheduling.md](scheduling.md)) | Pull email/calendar/etc, extract, `retain()` |
 
 ## Two-Tier Memory `[confirmed]`
@@ -78,14 +80,19 @@ Additive-only writes. Never fail a write. Hindsight consolidates each `retain()`
 | Component | Implementation | Runs as |
 |-|-|-|
 | Orchestrator | Inngest functions + raw SDK tool dispatch | Main Node.js process (Inngest Connect) |
-| Conversation agent | Inngest function, triggered by `inbound/arrived` event | Durable steps in main process |
-| Ingestion agents | Inngest functions, cron-triggered | Durable steps in main process |
+| Conversation agent | `handle-message`, triggered by `inbound/ready` once debounce has batched `inbound/arrived` | Durable steps in main process |
+| Scheduled tasks | `scheduled-task-ticker` cron fanning out to `scheduled-task-fire` | Durable steps in main process |
+| Ingestion agents (planned) | Inngest functions, cron-triggered | Durable steps in main process |
 | Extraction agent | Inngest function, triggered by `conversation/idle` event | Durable steps in main process |
-| Evolution supervisor | Inngest function, cron-triggered | Durable steps in main process |
+| Evolution supervisor (planned) | Inngest function, cron-triggered | Durable steps in main process |
 | Memory | Hindsight HTTP client → self-hosted Hindsight server | Docker service (Python, uses PostgreSQL + pgvector internally) |
 | Orchestration | Inngest (self-hosted) | Go binary (Connect via WebSocket) |
-| Interfaces | Channel adapters (`AdapterModule` contract) | Table-driven: direct (Inngest events), Telegram (long polling), future: webhooks, SSE |
+| Interfaces | Channel adapters (`AdapterModule` contract) | Table-driven: direct (Inngest events), Telegram (long polling), Web UI (oRPC + SSE from the in-process server, [web-ui.md](web-ui.md)) |
 | MCP integrations | MCP client SDK | Per-integration MCP servers |
+| Skills runtime | Pyodide workers and sysbox containers ([skills.md](skills.md)) | Worker threads in main process; sibling containers |
+| Sandbox | sysbox containers behind a Docker API proxy, or remote Daytona sandboxes ([sandbox.md](sandbox.md)) | Sibling containers reaped by `sandbox-reaper`; Daytona on its own API |
+| Coding delegation | `coding-task-*` functions driving `claude -p` ([coding-delegation.md](coding-delegation.md)) | CLI subprocess inside a sandbox container |
+| Pipelines | `pipeline-stage-runner` and gate functions ([pipelines.md](pipelines.md)) | Durable steps in main process |
 
 ## Orchestration Coupling `[confirmed]`
 
@@ -114,6 +121,8 @@ Hindsight is a **client-server system**. `@vectorize-io/hindsight-client` is a p
 - **Client config:** Just `baseUrl` + optional `apiKey`. No database connections from our app.
 
 ## Background Tasks: Claude Code Agent SDK `[research]`
+
+Not adopted: background work runs on the provider-routed API tier, and coding delegation drives the `claude -p` CLI inside a sandbox container ([coding-delegation.md](coding-delegation.md)). Kept as research.
 
 Three tiers of LLM calls:
 

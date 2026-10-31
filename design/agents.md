@@ -125,6 +125,70 @@ Claude (and most modern tool-use protocols) can emit multiple `tool_use` blocks 
 
 Reference: `executeToolCalls` in `src/agent/loop.ts`. See `design/decisions.md` for the tradeoff that drove this shape.
 
+### Turn Authority `[proposed]`
+
+What a turn's tools may do depends on who started the turn. A user turn acts with the user's authority. A scheduled fire or a pipeline stage runs a prompt saved earlier, often written by the model, with nobody watching. It may not extend itself (schedule, start pipelines), launch unattended work (delegate coding, register skills) or write standing instructions (rules, core memory). Without that limit, injected text in a fire's prompt, or in a page the fire reads, can schedule a recurring prompt that delegates coding and schedules again.
+
+**Sources.** `TurnSource` is the value set of the `inbound_message_source` pgEnum: `user`, `scheduled`, `pipeline`. A new value is a compile error in every exhaustive match over it until it has a policy. Nothing else starts a turn: a sub-agent is a tool-free call inside one, and a skill invoked as a tool acts through its turn's `Service`.
+
+**Where the source comes from.** Durable state, never message content. `handle-message` computes `turnAuthorityOf(rows)` over the rows `load-inbound` memoized, each of which carries its `source`. The pipeline stage runner passes `pipeline`: it runs only stage turns, and its `persist-stage-prompt` writes the inbound as `source='pipeline'`. The turn's authority is `TurnAuthority = { kind: "turn"; source: TurnSource }`.
+
+**Policy.** Every `ToolSpec` declares `requires: "any_turn" | "user_turn"`. The field is required, where `durable` is optional, so a tool can't ship without a decision; `defineTool` and the MCP, skill and sub-agent builders set it. `ToolRegistry.register` throws on a `user_turn` spec that isn't `durable`, so every verdict that can refuse is memoized. `authorize(authority, spec)` in `src/agent/turn-authority.ts` applies it: a user turn may call every tool, a scheduled or pipeline turn only `any_turn` ones. A stage's allowlist narrows its set further ([pipelines.md](pipelines.md#safety-proposed)).
+
+| Tool | Requires | Scheduled and pipeline turns | Why |
+|-|-|-|-|
+| `schedule_task` | `user_turn` | refused | The recursion guard (below). |
+| `remove_task` | `user_turn` | refused | A fire's prompt must not cancel the user's other tasks; a fire ending its own task is an open question. |
+| `delegate_coding` | `user_turn` | refused | It starts a sandboxed run and a draft PR, unattended when the profile auto-approves plans. Pipelines slice 4 adds a stage-scoped grant. |
+| `rule_set`, `rule_remove` | `user_turn` | refused | The non-user refusal [evolution.md](evolution.md#tools) specifies; the tools are not built yet. |
+| `core_memory_update` | `user_turn` | refused | Core memory renders into every system prompt, so a write is a standing instruction. |
+| `register_skill` | `user_turn` | refused | It deploys code, and while the classifier tags every skill `notify` the skill goes live unreviewed. |
+| `define_pipeline`, `activate_pipeline`, `start_pipeline` | `user_turn` | refused | Activation's preview/confirm gate needs the user; a definition's cron trigger is how a pipeline runs unattended. |
+| `memory_retain` | `any_turn` | allowed | Recording what it found is the point of many tasks. Tagging the staged row with the turn source, so the Observer can weigh a fact no user stated, is designed in turn-authority slice 3 (`todo.md`). |
+| `web_search`, `web_answer`, `fetch_url` | `any_turn` | allowed | A digest needs them; `fetch_url`'s destination check applies in every turn, and the refusals above limit what returned content can trigger. |
+| Skill tools (one per deployed skill) | `any_turn` | allowed | A deployed skill's effects were classified, and approved where its risk tier requires, at deploy ([skills.md](skills.md#risk-tiering--auto-apply-confirmed)). |
+| `mcp__*` | `any_turn` | allowed | The user approves each server per profile; whether a server can opt out of non-user turns is an open question. |
+| `write_file`, `edit_file`, `send_document`, `generate_image` | `any_turn` | allowed | A task's ordinary output: workspace files and deliveries to the user's own channels. The task cap and cadence bound what they cost. |
+| `subagent__*` | `any_turn` | allowed | Tool-free, text out. |
+| `memory_recall`, `memory_reflect`, `core_memory_read`, `read_file`, `list_files`, `list_tasks`, `list_pipelines`, `get_current_time` | `any_turn` | allowed | Reads. |
+
+**Frozen with the tool table.** `requires` is part of `FrozenToolSpecSchema`, so a run dispatches on the declarations its `freeze-turn-inputs` stored. A table frozen before the field parses with `requires: "any_turn"`: a build with no policy allowed every tool, and the run keeps the authority it started with. The frozen table is in the configuration digest, so the deploy that adds the field and the one that first declares `user_turn` each open one `configuration` epoch in every conversation at its next turn ([prompt-caching.md](prompt-caching.md#system-prompt-snapshot-confirmed)).
+
+**Enforced in one place: tool dispatch.** The loop takes `authority: TurnAuthority` as a required parameter beside `turnKey`. `runOne`'s handler thunk, the body of the durable `tool-iter<N>-<P>` step, calls `authorize` first and on a refusal returns `reject(message)` without calling the handler, so the refusal memoizes as the step's result and a replay returns it. The verdict is `{ kind: "allowed" } | { kind: "refused"; reason: "needs_user_turn" }`, matched exhaustively. The plan-then-execute refusal evolution.md specifies for the rule tools is a separate check in the same thunk, since it also reads the turn's memoized iterations.
+
+Handlers never read the source, and `ToolCallContext` doesn't carry it: the context is absent for non-durable tools and outside a retrying context. The one per-source behaviour inside a call, the turn source on a staged memory (turn-authority slice 3), is bound into the `Service` by `buildTurnService`, which then takes `TurnAuthority | { kind: "no_turn" }`. `no_turn` is a skill run outside any turn, cron-fired or from the CLI (`resolveSkillRunAs`): it stages memories with no turn source. The operator configured the run, no model chose it, its manifest's classified effects bound what it does, and its `ctx` has no scheduling, coding or rules methods.
+
+A refused tool stays in the turn's tool table, so chat and fire turns share one cached prefix ([prompt-caching.md](prompt-caching.md#one-prefix-per-conversation-proposed)); the turn context names the refused tools.
+
+**What the model is told.**
+
+- **The refusal**, an `is_error` tool_result: `Error: schedule_task isn't available in a scheduled turn: it needs a message from the user. Nothing was scheduled. Say in your reply what you would have done; the user can ask for it in their next message.` Class D counts it as no progress, and repeated attempts meet the volume-cluster nudge.
+- **The turn context** of a non-user turn, on the user message rather than in the system prompt, carries one more line: `Turn source: scheduled task. The user didn't send this message and isn't present: it is a task's saved prompt. Refused in this turn: schedule_task, remove_task, delegate_coding, core_memory_update. Memories you save are marked as saved by a scheduled task.` A stage turn reads `pipeline stage` and `a pipeline stage's instructions`. The refused list is the turn's frozen tool table filtered through `authorize`, so it names only tools the turn offers, and both inputs are step results. It is stored as `TurnContextSchema.authority` ([prompt-caching.md](prompt-caching.md#data-model)).
+- **The standing guidance**, `TURN_CONTEXT_GUIDANCE`, gains a sentence: when the turn context names a source other than the user, nobody is replying turn by turn, so do the task and report what was done and what was refused.
+
+**A mixed batch fails today.** The only mixed batch `handle-message` can load is user plus scheduled: a fire reuses an engaged conversation, so it can land while a user message waits out its debounce. `routingKindOf` throws on it in the bare body, before the loop, so the run fails after its retries and `onFailure` reports the turn failed and may open a cooldown. `turnAuthorityOf` still gives such a batch the least authority present, as defence in depth and as the rule for when the mixed-batch slice admits it: the model reads the batch as one message and can't tell which row asked for what, so a user row must not lend its authority to a fire's text.
+
+**Recursion guard.** No fire can create another: only user turns, the setup wizard and the CLI change the task set or a pipeline's triggers, and no turn without a user can add a task or start a pipeline. Unattended turns per user are then bounded by the task cap (`DEFAULT_SCHEDULED_TASK_CAP`, 200) times the fastest cadence (`MIN_CRON_INTERVAL_SECONDS`, one fire a minute), plus the active pipeline cron triggers times each definition's run quota ([pipelines.md](pipelines.md#safety-proposed)); a trigger is created at activation, which needs the user.
+
+**Failure modes.** The verdict is a pure function of the memoized inbound rows and the frozen declaration, so the policy adds no state.
+
+| Case | What happens | Why it is safe, or the residual |
+|-|-|-|
+| Crash inside a tool step before Inngest records it | The retry re-runs the thunk and gets the same verdict; an allowed call reaches the handler with its usual idempotency key | As for any durable tool ([crash-recovery.md](crash-recovery.md#per-tool-durability)) |
+| A run in flight across a deploy that changes declarations | Memoized steps replay their result; steps not yet run get the verdict of the table the run froze, `any_turn` for one frozen before the field | A memoized result and a frozen table are the contract with runs in flight. Residual: a fire in flight across the deploy that first declares `user_turn` can still schedule; `list_tasks` shows the task |
+| A re-delivered turn (a new run, empty step cache) after such a deploy | It freezes a fresh table, so its calls meet the current declarations; a batch that has grown into a mixed one throws, as above | Residual: a call the first delivery committed stays while the re-delivery may refuse it and say nothing was done; `list_tasks` shows what exists |
+| Two runs on one conversation | The conversation concurrency key serializes chat and stage turns; each run's authority comes from its own batch | Nothing shared |
+| The model repeats a refused call | Each is refused; the volume-cluster nudge follows past the tool's invocation budget | The loop stays bounded |
+| `inbound_message_source` gains a value | Compile error in `turnAuthorityOf`, `authorize` and the turn-context renderer | Nothing reaches dispatch without a policy |
+
+A refusal costs one step record and one more loop iteration; no handler runs. Implementation slices are in `todo.md` → Scheduling.
+
+**Open questions.**
+
+- **A fire ending its own task** ("check every hour until it's in stock"). It needs the firing task's id as durable turn state, which the turn doesn't carry today; `remove_task` stays `user_turn` until then.
+- **MCP servers in non-user turns.** Profile approval is the only gate today; a per-server opt-out would let the user keep a server with irreversible writes out of fires.
+- **The creation side.** A fire's task is created in a user turn, possibly after that turn read an injected page. The plan-then-execute refusal evolution.md gives the rule tools would apply to `schedule_task` as well; this section bounds what a fire can do, not whether it gets created.
+
 ## Routing: Agents-as-Tools `[confirmed]`
 
 A **sub-agent** is a specialist model the orchestrator can delegate a subtask to, exposed as a tool. It's the answer to "this model is great at a feature but can't run tools": the orchestrator holds the tools, the specialist runs tool-free and returns text. Claude's native tool selection handles routing — no router agent.

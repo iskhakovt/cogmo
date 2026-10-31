@@ -320,6 +320,8 @@ When a fire event lands, the fire handler dispatches the synthetic inbound, then
 
 **Routing for scheduled turns.** `RoutingContext.kind` is `'broadcast'` when any inbound in the turn's range is `source='scheduled'`. `DeliveryRouter.prepare()` skips source routing in this mode and delivers to every reachable session on the conversation — source routing would find nothing for a synthetic inbound with no originating session. The `receive: 'all'` overlay for private conversations still applies, so Web UI tabs watching the conversation receive the response too. `broadcast` is rejected on `isPrivate=false` conversations to prevent leaking proactive context into group threads; scheduled fires only target private conversations.
 
+**Authority for scheduled turns** `[proposed]`. `source='scheduled'` also limits what the turn's tools may do ([agents.md → Turn Authority](agents.md#turn-authority-proposed)). The limit comes from the turn's inbound rows, not from who created the task: a wizard or CLI task's fire reads content no more trusted than an agent-created one's.
+
 ### Idempotency, drift, catch-up
 
 | Concern | Approach |

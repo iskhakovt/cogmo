@@ -9,6 +9,7 @@ import { commandComposer } from "./forwarded.js";
 import { createInboundDispatch } from "./inbound-dispatch.js";
 import { telegramFunctions } from "./inngest-functions.js";
 import { registerMessageHandlers } from "./message-handlers.js";
+import { privateChatGate } from "./private-chat-gate.js";
 import { ProfileDialogs } from "./profile-dialog.js";
 import { renderTelegramHtml } from "./render.js";
 import { RepoDialogs } from "./repo-dialog.js";
@@ -39,7 +40,9 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   const adapter = new TelegramAdapter(bot, attachments);
   const profileDialogs = new ProfileDialogs();
   const repoDialogs = new RepoDialogs();
-  // Ahead of every handler, so nothing runs for a sender the channel doesn't admit.
+  // Ahead of every handler, so nothing runs outside a private chat or for a
+  // sender the channel doesn't admit.
+  bot.use(privateChatGate());
   bot.use(senderGate(transport));
   // Forwarded messages never run commands; they reach the message handlers below.
   registerCommands(commandComposer(bot), { transport, profileDialogs, repoDialogs });

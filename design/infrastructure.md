@@ -85,7 +85,7 @@ Hindsight and Inngest credentials are **env vars, not `secrets` rows**: deployme
 
 Each check fails boot if the server answers an unauthenticated request (the key would be ignored) or rejects Cogmo's key; `src/boot/checks.integration.test.ts` pins these premises against the pinned images. Dev and test Hindsight containers enforce a fixed key (`HINDSIGHT_TEST_API_KEY`), so every integration and e2e run uses the authenticated path; Inngest runs `inngest dev` with `INNGEST_DEV=true` there.
 
-Keys don't close every route — see `DEPLOYMENT.md` → Securing internal services.
+Keys don't close every route — see `deploy.md` → Securing internal services.
 
 ### Env lifecycle
 
@@ -134,7 +134,7 @@ On `SIGTERM` or `SIGINT`, the Inngest connection closes first, waiting for every
 
 The web server goes first so no request reaches a stopped dependency. It gets its 3 s drain plus 5 s; every other step is capped at 5 s. A step that overruns or throws doesn't stop the next, and `serve` logs each step's outcome and exits 0 regardless: the process did stop, and the log says what didn't.
 
-**Time budget.** After Inngest's drain, the teardown takes at most 33 s: 8 s for the web server and 5 s each for the adapters, MCP, the skills pool, the sandbox and the instance row; stopping the coding streams' sweep is synchronous. Docker's default stop grace is 10 s, after which it sends `SIGKILL`, so cogmo's container sets a longer one: `--stop-timeout 60` (`stop_grace_period: 60s` in compose), which leaves about 27 s for runs in flight ([DEPLOYMENT.md → Stopping](../DEPLOYMENT.md#stopping)).
+**Time budget.** After Inngest's drain, the teardown takes at most 33 s: 8 s for the web server and 5 s each for the adapters, MCP, the skills pool, the sandbox and the instance row; stopping the coding streams' sweep is synchronous. Docker's default stop grace is 10 s, after which it sends `SIGKILL`, so cogmo's container sets a longer one: `--stop-timeout 60` (`stop_grace_period: 60s` in compose), which leaves about 27 s for runs in flight ([deploy.md → Stopping](../deploy.md#stopping)).
 
 ## Image processing `[confirmed]`
 

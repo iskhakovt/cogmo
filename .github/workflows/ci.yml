@@ -60,7 +60,7 @@ jobs:
               - '!design/**'
               - '!changelog.d/**'
               - '!todo.md'
-              - '!PROGRESS.md'
+              - '!progress.md'
               - '!LICENSE'
               - '!.github/ISSUE_TEMPLATE/**'
 
