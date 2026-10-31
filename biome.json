@@ -6,7 +6,13 @@
     "useIgnoreFile": true
   },
   "files": {
-    "includes": ["**", "!apps/server/test/fixtures", "!design/web-ui/mockups", "!pnpm-lock.yaml"]
+    "includes": [
+      "**",
+      "!apps/server/test/fixtures",
+      "!design/web-ui/mockups",
+      "!pnpm-lock.yaml",
+      "!pnpm-workspace.yaml"
+    ]
   },
   "css": {
     "parser": {

@@ -467,7 +467,16 @@ jobs:
     name: Required Checks
     if: always()
     needs:
-      [changes, pr-title, schema-docs, check, hadolint, skills-runtime, unit, web, integration, e2e]
+      - changes
+      - pr-title
+      - schema-docs
+      - check
+      - hadolint
+      - skills-runtime
+      - unit
+      - web
+      - integration
+      - e2e
     runs-on: ubuntu-latest
     timeout-minutes: 1
     steps:
