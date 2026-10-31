@@ -35,6 +35,8 @@ Read `design/` for the full picture. Key docs:
 | [context-management.md](design/context-management.md) | Token counting, compaction pipeline, model registry |
 | [prompt-caching.md](design/prompt-caching.md) | Byte-stable prompt prefix, per-turn context on the user message, provider-neutral cache intent, usage accounting |
 | [transport/](design/transport/) | Messaging architecture — adapters, sessions, debounce, routing, identity |
+| [voice.md](design/voice.md) | Voice messages — speech-to-text inbound, text-to-speech outbound, pluggable providers |
+| [operator-facade.md](design/operator-facade.md) | Plan to split `Transport` into the channel contract and an operator-command surface |
 | [web-ui.md](design/web-ui.md) | Browser cockpit — in-process UI server, oRPC admin API, SSE chat, auth, Ledger design system |
 | [integrations.md](design/integrations.md) | Channel adapters, skill library, permission tiers, plugin extensibility |
 | [integrations/mcp.md](design/integrations/mcp.md) | MCP client — server config, lifecycle, sandboxing, schema pinning, profile filtering |
@@ -80,11 +82,12 @@ Other tracking docs:
 ## Stack
 
 - **Language:** TypeScript on Node.js
-- **Framework:** None — raw Anthropic SDK + OpenAI SDK (for OpenAI-compatible providers)
+- **Framework:** None — raw Anthropic SDK + OpenAI SDK (for OpenAI-compatible providers); Vercel AI SDK for image generation only ([design/image-generation.md](design/image-generation.md))
 - **Memory:** Hindsight (self-hosted server + HTTP client) — PostgreSQL + pgvector managed by Hindsight
 - **Orchestration:** Inngest (self-hosted) — event-driven durable execution, scheduling, queues
-- **Interface:** Telegram (primary), adapter pattern for others
-- **Deployment:** Standard Node.js process (systemd, Docker, etc.)
+- **Interface:** Telegram (primary) and a browser web UI, adapter pattern for others
+- **Storage:** PostgreSQL via Drizzle; S3-compatible object storage for files and attachments
+- **Deployment:** one Docker image running a single Node.js process ([deploy.md](deploy.md))
 
 ## Module Structure
 
@@ -92,17 +95,24 @@ Other tracking docs:
 
 | Module | Responsibility | Rule |
 |-|-|-|
-| `src/agent/` | Agentic loop, tool registry, service interface, prompt assembly, tools (memory, web, file, core memory) | Domain logic — how the agent thinks and acts |
-| `src/transport/` | Channel adapters (Direct, Telegram), delivery router, attachment store, session management, identity | Transport — how messages arrive and responses are delivered |
+| `src/agent/` | Agentic loop, tool registry, service interface, prompt assembly, tools (memory, web, file, core memory, image, sub-agents, scheduling), Observer/evolution, coding delegation, pipelines, model catalog | Domain logic — how the agent thinks and acts |
+| `src/transport/` | Channel adapters (Direct, Telegram, Web), delivery router, attachment store, session management, identity | Transport — how messages arrive and responses are delivered |
 | `src/db/` | Connection pool, transaction helper | Pure infrastructure — no schemas, no business logic |
 | `src/inngest/` | Inngest client, event definitions, the `Durable` step port and its `fromStepTools` adapter, `EventPublisher` | Orchestration infrastructure — client setup, event schemas and the port use cases plan steps through; no business logic. See [design/architecture.md](design/architecture.md) → Orchestration Coupling |
 | `src/llm/` | LLM provider interface, SDK adapters (Anthropic, OpenAI-compatible), canonical types (ContentBlock, StreamEvent, ImageBlock) | Single LLM call — provider abstraction, request/response translation |
 | `src/memory/` | Memory provider interface, Hindsight adapter | Memory access — provider abstraction, HTTP client |
 | `src/cli/` | `cogmo` operator commands — one cmd-ts command tree per command group, the shared runner (`run.ts`) and argument parsers (`args.ts`) | Transport edge — parses the command line and calls use-cases; a handler loads its own dependencies and resolves to the exit code. Domain modules never import from here. |
+| `src/mcp/` | MCP client — server registry, connections, tool approval, `mcp_servers` store | Domain logic — MCP servers as a tool source |
+| `src/skills/` | Skill library — git-backed repo, dispatcher, Pyodide and sysbox workers, `ctx` handler, cron, `skills` store | Domain logic — user skills and their runtime |
+| `src/sandbox/` | Container sandbox — supervisor, Docker API proxy, Daytona backend, reaper, lineage store | Domain logic — isolated execution for coding and skills |
+| `src/voice/` | TTS/STT providers, voice-mode resolution | Domain logic — voice input and output |
+| `src/secrets/` | Encrypted secrets store (AES-256-GCM, HKDF), GitHub/SSH credential helpers | Domain logic — credentials at rest |
+| `src/setup/` | `cogmo setup` wizard, non-interactive setup, seed, reset | Transport edge — operator setup over the domain use cases |
+| `src/boot/` | Staged `cogmo serve` bootstrap (core → sandbox → skills → runtime) and shutdown | Composition root — wires implementations to interfaces; no domain logic |
 | `src/web/` | Web UI server — promoted health router, oRPC admin API over `Transport`, fail-closed session auth (`web_sessions`), static SPA serving | Transport edge — a thin HTTP/RPC adapter that calls `Transport`/use-cases, no domain logic |
 | `src/util/` | Cross-cutting pure helpers (retry, etc.) | Stateless utilities only — no I/O ownership, no domain logic. If a helper needs DI, it belongs in a domain module instead. |
 
-**Infrastructure modules (`db/`, `inngest/`, `llm/`, `memory/`) contain only core setup and abstractions.** Business logic that uses them lives in domain modules (`agent/`, `transport/`). Example: the Inngest event definitions live in `src/inngest/events.ts`, but the `handle-message` orchestrator function that uses them lives in `src/agent/`. Respond functions live in `src/transport/`, not `src/inngest/functions/`.
+**Infrastructure modules (`db/`, `inngest/`, `llm/`, `memory/`) contain only core setup and abstractions.** Business logic that uses them lives in domain modules (`agent/`, `transport/`, `skills/`, `sandbox/`, `mcp/`, …). Example: the Inngest event definitions live in `src/inngest/events.ts`, but the `handle-message` orchestrator function that uses them lives in `src/agent/`. Every Inngest function lives in the domain module that owns its work, never in `src/inngest/`.
 
 ## Store Pattern
 
@@ -156,7 +166,7 @@ After making changes, run: `pnpm typecheck && pnpm lint && pnpm test`
 - **Build for the long term, not just the next feature.** This is not an MVP hack — it's a system designed to grow. Before implementing, think about how each piece interacts with the rest: how will this work with memory extraction? With multi-channel? With evolution? If a shortcut now creates a rewrite later, take the longer path. Stop and think about how pieces fit together before writing code.
 - **Early abstractions pay off** — define interfaces and typed contracts upfront. A clean LLM provider interface costs nothing now and saves a rewrite later.
 - **Event decoupling** — components communicate via Inngest events, not direct imports. The orchestrator emits `response/ready`; channel adapters listen independently. Adding a new channel never touches the orchestrator.
-- **Thin infrastructure layers** — Inngest functions are controllers: receive event, call domain services, emit events. Zero business logic in `src/inngest/functions/`. Domain logic lives in `src/agent/`, `src/llm/`, `src/transport/` and is testable without Inngest.
+- **Thin infrastructure layers** — Inngest functions are controllers: receive event, call domain services, emit events. None live in `src/inngest/`. Domain logic lives in `src/agent/`, `src/llm/`, `src/transport/` and is testable without Inngest.
 - **Domain owns logic, infra owns wiring** — use cases plan durable steps through the `Durable` port in `src/inngest/`, not Inngest's `step` (single-step handlers may call `step` directly; the multi-step exceptions are listed there); the functions themselves are Inngest's by design (design/architecture.md → Orchestration Coupling). If swapping Anthropic for OpenAI, only `src/llm/anthropic.ts` changes.
 - **Design for pluggability** — prompts, tools, LLM providers, and channels each have an explicit interface (`LlmProvider`, `Service`, `Adapter`, `Transport`, etc.) that defines the plugin contract. All code depends on these interfaces, never on concrete implementations. Today they're in-process; in the future they become the boundary for external plugins (WASM, MCP, containers). Every new extension point must define its interface first. See `design/integrations.md`.
 - **Service interface for tools** — tools access external systems exclusively through `Service`, never via direct service references. The orchestrator scopes the service per request (e.g., memory scoped to the current user's bank) and controls what each tool can access (ACL boundary). This is the same interface whether tools run in-process or in WASM. Tool inputs are validated at runtime — Zod for in-process TypeScript tools, JSON Schema validator for future plugins. See `design/agents.md` → Tool Architecture.

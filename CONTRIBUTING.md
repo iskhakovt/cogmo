@@ -18,7 +18,7 @@ This is a private personal project, but the conventions below apply to anyone (h
 Before pushing, run:
 
 ```bash
-pnpm typecheck && pnpm lint && pnpm test
+pnpm typecheck && pnpm lint && pnpm knip && pnpm test && pnpm --filter web test
 ```
 
 For changes that affect prompts, tools, or LLM/embedding requests, also re-record fixtures and run integration tests:
@@ -60,7 +60,7 @@ type(scope): description
 | `perf` | patch | Performance improvements |
 | `refactor`, `test`, `docs`, `chore`, `ci`, `build` | none | Internal changes, no release cut |
 
-**Scope** is optional but encouraged when the change is localised: `feat(transport): add Slack adapter`, `fix(memory): handle empty recall result`. Use the module name from `src/` as the scope.
+**Scope** is optional but encouraged when the change is localised: `feat(transport): add Slack adapter`, `fix(memory): handle empty recall result`. Use the module name from `apps/server/src/` (or `web` for `apps/web/`) as the scope.
 
 **Description** is imperative, lowercase, no trailing period: `add X`, not `Added X.` or `Adds X`.
 
@@ -86,7 +86,11 @@ Wrong format = no release. The PR title check runs commitlint (the `pr-title` jo
 | **Typecheck, Lint & Knip** | `pnpm typecheck && pnpm lint && pnpm knip` |
 | **Unit Tests** | `pnpm test` (PGlite, mocked LLM) + Codecov upload |
 | **Integration Tests** | `pnpm test:integration` against testcontainers + llmock fixtures |
-| **E2E Tests** | Builds Docker image, runs `pnpm test:e2e` against it |
+| **Hadolint** | Lints the Dockerfiles |
+| **Skills Runtime** | ruff, pyrefly and pytest over the Python skills runtime |
+| **Web Tests** | `pnpm --filter web build` and `pnpm --filter web test` (Vitest Browser Mode on Chromium) |
+| **E2E Tests** | Bakes the `cogmo` image and runs `pnpm test:e2e` against it. On PRs only with the `e2e` label (removed after a pass); always on pushes to `main` |
+| **Required Checks** | Aggregates the jobs above; the merge gate |
 
 ## Release process
 
@@ -98,8 +102,7 @@ Releases are cut on demand, not on every merge. The version is never bumped by h
    - Runs `semantic-release`: reads commits since the last tag, computes the next version, generates release notes, and creates the GitHub release and `vX.Y.Z` tag.
 3. If a release was published, the same run calls `.github/workflows/publish.yml`:
    - Derives the version from the tag at HEAD (Dunamai).
-   - Builds the images.
-   - Pushes `ghcr.io/<owner>/cogmo:<version>` and its variants.
+   - Builds and pushes `ghcr.io/<owner>/cogmo`, `cogmo-devbase` and `cogmo-skills`, each tagged `<version>` and `latest`.
 
 `chore:`/`docs:`/`refactor:`/etc. commits land in `main` without producing a version on their own. The next release that includes a `feat:` or `fix:` picks them up.
 
