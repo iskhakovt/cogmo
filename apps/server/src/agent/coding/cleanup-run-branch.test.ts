@@ -1,14 +1,17 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { InngestTestEngine } from "@inngest/test";
 import { RequestError } from "@octokit/request-error";
+import { sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Database, Transactor } from "../../db/index.js";
+import { inngest } from "../../inngest/client.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
-import { expectOk } from "../../test/assertions.js";
+import { assertKind, expectOk } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
-import { deleteRunBranch } from "./cleanup-run-branch.js";
+import { createRunBranchCleanupSubscriber, deleteRunBranch } from "./cleanup-run-branch.js";
 import { DrizzleCodingStore } from "./store/index.js";
 
 let db: Database;
@@ -84,7 +87,7 @@ function fakeOctokit(deleteRefImpl: () => Promise<unknown>) {
 }
 
 describe("deleteRunBranch", () => {
-  it("calls octokit.git.deleteRef with cogmo/run/<task-id> and returns deleted=true", async () => {
+  it("calls octokit.git.deleteRef with cogmo/run/<task-id> and resolves to deleted", async () => {
     const { taskId } = await seedRepoAndTask();
     const secretsStore = fakeSecretsStore(validIdentity);
     const captured: { ref?: string; owner?: string; repo?: string } = {};
@@ -101,13 +104,13 @@ describe("deleteRunBranch", () => {
       { taskId },
     );
 
-    expect(result.deleted).toBe(true);
+    expect(result).toEqual({ kind: "deleted" });
     expect(captured.owner).toBe("owner");
     expect(captured.repo).toBe("example");
     expect(captured.ref).toBe(`heads/cogmo/run/${taskId}`);
   });
 
-  it("swallows 404 (already deleted) as deleted=false with reason", async () => {
+  it("reads 404 (already deleted) as not_found", async () => {
     const { taskId } = await seedRepoAndTask();
     const secretsStore = fakeSecretsStore(validIdentity);
     const octokit = fakeOctokit(async () => {
@@ -124,11 +127,10 @@ describe("deleteRunBranch", () => {
       { runInTx: tx, store, secretsStore, octokitFactory: () => octokit },
       { taskId },
     );
-    expect(result.deleted).toBe(false);
-    expect(result.reason).toContain("404");
+    expect(result).toEqual({ kind: "not_found", missing: "ref" });
   });
 
-  it("swallows 422 (Reference does not exist) as deleted=false with reason", async () => {
+  it("reads 422 (Reference does not exist) as not_found", async () => {
     const { taskId } = await seedRepoAndTask();
     const secretsStore = fakeSecretsStore(validIdentity);
     const octokit = fakeOctokit(async () => {
@@ -145,8 +147,7 @@ describe("deleteRunBranch", () => {
       { runInTx: tx, store, secretsStore, octokitFactory: () => octokit },
       { taskId },
     );
-    expect(result.deleted).toBe(false);
-    expect(result.reason).toContain("422");
+    expect(result).toEqual({ kind: "not_found", missing: "ref" });
   });
 
   it("propagates 5xx so Inngest retries with backoff", async () => {
@@ -170,7 +171,7 @@ describe("deleteRunBranch", () => {
     ).rejects.toThrow(/Bad Gateway/);
   });
 
-  it("returns deleted=false when task row is missing (no octokit call)", async () => {
+  it("resolves to not_found when the task row is missing (no octokit call)", async () => {
     const secretsStore = fakeSecretsStore(validIdentity);
     const octokit = fakeOctokit(async () => {
       throw new Error("should not be called");
@@ -180,11 +181,10 @@ describe("deleteRunBranch", () => {
       { runInTx: tx, store, secretsStore, octokitFactory: () => octokit },
       { taskId: "019d0000-0000-7000-8000-0000000000ff" },
     );
-    expect(result.deleted).toBe(false);
-    expect(result.reason).toContain("task row not found");
+    expect(result).toEqual({ kind: "not_found", missing: "task" });
   });
 
-  it("returns deleted=false when identity secret is missing (no octokit call)", async () => {
+  it("resolves to unavailable when the identity secret is missing (no octokit call)", async () => {
     const { taskId } = await seedRepoAndTask();
     const secretsStore = fakeSecretsStore(undefined);
     const octokit = fakeOctokit(async () => {
@@ -195,7 +195,130 @@ describe("deleteRunBranch", () => {
       { runInTx: tx, store, secretsStore, octokitFactory: () => octokit },
       { taskId },
     );
-    expect(result.deleted).toBe(false);
-    expect(result.reason).toContain("not configured");
+    assertKind(result, "unavailable");
+    expect(result.detail).toContain("not configured");
+  });
+
+  it("resolves to unavailable when the repo's remote URL does not parse (no octokit call)", async () => {
+    const { taskId } = await seedRepoAndTask();
+    await db.execute(sql`UPDATE coding_repos SET remote_url = 'not-a-url-at-all'`);
+    const octokit = fakeOctokit(async () => {
+      throw new Error("should not be called");
+    });
+
+    const result = await deleteRunBranch(
+      {
+        runInTx: tx,
+        store,
+        secretsStore: fakeSecretsStore(validIdentity),
+        octokitFactory: () => octokit,
+      },
+      { taskId },
+    );
+    expect(result).toEqual({
+      kind: "unavailable",
+      detail: "cannot parse remote: not-a-url-at-all",
+    });
+  });
+});
+
+describe("createRunBranchCleanupSubscriber", () => {
+  function engineFor(
+    octokit: unknown,
+    event: { name: "coding/task/failed" | "coding/task/pr-opened"; data: object },
+    memo: { "delete-run-branch": unknown } | null,
+  ) {
+    const fn = createRunBranchCleanupSubscriber(
+      {
+        runInTx: tx,
+        store,
+        secretsStore: fakeSecretsStore(validIdentity),
+        octokitFactory: () => octokit as never,
+      },
+      inngest,
+    );
+    return new InngestTestEngine({
+      function: fn,
+      events: [event],
+      ...(memo !== null && {
+        steps: [{ id: "delete-run-branch", handler: () => memo["delete-run-branch"] }],
+      }),
+    });
+  }
+
+  it("keeps the run branch on coding/task/failed, the only copy of a git-remote task's work", async () => {
+    const { taskId } = await seedRepoAndTask();
+    const octokit = { git: { deleteRef: vi.fn(async () => ({ status: 204 })) } };
+
+    const { result, error } = await engineFor(
+      octokit,
+      {
+        name: "coding/task/failed",
+        data: { taskId, reason: "verify_failed", detail: "exit 1" },
+      },
+      null,
+    ).execute();
+
+    expect(error).toBeUndefined();
+    expect(result).toEqual({ kind: "kept" });
+    expect(octokit.git.deleteRef).not.toHaveBeenCalled();
+  });
+
+  it("keeps on a failed event replayed with an earlier build's delete-run-branch memo", async () => {
+    const { taskId } = await seedRepoAndTask();
+    const octokit = { git: { deleteRef: vi.fn(async () => ({ status: 204 })) } };
+
+    const { result, error } = await engineFor(
+      octokit,
+      {
+        name: "coding/task/failed",
+        data: { taskId, reason: "verify_failed", detail: "exit 1" },
+      },
+      { "delete-run-branch": { deleted: true } },
+    ).execute();
+
+    expect(error).toBeUndefined();
+    expect(result).toEqual({ kind: "kept" });
+    expect(octokit.git.deleteRef).not.toHaveBeenCalled();
+  });
+
+  it("returns an earlier build's delete-run-branch memo on pr-opened without deleting again", async () => {
+    const { taskId } = await seedRepoAndTask();
+    const octokit = { git: { deleteRef: vi.fn(async () => ({ status: 204 })) } };
+
+    const { result, error } = await engineFor(
+      octokit,
+      {
+        name: "coding/task/pr-opened",
+        data: { taskId, prUrl: "https://github.com/owner/example/pull/1", prNumber: 1 },
+      },
+      { "delete-run-branch": { deleted: false, reason: "already gone (404)" } },
+    ).execute();
+
+    expect(error).toBeUndefined();
+    expect(result).toEqual({ deleted: false, reason: "already gone (404)" });
+    expect(octokit.git.deleteRef).not.toHaveBeenCalled();
+  });
+
+  it("deletes the run branch on coding/task/pr-opened", async () => {
+    const { taskId } = await seedRepoAndTask();
+    const octokit = { git: { deleteRef: vi.fn(async () => ({ status: 204 })) } };
+
+    const { result, error } = await engineFor(
+      octokit,
+      {
+        name: "coding/task/pr-opened",
+        data: { taskId, prUrl: "https://github.com/owner/example/pull/1", prNumber: 1 },
+      },
+      null,
+    ).execute();
+
+    expect(error).toBeUndefined();
+    expect(result).toEqual({ kind: "deleted" });
+    expect(octokit.git.deleteRef).toHaveBeenCalledExactlyOnceWith({
+      owner: "owner",
+      repo: "example",
+      ref: `heads/cogmo/run/${taskId}`,
+    });
   });
 });
