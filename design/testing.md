@@ -200,7 +200,7 @@ Reference: `src/transport/adapters/telegram/commands/repo.test.ts`; `src/agent/c
 
 Runtime deps with breaking-change history (octokit, dockerode, sysbox image tags, Claude CLI flag set) deserve explicit tests that the API surface our code uses still exists. Today a runtime regression only surfaces in integration tests; a unit-tier schema validation against the SDK's request/response types catches it earlier.
 
-(Currently aspirational — listed in PROGRESS.md → Phase 6 → Test infrastructure as a future canary.)
+(Currently aspirational — listed in progress.md → Phase 6 → Test infrastructure as a future canary.)
 
 ### Non-settling-promise regression guards
 

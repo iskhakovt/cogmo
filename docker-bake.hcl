@@ -127,7 +127,7 @@ target "cogmo" {
 
 // Local e2e image. The e2e tier builds this when `E2E_IMAGE` is unset; CI
 // bakes `cogmo` and hands the tag over instead, so this target belongs to
-// local runs, DEPLOYMENT.md's local build included. It inherits the build inputs rather than the `cogmo` target,
+// local runs, deploy.md's local build included. It inherits the build inputs rather than the `cogmo` target,
 // which keeps the GHA cache attributes out — that backend wants an Actions
 // runtime token that exists only inside a workflow.
 //

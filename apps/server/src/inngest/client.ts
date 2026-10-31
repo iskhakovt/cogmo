@@ -14,7 +14,7 @@ import { env } from "../env.js";
 // `InngestSpanProcessor` that sets `inngest.runId`/`traceref`/`step.*`
 // attributes and exports to Inngest's own trace endpoint — but only when the
 // function run is started with a `traceparent` on the request headers. We
-// don't propagate `traceparent` through event payloads (see DEPLOYMENT.md →
+// don't propagate `traceparent` through event payloads (see deploy.md →
 // Observability for rationale), so the processor would be dormant. Skipping
 // it keeps setup minimal; re-add if we adopt traceparent propagation.
 // `INNGEST_APP_ID` gives each integration test file a fresh app id. Files

@@ -292,7 +292,7 @@ Owned by the `agent/pipeline/` domain folder (pipelines are agent work items, li
 
 ## Implementation Plan `[confirmed]`
 
-Phased as **PROGRESS.md → Phase 8**, four slices mirroring coding delegation's thin-slice precedent: (1) definitions spine — compile → preview → activate, no execution, plus the compile-quality eval set; (2) run engine MVP — command trigger, linear `agentic`/`gate` stages; (3) loops, DB-parked waits, cron triggers, admission control; (4) integration breadth — coding delegation as a stage, first external event source. The only new runtime dependency is `@marcbachmann/cel-js`, deferred to slice 3. Durations use the ms-style grammar above (decision: legibility in previews beat ISO-8601's standardness; the Zod regex removes ms-style's ambiguity, and `parseDurationMs` converts to milliseconds for `step.sleep`).
+Phased as **progress.md → Phase 8**, four slices mirroring coding delegation's thin-slice precedent: (1) definitions spine — compile → preview → activate, no execution, plus the compile-quality eval set; (2) run engine MVP — command trigger, linear `agentic`/`gate` stages; (3) loops, DB-parked waits, cron triggers, admission control; (4) integration breadth — coding delegation as a stage, first external event source. The only new runtime dependency is `@marcbachmann/cel-js`, deferred to slice 3. Durations use the ms-style grammar above (decision: legibility in previews beat ISO-8601's standardness; the Zod regex removes ms-style's ambiguity, and `parseDurationMs` converts to milliseconds for `step.sleep`).
 
 ## Open Questions
 
