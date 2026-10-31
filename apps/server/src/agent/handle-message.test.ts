@@ -5133,7 +5133,7 @@ describe("system prompt snapshot", () => {
 
     await run(next);
 
-    expect(turnContextSent(next)).toContain("<core_memory_updates>");
+    expect(turnContextSent(next)).toContain("<core_memory_updates");
     expect(turnContextSent(next)).toContain("## identity\nHome: Lisbon");
     // Recorded with the version it shows.
     expect(next.agentStore.insertOrRecoverTurnContext).toHaveBeenCalledWith(
@@ -5155,7 +5155,7 @@ describe("system prompt snapshot", () => {
       }),
     });
     await run(after);
-    expect(turnContextSent(after)).not.toContain("<core_memory_updates>");
+    expect(turnContextSent(after)).not.toContain("<core_memory_updates");
   });
 
   it("counts the delivery channels and every candidate announcement in compaction", async () => {
@@ -5181,7 +5181,7 @@ describe("system prompt snapshot", () => {
     const countedTurn = JSON.stringify(counted.messages.at(-1));
     expect(countedTurn).toContain("Home: Lisbon");
     expect(countedTurn).toContain("Delivery channels: telegram");
-    expect(turnContextSent(deps)).not.toContain("<core_memory_updates>");
+    expect(turnContextSent(deps)).not.toContain("<core_memory_updates");
     expect(turnContextSent(deps)).toContain("Delivery channels: telegram");
   });
 
@@ -5413,7 +5413,7 @@ describe("system prompt snapshot", () => {
         vi.mocked(deps.agentStore.insertOrRecoverTurnContext).mock.calls[0],
         "stored turn context",
       );
-      expect(stored.rendered).toContain("<core_memory_updates>");
+      expect(stored.rendered).toContain("<core_memory_updates");
       expect(stored.rendered).toContain("Home: Lisbon");
     });
 

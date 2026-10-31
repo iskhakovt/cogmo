@@ -3,6 +3,7 @@ import { err, ok, type Result } from "neverthrow";
 import { logger } from "../logger.js";
 import {
   DEPS_CACHE_VOLUME_TARGET,
+  type ExecOptions,
   type ExecStreamingHandle,
   type ResourceLimits,
   type SandboxClient,
@@ -101,6 +102,20 @@ export interface LockfileCompiler {
   ): Promise<Result<string, LockfileCompileError>>;
 }
 
+/**
+ * How every dependency script — the register-time compile, the populate and
+ * the reap — runs inside the skills image: from `/`, with uv's configuration
+ * discovery off. Tasks on a warm worker can write `$HOME`, the image's working
+ * directory, so uv would otherwise read a `uv.toml`, `pyproject.toml` or
+ * `.python-version` planted there, and a `~/.config/uv/uv.toml` or
+ * `~/.config/uv/.python-version` from any cwd, and could build the venv a
+ * later task runs in on another interpreter or index.
+ */
+export const DEPENDENCY_EXEC_OPTIONS = {
+  workingDir: "/",
+  env: { UV_NO_CONFIG: "1" },
+} as const satisfies ExecOptions;
+
 const DEFAULT_COMPILE_RESOURCE_LIMITS: Required<ResourceLimits> = {
   cpus: 1,
   memory_bytes: 512 * 1024 * 1024,
@@ -191,7 +206,7 @@ export function makeSandboxLockfileCompiler(
         // the same flag — documented in `design/skills.md`.
         const handle = await session.execStreaming(
           ["uv", "pip", "compile", "--generate-hashes", "--no-header", "--quiet", "-"],
-          { attachStdin: true, timeoutMs, ...(signal && { signal }) },
+          { ...DEPENDENCY_EXEC_OPTIONS, attachStdin: true, timeoutMs, ...(signal && { signal }) },
         );
         started = handle;
         if (!handle.stdin) {
@@ -283,9 +298,10 @@ const DEFAULT_POPULATE_TIMEOUT_MS = 180_000;
 /**
  * Prints the image's `py<major>.<minor>` tag, which names skill venvs. The
  * populate script and the reaper's both run it, so the two always agree on
- * which venvs are live. `-I` keeps the exec's cwd off `sys.path`: on a warm
- * worker that is `$HOME`, which tasks can write, and `-m` alone would import
- * a `cogmo_skills_runtime` planted there.
+ * which venvs are live. `-I` keeps the cwd off `sys.path` and ignores
+ * `PYTHON*` variables, so `-m` runs the image's module whichever directory
+ * the script runs in; without it, a `cogmo_skills_runtime` in the cwd would
+ * run instead.
  */
 export const PYTHON_ABI_TAG_COMMAND = "python3 -I -m cogmo_skills_runtime.abi";
 
@@ -421,7 +437,7 @@ export async function ensureVenvPopulated(
   try {
     handle = await opts.session.execStreaming(
       ["sh", "-c", POPULATE_SCRIPT, "populate", opts.lockfileHash, opts.workerId],
-      { attachStdin: true, timeoutMs },
+      { ...DEPENDENCY_EXEC_OPTIONS, attachStdin: true, timeoutMs },
     );
   } catch (e) {
     return err({

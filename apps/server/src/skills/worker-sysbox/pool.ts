@@ -39,8 +39,8 @@ export interface SysboxWorkerPoolOptions {
   depsCacheVolumeName?: string;
 
   /**
-   * Always-warm worker count. ≥ 1 keeps interactive latency at the steady-
-   * state ~300ms (fresh `python3 -u -c` exec on a live container) instead of
+   * Always-warm worker count. ≥ 1 keeps interactive latency at the steady
+   * state (a task forked from a live supervisor, a few ms) instead of
    * cold-start ~1-2 s (container create + boot). The pool replaces a
    * worker as soon as it dies, back up to `min`.
    */

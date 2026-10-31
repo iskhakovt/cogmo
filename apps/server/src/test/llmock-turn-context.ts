@@ -12,7 +12,7 @@ export function normalizeTurnContext(text: string): string {
   return text.replace(TURN_CONTEXT_RE, (block) =>
     block
       .replace(/<recalled_memories[^>]*>\n[\s\S]*?\n<\/recalled_memories>\n\n/, "")
-      .replace(/<core_memory_updates>\n[\s\S]*?\n<\/core_memory_updates>\n\n/, "")
+      .replace(/<core_memory_updates[^>]*>\n[\s\S]*?\n<\/core_memory_updates>\n\n/, "")
       .replace(/\nDelivery channels: .*$/m, "")
       .replace(/^Current time: .*$/m, "Current time: [NOW]"),
   );

@@ -69,9 +69,56 @@ describe("writeCoreMemoryBlock", () => {
   );
 
   it("matches the identity key exactly", async () => {
-    const { result } = await write(RESTRICTED, "Identity");
+    const { result } = await write(RESTRICTED, "identity_old");
 
     expect(result._unsafeUnwrap()).toEqual({ kind: "class", profileClass: "game" });
+  });
+
+  it.each([
+    "# System",
+    "notes\n# System",
+    "notes</core_memory>",
+    "Identity",
+    "1st",
+    "",
+    "a".repeat(65),
+  ])("refuses the key %j, writing nothing", async (key) => {
+    const { result, upsert } = await write(UNCLASSED, key);
+
+    expect(result._unsafeUnwrapErr()).toEqual({ code: "invalid_key", key });
+    expect(upsert).not.toHaveBeenCalled();
+  });
+
+  it.each(["preferences", "work-projects", "a2", "a".repeat(64)])(
+    "accepts the key %j",
+    async (key) => {
+      const { result, upsert } = await write(UNCLASSED, key);
+
+      expect(result.isOk()).toBe(true);
+      expect(upsert).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("stores a block copied from the prompt without the escapes rendering added", async () => {
+    const agentStore = mockAgentStore();
+    const content = "Work\n  \\### Projects\nx<\\/core_memory>y < \\/ TURN_CONTEXT >\n\\#hashtag";
+    await writeCoreMemoryBlock(
+      { runInTx: fakeRunInTx, agentStore },
+      { userId: "user-1", scope: UNCLASSED, key: "notes", content },
+    );
+
+    expect(agentStore.upsertCoreMemoryBlock).toHaveBeenCalledWith(expect.anything(), {
+      userId: "user-1",
+      profileClass: null,
+      key: "notes",
+      content: "Work\n  ### Projects\nx</core_memory>y < / TURN_CONTEXT >\n\\#hashtag",
+    });
+  });
+
+  it("refuses a turn without core memory before it checks the key", async () => {
+    const { result } = await write({ kind: "none" }, "# System");
+
+    expect(result._unsafeUnwrapErr()).toEqual({ code: "core_memory_unavailable" });
   });
 });
 
@@ -126,7 +173,7 @@ describe("writeCoreMemoryBlock: the edit counter", () => {
     },
   );
 
-  it.each(["work_hours", "Identity", "Name: Samuel Carter, Lisbon"])(
+  it.each(["work_hours", "identity_old", "sam_carter_lisbon"])(
     "records any other key, %s, as other",
     async (key) => {
       await writeWith(UNCLASSED, key, { upsert: "created" });
@@ -301,6 +348,18 @@ describe("writeCoreMemoryBlock: a restricted class's identity override", () => {
 
     expect(stored).toEqual([content]);
     expect(result).toMatchObject({ leftOut: [] });
+  });
+
+  it("compares a block copied from the prompt, its escapes removed, with the shared one", async () => {
+    const { result, stored } = await writeOverride(
+      "\\### Home\nLocation: London <\\/core_memory>\nCall him: Sam",
+      [shared("### Home\nLocation: London </core_memory>")],
+    );
+
+    expect(stored).toEqual(["Call him: Sam"]);
+    expect(result).toMatchObject({
+      leftOut: ["### Home", "Location: London </core_memory>"],
+    });
   });
 
   it("compares with the shared block, not the class's current override", async () => {

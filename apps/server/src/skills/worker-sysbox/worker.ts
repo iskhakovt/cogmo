@@ -26,8 +26,14 @@ import { createNdjsonTransport } from "./transport.js";
  * `supervisor.main()`). Installed into the cogmo-skills image's venv at
  * build time — the source lives in `images/skills/src/cogmo_skills_runtime/`,
  * not in this TS bundle. See `images/skills/Dockerfile`.
+ *
+ * `-I` keeps the cwd off `sys.path`. The exec runs in `$HOME`, which every
+ * task on the worker can write, and every task forks from this process, so
+ * with `-m` alone a `csv.py` one task planted there would run inside a later
+ * task that imports `csv`. It also ignores `PYTHON*` variables, `-u` standing
+ * in for the image's `PYTHONUNBUFFERED`; user site is already off in the venv.
  */
-const SUPERVISOR_CMD = ["python3", "-u", "-m", "cogmo_skills_runtime"] as const;
+const SUPERVISOR_CMD = ["python3", "-I", "-u", "-m", "cogmo_skills_runtime"] as const;
 
 const log = logger.child({ component: "skills.worker.sysbox" });
 
