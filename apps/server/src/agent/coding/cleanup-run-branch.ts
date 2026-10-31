@@ -41,8 +41,8 @@ export interface CleanupRunBranchDeps {
  * What a cleanup run did. `kept`: the trigger was `coding/task/failed`, so
  * the branch stays. `not_found`: nothing to delete — the task or repo row is
  * gone, or GitHub answered 404 / 422 (already deleted). `unavailable`: the
- * remote URL does not parse or the identity does not resolve, so the delete
- * waits for the weekly sweep.
+ * remote URL does not parse or the identity does not resolve; the weekly
+ * sweep stops on the same causes, so the branch stays until they are fixed.
  */
 export type RunBranchCleanup =
   | { kind: "kept" }
