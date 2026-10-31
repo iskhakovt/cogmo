@@ -94,10 +94,9 @@ export async function deleteRunBranch(
 
 /**
  * Inngest function on both terminal events, deciding on the triggering
- * event's name — durable for the run, so a run triggered before this rule
- * reads it too. Default retries (3) so a transient GitHub 5xx or secondary
- * rate-limit gets retried with backoff before giving up; the weekly cron
- * sweeps anything that ultimately failed.
+ * event's payload, durable for the run. Default retries (3) so a transient
+ * GitHub 5xx or secondary rate-limit gets retried with backoff before giving
+ * up; the weekly cron sweeps anything that ultimately failed.
  */
 export function createRunBranchCleanupSubscriber(deps: CleanupRunBranchDeps, inngest: Inngest) {
   return inngest.createFunction(
@@ -112,6 +111,9 @@ export function createRunBranchCleanupSubscriber(deps: CleanupRunBranchDeps, inn
     },
     // Matched on the payload, not the name: the SDK's event union also
     // carries `inngest/function.invoked`, whose data is either payload.
+    // The return is the run's output only, and nothing reads it: a run
+    // replaying an earlier build's `delete-run-branch` memo returns that
+    // memo's `{ deleted, reason }` shape, not a `RunBranchCleanup`.
     async ({ event, step }): Promise<RunBranchCleanup> =>
       await match(event.data)
         .with({ reason: P.string }, ({ taskId }): RunBranchCleanup => {

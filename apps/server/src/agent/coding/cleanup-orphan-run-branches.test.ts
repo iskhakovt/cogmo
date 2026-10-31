@@ -218,6 +218,32 @@ describe("sweepRepo", () => {
     expect(result).toEqual({ repoId: repo.id, deleted: 1, skipped: 0, errors: 0 });
   });
 
+  it("falls back to created_at for a failed task that never reached approval", async () => {
+    const repo = await seedRepo();
+    // `failed` from `queued`: `plan_approved_at` stays null.
+    const task = await insertTaskWithStatus(repo.id, "failed");
+    const eightDaysAgo = new Date(Date.now() - 8 * 24 * 3600 * 1000);
+    await db.execute(
+      sql`UPDATE coding_tasks SET created_at = ${eightDaysAgo} WHERE id = ${task.id}`,
+    );
+    const row = await tx((trx) => store.getTask(trx, task.id));
+    expect(row?.planApprovedAt).toBeNull();
+
+    const oct = fakeOctokit([`refs/heads/cogmo/run/${task.id}`]);
+    const result = await sweepRepo(
+      {
+        runInTx: tx,
+        store,
+        secretsStore: fakeSecretsStore(),
+        octokitFactory: oct.factory as never,
+      },
+      repo.id,
+      stepRun,
+    );
+
+    expect(result).toEqual({ repoId: repo.id, deleted: 1, skipped: 0, errors: 0 });
+  });
+
   it("never sweeps non-terminal tasks regardless of age (user owns stuck approvals)", async () => {
     const repo = await seedRepo();
     const oldNonTerminal = await insertTaskWithStatus(repo.id, "awaiting_approval");

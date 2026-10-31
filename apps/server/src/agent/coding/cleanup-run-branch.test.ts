@@ -8,6 +8,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import { mock } from "vitest-mock-extended";
 import type { Database, Transactor } from "../../db/index.js";
 import { inngest } from "../../inngest/client.js";
+import { codingTaskFailed, codingTaskPrOpened } from "../../inngest/events.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import { assertKind, expectOk } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
@@ -245,6 +246,16 @@ describe("createRunBranchCleanupSubscriber", () => {
       }),
     });
   }
+
+  it("pins the triggers and an idempotency key that carries the event name", () => {
+    const fn = createRunBranchCleanupSubscriber(
+      { runInTx: tx, store, secretsStore: fakeSecretsStore(validIdentity) },
+      inngest,
+    );
+    expect(fn.opts.id).toBe("coding-cleanup-run-branch");
+    expect(fn.opts.triggers).toEqual([codingTaskPrOpened, codingTaskFailed]);
+    expect(fn.opts.idempotency).toBe('event.name + "-" + event.data.taskId');
+  });
 
   it("keeps the run branch on coding/task/failed, the only copy of a git-remote task's work", async () => {
     const { taskId } = await seedRepoAndTask();
