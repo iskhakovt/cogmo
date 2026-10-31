@@ -28,6 +28,7 @@ interface BiomeResult {
 async function runBiomeLint(target: string): Promise<BiomeResult> {
   try {
     const { stdout, stderr } = await execFileAsync(BIOME_BIN, ["lint", target], {
+      cwd: tmp,
       env: process.env,
     });
     return { exitCode: 0, output: stdout + stderr };
@@ -56,8 +57,10 @@ function repoPlugins(): ReadonlyArray<z.infer<typeof PluginEntrySchema>> {
 /**
  * The main config excludes `test/fixtures/**` from biome's file scope, so a
  * fixture there would be silently skipped. Fixtures go into a tempdir with a
- * self-contained `biome.json` carrying the repo's plugin entries instead —
- * biome resolves config from the target's directory, so the tempdir's wins.
+ * self-contained `biome.json` carrying the repo's plugin entries instead, and
+ * biome runs from that tempdir, so its config is the project root. Run from the
+ * repo, biome would lint a file outside the repo's root under the repo's VCS
+ * ignore settings, which panics in biome 2.6.
  */
 let tmp: string;
 

@@ -878,7 +878,7 @@ export class DrizzleTransportStore implements TransportStore {
     // Take the smallest cap across active channels — the most-restrictive
     // wins so a session on a strict-budget channel doesn't get a long
     // voice clip just because another session permits it.
-    return rows.reduce((min, r) => (r.cap < min ? r.cap : min), first.cap);
+    return rows.reduce((min, r) => Math.min(min, r.cap), first.cap);
   }
 
   async getSourceSessions(

@@ -33,11 +33,6 @@ updates:
     # `cogmo.hindsightCompat` (see pnpm-workspace.yaml). A minor past the range
     # fails the boot check, so only patches come from here.
     #
-    # Biome 2.5.15 panics linting a file outside the project root while
-    # `vcs.useIgnoreFile` is on (biomejs/biome#12158), which is what
-    # `biome-plugin.test.ts` does with its tempdir fixtures. Only that version
-    # is skipped; drop the entry once the lockfile is past it.
-    #
     # A pyodide major is a Python minor (314 → 3.14), which the skills image
     # has to move with; see the docker `*python` entry.
     ignore:
@@ -45,8 +40,6 @@ updates:
         update-types: ["version-update:semver-major"]
       - dependency-name: "@vectorize-io/hindsight-client"
         update-types: ["version-update:semver-minor", "version-update:semver-major"]
-      - dependency-name: "@biomejs/biome"
-        versions: ["2.5.15"]
       - dependency-name: "pyodide"
         update-types: ["version-update:semver-major"]
     # Group updates so the lockfile only has one merge state to validate
