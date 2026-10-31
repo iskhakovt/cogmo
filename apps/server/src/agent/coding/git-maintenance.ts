@@ -15,10 +15,9 @@
  *
  * Every runner that commits in the tree does so inside a container, against
  * `/workspace`, which on the bind-mount backend IS `worktreePath`:
- * `runCommitAndPush` in the task's container, and `runWipCommit` /
- * `runWipPush` in teardown's salvage containers. A detached maintenance
- * process there writes through the mount into the tree the host then
- * deletes.
+ * `runCommitAndPush` in the task's container, and `runWipCommit` in
+ * teardown's commit container. A detached maintenance process there writes
+ * through the mount into the tree the host then deletes.
  */
 
 /**

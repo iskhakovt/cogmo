@@ -22,7 +22,7 @@
 
 import { existsSync, rmSync } from "node:fs";
 import { basename, join } from "node:path";
-import { ResultAsync } from "neverthrow";
+import { Result, ResultAsync } from "neverthrow";
 import { match } from "ts-pattern";
 import type { Transactor } from "../../db/index.js";
 import { logger } from "../../logger.js";
@@ -63,8 +63,6 @@ export interface TeardownWorktreeOpts {
   remoteUrl: string;
   /** Host filesystem path of the worktree to tear down. */
   worktreePath: string;
-  /** Task branch (e.g. `cogmo/abc12345`). */
-  branch: string;
   /** Task UUID — the salvage containers' lineage label, the WIP commit and ref. */
   taskId: string;
   /**
@@ -124,7 +122,6 @@ async function salvage(opts: TeardownWorktreeOpts): Promise<TeardownResult> {
     runWipCommit({
       container: session,
       worktreeDir: WORKTREE_DIR_IN_CONTAINER,
-      branch: opts.branch,
       taskId: opts.taskId,
     }),
   );
@@ -162,7 +159,14 @@ async function push(opts: TeardownWorktreeOpts, sha: string): Promise<TeardownRe
     return { kind: "wip_push_failed_kept", reason: "no GitHub identity available for WIP push" };
   }
   try {
-    const askpass = provisionPushAskpass(askpassBaseDir, taskId, identity);
+    // Fails only on the askpass dir's filesystem writes: a full or read-only disk.
+    const provisioned = Result.fromThrowable(provisionPushAskpass, describeError)(
+      askpassBaseDir,
+      taskId,
+      identity,
+    );
+    if (provisioned.isErr()) return { kind: "salvage_unavailable_kept", reason: provisioned.error };
+    const askpass = provisioned.value;
     const pushed = await inSalvageContainer(opts, askpass, (session) =>
       runWipPush({
         container: session,
@@ -186,9 +190,6 @@ async function push(opts: TeardownWorktreeOpts, sha: string): Promise<TeardownRe
         return { kind: "wip_pushed_and_removed" as const, wipRef: value.wipRef, sha: value.sha };
       })
       .exhaustive();
-  } catch (err) {
-    // Only `provisionAskpass`'s filesystem writes throw here.
-    return { kind: "salvage_unavailable_kept", reason: describeError(err) };
   } finally {
     cleanupAskpass({ baseDir: askpassBaseDir, rootTaskId: taskId });
   }
@@ -330,7 +331,6 @@ export async function safeTeardownWorktree(
       repoPath: repo.localPath,
       remoteUrl: repo.remoteUrl,
       worktreePath: assignment.worktreePath,
-      branch: assignment.branch,
       taskId,
       ...(resolved.isOk() && { identity: resolved.value }),
       sandbox: deps.sandbox,

@@ -211,21 +211,44 @@ const SALVAGE_CONFIG_FLAGS: ReadonlyArray<string> = [
   "credential.helper=",
 ];
 
+/**
+ * The upload-pack the scratch fetch runs against the tree. The tree's
+ * config governs it, so a tree that declares itself a partial clone, with
+ * HEAD on a commit whose objects are missing, can make it lazy-fetch through
+ * a transport that runs a command (`core.sshCommand`, `ext::`) while the PAT
+ * is readable. Git 2.45.1 and later honour `GIT_NO_LAZY_FETCH`; the
+ * protocol denies, which command-line `-c` makes outrank the tree's config,
+ * close the command-running transports on a git too old to know it.
+ */
+const SALVAGE_UPLOAD_PACK = [
+  "env GIT_NO_LAZY_FETCH=1 git",
+  "-c protocol.ext.allow=never",
+  "-c protocol.ssh.allow=never",
+  "-c protocol.file.allow=never",
+  "upload-pack",
+].join(" ");
+
 /** The salvage command that exited non-zero, or the fetched HEAD that moved. */
-type WipSalvageStage = "status" | "add" | "commit" | "rev-parse" | "init" | "fetch" | "push";
+type WipSalvageStage =
+  | "status"
+  | "add"
+  | "commit"
+  | "rev-parse"
+  | "rev-list"
+  | "init"
+  | "fetch"
+  | "push";
 
 export interface WipCommitParams {
   container: Pick<SandboxSession, "execStreaming">;
   /** Working directory inside the container — typically `/workspace`. */
   worktreeDir: string;
-  /** Task branch; its remote-tracking ref tells a pushed tree from an unpushed one. */
-  branch: string;
   /** Names the WIP commit. */
   taskId: string;
 }
 
 export type WipCommitResult =
-  /** No edits, and HEAD is what the remote-tracking ref of the branch records. */
+  /** No edits, and every commit on HEAD is on some remote-tracking ref. */
   | { kind: "clean" }
   /** HEAD — the WIP commit, or unpushed commits — has to reach the remote. */
   | { kind: "needs_push"; sha: string }
@@ -243,7 +266,7 @@ export type WipCommitResult =
  * container and reads that as the salvage being unavailable.
  */
 export async function runWipCommit(params: WipCommitParams): Promise<WipCommitResult> {
-  const { container, worktreeDir, branch, taskId } = params;
+  const { container, worktreeDir, taskId } = params;
   const local = (args: ReadonlyArray<string>) =>
     runGit(container, [...SALVAGE_CONFIG_FLAGS, ...args], {
       workingDir: worktreeDir,
@@ -276,15 +299,15 @@ export async function runWipCommit(params: WipCommitParams): Promise<WipCommitRe
   const head = await local(["rev-parse", "HEAD"]);
   if (head.exitCode !== 0) return { kind: "failed", stage: "rev-parse", output: combine(head) };
   const sha = head.stdout.trim();
-  // Absent when the branch was never pushed: that tree is unpushed.
-  const tracked = await local([
-    "rev-parse",
-    "--verify",
-    "--quiet",
-    `refs/remotes/${REMOTE}/${branch}`,
-  ]);
-  if (tracked.exitCode === 0 && tracked.stdout.trim() === sha) return { kind: "clean" };
-  return { kind: "needs_push", sha };
+  // Commits on HEAD that no remote-tracking ref holds. Zero for a plan that
+  // left the tree where the clone put it, so most plan failures and cancels
+  // never need the credential container.
+  const unpushed = await local(["rev-list", "--count", "HEAD", "--not", "--remotes"]);
+  const count = unpushed.stdout.trim();
+  if (unpushed.exitCode !== 0 || !/^\d+$/.test(count)) {
+    return { kind: "failed", stage: "rev-list", output: combine(unpushed) };
+  }
+  return count === "0" ? { kind: "clean" } : { kind: "needs_push", sha };
 }
 
 export interface WipPushParams {
@@ -313,7 +336,8 @@ export type WipPushResult =
  * repo's config, which the tree does not write, so the tree's remotes,
  * `insteadOf` rewrites, protocol and proxy settings never reach it. The
  * fetch is a local one: the tree's side is `git-upload-pack`, which runs no
- * hooks or filters. A per-task ref makes `--force` safe and the push
+ * hooks or filters, with lazy fetch off ({@link SALVAGE_UPLOAD_PACK}) and no
+ * submodule recursion. A per-task ref makes `--force` safe and the push
  * idempotent.
  *
  * Throws when an exec does (the container is gone), as {@link runWipCommit}.
@@ -336,8 +360,16 @@ export async function runWipPush(params: WipPushParams): Promise<WipPushResult> 
   const init = await scratch(["init", "--bare", "--quiet"], {}, GIT_LOCAL_TOTAL_MS);
   if (init.exitCode !== 0) return { kind: "failed", stage: "init", output: combine(init) };
   const fetch = await scratch(
-    ["fetch", "--no-tags", "--no-write-fetch-head", worktreeDir, `+HEAD:${wipRef}`],
-    {},
+    [
+      "fetch",
+      "--no-tags",
+      "--no-write-fetch-head",
+      "--no-recurse-submodules",
+      `--upload-pack=${SALVAGE_UPLOAD_PACK}`,
+      worktreeDir,
+      `+HEAD:${wipRef}`,
+    ],
+    { GIT_NO_LAZY_FETCH: "1" },
     GIT_PUSH_TOTAL_MS,
   );
   if (fetch.exitCode !== 0) return { kind: "failed", stage: "fetch", output: combine(fetch) };

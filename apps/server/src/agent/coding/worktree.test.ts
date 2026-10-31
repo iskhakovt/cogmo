@@ -29,7 +29,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 });
 
 /** Every host `execFile` the module under test runs. */
-const hostSpawns = vi.hoisted(() => [] as Array<{ file: string; args: ReadonlyArray<string> }>);
+const hostSpawns = vi.hoisted((): Array<{ file: string; args: ReadonlyArray<string> }> => []);
 
 // A pass-through recorder, so the adopt check can be held to reading HEAD as
 // a file: the clone it inspects is the tree the sandbox writes.

@@ -14,7 +14,7 @@ import {
   type SandboxSession,
   unwrapExit,
 } from "../../sandbox/index.js";
-import { assertKind } from "../../test/assertions.js";
+import { assertKind, expectDefined } from "../../test/assertions.js";
 import { fakeExecHandle } from "../../test/coding-fixtures.js";
 import { runCommitAndPush, runWipCommit, runWipPush } from "./commit-push.js";
 
@@ -569,12 +569,7 @@ describe("the WIP salvage against a real clone", () => {
   });
 
   function commit() {
-    return runWipCommit({
-      container: hostSession(clone),
-      worktreeDir: "/workspace",
-      branch,
-      taskId,
-    });
+    return runWipCommit({ container: hostSession(clone), worktreeDir: "/workspace", taskId });
   }
 
   function push(sha: string) {
@@ -630,7 +625,15 @@ describe("the WIP salvage against a real clone", () => {
     expect(await commit()).toEqual({ kind: "clean" });
   });
 
-  it("reports a clean tree whose branch was never pushed as needing a push, without a commit", async () => {
+  it("reports a never-pushed branch cut from a pushed tip as clean", async () => {
+    // The plan-failure shape: the task branch exists only locally, at the
+    // tip the clone came with, so nothing on it is missing from the remote.
+    await execFileP("git", ["-C", clone, "push", "origin", "main"]);
+
+    expect(await commit()).toEqual({ kind: "clean" });
+  });
+
+  it("reports a clean tree with commits no remote-tracking ref holds as needing a push, without a commit", async () => {
     const before = await head();
 
     expect(await commit()).toEqual({ kind: "needs_push", sha: before });
@@ -712,9 +715,104 @@ describe("the WIP salvage against a real clone", () => {
     expect(result.stage).toBe("push");
     expect(result.output).toMatch(/missing\.git/);
   });
+
+  it("never lazy-fetches in the tree, whatever the tree's promisor and ssh settings", async () => {
+    // A tree posing as a partial clone, HEAD on a commit whose blob is gone:
+    // an upload-pack that lazy-fetches runs the tree's `core.sshCommand` to
+    // fetch it, while the PAT is readable. `GIT_NO_LAZY_FETCH=0` in the
+    // ambient env stands in for a git that lazy-fetches by default.
+    writeFileSync(join(clone, "secret.txt"), "gone\n");
+    await execFileP("git", ["-C", clone, "add", "secret.txt"]);
+    await execFileP("git", [
+      "-C",
+      clone,
+      "-c",
+      "user.email=t@t",
+      "-c",
+      "user.name=t",
+      "-c",
+      "commit.gpgsign=false",
+      "commit",
+      "-m",
+      "add",
+    ]);
+    const { stdout: blob } = await execFileP("git", ["-C", clone, "rev-parse", "HEAD:secret.txt"]);
+    const id = blob.trim();
+    rmSync(join(clone, ".git", "objects", id.slice(0, 2), id.slice(2)));
+    const marker = join(dir, "ssh-ran");
+    writeFileSync(join(dir, "ssh"), `#!/bin/sh\necho "$@" >> '${marker}'\nexit 1\n`, {
+      mode: 0o755,
+    });
+    for (const [key, value] of [
+      ["core.repositoryformatversion", "1"],
+      ["extensions.partialClone", "promisor"],
+      ["remote.promisor.url", "ssh://example.invalid/x.git"],
+      ["remote.promisor.promisor", "true"],
+      ["core.sshCommand", join(dir, "ssh")],
+    ] as const) {
+      await execFileP("git", ["-C", clone, "config", key, value]);
+    }
+    vi.stubEnv("GIT_NO_LAZY_FETCH", "0");
+    try {
+      const result = await push(await head());
+
+      assertKind(result, "failed");
+      expect(result.stage).toBe("fetch");
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
 });
 
 describe("runWipPush", () => {
+  it("reports a failed scratch-repo init", async () => {
+    const { container, calls } = fakeContainer({
+      init: { exitCode: 1, stderr: "fatal: cannot mkdir /tmp/cogmo-wip.git\n" },
+    });
+
+    const result = await runWipPush({
+      container,
+      worktreeDir: "/workspace",
+      scratchGitDir: "/tmp/cogmo-wip.git",
+      remoteUrl: "https://github.com/user/cogmo.git",
+      taskId: "t",
+      sha: "deadbeef",
+      askpassEnv,
+    });
+
+    expect(result).toEqual({
+      kind: "failed",
+      stage: "init",
+      output: expect.stringContaining("cannot mkdir"),
+    });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("reports a failed fetch from the tree, and pushes nothing", async () => {
+    const { container, calls } = fakeContainer({
+      init: {},
+      fetch: { exitCode: 128, stderr: "fatal: protocol error: bad pack header\n" },
+    });
+
+    const result = await runWipPush({
+      container,
+      worktreeDir: "/workspace",
+      scratchGitDir: "/tmp/cogmo-wip.git",
+      remoteUrl: "https://github.com/user/cogmo.git",
+      taskId: "t",
+      sha: "deadbeef",
+      askpassEnv,
+    });
+
+    expect(result).toEqual({
+      kind: "failed",
+      stage: "fetch",
+      output: expect.stringContaining("bad pack header"),
+    });
+    expect(calls.map((c) => c.args.includes("push"))).toEqual([false, false]);
+  });
+
   it("gives the askpass env to the push alone, and every exec the salvage config", async () => {
     const { container, calls } = fakeContainer({
       init: {},
@@ -747,5 +845,16 @@ describe("runWipPush", () => {
       const isPush = call.args.includes("push");
       expect(call.env?.GIT_ASKPASS).toBe(isPush ? askpassEnv.GIT_ASKPASS : undefined);
     }
+    const fetch = expectDefined(
+      calls.find((c) => c.args.includes("fetch")),
+      "fetch exec",
+    );
+    expect(fetch.env).toEqual({ GIT_NO_LAZY_FETCH: "1" });
+    expect(fetch.args).toEqual(
+      expect.arrayContaining([
+        "--no-recurse-submodules",
+        "--upload-pack=env GIT_NO_LAZY_FETCH=1 git -c protocol.ext.allow=never -c protocol.ssh.allow=never -c protocol.file.allow=never upload-pack",
+      ]),
+    );
   });
 });

@@ -23,7 +23,7 @@ import { allocateWorktree } from "./worktree.js";
 
 /** Every host child process spawned while the module under test runs. */
 const hostSpawns = vi.hoisted(
-  () => [] as Array<{ file: string; args: ReadonlyArray<string>; cwd: string | undefined }>,
+  (): Array<{ file: string; args: ReadonlyArray<string>; cwd: string | undefined }> => [],
 );
 
 // A pass-through recorder: every caller still gets the real child process,
@@ -185,16 +185,13 @@ function salvageSandbox(script: Record<string, ScriptEntry>, opts: { createFails
   return { sandbox, calls, specs, askpassFiles, execs };
 }
 
-/** `rev-parse HEAD` and the fetched ref answer `sha`; the remote-tracking ref is absent. */
-function revParse(sha: string): ScriptEntry {
-  return (cmd) => (cmd.includes("--quiet") ? { exitCode: 1 } : { stdout: `${sha}\n` });
-}
-
+/** A tree with uncommitted work: after the WIP commit, HEAD holds one commit no remote ref has. */
 const DIRTY_SCRIPT: Record<string, ScriptEntry> = {
   status: { stdout: "?? in-progress.ts\n" },
   add: {},
   commit: { stdout: "[cogmo/x 1234567] wip\n" },
-  "rev-parse": revParse(SHA),
+  "rev-parse": { stdout: `${SHA}\n` },
+  "rev-list": { stdout: "1\n" },
   init: {},
   fetch: {},
   push: { stderr: "To github.com\n" },
@@ -254,7 +251,7 @@ describe("teardownWorktree", () => {
       "exec:add",
       "exec:commit",
       "exec:rev-parse",
-      "exec:rev-parse",
+      "exec:rev-list",
       "deleteByTaskId",
       "create:askpass",
       "exec:init",
@@ -312,12 +309,13 @@ describe("teardownWorktree", () => {
     expect(existsSync(join(askpassBaseDir, taskId))).toBe(false);
   });
 
-  it("removes a clean, pushed worktree without creating the credential container", async () => {
+  it("removes a clean worktree whose commits a remote ref holds, without the credential container", async () => {
     const taskId = uniqueTaskId();
     const { worktreePath, branch } = await allocatedWorktree(taskId);
     const { sandbox, calls, execs } = salvageSandbox({
       status: { stdout: "" },
       "rev-parse": { stdout: `${SHA}\n` },
+      "rev-list": { stdout: "0\n" },
     });
 
     const result = await teardown(sandbox, { taskId, worktreePath, branch, identity: IDENTITY });
@@ -325,11 +323,13 @@ describe("teardownWorktree", () => {
     expect(result).toEqual({ kind: "removed_clean" });
     expect(calls).not.toContain("create:askpass");
     expect(calls).not.toContain("exec:commit");
-    expect(execs[2]?.cmd).toContain(`refs/remotes/origin/${branch}`);
+    expect(execs[2]?.cmd).toEqual(
+      expect.arrayContaining(["rev-list", "--count", "HEAD", "--not", "--remotes"]),
+    );
     expect(existsSync(worktreePath)).toBe(false);
   });
 
-  it("pushes a clean worktree whose branch was never pushed, without a commit", async () => {
+  it("pushes a clean worktree with commits no remote ref holds, without a commit", async () => {
     const taskId = uniqueTaskId();
     const { worktreePath, branch } = await allocatedWorktree(taskId);
     const { sandbox, calls } = salvageSandbox({ ...DIRTY_SCRIPT, status: { stdout: "" } });
@@ -423,12 +423,10 @@ describe("teardownWorktree", () => {
     const other = "0123456789012345678901234567890123456789";
     const { sandbox, calls } = salvageSandbox({
       ...DIRTY_SCRIPT,
-      "rev-parse": (cmd) =>
-        cmd.some((a) => a.startsWith("--git-dir="))
-          ? { stdout: `${other}\n` }
-          : cmd.includes("--quiet")
-            ? { exitCode: 1 }
-            : { stdout: `${SHA}\n` },
+      // The scratch repo's fetched ref is another commit than the tree's HEAD.
+      "rev-parse": (cmd) => ({
+        stdout: `${cmd.some((a) => a.startsWith("--git-dir=")) ? other : SHA}\n`,
+      }),
     });
 
     const result = await teardown(sandbox, { taskId, worktreePath, branch, identity: IDENTITY });
@@ -513,6 +511,97 @@ describe("teardownWorktree", () => {
     expect(existsSync(join(worktreePath, "in-progress.ts"))).toBe(true);
     // The askpass dir goes regardless.
     expect(existsSync(join(askpassBaseDir, taskId))).toBe(false);
+  });
+
+  it("keeps the worktree, with no credential container, when a commit-stage command fails", async () => {
+    const taskId = uniqueTaskId();
+    const { worktreePath, branch } = await allocatedWorktree(taskId);
+    const { sandbox, calls } = salvageSandbox({
+      ...DIRTY_SCRIPT,
+      add: { exitCode: 128, stderr: "fatal: Unable to create '.git/index.lock': File exists.\n" },
+    });
+
+    const result = await teardown(sandbox, { taskId, worktreePath, branch, identity: IDENTITY });
+
+    expect(result).toEqual({
+      kind: "wip_push_failed_kept",
+      reason: expect.stringContaining("git add failed: fatal: Unable to create"),
+    });
+    expect(calls).not.toContain("create:askpass");
+    expect(existsSync(worktreePath)).toBe(true);
+  });
+
+  it("keeps the worktree, and creates nothing, when the image check rejects", async () => {
+    const taskId = uniqueTaskId();
+    const { worktreePath, branch } = await allocatedWorktree(taskId);
+    const { sandbox, calls } = salvageSandbox(DIRTY_SCRIPT);
+    vi.mocked(sandbox.ensureImagePresent).mockRejectedValueOnce(new Error("image not found"));
+
+    const result = await teardown(sandbox, { taskId, worktreePath, branch, identity: IDENTITY });
+
+    expect(result).toEqual({
+      kind: "salvage_unavailable_kept",
+      reason: expect.stringContaining("image not found"),
+    });
+    expect(calls.filter((c) => c.startsWith("create"))).toEqual([]);
+    expect(existsSync(worktreePath)).toBe(true);
+  });
+
+  it("keeps the worktree, with no credential container, when the askpass dir cannot be written", async () => {
+    const taskId = uniqueTaskId();
+    const { worktreePath, branch } = await allocatedWorktree(taskId);
+    // A file where the askpass root should be: the provisioning mkdir fails.
+    askpassBaseDir = join(baseDir, "askpass-is-a-file");
+    writeFileSync(askpassBaseDir, "");
+    const { sandbox, calls } = salvageSandbox(DIRTY_SCRIPT);
+
+    const result = await teardown(sandbox, { taskId, worktreePath, branch, identity: IDENTITY });
+
+    expect(result).toEqual({
+      kind: "salvage_unavailable_kept",
+      reason: expect.stringContaining("askpass-is-a-file"),
+    });
+    expect(calls).not.toContain("create:askpass");
+    expect(existsSync(worktreePath)).toBe(true);
+  });
+
+  it("keeps the worktree when the push container dies mid-push", async () => {
+    const taskId = uniqueTaskId();
+    const { worktreePath, branch } = await allocatedWorktree(taskId);
+    const { sandbox, calls } = salvageSandbox({
+      ...DIRTY_SCRIPT,
+      push: { transportError: new Error("container not running") },
+    });
+
+    const result = await teardown(sandbox, { taskId, worktreePath, branch, identity: IDENTITY });
+
+    expect(result).toEqual({
+      kind: "salvage_unavailable_kept",
+      reason: expect.stringContaining("container not running"),
+    });
+    expect(calls.at(-1)).toBe("deleteByTaskId");
+    expect(existsSync(worktreePath)).toBe(true);
+    expect(existsSync(join(askpassBaseDir, taskId))).toBe(false);
+  });
+
+  it("reads an exec throw as unavailable even when the reap after it fails too", async () => {
+    const taskId = uniqueTaskId();
+    const { worktreePath, branch } = await allocatedWorktree(taskId);
+    const { sandbox } = salvageSandbox({
+      ...DIRTY_SCRIPT,
+      add: { transportError: new Error("container not running") },
+    });
+    vi.mocked(sandbox.deleteByTaskId)
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("daemon restarting"));
+
+    const result = await teardown(sandbox, { taskId, worktreePath, branch, identity: IDENTITY });
+
+    expect(result).toEqual({
+      kind: "salvage_unavailable_kept",
+      reason: expect.stringContaining("container not running"),
+    });
+    expect(existsSync(worktreePath)).toBe(true);
   });
 });
 

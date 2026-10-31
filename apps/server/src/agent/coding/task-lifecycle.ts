@@ -146,8 +146,9 @@ interface ReclaimArgs {
    * `swept_by_caller`: the verify run, whose `finally` sweeps the sandbox
    * unconditionally — or, on its pre-`try` credentials exit, has created
    * none yet — so no reap step of its own follows here. On bind-mount the
-   * sandbox is gone before then: `teardown-worktree-cancelled` reaps the
-   * task's containers as its salvage's first step.
+   * sandbox is usually gone before then: `teardown-worktree-cancelled` reaps
+   * the task's containers as its salvage's first step, unless the tree is
+   * already gone or loading the identity threw.
    */
   sandbox: { kind: "reap"; stampStepId: string } | { kind: "swept_by_caller" };
   /**

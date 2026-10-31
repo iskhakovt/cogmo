@@ -194,9 +194,12 @@ async function headBranch(path: string): Promise<string | null> {
   const handle = await open(join(path, ".git", "HEAD"), flags).catch(() => null);
   if (handle === null) return null;
   try {
-    const entry = await handle.stat();
-    if (!entry.isFile() || entry.size > MAX_HEAD_BYTES) return null;
-    const ref = /^ref: refs\/heads\/(\S+)\s*$/.exec(await handle.readFile("utf8"));
+    if (!(await handle.stat()).isFile()) return null;
+    // One byte past the cap tells an oversized HEAD from one at the cap.
+    const buffer = Buffer.alloc(MAX_HEAD_BYTES + 1);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    if (bytesRead > MAX_HEAD_BYTES) return null;
+    const ref = /^ref: refs\/heads\/(\S+)\s*$/.exec(buffer.toString("utf8", 0, bytesRead));
     return ref?.[1] ?? null;
   } catch {
     return null;
