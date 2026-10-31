@@ -13,11 +13,12 @@
  * blocks the next `allocateWorktree` there ("exists but is not a git
  * working tree").
  *
- * Both runners that commit and push in the tree do so inside a container,
- * against `/workspace`, which on the bind-mount backend IS `worktreePath`:
- * `runCommitAndPush` in the task's container and `runWipSalvage` in
- * teardown's salvage container. A detached maintenance process there writes
- * through the mount into the tree the host then deletes.
+ * Every runner that commits in the tree does so inside a container, against
+ * `/workspace`, which on the bind-mount backend IS `worktreePath`:
+ * `runCommitAndPush` in the task's container, and `runWipCommit` /
+ * `runWipPush` in teardown's salvage containers. A detached maintenance
+ * process there writes through the mount into the tree the host then
+ * deletes.
  */
 
 /**

@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { lstat, mkdir, readFile, rename, rm, stat } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, mkdir, open, rename, rm, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { logger } from "../../logger.js";
@@ -184,17 +185,23 @@ const MAX_HEAD_BYTES = 1024;
  * The branch a clone's HEAD names, read as a file rather than asked of git:
  * the sandbox writes this tree, config included, and a git process here
  * would run under it. Null for a detached HEAD, and for a HEAD that is not
- * a regular file, so a symlink planted in the tree is never followed.
+ * a regular file. `O_NOFOLLOW` refuses a symlink at open, so a link planted
+ * in the tree is never followed, and `O_NONBLOCK` keeps a FIFO from
+ * blocking the open; the type is then checked on the descriptor itself.
  */
 async function headBranch(path: string): Promise<string | null> {
-  const headPath = join(path, ".git", "HEAD");
+  const flags = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
+  const handle = await open(join(path, ".git", "HEAD"), flags).catch(() => null);
+  if (handle === null) return null;
   try {
-    const entry = await lstat(headPath);
+    const entry = await handle.stat();
     if (!entry.isFile() || entry.size > MAX_HEAD_BYTES) return null;
-    const ref = /^ref: refs\/heads\/(\S+)\s*$/.exec(await readFile(headPath, "utf8"));
+    const ref = /^ref: refs\/heads\/(\S+)\s*$/.exec(await handle.readFile("utf8"));
     return ref?.[1] ?? null;
   } catch {
     return null;
+  } finally {
+    await handle.close();
   }
 }
 

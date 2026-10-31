@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { promisify } from "node:util";
@@ -93,6 +93,7 @@ beforeEach(async () => {
 afterAll(() => {
   if (baseDir) rmSync(baseDir, { recursive: true, force: true });
 });
+const REMOTE_URL = "https://github.com/user/cogmo.git";
 
 function uniqueTaskId(): string {
   return `019d0000-0000-7000-8000-${Math.random().toString(16).slice(2, 14).padEnd(12, "0")}`;
@@ -118,12 +119,14 @@ function hostGitInside(dir: string): ReadonlyArray<string> {
 }
 
 interface RecordedExec {
+  /** Which `create` handed out the session: 0 for the first salvage container. */
+  container: number;
   cmd: ReadonlyArray<string>;
   workingDir: string | undefined;
   env: Readonly<Record<string, string>> | undefined;
 }
 
-/** The git sub-command of an exec argv, past the leading `-c key=value` pairs. */
+/** The git sub-command of an exec argv, past the leading `-c key=value` pairs and `--git-dir`. */
 function subcommandOf(cmd: ReadonlyArray<string>): string | undefined {
   for (let i = 1; i < cmd.length; i++) {
     const arg = cmd[i];
@@ -131,68 +134,88 @@ function subcommandOf(cmd: ReadonlyArray<string>): string | undefined {
       i++;
       continue;
     }
+    if (arg?.startsWith("--git-dir=")) continue;
     return arg;
   }
   return undefined;
 }
 
+type ScriptEntry = FakeExecScript | ((cmd: ReadonlyArray<string>) => FakeExecScript);
+
 /**
- * The sandbox teardown salvages in. `create` hands out a session whose
- * execs answer from `script` by git sub-command (an array answers in turn);
- * `calls` records the client calls in order.
+ * The sandbox teardown salvages in. Each `create` hands out a session whose
+ * execs answer from `script` by git sub-command; `calls` records the client
+ * calls in order, and `askpassFiles` what each create found in the askpass
+ * dir it was asked to mount.
  */
-function salvageSandbox(
-  script: Record<string, FakeExecScript | FakeExecScript[]>,
-  opts: { createFails?: Error } = {},
-) {
+function salvageSandbox(script: Record<string, ScriptEntry>, opts: { createFails?: Error } = {}) {
   const calls: string[] = [];
   const specs: SessionSpec[] = [];
+  const askpassFiles: Array<ReadonlyArray<string> | undefined> = [];
   const execs: RecordedExec[] = [];
-  const cursors: Record<string, number> = {};
-  const execStreaming = vi.fn(
-    async (cmd: ReadonlyArray<string>, o?: ExecOptions): Promise<ExecStreamingHandle> => {
-      calls.push(`exec:${subcommandOf(cmd) ?? "?"}`);
-      execs.push({ cmd, workingDir: o?.workingDir, env: o?.env });
-      const sub = subcommandOf(cmd);
-      const entry = sub === undefined ? undefined : script[sub];
-      if (entry === undefined) throw new Error(`no scripted result for: ${cmd.join(" ")}`);
-      if (!Array.isArray(entry)) return fakeExecHandle(entry);
-      const idx = cursors[sub ?? ""] ?? 0;
-      cursors[sub ?? ""] = idx + 1;
-      const next = entry[idx];
-      if (next === undefined) throw new Error(`script for ${sub} exhausted`);
-      return fakeExecHandle(next);
-    },
-  );
-  const session: SandboxSession = {
+  const sessionFor = (container: number): SandboxSession => ({
     state: { type: "local-docker", taskId: "t", containerRowId: "row", dockerId: "docker" },
-    execStreaming,
+    execStreaming: vi.fn(
+      async (cmd: ReadonlyArray<string>, o?: ExecOptions): Promise<ExecStreamingHandle> => {
+        const sub = subcommandOf(cmd);
+        calls.push(`exec:${sub ?? "?"}`);
+        execs.push({ container, cmd, workingDir: o?.workingDir, env: o?.env });
+        const entry = sub === undefined ? undefined : script[sub];
+        if (entry === undefined) throw new Error(`no scripted result for: ${cmd.join(" ")}`);
+        return fakeExecHandle(typeof entry === "function" ? entry(cmd) : entry);
+      },
+    ),
     exec: vi.fn(),
-  };
+  });
   const sandbox: Pick<SandboxClient, "ensureImagePresent" | "create" | "deleteByTaskId"> = {
     ensureImagePresent: vi.fn(async () => {
       calls.push("ensureImagePresent");
     }),
     create: vi.fn(async (spec: SessionSpec) => {
-      calls.push("create");
+      calls.push(spec.askpass ? "create:askpass" : "create");
       specs.push(spec);
+      askpassFiles.push(spec.askpass ? readdirSync(spec.askpass.hostDir).sort() : undefined);
       if (opts.createFails) throw opts.createFails;
-      return session;
+      return sessionFor(specs.length - 1);
     }),
     deleteByTaskId: vi.fn(async () => {
       calls.push("deleteByTaskId");
     }),
   };
-  return { sandbox, calls, specs, execs };
+  return { sandbox, calls, specs, askpassFiles, execs };
 }
 
-const DIRTY_SCRIPT = {
+/** `rev-parse HEAD` and the fetched ref answer `sha`; the remote-tracking ref is absent. */
+function revParse(sha: string): ScriptEntry {
+  return (cmd) => (cmd.includes("--quiet") ? { exitCode: 1 } : { stdout: `${sha}\n` });
+}
+
+const DIRTY_SCRIPT: Record<string, ScriptEntry> = {
   status: { stdout: "?? in-progress.ts\n" },
   add: {},
   commit: { stdout: "[cogmo/x 1234567] wip\n" },
-  "rev-parse": { stdout: `${SHA}\n` },
-  push: { stderr: "To origin\n" },
-} satisfies Record<string, FakeExecScript>;
+  "rev-parse": revParse(SHA),
+  init: {},
+  fetch: {},
+  push: { stderr: "To github.com\n" },
+};
+
+const SALVAGE_FLAGS = ["core.hooksPath=/dev/null", "core.fsmonitor=false", "credential.helper="];
+
+function teardown(
+  sandbox: ReturnType<typeof salvageSandbox>["sandbox"],
+  args: { taskId: string; worktreePath: string; branch: string; identity?: GitHubIdentity },
+) {
+  return teardownWorktree({
+    repoPath,
+    remoteUrl: REMOTE_URL,
+    ...args,
+    sandbox,
+    image: IMAGE,
+    resourceLimits: LIMITS,
+    askpassBaseDir,
+  });
+}
 
 describe("teardownWorktree", () => {
   it("runs no host git inside the worktree", async () => {
@@ -202,46 +225,26 @@ describe("teardownWorktree", () => {
     const { sandbox } = salvageSandbox(DIRTY_SCRIPT);
 
     hostSpawns.length = 0;
-    await teardownWorktree({
-      repoPath,
-      worktreePath,
-      branch,
-      taskId,
-      identity: IDENTITY,
-      sandbox,
-      image: IMAGE,
-      resourceLimits: LIMITS,
-      askpassBaseDir,
-    });
+    await teardown(sandbox, { taskId, worktreePath, branch, identity: IDENTITY });
 
     expect(hostGitInside(worktreePath)).toEqual([]);
   });
 
-  it("salvages a dirty worktree in a fresh task container with the askpass mount, then deletes it", async () => {
+  it("commits with no credential mounted, then pushes from a second container holding only the PAT", async () => {
     const taskId = uniqueTaskId();
     const { worktreePath, branch } = await allocatedWorktree(taskId);
     writeFileSync(join(worktreePath, "in-progress.ts"), "// claude was here\n");
-    const { sandbox, calls, specs, execs } = salvageSandbox(DIRTY_SCRIPT);
+    const { sandbox, calls, specs, askpassFiles, execs } = salvageSandbox(DIRTY_SCRIPT);
 
-    const result = await teardownWorktree({
-      repoPath,
-      worktreePath,
-      branch,
-      taskId,
-      identity: IDENTITY,
-      sandbox,
-      image: IMAGE,
-      resourceLimits: LIMITS,
-      askpassBaseDir,
-    });
+    const result = await teardown(sandbox, { taskId, worktreePath, branch, identity: IDENTITY });
 
     expect(result).toEqual({
       kind: "wip_pushed_and_removed",
       wipRef: `refs/cogmo-wip/${taskId}`,
       sha: SHA,
     });
-    // The task's own containers go first, so no process the session left
-    // running shares the tree or sees the credential.
+    // The task's own containers go first; each salvage container is reaped
+    // before the next step.
     expect(calls).toEqual([
       "deleteByTaskId",
       "ensureImagePresent",
@@ -250,39 +253,108 @@ describe("teardownWorktree", () => {
       "exec:add",
       "exec:commit",
       "exec:rev-parse",
+      "exec:rev-parse",
+      "deleteByTaskId",
+      "create:askpass",
+      "exec:init",
+      "exec:fetch",
+      "exec:rev-parse",
       "exec:push",
       "deleteByTaskId",
     ]);
-    const spec = expectDefined(specs[0], "salvage spec");
-    expect(spec).toMatchObject({
+    const [commitSpec, pushSpec] = specs;
+    expect(commitSpec).toMatchObject({
       taskId,
       image: IMAGE,
       resourceLimits: LIMITS,
       worktree: { type: "host-path", hostPath: worktreePath },
+    });
+    expect(expectDefined(commitSpec, "commit spec").askpass).toBeUndefined();
+    expect(expectDefined(pushSpec, "push spec")).toMatchObject({
+      worktree: { type: "host-path", hostPath: worktreePath },
       askpass: { hostDir: join(askpassBaseDir, taskId), containerDir: CONTAINER_ASKPASS_DIR },
     });
-    // No Claude token and no home volume: the container runs only git.
-    expect(spec.env).toBeUndefined();
-    expect(spec.homeVolume).toBeUndefined();
+    // No Claude token and no home volume in either.
+    for (const spec of specs) {
+      expect(spec.env).toBeUndefined();
+      expect(spec.homeVolume).toBeUndefined();
+    }
+    // The WIP commit is unsigned: the signing key is not mounted.
+    expect(askpassFiles[1]).toEqual(["helper", "pat"]);
 
+    for (const e of execs) {
+      expect(e.cmd).toEqual(expect.arrayContaining(SALVAGE_FLAGS));
+    }
     const push = expectDefined(
       execs.find((e) => subcommandOf(e.cmd) === "push"),
       "push exec",
     );
-    expect(push.workingDir).toBe("/workspace");
+    expect(push.container).toBe(1);
     expect(push.env).toMatchObject({
       GIT_ASKPASS: `${CONTAINER_ASKPASS_DIR}/helper`,
       GIT_TERMINAL_PROMPT: "0",
     });
+    // By URL, from the scratch repo: the tree's `origin` is never read.
     expect(push.cmd).toEqual(
-      expect.arrayContaining(["--force", "--no-verify", "origin", `HEAD:refs/cogmo-wip/${taskId}`]),
+      expect.arrayContaining([
+        "--git-dir=/tmp/cogmo-wip.git",
+        "--force",
+        REMOTE_URL,
+        `refs/cogmo-wip/${taskId}:refs/cogmo-wip/${taskId}`,
+      ]),
     );
-    // Only the push sees the credential.
-    for (const e of execs.filter((x) => subcommandOf(x.cmd) !== "push")) {
+    expect(push.cmd).not.toContain("origin");
+    for (const e of execs.filter((x) => x !== push)) {
       expect(e.env?.GIT_ASKPASS).toBeUndefined();
     }
     expect(existsSync(worktreePath)).toBe(false);
     expect(existsSync(join(askpassBaseDir, taskId))).toBe(false);
+  });
+
+  it("removes a clean, pushed worktree without creating the credential container", async () => {
+    const taskId = uniqueTaskId();
+    const { worktreePath, branch } = await allocatedWorktree(taskId);
+    const { sandbox, calls, execs } = salvageSandbox({
+      status: { stdout: "" },
+      "rev-parse": { stdout: `${SHA}\n` },
+    });
+
+    const result = await teardown(sandbox, { taskId, worktreePath, branch, identity: IDENTITY });
+
+    expect(result).toEqual({ kind: "removed_clean" });
+    expect(calls).not.toContain("create:askpass");
+    expect(calls).not.toContain("exec:commit");
+    expect(execs[2]?.cmd).toContain(`refs/remotes/origin/${branch}`);
+    expect(existsSync(worktreePath)).toBe(false);
+  });
+
+  it("pushes a clean worktree whose branch was never pushed, without a commit", async () => {
+    const taskId = uniqueTaskId();
+    const { worktreePath, branch } = await allocatedWorktree(taskId);
+    const { sandbox, calls } = salvageSandbox({ ...DIRTY_SCRIPT, status: { stdout: "" } });
+
+    const result = await teardown(sandbox, { taskId, worktreePath, branch, identity: IDENTITY });
+
+    expect(result.kind).toBe("wip_pushed_and_removed");
+    expect(calls).not.toContain("exec:commit");
+    expect(calls).toContain("exec:push");
+  });
+
+  it("keeps the worktree, and creates no credential container, when no identity is supplied", async () => {
+    const taskId = uniqueTaskId();
+    const { worktreePath, branch } = await allocatedWorktree(taskId);
+    writeFileSync(join(worktreePath, "in-progress.ts"), "// claude was here\n");
+    const { sandbox, specs } = salvageSandbox(DIRTY_SCRIPT);
+
+    const result = await teardown(sandbox, { taskId, worktreePath, branch });
+
+    expect(result).toEqual({
+      kind: "wip_push_failed_kept",
+      reason: expect.stringMatching(/no GitHub identity/),
+    });
+    expect(specs).toHaveLength(1);
+    expect(expectDefined(specs[0], "commit spec").askpass).toBeUndefined();
+    expect(existsSync(join(worktreePath, "in-progress.ts"))).toBe(true);
   });
 
   it("keeps the worktree and runs no host git when no container can be created", async () => {
@@ -294,17 +366,7 @@ describe("teardownWorktree", () => {
     });
 
     hostSpawns.length = 0;
-    const result = await teardownWorktree({
-      repoPath,
-      worktreePath,
-      branch,
-      taskId,
-      identity: IDENTITY,
-      sandbox,
-      image: IMAGE,
-      resourceLimits: LIMITS,
-      askpassBaseDir,
-    });
+    const result = await teardown(sandbox, { taskId, worktreePath, branch, identity: IDENTITY });
 
     expect(result).toEqual({
       kind: "salvage_unavailable_kept",
@@ -312,120 +374,26 @@ describe("teardownWorktree", () => {
     });
     expect(hostGitInside(worktreePath)).toEqual([]);
     expect(existsSync(join(worktreePath, "in-progress.ts"))).toBe(true);
-    // The askpass dir provisioned for the container is gone with it.
     expect(calls.at(-1)).toBe("deleteByTaskId");
-    expect(existsSync(join(askpassBaseDir, taskId))).toBe(false);
   });
 
-  it("keeps the worktree when the container dies mid-salvage", async () => {
+  it("keeps the worktree when the container dies mid-commit", async () => {
     const taskId = uniqueTaskId();
     const { worktreePath, branch } = await allocatedWorktree(taskId);
     writeFileSync(join(worktreePath, "in-progress.ts"), "// claude was here\n");
-    const { sandbox } = salvageSandbox({
+    const { sandbox, calls } = salvageSandbox({
       ...DIRTY_SCRIPT,
       add: { transportError: new Error("container not running") },
     });
 
-    const result = await teardownWorktree({
-      repoPath,
-      worktreePath,
-      branch,
-      taskId,
-      identity: IDENTITY,
-      sandbox,
-      image: IMAGE,
-      resourceLimits: LIMITS,
-      askpassBaseDir,
-    });
+    const result = await teardown(sandbox, { taskId, worktreePath, branch, identity: IDENTITY });
 
     expect(result).toEqual({
       kind: "salvage_unavailable_kept",
       reason: expect.stringContaining("container not running"),
     });
+    expect(calls).not.toContain("create:askpass");
     expect(existsSync(worktreePath)).toBe(true);
-  });
-
-  it("removes a clean, pushed worktree without committing or pushing", async () => {
-    const taskId = uniqueTaskId();
-    const { worktreePath, branch } = await allocatedWorktree(taskId);
-    const { sandbox, calls, execs } = salvageSandbox({
-      status: { stdout: "" },
-      "rev-parse": [{ stdout: `${SHA}\n` }, { stdout: `${SHA}\n` }],
-    });
-
-    const result = await teardownWorktree({
-      repoPath,
-      worktreePath,
-      branch,
-      taskId,
-      identity: IDENTITY,
-      sandbox,
-      image: IMAGE,
-      resourceLimits: LIMITS,
-      askpassBaseDir,
-    });
-
-    expect(result).toEqual({ kind: "removed_clean" });
-    expect(calls.filter((c) => c.startsWith("exec:"))).toEqual([
-      "exec:status",
-      "exec:rev-parse",
-      "exec:rev-parse",
-    ]);
-    expect(execs[2]?.cmd).toContain(`refs/remotes/origin/${branch}`);
-    expect(existsSync(worktreePath)).toBe(false);
-  });
-
-  it("WIP-pushes a clean worktree whose branch was never pushed", async () => {
-    const taskId = uniqueTaskId();
-    const { worktreePath, branch } = await allocatedWorktree(taskId);
-    const { sandbox, calls } = salvageSandbox({
-      status: { stdout: "" },
-      // HEAD resolves; `refs/remotes/origin/<branch>` does not.
-      "rev-parse": [{ stdout: `${SHA}\n` }, { exitCode: 1 }, { stdout: `${SHA}\n` }],
-      push: {},
-    });
-
-    const result = await teardownWorktree({
-      repoPath,
-      worktreePath,
-      branch,
-      taskId,
-      identity: IDENTITY,
-      sandbox,
-      image: IMAGE,
-      resourceLimits: LIMITS,
-      askpassBaseDir,
-    });
-
-    expect(result.kind).toBe("wip_pushed_and_removed");
-    expect(calls).not.toContain("exec:commit");
-    expect(calls).toContain("exec:push");
-  });
-
-  it("keeps a dirty worktree, with no askpass mounted, when no identity is supplied", async () => {
-    const taskId = uniqueTaskId();
-    const { worktreePath, branch } = await allocatedWorktree(taskId);
-    writeFileSync(join(worktreePath, "in-progress.ts"), "// claude was here\n");
-    const { sandbox, specs, calls } = salvageSandbox(DIRTY_SCRIPT);
-
-    const result = await teardownWorktree({
-      repoPath,
-      worktreePath,
-      branch,
-      taskId,
-      sandbox,
-      image: IMAGE,
-      resourceLimits: LIMITS,
-      askpassBaseDir,
-    });
-
-    expect(result).toEqual({
-      kind: "wip_push_failed_kept",
-      reason: expect.stringMatching(/no GitHub identity/),
-    });
-    expect(specs[0]?.askpass).toBeUndefined();
-    expect(calls).not.toContain("exec:commit");
-    expect(existsSync(join(worktreePath, "in-progress.ts"))).toBe(true);
   });
 
   it("keeps the worktree when the WIP push fails", async () => {
@@ -437,22 +405,38 @@ describe("teardownWorktree", () => {
       push: { exitCode: 128, stderr: "fatal: unable to access remote\n" },
     });
 
-    const result = await teardownWorktree({
-      repoPath,
-      worktreePath,
-      branch,
-      taskId,
-      identity: IDENTITY,
-      sandbox,
-      image: IMAGE,
-      resourceLimits: LIMITS,
-      askpassBaseDir,
-    });
+    const result = await teardown(sandbox, { taskId, worktreePath, branch, identity: IDENTITY });
 
     expect(result).toEqual({
       kind: "wip_push_failed_kept",
       reason: expect.stringContaining("unable to access remote"),
     });
+    expect(existsSync(worktreePath)).toBe(true);
+    expect(existsSync(join(askpassBaseDir, taskId))).toBe(false);
+  });
+
+  it("refuses to push when the tree's HEAD moved after the commit", async () => {
+    const taskId = uniqueTaskId();
+    const { worktreePath, branch } = await allocatedWorktree(taskId);
+    writeFileSync(join(worktreePath, "in-progress.ts"), "// claude was here\n");
+    const other = "0123456789012345678901234567890123456789";
+    const { sandbox, calls } = salvageSandbox({
+      ...DIRTY_SCRIPT,
+      "rev-parse": (cmd) =>
+        cmd.some((a) => a.startsWith("--git-dir="))
+          ? { stdout: `${other}\n` }
+          : cmd.includes("--quiet")
+            ? { exitCode: 1 }
+            : { stdout: `${SHA}\n` },
+    });
+
+    const result = await teardown(sandbox, { taskId, worktreePath, branch, identity: IDENTITY });
+
+    expect(result).toEqual({
+      kind: "wip_push_failed_kept",
+      reason: expect.stringContaining("HEAD moved"),
+    });
+    expect(calls).not.toContain("exec:push");
     expect(existsSync(worktreePath)).toBe(true);
   });
 
@@ -462,17 +446,7 @@ describe("teardownWorktree", () => {
     rmSync(worktreePath, { recursive: true, force: true });
     const { sandbox, calls } = salvageSandbox({});
 
-    const result = await teardownWorktree({
-      repoPath,
-      worktreePath,
-      branch,
-      taskId,
-      identity: IDENTITY,
-      sandbox,
-      image: IMAGE,
-      resourceLimits: LIMITS,
-      askpassBaseDir,
-    });
+    const result = await teardown(sandbox, { taskId, worktreePath, branch, identity: IDENTITY });
 
     expect(result).toEqual({ kind: "no_worktree" });
     expect(calls).toEqual([]);
@@ -488,50 +462,55 @@ describe("teardownWorktree", () => {
     const { sandbox, calls } = salvageSandbox(DIRTY_SCRIPT);
     vi.mocked(sandbox.deleteByTaskId).mockRejectedValueOnce(new Error("daemon restarting"));
 
-    const result = await teardownWorktree({
-      repoPath,
-      worktreePath,
-      branch,
-      taskId,
-      identity: IDENTITY,
-      sandbox,
-      image: IMAGE,
-      resourceLimits: LIMITS,
-      askpassBaseDir,
-    });
+    const result = await teardown(sandbox, { taskId, worktreePath, branch, identity: IDENTITY });
 
     expect(result).toEqual({
       kind: "salvage_unavailable_kept",
       reason: expect.stringContaining("daemon restarting"),
     });
-    expect(calls).not.toContain("create");
+    expect(calls.filter((c) => c.startsWith("create"))).toEqual([]);
     expect(existsSync(worktreePath)).toBe(true);
   });
 
-  it("settles on the salvage's outcome when deleting the salvage container fails", async () => {
+  it("keeps the worktree, and pushes nothing, when the commit container cannot be reaped", async () => {
+    const taskId = uniqueTaskId();
+    const { worktreePath, branch } = await allocatedWorktree(taskId);
+    writeFileSync(join(worktreePath, "in-progress.ts"), "// claude was here\n");
+    const { sandbox, calls } = salvageSandbox(DIRTY_SCRIPT);
+    vi.mocked(sandbox.deleteByTaskId)
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("daemon restarting"));
+
+    const result = await teardown(sandbox, { taskId, worktreePath, branch, identity: IDENTITY });
+
+    // The container may still have the tree mounted, and a process in it
+    // still writing: no credential container joins it, and no delete races it.
+    expect(result).toEqual({
+      kind: "salvage_reap_failed_kept",
+      reason: expect.stringContaining("daemon restarting"),
+    });
+    expect(calls).not.toContain("create:askpass");
+    expect(existsSync(join(worktreePath, "in-progress.ts"))).toBe(true);
+  });
+
+  it("keeps the worktree when the push container cannot be reaped", async () => {
     const taskId = uniqueTaskId();
     const { worktreePath, branch } = await allocatedWorktree(taskId);
     writeFileSync(join(worktreePath, "in-progress.ts"), "// claude was here\n");
     const { sandbox } = salvageSandbox(DIRTY_SCRIPT);
     vi.mocked(sandbox.deleteByTaskId)
       .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
       .mockRejectedValueOnce(new Error("daemon restarting"));
 
-    const result = await teardownWorktree({
-      repoPath,
-      worktreePath,
-      branch,
-      taskId,
-      identity: IDENTITY,
-      sandbox,
-      image: IMAGE,
-      resourceLimits: LIMITS,
-      askpassBaseDir,
-    });
+    const result = await teardown(sandbox, { taskId, worktreePath, branch, identity: IDENTITY });
 
-    // The container is the reaper's; the askpass dir goes regardless.
-    expect(result.kind).toBe("wip_pushed_and_removed");
-    expect(existsSync(worktreePath)).toBe(false);
+    expect(result).toEqual({
+      kind: "salvage_reap_failed_kept",
+      reason: expect.stringContaining("daemon restarting"),
+    });
+    expect(existsSync(join(worktreePath, "in-progress.ts"))).toBe(true);
+    // The askpass dir goes regardless.
     expect(existsSync(join(askpassBaseDir, taskId))).toBe(false);
   });
 });
@@ -550,28 +529,29 @@ describe("safeTeardownWorktree", () => {
     };
   }
 
-  it("mounts the repo identity's askpass in the task image", async () => {
+  it("pushes to the repo's remote URL with its identity, in the task image", async () => {
     const taskId = uniqueTaskId();
     const { worktreePath, branch } = await allocatedWorktree(taskId);
     writeFileSync(join(worktreePath, "in-progress.ts"), "// claude was here\n");
     const secretsStore = mock<SecretsStore>();
     secretsStore.getSecret.mockResolvedValue(serializeGitHubIdentity(IDENTITY));
-    const { sandbox, specs } = salvageSandbox(DIRTY_SCRIPT);
+    const { sandbox, specs, execs } = salvageSandbox(DIRTY_SCRIPT);
 
     await safeTeardownWorktree(deps(secretsStore, sandbox), {
-      repo: codingRepoRow({ localPath: repoPath }),
+      repo: codingRepoRow({ localPath: repoPath, remoteUrl: REMOTE_URL }),
       taskId,
       worktreeAssignment: { type: "host-path", branch, worktreePath },
     });
 
-    expect(specs[0]).toMatchObject({
-      image: IMAGE,
-      askpass: { hostDir: join(askpassBaseDir, taskId) },
-    });
+    expect(specs.map((s) => s.image)).toEqual([IMAGE, IMAGE]);
+    expect(expectDefined(specs[1], "push spec").askpass?.hostDir).toBe(
+      join(askpassBaseDir, taskId),
+    );
+    expect(execs.find((e) => subcommandOf(e.cmd) === "push")?.cmd).toContain(REMOTE_URL);
     expect(existsSync(worktreePath)).toBe(false);
   });
 
-  it("salvages without askpass, keeping a dirty tree, when the identity cannot be resolved", async () => {
+  it("creates no credential container, keeping a dirty tree, when the identity cannot be resolved", async () => {
     const taskId = uniqueTaskId();
     const { worktreePath, branch } = await allocatedWorktree(taskId);
     writeFileSync(join(worktreePath, "in-progress.ts"), "// claude was here\n");
@@ -586,7 +566,7 @@ describe("safeTeardownWorktree", () => {
     });
 
     expect(specs).toHaveLength(1);
-    expect(specs[0]?.askpass).toBeUndefined();
+    expect(expectDefined(specs[0], "commit spec").askpass).toBeUndefined();
     expect(existsSync(join(worktreePath, "in-progress.ts"))).toBe(true);
   });
 

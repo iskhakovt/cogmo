@@ -145,7 +145,9 @@ interface ReclaimArgs {
    * the task never persisted a sandbox block, as on the plan run).
    * `swept_by_caller`: the verify run, whose `finally` sweeps the sandbox
    * unconditionally — or, on its pre-`try` credentials exit, has created
-   * none yet — so a delete here would only double the provider round-trip.
+   * none yet — so no reap step of its own follows here. On bind-mount the
+   * sandbox is gone before then: `teardown-worktree-cancelled` reaps the
+   * task's containers as its salvage's first step.
    */
   sandbox: { kind: "reap"; stampStepId: string } | { kind: "swept_by_caller" };
   /**

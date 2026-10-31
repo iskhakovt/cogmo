@@ -193,49 +193,59 @@ export async function runCommitAndPush(params: CommitAndPushParams): Promise<Com
   return { kind: "pushed", commitSha, output: pushOutput };
 }
 
-export interface WipSalvageParams {
+/**
+ * Config every salvage exec carries, ahead of whatever the tree's own
+ * `.git/config` says: no hooks, no fsmonitor, no credential helper. Command
+ * line `-c` outranks repo config; an empty `credential.helper` resets the
+ * helper list. Filters named in `.gitattributes`, and transport settings
+ * such as `url.*.insteadOf`, still apply in the tree — which is why the
+ * commit stage runs with no credential mounted, and the push stage pushes
+ * from a scratch repo whose config the tree does not write.
+ */
+const SALVAGE_CONFIG_FLAGS: ReadonlyArray<string> = [
+  "-c",
+  "core.hooksPath=/dev/null",
+  "-c",
+  "core.fsmonitor=false",
+  "-c",
+  "credential.helper=",
+];
+
+/** The salvage command that exited non-zero, or the fetched HEAD that moved. */
+type WipSalvageStage = "status" | "add" | "commit" | "rev-parse" | "init" | "fetch" | "push";
+
+export interface WipCommitParams {
   container: Pick<SandboxSession, "execStreaming">;
   /** Working directory inside the container — typically `/workspace`. */
   worktreeDir: string;
   /** Task branch; its remote-tracking ref tells a pushed tree from an unpushed one. */
   branch: string;
-  /** Names the WIP commit and the `refs/cogmo-wip/<taskId>` ref. */
+  /** Names the WIP commit. */
   taskId: string;
-  /**
-   * Env from `provisionAskpass`, given to the push alone. Undefined when no
-   * identity is mounted: a tree that needs pushing is then reported, not
-   * committed.
-   */
-  askpassEnv: Readonly<Record<string, string>> | undefined;
 }
 
-/** The salvage command that exited non-zero. */
-type WipSalvageStage = "status" | "add" | "commit" | "rev-parse" | "push";
-
-export type WipSalvageResult =
+export type WipCommitResult =
   /** No edits, and HEAD is what the remote-tracking ref of the branch records. */
   | { kind: "clean" }
-  | { kind: "pushed"; wipRef: string; sha: string }
-  /** Edits or unpushed commits, and no askpass to push them with. */
-  | { kind: "no_credentials" }
+  /** HEAD — the WIP commit, or unpushed commits — has to reach the remote. */
+  | { kind: "needs_push"; sha: string }
   | { kind: "failed"; stage: WipSalvageStage; output: string };
 
 /**
- * Teardown's WIP salvage, on the exec path {@link runCommitAndPush} uses:
- * commit whatever the tree holds as `wip: <taskId>` and force-push HEAD to
- * `refs/cogmo-wip/<taskId>`. A per-task ref makes `--force` safe and the
- * push idempotent; a re-run after a lost result finds the tree clean and
- * unpushed, and pushes the same commit again. `--no-verify` on both keeps a
- * hook in the tree from blocking a forensic commit. The commit is unsigned
- * under a fixed author: the user never approved this state.
+ * The salvage's first stage, run with no credential in the container: commit
+ * whatever the tree holds as `wip: <taskId>` and report whether HEAD still
+ * has to reach the remote. Unsigned under a fixed author, since the user
+ * never approved this state, and `--no-verify` so a hook cannot block it.
+ * A re-run after a lost result finds the tree clean and unpushed, and
+ * reports the same HEAD.
  *
  * Throws when an exec does (the container is gone); the caller owns the
  * container and reads that as the salvage being unavailable.
  */
-export async function runWipSalvage(params: WipSalvageParams): Promise<WipSalvageResult> {
-  const { container, worktreeDir, branch, taskId, askpassEnv } = params;
+export async function runWipCommit(params: WipCommitParams): Promise<WipCommitResult> {
+  const { container, worktreeDir, branch, taskId } = params;
   const local = (args: ReadonlyArray<string>) =>
-    runGit(container, args, {
+    runGit(container, [...SALVAGE_CONFIG_FLAGS, ...args], {
       workingDir: worktreeDir,
       env: {},
       timeoutMs: GIT_LOCAL_TOTAL_MS,
@@ -244,25 +254,7 @@ export async function runWipSalvage(params: WipSalvageParams): Promise<WipSalvag
 
   const status = await local(["status", "--porcelain"]);
   if (status.exitCode !== 0) return { kind: "failed", stage: "status", output: combine(status) };
-  const dirty = status.stdout.trim() !== "";
-
-  if (!dirty) {
-    const head = await local(["rev-parse", "HEAD"]);
-    if (head.exitCode !== 0) return { kind: "failed", stage: "rev-parse", output: combine(head) };
-    // Absent when the branch was never pushed: that tree is unpushed.
-    const tracked = await local([
-      "rev-parse",
-      "--verify",
-      "--quiet",
-      `refs/remotes/${REMOTE}/${branch}`,
-    ]);
-    if (tracked.exitCode === 0 && tracked.stdout.trim() === head.stdout.trim()) {
-      return { kind: "clean" };
-    }
-  }
-  if (askpassEnv === undefined) return { kind: "no_credentials" };
-
-  if (dirty) {
+  if (status.stdout.trim() !== "") {
     const add = await local(["add", "-A"]);
     if (add.exitCode !== 0) return { kind: "failed", stage: "add", output: combine(add) };
     const commit = await local([
@@ -281,21 +273,92 @@ export async function runWipSalvage(params: WipSalvageParams): Promise<WipSalvag
     if (commit.exitCode !== 0) return { kind: "failed", stage: "commit", output: combine(commit) };
   }
 
-  const sha = await local(["rev-parse", "HEAD"]);
-  if (sha.exitCode !== 0) return { kind: "failed", stage: "rev-parse", output: combine(sha) };
+  const head = await local(["rev-parse", "HEAD"]);
+  if (head.exitCode !== 0) return { kind: "failed", stage: "rev-parse", output: combine(head) };
+  const sha = head.stdout.trim();
+  // Absent when the branch was never pushed: that tree is unpushed.
+  const tracked = await local([
+    "rev-parse",
+    "--verify",
+    "--quiet",
+    `refs/remotes/${REMOTE}/${branch}`,
+  ]);
+  if (tracked.exitCode === 0 && tracked.stdout.trim() === sha) return { kind: "clean" };
+  return { kind: "needs_push", sha };
+}
+
+export interface WipPushParams {
+  container: Pick<SandboxSession, "execStreaming">;
+  /** The task tree inside the container — typically `/workspace`. */
+  worktreeDir: string;
+  /** A path in the container, outside the tree, for the scratch bare repo. */
+  scratchGitDir: string;
+  /** `coding_repos.remote_url`, pushed to by URL rather than by the tree's `origin`. */
+  remoteUrl: string;
+  taskId: string;
+  /** What {@link runWipCommit} reported; a tree whose HEAD moved since is refused. */
+  sha: string;
+  /** Env from `provisionAskpass`, given to the push alone. */
+  askpassEnv: Readonly<Record<string, string>>;
+}
+
+export type WipPushResult =
+  | { kind: "pushed"; wipRef: string; sha: string }
+  | { kind: "failed"; stage: WipSalvageStage; output: string };
+
+/**
+ * The salvage's second stage, the only one with the credential mounted:
+ * fetch the tree's HEAD into a fresh bare repo and force-push it from there
+ * to `refs/cogmo-wip/<taskId>` on `remoteUrl`. The push reads the scratch
+ * repo's config, which the tree does not write, so the tree's remotes,
+ * `insteadOf` rewrites, protocol and proxy settings never reach it. The
+ * fetch is a local one: the tree's side is `git-upload-pack`, which runs no
+ * hooks or filters. A per-task ref makes `--force` safe and the push
+ * idempotent.
+ *
+ * Throws when an exec does (the container is gone), as {@link runWipCommit}.
+ */
+export async function runWipPush(params: WipPushParams): Promise<WipPushResult> {
+  const { container, worktreeDir, scratchGitDir, remoteUrl, taskId, sha, askpassEnv } = params;
   const wipRef = `refs/cogmo-wip/${taskId}`;
-  const push = await runGit(
-    container,
-    ["push", "--force", "--no-verify", REMOTE, `HEAD:${wipRef}`],
-    {
-      workingDir: worktreeDir,
-      env: askpassEnv,
-      timeoutMs: GIT_PUSH_TOTAL_MS,
+  const scratch = (
+    args: ReadonlyArray<string>,
+    env: Readonly<Record<string, string>>,
+    timeoutMs: number,
+  ) =>
+    runGit(container, [...SALVAGE_CONFIG_FLAGS, `--git-dir=${scratchGitDir}`, ...args], {
+      workingDir: "/",
+      env,
+      timeoutMs,
       idleTimeoutMs: GIT_IDLE_MS,
-    },
+    });
+
+  const init = await scratch(["init", "--bare", "--quiet"], {}, GIT_LOCAL_TOTAL_MS);
+  if (init.exitCode !== 0) return { kind: "failed", stage: "init", output: combine(init) };
+  const fetch = await scratch(
+    ["fetch", "--no-tags", "--no-write-fetch-head", worktreeDir, `+HEAD:${wipRef}`],
+    {},
+    GIT_PUSH_TOTAL_MS,
+  );
+  if (fetch.exitCode !== 0) return { kind: "failed", stage: "fetch", output: combine(fetch) };
+  const fetched = await scratch(["rev-parse", "--verify", wipRef], {}, GIT_LOCAL_TOTAL_MS);
+  if (fetched.exitCode !== 0) {
+    return { kind: "failed", stage: "rev-parse", output: combine(fetched) };
+  }
+  if (fetched.stdout.trim() !== sha) {
+    return {
+      kind: "failed",
+      stage: "fetch",
+      output: `HEAD moved after the WIP commit: expected ${sha}, fetched ${fetched.stdout.trim()}`,
+    };
+  }
+  const push = await scratch(
+    ["push", "--force", "--no-verify", remoteUrl, `${wipRef}:${wipRef}`],
+    askpassEnv,
+    GIT_PUSH_TOTAL_MS,
   );
   if (push.exitCode !== 0) return { kind: "failed", stage: "push", output: combine(push) };
-  return { kind: "pushed", wipRef, sha: sha.stdout.trim() };
+  return { kind: "pushed", wipRef, sha };
 }
 
 interface ExecCapture {

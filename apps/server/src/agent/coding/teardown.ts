@@ -4,9 +4,11 @@
  *
  * The task's clone is bind-mounted read-write into its container, so the
  * sandbox writes all of it, `.git/config` and hooks included. The host
- * therefore runs no git in it: the WIP salvage runs in a salvage container
- * that mounts the tree and the askpass material, and the host only deletes
- * the tree once the salvage reports it safe to.
+ * therefore runs no git in it. The WIP salvage runs in two salvage
+ * containers: the commit in one with no credential, the push in a second
+ * with only the PAT mounted, created only when there is something to push.
+ * The host deletes the tree once the salvage reports it safe to, and every
+ * salvage container is gone.
  *
  * Resume reverses: re-materialize the clone, `git fetch origin
  * refs/cogmo-wip/<id>:wip-<id>` → `git checkout wip-<id>` →
@@ -18,12 +20,14 @@
  * always have a remote URL.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
+import { basename, join } from "node:path";
+import { ResultAsync } from "neverthrow";
 import { match } from "ts-pattern";
 import type { Transactor } from "../../db/index.js";
 import { logger } from "../../logger.js";
-import { cleanupAskpass, provisionAskpass } from "../../sandbox/askpass.js";
-import type { SandboxClient } from "../../sandbox/index.js";
+import { type AskpassMaterials, cleanupAskpass, provisionAskpass } from "../../sandbox/askpass.js";
+import type { SandboxClient, SandboxSession } from "../../sandbox/index.js";
 import type { ResourceLimits } from "../../sandbox/types.js";
 import {
   describeResolveIdentityError,
@@ -32,7 +36,7 @@ import {
 } from "../../secrets/github.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import { describeError } from "../../util/describe-error.js";
-import { runWipSalvage, type WipSalvageResult } from "./commit-push.js";
+import { runWipCommit, runWipPush, type WipCommitResult } from "./commit-push.js";
 import type { CodingRepoRow } from "./store/index.js";
 import { taskImage, WORKTREE_DIR_IN_CONTAINER } from "./task-sandbox.js";
 import type { WorktreeAssignment } from "./types.js";
@@ -41,26 +45,31 @@ import { removeWorktree } from "./worktree.js";
 const log = logger.child({ component: "coding.teardown" });
 
 /**
- * The salvage container's TTL. The salvage is a handful of git commands and
+ * A salvage container's TTL. The salvage is a handful of git commands and
  * deletes the container itself; this only bounds one a crash left behind,
  * should no later sweep by task id reach it first.
  */
 const SALVAGE_TTL_MS = 15 * 60 * 1000;
+
+/** The push stage's scratch bare repo, inside the push container and outside the tree. */
+const SCRATCH_GIT_DIR = "/tmp/cogmo-wip.git";
 
 type SalvageSandbox = Pick<SandboxClient, "ensureImagePresent" | "create" | "deleteByTaskId">;
 
 export interface TeardownWorktreeOpts {
   /** Path to the parent git clone (`coding_repos.local_path`). */
   repoPath: string;
+  /** `coding_repos.remote_url`, the WIP push's target. */
+  remoteUrl: string;
   /** Host filesystem path of the worktree to tear down. */
   worktreePath: string;
   /** Task branch (e.g. `cogmo/abc12345`). */
   branch: string;
-  /** Task UUID — the salvage container's lineage label, the WIP commit and ref. */
+  /** Task UUID — the salvage containers' lineage label, the WIP commit and ref. */
   taskId: string;
   /**
-   * GitHub identity for the WIP push. Without one the salvage container has
-   * no askpass: a clean tree is still removed, any other stays on disk.
+   * GitHub identity for the WIP push. Without one no push container is
+   * created: a clean tree is still removed, any other stays on disk.
    */
   identity?: GitHubIdentity;
   sandbox: SalvageSandbox;
@@ -77,7 +86,9 @@ export type TeardownResult =
   | { kind: "wip_pushed_and_removed"; wipRef: string; sha: string }
   | { kind: "wip_push_failed_kept"; reason: string }
   /** No container to salvage in, or it died mid-salvage; the host never falls back to git. */
-  | { kind: "salvage_unavailable_kept"; reason: string };
+  | { kind: "salvage_unavailable_kept"; reason: string }
+  /** A salvage container could not be reaped and may still have the tree mounted. */
+  | { kind: "salvage_reap_failed_kept"; reason: string };
 
 /**
  * Tear down a worktree on a failure / cancel path. Never throws. Idempotent:
@@ -86,7 +97,6 @@ export type TeardownResult =
  */
 export async function teardownWorktree(opts: TeardownWorktreeOpts): Promise<TeardownResult> {
   const { repoPath, worktreePath, taskId } = opts;
-
   if (!existsSync(worktreePath)) {
     // The parent repo can still hold a stale linked-worktree registration for
     // the path; `removeWorktree` prunes it so a later allocation isn't
@@ -94,41 +104,44 @@ export async function teardownWorktree(opts: TeardownWorktreeOpts): Promise<Tear
     await removeWorktree(repoPath, worktreePath);
     return { kind: "no_worktree" };
   }
-
-  const salvaged = await salvageInContainer(opts);
-  const result = await match(salvaged)
-    .with({ kind: "unavailable" }, async ({ reason }): Promise<TeardownResult> => {
-      log.warn({ taskId, worktreePath, reason }, "teardown: no salvage container — keeping");
-      return { kind: "salvage_unavailable_kept", reason };
-    })
-    .with({ kind: "salvaged" }, ({ result: salvage }) => settle(opts, salvage))
-    .exhaustive();
-  log.info({ taskId, worktreePath, kind: result.kind }, "teardown: done");
+  const result = await salvage(opts);
+  log.info({ taskId, worktreePath, result }, "teardown: done");
   return result;
 }
 
-/** Remove the tree when the salvage left nothing behind it; keep it otherwise. */
-async function settle(
+/**
+ * Reap the task's own containers first, so no process the session left
+ * running shares the tree or outlives into the push, then commit.
+ */
+async function salvage(opts: TeardownWorktreeOpts): Promise<TeardownResult> {
+  const ready = await reap(opts).andThen(() =>
+    ResultAsync.fromPromise(opts.sandbox.ensureImagePresent(opts.image), describeError),
+  );
+  if (ready.isErr()) return { kind: "salvage_unavailable_kept", reason: ready.error };
+  const committed = await inSalvageContainer(opts, undefined, (session) =>
+    runWipCommit({
+      container: session,
+      worktreeDir: WORKTREE_DIR_IN_CONTAINER,
+      branch: opts.branch,
+      taskId: opts.taskId,
+    }),
+  );
+  return match(committed)
+    .with({ kind: "unavailable" }, unavailableKept)
+    .with({ kind: "reap_failed" }, reapFailedKept)
+    .with({ kind: "ran" }, ({ value }) => afterCommit(opts, value))
+    .exhaustive();
+}
+
+async function afterCommit(
   opts: TeardownWorktreeOpts,
-  salvage: WipSalvageResult,
+  commit: WipCommitResult,
 ): Promise<TeardownResult> {
-  const { repoPath, worktreePath } = opts;
-  return match(salvage)
+  return match(commit)
     .with({ kind: "clean" }, async (): Promise<TeardownResult> => {
-      await removeWorktree(repoPath, worktreePath);
+      await removeWorktree(opts.repoPath, opts.worktreePath);
       return { kind: "removed_clean" };
     })
-    .with({ kind: "pushed" }, async ({ wipRef, sha }): Promise<TeardownResult> => {
-      await removeWorktree(repoPath, worktreePath);
-      return { kind: "wip_pushed_and_removed", wipRef, sha };
-    })
-    .with(
-      { kind: "no_credentials" },
-      async (): Promise<TeardownResult> => ({
-        kind: "wip_push_failed_kept",
-        reason: "no GitHub identity available for WIP push",
-      }),
-    )
     .with(
       { kind: "failed" },
       async ({ stage, output }): Promise<TeardownResult> => ({
@@ -136,57 +149,120 @@ async function settle(
         reason: `git ${stage} failed: ${output}`,
       }),
     )
+    .with({ kind: "needs_push" }, ({ sha }) => push(opts, sha))
     .exhaustive();
 }
 
-type SalvageOutcome =
-  | { kind: "salvaged"; result: WipSalvageResult }
-  | { kind: "unavailable"; reason: string };
-
-/**
- * Reap the task's own containers, then run the salvage in a fresh one that
- * mounts the tree and, with an identity, the askpass material. The fresh
- * container is reaped, and the askpass dir removed, before this returns.
- */
-async function salvageInContainer(opts: TeardownWorktreeOpts): Promise<SalvageOutcome> {
-  const { sandbox, taskId, identity, askpassBaseDir } = opts;
+/** The second container, created only now: the one that holds the PAT. */
+async function push(opts: TeardownWorktreeOpts, sha: string): Promise<TeardownResult> {
+  const { identity, askpassBaseDir, taskId } = opts;
+  if (identity === undefined) {
+    return { kind: "wip_push_failed_kept", reason: "no GitHub identity available for WIP push" };
+  }
   try {
-    await sandbox.deleteByTaskId(taskId);
-    const askpass =
-      identity === undefined
-        ? undefined
-        : provisionAskpass({ baseDir: askpassBaseDir, rootTaskId: taskId, identity });
-    await sandbox.ensureImagePresent(opts.image);
-    const session = await sandbox.create({
-      taskId,
-      image: opts.image,
-      resourceLimits: opts.resourceLimits,
-      expiresAt: new Date(Date.now() + SALVAGE_TTL_MS),
-      worktree: { type: "host-path", hostPath: opts.worktreePath },
-      ...(askpass && {
-        askpass: { hostDir: askpass.hostDir, containerDir: askpass.containerDir },
+    const askpass = provisionPushAskpass(askpassBaseDir, taskId, identity);
+    const pushed = await inSalvageContainer(opts, askpass, (session) =>
+      runWipPush({
+        container: session,
+        worktreeDir: WORKTREE_DIR_IN_CONTAINER,
+        scratchGitDir: SCRATCH_GIT_DIR,
+        remoteUrl: opts.remoteUrl,
+        taskId,
+        sha,
+        askpassEnv: askpass.env,
       }),
-    });
-    const result = await runWipSalvage({
-      container: session,
-      worktreeDir: WORKTREE_DIR_IN_CONTAINER,
-      branch: opts.branch,
-      taskId,
-      askpassEnv: askpass?.env,
-    });
-    return { kind: "salvaged", result };
+    );
+    return await match(pushed)
+      .with({ kind: "unavailable" }, unavailableKept)
+      .with({ kind: "reap_failed" }, reapFailedKept)
+      .with({ kind: "ran", value: { kind: "failed" } }, async ({ value }) => ({
+        kind: "wip_push_failed_kept" as const,
+        reason: `git ${value.stage} failed: ${value.output}`,
+      }))
+      .with({ kind: "ran", value: { kind: "pushed" } }, async ({ value }) => {
+        await removeWorktree(opts.repoPath, opts.worktreePath);
+        return { kind: "wip_pushed_and_removed" as const, wipRef: value.wipRef, sha: value.sha };
+      })
+      .exhaustive();
   } catch (err) {
-    // A rejection from the sandbox client or an exec: the container could
-    // not be had or did not survive. The tree is untouched by the host.
-    return { kind: "unavailable", reason: describeError(err) };
+    // Only `provisionAskpass`'s filesystem writes throw here.
+    return { kind: "salvage_unavailable_kept", reason: describeError(err) };
   } finally {
-    await sandbox.deleteByTaskId(taskId).catch((err: unknown) => {
-      log.warn({ err, taskId }, "teardown: salvage container delete failed — left to the reaper");
-    });
     cleanupAskpass({ baseDir: askpassBaseDir, rootTaskId: taskId });
   }
 }
 
+/**
+ * The askpass dir with the PAT and its helper only: the WIP commit is
+ * unsigned, so the signing key has no business in the container.
+ */
+function provisionPushAskpass(
+  baseDir: string,
+  taskId: string,
+  identity: GitHubIdentity,
+): AskpassMaterials {
+  const materials = provisionAskpass({ baseDir, rootTaskId: taskId, identity });
+  const signingKey = join(materials.hostDir, basename(materials.signingKeyPath));
+  rmSync(signingKey, { force: true });
+  rmSync(`${signingKey}.pub`, { force: true });
+  return materials;
+}
+
+type ContainerRun<T> =
+  | { kind: "ran"; value: T }
+  /** The create or an exec threw. */
+  | { kind: "unavailable"; reason: string }
+  /** The run finished, but its container may still be up with the tree mounted. */
+  | { kind: "reap_failed"; reason: string };
+
+/**
+ * One salvage container: the tree at `/workspace`, `askpass` mounted when
+ * given, no home volume, no Claude token. Reaped by task label afterwards,
+ * whatever happened; the per-task proxy socket the backend binds into every
+ * session it creates comes with it.
+ */
+async function inSalvageContainer<T>(
+  opts: TeardownWorktreeOpts,
+  askpass: AskpassMaterials | undefined,
+  run: (session: SandboxSession) => Promise<T>,
+): Promise<ContainerRun<T>> {
+  const ran = await ResultAsync.fromPromise(
+    opts.sandbox
+      .create({
+        taskId: opts.taskId,
+        image: opts.image,
+        resourceLimits: opts.resourceLimits,
+        expiresAt: new Date(Date.now() + SALVAGE_TTL_MS),
+        worktree: { type: "host-path", hostPath: opts.worktreePath },
+        ...(askpass && {
+          askpass: { hostDir: askpass.hostDir, containerDir: askpass.containerDir },
+        }),
+      })
+      .then(run),
+    describeError,
+  );
+  const reaped = await reap(opts);
+  if (ran.isErr()) return { kind: "unavailable", reason: ran.error };
+  if (reaped.isErr()) return { kind: "reap_failed", reason: reaped.error };
+  return { kind: "ran", value: ran.value };
+}
+
+function reap(opts: TeardownWorktreeOpts): ResultAsync<void, string> {
+  return ResultAsync.fromPromise(opts.sandbox.deleteByTaskId(opts.taskId), describeError).mapErr(
+    (reason) => {
+      log.warn({ taskId: opts.taskId, reason }, "teardown: reaping the task's containers failed");
+      return reason;
+    },
+  );
+}
+
+async function unavailableKept({ reason }: { reason: string }): Promise<TeardownResult> {
+  return { kind: "salvage_unavailable_kept", reason };
+}
+
+async function reapFailedKept({ reason }: { reason: string }): Promise<TeardownResult> {
+  return { kind: "salvage_reap_failed_kept", reason };
+}
 /** What teardown reads from an orchestrator's deps. */
 export interface TeardownDeps {
   /** Identity lookup decrypts a secret, which needs a tx. */
@@ -234,6 +310,7 @@ export async function safeTeardownWorktree(
     }
     await teardownWorktree({
       repoPath: repo.localPath,
+      remoteUrl: repo.remoteUrl,
       worktreePath: assignment.worktreePath,
       branch: assignment.branch,
       taskId,

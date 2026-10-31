@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -16,7 +16,7 @@ import {
 } from "../../sandbox/index.js";
 import { assertKind } from "../../test/assertions.js";
 import { fakeExecHandle } from "../../test/coding-fixtures.js";
-import { runCommitAndPush, runWipSalvage } from "./commit-push.js";
+import { runCommitAndPush, runWipCommit, runWipPush } from "./commit-push.js";
 
 interface FakeExecResult {
   stdout?: string;
@@ -494,17 +494,22 @@ describe("runCommitAndPush", () => {
 
 /**
  * A container stand-in that runs each exec on the host, with `/workspace`
- * mapped to `root`: real git against a real clone, for the salvage's argv.
+ * mapped to `root` in the working directory and the argv: real git against a
+ * real clone, for the salvage's argv.
  */
 function hostSession(root: string): Pick<SandboxSession, "execStreaming"> {
   return {
     execStreaming: async (cmd, opts) => {
       const [file, ...args] = cmd;
       if (file === undefined) throw new Error("empty argv");
-      const child = spawn(file, args, {
-        cwd: opts?.workingDir === "/workspace" ? root : opts?.workingDir,
-        env: { ...process.env, ...opts?.env },
-      });
+      const child = spawn(
+        file,
+        args.map((a) => (a === "/workspace" ? root : a)),
+        {
+          cwd: opts?.workingDir === "/workspace" ? root : opts?.workingDir,
+          env: { ...process.env, ...opts?.env },
+        },
+      );
       const exited = new Promise<Result<ExecExit, ExecFailure>>((resolve) => {
         child.on("error", (error) => resolve(err({ kind: "transport_failed", error })));
         child.on("close", (code) => resolve(ok({ exitCode: code ?? 1 })));
@@ -522,12 +527,12 @@ function hostSession(root: string): Pick<SandboxSession, "execStreaming"> {
   };
 }
 
-describe("runWipSalvage against a real clone", () => {
+describe("the WIP salvage against a real clone", () => {
   const execFileP = promisify(execFile);
   const branch = "cogmo/abc12345";
   const taskId = "019d0000-0000-7000-8000-000000000001";
   const wipRef = `refs/cogmo-wip/${taskId}`;
-  // A file:// remote takes no credential; the env only marks the push as the
+  // A local remote takes no credential; the env only marks the push as the
   // one exec that gets one.
   const env = Object.freeze({ GIT_TERMINAL_PROMPT: "0" });
   let dir: string;
@@ -563,13 +568,24 @@ describe("runWipSalvage against a real clone", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  function salvage(askpassEnv: Readonly<Record<string, string>> | undefined) {
-    return runWipSalvage({
+  function commit() {
+    return runWipCommit({
       container: hostSession(clone),
       worktreeDir: "/workspace",
       branch,
       taskId,
-      askpassEnv,
+    });
+  }
+
+  function push(sha: string) {
+    return runWipPush({
+      container: hostSession(clone),
+      worktreeDir: "/workspace",
+      scratchGitDir: join(dir, "scratch.git"),
+      remoteUrl: bare,
+      taskId,
+      sha,
+      askpassEnv: env,
     });
   }
 
@@ -582,14 +598,21 @@ describe("runWipSalvage against a real clone", () => {
     }
   }
 
-  it("commits a dirty tree as wip and pushes it to the per-task ref", async () => {
+  async function head(): Promise<string> {
+    const { stdout } = await execFileP("git", ["-C", clone, "rev-parse", "HEAD"]);
+    return stdout.trim();
+  }
+
+  it("commits a dirty tree as wip, then pushes it to the per-task ref", async () => {
     writeFileSync(join(clone, "in-progress.ts"), "// claude was here\n");
 
-    const result = await salvage(env);
+    const committed = await commit();
+    assertKind(committed, "needs_push");
+    expect(committed.sha).toBe(await head());
+    const pushed = await push(committed.sha);
 
-    assertKind(result, "pushed");
-    expect(result.wipRef).toBe(wipRef);
-    expect(await remoteRef(wipRef)).toBe(result.sha);
+    expect(pushed).toEqual({ kind: "pushed", wipRef, sha: committed.sha });
+    expect(await remoteRef(wipRef)).toBe(committed.sha);
     const { stdout } = await execFileP("git", [
       "--git-dir",
       bare,
@@ -604,54 +627,86 @@ describe("runWipSalvage against a real clone", () => {
   it("reports a clean tree whose branch the remote-tracking ref already records", async () => {
     await execFileP("git", ["-C", clone, "push", "origin", branch]);
 
-    expect(await salvage(env)).toEqual({ kind: "clean" });
-    expect(await remoteRef(wipRef)).toBeNull();
+    expect(await commit()).toEqual({ kind: "clean" });
   });
 
-  it("pushes a clean tree whose branch was never pushed, without a new commit", async () => {
-    const { stdout: head } = await execFileP("git", ["-C", clone, "rev-parse", "HEAD"]);
+  it("reports a clean tree whose branch was never pushed as needing a push, without a commit", async () => {
+    const before = await head();
 
-    const result = await salvage(env);
-
-    assertKind(result, "pushed");
-    expect(result.sha).toBe(head.trim());
+    expect(await commit()).toEqual({ kind: "needs_push", sha: before });
+    expect(await head()).toBe(before);
   });
 
   it("lands the same commit on the same ref when re-run after a push", async () => {
     writeFileSync(join(clone, "in-progress.ts"), "// claude was here\n");
-    const first = await salvage(env);
-    const second = await salvage(env);
+    const first = await commit();
+    assertKind(first, "needs_push");
+    await push(first.sha);
 
-    assertKind(first, "pushed");
-    assertKind(second, "pushed");
+    const second = await commit();
+    assertKind(second, "needs_push");
     expect(second.sha).toBe(first.sha);
-    expect(await remoteRef(wipRef)).toBe(first.sha);
+    expect(await push(second.sha)).toEqual({ kind: "pushed", wipRef, sha: first.sha });
   });
 
-  it("is not blocked by hooks in the tree", async () => {
-    for (const hook of ["pre-commit", "commit-msg", "pre-push"]) {
-      writeFileSync(join(clone, ".git", "hooks", hook), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  it("runs none of the tree's hooks or its fsmonitor", async () => {
+    const marker = join(dir, "ran");
+    const hook = `#!/bin/sh\necho "$0" >> '${marker}'\nexit 0\n`;
+    for (const name of [
+      "pre-commit",
+      "prepare-commit-msg",
+      "commit-msg",
+      "post-commit",
+      "pre-push",
+    ]) {
+      writeFileSync(join(clone, ".git", "hooks", name), hook, { mode: 0o755 });
     }
+    writeFileSync(join(dir, "fsmonitor"), hook, { mode: 0o755 });
+    await execFileP("git", ["-C", clone, "config", "core.fsmonitor", join(dir, "fsmonitor")]);
     writeFileSync(join(clone, "in-progress.ts"), "// claude was here\n");
 
-    const result = await salvage(env);
+    const committed = await commit();
+    assertKind(committed, "needs_push");
+    assertKind(await push(committed.sha), "pushed");
 
-    assertKind(result, "pushed");
-    expect(await remoteRef(wipRef)).toBe(result.sha);
+    expect(existsSync(marker)).toBe(false);
   });
 
-  it("commits nothing when there is no credential to push with", async () => {
-    writeFileSync(join(clone, "in-progress.ts"), "// claude was here\n");
+  it("pushes to the given URL whatever the tree's remotes and rewrites say", async () => {
+    await execFileP("git", ["-C", clone, "remote", "set-url", "origin", join(dir, "missing.git")]);
+    await execFileP("git", [
+      "-C",
+      clone,
+      "config",
+      `url.${join(dir, "elsewhere.git")}.insteadOf`,
+      bare,
+    ]);
+    const committed = await commit();
+    assertKind(committed, "needs_push");
 
-    expect(await salvage(undefined)).toEqual({ kind: "no_credentials" });
-    const { stdout } = await execFileP("git", ["-C", clone, "status", "--porcelain"]);
-    expect(stdout).toContain("in-progress.ts");
+    expect(await push(committed.sha)).toEqual({ kind: "pushed", wipRef, sha: committed.sha });
+    expect(await remoteRef(wipRef)).toBe(committed.sha);
+  });
+
+  it("refuses to push a HEAD other than the one committed", async () => {
+    const result = await push("0123456789012345678901234567890123456789");
+
+    assertKind(result, "failed");
+    expect(result.stage).toBe("fetch");
+    expect(result.output).toMatch(/HEAD moved/);
+    expect(await remoteRef(wipRef)).toBeNull();
   });
 
   it("reports the failing stage when the push is refused", async () => {
-    await execFileP("git", ["-C", clone, "remote", "set-url", "origin", join(dir, "missing.git")]);
-
-    const result = await salvage(env);
+    const result = await runWipPush({
+      container: hostSession(clone),
+      worktreeDir: "/workspace",
+      scratchGitDir: join(dir, "scratch.git"),
+      remoteUrl: join(dir, "missing.git"),
+      taskId,
+      sha: await head(),
+      askpassEnv: env,
+    });
 
     assertKind(result, "failed");
     expect(result.stage).toBe("push");
@@ -659,27 +714,36 @@ describe("runWipSalvage against a real clone", () => {
   });
 });
 
-describe("runWipSalvage", () => {
-  it("gives the askpass env to the push alone and keeps maintenance off on every exec", async () => {
+describe("runWipPush", () => {
+  it("gives the askpass env to the push alone, and every exec the salvage config", async () => {
     const { container, calls } = fakeContainer({
-      status: { stdout: "M src/foo.ts\n" },
-      add: {},
-      commit: {},
+      init: {},
+      fetch: {},
       "rev-parse": { stdout: "deadbeef\n" },
       push: {},
     });
 
-    await runWipSalvage({
+    await runWipPush({
       container,
       worktreeDir: "/workspace",
-      branch: "cogmo/abc",
+      scratchGitDir: "/tmp/cogmo-wip.git",
+      remoteUrl: "https://github.com/user/cogmo.git",
       taskId: "t",
+      sha: "deadbeef",
       askpassEnv,
     });
 
-    expect(calls).toHaveLength(5);
+    expect(calls).toHaveLength(4);
     for (const call of calls) {
-      expect(call.args).toEqual(expect.arrayContaining(["maintenance.auto=false", "gc.auto=0"]));
+      expect(call.args).toEqual(
+        expect.arrayContaining([
+          "maintenance.auto=false",
+          "core.hooksPath=/dev/null",
+          "core.fsmonitor=false",
+          "credential.helper=",
+          "--git-dir=/tmp/cogmo-wip.git",
+        ]),
+      );
       const isPush = call.args.includes("push");
       expect(call.env?.GIT_ASKPASS).toBe(isPush ? askpassEnv.GIT_ASKPASS : undefined);
     }

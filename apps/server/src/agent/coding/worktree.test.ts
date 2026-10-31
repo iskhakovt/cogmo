@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -243,6 +244,32 @@ describe("allocateWorktree", () => {
       allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: REMOTE_URL }),
     ).rejects.toThrow(/<detached>/);
     await removeWorktree(repoPath, worktreePath);
+  });
+
+  it("replaces a clone whose .git is a symlink, leaving the link's target alone", async () => {
+    const branch = uniqueBranch();
+    const worktreePath = uniqueWorktreePath();
+    await allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: REMOTE_URL });
+    // A real clone on the right branch elsewhere on the host: adopting through
+    // the link would read, and later delete, state outside the tree.
+    const decoy = uniqueWorktreePath();
+    await allocateWorktree({ repoPath, branch, worktreePath: decoy, remoteUrl: REMOTE_URL });
+    rmSync(join(worktreePath, ".git"), { recursive: true, force: true });
+    symlinkSync(join(decoy, ".git"), join(worktreePath, ".git"));
+
+    const result = await allocateWorktree({
+      repoPath,
+      branch,
+      worktreePath,
+      remoteUrl: REMOTE_URL,
+    });
+
+    expect(result.adopted).toBe(false);
+    expect(lstatSync(join(worktreePath, ".git")).isDirectory()).toBe(true);
+    expect(await headOf(worktreePath)).toBe(branch);
+    expect(statSync(join(decoy, ".git", "HEAD")).isFile()).toBe(true);
+    await removeWorktree(repoPath, worktreePath);
+    await removeWorktree(repoPath, decoy);
   });
 
   it("replaces a legacy linked worktree at the path with a standalone clone", async () => {
