@@ -133,8 +133,8 @@ importers:
         specifier: ^1.46.0
         version: 1.46.0(supports-color@7.2.0)
       inngest:
-        specifier: ^4.25.0
-        version: 4.25.0(@opentelemetry/core@2.12.0(@opentelemetry/api@1.9.1))(express@5.2.1(supports-color@7.2.0))(hono@4.13.13)(react@19.3.1)(supports-color@7.2.0)(typescript@7.0.2)(zod@4.6.7)
+        specifier: ^4.26.0
+        version: 4.26.0(@opentelemetry/core@2.12.0(@opentelemetry/api@1.9.1))(express@5.2.1(supports-color@7.2.0))(hono@4.13.13)(react@19.3.1)(supports-color@7.2.0)(typescript@7.0.2)(zod@4.6.7)
       js-tiktoken:
         specifier: ^1.0.21
         version: 1.0.21
@@ -161,7 +161,7 @@ importers:
         version: 8.2.0
       openai:
         specifier: ^7.43.0
-        version: 7.45.1(@aws-sdk/credential-provider-node@3.972.91)(@smithy/signature-v4@5.7.4)(undici@8.12.3)(ws@8.22.0)(zod@4.6.7)
+        version: 7.43.0(@aws-sdk/credential-provider-node@3.972.91)(@smithy/signature-v4@5.7.4)(undici@8.12.3)(ws@8.22.0)(zod@4.6.7)
       p-retry:
         specifier: ^8.0.1
         version: 8.0.1
@@ -213,7 +213,7 @@ importers:
         version: 0.5.11
       '@inngest/test':
         specifier: ^1.0.0
-        version: 1.0.0(inngest@4.25.0(@opentelemetry/core@2.12.0(@opentelemetry/api@1.9.1))(express@5.2.1(supports-color@7.2.0))(hono@4.13.13)(react@19.3.1)(supports-color@7.2.0)(typescript@7.0.2)(zod@4.6.7))
+        version: 1.0.0(inngest@4.26.0(@opentelemetry/core@2.12.0(@opentelemetry/api@1.9.1))(express@5.2.1(supports-color@7.2.0))(hono@4.13.13)(react@19.3.1)(supports-color@7.2.0)(typescript@7.0.2)(zod@4.6.7))
       '@modelcontextprotocol/server-everything':
         specifier: ^2026.8.31
         version: 2026.8.31(supports-color@7.2.0)
@@ -5199,8 +5199,8 @@ packages:
   inherits@2.0.4:
     resolution: {integrity: sha512-k/vGaX4/Yla3WzyMCvTQOXYeIHvqOKtnqBduzTHpzpQZzAskKMhZ2K+EnBiSM9zGSoIFeMpXKxa4dYeZIQqewQ==}
 
-  inngest@4.25.0:
-    resolution: {integrity: sha512-WLrGXEiCBGFpEne6nBOj7+2joUKcGNb05AljK2/X6Hf+A0CLc694IzH7hVIn4IlUN6+7cCEcS4iJjoz6eS0fiA==}
+  inngest@4.26.0:
+    resolution: {integrity: sha512-7pIHJowArd8c98sJKwvgz/vCT+F37X57HwM968dobthUoRyCGuNmiY3qe1o5MDRlPw9R7Z3BCkOtSIVFlKqWVQ==}
     engines: {node: '>=20'}
     peerDependencies:
       '@sveltejs/kit': '>=1.27.3'
@@ -5694,14 +5694,14 @@ packages:
   once@1.4.0:
     resolution: {integrity: sha512-lNaJgI+2Q5URQBkccEKHTQOPaXdUxnZZElQTZY0MFUAuaEqe1E+Nyvgdz/aIyNi6Z9MzO5dv1H8n58/GELp3+w==}
 
-  openai@7.45.1:
-    resolution: {integrity: sha512-mutrJXwhJIMZ24Lab2COFtNp44OcpZSnV4O2O7q38wAHUa2m2fQqUO5pj1XS3PqLfOTeODBUS9YoadqDnnGk5A==}
+  openai@7.43.0:
+    resolution: {integrity: sha512-fBjKaDFG8AVfkGYoIo/E+xNRlNk7nx2nQ9GoQtXfePzPjg4QcT6nejkhXayJnEwSpFGfthOrAPI2KXj5yAqg9A==}
     engines: {node: '>=22.0.0'}
     peerDependencies:
       '@aws-sdk/credential-provider-node': '>=3.972.0 <4'
       '@smithy/hash-node': '>=4.3.0 <5'
       '@smithy/signature-v4': '>=5.4.0 <6'
-      google-auth-library: '>=9.15.1 <12'
+      google-auth-library: '>=9.15.1 <11'
       undici: '>=5 <9'
       ws: ^8.21.0
       zod: ^3.25 || ^4.0
@@ -7671,9 +7671,9 @@ snapshots:
 
   '@inngest/ai@0.1.8': {}
 
-  '@inngest/test@1.0.0(inngest@4.25.0(@opentelemetry/core@2.12.0(@opentelemetry/api@1.9.1))(express@5.2.1(supports-color@7.2.0))(hono@4.13.13)(react@19.3.1)(supports-color@7.2.0)(typescript@7.0.2)(zod@4.6.7))':
+  '@inngest/test@1.0.0(inngest@4.26.0(@opentelemetry/core@2.12.0(@opentelemetry/api@1.9.1))(express@5.2.1(supports-color@7.2.0))(hono@4.13.13)(react@19.3.1)(supports-color@7.2.0)(typescript@7.0.2)(zod@4.6.7))':
     dependencies:
-      inngest: 4.25.0(@opentelemetry/core@2.12.0(@opentelemetry/api@1.9.1))(express@5.2.1(supports-color@7.2.0))(hono@4.13.13)(react@19.3.1)(supports-color@7.2.0)(typescript@7.0.2)(zod@4.6.7)
+      inngest: 4.26.0(@opentelemetry/core@2.12.0(@opentelemetry/api@1.9.1))(express@5.2.1(supports-color@7.2.0))(hono@4.13.13)(react@19.3.1)(supports-color@7.2.0)(typescript@7.0.2)(zod@4.6.7)
       tinyspy: 3.0.2
       ulid: 2.4.0
 
@@ -10299,7 +10299,7 @@ snapshots:
 
   '@types/connect@3.4.38':
     dependencies:
-      '@types/node': 26.6.6
+      '@types/node': 18.19.130
 
   '@types/debug@4.1.13':
     dependencies:
@@ -10335,7 +10335,7 @@ snapshots:
 
   '@types/memcached@2.2.10':
     dependencies:
-      '@types/node': 26.6.6
+      '@types/node': 18.19.130
 
   '@types/mime-types@3.0.1': {}
 
@@ -10355,7 +10355,7 @@ snapshots:
 
   '@types/pg@8.15.6':
     dependencies:
-      '@types/node': 26.6.6
+      '@types/node': 18.19.130
       pg-protocol: 1.16.0
       pg-types: 2.2.0
 
@@ -11466,7 +11466,7 @@ snapshots:
 
   inherits@2.0.4: {}
 
-  inngest@4.25.0(@opentelemetry/core@2.12.0(@opentelemetry/api@1.9.1))(express@5.2.1(supports-color@7.2.0))(hono@4.13.13)(react@19.3.1)(supports-color@7.2.0)(typescript@7.0.2)(zod@4.6.7):
+  inngest@4.26.0(@opentelemetry/core@2.12.0(@opentelemetry/api@1.9.1))(express@5.2.1(supports-color@7.2.0))(hono@4.13.13)(react@19.3.1)(supports-color@7.2.0)(typescript@7.0.2)(zod@4.6.7):
     dependencies:
       '@bufbuild/protobuf': 2.14.1
       '@inngest/ai': 0.1.8
@@ -11869,7 +11869,7 @@ snapshots:
     dependencies:
       wrappy: 1.0.2
 
-  openai@7.45.1(@aws-sdk/credential-provider-node@3.972.91)(@smithy/signature-v4@5.7.4)(undici@8.12.3)(ws@8.22.0)(zod@4.6.7):
+  openai@7.43.0(@aws-sdk/credential-provider-node@3.972.91)(@smithy/signature-v4@5.7.4)(undici@8.12.3)(ws@8.22.0)(zod@4.6.7):
     optionalDependencies:
       '@aws-sdk/credential-provider-node': 3.972.91
       '@smithy/signature-v4': 5.7.4
