@@ -33,7 +33,7 @@
     "db:migrate": "tsx --env-file-if-exists=../../.env --env-file-if-exists=.dev/env scripts/migrate.ts"
   },
   "engines": {
-    "node": "^24.15.0 || >=26.0.0"
+    "node": ">=26.0.0"
   },
   "dependencies": {
     "@ai-sdk/fal": "^3.0.66",
@@ -107,7 +107,7 @@
     "@types/dockerode": "4.0.2",
     "@types/jsdom": "^30.0.0",
     "@types/mime-types": "^3.0.1",
-    "@types/node": "^24.19.2",
+    "@types/node": "^26.6.6",
     "@types/picomatch": "^4.0.3",
     "@types/semver": "^7.8.0",
     "@types/split2": "4.2.3",

@@ -28,7 +28,7 @@ TypeScript on Node.js across a pnpm workspace: the long-running backend (`apps/s
 Node.js, on the `engines` floor in `apps/server/package.json`. Re-checked 2026-10 against the two alternatives:
 
 - **Bun** — memory growth in long-running processes is still reported through 2026, and its Rust rewrite has not had a stable track record yet. Cogmo is one process running for weeks under a fixed memory cap, the workload that exposes it. Revisit after several stable releases with no long-run leak reports.
-- **Deno** — runs most npm packages and ships OpenTelemetry built in, but offers cogmo nothing it lacks: Node 24 strips TypeScript types natively, isolation is the container sandbox rather than runtime permissions, and OTel already works through Node's module hooks. Moving would mean re-proving dockerode, pyodide's loader, the Inngest SDK, PGlite, testcontainers, Vitest and `pnpm deploy` for no gain. Revisit if in-process plugins need runtime-level permissions that Node's permission model can't give.
+- **Deno** — runs most npm packages and ships OpenTelemetry built in, but offers cogmo nothing it lacks: Node strips TypeScript types natively, isolation is the container sandbox rather than runtime permissions, and OTel already works through Node's module hooks. Moving would mean re-proving dockerode, pyodide's loader, the Inngest SDK, PGlite, testcontainers, Vitest and `pnpm deploy` for no gain. Revisit if in-process plugins need runtime-level permissions that Node's permission model can't give.
 
 ## Web UI
 
@@ -61,7 +61,7 @@ pipe(
 );
 ```
 
-ES2025 built-ins (Node 24): `Object.groupBy()`, `Map.groupBy()`, iterator helpers (`.map()`, `.filter()`, `.take()`, `.drop()`, `.flatMap()` on iterators — lazy sequences natively).
+ES2025 built-ins: `Object.groupBy()`, `Map.groupBy()`, iterator helpers (`.map()`, `.filter()`, `.take()`, `.drop()`, `.flatMap()` on iterators — lazy sequences natively).
 
 Use ES2025 where it suffices, Remeda for richer processing or pipe chains.
 
@@ -171,7 +171,7 @@ const env = createEnv({
 | Library | What | When to use |
 |-|-|-|
 | **UUID v7** | Time-ordered unique IDs (native PostgreSQL 18, `uuidv7()`) | DB-generated, time-ordered, no dependency |
-| **date-fns** | Modular date utilities | Until Node ships Temporal API natively |
+| **Temporal** | Built-in date/time API (Node 26); a package types it by adding `esnext.temporal` to its `lib` | Dates, time zones and durations, before any date library |
 
 ## Not Needed
 

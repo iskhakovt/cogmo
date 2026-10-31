@@ -80,7 +80,7 @@ Docker: one extra build stage (`pnpm --filter web build`) + one `COPY apps/web/d
 
 | Layer | Choice | Why |
 |-|-|-|
-| Build | Vite 8 (Rolldown) | Static SPA is the default for an auth-gated dashboard with no SEO; Node 24 clears the engine floor. |
+| Build | Vite 8 (Rolldown) | Static SPA is the default for an auth-gated dashboard with no SEO; Node 26 clears the engine floor. |
 | Framework | React 19 SPA, no SSR/RSC | SSR buys nothing on a self-hosted box and fights the SSE + RPC model; inherits the Radix/shadcn polish gravity. |
 | Routing / data | TanStack Router + Query (with `@orpc/tanstack-query`) | Typed routes + server-state cache for Transport reads, no second server. |
 | Chat runtime | `@assistant-ui/react` `ExternalStoreRuntime` | Zero wire protocol — the `StreamEvent` union flows in unchanged; persistence stays in Postgres. |

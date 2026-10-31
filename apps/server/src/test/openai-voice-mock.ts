@@ -265,8 +265,8 @@ async function handleStt(
   // FormData from the parsed parts.
   const recordFd = new FormData();
   recordFd.set("model", parsed.model);
-  // Wrap the bytes as a Buffer so Blob's BodyInit accepts them — Uint8Array
-  // typings rejected here under Node 22's lib.dom.
+  // Wrap the bytes as a Buffer so Blob accepts them: a
+  // `Uint8Array<ArrayBufferLike>` isn't a `BlobPart`.
   recordFd.set("file", new Blob([Buffer.from(parsed.audio)], { type: "audio/ogg" }), "audio.ogg");
   // Preserve any non-Content-Type headers (Authorization, etc.). Drop
   // Content-Type so fetch generates a fresh multipart boundary.

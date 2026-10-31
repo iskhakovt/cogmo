@@ -147,7 +147,7 @@ describe("engines.node stays within every dependency's range", () => {
 
     // `>=24.15.0` admits Node 25, which the dependency refuses.
     expect(conflicts(">=24.15.0", gapped)).toHaveLength(1);
-    // Our actual shape steps over the hole.
+    // A range that steps over the hole clears it.
     expect(conflicts("^24.15.0 || >=26.0.0", gapped)).toEqual([]);
   });
 

@@ -25,11 +25,9 @@ updates:
       default-days: 7
     # `@types/node` tracks the LOWEST Node major we support, not the newest:
     # the types say what the code may call, and the floor is what it runs on.
-    # `engines` is `^24.15.0 || >=26.0.0`, so 24.x is right and 25 is excluded
-    # outright, odd releases never becoming LTS. Nothing else catches a bump
-    # past the floor — `@types/node` declares no `engines` for
-    # `engine-ranges.test.ts` to check. Lift with the change that raises
-    # `engines.node`.
+    # Nothing else catches a bump past the floor — `@types/node` declares no
+    # `engines` for `engine-ranges.test.ts` to check. Bump it by hand with the
+    # change that raises `engines.node`.
     #
     # The Hindsight client moves by hand, with the hindsight-api image pins and
     # `cogmo.hindsightCompat` (see pnpm-workspace.yaml). A minor past the range

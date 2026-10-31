@@ -5,7 +5,7 @@ ARG PNPM_VERSION=12.13.0
 ARG PNPM_DIGEST=sha256:8ebb7ad694024b47535f6c2cd6bbeb532836e314609e8d90df0ef1f25661f8f4
 FROM ghcr.io/pnpm/pnpm:${PNPM_VERSION}@${PNPM_DIGEST} AS pnpm
 
-FROM mirror.gcr.io/library/node:24-trixie-slim@sha256:6950b66b4c0cb0151ce89fa75074673850763d096b044f422c6729b588dd4956 AS base
+FROM mirror.gcr.io/library/node:26-trixie-slim@sha256:e4db4c914bf8ad241bd24804fc25d272d89bad97e68cdc8a1414862790a02c39 AS base
 
 FROM base AS build
 WORKDIR /app
@@ -68,12 +68,12 @@ WORKDIR /app
 # merge-base). `ca-certificates` is required for `git clone` over HTTPS in
 # `transport.repos.cloneAndAdd` (otherwise: "server certificate verification
 # failed. CAfile: none"); `openssh-client` is required for `git@host:` SSH
-# remotes in the same path. The `node` user (UID 1000) ships in `node:24-trixie-slim`;
+# remotes in the same path. The `node` user (UID 1000) ships in the base image;
 # bind-mounted state directories from the host must be chowned 1000:1000 to match.
 #
 # `apt-get upgrade` applies Debian security updates that landed after the
 # base-image rebuild. Hadolint's DL3005 advises against this on the
-# premise that base maintainers keep up — in practice node:24-trixie-slim trails
+# premise that base maintainers keep up — in practice the base image trails
 # Debian security advisories by days to weeks, and the resulting CVE gap
 # in our published image is real. See trivy scan output on prior builds.
 # hadolint ignore=DL3005
@@ -85,11 +85,7 @@ RUN apt-get update \
     openssh-client \
  && rm -rf /var/lib/apt/lists/* \
            /usr/local/lib/node_modules/npm \
-           /usr/local/lib/node_modules/corepack \
            /usr/local/bin/npm /usr/local/bin/npx \
-           /usr/local/bin/corepack \
-           /usr/local/bin/yarn /usr/local/bin/yarnpkg \
-           /opt/yarn-v* \
  && mkdir -p /var/lib/cogmo/skills /var/lib/cogmo/repos /var/lib/cogmo/worktrees /var/lib/cogmo/askpass /var/lib/cogmo/sockets \
  && git init --bare /var/lib/cogmo/skills \
  && chown -R node:node /var/lib/cogmo
