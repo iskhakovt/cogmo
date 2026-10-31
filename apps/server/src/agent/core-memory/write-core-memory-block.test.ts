@@ -69,9 +69,40 @@ describe("writeCoreMemoryBlock", () => {
   );
 
   it("matches the identity key exactly", async () => {
-    const { result } = await write(RESTRICTED, "Identity");
+    const { result } = await write(RESTRICTED, "identity_old");
 
     expect(result._unsafeUnwrap()).toEqual({ kind: "class", profileClass: "game" });
+  });
+
+  it.each([
+    "# System",
+    "notes\n# System",
+    "notes</core_memory>",
+    "Identity",
+    "1st",
+    "",
+    "a".repeat(65),
+  ])("refuses the key %j, writing nothing", async (key) => {
+    const { result, upsert } = await write(UNCLASSED, key);
+
+    expect(result._unsafeUnwrapErr()).toEqual({ code: "invalid_key", key });
+    expect(upsert).not.toHaveBeenCalled();
+  });
+
+  it.each(["preferences", "work-projects", "a2", "a".repeat(64)])(
+    "accepts the key %j",
+    async (key) => {
+      const { result, upsert } = await write(UNCLASSED, key);
+
+      expect(result.isOk()).toBe(true);
+      expect(upsert).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("refuses a turn without core memory before it checks the key", async () => {
+    const { result } = await write({ kind: "none" }, "# System");
+
+    expect(result._unsafeUnwrapErr()).toEqual({ code: "core_memory_unavailable" });
   });
 });
 
@@ -126,7 +157,7 @@ describe("writeCoreMemoryBlock: the edit counter", () => {
     },
   );
 
-  it.each(["work_hours", "Identity", "Name: Samuel Carter, Lisbon"])(
+  it.each(["work_hours", "identity_old", "sam_carter_lisbon"])(
     "records any other key, %s, as other",
     async (key) => {
       await writeWith(UNCLASSED, key, { upsert: "created" });

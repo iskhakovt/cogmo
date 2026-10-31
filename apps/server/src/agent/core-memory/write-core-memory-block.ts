@@ -4,7 +4,12 @@ import { match } from "ts-pattern";
 import type { Transaction, Transactor } from "../../db/index.js";
 import { coreMemoryEdits } from "../../metrics.js";
 import type { AgentStore, CoreMemoryUpsertOutcome } from "../store/index.js";
-import { type CoreMemoryScope, DOCUMENTED_BLOCK_KEYS, IDENTITY_BLOCK_KEY } from "./scope.js";
+import {
+  type CoreMemoryScope,
+  DOCUMENTED_BLOCK_KEYS,
+  IDENTITY_BLOCK_KEY,
+  isBlockKey,
+} from "./scope.js";
 
 type CoreMemoryWriteTarget =
   | { kind: "shared" }
@@ -23,9 +28,13 @@ export type CoreMemoryWrite =
   | { kind: "override"; profileClass: string; leftOut: ReadonlyArray<string> }
   | { kind: "override-matches-shared"; profileClass: string };
 
-export interface CoreMemoryUnavailable {
-  code: "core_memory_unavailable";
-}
+/**
+ * Why a write stored nothing: the turn's scope has no core memory, or `key`
+ * is outside `BLOCK_KEY_PATTERN`.
+ */
+export type CoreMemoryWriteError =
+  | { code: "core_memory_unavailable" }
+  | { code: "invalid_key"; key: string };
 
 /** A write's effect on the stored block. */
 type BlockChange = CoreMemoryUpsertOutcome | "deleted";
@@ -42,9 +51,10 @@ type CoreMemoryWriteStore = Pick<
 export async function writeCoreMemoryBlock(
   deps: { runInTx: Transactor; agentStore: CoreMemoryWriteStore },
   args: { userId: string; scope: CoreMemoryScope; key: string; content: string },
-): Promise<Result<CoreMemoryWrite, CoreMemoryUnavailable>> {
+): Promise<Result<CoreMemoryWrite, CoreMemoryWriteError>> {
   const target = resolveTarget(args.scope, args.key);
   if (target === null) return err({ code: "core_memory_unavailable" });
+  if (!isBlockKey(args.key)) return err({ code: "invalid_key", key: args.key });
   if (target.kind === "override") {
     const { profileClass } = target;
     const { write, change } = await deps.runInTx((tx) =>
@@ -66,9 +76,9 @@ export async function writeCoreMemoryBlock(
 }
 
 /**
- * Count a committed change in `cogmo.core_memory.edits`. The key is free text
- * the model picks, so an undocumented one is labelled `other`, keeping content
- * out of the label and its cardinality bounded.
+ * Count a committed change in `cogmo.core_memory.edits`. The model picks the
+ * key, so an undocumented one is labelled `other`, keeping content out of the
+ * label and its cardinality bounded.
  */
 function countEdit(key: string, target: CoreMemoryWriteTarget, change: BlockChange): void {
   if (change === "unchanged") return;

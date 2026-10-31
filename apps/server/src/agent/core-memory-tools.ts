@@ -1,8 +1,16 @@
 import { ok } from "neverthrow";
 import { match } from "ts-pattern";
 import { z } from "zod";
-import { type CoreMemoryScope, DOCUMENTED_BLOCK_KEYS } from "./core-memory/scope.js";
-import type { CoreMemoryWrite } from "./core-memory/write-core-memory-block.js";
+import {
+  BLOCK_KEY_PATTERN,
+  BLOCK_KEY_RULE,
+  type CoreMemoryScope,
+  DOCUMENTED_BLOCK_KEYS,
+} from "./core-memory/scope.js";
+import type {
+  CoreMemoryWrite,
+  CoreMemoryWriteError,
+} from "./core-memory/write-core-memory-block.js";
 import { formatUserContext } from "./prompt.js";
 import { defineTool, reject, type ToolSpec } from "./tools.js";
 
@@ -28,16 +36,30 @@ export const coreMemoryUpdate = defineTool({
   schema: z.object({
     key: z
       .string()
-      .describe(`Block identifier (e.g. ${DOCUMENTED_BLOCK_KEYS.map((k) => `'${k}'`).join(", ")})`),
+      .regex(BLOCK_KEY_PATTERN, BLOCK_KEY_RULE)
+      .describe(
+        `Block identifier (e.g. ${DOCUMENTED_BLOCK_KEYS.map((k) => `'${k}'`).join(", ")}). ` +
+          BLOCK_KEY_RULE,
+      ),
     content: z.string().describe("Full block content (replaces previous content)"),
   }),
   handler: async (input, service) => {
     const written = await service.coreMemory.update(input.key, input.content);
-    return written
-      .map((w) => writtenText(input.key, w))
-      .orElse(() => reject("Core memory isn't available in this profile."));
+    return written.map((w) => writtenText(input.key, w)).orElse(rejection);
   },
 });
+
+/** The rejection for a write that stored nothing. */
+function rejection(error: CoreMemoryWriteError) {
+  return match(error)
+    .with({ code: "core_memory_unavailable" }, () =>
+      reject("Core memory isn't available in this profile."),
+    )
+    .with({ code: "invalid_key" }, ({ key }) =>
+      reject(`Core memory block key ${JSON.stringify(key)} is invalid. ${BLOCK_KEY_RULE}`),
+    )
+    .exhaustive();
+}
 
 /** The tool result for a write; for an override, it names the lines left out as shared. */
 function writtenText(key: string, written: CoreMemoryWrite): string {
