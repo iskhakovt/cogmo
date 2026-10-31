@@ -25,7 +25,7 @@ ARG UV_VERSION
 ARG UV_DIGEST
 FROM ghcr.io/astral-sh/uv:${UV_VERSION}@${UV_DIGEST} AS uv
 
-FROM mirror.gcr.io/library/python:3.14.9-slim@sha256:35caba83af2fe6da9a5d922f9b0156f21d1246a48278c58a08bd253303ba42e8 AS builder
+FROM mirror.gcr.io/library/python:3.14.10-slim@sha256:3cabfd7d7aaf394e6040e79fa1eec6ca1c52b74ed9188650472695d9a9326999 AS builder
 
 COPY --from=uv /uv /uvx /bin/
 
@@ -51,7 +51,7 @@ COPY src /app/src/
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-editable
 
-FROM mirror.gcr.io/library/python:3.14.9-slim@sha256:35caba83af2fe6da9a5d922f9b0156f21d1246a48278c58a08bd253303ba42e8
+FROM mirror.gcr.io/library/python:3.14.10-slim@sha256:3cabfd7d7aaf394e6040e79fa1eec6ca1c52b74ed9188650472695d9a9326999
 
 ENV PYTHONUNBUFFERED=1
 
