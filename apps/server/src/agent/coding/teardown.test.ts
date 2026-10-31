@@ -201,7 +201,7 @@ const SALVAGE_FLAGS = ["core.hooksPath=/dev/null", "core.fsmonitor=false", "cred
 
 function teardown(
   sandbox: ReturnType<typeof salvageSandbox>["sandbox"],
-  args: { taskId: string; worktreePath: string; branch: string; identity?: GitHubIdentity },
+  args: { taskId: string; worktreePath: string; identity?: GitHubIdentity },
 ) {
   return teardownWorktree({
     repoPath,
@@ -218,23 +218,23 @@ function teardown(
 describe("teardownWorktree", () => {
   it("runs no host git inside the worktree", async () => {
     const taskId = uniqueTaskId();
-    const { worktreePath, branch } = await allocatedWorktree(taskId);
+    const { worktreePath } = await allocatedWorktree(taskId);
     writeFileSync(join(worktreePath, "in-progress.ts"), "// claude was here\n");
     const { sandbox } = salvageSandbox(DIRTY_SCRIPT);
 
     hostSpawns.length = 0;
-    await teardown(sandbox, { taskId, worktreePath, branch, identity: IDENTITY });
+    await teardown(sandbox, { taskId, worktreePath, identity: IDENTITY });
 
     expect(hostGitInside(worktreePath)).toEqual([]);
   });
 
   it("commits with no credential mounted, then pushes from a second container holding only the PAT", async () => {
     const taskId = uniqueTaskId();
-    const { worktreePath, branch } = await allocatedWorktree(taskId);
+    const { worktreePath } = await allocatedWorktree(taskId);
     writeFileSync(join(worktreePath, "in-progress.ts"), "// claude was here\n");
     const { sandbox, calls, specs, askpassFiles, execs } = salvageSandbox(DIRTY_SCRIPT);
 
-    const result = await teardown(sandbox, { taskId, worktreePath, branch, identity: IDENTITY });
+    const result = await teardown(sandbox, { taskId, worktreePath, identity: IDENTITY });
 
     expect(result).toEqual({
       kind: "wip_pushed_and_removed",
@@ -311,14 +311,14 @@ describe("teardownWorktree", () => {
 
   it("removes a clean worktree whose commits a remote ref holds, without the credential container", async () => {
     const taskId = uniqueTaskId();
-    const { worktreePath, branch } = await allocatedWorktree(taskId);
+    const { worktreePath } = await allocatedWorktree(taskId);
     const { sandbox, calls, execs } = salvageSandbox({
       status: { stdout: "" },
       "rev-parse": { stdout: `${SHA}\n` },
       "rev-list": { stdout: "0\n" },
     });
 
-    const result = await teardown(sandbox, { taskId, worktreePath, branch, identity: IDENTITY });
+    const result = await teardown(sandbox, { taskId, worktreePath, identity: IDENTITY });
 
     expect(result).toEqual({ kind: "removed_clean" });
     expect(calls).not.toContain("create:askpass");
@@ -331,10 +331,10 @@ describe("teardownWorktree", () => {
 
   it("pushes a clean worktree with commits no remote ref holds, without a commit", async () => {
     const taskId = uniqueTaskId();
-    const { worktreePath, branch } = await allocatedWorktree(taskId);
+    const { worktreePath } = await allocatedWorktree(taskId);
     const { sandbox, calls } = salvageSandbox({ ...DIRTY_SCRIPT, status: { stdout: "" } });
 
-    const result = await teardown(sandbox, { taskId, worktreePath, branch, identity: IDENTITY });
+    const result = await teardown(sandbox, { taskId, worktreePath, identity: IDENTITY });
 
     expect(result.kind).toBe("wip_pushed_and_removed");
     expect(calls).not.toContain("exec:commit");
@@ -343,11 +343,11 @@ describe("teardownWorktree", () => {
 
   it("keeps the worktree, and creates no credential container, when no identity is supplied", async () => {
     const taskId = uniqueTaskId();
-    const { worktreePath, branch } = await allocatedWorktree(taskId);
+    const { worktreePath } = await allocatedWorktree(taskId);
     writeFileSync(join(worktreePath, "in-progress.ts"), "// claude was here\n");
     const { sandbox, specs } = salvageSandbox(DIRTY_SCRIPT);
 
-    const result = await teardown(sandbox, { taskId, worktreePath, branch });
+    const result = await teardown(sandbox, { taskId, worktreePath });
 
     expect(result).toEqual({
       kind: "wip_push_failed_kept",
@@ -360,14 +360,14 @@ describe("teardownWorktree", () => {
 
   it("keeps the worktree and runs no host git when no container can be created", async () => {
     const taskId = uniqueTaskId();
-    const { worktreePath, branch } = await allocatedWorktree(taskId);
+    const { worktreePath } = await allocatedWorktree(taskId);
     writeFileSync(join(worktreePath, "in-progress.ts"), "// claude was here\n");
     const { sandbox, calls } = salvageSandbox(DIRTY_SCRIPT, {
       createFails: new Error("connect ENOENT /var/run/docker.sock"),
     });
 
     hostSpawns.length = 0;
-    const result = await teardown(sandbox, { taskId, worktreePath, branch, identity: IDENTITY });
+    const result = await teardown(sandbox, { taskId, worktreePath, identity: IDENTITY });
 
     expect(result).toEqual({
       kind: "salvage_unavailable_kept",
@@ -380,14 +380,14 @@ describe("teardownWorktree", () => {
 
   it("keeps the worktree when the container dies mid-commit", async () => {
     const taskId = uniqueTaskId();
-    const { worktreePath, branch } = await allocatedWorktree(taskId);
+    const { worktreePath } = await allocatedWorktree(taskId);
     writeFileSync(join(worktreePath, "in-progress.ts"), "// claude was here\n");
     const { sandbox, calls } = salvageSandbox({
       ...DIRTY_SCRIPT,
       add: { transportError: new Error("container not running") },
     });
 
-    const result = await teardown(sandbox, { taskId, worktreePath, branch, identity: IDENTITY });
+    const result = await teardown(sandbox, { taskId, worktreePath, identity: IDENTITY });
 
     expect(result).toEqual({
       kind: "salvage_unavailable_kept",
@@ -399,14 +399,14 @@ describe("teardownWorktree", () => {
 
   it("keeps the worktree when the WIP push fails", async () => {
     const taskId = uniqueTaskId();
-    const { worktreePath, branch } = await allocatedWorktree(taskId);
+    const { worktreePath } = await allocatedWorktree(taskId);
     writeFileSync(join(worktreePath, "in-progress.ts"), "// claude was here\n");
     const { sandbox } = salvageSandbox({
       ...DIRTY_SCRIPT,
       push: { exitCode: 128, stderr: "fatal: unable to access remote\n" },
     });
 
-    const result = await teardown(sandbox, { taskId, worktreePath, branch, identity: IDENTITY });
+    const result = await teardown(sandbox, { taskId, worktreePath, identity: IDENTITY });
 
     expect(result).toEqual({
       kind: "wip_push_failed_kept",
@@ -418,7 +418,7 @@ describe("teardownWorktree", () => {
 
   it("refuses to push when the tree's HEAD moved after the commit", async () => {
     const taskId = uniqueTaskId();
-    const { worktreePath, branch } = await allocatedWorktree(taskId);
+    const { worktreePath } = await allocatedWorktree(taskId);
     writeFileSync(join(worktreePath, "in-progress.ts"), "// claude was here\n");
     const other = "0123456789012345678901234567890123456789";
     const { sandbox, calls } = salvageSandbox({
@@ -429,7 +429,7 @@ describe("teardownWorktree", () => {
       }),
     });
 
-    const result = await teardown(sandbox, { taskId, worktreePath, branch, identity: IDENTITY });
+    const result = await teardown(sandbox, { taskId, worktreePath, identity: IDENTITY });
 
     expect(result).toEqual({
       kind: "wip_push_failed_kept",
@@ -445,7 +445,7 @@ describe("teardownWorktree", () => {
     rmSync(worktreePath, { recursive: true, force: true });
     const { sandbox, calls } = salvageSandbox({});
 
-    const result = await teardown(sandbox, { taskId, worktreePath, branch, identity: IDENTITY });
+    const result = await teardown(sandbox, { taskId, worktreePath, identity: IDENTITY });
 
     expect(result).toEqual({ kind: "no_worktree" });
     expect(calls).toEqual([]);
@@ -457,11 +457,11 @@ describe("teardownWorktree", () => {
 
   it("keeps the worktree, and creates nothing, when the task's containers cannot be reaped", async () => {
     const taskId = uniqueTaskId();
-    const { worktreePath, branch } = await allocatedWorktree(taskId);
+    const { worktreePath } = await allocatedWorktree(taskId);
     const { sandbox, calls } = salvageSandbox(DIRTY_SCRIPT);
     vi.mocked(sandbox.deleteByTaskId).mockRejectedValueOnce(new Error("daemon restarting"));
 
-    const result = await teardown(sandbox, { taskId, worktreePath, branch, identity: IDENTITY });
+    const result = await teardown(sandbox, { taskId, worktreePath, identity: IDENTITY });
 
     expect(result).toEqual({
       kind: "salvage_unavailable_kept",
@@ -473,14 +473,14 @@ describe("teardownWorktree", () => {
 
   it("keeps the worktree, and pushes nothing, when the commit container cannot be reaped", async () => {
     const taskId = uniqueTaskId();
-    const { worktreePath, branch } = await allocatedWorktree(taskId);
+    const { worktreePath } = await allocatedWorktree(taskId);
     writeFileSync(join(worktreePath, "in-progress.ts"), "// claude was here\n");
     const { sandbox, calls } = salvageSandbox(DIRTY_SCRIPT);
     vi.mocked(sandbox.deleteByTaskId)
       .mockResolvedValueOnce(undefined)
       .mockRejectedValueOnce(new Error("daemon restarting"));
 
-    const result = await teardown(sandbox, { taskId, worktreePath, branch, identity: IDENTITY });
+    const result = await teardown(sandbox, { taskId, worktreePath, identity: IDENTITY });
 
     // The container may still have the tree mounted, and a process in it
     // still writing: no credential container joins it, and no delete races it.
@@ -494,7 +494,7 @@ describe("teardownWorktree", () => {
 
   it("keeps the worktree when the push container cannot be reaped", async () => {
     const taskId = uniqueTaskId();
-    const { worktreePath, branch } = await allocatedWorktree(taskId);
+    const { worktreePath } = await allocatedWorktree(taskId);
     writeFileSync(join(worktreePath, "in-progress.ts"), "// claude was here\n");
     const { sandbox } = salvageSandbox(DIRTY_SCRIPT);
     vi.mocked(sandbox.deleteByTaskId)
@@ -502,7 +502,7 @@ describe("teardownWorktree", () => {
       .mockResolvedValueOnce(undefined)
       .mockRejectedValueOnce(new Error("daemon restarting"));
 
-    const result = await teardown(sandbox, { taskId, worktreePath, branch, identity: IDENTITY });
+    const result = await teardown(sandbox, { taskId, worktreePath, identity: IDENTITY });
 
     expect(result).toEqual({
       kind: "salvage_reap_failed_kept",
@@ -515,13 +515,13 @@ describe("teardownWorktree", () => {
 
   it("keeps the worktree, with no credential container, when a commit-stage command fails", async () => {
     const taskId = uniqueTaskId();
-    const { worktreePath, branch } = await allocatedWorktree(taskId);
+    const { worktreePath } = await allocatedWorktree(taskId);
     const { sandbox, calls } = salvageSandbox({
       ...DIRTY_SCRIPT,
       add: { exitCode: 128, stderr: "fatal: Unable to create '.git/index.lock': File exists.\n" },
     });
 
-    const result = await teardown(sandbox, { taskId, worktreePath, branch, identity: IDENTITY });
+    const result = await teardown(sandbox, { taskId, worktreePath, identity: IDENTITY });
 
     expect(result).toEqual({
       kind: "wip_push_failed_kept",
@@ -533,11 +533,11 @@ describe("teardownWorktree", () => {
 
   it("keeps the worktree, and creates nothing, when the image check rejects", async () => {
     const taskId = uniqueTaskId();
-    const { worktreePath, branch } = await allocatedWorktree(taskId);
+    const { worktreePath } = await allocatedWorktree(taskId);
     const { sandbox, calls } = salvageSandbox(DIRTY_SCRIPT);
     vi.mocked(sandbox.ensureImagePresent).mockRejectedValueOnce(new Error("image not found"));
 
-    const result = await teardown(sandbox, { taskId, worktreePath, branch, identity: IDENTITY });
+    const result = await teardown(sandbox, { taskId, worktreePath, identity: IDENTITY });
 
     expect(result).toEqual({
       kind: "salvage_unavailable_kept",
@@ -549,13 +549,13 @@ describe("teardownWorktree", () => {
 
   it("keeps the worktree, with no credential container, when the askpass dir cannot be written", async () => {
     const taskId = uniqueTaskId();
-    const { worktreePath, branch } = await allocatedWorktree(taskId);
+    const { worktreePath } = await allocatedWorktree(taskId);
     // A file where the askpass root should be: the provisioning mkdir fails.
     askpassBaseDir = join(baseDir, "askpass-is-a-file");
     writeFileSync(askpassBaseDir, "");
     const { sandbox, calls } = salvageSandbox(DIRTY_SCRIPT);
 
-    const result = await teardown(sandbox, { taskId, worktreePath, branch, identity: IDENTITY });
+    const result = await teardown(sandbox, { taskId, worktreePath, identity: IDENTITY });
 
     expect(result).toEqual({
       kind: "salvage_unavailable_kept",
@@ -567,13 +567,13 @@ describe("teardownWorktree", () => {
 
   it("keeps the worktree when the push container dies mid-push", async () => {
     const taskId = uniqueTaskId();
-    const { worktreePath, branch } = await allocatedWorktree(taskId);
+    const { worktreePath } = await allocatedWorktree(taskId);
     const { sandbox, calls } = salvageSandbox({
       ...DIRTY_SCRIPT,
       push: { transportError: new Error("container not running") },
     });
 
-    const result = await teardown(sandbox, { taskId, worktreePath, branch, identity: IDENTITY });
+    const result = await teardown(sandbox, { taskId, worktreePath, identity: IDENTITY });
 
     expect(result).toEqual({
       kind: "salvage_unavailable_kept",
@@ -586,7 +586,7 @@ describe("teardownWorktree", () => {
 
   it("reads an exec throw as unavailable even when the reap after it fails too", async () => {
     const taskId = uniqueTaskId();
-    const { worktreePath, branch } = await allocatedWorktree(taskId);
+    const { worktreePath } = await allocatedWorktree(taskId);
     const { sandbox } = salvageSandbox({
       ...DIRTY_SCRIPT,
       add: { transportError: new Error("container not running") },
@@ -595,7 +595,7 @@ describe("teardownWorktree", () => {
       .mockResolvedValueOnce(undefined)
       .mockRejectedValueOnce(new Error("daemon restarting"));
 
-    const result = await teardown(sandbox, { taskId, worktreePath, branch, identity: IDENTITY });
+    const result = await teardown(sandbox, { taskId, worktreePath, identity: IDENTITY });
 
     expect(result).toEqual({
       kind: "salvage_unavailable_kept",

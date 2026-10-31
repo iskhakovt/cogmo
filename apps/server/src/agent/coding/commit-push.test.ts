@@ -749,6 +749,8 @@ describe("the WIP salvage against a real clone", () => {
       ["remote.promisor.url", "ssh://example.invalid/x.git"],
       ["remote.promisor.promisor", "true"],
       ["core.sshCommand", join(dir, "ssh")],
+      // A per-protocol allow in the tree outranks a bare `protocol.allow`.
+      ["protocol.ssh.allow", "always"],
     ] as const) {
       await execFileP("git", ["-C", clone, "config", key, value]);
     }
@@ -853,7 +855,7 @@ describe("runWipPush", () => {
     expect(fetch.args).toEqual(
       expect.arrayContaining([
         "--no-recurse-submodules",
-        "--upload-pack=env GIT_NO_LAZY_FETCH=1 git -c protocol.ext.allow=never -c protocol.ssh.allow=never -c protocol.file.allow=never upload-pack",
+        "--upload-pack=env GIT_NO_LAZY_FETCH=1 git -c protocol.allow=never -c protocol.ext.allow=never -c protocol.fd.allow=never -c protocol.file.allow=never -c protocol.git.allow=never -c protocol.http.allow=never -c protocol.https.allow=never -c protocol.ssh.allow=never -c protocol.ftp.allow=never -c protocol.ftps.allow=never upload-pack",
       ]),
     );
   });

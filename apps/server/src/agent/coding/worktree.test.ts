@@ -246,6 +246,34 @@ describe("allocateWorktree", () => {
     await removeWorktree(repoPath, worktreePath);
   });
 
+  it("refuses to adopt a clone whose HEAD is over the 1 KiB cap, however it reads", async () => {
+    const branch = uniqueBranch();
+    const worktreePath = uniqueWorktreePath();
+    await allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: REMOTE_URL });
+    // The right ref, padded with trailing whitespace the parse would accept,
+    // to one byte over the cap.
+    const ref = `ref: refs/heads/${branch}`;
+    writeFileSync(join(worktreePath, ".git", "HEAD"), ref.padEnd(1025, "\n"));
+
+    await expect(
+      allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: REMOTE_URL }),
+    ).rejects.toThrow(/<detached>/);
+    await removeWorktree(repoPath, worktreePath);
+  });
+
+  it("refuses to adopt a clone whose HEAD is a FIFO, without blocking on it", async () => {
+    const branch = uniqueBranch();
+    const worktreePath = uniqueWorktreePath();
+    await allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: REMOTE_URL });
+    rmSync(join(worktreePath, ".git", "HEAD"));
+    await execFileP("mkfifo", [join(worktreePath, ".git", "HEAD")]);
+
+    await expect(
+      allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: REMOTE_URL }),
+    ).rejects.toThrow(/<detached>/);
+    await removeWorktree(repoPath, worktreePath);
+  });
+
   it("replaces a clone whose .git is a symlink, leaving the link's target alone", async () => {
     const branch = uniqueBranch();
     const worktreePath = uniqueWorktreePath();

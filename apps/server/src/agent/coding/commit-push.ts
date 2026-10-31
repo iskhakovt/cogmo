@@ -214,17 +214,21 @@ const SALVAGE_CONFIG_FLAGS: ReadonlyArray<string> = [
 /**
  * The upload-pack the scratch fetch runs against the tree. The tree's
  * config governs it, so a tree that declares itself a partial clone, with
- * HEAD on a commit whose objects are missing, can make it lazy-fetch through
- * a transport that runs a command (`core.sshCommand`, `ext::`) while the PAT
- * is readable. Git 2.45.1 and later honour `GIT_NO_LAZY_FETCH`; the
- * protocol denies, which command-line `-c` makes outrank the tree's config,
- * close the command-running transports on a git too old to know it.
+ * HEAD on a commit whose objects are missing, can make it lazy-fetch while
+ * the PAT is readable, through a transport that runs the tree's config:
+ * `core.sshCommand`, `ext::`, `core.gitProxy` on `git://`, a credential
+ * helper on an `http(s)` 401. Git 2.45.1 and later honour
+ * `GIT_NO_LAZY_FETCH`. On a git too old to know it, the protocol policy
+ * denies every transport to that lazy fetch; the upload-pack serving the
+ * scratch fetch does not consult it. `protocol.allow` alone is not enough:
+ * a `protocol.<name>.allow` set in the tree outranks it, so each transport
+ * git ships is named too, where the command line outranks the tree.
  */
 const SALVAGE_UPLOAD_PACK = [
-  "env GIT_NO_LAZY_FETCH=1 git",
-  "-c protocol.ext.allow=never",
-  "-c protocol.ssh.allow=never",
-  "-c protocol.file.allow=never",
+  "env GIT_NO_LAZY_FETCH=1 git -c protocol.allow=never",
+  ...["ext", "fd", "file", "git", "http", "https", "ssh", "ftp", "ftps"].map(
+    (name) => `-c protocol.${name}.allow=never`,
+  ),
   "upload-pack",
 ].join(" ");
 
