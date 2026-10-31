@@ -48,7 +48,8 @@ const DEFAULT_RUN_AS = { userId: "u-1", profileId: "p-1" };
  *     gone before the next skill runs, and a skill cannot open its relay's
  *     or the supervisor's host channel through `/proc`.
  *   - `$HOME`, which tasks on a worker share and can write, reaches neither
- *     a later task's imports nor the venv populate's uv configuration.
+ *     a later task's imports nor the venv populate's uv configuration, and
+ *     a task cannot replace the runtime venv's `python3`.
  *
  * Gated by `SANDBOX_RUNTIME=sysbox`. Skipped on dev machines without
  * sysbox; runs in the GHA `sysbox-e2e` job. Mirrors the supervisor's own
@@ -361,6 +362,26 @@ async def run(inputs, ctx):
 
 /** The planting task's output: the container it ran in. */
 const HostSchema = z.object({ host: z.string() });
+
+/**
+ * Tries to swap the runtime venv's `python3`, first on PATH for the populate
+ * and reap scripts, for a script of its own.
+ */
+const REPLACE_RUNTIME_PYTHON_BODY = `
+import os
+
+async def run(inputs, ctx):
+    target = "/opt/cogmo-skills/.venv/bin/python3"
+    planted = target + ".planted"
+    try:
+        with open(planted, "w") as f:
+            f.write("#!/bin/sh\\necho planted\\n")
+        os.chmod(planted, 0o755)
+        os.replace(planted, target)
+    except PermissionError:
+        return {"replaced": False}
+    return {"replaced": True}
+`;
 
 const IDNA_HOST_BODY = `
 import importlib.metadata as md
@@ -737,6 +758,33 @@ async def run(inputs, ctx):
         .getVolume(depsCacheVolumeName)
         .remove()
         .catch(() => {});
+    }
+  }, 180_000);
+
+  it("a task cannot replace the runtime venv's python3", async () => {
+    const runner = await SkillRunnerImpl.create({
+      runInTx: tx,
+      store: skillStore,
+      secretsStore: stubSecrets(),
+      sandbox,
+      tier2Image: SKILLS_IMAGE,
+      userTimezone: "UTC",
+      defaultRunAs: DEFAULT_RUN_AS,
+    });
+    try {
+      await runner.__registerForTests({
+        name: "tier2-replace-python",
+        manifestSource: containerManifest("tier2-replace-python"),
+        body: REPLACE_RUNTIME_PYTHON_BODY,
+      });
+
+      const result = (
+        await runner.invoke({ name: "tier2-replace-python", inputs: {}, runAs: RUN_AS })
+      )._unsafeUnwrap();
+      assertStatus(result, "success");
+      expect(result.output).toEqual({ replaced: false });
+    } finally {
+      await runner.shutdown();
     }
   }, 180_000);
 });

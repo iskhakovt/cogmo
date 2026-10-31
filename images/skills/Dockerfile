@@ -77,9 +77,13 @@ RUN python3 -m pip uninstall --yes --root-user-action=ignore pip
 # via user namespaces; this is defense in depth.
 RUN useradd -m -u 1000 -s /bin/bash cogmo
 
-# Copy just the venv from the builder. Owns it as cogmo so the supervisor
-# can write byte-cache invalidations etc. without root.
-COPY --from=builder --chown=cogmo:cogmo /app/.venv /opt/cogmo-skills/.venv
+# Copy just the venv from the builder, root-owned so `cogmo` can only read it.
+# A task runs as `cogmo`, and the venv's `bin/` is first on PATH for the
+# populate and reap scripts the host runs on a warm worker: a task able to
+# write it could swap `python3` for code the next script runs. Nothing writes
+# here at runtime; UV_COMPILE_BYTECODE precompiled the bytecode, and skill
+# venvs live on /skill-venvs.
+COPY --from=builder /app/.venv /opt/cogmo-skills/.venv
 ENV PATH="/opt/cogmo-skills/.venv/bin:${PATH}"
 ENV VIRTUAL_ENV="/opt/cogmo-skills/.venv"
 # The venv links to the builder's interpreter, so a runtime FROM on another
