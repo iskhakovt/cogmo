@@ -3,8 +3,9 @@ import { logger } from "../../../logger.js";
 
 /**
  * Drop an update unless it comes from a private chat, and answer nothing
- * (design/transport/telegram.md → Scope). A reply carries the user's personal
- * memory, and in a group, supergroup or channel every member would read it.
+ * (design/transport/telegram.md → Decisions (Scope)). A reply carries the
+ * user's personal memory, and in a group, supergroup or channel every member
+ * would read it.
  * An update with no chat (an inline query, a tap on an inline-mode message)
  * has no private chat to answer in, so it stops here too.
  */

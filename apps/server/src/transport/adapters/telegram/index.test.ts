@@ -286,11 +286,13 @@ describe("the private-chat gate", () => {
   });
 
   it("counts an update the private-chat gate drops as handled", async () => {
-    const { adapter } = await setupWith({ token: "fake" });
+    const transport = mockTransport();
+    const { adapter } = await setupOn(transport, { token: "fake" });
 
     await deliverUpdate("on:message:text", inChat("on:message:text", { id: -100, type: "group" }));
     await adapter.stop();
 
+    expect(transport.senders.admits).not.toHaveBeenCalled();
     expect(mockBotApi.getUpdates).toHaveBeenCalledWith({ offset: 2, limit: 1, timeout: 0 });
   });
 

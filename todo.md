@@ -225,6 +225,7 @@
 - [ ] `p2` Stop container-tier skills sharing writable state. Successive tasks on a warm worker share `/tmp` and `$HOME`, and the `/skill-venvs` volume is writable by every skill on every worker, so one skill can plant files a later one reads or alter another's dependencies. design/skills.md → Cross-skill leakage in a shared worker accepts all three at single-author scale. Options: a per-task tmpfs and `HOME`, and a per-skill-hash venv mount made read-only after publish.
 - [ ] `p3` Record why a skills worker died as an enum, not a free string (`skills/worker-state.ts`). (deep review 2026-10-27, S7)
 - [ ] `p3` Let approve accept the lockfile it reviewed. Approve recompiles with `verifyFresh`, so a reviewed sha becomes unapprovable once a transitive dependency publishes a release. (deep review 2026-10-27, L12)
+- [ ] `p3` Close any active Telegram `channel_sessions` at a negative `platform_address` in prod. Before the private-chat gate (#725), the owner's message in a group opened a session at the group's id on a conversation marked private, and broadcast and receive-all delivery still reach it. Check once after deploy and close what it finds; delete this entry if it finds none.
 
 ### Setup, secrets & config
 
