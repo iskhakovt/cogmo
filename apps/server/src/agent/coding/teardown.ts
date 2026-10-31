@@ -78,6 +78,8 @@ export interface TeardownWorktreeOpts {
   resourceLimits: ResourceLimits;
   /** Host root for per-task askpass material (`SANDBOX_ASKPASS_DIR`). */
   askpassBaseDir: string;
+  /** The push stage's scratch bare repo, a path in the push container outside the tree. */
+  scratchGitDir: string;
 }
 
 export type TeardownResult =
@@ -165,7 +167,7 @@ async function push(opts: TeardownWorktreeOpts, sha: string): Promise<TeardownRe
       runWipPush({
         container: session,
         worktreeDir: WORKTREE_DIR_IN_CONTAINER,
-        scratchGitDir: SCRATCH_GIT_DIR,
+        scratchGitDir: opts.scratchGitDir,
         remoteUrl: opts.remoteUrl,
         taskId,
         sha,
@@ -272,19 +274,35 @@ export interface TeardownDeps {
   devbaseImage: string;
   defaultResourceLimits: ResourceLimits;
   askpassBaseDir: string;
+  /**
+   * Test-only: where the push stage's scratch repo lives in the push
+   * container. Production leaves it unset for `/tmp/cogmo-wip.git`; a test
+   * whose "container" is the host points it at a test-owned directory.
+   */
+  salvageScratchGitDir?: string;
 }
+
+/**
+ * What a teardown step records: the teardown's own outcome, `no_host_worktree`
+ * for a git-remote assignment, or `errored` when loading the identity threw.
+ */
+export type SafeTeardownResult =
+  | TeardownResult
+  | { kind: "no_host_worktree" }
+  | { kind: "errored"; reason: string };
 
 /**
  * Best-effort wrapper around {@link teardownWorktree} for failure / cancel
  * cascades. Loads the GitHub identity for the WIP push; on resolve failure,
- * proceeds without one, so a tree with work in it stays on disk.
+ * proceeds without one, so a tree with work in it stays on disk. Resolves to
+ * the outcome, which a teardown step returns as its result.
  *
  * Never throws — teardown is cleanup, not the operation that failed.
  */
 export async function safeTeardownWorktree(
   deps: TeardownDeps,
   args: { repo: CodingRepoRow; taskId: string; worktreeAssignment: WorktreeAssignment },
-): Promise<void> {
+): Promise<SafeTeardownResult> {
   const { repo, taskId, worktreeAssignment: assignment } = args;
   if (assignment.type !== "host-path") {
     // git-remote assignments have no host worktree to tear down — the
@@ -294,7 +312,7 @@ export async function safeTeardownWorktree(
       { taskId, type: assignment.type },
       "teardown-worktree: no host worktree for transport — skipping",
     );
-    return;
+    return { kind: "no_host_worktree" };
   }
   try {
     // A DB-level failure inside the lookup throws; it stays inside the try
@@ -308,7 +326,7 @@ export async function safeTeardownWorktree(
         "teardown-worktree: identity resolve failed — proceeding without WIP push",
       );
     }
-    await teardownWorktree({
+    return await teardownWorktree({
       repoPath: repo.localPath,
       remoteUrl: repo.remoteUrl,
       worktreePath: assignment.worktreePath,
@@ -319,8 +337,10 @@ export async function safeTeardownWorktree(
       image: taskImage(repo, deps.devbaseImage),
       resourceLimits: deps.defaultResourceLimits,
       askpassBaseDir: deps.askpassBaseDir,
+      scratchGitDir: deps.salvageScratchGitDir ?? SCRATCH_GIT_DIR,
     });
   } catch (err) {
     log.warn({ err, taskId }, "teardown-worktree threw — ignoring");
+    return { kind: "errored", reason: describeError(err) };
   }
 }

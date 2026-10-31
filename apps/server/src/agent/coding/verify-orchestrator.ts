@@ -80,6 +80,8 @@ export interface VerifyOrchestratorDeps {
   octokitFactory?: (pat: string) => Octokit;
   /** Test-only — same role as `CodingOrchestratorDeps.loadCodingSandboxEnv`. */
   loadCodingSandboxEnv?: typeof loadCodingSandboxEnv;
+  /** Test-only — see `TeardownDeps.salvageScratchGitDir`. */
+  salvageScratchGitDir?: string;
 }
 
 export interface VerifyOrchestratorResult {

@@ -194,7 +194,7 @@ export async function reclaimEndedTask(
       repo: args.repo,
       taskId: run.taskId,
       worktreeAssignment: args.assignment,
-    }).then(() => null),
+    }),
   );
   await match(args.sandbox)
     .with({ kind: "reap" }, async ({ stampStepId }) => {

@@ -214,6 +214,7 @@ function teardown(
     image: IMAGE,
     resourceLimits: LIMITS,
     askpassBaseDir,
+    scratchGitDir: "/tmp/cogmo-wip.git",
   });
 }
 
@@ -537,18 +538,51 @@ describe("safeTeardownWorktree", () => {
     secretsStore.getSecret.mockResolvedValue(serializeGitHubIdentity(IDENTITY));
     const { sandbox, specs, execs } = salvageSandbox(DIRTY_SCRIPT);
 
-    await safeTeardownWorktree(deps(secretsStore, sandbox), {
+    const result = await safeTeardownWorktree(deps(secretsStore, sandbox), {
       repo: codingRepoRow({ localPath: repoPath, remoteUrl: REMOTE_URL }),
       taskId,
       worktreeAssignment: { type: "host-path", branch, worktreePath },
     });
 
+    // The outcome is the step's result.
+    expect(result).toEqual({
+      kind: "wip_pushed_and_removed",
+      wipRef: `refs/cogmo-wip/${taskId}`,
+      sha: SHA,
+    });
     expect(specs.map((s) => s.image)).toEqual([IMAGE, IMAGE]);
     expect(expectDefined(specs[1], "push spec").askpass?.hostDir).toBe(
       join(askpassBaseDir, taskId),
     );
-    expect(execs.find((e) => subcommandOf(e.cmd) === "push")?.cmd).toContain(REMOTE_URL);
+    const push = expectDefined(
+      execs.find((e) => subcommandOf(e.cmd) === "push"),
+      "push exec",
+    );
+    expect(push.cmd).toContain(REMOTE_URL);
+    // Unset in production: the scratch repo is the container path.
+    expect(push.cmd).toContain("--git-dir=/tmp/cogmo-wip.git");
     expect(existsSync(worktreePath)).toBe(false);
+  });
+
+  it("puts the scratch repo where the deps say", async () => {
+    const taskId = uniqueTaskId();
+    const { worktreePath, branch } = await allocatedWorktree(taskId);
+    const secretsStore = mock<SecretsStore>();
+    secretsStore.getSecret.mockResolvedValue(serializeGitHubIdentity(IDENTITY));
+    const { sandbox, execs } = salvageSandbox({ ...DIRTY_SCRIPT, status: { stdout: "" } });
+
+    await safeTeardownWorktree(
+      { ...deps(secretsStore, sandbox), salvageScratchGitDir: "/scratch/wip.git" },
+      {
+        repo: codingRepoRow({ localPath: repoPath }),
+        taskId,
+        worktreeAssignment: { type: "host-path", branch, worktreePath },
+      },
+    );
+
+    expect(execs.find((e) => subcommandOf(e.cmd) === "push")?.cmd).toContain(
+      "--git-dir=/scratch/wip.git",
+    );
   });
 
   it("creates no credential container, keeping a dirty tree, when the identity cannot be resolved", async () => {
@@ -583,7 +617,10 @@ describe("safeTeardownWorktree", () => {
         taskId,
         worktreeAssignment: { type: "host-path", branch, worktreePath },
       }),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({
+      kind: "errored",
+      reason: expect.stringContaining("connection terminated"),
+    });
     expect(calls).toEqual([]);
     expect(existsSync(worktreePath)).toBe(true);
   });
@@ -591,12 +628,13 @@ describe("safeTeardownWorktree", () => {
   it("touches no sandbox for a git-remote assignment", async () => {
     const { sandbox, calls } = salvageSandbox({});
 
-    await safeTeardownWorktree(deps(mock<SecretsStore>(), sandbox), {
+    const result = await safeTeardownWorktree(deps(mock<SecretsStore>(), sandbox), {
       repo: codingRepoRow({ localPath: repoPath }),
       taskId: uniqueTaskId(),
       worktreeAssignment: { type: "git-remote", branch: "cogmo/abc" },
     });
 
+    expect(result).toEqual({ kind: "no_host_worktree" });
     expect(calls).toEqual([]);
   });
 });
