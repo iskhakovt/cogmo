@@ -28,13 +28,6 @@ overrides:
   "fast-uri@>=3 <3.1.6": ">=3.1.6 <4" # GHSA-5jgf-p345-68v8, -f65p-4m7j-42xc, -fph4-wmhf-6fwf, -jqff-g426-hqxp (high) via ajv
   "hono@>=4 <4.13.5": ">=4.13.5 <5" # GHSA-gqvv-2mrq-wpjv, -g6gw-c38x-mqfc, -crvj-82cr-hjcx (moderate) via @modelcontextprotocol/sdk, inngest
   "qs@>=6 <6.16.0": ">=6.16.0 <7" # GHSA-x5fp-wj9c-mxmx, GHSA-4mjr-xmp4-gh2g (moderate) via express, body-parser
-  # Not a floor: braces has no patched release for GHSA-vfj7-8cjw-p6xm (high),
-  # so this removes its only path (fast-glob > micromatch > braces). The SDK
-  # loads fast-glob lazily, only when `Image.fromDockerfile` or
-  # `dockerfileCommands` meets a COPY from the build context. Cogmo makes no such
-  # call (devbase's COPYs are all `--from=`); one would throw a DaytonaError.
-  # Drop once braces ships a fix or the SDK stops depending on fast-glob.
-  "@daytona/sdk>fast-glob": "-"
 
 # The Hindsight client is a first-party dependency (we contribute upstream and
 # pin the server to the matching image), so the supply-chain soak that guards

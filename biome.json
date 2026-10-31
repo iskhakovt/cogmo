@@ -13,6 +13,16 @@
       "tailwindDirectives": true
     }
   },
+  "markdown": {
+    "formatter": {
+      "enabled": false
+    }
+  },
+  "yaml": {
+    "formatter": {
+      "enabled": false
+    }
+  },
   "plugins": [
     "./biome-plugins/no-unsafe-cast.grit",
     {
