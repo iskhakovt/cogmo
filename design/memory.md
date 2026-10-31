@@ -605,7 +605,7 @@ Auto-recall searches Hindsight for memories relevant to the user's message and s
 
 The query is the turn's text: the text parts of its inbound rows, voice already transcribed, joined by newline (`recallQueryText` in `src/agent/recall-gate.ts`). An image or document contributes its caption, never its block, and forwarded text or a forwarded voice note's transcript its body, never its `<forwarded_message>` element ([transport/telegram.md](transport/telegram.md#forwarded-messages)). A turn with no text skips recall in every mode, so a captionless forward does.
 
-A failed recall degrades to no memories: the turn's context shows none rather than failing into Inngest retries, and `cogmo.memory.recall.failures` counts it against the bank. The failure also logs a warning and puts the `memory.recall` span into ERROR, but the counter is the only signal an alert can watch — see [DEPLOYMENT.md → Hindsight reranker](../DEPLOYMENT.md#hindsight-reranker) for the failover chain that keeps a dead reranker from causing one.
+A failed recall degrades to no memories: the turn's context shows none rather than failing into Inngest retries, and `cogmo.memory.recall.failures` counts it against the bank. The failure also logs a warning and puts the `memory.recall` span into ERROR, but the counter is the only signal an alert can watch — see [deploy.md → Hindsight reranker](../deploy.md#hindsight-reranker) for the failover chain that keeps a dead reranker from causing one.
 
 ### Profile Setting `[confirmed]`
 

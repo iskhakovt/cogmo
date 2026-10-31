@@ -9,9 +9,9 @@ This is a private personal project, but the conventions below apply to anyone (h
 | How to run the app locally | [README.md](README.md) |
 | Architecture, code style, module boundaries | [AGENTS.md](AGENTS.md) |
 | Design intent for a subsystem | [`design/`](design/) |
-| What's queued / in progress | [todo.md](todo.md), [PROGRESS.md](PROGRESS.md) |
+| What's queued / in progress | [todo.md](todo.md), [progress.md](progress.md) |
 | What changed and when | [`changelog.d/`](changelog.d/) (one Markdown fragment per PR) |
-| Running in production | [DEPLOYMENT.md](DEPLOYMENT.md) |
+| Running in production | [deploy.md](deploy.md) |
 
 ## Local workflow
 

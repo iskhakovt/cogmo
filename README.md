@@ -29,7 +29,7 @@ Shipped:
 - **Web UI** — streaming chat and admin screens.
 - **User-defined pipelines** — staged runs compiled from a free-text description, with human gates; loops and parked waits are next.
 
-Next: ingestion (Gmail and Calendar over MCP), prompt optimization, and the full evolutionary loop. See [`PROGRESS.md`](PROGRESS.md) for the phased plan and [`changelog.d/`](changelog.d/) for what's landed.
+Next: ingestion (Gmail and Calendar over MCP), prompt optimization, and the full evolutionary loop. See [`progress.md`](progress.md) for the phased plan and [`changelog.d/`](changelog.d/) for what's landed.
 
 ## Deploy
 
@@ -46,7 +46,7 @@ Cogmo provides:
 - A guided setup wizard (`cogmo setup`) that validates credentials live and writes them encrypted to your DB
 - A `serve` entrypoint that connects to Inngest, starts your channel adapters, and serves the web UI and health check on port 9090
 
-Full step-by-step instructions — env vars, Hindsight configuration, persistent state, securing internal services, observability — are in [`DEPLOYMENT.md`](DEPLOYMENT.md).
+Full step-by-step instructions — env vars, Hindsight configuration, persistent state, securing internal services, observability — are in [`deploy.md`](deploy.md).
 
 ## First-run setup
 
@@ -98,7 +98,7 @@ docker run -d \
   ghcr.io/iskhakovt/cogmo:<version>
 ```
 
-Message your bot on Telegram, or open the web UI on port 9090 and log in with the token `cogmo web-token` prints. Liveness is `GET /health` on the same port. Providers, models, sub-agents, image models and skills are managed afterwards with `cogmo provider`, `cogmo model`, `cogmo subagent`, `cogmo image-provider`, `cogmo image-model` and `cogmo skills` — see [`DEPLOYMENT.md` → Subcommands](DEPLOYMENT.md#subcommands).
+Message your bot on Telegram, or open the web UI on port 9090 and log in with the token `cogmo web-token` prints. Liveness is `GET /health` on the same port. Providers, models, sub-agents, image models and skills are managed afterwards with `cogmo provider`, `cogmo model`, `cogmo subagent`, `cogmo image-provider`, `cogmo image-model` and `cogmo skills` — see [`deploy.md` → Subcommands](deploy.md#subcommands).
 
 ## For contributors
 
@@ -107,7 +107,7 @@ Message your bot on Telegram, or open the web UI on port 9090 and log in with th
 | Run Cogmo locally for development | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
 | Understand module boundaries and code style | [`AGENTS.md`](AGENTS.md) |
 | Read the architecture and design docs | [`design/`](design/) |
-| Track what's queued / in progress | [`todo.md`](todo.md), [`PROGRESS.md`](PROGRESS.md) |
-| Deploy to your own host | [`DEPLOYMENT.md`](DEPLOYMENT.md) |
+| Track what's queued / in progress | [`todo.md`](todo.md), [`progress.md`](progress.md) |
+| Deploy to your own host | [`deploy.md`](deploy.md) |
 
 The repo is a pnpm workspace: the backend in `apps/server/`, the web UI SPA in `apps/web/`, and shared contracts in `packages/contracts/`. Local dev uses testcontainers — `pnpm dev` boots Postgres, Redis, Inngest, RustFS, and Hindsight, applies migrations, runs the backend, and starts the web UI (Vite dev server on http://localhost:5173, proxying to the backend on :9090). It prints a login token to paste into the web UI. No `docker-compose.yml` is shipped for end users.

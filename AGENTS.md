@@ -67,14 +67,14 @@ Skills live in [`.agents/skills/`](.agents/skills/), one `SKILL.md` folder each:
 | **Blocked** | Waiting on something external. Only the user moves these to Next. |
 
 - **Priorities:** `p1` (do soon — core, unblocks work), `p2` (do eventually), `p3` (do if bored — polish, cleanup). Format: `` `p1` `` tag before the task text.
-- When completing a task, **delete the entry** from `todo.md`, check off the corresponding item in PROGRESS.md, and drop a fragment in [`changelog.d/`](changelog.d/). **All three changes land in the same PR as the implementation, before the PR opens** — so when the PR merges, `main` already has the correct state. Don't open a PR with stale todo/PROGRESS entries planning to clean up post-merge: that leaves a brief window where `main` has the entry shipped but not removed, and risks the cleanup never landing if you forget.
+- When completing a task, **delete the entry** from `todo.md`, check off the corresponding item in progress.md, and drop a fragment in [`changelog.d/`](changelog.d/). **All three changes land in the same PR as the implementation, before the PR opens** — so when the PR merges, `main` already has the correct state. Don't open a PR with stale todo/progress entries planning to clean up post-merge: that leaves a brief window where `main` has the entry shipped but not removed, and risks the cleanup never landing if you forget.
 - The changelog fragment is the durable record (`todo.md` doesn't keep a graveyard). Filename: `YYYY-MM-DD-short-slug.md` — pick a slug specific enough that two parallel PRs the same day won't collide (use words from the actual change, not generic ones). Body is plain Markdown — the rich prose entry, no leading date or table syntax. Never edit existing fragments. One fragment per PR avoids merge conflicts on parallel PRs.
 
 Other tracking docs:
 
 | Doc | Purpose |
 |-|-|
-| [PROGRESS.md](PROGRESS.md) | Phased delivery plan — big picture |
+| [progress.md](progress.md) | Phased delivery plan — big picture |
 | [changelog.d/](changelog.d/) | Significant changes log — one Markdown fragment per PR |
 
 ## Stack
@@ -88,7 +88,7 @@ Other tracking docs:
 
 ## Module Structure
 
-**Workspace layout.** The repo is a pnpm workspace. The backend is the `cogmo` package at **`apps/server/`** — every `src/...` path in this file, `.agents/rules/`, and `design/` is relative to it (the package's internal layout is unchanged by the workspace split). The other members are `apps/web/` (the web UI SPA) and `packages/contracts/` (shared by both apps — Transport DTOs/enums + the oRPC `webContract`; ships TS source, no build). The repo root holds workspace config (`pnpm-workspace.yaml`, root `package.json`, `biome.json`), the docs (`design/`, `todo.md`, `PROGRESS.md`, `changelog.d/`), and tooling. Root scripts (`pnpm typecheck` / `lint` / `test` / `build`) proxy to `--filter cogmo`. See [design/web-ui.md](design/web-ui.md).
+**Workspace layout.** The repo is a pnpm workspace. The backend is the `cogmo` package at **`apps/server/`** — every `src/...` path in this file, `.agents/rules/`, and `design/` is relative to it (the package's internal layout is unchanged by the workspace split). The other members are `apps/web/` (the web UI SPA) and `packages/contracts/` (shared by both apps — Transport DTOs/enums + the oRPC `webContract`; ships TS source, no build). The repo root holds workspace config (`pnpm-workspace.yaml`, root `package.json`, `biome.json`), the docs (`design/`, `todo.md`, `progress.md`, `changelog.d/`), and tooling. Root scripts (`pnpm typecheck` / `lint` / `test` / `build`) proxy to `--filter cogmo`. See [design/web-ui.md](design/web-ui.md).
 
 | Module | Responsibility | Rule |
 |-|-|-|

@@ -604,7 +604,7 @@ export interface InngestAuthConfig {
  * event batch — which creates no event — must be accepted under the event key.
  * Skipped under `INNGEST_DEV`, which also disables SDK signature verification;
  * never set it in production. Keys don't cover the dashboard or GraphQL API —
- * see DEPLOYMENT.md → Securing internal services.
+ * see deploy.md → Securing internal services.
  */
 export async function checkInngestAuth(
   deps: BootProbeDeps,
