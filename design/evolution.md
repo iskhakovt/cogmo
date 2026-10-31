@@ -346,7 +346,7 @@ Every instruction row carries the conversation's user (`user_id`); the channel a
 
 **Dispatch refuses a call**, with the tool set unchanged ([one prefix per conversation](prompt-caching.md#one-prefix-per-conversation-proposed)), in two cases:
 
-- **A turn the user didn't start**: inbound `source <> 'user'`, a scheduled fire or a pipeline stage.
+- **A turn the user didn't start**: inbound `source <> 'user'`, a scheduled fire or a pipeline stage. Both tools declare `user_turn` ([agents.md → Turn Authority](agents.md#turn-authority-proposed)).
 - **After the turn reads a tool result** (plan-then-execute): an earlier iteration returned a result from any tool but the core-memory, memory (`memory_recall`, `memory_reflect`, `memory_retain`) and rule tools and `get_current_time` — a web page, an MCP result, a file, a skill's or a sub-agent's output. Calls in the same response as the first such read pass, since the model emitted them before any result. Memory results pass because auto-recall already puts recalled memories in the first iteration. The refusal says the rule wasn't saved and that repeating it will save it; the description asks for the rule tools before any other. The gate reads only memoized iterations, so a replay decides the same way.
 
 The handlers enforce the rest:
