@@ -146,7 +146,7 @@ function turnMessage(text: TurnText): string {
  * of it, a rule is reinforced once, and a new rule is written once per text
  * and channel. A turn so moves a rule at most once.
  */
-export function collapseCorrections(
+function collapseCorrections(
   items: ReadonlyArray<CorrectionItem>,
   rulesByLabel: ReadonlyMap<string, { id: string }>,
 ): ReadonlyArray<CorrectionItem> {

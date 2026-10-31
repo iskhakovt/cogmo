@@ -34,7 +34,7 @@ const LEARNING: ExtractionRule = {
   channelType: null,
 };
 
-function rows(userText: string, extra: ReadonlyArray<TurnMessage> = []): TurnMessage[] {
+function rows(userText: string, extra: ReadonlyArray<TurnMessage>): TurnMessage[] {
   return [
     ...extra,
     { id: "msg-1", role: "user", content: userText, cursor: TURN.cursor },
@@ -74,14 +74,10 @@ function setup(opts: {
 }) {
   const store = mockAgentStore({
     getTurnObservation: vi.fn().mockResolvedValue({
-      id: TURN.observationId,
-      conversationId: "conv-1",
-      cursor: TURN.cursor,
-      kind: "chat",
       status: opts.status ?? "pending",
       attempts: opts.attempts ?? 0,
     }),
-    listTurnMessages: vi.fn().mockResolvedValue(rows(SAID)),
+    listTurnMessages: vi.fn().mockResolvedValue(rows(SAID, [])),
     getCorrections: vi.fn().mockResolvedValue([LEARNING]),
     ...opts.store,
   });
@@ -144,7 +140,7 @@ describe("observeTurnCorrections", () => {
         listTurnMessages: vi
           .fn()
           .mockResolvedValue(
-            rows("").map((r) => (r.role === "user" ? { ...r, content: [IMAGE] } : r)),
+            rows("", []).map((r) => (r.role === "user" ? { ...r, content: [IMAGE] } : r)),
           ),
       },
     });

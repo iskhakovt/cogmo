@@ -171,14 +171,7 @@ function observerDeps(opts: {
     agentStore: mockAgentStore({
       listMessages: vi.fn().mockResolvedValue(HISTORY),
       listPendingTurns: vi.fn().mockResolvedValue([PLANNED_TURN]),
-      getTurnObservation: vi.fn().mockResolvedValue({
-        id: PLANNED_TURN.observationId,
-        conversationId: "conv-1",
-        cursor: PLANNED_TURN.cursor,
-        kind: "chat",
-        status: "pending",
-        attempts: 0,
-      }),
+      getTurnObservation: vi.fn().mockResolvedValue({ status: "pending", attempts: 0 }),
       listTurnMessages: vi
         .fn()
         .mockResolvedValue(
@@ -239,7 +232,7 @@ describe("runObserver phase isolation", () => {
     );
   });
 
-  it("plans the same steps whether or not correction extraction fails", async () => {
+  it("plans the same later steps whether or not correction extraction fails", async () => {
     const clean = exhaustedRetriesStep();
     await runObserver(EVENT, clean, observerDeps({ provider: routedProvider() }), "idle");
     const failing = exhaustedRetriesStep();
@@ -250,7 +243,14 @@ describe("runObserver phase isolation", () => {
       "idle",
     );
 
-    expect(failing.ids).toEqual(clean.ids);
+    // The failed turn's step is followed by the one that counts it.
+    expect(failing.ids).toEqual(
+      clean.ids.flatMap((id) =>
+        id === "observe-v1-corrections-obs-1"
+          ? [id, "observe-v1-corrections-exhausted-obs-1"]
+          : [id],
+      ),
+    );
     expect(clean.ids).toEqual([
       "record-start-time",
       "load-conversation",
@@ -383,6 +383,101 @@ describe("runObserver corrections by turn", () => {
     expect(deps.agentStore.transitionPendingTurn).not.toHaveBeenCalled();
     expect(step.ids).toContain("observe-v1-corrections-obs-1");
     expect(step.ids).not.toContain("observe-v1-corrections-obs-2");
+  });
+
+  it("keeps the fire's later phases when discovery fails after its retries", async () => {
+    const deps = observerDeps({
+      provider: routedProvider(),
+      store: { listUndiscoveredTurns: vi.fn().mockRejectedValue(new Error("connection reset")) },
+    });
+
+    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps, "idle");
+
+    expect(result).toMatchObject({
+      status: "processed",
+      corrections: { extracted: 0, reinforced: 0 },
+      memories: { extracted: 1 },
+      drained: { drained: 1 },
+      failedPhases: ["corrections"],
+    });
+    expect(deps.agentStore.recordEvolutionEvent).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the turns applied before a turn's step fails after its retries, and counts that turn", async () => {
+    const reinforce = {
+      corrections: [
+        {
+          action: "reinforce",
+          matchedExistingRuleId: "R1",
+          rule: "Be concise",
+          category: "style",
+          reasoning: "again",
+          evidence: "Berlin",
+        },
+      ],
+    };
+    const routed = routedProvider({ corrections: reinforce });
+    let correctionCalls = 0;
+    const provider = mockProvider({
+      chat: vi.fn(async (params: ChatParams) => {
+        if (params.system.includes("behavioral correction extractor") && ++correctionCalls > 1) {
+          throw UNAVAILABLE;
+        }
+        return routed.chat(params);
+      }),
+    });
+    const step = exhaustedRetriesStep();
+    const deps = observerDeps({
+      provider,
+      store: {
+        getCorrections: vi.fn().mockResolvedValue(RULES),
+        listPendingTurns: vi.fn().mockResolvedValue([PLANNED_TURN, SECOND_TURN]),
+        // Each turn's rows are `HISTORY`, on the cursor asked for.
+        listTurnMessages: vi
+          .fn()
+          .mockImplementation((_tx, _conversationId, cursors: ReadonlyArray<string>) =>
+            Promise.resolve(
+              HISTORY.map((m, i) => ({
+                ...m,
+                id: `msg-${i}`,
+                cursor: expectDefined(cursors[0], "cursor"),
+              })),
+            ),
+          ),
+      },
+    });
+
+    const result = await runObserver(EVENT, step, deps, "idle");
+
+    expect(result).toMatchObject({
+      status: "processed",
+      corrections: { reinforced: 1 },
+      memories: { extracted: 1 },
+      failedPhases: ["corrections"],
+    });
+    expect(step.ids).toContain("observe-v1-corrections-exhausted-obs-2");
+    expect(deps.agentStore.recordTurnAttempt).toHaveBeenCalledWith(expect.anything(), {
+      id: "obs-2",
+      seen: 0,
+      failure: { kind: "exhausted", message: expect.any(String) },
+      to: "pending",
+    });
+  });
+
+  it("gives a turn up once its steps have failed after their retries on three fires", async () => {
+    const deps = observerDeps({
+      provider: routedProvider({ corrections: UNAVAILABLE }),
+      store: {
+        getTurnObservation: vi.fn().mockResolvedValue({ status: "pending", attempts: 2 }),
+      },
+    });
+
+    await runObserver(EVENT, exhaustedRetriesStep(), deps, "idle");
+
+    expect(deps.agentStore.recordTurnAttempt).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ id: "obs-1", seen: 2, to: "failed" }),
+    );
   });
 
   it("observes the turns in plan order, each in a step of its own", async () => {

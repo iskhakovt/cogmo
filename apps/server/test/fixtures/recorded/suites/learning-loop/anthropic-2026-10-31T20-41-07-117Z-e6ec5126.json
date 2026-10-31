@@ -1,0 +1,28 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "[correction-extraction] <turn>\nUser: Call me T — I've just moved to Lisbon.\n\nAssistant: Nice to meet you, T! Welcome to Lisbon 🇵🇹\n\nQuick questions so I can help you better:\n- What do you do (work/studies)?\n- Should I assume you're now on Lisbon time (WET/WEST, UTC+0 or +1)?\n- Any preference for how I communicate — brief and to the point, or more detailed?\n[Tool: core_memory_update({\"content\":\"Name: T. Lives in Lisbon, Portugal.\",\"key\":\"identity\"})]\n\nUser: → Core memory block \"identity\" updated.\n\nAssistant: Got it, saved for now — let me know your role/work, timezone preference, and communication style whenever you get a chance.\n</turn>",
+        "model": "claude-sonnet-5",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "usage": {
+          "input_tokens": 258,
+          "cache_creation_input_tokens": 2617,
+          "cache_read_input_tokens": 0,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 2617,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "output_tokens": 580
+        },
+        "content": "{\"corrections\":[]}"
+      },
+      "metadata": {
+        "systemHash": "9c658d9a"
+      }
+    }
+  ]
+}

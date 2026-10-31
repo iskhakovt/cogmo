@@ -158,7 +158,7 @@ async function countOf(ruleId: string): Promise<number> {
   return expectDefined(row, ruleId).observationCount;
 }
 
-function engine(conversationId: string, provider: LlmProvider, steps: InngestSteps = []) {
+function engine(conversationId: string, provider: LlmProvider, steps: InngestSteps) {
   return new InngestTestEngine({
     function: createObserver(deps(provider)),
     events: [{ name: "conversation/idle", data: { conversationId } }],

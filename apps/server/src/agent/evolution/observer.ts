@@ -54,12 +54,17 @@ import {
   NO_CORRECTIONS,
 } from "./extract-corrections.js";
 import { extractMemories } from "./extract-memories.js";
-import { discoverTurns, type TurnPlan } from "./observation/discover-turns.js";
+import {
+  type DiscoverTurnsDeps,
+  discoverTurns,
+  type TurnPlan,
+} from "./observation/discover-turns.js";
 import {
   type ObserveTurnDeps,
   observeTurnCorrections,
-  type TurnOutcome,
 } from "./observation/observe-turn-corrections.js";
+import { recordExhaustedTurn } from "./observation/record-exhausted-turn.js";
+import type { TurnOutcome } from "./observation/turn-outcome.js";
 
 /**
  * Minimum transcript length (count of `messages` rows) before the
@@ -170,31 +175,50 @@ async function settlePhase<T>(
 }
 
 /**
- * Walk the plan's turns in order, one step each, and stop at the first
- * outcome that isn't a clean move: a later turn is never applied ahead of an
- * earlier one that can still succeed. A step that failed after its retries
- * stops the phase and marks it failed; the turns applied before it keep
- * their counts. Step ids come from the memoized plan, so every replay plans
- * the same steps.
+ * The corrections phase: discover and plan the turns, then walk them in
+ * order, one step each, stopping at the first outcome that isn't a clean
+ * move, so a later turn is never applied ahead of an earlier one that can
+ * still succeed. A step that failed after its retries, discovery's or a
+ * turn's, stops the phase and marks it failed; the turns applied before it
+ * keep their counts, and the fire's later phases still run. Step ids come
+ * from the memoized plan, so every replay plans the same steps.
  */
 async function observeCorrections(
   step: ObserverStepHarness,
-  plan: TurnPlan,
   args: {
     conversationId: string;
+    limit: number;
     scope: ExtractionScope;
     activeChannelTypes: ReadonlyArray<string>;
-    deps: ObserveTurnDeps;
+    deps: ObserveTurnDeps & DiscoverTurnsDeps;
   },
 ): Promise<SettledPhase<ExtractionResult>> {
+  const { conversationId } = args;
   const outcomes: TurnOutcome[] = [];
+  const exhausted = (err: StepError) => {
+    logger.warn(
+      { err, conversationId, phase: "corrections", stepId: err.stepId },
+      "observer: phase failed after retries — continuing without the rest of it",
+    );
+  };
+  let plan: TurnPlan | null = null;
   let failed = false;
-  for (const turn of plan.turns) {
+  try {
+    plan = await step.run("discover-turns", () =>
+      discoverTurns(args.deps, { conversationId, limit: args.limit }),
+    );
+  } catch (err) {
+    if (!(err instanceof StepError)) throw err;
+    exhausted(err);
+    failed = true;
+  }
+  for (const turn of plan?.turns ?? []) {
+    const observationId = turn.observationId;
     let outcome: TurnOutcome;
     try {
-      outcome = await step.run(`observe-v1-corrections-${turn.observationId}`, () =>
+      outcome = await step.run(`observe-v1-corrections-${observationId}`, () =>
         observeTurnCorrections(args.deps, {
-          conversationId: args.conversationId,
+          conversationId,
           turn,
           scope: args.scope,
           activeChannelTypes: args.activeChannelTypes,
@@ -202,30 +226,40 @@ async function observeCorrections(
       );
     } catch (err) {
       if (!(err instanceof StepError)) throw err;
-      logger.warn(
-        { err, conversationId: args.conversationId, phase: "corrections", stepId: err.stepId },
-        "observer: phase failed after retries — continuing without the rest of it",
-      );
+      exhausted(err);
       failed = true;
+      // The failure counts against the turn, so one that keeps throwing is
+      // given up after `MAX_TURN_ATTEMPTS` fires. Planned only after the
+      // memoized failure, so every replay plans it again.
+      try {
+        outcomes.push(
+          await step.run(`observe-v1-corrections-exhausted-${observationId}`, () =>
+            recordExhaustedTurn(args.deps, { observationId, message: err.message }),
+          ),
+        );
+      } catch (recordErr) {
+        if (!(recordErr instanceof StepError)) throw recordErr;
+        exhausted(recordErr);
+      }
       break;
     }
     outcomes.push(outcome);
     if (!continuesPhase(outcome)) break;
   }
   const applied = outcomes.flatMap((o) => (o.kind === "applied" ? [o] : []));
-  const finished = outcomes.filter((o) => continuesPhase(o) || o.kind === "failed").length;
-  const countOf = (kind: TurnOutcome["kind"]) => outcomes.filter((o) => o.kind === kind).length;
+  const counts = R.countBy(outcomes, (o) => o.kind);
+  const finished = R.sumBy(outcomes, (o) => (finishesTurn(o) ? 1 : 0));
   logger.info(
     {
-      conversationId: args.conversationId,
+      conversationId,
       applied: applied.length,
-      skippedNotUserSpeech: plan.notUserSpeech,
-      skippedEmpty: countOf("skipped"),
-      retried: countOf("retryLater"),
-      failed: countOf("failed"),
-      taken: countOf("taken"),
+      skippedNotUserSpeech: plan?.notUserSpeech ?? 0,
+      skippedEmpty: counts.skipped ?? 0,
+      retried: counts.retryLater ?? 0,
+      failed: counts.failed ?? 0,
+      taken: counts.taken ?? 0,
       droppedNoEvidence: R.sumBy(applied, (o) => o.droppedNoEvidence),
-      remaining: plan.remaining + plan.turns.length - finished,
+      remaining: plan === null ? 0 : plan.remaining + plan.turns.length - finished,
     },
     "observer: corrections turns observed",
   );
@@ -241,6 +275,14 @@ function continuesPhase(outcome: TurnOutcome): boolean {
   return match(outcome.kind)
     .with("applied", "skipped", "done", () => true)
     .with("taken", "retryLater", "failed", () => false)
+    .exhaustive();
+}
+
+/** Whether the turn left `pending` for good: everything but a retry or another run's move. */
+function finishesTurn(outcome: TurnOutcome): boolean {
+  return match(outcome.kind)
+    .with("applied", "skipped", "done", "failed", () => true)
+    .with("taken", "retryLater", () => false)
     .exhaustive();
 }
 
@@ -356,14 +398,9 @@ export async function runObserver(
   // Phase 1: corrections, one turn per step, from the turns no fire has
   // observed. Discovery is the phase's cursor: a turn's row, written with
   // its rule changes, keeps every later fire from reading it again.
-  const plan = await step.run("discover-turns", () =>
-    discoverTurns(
-      { runInTx: deps.runInTx, store: agentStore },
-      { conversationId, limit: TURNS_PER_PHASE[triggeredBy] },
-    ),
-  );
-  const corrections = await observeCorrections(step, plan, {
+  const corrections = await observeCorrections(step, {
     conversationId,
+    limit: TURNS_PER_PHASE[triggeredBy],
     scope: fire,
     activeChannelTypes,
     deps: { provider, model, runInTx: deps.runInTx, store: agentStore },

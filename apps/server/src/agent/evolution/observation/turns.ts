@@ -6,6 +6,7 @@
 
 import * as R from "remeda";
 import { isTurnRowContent } from "../../../llm/content.js";
+import type { TextBlock } from "../../../llm/types.js";
 import type { TurnMessage } from "../../store/index.js";
 import type { StoredContent } from "../../stored-content.js";
 import { formatTranscript } from "../extract-corrections.js";
@@ -71,7 +72,8 @@ function textOnly(content: StoredContent): StoredContent {
 function textOf(content: StoredContent): string {
   if (typeof content === "string") return content;
   return content
-    .flatMap((b) => (b.type === "text" && b.harness === undefined ? [b.text] : []))
+    .filter((b): b is TextBlock => b.type === "text" && b.harness === undefined)
+    .map((b) => b.text)
     .join("\n");
 }
 

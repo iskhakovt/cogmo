@@ -33,12 +33,8 @@ export interface PendingTurn {
   firstMessageId: string;
 }
 
-/** The row a step reads before it does anything. */
+/** What a step reads of its row before it does anything. */
 export interface TurnObservation {
-  id: string;
-  conversationId: string;
-  cursor: string;
-  kind: TurnKindValue;
   status: ObservationStatusValue;
   attempts: number;
 }
@@ -181,7 +177,8 @@ export class DrizzleTurnObservationStore implements TurnObservationStore {
           turnObservations.turnCursor,
           turnObservations.phase,
         ],
-        set: { updatedAt: sql`${turnObservations.updatedAt}` },
+        // No-op: the key's own value, so the row is left as it is.
+        set: { phase: params.phase },
       });
   }
 
@@ -189,18 +186,15 @@ export class DrizzleTurnObservationStore implements TurnObservationStore {
     tx: Transaction,
     params: { conversationId: string; phase: ObservationPhaseValue },
   ): Promise<ReadonlyArray<PendingTurn>> {
-    // Postgres has no `min(uuid)`; the canonical text of a uuid sorts as its
-    // bytes under the C collation.
+    // Each turn's oldest row: one per cursor, the lowest id first.
     const turnStarts = tx
-      .select({
+      .selectDistinctOn([messages.lastInboundMessageId], {
         cursor: messages.lastInboundMessageId,
-        firstMessageId: sql<string>`min(${messages.id}::text COLLATE "C")::uuid`.as(
-          "first_message_id",
-        ),
+        firstMessageId: messages.id,
       })
       .from(messages)
       .where(eq(messages.conversationId, params.conversationId))
-      .groupBy(messages.lastInboundMessageId)
+      .orderBy(messages.lastInboundMessageId, asc(messages.id))
       .as("turn_starts");
     return tx
       .select({
@@ -222,14 +216,7 @@ export class DrizzleTurnObservationStore implements TurnObservationStore {
 
   async getTurnObservation(tx: Transaction, id: string): Promise<TurnObservation | undefined> {
     const [row] = await tx
-      .select({
-        id: turnObservations.id,
-        conversationId: turnObservations.conversationId,
-        cursor: turnObservations.turnCursor,
-        kind: turnObservations.turnKind,
-        status: turnObservations.status,
-        attempts: turnObservations.attempts,
-      })
+      .select({ status: turnObservations.status, attempts: turnObservations.attempts })
       .from(turnObservations)
       .where(eq(turnObservations.id, id));
     return row;

@@ -264,13 +264,17 @@ describe("migration turn_observations", () => {
     const counted = await seedConversation();
     const proven = await turn(counted);
     await fire(counted, counted.count, { reinforced: 1 });
+    // A fire claiming more messages than the conversation holds is no
+    // evidence; the earlier fire's boundary stands.
     const overcounted = await seedConversation();
+    const underBoundary = await turn(overcounted);
     await turn(overcounted);
+    await fire(overcounted, 2, { failedPhases: [] });
     await fire(overcounted, overcounted.count + 5, { failedPhases: [] });
 
     await applyMigration();
 
-    expect([...(await rowsByCursor()).keys()].sort()).toEqual([kept, proven].sort());
+    expect([...(await rowsByCursor()).keys()].sort()).toEqual([kept, proven, underBoundary].sort());
   });
 
   it("ages out an answered turn over 30 days old that no fire read", async () => {

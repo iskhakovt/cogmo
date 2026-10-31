@@ -54,15 +54,16 @@ export function classifyTurnFailure(err: unknown): TurnFailure | null {
 
 /**
  * Whether a failure ends the turn at once. A turn too large for the model, a
- * refusal and a cut-off reply recur on every attempt; a parse failure or an
- * unplaced rejection may not, so those count toward `MAX_TURN_ATTEMPTS`.
+ * refusal and a cut-off reply recur on every attempt; a parse failure, an
+ * unplaced rejection or an exhausted step may not, so those count toward
+ * `MAX_TURN_ATTEMPTS`.
  */
 export function isTerminalTurnFailure(failure: TurnFailure): boolean {
   return match(failure.kind)
     .with("context_overflow", "refusal", "output_cut_off", () => true)
-    .with("parse", "rejected", () => false)
+    .with("parse", "rejected", "exhausted", () => false)
     .exhaustive();
 }
 
-/** Turn-caused failures a turn's corrections may have before the row is `failed`. */
+/** Counted failures a turn's corrections may have before the row is `failed`. */
 export const MAX_TURN_ATTEMPTS = 3;

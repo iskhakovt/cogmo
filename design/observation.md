@@ -160,7 +160,7 @@ Constraints and indexes:
 
   ```sql
   (status = 'skipped') = (skip_reason IS NOT NULL)
-  AND (status NOT IN ('held_extracted', 'extracted', 'applied') OR extraction IS NOT NULL)
+  AND (status NOT IN ('held_extracted', 'extracted', 'applied') OR extraction IS NOT NULL OR created_at < <the 1b migration's time>)
   AND (status NOT IN ('pending', 'held', 'skipped') OR extraction IS NULL)
   AND (attempts > 0) = (failure_kind IS NOT NULL)
   AND (failure_kind IS NULL) = (failure_message IS NULL)
@@ -217,7 +217,7 @@ stateDiagram-v2
 
 - any transition out of `applied`, out of `failed`, or out of `skipped` with a reason other than `unanswered`. No command reopens a `failed` row ([Decisions](#decisions));
 - `extracted → pending`, and any write that erases or rewrites `extraction`;
-- `pending → applied` without an extraction;
+- `pending → applied` without an extraction, for a row written from 1b on (an `applied` row of [Slice 1a](#slice-1a-corrections-by-turn-proposed) has none, and the CHECK exempts it);
 - `held` or `held_extracted` in the corrections phase, which the CHECK rejects.
 
 Every transition is a store method returning whether it moved, `{ kind: "transitioned" } | { kind: "stale"; status }`, the shape of `DrizzleCodingStore.transitionTaskStatus`. A stale transition is an expected outcome, not an `Err`. Each use case owns one group of transitions, as [Files](#types-and-boundaries-proposed) lists. Re-entry guards live inside the steps, and the bare body branches only on memoized outcomes ([inngest.md](../.agents/rules/inngest.md) → Never gate the bare body on state your own steps mutate).
@@ -651,6 +651,7 @@ Residuals:
 
 - The straddling turn, at most one per conversation, is observed again. A correction in it can reinforce once more, and a fact in it is retained under a turn document id beside the transcript-era document. If its contradiction is the one that reset a rule, the marker points at the newest `backfilled` row, a different turn, so re-observing it retires that rule.
 - A memories phase whose retain Hindsight acknowledged before the step failed for good records 0, so its turns are retained again under turn document ids.
+- A whole turn whose rows committed after the fire read rows with larger ids sits under the boundary by id without the fire having read it, and is `backfilled` unobserved. The window is one transaction's commit latency, against the idle debounce.
 
 **`contradicted_in_conversation_id`.** For each non-null value, the corrections backfill sets `contradicted_in_turn_id` to the newest `backfilled` corrections row of that conversation. A conversation with none leaves it NULL, so that rule's next contradiction resets it rather than retiring it. A later migration drops the old column (Rollout).
 
@@ -702,16 +703,16 @@ The cursor is this design's: a turn's `turn_observations` row, keyed on `(conver
 |-|-|-|
 | Unit | Answered turns by cursor, kind from the inbound, `not_user_speech` for scheduled and pipeline turns | `superseded`, covering turns, and `unanswered` skip rows that reopen (1b). An unanswered turn gets no row until a reply makes it answered. |
 | States | `pending`, `applied`, `failed`, `skipped` (`not_user_speech`, `empty`, `backfilled`, `aged_out`) | `held`, `held_extracted`, `extracted` and the stored extraction (PR 2) |
-| Steps | `discover-turns`, then one `observe-v1-corrections-<observationId>` per planned turn, holding extraction and apply | Separate extract, apply and attempt steps (1b) |
+| Steps | `discover-turns`, then one `observe-v1-corrections-<observationId>` per planned turn, holding extraction and apply; `observe-v1-corrections-exhausted-<observationId>` after a turn's step fails for good | Separate extract, apply and attempt steps (1b) |
 | Context | The turn answered before, its user text and final reply, each capped at 1,500 characters, head and tail | The summary, two turns, token budgets, truncating the turn (1b) |
-| Failures | Turn-caused throws classified (`classifyTurnFailure`) and counted to `MAX_TURN_ATTEMPTS` (3); any other throw is the step's to retry, then fails the phase for the fire, as before | `PhasePause` values and delayed follow-ups (1b) |
+| Failures | Turn-caused throws classified (`classifyTurnFailure`) and counted; a step that fails after its retries counted as `exhausted`; `MAX_TURN_ATTEMPTS` (3) of either fail the turn | `PhasePause` values, which pause without counting, and delayed follow-ups (1b) |
 | Profile and channels | The conversation's current profile and active channel types, as before | The turn's profile and `turn_contexts` channel types (1b) |
 | Budget | `TURNS_PER_PHASE`: 10 per idle fire, 3 per `/reflect`; the rest wait for the next fire | Follow-ups, chain and daily budgets, `observer-v2` (1b) |
 | Audit | The row's shape unchanged, `corrections` summed over the fire's turns; per-turn counts logged | `turns` in the payload, `/learned` (1b) |
 
 ### Storage
 
-`turn_observations` as in [Storage](#storage), without `extraction`; `phase` holds only `corrections`, and each enum only the values 1a writes. The CHECK is the subset that applies:
+`turn_observations` as in [Storage](#storage), without `extraction`; `phase` holds only `corrections`, and each enum only the values 1a writes. `failure_kind` also holds `exhausted`, a step that failed after its retries with a failure no class places. The failure is two columns under the CHECK, a pgEnum reason and its message, rather than a JSONB detail: the reason stays queryable, the shape `coding_tasks` keeps its failure in. The CHECK is the subset that applies:
 
 ```sql
 (status = 'skipped') = (skip_reason IS NOT NULL)
@@ -721,20 +722,35 @@ AND (status <> 'failed' OR attempts > 0)
 AND (skip_reason <> 'not_user_speech' OR turn_kind <> 'chat')
 ```
 
+An `applied` 1a row has no extraction, and stays legal when 1b adds the column: 1b's CHECK requires `extraction` on `applied` rows only where the row's corrections were extracted from 1b on, so the 1b migration exempts rows written before it (a `NULL` extraction on a row older than the migration) rather than refusing them.
+
 The partial index serves the plan alone: `(conversation_id, phase) WHERE status = 'pending'`.
 
-### Transitions
+### 1a states and transitions
+
+```mermaid
+stateDiagram-v2
+  [*] --> pending: discover (answered chat turn)
+  [*] --> skipped: discover (not_user_speech) / migration (backfilled, aged_out)
+  pending --> applied: rule writes committed
+  pending --> skipped: no user text (empty)
+  pending --> pending: counted failure, attempts < 3
+  pending --> failed: attempts = 3, or a terminal turn failure
+  applied --> [*]
+  failed --> [*]
+  skipped --> [*]
+```
 
 | From | To | By | Guard | Writes |
 |-|-|-|-|-|
 | — | `pending`; `skipped` (`not_user_speech`) for a scheduled or pipeline turn | `discoverTurns` | `INSERT … ON CONFLICT (conversation_id, turn_cursor, phase) DO UPDATE` with a no-op SET | Row, `attempts = 0` |
-| `pending` | `applied` | `observeTurnCorrections`, the first statement of the transaction that writes the rules | `WHERE id = $1 AND status = 'pending'` | — |
-| `pending` | `skipped` (`empty`) | `observeTurnCorrections`, for a turn row with no user text, before any model call | Same | `skip_reason` |
-| `pending` | `pending` | `observeTurnCorrections`, on a turn-caused failure short of the cap | `WHERE id = $1 AND status = 'pending' AND attempts = $seen`, `$seen` read at the step's start | `attempts + 1`, `failure_kind`, `failure_message` |
+| `pending` | `applied` | `applyTurnCorrections`, the first statement of the transaction that writes the rules | `WHERE id = $1 AND status = 'pending'` | — |
+| `pending` | `skipped` (`empty`) | `skipEmptyTurn`, for a turn row with no user text, before any model call | Same | `skip_reason` |
+| `pending` | `pending` | `recordTurnAttempt`, on a turn-caused failure, or (`recordExhaustedTurn`) a step that failed after its retries, short of the cap | `WHERE id = $1 AND status = 'pending' AND attempts = $seen`, `$seen` read at the step's start | `attempts + 1`, `failure_kind`, `failure_message` |
 | `pending` | `failed` | Same, at `attempts + 1 = 3` or on a terminal failure (`context_overflow`, `refusal`, `output_cut_off`) | Same | Same |
 | — | `skipped` (`backfilled`, `aged_out`) | Migration `0081_turn_observations` | — | Row |
 
-Any other transition is illegal, and no store method writes one: nothing leaves `applied`, `failed` or `skipped`. `TurnObservationStore` (`src/agent/store/turn-observations.ts`) returns `{ kind: "transitioned" } | { kind: "stale"; status }` from each guarded write.
+Any other transition is illegal, and no store method writes one: nothing leaves `applied`, `failed` or `skipped`. `TurnObservationStore` (`src/agent/store/turn-observations.ts`) returns `{ kind: "transitioned" } | { kind: "stale"; status }` from each guarded write. Each use case is a file of `src/agent/evolution/observation/`, called from the one turn step (`observeTurnCorrections`) or, for `recordExhaustedTurn`, from the step after it.
 
 ### One fire
 
@@ -744,10 +760,13 @@ Any other transition is illegal, and no store method writes one: nothing leaves 
 |-|-|
 | `applied`, `skipped` (`empty`), `done` (the row had left `pending` before the step began) | Next turn |
 | `taken` (this step's guarded write lost to another run) | Stop the phase |
-| `retryLater`, `failed` | Stop the phase: a later turn is never applied ahead of an earlier one that can still succeed |
-| A step that threw, out of retries (`StepError`) | Stop the phase; `failedPhases` names `corrections`, and the turns applied before it keep their counts |
+| `retryLater`, `failed` | Stop the phase: within one plan, a later turn is never applied ahead of an earlier one that can still succeed |
+| A turn's step that threw, out of retries (`StepError`) | `observe-v1-corrections-exhausted-<observationId>` counts the failure against the turn; stop the phase; `failedPhases` names `corrections`, and the turns applied before it keep their counts |
+| `discover-turns` threw, out of retries | Stop the phase as failed; the fire's later phases still run |
 
-Replays: a fire with N planned turns has N + 10 to N + 14 steps. The bare body calls no model, and step ids come from the memoized plan's DB-minted ids, so every replay plans the same steps.
+The catch is around the phase's steps alone, the [inngest.md](../.agents/rules/inngest.md) carve-out: every expected failure inside a step is a value, so a `StepError` is "threw, out of retries". The exhausted step is planned only after the memoized failure, so every replay plans it again. `/reflect`'s harness has no retries and no `StepError`: a throw reaches the user who asked, and nothing is counted.
+
+Replays: a fire with N planned turns has N + 10 to N + 15 steps. The bare body calls no model, and step ids come from the memoized plan's DB-minted ids, so every replay plans the same steps.
 
 ### Keys
 
@@ -757,7 +776,7 @@ Every write a turn's corrections make commits with its row's `pending → applie
 
 ### Backfill
 
-[Backlog and Backfill](#backlog-and-backfill-proposed) → Backfill, for corrections, as DML inside `0081_turn_observations` after the DDL: answered turns at or below the latest qualifying fire's boundary get `skipped` (`backfilled`), answered turns older than 30 days `skipped` (`aged_out`), every other turn no row, so the first fire discovers it as `pending`. Each contradiction record moves to the newest `backfilled` turn of its conversation, or NULL where there is none, and the conversation column is cleared. The CHECK is re-added last, so a row it refuses rolls the file back.
+[Backlog and Backfill](#backlog-and-backfill-proposed) → Backfill, for corrections, as DML inside `0081_turn_observations` after the DDL: answered turns at or below the latest qualifying fire's boundary get `skipped` (`backfilled`), answered turns older than 30 days `skipped` (`aged_out`), every other turn no row, so the first fire discovers it as `pending`. A fire whose `messageCount` is larger than its conversation's message count doesn't qualify. Each contradiction record moves to the newest `backfilled` turn of its conversation, or NULL where there is none, and the conversation column is cleared. The CHECK is re-added last, so a row it refuses rolls the file back.
 
 ### Failure modes
 
@@ -765,20 +784,21 @@ Every write a turn's corrections make commits with its row's `pending → applie
 |-|-|-|-|
 | a | Inside a turn's step before its apply commits: the model call in flight, or between the model and the commit | `pending` | The retry calls the model again, the one billable re-run; nothing was written |
 | b | After the apply commits, before Inngest records the step | `applied` | The re-run reads the row at its start, returns `done`, and calls no model |
-| c | A database error inside the apply transaction | `pending` | The rule writes roll back with the move; the step retries |
+| c | A database error inside the apply transaction | `pending` | The rule writes roll back with the move; the step retries, and the model is billed again |
 | d | A turn-caused failure, and a crash after its attempt commits | `pending` with `attempts + 1`, or `failed` | The re-run reads the new count and is the next attempt. A crash can spend one attempt early. |
-| e | A throw the turn didn't cause, out of the step's retries | Unchanged | The phase stops for the fire; the next fire retries the turn, with no attempt counted |
+| e | A throw the turn didn't cause, out of the step's retries | `pending` with `attempts + 1` (`exhausted`), or `failed` at 3 | The phase stops for the fire and the next fire retries the turn. A turn that keeps throwing holds its conversation's later turns for at most `MAX_TURN_ATTEMPTS` fires, costing at most 3 × (1 + the step's retries) model calls, then is passed. Residual until 1b's `PhasePause`: an outage or an expired key that outlasts three fires fails the turn it lands on, one per conversation. |
 | f | Two fires at once for one conversation: `/reflect` beside an idle fire, or two idle fires interleaving steps (the concurrency limit counts steps, not runs) | Each row moves once | Discovery is an idempotent upsert, and an insert racing it raises `40001`, which the transactor retries. Both may call the model for one turn. The first apply commits; the second's guarded UPDATE waits on the row lock, raises `40001`, and its retry finds the row `applied`: it returns `taken`, writes nothing and stops its phase. Residual: one duplicate model call. |
 | g | A turn's reply commits after discovery's snapshot | Not discovered this fire | No mark runs past it; the next fire's anti-join finds it |
-| h | A run of the transcript-era build in flight across the deploy | Whatever the database holds | Its memoized `extract-corrections` is never requested; `discover-turns` and the turn steps run against the rows. Residual: if that step committed its writes before the deploy, its audit row isn't written yet, so the backfill left its turns `pending` and they reinforce once more. At most one fire per conversation in flight. |
+| h | A run of the transcript-era build in flight across the deploy | Whatever the database holds | Its memoized `extract-corrections` is never requested; `discover-turns` and the turn steps run against the rows. Residual: if that step committed its writes before the deploy, its audit row isn't written yet, so the backfill left its turns `pending`: they reinforce once more, and a contradicting one retires the rule its first reading reset, as in row j. The fires in flight at the deploy are the residual's bound; the concurrency limit counts steps, so a conversation can have more than one. |
 | i | A run in flight across a later deploy that changes `TurnOutcome` | — | The step id's version moves to `observe-v2-`, so the body re-runs against the row |
 | j | Backfill | See [Backfill](#backfill) | Residuals as in Backlog and Backfill: a straddling turn is observed again; a fire that committed corrections and then recorded `failedPhases: ["corrections"]` leaves its turns to reinforce once more; a contradiction re-observed from such a turn retires the rule its first reading reset |
-| k | A late reply in the window PR 0 can't see, or an unanswered turn a late retry answers | Both turns `pending` | Residual until 1b's `superseded`: the user's words count in both turns |
-| l | A rollback to the previous build after the migration | Its writes land on `contradicted_in_conversation_id` | The column is NULL, so its next contradiction of a reset rule resets again rather than retiring. A roll forward clears that column on every marker write. |
+| k | A late reply in the window PR 0 can't see, an unanswered turn a late retry answers, or history written before PR 0 within the last 30 days | Both turns `pending`, then `applied` | The user's words count in both turns, for good: 1b decides `superseded` at discovery, so a turn 1a already applied stays applied. 1a removes the backstop the full design gives this history. |
+| l | A rollback to the previous build after the migration | Its writes land on `contradicted_in_conversation_id` | That build's graduation clears only the conversation column, so a rule carrying a turn marker would fail the CHECK on it: the rollback procedure runs `UPDATE steering_rules SET contradicted_in_turn_id = NULL` first. Its next contradiction of a reset rule then resets again rather than retiring. A roll forward clears the conversation column on every marker write. Residual: a process of the old build outliving the migration fails its graduations of marked rules until it stops. |
 | m | More pending turns than the cap | `pending` | The next idle fire or `/reflect` takes them, oldest first. A dormant conversation keeps them until its next turn. |
 | n | A rule merged or retired between extraction and apply | `applied` | `upsertCorrection` returns `stale`, counted as `unknownRuleReinforcementsSkipped` |
+| o | A function-level retry (an error outside a step) | Unchanged | As the main table's row 13: steps replay from cache, the database is the authority, and every transition is guarded |
 
-**Re-read cost.** Discovery reads the conversation's message ids, roles and cursors, no content. Content is read for the planned turns and each one's context turn. A model call per turn replaces one per fire over the whole transcript; the memories phase still reads the whole transcript until PR 2.
+**Re-read cost.** Each fire, discovery scans every message row of the conversation twice, ids, roles and cursors and no content: `listUndiscoveredTurns`'s anti-join and `listPendingTurns`'s turn starts. Content is read for the planned turns and each one's context turn. A model call per turn replaces one per fire over the whole transcript; the memories phase still reads the whole transcript until PR 2.
 
 ## Rollout `[proposed]`
 
@@ -790,14 +810,14 @@ Each PR is shippable and reviewable on its own. Migration numbers shift if other
    1a. **The cursor**, as [Slice 1a](#slice-1a-corrections-by-turn-proposed) specifies:
    - `renderTurn`, `renderContext` and the evidence check (`src/agent/evolution/observation/turns.ts`), `classifyTurnFailure` (`failure.ts`);
    - `TurnObservationStore`, with its transitions and their PGlite tests, the CHECK violations among them; `TranscriptStore.listTurnMessages` and `findAnsweredCursorBefore`;
-   - `discoverTurns` and `observeTurnCorrections`, the per-turn walk in `observer.ts`, and `TURNS_PER_PHASE`;
+   - `discoverTurns`, `observeTurnCorrections` and a use case per transition (`applyTurnCorrections`, `skipEmptyTurn`, `recordTurnAttempt`, `recordExhaustedTurn`), the per-turn walk in `observer.ts`, and `TURNS_PER_PHASE`;
    - `contradictLearningRule` on `contradicted_in_turn_id`;
    - `0081_turn_observations`, generated, with the corrections backfill inline: the enums, the table, `steering_rules.contradicted_in_turn_id`;
    - `turn_observations` in [data-model.md](data-model.md)'s table index, pointing here.
 
-   Tests: the premise (two fires over one transcript reinforce once), Failure Modes rows a, b, f and h as tests, (b) and (h) as replay tests with `@inngest/test` `steps:`, the classification matrix, the migration's backfill, and the learning-loop and Observer integration suites re-recorded.
+   Tests: the premise (two fires over one transcript reinforce once), Failure Modes rows a, b, e, f and h as tests, (b) and (h) as replay tests with `@inngest/test` `steps:`, the classification matrix, the migration's backfill, and the learning-loop cassette re-recorded.
 
-   1b. **The rest of the corrections phase**: `ConversationObservation`, `superseded` and `unanswered`; separate extract, apply and attempt steps; `PhasePause` and `callExtractionModel`; the turn's profile and channel types; the context budget; the per-fire loop as `observer-v2` with the `observer/backlog` event, follow-ups, chain and daily budgets (`EvolutionEventStore.countTurnCallsSince`) and the run id; `turns.corrections` in the audit row, `/learned`, `/reflect` and the web table; the transcript memories phase gated to idle and manual fires; `follow_up` added to the `evolution_trigger` pgEnum and `EvolutionTriggerSchema`, in a generated migration. Tests: each remaining Failure Modes row that applies to corrections as a replay test, each `TurnFailure` and `PhasePause` to its transition, the sync-harness throw mapping, and a concurrent-apply test on the real driver.
+   1b. **The rest of the corrections phase**: `ConversationObservation`, `superseded` and `unanswered`; separate extract, apply and attempt steps; `PhasePause` and `callExtractionModel`; the turn's profile and channel types; the context budget; the per-fire loop as `observer-v2` with the `observer/backlog` event, follow-ups, chain and daily budgets (`EvolutionEventStore.countTurnCallsSince`) and the run id; `turns.corrections` in the audit row, `/learned`, `/reflect` and the web table; the transcript memories phase gated to idle and manual fires; `follow_up` added to the `evolution_trigger` pgEnum and `EvolutionTriggerSchema`, and the `extraction` column with a CHECK that exempts 1a's `applied` rows, in a generated migration. Tests: each remaining Failure Modes row that applies to corrections as a replay test, each `TurnFailure` and `PhasePause` to its transition, the sync-harness throw mapping, and a concurrent-apply test on the real driver.
 2. **Memories by turn.** Contents:
    - the memories phase on the same machine: `held` and `held_extracted`, the stored extraction, positional document ids, and evidence;
    - its backfill, inline in the generated migration that adds the `memories` phase;
@@ -808,7 +828,7 @@ Each PR is shippable and reviewable on its own. Migration numbers shift if other
 3. **Drop `contradicted_in_conversation_id`.** Generated, after a release contains PR 1a, so a rollback to that release still finds no reader of the column.
 4. **Hindsight raw-retain spike**, optional, as in [Hindsight Raw Retain](#hindsight-raw-retain-proposed).
 
-When PR 2 merges, this document's sections move to `[confirmed]`, and the Observer and Consolidation table in evolution.md replaces its contradiction row with the turn semantics.
+When PR 2 merges, this document's sections move to `[confirmed]`.
 
 **Side bugs**, separate fixes found while designing this:
 
@@ -823,7 +843,7 @@ When PR 2 merges, this document's sections move to `[confirmed]`, and the Observ
 - **PR 1 ships in two.** 1a gives the Observer its cursor on this design's unit and keys, so a correction counts once per turn; 1b adds the rest of the corrections machine to the same rows. A per-conversation high-water mark was rejected ([The cursor is the turn](#the-cursor-is-the-turn)).
 - **`/reflect` is sync**, capped at `REFLECT_TURNS_PER_PHASE = 3`, with a follow-up for the rest.
 - **`BACKFILL_MAX_AGE` is 30 days.** Older dormant history is skipped as `aged_out`, terminally.
-- **The late-reply fix ships first, as PR 0**, with the batch range it and `superseded` share. `superseded` is the backstop for history and for the interleaving PR 0 can't see.
+- **The late-reply fix ships first, as PR 0**, with the batch range it and `superseded` share. `superseded` is the backstop for history and for the interleaving PR 0 can't see, for turns 1b discovers: a turn [Slice 1a](#slice-1a-corrections-by-turn-proposed) already applied keeps its count (its row k).
 - **#607 closes** once this design is accepted: its token-budget chunks had no durable identity, and its idempotency keys came from model citations.
 - **memory.md's `observation` facts sentence** (Recall says the extraction LLM produces them routinely; Hindsight's extraction yields only `world` and `experience`, and `observation` comes from consolidation) is corrected in a separate docs PR. The recall-filter override stays.
 

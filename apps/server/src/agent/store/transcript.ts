@@ -86,17 +86,17 @@ export type ChatHistoryAttachment =
   | { kind: "document"; name: string; mediaType: string }
   | { kind: "placeholder"; text: string };
 
-/**
- * One past turn for the web chat history read — `text` is the message's
- * displayable prose. Mirrored in `@cogmo/contracts`; see that definition for
- * why tool-call cards aren't reconstructed here.
- */
 /** A row of a turn, with the turn's cursor. */
 export interface TurnMessage extends StoredMessage {
   id: string;
   cursor: string;
 }
 
+/**
+ * One past turn for the web chat history read — `text` is the message's
+ * displayable prose. Mirrored in `@cogmo/contracts`; see that definition for
+ * why tool-call cards aren't reconstructed here.
+ */
 export interface ChatHistoryMessage {
   id: string;
   role: MessageRole;

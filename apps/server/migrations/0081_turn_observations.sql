@@ -1,4 +1,4 @@
-CREATE TYPE "public"."observation_failure_kind" AS ENUM('context_overflow', 'refusal', 'output_cut_off', 'parse', 'rejected');--> statement-breakpoint
+CREATE TYPE "public"."observation_failure_kind" AS ENUM('context_overflow', 'refusal', 'output_cut_off', 'parse', 'rejected', 'exhausted');--> statement-breakpoint
 CREATE TYPE "public"."observation_phase" AS ENUM('corrections');--> statement-breakpoint
 CREATE TYPE "public"."observation_skip_reason" AS ENUM('not_user_speech', 'empty', 'backfilled', 'aged_out');--> statement-breakpoint
 CREATE TYPE "public"."observation_status" AS ENUM('pending', 'applied', 'failed', 'skipped');--> statement-breakpoint
@@ -35,23 +35,26 @@ CREATE INDEX "idx_steering_rules_contradicted_in_turn" ON "steering_rules" USING
 -- `messageCount`, so its latest fire whose correction extraction returned
 -- covered exactly the first `messageCount` messages. A fire qualifies on
 -- positive evidence: `failedPhases` present without `corrections`, or, on a
--- row written before `failedPhases` existed, a non-zero correction count. An
+-- row written before `failedPhases` existed, a non-zero correction count; and
+-- a `messageCount` no larger than the conversation's message count. An
 -- answered turn whose rows all fall at or below that boundary is `skipped`
 -- (`backfilled`); any other answered turn whose newest row is over 30 days old
 -- is `skipped` (`aged_out`). Every other turn gets no row, and the next fire
 -- discovers it as `pending`.
 WITH "qualifying" AS (
-  SELECT "conversation_id", max(("payload"->>'messageCount')::integer) AS "message_count"
-  FROM "evolution_events"
-  WHERE "payload"->'messageCount' IS NOT NULL
+  SELECT e."conversation_id", max((e."payload"->>'messageCount')::integer) AS "message_count"
+  FROM "evolution_events" e
+  WHERE e."payload"->'messageCount' IS NOT NULL
+    AND (e."payload"->>'messageCount')::integer
+      <= (SELECT count(*) FROM "messages" m WHERE m."conversation_id" = e."conversation_id")
     AND CASE
-      WHEN "payload"->'failedPhases' IS NOT NULL
-        THEN NOT ("payload"->'failedPhases' @> '["corrections"]'::jsonb)
-      ELSE ("payload"->'corrections'->>'extracted')::integer
-        + ("payload"->'corrections'->>'reinforced')::integer
-        + ("payload"->'corrections'->>'contradictions')::integer > 0
+      WHEN e."payload"->'failedPhases' IS NOT NULL
+        THEN NOT (e."payload"->'failedPhases' @> '["corrections"]'::jsonb)
+      ELSE (e."payload"->'corrections'->>'extracted')::integer
+        + (e."payload"->'corrections'->>'reinforced')::integer
+        + (e."payload"->'corrections'->>'contradictions')::integer > 0
     END
-  GROUP BY "conversation_id"
+  GROUP BY e."conversation_id"
 ),
 "boundaries" AS (
   SELECT q."conversation_id",

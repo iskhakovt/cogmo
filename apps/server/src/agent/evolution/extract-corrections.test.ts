@@ -8,7 +8,6 @@ import type { StoredMessage } from "../stored-content.js";
 import {
   type ApplyCorrectionsStore,
   applyCorrections,
-  collapseCorrections,
   type ExtractionDeps,
   type ExtractionResult,
   type ExtractionScope,
@@ -1358,14 +1357,13 @@ describe("extractTurnCorrections and applyCorrections", () => {
     );
   });
 
-  it("collapses nothing it can't resolve: an unknown label stays for the apply to count", () => {
-    const items = [reinforceItem("R9"), reinforceItem("R9")].map((c) => ({
-      ...c,
-      category: "style" as const,
-      evidence: "x",
-    }));
+  it("collapses nothing it can't resolve: each unknown label is counted", async () => {
+    const deps = mockExtractionDeps({ corrections: [reinforceItem("R9"), reinforceItem("R9")] });
 
-    expect(collapseCorrections(items, new Map())).toHaveLength(2);
+    const result = await extractAndApply(sampleHistory, SCOPE, deps);
+
+    expect(result.unknownRuleReinforcementsSkipped).toBe(2);
+    expect(deps.store.upsertCorrection).not.toHaveBeenCalled();
   });
 
   it("recovers a trailing-comma extraction response via chatTyped repair", async () => {
