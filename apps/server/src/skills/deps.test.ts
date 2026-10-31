@@ -361,6 +361,23 @@ describe("makeSandboxLockfileCompiler", () => {
     );
   });
 
+  it("runs from / with uv's config discovery off, as the populate script does", async () => {
+    // Why: see `DEPENDENCY_EXEC_OPTIONS`.
+    const h = buildCompilerHarness(makeFakeExec);
+    const compiler = makeSandboxLockfileCompiler({
+      sandbox: h.sandbox,
+      image: "cogmo-skills:test",
+    });
+
+    const promise = compiler.compile(["httpx==0.27.0"]);
+    await new Promise((r) => setImmediate(r));
+    h.exec.waitResolve(0);
+    await promise;
+
+    const [, options] = expectDefined(h.session.execStreaming.mock.calls[0], "compile exec");
+    expect(options).toMatchObject({ workingDir: "/", env: { UV_NO_CONFIG: "1" } });
+  });
+
   it("starts nothing once its signal has aborted", async () => {
     const h = buildCompilerHarness(makeFakeExec);
     // An exec that would finish at once, so a compile that starts anyway returns.

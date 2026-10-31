@@ -102,6 +102,20 @@ export interface LockfileCompiler {
   ): Promise<Result<string, LockfileCompileError>>;
 }
 
+/**
+ * How every dependency script — the register-time compile, the populate and
+ * the reap — runs inside the skills image: from `/`, with uv's configuration
+ * discovery off. Tasks on a warm worker can write `$HOME`, the image's working
+ * directory, so uv would otherwise read a `uv.toml`, `pyproject.toml` or
+ * `.python-version` planted there, and a `~/.config/uv/uv.toml` or
+ * `~/.config/uv/.python-version` from any cwd, and could build the venv a
+ * later task runs in on another interpreter or index.
+ */
+export const DEPENDENCY_EXEC_OPTIONS = {
+  workingDir: "/",
+  env: { UV_NO_CONFIG: "1" },
+} as const satisfies ExecOptions;
+
 const DEFAULT_COMPILE_RESOURCE_LIMITS: Required<ResourceLimits> = {
   cpus: 1,
   memory_bytes: 512 * 1024 * 1024,
@@ -192,7 +206,7 @@ export function makeSandboxLockfileCompiler(
         // the same flag — documented in `design/skills.md`.
         const handle = await session.execStreaming(
           ["uv", "pip", "compile", "--generate-hashes", "--no-header", "--quiet", "-"],
-          { attachStdin: true, timeoutMs, ...(signal && { signal }) },
+          { ...DEPENDENCY_EXEC_OPTIONS, attachStdin: true, timeoutMs, ...(signal && { signal }) },
         );
         started = handle;
         if (!handle.stdin) {
@@ -290,19 +304,6 @@ const DEFAULT_POPULATE_TIMEOUT_MS = 180_000;
  * run instead.
  */
 export const PYTHON_ABI_TAG_COMMAND = "python3 -I -m cogmo_skills_runtime.abi";
-
-/**
- * How the populate and reap scripts run inside a worker's image: from `/`,
- * with uv's configuration discovery off. Tasks on a warm worker can write
- * `$HOME`, the image's working directory, so uv would otherwise read a
- * `uv.toml`, `pyproject.toml` or `.python-version` planted there, and a
- * `~/.config/uv/uv.toml` or `~/.config/uv/.python-version` from any cwd, and
- * could build the venv a later task runs in on another interpreter or index.
- */
-export const DEPENDENCY_EXEC_OPTIONS = {
-  workingDir: "/",
-  env: { UV_NO_CONFIG: "1" },
-} as const satisfies ExecOptions;
 
 /**
  * Shell program that the populator invokes inside the worker

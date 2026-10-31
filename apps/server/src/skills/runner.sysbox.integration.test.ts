@@ -360,6 +360,20 @@ async def run(inputs, ctx):
     return {"host": socket.gethostname()}
 `;
 
+/**
+ * Plants a project in `$HOME`, the image's working directory, whose
+ * `requires-python` no interpreter meets. uv reads it from the cwd even with
+ * configuration discovery off, so only a populate run elsewhere ignores it.
+ */
+const PLANT_PROJECT_BODY = `
+import os, socket
+
+async def run(inputs, ctx):
+    with open(os.path.join(os.path.expanduser("~"), "pyproject.toml"), "w") as f:
+        f.write('[project]\\nname = "planted"\\nversion = "0"\\nrequires-python = ">=3.99"\\n')
+    return {"host": socket.gethostname()}
+`;
+
 /** The planting task's output: the container it ran in. */
 const HostSchema = z.object({ host: z.string() });
 
@@ -748,6 +762,50 @@ async def run(inputs, ctx):
       // Its venv is populated on the worker the planting task ran on.
       const populated = (
         await runner.invoke({ name: "tier2-idna-host", inputs: {}, runAs: RUN_AS })
+      )._unsafeUnwrap();
+      assertStatus(populated, "success");
+      const { host } = HostSchema.parse(planted.output);
+      expect(populated.output, JSON.stringify(populated)).toEqual({ host, version: "3.10" });
+    } finally {
+      await runner.shutdown();
+      await docker
+        .getVolume(depsCacheVolumeName)
+        .remove()
+        .catch(() => {});
+    }
+  }, 180_000);
+
+  it("a populate ignores a project a task planted in its working directory", async () => {
+    const depsCacheVolumeName = `cogmo-skills-test-deps-${randomUUID()}`;
+    const runner = await SkillRunnerImpl.create({
+      runInTx: tx,
+      store: skillStore,
+      secretsStore: stubSecrets(),
+      sandbox,
+      tier2Image: SKILLS_IMAGE,
+      userTimezone: "UTC",
+      defaultRunAs: DEFAULT_RUN_AS,
+      depsCacheVolumeName,
+    });
+    try {
+      await runner.__registerForTests({
+        name: "tier2-plant-project",
+        manifestSource: containerManifest("tier2-plant-project"),
+        body: PLANT_PROJECT_BODY,
+      });
+      await runner.__registerForTests({
+        name: "tier2-idna-project",
+        manifestSource: depsManifest("tier2-idna-project"),
+        body: IDNA_HOST_BODY,
+        lockfileContents: IDNA_LOCKFILE,
+      });
+
+      const planted = (
+        await runner.invoke({ name: "tier2-plant-project", inputs: {}, runAs: RUN_AS })
+      )._unsafeUnwrap();
+      assertStatus(planted, "success");
+      const populated = (
+        await runner.invoke({ name: "tier2-idna-project", inputs: {}, runAs: RUN_AS })
       )._unsafeUnwrap();
       assertStatus(populated, "success");
       const { host } = HostSchema.parse(planted.output);
