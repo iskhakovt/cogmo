@@ -21,7 +21,9 @@ COPY packages/contracts/package.json packages/contracts/
 # `pmOnFail: ignore` lets pnpm run whatever version it is, so the install first
 # checks it against packageManager.
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
-    test "pnpm@$(pnpm --version)" = "$(node -p "require('./package.json').packageManager.split('+')[0]")" \
+    have="pnpm@$(pnpm --version)" \
+ && want="$(node -p "require('./package.json').packageManager.split('+')[0]")" \
+ && if [ "$have" != "$want" ]; then echo "$have does not match packageManager $want" >&2; exit 1; fi \
  && pnpm install --frozen-lockfile
 COPY apps/server/tsconfig.json apps/server/tsup.config.ts apps/server/
 COPY apps/server/src/ apps/server/src/
