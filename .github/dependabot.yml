@@ -11,16 +11,17 @@ updates:
     # the default `dependencies` + ecosystem labels would cost a CI run
     # apiece. Nothing reads them; the `chore(deps)` prefix marks these PRs.
     labels: []
-    # Wait 7 days after a release before bumping. pnpm enforces a 24h
-    # minimumReleaseAge soak at install time, so Dependabot's default
-    # (bump the instant a version is published) produces lockfiles that
-    # fail `pnpm install --frozen-lockfile` whenever a release is fresh.
-    # 7 days clears that gate with margin and gives a real soak window.
-    # Applies to version-updates only; security updates are exempt. Dependabot
-    # passes it to pnpm as a non-strict `minimum-release-age`, so a version
-    # update re-resolves any lockfile entry under 7 days old to an older
-    # release — a freshly landed security patch included. Floor such a patch
-    # in `overrides:` (pnpm-workspace.yaml).
+    # Wait 7 days after a release before bumping: the soak window, and the
+    # same `minimumReleaseAge` pnpm-workspace.yaml holds every install to and
+    # re-checks the lockfile against. Keep the two equal; a shorter cooldown
+    # opens PRs whose `pnpm install --frozen-lockfile` fails.
+    # Applies to version-updates only; security updates are exempt, so a
+    # security PR whose patch is under 7 days old needs a
+    # `minimumReleaseAgeExclude` entry before its install passes. Dependabot
+    # passes the cooldown to pnpm as a non-strict `minimum-release-age`, so a
+    # version update re-resolves any lockfile entry under 7 days old to an
+    # older release — a freshly landed security patch included. Floor such a
+    # patch in `overrides:` (pnpm-workspace.yaml).
     cooldown:
       default-days: 7
     # `@types/node` tracks the LOWEST Node major we support, not the newest:

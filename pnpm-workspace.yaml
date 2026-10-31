@@ -16,7 +16,8 @@ allowBuilds:
 #
 # A floor also holds a security patch younger than Dependabot's `cooldown`,
 # which the next version update would otherwise resolve below
-# (.github/dependabot.yml).
+# (.github/dependabot.yml); until it is 7 days old it also needs a
+# `minimumReleaseAgeExclude` entry.
 #
 # Both bounds are load-bearing: unbounded, `fast-uri >=3.1.6` resolves to 4.1.4
 # against ajv's `^3.0.1`, and a bare `<4.13.5` selector would drag a hono 3.x
@@ -38,13 +39,24 @@ overrides:
   # leaves `*` one candidate. Move it with apps/server's @types/node.
   "@types/ssh2>@types/node": "^26.6.6"
 
-# The Hindsight client is a first-party dependency (we contribute upstream and
-# pin the server to the matching image), so the supply-chain soak that guards
-# against unknown third-party same-day releases doesn't apply — track its
-# releases immediately. Bump in lockstep with the hindsight-api image pins in
-# apps/server/dev/containers.ts and cogmo.hindsightCompat.
+# Every pnpm install, local and in CI, resolves to releases at least 7 days old,
+# the soak Dependabot's `cooldown` waits out, and re-checks each lockfile entry
+# against it. Non-strict: when nothing that old is in range, as for a fresh
+# security patch, resolution takes the younger release instead of failing, so
+# Dependabot's security updates still open their PRs; the lockfile check then
+# fails until the release has an exclude here. Exclude a temporary release by
+# `name@version` and drop it once it is 7 days old.
+minimumReleaseAge: 10080
+minimumReleaseAgeStrict: false
 minimumReleaseAgeExclude:
-  - '@vectorize-io/hindsight-client@1.1.0'
+  # Standing: the Hindsight client is first-party (we contribute upstream and
+  # pin the server to the matching image), so the soak that guards against
+  # unknown third-party releases doesn't apply. Bump in lockstep with the
+  # hindsight-api image pins in apps/server/dev/containers.ts and
+  # cogmo.hindsightCompat.
+  - "@vectorize-io/hindsight-client"
+  - "@types/node@26.6.6" # 7 days old on 2026-11-04
+  - "follow-redirects@1.16.2" # security patch (#721), 7 days old on 2026-11-01
 
 # Keeps pnpm-lock.yaml a single YAML document. Under the default `download`,
 # pnpm 12 prepends an environment document recording itself, and GitHub's
