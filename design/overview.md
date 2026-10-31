@@ -41,7 +41,7 @@ Month 6 should be qualitatively different from month 1.
 | Use case | Method | Cost |
 |-|-|-|
 | Interactive (Telegram) | Anthropic SDK, per-token | ~$80-200/mo (Sonnet) |
-| Background (extraction, evolution, scheduled turns) | Configured API provider, per-token | Small next to interactive |
+| Background (extraction, evolution, scheduled turns) | Configured API provider | Per-token |
 | Coding delegation | `claude -p` headless in a sandbox | $0 (subscription) |
 | Local sub-tasks (future, Mac Mini tier) | Ollama | $0 after hardware |
 
