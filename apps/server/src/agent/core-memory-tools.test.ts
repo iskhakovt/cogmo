@@ -182,6 +182,12 @@ describe("core_memory_read", () => {
 
     expect(result).toContain("No core memory blocks");
   });
+
+  it("describes its result as the prompt's rendering, escapes and all", () => {
+    expect(coreMemoryRead.description).not.toContain("raw content");
+    expect(coreMemoryRead.description).toContain("as your system prompt shows them");
+    expect(coreMemoryRead.description).toContain("core_memory_update removes the backslash");
+  });
 });
 
 describe("core_memory_update routing", () => {

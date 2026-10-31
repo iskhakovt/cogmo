@@ -84,8 +84,10 @@ function writtenText(key: string, written: CoreMemoryWrite): string {
 export const coreMemoryRead = defineTool({
   name: "core_memory_read",
   description:
-    "Read all core memory blocks. These are already visible in your system prompt, " +
-    "but use this tool if you need to inspect the raw content or check what blocks exist.",
+    "Read all core memory blocks as your system prompt shows them, to check what blocks " +
+    "exist and what they hold. A heading or closing tag inside a block shows with a " +
+    "backslash; core_memory_update removes the backslash, so a block copied from here saves " +
+    "as it was.",
   // Durable: re-executed on a later step boundary after a same-turn
   // `core_memory_update`, a non-durable handler would record blocks the model
   // never saw.

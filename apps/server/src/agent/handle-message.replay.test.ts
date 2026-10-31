@@ -1334,7 +1334,7 @@ describe("handle-message — replay equality", () => {
     );
 
     expect(sent).toContain('"text":"EPOCH PROMPT"');
-    expect(sent).toContain("<core_memory_updates>");
+    expect(sent).toContain("<core_memory_updates");
     expect(sent).toContain("earlier-signature");
   });
 });

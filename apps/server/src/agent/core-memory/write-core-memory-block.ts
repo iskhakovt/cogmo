@@ -3,6 +3,7 @@ import * as R from "remeda";
 import { match } from "ts-pattern";
 import type { Transaction, Transactor } from "../../db/index.js";
 import { coreMemoryEdits } from "../../metrics.js";
+import { unescapeEnvelopeBlock } from "../envelope.js";
 import type { AgentStore, CoreMemoryUpsertOutcome } from "../store/index.js";
 import {
   type CoreMemoryScope,
@@ -47,14 +48,19 @@ type CoreMemoryWriteStore = Pick<
   "getCoreMemoryBlocks" | "upsertCoreMemoryBlock" | "deleteCoreMemoryBlock"
 >;
 
-/** Write one block where the turn's scope sends it (design/memory.md → Behaviour by Profile). */
+/**
+ * Write one block where the turn's scope sends it (design/memory.md →
+ * Behaviour by Profile), its content without the escapes rendering adds, so a
+ * block copied from the prompt stores as it was.
+ */
 export async function writeCoreMemoryBlock(
   deps: { runInTx: Transactor; agentStore: CoreMemoryWriteStore },
-  args: { userId: string; scope: CoreMemoryScope; key: string; content: string },
+  input: { userId: string; scope: CoreMemoryScope; key: string; content: string },
 ): Promise<Result<CoreMemoryWrite, CoreMemoryWriteError>> {
-  const target = resolveTarget(args.scope, args.key);
+  const target = resolveTarget(input.scope, input.key);
   if (target === null) return err({ code: "core_memory_unavailable" });
-  if (!isBlockKey(args.key)) return err({ code: "invalid_key", key: args.key });
+  if (!isBlockKey(input.key)) return err({ code: "invalid_key", key: input.key });
+  const args = { ...input, content: unescapeEnvelopeBlock(input.content) };
   if (target.kind === "override") {
     const { profileClass } = target;
     const { write, change } = await deps.runInTx((tx) =>

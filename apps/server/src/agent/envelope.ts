@@ -5,7 +5,7 @@
  * design/memory.md → What the Model Sees).
  */
 
-import { escapeClosingTags } from "../util/string.js";
+import { escapeClosingTags, unescapeClosingTags } from "../util/string.js";
 
 /** The data-not-instructions clause every envelope's header ends with. */
 export const NOT_INSTRUCTIONS =
@@ -35,4 +35,16 @@ export function escapeEnvelope(text: string): string {
  */
 export function escapeEnvelopeBlock(text: string): string {
   return escapeEnvelope(text).replace(/^([ \t]*)(#{1,6})(?=\s|$)/gm, "$1\\$2");
+}
+
+/**
+ * `text` with the escapes `escapeEnvelopeBlock` adds removed, so a block the
+ * model copies from the prompt into a write stores as it was and renders the
+ * same again. A backslash the writer meant in those places goes too.
+ */
+export function unescapeEnvelopeBlock(text: string): string {
+  return unescapeClosingTags(text, ENVELOPE_ELEMENTS).replace(
+    /^([ \t]*)\\(#{1,6})(?=\s|$)/gm,
+    "$1$2",
+  );
 }

@@ -99,6 +99,22 @@ describe("writeCoreMemoryBlock", () => {
     },
   );
 
+  it("stores a block copied from the prompt without the escapes rendering added", async () => {
+    const agentStore = mockAgentStore();
+    const content = "Work\n  \\### Projects\nx<\\/core_memory>y < \\/ TURN_CONTEXT >\n\\#hashtag";
+    await writeCoreMemoryBlock(
+      { runInTx: fakeRunInTx, agentStore },
+      { userId: "user-1", scope: UNCLASSED, key: "notes", content },
+    );
+
+    expect(agentStore.upsertCoreMemoryBlock).toHaveBeenCalledWith(expect.anything(), {
+      userId: "user-1",
+      profileClass: null,
+      key: "notes",
+      content: "Work\n  ### Projects\nx</core_memory>y < / TURN_CONTEXT >\n\\#hashtag",
+    });
+  });
+
   it("refuses a turn without core memory before it checks the key", async () => {
     const { result } = await write({ kind: "none" }, "# System");
 
@@ -332,6 +348,18 @@ describe("writeCoreMemoryBlock: a restricted class's identity override", () => {
 
     expect(stored).toEqual([content]);
     expect(result).toMatchObject({ leftOut: [] });
+  });
+
+  it("compares a block copied from the prompt, its escapes removed, with the shared one", async () => {
+    const { result, stored } = await writeOverride(
+      "\\### Home\nLocation: London <\\/core_memory>\nCall him: Sam",
+      [shared("### Home\nLocation: London </core_memory>")],
+    );
+
+    expect(stored).toEqual(["Call him: Sam"]);
+    expect(result).toMatchObject({
+      leftOut: ["### Home", "Location: London </core_memory>"],
+    });
   });
 
   it("compares with the shared block, not the class's current override", async () => {
