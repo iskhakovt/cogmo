@@ -45,9 +45,11 @@ if (process.env.OTEL_EXPORTER_OTLP_ENDPOINT && process.env.OTEL_SDK_DISABLED !==
     // query, before anything is exported. Log lines get the same
     // redaction in `logger.ts`, ahead of instrumentation-pino's log export.
     traceExporter: new RedactingSpanExporter(new OTLPTraceExporter()),
-    metricReader: new PeriodicExportingMetricReader({
-      exporter: new OTLPMetricExporter(),
-    }),
+    metricReaders: [
+      new PeriodicExportingMetricReader({
+        exporter: new OTLPMetricExporter(),
+      }),
+    ],
     instrumentations: [
       new HttpInstrumentation(),
       new UndiciInstrumentation(),
