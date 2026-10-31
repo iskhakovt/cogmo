@@ -6,7 +6,7 @@
     "useIgnoreFile": true
   },
   "files": {
-    "includes": ["**", "!apps/server/test/fixtures", "!design/web-ui/mockups"]
+    "includes": ["**", "!apps/server/test/fixtures", "!design/web-ui/mockups", "!pnpm-lock.yaml"]
   },
   "css": {
     "parser": {
@@ -14,11 +14,6 @@
     }
   },
   "markdown": {
-    "formatter": {
-      "enabled": false
-    }
-  },
-  "yaml": {
     "formatter": {
       "enabled": false
     }
