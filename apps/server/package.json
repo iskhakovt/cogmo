@@ -5,7 +5,7 @@
   "license": "MIT",
   "type": "module",
   "cogmo": {
-    "hindsightCompat": ">=1.0.0 <1.1.0"
+    "hindsightCompat": ">=1.1.0 <1.2.0"
   },
   "files": [
     "dist",
@@ -62,7 +62,7 @@
     "@orpc/contract": "1.16.0",
     "@orpc/server": "1.16.0",
     "@t3-oss/env-core": "^0.13.11",
-    "@vectorize-io/hindsight-client": "~1.0.0",
+    "@vectorize-io/hindsight-client": "~1.1.0",
     "ai": "^7.0.148",
     "ajv": "^8.20.0",
     "canonicalize": "5.1.0",
