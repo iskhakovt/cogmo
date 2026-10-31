@@ -23,3 +23,9 @@ export function escapeClosingTags(text: string, names: ReadonlyArray<string>): s
   const closing = new RegExp(`<(\\s*)\\/(\\s*(?:${names.join("|")}))`, "gi");
   return text.replace(closing, "<$1\\/$2");
 }
+
+/** `text` with the backslash `escapeClosingTags` puts before each named closing tag's slash removed. */
+export function unescapeClosingTags(text: string, names: ReadonlyArray<string>): string {
+  const escaped = new RegExp(`<(\\s*)\\\\\\/(\\s*(?:${names.join("|")}))`, "gi");
+  return text.replace(escaped, "<$1/$2");
+}

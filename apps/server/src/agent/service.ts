@@ -13,8 +13,8 @@ import type { SkillsService } from "../skills/skills-service.js";
 import type { CodingService } from "./coding/service.js";
 import type { CoreMemoryView } from "./core-memory/scope.js";
 import type {
-  CoreMemoryUnavailable,
   CoreMemoryWrite,
+  CoreMemoryWriteError,
 } from "./core-memory/write-core-memory-block.js";
 import type { PipelinesService } from "./pipeline/pipelines-service.js";
 import type { SchedulingService } from "./scheduling/scheduling-service.js";
@@ -116,8 +116,11 @@ export interface Service {
   coreMemory: {
     /** The turn's scope and the blocks it sees, in the order they render. */
     get(): Promise<CoreMemoryView>;
-    /** Write a block where the turn's scope sends it (`writeCoreMemoryBlock`). */
-    update(key: string, content: string): Promise<Result<CoreMemoryWrite, CoreMemoryUnavailable>>;
+    /**
+     * Write a block where the turn's scope sends it, under a key
+     * `BLOCK_KEY_PATTERN` admits (`writeCoreMemoryBlock`).
+     */
+    update(key: string, content: string): Promise<Result<CoreMemoryWrite, CoreMemoryWriteError>>;
   };
   /**
    * Coding-delegation surface. Optional — only present when the sandbox

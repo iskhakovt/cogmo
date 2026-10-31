@@ -438,7 +438,7 @@ describe("prompt caching", () => {
     );
     expect(announcing).toEqual([3]);
     expect(expectDefined(stored[3], "turn 4 context").rendered).toMatch(
-      /<core_memory_updates>[\s\S]*Lisbon[\s\S]*<\/core_memory_updates>/,
+      /<core_memory_updates trusted="false">[\s\S]*Lisbon[\s\S]*<\/core_memory_updates>/,
     );
 
     // ── Recalled memories: shown by turn 2, never shown twice ──
