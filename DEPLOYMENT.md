@@ -17,7 +17,7 @@ Cogmo stores its application state in your Postgres; Hindsight stores its vector
 
 ### Hindsight image variant
 
-Hindsight publishes two image families: **slim** (`:latest-slim`, ~500 MB, no local ML) and **full** (`:latest`, ~9 GB, bundles PyTorch + embedding/reranker models). Cogmo recommends **slim** for most deployments:
+Hindsight publishes two image families: **slim** (`:<version>-slim`, ~500 MB, no local ML) and **full** (`:<version>`, ~9 GB, bundles PyTorch + embedding/reranker models). Pin a release inside `cogmo.hindsightCompat`, not a floating `latest`, which moves past the range on Hindsight's next minor and stops Cogmo booting. Hindsight migrates its database when it starts, and a migration can change data, so back the database up before moving to a new version. Cogmo recommends **slim** for most deployments:
 
 - You already configured an LLM provider for Cogmo's main loop. Reusing that same OpenAI-/OpenRouter-/Cohere-compatible key for Hindsight's embeddings and reranker costs a few cents per month at personal scale.
 - The image is ~18× smaller, cold-start is seconds instead of a minute, and idle RAM stays under 500 MB.
