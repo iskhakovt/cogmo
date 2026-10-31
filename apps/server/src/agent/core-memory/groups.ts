@@ -4,7 +4,8 @@
  * Sees).
  */
 
-import type { CoreMemoryView, ScopedCoreMemoryBlock } from "./scope.js";
+import { escapeEnvelope, escapeEnvelopeBlock } from "../envelope.js";
+import { type CoreMemoryView, isBlockKey, type ScopedCoreMemoryBlock } from "./scope.js";
 
 const SHARED_GROUP = "Shared by every persona:";
 
@@ -47,4 +48,21 @@ export function formatBlockGroups(
   return groups
     .map(({ lead, blocks }) => (lead === null ? format(blocks) : `${lead}\n\n${format(blocks)}`))
     .join("\n\n");
+}
+
+/**
+ * Blocks as enveloped data, each under a heading of its key. A key
+ * `BLOCK_KEY_PATTERN` admits is the bare heading, so a key copied from the
+ * prompt into a tool call is the key; a stored key the Service would refuse
+ * renders as a quoted JSON string, one line. Content renders with its
+ * headings and closing tags escaped.
+ */
+export function formatBlocks(blocks: ReadonlyArray<ScopedCoreMemoryBlock>): string {
+  return blocks
+    .map((b) => `## ${formatKey(b.key)}\n${escapeEnvelopeBlock(b.content)}`)
+    .join("\n\n");
+}
+
+function formatKey(key: string): string {
+  return isBlockKey(key) ? key : escapeEnvelope(JSON.stringify(key));
 }

@@ -122,7 +122,7 @@ describe("sweepRepo", () => {
     // Backdate to 8 days ago.
     const eightDaysAgo = new Date(Date.now() - 8 * 24 * 3600 * 1000);
     await db.execute(
-      sql`UPDATE coding_tasks SET created_at = ${eightDaysAgo} WHERE id = ${oldTask.id}`,
+      sql`UPDATE coding_tasks SET created_at = ${eightDaysAgo}, plan_approved_at = ${eightDaysAgo} WHERE id = ${oldTask.id}`,
     );
 
     const oct = fakeOctokit([`refs/heads/cogmo/run/${oldTask.id}`]);
@@ -167,6 +167,81 @@ describe("sweepRepo", () => {
     expect(result.deleted).toBe(0);
     expect(result.skipped).toBe(1);
     expect(oct.calls.deleteRef).not.toHaveBeenCalled();
+  });
+
+  it("keeps a failed task's branch for 7 days from approval, however long the plan waited at the gate", async () => {
+    const repo = await seedRepo();
+    const task = await insertTaskWithStatus(repo.id, "failed");
+    const tenDaysAgo = new Date(Date.now() - 10 * 24 * 3600 * 1000);
+    const oneDayAgo = new Date(Date.now() - 24 * 3600 * 1000);
+    await db.execute(
+      sql`UPDATE coding_tasks SET created_at = ${tenDaysAgo}, plan_approved_at = ${oneDayAgo} WHERE id = ${task.id}`,
+    );
+
+    const oct = fakeOctokit([`refs/heads/cogmo/run/${task.id}`]);
+    const result = await sweepRepo(
+      {
+        runInTx: tx,
+        store,
+        secretsStore: fakeSecretsStore(),
+        octokitFactory: oct.factory as never,
+      },
+      repo.id,
+      stepRun,
+    );
+
+    expect(result).toEqual({ repoId: repo.id, deleted: 0, skipped: 1, errors: 0 });
+    expect(oct.calls.deleteRef).not.toHaveBeenCalled();
+  });
+
+  it("deletes a failed task's branch once 7 days have passed since approval", async () => {
+    const repo = await seedRepo();
+    const task = await insertTaskWithStatus(repo.id, "failed");
+    const tenDaysAgo = new Date(Date.now() - 10 * 24 * 3600 * 1000);
+    const eightDaysAgo = new Date(Date.now() - 8 * 24 * 3600 * 1000);
+    await db.execute(
+      sql`UPDATE coding_tasks SET created_at = ${tenDaysAgo}, plan_approved_at = ${eightDaysAgo} WHERE id = ${task.id}`,
+    );
+
+    const oct = fakeOctokit([`refs/heads/cogmo/run/${task.id}`]);
+    const result = await sweepRepo(
+      {
+        runInTx: tx,
+        store,
+        secretsStore: fakeSecretsStore(),
+        octokitFactory: oct.factory as never,
+      },
+      repo.id,
+      stepRun,
+    );
+
+    expect(result).toEqual({ repoId: repo.id, deleted: 1, skipped: 0, errors: 0 });
+  });
+
+  it("falls back to created_at for a failed task that never reached approval", async () => {
+    const repo = await seedRepo();
+    // `failed` from `queued`: `plan_approved_at` stays null.
+    const task = await insertTaskWithStatus(repo.id, "failed");
+    const eightDaysAgo = new Date(Date.now() - 8 * 24 * 3600 * 1000);
+    await db.execute(
+      sql`UPDATE coding_tasks SET created_at = ${eightDaysAgo} WHERE id = ${task.id}`,
+    );
+    const row = await tx((trx) => store.getTask(trx, task.id));
+    expect(row?.planApprovedAt).toBeNull();
+
+    const oct = fakeOctokit([`refs/heads/cogmo/run/${task.id}`]);
+    const result = await sweepRepo(
+      {
+        runInTx: tx,
+        store,
+        secretsStore: fakeSecretsStore(),
+        octokitFactory: oct.factory as never,
+      },
+      repo.id,
+      stepRun,
+    );
+
+    expect(result).toEqual({ repoId: repo.id, deleted: 1, skipped: 0, errors: 0 });
   });
 
   it("never sweeps non-terminal tasks regardless of age (user owns stuck approvals)", async () => {
@@ -237,7 +312,7 @@ describe("sweepRepo", () => {
     const taskB = await insertTaskWithStatus(repo.id, "pr_open");
     const eightDaysAgo = new Date(Date.now() - 8 * 24 * 3600 * 1000);
     await db.execute(
-      sql`UPDATE coding_tasks SET created_at = ${eightDaysAgo} WHERE id IN (${taskA.id}, ${taskB.id})`,
+      sql`UPDATE coding_tasks SET created_at = ${eightDaysAgo}, plan_approved_at = ${eightDaysAgo} WHERE id IN (${taskA.id}, ${taskB.id})`,
     );
 
     // First delete throws a non-404/422 error (e.g. transient 502).
@@ -348,7 +423,7 @@ describe("sweepRepo", () => {
     const taskB = await insertTaskWithStatus(repo.id, "pr_open");
     const eightDaysAgo = new Date(Date.now() - 8 * 24 * 3600 * 1000);
     await db.execute(
-      sql`UPDATE coding_tasks SET created_at = ${eightDaysAgo} WHERE id IN (${taskA.id}, ${taskB.id})`,
+      sql`UPDATE coding_tasks SET created_at = ${eightDaysAgo}, plan_approved_at = ${eightDaysAgo} WHERE id IN (${taskA.id}, ${taskB.id})`,
     );
 
     const oct = fakeOctokit([
@@ -380,24 +455,34 @@ describe("sweepRepo", () => {
     expect(result.errors).toBe(0); // 404/422 are NOT errors
   });
 
-  it("replays the full rows an earlier build memoized for load-repo and load-tasks", async () => {
-    // An earlier build returned whole rows from both steps; a run in flight
-    // replays them, `Date`s already turned to ISO strings by the round-trip.
+  it("replays an earlier build's full-row load-repo memo and reads retention past a load-tasks memo", async () => {
+    // An earlier build returned the whole repo row from `load-repo` and the
+    // task rows from `load-tasks`; a run in flight replays them, `Date`s
+    // already turned to ISO strings by the round-trip.
     const repo = await seedRepo();
     const oldTask = await insertTaskWithStatus(repo.id, "pr_open");
     const recentTask = await insertTaskWithStatus(repo.id, "failed");
     const eightDaysAgo = new Date(Date.now() - 8 * 24 * 3600 * 1000);
     await db.execute(
-      sql`UPDATE coding_tasks SET created_at = ${eightDaysAgo} WHERE id = ${oldTask.id}`,
+      sql`UPDATE coding_tasks SET created_at = ${eightDaysAgo}, plan_approved_at = ${eightDaysAgo} WHERE id = ${oldTask.id}`,
     );
     const tasks = await tx((trx) => store.getTasksByIds(trx, [oldTask.id, recentTask.id]));
+    // Verdicts inverted from the committed rows: a body that read this memo
+    // would skip the old task and delete the recent one.
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 3600 * 1000);
+    const loadTasksMemo = tasks.map((t) =>
+      t.id === oldTask.id
+        ? { ...t, status: "executing" as const }
+        : { ...t, createdAt: thirtyDaysAgo, planApprovedAt: thirtyDaysAgo },
+    );
     const memo = {
-      "load-repo": JSON.parse(JSON.stringify(repo)),
-      "load-tasks": JSON.parse(JSON.stringify(tasks)),
+      // Another owner than the committed row's, so the delete shows the
+      // repo came from the memo.
+      "load-repo": JSON.parse(
+        JSON.stringify({ ...repo, remoteUrl: "https://github.com/memo-owner/example.git" }),
+      ),
+      "load-tasks": JSON.parse(JSON.stringify(loadTasksMemo)),
     };
-    // Only the memo knows these rows now: a body that re-ran would find no
-    // repo and return zeros.
-    await truncateAll(db);
 
     const step = fakeDurable({ memo });
     const oct = fakeOctokit([
@@ -415,9 +500,15 @@ describe("sweepRepo", () => {
       step.run,
     );
 
+    expect(step.stepIds()).toEqual([
+      "load-repo",
+      "list-run-refs",
+      "load-task-retention",
+      `delete-${oldTask.id}`,
+    ]);
     expect(result).toEqual({ repoId: repo.id, deleted: 1, skipped: 1, errors: 0 });
     expect(oct.calls.deleteRef).toHaveBeenCalledExactlyOnceWith({
-      owner: "owner",
+      owner: "memo-owner",
       repo: "example",
       ref: `heads/cogmo/run/${oldTask.id}`,
     });

@@ -3,7 +3,7 @@
 Architecture (see design/skills.md "Warm pool"):
 
   - The TS worker (`src/skills/worker-sysbox/worker.ts`) spawns this
-    module via `python3 -u -m cogmo_skills_runtime` once at create
+    module via `python3 -I -u -m cogmo_skills_runtime` once at create
     time. It announces `supervisor_ready` with its protocol version and
     stays alive across the worker's lifetime.
   - Two processes per task, both forked from the supervisor's clean

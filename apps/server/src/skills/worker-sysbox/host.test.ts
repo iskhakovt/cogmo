@@ -144,7 +144,7 @@ describe("runOnSysboxContainer", () => {
     // Lifecycle: ensureImage → create → exec → ... → exec.dispose → delete.
     expect(bundle.calls).toContain("ensureImage:python:3.14-slim");
     expect(bundle.calls).toContain("create:task-happy:python:3.14-slim");
-    expect(bundle.calls).toContain("exec:python3:-u");
+    expect(bundle.calls).toContain("exec:python3:-I");
     expect(bundle.calls).toContain("exec.dispose");
     expect(bundle.calls).toContain("delete:host-fake");
   });

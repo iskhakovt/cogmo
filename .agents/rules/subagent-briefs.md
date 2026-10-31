@@ -21,7 +21,7 @@ absence cost real work in this repo.
   `pnpm typecheck && pnpm lint` plus the specific test files touched — and say
   which suites *not* to run.
 - **Hands off shared bookkeeping.** "Do not touch git. Do not edit `todo.md`,
-  `PROGRESS.md`, or `changelog.d/`." Parallel agents each editing the changelog
+  `progress.md`, or `changelog.d/`." Parallel agents each editing the changelog
   produces conflicts; the orchestrator owns those files.
 - **Self-audit before reporting.** "Walk the `code` checklist in
   `.agents/skills/cogmo-review/reviewer.md` over your own diff (in Claude Code,

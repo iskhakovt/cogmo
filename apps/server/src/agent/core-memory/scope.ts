@@ -7,13 +7,30 @@ import type { AgentStore, Profile } from "../store/index.js";
 /** The one key a classed profile shares with every persona. */
 export const IDENTITY_BLOCK_KEY = "identity";
 
-/** The keys `core_memory_update` names; the model may pick any other. */
+/** The keys `core_memory_update` names; the model may pick any other `BLOCK_KEY_PATTERN` admits. */
 export const DOCUMENTED_BLOCK_KEYS: ReadonlyArray<string> = [
   IDENTITY_BLOCK_KEY,
   "user_profile",
   "active_projects",
   "preferences",
 ];
+
+/**
+ * What a block key written through the Service may be: one line that renders
+ * as a bare heading and can't read as markup (design/memory.md → What the
+ * Model Sees).
+ */
+export const BLOCK_KEY_PATTERN = /^[a-z][a-z0-9_-]{0,63}$/;
+
+/** `BLOCK_KEY_PATTERN` for the model, ending with an example. */
+export const BLOCK_KEY_RULE =
+  "A block key is lowercase letters, digits, _ and -, starting with a letter, at most 64 " +
+  "characters, such as preferences.";
+
+/** Whether `key` is one `BLOCK_KEY_PATTERN` admits. */
+export function isBlockKey(key: string): boolean {
+  return BLOCK_KEY_PATTERN.test(key);
+}
 
 /** A stored block with its scope: `profileClass` is null for the shared block and the unclassed bucket. */
 export interface ScopedCoreMemoryBlock {

@@ -9,7 +9,7 @@ Two modules carry the runtime, and `abi` names the skill venvs:
   `task_result`. Task processes execute `runner._main(...)` directly.
 
 The TS host (`src/skills/worker-sysbox/worker.ts`) spawns this package
-via `python3 -u -m cogmo_skills_runtime`. See `design/skills.md` ->
+via `python3 -I -u -m cogmo_skills_runtime`. See `design/skills.md` ->
 "Warm pool" for the protocol contract.
 
 Importing the package imports none of its modules. The host's populate

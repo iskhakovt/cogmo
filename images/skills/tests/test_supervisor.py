@@ -310,7 +310,7 @@ class TestActivateSkillVenv:
 class TestSupervisorImportSafety:
     """Importing the supervisor module shouldn't have side effects.
 
-    The TS host runs the supervisor via `python3 -u -m
+    The TS host runs the supervisor via `python3 -I -u -m
     cogmo_skills_runtime`, which executes `__main__.py`'s
     `main()` only when invoked. Tests + lint passes import the
     package; importing must not start the dispatch loop, fork, or
