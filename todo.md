@@ -65,7 +65,7 @@
 
 - [ ] `p2` Slice 1 — hoist facade logic into use cases, one PR per namespace (repos, profiles, conversations, coding, pipelines, scheduling, evolution, compartments, skills, mcp; chats and sessions stay transport-side). Namespaces become validate → use case → error map; ownership checks move into the use cases; PGlite tests per use case. Needs the `EventPublisher` port for the cooldown, coding and pipeline emits.
 - [ ] `p2` Slice 2 — `Principal` (branded class, fenced minters), `Transport.identify` by channel mode, `invalid_id` at every id argument, `OperatorFeatures` replacing the optional deps and the `*_disabled`/`*_unavailable` codes, coding/pipelines `identity_rejected` → `*_not_found`; contract, SPA and Telegram renderers in the same PR; factory churn; `identity.md` and `adapters.md` Transport section rewritten. (deep review 2026-10-27, L8)
-- [ ] `p2` Slice 3 — the split: `src/operator/` with `Operator`/`OperatorError`/`createOperator`, `Transport` shrunk to the channel contract, `AdapterDeps.operator`, `ownerPrincipal` wired into the CLI loaders, `command-service.ts` deleted, contracts renamed, AGENTS.md rows, namespace rule, glossary; one same-day PR. (deep review 2026-10-27, A4)
+- [ ] `p2` Slice 3 — the split: `src/operator/` with `Operator`/`OperatorError`/`createOperator`, `Transport` shrunk to the channel contract, `AdapterDeps.operator`, `ownerPrincipal` wired into the CLI loaders, contracts renamed, AGENTS.md rows, namespace rule, glossary; one same-day PR. (deep review 2026-10-27, A4)
 
 ### Memory & evolution
 
