@@ -3,7 +3,6 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { ok } from "neverthrow";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Database, Transactor } from "../../db/index.js";
@@ -18,7 +17,7 @@ import {
 import { DrizzleSandboxStore } from "../../sandbox/store/index.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import { expectDefined, expectOk } from "../../test/assertions.js";
-import { codingAuthSecrets, parkCodingTaskAt } from "../../test/coding-fixtures.js";
+import { codingAuthSecrets, fakeExecHandle, parkCodingTaskAt } from "../../test/coding-fixtures.js";
 import { makeStepRun, makeStepSendEvent } from "../../test/factories.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { DrizzleAgentStore } from "../store/index.js";
@@ -223,14 +222,22 @@ function fakeSandbox(opts: FakeContainerOpts = {}): FakeSandboxResult {
   };
 }
 
+/** Exits 0 with empty output; teardown's salvage drains both streams. */
 function noopExec(): ExecStreamingHandle {
-  return {
-    stdout: process.stdin,
-    stderr: process.stdin,
-    exited: Promise.resolve(ok({ exitCode: 0 })),
-    wait: async () => ({ exitCode: 0 }),
-    dispose: async () => {},
-  };
+  return fakeExecHandle({});
+}
+
+/** `create` calls for a session container: teardown's salvage container carries no Claude token. */
+function sessionCreates(calls: FakeSandboxResult["createCalls"]): FakeSandboxResult["createCalls"] {
+  return calls.filter((c) => c.env !== undefined);
+}
+
+/**
+ * The `deleteByTaskId` calls of a teardown that found a worktree: it reaps
+ * the task's containers before the salvage, and its salvage container after.
+ */
+function salvageReaps(taskId: string): string[] {
+  return [taskId, taskId];
 }
 
 function backendYielding(events: CodingEvent[]): CodingBackend {
@@ -525,7 +532,7 @@ describe("runCodingTask", () => {
       expect(result.failure?.reason).toBe("unexpected_error");
       expect(result.failure?.detail).toMatch(/claude_code_oauth_token/);
     }
-    expect(createCalls).toHaveLength(0);
+    expect(sessionCreates(createCalls)).toHaveLength(0);
   });
 
   async function seedUserTaskWithAutoapprove(
@@ -862,7 +869,7 @@ describe("runCodingTask", () => {
       "claude exit code 2",
     );
     expect((await tx((trx) => store.getTask(trx, task.id)))?.sessionId).toBe("sess-X");
-    expect(stopCalls).toEqual([task.id]);
+    expect(stopCalls).toEqual([...salvageReaps(task.id), task.id]);
     expect(planStream.failed).toHaveLength(1);
     expect(planStream.finalized).toEqual([]);
   });
@@ -900,7 +907,7 @@ describe("runCodingTask", () => {
       expect.objectContaining({ name: "coding/task/failed" }),
     );
     expect(planStream.failed).toEqual(["Task cancelled while planning."]);
-    expect(stopCalls).toEqual([task.id]);
+    expect(stopCalls).toEqual([...salvageReaps(task.id), task.id]);
   });
 
   it("empty plan with success exit → failed as no_plan_produced", async () => {
@@ -923,7 +930,7 @@ describe("runCodingTask", () => {
     const reloaded = await tx((trx) => store.getTask(trx, task.id));
     expect(reloaded?.status).toBe("failed");
     expect(reloaded?.failureReason).toBe("no_plan_produced");
-    expect(stopCalls).toEqual([task.id]);
+    expect(stopCalls).toEqual([...salvageReaps(task.id), task.id]);
   });
 
   it("createTaskContainer throws → status=failed, deleteByTaskId sweep fires", async () => {
@@ -950,7 +957,7 @@ describe("runCodingTask", () => {
     expect(result.failure?.reason).toBe("unexpected_error");
     expect(result.failure?.detail).toMatch(/docker daemon down/);
     expect((await tx((trx) => store.getTask(trx, task.id)))?.status).toBe("failed");
-    expect(stopCalls).toEqual([task.id]);
+    expect(stopCalls).toEqual([...salvageReaps(task.id), task.id]);
   });
 
   it("a failure before the plan streams still reaches the plan stream", async () => {
@@ -1031,8 +1038,8 @@ describe("runCodingTask", () => {
     });
     expect(result.status).toBe("failed");
     expect(result.failure?.detail).toMatch(/snapshot build_failed/);
-    expect(createCalls).toHaveLength(0);
-    expect(stopCalls).toEqual([task.id]);
+    expect(sessionCreates(createCalls)).toHaveLength(0);
+    expect(stopCalls).toEqual([...salvageReaps(task.id), task.id]);
   });
 
   it("worktree allocation failure → status=failed", async () => {

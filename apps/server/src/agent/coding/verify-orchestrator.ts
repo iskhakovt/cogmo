@@ -80,6 +80,8 @@ export interface VerifyOrchestratorDeps {
   octokitFactory?: (pat: string) => Octokit;
   /** Test-only — same role as `CodingOrchestratorDeps.loadCodingSandboxEnv`. */
   loadCodingSandboxEnv?: typeof loadCodingSandboxEnv;
+  /** Test-only — see `TeardownDeps.salvageScratchGitDir`. */
+  salvageScratchGitDir?: string;
 }
 
 export interface VerifyOrchestratorResult {
@@ -203,9 +205,7 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
   } catch (err) {
     run.log.error({ err }, "coding verify failed");
     const recorded = await failTaskFromCatch(run, deps, err);
-    await safeTeardownWorktree({
-      secretsStore: deps.secretsStore,
-      runInTx: deps.runInTx,
+    await safeTeardownWorktree(deps, {
       repo,
       taskId,
       worktreeAssignment: assignment,
@@ -347,9 +347,7 @@ async function failVerify(
     .with({ kind: "recorded" }, async (recordedFailure): Promise<VerifyOrchestratorResult> => {
       await run
         .stepRun("teardown-worktree", () =>
-          safeTeardownWorktree({
-            secretsStore: deps.secretsStore,
-            runInTx: deps.runInTx,
+          safeTeardownWorktree(deps, {
             repo: failure.repo,
             taskId: run.taskId,
             worktreeAssignment: failure.assignment,

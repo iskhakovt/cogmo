@@ -264,9 +264,7 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     run.log.error({ err }, "coding task failed");
     const recorded = await failTaskFromCatch(run, deps, err);
     if (assignment) {
-      await safeTeardownWorktree({
-        runInTx: deps.runInTx,
-        secretsStore: deps.secretsStore,
+      await safeTeardownWorktree(deps, {
         repo,
         taskId: run.taskId,
         worktreeAssignment: assignment,
@@ -387,9 +385,7 @@ async function tearDownFailedPlan(
   failure: TaskFailure,
 ): Promise<void> {
   await run.stepRun("teardown-worktree", () =>
-    safeTeardownWorktree({
-      runInTx: deps.runInTx,
-      secretsStore: deps.secretsStore,
+    safeTeardownWorktree(deps, {
       repo: args.repo,
       taskId: run.taskId,
       worktreeAssignment: args.assignment,
@@ -513,9 +509,7 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
   } catch (err) {
     run.log.error({ err }, "coding execute failed");
     const recorded = await failTaskFromCatch(run, deps, err);
-    await safeTeardownWorktree({
-      runInTx: deps.runInTx,
-      secretsStore: deps.secretsStore,
+    await safeTeardownWorktree(deps, {
       repo,
       taskId: run.taskId,
       worktreeAssignment: assignment,

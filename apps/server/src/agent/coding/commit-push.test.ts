@@ -1,12 +1,22 @@
-import { describe, expect, it, vi } from "vitest";
-import type {
-  ExecOptions,
-  ExecStreamingHandle,
-  LocalDockerSessionState,
-  SandboxSession,
+import { execFile, spawn } from "node:child_process";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { promisify } from "node:util";
+import { err, ok, type Result } from "neverthrow";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  type ExecExit,
+  type ExecFailure,
+  type ExecOptions,
+  type ExecStreamingHandle,
+  type LocalDockerSessionState,
+  type SandboxSession,
+  unwrapExit,
 } from "../../sandbox/index.js";
+import { assertKind, expectDefined } from "../../test/assertions.js";
 import { fakeExecHandle } from "../../test/coding-fixtures.js";
-import { runCommitAndPush } from "./commit-push.js";
+import { runCommitAndPush, runWipCommit, runWipPush } from "./commit-push.js";
 
 interface FakeExecResult {
   stdout?: string;
@@ -479,5 +489,374 @@ describe("runCommitAndPush", () => {
 
     expect(result.output).toContain("[cogmo: output truncated to last 8 KiB]");
     expect(result.output).not.toContain(pat.slice(10));
+  });
+});
+
+/**
+ * A container stand-in that runs each exec on the host, with `/workspace`
+ * mapped to `root` in the working directory and the argv: real git against a
+ * real clone, for the salvage's argv.
+ */
+function hostSession(root: string): Pick<SandboxSession, "execStreaming"> {
+  return {
+    execStreaming: async (cmd, opts) => {
+      const [file, ...args] = cmd;
+      if (file === undefined) throw new Error("empty argv");
+      const child = spawn(
+        file,
+        args.map((a) => (a === "/workspace" ? root : a)),
+        {
+          cwd: opts?.workingDir === "/workspace" ? root : opts?.workingDir,
+          env: { ...process.env, ...opts?.env },
+        },
+      );
+      const exited = new Promise<Result<ExecExit, ExecFailure>>((resolve) => {
+        child.on("error", (error) => resolve(err({ kind: "transport_failed", error })));
+        child.on("close", (code) => resolve(ok({ exitCode: code ?? 1 })));
+      });
+      return {
+        stdout: child.stdout,
+        stderr: child.stderr,
+        exited,
+        wait: () => exited.then(unwrapExit),
+        dispose: async () => {
+          child.kill();
+        },
+      };
+    },
+  };
+}
+
+describe("the WIP salvage against a real clone", () => {
+  const execFileP = promisify(execFile);
+  const branch = "cogmo/abc12345";
+  const taskId = "019d0000-0000-7000-8000-000000000001";
+  const wipRef = `refs/cogmo-wip/${taskId}`;
+  // A local remote takes no credential; the env only marks the push as the
+  // one exec that gets one.
+  const env = Object.freeze({ GIT_TERMINAL_PROMPT: "0" });
+  let dir: string;
+  let bare: string;
+  let clone: string;
+
+  beforeEach(async () => {
+    dir = mkdtempSync(join(tmpdir(), "cogmo-wip-salvage-"));
+    bare = join(dir, "bare.git");
+    clone = join(dir, "clone");
+    await execFileP("git", ["init", "--bare", bare]);
+    await execFileP("git", ["init", "--initial-branch=main", clone]);
+    writeFileSync(join(clone, "README.md"), "hello\n");
+    await execFileP("git", ["-C", clone, "add", "."]);
+    await execFileP("git", [
+      "-C",
+      clone,
+      "-c",
+      "user.email=t@t",
+      "-c",
+      "user.name=t",
+      "-c",
+      "commit.gpgsign=false",
+      "commit",
+      "-m",
+      "init",
+    ]);
+    await execFileP("git", ["-C", clone, "checkout", "-b", branch]);
+    await execFileP("git", ["-C", clone, "remote", "add", "origin", bare]);
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function commit() {
+    return runWipCommit({ container: hostSession(clone), worktreeDir: "/workspace", taskId });
+  }
+
+  function push(sha: string) {
+    return runWipPush({
+      container: hostSession(clone),
+      worktreeDir: "/workspace",
+      scratchGitDir: join(dir, "scratch.git"),
+      remoteUrl: bare,
+      taskId,
+      sha,
+      askpassEnv: env,
+    });
+  }
+
+  async function remoteRef(ref: string): Promise<string | null> {
+    try {
+      const { stdout } = await execFileP("git", ["--git-dir", bare, "rev-parse", "--verify", ref]);
+      return stdout.trim();
+    } catch {
+      return null;
+    }
+  }
+
+  async function head(): Promise<string> {
+    const { stdout } = await execFileP("git", ["-C", clone, "rev-parse", "HEAD"]);
+    return stdout.trim();
+  }
+
+  it("commits a dirty tree as wip, then pushes it to the per-task ref", async () => {
+    writeFileSync(join(clone, "in-progress.ts"), "// claude was here\n");
+
+    const committed = await commit();
+    assertKind(committed, "needs_push");
+    expect(committed.sha).toBe(await head());
+    const pushed = await push(committed.sha);
+
+    expect(pushed).toEqual({ kind: "pushed", wipRef, sha: committed.sha });
+    expect(await remoteRef(wipRef)).toBe(committed.sha);
+    const { stdout } = await execFileP("git", [
+      "--git-dir",
+      bare,
+      "log",
+      "-1",
+      "--format=%s",
+      wipRef,
+    ]);
+    expect(stdout.trim()).toBe(`wip: ${taskId}`);
+  });
+
+  it("reports a clean tree whose branch the remote-tracking ref already records", async () => {
+    await execFileP("git", ["-C", clone, "push", "origin", branch]);
+
+    expect(await commit()).toEqual({ kind: "clean" });
+  });
+
+  it("reports a never-pushed branch cut from a pushed tip as clean", async () => {
+    // The plan-failure shape: the task branch exists only locally, at the
+    // tip the clone came with, so nothing on it is missing from the remote.
+    await execFileP("git", ["-C", clone, "push", "origin", "main"]);
+
+    expect(await commit()).toEqual({ kind: "clean" });
+  });
+
+  it("reports a clean tree with commits no remote-tracking ref holds as needing a push, without a commit", async () => {
+    const before = await head();
+
+    expect(await commit()).toEqual({ kind: "needs_push", sha: before });
+    expect(await head()).toBe(before);
+  });
+
+  it("lands the same commit on the same ref when re-run after a push", async () => {
+    writeFileSync(join(clone, "in-progress.ts"), "// claude was here\n");
+    const first = await commit();
+    assertKind(first, "needs_push");
+    await push(first.sha);
+
+    const second = await commit();
+    assertKind(second, "needs_push");
+    expect(second.sha).toBe(first.sha);
+    expect(await push(second.sha)).toEqual({ kind: "pushed", wipRef, sha: first.sha });
+  });
+
+  it("runs none of the tree's hooks or its fsmonitor", async () => {
+    const marker = join(dir, "ran");
+    const hook = `#!/bin/sh\necho "$0" >> '${marker}'\nexit 0\n`;
+    for (const name of [
+      "pre-commit",
+      "prepare-commit-msg",
+      "commit-msg",
+      "post-commit",
+      "pre-push",
+    ]) {
+      writeFileSync(join(clone, ".git", "hooks", name), hook, { mode: 0o755 });
+    }
+    writeFileSync(join(dir, "fsmonitor"), hook, { mode: 0o755 });
+    await execFileP("git", ["-C", clone, "config", "core.fsmonitor", join(dir, "fsmonitor")]);
+    writeFileSync(join(clone, "in-progress.ts"), "// claude was here\n");
+
+    const committed = await commit();
+    assertKind(committed, "needs_push");
+    assertKind(await push(committed.sha), "pushed");
+
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it("pushes to the given URL whatever the tree's remotes and rewrites say", async () => {
+    await execFileP("git", ["-C", clone, "remote", "set-url", "origin", join(dir, "missing.git")]);
+    await execFileP("git", [
+      "-C",
+      clone,
+      "config",
+      `url.${join(dir, "elsewhere.git")}.insteadOf`,
+      bare,
+    ]);
+    const committed = await commit();
+    assertKind(committed, "needs_push");
+
+    expect(await push(committed.sha)).toEqual({ kind: "pushed", wipRef, sha: committed.sha });
+    expect(await remoteRef(wipRef)).toBe(committed.sha);
+  });
+
+  it("refuses to push a HEAD other than the one committed", async () => {
+    const result = await push("0123456789012345678901234567890123456789");
+
+    assertKind(result, "failed");
+    expect(result.stage).toBe("fetch");
+    expect(result.output).toMatch(/HEAD moved/);
+    expect(await remoteRef(wipRef)).toBeNull();
+  });
+
+  it("reports the failing stage when the push is refused", async () => {
+    const result = await runWipPush({
+      container: hostSession(clone),
+      worktreeDir: "/workspace",
+      scratchGitDir: join(dir, "scratch.git"),
+      remoteUrl: join(dir, "missing.git"),
+      taskId,
+      sha: await head(),
+      askpassEnv: env,
+    });
+
+    assertKind(result, "failed");
+    expect(result.stage).toBe("push");
+    expect(result.output).toMatch(/missing\.git/);
+  });
+
+  it("never lazy-fetches in the tree, whatever the tree's promisor and ssh settings", async () => {
+    // A tree posing as a partial clone, HEAD on a commit whose blob is gone:
+    // an upload-pack that lazy-fetches runs the tree's `core.sshCommand` to
+    // fetch it, while the PAT is readable. `GIT_NO_LAZY_FETCH=0` in the
+    // ambient env stands in for a git that lazy-fetches by default.
+    writeFileSync(join(clone, "secret.txt"), "gone\n");
+    await execFileP("git", ["-C", clone, "add", "secret.txt"]);
+    await execFileP("git", [
+      "-C",
+      clone,
+      "-c",
+      "user.email=t@t",
+      "-c",
+      "user.name=t",
+      "-c",
+      "commit.gpgsign=false",
+      "commit",
+      "-m",
+      "add",
+    ]);
+    const { stdout: blob } = await execFileP("git", ["-C", clone, "rev-parse", "HEAD:secret.txt"]);
+    const id = blob.trim();
+    rmSync(join(clone, ".git", "objects", id.slice(0, 2), id.slice(2)));
+    const marker = join(dir, "ssh-ran");
+    writeFileSync(join(dir, "ssh"), `#!/bin/sh\necho "$@" >> '${marker}'\nexit 1\n`, {
+      mode: 0o755,
+    });
+    for (const [key, value] of [
+      ["core.repositoryformatversion", "1"],
+      ["extensions.partialClone", "promisor"],
+      ["remote.promisor.url", "ssh://example.invalid/x.git"],
+      ["remote.promisor.promisor", "true"],
+      ["core.sshCommand", join(dir, "ssh")],
+      // A per-protocol allow in the tree outranks a bare `protocol.allow`.
+      ["protocol.ssh.allow", "always"],
+    ] as const) {
+      await execFileP("git", ["-C", clone, "config", key, value]);
+    }
+    vi.stubEnv("GIT_NO_LAZY_FETCH", "0");
+    try {
+      const result = await push(await head());
+
+      assertKind(result, "failed");
+      expect(result.stage).toBe("fetch");
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+});
+
+describe("runWipPush", () => {
+  it("reports a failed scratch-repo init", async () => {
+    const { container, calls } = fakeContainer({
+      init: { exitCode: 1, stderr: "fatal: cannot mkdir /tmp/cogmo-wip.git\n" },
+    });
+
+    const result = await runWipPush({
+      container,
+      worktreeDir: "/workspace",
+      scratchGitDir: "/tmp/cogmo-wip.git",
+      remoteUrl: "https://github.com/user/cogmo.git",
+      taskId: "t",
+      sha: "deadbeef",
+      askpassEnv,
+    });
+
+    expect(result).toEqual({
+      kind: "failed",
+      stage: "init",
+      output: expect.stringContaining("cannot mkdir"),
+    });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("reports a failed fetch from the tree, and pushes nothing", async () => {
+    const { container, calls } = fakeContainer({
+      init: {},
+      fetch: { exitCode: 128, stderr: "fatal: protocol error: bad pack header\n" },
+    });
+
+    const result = await runWipPush({
+      container,
+      worktreeDir: "/workspace",
+      scratchGitDir: "/tmp/cogmo-wip.git",
+      remoteUrl: "https://github.com/user/cogmo.git",
+      taskId: "t",
+      sha: "deadbeef",
+      askpassEnv,
+    });
+
+    expect(result).toEqual({
+      kind: "failed",
+      stage: "fetch",
+      output: expect.stringContaining("bad pack header"),
+    });
+    expect(calls.map((c) => c.args.includes("push"))).toEqual([false, false]);
+  });
+
+  it("gives the askpass env to the push alone, and every exec the salvage config", async () => {
+    const { container, calls } = fakeContainer({
+      init: {},
+      fetch: {},
+      "rev-parse": { stdout: "deadbeef\n" },
+      push: {},
+    });
+
+    await runWipPush({
+      container,
+      worktreeDir: "/workspace",
+      scratchGitDir: "/tmp/cogmo-wip.git",
+      remoteUrl: "https://github.com/user/cogmo.git",
+      taskId: "t",
+      sha: "deadbeef",
+      askpassEnv,
+    });
+
+    expect(calls).toHaveLength(4);
+    for (const call of calls) {
+      expect(call.args).toEqual(
+        expect.arrayContaining([
+          "maintenance.auto=false",
+          "core.hooksPath=/dev/null",
+          "core.fsmonitor=false",
+          "credential.helper=",
+          "--git-dir=/tmp/cogmo-wip.git",
+        ]),
+      );
+      const isPush = call.args.includes("push");
+      expect(call.env?.GIT_ASKPASS).toBe(isPush ? askpassEnv.GIT_ASKPASS : undefined);
+    }
+    const fetch = expectDefined(
+      calls.find((c) => c.args.includes("fetch")),
+      "fetch exec",
+    );
+    expect(fetch.env).toEqual({ GIT_NO_LAZY_FETCH: "1" });
+    expect(fetch.args).toEqual(
+      expect.arrayContaining([
+        "--no-recurse-submodules",
+        "--upload-pack=env GIT_NO_LAZY_FETCH=1 git -c protocol.allow=never -c protocol.ext.allow=never -c protocol.fd.allow=never -c protocol.file.allow=never -c protocol.git.allow=never -c protocol.http.allow=never -c protocol.https.allow=never -c protocol.ssh.allow=never -c protocol.ftp.allow=never -c protocol.ftps.allow=never upload-pack",
+      ]),
+    );
   });
 });

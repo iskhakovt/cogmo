@@ -26,7 +26,7 @@
  */
 
 import { execFile } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -36,6 +36,7 @@ import { ok } from "neverthrow";
 import type { StartedTestContainer } from "testcontainers";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
+import { z } from "zod";
 import { gitea as giteaContainer } from "../../../dev/containers.js";
 import type { Database, Transactor } from "../../db/index.js";
 import {
@@ -258,8 +259,11 @@ function fakeSandbox(opts: { worktreePath: string }): {
           env[k] = hostDir && containerDir ? rewrite(v, hostDir, containerDir) : v;
         }
       }
-      const args =
-        hostDir && containerDir ? cmd.map((a) => rewrite(a, hostDir, containerDir)) : [...cmd];
+      // `/workspace` as an argument too, not only as the working directory:
+      // the teardown salvage fetches from the tree by that path.
+      const args = cmd
+        .map((a) => (hostDir && containerDir ? rewrite(a, hostDir, containerDir) : a))
+        .map((a) => (a === "/workspace" ? opts.worktreePath : a));
 
       const { stdout, stderr, exitCode } = await execFileP(args[0] ?? "", args.slice(1), {
         cwd,
@@ -513,6 +517,9 @@ function makeDeps(opts: {
     devbaseImage: "ignored",
     defaultResourceLimits: { cpus: 1, memory_bytes: 1 << 30, pids: 64 },
     taskTtlMs: 60_000,
+    // The fake's "container" is the host, so the push stage's scratch repo
+    // goes in the test's own directory rather than the host's `/tmp`.
+    salvageScratchGitDir: join(workspaceRoot, "scratch.git"),
     octokitFactory: makeOctokitFactory({
       capture: opts.capture,
       ...(opts.failPr && { fail: opts.failPr }),
@@ -587,20 +594,70 @@ describe("verify orchestrator integration — gitea + scoped octokit", () => {
     ]);
   }, 120_000);
 
-  it("failure path: verify exit≠0 → status=failed, no branch pushed", async () => {
+  it("failure path: verify exit≠0 → status=failed, no branch pushed, WIP salvaged", async () => {
     const { taskId, branch } = await seedTask({ verifyCommand: "exit 7" });
+    // Uncommitted work the failure teardown has to salvage.
+    writeFileSync(join(worktreePath, "IN-PROGRESS.md"), "unfinished\n");
     const capture: CapturedPullsCreate[] = [];
     const deps = makeDeps({ capture });
     const inngestSend = vi.fn().mockResolvedValue(undefined);
+    const stepResults = new Map<string, unknown>();
+    const recordingStepRun: typeof stepRun = async (id, fn) => {
+      const value = await stepRun(id, fn);
+      stepResults.set(id, value);
+      return value;
+    };
 
     const result = await runCodingVerify({
       taskId,
       runId: "run-test",
       deps,
-      stepRun,
+      stepRun: recordingStepRun,
       stepSendEvent: makeStepSendEvent({ send: inngestSend }),
       inngest: { send: inngestSend },
     });
+
+    // The salvage ran end to end on real git: committed in the tree, fetched
+    // into the scratch repo, pushed to Gitea, and the tree removed.
+    const wipRef = `refs/cogmo-wip/${taskId}`;
+    const teardown = stepResults.get("teardown-worktree");
+    expect(teardown).toEqual({ kind: "wip_pushed_and_removed", wipRef, sha: expect.any(String) });
+    const { sha } = z.object({ sha: z.string() }).parse(teardown);
+    const authedUrl = `${giteaUrl}/${GITEA_USER}/${GITEA_REPO}.git`.replace(
+      "://",
+      `://${GITEA_USER}:${giteaPat}@`,
+    );
+    const { stdout: remote } = await execFileP("git", ["ls-remote", authedUrl, wipRef]);
+    expect(remote.trim()).toBe(`${sha}\t${wipRef}`);
+    const check = join(workspaceRoot, "check.git");
+    await execFileP("git", ["init", "--bare", "--quiet", check]);
+    await execFileP("git", [
+      "--git-dir",
+      check,
+      "fetch",
+      "--quiet",
+      authedUrl,
+      `${wipRef}:${wipRef}`,
+    ]);
+    const { stdout: subject } = await execFileP("git", [
+      "--git-dir",
+      check,
+      "log",
+      "-1",
+      "--format=%s",
+      wipRef,
+    ]);
+    expect(subject.trim()).toBe(`wip: ${taskId}`);
+    const { stdout: files } = await execFileP("git", [
+      "--git-dir",
+      check,
+      "show",
+      "--name-only",
+      "--format=",
+      wipRef,
+    ]);
+    expect(files).toContain("IN-PROGRESS.md");
+    expect(existsSync(worktreePath)).toBe(false);
 
     expect(result.status).toBe("failed");
     if (result.status === "failed") {

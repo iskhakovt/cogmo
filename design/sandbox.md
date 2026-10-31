@@ -15,7 +15,7 @@ Both paths offer:
 - **One abstraction for downstream code** — the orchestrator, coding tool, and skills runner code against `SandboxClient` / `SandboxSession`, not against a specific provider.
 - **Per-consumer images** — coding-delegation runs `cogmo/devbase` (with `claude-code` baked in); skills tier-2 runs `python:3.14-slim` (or a Cogmo-baked successor) by manifest. Image is per-session, not per-backend.
 
-Compatibility with existing tooling — testcontainers, `docker compose`, `docker buildx` — is preserved. On the local backend they spawn host-visible siblings through the Cogmo proxy. On managed backends they spawn provider-internal siblings; the provider's sandbox boundary is the policy boundary.
+On the local backend, tooling that drives Docker, such as testcontainers and `docker compose`, spawns host-visible siblings through the Cogmo proxy. Until the proxy inserts child rows (Proxy Design → Authorization boundary `[proposed]`), the reaper kills those siblings within a minute. Image builds are not supported there. On managed backends it spawns provider-internal siblings, and the provider's sandbox boundary is the policy boundary.
 
 A unified policy plane across both backend families is a non-goal. Policy lives where it can be enforced — Cogmo's Docker proxy on local, the provider's sandbox boundary on managed.
 
@@ -103,6 +103,14 @@ interface SessionSpec {
    */
   homeVolume?: HomeVolumeSpec;
   askpass?: AskpassMaterial;
+  /** Process env for the container (`CLAUDE_CODE_OAUTH_TOKEN`, …). Never host `process.env`. */
+  env?: Record<string, string>;
+  /**
+   * `[proposed]` Whether the session gets a Docker API proxy socket
+   * (Proxy Design → Which sessions get a socket). Required, so every
+   * caller states it.
+   */
+  dockerSocket: boolean;
 }
 
 interface SandboxSession {
@@ -247,7 +255,7 @@ Host daemon runs normally. Cogmo adds:
 
 1. **Container supervisor** — creates task containers directly against the host daemon with `HostConfig.Runtime = "sysbox-runc"` by default.
 2. **Docker API proxy** — per task container, Cogmo allocates a Unix socket at `${SANDBOX_PROXY_SOCKET_DIR}/<task-id>.sock` (default `/var/lib/cogmo/sockets/`, image-provisioned and chowned to the runtime user), mounted into the task container at `/var/run/docker.sock`.
-3. **Sibling-container spawn model** — when the task container (or its tooling) calls the proxy to create a child, the child is a *sibling* on the host daemon, not a truly nested container. The parent relationship lives in Cogmo's DB and in Docker labels. Proxy injects `HostConfig.Runtime = "sysbox-runc"` on children by default so every container in the tree is userns-isolated.
+3. **Sibling-container spawn model** — when the task container (or its tooling) calls the proxy to create a child, the child is a *sibling* on the host daemon, not a truly nested container. The parent relationship lives in Docker labels, and also in Cogmo's DB once the proxy inserts child rows (Proxy Design → Authorization boundary `[proposed]`). The proxy injects `HostConfig.Runtime = "sysbox-runc"` on children by default so every container in the tree is userns-isolated.
 
 Topology 2 — nested `dockerd` inside the task container — is deferred. Only added if a specific use case requires a private daemon (rare for personal scale).
 
@@ -277,7 +285,7 @@ containers (
   id               UUID v7 PK,
   docker_id        TEXT NOT NULL UNIQUE,            -- Docker's container ID
   parent_id        UUID REFERENCES containers(id),  -- null = created by Cogmo directly
-  root_task_id     UUID,                            -- denormalized, NO FK — not every container belongs to a coding task
+  root_task_id     UUID NOT NULL,                   -- denormalized, NO FK — not every container belongs to a coding task
   depth            INT NOT NULL,                    -- 0 = task container, 1+ = spawned by tooling
   image            TEXT NOT NULL,
   runtime          container_runtime NOT NULL,
@@ -295,7 +303,7 @@ containers (
 
 No exit code: Cogmo never observes one. A reap removes the container before anything inspects it, and a container the stale pass finds missing from the daemon took its exit code with it.
 
-Same pattern for `networks` and `volumes` tables — Docker objects Cogmo provisions or allows tooling to provision.
+`networks` and `volumes` have the same lineage columns and a `created | reaped` status. They hold the objects the proxy creates for a task (Proxy Design → Authorization boundary `[proposed]`), and nothing inserts them until then. `[proposed]` Both tables gain `reaped_reason sandbox_object_reaped_reason` with a CHECK that ties it to the status, and `volumes.docker_id` trades its UNIQUE for a partial unique index on live rows (Network and volume state machine).
 
 `parent_id` + `root_task_id` + `depth` computed at insert time from the parent row. No recursive CTE in the hot path.
 
@@ -327,73 +335,264 @@ Every container Cogmo creates or proxies gets these Docker labels:
 
 Labels are the **mirror**; Cogmo DB is **authoritative**. Labels enable orphan detection via `docker ps --filter label=cogmo.managed=true` and survive Cogmo restarts for reconciliation.
 
-### Proxy Design `[confirmed]`
+### Proxy Design
 
-Written in TS, lives in `src/sandbox/clients/local-docker/proxy/`. Single Node process. Listens on multiple Unix socket paths simultaneously — one per active task container. Socket path identifies the caller's parent.
+The proxy lives in `src/sandbox/proxy/` and runs inside `cogmo serve` `[confirmed]`. Each task gets one Unix socket, `${SANDBOX_PROXY_SOCKET_DIR}/<task-id>.sock`, bind-mounted at `/var/run/docker.sock` into that task's depth-0 container and nowhere else. The socket a connection arrives on is the caller's identity, so there are no tokens. A shared `http.Server` parses every request, `router.ts` classifies it, and `policy.ts` rewrites a create body. Both are pure.
 
-#### Intercepted endpoints
+#### Enforced today `[confirmed]`
 
-| Endpoint | Interception | Action |
+- `/swarm`, `/plugins`, `/nodes`, `/build`, `/session` and `/auth` are denied (403). The match runs after the path is percent-decoded and its dot-segments resolved.
+- `POST /containers/create` is denied for `HostConfig.Privileged`, `NetworkMode: "host"`, a host-path `Binds` or `Mounts` bind source, and eight `CapAdd` capabilities (`policy.ts:37-148`). A create that passes has its `Runtime`, `CgroupParent` and the five Cogmo labels overwritten and is forwarded.
+- Everything else is forwarded unchecked, under the raw `req.url` rather than the canonical path that was classified (`proxy/index.ts:270`, `:310`).
+- Exec start, attach, `logs`, `events` and `distribution` are raw-piped from the moment the request line has been replayed, without waiting for the daemon's `101`.
+- Every Local-Docker session gets a socket, skills tier-2 workers included.
+- A child gets no `containers` row, so the orphan pass kills it within a minute (Container state machine → Failure modes). That includes the children testcontainers or `docker compose` start.
+- The reaper's network and volume updates are unconditional (`reaper.ts:191`, `:213`).
+- `unregisterTask` drops the task's scope before closing its connections (`proxy/index.ts:143`). A request that arrives meanwhile on an open connection gets a 500.
+
+This is not an authorization boundary:
+
+- A task can inspect, exec into, archive, kill or list any container on the daemon. A sibling task's container binds include that task's proxy socket, worktree and askpass directory (`supervisor.ts:252-259`).
+- The create policy reads keys case-sensitively, so `hostconfig.privileged` passes. It strips a `CAP_` prefix case-sensitively before upper-casing (`policy.ts:139`), so `cap_sys_admin` becomes `CAP_SYS_ADMIN`, which is not in the deny set, and passes.
+- Several escapes pass the create policy entirely:
+  - `VolumesFrom` copies another container's binds, a sibling task's proxy socket included.
+  - `NetworkMode` and `PidMode` of `container:<id>` join another container's namespaces.
+  - `PidMode`, `IpcMode`, `UTSMode`, `UsernsMode` and `CgroupnsMode` of `host`, and `Devices`, `SecurityOpt` and `Sysctls`, are unchecked.
+  - Any named volume mounts, another task's `cogmo-task-home-<task-id>` included, and `GET /volumes` lists those names.
+- `/grpc`, BuildKit's gRPC endpoint, is missing from the deny list. It is blocked only because the daemon requires an upgrade there and the proxy's upgrade handler refuses routes it would forward.
+- A pipelined request after a raw-piped one reaches the daemon unchecked.
+
+The spec below replaces this.
+
+#### Authorization boundary `[proposed]`
+
+**Ownership.** A task owns the `containers` rows that carry its `root_task_id` and are not `reaped`: its depth-0 container, plus every child the proxy created for it (Child containers, below). The same rule covers `networks` and `volumes` rows in `created`. Ownership comes from the store on every request. Labels are only the mirror (Label Schema).
+
+A ref in a path or body (a full id, a unique prefix or a name) is resolved through the daemon (`GET /containers/{ref}/json`, `/networks/{ref}`, `/volumes/{name}`), checked against the rows, and rewritten to the full id, so a rename between the check and the forward cannot redirect the request. The default `bridge` network is identified by its resolved id, not its name, because the testcontainers port forwarder passes the id.
+
+Exec ids are kept in memory per task: the proxy records the id from each 201 to a `POST /containers/{id}/exec` sent through the task's socket. A task therefore cannot start or resize an exec that Cogmo created on its depth-0 container, even though inspect lists those ids. A process restart loses the set, which is harmless because the containers go with it (Crash Recovery).
+
+**Caps and cost.** A task holds at most 16 live children (`containers` rows at depth ≥ 1 in `starting` or `running`), 8 networks and 8 volumes in `created`, each child within the task's resource limits. A create past a cap is `denied`. Each count is read before the forward, so two concurrent creates can land one over the cap, which is benign at single-user scale (store-pattern.md → admission caps). Each container, exec, network or volume request costs one daemon lookup and one store read. A list costs one store read. A create costs one insert. A container create also costs one image inspect, plus one `GET /version` when it names a `platform`.
+
+**The forwarded request.** The proxy never forwards `req.url`. It forwards the canonical path it classified, with refs rewritten to full ids, plus the query, parsed and re-serialised.
+
+- A version prefix below `v1.44` is `denied`. A request with no prefix goes to the daemon without one.
+- `POST /containers/create` forwards the query keys `name` and `platform` and drops every other key. docker-modem copies every option into the query string as well as the body, so `Image=…&HostConfig=…` arrive as query keys; the daemon reads no create query key but those two.
+- `POST /images/create` needs a non-empty `fromImage`, forwards `tag` and `platform`, denies `fromSrc`, `repo`, `message` and `changes`, and drops any other key.
+- Other routes forward their parsed query. List `filters` pass through, because the responses are filtered anyway. A child `DELETE` always carries `v=true` (Lifecycle row).
+- What reaches the daemon is the re-serialised value the checks ran on, never the client's bytes. A JSON integer above 2^53 therefore arrives rounded, which is harmless for every allowlisted field.
+- A normal forward drops the hop-by-hop headers `Connection`, `Upgrade`, `Keep-Alive`, `TE`, `Trailer` and `Transfer-Encoding`, and Node re-frames the body.
+
+**Outcomes other than a forward** form a sealed union, `ProxyRejection`, which the HTTP edge maps to a status once:
+
+| Kind | Status | When |
 |-|-|-|
-| `POST /containers/create` | Full | Validate `HostConfig`, inject labels + runtime, insert row, forward |
-| `POST /containers/{id}/start` | Observe | Forward, update status + `started_at` |
-| `POST /containers/{id}/stop`, `/kill`, `/restart` | Observe + authz | Check caller owns the target (label match); forward; update status |
-| `DELETE /containers/{id}` | Observe + authz | Check ownership; forward; mark `reaped` |
-| `POST /networks/create` | Full | Inject labels, insert row, forward |
-| `DELETE /networks/{id}` | Authz | Ownership check; forward; mark reaped |
-| `POST /volumes/create` | Full | Inject labels, insert row, forward |
-| `DELETE /volumes/{name}` | Authz | Same |
-| `POST /images/create` (pull) | Policy | Optional registry allowlist |
-| Anything under `/swarm/*`, `/plugins/*`, `/nodes/*` | Deny | Wholesale block. Return 403. |
-| Everything else (`/_ping`, `/version`, `/containers/json`, `/events`, exec, logs, attach, `/build`, `/session`) | Pass-through | Forward unchanged |
+| `not_found` | 404, in the daemon's wording for the object type (`No such container: <ref>`) | The ref is unknown, unowned or `reaped`, or a create names an image the daemon does not have (`No such image`). A ref to a sibling's or Cogmo's object gets the same answer as a missing one. Names still leak existence elsewhere (Residuals) |
+| `denied` | 403, naming the route, query key or field | The route class, a query key, a body field or a cap is not allowed |
+| `malformed` | 400 | The body is not a JSON object, a field fails its schema, a key holds a non-ASCII character or is `__proto__`, `constructor` or `prototype`, or two keys differ only in case |
+| `too_large` | 413 | A body to be rewritten is over 1 MiB |
+| `unavailable` | 503 | The store read or the daemon resolve failed, the scope has no depth-0 row yet, the scope is gone because the task is being torn down, or a volume 201 is labelled with this task but another instance (Network and volume state machine). The client may retry |
+| `daemon_failed` | 502 | The daemon connection failed, or its create response could not be read |
+| `record_failed` | 500 | The daemon created an object and inserting its row failed. The proxy tried to remove the object, except a volume (Network and volume policy). An object the proxy could not remove is left to the orphan pass |
 
-#### Policy at `POST /containers/create`
+**Route table.** Paths are matched after the version prefix is stripped and the path canonicalised. The first matching row wins, and a path no row matches is `denied`. Default-deny also covers routes the daemon adds later.
 
-Defaults applied unless explicitly allowed per task:
+| Class | Routes | Outcome |
+|-|-|-|
+| Meta | `GET`/`HEAD /_ping`, `GET /version`, `GET /info` | forward |
+| Create | `POST /containers/create` | create policy, forward, child row |
+| Read | `GET /containers/{id}/json`, `/top`, `/logs`, `/stats`, `/changes`, `/export`; `GET`/`HEAD /containers/{id}/archive`; `POST /containers/{id}/wait`, `/resize` | owned, any depth |
+| Write | `PUT /containers/{id}/archive` | Owned, depth ≥ 1 only. The depth-0 container's `/workspace` is a host bind, and the daemon extracts as host root with the tar's modes, so a write there could plant root-owned setuid files in the host worktree. testcontainers copies only into children |
+| Lifecycle | `POST /containers/{id}/start`, `/stop`, `/restart`, `/kill`, `/pause`, `/unpause`, `/rename`; `DELETE /containers/{id}` | Owned, depth ≥ 1 only. The depth-0 container's lifecycle belongs to Cogmo (`denied`). `start` must have an empty body. `DELETE` denies the `link` query key and is forwarded with `v=true`. `start` and `DELETE` also update the child's row |
+| Exec | `POST /containers/{id}/exec` (exec policy); `POST /exec/{id}/start`, `/resize`; `GET /exec/{id}/json` | Create needs an owned container, at any depth. The other three routes need an exec created through this task's socket |
+| Attach | `POST /containers/{id}/attach`, `GET /containers/{id}/attach/ws` | owned, any depth |
+| Lists | `GET /containers/json`, `/networks`, `/volumes` | Forwarded. The response keeps only owned objects, plus `bridge` in `/networks` |
+| Events | `GET /events` | Forwarded. Each NDJSON line is dropped unless its `Actor.Attributes["cogmo.root_task"]` is the task's. Network and volume events carry no such attribute, so they are dropped too |
+| Images | `GET /images/json`, `/images/{name}/json`, `/images/{name}/history`, `/distribution/{name}/json`; `POST /images/create` | Forwarded under the query policy above. Images are shared across tasks and hold no task state. A pull or distribution lookup whose registry host is `localhost`, a `*.localhost` name or an IP literal is `denied`, because otherwise the daemon would fetch from the host's loopback, which it trusts as an insecure registry by default, or from the LAN. IP literals are recognised in every form `inet_aton` accepts (`127.1`, `2130706433`, `0x7f.1`), and as bracketed IPv6 |
+| Networks | `POST /networks/create` (network policy); `GET`/`DELETE /networks/{id}`; `POST /networks/{id}/connect`, `/disconnect` | The network must be owned, and connect or disconnect also needs an owned container. The body's `Container` ref is resolved and rewritten to its full id. A connect body may set `EndpointConfig.Aliases` only, and a disconnect body may set `Force`. On `bridge`, every task may use `GET`, plus connect and disconnect of an owned container: testcontainers reads the gateway there and attaches containers to its port forwarder. `DELETE` on `bridge` is `denied`. Every network object returned, by inspect or list, has its `Containers` map cut to owned containers |
+| Volumes | `POST /volumes/create` (volume policy); `GET`/`DELETE /volumes/{name}` | owned |
+| Denied | `/swarm`, `/nodes`, `/services`, `/tasks`, `/secrets`, `/configs`, `/plugins`, `/build`, `/session`, `/grpc`, `/auth`, `/commit`, `/system/df`; every `/{containers,images,networks,volumes,build}/prune`; `POST /containers/{id}/update`; `DELETE /images/{name}`; `/images/{name}/tag`, `/images/{name}/push`, `/images/{name}/get`; `/images/load`, `/images/get` | `denied` |
 
-- **Deny** `HostConfig.Privileged = true`
-- **Deny** `HostConfig.NetworkMode = "host"`
-- **Deny** `HostConfig.Binds` with host paths outside the task's allowed mount set (worktree, caches)
-- **Deny** `HostConfig.CapAdd` containing `SYS_ADMIN`, `NET_ADMIN`, `SYS_PTRACE` (and friends)
-- **Inject** `HostConfig.Runtime = "sysbox-runc"` unless task opts into `runc`
-- **Inject** resource caps inherited from the task container (child can't ask for more CPU/memory than the task has)
-- **Inject** Cogmo labels
+**Create policy.** The proxy builds a new body rather than patching the one it received:
 
-#### Authentication
+1. The body is parsed, and every object that holds struct fields is checked against the key rules under `malformed`. Data-keyed maps are exempt, since their keys are data. The daemon decodes with Go's `encoding/json`, which matches field names case-insensitively, Unicode folding included (`ſ` matches `s`). Rejecting non-ASCII keys and keys that differ only in case leaves no key that could reach a field the proxy did not read.
+2. Every struct field is read by its case-folded name and parsed through its own Zod schema. A number must be a JSON number, so `Memory: "1e12"` is `malformed`.
+3. A struct field that is not on the allowlist is dropped if its value is zero, and `denied`, by name, otherwise. Zero means `null`, `false`, `0`, `""`, or a struct whose fields are all zero. The Docker CLI sends every `HostConfig` field, mostly as zeros. Unknown fields count too, so a field from a newer API version stays closed until it is listed.
+4. An allowlisted field is kept exactly as sent, zero or not. Data-keyed maps keep every entry, empty values included: `ExposedPorts: {"5432/tcp": {}}`, `Volumes: {"/data": {}}`, `Tmpfs: {"/tmp": ""}`, and labels with empty values. An empty `Entrypoint: [""]`, which clears the image's entrypoint, is kept as well. The map-valued fields are `Labels`, `ExposedPorts`, `Volumes`, `HostConfig.Tmpfs`, `HostConfig.PortBindings` and `NetworkingConfig.EndpointsConfig`.
+5. The output is a fresh object with only canonical field names, plus the injected values.
 
-No tokens. The socket path *is* the identity. Mount access is controlled by filesystem perms — only the target task container can connect. Each task gets a private socket.
+| Field | Rule |
+|-|-|
+| `Image` | Required. The proxy inspects it (`GET /images/{Image}/json`) and forwards the inspected `Id` in its place, so the image the checks ran on is the one the daemon runs, as refs are rewritten to ids elsewhere. An inspect 404 is answered directly as `not_found` (`No such image`), and the create is not forwarded. An empty `platform=` counts as absent. Any other `platform` is normalized as containerd does it (lower-case; arch aliases such as `x86_64` → `amd64` and `aarch64` → `arm64`; arm64's `v8` variant dropped) and compared with the daemon's own, read from `GET /version` (`Os`/`Arch`). Anything else, including any other variant, is `denied`, so the inspect and the create see the same image. The child row's `image` records the name the task asked for |
+| `name`, `platform` | Dropped from the body. dockerode sends its options both as the query and as the body, and the proxy takes these two from the query only |
+| `Cmd`, `Entrypoint`, `WorkingDir`, `User`, `Hostname`, `Domainname`, `ExposedPorts`, `Healthcheck`, `StopSignal`, `StopTimeout`, `Shell`, `Tty`, `OpenStdin`, `StdinOnce`, `AttachStdin`, `AttachStdout`, `AttachStderr`, `NetworkDisabled`, `Volumes` (anonymous) | allowed |
+| `Env` | Allowed, except an entry whose name starts with `SYSBOX_` (in any case), which is `denied`: sysbox reads per-container configuration from those. Image `ENV` merges into the same OCI env, so the create is also `denied` if the inspected image's `Config.Env` has a `SYSBOX_` key |
+| `Labels` | Allowed. Keys that start with `cogmo.`, in any case, are dropped and the Cogmo labels injected |
+| `HostConfig.Memory`, `PidsLimit` | `null` or `0` is absent and set from the task's `ResourceLimits`. A negative value is `denied`, since the API reads it as unlimited (`PidsLimit: -1`), and so is a value above the task's limit |
+| CPU: `HostConfig.NanoCpus`, or `CpuQuota` with `CpuPeriod` | One quantity in either form. With neither form present (`null` or `0`), `NanoCpus` is injected from the task's limit. With both forms, the request is `denied`, because the daemon refuses the pair. A negative `CpuQuota` (unlimited) is `denied`. CPUs are `NanoCpus / 1e9`, or `CpuQuota / CpuPeriod` with the daemon's default period of 100000 when `CpuPeriod` is absent, and above the task's limit they are `denied`. A `CpuPeriod` without `CpuQuota` is dropped |
+| `HostConfig.MemoryReservation`, `MemorySwappiness`, `CpuShares`, `CpusetCpus`, `CpusetMems` | allowed |
+| `HostConfig.ShmSize` | at most the effective `Memory` |
+| `HostConfig.MemorySwap` | `null` or `0` (the CLI's default) is set to the effective `Memory`. Any other value must equal it, so `MemorySwap: -1` (unlimited swap) is `denied` |
+| `HostConfig.OomScoreAdj` | ≥ 0 |
+| `HostConfig.Ulimits` | `nofile` and `nproc` only |
+| `HostConfig.CapAdd` | Docker's default set (`AUDIT_WRITE`, `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `FSETID`, `KILL`, `MKNOD`, `NET_BIND_SERVICE`, `NET_RAW`, `SETFCAP`, `SETGID`, `SETPCAP`, `SETUID`, `SYS_CHROOT`), plus `IPC_LOCK`, plus `SYS_NICE` when the task's runtime is `sysbox-runc`. Under `runc` (`allow_privileged_runc`), `SYS_NICE` is `denied`, because the real capability allows `SCHED_FIFO`, which the CFS quota does not throttle. Names are compared after upper-casing and stripping a leading `CAP_`. `ALL`, and anything else, is `denied` |
+| `HostConfig.CapDrop`, `GroupAdd`, `Init`, `ReadonlyRootfs`, `AutoRemove`, `ExtraHosts`, `Dns`, `DnsOptions`, `DnsSearch`, `ConsoleSize` | allowed |
+| `HostConfig.SecurityOpt` | `no-new-privileges`, `no-new-privileges:true` or `no-new-privileges=true` only |
+| `HostConfig.RestartPolicy` | `Name` is `""`, `no` or `on-failure`. `MaximumRetryCount` is allowed |
+| `HostConfig.IpcMode` | `""`, `private`, `none` or `shareable` |
+| `HostConfig.CgroupnsMode` | `""` or `private` |
+| `HostConfig.NetworkMode` | `""`, `default`, `bridge`, `none`, or an owned network, which is rewritten to its id |
+| `NetworkingConfig.EndpointsConfig` | Keys must be `bridge` or owned networks, rewritten to ids. Each endpoint may set `Aliases` only |
+| `HostConfig.PortBindings` | `HostPort` must be empty or `"0"`. `HostIp` is rewritten to the `bridge` network's gateway, so a published port is reachable from task containers and the host, and is not bound on the host's other interfaces |
+| `HostConfig.Tmpfs`; `HostConfig.Mounts` with `Type: tmpfs` | allowed |
+| `HostConfig.Binds`; `HostConfig.Mounts` with `Type: volume` | The source must be an owned volume, with no `VolumeOptions.DriverConfig`. A host path, an unowned volume or any other mount type is `denied` |
+| `HostConfig.Runtime`, `CgroupParent` | overwritten from the scope |
+| Every other field, including `Privileged`, `VolumesFrom`, `VolumeDriver`, `Devices`, `DeviceRequests`, `DeviceCgroupRules`, `PidMode`, `UTSMode`, `UsernsMode`, `Cgroup`, `Sysctls`, `MaskedPaths`, `ReadonlyPaths`, `Links`, `PublishAllPorts`, `OomKillDisable`, `LogConfig`, `StorageOpt`, `Annotations`, `MacAddress` and the `Blkio*`, `CpuRealtime*` and `KernelMemory*` families | `denied` when non-zero |
 
-#### Implementation note
+**Exec policy.** The body of `POST /containers/{id}/exec` is rebuilt the same way. Allowed: `Cmd` (required), `Env` (with the `SYSBOX_` rule), `WorkingDir`, `User`, `Tty`, `AttachStdin`, `AttachStdout`, `AttachStderr`, `DetachKeys` and `ConsoleSize`. `Privileged`, or any other field with a non-zero value, is `denied`.
 
-The proxy is a Unix socket server. Most Docker API calls are plain HTTP/1.1 and pass through via `http.request` to `/var/run/docker.sock`.
+**Network and volume policy.** Both bodies are rebuilt the same way as a create body. `CheckDuplicate`, which the daemon has ignored since API 1.44, is dropped.
 
-Endpoints that need more than HTTP req/resp — all handled by the same raw bidirectional pipe, not separate code paths:
+- **Network create** accepts `Name`, `Labels` (handled as on a container create) and `Internal`. `Driver` must be `""` or `bridge`. `Options`, any `IPAM` other than the default, `EnableIPv6`, `Attachable`, `Ingress`, `ConfigOnly`, `ConfigFrom` and `Scope` are `denied`, because driver options and custom subnets reach host interfaces and routes.
+- **Volume create** accepts `Name` and `Labels`. `Driver` must be `""` or `local`. `DriverOpts` is `denied`, because the local driver's `o=bind` is a host bind mount, and so is `ClusterVolumeSpec`. A `Name` that starts with `cogmo-`, in any case, is `denied`: Cogmo's own volumes (`cogmo-task-home-<task-id>`, the skills deps cache, `cogmo-cache-*`) use that prefix. The deps cache name is operator-configurable (`COGMO_SKILLS_DEPS_VOLUME`), so the configured name is also denied by exact match, whatever its prefix.
+- **A volume create can return a volume that already existed.** The daemon's volume create is idempotent: an existing name returns 201 with the existing volume. So a 201 whose `Labels` lack this task's `cogmo.root_task` is someone else's volume. The proxy answers `denied`, inserts no row, and never removes it.
+- **The rows** follow the Network and volume state machine (below). A failed network insert removes the network, because a network create always makes a new object. A failed volume insert removes nothing, because the 201 may name a volume the task already had. A rowless volume carrying this instance's label is left to the orphan pass.
+- **Removal.** Every Cogmo removal of a container (reap, cascade, the create rollbacks) passes `v=true`, and so does a task's `DELETE` of a child. Anonymous volumes, from `Volumes` or an image's `VOLUME`, therefore go with their container. Those volumes carry no labels and get no row, so no cap counts them and the orphan pass never sees them (Residuals).
 
-- `/containers/{id}/attach`, `/exec/{id}/start`, `/events`, log follow — hijacked connections, plain bytes after the upgrade.
-- `/build` — streaming tar upload with NDJSON progress stream back. HTTP/1.1, but long-lived; pipe both directions.
-- `/session` (BuildKit / buildx) — HTTP/1.1 `Upgrade` to gRPC-over-HTTP/2. Node's `http` server surfaces the upgrade via the `upgrade` event. After the upgrade completes, it's just bytes on a socket — pipe them to the daemon socket in both directions and stay out of the way. We don't need to understand gRPC.
+**Upgraded streams.** Only a request that Node surfaces as an `upgrade` is raw-piped, and only after the ownership check. Exec start and `/attach` must carry `Upgrade: tcp`, and `/attach/ws` must carry `Upgrade: websocket`. An upgrade on any other route, or with any other value, is `denied`.
 
-Node's `http` module exposes upgrades via the `upgrade` event; forward the raw socket with `stream.pipe()` in both directions. No buffering, no HTTP/2 implementation in Node.
+The proxy writes the request line, the headers and the `Content-Length` body to a fresh daemon connection, because the daemon reads exec start's JSON body before it answers. An upgrade with a chunked body is `malformed`. Every byte after the body, from `head` or the socket, is held until the proxy reads the daemon's status line. A `101` opens both directions, and from then on the proxy pipes plain bytes without understanding the protocol inside. Any other status is relayed to the client and both connections end, so bytes sent as a pipelined request never reach the daemon as HTTP.
 
-**What this gets us.** Transparent buildx support — `docker buildx build`, the default `docker` driver (uses host BuildKit), and the `docker-container` driver (spawns a buildkitd sibling, which comes up through our `/containers/create` path with labels injected) all work. Testcontainers' image build path works. `docker compose build` works.
+Every other route goes through `http.request` as a normal request, whose response streams: `logs` with `follow`, `events`, and exec start without `Upgrade`. The client connection stays under Node's parser, so a request pipelined after one of these is classified on its own.
 
-**What this does NOT get us.** Policy enforcement on build contents — things like "deny this `FROM` because it's from an unapproved registry" or "deny this `RUN` because it mounts host paths" — requires parsing the BuildKit gRPC session. That's the [moby/buildkit Go SDK](https://github.com/moby/buildkit) territory (or TS stubs autogenerated from the [`frontend/gateway/pb`](https://github.com/moby/buildkit/tree/master/frontend/gateway/pb) `.proto` files). Deferred; basic registry policy at `POST /images/create` covers the common case.
+**Child containers.** When the daemon answers 201 to a create, the proxy reads `Id` and inserts the child's `containers` row in `starting` before it answers the client. The row records the parent (the task's depth-0 row), depth 1, the task's `root_task_id`, `instance_id` and `ttl_expires_at`, and the effective `resource_limits`. If the insert fails, the proxy force-removes the container and answers `record_failed`. After that, `start` moves the row to `running` and `DELETE` moves it to `exited`, and the TTL, cascade, orphan and reconcile reaps apply as to any row (Container state machine). The use case lives in `src/sandbox/insert-child-container.ts`.
 
-References: [buildkite/sockguard](https://github.com/buildkite/sockguard) (label model + endpoint selection), [CpuID/dockerd-ci-proxy](https://github.com/CpuID/dockerd-ci-proxy) (label injection on create), [Tecnativa/docker-socket-proxy](https://github.com/Tecnativa/docker-socket-proxy) (endpoint categories to block).
+The create's daemon request and its insert are bound to neither the client's connection nor the task's abort signal. `unregisterTask` works in this order:
+
+1. Drops the scope, so a request arriving on an open keep-alive connection gets `unavailable`.
+2. Stops accepting connections.
+3. Waits for in-flight creates, up to 30 seconds.
+4. Aborts every connection, and any create still in flight with them.
+
+A create cut off by step 4 leaves either a rowless container, which the orphan pass removes once the grace window has passed, or a row inserted after the cascade listed rows, which lives until its TTL (Container state machine → Failure modes).
+
+`TaskScope` carries `resourceLimits` and `ttlExpiresAt`. Depth stays at 1: a child gets no socket, since host-path binds and `VolumesFrom` are denied, so it cannot create containers of its own.
+
+**Which sessions get a socket.** `SessionSpec.dockerSocket: boolean` is required, so every caller states it. Coding delegation sets it to `true`. Skills tier-2 sets it to `false`, so a tier-2 skill's Python cannot reach the daemon.
+
+**Residuals.**
+
+- There is no aggregate cap. Each child may use up to the task's limits, so 16 children can hold 16 times the task's budget until slice-level enforcement is built (Hierarchical enforcement via cgroup parent, below). Nothing caps the images a task pulls or the disk they use.
+- Networks draw from the daemon's address pools. With 8 per task, a handful of concurrent tasks can still exhaust a small default pool, and new networks then fail for everyone.
+- A pull can move a shared local tag to the registry's current digest, under every task that uses that tag.
+- `GET /info` exposes host details: kernel, CPU and memory, daemon configuration, registry mirrors and container counts.
+- BuildKit stays denied (`/build`, `/session`, `/grpc`), so tasks cannot build images.
+- Anonymous volumes are freed only when their container is removed. A child the task stops but keeps holds its anonymous volumes until the cascade or the TTL pass.
+- Networks and volumes created through the proxy before slice 5 carry no Cogmo labels and have no rows, so nothing ever collects them.
+- Names leak existence. A container or network create with a taken name gets the daemon's 409, which names the holder's id. A volume create of a foreign name gets `denied`. Neither grants access.
+- The network layer is outside the proxy. Every depth-0 container, and every child on `bridge`, shares Docker's default bridge with other tasks and with skills workers. They can reach each other's listening ports, and ports published on the gateway are reachable from every task. Per-task networks for depth-0 containers are tracked in `todo.md`.
+- A registry name that resolves to a private address still reaches it on pull. A registry allowlist is tracked in `todo.md`.
+
+**Rollout.** No consumer depends on a field or route this spec denies, so it ships with no enforcement flag.
+
+- The Claude CLI makes no Docker API calls, and `cogmo-devbase` ships no docker CLI (`images/devbase/Dockerfile`). A Docker client has to come from the repo under work, which in practice means testcontainers-node over dockerode. Everything `dev/containers.ts` sends is allowed:
+  - `name` (the port forwarder always sets one), `Env`, `Cmd`, and `ExposedPorts` with `PortBindings` (`HostPort: "0"`). dockerode sends these as both query and body, and the extra query keys are dropped;
+  - user-defined networks with aliases (`/networks/create`, then `/networks/{id}/connect`);
+  - `PUT /archive` for copied files;
+  - waits on logs, exec and HTTP;
+  - `GET /networks/bridge` for the gateway, and `exposeHostPort`'s connect to `bridge`.
+- Ryuk needs a host-path bind of the socket, which is already denied, and optionally `Privileged`. Cogmo sets `TESTCONTAINERS_RYUK_DISABLED=true` in a coding session's env (`SessionSpec.env`), and the cascade does Ryuk's job.
+- The skills tier-2 runner never opens the socket.
+- No workflow relies on proxy-created children, which the orphan pass reaps (Enforced today).
+
+**Test plan.** Unit tests in `src/sandbox/proxy/` run on `proxy.test.ts`'s fake daemon socket. Each asserts the status, and for a rejection that nothing reached the daemon.
+
+- Create and exec policy:
+  - one test per denied field set to a non-zero value, and the same field zero-valued passing;
+  - case variants (`hostconfig`, `HOSTCONFIG.privileged`) are read;
+  - duplicate case-folded keys, a non-ASCII key, a `__proto__` key and a string `Memory` are `malformed`;
+  - a caller's `cogmo.*` labels are replaced;
+  - a `SYSBOX_` env entry is denied;
+  - every `CapAdd` value outside the allowlist, plus `ALL` and `cap_sys_admin`, is denied;
+  - `SYS_NICE` is allowed under `sysbox-runc` and denied under `runc`;
+  - each resource cap absent or `0` (injected), at the limit (allowed), negative (`denied`) and above the limit (`denied`);
+  - `MemorySwap` absent or `0` (set to `Memory`), equal (allowed), and `-1` with `Memory: 0` (`denied`);
+  - `CpuQuota` with and without `CpuPeriod`, `CpuPeriod` alone, `NanoCpus` with `CpuQuota` (`denied`), and `NanoCpus` injected only when neither form is present;
+  - an image whose `Config.Env` has a `SYSBOX_` key is denied;
+  - the `PortBindings` rewrite, and a fixed `HostPort`;
+  - each `NetworkMode` form;
+  - `ExposedPorts`, `Volumes`, `Tmpfs`, empty-valued labels and `Entrypoint: [""]` reach the daemon unchanged;
+  - a body `name` is dropped and the query `name` forwarded;
+  - on create, a query key other than `name` and `platform` is dropped, and on `/images/create` `fromSrc` is denied;
+  - a recorded testcontainers-node create request, its duplicated query included, passes changed only by the injections, the dropped query keys and `Image` rewritten to the inspected id;
+  - an image the daemon does not have gets `not_found` without a forward;
+  - host platform forms (`Linux/x86_64` and `linux` on amd64, `linux/arm64/v8` on arm64) and an empty `platform=` are forwarded, and a non-host platform or variant is denied.
+- Routes:
+  - for each class, an owned ref is forwarded under its full id and canonical path;
+  - a sibling task's id, Cogmo's own container and an unknown id all return the same 404;
+  - a name and a prefix both resolve;
+  - depth-0 lifecycle routes and a depth-0 `PUT /archive` are `denied`;
+  - list responses omit siblings, `/events` drops their lines, and `GET /networks/bridge` lists only owned containers;
+  - each Denied row, an unlisted path and a version prefix below `v1.44` are `denied`;
+  - every registry-host form named in the Images row is denied;
+  - while slices 2–4 are live, `DELETE /volumes/{name}` is denied, an owned container's connect and disconnect on `bridge` are forwarded, and every other connect or disconnect is denied;
+  - a store failure returns 503, and a request during teardown returns `unavailable`.
+- Streams:
+  - a privileged create pipelined after `GET /logs` on the same connection is denied;
+  - when the daemon answers an upgrade with 404, none of the client's following bytes are forwarded and both connections end;
+  - an upgrade to an unowned exec returns 404;
+  - exec start without `Upgrade` is handled as a normal request, with `Upgrade` and `Connection` stripped;
+  - an exec start whose JSON body comes with `Upgrade: tcp` reaches the daemon whole, and the bytes after it wait for the `101`;
+  - an upgrade with a chunked body, or with the wrong `Upgrade` value for its route, is rejected;
+  - starting an exec this socket did not create returns 404.
+- Child rows, with the store on PGlite:
+  - a create yields a `starting` row with the scope's lineage;
+  - a failed insert removes the container;
+  - `start` moves the row to `running`, and `DELETE` to `exited`;
+  - stopping and restarting a child leaves it running;
+  - the 17th live child is denied;
+  - a child `DELETE` and every Cogmo container removal (reap, cascade, create rollback) reach the daemon with `v=true`;
+  - a teardown during an in-flight create still leaves a row for the cascade;
+  - the orphan pass skips a fresh rowless container labelled with the live instance, and reaps it once the grace window has passed.
+- Networks and volumes, with the store on PGlite:
+  - a volume 201 that lacks this task's label is denied, inserts no row and removes nothing;
+  - a `cogmo-` volume name is denied;
+  - a reaped volume name can be created again;
+  - every transition is a conditional UPDATE that returns `stale` on a second writer;
+  - the 9th network and the 9th volume are denied;
+  - a foreign live conflict-arm row is superseded and the new row inserted, and a 201 labelled with another instance is `unavailable` with no write;
+  - two concurrent same-task creates of one name converge on one row: the loser's `ON CONFLICT` raises `40001`, and the transactor's retry lands on the conflict arm;
+  - `reapVolume` supersedes without removing when the volume's labels do not match its row, transitions without removing on an inspect 404, and returns `in_use` on a 409;
+  - the configured `COGMO_SKILLS_DEPS_VOLUME` name is denied even without the `cogmo-` prefix.
+- One integration test in `supervisor.integration.test.ts` creates a child through a real task socket. It asserts that the next reaper tick leaves the child running and that the cascade removes it.
+
+**Slices.** The spec ships in this order, one PR per slice, tracked in `todo.md`. As each slice lands, its part of "Enforced today" is removed and its part of this section becomes `[confirmed]`. Every route a slice does not touch keeps today's behaviour until a later slice does.
+
+1. **Create and exec policy:** the create and exec policies, the create query policy, the `v1.44` version floor on the create and exec routes (the two bodies this slice parses against 1.44 semantics; slice 2 extends it to every route), Ryuk disabled in coding sessions, and the deny matrix. Until slice 5, named-volume mounts are denied outright, and `NetworkMode` and `EndpointsConfig` accept only `default`, `bridge` and `none`. The child cap needs rows, so it arrives with slice 3.
+2. **Ownership:** container and exec ownership, depth-0 lifecycle and `PUT /archive` denies, container list and event filtering, the canonical forwarded request with the version floor and the hop-by-hop strip, `SessionSpec.dockerSocket`, and default-deny for every path outside the route table. Image, network and volume routes stay forwarded as today until slice 5, except `DELETE /volumes/{name}` and network connect and disconnect. From this slice on, connect and disconnect are allowed only for an owned container on `bridge`, which testcontainers' port forwarder needs, and every other connect or disconnect is `denied`, as is `DELETE /volumes/{name}`. Unchecked, they would let a task delete another task's volume, attach a sibling's container to its network, or detach one from `bridge`. Children still have no rows, so a task owns only its depth-0 container in the meantime.
+3. **Child rows:** child rows, the child cap, the orphan pass's grace window, the teardown order, and `v=true` on every Cogmo container removal and on a task's child `DELETE`.
+4. **Upgraded streams.**
+5. **Images, networks and volumes:** the image query and registry-host rules, the network and volume policies with their caps, the Network and volume state machine and its migration, owned networks and volumes in the create policy, and the `bridge` inspect filter.
+
+#### Builds `[confirmed]`
+
+Builds are denied. The proxy could carry BuildKit's `Upgrade` to gRPC-over-HTTP/2 as plain bytes, but policy on build contents, such as which `FROM` registries are allowed or whether a `RUN` mounts host paths, would mean parsing the BuildKit gRPC session ([moby/buildkit](https://github.com/moby/buildkit), [`frontend/gateway/pb`](https://github.com/moby/buildkit/tree/master/frontend/gateway/pb)). That work is deferred until a task needs builds.
+
+References: [buildkite/sockguard](https://github.com/buildkite/sockguard) (the ownership-label model and endpoint selection), [CpuID/dockerd-ci-proxy](https://github.com/CpuID/dockerd-ci-proxy) (label injection on create), [Tecnativa/docker-socket-proxy](https://github.com/Tecnativa/docker-socket-proxy) (endpoint categories to block).
 
 ### Reaper `[confirmed]`
 
-Inngest cron, runs every 30s. Three passes:
+Inngest cron, runs every minute (the cron floor). Three passes:
 
 1. **TTL expired** — `WHERE ttl_expires_at < now() AND status IN ('starting','running')`. Kill post-order: children first (sort by `depth DESC`), then parent.
-2. **Orphan detection** — `docker ps --filter label=cogmo.managed=true`. Anything present on the daemon but missing from the DB, or labelled with a dead `cogmo.instance`, gets killed.
+2. **Orphan detection** — `docker ps --filter label=cogmo.managed=true`. Anything present on the daemon but missing from the DB, or labelled with a dead `cogmo.instance`, gets killed. `[proposed]` A container that is labelled with a live instance and has no row is skipped while its daemon `Created` time is under 2 minutes old. That covers the gap between a create and its row insert, in both the supervisor and the proxy. A container labelled with a dead instance is reaped at once.
 3. **Stale DB rows** — containers in DB with `status IN ('starting','running')` but missing from `docker ps` get marked exited with no exit code.
 
 Root-task cascade (not on cron — triggered by task completion/failure): `WHERE root_task_id = $t AND status != 'reaped' ORDER BY depth DESC` → stop + remove.
 
 Every status write is a conditional transition from the status the pass read (Container state machine below), so a row a cascade or an overlapping tick finished first is left as it is and not counted.
 
-Networks and volumes reaped last, after all containers in the root task are gone.
+Networks and volumes have a TTL pass of their own, whose update is unconditional today. `[proposed]` Once the proxy inserts their rows, every pass and the cascade reap them through the conditional transitions in the Network and volume state machine, after the task's containers.
 
 ### Lifecycle `[confirmed]`
 
@@ -412,6 +611,8 @@ Task teardown (`deleteByTaskId`):
 3. Ends every connection made through the socket and its upstream leg to the daemon — hijacked streams (`logs -f`, `events`, attach) included, so teardown never waits on a running container.
 4. Closes the socket's listener and removes the socket file.
 
+`[proposed]` Once the proxy inserts child rows, teardown reverses steps 1 and 2. It runs `unregisterTask` first, in the order given under Proxy Design → Child containers: drop the scope, stop accepting, wait up to 30 seconds for in-flight creates only, then abort every connection. A child created during teardown therefore has its row before the cascade lists the task's rows. Streaming routes (`logs -f`, `/events`, attach, exec) are not waited for: new requests on them get `unavailable` once the scope is gone, and live streams end at the abort.
+
 ### Container state machine `[confirmed]`
 
 **Unit.** One `containers` row, keyed by its `id`; `docker_id` is the daemon's name for the same object and is UNIQUE. Every status write is a conditional UPDATE on `id`.
@@ -422,7 +623,7 @@ Task teardown (`deleteByTaskId`):
 |-|-|
 | `starting` | Row inserted; the daemon has the container; `start` has not completed |
 | `running` | `start` completed; `started_at` set |
-| `exited` | The daemon no longer has the container and Cogmo did not remove it |
+| `exited` | The daemon no longer has the container, and Cogmo did not remove it (a task may have, through the proxy) |
 | `reaped` | Cogmo killed and removed the daemon object; `reaped_reason` says why. Terminal |
 
 ```mermaid
@@ -431,8 +632,8 @@ stateDiagram-v2
   starting --> running: start completed
   starting --> reaped: start failed / TTL / cascade / orphan / reconcile
   running --> reaped: TTL / cascade / orphan / reconcile
-  running --> exited: missing from the daemon
-  starting --> exited: missing from the daemon
+  running --> exited: missing from the daemon / proxy DELETE (proposed)
+  starting --> exited: missing from the daemon / proxy DELETE (proposed)
   exited --> reaped: cascade / orphan / reconcile
   reaped --> [*]
 ```
@@ -446,6 +647,9 @@ stateDiagram-v2
 | `starting`, `running`, `exited` | `reaped` | `deleteByTaskId` (`cascade`) | `status <> 'reaped'` | `exited_at` (`coalesce`: kept when the row was `exited`), `reaped_reason` |
 | `starting`, `running`, `exited` | `reaped` | reaper orphan pass (`dead_instance`), boot `reconcileCrashedInstances` (`crash_reconcile`), for a listed daemon object with a row | same | same |
 | `starting`, `running` | `exited` | reaper stale pass | `status = <read status>` | `exited_at` |
+| — | `starting` | `[proposed]` proxy create, after the daemon's 201 | `INSERT`; `docker_id` UNIQUE | row: parent = the task's depth-0 row, depth 1 |
+| `starting` | `running` | `[proposed]` proxy `start`, after the daemon's 204 | `WHERE id = $1 AND status = 'starting'` | `started_at` |
+| `starting`, `running` | `exited` | `[proposed]` proxy `DELETE`, after the daemon's 204: the task removed it, Cogmo only relayed. The row does not record which path wrote `exited`, because both mean the daemon object went without Cogmo removing it and nothing branches on the difference | `status = <read status>` | `exited_at` |
 
 Every reap kills and removes the daemon object *before* the transition (Failure modes below), and its guard is `status <> 'reaped'` rather than the status the pass read: a reap is legal from every live state, and a row another path moved forward meanwhile (`create` committing `starting → running` while a cascade kills) must still land on `reaped` — the container is gone. **Illegal**, so the store's `ContainerTransition` type does not express them: anything out of `reaped`; `exited → running`; `running → starting`.
 
@@ -457,9 +661,9 @@ The transition is `SandboxStore.transitionContainerStatus(tx, { id, at } & Conta
 
 | Crash point or race | Row | Daemon | Why safe, or the residual |
 |-|-|-|-|
-| Daemon create succeeds, row insert fails | none | container | `create` force-removes it and releases the proxy scope. If the remove fails too, the orphan pass removes a labelled container with no row on its next tick |
+| Daemon create succeeds, row insert fails | none | container | `create` force-removes it and releases the proxy scope. If the remove fails too, the orphan pass removes a labelled container with no row on its next tick (`[proposed]` once the grace window has passed) |
 | Process dies between create and insert | none | container | Orphan pass: no row ⇒ orphan |
-| A reaper tick lists the daemon while a live `create` is between `createContainer` and the row insert | none, yet | killed by the orphan pass | Residual: the same rule as the proxy child. The insert then succeeds, `start` 404s, and the start-failure reap marks the row `reaped` (its kill/remove 404s are tolerated), so the `create-container` step fails and retries. The window is one DB round trip against a once-a-minute tick; a grace window on the daemon's `Created` or row-first ordering closes it; tracked with the proxy-child entry in `todo.md` |
+| A reaper tick lists the daemon while a live `create` is between `createContainer` and the row insert | none, yet | killed by the orphan pass | This is a residual, under the same rule as the proxy child. The insert then succeeds, `start` 404s, and the start-failure reap marks the row `reaped` (its kill and remove 404s are tolerated), so the `create-container` step fails and retries. The window is one DB round trip against a once-a-minute tick. `[proposed]` The orphan pass's grace window closes it |
 | The `create-container` step retries after `create` threw | the failed attempt's, terminal or absent | removed by the failed attempt | The retry creates a new container and row for the same task; `tryResumeByTaskId` skips terminal rows. What a failed attempt could not remove follows its own row here (`start` throws; insert fails) |
 | Process dies between insert and `running` | `starting` | created or running | A crashed instance keeps `stopped_at` NULL, so the reaper's orphan pass counts it live and its rows are never orphans. The next boot's `reconcileCrashedInstances` reaps every container labelled with an open prior instance, then closes those instance rows, so the orphan pass retries anything reconcile could not kill. `tryResumeByTaskId` resumes only a daemon container that reports `running` |
 | `start` throws | `reaped` | removed | `start_failed`. Residual: if the kill + remove throws, the row stays `starting` over a stopped container, and the TTL pass reaps it at expiry |
@@ -476,26 +680,87 @@ The transition is `SandboxStore.transitionContainerStatus(tx, { id, at } & Conta
 | A coding task's teardown step is retried by the new build | `reaped` once | removed once | `deleteByTaskId` re-reads the task's rows and skips those already `reaped`; a row the old build touched is in one of the two states above and is reaped now if still live |
 | `docker rm` outside Cogmo | `running` | gone | Stale pass → `exited` |
 | `listContainers` fails in a tick | unchanged | unchanged | The stale pass is skipped: an empty listing is indistinguishable from "all gone" |
-| Proxy-created child | none | container, labelled with the live instance | Residual. The proxy injects labels but writes no row, so the orphan pass treats the child as an orphan on its next tick. The row insert the proxy design table promises at `POST /containers/create` is the fix; tracked in `todo.md` |
+| Proxy-created child | none | container, labelled with the live instance | This is a residual. The proxy injects labels but writes no row, so the orphan pass treats the child as an orphan and kills it on its next tick. The rows below replace this one once child rows land (Proxy Design → Child containers) |
+| `[proposed]` Proxy create: the daemon refuses | none | none | The response is relayed and nothing is inserted |
+| `[proposed]` Proxy create: the daemon answers 201 and the row insert fails | none | container | The proxy force-removes the container and answers 500. If the remove fails too, the orphan pass removes the container once the grace window has passed |
+| `[proposed]` Proxy create: the daemon's response is lost after it created the container | none | container | The proxy answers 502. The orphan pass removes the container once the grace window has passed |
+| `[proposed]` Proxy create: the process dies between the 201 and the insert | none | container, labelled with the dying instance | The next boot's reconcile reaps it along with the instance's other containers |
+| `[proposed]` A reaper tick lists a child between the 201 and the insert | none, yet | left alone | The grace window skips a rowless container labelled with the live instance that is under 2 minutes old |
+| `[proposed]` Teardown races an in-flight proxy create that settles within the wait | `starting`, then `reaped` | removed by the cascade | `unregisterTask` waits up to 30 seconds for in-flight creates before the cascade lists rows. A create is bound to neither the client's connection nor the task's abort signal, so its insert lands even after the socket has closed |
+| `[proposed]` An in-flight create outlives the 30-second wait | none, or `starting` after the cascade | container | Step 4 of `unregisterTask` aborts the create. If the daemon had not answered, the container, if one was made, is rowless, and the orphan pass removes it once the grace window has passed. If the insert commits after the cascade listed the task's rows, the row stays `starting` and the child lives until its TTL, when the TTL pass reaps it |
+| `[proposed]` A request on an already-open keep-alive connection during teardown | unchanged | untouched | `unregisterTask` drops the scope first, so the request is answered `unavailable` and nothing is forwarded |
+| `[proposed]` Proxy `start` is `stale` with status `running` | `running` | running | The child was stopped and started again. Its row left `starting` on the first start, so the proxy answers 204 and writes nothing |
+| `[proposed]` Proxy `start` is `stale` with status `reaped` or `exited` | `reaped` / `exited` | removed by the proxy | A TTL pass or cascade reaped the row mid-start, or the stale pass found it missing. The proxy kills and removes the container the daemon just started and answers 404 |
+| `[proposed]` Proxy `start` succeeds and its transition write fails | `starting` | running | The proxy answers 204. The row under-reports `running`, which is harmless because every reap covers `starting` |
+| `[proposed]` Proxy `DELETE` succeeds and the `exited` write fails | `starting` / `running` | gone | The stale pass marks the row `exited` on its next tick |
+| `[proposed]` A task names a sibling's container, or Cogmo's | unchanged | untouched | Nothing is forwarded, and the answer is the daemon's 404 for a missing container, so the existence of the target does not leak |
+| `[proposed]` The ownership read fails | unchanged | untouched | The proxy answers 503 and forwards nothing (fail closed) |
+| `[proposed]` A run is in flight across the deploy that enables enforcement | the old instance's rows, reaped | removed | A deploy restarts `cogmo serve`, and the old instance's containers are reaped, by reconcile or by the orphan pass once that instance's row is closed. A resumed task gets a new depth-0 container, so every container that talks to the new proxy was created by the new build. The old build wrote no child rows, so nothing needs backfilling. The grace window covers live-instance labels only, so old-instance children are reaped at once |
+| `[proposed]` A task's tooling sends a field or route the allowlist rejects (Ryuk's socket bind, `--privileged`, a fixed host port, `docker build`) | none | none | The task gets a 403 naming the field or route. Its test run fails visibly, and nothing is created |
+
+### Network and volume state machine `[proposed]`
+
+**Unit.** One `networks` or `volumes` row, keyed by its `id`. `docker_id` is the daemon's name for the object: the network id, which is never reused, or the volume name, which can be. `networks.docker_id` stays UNIQUE. On `volumes`, a partial unique index on `docker_id WHERE status = 'created'` replaces the UNIQUE, so a reaped name such as compose's `<project>_data` can be created again.
+
+**States**, the existing `network_status` and `volume_status` pgEnums:
+
+| State | Meaning |
+|-|-|
+| `created` | The proxy inserted the row after the daemon's 201 |
+| `reaped` | The daemon object is gone, and `reaped_reason` says why. Terminal |
+
+```mermaid
+stateDiagram-v2
+  [*] --> created: proxy create (daemon 201, this task's label)
+  created --> reaped: proxy DELETE / superseded / TTL / cascade / orphan / reconcile
+  reaped --> [*]
+```
+
+**Reason.** `reaped_reason` is a nullable `sandbox_object_reaped_reason` column on both tables. Its values are `removed_by_task`, `ttl_expired`, `cascade`, `dead_instance`, `crash_reconcile`, `superseded` and `unknown`. A CHECK holds `(status = 'reaped') = (reaped_reason IS NOT NULL)`. `unknown` exists only for the migration, which backfills it on any row already `reaped` before it adds the CHECK. In slice 5's one migration file: the enum, both columns, the backfill, the CHECK, and the swap of the volumes UNIQUE for the partial index.
+
+| From | To | By (reason) | Guard | Writes |
+|-|-|-|-|-|
+| — | `created` | proxy create, after a 201 carrying this task's `cogmo.root_task` | Network: `INSERT`. Volume: `INSERT … ON CONFLICT (docker_id) WHERE status = 'created' DO UPDATE` with a no-op SET, returning the live row (inngest.md). If the returned row has another `root_task_id` or `instance_id`, and the 201's labels name this task and this instance, it is superseded (next row) and the insert runs again in the same transaction. A 201 labelled with this task but another instance means the old object still exists, so the proxy answers `unavailable` and writes nothing | row: parent = the task's depth-0 row, depth 1, the task's TTL |
+| `created` | `reaped` | proxy volume create (`superseded`): a 201 labelled with this task and this instance proves that this request created the object, so the old row's object is gone | `WHERE id = $1 AND status = 'created'` | `reaped_reason` |
+| `created` | `reaped` | proxy `DELETE`, after the daemon's 204 (`removed_by_task`) | `WHERE id = $1 AND status = 'created'` | `reaped_reason` |
+| `created` | `reaped` | reaper TTL pass (`ttl_expired`), cascade (`cascade`), orphan pass (`dead_instance`) and reconcile (`crash_reconcile`). Each runs after the daemon remove; for a volume, `reapVolume`'s inspect 404 stands in for the remove | `WHERE id = $1 AND status = 'created'` | `reaped_reason` |
+| `created` | `reaped` | `reapVolume` (`superseded`), when the inspected volume's labels do not match the row: another task or instance holds the name now | `WHERE id = $1 AND status = 'created'` | `reaped_reason` |
+
+`SandboxStore.transitionNetworkStatus` and `transitionVolumeStatus` replace the unconditional `updateNetworkStatus` and `updateVolumeStatus`. Each returns `{ kind: "transitioned" } | { kind: "stale"; status }`, and `stale` is not counted. One use case each: `reapNetwork`, `reapVolume`, and `insertOrSupersedeVolume` (`src/sandbox/insert-or-supersede-volume.ts`), which owns the conflict-arm branch. A `stale` from its supersede UPDATE is an invariant violation and throws, because the conflict arm holds the row's lock until the transaction ends. `reapVolume` inspects the volume first. On a 404 it transitions the row and removes nothing by name. When the `cogmo.root_task` and `cogmo.instance` labels match the row, it removes the volume and then transitions the row. On a mismatch it transitions the row to `superseded` without removing anything. It returns `{ kind: "reaped" } | { kind: "superseded" } | { kind: "stale"; status } | { kind: "in_use" }` (the remove's 409, retried next tick) as values, and a daemon refusal as `Err` (`daemon_failed`). The cascade reaps a task's networks and volumes after its containers. The orphan pass and reconcile list `cogmo.managed` networks and volumes as they do containers, grace window included. Once `volumes.docker_id` is no longer unique, every volume lookup by name (`getVolumeByDockerId`, and the orphan pass's "has a row" check) matches only `created` rows.
+
+| Crash point or race | Row | Daemon | Why safe, or the residual |
+|-|-|-|-|
+| Volume 201 without this task's label (an existing volume) | none | untouched | The proxy answers `denied`, inserts nothing and removes nothing, so another task's volume and Cogmo's are never taken over |
+| Two creates of one volume name in one task | one `created` row | one volume | The second insert lands on the conflict arm and returns the first row |
+| Task A's `DELETE /volumes/foo` gets 204, then its `removed_by_task` write fails or the process dies; task B then creates `foo` | A's row `reaped` (`superseded`), B's row `created` | B's volume | B's 201 carries B's labels, so the conflict arm's row from A is superseded and B's row inserted. A pass that later reads A's row and inspects the volume finds B's labels, and supersedes the row without removing anything |
+| A pass read A's `created` row before B's create | A's row `reaped` | B's volume untouched | An inspect before B's 201 gets a 404, so the row transitions and nothing is removed by name. An inspect after it sees B's labels, so the row is superseded. Residual: between an inspect that saw A's labels and the remove, someone else removes A's volume and another task recreates the name. The remove then takes the new volume unless it is already mounted (409), and the new owner's mount fails loudly rather than losing data silently |
+| A task resumed on a new instance recreates a name whose old object still exists | the old row, unchanged | the old volume, untouched | The 201 returns the old volume, labelled with the dead instance, so the proxy answers `unavailable`. The orphan pass or reconcile then removes the dead instance's volume and transitions its row (`dead_instance` or `crash_reconcile`), so the client's retry creates a fresh volume and inserts with no conflict |
+| A dead instance's `created` row whose object is gone | `created` | none | Residual. The TTL pass reads only its own instance's rows, and the orphan pass and reconcile start from daemon objects, so they never reach the row. Two paths do: the task's cascade, keyed on `root_task_id`, reaps it on a live instance (the remove's 404 counts as removed), and so does a later create of the same name, as `superseded`. Until one of them runs, the row counts against its task's 8-volume cap |
+| Teardown races an in-flight network or volume create | as for containers | object | The 30-second wait in `unregisterTask` covers every create: container, network and volume. A create cut off by step 4 leaves a rowless object for the orphan pass, or a row the cascade missed, which the TTL pass reaps |
+| Network 201, insert fails | none | network | The proxy removes the network and answers `record_failed`. If the remove fails, the orphan pass removes the network once the grace window has passed |
+| Volume 201 with this task's label, insert fails | none | volume | The proxy answers `record_failed` and removes nothing. The orphan pass removes the rowless volume once the grace window has passed, and the daemon refuses with 409 while a container still mounts it, so the pass retries on a later tick |
+| Process dies between the 201 and the insert | none | object, labelled with the dying instance | The next boot's reconcile removes it |
+| The daemon refuses a remove (409: endpoints attached, volume in use) | `created` | object | Nothing transitions. The pass logs it and retries next tick. The cascade removes containers first, so their endpoints and mounts are gone by then |
+| Crash between the remove and the transition | `created` | gone | The next pass's remove gets a 404, which counts as removed, and the transition lands. The reason may be `ttl_expired` or `cascade` where the task's `DELETE` did the removing, which nothing branches on |
+| Two passes, or a pass and the proxy's `DELETE`, race | `reaped` once | removed once | The second transition is `stale` |
+| A reaped volume's name is created again | a new `created` row | volume | The partial index admits it. The old row stays `reaped` |
+| A run on the old build after the migration | its rows | its objects | The old build writes no network or volume rows. Its reaper's unconditional `status = 'reaped'` update would now fail the CHECK on a TTL-expired row, but the old build has no such rows to update |
 
 ### Crash Recovery `[confirmed]`
 
-At Cogmo boot:
+At boot, `reconcileCrashedInstances` runs in the background:
 
-1. Generate new `instance_id` for this run.
-2. List containers matching `label=cogmo.managed=true` via Docker daemon.
-3. For each found container:
-   - If its `cogmo.instance` ≠ current instance → orphan from a previous run. Stop + remove. Move any matching DB row to `reaped` (`crash_reconcile`), from whichever non-terminal status it holds.
-   - If a DB row exists and matches the current instance → crash during task execution. Mark status according to Docker's report; if still running, let the task resume (session_id in `coding_tasks` lets us rejoin).
-4. Same pass for networks and volumes.
+1. Bootstrap inserts this run's `cogmo_instances` row.
+2. It lists the containers labelled `cogmo.managed=true`. Each one labelled with another open instance row in this database is killed and removed, and its row, if it has one, moves to `reaped` (`crash_reconcile`).
+3. It closes those instance rows, so the orphan pass retries anything reconcile could not kill. A container from a gracefully stopped instance, whose row is already closed, is left to the orphan pass.
 
-Proxy crash mid-task: in-memory socket map is lost. Supervisor rebuilds it from the `containers` table (query `depth=0 AND status='running' AND instance_id=<current>`) and re-creates the socket files. Tasks briefly see "Docker daemon unavailable" errors; retry on their end, or Cogmo marks the task failed if the gap is long.
+Networks and volumes are not reconciled. `[proposed]` Once the proxy inserts their rows, reconcile lists `cogmo.managed` networks and volumes as it does containers (Network and volume state machine). The proxy runs in the same process, so a proxy crash is a process crash and this pass covers it. An extracted proxy (Deployment Topology) would have to rebuild its socket map from the live depth-0 rows.
 
 ### Networks, Volumes, Images `[confirmed]`
 
-**Networks and volumes:** tracked identically to containers, with the same `root_task_id` cascade. Common case — docker compose brings up services + a network; all get reaped together when the task exits.
+**Networks and volumes** `[proposed]`: tracked like containers, with the same `root_task_id` cascade, once the proxy's network and volume routes insert their rows (Network and volume state machine). The common case is a `docker compose` that brings up services and a network, all reaped together when the task ends.
 
-**Images:** shared across tasks, not reaped per-task. Separate GC job keyed on disk budget — prune dangling + untagged + LRU-with-max-age, enforced every N minutes or when disk > threshold. Pull policy: registry allowlist (empty by default = allow all).
+**Images:** shared across tasks, not reaped per task. Pulls are forwarded with no registry allowlist. `[proposed]` A separate GC job keyed on disk budget would prune dangling and untagged images and evict by LRU with a maximum age, every N minutes or when disk passes a threshold.
 
 #### Cache volume scoping
 
@@ -726,31 +991,32 @@ The Daytona backend does not run the Cogmo Docker socket proxy, the systemd cgro
 
 ```text
 src/sandbox/
-  index.ts                     — public API: SandboxClient, SandboxSession, capabilities
-  options.ts                   — discriminated SandboxClientOptions (Zod)
-  state.ts                     — discriminated SandboxSessionState (Zod)
+  index.ts                     — public API: SandboxClient, SandboxSession, options, capabilities
+  types.ts                     — shared schemas (labels, resource limits)
   factory.ts                   — selects backend from SANDBOX_BACKEND env
-  clients/
-    local-docker/
-      client.ts                — LocalDockerSandboxClient
-      session.ts               — LocalDockerSandboxSession
-      supervisor.ts            — container lifecycle, socket allocation
-      proxy/
-        index.ts, policy.ts, router.ts
-      reaper.ts                — TTL + orphan + cascade logic
-      runtime.ts               — sysbox detection + runtime selection
-      askpass.ts
-      cgroup-parent.ts
-      rpc/router.ts            — tRPC control plane (extracted-sidecar mode)
-    daytona/
-      client.ts                — DaytonaSandboxClient
-      session.ts               — DaytonaSandboxSession (exec, fs, git)
-      streaming.ts             — session-logs WS wrapper, polling fallback
-      git-transport.ts         — ephemeral-branch push/fetch helper
+  supervisor.ts                — LocalDockerSandboxClient: container lifecycle, socket allocation, reconcile
+  exec.ts, exec-run.ts, exec-state.ts — exec lifecycle (pure transition table + driver)
+  docker-facade.ts             — narrow dockerode interface
+  mark-container-running.ts, mark-container-exited.ts, reap-container.ts, kill-and-remove-container.ts
+                               — one use case per container transition
+  reaper.ts                    — TTL + orphan + stale passes (Inngest cron)
+  runtime.ts                   — sysbox detection + runtime selection
+  askpass.ts
+  cgroup-parent.ts
+  proxy/
+    index.ts, policy.ts, router.ts, types.ts — Docker API proxy
+  daytona/
+    client.ts                  — DaytonaSandboxClient
+    session.ts                 — DaytonaSandboxSession (exec, fs, git)
+    exec-streaming.ts          — session-logs WS exec
+    exec-pty.ts                — PTY exec for stdin-attached commands
+    askpass-upload.ts, auth.ts, dispose.ts, probe.ts, shell-quote.ts
   store/
-    schema.ts                  — containers, networks, volumes (Local-Docker only)
+    schema.ts                  — cogmo_instances, containers, networks, volumes (Local-Docker only)
     index.ts                   — SandboxStore interface + Drizzle impl
 ```
+
+The ephemeral-branch push and fetch for Daytona's `git-remote` transport live with coding delegation (`src/agent/coding/`). The tRPC control plane for an extracted proxy (Deployment Topology) is not built.
 
 The Daytona backend in-tree alongside Local-Docker. If the provider list grows, individual backends extract to separate packages — the abstraction is designed for it (matches the OpenAI Agents SDK's in-tree-Docker + out-of-tree-everything-else pattern).
 

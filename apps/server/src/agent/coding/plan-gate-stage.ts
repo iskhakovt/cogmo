@@ -5,19 +5,15 @@
 
 import { match } from "ts-pattern";
 import { codingTaskPlanApproved } from "../../inngest/events.js";
-import type { SandboxClient } from "../../sandbox/index.js";
-import type { SecretsStore } from "../../secrets/store/index.js";
 import type { CodingRun, TaskStoreDeps } from "./coding-run.js";
 import { planGateEmission } from "./plan-gate.js";
 import type { PlanStreamHandle } from "./progress-stream.js";
 import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
 import { advanceTask, reclaimIfEnded } from "./task-lifecycle.js";
+import type { TeardownDeps } from "./teardown.js";
 import type { WorktreeAssignment } from "./types.js";
 
-interface PlanGateDeps extends TaskStoreDeps {
-  sandbox: Pick<SandboxClient, "deleteByTaskId">;
-  secretsStore: SecretsStore;
-}
+interface PlanGateDeps extends TaskStoreDeps, TeardownDeps {}
 
 /** Who clears a task's plan gate. */
 type Gate = "human_tap" | "profile_autoapprove" | "no_interactive_gate";
