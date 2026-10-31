@@ -11,9 +11,10 @@ import { repoRoot } from "./repo-root.js";
  * functions count the way they do in a real build.
  *
  * The task images' toolchain pins live in bake alone: their Dockerfiles
- * declare the ARGs without defaults. Two pins have a mirror bake can't feed —
- * package.json pins pnpm via `packageManager`, and ci.yml pins uv for the
- * skills-runtime job — so those are held to the bake values here.
+ * declare the ARGs without defaults. Three files mirror pins bake can't feed —
+ * package.json's `packageManager` and the root Dockerfile's ARG defaults
+ * (pnpm), and ci.yml's setup-uv (uv) — so those are held to the bake values
+ * here.
  */
 
 function read(relativePath: string): string {
@@ -81,6 +82,19 @@ describe("toolchain pins", () => {
     const pnpm = extract(packageManager, "packageManager pnpm version", /^pnpm@([^+]+)/);
     expect(pnpm).toBe(arg("devbase", "PNPM_VERSION"));
   });
+
+  it.each(["PNPM_VERSION", "PNPM_DIGEST"])(
+    "the root Dockerfile's %s default matches bake",
+    (name) => {
+      const dockerfile = readFileSync(target("cogmo-e2e").dockerfilePath, "utf8");
+      const fallback = extract(
+        dockerfile,
+        `root Dockerfile ${name} default`,
+        new RegExp(`^ARG ${name}=(\\S+)$`, "m"),
+      );
+      expect(fallback).toBe(arg("cogmo-e2e", name));
+    },
+  );
 });
 
 /**
