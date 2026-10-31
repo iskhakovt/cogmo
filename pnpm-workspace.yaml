@@ -46,9 +46,9 @@ minimumReleaseAgeExclude:
   # unknown third-party releases doesn't apply. Bump in lockstep with the
   # hindsight-api image pins in apps/server/dev/containers.ts and
   # cogmo.hindsightCompat.
-  - '@vectorize-io/hindsight-client@1.1.0'
-  - '@types/node@26.6.6' # until 2026-11-04
-  - 'follow-redirects@1.16.2' # security patch (#721), until 2026-11-05
+  - "@vectorize-io/hindsight-client@1.1.0"
+  - "@types/node@26.6.6" # until 2026-11-04
+  - "follow-redirects@1.16.2" # security patch (#721), until 2026-11-05
 
 # Keeps pnpm-lock.yaml a single YAML document. Under the default `download`,
 # pnpm 12 prepends an environment document recording itself, and GitHub's
