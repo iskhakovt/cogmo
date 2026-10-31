@@ -18,7 +18,9 @@ const DependabotSchema = z.object({
   updates: z.array(
     z.object({
       "package-ecosystem": z.string(),
-      cooldown: z.object({ "default-days": z.number() }).optional(),
+      // Strict: a `semver-*-days`, `include` or `exclude` key would let
+      // Dependabot open PRs on releases younger than the soak.
+      cooldown: z.object({ "default-days": z.number() }).strict().optional(),
     }),
   ),
 });
