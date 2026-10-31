@@ -154,12 +154,6 @@
 
 ### Skills, voice & transport
 
-- [ ] `p1` Keep task-writable `$HOME` out of what the tier-2 supervisor and the host's dependency scripts load. Tasks on a worker share and can write `$HOME` (design/skills.md → State reset between tasks). Two consequences, both cross-task code or config injection rather than leftover files:
-  - **The supervisor.** `SUPERVISOR_CMD` (`src/skills/worker-sysbox/worker.ts`) starts `python3 -u -m cogmo_skills_runtime` in `/home/cogmo`. `-m` puts the cwd first on `sys.path`, the supervisor never removes it, and every task forks from it. A planted `$HOME/csv.py` runs inside a later task that imports `csv`, with that task's inputs and `ctx` secrets in reach.
-    - Fix shape: `-I` (or `-P`). `-I` also drops `PYTHON*` env vars and user site, so check what the supervisor and tasks read from them (`-u` covers `PYTHONUNBUFFERED`).
-  - **The populate and reaper execs.** They run with `$HOME` as cwd, so `uv venv` and `uv pip sync` pick up a planted `$HOME/uv.toml`, `$HOME/.python-version` or `$HOME/.config/uv/uv.toml`, for example choosing another interpreter for the venv a later task runs in. The abi probe's `-I` covers only the probe.
-    - Fix shape: `workingDir: "/"` on both `execStreaming` calls, plus `UV_NO_CONFIG=1`.
-  - Regression tests in the sysbox supervisor tests: plant a module in `$HOME` and run a task that imports it; plant a `.python-version` and populate.
 - [ ] `p1` Sandbox tier-1 skills or stop treating Pyodide as a trust tier. The worker shares the host's environment, has no resource limits and keeps the `js` and `pyodide_js` bridges (environment, child processes, a fetch the SSRF guard never sees), and a tier-1 skill with no effects goes live as `auto`. Run tier 1 inside tier 2's container boundary, or never classify it `auto`, load Pyodide with empty `jsglobals`, set `resourceLimits`, lint the bridges, and test that `import js` cannot reach `process`; design/skills.md calls the tier a capability-based sandbox. (deep review 2026-10-27, H1)
 - [ ] `p1` Drop non-private Telegram chats ahead of the sender gate, with a test. A reply with full personal memory otherwise goes to every member of a group the bot is added to, though design/transport/telegram.md says DMs only. (deep review 2026-10-27, M1)
 - [ ] `p2` Deliver a batch per adapter so one adapter's failure doesn't re-send the full reply through the others on retry: a step per target, or `allSettled` inside the step as the router's other fan-outs do, with a test for a rejecting adapter. (deep review 2026-10-27, M8)

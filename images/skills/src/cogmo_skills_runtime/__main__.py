@@ -1,4 +1,4 @@
-"""Entry point for `python3 -u -m cogmo_skills_runtime`.
+"""Entry point for `python3 -I -u -m cogmo_skills_runtime`.
 
 Runs the supervisor's main loop. Returns when stdin closes.
 """

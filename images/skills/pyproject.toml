@@ -1,7 +1,7 @@
 # cogmo-skills-runtime — the python supervisor + runner that runs inside
 # `cogmo-skills:<version>`. Hosts the JSON-RPC bridge to the Cogmo TS
 # host (`src/skills/worker-sysbox/worker.ts`); workers spawn this via
-# `python3 -u -m cogmo_skills_runtime`.
+# `python3 -I -u -m cogmo_skills_runtime`.
 #
 # Production has zero runtime deps (stdlib only). Dev group covers
 # ruff/pyrefly/pytest for the local + CI workflow. uv-managed lockfile

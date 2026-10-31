@@ -46,6 +46,8 @@ const DEFAULT_RUN_AS = { userId: "u-1", profileId: "p-1" };
  *   - Task isolation on a warm worker: a process a skill leaves behind is
  *     gone before the next skill runs, and a skill cannot open its relay's
  *     or the supervisor's host channel through `/proc`.
+ *   - `$HOME`, which tasks on a worker share and can write, reaches neither
+ *     a later task's imports nor the venv populate's uv configuration.
  *
  * Gated by `SANDBOX_RUNTIME=sysbox`. Skipped on dev machines without
  * sysbox; runs in the GHA `sysbox-e2e` job. Mirrors the supervisor's own
@@ -280,6 +282,87 @@ async def run(inputs, ctx):
     return {"opened": opened, "control": _can_open(f"/proc/{os.getpid()}/fd/0", os.O_RDONLY)}
 `;
 
+/**
+ * Lockfile recorded by running `echo "idna==3.10" | uv pip compile
+ * --generate-hashes --no-header --quiet --only-binary=:all: -` against
+ * the same `cogmo-skills:test` image the sandbox uses. Idna is a
+ * pure-Python single-package dep (no transitive graph), so the
+ * populator's `uv pip sync --require-hashes` step exercises the
+ * shared-volume mount + activation path with the smallest possible
+ * wheel surface (~80 KB).
+ *
+ * **Refresh trigger: PyPI yanks idna==3.10.** If `uv pip sync` starts
+ * failing with a "hash mismatch" or "file not found" error here, the
+ * pinned version no longer exists upstream. Pick the current stable
+ * (`pip index versions idna`), re-run the compile command above,
+ * and replace the hashes + the expected versions in the assertions.
+ */
+const IDNA_LOCKFILE = `idna==3.10 \\
+    --hash=sha256:12f65c9b470abda6dc35cf8e63cc574b1c52b11df2c86030af0ac09b01b13ea9 \\
+    --hash=sha256:946d195a0d259cbba61165e88e65941f16e9b36ea6ddb97f00452bae8b1287d3
+`;
+
+const depsManifest = (name: string) => `---
+name: ${name}
+description: a tier-2 skill that imports a declared dependency
+tier: container
+dependencies:
+  - "idna==3.10"
+inputs:
+  type: object
+  properties: {}
+---
+`;
+
+/**
+ * Writes a `csv.py` into the task's cwd, which is the supervisor's, and into
+ * `$HOME`: on a warm worker every task can write both.
+ */
+const PLANT_MODULE_BODY = `
+import os, socket
+
+async def run(inputs, ctx):
+    for d in {os.getcwd(), os.path.expanduser("~")}:
+        with open(os.path.join(d, "csv.py"), "w") as f:
+            f.write("PLANTED = True\\n")
+    return {"host": socket.gethostname()}
+`;
+
+const IMPORT_CSV_BODY = `
+import csv, socket
+
+async def run(inputs, ctx):
+    return {"host": socket.gethostname(), "planted": hasattr(csv, "PLANTED"), "file": csv.__file__}
+`;
+
+/**
+ * Plants uv configuration in `$HOME`: a `.python-version` in the image's
+ * working directory and a user `uv.toml`. Each asks for an interpreter the
+ * image doesn't have, and downloads are off, so a populate that reads either
+ * cannot create the venv.
+ */
+const PLANT_UV_CONFIG_BODY = `
+import os, socket
+
+async def run(inputs, ctx):
+    home = os.path.expanduser("~")
+    with open(os.path.join(home, ".python-version"), "w") as f:
+        f.write("3.9\\n")
+    os.makedirs(os.path.join(home, ".config", "uv"), exist_ok=True)
+    with open(os.path.join(home, ".config", "uv", "uv.toml"), "w") as f:
+        f.write('python-preference = "only-managed"\\n')
+    return {"host": socket.gethostname()}
+`;
+
+const IDNA_HOST_BODY = `
+import importlib.metadata as md
+import socket
+import idna
+
+async def run(inputs, ctx):
+    return {"host": socket.gethostname(), "version": md.version("idna")}
+`;
+
 describe.skipIf(!SHOULD_RUN)("SkillRunnerImpl tier-2 (sysbox runtime, GHA only)", () => {
   it("invokes a tier-2 skill end-to-end against cogmo-skills:test", async () => {
     const runner = await SkillRunnerImpl.create({
@@ -400,34 +483,6 @@ resources:
   }, 180_000);
 
   it("invokes a tier-2 skill with declared deps — populator + venv activation end-to-end", async () => {
-    // Lockfile recorded by running `echo "idna==3.10" | uv pip compile
-    // --generate-hashes --no-header --quiet --only-binary=:all: -` against
-    // the same `cogmo-skills:test` image the sandbox uses. Idna is a
-    // pure-Python single-package dep (no transitive graph), so the
-    // populator's `uv pip sync --require-hashes` step exercises the
-    // shared-volume mount + activation path with the smallest possible
-    // wheel surface (~80 KB).
-    //
-    // **Refresh trigger: PyPI yanks idna==3.10.** If `uv pip sync` starts
-    // failing with a "hash mismatch" or "file not found" error here, the
-    // pinned version no longer exists upstream. Pick the current stable
-    // (`pip index versions idna`), re-run the compile command above,
-    // and replace the hashes + the assertion's expected version below.
-    const idnaLockfile = `idna==3.10 \\
-    --hash=sha256:12f65c9b470abda6dc35cf8e63cc574b1c52b11df2c86030af0ac09b01b13ea9 \\
-    --hash=sha256:946d195a0d259cbba61165e88e65941f16e9b36ea6ddb97f00452bae8b1287d3
-`;
-    const depsManifest = `---
-name: tier2-with-deps
-description: a tier-2 skill that imports a declared dependency
-tier: container
-dependencies:
-  - "idna==3.10"
-inputs:
-  type: object
-  properties: {}
----
-`;
     const depsBody = `
 import importlib.metadata as md
 import idna
@@ -455,9 +510,9 @@ async def run(inputs, ctx):
     try {
       await runner.__registerForTests({
         name: "tier2-with-deps",
-        manifestSource: depsManifest,
+        manifestSource: depsManifest("tier2-with-deps"),
         body: depsBody,
-        lockfileContents: idnaLockfile,
+        lockfileContents: IDNA_LOCKFILE,
       });
 
       const result = (
@@ -587,6 +642,93 @@ async def run(inputs, ctx):
       expect(result.output).toEqual({ opened: [], control: true });
     } finally {
       await runner.shutdown();
+    }
+  }, 180_000);
+
+  it("a module a task plants in $HOME never loads in a later task on the worker", async () => {
+    const runner = await SkillRunnerImpl.create({
+      runInTx: tx,
+      store: skillStore,
+      secretsStore: stubSecrets(),
+      sandbox,
+      tier2Image: SKILLS_IMAGE,
+      userTimezone: "UTC",
+      defaultRunAs: DEFAULT_RUN_AS,
+    });
+    try {
+      await runner.__registerForTests({
+        name: "tier2-plant-module",
+        manifestSource: containerManifest("tier2-plant-module"),
+        body: PLANT_MODULE_BODY,
+      });
+      await runner.__registerForTests({
+        name: "tier2-import-csv",
+        manifestSource: containerManifest("tier2-import-csv"),
+        body: IMPORT_CSV_BODY,
+      });
+
+      const planted = (
+        await runner.invoke({ name: "tier2-plant-module", inputs: {}, runAs: RUN_AS })
+      )._unsafeUnwrap();
+      assertStatus(planted, "success");
+      const imported = (
+        await runner.invoke({ name: "tier2-import-csv", inputs: {}, runAs: RUN_AS })
+      )._unsafeUnwrap();
+      assertStatus(imported, "success");
+      const { host } = planted.output as { host: string };
+      // Same container, so the planted file is on the importing task's disk.
+      expect(imported.output).toEqual({
+        host,
+        planted: false,
+        file: expect.stringMatching(/^\/usr\/local\/lib\/python3\.\d+\/csv\.py$/),
+      });
+    } finally {
+      await runner.shutdown();
+    }
+  }, 180_000);
+
+  it("a populate ignores uv configuration a task planted in $HOME", async () => {
+    const depsCacheVolumeName = `cogmo-skills-test-deps-${randomUUID()}`;
+    const runner = await SkillRunnerImpl.create({
+      runInTx: tx,
+      store: skillStore,
+      secretsStore: stubSecrets(),
+      sandbox,
+      tier2Image: SKILLS_IMAGE,
+      userTimezone: "UTC",
+      defaultRunAs: DEFAULT_RUN_AS,
+      depsCacheVolumeName,
+    });
+    try {
+      await runner.__registerForTests({
+        name: "tier2-plant-uv-config",
+        manifestSource: containerManifest("tier2-plant-uv-config"),
+        body: PLANT_UV_CONFIG_BODY,
+      });
+      await runner.__registerForTests({
+        name: "tier2-idna-host",
+        manifestSource: depsManifest("tier2-idna-host"),
+        body: IDNA_HOST_BODY,
+        lockfileContents: IDNA_LOCKFILE,
+      });
+
+      const planted = (
+        await runner.invoke({ name: "tier2-plant-uv-config", inputs: {}, runAs: RUN_AS })
+      )._unsafeUnwrap();
+      assertStatus(planted, "success");
+      // Its venv is populated on the worker the planting task ran on.
+      const populated = (
+        await runner.invoke({ name: "tier2-idna-host", inputs: {}, runAs: RUN_AS })
+      )._unsafeUnwrap();
+      assertStatus(populated, "success");
+      const { host } = planted.output as { host: string };
+      expect(populated.output, JSON.stringify(populated)).toEqual({ host, version: "3.10" });
+    } finally {
+      await runner.shutdown();
+      await docker
+        .getVolume(depsCacheVolumeName)
+        .remove()
+        .catch(() => {});
     }
   }, 180_000);
 });

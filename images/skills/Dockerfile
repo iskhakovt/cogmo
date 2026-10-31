@@ -103,4 +103,4 @@ RUN mkdir -p /skill-venvs && chown cogmo:cogmo /skill-venvs
 # files the skill writes land somewhere writable.
 USER cogmo
 WORKDIR /home/cogmo
-CMD ["python3", "-u", "-m", "cogmo_skills_runtime"]
+CMD ["python3", "-I", "-u", "-m", "cogmo_skills_runtime"]

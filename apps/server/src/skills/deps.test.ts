@@ -592,6 +592,28 @@ describe("ensureVenvPopulated", () => {
     expect(/^PY_ABI=\$\((.*)\)$/m.exec(script)?.[1]).toBe("python3 -I -m cogmo_skills_runtime.abi");
   });
 
+  it("runs from / with uv's config discovery off, so uv ignores config a task planted in $HOME", async () => {
+    // Why: see `DEPENDENCY_EXEC_OPTIONS`. The sysbox tier plants a
+    // `.python-version` and a user `uv.toml` and populates
+    // (`runner.sysbox.integration.test.ts`).
+    const exec = makeFakeExec();
+    const session = mock<SandboxSession>();
+    session.execStreaming.mockResolvedValue(exec.handle);
+
+    const promise = ensureVenvPopulated({
+      session,
+      lockfileHash: "abc123",
+      lockfileContents: "httpx==0.27.0\n",
+      workerId: "worker-1",
+    });
+    await new Promise((r) => setImmediate(r));
+    exec.waitResolve(0);
+    await promise;
+
+    const [, options] = expectDefined(session.execStreaming.mock.calls[0], "populate exec");
+    expect(options).toMatchObject({ workingDir: "/", env: { UV_NO_CONFIG: "1" } });
+  });
+
   it("returns populate_failed with stderr on non-zero exit", async () => {
     const exec = makeFakeExec();
     const session = mock<SandboxSession>();

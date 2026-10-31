@@ -24,14 +24,10 @@ from typing import Any
 
 import pytest
 
-import cogmo_skills_runtime
-
 pytestmark = pytest.mark.skipif(
     not hasattr(os, "pidfd_open"),
     reason="os.pidfd_open unavailable on this build of CPython",
 )
-
-_SRC_DIR = str(Path(cogmo_skills_runtime.__file__).resolve().parent.parent)
 
 
 class _Supervisor:
@@ -41,17 +37,19 @@ class _Supervisor:
     `main()`, to stub one of its internals.
     """
 
-    def __init__(self, patch: str | None = None) -> None:
-        env = dict(os.environ)
-        env["PYTHONPATH"] = _SRC_DIR
+    def __init__(self, patch: str | None = None, cwd: Path | None = None) -> None:
         argv = ["-m", "cogmo_skills_runtime"]
         if patch is not None:
             argv = ["-c", f"from cogmo_skills_runtime import supervisor\n{patch}\nsupervisor.main()\n"]
+        # The host's flags (`SUPERVISOR_CMD` in
+        # `apps/server/src/skills/worker-sysbox/worker.ts`). `-I` ignores
+        # `PYTHONPATH`, so the package resolves as in the image: installed in
+        # the interpreter's environment.
         self.proc = subprocess.Popen(
-            [sys.executable, "-u", *argv],
+            [sys.executable, "-I", "-u", *argv],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            env=env,
+            cwd=cwd,
         )
         self._frames: queue.Queue[dict[str, Any] | None] = queue.Queue()
         self._reader = threading.Thread(target=self._read, daemon=True)
@@ -204,6 +202,18 @@ async def run(inputs, ctx):
 
 _ECHO = "async def run(inputs, ctx):\n    return {'echo': inputs}\n"
 
+# Writes a `csv.py` into the task's cwd, which is the supervisor's.
+_PLANT_CSV = """
+import os
+
+async def run(inputs, ctx):
+    with open(os.path.join(os.getcwd(), "csv.py"), "w") as f:
+        f.write("PLANTED = True\\n")
+    return os.getcwd()
+"""
+
+_IMPORT_CSV = "import csv\nasync def run(inputs, ctx):\n    return hasattr(csv, 'PLANTED')\n"
+
 # Walks up from the task's process to the supervisor, trying to open each
 # ancestor's stdin and stdout through /proc.
 _OPEN_ANCESTOR_FDS = """
@@ -261,6 +271,20 @@ class TestTaskIsolation:
         body = "import ctypes\nasync def run(inputs, ctx):\n    return ctypes.CDLL(None).prctl(39, 0, 0, 0, 0)\n"
         # 39 = PR_GET_NO_NEW_PRIVS
         assert sup.run_task("t-nnp", body, {})["output"] == 1
+
+    def test_a_module_a_task_plants_in_the_cwd_never_loads_in_a_later_task(self, tmp_path: Path) -> None:
+        """The host starts the supervisor in `$HOME`, which tasks can write,
+        and every task forks from it. Started isolated, the supervisor keeps
+        that cwd off `sys.path`, so a later task's `import csv` is the stdlib's."""
+        sup = _Supervisor(cwd=tmp_path)
+        try:
+            planted = sup.run_task("t-plant", _PLANT_CSV, {})
+            assert planted["output"] == str(tmp_path), planted
+            assert sup.await_exit("t-plant") == {"type": "task_exited", "id": "t-plant"}
+            imported = sup.run_task("t-import", _IMPORT_CSV, {})
+            assert imported["output"] is False, imported
+        finally:
+            sup.close()
 
     @pytest.mark.skipif(os.geteuid() == 0, reason="root holds CAP_SYS_PTRACE, which bypasses dumpability")
     def test_the_task_cannot_open_the_host_channel_through_proc(self, sup: _Supervisor) -> None:

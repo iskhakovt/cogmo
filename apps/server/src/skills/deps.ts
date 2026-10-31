@@ -3,6 +3,7 @@ import { err, ok, type Result } from "neverthrow";
 import { logger } from "../logger.js";
 import {
   DEPS_CACHE_VOLUME_TARGET,
+  type ExecOptions,
   type ExecStreamingHandle,
   type ResourceLimits,
   type SandboxClient,
@@ -283,11 +284,25 @@ const DEFAULT_POPULATE_TIMEOUT_MS = 180_000;
 /**
  * Prints the image's `py<major>.<minor>` tag, which names skill venvs. The
  * populate script and the reaper's both run it, so the two always agree on
- * which venvs are live. `-I` keeps the exec's cwd off `sys.path`: on a warm
- * worker that is `$HOME`, which tasks can write, and `-m` alone would import
- * a `cogmo_skills_runtime` planted there.
+ * which venvs are live. `-I` keeps the cwd off `sys.path` and ignores
+ * `PYTHON*` variables, so the module is the image's whatever directory the
+ * script runs in: with `-m` alone, a `cogmo_skills_runtime` in the cwd would
+ * run instead.
  */
 export const PYTHON_ABI_TAG_COMMAND = "python3 -I -m cogmo_skills_runtime.abi";
+
+/**
+ * How the populate and reap scripts run inside a worker's image: from `/`,
+ * with uv's configuration discovery off. Tasks on a warm worker can write
+ * `$HOME`, the image's working directory, so uv would otherwise read a
+ * `uv.toml`, `pyproject.toml` or `.python-version` planted there, and a
+ * `~/.config/uv/uv.toml` or `~/.config/uv/.python-version` from any cwd, and
+ * could build the venv a later task runs in on another interpreter or index.
+ */
+export const DEPENDENCY_EXEC_OPTIONS = {
+  workingDir: "/",
+  env: { UV_NO_CONFIG: "1" },
+} as const satisfies ExecOptions;
 
 /**
  * Shell program that the populator invokes inside the worker
@@ -421,7 +436,7 @@ export async function ensureVenvPopulated(
   try {
     handle = await opts.session.execStreaming(
       ["sh", "-c", POPULATE_SCRIPT, "populate", opts.lockfileHash, opts.workerId],
-      { attachStdin: true, timeoutMs },
+      { ...DEPENDENCY_EXEC_OPTIONS, attachStdin: true, timeoutMs },
     );
   } catch (e) {
     return err({
