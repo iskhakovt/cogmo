@@ -175,20 +175,38 @@ function collapseCorrections(
   const seen = new Set<string>();
   return items.filter((c) => {
     const target = targetOf(c);
-    const key = match(c)
-      .with({ action: "new" }, (n) => `new:${n.channelType ?? ""}:${normalizedText(n.rule)}`)
-      .with({ action: "contradiction" }, () => (target === null ? null : `contradiction:${target}`))
+    const verdict = match(c)
+      .returnType<Dedup>()
+      .with({ action: "new" }, (n) => ({
+        kind: "key",
+        key: `new:${n.channelType ?? ""}:${normalizedText(n.rule)}`,
+      }))
+      .with({ action: "contradiction" }, () =>
+        target === null ? { kind: "keep" } : { kind: "key", key: `contradiction:${target}` },
+      )
       .with({ action: "reinforce" }, () =>
-        // A reinforcement of a rule this turn contradicts loses to it.
-        target === null ? null : contradicted.has(target) ? "dropped" : `reinforce:${target}`,
+        target === null
+          ? { kind: "keep" }
+          : // A reinforcement of a rule this turn contradicts loses to it.
+            contradicted.has(target)
+            ? { kind: "drop" }
+            : { kind: "key", key: `reinforce:${target}` },
       )
       .exhaustive();
-    if (key === null) return true;
-    if (key === "dropped" || seen.has(key)) return false;
-    seen.add(key);
-    return true;
+    return match(verdict)
+      .with({ kind: "keep" }, () => true)
+      .with({ kind: "drop" }, () => false)
+      .with({ kind: "key" }, ({ key }) => {
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .exhaustive();
   });
 }
+
+/** What the dedup does with one item: keep it unkeyed, drop it, or keep the first with its key. */
+type Dedup = { kind: "keep" } | { kind: "drop" } | { kind: "key"; key: string };
 
 function normalizedText(text: string): string {
   return text.toLowerCase().replace(/\s+/g, " ").trim();

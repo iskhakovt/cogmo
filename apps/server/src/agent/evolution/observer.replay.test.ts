@@ -9,6 +9,8 @@
 import { randomUUID } from "node:crypto";
 import { InngestTestEngine } from "@inngest/test";
 import { eq } from "drizzle-orm";
+import { StepError } from "inngest";
+import { errors } from "inngest/internals";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
 import type { LlmProvider } from "../../llm/provider.js";
@@ -223,6 +225,70 @@ describe("createObserver under replay", () => {
     expect(await countOf(ruleId)).toBe(1);
     const rows = await db.select({ status: turnObservations.status }).from(turnObservations);
     expect(rows.map((r) => r.status)).toEqual(["applied", "applied"]);
+  });
+
+  /**
+   * A fire whose second turn's step fails for good: the real step body
+   * throws, and the error reaches the walk as the SDK hands a step's failure
+   * back, serialized (`errors.serializeError`) and rebuilt as a `StepError`.
+   * `@inngest/test`'s mocked steps resolve a throwing handler as `undefined`,
+   * so the harness applies the SDK's own serialization instead.
+   */
+  async function secondTurnFails(failure: "unavailable" | "database") {
+    const { conversationId } = await seed();
+    const plan = await discoverTurns({ runInTx: tx, store }, { conversationId, limit: 10 });
+    const second = expectDefined(plan.turns[1], "second turn");
+    const secondStep = `observe-v1-corrections-${second.observationId}`;
+    const inner = reinforcingProvider();
+    const provider = mockProvider({
+      chat: vi.fn(async (params: ChatParams) => {
+        const correcting = params.system.includes("behavioral correction extractor");
+        const onSecond = params.messages.some(
+          (m) => typeof m.content === "string" && m.content.includes(CORRECTION),
+        );
+        if (correcting && onSecond && failure === "unavailable") {
+          throw Object.assign(new Error("overloaded"), { status: 529 });
+        }
+        return inner.chat(params);
+      }),
+    });
+    const sdkStep: ObserverStepHarness = {
+      async run<T>(id: string, fn: () => Promise<T>): Promise<T> {
+        try {
+          if (id === secondStep && failure === "database") throw new Error("connection reset");
+          return await fn();
+        } catch (err) {
+          throw new StepError(id, errors.serializeError(err));
+        }
+      },
+    };
+
+    await runObserver({ data: { conversationId } }, sdkStep, deps(provider), "idle");
+
+    const [row] = await db
+      .select({
+        status: turnObservations.status,
+        attempts: turnObservations.attempts,
+        failureKind: turnObservations.failureKind,
+      })
+      .from(turnObservations)
+      .where(eq(turnObservations.id, second.observationId));
+    const [audit] = await db.select({ payload: evolutionEvents.payload }).from(evolutionEvents);
+    return { row, failedPhases: audit?.payload.failedPhases };
+  }
+
+  it("leaves a turn uncounted when its step failed with an unavailable extraction", async () => {
+    const { row, failedPhases } = await secondTurnFails("unavailable");
+
+    expect(row).toEqual({ status: "pending", attempts: 0, failureKind: null });
+    expect(failedPhases).toEqual(["corrections"]);
+  });
+
+  it("counts a turn whose step failed with anything else", async () => {
+    const { row, failedPhases } = await secondTurnFails("database");
+
+    expect(row).toEqual({ status: "pending", attempts: 1, failureKind: "exhausted" });
+    expect(failedPhases).toEqual(["corrections"]);
   });
 });
 

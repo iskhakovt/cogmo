@@ -2,11 +2,13 @@
  * Which extraction failures the turn caused. The provider layer fails by
  * throwing; the Observer converts a throw to a value here, once, and only
  * when the turn caused it, so that only a turn-caused failure is counted on
- * the turn's row (design/observation.md → Slice 1a). Any other failure of
- * the extraction call (an outage, a rate limit, an expired key, an unknown
- * model, a 4xx no rule places) is rethrown as `ExtractionUnavailableError`:
- * the step retries it, the fire gives up on the phase, and the row stays as
- * it was.
+ * the turn's row (design/observation.md → Slice 1a). Anything else thrown
+ * by the extraction (the rules read, the prompt build or the provider call:
+ * an outage, a rate limit, an expired key, an unknown model, a 4xx no rule
+ * places, bugs included) is rethrown as `ExtractionUnavailableError`: the
+ * step retries it, the fire gives up on the phase, and the row stays as it
+ * was. What a turn's step throws outside the extraction (loading the turn,
+ * applying it, skipping it) is counted.
  */
 
 import { match } from "ts-pattern";

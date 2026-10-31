@@ -208,10 +208,25 @@ describe("DrizzleTurnObservationStore", () => {
       await tx((trx) =>
         store.transitionPendingTurn(trx, { id: doneId, to: { status: "applied" } }),
       );
+      const laterId = expectDefined(
+        all.find((t) => t.cursor === later),
+        "later turn",
+      ).observationId;
+      await tx((trx) =>
+        store.recordTurnAttempt(trx, {
+          id: laterId,
+          seen: 0,
+          failure: { kind: "parse", message: "bad json" },
+          to: "pending",
+        }),
+      );
 
       const turns = await planned(conv);
 
-      expect(turns.map((t) => t.cursor)).toEqual([earlier, later]);
+      expect(turns.map((t) => [t.cursor, t.attempts])).toEqual([
+        [earlier, 0],
+        [later, 1],
+      ]);
       const [firstRow] = await db
         .select({ id: messages.id })
         .from(messages)

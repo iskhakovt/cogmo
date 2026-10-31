@@ -691,9 +691,9 @@ Recommendation: a later spike behind a flag, measured on the memory routing eval
 
 <a id="slice-1a"></a>
 
-## Slice 1a: Corrections by Turn `[proposed]`
+## Slice 1a: Corrections by Turn `[confirmed]`
 
-The first step of PR 1 (Rollout): the corrections phase on the turn unit, with the part of the state machine that gives the Observer a durable cursor. Each fire extracts corrections from the turns no fire has observed, one model call per turn, and a turn's corrections commit once. Memory extraction keeps reading the whole transcript until PR 2. Slice 1a moves to `[confirmed]` on its own once its review passes, ahead of the rest of this document.
+The first step of PR 1 (Rollout): the corrections phase on the turn unit, with the part of the state machine that gives the Observer a durable cursor. Each fire extracts corrections from the turns no fire has observed, one model call per turn, and a turn's corrections commit once. Memory extraction keeps reading the whole transcript until PR 2. Slice 1a is `[confirmed]` on its own, ahead of the rest of this document.
 
 ### The cursor is the turn
 
@@ -709,9 +709,9 @@ The cursor is this design's: a turn's `turn_observations` row, keyed on `(conver
 |-|-|-|
 | Unit | Answered turns by cursor, kind from the inbound, `not_user_speech` for scheduled and pipeline turns | `superseded`, covering turns, and `unanswered` skip rows that reopen (1b). An unanswered turn gets no row until a reply makes it answered. |
 | States | `pending`, `applied`, `failed`, `skipped` (`not_user_speech`, `empty`, `backfilled`, `aged_out`) | `held`, `held_extracted`, `extracted` and the stored extraction (PR 2) |
-| Steps | `discover-turns`, then one `observe-v1-corrections-<observationId>` per planned turn, holding extraction and apply; `observe-v1-corrections-exhausted-<observationId>` after a turn's step fails for good outside the extraction call | Separate extract, apply and attempt steps (1b) |
+| Steps | `discover-turns`, then one `observe-v1-corrections-<observationId>` per planned turn, holding extraction and apply; `observe-v1-corrections-exhausted-<observationId>` after a turn's step fails for good outside the extraction (the rules read, prompt build and provider call) | Separate extract, apply and attempt steps (1b) |
 | Context | The turn answered before, its user text and final reply, each capped at 1,500 characters, head and tail | The summary, two turns, token budgets, truncating the turn (1b) |
-| Failures | Turn-caused throws classified (`classifyTurnFailure`) and counted; a step that fails for good outside the extraction call counted as `exhausted`; `MAX_TURN_ATTEMPTS` (3) counts fail the turn. Any other extraction-call failure is not counted. | `PhasePause` values and delayed follow-ups (1b) |
+| Failures | Turn-caused throws classified (`classifyTurnFailure`) and counted; a step that fails for good outside the extraction (loading, applying or skipping the turn) counted as `exhausted`; `MAX_TURN_ATTEMPTS` (3) counts fail the turn. Anything else the extraction throws, bugs included, is not counted. | `PhasePause` values and delayed follow-ups (1b) |
 | Profile and channels | The conversation's current profile and active channel types | The turn's profile and `turn_contexts` channel types (1b) |
 | Budget | `TURNS_PER_PHASE`: 10 per idle fire, 3 per `/reflect`; the rest wait for the next fire | Follow-ups, chain and daily budgets, `observer-v2` (1b) |
 | Audit | The row's shape unchanged, `corrections` summed over the fire's turns; per-turn counts logged | `turns` in the payload, `/learned` (1b) |
@@ -767,7 +767,7 @@ Any other transition is illegal, and no store method writes one: nothing leaves 
 | `applied`, `skipped` (`empty`), `done` (the row had left `pending` before the step began) | Next turn |
 | `taken` (this step's guarded write lost to another run) | Stop the phase |
 | `retryLater`, `failed` | Stop the phase: within one plan, a later turn is never applied ahead of an earlier one that can still succeed |
-| A turn's step failed for good with `ExtractionUnavailableError` (the extraction call failed for a reason that isn't the turn's) | Stop the phase as failed, counting nothing |
+| A turn's step failed for good with `ExtractionUnavailableError` (the rules read, prompt build or provider call threw something not placed as the turn's) | Stop the phase as failed, counting nothing |
 | A turn's step failed for good with anything else | `observe-v1-corrections-exhausted-<observationId>` counts it against the turn; stop the phase as failed |
 | `discover-turns` failed for good | Stop the phase as failed |
 
@@ -793,9 +793,9 @@ Every write a turn's corrections make commits with its row's `pending → applie
 | b | After the apply commits, before Inngest records the step | `applied` | The re-run reads the row at its start, returns `done`, and calls no model |
 | c | A database error inside the apply transaction | `pending` | The rule writes roll back with the move; the step retries, and the model is billed again |
 | d | A turn-caused failure, and a crash after its attempt commits | `pending` with `attempts + 1`, or `failed` | The re-run reads the new count and is the next attempt. A crash can spend one attempt early. |
-| e | The extraction call fails for a reason that isn't the turn's (an outage, a rate limit, an expired key, billing, an unknown model), out of the step's retries | `pending`, uncounted | The phase stops for the fire, and later fires retry the turn. Residual until 1b's `PhasePause`: while the cause lasts, the conversation's walk stalls at that turn, one model call per step attempt per fire. |
+| e | The extraction throws something the classifier doesn't place as the turn's, out of the step's retries: anything thrown by the rules read, the prompt build or the provider call (an outage, a rate limit, an expired key, billing, an unknown model, a network failure, which undici reports as `TypeError: fetch failed`), bugs included | `pending`, uncounted | The phase stops for the fire, and later fires retry the turn. Residual until 1b's `PhasePause`: while the cause lasts, the conversation's walk stalls at that turn, one model call per step attempt per fire; a bug in that region stalls it until fixed. |
 | e′ | A 400 or other 4xx that no rule places as the turn's: the overflow messages the classifier knows are Anthropic's "prompt is too long" and "exceed context limit" and OpenAI's and OpenRouter's "maximum context length" and `context_length_exceeded` | `pending`, uncounted | As row e. Residual: a request the provider will always reject for this turn (an overflow worded otherwise, a parameter the turn's size breaks) stalls the conversation's walk for good. 1b's classification decides it. |
-| e″ | A step fails for good outside the extraction call (a database error, a bug) | `pending` with `attempts + 1` (`exhausted`), or `failed` at 3 | The exhausted step counts it, guarded on the plan's count, so a re-run counts once. A turn that keeps failing holds the conversation's later turns for at most `MAX_TURN_ATTEMPTS` fires, then is passed. Cost: at most 3 fires × 2 step attempts × 2 `chatTyped` calls (one repair retry), about 12 billed calls, when the failure lands after the model call. |
+| e″ | A turn's step fails for good with something thrown outside the extraction: loading the turn, applying it, or skipping it (a database error, a bug) | `pending` with `attempts + 1` (`exhausted`), or `failed` at 3 | The exhausted step counts it, guarded on the plan's count, so a re-run counts once. A turn that keeps failing holds the conversation's later turns for at most `MAX_TURN_ATTEMPTS` fires, then is passed. Cost: at most 3 fires × 2 step attempts × 2 `chatTyped` calls (one repair retry), about 12 billed calls, when the failure lands after the model call. |
 | f | Two fires at once for one conversation: `/reflect` beside an idle fire, or two idle fires interleaving steps (the concurrency limit counts steps, not runs) | Each row moves once | Discovery is an idempotent upsert, and an insert racing it raises `40001`, which the transactor retries. Both may call the model for one turn. The first apply commits; the second's guarded UPDATE waits on the row lock, raises `40001`, and its retry finds the row `applied`: it returns `taken`, writes nothing and stops its phase. Residual: one duplicate model call. |
 | g | A turn's reply commits after discovery's snapshot | Not discovered this fire | No mark runs past it; the next fire's anti-join finds it |
 | h | A run of the transcript-era build in flight across the deploy | Whatever the database holds | Its memoized `extract-corrections` is never requested; `discover-turns` and the turn steps run against the rows. Residual: if that step committed its writes before the deploy, its audit row isn't written yet, so the backfill left its turns `pending`: they reinforce once more, and a contradicting one either retires the rule its first reading reset (the marker moved to a backfilled turn of the conversation) or, where the conversation had no backfilled turn and the marker is NULL, resets it again. The fires in flight at the deploy bound it; the concurrency limit counts steps, so a conversation can have more than one. |
@@ -839,7 +839,7 @@ Each PR is shippable and reviewable on its own. Migration numbers shift if other
 3. **Drop `contradicted_in_conversation_id`.** Generated, after a release contains PR 1a, so a rollback to that release still finds no reader of the column.
 4. **Hindsight raw-retain spike**, optional, as in [Hindsight Raw Retain](#hindsight-raw-retain-proposed).
 
-When PR 2 merges, this document's sections move to `[confirmed]`; [Slice 1a](#slice-1a) moves on its own once its review passes.
+When PR 2 merges, this document's sections move to `[confirmed]`; [Slice 1a](#slice-1a) already is.
 
 **Side bugs**, separate fixes found while designing this:
 
