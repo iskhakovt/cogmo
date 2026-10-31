@@ -38,21 +38,21 @@ variable "VERSION" {
 // declare these ARGs without defaults. Base-image FROM digests stay literal in
 // each Dockerfile for Dependabot. uv is shared by devbase + skills.
 variable "UV_VERSION" {
-  default = "0.13.4"
+  default = "0.13.6"
 }
 variable "UV_DIGEST" {
-  default = "sha256:9f130421e930bfbdc563c00740466603f8723158e90297d07957c2294640262b"
+  default = "sha256:af22a52f5eafef3d78e551599d405c02df61919d18028f0cea8eda93bc9986d0"
 }
 // Match package.json packageManager. The digest is ghcr.io/pnpm/pnpm's
 // index for that version.
 variable "PNPM_VERSION" {
-  default = "12.13.0"
+  default = "12.16.1"
 }
 variable "PNPM_DIGEST" {
-  default = "sha256:8ebb7ad694024b47535f6c2cd6bbeb532836e314609e8d90df0ef1f25661f8f4"
+  default = "sha256:33081d3d2c96ba582d316cfd630f0f43961d9c60ff919b50edd1835a1462976b"
 }
 variable "NPM_VERSION" {
-  default = "12.2.0"
+  default = "12.2.1"
 }
 // Coupled to the claude.ts stream-json parser — bump with it, and check the
 // CLI still exits at its `result` with a background command left running
