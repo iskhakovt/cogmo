@@ -64,6 +64,7 @@ AES-256-GCM via `@noble/ciphers`, HKDF-SHA256 key derivation via `@noble/hashes`
 
 ```
 secretsKey = hkdf(sha256, masterKey, fixedSalt, "cogmo/secrets-at-rest/v1", 32)
+egressKey  = hkdf(sha256, masterKey, fixedSalt, "cogmo/skill-egress/v1", 32)   // [proposed] skill egress credentials (skills.md → Egress proxy)
 ```
 
 The `v1` tag enables future re-derivation without rotating the master key. If a derived key is compromised, others are unaffected.

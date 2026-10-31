@@ -49,7 +49,7 @@ Skills execute in one of two sandboxes, chosen by skill metadata. No middle grou
 
 **Used for:** skills that only need HTTP through `ctx`, stdlib, and pre-built / pure-Python packages.
 
-**Why:** glue code without a container boot. Each invocation starts a fresh worker thread and Pyodide, about 5 s today, most of it micropip fetching dependencies from PyPI. Tier 1 is not an isolation boundary yet: the worker shares the host's environment and its `js` bridge reaches the host's globals ([Tier-1 boundary](#tier-1-boundary-proposed)).
+**Why:** glue code without a container boot. What isolates it today, and the hardening that makes it a boundary: [Tier-1 boundary](#tier-1-boundary-proposed).
 
 **Constraints:**
 
@@ -123,17 +123,17 @@ Overrides validated at deploy against a per-tier hard ceiling (e.g., ≤2 GB mem
 
 **Layers**, in the order they ship. Each closes a route the others leave open, and a test per layer turns the others off and shows its route closed.
 
-1. **A forked child process per worker**, launched with `--permission`, `--allow-fs-read` for the Pyodide distribution and the worker's read-only wheel directory, `--allow-worker`, and `--disallow-code-generation-from-strings`. It is granted no `--allow-fs-write`, `--allow-child-process` or `--allow-net`, so `fetch` throws `ERR_ACCESS_DENIED` and `FS.mount(NODEFS)` reaches nothing outside the grant. The V8 flag makes the `Function`-constructor path throw `EvalError`; Pyodide evaluates no JS string once loaded. Pyodide runs on a worker thread inside the child, created with an `execArgv` that re-lists the child's flags (an explicit `execArgv` otherwise drops the grant), so the child's main thread can write the interrupt buffer. Emscripten's boot calls `process.binding("constants")`, which `--permission` denies, so the child shims it with `os.constants` before `loadPyodide`. The Node permission model's own docs say it does not stop malicious code: symlinks are followed out of granted paths, which is why the host writes the wheel directory without links, and inherited file descriptors bypass it, which is why the child inherits only the IPC channel. It is one layer of several, not the boundary on its own.
+1. **A forked child process per worker**, launched with `--permission`, `--allow-fs-read` for the Pyodide distribution and the worker's read-only wheel directory, `--allow-worker`, and `--disallow-code-generation-from-strings`. It is granted no `--allow-fs-write`, `--allow-child-process` or `--allow-net`, so `fetch` throws `ERR_ACCESS_DENIED` and `FS.mount(NODEFS)` reaches nothing outside the grant. The V8 flag makes the `Function`-constructor path throw `EvalError`; Pyodide evaluates no JS string once loaded. Pyodide runs on a worker thread inside the child, created with an `execArgv` that re-lists the child's flags (an explicit `execArgv` otherwise drops the grant), so the child's main thread can write the interrupt buffer the two threads share. Emscripten side modules that define JS with `EM_JS` build it from strings at load, which the flag refuses; `pyodide-compat.ts` load-tests each native package in the lockfile under the flag, and one that fails to load makes the skill `tier: container`. Emscripten's boot calls `process.binding("constants")`, which `--permission` denies, so the child shims it with `os.constants` before `loadPyodide`. The Node permission model's own docs say it does not stop malicious code: symlinks are followed out of granted paths, which is why the host writes the wheel directory without links, and inherited file descriptors bypass it, which is why the child inherits only the IPC channel. It is one layer of several, not the boundary on its own.
 2. **`env: {}`** for the child.
 3. **Minimal `jsglobals`**: a frozen null-prototype object holding only `setTimeout` and `clearTimeout`, which `webloop` needs for the asyncio loop that `ctx` RPCs await. `ctx` crosses through the registered `__cogmo_bridge__` module, which `jsglobals` does not affect.
 4. **No network from the start.** The host fetches the lockfile's wheels from PyPI, checks each against its `requirements.lock` hash (closing micropip's missing `--require-hashes`), and writes them to a per-lockfile-hash directory the child can only read. The child installs from that copy. Before skill code runs, the child deletes `fetch`, `XMLHttpRequest` and `WebSocket` from its globals, so a hole in layer 1 still finds no network API. Pyodide's built-in packages (pydantic among them) come from a `packageCacheDir` the host fills with `checkIntegrity` on.
-5. **Memory.** Worker `resourceLimits` cap only the JS heap, never ArrayBuffers, and WebAssembly memory is one: a measured worker with a 64 MB JS heap limit grew Pyodide to 3.2 GB. Before `loadPyodide`, the child patches `WebAssembly.Memory.prototype.grow` to throw past `resources.memory_mb` (128 MiB by default, re-measured with pydantic loaded); Python sees a `MemoryError` and the interpreter survives. A per-child cgroup is the process ceiling where the deployment delegates one (the same delegation [sandbox.md](sandbox.md#hierarchical-enforcement-via-cgroup-parent-confirmed-slice-naming--assignment--proposed-aggregate-budget-enforcement) defers). `RLIMIT_AS` is not used, since V8 reserves guard regions far larger than the heap.
-6. **CPU**, as today: the interrupt buffer at `wall_clock_s`, then `SIGKILL` of the child, which a CPU loop with no JS↔WASM boundary cannot outlast.
+5. **Memory.** Worker `resourceLimits` cap only the JS heap, never ArrayBuffers, and WebAssembly memory is one: a measured worker with a 64 MB JS heap limit grew Pyodide to 3.2 GB. Before `loadPyodide`, the child patches `WebAssembly.Memory.prototype.grow` to throw past `resources.memory_mb` (128 MiB by default, re-measured with pydantic loaded); Python sees a `MemoryError` and the interpreter survives. The hook covers Emscripten's growth path, which calls `grow` from JS; it does not cover a WebAssembly `memory.grow` instruction or code that reaches the original method another way. The hard ceiling is a per-child cgroup, which needs the delegation [sandbox.md](sandbox.md#hierarchical-enforcement-via-cgroup-parent-confirmed-slice-naming--assignment--proposed-aggregate-budget-enforcement) defers; without it there is no hard memory ceiling. `RLIMIT_AS` is not used, since V8 reserves guard regions far larger than the heap.
+6. **CPU.** At `wall_clock_s` the host sends the child an IPC message, since a `SharedArrayBuffer` cannot cross `fork()`; the child's main thread writes the interrupt buffer, and after the grace window the host sends `SIGKILL`, which a loop with no JS↔WASM boundary cannot outlast.
 7. **Lint**: `wasm-lint` rejects imports of `js`, `pyodide_js`, `pyodide.ffi`, `pyodide.code`, `pyodide.http` and `micropip`; the verify stage rejects dynamic code. Lint is the UX layer that tells an honest author why, not a boundary.
 
-**What it still cannot promise.** Resource exhaustion the layers do not meter (file descriptors, recursion depth, timer churn) is bounded only by the wall clock, the kill and, where present, the cgroup. Side channels between processes on one host are out of scope. The interrupt buffer is a `SharedArrayBuffer` shared with the host; the host only writes it. An escape past all seven layers lands in an unprivileged Node process with no network, no writable path and no secrets in its environment.
+**What it still cannot promise.** Resource exhaustion the layers do not meter (file descriptors, recursion depth, timer churn) is bounded only by the wall clock, the kill and, where present, the cgroup. Side channels between processes on one host are out of scope. The interrupt buffer is shared only between the child's two threads, and only the main thread writes it. An escape past all seven layers lands in an unprivileged Node process with no network, no writable path and no secrets in its environment.
 
-**Cost.** Nothing per invocation beyond today's spawn: every layer is a launch argument or work done before `ready`. A child costs about 200 ms to start and 1 s to boot bare Pyodide, against the ~5 s a worker thread spends today, mostly on micropip fetching from PyPI. The pydantic wheels add about 190 ms per cold child.
+**Cost.** The layers are launch arguments or work before `ready`, so they add nothing per call. The child itself does: about 200 ms to start a process, which the pool hides. Booting bare Pyodide takes about 1 s, against the ~5 s a worker thread spends today, mostly on micropip fetching from PyPI. The pydantic wheels add about 190 ms per cold child.
 
 **Pool.** A warm child serves one task and exits, so module state, `sys.modules` and MEMFS never cross tasks. Memory snapshots cannot carry dependencies: `makeMemorySnapshot` is private API, and snapshotting after `loadPackage` throws (`Unexpected hiwire entry`). So the pool pre-boots children rather than restoring them: per lockfile hash, keeping `min = 1` for the empty set and for recently used hashes, `max` shared with tier 2's, with dependency warmth from the wheel directory. A bare snapshot cuts boot from ~1 s to ~115 ms and is adopted only if Pyodide makes the API public.
 
@@ -379,6 +379,8 @@ skills/
     ...
 ```
 
+Today `[confirmed]` register reads `SKILL.md`, `skill.py` and `requirements.lock` at the repo root, one skill per branch. A directory per skill on `main`, as above, is `[proposed]`: it lets drafts of different skills merge `main` cleanly and makes rollback a forward commit.
+
 ### SKILL.md schema `[proposed]`
 
 The canonical manifest. Every `SKILL.md` is parsed on `register` against `SkillManifestSchema` — a single Zod schema that's the source of truth for the deploy contract. Scattering field definitions across sections is how they drift; one schema prevents that.
@@ -591,9 +593,9 @@ Not every skill creation or edit needs human approval. Review-everything is fric
 
 | Tier | Matches when | Action |
 |-|-|-|
-| **Auto** | WASM tier, no secrets (or only read-only public-API secrets), no network, no `writes_*` / `sends_*` / `deletes_*` / `financial` effects, cost-capped | `register` fast-forwards `main` to the branch tip immediately on classification. Skill is live. No notification. |
-| **Notify** | Reads user data, OR idempotent external writes (`writes_memory`, creating drafts, upserts), OR any secrets with scoped destinations, OR a `network:` allowlist without secrets | `register` fast-forwards `main` to the branch tip immediately on classification. No notification is sent today; [Notifications and undo](#notifications-and-undo) specifies one. |
-| **Approve** | Container tier, any destructive effect (`deletes_external`, overwrite), external messaging (`sends_email`, `sends_message`, `posts_public`), `financial`, `spawns_subprocess`, broad permissions (3+ secrets, filesystem writes), **or any secret combined with network access at any count** | `register` leaves `main` untouched; the branch stays as-is. Through `register_skill`, Telegram gets an approval prompt with the name, declared effects, schedule and short sha, and approve/deny buttons; the auto-register path posts nothing. `main` is fast-forwarded only when `approveDeploy` fires. |
+| **Auto** | Everything not matched below: tier `wasm`, no declared or detected effect, no `network:` block, at most two secrets of any kind, every dependency on the allowlist | `register` fast-forwards `main` to the branch tip immediately on classification. Skill is live. No notification. |
+| **Notify** | A dependency on neither list, OR any other declared or detected effect (`reads_memory`, `writes_memory`, `reads_user_data`, `writes_user_data`, `reads_filesystem`), OR a `network:` block without secrets | `register` fast-forwards `main` to the branch tip immediately on classification. No notification is sent today; [Notifications and undo](#notifications-and-undo) specifies one. |
+| **Approve** | First match: validation errors; a dependency on the approve list; an effect in `APPROVE_GATING_EFFECTS` (`deletes_external`, `sends_email`, `sends_message`, `posts_public`, `financial`, `spawns_subprocess`, `writes_filesystem`); tier `container`; **any secret together with a `network:` block**; three or more secrets | `register` leaves `main` untouched; the branch stays as-is. Through `register_skill`, Telegram gets an approval prompt with the name, declared effects, schedule and short sha, and approve/deny buttons; the auto-register path posts nothing. `main` is fast-forwarded only when `approveDeploy` fires. |
 
 Secrets-plus-network is its own `approve` trigger rather than a count, because the count answers "how broad are this skill's permissions" while the pairing answers "can this skill read a credential and also reach somewhere to send it". `APPROVE_SECRETS_THRESHOLD` stays as the breadth signal for skills with no egress.
 
@@ -616,7 +618,7 @@ Detection rules live in `src/skills/ast-rules.ts` as pure data — two tables (`
 
 **Threat model — UX gate, not security boundary.** A skill body can `getattr(__import__("os"), "system")(...)`, alias a module under a different name, or use a third-party SDK we don't have a rule for, and bypass detection. The actual security boundaries are sysbox isolation (tier-2), the `effects`-driven secret allowlist (P3.4), and the `approve` tier for risky skills. AST lint serves two narrower purposes: (1) force the manifest's `effects:` to track what the body actually does (drift catcher); (2) prove enough harmlessness to skip the human approval tap (tier promoter for `auto`). Don't try to harden it against adversarial authors — that's not its job.
 
-**Failure mode.** Any throw from the AST path (parser load failure, walk panic, unexpected node shape) is caught at the `classifier.ts` boundary and routes through the declaration-only stub (`classifyManifestStub`). The audit log shifts `classifier_version` from `ast-1` to `stub-2-effect-aware` so an operator can spot the degradation; the deploy still completes with a conservative declaration-only tier. The stub caps its tier at `notify`. A null parse tree takes the declarations-only path instead, which can return `auto`; the verify stage's syntax gate rejects such a file before register.
+**Failure mode.** Any throw from the AST path (parser load failure, walk panic, unexpected node shape) is caught at the `classifier.ts` boundary and routes through the declaration-only stub (`classifyManifestStub`). The audit log shifts `classifier_version` from `ast-1` to `stub-2-effect-aware` so an operator can spot the degradation; the deploy still completes with a conservative declaration-only tier. The stub caps its tier at `notify`. A null parse tree takes the declarations-only path instead, which can return `auto`; the planned verify stage's syntax gate rejects such a file before register.
 
 ### Where the classifier runs
 
@@ -676,7 +678,8 @@ type RegisterResult =
   | { status: "live" }                                              // gitSha: main's new tip
   | { status: "pending_approval"; pendingId: string; schedule?: string }  // gitSha: branch tip
   | { status: "no_op" }
-  | { status: "rejected"; errors: readonly string[] };              // nothing written
+  | { status: "rejected"; errors: readonly string[] }               // nothing written
+  | { status: "blocked"; reasons: readonly SkillRiskReason[] };    // [proposed]: a terminal `blocked` deploy row
 
 type SkillRunResult =
   | { runId: string; status: "success"; output?: unknown }
@@ -729,9 +732,10 @@ Register, approve and rollback take the skill name's `pg_advisory_xact_lock` ins
 | `register` → `pending_approval` | no `pending_approval` row for the skill (snapshot). `main` is not checked in the transaction: `applyFilesystem`, where it is re-read, runs only when the deploy goes live | insert `skills` disabled for a first deploy, else leave it; insert the row | `pending_approval` |
 | `approve`: `pending_approval` → `live` | `UPDATE skill_deploys SET status = 'live' … WHERE id = $1 AND status = 'pending_approval'`, the transaction's first write; a pre-read of the row refuses one the snapshot already shows resolved before the lock is taken | the row (`approved_by`, `resolved_at`); then `skills` at the deploy's sha and manifest, `disabled = false`; then `update-ref main`. After the commit, best-effort: mirror | `live`; `rejected` with `deploy_not_found`, `skill_not_found`, or `deploy_not_pending: status is '<status>'`; a moved `main` rolls back as `non_fast_forward_at_approve_time` |
 | `deny`: `pending_approval` → `denied` | `UPDATE … WHERE id = $1 AND status = 'pending_approval'`; a zero-row match re-reads the row | the row (`resolved_at`); `skills` and `main` untouched | `transitioned`; `not_found`; `not_pending` with the row's status |
-| `rollback` → `rolled_back` | `main` unchanged since the pre-transaction read. The target is any commit whose manifest names the skill: no prior `live` row is required and nothing checks for a pending deploy — rollback is an owner-only CLI override of the approval gate (failure modes) | `skills` at the target sha; insert the row; `update-ref main` to the target, which rewinds past every commit after it, other skills' deploys included (failure modes). After the commit, best-effort: mirror with `--force-with-lease` | `live`, `no_op`, `rejected`; a moved `main` rolls back as `main_moved` |
+| `register` → `blocked` `[proposed]` | the risk tier is `blocked` ([Risk tiers](#risk-tiers-without-a-human)) | insert the row `blocked`, terminal, its reasons in `classifier_log`; `skills` and `main` untouched | `blocked` with the reasons |
+| `rollback` → `rolled_back` | `main` unchanged since the pre-transaction read. The target is any commit whose manifest names the skill: no prior `live` row is required and nothing checks for a pending deploy — rollback is an owner-only CLI override of the approval gate (failure modes) | `skills` at the target sha; insert the row; `update-ref main` to the target, which rewinds past every commit after it, other skills' deploys included (failure modes). After the commit, best-effort: mirror with `--force-with-lease`. `[proposed]`: a forward commit on `main` that restores `skills/<name>/` to its content at the target, so `main` only fast-forwards, no other skill's deploy is touched, and the mirror is a plain push; `skills.git_sha` is the new commit | `live`, `no_op`, `rejected`; a moved `main` rolls back as `main_moved` |
 
-Deny's outcomes are values its callers match exhaustively: `denyDeploy` returns `Result<void, DenyDeployError>`, `cogmo skills deny` exits 1 naming the miss, and a keyboard tap toasts `skill_deploy_not_found` or `skill_deploy_not_pending`. Nothing reports a resolution that did not happen. Approve and rollback carry a rejection as the `reason` string of `ExecuteRegisterResult`, which the use cases flatten into `RegisterResult.errors`: untyped, with no split between a failure that is terminal for the deploy (a manifest error) and one that only pauses it (PyPI unreachable during the lockfile compile), and the first-deploy `23505` race surfaces as a throw. `transport.skills.approveDeploy` recovers the two codes it can name by prefix and renders the rest as `skill_deploy_register_failed`. A residual (todo: tag the deploy rejection).
+Deny's outcomes are values its callers match exhaustively: `denyDeploy` returns `Result<void, DenyDeployError>`, `cogmo skills deny` exits 1 naming the miss, and a keyboard tap toasts `skill_deploy_not_found` or `skill_deploy_not_pending`. Nothing reports a resolution that did not happen. Approve and rollback carry a rejection as the `reason` string of `ExecuteRegisterResult`, which the use cases flatten into `RegisterResult.errors`: untyped, with no split between a failure that is terminal for the deploy (a manifest error) and one that only pauses it (PyPI unreachable during the lockfile compile), and the first-deploy `23505` race surfaces as a throw. `transport.skills.approveDeploy` recovers the two codes it can name by prefix and renders the rest as `skill_deploy_register_failed`. A residual, closed by the tagged rejection union in todo.md → Skills autonomy S10.
 
 #### Per-state data `[confirmed]`
 
@@ -762,12 +766,12 @@ Who repeats a deploy: the Inngest auto-register caller runs `register` in one st
 | `deny` of an unknown id, or of a row already `live`, `denied` or `rolled_back` (a second tap, a stale CLI call) | nothing written | the conditional UPDATE matches no row; the caller gets `not_found`, or `not_pending` with the status the row holds |
 | `approve` racing a deny or another approve of the same row (two taps; a tap and the CLI) | one resolution wins and commits; the loser writes nothing | a resolution committed after the loser's snapshot raises `40001` at the loser's first UPDATE under REPEATABLE READ; the transaction rolls back and the transactor retries from a fresh snapshot, where approve's pre-read sees `denied` or `live`, and a losing deny's conditional UPDATE matches zero rows and returns `not_pending`. One committed before the snapshot is seen the same way. The guarded UPDATE being the first write is hardening: the zero-row match is a path REPEATABLE READ does not reach, and it provably writes nothing |
 | two `register`s of one skill at once | mixed tiers: an approve-tier winner writes only a `skill_deploys` INSERT; a notify-tier loser's snapshot does not see it, its `skills` UPDATE conflicts with nothing and `main` has not moved, so the skill goes live at the loser's tip while the winner's row stays pending. Two approve-tier registers of an existing skill insert two `pending_approval` rows — nothing conflicts, and no index forbids it. Two first deploys hit `skills.name` UNIQUE with `23505`, which the transactor does not retry, so the loser throws. A register racing an approve or deny may read a stale `pending_deploy_exists` | the stranded pending row blocks register until it is denied; approving it goes live when it carries the tip `main` already holds (the fast-forward check passes) and is `non_fast_forward_at_approve_time` otherwise; the thrown `23505` is a call the operator repeats; the stale rejection is benign. **Residual** until the advisory-lock audit (todo): only taking the lock before the snapshot closes the mixed-tier case; a partial unique index on `(skill_id) WHERE status = 'pending_approval'`, written through `ON CONFLICT DO UPDATE`, closes only the duplicate pending rows, since the mixed-tier loser inserts a `live` row |
-| `register_skill` run again by Inngest after the commit, before the step result was recorded | live tier: the second run is `no_op`, the tip being `main`. Approve tier: the second run is `pending_deploy_exists`, which the model reads as a rejection; and when the crash fell between the commit and the `skills/deploy/approval-requested` emit, no approval keyboard is posted | the database is consistent either way; the operator approves from the CLI. **Residual**: `register_skill` drops the `ToolCallContext.idempotencyKey` the loop supplies, `register` takes no key, and the emit is not part of any recovery (todo) |
+| `register_skill` run again by Inngest after the commit, before the step result was recorded | live tier: the second run is `no_op`, the tip being `main`. Approve tier: the second run is `pending_deploy_exists`, which the model reads as a rejection; and when the crash fell between the commit and the `skills/deploy/approval-requested` emit, no approval keyboard is posted | the database is consistent either way; the operator approves from the CLI. **Residual**: `register_skill` drops the `ToolCallContext.idempotencyKey` the loop supplies, `register` takes no key, and the emit is not part of any recovery. Skills autonomy S10 takes the tool off the agent surface |
 | `main` moves between a deploy's checks and its `update-ref` (another skill's deploy landed) | nothing committed | `advanceMain` throws inside the transaction, which rolls back the row and the projection; the caller gets the rejection named in the transition table and retries |
 | `update-ref main` succeeds inside `applyFilesystem`, then the commit fails or the process dies | `main` at the deploy's sha; the database as before the transaction — for an approve of an enabled skill, the row still `pending_approval` and `skills` at the old sha; register's feature branch still exists | the database decides what runs, so the code on `main` does not execute. Repeating converges for register and approve: `isAncestor(main, sha)` holds for the sha `main` already holds (a commit is its own ancestor), `update-ref` to it is a no-op, and register's branch is still there because it is deleted only after the commit. Rollback's database repeat converges too — `main` already equals the target, which satisfies its `unchanged` guard — but its mirror never does: the lease expects the remote at the target while the remote holds the pre-rollback sha, so every repeat's push is rejected until the manual force push below. **Residual**, against *`main` is authoritative* below: until then `refs/heads/main` and `skills.git_sha` disagree, and every other skill's branch based on the old `main` is `non_fast_forward`; if the operator denies instead — or a deny waiting on the row lock proceeds when approve's commit fails — deny writes only the row, so `main` keeps a commit whose deploy is `denied`, and the next deploy's mirror pushes it. Reconciliation is manual: rewind `main` to the sha it held before the failed transaction — the `skill_deploys.git_sha` with the newest `resolved_at` among `live` and `rolled_back` rows across all skills, or delete `refs/heads/main` if no deploy ever committed, since register handles an unborn `main` — before any further deploy; rewinding to this skill's `skills.git_sha` would drop other skills' later deploys |
 | the feature branch delete after a committed register fails | the deploy is live; the branch lingers | logged as a warning; registering the branch again is `no_op` while its tip is `main`, and `non_fast_forward` once another skill has deployed — harmless either way; the branch can be deleted by hand |
 | `mirrorMainToRemote` fails after the commit, or the process dies between the commit and the push | local `main` and the database agree; the remote lags | every failure in the mirror — reading `origin`, resolving the identity, the push — is caught and logged as a warning, and the deploy still returns `live`. After a register or approve the next deploy's push, or `git -C $COGMO_SKILLS_PATH push origin main`, reconciles (Repo invariants). After a rollback the remote is ahead of local `main` and every later fast-forward push is rejected; recovery is `git push --force-with-lease=refs/heads/main:<remote sha> origin main` by hand |
-| `rollback` of one skill past another skill's later deploy | `main` loses the other skill's commits; its `skills.git_sha` is reachable from no ref once its feature branch was deleted; the force-with-lease mirror pushes the rewind | **Accepted residual** of the single linear `main`, against *`main` is authoritative* and the Repo invariant on dangling shas: the other skill stays invocable while git keeps the unreachable commit (whether gc against the bare repo prunes it is not established), and its next register on a branch based on the old `main` is `non_fast_forward` until rebased. Recovery is to re-register the other skill's tip from a branch rebased onto the rewound `main`. Keep-alive refs (`refs/deploys/<id>`) or a guard that refuses to drop another skill's live sha are a todo |
+| `rollback` of one skill past another skill's later deploy | `main` loses the other skill's commits; its `skills.git_sha` is reachable from no ref once its feature branch was deleted; the force-with-lease mirror pushes the rewind | **Accepted residual** of the single linear `main`, against *`main` is authoritative* and the Repo invariant on dangling shas: the other skill stays invocable while git keeps the unreachable commit (whether gc against the bare repo prunes it is not established), and its next register on a branch based on the old `main` is `non_fast_forward` until rebased. Recovery is to re-register the other skill's tip from a branch rebased onto the rewound `main`. The forward-commit rollback above `[proposed]` removes this residual |
 | `rollback` while a deploy of the same skill is pending | a `rolled_back` row and `main` at the target; the pending row stays pending, its `prior_git_sha` stale | accepted as the owner override it is: a later approve fast-forwards `main` back over the rollback when the target is an ancestor of the pending tip, and is `non_fast_forward_at_approve_time` otherwise until the tip is rebased; a deny leaves the rollback in place. A rollback to the pending tip itself puts unreviewed code live with the row still pending |
 | `rollback` to a sha that never had a `live` row, then `deregister`, then `enable` | `enable` is refused with `no_live_deploy` | the enable guard matches `live` only and the rollback's row is `rolled_back`; accepted and stated at the guard, which is the one place that reads it. Counting `rolled_back` there is the alternative (part of the activation todo) |
 | a `deregister` lands while a deploy is pending, then the deploy is approved (the planned failure breaker would land the same way; today `disableSkill` is called only by `deregister`) | approve writes `disabled = false`, so the skill comes back live | the order decides: a deregister committed first is in approve's snapshot and approve still flips the flag; one committed after approve disables the now-live skill, which is what it asked for. **Decision:** approve keeps `disabled` when the skill's current sha has a `live` row — the skill was disabled after this deploy was queued — and tells the approver; only a first deploy's approval enables. Until that is implemented (todo), a residual |
@@ -810,7 +814,9 @@ Pipelines ([pipelines.md](pipelines.md)) supply the patterns this lifecycle reus
 
 **Sequence.** `transition_seq` increments on every transition, the claim included. Each event the draft emits carries `{ draftId, seq }` and the bus-dedup id `skill-draft-<id>-<seq>`. Each gate key is `${draftId}:${seq}`, encoded as the pipelines' 8-hex token. A re-emit after a Retry, an Override or a second block in one round therefore always has an id the bus has not seen, and a card left from an earlier park never matches.
 
-**Rounds share a branch.** Every attempt's coding task works on the draft's branch, `cogmo/skill-<draftShort>`, starting from the previous attempt's tip and resuming its CLI session with the findings as its goal, so the draft has one PR that each round updates. Coding delegation needs two things for this: a task that starts from a given branch and session, and `open-pr` treating an existing PR on the branch as opened rather than failing on GitHub's 422.
+**Each attempt is a fresh coding task.** It has a fresh CLI session seeded with the findings and starts from the previous attempt's tip with `main` merged in, so a `non_fast_forward` from another skill's deploy is resolved before authoring instead of recurring each round; the per-skill directory layout keeps that merge clean. Coding delegation gains a `baseRef` on the task for this, designed in [coding-delegation.md](coding-delegation.md) with its CHECKs and failure rows (todo.md → Skills autonomy S9). Each attempt opens its own branch and PR; the draft closes the PR an attempt supersedes, so only the latest is open.
+
+**Admission.** The skills repo admits one coding task at a time (`maxConcurrentTasks: 1`). When admission refuses a draft's next task, the draft stays in `authoring` with `state.awaitingSlot`, and the reconcile cron retries admission each tick until a slot frees; the transitions out of `authoring` require the attempt's task to exist.
 
 **States** — `skill_draft_status`:
 
@@ -846,23 +852,24 @@ draft_skill ─▶ specifying ◀─┐ revise_spec
 
 | Transition | Actor or trigger | Guard | Writes |
 |-|-|-|-|
-| insert → `specifying` | `draft_skill` (user turn) | the spec parses `SkillSpecSchema`, else the tool returns its issues and writes nothing; no open draft holds the name, read in the transaction under the partial name index's `targetWhere` | the row, `spec_version = 1`, through `ON CONFLICT (idempotency_key) DO UPDATE` with a no-op SET, the one arbiter. A recovered row with another name, or an insert losing the name index to a concurrent one (`23505`, mapped at the store edge), returns `{ kind: "name_taken"; draftId; status }`. Emit `skills/draft.parked` |
+| insert → `specifying` | `draft_skill` (user turn) | the spec parses `SkillSpecSchema`, else the tool returns its issues and writes nothing; no open draft holds the name, read in the transaction under the partial name index's `targetWhere` | the row, `spec_version = 1`, through `ON CONFLICT (idempotency_key) DO UPDATE` with a no-op SET, the one arbiter; the key is the call's `ToolCallContext.idempotencyKey` plus a digest of the canonical spec. A recovered row with another name, or an insert losing the name index to a concurrent one (`23505`, mapped at the store edge), returns `{ kind: "name_taken"; draftId; status }`. Emit `skills/draft.parked` |
 | claim (same state) | the first step of each draft function | status and seq; `state.claimedByRunId` null or this Inngest run's id | `state.claimedByRunId`; returns `claimed`, `claimed_by_this` (a replay) or `stale` with the row's status |
 | `specifying` → `specifying` (revise spec) | `draft_skill` naming a draft in `specifying` | status `specifying` | `spec`, `spec_version + 1`; emit `skills/draft.settled` for the old gate key and `skills/draft.parked` for the new one |
 | `specifying` → `authoring` (approve spec) | the requester's Approve tap; or automatically when the spec equals the live manifest and asks nothing | status, seq from the gate key; no open questions | `round = 0`, `attempt = 0`, `state.approvedSpecVersion`; the first `coding_tasks` row (`insertOrRecoverTask`, `trigger_source = 'skill_draft'`) and its round row, one transaction; then emit `coding/task/start` and `skills/draft.settled` |
 | `authoring` → `verifying` | `coding/task/pr-opened` for the current attempt's task | status, seq, the task is the current attempt's | the attempt's `tip_sha`; emit `skills/draft.verify` |
-| `authoring` → `authoring` | `coding/task/failed` ([Coding failures](#coding-failures)) | status, seq, the current attempt's task | a round-spending reason: `round + 1`, `attempt = 0`, the failure as a finding; a retrying one: `attempt + 1`. Both insert the next coding task |
+| `authoring` → `authoring` | `coding/task/failed` ([Coding failures](#coding-failures)), or the reconcile cron's admission retry | status, seq, the current attempt's task | a round-spending reason: `round + 1`, `attempt = 0`, the failure as a finding; a retrying one: `attempt + 1`. Both insert the next coding task |
 | `verifying` → `reviewing` | `settle-verify`, report has no `revise` finding | status, seq | the report on the attempt row; emit `skills/draft.review` |
 | `reviewing` → `registering` | `settle-review` | every panel member's row for round r reads `pass` | emit `skills/draft.register` |
 | `registering` → `live` | `settle-register` | a `live` `skill_deploys` row at the tip | `state.deployId` |
+| `registering` → `blocked: registrar_unavailable` | `register` pausing: PyPI unreachable during the lockfile compile, sandbox unavailable | status, seq | `blocked_reason`, `state.resumeTo = registering`; emit `skills/draft.parked`; no round spent |
 | `registering` → `awaiting_approval` | `settle-register` | a `pending_approval` row at the tip | `state.deployId`; emit `skills/draft.parked` |
 | `awaiting_approval` → `live` / `abandoned` | `skills/deploy/resolved` for `state.deployId`, emitted by `approveDeploy` and `denyDeploy` whoever calls them (owner tap, CLI); or the waiter's timeout, which denies | the row's resolution; a timeout matches its gate key | `end_reason = denied` or `approval_timeout` on `abandoned`; emit `skills/draft.settled` |
 | `verifying`, `reviewing`, `registering` → `authoring` (r+1) | findings: verify `revise`, any reviewer `revise` (none `block`), or a register rejection | status, seq, round r < `max_rounds` | `round + 1`, `attempt = 0`, the next coding task, carrying every finding of round r |
 | any working state → `blocked: rounds_exhausted` | the same, at r = `max_rounds` | status, seq | `blocked_reason`; emit `skills/draft.parked` |
 | `authoring`, `verifying`, `reviewing` → `blocked: *_unavailable` | a pausing coding failure, or a verify sandbox or reviewer still unreachable after the step's retries | status, seq | `blocked_reason`, `state.resumeTo`; emit `skills/draft.parked` |
 | `reviewing` → `blocked: reviewer_block` | any reviewer `block` | status, seq | `blocked_reason`; emit `skills/draft.parked` |
-| `registering` → `blocked: risk_blocked` | register classifies `blocked` ([Risk tiers](#risk-tiers-without-a-human)) | status, seq | `blocked_reason`, the reasons on the attempt row; emit `skills/draft.parked` |
-| `blocked` → `state.resumeTo` (retry) | the owner's Retry tap | reason is `*_unavailable`; seq from the gate key | `author_unavailable` inserts the next attempt's coding task; the others re-emit the resumed state's event under the new seq; emit `skills/draft.settled` |
+| `registering` → `blocked: risk_blocked` | `settle-register`, from the memoized `RegisterResult` `blocked` ([Risk tiers](#risk-tiers-without-a-human)) | status, seq | `blocked_reason`, the reasons on the attempt row; emit `skills/draft.parked` |
+| `blocked` → `state.resumeTo` (retry) | the owner's Retry tap | reason is `*_unavailable` (including `registrar_unavailable`); seq from the gate key | `author_unavailable` inserts the next attempt's coding task; the others re-emit the resumed state's event under the new seq; emit `skills/draft.settled` |
 | `blocked` → `registering` (override) | the owner's Override tap | reason is `reviewer_block` or `risk_blocked`, or `rounds_exhausted` with round r's verify passed; seq | `state.overriddenBy`, which register needs to accept a `blocked` tier; emit `skills/draft.register`, `skills/draft.settled` |
 | `blocked: rounds_exhausted` → `authoring` (extend) | the owner's One-more-round tap | `max_rounds` < 6; seq | `max_rounds + 1`, `round + 1`, the next coding task; emit `skills/draft.settled` |
 | `awaiting_approval` → `abandoned` | the owner's Abandon tap | status, seq | denies the pending `skill_deploys` row (`denyPendingDeploy`) in the same transaction, so later registers of the skill are not refused `pending_deploy_exists`; `end_reason = user_abandoned`; emit `skills/draft.settled` |
@@ -891,7 +898,8 @@ Every `coding_tasks.failure_reason` maps to one outcome for the draft:
 | `skill-draft-on-coding` | `coding/task/pr-opened`, `coding/task/failed` for a `skill_draft` task | one step that transitions and, for a new attempt, inserts its coding task; the emit is a second step |
 | `skill-draft-verify` | `skills/draft.verify` | `claim`, `run-verify` (one sandbox session and one tier-runtime run), `settle-verify`: the body runs up to four times, none of it billable |
 | `skill-draft-review` | `skills/draft.review` | `claim`, one `review-<reviewer>` step per panel member in parallel, then `settle-review` reading the review rows, since code after a parallel group runs only in fully memoized invocations. Four steps, so the body runs up to five times; each reviewer step makes at most three model calls (the verdict plus two malformed-verdict retries), and each Inngest retry of the step repeats them |
-| `skill-draft-register` | `skills/draft.register` | `claim`, `register`, `settle-register`, which reads the deploy at the tip rather than trusting the register result, so a repeat that returns `no_op` or `pending_deploy_exists` settles the same way |
+| `skill-draft-register` | `skills/draft.register` | `claim`, `register`, `settle-register`. A `rejected` or `blocked` result settles from the memoized `RegisterResult`; `live` and `pending_approval` settle from the deploy row at the tip, so a repeat that returns `no_op` or `pending_deploy_exists` settles the same way |
+| `skill-draft-on-deploy` | `skills/deploy/resolved` | one step: `awaiting_approval` → `live` or `abandoned` for the draft whose `state.deployId` it names |
 | `skill-draft-waiter` | `skills/draft.parked` `{ draftId, gateKey, boundMs }` | `idempotency: gateKey`; sleeps out the bound with two reminders, then emits the timeout carrying its gate key; `cancelOn` `skills/draft.settled` matched on `data.gateKey`, as `pipeline-gate-waiter` does |
 | `skill-draft-reconcile` | cron, every 10 min | for a working state older than 30 min (`transitioned_at`) it re-emits the owed event under the current seq. For `authoring` it reads the attempt's coding task: `queued`, re-emit `coding/task/start`; `pr_open` or `failed`, apply that outcome as `skill-draft-on-coding` would; running past its wall time, nothing, since coding delegation's own reconciliation ends it |
 
@@ -908,15 +916,17 @@ Every `coding_tasks.failure_reason` maps to one outcome for the draft:
 | A reviewer step bills its model, then crashes before recording | `reviewing` | the retry bills once more; the review row (unique on draft, round, reviewer, `ON CONFLICT DO UPDATE` with a no-op SET) keeps the first verdict that committed. **Residual:** one re-billed review per crash |
 | A reviewer stays unreachable or returns a malformed verdict after retries | `blocked: reviewer_unavailable` | never a pass on a partial panel; Retry resumes `reviewing` under a new seq and re-runs only the missing member, whose row is absent |
 | `register` commits, then the step result is lost | `registering` | the retry's `register` is `no_op` (live tip) or `pending_deploy_exists`; `settle-register` reads the deploy at the tip either way |
-| Register rejects the tip (validation, lockfile, spec drift, `non_fast_forward`) | `authoring` at r+1, or `blocked: rounds_exhausted` | the rejection becomes a finding, so the author fixes what the floor refused. **Residual:** drafts of two skills race the single `main`; the loser's `non_fast_forward` costs it a round |
+| Register rejects the tip (validation, lockfile, spec drift, `non_fast_forward`) | `authoring` at r+1, or `blocked: rounds_exhausted` | the rejection becomes a finding, so the author fixes what the floor refused. Each attempt merges `main` before authoring, so a `non_fast_forward` recurs only when another skill deploys between that merge and register. **Residual:** that window costs a round |
 | Rounds run out | `blocked: rounds_exhausted` | the cap bounds cost; Extend grants one round at a time up to 6, Override registers only a tip that passed verify |
 | `cogmo skills approve` or `deny` resolves the draft's pending deploy outside the draft | `live` or `abandoned` | both emit `skills/deploy/resolved`, which the draft follows like a tap |
 | `cogmo skills rollback`, `deregister` or a CLI `register` of the same skill while a draft is open | the draft's state | the draft's register meets the moved state as a rejection (`non_fast_forward`, or a base that is not the live sha) and turns it into a finding; a pending deploy left by the CLI blocks register as `pending_deploy_exists` until the owner resolves it |
 | A cron fire of the skill while a revision is in flight | the live version runs | a draft writes nothing to `skills` until register; each run records the `git_sha` it ran |
+| Abandon commits, the coding-task cancel it emits is lost | `abandoned`; the task runs on | when the task opens its PR, `skill-draft-on-coding` finds the draft terminal and closes the PR. **Residual:** the task's tokens are spent |
+| The coding task finishes between Abandon's read and its commit | `abandoned`; the outcome event arrives after | the outcome's transition guard reads `stale`; a PR it opened is closed as above |
 | A waiter from an earlier park wakes | unchanged | its gate key's seq is stale, so the timeout transition matches no row; `skills/draft.settled` normally cancelled it first |
 | A run in flight across a deploy that changes these functions | each step replays its stored result | new data rides new steps reading committed rows, never an earlier step's return value |
 | Two taps, or a tap and a timeout, on one gate | one transition wins | conditional UPDATE on seq; the loser reads `stale` and is told only if its decision did not stand |
-| `draft_skill` re-run by Inngest after its commit | the same row | `ToolCallContext.idempotencyKey` recovers it through the one `ON CONFLICT` arbiter |
+| `draft_skill` re-run by Inngest after its commit | the same row | the key (the call's key plus the spec digest) recovers it through the one `ON CONFLICT` arbiter |
 | Two `draft_skill` calls for one name at once | one row | the loser trips the partial name index (`23505`), which the store returns as `name_taken` |
 | A skills-repo coding task started before the draft machine shipped reaches `pr-opened` | no draft row | the subscriber registers it as the auto-register subscriber does today, for one release, then the path is removed |
 | The requester has no reachable channel for the card | `specifying` | it times out to `abandoned: spec_timeout`; `cogmo skills drafts` lists it meanwhile |
@@ -946,12 +956,12 @@ Mechanical checks, run by Cogmo on the round's tip before any reviewer sees it, 
 
 | Check | Mechanism | Practice it enforces |
 |-|-|-|
-| Owned paths | the branch changes only `SKILL.md`, `skill.py`, `requirements.lock`, `test_skill.py` | toolchain files are Cogmo's |
+| Owned paths | the branch changes only `skills/<name>/` (`SKILL.md`, `skill.py`, `requirements.lock`, `test_skill.py`) for the draft's own skill | toolchain files and other skills are not the author's |
 | Syntax | `python -I -m py_compile`; a tree-sitter `ERROR` node also fails | — |
 | Entrypoint | AST: `async def run(inputs: Input, ctx: Ctx) -> Output` at module level | typed `run` |
 | Contracts | AST: `Input` and `Output` subclass `pydantic.BaseModel`; their JSON Schemas generate in the tier's runtime and match the spec | pydantic contracts |
 | Types and lint | `pyrefly check` against the `cogmo_ctx` stubs; `ruff check` with `E`, `F`, `B`, `BLE`, `S` (the flake8-bandit port, which stands in for bandit), `ASYNC` | failures as values: no bare or swallowing `except`, `SkillError` for expected failures |
-| Imports | each import root is stdlib, `pydantic`, `cogmo_ctx`, or a module a declared dependency's wheel provides (its `top_level.txt`, read at lockfile compile) | dependencies declared for every import |
+| Imports | each import root is stdlib, `pydantic`, `cogmo_ctx`, or a module a declared dependency's wheel installs (from its `RECORD`, read at lockfile compile) | dependencies declared for every import |
 | Dynamic code | AST: `exec`, `eval`, `compile`, `__import__`, `importlib.import_module` or `getattr` on a module with a non-literal name | no code built at runtime |
 | Tier-1 bridges | `wasm-lint` rows for `js`, `pyodide_js`, `pyodide.ffi`, `pyodide.code`, `pyodide.http`, `micropip` | tier 1 reaches the host only through `ctx` |
 | Effects, hosts, secrets | the AST rules plus rows for `ctx.memory.*`, `ctx.files.*`, a non-GET `ctx.http`, literal `ctx.secrets.get` names and literal URL hosts, checked against the spec | the manifest says what the code does |
@@ -962,7 +972,7 @@ Mechanical checks, run by Cogmo on the round's tip before any reviewer sees it, 
 | Size | `skill.py` at most 400 lines | reviewers lose recall on large diffs, so skills stay small |
 | Register dry run | `prepareRegister` without the write: manifest, ajv, lockfile compile, Pyodide compatibility | register's floor, met before review |
 
-Static checks and `pytest` run under CPython in one short-lived `cogmo-skills` sandbox session per round, from a tools virtualenv (`/opt/cogmo-skills/tools`: ruff, pyrefly, pytest) outside the task's `sys.path`. The sandbox has no egress ([Egress proxy](#egress-proxy-proposed)). A tier-1 skill's sample call runs in the hardened Pyodide child ([Tier-1 boundary](#tier-1-boundary-proposed)), a tier-2 skill's on a warm worker. The report is `SkillVerifyReportSchema` on the round row: per check, its status and findings, plus the sample call's trace, which the reviewers and the notification read.
+Static checks and `pytest` run under CPython in one short-lived `cogmo-skills` sandbox session per attempt, from a tools virtualenv (`/opt/cogmo-skills/tools`: ruff, pyrefly, pytest) outside the task's `sys.path`. The session's only egress is a `verify` credential for the lockfile compile and the dependency install the tests and the schema import need ([Egress proxy](#egress-proxy-proposed)). A tier-1 skill's sample call runs in the hardened Pyodide child ([Tier-1 boundary](#tier-1-boundary-proposed)). A tier-2 skill's sample call and `pytest` run only once tier-2 workers sit behind the proxy, with every request answered in shadow and none forwarded; until then a tier-2 skill gets the static checks only. The report is `SkillVerifyReportSchema` on the round row: per check, its status and findings, plus the sample call's trace, which the reviewers and the notification read.
 
 **The skills repo toolchain.** Bootstrap writes Cogmo-owned files to the repo root: `pyproject.toml` (Python 3.14, a `dev` group pinning the tools virtualenv's versions, ruff and pyrefly configuration), `CLAUDE.md` (the authoring convention, generated from `SkillManifestSchema` and `SKILL_EFFECTS` so it cannot drift from them), `cogmo_ctx/` stubs ([Contracts](#contracts-proposed)) and `skill.schema.json`. A Cogmo release that changes them commits them to `main` through `advanceMain` at boot, under the bootstrap lock: the one writer of `main` besides register, deploying no skill. The repo's `verifyCommand` is `uv run --locked --group dev scripts/verify`, which runs ruff, pyrefly and pytest inside the coding task so the author sees failures in its own session; Cogmo's verify stage is still the authority, since the author can edit nothing it runs.
 
@@ -973,7 +983,7 @@ Read-only reviewer agents replace the human approval tap. A panel reviews every 
 - **The author's model**, in a fresh session with no access to the author's;
 - **a model of the other family**: Codex reviews a Claude-authored draft and Claude a Codex-authored one. The author's family never reviews alone.
 
-`SkillReviewer` is the interface (`review(input, signal): Promise<Result<SkillReviewVerdict, SkillReviewerError>>`), with a Claude Code backend (`claude -p --permission-mode plan`) and a Codex backend (`codex exec --sandbox read-only`), each in a sandbox holding the draft branch, so a reviewer can read the repo and run the tests, not just the diff. Its input: the approved spec card, the diff against the base, the verify report and trace, `classifier_log`, the previous rounds' findings, and the checklist.
+`SkillReviewer` is the interface (`review(input, signal): Promise<Result<SkillReviewVerdict, SkillReviewerError>>`), with a Claude Code backend (`claude -p --permission-mode plan`) and a Codex backend (`codex exec --sandbox read-only`), each in a read-only sandbox holding the draft branch, so a reviewer reads the repo, not just the diff. Tests run once, in the verify session, and reach reviewers as the report and trace. A review session has a 100k-token budget and a 10-minute wall clock; exceeding either is `unavailable`. Its input: the approved spec card, the diff against the base, the verify report and trace, `classifier_log`, the previous rounds' findings, and the checklist.
 
 **Checklist.** A fixed, versioned file (`src/skills/review/checklist.md`); its version is recorded on every review row. Each item is `revise` when it fails, and the four marked block are `block`:
 
@@ -991,7 +1001,9 @@ Read-only reviewer agents replace the human approval tap. A panel reviews every 
 
 **Verdict.** `SkillReviewVerdict` is `{ verdict: "pass" | "revise" | "block", summary, findings: [{ item, severity: "block" | "revise" | "note", where, what, fix }] }`, validated with Zod. The verdict must equal its worst finding's severity (`note` alone is a pass); a mismatch or a parse failure is retried twice with the error fed back, then reported as `malformed_verdict`. `SkillReviewerError` is `{ kind: "unavailable"; cause } | { kind: "malformed_verdict" }`, and both park the draft at `blocked: reviewer_unavailable`. The panel passes only when every member passes. Any `block` blocks the draft; a `revise` with no `block` starts the next round with every finding. A `block` notification carries the reasons and a one-tap Override.
 
-**Measured, not trusted.** A seeded-bug suite (`test/fixtures/skill-review/`) holds skills each carrying one defect class — an undeclared host, a secret in the output, a memory read posted out, a missing idempotency key, dynamic code, swallowed failures, an unbounded loop, an input the spec lacks — and clean controls, a third of the cases. A live-tier test runs every backend over it: each reviewer must reach the expected severity on at least 80% of seeded cases and the panel on 90%, with no `block` and at most 20% `revise` on controls. It runs when the checklist, a reviewer prompt, a model or a CLI version changes, never on PRs.
+**Measured, not trusted.** A seeded-bug suite (`test/fixtures/skill-review/`) holds skills each carrying one defect class — an undeclared host, a secret in the output, a memory read posted out, a missing idempotency key, dynamic code, swallowed failures, an unbounded loop, an input the spec lacks — and clean controls, a third of the cases. A live-tier test runs every backend over it: each reviewer must reach the expected severity on at least 80% of seeded cases and the panel on 90%, with no `block` and at most 20% `revise` on controls. It runs when the checklist, a reviewer prompt, a reviewer model or a CLI version changes, and weekly; never on PRs. A run below the floor clears `reviewPanel`, so the current tier table applies, and notifies the owner.
+
+**Without a second family.** When no Codex backend is configured, `reviewPanel` stays off, the current tier table applies with `auto` unavailable (`notify` at best), and the owner is told once at boot. The author's model never reviews alone.
 
 ### Risk tiers without a human
 
@@ -1004,12 +1016,12 @@ Read-only reviewer agents replace the human approval tap. A panel reviews every 
 | `approve` | Pending until the owner taps Approve. Only for what the owner opted into. |
 | `blocked` | Not deployed; a notification with the reasons and one-tap Override, which registers with `approved_by` set to the owner. |
 
-`approve` is opt-in per class: `skills.approve_classes`, an owner setting holding any of `SKILL_EFFECTS` plus `raw_secret`, `reads_and_egress` and `sensitive_dependency`, empty by default.
+`approve` is opt-in per class: the `skill_approval_classes` rows, one per class the owner opts into from `SKILL_EFFECTS` plus `raw_secret`, `reads_and_egress` and `sensitive_dependency`; none by default.
 
 Rules, first match wins:
 
 1. **Rejected**, no tier: validation errors, as today.
-2. **`blocked`**: the manifest needs enforcement this deployment lacks — a bound secret before the proxy substitutes, a `network:` block on a tier-2 backend without the egress proxy's network, an sdist.
+2. **`blocked`**: the manifest needs enforcement this deployment lacks — a bound secret before the proxy substitutes, or a `network:` block on a tier-2 backend without the egress proxy's network. `RegisterResult` gains `{ status: "blocked"; reasons }`, and register writes a terminal `blocked` deploy row (Deploy lifecycle).
 3. **`approve`**: a declared or detected effect, or a reason, in `approve_classes`.
 4. **`auto`**, when all hold: an edit whose manifest does not widen the live one (a first deploy always notifies); the tier's boundary is enforced (tier 1 hardened; tier 2 behind the proxy network); no write, send, delete, financial or subprocess effect; every secret bound; no read effect alongside `network:`; every dependency on the allowlist; `cost_per_call_usd = 0`.
 5. **`notify`**: everything else, each reason listed. A raw secret (`raw_secret`) lands here at most, never `auto`: its plaintext is in the skill's memory, so it can leave through any allowed host, a memory write or the output, and no check sees the value. A read effect with `network:` (`reads_and_egress`) is the same pairing as a raw secret with egress.
@@ -1022,9 +1034,9 @@ One use case (`announceDeployOutcome`) serves every register caller and emits `s
 
 | Outcome | Message | Buttons |
 |-|-|-|
-| `live`, `notify` | `skill X is live` (new, or `abc1234 → def5678`), the description, the reasons, effects (declared and detected), hosts, secrets (bound or raw), dependencies, schedule and run-as, verify and panel verdicts with the round | Disable; Roll back for an edit, shown only while this deploy's sha is `main`'s tip, so it never rewinds another skill's deploy; Details |
+| `live`, `notify` | `skill X is live` (new, or `abc1234 → def5678`), the description, the reasons, effects (declared and detected), hosts, secrets (bound or raw), dependencies, schedule and run-as, verify and panel verdicts with the round | Disable; Roll back for an edit, a forward commit restoring the skill's directory (Deploy lifecycle); Details |
 | `pending_approval` | the same, and the opted-in class that holds it | Approve, Deny |
-| `blocked` | the same, and the reasons | Override, Abandon |
+| `blocked` | the same, and the reasons | Override and Abandon, the owner's |
 | `rejected` | the findings, and the round it starts | — |
 
 `auto` sends nothing. Disable is `/disable X`; Details links to the run view ([Observability](#observability-proposed)).
@@ -1150,7 +1162,7 @@ Pyodide consumes the parsed package specs from `requirements.lock` via `micropip
 
 Pyodide-incompatible wheels (native extensions outside the [pre-built Pyodide list](https://pyodide.org/en/stable/usage/packages-in-pyodide.html) and not available as pure-Python wheels via `micropip`) fail at register. `src/skills/pyodide-compat.ts` reads `pyodide-lock.json` from the installed pyodide package and verifies each declared `name==version` is either bundled exactly or has a pure-Python wheel on PyPI; mismatches reject the register with `tier1_incompatible_dependency`. Skills depending on native-only wheels must declare `tier: container`.
 
-Worker init (Pyodide load + micropip install + version verify) is capped at 60s by default — a hung micropip resolve against a slow PyPI surfaces as `worker_init_timeout` instead of wedging the worker. A per-lockfile-hash wheel cache for micropip-fetched wheels is deferred — Pyodide's built-in `packageCacheDir` covers the runtime's bundled packages only, so a moderately-deps'd skill re-downloads from PyPI on every worker boot today (todo.md).
+Worker init (Pyodide load + micropip install + version verify) is capped at 60s by default — a hung micropip resolve against a slow PyPI surfaces as `worker_init_timeout` instead of wedging the worker. Pyodide's built-in `packageCacheDir` covers the runtime's bundled packages only, so a skill with dependencies re-downloads them from PyPI on every worker boot today. The per-lockfile-hash, hash-checked wheel directory in [Tier-1 boundary](#tier-1-boundary-proposed) (layer 4) replaces micropip's fetch.
 
 ### Cache reachability
 
@@ -1217,7 +1229,7 @@ If an auto-applied skill misbehaves:
 - **`/disable <skill>`** — channel command disables immediately (sets `skills.disabled = true`; running tasks finish, no new invocations accepted). Idempotent on already-disabled rows.
 - **`/enable <skill>`** — re-activates a previously disabled skill. Refuses with a "no live deploy" message if the skill was never live at its current sha (denied-on-first-deploy guard above).
 - **`/skills`** — operator inventory: lists every registered skill (enabled + disabled, with marker), tier, risk tier, short git sha. Discovery surface for the other two commands.
-- **`/rollback <skill>`** — revert to prior git SHA, re-sync.
+- **`/rollback <skill>`** — back to the prior deploy's version (Deploy lifecycle).
 - **Automatic kill-switches** — auto-disable on defect-class failures ([Notifications and undo](#notifications-and-undo)); a skill over its cost budget is refused dispatch (Cost tracking).
 
 ### Mapping to existing design
@@ -1307,7 +1319,7 @@ At personal scale (<50 skills) this is enough on its own — the tool list stays
 
 ### Cron skill failure handling
 
-A failed cron run is recorded with an `error_kind` whose class decides what follows: a pausing kind re-fires once, every failure notifies the run-as user, and defect-class failures auto-disable the skill ([Run failures](#run-failures)). Agent-led repair is the Repair button on the auto-disable notification, which opens a draft through the normal pipeline.
+See [Run failures](#run-failures): the `error_kind` class decides retry, notification and auto-disable.
 
 ## Host context (`ctx`) `[proposed]`
 
@@ -1497,7 +1509,7 @@ The second, independent consensus is default-deny egress with a per-workload all
 | 2 | Egress proxy: the one route out for both tiers, per-run credentials, pinning to the checked address, audit | `[proposed]` |
 | 3 | Bound secrets as placeholders, substituted at the proxy, with token exchange | `[proposed]`; `binding` parses and is ignored today |
 
-**Stage 1 — declared egress, default deny.** A `network:` block in `SKILL.md` names the hosts a skill may reach; absent the block, `ctx.http` refuses every destination, so a skill opts into the internet per host rather than out of it. Entries are hostnames, optionally prefixed `*.` for subdomains — `*.example.com` admits any host under that zone, `a.b.example.com` as readily as `api.example.com`, but not the apex, which needs its own entry — and a lone `*` does not parse. Depth is deliberate: CDN and bucket hosts are routinely several labels deep, and a single-label rule would push authors toward listing a bare apex, which is broader. A wildcard over a zone carrying third-party sub-labels admits those too, which is a property of sharing the zone rather than of the depth, and a reason to name hosts exactly where the zone is shared. Matching happens on the hostname ahead of resolution, so a destination the manifest never named does not even become a DNS query; the address guard then runs on what a permitted name resolves to, which is a separate question and refuses a declared host pointing inward. `computeRiskTier` never returns `auto` for a skill combining network access with declared secrets, at any count: the threshold governs how many secrets count as broad permissions, which is not the same question as whether a skill can read a credential and also reach somewhere to send it. Network with no secrets lands at `notify`.
+**Stage 1 — declared egress, default deny.** A `network:` block in `SKILL.md` names the hosts a skill may reach; absent the block, `ctx.http` refuses every destination, so a skill opts into the internet per host rather than out of it. Entries are hostnames, optionally prefixed `*.` for subdomains — `*.example.com` admits any host under that zone, `a.b.example.com` as readily as `api.example.com`, but not the apex, which needs its own entry — and a lone `*` does not parse. Depth is deliberate: CDN and bucket hosts are routinely several labels deep, and a single-label rule would push authors toward listing a bare apex, which is broader. A wildcard over a zone carrying third-party sub-labels admits those too, which is a property of sharing the zone rather than of the depth, and a reason to name hosts exactly where the zone is shared. Matching happens on the hostname ahead of resolution, so a destination the manifest never named does not even become a DNS query; the address guard then runs on what a permitted name resolves to, which is a separate question and refuses a declared host pointing inward.
 
 This is the load-bearing control, because exfiltration requires reaching a destination the attacker chose. An allowlist bounds where a credential can travel even while the skill still holds it in plaintext, which is why the proxy enforces it for both tiers before it substitutes anything.
 
@@ -1509,7 +1521,8 @@ One enforcement point for every byte a skill sends off the machine: a token-inje
 
 - Tier-2 workers run on an internal Docker network (`Internal: true`): no default route, and the only reachable address is the proxy's listener on that network. That is the enforcement, so there is no `iptables` and nothing to bypass by unsetting a variable. `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` are set for convenience. Sessions that run skill code without needing egress, such as the verify stage's, join the same network and get no credential.
 - `ctx.http`, which the host performs for tier 1 and for tier 2's RPC, calls the same proxy module in-process. Allowlist, pinning, substitution and audit have one implementation.
-- Dependency populate on a tier-2 worker reaches PyPI through the proxy, under a populate credential for the run it serves, with an allowlist of `pypi.org` and `files.pythonhosted.org` and no bindings.
+- Dependency populate, the lockfile compile and the verify session reach the package index through the proxy under their own credential classes (below).
+- When `cogmo serve` runs in a container it joins the internal network; on the host it listens on that network's bridge address. todo.md → Skills autonomy S7 confirms the host case under rootless and rootful Docker.
 - Non-HTTP protocols have no route. A tier-2 skill that needs raw TCP (SMTP, a database wire protocol) cannot run; this residual is an owner question.
 - Tier 2 runs on local Docker only ([Warm pool](#warm-pool-confirmed)). A managed backend Cogmo cannot attach to an internal network has no egress control, so the classifier reads `tier2EgressEnforced = false` there: bound secrets are unavailable and a `network:` block is `blocked`, until the provider offers an egress hook the proxy can sit behind.
 
@@ -1518,7 +1531,15 @@ One enforcement point for every byte a skill sends off the machine: a token-inje
 - The credential is `<runId>.<mac>`, where `mac` is HMAC-SHA256 of the run id under a key derived from the master key (HKDF, purpose `skill-egress`, [infrastructure.md](infrastructure.md)). It derives from the durable `skill_runs` row, so nothing stores it and a restarted proxy needs no map.
 - The relay puts it in the task process's environment and proxy URL (`http://<credential>@<proxy>`), never in the container's. A pool worker's next task gets the next run's credential.
 - Each request is admitted only while its run is `recovery_point = 'started'`. The proxy then loads the run's skill at the run's `git_sha` for its allowlist and bindings. `transitionToExecuted` revokes the credential by moving the row, and the proxy aborts that run's open requests and refuses new ones. A cached admission lives at most until the run's deadline.
-- A new run means a new credential. A leaked one opens only its own run's allowlist, and only while the run is in flight.
+- A new run means a new credential. The task process can read its own credential; that is the trade for pool workers that need no per-task network setup, and it is bounded because a credential opens only its own run's allowlist, and only while the run is in flight.
+
+**Credential classes.**
+
+| Class | Derived from | Admitted while | Allowlist | Limits |
+|-|-|-|-|-|
+| `run` | the run id | the run is at `started` | the skill's `network.allow` at the run's `git_sha` | `ctx.http`'s |
+| `populate` | the run id, purpose `populate` | the run is at `started` | the configured package index hosts | 512 MiB response, 10 min |
+| `verify` | the draft id, round and attempt; for a register outside a draft, the skill name and tip sha with an expiry in the token | the draft is `verifying` or `registering` at that attempt; or until the expiry | the configured package index hosts, for compile and install only | 512 MiB response, 10 min |
 
 **TLS.** The proxy terminates TLS for `CONNECT` with a Cogmo CA, minted by setup, kept in the secrets store, and rotated by `cogmo skills rotate-egress-ca`.
 
@@ -1529,31 +1550,30 @@ One enforcement point for every byte a skill sends off the machine: a token-inje
 
 **Implementation.** A Node module in-process, not a mitmproxy sidecar. It reuses the Docker API proxy's split ([sandbox.md → Proxy Design](sandbox.md#proxy-design)): a pure router and policy, a thin `http.Server` shell. It is one language and one deployment unit, and `ctx.http` calls it directly. A sidecar would add a Python deployment unit, its own CA lifecycle, and a run-correlation channel back to Cogmo for every request. The module needs two runtime dependencies, both under AGENTS.md → Autonomy: `undici`, for an `Agent` whose `connect.lookup` pins the vetted address, and an X.509 library to mint leaf certificates (`node:crypto` reads certificates but cannot issue them).
 
-**Per request**, in order, with `ctx.http`'s limits:
+**Per request**, in order:
 
 1. A missing or unadmitted credential is refused with `407`.
 2. A host outside the run's allowlist is denied before resolution, so it never becomes a DNS query.
 3. The resolved address must pass `isBlockedAddress`, and the connection is pinned to that address. This closes DNS rebinding for `ctx.http` and the proxy alike.
-4. `http` and `https` only; redirects are returned, not followed.
-5. Request and response bodies are capped at 5 MiB, and every request is timed out by the run's remaining wall clock.
-6. Substitution, below.
-7. Audit, below.
-8. In a shadow run, a non-GET method is recorded and answered `202` with a fixed shadow body.
+4. `ctx.http`'s scheme, redirect, body-size and timeout rules ([v1 surface](#v1-surface)), with the class's limits where the table above sets its own.
+5. Substitution, below.
+6. Audit, below.
+7. In a shadow run, a non-GET method is recorded (`shadowed`) and answered `202` with a fixed shadow body; in a verify sample call, every request is.
 
 **Substitution.** A bound secret never enters the worker. `ctx.secrets.get(name)` returns a placeholder, `cogmo-secret:<hmac(runId, name)>`, unique to the run.
 
-- The binding names its `destination` (a URL pattern within the allowlist) and its `location`, an enum: `header` (the default: a named header, or the existing `header:` template), `query` (one parameter) or `body_json_path` (one JSON body field, for APIs that take a credential in the body). The proxy replaces the placeholder only in that location, only on a request to that destination.
+- The binding names its `destination` (a URL pattern within the allowlist) and its `location`, an enum: `header` (the default: a named header, or the existing `header:` template) or `query` (one parameter). Body placement waits on an owner question (Open questions). The proxy replaces the placeholder only in that location, only on a request to that destination.
 - A placeholder anywhere else — another host, another location — is passed through unchanged, so it reaches the destination as an opaque string, and audited as `binding_misuse`.
 - `exchange: oauth_refresh` makes the proxy trade the stored refresh token for a short-lived access token at substitution time, caching it until its expiry, so no long-lived credential reaches the request either.
 - An unbound secret keeps the pull model and classifies as `raw_secret` ([Risk tiers](#risk-tiers-without-a-human)). It is the fallback for credentials no binding can place, such as a signing key the skill computes with.
 
-**Audit.** Every proxied request writes one `skill_egress` row: `run_id`, `method`, `origin`, `path` (never the query string), request and response bytes, `status`, `outcome` (`forwarded | denied | failed`), `failure_reason` (`skill_egress_failure_reason`: `host_not_allowed`, `blocked_address`, `credential_revoked`, `not_http`, `too_large`, `timeout`, `upstream_error`), and `bindings` (`EgressBindingsSchema`: each secret name with `substituted` or `misuse`). The row is inserted before the request is forwarded and completed with status and response bytes afterwards; a request whose insert fails is refused, failing closed as `secrets.get` does. `ctx.http` writes the same row, in place of its `http.request` context call. A request with no valid credential has no run to name and is logged, not stored.
+**Audit.** Every proxied request writes one `skill_egress` row: `run_id`, `method`, `origin`, `path` (never the query string), request and response bytes, `status`, `outcome` (`forwarded | shadowed | denied | failed`), `failure_reason` (`skill_egress_failure_reason`, set iff `denied` or `failed`: `host_not_allowed`, `blocked_address`, `credential_revoked`, `not_http`, `too_large`, `timeout`, `upstream_error`), and `bindings` (`EgressBindingsSchema`: each secret name with `substituted` or `misuse`). The row is inserted before the request is forwarded and completed with status and response bytes afterwards; a request whose insert fails is refused, failing closed as `secrets.get` does. `ctx.http` writes the same row, in place of its `http.request` context call. A request with no valid credential has no run to name and is logged, not stored.
 
 **Credential lifecycle.** The credential has no state of its own: it is live exactly while its run is at `started`. The proxy holds only caches it can rebuild.
 
 | Failure mode | State left | Why it is safe, or the residual |
 |-|-|-|
-| The proxy is down or restarting | requests fail to connect; the run continues | fails closed: no route exists around it. A run that ends on it records `egress_unavailable`, a pausing kind. A restart re-derives admission from `skill_runs` |
+| The proxy is down or restarting | requests fail to connect; the run continues | fails closed: no route exists around it. When a run ends in error, the runner checks the proxy's health and records `egress_unavailable`, a pausing kind, if it is down, whatever the skill raised. A restart re-derives admission from `skill_runs` |
 | A run ends with a request in flight | the request is aborted | revocation follows the row; the skill already has its result or error |
 | A run is swept from `started` ([Run failures](#run-failures)) | the credential is revoked with it | the sweeper's transition is the same revocation |
 | CA rotation | workers trust the old and new CAs until recycled | rotation drains the pool; the old CA is removed once no worker holds it |
@@ -1587,7 +1607,7 @@ async def run(inputs: Input, ctx: Ctx) -> Output: ...
 - At register, and at verify, the runner imports `skill.py` in the tier's own runtime (inside the sandbox the lockfile compile already starts, or the Pyodide child). It emits `Input.model_json_schema()` and `Output.model_json_schema()`, which become `skills.inputs` and `skills.outputs`: the LLM tool schema and the host's pre-flight ajv check.
 - The frontmatter carries no `inputs` or `outputs`, which keeps `SKILL.md` closer to Anthropic's standard. A skill with no `Input` model still needs frontmatter `inputs`, so live skills keep working.
 - The runner validates with `Input.model_validate(inputs)` before `run`, so pydantic applies defaults (a cron fire's `{}`) and formats. After `run` it applies `Output.model_validate(result).model_dump(mode="json")`.
-- pydantic belongs to the runtime, not to skills: the tier-2 runtime venv and tier 1's built-in packages pin one version each. A skill declaring another version is rejected.
+- pydantic belongs to the runtime, not to skills: the tier-2 runtime venv and tier 1's built-in packages pin one version each. A skill declaring another version is rejected, and the lockfile compile runs with `--constraint` on the runtime's pin, so no dependency pulls a different one in transitively.
 
 **`ctx`: one Python package, `cogmo_ctx`.** Both tiers ship it with a pluggable bridge, the tier-1 `MessagePort` and the tier-2 relay pipe. It replaces tier 1's untyped `ctx.py` and the copy inside `runner.py`. Its typed surface — argument and result models, `CtxError` with a `kind` enum — and the worker protocol frames are generated from the TS Zod schemas (`z.toJSONSchema`) by a codegen script. CI fails when the generated `.pyi` and JSON Schemas are stale, and pytest validates the Python side's frames against them, which catches drift such as a field one side sends and the other strips. `SKILL_EFFECTS` and `SkillManifestSchema` reach the authoring prompt and `CLAUDE.md` by interpolation, never by hand.
 
@@ -1604,7 +1624,7 @@ async def run(inputs: Input, ctx: Ctx) -> Output: ...
 | pausing | `skill_retryable` (`SkillError(..., retryable=True)`), `runtime_unavailable` (pool, sandbox, supervisor, worker init), `dependency_unavailable`, `egress_unavailable`, `host_lost` (swept) | no | once, for a cron fire |
 | legacy | `unknown`: only the migration writes it, on error rows from before the column | no | no |
 
-- A failure before the skill executed is a `SkillInvokeRejection`, as today, and a cron fire throws on it so Inngest's retries apply.
+- A failure before the skill executed is a `SkillInvokeRejection`, as today. A cron fire throws on `sandbox_unavailable`, so Inngest's retries apply; every other rejection is skipped, as today.
 - A run that executed is never re-run on its own key. A cron run ending in a pausing kind is re-fired once, after a backoff, under `skill-cron:<skillId>:<scheduledFor>:retry`.
 - `output_invalid` keeps what the skill returned, so the run is debuggable and the model is told its effects happened: `chk_skill_runs_outcome` admits `output` on an error verdict only with that kind.
 - A non-JSON output (`NaN`, a `set`) is `output_invalid`, decided in the worker before `transitionToExecuted`, so a host-side parse never strands the row at `started`.
@@ -1628,7 +1648,7 @@ The database answers what an operator asks of a skill:
 | What it cost | `resource_usage` (wall clock, peak memory), and declared `cost_per_call_usd` summed per run |
 | How it got here | `skill_deploys` (tier, reasons, `classifier_log`), and the draft: spec card, rounds, verify reports, reviews |
 
-- **CLI.** `cogmo skills runs <name> [--since 7d] [--status error]`; `cogmo skills run <runId>` (its context calls and egress); `cogmo skills activity <name> [--since 7d]` (hosts, secrets, writes, error kinds, cost); `cogmo skills drafts [--open]`.
+- **CLI.** `cogmo skills runs <name> [--since 7d] [--status error]`; `cogmo skills run-log <runId>` (its context calls and egress); `cogmo skills activity <name> [--since 7d]` (hosts, secrets, writes, error kinds, cost); `cogmo skills drafts [--open]`.
 - **Web UI.** The same reads through oRPC (`skills.runs`, `skills.run`, `skills.activity`, `skills.drafts`) on the Skills page, which the notifications' Details link opens.
 - **Chat.** `/skills` adds open and blocked drafts, with their buttons.
 
@@ -1729,16 +1749,17 @@ ALTER TYPE skill_risk_tier ADD VALUE 'blocked';   -- auto | notify | approve | b
 CREATE TYPE skill_draft_status AS ENUM ('specifying', 'authoring', 'verifying', 'reviewing', 'registering',
   'awaiting_approval', 'blocked', 'live', 'abandoned', 'failed');
 CREATE TYPE skill_draft_blocked_reason AS ENUM ('author_unavailable', 'verifier_unavailable', 'reviewer_unavailable',
-  'reviewer_block', 'risk_blocked', 'rounds_exhausted');
+  'registrar_unavailable', 'reviewer_block', 'risk_blocked', 'rounds_exhausted');
 CREATE TYPE skill_draft_end_reason AS ENUM ('user_abandoned', 'spec_timeout', 'blocked_timeout', 'approval_timeout',
   'denied', 'step_error');
-CREATE TYPE skill_reviewer AS ENUM ('claude', 'codex');
 CREATE TYPE skill_review_verdict AS ENUM ('pass', 'revise', 'block');
 CREATE TYPE skill_run_error_kind AS ENUM ('skill_raised', 'output_invalid', 'load_failed', 'wall_clock_exceeded',
   'memory_exceeded', 'skill_failed', 'input_invalid', 'skill_retryable', 'runtime_unavailable',
   'dependency_unavailable', 'egress_unavailable', 'host_lost', 'unknown');   -- 'unknown': migration backfill only
 CREATE TYPE skill_disabled_reason AS ENUM ('awaiting_first_deploy', 'operator', 'deregistered', 'error_rate', 'unknown');
-CREATE TYPE skill_egress_outcome AS ENUM ('forwarded', 'denied', 'failed');
+CREATE TYPE skill_egress_outcome AS ENUM ('forwarded', 'shadowed', 'denied', 'failed');
+ALTER TYPE skill_deploy_status ADD VALUE 'blocked';   -- terminal: resolved_at set
+CREATE TYPE skill_approval_class AS ENUM (/* SKILL_EFFECTS */ ..., 'raw_secret', 'reads_and_egress', 'sensitive_dependency');
 CREATE TYPE skill_egress_failure_reason AS ENUM ('host_not_allowed', 'blocked_address', 'credential_revoked',
   'not_http', 'too_large', 'timeout', 'upstream_error');
 
@@ -1746,7 +1767,7 @@ skill_drafts (
   id                 UUID v7 PK,
   skill_name         TEXT NOT NULL,
   base_git_sha       TEXT,                     -- nullable: null for a new skill; the live sha an edit starts from
-  conversation_id    UUID NOT NULL REFERENCES conversations(id),   -- where the card and notifications go
+  conversation_id    UUID REFERENCES conversations(id),   -- nullable: null for a CLI-started draft, whose card and notifications go to the owner
   requester_user_id  UUID NOT NULL REFERENCES users(id),
   requester_profile_id UUID NOT NULL REFERENCES profiles(id),      -- the deploy origin, and who a schedule runs as
   status             skill_draft_status NOT NULL,
@@ -1782,13 +1803,19 @@ skill_draft_reviews (
   id                 UUID v7 PK,
   draft_id           UUID NOT NULL REFERENCES skill_drafts(id),
   round              INT NOT NULL,
-  reviewer           skill_reviewer NOT NULL,
+  reviewer           coding_backend NOT NULL,   -- the reviewer's family: 'claude' | 'codex'
   model              TEXT NOT NULL,          -- upstream model id, as reported by the backend
   checklist_version  TEXT NOT NULL,
   verdict            skill_review_verdict NOT NULL,
   findings           JSONB NOT NULL,         -- SkillFindingsSchema
   created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (draft_id, round, reviewer)         -- written through ON CONFLICT DO UPDATE with a no-op SET
+)
+
+skill_approval_classes (
+  id          UUID v7 PK,
+  class       skill_approval_class NOT NULL UNIQUE,   -- a class the owner holds for approval; no rows = approve never applies
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 )
 
 skill_egress (
@@ -1857,7 +1884,7 @@ UPDATE recovery_point='finished', status='success'|'error'  ← transitionToFini
 - `chk_skill_runs_executed_payload`: `finished_at`, `resource_usage` and the worker's `output` or `error` arrive with `executed` and are absent before it.
 - `chk_skill_runs_outcome`: `output` and `error` are alternatives; an `error` verdict names its reason and keeps no output, a `success` verdict has no error.
 
-The `executed` payload stays in its existing columns under CHECK, a deviation from [state-machines.md](../.agents/rules/state-machines.md)'s per-state JSONB blob: the columns are populated in production, the CHECK gives the same all-or-none invariant, moving them would cost a data migration with no reader to benefit, and `chk_skills_run_as_iff_live_schedule` is the same accepted shape. `error` is free text, so a worker failure and an output-schema rejection cannot be told apart by query; an `error_kind` enum is a residual (todo).
+The `executed` payload stays in its existing columns under CHECK, a deviation from [state-machines.md](../.agents/rules/state-machines.md)'s per-state JSONB blob: the columns are populated in production, the CHECK gives the same all-or-none invariant, moving them would cost a data migration with no reader to benefit, and `chk_skills_run_as_iff_live_schedule` is the same accepted shape. `error` is free text, so a worker failure and an output-schema rejection cannot be told apart by query; an `error_kind` enum is a residual, closed by [Run failures](#run-failures) (todo.md → Skills autonomy S3).
 
 In code the transitions take values — `ExecutedOutcome` (`{ kind: "output", output } | { kind: "error", error }`) and `SkillRunVerdict` (`{ status: "success", output } | { status: "error", error }`) — which the store maps onto the columns, so no caller can write a half-payload. `finishedVerdictOf` reads a `finished` row back into its verdict and throws on a row outside the shape: an invariant the CHECKs hold, so a bug, not a value.
 
@@ -1914,20 +1941,7 @@ In code the transitions take values — `ExecutedOutcome` (`{ kind: "output", ou
 | Agent surface | `skills-tool.ts`, `skills-service.ts`, `skill-tool-builder.ts`, `skills-keyboard.ts` | Per-turn tool list registration, per-conversation service, Anthropic SDK descriptor build, Telegram approve/deny keyboard |
 | Store | `store/` | DB schema + `SkillStore` interface (`skills`, `skill_deploys`, `skill_runs`, `skill_context_calls` tables) |
 
-Public interface (canonical — see [Where the classifier runs](#where-the-classifier-runs) for the full RPC contract):
-
-```typescript
-interface SkillRunner {
-  register(opts: { branch: string; origin: SkillDeployOrigin }): Promise<RegisterResult>;
-  approveDeploy(opts: { pendingId: string; origin: SkillDeployOrigin }): Promise<RegisterResult>;
-  denyDeploy(opts: { pendingId: string; reason?: string }): Promise<Result<void, DenyDeployError>>;
-  rollback(opts: { name: string; toGitSha: string; origin: SkillDeployOrigin }): Promise<RegisterResult>;
-  deregister(opts: { name: string }): Promise<DeregisterResult>;
-  enable(opts: { name: string; origin: SkillDeployOrigin }): Promise<EnableResult>;
-  list(): Promise<readonly SkillSummary[]>;
-  invoke(opts: { name: string; inputs: unknown; runAs: SkillRunAs }): Promise<Result<SkillRunResult, SkillInvokeRejection>>;
-}
-```
+The public interface is `SkillRunner`, defined once in [Where the classifier runs](#where-the-classifier-runs).
 
 ## Relationship to other modules
 
@@ -1959,19 +1973,19 @@ interface SkillRunner {
 | Reviewers | The author's model in a fresh session plus the other family's; structured verdict; 3 rounds | Self-preference bias makes the author's family the weakest sole judge; rounds are bounded because self-repair is limited by critique quality. A seeded-bug suite is a regression floor, not a recall measure. |
 | Prompt practices | Each has a mechanical twin in the verify stage | Prompts are advisory; gates are deterministic. |
 | Classifier execution | Branch + `register` RPC | No repo-watching. Branch ≠ deploy. Atomic, synchronous, authoritative. Pre-commit hook deferred unless ~30s feedback lag becomes painful. |
-| Who advances `main` | Only Cogmo's `register` RPC | Pre-receive hook rejects direct pushes to `main`. Makes "live on main" atomic with "classified and approved"; collapses transient "committed-but-rejected" states; structurally prevents force push. |
+| Who advances `main` | Only Cogmo: `register`, and the toolchain commit at boot | Pre-receive hook rejects direct pushes to `main`. Makes "live on main" atomic with "classified and approved"; collapses transient "committed-but-rejected" states; structurally prevents force push. |
 | Concurrency on register | Advisory lock + pending-deploy check | `pg_advisory_xact_lock` per skill name queues concurrent registers; it doesn't refresh the loser's snapshot (audit filed in `todo.md`). Refuse if a pending-approval deploy exists. Idempotent for no-op SHAs. Standard DB-backed state-machine pattern. |
 | LLM tool surface | One tool per skill (dynamic per-turn tool list) | Matches progressive disclosure — skills appear in the tool list with their own name + description. No `invoke_skill` wrapper (would break discovery). Orchestrator rebuilds tool list each turn from `SkillRunner.list()`. |
 | Manifest | Single `SkillManifestSchema` (Zod) parsed from `SKILL.md` frontmatter | Five consumers read it: register RPC, classifier, dependency populator, dispatcher, tool registrar. One schema prevents field drift. Superset of Anthropic SKILL.md. |
 | State reset | Fresh processes per task forked from a pre-imported supervisor, behind a per-task relay; the task's process tree is killed before the worker is released; per-skill `recycle` opt-out | No in-memory state or process crosses tasks, at a few ms per task. Recycling every task also resets the filesystem, at a container start per invocation. |
 | Skill discovery | Progressive disclosure (SKILL.md) | Matches Anthropic standard. At <50 skills, tool list stays manageable. Retrieval (`search_skills`) added later when tool-list tokens or selection accuracy forces it. |
-| Resource budgets | Declared in SKILL.md; cgroup slice (container) / `WebAssembly.Memory.grow` hook plus a child-process cgroup (WASM) | Container tier reuses sandbox.md cgroup parent. `resourceLimits` cannot cap WASM memory, which is an ArrayBuffer. Per-skill override within tier hard ceilings. |
+| Resource budgets | Declared in SKILL.md; cgroup slice (container); WASM per [Tier-1 boundary](#tier-1-boundary-proposed) | Container tier reuses sandbox.md cgroup parent. Per-skill override within tier hard ceilings. |
 | Cost tracking | Wall-clock + peak memory + LLM tokens via `ctx.llm` + declared `cost_per_call_usd` | Measured per `skill_run`. Dispatcher enforces daily/monthly budget from SKILL.md. `auto` tier requires zero paid surface. |
 | Cron failure handling | `error_kind` classes: a pausing kind re-fires once, every failure notifies, defects auto-disable | Infrastructure failures must not read as skill bugs, and a run that executed is never silently repeated. |
 | Tier-1 boundary | Pyodide in a forked child under `--permission` and `--disallow-code-generation-from-strings`, minimal frozen `jsglobals`, `env: {}`, no network API, a `grow` hook | Measured: `jsglobals` alone leaves the `Function`-constructor path, `resourceLimits` does not cap WASM memory, and snapshots cannot preload dependencies. |
 | Contracts | pydantic `Input` / `Output` in `skill.py` generate the tool schema; one `cogmo_ctx` generated from the TS schemas | One source per contract; every copy generated and checked in CI. |
 | Inter-skill composition | Not in v1; future via `ctx.skills.invoke()` through orchestrator | Agent composes at LLM level. Direct skill imports rejected — break permission scoping. |
-| `ctx` v1 surface | secrets, memory, files, http, now, user, log (attachments, llm, notify pending) | Covers what skills actually need. `http` is tier 1's only network path and is gated on the manifest's `network.allow`; metrics, composition and scheduling stay deferred. |
+| `ctx` v1 surface | secrets, memory, files, http, now, user, log (attachments, llm, notify pending) | Covers what skills actually need. `http` is the intended network path, gated on the manifest's `network.allow`; metrics, composition and scheduling stay deferred. |
 | Invocation | Inngest events | Durable execution, retry, scheduling — all free. Matches existing orchestration pattern. |
 | Output delivery | JSON via tool result; binaries via `AttachmentStore` | Same pattern as `generate_image`. |
 | Skill metadata | `SKILL.md` frontmatter | Matches Anthropic's progressive-disclosure standard, already referenced in [integrations.md](integrations.md). |
@@ -1979,7 +1993,6 @@ interface SkillRunner {
 | Secrets access | Pull model — `ctx.secrets.get(name)` gated by manifest allowlist; bound secrets become placeholders the egress proxy substitutes | Materializes secrets only at point of use; per-access audit; zero-touch rotation. Reads naturally in Python. The manifest gating its own access is the skill declaring its own permissions, which is why risk tiering and the egress allowlist carry the weight rather than the allowlist alone. |
 | Secrets storage | Existing encrypted `secrets` table (per [infrastructure.md](infrastructure.md)) | Cogmo already has a minimal self-hosted vault. No external service at personal scale. |
 | Egress enforcement | One token-injecting forward proxy in `cogmo serve`; tier-2 workers on an internal network with no other route; `ctx.http` through the same module | The missing route is the enforcement, so unsetting a variable bypasses nothing; one implementation of allowlist, pinning, substitution and audit. In-process Node over a mitmproxy sidecar: one language, one deployment unit, no run-correlation channel. |
-| Egress allowlist | Manifest `network:` block, default deny (stage 1) | Bounds where a credential can travel even while the skill holds it in plaintext, which is what makes it the release gate rather than substitution. Matches the default-deny-plus-allowlist consensus for running model-authored code. |
 | Dep declaration | `dependencies: ["pkg==version", ...]` in `SKILL.md`; Zod regex rejects ranges/extras/URLs/paths | One Zod schema, five consumers — same drift-prevention as the rest of the manifest. Strict pinning prevents resolution drift between register and re-resolve. |
 | Lockfile | `requirements.lock` next to `skill.py`, hash-pinned via `uv pip compile --generate-hashes`, author-committed | Transitive graph pinned; register byte-compares to catch staleness. Atomic with the rest of the skill from the operator's POV. |
 | Resolver | `uv` (compile + sync) baked into `cogmo-skills:<version>` runtime image | Sub-100ms venv creation; hash pinning is first-class; resolver at register matches resolver at populate byte-for-byte. Already standardised across the codebase. |
@@ -1989,7 +2002,7 @@ interface SkillRunner {
 | Cache reachability | `skills.lockfile_hash` denormalised from git; reaper sweeps `<hash>/` with no live reference + 7-day grace | LRU evicts cold-but-live skills and pays multi-second cold start on next invoke. Reachability + grace period is correct. |
 | Source distributions | Forbidden (`--only-binary=:all:`) | Sdists run arbitrary install-time code + need a build toolchain. Auto-tier never includes sdists. Opt-in escape hatch deferred to a real driver. |
 | Venv overlay vs `--target` | Per-skill venv, not `--target` + PYTHONPATH | `--target` has well-known namespace-package collisions ([pip #10629](https://github.com/pypa/pip/issues/10629)), inert `.pth` files, missing console scripts; PYTHONPATH overlay shadows base-wins which is surprising. Venv creation is cheap enough that "always a venv" is defensible. |
-| Tier 1 deps | `micropip.install(specs, keep_going=False)` at WASM worker init, post-install `importlib.metadata.version()` verify per declared dep | Pyodide-incompatible wheels fail at register (`src/skills/pyodide-compat.ts` reads `pyodide-lock.json` + checks PyPI for a pure-Python wheel). Hash pinning isn't possible (no `micropip --require-hashes`); a per-lockfile-hash micropip wheel cache + private mirror are deferred (`[research]`). |
+| Tier 1 deps | Today `micropip.install` at worker init with a version check; `[proposed]` host-fetched, hash-checked wheels installed offline ([Tier-1 boundary](#tier-1-boundary-proposed)) | Pyodide-incompatible wheels fail at register (`pyodide-compat.ts`); the wheel directory closes micropip's missing `--require-hashes`. |
 | Private mirror | Deferred (`[research]`) | Public PyPI + hash pinning is fine at single-operator scale. Devpi/Bandersnatch becomes table stakes when scale widens or quarantine windows on new releases are wanted. |
 | Attestation verification | Deferred (`[research]`) | PEP 740 attestations are emerging (132k+ packages by Mar 2026). Verification via `pypi-attestations` belongs alongside the mirror when that lands. |
 
