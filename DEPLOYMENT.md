@@ -10,7 +10,7 @@ This is the canonical install guide. Cogmo is a single Node.js process distribut
 | pgvector | latest | Postgres extension for vector storage. The `pgvector/pgvector:pg18` image bundles it. |
 | Redis | 7+ | Inngest queue and state store. |
 | Inngest | latest | Self-hosted `inngest start` with an event key and signing key. `inngest dev` is for local development only — see [Securing internal services](#securing-internal-services). |
-| [Hindsight](https://github.com/vectorize-io/hindsight) | 1.0.x, slim recommended | Memory server, HTTP API on port 8888. Cogmo reads the server's version at boot and refuses to start outside `cogmo.hindsightCompat` in `apps/server/package.json`, so upgrade the two together. See [Hindsight image variant](#hindsight-image-variant) for which tag to pick. |
+| [Hindsight](https://github.com/vectorize-io/hindsight) | 1.1.x, slim recommended | Memory server, HTTP API on port 8888. Cogmo reads the server's version at boot and refuses to start outside `cogmo.hindsightCompat` in `apps/server/package.json`, so upgrade the two together. See [Hindsight image variant](#hindsight-image-variant) for which tag to pick. |
 | Docker | latest | For pulling and running the image. |
 
 Cogmo stores its application state in your Postgres; Hindsight stores its vectors in the same Postgres (different schema). One database is enough for personal scale.
