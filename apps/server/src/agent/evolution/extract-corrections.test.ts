@@ -6,8 +6,13 @@ import { mockProvider } from "../../test/factories.js";
 import type { ExtractionRule } from "../store/index.js";
 import type { StoredMessage } from "../stored-content.js";
 import {
+  type ApplyCorrectionsStore,
+  applyCorrections,
+  collapseCorrections,
   type ExtractionDeps,
-  extractCorrections,
+  type ExtractionResult,
+  type ExtractionScope,
+  extractTurnCorrections,
   formatTranscript,
 } from "./extract-corrections.js";
 
@@ -201,16 +206,29 @@ describe("formatTranscript", () => {
   });
 });
 
-// --- extractCorrections tests ---
+// --- extractTurnCorrections + applyCorrections tests ---
+
+/** The extraction's dependencies, the apply's store calls, and the conversation's channels. */
+interface TestDeps extends Omit<ExtractionDeps, "store"> {
+  store: ExtractionDeps["store"] & ApplyCorrectionsStore;
+  activeChannelTypes: ReadonlyArray<string>;
+}
+
+/** The observation row of the turn the tests apply. */
+const TURN_ID = "turn-observation-1";
 
 function mockExtractionDeps(
   chatTypedResponse: { corrections: Array<Record<string, unknown>> },
-  storeOverrides?: Partial<ExtractionDeps["store"]>,
+  storeOverrides?: Partial<TestDeps["store"]>,
   activeChannelTypes: ReadonlyArray<string> = [],
-): ExtractionDeps {
+): TestDeps {
+  // Every scripted item quotes the user, unless it says otherwise.
+  const answer = {
+    corrections: chatTypedResponse.corrections.map((c) => ({ evidence: "fetch_url", ...c })),
+  };
   const provider = mockProvider({
     chat: vi.fn().mockResolvedValue({
-      content: [{ type: "text", text: JSON.stringify(chatTypedResponse) }],
+      content: [{ type: "text", text: JSON.stringify(answer) }],
       stopReason: "end_turn",
       model: "mock",
       usage: { inputTokens: 10, outputTokens: 5 },
@@ -234,8 +252,27 @@ function mockExtractionDeps(
   };
 }
 
-const SCOPE = {
-  conversationId: "conv-1",
+/** Extract `history` as one turn, then apply what came back, as the Observer's turn step does. */
+async function extractAndApply(
+  history: ReadonlyArray<StoredMessage>,
+  scope: ExtractionScope,
+  deps: TestDeps,
+): Promise<ExtractionResult> {
+  const corrections = await extractTurnCorrections(
+    { turn: formatTranscript(history), context: null },
+    scope,
+    deps.activeChannelTypes,
+    deps,
+  );
+  return applyCorrections(FAKE_TX, corrections, {
+    turnObservationId: TURN_ID,
+    scope,
+    activeChannelTypes: deps.activeChannelTypes,
+    store: deps.store,
+  });
+}
+
+const SCOPE: ExtractionScope = {
   profileId: "profile-1",
   userId: "user-1",
   seesUserRules: true,
@@ -249,6 +286,27 @@ function instructionRow(id: string, rule: string, observationCount = 1) {
 /** A learned rule still learning, as `getCorrections` returns it. */
 function learningRow(id: string, rule: string, channelType: string | null = null): ExtractionRule {
   return { ...ruleRow(id, rule), status: "learning", channelType };
+}
+
+function reinforceItem(label: string) {
+  return {
+    rule: "Be concise",
+    category: "style",
+    reasoning: "again",
+    matchedExistingRuleId: label,
+    action: "reinforce" as const,
+  };
+}
+
+function newItem(rule: string) {
+  return {
+    rule,
+    category: "domain",
+    reasoning: "a new preference",
+    matchedExistingRuleId: null,
+    action: "new" as const,
+    channelType: null,
+  };
 }
 
 function contradiction(label: string) {
@@ -265,7 +323,7 @@ function contradiction(label: string) {
   };
 }
 
-function systemPromptOf(deps: ExtractionDeps): string {
+function systemPromptOf(deps: TestDeps): string {
   const call = expectDefined(vi.mocked(deps.provider.chat).mock.calls[0], "chat call");
   return call[0].system;
 }
@@ -286,10 +344,10 @@ const sampleHistory: StoredMessage[] = [
   { role: "assistant", content: "Got it, I'll use fetch_url next time." },
 ];
 
-describe("extractCorrections", () => {
+describe("extractTurnCorrections and applyCorrections", () => {
   it("returns zeros when no corrections found", async () => {
     const deps = mockExtractionDeps({ corrections: [] });
-    const result = await extractCorrections(sampleHistory, SCOPE, deps);
+    const result = await extractAndApply(sampleHistory, SCOPE, deps);
 
     expect(result).toEqual({
       extracted: 0,
@@ -318,7 +376,7 @@ describe("extractCorrections", () => {
         },
       );
 
-      await extractCorrections(sampleHistory, { ...SCOPE, seesUserRules: false }, deps);
+      await extractAndApply(sampleHistory, { ...SCOPE, seesUserRules: false }, deps);
 
       expect(deps.store.getInstructionRules).not.toHaveBeenCalled();
       const system = systemPromptOf(deps);
@@ -338,7 +396,7 @@ describe("extractCorrections", () => {
         },
       );
 
-      await extractCorrections(sampleHistory, SCOPE, deps);
+      await extractAndApply(sampleHistory, SCOPE, deps);
 
       expect(deps.store.getInstructionRules).toHaveBeenCalledWith(
         expect.anything(),
@@ -361,7 +419,7 @@ describe("extractCorrections", () => {
         },
       );
 
-      await extractCorrections(sampleHistory, SCOPE, deps);
+      await extractAndApply(sampleHistory, SCOPE, deps);
 
       const system = systemPromptOf(deps);
       expect(system).toContain(
@@ -375,7 +433,7 @@ describe("extractCorrections", () => {
     it("defines the memory category as what the assistant remembers, tracks or must not store", async () => {
       const deps = mockExtractionDeps({ corrections: [] });
 
-      await extractCorrections(sampleHistory, SCOPE, deps);
+      await extractAndApply(sampleHistory, SCOPE, deps);
 
       expect(systemPromptOf(deps)).toContain(
         '"memory": What the assistant remembers, tracks or must not store',
@@ -404,7 +462,7 @@ describe("extractCorrections", () => {
         },
       );
 
-      const result = await extractCorrections(sampleHistory, SCOPE, deps);
+      const result = await extractAndApply(sampleHistory, SCOPE, deps);
 
       expect(result).toMatchObject({ reinforced: 1, unknownRuleReinforcementsSkipped: 0 });
       expect(deps.store.upsertCorrection).toHaveBeenCalledWith(
@@ -432,7 +490,7 @@ describe("extractCorrections", () => {
       );
       const warn = vi.spyOn(logger, "warn");
 
-      const result = await extractCorrections(sampleHistory, SCOPE, deps);
+      const result = await extractAndApply(sampleHistory, SCOPE, deps);
 
       expect(result.extracted).toBe(0);
       expect(deps.store.hasInstructionRule).toHaveBeenCalledWith(expect.anything(), {
@@ -467,7 +525,7 @@ describe("extractCorrections", () => {
         ["web"],
       );
 
-      const result = await extractCorrections(sampleHistory, SCOPE, deps);
+      const result = await extractAndApply(sampleHistory, SCOPE, deps);
 
       expect(result.extracted).toBe(1);
       expect(deps.store.hasInstructionRule).toHaveBeenCalledWith(
@@ -493,28 +551,24 @@ describe("extractCorrections", () => {
         { hasInstructionRule: vi.fn().mockResolvedValue(true) },
       );
 
-      const result = await extractCorrections(
-        sampleHistory,
-        { ...SCOPE, seesUserRules: false },
-        deps,
-      );
+      const result = await extractAndApply(sampleHistory, { ...SCOPE, seesUserRules: false }, deps);
 
       expect(result.extracted).toBe(0);
     });
   });
 
   describe("a contradiction", () => {
-    it("resets a rule still learning on a first contradiction, from this conversation", async () => {
+    it("resets a rule still learning on a first contradiction, from this turn", async () => {
       const deps = mockExtractionDeps(contradiction("R1"), {
         getCorrections: vi.fn().mockResolvedValue([learningRow("learning", "Use bullet points")]),
       });
 
-      const result = await extractCorrections(sampleHistory, SCOPE, deps);
+      const result = await extractAndApply(sampleHistory, SCOPE, deps);
 
       expect(result).toMatchObject({ contradictions: 1, reset: 1, retired: 0, extracted: 0 });
       expect(deps.store.contradictLearningRule).toHaveBeenCalledWith(expect.anything(), {
         id: "learning",
-        conversationId: "conv-1",
+        turnObservationId: TURN_ID,
       });
       expect(deps.store.upsertCorrection).not.toHaveBeenCalled();
     });
@@ -525,7 +579,7 @@ describe("extractCorrections", () => {
         contradictLearningRule: vi.fn().mockResolvedValue("retired"),
       });
 
-      const result = await extractCorrections(sampleHistory, SCOPE, deps);
+      const result = await extractAndApply(sampleHistory, SCOPE, deps);
 
       expect(result).toMatchObject({ contradictions: 1, reset: 0, retired: 1 });
     });
@@ -541,7 +595,7 @@ describe("extractCorrections", () => {
       ]) {
         const deps = mockExtractionDeps(contradiction("R1"), store);
 
-        const result = await extractCorrections(sampleHistory, SCOPE, deps);
+        const result = await extractAndApply(sampleHistory, SCOPE, deps);
 
         expect(result).toMatchObject({ contradictions: 1, retired: 0, reset: 0 });
         expect(deps.store.contradictLearningRule).not.toHaveBeenCalled();
@@ -561,7 +615,7 @@ describe("extractCorrections", () => {
       const warn = vi.spyOn(logger, "warn");
       const info = vi.spyOn(logger, "info");
 
-      const result = await extractCorrections(sampleHistory, SCOPE, deps);
+      const result = await extractAndApply(sampleHistory, SCOPE, deps);
 
       expect(result).toMatchObject({
         contradictions: 1,
@@ -587,7 +641,7 @@ describe("extractCorrections", () => {
         contradictLearningRule: vi.fn().mockResolvedValue("unchanged"),
       });
 
-      const result = await extractCorrections(sampleHistory, SCOPE, deps);
+      const result = await extractAndApply(sampleHistory, SCOPE, deps);
 
       expect(result).toMatchObject({ contradictions: 1, retired: 0, reset: 0 });
     });
@@ -607,7 +661,7 @@ describe("extractCorrections", () => {
       ],
     });
 
-    const result = await extractCorrections(sampleHistory, SCOPE, deps);
+    const result = await extractAndApply(sampleHistory, SCOPE, deps);
 
     expect(result.extracted).toBe(1);
     expect(deps.store.upsertCorrection).toHaveBeenCalledWith(expect.anything(), {
@@ -633,7 +687,7 @@ describe("extractCorrections", () => {
       ],
     });
 
-    const result = await extractCorrections(sampleHistory, SCOPE, deps);
+    const result = await extractAndApply(sampleHistory, SCOPE, deps);
 
     expect(result.extracted).toBe(1);
     expect(deps.store.upsertCorrection).toHaveBeenCalledWith(expect.anything(), {
@@ -660,7 +714,7 @@ describe("extractCorrections", () => {
       { getCorrections: vi.fn().mockResolvedValue(LABELLED_RULES) },
     );
 
-    const result = await extractCorrections(sampleHistory, SCOPE, deps);
+    const result = await extractAndApply(sampleHistory, SCOPE, deps);
 
     expect(result.reinforced).toBe(1);
     expect(result.unknownRuleReinforcementsSkipped).toBe(0);
@@ -690,7 +744,7 @@ describe("extractCorrections", () => {
     );
     const warn = vi.spyOn(logger, "warn");
 
-    const result = await extractCorrections(sampleHistory, SCOPE, deps);
+    const result = await extractAndApply(sampleHistory, SCOPE, deps);
 
     expect(result.reinforced).toBe(0);
     expect(result.unknownRuleReinforcementsSkipped).toBe(1);
@@ -708,7 +762,7 @@ describe("extractCorrections", () => {
       { getCorrections: vi.fn().mockResolvedValue(LABELLED_RULES) },
     );
 
-    await extractCorrections(sampleHistory, SCOPE, deps);
+    await extractAndApply(sampleHistory, SCOPE, deps);
 
     const system = expectDefined(vi.mocked(deps.provider.chat).mock.calls[0], "chat call")[0]
       .system;
@@ -740,7 +794,7 @@ describe("extractCorrections", () => {
       { getCorrections: vi.fn().mockResolvedValue(rules) },
     );
 
-    await extractCorrections(sampleHistory, SCOPE, deps);
+    await extractAndApply(sampleHistory, SCOPE, deps);
 
     const system = expectDefined(vi.mocked(deps.provider.chat).mock.calls[0], "chat call")[0]
       .system;
@@ -770,7 +824,7 @@ describe("extractCorrections", () => {
     );
     const warn = vi.spyOn(logger, "warn");
 
-    const result = await extractCorrections(sampleHistory, SCOPE, deps);
+    const result = await extractAndApply(sampleHistory, SCOPE, deps);
 
     expect(result.contradictions).toBe(0);
     expect(deps.store.upsertCorrection).not.toHaveBeenCalled();
@@ -809,7 +863,7 @@ describe("extractCorrections", () => {
       },
     );
 
-    const result = await extractCorrections(sampleHistory, SCOPE, deps);
+    const result = await extractAndApply(sampleHistory, SCOPE, deps);
 
     expect(result.reinforced).toBe(1);
     expect(deps.store.upsertCorrection).toHaveBeenCalledWith(expect.anything(), {
@@ -841,7 +895,7 @@ describe("extractCorrections", () => {
       },
     );
 
-    const result = await extractCorrections(sampleHistory, SCOPE, deps);
+    const result = await extractAndApply(sampleHistory, SCOPE, deps);
 
     expect(result.contradictions).toBe(1);
     expect(result.extracted).toBe(0);
@@ -877,7 +931,7 @@ describe("extractCorrections", () => {
       },
     );
 
-    const result = await extractCorrections(sampleHistory, SCOPE, deps);
+    const result = await extractAndApply(sampleHistory, SCOPE, deps);
 
     expect(result.promoted).toBe(1);
     expect(result.reinforced).toBe(1);
@@ -889,7 +943,7 @@ describe("extractCorrections", () => {
       { countLiveLearnedRules: vi.fn().mockResolvedValue(21) },
     );
 
-    const result = await extractCorrections(sampleHistory, SCOPE, deps);
+    const result = await extractAndApply(sampleHistory, SCOPE, deps);
     expect(result.consolidationNeeded).toBe(true);
     expect(deps.store.countLiveLearnedRules).toHaveBeenCalledWith(FAKE_TX, "profile-1");
   });
@@ -900,7 +954,7 @@ describe("extractCorrections", () => {
       { countLiveLearnedRules: vi.fn().mockResolvedValue(20) },
     );
 
-    const result = await extractCorrections(sampleHistory, SCOPE, deps);
+    const result = await extractAndApply(sampleHistory, SCOPE, deps);
     expect(result.consolidationNeeded).toBe(false);
   });
 
@@ -924,7 +978,7 @@ describe("extractCorrections", () => {
     );
     const warn = vi.spyOn(logger, "warn");
 
-    const result = await extractCorrections(sampleHistory, SCOPE, deps);
+    const result = await extractAndApply(sampleHistory, SCOPE, deps);
 
     expect(result).toMatchObject({
       reinforced: 0,
@@ -983,7 +1037,7 @@ describe("extractCorrections", () => {
       },
     );
 
-    const result = await extractCorrections(sampleHistory, SCOPE, deps);
+    const result = await extractAndApply(sampleHistory, SCOPE, deps);
 
     expect(result.extracted).toBe(1);
     expect(result.reinforced).toBe(1);
@@ -1010,7 +1064,7 @@ describe("extractCorrections", () => {
       ["telegram", "direct"],
     );
 
-    const result = await extractCorrections(sampleHistory, SCOPE, deps);
+    const result = await extractAndApply(sampleHistory, SCOPE, deps);
 
     expect(result.extracted).toBe(1);
     expect(deps.store.upsertCorrection).toHaveBeenCalledWith(expect.anything(), {
@@ -1039,7 +1093,7 @@ describe("extractCorrections", () => {
       ["telegram"],
     );
 
-    const result = await extractCorrections(sampleHistory, SCOPE, deps);
+    const result = await extractAndApply(sampleHistory, SCOPE, deps);
 
     expect(result.extracted).toBe(1);
     expect(deps.store.upsertCorrection).toHaveBeenCalledWith(expect.anything(), {
@@ -1079,7 +1133,7 @@ describe("extractCorrections", () => {
       ["telegram"],
     );
 
-    const result = await extractCorrections(sampleHistory, SCOPE, deps);
+    const result = await extractAndApply(sampleHistory, SCOPE, deps);
 
     expect(result.reinforced).toBe(1);
     expect(result.outOfScopeReinforcementsSkipped).toBe(0);
@@ -1122,7 +1176,7 @@ describe("extractCorrections", () => {
       ["telegram"],
     );
 
-    const result = await extractCorrections(sampleHistory, SCOPE, deps);
+    const result = await extractAndApply(sampleHistory, SCOPE, deps);
 
     expect(result.reinforced).toBe(1);
     expect(result.outOfScopeReinforcementsSkipped).toBe(0);
@@ -1165,7 +1219,7 @@ describe("extractCorrections", () => {
       ["telegram"],
     );
 
-    const result = await extractCorrections(sampleHistory, SCOPE, deps);
+    const result = await extractAndApply(sampleHistory, SCOPE, deps);
 
     expect(result.reinforced).toBe(0);
     expect(result.outOfScopeReinforcementsSkipped).toBe(1);
@@ -1192,7 +1246,7 @@ describe("extractCorrections", () => {
       ["telegram"],
     );
 
-    const result = await extractCorrections(sampleHistory, SCOPE, deps);
+    const result = await extractAndApply(sampleHistory, SCOPE, deps);
 
     expect(result.reinforced).toBe(0);
     expect(result.outOfScopeReinforcementsSkipped).toBe(0);
@@ -1228,7 +1282,7 @@ describe("extractCorrections", () => {
       ["telegram"],
     );
 
-    await extractCorrections(sampleHistory, SCOPE, deps);
+    await extractAndApply(sampleHistory, SCOPE, deps);
 
     expect(deps.provider.chat).toHaveBeenCalledOnce();
     const call = vi.mocked(deps.provider.chat).mock.calls[0]?.[0];
@@ -1241,38 +1295,77 @@ describe("extractCorrections", () => {
   it("instructs the LLM to default to null when no channels are active", async () => {
     const deps = mockExtractionDeps({ corrections: [] }, undefined, []);
 
-    await extractCorrections(sampleHistory, SCOPE, deps);
+    await extractAndApply(sampleHistory, SCOPE, deps);
 
     const call = vi.mocked(deps.provider.chat).mock.calls[0]?.[0];
     const system = call?.system ?? "";
     expect(system).toContain("No active channels were resolved");
   });
 
-  it("skips extraction for empty transcript", async () => {
+  it("sends the turn inside <turn>, after the earlier exchange it is given", async () => {
     const deps = mockExtractionDeps({ corrections: [] });
-    const thinkingOnly: StoredMessage[] = [
+
+    await extractTurnCorrections(
+      { turn: "User: shorter please", context: "User: tell me\n\nAssistant: a long answer" },
+      SCOPE,
+      [],
+      deps,
+    );
+
+    const call = expectDefined(vi.mocked(deps.provider.chat).mock.calls[0], "chat call");
+    expect(call[0].messages).toEqual([
       {
-        role: "assistant",
-        content: [{ type: "thinking", thinking: "hmm", signature: "sig" }],
+        role: "user",
+        content:
+          "<earlier_conversation>\nUser: tell me\n\nAssistant: a long answer\n</earlier_conversation>\n\n<turn>\nUser: shorter please\n</turn>",
       },
-    ];
+    ]);
+    expect(call[0].system).toContain("Extract corrections from the user's words in `<turn>` only");
+  });
 
-    const result = await extractCorrections(thinkingOnly, SCOPE, deps);
+  it("moves each rule once per turn: a contradiction wins, a reinforcement and a new rule count once", async () => {
+    const deps = mockExtractionDeps(
+      {
+        corrections: [
+          { ...reinforceItem("R1"), rule: "Be concise" },
+          { ...reinforceItem("R1"), rule: "Be concise, again" },
+          { ...reinforceItem("R2"), rule: "Keep replies short" },
+          {
+            rule: "Short is fine",
+            category: "style",
+            reasoning: "retracts",
+            matchedExistingRuleId: "R2",
+            action: "contradiction",
+          },
+          newItem("Use fetch_url for weather"),
+          newItem("use  fetch_url for WEATHER"),
+        ],
+      },
+      { getCorrections: vi.fn().mockResolvedValue(LABELLED_RULES) },
+    );
 
-    expect(result).toEqual({
-      extracted: 0,
-      reinforced: 0,
-      contradictions: 0,
-      retired: 0,
-      reset: 0,
-      promoted: 0,
-      outOfScopeReinforcementsSkipped: 0,
-      outOfScopeContradictionsSkipped: 0,
-      unknownRuleReinforcementsSkipped: 0,
-      consolidationNeeded: false,
-    });
-    // chatTyped should not have been called
-    expect(deps.provider.chat).not.toHaveBeenCalled();
+    const result = await extractAndApply(sampleHistory, SCOPE, deps);
+
+    expect(result).toMatchObject({ reinforced: 1, extracted: 1, contradictions: 1 });
+    expect(deps.store.upsertCorrection).toHaveBeenCalledTimes(2);
+    expect(deps.store.upsertCorrection).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ existingRuleId: "rule-a" }),
+    );
+    expect(deps.store.upsertCorrection).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ existingRuleId: "rule-b" }),
+    );
+  });
+
+  it("collapses nothing it can't resolve: an unknown label stays for the apply to count", () => {
+    const items = [reinforceItem("R9"), reinforceItem("R9")].map((c) => ({
+      ...c,
+      category: "style" as const,
+      evidence: "x",
+    }));
+
+    expect(collapseCorrections(items, new Map())).toHaveLength(2);
   });
 
   it("recovers a trailing-comma extraction response via chatTyped repair", async () => {
@@ -1285,7 +1378,7 @@ describe("extractCorrections", () => {
         content: [
           {
             type: "text",
-            text: '{"corrections":[{"rule":"Use fetch_url for weather lookups","category":"domain","reasoning":"User correction","matchedExistingRuleId":null,"action":"new","channelType":null,},],}',
+            text: '{"corrections":[{"rule":"Use fetch_url for weather lookups","category":"domain","reasoning":"User correction","evidence":"use fetch_url","matchedExistingRuleId":null,"action":"new","channelType":null,},],}',
           },
         ],
         stopReason: "end_turn",
@@ -1293,9 +1386,9 @@ describe("extractCorrections", () => {
         usage: { inputTokens: 10, outputTokens: 5 },
       }),
     });
-    const deps: ExtractionDeps = { ...mockExtractionDeps({ corrections: [] }), provider };
+    const deps: TestDeps = { ...mockExtractionDeps({ corrections: [] }), provider };
 
-    const result = await extractCorrections(sampleHistory, SCOPE, deps);
+    const result = await extractAndApply(sampleHistory, SCOPE, deps);
 
     expect(result.extracted).toBe(1);
     expect(provider.chat).toHaveBeenCalledTimes(1);

@@ -305,10 +305,20 @@ async function upsertInstructionRule(
   return { kind: inserted ? "new" : "existing", ...row };
 }
 
-/** The columns a retirement writes; a contradiction's also records its conversation. */
+/** The columns a retirement writes; a contradiction's also records its turn. */
 function retirement(reason: SteeringRuleRetireReason) {
   return { status: "retired" as const, retractedAt: sql`now()`, retiredReason: reason };
 }
+
+/**
+ * `contradicted_in_conversation_id`, cleared by every write of the turn
+ * marker, so a value a rolled-back build wrote never outlives the next write
+ * and never meets the CHECK on a rule that left learning.
+ */
+const LEGACY_MARKER_CLEARED = { contradictedInConversationId: null } as const;
+
+/** No contradiction record, for a retirement that isn't one. */
+const NO_CONTRADICTION_MARKER = { contradictedInTurnId: null, ...LEGACY_MARKER_CLEARED } as const;
 
 const RULE_MATCH_COLUMNS = {
   id: steeringRules.id,
@@ -402,18 +412,18 @@ export interface SteeringRuleStore {
   ): Promise<UpsertCorrectionResult>;
 
   /**
-   * Apply a contradiction from `conversationId` to a learned rule still
-   * learning. The first resets its observation count to 0 and records the
-   * conversation (`reset`); one from another conversation retires it and
-   * records that conversation instead (`retired`). A contradiction from the
-   * recorded conversation writes nothing and reports what that conversation
-   * did, so a retried or repeated extraction applies once and counts the
-   * same. Every other retirement clears the record, so one against a rule that
-   * is live, retired otherwise or not learned writes nothing (`unchanged`).
+   * Apply a contradiction from the turn whose `corrections` observation row
+   * is `turnObservationId` to a learned rule still learning. The first resets
+   * its observation count to 0 and records the turn (`reset`); one from any
+   * other turn, in the same conversation or another, retires it and records
+   * that turn instead (`retired`). A contradiction from the recorded turn
+   * writes nothing and reports what that turn did. Every other retirement
+   * clears the record, so one against a rule that is live, retired otherwise
+   * or not learned writes nothing (`unchanged`).
    */
   contradictLearningRule(
     tx: Transaction,
-    params: { id: string; conversationId: string },
+    params: { id: string; turnObservationId: string },
   ): Promise<"reset" | "retired" | "unchanged">;
 
   /**
@@ -598,29 +608,30 @@ export class DrizzleSteeringRuleStore implements SteeringRuleStore {
 
   async contradictLearningRule(
     tx: Transaction,
-    params: { id: string; conversationId: string },
+    params: { id: string; turnObservationId: string },
   ): Promise<"reset" | "retired" | "unchanged"> {
     const learning = and(
       eq(steeringRules.id, params.id),
       eq(steeringRules.status, "learning"),
       inArray(steeringRules.source, LEARNED_RULE_SOURCES),
     );
+    const marker = { contradictedInTurnId: params.turnObservationId, ...LEGACY_MARKER_CLEARED };
     const retired = await tx
       .update(steeringRules)
-      .set({ ...retirement("contradicted"), contradictedInConversationId: params.conversationId })
+      .set({ ...retirement("contradicted"), ...marker })
       .where(
         and(
           learning,
-          isNotNull(steeringRules.contradictedInConversationId),
-          ne(steeringRules.contradictedInConversationId, params.conversationId),
+          isNotNull(steeringRules.contradictedInTurnId),
+          ne(steeringRules.contradictedInTurnId, params.turnObservationId),
         ),
       )
       .returning({ id: steeringRules.id });
     if (retired.length > 0) return "retired";
     const reset = await tx
       .update(steeringRules)
-      .set({ observationCount: 0, contradictedInConversationId: params.conversationId })
-      .where(and(learning, isNull(steeringRules.contradictedInConversationId)))
+      .set({ observationCount: 0, ...marker })
+      .where(and(learning, isNull(steeringRules.contradictedInTurnId)))
       .returning({ id: steeringRules.id });
     if (reset.length > 0) return "reset";
     const [applied] = await tx
@@ -629,7 +640,7 @@ export class DrizzleSteeringRuleStore implements SteeringRuleStore {
       .where(
         and(
           eq(steeringRules.id, params.id),
-          eq(steeringRules.contradictedInConversationId, params.conversationId),
+          eq(steeringRules.contradictedInTurnId, params.turnObservationId),
           inArray(steeringRules.source, LEARNED_RULE_SOURCES),
         ),
       );
@@ -684,16 +695,16 @@ export class DrizzleSteeringRuleStore implements SteeringRuleStore {
   ): Promise<UpsertCorrectionResult> {
     if (params.existingRuleId) {
       // A learning rule graduates at its second observation, and leaves the
-      // conversation of its reset behind; a live one, an instruction included,
-      // is reinforced in place. One statement, so `old` and `new` tell them
-      // apart.
+      // turn of its reset behind; a live one, an instruction included, is
+      // reinforced in place. One statement, so `old` and `new` tell them apart.
       const graduates = sql`${steeringRules.status} = 'learning' AND ${steeringRules.observationCount} + 1 >= 2`;
       const [reinforced] = await tx
         .update(steeringRules)
         .set({
           observationCount: sql`${steeringRules.observationCount} + 1`,
           status: sql`CASE WHEN ${graduates} THEN 'live' ELSE ${steeringRules.status} END`,
-          contradictedInConversationId: sql`CASE WHEN ${graduates} THEN NULL ELSE ${steeringRules.contradictedInConversationId} END`,
+          contradictedInTurnId: sql`CASE WHEN ${graduates} THEN NULL ELSE ${steeringRules.contradictedInTurnId} END`,
+          ...LEGACY_MARKER_CLEARED,
         })
         .where(
           and(
@@ -827,8 +838,8 @@ export class DrizzleSteeringRuleStore implements SteeringRuleStore {
     }
     await tx
       .update(steeringRules)
-      // Not a contradiction's retirement: no conversation recorded it.
-      .set({ ...retirement("superseded"), contradictedInConversationId: null })
+      // Not a contradiction's retirement: no turn recorded it.
+      .set({ ...retirement("superseded"), ...NO_CONTRADICTION_MARKER })
       .where(
         and(
           inArray(steeringRules.source, LEARNED_RULE_SOURCES),
@@ -847,8 +858,8 @@ export class DrizzleSteeringRuleStore implements SteeringRuleStore {
     const scope = { profileId: params.profileId, userId: params.userId };
     const retired = await tx
       .update(steeringRules)
-      // Not a contradiction's retirement: no conversation recorded it.
-      .set({ ...retirement("removed_by_user"), contradictedInConversationId: null })
+      // Not a contradiction's retirement: no turn recorded it.
+      .set({ ...retirement("removed_by_user"), ...NO_CONTRADICTION_MARKER })
       .where(
         and(
           textMatches(params.text),

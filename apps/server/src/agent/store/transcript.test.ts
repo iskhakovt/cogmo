@@ -797,6 +797,60 @@ describe("DrizzleTranscriptStore", () => {
     });
   });
 
+  describe("turn reads", () => {
+    const TURN_1 = "019d0000-0000-7000-8000-0000000000a1";
+    const TURN_2 = "019d0000-0000-7000-8000-0000000000a2";
+    const UNANSWERED = "019d0000-0000-7000-8000-0000000000a3";
+
+    /** Turn 1 answered, an unanswered turn, then turn 2 answered; the answered turns' first rows. */
+    async function threeTurns(conversationId: string, stamp: { profileId: string; model: string }) {
+      const write = (role: "user" | "assistant", cursor: string, content: string) =>
+        tx((trx) =>
+          store.insertMessage(trx, {
+            conversationId,
+            role,
+            content,
+            lastInboundMessageId: cursor,
+            firstInboundMessageId: null,
+            ...stamp,
+          }),
+        );
+      const first1 = await write("user", TURN_1, "one");
+      await write("assistant", TURN_1, "reply one");
+      await write("user", UNANSWERED, "lost");
+      const first2 = await write("user", TURN_2, "two");
+      await write("assistant", TURN_2, "reply two");
+      return { first1: first1.id, first2: first2.id };
+    }
+
+    it("lists the rows of the named turns only, in order, with their cursors", async () => {
+      const { conversationId, stamp } = await seedConversation(tx);
+      await threeTurns(conversationId, stamp);
+
+      const rows = await tx((trx) => store.listTurnMessages(trx, conversationId, [TURN_2, TURN_1]));
+
+      expect(rows.map((r) => [r.cursor, r.content])).toEqual([
+        [TURN_1, "one"],
+        [TURN_1, "reply one"],
+        [TURN_2, "two"],
+        [TURN_2, "reply two"],
+      ]);
+      expect(await tx((trx) => store.listTurnMessages(trx, conversationId, []))).toEqual([]);
+    });
+
+    it("finds the turn answered last before a turn's first row, past an unanswered one", async () => {
+      const { conversationId, stamp } = await seedConversation(tx);
+      const { first1, first2 } = await threeTurns(conversationId, stamp);
+
+      expect(await tx((trx) => store.findAnsweredCursorBefore(trx, conversationId, first2))).toBe(
+        TURN_1,
+      );
+      expect(
+        await tx((trx) => store.findAnsweredCursorBefore(trx, conversationId, first1)),
+      ).toBeUndefined();
+    });
+  });
+
   describe("getLastMessageTime", () => {
     it("returns the most recent message timestamp", async () => {
       const { conversationId, stamp } = await seedConversation(tx);

@@ -5,7 +5,9 @@ import {
   eq,
   getTableColumns,
   gt,
+  inArray,
   isNull,
+  lt,
   lte,
   ne,
   not,
@@ -89,6 +91,12 @@ export type ChatHistoryAttachment =
  * displayable prose. Mirrored in `@cogmo/contracts`; see that definition for
  * why tool-call cards aren't reconstructed here.
  */
+/** A row of a turn, with the turn's cursor. */
+export interface TurnMessage extends StoredMessage {
+  id: string;
+  cursor: string;
+}
+
 export interface ChatHistoryMessage {
   id: string;
   role: MessageRole;
@@ -209,6 +217,23 @@ export interface TranscriptStore {
     tx: Transaction,
     conversationId: string,
   ): Promise<ReadonlyArray<StoredMessage & { id: string }>>;
+
+  /** The rows of the conversation's turns with these cursors, ordered by id: what the Observer renders. */
+  listTurnMessages(
+    tx: Transaction,
+    conversationId: string,
+    cursors: ReadonlyArray<string>,
+  ): Promise<ReadonlyArray<TurnMessage>>;
+
+  /**
+   * The cursor of the newest assistant row older than `beforeMessageId`: the
+   * turn answered last before a turn whose first row is `beforeMessageId`.
+   */
+  findAnsweredCursorBefore(
+    tx: Transaction,
+    conversationId: string,
+    beforeMessageId: string,
+  ): Promise<string | undefined>;
 
   /**
    * Widest durable summary for a conversation, or undefined when it has never
@@ -609,6 +634,49 @@ export class DrizzleTranscriptStore implements TranscriptStore {
         })
         .returning(),
     );
+  }
+
+  async listTurnMessages(
+    tx: Transaction,
+    conversationId: string,
+    cursors: ReadonlyArray<string>,
+  ): Promise<ReadonlyArray<TurnMessage>> {
+    if (cursors.length === 0) return [];
+    return tx
+      .select({
+        id: messages.id,
+        role: messages.role,
+        content: messages.content,
+        cursor: messages.lastInboundMessageId,
+      })
+      .from(messages)
+      .where(
+        and(
+          eq(messages.conversationId, conversationId),
+          inArray(messages.lastInboundMessageId, [...cursors]),
+        ),
+      )
+      .orderBy(asc(messages.id));
+  }
+
+  async findAnsweredCursorBefore(
+    tx: Transaction,
+    conversationId: string,
+    beforeMessageId: string,
+  ): Promise<string | undefined> {
+    const rows = await tx
+      .select({ cursor: messages.lastInboundMessageId })
+      .from(messages)
+      .where(
+        and(
+          eq(messages.conversationId, conversationId),
+          eq(messages.role, "assistant"),
+          lt(messages.id, beforeMessageId),
+        ),
+      )
+      .orderBy(desc(messages.id))
+      .limit(1);
+    return rows[0]?.cursor;
   }
 
   async getHistoryAfter(

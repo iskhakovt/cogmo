@@ -16,6 +16,7 @@ import { DrizzleScheduledTaskStore, type ScheduledTaskStore } from "./scheduled-
 import { DrizzleSteeringRuleStore, type SteeringRuleStore } from "./steering-rules.js";
 import { DrizzleSubAgentStore, type SubAgentStore } from "./sub-agents.js";
 import { DrizzleTranscriptStore, type TranscriptStore } from "./transcript.js";
+import { DrizzleTurnObservationStore, type TurnObservationStore } from "./turn-observations.js";
 import { DrizzleUserStore, type UserStore } from "./users.js";
 import { DrizzleVoiceConfigStore, type VoiceConfigStore } from "./voice-config.js";
 
@@ -32,6 +33,7 @@ export * from "./scheduled-tasks.js";
 export * from "./steering-rules.js";
 export * from "./sub-agents.js";
 export * from "./transcript.js";
+export * from "./turn-observations.js";
 export * from "./users.js";
 export * from "./voice-config.js";
 
@@ -51,7 +53,8 @@ export interface AgentStore
     LlmProviderStore,
     ImageProviderStore,
     SubAgentStore,
-    VoiceConfigStore {}
+    VoiceConfigStore,
+    TurnObservationStore {}
 
 /** `AgentStore` over the per-aggregate Drizzle stores, each method delegating to its own. */
 export class DrizzleAgentStore implements AgentStore {
@@ -70,6 +73,7 @@ export class DrizzleAgentStore implements AgentStore {
   readonly #imageProviders = new DrizzleImageProviderStore();
   readonly #subAgents = new DrizzleSubAgentStore();
   readonly #voiceConfig = new DrizzleVoiceConfigStore();
+  readonly #turnObservations = new DrizzleTurnObservationStore();
 
   readonly createUser = this.#users.createUser.bind(this.#users);
   readonly getFirstUser = this.#users.getFirstUser.bind(this.#users);
@@ -159,6 +163,10 @@ export class DrizzleAgentStore implements AgentStore {
   readonly insertOrRecoverSystemPromptSnapshot =
     this.#transcript.insertOrRecoverSystemPromptSnapshot.bind(this.#transcript);
   readonly insertOrRecoverSummary = this.#transcript.insertOrRecoverSummary.bind(this.#transcript);
+  readonly listTurnMessages = this.#transcript.listTurnMessages.bind(this.#transcript);
+  readonly findAnsweredCursorBefore = this.#transcript.findAnsweredCursorBefore.bind(
+    this.#transcript,
+  );
   readonly getHistoryAfter = this.#transcript.getHistoryAfter.bind(this.#transcript);
   readonly getLastMessageTime = this.#transcript.getLastMessageTime.bind(this.#transcript);
   readonly getLastTokens = this.#transcript.getLastTokens.bind(this.#transcript);
@@ -231,6 +239,23 @@ export class DrizzleAgentStore implements AgentStore {
     this.#evolutionEvents,
   );
   readonly getEvolutionEvent = this.#evolutionEvents.getEvolutionEvent.bind(this.#evolutionEvents);
+
+  readonly listUndiscoveredTurns = this.#turnObservations.listUndiscoveredTurns.bind(
+    this.#turnObservations,
+  );
+  readonly insertTurnObservations = this.#turnObservations.insertTurnObservations.bind(
+    this.#turnObservations,
+  );
+  readonly listPendingTurns = this.#turnObservations.listPendingTurns.bind(this.#turnObservations);
+  readonly getTurnObservation = this.#turnObservations.getTurnObservation.bind(
+    this.#turnObservations,
+  );
+  readonly transitionPendingTurn = this.#turnObservations.transitionPendingTurn.bind(
+    this.#turnObservations,
+  );
+  readonly recordTurnAttempt = this.#turnObservations.recordTurnAttempt.bind(
+    this.#turnObservations,
+  );
 
   readonly listDistinctUserSelectableModels =
     this.#llmProviders.listDistinctUserSelectableModels.bind(this.#llmProviders);

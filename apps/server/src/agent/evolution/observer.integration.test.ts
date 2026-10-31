@@ -17,6 +17,7 @@
  * on Cogmo's logic and removes a fixture-record step from the test loop.
  */
 
+import { randomUUID } from "node:crypto";
 import { and, eq, inArray, like } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
@@ -41,6 +42,7 @@ import {
   profileClasses,
   profiles,
   steeringRules,
+  turnObservations,
 } from "../store/schema.js";
 import { type ObserverStepHarness, runObserver } from "./observer.js";
 
@@ -100,10 +102,13 @@ async function cleanupTestState(): Promise<void> {
   await db
     .delete(steeringRules)
     .where(and(eq(steeringRules.source, "correction"), inArray(steeringRules.rule, SUITE_RULES)));
-  // Drop audit rows before conversations — FK from evolution_events →
-  // conversations is `no action`, so a stale row would block deletion of
+  // Drop audit and turn rows before conversations — their FKs to
+  // conversations are `no action`, so a stale row would block deletion of
   // its parent conversation below.
   await db.delete(evolutionEvents).where(eq(evolutionEvents.userId, userId));
+  await db
+    .delete(turnObservations)
+    .where(inArray(turnObservations.conversationId, testConversationIds));
   await db
     .delete(conversations)
     .where(and(eq(conversations.userId, userId), inArray(conversations.profileId, testProfileIds)));
@@ -190,14 +195,16 @@ async function seedConversation(opts: {
     .returning({ id: conversations.id });
   const conversationId = expectDefined(insertedConversation[0], "inserted conversation row").id;
 
-  // Alternate user / assistant rows so transcript shape is realistic.
+  // Alternate user / assistant rows so transcript shape is realistic, each
+  // pair one turn on a cursor of its own.
+  const cursors = Array.from({ length: Math.ceil(opts.messageCount / 2) }, () => randomUUID());
   const rows = Array.from({ length: opts.messageCount }, (_, i) => ({
     conversationId,
     role: (i % 2 === 0 ? "user" : "assistant") as "user" | "assistant",
     content: `message ${i}`,
     profileId,
     model: "claude-sonnet-4-6",
-    lastInboundMessageId: "00000000-0000-0000-0000-000000000000",
+    lastInboundMessageId: expectDefined(cursors[Math.floor(i / 2)], "turn cursor"),
     outputTokens: -1,
   }));
   if (rows.length > 0) {
@@ -820,7 +827,7 @@ describe("runObserver — real PG + recording memory mock", () => {
 
   it("scopes a 'new' correction to the active channel and stamps channel_type on the steering_rules row", async () => {
     // End-to-end channel-scoping path — mirrors the unit test for
-    // extractCorrections but validates the wiring chain
+    // the correction extraction but validates the wiring chain
     // (transport.getActiveChannelTypes → prompt → upsertCorrection
     // → steering_rules.channel_type) under real PG.
     const { conversationId } = await seedConversation({ messageCount: 4 });
@@ -845,6 +852,8 @@ describe("runObserver — real PG + recording memory mock", () => {
                       rule: CHANNEL_SCOPED_RULE,
                       category: "style",
                       reasoning: "Telegram-specific formatting preference",
+                      // The second turn's user row, so one turn applies it.
+                      evidence: "message 2",
                       matchedExistingRuleId: null,
                       action: "new",
                       channelType: "telegram",

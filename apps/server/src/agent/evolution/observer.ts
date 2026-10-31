@@ -2,8 +2,9 @@
  * Observer — post-conversation extraction. Inngest function triggered by
  * `conversation/idle`. Sequence per fire:
  *
- *   1. extract corrections from the transcript → steering rules (with
- *      optional consolidation when active rule count crosses threshold)
+ *   1. extract corrections from each turn no fire has observed, one step
+ *      per turn → steering rules (with optional consolidation when active
+ *      rule count crosses threshold); see design/observation.md → Slice 1a
  *   2. extract facts from the transcript → Hindsight (with full
  *      network + compartment + trust tags)
  *   3. drain pending memories for the user → classify each → Hindsight,
@@ -18,12 +19,15 @@
  * during the same idle pass.
  *
  * The phases are independent: a step that fails after its retries costs
- * its own phase, which reports an empty result, and the rest of the fire
- * still runs and records its audit row, which names the failed phases.
- * See `settlePhase`.
+ * its own phase, which reports an empty result (corrections: the turns it
+ * applied before the failure), and the rest of the fire still runs and
+ * records its audit row, which names the failed phases. See `settlePhase`
+ * and `observeCorrections`.
  */
 
 import { NonRetriableError, StepError } from "inngest";
+import * as R from "remeda";
+import { match } from "ts-pattern";
 import type { Transactor } from "../../db/index.js";
 import { inngest } from "../../inngest/client.js";
 import { conversationIdle } from "../../inngest/events.js";
@@ -43,8 +47,19 @@ import {
   type PendingBatch,
 } from "./drain-pending-memories.js";
 import type { EvolutionTrigger, ObserverPhase } from "./event-schema.js";
-import { extractCorrections } from "./extract-corrections.js";
+import {
+  addExtractionResults,
+  type ExtractionResult,
+  type ExtractionScope,
+  NO_CORRECTIONS,
+} from "./extract-corrections.js";
 import { extractMemories } from "./extract-memories.js";
+import { discoverTurns, type TurnPlan } from "./observation/discover-turns.js";
+import {
+  type ObserveTurnDeps,
+  observeTurnCorrections,
+  type TurnOutcome,
+} from "./observation/observe-turn-corrections.js";
 
 /**
  * Minimum transcript length (count of `messages` rows) before the
@@ -62,6 +77,12 @@ export const MIN_MESSAGES_FOR_EXTRACTION = 4; // 2 turns minimum
  * `conversation/idle` to drain.
  */
 const PENDING_DRAIN_BATCH_SIZE = 100;
+
+/**
+ * Turns one fire observes per phase, oldest first; the rest wait for the
+ * next fire. `/reflect` takes fewer, since the user waits on its reply.
+ */
+const TURNS_PER_PHASE: Readonly<Record<EvolutionTrigger, number>> = { idle: 10, manual: 3 };
 
 export interface ObserverDeps {
   runInTx: Transactor;
@@ -106,7 +127,7 @@ export type ObserverResult =
       status: "processed";
       conversationId: string;
       eventId: string;
-      corrections: Awaited<ReturnType<typeof extractCorrections>>;
+      corrections: ExtractionResult;
       consolidation: Awaited<ReturnType<typeof consolidateRules>> | null;
       memories: Awaited<ReturnType<typeof extractMemories>>;
       drained: DrainPendingResult;
@@ -146,6 +167,81 @@ async function settlePhase<T>(
     );
     return { phase, result: fallback, failed: true };
   }
+}
+
+/**
+ * Walk the plan's turns in order, one step each, and stop at the first
+ * outcome that isn't a clean move: a later turn is never applied ahead of an
+ * earlier one that can still succeed. A step that failed after its retries
+ * stops the phase and marks it failed; the turns applied before it keep
+ * their counts. Step ids come from the memoized plan, so every replay plans
+ * the same steps.
+ */
+async function observeCorrections(
+  step: ObserverStepHarness,
+  plan: TurnPlan,
+  args: {
+    conversationId: string;
+    scope: ExtractionScope;
+    activeChannelTypes: ReadonlyArray<string>;
+    deps: ObserveTurnDeps;
+  },
+): Promise<SettledPhase<ExtractionResult>> {
+  const outcomes: TurnOutcome[] = [];
+  let failed = false;
+  for (const turn of plan.turns) {
+    let outcome: TurnOutcome;
+    try {
+      outcome = await step.run(`observe-v1-corrections-${turn.observationId}`, () =>
+        observeTurnCorrections(args.deps, {
+          conversationId: args.conversationId,
+          turn,
+          scope: args.scope,
+          activeChannelTypes: args.activeChannelTypes,
+        }),
+      );
+    } catch (err) {
+      if (!(err instanceof StepError)) throw err;
+      logger.warn(
+        { err, conversationId: args.conversationId, phase: "corrections", stepId: err.stepId },
+        "observer: phase failed after retries — continuing without the rest of it",
+      );
+      failed = true;
+      break;
+    }
+    outcomes.push(outcome);
+    if (!continuesPhase(outcome)) break;
+  }
+  const applied = outcomes.flatMap((o) => (o.kind === "applied" ? [o] : []));
+  const finished = outcomes.filter((o) => continuesPhase(o) || o.kind === "failed").length;
+  const countOf = (kind: TurnOutcome["kind"]) => outcomes.filter((o) => o.kind === kind).length;
+  logger.info(
+    {
+      conversationId: args.conversationId,
+      applied: applied.length,
+      skippedNotUserSpeech: plan.notUserSpeech,
+      skippedEmpty: countOf("skipped"),
+      retried: countOf("retryLater"),
+      failed: countOf("failed"),
+      taken: countOf("taken"),
+      droppedNoEvidence: R.sumBy(applied, (o) => o.droppedNoEvidence),
+      remaining: plan.remaining + plan.turns.length - finished,
+    },
+    "observer: corrections turns observed",
+  );
+  return {
+    phase: "corrections",
+    failed,
+    result: applied.reduce((sum, o) => addExtractionResults(sum, o.result), NO_CORRECTIONS),
+  };
+}
+
+/** Whether the walk goes on to the next turn after this one's outcome. */
+function continuesPhase(outcome: TurnOutcome): boolean {
+  return match(outcome.kind)
+    .with("applied", "skipped", "done", () => true)
+    .with("taken", "retryLater", "failed", () => false)
+    .exhaustive();
 }
 
 /**
@@ -257,35 +353,21 @@ export async function runObserver(
     seesUserRules: admitsFirstParty(profile),
   };
 
-  // Phase 1: extract corrections from the transcript into steering rules.
-  // A failed extraction reports nothing found, which also rules out
-  // consolidation for this fire.
-  const corrections = await settlePhase(
-    "corrections",
-    conversationId,
-    {
-      extracted: 0,
-      reinforced: 0,
-      contradictions: 0,
-      retired: 0,
-      reset: 0,
-      promoted: 0,
-      outOfScopeReinforcementsSkipped: 0,
-      outOfScopeContradictionsSkipped: 0,
-      unknownRuleReinforcementsSkipped: 0,
-      consolidationNeeded: false,
-    },
-    () =>
-      step.run("extract-corrections", async () => {
-        return extractCorrections(history, fire, {
-          provider,
-          model,
-          runInTx: deps.runInTx,
-          store: agentStore,
-          activeChannelTypes,
-        });
-      }),
+  // Phase 1: corrections, one turn per step, from the turns no fire has
+  // observed. Discovery is the phase's cursor: a turn's row, written with
+  // its rule changes, keeps every later fire from reading it again.
+  const plan = await step.run("discover-turns", () =>
+    discoverTurns(
+      { runInTx: deps.runInTx, store: agentStore },
+      { conversationId, limit: TURNS_PER_PHASE[triggeredBy] },
+    ),
   );
+  const corrections = await observeCorrections(step, plan, {
+    conversationId,
+    scope: fire,
+    activeChannelTypes,
+    deps: { provider, model, runInTx: deps.runInTx, store: agentStore },
+  });
 
   const consolidation = corrections.result.consolidationNeeded
     ? await settlePhase("consolidation", conversationId, null, () =>
