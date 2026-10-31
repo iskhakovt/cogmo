@@ -9,7 +9,7 @@ import { mockAttachmentStore, mockInngest, mockTransport } from "../factories.js
 export function makeCtx(fromId: number, text = "hello", chatId = 42) {
   return {
     from: { id: fromId },
-    chat: { id: chatId },
+    chat: { id: chatId, type: "private" },
     message: { text, date: 1700000000 },
     reply: vi.fn().mockResolvedValue({}),
     api: { sendChatAction: vi.fn().mockResolvedValue(true) },
@@ -19,7 +19,7 @@ export function makeCtx(fromId: number, text = "hello", chatId = 42) {
 export function makePhotoCtx(fromId: number, caption?: string, chatId = 42) {
   return {
     from: { id: fromId },
-    chat: { id: chatId },
+    chat: { id: chatId, type: "private" },
     message: {
       date: 1700000000,
       caption,
@@ -44,7 +44,7 @@ export function makeVoiceCtx(
 ) {
   return {
     from: { id: fromId },
-    chat: { id: chatId },
+    chat: { id: chatId, type: "private" },
     message: {
       date: 1700000000,
       caption,
@@ -76,7 +76,7 @@ export function makeDocumentCtx(
 ) {
   return {
     from: { id: fromId },
-    chat: { id: chatId },
+    chat: { id: chatId, type: "private" },
     message: {
       date: 1700000000,
       caption,

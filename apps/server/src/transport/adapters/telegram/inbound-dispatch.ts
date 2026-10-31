@@ -4,6 +4,7 @@
  */
 
 import type { Bot } from "grammy";
+import type { Chat } from "grammy/types";
 import { match } from "ts-pattern";
 import type { InboundContent } from "../../../agent/conversation/inbound-content.js";
 import { logger } from "../../../logger.js";
@@ -24,9 +25,15 @@ export interface InboundDispatchDeps {
   boundary: AdapterDeps["boundary"];
 }
 
+/** The part of a grammY context dispatch reads: the chat the inbound came from, and its reply. */
+interface DispatchCtx {
+  chat: Pick<Chat, "type">;
+  reply: (text: string) => Promise<{ message_id: number }>;
+}
+
 /** Dispatch one inbound for `addr`, after the ones already in flight for it. */
 export type DispatchInbound = (
-  ctx: { reply: (text: string) => Promise<{ message_id: number }> },
+  ctx: DispatchCtx,
   addr: string,
   handle: string,
   content: InboundContent,
@@ -125,7 +132,7 @@ async function fireBoundaryPrompt(
  */
 async function doDispatch(
   deps: InboundDispatchDeps,
-  ctx: { reply: (text: string) => Promise<{ message_id: number }> },
+  ctx: DispatchCtx,
   addr: string,
   handle: string,
   content: InboundContent,
@@ -154,7 +161,9 @@ async function doDispatch(
       const fired = await fireBoundaryPrompt(deps, ctx, addr, handle, prior, buffered);
       if (fired) return;
     }
-    const result = await transport.createConversation(addr, handle, { isPrivate: true });
+    const result = await transport.createConversation(addr, handle, {
+      isPrivate: ctx.chat.type === "private",
+    });
     if (result.isErr()) {
       if (result.error.code === "identity_rejected") {
         logger.info({ handle }, "telegram: rejected unauthorized user");
@@ -202,7 +211,7 @@ export function createInboundDispatch(deps: InboundDispatchDeps): DispatchInboun
   const dispatchTails = new Map<string, Promise<void>>();
 
   return async function dispatchInbound(
-    ctx: { reply: (text: string) => Promise<{ message_id: number }> },
+    ctx: DispatchCtx,
     addr: string,
     handle: string,
     content: InboundContent,

@@ -79,14 +79,15 @@ describe("setup", () => {
 
   // grammY runs middleware in registration order, and a handler that answers
   // an update doesn't call next(). The update-id middleware goes first so it
-  // wraps every handler, then the sender gate, so no handler runs for a sender
-  // the channel doesn't admit; commands go ahead of the message handlers, so a
-  // `/new` never also reaches `message:text`; polling starts last.
+  // wraps every handler, then the private-chat gate and the sender gate, so no
+  // handler runs outside a private chat or for a sender the channel doesn't
+  // admit; commands go ahead of the message handlers, so a `/new` never also
+  // reaches `message:text`; polling starts last.
   it("registers the bot's middleware in dispatch order", async () => {
     await setupWith({ token: "fake" });
 
     const order = botLifecycle.registrations;
-    expect(order.slice(0, 3)).toEqual(["use", "use", "drop"]);
+    expect(order.slice(0, 4)).toEqual(["use", "use", "use", "drop"]);
     expect(order.at(-1)).toBe("start");
     const drop = order.indexOf("drop");
     const text = order.indexOf("on:message:text");
@@ -144,7 +145,12 @@ function update<C extends object>(ctx: C) {
 }
 
 function tap(data: string, match: ReadonlyArray<string>) {
-  return { from: { id: STRANGER }, chat: { id: STRANGER }, callbackQuery: { data }, match };
+  return {
+    from: { id: STRANGER },
+    chat: { id: STRANGER, type: "private" },
+    callbackQuery: { data },
+    match,
+  };
 }
 
 /** A transport that admits no one and, past the gate, rejects a stranger as the Transport does. */
@@ -246,5 +252,55 @@ describe("the sender gate", () => {
     await deliverUpdate("command:start", start);
 
     expect(start.reply).toHaveBeenCalledOnce();
+  });
+});
+
+describe("the private-chat gate", () => {
+  beforeEach(() => {
+    resetGrammyMock();
+  });
+
+  /** An update from the admitted sender 111 in the chat `chat`. */
+  function inChat(key: string, chat: { id: number; type: string }) {
+    return key.startsWith("callbackQuery:")
+      ? update({ ...tap("resume:work", ["", "work"]), from: { id: 111 }, chat })
+      : update({ ...makeCtx(111, "hello", chat.id), chat });
+  }
+
+  it.each<[string, string]>([
+    ["group", "on:message:text"],
+    ["supergroup", "on:message:text"],
+    ["channel", "on:message:text"],
+    ["group", "callbackQuery:^resume:(.+)$"],
+    ["supergroup", "callbackQuery:^resume:(.+)$"],
+  ])("answers a %s chat's %s with nothing, ahead of the sender gate", async (type, key) => {
+    const transport = mockTransport();
+    await setupOn(transport, { token: "fake" });
+    const ctx = inChat(key, { id: -100, type });
+
+    await deliverUpdate(key, ctx);
+
+    expect(calledMocks(ctx)).toEqual([]);
+    expect(calledMocks(transport)).toEqual([]);
+    expect(calledMocks(mockBotApi)).toEqual(["setMyCommands"]);
+  });
+
+  it("counts an update the private-chat gate drops as handled", async () => {
+    const { adapter } = await setupWith({ token: "fake" });
+
+    await deliverUpdate("on:message:text", inChat("on:message:text", { id: -100, type: "group" }));
+    await adapter.stop();
+
+    expect(mockBotApi.getUpdates).toHaveBeenCalledWith({ offset: 2, limit: 1, timeout: 0 });
+  });
+
+  it("passes a private chat's message on to the sender gate and its handler", async () => {
+    const transport = mockTransport({ resolveSession: vi.fn().mockResolvedValue(null) });
+    await setupOn(transport, { token: "fake" });
+
+    await deliverUpdate("on:message:text", inChat("on:message:text", { id: 42, type: "private" }));
+
+    expect(transport.senders.admits).toHaveBeenCalledWith("111");
+    expect(transport.createConversation).toHaveBeenCalledWith("42", "111", { isPrivate: true });
   });
 });
