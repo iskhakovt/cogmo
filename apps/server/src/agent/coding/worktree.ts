@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { mkdir, rename, rm, stat } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, mkdir, open, rename, rm, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { logger } from "../../logger.js";
@@ -18,7 +19,7 @@ export interface AllocateWorktreeParams {
   /**
    * Remote URL (`coding_repos.remote_url`) installed as `origin` on the
    * materialized clone. In-container `git push origin <branch>` and the
-   * host-side WIP teardown both resolve `origin` from the clone's own
+   * teardown's WIP salvage both resolve `origin` from the clone's own
    * config, so it must point at the real remote, not at `repoPath`.
    */
   remoteUrl: string;
@@ -40,9 +41,11 @@ export interface AllocateWorktreeResult {
  * inside the sandbox.
  *
  * Mounting the parent repo's `.git` into the container instead would fix
- * the path but hand the sandboxed task write access to state that
- * host-side git (teardown, prune) later executes — config and hooks — so
- * the clone is also the isolation-preserving choice.
+ * the path but hand the sandboxed task write access to the config and hooks
+ * that host-side git (prune, the transport fetches) runs under, so the clone
+ * is also the isolation-preserving choice. The clone itself is the sandbox's
+ * to write, so the host runs no git in it once it is mounted: the adopt
+ * check reads `.git/HEAD` as a file.
  *
  * `--no-hardlinks` keeps the isolation story complete: a default local
  * clone hardlinks object files, sharing inodes with the parent repo, and
@@ -53,7 +56,7 @@ export interface AllocateWorktreeResult {
  * boundaries → allocate-worktree". Three cases:
  *
  *   1. A standalone clone already exists at the path with HEAD = `branch`
- *      → adopt and return. (Inngest crash between materialization and the
+ *      (see {@link headBranch}) → adopt and return. (Inngest crash between materialization and the
  *      DB update; the clone is already there.)
  *   2. A legacy linked worktree exists at the path (its `.git` is a file)
  *      → remove it and re-materialize as a clone. Linked worktrees never
@@ -72,7 +75,7 @@ export async function allocateWorktree(
 
   const existing = await classifyPath(worktreePath);
   if (existing === "clone") {
-    const head = await currentBranch(worktreePath);
+    const head = await headBranch(worktreePath);
     if (head === branch) {
       log.info({ worktreePath, branch }, "adopting existing clone");
       return { adopted: true };
@@ -118,9 +121,9 @@ export async function allocateWorktree(
  */
 export async function removeWorktree(repoPath: string, worktreePath: string): Promise<void> {
   // `force` only swallows ENOENT. A process still writing inside the tree —
-  // git's own background maintenance is the usual one, and it is suppressed at
-  // the source in teardown, but a sandbox process on a bind mount can do it
-  // too — makes the walk fail with ENOTEMPTY on whichever directory it was
+  // git's own background maintenance is the usual one, and the salvage's git
+  // flags suppress it at the source, but a sandbox process on a bind mount can
+  // do it too — makes the walk fail with ENOTEMPTY on whichever directory it was
   // mid-way through. Retries let the delete outlast a writer that is finishing
   // up; without them the tree is left half-removed, and because the failure is
   // logged rather than raised, the next allocation at this path is the first
@@ -144,7 +147,7 @@ type PathClass =
   | "absent"
   /** `.git` is a directory — a standalone clone (adopt or wrong-branch). */
   | "clone"
-  /** `.git` is a file — a legacy linked worktree, unusable in-container. */
+  /** `.git` is a file (or a symlink) — a legacy linked worktree, unusable in-container. */
   | "linked"
   /** Path exists but holds no `.git` — refuse to overwrite. */
   | "non-git";
@@ -152,7 +155,8 @@ type PathClass =
 /**
  * Classify what (if anything) occupies `worktreePath`. Async `stat` rather
  * than the sync variants so a concurrent allocation doesn't block the event
- * loop. One stat on the path, one on its `.git`.
+ * loop. One stat on the path, one `lstat` on its `.git`, which the sandbox
+ * may have replaced with a link out of the tree.
  */
 async function classifyPath(worktreePath: string): Promise<PathClass> {
   try {
@@ -161,7 +165,7 @@ async function classifyPath(worktreePath: string): Promise<PathClass> {
     return "absent";
   }
   try {
-    const gitEntry = await stat(join(worktreePath, ".git"));
+    const gitEntry = await lstat(join(worktreePath, ".git"));
     return gitEntry.isDirectory() ? "clone" : "linked";
   } catch {
     return "non-git";
@@ -174,13 +178,33 @@ async function pruneWorktreeMetadata(repoPath: string, worktreePath: string): Pr
   });
 }
 
-async function currentBranch(path: string): Promise<string | null> {
+/** A symbolic HEAD is one short line; anything longer is not one. */
+const MAX_HEAD_BYTES = 1024;
+
+/**
+ * The branch a clone's HEAD names, read as a file rather than asked of git:
+ * the sandbox writes this tree, config included, and a git process here
+ * would run under it. Null for a detached HEAD, and for a HEAD that is not
+ * a regular file. `O_NOFOLLOW` refuses a symlink at open, so a link planted
+ * in the tree is never followed, and `O_NONBLOCK` keeps a FIFO from
+ * blocking the open; the type is then checked on the descriptor itself.
+ */
+async function headBranch(path: string): Promise<string | null> {
+  const flags = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
+  const handle = await open(join(path, ".git", "HEAD"), flags).catch(() => null);
+  if (handle === null) return null;
   try {
-    const { stdout } = await execFileP("git", ["-C", path, "rev-parse", "--abbrev-ref", "HEAD"]);
-    const ref = stdout.trim();
-    return ref === "HEAD" ? null : ref;
+    if (!(await handle.stat()).isFile()) return null;
+    // One byte past the cap tells an oversized HEAD from one at the cap.
+    const buffer = Buffer.alloc(MAX_HEAD_BYTES + 1);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    if (bytesRead > MAX_HEAD_BYTES) return null;
+    const ref = /^ref: refs\/heads\/(\S+)\s*$/.exec(buffer.toString("utf8", 0, bytesRead));
+    return ref?.[1] ?? null;
   } catch {
     return null;
+  } finally {
+    await handle.close();
   }
 }
 

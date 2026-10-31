@@ -7,8 +7,7 @@
 import { err, ok, type Result } from "neverthrow";
 import { match, P } from "ts-pattern";
 import type { EventPublisher } from "../../inngest/durable.js";
-import type { SandboxClient, SandboxSession } from "../../sandbox/index.js";
-import type { SecretsStore } from "../../secrets/store/index.js";
+import type { SandboxSession } from "../../sandbox/index.js";
 import type { BackendUsage } from "./backend.js";
 import type { CodingRun, TaskStoreDeps } from "./coding-run.js";
 import { commitAuthorFor, runCommitAndPush } from "./commit-push.js";
@@ -25,13 +24,10 @@ import {
   stampSandboxDeleted,
 } from "./task-lifecycle.js";
 import { reapTaskSandbox, WORKTREE_DIR_IN_CONTAINER } from "./task-sandbox.js";
-import { safeTeardownWorktree } from "./teardown.js";
+import { safeTeardownWorktree, type TeardownDeps } from "./teardown.js";
 import type { TaskFailure, WorktreeAssignment } from "./types.js";
 
-interface ExecuteOutcomeDeps extends TaskStoreDeps {
-  sandbox: Pick<SandboxClient, "deleteByTaskId">;
-  secretsStore: SecretsStore;
-}
+interface ExecuteOutcomeDeps extends TaskStoreDeps, TeardownDeps {}
 
 /** The task's repo, worktree and progress stream, which every exit touches. */
 interface ExecuteExitContext {
@@ -175,9 +171,7 @@ async function tearDownFailedExecute(
 ): Promise<void> {
   if (steps.teardownWorktree !== null) {
     await run.stepRun(steps.teardownWorktree, () =>
-      safeTeardownWorktree({
-        runInTx: deps.runInTx,
-        secretsStore: deps.secretsStore,
+      safeTeardownWorktree(deps, {
         repo: exit.repo,
         taskId: run.taskId,
         worktreeAssignment: exit.assignment,

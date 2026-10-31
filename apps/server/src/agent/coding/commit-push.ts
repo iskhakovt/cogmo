@@ -193,6 +193,210 @@ export async function runCommitAndPush(params: CommitAndPushParams): Promise<Com
   return { kind: "pushed", commitSha, output: pushOutput };
 }
 
+/**
+ * Config every salvage exec carries, ahead of whatever the tree's own
+ * `.git/config` says: no hooks, no fsmonitor, no credential helper. Command
+ * line `-c` outranks repo config; an empty `credential.helper` resets the
+ * helper list. Filters named in `.gitattributes`, and transport settings
+ * such as `url.*.insteadOf`, still apply in the tree — which is why the
+ * commit stage runs with no credential mounted, and the push stage pushes
+ * from a scratch repo whose config the tree does not write.
+ */
+const SALVAGE_CONFIG_FLAGS: ReadonlyArray<string> = [
+  "-c",
+  "core.hooksPath=/dev/null",
+  "-c",
+  "core.fsmonitor=false",
+  "-c",
+  "credential.helper=",
+];
+
+/**
+ * The upload-pack the scratch fetch runs against the tree. The tree's
+ * config governs it, so a tree that declares itself a partial clone, with
+ * HEAD on a commit whose objects are missing, can make it lazy-fetch while
+ * the PAT is readable, through a transport that runs the tree's config:
+ * `core.sshCommand`, `ext::`, `core.gitProxy` on `git://`, a credential
+ * helper on an `http(s)` 401. Git 2.45.1 and later honour
+ * `GIT_NO_LAZY_FETCH`. On a git too old to know it, the protocol policy
+ * denies every transport to that lazy fetch; the upload-pack serving the
+ * scratch fetch does not consult it. `protocol.allow` alone is not enough:
+ * a `protocol.<name>.allow` set in the tree outranks it, so each transport
+ * git ships is named too, where the command line outranks the tree.
+ */
+const SALVAGE_UPLOAD_PACK = [
+  "env GIT_NO_LAZY_FETCH=1 git -c protocol.allow=never",
+  ...["ext", "fd", "file", "git", "http", "https", "ssh", "ftp", "ftps"].map(
+    (name) => `-c protocol.${name}.allow=never`,
+  ),
+  "upload-pack",
+].join(" ");
+
+/** The salvage command that exited non-zero, or the fetched HEAD that moved. */
+type WipSalvageStage =
+  | "status"
+  | "add"
+  | "commit"
+  | "rev-parse"
+  | "rev-list"
+  | "init"
+  | "fetch"
+  | "push";
+
+export interface WipCommitParams {
+  container: Pick<SandboxSession, "execStreaming">;
+  /** Working directory inside the container — typically `/workspace`. */
+  worktreeDir: string;
+  /** Names the WIP commit. */
+  taskId: string;
+}
+
+export type WipCommitResult =
+  /** No edits, and every commit on HEAD is on some remote-tracking ref. */
+  | { kind: "clean" }
+  /** HEAD — the WIP commit, or unpushed commits — has to reach the remote. */
+  | { kind: "needs_push"; sha: string }
+  | { kind: "failed"; stage: WipSalvageStage; output: string };
+
+/**
+ * The salvage's first stage, run with no credential in the container: commit
+ * whatever the tree holds as `wip: <taskId>` and report whether HEAD still
+ * has to reach the remote. Unsigned under a fixed author, since the user
+ * never approved this state, and `--no-verify` so a hook cannot block it.
+ * A re-run after a lost result finds the tree clean and unpushed, and
+ * reports the same HEAD.
+ *
+ * Throws when an exec does (the container is gone); the caller owns the
+ * container and reads that as the salvage being unavailable.
+ */
+export async function runWipCommit(params: WipCommitParams): Promise<WipCommitResult> {
+  const { container, worktreeDir, taskId } = params;
+  const local = (args: ReadonlyArray<string>) =>
+    runGit(container, [...SALVAGE_CONFIG_FLAGS, ...args], {
+      workingDir: worktreeDir,
+      env: {},
+      timeoutMs: GIT_LOCAL_TOTAL_MS,
+      idleTimeoutMs: GIT_IDLE_MS,
+    });
+
+  const status = await local(["status", "--porcelain"]);
+  if (status.exitCode !== 0) return { kind: "failed", stage: "status", output: combine(status) };
+  if (status.stdout.trim() !== "") {
+    const add = await local(["add", "-A"]);
+    if (add.exitCode !== 0) return { kind: "failed", stage: "add", output: combine(add) };
+    const commit = await local([
+      "-c",
+      "commit.gpgsign=false",
+      "-c",
+      "user.email=cogmo-bot@noreply.local",
+      "-c",
+      "user.name=Cogmo (WIP)",
+      "commit",
+      "--no-verify",
+      "--allow-empty",
+      "-m",
+      `wip: ${taskId}`,
+    ]);
+    if (commit.exitCode !== 0) return { kind: "failed", stage: "commit", output: combine(commit) };
+  }
+
+  const head = await local(["rev-parse", "HEAD"]);
+  if (head.exitCode !== 0) return { kind: "failed", stage: "rev-parse", output: combine(head) };
+  const sha = head.stdout.trim();
+  // Commits on HEAD that no remote-tracking ref holds. Zero for a plan that
+  // left the tree where the clone put it, so most plan failures and cancels
+  // never need the credential container.
+  const unpushed = await local(["rev-list", "--count", "HEAD", "--not", "--remotes"]);
+  const count = unpushed.stdout.trim();
+  if (unpushed.exitCode !== 0 || !/^\d+$/.test(count)) {
+    return { kind: "failed", stage: "rev-list", output: combine(unpushed) };
+  }
+  return count === "0" ? { kind: "clean" } : { kind: "needs_push", sha };
+}
+
+export interface WipPushParams {
+  container: Pick<SandboxSession, "execStreaming">;
+  /** The task tree inside the container — typically `/workspace`. */
+  worktreeDir: string;
+  /** A path in the container, outside the tree, for the scratch bare repo. */
+  scratchGitDir: string;
+  /** `coding_repos.remote_url`, pushed to by URL rather than by the tree's `origin`. */
+  remoteUrl: string;
+  taskId: string;
+  /** What {@link runWipCommit} reported; a tree whose HEAD moved since is refused. */
+  sha: string;
+  /** Env from `provisionAskpass`, given to the push alone. */
+  askpassEnv: Readonly<Record<string, string>>;
+}
+
+export type WipPushResult =
+  | { kind: "pushed"; wipRef: string; sha: string }
+  | { kind: "failed"; stage: WipSalvageStage; output: string };
+
+/**
+ * The salvage's second stage, the only one with the credential mounted:
+ * fetch the tree's HEAD into a fresh bare repo and force-push it from there
+ * to `refs/cogmo-wip/<taskId>` on `remoteUrl`. The push reads the scratch
+ * repo's config, which the tree does not write, so the tree's remotes,
+ * `insteadOf` rewrites, protocol and proxy settings never reach it. The
+ * fetch is a local one: the tree's side is `git-upload-pack`, which runs no
+ * hooks or filters, with lazy fetch off ({@link SALVAGE_UPLOAD_PACK}) and no
+ * submodule recursion. A per-task ref makes `--force` safe and the push
+ * idempotent.
+ *
+ * Throws when an exec does (the container is gone), as {@link runWipCommit}.
+ */
+export async function runWipPush(params: WipPushParams): Promise<WipPushResult> {
+  const { container, worktreeDir, scratchGitDir, remoteUrl, taskId, sha, askpassEnv } = params;
+  const wipRef = `refs/cogmo-wip/${taskId}`;
+  const scratch = (
+    args: ReadonlyArray<string>,
+    env: Readonly<Record<string, string>>,
+    timeoutMs: number,
+  ) =>
+    runGit(container, [...SALVAGE_CONFIG_FLAGS, `--git-dir=${scratchGitDir}`, ...args], {
+      workingDir: "/",
+      env,
+      timeoutMs,
+      idleTimeoutMs: GIT_IDLE_MS,
+    });
+
+  const init = await scratch(["init", "--bare", "--quiet"], {}, GIT_LOCAL_TOTAL_MS);
+  if (init.exitCode !== 0) return { kind: "failed", stage: "init", output: combine(init) };
+  const fetch = await scratch(
+    [
+      "fetch",
+      "--no-tags",
+      "--no-write-fetch-head",
+      "--no-recurse-submodules",
+      `--upload-pack=${SALVAGE_UPLOAD_PACK}`,
+      worktreeDir,
+      `+HEAD:${wipRef}`,
+    ],
+    { GIT_NO_LAZY_FETCH: "1" },
+    GIT_PUSH_TOTAL_MS,
+  );
+  if (fetch.exitCode !== 0) return { kind: "failed", stage: "fetch", output: combine(fetch) };
+  const fetched = await scratch(["rev-parse", "--verify", wipRef], {}, GIT_LOCAL_TOTAL_MS);
+  if (fetched.exitCode !== 0) {
+    return { kind: "failed", stage: "rev-parse", output: combine(fetched) };
+  }
+  if (fetched.stdout.trim() !== sha) {
+    return {
+      kind: "failed",
+      stage: "fetch",
+      output: `HEAD moved after the WIP commit: expected ${sha}, fetched ${fetched.stdout.trim()}`,
+    };
+  }
+  const push = await scratch(
+    ["push", "--force", "--no-verify", remoteUrl, `${wipRef}:${wipRef}`],
+    askpassEnv,
+    GIT_PUSH_TOTAL_MS,
+  );
+  if (push.exitCode !== 0) return { kind: "failed", stage: "push", output: combine(push) };
+  return { kind: "pushed", wipRef, sha };
+}
+
 interface ExecCapture {
   exitCode: number;
   stdout: string;

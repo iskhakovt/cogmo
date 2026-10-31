@@ -1,12 +1,14 @@
 import { execFile } from "node:child_process";
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   renameSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { rm } from "node:fs/promises";
@@ -24,6 +26,30 @@ import { allocateWorktree, removeWorktree } from "./worktree.js";
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
   return { ...actual, rm: vi.fn(actual.rm) };
+});
+
+/** Every host `execFile` the module under test runs. */
+const hostSpawns = vi.hoisted((): Array<{ file: string; args: ReadonlyArray<string> }> => []);
+
+// A pass-through recorder, so the adopt check can be held to reading HEAD as
+// a file: the clone it inspects is the tree the sandbox writes.
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  const { promisify: promisifyFn } = await import("node:util");
+  const execFileAsync = promisifyFn(actual.execFile);
+  function execFile(...params: unknown[]): unknown {
+    return Reflect.apply(actual.execFile, undefined, params);
+  }
+  Object.defineProperty(execFile, promisifyFn.custom, {
+    value: (...params: unknown[]): unknown => {
+      hostSpawns.push({
+        file: String(params[0]),
+        args: Array.isArray(params[1]) ? params[1].map(String) : [],
+      });
+      return Reflect.apply(execFileAsync, undefined, params);
+    },
+  });
+  return { ...actual, execFile };
 });
 
 const execFileP = promisify(execFile);
@@ -170,6 +196,108 @@ describe("allocateWorktree", () => {
     });
     expect(result.adopted).toBe(true);
     await removeWorktree(repoPath, worktreePath);
+  });
+
+  it("adopts by reading HEAD as a file, with no git process in the clone", async () => {
+    const branch = uniqueBranch();
+    const worktreePath = uniqueWorktreePath();
+    await allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: REMOTE_URL });
+
+    hostSpawns.length = 0;
+    const result = await allocateWorktree({
+      repoPath,
+      branch,
+      worktreePath,
+      remoteUrl: REMOTE_URL,
+    });
+
+    expect(result.adopted).toBe(true);
+    expect(hostSpawns.filter((c) => c.args.some((a) => a.startsWith(worktreePath)))).toEqual([]);
+    await removeWorktree(repoPath, worktreePath);
+  });
+
+  it("refuses to adopt a clone whose HEAD is detached", async () => {
+    const branch = uniqueBranch();
+    const worktreePath = uniqueWorktreePath();
+    await allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: REMOTE_URL });
+    const { stdout } = await execFileP("git", ["-C", worktreePath, "rev-parse", "HEAD"]);
+    writeFileSync(join(worktreePath, ".git", "HEAD"), stdout);
+
+    await expect(
+      allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: REMOTE_URL }),
+    ).rejects.toThrow(/<detached>/);
+    await removeWorktree(repoPath, worktreePath);
+  });
+
+  it("refuses to adopt a clone whose HEAD is a symlink, without following it", async () => {
+    const branch = uniqueBranch();
+    const worktreePath = uniqueWorktreePath();
+    await allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: REMOTE_URL });
+    // A host file that reads as the right HEAD: following the link would
+    // adopt on content outside the clone.
+    const decoy = join(baseDir, `decoy-head-${Math.random().toString(36).slice(2, 8)}`);
+    writeFileSync(decoy, `ref: refs/heads/${branch}\n`);
+    rmSync(join(worktreePath, ".git", "HEAD"));
+    symlinkSync(decoy, join(worktreePath, ".git", "HEAD"));
+
+    await expect(
+      allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: REMOTE_URL }),
+    ).rejects.toThrow(/<detached>/);
+    await removeWorktree(repoPath, worktreePath);
+  });
+
+  it("refuses to adopt a clone whose HEAD is over the 1 KiB cap, however it reads", async () => {
+    const branch = uniqueBranch();
+    const worktreePath = uniqueWorktreePath();
+    await allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: REMOTE_URL });
+    // The right ref, padded with trailing whitespace the parse would accept,
+    // to one byte over the cap.
+    const ref = `ref: refs/heads/${branch}`;
+    writeFileSync(join(worktreePath, ".git", "HEAD"), ref.padEnd(1025, "\n"));
+
+    await expect(
+      allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: REMOTE_URL }),
+    ).rejects.toThrow(/<detached>/);
+    await removeWorktree(repoPath, worktreePath);
+  });
+
+  it("refuses to adopt a clone whose HEAD is a FIFO, without blocking on it", async () => {
+    const branch = uniqueBranch();
+    const worktreePath = uniqueWorktreePath();
+    await allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: REMOTE_URL });
+    rmSync(join(worktreePath, ".git", "HEAD"));
+    await execFileP("mkfifo", [join(worktreePath, ".git", "HEAD")]);
+
+    await expect(
+      allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: REMOTE_URL }),
+    ).rejects.toThrow(/<detached>/);
+    await removeWorktree(repoPath, worktreePath);
+  });
+
+  it("replaces a clone whose .git is a symlink, leaving the link's target alone", async () => {
+    const branch = uniqueBranch();
+    const worktreePath = uniqueWorktreePath();
+    await allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: REMOTE_URL });
+    // A real clone on the right branch elsewhere on the host: adopting through
+    // the link would read, and later delete, state outside the tree.
+    const decoy = uniqueWorktreePath();
+    await allocateWorktree({ repoPath, branch, worktreePath: decoy, remoteUrl: REMOTE_URL });
+    rmSync(join(worktreePath, ".git"), { recursive: true, force: true });
+    symlinkSync(join(decoy, ".git"), join(worktreePath, ".git"));
+
+    const result = await allocateWorktree({
+      repoPath,
+      branch,
+      worktreePath,
+      remoteUrl: REMOTE_URL,
+    });
+
+    expect(result.adopted).toBe(false);
+    expect(lstatSync(join(worktreePath, ".git")).isDirectory()).toBe(true);
+    expect(await headOf(worktreePath)).toBe(branch);
+    expect(statSync(join(decoy, ".git", "HEAD")).isFile()).toBe(true);
+    await removeWorktree(repoPath, worktreePath);
+    await removeWorktree(repoPath, decoy);
   });
 
   it("replaces a legacy linked worktree at the path with a standalone clone", async () => {
