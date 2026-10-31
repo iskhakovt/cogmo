@@ -490,7 +490,7 @@ A create cut off by step 4 leaves either a rowless container, which the orphan p
 - Anonymous volumes are freed only when their container is removed. A child the task stops but keeps holds its anonymous volumes until the cascade or the TTL pass.
 - Networks and volumes created through the proxy before slice 5 carry no Cogmo labels and have no rows, so nothing ever collects them.
 - Names leak existence. A container or network create with a taken name gets the daemon's 409, which names the holder's id. A volume create of a foreign name gets `denied`. Neither grants access.
-- The network layer is outside the proxy. Every depth-0 container, and every child on `bridge`, shares Docker's default bridge with other tasks and with skills workers. They can reach each other's listening ports, and ports published on the gateway are reachable from every task. Per-task networks for depth-0 containers are tracked in `todo.md`.
+- The network layer is outside the proxy. Every depth-0 container, and every child on `bridge`, shares Docker's default bridge with other tasks and with skills workers, until skills workers move to an internal network whose only route is the egress proxy ([skills.md → Egress proxy](skills.md#egress-proxy-proposed)). They can reach each other's listening ports, and ports published on the gateway are reachable from every task. Per-task networks for depth-0 containers are tracked in `todo.md`.
 - A registry name that resolves to a private address still reaches it on pull. A registry allowlist is tracked in `todo.md`.
 
 **Rollout.** No consumer depends on a field or route this spec denies, so it ships with no enforcement flag.

@@ -189,7 +189,7 @@ Wiring this into `DefaultPromptSource` is P2 — P1 prompts are hardcoded templa
 ```sql
 -- Enumerated types (Drizzle pgEnum in the store schema)
 CREATE TYPE coding_backend AS ENUM ('claude', 'codex');
-CREATE TYPE coding_trigger_source AS ENUM ('user', 'evolution', 'signal_pipeline');
+CREATE TYPE coding_trigger_source AS ENUM ('user', 'evolution', 'signal_pipeline');  -- [proposed] + 'skill_draft' (skills.md → Skill lifecycle)
 -- Naming convention: `awaiting_X` = waiting on a human gate;
 -- `pending_X` = automatic transient (queued for the orchestrator, no human in the loop).
 CREATE TYPE coding_task_status AS ENUM (
@@ -714,6 +714,8 @@ Gating depends on `trigger_source`:
 - **`user`** — Plan posted to Telegram with inline keyboard: **Approve**, **Revise** (cancels the task and asks the user to describe what should change; the agent's next turn issues a fresh `delegate_coding`), **Cancel**. No edits happen until approved. Approval writes `plan_approved_at` and emits `coding/task/plan-approved`, which triggers the execute orchestrator. Identity check: `callback.from.id` resolves via `transportStore.resolveUser` to a Cogmo `userId` and must match the conversation owner — another allowlisted user in the same chat gets `identity_rejected`, and a stranger's tap never reaches the handler ([transport/identity.md](transport/identity.md) → Allowlist enforcement).
 - **`evolution` / `signal_pipeline`** — No interactive gate exists: there is no conversation to render a keyboard into and nobody to tap it. The plan run therefore clears the gate itself on the same code path as per-profile auto-approve — `approvePlanIfPending` stamps `plan_approved_at`, `step.sendEvent` emits `coding/task/plan-approved` — and the task parks at `awaiting_approval` for the microseconds until `coding-task-execute` claims it. The PR merge gate remains the single human checkpoint. `plan_approved_at` records when the gate cleared, not that a human cleared it; `trigger_source` is what distinguishes the two.
 
+- **`skill_draft`** `[proposed]` — the user already approved the skill's spec card ([skills.md → Spec phase](skills.md#spec-phase)), so the plan run clears the gate as for `evolution`.
+
 This keeps automated self-improvement flows non-blocking while preserving a human veto where it matters — at PR review. An automated task that produces a bad plan wastes its own tokens and parks a PR; it cannot modify the system without the human reviewer.
 
 **Approval does not expire.** Once a plan is approved (`plan_approved_at` set), that approval stands until the task reaches a terminal state. The plan text lives durably in `coding_tasks.plan`; the task's branch is isolated from base-branch drift until merge; container resources are freed by the idle-TTL path independently of approval freshness. If execution is resumed hours or days after approval, the preserved `session_id` rehydrates the same plan into a fresh container. State-based invalidation (code SHA drift) is the industry norm here, not time-based; our task-branch isolation makes even that a non-issue. P3 polish: post a "still want to proceed?" confirmation if execution would start >24h after approval — reminder, not expiry.
@@ -756,7 +758,7 @@ No deny list, no auto-approve, no decision log, no Telegram inline keyboard, no 
 
 ### Merge gate `[confirmed]`
 
-The final artifact is a **ready-for-review PR**. Cogmo never pushes to `main` and never merges — the merge is the human-approval gate. The PR opens ready rather than as a draft: creation is already gated on the verify step passing, the sole reviewer is the user, and the draft state would only add a manual "ready for review" click (and suppress review-request notifications and some CI configurations) without guarding anything the merge gate doesn't. The user reviews the diff in GitHub Mobile (or desktop) using their normal review flow — branch protection, required checks, and reviewers apply.
+The final artifact is a **ready-for-review PR**. Cogmo never pushes to `main` and never merges — the merge is the human-approval gate. The skills repo is the exception: its PR is a record, and register advances `main` once the draft's reviewers pass ([skills.md → Authoring pipeline](skills.md#authoring-pipeline-proposed)). The PR opens ready rather than as a draft: creation is already gated on the verify step passing, the sole reviewer is the user, and the draft state would only add a manual "ready for review" click (and suppress review-request notifications and some CI configurations) without guarding anything the merge gate doesn't. The user reviews the diff in GitHub Mobile (or desktop) using their normal review flow — branch protection, required checks, and reviewers apply.
 
 ## Git Identity `[confirmed]`
 
