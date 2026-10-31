@@ -160,7 +160,7 @@ the rule (`file` + a short exact quote).
 - 6f Inngest functions with new steps have replay tests.
 
 **7. Bookkeeping** — `AGENTS.md` → Task Tracking, Commits & PRs
-- 7a Completed `todo.md` entry deleted; PROGRESS.md checked off where one exists.
+- 7a Completed `todo.md` entry deleted; progress.md checked off where one exists.
 - 7b One new `changelog.d/YYYY-MM-DD-<slug>.md` fragment; present tense; no
   existing fragment edited.
 - 7c Conventional, lowercase PR title; type matches the release impact.

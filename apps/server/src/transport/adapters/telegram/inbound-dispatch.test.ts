@@ -21,6 +21,17 @@ describe("createInboundDispatch", () => {
     expect(transport.createConversation).toHaveBeenCalledWith("42", "111", { isPrivate: true });
   });
 
+  it("opens a conversation as private only for a private chat", async () => {
+    const { transport } = await createAdapter({
+      resolveSession: vi.fn().mockResolvedValue(null),
+    });
+    const ctx = { ...makeCtx(111, "first message", -100), chat: { id: -100, type: "group" } };
+
+    await handlers.get("on:message:text")(ctx);
+
+    expect(transport.createConversation).toHaveBeenCalledWith("-100", "111", { isPrivate: false });
+  });
+
   // The text-message path's branches around session resolution: identity
   // rejection on createConversation and emit-failure on transport.emit. Both
   // are silent error paths (info or error log, no user-visible reply);

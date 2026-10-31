@@ -1,9 +1,11 @@
 /**
  * Weekly safety-net cron for orphan `cogmo/run/*` refs on the GitHub
  * remote. Event-driven cleanup (`cleanup-run-branch.ts`) deletes refs
- * immediately on terminal task events; this cron catches anything that
- * leaked — events that never fired (host crashed between status set and
- * event emit), drift between the DB and the remote, manual pushes, etc.
+ * immediately on `coding/task/pr-opened` and keeps them on
+ * `coding/task/failed`; this cron deletes the kept refs once their
+ * retention passes, and catches anything that leaked — events that never
+ * fired (host crashed between status set and event emit), drift between
+ * the DB and the remote, manual pushes, etc.
  *
  * Shape (per Inngest fan-out idiom):
  *   1. Cron fires once a week (`0 4 * * 0` — Sun 04:00 UTC).
@@ -15,9 +17,10 @@
  *      `coding_tasks`, delete each stale ref via its own `step.run`
  *      (replay-granular, idempotent).
  *
- * Stale criterion: terminal task row OR absent row, AND ref's task is
- * older than 7 days (the retention window — also applies to refs whose
- * task row was deleted, e.g. cancelled tasks GC'd from the DB).
+ * Stale criterion: an absent row (deleted, or a foreign ref), or a
+ * terminal row whose retention clock — `plan_approved_at`, else
+ * `created_at` — is older than 7 days. A failed task's ref is the only copy
+ * of its work on git-remote, so the window is the user's time to fetch it.
  */
 
 import { RequestError } from "@octokit/request-error";
@@ -35,7 +38,7 @@ import { type CodingStore, isTerminalCodingTaskStatus } from "./store/index.js";
 
 const log = logger.child({ component: "coding.cleanup-orphan-run-branches" });
 
-/** Refs older than this stop being load-bearing for any retry path. */
+/** How long a terminal task's ref stays: the time to fetch a failed task's work. */
 const RETENTION_DAYS = 7;
 const RETENTION_MS = RETENTION_DAYS * 24 * 60 * 60 * 1000;
 
@@ -173,9 +176,18 @@ export async function sweepRepo(
   // Batch task lookup — one query for every ref. Avoids N round-trips
   // through Inngest's executor and stays well under any per-function
   // step-count cap. Map by id for O(1) lookup in the loop below.
-  const tasks = await stepRun("load-tasks", async () => {
+  //
+  // The retention clock starts at approval: a run branch carries work only
+  // from execute, which approval starts, so a plan's wait at the gate does
+  // not eat into the time a failed task's work stays fetchable. A task that
+  // never reached approval falls back to its creation.
+  const tasks = await stepRun("load-task-retention", async () => {
     const rows = await deps.runInTx((tx) => deps.store.getTasksByIds(tx, taskIds));
-    return rows.map((t) => ({ id: t.id, status: t.status, createdAt: t.createdAt.toISOString() }));
+    return rows.map((t) => ({
+      id: t.id,
+      status: t.status,
+      retainedSince: (t.planApprovedAt ?? t.createdAt).toISOString(),
+    }));
   });
   const tasksById = new Map(tasks.map((t) => [t.id, t] as const));
 
@@ -186,20 +198,18 @@ export async function sweepRepo(
   for (const taskId of taskIds) {
     const task = tasksById.get(taskId);
 
-    // Stale criterion: task row is terminal AND created >7 days ago, OR
-    // there is no task row at all (deleted, or this ref came from a
-    // foreign source). Non-terminal tasks are NEVER swept regardless of
-    // age — they may be stuck pending approval; the user owns that.
+    // Stale criterion: task row is terminal AND its retention clock is
+    // >7 days old, OR there is no task row at all (deleted, or this ref
+    // came from a foreign source). Non-terminal tasks are NEVER swept
+    // regardless of age — they may be stuck pending approval; the user
+    // owns that.
     let stale: boolean;
     if (!task) {
       stale = true;
     } else if (!isTerminalCodingTaskStatus(task.status)) {
       stale = false;
     } else {
-      // `load-tasks` carries `createdAt` as an ISO string, the form a
-      // `Date` takes in JSON.
-      const createdAt = new Date(task.createdAt);
-      const ageMs = now.getTime() - createdAt.getTime();
+      const ageMs = now.getTime() - new Date(task.retainedSince).getTime();
       stale = ageMs >= RETENTION_MS;
     }
 

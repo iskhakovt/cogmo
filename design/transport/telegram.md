@@ -14,7 +14,9 @@ Telegram is the primary interactive channel. Personal DM with the bot — single
 
 Implements `AdapterModule` contract (`channelType` + `setup()`). Token extracted from `channel.credentials`. See [adapters.md](adapters.md) for the `Adapter` / `Transport` interfaces.
 
-**Sender gate:** the middleware ahead of every handler asks `transport.senders.admits(String(ctx.from.id))` and drops an update the channel doesn't admit ([identity.md](identity.md) → Allowlist enforcement). An update with no `from` (a channel post) stops there too: it has no sender to admit, and no handler takes one. A dropped update counts as handled, so `stop()` confirms it and a restart doesn't redeliver it.
+**Private-chat gate:** `[confirmed]` the first middleware after the update-id tracker drops any update whose `chat.type` is not `private` — group, supergroup and channel messages, edits and callback taps alike, and an update with no chat — with no reply and one info log line naming the chat's id and type, since a reply carries the user's personal memory to every member of the chat. Dispatch opens a conversation with `isPrivate` from the chat's type.
+
+**Sender gate:** the middleware after the private-chat gate asks `transport.senders.admits(String(ctx.from.id))` and drops an update the channel doesn't admit ([identity.md](identity.md) → Allowlist enforcement). An update with no `from` stops there too: it has no sender to admit, and no handler takes one. A dropped update counts as handled, so `stop()` confirms it and a restart doesn't redeliver it.
 
 **Inbound:**
 1. `bot.on("message:text")` — resolve/create session via `transport.resolveSession()` / `transport.createConversation()`
@@ -23,7 +25,7 @@ Implements `AdapterModule` contract (`channelType` + `setup()`). Token extracted
 
 Photos, documents and voice notes upload their original bytes through `transport.uploadAttachment` and emit a block carrying the path; `create-user-message` normalizes the images and checks the documents ([attachments.md](attachments.md)). `[confirmed]` A document's media type is Telegram's `mime_type` unless that is missing or `application/octet-stream`, the type a client sends for a file it doesn't recognise. Then the content decides between text and binary, and the `file_name` extension (`mime-types`) names the type within each. Text is valid UTF-8 with none of the WHATWG MIME Sniffing Standard's binary data bytes in its first 8,000 bytes (git's window); it keeps a `text/*` type, or `application/pdf` for an all-ASCII PDF, and is otherwise `text/plain`, since mime-db maps some source files to binary types (`.ts` to `video/mp2t`). Binary takes the extension's type, or stays `application/octet-stream`. A JPEG, PNG, GIF or WebP document routes to an image block; any other image format stays a document, since no vision route reads it. No route serves the stored original back over HTTP, so an inferred `text/html` reaches only the model. `[confirmed]` A document's block, an `image/*` one included, carries its `file_name` as `name`. A document whose `file_size` exceeds the Bot API's 20 MB download limit, which `getFile` refuses, is emitted as a size-only block (`bytes`, no path) naming the file, without a download, so the user gets the too-large placeholder rather than silence. Any other file over the limit, by its declared size or by `getFile`'s refusal, is not emitted; the bot replies that the file is too large and names the limit.
 
-**Platform address:** `String(ctx.chat.id)` — delivery target for `sendMessage`. In DMs, equals the user's Telegram ID. In groups, a separate group ID.
+**Platform address:** `String(ctx.chat.id)` — delivery target for `sendMessage`. The private-chat gate admits only DMs, so it equals the user's Telegram ID.
 
 **Platform user handle:** `String(ctx.from.id)` — the user's Telegram ID, passed to transport for identity resolution.
 
@@ -107,6 +109,7 @@ A forwarded message never runs a bot command. It keeps its `bot_command` entity,
 | Module | Holds |
 |-|-|
 | `adapter.ts` | `TelegramAdapter`: delivery, stream handles, voice, and a `stop()` that confirms handled updates |
+| `private-chat-gate.ts` | The first middleware, which drops an update from outside a private chat |
 | `sender-gate.ts` | The middleware ahead of every handler that drops an update the channel doesn't admit |
 | `command-routes.ts` | Command registration on the forward-dropping composer, `/start`, `/cancel`, the command menu |
 | `callback-routes.ts` | Inline-keyboard taps: boundary prompt, `/sessions`, plan, pipeline gate, skills approval |
@@ -129,6 +132,7 @@ The adapter starts if a Telegram channel row exists in the DB. `channels.credent
 
 Unit tests use grammY transformers to capture outgoing API calls — no network, no bot token needed. Test:
 - Answers a text message, `/start`, `/new`, a photo, voice note or document, and a callback tap from a sender the channel doesn't admit with nothing: no reply, typing indicator, download, upload or dispatch
+- Drops a group, supergroup or channel update, an edit or a tap in one, and an update with no chat, ahead of the sender gate, and counts it as handled
 - Drops an update with no sender without asking the transport, and counts a dropped update as handled
 - Calls `transport.emit()` with correct `InboundContent` for resolved users
 - Marks forwarded text, captions, captionless media and voice notes with `forwarded`, and leaves self-forwards unmarked

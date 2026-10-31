@@ -6,11 +6,12 @@ This is the canonical install guide. Cogmo is a single Node.js process distribut
 
 | Component | Version | Notes |
 |-|-|-|
-| PostgreSQL | **18 recommended** (14+ accepted via SQL polyfill, but dev-only) | One instance shared by Cogmo and Hindsight. CI tests against PG 18 (`pgvector/pgvector:pg18`). PG 18 ships native, monotonic `uuidv7()`; older versions get a `plpgsql` fallback from `scripts/init-db.sql` that is non-monotonic and lower quality — fine for local experiments, avoid in production. |
+| PostgreSQL | **18 recommended** (14+ accepted via SQL polyfill, but dev-only) | One instance shared by Cogmo and Hindsight. CI tests against PG 18 (`pgvector/pgvector:pg18`). PG 18 ships native, monotonic `uuidv7()`; older versions get a `plpgsql` fallback from `apps/server/scripts/init-db.sql` that is non-monotonic and lower quality — fine for local experiments, avoid in production. |
 | pgvector | latest | Postgres extension for vector storage. The `pgvector/pgvector:pg18` image bundles it. |
 | Redis | 7+ | Inngest queue and state store. |
 | Inngest | latest | Self-hosted `inngest start` with an event key and signing key. `inngest dev` is for local development only — see [Securing internal services](#securing-internal-services). |
 | [Hindsight](https://github.com/vectorize-io/hindsight) | 1.1.x, slim recommended | Memory server, HTTP API on port 8888. Cogmo reads the server's version at boot and refuses to start outside `cogmo.hindsightCompat` in `apps/server/package.json`, so upgrade the two together. See [Hindsight image variant](#hindsight-image-variant) for which tag to pick. |
+| S3-compatible object storage | any | A bucket for files and attachments. `serve` checks it at boot. See [Object storage](#object-storage). |
 | Docker | latest | For pulling and running the image. |
 
 Cogmo stores its application state in your Postgres; Hindsight stores its vectors in the same Postgres (different schema). One database is enough for personal scale.
@@ -75,7 +76,7 @@ docker buildx bake --load --set cogmo-e2e.tags=cogmo cogmo-e2e                  
 VERSION=0.0.0-dev docker buildx bake --load --set cogmo-e2e.tags=cogmo cogmo-e2e   # override the embedded version string
 ```
 
-The image is based on `node:26-trixie-slim` (Debian 13), runs as the `node` user (UID 1000), and exposes port 9090 (health). Default entrypoint: `node --import ./dist/otel.js dist/main.js serve`. The `--import` hook initializes OpenTelemetry if configured (see [Observability](#observability)) and is a no-op otherwise.
+The image is based on `node:26-trixie-slim` (Debian 13), runs as the `node` user (UID 1000), and exposes port 9090 (web UI and health). Default entrypoint: `node --import ./dist/otel.js dist/main.js serve`. The `--import` hook initializes OpenTelemetry if configured (see [Observability](#observability)) and is a no-op otherwise.
 
 ## Persistent state
 
@@ -87,8 +88,9 @@ Cogmo writes runtime state under `/var/lib/cogmo` inside the container:
 | `/var/lib/cogmo/repos` | Cached clones of external repos (read-only sources for skills). Regenerable. |
 | `/var/lib/cogmo/worktrees` | Ephemeral working trees for skill execution. Regenerable. |
 | `/var/lib/cogmo/askpass` | Short-lived credential helpers for git over HTTPS. Regenerable. |
+| `/var/lib/cogmo/sockets` | Per-task Docker API proxy sockets. Regenerable. |
 
-The image pre-creates all four with `node:node` ownership. If you don't bind-mount, state lives inside the container's writable layer and is lost when the container is removed — fine for kicking the tires, **never for production**: the skills repo is irreplaceable.
+The image pre-creates all five with `node:node` ownership. If you don't bind-mount, state lives inside the container's writable layer and is lost when the container is removed — fine for kicking the tires, **never for production**: the skills repo is irreplaceable.
 
 ### Bind-mount permissions
 
@@ -114,7 +116,7 @@ If UID 1000 collides with an existing user on your host, pick any free UID, chow
 
 ## Configuration
 
-All configuration is via environment variables. The schema is in [`src/env.ts`](src/env.ts).
+All configuration is via environment variables. The schema is in [`apps/server/src/env.ts`](apps/server/src/env.ts).
 
 ### Required
 
@@ -161,6 +163,8 @@ Defaults below match the in-image expectations: every host-state path sits under
 
 #### Object storage
 
+Required by `serve`, which checks the bucket at boot. With `S3_ENDPOINT` unset the client targets AWS S3, and with no key pair set it uses ambient AWS credentials.
+
 | Variable | Default | Purpose |
 |-|-|-|
 | `S3_ENDPOINT`, `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_REGION` | — / `cogmo-files` / — / — / `us-east-1` | Object storage for the file tools and image attachments. Any S3-compatible store works; dev and tests run RustFS. |
@@ -174,6 +178,18 @@ Defaults below match the in-image expectations: every host-state path sits under
 | `DEBOUNCE_IDLE_SECONDS` | `3` | Quiet window after the last inbound message before the orchestrator fires. Tunes responsiveness vs. batching. |
 | `DEBOUNCE_MAXWAIT_SECONDS` | `30` | Hard cap on debounce wait — even in a streaming burst the orchestrator fires by this deadline. |
 | `DEBOUNCE_RESUME_POLICY` | `debounce` | `debounce` / `flush` / `await_input` — behaviour when new messages arrive mid-turn. See [`design/transport/`](design/transport/). |
+| `BOUNDARY_PROMPT_TIMEOUT_SECONDS` | `30` | How long the "Resume previous / Start fresh" prompt waits for an answer after a session goes idle before starting fresh. |
+| `BOUNDARY_PROMPT_MIN_USER_TURNS` | `3` | User turns the previous conversation needs before that prompt is shown at all. |
+
+#### Web UI server
+
+| Variable | Default | Purpose |
+|-|-|-|
+| `WEB_HOST` | `0.0.0.0` | Bind host for the web UI and health server. Keep the container default and restrict at the publish layer (see [Web UI](#web-ui)); set `127.0.0.1` on a bare-metal run with no proxy. |
+| `WEB_PORT` | `9090` | Port for the web UI and `/health`. |
+| `WEB_SESSION_TTL_DAYS` | `30` | Absolute lifetime of a web UI login session. |
+| `WEB_STATIC_ROOT` | `./apps/web/dist` | Built SPA directory. The image ships it at the default. |
+| `WEB_INSECURE_COOKIES`, `WEB_DEV_ALLOW_ORIGIN` | — | Local dev only: drop the `__Host-`/`Secure` cookie hardening and allow a cross-origin SPA. Leave unset in production. |
 
 #### Sandbox backend
 
@@ -219,7 +235,7 @@ See [`design/skills.md`](design/skills.md) for two-tier (Pyodide + sysbox) execu
 | `MCP_CALL_TIMEOUT_MS` | `30000` | Per-call timeout for MCP tool dispatch. |
 | `MCP_IDLE_EVICTION_MS` | `600000` (10 min) | A live MCP connection unused this long is closed. To keep connections open indefinitely, set a very large value, e.g. `31536000000` (a year). |
 
-LLM provider keys, Telegram bot tokens, Tavily/fal.ai keys, and similar credentials are **not** env vars — they live encrypted in the DB after `cogmo setup`. Putting secrets in env files is explicitly discouraged; use host secret management ([sops-nix](https://github.com/Mic92/sops-nix), [Vault](https://www.vaultproject.io/), systemd `LoadCredential`, Docker secrets via `_FILE`, etc.) for `COGMO_MASTER_KEY`, `DATABASE_URL`, `HINDSIGHT_API_KEY`, `INNGEST_EVENT_KEY` and `INNGEST_SIGNING_KEY` — each accepts a `_FILE` variant.
+LLM provider keys, Telegram bot tokens and similar credentials are **not** env vars — they live encrypted in the DB after `cogmo setup`. `TAVILY_API_KEY`, `OPENROUTER_API_KEY` and `FAL_API_KEY` are read as fallbacks when the DB has no key (`FAL_API_KEY` is copied into the DB at boot); prefer `cogmo setup`. Putting secrets in env files is explicitly discouraged; use host secret management ([sops-nix](https://github.com/Mic92/sops-nix), [Vault](https://www.vaultproject.io/), systemd `LoadCredential`, Docker secrets via `_FILE`, etc.) for `COGMO_MASTER_KEY`, `DATABASE_URL`, `HINDSIGHT_API_KEY`, `INNGEST_EVENT_KEY` and `INNGEST_SIGNING_KEY` — each accepts a `_FILE` variant.
 
 ## Securing internal services
 
@@ -296,6 +312,7 @@ Neither is probed by Cogmo, so key them yourself:
 
    ```bash
    docker run --rm -it \
+     -v /var/lib/cogmo:/var/lib/cogmo \
      -e DATABASE_URL=postgresql://... \
      -e COGMO_MASTER_KEY=... \
      -e HINDSIGHT_URL=http://hindsight:8888 \
@@ -306,7 +323,7 @@ Neither is probed by Cogmo, so key them yourself:
      ghcr.io/iskhakovt/cogmo:<version> setup
    ```
 
-   The wizard validates each credential live (Anthropic/OpenAI `/v1/models`, Telegram `getMe`, Tavily ping, Hindsight `/health`) and writes only on success. It is re-runnable — running it again on an existing deployment lets you add a channel, rotate a key, or swap providers. Use `--reset secrets|channels|all` to wipe scoped state and re-prompt. See [`design/setup.md`](design/setup.md) for the full UX contract.
+   The wizard validates credentials live (Anthropic/OpenAI `/v1/models`, Telegram `getMe`, Tavily ping, GitHub `/user`, Claude Code OAuth, Daytona, Hindsight `/health`). An LLM, Claude Code, Daytona or voice credential that fails validation can still be saved after a warning; fal.ai has no cheap check, so its key is stored unvalidated. It is re-runnable — running it again on an existing deployment lets you add a channel, rotate a key, or swap providers. Use `--reset secrets|channels|all` to wipe scoped state and re-prompt. See [`design/setup.md`](design/setup.md) for the full UX contract.
 
 3. **Start the long-running process:**
 
@@ -321,11 +338,13 @@ Neither is probed by Cogmo, so key them yourself:
      -e INNGEST_BASE_URL=http://inngest:8288 \
      -e INNGEST_EVENT_KEY=... \
      -e INNGEST_SIGNING_KEY=... \
-     -p 9090:9090 \
+     -e S3_ENDPOINT=... -e S3_BUCKET=... -e S3_ACCESS_KEY=... -e S3_SECRET_KEY=... \
+     -v /var/lib/cogmo:/var/lib/cogmo \
+     -p 127.0.0.1:9090:9090 \
      ghcr.io/iskhakovt/cogmo:<version>
    ```
 
-   The default `CMD` is `serve`. The process connects to Inngest, starts each configured channel adapter (e.g. Telegram long-polling), and listens on `0.0.0.0:9090` for liveness checks.
+   The default `CMD` is `serve`. The process applies pending migrations, connects to Inngest, starts each configured channel adapter (e.g. Telegram long-polling), and serves the web UI and `/health` on `0.0.0.0:9090` inside the container.
 
 ## Subcommands
 
@@ -336,11 +355,22 @@ The image entrypoint dispatches based on the first arg:
 | `serve` *(default)* | Run the long-lived agent process. |
 | `setup` | Interactive guided setup wizard. Idempotent. Required on first run; re-run any time to change credentials or add a channel. |
 | `setup --reset secrets\|channels\|all` | Wipe scoped state before prompting. |
-| `setup --non-interactive` | Currently only seeds defaults — full provider configuration via env vars is tracked as a future enhancement. Use `setup` interactively for now. |
-| `seed` | Legacy idempotent seed (default user + profile + direct channel). `setup` does this and more; prefer it. |
+| `setup --non-interactive` | Read the provider, Telegram and optional credentials from `COGMO_*` env vars instead of prompting; validates everything before writing. See [`design/setup.md` → Non-interactive mode](design/setup.md#non-interactive-mode). |
+| `seed` | Apply migrations and seed the default user, profile, and direct and web channels. `setup` does this and more; prefer it. |
 | `gen-key` | Print a fresh `COGMO_MASTER_KEY` to stdout. |
+| `web-token` | Print the web UI login token, derived from `COGMO_MASTER_KEY`. |
+| `provider`, `model` | Add, list, change and remove LLM providers and model routing rows without re-running the wizard ([`design/setup.md` → Post-setup CLI](design/setup.md#post-setup-cli)). |
+| `subagent`, `image-provider`, `image-model` | Manage sub-agents, image providers and image models. |
+| `skills` | Register, approve, deny, roll back, deregister, run and list skills. |
+| `migrate-memories`, `backfill`, `migrate-skills-remote` | One-off data migrations; run `cogmo <command> --help`. |
 
 `serve` logs to stdout. Every other command logs to stderr, so its stdout carries only its output.
+
+## Web UI
+
+`serve` serves a browser cockpit (chat and admin screens) on the same port as `/health`. Log in with the token `cogmo web-token` prints; it is derived from `COGMO_MASTER_KEY`, stored nowhere, and changes only when the master key does. A login becomes a server-side session that lasts `WEB_SESSION_TTL_DAYS`.
+
+The app's auth is defense in depth, not the boundary. Keep the port off the open network: publish it on loopback only (`-p 127.0.0.1:9090:9090`) and reach it only through a proxy on the same host or a sidecar. The session cookie is `__Host-`-prefixed and `Secure`, so serve the UI over HTTPS (a reverse proxy, `tailscale serve`, `cloudflared`). See [`design/web-ui.md`](design/web-ui.md).
 
 ## Health check
 
@@ -370,8 +400,8 @@ The image entrypoint always launches with `node --import ./dist/otel.js`, which 
 
 Telegram's Bot API authenticates by URL path (`/bot<id>:<secret>/<method>`, and `/file/bot<id>:<secret>/…` for downloads), so the bot token is part of every Telegram request URL. Cogmo redacts it before anything leaves the process, so a backend that takes OTLP directly needs no scrubbing of its own:
 
-- **Spans.** The trace exporter is wrapped (`src/otel-redaction.ts`), whichever instrumentation produced the span. URL attributes (`url.full`, `url.original`, `http.url`, `http.target`) are exported without their query or fragment, and `url.query` and `url.fragment` are dropped, so a query-string credential never reaches a URL attribute, whatever its parameter is called. In every string — names, status messages, attributes, `exception.message` and `exception.stacktrace` — `bot<id>:<secret>` path segments become `bot<redacted>`.
-- **Logs.** Every serialized pino line goes through the same token redaction before it's written (`src/logger.ts`), so the log stream and the OTLP log export carry the same redacted line. A grammY network failure is where this matters: its `HttpError` keeps node-fetch's error, whose message names the full request URL.
+- **Spans.** The trace exporter is wrapped (`apps/server/src/otel-redaction.ts`), whichever instrumentation produced the span. URL attributes (`url.full`, `url.original`, `http.url`, `http.target`) are exported without their query or fragment, and `url.query` and `url.fragment` are dropped, so a query-string credential never reaches a URL attribute, whatever its parameter is called. In every string — names, status messages, attributes, `exception.message` and `exception.stacktrace` — `bot<id>:<secret>` path segments become `bot<redacted>`.
+- **Logs.** Every serialized pino line goes through the same token redaction before it's written (`apps/server/src/logger.ts`), so the log stream and the OTLP log export carry the same redacted line. A grammY network failure is where this matters: its `HttpError` keeps node-fetch's error, whose message names the full request URL.
 
 Free text isn't cut at queries: a URL with a query-string credential inside an error message is exported as written, and so is a credential in another URL's path, such as an MCP server URL with a token in it.
 
@@ -414,7 +444,7 @@ docker run -d --name cogmo \
   -e INNGEST_SIGNING_KEY=... \
   -e OTEL_EXPORTER_OTLP_ENDPOINT=http://lgtm:4318 \
   -e OTEL_SERVICE_NAME=cogmo \
-  -p 9090:9090 \
+  -p 127.0.0.1:9090:9090 \
   ghcr.io/iskhakovt/cogmo:<version>
 ```
 
@@ -443,7 +473,7 @@ docker run -d --name cogmo \
   -e OTEL_EXPORTER_OTLP_HEADERS="Authorization=Basic $(printf '%s' '<instance-id>:<token>' | base64)" \
   -e OTEL_SERVICE_NAME=cogmo \
   -e OTEL_RESOURCE_ATTRIBUTES=deployment.environment=prod \
-  -p 9090:9090 \
+  -p 127.0.0.1:9090:9090 \
   ghcr.io/iskhakovt/cogmo:<version>
 ```
 
@@ -462,15 +492,10 @@ samples 10% of root traces while keeping child spans consistent.
 
 ## Updating
 
-Pull the new tag and restart. `setup` runs Drizzle migrations on every invocation, so for schema changes:
+Back up the database, then pull the new tag and restart `serve` on it. `serve` applies pending migrations at boot under an advisory lock, so no separate migration step is needed. Migrations are forward-only.
 
 ```bash
 docker pull ghcr.io/iskhakovt/cogmo:<new-version>
-docker run --rm \
-  -e DATABASE_URL=... -e COGMO_MASTER_KEY=... \
-  ghcr.io/iskhakovt/cogmo:<new-version> setup
 docker stop cogmo && docker rm cogmo
 # re-run the `serve` command from "Bootstrap sequence" step 3 with the new tag
 ```
-
-Migrations are forward-only. Always back up the database before upgrading.

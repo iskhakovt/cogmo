@@ -41,9 +41,10 @@ export const commandComposer = {
   command: vi.fn((cmd: string, handler: Handler) => handlers.set(`command:${cmd}`, handler)),
 };
 
-/** The part of a grammY context the bot's middleware reads: the update's id and its sender. */
+/** The part of a grammY context the bot's middleware reads: the update's id, its chat and its sender. */
 interface UpdateCtx {
   update: { update_id: number };
+  chat?: { id: number; type: string };
   from?: { id: number };
 }
 
@@ -65,11 +66,14 @@ export const botLifecycle = {
 };
 
 /**
- * Run one update from sender 1 through the registered middleware, then
- * `handler`, as grammY composes them.
+ * Run one update from sender 1 in its private chat through the registered
+ * middleware, then `handler`, as grammY composes them.
  */
 export function runUpdate(updateId: number, handler: () => Promise<void>): Promise<void> {
-  return compose({ update: { update_id: updateId }, from: { id: 1 } }, handler);
+  return compose(
+    { update: { update_id: updateId }, chat: { id: 1, type: "private" }, from: { id: 1 } },
+    handler,
+  );
 }
 
 /** Run `ctx` through the registered middleware, then the handler registered under `key`. */

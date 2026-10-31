@@ -2,20 +2,28 @@
 
 Each domain module owns its DB access in a `store/` subdirectory:
 
-- **`<module>/store/schema.ts`** — Drizzle table definitions owned by this module
-- **`<module>/store/index.ts`** — Store interface + implementation. All DB reads/writes go through this.
+- **`<module>/store/schema.ts`** — Drizzle table definitions owned by this module (a large module splits them into `store/schema/*.ts` behind a `schema.ts` barrel, as `agent/store/` does)
+- **`<module>/store/index.ts`** — Store interface + implementation. All DB reads/writes go through this. A large store keeps its queries in per-table files beside it, as `agent/store/` does.
 - **`src/db/schemas.ts`** — Barrel file re-exporting all module schemas (for drizzle-kit migrations only)
 
 | Store | Tables |
 |-|-|
-| `agent/store/` | conversations, messages, steering_rules, profiles, core_memory_blocks |
-| `transport/store/` | channels, channel_sessions, inbound_messages, user_identities, attachment_originals |
+| `agent/store/` | users, profiles, profile_classes, custom_compartments, conversations, aliases, messages, conversation_summaries, turn_contexts, system_prompt_snapshots, steering_rules, core_memory_blocks, evolution_events, pending_memories, scheduled_tasks, sub_agents, voice_config, llm_providers, model_providers, image_providers, image_models |
+| `agent/coding/store/` | coding_repos, coding_tasks |
+| `agent/model-catalog/store/` | model_catalogs |
+| `agent/pipeline/store/` | pipeline_definitions, pipeline_runs |
+| `transport/store/` | channels, channel_sessions, inbound_messages, chat_default_profiles, boundary_pending, user_identities, attachment_originals |
+| `mcp/store/` | mcp_servers, mcp_server_tools |
+| `sandbox/store/` | cogmo_instances, containers, networks, volumes |
+| `secrets/store/` | secrets |
+| `skills/store/` | skills, skill_deploys, skill_runs, skill_context_calls |
+| `web/store/` | web_sessions |
 
 **Interface boundary, not table boundary.** A store implementation can import schemas from any module — JOINs and cross-table transactions are fine. Consumers depend on the store interface and mock it in tests. The schema defines ownership (who creates/migrates the table); the interface defines access (who can read/write what).
 
 **Stores are stateless query objects; methods take `tx` first.** Every Drizzle store implementation has no constructor (or only the encryption key, for `DrizzleSecretsStore`) — `new DrizzleAgentStore()`. Each method takes `tx: Transaction` (exported from `src/db/index.ts`) as its first parameter and operates on `tx` directly with no internal `runInTx` wrapper. Callers own the unit-of-work boundary: pass a `Transactor` (`<T>(cb: (tx: Transaction) => Promise<T>) => Promise<T>`) into deps and wrap each call (or set of calls) in `runInTx(async (tx) => store.method(tx, args))`. Composing reads across stores — the original motivation — becomes natural: open one tx, call into multiple stores. Tests get `tx` from `createTestDatabase()`'s `{ db, tx, close }` return; unit tests use `await tx((trx) => store.method(trx, args))`. Mock-based tests use a sentinel-tx token: `const FAKE_TX = { __mockTx: true } as never; const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);` — assertions on call args use `expect.anything()` for the tx position.
 
-**Use cases live in domain folders, named after the action.** When a workflow composes multiple store calls inside one tx (the common case as soon as anything non-trivial talks to two stores), put it in a kebab-case file under the relevant domain folder — `src/agent/conversation/load-conversation-context.ts`, `src/agent/profile/set-profile-voice-mode.ts`, etc. Single async function per file: `async function loadConversationContext(deps, args) { ... }`. `deps` carries the `Transactor` plus the store interfaces the use case touches; `args` carries per-call inputs. Tests pass a fake `deps`. No `Service` class to wrap them in — the file IS the use case. The existing `Service` interface in `src/agent/service.ts` is unrelated: that's the per-conversation tool execution context (memory, files, coreMemory ACL boundary), not an application-service layer.
+**Use cases live in domain folders, named after the action.** When a workflow composes multiple store calls inside one tx (the common case as soon as anything non-trivial talks to two stores), put it in a kebab-case file under the relevant domain folder — `src/agent/conversation/load-conversation-context.ts`, `src/agent/conversation/compact-conversation.ts`, etc. Single async function per file: `async function loadConversationContext(deps, args) { ... }`. `deps` carries the `Transactor` plus the store interfaces the use case touches; `args` carries per-call inputs. Tests pass a fake `deps`. No `Service` class to wrap them in — the file IS the use case. The existing `Service` interface in `src/agent/service.ts` is unrelated: that's the per-conversation tool execution context (memory, files, coreMemory ACL boundary), not an application-service layer.
 
 **Default isolation is REPEATABLE READ.** `transactor(db)` wraps every call in `db.transaction(cb, { isolationLevel: "repeatable read" })` and retries a `40001 serialization_failure` up to twice (3 attempts) before surfacing it to Inngest's outer retry budget. That retry is `essential`: `RETRY_DISABLED`, which switches transport retries off in tests, leaves it on. Snapshot isolation per tx — every statement in a `runInTx` block sees one snapshot, taken by the block's first statement. Compose reads across stores freely; no per-statement-snapshot reasoning required. Predicate races (two transactions both reading `count < cap`, or both reading "no row" and inserting) are *not* caught: snapshot isolation doesn't predicate-lock, and two plain inserts conflict with nothing. Enforce them in the database; don't reach for SERIALIZABLE:
 

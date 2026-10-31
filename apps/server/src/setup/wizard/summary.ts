@@ -39,7 +39,7 @@ export async function stepSummary(deps: WizardDeps, botUsername?: string): Promi
     nextSteps.push("3. You should get a reply within a few seconds.");
   }
   nextSteps.push("");
-  nextSteps.push("If something doesn't work, see DEPLOYMENT.md.");
+  nextSteps.push("If something doesn't work, see deploy.md.");
 
   p.note(nextSteps.join("\n"), "Verify it's running");
   p.outro("Cogmo is ready.");
