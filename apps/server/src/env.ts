@@ -214,7 +214,7 @@ export const env = createEnv({
     COGMO_MASTER_KEY: z.string().optional(),
     /** Semver set at build time (Dockerfile `ARG VERSION`). `dev` when unset. */
     VERSION: z.string().default("dev"),
-    /** Short git SHA, set at build time via Dockerfile `ARG GIT_SHA`. Optional. */
+    /** Short git SHA that `/health` reports as `releaseId`. No build step sets it; the deployment can. */
     GIT_SHA: z.string().optional(),
     /**
      * Selects which sandbox backend the factory wires up. `local-docker`
