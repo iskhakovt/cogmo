@@ -344,7 +344,7 @@ The image entrypoint dispatches based on the first arg:
 
 ## Health check
 
-`GET /health` on port 9090 returns 200 with an `application/health+json` body (IETF draft schema: `status`, `version`, `releaseId`, `description`, `notes`). Liveness only — a Postgres blip will not flap the container. Wire it to your supervisor (Docker `HEALTHCHECK`, k8s `livenessProbe`, systemd, etc.).
+`GET /health` on port 9090 returns 200 with an `application/health+json` body (IETF draft schema: `status`, `version`, `description`, `notes`, and `releaseId` when `GIT_SHA` is set). Liveness only — a Postgres blip will not flap the container. Wire it to your supervisor (Docker `HEALTHCHECK`, k8s `livenessProbe`, systemd, etc.).
 
 ## Stopping
 
