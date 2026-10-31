@@ -10,11 +10,10 @@ import { repoRoot } from "./repo-root.js";
  * `docker buildx bake --print` resolves it — so inheritance, interpolation and
  * functions count the way they do in a real build.
  *
- * The task images' toolchain pins live in bake alone: their Dockerfiles
- * declare the ARGs without defaults. Three files mirror pins bake can't feed —
- * package.json's `packageManager` and the root Dockerfile's ARG defaults
- * (pnpm), and ci.yml's setup-uv (uv) — so those are held to the bake values
- * here.
+ * Every image's build args live in bake alone: its Dockerfile declares the
+ * ARGs without defaults. Two pins have a mirror bake can't feed —
+ * package.json pins pnpm via `packageManager`, and ci.yml pins uv for the
+ * skills-runtime job — so those are held to the bake values here.
  */
 
 function read(relativePath: string): string {
@@ -27,12 +26,12 @@ function extract(source: string, label: string, pattern: RegExp): string {
   return match[1];
 }
 
-const TASK_TARGETS = ["devbase", "skills"] as const;
+const IMAGE_TARGETS = ["devbase", "skills", "cogmo"] as const;
 
 const targets = new Map<string, BakeTarget>();
 
 beforeAll(async () => {
-  for (const name of [...TASK_TARGETS, "cogmo-e2e"]) {
+  for (const name of [...IMAGE_TARGETS, "cogmo-e2e"]) {
     targets.set(name, await printBakeTarget(name));
   }
 });
@@ -45,7 +44,7 @@ function arg(targetName: string, name: string): string {
   return expectDefined(target(targetName).args[name], `${targetName} arg ${name}`);
 }
 
-describe.each(TASK_TARGETS)("the %s Dockerfile takes its toolchain from bake", (name) => {
+describe.each(IMAGE_TARGETS)("the %s Dockerfile takes its build args from bake", (name) => {
   it("declares every ARG without a default", () => {
     // A default is a second copy of the pin, which bake overrides and
     // nothing else checks.
@@ -53,8 +52,8 @@ describe.each(TASK_TARGETS)("the %s Dockerfile takes its toolchain from bake", (
   });
 
   it("is supplied a value for every ARG, and declares every arg bake passes", () => {
-    // An ARG bake doesn't pass is empty at build time, and npm installs
-    // `latest` for an empty version.
+    // An ARG bake doesn't pass is empty at build time: npm installs `latest`
+    // for an empty version, and an empty pnpm pin breaks the root image's FROM.
     const dockerfile = readFileSync(target(name).dockerfilePath, "utf8");
     expect(() => withArgDefaults(dockerfile, target(name).args)).not.toThrow();
   });
@@ -82,19 +81,6 @@ describe("toolchain pins", () => {
     const pnpm = extract(packageManager, "packageManager pnpm version", /^pnpm@([^+]+)/);
     expect(pnpm).toBe(arg("devbase", "PNPM_VERSION"));
   });
-
-  it.each(["PNPM_VERSION", "PNPM_DIGEST"])(
-    "the root Dockerfile's %s default matches bake",
-    (name) => {
-      const dockerfile = readFileSync(target("cogmo-e2e").dockerfilePath, "utf8");
-      const fallback = extract(
-        dockerfile,
-        `root Dockerfile ${name} default`,
-        new RegExp(`^ARG ${name}=(\\S+)$`, "m"),
-      );
-      expect(fallback).toBe(arg("cogmo-e2e", name));
-    },
-  );
 });
 
 /**

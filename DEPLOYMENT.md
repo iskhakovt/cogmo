@@ -71,8 +71,8 @@ See [packages](https://github.com/iskhakovt/cogmo/pkgs/container/cogmo) for avai
 To build locally instead:
 
 ```bash
-docker build -t cogmo .                              # version = "dev" (Dockerfile default)
-docker build --build-arg VERSION=0.0.0-dev -t cogmo . # override the embedded version string
+docker buildx bake --load --set cogmo-e2e.tags=cogmo cogmo-e2e                     # version = "dev"
+VERSION=0.0.0-dev docker buildx bake --load --set cogmo-e2e.tags=cogmo cogmo-e2e   # override the embedded version string
 ```
 
 The image is based on `node:24-trixie-slim` (Debian 13), runs as the `node` user (UID 1000), and exposes port 9090 (health). Default entrypoint: `node --import ./dist/otel.js dist/main.js serve`. The `--import` hook initializes OpenTelemetry if configured (see [Observability](#observability)) and is a no-op otherwise.

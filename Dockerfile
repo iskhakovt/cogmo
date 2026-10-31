@@ -1,8 +1,7 @@
-# pnpm comes from its official image, pinned in docker-bake.hcl. These defaults
-# serve a plain `docker build`; docker-bake.integration.test.ts holds them to
-# bake's values. ARGs in a FROM need global scope.
-ARG PNPM_VERSION=12.13.0
-ARG PNPM_DIGEST=sha256:8ebb7ad694024b47535f6c2cd6bbeb532836e314609e8d90df0ef1f25661f8f4
+# Build through docker-bake.hcl, which supplies every ARG here. pnpm comes from
+# its official image, pinned there. ARGs in a FROM need global scope.
+ARG PNPM_VERSION
+ARG PNPM_DIGEST
 FROM ghcr.io/pnpm/pnpm:${PNPM_VERSION}@${PNPM_DIGEST} AS pnpm
 
 FROM mirror.gcr.io/library/node:24-trixie-slim@sha256:6950b66b4c0cb0151ce89fa75074673850763d096b044f422c6729b588dd4956 AS base
@@ -100,7 +99,7 @@ COPY --from=build --chown=node:node /deploy .
 # to this WORKDIR). `pnpm deploy` doesn't carry it, so copy the build output here.
 COPY --from=build --chown=node:node /app/apps/web/dist ./apps/web/dist
 
-ARG VERSION=dev
+ARG VERSION
 ENV VERSION=$VERSION
 
 # web UI + health endpoint

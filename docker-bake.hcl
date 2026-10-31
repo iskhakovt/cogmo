@@ -18,8 +18,7 @@
 //   - sysbox-e2e.yml: VERSION=test, --load skills. No platform override
 //     needed (skills is already amd64-only by default).
 //   - Local: `docker buildx bake skills` builds with default tag :dev.
-//     For fast amd64-only on cogmo locally, override platform + cache
-//     scope to amd64.
+//     For cogmo, bake `cogmo-e2e` (native platform, no GHA cache).
 //
 // Local-dev convention: the runtime defaults to `cogmo-{devbase,skills}:latest`
 // when `process.env.VERSION` is unset (publish.yml pushes `:latest` alongside
@@ -35,18 +34,17 @@ variable "VERSION" {
   default = "dev"
 }
 
-// Toolchain versions, bumped by hand. The task images' Dockerfiles declare
-// these ARGs without defaults, so this is their only copy. Base-image FROM
-// digests stay literal in each Dockerfile for Dependabot. uv is shared by
-// devbase + skills.
+// Toolchain versions, bumped by hand, and their only copy: the Dockerfiles
+// declare these ARGs without defaults. Base-image FROM digests stay literal in
+// each Dockerfile for Dependabot. uv is shared by devbase + skills.
 variable "UV_VERSION" {
   default = "0.13.4"
 }
 variable "UV_DIGEST" {
   default = "sha256:9f130421e930bfbdc563c00740466603f8723158e90297d07957c2294640262b"
 }
-// Match package.json packageManager and the root Dockerfile's ARG defaults
-// (test-enforced). The digest is ghcr.io/pnpm/pnpm's index for that version.
+// Match package.json packageManager. The digest is ghcr.io/pnpm/pnpm's
+// index for that version.
 variable "PNPM_VERSION" {
   default = "12.13.0"
 }
@@ -129,7 +127,7 @@ target "cogmo" {
 
 // Local e2e image. The e2e tier builds this when `E2E_IMAGE` is unset; CI
 // bakes `cogmo` and hands the tag over instead, so this target belongs to
-// local runs. It inherits the build inputs rather than the `cogmo` target,
+// local runs, DEPLOYMENT.md's local build included. It inherits the build inputs rather than the `cogmo` target,
 // which keeps the GHA cache attributes out — that backend wants an Actions
 // runtime token that exists only inside a workflow.
 //
