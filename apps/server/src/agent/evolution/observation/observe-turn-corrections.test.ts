@@ -10,7 +10,7 @@ import { observeTurnCorrections } from "./observe-turn-corrections.js";
 const FAKE_TX = { __mockTx: true } as never;
 const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
 
-const TURN = { observationId: "obs-1", cursor: "cursor-1", firstMessageId: "msg-1" };
+const TURN = { observationId: "obs-1", cursor: "cursor-1", firstMessageId: "msg-1", attempts: 0 };
 const SCOPE = { profileId: "profile-1", userId: "user-1", seesUserRules: true };
 const SAID = "No, shorter please. I keep asking.";
 
@@ -66,17 +66,16 @@ const CONTRADICTION = {
   evidence: "shorter please",
 };
 
+/** The row as a fresh discovery leaves it. */
+const PENDING = { status: "pending", attempts: 0 } as const;
+
 function setup(opts: {
   provider: LlmProvider;
-  status?: "pending" | "applied";
-  attempts?: number;
+  row: { status: "pending" | "applied"; attempts: number };
   store?: Partial<AgentStore>;
 }) {
   const store = mockAgentStore({
-    getTurnObservation: vi.fn().mockResolvedValue({
-      status: opts.status ?? "pending",
-      attempts: opts.attempts ?? 0,
-    }),
+    getTurnObservation: vi.fn().mockResolvedValue(opts.row),
     listTurnMessages: vi.fn().mockResolvedValue(rows(SAID, [])),
     getCorrections: vi.fn().mockResolvedValue([LEARNING]),
     ...opts.store,
@@ -94,7 +93,7 @@ function setup(opts: {
 
 describe("observeTurnCorrections", () => {
   it("applies the turn's corrections on the transaction that moves its row, keyed on the row", async () => {
-    const { store, run } = setup({ provider: answering([CONTRADICTION]) });
+    const { store, run } = setup({ provider: answering([CONTRADICTION]), row: PENDING });
 
     const outcome = await run();
 
@@ -113,7 +112,10 @@ describe("observeTurnCorrections", () => {
   });
 
   it("calls no model for a row that already left `pending`", async () => {
-    const { store, provider, run } = setup({ provider: answering([]), status: "applied" });
+    const { store, provider, run } = setup({
+      provider: answering([]),
+      row: { status: "applied", attempts: 0 },
+    });
 
     expect(await run()).toEqual({ kind: "done", status: "applied" });
     expect(provider.chat).not.toHaveBeenCalled();
@@ -123,6 +125,7 @@ describe("observeTurnCorrections", () => {
   it("writes nothing when another run moved the row first", async () => {
     const { store, run } = setup({
       provider: answering([CONTRADICTION]),
+      row: PENDING,
       store: {
         transitionPendingTurn: vi.fn().mockResolvedValue({ kind: "stale", status: "applied" }),
       },
@@ -136,6 +139,7 @@ describe("observeTurnCorrections", () => {
   it("skips a turn with no user text without calling the model", async () => {
     const { store, provider, run } = setup({
       provider: answering([]),
+      row: PENDING,
       store: {
         listTurnMessages: vi
           .fn()
@@ -156,6 +160,7 @@ describe("observeTurnCorrections", () => {
   it("drops an item whose evidence the user didn't say", async () => {
     const { store, run } = setup({
       provider: answering([{ ...CONTRADICTION, evidence: "use long replies" }]),
+      row: PENDING,
     });
 
     expect(await run()).toMatchObject({ kind: "applied", droppedNoEvidence: 1 });
@@ -169,6 +174,7 @@ describe("observeTurnCorrections", () => {
     ];
     const { store, provider, run } = setup({
       provider: answering([]),
+      row: PENDING,
       store: {
         findAnsweredCursorBefore: vi.fn().mockResolvedValue("cursor-0"),
         listTurnMessages: vi.fn().mockResolvedValue(rows(SAID, earlier)),
@@ -192,7 +198,7 @@ describe("observeTurnCorrections", () => {
     const UNPARSEABLE = answering([{ action: "reinforce", rule: "x", category: "style" }]);
 
     it("counts one the turn caused, for a later fire to retry", async () => {
-      const { store, run } = setup({ provider: UNPARSEABLE });
+      const { store, run } = setup({ provider: UNPARSEABLE, row: PENDING });
 
       expect(await run()).toEqual({ kind: "retryLater", attempts: 1, failure: "parse" });
       expect(store.recordTurnAttempt).toHaveBeenCalledWith(FAKE_TX, {
@@ -205,7 +211,10 @@ describe("observeTurnCorrections", () => {
     });
 
     it("fails the turn on its third", async () => {
-      const { store, run } = setup({ provider: UNPARSEABLE, attempts: 2 });
+      const { store, run } = setup({
+        provider: UNPARSEABLE,
+        row: { status: "pending", attempts: 2 },
+      });
 
       expect(await run()).toEqual({ kind: "failed", attempts: 3, failure: "parse" });
       expect(store.recordTurnAttempt).toHaveBeenCalledWith(
@@ -215,22 +224,26 @@ describe("observeTurnCorrections", () => {
     });
 
     it("fails the turn at once on one every attempt repeats", async () => {
-      const { run } = setup({ provider: throwing(new RefusalError("refused")) });
+      const { run } = setup({ provider: throwing(new RefusalError("refused")), row: PENDING });
 
       expect(await run()).toEqual({ kind: "failed", attempts: 1, failure: "refusal" });
     });
 
-    it("rethrows one the turn didn't cause, and records nothing", async () => {
+    it("rethrows one the turn didn't cause as unavailable, and records nothing", async () => {
       const outage = Object.assign(new Error("overloaded"), { status: 529 });
-      const { store, run } = setup({ provider: throwing(outage) });
+      const { store, run } = setup({ provider: throwing(outage), row: PENDING });
 
-      await expect(run()).rejects.toBe(outage);
+      await expect(run()).rejects.toMatchObject({
+        name: "ExtractionUnavailableError",
+        cause: outage,
+      });
       expect(store.recordTurnAttempt).not.toHaveBeenCalled();
     });
 
     it("records nothing over another run's move", async () => {
       const { run } = setup({
         provider: UNPARSEABLE,
+        row: PENDING,
         store: {
           recordTurnAttempt: vi.fn().mockResolvedValue({ kind: "stale", status: "applied" }),
         },

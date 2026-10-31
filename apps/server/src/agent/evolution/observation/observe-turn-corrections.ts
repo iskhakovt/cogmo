@@ -6,8 +6,9 @@
  * `skipEmptyTurn` and `recordTurnAttempt`.
  */
 
+import { match } from "ts-pattern";
 import { logger } from "../../../logger.js";
-import type { AgentStore, PendingTurn } from "../../store/index.js";
+import type { AgentStore, PendingTurn, TurnMessage } from "../../store/index.js";
 import {
   type ApplyCorrectionsStore,
   type ExtractionDeps,
@@ -16,7 +17,7 @@ import {
   type TurnCorrections,
 } from "../extract-corrections.js";
 import { applyTurnCorrections } from "./apply-turn-corrections.js";
-import { classifyTurnFailure } from "./failure.js";
+import { classifyTurnFailure, ExtractionUnavailableError } from "./failure.js";
 import { recordTurnAttempt } from "./record-turn-attempt.js";
 import { skipEmptyTurn } from "./skip-empty-turn.js";
 import type { TurnOutcome } from "./turn-outcome.js";
@@ -42,25 +43,54 @@ export interface ObserveTurnArgs {
   activeChannelTypes: ReadonlyArray<string>;
 }
 
+/** A pending turn's rows, read with the count its attempt is guarded on. */
+interface LoadedTurn {
+  kind: "loaded";
+  attempts: number;
+  /** The cursor of the turn answered before this one: the context. */
+  previous: string | undefined;
+  rows: ReadonlyArray<TurnMessage>;
+}
+
 export async function observeTurnCorrections(
   deps: ObserveTurnDeps,
   args: ObserveTurnArgs,
 ): Promise<TurnOutcome> {
   const { store } = deps;
   const { conversationId, turn } = args;
-  const observationId = turn.observationId;
   const loaded = await deps.runInTx(async (tx) => {
-    const row = await store.getTurnObservation(tx, observationId);
+    const row = await store.getTurnObservation(tx, turn.observationId);
     // The id came from this run's plan, and no code deletes the rows.
-    if (row === undefined) throw new Error(`turn observation ${observationId} is missing`);
-    if (row.status !== "pending") return { kind: "done", status: row.status } as const;
-    const previous = await store.findAnsweredCursorBefore(tx, conversationId, turn.firstMessageId);
-    const cursors = previous === undefined ? [turn.cursor] : [turn.cursor, previous];
-    const rows = await store.listTurnMessages(tx, conversationId, cursors);
-    return { kind: "loaded", attempts: row.attempts, previous, rows } as const;
+    if (row === undefined) throw new Error(`turn observation ${turn.observationId} is missing`);
+    return match(row.status)
+      .returnType<Promise<LoadedTurn | Extract<TurnOutcome, { kind: "done" }>>>()
+      .with("applied", "failed", "skipped", async (status) => ({ kind: "done", status }))
+      .with("pending", async () => {
+        const previous = await store.findAnsweredCursorBefore(
+          tx,
+          conversationId,
+          turn.firstMessageId,
+        );
+        const cursors = previous === undefined ? [turn.cursor] : [turn.cursor, previous];
+        const rows = await store.listTurnMessages(tx, conversationId, cursors);
+        return { kind: "loaded", attempts: row.attempts, previous, rows };
+      })
+      .exhaustive();
   });
-  if (loaded.kind === "done") return loaded;
+  return match(loaded)
+    .returnType<Promise<TurnOutcome>>()
+    .with({ kind: "done" }, async (done) => done)
+    .with({ kind: "loaded" }, (pending) => observeLoaded(deps, args, pending))
+    .exhaustive();
+}
 
+async function observeLoaded(
+  deps: ObserveTurnDeps,
+  args: ObserveTurnArgs,
+  loaded: LoadedTurn,
+): Promise<TurnOutcome> {
+  const { conversationId, turn } = args;
+  const observationId = turn.observationId;
   const rendered = renderTurn(loaded.rows, turn.cursor);
   // Nothing a correction could quote: no model call.
   if (rendered.userText === "") return skipEmptyTurn(deps, { observationId });
@@ -75,7 +105,7 @@ export async function observeTurnCorrections(
   } catch (err) {
     const failure = classifyTurnFailure(err);
     // Not the turn's doing: the step retries it, and the row stays as it is.
-    if (failure === null) throw err;
+    if (failure === null) throw new ExtractionUnavailableError(err);
     logger.warn({ err, conversationId, observationId }, "observer: turn's extraction failed");
     return recordTurnAttempt(deps, { observationId, seen: loaded.attempts, failure });
   }

@@ -246,7 +246,7 @@ steering_rules (
   user_id           UUID FK → users ON DELETE CASCADE, -- nullable: null = every user; set on every instruction row
   quote             TEXT,                     -- nullable: the user's words; set on every instruction row
   contradicted_in_turn_id UUID FK → turn_observations ON DELETE SET NULL, -- nullable: null = never contradicted while learning; the turn that reset or retired it; only on a learning or retired row
-  contradicted_in_conversation_id UUID FK → conversations ON DELETE SET NULL, -- nullable: NULL on every row, read by nothing; kept for rollback until a later migration drops it
+  contradicted_in_conversation_id UUID FK → conversations ON DELETE SET NULL, -- nullable: NULL on every row written after the migration, read by nothing; kept for rollback until a later migration drops it
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 -- chk_steering_rules_lifecycle, uq_steering_rules_instruction: evolution.md → Explicit Instructions → Data Model

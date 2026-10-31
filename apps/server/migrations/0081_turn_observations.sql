@@ -1,4 +1,4 @@
-CREATE TYPE "public"."observation_failure_kind" AS ENUM('context_overflow', 'refusal', 'output_cut_off', 'parse', 'rejected', 'exhausted');--> statement-breakpoint
+CREATE TYPE "public"."observation_failure_kind" AS ENUM('context_overflow', 'refusal', 'output_cut_off', 'parse', 'exhausted');--> statement-breakpoint
 CREATE TYPE "public"."observation_phase" AS ENUM('corrections');--> statement-breakpoint
 CREATE TYPE "public"."observation_skip_reason" AS ENUM('not_user_speech', 'empty', 'backfilled', 'aged_out');--> statement-breakpoint
 CREATE TYPE "public"."observation_status" AS ENUM('pending', 'applied', 'failed', 'skipped');--> statement-breakpoint

@@ -1,5 +1,5 @@
 {
-  "id": "0ca51f18-df7a-41b1-a07f-bd4b47b6a529",
+  "id": "9b1d2331-8aea-46c8-b4a3-030783a1601c",
   "prevId": "45e9bca7-27c7-4ba3-9f00-29726a795c7c",
   "version": "7",
   "dialect": "postgresql",
@@ -4990,7 +4990,7 @@
     "public.observation_failure_kind": {
       "name": "observation_failure_kind",
       "schema": "public",
-      "values": ["context_overflow", "refusal", "output_cut_off", "parse", "rejected", "exhausted"]
+      "values": ["context_overflow", "refusal", "output_cut_off", "parse", "exhausted"]
     },
     "public.observation_phase": {
       "name": "observation_phase",

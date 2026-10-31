@@ -59,11 +59,12 @@ import {
   discoverTurns,
   type TurnPlan,
 } from "./observation/discover-turns.js";
+import { isExtractionUnavailable } from "./observation/failure.js";
 import {
   type ObserveTurnDeps,
   observeTurnCorrections,
 } from "./observation/observe-turn-corrections.js";
-import { recordExhaustedTurn } from "./observation/record-exhausted-turn.js";
+import { recordTurnAttempt } from "./observation/record-turn-attempt.js";
 import type { TurnOutcome } from "./observation/turn-outcome.js";
 
 /**
@@ -228,25 +229,33 @@ async function observeCorrections(
       if (!(err instanceof StepError)) throw err;
       exhausted(err);
       failed = true;
-      // The failure counts against the turn, so one that keeps throwing is
-      // given up after `MAX_TURN_ATTEMPTS` fires. Planned only after the
-      // memoized failure, so every replay plans it again.
-      try {
-        outcomes.push(
-          await step.run(`observe-v1-corrections-exhausted-${observationId}`, () =>
-            recordExhaustedTurn(args.deps, { observationId, message: err.message }),
-          ),
-        );
-      } catch (recordErr) {
-        if (!(recordErr instanceof StepError)) throw recordErr;
-        exhausted(recordErr);
+      // An unavailable extraction call isn't the turn's: the turn stays
+      // pending for a later fire. Any other failure counts against it, so a
+      // turn that keeps throwing is given up after `MAX_TURN_ATTEMPTS` fires.
+      // Planned only after the memoized failure, so every replay plans it
+      // again; guarded on the plan's count, so a re-run counts once.
+      if (!isExtractionUnavailable(err)) {
+        try {
+          outcomes.push(
+            await step.run(`observe-v1-corrections-exhausted-${observationId}`, () =>
+              recordTurnAttempt(args.deps, {
+                observationId,
+                seen: turn.attempts,
+                failure: { kind: "exhausted", message: err.message },
+              }),
+            ),
+          );
+        } catch (recordErr) {
+          if (!(recordErr instanceof StepError)) throw recordErr;
+          exhausted(recordErr);
+        }
       }
       break;
     }
     outcomes.push(outcome);
     if (!continuesPhase(outcome)) break;
   }
-  const applied = outcomes.flatMap((o) => (o.kind === "applied" ? [o] : []));
+  const applied = outcomes.filter((o) => o.kind === "applied");
   const counts = R.countBy(outcomes, (o) => o.kind);
   const finished = R.sumBy(outcomes, (o) => (finishesTurn(o) ? 1 : 0));
   logger.info(

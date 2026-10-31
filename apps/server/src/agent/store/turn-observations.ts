@@ -31,6 +31,8 @@ export interface PendingTurn {
   cursor: string;
   /** The turn's oldest row: turns are ordered by it, and its context precedes it. */
   firstMessageId: string;
+  /** Failures counted so far, as the plan read them: the guard of an attempt the walk records. */
+  attempts: number;
 }
 
 /** What a step reads of its row before it does anything. */
@@ -201,6 +203,7 @@ export class DrizzleTurnObservationStore implements TurnObservationStore {
         observationId: turnObservations.id,
         cursor: turnObservations.turnCursor,
         firstMessageId: turnStarts.firstMessageId,
+        attempts: turnObservations.attempts,
       })
       .from(turnObservations)
       .innerJoin(turnStarts, eq(turnStarts.cursor, turnObservations.turnCursor))

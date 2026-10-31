@@ -12,6 +12,7 @@ function pendingTurns(n: number): PendingTurn[] {
     observationId: `obs-${i}`,
     cursor: `cursor-${i}`,
     firstMessageId: `msg-${i}`,
+    attempts: 0,
   }));
 }
 

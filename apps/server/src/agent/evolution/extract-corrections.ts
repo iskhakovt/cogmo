@@ -150,27 +150,41 @@ function collapseCorrections(
   items: ReadonlyArray<CorrectionItem>,
   rulesByLabel: ReadonlyMap<string, { id: string }>,
 ): ReadonlyArray<CorrectionItem> {
-  const targetOf = (c: CorrectionItem): string | undefined =>
-    c.action === "new" ? undefined : rulesByLabel.get(c.matchedExistingRuleId)?.id;
+  // A rule's id for an item that names one, null for a new rule or a label
+  // no listed rule has (counted and skipped where it is applied).
+  const targetOf = (c: CorrectionItem): string | null =>
+    match(c)
+      .with({ action: "new" }, () => null)
+      .with(
+        { action: "reinforce" },
+        { action: "contradiction" },
+        (m) => rulesByLabel.get(m.matchedExistingRuleId)?.id ?? null,
+      )
+      .exhaustive();
   const contradicted = new Set(
-    items.flatMap((c) => {
-      const id = c.action === "contradiction" ? targetOf(c) : undefined;
-      return id === undefined ? [] : [id];
-    }),
+    items.flatMap((c) =>
+      match(c)
+        .with({ action: "contradiction" }, (m) => {
+          const id = targetOf(m);
+          return id === null ? [] : [id];
+        })
+        .with({ action: "new" }, { action: "reinforce" }, () => [])
+        .exhaustive(),
+    ),
   );
   const seen = new Set<string>();
   return items.filter((c) => {
     const target = targetOf(c);
     const key = match(c)
       .with({ action: "new" }, (n) => `new:${n.channelType ?? ""}:${normalizedText(n.rule)}`)
-      .with({ action: "reinforce" }, { action: "contradiction" }, (m) =>
-        // An unknown label is counted and skipped where it is applied.
-        target === undefined ? null : `${m.action}:${target}`,
+      .with({ action: "contradiction" }, () => (target === null ? null : `contradiction:${target}`))
+      .with({ action: "reinforce" }, () =>
+        // A reinforcement of a rule this turn contradicts loses to it.
+        target === null ? null : contradicted.has(target) ? "dropped" : `reinforce:${target}`,
       )
       .exhaustive();
     if (key === null) return true;
-    if (c.action === "reinforce" && target !== undefined && contradicted.has(target)) return false;
-    if (seen.has(key)) return false;
+    if (key === "dropped" || seen.has(key)) return false;
     seen.add(key);
     return true;
   });

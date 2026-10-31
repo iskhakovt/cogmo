@@ -2,7 +2,7 @@ The Observer reads corrections turn by turn, from a durable cursor: a `turn_obse
 
 Contradictions key on the turn: `steering_rules.contradicted_in_turn_id` records the turn whose contradiction reset a rule still learning, and a contradiction from any other turn, in the same conversation or another, retires it, so a rule contradicted in two turns of one long chat now retires.
 
-Each turn's extraction gets the exchange before it as context, and an item counts only when its new `evidence` field quotes the turn's own user text. Scheduled and pipeline turns are skipped as `not_user_speech`, a turn with no user text as `empty`. A failure the turn caused, or a step that fails after its retries, is counted on the row, and the turn fails at the third count, or at once on a refusal, a cut-off reply or a context-length rejection.
+Each turn's extraction gets the exchange before it as context, and an item counts only when its new `evidence` field quotes the turn's own user text. Scheduled and pipeline turns are skipped as `not_user_speech`, a turn with no user text as `empty`. A failure the turn caused, or a step that fails for good outside the extraction call, is counted on the row, and the turn fails at the third count, or at once on a refusal, a cut-off reply or a context-length rejection; an outage, a rate limit or a bad key is never counted, and the turn waits for a later fire.
 
 Migration `0081_turn_observations` creates the table and starts each conversation's cursor where the transcript-era Observer's audit rows show it stopped, moving each conversation-keyed contradiction record to that conversation's newest backfilled turn.
 

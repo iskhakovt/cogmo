@@ -7,7 +7,12 @@ import {
   ToolArgsCutOffError,
 } from "../../../llm/errors.js";
 import { AllProvidersFailedError, RefusalError } from "../../../llm/fallback.js";
-import { classifyTurnFailure, isTerminalTurnFailure } from "./failure.js";
+import {
+  classifyTurnFailure,
+  ExtractionUnavailableError,
+  isExtractionUnavailable,
+  isTerminalTurnFailure,
+} from "./failure.js";
 
 function httpError(status: number, message: string): Error {
   return Object.assign(new Error(message), { status });
@@ -34,11 +39,20 @@ describe("classifyTurnFailure", () => {
     ["an unusable payload", new ProviderProtocolError("bad", undefined), "parse"],
     ["a schema mismatch after repair", new ZodError([]), "parse"],
     [
-      "a 400 naming the context window",
-      httpError(400, "prompt is too long: 250000 tokens"),
+      "Anthropic's context overflow",
+      httpError(400, "prompt is too long: 250000 tokens > 200000 maximum"),
       "context_overflow",
     ],
-    ["another 4xx", httpError(422, "unprocessable"), "rejected"],
+    [
+      "OpenAI's context overflow",
+      httpError(400, "This model's maximum context length is 128000 tokens."),
+      "context_overflow",
+    ],
+    [
+      "an overflow by code",
+      httpError(400, "context_length_exceeded: reduce the length"),
+      "context_overflow",
+    ],
   ])("counts %s against the turn", (_label, err, kind) => {
     expect(classifyTurnFailure(err)).toMatchObject({ kind });
   });
@@ -51,11 +65,26 @@ describe("classifyTurnFailure", () => {
     ["a payment failure", httpError(402, "payment required")],
     ["a missing model", httpError(404, "model not found")],
     ["a 400 naming billing", httpError(400, "Your credit balance is too low")],
+    [
+      "a 400 about a context_management parameter",
+      httpError(400, "context_management.edits.0: unknown field"),
+    ],
+    ["another 4xx", httpError(422, "unprocessable")],
     ["a network failure", new Error("ECONNRESET")],
     ["every provider down", new AllProvidersFailedError([])],
     ["a non-error throw", "boom"],
   ])("leaves %s for the step to retry", (_label, err) => {
     expect(classifyTurnFailure(err)).toBeNull();
+  });
+});
+
+describe("ExtractionUnavailableError", () => {
+  it("is told apart by the name a step's failure keeps, and carries the cause's message", () => {
+    const err = new ExtractionUnavailableError(httpError(503, "overloaded"));
+
+    expect(isExtractionUnavailable({ name: err.name })).toBe(true);
+    expect(isExtractionUnavailable(new Error("connection reset"))).toBe(false);
+    expect(err.message).toContain("overloaded");
   });
 });
 
@@ -65,6 +94,6 @@ describe("isTerminalTurnFailure", () => {
     expect(isTerminalTurnFailure({ kind: "refusal", message: "" })).toBe(true);
     expect(isTerminalTurnFailure({ kind: "output_cut_off", message: "" })).toBe(true);
     expect(isTerminalTurnFailure({ kind: "parse", message: "" })).toBe(false);
-    expect(isTerminalTurnFailure({ kind: "rejected", message: "" })).toBe(false);
+    expect(isTerminalTurnFailure({ kind: "exhausted", message: "" })).toBe(false);
   });
 });

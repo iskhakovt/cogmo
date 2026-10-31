@@ -9,7 +9,8 @@
  * to that conversation's newest backfilled turn, and the conversation column
  * is cleared. Runs the file's SQL against PGlite over rows in the
  * pre-migration shape (the table, the enums and the new column dropped, the
- * 0078 CHECK restored) and asserts where each turn and record lands.
+ * lifecycle CHECK as it stood before this migration, without the turn
+ * marker's term, restored) and asserts where each turn and record lands.
  */
 
 import { randomUUID } from "node:crypto";

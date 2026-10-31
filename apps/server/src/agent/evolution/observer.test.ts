@@ -112,7 +112,12 @@ function routedProvider(overrides: Partial<Answers> = {}): LlmProvider {
 const UNAVAILABLE = Object.assign(new Error("provider unavailable"), { status: 503 });
 
 /** The one turn the default store plans: the whole of `HISTORY`, on one cursor. */
-const PLANNED_TURN = { observationId: "obs-1", cursor: "cursor-1", firstMessageId: "msg-0" };
+const PLANNED_TURN = {
+  observationId: "obs-1",
+  cursor: "cursor-1",
+  firstMessageId: "msg-0",
+  attempts: 0,
+};
 
 /**
  * A correction the schema cannot accept on any retry: a reinforcement has to
@@ -243,14 +248,8 @@ describe("runObserver phase isolation", () => {
       "idle",
     );
 
-    // The failed turn's step is followed by the one that counts it.
-    expect(failing.ids).toEqual(
-      clean.ids.flatMap((id) =>
-        id === "observe-v1-corrections-obs-1"
-          ? [id, "observe-v1-corrections-exhausted-obs-1"]
-          : [id],
-      ),
-    );
+    // An unavailable extraction is not counted, so no step follows it.
+    expect(failing.ids).toEqual(clean.ids);
     expect(clean.ids).toEqual([
       "record-start-time",
       "load-conversation",
@@ -362,7 +361,12 @@ describe("runObserver phase isolation", () => {
 });
 
 describe("runObserver corrections by turn", () => {
-  const SECOND_TURN = { observationId: "obs-2", cursor: "cursor-2", firstMessageId: "msg-9" };
+  const SECOND_TURN = {
+    observationId: "obs-2",
+    cursor: "cursor-2",
+    firstMessageId: "msg-9",
+    attempts: 0,
+  };
 
   it("counts a failure the turn caused on its row, keeps the phase, and stops at that turn", async () => {
     const step = exhaustedRetriesStep();
@@ -403,7 +407,12 @@ describe("runObserver corrections by turn", () => {
     expect(deps.agentStore.recordEvolutionEvent).toHaveBeenCalledOnce();
   });
 
-  it("keeps the turns applied before a turn's step fails after its retries, and counts that turn", async () => {
+  /** Two planned turns; the first reinforces, the second's step fails as `failSecond` does. */
+  function twoTurnFire(opts: {
+    failSecond: "unavailable" | "database";
+    planAttempts: number;
+    recordTurnAttempt?: AgentStore["recordTurnAttempt"];
+  }) {
     const reinforce = {
       corrections: [
         {
@@ -420,32 +429,49 @@ describe("runObserver corrections by turn", () => {
     let correctionCalls = 0;
     const provider = mockProvider({
       chat: vi.fn(async (params: ChatParams) => {
-        if (params.system.includes("behavioral correction extractor") && ++correctionCalls > 1) {
+        const correcting = params.system.includes("behavioral correction extractor");
+        if (correcting && opts.failSecond === "unavailable" && ++correctionCalls > 1) {
           throw UNAVAILABLE;
         }
         return routed.chat(params);
       }),
     });
+    const second = { ...SECOND_TURN, attempts: opts.planAttempts };
+    let reads = 0;
     const step = exhaustedRetriesStep();
     const deps = observerDeps({
       provider,
       store: {
         getCorrections: vi.fn().mockResolvedValue(RULES),
-        listPendingTurns: vi.fn().mockResolvedValue([PLANNED_TURN, SECOND_TURN]),
-        // Each turn's rows are `HISTORY`, on the cursor asked for.
+        listPendingTurns: vi.fn().mockResolvedValue([PLANNED_TURN, second]),
+        // The live row's count differs from the plan's: the walk's attempt
+        // must be guarded on the plan's.
+        getTurnObservation: vi.fn().mockResolvedValue({ status: "pending", attempts: 7 }),
+        // Each turn's rows are `HISTORY`, on the cursor asked for; the second
+        // read fails when the second turn's database read is to fail.
         listTurnMessages: vi
           .fn()
-          .mockImplementation((_tx, _conversationId, cursors: ReadonlyArray<string>) =>
-            Promise.resolve(
+          .mockImplementation((_tx, _conversationId, cursors: ReadonlyArray<string>) => {
+            reads++;
+            if (opts.failSecond === "database" && reads > 1) {
+              return Promise.reject(new Error("connection reset"));
+            }
+            return Promise.resolve(
               HISTORY.map((m, i) => ({
                 ...m,
                 id: `msg-${i}`,
                 cursor: expectDefined(cursors[0], "cursor"),
               })),
-            ),
-          ),
+            );
+          }),
+        ...(opts.recordTurnAttempt !== undefined && { recordTurnAttempt: opts.recordTurnAttempt }),
       },
     });
+    return { step, deps };
+  }
+
+  it("keeps the turns applied before a turn's step fails for good, and counts that turn on the plan's count", async () => {
+    const { step, deps } = twoTurnFire({ failSecond: "database", planAttempts: 0 });
 
     const result = await runObserver(EVENT, step, deps, "idle");
 
@@ -459,27 +485,49 @@ describe("runObserver corrections by turn", () => {
     expect(deps.agentStore.recordTurnAttempt).toHaveBeenCalledWith(expect.anything(), {
       id: "obs-2",
       seen: 0,
-      failure: { kind: "exhausted", message: expect.any(String) },
+      failure: { kind: "exhausted", message: expect.stringContaining("connection reset") },
       to: "pending",
     });
   });
 
-  it("gives a turn up once its steps have failed after their retries on three fires", async () => {
-    const deps = observerDeps({
-      provider: routedProvider({ corrections: UNAVAILABLE }),
-      store: {
-        getTurnObservation: vi.fn().mockResolvedValue({ status: "pending", attempts: 2 }),
-      },
-    });
+  it("leaves a turn whose extraction call was unavailable pending, uncounted", async () => {
+    const { step, deps } = twoTurnFire({ failSecond: "unavailable", planAttempts: 0 });
+
+    const result = await runObserver(EVENT, step, deps, "idle");
+
+    expect(result).toMatchObject({ corrections: { reinforced: 1 }, failedPhases: ["corrections"] });
+    expect(step.ids).not.toContain("observe-v1-corrections-exhausted-obs-2");
+    expect(deps.agentStore.recordTurnAttempt).not.toHaveBeenCalled();
+  });
+
+  it("gives a turn up once its steps have failed for good on three fires", async () => {
+    const { deps } = twoTurnFire({ failSecond: "database", planAttempts: 2 });
 
     await runObserver(EVENT, exhaustedRetriesStep(), deps, "idle");
 
     expect(deps.agentStore.recordTurnAttempt).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ id: "obs-1", seen: 2, to: "failed" }),
+      expect.objectContaining({ id: "obs-2", seen: 2, to: "failed" }),
     );
   });
 
+  it("still runs the fire's later phases when counting the failed turn fails for good", async () => {
+    const { step, deps } = twoTurnFire({
+      failSecond: "database",
+      planAttempts: 0,
+      recordTurnAttempt: vi.fn().mockRejectedValue(new Error("connection reset")),
+    });
+
+    const result = await runObserver(EVENT, step, deps, "idle");
+
+    expect(result).toMatchObject({
+      status: "processed",
+      corrections: { reinforced: 1 },
+      memories: { extracted: 1 },
+      drained: { drained: 1 },
+      failedPhases: ["corrections"],
+    });
+  });
   it("observes the turns in plan order, each in a step of its own", async () => {
     const step = exhaustedRetriesStep();
     const deps = observerDeps({
@@ -501,6 +549,7 @@ describe("runObserver corrections by turn", () => {
       observationId: `obs-${i}`,
       cursor: `cursor-${i}`,
       firstMessageId: `msg-${i}`,
+      attempts: 0,
     }));
     const step = exhaustedRetriesStep();
     const deps = observerDeps({

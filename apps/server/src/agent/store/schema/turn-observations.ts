@@ -54,15 +54,15 @@ export type ObservationSkipReasonValue = (typeof observationSkipReason.enumValue
 
 /**
  * The last failure counted against a row's extraction: one the turn caused,
- * or `exhausted`, a step that failed after its retries with a failure no
- * class places, counted so a turn that keeps throwing is given up.
+ * or `exhausted`, a step that failed after its retries with a failure that
+ * isn't the extraction call's (a database error, a bug), counted so a turn
+ * that keeps throwing is given up.
  */
 export const observationFailureKind = pgEnum("observation_failure_kind", [
   "context_overflow",
   "refusal",
   "output_cut_off",
   "parse",
-  "rejected",
   "exhausted",
 ]);
 export type ObservationFailureKindValue = (typeof observationFailureKind.enumValues)[number];
