@@ -355,6 +355,8 @@ The spec below replaces this.
 
 #### Authorization boundary `[proposed]`
 
+**Cost.** Each container or exec request costs one daemon lookup and one store read, and each list costs one store read. A create also costs one insert. A task holds at most 16 live children, each within the task's resource limits.
+
 **Ownership.** A task owns the `containers` rows that carry its `root_task_id` and are not `reaped`: its depth-0 container, plus every child the proxy created for it (Child containers, below). The same rule covers `networks` and `volumes` rows in `created`. Ownership comes from the store on every request. Labels are only the mirror (Label Schema).
 
 A ref in a path (a full id, a unique prefix or a name) is resolved through the daemon (`GET /containers/{ref}/json`, `/networks/{ref}`, `/volumes/{name}`) and checked against the rows. The path forwarded to the daemon names the full id, so a rename between the check and the forward cannot redirect the request. Exec ids are kept in memory per task: the proxy records the id from each 201 to a `POST /containers/{id}/exec` sent through the task's socket. A task can therefore not start or resize an exec that Cogmo created on its depth-0 container, even though inspect lists those ids. A process restart loses the set, which is harmless because the containers go with it (Crash Recovery).
@@ -400,6 +402,7 @@ Fields whose values are maps (`Labels`, `ExposedPorts`, `Volumes`, `HostConfig.T
 
 | Field | Rule |
 |-|-|
+| (the request) | `denied` when the task already has 16 live children (`containers` rows at depth ≥ 1 in `starting` or `running`). The count is read before the forward, so two concurrent creates can land a 17th. At single-user scale that race is benign (store-pattern.md → admission caps) |
 | `Image` | required |
 | `Cmd`, `Entrypoint`, `Env`, `WorkingDir`, `User`, `Hostname`, `Domainname`, `ExposedPorts`, `Healthcheck`, `StopSignal`, `StopTimeout`, `Shell`, `Tty`, `OpenStdin`, `StdinOnce`, `AttachStdin`, `AttachStdout`, `AttachStderr`, `NetworkDisabled`, `Volumes` (anonymous) | allowed |
 | `Labels` | Allowed. Keys that start with `cogmo.`, in any case, are dropped and the Cogmo labels injected |
@@ -446,10 +449,10 @@ After that, `start` moves the row to `running` and `DELETE` moves it to `exited`
 **Residuals.**
 
 - There is no aggregate cap. Each child may use up to the task's limits, so N children can hold N times the task's budget until slice-level enforcement is built (Hierarchical enforcement via cgroup parent, below).
-- Nothing caps the number of children, the images a task pulls, or the disk they use.
+- A task can hold at most 16 live children (Create policy). Nothing caps the images it pulls or the disk they use.
 - BuildKit stays denied (`/build`, `/session`, `/grpc`), so tasks cannot build images.
-- The network layer is outside the proxy. Every depth-0 container, and every child on `bridge`, shares Docker's default bridge with other tasks and with skills workers. They can reach each other's listening ports, and ports published on the gateway are reachable from every task.
-- A registry name that resolves to a private address still reaches it on pull.
+- The network layer is outside the proxy. Every depth-0 container, and every child on `bridge`, shares Docker's default bridge with other tasks and with skills workers. They can reach each other's listening ports, and ports published on the gateway are reachable from every task. Per-task networks for depth-0 containers are tracked in `todo.md`.
+- A registry name that resolves to a private address still reaches it on pull. A registry allowlist is tracked in `todo.md`.
 
 **Rollout.** No consumer depends on a field or route this spec denies, so it ships with no enforcement flag.
 
@@ -496,9 +499,9 @@ After that, `start` moves the row to `running` and `DELETE` moves it to `exited`
 
 **Slices.** The spec ships in this order, one PR per slice, tracked in `todo.md`. As each slice lands, its part of "Enforced today" is removed and its part of this section becomes `[confirmed]`.
 
-1. Child rows and the reaper grace window.
+1. The create and exec policies, the child cap, Ryuk disabled in coding sessions, and the deny matrix.
 2. Ownership checks, exec ids scoped to the socket, list and event filtering, default-deny, and sockets only for sessions that ask for one.
-3. The create and exec policies, Ryuk disabled in coding sessions, and the deny matrix.
+3. Child rows and the reaper grace window.
 4. Upgraded streams.
 5. Images, networks and volumes.
 
@@ -869,31 +872,32 @@ The Daytona backend does not run the Cogmo Docker socket proxy, the systemd cgro
 
 ```text
 src/sandbox/
-  index.ts                     — public API: SandboxClient, SandboxSession, capabilities
-  options.ts                   — discriminated SandboxClientOptions (Zod)
-  state.ts                     — discriminated SandboxSessionState (Zod)
+  index.ts                     — public API: SandboxClient, SandboxSession, options, capabilities
+  types.ts                     — shared schemas (labels, resource limits)
   factory.ts                   — selects backend from SANDBOX_BACKEND env
-  clients/
-    local-docker/
-      client.ts                — LocalDockerSandboxClient
-      session.ts               — LocalDockerSandboxSession
-      supervisor.ts            — container lifecycle, socket allocation
-      proxy/
-        index.ts, policy.ts, router.ts
-      reaper.ts                — TTL + orphan + cascade logic
-      runtime.ts               — sysbox detection + runtime selection
-      askpass.ts
-      cgroup-parent.ts
-      rpc/router.ts            — tRPC control plane (extracted-sidecar mode)
-    daytona/
-      client.ts                — DaytonaSandboxClient
-      session.ts               — DaytonaSandboxSession (exec, fs, git)
-      streaming.ts             — session-logs WS wrapper, polling fallback
-      git-transport.ts         — ephemeral-branch push/fetch helper
+  supervisor.ts                — LocalDockerSandboxClient: container lifecycle, socket allocation, reconcile
+  exec.ts, exec-run.ts, exec-state.ts — exec lifecycle (pure transition table + driver)
+  docker-facade.ts             — narrow dockerode interface
+  mark-container-running.ts, mark-container-exited.ts, reap-container.ts, kill-and-remove-container.ts
+                               — one use case per container transition
+  reaper.ts                    — TTL + orphan + stale passes (Inngest cron)
+  runtime.ts                   — sysbox detection + runtime selection
+  askpass.ts
+  cgroup-parent.ts
+  proxy/
+    index.ts, policy.ts, router.ts, types.ts — Docker API proxy
+  daytona/
+    client.ts                  — DaytonaSandboxClient
+    session.ts                 — DaytonaSandboxSession (exec, fs, git)
+    exec-streaming.ts          — session-logs WS exec
+    exec-pty.ts                — PTY exec for stdin-attached commands
+    askpass-upload.ts, auth.ts, dispose.ts, probe.ts, shell-quote.ts
   store/
-    schema.ts                  — containers, networks, volumes (Local-Docker only)
+    schema.ts                  — cogmo_instances, containers, networks, volumes (Local-Docker only)
     index.ts                   — SandboxStore interface + Drizzle impl
 ```
+
+The ephemeral-branch push and fetch for Daytona's `git-remote` transport live with coding delegation (`src/agent/coding/`). The tRPC control plane for an extracted proxy (Deployment Topology) is not built.
 
 The Daytona backend in-tree alongside Local-Docker. If the provider list grows, individual backends extract to separate packages — the abstraction is designed for it (matches the OpenAI Agents SDK's in-tree-Docker + out-of-tree-everything-else pattern).
 
