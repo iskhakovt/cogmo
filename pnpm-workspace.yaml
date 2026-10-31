@@ -24,10 +24,14 @@ allowBuilds:
 # against GHSA-4mjr-xmp4-gh2g (spans >=2.2.5); none is in the tree, and one
 # arriving wants investigating rather than a silent major bump.
 overrides:
+  "@hono/node-server@>=2 <2.1.3": ">=2.1.3 <3" # GHSA-rmxm-3fg6-px4f (moderate) via @modelcontextprotocol/sdk
   "body-parser@>=2 <2.4.0": ">=2.4.0 <3" # GHSA-27r3-jxmh-p828 (high) via express
   "fast-uri@>=3 <3.1.6": ">=3.1.6 <4" # GHSA-5jgf-p345-68v8, -f65p-4m7j-42xc, -fph4-wmhf-6fwf, -jqff-g426-hqxp (high) via ajv
+  "follow-redirects@>=1 <1.16.2": ">=1.16.2 <2" # GHSA-mrwp-f3q8-3g9p (high) via @daytona/sdk, axios
   "hono@>=4 <4.13.5": ">=4.13.5 <5" # GHSA-gqvv-2mrq-wpjv, -g6gw-c38x-mqfc, -crvj-82cr-hjcx (moderate) via @modelcontextprotocol/sdk, inngest
   "qs@>=6 <6.16.0": ">=6.16.0 <7" # GHSA-x5fp-wj9c-mxmx, GHSA-4mjr-xmp4-gh2g (moderate) via express, body-parser
+  "seroval@>=1 <1.6.11": ">=1.6.11 <2" # GHSA-97r2-qh9m-474h, -wp97-x4hv-qvhp, -7rv5-mrxv-xcr9 (high), -f86p-h4j2-7qgj, -9wx9-5pv9-3349 (moderate) via @tanstack/router-core
+  "systeminformation@>=5 <5.33.16": ">=5.33.16 <6" # GHSA-3f7j-7jwc-fxfj (high), -7648-jmwf-vw7j (moderate), -4vjg-vx72-qq4g (low) via inngest, @opentelemetry/instrumentation-host-metrics
   # Not a floor: @types/ssh2 alone asks for @types/node ^18. With that second
   # copy in the tree, a package taking any @types/node (`*`) binds to whichever
   # copy the resolver reuses, and Dependabot's re-resolution picks 18. One copy
