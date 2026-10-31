@@ -176,6 +176,22 @@ describe("SysboxSkillWorker", () => {
     expect(worker.taskCount).toBe(0);
   });
 
+  it("starts the supervisor isolated, so modules in its task-writable cwd never load", async () => {
+    // Why `-I`: see `SUPERVISOR_CMD`. The sysbox tier plants a module and
+    // runs a task that imports it (`runner.sysbox.integration.test.ts`).
+    const { sandbox, session } = buildFakeSandbox();
+    await SysboxSkillWorker.create({
+      workerId: "w-isolated",
+      sandbox,
+      image: "cogmo-skills:test",
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    expect(session.execStreaming).toHaveBeenCalledWith(
+      ["python3", "-I", "-u", "-m", "cogmo_skills_runtime"],
+      expect.objectContaining({ attachStdin: true }),
+    );
+  });
+
   it("merges per-skill resource overrides on top of defaults", async () => {
     const { sandbox } = buildFakeSandbox();
     await SysboxSkillWorker.create({

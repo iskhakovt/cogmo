@@ -270,4 +270,24 @@ describe("reapSkillVenvs", () => {
     const script = expectDefined(argv[2], "reap script");
     expect(/^PY_ABI=\$\((.*)\)$/m.exec(script)?.[1]).toBe("python3 -I -m cogmo_skills_runtime.abi");
   });
+
+  it("runs from / with uv's config discovery off, as the populate script does", async () => {
+    // Why: see `DEPENDENCY_EXEC_OPTIONS`.
+    const h = buildHarness();
+    const promise = reapSkillVenvs({
+      sandbox: h.sandbox,
+      image: "cogmo-skills:test",
+      depsCacheVolumeName: "deps-vol-x",
+      reachableHashes: new Set(),
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    h.exec.finish("", 0);
+    await promise;
+
+    const [, options] = expectDefined(
+      vi.mocked(h.session.execStreaming).mock.calls[0],
+      "reap exec",
+    );
+    expect(options).toMatchObject({ workingDir: "/", env: { UV_NO_CONFIG: "1" } });
+  });
 });

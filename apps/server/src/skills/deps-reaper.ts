@@ -6,7 +6,7 @@ import {
   type SandboxClient,
   type SandboxSession,
 } from "../sandbox/index.js";
-import { PYTHON_ABI_TAG_COMMAND } from "./deps.js";
+import { DEPENDENCY_EXEC_OPTIONS, PYTHON_ABI_TAG_COMMAND } from "./deps.js";
 
 const log = logger.child({ component: "skills.deps-reaper" });
 
@@ -143,7 +143,7 @@ export async function reapSkillVenvs(
     try {
       const handle = await session.execStreaming(
         ["sh", "-c", REAP_SCRIPT, "reap", String(graceDays)],
-        { attachStdin: true, timeoutMs: REAP_TIMEOUT_MS },
+        { ...DEPENDENCY_EXEC_OPTIONS, attachStdin: true, timeoutMs: REAP_TIMEOUT_MS },
       );
       if (!handle.stdin) {
         await handle.dispose().catch(() => {});
