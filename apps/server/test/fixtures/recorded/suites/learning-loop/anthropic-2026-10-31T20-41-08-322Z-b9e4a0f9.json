@@ -1,0 +1,28 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "[correction-extraction] <earlier_conversation>\nUser: Call me T — I've just moved to Lisbon.\n\nAssistant: Got it, saved for now — let me know your role/work, timezone preference, and communication style whenever you get a chance.\n</earlier_conversation>\n\n<turn>\nUser: We had dinner at Taberna da Rua das Flores and the bacalhau was the best I've ever had. What other Portuguese dishes should I try?\n\nAssistant: [Tool: memory_retain({\"content\":\"T had dinner at Taberna da Rua das Flores in Lisbon and said the bacalhau was the best they've ever had.\",\"context\":\"T just moved to Lisbon; chatting about Portuguese food\"})]\n\nUser: → Remembered.\n\nAssistant: Great pick — that place is known for doing classics really well. Since you loved the bacalhau, here's what to try next:\n\n- **Bacalhau à Brás** – shredded cod with eggs, onions, and crispy potato straws (different from a brás-style, worth comparing to whatever version you had).\n- **Bacalhau com Natas** – creamy, baked cod and potato casserole.\n- **Polvo à Lagareiro** – octopus roasted with olive oil and garlic, often with smashed potatoes.\n- **Arroz de Marisco** – soupy seafood rice, great if you like shellfish.\n- **Cozido à Portuguesa** – hearty boiled meat-and-veg stew, more of a winter dish.\n- **Francesinha** – if you're in Porto or find a good spot in Lisbon, a heavy sandwich smothered in sauce and melted cheese (not for the faint of heart).\n- **Alheira** – a sausage (historically pork-free, made with bread and meat) usually fried and served with egg and fries.\n- **Pastéis de nata** – the obvious one, but worth seeking out Manteigaria or Pastéis de Belém for the \"best\" debate.\n- **Ginjinha** – not food, but a cherry liqueur shot, often served in a chocolate cup — great post-dinner.\n\nIf you want, tell me what you liked most about the bacalhau (creamy? crispy? smoky?) and I can point you to specific dishes or restaurants that nail that style.\n</turn>",
+        "model": "claude-sonnet-5",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "usage": {
+          "input_tokens": 742,
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 2617,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "output_tokens": 11
+        },
+        "content": "{\"corrections\":[]}"
+      },
+      "metadata": {
+        "systemHash": "9c658d9a"
+      }
+    }
+  ]
+}

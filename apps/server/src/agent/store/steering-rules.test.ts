@@ -5,7 +5,8 @@
  * consolidation — including those that skip a retired row.
  */
 
-import { eq } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
+import { eq, inArray, sql } from "drizzle-orm";
 import { err } from "neverthrow";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
@@ -17,6 +18,7 @@ import {
   type SteeringRuleSourceValue,
   type SteeringRuleStatusValue,
   steeringRules,
+  turnObservations,
   users,
 } from "./schema.js";
 import {
@@ -114,7 +116,7 @@ async function reasonOf(id: string) {
   const [state] = await db
     .select({
       retiredReason: steeringRules.retiredReason,
-      contradictedIn: steeringRules.contradictedInConversationId,
+      contradictedIn: steeringRules.contradictedInTurnId,
     })
     .from(steeringRules)
     .where(eq(steeringRules.id, id));
@@ -997,22 +999,81 @@ describe("the Observer's rule reads", () => {
       return expectDefined(state, id).observationCount;
     }
 
-    const contradict = (id: string, conversationId: string) =>
-      tx((trx) => store.contradictLearningRule(trx, { id, conversationId }));
+    /** A turn's `corrections` observation row, in `conversationId` or a conversation of its own. */
+    async function turn(conversationId?: string): Promise<string> {
+      const [observation] = await db
+        .insert(turnObservations)
+        .values({
+          conversationId: conversationId ?? (await conversation()),
+          turnCursor: randomUUID(),
+          turnKind: "chat",
+          phase: "corrections",
+          status: "applied",
+          attempts: 0,
+          updatedAt: sql`now()`,
+        })
+        .returning({ id: turnObservations.id });
+      return expectDefined(observation, "turn observation").id;
+    }
 
-    it("resets a learning rule's count on a first contradiction, and keeps it learning", async () => {
-      const convA = await conversation();
+    const contradict = (id: string, turnObservationId: string) =>
+      tx((trx) => store.contradictLearningRule(trx, { id, turnObservationId }));
+
+    it("retires it on a contradiction from another turn of the same conversation", async () => {
+      const conv = await conversation();
+      const [turnA, turnB] = [await turn(conv), await turn(conv)];
       const id = await row({ rule: "Learning", source: "correction", status: "learning" });
 
-      expect(await contradict(id, convA)).toBe("reset");
+      expect(await contradict(id, turnA)).toBe("reset");
+      expect(await contradict(id, turnB)).toBe("retired");
+      expect(await reasonOf(id)).toEqual({ retiredReason: "contradicted", contradictedIn: turnB });
+    });
+
+    it("clears a conversation marker an earlier build wrote, on every marker write", async () => {
+      const [legacyConv, turnA] = [await conversation(), await turn()];
+      const learning = await row({ rule: "Learning", source: "correction", status: "learning" });
+      const graduating = await row({
+        rule: "Graduating",
+        source: "correction",
+        status: "learning",
+        observationCount: 1,
+      });
+      await db
+        .update(steeringRules)
+        .set({ contradictedInConversationId: legacyConv })
+        .where(inArray(steeringRules.id, [learning, graduating]));
+
+      expect(await contradict(learning, turnA)).toBe("reset");
+      expect(
+        await tx((trx) =>
+          store.upsertCorrection(trx, {
+            rule: "Graduating",
+            category: "style",
+            profileId: null,
+            existingRuleId: graduating,
+          }),
+        ),
+      ).toEqual({ kind: "promoted", id: graduating });
+      const legacy = await db
+        .select({ id: steeringRules.id, conv: steeringRules.contradictedInConversationId })
+        .from(steeringRules)
+        .where(inArray(steeringRules.id, [learning, graduating]));
+      expect(legacy.map((r) => r.conv)).toEqual([null, null]);
+    });
+
+    it("resets a learning rule's count on a first contradiction, and keeps it learning", async () => {
+      const turnA = await turn();
+      const id = await row({ rule: "Learning", source: "correction", status: "learning" });
+
+      expect(await contradict(id, turnA)).toBe("reset");
       expect(await countOf(id)).toBe(0);
       expect(await stateOf(id)).toBe("learning");
     });
 
-    it("reports the same reset to a retry from the conversation, writing nothing more", async () => {
-      const convA = await conversation();
+    it("reports the same reset to a retry from the turn, writing nothing more", async () => {
+      const turnA = await turn();
       const id = await row({ rule: "Learning", source: "correction", status: "learning" });
-      await contradict(id, convA);
+      await contradict(id, turnA);
       await tx((trx) =>
         store.upsertCorrection(trx, {
           rule: "Learning",
@@ -1022,23 +1083,23 @@ describe("the Observer's rule reads", () => {
         }),
       );
 
-      expect(await contradict(id, convA)).toBe("reset");
+      expect(await contradict(id, turnA)).toBe("reset");
       expect(await countOf(id)).toBe(1);
       expect(await stateOf(id)).toBe("learning");
     });
 
-    it("reports the same retirement to a retry from the retiring conversation", async () => {
-      const [convA, convB] = [await conversation(), await conversation()];
+    it("reports the same retirement to a retry from the retiring turn", async () => {
+      const [turnA, turnB] = [await turn(), await turn()];
       const id = await row({ rule: "Learning", source: "correction", status: "learning" });
-      await contradict(id, convA);
-      await contradict(id, convB);
+      await contradict(id, turnA);
+      await contradict(id, turnB);
 
-      expect(await contradict(id, convB)).toBe("retired");
-      expect(await contradict(id, convA)).toBe("unchanged");
+      expect(await contradict(id, turnB)).toBe("retired");
+      expect(await contradict(id, turnA)).toBe("unchanged");
       expect(await stateOf(id)).toBe("retired");
     });
 
-    it("reports nothing to the resetting conversation once another path retired the rule", async () => {
+    it("reports nothing to the resetting turn once another path retired the rule", async () => {
       const userId = await seedUser();
       const viaSet = await row({ rule: "No emojis", source: "correction", status: "learning" });
       const viaRemove = await row({
@@ -1046,9 +1107,9 @@ describe("the Observer's rule reads", () => {
         source: "correction",
         status: "learning",
       });
-      const convA = await conversation();
-      await contradict(viaSet, convA);
-      await contradict(viaRemove, convA);
+      const turnA = await turn();
+      await contradict(viaSet, turnA);
+      await contradict(viaRemove, turnA);
       // An instruction with the same text supersedes one.
       await set({ rule: "No emojis", userId });
       // Two reinforcements promote the other, which `rule_remove` can then retire.
@@ -1073,14 +1134,14 @@ describe("the Observer's rule reads", () => {
       );
       expect([await stateOf(viaSet), await stateOf(viaRemove)]).toEqual(["retired", "retired"]);
 
-      expect(await contradict(viaSet, convA)).toBe("unchanged");
-      expect(await contradict(viaRemove, convA)).toBe("unchanged");
+      expect(await contradict(viaSet, turnA)).toBe("unchanged");
+      expect(await contradict(viaRemove, turnA)).toBe("unchanged");
     });
 
-    it("retires it on a contradiction from another conversation, reinforced meanwhile or not", async () => {
-      const [convA, convB] = [await conversation(), await conversation()];
+    it("retires it on a contradiction from another turn, reinforced meanwhile or not", async () => {
+      const [turnA, turnB] = [await turn(), await turn()];
       const id = await row({ rule: "Learning", source: "correction", status: "learning" });
-      await contradict(id, convA);
+      await contradict(id, turnA);
       await tx((trx) =>
         store.upsertCorrection(trx, {
           rule: "Learning",
@@ -1091,15 +1152,15 @@ describe("the Observer's rule reads", () => {
       );
       expect(await stateOf(id)).toBe("learning");
 
-      expect(await contradict(id, convB)).toBe("retired");
+      expect(await contradict(id, turnB)).toBe("retired");
       expect(await stateOf(id)).toBe("retired");
-      expect(await reasonOf(id)).toEqual({ retiredReason: "contradicted", contradictedIn: convB });
+      expect(await reasonOf(id)).toEqual({ retiredReason: "contradicted", contradictedIn: turnB });
     });
 
-    it("graduation clears the conversation of a reset, so a live rule carries no learning data", async () => {
-      const convA = await conversation();
+    it("graduation clears the turn of a reset, so a live rule carries no learning data", async () => {
+      const turnA = await turn();
       const id = await row({ rule: "Learning", source: "correction", status: "learning" });
-      await contradict(id, convA);
+      await contradict(id, turnA);
       const reinforce = () =>
         tx((trx) =>
           store.upsertCorrection(trx, {
@@ -1111,14 +1172,14 @@ describe("the Observer's rule reads", () => {
         );
 
       expect(await reinforce()).toEqual({ kind: "reinforced", id });
-      expect(await reasonOf(id)).toEqual({ retiredReason: null, contradictedIn: convA });
+      expect(await reasonOf(id)).toEqual({ retiredReason: null, contradictedIn: turnA });
       expect(await reinforce()).toEqual({ kind: "promoted", id });
       expect(await stateOf(id)).toBe("live");
       expect(await reasonOf(id)).toEqual({ retiredReason: null, contradictedIn: null });
     });
 
     it("refuses a live rule that carries a contradiction record", async () => {
-      const convA = await conversation();
+      const turnA = await turn();
 
       await expect(
         db.insert(steeringRules).values({
@@ -1128,7 +1189,7 @@ describe("the Observer's rule reads", () => {
           source: "correction",
           priority: 100,
           observationCount: 2,
-          contradictedInConversationId: convA,
+          contradictedInTurnId: turnA,
         }),
       ).rejects.toMatchObject({
         cause: { message: expect.stringMatching(/chk_steering_rules_lifecycle/) },
@@ -1137,13 +1198,13 @@ describe("the Observer's rule reads", () => {
 
     it("leaves a live, retired or instruction rule alone", async () => {
       const userId = await seedUser();
-      const convA = await conversation();
+      const turnA = await turn();
       const active = await row({ rule: "Active", source: "correction" });
       const retired = await row({ rule: "Retired", source: "correction", status: "retired" });
       const instruction = await row({ rule: "Mine", source: "instruction", userId });
 
       for (const id of [active, retired, instruction]) {
-        expect(await contradict(id, convA)).toBe("unchanged");
+        expect(await contradict(id, turnA)).toBe("unchanged");
       }
       expect([await stateOf(active), await stateOf(retired), await stateOf(instruction)]).toEqual([
         "live",

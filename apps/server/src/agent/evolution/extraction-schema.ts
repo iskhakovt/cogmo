@@ -1,7 +1,7 @@
 /**
  * Zod schemas and prompt builder for correction extraction.
  *
- * The extraction LLM analyzes a conversation transcript and identifies
+ * The extraction LLM analyzes one turn of a conversation and identifies
  * behavioral corrections — moments where the user redirected the assistant.
  * Results are structured via chatTyped() for reliable parsing.
  */
@@ -21,6 +21,11 @@ const CorrectionBaseSchema = z.object({
   reasoning: z
     .string()
     .describe("Why this was identified as a correction — for observability, not stored"),
+  evidence: z
+    .string()
+    .describe(
+      "The user's own words in <turn> that carry this correction, quoted verbatim: a short exact excerpt, not a paraphrase",
+    ),
 });
 
 // The two null-valued fields of a `new` correction default to null on
@@ -149,7 +154,11 @@ No active channels were resolved for this conversation. Set \`channelType\` to \
     ? `\n- When \`rule_set\` answered that the rule is already set, the user had to say it again: "reinforce" the rule marked "set by the user" that it names.`
     : "";
 
-  return `You are a behavioral correction extractor. Your job is to analyze a conversation transcript between a user and an AI assistant, and identify moments where the user corrected, redirected, or expressed a preference about the assistant's behavior.
+  return `You are a behavioral correction extractor. Your job is to analyze one turn of a conversation between a user and an AI assistant, and identify moments where the user corrected, redirected, or expressed a preference about the assistant's behavior.
+
+## The Turn
+
+The message holds the turn inside a \`<turn>\` element: the user's message, the assistant's tool calls, and its reply. Before it, an \`<earlier_conversation>\` element may hold the exchange that preceded the turn, which has already been analyzed: use it only to understand what the user is reacting to. Extract corrections from the user's words in \`<turn>\` only, and quote those words in \`evidence\`.
 
 ## What to Look For
 
@@ -167,7 +176,7 @@ No active channels were resolved for this conversation. Set \`channelType\` to \
 - **Generalize**: Extract behavioral rules, not conversation-specific facts. "Prefer concise responses" not "When I asked about weather, you were too verbose".
 - **No specific references**: Don't mention specific topics, names, dates, or conversation details in the rule text.
 - **One rule per correction**: Each correction becomes one rule. Don't combine multiple corrections.
-- **Skip if none found**: Most conversations have no corrections. Return an empty corrections array if nothing qualifies.
+- **Skip if none found**: Most turns have no corrections. Return an empty corrections array if nothing qualifies.
 - **Categories**:
   - "style": How the assistant should communicate (tone, format, length, approach)
   - "domain": What the assistant should know or do in specific domains
@@ -175,7 +184,7 @@ No active channels were resolved for this conversation. Set \`channelType\` to \
 
 ## Rules the User Set
 
-The assistant records a standing instruction the user states with the \`rule_set\` tool, and a retraction with \`rule_remove\`. The transcript shows each call as [Tool: rule_set(...)] followed by its result.
+The assistant records a standing instruction the user states with the \`rule_set\` tool, and a retraction with \`rule_remove\`. A turn shows each call as [Tool: rule_set(...)] followed by its result.
 
 - An instruction or retraction that a successful \`rule_set\` or \`rule_remove\` call recorded is handled: extract nothing for it.${alreadySetLine}
 - A call that failed ([Error]) recorded nothing: judge the user's words as you would without it.
@@ -184,5 +193,5 @@ ${channelsSection}
 
 ${rulesSection}
 
-Analyze the transcript below and extract any behavioral corrections.`;
+Analyze the turn below and extract any behavioral corrections.`;
 }

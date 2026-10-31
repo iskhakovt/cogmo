@@ -116,6 +116,8 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
       },
     }),
     getHistoryAfter: vi.fn().mockResolvedValue([]),
+    listTurnMessages: vi.fn().mockResolvedValue([]),
+    findAnsweredCursorBefore: vi.fn().mockResolvedValue(undefined),
     getProfile: vi.fn().mockResolvedValue({
       id: "profile-1",
       userId: null,
@@ -270,6 +272,12 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
     recordEvolutionEvent: vi.fn().mockResolvedValue({ id: "evo-1" }),
     listEvolutionEvents: vi.fn().mockResolvedValue([]),
     getEvolutionEvent: vi.fn().mockResolvedValue(undefined),
+    listUndiscoveredTurns: vi.fn().mockResolvedValue([]),
+    insertTurnObservations: vi.fn().mockResolvedValue(undefined),
+    listPendingTurns: vi.fn().mockResolvedValue([]),
+    getTurnObservation: vi.fn().mockResolvedValue(undefined),
+    transitionPendingTurn: vi.fn().mockResolvedValue({ kind: "transitioned" }),
+    recordTurnAttempt: vi.fn().mockResolvedValue({ kind: "transitioned" }),
     // --- Admin (Chunk 3) ---
     listProfiles: vi.fn().mockResolvedValue([]),
     getProfileOwner: vi.fn().mockResolvedValue(null),

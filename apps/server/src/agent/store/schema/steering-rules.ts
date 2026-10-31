@@ -13,6 +13,7 @@ import {
 import { pk, ts } from "../../../db/helpers.js";
 import { conversations } from "./conversations.js";
 import { profiles } from "./profiles.js";
+import { turnObservations } from "./turn-observations.js";
 import { users } from "./users.js";
 
 /**
@@ -94,7 +95,7 @@ export const LIVE_INSTRUCTION_RULE: SQL = sql`source = 'instruction' AND status 
  * retired; an operator's rule or a channel default (`manual`, `seed`) is live,
  * disabled or retired; an instruction is live or retired. `retracted_at` and
  * `retired_reason` are set on a retired row and on no other;
- * `contradicted_in_conversation_id` only on a learning or retired one.
+ * `contradicted_in_turn_id` only on a learning or retired one.
  * `user_id` and `quote` belong to `instruction` rows.
  */
 export const steeringRules = pgTable(
@@ -115,12 +116,17 @@ export const steeringRules = pgTable(
     // instructions stay out of another's prompt.
     userId: uuid("user_id").references(() => users.id, { onDelete: "cascade" }),
     quote: text("quote"), // the user's words `rule_set` quoted; set on every instruction row
-    // NULL = never contradicted while learning. The conversation whose
-    // contradiction reset the learning rule's count, then the one whose
-    // contradiction retired it; one from the recorded conversation changes
-    // nothing, so a retried or repeated extraction of one conversation applies
-    // once. Graduation, any other retirement, and a deleted conversation clear
-    // it; the last only costs one more reset.
+    // NULL = never contradicted while learning. The turn, by its
+    // `corrections` observation row, whose contradiction reset the learning
+    // rule's count, then the one whose contradiction retired it; one from the
+    // recorded turn changes nothing. Graduation and any other retirement
+    // clear it.
+    contradictedInTurnId: uuid("contradicted_in_turn_id").references(() => turnObservations.id, {
+      onDelete: "set null",
+    }),
+    // NULL on every row and read by nothing: kept so a rollback to a build
+    // that still writes it finds the column. Every write that sets or clears
+    // `contradicted_in_turn_id` clears it too.
     contradictedInConversationId: uuid("contradicted_in_conversation_id").references(
       () => conversations.id,
       { onDelete: "set null" },
@@ -133,6 +139,7 @@ export const steeringRules = pgTable(
       sql`((${t.status} = 'retired') = (${t.retractedAt} IS NOT NULL))
         AND ((${t.status} = 'retired') = (${t.retiredReason} IS NOT NULL))
         AND (${t.contradictedInConversationId} IS NULL OR ${t.status} IN ('learning', 'retired'))
+        AND (${t.contradictedInTurnId} IS NULL OR ${t.status} IN ('learning', 'retired'))
         AND (${t.status} <> 'learning' OR ${t.source} IN ('correction', 'evolution'))
         AND (${t.status} <> 'disabled' OR ${t.source} IN ('manual', 'seed'))
         AND ((${t.source} = 'instruction') = (${t.userId} IS NOT NULL))
@@ -145,5 +152,9 @@ export const steeringRules = pgTable(
     index("idx_steering_rules_contradicted_in_conversation")
       .on(t.contradictedInConversationId)
       .where(sql`contradicted_in_conversation_id IS NOT NULL`),
+    // For the FK's ON DELETE SET NULL.
+    index("idx_steering_rules_contradicted_in_turn")
+      .on(t.contradictedInTurnId)
+      .where(sql`contradicted_in_turn_id IS NOT NULL`),
   ],
 );

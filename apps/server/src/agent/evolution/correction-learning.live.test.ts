@@ -8,7 +8,7 @@
  * Each scenario in `test/fixtures/evals/correction-learning.json` runs two
  * scripted conversations through the live-eval harness (`src/test/live-eval.ts`),
  * each ending in the same correction worded differently. After each one,
- * `extractCorrections` runs on its transcript on the Observer's model (the
+ * the Observer observes its turns, one extraction each, on its model (the
  * profile's extraction model, else its chat model), writing through
  * `DrizzleAgentStore` to a PGlite database of the sample's own. The second
  * extraction sees the first one's rule, so graduation depends on the model
@@ -30,7 +30,7 @@
  * turn or an extraction does not complete.
  *
  * Skipped unless `LIVE=1` and `ANTHROPIC_API_KEY` are set. A full run is 24
- * turns and 8 extractions on Sonnet 5, about $0.45.
+ * turns on Sonnet 5, and one extraction per turn of the correcting conversations.
  *
  *   set -a; . ./.env; set +a; LIVE=1 pnpm test:live src/agent/evolution/correction-learning.live.test.ts
  *
@@ -44,7 +44,9 @@ import { join } from "node:path";
 import * as R from "remeda";
 import { afterAll, describe, expect, it } from "vitest";
 import { z } from "zod";
+import type { Transaction } from "../../db/index.js";
 import { AnthropicProvider } from "../../llm/anthropic.js";
+import { isTurnRowContent } from "../../llm/content.js";
 import { seedChannelRules } from "../../setup/seed.js";
 import { expectDefined, expectOk } from "../../test/assertions.js";
 import { REPLY_CHECKS, type ReplyCheck, wordCount } from "../../test/eval-checks.js";
@@ -71,10 +73,16 @@ import {
 import { createTestDatabase } from "../../test/pglite.js";
 import type { SectionedRule } from "../rule-sections.js";
 import type { CoreMemoryBlock } from "../service.js";
-import { DrizzleAgentStore } from "../store/index.js";
+import { type AgentStore, DrizzleAgentStore } from "../store/index.js";
 import type { SteeringRuleStatusValue } from "../store/schema.js";
-import { toStoredMessage } from "../stored-content.js";
-import { type ExtractionResult, extractCorrections } from "./extract-corrections.js";
+import { type StoredMessage, toStoredMessage } from "../stored-content.js";
+import {
+  addExtractionResults,
+  type ExtractionResult,
+  NO_CORRECTIONS,
+} from "./extract-corrections.js";
+import { discoverTurns } from "./observation/discover-turns.js";
+import { observeTurnCorrections } from "./observation/observe-turn-corrections.js";
 
 const CheckSchema = z.enum([
   "no-list-lines",
@@ -266,6 +274,30 @@ function expectCompleted(turns: ReadonlyArray<EvalTurn>): void {
   }
 }
 
+/**
+ * Write a conversation's history as production does: each turn row opens a
+ * turn on a cursor of its own, and the rows after it carry that cursor.
+ */
+async function persistAsTurns(
+  tx: Transaction,
+  store: Pick<AgentStore, "insertMessage">,
+  args: { conversationId: string; profileId: string; history: ReadonlyArray<StoredMessage> },
+): Promise<void> {
+  let cursor = randomUUID();
+  for (const [i, m] of args.history.entries()) {
+    if (i > 0 && m.role === "user" && isTurnRowContent(m.content)) cursor = randomUUID();
+    await store.insertMessage(tx, {
+      conversationId: args.conversationId,
+      role: m.role,
+      content: m.content,
+      profileId: args.profileId,
+      model: EXTRACTION_MODEL,
+      lastInboundMessageId: cursor,
+      firstInboundMessageId: null,
+    });
+  }
+}
+
 describe.skipIf(LIVE_API_KEY === undefined)(
   `correction learning on ${EVAL_MODEL} (live eval)`,
   () => {
@@ -322,18 +354,39 @@ describe.skipIf(LIVE_API_KEY === undefined)(
             const conv = await db.tx((tx) =>
               store.createConversation(tx, { ...owner, isPrivate: true }),
             );
-            const scope = { ...owner, conversationId: conv.id, seesUserRules: true };
-            const extracted = await extractCorrections(
-              conversation.history.map(toStoredMessage),
-              scope,
-              {
-                provider: usage.metered(provider),
-                model: EXTRACTION_MODEL,
-                runInTx: db.tx,
-                store,
-                activeChannelTypes: CHANNEL_TYPES,
-              },
+            await db.tx((tx) =>
+              persistAsTurns(tx, store, {
+                conversationId: conv.id,
+                profileId: owner.profileId,
+                history: conversation.history.map(toStoredMessage),
+              }),
             );
+            const plan = await discoverTurns(
+              { runInTx: db.tx, store },
+              { conversationId: conv.id, limit: conversation.history.length },
+            );
+            let extracted: ExtractionResult = NO_CORRECTIONS;
+            for (const turn of plan.turns) {
+              const outcome = await observeTurnCorrections(
+                {
+                  provider: usage.metered(provider),
+                  model: EXTRACTION_MODEL,
+                  runInTx: db.tx,
+                  store,
+                },
+                {
+                  conversationId: conv.id,
+                  turn,
+                  scope: { ...owner, seesUserRules: true },
+                  activeChannelTypes: CHANNEL_TYPES,
+                },
+              );
+              if (outcome.kind === "applied") {
+                extracted = addExtractionResults(extracted, outcome.result);
+              } else if (outcome.kind !== "skipped") {
+                throw new Error(`turn ${turn.observationId} ended ${outcome.kind}`);
+              }
+            }
             return {
               extracted,
               stored: await corrections(),

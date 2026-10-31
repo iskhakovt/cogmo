@@ -1,20 +1,21 @@
 /**
- * Correction extraction — pure function with injected dependencies.
- *
- * Analyzes a conversation transcript for behavioral corrections,
- * compares against existing rules for dedup, and persists new/reinforced
- * corrections via the store. Graduation logic (observation threshold)
- * lives in the store's upsertCorrection method.
+ * Correction extraction for one turn, in two halves with injected
+ * dependencies: `extractTurnCorrections` asks the model for the turn's
+ * corrections against the rules the profile sees, and `applyCorrections`
+ * writes them inside the caller's transaction, the one that moves the turn's
+ * observation row out of `pending` (design/observation.md → Slice 1a).
+ * Graduation (the observation threshold) lives in the store's
+ * `upsertCorrection`.
  */
 
 import * as R from "remeda";
 import { match } from "ts-pattern";
-import type { Transactor } from "../../db/index.js";
+import type { Transaction, Transactor } from "../../db/index.js";
 import { isHarnessPrompt } from "../../llm/content.js";
 import type { LlmProvider } from "../../llm/provider.js";
 import { chatTyped } from "../../llm/typed.js";
 import { logger } from "../../logger.js";
-import type { AgentStore, UpsertCorrectionResult } from "../store/index.js";
+import type { AgentStore, ExtractionRule, UpsertCorrectionResult } from "../store/index.js";
 import type { StoredContentBlock, StoredMessage } from "../stored-content.js";
 import {
   buildExtractionPrompt,
@@ -34,29 +35,20 @@ export interface ExtractionDeps {
   provider: LlmProvider;
   model: string;
   runInTx: Transactor;
-  store: Pick<
-    AgentStore,
-    | "getCorrections"
-    | "getInstructionRules"
-    | "hasInstructionRule"
-    | "upsertCorrection"
-    | "contradictLearningRule"
-    | "countLiveLearnedRules"
-  >;
-  /**
-   * Distinct channel types active for the conversation when this Observer
-   * fired. Threaded into the extraction prompt and used to validate the
-   * LLM's `channelType` choice — anything outside the active set is
-   * coerced to null (global) with a warning.
-   */
-  activeChannelTypes: ReadonlyArray<string>;
+  store: Pick<AgentStore, "getCorrections" | "getInstructionRules">;
 }
+
+/** The store calls `applyCorrections` makes, all on the caller's transaction. */
+export type ApplyCorrectionsStore = Pick<
+  AgentStore,
+  "hasInstructionRule" | "upsertCorrection" | "contradictLearningRule" | "countLiveLearnedRules"
+>;
 
 export interface ExtractionResult {
   extracted: number;
   reinforced: number;
   contradictions: number;
-  /** Rules still learning that a second contradiction, from another conversation, retired. */
+  /** Rules still learning that a second contradiction, from another turn, retired. */
   retired: number;
   /** Rules still learning whose count a first contradiction reset to 0. */
   reset: number;
@@ -69,10 +61,22 @@ export interface ExtractionResult {
   consolidationNeeded: boolean;
 }
 
+/** What a fire that applied no correction reports. */
+export const NO_CORRECTIONS: Readonly<ExtractionResult> = {
+  extracted: 0,
+  reinforced: 0,
+  contradictions: 0,
+  retired: 0,
+  reset: 0,
+  promoted: 0,
+  outOfScopeReinforcementsSkipped: 0,
+  outOfScopeContradictionsSkipped: 0,
+  unknownRuleReinforcementsSkipped: 0,
+  consolidationNeeded: false,
+};
+
 /** Whose rules one extraction reads. */
 export interface ExtractionScope {
-  /** The conversation extracted from: a contradiction is applied once per conversation. */
-  conversationId: string;
   profileId: string;
   userId: string;
   /**
@@ -83,56 +87,149 @@ export interface ExtractionScope {
   seesUserRules: boolean;
 }
 
+/** A rule as the extraction prompt lists it, under its label. */
+export type LabelledRule = ExtractionRule & { setByUser: boolean };
+
+/** The model's corrections for one turn, and the rules its labels name. */
+export interface TurnCorrections {
+  items: ReadonlyArray<CorrectionItem>;
+  rulesByLabel: ReadonlyMap<string, LabelledRule>;
+}
+
+/** One turn rendered for the prompt; `context` is the exchange before it, if any. */
+export interface TurnText {
+  turn: string;
+  context: string | null;
+}
+
 /**
- * Extract behavioral corrections from a conversation transcript.
- *
- * Returns counts of what was found and whether consolidation is needed.
- * Pure function — all I/O goes through deps.
+ * Ask the model for one turn's corrections. Provider failures throw, for the
+ * caller to classify.
  */
-export async function extractCorrections(
-  history: ReadonlyArray<StoredMessage>,
+export async function extractTurnCorrections(
+  text: TurnText,
   scope: ExtractionScope,
+  activeChannelTypes: ReadonlyArray<string>,
   deps: ExtractionDeps,
-): Promise<ExtractionResult> {
-  const transcript = formatTranscript(history);
-
-  if (transcript.trim().length === 0) {
-    logger.debug("empty transcript — skipping extraction");
-    return {
-      extracted: 0,
-      reinforced: 0,
-      contradictions: 0,
-      retired: 0,
-      reset: 0,
-      promoted: 0,
-      outOfScopeReinforcementsSkipped: 0,
-      outOfScopeContradictionsSkipped: 0,
-      unknownRuleReinforcementsSkipped: 0,
-      consolidationNeeded: false,
-    };
-  }
-
+): Promise<TurnCorrections> {
   const { learned, instructions } = await deps.runInTx(async (tx) => ({
     learned: await deps.store.getCorrections(tx, scope.profileId),
     instructions: scope.seesUserRules ? await deps.store.getInstructionRules(tx, scope) : [],
   }));
   // The prompt lists each rule under a short label rather than its id; the
   // model's `matchedExistingRuleId` carries the label back.
-  const existingRulesByLabel = labelRules([
+  const rulesByLabel = labelRules<LabelledRule>([
     ...learned.map((r) => ({ ...r, setByUser: false })),
     ...instructions.map((r) => ({ ...r, setByUser: true })),
   ]);
-  const systemPrompt = buildExtractionPrompt(existingRulesByLabel, deps.activeChannelTypes);
-
   const { data } = await chatTyped({
     provider: deps.provider,
     model: deps.model,
-    system: systemPrompt,
-    messages: [{ role: "user", content: transcript }],
+    system: buildExtractionPrompt(rulesByLabel, activeChannelTypes),
+    messages: [{ role: "user", content: turnMessage(text) }],
     schema: CorrectionExtractionSchema,
     name: "correction-extraction",
     repair: {},
   });
+  return { items: data.corrections, rulesByLabel };
+}
+
+function turnMessage(text: TurnText): string {
+  const turn = `<turn>\n${text.turn}\n</turn>`;
+  return text.context === null
+    ? turn
+    : `<earlier_conversation>\n${text.context}\n</earlier_conversation>\n\n${turn}`;
+}
+
+/**
+ * One action per target: a contradiction of a rule wins over a reinforcement
+ * of it, a rule is reinforced once, and a new rule is written once per text
+ * and channel. A turn so moves a rule at most once.
+ */
+function collapseCorrections(
+  items: ReadonlyArray<CorrectionItem>,
+  rulesByLabel: ReadonlyMap<string, { id: string }>,
+): ReadonlyArray<CorrectionItem> {
+  // A rule's id for an item that names one, null for a new rule or a label
+  // no listed rule has (counted and skipped where it is applied).
+  const targetOf = (c: CorrectionItem): string | null =>
+    match(c)
+      .with({ action: "new" }, () => null)
+      .with(
+        { action: "reinforce" },
+        { action: "contradiction" },
+        (m) => rulesByLabel.get(m.matchedExistingRuleId)?.id ?? null,
+      )
+      .exhaustive();
+  const contradicted = new Set(
+    items.flatMap((c) =>
+      match(c)
+        .with({ action: "contradiction" }, (m) => {
+          const id = targetOf(m);
+          return id === null ? [] : [id];
+        })
+        .with({ action: "new" }, { action: "reinforce" }, () => [])
+        .exhaustive(),
+    ),
+  );
+  const seen = new Set<string>();
+  return items.filter((c) => {
+    const target = targetOf(c);
+    const verdict = match(c)
+      .returnType<Dedup>()
+      .with({ action: "new" }, (n) => ({
+        kind: "key",
+        key: `new:${n.channelType ?? ""}:${normalizedText(n.rule)}`,
+      }))
+      .with({ action: "contradiction" }, () =>
+        target === null ? { kind: "keep" } : { kind: "key", key: `contradiction:${target}` },
+      )
+      .with({ action: "reinforce" }, () =>
+        target === null
+          ? { kind: "keep" }
+          : // A reinforcement of a rule this turn contradicts loses to it.
+            contradicted.has(target)
+            ? { kind: "drop" }
+            : { kind: "key", key: `reinforce:${target}` },
+      )
+      .exhaustive();
+    return match(verdict)
+      .with({ kind: "keep" }, () => true)
+      .with({ kind: "drop" }, () => false)
+      .with({ kind: "key" }, ({ key }) => {
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .exhaustive();
+  });
+}
+
+/** What the dedup does with one item: keep it unkeyed, drop it, or keep the first with its key. */
+type Dedup = { kind: "keep" } | { kind: "drop" } | { kind: "key"; key: string };
+
+function normalizedText(text: string): string {
+  return text.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Write one turn's corrections on `tx`: the transaction that moved the turn's
+ * observation row to `applied`, so the writes and the move commit together.
+ * Returns counts of what was written and whether consolidation is needed.
+ */
+export async function applyCorrections(
+  tx: Transaction,
+  corrections: TurnCorrections,
+  args: {
+    turnObservationId: string;
+    scope: ExtractionScope;
+    activeChannelTypes: ReadonlyArray<string>;
+    store: ApplyCorrectionsStore;
+  },
+): Promise<ExtractionResult> {
+  const { store, scope } = args;
+  const { rulesByLabel } = corrections;
+  const activeChannelSet = new Set(args.activeChannelTypes);
 
   let extracted = 0;
   let reinforced = 0;
@@ -144,11 +241,9 @@ export async function extractCorrections(
   let outOfScopeContradictionsSkipped = 0;
   let unknownRuleReinforcementsSkipped = 0;
 
-  const activeChannelSet = new Set(deps.activeChannelTypes);
-
-  for (const correction of data.corrections) {
+  for (const correction of collapseCorrections(corrections.items, rulesByLabel)) {
     if (correction.action === "contradiction") {
-      const contradictedRule = existingRulesByLabel.get(correction.matchedExistingRuleId);
+      const contradictedRule = rulesByLabel.get(correction.matchedExistingRuleId);
       if (contradictedRule === undefined) {
         logger.warn(
           {
@@ -169,8 +264,8 @@ export async function extractCorrections(
       };
       // The user retracts a live rule in the turn. One still learning, which
       // `# Rules` doesn't show, has its count reset by a first contradiction
-      // and is retired by a second from another conversation: a single
-      // mislabelled contradiction costs its evidence, not the rule.
+      // and is retired by a second from another turn: a single mislabelled
+      // contradiction costs its evidence, not the rule.
       if (contradictedRule.status !== "learning") {
         logger.info(log, "correction contradicts a live rule — logged, not applied");
         continue;
@@ -187,12 +282,10 @@ export async function extractCorrections(
         );
         continue;
       }
-      const outcome = await deps.runInTx((tx) =>
-        deps.store.contradictLearningRule(tx, {
-          id: contradictedRule.id,
-          conversationId: scope.conversationId,
-        }),
-      );
+      const outcome = await store.contradictLearningRule(tx, {
+        id: contradictedRule.id,
+        turnObservationId: args.turnObservationId,
+      });
       match(outcome)
         .with("retired", () => {
           retired++;
@@ -208,7 +301,7 @@ export async function extractCorrections(
         .with("unchanged", () => {
           logger.info(
             log,
-            "extraction: contradiction already applied from this conversation, or the rule was promoted or retired since it was listed",
+            "extraction: contradiction already applied from this turn, or the rule was promoted or retired since it was listed",
           );
         })
         .exhaustive();
@@ -223,14 +316,12 @@ export async function extractCorrections(
     if (correction.action === "new") {
       // Dropped when an instruction this conversation sees covers its scope:
       // a persona's own instruction keeps its text out of a global learned rule.
-      const held = await deps.runInTx((tx) =>
-        deps.store.hasInstructionRule(tx, {
-          userId: scope.userId,
-          text: correction.rule,
-          profileId: scope.profileId,
-          channelType,
-        }),
-      );
+      const held = await store.hasInstructionRule(tx, {
+        userId: scope.userId,
+        text: correction.rule,
+        profileId: scope.profileId,
+        channelType,
+      });
       if (held) {
         logger.warn(
           { rule: correction.rule, channelType, reasoning: correction.reasoning },
@@ -242,7 +333,7 @@ export async function extractCorrections(
 
     let existingRuleId: string | null = null;
     if (correction.action === "reinforce") {
-      const matchedRule = existingRulesByLabel.get(correction.matchedExistingRuleId);
+      const matchedRule = rulesByLabel.get(correction.matchedExistingRuleId);
       if (matchedRule === undefined) {
         logger.warn(
           {
@@ -271,13 +362,7 @@ export async function extractCorrections(
       existingRuleId = matchedRule.id;
     }
 
-    const result = await applyCorrection(
-      correction,
-      channelType,
-      existingRuleId,
-      deps.runInTx,
-      deps.store,
-    );
+    const result = await applyCorrection(tx, correction, channelType, existingRuleId, store);
     const countApplied = () => {
       if (correction.action === "new") extracted++;
       if (correction.action === "reinforce") reinforced++;
@@ -298,29 +383,10 @@ export async function extractCorrections(
       .exhaustive();
   }
 
-  const activeCount = await deps.runInTx((tx) =>
-    deps.store.countLiveLearnedRules(tx, scope.profileId),
-  );
+  const activeCount = await store.countLiveLearnedRules(tx, scope.profileId);
   const consolidationNeeded = activeCount > CONSOLIDATION_THRESHOLD;
 
-  logger.info(
-    {
-      extracted,
-      reinforced,
-      contradictions,
-      retired,
-      reset,
-      promoted,
-      outOfScopeReinforcementsSkipped,
-      outOfScopeContradictionsSkipped,
-      unknownRuleReinforcementsSkipped,
-      activeCount,
-      consolidationNeeded,
-    },
-    "correction extraction complete",
-  );
-
-  return {
+  const result: ExtractionResult = {
     extracted,
     reinforced,
     contradictions,
@@ -332,6 +398,30 @@ export async function extractCorrections(
     unknownRuleReinforcementsSkipped,
     consolidationNeeded,
   };
+  logger.info(
+    { ...result, activeCount, turnObservationId: args.turnObservationId },
+    "correction extraction complete",
+  );
+  return result;
+}
+
+/** Two turns' counts as one fire's; consolidation follows the later turn's count. */
+export function addExtractionResults(a: ExtractionResult, b: ExtractionResult): ExtractionResult {
+  return {
+    extracted: a.extracted + b.extracted,
+    reinforced: a.reinforced + b.reinforced,
+    contradictions: a.contradictions + b.contradictions,
+    retired: a.retired + b.retired,
+    reset: a.reset + b.reset,
+    promoted: a.promoted + b.promoted,
+    outOfScopeReinforcementsSkipped:
+      a.outOfScopeReinforcementsSkipped + b.outOfScopeReinforcementsSkipped,
+    outOfScopeContradictionsSkipped:
+      a.outOfScopeContradictionsSkipped + b.outOfScopeContradictionsSkipped,
+    unknownRuleReinforcementsSkipped:
+      a.unknownRuleReinforcementsSkipped + b.unknownRuleReinforcementsSkipped,
+    consolidationNeeded: b.consolidationNeeded,
+  };
 }
 
 /**
@@ -340,21 +430,19 @@ export async function extractCorrections(
  * `stale` when that rule is no longer live or learning.
  */
 async function applyCorrection(
+  tx: Transaction,
   correction: CorrectionItem,
   channelType: string | null,
   existingRuleId: string | null,
-  runInTx: Transactor,
   store: Pick<AgentStore, "upsertCorrection">,
 ): Promise<UpsertCorrectionResult> {
-  return runInTx((tx) =>
-    store.upsertCorrection(tx, {
-      rule: correction.rule,
-      category: correction.category,
-      profileId: null, // global — industry standard for personal assistants
-      channelType,
-      ...(existingRuleId !== null && { existingRuleId }),
-    }),
-  );
+  return store.upsertCorrection(tx, {
+    rule: correction.rule,
+    category: correction.category,
+    profileId: null, // global — industry standard for personal assistants
+    channelType,
+    ...(existingRuleId !== null && { existingRuleId }),
+  });
 }
 
 /**
@@ -363,7 +451,7 @@ async function applyCorrection(
  * active channel set. The prompt is the steering signal that asks the LLM to
  * emit cross-scope wording matches as `new` with the right `channelType`;
  * this gate is the safety net for when it doesn't. The matched rule is
- * already in `existingRules` (loaded for the prompt), so the validation
+ * already in the labelled rules (loaded for the prompt), so the validation
  * costs nothing extra at the DB layer. Channel-scoped rules pass only when
  * their `channelType` is in the active set; each call site counts and logs
  * an out-of-scope match with a structured warning shaped like

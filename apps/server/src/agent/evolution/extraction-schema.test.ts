@@ -16,6 +16,7 @@ describe("CorrectionExtractionSchema", () => {
           rule: "Be more concise",
           category: "style",
           reasoning: "User asked for shorter responses",
+          evidence: "shorter please",
           matchedExistingRuleId: null,
           action: "new",
           channelType: null,
@@ -32,6 +33,7 @@ describe("CorrectionExtractionSchema", () => {
           rule: "Avoid markdown headings",
           category: "style",
           reasoning: "Preference scoped to chat medium",
+          evidence: "shorter please",
           matchedExistingRuleId: null,
           action: "new",
           channelType: "telegram",
@@ -53,6 +55,7 @@ describe("CorrectionExtractionSchema", () => {
           rule: "Be concise",
           category: "style",
           reasoning: "Same as before",
+          evidence: "shorter please",
           matchedExistingRuleId: "rule-123",
           action: "reinforce",
         },
@@ -68,6 +71,7 @@ describe("CorrectionExtractionSchema", () => {
           rule: "test",
           category: "safety",
           reasoning: "test",
+          evidence: "shorter please",
           matchedExistingRuleId: null,
           action: "new",
           channelType: null,
@@ -89,6 +93,7 @@ describe("CorrectionExtractionSchema", () => {
           rule: "test",
           category: "style",
           reasoning: "test",
+          evidence: "shorter please",
           matchedExistingRuleId: null,
           action: "new",
         },
@@ -107,6 +112,7 @@ describe("CorrectionExtractionSchema", () => {
           rule: "test",
           category: "style",
           reasoning: "test",
+          evidence: "shorter please",
           action: "new",
           channelType: "telegram",
         },
@@ -126,6 +132,7 @@ describe("CorrectionExtractionSchema", () => {
           rule: "test",
           category: "style",
           reasoning: "test",
+          evidence: "shorter please",
           matchedExistingRuleId: "rule-123",
           action: "new",
           channelType: null,
@@ -164,6 +171,21 @@ describe("CorrectionExtractionSchema", () => {
     );
   });
 
+  it("requires every correction to quote its evidence", () => {
+    const input = {
+      corrections: [
+        {
+          rule: "Be concise",
+          category: "style",
+          reasoning: "test",
+          matchedExistingRuleId: "R1",
+          action: "reinforce",
+        },
+      ],
+    };
+    expect(() => CorrectionExtractionSchema.parse(input)).toThrow(/evidence/);
+  });
+
   it("rejects reinforce with null matchedExistingRuleId", () => {
     const input = {
       corrections: [
@@ -171,6 +193,7 @@ describe("CorrectionExtractionSchema", () => {
           rule: "Be concise",
           category: "style",
           reasoning: "test",
+          evidence: "shorter please",
           matchedExistingRuleId: null,
           action: "reinforce",
         },
@@ -186,6 +209,7 @@ describe("CorrectionExtractionSchema", () => {
           rule: "Be verbose",
           category: "style",
           reasoning: "test",
+          evidence: "shorter please",
           matchedExistingRuleId: null,
           action: "contradiction",
         },

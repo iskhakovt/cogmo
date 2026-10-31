@@ -365,7 +365,7 @@ interface ExtractedMemory {
   context?: string;                                    // when/why this was learned
 }
 
-// Observer step: extract-memories (after extract-corrections)
+// Observer step: extract-memories (after the corrections phase's turn steps)
 const memories = await step.run("extract-memories", async () => {
   const extracted = await chatTyped(provider, {
     model,

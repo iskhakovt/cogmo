@@ -85,7 +85,7 @@ const VALID_ANSWERS: Answers = {
   classification: { network: "bank", compartment: "personal", trust: "first-party" },
 };
 
-/** Routes each structured-output call to its answer by the system prompt. */
+/** Routes each structured-output call to its answer by the system prompt; an `Error` answer is thrown. */
 function routedProvider(overrides: Partial<Answers> = {}): LlmProvider {
   const answers = { ...VALID_ANSWERS, ...overrides };
   return mockProvider({
@@ -97,6 +97,7 @@ function routedProvider(overrides: Partial<Answers> = {}): LlmProvider {
           : params.system.includes("memory extraction engine")
             ? answers.memories
             : answers.classification;
+      if (answer instanceof Error) throw answer;
       return {
         content: [{ type: "text", text: JSON.stringify(answer) }],
         stopReason: "end_turn",
@@ -107,9 +108,20 @@ function routedProvider(overrides: Partial<Answers> = {}): LlmProvider {
   });
 }
 
+/** An outage, which the turn didn't cause: the step retries it, and then the phase fails. */
+const UNAVAILABLE = Object.assign(new Error("provider unavailable"), { status: 503 });
+
+/** The one turn the default store plans: the whole of `HISTORY`, on one cursor. */
+const PLANNED_TURN = {
+  observationId: "obs-1",
+  cursor: "cursor-1",
+  firstMessageId: "msg-0",
+  attempts: 0,
+};
+
 /**
  * A correction the schema cannot accept on any retry: a reinforcement has to
- * name the rule it reinforces.
+ * name the rule it reinforces. The turn caused it, so it is counted on the row.
  */
 const UNPARSEABLE_CORRECTIONS = {
   corrections: [{ rule: "Be concise", category: "style", reasoning: "again", action: "reinforce" }],
@@ -163,6 +175,13 @@ function observerDeps(opts: {
     runInTx: fakeRunInTx,
     agentStore: mockAgentStore({
       listMessages: vi.fn().mockResolvedValue(HISTORY),
+      listPendingTurns: vi.fn().mockResolvedValue([PLANNED_TURN]),
+      getTurnObservation: vi.fn().mockResolvedValue({ status: "pending", attempts: 0 }),
+      listTurnMessages: vi
+        .fn()
+        .mockResolvedValue(
+          HISTORY.map((m, i) => ({ ...m, id: `msg-${i}`, cursor: PLANNED_TURN.cursor })),
+        ),
       getPendingMemories: vi.fn().mockResolvedValue(PENDING),
       ...opts.store,
     }),
@@ -190,7 +209,7 @@ function recordedPayload(deps: { agentStore: AgentStore }): unknown {
 describe("runObserver phase isolation", () => {
   it("extracts memories and drains pending rows when correction extraction fails", async () => {
     const deps = observerDeps({
-      provider: routedProvider({ corrections: UNPARSEABLE_CORRECTIONS }),
+      provider: routedProvider({ corrections: UNAVAILABLE }),
     });
     const warn = vi.spyOn(logger, "warn");
 
@@ -211,24 +230,25 @@ describe("runObserver phase isolation", () => {
       expect.objectContaining({
         conversationId: "conv-1",
         phase: "corrections",
-        stepId: "extract-corrections",
+        stepId: "observe-v1-corrections-obs-1",
         err: expect.any(StepError),
       }),
       expect.stringContaining("observer"),
     );
   });
 
-  it("plans the same steps whether or not correction extraction fails", async () => {
+  it("plans the same later steps whether or not correction extraction fails", async () => {
     const clean = exhaustedRetriesStep();
     await runObserver(EVENT, clean, observerDeps({ provider: routedProvider() }), "idle");
     const failing = exhaustedRetriesStep();
     await runObserver(
       EVENT,
       failing,
-      observerDeps({ provider: routedProvider({ corrections: UNPARSEABLE_CORRECTIONS }) }),
+      observerDeps({ provider: routedProvider({ corrections: UNAVAILABLE }) }),
       "idle",
     );
 
+    // An unavailable extraction is not counted, so no step follows it.
     expect(failing.ids).toEqual(clean.ids);
     expect(clean.ids).toEqual([
       "record-start-time",
@@ -237,7 +257,8 @@ describe("runObserver phase isolation", () => {
       "load-history",
       "load-custom-compartments",
       "load-active-channel-types",
-      "extract-corrections",
+      "discover-turns",
+      "observe-v1-corrections-obs-1",
       "extract-memories",
       "load-pending-memories",
       "classify-pending-memories",
@@ -330,14 +351,229 @@ describe("runObserver phase isolation", () => {
   it("propagates a failure that did not come from a step with exhausted retries", async () => {
     // `/reflect` runs the Observer through a harness with no retries; its
     // caller surfaces the error to the user instead of reporting zeros.
-    const deps = observerDeps({
-      provider: routedProvider({ corrections: UNPARSEABLE_CORRECTIONS }),
-    });
+    const deps = observerDeps({ provider: routedProvider({ corrections: UNAVAILABLE }) });
 
     await expect(runObserver(EVENT, syncStep, deps, "idle")).rejects.toThrow(
-      /matchedExistingRuleId/,
+      /provider unavailable/,
     );
     expect(deps.memory.retainBatch).not.toHaveBeenCalled();
+  });
+});
+
+describe("runObserver corrections by turn", () => {
+  const SECOND_TURN = {
+    observationId: "obs-2",
+    cursor: "cursor-2",
+    firstMessageId: "msg-9",
+    attempts: 0,
+  };
+
+  it("counts a failure the turn caused on its row, keeps the phase, and stops at that turn", async () => {
+    const step = exhaustedRetriesStep();
+    const deps = observerDeps({
+      provider: routedProvider({ corrections: UNPARSEABLE_CORRECTIONS }),
+      store: { listPendingTurns: vi.fn().mockResolvedValue([PLANNED_TURN, SECOND_TURN]) },
+    });
+
+    const result = await runObserver(EVENT, step, deps, "idle");
+
+    expect(result).toMatchObject({ status: "processed", failedPhases: [] });
+    expect(deps.agentStore.recordTurnAttempt).toHaveBeenCalledWith(expect.anything(), {
+      id: "obs-1",
+      seen: 0,
+      failure: { kind: "parse", message: expect.any(String) },
+      to: "pending",
+    });
+    expect(deps.agentStore.transitionPendingTurn).not.toHaveBeenCalled();
+    expect(step.ids).toContain("observe-v1-corrections-obs-1");
+    expect(step.ids).not.toContain("observe-v1-corrections-obs-2");
+  });
+
+  it("keeps the fire's later phases when discovery fails after its retries", async () => {
+    const deps = observerDeps({
+      provider: routedProvider(),
+      store: { listUndiscoveredTurns: vi.fn().mockRejectedValue(new Error("connection reset")) },
+    });
+
+    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps, "idle");
+
+    expect(result).toMatchObject({
+      status: "processed",
+      corrections: { extracted: 0, reinforced: 0 },
+      memories: { extracted: 1 },
+      drained: { drained: 1 },
+      failedPhases: ["corrections"],
+    });
+    expect(deps.agentStore.recordEvolutionEvent).toHaveBeenCalledOnce();
+  });
+
+  /** Two planned turns; the first reinforces, the second's step fails as `failSecond` does. */
+  function twoTurnFire(opts: {
+    failSecond: "unavailable" | "database";
+    planAttempts: number;
+    recordTurnAttempt?: AgentStore["recordTurnAttempt"];
+  }) {
+    const reinforce = {
+      corrections: [
+        {
+          action: "reinforce",
+          matchedExistingRuleId: "R1",
+          rule: "Be concise",
+          category: "style",
+          reasoning: "again",
+          evidence: "Berlin",
+        },
+      ],
+    };
+    const routed = routedProvider({ corrections: reinforce });
+    let correctionCalls = 0;
+    const provider = mockProvider({
+      chat: vi.fn(async (params: ChatParams) => {
+        const correcting = params.system.includes("behavioral correction extractor");
+        if (correcting && opts.failSecond === "unavailable" && ++correctionCalls > 1) {
+          throw UNAVAILABLE;
+        }
+        return routed.chat(params);
+      }),
+    });
+    const second = { ...SECOND_TURN, attempts: opts.planAttempts };
+    let reads = 0;
+    const step = exhaustedRetriesStep();
+    const deps = observerDeps({
+      provider,
+      store: {
+        getCorrections: vi.fn().mockResolvedValue(RULES),
+        listPendingTurns: vi.fn().mockResolvedValue([PLANNED_TURN, second]),
+        // The live row's count differs from the plan's: the walk's attempt
+        // must be guarded on the plan's.
+        getTurnObservation: vi.fn().mockResolvedValue({ status: "pending", attempts: 7 }),
+        // Each turn's rows are `HISTORY`, on the cursor asked for; the second
+        // read fails when the second turn's database read is to fail.
+        listTurnMessages: vi
+          .fn()
+          .mockImplementation((_tx, _conversationId, cursors: ReadonlyArray<string>) => {
+            reads++;
+            if (opts.failSecond === "database" && reads > 1) {
+              return Promise.reject(new Error("connection reset"));
+            }
+            return Promise.resolve(
+              HISTORY.map((m, i) => ({
+                ...m,
+                id: `msg-${i}`,
+                cursor: expectDefined(cursors[0], "cursor"),
+              })),
+            );
+          }),
+        ...(opts.recordTurnAttempt !== undefined && { recordTurnAttempt: opts.recordTurnAttempt }),
+      },
+    });
+    return { step, deps };
+  }
+
+  it("keeps the turns applied before a turn's step fails for good, and counts that turn on the plan's count", async () => {
+    const { step, deps } = twoTurnFire({ failSecond: "database", planAttempts: 0 });
+
+    const result = await runObserver(EVENT, step, deps, "idle");
+
+    expect(result).toMatchObject({
+      status: "processed",
+      corrections: { reinforced: 1 },
+      memories: { extracted: 1 },
+      failedPhases: ["corrections"],
+    });
+    expect(step.ids).toContain("observe-v1-corrections-exhausted-obs-2");
+    expect(deps.agentStore.recordTurnAttempt).toHaveBeenCalledWith(expect.anything(), {
+      id: "obs-2",
+      seen: 0,
+      failure: { kind: "exhausted", message: expect.stringContaining("connection reset") },
+      to: "pending",
+    });
+  });
+
+  it("leaves a turn whose extraction call was unavailable pending, uncounted", async () => {
+    const { step, deps } = twoTurnFire({ failSecond: "unavailable", planAttempts: 0 });
+
+    const result = await runObserver(EVENT, step, deps, "idle");
+
+    expect(result).toMatchObject({ corrections: { reinforced: 1 }, failedPhases: ["corrections"] });
+    expect(step.ids).not.toContain("observe-v1-corrections-exhausted-obs-2");
+    expect(deps.agentStore.recordTurnAttempt).not.toHaveBeenCalled();
+  });
+
+  it("gives a turn up once its steps have failed for good on three fires", async () => {
+    const { deps } = twoTurnFire({ failSecond: "database", planAttempts: 2 });
+
+    await runObserver(EVENT, exhaustedRetriesStep(), deps, "idle");
+
+    expect(deps.agentStore.recordTurnAttempt).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ id: "obs-2", seen: 2, to: "failed" }),
+    );
+  });
+
+  it("still runs the fire's later phases when counting the failed turn fails for good", async () => {
+    const { step, deps } = twoTurnFire({
+      failSecond: "database",
+      planAttempts: 0,
+      recordTurnAttempt: vi.fn().mockRejectedValue(new Error("connection reset")),
+    });
+
+    const result = await runObserver(EVENT, step, deps, "idle");
+
+    expect(result).toMatchObject({
+      status: "processed",
+      corrections: { reinforced: 1 },
+      memories: { extracted: 1 },
+      drained: { drained: 1 },
+      failedPhases: ["corrections"],
+    });
+  });
+  it("observes the turns in plan order, each in a step of its own", async () => {
+    const step = exhaustedRetriesStep();
+    const deps = observerDeps({
+      provider: routedProvider(),
+      store: { listPendingTurns: vi.fn().mockResolvedValue([PLANNED_TURN, SECOND_TURN]) },
+    });
+
+    await runObserver(EVENT, step, deps, "idle");
+
+    expect(step.ids.filter((id) => id.startsWith("observe-v1-"))).toEqual([
+      "observe-v1-corrections-obs-1",
+      "observe-v1-corrections-obs-2",
+    ]);
+    expect(deps.agentStore.transitionPendingTurn).toHaveBeenCalledTimes(2);
+  });
+
+  it("plans at most three turns for `/reflect`, which the user waits on", async () => {
+    const pending = Array.from({ length: 5 }, (_, i) => ({
+      observationId: `obs-${i}`,
+      cursor: `cursor-${i}`,
+      firstMessageId: `msg-${i}`,
+      attempts: 0,
+    }));
+    const step = exhaustedRetriesStep();
+    const deps = observerDeps({
+      provider: routedProvider(),
+      store: { listPendingTurns: vi.fn().mockResolvedValue(pending) },
+    });
+
+    await runObserver(EVENT, step, deps, "manual");
+
+    expect(step.ids.filter((id) => id.startsWith("observe-v1-"))).toHaveLength(3);
+  });
+
+  it("applies nothing and calls no model when no turn is pending", async () => {
+    const provider = routedProvider();
+    const deps = observerDeps({
+      provider,
+      store: { listPendingTurns: vi.fn().mockResolvedValue([]) },
+    });
+
+    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps, "idle");
+
+    expect(result).toMatchObject({ corrections: { extracted: 0, consolidationNeeded: false } });
+    const prompts = vi.mocked(provider.chat).mock.calls.map(([p]) => p.system);
+    expect(prompts.some((s) => s.includes("behavioral correction extractor"))).toBe(false);
   });
 });
 
@@ -353,7 +589,7 @@ describe("runObserver phase outcomes", () => {
 
   it("records a failed correction extraction", async () => {
     const deps = observerDeps({
-      provider: routedProvider({ corrections: UNPARSEABLE_CORRECTIONS }),
+      provider: routedProvider({ corrections: UNAVAILABLE }),
     });
 
     const result = await runObserver(EVENT, exhaustedRetriesStep(), deps, "idle");

@@ -1,0 +1,33 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "Return valid json only.\n\n## MISSION\n\nTrack anything notable in the new facts — names, numbers, dates, places, events, decisions, claims, relationships, and recurring patterns.\n\n## INPUT\n\n### New facts\n\n[[UUID]] User recently moved to Lisbon, Portugal. | Involving: user (mentioned_at=2026-10-31 20:41:10.482040+00:00)\n[[UUID]] User prefers responses written in plain prose sentences, not bullet points or lists. | Involving: user (mentioned_at=2026-10-31 20:41:10.482213+00:00)\n[[UUID]] T had dinner at Taberna da Rua das Flores in Lisbon and said the bacalhau there was the best they've ever had. | When: 2026-10-01 | Involving: T (occurred_start=2026-10-01 00:00:00+00:00, occurred_end=2026-10-01 23:59:59+00:00, mentioned_at=2026-10-31 20:41:10.482146+00:00)\n[[UUID]] T had dinner at Taberna da Rua das Flores in Lisbon and said the bacalhau was the best they've ever had. | When: on October 01, 2026 | Involving: T (occurred_start=2026-10-01 00:00:00+00:00, occurred_end=2026-10-01 23:59:59+00:00, mentioned_at=2026-10-31 20:41:10.485477+00:00)\n[[UUID]] User goes by the name T. | Involving: user (mentioned_at=2026-10-31 20:41:10.481759+00:00)\n\n### Existing observations\n\n[]",
+        "model": "gpt-4o-mini",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "content": "{\n  \"creates\": [\n    {\n      \"text\": \"User recently moved to Lisbon, Portugal.\",\n      \"source_fact_ids\": [\n        \"33b0fb45-0bcd-41dc-9a99-167a859a9466\"\n      ],\n      \"reason\": \"New observation about the user's recent move to Lisbon.\"\n    },\n    {\n      \"text\": \"User prefers responses written in plain prose sentences, not bullet points or lists.\",\n      \"source_fact_ids\": [\n        \"e1a0aa3e-8dcb-4273-adbc-0a977b2d993c\"\n      ],\n      \"reason\": \"New observation about the user's preference for response format.\"\n    },\n    {\n      \"text\": \"T had dinner at Taberna da Rua das Flores in Lisbon and said the bacalhau was the best they've ever had.\",\n      \"source_fact_ids\": [\n        \"7d204028-46b4-4d9b-a535-0f2fc90e8d27\",\n        \"192db90c-e7f2-46cd-8d9f-d2ad9b294130\"\n      ],\n      \"reason\": \"New observation about T's dining experience at Taberna da Rua das Flores.\"\n    },\n    {\n      \"text\": \"User goes by the name T.\",\n      \"source_fact_ids\": [\n        \"08dca0bb-4d75-4f46-86e7-21df7025ebfb\"\n      ],\n      \"reason\": \"New observation about the user's name.\"\n    }\n  ],\n  \"updates\": [],\n  \"deletes\": []\n}",
+        "usage": {
+          "prompt_tokens": 4872,
+          "completion_tokens": 344,
+          "total_tokens": 5216,
+          "prompt_tokens_details": {
+            "cached_tokens": 0,
+            "audio_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0,
+            "audio_tokens": 0,
+            "accepted_prediction_tokens": 0,
+            "rejected_prediction_tokens": 0
+          }
+        }
+      },
+      "metadata": {
+        "systemHash": "7dd29b6d"
+      }
+    }
+  ]
+}

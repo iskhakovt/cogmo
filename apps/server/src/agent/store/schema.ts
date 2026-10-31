@@ -13,5 +13,6 @@ export * from "./schema/scheduled-tasks.js";
 export * from "./schema/steering-rules.js";
 export * from "./schema/sub-agents.js";
 export * from "./schema/transcript.js";
+export * from "./schema/turn-observations.js";
 export * from "./schema/users.js";
 export * from "./schema/voice-config.js";
