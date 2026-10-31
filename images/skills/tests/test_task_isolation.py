@@ -37,14 +37,15 @@ class _Supervisor:
     `main()`, to stub one of its internals.
     """
 
-    def __init__(self, patch: str | None = None, cwd: Path | None = None) -> None:
+    def __init__(self, *, cwd: Path, patch: str | None = None) -> None:
         argv = ["-m", "cogmo_skills_runtime"]
         if patch is not None:
             argv = ["-c", f"from cogmo_skills_runtime import supervisor\n{patch}\nsupervisor.main()\n"]
-        # The host's flags (`SUPERVISOR_CMD` in
-        # `apps/server/src/skills/worker-sysbox/worker.ts`). `-I` ignores
-        # `PYTHONPATH`, so the package resolves as in the image: installed in
-        # the interpreter's environment.
+        # The host's flags, `SUPERVISOR_CMD` in
+        # `apps/server/src/skills/worker-sysbox/worker.ts`; `worker.test.ts`
+        # pins them and the sysbox tier runs them. `-I` ignores `PYTHONPATH`,
+        # so the package resolves as in the image: installed in the
+        # interpreter's environment.
         self.proc = subprocess.Popen(
             [sys.executable, "-I", "-u", *argv],
             stdin=subprocess.PIPE,
@@ -127,8 +128,8 @@ class _Supervisor:
 
 
 @pytest.fixture
-def sup() -> Generator[_Supervisor]:
-    s = _Supervisor()
+def sup(tmp_path: Path) -> Generator[_Supervisor]:
+    s = _Supervisor(cwd=tmp_path)
     yield s
     s.close()
 
@@ -387,8 +388,8 @@ class TestSupervisorProtocol:
         }
         assert frames[-1] == {"type": "task_exited", "id": "t-old"}
 
-    def test_exits_without_task_exited_when_the_sweep_cannot_empty_the_subtree(self) -> None:
-        sup = _Supervisor(patch="supervisor._sweep_descendants = lambda deadline_s: False")
+    def test_exits_without_task_exited_when_the_sweep_cannot_empty_the_subtree(self, tmp_path: Path) -> None:
+        sup = _Supervisor(cwd=tmp_path, patch="supervisor._sweep_descendants = lambda deadline_s: False")
         try:
             result = sup.run_task("t-stuck", _ECHO, {})
             assert result["ok"] is True

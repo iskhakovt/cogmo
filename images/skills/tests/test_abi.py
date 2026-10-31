@@ -35,7 +35,7 @@ def test_module_entry_point_prints_the_tag_and_nothing_else() -> None:
 
 def test_entry_point_ignores_a_package_planted_in_its_cwd(tmp_path: Path) -> None:
     """`-m` puts the cwd first on `sys.path`. `-I` leaves it off, so the
-    scripts run the image's module whatever directory they run in, and a
+    scripts run the image's module whichever directory they run in, and a
     `cogmo_skills_runtime` planted in that directory never runs."""
     planted = tmp_path / "cogmo_skills_runtime"
     planted.mkdir()

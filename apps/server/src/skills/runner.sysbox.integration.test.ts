@@ -5,6 +5,7 @@ import { hostname } from "node:os";
 import Docker from "dockerode";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { mock } from "vitest-mock-extended";
+import { z } from "zod";
 import type { Transactor } from "../db/index.js";
 import {
   CogmoSocketProxy,
@@ -337,22 +338,29 @@ async def run(inputs, ctx):
 
 /**
  * Plants uv configuration in `$HOME`: a `.python-version` in the image's
- * working directory and a user `uv.toml`. Each asks for an interpreter the
- * image doesn't have, and downloads are off, so a populate that reads either
- * cannot create the venv.
+ * working directory, and a user `uv.toml` and `.python-version`. Each asks
+ * for an interpreter the image doesn't have, and downloads are off, so a
+ * populate that reads any of them cannot create the venv.
  */
 const PLANT_UV_CONFIG_BODY = `
 import os, socket
 
 async def run(inputs, ctx):
     home = os.path.expanduser("~")
-    with open(os.path.join(home, ".python-version"), "w") as f:
-        f.write("3.9\\n")
-    os.makedirs(os.path.join(home, ".config", "uv"), exist_ok=True)
-    with open(os.path.join(home, ".config", "uv", "uv.toml"), "w") as f:
-        f.write('python-preference = "only-managed"\\n')
+    user = os.path.join(home, ".config", "uv")
+    os.makedirs(user, exist_ok=True)
+    for path, content in (
+        (os.path.join(home, ".python-version"), "3.9\\n"),
+        (os.path.join(user, ".python-version"), "3.9\\n"),
+        (os.path.join(user, "uv.toml"), 'python-preference = "only-managed"\\n'),
+    ):
+        with open(path, "w") as f:
+            f.write(content)
     return {"host": socket.gethostname()}
 `;
+
+/** The planting task's output: the container it ran in. */
+const HostSchema = z.object({ host: z.string() });
 
 const IDNA_HOST_BODY = `
 import importlib.metadata as md
@@ -675,7 +683,7 @@ async def run(inputs, ctx):
         await runner.invoke({ name: "tier2-import-csv", inputs: {}, runAs: RUN_AS })
       )._unsafeUnwrap();
       assertStatus(imported, "success");
-      const { host } = planted.output as { host: string };
+      const { host } = HostSchema.parse(planted.output);
       // Same container, so the planted file is on the importing task's disk.
       expect(imported.output).toEqual({
         host,
@@ -721,7 +729,7 @@ async def run(inputs, ctx):
         await runner.invoke({ name: "tier2-idna-host", inputs: {}, runAs: RUN_AS })
       )._unsafeUnwrap();
       assertStatus(populated, "success");
-      const { host } = planted.output as { host: string };
+      const { host } = HostSchema.parse(planted.output);
       expect(populated.output, JSON.stringify(populated)).toEqual({ host, version: "3.10" });
     } finally {
       await runner.shutdown();

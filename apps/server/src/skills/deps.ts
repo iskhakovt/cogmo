@@ -285,8 +285,8 @@ const DEFAULT_POPULATE_TIMEOUT_MS = 180_000;
  * Prints the image's `py<major>.<minor>` tag, which names skill venvs. The
  * populate script and the reaper's both run it, so the two always agree on
  * which venvs are live. `-I` keeps the cwd off `sys.path` and ignores
- * `PYTHON*` variables, so the module is the image's whatever directory the
- * script runs in: with `-m` alone, a `cogmo_skills_runtime` in the cwd would
+ * `PYTHON*` variables, so `-m` runs the image's module whichever directory
+ * the script runs in; without it, a `cogmo_skills_runtime` in the cwd would
  * run instead.
  */
 export const PYTHON_ABI_TAG_COMMAND = "python3 -I -m cogmo_skills_runtime.abi";
