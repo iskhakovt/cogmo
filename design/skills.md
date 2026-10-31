@@ -810,6 +810,8 @@ Once pipelines can express it, the lifecycle can become a built-in definition, t
 
 **Unit.** A `skill_drafts` row, keyed by its UUIDv7 `id`: one request to create a skill, or to change a live one, from the first spec to a terminal state. Its bounds are fixed when the row is inserted — the skill name, and for an edit the live `base_git_sha` — so nothing re-plans them. A round (`round`, from 0) is one authoring attempt; every write below the draft is keyed on `(draft_id, round)`, and a review on `(draft_id, round, reviewer)`.
 
+**Rounds share a branch.** Every round's coding task works on the draft's branch, `cogmo/skill-<draftShort>`, starting from the previous round's tip and resuming its CLI session with the findings as its goal, so the draft has one PR that each round updates. Coding delegation needs two things for this: a task that starts from a given branch and session, and `open-pr` treating an existing PR on the branch as opened rather than failing on GitHub's 422.
+
 **States** — `skill_draft_status`:
 
 | State | Meaning | Waits on |
