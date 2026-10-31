@@ -178,7 +178,7 @@ Defaults below match the in-image expectations: every host-state path sits under
 | `BOUNDARY_PROMPT_TIMEOUT_SECONDS` | `30` | How long the "Resume previous / Start fresh" prompt waits for an answer after a session goes idle before starting fresh. |
 | `BOUNDARY_PROMPT_MIN_USER_TURNS` | `3` | User turns the previous conversation needs before that prompt is shown at all. |
 
-#### Web UI
+#### Web UI server
 
 | Variable | Default | Purpose |
 |-|-|-|
@@ -231,7 +231,7 @@ See [`design/skills.md`](design/skills.md) for two-tier (Pyodide + sysbox) execu
 | `MCP_CALL_TIMEOUT_MS` | `30000` | Per-call timeout for MCP tool dispatch. |
 | `MCP_IDLE_EVICTION_MS` | `600000` (10 min) | A live MCP connection unused this long is closed. To keep connections open indefinitely, set a very large value, e.g. `31536000000` (a year). |
 
-LLM provider keys, Telegram bot tokens and similar credentials are **not** env vars — they live encrypted in the DB after `cogmo setup`. The legacy `TAVILY_API_KEY`, `OPENROUTER_API_KEY` and `FAL_API_KEY` are still read as fallbacks (`FAL_API_KEY` is copied into the DB at boot); prefer `cogmo setup`. Putting secrets in env files is explicitly discouraged; use host secret management ([sops-nix](https://github.com/Mic92/sops-nix), [Vault](https://www.vaultproject.io/), systemd `LoadCredential`, Docker secrets via `_FILE`, etc.) for `COGMO_MASTER_KEY`, `DATABASE_URL`, `HINDSIGHT_API_KEY`, `INNGEST_EVENT_KEY` and `INNGEST_SIGNING_KEY` — each accepts a `_FILE` variant.
+LLM provider keys, Telegram bot tokens and similar credentials are **not** env vars — they live encrypted in the DB after `cogmo setup`. `TAVILY_API_KEY`, `OPENROUTER_API_KEY` and `FAL_API_KEY` are read as fallbacks when the DB has no key (`FAL_API_KEY` is copied into the DB at boot); prefer `cogmo setup`. Putting secrets in env files is explicitly discouraged; use host secret management ([sops-nix](https://github.com/Mic92/sops-nix), [Vault](https://www.vaultproject.io/), systemd `LoadCredential`, Docker secrets via `_FILE`, etc.) for `COGMO_MASTER_KEY`, `DATABASE_URL`, `HINDSIGHT_API_KEY`, `INNGEST_EVENT_KEY` and `INNGEST_SIGNING_KEY` — each accepts a `_FILE` variant.
 
 ## Securing internal services
 
@@ -308,6 +308,7 @@ Neither is probed by Cogmo, so key them yourself:
 
    ```bash
    docker run --rm -it \
+     -v /var/lib/cogmo:/var/lib/cogmo \
      -e DATABASE_URL=postgresql://... \
      -e COGMO_MASTER_KEY=... \
      -e HINDSIGHT_URL=http://hindsight:8888 \
@@ -318,7 +319,7 @@ Neither is probed by Cogmo, so key them yourself:
      ghcr.io/iskhakovt/cogmo:<version> setup
    ```
 
-   The wizard validates each credential live (Anthropic/OpenAI `/v1/models`, Telegram `getMe`, Tavily ping, GitHub `/user`, Claude Code OAuth, Daytona, Hindsight `/health`) and writes only on success. It is re-runnable — running it again on an existing deployment lets you add a channel, rotate a key, or swap providers. Use `--reset secrets|channels|all` to wipe scoped state and re-prompt. See [`design/setup.md`](design/setup.md) for the full UX contract.
+   The wizard validates credentials live (Anthropic/OpenAI `/v1/models`, Telegram `getMe`, Tavily ping, GitHub `/user`, Claude Code OAuth, Daytona, Hindsight `/health`). An LLM key that fails validation can still be saved after a warning; fal.ai has no cheap check, so its key is stored unvalidated. It is re-runnable — running it again on an existing deployment lets you add a channel, rotate a key, or swap providers. Use `--reset secrets|channels|all` to wipe scoped state and re-prompt. See [`design/setup.md`](design/setup.md) for the full UX contract.
 
 3. **Start the long-running process:**
 
@@ -355,7 +356,7 @@ The image entrypoint dispatches based on the first arg:
 | `web-token` | Print the web UI login token, derived from `COGMO_MASTER_KEY`. |
 | `provider`, `model` | Add, list, change and remove LLM providers and model routing rows without re-running the wizard ([`design/setup.md` → Post-setup CLI](design/setup.md#post-setup-cli)). |
 | `subagent`, `image-provider`, `image-model` | Manage sub-agents, image providers and image models. |
-| `skills` | Register, approve, deny, roll back and list skills. |
+| `skills` | Register, approve, deny, roll back, deregister, run and list skills. |
 | `migrate-memories`, `backfill`, `migrate-skills-remote` | One-off data migrations; run `cogmo <command> --help`. |
 
 `serve` logs to stdout. Every other command logs to stderr, so its stdout carries only its output.
@@ -364,7 +365,7 @@ The image entrypoint dispatches based on the first arg:
 
 `serve` serves a browser cockpit (chat and admin screens) on the same port as `/health`. Log in with the token `cogmo web-token` prints; it is derived from `COGMO_MASTER_KEY`, stored nowhere, and changes only when the master key does. A login becomes a server-side session that lasts `WEB_SESSION_TTL_DAYS`.
 
-The app's auth is defense in depth, not the boundary. Keep the port off the open network: publish it on loopback only (`-p 127.0.0.1:9090:9090`) and reach it through a reverse proxy, a Tailscale or `cloudflared` sidecar, or an SSH tunnel. The session cookie is `__Host-`-prefixed and `Secure`, so browsers send it only over HTTPS or to `localhost`. See [`design/web-ui.md`](design/web-ui.md).
+The app's auth is defense in depth, not the boundary. Keep the port off the open network: publish it on loopback only (`-p 127.0.0.1:9090:9090`) and reach it only through a proxy on the same host or a sidecar. The session cookie is `__Host-`-prefixed and `Secure`, so serve the UI over HTTPS (a reverse proxy, `tailscale serve`, `cloudflared`). See [`design/web-ui.md`](design/web-ui.md).
 
 ## Health check
 

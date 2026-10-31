@@ -60,6 +60,7 @@ Once the container can reach your DB, Redis, Inngest, and Hindsight, run the wiz
 
 ```bash
 docker run --rm -it \
+  -v /var/lib/cogmo:/var/lib/cogmo \
   -e DATABASE_URL=postgresql://... \
   -e COGMO_MASTER_KEY=... \
   -e HINDSIGHT_URL=http://hindsight:8888 \
@@ -72,13 +73,13 @@ docker run --rm -it \
 
 It applies migrations, seeds the default user and profile, then walks you through:
 
-1. **LLM provider** (required) — Anthropic, OpenRouter, OpenAI, or any OpenAI-compatible endpoint, plus at least one model picked from the provider's live list.
+1. **LLM provider** (required) — Anthropic, OpenRouter, OpenAI, or any OpenAI-compatible endpoint, plus the models to route to it, picked from the provider's live list.
 2. **Telegram** — a `@BotFather` token (checked with `getMe`) and an allowlist of user IDs.
-3. **Optional tools and outputs** — Tavily and web answers, image providers, voice.
+3. **Optional tools and outputs** — Tavily web search, fal.ai and other image providers, voice.
 4. **Coding delegation** — GitHub identity, Claude Code auth, Daytona sandbox, skills repo remote.
 5. **Hindsight check** and a summary of what was configured.
 
-Every credential is validated before it is stored, encrypted (AES-256-GCM, HKDF-derived from `COGMO_MASTER_KEY`) in the `secrets` table. `cogmo setup` is re-runnable: each step offers Keep / Modify / Skip, and `--reset secrets|channels|all` wipes scoped state first. `--non-interactive` reads the same configuration from `COGMO_*` env vars. See [`design/setup.md`](design/setup.md) for the full UX contract.
+Credentials are checked against the live service where one offers a cheap check (an LLM key that fails can still be saved after a warning) and stored encrypted (AES-256-GCM, HKDF-derived from `COGMO_MASTER_KEY`) in the `secrets` table. `cogmo setup` is re-runnable: each step offers Keep / Modify / Skip, and `--reset secrets|channels|all` wipes scoped state first. `--non-interactive` reads the provider, Telegram and optional credentials from `COGMO_*` env vars instead. See [`design/setup.md`](design/setup.md) for the full UX contract.
 
 Then start the long-running process with the same env vars, a persistent state directory, and room for a graceful shutdown:
 
@@ -98,7 +99,7 @@ docker run -d \
   ghcr.io/iskhakovt/cogmo:<version>
 ```
 
-Message your bot on Telegram, or open the web UI on port 9090 and log in with the token `cogmo web-token` prints. Liveness is `GET /health` on the same port. Providers, models, sub-agents, image models and skills are managed afterwards with `cogmo provider`, `cogmo model`, `cogmo subagent`, `cogmo image-provider`, `cogmo image-model` and `cogmo skills` — see [`deploy.md` → Subcommands](deploy.md#subcommands).
+Message your bot on Telegram, or open the web UI through an HTTPS proxy in front of port 9090 and log in with the token `cogmo web-token` prints. Liveness is `GET /health` on the same port. Providers, models, sub-agents, image models and skills are managed afterwards with `cogmo provider`, `cogmo model`, `cogmo subagent`, `cogmo image-provider`, `cogmo image-model` and `cogmo skills` — see [`deploy.md` → Subcommands](deploy.md#subcommands).
 
 ## For contributors
 

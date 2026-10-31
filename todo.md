@@ -349,7 +349,6 @@
 
 ### Design docs & rules
 
-- [ ] `p2` Rewrite design/architecture.md beyond Orchestration Coupling: drop the Claude CLI background tier and the tools-via-MCP claim, and cover skills, sandbox, pipelines and the web UI. (deep review 2026-10-27, D9)
 - [ ] `p3` Index every live table in design/data-model.md and move the four live ones out of Deferred. (deep review 2026-10-27, D8)
 - [ ] `p3` Sweep confidence markers: upgrade `[proposed]` on shipped, tested sections, and tag `[confirmed]` sections that describe pending rollout steps as pending. (deep review 2026-10-27, D10)
 - [ ] `p3` Add the carve-out for hand-written data migrations that the migrations already follow to the migration rule in .agents/rules/architecture-rules.md. (deep review 2026-10-27, D12)

@@ -41,11 +41,11 @@ The Evolution Supervisor and Ingestion Agents are planned ([evolution.md](evolut
 ## Data Flow `[confirmed]`
 
 ```
-INGESTION (scheduled, headless)              RETRIEVAL (interactive)
+INGESTION (scheduled, planned)               RETRIEVAL (interactive)
 
   [Email / Calendar / Strava / ...]            [User on Telegram]
               |                                        |
-     claude -p (background)                   anthropic SDK (per-token)
+     provider-routed API (background)         provider-routed API (per-token)
      "extract important facts"                "answer using memory"
               |                                        |
      hindsight.retain(fact, network)          hindsight.recall(query)
