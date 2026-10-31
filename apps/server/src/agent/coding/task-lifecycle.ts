@@ -7,8 +7,6 @@
  */
 
 import { match, P } from "ts-pattern";
-import type { SandboxClient } from "../../sandbox/index.js";
-import type { SecretsStore } from "../../secrets/store/index.js";
 import type { CodingRun, TaskStoreDeps } from "./coding-run.js";
 import {
   type CodingRepoRow,
@@ -17,7 +15,7 @@ import {
   type CodingTaskStatus,
   isTerminalCodingTaskStatus,
 } from "./store/index.js";
-import { safeTeardownWorktree } from "./teardown.js";
+import { safeTeardownWorktree, type TeardownDeps } from "./teardown.js";
 import type { WorktreeAssignment } from "./types.js";
 
 interface Claim {
@@ -173,10 +171,7 @@ export async function reclaimIfEnded(
     .exhaustive();
 }
 
-type ReclaimDeps = TaskStoreDeps & {
-  sandbox: Pick<SandboxClient, "deleteByTaskId">;
-  secretsStore: SecretsStore;
-};
+type ReclaimDeps = TaskStoreDeps & TeardownDeps;
 
 /**
  * Reclaims the worktree, sandbox and stream of a task that ended under this
@@ -193,9 +188,7 @@ export async function reclaimEndedTask(
   args: ReclaimArgs,
 ): Promise<void> {
   await run.stepRun("teardown-worktree-cancelled", () =>
-    safeTeardownWorktree({
-      runInTx: deps.runInTx,
-      secretsStore: deps.secretsStore,
+    safeTeardownWorktree(deps, {
       repo: args.repo,
       taskId: run.taskId,
       worktreeAssignment: args.assignment,

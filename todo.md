@@ -4,7 +4,6 @@
 
 ### Coding delegation & sandbox
 
-- [ ] `p1` Stop running git on the host inside the task's clone. Teardown runs status, add, commit and push as the Cogmo user in the tree the sandbox writes, so a repo-local hook, fsmonitor, ssh command or credential helper runs host code. Do the WIP salvage in the container, keep only the delete on the host, and read the adopt check's HEAD as a file. (deep review 2026-10-27, H2)
 - [ ] `p1` Make the Docker API proxy an authorization boundary, as design/sandbox.md → Proxy Design specifies. Track the docker ids each task created and deny container, exec, volume and network routes outside that set, filter list endpoints, rebuild the create body from an allowlist of fields read case-insensitively, allowlist `CapAdd`, deny volume mounts, devices and namespace options, close the hijack routes' pipelining bypass, and test a deny matrix per field. Mark the design's unimplemented rows pending until then. (deep review 2026-10-27, H3, D4)
 - [ ] `p2` Mask the coding progress stream, the persisted plan and the CLI's stderr log as every DB, event and PR sink already is, so a token the model echoes never reaches Telegram or the logs. (deep review 2026-10-27, M20)
 - [ ] `p2` Fix design/coding-delegation.md where it reads as current: the 7-day permission-prompt wait under Worker-death reconciliation is no step wait, and the weekly WIP-ref prune is not built (its cron entry is below). (deep review 2026-10-27, D6)

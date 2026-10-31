@@ -267,7 +267,9 @@ describe("coding-task-start — Inngest replay", () => {
     expect(current().status).toBe("failed");
     expect(backend.planCalls()).toBe(0);
     expect(emittedEventNames(sendSpy)).toContain("coding/task/failed");
-    expect(sandbox.teardownCalls()).toBe(1);
+    // Once each, despite the replays: `teardown-worktree` reaps the task's
+    // containers and then its salvage container, and `teardown` sweeps.
+    expect(sandbox.teardownCalls()).toBe(3);
   });
 
   it("a run in flight that allocated before `check-credentials` existed tears down on a missing token", async () => {

@@ -193,6 +193,111 @@ export async function runCommitAndPush(params: CommitAndPushParams): Promise<Com
   return { kind: "pushed", commitSha, output: pushOutput };
 }
 
+export interface WipSalvageParams {
+  container: Pick<SandboxSession, "execStreaming">;
+  /** Working directory inside the container — typically `/workspace`. */
+  worktreeDir: string;
+  /** Task branch; its remote-tracking ref tells a pushed tree from an unpushed one. */
+  branch: string;
+  /** Names the WIP commit and the `refs/cogmo-wip/<taskId>` ref. */
+  taskId: string;
+  /**
+   * Env from `provisionAskpass`, given to the push alone. Undefined when no
+   * identity is mounted: a tree that needs pushing is then reported, not
+   * committed.
+   */
+  askpassEnv: Readonly<Record<string, string>> | undefined;
+}
+
+/** The salvage command that exited non-zero. */
+type WipSalvageStage = "status" | "add" | "commit" | "rev-parse" | "push";
+
+export type WipSalvageResult =
+  /** No edits, and HEAD is what the remote-tracking ref of the branch records. */
+  | { kind: "clean" }
+  | { kind: "pushed"; wipRef: string; sha: string }
+  /** Edits or unpushed commits, and no askpass to push them with. */
+  | { kind: "no_credentials" }
+  | { kind: "failed"; stage: WipSalvageStage; output: string };
+
+/**
+ * Teardown's WIP salvage, on the exec path {@link runCommitAndPush} uses:
+ * commit whatever the tree holds as `wip: <taskId>` and force-push HEAD to
+ * `refs/cogmo-wip/<taskId>`. A per-task ref makes `--force` safe and the
+ * push idempotent; a re-run after a lost result finds the tree clean and
+ * unpushed, and pushes the same commit again. `--no-verify` on both keeps a
+ * hook in the tree from blocking a forensic commit. The commit is unsigned
+ * under a fixed author: the user never approved this state.
+ *
+ * Throws when an exec does (the container is gone); the caller owns the
+ * container and reads that as the salvage being unavailable.
+ */
+export async function runWipSalvage(params: WipSalvageParams): Promise<WipSalvageResult> {
+  const { container, worktreeDir, branch, taskId, askpassEnv } = params;
+  const local = (args: ReadonlyArray<string>) =>
+    runGit(container, args, {
+      workingDir: worktreeDir,
+      env: {},
+      timeoutMs: GIT_LOCAL_TOTAL_MS,
+      idleTimeoutMs: GIT_IDLE_MS,
+    });
+
+  const status = await local(["status", "--porcelain"]);
+  if (status.exitCode !== 0) return { kind: "failed", stage: "status", output: combine(status) };
+  const dirty = status.stdout.trim() !== "";
+
+  if (!dirty) {
+    const head = await local(["rev-parse", "HEAD"]);
+    if (head.exitCode !== 0) return { kind: "failed", stage: "rev-parse", output: combine(head) };
+    // Absent when the branch was never pushed: that tree is unpushed.
+    const tracked = await local([
+      "rev-parse",
+      "--verify",
+      "--quiet",
+      `refs/remotes/${REMOTE}/${branch}`,
+    ]);
+    if (tracked.exitCode === 0 && tracked.stdout.trim() === head.stdout.trim()) {
+      return { kind: "clean" };
+    }
+  }
+  if (askpassEnv === undefined) return { kind: "no_credentials" };
+
+  if (dirty) {
+    const add = await local(["add", "-A"]);
+    if (add.exitCode !== 0) return { kind: "failed", stage: "add", output: combine(add) };
+    const commit = await local([
+      "-c",
+      "commit.gpgsign=false",
+      "-c",
+      "user.email=cogmo-bot@noreply.local",
+      "-c",
+      "user.name=Cogmo (WIP)",
+      "commit",
+      "--no-verify",
+      "--allow-empty",
+      "-m",
+      `wip: ${taskId}`,
+    ]);
+    if (commit.exitCode !== 0) return { kind: "failed", stage: "commit", output: combine(commit) };
+  }
+
+  const sha = await local(["rev-parse", "HEAD"]);
+  if (sha.exitCode !== 0) return { kind: "failed", stage: "rev-parse", output: combine(sha) };
+  const wipRef = `refs/cogmo-wip/${taskId}`;
+  const push = await runGit(
+    container,
+    ["push", "--force", "--no-verify", REMOTE, `HEAD:${wipRef}`],
+    {
+      workingDir: worktreeDir,
+      env: askpassEnv,
+      timeoutMs: GIT_PUSH_TOTAL_MS,
+      idleTimeoutMs: GIT_IDLE_MS,
+    },
+  );
+  if (push.exitCode !== 0) return { kind: "failed", stage: "push", output: combine(push) };
+  return { kind: "pushed", wipRef, sha: sha.stdout.trim() };
+}
+
 interface ExecCapture {
   exitCode: number;
   stdout: string;
