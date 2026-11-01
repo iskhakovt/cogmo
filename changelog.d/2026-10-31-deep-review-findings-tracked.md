@@ -1,1 +1,0 @@
-The 2026-10-27 whole-codebase review is recorded in `design/reviews/2026-10-27-deep-review.md`: one row per finding with its severity, its status against `main` and where to look. Every open finding has a `todo.md` entry that names its review id, with the three High and three Medium-high findings at `p1`.
