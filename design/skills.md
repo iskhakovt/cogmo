@@ -93,12 +93,12 @@ Overrides are validated at deploy against hard ceilings, the same for both tiers
 
 **Layers**, in the order they ship. Each closes a route the others leave open, and a test per layer turns the others off and shows its route closed.
 
-1. **A forked child process per worker** under `--permission`, granted only `--allow-fs-read` for the Pyodide distribution and the worker's read-only wheel directory and `--allow-worker`, plus `--disallow-code-generation-from-strings`: `fetch` throws `ERR_ACCESS_DENIED`, `FS.mount(NODEFS)` reaches nothing outside the grant, and the `Function`-constructor path throws `EvalError` (Pyodide evaluates no JS string once loaded). Pyodide runs on a worker thread whose `execArgv` re-lists the child's flags (an explicit `execArgv` otherwise drops the grant), so the child's main thread can write the interrupt buffer they share. Emscripten side modules that define JS with `EM_JS` build it from strings at load, so `pyodide-compat.ts` load-tests each native package in the lockfile under the flag, and one that fails makes the skill `tier: container`. The child shims `process.binding("constants")`, which Emscripten's boot calls and `--permission` denies, with `os.constants`. It exits when its IPC channel disconnects, so a dying host takes its children with it; each child leads its own process group, recorded in the host's runtime directory, and boot `SIGKILL`s every recorded group before the pool starts, since without the cgroup nothing else bounds an orphan. Node documents that the permission model does not stop malicious code: it follows symlinks out of granted paths, so the host writes the wheel directory without links, and inherited file descriptors bypass it, so the child inherits only the IPC channel.
+1. **A forked child process per worker** under `--permission`, granted only `--allow-fs-read` for the Pyodide distribution and the worker's read-only wheel directory and `--allow-worker`, plus `--disallow-code-generation-from-strings`: `fetch` throws `ERR_ACCESS_DENIED`, `FS.mount(NODEFS)` reaches nothing outside the grant, and the `Function`-constructor path throws `EvalError` (Pyodide evaluates no JS string once loaded). Pyodide runs on a worker thread whose `execArgv` re-lists the child's flags (an explicit `execArgv` otherwise drops the grant), so the child's main thread can write the interrupt buffer they share. Emscripten side modules that define JS with `EM_JS` build it from strings at load, so `pyodide-compat.ts` load-tests each native package in the lockfile under the flag, and one that fails makes the skill `tier: container`. The child shims `process.binding("constants")`, which Emscripten's boot calls and `--permission` denies, with `os.constants`. It exits when its IPC channel disconnects, so a dying host takes its children with it; each child leads its own process group, recorded in the host's runtime directory, and boot `SIGKILL`s every recorded group before the pool starts, since without the cgroup nothing else bounds an orphan. `[proposed]` A record holds the kernel's boot id, the Cogmo instance id, the pid and its start time from `/proc/<pid>/stat`, since a pgid alone can name a reused group, Cogmo's own included, after a container restart or a reboot onto a non-tmpfs path. A child's clean exit deletes its record (`recorded → exited`); boot kills a group only when the boot id, the instance and the pid's start time all still match (`orphaned → killed`), and deletes every record either way. Node documents that the permission model does not stop malicious code: it follows symlinks out of granted paths, so the host writes the wheel directory without links, and inherited file descriptors bypass it, so the child inherits only the IPC channel.
 2. **`env: {}`** for the child.
 3. **Minimal `jsglobals`**: a frozen null-prototype object holding only `setTimeout` and `clearTimeout`, which `webloop` needs for the asyncio loop that `ctx` RPCs await. `ctx` crosses through the registered `__cogmo_bridge__` module, which `jsglobals` does not affect.
-4. **No network from the start.** The host fetches the lockfile's wheels from PyPI, checks each against its `requirements.lock` hash (closing micropip's missing `--require-hashes`), and writes them to a per-lockfile-hash directory the child can only read. The child installs from that copy. Before skill code runs, the child deletes `fetch`, `XMLHttpRequest` and `WebSocket` from its globals, so a hole in layer 1 still finds no network API. Pyodide's built-in packages (pydantic among them) come from a `packageCacheDir` the host fills with `checkIntegrity` on.
+4. **No network from the start.** The host fetches the lockfile's wheels from PyPI, checks each against its `requirements.lock` hash (closing micropip's missing `--require-hashes`), and writes them to a per-lockfile-hash directory the child can only read. The child installs from that copy. `[proposed]` The directory is published as the venvs are ([Populate](#populate)): written link-free under `tmp.<id>`, marked `.ready`, renamed into place and made read-only, so a pool boot and `verify-install` racing on one hash leave one copy and a reader never sees a partial one; the venv reaper's reachability and grace rule ([Cache reachability](#cache-reachability)) reaps it. Before skill code runs, the child deletes `fetch`, `XMLHttpRequest` and `WebSocket` from its globals, so a hole in layer 1 still finds no network API. Pyodide's built-in packages (pydantic among them) come from a `packageCacheDir` the host fills with `checkIntegrity` on.
 5. **Memory.** Worker `resourceLimits` cap only the JS heap, never ArrayBuffers, and WebAssembly memory is one: a measured worker with a 64 MB JS heap limit grew Pyodide to 3.2 GB. Before `loadPyodide`, the child patches `WebAssembly.Memory.prototype.grow` to throw past `resources.memory_mb` (128 MiB by default, re-measured with pydantic loaded); Python sees a `MemoryError` and the interpreter survives. The hook covers Emscripten's growth path, which calls `grow` from JS; it does not cover a WebAssembly `memory.grow` instruction or code that reaches the original method another way. The hard ceiling is a per-child cgroup, which needs the delegation [sandbox.md](sandbox.md#hierarchical-enforcement-via-cgroup-parent-confirmed-slice-naming--assignment--proposed-aggregate-budget-enforcement) defers; without it there is no hard memory ceiling. `RLIMIT_AS` is not used, since V8 reserves guard regions far larger than the heap. `tier1Hardened` therefore claims no hard ceiling; a separate `tier1MemoryBounded`, set where the per-child cgroup exists, does. Rule 4 of [Risk tiers without a human](#risk-tiers-without-a-human) reads only `tier1Hardened`, since the gap the cgroup closes costs availability, not a secret.
-6. **CPU.** At `wall_clock_s` the host sends the child an IPC message, since a `SharedArrayBuffer` cannot cross `fork()`; the child's main thread writes the interrupt buffer, and after the grace window the host sends `SIGKILL`, which a loop with no JS↔WASM boundary cannot outlast.
+6. **CPU.** At `wall_clock_s` the host sends the child an IPC message, since a `SharedArrayBuffer` cannot cross `fork()`; the child's main thread writes the interrupt buffer, and after the grace window the host sends `SIGKILL`, which a loop with no JS↔WASM boundary cannot outlast. `[proposed]` A result that arrives after the interrupt is `wall_clock_exceeded`, whatever it says, since a skill can catch `KeyboardInterrupt`.
 7. **Lint**: `wasm-lint` rejects imports of `js`, `pyodide_js`, `pyodide.ffi`, `pyodide.code`, `pyodide.http` and `micropip`; the verify stage rejects dynamic code. Lint is the UX layer that tells an honest author why, not a boundary.
 
 **What it still cannot promise.** Nothing at the OS level separates the child from the server: no other uid, namespace or seccomp filter. An escape past layer 1 holds the server's OS privileges: its network, every file its user can read (the `_FILE` secrets included), and the server's own environment at `/proc/<pid>/environ`; `env: {}` keeps secrets out of the child's environment only. `tier1Hardened` claims the seven layers and no more; a guarantee past layer 1 needs OS containment, which this design does not specify. Resource exhaustion the layers do not meter (file descriptors, recursion depth, timer churn) is bounded only by the wall clock, the kill and, where present, the cgroup. Side channels between processes on one host are out of scope. The interrupt buffer is shared only between the child's two threads, and only the main thread writes it.
@@ -288,6 +288,25 @@ $COGMO_SKILLS_PATH/                # default /var/lib/cogmo/skills (configurable
 - Coding delegation operates on this repo exactly like it operates on user-registered repos — feature-branch flow over the same [sandbox.md](sandbox.md) + [coding-delegation.md](coding-delegation.md) infrastructure. The skills repo's only specialness is the post-`register` push-to-remote step.
 
 **Why local-authoritative.** Filesystem `update-ref` is atomic and needs no forge client; routing `register` through a provider API (`octokit.git.updateRef` or its Gitea twin) would couple the one operation that must stay crisp to per-forge clients. A failed push degrades to "live locally, remote behind": the database and the bare repo agree, and the next push reconciles. The remote exists for off-host backup of the skill library, at the cost of one URL in setup. Past setup every path is plain `git`, with credentials from the askpass helper; the provider-specific surfaces are the wizard's GitHub auto-provision and the PR opener ([coding-delegation.md](coding-delegation.md) → Merge gate), which knows only GitHub, so another forge gets the pushed branch and the operator opens the PR.
+
+**Mirror state** `[proposed]`, S5's. The unit is the singleton `skills_repo_mirror` row; its `status` (`skills_mirror_status`) says how the remote stands to local `main`. Each push records its result, so a remote left behind or diverged is a row the owner can see, not a warning in a log.
+
+| Transition | By | Guard | Writes |
+|-|-|-|-|
+| `synced`, `behind` → `behind`; `diverged` kept | a transaction that advances `main` (a deploy, the layout or toolchain commit) | — | `local_sha` |
+| `behind` → `synced` | a push that lands | the pushed sha equals `local_sha`, read in the recording transaction | `pushed_sha`, `last_failure` cleared |
+| `behind` → `behind` | a push that fails unreachable, on auth or on time | — | `last_failure` |
+| `behind` → `diverged` | a push rejected, when `ls-remote` shows the remote's `main` is not an ancestor of local `main` | — | `last_failure = 'rejected'`; the owner told once |
+| `diverged` → `synced` | the owner's manual push ([Deploy lifecycle](#deploy-lifecycle-confirmed) → failure modes), seen by the reconcile | the remote's `main` equals `local_sha` | `pushed_sha`, `last_failure` cleared |
+
+`skills-mirror-reconcile`, every 10 min, pushes when `behind` and checks the remote when `diverged`; a push is idempotent. A rejection whose remote `main` is an ancestor of local `main` lost to a newer push and changes nothing. The forward-commit rollback removes the one Cogmo-made path into `diverged`, which then needs an outside push to the remote. S9 merges local `main` into an attempt's start ref on the host and pushes that ref with the task, so a remote behind `main` never costs a draft a round.
+
+| Failure mode | State left | Why it is safe, or the residual |
+|-|-|-|
+| The process dies after `update-ref`, before the push | `behind` | the reconcile pushes within a tick |
+| The push lands, the recording transaction fails | `behind` | the next push is a no-op that records `synced` |
+| A deploy's push and the reconcile's at once | the newer sha on the remote | the older push's rejection reads the remote as an ancestor, so it records nothing |
+| The remote stays unreachable | `behind`, `last_failure` set | local `main` and the database agree; the off-host copy lags, which `/skills` shows |
 
 **Where it does not live.** Not in the Cogmo repo: skills are per-deployment, and a fork would conflict on upstream pulls, leak private workflows through a misconfigured remote and tie release cadences together. Not in one shared repo: each operator owns a private `cogmo-skills`. Not behind a git server in Cogmo: deploys go through `register`, so there is no PR UI to build, and operators bring their own forge. No base skills ship with Cogmo: the agent authors what it needs, and a pattern worth shipping would move to a `base-skills/` directory in the Cogmo repo.
 
@@ -561,7 +580,7 @@ type SkillInvokeRejection =
 
 The unit is a `skill_deploys` row, keyed by its id; its `status` is the `skill_deploy_status` enum. `live`, `denied` and `rolled_back` are terminal, as are `blocked` and `superseded` `[proposed]`, and `live` means the deploy went live, not that it is current — the enable guard below reads it that way. While a deploy of an enabled skill is pending, its `skills` row keeps the skill's last live sha, so the live version stays live through the approval window. A first deploy has no live version: its `skills` row is inserted disabled at the pending or blocked tip and stays there if the deploy is denied, blocked or superseded, and the enable guard keeps that sha from going live without a review.
 
-Activation is a second lifecycle this section does not model: `skills.disabled` together with whether a `live` row exists at the skill's current sha — a first deploy pending, denied or blocked (disabled, no live row), live (enabled), deregistered (disabled, live row), and the planned failure breaker — with `deregister`, `enable`, `approve` and `rollback` as its transitions. Naming it as its own state machine is a todo; until then it is an accepted residual, and the enable guard is its one explicit rule.
+Activation is a second lifecycle, on the `skills` row: [Skill activation](#skill-activation-proposed).
 
 ```
 register (auto, notify) ──────────────────────────────▶ live
@@ -635,7 +654,7 @@ Who repeats a deploy: the Inngest auto-register caller runs `register` in one st
 | `[proposed]` forward rollback: `update-ref` lands, then the transaction fails or the process dies | `main` holds the restoring commit; `skills.git_sha` and the deploy rows as before, so the old version keeps running | the operator repeats the rollback. Its recovery check, as in the layout move, finds the newest first-parent commit on `main` that changes `skills/<name>/`; when that is Cogmo's restoring commit for this target (Cogmo's identity and a `Cogmo-Restores: <target>` trailer) with no row, it records it instead of making a second, even when other skills have deployed since. **Residual** until the repeat: a draft of the skill that merges `main` starts from the restored directory while its base is still the old live sha |
 | `[proposed]` forward rollback: the mirror push fails after the commit | local `main` and the database agree; the remote lags | a plain push, so the next deploy's push or a manual `git push origin main` reconciles, as after a register |
 | `rollback` to a sha that never had a `live` row, then `deregister`, then `enable` | `enable` is refused with `no_live_deploy` | the enable guard matches `live` only and the rollback's row is `rolled_back`; accepted and stated at the guard, which is the one place that reads it. `[proposed]`: the guard also accepts a `rolled_back` row whose `restores_git_sha` once had a `live` row, which still refuses this case, since the target never did |
-| a `deregister` or `/disable` lands while a deploy is pending or a draft is open, then the deploy is approved or the draft's register goes live (the planned failure breaker lands the same way) | both write `disabled = false` (`executeRegister` and `executeApprove`), so the skill comes back live | **Decision:** approve and register keep `disabled` unless `disabled_reason` is `awaiting_first_deploy` or the deploy comes from a Repair draft, and `RegisterResult` carries `enabled: false`, so the toast, the CLI and the draft's notification say the skill stays disabled. Until `disabled_reason` lands, the predicate is that the skill's current sha has a `live` row. A disable committed after approve's or register's snapshot disables the now-live skill, which is what it asked for. Until implemented (todo.md → Skills autonomy S12), a residual |
+| a `deregister` or `/disable` lands while a deploy is pending or a draft is open, then the deploy is approved or the draft's register goes live (the planned failure breaker lands the same way) | both write `disabled = false` (`executeRegister` and `executeApprove`), so the skill comes back live | **Decision:** register and approve put a skill live only from `awaiting_first_deploy`, or from any disabled activation for a Repair draft's deploy, and otherwise keep the activation ([Skill activation](#skill-activation-proposed)); `RegisterResult` carries `enabled: false`, so the toast, the CLI and the draft's notification say the skill stays disabled. Until implemented (todo.md → Skills autonomy S12), a residual |
 
 **Approval-gate guard on `enable`.** `enable` refuses (`no_live_deploy`) when the skill's current `git_sha` has no `live` row, so `/disable` then `/enable` cannot activate a denied, blocked or pending first deploy. A rollback target that once had a `live` row passes; one that never did stays refused (failure modes). `[proposed]` After a forward rollback `skills.git_sha` is the restoring commit, whose row is `rolled_back`; the guard also accepts such a row when its `restores_git_sha` once had a `live` row.
 
@@ -643,6 +662,51 @@ Who repeats a deploy: the Inngest auto-register caller runs `register` in one st
 
 - **`main` is authoritative.** After reconciliation, every enabled skill's `skills.git_sha` is on `main`: equal to it right after that skill's deploy, an ancestor once another skill has deployed. The failure modes above name the windows where it is not (an `update-ref` that landed before its transaction failed; a rollback past another skill's deploy) and how each reconciles. A pending, denied or blocked first deploy holds a sha that is not on `main`, and runs nothing.
 - **Cancellable until the deploy transaction starts.** `register` checks its `signal` at its start and again just before the transaction, and the lockfile compile honours it throughout: a wait for the image ends, no session starts, and a running exec is disposed before its session is deleted. An abort seen by then stops the deploy, and `register` rejects with the signal's reason, not with a rejection the abort caused, leaving `main` and the branch untouched. These are checks, not a wall-clock cap: work between them that takes no signal (local git, the classifier, the Pyodide check's PyPI lookups) runs to its end first. Once the transaction has started, its wait on the advisory lock included, an abort only kills the mirror push to the remote, and the result stands. A skill-repo coding task's auto-register runs `register` under a 300 s deadline.
+
+#### Skill activation `[proposed]`
+
+**Unit.** The `skills` row. Its `activation` (`skill_activation`) is the state; `disabled` stays as its projection for `idx_skills_due` and the listing reads, under `chk_skills_disabled_iff_not_live`: `disabled = (activation <> 'live')`. S12 owns it (todo.md → Skills autonomy).
+
+| State | Meaning |
+|-|-|
+| `awaiting_first_deploy` | inserted by a first deploy that has not gone live: pending, blocked, denied or superseded |
+| `live` | enabled at its sha |
+| `disabled_operator` | `/disable` or `cogmo skills disable` |
+| `deregistered` | `deregister` |
+| `disabled_error_rate` | the auto-disable breaker ([Notifications and undo](#notifications-and-undo)) |
+
+```
+insert ─▶ awaiting_first_deploy ──approve, a live register, an Override──▶ live
+insert (a live tier) ──────────────────────────────────────────────────▶ live
+live ──disable──▶ disabled_operator    live ──breaker──▶ disabled_error_rate
+live, disabled_operator, disabled_error_rate ──deregister──▶ deregistered
+any disabled state ──enable, rollback, a Repair's deploy──▶ live
+```
+
+Each transition is a conditional UPDATE `WHERE id = $1 AND activation = <from>`, in the transaction of the use case that makes it.
+
+| Transition | By | Guard | Writes |
+|-|-|-|-|
+| insert → `awaiting_first_deploy` | a first deploy's register at the `approve` or `blocked` tier | no row for the name (`skills.name` UNIQUE, the [first-deploy race](#first-deploy-race)) | the row at the tip, no run-as |
+| insert → `live` | a first deploy's register at a live tier | as above | the row; run-as when scheduled ([Run-as identity](#run-as-identity-confirmed)) |
+| `awaiting_first_deploy` → `live` | approve, or a register that goes live (a later tip, an Override) | `activation = 'awaiting_first_deploy'` | the sha and manifest columns; run-as afresh |
+| `live` → `disabled_operator` | `/disable`, `cogmo skills disable` | `activation = 'live'` | run-as cleared |
+| `live`, `disabled_operator`, `disabled_error_rate` → `deregistered` | `deregister` | `activation` is the one read | run-as cleared; the skill's open `skill_shadow_fires` row `superseded` |
+| `live` → `disabled_error_rate` | the auto-disable subscriber | `activation = 'live' AND git_sha = $sha`, the sha whose runs tripped the rule | run-as cleared; the notification after the commit |
+| any disabled state → `live` (enable) | `/enable`, `cogmo skills enable` | `activation` is the one read; the enable guard (above) | run-as afresh |
+| any state → `live` (rollback) | `rollback`, the owner's override, on which the breaker notification's Roll back relies | `activation` is the one read | the target's sha and manifest; run-as afresh |
+| any disabled state → `live` (Repair) | the deploy transaction of a Repair draft's register or approve | `activation` is the one read | as approve |
+
+Register and approve of a skill in `disabled_operator`, `deregistered` or `disabled_error_rate`, other than a Repair's, write the sha and manifest and keep the activation; `RegisterResult` carries `enabled: false`. The two operator states differ only in what the operator said, which `/skills` and the activity view report.
+
+| Failure mode | State left | Why it is safe, or the residual |
+|-|-|-|
+| A disable and an approve, register or enable of one skill at once | one order | both update the `skills` row, so the second to commit raises `40001` and the transactor retries it from the first's result: a disable after the deploy disables the new version; a deploy after the disable keeps it |
+| The breaker fires after a new deploy of the skill | the new deploy live | its guard names the sha whose runs tripped it, so the UPDATE matches no row and the new version starts with no failures counted against it |
+| `skills/run.failed` is lost | `live` | the existing residual ([Run failures](#run-failures)): the rule reads `skill_runs` at the live sha at the next failure |
+| A conditional UPDATE matches no row (a second tap, a stale CLI call) | unchanged | the caller gets the activation the row holds, a value its result names, never a throw |
+| A Repair's deploy lands after the owner disabled the skill again | `live` | **Accepted:** the Repair is the owner's own request to put the skill back; its notification says it is live |
+| The migration that adds the column | backfilled | `live` where `disabled` is false; `awaiting_first_deploy` where the sha has no `live` row (or `rolled_back` one); otherwise `disabled_operator`, which every transition treats as it treats `deregistered`. It runs at boot, before any writer |
 
 ## Authoring pipeline `[proposed]`
 
@@ -664,9 +728,9 @@ The lifecycle reuses the pipelines' gate and loop patterns ([pipelines.md](pipel
 
 **Sequence.** `transition_seq` increments on every transition, the claim included. Each event the draft emits carries `{ draftId, seq }` and the bus-dedup id `skill-draft-<id>-<seq>-<event>`, the event's name included, since one transition can emit two events. Each gate key is `${draftId}:${seq}`, encoded as the pipelines' 8-hex token. A re-emit after a Retry, an Override or a second block in one round therefore always has an id the bus has not seen, and a card left from an earlier park never matches.
 
-**Each attempt is a fresh coding task.** It has a fresh CLI session seeded with the findings and starts from the previous attempt's tip with `main` merged in, so a `non_fast_forward` from another skill's deploy is resolved before authoring instead of recurring each round; the per-skill directory layout keeps that merge clean. Coding delegation gains a `baseRef` on the task for this, which S9 designs in [coding-delegation.md](coding-delegation.md) with its CHECKs and failure rows (todo.md → Skills autonomy S9). Each attempt opens its own branch and PR; the draft closes the PR an attempt supersedes, so only the latest is open.
+**Each attempt is a fresh coding task.** It has a fresh CLI session seeded with the findings and starts from the previous attempt's tip with `main` merged in, so a `non_fast_forward` from another skill's deploy is resolved before authoring instead of recurring each round; the per-skill directory layout keeps that merge clean. Coding delegation gains a `baseRef` on the task for this, which S9 designs in [coding-delegation.md](coding-delegation.md) with its CHECKs and failure rows (todo.md → Skills autonomy S9). Each attempt opens its own branch and PR; the draft closes the PR an attempt supersedes, so only the latest is open. `[proposed]` The close follows the commit and records `pr_closed_at` on the attempt row; the reconcile cron closes any PR still open on an attempt whose `outcome` is other than `deployed`, so a close a crash lost happens within a tick.
 
-**Admission.** The skills repo admits one coding task at a time (`maxConcurrentTasks: 1`). When admission refuses a draft's next task, the draft stays in `authoring` in its `awaiting_slot` variant, which holds the attempt's pending findings; the round row, whose coding-task reference is NOT NULL, is written once admission succeeds. The reconcile cron retries admission each tick; after 24 h of refusals the draft parks at `blocked: author_unavailable` with `cause: admission`. In `awaiting_slot` no coding task exists, so its transitions (admission, the 24 h park and Abandon) guard on the variant; every other transition out of `authoring` guards on the attempt's task. The `skill_draft` source's daily quota, failure backoff and priority are coding delegation's admission rules ([coding-delegation.md → Admission & Rate Limiting](coding-delegation.md#admission--rate-limiting-proposed)), set in S9 (todo.md → Skills autonomy).
+**Admission.** The skills repo admits one coding task at a time (`maxConcurrentTasks: 1`). When admission refuses a draft's next task, the draft stays in `authoring` in its `awaiting_slot` variant, which holds the attempt's pending findings; the round row, whose coding-task reference is NOT NULL, is written once admission succeeds. The reconcile cron retries admission each tick; after 24 h of refusals the draft parks at `blocked: author_unavailable` with `cause: admission`. `[proposed]` A skills repo with no `coding_repos` row (setup's Skip, [Repo location](#repo-location)) admits nothing: `draft_skill` refuses `skills_repo_unconfigured` and writes nothing, and a transition that would insert a coding task after the row is removed parks at `blocked: author_unavailable` with `cause: repo_unconfigured`. In `awaiting_slot` no coding task exists, so its transitions (admission, the 24 h park and Abandon) guard on the variant; every other transition out of `authoring` guards on the attempt's task. The `skill_draft` source's daily quota, failure backoff and priority are coding delegation's admission rules ([coding-delegation.md → Admission & Rate Limiting](coding-delegation.md#admission--rate-limiting-proposed)), set in S9 (todo.md → Skills autonomy).
 
 <a id="re-merge"></a>**Re-merge** `[proposed]`. An approve refused because `main` moved in a way the approve-time merge does not accept ([Deploy lifecycle](#deploy-lifecycle-confirmed)) emits `skills/deploy/approve-refused`, and the draft takes a re-merge attempt: the pending deploy becomes `superseded`, not `denied`, since the owner approved it, and a new attempt in the same round starts from the tip with `main` merged in, its finding naming the paths `main` changed under `skills/<name>/`. Verify and the panel judge the new tip, register files a new pending deploy, and the approval card is posted again; the spec approval stands, so the spec card is not. A re-merge spends no round and does not count toward the round's retry attempts ([Coding failures](#coding-failures)). `remerges` bounds it at two per draft: the next refusal parks at `blocked: base_contended`, where the owner's Re-merge tap grants one more and Abandon ends the draft. A refusal that follows a rollback of this skill, which also moves `skills.git_sha`, ends the draft `abandoned: base_moved` instead, spending no attempt.
 
@@ -733,20 +797,20 @@ draft_skill ─▶ specifying ◀─┐ revise_spec
 | `awaiting_approval` → `abandoned: base_moved` `[proposed]` | the same event | status, seq; the base moved, read as register's step 2 reads it; the deploy row pending | supersedes the pending row; `end_reason = base_moved`; emit `skills/draft.settled`; no attempt is spent on a tip register would refuse |
 | `blocked: base_contended` → `authoring` (re-merge) `[proposed]` | the owner's Re-merge tap | reason `base_contended`, seq from the gate key | `remerges + 1`, `attempt + 1` and the next coding task, or `awaiting_slot`, as the re-merge row; emit `coding/task/start` (when admitted) and `skills/draft.settled` |
 | `verifying`, `reviewing`, `registering` → `authoring` (r+1) | findings: verify `revise`, any reviewer `revise` (none `block`), or a register rejection from `RegisterRejection`'s terminal group other than `blocked` | status, seq, round r < `max_rounds` | from `registering`, `register_rejection` on round r's current attempt row; `round + 1`, `attempt = 0`, the next coding task, carrying every finding of round r; after the commit, close round r's PR |
-| any working state → `blocked: rounds_exhausted` | the same, at r = `max_rounds` | status, seq | `blocked_reason`; from `registering`, `register_rejection` on the attempt row; emit `skills/draft.parked` |
-| `authoring`, `verifying`, `reviewing` → `blocked: *_unavailable` | a pausing coding failure; a verify sandbox or reviewer still unreachable after the step's retries; or a verify phase reset refused at the cap | status, seq | `blocked_reason`, `state.resumeTo`, and for `verifier_unavailable` `state.cause` (`sandbox` or `resets_exhausted`); emit `skills/draft.parked` |
+| any working state → `blocked: rounds_exhausted` | the same, at r = `max_rounds` | status, seq | `blocked_reason`; `[proposed]` `state.cause`, the attempt outcome that would have spent the next round (`coding_revise`, `verify_revise`, `review_revise` or `register_rejected`); from `registering`, `register_rejection` on the attempt row; emit `skills/draft.parked` |
+| `authoring`, `verifying`, `reviewing` → `blocked: *_unavailable` | a pausing coding failure; a verify sandbox or reviewer still unreachable after the step's retries; or a verify phase reset refused at the cap | status, seq | `blocked_reason`, `state.resumeTo`, and for `verifier_unavailable` `state.cause` (`sandbox` or `resets_exhausted`); `[proposed]` for `reviewer_unavailable` `state.cause` (`unavailable` or `malformed_verdict`, the `SkillReviewerError` kind) and `state.reviewers`, the members without a review row; emit `skills/draft.parked` |
 | `reviewing` → `blocked: reviewer_block` | any reviewer `block` | status, seq | `blocked_reason`; emit `skills/draft.parked` |
 | `registering` → `blocked: risk_blocked` | `settle-register`, from the memoized `blocked` rejection ([Risk tiers](#risk-tiers-without-a-human)) | status, seq | `blocked_reason`, `state.reasons` (the rejection's `SkillRiskReason[]`, rule 2's reasons); emit `skills/draft.parked` |
 | `blocked` → `state.resumeTo` (retry) | the owner's Retry tap | reason is `*_unavailable` (including `registrar_unavailable`); seq from the gate key | `author_unavailable` inserts the next attempt's coding task, or re-enters `awaiting_slot` when admission refuses; the others re-emit the resumed state's event under the new seq, with the tap's phase reset ([Verify phases](#verify-phases) → At the cap); emit `skills/draft.settled` |
-| `blocked` → `registering` (override) | the owner's Override tap | reason is `reviewer_block`, `risk_blocked` without the `binding_unenforced` reason ([Risk tiers](#risk-tiers-without-a-human), rule 2), or `rounds_exhausted` with round r's current attempt holding a `verify_report` with no `revise` finding and a null `register_rejection`; seq | `state.overriddenBy`, which register needs to accept a `blocked` tier; from `risk_blocked`, the tap's phase reset ([Verify phases](#verify-phases) → At the cap); emit `skills/draft.register`, `skills/draft.settled` |
-| `blocked: rounds_exhausted` → `authoring` (extend) | the owner's One-more-round tap | `max_rounds` < 6; seq | `max_rounds + 1`, `round + 1`, the next coding task; after the commit, close the last round's PR; emit `skills/draft.settled` |
+| `blocked` → `registering` (override) | the owner's Override tap | reason is `reviewer_block`, `risk_blocked` without the `binding_unenforced` reason ([Risk tiers](#risk-tiers-without-a-human), rule 2), or `rounds_exhausted` whose `state.cause` is `review_revise`, the one cause whose tip passed verify and was not refused by register; seq | `state.overriddenBy`, which register needs to accept a `blocked` tier; from `risk_blocked`, the tap's phase reset ([Verify phases](#verify-phases) → At the cap); emit `skills/draft.register`, `skills/draft.settled` |
+| `blocked: rounds_exhausted` → `authoring` (extend) | the owner's One-more-round tap | `max_rounds` < 6; seq | `max_rounds + 1`, `round + 1`, the next coding task, the superseded attempt's `outcome` = `state.cause`; after the commit, close the last round's PR; emit `skills/draft.settled` |
 | `awaiting_approval` → `abandoned` | the owner's Abandon tap | status, seq | denies the pending `skill_deploys` row (`denyPendingDeploy`) in the same transaction, so later registers of the skill are not refused `pending_deploy_exists`; `end_reason = user_abandoned`; emit `skills/draft.settled` |
 | other non-terminal → `abandoned` | Abandon (the requester's in `specifying`, the owner's in `blocked`; the tool's or the CLI's in any state but `registering`) or the waiter's timeout in `specifying` or `blocked` | not terminal and not `registering`, where Abandon returns `not_abandonable`, so `settle-register` never meets an abandoned draft; a timeout matches its gate key's seq | `end_reason`: `user_abandoned`, `spec_timeout`, `blocked_timeout`; an abandoned working state's coding task is cancelled, and from `verifying` or `reviewing` the attempt's PR is closed after the commit; emit `skills/draft.settled` |
 | any non-terminal → `failed` | a draft function's `onFailure` | not terminal, and the failing run still holds the position. A claiming function: `state.claimedByRunId` is the failing run's. `skill-draft-on-coding`, which cannot read its run's step results: the event's `(round, attempt)` (carried by `coding/task/*` events for `skill_draft` tasks) are the draft's current ones and the draft is `authoring`, or, for `coding/task/failed` only, `blocked` at a reason that outcome writes (`author_unavailable`, `rounds_exhausted`), whose lost `skills/draft.parked` nothing re-emits; a draft it moved to `verifying` is the reconcile cron's. `-on-deploy`: `state.deployId` is the event's and the draft is `awaiting_approval`. `-waiter`: its gate key's seq is current. `-register` first reads the deploy at the tip ([Functions](#skill-lifecycle)): when one committed, it settles from it as `settle-register` would, and emits that state's event; it fails the draft only when none did. `-reconcile` never fails a draft: a failed tick is logged, and the next tick retries | `end_reason = step_error`, the error text in `state.detail` |
 
-Transitions not in the table are illegal. A tap is honoured only from its row's actor and only while its gate key's seq is current. A transition that supersedes the current attempt (the next attempt or round, Extend) or leaves it no verify or register work (`awaiting_approval`, `live`, `abandoned`, `failed`) also moves the attempt's `verify_phase` to `done` in its transaction. A park in `blocked` keeps the phase, since Retry and Override resume into verify or register.
+Transitions not in the table are illegal. A tap is honoured only from its row's actor and only while its gate key's seq is current. A transition that supersedes the current attempt (the next attempt or round, Extend) or leaves it no verify or register work (`awaiting_approval`, `live`, `abandoned`, `failed`) also moves the attempt's `verify_phase` to `done` in its transaction, `[proposed]` and writes its `outcome` (`skill_draft_attempt_outcome`), why the attempt ended: `coding_retry` for a new attempt in the round; `coding_revise`, `verify_revise`, `review_revise` or `register_rejected` for the round it starts; `deployed` once register committed a deploy row at its tip, live, pending or denied, whose later status is the deploy row's (a re-merge finds its attempt already `deployed`); `base_moved`, `abandoned` or `failed` when the draft ends with the attempt current. A park in `blocked` keeps the phase, since Retry and Override resume into verify or register, and leaves `outcome` null.
 
-**Per-state data.** `state` is `SkillDraftStateSchema`, a Zod union discriminated on `status`, and a CHECK ties `state->>'status'` to the column; a `blocked` state is further discriminated on its reason, so `resumeTo` exists only on the `*_unavailable` variants, and `cause` (a Zod enum) only on `verifier_unavailable`, `registrar_unavailable`, and `author_unavailable` when admission parked it (`admission`); the `risk_blocked` variant carries `reasons`, the `blocked` rejection's list, written by the transition that parks it. `blocked_reason` (`skill_draft_blocked_reason`) is set iff `blocked`; `end_reason` (`skill_draft_end_reason`: `user_abandoned`, `spec_timeout`, `blocked_timeout`, `approval_timeout`, `denied`, `base_moved`, `step_error`) iff `abandoned` or `failed`. `spec` changes only in `specifying`, and stays the one copy of the spec; after approval `state.approvedSpecVersion` names the version every later check reads. The `specifying` and `awaiting_approval` variants carry `card: { specVersion, text }`, the exact text the gate message showed, so a tap is verified against what its actor read; the renderer fits a card within the transport's message limit (Telegram's 4096 characters), which bounds the stored text.
+**Per-state data.** `state` is `SkillDraftStateSchema`, a Zod union discriminated on `status`, and a CHECK ties `state->>'status'` to the column; a `blocked` state is further discriminated on its reason, so `resumeTo` exists only on the `*_unavailable` variants, and `cause` (a Zod enum) only on `verifier_unavailable`, `registrar_unavailable`, `author_unavailable` when admission parked it (`admission`) or the repo is gone (`repo_unconfigured`), and `[proposed]` `reviewer_unavailable` (with `reviewers`) and `rounds_exhausted`; the `risk_blocked` variant carries `reasons`, the `blocked` rejection's list, written by the transition that parks it. `blocked_reason` (`skill_draft_blocked_reason`) is set iff `blocked`; `end_reason` (`skill_draft_end_reason`: `user_abandoned`, `spec_timeout`, `blocked_timeout`, `approval_timeout`, `denied`, `base_moved`, `step_error`) iff `abandoned` or `failed`. `spec` changes only in `specifying`, and stays the one copy of the spec; after approval `state.approvedSpecVersion` names the version every later check reads. The `specifying` and `awaiting_approval` variants carry `card: { specVersion, text }`, the exact text the gate message showed, so a tap is verified against what its actor read; the renderer fits a card within the transport's message limit (Telegram's 4096 characters), which bounds the stored text.
 
 #### Coding failures
 
@@ -769,7 +833,7 @@ Every `coding_tasks.failure_reason` maps to one outcome for the draft:
 | `skill-draft-register` | `skills/draft.register` | `claim`, `register`, `settle-register`, then an emit step for the events the settled transition owes (`skills/draft.parked`, `skills/draft.settled`, or the next round's `coding/task/start`), as `-on-coding` has: four steps, so the body runs up to five times, none of it billable; `register`'s sandbox sessions run only inside its step. A `settle-register` retry after its commit reads `stale` with the row at the transition's target status and `seq + 1`, takes that as its own commit, and returns the same events, so the emit step still runs. The skill's **deploy at the tip** is its newest `skill_deploys` row whose `git_sha` is the tip, unless that row is `blocked`, which an Override is past. The `register` step reads it first: one there means an earlier attempt of the step, or a CLI register of the same sha, committed it, so the step returns it without calling register. Otherwise it re-enters from the attempt's phase ([Verify phases](#verify-phases)) and returns `RegisterStepResult`: `{ kind: "deployed"; deployId }`, `{ kind: "registered"; result: RegisterResult }` or `{ kind: "resets_exhausted" }`. Register never returns the approve- and rollback-only rejections, so the step's rejection type excludes them. `settle-register` matches the result exhaustively. `deployed`, a `live`, `pending_approval` or `no_op` result, and `pending_deploy_exists` at the tip each name one deploy row (for `no_op`, the enabled skill's sha has a `live` row by the enable guard, or a `rolled_back` one); `settle-register` reads it and settles from its status now: `live` or `rolled_back` → `live`, `pending_approval` → `awaiting_approval`, `denied` → `abandoned: denied`; a `blocked` row, or none, is an invariant violation that fails the run. **Residual:** a rollback or deregister landing between the two steps leaves the row as it was, so the draft can report `live` for code since rolled back or deregistered, which matches `live`'s meaning in the Deploy lifecycle. `base_moved` ends the draft `abandoned: base_moved`; `pending_deploy_exists` elsewhere, the pausing rejections and `resets_exhausted` park at `registrar_unavailable`; the remaining rejections, `blocked` included, settle from the memoized value |
 | `skill-draft-on-deploy` | `skills/deploy/resolved`; `[proposed]` `skills/deploy/approve-refused` | one step: `awaiting_approval` → `live` or `abandoned` for the draft whose `state.deployId` it names; for `approve-refused`, the re-merge or the park, with the re-merge's coding task, then an emit step, as `-on-coding` has |
 | `skill-draft-waiter` | `skills/draft.parked` `{ draftId, gateKey, boundMs }` | `idempotency: gateKey`; sleeps out the bound with two reminders, then emits the timeout carrying its gate key; `cancelOn` `skills/draft.settled` matched on `data.gateKey`, as `pipeline-gate-waiter` does |
-| `skill-draft-reconcile` | cron, every 10 min | for `verifying`, `reviewing` or `registering` older than 30 min (`transitioned_at`) whose claim is null or past its lease, it releases the claim (the release row) and emits the owed event under the new seq; a live claim it leaves alone, since an early re-emit would be consumed as `stale` and its id deduplicated by the bus for 24 h. For `awaiting_approval` it reads the deploy row and settles a resolved one. For `authoring` it reads the attempt's coding task: `queued`, re-emit `coding/task/start`; `pr_open` or `failed`, apply that outcome as `skill-draft-on-coding` would; running past its wall time, nothing, since coding delegation's own reconciliation ends it. In `awaiting_slot` it retries admission, and parks the draft after 24 h |
+| `skill-draft-reconcile` | cron, every 10 min | for `verifying`, `reviewing` or `registering` older than 30 min (`transitioned_at`) whose claim is null or past its lease, it releases the claim (the release row) and emits the owed event under the new seq; a live claim it leaves alone, since an early re-emit would be consumed as `stale` and its id deduplicated by the bus for 24 h. For `awaiting_approval` it reads the deploy row and settles a resolved one. For `authoring` it reads the attempt's coding task: `queued`, re-emit `coding/task/start`; `pr_open` or `failed`, apply that outcome as `skill-draft-on-coding` would; running past its wall time, nothing, since coding delegation's own reconciliation ends it. In `awaiting_slot` it retries admission, and parks the draft after 24 h. `[proposed]` For every attempt whose `outcome` is other than `deployed`, whose coding task opened a PR and whose `pr_closed_at` is null, it closes the PR, which is idempotent, and sets `pr_closed_at` |
 
 **Failure modes.**
 
@@ -786,7 +850,7 @@ Every `coding_tasks.failure_reason` maps to one outcome for the draft:
 | A CLI `register` of the draft's exact tip lands first (live, pending or denied) | once the draft reaches `registering`, it settles from that deploy | the `register` step's read is keyed on the sha, not the draft, so it adopts the row as its own ([Functions](#skill-lifecycle)): `live`, `awaiting_approval` or `abandoned: denied`. **Residual:** the draft takes an outcome it did not request, which is the owner's decision on that exact code. Before register, verify and review still judge the tip, so a draft in `verifying` or `reviewing` can end in `revise` or `reviewer_block` while the CLI has that code live |
 | Two first deploys of one name race on `skills.name` | `registering`, or `blocked: registrar_unavailable` | the [first-deploy race](#first-deploy-race): one in-process retry, then a park without spending a round |
 | Register rejects the tip (validation, lockfile, spec drift, `non_fast_forward`) | `authoring` at r+1, or `blocked: rounds_exhausted`; the rejection in the attempt's `register_rejection` | the rejection becomes a finding, so the author fixes what the floor refused. Each attempt merges `main` before authoring, so a `non_fast_forward` recurs only when another skill deploys between that merge and register. **Residual:** that window costs a round |
-| Rounds run out | `blocked: rounds_exhausted` | the cap bounds cost; Extend grants one round at a time up to 6, Override registers only a tip that passed verify and that register has not refused, read from the attempt's `verify_report` and `register_rejection` (the override row) |
+| Rounds run out | `blocked: rounds_exhausted` | the cap bounds cost; Extend grants one round at a time up to 6, Override registers only a tip that passed verify and that register has not refused, read from `state.cause` (the override row) |
 | `cogmo skills approve` or `deny` resolves the draft's pending deploy outside the draft | `live` or `abandoned` | both emit `skills/deploy/resolved`, which the draft follows like a tap |
 | `cogmo skills rollback`, `deregister`, `/disable` or a CLI `register` of the same skill while a draft is open | the draft's state | a rollback or a live CLI register moves `skills.git_sha` off the draft's base, so the draft's register returns `base_moved` and the draft ends `abandoned: base_moved`, spending no round; a deregister or `/disable` moves no sha, and register keeps the skill disabled (Deploy lifecycle → failure modes); a pending deploy the CLI left at another sha parks the draft at `blocked: registrar_unavailable` (`pending_deploy`) until the owner resolves it and taps Retry |
 | A cron fire of the skill while a revision is in flight | the live version runs | a draft writes nothing to `skills` until register; each run records the `git_sha` it ran |
@@ -798,6 +862,8 @@ Every `coding_tasks.failure_reason` maps to one outcome for the draft:
 | `[proposed]` The approve-time merge commits while a refused tap's event is in flight (a second tap, or the CLI) | `live`, or the re-merge | the re-merge's transaction reads the deploy row: one already `live` settles the draft `live`, and the `resolved` event then reads `stale`; a pending row is superseded with the re-merge, so a later approve of it is `deploy_not_pending` |
 | A claim holder is cancelled or its process dies | the working state, claimed | after the lease (`claimedAt` plus the function's maximum runtime), the reconcile cron's release takes a new seq and re-emits, so a new run claims under an id the bus has not seen; within the lease the cron does nothing |
 | The release commits, its emit is lost | the working state, unclaimed, at the new seq | 30 min later the next release takes a newer seq and emits again |
+| `[proposed]` A transition that supersedes an attempt commits, then its PR close is lost | the attempt `done`, its PR open, `pr_closed_at` null | the reconcile cron closes it within a tick |
+| `[proposed]` The skills repo's `coding_repos` row is removed while a draft is open | `blocked: author_unavailable` (`repo_unconfigured`) at the next coding-task insert | a value, not the throw that would end in `failed: step_error`; Retry once the repo is configured again |
 | Admission refuses for 24 h (a stuck task holds the slot; the source's quota or backoff) | `blocked: author_unavailable` (`admission`) | Retry tries admission again, and Abandon ends the draft; no round spent |
 | Abandon in `awaiting_slot` | `abandoned` | no coding task exists to cancel |
 | A run in flight across a deploy that changes these functions | each step replays its stored result | new data rides new steps reading committed rows, never an earlier step's return value |
@@ -889,7 +955,7 @@ any phase ──attempt superseded, or left no verify or register work──▶ 
 - **No dependencies.** A skill that declares none has no artefact: `install → code` leaves `deps_hash` null, `verify-install` and `verify-code` at `code` find nothing to look for and proceed, and no artefact reset arises; register's lockfile step does not run. `register`'s reset at `register_code` still applies, since it is about skill code that may have run, not the artefact.
 - **At the cap** (`verify_resets = 2`) a step's reset is refused and the working state parks with `state.cause = resets_exhausted`. A verify step commits `verifying → blocked: verifier_unavailable` in its own transaction and returns `{ kind: "parked" }`; an emit step for `skills/draft.parked` follows and the run ends. The `register` step returns `resets_exhausted` without calling register, and `settle-register` parks `registering → blocked: registrar_unavailable` from it. The owner's Retry from `verifier_unavailable` with the attempt at `code`, or from `registrar_unavailable` or Override from `risk_blocked` with it at `register_code`, performs that phase's reset in its own transaction, uncapped. A resumed run therefore starts with a fresh install credential instead of re-entering the state it parked in; past the cap, each further reset takes a tap.
 
-A draftless register has no attempt row and moves through `register_install` and `register_code` in-process ([Egress proxy](#egress-proxy-proposed) → credential classes).
+A draftless register has no attempt row; its `skill_register_sessions` row moves through `register_install` and `register_code` ([Egress proxy](#egress-proxy-proposed) → Draftless register phases).
 
 Re-entry above covers a crash after each step's move; the table adds the rest.
 
@@ -972,7 +1038,7 @@ any but no_second_family ──a review reports a model off its round's frozen i
 | any but `no_second_family` → `calibration_passed` / `calibration_failed` | a calibration run's `settle` ([Calibration runs](#calibration-runs)) | `calibration_inputs = <the run's inputs>`, in the transaction that settles the run; a run whose inputs a boot or a drift has replaced matches no row and settles `stale`, so it can never re-enable the flag | `reason`, `enabled`; the owner notified on `calibration_failed` |
 | any but `no_second_family` → `model_drift` | a `review-<reviewer>` step whose verdict reports a model other than its round's frozen id for that backend, in the transaction that writes the review row | `calibration_inputs->'modelIds'->>'<backend>' = <the round's frozen id>` | that backend's `modelIds` entry set to the reported id (`jsonb_set`), `reason`, `enabled = false`; after the commit, the job's `drift:<reviewId>` trigger carrying the inputs written |
 | re-send a drift trigger (same state) | the retry of that review step: its review row comes back from the `ON CONFLICT` arm, and the guard above matches no row | the review's reported id differs from its round's frozen id, and the backend's `modelIds` entry already equals it | nothing; after the commit, the `drift:<reviewId>` trigger again with the row's inputs, which the bus deduplicates if the first emit landed |
-| re-send a lost trigger (same state) | boot, under the bootstrap lock, when no transition above applies | `reason` is `recalibration_pending` or `model_drift`, and for the current inputs' digest no `calibration_runs` row is `running` and none settled `passed` or `failed: below_floor`; a `stale` or `failed: step_error` row does not count | nothing; after the commit, the `boot:<boot id>` trigger with the row's inputs |
+| re-send a lost trigger (same state) | boot, under the bootstrap lock, when no transition above applies | `reason` is `recalibration_pending` or `model_drift`, and for the current inputs' digest no `calibration_runs` row is `running` (`[proposed]`: within the job's maximum runtime) and none settled `passed` or `failed: below_floor`; a `stale` or `failed: step_error` row does not count | nothing; after the commit, the `boot:<boot id>` trigger with the row's inputs |
 
 A drifted round's verdicts still settle it, and its register classifies without the panel, since the flag is off.
 
@@ -999,7 +1065,8 @@ A drifted round's verdicts still settle it, and its register classifies without 
 insert ─▶ running ──settle, inputs current, floor met──▶ passed
              │    ├─settle, inputs current, below floor─▶ failed: below_floor
              │    └─settle, inputs moved───────────────▶ stale
-             └──onFailure──────────────────────────────▶ failed: step_error
+             ├──onFailure──────────────────────────────▶ failed: step_error
+             └──a trigger, past the job's maximum runtime──▶ failed: lost   [proposed]
 ```
 
 | Transition | By | Guard | Writes |
@@ -1008,6 +1075,7 @@ insert ─▶ running ──settle, inputs current, floor met──▶ passed
 | `running` → `passed` / `failed: below_floor` | `settle`, from the case steps' results | `status = 'running'`, and `UPDATE deployment_flags … WHERE name = 'skills.review_panel' AND calibration_inputs = <the run's inputs>` matches its row, in the same transaction; inputs a boot or a drift replaced match nothing | the scores per backend and per class; the flag set (`calibration_passed`) or cleared (`calibration_failed`, the owner notified) by that UPDATE |
 | `running` → `stale` | `settle`, when that UPDATE matches no row | `status = 'running'` | the scores; the flag untouched |
 | `running` → `failed: step_error` | the job's `onFailure` | `status = 'running'` | `failure_reason`; the flag untouched; the owner notified |
+| `running` → `failed: lost` `[proposed]` | boot's re-send, or the weekly fire, finding the row | `status = 'running'` and `created_at` older than the job's maximum runtime | `failure_reason`; the trigger then proceeds |
 
 **Steps.** One `case-<backend>-<caseId>` step per backend and fixture, its ids from the shipped fixture list, then `settle`. Each case step first reads the flag row and returns `skipped` without calling the model when the row's `calibration_inputs` are no longer the run's, so a run overtaken by a boot or a drift stops billing. Concurrency 1 across the job, so runs queue rather than interleave, and the `throttle` delays a third start in 24 h. At 30 cases and two backends the job has 62 steps (the insert, 60 case steps, `settle`), so the body runs up to 63 times; it reads only memoized results and the shipped fixture list, and bills only inside case steps.
 
@@ -1020,6 +1088,7 @@ insert ─▶ running ──settle, inputs current, floor met──▶ passed
 | A case step bills its model, then crashes before recording | `running` | the retry bills once more. **Residual:** one re-billed session per crash |
 | `settle` commits, then its result is lost | terminal | the retry's guard matches no row, and the step returns the row's status |
 | The job fails after its retries | `failed: step_error` | the flag stays as it was: a set one because an infrastructure failure says nothing about the reviewers; a cleared one until the next run, which the next boot's re-send starts, since a `failed: step_error` row does not block it ([Review-panel flag](#review-panel-flag)). **Residual:** without a boot, the weekly run is the fallback, and the panel stays off until it |
+| `[proposed]` A run is cancelled, or lost across an Inngest outage, so `onFailure` never fires | `running` until a trigger finds it past the job's maximum runtime, then `failed: lost` | the boot re-send no longer waits behind a run that will never settle |
 | The flag is cleared while a draft is in `reviewing` | the round's frozen panel finishes | register classifies without the panel, so the draft can only land lower: `notify` instead of `auto` |
 | A boot run and a weekly run triggered together | one waits | concurrency 1; the second's case steps skip when its inputs are no longer the flag row's |
 
@@ -1074,7 +1143,7 @@ Rules, first match wins. They are the one statement of the tiering; every other 
 
 Rule 1's validation errors are rejections, not reasons, and a `blocked` rejection carries only rule 2's three.
 
-The classifier reads capabilities as flags (`tier1Hardened`, `egressListener`, `tier2EgressEnforced`, `bindingsSubstituted`, `reviewPanel`), never by inspecting the build, so the tier follows what is enforced while the pieces ship in order. Without `reviewPanel`, `reviewing` is skipped and rules 2–5 give way to today's table ([Risk tiering & auto-apply](#risk-tiering--auto-apply-confirmed)) with `auto` capped to `notify`, since no reviewer stands in for the tap. `tier1Hardened` and `bindingsSubstituted` are properties of the build; `egressListener` is set at boot (a container, or `COGMO_SKILLS_EGRESS_HOST_LISTENER=1` on the host); `tier2EgressEnforced` needs the build and `egressListener`; `reviewPanel` is the `skills.review_panel` row of `deployment_flags`. `tier1MemoryBounded`, set at boot where the per-child cgroup exists, is recorded beside them in `classifier_log`, and no rule reads it ([Tier-1 boundary](#tier-1-boundary-proposed), layer 5).
+The classifier reads capabilities as flags (`tier1Hardened`, `egressListener`, `tier2EgressEnforced`, `bindingsSubstituted`, `reviewPanel`), never by inspecting the build, so the tier follows what is enforced while the pieces ship in order. Without `reviewPanel`, `reviewing` is skipped and rules 2–5 give way to today's table ([Risk tiering & auto-apply](#risk-tiering--auto-apply-confirmed)) with `auto` capped to `notify`, since no reviewer stands in for the tap. `tier1Hardened` and `bindingsSubstituted` are properties of the build; `egressListener` is true while the listener is bound (`[proposed]`: its `listening` state, [Egress proxy](#egress-proxy-proposed) → One path), which needs a container or `COGMO_SKILLS_EGRESS_HOST_LISTENER=1` on the host; `tier2EgressEnforced` needs the build and `egressListener`; `reviewPanel` is the `skills.review_panel` row of `deployment_flags`. `tier1MemoryBounded`, set at boot where the per-child cgroup exists, is recorded beside them in `classifier_log`, and no rule reads it ([Tier-1 boundary](#tier-1-boundary-proposed), layer 5).
 
 #### Write requests `[proposed]`
 
@@ -1110,7 +1179,7 @@ owed, claimed ──a later deploy or rollback of the skill──▶ superseded
 | `owed` → `claimed` | a scheduled fire's run insert (`startOrRecoverRun`), in its transaction | status `owed`, whatever sha the run reads | `run_id`; the run inserted with `shadow = true` |
 | `claimed` → `completed` | the run's finish transition, in its transaction | status `claimed`; `run_id` is the finishing run, which ran at the row's `git_sha` | `resolved_at`; the notification after the commit |
 | `claimed` → `owed` | the same, the sweeper's finish included, for a run ending in a pausing kind (nothing ran to its end) or run at another sha | as above, without the sha | `run_id` cleared, so the next fire, the pausing re-fire included, is shadowed |
-| `owed`, `claimed` → `superseded` | a later deploy or rollback of the skill, in its transaction | not terminal | `resolved_at`; the new deploy inherits the debt (insert) |
+| `owed`, `claimed` → `superseded` | a later deploy or rollback of the skill, in its transaction; or `[proposed]` its `deregister` ([Skill activation](#skill-activation-proposed)) | not terminal | `resolved_at`; a new deploy inherits the debt (insert), a deregister ends it |
 
 A scheduled fire that finds the row `claimed` by another run also runs in shadow, without claiming.
 
@@ -1122,7 +1191,7 @@ A scheduled fire that finds the row `claimed` by another run also runs in shadow
 | A tool call runs the skill before its first fire | live; the row stays `owed` | the user asked for the act in that turn |
 | The shadow notification's emit is lost | `completed` | **Residual:** the run view shows the shadow run and its recorded intents |
 
-**Auto-disable.** Defect-class failures ([Contracts → Run failures](#run-failures)) at the live sha — three in a row, or half of the last ten with at least five — disable the skill with `disabled_reason = 'error_rate'` and notify with the last error: Enable, Roll back, Repair. Repair opens a draft whose spec is the live manifest, so it skips the card, with the failures as round 0's findings.
+**Auto-disable.** Defect-class failures ([Contracts → Run failures](#run-failures)) at the live sha — three in a row, or half of the last ten with at least five — move it to `disabled_error_rate` ([Skill activation](#skill-activation-proposed)) and notify with the last error: Enable, Roll back, Repair. Repair opens a draft whose spec is the live manifest, so it skips the card, with the failures as round 0's findings.
 
 ## Dependencies `[confirmed]`
 
@@ -1349,6 +1418,42 @@ A run's output reaches the model as JSON in the tool result. Binary output waits
 
 See [Run failures](#run-failures): the `error_kind` class decides retry, notification and auto-disable.
 
+### Cron fires `[proposed]`
+
+**Unit.** A `skill_cron_fires` row, keyed `(skill_id, scheduled_for, attempt)`: attempt 0 is the fire the schedule owed, attempt 1 its one re-fire after a pausing run ([Run failures](#run-failures)). Their bus ids are the ticker's `${skillId}:${scheduledFor}` and `${skillId}:${scheduledFor}:retry`. Its status is `skill_cron_fire_status`, and a skipped fire records `skill_cron_skip_reason`: the fire handler's reasons (`skill_not_found`, `not_scheduled`, `skill_disabled`, `invalid_inputs`, `sandbox_unavailable`, `inflight`), plus `handler_failed` and `expired`. S12 owns it (todo.md → Skills autonomy).
+
+```
+lock-and-advance ─▶ owed ──dispatch──▶ dispatched ──run finished──▶ completed
+                     ├──skip──────────▶ skipped
+                     └──handler failed, or owed past 1 h──▶ skipped
+run finished pausing at attempt 0 ──▶ attempt 1 inserted retry_owed ──due──▶ owed
+```
+
+| Transition | By | Guard | Writes |
+|-|-|-|-|
+| insert → `owed` | the ticker's `lock-and-advance`, in the transaction that advances `next_run_at` | the due `skills` row, locked `FOR UPDATE SKIP LOCKED`; `ON CONFLICT (skill_id, scheduled_for, attempt) DO UPDATE` with a no-op SET | the row, `due_at = scheduled_for` |
+| `owed` (re-emit) | each later tick, for an `owed` row older than one tick | `status = 'owed'` | nothing; the tick returns the row with its due rows, and the fan-out sends it under its bus id again |
+| `owed` → `skipped: expired` | the tick, for an `owed` row older than 1 h | `status = 'owed'` | `skip_reason`, `resolved_at` |
+| `owed` → `dispatched` | `skill-cron-fire`'s dispatch step, in `startOrRecoverRun`'s transaction | `status = 'owed'`; an event with no row (sent by a build before this table) inserts it `owed` first | `run_id` |
+| `owed` → `skipped` | the same step, for a runner rejection or a skill it cannot fire | `status = 'owed'` | `skip_reason`, `skip_detail`, `resolved_at` |
+| `owed` → `skipped: handler_failed` | `skill-cron-fire`'s `onFailure` | `status = 'owed'` | as above |
+| `dispatched` → `completed` | the run's finish transition, the sweeper's included, in its transaction | `status = 'dispatched' AND run_id = $run` | `resolved_at`; at attempt 0 with a pausing `error_kind`, the attempt-1 row, `retry_owed`, `due_at` the backoff's end |
+| `retry_owed` → `owed` | the ticker, once `due_at` has passed | `status = 'retry_owed'` | the fan-out sends it |
+
+**Per-state data.** `run_id` is set iff `dispatched` or `completed`, `skip_reason` iff `skipped`, `resolved_at` iff `skipped` or `completed` (CHECKs); `retry_owed` occurs only at attempt 1. Single fields, so they keep their natural types. `skills.last_fired_at` keeps recording the tick; the fire's own record is the row, so "why didn't the 09:00 digest run" is a query.
+
+| Failure mode | State left | Why it is safe, or the residual |
+|-|-|-|
+| The fan-out send fails, or the process dies, after `lock-and-advance` commits | `owed` | the ticker's retries replay the memoized advance and send again (the ticker fix in todo.md, ahead of S12); past them, the next tick re-emits the row |
+| A re-emit of an event the bus already holds | `owed` or later | the bus drops the duplicate id within 24 h; a re-emit the handler receives meets the dispatch guard, which reads the row past `owed` and writes nothing |
+| The handler fails after its retries | `skipped: handler_failed` | its `onFailure`; re-emits stop with the row past `owed` |
+| `onFailure` is lost too, or the handler never receives the event | `owed` for up to an hour | each tick re-emits it, deduplicated by the bus; at 1 h the tick skips it `expired`, so a fire never runs more than an hour late |
+| A run's finish transaction fails | `dispatched` | the run's finish and the fire's completion commit together or not at all |
+| A dispatched run is swept | `completed`; for `host_lost` at attempt 0, the attempt-1 row `retry_owed` | the sweeper's finish is a run finish |
+| Two ticks at once | one row per key | concurrency 1, `SKIP LOCKED` and the unique key |
+| A deploy, disable or schedule change between the tick and the dispatch | `skipped` with its reason, or `dispatched` at the sha the run reads | the reason is a column, not a log line |
+| A run in flight across the deploy that ships the table | the handler inserts the row from its event | the dispatch row's guard |
+
 ## Host context (`ctx`) `[confirmed]`
 
 Skills receive a host context object as the second argument to `run()`:
@@ -1511,14 +1616,15 @@ One enforcement point for every byte a skill sends off the machine: a token-inje
 - Dependency populate, the lockfile compile and the verify session reach the package index through the proxy under their own credential classes (below).
 - mockttp binds every interface. When `cogmo serve` runs in a container, that is the internal network and the compose network, with nothing published. On the host it is every interface, reachable from the LAN and the tailnet, so the listener starts there only under `COGMO_SKILLS_EGRESS_HOST_LISTENER=1`; without it the proxy does not start, the classifier reads `egressListener = false` and `tier2EgressEnforced = false`, a `network:` block of either tier is `blocked` at register while `reviewPanel` is on, since rule 2 exists only with the panel ([Risk tiers](#risk-tiers-without-a-human)), and `ctx.http` has no route and fails every call `network_error`. **Residual** while `reviewPanel` is off, which a deployment without a second family is for good: a flagless host deploys `network:` skills and `ctx.http` fails their runs. todo.md → Skills autonomy S7 confirms the host case under rootless and rootful Docker and asks mockttp upstream for a bind address, which retires the flag.
 - **Unauthenticated load, in every deployment.** A client that reaches the listener without a credential (any tier-2 task or verify session in a container deployment; the LAN and the tailnet behind the host flag) completes TLS handshakes before its `407`, has the proxy mint a leaf certificate for each name it sends, and holds up to the request cap in memory per connection. S6 bounds it, and its integration test pins each bound: the leaf cache is an LRU of fixed size; a name on no live allowlist (an enabled skill's, the package index hosts, an open verify attempt's spec) gets no leaf, so its handshake fails; connections are capped per credential and in total; and the tunnel's DNS lookup and connect each time out. The proxy shares the agent's process and event loop by the owner's choice ([Decisions](#decisions)), so these bounds protect the agent too.
+- **Listener state** `[proposed]`, S6's. The listener and its pin tunnel share one in-process state, `starting | listening | failed | stopped`. `egressListener` is true only while it is `listening`, after both have bound, not because the configuration asks for a listener; the runner's proxy-health check reads the same state. A bind that fails, or a listener that dies, moves it to `failed` with the reason: `cogmo serve` keeps running, the owner is told once, register classifies `network:` skills `blocked` (`egress_listener_missing`) while `reviewPanel` is on, and runs that end in error with it `failed` record `egress_unavailable`.
 - Non-HTTP protocols have no route ([Decisions](#decisions) → Non-HTTP egress).
 - Tier 2 runs on local Docker only ([Warm pool](#warm-pool-confirmed)). A managed backend Cogmo cannot attach to an internal network has no egress control, so the classifier reads `tier2EgressEnforced = false` there: bound secrets are unavailable and a `network:` block is `blocked`, until the provider offers an egress hook the proxy can sit behind.
 
 **Per-run identity.** No credential, no egress.
 
-- The credential is `<class>.<subject fields>.<mac>`: the class, its subject fields in the order the credential-classes table lists them, and `mac`, HMAC-SHA256 of everything before it, every subject field, the draftless register's expiry among them, under a key derived from the master key (HKDF, purpose `skill-egress`, [infrastructure.md](infrastructure.md)). Fields are dot-separated and none holds a dot: UUIDs, integers, enum values, a sha, an epoch-second expiry, and a skill name, which `SkillManifestSchema` keeps to `[a-z][a-z0-9_-]*`. The rules parse the class to pick a rule; admission verifies the MAC for the class claimed, then checks the subject against durable state. Every subject is durable (a `skill_runs` row, a draft's attempt or round, or a draftless register's name, tip and expiry), so nothing stores the credential and a restarted proxy needs no map.
+- The credential is `<class>.<subject fields>.<mac>`: the class, its subject fields in the order the credential-classes table lists them, and `mac`, HMAC-SHA256 of everything before it, every subject field, under a key derived from the master key (HKDF, purpose `skill-egress`, [infrastructure.md](infrastructure.md)). Fields are dot-separated and none holds a dot: UUIDs, integers and enum values. The rules parse the class to pick a rule; admission verifies the MAC for the class claimed, then checks the subject against durable state. Every subject is durable (a `skill_runs` row, a draft's attempt or round, or a draftless register's phase row), so nothing stores the credential and a restarted proxy needs no map.
 - The relay puts it in the task process's environment and proxy URL, never in the container's. The URL is mockttp's metadata form, `http://metadata:<base64url({"tags":["<credential>"]})>@<proxy>`, which httpx and requests send as `Proxy-Authorization` on each `CONNECT`, and on each plain-`http` request (Implementation, below). A pool worker's next task gets the next run's credential.
-- A `run` request is admitted only while its run is at `recovery_point = 'dispatched'`, a `populate` request only while it is at `started`, before dispatch (`dispatched` is S3's, [Run failures](#run-failures) → Stuck runs). The proxy then loads the run's skill at the run's `git_sha` for its allowlist and bindings. `transitionToExecuted` revokes the credential by moving the row, and the proxy refuses the run's next request. A request already in flight carries no further secret, since substitution is in the request line and headers, already sent; it ends when its client socket closes, which the task process's exit does and `ctx.http` does by aborting its request when the run ends, and at the tunnel's class timeout at the latest. mockttp drops the upstream connection as soon as the client's closes. Admission is cached per class: a `run` admission until `deadline_at` and a `populate` admission until dispatch, each invalidated in-process by the run's next transition, the sweeper's included; a verify-class admission never, so every verify request re-reads its attempt's phase in one indexed read.
+- A `run` request is admitted only while its run is at `recovery_point = 'dispatched'`, a `populate` request only while it is at `started`, before dispatch (`dispatched` is S3's, [Run failures](#run-failures) → Stuck runs). The proxy then loads the run's skill at the run's `git_sha` for its allowlist and bindings. `transitionToExecuted` revokes the credential by moving the row, and the proxy refuses the run's next request. A request already in flight carries no further secret, since substitution is in the request line and headers, already sent; it ends when its client socket closes, which the task process's exit does and `ctx.http` does by aborting its request when the run ends, and at the tunnel's class timeout at the latest. mockttp drops the upstream connection as soon as the client's closes. Admission is cached per class, each entry bounded by a time the admission read from the database: a `run` admission until `deadline_at`, a `populate` admission until `created_at` plus 15 min, the sweeper's bound on a `started` row. The run's next transition, the sweeper's included, also drops the entry in-process when it commits in `cogmo serve`; one committed in another process (`cogmo skills run` runs the runner in the CLI) takes effect at the bound. **Residual:** a CLI run's `populate` credential stays admitted to the package index hosts until its bound, after dispatch. A verify-class admission is never cached, so every verify request re-reads its attempt's phase, or its draftless register's phase row, in one indexed read.
 - A new run means a new credential. The task process can read its own credential; that is the trade for pool workers that need no per-task network setup, and it is bounded because a credential opens only its own run's allowlist, and only while the run is in flight.
 
 **Credential classes.**
@@ -1527,11 +1633,26 @@ One enforcement point for every byte a skill sends off the machine: a token-inje
 |-|-|-|-|-|
 | `run` | `<runId>` | the run is at `dispatched` | the skill's `network.allow` at the run's `git_sha` | 5 MiB + 64 KiB per response and 130 s per connection, enforced by the tunnel as the backstop behind `ctx.http`'s 5 MiB decoded-body cap and 120 s timeout, which fire first, and as the only limit on tier-2 sockets |
 | `populate` | `<runId>`; the class keeps it apart from the run's `run` credential | the run is at `started` | the configured package index hosts | 512 MiB per response, 10 min, enforced by the tunnel |
-| `verify_install` | in a draft, `draft.<draftId>.<round>.<attempt>.<phase>.<generation>` (`verify_resets`); for a register outside a draft, `register.<skillName>.<tipSha>.<phase>.<expiresAt>` | the attempt is at the token's phase and generation: `install` with the draft `verifying` at that attempt, or `register_install` with it `registering`; for a draftless register, until the register call revokes it in-process before the import, or its 10-minute expiry. **Residual:** a restart forgets the in-process revocation, so the token is live again until it expires | the configured package index hosts, forwarded | 512 MiB per response, 10 min, enforced by the tunnel |
-| `verify_code` | as `verify_install` | the attempt is at the token's phase and generation: `code` with the draft `verifying`, or `register_code` with it `registering`; for a draftless register, until its expiry | the spec's hosts (a draftless register: the manifest's), answered in shadow and never forwarded; nothing else | none: nothing is forwarded |
+| `verify_install` | in a draft, `draft.<draftId>.<round>.<attempt>.<phase>.<generation>` (`verify_resets`); for a register outside a draft, `register.<sessionId>.<phase>` | the attempt is at the token's phase and generation: `install` with the draft `verifying` at that attempt, or `register_install` with it `registering`; for a draftless register, its `skill_register_sessions` row at `register_install` and before `expires_at` | the configured package index hosts, forwarded | 512 MiB per response, 10 min, enforced by the tunnel |
+| `verify_code` | as `verify_install` | the attempt is at the token's phase and generation: `code` with the draft `verifying`, or `register_code` with it `registering`; for a draftless register, its row at `register_code` and before `expires_at` | the spec's hosts (a draftless register: the manifest's), answered in shadow and never forwarded; nothing else | none: nothing is forwarded |
 | `review` | `<draftId>.<round>.<attempt>.<reviewer>`, for a reviewer session ([Review stage](#review-stage) → Reviewer sandbox) | the draft is `reviewing` at the token's round and attempt, for that reviewer | the backend's model API hosts only, forwarded | none beyond the review session's 10-minute wall clock |
 
-Before S10 the verify classes admit only a draftless register's in-process phases ([Verify phases](#verify-phases)).
+Before S10 the verify classes admit only a draftless register's phase row (below).
+
+**Draftless register phases** `[proposed]`, S7's. A register outside a draft has no attempt row, so its verify credentials name a `skill_register_sessions` row, keyed by its id, whose `phase` (`skill_register_phase`) the proxy re-reads per request. Every transition commits in the database, so a register run from the CLI revokes in `cogmo serve` too, and a restart forgets nothing.
+
+| Transition | By | Guard | Writes |
+|-|-|-|-|
+| insert → `register_install` | register, before the lockfile compile | — | the row: skill name, tip, `expires_at` 10 min on |
+| `register_install` → `register_code` | register, before the schema import, so no skill code runs while the install credential is admitted | `phase = 'register_install'` | `phase` |
+| `register_install`, `register_code` → `done` | register's end, whatever its outcome | `phase <> 'done'` | `phase` |
+
+| Failure mode | State left | Why it is safe, or the residual |
+|-|-|-|
+| register's process dies, or its `done` write fails | the row at its phase | admitted only until `expires_at`; nothing in a process holds the state |
+| register's process dies after the import started | `register_code` | the install credential is already refused; the code credential answers in shadow until `expires_at` |
+| Two registers of one tip at once | two rows | each credential names its own row |
+
 
 A verify sample call has no run: its recording `ctx` ([Verify stage](#verify-stage)) answers `ctx.secrets.get` with a fixed placeholder, so the placeholder needs no `runId`.
 
@@ -1606,9 +1727,9 @@ The credential rides in mockttp's metadata channel: `Proxy-Authorization: Basic 
 | The write-back fails | the request refused | the new refresh token is lost as above; using the access token without storing its pair would only hide the loss until it expires |
 | The secret is updated mid-run | the next request refreshes from the new value | the cache key includes the row's nonce |
 
-**Audit.** Every proxied request writes one `skill_egress` row: its subject, exactly one of `run_id` (`run` and `populate`), `draft_round_id` (verify and review classes inside a draft) or the register subject `(register_skill_name, register_tip_sha)` (verify classes for a register outside a draft), and `credential_class`; `method`, `origin`, `path` (never the query string; a `path` binding's segment as its template), request and response bytes, `status`, `outcome` (`forwarded | shadowed | denied | failed`), `failure_reason` (`skill_egress_failure_reason`, set iff `denied` or `failed`: `host_not_allowed`, `blocked_address`, `credential_revoked`, `credential_unavailable`, `not_http`, `too_large`, `timeout`, `upstream_error`, `client_aborted`), and `bindings` (`EgressBindingsSchema`: each secret name with `substituted` or `misuse`). The row is inserted before the request is forwarded and completed from mockttp's `response` and `abort` events: the status from the event, request and response bytes from the tunnel's counts, and for a cut connection the reason from the tunnel's log, matched by class, host and the request's lifetime (**residual:** two concurrent requests of one class to one host, from any runs, are told apart only by time, so their byte counts and cut reasons can swap; refusals are unaffected, since their reply names its reason); `client_aborted` for an `abort` with no error of its own; a request whose insert fails is refused, failing closed as `secrets.get` does. A `ctx.http` call gets its row from the proxy like any other request. Only a request with no valid credential has no subject; it is logged, not stored.
+**Audit.** Every proxied request writes one `skill_egress` row: its subject, exactly one of `run_id` (`run` and `populate`), `draft_round_id` (verify and review classes inside a draft) or `register_session_id` (verify classes for a register outside a draft), and `credential_class`; `method`, `origin`, `path` (never the query string; a `path` binding's segment as its template), request and response bytes, `status`, `outcome` (`pending | forwarded | shadowed | denied | failed`), `failure_reason` (`skill_egress_failure_reason`, set iff `denied` or `failed`: `host_not_allowed`, `blocked_address`, `credential_revoked`, `credential_unavailable`, `not_http`, `too_large`, `timeout`, `upstream_error`, `client_aborted`, `process_lost`), and `bindings` (`EgressBindingsSchema`: each secret name with `substituted` or `misuse`). A forwarded request's row is inserted `pending` before the request is forwarded, and a refused or shadowed one's at its outcome. Completion is `UPDATE … WHERE id = $1 AND outcome = 'pending'`, to `forwarded` or `failed`, so a second event for one request matches no row; it reads mockttp's `response` and `abort` events: the status from the event, request and response bytes from the tunnel's counts, and for a cut connection the reason from the tunnel's log, matched by class, host and the request's lifetime (**residual:** two concurrent requests of one class to one host, from any runs, are told apart only by time, so their byte counts and cut reasons can swap; refusals are unaffected, since their reply names its reason); `client_aborted` for an `abort` with no error of its own; a request whose insert fails is refused, failing closed as `secrets.get` does. A `ctx.http` call gets its row from the proxy like any other request. Only a request with no valid credential has no subject; it is logged, not stored. At boot, before the listener starts, the proxy marks every row still `pending` from before the boot `failed: process_lost`: one `cogmo serve` per database runs the proxy, so no live request owns one. Observability's totals count only completed rows.
 
-**Credential lifecycle.** A credential has no state of its own; its liveness is read from durable state. A `populate` credential is live while its run is at `started`, a `run` credential while it is at `dispatched`. A verify credential inside a draft is live while the draft is in the state, and the attempt in the phase and generation, the credential names. A draftless register's verify credential is live until its 10-minute expiry, or until the register call revokes the install credential in-process, which a restart forgets. The proxy holds only caches it can rebuild.
+**Credential lifecycle.** A credential has no state of its own; its liveness is read from durable state, and a cached admission ends at a time read from it (Per-run identity). A `populate` credential is live while its run is at `started`, a `run` credential while it is at `dispatched`. A verify credential inside a draft is live while the draft is in the state, and the attempt in the phase and generation, the credential names. A draftless register's verify credential is live while its phase row is at the credential's phase and before `expires_at`. The proxy holds only caches it can rebuild.
 
 | Failure mode | State left | Why it is safe, or the residual |
 |-|-|-|
@@ -1623,7 +1744,7 @@ The credential rides in mockttp's metadata channel: `Proxy-Authorization: Basic 
 | A `CONNECT` to an IP literal naming an allowlisted host in `Host` | denied `host_not_allowed`; nothing connects | the policy compares the tunnel's destination with the URL's host, and returns the checked URL so mockttp connects by name, never by the tunnel's address |
 | A WebSocket upgrade, or a non-HTTP protocol on the listener | refused: `503` for the upgrade, a closed connection otherwise | no WebSocket rule and no passthrough option exists |
 | A mockttp major changes the rule or hook API | the integration test fails | it drives the real listener against a local TLS upstream (pinning, a wrong certificate, a `CONNECT` to an IP literal, `407`, `403`, `413`, the byte cap on a close-delimited body, one request per connection, a refused upgrade), so a bump that breaks the policy wiring cannot merge green |
-| The proxy crashes between forwarding and completing the audit row | the row with `status` and response bytes null | the request is recorded as sent with its result unknown, never missing |
+| The proxy crashes between forwarding and completing the audit row | the row `pending` until the next boot, then `failed: process_lost` | the request is recorded as sent with its result unknown, never missing, and never counted as forwarded |
 | The audit insert fails | the request refused `502` with `x-cogmo-egress: upstream_error` | fails closed; `ctx.http` raises `network_error` |
 | The master key rotates | `cogmo serve` stopped first ([infrastructure.md → Master-key rotation](infrastructure.md#master-key-rotation-proposed)) | no run holds a credential; a run the stop left at `started` or `dispatched` is swept |
 | A tier-2 skill needing raw TCP | no route | the skill fails: non-HTTP egress is denied ([Decisions](#decisions)) |
@@ -1669,12 +1790,12 @@ async def run(inputs: Input, ctx: Ctx) -> Output: ...
 | lost | `result_lost` (swept after dispatch, so the body may have acted) | no | no |
 | legacy | `unknown`: only the migration writes it, on error rows from before the column | no | no |
 
-- A failure before the skill executed is a `SkillInvokeRejection`, as today. A cron fire throws on `sandbox_unavailable`, so Inngest's retries apply; every other rejection is skipped, as today.
-- A run that executed is never re-run on its own key. A cron run ending in a pausing kind is re-fired once, after a backoff, under `skill-cron:<skillId>:<scheduledFor>:retry`.
+- A failure before the skill executed is a `SkillInvokeRejection`, as today. A cron fire throws on `sandbox_unavailable`, so Inngest's retries apply; every other rejection is skipped, as today, `[proposed]` recorded as the fire's `skip_reason` ([Cron fires](#cron-fires-proposed)).
+- A run that executed is never re-run on its own key. A cron run ending in a pausing kind is re-fired once, after a backoff, under `skill-cron:<skillId>:<scheduledFor>:retry`, as the fire's attempt-1 row ([Cron fires](#cron-fires-proposed)).
 - `output_invalid` keeps what the skill returned, so the run is debuggable and the model is told its effects happened: `chk_skill_runs_outcome` admits `output` on an error verdict only with that kind.
 - A non-JSON output (`NaN`, a `set`) is `output_invalid`, decided in the worker before `transitionToExecuted`, so a host-side parse never strands the row at `started`.
 
-**Events.** Every run that finishes with an error emits `skills/run.failed` `{ skillId, runId, trigger, errorKind }`. Cron and event runs notify their run-as user: the skill, the error, the last success, and Disable. Tool runs reach the user through the model. The same subscriber applies the auto-disable rule ([Notifications and undo](#notifications-and-undo)), and `skills.disabled_reason` (`awaiting_first_deploy | operator | deregistered | error_rate`, set iff `disabled`) records why a skill is off, naming the activation states that `disabled` alone encodes. The emit follows the commit that finishes the run, so a crash between them loses it. **Residual:** that notification is lost, though the run shows in `cogmo skills runs` and the activity view; auto-disable reads `skill_runs` at the live sha, not a counter, so it counts the failure at the next one.
+**Events.** Every run that finishes with an error emits `skills/run.failed` `{ skillId, runId, trigger, errorKind }`. Cron and event runs notify their run-as user: the skill, the error, the last success, and Disable. Tool runs reach the user through the model. The same subscriber applies the auto-disable rule ([Notifications and undo](#notifications-and-undo)), and `skills.activation` records why a skill is off ([Skill activation](#skill-activation-proposed)). The emit follows the commit that finishes the run, so a crash between them loses it. **Residual:** that notification is lost, though the run shows in `cogmo skills runs` and the activity view; auto-disable reads `skill_runs` at the live sha, not a counter, so it counts the failure at the next one.
 
 **Stuck runs** `[proposed]`, S3's. Dispatch is a transition: immediately before it sends `task_invoke`, every runtime moves the row `started → dispatched` by conditional UPDATE, writing `deadline_at` (now, plus `wall_clock_s`, plus 60 s for the kill and the result frame). Zero rows means the sweeper took the run, and the task is not sent. `skill-runs-sweeper` runs every 5 min and moves a stuck row to `finished`, writing `finished_at`, `resource_usage` (`wallClockMs` from `created_at`, `peakMemoryBytes` null) and the `error` text, as `chk_skill_runs_executed_payload` and `chk_skill_runs_outcome` require:
 
@@ -1685,7 +1806,7 @@ async def run(inputs: Input, ctx: Ctx) -> Output: ...
 
 Each move is a conditional UPDATE on the row's recovery point, and revokes the run's egress credential with it. A late `transitionToExecuted` then matches no row and returns `swept`, logged with the output it discards, rather than throwing. A keyed retry replays the swept error instead of reading `inflight` forever. **Residual:** a row a build without `dispatched` left at `started` may have executed, and is swept as `host_lost`, so its cron fire re-fires once; this happens only across the deploy that ships S3.
 
-**Audit columns.** `skill_runs` gains `git_sha`, `run_as_user_id`, `run_as_profile_id`, `shadow` and `deadline_at`. `skill_context_calls.error` becomes the `ctx_error_kind` pgEnum, and `secrets.get` fails closed when its audit row cannot be written. Backfills, in the migration of the slice that adds each column: with the run schema (todo.md → Skills autonomy S3), error runs get `error_kind = 'unknown'` and `shadow` is `false`; with the failure events (S12), context-call errors map each known `CtxErrorKind` string to its value and anything else to `unknown`, and disabled skills get `awaiting_first_deploy` when their sha has no live deploy, else `unknown`, since nothing recorded whether an operator or `deregister` turned them off.
+**Audit columns.** `skill_runs` gains `git_sha`, `run_as_user_id`, `run_as_profile_id`, `shadow` and `deadline_at`. `skill_context_calls.error` becomes the `ctx_error_kind` pgEnum, and `secrets.get` fails closed when its audit row cannot be written. Backfills, in the migration of the slice that adds each column: with the run schema (todo.md → Skills autonomy S3), error runs get `error_kind = 'unknown'` and `shadow` is `false`; with the failure events (S12), context-call errors map each known `CtxErrorKind` string to its value and anything else to `unknown`, and `skills.activation` is backfilled as [Skill activation](#skill-activation-proposed) states.
 
 ## Observability `[proposed]`
 
@@ -1697,6 +1818,7 @@ The database answers what an operator asks of a skill:
 | Which hosts, with which verbs, and how much data | `skill_egress` by run: method, origin, path, bytes, status, denials |
 | Which secrets, and where they went | `skill_context_calls` (`secrets.get`) and `skill_egress.bindings` (`substituted`, `misuse`) |
 | What it wrote | `skill_context_calls` for memory and files; `skill_egress` for every proxied request, with its method |
+| Why a scheduled fire did not run `[proposed]` | `skill_cron_fires` by skill and `scheduled_for`: status, `skip_reason`, the run it dispatched |
 | What it cost | `resource_usage` (wall clock, peak memory), and declared `cost_per_call_usd` summed per run |
 | How it got here | `skill_deploys` (tier, reasons, `classifier_log`), and the draft: spec card, rounds, verify reports, reviews |
 
@@ -1806,22 +1928,30 @@ CREATE TYPE skill_run_error_kind AS ENUM ('skill_raised', 'output_invalid', 'loa
   'memory_exceeded', 'skill_failed', 'input_invalid', 'skill_retryable', 'runtime_unavailable',
   'dependency_unavailable', 'egress_unavailable', 'credential_unavailable', 'host_lost', 'result_lost',
   'unknown');   -- 'unknown': migration backfill only
-CREATE TYPE skill_disabled_reason AS ENUM ('awaiting_first_deploy', 'operator', 'deregistered', 'error_rate', 'unknown');
-CREATE TYPE skill_egress_outcome AS ENUM ('forwarded', 'shadowed', 'denied', 'failed');
+CREATE TYPE skill_activation AS ENUM ('awaiting_first_deploy', 'live', 'disabled_operator', 'deregistered', 'disabled_error_rate');
+CREATE TYPE skill_egress_outcome AS ENUM ('pending', 'forwarded', 'shadowed', 'denied', 'failed');
 CREATE TYPE skill_egress_class AS ENUM ('run', 'populate', 'verify_install', 'verify_code', 'review');
 CREATE TYPE skill_verify_phase AS ENUM ('install', 'code', 'register_install', 'register_code', 'done');
+CREATE TYPE skill_draft_attempt_outcome AS ENUM ('coding_retry', 'coding_revise', 'verify_revise', 'review_revise', 'register_rejected',
+  'deployed', 'base_moved', 'abandoned', 'failed');
 CREATE TYPE deployment_flag_reason AS ENUM ('calibration_passed', 'calibration_failed', 'recalibration_pending', 'model_drift',
   'no_second_family');
 ALTER TYPE skill_deploy_status ADD VALUE 'blocked';   -- terminal: resolved_at set
 ALTER TYPE skill_deploy_status ADD VALUE 'superseded';   -- terminal: resolved_at set; a pending deploy a re-merge replaced; no CHECK names it
 CREATE TYPE skill_approval_class AS ENUM (/* SKILL_EFFECTS */ ..., 'raw_secret', 'reads_and_egress', 'sensitive_dependency');
 CREATE TYPE skill_egress_failure_reason AS ENUM ('host_not_allowed', 'blocked_address', 'credential_revoked',
-  'credential_unavailable', 'not_http', 'too_large', 'timeout', 'upstream_error', 'client_aborted');
+  'credential_unavailable', 'not_http', 'too_large', 'timeout', 'upstream_error', 'client_aborted', 'process_lost');
+CREATE TYPE skill_register_phase AS ENUM ('register_install', 'register_code', 'done');
 ALTER TYPE skill_run_recovery_point ADD VALUE 'dispatched';   -- started | dispatched | executed | finished; no CHECK names it, so it shares their migration
 CREATE TYPE egress_ca_status AS ENUM ('active', 'retiring', 'retired');
 CREATE TYPE calibration_run_status AS ENUM ('running', 'passed', 'stale', 'failed');
-CREATE TYPE calibration_failure_reason AS ENUM ('below_floor', 'step_error');
+CREATE TYPE calibration_failure_reason AS ENUM ('below_floor', 'step_error', 'lost');
 CREATE TYPE skill_shadow_fire_status AS ENUM ('owed', 'claimed', 'completed', 'superseded');
+CREATE TYPE skills_mirror_status AS ENUM ('synced', 'behind', 'diverged');
+CREATE TYPE skills_mirror_failure AS ENUM ('rejected', 'unreachable', 'auth', 'timeout');
+CREATE TYPE skill_cron_fire_status AS ENUM ('owed', 'dispatched', 'skipped', 'completed', 'retry_owed');
+CREATE TYPE skill_cron_skip_reason AS ENUM ('skill_not_found', 'not_scheduled', 'skill_disabled', 'invalid_inputs', 'sandbox_unavailable',
+  'inflight', 'handler_failed', 'expired');
 
 skill_drafts (
   id                 UUID v7 PK,
@@ -1840,7 +1970,8 @@ skill_drafts (
   spec_version       INT NOT NULL,
   state              JSONB NOT NULL,           -- SkillDraftStateSchema, discriminated on status; CHECK state->>'status' = status;
                                                -- post-approval variants carry specApproval ('requester' | 'auto' | 'repair'),
-                                               -- author_unavailable an optional cause 'admission', risk_blocked its reasons (SkillRiskReason[]),
+                                               -- author_unavailable an optional cause ('admission' | 'repo_unconfigured'), risk_blocked its reasons (SkillRiskReason[]),
+                                               -- reviewer_unavailable its cause and reviewers, rounds_exhausted its cause (an attempt outcome),
                                                -- specifying and awaiting_approval the card { specVersion, text } their gate message showed
   blocked_reason     skill_draft_blocked_reason,  -- nullable: set iff status = 'blocked' (CHECK)
   end_reason         skill_draft_end_reason,      -- nullable: set iff status IN ('abandoned', 'failed') (CHECK)
@@ -1866,6 +1997,9 @@ skill_draft_rounds (
   deps_hash        TEXT,                     -- nullable: the lockfile hash verify-install populated; null in 'install', and throughout for a skill with
                                              -- no dependencies; CHECK verify_phase <> 'install' OR deps_hash IS NULL
   verify_resets    INT NOT NULL,             -- 0 at insert; +1 per phase reset; in every verify credential; steps reset while < 2, owner taps past it
+  outcome          skill_draft_attempt_outcome,  -- nullable: why the attempt ended; set iff verify_phase = 'done' (CHECK)
+  pr_closed_at     TIMESTAMPTZ,              -- nullable: set when its PR is closed; CHECK pr_closed_at IS NULL OR verify_phase = 'done'
+  -- CHECK tip_sha IS NOT NULL OR verify_phase IN ('install', 'done'); CHECK verify_report IS NULL OR tip_sha IS NOT NULL
   panel            JSONB,                    -- nullable: ReviewPanelSchema { members, modelIds, checklistVersion, calibrationRunId }; set when the round enters reviewing,
                                              -- by the transition that writes verify_report: CHECK panel IS NULL OR verify_report IS NOT NULL
   created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -1884,6 +2018,17 @@ skill_draft_reviews (
   findings           JSONB NOT NULL,         -- SkillFindingsSchema
   created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (draft_id, round, attempt, reviewer)  -- written through ON CONFLICT DO UPDATE with a no-op SET
+)
+
+skills_repo_mirror (
+  id            UUID v7 PK,
+  singleton     BOOLEAN NOT NULL UNIQUE CHECK (singleton),
+  status        skills_mirror_status NOT NULL,   -- transitions in Repo location → Mirror state
+  local_sha     TEXT,                  -- nullable: null before main is born; main as the last advancing transaction left it
+  pushed_sha    TEXT,                  -- nullable: null before the first push lands
+  last_failure  skills_mirror_failure, -- nullable: the last failed push's cause; CHECK status <> 'synced' OR last_failure IS NULL,
+                                       -- CHECK status <> 'diverged' OR last_failure = 'rejected'
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 )
 
 skills_repo_layout (
@@ -1911,21 +2056,30 @@ skill_approval_classes (
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 )
 
+skill_register_sessions (
+  id          UUID v7 PK,
+  skill_name  TEXT NOT NULL,
+  tip_sha     TEXT NOT NULL,
+  phase       skill_register_phase NOT NULL,   -- which verify credential the proxy admits; transitions in Draftless register phases
+  expires_at  TIMESTAMPTZ NOT NULL,            -- 10 min after insert; nothing is admitted past it
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+)
+
 skill_egress (
   id              UUID v7 PK,
   run_id          UUID REFERENCES skill_runs(id),           -- nullable: the subject of run and populate requests
   draft_round_id  UUID REFERENCES skill_draft_rounds(id),   -- nullable: the subject of verify and review requests inside a draft
-  register_skill_name TEXT,                                -- nullable: with register_tip_sha, the subject of a draftless register's verify requests
-  register_tip_sha    TEXT,                                -- nullable: set iff register_skill_name is (CHECK)
+  register_session_id UUID REFERENCES skill_register_sessions(id),  -- nullable: the subject of a draftless register's verify requests
   credential_class skill_egress_class NOT NULL,
-  -- CHECK exactly one subject: run_id, draft_round_id, or the register pair
+  -- CHECK exactly one subject: run_id, draft_round_id or register_session_id
   -- CHECK credential_class IN ('run', 'populate') = (run_id IS NOT NULL)
   method          TEXT NOT NULL,
   origin          TEXT NOT NULL,
   path            TEXT NOT NULL,             -- never the query string; a path binding's templated segment as the template, never the value
   request_bytes   INT NOT NULL,
   response_bytes  INT,                       -- nullable: null until the response completes the row
-  status          INT,                       -- nullable: null when denied, failed before a response, or not yet completed
+  status          INT,                       -- nullable: null when denied, failed before a response, or pending;
+                                             -- CHECK (outcome = 'pending') = (status IS NULL AND response_bytes IS NULL AND failure_reason IS NULL)
   outcome         skill_egress_outcome NOT NULL,
   failure_reason  skill_egress_failure_reason,  -- nullable: set iff outcome IN ('denied', 'failed') (CHECK)
   bindings        JSONB NOT NULL,            -- EgressBindingsSchema: [{ secret, event: 'substituted' | 'misuse' }]
@@ -1957,6 +2111,21 @@ skill_shadow_fires (
   -- UNIQUE (skill_id) WHERE status IN ('owed', 'claimed')
 )
 
+skill_cron_fires (
+  id            UUID v7 PK,
+  skill_id      UUID NOT NULL REFERENCES skills(id),
+  scheduled_for TIMESTAMPTZ NOT NULL,         -- the schedule's slot, as the ticker computed it
+  attempt       INT NOT NULL,                 -- 0 the fire, 1 the pausing re-fire; CHECK attempt IN (0, 1) AND (status <> 'retry_owed' OR attempt = 1)
+  status        skill_cron_fire_status NOT NULL,
+  due_at        TIMESTAMPTZ NOT NULL,         -- scheduled_for at attempt 0; the backoff's end at attempt 1
+  run_id        UUID REFERENCES skill_runs(id),  -- nullable: set iff status IN ('dispatched', 'completed') (CHECK)
+  skip_reason   skill_cron_skip_reason,       -- nullable: set iff status = 'skipped' (CHECK)
+  skip_detail   TEXT,                         -- nullable: the rejection's text, when it has one
+  resolved_at   TIMESTAMPTZ,                  -- nullable: set iff status IN ('skipped', 'completed') (CHECK)
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (skill_id, scheduled_for, attempt)  -- written through ON CONFLICT DO UPDATE with a no-op SET
+)
+
 egress_ca_generations (
   id          UUID v7 PK,
   generation  INT NOT NULL UNIQUE,
@@ -1985,9 +2154,11 @@ egress_ca_generations (
                                      -- on a live row an approve-time merge wrote: CHECK (reviewed_git_sha = git_sha OR status = 'live'); backfill: git_sha
 
 -- skills gains:
-  disabled_reason    skill_disabled_reason,  -- nullable: set iff disabled (CHECK); backfill: 'awaiting_first_deploy' where the sha has no live deploy, else 'unknown'
+  activation         skill_activation NOT NULL,  -- the activation state; CHECK disabled = (activation <> 'live') (chk_skills_disabled_iff_not_live);
+                                                 -- backfill in Skill activation
 
--- skill_context_calls.error becomes ctx_error_kind (the CtxErrorKind set, plus 'unknown' for unmapped legacy text); http.request rows give way to skill_egress
+-- skill_context_calls.error becomes ctx_error_kind (the CtxErrorKind set, plus 'unknown' for unmapped legacy text), with CHECK ok = (error IS NULL);
+-- http.request rows give way to skill_egress
 ```
 
 `classifier_log` gains `reasons` (`SkillRiskReason[]`, [Risk tiers](#risk-tiers-without-a-human) → Reasons), `approvalClasses` (the `skill_approval_classes` an `opted_in` reason matched), `declared_network` and the capability flags it read, so a deploy records why it got its tier. `skill_deploys.approved_by` also holds an Override's owner.
