@@ -12,6 +12,7 @@ TypeScript on Node.js across a pnpm workspace: the long-running backend (`apps/s
 | Build | tsup | esbuild-powered production builds, zero config |
 | Type check | tsc --noEmit | Separate from build — run in CI and as watch process |
 | HTTP | `node:http` + oRPC + sirv | No framework: the UI server routes on raw `node:http`, serves the admin API through oRPC's node handler and the SPA through sirv — see [web-ui.md](web-ui.md) |
+| Egress interception | mockttp | In-process HTTPS-intercepting forward proxy for skill egress; the policy is Cogmo's — see [skills.md](skills.md#egress-proxy-proposed) |
 | Validation | Zod v4 | 14x faster than v3, 78+ integrating libraries, ecosystem standard |
 | ORM | Drizzle | SQL-like query chains, TS-native schema, tiny (5KB) |
 | Migrations | drizzle-kit | Schema diffs → SQL files, comes with Drizzle |
