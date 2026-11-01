@@ -76,13 +76,15 @@ The `v1` tag enables future re-derivation without rotating the master key. If a 
 Four purposes derive from the master key: `secrets-at-rest` (every `secrets` row, the skills egress CA among them), `s3-objects` (under `S3_CLIENT_ENCRYPT`), `web-login-token`, and `skill-egress` (per-run egress credentials, [skills.md → Egress proxy](skills.md#egress-proxy-proposed)). Rotation is offline, and no slice builds it yet:
 
 1. Stop `cogmo serve`, so no run holds an egress credential.
-2. `cogmo rotate-master-key --new-key-file <path>` decrypts every `secrets` row under the current key and re-encrypts it under the new one, each with a fresh nonce, in one transaction; a row that fails to decrypt aborts it with nothing written. It refuses while `S3_CLIENT_ENCRYPT` is on, since re-encrypting objects cannot share that transaction and has no design yet.
-3. Point `COGMO_MASTER_KEY` (or `_FILE`) at the new key and start `cogmo serve`. `cogmo web-token` prints the new login token; web sessions are unaffected.
+2. `cogmo rotate-master-key --new-key-file <path>` takes the bootstrap lock and refuses while any `cogmo_instances` row has `stopped_at IS NULL`, so no live instance can write under the old key after the commit. It decrypts every `secrets` row under the current key and re-encrypts it under the new one, each with a fresh nonce, in one transaction; a row that fails to decrypt aborts it with nothing written. It refuses while `S3_CLIENT_ENCRYPT` is on or any encrypted object exists (the `deployment_flags` row `s3.encrypted_objects`, set by the first encrypted write and never cleared), since re-encrypting objects cannot share that transaction and has no design yet.
+3. Point `COGMO_MASTER_KEY` (or `_FILE`) at the new key and start `cogmo serve`. Boot decrypts one `secrets` row before it serves anything and refuses to start when the key does not fit, so a wrong key writes nothing. `cogmo web-token` prints the new login token; web sessions are unaffected.
 
 | Failure mode | State left | Why it is safe, or the residual |
 |-|-|-|
-| The command crashes, or a row fails to decrypt | every row under the old key | one transaction; fix the cause and rerun |
-| The key is swapped without running the command | no secret decrypts | restore the old key: the rows are unchanged |
+| The command crashes before its commit, or a row fails to decrypt | every row under the old key | one transaction; fix the cause and rerun with the old key still configured |
+| The command crashes after its commit | every row under the new key; the operator's configuration still names the old one | step 3 proceeds: boot refuses the old key, which is the signal to switch. Rerunning with the old key fails at the first row and writes nothing |
+| The key is swapped without running the command | no secret decrypts; boot refuses to start | restore the old key: the rows are unchanged, and the refused boot wrote none |
+| `cogmo serve` is live when the command runs | the command refuses | the `cogmo_instances` check under the bootstrap lock; **residual:** an instance that died without writing `stopped_at` blocks rotation until the reaper settles its row |
 | A skill run the stop left at `started` or `dispatched` | its egress credential no longer verifies | the sweeper settles it ([skills.md → Run failures](skills.md#run-failures)) |
 
 ### `_FILE` convention for Docker secrets
