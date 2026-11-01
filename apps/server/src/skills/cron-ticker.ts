@@ -13,6 +13,13 @@
  *      `id = ${skillId}:${scheduledFor}` so Inngest dedup'es duplicate emits
  *      across retries.
  *
+ * The advance commits before the fan-out sends, so an advanced row is no
+ * longer due and no later tick re-locks it: the run's own retries are what
+ * deliver its fire. A failed `fan-out` retries against the memoized
+ * `lock-and-advance` result. Residual: a crash after the advance commits but
+ * before Inngest records the step re-runs it, finds the row not due, and that
+ * fire is lost.
+ *
  * Skills don't have a `catchup_missed` policy — a row whose `next_run_at`
  * is multiple days in the past fires once with that stale timestamp and
  * the row's `next_run_at` then skips forward to the first occurrence after
@@ -21,10 +28,10 @@
  *
  * Parallel to `src/agent/scheduling/ticker.ts` which serves the
  * `scheduled_tasks` table. Shared design: same FOR UPDATE SKIP LOCKED
- * pattern, same `retries: 0` + cron-as-recovery posture, same per-event
- * idempotency key shape. Separate tables and events because the dispatch
- * semantics differ (skills are host-scoped, `runner.invoke` instead of
- * synthetic-inbound rotation). See design/skills.md → Invocation.
+ * pattern, same per-event idempotency key shape. Separate tables and events
+ * because the dispatch semantics differ (skills are host-scoped,
+ * `runner.invoke` instead of synthetic-inbound rotation). See
+ * design/skills.md → Invocation.
  */
 
 import type { Inngest } from "inngest";
@@ -72,10 +79,11 @@ export function createSkillCronTicker(deps: SkillCronTickerDeps, inngest: Innges
   return inngest.createFunction(
     {
       id: "skill-cron-ticker",
-      // Pure dispatch — a transient DB blip shouldn't burn the retry
-      // budget; the next minute's tick re-locks any rows we missed. Same
-      // posture as `scheduled-task-ticker`: cron IS the recovery mechanism.
-      retries: 0,
+      // A failed step retries with every earlier step memoized: a failed
+      // `fan-out` re-sends the advanced rows' events (deduped by id), and a
+      // failed `lock-and-advance` rolled back, so re-locking is safe. Later
+      // ticks queue behind a run that is backing off.
+      retries: 3,
       // Singleton: never run two ticker bodies concurrently. FOR UPDATE
       // SKIP LOCKED is defense in depth; the function-level cap keeps the
       // dashboard tidy.
