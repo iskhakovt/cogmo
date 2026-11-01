@@ -71,6 +71,20 @@ The `v1` tag enables future re-derivation without rotating the master key. If a 
 
 **Why `@noble/ciphers`:** Stateless API (`gcm(key, nonce).encrypt(plaintext)`) eliminates the call-order footguns in `node:crypto`'s stateful cipher API. Cure53-audited (September 2024, full scope). ~11 KB gzipped, pure TS.
 
+### Master-key rotation `[proposed]`
+
+Four purposes derive from the master key: `secrets-at-rest` (every `secrets` row, the skills egress CA among them), `s3-objects` (under `S3_CLIENT_ENCRYPT`), `web-login-token`, and `skill-egress` (per-run egress credentials, [skills.md → Egress proxy](skills.md#egress-proxy-proposed)). Rotation is offline, and no slice builds it yet:
+
+1. Stop `cogmo serve`, so no run holds an egress credential.
+2. `cogmo rotate-master-key --new-key-file <path>` decrypts every `secrets` row under the current key and re-encrypts it under the new one, each with a fresh nonce, in one transaction; a row that fails to decrypt aborts it with nothing written. It refuses while `S3_CLIENT_ENCRYPT` is on, since re-encrypting objects cannot share that transaction and has no design yet.
+3. Point `COGMO_MASTER_KEY` (or `_FILE`) at the new key and start `cogmo serve`. `cogmo web-token` prints the new login token; web sessions are unaffected.
+
+| Failure mode | State left | Why it is safe, or the residual |
+|-|-|-|
+| The command crashes, or a row fails to decrypt | every row under the old key | one transaction; fix the cause and rerun |
+| The key is swapped without running the command | no secret decrypts | restore the old key: the rows are unchanged |
+| A skill run the stop left at `started` or `dispatched` | its egress credential no longer verifies | the sweeper settles it ([skills.md → Run failures](skills.md#run-failures)) |
+
 ### `_FILE` convention for Docker secrets
 
 Standard Docker pattern (Postgres, MariaDB, Redis, Keycloak). For any env var `FOO`, if `FOO_FILE` is set, read the file contents and use as the value. Applied to `COGMO_MASTER_KEY`, `DATABASE_URL`, `HINDSIGHT_API_KEY`, `INNGEST_EVENT_KEY` and `INNGEST_SIGNING_KEY` in `src/env.ts`. Extensible to any env var.
