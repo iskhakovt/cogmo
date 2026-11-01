@@ -16,9 +16,13 @@
  * The advance commits before the fan-out sends, so an advanced row is no
  * longer due and no later tick re-locks it: the run's own retries are what
  * deliver its fire. A failed `fan-out` retries against the memoized
- * `lock-and-advance` result. Residual: a crash after the advance commits but
- * before Inngest records the step re-runs it, finds the row not due, and that
- * fire is lost.
+ * `lock-and-advance` result. Two residuals lose the fire:
+ *
+ *   - `fan-out` fails all its retries.
+ *   - The advance commits but Inngest never records the step's result (a
+ *     crash, or the Inngest server unreachable), so the retry re-runs it and
+ *     finds the row not due. Self-hosted, the event API and the step store
+ *     are one server, so one outage can cause both.
  *
  * Skills don't have a `catchup_missed` policy — a row whose `next_run_at`
  * is multiple days in the past fires once with that stale timestamp and
@@ -81,8 +85,11 @@ export function createSkillCronTicker(deps: SkillCronTickerDeps, inngest: Innges
       id: "skill-cron-ticker",
       // A failed step retries with every earlier step memoized: a failed
       // `fan-out` re-sends the advanced rows' events (deduped by id), and a
-      // failed `lock-and-advance` rolled back, so re-locking is safe. Later
-      // ticks queue behind a run that is backing off.
+      // failed `lock-and-advance` rolled back, so re-locking is safe. A run
+      // in retry backoff holds no concurrency slot, so later ticks run
+      // meanwhile and lock only rows still due, none of the retrying run's;
+      // an every-minute schedule can deliver a later fire before the retried
+      // earlier one, which is harmless.
       retries: 3,
       // Singleton: never run two ticker bodies concurrently. FOR UPDATE
       // SKIP LOCKED is defense in depth; the function-level cap keeps the

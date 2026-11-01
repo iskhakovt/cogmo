@@ -249,6 +249,9 @@ describe("runSkillCronTick", () => {
   });
 });
 
+/** The event Inngest triggers a cron function with. */
+const CRON_TICK = { name: "inngest/scheduled.timer", data: { cron: "* * * * *" } };
+
 /** The `_send` argument of a `fan-out` batch; only the dedup ids are read. */
 const FanOutArgsSchema = z.object({ payload: z.array(z.object({ id: z.string() })) });
 
@@ -333,7 +336,7 @@ describe("createSkillCronTicker (Inngest wiring)", () => {
 
     await new InngestTestEngine({
       function: fn,
-      events: [{ name: "inngest/function.invoked", data: {} } as never],
+      events: [CRON_TICK],
     }).execute();
 
     expect(sendSpy).toHaveBeenCalledTimes(1);
@@ -353,13 +356,13 @@ describe("createSkillCronTicker (Inngest wiring)", () => {
   /**
    * One ticker run as the Inngest server drives it: `lock-and-advance` runs
    * and is memoized, then each attempt replays it and runs `fan-out`. A
-   * failed attempt is retried while the function's budget lasts; the server
-   * gives a function `retries + 1` attempts.
+   * failed `fan-out` is retried while its budget lasts; the server gives
+   * each step `retries + 1` attempts.
    */
   async function runTick(fn: ReturnType<typeof createSkillCronTicker>): Promise<void> {
     const engine = new InngestTestEngine({
       function: fn,
-      events: [{ name: "inngest/function.invoked", data: {} } as never],
+      events: [CRON_TICK],
     });
     const advanced = await engine.executeStep("lock-and-advance");
     const attempts = expectDefined(fn.opts.retries, "retries") + 1;
@@ -424,7 +427,7 @@ describe("createSkillCronTicker (Inngest wiring)", () => {
     ];
     await new InngestTestEngine({
       function: fn,
-      events: [{ name: "inngest/function.invoked", data: {} } as never],
+      events: [CRON_TICK],
       steps: [{ id: "lock-and-advance", handler: () => cachedEvents }],
     }).execute();
 
