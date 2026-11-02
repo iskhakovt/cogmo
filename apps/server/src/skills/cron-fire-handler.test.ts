@@ -231,6 +231,27 @@ describe("createSkillCronFireHandler", () => {
     );
   });
 
+  it("skips a terminal tier-1 package failure at once, without spending retries", async () => {
+    const runner = mock<SkillRunner>();
+    runner.invoke.mockResolvedValue(
+      err({
+        kind: "tier1_packages_unavailable",
+        name: "morning-brief",
+        error: { kind: "hash_mismatch", spec: "idna==3.10", message: "sha256 differs" },
+      }),
+    );
+    const fn = createSkillCronFireHandler(deps(runner), inngest);
+
+    const { result, error } = await new InngestTestEngine({
+      function: fn,
+      events: [baseEvent],
+      transformCtx: (ctx) => ({ ...mockCtx(ctx), attempt: 0 }),
+    }).execute();
+
+    expect(error).toBeUndefined();
+    expect(result).toMatchObject({ status: "skipped", reason: "tier1_packages_unavailable" });
+  });
+
   it("skips with reason 'tier1_packages_unavailable' on the final attempt", async () => {
     const runner = mock<SkillRunner>();
     runner.invoke.mockResolvedValue(

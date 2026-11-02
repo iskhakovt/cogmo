@@ -54,13 +54,33 @@ const CRON_FIRE_RETRIES = 2;
 
 /**
  * Whether a retry of the fire may clear the rejection: tier-1 packages the
- * host could not fetch are fetched again by the next attempt. Retries can't
- * repair the rest.
+ * host could not fetch, verify or publish are fetched again by the next
+ * attempt. A wheel with no pure build or a hash the lockfile does not carry
+ * is terminal for the lockfile, and retries can't repair the rest.
  */
 function retriesClear(rejection: SkillInvokeRejection): boolean {
-  return match(rejection.kind)
-    .with("tier1_packages_unavailable", () => true)
-    .with("not_found", "disabled", "invalid_inputs", "sandbox_unavailable", "inflight", () => false)
+  return match(rejection)
+    .with({ kind: "tier1_packages_unavailable" }, ({ error }) =>
+      match(error.kind)
+        .with(
+          "network_failed",
+          "prefetch_failed",
+          "publish_failed",
+          "bundled_unreadable",
+          "builtin_integrity",
+          () => true,
+        )
+        .with("wheel_unavailable", "hash_mismatch", () => false)
+        .exhaustive(),
+    )
+    .with(
+      { kind: "not_found" },
+      { kind: "disabled" },
+      { kind: "invalid_inputs" },
+      { kind: "sandbox_unavailable" },
+      { kind: "inflight" },
+      () => false,
+    )
     .exhaustive();
 }
 
