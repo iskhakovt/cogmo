@@ -37,9 +37,11 @@ export interface BoundaryJanitorDeps {
  * with the dedup id `inbound-arrived-${inboundMessageId}` so a waiter +
  * janitor double-resolution collapses at the bus.
  *
- * `retries: 0` matches the `skill-cron-ticker` / `scheduled-task-ticker`
- * posture: a DB blip burns no retry budget, the next tick re-scans. The
- * concurrency cap keeps two janitor bodies from running concurrently.
+ * `retries: 0`: a failure before `resolveBoundary` commits burns no retry
+ * budget, the next tick re-scans the row. A failure of the `inbound/arrived`
+ * send after the commit is not recovered this way: the row is gone, so the
+ * buffered messages stay drained and unannounced (todo.md → Scheduling).
+ * The concurrency cap keeps two janitor bodies from running concurrently.
  */
 export function createBoundaryJanitor(deps: BoundaryJanitorDeps) {
   const gracePeriodMs = deps.gracePeriodMs ?? 60_000;
