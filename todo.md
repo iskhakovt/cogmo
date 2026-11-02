@@ -340,6 +340,7 @@ One PR per slice, in order; each later slice assumes the earlier ones.
 - [ ] `p3` Decide the LLM layer's error channel: a sealed failure union returned as a value, or the exception recorded in `.agents/rules/code-style.md`, so `instanceof` dispatch and Results unwrapped into throws stop being relitigated. (deep review 2026-10-27, A9)
 - [ ] `p3` Delete what nothing consumes: `MemoryProvider.retain` and `Service.memory.retain`, `updateChannelCredentials`, `TaskScope.parentContainerRowId`, and the sandbox `networks`/`volumes` store methods unless the proxy's row inserts give them a writer. (deep review 2026-10-27, L1)
 - [ ] `p3` Move `deriveCauseClass` and `calculateElapsedCooldown` out of `inngest/events.ts` into the agent's resilience code. (deep review 2026-10-27, L10)
+- [ ] `p3` Narrow the error type of `transport.skills.approveDeploy`, `denyDeploy` and `disableById` to the codes they return, so `keepsSkillsKeyboard` (`telegram/commands/keyboard-callbacks.ts`) can match them with `.exhaustive()` instead of `.otherwise` over the transport-wide `TransportError`; a new skills code would then fail to compile rather than clear the keyboard by default. (S1 review 2026-11-02)
 
 ### CLI & developer experience
 
