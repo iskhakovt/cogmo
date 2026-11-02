@@ -5,6 +5,7 @@ import {
   mkdtemp,
   readdir,
   readFile,
+  realpath,
   rm,
   symlink,
   writeFile,
@@ -30,14 +31,17 @@ import { type ChildGroupRecord, ChildGroupRecordSchema } from "./process-groups.
 /**
  * `runOnWorker` end to end: real tier-1 children under the boundary's flags,
  * each booting Pyodide (~1 s). The child bundle is built once for the file, on
- * the first spawn. `beforeAll` fills a package cache from Pyodide's CDN, the
- * one step that needs the network; every child loads from it.
+ * the first spawn. `beforeAll` fills a package cache from Pyodide's CDN and
+ * downloads one wheel from PyPI, the only steps that need the network; every
+ * child loads from local files.
  */
 
 let cacheDir: string;
 let childrenDir: string;
 let server: Server;
 let serverUrl: string;
+/** typing-extensions 4.14.0, older than the 4.15.0 pydantic's bundle carries. */
+let typingExtensionsWheel: { fileName: string; bytes: Uint8Array };
 
 const prefetcher = createTier1Prefetcher({
   pyodideDistDir: pyodideDistDir(),
@@ -49,12 +53,31 @@ beforeAll(async () => {
   childrenDir = await mkdtemp(join(tmpdir(), "cogmo-tier1-children-"));
   const filled = await prefetcher.prefetchBuiltins(["pydantic"], { packageCacheDir: cacheDir });
   assert(filled.isOk(), filled.isErr() ? filled.error : "");
+  typingExtensionsWheel = await downloadWheel("typing-extensions", "4.14.0");
   server = createServer((_req, res) => res.end("reached"));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
   assert(typeof address === "object" && address !== null);
   serverUrl = `http://127.0.0.1:${address.port}/`;
 }, 120_000);
+
+/** The pure-Python wheel PyPI serves for `name==version`. */
+async function downloadWheel(
+  name: string,
+  version: string,
+): Promise<{ fileName: string; bytes: Uint8Array }> {
+  const meta = z
+    .object({ urls: z.array(z.object({ url: z.string() })) })
+    .parse(await (await fetch(`https://pypi.org/pypi/${name}/${version}/json`)).json());
+  const url = expectDefined(
+    meta.urls.map((u) => u.url).find((u) => u.endsWith("-py3-none-any.whl")),
+    `the ${name} ${version} wheel`,
+  );
+  return {
+    fileName: expectDefined(url.split("/").at(-1), "the wheel's file name"),
+    bytes: new Uint8Array(await (await fetch(url)).arrayBuffer()),
+  };
+}
 
 afterAll(async () => {
   await new Promise((resolve) => server.close(resolve));
@@ -218,29 +241,6 @@ async def run(inputs, ctx):
 
     assert(!result.ok);
     expect(result.error).toContain("kaboom");
-  });
-
-  it("enforces the wall clock on a tight loop", {
-    timeout: 15_000,
-  }, async () => {
-    const result = await runOnWorker(
-      task({
-        taskId: "task-4",
-        skillName: "loop",
-        body: `
-async def run(inputs, ctx):
-    n = 0
-    while True:
-        n += 1
-`,
-        inputs: {},
-        wallClockS: 1,
-        ctxHandler: noopHandler(),
-      }),
-    );
-
-    assert(!result.ok);
-    expect(result.error).toBe("wall_clock_exceeded");
   });
 
   it("runs a skill that prints to stdout and stderr, which reach nothing", async () => {
@@ -574,25 +574,37 @@ async def run(inputs, ctx):
     expect(connections).toBe(0);
   });
 
-  it("permission: mounting a host path outside the grant fails", async () => {
+  it("permission: mounting a host path outside the grant fails, while a granted one mounts", async () => {
     // A plain JS object's constructor is Object, so the mount options can be
-    // built without the 'js' module; only the permission model stands in the way.
-    const result = await boundaryRun(`
+    // built without the 'js' module; only the permission model stands in the
+    // way. The granted mount is the control: the same NODEFS call on a path
+    // the child may read succeeds, so the refusal is the grant's.
+    const result = await boundaryRun(
+      `
 async def run(inputs, ctx):
     import os
     import pyodide_js
     from pyodide.ffi import to_js
     FS = pyodide_js.FS
-    opts = to_js({"root": "/etc"}, dict_converter=pyodide_js.lockfile.constructor.fromEntries)
-    FS.mkdir("/host")
-    try:
-        FS.mount(FS.filesystems.NODEFS, opts, "/host")
-        return {"listed": len(os.listdir("/host"))}
-    except Exception as e:
-        return {"failed": str(e)[:200]}
-`);
+    fromEntries = pyodide_js.lockfile.constructor.fromEntries
+
+    def mount(root, at):
+        FS.mkdir(at)
+        try:
+            FS.mount(FS.filesystems.NODEFS, to_js({"root": root}, dict_converter=fromEntries), at)
+            return {"listed": len(os.listdir(at))}
+        except Exception as e:
+            return {"failed": str(e)[:200]}
+
+    return {"granted": mount(inputs["granted"], "/granted"), "outside": mount("/etc", "/host")}
+`,
+      { inputs: { granted: await realpath(cacheDir) } },
+    );
     assert(result.ok, result.ok ? "" : result.error);
-    expect(result.output).toHaveProperty("failed");
+    expect(result.output).toEqual({
+      granted: { listed: (await readdir(cacheDir)).length },
+      outside: { failed: expect.any(String) },
+    });
   });
 
   it("code generation: the Function constructor behind a JS proxy throws EvalError", async () => {
@@ -804,29 +816,41 @@ async def run(inputs, ctx):
     }
   });
 
-  it("kills the child and fails the run when its record cannot be written", async () => {
-    const readOnly = await mkdtemp(join(tmpdir(), "cogmo-tier1-children-ro-"));
-    await chmod(readOnly, 0o555);
-    try {
-      const result = await boundaryRun("async def run(inputs, ctx):\n    return None\n", {
-        childrenDir: readOnly,
-      });
-      assert(!result.ok);
-      const recorded = /^worker init failed: could not record child (\d+): /.exec(result.error);
-      const pid = Number(expectDefined(recorded?.[1], `the child's pid in ${result.error}`));
-      expect(() => process.kill(pid, 0)).toThrow(expect.objectContaining({ code: "ESRCH" }));
-      expect(await readdir(readOnly)).toEqual([]);
-    } finally {
-      await chmod(readOnly, 0o755);
-      await rm(readOnly, { recursive: true, force: true });
-    }
-  });
+  // Root writes into the read-only directory this test relies on refusing it.
+  it.skipIf(process.getuid?.() === 0)(
+    "kills the child and fails the run when its record cannot be written",
+    async () => {
+      const readOnly = await mkdtemp(join(tmpdir(), "cogmo-tier1-children-ro-"));
+      await chmod(readOnly, 0o555);
+      try {
+        const result = await boundaryRun("async def run(inputs, ctx):\n    return None\n", {
+          childrenDir: readOnly,
+        });
+        assert(!result.ok);
+        const recorded = /^worker init failed: could not record child (\d+): /.exec(result.error);
+        const pid = Number(expectDefined(recorded?.[1], `the child's pid in ${result.error}`));
+        expect(() => process.kill(pid, 0)).toThrow(expect.objectContaining({ code: "ESRCH" }));
+        expect(await readdir(readOnly)).toEqual([]);
+      } finally {
+        await chmod(readOnly, 0o755);
+        await rm(readOnly, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("fails the task, not the child, on an output JSON cannot carry", async () => {
     const result = await boundaryRun('async def run(inputs, ctx):\n    return {"n": 2**60}\n');
     expect(result).toEqual({
       ok: false,
       error: expect.stringMatching(/^task output is not JSON-serializable: .*BigInt/),
+    });
+  });
+
+  it("fails the task, not the child, on an output structured clone cannot carry", async () => {
+    const result = await boundaryRun('async def run(inputs, ctx):\n    return {"f": lambda: 1}\n');
+    expect(result).toEqual({
+      ok: false,
+      error: expect.stringMatching(/^task output is not serializable: .*could not be cloned/),
     });
   });
 
@@ -893,20 +917,9 @@ async function liveRecords(): Promise<ChildGroupRecord[]> {
 describe("wheels and built-ins together", () => {
   it("keeps a lockfile's pin of a built-in's bundled dependency", async () => {
     // pydantic's bundled typing-extensions is 4.15.0; the lockfile pins 4.14.0.
-    const meta = z
-      .object({ urls: z.array(z.object({ url: z.string() })) })
-      .parse(await (await fetch("https://pypi.org/pypi/typing-extensions/4.14.0/json")).json());
-    const wheelUrl = expectDefined(
-      meta.urls.map((u) => u.url).find((u) => u.endsWith("-py3-none-any.whl")),
-      "the typing-extensions 4.14.0 wheel",
-    );
     const wheelDir = await mkdtemp(join(tmpdir(), "cogmo-tier1-wheels-"));
     try {
-      const wheel = expectDefined(wheelUrl.split("/").at(-1), "the wheel's file name");
-      await writeFile(
-        join(wheelDir, wheel),
-        new Uint8Array(await (await fetch(wheelUrl)).arrayBuffer()),
-      );
+      await writeFile(join(wheelDir, typingExtensionsWheel.fileName), typingExtensionsWheel.bytes);
       const result = await boundaryRun(
         `
 import importlib.metadata

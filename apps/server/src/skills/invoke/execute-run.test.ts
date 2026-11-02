@@ -1,4 +1,3 @@
-import { err, ok } from "neverthrow";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Transactor } from "../../db/index.js";
@@ -53,12 +52,14 @@ function runtimeConfig(resolve: RuntimeConfig["resolveTier1Packages"]): RuntimeC
 
 describe("executeRun", () => {
   const store = mock<SkillStore>();
+  const resolve = vi.fn<RuntimeConfig["resolveTier1Packages"]>();
+  const packages = { builtins: ["pydantic"], wheelDir: "/wheels/abc" };
 
   beforeEach(() => {
     store.transitionToExecuted.mockReset();
   });
 
-  async function execute(resolve: RuntimeConfig["resolveTier1Packages"]) {
+  async function execute() {
     return executeRun(
       {
         store,
@@ -77,53 +78,34 @@ describe("executeRun", () => {
           userId: "user-1",
           service: { memory: mock<SkillRunServices["memory"]>(), files: mockFilesService() },
         },
-        runtime: { kind: "wasm" },
+        runtime: { kind: "wasm", packages },
       },
     );
   }
 
-  it("fails a tier-1 run whose packages cannot be made available, and forks no child", async () => {
-    const outcome = await execute(async () =>
-      err({ kind: "prefetch_failed", message: "cdn down" }),
-    );
+  it("runs a tier-1 run with the packages its runtime carries, resolving none itself", async () => {
+    vi.mocked(dispatchToRuntime).mockResolvedValue({ ok: true, output: { echo: 1 } });
 
-    expect(outcome).toEqual({
-      kind: "error",
-      error: "tier1_packages_unavailable: prefetch_failed: cdn down",
-    });
-    expect(dispatchToRuntime).not.toHaveBeenCalled();
+    const outcome = await execute();
+
+    expect(outcome).toEqual({ kind: "output", output: { echo: 1 } });
+    expect(resolve).not.toHaveBeenCalled();
+    expect(vi.mocked(dispatchToRuntime).mock.calls[0]?.[1]).toEqual({ kind: "wasm", packages });
     expect(store.transitionToExecuted).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ id: "run-1", outcome }),
     );
   });
 
-  it("fails a tier-1 run whose built-in fails Pyodide's pinned sha256, naming the file", async () => {
-    const outcome = await execute(async () =>
-      err({
-        kind: "builtin_integrity",
-        fileName: "micropip-0.11.1-py3-none-any.whl",
-        message: "the prefetched file hashes to sha256:aa",
-      }),
+  it("records the runtime's error as the run's outcome", async () => {
+    vi.mocked(dispatchToRuntime).mockResolvedValue({ ok: false, error: "ValueError: boom" });
+
+    const outcome = await execute();
+
+    expect(outcome).toEqual({ kind: "error", error: "ValueError: boom" });
+    expect(store.transitionToExecuted).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ id: "run-1", outcome }),
     );
-
-    expect(outcome).toEqual({
-      kind: "error",
-      error:
-        "tier1_packages_unavailable: builtin_integrity: micropip-0.11.1-py3-none-any.whl: the prefetched file hashes to sha256:aa",
-    });
-    expect(dispatchToRuntime).not.toHaveBeenCalled();
-  });
-
-  it("hands a tier-1 run the packages resolved for its lockfile", async () => {
-    vi.mocked(dispatchToRuntime).mockResolvedValue({ ok: true, output: { echo: 1 } });
-    const packages = { builtins: ["pydantic"], wheelDir: "/wheels/abc" };
-    const resolve = vi.fn<RuntimeConfig["resolveTier1Packages"]>(async () => ok(packages));
-
-    const outcome = await execute(resolve);
-
-    expect(outcome).toEqual({ kind: "output", output: { echo: 1 } });
-    expect(resolve).toHaveBeenCalledWith(expect.objectContaining({ contents: LOCKFILE }));
-    expect(vi.mocked(dispatchToRuntime).mock.calls[0]?.[7]).toEqual(packages);
   });
 });

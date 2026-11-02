@@ -4,7 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { CtxHandler } from "../dispatcher.js";
 import type { HostMessage } from "../protocol.js";
-import { type RunOnWorkerResult, runOnChild, type Tier1Child } from "./host.js";
+import { buildTier1Child } from "./child-bundle.js";
+import { forkRunChild, type RunOnWorkerResult, runOnChild, type Tier1Child } from "./host.js";
 import type { IpcChannel } from "./transport.js";
 
 /**
@@ -13,8 +14,18 @@ import type { IpcChannel } from "./transport.js";
  * `host.test.ts` covers `runOnWorker` end to end against real children.
  */
 
+vi.mock("./child-bundle.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./child-bundle.js")>();
+  return { ...actual, buildTier1Child: vi.fn(actual.buildTier1Child) };
+});
+
 class StandInChannel extends EventEmitter implements IpcChannel {
   connected = true;
+  /** Exit the child: `exit`, then `close` once its channel has drained, as Node emits them. */
+  exit(code: number | null, signal: NodeJS.Signals | null): void {
+    this.emit("exit", code, signal);
+    this.emit("close", code, signal);
+  }
   readonly sent: unknown[] = [];
   send(message: unknown): boolean {
     this.sent.push(message);
@@ -39,7 +50,7 @@ function standIn(): StandIn {
   const interrupt = vi.fn();
   // Killing the child exits it, as the real one's SIGKILL does.
   const kill = vi.fn(() => {
-    ipc.emit("exit", null, "SIGKILL");
+    ipc.exit(null, "SIGKILL");
     exited.resolve();
   });
   return { child: { ipc, interrupt, kill, exited: exited.promise }, ipc, interrupt, kill };
@@ -128,7 +139,7 @@ describe("runOnChild", () => {
     const watched = watch(result);
     await readyAndInvoked(t);
 
-    t.ipc.emit("exit", 3, null);
+    t.ipc.exit(3, null);
     await settle();
 
     expect(watched.settled()).toBe(true);
@@ -209,7 +220,7 @@ describe("runOnChild", () => {
   it("reports a child that exits before it is ready", async () => {
     const t = standIn();
     const result = run(t);
-    t.ipc.emit("exit", 7, null);
+    t.ipc.exit(7, null);
     await settle();
 
     expect(await result).toEqual({
@@ -251,5 +262,29 @@ describe("runOnChild", () => {
 
     expect(await result).toEqual({ ok: false, error: "worker_init_timeout after 5000ms" });
     expect(t.kill).toHaveBeenCalled();
+  });
+});
+
+describe("the child bundle built from source", () => {
+  it("is built again on the next spawn after a build that failed", async () => {
+    vi.mocked(buildTier1Child)
+      .mockRejectedValueOnce(new Error("esbuild unavailable"))
+      .mockRejectedValueOnce(new Error("esbuild still unavailable"));
+    const params = {
+      taskId: "task-1",
+      skillName: "skill",
+      body: "",
+      inputs: {},
+      ctxHandler: mock<CtxHandler>(),
+      packages: { builtins: [], wheelDir: null },
+      packageCacheDir: "/nonexistent/cache",
+      pyodideDistDir: "/nonexistent/dist",
+      childrenDir: "/nonexistent/children",
+      memoryMb: 128,
+    };
+
+    await expect(forkRunChild(params)).rejects.toThrow("esbuild unavailable");
+    await expect(forkRunChild(params)).rejects.toThrow("esbuild still unavailable");
+    expect(buildTier1Child).toHaveBeenCalledTimes(2);
   });
 });

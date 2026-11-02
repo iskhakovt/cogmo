@@ -42,13 +42,18 @@ type SkipReason =
   | "skill_disabled"
   | "invalid_inputs"
   | "sandbox_unavailable"
+  | "tier1_packages_unavailable"
   | "inflight";
 
 type DispatchResult =
   | { status: "completed"; runId: string; runStatus: "success" | "error" }
   | { status: "skipped"; reason: SkipReason; detail?: string };
 
-/** The skip a runner rejection becomes. Retries can't repair any of them. */
+/**
+ * The skip a runner rejection becomes. Retries within the fire can't repair
+ * them; tier-1 packages that failed to download are fetched again by the
+ * next fire.
+ */
 function skipReason(rejection: SkillInvokeRejection): SkipReason {
   return match(rejection.kind)
     .returnType<SkipReason>()
@@ -56,6 +61,7 @@ function skipReason(rejection: SkillInvokeRejection): SkipReason {
     .with("disabled", () => "skill_disabled")
     .with("invalid_inputs", () => "invalid_inputs")
     .with("sandbox_unavailable", () => "sandbox_unavailable")
+    .with("tier1_packages_unavailable", () => "tier1_packages_unavailable")
     .with("inflight", () => "inflight")
     .exhaustive();
 }

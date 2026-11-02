@@ -46,15 +46,22 @@ function runsOnPool(manifest: SkillManifest): boolean {
   return overrides.cpus === undefined && overrides.memory_bytes === undefined;
 }
 
-/** Where a run executes: the tier-1 isolate, the warm pool, or a one-shot container. */
+/**
+ * Where a run executes: the tier-1 isolate with the packages its child
+ * installs, the warm pool, or a one-shot container.
+ */
 export type SkillRuntime =
-  | { kind: "wasm" }
+  | { kind: "wasm"; packages: Tier1Packages }
   | { kind: "pool"; pool: SysboxWorkerPool }
   | { kind: "one_shot"; sandbox: SandboxClient };
 
-/** A {@link SkillRuntime} before the warm pool is started. */
+/**
+ * A {@link SkillRuntime} before the tier-1 packages are resolved and the warm
+ * pool is started.
+ */
 export type RuntimePlan =
-  | Exclude<SkillRuntime, { kind: "pool" }>
+  | Exclude<SkillRuntime, { kind: "wasm" } | { kind: "pool" }>
+  | { kind: "wasm" }
   | { kind: "pool"; sandbox: SandboxClient };
 
 /**
@@ -94,10 +101,7 @@ export interface RuntimeConfig {
   depsCacheVolumeName: string | undefined;
 }
 
-/**
- * Run the task on the runtime {@link planRuntime} chose. `packages` is what a
- * tier-1 child installs; the container runtimes ignore it.
- */
+/** Run the task on the runtime {@link planRuntime} chose. */
 export async function dispatchToRuntime(
   config: RuntimeConfig,
   runtime: SkillRuntime,
@@ -106,7 +110,6 @@ export async function dispatchToRuntime(
   inputs: unknown,
   ctxHandler: DefaultCtxHandler,
   taskId: string,
-  packages: Tier1Packages,
 ): Promise<RunOnWorkerResult | InvokeResult> {
   const wallClockS = cached.manifest.resources?.wall_clock_s;
   const task = {
@@ -121,7 +124,7 @@ export async function dispatchToRuntime(
     return runOnWorker({
       ...task,
       packageCacheDir: config.pyodidePackageCacheDir,
-      packages,
+      packages: runtime.packages,
       pyodideDistDir: config.pyodideDistDir,
       childrenDir: config.tier1ChildrenDir,
       memoryMb: cached.manifest.resources?.memory_mb ?? DEFAULT_TIER1_MEMORY_MB,

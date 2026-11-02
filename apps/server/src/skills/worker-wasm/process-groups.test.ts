@@ -3,7 +3,7 @@ import { once } from "node:events";
 import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, assert, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, assert, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   type ChildGroupRecord,
   ChildGroupRecordSchema,
@@ -11,9 +11,15 @@ import {
   killChildGroup,
   parseStartTime,
   readBootId,
+  readStartTime,
   reapOrphanedChildGroups,
   recordChildGroup,
 } from "./process-groups.js";
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, writeFile: vi.fn(actual.writeFile) };
+});
 
 function record(overrides: Partial<ChildGroupRecord>): ChildGroupRecord {
   return {
@@ -136,6 +142,24 @@ describe("recordChildGroup", () => {
       child.kill("SIGKILL");
     }
   });
+
+  it("writes the record under a temporary name and renames it into place", async () => {
+    const { child, pid } = sleeper({ detached: true });
+    try {
+      vi.mocked(writeFile).mockClear();
+
+      const recorded = await recordChildGroup(dir, pid);
+
+      assert(recorded.isOk(), recorded.isErr() ? recorded.error : "");
+      expect(recorded.value).toBe(join(dir, `${pid}.json`));
+      const targets = vi.mocked(writeFile).mock.calls.map(([target]) => String(target));
+      expect(targets).toHaveLength(1);
+      expect(targets[0]?.startsWith(`${recorded.value}.tmp.`)).toBe(true);
+      expect(await readdir(dir)).toEqual([`${pid}.json`]);
+    } finally {
+      child.kill("SIGKILL");
+    }
+  });
 });
 
 describe("reapOrphanedChildGroups", () => {
@@ -162,10 +186,13 @@ describe("reapOrphanedChildGroups", () => {
   }
 
   it("is empty for a directory that does not exist", async () => {
-    expect(await reapOrphanedChildGroups(join(dir, "missing"), { bootId: "x" })).toEqual({
+    expect(
+      await reapOrphanedChildGroups(join(dir, "missing"), { bootId: "x", readStartTime }),
+    ).toEqual({
       killed: [],
       owned: [],
       stale: [],
+      unjudged: [],
     });
   });
 
@@ -176,12 +203,16 @@ describe("reapOrphanedChildGroups", () => {
       // This process's pid with a start time it never had: an owner since replaced.
       await writeRecord(pid, "1");
 
-      const report = await reapOrphanedChildGroups(dir, { bootId: await readBootId() });
+      const report = await reapOrphanedChildGroups(dir, {
+        bootId: await readBootId(),
+        readStartTime,
+      });
 
       expect(report).toEqual({
         killed: [expect.objectContaining({ pid })],
         owned: [],
         stale: [],
+        unjudged: [],
       });
       expect(await exited).toEqual([null, "SIGKILL"]);
       expect(await readdir(dir)).toEqual([]);
@@ -195,9 +226,17 @@ describe("reapOrphanedChildGroups", () => {
     try {
       await writeRecord(pid, await startTimeOf(process.pid));
 
-      const report = await reapOrphanedChildGroups(dir, { bootId: await readBootId() });
+      const report = await reapOrphanedChildGroups(dir, {
+        bootId: await readBootId(),
+        readStartTime,
+      });
 
-      expect(report).toEqual({ killed: [], owned: [expect.objectContaining({ pid })], stale: [] });
+      expect(report).toEqual({
+        killed: [],
+        owned: [expect.objectContaining({ pid })],
+        stale: [],
+        unjudged: [],
+      });
       expect(child.exitCode).toBeNull();
       expect(child.signalCode).toBeNull();
       expect(() => process.kill(pid, 0)).not.toThrow();
@@ -214,12 +253,16 @@ describe("reapOrphanedChildGroups", () => {
     try {
       await writeRecord(pid, "1");
 
-      const report = await reapOrphanedChildGroups(dir, { bootId: await readBootId() });
+      const report = await reapOrphanedChildGroups(dir, {
+        bootId: await readBootId(),
+        readStartTime,
+      });
 
       expect(report).toEqual({
         killed: [],
         owned: [],
         stale: [{ file: `${pid}.json`, reason: "leader_gone" }],
+        unjudged: [],
       });
       expect(await readdir(dir)).toEqual([]);
     } finally {
@@ -231,7 +274,10 @@ describe("reapOrphanedChildGroups", () => {
     await writeFile(join(dir, "1.json"), JSON.stringify(record({ pid: process.pid })));
     await writeFile(join(dir, "2.json"), "{ cut short");
 
-    const report = await reapOrphanedChildGroups(dir, { bootId: await readBootId() });
+    const report = await reapOrphanedChildGroups(dir, {
+      bootId: await readBootId(),
+      readStartTime,
+    });
 
     expect(report).toEqual({
       killed: [],
@@ -240,6 +286,7 @@ describe("reapOrphanedChildGroups", () => {
         { file: "1.json", reason: "other_boot" },
         { file: "2.json", reason: "unreadable" },
       ],
+      unjudged: [],
     });
     expect(await readdir(dir)).toEqual([]);
   });
@@ -251,12 +298,36 @@ describe("reapOrphanedChildGroups", () => {
       JSON.stringify(record({ bootId: await readBootId(), pid: process.pid, startTime: "1" })),
     );
 
-    const report = await reapOrphanedChildGroups(dir, { bootId: await readBootId() });
+    const report = await reapOrphanedChildGroups(dir, {
+      bootId: await readBootId(),
+      readStartTime,
+    });
 
     expect(report).toEqual({
       killed: [],
       owned: [],
       stale: [{ file: "1.json", reason: "pid_reused" }],
+      unjudged: [],
     });
+  });
+
+  it("leaves a record whose start times cannot be read, and reaps the rest", async () => {
+    const bootId = await readBootId();
+    await writeFile(join(dir, "1.json"), JSON.stringify(record({ bootId, pid: 1111 })));
+    await writeFile(join(dir, "2.json"), JSON.stringify(record({ bootId: "other", pid: 2222 })));
+    const denied = Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+
+    const report = await reapOrphanedChildGroups(dir, {
+      bootId,
+      readStartTime: async (pid) => (pid === 1111 ? Promise.reject(denied) : readStartTime(pid)),
+    });
+
+    expect(report).toEqual({
+      killed: [],
+      owned: [],
+      stale: [{ file: "2.json", reason: "other_boot" }],
+      unjudged: [{ file: "1.json", message: "EACCES: permission denied" }],
+    });
+    expect(await readdir(dir)).toEqual(["1.json"]);
   });
 });

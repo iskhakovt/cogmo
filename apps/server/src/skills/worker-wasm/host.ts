@@ -392,17 +392,20 @@ async function runUtilityChild<T>(
   }
 }
 
-/** The child's first message, or why none came before it exited or `deadline` aborted. */
+/**
+ * The child's first message, or why none came before it exited and its
+ * channel closed, or `deadline` aborted.
+ */
 function firstMessage(ipc: IpcChannel, deadline: AbortSignal): Promise<Result<unknown, string>> {
   return new Promise((resolve) => {
     const settle = (result: Result<unknown, string>): void => {
       ipc.off("message", onMessage);
-      ipc.off("exit", onExit);
+      ipc.off("close", onClose);
       deadline.removeEventListener("abort", onAbort);
       resolve(result);
     };
     const onMessage = (message: unknown): void => settle(ok(message));
-    const onExit = (code: number | null, signal: NodeJS.Signals | null): void =>
+    const onClose = (code: number | null, signal: NodeJS.Signals | null): void =>
       settle(err(`child exited (${code === null ? `signal ${signal}` : `code ${code}`})`));
     const onAbort = (): void => settle(err(`aborted: ${describeReason(deadline.reason)}`));
     if (deadline.aborted) {
@@ -410,7 +413,7 @@ function firstMessage(ipc: IpcChannel, deadline: AbortSignal): Promise<Result<un
       return;
     }
     ipc.on("message", onMessage);
-    ipc.on("exit", onExit);
+    ipc.on("close", onClose);
     deadline.addEventListener("abort", onAbort, { once: true });
   });
 }
@@ -508,12 +511,22 @@ async function forkTier1Child(opts: {
 
 let sourceBundle: Promise<string> | undefined;
 
-/** The child entry: beside the bundled host, or bundled from source on first use. */
+/**
+ * The child entry: beside the bundled host, or bundled from source on first
+ * use. A failed build is not kept, so the next spawn builds again.
+ */
 function tier1ChildEntry(): Promise<string> {
   if (!import.meta.url.endsWith(".ts")) {
     return Promise.resolve(fileURLToPath(new URL("./tier1-child.mjs", import.meta.url)));
   }
-  sourceBundle ??= bundleFromSource();
+  if (sourceBundle === undefined) {
+    const building = bundleFromSource();
+    sourceBundle = building;
+    // Only forgets the build: every caller awaits `building` and sees its error.
+    building.catch(() => {
+      if (sourceBundle === building) sourceBundle = undefined;
+    });
+  }
   return sourceBundle;
 }
 
@@ -529,10 +542,15 @@ async function bundleFromSource(): Promise<string> {
   const { buildTier1Child, assertOwnPrivateDir } = await import("./child-bundle.js");
   const root = await realpath(tmpdir());
   const buildDir = await mkdtemp(join(root, "cogmo-tier1-build-"));
-  await buildTier1Child({
-    sourceDir: fileURLToPath(new URL(".", import.meta.url)),
-    outDir: buildDir,
-  });
+  try {
+    await buildTier1Child({
+      sourceDir: fileURLToPath(new URL(".", import.meta.url)),
+      outDir: buildDir,
+    });
+  } catch (e) {
+    await rm(buildDir, { recursive: true, force: true });
+    throw e;
+  }
   const files = (await readdir(buildDir)).sort();
   const contents = await Promise.all(files.map((f) => readFile(join(buildDir, f))));
   const digest = R.reduce(

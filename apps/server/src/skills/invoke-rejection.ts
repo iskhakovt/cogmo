@@ -1,8 +1,9 @@
 import { match } from "ts-pattern";
+import { describeTier1PackagesError, type Tier1PackagesError } from "./worker-wasm/wheel-cache.js";
 
 /**
  * Why `invoke` declined to run a skill. Nothing executed. Only `inflight`
- * has a run row: the one a prior attempt under the same idempotency key
+ * names a run row: the one a prior attempt under the same idempotency key
  * left at `recovery_point='started'`. The runner can't tell a crashed
  * attempt from one still executing, and re-executing either risks firing
  * the skill's side effects twice, so it declines and names the row for an
@@ -14,6 +15,8 @@ export type SkillInvokeRejection =
   | { kind: "invalid_inputs"; name: string; issues: readonly string[] }
   /** A `tier: container` skill on a deployment with no sandbox configured. */
   | { kind: "sandbox_unavailable"; name: string }
+  /** A `tier: wasm` skill whose lockfile's packages the host could not make available. */
+  | { kind: "tier1_packages_unavailable"; name: string; error: Tier1PackagesError }
   | { kind: "inflight"; name: string; runId: string };
 
 /** One line naming the rejection, for logs and operator-facing output. */
@@ -30,6 +33,11 @@ export function describeInvokeRejection(rejection: SkillInvokeRejection): string
       { kind: "sandbox_unavailable" },
       ({ name }) =>
         `skill '${name}' is tier=container but no sandbox is configured (set SANDBOX_RUNTIME)`,
+    )
+    .with(
+      { kind: "tier1_packages_unavailable" },
+      ({ name, error }) =>
+        `skill '${name}' cannot run: its tier-1 packages are unavailable (${describeTier1PackagesError(error)})`,
     )
     .with(
       { kind: "inflight" },

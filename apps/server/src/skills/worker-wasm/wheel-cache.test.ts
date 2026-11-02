@@ -800,16 +800,43 @@ describe("reapTier1WheelDirs", () => {
     await utimes(dir, mtime, mtime);
   }
 
-  it("moves a directory out of its hash before removing it, so no reader sees a partial one", async () => {
+  // Root removes the sealed entry this test relies on failing to remove.
+  it.skipIf(process.getuid?.() === 0)(
+    "moves a directory out of its hash before removing it, so no reader sees a partial one",
+    async () => {
+      await published(UNREACHABLE_OLD, eightDaysAgo);
+      const dir = join(wheelsRoot, UNREACHABLE_OLD);
+      // A sealed entry the removal cannot get through: a removal cut short.
+      await chmod(dir, 0o755);
+      await mkdir(join(dir, "stuck"));
+      await writeFile(join(dir, "stuck", "wheel.whl"), "");
+      await chmod(join(dir, "stuck"), 0o555);
+      await chmod(dir, 0o555);
+      await utimes(dir, eightDaysAgo, eightDaysAgo);
+
+      const result = await reapTier1WheelDirs({
+        wheelsRoot,
+        reachableHashes: new Set(),
+        graceDays: 7,
+      });
+
+      expect(result._unsafeUnwrapErr().kind).toBe("reap_failed");
+      const left = await readdir(wheelsRoot);
+      expect(left).not.toContain(UNREACHABLE_OLD);
+      expect(left).toEqual([expect.stringMatching(new RegExp(`^${UNREACHABLE_OLD}\\.tmp\\.`))]);
+    },
+  );
+
+  it("skips a directory a concurrent reap moved away, and reaps the rest", async () => {
+    const alsoOld = "d".repeat(64);
     await published(UNREACHABLE_OLD, eightDaysAgo);
-    const dir = join(wheelsRoot, UNREACHABLE_OLD);
-    // A sealed entry the removal cannot get through: a removal cut short.
-    await chmod(dir, 0o755);
-    await mkdir(join(dir, "stuck"));
-    await writeFile(join(dir, "stuck", "wheel.whl"), "");
-    await chmod(join(dir, "stuck"), 0o555);
-    await chmod(dir, 0o555);
-    await utimes(dir, eightDaysAgo, eightDaysAgo);
+    await published(alsoOld, eightDaysAgo);
+    const moved = join(wheelsRoot, UNREACHABLE_OLD);
+    // Another reaper moves it out of its hash between this reap's listing and
+    // its rename; the stale sweep then removes what that reaper left.
+    statHook.before = async (path) => {
+      if (path === moved) await rename(moved, join(wheelsRoot, `${UNREACHABLE_OLD}.tmp.other`));
+    };
 
     const result = await reapTier1WheelDirs({
       wheelsRoot,
@@ -817,10 +844,8 @@ describe("reapTier1WheelDirs", () => {
       graceDays: 7,
     });
 
-    expect(result._unsafeUnwrapErr().kind).toBe("reap_failed");
-    const left = await readdir(wheelsRoot);
-    expect(left).not.toContain(UNREACHABLE_OLD);
-    expect(left).toEqual([expect.stringMatching(new RegExp(`^${UNREACHABLE_OLD}\\.tmp\\.`))]);
+    expect(result._unsafeUnwrap()).toEqual({ reapedHashes: [alsoOld] });
+    expect(await readdir(wheelsRoot)).toEqual([]);
   });
 
   it("sweeps a sealed tmp directory a reap left behind", async () => {

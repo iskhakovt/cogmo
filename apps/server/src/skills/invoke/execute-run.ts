@@ -1,13 +1,9 @@
-import { ok } from "neverthrow";
 import type { Transactor } from "../../db/index.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import { DefaultCtxHandler, type DefaultCtxHandlerOptions } from "../ctx-handler.js";
 import type { SkillRunAs } from "../run-as.js";
 import type { SkillSourceCacheEntry } from "../source-cache.js";
 import type { ExecutedOutcome, SkillRow, SkillStore } from "../store/index.js";
-import type { RunOnWorkerResult } from "../worker-wasm/host.js";
-import type { Tier1Packages } from "../worker-wasm/tier1.js";
-import { describeTier1PackagesError, type Tier1PackagesError } from "../worker-wasm/wheel-cache.js";
 import { dispatchToRuntime, type RuntimeConfig, type SkillRuntime } from "./runtime.js";
 
 export interface ExecuteRunDeps {
@@ -55,29 +51,14 @@ export async function executeRun(
     }),
   });
 
-  // A tier-1 child installs only what the host resolved for its lockfile; a
-  // lockfile the host cannot make available fails the run before any code runs.
-  const packages =
-    args.runtime.kind === "wasm"
-      ? await deps.runtime.resolveTier1Packages(cached.lockfile)
-      : ok<Tier1Packages, Tier1PackagesError>({ builtins: [], wheelDir: null });
-  const result = await packages.match(
-    (resolved) =>
-      dispatchToRuntime(
-        deps.runtime,
-        args.runtime,
-        skill,
-        cached,
-        args.inputs,
-        ctxHandler,
-        run.id,
-        resolved,
-      ),
-    (error) =>
-      Promise.resolve<RunOnWorkerResult>({
-        ok: false,
-        error: `tier1_packages_unavailable: ${describeTier1PackagesError(error)}`,
-      }),
+  const result = await dispatchToRuntime(
+    deps.runtime,
+    args.runtime,
+    skill,
+    cached,
+    args.inputs,
+    ctxHandler,
+    run.id,
   );
   const finishedAt = new Date();
   // `wallClockMs` is always derived from the host-side timestamps;

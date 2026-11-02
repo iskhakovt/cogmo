@@ -71,4 +71,42 @@ describe("bootstrapSkillRunner", () => {
     expect(await exited).toEqual([null, "SIGKILL"]);
     expect(await readdir(childrenDir)).toEqual([]);
   });
+
+  it("skips the reap on a host without Linux's /proc, reading no boot id", async () => {
+    const bootId = vi.fn(readBootId);
+
+    await bootstrapSkillRunner(
+      mock<CoreDeps>(),
+      NO_SANDBOX,
+      { reapTier1Children: true },
+      { tier1ReapHostOverride: { platform: "darwin", readBootId: bootId } },
+    );
+
+    expect(bootId).not.toHaveBeenCalled();
+    expect(orphan.exitCode).toBeNull();
+    expect(orphan.signalCode).toBeNull();
+    expect(await readdir(childrenDir)).toEqual([`${pid}.json`]);
+  });
+
+  it("skips the reap when the boot id is unreadable, rather than failing the boot", async () => {
+    const unreadable = Object.assign(new Error("ENOENT: no such file or directory"), {
+      code: "ENOENT",
+    });
+
+    await bootstrapSkillRunner(
+      mock<CoreDeps>(),
+      NO_SANDBOX,
+      { reapTier1Children: true },
+      {
+        tier1ReapHostOverride: {
+          platform: "linux",
+          readBootId: () => Promise.reject(unreadable),
+        },
+      },
+    );
+
+    expect(orphan.exitCode).toBeNull();
+    expect(orphan.signalCode).toBeNull();
+    expect(await readdir(childrenDir)).toEqual([`${pid}.json`]);
+  });
 });

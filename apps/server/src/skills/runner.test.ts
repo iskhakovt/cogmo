@@ -550,6 +550,58 @@ inputs:
     });
   });
 
+  it("rejects a tier-1 invoke whose packages are unavailable with no run row, so a keyed retry runs the skill", async () => {
+    const lockfileContents = `idna==3.10 --hash=sha256:${"0".repeat(64)}\n`;
+    const resolvePackages = vi
+      .fn<NonNullable<SkillRunnerOptions["tier1"]["resolvePackages"]>>()
+      .mockResolvedValueOnce(
+        err({ kind: "network_failed", spec: "idna==3.10", message: "offline" }),
+      )
+      .mockResolvedValueOnce(ok({ builtins: [], wheelDir: null }))
+      .mockResolvedValue(err({ kind: "prefetch_failed", message: "cdn down" }));
+    const offline = offlineTier1(tier1Root);
+    const runner = await SkillRunnerImpl.create({
+      store,
+      runInTx: tx,
+      secretsStore: makeMockSecrets(),
+      userTimezone: "UTC",
+      defaultRunAs: DEFAULT_RUN_AS,
+      ...offline,
+      tier1: { ...offline.tier1, resolvePackages },
+    });
+    await runner.__registerForTests({
+      name: "echo",
+      manifestSource: ECHO_MANIFEST,
+      body: ECHO_BODY,
+      lockfileContents,
+    });
+    const keyed = {
+      name: "echo",
+      inputs: { x: 1 },
+      idempotencyKey: "skill-cron:echo:packages-down",
+      runAs: runAs(),
+    };
+
+    const rejected = await runner.invoke(keyed);
+
+    expect(rejected._unsafeUnwrapErr()).toEqual({
+      kind: "tier1_packages_unavailable",
+      name: "echo",
+      error: { kind: "network_failed", spec: "idna==3.10", message: "offline" },
+    });
+    expect(
+      await tx((trx) => store.getRunByIdempotencyKey(trx, keyed.idempotencyKey)),
+    ).toBeUndefined();
+
+    const retried = (await runner.invoke(keyed))._unsafeUnwrap();
+    assertStatus(retried, "success");
+    expect(retried.output).toEqual({ echo: 2 });
+
+    // A replay of the settled run needs no packages, so their loss refuses nothing.
+    expect((await runner.invoke(keyed))._unsafeUnwrap()).toEqual(retried);
+    expect(resolvePackages).toHaveBeenCalledTimes(2);
+  });
+
   it("two sequential invokes succeed independently (no shared state)", async () => {
     const runner = await makeRunner();
     await runner.__registerForTests({

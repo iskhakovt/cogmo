@@ -196,6 +196,24 @@ describe("skillsCli", () => {
     expect(stderr.join("\n")).toMatch(/invoke failed: skill not found: echo/);
   });
 
+  it("exits 1 naming the packages a tier-1 skill could not get", async () => {
+    const { io, err: stderr } = captureIo();
+    const runner = makeRunner({
+      invoke: vi.fn().mockResolvedValue(
+        err({
+          kind: "tier1_packages_unavailable",
+          name: "echo",
+          error: { kind: "network_failed", spec: "idna==3.10", message: "offline" },
+        }),
+      ),
+    });
+    const code = await run(["run", "echo", "{}"], depsFor(runner), io);
+    expect(code).toBe(1);
+    expect(stderr.join("\n")).toMatch(
+      "invoke failed: skill 'echo' cannot run: its tier-1 packages are unavailable (network_failed: idna==3.10: offline)",
+    );
+  });
+
   it("catches a runner.invoke exception and exits 1 with stderr", async () => {
     const { io, err } = captureIo();
     const runner = makeRunner({

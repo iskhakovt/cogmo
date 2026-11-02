@@ -1,8 +1,10 @@
-import { readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { err, ok, type Result } from "neverthrow";
+import { err, ok, type Result, ResultAsync } from "neverthrow";
 import { match } from "ts-pattern";
 import { z } from "zod";
+import { describeError } from "../../util/describe-error.js";
 
 /**
  * Tier-1 children's process groups, recorded so `cogmo serve` can kill the
@@ -49,11 +51,15 @@ export type RecordVerdict =
 /** A group `SIGKILL`ed, or one already gone (`ESRCH`). */
 export type KillOutcome = { kind: "killed" } | { kind: "gone" };
 
-/** What `reapOrphanedChildGroups` did with each record. */
+/**
+ * What `reapOrphanedChildGroups` did with each record. `unjudged` names a
+ * record left in place because `/proc` could not be read for its processes.
+ */
 export interface ReapReport {
   killed: readonly ChildGroupRecord[];
   owned: readonly ChildGroupRecord[];
   stale: readonly { file: string; reason: StaleReason }[];
+  unjudged: readonly { file: string; message: string }[];
 }
 
 /** The kernel's id for this boot. */
@@ -80,7 +86,7 @@ export function parseStartTime(stat: string): string | null {
 }
 
 /** The start time of `pid`, or null when no such process exists. */
-async function readStartTime(pid: number): Promise<string | null> {
+export async function readStartTime(pid: number): Promise<string | null> {
   try {
     return parseStartTime(await readFile(`/proc/${pid}/stat`, "utf8"));
   } catch (e) {
@@ -129,8 +135,17 @@ export async function recordChildGroup(dir: string, pid: number): Promise<Result
       pid,
       startTime,
     };
+    // Written aside and renamed into place, so a reap never reads a partial
+    // record; the temporary name is not a `.json` a reap lists.
     const path = join(dir, `${pid}.json`);
-    await writeFile(path, JSON.stringify(record));
+    const tmp = `${path}.tmp.${randomUUID()}`;
+    try {
+      await writeFile(tmp, JSON.stringify(record));
+      await rename(tmp, path);
+    } catch (e) {
+      await rm(tmp, { force: true });
+      throw e;
+    }
     return ok(path);
   } catch (e) {
     return err(`could not record child ${pid}: ${e instanceof Error ? e.message : String(e)}`);
@@ -159,17 +174,19 @@ export function killChildGroup(pid: number): KillOutcome {
 
 /**
  * Judge every record under `childrenDir`: kill an orphaned group and delete
- * its record, leave an owned one, and delete a stale one. Only `cogmo serve`
- * runs it, at boot, before the runner serves.
+ * its record, leave an owned one, and delete a stale one. A record whose
+ * processes' start times cannot be read is left for the next reap. Only
+ * `cogmo serve` runs it, at boot, before the runner serves.
  */
 export async function reapOrphanedChildGroups(
   childrenDir: string,
-  current: { bootId: string },
+  current: { bootId: string; readStartTime: (pid: number) => Promise<string | null> },
 ): Promise<ReapReport> {
   const files = await listRecords(childrenDir);
   const killed: ChildGroupRecord[] = [];
   const owned: ChildGroupRecord[] = [];
   const stale: { file: string; reason: StaleReason }[] = [];
+  const unjudged: { file: string; message: string }[] = [];
   // Sequential: each kill acts on the start times just read for that record.
   for (const file of files) {
     const path = join(childrenDir, file);
@@ -179,11 +196,16 @@ export async function reapOrphanedChildGroups(
       await removeChildGroupRecord(path);
       continue;
     }
-    const verdict = judgeRecord(record, {
-      bootId: current.bootId,
-      startTime: await readStartTime(record.pid),
-      ownerStartTime: await readStartTime(record.ownerPid),
-    });
+    const startTimes = await ResultAsync.fromPromise(
+      Promise.all([current.readStartTime(record.pid), current.readStartTime(record.ownerPid)]),
+      describeError,
+    );
+    if (startTimes.isErr()) {
+      unjudged.push({ file, message: startTimes.error });
+      continue;
+    }
+    const [startTime, ownerStartTime] = startTimes.value;
+    const verdict = judgeRecord(record, { bootId: current.bootId, startTime, ownerStartTime });
     const keep = match(verdict)
       .with({ kind: "orphaned" }, () => {
         match(killChildGroup(record.pid))
@@ -205,7 +227,7 @@ export async function reapOrphanedChildGroups(
       .exhaustive();
     if (!keep) await removeChildGroupRecord(path);
   }
-  return { killed, owned, stale };
+  return { killed, owned, stale, unjudged };
 }
 
 async function listRecords(dir: string): Promise<string[]> {
@@ -222,7 +244,7 @@ async function readRecord(path: string): Promise<ChildGroupRecord | null> {
     const parsed = ChildGroupRecordSchema.safeParse(JSON.parse(await readFile(path, "utf8")));
     return parsed.success ? parsed.data : null;
   } catch {
-    // A record cut short by a crash mid-write names nothing to kill.
+    // A record that does not parse names nothing to kill.
     return null;
   }
 }

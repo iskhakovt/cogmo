@@ -68,6 +68,7 @@ describe("createIpcTransport", () => {
     const h = harness();
     const next = h.transport.messages()[Symbol.asyncIterator]().next();
     h.child.emit("exit", 1, null);
+    h.child.emit("close", 1, null);
 
     await expect(next).rejects.toThrow("worker exited (code 1)");
   });
@@ -76,8 +77,22 @@ describe("createIpcTransport", () => {
     const h = harness();
     const next = h.transport.messages()[Symbol.asyncIterator]().next();
     h.child.emit("exit", null, "SIGKILL");
+    h.child.emit("close", null, "SIGKILL");
 
     await expect(next).rejects.toThrow("worker exited (signal SIGKILL)");
+  });
+
+  it("yields a frame the channel delivers after the child's exit, then fails on its close", async () => {
+    // Node can emit `exit` before it has read the last frames off the channel.
+    const h = harness();
+    const frames = h.transport.messages()[Symbol.asyncIterator]();
+    const first = frames.next();
+    h.child.emit("exit", 1, null);
+    h.child.emit("message", { type: "fatal", error: "micropip: no matching wheel" });
+    h.child.emit("close", 1, null);
+
+    expect((await first).value).toEqual({ type: "fatal", error: "micropip: no matching wheel" });
+    await expect(frames.next()).rejects.toThrow("worker exited (code 1)");
   });
 
   it("ends the stream cleanly on close, disconnects, and keeps a later error from escaping", async () => {

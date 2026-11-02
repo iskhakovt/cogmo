@@ -582,15 +582,21 @@ export async function reapTier1WheelDirs(
     const reapedHashes: string[] = [];
     for (const d of candidates) {
       const path = join(args.wheelsRoot, d.name);
-      const { mtimeMs } = await stat(path);
-      if (now - mtimeMs <= graceMs) continue;
-      // Out of its hash first, in one rename, so a reader never finds `.ready`
-      // over a partial set; a crash before the removal leaves a stale `tmp`
-      // directory for the sweep below.
-      const doomed = join(args.wheelsRoot, `${d.name}.tmp.${randomUUID()}`);
-      await rename(path, doomed);
-      await removeSealedDir(doomed);
-      reapedHashes.push(d.name);
+      try {
+        const { mtimeMs } = await stat(path);
+        if (now - mtimeMs <= graceMs) continue;
+        // Out of its hash first, in one rename, so a reader never finds
+        // `.ready` over a partial set; a crash before the removal leaves a
+        // stale `tmp` directory for the sweep below.
+        const doomed = join(args.wheelsRoot, `${d.name}.tmp.${randomUUID()}`);
+        await rename(path, doomed);
+        await removeSealedDir(doomed);
+        reapedHashes.push(d.name);
+      } catch (e) {
+        const code = errnoCode(e);
+        if (code === undefined || !CONCURRENT_MOVE_CODES.has(code)) throw e;
+        log.debug({ path, code }, "wheel-cache: wheel dir moved during the reap");
+      }
     }
     await removeStaleTmpDirs(args.wheelsRoot, isWheelTmpDir, now);
     log.info(

@@ -53,6 +53,20 @@ function importedSpecifiers(source: string): ReadonlyArray<string> {
   );
 }
 
+/**
+ * The start of every dynamic `import(` argument that is not a string literal,
+ * which `importedSpecifiers` cannot see. An identifier character or `.` before
+ * `import` makes it another call (`py.pyimport(module)`).
+ */
+function computedImports(source: string): ReadonlyArray<string> {
+  return [...source.matchAll(/(?<![\w$.])import\s*\(\s*(?![\s"')])/g)].map(({ index, 0: call }) =>
+    source.slice(index + call.length, index + call.length + 80),
+  );
+}
+
+/** `pyodide-worker.ts` loads Pyodide by path from the granted distribution. */
+const PYODIDE_IMPORT = /^pathToFileURL\(join\(\w+\.pyodideDistDir, "pyodide\.mjs"\)\)\.href\)/;
+
 describe("tsup build", () => {
   it("emits the tier-1 child beside every bundle that forks it", () => {
     const spawners = emittedBundles().filter((f) =>
@@ -76,6 +90,9 @@ describe("tsup build", () => {
       .filter((specifier) => !specifier.startsWith("node:"));
 
     expect(external).toEqual([]);
+    const computed = sources.flatMap(computedImports);
+    expect(computed.filter((arg) => !PYODIDE_IMPORT.test(arg))).toEqual([]);
+    expect(computed.filter((arg) => PYODIDE_IMPORT.test(arg))).toHaveLength(1);
     // `py/ctx.py` and `py/install_deps.py`, inlined by the `.py` text loader.
     expect(sources[1]).toContain("def _build_ctx(bridge):");
     expect(sources[1]).toContain("async def _install_wheels(mount, files):");

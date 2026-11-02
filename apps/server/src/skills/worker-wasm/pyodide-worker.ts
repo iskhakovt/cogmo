@@ -271,7 +271,19 @@ async function handleTaskInvoke(py: PyodideInterface, body: string, raw: unknown
     ok: false,
     error: e instanceof Error ? e.message : String(e),
   }));
-  port.postMessage(result);
+  try {
+    port.postMessage(result);
+  } catch (e) {
+    // An output holding a function or another proxy cannot cross to the
+    // child's thread; the task fails rather than leave the host waiting.
+    if (!(e instanceof DOMException && e.name === "DataCloneError")) throw e;
+    port.postMessage({
+      type: "task_result",
+      id: invoke.id,
+      ok: false,
+      error: `task output is not serializable: ${e.message}`,
+    } satisfies TaskResult);
+  }
 }
 
 async function run(init: Extract<ChildInit, { mode: "run" }>): Promise<void> {

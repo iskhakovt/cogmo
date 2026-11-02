@@ -12,7 +12,7 @@ const log = logger.child({ component: "skills.deps-reaper" });
 
 /**
  * Days an unreachable dependency directory, a venv or a tier-1 wheel
- * directory, sits before it is removed.
+ * directory, must sit unmodified, by its mtime, before it is removed.
  */
 export const DEPS_REAP_GRACE_DAYS = 7;
 
@@ -86,7 +86,7 @@ export interface ReapSkillVenvsOptions {
   depsCacheVolumeName: string;
   /** Lockfile hashes that must NOT be reaped (every live or disabled skill). */
   reachableHashes: ReadonlySet<string>;
-  /** Days a directory must sit unreachable before reap. Defaults to 7. */
+  /** Days an unreachable directory must sit unmodified, by its mtime, before reap. Defaults to 7. */
   graceDays?: number;
 }
 

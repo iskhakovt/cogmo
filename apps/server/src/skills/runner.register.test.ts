@@ -232,8 +232,9 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
     assertStatus(result, "live");
     expect(result.name).toBe("echo");
     expect(result.gitSha).toBe(sha);
-    // ECHO declares and does nothing, which the table rates `auto`; an
-    // unhardened tier 1 caps it at `notify`, so it goes live with a message.
+    // ECHO declares and does nothing, which the table rates `auto`; with no
+    // review panel (`no_review_panel`) it is capped at `notify`, so it goes
+    // live with a message.
     expect(result.riskTier).toBe("notify");
 
     // main now points at the branch tip.

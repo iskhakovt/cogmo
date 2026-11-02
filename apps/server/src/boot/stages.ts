@@ -36,6 +36,13 @@ import type { Transport } from "../transport/transport.js";
 import type { DrizzleWebSessionStore } from "../web/store/index.js";
 import type { HindsightCompat } from "./checks.js";
 
+/** What the tier-1 child reap reads about the host it runs on. */
+export interface Tier1ReapHost {
+  platform: NodeJS.Platform;
+  /** The kernel's boot id (`readBootId`). */
+  readBootId(): Promise<string>;
+}
+
 /**
  * Per-stage option ownership — keep in sync when adding fields:
  *
@@ -47,8 +54,9 @@ import type { HindsightCompat } from "./checks.js";
  * - `sandboxClientOverride` → read by `bootstrapSandbox` (skips env-driven
  *   backend selection so tests can wire `FakeDaytonaSandboxClient`
  *   without hitting Daytona Cloud or a self-hosted compose).
- * - `skillCtxHttpOverride` → read by `bootstrapSkillRunner` (the network
- *   skills reach through `ctx.http`).
+ * - `skillCtxHttpOverride`, `tier1ReapHostOverride` → read by
+ *   `bootstrapSkillRunner` (the network skills reach through `ctx.http`, and
+ *   the host `cogmo serve`'s tier-1 child reap reads).
  * - `codingAuthOverride`, `octokitFactory` → read by `bootstrapRuntime`
  *   (the coding orchestrators' in-sandbox auth and GitHub client).
  *
@@ -96,6 +104,12 @@ export interface BootstrapOptions {
    * backend identity).
    */
   sandboxClientOverride?: SandboxClient;
+  /**
+   * The host `cogmo serve`'s tier-1 child reap reads. Used by tests to stand
+   * in a non-Linux platform or an unreadable boot id; production wiring
+   * leaves this undefined for `process.platform` and `/proc`.
+   */
+  tier1ReapHostOverride?: Tier1ReapHost;
   /**
    * Test-only override for the in-sandbox coding-auth resolver. When
    * omitted, the orchestrators use the real `loadCodingSandboxEnv` —
