@@ -89,7 +89,7 @@ describe("ClassifierLogSchema", () => {
     const log = {
       ...STUB,
       declared_network: ["api.example.com"],
-      capabilities: { tier1Hardened: false, reviewPanel: true },
+      capabilities: { tier1Hardened: false, reviewPanel: true, tier1MemoryBounded: false },
     };
     expect(ClassifierLogSchema.parse(log)).toEqual(log);
   });

@@ -272,6 +272,58 @@ def run(inputs, ctx):
     });
   });
 
+  describe("Pyodide host escapes", () => {
+    it.each([
+      ["import js\n", "js_import"],
+      ["import js as host\n", "js_import"],
+      ["from js import fetch\n", "js_import"],
+      ["import json, js\n", "js_import"],
+      ["import pyodide_js\n", "pyodide_js_import"],
+      ["from pyodide_js import FS\n", "pyodide_js_import"],
+      ["import pyodide.ffi\n", "pyodide_ffi_import"],
+      ["from pyodide.ffi import to_js\n", "pyodide_ffi_import"],
+      ["from pyodide.ffi.wrappers import add_event_listener\n", "pyodide_ffi_import"],
+      ["from pyodide import ffi\n", "pyodide_ffi_import"],
+      ["import pyodide\npyodide.ffi.to_js({})\n", "pyodide_ffi_import"],
+      ["from pyodide.code import run_js\n", "pyodide_code_import"],
+      ["from pyodide import code as c\n", "pyodide_code_import"],
+      ["from pyodide.http import pyfetch\n", "pyodide_http_import"],
+      ["from pyodide import ffi, http\n", "pyodide_http_import"],
+      ["import micropip\n", "micropip_import"],
+      ["from micropip import install\n", "micropip_import"],
+      ["from pyodide import (\n    ffi,\n)\n", "pyodide_ffi_import"],
+    ])("rejects %j as %s", (body, rule) => {
+      const r = lintWasmCompat(body);
+      expect(r.isErr()).toBe(true);
+      if (!r.isErr()) return;
+      expect(r.error.map((e) => e.rule)).toContain(rule);
+    });
+
+    it.each([
+      ["js_data = load()\nprint(js_data)\n"],
+      ["import json\n"],
+      ["import jsonschema\n"],
+      ["from mypkg import js\n"],
+      ["import mypkg.js\n"],
+      ["import pyodide\n"],
+      ["from pyodide import webloop\n"],
+      ["from pyodide import ffi_helpers\n"],
+      ["import micropipe\n"],
+    ])("allows %j", (body) => {
+      expect(lintWasmCompat(body).isOk()).toBe(true);
+    });
+
+    it("tells the author what replaces the network routes", () => {
+      const r = lintWasmCompat("from pyodide.http import pyfetch\nimport js\nimport micropip\n");
+      expect(r.isErr()).toBe(true);
+      if (!r.isErr()) return;
+      const reasons = new Map(r.error.map((e) => [e.rule, e.reason]));
+      expect(reasons.get("pyodide_http_import")).toContain("ctx.http");
+      expect(reasons.get("js_import")).toContain("ctx.http");
+      expect(reasons.get("micropip_import")).toContain("dependencies");
+    });
+  });
+
   describe("pathological input", () => {
     it.each([
       ["from\thttp\timport", "\t\t,"],

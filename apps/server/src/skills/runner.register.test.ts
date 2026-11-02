@@ -17,11 +17,14 @@ import { assertStatus, expectDefined } from "../test/assertions.js";
 import { mockFilesService } from "../test/factories.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import { makePopulatedBareRepo } from "../test/skills-bare-repo.js";
+import { offlineTier1 } from "../test/skills-fixtures.js";
 import { channels, userIdentities } from "../transport/store/schema.js";
+import { loadBundledPackages } from "./pyodide-compat.js";
 import { bootstrapSkillsRepo } from "./repo.js";
 import type { SkillRunAs, SkillRunServices } from "./run-as.js";
 import { type SkillActor, type SkillDeployOrigin, SkillRunnerImpl } from "./runner.js";
 import { DrizzleSkillStore, type SkillRunIdentity, type SkillStore } from "./store/index.js";
+import type { Tier1PackagesError } from "./worker-wasm/tier1.js";
 
 const execFileP = promisify(execFile);
 
@@ -210,6 +213,9 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
       userTimezone: "UTC",
       defaultRunAs: DEFAULT_RUN_AS,
       skillsRepoPath: repo.bare,
+      // The fixtures' lockfiles carry placeholder hashes, so register must
+      // neither fetch wheels nor spawn a probe child.
+      ...offlineTier1(repo.bare),
       ...overrides,
     });
   }
@@ -227,8 +233,9 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
     assertStatus(result, "live");
     expect(result.name).toBe("echo");
     expect(result.gitSha).toBe(sha);
-    // ECHO declares and does nothing, which the table rates `auto`; an
-    // unhardened tier 1 caps it at `notify`, so it goes live with a message.
+    // ECHO declares and does nothing, which the table rates `auto`; with no
+    // review panel (`no_review_panel`) it is capped at `notify`, so it goes
+    // live with a message.
     expect(result.riskTier).toBe("notify");
 
     // main now points at the branch tip.
@@ -251,7 +258,7 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
       secrets: [],
       dependencies: [],
       schedule: null,
-      reasons: ["tier1_unhardened", "no_review_panel"],
+      reasons: ["no_review_panel"],
       priorGitSha: null,
     });
 
@@ -638,6 +645,105 @@ outputs:
       expect(skill?.lockfileHash).toMatch(/^[0-9a-f]{64}$/);
     });
 
+    describe("tier-1 packages", () => {
+      // Bundled by Pyodide at this version and pure Python: the compatibility
+      // check asks neither PyPI nor the probe.
+      async function pushBundledDeps(branch: string, spec: string): Promise<void> {
+        await writeFile(join(repo.work, "SKILL.md"), ECHO_WITH_DEPS.replace("httpx==0.27.0", spec));
+        await writeFile(join(repo.work, "skill.py"), ECHO_BODY);
+        await writeFile(
+          join(repo.work, "requirements.lock"),
+          `${spec} \\\n    --hash=sha256:${"0".repeat(64)}\n`,
+        );
+        await execFileP("git", ["-C", repo.work, "add", "."]);
+        await execFileP("git", ["-C", repo.work, "commit", "-m", branch, "--allow-empty"]);
+        await execFileP("git", [
+          "-C",
+          repo.work,
+          "push",
+          "-f",
+          "origin",
+          `HEAD:refs/heads/${branch}`,
+        ]);
+      }
+
+      async function registerResolvingTo(error: Tier1PackagesError) {
+        const resolvePackages = vi.fn(async () => err(error));
+        const { tier1, pyodidePackageCacheDir } = offlineTier1(repo.bare);
+        const runner = await makeRunner({
+          pyodidePackageCacheDir,
+          tier1: { ...tier1, resolvePackages },
+        });
+        await pushBundledDeps("skill/echo-tier1", "httpx==0.28.1");
+        const result = await runner.register({ branch: "skill/echo-tier1", origin: OWNER });
+        expect(resolvePackages).toHaveBeenCalledTimes(1);
+        return result;
+      }
+
+      it("fills the boundary probe's cache from Pyodide's CDN on the host, and goes live without the probe when that fails", async () => {
+        const { tier1, pyodidePackageCacheDir } = offlineTier1(repo.bare);
+        const runner = await makeRunner({ pyodidePackageCacheDir, tier1 });
+        // Bundled by Pyodide at this version and native: the probe load-tests it.
+        await pushBundledDeps("skill/echo-native", "pydantic-core==2.41.5");
+        const result = await runner.register({ branch: "skill/echo-native", origin: OWNER });
+        assertStatus(result, "live");
+        const fetchImpl = expectDefined(tier1.fetchImpl, "fetchImpl");
+        const bundled = (await loadBundledPackages())._unsafeUnwrap();
+        const coreFile = expectDefined(
+          bundled.packages.get("pydantic-core"),
+          "pydantic-core",
+        ).fileName;
+        expect(fetchImpl).toHaveBeenCalledWith(
+          `https://cdn.jsdelivr.net/pyodide/v${bundled.version}/full/${coreFile}`,
+          expect.anything(),
+        );
+        // The offline fetch fails the fill, which fails open before any probe child.
+        expect(expectDefined(tier1.probe, "probe").probeBuiltins).not.toHaveBeenCalled();
+      });
+
+      it("rejects as tier1_dependency_unavailable when a wheel fails its pinned hash", async () => {
+        const result = await registerResolvingTo({
+          kind: "hash_mismatch",
+          spec: "idna==3.10",
+          message: "idna-3.10-py3-none-any.whl hashes to sha256:aa",
+        });
+        assertStatus(result, "rejected");
+        expect(result.errors).toEqual([
+          expect.stringMatching(/^tier1_dependency_unavailable: hash_mismatch: idna==3\.10: /),
+        ]);
+        expect(await getMainSha(repo.bare)).toBeNull();
+      });
+
+      it("goes live when the packages cannot be fetched: the run fetches them again", async () => {
+        const result = await registerResolvingTo({
+          kind: "network_failed",
+          spec: "idna==3.10",
+          message: "pypi lookup: ECONNRESET",
+        });
+        assertStatus(result, "live");
+        const skill = await tx((trx) => store.getSkillByName(trx, "echo"));
+        expect(skill?.lockfileHash).toMatch(/^[0-9a-f]{64}$/);
+      });
+
+      it("goes live when a built-in fails Pyodide's pinned sha256: a verdict on the cache, not the lockfile", async () => {
+        const result = await registerResolvingTo({
+          kind: "builtin_integrity",
+          fileName: "httpx-0.28.1-py3-none-any.whl",
+          message:
+            "the download from https://cdn.jsdelivr.net/pyodide/v314.0.7/full/httpx-0.28.1-py3-none-any.whl hashes to sha256:aa",
+        });
+        assertStatus(result, "live");
+      });
+
+      it("goes live when Pyodide's own lockfile cannot be read", async () => {
+        const result = await registerResolvingTo({
+          kind: "bundled_unreadable",
+          message: "pyodide-lock.json: ENOENT",
+        });
+        assertStatus(result, "live");
+      });
+    });
+
     it("an abort during the PyPI lookups rejects with its reason and commits nothing", async () => {
       // A dependency Pyodide doesn't bundle, so the compatibility check asks PyPI.
       const lockfile = "cogmo-unbundled==1.0.0 \\\n    --hash=sha256:0\n";
@@ -657,23 +763,22 @@ outputs:
         "origin",
         "HEAD:refs/heads/skill/echo-pypi",
       ]);
-      const runner = await makeRunner();
       const mainBefore = await getMainSha(repo.bare);
       const controller = new AbortController();
       const reason = new Error("register deadline");
-      const fetch = vi.fn(async () => {
+      // The compatibility check's PyPI lookup is the injected fetch; it aborts
+      // the register from inside the first call.
+      const fetch = vi.fn<typeof globalThis.fetch>(async () => {
         controller.abort(reason);
         return new Response(null, { status: 404 });
       });
-      vi.stubGlobal("fetch", fetch);
+      const runner = await makeRunner({
+        tier1: { ...offlineTier1(repo.bare).tier1, fetchImpl: fetch },
+      });
 
-      try {
-        await expect(
-          runner.register({ branch: "skill/echo-pypi", origin: OWNER, signal: controller.signal }),
-        ).rejects.toBe(reason);
-      } finally {
-        vi.unstubAllGlobals();
-      }
+      await expect(
+        runner.register({ branch: "skill/echo-pypi", origin: OWNER, signal: controller.signal }),
+      ).rejects.toBe(reason);
 
       expect(fetch).toHaveBeenCalled();
       expect(await tx((trx) => store.getSkillByName(trx, "echo"))).toBeUndefined();
@@ -2211,6 +2316,7 @@ effects:
           userTimezone: "UTC",
           defaultRunAs: DEFAULT_RUN_AS,
           skillsRepoPath: repoWithRemote.bare,
+          ...offlineTier1(repoWithRemote.bare),
         });
 
         const sha = await pushFeatureBranch({
@@ -2347,6 +2453,7 @@ effects:
           userTimezone: "UTC",
           defaultRunAs: DEFAULT_RUN_AS,
           skillsRepoPath: repoWithRemote.bare,
+          ...offlineTier1(repoWithRemote.bare),
         });
         const sha = await pushFeatureBranch({
           work: repoWithRemote.work,
@@ -2564,6 +2671,7 @@ effects:
         userTimezone: "UTC",
         defaultRunAs: DEFAULT_RUN_AS,
         skillsRepoPath,
+        ...offlineTier1(skillsRepoPath),
       });
     }
   });

@@ -2,11 +2,12 @@
  * Fire-handler unit tests via `InngestTestEngine`. Covers the dispatch
  * branch matrix: success, runner-side error (run row persisted, no retry),
  * the skipped reasons (skill_not_found / not_scheduled / skill_disabled /
- * invalid_inputs / sandbox_unavailable / inflight), the run-as identity read from the
- * skill row, and the replay-safety contract on the `dispatch` step.
+ * invalid_inputs / sandbox_unavailable / tier1_packages_unavailable /
+ * inflight), the run-as identity read from the skill row, and the
+ * replay-safety contract on the `dispatch` step.
  */
 
-import { InngestTestEngine } from "@inngest/test";
+import { InngestTestEngine, mockCtx } from "@inngest/test";
 import { err, ok } from "neverthrow";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
@@ -205,6 +206,76 @@ describe("createSkillCronFireHandler", () => {
     const { result } = await new InngestTestEngine({ function: fn, events: [baseEvent] }).execute();
 
     expect(result).toMatchObject({ status: "skipped", reason: "sandbox_unavailable" });
+  });
+
+  it("throws on a tier-1 package failure before the final attempt, so Inngest's retries fetch them again", async () => {
+    const runner = mock<SkillRunner>();
+    runner.invoke.mockResolvedValue(
+      err({
+        kind: "tier1_packages_unavailable",
+        name: "morning-brief",
+        error: { kind: "prefetch_failed", message: "cdn down" },
+      }),
+    );
+    const fn = createSkillCronFireHandler(deps(runner), inngest);
+
+    const { result, error } = await new InngestTestEngine({
+      function: fn,
+      events: [baseEvent],
+      transformCtx: (ctx) => ({ ...mockCtx(ctx), attempt: 1 }),
+    }).execute();
+
+    expect(result).toBeUndefined();
+    expect((error as { message?: string } | undefined)?.message).toBe(
+      "skill 'morning-brief' cannot run: its tier-1 packages are unavailable (prefetch_failed: cdn down)",
+    );
+  });
+
+  it("skips a terminal tier-1 package failure at once, without spending retries", async () => {
+    const runner = mock<SkillRunner>();
+    runner.invoke.mockResolvedValue(
+      err({
+        kind: "tier1_packages_unavailable",
+        name: "morning-brief",
+        error: { kind: "hash_mismatch", spec: "idna==3.10", message: "sha256 differs" },
+      }),
+    );
+    const fn = createSkillCronFireHandler(deps(runner), inngest);
+
+    const { result, error } = await new InngestTestEngine({
+      function: fn,
+      events: [baseEvent],
+      transformCtx: (ctx) => ({ ...mockCtx(ctx), attempt: 0 }),
+    }).execute();
+
+    expect(error).toBeUndefined();
+    expect(result).toMatchObject({ status: "skipped", reason: "tier1_packages_unavailable" });
+  });
+
+  it("skips with reason 'tier1_packages_unavailable' on the final attempt", async () => {
+    const runner = mock<SkillRunner>();
+    runner.invoke.mockResolvedValue(
+      err({
+        kind: "tier1_packages_unavailable",
+        name: "morning-brief",
+        error: { kind: "prefetch_failed", message: "cdn down" },
+      }),
+    );
+    const fn = createSkillCronFireHandler(deps(runner), inngest);
+
+    const { result, error } = await new InngestTestEngine({
+      function: fn,
+      events: [baseEvent],
+      transformCtx: (ctx) => ({ ...mockCtx(ctx), attempt: 2 }),
+    }).execute();
+
+    expect(error).toBeUndefined();
+    expect(result).toMatchObject({
+      status: "skipped",
+      reason: "tier1_packages_unavailable",
+      detail:
+        "skill 'morning-brief' cannot run: its tier-1 packages are unavailable (prefetch_failed: cdn down)",
+    });
   });
 
   it("propagates a thrown Error even when its message reads like a rejection", async () => {

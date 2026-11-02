@@ -12,6 +12,9 @@
  */
 
 import { randomBytes } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
@@ -26,6 +29,7 @@ import { DrizzleSecretsStore } from "../secrets/store/index.js";
 import { assertStatus, expectOk } from "../test/assertions.js";
 import { mockFilesService } from "../test/factories.js";
 import { fileDatabaseUrl } from "../test/integration-file.js";
+import { offlineTier1 } from "../test/skills-fixtures.js";
 import { resolveSkillRunAs, type SkillRunAs } from "./run-as.js";
 import { SkillRunnerImpl } from "./runner.js";
 import { DrizzleSkillStore } from "./store/index.js";
@@ -40,8 +44,10 @@ let secretsStore: DrizzleSecretsStore;
 let tx: ReturnType<typeof transactor>;
 /** A user and profile of this file's own, which every invocation runs as. */
 let runAs: SkillRunAs;
+let tier1Root: string;
 
 beforeAll(async () => {
+  tier1Root = await mkdtemp(join(tmpdir(), "runner-it-tier1-"));
   sql = postgres(fileDatabaseUrl(), { max: 4 });
   db = drizzle(sql, { schema });
   tx = transactor(db);
@@ -79,6 +85,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await sql.end();
+  await rm(tier1Root, { recursive: true, force: true });
 });
 
 async function makeRunner() {
@@ -89,6 +96,8 @@ async function makeRunner() {
     userTimezone: "UTC",
     // No skill here is scheduled, so the identity never reaches a row.
     defaultRunAs: { userId: "it-owner", profileId: "it-profile" },
+    // No skill here declares dependencies, so the resolver is never asked.
+    ...offlineTier1(tier1Root),
   });
 }
 

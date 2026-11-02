@@ -1,7 +1,7 @@
 import { Ajv, type ValidateFunction } from "ajv";
 import { err, ok, type Result } from "neverthrow";
 import { describeError } from "../util/describe-error.js";
-import { type LockfileSnapshot, parseLockfilePackageSpecs, readLockfileAtSha } from "./deps.js";
+import { type LockfileSnapshot, readLockfileAtSha } from "./deps.js";
 import { readSkillSource, type SkillSource } from "./skill-source.js";
 import type { SkillRow } from "./store/index.js";
 import type { SkillInputs, SkillManifest } from "./types.js";
@@ -9,10 +9,8 @@ import type { SkillInputs, SkillManifest } from "./types.js";
 export interface SkillLockfileCacheValue {
   /** sha256, matches `skills.lockfile_hash`. */
   hash: string;
-  /** Raw bytes — sysbox populator feeds to `uv pip sync` via stdin. */
+  /** Raw bytes: the sysbox populator feeds them to `uv pip sync` via stdin, and the host resolves tier 1's packages from them. */
   contents: string;
-  /** Parsed `name==version` specs — WASM tier feeds to `micropip.install`. */
-  specs: readonly string[];
 }
 
 export interface SkillSourceCacheEntry {
@@ -23,7 +21,7 @@ export interface SkillSourceCacheEntry {
   readonly outputsValidator?: ValidateFunction;
   /**
    * Lockfile-derived data, populated atomically when the manifest declares
-   * dependencies. All three fields go together; half-populated states are
+   * dependencies. Both fields go together; half-populated states are
    * unrepresentable. Absent when the manifest has no deps.
    */
   readonly lockfile?: SkillLockfileCacheValue;
@@ -34,7 +32,6 @@ function buildLockfileCacheValue(snapshot: LockfileSnapshot): SkillLockfileCache
   return {
     hash: snapshot.hash,
     contents: snapshot.contents,
-    specs: parseLockfilePackageSpecs(snapshot.contents),
   };
 }
 

@@ -1,20 +1,52 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { err, ok } from "neverthrow";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mock } from "vitest-mock-extended";
+import pyodidePackage from "../../node_modules/pyodide/package.json" with { type: "json" };
 import {
   __resetPyodideCompatCachesForTests,
   checkPyodideCompat,
   formatPyodideCompatIssues,
+  loadBundledPackages,
   pypiHasPureWheel,
 } from "./pyodide-compat.js";
+import type { FillBuiltins, Tier1Probe } from "./worker-wasm/tier1.js";
 
 const fakeLockfile = {
   packages: {
     // Exact-version match -> compat accepts without PyPI lookup.
-    httpx: { name: "httpx", version: "0.28.1" },
+    httpx: {
+      name: "httpx",
+      version: "0.28.1",
+      file_name: "httpx-0.28.1-py3-none-any.whl",
+      sha256: "1".repeat(64),
+      depends: ["Python_Dateutil"],
+    },
     // PEP-503-normalised: stored under `python-dateutil`, queried via `Python_Dateutil` etc.
-    "python-dateutil": { name: "python-dateutil", version: "2.9.0" },
+    "python-dateutil": {
+      name: "python-dateutil",
+      version: "2.9.0",
+      file_name: "python_dateutil-2.9.0-py2.py3-none-any.whl",
+      sha256: "2".repeat(64),
+      depends: [],
+    },
+    // Native: an Emscripten-built wheel, as pyodide-lock.json names it.
+    "pydantic-core": {
+      name: "pydantic_core",
+      version: "2.41.5",
+      file_name: "pydantic_core-2.41.5-cp314-cp314-pyemscripten_2026_0_wasm32.whl",
+      sha256: "3".repeat(64),
+      depends: [],
+    },
+    regex: {
+      name: "regex",
+      version: "2026.3.32",
+      file_name: "regex-2026.3.32-cp314-cp314-pyemscripten_2026_0_wasm32.whl",
+      sha256: "4".repeat(64),
+      depends: [],
+    },
   },
 };
 
@@ -25,6 +57,7 @@ beforeEach(async () => {
   lockfileDir = await mkdtemp(join(tmpdir(), "pyodide-compat-"));
   lockfilePath = join(lockfileDir, "pyodide-lock.json");
   await writeFile(lockfilePath, JSON.stringify(fakeLockfile));
+  await writeFile(join(lockfileDir, "package.json"), JSON.stringify({ version: "314.0.7" }));
   __resetPyodideCompatCachesForTests();
 });
 
@@ -199,6 +232,189 @@ describe("checkPyodideCompat", () => {
     expect(result.isErr()).toBe(true);
     if (!result.isErr()) return;
     expect(result.error.map((i) => i.spec)).toEqual(["numpy==2.0.0", "scipy==1.13.0"]);
+  });
+});
+
+describe("loadBundledPackages", () => {
+  it("reads the release from the package.json beside the lockfile", async () => {
+    expect((await loadBundledPackages(lockfilePath))._unsafeUnwrap().version).toBe("314.0.7");
+  });
+
+  it("reads the installed distribution's release, the one its CDN directory is named by", async () => {
+    expect((await loadBundledPackages())._unsafeUnwrap().version).toBe(pyodidePackage.version);
+  });
+
+  it.each([
+    ["missing", null],
+    ["not a release", JSON.stringify({ version: "../../evil" })],
+  ])("errs bundled_unreadable for a package.json that is %s", async (_label, contents) => {
+    const packageJson = join(lockfileDir, "package.json");
+    if (contents === null) await rm(packageJson);
+    else await writeFile(packageJson, contents);
+    expect((await loadBundledPackages(lockfilePath))._unsafeUnwrapErr()).toMatchObject({
+      kind: "bundled_unreadable",
+      message: expect.stringContaining("package.json"),
+    });
+  });
+
+  it("keys by normalised name, marks Emscripten-built wheels native, and normalises depends", async () => {
+    const bundled = (await loadBundledPackages(lockfilePath))._unsafeUnwrap().packages;
+    expect(bundled.get("httpx")).toEqual({
+      version: "0.28.1",
+      native: false,
+      fileName: "httpx-0.28.1-py3-none-any.whl",
+      sha256: "1".repeat(64),
+      depends: ["python-dateutil"],
+    });
+    expect(bundled.get("python-dateutil")).toMatchObject({ version: "2.9.0", native: false });
+    expect(bundled.get("pydantic-core")).toEqual({
+      version: "2.41.5",
+      native: true,
+      fileName: "pydantic_core-2.41.5-cp314-cp314-pyemscripten_2026_0_wasm32.whl",
+      sha256: "3".repeat(64),
+      depends: [],
+    });
+  });
+
+  it("errs bundled_unreadable for a missing file", async () => {
+    const result = await loadBundledPackages(join(lockfileDir, "missing.json"));
+    expect(result._unsafeUnwrapErr()).toMatchObject({
+      kind: "bundled_unreadable",
+      message: expect.stringContaining("missing.json"),
+    });
+  });
+
+  it("errs bundled_unreadable for a file that is not a Pyodide lockfile", async () => {
+    await writeFile(lockfilePath, JSON.stringify({ packages: { x: { name: "x" } } }));
+    const result = await loadBundledPackages(lockfilePath);
+    expect(result._unsafeUnwrapErr()).toMatchObject({
+      kind: "bundled_unreadable",
+      message: expect.stringContaining("not a Pyodide lockfile"),
+    });
+  });
+
+  it("errs bundled_unreadable for an entry whose sha256 is not a hex digest", async () => {
+    const { httpx } = fakeLockfile.packages;
+    await writeFile(
+      lockfilePath,
+      JSON.stringify({ packages: { httpx: { ...httpx, sha256: "not-a-digest" } } }),
+    );
+    expect((await loadBundledPackages(lockfilePath))._unsafeUnwrapErr()).toMatchObject({
+      kind: "bundled_unreadable",
+      message: expect.stringContaining("sha256"),
+    });
+  });
+
+  it("errs bundled_unreadable for a file that is not JSON", async () => {
+    await writeFile(lockfilePath, "{ cut short");
+    expect((await loadBundledPackages(lockfilePath))._unsafeUnwrapErr().kind).toBe(
+      "bundled_unreadable",
+    );
+  });
+});
+
+describe("checkPyodideCompat boundary probe", () => {
+  /** A boundary probe whose cache fill succeeds unless told otherwise. */
+  function boundary() {
+    const fillBuiltins = vi.fn<FillBuiltins>(async () => ok());
+    const probe = mock<Tier1Probe>();
+    return { fillBuiltins, probe, packageCacheDir: "/cache/pyodide" };
+  }
+
+  it("fills the cache with and probes only the bundled native packages", async () => {
+    const b = boundary();
+    b.probe.probeBuiltins.mockResolvedValue(ok());
+    const result = await checkPyodideCompat(
+      ["httpx==0.28.1", "pydantic_core==2.41.5", "regex==2026.3.32"],
+      { lockfilePath, fetchImpl: fakeFetch({}), probe: b },
+    );
+    expect(result.isOk()).toBe(true);
+    expect(b.fillBuiltins).toHaveBeenCalledWith(["pydantic-core", "regex"], {
+      packageCacheDir: "/cache/pyodide",
+    });
+    expect(b.probe.probeBuiltins).toHaveBeenCalledWith(["pydantic-core", "regex"], {
+      packageCacheDir: "/cache/pyodide",
+    });
+  });
+
+  it("allows the register when the probe itself could not run", async () => {
+    const b = boundary();
+    b.probe.probeBuiltins.mockResolvedValue(
+      err({ kind: "unavailable", message: "probe child exited with code 137" }),
+    );
+    const result = await checkPyodideCompat(["pydantic_core==2.41.5"], {
+      lockfilePath,
+      fetchImpl: fakeFetch({}),
+      probe: b,
+    });
+    expect(result.isOk()).toBe(true);
+  });
+
+  it("turns each package the probe rejects into an issue carrying its message", async () => {
+    const b = boundary();
+    b.probe.probeBuiltins.mockResolvedValue(
+      err({
+        kind: "rejected",
+        failures: [{ name: "regex", reason: "EvalError: Code generation from strings disallowed" }],
+      }),
+    );
+    const result = await checkPyodideCompat(["pydantic_core==2.41.5", "regex==2026.3.32"], {
+      lockfilePath,
+      fetchImpl: fakeFetch({}),
+      probe: b,
+    });
+    expect(result._unsafeUnwrapErr()).toEqual([
+      {
+        spec: "regex==2026.3.32",
+        reason: "native_package_rejected_by_boundary",
+        message: "EvalError: Code generation from strings disallowed",
+      },
+    ]);
+    expect(formatPyodideCompatIssues(result._unsafeUnwrapErr())).toBe(
+      "tier1_incompatible_dependency: regex==2026.3.32 -- its native module cannot load under the tier-1 boundary (JS built from strings); declare tier: container (EvalError: Code generation from strings disallowed)",
+    );
+  });
+
+  it("does not start a probe when no native package is bundled at its locked version", async () => {
+    const b = boundary();
+    const result = await checkPyodideCompat(["httpx==0.28.1"], {
+      lockfilePath,
+      fetchImpl: fakeFetch({}),
+      probe: b,
+    });
+    expect(result.isOk()).toBe(true);
+    expect(b.fillBuiltins).not.toHaveBeenCalled();
+    expect(b.probe.probeBuiltins).not.toHaveBeenCalled();
+  });
+
+  it("fails open when the package cache cannot be filled", async () => {
+    const b = boundary();
+    b.fillBuiltins.mockResolvedValue(
+      err({ kind: "prefetch_failed", message: "download https://cdn.jsdelivr.net/…: ECONNRESET" }),
+    );
+    const result = await checkPyodideCompat(["regex==2026.3.32"], {
+      lockfilePath,
+      fetchImpl: fakeFetch({}),
+      probe: b,
+    });
+    expect(result.isOk()).toBe(true);
+    expect(b.probe.probeBuiltins).not.toHaveBeenCalled();
+  });
+
+  it("reports probe rejections beside the PyPI issues", async () => {
+    const b = boundary();
+    b.probe.probeBuiltins.mockResolvedValue(
+      err({ kind: "rejected", failures: [{ name: "regex", reason: "boom" }] }),
+    );
+    const result = await checkPyodideCompat(["numpy==2.0.0", "regex==2026.3.32"], {
+      lockfilePath,
+      fetchImpl: fakeFetch({ "numpy==2.0.0": { ok: true, body: { urls: [] } } }),
+      probe: b,
+    });
+    expect(result._unsafeUnwrapErr().map((i) => i.reason)).toEqual([
+      "no_pyodide_bundle_and_no_pure_wheel",
+      "native_package_rejected_by_boundary",
+    ]);
   });
 });
 

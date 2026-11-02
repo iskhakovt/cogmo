@@ -9,20 +9,22 @@ import { tsupOptions } from "../../tsup.config.js";
 
 /**
  * `tsup.config.ts` against the layout the bundled skills host depends on.
- * `host.ts` spawns the tier-1 worker from `./worker-entry.js` relative to its
- * own module URL, so the build has to emit the worker entry beside whichever
- * bundle the host lands in, and the worker reads its Python from `py/` beside
- * itself. Only the label-gated e2e tier runs the image build, so this runs the
- * build itself: in-process, through tsup's API, so no bundled copy of the
+ * `host.ts` forks the tier-1 child from `./tier1-child.mjs` relative to its
+ * own module URL, so the build has to emit the child beside whichever bundle
+ * the host lands in, with its Pyodide worker beside it. The child runs under
+ * `--permission` with read access to its own directory and the Pyodide
+ * distribution only, so neither file may import anything but Node's
+ * built-ins. Only the label-gated e2e tier runs the image build, so this runs
+ * the build itself: in-process, through tsup's API, so no bundled copy of the
  * config lands beside it in the source tree. Entries resolve from the cwd,
  * which Vitest sets to the server package.
  */
 
 /** The specifier `host.ts` resolves against its module URL in the build. */
-const WORKER_SPECIFIER = "./worker-entry.js";
+const CHILD_SPECIFIER = "./tier1-child.mjs";
 
-/** The worker's Python in the source tree, relative to the server package. */
-const WORKER_PYTHON_SRC = "src/skills/worker-wasm/py";
+/** The child's files, which `child-bundle.ts` emits side by side. */
+const CHILD_FILES = ["tier1-child.mjs", "tier1-pyodide-worker.mjs"];
 
 /** A full bundle; generous so a loaded runner doesn't fail it on time. */
 const BUILD_TIMEOUT_MS = 120_000;
@@ -34,12 +36,6 @@ beforeAll(async () => {
   await build({ ...tsupOptions(outDir), silent: true });
 }, BUILD_TIMEOUT_MS);
 
-function pythonFiles(dir: string): ReadonlyArray<string> {
-  return readdirSync(dir, { recursive: true, encoding: "utf8" })
-    .filter((f) => f.endsWith(".py"))
-    .sort();
-}
-
 afterAll(async () => {
   await rm(outDir, { recursive: true, force: true });
 });
@@ -50,28 +46,55 @@ function emittedBundles(): ReadonlyArray<string> {
     .map((f) => join(outDir, f));
 }
 
+/** Every module specifier a bundle imports, static or dynamic. */
+function importedSpecifiers(source: string): ReadonlyArray<string> {
+  return [...source.matchAll(/(?:\bfrom\s*|\bimport\s*\(?\s*)["']([^"']+)["']/g)].flatMap(
+    ([, specifier]) => (specifier === undefined ? [] : [specifier]),
+  );
+}
+
+/**
+ * The start of every dynamic `import(` argument that is not a string literal,
+ * which `importedSpecifiers` cannot see. An identifier character or `.` before
+ * `import` makes it another call (`py.pyimport(module)`).
+ */
+function computedImports(source: string): ReadonlyArray<string> {
+  return [...source.matchAll(/(?<![\w$.])import\s*\(\s*(?![\s"')])/g)].map(({ index, 0: call }) =>
+    source.slice(index + call.length, index + call.length + 80),
+  );
+}
+
+/** `pyodide-worker.ts` loads Pyodide by path from the granted distribution. */
+const PYODIDE_IMPORT = /^pathToFileURL\(join\(\w+\.pyodideDistDir, "pyodide\.mjs"\)\)\.href\)/;
+
 describe("tsup build", () => {
-  it("emits the tier-1 worker entry beside every bundle that spawns it", () => {
-    const bundles = emittedBundles();
-    const spawners = bundles.filter((f) =>
-      readFileSync(f, "utf8").includes(`"${WORKER_SPECIFIER}"`),
+  it("emits the tier-1 child beside every bundle that forks it", () => {
+    const spawners = emittedBundles().filter((f) =>
+      readFileSync(f, "utf8").includes(`"${CHILD_SPECIFIER}"`),
     );
     const missing = spawners
-      .map((f) => fileURLToPath(new URL(WORKER_SPECIFIER, pathToFileURL(f))))
-      .filter((worker) => !existsSync(worker))
-      .map((worker) => relative(outDir, worker));
-    const workers = bundles
-      .filter((f) => f.endsWith("/worker-entry.js"))
-      .map((f) => relative(outDir, f));
+      .flatMap((f) =>
+        CHILD_FILES.map((child) => fileURLToPath(new URL(`./${child}`, pathToFileURL(f)))),
+      )
+      .filter((child) => !existsSync(child))
+      .map((child) => relative(outDir, child));
 
     expect(spawners).not.toEqual([]);
-    expect(missing, `worker-entry.js emitted at: ${workers.join(", ") || "nowhere"}`).toEqual([]);
+    expect(missing).toEqual([]);
   });
 
-  it("copies the worker's Python, subpackages included, into py/ beside the worker entry", () => {
-    const sources = pythonFiles(WORKER_PYTHON_SRC);
+  it("bundles the child self-contained, its Python embedded", () => {
+    const sources = CHILD_FILES.map((f) => readFileSync(join(outDir, f), "utf8"));
+    const external = sources
+      .flatMap(importedSpecifiers)
+      .filter((specifier) => !specifier.startsWith("node:"));
 
-    expect(sources).not.toEqual([]);
-    expect(pythonFiles(join(outDir, "py"))).toEqual(sources);
+    expect(external).toEqual([]);
+    const computed = sources.flatMap(computedImports);
+    expect(computed.filter((arg) => !PYODIDE_IMPORT.test(arg))).toEqual([]);
+    expect(computed.filter((arg) => PYODIDE_IMPORT.test(arg))).toHaveLength(1);
+    // `py/ctx.py` and `py/install_deps.py`, inlined by the `.py` text loader.
+    expect(sources[1]).toContain("def _build_ctx(bridge):");
+    expect(sources[1]).toContain("async def _install_wheels(mount, files):");
   });
 });

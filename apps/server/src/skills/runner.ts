@@ -1,4 +1,4 @@
-import type { Result } from "neverthrow";
+import { err, ok, type Result } from "neverthrow";
 import { computeNextRun } from "../agent/scheduling/cron.js";
 import type { Transactor } from "../db/index.js";
 import { defaultSkillsImage } from "../env.js";
@@ -20,6 +20,7 @@ import type { SkillDeployOrigin } from "./deploy/origin.js";
 import { registerSkill } from "./deploy/register.js";
 import type { RegisterResult } from "./deploy/register-result.js";
 import { rollbackSkill } from "./deploy/rollback.js";
+import type { LockfileSnapshot } from "./deps.js";
 import { type LockfileCompiler, makeSandboxLockfileCompiler } from "./deps.js";
 import { type InvokeDeps, invokeSkill } from "./invoke/invoke.js";
 import type { SkillRunResult } from "./invoke/run-result.js";
@@ -32,10 +33,19 @@ import {
   type SkillSummary,
   type SkillToolDef,
 } from "./listing.js";
+import { loadBundledPackages } from "./pyodide-compat.js";
 import type { SkillRunAs } from "./run-as.js";
 import { type RegisterForTestsParams, seedSkillForTests } from "./seed-for-tests.js";
 import { SkillSourceCache } from "./source-cache.js";
 import type { SkillRow, SkillRunIdentity, SkillRunTrigger, SkillStore } from "./store/index.js";
+import { createTier1Probe, pyodideDistDir } from "./worker-wasm/host.js";
+import type {
+  FillBuiltins,
+  Tier1Packages,
+  Tier1PackagesError,
+  Tier1Probe,
+} from "./worker-wasm/tier1.js";
+import { ensureTier1Packages, fillBuiltinCache } from "./worker-wasm/wheel-cache.js";
 
 export type {
   DeregisterResult,
@@ -165,8 +175,28 @@ export interface SkillRunnerOptions {
    * `rollback` without it throws a clear error.
    */
   skillsRepoPath?: string;
-  /** Pyodide package cache directory — speeds up cold starts. Optional. */
-  pyodidePackageCacheDir?: string;
+  /** Pyodide package cache directory, which the host fills and tier-1 children read. */
+  pyodidePackageCacheDir: string;
+  /**
+   * Tier 1's other host-side directories: the published wheel directories and
+   * the children's process-group records (design/skills.md → Tier-1 boundary).
+   */
+  tier1: {
+    wheelsRoot: string;
+    childrenDir: string;
+    /** Tests inject a probe that spawns no child. */
+    probe?: Tier1Probe;
+    /**
+     * Tests inject a fetch that reaches no network: what the host downloads
+     * built-ins from Pyodide's CDN and wheels from PyPI with.
+     */
+    fetchImpl?: typeof fetch;
+    /** Tests inject a resolver that reaches no network. */
+    resolvePackages?: (
+      lockfile: LockfileSnapshot,
+      signal?: AbortSignal,
+    ) => Promise<Result<Tier1Packages, Tier1PackagesError>>;
+  };
   /**
    * Sandbox handle for running tier-2 (sysbox container) skills. Optional —
    * deployments without `SANDBOX_RUNTIME` set leave it undefined; tier-2
@@ -261,6 +291,41 @@ export class SkillRunnerImpl implements SkillRunner {
     }
     const clock = opts.clock ?? (() => new Date());
     const sourceCache = new SkillSourceCache(opts.skillsRepoPath);
+    const packageCacheDir = opts.pyodidePackageCacheDir;
+    const tier1 = opts.tier1;
+    const distDir = pyodideDistDir();
+    const probe =
+      tier1.probe ?? createTier1Probe({ pyodideDistDir: distDir, childrenDir: tier1.childrenDir });
+    const fetchImpl = tier1.fetchImpl ?? fetch;
+    const resolvePackages =
+      tier1.resolvePackages ??
+      (async (
+        lockfile: LockfileSnapshot,
+        signal?: AbortSignal,
+      ): Promise<Result<Tier1Packages, Tier1PackagesError>> => {
+        const bundled = await loadBundledPackages();
+        if (bundled.isErr()) {
+          return err({ kind: "bundled_unreadable", message: bundled.error.message });
+        }
+        return ensureTier1Packages(
+          { fetchImpl, bundled: bundled.value },
+          { lockfile, packageCacheDir, wheelsRoot: tier1.wheelsRoot, ...(signal && { signal }) },
+        );
+      });
+    // The register's boundary probe loads from the cache this fills, staged
+    // and verified as a run's built-ins are.
+    const fillBuiltins: FillBuiltins = async (names, cacheOpts) => {
+      const bundled = await loadBundledPackages();
+      if (bundled.isErr()) return err(bundled.error);
+      return fillBuiltinCache({ fetchImpl, bundled: bundled.value }, { names, ...cacheOpts });
+    };
+    const resolveTier1Packages = (
+      lockfile: LockfileSnapshot | undefined,
+      signal?: AbortSignal,
+    ): Promise<Result<Tier1Packages, Tier1PackagesError>> =>
+      lockfile === undefined
+        ? Promise.resolve(ok({ builtins: [], wheelDir: null }))
+        : resolvePackages(lockfile, signal);
     this.#warmPool = new LazyWarmPool({
       image: tier2Image,
       depsCacheVolumeName,
@@ -272,6 +337,7 @@ export class SkillRunnerImpl implements SkillRunner {
       secretsStore: opts.secretsStore,
       defaultRunAs: opts.defaultRunAs,
       capabilities: BUILD_CAPABILITIES,
+      tier1: { fetchImpl, probe, fillBuiltins, packageCacheDir, resolvePackages },
       skillsRepoPath: opts.skillsRepoPath,
       sourceCache,
       // Explicit override wins; otherwise default to a sandbox-backed
@@ -302,7 +368,10 @@ export class SkillRunnerImpl implements SkillRunner {
       sandbox: opts.sandbox,
       warmPool: this.#warmPool,
       runtime: {
-        pyodidePackageCacheDir: opts.pyodidePackageCacheDir,
+        pyodidePackageCacheDir: packageCacheDir,
+        pyodideDistDir: distDir,
+        tier1ChildrenDir: tier1.childrenDir,
+        resolveTier1Packages,
         tier2Image,
         depsCacheVolumeName,
       },

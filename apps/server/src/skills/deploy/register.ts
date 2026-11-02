@@ -9,6 +9,7 @@ import { checkPyodideCompat, formatPyodideCompatIssues } from "../pyodide-compat
 import { readSkillSource, SKILL_BODY_FILE, SKILL_MANIFEST_FILE } from "../skill-source.js";
 import type { ExecuteRegisterResult } from "../store/index.js";
 import type { ClassifierLog, SkillManifest } from "../types.js";
+import { describeTier1PackagesError } from "../worker-wasm/tier1.js";
 import { lintWasmCompat } from "../worker-wasm/wasm-lint.js";
 import { advanceMain, runDeployTx } from "./advance-main.js";
 import { type DeployDeps, requireRepoPath } from "./deploy-deps.js";
@@ -215,9 +216,48 @@ async function prepareRegister(
   const lockfile = lockfileResult.value;
 
   if (manifest.tier === "wasm" && lockfile !== null) {
-    const compat = await checkPyodideCompat(parseLockfilePackageSpecs(lockfile.contents));
+    const compat = await checkPyodideCompat(parseLockfilePackageSpecs(lockfile.contents), {
+      fetchImpl: deps.tier1.fetchImpl,
+      probe: {
+        probe: deps.tier1.probe,
+        fillBuiltins: deps.tier1.fillBuiltins,
+        packageCacheDir: deps.tier1.packageCacheDir,
+        ...(signal && { signal }),
+      },
+    });
     if (compat.isErr()) {
       return err(rejectedResult(branchSha, formatPyodideCompatIssues(compat.error)));
+    }
+    // Fetch and publish the lockfile's wheels now, so the first run pays no
+    // download. A wheel that fails its hash, or has no pure build, is a
+    // verdict on the lockfile; a network, cache or Pyodide-lockfile failure is
+    // not, nor is a built-in whose cached or downloaded file fails Pyodide's
+    // pinned sha256, and the run fetches again.
+    const packages = await deps.tier1.resolvePackages(lockfile, signal);
+    if (packages.isErr()) {
+      const refused = match(packages.error)
+        .with({ kind: "hash_mismatch" }, { kind: "wheel_unavailable" }, () => true)
+        .with(
+          { kind: "network_failed" },
+          { kind: "prefetch_failed" },
+          { kind: "publish_failed" },
+          { kind: "bundled_unreadable" },
+          { kind: "builtin_integrity" },
+          () => false,
+        )
+        .exhaustive();
+      if (refused) {
+        return err(
+          rejectedResult(
+            branchSha,
+            `tier1_dependency_unavailable: ${describeTier1PackagesError(packages.error)}`,
+          ),
+        );
+      }
+      log.warn(
+        { skillName: manifest.name, error: describeTier1PackagesError(packages.error) },
+        "tier-1 packages not fetched at register; the first run fetches them",
+      );
     }
   }
 

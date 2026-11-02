@@ -12,6 +12,7 @@ import { expectDefined } from "../test/assertions.js";
 import {
   ensureVenvPopulated,
   makeSandboxLockfileCompiler,
+  parseLockfileEntries,
   parseLockfilePackageSpecs,
   REQUIREMENTS_LOCK_FILE,
   readLockfileAtSha,
@@ -546,6 +547,56 @@ pydantic==2.5.3 \\
     expect(parseLockfilePackageSpecs("httpx==0.27.0 # via something\nrequests==2.31.0\n")).toEqual([
       "httpx==0.27.0",
       "requests==2.31.0",
+    ]);
+  });
+});
+
+describe("parseLockfileEntries", () => {
+  const A = "a".repeat(64);
+  const B = "B".repeat(64);
+  const C = "c".repeat(64);
+
+  it("collects every continuation-line hash under its spec", () => {
+    const lockfile = `anyio==4.7.0 \\
+    --hash=sha256:${A} \\
+    --hash=sha256:${B}
+    # via httpx
+httpx==0.27.0 \\
+    --hash=sha256:${C}
+`;
+    expect(parseLockfileEntries(lockfile)).toEqual([
+      { name: "anyio", version: "4.7.0", sha256: [A, B.toLowerCase()] },
+      { name: "httpx", version: "0.27.0", sha256: [C] },
+    ]);
+  });
+
+  it("reads hashes written on the spec line itself", () => {
+    expect(parseLockfileEntries(`httpx==0.27.0 --hash=sha256:${A}\n`)).toEqual([
+      { name: "httpx", version: "0.27.0", sha256: [A] },
+    ]);
+  });
+
+  it("gives an unhashed spec an empty hash list", () => {
+    expect(parseLockfileEntries("requests==2.31.0\n")).toEqual([
+      { name: "requests", version: "2.31.0", sha256: [] },
+    ]);
+  });
+
+  it("skips non-sha256 hashes, comments and option lines", () => {
+    const lockfile = `# header
+--index-url https://pypi.org/simple
+idna==3.10 \\
+    --hash=md5:${A} \\
+    --hash=sha256:${C}
+`;
+    expect(parseLockfileEntries(lockfile)).toEqual([
+      { name: "idna", version: "3.10", sha256: [C] },
+    ]);
+  });
+
+  it("does not read a hash out of a comment", () => {
+    expect(parseLockfileEntries(`idna==3.10 # --hash=sha256:${A}\n`)).toEqual([
+      { name: "idna", version: "3.10", sha256: [] },
     ]);
   });
 });

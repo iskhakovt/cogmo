@@ -1,30 +1,31 @@
-# Installs a tier-1 skill's dependencies. `worker-entry.ts` runs this file
-# in the Pyodide globals at worker boot, then awaits
-# `_install_and_verify(specs)` with the skill's `pkg==version` pins before
-# it signals ready; a failure here is the worker's `fatal`.
+# Installs a tier-1 skill's wheels. `pyodide-worker.ts` runs this file in the
+# Pyodide globals at boot, mounts the skill's read-only wheel directory, then
+# awaits `_install_wheels(mount, files)` before it signals ready; a failure
+# here is the worker's `fatal`.
 #
-# micropip has no `--require-hashes`: the WASM tier trusts PyPI's wire
-# integrity (`design/skills.md` → Security posture). The version check
-# after the install catches a pin the resolver skipped and a Pyodide-bundled
-# version that differs from the pin.
+# The host resolved the lockfile and checked every wheel against its
+# `requirements.lock` hash (`design/skills.md` → Tier-1 boundary, layer 4), so
+# micropip installs the files as they are, without resolving dependencies or
+# reaching the network. The version check after the install catches a wheel
+# whose metadata disagrees with its file name.
 import importlib.metadata as _md
 
 import micropip
 
 
-async def _install_and_verify(specs):
-    await micropip.install(specs, keep_going=False)
+async def _install_wheels(mount, files):
+    await micropip.install([f"emfs:{mount}/{f}" for f in files], deps=False)
     mismatches = []
-    for spec in specs:
-        name, _, version = spec.partition("==")
-        if not version:
-            continue
+    for f in files:
+        # A wheel's file name escapes `-` in its name and version, so the
+        # first two fields are exactly those.
+        name, version = f.split("-")[:2]
         try:
             installed = _md.version(name)
         except _md.PackageNotFoundError:
             mismatches.append(f"{name}: not installed")
             continue
         if installed != version:
-            mismatches.append(f"{name}: requested {version}, installed {installed}")
+            mismatches.append(f"{name}: wheel {version}, installed {installed}")
     if mismatches:
         raise RuntimeError("dep version verification failed: " + "; ".join(mismatches))

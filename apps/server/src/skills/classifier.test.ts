@@ -12,9 +12,13 @@ import type { SkillRiskReason } from "./risk-reasons.js";
 import type { SkillEffect, SkillManifest } from "./types.js";
 
 /** The reasons `BUILD_CAPABILITIES` adds when the table would return `auto`. */
-const CAP_REASONS: SkillRiskReason[] = ["tier1_unhardened", "no_review_panel"];
+const CAP_REASONS: SkillRiskReason[] = ["no_review_panel"];
 
-const ALL_CAPABILITIES: SkillsCapabilities = { tier1Hardened: true, reviewPanel: true };
+const ALL_CAPABILITIES: SkillsCapabilities = {
+  tier1Hardened: true,
+  reviewPanel: true,
+  tier1MemoryBounded: false,
+};
 
 function makeManifest(overrides: Partial<SkillManifest> = {}): SkillManifest {
   return {

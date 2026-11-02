@@ -1,9 +1,12 @@
 import type { Inngest } from "inngest";
+import type { Result } from "neverthrow";
 import type { Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
 import type { SandboxClient } from "../sandbox/index.js";
-import { reapSkillVenvs } from "./deps-reaper.js";
+import { DEPS_REAP_GRACE_DAYS, type ReapSkillVenvsError, reapSkillVenvs } from "./deps-reaper.js";
+import type { BundledDistribution, BundledPackagesUnreadable } from "./pyodide-compat.js";
 import type { SkillStore } from "./store/index.js";
+import { reapTier1WheelDirs, sweepTier1WheelTmpDirs } from "./worker-wasm/wheel-cache.js";
 
 const log = logger.child({ component: "skills.deps-reaper-function" });
 
@@ -28,11 +31,23 @@ export interface SkillDepsReaperDeps {
    * by tests that don't exercise the reap path.
    */
   depsCacheVolumeName: string | undefined;
+  /**
+   * Host directory holding the tier-1 wheel directories
+   * (`ensureTier1Packages`). Unset where tier 1 publishes none.
+   */
+  wheelsRoot?: string;
+  /**
+   * The installed Pyodide distribution, whose version keys the wheel
+   * directories a child installs from (`loadBundledPackages`).
+   */
+  loadBundled: () => Promise<Result<BundledDistribution, BundledPackagesUnreadable>>;
 }
 
 /**
  * Daily Inngest scheduled function that sweeps unreachable
- * `/skill-venvs/<hash>/` directories. Unreachable = no `skills` row
+ * `/skill-venvs/<hash>/` directories, and the host's tier-1 wheel
+ * directories when `wheelsRoot` is set (a reachable hash's directory for a
+ * Pyodide release other than the installed one is unreachable). Unreachable = no `skills` row
  * (enabled or disabled) carries that `lockfile_hash`. A 7-day grace
  * window protects the rollback-then-roll-forward case where a hash
  * temporarily leaves the reachable set; if the rollback sticks past
@@ -61,45 +76,102 @@ export function createSkillDepsReaper(deps: SkillDepsReaperDeps, inngest: Innges
       triggers: [{ cron: "17 3 * * *" }],
     },
     async ({ step }) => {
-      if (!deps.sandbox || !deps.depsCacheVolumeName) {
-        log.info("skill-venvs-reaper: sandbox or deps volume not configured; skipping");
-        return { skipped: true } as const;
-      }
-      if (deps.sandbox.capabilities.depsCacheSharing === "per-sandbox") {
-        // No persistent shared volume to sweep — each sandbox already
-        // disposes its container-local /skill-venvs on delete.
-        log.info(
-          { backend: deps.sandbox.backendId },
-          "skill-venvs-reaper: backend uses per-sandbox cache; nothing to reap",
-        );
-        return { skipped: true } as const;
-      }
-      const sandbox = deps.sandbox;
-      const depsCacheVolumeName = deps.depsCacheVolumeName;
+      const venvSandbox = venvReapSandbox(deps);
+      const wheelsRoot = deps.wheelsRoot;
+      if (!venvSandbox && wheelsRoot === undefined) return { skipped: true } as const;
 
       const reachable = await step.run("list-reachable-hashes", async () => {
         const set = await deps.runInTx((tx) => deps.store.listReachableLockfileHashes(tx));
         return [...set];
       });
 
-      const result = await step.run("reap", async () => {
-        const r = await reapSkillVenvs({
-          sandbox,
-          image: deps.image,
-          depsCacheVolumeName,
-          reachableHashes: new Set(reachable),
-        });
-        if (r.isErr()) {
-          log.warn(
-            { err: r.error.message, kind: r.error.kind },
-            "skill-venvs-reaper: reap step failed",
-          );
-          return { reapedHashes: [] as string[], error: r.error.kind };
-        }
-        return { reapedHashes: [...r.value.reapedHashes] };
-      });
+      const venvs = venvSandbox
+        ? await step.run(
+            "reap",
+            async (): Promise<{ reapedHashes: string[]; error?: ReapSkillVenvsError["kind"] }> => {
+              const r = await reapSkillVenvs({
+                sandbox: venvSandbox.sandbox,
+                image: deps.image,
+                depsCacheVolumeName: venvSandbox.depsCacheVolumeName,
+                reachableHashes: new Set(reachable),
+              });
+              if (r.isErr()) {
+                log.warn(
+                  { err: r.error.message, kind: r.error.kind },
+                  "skill-venvs-reaper: reap step failed",
+                );
+                return { reapedHashes: [], error: r.error.kind };
+              }
+              return { reapedHashes: [...r.value.reapedHashes] };
+            },
+          )
+        : ({ skipped: true } as const);
 
-      return result;
+      const tier1Wheels =
+        wheelsRoot === undefined
+          ? ({ skipped: true } as const)
+          : await step.run(
+              "reap-tier1-wheels",
+              async (): Promise<{
+                reapedDirs: string[];
+                error?: "reap_failed" | "bundled_unreadable";
+              }> => {
+                // The installed release decides which directories a child installs from.
+                const bundled = await deps.loadBundled();
+                if (bundled.isErr()) {
+                  log.warn(
+                    { err: bundled.error.message },
+                    "skill-venvs-reaper: Pyodide's lockfile unreadable; sweeping only the tier-1 wheel root's stale tmp dirs",
+                  );
+                  const swept = await sweepTier1WheelTmpDirs(wheelsRoot);
+                  if (swept.isErr()) {
+                    log.warn(
+                      { err: swept.error.message },
+                      "skill-venvs-reaper: tier-1 wheel tmp sweep failed",
+                    );
+                  }
+                  return { reapedDirs: [], error: bundled.error.kind };
+                }
+                const r = await reapTier1WheelDirs({
+                  wheelsRoot,
+                  reachableHashes: new Set(reachable),
+                  pyodideVersion: bundled.value.version,
+                  graceDays: DEPS_REAP_GRACE_DAYS,
+                });
+                if (r.isErr()) {
+                  log.warn(
+                    { err: r.error.message },
+                    "skill-venvs-reaper: tier-1 wheel reap failed",
+                  );
+                  return { reapedDirs: [], error: r.error.kind };
+                }
+                return { reapedDirs: [...r.value.reapedDirs] };
+              },
+            );
+
+      return { venvs, tier1Wheels };
     },
   );
+}
+
+/**
+ * The sandbox and volume the venv sweep runs on, or undefined when there is
+ * no shared venv volume to sweep: no sandbox or volume configured, or a
+ * backend whose sandboxes each dispose their own `/skill-venvs` on delete.
+ */
+function venvReapSandbox(
+  deps: SkillDepsReaperDeps,
+): { sandbox: SandboxClient; depsCacheVolumeName: string } | undefined {
+  if (!deps.sandbox || !deps.depsCacheVolumeName) {
+    log.info("skill-venvs-reaper: sandbox or deps volume not configured; skipping venvs");
+    return undefined;
+  }
+  if (deps.sandbox.capabilities.depsCacheSharing === "per-sandbox") {
+    log.info(
+      { backend: deps.sandbox.backendId },
+      "skill-venvs-reaper: backend uses per-sandbox cache; no venvs to reap",
+    );
+    return undefined;
+  }
+  return { sandbox: deps.sandbox, depsCacheVolumeName: deps.depsCacheVolumeName };
 }

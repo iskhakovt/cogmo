@@ -19,7 +19,7 @@ import type { SkillRiskReason } from "./risk-reasons.js";
 import type { SkillManifest } from "./types.js";
 
 /** The reasons `BUILD_CAPABILITIES` adds when the table would return `auto`. */
-const CAP_REASONS: SkillRiskReason[] = ["tier1_unhardened", "no_review_panel"];
+const CAP_REASONS: SkillRiskReason[] = ["no_review_panel"];
 
 function manifestWith(overrides: Partial<SkillManifest> = {}): SkillManifest {
   return {
@@ -534,16 +534,22 @@ async def run(inputs, ctx):
     const log = await classifyWithAst(manifestWith(), HARMLESS, {
       tier1Hardened: false,
       reviewPanel: false,
+      tier1MemoryBounded: false,
     });
     expect(log.risk_tier).toBe("notify");
     expect(log.reasons).toEqual(["tier1_unhardened", "no_review_panel"]);
-    expect(log.capabilities).toEqual({ tier1Hardened: false, reviewPanel: false });
+    expect(log.capabilities).toEqual({
+      tier1Hardened: false,
+      reviewPanel: false,
+      tier1MemoryBounded: false,
+    });
   });
 
   it("records only tier1_unhardened once a review panel is set", async () => {
     const log = await classifyWithAst(manifestWith(), HARMLESS, {
       tier1Hardened: false,
       reviewPanel: true,
+      tier1MemoryBounded: false,
     });
     expect(log.risk_tier).toBe("notify");
     expect(log.reasons).toEqual(["tier1_unhardened"]);
@@ -553,6 +559,7 @@ async def run(inputs, ctx):
     const log = await classifyWithAst(manifestWith(), HARMLESS, {
       tier1Hardened: true,
       reviewPanel: false,
+      tier1MemoryBounded: false,
     });
     expect(log.risk_tier).toBe("notify");
     expect(log.reasons).toEqual(["no_review_panel"]);
@@ -562,10 +569,15 @@ async def run(inputs, ctx):
     const log = await classifyWithAst(manifestWith(), HARMLESS, {
       tier1Hardened: true,
       reviewPanel: true,
+      tier1MemoryBounded: false,
     });
     expect(log.risk_tier).toBe("auto");
     expect(log.reasons).toEqual([]);
-    expect(log.capabilities).toEqual({ tier1Hardened: true, reviewPanel: true });
+    expect(log.capabilities).toEqual({
+      tier1Hardened: true,
+      reviewPanel: true,
+      tier1MemoryBounded: false,
+    });
   });
 
   it("leaves a notify deploy's reasons free of the cap", async () => {

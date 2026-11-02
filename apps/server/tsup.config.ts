@@ -1,28 +1,10 @@
-import { cpSync, statSync } from "node:fs";
-import { basename, join } from "node:path";
 import { defineConfig, type Options } from "tsup";
+import { buildTier1Child } from "./src/skills/worker-wasm/child-bundle.js";
 
 const OUT_DIR = "dist";
 
 /**
- * The tier-1 worker reads its Python from `py/` beside its own module, so the
- * `.py` files go next to the built `worker-entry.js`, subpackages included.
- * Tool caches (`.ruff_cache/`, `__pycache__/`) and config stay behind.
- */
-function copyWorkerPython(outDir: string): void {
-  cpSync("src/skills/worker-wasm/py", join(outDir, "py"), {
-    recursive: true,
-    filter: (source) => {
-      const name = basename(source);
-      return statSync(source).isDirectory()
-        ? !name.startsWith(".") && name !== "__pycache__"
-        : name.endsWith(".py");
-    },
-  });
-}
-
-/**
- * The build for an output directory. The worker's Python is copied into the
+ * The build for an output directory. The tier-1 child is bundled into the
  * same directory, so a build elsewhere (`--out-dir`, `tsup-config.test.ts`)
  * gets its own copy and leaves `dist/` alone.
  */
@@ -35,9 +17,6 @@ export function tsupOptions(outDir: string): Options {
       index: "src/index.ts",
       main: "src/main.ts",
       otel: "src/otel.ts",
-      // Tier-1 skills worker. `host.ts` spawns it from `./worker-entry.js`
-      // relative to the bundle the host is bundled into.
-      "worker-entry": "src/skills/worker-wasm/worker-entry.ts",
     },
     format: ["esm"],
     target: "node26",
@@ -51,7 +30,13 @@ export function tsupOptions(outDir: string): Options {
     // runtime — `@orpc/contract` is imported only by that bundled code, not by
     // `src/`, so don't drop it as "unused".
     noExternal: [/^@cogmo\//],
-    onSuccess: async () => copyWorkerPython(outDir),
+    // The host imports the child bundler only when it runs from source.
+    external: ["esbuild"],
+    // The tier-1 child: `host.ts` forks `./tier1-child.mjs` relative to the
+    // bundle the host is bundled into, so it goes at the output's root. It is
+    // its own self-contained esbuild bundle, since under `--permission` it
+    // can read nothing from `node_modules` (`child-bundle.ts`).
+    onSuccess: () => buildTier1Child({ sourceDir: "src/skills/worker-wasm", outDir }),
   };
 }
 

@@ -7,12 +7,17 @@ import type { SecretsStore } from "../../secrets/store/index.js";
 import type { DefaultCtxHandlerOptions } from "../ctx-handler.js";
 import type { SkillInvokeRejection } from "../invoke-rejection.js";
 import type { SkillRunAs } from "../run-as.js";
-import { type SkillSourceCache, schemaIssues } from "../source-cache.js";
+import {
+  type SkillSourceCache,
+  type SkillSourceCacheEntry,
+  schemaIssues,
+} from "../source-cache.js";
 import type { SkillRunTrigger, SkillStore } from "../store/index.js";
+import { describeTier1PackagesError } from "../worker-wasm/tier1.js";
 import { executeRun } from "./execute-run.js";
 import { finishRun } from "./finish-run.js";
 import type { SkillRunResult } from "./run-result.js";
-import { planRuntime, type RuntimeConfig, type SkillRuntime } from "./runtime.js";
+import { planRuntime, type RuntimeConfig, type RuntimePlan, type SkillRuntime } from "./runtime.js";
 import { startRun } from "./start-run.js";
 import type { LazyWarmPool } from "./warm-pool.js";
 
@@ -79,14 +84,18 @@ export async function invokeSkill(
   const trigger: SkillRunTrigger = opts.trigger ?? "manual";
   const { idempotencyKey } = opts;
 
-  // The warm pool starts before the run row is written, so a pool that
-  // can't start throws with no row behind and a keyed retry runs the skill
-  // rather than refusing a `started` row as in flight. A key that already
-  // has a row is a replay, which recovery settles without the pool.
-  const pool =
-    plan.kind === "pool" && !(await hasKeyedRun(deps, idempotencyKey))
-      ? await deps.warmPool.ensure(plan.sandbox)
-      : undefined;
+  // The runtime is prepared before the run row is written: tier-1 packages
+  // the host cannot provide, or a warm pool that can't start, leave no row
+  // behind, so a keyed retry runs the skill rather than replaying a failure
+  // no skill code produced or refusing a `started` row as in flight. A key
+  // that already has a row is a replay, which recovery settles without a
+  // runtime.
+  const keyed = await hasKeyedRun(deps, idempotencyKey);
+  const prepared: Result<SkillRuntime | undefined, SkillInvokeRejection> = keyed
+    ? ok(undefined)
+    : await prepareRuntime(deps, { name, plan, cached });
+  if (prepared.isErr()) return err(prepared.error);
+  const runtime = prepared.value;
 
   const start = await startRun(deps, {
     skillId: skill.id,
@@ -120,12 +129,10 @@ export async function invokeSkill(
     })
     .with({ kind: "execute" }, async ({ runId, createdAt }) => {
       log.info({ runId, ...logFields }, "invoking skill");
-      // `pool` is unset here only when the keyed row seen above was gone by
-      // the time this attempt inserted its own.
-      const runtime: SkillRuntime =
-        plan.kind === "pool"
-          ? { kind: "pool", pool: pool ?? (await deps.warmPool.ensure(plan.sandbox)) }
-          : plan;
+      // Set: a keyed row `hasKeyedRun` saw is recovered, never inserted, since nothing deletes `skill_runs` rows.
+      if (runtime === undefined) {
+        throw new Error(`invoke: run ${runId} was inserted under a key that already had a row`);
+      }
       const executed = await executeRun(deps, {
         run: { id: runId, createdAt },
         skill,
@@ -136,6 +143,36 @@ export async function invokeSkill(
       });
       return ok(await finishRun(deps, { runId, skillName: name, cached, executed }));
     })
+    .exhaustive();
+}
+
+/**
+ * The runtime a run executes on: the tier-1 packages the lockfile needs,
+ * resolved by the host, or the started warm pool. A lockfile whose packages
+ * are unavailable rejects the invocation; a pool that can't start throws.
+ */
+async function prepareRuntime(
+  deps: Pick<InvokeDeps, "runtime" | "warmPool">,
+  args: { name: string; plan: RuntimePlan; cached: SkillSourceCacheEntry },
+): Promise<Result<SkillRuntime, SkillInvokeRejection>> {
+  const { name, plan, cached } = args;
+  return match(plan)
+    .returnType<Promise<Result<SkillRuntime, SkillInvokeRejection>>>()
+    .with({ kind: "wasm" }, async () =>
+      (await deps.runtime.resolveTier1Packages(cached.lockfile))
+        .map((packages): SkillRuntime => ({ kind: "wasm", packages }))
+        .mapErr((error): SkillInvokeRejection => {
+          log.warn(
+            { skillName: name, error: describeTier1PackagesError(error) },
+            "skill invocation refused: tier-1 packages unavailable",
+          );
+          return { kind: "tier1_packages_unavailable", name, error };
+        }),
+    )
+    .with({ kind: "pool" }, async ({ sandbox }) =>
+      ok({ kind: "pool", pool: await deps.warmPool.ensure(sandbox) }),
+    )
+    .with({ kind: "one_shot" }, async (oneShot) => ok(oneShot))
     .exhaustive();
 }
 

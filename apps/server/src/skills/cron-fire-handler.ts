@@ -42,13 +42,49 @@ type SkipReason =
   | "skill_disabled"
   | "invalid_inputs"
   | "sandbox_unavailable"
+  | "tier1_packages_unavailable"
   | "inflight";
 
 type DispatchResult =
   | { status: "completed"; runId: string; runStatus: "success" | "error" }
   | { status: "skipped"; reason: SkipReason; detail?: string };
 
-/** The skip a runner rejection becomes. Retries can't repair any of them. */
+/** Inngest's retries of a fire; `attempt` runs from 0 to this. */
+const CRON_FIRE_RETRIES = 2;
+
+/**
+ * Whether a retry of the fire may clear the rejection: tier-1 packages the
+ * host could not fetch, verify or publish are fetched again by the next
+ * attempt. A wheel with no pure build or a hash the lockfile does not carry
+ * is terminal for the lockfile, and retries can't repair the rest.
+ */
+function retriesClear(rejection: SkillInvokeRejection): boolean {
+  return match(rejection)
+    .with({ kind: "tier1_packages_unavailable" }, ({ error }) =>
+      match(error.kind)
+        .with(
+          "network_failed",
+          "prefetch_failed",
+          "publish_failed",
+          "bundled_unreadable",
+          "builtin_integrity",
+          () => true,
+        )
+        .with("wheel_unavailable", "hash_mismatch", () => false)
+        .exhaustive(),
+    )
+    .with(
+      { kind: "not_found" },
+      { kind: "disabled" },
+      { kind: "invalid_inputs" },
+      { kind: "sandbox_unavailable" },
+      { kind: "inflight" },
+      () => false,
+    )
+    .exhaustive();
+}
+
+/** The skip a runner rejection becomes. */
 function skipReason(rejection: SkillInvokeRejection): SkipReason {
   return match(rejection.kind)
     .returnType<SkipReason>()
@@ -56,6 +92,7 @@ function skipReason(rejection: SkillInvokeRejection): SkipReason {
     .with("disabled", () => "skill_disabled")
     .with("invalid_inputs", () => "invalid_inputs")
     .with("sandbox_unavailable", () => "sandbox_unavailable")
+    .with("tier1_packages_unavailable", () => "tier1_packages_unavailable")
     .with("inflight", () => "inflight")
     .exhaustive();
 }
@@ -64,11 +101,11 @@ export function createSkillCronFireHandler(deps: SkillCronFireDeps, inngest: Inn
   return inngest.createFunction(
     {
       id: "skill-cron-fire",
-      retries: 2,
+      retries: CRON_FIRE_RETRIES,
       concurrency: { limit: 1, key: "event.data.skillId" },
       triggers: [skillCronFire],
     },
-    async ({ event, step }) => {
+    async ({ event, step, attempt }) => {
       const { skillId, skillName, scheduledFor } = event.data;
 
       // Deterministic-per-fire idempotency key — same shape as the
@@ -119,11 +156,12 @@ export function createSkillCronFireHandler(deps: SkillCronFireDeps, inngest: Inn
             runId: run.runId,
             runStatus: run.status,
           }),
-          (rejection): DispatchResult => ({
-            status: "skipped",
-            reason: skipReason(rejection),
-            detail: describeInvokeRejection(rejection),
-          }),
+          (rejection): DispatchResult => {
+            const detail = describeInvokeRejection(rejection);
+            // Thrown so Inngest retries the step; the final attempt records the skip.
+            if (retriesClear(rejection) && attempt < CRON_FIRE_RETRIES) throw new Error(detail);
+            return { status: "skipped", reason: skipReason(rejection), detail };
+          },
         );
       });
 

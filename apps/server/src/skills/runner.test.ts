@@ -1,3 +1,6 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { err, ok } from "neverthrow";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
@@ -8,6 +11,7 @@ import type { SecretsStore } from "../secrets/store/index.js";
 import { assertStatus, expectDefined } from "../test/assertions.js";
 import { mockFilesService } from "../test/factories.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
+import { offlineTier1 } from "../test/skills-fixtures.js";
 import type { SkillRunAs, SkillRunServices } from "./run-as.js";
 import { SkillRunnerImpl, type SkillRunnerOptions } from "./runner.js";
 import { DrizzleSkillStore } from "./store/index.js";
@@ -23,10 +27,12 @@ let db: Database;
 let tx: Transactor;
 let close: () => Promise<void>;
 let store: DrizzleSkillStore;
+let tier1Root: string;
 
 beforeAll(async () => {
   ({ db, tx, close } = await createTestDatabase());
   store = new DrizzleSkillStore();
+  tier1Root = await mkdtemp(join(tmpdir(), "runner-test-tier1-"));
 });
 
 afterEach(async () => {
@@ -35,6 +41,7 @@ afterEach(async () => {
 
 afterAll(async () => {
   await close();
+  await rm(tier1Root, { recursive: true, force: true });
 });
 
 function makeMockMemory(): SkillRunServices["memory"] {
@@ -76,6 +83,7 @@ async function makeRunner(
     secretsStore: opts.secretsStore ?? makeMockSecrets(),
     userTimezone: "UTC",
     defaultRunAs: DEFAULT_RUN_AS,
+    ...offlineTier1(tier1Root),
     ...(opts.ctxHttp && { ctxHttp: opts.ctxHttp }),
   });
 }
@@ -443,7 +451,7 @@ async def run(inputs, ctx):
     expect(run?.output).toBeNull();
     expect(run?.error).toContain("kaboom");
     // Error-path coverage of the no-rusage → null coalesce in
-    // `runner.invoke`. Pyodide's worker-entry catches the exception and
+    // `runner.invoke`. The tier-1 Pyodide worker catches the exception and
     // emits a `task_result` without a `rusage` block, identical in shape
     // to the tier-2 supervisor-synthesised result (wall-clock kill,
     // SIGKILL, watchdog). A regression that swapped `?? null` for `?? 0`
@@ -540,6 +548,58 @@ inputs:
       kind: "sandbox_unavailable",
       name: "container-skill",
     });
+  });
+
+  it("rejects a tier-1 invoke whose packages are unavailable with no run row, so a keyed retry runs the skill", async () => {
+    const lockfileContents = `idna==3.10 --hash=sha256:${"0".repeat(64)}\n`;
+    const resolvePackages = vi
+      .fn<NonNullable<SkillRunnerOptions["tier1"]["resolvePackages"]>>()
+      .mockResolvedValueOnce(
+        err({ kind: "network_failed", spec: "idna==3.10", message: "offline" }),
+      )
+      .mockResolvedValueOnce(ok({ builtins: [], wheelDir: null }))
+      .mockResolvedValue(err({ kind: "prefetch_failed", message: "cdn down" }));
+    const offline = offlineTier1(tier1Root);
+    const runner = await SkillRunnerImpl.create({
+      store,
+      runInTx: tx,
+      secretsStore: makeMockSecrets(),
+      userTimezone: "UTC",
+      defaultRunAs: DEFAULT_RUN_AS,
+      ...offline,
+      tier1: { ...offline.tier1, resolvePackages },
+    });
+    await runner.__registerForTests({
+      name: "echo",
+      manifestSource: ECHO_MANIFEST,
+      body: ECHO_BODY,
+      lockfileContents,
+    });
+    const keyed = {
+      name: "echo",
+      inputs: { x: 1 },
+      idempotencyKey: "skill-cron:echo:packages-down",
+      runAs: runAs(),
+    };
+
+    const rejected = await runner.invoke(keyed);
+
+    expect(rejected._unsafeUnwrapErr()).toEqual({
+      kind: "tier1_packages_unavailable",
+      name: "echo",
+      error: { kind: "network_failed", spec: "idna==3.10", message: "offline" },
+    });
+    expect(
+      await tx((trx) => store.getRunByIdempotencyKey(trx, keyed.idempotencyKey)),
+    ).toBeUndefined();
+
+    const retried = (await runner.invoke(keyed))._unsafeUnwrap();
+    assertStatus(retried, "success");
+    expect(retried.output).toEqual({ echo: 2 });
+
+    // A replay of the settled run needs no packages, so their loss refuses nothing.
+    expect((await runner.invoke(keyed))._unsafeUnwrap()).toEqual(retried);
+    expect(resolvePackages).toHaveBeenCalledTimes(2);
   });
 
   it("two sequential invokes succeed independently (no shared state)", async () => {
@@ -1008,6 +1068,7 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
       secretsStore: makeMockSecrets(),
       userTimezone: "UTC",
       defaultRunAs: DEFAULT_RUN_AS,
+      ...offlineTier1(tier1Root),
       sandbox: mock<SandboxClient>(),
     });
     await runner.__registerForTests({
@@ -1187,6 +1248,7 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
       secretsStore: makeMockSecrets(),
       userTimezone: "UTC",
       defaultRunAs: DEFAULT_RUN_AS,
+      ...offlineTier1(tier1Root),
       sandbox: perSandbox,
       // Operator-configured value flowing in from env — the runner must
       // ignore it because the backend can't honour POSIX semantics.
@@ -1226,6 +1288,7 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
       secretsStore: makeMockSecrets(),
       userTimezone: "UTC",
       defaultRunAs: DEFAULT_RUN_AS,
+      ...offlineTier1(tier1Root),
       sandbox: sharedVolume,
       depsCacheVolumeName: "cogmo-skills-deps-cache",
     });

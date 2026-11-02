@@ -16,6 +16,12 @@ export interface SkillsCapabilities {
    * row of `deployment_flags`). Without one, `auto` is capped at `notify`.
    */
   reviewPanel: boolean;
+  /**
+   * A per-child cgroup gives tier 1 a hard memory ceiling (design/skills.md →
+   * Tier-1 boundary, layer 5). Recorded beside the tier; no rule reads it,
+   * since the gap it closes costs availability, not a secret.
+   */
+  tier1MemoryBounded: boolean;
 }
 
 /**
@@ -23,6 +29,8 @@ export interface SkillsCapabilities {
  * read once the review stage ships.
  */
 export const BUILD_CAPABILITIES: Readonly<SkillsCapabilities> = Object.freeze({
-  tier1Hardened: false,
+  tier1Hardened: true,
   reviewPanel: false,
+  // The per-child cgroup needs the delegation sandbox.md defers.
+  tier1MemoryBounded: false,
 });

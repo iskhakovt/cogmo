@@ -18,12 +18,45 @@ import { err, ok, type Result } from "neverthrow";
  * exists so a skill author writing `import subprocess` gets a clear "won't
  * work in tier-1" at deploy time instead of a Pyodide ImportError at
  * runtime.
+ *
+ * It also rejects the modules that reach past Python into the host's
+ * JavaScript: `js`, `pyodide_js`, `pyodide.ffi`, `pyodide.code`,
+ * `pyodide.http` and `micropip`. The tier-1 boundary closes each of them
+ * (design/skills.md → Tier-1 boundary, layer 7); the rule tells an honest
+ * author why the import fails and what to use instead.
  */
 
 interface RulePattern {
   name: string;
   pattern: RegExp;
   reason: string;
+}
+
+/**
+ * Leading names of an `import a, b as c, …` list, so a rule matches its
+ * module at any position in it. Spelled out rather than folded into a
+ * whitespace-matching class: see `stdlib_network`.
+ */
+const IMPORT_LIST_PREFIX = "(?:[\\w.]+(?:[ \\t]+as[ \\t]+[\\w.]+)?[ \\t]*,[ \\t]*)*";
+
+/** `import M`, `import a, M`, `import M.sub` and `from M[.sub] import …` for a top-level module. */
+function moduleImport(module: string): RegExp {
+  return new RegExp(
+    `^[ \\t]*(?:import[ \\t]+${IMPORT_LIST_PREFIX}${module}\\b|from[ \\t]+${module}(?:\\.[\\w.]+)?[ \\t]+import\\b)`,
+    "m",
+  );
+}
+
+/**
+ * `pyodide.<sub>` anywhere, which covers `import pyodide.<sub>`, `from
+ * pyodide.<sub> import …` and attribute use after `import pyodide`, plus
+ * `from pyodide import …, <sub>`.
+ */
+function pyodideSubmodule(sub: string): RegExp {
+  return new RegExp(
+    `\\bpyodide\\.${sub}\\b|^[ \\t]*from[ \\t]+pyodide[ \\t]+import[ \\t]+${IMPORT_LIST_PREFIX}${sub}\\b`,
+    "m",
+  );
 }
 
 const RULES: readonly RulePattern[] = [
@@ -96,6 +129,41 @@ const RULES: readonly RulePattern[] = [
     name: "ctypes",
     pattern: /^[ \t]*(?:import[ \t]+ctypes|from[ \t]+ctypes[ \t]+import)\b/m,
     reason: "ctypes is not available in tier-1 (WASM)",
+  },
+  {
+    name: "js_import",
+    pattern: moduleImport("js"),
+    reason:
+      "`js` is the host's JavaScript scope, which tier-1 (WASM) closes; use `await ctx.http.get(url)` for the network",
+  },
+  {
+    name: "pyodide_js_import",
+    pattern: moduleImport("pyodide_js"),
+    reason:
+      "`pyodide_js` reaches the Pyodide runtime and its filesystem mounts, which tier-1 (WASM) closes; there is no replacement",
+  },
+  {
+    name: "pyodide_ffi_import",
+    pattern: pyodideSubmodule("ffi"),
+    reason:
+      "`pyodide.ffi` is JavaScript interop, which tier-1 (WASM) closes; there is no replacement",
+  },
+  {
+    name: "pyodide_code_import",
+    pattern: pyodideSubmodule("code"),
+    reason: "`pyodide.code` runs JavaScript, which tier-1 (WASM) closes; there is no replacement",
+  },
+  {
+    name: "pyodide_http_import",
+    pattern: pyodideSubmodule("http"),
+    reason:
+      "`pyodide.http` fetches through the host's JavaScript, which tier-1 (WASM) closes; use `await ctx.http.get(url)`",
+  },
+  {
+    name: "micropip_import",
+    pattern: moduleImport("micropip"),
+    reason:
+      "tier-1 (WASM) installs nothing at runtime; declare the package in SKILL.md `dependencies`",
   },
 ];
 

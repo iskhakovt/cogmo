@@ -10,8 +10,11 @@ import { DEPENDENCY_EXEC_OPTIONS, PYTHON_ABI_TAG_COMMAND } from "./deps.js";
 
 const log = logger.child({ component: "skills.deps-reaper" });
 
-/** Default grace window before an unreachable venv is removed. */
-const DEFAULT_GRACE_DAYS = 7;
+/**
+ * Days an unreachable dependency directory, a venv or a tier-1 wheel
+ * directory, must sit unmodified, by its mtime, before it is removed.
+ */
+export const DEPS_REAP_GRACE_DAYS = 7;
 
 /** Per-reap wall-clock cap. The script lists + deletes a small number of dirs. */
 const REAP_TIMEOUT_MS = 60_000;
@@ -83,7 +86,7 @@ export interface ReapSkillVenvsOptions {
   depsCacheVolumeName: string;
   /** Lockfile hashes that must NOT be reaped (every live or disabled skill). */
   reachableHashes: ReadonlySet<string>;
-  /** Days a directory must sit unreachable before reap. Defaults to 7. */
+  /** Days an unreachable directory must sit unmodified, by its mtime, before reap. Defaults to 7. */
   graceDays?: number;
 }
 
@@ -115,7 +118,7 @@ export type ReapSkillVenvsError =
 export async function reapSkillVenvs(
   opts: ReapSkillVenvsOptions,
 ): Promise<Result<ReapSkillVenvsResult, ReapSkillVenvsError>> {
-  const graceDays = opts.graceDays ?? DEFAULT_GRACE_DAYS;
+  const graceDays = opts.graceDays ?? DEPS_REAP_GRACE_DAYS;
   const taskId = `skill-venvs-reaper-${randomUUID()}`;
   const expiresAt = new Date(Date.now() + REAP_TIMEOUT_MS + 30_000);
 

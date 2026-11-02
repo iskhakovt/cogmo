@@ -1,12 +1,19 @@
+import type { Result } from "neverthrow";
 import type { SandboxClient } from "../../sandbox/index.js";
 import type { DefaultCtxHandler } from "../ctx-handler.js";
+import type { LockfileSnapshot } from "../deps.js";
 import type { SkillSourceCacheEntry } from "../source-cache.js";
 import type { SkillRow, SkillTier } from "../store/index.js";
 import type { SkillManifest } from "../types.js";
 import { runOnSysboxContainer } from "../worker-sysbox/host.js";
 import type { SysboxWorkerPool } from "../worker-sysbox/pool.js";
 import type { InvokeResult } from "../worker-sysbox/worker.js";
-import { type RunOnWorkerResult, runOnWorker } from "../worker-wasm/host.js";
+import {
+  DEFAULT_TIER1_MEMORY_MB,
+  type RunOnWorkerResult,
+  runOnWorker,
+} from "../worker-wasm/host.js";
+import type { Tier1Packages, Tier1PackagesError } from "../worker-wasm/tier1.js";
 
 /**
  * Translate a manifest's `resources` block into the partial `ResourceLimits`
@@ -38,15 +45,22 @@ function runsOnPool(manifest: SkillManifest): boolean {
   return overrides.cpus === undefined && overrides.memory_bytes === undefined;
 }
 
-/** Where a run executes: the tier-1 isolate, the warm pool, or a one-shot container. */
+/**
+ * Where a run executes: the tier-1 isolate with the packages its child
+ * installs, the warm pool, or a one-shot container.
+ */
 export type SkillRuntime =
-  | { kind: "wasm" }
+  | { kind: "wasm"; packages: Tier1Packages }
   | { kind: "pool"; pool: SysboxWorkerPool }
   | { kind: "one_shot"; sandbox: SandboxClient };
 
-/** A {@link SkillRuntime} before the warm pool is started. */
+/**
+ * A {@link SkillRuntime} before the tier-1 packages are resolved and the warm
+ * pool is started.
+ */
 export type RuntimePlan =
-  | Exclude<SkillRuntime, { kind: "pool" }>
+  | Exclude<SkillRuntime, { kind: "wasm" } | { kind: "pool" }>
+  | { kind: "wasm" }
   | { kind: "pool"; sandbox: SandboxClient };
 
 /**
@@ -65,8 +79,21 @@ export function planRuntime(
 
 /** How the runner's deployment configures the runtimes. */
 export interface RuntimeConfig {
-  /** Pyodide package cache directory — speeds up tier-1 cold starts. */
-  pyodidePackageCacheDir: string | undefined;
+  /** Pyodide's package cache, the only place a tier-1 child loads built-ins from. */
+  pyodidePackageCacheDir: string;
+  /** The real path of the Pyodide distribution (`pyodideDistDir()`). */
+  pyodideDistDir: string;
+  /** Where tier-1 children's process-group records live while they run. */
+  tier1ChildrenDir: string;
+  /**
+   * What a tier-1 child installs for a lockfile: the built-ins the package
+   * cache holds and the lockfile's read-only wheel directory, fetched and
+   * verified by the host when missing (`ensureTier1Packages`).
+   */
+  resolveTier1Packages(
+    lockfile: LockfileSnapshot | undefined,
+    signal?: AbortSignal,
+  ): Promise<Result<Tier1Packages, Tier1PackagesError>>;
   /** Container image for one-shot tier-2 runs. */
   tier2Image: string;
   /** Named volume of per-lockfile venvs, when the sandbox can share one. */
@@ -93,13 +120,13 @@ export async function dispatchToRuntime(
     ctxHandler,
   };
   if (runtime.kind === "wasm") {
-    // Specs only (not hashes) — see `design/skills.md` → Security posture
-    // for the WASM-vs-sysbox integrity asymmetry rationale.
-    const packageSpecs = cached.lockfile?.specs ?? [];
     return runOnWorker({
       ...task,
-      ...(config.pyodidePackageCacheDir && { packageCacheDir: config.pyodidePackageCacheDir }),
-      ...(packageSpecs.length > 0 && { packageSpecs }),
+      packageCacheDir: config.pyodidePackageCacheDir,
+      packages: runtime.packages,
+      pyodideDistDir: config.pyodideDistDir,
+      childrenDir: config.tier1ChildrenDir,
+      memoryMb: cached.manifest.resources?.memory_mb ?? DEFAULT_TIER1_MEMORY_MB,
     });
   }
   const isolation = cached.manifest.isolation;
