@@ -87,6 +87,31 @@ describe("handleSkills", () => {
     );
   });
 
+  it("splits a long inventory into several replies, each with whole lines", async () => {
+    const skills = Array.from({ length: 60 }, (_, i) => ({
+      name: `skill-${String(i).padStart(2, "0")}`,
+      tier: "wasm" as const,
+      riskTier: "approve" as const,
+      disabled: true,
+      gitSha: "def5678eeee",
+      pendingDeploy: {
+        id: `01960000-0000-7000-8000-0000000000${String(i).padStart(2, "0")}`,
+        gitSha: "def5678eeee",
+        priorGitSha: null,
+      },
+    }));
+    const transport = transportWith({ skills: { list: vi.fn().mockResolvedValue(ok(skills)) } });
+    const ctx = mkCtx();
+    await handleSkills(transport, ctx);
+    const replies = ctx.reply.mock.calls.map((call) => String(call[0]));
+    expect(replies.length).toBeGreaterThan(1);
+    expect(replies[0]?.startsWith("Skills:\nskill-00 ")).toBe(true);
+    for (const reply of replies) expect(reply.length).toBeLessThanOrEqual(4096);
+    const lines = replies.join("\n").split("\n");
+    expect(lines).toHaveLength(61);
+    expect(lines.at(-1)?.startsWith("skill-59 ")).toBe(true);
+  });
+
   it("nudges the user when there are no skills", async () => {
     const transport = transportWith({
       skills: { list: vi.fn().mockResolvedValue(ok([])) },
