@@ -3,7 +3,7 @@
 import { match, P } from "ts-pattern";
 import type { ParsedSkillsDeployCallback } from "../../../../skills/skills-keyboard.js";
 import type { Transport } from "../../../transport.js";
-import type { TransportError } from "../../transport-error.js";
+import type { TransportError } from "../../../transport-error.js";
 import { errorMessage } from "./reply.js";
 
 /**
