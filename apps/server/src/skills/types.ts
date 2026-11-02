@@ -259,6 +259,8 @@ export const ClassifierLogSchema = z.object({
     .object({
       tier1Hardened: z.boolean(),
       reviewPanel: z.boolean(),
+      /** Rows written before the flag was recorded read false. */
+      tier1MemoryBounded: z.boolean().default(false),
     })
     .optional(),
 });
