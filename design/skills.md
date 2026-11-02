@@ -2086,9 +2086,9 @@ skill_approval_classes (
 -- serve_instances and serve_heartbeats are owned by serve/store/, the store of src/serve/, the serve process's own lifecycle, which the core
 -- boot stage calls; the egress listener's status is one column of it. Skills and sandbox reference the tables and own neither.
 serve_instances (
-  id          UUID v7 PK,                  -- the serve instance id: every per-process record keys on it, whatever the sandbox backend
-  started_at  TIMESTAMPTZ NOT NULL,        -- written by the core boot stage's insert, once per cogmo serve process
-  stopped_at  TIMESTAMPTZ,                 -- nullable: null while running, and after a crash; set on graceful shutdown
+  id          UUID v7 PK,                  -- the serve instance id: every per-process record keys on it, whatever the sandbox backend;
+                                           -- inserted by the core boot stage once per cogmo serve process. Liveness is read from
+                                           -- serve_heartbeats and the advisory locks, so the row carries no status of its own
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 )
 
