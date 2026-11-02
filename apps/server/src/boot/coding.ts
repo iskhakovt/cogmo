@@ -102,6 +102,7 @@ export function createCodingRuntime(
           ...repoDeps,
           agentStore: core.agentStore,
           skillRunner,
+          publisher: inngest,
           skillsRepoPath: env.COGMO_SKILLS_PATH,
         },
         inngest,

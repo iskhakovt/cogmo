@@ -71,6 +71,15 @@ export interface SkillsNamespace {
     name: string,
   ): Promise<Result<{ name: string }, TransportError>>;
   /**
+   * {@link disable} for the skill `skillId`, as a deploy message's Disable
+   * button names it. Returns `skill_not_found` naming the id when no skill
+   * has it, and naming the skill when it went away before the deregister.
+   */
+  disableById(
+    skillId: string,
+    tapperPlatformHandle: string,
+  ): Promise<Result<{ name: string }, TransportError>>;
+  /**
    * Re-enable a previously-disabled skill. Refuses with
    * `skill_no_live_deploy` if the skill was never live at its current
    * `gitSha` (denied-on-first-deploy guard — see {@link SkillRunner.enable}).
@@ -189,6 +198,22 @@ export function createSkills(
         .exhaustive();
     },
 
+    async disableById(skillId, tapperPlatformHandle) {
+      const identityCheck = await checkSkillsTapper(tapperPlatformHandle);
+      if (identityCheck.isErr()) return err(identityCheck.error);
+      if (!skillRunner || !skillStore) return err({ code: "skills_disabled" as const });
+      const skill = await runInTx((tx) => skillStore.getSkillById(tx, skillId));
+      if (!skill) return err({ code: "skill_id_not_found" as const, skillId });
+      const result = await skillRunner.deregister({ name: skill.name });
+      return match(result)
+        .returnType<Result<{ name: string }, TransportError>>()
+        .with({ kind: "deregistered" }, (r) => ok({ name: r.name }))
+        .with({ kind: "rejected", reason: "not_found" }, (r) =>
+          err({ code: "skill_not_found", name: r.name }),
+        )
+        .exhaustive();
+    },
+
     async enable(platformUserHandle, name, platformAddress) {
       const origin = await resolveSkillsActor(platformUserHandle, platformAddress);
       if (!origin) return err({ code: "identity_rejected" as const });
@@ -242,7 +267,7 @@ export function createSkills(
 
   /**
    * Identity check for the rest of the skills admin surface (deny, list,
-   * disable). Skills are deployment-wide, so the check is "is the tapper a
+   * disable, disableById). Skills are deployment-wide, so the check is "is the tapper a
    * known user of this channel". `resolveUser` returns
    * non-null iff the platform handle is allowlisted; that's the same gate
    * the inbound message path already enforces.

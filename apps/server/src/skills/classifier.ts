@@ -1,10 +1,6 @@
+import { match } from "ts-pattern";
 import { logger } from "../logger.js";
-import { AST_CLASSIFIER_VERSION, classifyWithAst } from "./ast-classifier.js";
-import {
-  APPROVE_GATING_EFFECTS,
-  APPROVE_SECRETS_THRESHOLD,
-  categoriseDependency,
-} from "./ast-rules.js";
+import { AST_CLASSIFIER_VERSION, classifyWithAst, computeRiskTier } from "./ast-classifier.js";
 import type { SkillsCapabilities } from "./capabilities.js";
 import type { ClassifierLog, SkillManifest } from "./types.js";
 
@@ -65,8 +61,13 @@ export async function classifyManifest(
 /**
  * Declaration-only fallback. Same shape as the AST path's output but
  * with `classifier_version: STUB_CLASSIFIER_VERSION` and
- * `detected_effects: []`. Auto-tier is unreachable here on purpose —
- * the stub can't *prove* a skill is read-only, only the AST path can.
+ * `detected_effects: []`. It runs the AST path's table over the
+ * declarations alone, so the two agree on every `approve` trigger —
+ * secrets alongside network included, since `notify` deploys live and a
+ * degraded classifier must not ship the combination the stricter path
+ * refuses. Auto-tier is unreachable here on purpose: the stub can't
+ * *prove* a skill is read-only, only the AST path can, so a table
+ * result of `auto` lands at `notify`.
  *
  * Exported for tests that want to exercise the fallback explicitly.
  */
@@ -76,34 +77,29 @@ export function classifyManifestStub(
 ): ClassifierLog {
   const declaredSecrets = manifest.secrets.map((s) => (typeof s === "string" ? s : s.name));
 
-  const hasApproveEffect = manifest.effects.some((e) => APPROVE_GATING_EFFECTS.has(e));
-  const isContainerTier = manifest.tier === "container";
-  const hasManySecrets = declaredSecrets.length >= APPROVE_SECRETS_THRESHOLD;
-  const hasApproveDep = manifest.dependencies.some((d) => categoriseDependency(d) === "approve");
-  // Mirrors the AST path's rule. `notify` deploys live, so leaving this
-  // out would let a degraded classifier ship the one combination the
-  // stricter path refuses — a credential the body can read next to a
-  // route off the machine. Reading a manifest field needs no parser, so
-  // there is nothing about the fallback that makes the check unavailable.
-  const hasSecretsWithNetwork = manifest.network !== undefined && declaredSecrets.length > 0;
-
-  // Stub can't reach `auto` (only the AST path can prove a body is
-  // read-only), so the dep-allowlist case still lands at `notify` here —
-  // see classifier.ts header. Approve-tier deps still force `approve`.
-  const riskTier =
-    hasApproveEffect || isContainerTier || hasManySecrets || hasApproveDep || hasSecretsWithNetwork
-      ? "approve"
-      : "notify";
+  const { riskTier, reasons } = computeRiskTier({
+    declared: manifest.effects,
+    detected: [],
+    validationErrors: [],
+    tier: manifest.tier,
+    secretsCount: declaredSecrets.length,
+    hasNetwork: manifest.network !== undefined,
+    dependencies: manifest.dependencies,
+    capabilities,
+  });
 
   return {
     classifier_version: STUB_CLASSIFIER_VERSION,
-    risk_tier: riskTier,
+    risk_tier: match(riskTier)
+      .with("auto", "notify", (): "notify" => "notify")
+      .with("approve", (tier) => tier)
+      .exhaustive(),
     declared_effects: manifest.effects,
     detected_effects: [],
     declared_secrets: declaredSecrets,
     declared_dependencies: manifest.dependencies,
     validation_errors: [],
-    reasons: [],
+    reasons,
     declared_network: manifest.network?.allow ?? null,
     capabilities,
   };

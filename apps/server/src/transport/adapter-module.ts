@@ -3,7 +3,6 @@ import type { JsonValue } from "type-fest";
 import type { CodingStore } from "../agent/coding/store/index.js";
 import type { CodingStreamingRegistry } from "../agent/coding/streaming-registry.js";
 import type { Transactor } from "../db/index.js";
-import type { SkillStore } from "../skills/store/index.js";
 import type { WebStreamRegistry } from "./adapters/web/stream-registry.js";
 import type { AttachmentStore } from "./attachment-store.js";
 import type { TransportStore } from "./store/index.js";
@@ -25,15 +24,14 @@ export interface CodingProgressDeps {
 }
 
 /**
- * Skills-approval wiring — adapters that show approve-tier deploy keyboards
+ * Skill deploy-outcome wiring — adapters that render deploy outcomes
  * (today: Telegram) use this to register an Inngest function listening on
- * `skills/deploy/approval-requested`. Posts the inline keyboard into the
+ * `skills/deploy/outcome`, which posts the outcome and its buttons into the
  * originating conversation's active session. Adapters without skills UX
  * leave it undefined.
  */
-export interface SkillsApprovalDeps {
+export interface SkillsDeployDeps {
   runInTx: Transactor;
-  skillStore: SkillStore;
   transportStore: TransportStore;
 }
 
@@ -65,7 +63,7 @@ export interface AdapterDeps {
   transport: Transport;
   /**
    * Inngest client — adapters register event-driven listeners with it (e.g.
-   * Telegram's boundary-prompt cleanup, coding-progress, skills-approval).
+   * Telegram's boundary-prompt cleanup, coding-progress, skill deploy outcomes).
    * Returned in `AdapterSetupResult.functions` for the runtime to serve.
    */
   inngest: Inngest;
@@ -75,7 +73,7 @@ export interface AdapterDeps {
   /** Optional — present only when the sandbox module is initialized. */
   codingProgress?: CodingProgressDeps;
   /** Optional — present only when the skills module is wired. */
-  skillsApproval?: SkillsApprovalDeps;
+  skillsDeploy?: SkillsDeployDeps;
   /** Always supplied by the registry — every Telegram channel can host a gate. */
   pipelineGate?: PipelineGateDeps;
   /**

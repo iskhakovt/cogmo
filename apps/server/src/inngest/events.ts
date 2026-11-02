@@ -621,33 +621,109 @@ export const codingRunBranchSweepRepo = eventType("coding/run-branch-sweep/repo"
 });
 
 /**
- * Skills deploy gate — `register` produced an `approve`-tier deploy that
- * needs human signoff before main is advanced. Emitted by Service.skills
- * after the runner returns `pending_approval`. The per-channel Telegram
- * function consumes this and posts the Approve / Deny inline keyboard into
- * the originating conversation's active session. The keyboard's callback
- * tap dispatches directly to `transport.skills.approveDeploy` /
- * `denyDeploy` — no `step.waitForEvent` orchestration on the runner side
- * (the runner already returned).
- *
- * `pendingId` is the `skill_deploys.id` UUID; the per-channel Telegram
- * function reads the pending deploy's declared effects from its
- * `skill_deploys` row at post time. The pending manifest's schedule is
- * recorded nowhere the poster can read, so it travels on the event.
+ * The skill effects (`SKILL_EFFECTS` in `src/skills/types.ts`), risk tiers
+ * and risk reasons (`SKILL_RISK_REASONS` in `src/skills/risk-reasons.ts`) a
+ * deploy outcome names. The event schema doesn't import domain code;
+ * events.test.ts pins them together.
  */
-export const skillsDeployApprovalRequested = eventType("skills/deploy/approval-requested", {
-  schema: z.object({
-    pendingId: z.string(),
-    skillName: z.string(),
-    gitSha: z.string(),
-    conversationId: z.string(),
-    /**
-     * The pending manifest's cron schedule, or null; the prompt says who it
-     * will run as. Absent on events queued before the field existed.
-     */
-    schedule: z.string().nullable().optional(),
+const skillEffects = [
+  "reads_memory",
+  "writes_memory",
+  "reads_user_data",
+  "writes_user_data",
+  "sends_email",
+  "sends_message",
+  "posts_public",
+  "deletes_external",
+  "financial",
+  "reads_filesystem",
+  "writes_filesystem",
+  "spawns_subprocess",
+] as const;
+
+const skillRiskTiers = ["auto", "notify", "approve"] as const;
+
+const skillRiskReasons = [
+  "binding_unenforced",
+  "egress_network_missing",
+  "egress_listener_missing",
+  "opted_in",
+  "first_deploy",
+  "manifest_widened",
+  "tier1_unhardened",
+  "tier2_unenforced",
+  "tier2_shared_worker",
+  "acting_effect",
+  "unlisted_dependency",
+  "sensitive_dependency",
+  "paid_call",
+  "raw_secret",
+  "reads_and_egress",
+  "no_review_panel",
+  "container_tier",
+  "approve_gating_effect",
+  "secrets_with_network",
+  "secret_breadth",
+  "declared_effect",
+  "network_declared",
+] as const;
+
+/** What a `live` or `pending_approval` outcome tells the user about the deployed version. */
+const skillsDeployedOutcomeFields = {
+  conversationId: z.string(),
+  skillId: z.string(),
+  /** The `skill_deploys` row; on `pending_approval`, the id approve and deny name. */
+  deployId: z.string(),
+  skillName: z.string(),
+  riskTier: z.enum(skillRiskTiers),
+  reasons: z.array(z.enum(skillRiskReasons)),
+  gitSha: z.string(),
+  /** The version the deploy replaces; null on a skill's first deploy. */
+  priorGitSha: z.string().nullable(),
+  description: z.string(),
+  effects: z.object({
+    declared: z.array(z.enum(skillEffects)),
+    detected: z.array(z.enum(skillEffects)),
   }),
+  /** The manifest's `network.allow`; empty without a `network:` block. */
+  hosts: z.array(z.string()),
+  secrets: z.array(z.object({ name: z.string(), bound: z.boolean() })),
+  dependencies: z.array(z.string()),
+  /** The manifest's cron schedule; a scheduled run runs as whoever registered it. */
+  schedule: z.string().nullable(),
+};
+
+/**
+ * The outcome of a skill register (design/skills.md → Notifications and
+ * undo), emitted by `announceDeployOutcome` after the deploy commits, for
+ * every register caller: the agent's `register_skill` tool and the coding
+ * task's auto-register. `no_op` emits nothing. A channel renders it in the
+ * session on `conversationId`; a `pending_approval` message carries the
+ * Approve / Deny keyboard, whose taps go straight to
+ * `transport.skills.approveDeploy` / `denyDeploy`. Nothing replays a lost
+ * emit: `/skills` lists every deploy.
+ *
+ * `rejected` carries `skillName` empty when the rejection precedes reading
+ * the manifest; `gitSha` is the branch tip, empty when the branch did not
+ * resolve.
+ */
+export const skillsDeployOutcome = eventType("skills/deploy/outcome", {
+  schema: z.discriminatedUnion("outcome", [
+    z.object({ outcome: z.literal("live"), ...skillsDeployedOutcomeFields }).strict(),
+    z.object({ outcome: z.literal("pending_approval"), ...skillsDeployedOutcomeFields }).strict(),
+    z
+      .object({
+        outcome: z.literal("rejected"),
+        conversationId: z.string(),
+        skillName: z.string(),
+        gitSha: z.string(),
+        errors: z.array(z.string()),
+      })
+      .strict(),
+  ]),
 });
+
+export type SkillsDeployOutcomeData = z.infer<typeof skillsDeployOutcome.schema>;
 
 /**
  * Run the model catalog refresh (`src/agent/model-catalog/refresh-function.ts`)

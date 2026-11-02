@@ -59,7 +59,8 @@ export function skillsCli(io: CliIo, loadDeps: LoadDeps<SkillsCliDeps>) {
     cmds: {
       list: command({
         name: "list",
-        description: "List enabled skills (name, tier, risk, disabled, git_sha).",
+        description:
+          "List every skill, disabled ones included (name, tier, risk, disabled, git_sha, pending_deploy).",
         args: {},
         handler: async () => listSkills(await loadDeps(), io),
       }),
@@ -140,15 +141,28 @@ export function skillsCli(io: CliIo, loadDeps: LoadDeps<SkillsCliDeps>) {
   });
 }
 
+/**
+ * Every skill, so a pending first deploy — whose skill row is disabled until
+ * it is approved — shows with the id `cogmo skills approve` takes.
+ */
 async function listSkills(deps: SkillsCliDeps, io: CliIo): Promise<number> {
-  const skills = await deps.runner.list();
+  const skills = await deps.runner.listAll();
   if (skills.length === 0) {
-    io.out("(no enabled skills)");
+    io.out("(no skills)");
     return 0;
   }
-  io.out("name\ttier\trisk\tdisabled\tgit_sha");
+  io.out("name\ttier\trisk\tdisabled\tgit_sha\tpending_deploy");
   for (const s of skills) {
-    io.out([s.name, s.tier, s.riskTier, s.disabled ? "yes" : "no", s.gitSha].join("\t"));
+    io.out(
+      [
+        s.name,
+        s.tier,
+        s.riskTier,
+        s.disabled ? "yes" : "no",
+        s.gitSha,
+        s.pendingDeploy?.id ?? "-",
+      ].join("\t"),
+    );
   }
   return 0;
 }

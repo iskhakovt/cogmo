@@ -166,11 +166,7 @@ export async function startChannels(deps: RegistryDeps): Promise<RegistryResult>
           },
         }),
       ...(deps.skillStore && {
-        skillsApproval: {
-          runInTx: deps.runInTx,
-          skillStore: deps.skillStore,
-          transportStore: deps.transportStore,
-        },
+        skillsDeploy: { runInTx: deps.runInTx, transportStore: deps.transportStore },
       }),
       pipelineGate: { runInTx: deps.runInTx, transportStore: deps.transportStore },
       ...(deps.webStream && { webStream: deps.webStream }),

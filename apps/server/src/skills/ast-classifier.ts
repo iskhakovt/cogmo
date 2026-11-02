@@ -19,8 +19,9 @@
  *      that `smtplib.SMTP(...)`-s without saying so.
  *
  *   2. **Tier promoter** — when nothing dangerous is detected AND
- *      nothing dangerous is declared, promote to `auto` (no human
- *      tap, ships immediately).
+ *      nothing dangerous is declared, the table reaches `auto` (no
+ *      human tap, ships immediately), capped at `notify` until tier 1
+ *      is hardened and a review panel is set ({@link computeRiskTier}).
  *
  * Rules live in `ast-rules.ts` as pure data — adding "rule X marks
  * effect Y" is a new row, no logic change. Parser load and walking
@@ -35,6 +36,8 @@
 
 import { readFileSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
+import * as R from "remeda";
+import { match } from "ts-pattern";
 import { Language, type Node, Parser } from "web-tree-sitter";
 import { logger } from "../logger.js";
 import {
@@ -46,6 +49,7 @@ import {
   REJECT_ON_UNDECLARED,
 } from "./ast-rules.js";
 import type { SkillsCapabilities } from "./capabilities.js";
+import type { SkillRiskReason } from "./risk-reasons.js";
 import type { ClassifierLog, SkillEffect, SkillManifest } from "./types.js";
 
 export const AST_CLASSIFIER_VERSION = "ast-1";
@@ -320,24 +324,27 @@ function stringLiteralValue(node: Node): string {
 }
 
 /**
- * Compute the `risk_tier` for a deploy given declared + detected
- * effects, manifest tier (wasm/container), and secrets count.
- *
- * Order:
- *   1. If any `validation_errors` were produced (undeclared dangerous
- *      effect), the deploy will be rejected upstream regardless. We
- *      stamp `approve` defensively so that a hypothetical "rejected
- *      but recorded" path doesn't accidentally land an `auto` tier in
- *      the audit log.
- *   2. Detected effects that map into `APPROVE_GATING_EFFECTS` or
- *      declared effects in the same set → `approve`.
- *   3. tier=container, secrets alongside network, or secrets >=
- *      threshold → `approve`.
- *   4. Anything else with declared OR detected effects → `notify`.
- *   5. Network with no secrets and no effects → `notify`.
- *   6. Empty effects + tier=wasm + few secrets + no network → `auto`.
+ * The table reasons and the tier each one raises (design/skills.md → Risk
+ * tiering & auto-apply → Tiers; Risk tiers without a human → Reasons).
  */
-function computeRiskTier(opts: {
+const TABLE_REASON_TIERS = {
+  sensitive_dependency: "approve",
+  approve_gating_effect: "approve",
+  container_tier: "approve",
+  secrets_with_network: "approve",
+  secret_breadth: "approve",
+  unlisted_dependency: "notify",
+  declared_effect: "notify",
+  network_declared: "notify",
+} as const satisfies Partial<Record<SkillRiskReason, "notify" | "approve">>;
+
+type TableReason = keyof typeof TABLE_REASON_TIERS;
+
+type RiskTier = ClassifierLog["risk_tier"];
+
+const TIER_SEVERITY: Readonly<Record<RiskTier, number>> = { auto: 0, notify: 1, approve: 2 };
+
+export interface RiskTierInput {
   declared: ReadonlyArray<SkillEffect>;
   detected: ReadonlyArray<SkillEffect>;
   validationErrors: ReadonlyArray<string>;
@@ -345,49 +352,76 @@ function computeRiskTier(opts: {
   secretsCount: number;
   /** Whether the manifest declares a `network:` allowlist at all. */
   hasNetwork: boolean;
-  /**
-   * Highest-severity dep category across `manifest.dependencies`. A
-   * single `approve`-listed dep forces `approve`; otherwise any dep
-   * outside the allowlist bumps to at least `notify`. `none` means
-   * either no deps or every dep is allowlisted.
-   */
-  depCategory: "none" | "notify" | "approve";
-}): ClassifierLog["risk_tier"] {
-  if (opts.validationErrors.length > 0) return "approve";
-  if (opts.depCategory === "approve") return "approve";
+  dependencies: ReadonlyArray<string>;
+  capabilities: SkillsCapabilities;
+}
 
-  const all = new Set<SkillEffect>([...opts.declared, ...opts.detected]);
-  for (const e of all) {
-    if (APPROVE_GATING_EFFECTS.has(e)) return "approve";
-  }
-  if (opts.tier === "container") return "approve";
-  // A credential the body can read plus a route off the machine is the
-  // exfiltration pair, and no count of secrets makes it safe — the threshold
-  // answers how broad a skill's permissions are, which is a different
-  // question from whether it can send one somewhere.
-  if (opts.hasNetwork && opts.secretsCount > 0) return "approve";
-  if (opts.secretsCount >= APPROVE_SECRETS_THRESHOLD) return "approve";
-  if (opts.depCategory === "notify") return "notify";
-  if (all.size > 0) return "notify";
-  // Egress on its own reaches only what the allowlist named and carries no
-  // credential, so it earns a note rather than a gate.
-  if (opts.hasNetwork) return "notify";
-  return "auto";
+export interface RiskTierResult {
+  riskTier: RiskTier;
+  /** Every reason that applies, in a fixed order, not only the deciding one. */
+  reasons: SkillRiskReason[];
+}
+
+/** The reasons whose predicate holds, in the order given. */
+function raised<Reason extends SkillRiskReason>(
+  triggers: ReadonlyArray<readonly [Reason, boolean]>,
+): Reason[] {
+  return triggers.filter(([, holds]) => holds).map(([reason]) => reason);
 }
 
 /**
- * Fold the per-dep categories into a single tier-impact label. The
- * classifier never needs the full per-dep breakdown for the tier
- * decision — only the worst category drives it.
+ * Compute the `risk_tier` for a deploy, with every reason that applies.
+ *
+ * Each table predicate is evaluated; the tier is the most severe tier any
+ * raised reason carries (approve > notify > auto), `auto` when none is
+ * raised. Validation errors (an undeclared dangerous effect) reject the
+ * deploy upstream; the tier is stamped `approve` so a recorded rejection
+ * never carries `auto`.
+ *
+ * `auto` is capped at `notify` while tier 1 is unhardened
+ * (`tier1_unhardened`) and while no review panel stands in for the owner's
+ * tap (`no_review_panel`); both are recorded when both flags are off.
  */
-function highestDepCategory(deps: ReadonlyArray<string>): "none" | "notify" | "approve" {
-  let worst: "none" | "notify" | "approve" = "none";
-  for (const dep of deps) {
-    const cat = categoriseDependency(dep);
-    if (cat === "approve") return "approve";
-    if (cat === "notify") worst = "notify";
-  }
-  return worst;
+export function computeRiskTier(input: RiskTierInput): RiskTierResult {
+  const effects = [...input.declared, ...input.detected];
+  const depCategories = new Set(input.dependencies.map(categoriseDependency));
+  // A credential the body can read plus a route off the machine is the
+  // exfiltration pair, and no count of secrets makes it safe — the threshold
+  // answers how broad a skill's permissions are, which is a different
+  // question from whether it can send one somewhere. Egress on its own
+  // reaches only what the allowlist named and carries no credential, so it
+  // earns a note rather than a gate.
+  const reasons = raised<TableReason>([
+    ["sensitive_dependency", depCategories.has("approve")],
+    ["approve_gating_effect", effects.some((e) => APPROVE_GATING_EFFECTS.has(e))],
+    ["container_tier", input.tier === "container"],
+    ["secrets_with_network", input.hasNetwork && input.secretsCount > 0],
+    ["secret_breadth", input.secretsCount >= APPROVE_SECRETS_THRESHOLD],
+    ["unlisted_dependency", depCategories.has("notify")],
+    ["declared_effect", effects.some((e) => !APPROVE_GATING_EFFECTS.has(e))],
+    ["network_declared", input.hasNetwork && input.secretsCount === 0],
+  ]);
+
+  const tableTier: RiskTier =
+    input.validationErrors.length > 0
+      ? "approve"
+      : (R.firstBy(
+          reasons.map((reason) => TABLE_REASON_TIERS[reason]),
+          [(tier) => TIER_SEVERITY[tier], "desc"],
+        ) ?? "auto");
+
+  return match(tableTier)
+    .with("auto", (): RiskTierResult => {
+      const capReasons = raised<SkillRiskReason>([
+        ["tier1_unhardened", !input.capabilities.tier1Hardened],
+        ["no_review_panel", !input.capabilities.reviewPanel],
+      ]);
+      return capReasons.length > 0
+        ? { riskTier: "notify", reasons: [...reasons, ...capReasons] }
+        : { riskTier: "auto", reasons };
+    })
+    .with("notify", "approve", (riskTier): RiskTierResult => ({ riskTier, reasons }))
+    .exhaustive();
 }
 
 /**
@@ -440,25 +474,26 @@ export async function classifyWithAst(
 
   const declaredSecrets = manifest.secrets.map((s) => (typeof s === "string" ? s : s.name));
 
-  const risk_tier = computeRiskTier({
+  const { riskTier, reasons } = computeRiskTier({
     declared: manifest.effects,
     detected: [...detectedSet],
     validationErrors: validation_errors,
     tier: manifest.tier,
     secretsCount: declaredSecrets.length,
     hasNetwork: manifest.network !== undefined,
-    depCategory: highestDepCategory(manifest.dependencies),
+    dependencies: manifest.dependencies,
+    capabilities,
   });
 
   return {
     classifier_version: AST_CLASSIFIER_VERSION,
-    risk_tier,
+    risk_tier: riskTier,
     declared_effects: manifest.effects,
     detected_effects: [...detectedSet].sort(),
     declared_secrets: declaredSecrets,
     declared_dependencies: manifest.dependencies,
     validation_errors,
-    reasons: [],
+    reasons,
     declared_network: manifest.network?.allow ?? null,
     capabilities,
   };
@@ -475,24 +510,25 @@ function classifyFromDeclarationsOnly(
   capabilities: SkillsCapabilities,
 ): ClassifierLog {
   const declaredSecrets = manifest.secrets.map((s) => (typeof s === "string" ? s : s.name));
-  const risk_tier = computeRiskTier({
+  const { riskTier, reasons } = computeRiskTier({
     declared: manifest.effects,
     detected: [],
     validationErrors: [],
     tier: manifest.tier,
     secretsCount: declaredSecrets.length,
     hasNetwork: manifest.network !== undefined,
-    depCategory: highestDepCategory(manifest.dependencies),
+    dependencies: manifest.dependencies,
+    capabilities,
   });
   return {
     classifier_version: AST_CLASSIFIER_VERSION,
-    risk_tier,
+    risk_tier: riskTier,
     declared_effects: manifest.effects,
     detected_effects: [],
     declared_secrets: declaredSecrets,
     declared_dependencies: manifest.dependencies,
     validation_errors: [],
-    reasons: [],
+    reasons,
     declared_network: manifest.network?.allow ?? null,
     capabilities,
   };

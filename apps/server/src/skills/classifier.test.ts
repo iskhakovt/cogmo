@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { __resetParserForTests, __setWasmPathForTests } from "./ast-classifier.js";
+import type { SkillsCapabilities } from "./capabilities.js";
 import { BUILD_CAPABILITIES } from "./capabilities.js";
 import {
   AST_CLASSIFIER_VERSION,
@@ -7,7 +8,13 @@ import {
   classifyManifestStub,
   STUB_CLASSIFIER_VERSION,
 } from "./classifier.js";
+import type { SkillRiskReason } from "./risk-reasons.js";
 import type { SkillEffect, SkillManifest } from "./types.js";
+
+/** The reasons `BUILD_CAPABILITIES` adds when the table would return `auto`. */
+const CAP_REASONS: SkillRiskReason[] = ["tier1_unhardened", "no_review_panel"];
+
+const ALL_CAPABILITIES: SkillsCapabilities = { tier1Hardened: true, reviewPanel: true };
 
 function makeManifest(overrides: Partial<SkillManifest> = {}): SkillManifest {
   return {
@@ -41,9 +48,16 @@ describe("classifyManifest (live AST path)", () => {
     expect(log.classifier_version).toBe(AST_CLASSIFIER_VERSION);
   });
 
-  it("promotes empty-effects + harmless body to auto (the unlock)", async () => {
+  it("caps empty-effects + harmless body at notify under the build's capabilities", async () => {
     const log = await classifyManifest(makeManifest(), NOOP_BODY, BUILD_CAPABILITIES);
+    expect(log.risk_tier).toBe("notify");
+    expect(log.reasons).toEqual(CAP_REASONS);
+  });
+
+  it("promotes empty-effects + harmless body to auto once both capabilities are set", async () => {
+    const log = await classifyManifest(makeManifest(), NOOP_BODY, ALL_CAPABILITIES);
     expect(log.risk_tier).toBe("auto");
+    expect(log.reasons).toEqual([]);
   });
 
   it("non-trivial declared effect at wasm tier stays notify", async () => {
@@ -69,31 +83,32 @@ describe("classifyManifest (live AST path)", () => {
 // path consumes `manifest.dependencies` via highestDepCategory; the
 // stub path consumes it via hasApproveDep. One block ensures both
 // paths agree on the approve-list / unknown-dep / PEP 503
-// normalisation contract. AST reaches `auto` for harmless inputs;
-// stub cannot (no AST means no read-only proof) and lands at `notify`.
+// normalisation contract. Under the build's capabilities both land
+// harmless inputs at `notify`: the AST path through the tier-1 cap, the
+// stub because it cannot prove a body read-only.
 describe.each([
   {
     label: "AST path",
     classify: (m: SkillManifest) => classifyManifest(m, NOOP_BODY, BUILD_CAPABILITIES),
-    nonApproveTier: "auto" as const,
   },
   {
     label: "stub fallback",
     classify: (m: SkillManifest) => Promise.resolve(classifyManifestStub(m, BUILD_CAPABILITIES)),
-    nonApproveTier: "notify" as const,
   },
-])("dependencies — $label", ({ classify, nonApproveTier }) => {
-  it("allowlisted deps land at the path's lowest non-approve tier", async () => {
+])("dependencies — $label", ({ classify }) => {
+  it("allowlisted deps land at notify with no dependency reason", async () => {
     const log = await classify(
       makeManifest({ dependencies: ["httpx==0.27.0", "pydantic==2.5.3"] }),
     );
-    expect(log.risk_tier).toBe(nonApproveTier);
+    expect(log.risk_tier).toBe("notify");
+    expect(log.reasons).toEqual(CAP_REASONS);
     expect(log.declared_dependencies).toEqual(["httpx==0.27.0", "pydantic==2.5.3"]);
   });
 
   it("unknown deps bump to notify", async () => {
     const log = await classify(makeManifest({ dependencies: ["some-obscure-pkg==1.0.0"] }));
     expect(log.risk_tier).toBe("notify");
+    expect(log.reasons).toEqual(["unlisted_dependency"]);
   });
 
   it.each([
@@ -248,15 +263,14 @@ describe("classifyManifest — fallback when AST parser is unloadable", () => {
     __setWasmPathForTests("/tmp/cogmo-nonexistent-wasm-path-yyyyyyyyyyyy.wasm");
     __resetParserForTests();
 
-    // No declared effects, harmless body — under the AST path this
-    // promotes to auto. Under the stub fallback, auto is unreachable
-    // (the stub can't *prove* read-only) so it stays at notify.
-    // Asserting `!== "auto"` directly proves we didn't take the
-    // AST path.
+    // No declared effects, harmless body — with both capabilities set
+    // the AST path promotes this to auto. Under the stub fallback, auto
+    // is unreachable (the stub can't *prove* read-only) so it stays at
+    // notify, which proves we didn't take the AST path.
     const log = await classifyManifest(
       makeManifest(),
       "async def run(inputs, ctx):\n    return {}\n",
-      BUILD_CAPABILITIES,
+      ALL_CAPABILITIES,
     );
     expect(log.classifier_version).toBe(STUB_CLASSIFIER_VERSION);
     expect(log.risk_tier).toBe("notify");
@@ -286,5 +300,37 @@ describe("classifyManifestStub — secrets alongside network", () => {
   it("leaves a secret with no network at notify", () => {
     const log = classifyManifestStub(makeManifest({ secrets: ["api_key"] }), BUILD_CAPABILITIES);
     expect(log.risk_tier).toBe("notify");
+  });
+});
+
+describe("classifyManifestStub — reasons and capabilities", () => {
+  it("records every reason its declarations raise", () => {
+    const log = classifyManifestStub(
+      makeManifest({ tier: "container", dependencies: ["some-obscure-pkg==1.0.0"] }),
+      BUILD_CAPABILITIES,
+    );
+    expect(log.risk_tier).toBe("approve");
+    expect(log.reasons).toEqual(["container_tier", "unlisted_dependency"]);
+  });
+
+  it("records the network pairing and the declared allowlist", () => {
+    const log = classifyManifestStub(
+      makeManifest({ secrets: ["api_key"], network: { allow: ["api.example.com"] } }),
+      BUILD_CAPABILITIES,
+    );
+    expect(log.reasons).toEqual(["secrets_with_network"]);
+    expect(log.declared_network).toEqual(["api.example.com"]);
+  });
+
+  it("stamps the capability flags it read", () => {
+    const log = classifyManifestStub(makeManifest(), ALL_CAPABILITIES);
+    expect(log.capabilities).toEqual(ALL_CAPABILITIES);
+    expect(log.declared_network).toBeNull();
+  });
+
+  it("stays at notify with both capabilities set, where the AST path reaches auto", () => {
+    const log = classifyManifestStub(makeManifest(), ALL_CAPABILITIES);
+    expect(log.risk_tier).toBe("notify");
+    expect(log.reasons).toEqual([]);
   });
 });

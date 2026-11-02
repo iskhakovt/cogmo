@@ -12,6 +12,7 @@ import type { ClassifierLog, SkillManifest } from "../types.js";
 import { lintWasmCompat } from "../worker-wasm/wasm-lint.js";
 import { advanceMain, runDeployTx } from "./advance-main.js";
 import { type DeployDeps, requireRepoPath } from "./deploy-deps.js";
+import { deployFacts } from "./deploy-facts.js";
 import { readManifestLockfile } from "./lockfile-check.js";
 import { mirrorMainToRemote } from "./mirror.js";
 import { deployRunAs, type SkillDeployOrigin } from "./origin.js";
@@ -256,6 +257,9 @@ function registerResultToRpc(
       riskTier: classifierLog.risk_tier,
       status: "live",
       gitSha: result.skill.gitSha,
+      skillId: result.skill.id,
+      deployId: result.deploy.id,
+      facts: deployFacts(manifest, result.deploy),
     };
   }
   // pending_approval — also warm cache so a follow-up approve doesn't re-read.
@@ -265,7 +269,8 @@ function registerResultToRpc(
     riskTier: classifierLog.risk_tier,
     status: "pending_approval",
     gitSha: branchSha,
-    pendingId: result.deploy.id,
-    ...(manifest.schedule !== undefined && { schedule: manifest.schedule }),
+    skillId: result.skill.id,
+    deployId: result.deploy.id,
+    facts: deployFacts(manifest, result.deploy),
   };
 }

@@ -3,6 +3,8 @@ import {
   type BoundaryResolvedData,
   boundaryResolvedEvent,
   pipelineGatePending,
+  type SkillsDeployOutcomeData,
+  skillsDeployOutcome,
 } from "../../../inngest/events.js";
 import { expectDefined } from "../../../test/assertions.js";
 import {
@@ -41,6 +43,75 @@ describe("telegramFunctions", () => {
         triggers: [pipelineGatePending],
         retries: 0,
       });
+    });
+  });
+
+  describe("skill deploy outcome", () => {
+    function setupWith(skillsDeploy: boolean) {
+      const inngest = mockInngest();
+      const transportStore = mockTransportStore({
+        getActiveSessionsForConversation: vi
+          .fn()
+          .mockResolvedValue([
+            { id: "s-1", channelId: "tg-ch", platformAddress: "42", conversationId: "conv-1" },
+          ]),
+      });
+      const ready = setup({
+        channelId: "tg-ch",
+        credentials: { token: "fake" },
+        transport: mockTransport(),
+        attachments: mockAttachmentStore(),
+        inngest,
+        boundary: { promptTimeoutMs: 30000, minUserTurns: 3 },
+        ...(skillsDeploy && { skillsDeploy: { runInTx: fakeRunInTx, transportStore } }),
+      });
+      return { inngest, ready };
+    }
+
+    it("posts the outcome to this channel's session through bot.api.sendMessage", async () => {
+      const { inngest, ready } = setupWith(true);
+      await ready;
+
+      const registration = vi
+        .mocked(inngest.createFunction)
+        .mock.calls.find(
+          (call) => (call[0] as { id?: string }).id === "telegram-skills-deploy-outcome-tg-ch",
+        );
+      const [opts, handler] = expectDefined(registration) as [
+        { triggers: unknown[]; retries: number },
+        (ctx: { event: { data: SkillsDeployOutcomeData } }) => Promise<unknown>,
+      ];
+      expect(opts.triggers).toEqual([skillsDeployOutcome]);
+      expect(opts.retries).toBe(0);
+
+      const result = await handler({
+        event: {
+          data: {
+            outcome: "rejected",
+            conversationId: "conv-1",
+            skillName: "echo",
+            gitSha: "abc1234",
+            errors: ["bad"],
+          },
+        },
+      });
+
+      expect(result).toEqual({ posted: true });
+      expect(mockBotApi.sendMessage).toHaveBeenCalledWith(
+        42,
+        "❌ Skill register rejected: echo\nbad",
+        {},
+      );
+    });
+
+    it("registers no outcome listener when skills are not wired", async () => {
+      const { inngest, ready } = setupWith(false);
+      await ready;
+
+      const ids = vi.mocked(inngest.createFunction).mock.calls.map((call) => call[0]);
+      expect(ids).not.toContainEqual(
+        expect.objectContaining({ id: "telegram-skills-deploy-outcome-tg-ch" }),
+      );
     });
   });
 

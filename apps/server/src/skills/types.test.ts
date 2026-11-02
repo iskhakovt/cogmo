@@ -77,10 +77,33 @@ describe("ClassifierLogSchema", () => {
     declared_secrets: [],
     declared_dependencies: [],
     validation_errors: [],
+    reasons: ["tier1_unhardened" as const],
+    declared_network: null,
   };
 
   it("round-trips a stub log", () => {
     expect(ClassifierLogSchema.parse(STUB)).toEqual(STUB);
+  });
+
+  it("round-trips the capability flags and a declared allowlist", () => {
+    const log = {
+      ...STUB,
+      declared_network: ["api.example.com"],
+      capabilities: { tier1Hardened: false, reviewPanel: true },
+    };
+    expect(ClassifierLogSchema.parse(log)).toEqual(log);
+  });
+
+  it("fills the defaults on a log written before reasons were recorded", () => {
+    const { reasons: _reasons, declared_network: _network, ...legacy } = STUB;
+    const parsed = ClassifierLogSchema.parse(legacy);
+    expect(parsed.reasons).toEqual([]);
+    expect(parsed.declared_network).toBeNull();
+    expect(parsed.capabilities).toBeUndefined();
+  });
+
+  it("rejects a reason outside SKILL_RISK_REASONS", () => {
+    expect(() => ClassifierLogSchema.parse({ ...STUB, reasons: ["vibes"] })).toThrow();
   });
 
   it.each([

@@ -448,6 +448,8 @@ export interface SkillStore {
   getPendingDeploy(tx: Transaction, skillId: string): Promise<SkillDeployRow | undefined>;
   /** Returns the deploy row by id, or null. */
   getDeployById(tx: Transaction, id: string): Promise<SkillDeployRow | undefined>;
+  /** Every deploy awaiting approval, oldest first. Backs the listings' pending column. */
+  listPendingDeploys(tx: Transaction): Promise<readonly SkillDeployRow[]>;
 
   // --- skill_runs ---
   insertRun(tx: Transaction, params: InsertRunParams): Promise<SkillRunRow>;
@@ -994,6 +996,14 @@ export class DrizzleSkillStore implements SkillStore {
   async getDeployById(tx: Transaction, id: string): Promise<SkillDeployRow | undefined> {
     const rows = await tx.select().from(skillDeploys).where(eq(skillDeploys.id, id)).limit(1);
     return rows[0];
+  }
+
+  async listPendingDeploys(tx: Transaction): Promise<readonly SkillDeployRow[]> {
+    return tx
+      .select()
+      .from(skillDeploys)
+      .where(eq(skillDeploys.status, "pending_approval"))
+      .orderBy(asc(skillDeploys.createdAt), asc(skillDeploys.id));
   }
 
   // --- skill_runs ---

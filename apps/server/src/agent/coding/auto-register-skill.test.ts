@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Database, Transactor } from "../../db/index.js";
+import type { EventPublisher } from "../../inngest/durable.js";
 import { GitHubIdentitySchema } from "../../secrets/github.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import { bootstrapSkillsRepo, SKILLS_CODING_REPO_NAME } from "../../skills/repo.js";
@@ -13,6 +14,7 @@ import type { RegisterResult, SkillRunner } from "../../skills/runner.js";
 import { expectOk } from "../../test/assertions.js";
 import { parkCodingTaskAt } from "../../test/coding-fixtures.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
+import { liveRegisterResult } from "../../test/skills-fixtures.js";
 import { DrizzleAgentStore } from "../store/index.js";
 import { autoRegisterSkill } from "./auto-register-skill.js";
 import { DrizzleCodingStore } from "./store/index.js";
@@ -133,6 +135,7 @@ describe("autoRegisterSkill", () => {
         agentStore,
         secretsStore: fakeSecretsStore(validIdentity),
         skillRunner,
+        publisher: mock<EventPublisher>(),
         skillsRepoPath: bareRepoPath,
       },
       { taskId },
@@ -152,6 +155,7 @@ describe("autoRegisterSkill", () => {
         agentStore,
         secretsStore: fakeSecretsStore(validIdentity),
         skillRunner,
+        publisher: mock<EventPublisher>(),
         skillsRepoPath: bareRepoPath,
       },
       { taskId: "01900000-0000-7000-8000-000000000000" },
@@ -171,6 +175,7 @@ describe("autoRegisterSkill", () => {
         agentStore,
         secretsStore: fakeSecretsStore(undefined),
         skillRunner,
+        publisher: mock<EventPublisher>(),
         skillsRepoPath: bareRepoPath,
       },
       { taskId },
@@ -191,6 +196,7 @@ describe("autoRegisterSkill", () => {
         agentStore,
         secretsStore: fakeSecretsStore(validIdentity),
         skillRunner,
+        publisher: mock<EventPublisher>(),
         skillsRepoPath: bareRepoPath,
       },
       { taskId },
@@ -206,14 +212,10 @@ describe("autoRegisterSkill", () => {
 
     // `riskTier` on RegisterResult is auto-derived from declared effects,
     // distinct from the manifest's `tier` (wasm | container).
-    const registerResult: RegisterResult = {
-      name: "btc-spot",
-      riskTier: "notify",
-      status: "live",
-      gitSha: "abc123",
-    };
+    const registerResult: RegisterResult = liveRegisterResult({ name: "btc-spot" });
     const skillRunner = mock<SkillRunner>();
     skillRunner.register.mockResolvedValue(registerResult);
+    const publisher = mock<EventPublisher>();
 
     const result = await autoRegisterSkill(
       {
@@ -222,6 +224,7 @@ describe("autoRegisterSkill", () => {
         agentStore,
         secretsStore: fakeSecretsStore(validIdentity),
         skillRunner,
+        publisher,
         skillsRepoPath: bareRepoPath,
       },
       { taskId },
@@ -238,6 +241,8 @@ describe("autoRegisterSkill", () => {
       origin: { kind: "owner" },
       signal: expect.any(AbortSignal),
     });
+    // Nowhere to post the outcome.
+    expect(publisher.send).not.toHaveBeenCalled();
 
     const { stdout } = await execFileP("git", [
       "-C",
@@ -272,12 +277,8 @@ describe("autoRegisterSkill", () => {
     });
     await pushBranchToUpstream(branch);
     const skillRunner = mock<SkillRunner>();
-    skillRunner.register.mockResolvedValue({
-      name: "btc-spot",
-      riskTier: "notify",
-      status: "live",
-      gitSha: "abc123",
-    });
+    skillRunner.register.mockResolvedValue(liveRegisterResult({ name: "btc-spot" }));
+    const publisher = mock<EventPublisher>();
 
     await autoRegisterSkill(
       {
@@ -286,6 +287,7 @@ describe("autoRegisterSkill", () => {
         agentStore,
         secretsStore: fakeSecretsStore(validIdentity),
         skillRunner,
+        publisher,
         skillsRepoPath: bareRepoPath,
       },
       { taskId },
@@ -295,6 +297,16 @@ describe("autoRegisterSkill", () => {
       branch,
       origin: { kind: "conversation", userId: origin.userId, profileId: origin.profileId },
       signal: expect.any(AbortSignal),
+    });
+    // The outcome is posted where the skill was asked for.
+    expect(publisher.send).toHaveBeenCalledTimes(1);
+    expect(publisher.send).toHaveBeenCalledWith({
+      name: "skills/deploy/outcome",
+      data: expect.objectContaining({
+        outcome: "live",
+        skillName: "btc-spot",
+        conversationId: origin.conversationId,
+      }),
     });
   });
 
@@ -329,6 +341,7 @@ describe("autoRegisterSkill", () => {
           agentStore: { getConversation: vi.fn().mockResolvedValue(undefined) },
           secretsStore: fakeSecretsStore(validIdentity),
           skillRunner,
+          publisher: mock<EventPublisher>(),
           skillsRepoPath: bareRepoPath,
         },
         { taskId },
@@ -352,6 +365,7 @@ describe("autoRegisterSkill", () => {
         agentStore,
         secretsStore: fakeSecretsStore(validIdentity),
         skillRunner,
+        publisher: mock<EventPublisher>(),
         skillsRepoPath: bareRepoPath,
       },
       { taskId },
@@ -367,12 +381,7 @@ describe("autoRegisterSkill", () => {
     const deadline = new AbortController();
     const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(deadline.signal);
     const skillRunner = mock<SkillRunner>();
-    skillRunner.register.mockResolvedValue({
-      name: "btc-spot",
-      riskTier: "notify",
-      status: "live",
-      gitSha: "abc123",
-    });
+    skillRunner.register.mockResolvedValue(liveRegisterResult({ name: "btc-spot" }));
 
     try {
       await autoRegisterSkill(
@@ -382,6 +391,7 @@ describe("autoRegisterSkill", () => {
           agentStore,
           secretsStore: fakeSecretsStore(validIdentity),
           skillRunner,
+          publisher: mock<EventPublisher>(),
           skillsRepoPath: bareRepoPath,
         },
         { taskId },

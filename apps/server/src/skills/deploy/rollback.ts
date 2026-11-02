@@ -3,6 +3,7 @@ import { getMainSha, revParse } from "../git-ops.js";
 import { readSkillSource } from "../skill-source.js";
 import { advanceMain, runDeployTx } from "./advance-main.js";
 import { type DeployDeps, requireRepoPath, ZERO_SHA } from "./deploy-deps.js";
+import { deployFacts } from "./deploy-facts.js";
 import { readManifestLockfile } from "./lockfile-check.js";
 import { mirrorMainToRemote } from "./mirror.js";
 import { deployRunAs, type SkillDeployOrigin } from "./origin.js";
@@ -131,6 +132,9 @@ export async function rollbackSkill(
       riskTier: result.skill.riskTier,
       status: "live",
       gitSha: result.skill.gitSha,
+      skillId: result.skill.id,
+      deployId: result.deploy.id,
+      facts: deployFacts(manifest, result.deploy),
     };
   }
   if (result.kind === "no_op") {

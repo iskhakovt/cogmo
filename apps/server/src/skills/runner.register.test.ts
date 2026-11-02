@@ -227,10 +227,9 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
     assertStatus(result, "live");
     expect(result.name).toBe("echo");
     expect(result.gitSha).toBe(sha);
-    // ECHO body has no detectable side effects + manifest declares no
-    // effects → AST classifier promotes to auto. Pre-AST stub
-    // returned `notify` here because auto was unreachable.
-    expect(result.riskTier).toBe("auto");
+    // ECHO declares and does nothing, which the table rates `auto`; an
+    // unhardened tier 1 caps it at `notify`, so it goes live with a message.
+    expect(result.riskTier).toBe("notify");
 
     // main now points at the branch tip.
     expect(await getMainSha(repo.bare)).toBe(sha);
@@ -240,6 +239,21 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
     expect(skill?.gitSha).toBe(sha);
     expect(skill?.tier).toBe("wasm");
     expect(skill?.disabled).toBe(false);
+
+    // The result names the rows it wrote and the facts the outcome message shows.
+    const deploy = await tx((trx) => store.getDeployById(trx, result.deployId));
+    expect(result.skillId).toBe(skill?.id);
+    expect(deploy?.skillId).toBe(skill?.id);
+    expect(result.facts).toEqual({
+      description: "a tier-1 skill that echoes one int field",
+      effects: { declared: [], detected: [] },
+      hosts: [],
+      secrets: [],
+      dependencies: [],
+      schedule: null,
+      reasons: deploy?.classifierLog.reasons,
+      priorGitSha: null,
+    });
 
     // Feature branch deleted.
     await expect(
@@ -943,9 +957,17 @@ outputs:
       });
       await runner.register({ branch: "skill/echo-v2", origin: OWNER });
 
+      const v2 = await getMainSha(repo.bare);
       const result = await runner.rollback({ name: "echo", toGitSha: v1, origin: OWNER });
       assertStatus(result, "live");
       expect(result.gitSha).toBe(v1);
+      // The facts are the restored version's, replacing v2.
+      expect(result.facts).toMatchObject({
+        description: "a tier-1 skill that echoes one int field",
+        priorGitSha: v2,
+      });
+      const deploy = await tx((trx) => store.getDeployById(trx, result.deployId));
+      expect(deploy?.status).toBe("rolled_back");
 
       expect(await getMainSha(repo.bare)).toBe(v1);
       const skill = await tx((trx) => store.getSkillByName(trx, "echo"));
@@ -1119,10 +1141,10 @@ ${effects}
         body: ECHO_BODY,
       });
       const reg = await runner.register({ branch: "skill/briefing", origin: OWNER });
-      if (reg.status !== "pending_approval" || !reg.pendingId) {
+      if (reg.status !== "pending_approval" || !reg.deployId) {
         throw new Error(`expected pending_approval, got ${reg.status}`);
       }
-      return reg.pendingId;
+      return reg.deployId;
     }
 
     async function liveBriefing(runner: SkillRunnerImpl, origin: SkillDeployOrigin): Promise<void> {
@@ -1201,7 +1223,7 @@ ${effects}
       expect(await runAsOfBriefing()).toEqual([approver.userId, owner.profileId]);
     });
 
-    it("a pending result carries the pending manifest's schedule for the approval prompt", async () => {
+    it("a pending result carries the pending manifest's schedule for the outcome message", async () => {
       const runner = await makeRunner({ defaultRunAs: await seedOwner() });
       await pushFeatureBranch({
         work: repo.work,
@@ -1212,7 +1234,7 @@ ${effects}
 
       const reg = await runner.register({ branch: "skill/briefing", origin: OWNER });
 
-      expect(reg).toMatchObject({ status: "pending_approval", schedule: "0 9 * * *" });
+      expect(reg).toMatchObject({ status: "pending_approval", facts: { schedule: "0 9 * * *" } });
     });
 
     it("an owner approval records no approver and runs as the owner", async () => {
@@ -1324,10 +1346,10 @@ effects:
         body: ECHO_BODY,
       });
       const reg = await runner.register({ branch: "skill/notifier", origin: OWNER });
-      if (reg.status !== "pending_approval" || !reg.pendingId) {
+      if (reg.status !== "pending_approval" || !reg.deployId) {
         throw new Error(`expected pending_approval, got ${reg.status}`);
       }
-      return reg.pendingId;
+      return reg.deployId;
     }
 
     it("deploy_not_found when pendingId doesn't exist", async () => {
@@ -1569,8 +1591,8 @@ effects:
       const result = await runner.deregister({ name: "echo" });
       expect(result).toEqual({ kind: "deregistered", name: "echo" });
 
-      const list = await runner.list();
-      expect(list).toHaveLength(0);
+      const enabled = (await runner.listAll()).filter((s) => !s.disabled);
+      expect(enabled).toHaveLength(0);
       // Row still exists for audit history.
       const skill = await tx((trx) => store.getSkillByName(trx, "echo"));
       expect(skill?.disabled).toBe(true);
@@ -1687,7 +1709,7 @@ effects:
       const result = await runner.register({ branch: "skill/notifier", origin: OWNER });
       assertStatus(result, "pending_approval");
       expect(result.riskTier).toBe("approve");
-      expect(result.pendingId).toBeTruthy();
+      expect(result.deployId).toBeTruthy();
       // main is NOT advanced for approve-tier.
       expect(await getMainSha(repo.bare)).toBe(before);
     });
@@ -1713,12 +1735,22 @@ effects:
       });
       const reg = await runner.register({ branch: "skill/notifier", origin: OWNER });
       assertStatus(reg, "pending_approval");
-      const pendingId = reg.pendingId;
+      const pendingId = reg.deployId;
       if (!pendingId) throw new Error("expected pendingId");
+
+      expect(reg.facts).toMatchObject({
+        description: "a skill that sends notifications to the user",
+        effects: { declared: ["sends_message"] },
+        priorGitSha: null,
+      });
 
       const approved = await runner.approveDeploy({ pendingId, origin: OWNER });
       assertStatus(approved, "live");
       expect(approved.gitSha).toBe(sha);
+      // Approve resolves the pending row and reports its facts.
+      expect(approved.deployId).toBe(pendingId);
+      expect(approved.skillId).toBe(reg.skillId);
+      expect(approved.facts).toEqual(reg.facts);
 
       // main moved + skills row reflects the approved sha.
       expect(await getMainSha(repo.bare)).toBe(sha);
@@ -1889,7 +1921,7 @@ effects:
       });
       const reg = await runner.register({ branch: "skill/shapeshift-v1", origin: OWNER });
       assertStatus(reg, "pending_approval");
-      await runner.approveDeploy({ pendingId: reg.pendingId, origin: OWNER });
+      await runner.approveDeploy({ pendingId: reg.deployId, origin: OWNER });
 
       // Now stage v2 with a different inputs schema + extra effect.
       const v2Manifest = `---
@@ -1916,7 +1948,7 @@ effects:
       });
       const reg2 = await runner.register({ branch: "skill/shapeshift-v2", origin: OWNER });
       assertStatus(reg2, "pending_approval");
-      const approved = await runner.approveDeploy({ pendingId: reg2.pendingId, origin: OWNER });
+      const approved = await runner.approveDeploy({ pendingId: reg2.deployId, origin: OWNER });
       assertStatus(approved, "live");
 
       const skill = await tx((trx) => store.getSkillByName(trx, "shapeshift"));
@@ -1998,7 +2030,7 @@ effects:
       const reg = await runner.register({ branch: "skill/notify-skill", origin: OWNER });
       assertStatus(reg, "pending_approval");
       expect(reg.gitSha).toBe(sha);
-      if (!reg.pendingId) throw new Error("expected pendingId");
+      if (!reg.deployId) throw new Error("expected pendingId");
 
       // After insert: skill row exists but disabled=true (first-time
       // pending_approval — there's no prior live version to keep visible).
@@ -2006,7 +2038,7 @@ effects:
       expect(beforeDeny?.disabled).toBe(true);
       expect(beforeDeny?.gitSha).toBe(sha);
 
-      expect(await runner.denyDeploy({ pendingId: reg.pendingId, reason: "not now" })).toEqual(
+      expect(await runner.denyDeploy({ pendingId: reg.deployId, reason: "not now" })).toEqual(
         ok(undefined),
       );
 
@@ -2025,8 +2057,8 @@ effects:
       const reg2 = await runner.register({ branch: "skill/notify-skill", origin: OWNER });
       assertStatus(reg2, "pending_approval");
       expect(reg2.gitSha).toBe(sha);
-      expect(reg2.pendingId).toBeTruthy();
-      expect(reg2.pendingId).not.toBe(reg.pendingId);
+      expect(reg2.deployId).toBeTruthy();
+      expect(reg2.deployId).not.toBe(reg.deployId);
     });
 
     it("does NOT take a currently-live skill offline when an approve-tier upgrade is queued", async () => {
@@ -2071,7 +2103,7 @@ effects:
       });
       const reg2 = await runner.register({ branch: "skill/upgradable-v2", origin: OWNER });
       assertStatus(reg2, "pending_approval");
-      if (!reg2.pendingId) throw new Error("expected pendingId for v2");
+      if (!reg2.deployId) throw new Error("expected pendingId for v2");
 
       // Critical: skills row UNCHANGED — still pointing at v1, still live.
       const duringApproval = await tx((trx) => store.getSkillByName(trx, "upgradable"));
@@ -2080,7 +2112,7 @@ effects:
 
       // Deny the v2 upgrade. The live v1 should still be live afterwards —
       // this is the exact regression the row-untouched rule prevents.
-      await runner.denyDeploy({ pendingId: reg2.pendingId, reason: "rejected" });
+      await runner.denyDeploy({ pendingId: reg2.deployId, reason: "rejected" });
       const afterDeny = await tx((trx) => store.getSkillByName(trx, "upgradable"));
       expect(afterDeny?.disabled).toBe(false);
       expect(afterDeny?.gitSha).toBe(v1Sha);
@@ -2374,7 +2406,7 @@ effects:
         // and leaves both local and remote main on the seed commit.
         const reg = await runner.register({ branch: "skill/notifier", origin: OWNER });
         assertStatus(reg, "pending_approval");
-        const pendingId = reg.pendingId;
+        const pendingId = reg.deployId;
         if (!pendingId) throw new Error("expected pendingId");
         const seedSha = (
           await execFileP("git", ["-C", repoWithRemote.remote, "rev-parse", "refs/heads/main"])

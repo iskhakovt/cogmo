@@ -15,7 +15,11 @@
 import { describe, expect, it } from "vitest";
 import { __resetParserForTests, classifyWithAst } from "./ast-classifier.js";
 import { BUILD_CAPABILITIES } from "./capabilities.js";
+import type { SkillRiskReason } from "./risk-reasons.js";
 import type { SkillManifest } from "./types.js";
+
+/** The reasons `BUILD_CAPABILITIES` adds when the table would return `auto`. */
+const CAP_REASONS: SkillRiskReason[] = ["tier1_unhardened", "no_review_panel"];
 
 function manifestWith(overrides: Partial<SkillManifest> = {}): SkillManifest {
   return {
@@ -33,7 +37,7 @@ function manifestWith(overrides: Partial<SkillManifest> = {}): SkillManifest {
 }
 
 describe("classifyWithAst — empty / harmless body", () => {
-  it("empty effects + no detectable side effects → auto", async () => {
+  it("empty effects + no detectable side effects → auto, capped at notify", async () => {
     const log = await classifyWithAst(
       manifestWith(),
       `
@@ -42,7 +46,8 @@ async def run(inputs, ctx):
 `,
       BUILD_CAPABILITIES,
     );
-    expect(log.risk_tier).toBe("auto");
+    expect(log.risk_tier).toBe("notify");
+    expect(log.reasons).toEqual(CAP_REASONS);
     expect(log.detected_effects).toEqual([]);
     expect(log.validation_errors).toEqual([]);
   });
@@ -74,7 +79,8 @@ async def run(inputs, ctx):
 `,
       BUILD_CAPABILITIES,
     );
-    expect(log.risk_tier).toBe("auto");
+    expect(log.risk_tier).toBe("notify");
+    expect(log.reasons).toEqual(CAP_REASONS);
     expect(log.detected_effects).toEqual([]);
   });
 
@@ -89,7 +95,8 @@ async def run(inputs, ctx):
 `,
       BUILD_CAPABILITIES,
     );
-    expect(log.risk_tier).toBe("auto");
+    expect(log.risk_tier).toBe("notify");
+    expect(log.reasons).toEqual(CAP_REASONS);
     expect(log.detected_effects).toEqual([]);
   });
 });
@@ -333,8 +340,9 @@ async def run(inputs, ctx):
       BUILD_CAPABILITIES,
     );
     expect(log.detected_effects).not.toContain("spawns_subprocess");
-    // Still gets auto because nothing in the rules table matches.
-    expect(log.risk_tier).toBe("auto");
+    // Nothing in the rules table matches, so only the tier-1 cap applies.
+    expect(log.risk_tier).toBe("notify");
+    expect(log.reasons).toEqual(CAP_REASONS);
   });
 
   it("aliased import (`import subprocess as sp`) is detected via the import statement", async () => {
@@ -438,7 +446,8 @@ async def run(inputs, ctx):
       `async def run(inputs, ctx):\n    return {}`,
       BUILD_CAPABILITIES,
     );
-    expect(log.risk_tier).toBe("auto");
+    expect(log.risk_tier).toBe("notify");
+    expect(log.reasons).toEqual(CAP_REASONS);
   });
 });
 
@@ -487,7 +496,7 @@ async def run(inputs, ctx):
     expect(log.risk_tier).toBe("approve");
   });
 
-  it("one secret with no network stays auto", async () => {
+  it("one secret with no network stays auto, capped at notify", async () => {
     // The pairing is what gates. A secret a skill cannot send anywhere is
     // still only as broad as the count threshold says.
     const log = await classifyWithAst(
@@ -498,7 +507,8 @@ async def run(inputs, ctx):
 `,
       BUILD_CAPABILITIES,
     );
-    expect(log.risk_tier).toBe("auto");
+    expect(log.risk_tier).toBe("notify");
+    expect(log.reasons).toEqual(CAP_REASONS);
   });
 
   it("a bound secret alongside network → approve, same as a bare one", async () => {
@@ -511,5 +521,149 @@ async def run(inputs, ctx):
       BUILD_CAPABILITIES,
     );
     expect(log.risk_tier).toBe("approve");
+  });
+});
+
+describe("classifyWithAst — tier-1 cap", () => {
+  const HARMLESS = `
+async def run(inputs, ctx):
+    return {"ok": True}
+`;
+
+  it("caps auto at notify with both cap reasons while both flags are off", async () => {
+    const log = await classifyWithAst(manifestWith(), HARMLESS, {
+      tier1Hardened: false,
+      reviewPanel: false,
+    });
+    expect(log.risk_tier).toBe("notify");
+    expect(log.reasons).toEqual(["tier1_unhardened", "no_review_panel"]);
+    expect(log.capabilities).toEqual({ tier1Hardened: false, reviewPanel: false });
+  });
+
+  it("records only tier1_unhardened once a review panel is set", async () => {
+    const log = await classifyWithAst(manifestWith(), HARMLESS, {
+      tier1Hardened: false,
+      reviewPanel: true,
+    });
+    expect(log.risk_tier).toBe("notify");
+    expect(log.reasons).toEqual(["tier1_unhardened"]);
+  });
+
+  it("records only no_review_panel once tier 1 is hardened", async () => {
+    const log = await classifyWithAst(manifestWith(), HARMLESS, {
+      tier1Hardened: true,
+      reviewPanel: false,
+    });
+    expect(log.risk_tier).toBe("notify");
+    expect(log.reasons).toEqual(["no_review_panel"]);
+  });
+
+  it("returns auto with no reasons when both flags are set", async () => {
+    const log = await classifyWithAst(manifestWith(), HARMLESS, {
+      tier1Hardened: true,
+      reviewPanel: true,
+    });
+    expect(log.risk_tier).toBe("auto");
+    expect(log.reasons).toEqual([]);
+    expect(log.capabilities).toEqual({ tier1Hardened: true, reviewPanel: true });
+  });
+
+  it("leaves a notify deploy's reasons free of the cap", async () => {
+    const log = await classifyWithAst(
+      manifestWith({ effects: ["reads_memory"] }),
+      HARMLESS,
+      BUILD_CAPABILITIES,
+    );
+    expect(log.risk_tier).toBe("notify");
+    expect(log.reasons).toEqual(["declared_effect"]);
+  });
+});
+
+describe("classifyWithAst — reasons", () => {
+  const HARMLESS = `
+async def run(inputs, ctx):
+    return {"ok": True}
+`;
+  const NETWORK = { allow: ["api.example.com"] };
+
+  it.each<[SkillRiskReason, Partial<SkillManifest>, "notify" | "approve"]>([
+    ["sensitive_dependency", { dependencies: ["boto3==1.34.0"] }, "approve"],
+    ["approve_gating_effect", { effects: ["sends_email"] }, "approve"],
+    ["container_tier", { tier: "container" }, "approve"],
+    ["secrets_with_network", { secrets: ["api_key"], network: NETWORK }, "approve"],
+    ["secret_breadth", { secrets: ["a", "b", "c"] }, "approve"],
+    ["unlisted_dependency", { dependencies: ["some-obscure-pkg==1.0.0"] }, "notify"],
+    ["declared_effect", { effects: ["reads_memory"] }, "notify"],
+    ["network_declared", { network: NETWORK }, "notify"],
+  ])("raises %s alone for its trigger", async (reason, overrides, tier) => {
+    const log = await classifyWithAst(manifestWith(overrides), HARMLESS, BUILD_CAPABILITIES);
+    expect(log.risk_tier).toBe(tier);
+    expect(log.reasons).toEqual([reason]);
+  });
+
+  it("raises approve_gating_effect for a detected effect, without the cap", async () => {
+    const log = await classifyWithAst(
+      manifestWith(),
+      `
+import smtplib
+async def run(inputs, ctx):
+    return {"ok": True}
+`,
+      BUILD_CAPABILITIES,
+    );
+    expect(log.risk_tier).toBe("approve");
+    expect(log.validation_errors).toHaveLength(1);
+    expect(log.reasons).toEqual(["approve_gating_effect"]);
+  });
+
+  it("records both reasons for a container-tier skill with an unlisted dependency", async () => {
+    const log = await classifyWithAst(
+      manifestWith({ tier: "container", dependencies: ["some-obscure-pkg==1.0.0"] }),
+      HARMLESS,
+      BUILD_CAPABILITIES,
+    );
+    expect(log.risk_tier).toBe("approve");
+    expect(log.reasons).toEqual(["container_tier", "unlisted_dependency"]);
+  });
+
+  it("records a gating and a non-gating effect as separate reasons", async () => {
+    const log = await classifyWithAst(
+      manifestWith({ effects: ["sends_email", "reads_memory"] }),
+      HARMLESS,
+      BUILD_CAPABILITIES,
+    );
+    expect(log.risk_tier).toBe("approve");
+    expect(log.reasons).toEqual(["approve_gating_effect", "declared_effect"]);
+  });
+
+  it("records secret breadth and the network pairing together", async () => {
+    const log = await classifyWithAst(
+      manifestWith({ secrets: ["a", "b", "c"], network: NETWORK }),
+      HARMLESS,
+      BUILD_CAPABILITIES,
+    );
+    expect(log.risk_tier).toBe("approve");
+    expect(log.reasons).toEqual(["secrets_with_network", "secret_breadth"]);
+  });
+
+  it("records an approve-list and an unlisted dependency together", async () => {
+    const log = await classifyWithAst(
+      manifestWith({ dependencies: ["paramiko==3.4.0", "some-obscure-pkg==1.0.0"] }),
+      HARMLESS,
+      BUILD_CAPABILITIES,
+    );
+    expect(log.risk_tier).toBe("approve");
+    expect(log.reasons).toEqual(["sensitive_dependency", "unlisted_dependency"]);
+  });
+
+  it("stamps declared_network from the manifest's allowlist", async () => {
+    const withNetwork = await classifyWithAst(
+      manifestWith({ network: NETWORK }),
+      HARMLESS,
+      BUILD_CAPABILITIES,
+    );
+    expect(withNetwork.declared_network).toEqual(["api.example.com"]);
+    const without = await classifyWithAst(manifestWith(), HARMLESS, BUILD_CAPABILITIES);
+    expect(without.declared_network).toBeNull();
   });
 });

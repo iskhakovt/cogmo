@@ -1,4 +1,4 @@
-import type { Transactor } from "../db/index.js";
+import type { Transaction, Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
 import type { SkillSourceCache } from "./source-cache.js";
 import type { SkillRiskTier, SkillRow, SkillStore, SkillTier } from "./store/index.js";
@@ -48,31 +48,44 @@ export interface ListingDeps {
   sourceCache: SkillSourceCache;
 }
 
-function rowToSummary(r: SkillRow): SkillSummary {
+type PendingDeploy = SkillSummary["pendingDeploy"];
+
+function rowToSummary(r: SkillRow, pendingDeploy: PendingDeploy): SkillSummary {
   return {
     name: r.name,
     tier: r.tier,
     riskTier: r.riskTier,
     disabled: r.disabled,
     gitSha: r.gitSha,
-    pendingDeploy: null,
+    pendingDeploy,
   };
 }
 
-/** Enabled skills, by name. */
-export async function listSkills(
+/**
+ * Read the skill rows and the pending deploys in one transaction, so a
+ * listing never pairs a skill with a deploy from a different snapshot.
+ * Register resolves a skill's earlier pending deploy before it writes a new
+ * one; were two ever pending, the newest is the one shown.
+ */
+async function summarise(
   deps: Pick<ListingDeps, "store" | "runInTx">,
+  readSkills: (tx: Transaction) => Promise<readonly SkillRow[]>,
 ): Promise<readonly SkillSummary[]> {
-  const rows = await deps.runInTx((tx) => deps.store.listEnabledSkills(tx));
-  return rows.map(rowToSummary);
+  const { rows, pending } = await deps.runInTx(async (tx) => ({
+    rows: await readSkills(tx),
+    pending: await deps.store.listPendingDeploys(tx),
+  }));
+  const pendingBySkill = new Map(
+    pending.map((d): [string, PendingDeploy] => [d.skillId, { id: d.id, gitSha: d.gitSha }]),
+  );
+  return rows.map((r) => rowToSummary(r, pendingBySkill.get(r.id) ?? null));
 }
 
-/** Every skill, disabled ones included, by name. */
+/** Every skill, disabled ones included, by name, each with its pending deploy. */
 export async function listAllSkills(
   deps: Pick<ListingDeps, "store" | "runInTx">,
 ): Promise<readonly SkillSummary[]> {
-  const rows = await deps.runInTx((tx) => deps.store.listAllSkills(tx));
-  return rows.map(rowToSummary);
+  return summarise(deps, (tx) => deps.store.listAllSkills(tx));
 }
 
 /** The enabled skills as LLM tool descriptors, skipping any whose source is unreadable. */

@@ -107,7 +107,7 @@ describe("SkillRunnerImpl", () => {
       manifestSource: ECHO_MANIFEST,
       body: ECHO_BODY,
     });
-    const list = await runner.list();
+    const list = await runner.listAll();
     expect(list).toHaveLength(1);
     expect(list[0]?.name).toBe("echo");
     expect(list[0]?.tier).toBe("wasm");
@@ -615,8 +615,8 @@ inputs:
       body: ECHO_BODY,
     });
     await tx((trx) => store.disableSkill(trx, a.id));
-    const list = await runner.list();
-    expect(list.map((s) => s.name)).toEqual(["beta"]);
+    const enabled = (await runner.listAll()).filter((s) => !s.disabled);
+    expect(enabled.map((s) => s.name)).toEqual(["beta"]);
   });
 
   it("enable re-activates a deregistered skill (round-trip)", async () => {
@@ -634,7 +634,7 @@ inputs:
 
     const result = await runner.enable({ name: "echo", origin: { kind: "owner" } });
     expect(result).toEqual({ kind: "enabled", name: "echo", gitSha: row.gitSha, schedule: null });
-    expect((await runner.list()).map((s) => s.name)).toContain("echo");
+    expect((await runner.listAll()).find((s) => s.name === "echo")?.disabled).toBe(false);
   });
 
   it("enable on an already-enabled skill is idempotent", async () => {

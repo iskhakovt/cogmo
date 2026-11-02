@@ -340,6 +340,37 @@ describe("DrizzleSkillStore", () => {
       };
     }
 
+    it("listPendingDeploys returns every pending row oldest first, and drops a resolved one", async () => {
+      const first = await seedSkill({ name: "first" });
+      const second = await seedSkill({ name: "second" });
+      const firstPending = await tx((trx) =>
+        store.insertDeploy(trx, deployParams(first.id, "pending_approval", null)),
+      );
+      const secondPending = await tx((trx) =>
+        store.insertDeploy(trx, {
+          ...deployParams(second.id, "pending_approval", null),
+          gitSha: SHA_NEW,
+        }),
+      );
+      await tx((trx) => store.insertDeploy(trx, deployParams(first.id, "live", new Date())));
+
+      const pending = await tx((trx) => store.listPendingDeploys(trx));
+      expect(pending.map((d) => [d.id, d.skillId, d.gitSha])).toEqual([
+        [firstPending.id, first.id, SHA],
+        [secondPending.id, second.id, SHA_NEW],
+      ]);
+
+      await tx((trx) => store.denyPendingDeploy(trx, { pendingId: firstPending.id }));
+      const afterDeny = await tx((trx) => store.listPendingDeploys(trx));
+      expect(afterDeny.map((d) => d.id)).toEqual([secondPending.id]);
+    });
+
+    it("listPendingDeploys returns nothing when no deploy is pending", async () => {
+      const skill = await seedSkill();
+      await tx((trx) => store.insertDeploy(trx, deployParams(skill.id, "live", new Date())));
+      expect(await tx((trx) => store.listPendingDeploys(trx))).toEqual([]);
+    });
+
     it("the CHECK refuses a terminal row without resolved_at and a pending row with one", async () => {
       const skill = await seedSkill();
       await expect(

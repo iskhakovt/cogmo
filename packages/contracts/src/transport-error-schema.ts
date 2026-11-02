@@ -51,6 +51,7 @@ export const TransportErrorSchema = z.discriminatedUnion("code", [
   z.object({ code: z.literal("task_already_terminal"), taskId: z.string(), status: z.string() }),
   z.object({ code: z.literal("skills_disabled") }),
   z.object({ code: z.literal("skill_not_found"), name: z.string() }),
+  z.object({ code: z.literal("skill_id_not_found"), skillId: z.string() }),
   z.object({ code: z.literal("skill_no_live_deploy"), name: z.string() }),
   z.object({ code: z.literal("skill_deploy_not_found"), pendingId: z.string() }),
   z.object({

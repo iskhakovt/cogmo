@@ -15,6 +15,7 @@ describe("handleSkills", () => {
               riskTier: "auto",
               disabled: false,
               gitSha: "1234567abcdef",
+              pendingDeploy: null,
             },
             {
               name: "beta",
@@ -22,6 +23,7 @@ describe("handleSkills", () => {
               riskTier: "approve",
               disabled: true,
               gitSha: "fedcba9012345",
+              pendingDeploy: null,
             },
           ]),
         ),
@@ -30,8 +32,34 @@ describe("handleSkills", () => {
     const ctx = mkCtx();
     await handleSkills(transport, ctx);
     const reply = (ctx.reply.mock.calls[0]?.[0] ?? "") as string;
-    expect(reply).toContain("alpha [wasm/auto] @ 1234567");
-    expect(reply).toContain("beta [container/approve] @ fedcba9 (disabled)");
+    expect(reply).toBe(
+      "Skills:\nalpha [wasm/auto] @ 1234567\nbeta [container/approve] @ fedcba9 (disabled)",
+    );
+  });
+
+  it("shows a pending deploy's shas and full id on its skill's line", async () => {
+    const id = "01960000-0000-7000-8000-000000000001";
+    const transport = transportWith({
+      skills: {
+        list: vi.fn().mockResolvedValue(
+          ok([
+            {
+              name: "gamma",
+              tier: "wasm",
+              riskTier: "approve",
+              disabled: true,
+              gitSha: "abc1234ffff",
+              pendingDeploy: { id, gitSha: "def5678eeee" },
+            },
+          ]),
+        ),
+      },
+    });
+    const ctx = mkCtx();
+    await handleSkills(transport, ctx);
+    expect(ctx.reply).toHaveBeenCalledWith(
+      `Skills:\ngamma [wasm/approve] @ abc1234 (disabled) — pending approval abc1234 → def5678, id ${id}`,
+    );
   });
 
   it("nudges the user when there are no skills", async () => {

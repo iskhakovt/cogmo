@@ -8,7 +8,7 @@ import { type CliIo, runCli } from "./run.js";
 import { type SkillsCliDeps, skillsCli } from "./skills.js";
 
 function makeRunner(overrides: Partial<SkillRunner> = {}): SkillRunner {
-  return mock<SkillRunner>({ list: vi.fn().mockResolvedValue([]), ...overrides });
+  return mock<SkillRunner>({ listAll: vi.fn().mockResolvedValue([]), ...overrides });
 }
 
 /** The install owner with the default profile, as `main.ts` resolves them. */
@@ -50,31 +50,43 @@ describe("skillsCli", () => {
     },
   );
 
-  it("prints (no enabled skills) when list is empty", async () => {
+  it("prints (no skills) when list is empty", async () => {
     const { io, out } = captureIo();
     const code = await run(["list"], depsFor(makeRunner()), io);
     expect(code).toBe(0);
-    expect(out.join("\n")).toContain("(no enabled skills)");
+    expect(out).toEqual(["(no skills)"]);
   });
 
-  it("prints a tab-separated row per skill", async () => {
+  it("prints a tab-separated row per skill, disabled ones and pending deploys included", async () => {
     const { io, out } = captureIo();
+    const pendingId = "01960000-0000-7000-8000-000000000001";
     const runner = makeRunner({
-      list: vi.fn().mockResolvedValue([
+      listAll: vi.fn().mockResolvedValue([
         {
           name: "echo",
           tier: "wasm",
-          riskTier: "auto",
+          riskTier: "notify",
           disabled: false,
           gitSha: "abc12345",
+          pendingDeploy: null,
+        },
+        {
+          name: "mailer",
+          tier: "wasm",
+          riskTier: "approve",
+          disabled: true,
+          gitSha: "def67890",
+          pendingDeploy: { id: pendingId, gitSha: "def67890" },
         },
       ]),
     });
     const code = await run(["list"], depsFor(runner), io);
     expect(code).toBe(0);
-    const printed = out.join("\n");
-    expect(printed).toContain("name\ttier\trisk\tdisabled\tgit_sha");
-    expect(printed).toContain("echo\twasm\tauto\tno\tabc12345");
+    expect(out).toEqual([
+      "name\ttier\trisk\tdisabled\tgit_sha\tpending_deploy",
+      "echo\twasm\tnotify\tno\tabc12345\t-",
+      `mailer\twasm\tapprove\tyes\tdef67890\t${pendingId}`,
+    ]);
   });
 
   it("rejects `run` without a name", async () => {

@@ -1,6 +1,7 @@
 import { match } from "ts-pattern";
 import type { SkillSourceError } from "../skill-source.js";
 import type { SkillRiskTier } from "../store/index.js";
+import type { DeployFacts } from "./deploy-facts.js";
 
 /** Fields every deploy outcome carries. */
 interface RegisterResultBase {
@@ -9,20 +10,28 @@ interface RegisterResultBase {
   gitSha: string;
 }
 
+/** Fields an outcome that wrote a deploy row carries. */
+interface DeployedResultBase extends RegisterResultBase {
+  skillId: string;
+  /** The `skill_deploys` row this outcome wrote or resolved. */
+  deployId: string;
+  /** What the deployed version declares and why it got its tier. */
+  facts: DeployFacts;
+}
+
 /**
- * The outcome of `register`, `approveDeploy` or `rollback`. `name` is empty
+ * The outcome of `register`, `approveDeploy` or `rollback`, and what
+ * `announceDeployOutcome` turns into `skills/deploy/outcome`. `name` is empty
  * on a rejection that precedes reading the manifest.
  */
 export type RegisterResult =
   /** `gitSha` is main's new tip. */
-  | (RegisterResultBase & { status: "live" })
-  /** `gitSha` is the branch tip awaiting approval; main has not moved. */
-  | (RegisterResultBase & {
-      status: "pending_approval";
-      pendingId: string;
-      /** The pending manifest's cron schedule, if it declares one. */
-      schedule?: string;
-    })
+  | (DeployedResultBase & { status: "live" })
+  /**
+   * `gitSha` is the branch tip awaiting approval; main has not moved.
+   * `deployId` is the pending row an approve or deny names.
+   */
+  | (DeployedResultBase & { status: "pending_approval" })
   /** The tip is already live: nothing changed. */
   | (RegisterResultBase & { status: "no_op" })
   /** Nothing was written. */

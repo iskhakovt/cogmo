@@ -19,7 +19,6 @@ function makeRunner(overrides: Partial<SkillRunner> = {}): SkillRunner {
     rollback: vi.fn(),
     deregister: vi.fn(),
     enable: vi.fn(),
-    list: vi.fn().mockResolvedValue([]),
     listAll: vi.fn().mockResolvedValue([]),
     listToolDefs: vi.fn().mockResolvedValue([]),
     invoke: vi.fn(),

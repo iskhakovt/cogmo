@@ -1,4 +1,4 @@
-/** The Inngest functions a Telegram channel serves: coding progress, skills approval, pipeline gates, boundary-prompt cleanup. */
+/** The Inngest functions a Telegram channel serves: coding progress, skill deploy outcomes, pipeline gates, boundary-prompt cleanup. */
 
 import type { Bot } from "grammy";
 import { startCodingProgressSubscriber } from "../../../agent/coding/progress-subscriber.js";
@@ -6,12 +6,12 @@ import {
   boundaryResolvedEvent,
   codingTaskStart,
   pipelineGatePending,
-  skillsDeployApprovalRequested,
+  skillsDeployOutcome,
 } from "../../../inngest/events.js";
 import type { AdapterDeps, AdapterSetupResult } from "../../adapter-module.js";
 import { editResolvedBoundaryPrompt } from "./boundary-prompt-editor.js";
 import { postPipelineGateKeyboard } from "./pipeline-gate-poster.js";
-import { postSkillsApprovalKeyboard } from "./skills-approval-poster.js";
+import { postSkillsDeployOutcome } from "./skills-deploy-outcome-poster.js";
 
 export function telegramFunctions(deps: AdapterDeps, bot: Bot): AdapterSetupResult["functions"] {
   const { inngest, channelId } = deps;
@@ -59,26 +59,25 @@ export function telegramFunctions(deps: AdapterDeps, bot: Bot): AdapterSetupResu
     );
   }
 
-  // Skills approve-tier deploy gate — listen on
-  // skills/deploy/approval-requested, post the inline keyboard message into
-  // the originating conversation's session. The runner's register call has
-  // already returned with status=pending_approval; the keyboard tap routes
-  // straight to transport.skills.approveDeploy/denyDeploy.
-  if (deps.skillsApproval) {
-    const { skillStore, runInTx, transportStore } = deps.skillsApproval;
+  // Skill deploy outcomes — listen on skills/deploy/outcome and post the
+  // outcome into the originating conversation's session: what went live
+  // with a Disable button, a pending deploy with Approve / Deny, or the
+  // rejection's errors. The register has already returned; a tap routes
+  // straight to transport.skills.
+  if (deps.skillsDeploy) {
+    const { runInTx, transportStore } = deps.skillsDeploy;
     functions.push(
       inngest.createFunction(
         {
-          id: `telegram-skills-approval-${channelId}`,
-          triggers: [skillsDeployApprovalRequested],
+          id: `telegram-skills-deploy-outcome-${channelId}`,
+          triggers: [skillsDeployOutcome],
           retries: 0,
         },
         async ({ event }) =>
-          postSkillsApprovalKeyboard({
+          postSkillsDeployOutcome({
             event: event.data,
             channelId,
             runInTx,
-            skillStore,
             transportStore,
             sendMessage: (chatId, text, opts) => bot.api.sendMessage(chatId, text, opts),
           }),

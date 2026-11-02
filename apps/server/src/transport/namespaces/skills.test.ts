@@ -17,8 +17,9 @@ import type {
   SkillRunner,
   SkillSummary,
 } from "../../skills/runner.js";
-import type { SkillDeployRow, SkillStore } from "../../skills/store/index.js";
+import type { SkillDeployRow, SkillRow, SkillStore } from "../../skills/store/index.js";
 import { mockAgentStore, mockTransportStore } from "../../test/factories.js";
+import { liveRegisterResult } from "../../test/skills-fixtures.js";
 import type { Session, TransportStore } from "../store/index.js";
 import { createSkills } from "./skills.js";
 
@@ -195,6 +196,76 @@ describe("Transport.skills.disable", () => {
   });
 });
 
+describe("Transport.skills.disableById", () => {
+  const SKILL_ID = "019d0000-0000-7000-8000-0000000000ab";
+
+  function storeWithSkill(skill: Pick<SkillRow, "id" | "name"> | undefined): SkillStore {
+    const store = mock<SkillStore>();
+    store.getSkillById.mockResolvedValue(skill ? { ...mock<SkillRow>(), ...skill } : undefined);
+    return store;
+  }
+
+  it("deregisters the skill the id names → ok({name})", async () => {
+    const runner = mock<SkillRunner>();
+    runner.deregister.mockResolvedValue({
+      kind: "deregistered",
+      name: "echo",
+    } satisfies DeregisterResult);
+    const store = storeWithSkill({ id: SKILL_ID, name: "echo" });
+    const skills = makeSkills({ runner, store });
+
+    const result = await skills.disableById(SKILL_ID, KNOWN_HANDLE);
+
+    expect(result._unsafeUnwrap()).toEqual({ name: "echo" });
+    expect(store.getSkillById).toHaveBeenCalledWith(expect.anything(), SKILL_ID);
+    expect(runner.deregister).toHaveBeenCalledWith({ name: "echo" });
+  });
+
+  it("returns skill_id_not_found when no skill has the id", async () => {
+    const runner = mock<SkillRunner>();
+    const skills = makeSkills({ runner, store: storeWithSkill(undefined) });
+
+    const result = await skills.disableById(SKILL_ID, KNOWN_HANDLE);
+
+    expect(result._unsafeUnwrapErr()).toEqual({ code: "skill_id_not_found", skillId: SKILL_ID });
+    expect(runner.deregister).not.toHaveBeenCalled();
+  });
+
+  it("returns skill_not_found when the skill goes away before the deregister", async () => {
+    const runner = mock<SkillRunner>();
+    runner.deregister.mockResolvedValue({
+      kind: "rejected",
+      name: "echo",
+      reason: "not_found",
+    } satisfies DeregisterResult);
+    const skills = makeSkills({ runner, store: storeWithSkill({ id: SKILL_ID, name: "echo" }) });
+
+    const result = await skills.disableById(SKILL_ID, KNOWN_HANDLE);
+
+    expect(result._unsafeUnwrapErr()).toEqual({ code: "skill_not_found", name: "echo" });
+  });
+
+  it("rejects an unknown tapper before reading the skill", async () => {
+    const runner = mock<SkillRunner>();
+    const store = storeWithSkill({ id: SKILL_ID, name: "echo" });
+    const skills = makeSkills({ runner, store });
+
+    const result = await skills.disableById(SKILL_ID, UNKNOWN_HANDLE);
+
+    expect(result._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
+    expect(store.getSkillById).not.toHaveBeenCalled();
+    expect(runner.deregister).not.toHaveBeenCalled();
+  });
+
+  it("returns skills_disabled when the runtime is unwired", async () => {
+    const skills = makeSkills({});
+
+    const result = await skills.disableById(SKILL_ID, KNOWN_HANDLE);
+
+    expect(result._unsafeUnwrapErr()).toEqual({ code: "skills_disabled" });
+  });
+});
+
 describe("Transport.skills.enable", () => {
   it("maps runner.enable=enabled → ok({alreadyEnabled:false}) with the schedule it now runs", async () => {
     const runner = mock<SkillRunner>();
@@ -345,12 +416,12 @@ function makeDeployRow(overrides: Partial<SkillDeployRow> = {}): SkillDeployRow 
 describe("Transport.skills.approveDeploy", () => {
   it("happy path: pending → runner.approveDeploy → ok({pendingId, skillName, gitSha})", async () => {
     const runner = mock<SkillRunner>();
-    runner.approveDeploy.mockResolvedValue({
-      name: "echo",
-      riskTier: "approve",
-      status: "live",
-      gitSha: "1111111111111111111111111111111111111111",
-    });
+    runner.approveDeploy.mockResolvedValue(
+      liveRegisterResult({
+        riskTier: "approve",
+        gitSha: "1111111111111111111111111111111111111111",
+      }),
+    );
     const store = mock<SkillStore>();
     store.getDeployById.mockResolvedValue(makeDeployRow());
     const skills = makeSkills({ runner, store });
@@ -377,12 +448,12 @@ describe("Transport.skills.approveDeploy", () => {
 
   it("passes the conversation of the chat the tap came from as the approval's origin", async () => {
     const runner = mock<SkillRunner>();
-    runner.approveDeploy.mockResolvedValue({
-      name: "echo",
-      riskTier: "approve",
-      status: "live",
-      gitSha: "1111111111111111111111111111111111111111",
-    });
+    runner.approveDeploy.mockResolvedValue(
+      liveRegisterResult({
+        riskTier: "approve",
+        gitSha: "1111111111111111111111111111111111111111",
+      }),
+    );
     const store = mock<SkillStore>();
     store.getDeployById.mockResolvedValue(makeDeployRow());
     const transportStore = makeTransportStore();

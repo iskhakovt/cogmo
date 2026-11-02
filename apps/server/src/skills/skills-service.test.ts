@@ -1,30 +1,10 @@
-import type { Inngest } from "inngest";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
+import { mock } from "vitest-mock-extended";
+import type { EventPublisher } from "../inngest/durable.js";
+import { liveRegisterResult, pendingRegisterResult } from "../test/skills-fixtures.js";
 import type { RegisterResult, SkillRunner } from "./runner.js";
 import { createSkillsService } from "./skills-service.js";
 
-function makeRunner(overrides: Partial<SkillRunner> = {}): SkillRunner {
-  return {
-    register: vi.fn(),
-    approveDeploy: vi.fn(),
-    denyDeploy: vi.fn(),
-    rollback: vi.fn(),
-    deregister: vi.fn(),
-    enable: vi.fn(),
-    list: vi.fn().mockResolvedValue([]),
-    listAll: vi.fn().mockResolvedValue([]),
-    listToolDefs: vi.fn().mockResolvedValue([]),
-    invoke: vi.fn(),
-    ...overrides,
-  };
-}
-
-function makeInngest(): { inngest: Inngest; send: ReturnType<typeof vi.fn> } {
-  const send = vi.fn().mockResolvedValue(undefined);
-  return { inngest: { send } as unknown as Inngest, send };
-}
-
-const PENDING_ID = "019d0000-0000-7000-8000-000000000001";
 const CONV_ID = "019d0000-0000-7000-8000-000000000777";
 /** The turn's user and profile. */
 const ORIGIN = {
@@ -32,106 +12,75 @@ const ORIGIN = {
   profileId: "019d0000-0000-7000-8000-0000000000b7",
 };
 
-describe("createSkillsService.register", () => {
-  it("emits skills/deploy/approval-requested when the runner returns pending_approval", async () => {
-    const runnerResult: RegisterResult = {
-      name: "notifier",
-      riskTier: "approve",
-      status: "pending_approval",
-      gitSha: "abcdef0123456789",
-      pendingId: PENDING_ID,
-      schedule: "0 9 * * *",
-    };
-    const runner = makeRunner({ register: vi.fn().mockResolvedValue(runnerResult) });
-    const { inngest, send } = makeInngest();
+function serviceFor(result: RegisterResult) {
+  const runner = mock<SkillRunner>();
+  runner.register.mockResolvedValue(result);
+  const inngest = mock<EventPublisher>();
+  const service = createSkillsService({
+    runner,
+    inngest,
+    conversationId: CONV_ID,
+    origin: ORIGIN,
+  });
+  return { service, runner, send: inngest.send };
+}
 
-    const service = createSkillsService({
-      runner,
-      inngest,
-      conversationId: CONV_ID,
-      origin: ORIGIN,
-    });
-    const result = await service.register({ branch: "skill/notifier" });
+describe("createSkillsService.register", () => {
+  it("announces a live deploy as skills/deploy/outcome in the turn's conversation", async () => {
+    const runnerResult = liveRegisterResult();
+    const { service, send } = serviceFor(runnerResult);
+
+    const result = await service.register({ branch: "skill/echo" });
 
     expect(result).toEqual(runnerResult);
     expect(send).toHaveBeenCalledTimes(1);
     expect(send).toHaveBeenCalledWith({
-      name: "skills/deploy/approval-requested",
-      data: {
-        pendingId: PENDING_ID,
-        skillName: "notifier",
-        gitSha: "abcdef0123456789",
+      name: "skills/deploy/outcome",
+      data: expect.objectContaining({
+        outcome: "live",
         conversationId: CONV_ID,
-        schedule: "0 9 * * *",
-      },
+        deployId: runnerResult.deployId,
+        skillName: "echo",
+      }),
     });
   });
 
-  it("does NOT emit on a live result (notify-tier auto-merge)", async () => {
-    const runnerResult: RegisterResult = {
-      name: "echo",
-      riskTier: "notify",
-      status: "live",
-      gitSha: "abcdef0",
-    };
-    const runner = makeRunner({ register: vi.fn().mockResolvedValue(runnerResult) });
-    const { inngest, send } = makeInngest();
+  it("announces a pending deploy", async () => {
+    const { service, send } = serviceFor(pendingRegisterResult());
 
-    const service = createSkillsService({
-      runner,
-      inngest,
-      conversationId: CONV_ID,
-      origin: ORIGIN,
+    await service.register({ branch: "skill/notifier" });
+
+    expect(send).toHaveBeenCalledWith({
+      name: "skills/deploy/outcome",
+      data: expect.objectContaining({ outcome: "pending_approval", conversationId: CONV_ID }),
     });
-    await service.register({ branch: "skill/echo" });
-
-    expect(send).not.toHaveBeenCalled();
   });
 
-  it("does NOT emit on a rejected result", async () => {
-    const runnerResult: RegisterResult = {
+  it("announces a rejection", async () => {
+    const { service, send } = serviceFor({
       name: "",
       riskTier: "notify",
       status: "rejected",
       gitSha: "",
       errors: ["branch_not_found"],
-    };
-    const runner = makeRunner({ register: vi.fn().mockResolvedValue(runnerResult) });
-    const { inngest, send } = makeInngest();
-
-    const service = createSkillsService({
-      runner,
-      inngest,
-      conversationId: CONV_ID,
-      origin: ORIGIN,
     });
+
     await service.register({ branch: "skill/missing" });
 
-    expect(send).not.toHaveBeenCalled();
+    expect(send).toHaveBeenCalledWith({
+      name: "skills/deploy/outcome",
+      data: expect.objectContaining({ outcome: "rejected", errors: ["branch_not_found"] }),
+    });
   });
 
-  it("returns the runner result even if event emit fails (fire-and-forget)", async () => {
-    const runnerResult: RegisterResult = {
-      name: "notifier",
-      riskTier: "approve",
-      status: "pending_approval",
-      gitSha: "abc",
-      pendingId: PENDING_ID,
-    };
-    const runner = makeRunner({ register: vi.fn().mockResolvedValue(runnerResult) });
-    const send = vi.fn().mockRejectedValue(new Error("inngest unreachable"));
-    const inngest = { send } as unknown as Inngest;
+  it("returns the runner result when the emit fails", async () => {
+    const runnerResult = pendingRegisterResult();
+    const { service, send } = serviceFor(runnerResult);
+    send.mockRejectedValue(new Error("inngest unreachable"));
 
-    const service = createSkillsService({
-      runner,
-      inngest,
-      conversationId: CONV_ID,
-      origin: ORIGIN,
-    });
     const result = await service.register({ branch: "skill/notifier" });
 
-    // Register itself succeeds — the deploy is pending in the DB regardless
-    // of whether the keyboard was posted. Operator can approve via CLI.
+    // The deploy is committed whether or not the message went out.
     expect(result).toEqual(runnerResult);
     expect(send).toHaveBeenCalledTimes(1);
   });
@@ -139,15 +88,7 @@ describe("createSkillsService.register", () => {
 
 describe("createSkillsService origin", () => {
   it("registers with the turn's conversation as the origin", async () => {
-    const live: RegisterResult = { name: "echo", riskTier: "notify", status: "live", gitSha: "a" };
-    const runner = makeRunner({ register: vi.fn().mockResolvedValue(live) });
-    const { inngest } = makeInngest();
-    const service = createSkillsService({
-      runner,
-      inngest,
-      conversationId: CONV_ID,
-      origin: ORIGIN,
-    });
+    const { service, runner } = serviceFor(liveRegisterResult());
 
     await service.register({ branch: "skill/echo" });
 

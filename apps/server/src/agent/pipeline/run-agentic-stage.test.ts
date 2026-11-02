@@ -27,6 +27,7 @@ import {
   mockMemoryProvider,
   mockTransportStore,
 } from "../../test/factories.js";
+import { liveRegisterResult } from "../../test/skills-fixtures.js";
 import type { StreamDeliveryError } from "../../transport/delivery-router.js";
 import { canonicalKeyOrder } from "../../util/canonical-key-order.js";
 import { createAttachmentReader } from "../attachments/attachment-reader.js";
@@ -628,12 +629,7 @@ describe("runAgenticStage", () => {
         },
       ]);
       skillRunner.invoke.mockResolvedValue(ok({ runId: "run-1", status: "success", output: {} }));
-      skillRunner.register.mockResolvedValue({
-        name: "echo",
-        riskTier: "notify",
-        status: "live",
-        gitSha: "abc1234",
-      });
+      skillRunner.register.mockResolvedValue(liveRegisterResult());
       h.deps.skillRunner = skillRunner;
       const stage: Stage = {
         id: "draft",

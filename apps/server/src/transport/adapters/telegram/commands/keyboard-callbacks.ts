@@ -1,6 +1,7 @@
-/** Taps on the plan, pipeline-gate and skills-approval keyboards, as what the adapter writes back. */
+/** Taps on the plan, pipeline-gate and skill deploy keyboards, as what the adapter writes back. */
 
 import { match } from "ts-pattern";
+import type { ParsedSkillsDeployCallback } from "../../../../skills/skills-keyboard.js";
 import type { Transport } from "../../../transport.js";
 import { errorMessage } from "./reply.js";
 
@@ -114,45 +115,58 @@ export async function handlePipelineGateCallback(
       };
 }
 
-export interface SkillsApprovalCallbackOutcome {
+export interface SkillsDeployCallbackOutcome {
   editText: string;
   toast: string;
 }
 
 /**
- * Skills-deploy approve-tier callback handler — translates a parsed Approve /
- * Deny tap into a `transport.skills.{approveDeploy,denyDeploy}` call and an
- * outcome the adapter renders. The Transport resolves the tapper's identity;
- * an approval also takes the chat the tap came from (`platformAddress`),
- * whose conversation is its origin.
+ * Skill deploy-keyboard callback handler — translates a parsed Approve /
+ * Deny tap on a pending deploy, or a Disable tap on a live skill, into a
+ * `transport.skills` call and an outcome the adapter renders. The Transport
+ * resolves the tapper's identity; an approval also takes the chat the tap
+ * came from (`platformAddress`), whose conversation is its origin.
  */
-export async function handleSkillsApprovalCallback(
+export async function handleSkillsDeployCallback(
   transport: Transport,
-  parsed: { pendingId: string; action: "approve" | "deny" },
+  parsed: ParsedSkillsDeployCallback,
   tapperPlatformHandle: string,
   platformAddress: string,
-): Promise<SkillsApprovalCallbackOutcome> {
-  if (parsed.action === "approve") {
-    const res = await transport.skills.approveDeploy(
-      parsed.pendingId,
-      tapperPlatformHandle,
-      platformAddress,
-    );
-    if (res.isErr()) {
-      return { editText: errorMessage(res.error), toast: errorMessage(res.error) };
-    }
-    return {
-      editText: `✅ Approved: '${res.value.skillName}' is now live (${res.value.gitSha.slice(0, 7)}).`,
-      toast: "Approved",
-    };
-  }
-  // deny
-  const res = await transport.skills.denyDeploy(parsed.pendingId, tapperPlatformHandle);
-  if (res.isErr()) {
-    return { editText: errorMessage(res.error), toast: errorMessage(res.error) };
-  }
-  return {
-    editText: "❌ Deploy denied — no main advance. Re-register a different version to retry.",
-    toast: "Denied",
-  };
+): Promise<SkillsDeployCallbackOutcome> {
+  return match(parsed)
+    .with({ action: "approve" }, async ({ pendingId }) => {
+      const res = await transport.skills.approveDeploy(
+        pendingId,
+        tapperPlatformHandle,
+        platformAddress,
+      );
+      if (res.isErr()) {
+        return { editText: errorMessage(res.error), toast: errorMessage(res.error) };
+      }
+      return {
+        editText: `✅ Approved: '${res.value.skillName}' is now live (${res.value.gitSha.slice(0, 7)}).`,
+        toast: "Approved",
+      };
+    })
+    .with({ action: "deny" }, async ({ pendingId }) => {
+      const res = await transport.skills.denyDeploy(pendingId, tapperPlatformHandle);
+      if (res.isErr()) {
+        return { editText: errorMessage(res.error), toast: errorMessage(res.error) };
+      }
+      return {
+        editText: "❌ Deploy denied — no main advance. Re-register a different version to retry.",
+        toast: "Denied",
+      };
+    })
+    .with({ action: "disable" }, async ({ skillId }) => {
+      const res = await transport.skills.disableById(skillId, tapperPlatformHandle);
+      if (res.isErr()) {
+        return { editText: errorMessage(res.error), toast: errorMessage(res.error) };
+      }
+      return {
+        editText: `🚫 Skill ${res.value.name} disabled. /enable ${res.value.name} re-enables it.`,
+        toast: "Disabled",
+      };
+    })
+    .exhaustive();
 }
