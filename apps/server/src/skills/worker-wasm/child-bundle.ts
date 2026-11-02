@@ -1,7 +1,6 @@
 import { lstat } from "node:fs/promises";
 import { join } from "node:path";
 import { build } from "esbuild";
-import { err, ok, type Result } from "neverthrow";
 
 /**
  * Bundle the tier-1 child: `child-entry.ts` as `tier1-child.mjs` and
@@ -37,21 +36,23 @@ export async function buildTier1Child(opts: { sourceDir: string; outDir: string 
 }
 
 /**
- * Whether `dir`, a bundle directory another process published under the
+ * Throw unless `dir`, a bundle directory another process published under the
  * shared temporary directory, is one this user can trust: a real directory,
  * not a link, owned by this uid and closed to everyone else (`0o700`, as
- * `mkdtemp` creates it). Anything else may hold a planted child.
+ * `mkdtemp` creates it). Anything else may hold a planted child. A fatal
+ * setup check: it runs only when the server runs from source.
  */
-export async function checkOwnPrivateDir(dir: string): Promise<Result<void, string>> {
+export async function assertOwnPrivateDir(dir: string): Promise<void> {
+  const refuse = (reason: string) =>
+    new Error(`refusing the tier-1 child bundle at ${dir}: ${reason}`);
   const stats = await lstat(dir);
   if (stats.isSymbolicLink() || !stats.isDirectory()) {
-    return err(`${dir} is not a directory of its own`);
+    throw refuse(`${dir} is not a directory of its own`);
   }
   if (stats.uid !== process.getuid?.()) {
-    return err(`${dir} is owned by uid ${stats.uid}, not this process's`);
+    throw refuse(`${dir} is owned by uid ${stats.uid}, not this process's`);
   }
   if ((stats.mode & 0o777) !== 0o700) {
-    return err(`${dir} has mode ${(stats.mode & 0o777).toString(8)}, not 700`);
+    throw refuse(`${dir} has mode ${(stats.mode & 0o777).toString(8)}, not 700`);
   }
-  return ok(undefined);
 }

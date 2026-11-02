@@ -16,6 +16,7 @@ const PyodideLockfileSchema = z.object({
       name: z.string(),
       version: z.string(),
       file_name: z.string(),
+      sha256: z.string().regex(/^[0-9a-f]{64}$/, "sha256 must be a lowercase hex digest"),
       depends: z.array(z.string()),
     }),
   ),
@@ -32,6 +33,8 @@ export interface BundledPackage {
   native: boolean;
   /** The file Pyodide loads it from, the name it takes in the package cache. */
   fileName: string;
+  /** The hex sha256 the lockfile pins for `fileName`'s bytes. */
+  sha256: string;
   /** The bundled packages it needs loaded first, by normalised name. */
   depends: readonly string[];
 }
@@ -93,6 +96,7 @@ export async function loadBundledPackages(
         version: pkg.version,
         native: /_wasm32\.whl$/.test(pkg.file_name),
         fileName: pkg.file_name,
+        sha256: pkg.sha256,
         depends: pkg.depends.map(normalizePackageName),
       },
     ]),

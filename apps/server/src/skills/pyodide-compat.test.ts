@@ -20,6 +20,7 @@ const fakeLockfile = {
       name: "httpx",
       version: "0.28.1",
       file_name: "httpx-0.28.1-py3-none-any.whl",
+      sha256: "1".repeat(64),
       depends: ["Python_Dateutil"],
     },
     // PEP-503-normalised: stored under `python-dateutil`, queried via `Python_Dateutil` etc.
@@ -27,6 +28,7 @@ const fakeLockfile = {
       name: "python-dateutil",
       version: "2.9.0",
       file_name: "python_dateutil-2.9.0-py2.py3-none-any.whl",
+      sha256: "2".repeat(64),
       depends: [],
     },
     // Native: an Emscripten-built wheel, as pyodide-lock.json names it.
@@ -34,12 +36,14 @@ const fakeLockfile = {
       name: "pydantic_core",
       version: "2.41.5",
       file_name: "pydantic_core-2.41.5-cp314-cp314-pyemscripten_2026_0_wasm32.whl",
+      sha256: "3".repeat(64),
       depends: [],
     },
     regex: {
       name: "regex",
       version: "2026.3.32",
       file_name: "regex-2026.3.32-cp314-cp314-pyemscripten_2026_0_wasm32.whl",
+      sha256: "4".repeat(64),
       depends: [],
     },
   },
@@ -236,6 +240,7 @@ describe("loadBundledPackages", () => {
       version: "0.28.1",
       native: false,
       fileName: "httpx-0.28.1-py3-none-any.whl",
+      sha256: "1".repeat(64),
       depends: ["python-dateutil"],
     });
     expect(bundled.get("python-dateutil")).toMatchObject({ version: "2.9.0", native: false });
@@ -243,6 +248,7 @@ describe("loadBundledPackages", () => {
       version: "2.41.5",
       native: true,
       fileName: "pydantic_core-2.41.5-cp314-cp314-pyemscripten_2026_0_wasm32.whl",
+      sha256: "3".repeat(64),
       depends: [],
     });
   });
@@ -261,6 +267,18 @@ describe("loadBundledPackages", () => {
     expect(result._unsafeUnwrapErr()).toMatchObject({
       kind: "bundled_unreadable",
       message: expect.stringContaining("not a Pyodide lockfile"),
+    });
+  });
+
+  it("errs bundled_unreadable for an entry whose sha256 is not a hex digest", async () => {
+    const { httpx } = fakeLockfile.packages;
+    await writeFile(
+      lockfilePath,
+      JSON.stringify({ packages: { httpx: { ...httpx, sha256: "not-a-digest" } } }),
+    );
+    expect((await loadBundledPackages(lockfilePath))._unsafeUnwrapErr()).toMatchObject({
+      kind: "bundled_unreadable",
+      message: expect.stringContaining("sha256"),
     });
   });
 

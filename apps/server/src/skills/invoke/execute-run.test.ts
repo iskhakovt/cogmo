@@ -98,6 +98,23 @@ describe("executeRun", () => {
     );
   });
 
+  it("fails a tier-1 run whose built-in fails Pyodide's pinned sha256, naming the file", async () => {
+    const outcome = await execute(async () =>
+      err({
+        kind: "builtin_integrity",
+        fileName: "micropip-0.11.1-py3-none-any.whl",
+        message: "the prefetched file hashes to sha256:aa",
+      }),
+    );
+
+    expect(outcome).toEqual({
+      kind: "error",
+      error:
+        "tier1_packages_unavailable: builtin_integrity: micropip-0.11.1-py3-none-any.whl: the prefetched file hashes to sha256:aa",
+    });
+    expect(dispatchToRuntime).not.toHaveBeenCalled();
+  });
+
   it("hands a tier-1 run the packages resolved for its lockfile", async () => {
     vi.mocked(dispatchToRuntime).mockResolvedValue({ ok: true, output: { echo: 1 } });
     const packages = { builtins: ["pydantic"], wheelDir: "/wheels/abc" };

@@ -1,4 +1,5 @@
 import { Worker } from "node:worker_threads";
+import { match, P } from "ts-pattern";
 import { INTERRUPT_MESSAGE } from "./interrupt-message.js";
 
 /**
@@ -97,29 +98,27 @@ function relay(worker: Worker, message: unknown): void {
   } catch (e) {
     reason = e instanceof Error ? e.message : String(e);
   }
-  const frame = typeof message === "object" && message !== null ? message : {};
-  const type = "type" in frame ? frame.type : undefined;
-  const id = "id" in frame && typeof frame.id === "string" ? frame.id : undefined;
-  const taskId = "taskId" in frame && typeof frame.taskId === "string" ? frame.taskId : undefined;
-  if (type === "task_result" && id !== undefined) {
-    send?.({
-      type: "task_result",
-      id,
-      ok: false,
-      error: `task output is not JSON-serializable: ${reason}`,
-    });
-  } else if (type === "ctx_call" && id !== undefined && taskId !== undefined) {
-    worker.postMessage({
-      type: "ctx_result",
-      taskId,
-      id,
-      ok: false,
-      errorKind: "invalid_args",
-      message: `ctx call arguments are not JSON-serializable: ${reason}`,
-    });
-  } else {
-    fail(`could not relay a worker frame: ${reason}`);
-  }
+  // An untyped frame: the worker's protocol is not parsed on this thread.
+  match(message)
+    .with({ type: "task_result", id: P.string }, ({ id }) =>
+      send?.({
+        type: "task_result",
+        id,
+        ok: false,
+        error: `task output is not JSON-serializable: ${reason}`,
+      }),
+    )
+    .with({ type: "ctx_call", id: P.string, taskId: P.string }, ({ id, taskId }) =>
+      worker.postMessage({
+        type: "ctx_result",
+        taskId,
+        id,
+        ok: false,
+        errorKind: "invalid_args",
+        message: `ctx call arguments are not JSON-serializable: ${reason}`,
+      }),
+    )
+    .otherwise(() => fail(`could not relay a worker frame: ${reason}`));
 }
 
 /**

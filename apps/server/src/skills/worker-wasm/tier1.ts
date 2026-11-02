@@ -44,9 +44,10 @@ export type Tier1ProbeError =
  */
 export interface Tier1Prefetcher {
   /**
-   * Download `names` and their Pyodide dependencies into `packageCacheDir`
-   * with integrity checks, through a child that has the network and no
-   * permission flags, so later children find every file locally.
+   * Download `names` and their Pyodide dependencies into `packageCacheDir`,
+   * through a child that has the network and no permission flags, so later
+   * children find every file locally. Pyodide checks no integrity under
+   * Node; `ensureTier1Packages` hashes what it wrote.
    */
   prefetchBuiltins(
     names: readonly string[],

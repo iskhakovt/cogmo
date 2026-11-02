@@ -15,6 +15,17 @@ import type { BootstrapOptions, CoreDeps, SandboxDeps, SkillRunnerHandle } from 
 
 const log = logger.child({ component: "boot.skills" });
 
+/** What the process booting the runner owns besides it. */
+interface SkillRunnerOwnership {
+  /**
+   * True for `cogmo serve` only: the reap kills the tier-1 children a dead
+   * Cogmo process left behind, and a CLI process must not touch those of the
+   * serve it runs beside (design/skills.md → Tier-1 boundary, layer 1 →
+   * Process-group records).
+   */
+  reapTier1Children: boolean;
+}
+
 /**
  * Used by both `cogmo serve` (where the runner is shared between
  * handle-message's `register_skill` tool and the channel adapters' `/skill`
@@ -22,20 +33,15 @@ const log = logger.child({ component: "boot.skills" });
  * Tier-2 (sysbox/Daytona) skill execution requires a non-null `sandbox`;
  * CLIs pass `NO_SANDBOX` and accept that tier-2 invocations throw at call
  * time.
- *
- * `reapTier1Children` is true for `cogmo serve` only: the reap kills the
- * tier-1 children a dead Cogmo process left behind, and a CLI process must
- * not touch those of the serve it runs beside (design/skills.md → Tier-1
- * boundary, layer 1 → Process-group records).
  */
 export async function bootstrapSkillRunner(
   core: CoreDeps,
   sandbox: SandboxDeps,
-  reapTier1Children: boolean,
+  ownership: SkillRunnerOwnership,
   opts: BootstrapOptions = {},
 ): Promise<SkillRunnerHandle> {
   const tier1ChildrenDir = `${env.COGMO_SKILLS_PATH}/.tier1-children`;
-  if (reapTier1Children) await reapTier1ChildGroups(tier1ChildrenDir);
+  if (ownership.reapTier1Children) await reapTier1ChildGroups(tier1ChildrenDir);
   const skillRunner = await SkillRunnerImpl.create({
     store: core.skillStore,
     runInTx: core.runInTx,

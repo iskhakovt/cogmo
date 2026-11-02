@@ -127,7 +127,9 @@ async function loadSkillsDeps(): Promise<SkillsCliDeps> {
   // skills and every admin subcommand run.
   const core = await bootstrapCore();
   // A CLI process leaves tier-1 children alone: they may be the serve's.
-  const { skillRunner } = await bootstrapSkillRunner(core, NO_SANDBOX, false);
+  const { skillRunner } = await bootstrapSkillRunner(core, NO_SANDBOX, {
+    reapTier1Children: false,
+  });
   return {
     runner: skillRunner,
     ownerRunAs: () => resolveSkillRunAs(core, { userId: core.user.id, profileId: core.profile.id }),

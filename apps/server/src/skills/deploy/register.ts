@@ -229,7 +229,8 @@ async function prepareRegister(
     // Fetch and publish the lockfile's wheels now, so the first run pays no
     // download. A wheel that fails its hash, or has no pure build, is a
     // verdict on the lockfile; a network, cache or Pyodide-lockfile failure is
-    // not, and the run fetches again.
+    // not, nor is a built-in whose cached or downloaded file fails Pyodide's
+    // pinned sha256, and the run fetches again.
     const packages = await deps.tier1.resolvePackages(lockfile, signal);
     if (packages.isErr()) {
       const refused = match(packages.error)
@@ -239,6 +240,7 @@ async function prepareRegister(
           { kind: "prefetch_failed" },
           { kind: "publish_failed" },
           { kind: "bundled_unreadable" },
+          { kind: "builtin_integrity" },
           () => false,
         )
         .exhaustive();

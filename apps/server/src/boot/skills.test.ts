@@ -56,7 +56,7 @@ describe("bootstrapSkillRunner", () => {
   });
 
   it("leaves tier-1 children and their records alone for a CLI process", async () => {
-    await bootstrapSkillRunner(mock<CoreDeps>(), NO_SANDBOX, false);
+    await bootstrapSkillRunner(mock<CoreDeps>(), NO_SANDBOX, { reapTier1Children: false });
 
     expect(orphan.exitCode).toBeNull();
     expect(orphan.signalCode).toBeNull();
@@ -66,7 +66,7 @@ describe("bootstrapSkillRunner", () => {
   it("kills a dead owner's tier-1 children before the serve's runner exists", async () => {
     const exited = once(orphan, "exit");
 
-    await bootstrapSkillRunner(mock<CoreDeps>(), NO_SANDBOX, true);
+    await bootstrapSkillRunner(mock<CoreDeps>(), NO_SANDBOX, { reapTier1Children: true });
 
     expect(await exited).toEqual([null, "SIGKILL"]);
     expect(await readdir(childrenDir)).toEqual([]);

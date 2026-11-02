@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
+import { createReadStream } from "node:fs";
 import { chmod, mkdir, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { err, ok, type Result } from "neverthrow";
+import { err, ok, Result } from "neverthrow";
 import * as R from "remeda";
 import { match } from "ts-pattern";
 import { z } from "zod";
@@ -25,6 +26,9 @@ const TMP_DIR_RE = /^[0-9a-f]{64}\.tmp\./;
 
 /** A `tmp` directory this old belongs to a publish that died. */
 const STALE_TMP_MS = 10 * 60 * 1000;
+
+/** What the sweep meets when a concurrent publisher or sweep moves a candidate first. */
+const CONCURRENT_MOVE_CODES: ReadonlySet<string> = new Set(["ENOENT", "ENOTEMPTY", "EPERM"]);
 
 /** Wall-clock cap on each PyPI request, the metadata lookup and the download alike. */
 const REQUEST_TIMEOUT_MS = 60_000;
@@ -51,7 +55,10 @@ const PypiReleaseFilesSchema = z.object({
  * the lockfile (PyPI does not serve a pure-Python wheel with a pinned hash),
  * while `network_failed`, `prefetch_failed`, `publish_failed` and
  * `bundled_unreadable` (Pyodide's own lockfile could not be read) may clear
- * on a retry.
+ * on a retry. `builtin_integrity` names a package-cache file that does not
+ * hash to the sha256 Pyodide's lockfile pins after a prefetch, or that cannot
+ * be checked: a verdict on this deployment's cache or its download, not on the
+ * skill's lockfile. The mismatching file is deleted, so a retry fetches it again.
  */
 export type Tier1PackagesError =
   | { kind: "wheel_unavailable"; spec: string; message: string }
@@ -59,7 +66,13 @@ export type Tier1PackagesError =
   | { kind: "network_failed"; spec: string; message: string }
   | { kind: "prefetch_failed"; message: string }
   | { kind: "publish_failed"; message: string }
-  | { kind: "bundled_unreadable"; message: string };
+  | { kind: "bundled_unreadable"; message: string }
+  | { kind: "builtin_integrity"; fileName: string; message: string };
+
+/** A built-in's cache file that cannot be loaded as is: missing, or deleted for bytes other than the lockfile pins. */
+type UnverifiedBuiltin =
+  | { kind: "absent"; pkg: BundledPackage }
+  | { kind: "mismatch"; pkg: BundledPackage; actual: string };
 
 export interface EnsureTier1PackagesDeps {
   prefetcher: Tier1Prefetcher;
@@ -85,8 +98,12 @@ export interface EnsureTier1PackagesArgs {
  * published under `<wheelsRoot>/<lockfile hash>/`.
  *
  * The cache must hold the builtins, micropip (which installs the wheels) and
- * every bundled package they depend on. A prefetch child fills it only when
- * one of those files is missing, so a warm cache costs no Pyodide boot.
+ * every bundled package they depend on, each file hashing to the sha256
+ * Pyodide's lockfile pins. Pyodide's Node loader checks no integrity, of a
+ * cached file or of its CDN download, so this check is the one a task child's
+ * packages pass. A file that fails it is deleted, and a prefetch child fills
+ * the cache only when one of those files is missing or deleted, so a warm
+ * cache costs no Pyodide boot; what the prefetch wrote is checked again.
  *
  * The directory is published as the venvs are: written under
  * `<hash>.tmp.<id>`, marked `.ready`, renamed into place, then made
@@ -106,16 +123,20 @@ export async function ensureTier1Packages(
   if (builtins.length === 0 && wheelEntries.length === 0) {
     return ok({ builtins, wheelDir: null });
   }
-  const cached = await cacheHolds(
-    args.packageCacheDir,
-    bundledClosure(deps.bundled, [...builtins, "micropip"]),
-  );
-  if (!cached) {
+  const closure = bundledClosure(deps.bundled, [...builtins, "micropip"]);
+  const unverified = await evictUnverifiedBuiltins(args.packageCacheDir, closure);
+  if (unverified.isErr()) return err(unverified.error);
+  if (unverified.value.length > 0) {
     const prefetched = await deps.prefetcher.prefetchBuiltins(builtins, {
       packageCacheDir: args.packageCacheDir,
       ...(args.signal && { signal: args.signal }),
     });
     if (prefetched.isErr()) return err({ kind: "prefetch_failed", message: prefetched.error });
+    const rechecked = await evictUnverifiedBuiltins(args.packageCacheDir, closure);
+    if (rechecked.isErr()) return err(rechecked.error);
+    if (rechecked.value.length > 0) {
+      return err(unverifiedAfterPrefetch(args.packageCacheDir, rechecked.value));
+    }
   }
   if (wheelEntries.length === 0) return ok({ builtins, wheelDir: null });
   const published = await publishWheelDir(deps.fetchImpl, args, wheelEntries);
@@ -137,6 +158,7 @@ export function describeTier1PackagesError(error: Tier1PackagesError): string {
       { kind: "bundled_unreadable" },
       (e) => `${e.kind}: ${e.message}`,
     )
+    .with({ kind: "builtin_integrity" }, (e) => `${e.kind}: ${e.fileName}: ${e.message}`)
     .exhaustive();
 }
 
@@ -163,20 +185,78 @@ function bundledClosure(
   return closure;
 }
 
-/** Whether `packageCacheDir` holds every package's file. */
-async function cacheHolds(
+/**
+ * Hash each package's file in `packageCacheDir` against the sha256 Pyodide's
+ * lockfile pins and delete every file that does not match: a truncated write
+ * from a prefetch child killed mid-download, or tampered bytes. Resolves to
+ * the packages whose file is absent or was deleted; errs `builtin_integrity`
+ * when a file can be neither hashed nor deleted.
+ */
+async function evictUnverifiedBuiltins(
   packageCacheDir: string,
   packages: readonly BundledPackage[],
-): Promise<boolean> {
-  const present = await Promise.all(
-    packages.map((pkg) =>
-      stat(join(packageCacheDir, pkg.fileName)).then(
-        (s) => s.isFile(),
-        () => false,
-      ),
-    ),
-  );
-  return present.every((p) => p);
+): Promise<Result<readonly UnverifiedBuiltin[], Tier1PackagesError>> {
+  const checked = await Promise.all(packages.map((pkg) => evictIfUnverified(packageCacheDir, pkg)));
+  return Result.combine(checked).map((states) => states.filter(R.isNonNullish));
+}
+
+/** Null when `pkg`'s cached file hashes to its pinned sha256. */
+async function evictIfUnverified(
+  packageCacheDir: string,
+  pkg: BundledPackage,
+): Promise<Result<UnverifiedBuiltin | null, Tier1PackagesError>> {
+  const path = join(packageCacheDir, pkg.fileName);
+  try {
+    const actual = await sha256OfFile(path);
+    if (actual === null) return ok({ kind: "absent", pkg });
+    if (actual === pkg.sha256) return ok(null);
+    await rm(path, { force: true, recursive: true });
+    return ok({ kind: "mismatch", pkg, actual });
+  } catch (e) {
+    return err({
+      kind: "builtin_integrity",
+      fileName: pkg.fileName,
+      message: `cannot check ${path} against its sha256: ${describeError(e)}`,
+    });
+  }
+}
+
+/** The hex sha256 of the file at `path`; null when there is none. */
+async function sha256OfFile(path: string): Promise<string | null> {
+  const hash = createHash("sha256");
+  try {
+    for await (const chunk of createReadStream(path)) hash.update(chunk);
+  } catch (e) {
+    if (errnoCode(e) === "ENOENT") return null;
+    throw e;
+  }
+  return hash.digest("hex");
+}
+
+/**
+ * The error for the files still failing their check after a prefetch: the
+ * first mismatching one, else every absent one.
+ */
+function unverifiedAfterPrefetch(
+  packageCacheDir: string,
+  unverified: readonly UnverifiedBuiltin[],
+): Tier1PackagesError {
+  const mismatch = unverified.find((u) => u.kind === "mismatch");
+  if (mismatch !== undefined) {
+    return {
+      kind: "builtin_integrity",
+      fileName: mismatch.pkg.fileName,
+      message: `the prefetched file hashes to sha256:${mismatch.actual}; Pyodide's lockfile pins sha256:${mismatch.pkg.sha256}`,
+    };
+  }
+  return {
+    kind: "prefetch_failed",
+    message: `the prefetch left ${unverified.map((u) => u.pkg.fileName).join(", ")} absent from ${packageCacheDir}`,
+  };
+}
+
+function errnoCode(e: unknown): string | undefined {
+  return e instanceof Error && "code" in e && typeof e.code === "string" ? e.code : undefined;
 }
 
 /** Files `0o444`, then the directory `0o555`: what the permission grant lets a child read and nothing writes. */
@@ -206,7 +286,13 @@ async function publishWheelDir(
   const tmp = join(args.wheelsRoot, `${hash}.tmp.${randomUUID()}`);
   try {
     await mkdir(args.wheelsRoot, { recursive: true });
-    await removeStaleTmpDirs(args.wheelsRoot, Date.now());
+    // The sweep is housekeeping: what it fails to remove waits for the next one.
+    await removeStaleTmpDirs(args.wheelsRoot, Date.now()).catch((e: unknown) => {
+      log.warn(
+        { wheelsRoot: args.wheelsRoot, err: describeError(e) },
+        "wheel-cache: stale tmp sweep failed",
+      );
+    });
     await mkdir(tmp);
     for (const entry of entries) {
       const wheel = await fetchVerifiedWheel(fetchImpl, entry, args.signal);
@@ -334,15 +420,24 @@ async function fetchVerifiedWheel(
   return ok({ filename: file.filename, bytes });
 }
 
-/** Remove `<hash>.tmp.<id>` directories older than `STALE_TMP_MS`. */
+/**
+ * Remove `<hash>.tmp.<id>` directories older than `STALE_TMP_MS`. A candidate
+ * a concurrent publisher renames into place, or a concurrent sweep removes,
+ * between the listing and its removal is skipped.
+ */
 async function removeStaleTmpDirs(root: string, now: number): Promise<void> {
   const dirents = await readdir(root, { withFileTypes: true });
   const candidates = dirents.filter((d) => d.isDirectory() && TMP_DIR_RE.test(d.name));
   for (const d of candidates) {
     const path = join(root, d.name);
-    const { mtimeMs } = await stat(path);
-    if (now - mtimeMs <= STALE_TMP_MS) continue;
-    await removeSealedDir(path);
+    try {
+      const { mtimeMs } = await stat(path);
+      if (now - mtimeMs > STALE_TMP_MS) await removeSealedDir(path);
+    } catch (e) {
+      const code = errnoCode(e);
+      if (code === undefined || !CONCURRENT_MOVE_CODES.has(code)) throw e;
+      log.debug({ path, code }, "wheel-cache: tmp dir moved during the sweep");
+    }
   }
 }
 
@@ -378,7 +473,7 @@ export async function reapTier1WheelDirs(
   const graceMs = args.graceDays * 24 * 60 * 60 * 1000;
   try {
     const dirents = await readdir(args.wheelsRoot, { withFileTypes: true }).catch((e: unknown) => {
-      if (e instanceof Error && "code" in e && e.code === "ENOENT") return null;
+      if (errnoCode(e) === "ENOENT") return null;
       throw e;
     });
     if (dirents === null) return ok({ reapedHashes: [] });

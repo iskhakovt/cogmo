@@ -5,6 +5,7 @@ import {
   mkdir,
   mkdtemp,
   readdir,
+  rename,
   rm,
   stat,
   utimes,
@@ -20,6 +21,23 @@ import type { BundledPackage } from "../pyodide-compat.js";
 import type { Tier1Prefetcher } from "./tier1.js";
 import { ensureTier1Packages, reapTier1WheelDirs } from "./wheel-cache.js";
 
+/** Runs before each `stat` the module under test makes, to stage a concurrent writer. */
+const statHook = vi.hoisted(() => {
+  const hook: { before: ((path: string) => Promise<void>) | null } = { before: null };
+  return hook;
+});
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    stat: async (...args: Parameters<typeof actual.stat>) => {
+      await statHook.before?.(args[0].toString());
+      return actual.stat(...args);
+    },
+  };
+});
+
 const IDNA_BYTES = Buffer.from("idna wheel bytes");
 const SNIFFIO_BYTES = Buffer.from("sniffio wheel bytes");
 
@@ -31,8 +49,25 @@ const IDNA_SHA = sha256(IDNA_BYTES);
 const SNIFFIO_SHA = sha256(SNIFFIO_BYTES);
 const OTHER_SHA = "f".repeat(64);
 
+/** The bytes a bundled fixture's file holds, which its lockfile sha256 pins. */
+function bundledBytes(fileName: string): Buffer {
+  return Buffer.from(`${fileName} bytes`);
+}
+
 function bundled(version: string, fileName: string, depends: readonly string[]): BundledPackage {
-  return { version, native: fileName.includes("_wasm32"), fileName, depends };
+  return {
+    version,
+    native: fileName.includes("_wasm32"),
+    fileName,
+    sha256: sha256(bundledBytes(fileName)),
+    depends,
+  };
+}
+
+function bundledFileName(name: string): string {
+  const pkg = BUNDLED.get(name);
+  if (pkg === undefined) throw new Error(`no bundled fixture ${name}`);
+  return pkg.fileName;
 }
 
 const BUNDLED: ReadonlyMap<string, BundledPackage> = new Map([
@@ -50,15 +85,21 @@ const BUNDLED: ReadonlyMap<string, BundledPackage> = new Map([
   ["micropip", bundled("0.11.1", "micropip-0.11.1-py3-none-any.whl", [])],
 ]);
 
-/** A package cache holding the files of `names`. */
+/** A package cache holding the lockfile-pinned files of `names`. */
 async function cacheWith(dir: string, names: readonly string[]): Promise<string> {
   await mkdir(dir, { recursive: true });
   for (const name of names) {
-    const pkg = BUNDLED.get(name);
-    if (pkg === undefined) throw new Error(`no bundled fixture ${name}`);
-    await writeFile(join(dir, pkg.fileName), "");
+    const fileName = bundledFileName(name);
+    await writeFile(join(dir, fileName), bundledBytes(fileName));
   }
   return dir;
+}
+
+async function exists(path: string): Promise<boolean> {
+  return stat(path).then(
+    () => true,
+    () => false,
+  );
 }
 
 function lockfile(contents: string): LockfileSnapshot {
@@ -133,9 +174,13 @@ function mixedPypi(overrides: Record<string, ReleaseFile[] | number> = {}): type
   );
 }
 
+/** A prefetcher that fills the cache with every bundled fixture's pinned file. */
 function okPrefetcher() {
   const prefetcher = mock<Tier1Prefetcher>();
-  prefetcher.prefetchBuiltins.mockResolvedValue(ok());
+  prefetcher.prefetchBuiltins.mockImplementation(async (_names, { packageCacheDir }) => {
+    await cacheWith(packageCacheDir, [...BUNDLED.keys()]);
+    return ok();
+  });
   return prefetcher;
 }
 
@@ -149,13 +194,16 @@ async function makeWritable(dir: string): Promise<void> {
 
 let root: string;
 let wheelsRoot: string;
+let cacheDir: string;
 
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "wheel-cache-"));
   wheelsRoot = join(root, "wheels");
+  cacheDir = join(root, "cache");
 });
 
 afterEach(async () => {
+  statHook.before = null;
   await makeWritable(root);
   await rm(root, { recursive: true, force: true });
 });
@@ -170,14 +218,14 @@ pydantic_core==2.41.5 --hash=sha256:${OTHER_SHA}
 `);
     const result = await ensureTier1Packages(
       { prefetcher, fetchImpl, bundled: BUNDLED },
-      { lockfile: lock, packageCacheDir: "/cache/pyodide", wheelsRoot },
+      { lockfile: lock, packageCacheDir: cacheDir, wheelsRoot },
     );
     expect(result._unsafeUnwrap()).toEqual({
       builtins: ["pydantic", "pydantic-core"],
       wheelDir: join(wheelsRoot, lock.hash),
     });
     expect(prefetcher.prefetchBuiltins).toHaveBeenCalledWith(["pydantic", "pydantic-core"], {
-      packageCacheDir: "/cache/pyodide",
+      packageCacheDir: cacheDir,
     });
     expect((await readdir(join(wheelsRoot, lock.hash))).sort()).toEqual([
       ".ready",
@@ -194,18 +242,18 @@ pydantic_core==2.41.5 --hash=sha256:${OTHER_SHA}
     const lock = lockfile(`typing-extensions==4.14.0 --hash=sha256:${SNIFFIO_SHA}\n`);
     const result = await ensureTier1Packages(
       { prefetcher, fetchImpl, bundled: BUNDLED },
-      { lockfile: lock, packageCacheDir: "/cache", wheelsRoot },
+      { lockfile: lock, packageCacheDir: cacheDir, wheelsRoot },
     );
     expect(result._unsafeUnwrap()).toEqual({
       builtins: [],
       wheelDir: join(wheelsRoot, lock.hash),
     });
-    expect(prefetcher.prefetchBuiltins).toHaveBeenCalledWith([], { packageCacheDir: "/cache" });
+    expect(prefetcher.prefetchBuiltins).toHaveBeenCalledWith([], { packageCacheDir: cacheDir });
   });
 
   it("skips the prefetch when the cache holds every built-in, micropip and their dependencies", async () => {
     const prefetcher = okPrefetcher();
-    const packageCacheDir = await cacheWith(join(root, "cache"), [
+    const packageCacheDir = await cacheWith(cacheDir, [
       "pydantic",
       "pydantic-core",
       "typing-extensions",
@@ -225,11 +273,7 @@ pydantic_core==2.41.5 --hash=sha256:${OTHER_SHA}
 
   it("prefetches when the cache lacks a built-in's transitive dependency", async () => {
     const prefetcher = okPrefetcher();
-    const packageCacheDir = await cacheWith(join(root, "cache"), [
-      "pydantic",
-      "pydantic-core",
-      "micropip",
-    ]);
+    const packageCacheDir = await cacheWith(cacheDir, ["pydantic", "pydantic-core", "micropip"]);
     const result = await ensureTier1Packages(
       { prefetcher, fetchImpl: fakePypi({}, {}), bundled: BUNDLED },
       {
@@ -242,9 +286,81 @@ pydantic_core==2.41.5 --hash=sha256:${OTHER_SHA}
     expect(prefetcher.prefetchBuiltins).toHaveBeenCalledWith(["pydantic"], { packageCacheDir });
   });
 
+  it("deletes a cached file whose sha256 is not the lockfile's, and prefetches it again", async () => {
+    const prefetcher = okPrefetcher();
+    const packageCacheDir = await cacheWith(cacheDir, [
+      "pydantic",
+      "pydantic-core",
+      "typing-extensions",
+      "micropip",
+    ]);
+    // A prefetch child killed mid-write leaves a truncated file.
+    const truncated = join(packageCacheDir, bundledFileName("pydantic-core"));
+    await writeFile(truncated, bundledBytes(bundledFileName("pydantic-core")).subarray(0, 5));
+    const fill = prefetcher.prefetchBuiltins.getMockImplementation();
+    let presentAtPrefetch: boolean | null = null;
+    prefetcher.prefetchBuiltins.mockImplementation(async (names, opts) => {
+      presentAtPrefetch = await exists(truncated);
+      return fill ? fill(names, opts) : ok();
+    });
+    const result = await ensureTier1Packages(
+      { prefetcher, fetchImpl: fakePypi({}, {}), bundled: BUNDLED },
+      {
+        lockfile: lockfile(`pydantic==2.12.5 --hash=sha256:${OTHER_SHA}\n`),
+        packageCacheDir,
+        wheelsRoot,
+      },
+    );
+    expect(result._unsafeUnwrap()).toEqual({ builtins: ["pydantic"], wheelDir: null });
+    expect(prefetcher.prefetchBuiltins).toHaveBeenCalledWith(["pydantic"], { packageCacheDir });
+    expect(presentAtPrefetch).toBe(false);
+  });
+
+  it("errs builtin_integrity naming the file when the prefetch leaves it mismatching, and deletes it", async () => {
+    const prefetcher = mock<Tier1Prefetcher>();
+    const tampered = join(cacheDir, bundledFileName("pydantic-core"));
+    prefetcher.prefetchBuiltins.mockImplementation(async (_names, { packageCacheDir }) => {
+      await cacheWith(packageCacheDir, [...BUNDLED.keys()]);
+      // What a tampered CDN response leaves in the cache.
+      await writeFile(tampered, "tampered bytes");
+      return ok();
+    });
+    const result = await ensureTier1Packages(
+      { prefetcher, fetchImpl: fakePypi({}, {}), bundled: BUNDLED },
+      {
+        lockfile: lockfile(`pydantic==2.12.5 --hash=sha256:${OTHER_SHA}\n`),
+        packageCacheDir: cacheDir,
+        wheelsRoot,
+      },
+    );
+    expect(result._unsafeUnwrapErr()).toEqual({
+      kind: "builtin_integrity",
+      fileName: bundledFileName("pydantic-core"),
+      message: expect.stringContaining(`sha256:${sha256(Buffer.from("tampered bytes"))}`),
+    });
+    expect(await exists(tampered)).toBe(false);
+  });
+
+  it("errs prefetch_failed naming the file when the prefetch leaves it absent", async () => {
+    const prefetcher = mock<Tier1Prefetcher>();
+    prefetcher.prefetchBuiltins.mockResolvedValue(ok());
+    const result = await ensureTier1Packages(
+      { prefetcher, fetchImpl: fakePypi({}, {}), bundled: BUNDLED },
+      {
+        lockfile: lockfile(`pydantic==2.12.5 --hash=sha256:${OTHER_SHA}\n`),
+        packageCacheDir: cacheDir,
+        wheelsRoot,
+      },
+    );
+    expect(result._unsafeUnwrapErr()).toMatchObject({
+      kind: "prefetch_failed",
+      message: expect.stringContaining(bundledFileName("pydantic")),
+    });
+  });
+
   it("prefetches when the cache lacks micropip", async () => {
     const prefetcher = okPrefetcher();
-    const packageCacheDir = await cacheWith(join(root, "cache"), [
+    const packageCacheDir = await cacheWith(cacheDir, [
       "pydantic",
       "pydantic-core",
       "typing-extensions",
@@ -266,7 +382,7 @@ pydantic_core==2.41.5 --hash=sha256:${OTHER_SHA}
       { prefetcher: okPrefetcher(), fetchImpl, bundled: BUNDLED },
       {
         lockfile: lockfile(`pydantic==2.12.5 --hash=sha256:${OTHER_SHA}\n`),
-        packageCacheDir: "/cache",
+        packageCacheDir: cacheDir,
         wheelsRoot,
       },
     );
@@ -280,7 +396,7 @@ pydantic_core==2.41.5 --hash=sha256:${OTHER_SHA}
     prefetcher.prefetchBuiltins.mockResolvedValue(err("cdn down"));
     const result = await ensureTier1Packages(
       { prefetcher, fetchImpl: mixedPypi(), bundled: BUNDLED },
-      { lockfile: MIXED_LOCK, packageCacheDir: "/cache", wheelsRoot },
+      { lockfile: MIXED_LOCK, packageCacheDir: cacheDir, wheelsRoot },
     );
     expect(result._unsafeUnwrapErr()).toEqual({ kind: "prefetch_failed", message: "cdn down" });
   });
@@ -293,7 +409,7 @@ sniffio==1.3.1 \\
 `);
     const result = await ensureTier1Packages(
       { prefetcher: okPrefetcher(), fetchImpl: mixedPypi(), bundled: BUNDLED },
-      { lockfile: lock, packageCacheDir: "/cache", wheelsRoot },
+      { lockfile: lock, packageCacheDir: cacheDir, wheelsRoot },
     );
     const dir = result._unsafeUnwrap().wheelDir;
     expect(dir).toBe(join(wheelsRoot, lock.hash));
@@ -317,7 +433,7 @@ sniffio==1.3.1 \\
   it("serves a published directory without fetching again", async () => {
     const lock = lockfile(`idna==3.10 --hash=sha256:${IDNA_SHA}\n`);
     const deps = { prefetcher: okPrefetcher(), fetchImpl: mixedPypi(), bundled: BUNDLED };
-    const args = { lockfile: lock, packageCacheDir: "/cache", wheelsRoot };
+    const args = { lockfile: lock, packageCacheDir: cacheDir, wheelsRoot };
     await ensureTier1Packages(deps, args);
     vi.mocked(deps.fetchImpl).mockClear();
     const again = await ensureTier1Packages(deps, args);
@@ -328,7 +444,7 @@ sniffio==1.3.1 \\
   it("seals a published directory a dying publisher left writable", async () => {
     const lock = lockfile(`idna==3.10 --hash=sha256:${IDNA_SHA}\n`);
     const deps = { prefetcher: okPrefetcher(), fetchImpl: mixedPypi(), bundled: BUNDLED };
-    const args = { lockfile: lock, packageCacheDir: "/cache", wheelsRoot };
+    const args = { lockfile: lock, packageCacheDir: cacheDir, wheelsRoot };
     await ensureTier1Packages(deps, args);
     const dir = join(wheelsRoot, lock.hash);
     await chmod(dir, 0o755);
@@ -345,7 +461,7 @@ sniffio==1.3.1 \\
     const lock = lockfile(`idna==3.10 --hash=sha256:${IDNA_SHA}\n`);
     const result = await ensureTier1Packages(
       { prefetcher: okPrefetcher(), fetchImpl, bundled: BUNDLED },
-      { lockfile: lock, packageCacheDir: "/cache", wheelsRoot },
+      { lockfile: lock, packageCacheDir: cacheDir, wheelsRoot },
     );
     expect(result._unsafeUnwrapErr()).toMatchObject({ kind: "hash_mismatch", spec: "idna==3.10" });
     expect(await readdir(wheelsRoot)).toEqual([]);
@@ -360,7 +476,7 @@ sniffio==1.3.1 \\
       },
       {
         lockfile: lockfile(`idna==3.10 --hash=sha256:${IDNA_SHA}\n`),
-        packageCacheDir: "/cache",
+        packageCacheDir: cacheDir,
         wheelsRoot,
       },
     );
@@ -389,7 +505,7 @@ sniffio==1.3.1 \\
       },
       {
         lockfile: lockfile(`sniffio==1.3.1 --hash=sha256:${SNIFFIO_SHA}\n`),
-        packageCacheDir: "/cache",
+        packageCacheDir: cacheDir,
         wheelsRoot,
       },
     );
@@ -409,12 +525,12 @@ sniffio==1.3.1 \\
       },
       {
         lockfile: lockfile(`idna==3.10 --hash=sha256:${IDNA_SHA}\n`),
-        packageCacheDir: "/cache",
+        packageCacheDir: cacheDir,
         wheelsRoot,
       },
     );
     expect(result._unsafeUnwrapErr().kind).toBe("wheel_unavailable");
-    expect(await readdir(root)).toEqual(["wheels"]);
+    expect((await readdir(root)).sort()).toEqual(["cache", "wheels"]);
   });
 
   it.each([
@@ -429,7 +545,7 @@ sniffio==1.3.1 \\
       },
       {
         lockfile: lockfile(`idna==3.10 --hash=sha256:${IDNA_SHA}\n`),
-        packageCacheDir: "/cache",
+        packageCacheDir: cacheDir,
         wheelsRoot,
       },
     );
@@ -444,7 +560,7 @@ sniffio==1.3.1 \\
       { prefetcher: okPrefetcher(), fetchImpl, bundled: BUNDLED },
       {
         lockfile: lockfile(`idna==3.10 --hash=sha256:${IDNA_SHA}\n`),
-        packageCacheDir: "/cache",
+        packageCacheDir: cacheDir,
         wheelsRoot,
       },
     );
@@ -470,7 +586,7 @@ sniffio==1.3.1 \\
     });
     const result = await ensureTier1Packages(
       { prefetcher: okPrefetcher(), fetchImpl, bundled: BUNDLED },
-      { lockfile: lock, packageCacheDir: "/cache", wheelsRoot },
+      { lockfile: lock, packageCacheDir: cacheDir, wheelsRoot },
     );
     expect(result._unsafeUnwrap().wheelDir).toBe(target);
     expect((await readdir(target)).sort()).toEqual([".ready", "winner.whl"]);
@@ -484,10 +600,44 @@ sniffio==1.3.1 \\
     await writeFile(join(target, "partial.whl"), "partial");
     const result = await ensureTier1Packages(
       { prefetcher: okPrefetcher(), fetchImpl: mixedPypi(), bundled: BUNDLED },
-      { lockfile: lock, packageCacheDir: "/cache", wheelsRoot },
+      { lockfile: lock, packageCacheDir: cacheDir, wheelsRoot },
     );
     expect(result._unsafeUnwrapErr().kind).toBe("publish_failed");
     expect(await readdir(wheelsRoot)).toEqual([lock.hash]);
+  });
+
+  it("publishes when a sibling publisher renames a tmp directory away between the sweep's listing and its stat", async () => {
+    const sibling = join(wheelsRoot, `${OTHER_SHA}.tmp.sibling`);
+    await mkdir(sibling, { recursive: true });
+    await writeFile(join(sibling, ".ready"), "");
+    statHook.before = async (path) => {
+      if (path === sibling) await rename(sibling, join(wheelsRoot, OTHER_SHA));
+    };
+    const lock = lockfile(`idna==3.10 --hash=sha256:${IDNA_SHA}\n`);
+    const result = await ensureTier1Packages(
+      { prefetcher: okPrefetcher(), fetchImpl: mixedPypi(), bundled: BUNDLED },
+      { lockfile: lock, packageCacheDir: cacheDir, wheelsRoot },
+    );
+    expect(result._unsafeUnwrap().wheelDir).toBe(join(wheelsRoot, lock.hash));
+    expect((await readdir(wheelsRoot)).sort()).toEqual([lock.hash, OTHER_SHA].sort());
+  });
+
+  it("publishes when the sweep itself fails", async () => {
+    const candidate = join(wheelsRoot, `${OTHER_SHA}.tmp.unreadable`);
+    await mkdir(candidate, { recursive: true });
+    statHook.before = async (path) => {
+      if (path === candidate) {
+        throw Object.assign(new Error(`EACCES: permission denied, stat '${path}'`), {
+          code: "EACCES",
+        });
+      }
+    };
+    const lock = lockfile(`idna==3.10 --hash=sha256:${IDNA_SHA}\n`);
+    const result = await ensureTier1Packages(
+      { prefetcher: okPrefetcher(), fetchImpl: mixedPypi(), bundled: BUNDLED },
+      { lockfile: lock, packageCacheDir: cacheDir, wheelsRoot },
+    );
+    expect(result._unsafeUnwrap().wheelDir).toBe(join(wheelsRoot, lock.hash));
   });
 
   it("removes tmp directories older than ten minutes on the way in", async () => {
@@ -500,7 +650,7 @@ sniffio==1.3.1 \\
     const lock = lockfile(`idna==3.10 --hash=sha256:${IDNA_SHA}\n`);
     await ensureTier1Packages(
       { prefetcher: okPrefetcher(), fetchImpl: mixedPypi(), bundled: BUNDLED },
-      { lockfile: lock, packageCacheDir: "/cache", wheelsRoot },
+      { lockfile: lock, packageCacheDir: cacheDir, wheelsRoot },
     );
     expect((await readdir(wheelsRoot)).sort()).toEqual([lock.hash, `${OTHER_SHA}.tmp.live`].sort());
   });

@@ -125,16 +125,19 @@ function normalizeName(name: string): string {
  * Load `names` with their dependencies. Pyodide reports a package it cannot
  * load through `errorCallback` and resolves anyway, so the errors and the
  * loaded set decide: null when every name loaded, the reason otherwise.
+ *
+ * Under Node, Pyodide checks no integrity: neither the cached file nor its
+ * CDN download is compared with the lockfile's sha256, whatever
+ * `checkIntegrity` says. The host's check of the package cache before a run
+ * child starts (`ensureTier1Packages`) is the one that counts.
  */
 async function loadPackages(
   py: PyodideInterface,
   names: readonly string[],
-  checkIntegrity: boolean,
 ): Promise<string | null> {
   if (names.length === 0) return null;
   const errors: string[] = [];
   const loaded = await py.loadPackage([...names], {
-    checkIntegrity,
     messageCallback: () => {},
     errorCallback: (message) => errors.push(message),
   });
@@ -156,7 +159,7 @@ async function loadPackages(
 async function installWheels(py: PyodideInterface, wheelDir: string): Promise<void> {
   const files = nodeFs.readdirSync(wheelDir).filter((f) => f.endsWith(".whl"));
   if (files.length === 0) return;
-  const micropip = await loadPackages(py, ["micropip"], true);
+  const micropip = await loadPackages(py, ["micropip"]);
   if (micropip !== null) throw new Error(`micropip did not load: ${micropip}`);
   py.FS.mkdirTree(WHEEL_MOUNT);
   py.FS.mount(py.FS.filesystems.NODEFS, { root: wheelDir }, WHEEL_MOUNT);
@@ -286,7 +289,7 @@ async function run(init: Extract<ChildInit, { mode: "run" }>): Promise<void> {
   if (init.wheelDir !== null) await installWheels(py, init.wheelDir);
   // A package missing from the cache fails the boot: under the permission
   // model Pyodide's CDN fallback cannot reach the network.
-  const builtins = await loadPackages(py, init.builtins, true);
+  const builtins = await loadPackages(py, init.builtins);
   if (builtins !== null) throw new Error(`built-in packages did not load: ${builtins}`);
   deleteNetworkGlobals();
 
@@ -307,7 +310,7 @@ async function prefetch(init: Extract<ChildInit, { mode: "prefetch" }>): Promise
     packageCacheDir: init.packageCacheDir,
     restricted: false,
   });
-  const failed = await loadPackages(py, init.names, true);
+  const failed = await loadPackages(py, init.names);
   port.postMessage(failed === null ? { type: "prefetched" } : { type: "fatal", error: failed });
 }
 
@@ -329,7 +332,7 @@ async function probe(init: Extract<ChildInit, { mode: "probe" }>): Promise<void>
 async function probeOne(py: PyodideInterface, name: string): Promise<string | null> {
   const entry = py.lockfile.packages[normalizeName(name)];
   if (entry === undefined) return "not a Pyodide built-in";
-  const loaded = await loadPackages(py, [name], true);
+  const loaded = await loadPackages(py, [name]);
   if (loaded !== null) return loaded;
   for (const module of entry.imports) {
     try {

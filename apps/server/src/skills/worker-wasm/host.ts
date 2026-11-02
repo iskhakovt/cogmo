@@ -526,7 +526,7 @@ function tier1ChildEntry(): Promise<string> {
  * create a name in the shared temporary directory first.
  */
 async function bundleFromSource(): Promise<string> {
-  const { buildTier1Child, checkOwnPrivateDir } = await import("./child-bundle.js");
+  const { buildTier1Child, assertOwnPrivateDir } = await import("./child-bundle.js");
   const root = await realpath(tmpdir());
   const buildDir = await mkdtemp(join(root, "cogmo-tier1-build-"));
   await buildTier1Child({
@@ -547,10 +547,7 @@ async function bundleFromSource(): Promise<string> {
     const code = e instanceof Error && "code" in e ? e.code : undefined;
     if (code !== "EEXIST" && code !== "ENOTEMPTY") throw e;
     await rm(buildDir, { recursive: true, force: true });
-    const trusted = await checkOwnPrivateDir(outDir);
-    if (trusted.isErr()) {
-      throw new Error(`refusing the tier-1 child bundle at ${outDir}: ${trusted.error}`);
-    }
+    await assertOwnPrivateDir(outDir);
   }
   return join(outDir, "tier1-child.mjs");
 }

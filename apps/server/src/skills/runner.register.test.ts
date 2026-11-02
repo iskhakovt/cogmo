@@ -704,6 +704,15 @@ outputs:
         expect(skill?.lockfileHash).toMatch(/^[0-9a-f]{64}$/);
       });
 
+      it("goes live when a built-in fails Pyodide's pinned sha256: a verdict on the cache, not the lockfile", async () => {
+        const result = await registerResolvingTo({
+          kind: "builtin_integrity",
+          fileName: "httpx-0.28.1-py3-none-any.whl",
+          message: "the prefetched file hashes to sha256:aa",
+        });
+        assertStatus(result, "live");
+      });
+
       it("goes live when Pyodide's own lockfile cannot be read", async () => {
         const result = await registerResolvingTo({
           kind: "bundled_unreadable",
