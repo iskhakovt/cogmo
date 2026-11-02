@@ -1638,7 +1638,7 @@ One enforcement point for every byte a skill sends off the machine: a token-inje
 - Non-HTTP protocols have no route ([Decisions](#decisions) → Non-HTTP egress).
 - Tier 2 runs on local Docker only ([Warm pool](#warm-pool-confirmed)). A managed backend Cogmo cannot attach to an internal network has no egress control, so the classifier reads `tier2EgressEnforced = false` there: bound secrets are unavailable and a `network:` block is `blocked`, until the provider offers an egress hook the proxy can sit behind.
 
-**Proxy holder** `[proposed]`, S6's. The proxy has one holder per database. At its skills stage, before the `pending` sweep and the listener, `cogmo serve` takes the egress proxy lock: an exclusive session advisory lock on a third fixed key beside the bootstrap and writer locks ([infrastructure.md](infrastructure.md)). A second serve, as a deploy overlap starts one, waits on it there, so the proxy hands over only when the old serve releases the lock at shutdown or its connection ends. Deploys therefore stop the old serve before starting the new one ([deploy.md → Updating](../deploy.md#updating)): a serve waiting at its skills stage never answers `/health`, which comes up after that stage, so a start-new-then-stop-old rollout would wait forever.
+<a id="proxy-holder"></a>**Proxy holder** `[proposed]`, S6's. The proxy has one holder per database. At its skills stage, before the `pending` sweep and the listener, `cogmo serve` takes the egress proxy lock: an exclusive session advisory lock on a third fixed key beside the bootstrap and writer locks ([infrastructure.md](infrastructure.md)). A second serve, as a deploy overlap starts one, waits on it there, so the proxy hands over only when the old serve releases the lock at shutdown or its connection ends. Deploys therefore stop the old serve before starting the new one ([deploy.md → Updating](../deploy.md#updating)): a serve waiting at its skills stage never answers `/health`, which comes up after that stage, so a start-new-then-stop-old rollout would wait forever.
 
 | Failure mode | State left | Why it is safe, or the residual |
 |-|-|-|
@@ -2083,6 +2083,8 @@ skill_approval_classes (
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 )
 
+-- serve_instances and serve_heartbeats are owned by serve/store/, the store of src/serve/, the serve process's own lifecycle, which the core
+-- boot stage calls; the egress listener's status is one column of it. Skills and sandbox reference the tables and own neither.
 serve_instances (
   id          UUID v7 PK,                  -- the serve instance id: every per-process record keys on it, whatever the sandbox backend
   started_at  TIMESTAMPTZ NOT NULL,        -- written by the core boot stage's insert, once per cogmo serve process

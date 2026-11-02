@@ -320,7 +320,7 @@ cogmo_instances (
 
 Row inserted in bootstrap before any sandbox operations; `stopped_at` set on graceful shutdown, or by the next boot's `reconcileCrashedInstances` once it has reaped the instance's containers (a crash leaves it NULL). Orphan detection joins `containers.instance_id → cogmo_instances.id` — any container tied to a row with non-null `stopped_at`, or a row that was never closed and whose pid no longer exists on the host, is an orphan.
 
-`[proposed]` `serve_instance_id` ties the row to the `serve_instances` row the core boot stage inserts once per `cogmo serve` process ([skills.md → Data model](skills.md#data-model-confirmed)), whose database-generated id every per-process record keys on, so the sandbox stage mints no second process id. Its migration inserts one stopped `serve_instances` row and points every existing `cogmo_instances` row at it, which keeps the column NOT NULL from the start; a nullable column waiting on a backfill would need a second migration to tighten it.
+`[proposed]` `serve_instance_id` ties the row to the `serve_instances` row the core boot stage inserts once per `cogmo serve` process, owned by `serve/store/` and defined in [skills.md → Data model](skills.md#data-model-confirmed), whose database-generated id every per-process record keys on, so the sandbox stage mints no second process id. Its migration inserts one stopped `serve_instances` row and points every existing `cogmo_instances` row at it, which keeps the column NOT NULL from the start; a nullable column waiting on a backfill would need a second migration to tighten it.
 
 The Daytona backend does not use these tables — its state lives in `SandboxSessionState` (provider sandbox id) and Daytona's own infrastructure.
 
