@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { InngestTestEngine } from "@inngest/test";
 import { err } from "neverthrow";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Transactor } from "../db/index.js";
 import { inngest } from "../inngest/client.js";
@@ -18,11 +18,6 @@ import type { SandboxCapabilities, SandboxClient } from "../sandbox/index.js";
 import { createSkillDepsReaper } from "./deps-reaper-function.js";
 import { loadBundledPackages } from "./pyodide-compat.js";
 import type { SkillStore } from "./store/index.js";
-
-vi.mock("./pyodide-compat.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("./pyodide-compat.js")>();
-  return { ...actual, loadBundledPackages: vi.fn(actual.loadBundledPackages) };
-});
 
 const SCHEDULED_EVENT = {
   name: "inngest/function.invoked",
@@ -63,6 +58,7 @@ describe("createSkillDepsReaper", () => {
         sandbox: undefined,
         image: "cogmo-skills:test",
         depsCacheVolumeName: "deps-vol-x",
+        loadBundled: loadBundledPackages,
       },
       inngest,
     );
@@ -89,6 +85,7 @@ describe("createSkillDepsReaper", () => {
         sandbox,
         image: "cogmo-skills:test",
         depsCacheVolumeName: undefined,
+        loadBundled: loadBundledPackages,
       },
       inngest,
     );
@@ -117,6 +114,7 @@ describe("createSkillDepsReaper", () => {
         sandbox,
         image: "cogmo-skills:test",
         depsCacheVolumeName: "deps-vol-x",
+        loadBundled: loadBundledPackages,
       },
       inngest,
     );
@@ -154,6 +152,7 @@ describe("createSkillDepsReaper", () => {
           image: "cogmo-skills:test",
           depsCacheVolumeName: undefined,
           wheelsRoot,
+          loadBundled: loadBundledPackages,
         },
         inngest,
       );
@@ -181,9 +180,6 @@ describe("createSkillDepsReaper", () => {
       const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
       await mkdir(join(wheelsRoot, unreachable));
       await utimes(join(wheelsRoot, unreachable), eightDaysAgo, eightDaysAgo);
-      vi.mocked(loadBundledPackages).mockResolvedValueOnce(
-        err({ kind: "bundled_unreadable", message: "pyodide-lock.json: ENOENT" }),
-      );
       const store = mock<SkillStore>();
       store.listReachableLockfileHashes.mockResolvedValue(new Set());
       const fn = createSkillDepsReaper(
@@ -194,6 +190,8 @@ describe("createSkillDepsReaper", () => {
           image: "cogmo-skills:test",
           depsCacheVolumeName: undefined,
           wheelsRoot,
+          loadBundled: async () =>
+            err({ kind: "bundled_unreadable" as const, message: "pyodide-lock.json: ENOENT" }),
         },
         inngest,
       );

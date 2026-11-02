@@ -9,6 +9,7 @@ import { logger } from "../logger.js";
 import { createSkillCronFireHandler } from "../skills/cron-fire-handler.js";
 import { createSkillCronTicker } from "../skills/cron-ticker.js";
 import { createSkillDepsReaper } from "../skills/deps-reaper-function.js";
+import { loadBundledPackages } from "../skills/pyodide-compat.js";
 import { resolveSkillRunAs } from "../skills/run-as.js";
 import { SkillRunnerImpl } from "../skills/runner.js";
 import {
@@ -127,6 +128,7 @@ export function createSkillFunctions(
       image: env.COGMO_SKILLS_IMAGE,
       depsCacheVolumeName: env.COGMO_SKILLS_DEPS_VOLUME,
       wheelsRoot: tier1WheelsRoot(),
+      loadBundled: loadBundledPackages,
     },
     inngest,
   );

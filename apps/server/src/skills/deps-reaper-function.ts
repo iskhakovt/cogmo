@@ -1,9 +1,10 @@
 import type { Inngest } from "inngest";
+import type { Result } from "neverthrow";
 import type { Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
 import type { SandboxClient } from "../sandbox/index.js";
 import { DEPS_REAP_GRACE_DAYS, type ReapSkillVenvsError, reapSkillVenvs } from "./deps-reaper.js";
-import { loadBundledPackages } from "./pyodide-compat.js";
+import type { BundledDistribution, BundledPackagesUnreadable } from "./pyodide-compat.js";
 import type { SkillStore } from "./store/index.js";
 import { reapTier1WheelDirs } from "./worker-wasm/wheel-cache.js";
 
@@ -35,6 +36,11 @@ export interface SkillDepsReaperDeps {
    * (`ensureTier1Packages`). Unset where tier 1 publishes none.
    */
   wheelsRoot?: string;
+  /**
+   * The installed Pyodide distribution, whose version keys the wheel
+   * directories a child installs from (`loadBundledPackages`).
+   */
+  loadBundled: () => Promise<Result<BundledDistribution, BundledPackagesUnreadable>>;
 }
 
 /**
@@ -111,7 +117,7 @@ export function createSkillDepsReaper(deps: SkillDepsReaperDeps, inngest: Innges
                 error?: "reap_failed" | "bundled_unreadable";
               }> => {
                 // The installed release decides which directories a child installs from.
-                const bundled = await loadBundledPackages();
+                const bundled = await deps.loadBundled();
                 if (bundled.isErr()) {
                   log.warn(
                     { err: bundled.error.message },
