@@ -11,7 +11,7 @@ describe("fitTelegramMessage", () => {
     const text = `${"x".repeat(TELEGRAM_MAX_MESSAGE_LENGTH - 2)}😀😀`;
     const fitted = fitTelegramMessage(text);
     expect(fitted.length).toBeLessThanOrEqual(TELEGRAM_MAX_MESSAGE_LENGTH);
-    expect([...fitted].every((ch) => !/[\ud800-\udfff]/.test(ch))).toBe(true);
+    expect(fitted.isWellFormed()).toBe(true);
     expect(fitted.endsWith("…")).toBe(true);
   });
 
