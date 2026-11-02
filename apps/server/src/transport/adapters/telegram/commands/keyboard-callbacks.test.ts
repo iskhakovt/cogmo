@@ -165,6 +165,7 @@ describe("handleSkillsDeployCallback", () => {
     expect(outcome.editText).toMatch(/denied/);
     expect(outcome.editText).toMatch(/main did not move/);
     expect(outcome.toast).toBe("Denied");
+    expect(outcome.clearKeyboard).toBe(true);
   });
 
   it("identity_rejected from Transport surfaces an unauthorized message", async () => {
@@ -182,6 +183,7 @@ describe("handleSkillsDeployCallback", () => {
       "wrong-user",
       "chat-1",
     );
+    expect(outcome.clearKeyboard).toBe(false);
 
     expect(outcome.editText).toMatch(/not authorized/);
     expect(outcome.toast).toMatch(/not authorized/);
@@ -253,6 +255,7 @@ describe("handleSkillsDeployCallback", () => {
     expect(outcome).toEqual({
       editText: "🚫 Skill echo disabled. /enable echo re-enables it.",
       toast: "Disabled",
+      clearKeyboard: true,
     });
   });
 

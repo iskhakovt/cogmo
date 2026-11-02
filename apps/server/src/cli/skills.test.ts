@@ -83,9 +83,9 @@ describe("skillsCli", () => {
     const code = await run(["list"], depsFor(runner), io);
     expect(code).toBe(0);
     expect(out).toEqual([
-      "name\ttier\trisk\tdisabled\tgit_sha\tpending_deploy",
-      "echo\twasm\tnotify\tno\tabc12345\t-",
-      `mailer\twasm\tapprove\tyes\tdef67890\t${pendingId}`,
+      "name\ttier\trisk\tdisabled\tgit_sha\tpending_deploy\tpending_git_sha",
+      "echo\twasm\tnotify\tno\tabc12345\t-\t-",
+      `mailer\twasm\tapprove\tyes\tdef67890\t${pendingId}\tdef67890`,
     ]);
   });
 

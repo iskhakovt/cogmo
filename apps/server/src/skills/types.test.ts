@@ -71,7 +71,7 @@ describe("SkillIoSchema", () => {
 describe("ClassifierLogSchema", () => {
   const STUB = {
     classifier_version: "stub-0",
-    risk_tier: "auto" as const,
+    risk_tier: "notify" as const,
     declared_effects: [],
     detected_effects: [],
     declared_secrets: [],

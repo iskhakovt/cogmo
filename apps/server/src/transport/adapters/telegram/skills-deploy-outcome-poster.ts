@@ -9,6 +9,7 @@ import {
   type SkillsInlineKeyboardMarkup,
 } from "../../../skills/skills-keyboard.js";
 import type { TransportStore } from "../../store/index.js";
+import { fitTelegramMessage } from "./message-limit.js";
 
 type DeployedOutcome = Extract<SkillsDeployOutcomeData, { outcome: "live" | "pending_approval" }>;
 
@@ -36,6 +37,7 @@ const REASON_LABELS: Readonly<Record<SkillRiskReason, string>> = {
   secret_breadth: "three or more secrets",
   declared_effect: "declares effects",
   network_declared: "reaches the network",
+  classifier_fallback: "the classifier could not read the body",
 };
 
 /**
@@ -165,7 +167,7 @@ export async function postSkillsDeployOutcome(args: {
   try {
     await sendMessage(
       Number(tgSession.platformAddress),
-      deployOutcomeText(event),
+      fitTelegramMessage(deployOutcomeText(event)),
       keyboard ? { reply_markup: keyboard } : {},
     );
     return { posted: true };

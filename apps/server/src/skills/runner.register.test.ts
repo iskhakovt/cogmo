@@ -251,7 +251,7 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
       secrets: [],
       dependencies: [],
       schedule: null,
-      reasons: deploy?.classifierLog.reasons,
+      reasons: ["tier1_unhardened", "no_review_panel"],
       priorGitSha: null,
     });
 

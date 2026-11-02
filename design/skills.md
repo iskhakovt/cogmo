@@ -500,8 +500,8 @@ Each deploy is classified, from the manifest and a static-analysis pass, into a 
 | Tier | Matches when | Action |
 |-|-|-|
 | **Auto** | Everything not matched below: tier `wasm`, no declared or detected effect, no `network:` block, at most two secrets of any kind, every dependency on the allowlist | `register` fast-forwards `main` to the branch tip immediately on classification. Skill is live. No notification. |
-| **Notify** | A dependency on neither list, OR any other declared or detected effect (`reads_memory`, `writes_memory`, `reads_user_data`, `writes_user_data`, `reads_filesystem`), OR a `network:` block without secrets | `register` fast-forwards `main` to the branch tip immediately on classification, and the requester's conversation gets the deploy notification with Disable ([Notifications and undo](#notifications-and-undo)). |
-| **Approve** | First match: validation errors; a dependency on the approve list; an effect in `APPROVE_GATING_EFFECTS` (`deletes_external`, `sends_email`, `sends_message`, `posts_public`, `financial`, `spawns_subprocess`, `writes_filesystem`); tier `container`; **any secret together with a `network:` block**; three or more secrets | `register` leaves `main` untouched; the branch stays as-is. The requester's conversation gets the `pending_approval` notification with Approve and Deny ([Notifications and undo](#notifications-and-undo)), from `register_skill` and the coding-task auto-register alike. `main` is fast-forwarded only when `approveDeploy` fires. |
+| **Notify** | A dependency on neither list, OR any other declared or detected effect (`reads_memory`, `writes_memory`, `reads_user_data`, `writes_user_data`, `reads_filesystem`), OR a `network:` block without secrets | `register` fast-forwards `main` to the branch tip immediately on classification, and the requester's conversation, when the register has one, gets the deploy notification with Disable ([Notifications and undo](#notifications-and-undo)). |
+| **Approve** | First match: validation errors; a dependency on the approve list; an effect in `APPROVE_GATING_EFFECTS` (`deletes_external`, `sends_email`, `sends_message`, `posts_public`, `financial`, `spawns_subprocess`, `writes_filesystem`); tier `container`; **any secret together with a `network:` block**; three or more secrets | `register` leaves `main` untouched; the branch stays as-is. The requester's conversation, when the register has one, gets the `pending_approval` notification with Approve and Deny ([Notifications and undo](#notifications-and-undo)), from `register_skill` and the coding-task auto-register alike. `main` is fast-forwarded only when `approveDeploy` fires. |
 
 Secrets-plus-network is its own `approve` trigger rather than a count, because the count answers "how broad are this skill's permissions" while the pairing answers "can this skill read a credential and also reach somewhere to send it". `APPROVE_SECRETS_THRESHOLD` stays as the breadth signal for skills with no egress.
 
@@ -1169,6 +1169,7 @@ Rules, first match wins. They are the one statement of the tiering; every other 
 | `secret_breadth` | today's table, `approve` | three or more secrets |
 | `declared_effect` | today's table, `notify` | any other declared or detected effect |
 | `network_declared` | today's table, `notify` | a `network:` block without secrets |
+| `classifier_fallback` | today's table, the stub's cap | the declaration-only stub, which cannot show a body read-only, returned `notify` where the table said `auto` ([Classifier](#classifier) → Failure mode) |
 
 Rule 1's validation errors are rejections, not reasons, and a `blocked` rejection carries only rule 2's three.
 

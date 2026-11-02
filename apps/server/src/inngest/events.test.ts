@@ -177,6 +177,7 @@ describe("skills/deploy/outcome", () => {
   it("accepts each outcome", () => {
     expect(parse({ outcome: "live", ...deployed })).toBe(true);
     expect(parse({ outcome: "pending_approval", ...deployed })).toBe(true);
+    expect(parse({ outcome: "live", ...deployed, schedule: null, priorGitSha: null })).toBe(true);
     expect(parse(rejected)).toBe(true);
   });
 
@@ -193,5 +194,6 @@ describe("skills/deploy/outcome", () => {
     expect(live.shape.riskTier.options).toEqual([...skillRiskTier.enumValues]);
     expect(live.shape.reasons.element.options).toEqual([...SKILL_RISK_REASONS]);
     expect(live.shape.effects.shape.declared.element.options).toEqual([...SKILL_EFFECTS]);
+    expect(live.shape.effects.shape.detected.element.options).toEqual([...SKILL_EFFECTS]);
   });
 });

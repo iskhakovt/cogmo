@@ -161,10 +161,12 @@ export function registerCallbackQueries(bot: Bot, transport: Transport): void {
       String(fromId),
       String(chatId),
     );
-    await editTappedMessage(
-      () => ctx.editMessageText(outcome.editText, { reply_markup: clearedKeyboard() }),
-      "edit skill deploy message",
-    );
+    if (outcome.clearKeyboard) {
+      await editTappedMessage(
+        () => ctx.editMessageText(outcome.editText, { reply_markup: clearedKeyboard() }),
+        "edit skill deploy message",
+      );
+    }
     await ctx.answerCallbackQuery({ text: outcome.toast });
   });
 }

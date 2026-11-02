@@ -666,6 +666,7 @@ const skillRiskReasons = [
   "secret_breadth",
   "declared_effect",
   "network_declared",
+  "classifier_fallback",
 ] as const;
 
 /** What a `live` or `pending_approval` outcome tells the user about the deployed version. */

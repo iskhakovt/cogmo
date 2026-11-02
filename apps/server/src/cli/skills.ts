@@ -151,7 +151,7 @@ async function listSkills(deps: SkillsCliDeps, io: CliIo): Promise<number> {
     io.out("(no skills)");
     return 0;
   }
-  io.out("name\ttier\trisk\tdisabled\tgit_sha\tpending_deploy");
+  io.out("name\ttier\trisk\tdisabled\tgit_sha\tpending_deploy\tpending_git_sha");
   for (const s of skills) {
     io.out(
       [
@@ -161,6 +161,7 @@ async function listSkills(deps: SkillsCliDeps, io: CliIo): Promise<number> {
         s.disabled ? "yes" : "no",
         s.gitSha,
         s.pendingDeploy?.id ?? "-",
+        s.pendingDeploy?.gitSha ?? "-",
       ].join("\t"),
     );
   }

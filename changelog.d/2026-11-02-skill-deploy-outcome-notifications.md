@@ -2,6 +2,6 @@ Every skill deploy now tells the requester what happened. One use case, `announc
 
 The classifier records every reason that applies to a tier in `classifier_log.reasons` (`SKILL_RISK_REASONS`, the one list), with the manifest's `network.allow` as `declared_network` and the enforcement flags it read as `capabilities`. Tier 1 is capped at `notify` while `tier1Hardened` is unset (an unhardened tier-1 skill holds the server's environment), and `auto` returns only once `reviewPanel` is set too; both cap reasons are recorded. No deploy is silent under the cap. Rows written before these fields read empty reasons and no network.
 
-`/skills` names a pending deploy's id and sha beside the skill, and `cogmo skills list` its id, so a lost notification still leaves the id for `cogmo skills approve`; the CLI lists every skill, so a pending first deploy (whose row is disabled) shows. The agent's skills guidance describes the tiers as they are, with nothing deploying silently, and `register_skill` returns the deploy id.
+`/skills` and `cogmo skills list` name a pending deploy's id and sha beside the skill, so a lost notification still leaves the id for `cogmo skills approve`; the CLI lists every skill, so a pending first deploy (whose row is disabled) shows. The agent's skills guidance describes the tiers as they are, with nothing deploying silently, and `register_skill` returns the deploy id.
 
-The `skills/deploy/approval-requested` event is retired; one queued across the deploy has no listener, and its pending row stays visible in `/skills` for `cogmo skills approve`.
+The `skills/deploy/approval-requested` event is no longer emitted; a pending deploy stays discoverable in `/skills` and `cogmo skills list` for `cogmo skills approve`.

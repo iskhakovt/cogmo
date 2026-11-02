@@ -108,12 +108,30 @@ describe("listAllSkills", () => {
     expect(store.listPendingDeploys).toHaveBeenCalledWith(FAKE_TX);
   });
 
+  it("keeps a first deploy's null prior sha", async () => {
+    const { store, runInTx } = setup();
+    store.listAllSkills.mockResolvedValue([skillRow({ disabled: true, gitSha: SHA_PENDING })]);
+    store.listPendingDeploys.mockResolvedValue([pendingDeploy({ priorGitSha: null })]);
+
+    const [summary] = await listAllSkills({ store, runInTx });
+
+    expect(summary?.pendingDeploy).toEqual({
+      id: "deploy-1",
+      gitSha: SHA_PENDING,
+      priorGitSha: null,
+    });
+  });
+
   it("shows the newest of two pending deploys for one skill", async () => {
     const { store, runInTx } = setup();
     store.listAllSkills.mockResolvedValue([skillRow()]);
     store.listPendingDeploys.mockResolvedValue([
-      pendingDeploy({ id: "deploy-old", gitSha: "c".repeat(40) }),
-      pendingDeploy({ id: "deploy-new" }),
+      pendingDeploy({
+        id: "deploy-old",
+        gitSha: "c".repeat(40),
+        createdAt: new Date("2026-11-01T00:00:00Z"),
+      }),
+      pendingDeploy({ id: "deploy-new", createdAt: new Date("2026-11-02T00:00:00Z") }),
     ]);
 
     const [summary] = await listAllSkills({ store, runInTx });

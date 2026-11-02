@@ -330,6 +330,6 @@ describe("classifyManifestStub — reasons and capabilities", () => {
   it("stays at notify with both capabilities set, where the AST path reaches auto", () => {
     const log = classifyManifestStub(makeManifest(), ALL_CAPABILITIES);
     expect(log.risk_tier).toBe("notify");
-    expect(log.reasons).toEqual([]);
+    expect(log.reasons).toEqual(["classifier_fallback"]);
   });
 });

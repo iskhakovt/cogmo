@@ -118,6 +118,11 @@ export async function handlePipelineGateCallback(
 export interface SkillsDeployCallbackOutcome {
   editText: string;
   toast: string;
+  /**
+   * Whether the keyboard should go. Yes unless the tapper was rejected: a
+   * rejected tap must not take the buttons away from whoever can use them.
+   */
+  clearKeyboard: boolean;
 }
 
 /**
@@ -141,31 +146,46 @@ export async function handleSkillsDeployCallback(
         platformAddress,
       );
       if (res.isErr()) {
-        return { editText: errorMessage(res.error), toast: errorMessage(res.error) };
+        return {
+          editText: errorMessage(res.error),
+          toast: errorMessage(res.error),
+          clearKeyboard: res.error.code !== "identity_rejected",
+        };
       }
       return {
         editText: `✅ Approved: '${res.value.skillName}' is now live (${res.value.gitSha.slice(0, 7)}).`,
         toast: "Approved",
+        clearKeyboard: true,
       };
     })
     .with({ action: "deny" }, async ({ pendingId }) => {
       const res = await transport.skills.denyDeploy(pendingId, tapperPlatformHandle);
       if (res.isErr()) {
-        return { editText: errorMessage(res.error), toast: errorMessage(res.error) };
+        return {
+          editText: errorMessage(res.error),
+          toast: errorMessage(res.error),
+          clearKeyboard: res.error.code !== "identity_rejected",
+        };
       }
       return {
         editText: "❌ Deploy denied — main did not move. Register again to retry.",
         toast: "Denied",
+        clearKeyboard: true,
       };
     })
     .with({ action: "disable" }, async ({ skillId }) => {
       const res = await transport.skills.disableById(skillId, tapperPlatformHandle);
       if (res.isErr()) {
-        return { editText: errorMessage(res.error), toast: errorMessage(res.error) };
+        return {
+          editText: errorMessage(res.error),
+          toast: errorMessage(res.error),
+          clearKeyboard: res.error.code !== "identity_rejected",
+        };
       }
       return {
         editText: `🚫 Skill ${res.value.name} disabled. /enable ${res.value.name} re-enables it.`,
         toast: "Disabled",
+        clearKeyboard: true,
       };
     })
     .exhaustive();

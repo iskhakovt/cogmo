@@ -27,6 +27,7 @@ export const SKILL_RISK_REASONS = [
   "secret_breadth",
   "declared_effect",
   "network_declared",
+  "classifier_fallback",
 ] as const;
 
 export type SkillRiskReason = (typeof SKILL_RISK_REASONS)[number];
