@@ -19,7 +19,7 @@ First-class feature from day one. Six stages, each a complete working system. St
 ### Stage 2: Skill Library `[research]`
 **Trigger:** When agent repeatedly does the same multi-step task
 **What:** Agent writes reusable code tools. The human approves each skill's spec; agent reviewers check its code ([skills.md → Authoring pipeline](skills.md#authoring-pipeline-proposed)).
-**Implementation:** Voyager pattern — `skills/code/` + `skills/description/`. Description embedding is retrieval key. Skills are compositional (new skills build on old ones).
+**Implementation:** Voyager pattern: a git-backed library with a directory per skill, its `SKILL.md` description the retrieval key ([skills.md → Per-skill structure](skills.md#per-skill-structure)). Skills compose at the model level; runtime composition is deferred ([skills.md → Inter-skill composition](skills.md#inter-skill-composition)).
 **Review gate:** the spec card, mechanical verify gates and a cross-family reviewer panel ([skills.md → Review stage](skills.md#review-stage)).
 **Standard:** SKILL.md progressive disclosure:
 - Tier 1: Name + description (~50 tokens, always loaded)

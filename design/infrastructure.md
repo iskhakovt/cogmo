@@ -71,6 +71,24 @@ The `v1` tag enables future re-derivation without rotating the master key. If a 
 
 **Why `@noble/ciphers`:** Stateless API (`gcm(key, nonce).encrypt(plaintext)`) eliminates the call-order footguns in `node:crypto`'s stateful cipher API. Cure53-audited (September 2024, full scope). ~11 KB gzipped, pure TS.
 
+### Master-key rotation `[proposed]`
+
+Four purposes derive from the master key: `secrets-at-rest` (every `secrets` row, the skills egress CA among them), `s3-objects` (under `S3_CLIENT_ENCRYPT`), `web-login-token`, and `skill-egress` (per-run egress credentials, [skills.md → Egress proxy](skills.md#egress-proxy-proposed)). Rotation is offline, and no slice builds it yet:
+
+1. Stop `cogmo serve`, so no run holds an egress credential.
+2. `cogmo rotate-master-key --new-key-file <path>` takes the bootstrap lock, then tries the writer lock exclusively (`pg_try_advisory_lock`, a fixed key beside the bootstrap lock's) and refuses while anyone holds it. Every process that writes `secrets` rows (every caller of `putSecret`: `cogmo serve` from its core stage, and for their run the CLI writers such as `cogmo setup`, `cogmo provider add` and `cogmo image-provider`) holds that lock in shared mode (`pg_advisory_lock_shared`) on a reserved connection for its whole life, as `bootstrapLock` reserves one; shared mode lets two serves overlap during a deploy, and a process whose reserved connection drops exits, since Postgres has released its lock. A dead process holds nothing. So no writer can encrypt under the old key after the commit, and a writer that starts afterwards fails its key check: every secrets writer, not only serve, takes the shared lock first and then decrypts one existing `secrets` row before its first write, stopping when the key does not fit; a writer that checked before taking the lock could pass under the old key and write after the commit. The command then decrypts every `secrets` row under the current key and re-encrypts it under the new one, each with a fresh nonce, in one transaction; a row that fails to decrypt aborts it with nothing written. It refuses while `S3_CLIENT_ENCRYPT` is on, and while any object in the bucket is encrypted, which it checks by a ranged read of each object's first bytes against the blob envelope's magic prefix (`src/secrets/blob-envelope.ts`), since re-encrypting objects cannot share that transaction and has no design yet.
+3. Point `COGMO_MASTER_KEY` (or `_FILE`) at the new key and start `cogmo serve`. Boot takes its shared writer lock, then decrypts one `secrets` row before it serves anything, and refuses to start when the key does not fit, so a wrong key writes nothing. `cogmo web-token` prints the new login token; web sessions are unaffected.
+
+| Failure mode | State left | Why it is safe, or the residual |
+|-|-|-|
+| The command crashes before its commit, or a row fails to decrypt | every row under the old key | one transaction; fix the cause and rerun with the old key still configured |
+| The command crashes after its commit | every row under the new key; the operator's configuration still names the old one | step 3 proceeds: boot refuses the old key, which is the signal to switch. Rerunning with the old key fails at the first row and writes nothing |
+| The key is swapped without running the command | no secret decrypts; boot refuses to start | restore the old key: the rows are unchanged, and the refused boot wrote none |
+| `cogmo serve` or a CLI secrets writer is live when the command runs | the command refuses | the writer lock is held in shared mode; a dead process holds nothing, since a session lock ends with its connection |
+| A CLI secrets writer starts after the commit, before the operator switches the key | it writes nothing | its key check fails on the first existing row, as boot's does |
+| Objects were encrypted under an earlier configuration and `S3_CLIENT_ENCRYPT` is now off | the command refuses | the bucket probe finds the envelope prefix; the refusal names the objects. **Residual:** the probe reads every object's first bytes, which at personal scale is seconds |
+| A skill run the stop left at `started` or `dispatched` | its egress credential no longer verifies | the sweeper settles it ([skills.md → Run failures](skills.md#run-failures)) |
+
 ### `_FILE` convention for Docker secrets
 
 Standard Docker pattern (Postgres, MariaDB, Redis, Keycloak). For any env var `FOO`, if `FOO_FILE` is set, read the file contents and use as the value. Applied to `COGMO_MASTER_KEY`, `DATABASE_URL`, `HINDSIGHT_API_KEY`, `INNGEST_EVENT_KEY` and `INNGEST_SIGNING_KEY` in `src/env.ts`. Extensible to any env var.

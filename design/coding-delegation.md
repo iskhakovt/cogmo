@@ -840,7 +840,7 @@ Four layers, clean separation:
 
 **Why repo-knowledge lives in the repo, not in Hindsight.** The natural sink for a fact like "this repo needs PG running for tests" is the place humans and Claude Code both already look — the repo's `CLAUDE.md`. Putting it in a Cogmo-private vector store creates a shadow copy of information the repo should own, splits the canonical source from the one humans read, and adds a Hindsight dependency for coding that its vector-recall shape doesn't particularly fit. Hindsight stays scoped to conversational memory.
 
-**Observer for coding tasks** ([memory.md](memory.md)) runs post-task but its sink is a proposed `CLAUDE.md` edit, filed as a small follow-up coding task (`trigger_source = 'evolution'`, goal like "update `CLAUDE.md` with lesson from task `<id>`: `<fact>`"). The usual PR gate applies. Humans review and merge, and the knowledge then loads natively on every future task via Claude Code's project-tier memory. No separate store, no dual-writes, no recall-filtering.
+**Observer for coding tasks** ([memory.md](memory.md)) runs post-task but its sink is a proposed `CLAUDE.md` edit, filed as a small follow-up coding task (`trigger_source = 'evolution'`, goal like "update `CLAUDE.md` with lesson from task `<id>`: `<fact>`"). The usual PR gate applies. The skills repo is excluded: its `CLAUDE.md` is Cogmo-owned and generated ([skills.md → Verify stage](skills.md#verify-stage)), and every coding task on it belongs to a draft. Humans review and merge, and the knowledge then loads natively on every future task via Claude Code's project-tier memory. No separate store, no dual-writes, no recall-filtering.
 
 This reuses the whole coding-delegation pipeline (sandbox, plan gate for user triggers, PR) for its own metacognition, which keeps one pattern rather than two.
 
@@ -975,7 +975,7 @@ After (5): end-to-end working flow for the single-backend, trusted-repo case.
 
 13. **Parallel tasks on the same repo.** Raise `max_concurrent_tasks` past 1; add the install-lock (Concurrency option B) on shared cache volumes. Narrow the lock to known racers (pip, apt) after measurement (option C).
 14. **BuildKit policy enforcement.** Basic `buildx` works from P1 via transparent pipe on `/session`. This phase adds gRPC-level inspection via the BuildKit SDK for fine-grained policy — blocking `FROM` lines against unapproved registries, inspecting secret mounts, rejecting builds that would escape worktree scope.
-15. **Observer repo-knowledge loop.** Post-task Observer extracts durable repo-facts and files a small follow-up coding task (`trigger_source = 'evolution'`) whose goal is to propose a `CLAUDE.md` edit. Normal PR gate applies. Once merged, Claude Code loads the new knowledge natively on every future task — no Cogmo-private store.
+15. **Observer repo-knowledge loop.** Post-task Observer extracts durable repo-facts and files a small follow-up coding task (`trigger_source = 'evolution'`) whose goal is to propose a `CLAUDE.md` edit, on any registered repo but the skills repo. Normal PR gate applies. Once merged, Claude Code loads the new knowledge natively on every future task — no Cogmo-private store.
 
 Each phase has a clear "done" bar: the prior phase's feature works unchanged, and the new one is opt-in behind config (not a silent behavior change).
 
