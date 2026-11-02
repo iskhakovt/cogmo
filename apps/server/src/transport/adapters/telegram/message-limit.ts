@@ -11,5 +11,9 @@ const ELLIPSIS = "…";
  */
 export function fitTelegramMessage(text: string): string {
   if (text.length <= TELEGRAM_MAX_MESSAGE_LENGTH) return text;
-  return text.slice(0, TELEGRAM_MAX_MESSAGE_LENGTH - ELLIPSIS.length) + ELLIPSIS;
+  let end = TELEGRAM_MAX_MESSAGE_LENGTH - ELLIPSIS.length;
+  // Never cut between the two code units of one character (an emoji).
+  const last = text.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+  return text.slice(0, end) + ELLIPSIS;
 }

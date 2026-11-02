@@ -98,6 +98,24 @@ describe("registerCallbackQueries", () => {
       expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({ text: "Approved" });
     });
 
+    it("skill deploy: a rejected tap answers with a toast and leaves the keyboard", async () => {
+      const { transport } = await createAdapter({
+        skills: {
+          approveDeploy: vi.fn().mockResolvedValue(err({ code: "identity_rejected" })),
+        },
+      });
+      const ctx = makeCallbackCtx(`skill:${PENDING_ID}:approve`);
+
+      const handler = handlers.get(`callbackQuery:${SKILLS_DEPLOY_CALLBACK_REGEX.source}`);
+      await handler(ctx);
+
+      expect(transport.skills.approveDeploy).toHaveBeenCalled();
+      expect(ctx.editMessageText).not.toHaveBeenCalled();
+      expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({
+        text: "You're not authorized on this bot.",
+      });
+    });
+
     it("skill approval: a tap with no chat is answered, not dispatched", async () => {
       const { transport } = await createAdapter();
       const { chat: _chat, ...ctx } = makeCallbackCtx(`skill:${PENDING_ID}:approve`);

@@ -90,19 +90,20 @@ export function classifyManifestStub(
 
   // The stub cannot show a body read-only, so `auto` is out of its reach;
   // the cap is recorded as a reason of its own.
-  const capped = riskTier === "auto";
+  const stubbed = match(riskTier)
+    .returnType<Pick<ClassifierLog, "risk_tier" | "reasons">>()
+    .with("auto", () => ({ risk_tier: "notify", reasons: [...reasons, "classifier_fallback"] }))
+    .with("notify", "approve", (tier) => ({ risk_tier: tier, reasons }))
+    .exhaustive();
   return {
     classifier_version: STUB_CLASSIFIER_VERSION,
-    risk_tier: match(riskTier)
-      .with("auto", "notify", (): "notify" => "notify")
-      .with("approve", (tier) => tier)
-      .exhaustive(),
+    risk_tier: stubbed.risk_tier,
     declared_effects: manifest.effects,
     detected_effects: [],
     declared_secrets: declaredSecrets,
     declared_dependencies: manifest.dependencies,
     validation_errors: [],
-    reasons: capped ? [...reasons, "classifier_fallback"] : reasons,
+    reasons: stubbed.reasons,
     declared_network: manifest.network?.allow ?? null,
     capabilities: { ...capabilities },
   };
