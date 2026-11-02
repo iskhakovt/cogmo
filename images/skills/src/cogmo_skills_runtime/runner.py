@@ -157,8 +157,8 @@ class _Http:
     Present in both tiers so a skill does not break when adding a
     dependency moves it here from the wasm tier. The container tier has
     real sockets and can use `httpx` instead; going through the host keeps
-    the request in
-    `skill_context_calls` and under the host's destination checks.
+    the request in `skill_context_calls` and under the host's destination
+    checks.
     """
 
     def __init__(self, bridge: _Bridge) -> None:

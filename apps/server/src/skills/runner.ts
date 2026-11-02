@@ -63,7 +63,7 @@ export type { RegisterForTestsParams } from "./seed-for-tests.js";
  * Production wiring always passes `containerImage:
  * env.COGMO_SKILLS_IMAGE`, so this default only matters for tests that
  * construct a runner without an explicit image AND actually invoke a
- * tier-container skill (the integration test does the latter — it overrides).
+ * container skill (the integration test does the latter — it overrides).
  * Shares the helper with `env.ts` so the two never drift.
  */
 const DEFAULT_CONTAINER_IMAGE = defaultSkillsImage();
@@ -205,8 +205,8 @@ export interface SkillRunnerOptions {
    */
   sandbox?: SandboxClient;
   /**
-   * Image for container-tier skills. Defaults to the cogmo-skills image
-   * (`defaultSkillsImage()`, from `COGMO_SKILLS_IMAGE`).
+   * Image for container-tier skills. Defaults to the cogmo-skills image,
+   * `COGMO_SKILLS_IMAGE`'s own default (`defaultSkillsImage()`).
    */
   containerImage?: string;
   /**
