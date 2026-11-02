@@ -72,65 +72,64 @@ function setup(): {
   return { store, runInTx, txCount: () => count };
 }
 
-describe.each([{ label: "listAllSkills", list: listAllSkills, read: "listAllSkills" as const }])(
-  "$label",
-  ({ list, read }) => {
-    it("attaches each skill's pending deploy and leaves the others null", async () => {
-      const { store, runInTx } = setup();
-      store[read].mockResolvedValue([
-        skillRow(),
-        skillRow({ id: "skill-2", name: "other", disabled: read === "listAllSkills" }),
-      ]);
-      store.listPendingDeploys.mockResolvedValue([pendingDeploy()]);
+describe("listAllSkills", () => {
+  const list = listAllSkills;
+  const read = "listAllSkills" as const;
+  it("attaches each skill's pending deploy and leaves the others null", async () => {
+    const { store, runInTx } = setup();
+    store[read].mockResolvedValue([
+      skillRow(),
+      skillRow({ id: "skill-2", name: "other", disabled: read === "listAllSkills" }),
+    ]);
+    store.listPendingDeploys.mockResolvedValue([pendingDeploy()]);
 
-      const summaries = await list({ store, runInTx });
+    const summaries = await list({ store, runInTx });
 
-      expect(summaries).toEqual([
-        {
-          name: "echo",
-          tier: "wasm",
-          riskTier: "notify",
-          disabled: false,
-          gitSha: SHA_LIVE,
-          pendingDeploy: { id: "deploy-1", gitSha: SHA_PENDING },
-        },
-        expect.objectContaining({ name: "other", pendingDeploy: null }),
-      ]);
-    });
+    expect(summaries).toEqual([
+      {
+        name: "echo",
+        tier: "wasm",
+        riskTier: "notify",
+        disabled: false,
+        gitSha: SHA_LIVE,
+        pendingDeploy: { id: "deploy-1", gitSha: SHA_PENDING },
+      },
+      expect.objectContaining({ name: "other", pendingDeploy: null }),
+    ]);
+  });
 
-    it("reads the skills and the pending deploys in one transaction", async () => {
-      const { store, runInTx, txCount } = setup();
-      store[read].mockResolvedValue([skillRow()]);
-      store.listPendingDeploys.mockResolvedValue([]);
+  it("reads the skills and the pending deploys in one transaction", async () => {
+    const { store, runInTx, txCount } = setup();
+    store[read].mockResolvedValue([skillRow()]);
+    store.listPendingDeploys.mockResolvedValue([]);
 
-      await list({ store, runInTx });
+    await list({ store, runInTx });
 
-      expect(txCount()).toBe(1);
-      expect(store[read]).toHaveBeenCalledWith(FAKE_TX);
-      expect(store.listPendingDeploys).toHaveBeenCalledWith(FAKE_TX);
-    });
+    expect(txCount()).toBe(1);
+    expect(store[read]).toHaveBeenCalledWith(FAKE_TX);
+    expect(store.listPendingDeploys).toHaveBeenCalledWith(FAKE_TX);
+  });
 
-    it("shows the newest of two pending deploys for one skill", async () => {
-      const { store, runInTx } = setup();
-      store[read].mockResolvedValue([skillRow()]);
-      store.listPendingDeploys.mockResolvedValue([
-        pendingDeploy({ id: "deploy-old", gitSha: "c".repeat(40) }),
-        pendingDeploy({ id: "deploy-new" }),
-      ]);
+  it("shows the newest of two pending deploys for one skill", async () => {
+    const { store, runInTx } = setup();
+    store[read].mockResolvedValue([skillRow()]);
+    store.listPendingDeploys.mockResolvedValue([
+      pendingDeploy({ id: "deploy-old", gitSha: "c".repeat(40) }),
+      pendingDeploy({ id: "deploy-new" }),
+    ]);
 
-      const [summary] = await list({ store, runInTx });
+    const [summary] = await list({ store, runInTx });
 
-      expect(summary?.pendingDeploy).toEqual({ id: "deploy-new", gitSha: SHA_PENDING });
-    });
+    expect(summary?.pendingDeploy).toEqual({ id: "deploy-new", gitSha: SHA_PENDING });
+  });
 
-    it("ignores a pending deploy whose skill is not in the listing", async () => {
-      const { store, runInTx } = setup();
-      store[read].mockResolvedValue([skillRow()]);
-      store.listPendingDeploys.mockResolvedValue([pendingDeploy({ skillId: "skill-elsewhere" })]);
+  it("ignores a pending deploy whose skill is not in the listing", async () => {
+    const { store, runInTx } = setup();
+    store[read].mockResolvedValue([skillRow()]);
+    store.listPendingDeploys.mockResolvedValue([pendingDeploy({ skillId: "skill-elsewhere" })]);
 
-      const summaries = await list({ store, runInTx });
+    const summaries = await list({ store, runInTx });
 
-      expect(summaries.map((s) => s.pendingDeploy)).toEqual([null]);
-    });
-  },
-);
+    expect(summaries.map((s) => s.pendingDeploy)).toEqual([null]);
+  });
+});

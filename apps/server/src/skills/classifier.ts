@@ -101,6 +101,6 @@ export function classifyManifestStub(
     validation_errors: [],
     reasons,
     declared_network: manifest.network?.allow ?? null,
-    capabilities,
+    capabilities: { ...capabilities },
   };
 }

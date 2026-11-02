@@ -53,7 +53,7 @@ export function userIdOf(p: Principal): string;
 - A channel-minted principal is valid only on its channel: `Transport` methods on channel B reject a principal whose `via.channelId` is A with `identity_rejected`. An owner principal is valid on the operator only; no `Transport` method accepts one, since no caller needs that.
 - `ownerPrincipal` is not on `Operator` and not reachable from `AdapterDeps`. `TransportDeps.defaultUserId`, which `createTransport` never reads today, is the owner id the loaders pass.
 - `principal.ts` lives in `src/operator/` and transport imports its class and minter as values; `src/operator/` imports from `src/transport/` as types only (stores are injected), so the two modules do not form a value cycle.
-- What this does and does not close: adapters cannot read a principal's id. They still receive a `TransportStore` through `AdapterDeps` (`codingProgress`, `skillsApproval`, `pipelineGate`) and profile DTOs that carry `userId`; removing those is follow-up work outside this plan, and the `identity.md` rewrite says so.
+- What this does and does not close: adapters cannot read a principal's id. They still receive a `TransportStore` through `AdapterDeps` (`codingProgress`, `skillsDeploy`, `pipelineGate`) and profile DTOs that carry `userId`; removing those is follow-up work outside this plan, and the `identity.md` rewrite says so.
 
 ### `Transport` (per channel) `[proposed]`
 

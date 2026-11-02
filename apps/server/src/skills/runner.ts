@@ -158,8 +158,9 @@ export interface SkillRunnerOptions {
   /** The install owner with the default profile — what an `owner` origin runs as. */
   defaultRunAs: SkillRunIdentity;
   /**
-   * What this deployment enforces, read by the classifier
-   * ({@link BUILD_CAPABILITIES} when unset).
+   * What this deployment enforces, read by the classifier. Boot passes
+   * {@link BUILD_CAPABILITIES}; a runner built without it (the tests') reads
+   * the same flags, so an omitted value can never loosen a tier.
    */
   capabilities?: SkillsCapabilities;
   /**

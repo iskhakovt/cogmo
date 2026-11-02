@@ -22,7 +22,7 @@ export interface SkillsCapabilities {
  * The capabilities of this build. `reviewPanel` becomes a `deployment_flags`
  * read once the review stage ships.
  */
-export const BUILD_CAPABILITIES: SkillsCapabilities = {
+export const BUILD_CAPABILITIES: Readonly<SkillsCapabilities> = Object.freeze({
   tier1Hardened: false,
   reviewPanel: false,
-};
+});

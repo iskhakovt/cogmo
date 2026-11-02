@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { Transactor } from "../../../db/index.js";
 import type { SkillsDeployOutcomeData } from "../../../inngest/events.js";
 import { mockTransportStore } from "../../../test/factories.js";
-import { deployOutcomeText, postSkillsDeployOutcome } from "./skills-deploy-outcome-poster.js";
+import { postSkillsDeployOutcome } from "./skills-deploy-outcome-poster.js";
 
 const FAKE_TX = { __mockTx: true } as never;
 const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
@@ -70,9 +70,26 @@ function telegramSessionStore() {
   });
 }
 
-describe("deployOutcomeText", () => {
-  it("live, first deploy: headline, description and every fact", () => {
-    expect(deployOutcomeText(deployed("live", FULL_FACTS))).toBe(
+/** The text the poster sends this channel's session for `event`. */
+async function textOf(event: SkillsDeployOutcomeData): Promise<string> {
+  const sendMessage = vi.fn().mockResolvedValue(undefined);
+  await postSkillsDeployOutcome({
+    event,
+    channelId: "ch-telegram",
+    runInTx: fakeRunInTx,
+    transportStore: telegramSessionStore(),
+    sendMessage,
+  });
+  const [call] = sendMessage.mock.calls;
+  if (!call) throw new Error("nothing was sent");
+  const [, text] = call;
+  if (typeof text !== "string") throw new Error("the message text is not a string");
+  return text;
+}
+
+describe("the message text", () => {
+  it("live, first deploy: headline, description and every fact", async () => {
+    expect(await textOf(deployed("live", FULL_FACTS))).toBe(
       [
         "✅ Skill briefing is live",
         "Posts the morning briefing.",
@@ -87,32 +104,32 @@ describe("deployOutcomeText", () => {
     );
   });
 
-  it("live, update: names both shas", () => {
-    const text = deployOutcomeText(deployed("live", { priorGitSha: "abc1234abc1234" }));
+  it("live, update: names both shas", async () => {
+    const text = await textOf(deployed("live", { priorGitSha: "abc1234abc1234" }));
     expect(text.split("\n")[0]).toBe("✅ Skill briefing updated abc1234 → def5678");
   });
 
-  it("live, re-register of the live sha: reads as live, not as an update", () => {
-    const text = deployOutcomeText(deployed("live", { priorGitSha: "def5678def5678def5678" }));
+  it("live, re-register of the live sha: reads as live, not as an update", async () => {
+    const text = await textOf(deployed("live", { priorGitSha: "def5678def5678def5678" }));
     expect(text.split("\n")[0]).toBe("✅ Skill briefing is live");
   });
 
-  it("live with nothing declared: leaves the empty sections out", () => {
-    expect(deployOutcomeText(deployed("live"))).toBe(
+  it("live with nothing declared: leaves the empty sections out", async () => {
+    expect(await textOf(deployed("live"))).toBe(
       ["✅ Skill briefing is live", "Posts the morning briefing.", "", "Effects: none"].join("\n"),
     );
   });
 
-  it("live: an effect only one side has reads none on the other", () => {
-    const text = deployOutcomeText(
+  it("live: an effect only one side has reads none on the other", async () => {
+    const text = await textOf(
       deployed("live", { effects: { declared: [], detected: ["reads_memory"] } }),
     );
     expect(text).toContain("Effects: declared none; detected reads_memory");
   });
 
-  it("pending: headline, facts, commit and what each button does", () => {
+  it("pending: headline, facts, commit and what each button does", async () => {
     expect(
-      deployOutcomeText(deployed("pending_approval", { ...FULL_FACTS, priorGitSha: "abc1234ff" })),
+      await textOf(deployed("pending_approval", { ...FULL_FACTS, priorGitSha: "abc1234ff" })),
     ).toBe(
       [
         "🛡️ Skill deploy awaiting approval: briefing",
@@ -131,13 +148,13 @@ describe("deployOutcomeText", () => {
     );
   });
 
-  it("pending, first deploy: the commit alone", () => {
-    expect(deployOutcomeText(deployed("pending_approval"))).toContain("\nCommit: def5678\n");
+  it("pending, first deploy: the commit alone", async () => {
+    expect(await textOf(deployed("pending_approval"))).toContain("\nCommit: def5678\n");
   });
 
-  it("rejected: the skill's name and each error on its own line", () => {
+  it("rejected: the skill's name and each error on its own line", async () => {
     expect(
-      deployOutcomeText({
+      await textOf({
         outcome: "rejected",
         conversationId: CONV_ID,
         skillName: "briefing",
@@ -153,8 +170,8 @@ describe("deployOutcomeText", () => {
     );
   });
 
-  it("rejected before the manifest was read: the branch's sha stands in for the name", () => {
-    const text = deployOutcomeText({
+  it("rejected before the manifest was read: the branch's sha stands in for the name", async () => {
+    const text = await textOf({
       outcome: "rejected",
       conversationId: CONV_ID,
       skillName: "",
@@ -164,8 +181,8 @@ describe("deployOutcomeText", () => {
     expect(text.split("\n")[0]).toBe("❌ Skill register rejected: def5678");
   });
 
-  it("rejected with no sha either: says the branch is unknown", () => {
-    const text = deployOutcomeText({
+  it("rejected with no sha either: says the branch is unknown", async () => {
+    const text = await textOf({
       outcome: "rejected",
       conversationId: CONV_ID,
       skillName: "",

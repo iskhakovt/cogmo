@@ -44,7 +44,7 @@ const REASON_LABELS: Readonly<Record<SkillRiskReason, string>> = {
  * manifest-author-controlled, and a Markdown parse failure would 400 the
  * whole send. A section with nothing to say is left out.
  */
-export function deployOutcomeText(event: SkillsDeployOutcomeData): string {
+function deployOutcomeText(event: SkillsDeployOutcomeData): string {
   return match(event)
     .with({ outcome: "live" }, (live) => {
       const headline =

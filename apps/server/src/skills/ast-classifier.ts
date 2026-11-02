@@ -495,7 +495,7 @@ export async function classifyWithAst(
     validation_errors,
     reasons,
     declared_network: manifest.network?.allow ?? null,
-    capabilities,
+    capabilities: { ...capabilities },
   };
 }
 
@@ -530,6 +530,6 @@ function classifyFromDeclarationsOnly(
     validation_errors: [],
     reasons,
     declared_network: manifest.network?.allow ?? null,
-    capabilities,
+    capabilities: { ...capabilities },
   };
 }

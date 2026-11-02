@@ -16,7 +16,7 @@ const log = logger.child({ component: "skills.announce-outcome" });
  * model, which also keeps a duplicate register (a `pending_deploy_exists`
  * rejection) silent. Runs after the deploy commits, so a failed emit is
  * logged and dropped rather than failing a deploy that already happened:
- * `/skills` lists every deploy.
+ * `/skills` names every skill and its pending deploy.
  */
 export async function announceDeployOutcome(
   deps: { publisher: EventPublisher },

@@ -701,7 +701,7 @@ const skillsDeployedOutcomeFields = {
  * session on `conversationId`; a `pending_approval` message carries the
  * Approve / Deny keyboard, whose taps go straight to
  * `transport.skills.approveDeploy` / `denyDeploy`. Nothing replays a lost
- * emit: `/skills` lists every deploy.
+ * emit: `/skills` names every skill and its pending deploy.
  *
  * `rejected` carries `skillName` empty when the rejection precedes reading
  * the manifest; `gitSha` is the branch tip, empty when the branch did not

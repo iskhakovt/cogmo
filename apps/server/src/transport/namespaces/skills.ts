@@ -72,8 +72,9 @@ export interface SkillsNamespace {
   ): Promise<Result<{ name: string }, TransportError>>;
   /**
    * {@link disable} for the skill `skillId`, as a deploy message's Disable
-   * button names it. Returns `skill_not_found` naming the id when no skill
-   * has it, and naming the skill when it went away before the deregister.
+   * button names it. Returns `skill_id_not_found` when no skill has the id,
+   * and `skill_not_found` naming the skill when it went away before the
+   * deregister.
    */
   disableById(
     skillId: string,
