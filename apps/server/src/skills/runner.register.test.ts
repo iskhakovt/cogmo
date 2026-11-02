@@ -20,8 +20,14 @@ import { makePopulatedBareRepo } from "../test/skills-bare-repo.js";
 import { channels, userIdentities } from "../transport/store/schema.js";
 import { bootstrapSkillsRepo } from "./repo.js";
 import type { SkillRunAs, SkillRunServices } from "./run-as.js";
-import { type SkillActor, type SkillDeployOrigin, SkillRunnerImpl } from "./runner.js";
+import {
+  type SkillActor,
+  type SkillDeployOrigin,
+  SkillRunnerImpl,
+  type SkillRunnerOptions,
+} from "./runner.js";
 import { DrizzleSkillStore, type SkillRunIdentity, type SkillStore } from "./store/index.js";
+import type { Tier1Prefetcher } from "./worker-wasm/tier1.js";
 
 const execFileP = promisify(execFile);
 
@@ -210,8 +216,26 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
       userTimezone: "UTC",
       defaultRunAs: DEFAULT_RUN_AS,
       skillsRepoPath: repo.bare,
+      tier1: offlineTier1(),
       ...overrides,
     });
+  }
+
+  /**
+   * Tier 1 without the network: the fixtures' lockfiles carry placeholder
+   * hashes, so register must neither fetch wheels nor spawn a probe child.
+   */
+  function offlineTier1(): NonNullable<SkillRunnerOptions["tier1"]> {
+    const prefetcher = mock<Tier1Prefetcher>();
+    prefetcher.prefetchBuiltins.mockResolvedValue(ok());
+    prefetcher.probeBuiltins.mockResolvedValue(ok());
+    return {
+      wheelsRoot: join(repo.bare, ".pyodide-wheels"),
+      childrenDir: join(repo.bare, ".tier1-children"),
+      instanceId: null,
+      prefetcher,
+      resolvePackages: async () => ok({ builtins: [], wheelDir: null }),
+    };
   }
 
   it("registers a fresh skill — advances main, writes DB rows, deletes branch", async () => {
@@ -251,7 +275,7 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
       secrets: [],
       dependencies: [],
       schedule: null,
-      reasons: ["tier1_unhardened", "no_review_panel"],
+      reasons: ["no_review_panel"],
       priorGitSha: null,
     });
 

@@ -443,7 +443,7 @@ async def run(inputs, ctx):
     expect(run?.output).toBeNull();
     expect(run?.error).toContain("kaboom");
     // Error-path coverage of the no-rusage → null coalesce in
-    // `runner.invoke`. Pyodide's worker-entry catches the exception and
+    // `runner.invoke`. The tier-1 Pyodide worker catches the exception and
     // emits a `task_result` without a `rusage` block, identical in shape
     // to the tier-2 supervisor-synthesised result (wall-clock kill,
     // SIGKILL, watchdog). A regression that swapped `?? null` for `?? 0`

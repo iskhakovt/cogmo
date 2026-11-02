@@ -4,12 +4,16 @@
 
 import { env } from "../env.js";
 import { inngest } from "../inngest/index.js";
+import { logger } from "../logger.js";
 import { createSkillCronFireHandler } from "../skills/cron-fire-handler.js";
 import { createSkillCronTicker } from "../skills/cron-ticker.js";
 import { createSkillDepsReaper } from "../skills/deps-reaper-function.js";
 import { resolveSkillRunAs } from "../skills/run-as.js";
 import { SkillRunnerImpl } from "../skills/runner.js";
+import { readBootId, reapOrphanedChildGroups } from "../skills/worker-wasm/process-groups.js";
 import type { BootstrapOptions, CoreDeps, SandboxDeps, SkillRunnerHandle } from "./stages.js";
+
+const log = logger.child({ component: "boot.skills" });
 
 /**
  * Used by both `cogmo serve` (where the runner is shared between
@@ -24,6 +28,17 @@ export async function bootstrapSkillRunner(
   sandbox: SandboxDeps,
   opts: BootstrapOptions = {},
 ): Promise<SkillRunnerHandle> {
+  // Tier-1 children left by a previous process of this boot: nothing else
+  // bounds them without the per-child cgroup (design/skills.md → Tier-1
+  // boundary, layer 1).
+  const tier1ChildrenDir = `${env.COGMO_SKILLS_PATH}/.tier1-children`;
+  const reaped = await reapOrphanedChildGroups(tier1ChildrenDir, { bootId: await readBootId() });
+  if (reaped.killed.length > 0 || reaped.stale.length > 0) {
+    log.info(
+      { killed: reaped.killed.map((r) => r.pid), stale: reaped.stale.length },
+      "tier-1 child process groups reaped at boot",
+    );
+  }
   const skillRunner = await SkillRunnerImpl.create({
     store: core.skillStore,
     runInTx: core.runInTx,
@@ -39,6 +54,11 @@ export async function bootstrapSkillRunner(
     // for skills that micropip-install pure-Python wheels — the stdlib is
     // always bundled.
     pyodidePackageCacheDir: `${env.COGMO_SKILLS_PATH}/.pyodide-cache`,
+    tier1: {
+      wheelsRoot: tier1WheelsRoot(),
+      childrenDir: tier1ChildrenDir,
+      instanceId: sandbox.sandboxInstanceId ?? null,
+    },
     poolOptions: {
       min: env.COGMO_SKILLS_POOL_MIN,
       idleShutdownMs: env.COGMO_SKILLS_POOL_IDLE_SHUTDOWN_MS,
@@ -89,9 +109,15 @@ export function createSkillFunctions(
       sandbox: sandbox.sandbox ?? undefined,
       image: env.COGMO_SKILLS_IMAGE,
       depsCacheVolumeName: env.COGMO_SKILLS_DEPS_VOLUME,
+      wheelsRoot: tier1WheelsRoot(),
     },
     inngest,
   );
 
   return { skillCronTicker, skillCronFire, skillDepsReaper };
+}
+
+/** The hash-verified pure-Python wheels tier-1 children install from. */
+function tier1WheelsRoot(): string {
+  return `${env.COGMO_SKILLS_PATH}/.pyodide-wheels`;
 }

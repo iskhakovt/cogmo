@@ -1,5 +1,5 @@
 # The tier-1 `ctx` SDK: the object a skill's `async def run(inputs, ctx)`
-# receives. `worker-entry.ts` runs this file in the Pyodide globals the
+# receives. `pyodide-worker.ts` runs this file in the Pyodide globals the
 # skill body shares, so the body can name `CtxError`, and hands each task
 # the `Ctx` that `_build_ctx(bridge)` returns.
 #
@@ -111,14 +111,12 @@ class Ctx:
         self.log = _Log(self)
 
     async def _call(self, method, args):
-        from js import Object
-        from pyodide.ffi import jsnull, to_js
+        from pyodide.ffi import jsnull
 
-        # Convert Python dict -> plain JS object so structured clone passes
-        # cleanly through postMessage.
-        js_args = to_js(args, dict_converter=Object.fromEntries)
-        # The bridge answers { ok, value } or { ok, kind, message }.
-        reply = (await self._bridge.call(method, js_args)).to_py()
+        # The bridge converts `args` to a plain JS object itself: the `js`
+        # module holds only timers, so Python has no `Object` to build one.
+        # It answers { ok, value } or { ok, kind, message }.
+        reply = (await self._bridge.call(method, args)).to_py()
         if not reply["ok"]:
             raise CtxError(reply["kind"], reply["message"])
         value = reply.get("value")

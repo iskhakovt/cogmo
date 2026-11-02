@@ -19,7 +19,7 @@ import type { SkillRiskReason } from "./risk-reasons.js";
 import type { SkillManifest } from "./types.js";
 
 /** The reasons `BUILD_CAPABILITIES` adds when the table would return `auto`. */
-const CAP_REASONS: SkillRiskReason[] = ["tier1_unhardened", "no_review_panel"];
+const CAP_REASONS: SkillRiskReason[] = ["no_review_panel"];
 
 function manifestWith(overrides: Partial<SkillManifest> = {}): SkillManifest {
   return {

@@ -1,46 +1,56 @@
+import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { MessageChannel, type MessagePort, Worker } from "node:worker_threads";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { CtxHandler } from "../dispatcher.js";
-import { type PyodideThread, type RunOnWorkerResult, runOnThread } from "./host.js";
+import type { HostMessage } from "../protocol.js";
+import { type RunOnWorkerResult, runOnChild, type Tier1Child } from "./host.js";
+import type { IpcChannel } from "./transport.js";
 
 /**
- * `runOnThread` against a stand-in thread: the test plays the Pyodide
- * worker on the far end of a real `MessageChannel`, and errors or exits the
- * thread at will. `host.test.ts` covers `runOnWorker` end to end against
- * real Pyodide.
+ * `runOnChild` against a stand-in child: the test plays the tier-1 child on
+ * the far end of its IPC channel, and errors or exits it at will.
+ * `host.test.ts` covers `runOnWorker` end to end against real children.
  */
 
+class StandInChannel extends EventEmitter implements IpcChannel {
+  connected = true;
+  readonly sent: unknown[] = [];
+  send(message: unknown): boolean {
+    this.sent.push(message);
+    this.emit("sent", message);
+    return true;
+  }
+  disconnect(): void {
+    this.connected = false;
+  }
+}
+
 interface StandIn {
-  thread: PyodideThread;
-  /** The worker's end of the channel. */
-  worker: MessagePort;
+  child: Tier1Child;
+  ipc: StandInChannel;
   interrupt: ReturnType<typeof vi.fn>;
-  terminate: ReturnType<typeof vi.fn>;
+  kill: ReturnType<typeof vi.fn>;
 }
 
 function standIn(): StandIn {
-  const channel = new MessageChannel();
+  const ipc = new StandInChannel();
+  const exited = Promise.withResolvers<void>();
   const interrupt = vi.fn();
-  const terminate = vi.fn(async () => {
-    channel.port2.close();
+  // Killing the child exits it, as the real one's SIGKILL does.
+  const kill = vi.fn(() => {
+    ipc.emit("exit", null, "SIGKILL");
+    exited.resolve();
   });
-  return {
-    thread: { port: channel.port1, events: new EventEmitter(), interrupt, terminate },
-    worker: channel.port2,
-    interrupt,
-    terminate,
-  };
+  return { child: { ipc, interrupt, kill, exited: exited.promise }, ipc, interrupt, kill };
 }
 
 const WALL_CLOCK_S = 30;
 
 function run(t: StandIn, wallClockS = WALL_CLOCK_S): Promise<RunOnWorkerResult> {
-  return runOnThread(t.thread, {
+  return runOnChild(t.child, {
     taskId: "task-1",
     skillName: "skill",
-    body: "",
     inputs: {},
     wallClockS,
     readyTimeoutMs: 5_000,
@@ -55,14 +65,14 @@ async function settle(): Promise<void> {
   await vi.advanceTimersByTimeAsync(0);
 }
 
-/** Announce the thread ready and wait for the task it is handed. */
+/** Announce the child ready and wait for the task it is handed. */
 async function readyAndInvoked(t: StandIn): Promise<void> {
   const invoked = new Promise<void>((resolve) => {
-    t.worker.on("message", (m: { type?: string }) => {
+    t.ipc.on("sent", (m: HostMessage) => {
       if (m.type === "task_invoke") resolve();
     });
   });
-  t.worker.postMessage({ type: "ready" });
+  t.ipc.emit("message", { type: "ready" });
   await settle();
   await invoked;
 }
@@ -84,41 +94,41 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-describe("runOnThread", () => {
+describe("runOnChild", () => {
   it("settles a task on its result, with no wait for a task_exited", async () => {
     const t = standIn();
     const result = run(t);
     const watched = watch(result);
     await readyAndInvoked(t);
 
-    t.worker.postMessage({ type: "task_result", id: "task-1", ok: true, output: 1 });
+    t.ipc.emit("message", { type: "task_result", id: "task-1", ok: true, output: 1 });
     await settle();
 
     expect(watched.settled()).toBe(true);
     expect(await result).toEqual({ ok: true, output: 1 });
-    expect(t.terminate).toHaveBeenCalled();
+    expect(t.kill).toHaveBeenCalled();
   });
 
-  it("fails a task at once when its thread crashes mid-task", async () => {
+  it("fails a task at once when its child's channel errors mid-task", async () => {
     const t = standIn();
     const result = run(t);
     const watched = watch(result);
     await readyAndInvoked(t);
 
-    t.thread.events.emit("error", new Error("out of memory"));
+    t.ipc.emit("error", new Error("out of memory"));
     await settle();
 
     expect(watched.settled()).toBe(true);
     expect(await result).toEqual({ ok: false, error: "worker crashed: out of memory" });
   });
 
-  it("fails a task at once when its thread exits mid-task", async () => {
+  it("fails a task at once when its child exits mid-task", async () => {
     const t = standIn();
     const result = run(t);
     const watched = watch(result);
     await readyAndInvoked(t);
 
-    t.thread.events.emit("exit", 3);
+    t.ipc.emit("exit", 3, null);
     await settle();
 
     expect(watched.settled()).toBe(true);
@@ -135,23 +145,38 @@ describe("runOnThread", () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(t.interrupt).toHaveBeenCalledTimes(1);
 
-    t.thread.events.emit("error", new Error("KeyboardInterrupt"));
+    t.ipc.emit("error", new Error("KeyboardInterrupt"));
     await settle();
 
     expect(await result).toEqual({ ok: false, error: "wall_clock_exceeded" });
   });
 
-  it("keeps a result that arrives in the grace window after the interrupt", async () => {
+  it("reports a result that arrives after the interrupt as wall_clock_exceeded", async () => {
+    // A skill can catch KeyboardInterrupt and return normally.
     const t = standIn();
     const result = run(t);
     await readyAndInvoked(t);
 
     await vi.advanceTimersByTimeAsync(WALL_CLOCK_S * 1000);
     expect(t.interrupt).toHaveBeenCalledTimes(1);
-    t.worker.postMessage({ type: "task_result", id: "task-1", ok: false, error: "interrupted" });
+    t.ipc.emit("message", { type: "task_result", id: "task-1", ok: true, output: { ok: true } });
     await settle();
 
-    expect(await result).toEqual({ ok: false, error: "interrupted" });
+    expect(await result).toEqual({ ok: false, error: "wall_clock_exceeded" });
+    expect(t.kill).toHaveBeenCalled();
+  });
+
+  it("keeps a result that arrives before the wall clock", async () => {
+    const t = standIn();
+    const result = run(t);
+    await readyAndInvoked(t);
+
+    await vi.advanceTimersByTimeAsync(WALL_CLOCK_S * 1000 - 1);
+    t.ipc.emit("message", { type: "task_result", id: "task-1", ok: false, error: "boom" });
+    await settle();
+
+    expect(await result).toEqual({ ok: false, error: "boom" });
+    expect(t.interrupt).not.toHaveBeenCalled();
   });
 
   it("fails a task with no result by the end of the grace window", async () => {
@@ -169,10 +194,10 @@ describe("runOnThread", () => {
     expect(await result).toEqual({ ok: false, error: "wall_clock_exceeded" });
   });
 
-  it("reports a thread that fails to load", async () => {
+  it("reports a child that fails to load", async () => {
     const t = standIn();
     const result = run(t);
-    t.worker.postMessage({ type: "fatal", error: "micropip: no matching wheel" });
+    t.ipc.emit("message", { type: "fatal", error: "micropip: no matching wheel" });
     await settle();
 
     expect(await result).toEqual({
@@ -181,10 +206,10 @@ describe("runOnThread", () => {
     });
   });
 
-  it("reports a thread that exits before it is ready", async () => {
+  it("reports a child that exits before it is ready", async () => {
     const t = standIn();
     const result = run(t);
-    t.thread.events.emit("exit", 7);
+    t.ipc.emit("exit", 7, null);
     await settle();
 
     expect(await result).toEqual({
@@ -193,52 +218,38 @@ describe("runOnThread", () => {
     });
   });
 
-  it("reports a real thread that throws as it loads, without waiting out its deadline", async () => {
-    // A `py/` file missing beside worker-entry throws at module load. Node
-    // reports that as the thread's `error`, then its `exit`. The deadline's
-    // timer is faked, so only the thread's death can settle the task.
-    const worker = new Worker(`require("node:fs").readFileSync("/nonexistent/py/ctx.py");`, {
-      eval: true,
+  it("reports a real child that throws as it loads, without waiting out its deadline", async () => {
+    // The deadline's timer is faked, so only the child's exit can settle the task.
+    const proc = spawn(process.execPath, ["-e", "throw new Error('boom')"], {
+      stdio: ["ignore", "ignore", "ignore", "ipc"],
     });
-    const channel = new MessageChannel();
+    const exited = new Promise<void>((resolve) => proc.once("exit", () => resolve()));
     try {
-      const result = await runOnThread(
-        {
-          port: channel.port1,
-          events: worker,
-          interrupt: () => {},
-          terminate: () => worker.terminate(),
-        },
+      const result = await runOnChild(
+        { ipc: proc, interrupt: () => {}, kill: () => proc.kill("SIGKILL"), exited },
         {
           taskId: "task-1",
           skillName: "skill",
-          body: "",
           inputs: {},
           readyTimeoutMs: 5_000,
           ctxHandler: mock<CtxHandler>(),
         },
       );
 
-      expect(result).toEqual({
-        ok: false,
-        error:
-          "worker init failed: worker crashed: ENOENT: no such file or directory, open '/nonexistent/py/ctx.py'",
-      });
+      expect(result).toEqual({ ok: false, error: "worker init failed: worker exited (code 1)" });
     } finally {
-      // A failed assertion or a hang must not leave the thread or a port open.
-      await worker.terminate();
-      channel.port1.close();
-      channel.port2.close();
+      // A failed assertion or a hang must not leave the process behind.
+      proc.kill("SIGKILL");
     }
   });
 
-  it("reports a thread that is not ready by its deadline", async () => {
+  it("reports a child that is not ready by its deadline", async () => {
     const t = standIn();
     const result = run(t);
     await vi.advanceTimersByTimeAsync(5_000);
     await settle();
 
     expect(await result).toEqual({ ok: false, error: "worker_init_timeout after 5000ms" });
-    expect(t.terminate).toHaveBeenCalled();
+    expect(t.kill).toHaveBeenCalled();
   });
 });

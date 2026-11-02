@@ -2,7 +2,7 @@ import { z } from "zod";
 
 /**
  * Worker JSON-RPC protocol — transport-agnostic message shapes used by the
- * Tier 1 (postMessage over MessageChannel) and Tier 2 (NDJSON over the
+ * Tier 1 (IPC to a forked child process) and Tier 2 (NDJSON over the
  * supervisor's stdin/stdout) workers. Tasks and ctx calls correlate by
  * `id`; every ctx message also names the task it belongs to. See
  * `design/skills.md` → Protocol.
@@ -73,8 +73,8 @@ export const TaskInvokeSchema = z.object({
    * skill declares dependencies. Absent for skills with empty
    * `dependencies` — the task runs against the stdlib only.
    *
-   * Tier 1 (Pyodide) ignores this field — Pyodide manages its own
-   * import path via `micropip`.
+   * Tier 1 (Pyodide) ignores this field: its child installs the
+   * packages it was forked with, before the handshake.
    */
   // Zod surfaces the failing value via `error.issues[i].input` on
   // parse failure — the message stays terse; debug consumers reach
@@ -170,7 +170,7 @@ export type CtxResult = z.infer<typeof CtxResultSchema>;
  * Every process the task started has been killed and reaped; the worker is
  * reusable only after it. The tier-2 supervisor sends it after the task's
  * `task_result`, or in place of one when the task's relay died first. Tier 1
- * never sends it: its port transport yields one after each `task_result`.
+ * never sends it: its IPC transport yields one after each `task_result`.
  */
 export const TaskExitedSchema = z.object({
   type: z.literal("task_exited"),

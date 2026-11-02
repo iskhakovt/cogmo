@@ -8,11 +8,12 @@
  *      bootstrap depends on something the base image doesn't ship, every
  *      skill invocation in production crashes.
  *
- *   2. Does a tier-1 skill run from the bundled build? `host.ts` spawns its
- *      worker from `new URL("./worker-entry.js", import.meta.url)`, which
- *      resolves only if tsup emits the worker entry beside the bundle the
- *      host landed in, and the worker reads `py/` beside itself as it loads.
- *      Source-tier tests load the host from `src/` and never take that path;
+ *   2. Does a tier-1 skill run from the bundled build? `host.ts` forks its
+ *      child from `new URL("./tier1-child.mjs", import.meta.url)`, which
+ *      resolves only if the build emits the child beside the bundle the host
+ *      landed in, and the child runs under `--permission` with read access
+ *      to its own directory and the Pyodide distribution only. Source-tier
+ *      tests bundle the child from `src/` and never take that path;
  *      registering and running a skill through the shipped CLI does.
  *
  * The app container boots in `serve` mode (per the e2e setup), so we drive

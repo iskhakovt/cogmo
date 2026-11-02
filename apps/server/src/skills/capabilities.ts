@@ -29,7 +29,7 @@ export interface SkillsCapabilities {
  * read once the review stage ships.
  */
 export const BUILD_CAPABILITIES: Readonly<SkillsCapabilities> = Object.freeze({
-  tier1Hardened: false,
+  tier1Hardened: true,
   reviewPanel: false,
   // The per-child cgroup needs the delegation sandbox.md defers.
   tier1MemoryBounded: false,

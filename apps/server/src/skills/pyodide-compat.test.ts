@@ -1,20 +1,39 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { err, ok } from "neverthrow";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mock } from "vitest-mock-extended";
 import {
   __resetPyodideCompatCachesForTests,
   checkPyodideCompat,
   formatPyodideCompatIssues,
+  loadBundledPackages,
   pypiHasPureWheel,
 } from "./pyodide-compat.js";
+import type { Tier1Prefetcher } from "./worker-wasm/tier1.js";
 
 const fakeLockfile = {
   packages: {
     // Exact-version match -> compat accepts without PyPI lookup.
-    httpx: { name: "httpx", version: "0.28.1" },
+    httpx: { name: "httpx", version: "0.28.1", file_name: "httpx-0.28.1-py3-none-any.whl" },
     // PEP-503-normalised: stored under `python-dateutil`, queried via `Python_Dateutil` etc.
-    "python-dateutil": { name: "python-dateutil", version: "2.9.0" },
+    "python-dateutil": {
+      name: "python-dateutil",
+      version: "2.9.0",
+      file_name: "python_dateutil-2.9.0-py2.py3-none-any.whl",
+    },
+    // Native: an Emscripten-built wheel, as pyodide-lock.json names it.
+    "pydantic-core": {
+      name: "pydantic_core",
+      version: "2.41.5",
+      file_name: "pydantic_core-2.41.5-cp314-cp314-pyemscripten_2026_0_wasm32.whl",
+    },
+    regex: {
+      name: "regex",
+      version: "2026.3.32",
+      file_name: "regex-2026.3.32-cp314-cp314-pyemscripten_2026_0_wasm32.whl",
+    },
   },
 };
 
@@ -199,6 +218,119 @@ describe("checkPyodideCompat", () => {
     expect(result.isErr()).toBe(true);
     if (!result.isErr()) return;
     expect(result.error.map((i) => i.spec)).toEqual(["numpy==2.0.0", "scipy==1.13.0"]);
+  });
+});
+
+describe("loadBundledPackages", () => {
+  it("keys by normalised name and marks Emscripten-built wheels native", async () => {
+    const bundled = await loadBundledPackages(lockfilePath);
+    expect(bundled.get("httpx")).toEqual({ version: "0.28.1", native: false });
+    expect(bundled.get("python-dateutil")).toEqual({ version: "2.9.0", native: false });
+    expect(bundled.get("pydantic-core")).toEqual({ version: "2.41.5", native: true });
+  });
+});
+
+describe("checkPyodideCompat boundary probe", () => {
+  function probeWith(prefetcher: Tier1Prefetcher) {
+    return { prefetcher, packageCacheDir: "/cache/pyodide" };
+  }
+
+  it("prefetches and probes only the bundled native packages", async () => {
+    const prefetcher = mock<Tier1Prefetcher>();
+    prefetcher.prefetchBuiltins.mockResolvedValue(ok());
+    prefetcher.probeBuiltins.mockResolvedValue(ok());
+    const result = await checkPyodideCompat(
+      ["httpx==0.28.1", "pydantic_core==2.41.5", "regex==2026.3.32"],
+      { lockfilePath, fetchImpl: fakeFetch({}), probe: probeWith(prefetcher) },
+    );
+    expect(result.isOk()).toBe(true);
+    expect(prefetcher.prefetchBuiltins).toHaveBeenCalledWith(["pydantic-core", "regex"], {
+      packageCacheDir: "/cache/pyodide",
+    });
+    expect(prefetcher.probeBuiltins).toHaveBeenCalledWith(["pydantic-core", "regex"], {
+      packageCacheDir: "/cache/pyodide",
+    });
+  });
+
+  it("allows the register when the probe itself could not run", async () => {
+    const prefetcher = mock<Tier1Prefetcher>();
+    prefetcher.prefetchBuiltins.mockResolvedValue(ok());
+    prefetcher.probeBuiltins.mockResolvedValue(
+      err({ kind: "unavailable", message: "probe child exited with code 137" }),
+    );
+    const result = await checkPyodideCompat(["pydantic_core==2.41.5"], {
+      lockfilePath,
+      fetchImpl: fakeFetch({}),
+      probe: probeWith(prefetcher),
+    });
+    expect(result.isOk()).toBe(true);
+  });
+
+  it("turns each package the probe rejects into an issue carrying its message", async () => {
+    const prefetcher = mock<Tier1Prefetcher>();
+    prefetcher.prefetchBuiltins.mockResolvedValue(ok());
+    prefetcher.probeBuiltins.mockResolvedValue(
+      err({
+        kind: "rejected",
+        failures: [{ name: "regex", reason: "EvalError: Code generation from strings disallowed" }],
+      }),
+    );
+    const result = await checkPyodideCompat(["pydantic_core==2.41.5", "regex==2026.3.32"], {
+      lockfilePath,
+      fetchImpl: fakeFetch({}),
+      probe: probeWith(prefetcher),
+    });
+    expect(result._unsafeUnwrapErr()).toEqual([
+      {
+        spec: "regex==2026.3.32",
+        reason: "native_package_rejected_by_boundary",
+        message: "EvalError: Code generation from strings disallowed",
+      },
+    ]);
+    expect(formatPyodideCompatIssues(result._unsafeUnwrapErr())).toBe(
+      "tier1_incompatible_dependency: regex==2026.3.32 -- its native module cannot load under the tier-1 boundary (JS built from strings); declare tier: container (EvalError: Code generation from strings disallowed)",
+    );
+  });
+
+  it("does not start a probe when no native package is bundled at its locked version", async () => {
+    const prefetcher = mock<Tier1Prefetcher>();
+    const result = await checkPyodideCompat(["httpx==0.28.1"], {
+      lockfilePath,
+      fetchImpl: fakeFetch({}),
+      probe: probeWith(prefetcher),
+    });
+    expect(result.isOk()).toBe(true);
+    expect(prefetcher.prefetchBuiltins).not.toHaveBeenCalled();
+    expect(prefetcher.probeBuiltins).not.toHaveBeenCalled();
+  });
+
+  it("fails open when the prefetch cannot fill the package cache", async () => {
+    const prefetcher = mock<Tier1Prefetcher>();
+    prefetcher.prefetchBuiltins.mockResolvedValue(err("cdn unreachable"));
+    const result = await checkPyodideCompat(["regex==2026.3.32"], {
+      lockfilePath,
+      fetchImpl: fakeFetch({}),
+      probe: probeWith(prefetcher),
+    });
+    expect(result.isOk()).toBe(true);
+    expect(prefetcher.probeBuiltins).not.toHaveBeenCalled();
+  });
+
+  it("reports probe rejections beside the PyPI issues", async () => {
+    const prefetcher = mock<Tier1Prefetcher>();
+    prefetcher.prefetchBuiltins.mockResolvedValue(ok());
+    prefetcher.probeBuiltins.mockResolvedValue(
+      err({ kind: "rejected", failures: [{ name: "regex", reason: "boom" }] }),
+    );
+    const result = await checkPyodideCompat(["numpy==2.0.0", "regex==2026.3.32"], {
+      lockfilePath,
+      fetchImpl: fakeFetch({ "numpy==2.0.0": { ok: true, body: { urls: [] } } }),
+      probe: probeWith(prefetcher),
+    });
+    expect(result._unsafeUnwrapErr().map((i) => i.reason)).toEqual([
+      "no_pyodide_bundle_and_no_pure_wheel",
+      "native_package_rejected_by_boundary",
+    ]);
   });
 });
 

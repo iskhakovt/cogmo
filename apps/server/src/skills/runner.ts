@@ -1,4 +1,6 @@
-import type { Result } from "neverthrow";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { ok, type Result } from "neverthrow";
 import { computeNextRun } from "../agent/scheduling/cron.js";
 import type { Transactor } from "../db/index.js";
 import { defaultSkillsImage } from "../env.js";
@@ -20,6 +22,7 @@ import type { SkillDeployOrigin } from "./deploy/origin.js";
 import { registerSkill } from "./deploy/register.js";
 import type { RegisterResult } from "./deploy/register-result.js";
 import { rollbackSkill } from "./deploy/rollback.js";
+import type { LockfileSnapshot } from "./deps.js";
 import { type LockfileCompiler, makeSandboxLockfileCompiler } from "./deps.js";
 import { type InvokeDeps, invokeSkill } from "./invoke/invoke.js";
 import type { SkillRunResult } from "./invoke/run-result.js";
@@ -32,10 +35,14 @@ import {
   type SkillSummary,
   type SkillToolDef,
 } from "./listing.js";
+import { loadBundledPackages } from "./pyodide-compat.js";
 import type { SkillRunAs } from "./run-as.js";
 import { type RegisterForTestsParams, seedSkillForTests } from "./seed-for-tests.js";
 import { SkillSourceCache } from "./source-cache.js";
 import type { SkillRow, SkillRunIdentity, SkillRunTrigger, SkillStore } from "./store/index.js";
+import { createTier1Prefetcher, pyodideDistDir } from "./worker-wasm/host.js";
+import type { Tier1Packages, Tier1Prefetcher } from "./worker-wasm/tier1.js";
+import { ensureTier1Packages, type Tier1PackagesError } from "./worker-wasm/wheel-cache.js";
 
 export type {
   DeregisterResult,
@@ -165,8 +172,28 @@ export interface SkillRunnerOptions {
    * `rollback` without it throws a clear error.
    */
   skillsRepoPath?: string;
-  /** Pyodide package cache directory — speeds up cold starts. Optional. */
+  /**
+   * Pyodide package cache directory, which the host fills and tier-1 children
+   * read. A temp directory when unset (tests).
+   */
   pyodidePackageCacheDir?: string;
+  /**
+   * Tier 1's other host-side directories and the serve instance its
+   * process-group records name (design/skills.md → Tier-1 boundary). Temp
+   * directories and no instance when unset (tests).
+   */
+  tier1?: {
+    wheelsRoot: string;
+    childrenDir: string;
+    instanceId: string | null;
+    /** Tests inject a prefetcher that spawns no child. */
+    prefetcher?: Tier1Prefetcher;
+    /** Tests inject a resolver that reaches no network. */
+    resolvePackages?: (
+      lockfile: LockfileSnapshot,
+      signal?: AbortSignal,
+    ) => Promise<Result<Tier1Packages, Tier1PackagesError>>;
+  };
   /**
    * Sandbox handle for running tier-2 (sysbox container) skills. Optional —
    * deployments without `SANDBOX_RUNTIME` set leave it undefined; tier-2
@@ -261,6 +288,34 @@ export class SkillRunnerImpl implements SkillRunner {
     }
     const clock = opts.clock ?? (() => new Date());
     const sourceCache = new SkillSourceCache(opts.skillsRepoPath);
+    const packageCacheDir = opts.pyodidePackageCacheDir ?? join(tmpdir(), "cogmo-pyodide-cache");
+    const tier1 = opts.tier1 ?? {
+      wheelsRoot: join(tmpdir(), "cogmo-pyodide-wheels"),
+      childrenDir: join(tmpdir(), "cogmo-tier1-children"),
+      instanceId: null,
+    };
+    const distDir = pyodideDistDir();
+    const prefetcher =
+      opts.tier1?.prefetcher ??
+      createTier1Prefetcher({
+        pyodideDistDir: distDir,
+        childrenDir: tier1.childrenDir,
+        instanceId: tier1.instanceId,
+      });
+    const resolvePackages =
+      opts.tier1?.resolvePackages ??
+      (async (lockfile: LockfileSnapshot, signal?: AbortSignal) =>
+        ensureTier1Packages(
+          { prefetcher, fetchImpl: fetch, bundled: await loadBundledPackages() },
+          { lockfile, packageCacheDir, wheelsRoot: tier1.wheelsRoot, ...(signal && { signal }) },
+        ));
+    const resolveTier1Packages = (
+      lockfile: LockfileSnapshot | undefined,
+      signal?: AbortSignal,
+    ): Promise<Result<Tier1Packages, Tier1PackagesError>> =>
+      lockfile === undefined
+        ? Promise.resolve(ok({ builtins: [], wheelDir: null }))
+        : resolvePackages(lockfile, signal);
     this.#warmPool = new LazyWarmPool({
       image: tier2Image,
       depsCacheVolumeName,
@@ -272,6 +327,7 @@ export class SkillRunnerImpl implements SkillRunner {
       secretsStore: opts.secretsStore,
       defaultRunAs: opts.defaultRunAs,
       capabilities: BUILD_CAPABILITIES,
+      tier1: { prefetcher, packageCacheDir, resolvePackages },
       skillsRepoPath: opts.skillsRepoPath,
       sourceCache,
       // Explicit override wins; otherwise default to a sandbox-backed
@@ -302,7 +358,11 @@ export class SkillRunnerImpl implements SkillRunner {
       sandbox: opts.sandbox,
       warmPool: this.#warmPool,
       runtime: {
-        pyodidePackageCacheDir: opts.pyodidePackageCacheDir,
+        pyodidePackageCacheDir: packageCacheDir,
+        pyodideDistDir: distDir,
+        tier1ChildrenDir: tier1.childrenDir,
+        tier1InstanceId: tier1.instanceId,
+        resolveTier1Packages,
         tier2Image,
         depsCacheVolumeName,
       },

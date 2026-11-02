@@ -75,12 +75,41 @@ export function hashLockfileContents(contents: string): string {
 
 const LOCKFILE_SPEC_RE = /^([a-z0-9][a-z0-9._-]*?)==([a-zA-Z0-9.+!-]+)/i;
 
+const LOCKFILE_HASH_RE = /--hash=sha256:([0-9a-f]+)/gi;
+
+/** One pinned package of a `requirements.lock`. */
+export interface LockfileEntry {
+  /** As the lockfile spells it (uv writes the PEP 503 normalised form). */
+  name: string;
+  version: string;
+  /** Lowercase hex sha256 of every artifact the lockfile accepts for the pin. */
+  sha256: readonly string[];
+}
+
+/**
+ * Parse the pinned entries of `uv pip compile --generate-hashes` output: a
+ * `name==version` line, its `--hash=sha256:<hex>` options on the same line or
+ * on ` \`-continued lines below it. Comments and other options are skipped.
+ * Order preserved.
+ */
+export function parseLockfileEntries(contents: string): readonly LockfileEntry[] {
+  return contents
+    .replace(/\\\r?\n/g, " ")
+    .split("\n")
+    .flatMap((rawLine): LockfileEntry[] => {
+      const line = rawLine.replace(/#.*$/, "").trim();
+      const match = LOCKFILE_SPEC_RE.exec(line);
+      if (!match?.[1] || !match[2]) return [];
+      const sha256 = [...line.matchAll(LOCKFILE_HASH_RE)].flatMap((h) =>
+        h[1] ? [h[1].toLowerCase()] : [],
+      );
+      return [{ name: match[1], version: match[2], sha256 }];
+    });
+}
+
 /** Parse `name==version` specs from `uv pip compile --generate-hashes` output. Order preserved. */
 export function parseLockfilePackageSpecs(contents: string): readonly string[] {
-  return contents.split("\n").flatMap((rawLine) => {
-    const match = LOCKFILE_SPEC_RE.exec(rawLine.trim());
-    return match ? [`${match[1]}==${match[2]}`] : [];
-  });
+  return parseLockfileEntries(contents).map((e) => `${e.name}==${e.version}`);
 }
 
 /** `resolver_failed` → uv stderr (yanked / missing / typo). `transport_failed` → everything else. */

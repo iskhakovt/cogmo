@@ -1,18 +1,34 @@
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { err, ok, type Result } from "neverthrow";
+import { match } from "ts-pattern";
 import { z } from "zod";
 import { logger } from "../logger.js";
 import { describeError } from "../util/describe-error.js";
+import type { Tier1Prefetcher } from "./worker-wasm/tier1.js";
 
 const log = logger.child({ component: "skills.pyodide-compat" });
 
 const PyodideLockfileSchema = z.object({
-  packages: z.record(z.string(), z.object({ name: z.string(), version: z.string() })),
+  packages: z.record(
+    z.string(),
+    z.object({ name: z.string(), version: z.string(), file_name: z.string() }),
+  ),
 });
 
-/** Bundled-package name -> version map, lazily loaded from pyodide's installed lockfile. */
-let cachedBundled: Map<string, string> | null = null;
+/** A package Pyodide's distribution ships, keyed by its PEP 503 normalised name. */
+export interface BundledPackage {
+  version: string;
+  /**
+   * The package is built for Emscripten (its wheel carries the `…_wasm32`
+   * platform tag), so it loads an Emscripten side module rather than only
+   * Python source.
+   */
+  native: boolean;
+}
+
+/** Bundled-package map, lazily loaded from pyodide's installed lockfile. */
+let cachedBundled: ReadonlyMap<string, BundledPackage> | null = null;
 
 /**
  * PyPI-pure-wheel cache keyed by `name==version`. Stores only `true`
@@ -26,26 +42,37 @@ let cachedBundled: Map<string, string> | null = null;
  */
 const pypiPureWheelCache = new Map<string, true>();
 
-async function loadBundled(lockfilePathOverride?: string): Promise<Map<string, string>> {
+/**
+ * The packages the installed Pyodide distribution bundles, read from its
+ * `pyodide-lock.json` (or `lockfilePathOverride`) and cached for the process
+ * when read from the installed distribution. Throws when the file is missing
+ * or malformed; callers decide whether that blocks them.
+ */
+export async function loadBundledPackages(
+  lockfilePathOverride?: string,
+): Promise<ReadonlyMap<string, BundledPackage>> {
   if (cachedBundled && !lockfilePathOverride) return cachedBundled;
   const require = createRequire(import.meta.url);
   const lockPath = lockfilePathOverride ?? require.resolve("pyodide/pyodide-lock.json");
   const raw = await readFile(lockPath, "utf-8");
   const parsed = PyodideLockfileSchema.parse(JSON.parse(raw));
-  const map = new Map<string, string>();
-  for (const pkg of Object.values(parsed.packages)) {
-    map.set(normalizeName(pkg.name), pkg.version);
-  }
+  const map: ReadonlyMap<string, BundledPackage> = new Map(
+    Object.values(parsed.packages).map((pkg) => [
+      normalizePackageName(pkg.name),
+      { version: pkg.version, native: /_wasm32\.whl$/.test(pkg.file_name) },
+    ]),
+  );
   if (!lockfilePathOverride) cachedBundled = map;
   return map;
 }
 
 /** PEP 503 normalisation — `Foo_Bar.Baz` and `foo-bar-baz` are the same project. */
-function normalizeName(name: string): string {
+export function normalizePackageName(name: string): string {
   return name.replace(/[-_.]+/g, "-").toLowerCase();
 }
 
-const PURE_WHEEL_SUFFIXES = ["-py3-none-any.whl", "-py2.py3-none-any.whl"] as const;
+/** Filename suffixes of a wheel that is pure Python, so importable under Pyodide. */
+export const PURE_WHEEL_SUFFIXES = ["-py3-none-any.whl", "-py2.py3-none-any.whl"] as const;
 
 const PypiReleaseSchema = z.object({
   urls: z
@@ -73,7 +100,7 @@ export async function pypiHasPureWheel(
   version: string,
   opts: { timeoutMs?: number; fetchImpl?: typeof fetch } = {},
 ): Promise<Result<boolean, PypiUnavailable>> {
-  const cacheKey = `${normalizeName(name)}==${version}`;
+  const cacheKey = `${normalizePackageName(name)}==${version}`;
   if (pypiPureWheelCache.has(cacheKey)) return ok(true);
   const fetchImpl = opts.fetchImpl ?? fetch;
   const spec = `${name}==${version}`;
@@ -112,10 +139,33 @@ export async function pypiHasPureWheel(
   return ok(hasPure);
 }
 
-export interface PyodideCompatIssue {
-  spec: string;
-  reason: "no_pyodide_bundle_and_no_pure_wheel" | "version_mismatch_no_pure_wheel";
-  bundledVersion?: string;
+export type PyodideCompatIssue =
+  | {
+      spec: string;
+      reason: "no_pyodide_bundle_and_no_pure_wheel";
+    }
+  | {
+      spec: string;
+      reason: "version_mismatch_no_pure_wheel";
+      bundledVersion: string;
+    }
+  | {
+      spec: string;
+      reason: "native_package_rejected_by_boundary";
+      /** What the probe child reported when the package failed to load. */
+      message: string;
+    };
+
+/**
+ * Load-tests the lockfile's bundled native packages under the tier-1
+ * boundary (design/skills.md → Tier-1 boundary, layer 1): Emscripten side
+ * modules that define JS with `EM_JS` build it from strings at load, which
+ * the boundary refuses.
+ */
+export interface PyodideBoundaryProbe {
+  prefetcher: Tier1Prefetcher;
+  packageCacheDir: string;
+  signal?: AbortSignal;
 }
 
 export interface CheckPyodideCompatOptions {
@@ -125,81 +175,147 @@ export interface CheckPyodideCompatOptions {
   fetchImpl?: typeof fetch;
   /** PyPI lookup wall-clock cap per spec. Defaults to 5s. */
   timeoutMs?: number;
+  /** When set, bundled native packages must also load under the boundary. */
+  probe?: PyodideBoundaryProbe;
 }
 
 /**
  * For each declared `name==version`, verify either (a) Pyodide bundles
- * that exact name+version, or (b) PyPI has a pure-Python wheel for it
- * (which `micropip.install` can fetch at first invoke). Surfaces the
- * "no Pyodide wheel and no pure-Python PyPI wheel" failure mode at
- * register-time -- otherwise it lands as a confusing micropip exception
- * during the first WASM invocation of the skill. Pyodide-incompatible
- * deps should declare `tier: container` instead.
+ * that exact name+version, or (b) PyPI has a pure-Python wheel for it.
+ * Surfaces the "no Pyodide wheel and no pure-Python PyPI wheel" failure
+ * mode at register-time, before the first WASM invocation of the skill.
+ * Pyodide-incompatible deps should declare `tier: container` instead.
  *
- * PyPI failures fail open with a warn log: the worst case is
- * first-invoke micropip surface, which is the pre-existing behaviour;
- * we don't want a transient PyPI 503 to block register.
+ * With `opts.probe`, the bundled native packages among the specs are then
+ * fetched into the package cache and load-tested under the tier-1 boundary;
+ * each one that fails to load is a `native_package_rejected_by_boundary`
+ * issue.
+ *
+ * PyPI failures, an unreadable `pyodide-lock.json` and a prefetch that cannot
+ * fill the cache fail open with a warn log: a transient outage shouldn't
+ * block register, and the first invocation surfaces the same case.
  */
 export async function checkPyodideCompat(
   declaredSpecs: ReadonlyArray<string>,
   opts: CheckPyodideCompatOptions = {},
 ): Promise<Result<void, ReadonlyArray<PyodideCompatIssue>>> {
   if (declaredSpecs.length === 0) return ok();
-  let bundled: Map<string, string>;
+  let bundled: ReadonlyMap<string, BundledPackage>;
   try {
-    bundled = await loadBundled(opts.lockfilePath);
+    bundled = await loadBundledPackages(opts.lockfilePath);
   } catch (e) {
     // pyodide-lock.json unreadable -- typically `pyodide` not installed
     // (a future tier-2-only deployment marking it optional) or the file
     // missing from a non-standard install. Same fail-open posture as
     // PyPI network errors below: register stays unblocked, first
-    // WASM-tier invocation surfaces the real issue via micropip.
+    // WASM-tier invocation surfaces the real issue.
     log.warn(
       { err: describeError(e) },
       "pyodide-compat: lockfile load failed; allowing register (first-invoke surfaces the real issue)",
     );
     return ok();
   }
-  const issues: PyodideCompatIssue[] = [];
-  for (const spec of declaredSpecs) {
+  const parsedSpecs = declaredSpecs.flatMap((spec) => {
     const m = /^([a-z0-9][a-z0-9._-]*?)==(.+)$/i.exec(spec);
-    if (!m) continue;
-    const name = m[1] ?? "";
-    const version = m[2] ?? "";
-    if (!name || !version) continue;
-    const normName = normalizeName(name);
-    const bundledVersion = bundled.get(normName);
-    if (bundledVersion === version) continue;
+    return m?.[1] && m[2] ? [{ spec, name: m[1], version: m[2] }] : [];
+  });
+  const issues: PyodideCompatIssue[] = [];
+  const nativeBundled: { spec: string; name: string }[] = [];
+  for (const { spec, name, version } of parsedSpecs) {
+    const normName = normalizePackageName(name);
+    const pkg = bundled.get(normName);
+    if (pkg?.version === version) {
+      if (pkg.native) nativeBundled.push({ spec, name: normName });
+      continue;
+    }
     const pure = await pypiHasPureWheel(name, version, opts);
     if (pure.isErr()) {
-      // Fail open: first invoke surfaces the same case via micropip, and a
-      // brief PyPI outage shouldn't block tier-1 registers.
+      // Fail open: first invoke surfaces the same case, and a brief PyPI
+      // outage shouldn't block tier-1 registers.
       log.warn(
         { spec, reason: pure.error.reason },
-        "pyodide-compat: PyPI check failed; allowing register (first-invoke will recheck via micropip)",
+        "pyodide-compat: PyPI check failed; allowing register (first-invoke will recheck)",
       );
       continue;
     }
     if (pure.value) continue;
-    issues.push({
-      spec,
-      reason: bundledVersion
-        ? "version_mismatch_no_pure_wheel"
-        : "no_pyodide_bundle_and_no_pure_wheel",
-      ...(bundledVersion && { bundledVersion }),
-    });
+    issues.push(
+      pkg
+        ? { spec, reason: "version_mismatch_no_pure_wheel", bundledVersion: pkg.version }
+        : { spec, reason: "no_pyodide_bundle_and_no_pure_wheel" },
+    );
+  }
+  if (opts.probe && nativeBundled.length > 0) {
+    issues.push(...(await probeNativeBundled(opts.probe, nativeBundled)));
   }
   return issues.length > 0 ? err(issues) : ok();
 }
 
+async function probeNativeBundled(
+  probe: PyodideBoundaryProbe,
+  packages: ReadonlyArray<{ spec: string; name: string }>,
+): Promise<PyodideCompatIssue[]> {
+  const names = packages.map((p) => p.name);
+  const cacheOpts = {
+    packageCacheDir: probe.packageCacheDir,
+    ...(probe.signal && { signal: probe.signal }),
+  };
+  const prefetched = await probe.prefetcher.prefetchBuiltins(names, cacheOpts);
+  if (prefetched.isErr()) {
+    log.warn(
+      { names, reason: prefetched.error },
+      "pyodide-compat: package cache prefetch failed; allowing register without the boundary probe",
+    );
+    return [];
+  }
+  const probed = await probe.prefetcher.probeBuiltins(names, cacheOpts);
+  if (probed.isOk()) return [];
+  return (
+    match(probed.error)
+      .returnType<PyodideCompatIssue[]>()
+      .with({ kind: "rejected" }, ({ failures }) =>
+        failures.map((failure) => ({
+          spec:
+            packages.find((p) => p.name === normalizePackageName(failure.name))?.spec ??
+            failure.name,
+          reason: "native_package_rejected_by_boundary",
+          message: failure.reason,
+        })),
+      )
+      // The probe said nothing about the packages: register stays unblocked,
+      // and the first run under the boundary surfaces a package that cannot load.
+      .with({ kind: "unavailable" }, ({ message }) => {
+        log.warn(
+          { names, reason: message },
+          "pyodide-compat: boundary probe unavailable; allowing register without it",
+        );
+        return [];
+      })
+      .exhaustive()
+  );
+}
+
 /** Render compat issues as a single user-facing message for the register `errors[]`. */
 export function formatPyodideCompatIssues(issues: ReadonlyArray<PyodideCompatIssue>): string {
-  const lines = issues.map((i) => {
-    if (i.reason === "version_mismatch_no_pure_wheel") {
-      return `tier1_incompatible_dependency: ${i.spec} -- Pyodide bundles ${i.bundledVersion} but no pure-Python wheel exists on PyPI for the requested version`;
-    }
-    return `tier1_incompatible_dependency: ${i.spec} -- not bundled by Pyodide and no pure-Python wheel on PyPI (declare tier: container if a native wheel is required)`;
-  });
+  const lines = issues.map((i) =>
+    match(i)
+      .with(
+        { reason: "version_mismatch_no_pure_wheel" },
+        (v) =>
+          `tier1_incompatible_dependency: ${v.spec} -- Pyodide bundles ${v.bundledVersion} but no pure-Python wheel exists on PyPI for the requested version`,
+      )
+      .with(
+        { reason: "no_pyodide_bundle_and_no_pure_wheel" },
+        (v) =>
+          `tier1_incompatible_dependency: ${v.spec} -- not bundled by Pyodide and no pure-Python wheel on PyPI (declare tier: container if a native wheel is required)`,
+      )
+      .with(
+        { reason: "native_package_rejected_by_boundary" },
+        (v) =>
+          `tier1_incompatible_dependency: ${v.spec} -- its native module cannot load under the tier-1 boundary (JS built from strings); declare tier: container (${v.message})`,
+      )
+      .exhaustive(),
+  );
   return lines.join("; ");
 }
 
