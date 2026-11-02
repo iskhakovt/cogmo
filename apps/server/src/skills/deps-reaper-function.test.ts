@@ -173,6 +173,44 @@ describe("createSkillDepsReaper", () => {
     }
   });
 
+  it.skipIf(process.getuid?.() === 0)(
+    "still reports bundled_unreadable when the tmp sweep itself fails",
+    async () => {
+      const wheelsRoot = await mkdtemp(join(tmpdir(), "deps-reaper-wheels-"));
+      try {
+        await chmod(wheelsRoot, 0o000);
+        const store = mock<SkillStore>();
+        store.listReachableLockfileHashes.mockResolvedValue(new Set());
+        const fn = createSkillDepsReaper(
+          {
+            runInTx,
+            store,
+            sandbox: undefined,
+            image: "cogmo-skills:test",
+            depsCacheVolumeName: undefined,
+            wheelsRoot,
+            loadBundled: async () =>
+              err({ kind: "bundled_unreadable" as const, message: "pyodide-lock.json: ENOENT" }),
+          },
+          inngest,
+        );
+
+        const { result, error } = await new InngestTestEngine({
+          function: fn,
+          events: [SCHEDULED_EVENT],
+        }).execute();
+
+        expect(error).toBeUndefined();
+        expect(result).toMatchObject({
+          tier1Wheels: { reapedDirs: [], error: "bundled_unreadable" },
+        });
+      } finally {
+        await chmod(wheelsRoot, 0o700);
+        await rm(wheelsRoot, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("sweeps only the wheel root's stale tmp dirs when Pyodide's lockfile cannot be read", async () => {
     const wheelsRoot = await mkdtemp(join(tmpdir(), "deps-reaper-wheels-"));
     const unreachable = `${"b".repeat(64)}-pyodide314.0.7`;
