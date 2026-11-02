@@ -49,15 +49,17 @@ const PypiReleaseFilesSchema = z.object({
  * Why a lockfile's tier-1 packages could not be provided. The wheel kinds
  * name the package: `wheel_unavailable` and `hash_mismatch` are terminal for
  * the lockfile (PyPI does not serve a pure-Python wheel with a pinned hash),
- * while `network_failed`, `prefetch_failed` and `publish_failed` may clear on
- * a retry.
+ * while `network_failed`, `prefetch_failed`, `publish_failed` and
+ * `bundled_unreadable` (Pyodide's own lockfile could not be read) may clear
+ * on a retry.
  */
 export type Tier1PackagesError =
   | { kind: "wheel_unavailable"; spec: string; message: string }
   | { kind: "hash_mismatch"; spec: string; message: string }
   | { kind: "network_failed"; spec: string; message: string }
   | { kind: "prefetch_failed"; message: string }
-  | { kind: "publish_failed"; message: string };
+  | { kind: "publish_failed"; message: string }
+  | { kind: "bundled_unreadable"; message: string };
 
 export interface EnsureTier1PackagesDeps {
   prefetcher: Tier1Prefetcher;
@@ -78,9 +80,13 @@ export interface EnsureTier1PackagesArgs {
 /**
  * Provide what a tier-1 child installs for `lockfile` (design/skills.md →
  * Tier-1 boundary, layer 4). A package Pyodide bundles at the locked version
- * is a builtin, fetched into `packageCacheDir`; every other package is a
+ * is a builtin, loaded from `packageCacheDir`; every other package is a
  * pure-Python wheel from PyPI, checked against the lockfile's sha256 and
  * published under `<wheelsRoot>/<lockfile hash>/`.
+ *
+ * The cache must hold the builtins, micropip (which installs the wheels) and
+ * every bundled package they depend on. A prefetch child fills it only when
+ * one of those files is missing, so a warm cache costs no Pyodide boot.
  *
  * The directory is published as the venvs are: written under
  * `<hash>.tmp.<id>`, marked `.ready`, renamed into place, then made
@@ -88,19 +94,6 @@ export interface EnsureTier1PackagesArgs {
  * rename succeeds once it sees the winner's `.ready`. Nothing in it is a
  * link, since the child's permission model follows links out of the grant.
  */
-/** One line naming why the lockfile's packages could not be made available. */
-export function describeTier1PackagesError(error: Tier1PackagesError): string {
-  return match(error)
-    .with(
-      { kind: "wheel_unavailable" },
-      { kind: "hash_mismatch" },
-      { kind: "network_failed" },
-      (e) => `${e.kind}: ${e.spec}: ${e.message}`,
-    )
-    .with({ kind: "prefetch_failed" }, { kind: "publish_failed" }, (e) => `${e.kind}: ${e.message}`)
-    .exhaustive();
-}
-
 export async function ensureTier1Packages(
   deps: EnsureTier1PackagesDeps,
   args: EnsureTier1PackagesArgs,
@@ -110,7 +103,14 @@ export async function ensureTier1Packages(
     (e) => deps.bundled.get(normalizePackageName(e.name))?.version === e.version,
   );
   const builtins = builtinEntries.map((e) => normalizePackageName(e.name));
-  if (builtins.length > 0) {
+  if (builtins.length === 0 && wheelEntries.length === 0) {
+    return ok({ builtins, wheelDir: null });
+  }
+  const cached = await cacheHolds(
+    args.packageCacheDir,
+    bundledClosure(deps.bundled, [...builtins, "micropip"]),
+  );
+  if (!cached) {
     const prefetched = await deps.prefetcher.prefetchBuiltins(builtins, {
       packageCacheDir: args.packageCacheDir,
       ...(args.signal && { signal: args.signal }),
@@ -120,6 +120,63 @@ export async function ensureTier1Packages(
   if (wheelEntries.length === 0) return ok({ builtins, wheelDir: null });
   const published = await publishWheelDir(deps.fetchImpl, args, wheelEntries);
   return published.map((wheelDir) => ({ builtins, wheelDir }));
+}
+
+/** One line naming why the lockfile's packages could not be made available. */
+export function describeTier1PackagesError(error: Tier1PackagesError): string {
+  return match(error)
+    .with(
+      { kind: "wheel_unavailable" },
+      { kind: "hash_mismatch" },
+      { kind: "network_failed" },
+      (e) => `${e.kind}: ${e.spec}: ${e.message}`,
+    )
+    .with(
+      { kind: "prefetch_failed" },
+      { kind: "publish_failed" },
+      { kind: "bundled_unreadable" },
+      (e) => `${e.kind}: ${e.message}`,
+    )
+    .exhaustive();
+}
+
+/**
+ * The bundled packages `roots` name and every bundled package they depend on,
+ * transitively. A name Pyodide does not bundle has no file to check.
+ */
+function bundledClosure(
+  bundled: ReadonlyMap<string, BundledPackage>,
+  roots: readonly string[],
+): readonly BundledPackage[] {
+  const seen = new Set<string>();
+  const closure: BundledPackage[] = [];
+  const pending = [...roots];
+  // A stateful walk over the dependency graph, which may share nodes.
+  for (let name = pending.pop(); name !== undefined; name = pending.pop()) {
+    if (seen.has(name)) continue;
+    seen.add(name);
+    const pkg = bundled.get(name);
+    if (pkg === undefined) continue;
+    closure.push(pkg);
+    pending.push(...pkg.depends);
+  }
+  return closure;
+}
+
+/** Whether `packageCacheDir` holds every package's file. */
+async function cacheHolds(
+  packageCacheDir: string,
+  packages: readonly BundledPackage[],
+): Promise<boolean> {
+  const present = await Promise.all(
+    packages.map((pkg) =>
+      stat(join(packageCacheDir, pkg.fileName)).then(
+        (s) => s.isFile(),
+        () => false,
+      ),
+    ),
+  );
+  return present.every((p) => p);
 }
 
 /** Files `0o444`, then the directory `0o555`: what the permission grant lets a child read and nothing writes. */
@@ -277,19 +334,22 @@ async function fetchVerifiedWheel(
   return ok({ filename: file.filename, bytes });
 }
 
-/** Remove `<hash>.tmp.<id>` directories older than `STALE_TMP_MS`. Returns their names. */
-async function removeStaleTmpDirs(root: string, now: number): Promise<readonly string[]> {
+/** Remove `<hash>.tmp.<id>` directories older than `STALE_TMP_MS`. */
+async function removeStaleTmpDirs(root: string, now: number): Promise<void> {
   const dirents = await readdir(root, { withFileTypes: true });
   const candidates = dirents.filter((d) => d.isDirectory() && TMP_DIR_RE.test(d.name));
-  const removed: string[] = [];
   for (const d of candidates) {
     const path = join(root, d.name);
     const { mtimeMs } = await stat(path);
     if (now - mtimeMs <= STALE_TMP_MS) continue;
-    await rm(path, { recursive: true, force: true });
-    removed.push(d.name);
+    await removeSealedDir(path);
   }
-  return removed;
+}
+
+/** Remove a directory that may be sealed read-only: its entries cannot be unlinked until it is writable. */
+async function removeSealedDir(dir: string): Promise<void> {
+  await chmod(dir, 0o755);
+  await rm(dir, { recursive: true, force: true });
 }
 
 export interface ReapTier1WheelDirsArgs {
@@ -330,9 +390,12 @@ export async function reapTier1WheelDirs(
       const path = join(args.wheelsRoot, d.name);
       const { mtimeMs } = await stat(path);
       if (now - mtimeMs <= graceMs) continue;
-      // A published directory is read-only, so its entries cannot be unlinked until it is writable.
-      await chmod(path, 0o755);
-      await rm(path, { recursive: true, force: true });
+      // Out of its hash first, in one rename, so a reader never finds `.ready`
+      // over a partial set; a crash before the removal leaves a stale `tmp`
+      // directory for the sweep below.
+      const doomed = join(args.wheelsRoot, `${d.name}.tmp.${randomUUID()}`);
+      await rename(path, doomed);
+      await removeSealedDir(doomed);
       reapedHashes.push(d.name);
     }
     await removeStaleTmpDirs(args.wheelsRoot, now);

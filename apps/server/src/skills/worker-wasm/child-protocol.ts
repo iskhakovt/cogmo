@@ -11,8 +11,8 @@ export const ChildInitSchema = z.discriminatedUnion("mode", [
     mode: z.literal("run"),
     /** The real path of the `pyodide` package directory. */
     pyodideDistDir: z.string().min(1),
-    /** Null: Pyodide's own default, the distribution directory. */
-    packageCacheDir: z.string().min(1).nullable(),
+    /** Pyodide's package cache, the only place the child loads built-ins from. */
+    packageCacheDir: z.string().min(1),
     /** Pyodide built-ins to load from the cache before the skill runs. */
     builtins: z.array(z.string().min(1)),
     /** The read-only directory of the lockfile's wheels, or null for none. */

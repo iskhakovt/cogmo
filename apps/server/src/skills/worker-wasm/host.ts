@@ -7,7 +7,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { err, ok, type Result, ResultAsync } from "neverthrow";
+import { err, ok, okAsync, type Result, ResultAsync } from "neverthrow";
 import * as R from "remeda";
 import { match } from "ts-pattern";
 import type { z } from "zod";
@@ -75,19 +75,14 @@ export interface RunOnWorkerParams {
   wallClockS?: number;
   /** Child init cap (fork, Pyodide boot, package installs). Defaults to 60 s. */
   readyTimeoutMs?: number;
-  /**
-   * Pyodide's package cache, which `Tier1Prefetcher.prefetchBuiltins` fills.
-   * Unset: Pyodide's default, the distribution directory.
-   */
-  packageCacheDir?: string;
+  /** Pyodide's package cache, which `Tier1Prefetcher.prefetchBuiltins` fills. */
+  packageCacheDir: string;
   /** What the child installs before `ready`, from local files only. */
   packages: Tier1Packages;
   /** {@link pyodideDistDir}. */
   pyodideDistDir: string;
   /** Where the child's process-group record lives while it runs. */
   childrenDir: string;
-  /** The serve instance the record names; null where none is known. */
-  instanceId: string | null;
   /** WebAssembly memory ceiling, in MiB. */
   memoryMb: number;
   ctxHandler: CtxHandler;
@@ -135,34 +130,42 @@ export async function runOnWorker(params: RunOnWorkerParams): Promise<RunOnWorke
  * Fork the child that runs `params`'s task, under the boundary's flags with
  * read access to the Pyodide distribution, the package cache, the wheel
  * directory and the child bundle only.
+ *
+ * @public Exported for `host.test.ts`, which forks a child and drops its IPC channel.
  */
 export async function forkRunChild(params: RunOnWorkerParams): Promise<Result<Tier1Child, string>> {
   const entry = await tier1ChildEntry();
-  const grants = await ResultAsync.combine([
+  // The child is told the resolved paths it is granted: the permission model
+  // compares a path as written, so a granted directory reached through a
+  // symlink is refused.
+  const resolved = await ResultAsync.combine([
     resolveDir(params.pyodideDistDir, { create: false }),
     resolveDir(dirname(entry), { create: false }),
-    ...(params.packageCacheDir === undefined
-      ? []
-      : [resolveDir(params.packageCacheDir, { create: true })]),
-    ...(params.packages.wheelDir === null
-      ? []
-      : [resolveDir(params.packages.wheelDir, { create: false })]),
+    resolveDir(params.packageCacheDir, { create: true }),
+    params.packages.wheelDir === null
+      ? okAsync(null)
+      : resolveDir(params.packages.wheelDir, { create: false }),
   ]);
-  if (grants.isErr()) return err(grants.error);
+  if (resolved.isErr()) return err(resolved.error);
+  const [distDir, entryDir, packageCacheDir, wheelDir] = resolved.value;
   return forkTier1Child({
     entry,
-    execArgv: boundaryExecArgv(grants.value),
+    execArgv: boundaryExecArgv([
+      distDir,
+      entryDir,
+      packageCacheDir,
+      ...(wheelDir === null ? [] : [wheelDir]),
+    ]),
     init: {
       mode: "run",
-      pyodideDistDir: params.pyodideDistDir,
-      packageCacheDir: params.packageCacheDir ?? null,
+      pyodideDistDir: distDir,
+      packageCacheDir,
       builtins: [...params.packages.builtins],
-      wheelDir: params.packages.wheelDir,
+      wheelDir,
       memoryMb: params.memoryMb,
       body: params.body,
     },
     childrenDir: params.childrenDir,
-    instanceId: params.instanceId,
   });
 }
 
@@ -170,6 +173,8 @@ export async function forkRunChild(params: RunOnWorkerParams): Promise<Result<Ti
  * Drive `child` through its handshake and its one task, then make sure it is
  * dead and its record gone. `runOnWorker` hands it a forked child; tests hand
  * it a stand-in.
+ *
+ * @public Exported for `host.child.test.ts`, which drives it with a stand-in child.
  */
 export async function runOnChild(
   child: Tier1Child,
@@ -276,8 +281,6 @@ export interface Tier1PrefetcherOptions {
   pyodideDistDir: string;
   /** Where each child's process-group record lives while it runs. */
   childrenDir: string;
-  /** The serve instance the records name; null where none is known. */
-  instanceId: string | null;
 }
 
 /**
@@ -370,7 +373,6 @@ async function runUtilityChild<T>(
     execArgv: run.execArgv,
     init: run.init,
     childrenDir: opts.childrenDir,
-    instanceId: opts.instanceId,
   });
   if (forked.isErr()) return err(forked.error);
   const child = forked.value;
@@ -449,15 +451,14 @@ function resolveDir(dir: string, opts: { create: boolean }): ResultAsync<string,
 /**
  * Fork a tier-1 child, leading its own process group with only the IPC
  * channel and stderr inherited, record the group before anything else, and
- * send it `init`. A child whose group cannot be recorded is killed: boot
- * could not reap it.
+ * send it `init`. A child whose group cannot be recorded is killed: a reap
+ * could not find it.
  */
 async function forkTier1Child(opts: {
   entry: string;
   execArgv: readonly string[];
   init: ChildInit;
   childrenDir: string;
-  instanceId: string | null;
 }): Promise<Result<Tier1Child, string>> {
   const childrenDir = await ResultAsync.fromPromise(
     mkdir(opts.childrenDir, { recursive: true }),
@@ -468,8 +469,8 @@ async function forkTier1Child(opts: {
   const child = fork(opts.entry, [], {
     execArgv: [...opts.execArgv],
     env: {},
-    // stderr is a write-only descriptor into the host's log; the permission
-    // model does not cover inherited descriptors, so it is the only other one.
+    // stderr is the host's stderr descriptor; the permission model does not
+    // cover inherited descriptors, so it is the only one besides the channel.
     stdio: ["ignore", "ignore", "inherit", "ipc"],
     detached: true,
     serialization: "json",
@@ -487,7 +488,7 @@ async function forkTier1Child(opts: {
     if (child.exitCode === null && child.signalCode === null) killChildGroup(pid);
   };
 
-  const recorded = await recordChildGroup(opts.childrenDir, { pid, instanceId: opts.instanceId });
+  const recorded = await recordChildGroup(opts.childrenDir, pid);
   if (recorded.isErr()) {
     kill();
     await exit;
@@ -520,10 +521,12 @@ function tier1ChildEntry(): Promise<string> {
  * Bundle the child from source into a temporary directory named by the
  * bundle's digest, so test files and dev restarts share one copy per version
  * of the sources rather than leave one behind each. The first process to
- * publish a digest wins; a later one drops its own build.
+ * publish a digest wins; a later one drops its own build and uses the
+ * winner's only if it is this user's private directory, since anyone can
+ * create a name in the shared temporary directory first.
  */
 async function bundleFromSource(): Promise<string> {
-  const { buildTier1Child } = await import("./child-bundle.js");
+  const { buildTier1Child, checkOwnPrivateDir } = await import("./child-bundle.js");
   const root = await realpath(tmpdir());
   const buildDir = await mkdtemp(join(root, "cogmo-tier1-build-"));
   await buildTier1Child({
@@ -544,6 +547,10 @@ async function bundleFromSource(): Promise<string> {
     const code = e instanceof Error && "code" in e ? e.code : undefined;
     if (code !== "EEXIST" && code !== "ENOTEMPTY") throw e;
     await rm(buildDir, { recursive: true, force: true });
+    const trusted = await checkOwnPrivateDir(outDir);
+    if (trusted.isErr()) {
+      throw new Error(`refusing the tier-1 child bundle at ${outDir}: ${trusted.error}`);
+    }
   }
   return join(outDir, "tier1-child.mjs");
 }

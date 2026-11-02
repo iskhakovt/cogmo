@@ -54,7 +54,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   const core = await bootstrapCore(opts);
   await verifyDependencies(core);
   const sandbox = await bootstrapSandbox(core, opts);
-  const { skillRunner } = await bootstrapSkillRunner(core, sandbox, opts);
+  const { skillRunner } = await bootstrapSkillRunner(core, sandbox, true, opts);
   const runtime = await bootstrapRuntime(core, sandbox, skillRunner, opts);
 
   // Spread every stage so any field added to a stage interface flows

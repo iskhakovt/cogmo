@@ -1,6 +1,4 @@
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { ok, type Result } from "neverthrow";
+import { err, ok, type Result } from "neverthrow";
 import { computeNextRun } from "../agent/scheduling/cron.js";
 import type { Transactor } from "../db/index.js";
 import { defaultSkillsImage } from "../env.js";
@@ -172,20 +170,15 @@ export interface SkillRunnerOptions {
    * `rollback` without it throws a clear error.
    */
   skillsRepoPath?: string;
+  /** Pyodide package cache directory, which the host fills and tier-1 children read. */
+  pyodidePackageCacheDir: string;
   /**
-   * Pyodide package cache directory, which the host fills and tier-1 children
-   * read. A temp directory when unset (tests).
+   * Tier 1's other host-side directories: the published wheel directories and
+   * the children's process-group records (design/skills.md → Tier-1 boundary).
    */
-  pyodidePackageCacheDir?: string;
-  /**
-   * Tier 1's other host-side directories and the serve instance its
-   * process-group records name (design/skills.md → Tier-1 boundary). Temp
-   * directories and no instance when unset (tests).
-   */
-  tier1?: {
+  tier1: {
     wheelsRoot: string;
     childrenDir: string;
-    instanceId: string | null;
     /** Tests inject a prefetcher that spawns no child. */
     prefetcher?: Tier1Prefetcher;
     /** Tests inject a resolver that reaches no network. */
@@ -288,27 +281,27 @@ export class SkillRunnerImpl implements SkillRunner {
     }
     const clock = opts.clock ?? (() => new Date());
     const sourceCache = new SkillSourceCache(opts.skillsRepoPath);
-    const packageCacheDir = opts.pyodidePackageCacheDir ?? join(tmpdir(), "cogmo-pyodide-cache");
-    const tier1 = opts.tier1 ?? {
-      wheelsRoot: join(tmpdir(), "cogmo-pyodide-wheels"),
-      childrenDir: join(tmpdir(), "cogmo-tier1-children"),
-      instanceId: null,
-    };
+    const packageCacheDir = opts.pyodidePackageCacheDir;
+    const tier1 = opts.tier1;
     const distDir = pyodideDistDir();
     const prefetcher =
-      opts.tier1?.prefetcher ??
-      createTier1Prefetcher({
-        pyodideDistDir: distDir,
-        childrenDir: tier1.childrenDir,
-        instanceId: tier1.instanceId,
-      });
+      tier1.prefetcher ??
+      createTier1Prefetcher({ pyodideDistDir: distDir, childrenDir: tier1.childrenDir });
     const resolvePackages =
-      opts.tier1?.resolvePackages ??
-      (async (lockfile: LockfileSnapshot, signal?: AbortSignal) =>
-        ensureTier1Packages(
-          { prefetcher, fetchImpl: fetch, bundled: await loadBundledPackages() },
+      tier1.resolvePackages ??
+      (async (
+        lockfile: LockfileSnapshot,
+        signal?: AbortSignal,
+      ): Promise<Result<Tier1Packages, Tier1PackagesError>> => {
+        const bundled = await loadBundledPackages();
+        if (bundled.isErr()) {
+          return err({ kind: "bundled_unreadable", message: bundled.error.message });
+        }
+        return ensureTier1Packages(
+          { prefetcher, fetchImpl: fetch, bundled: bundled.value },
           { lockfile, packageCacheDir, wheelsRoot: tier1.wheelsRoot, ...(signal && { signal }) },
-        ));
+        );
+      });
     const resolveTier1Packages = (
       lockfile: LockfileSnapshot | undefined,
       signal?: AbortSignal,
@@ -361,7 +354,6 @@ export class SkillRunnerImpl implements SkillRunner {
         pyodidePackageCacheDir: packageCacheDir,
         pyodideDistDir: distDir,
         tier1ChildrenDir: tier1.childrenDir,
-        tier1InstanceId: tier1.instanceId,
         resolveTier1Packages,
         tier2Image,
         depsCacheVolumeName,

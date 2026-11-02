@@ -1,4 +1,14 @@
-import { copyFile, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  copyFile,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -32,7 +42,6 @@ let serverUrl: string;
 const prefetcher = createTier1Prefetcher({
   pyodideDistDir: pyodideDistDir(),
   childrenDir: join(tmpdir(), "cogmo-tier1-children-prefetch"),
-  instanceId: null,
 });
 
 beforeAll(async () => {
@@ -63,7 +72,6 @@ function task(
     packageCacheDir: cacheDir,
     pyodideDistDir: pyodideDistDir(),
     childrenDir,
-    instanceId: null,
     memoryMb: 128,
     ...params,
   };
@@ -531,7 +539,39 @@ async def run(inputs, ctx):
       { inputs: { url: serverUrl } },
     );
     assert(result.ok, result.ok ? "" : result.error);
-    expect(result.output).toHaveProperty("failed");
+    // `pyfetch` reaches for `js.fetch`, which the restricted `jsglobals` lacks.
+    expect(result.output).toEqual({ failed: "NameError" });
+  });
+
+  it("network: a socket through Node's own sockets reaches nothing, even a server on loopback", async () => {
+    // Plain Node runs this body to the server; under the child's flags Node's
+    // `net` throws ERR_ACCESS_DENIED, which Emscripten's socket layer reports
+    // to Python as a refused connection, whatever the cause.
+    let connections = 0;
+    const onConnection = (): void => {
+      connections += 1;
+    };
+    server.on("connection", onConnection);
+    const result = await boundaryRun(
+      `
+async def run(inputs, ctx):
+    import socket
+    import pyodide_js
+    await pyodide_js.useNodeSockFS()
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.connect(("127.0.0.1", inputs["port"]))
+        s.sendall(b"GET / HTTP/1.0\\r\\n\\r\\n")
+        return {"reached": s.recv(100).decode()}
+    except BaseException as e:
+        return {"failed": f"{type(e).__name__}: {e}"}
+`,
+      { inputs: { port: Number(new URL(serverUrl).port) } },
+    );
+    server.off("connection", onConnection);
+    assert(result.ok, result.ok ? "" : result.error);
+    expect(result.output).toEqual({ failed: expect.stringMatching(/^ConnectionRefusedError: /) });
+    expect(connections).toBe(0);
   });
 
   it("permission: mounting a host path outside the grant fails", async () => {
@@ -727,6 +767,86 @@ async def run(inputs, ctx):
     } finally {
       await rm(wheelDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("forking a run child", () => {
+  it("grants and hands the child resolved paths when the cache and wheel directory are symlinks", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cogmo-tier1-links-"));
+    try {
+      const wheelDir = join(root, "wheels");
+      await mkdir(wheelDir);
+      const wheel = expectDefined(
+        (await readdir(cacheDir)).find((f) => f.startsWith("annotated_types-")),
+        "the annotated_types wheel in the cache",
+      );
+      await copyFile(join(cacheDir, wheel), join(wheelDir, wheel));
+      await symlink(wheelDir, join(root, "wheels-link"));
+      await symlink(cacheDir, join(root, "cache-link"));
+      const result = await boundaryRun(
+        `
+import importlib.metadata
+import annotated_types
+import pydantic
+
+async def run(inputs, ctx):
+    return importlib.metadata.version("annotated_types")
+`,
+        {
+          packageCacheDir: join(root, "cache-link"),
+          packages: { builtins: ["pydantic"], wheelDir: join(root, "wheels-link") },
+        },
+      );
+      assert(result.ok, result.ok ? "" : result.error);
+      expect(result.output).toBe(wheel.split("-")[1]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("kills the child and fails the run when its record cannot be written", async () => {
+    const readOnly = await mkdtemp(join(tmpdir(), "cogmo-tier1-children-ro-"));
+    await chmod(readOnly, 0o555);
+    try {
+      const result = await boundaryRun("async def run(inputs, ctx):\n    return None\n", {
+        childrenDir: readOnly,
+      });
+      assert(!result.ok);
+      const recorded = /^worker init failed: could not record child (\d+): /.exec(result.error);
+      const pid = Number(expectDefined(recorded?.[1], `the child's pid in ${result.error}`));
+      expect(() => process.kill(pid, 0)).toThrow(expect.objectContaining({ code: "ESRCH" }));
+      expect(await readdir(readOnly)).toEqual([]);
+    } finally {
+      await chmod(readOnly, 0o755);
+      await rm(readOnly, { recursive: true, force: true });
+    }
+  });
+
+  it("fails the task, not the child, on an output JSON cannot carry", async () => {
+    const result = await boundaryRun('async def run(inputs, ctx):\n    return {"n": 2**60}\n');
+    expect(result).toEqual({
+      ok: false,
+      error: expect.stringMatching(/^task output is not JSON-serializable: .*BigInt/),
+    });
+  });
+
+  it("fails the ctx call, not the child, on arguments JSON cannot carry", async () => {
+    const handler = noopHandler();
+    const result = await boundaryRun(
+      `
+async def run(inputs, ctx):
+    try:
+        await ctx.http.get("https://example.com", headers={"n": 2**60})
+    except Exception as e:
+        return {"failed": str(e)}
+`,
+      { ctxHandler: handler },
+    );
+    assert(result.ok, result.ok ? "" : result.error);
+    expect(result.output).toEqual({
+      failed: expect.stringMatching(/^invalid_args: ctx call arguments are not JSON-serializable/),
+    });
+    expect(handler.handle).not.toHaveBeenCalled();
   });
 });
 

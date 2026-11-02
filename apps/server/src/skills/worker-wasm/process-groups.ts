@@ -3,42 +3,56 @@ import { join } from "node:path";
 import { err, ok, type Result } from "neverthrow";
 import { match } from "ts-pattern";
 import { z } from "zod";
-import { logger } from "../../logger.js";
 
 /**
- * Tier-1 children's process groups, recorded so boot can kill the ones a dead
- * host left behind (design/skills.md → Tier-1 boundary, layer 1). Each child
- * leads its own group; nothing else bounds an orphan without a cgroup. A
- * record names the group by its leader's pid, and pins it with the kernel's
- * boot id and the leader's start time, since a pid alone can name a reused
- * group, the server's own included, after a container restart or a reboot.
+ * Tier-1 children's process groups, recorded so `cogmo serve` can kill the
+ * ones a dead Cogmo process left behind (design/skills.md → Tier-1 boundary,
+ * layer 1 → Process-group records). Each child leads its own group; nothing
+ * else bounds an orphan without a cgroup.
  *
- * `recorded → exited`: the host writes the record before the child's
- * handshake and deletes it once the child has exited, killed or not.
- * `orphaned → killed`: boot kills a recorded group only while the boot id and
- * the leader's start time still match, and deletes every record either way.
+ * A record names the group by its leader's pid and the Cogmo process that
+ * forked it, its owner, and pins both with their start times and the
+ * kernel's boot id, since a pid alone can name a reused process after a
+ * container restart or a reboot. The owner writes the record before the
+ * child's handshake and deletes it once the child has exited. A `serve`
+ * boot's reap kills a recorded group only while the boot, the child and not
+ * the owner still match; it leaves a live owner's records alone and deletes
+ * the rest.
  */
 
-const log = logger.child({ component: "skills.worker.wasm.process-groups" });
+/** Field 22 of `/proc/<pid>/stat`: clock ticks after boot, as written there. */
+const StartTimeSchema = z.string().regex(/^\d+$/);
 
 export const ChildGroupRecordSchema = z.object({
   bootId: z.string().min(1),
-  /** The serve instance that forked the child; null where none is known. */
-  instanceId: z.string().min(1).nullable(),
+  /** The Cogmo process that forked the child. */
+  ownerPid: z.number().int().positive(),
+  ownerStartTime: StartTimeSchema,
+  /** The child, which leads the group. */
   pid: z.number().int().positive(),
-  /** Field 22 of `/proc/<pid>/stat`: clock ticks after boot, as written there. */
-  startTime: z.string().regex(/^\d+$/),
+  startTime: StartTimeSchema,
 });
 export type ChildGroupRecord = z.infer<typeof ChildGroupRecordSchema>;
 
-/** Why a record names no live orphan. */
+/** Why a record names no group to kill or leave. */
 export type StaleReason = "other_boot" | "leader_gone" | "pid_reused" | "unreadable";
 
-export type RecordVerdict = { kind: "orphaned" } | { kind: "stale"; reason: StaleReason };
+/**
+ * What a reap does with a record: kill the group of a dead owner, leave a
+ * live owner's record to it, or delete a record that names no live group.
+ */
+export type RecordVerdict =
+  | { kind: "orphaned" }
+  | { kind: "owned" }
+  | { kind: "stale"; reason: StaleReason };
+
+/** A group `SIGKILL`ed, or one already gone (`ESRCH`). */
+export type KillOutcome = { kind: "killed" } | { kind: "gone" };
 
 /** What `reapOrphanedChildGroups` did with each record. */
 export interface ReapReport {
   killed: readonly ChildGroupRecord[];
+  owned: readonly ChildGroupRecord[];
   stale: readonly { file: string; reason: StaleReason }[];
 }
 
@@ -51,6 +65,8 @@ export async function readBootId(): Promise<string> {
  * Field 22 (`starttime`) of a `/proc/<pid>/stat` line, or null when the line
  * has no such field. Parsed after the last `)`: the command name in field 2
  * may hold spaces and parentheses.
+ *
+ * @public Exported for its unit test: a crafted `stat` line reaches no other path.
  */
 export function parseStartTime(stat: string): string | null {
   const close = stat.lastIndexOf(")");
@@ -74,44 +90,50 @@ async function readStartTime(pid: number): Promise<string | null> {
 }
 
 /**
- * Whether `record` names a live group this boot: the same boot, and a leader
- * still alive with the start time it was recorded with.
+ * The verdict on `record` given what `/proc` shows now for its child and its
+ * owner: stale from another boot or once the child's pid is gone or reused;
+ * otherwise owned while the owner's start time still matches, and orphaned
+ * once it does not.
+ *
+ * @public Exported for its unit test: the verdict table without live processes.
  */
 export function judgeRecord(
   record: ChildGroupRecord,
-  current: { bootId: string; startTime: string | null },
+  current: { bootId: string; startTime: string | null; ownerStartTime: string | null },
 ): RecordVerdict {
   if (record.bootId !== current.bootId) return { kind: "stale", reason: "other_boot" };
   if (current.startTime === null) return { kind: "stale", reason: "leader_gone" };
   if (current.startTime !== record.startTime) return { kind: "stale", reason: "pid_reused" };
+  if (current.ownerStartTime === record.ownerStartTime) return { kind: "owned" };
   return { kind: "orphaned" };
 }
 
 /**
- * Record the group `pid` leads under `dir`, before the child's handshake.
- * Resolves the record's path, or why it could not be written; the caller then
- * kills the child, since an unrecorded child is one boot cannot reap.
+ * Record the group `pid` leads under `dir`, owned by this process, before
+ * the child's handshake. Resolves the record's path, or why it could not be
+ * written; the caller then kills the child, since an unrecorded child is one
+ * a reap cannot find.
  */
-export async function recordChildGroup(
-  dir: string,
-  child: { pid: number; instanceId: string | null },
-): Promise<Result<string, string>> {
+export async function recordChildGroup(dir: string, pid: number): Promise<Result<string, string>> {
   try {
-    const startTime = await readStartTime(child.pid);
-    if (startTime === null) return err(`child ${child.pid} has no /proc entry`);
+    const [startTime, ownerStartTime] = await Promise.all([
+      readStartTime(pid),
+      readStartTime(process.pid),
+    ]);
+    if (startTime === null) return err(`child ${pid} has no /proc entry`);
+    if (ownerStartTime === null) return err(`this process (${process.pid}) has no /proc entry`);
     const record: ChildGroupRecord = {
       bootId: await readBootId(),
-      instanceId: child.instanceId,
-      pid: child.pid,
+      ownerPid: process.pid,
+      ownerStartTime,
+      pid,
       startTime,
     };
-    const path = join(dir, `${child.pid}.json`);
+    const path = join(dir, `${pid}.json`);
     await writeFile(path, JSON.stringify(record));
     return ok(path);
   } catch (e) {
-    return err(
-      `could not record child ${child.pid}: ${e instanceof Error ? e.message : String(e)}`,
-    );
+    return err(`could not record child ${pid}: ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
@@ -121,24 +143,24 @@ export async function removeChildGroupRecord(path: string): Promise<void> {
 }
 
 /**
- * `SIGKILL` the group `pid` leads. False when the group is already gone.
- * Only for a group whose leader the caller has not reaped, or one
- * `judgeRecord` found live: a reaped leader's pid can lead someone else's
- * group.
+ * `SIGKILL` the group `pid` leads; `gone` when no such group exists. Only for
+ * a group whose leader the caller has not reaped, or one `judgeRecord` found
+ * orphaned: a reaped leader's pid can lead someone else's group.
  */
-export function killChildGroup(pid: number): boolean {
+export function killChildGroup(pid: number): KillOutcome {
   try {
     process.kill(-pid, "SIGKILL");
-    return true;
+    return { kind: "killed" };
   } catch (e) {
-    if (errorCode(e) === "ESRCH") return false;
+    if (errorCode(e) === "ESRCH") return { kind: "gone" };
     throw e;
   }
 }
 
 /**
- * Kill every group recorded under `childrenDir` that is still alive this
- * boot, and delete every record. Boot runs it before the pool starts.
+ * Judge every record under `childrenDir`: kill an orphaned group and delete
+ * its record, leave an owned one, and delete a stale one. Only `cogmo serve`
+ * runs it, at boot, before the runner serves.
  */
 export async function reapOrphanedChildGroups(
   childrenDir: string,
@@ -146,31 +168,44 @@ export async function reapOrphanedChildGroups(
 ): Promise<ReapReport> {
   const files = await listRecords(childrenDir);
   const killed: ChildGroupRecord[] = [];
+  const owned: ChildGroupRecord[] = [];
   const stale: { file: string; reason: StaleReason }[] = [];
-  // Sequential: each kill acts on the start time just read for that pid.
+  // Sequential: each kill acts on the start times just read for that record.
   for (const file of files) {
     const path = join(childrenDir, file);
     const record = await readRecord(path);
-    const verdict: RecordVerdict =
-      record === null
-        ? { kind: "stale", reason: "unreadable" }
-        : judgeRecord(record, {
-            bootId: current.bootId,
-            startTime: await readStartTime(record.pid),
-          });
-    match(verdict)
+    if (record === null) {
+      stale.push({ file, reason: "unreadable" });
+      await removeChildGroupRecord(path);
+      continue;
+    }
+    const verdict = judgeRecord(record, {
+      bootId: current.bootId,
+      startTime: await readStartTime(record.pid),
+      ownerStartTime: await readStartTime(record.ownerPid),
+    });
+    const keep = match(verdict)
       .with({ kind: "orphaned" }, () => {
-        if (record !== null && killChildGroup(record.pid)) killed.push(record);
-        else stale.push({ file, reason: "leader_gone" });
+        match(killChildGroup(record.pid))
+          .with({ kind: "killed" }, () => killed.push(record))
+          // It exited between the check and the kill: nothing was killed.
+          .with({ kind: "gone" }, () => stale.push({ file, reason: "leader_gone" }))
+          .exhaustive();
+        return false;
       })
-      .with({ kind: "stale" }, ({ reason }) => stale.push({ file, reason }))
+      // The owner deletes it when the child exits.
+      .with({ kind: "owned" }, () => {
+        owned.push(record);
+        return true;
+      })
+      .with({ kind: "stale" }, ({ reason }) => {
+        stale.push({ file, reason });
+        return false;
+      })
       .exhaustive();
-    await removeChildGroupRecord(path);
+    if (!keep) await removeChildGroupRecord(path);
   }
-  if (killed.length > 0) {
-    log.warn({ killed: killed.map((r) => r.pid) }, "killed orphaned tier-1 child groups");
-  }
-  return { killed, stale };
+  return { killed, owned, stale };
 }
 
 async function listRecords(dir: string): Promise<string[]> {

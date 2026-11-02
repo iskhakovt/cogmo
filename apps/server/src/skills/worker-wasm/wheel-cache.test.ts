@@ -31,11 +31,35 @@ const IDNA_SHA = sha256(IDNA_BYTES);
 const SNIFFIO_SHA = sha256(SNIFFIO_BYTES);
 const OTHER_SHA = "f".repeat(64);
 
+function bundled(version: string, fileName: string, depends: readonly string[]): BundledPackage {
+  return { version, native: fileName.includes("_wasm32"), fileName, depends };
+}
+
 const BUNDLED: ReadonlyMap<string, BundledPackage> = new Map([
-  ["pydantic", { version: "2.12.5", native: false }],
-  ["pydantic-core", { version: "2.41.5", native: true }],
-  ["typing-extensions", { version: "4.15.0", native: false }],
+  [
+    "pydantic",
+    bundled("2.12.5", "pydantic-2.12.5-py3-none-any.whl", ["pydantic-core", "typing-extensions"]),
+  ],
+  [
+    "pydantic-core",
+    bundled("2.41.5", "pydantic_core-2.41.5-cp314-cp314-pyemscripten_2026_0_wasm32.whl", [
+      "typing-extensions",
+    ]),
+  ],
+  ["typing-extensions", bundled("4.15.0", "typing_extensions-4.15.0-py3-none-any.whl", [])],
+  ["micropip", bundled("0.11.1", "micropip-0.11.1-py3-none-any.whl", [])],
 ]);
+
+/** A package cache holding the files of `names`. */
+async function cacheWith(dir: string, names: readonly string[]): Promise<string> {
+  await mkdir(dir, { recursive: true });
+  for (const name of names) {
+    const pkg = BUNDLED.get(name);
+    if (pkg === undefined) throw new Error(`no bundled fixture ${name}`);
+    await writeFile(join(dir, pkg.fileName), "");
+  }
+  return dir;
+}
 
 function lockfile(contents: string): LockfileSnapshot {
   return { hash: hashLockfileContents(contents), contents };
@@ -161,7 +185,7 @@ pydantic_core==2.41.5 --hash=sha256:${OTHER_SHA}
     ]);
   });
 
-  it("treats a bundled name at another version as a wheel", async () => {
+  it("treats a bundled name at another version as a wheel, and prefetches micropip to install it", async () => {
     const fetchImpl = fakePypi(
       { "typing-extensions==4.14.0": [pureWheel("typing_extensions", "4.14.0", SNIFFIO_SHA)] },
       { [pureWheel("typing_extensions", "4.14.0", SNIFFIO_SHA).url]: SNIFFIO_BYTES },
@@ -176,7 +200,64 @@ pydantic_core==2.41.5 --hash=sha256:${OTHER_SHA}
       builtins: [],
       wheelDir: join(wheelsRoot, lock.hash),
     });
+    expect(prefetcher.prefetchBuiltins).toHaveBeenCalledWith([], { packageCacheDir: "/cache" });
+  });
+
+  it("skips the prefetch when the cache holds every built-in, micropip and their dependencies", async () => {
+    const prefetcher = okPrefetcher();
+    const packageCacheDir = await cacheWith(join(root, "cache"), [
+      "pydantic",
+      "pydantic-core",
+      "typing-extensions",
+      "micropip",
+    ]);
+    const result = await ensureTier1Packages(
+      { prefetcher, fetchImpl: fakePypi({}, {}), bundled: BUNDLED },
+      {
+        lockfile: lockfile(`pydantic==2.12.5 --hash=sha256:${OTHER_SHA}\n`),
+        packageCacheDir,
+        wheelsRoot,
+      },
+    );
+    expect(result._unsafeUnwrap()).toEqual({ builtins: ["pydantic"], wheelDir: null });
     expect(prefetcher.prefetchBuiltins).not.toHaveBeenCalled();
+  });
+
+  it("prefetches when the cache lacks a built-in's transitive dependency", async () => {
+    const prefetcher = okPrefetcher();
+    const packageCacheDir = await cacheWith(join(root, "cache"), [
+      "pydantic",
+      "pydantic-core",
+      "micropip",
+    ]);
+    const result = await ensureTier1Packages(
+      { prefetcher, fetchImpl: fakePypi({}, {}), bundled: BUNDLED },
+      {
+        lockfile: lockfile(`pydantic==2.12.5 --hash=sha256:${OTHER_SHA}\n`),
+        packageCacheDir,
+        wheelsRoot,
+      },
+    );
+    expect(result._unsafeUnwrap()).toEqual({ builtins: ["pydantic"], wheelDir: null });
+    expect(prefetcher.prefetchBuiltins).toHaveBeenCalledWith(["pydantic"], { packageCacheDir });
+  });
+
+  it("prefetches when the cache lacks micropip", async () => {
+    const prefetcher = okPrefetcher();
+    const packageCacheDir = await cacheWith(join(root, "cache"), [
+      "pydantic",
+      "pydantic-core",
+      "typing-extensions",
+    ]);
+    await ensureTier1Packages(
+      { prefetcher, fetchImpl: fakePypi({}, {}), bundled: BUNDLED },
+      {
+        lockfile: lockfile(`pydantic==2.12.5 --hash=sha256:${OTHER_SHA}\n`),
+        packageCacheDir,
+        wheelsRoot,
+      },
+    );
+    expect(prefetcher.prefetchBuiltins).toHaveBeenCalledWith(["pydantic"], { packageCacheDir });
   });
 
   it("returns a null wheelDir and touches neither PyPI nor the disk when every package is bundled", async () => {
@@ -439,6 +520,43 @@ describe("reapTier1WheelDirs", () => {
     await chmod(dir, 0o555);
     await utimes(dir, mtime, mtime);
   }
+
+  it("moves a directory out of its hash before removing it, so no reader sees a partial one", async () => {
+    await published(UNREACHABLE_OLD, eightDaysAgo);
+    const dir = join(wheelsRoot, UNREACHABLE_OLD);
+    // A sealed entry the removal cannot get through: a removal cut short.
+    await chmod(dir, 0o755);
+    await mkdir(join(dir, "stuck"));
+    await writeFile(join(dir, "stuck", "wheel.whl"), "");
+    await chmod(join(dir, "stuck"), 0o555);
+    await chmod(dir, 0o555);
+    await utimes(dir, eightDaysAgo, eightDaysAgo);
+
+    const result = await reapTier1WheelDirs({
+      wheelsRoot,
+      reachableHashes: new Set(),
+      graceDays: 7,
+    });
+
+    expect(result._unsafeUnwrapErr().kind).toBe("reap_failed");
+    const left = await readdir(wheelsRoot);
+    expect(left).not.toContain(UNREACHABLE_OLD);
+    expect(left).toEqual([expect.stringMatching(new RegExp(`^${UNREACHABLE_OLD}\\.tmp\\.`))]);
+  });
+
+  it("sweeps a sealed tmp directory a reap left behind", async () => {
+    const leftover = `${UNREACHABLE_OLD}.tmp.crashed`;
+    await published(leftover, eightDaysAgo);
+
+    const result = await reapTier1WheelDirs({
+      wheelsRoot,
+      reachableHashes: new Set(),
+      graceDays: 7,
+    });
+
+    expect(result._unsafeUnwrap()).toEqual({ reapedHashes: [] });
+    expect(await readdir(wheelsRoot)).toEqual([]);
+  });
 
   it("removes unreachable directories past the grace and keeps the rest", async () => {
     await published(REACHABLE, eightDaysAgo);

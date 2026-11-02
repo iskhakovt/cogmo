@@ -92,7 +92,7 @@ function capWasmMemory(memoryMb: number): void {
 
 async function bootPyodide(options: {
   pyodideDistDir: string;
-  packageCacheDir: string | null;
+  packageCacheDir: string;
   restricted: boolean;
 }): Promise<PyodideInterface> {
   // By path, not by package name: the bundle lives outside node_modules.
@@ -101,7 +101,7 @@ async function bootPyodide(options: {
   );
   return pyodideModule.loadPyodide({
     indexURL: options.pyodideDistDir,
-    ...(options.packageCacheDir !== null && { packageCacheDir: options.packageCacheDir }),
+    packageCacheDir: options.packageCacheDir,
     // `js` is this object: `setTimeout`/`clearTimeout` for the asyncio loop
     // `ctx` calls await, and nothing else (design/skills.md → layer 3).
     ...(options.restricted && {

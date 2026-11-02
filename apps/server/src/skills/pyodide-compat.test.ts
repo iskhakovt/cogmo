@@ -16,23 +16,31 @@ import type { Tier1Prefetcher } from "./worker-wasm/tier1.js";
 const fakeLockfile = {
   packages: {
     // Exact-version match -> compat accepts without PyPI lookup.
-    httpx: { name: "httpx", version: "0.28.1", file_name: "httpx-0.28.1-py3-none-any.whl" },
+    httpx: {
+      name: "httpx",
+      version: "0.28.1",
+      file_name: "httpx-0.28.1-py3-none-any.whl",
+      depends: ["Python_Dateutil"],
+    },
     // PEP-503-normalised: stored under `python-dateutil`, queried via `Python_Dateutil` etc.
     "python-dateutil": {
       name: "python-dateutil",
       version: "2.9.0",
       file_name: "python_dateutil-2.9.0-py2.py3-none-any.whl",
+      depends: [],
     },
     // Native: an Emscripten-built wheel, as pyodide-lock.json names it.
     "pydantic-core": {
       name: "pydantic_core",
       version: "2.41.5",
       file_name: "pydantic_core-2.41.5-cp314-cp314-pyemscripten_2026_0_wasm32.whl",
+      depends: [],
     },
     regex: {
       name: "regex",
       version: "2026.3.32",
       file_name: "regex-2026.3.32-cp314-cp314-pyemscripten_2026_0_wasm32.whl",
+      depends: [],
     },
   },
 };
@@ -222,11 +230,45 @@ describe("checkPyodideCompat", () => {
 });
 
 describe("loadBundledPackages", () => {
-  it("keys by normalised name and marks Emscripten-built wheels native", async () => {
-    const bundled = await loadBundledPackages(lockfilePath);
-    expect(bundled.get("httpx")).toEqual({ version: "0.28.1", native: false });
-    expect(bundled.get("python-dateutil")).toEqual({ version: "2.9.0", native: false });
-    expect(bundled.get("pydantic-core")).toEqual({ version: "2.41.5", native: true });
+  it("keys by normalised name, marks Emscripten-built wheels native, and normalises depends", async () => {
+    const bundled = (await loadBundledPackages(lockfilePath))._unsafeUnwrap();
+    expect(bundled.get("httpx")).toEqual({
+      version: "0.28.1",
+      native: false,
+      fileName: "httpx-0.28.1-py3-none-any.whl",
+      depends: ["python-dateutil"],
+    });
+    expect(bundled.get("python-dateutil")).toMatchObject({ version: "2.9.0", native: false });
+    expect(bundled.get("pydantic-core")).toEqual({
+      version: "2.41.5",
+      native: true,
+      fileName: "pydantic_core-2.41.5-cp314-cp314-pyemscripten_2026_0_wasm32.whl",
+      depends: [],
+    });
+  });
+
+  it("errs bundled_unreadable for a missing file", async () => {
+    const result = await loadBundledPackages(join(lockfileDir, "missing.json"));
+    expect(result._unsafeUnwrapErr()).toMatchObject({
+      kind: "bundled_unreadable",
+      message: expect.stringContaining("missing.json"),
+    });
+  });
+
+  it("errs bundled_unreadable for a file that is not a Pyodide lockfile", async () => {
+    await writeFile(lockfilePath, JSON.stringify({ packages: { x: { name: "x" } } }));
+    const result = await loadBundledPackages(lockfilePath);
+    expect(result._unsafeUnwrapErr()).toMatchObject({
+      kind: "bundled_unreadable",
+      message: expect.stringContaining("not a Pyodide lockfile"),
+    });
+  });
+
+  it("errs bundled_unreadable for a file that is not JSON", async () => {
+    await writeFile(lockfilePath, "{ cut short");
+    expect((await loadBundledPackages(lockfilePath))._unsafeUnwrapErr().kind).toBe(
+      "bundled_unreadable",
+    );
   });
 });
 

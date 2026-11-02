@@ -36,6 +36,7 @@ import type { Database, Transactor } from "../db/index.js";
 import type { GitHubIdentity } from "../secrets/github.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
+import { offlineTier1 } from "../test/skills-fixtures.js";
 import { bootstrapSkillsRepo, ensureSkillsCodingRepo, SKILLS_CODING_REPO_NAME } from "./repo.js";
 import { SkillRunnerImpl } from "./runner.js";
 import { DrizzleSkillStore } from "./store/index.js";
@@ -264,6 +265,7 @@ describe("skill authoring bootstrap — boot → fetch → register chain", () =
       // Unscheduled skill: the identity never reaches a row.
       defaultRunAs: { userId: "user-1", profileId: "profile-1" },
       skillsRepoPath: repos.skillsBare,
+      ...offlineTier1(repos.skillsBare),
     });
 
     const registerResult = await runner.register({ branch, origin: { kind: "owner" } });

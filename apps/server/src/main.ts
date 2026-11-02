@@ -126,7 +126,8 @@ async function loadSkillsDeps(): Promise<SkillsCliDeps> {
   // Without the sandbox, tier-2 skill execution throws at call time; tier-1
   // skills and every admin subcommand run.
   const core = await bootstrapCore();
-  const { skillRunner } = await bootstrapSkillRunner(core, NO_SANDBOX);
+  // A CLI process leaves tier-1 children alone: they may be the serve's.
+  const { skillRunner } = await bootstrapSkillRunner(core, NO_SANDBOX, false);
   return {
     runner: skillRunner,
     ownerRunAs: () => resolveSkillRunAs(core, { userId: core.user.id, profileId: core.profile.id }),

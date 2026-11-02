@@ -203,7 +203,7 @@ export const NO_SANDBOX: SandboxDeps = {
  * Skill runner + its construction inputs. Returned by `bootstrapSkillRunner`.
  *
  * Tier-2 (sysbox / Daytona) only runs when `sandbox` is non-null. CLIs that
- * call `bootstrapSkillRunner(core, NO_SANDBOX)` get a runner that supports
+ * call `bootstrapSkillRunner(core, NO_SANDBOX, false)` get a runner that supports
  * tier-1 (Pyodide) skills + every admin subcommand (list / register /
  * approve / deny / rollback / deregister); tier-2 invocations throw a
  * clear "no sandbox configured" error at call time.

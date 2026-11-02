@@ -12,7 +12,12 @@ const log = logger.child({ component: "skills.pyodide-compat" });
 const PyodideLockfileSchema = z.object({
   packages: z.record(
     z.string(),
-    z.object({ name: z.string(), version: z.string(), file_name: z.string() }),
+    z.object({
+      name: z.string(),
+      version: z.string(),
+      file_name: z.string(),
+      depends: z.array(z.string()),
+    }),
   ),
 });
 
@@ -25,6 +30,16 @@ export interface BundledPackage {
    * Python source.
    */
   native: boolean;
+  /** The file Pyodide loads it from, the name it takes in the package cache. */
+  fileName: string;
+  /** The bundled packages it needs loaded first, by normalised name. */
+  depends: readonly string[];
+}
+
+/** Pyodide's `pyodide-lock.json` could not be read or parsed. */
+export interface BundledPackagesUnreadable {
+  kind: "bundled_unreadable";
+  message: string;
 }
 
 /** Bundled-package map, lazily loaded from pyodide's installed lockfile. */
@@ -45,25 +60,45 @@ const pypiPureWheelCache = new Map<string, true>();
 /**
  * The packages the installed Pyodide distribution bundles, read from its
  * `pyodide-lock.json` (or `lockfilePathOverride`) and cached for the process
- * when read from the installed distribution. Throws when the file is missing
- * or malformed; callers decide whether that blocks them.
+ * when read from the installed distribution. Errs when the file is missing or
+ * malformed; callers decide whether that blocks them.
  */
 export async function loadBundledPackages(
   lockfilePathOverride?: string,
-): Promise<ReadonlyMap<string, BundledPackage>> {
-  if (cachedBundled && !lockfilePathOverride) return cachedBundled;
-  const require = createRequire(import.meta.url);
-  const lockPath = lockfilePathOverride ?? require.resolve("pyodide/pyodide-lock.json");
-  const raw = await readFile(lockPath, "utf-8");
-  const parsed = PyodideLockfileSchema.parse(JSON.parse(raw));
+): Promise<Result<ReadonlyMap<string, BundledPackage>, BundledPackagesUnreadable>> {
+  if (cachedBundled && !lockfilePathOverride) return ok(cachedBundled);
+  let lockPath: string | undefined;
+  let raw: unknown;
+  try {
+    lockPath =
+      lockfilePathOverride ?? createRequire(import.meta.url).resolve("pyodide/pyodide-lock.json");
+    raw = JSON.parse(await readFile(lockPath, "utf-8"));
+  } catch (e) {
+    return err({
+      kind: "bundled_unreadable",
+      message: `${lockPath ?? "pyodide/pyodide-lock.json"}: ${describeError(e)}`,
+    });
+  }
+  const parsed = PyodideLockfileSchema.safeParse(raw);
+  if (!parsed.success) {
+    return err({
+      kind: "bundled_unreadable",
+      message: `${lockPath}: not a Pyodide lockfile: ${parsed.error.message}`,
+    });
+  }
   const map: ReadonlyMap<string, BundledPackage> = new Map(
-    Object.values(parsed.packages).map((pkg) => [
+    Object.values(parsed.data.packages).map((pkg) => [
       normalizePackageName(pkg.name),
-      { version: pkg.version, native: /_wasm32\.whl$/.test(pkg.file_name) },
+      {
+        version: pkg.version,
+        native: /_wasm32\.whl$/.test(pkg.file_name),
+        fileName: pkg.file_name,
+        depends: pkg.depends.map(normalizePackageName),
+      },
     ]),
   );
   if (!lockfilePathOverride) cachedBundled = map;
-  return map;
+  return ok(map);
 }
 
 /** PEP 503 normalisation — `Foo_Bar.Baz` and `foo-bar-baz` are the same project. */
@@ -200,21 +235,20 @@ export async function checkPyodideCompat(
   opts: CheckPyodideCompatOptions = {},
 ): Promise<Result<void, ReadonlyArray<PyodideCompatIssue>>> {
   if (declaredSpecs.length === 0) return ok();
-  let bundled: ReadonlyMap<string, BundledPackage>;
-  try {
-    bundled = await loadBundledPackages(opts.lockfilePath);
-  } catch (e) {
+  const loaded = await loadBundledPackages(opts.lockfilePath);
+  if (loaded.isErr()) {
     // pyodide-lock.json unreadable -- typically `pyodide` not installed
     // (a future tier-2-only deployment marking it optional) or the file
     // missing from a non-standard install. Same fail-open posture as
     // PyPI network errors below: register stays unblocked, first
     // WASM-tier invocation surfaces the real issue.
     log.warn(
-      { err: describeError(e) },
+      { err: loaded.error.message },
       "pyodide-compat: lockfile load failed; allowing register (first-invoke surfaces the real issue)",
     );
     return ok();
   }
+  const bundled = loaded.value;
   const parsedSpecs = declaredSpecs.flatMap((spec) => {
     const m = /^([a-z0-9][a-z0-9._-]*?)==(.+)$/i.exec(spec);
     return m?.[1] && m[2] ? [{ spec, name: m[1], version: m[2] }] : [];

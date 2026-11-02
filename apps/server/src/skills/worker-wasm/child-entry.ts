@@ -75,13 +75,51 @@ function startWorker(init: unknown): Worker {
     ) {
       ready = true;
     }
-    send?.(message);
+    relay(started, message);
   });
   started.on("error", (e: Error) => fail(`pyodide worker crashed: ${e.message}`));
   started.on("exit", (code: number) => {
     if (code !== 0) fail(`pyodide worker exited (code ${code})`);
   });
   return started;
+}
+
+/**
+ * Send a worker frame to the host. A frame IPC's JSON cannot carry (a Python
+ * int past 2^53 arrives as a BigInt) fails the task or the ctx call that sent
+ * it as a value, rather than throw out of the listener and end the child.
+ */
+function relay(worker: Worker, message: unknown): void {
+  let reason: string;
+  try {
+    send?.(message);
+    return;
+  } catch (e) {
+    reason = e instanceof Error ? e.message : String(e);
+  }
+  const frame = typeof message === "object" && message !== null ? message : {};
+  const type = "type" in frame ? frame.type : undefined;
+  const id = "id" in frame && typeof frame.id === "string" ? frame.id : undefined;
+  const taskId = "taskId" in frame && typeof frame.taskId === "string" ? frame.taskId : undefined;
+  if (type === "task_result" && id !== undefined) {
+    send?.({
+      type: "task_result",
+      id,
+      ok: false,
+      error: `task output is not JSON-serializable: ${reason}`,
+    });
+  } else if (type === "ctx_call" && id !== undefined && taskId !== undefined) {
+    worker.postMessage({
+      type: "ctx_result",
+      taskId,
+      id,
+      ok: false,
+      errorKind: "invalid_args",
+      message: `ctx call arguments are not JSON-serializable: ${reason}`,
+    });
+  } else {
+    fail(`could not relay a worker frame: ${reason}`);
+  }
 }
 
 /**

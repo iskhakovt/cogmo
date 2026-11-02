@@ -17,17 +17,13 @@ import { assertStatus, expectDefined } from "../test/assertions.js";
 import { mockFilesService } from "../test/factories.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import { makePopulatedBareRepo } from "../test/skills-bare-repo.js";
+import { offlineTier1 } from "../test/skills-fixtures.js";
 import { channels, userIdentities } from "../transport/store/schema.js";
 import { bootstrapSkillsRepo } from "./repo.js";
 import type { SkillRunAs, SkillRunServices } from "./run-as.js";
-import {
-  type SkillActor,
-  type SkillDeployOrigin,
-  SkillRunnerImpl,
-  type SkillRunnerOptions,
-} from "./runner.js";
+import { type SkillActor, type SkillDeployOrigin, SkillRunnerImpl } from "./runner.js";
 import { DrizzleSkillStore, type SkillRunIdentity, type SkillStore } from "./store/index.js";
-import type { Tier1Prefetcher } from "./worker-wasm/tier1.js";
+import type { Tier1PackagesError } from "./worker-wasm/wheel-cache.js";
 
 const execFileP = promisify(execFile);
 
@@ -216,26 +212,11 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
       userTimezone: "UTC",
       defaultRunAs: DEFAULT_RUN_AS,
       skillsRepoPath: repo.bare,
-      tier1: offlineTier1(),
+      // The fixtures' lockfiles carry placeholder hashes, so register must
+      // neither fetch wheels nor spawn a probe child.
+      ...offlineTier1(repo.bare),
       ...overrides,
     });
-  }
-
-  /**
-   * Tier 1 without the network: the fixtures' lockfiles carry placeholder
-   * hashes, so register must neither fetch wheels nor spawn a probe child.
-   */
-  function offlineTier1(): NonNullable<SkillRunnerOptions["tier1"]> {
-    const prefetcher = mock<Tier1Prefetcher>();
-    prefetcher.prefetchBuiltins.mockResolvedValue(ok());
-    prefetcher.probeBuiltins.mockResolvedValue(ok());
-    return {
-      wheelsRoot: join(repo.bare, ".pyodide-wheels"),
-      childrenDir: join(repo.bare, ".tier1-children"),
-      instanceId: null,
-      prefetcher,
-      resolvePackages: async () => ok({ builtins: [], wheelDir: null }),
-    };
   }
 
   it("registers a fresh skill — advances main, writes DB rows, deletes branch", async () => {
@@ -660,6 +641,76 @@ outputs:
       const skill = await tx((trx) => store.getSkillByName(trx, "echo"));
       // sha256(ECHO_LOCKFILE) — hex length 64 is the schema-level shape.
       expect(skill?.lockfileHash).toMatch(/^[0-9a-f]{64}$/);
+    });
+
+    describe("tier-1 packages", () => {
+      // Bundled by Pyodide at this version and pure Python: the compatibility
+      // check asks neither PyPI nor the probe.
+      const BUNDLED_LOCKFILE = `httpx==0.28.1 \\\n    --hash=sha256:${"0".repeat(64)}\n`;
+
+      async function pushBundledDeps(branch: string): Promise<void> {
+        await writeFile(
+          join(repo.work, "SKILL.md"),
+          ECHO_WITH_DEPS.replace("httpx==0.27.0", "httpx==0.28.1"),
+        );
+        await writeFile(join(repo.work, "skill.py"), ECHO_BODY);
+        await writeFile(join(repo.work, "requirements.lock"), BUNDLED_LOCKFILE);
+        await execFileP("git", ["-C", repo.work, "add", "."]);
+        await execFileP("git", ["-C", repo.work, "commit", "-m", branch, "--allow-empty"]);
+        await execFileP("git", [
+          "-C",
+          repo.work,
+          "push",
+          "-f",
+          "origin",
+          `HEAD:refs/heads/${branch}`,
+        ]);
+      }
+
+      async function registerResolvingTo(error: Tier1PackagesError) {
+        const resolvePackages = vi.fn(async () => err(error));
+        const { tier1, pyodidePackageCacheDir } = offlineTier1(repo.bare);
+        const runner = await makeRunner({
+          pyodidePackageCacheDir,
+          tier1: { ...tier1, resolvePackages },
+        });
+        await pushBundledDeps("skill/echo-tier1");
+        const result = await runner.register({ branch: "skill/echo-tier1", origin: OWNER });
+        expect(resolvePackages).toHaveBeenCalledTimes(1);
+        return result;
+      }
+
+      it("rejects as tier1_dependency_unavailable when a wheel fails its pinned hash", async () => {
+        const result = await registerResolvingTo({
+          kind: "hash_mismatch",
+          spec: "idna==3.10",
+          message: "idna-3.10-py3-none-any.whl hashes to sha256:aa",
+        });
+        assertStatus(result, "rejected");
+        expect(result.errors).toEqual([
+          expect.stringMatching(/^tier1_dependency_unavailable: hash_mismatch: idna==3\.10: /),
+        ]);
+        expect(await getMainSha(repo.bare)).toBeNull();
+      });
+
+      it("goes live when the packages cannot be fetched: the run fetches them again", async () => {
+        const result = await registerResolvingTo({
+          kind: "network_failed",
+          spec: "idna==3.10",
+          message: "pypi lookup: ECONNRESET",
+        });
+        assertStatus(result, "live");
+        const skill = await tx((trx) => store.getSkillByName(trx, "echo"));
+        expect(skill?.lockfileHash).toMatch(/^[0-9a-f]{64}$/);
+      });
+
+      it("goes live when Pyodide's own lockfile cannot be read", async () => {
+        const result = await registerResolvingTo({
+          kind: "bundled_unreadable",
+          message: "pyodide-lock.json: ENOENT",
+        });
+        assertStatus(result, "live");
+      });
     });
 
     it("an abort during the PyPI lookups rejects with its reason and commits nothing", async () => {
@@ -2235,6 +2286,7 @@ effects:
           userTimezone: "UTC",
           defaultRunAs: DEFAULT_RUN_AS,
           skillsRepoPath: repoWithRemote.bare,
+          ...offlineTier1(repoWithRemote.bare),
         });
 
         const sha = await pushFeatureBranch({
@@ -2371,6 +2423,7 @@ effects:
           userTimezone: "UTC",
           defaultRunAs: DEFAULT_RUN_AS,
           skillsRepoPath: repoWithRemote.bare,
+          ...offlineTier1(repoWithRemote.bare),
         });
         const sha = await pushFeatureBranch({
           work: repoWithRemote.work,
@@ -2588,6 +2641,7 @@ effects:
         userTimezone: "UTC",
         defaultRunAs: DEFAULT_RUN_AS,
         skillsRepoPath,
+        ...offlineTier1(skillsRepoPath),
       });
     }
   });

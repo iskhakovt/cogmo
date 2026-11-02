@@ -74,13 +74,11 @@ export function planRuntime(
 /** How the runner's deployment configures the runtimes. */
 export interface RuntimeConfig {
   /** Pyodide's package cache, the only place a tier-1 child loads built-ins from. */
-  pyodidePackageCacheDir: string | undefined;
+  pyodidePackageCacheDir: string;
   /** The real path of the Pyodide distribution (`pyodideDistDir()`). */
   pyodideDistDir: string;
   /** Where tier-1 children's process-group records live while they run. */
   tier1ChildrenDir: string;
-  /** The serve instance a child's process-group record names; null where none is known. */
-  tier1InstanceId: string | null;
   /**
    * What a tier-1 child installs for a lockfile: the built-ins the package
    * cache holds and the lockfile's read-only wheel directory, fetched and
@@ -122,13 +120,10 @@ export async function dispatchToRuntime(
   if (runtime.kind === "wasm") {
     return runOnWorker({
       ...task,
-      ...(config.pyodidePackageCacheDir !== undefined && {
-        packageCacheDir: config.pyodidePackageCacheDir,
-      }),
+      packageCacheDir: config.pyodidePackageCacheDir,
       packages,
       pyodideDistDir: config.pyodideDistDir,
       childrenDir: config.tier1ChildrenDir,
-      instanceId: config.tier1InstanceId,
       memoryMb: cached.manifest.resources?.memory_mb ?? DEFAULT_TIER1_MEMORY_MB,
     });
   }

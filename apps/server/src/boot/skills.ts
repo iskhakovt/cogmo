@@ -22,23 +22,20 @@ const log = logger.child({ component: "boot.skills" });
  * Tier-2 (sysbox/Daytona) skill execution requires a non-null `sandbox`;
  * CLIs pass `NO_SANDBOX` and accept that tier-2 invocations throw at call
  * time.
+ *
+ * `reapTier1Children` is true for `cogmo serve` only: the reap kills the
+ * tier-1 children a dead Cogmo process left behind, and a CLI process must
+ * not touch those of the serve it runs beside (design/skills.md → Tier-1
+ * boundary, layer 1 → Process-group records).
  */
 export async function bootstrapSkillRunner(
   core: CoreDeps,
   sandbox: SandboxDeps,
+  reapTier1Children: boolean,
   opts: BootstrapOptions = {},
 ): Promise<SkillRunnerHandle> {
-  // Tier-1 children left by a previous process of this boot: nothing else
-  // bounds them without the per-child cgroup (design/skills.md → Tier-1
-  // boundary, layer 1).
   const tier1ChildrenDir = `${env.COGMO_SKILLS_PATH}/.tier1-children`;
-  const reaped = await reapOrphanedChildGroups(tier1ChildrenDir, { bootId: await readBootId() });
-  if (reaped.killed.length > 0 || reaped.stale.length > 0) {
-    log.info(
-      { killed: reaped.killed.map((r) => r.pid), stale: reaped.stale.length },
-      "tier-1 child process groups reaped at boot",
-    );
-  }
+  if (reapTier1Children) await reapTier1ChildGroups(tier1ChildrenDir);
   const skillRunner = await SkillRunnerImpl.create({
     store: core.skillStore,
     runInTx: core.runInTx,
@@ -49,15 +46,12 @@ export async function bootstrapSkillRunner(
     userTimezone: env.USER_TIMEZONE,
     defaultRunAs: { userId: core.user.id, profileId: core.profile.id },
     skillsRepoPath: env.COGMO_SKILLS_PATH,
-    // Cache Pyodide's pre-built packages under the skills repo's git dir
-    // so JsDelivr fetches don't repeat across worker spawns. Only matters
-    // for skills that micropip-install pure-Python wheels — the stdlib is
-    // always bundled.
+    // Pyodide's built-ins, which the host prefetches and tier-1 children load
+    // read-only; the stdlib ships inside the distribution.
     pyodidePackageCacheDir: `${env.COGMO_SKILLS_PATH}/.pyodide-cache`,
     tier1: {
       wheelsRoot: tier1WheelsRoot(),
       childrenDir: tier1ChildrenDir,
-      instanceId: sandbox.sandboxInstanceId ?? null,
     },
     poolOptions: {
       min: env.COGMO_SKILLS_POOL_MIN,
@@ -115,6 +109,25 @@ export function createSkillFunctions(
   );
 
   return { skillCronTicker, skillCronFire, skillDepsReaper };
+}
+
+/**
+ * Kill the tier-1 children a dead Cogmo process of this boot left behind,
+ * which nothing else bounds without the per-child cgroup, before the runner
+ * serves.
+ */
+async function reapTier1ChildGroups(childrenDir: string): Promise<void> {
+  const reaped = await reapOrphanedChildGroups(childrenDir, { bootId: await readBootId() });
+  const summary = {
+    killed: reaped.killed.map((r) => r.pid),
+    owned: reaped.owned.map((r) => r.pid),
+    stale: reaped.stale,
+  };
+  if (reaped.killed.length > 0) {
+    log.warn(summary, "killed orphaned tier-1 child process groups at boot");
+  } else if (reaped.owned.length > 0 || reaped.stale.length > 0) {
+    log.info(summary, "tier-1 child process-group records reaped at boot");
+  }
 }
 
 /** The hash-verified pure-Python wheels tier-1 children install from. */

@@ -1,7 +1,9 @@
 /// <reference path="../../test/vitest.d.ts" />
 
 import { randomUUID } from "node:crypto";
-import { hostname } from "node:os";
+import { mkdtemp, rm } from "node:fs/promises";
+import { hostname, tmpdir } from "node:os";
+import { join } from "node:path";
 import Docker from "dockerode";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { mock } from "vitest-mock-extended";
@@ -18,6 +20,7 @@ import type { SecretsStore } from "../secrets/store/index.js";
 import { assertStatus } from "../test/assertions.js";
 import { mockFilesService } from "../test/factories.js";
 import { createTestDatabase } from "../test/pglite.js";
+import { offlineTier1 } from "../test/skills-fixtures.js";
 import type { SkillRunAs, SkillRunServices } from "./run-as.js";
 import { SkillRunnerImpl } from "./runner.js";
 import { DrizzleSkillStore } from "./store/index.js";
@@ -72,9 +75,11 @@ let docker: Docker;
 let proxy: CogmoSocketProxy;
 let sandbox: SandboxClient;
 let instanceId: string;
+let tier1Root: string;
 
 beforeAll(async () => {
   if (!SHOULD_RUN) return;
+  tier1Root = await mkdtemp(join(tmpdir(), "runner-sysbox-tier1-"));
   ({ tx, close } = await createTestDatabase());
   agentStore = new DrizzleSandboxStore();
   skillStore = new DrizzleSkillStore();
@@ -130,6 +135,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (!SHOULD_RUN) return;
+  await rm(tier1Root, { recursive: true, force: true });
   if (sandbox) await sandbox.shutdown();
   // Belt-and-suspenders cleanup, scoped to this test's instance label so
   // parallel test files (or stray containers from unrelated runs on the
@@ -416,6 +422,8 @@ describe.skipIf(!SHOULD_RUN)("SkillRunnerImpl tier-2 (sysbox runtime, GHA only)"
       tier2Image: SKILLS_IMAGE,
       userTimezone: "UTC",
       defaultRunAs: DEFAULT_RUN_AS,
+      // Every skill here is tier 2.
+      ...offlineTier1(tier1Root),
     });
 
     try {
@@ -448,6 +456,8 @@ describe.skipIf(!SHOULD_RUN)("SkillRunnerImpl tier-2 (sysbox runtime, GHA only)"
       tier2Image: SKILLS_IMAGE,
       userTimezone: "UTC",
       defaultRunAs: DEFAULT_RUN_AS,
+      // Every skill here is tier 2.
+      ...offlineTier1(tier1Root),
     });
 
     const slowManifest = `---
@@ -490,6 +500,8 @@ resources:
       tier2Image: SKILLS_IMAGE,
       userTimezone: "UTC",
       defaultRunAs: DEFAULT_RUN_AS,
+      // Every skill here is tier 2.
+      ...offlineTier1(tier1Root),
       // Default min=1: the runner.create call eagerly spawns one worker
       // before the first invoke, so both invokes run on a warm container.
       // Tighter idle/recycle caps don't matter for a two-task test.
@@ -548,6 +560,8 @@ async def run(inputs, ctx):
       tier2Image: SKILLS_IMAGE,
       userTimezone: "UTC",
       defaultRunAs: DEFAULT_RUN_AS,
+      // Every skill here is tier 2.
+      ...offlineTier1(tier1Root),
       depsCacheVolumeName,
     });
     try {
@@ -594,6 +608,8 @@ async def run(inputs, ctx):
       tier2Image: SKILLS_IMAGE,
       userTimezone: "UTC",
       defaultRunAs: DEFAULT_RUN_AS,
+      // Every skill here is tier 2.
+      ...offlineTier1(tier1Root),
     });
 
     await runner.__registerForTests({
@@ -628,6 +644,8 @@ async def run(inputs, ctx):
       tier2Image: SKILLS_IMAGE,
       userTimezone: "UTC",
       defaultRunAs: DEFAULT_RUN_AS,
+      // Every skill here is tier 2.
+      ...offlineTier1(tier1Root),
     });
     try {
       await runner.__registerForTests({
@@ -670,6 +688,8 @@ async def run(inputs, ctx):
       tier2Image: SKILLS_IMAGE,
       userTimezone: "UTC",
       defaultRunAs: DEFAULT_RUN_AS,
+      // Every skill here is tier 2.
+      ...offlineTier1(tier1Root),
     });
     try {
       await runner.__registerForTests({
@@ -697,6 +717,8 @@ async def run(inputs, ctx):
       tier2Image: SKILLS_IMAGE,
       userTimezone: "UTC",
       defaultRunAs: DEFAULT_RUN_AS,
+      // Every skill here is tier 2.
+      ...offlineTier1(tier1Root),
     });
     try {
       await runner.__registerForTests({
@@ -740,6 +762,8 @@ async def run(inputs, ctx):
       tier2Image: SKILLS_IMAGE,
       userTimezone: "UTC",
       defaultRunAs: DEFAULT_RUN_AS,
+      // Every skill here is tier 2.
+      ...offlineTier1(tier1Root),
       depsCacheVolumeName,
     });
     try {
@@ -785,6 +809,8 @@ async def run(inputs, ctx):
       tier2Image: SKILLS_IMAGE,
       userTimezone: "UTC",
       defaultRunAs: DEFAULT_RUN_AS,
+      // Every skill here is tier 2.
+      ...offlineTier1(tier1Root),
       depsCacheVolumeName,
     });
     try {
@@ -828,6 +854,8 @@ async def run(inputs, ctx):
       tier2Image: SKILLS_IMAGE,
       userTimezone: "UTC",
       defaultRunAs: DEFAULT_RUN_AS,
+      // Every skill here is tier 2.
+      ...offlineTier1(tier1Root),
     });
     try {
       await runner.__registerForTests({
