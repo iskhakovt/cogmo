@@ -366,13 +366,17 @@ describe("createSkillCronTicker (Inngest wiring)", () => {
     });
     const advanced = await engine.executeStep("lock-and-advance");
     const attempts = expectDefined(fn.opts.retries, "retries") + 1;
+    let lastError: unknown;
     for (let attempt = 0; attempt < attempts; attempt++) {
       // A fresh array per attempt: the engine appends every step it ran to
       // the one it is given, which would memoize the failed `fan-out`.
       const steps = [{ id: "lock-and-advance", handler: () => advanced.result }];
       const { error } = await engine.execute({ steps });
       if (error === undefined) return;
+      lastError = error;
     }
+    // Every attempt failed: surface the run's error instead of an empty delivery.
+    throw lastError;
   }
 
   it("delivers an advanced row's fire when the fan-out fails once", async () => {
