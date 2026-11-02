@@ -1638,13 +1638,13 @@ One enforcement point for every byte a skill sends off the machine: a token-inje
 - Non-HTTP protocols have no route ([Decisions](#decisions) → Non-HTTP egress).
 - Tier 2 runs on local Docker only ([Warm pool](#warm-pool-confirmed)). A managed backend Cogmo cannot attach to an internal network has no egress control, so the classifier reads `tier2EgressEnforced = false` there: bound secrets are unavailable and a `network:` block is `blocked`, until the provider offers an egress hook the proxy can sit behind.
 
-**Proxy holder** `[proposed]`, S6's. The proxy has one holder per database. At its skills stage, before the `pending` sweep and the listener, `cogmo serve` takes the egress proxy lock: an exclusive session advisory lock on a third fixed key beside the bootstrap and writer locks ([infrastructure.md](infrastructure.md)). A second serve, as a deploy overlap starts one, waits on it there, so the proxy hands over only when the old serve releases the lock at shutdown or its connection ends.
+**Proxy holder** `[proposed]`, S6's. The proxy has one holder per database. At its skills stage, before the `pending` sweep and the listener, `cogmo serve` takes the egress proxy lock: an exclusive session advisory lock on a third fixed key beside the bootstrap and writer locks ([infrastructure.md](infrastructure.md)). A second serve, as a deploy overlap starts one, waits on it there, so the proxy hands over only when the old serve releases the lock at shutdown or its connection ends. Deploys therefore stop the old serve before starting the new one ([deploy.md → Updating](../deploy.md#updating)): a serve waiting at its skills stage never answers `/health`, which comes up after that stage, so a start-new-then-stop-old rollout would wait forever.
 
 | Failure mode | State left | Why it is safe, or the residual |
 |-|-|-|
 | Two serves at once | one listener | the second waits at its skills stage until the first releases; between the release and its listener's bind, `egressListener` is false. **Residual:** register in that gap classifies `network:` skills as no listener allows |
 | The holder dies mid-request | the request's row `pending`; the lock released with the connection | the next holder's sweep marks the row `failed: process_lost` before its listener starts |
-| The holder's connection drops while the process lives | the lock lost | the holder stops its listener (`stopped`) and takes the lock again before restarting it, so two listeners never run |
+| The holder's lock connection drops while the process lives | the lock released at once; the holder learns of it only when it next uses that connection | the holder checks its lock connection on every 30 s heartbeat and, finding it gone, stops its listener (`stopped`) and takes the lock again before restarting it. **Residual:** for up to one heartbeat interval a waiting serve can take the lock, sweep `pending` rows the old holder is still completing, and run a second listener |
 
 **Per-run identity.** No credential, no egress.
 
@@ -1734,7 +1734,7 @@ The credential rides in mockttp's metadata channel: `Proxy-Authorization: Basic 
 **Substitution.** Cogmo never hands a bound secret's plaintext to the worker: `ctx.secrets.get(name)` returns a placeholder, `cogmo-secret:<hmac(runId, name)>`, unique to the run.
 
 - The binding names its `destination` (a URL pattern within the allowlist) and its `location`, an enum: `header` (the default: a named header, or the existing `header:` template), `query` (one parameter) or `path` (a path template whose one templated segment holds the placeholder, for an API that takes the token in the URL path, as the Telegram Bot API's `/bot<token>/<method>` does). A request body is never a substitution site ([Decisions](#decisions) → Substitution sites). The proxy replaces the placeholder only in that location, only on a request to that destination, and for `path` only when the request's path matches the template; the value is percent-encoded as a path segment.
-- Path matching reads the templated segment as a wildcard: the destination pattern and `isWriteRequest`'s `WRITE_ENDPOINTS` ([Write requests](#write-requests-proposed)) match the path as the skill sent it, placeholder and all, never the value. The audit row's `path` holds the templated segment as the template's text, so it records neither the value nor the run's placeholder. A raw secret value `ctx.secrets.get` issued to the run, which the host holds for the run's life, is recorded as `{{raw}}` wherever the path contains it.
+- Path matching reads the templated segment as a wildcard: the destination pattern and `isWriteRequest`'s `WRITE_ENDPOINTS` ([Write requests](#write-requests-proposed)) match the path as the skill sent it, placeholder and all, never the value. The audit row's `path` holds the templated segment as the template's text, so it records neither the value nor the run's placeholder. A raw secret value `ctx.secrets.get` issued to the run, which the host holds for the run's life, is recorded as `{{raw}}` wherever the path contains it. **Residual:** `cogmo skills run` issues raw values in the CLI process, which the proxy does not see, so such a run's raw value in a URL path is stored unredacted.
 - A placeholder anywhere else — another host, another location, a path the template does not match — is passed through unchanged, so it reaches the destination as an opaque string, and audited as `binding_misuse`.
 - An unbound secret keeps the pull model and classifies as `raw_secret` ([Risk tiers](#risk-tiers-without-a-human)). It is the fallback for credentials no binding can place, such as a signing key the skill computes with.
 - **Residual:** an upstream can reflect the substituted value back, a query parameter or path segment echoed in an error body or a `Location` header, and the response streams to the skill unmodified, since no rule sets a response hook. Redacting it would need one, which would end streaming, so it is p3 at most.
@@ -1742,13 +1742,13 @@ The credential rides in mockttp's metadata channel: `Proxy-Authorization: Basic 
 **OAuth refresh** `[proposed]`, specified here before S8 builds it. `exchange: oauth_refresh` makes the proxy trade the stored refresh token for an access token at substitution time, so no long-lived credential reaches the request.
 
 - The secret's value holds the refresh token and what the exchange needs: the token endpoint, the client id and secret. The access token is cached in process, keyed by the secret's name and its row's nonce, so updating the secret invalidates it, and used until 60 s before its expiry.
-- A refresh holds `pg_advisory_xact_lock(hashtext('skill_oauth_refresh:' || name))` across the exchange and the write-back, in a READ COMMITTED transaction, so the secret it reads after the lock is the one the previous holder wrote back ([store-pattern](../.agents/rules/store-pattern.md)); the exchange's timeout bounds how long the transaction stays open. A request that needs the same secret waits, then uses the token the holder cached, or, in another process, the refresh token the holder stored.
+- A refresh holds `pg_advisory_xact_lock(hashtext('skill_oauth_refresh:' || name))` across the exchange and the write-back, in a READ COMMITTED transaction, so the secret it reads after the lock is the one the previous holder wrote back ([store-pattern](../.agents/rules/store-pattern.md)); the exchange's timeout bounds how long the transaction stays open. A request that needs the same secret waits, then uses the token the holder cached. Only the proxy holder runs exchanges.
 - A response carrying a new refresh token, from a provider that rotates on use, is written back to the secret, re-encrypted, and committed before the access token is cached or used.
 - A refused grant (`invalid_grant`, or a 400 or 401 from the endpoint), an unreachable endpoint, a 5xx, a timeout, or a failed write-back refuses the request `502` with `x-cogmo-egress: credential_unavailable`, audited with that `failure_reason`; a refused grant also tells the owner to re-authorise the secret. A run that ends in error with such a row ends `credential_unavailable`, a pausing kind ([Run failures](#run-failures)).
 
 | Failure mode | State left | Why it is safe, or the residual |
 |-|-|-|
-| Two requests need a refresh at once, in one process or two | one exchange | the database lock; the waiter uses the holder's cached token, or the refresh token it wrote back |
+| Two requests need a refresh at once | one exchange | the lock; the waiter uses the token the holder cached |
 | A crash after the provider rotated the refresh token, before the write-back commits | the stored token is the old one, which a rotating provider has revoked | the next refresh is refused `invalid_grant`, and the owner re-authorises. **Residual** |
 | The write-back fails | the request refused | the new refresh token is lost as above; using the access token without storing its pair would only hide the loss until it expires |
 | The secret is updated mid-run | the next request refreshes from the new value | the cache key includes the row's nonce |
@@ -2083,11 +2083,17 @@ skill_approval_classes (
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 )
 
+serve_instances (
+  id          UUID v7 PK,                  -- the serve instance id: every per-process record keys on it, whatever the sandbox backend
+  started_at  TIMESTAMPTZ NOT NULL,        -- written by the core boot stage's insert, once per cogmo serve process
+  stopped_at  TIMESTAMPTZ,                 -- nullable: null while running, and after a crash; set on graceful shutdown
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+)
+
 serve_heartbeats (
   id              UUID v7 PK,
-  instance_id     UUID NOT NULL UNIQUE,  -- the serve instance id, minted once per process by the core boot stage, whatever the sandbox backend
-                                         -- (local-docker's cogmo_instances row reuses it);
-                                         -- no FK: cogmo_instances rows exist only on the local-docker backend
+  instance_id     UUID NOT NULL UNIQUE REFERENCES serve_instances(id),  -- the serve instance; cogmo_instances, which exists only on the
+                                         -- local-docker backend, references serve_instances too (sandbox.md → Data Model)
   egress_listener egress_listener_status NOT NULL,   -- transitions in Egress proxy → One path → Listener state
   failure         TEXT,                  -- nullable: the bind or listener error; set iff egress_listener = 'failed' (CHECK)
   heartbeat_at    TIMESTAMPTZ NOT NULL,  -- the database's now() at each transition and every 30 s; egressListener needs it within 90 s
