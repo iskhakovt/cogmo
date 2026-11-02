@@ -49,7 +49,7 @@ describe("handleSkills", () => {
               riskTier: "approve",
               disabled: true,
               gitSha: "abc1234ffff",
-              pendingDeploy: { id, gitSha: "def5678eeee" },
+              pendingDeploy: { id, gitSha: "def5678eeee", priorGitSha: "abc1234ffff" },
             },
           ]),
         ),
@@ -62,7 +62,7 @@ describe("handleSkills", () => {
     );
   });
 
-  it("marks a pending first deploy, whose row already sits at the pending tip", async () => {
+  it("marks a pending first deploy, which replaces no live version", async () => {
     const id = "01960000-0000-7000-8000-000000000002";
     const transport = transportWith({
       skills: {
@@ -74,7 +74,7 @@ describe("handleSkills", () => {
               riskTier: "approve",
               disabled: true,
               gitSha: "def5678eeee",
-              pendingDeploy: { id, gitSha: "def5678eeee" },
+              pendingDeploy: { id, gitSha: "def5678eeee", priorGitSha: null },
             },
           ]),
         ),

@@ -678,7 +678,7 @@ const skillsDeployedOutcomeFields = {
   riskTier: z.enum(skillRiskTiers),
   reasons: z.array(z.enum(skillRiskReasons)),
   gitSha: z.string(),
-  /** The version the deploy replaces; null on a skill's first deploy. */
+  /** The live version the deploy replaces; null when none was live before it. */
   priorGitSha: z.string().nullable(),
   description: z.string(),
   effects: z.object({
@@ -697,7 +697,8 @@ const skillsDeployedOutcomeFields = {
  * The outcome of a skill register (design/skills.md → Notifications and
  * undo), emitted by `announceDeployOutcome` after the deploy commits, for
  * every register caller: the agent's `register_skill` tool and the coding
- * task's auto-register. `no_op` emits nothing. A channel renders it in the
+ * task's auto-register. A `no_op` and an `auto` deploy emit nothing; a
+ * rejection is emitted only by the auto-register. A channel renders it in the
  * session on `conversationId`; a `pending_approval` message carries the
  * Approve / Deny keyboard, whose taps go straight to
  * `transport.skills.approveDeploy` / `denyDeploy`. Nothing replays a lost

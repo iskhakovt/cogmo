@@ -41,7 +41,7 @@ function pendingDeploy(overrides: Partial<SkillDeployRow> = {}): SkillDeployRow 
     status: "pending_approval",
     approvedBy: null,
     classifierLog: {
-      classifier_version: "ast-1",
+      classifier_version: "ast-2",
       risk_tier: "approve",
       declared_effects: ["sends_email"],
       detected_effects: [],
@@ -92,7 +92,7 @@ describe("listAllSkills", () => {
         riskTier: "notify",
         disabled: false,
         gitSha: SHA_LIVE,
-        pendingDeploy: { id: "deploy-1", gitSha: SHA_PENDING },
+        pendingDeploy: { id: "deploy-1", gitSha: SHA_PENDING, priorGitSha: SHA_LIVE },
       },
       expect.objectContaining({ name: "other", pendingDeploy: null }),
     ]);
@@ -120,7 +120,11 @@ describe("listAllSkills", () => {
 
     const [summary] = await list({ store, runInTx });
 
-    expect(summary?.pendingDeploy).toEqual({ id: "deploy-new", gitSha: SHA_PENDING });
+    expect(summary?.pendingDeploy).toEqual({
+      id: "deploy-new",
+      gitSha: SHA_PENDING,
+      priorGitSha: SHA_LIVE,
+    });
   });
 
   it("ignores a pending deploy whose skill is not in the listing", async () => {

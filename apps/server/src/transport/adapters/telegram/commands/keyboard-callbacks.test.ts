@@ -163,7 +163,7 @@ describe("handleSkillsDeployCallback", () => {
 
     expect(deny).toHaveBeenCalledWith(pendingId, "user-tg-1");
     expect(outcome.editText).toMatch(/denied/);
-    expect(outcome.editText).toMatch(/no main advance/);
+    expect(outcome.editText).toMatch(/main did not move/);
     expect(outcome.toast).toBe("Denied");
   });
 

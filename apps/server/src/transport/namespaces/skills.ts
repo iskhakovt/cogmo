@@ -16,12 +16,16 @@ export interface SkillListEntry {
   riskTier: SkillRiskTier;
   disabled: boolean;
   gitSha: string;
-  /** The skill's deploy awaiting approval, or null when none is pending. */
-  pendingDeploy: { id: string; gitSha: string } | null;
+  /**
+   * The skill's deploy awaiting approval, or null when none is pending.
+   * `priorGitSha` is the live version it would replace; null for a first deploy.
+   */
+  pendingDeploy: { id: string; gitSha: string; priorGitSha: string | null } | null;
 }
 
 /**
- * Skills-deploy approval surface for the approve-tier inline keyboard.
+ * Skills surface for the deploy message's keyboards (Approve, Deny, Disable)
+ * and the `/skills` commands.
  * Mirrors the `coding` namespace shape: identity-checked, calls into the
  * existing `SkillRunner` RPCs, returns `Result` with skills-specific
  * error codes. Returns `skills_disabled` when the skills module isn't

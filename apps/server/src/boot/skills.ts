@@ -4,7 +4,6 @@
 
 import { env } from "../env.js";
 import { inngest } from "../inngest/index.js";
-import { BUILD_CAPABILITIES } from "../skills/capabilities.js";
 import { createSkillCronFireHandler } from "../skills/cron-fire-handler.js";
 import { createSkillCronTicker } from "../skills/cron-ticker.js";
 import { createSkillDepsReaper } from "../skills/deps-reaper-function.js";
@@ -26,7 +25,6 @@ export async function bootstrapSkillRunner(
   opts: BootstrapOptions = {},
 ): Promise<SkillRunnerHandle> {
   const skillRunner = await SkillRunnerImpl.create({
-    capabilities: BUILD_CAPABILITIES,
     store: core.skillStore,
     runInTx: core.runInTx,
     secretsStore: core.secretsStore,

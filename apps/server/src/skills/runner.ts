@@ -5,7 +5,7 @@ import { defaultSkillsImage } from "../env.js";
 import { logger } from "../logger.js";
 import type { SandboxClient } from "../sandbox/index.js";
 import type { SecretsStore } from "../secrets/store/index.js";
-import { BUILD_CAPABILITIES, type SkillsCapabilities } from "./capabilities.js";
+import { BUILD_CAPABILITIES } from "./capabilities.js";
 import type { DefaultCtxHandlerOptions } from "./ctx-handler.js";
 import {
   type DeregisterResult,
@@ -158,12 +158,6 @@ export interface SkillRunnerOptions {
   /** The install owner with the default profile — what an `owner` origin runs as. */
   defaultRunAs: SkillRunIdentity;
   /**
-   * What this deployment enforces, read by the classifier. Boot passes
-   * {@link BUILD_CAPABILITIES}; a runner built without it (the tests') reads
-   * the same flags, so an omitted value can never loosen a tier.
-   */
-  capabilities?: SkillsCapabilities;
-  /**
    * Path to the bare skills repo (`$COGMO_SKILLS_PATH`). Required for the
    * register / rollback flows that read SKILL.md from git and advance
    * `refs/heads/main` via `git update-ref`. Tests that only exercise
@@ -277,7 +271,7 @@ export class SkillRunnerImpl implements SkillRunner {
       runInTx: opts.runInTx,
       secretsStore: opts.secretsStore,
       defaultRunAs: opts.defaultRunAs,
-      capabilities: opts.capabilities ?? BUILD_CAPABILITIES,
+      capabilities: BUILD_CAPABILITIES,
       skillsRepoPath: opts.skillsRepoPath,
       sourceCache,
       // Explicit override wins; otherwise default to a sandbox-backed

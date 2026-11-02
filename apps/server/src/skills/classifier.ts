@@ -20,7 +20,7 @@ import type { ClassifierLog, SkillManifest } from "./types.js";
  *     degradation; the deploy still completes with the conservative
  *     stub tier.
  *
- * Public entry is `classifyManifest(manifest, body)` — async because
+ * Public entry is `classifyManifest(manifest, body, capabilities)` — async because
  * the AST parser load is async. Tests that don't exercise body AST
  * may pass an empty body; the AST path will run, find nothing, and
  * return the same tier the declaration-only path would.
@@ -30,10 +30,10 @@ const log = logger.child({ component: "skills.classifier" });
 
 /**
  * Stub classifier version. Used by the fallback path only. The AST
- * path stamps `AST_CLASSIFIER_VERSION` (`ast-1`) so audit-log
+ * path stamps `AST_CLASSIFIER_VERSION` (`ast-2`) so audit-log
  * consumers can tell the two apart.
  */
-export const STUB_CLASSIFIER_VERSION = "stub-2-effect-aware";
+export const STUB_CLASSIFIER_VERSION = "stub-3-reasons";
 
 /**
  * Re-exported so `register` / `__registerForTests` (and any other

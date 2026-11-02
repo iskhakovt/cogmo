@@ -73,7 +73,7 @@ afterAll(async () => {
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 const SHA_NEW = "fedcba9876543210fedcba9876543210fedcba98";
-const SHA_EDIT = "0123456789abcdef0123456789abcdef01234567";
+const SHA_EDIT = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
 const SHA_THIRD = "1111111111111111111111111111111111111111";
 
 const INPUTS_SCHEMA: SkillInputs = {
@@ -1431,6 +1431,36 @@ describe("DrizzleSkillStore", () => {
       const edit = await register({ branchTipSha: SHA_EDIT });
       assertKind(edit, "live");
       expect(edit.deploy.priorGitSha).toBe(SHA_NEW);
+    });
+
+    it("counts a rolled-back version as live when the next deploy names what it replaces", async () => {
+      await register();
+      const edit = await register({ branchTipSha: SHA_NEW });
+      assertKind(edit, "live");
+      const base = executeRegisterParams({});
+      const rolledBack = await tx((trx) =>
+        store.executeRollback(trx, {
+          name: base.name,
+          toGitSha: SHA_EDIT,
+          tier: base.tier,
+          riskTier: base.riskTier,
+          effects: base.effects,
+          schedule: base.schedule,
+          scheduleNextRunAt: base.scheduleNextRunAt,
+          lockfileHash: base.lockfileHash,
+          inputs: base.inputs,
+          outputs: base.outputs,
+          classifierLog: base.classifierLog,
+          runAs: base.runAs,
+          applyFilesystem: noFs,
+        }),
+      );
+      assertKind(rolledBack, "live");
+      expect(rolledBack.deploy.priorGitSha).toBe(SHA_NEW);
+
+      const next = await register({ branchTipSha: SHA });
+      assertKind(next, "live");
+      expect(next.deploy.priorGitSha).toBe(SHA_EDIT);
     });
 
     it("deny resolves a pending deploy and leaves the skills row alone", async () => {

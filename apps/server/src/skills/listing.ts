@@ -12,8 +12,11 @@ export interface SkillSummary {
   riskTier: SkillRiskTier;
   disabled: boolean;
   gitSha: string;
-  /** The skill's deploy awaiting approval, or null when none is pending. */
-  pendingDeploy: { id: string; gitSha: string } | null;
+  /**
+   * The skill's deploy awaiting approval, or null when none is pending.
+   * `priorGitSha` is the live version it would replace; null for a first deploy.
+   */
+  pendingDeploy: { id: string; gitSha: string; priorGitSha: string | null } | null;
 }
 
 /**
@@ -76,7 +79,10 @@ export async function listAllSkills(
     pending: await deps.store.listPendingDeploys(tx),
   }));
   const pendingBySkill = new Map(
-    pending.map((d): [string, PendingDeploy] => [d.skillId, { id: d.id, gitSha: d.gitSha }]),
+    pending.map((d): [string, PendingDeploy] => [
+      d.skillId,
+      { id: d.id, gitSha: d.gitSha, priorGitSha: d.priorGitSha },
+    ]),
   );
   return rows.map((r) => rowToSummary(r, pendingBySkill.get(r.id) ?? null));
 }

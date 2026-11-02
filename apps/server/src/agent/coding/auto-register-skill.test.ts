@@ -310,6 +310,62 @@ describe("autoRegisterSkill", () => {
     });
   });
 
+  it("announces a rejected register to the task's conversation: no model relays it", async () => {
+    const origin = await tx(async (trx) => {
+      const user = await agentStore.createUser(trx);
+      const profile = await agentStore
+        .createProfile(trx, {
+          userId: user.id,
+          name: "work",
+          basePrompt: "",
+          model: "m",
+          toolSet: [],
+        })
+        .then(expectOk);
+      const conversation = await agentStore.createConversation(trx, {
+        userId: user.id,
+        profileId: profile.id,
+        isPrivate: true,
+      });
+      return { conversationId: conversation.id };
+    });
+    const { taskId, branch } = await seedRepoAndTask(SKILLS_CODING_REPO_NAME, {
+      conversationId: origin.conversationId,
+    });
+    await pushBranchToUpstream(branch);
+    const skillRunner = mock<SkillRunner>();
+    skillRunner.register.mockResolvedValue({
+      name: "",
+      riskTier: "notify",
+      status: "rejected",
+      gitSha: "abc1234",
+      errors: ["missing_skill_md: SKILL.md not found at branch tip"],
+    });
+    const publisher = mock<EventPublisher>();
+
+    await autoRegisterSkill(
+      {
+        runInTx: tx,
+        store,
+        agentStore,
+        secretsStore: fakeSecretsStore(validIdentity),
+        skillRunner,
+        publisher,
+        skillsRepoPath: bareRepoPath,
+      },
+      { taskId },
+    );
+
+    expect(publisher.send).toHaveBeenCalledWith({
+      name: "skills/deploy/outcome",
+      data: expect.objectContaining({
+        outcome: "rejected",
+        conversationId: origin.conversationId,
+        errors: ["missing_skill_md: SKILL.md not found at branch tip"],
+      }),
+    });
+  });
+
   it("throws rather than deploy as the owner when the task's conversation doesn't resolve", async () => {
     const conversationId = await tx(async (trx) => {
       const user = await agentStore.createUser(trx);

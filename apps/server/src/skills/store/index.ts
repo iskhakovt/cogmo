@@ -1,4 +1,4 @@
-import { and, asc, eq, getTableColumns, isNotNull, lte, sql } from "drizzle-orm";
+import { and, asc, eq, getTableColumns, inArray, isNotNull, lte, sql } from "drizzle-orm";
 import { match } from "ts-pattern";
 import { single } from "../../db/helpers.js";
 import type { Transaction } from "../../db/index.js";
@@ -377,12 +377,13 @@ export interface SkillStore {
    */
   listReachableLockfileHashes(tx: Transaction): Promise<ReadonlySet<string>>;
   /**
-   * True iff at least one `skill_deploys` row exists with the given
-   * `(skill_id, git_sha)` and `status = 'live'`. Used by `enable` to gate
-   * re-activation: a never-approved-then-denied first deploy leaves the
-   * skills row at `disabled=true` with the rejected sha; `/enable foo`
-   * without this check would smuggle code past the approval gate.
-   * Rolled-back skills still pass (the prior live row remains).
+   * True iff the version `(skill_id, git_sha)` went live: a `skill_deploys`
+   * row with `status = 'live'`, or `'rolled_back'` (the owner put that code
+   * live). Used by `enable` to gate re-activation: a never-approved-then-denied
+   * first deploy leaves the skills row at `disabled=true` with the rejected
+   * sha; `/enable foo` without this check would smuggle code past the approval
+   * gate. And by register and rollback for `prior_git_sha`, the live version
+   * a deploy replaces.
    */
   hasLiveDeployForSkill(
     tx: Transaction,
@@ -574,7 +575,7 @@ export class DrizzleSkillStore implements SkillStore {
         and(
           eq(skillDeploys.skillId, params.skillId),
           eq(skillDeploys.gitSha, params.gitSha),
-          eq(skillDeploys.status, "live"),
+          inArray(skillDeploys.status, ["live", "rolled_back"]),
         ),
       )
       .limit(1);
@@ -957,7 +958,12 @@ export class DrizzleSkillStore implements SkillStore {
       .values({
         skillId: existing.id,
         gitSha: params.toGitSha,
-        priorGitSha: existing.gitSha,
+        priorGitSha: (await this.hasLiveDeployForSkill(tx, {
+          skillId: existing.id,
+          gitSha: existing.gitSha,
+        }))
+          ? existing.gitSha
+          : null,
         riskTier: params.classifierLog.risk_tier,
         status: "rolled_back",
         classifierLog: params.classifierLog,

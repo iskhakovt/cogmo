@@ -52,7 +52,7 @@ import type { SkillsCapabilities } from "./capabilities.js";
 import type { SkillRiskReason } from "./risk-reasons.js";
 import type { ClassifierLog, SkillEffect, SkillManifest } from "./types.js";
 
-export const AST_CLASSIFIER_VERSION = "ast-1";
+export const AST_CLASSIFIER_VERSION = "ast-2";
 
 const log = logger.child({ component: "skills.ast-classifier" });
 

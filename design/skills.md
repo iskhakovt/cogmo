@@ -505,7 +505,7 @@ Each deploy is classified, from the manifest and a static-analysis pass, into a 
 
 Secrets-plus-network is its own `approve` trigger rather than a count, because the count answers "how broad are this skill's permissions" while the pairing answers "can this skill read a credential and also reach somewhere to send it". `APPROVE_SECRETS_THRESHOLD` stays as the breadth signal for skills with no egress.
 
-**Tier 1 capped at `notify`** `[confirmed]`. While `tier1Hardened` is unset, the table returns `notify` where it would return `auto`: an unhardened tier-1 skill holds the server's environment ([Tier-1 boundary](#tier-1-boundary-proposed)), so none deploys without a notification. Tier 1 is the only tier the table promotes to `auto`, so no deploy is `auto` under the cap. Setting `tier1Hardened` lifts it, and `auto` returns only once `reviewPanel` is set too: without a panel, [Risk tiers without a human](#risk-tiers-without-a-human) caps `auto` at `notify`.
+**Tier 1 capped at `notify`** `[confirmed]`. While `tier1Hardened` is unset, the table returns `notify` where it would return `auto`: an unhardened tier-1 skill holds the server's environment ([Tier-1 boundary](#tier-1-boundary-proposed)), so none deploys without a notification (an auto-register for a coding task with no conversation posts nothing: `/skills` lists it). Tier 1 is the only tier the table promotes to `auto`, so no deploy is `auto` under the cap. Setting `tier1Hardened` lifts it, and `auto` returns only once `reviewPanel` is set too: without a panel, [Risk tiers without a human](#risk-tiers-without-a-human) caps `auto` at `notify`.
 
 ### Classifier
 
@@ -1956,7 +1956,7 @@ skill_deploys (
   id              UUID v7 PK,
   skill_id        UUID NOT NULL REFERENCES skills(id),
   git_sha         TEXT NOT NULL,           -- commit being deployed
-  prior_git_sha   TEXT,                    -- nullable: the live version this deploy replaces; null when none was live; used for rollback
+  prior_git_sha   TEXT,                    -- nullable: the live version this deploy replaces (one with a live or rolled_back row); null when none was live; shown by the notification
   risk_tier       skill_risk_tier NOT NULL,
   status          skill_deploy_status NOT NULL,
   approved_by     UUID REFERENCES user_identities(id),  -- nullable: the identity that approved an approve-tier deploy for a user; null for auto/notify-tier and owner-CLI approvals

@@ -160,8 +160,8 @@ export async function postSkillsDeployOutcome(args: {
   const keyboard = deployOutcomeKeyboard(event);
   // Guard the send: a closed chat / blocked bot / network blip shouldn't
   // take the function down silently. retries=0 on the Inngest function
-  // means there's no automatic retry; `/skills` lists every deploy, and a
-  // pending one is approved from the CLI (`cogmo skills approve <id>`).
+  // means there's no automatic retry; `/skills` names every skill and its
+  // pending deploy, which the CLI approves (`cogmo skills approve <id>`).
   try {
     await sendMessage(
       Number(tgSession.platformAddress),

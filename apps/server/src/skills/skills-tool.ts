@@ -21,15 +21,15 @@ export const SKILLS_PROMPT_GUIDANCE = `You can author Python skills — small pr
 2. When the task opens its PR, Cogmo registers the branch itself and the user receives the outcome message; don't call \`register_skill\` for it. \`register_skill\` is for a skills-repo branch that arrived some other way (the user pushed it and asked). The classifier tiers every deploy, and nothing deploys silently. A \`notify\` skill goes live at once, and the user gets a message listing what it declares, with a Disable button. An \`approve\` skill — tier \`container\`, an acting effect (sending, deleting, writing files, financial or a subprocess), a secret together with a network allowlist, three or more secrets, or a dependency on the approve list — waits until the user taps Approve on the message they receive.
 3. The new skill appears as its own LLM tool from your *next turn onwards* (the tool list is rebuilt each turn from the live-skill rows). You can then call it like any built-in tool.
 
-Don't try to register skills you didn't author this conversation — the user owns the deploy decision for unfamiliar branches. If the register is rejected (manifest invalid, branch missing, non-fast-forward), surface the error verbatim and ask for guidance.`;
+Register only a branch the user asked you to register this conversation — the user owns the deploy decision for unfamiliar branches. If the register is rejected (manifest invalid, branch missing, non-fast-forward), surface the error verbatim and ask for guidance.`;
 
 export const registerSkillTool: ToolSpec = defineTool({
   name: "register_skill",
   description:
-    "Register a skill from a freshly-pushed feature branch in the skills repo. The branch tip " +
-    "must contain SKILL.md (manifest) + skill.py (entrypoint). On success the skill is live, " +
-    "appearing as its own tool on your next turn, or awaits the user's approval. Use after " +
-    "delegate_coding finishes a skill authoring task.",
+    "Register a skill from a feature branch in the skills repo that reached it outside a coding " +
+    "task (a coding task's branch is registered when its PR opens). The branch tip must contain " +
+    "SKILL.md (manifest) + skill.py (entrypoint). On success the skill is live, appearing as its " +
+    "own tool on your next turn, or awaits the user's approval.",
   // Durable: registration compiles and deploys the skill (sandbox work +
   // git state). Exactly-once per turn, not once per step boundary after
   // the call.
@@ -55,10 +55,12 @@ export const registerSkillTool: ToolSpec = defineTool({
         riskTier: result.riskTier,
         gitSha: result.gitSha,
         ...match(result)
+          .returnType<{ deployId?: string }>()
           .with({ status: "live" }, { status: "pending_approval" }, (deployed) => ({
             deployId: deployed.deployId,
           }))
-          .otherwise(() => ({})),
+          .with({ status: "no_op" }, () => ({}))
+          .exhaustive(),
         nextStep: match(result.status)
           .with(
             "live",

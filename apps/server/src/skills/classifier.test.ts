@@ -79,9 +79,8 @@ describe("classifyManifest (live AST path)", () => {
   });
 });
 
-// Dependency-tier gating runs through both classifier paths: the AST
-// path consumes `manifest.dependencies` via highestDepCategory; the
-// stub path consumes it via hasApproveDep. One block ensures both
+// Dependency-tier gating runs through both classifier paths, which share
+// `computeRiskTier` over `manifest.dependencies`. One block ensures both
 // paths agree on the approve-list / unknown-dep / PEP 503
 // normalisation contract. Under the build's capabilities both land
 // harmless inputs at `notify`: the AST path through the tier-1 cap, the

@@ -246,7 +246,10 @@ export const ClassifierLogSchema = z.object({
    * recorded them.
    */
   reasons: z.array(z.enum(SKILL_RISK_REASONS)).default([]),
-  /** The manifest's `network.allow`; null without a `network:` block. */
+  /**
+   * The manifest's `network.allow`; null without a `network:` block, and on
+   * rows written before the classifier recorded it.
+   */
   declared_network: z.array(z.string()).nullable().default(null),
   /**
    * The enforcement flags the tier was computed against. Absent on rows

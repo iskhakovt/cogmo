@@ -154,7 +154,7 @@ export async function handleSkillsDeployCallback(
         return { editText: errorMessage(res.error), toast: errorMessage(res.error) };
       }
       return {
-        editText: "❌ Deploy denied — no main advance. Re-register a different version to retry.",
+        editText: "❌ Deploy denied — main did not move. Register again to retry.",
         toast: "Denied",
       };
     })
