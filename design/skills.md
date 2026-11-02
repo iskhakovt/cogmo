@@ -2153,8 +2153,9 @@ skill_approval_classes (
 -- boot stage calls; the egress listener's status is one column of it. Skills and sandbox reference the tables and own neither.
 serve_instances (
   id          UUID v7 PK,                  -- the process instance id: every per-process record keys on it, whatever the sandbox backend;
-                                           -- inserted by the core boot stage once per Cogmo process that runs it, cogmo serve and a CLI
-                                           -- running the sandbox stage alike (only the proxy holder writes serve_heartbeats). Liveness is
+                                           -- inserted by the core boot stage once per Cogmo process that goes on to run the sandbox stage,
+                                           -- cogmo serve and a CLI running that stage alike, never for a CLI command that boots core only
+                                           -- (only the proxy holder writes serve_heartbeats). Liveness is
                                            -- read from serve_heartbeats and the advisory locks, so the row carries no status of its own
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 )
