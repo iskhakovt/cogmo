@@ -20,7 +20,7 @@ import { mock } from "vitest-mock-extended";
 import { hashLockfileContents, type LockfileSnapshot } from "../deps.js";
 import type { BundledPackage } from "../pyodide-compat.js";
 import type { Tier1Prefetcher } from "./tier1.js";
-import { ensureTier1Packages, reapTier1WheelDirs } from "./wheel-cache.js";
+import { ensureTier1Packages, reapTier1WheelDirs, stagedPrefetcher } from "./wheel-cache.js";
 
 /** Runs before each `stat` the module under test makes, to stage a concurrent writer. */
 const statHook = vi.hoisted(() => {
@@ -881,5 +881,30 @@ describe("reapTier1WheelDirs", () => {
       graceDays: 7,
     });
     expect(result._unsafeUnwrap()).toEqual({ reapedHashes: [] });
+  });
+});
+
+describe("stagedPrefetcher", () => {
+  it("fails the prefetch with the lockfile's message when Pyodide's lockfile cannot be read", async () => {
+    const raw = mock<Tier1Prefetcher>();
+    const staged = stagedPrefetcher({
+      prefetcher: raw,
+      loadBundled: async () => err({ message: "pyodide-lock.json: ENOENT" }),
+    });
+
+    const result = await staged.prefetchBuiltins(["pydantic"], { packageCacheDir: root });
+
+    expect(result._unsafeUnwrapErr()).toBe("pyodide-lock.json: ENOENT");
+    expect(raw.prefetchBuiltins).not.toHaveBeenCalled();
+  });
+
+  it("delegates the probe untouched", async () => {
+    const raw = mock<Tier1Prefetcher>();
+    raw.probeBuiltins.mockResolvedValue(ok());
+    const staged = stagedPrefetcher({ prefetcher: raw, loadBundled: async () => ok(BUNDLED) });
+
+    await staged.probeBuiltins(["pydantic"], { packageCacheDir: root });
+
+    expect(raw.probeBuiltins).toHaveBeenCalledWith(["pydantic"], { packageCacheDir: root });
   });
 });

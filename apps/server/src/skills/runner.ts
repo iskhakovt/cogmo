@@ -41,9 +41,8 @@ import type { SkillRow, SkillRunIdentity, SkillRunTrigger, SkillStore } from "./
 import { createTier1Prefetcher, pyodideDistDir } from "./worker-wasm/host.js";
 import type { Tier1Packages, Tier1Prefetcher } from "./worker-wasm/tier1.js";
 import {
-  describeTier1PackagesError,
   ensureTier1Packages,
-  fillBuiltinCache,
+  stagedPrefetcher,
   type Tier1PackagesError,
 } from "./worker-wasm/wheel-cache.js";
 
@@ -309,18 +308,7 @@ export class SkillRunnerImpl implements SkillRunner {
       });
     // The register's boundary probe loads from the cache its prefetch fills,
     // so that prefetch is staged and verified as a run's is.
-    const probePrefetcher: Tier1Prefetcher = {
-      prefetchBuiltins: async (names, cacheOpts) => {
-        const bundled = await loadBundledPackages();
-        if (bundled.isErr()) return err(bundled.error.message);
-        const filled = await fillBuiltinCache(
-          { prefetcher, bundled: bundled.value },
-          { names, ...cacheOpts },
-        );
-        return filled.mapErr(describeTier1PackagesError);
-      },
-      probeBuiltins: (names, cacheOpts) => prefetcher.probeBuiltins(names, cacheOpts),
-    };
+    const probePrefetcher = stagedPrefetcher({ prefetcher, loadBundled: loadBundledPackages });
     const resolveTier1Packages = (
       lockfile: LockfileSnapshot | undefined,
       signal?: AbortSignal,

@@ -165,6 +165,31 @@ export async function fillBuiltinCache(
   return prefetchStaged(deps.prefetcher, args, closure);
 }
 
+/**
+ * A {@link Tier1Prefetcher} whose `prefetchBuiltins` stages and verifies
+ * through {@link fillBuiltinCache}, for a caller that loads from the cache
+ * right after (the register-time probe). `loadBundled` is Pyodide's lockfile;
+ * a lockfile that cannot be read fails the prefetch with its message, and the
+ * caller decides what that means.
+ */
+export function stagedPrefetcher(deps: {
+  prefetcher: Tier1Prefetcher;
+  loadBundled: () => Promise<Result<ReadonlyMap<string, BundledPackage>, { message: string }>>;
+}): Tier1Prefetcher {
+  return {
+    prefetchBuiltins: async (names, cacheOpts) => {
+      const bundled = await deps.loadBundled();
+      if (bundled.isErr()) return err(bundled.error.message);
+      const filled = await fillBuiltinCache(
+        { prefetcher: deps.prefetcher, bundled: bundled.value },
+        { names, ...cacheOpts },
+      );
+      return filled.mapErr(describeTier1PackagesError);
+    },
+    probeBuiltins: (names, cacheOpts) => deps.prefetcher.probeBuiltins(names, cacheOpts),
+  };
+}
+
 async function prefetchStaged(
   prefetcher: Tier1Prefetcher,
   args: FillBuiltinCacheArgs,
