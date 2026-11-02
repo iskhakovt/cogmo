@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { err, ok, type Result, ResultAsync } from "neverthrow";
 import { match } from "ts-pattern";
@@ -182,6 +182,7 @@ export async function reapOrphanedChildGroups(
   childrenDir: string,
   current: { bootId: string; readStartTime: (pid: number) => Promise<string | null> },
 ): Promise<ReapReport> {
+  await sweepTempRecords(childrenDir, Date.now());
   const files = await listRecords(childrenDir);
   const killed: ChildGroupRecord[] = [];
   const owned: ChildGroupRecord[] = [];
@@ -236,6 +237,35 @@ async function listRecords(dir: string): Promise<string[]> {
   } catch (e) {
     if (errorCode(e) === "ENOENT") return [];
     throw e;
+  }
+}
+
+/** A record's temporary file outlives its owner only when the owner died between write and rename. */
+const STALE_TEMP_RECORD_MS = 60_000;
+
+/**
+ * Remove `<pid>.json.tmp.<id>` files older than a minute: an owner that died
+ * between writing one and renaming it left it, and no reap reads it as a
+ * record. A live owner's temp file exists for milliseconds, so the age gate
+ * keeps a concurrent write safe.
+ */
+async function sweepTempRecords(dir: string, now: number): Promise<void> {
+  let names: string[];
+  try {
+    names = (await readdir(dir)).filter((f) => f.includes(".json.tmp."));
+  } catch (e) {
+    if (errorCode(e) === "ENOENT") return;
+    throw e;
+  }
+  for (const name of names) {
+    const path = join(dir, name);
+    try {
+      const info = await stat(path);
+      if (now - info.mtimeMs > STALE_TEMP_RECORD_MS) await rm(path, { force: true });
+    } catch (e) {
+      // Renamed or removed by its owner between the listing and here.
+      if (errorCode(e) !== "ENOENT") throw e;
+    }
   }
 }
 

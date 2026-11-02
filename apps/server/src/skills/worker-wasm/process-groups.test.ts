@@ -1,6 +1,6 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, assert, beforeEach, describe, expect, it, vi } from "vitest";
@@ -184,6 +184,19 @@ describe("reapOrphanedChildGroups", () => {
     };
     await writeFile(join(dir, `${pid}.json`), JSON.stringify(written));
   }
+
+  it("removes a record's temporary file left for over a minute, and keeps a fresh one", async () => {
+    const stale = join(dir, "4242.json.tmp.old");
+    const fresh = join(dir, "4343.json.tmp.new");
+    await writeFile(stale, "{");
+    await writeFile(fresh, "{");
+    const twoMinutesAgo = new Date(Date.now() - 120_000);
+    await utimes(stale, twoMinutesAgo, twoMinutesAgo);
+
+    await reapOrphanedChildGroups(dir, { bootId: "x", readStartTime });
+
+    expect((await readdir(dir)).sort()).toEqual(["4343.json.tmp.new"]);
+  });
 
   it("is empty for a directory that does not exist", async () => {
     expect(
