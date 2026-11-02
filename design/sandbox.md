@@ -111,6 +111,43 @@ interface SessionSpec {
    * caller states it.
    */
   dockerSocket: boolean;
+  /**
+   * `[proposed]` (skills S4) Required, so every caller states it. `"none"`
+   * runs the session with no interface but loopback; `"bridge"` is the
+   * daemon's default bridge. The create refuses an `egressSocket` with
+   * `"bridge"`. From skills S7 the skills session schema (a Zod refinement)
+   * requires an `egressSocket` on every `"none"` session whose `purpose`
+   * is not `reap` (the deps reaper runs no skill code and needs no egress)
+   * (skills.md → Egress proxy → One path).
+   */
+  network: "bridge" | "none";
+  /**
+   * `[proposed]` (skills S7) A per-session Unix socket the backend creates
+   * before the container, whose acceptor pipes each connection to
+   * `127.0.0.1:<targetPort>` in Cogmo's process, mounted read-only at
+   * `containerPath` (skills.md → Egress proxy → Session socket).
+   */
+  egressSocket?: { targetPort: number; containerPath: string };
+  /**
+   * `[proposed]` (skills S14) `ReadonlyRootfs`, a tmpfs at each path,
+   * `ShmSize` and `IpcMode: private` (skills.md → State reset between
+   * tasks → Inter-task wipe). `execGroups` is the tmpfs at
+   * `/run/cogmo-exec`, mode 0700, owned by the supervisor uid, where the
+   * backend's exec wrappers record their process groups; it is required,
+   * so no session with a read-only root starts without it.
+   */
+  readOnlyRoot?: {
+    tmpfs: ReadonlyArray<{ path: string; sizeBytes: number; uid: number; mode: number }>;
+    execGroups: { path: "/run/cogmo-exec"; sizeBytes: number; uid: number; mode: 0o700 };
+    shmSizeBytes: number;
+  };
+  /**
+   * `[proposed]` (skills S14) The skills venv cache volume, mounted at
+   * `/skill-venvs`, in place of `depsCacheVolume`. Absent, no venv volume
+   * is mounted. Only a populate session sets `readOnly: false`
+   * (skills.md → Populate → Populate session).
+   */
+  dependencyCache?: { volume: string; readOnly: boolean };
 }
 
 interface SandboxSession {
@@ -481,7 +518,7 @@ A create cut off by step 4 leaves either a rowless container, which the orphan p
 
 `TaskScope` carries `resourceLimits` and `ttlExpiresAt`. Depth stays at 1: a child gets no socket, since host-path binds and `VolumesFrom` are denied, so it cannot create containers of its own.
 
-**Which sessions get a socket.** `SessionSpec.dockerSocket: boolean` is required, so every caller states it. Coding delegation sets it to `true`. Skills tier-2 sets it to `false`, so a tier-2 skill's Python cannot reach the daemon.
+**Which sessions get a socket.** `SessionSpec.dockerSocket: boolean` is required, so every caller states it. Coding delegation sets it to `true`. Skills tier-2 sets it to `false`, so a tier-2 skill's Python cannot reach the daemon. `[proposed]` Every skills session also runs with `network: "none"` and reaches the egress proxy over an `egressSocket` instead of a network ([skills.md → Egress proxy](skills.md#egress-proxy-proposed) → One path); that socket follows the session's lifecycle as this one does ([skills.md → Session socket](skills.md#session-socket)).
 
 **Residuals.**
 
@@ -493,7 +530,7 @@ A create cut off by step 4 leaves either a rowless container, which the orphan p
 - Anonymous volumes are freed only when their container is removed. A child the task stops but keeps holds its anonymous volumes until the cascade or the TTL pass.
 - Networks and volumes created through the proxy before slice 5 carry no Cogmo labels and have no rows, so nothing ever collects them.
 - Names leak existence. A container or network create with a taken name gets the daemon's 409, which names the holder's id. A volume create of a foreign name gets `denied`. Neither grants access.
-- The network layer is outside the proxy. Every depth-0 container, and every child on `bridge`, shares Docker's default bridge with other tasks and with skills workers, until skills workers move to an internal network whose only route is the egress proxy ([skills.md → Egress proxy](skills.md#egress-proxy-proposed)). They can reach each other's listening ports, and ports published on the gateway are reachable from every task. Per-task networks for depth-0 containers are tracked in `todo.md`.
+- The network layer is outside the proxy. Every depth-0 container, and every child on `bridge`, shares Docker's default bridge with other tasks, and with skills workers until they run with `NetworkMode: none` behind a per-session socket to the egress proxy ([skills.md → Egress proxy](skills.md#egress-proxy-proposed)). They can reach each other's listening ports, and ports published on the gateway are reachable from every task. Per-task networks for depth-0 containers are tracked in `todo.md`.
 - A registry name that resolves to a private address still reaches it on pull. A registry allowlist is tracked in `todo.md`.
 
 **Rollout.** No consumer depends on a field or route this spec denies, so it ships with no enforcement flag.
@@ -613,6 +650,8 @@ Task teardown (`deleteByTaskId`):
 2. Removes the socket's entry from the proxy's map.
 3. Ends every connection made through the socket and its upstream leg to the daemon — hijacked streams (`logs -f`, `events`, attach) included, so teardown never waits on a running container.
 4. Closes the socket's listener and removes the socket file.
+
+`[proposed]` A session with an `egressSocket` gets its socket the same way: listening before step 2 of startup, mounted with a `Mounts` bind that refuses a missing source, and closed and removed after the container at teardown ([skills.md → Session socket](skills.md#session-socket)).
 
 `[proposed]` Once the proxy inserts child rows, teardown reverses steps 1 and 2. It runs `unregisterTask` first, in the order given under Proxy Design → Child containers: drop the scope, stop accepting, wait up to 30 seconds for in-flight creates only, then abort every connection. A child created during teardown therefore has its row before the cascade lists the task's rows. Streaming routes (`logs -f`, `/events`, attach, exec) are not waited for: new requests on them get `unavailable` once the scope is gone, and live streams end at the abort.
 
@@ -755,7 +794,7 @@ At boot, `reconcileCrashedInstances` runs in the background:
 
 1. Bootstrap inserts this run's `cogmo_instances` row.
 2. It lists the containers labelled `cogmo.managed=true`. Each one labelled with another open instance row in this database is killed and removed, and its row, if it has one, moves to `reaped` (`crash_reconcile`).
-3. It closes those instance rows, so the orphan pass retries anything reconcile could not kill. A container from a gracefully stopped instance, whose row is already closed, is left to the orphan pass.
+3. It closes those instance rows, so the orphan pass retries anything reconcile could not kill. `[proposed]` It removes each closed instance's egress socket directory, `${SANDBOX_PROXY_SOCKET_DIR}/egress/<instanceId>/`, and the orphan pass removes any it finds for a closed instance ([skills.md → Session socket](skills.md#session-socket)). A container from a gracefully stopped instance, whose row is already closed, is left to the orphan pass.
 
 Networks and volumes are not reconciled. `[proposed]` Once the proxy inserts their rows, reconcile lists `cogmo.managed` networks and volumes as it does containers (Network and volume state machine). The proxy runs in the same process, so a proxy crash is a process crash and this pass covers it. An extracted proxy (Deployment Topology) would have to rebuild its socket map from the live depth-0 rows.
 
