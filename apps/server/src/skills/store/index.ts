@@ -688,7 +688,13 @@ export class DrizzleSkillStore implements SkillStore {
 
     const goesLive = params.riskTier !== "approve";
     const deployStatus: SkillDeployStatus = goesLive ? "live" : "pending_approval";
-    const priorGitSha = existing?.gitSha ?? null;
+    // The live version this deploy replaces. A skills row whose sha never
+    // went live (a denied or pending first deploy) is no prior version.
+    const priorGitSha =
+      existing &&
+      (await this.hasLiveDeployForSkill(tx, { skillId: existing.id, gitSha: existing.gitSha }))
+        ? existing.gitSha
+        : null;
 
     // Ordering: DB writes FIRST, applyFilesystem LAST. If any DB write
     // fails, the tx rolls back before main moves; if applyFilesystem

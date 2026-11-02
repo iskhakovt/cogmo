@@ -17,7 +17,7 @@ export interface DeployFacts {
   dependencies: readonly string[];
   schedule: string | null;
   reasons: readonly SkillRiskReason[];
-  /** The version the deploy replaces; null on a skill's first deploy. */
+  /** The live version the deploy replaces; null when none was live before it. */
   priorGitSha: string | null;
 }
 

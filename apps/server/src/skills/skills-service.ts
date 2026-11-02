@@ -44,7 +44,7 @@ export function createSkillsService(deps: SkillsServiceDeps): SkillsService {
       });
       await announceDeployOutcome(
         { publisher: deps.inngest },
-        { result, conversationId: deps.conversationId },
+        { result, conversationId: deps.conversationId, announceRejections: false },
       );
       return result;
     },

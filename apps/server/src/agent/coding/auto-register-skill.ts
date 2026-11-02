@@ -141,9 +141,13 @@ export async function autoRegisterSkill(
     "auto-register fired",
   );
   // A task with no conversation (an automated trigger) has nowhere to post
-  // the outcome; `/skills` lists the deploy.
+  // the outcome; `/skills` lists the deploy. A rejection is announced too:
+  // no model relays it on this path.
   if (conversationId !== null) {
-    await announceDeployOutcome({ publisher: deps.publisher }, { result, conversationId });
+    await announceDeployOutcome(
+      { publisher: deps.publisher },
+      { result, conversationId, announceRejections: true },
+    );
   }
   return { kind: "registered", branch, result };
 }

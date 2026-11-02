@@ -56,7 +56,7 @@ describe("createSkillsService.register", () => {
     });
   });
 
-  it("announces a rejection", async () => {
+  it("keeps a rejection silent: the model relays it to the user", async () => {
     const { service, send } = serviceFor({
       name: "",
       riskTier: "notify",
@@ -67,10 +67,7 @@ describe("createSkillsService.register", () => {
 
     await service.register({ branch: "skill/missing" });
 
-    expect(send).toHaveBeenCalledWith({
-      name: "skills/deploy/outcome",
-      data: expect.objectContaining({ outcome: "rejected", errors: ["branch_not_found"] }),
-    });
+    expect(send).not.toHaveBeenCalled();
   });
 
   it("returns the runner result when the emit fails", async () => {

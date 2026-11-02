@@ -33,10 +33,13 @@ export async function handleSkills(
   // for readability; the full sha is rarely useful at the chat surface.
   const lines = res.value.map((s) => {
     const marker = s.disabled ? " (disabled)" : "";
+    // A pending first deploy's row already sits at the pending tip, so there is no live sha to show beside it.
     const pending =
       s.pendingDeploy === null
         ? ""
-        : ` — pending approval ${s.gitSha.slice(0, 7)} → ${s.pendingDeploy.gitSha.slice(0, 7)}, id ${s.pendingDeploy.id}`;
+        : s.pendingDeploy.gitSha === s.gitSha
+          ? ` — pending approval ${s.pendingDeploy.gitSha.slice(0, 7)} (first deploy), id ${s.pendingDeploy.id}`
+          : ` — pending approval ${s.gitSha.slice(0, 7)} → ${s.pendingDeploy.gitSha.slice(0, 7)}, id ${s.pendingDeploy.id}`;
     return `${s.name} [${s.tier}/${s.riskTier}] @ ${s.gitSha.slice(0, 7)}${marker}${pending}`;
   });
   await ctx.reply(`Skills:\n${lines.join("\n")}`);

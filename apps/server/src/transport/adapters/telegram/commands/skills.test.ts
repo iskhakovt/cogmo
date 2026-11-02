@@ -62,6 +62,31 @@ describe("handleSkills", () => {
     );
   });
 
+  it("marks a pending first deploy, whose row already sits at the pending tip", async () => {
+    const id = "01960000-0000-7000-8000-000000000002";
+    const transport = transportWith({
+      skills: {
+        list: vi.fn().mockResolvedValue(
+          ok([
+            {
+              name: "delta",
+              tier: "wasm",
+              riskTier: "approve",
+              disabled: true,
+              gitSha: "def5678eeee",
+              pendingDeploy: { id, gitSha: "def5678eeee" },
+            },
+          ]),
+        ),
+      },
+    });
+    const ctx = mkCtx();
+    await handleSkills(transport, ctx);
+    expect(ctx.reply).toHaveBeenCalledWith(
+      `Skills:\ndelta [wasm/approve] @ def5678 (disabled) — pending approval def5678 (first deploy), id ${id}`,
+    );
+  });
+
   it("nudges the user when there are no skills", async () => {
     const transport = transportWith({
       skills: { list: vi.fn().mockResolvedValue(ok([])) },

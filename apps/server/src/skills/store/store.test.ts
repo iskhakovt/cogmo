@@ -73,6 +73,7 @@ afterAll(async () => {
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 const SHA_NEW = "fedcba9876543210fedcba9876543210fedcba98";
+const SHA_EDIT = "0123456789abcdef0123456789abcdef01234567";
 const SHA_THIRD = "1111111111111111111111111111111111111111";
 
 const INPUTS_SCHEMA: SkillInputs = {
@@ -1417,6 +1418,20 @@ describe("DrizzleSkillStore", () => {
     async function reloadDeploy(id: string) {
       return expectDefined(await tx((trx) => store.getDeployById(trx, id)), "deploy");
     }
+
+    it("records the live version a deploy replaces, and none after a denied first deploy", async () => {
+      const denied = await register({ riskTier: "approve", classifierLog: APPROVE_LOG });
+      assertKind(denied, "pending_approval");
+      await tx((trx) => store.denyPendingDeploy(trx, { pendingId: denied.deploy.id }));
+
+      const first = await register({ branchTipSha: SHA_NEW });
+      assertKind(first, "live");
+      expect(first.deploy.priorGitSha).toBeNull();
+
+      const edit = await register({ branchTipSha: SHA_EDIT });
+      assertKind(edit, "live");
+      expect(edit.deploy.priorGitSha).toBe(SHA_NEW);
+    });
 
     it("deny resolves a pending deploy and leaves the skills row alone", async () => {
       const { pendingId, skill } = await pendingUpgrade();

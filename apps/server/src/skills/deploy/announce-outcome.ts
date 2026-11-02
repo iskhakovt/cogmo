@@ -9,16 +9,20 @@ const log = logger.child({ component: "skills.announce-outcome" });
 /**
  * Tell the user how a register ended (design/skills.md → Notifications and
  * undo): emit `skills/deploy/outcome` for the deploy's conversation, which a
- * channel renders with the deploy's facts and buttons. `no_op` announces
- * nothing. Runs after the deploy commits, so a failed emit is logged and
- * dropped rather than failing a deploy that already happened: `/skills`
- * lists every deploy.
+ * channel renders with the deploy's facts and buttons. `no_op` and an `auto`
+ * deploy announce nothing. A rejection is announced only when
+ * `announceRejections` is set: the coding-task auto-register has no other
+ * voice, while `register_skill`'s rejection reaches the user through the
+ * model, which also keeps a duplicate register (a `pending_deploy_exists`
+ * rejection) silent. Runs after the deploy commits, so a failed emit is
+ * logged and dropped rather than failing a deploy that already happened:
+ * `/skills` lists every deploy.
  */
 export async function announceDeployOutcome(
   deps: { publisher: EventPublisher },
-  args: { result: RegisterResult; conversationId: string },
+  args: { result: RegisterResult; conversationId: string; announceRejections: boolean },
 ): Promise<void> {
-  const data = outcomeEventData(args.result, args.conversationId);
+  const data = outcomeEventData(args.result, args.conversationId, args.announceRejections);
   if (data === null) return;
   try {
     await deps.publisher.send({ name: skillsDeployOutcome.name, data });
@@ -39,9 +43,22 @@ export async function announceDeployOutcome(
 function outcomeEventData(
   result: RegisterResult,
   conversationId: string,
+  announceRejections: boolean,
 ): SkillsDeployOutcomeData | null {
   return match(result)
     .returnType<SkillsDeployOutcomeData | null>()
+    .with({ status: "live", riskTier: "auto" }, () => null)
+    .with({ status: "rejected" }, (rejected) =>
+      announceRejections
+        ? {
+            outcome: "rejected" as const,
+            conversationId,
+            skillName: rejected.name,
+            gitSha: rejected.gitSha,
+            errors: [...rejected.errors],
+          }
+        : null,
+    )
     .with({ status: "live" }, { status: "pending_approval" }, (deployed) => ({
       outcome: deployed.status,
       conversationId,
@@ -61,13 +78,6 @@ function outcomeEventData(
       secrets: deployed.facts.secrets.map((s) => ({ name: s.name, bound: s.bound })),
       dependencies: [...deployed.facts.dependencies],
       schedule: deployed.facts.schedule,
-    }))
-    .with({ status: "rejected" }, (rejected) => ({
-      outcome: "rejected" as const,
-      conversationId,
-      skillName: rejected.name,
-      gitSha: rejected.gitSha,
-      errors: [...rejected.errors],
     }))
     .with({ status: "no_op" }, () => null)
     .exhaustive();

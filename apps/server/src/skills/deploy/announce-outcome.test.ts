@@ -33,7 +33,10 @@ const FACTS = deployFactsFixture({
 /** The one event `result` announces, parsed through the event's own schema. */
 async function announced(result: Parameters<typeof announceDeployOutcome>[1]["result"]) {
   const publisher = mock<EventPublisher>();
-  await announceDeployOutcome({ publisher }, { result, conversationId: CONV_ID });
+  await announceDeployOutcome(
+    { publisher },
+    { result, conversationId: CONV_ID, announceRejections: true },
+  );
   expect(publisher.send).toHaveBeenCalledTimes(1);
   const [event] = expectDefined(publisher.send.mock.calls[0], "send call");
   if (Array.isArray(event)) throw new Error("expected a single event");
@@ -80,7 +83,7 @@ describe("announceDeployOutcome", () => {
     });
   });
 
-  it("announces a rejection with its errors", async () => {
+  it("announces a rejection with its errors when the caller has no other voice", async () => {
     const data = await announced(rejectedResult("abc1234", "missing_skill_md", "bad_schema"));
 
     expect(data).toEqual({
@@ -92,6 +95,21 @@ describe("announceDeployOutcome", () => {
     });
   });
 
+  it("keeps a rejection silent when the model relays it", async () => {
+    const publisher = mock<EventPublisher>();
+
+    await announceDeployOutcome(
+      { publisher },
+      {
+        result: rejectedResult("abc1234", "pending_deploy_exists: approve or deny first"),
+        conversationId: CONV_ID,
+        announceRejections: false,
+      },
+    );
+
+    expect(publisher.send).not.toHaveBeenCalled();
+  });
+
   it("announces nothing for a no-op", async () => {
     const publisher = mock<EventPublisher>();
 
@@ -100,6 +118,22 @@ describe("announceDeployOutcome", () => {
       {
         result: { name: "echo", riskTier: "notify", status: "no_op", gitSha: "abc1234" },
         conversationId: CONV_ID,
+        announceRejections: true,
+      },
+    );
+
+    expect(publisher.send).not.toHaveBeenCalled();
+  });
+
+  it("announces nothing for an auto deploy", async () => {
+    const publisher = mock<EventPublisher>();
+
+    await announceDeployOutcome(
+      { publisher },
+      {
+        result: liveRegisterResult({ riskTier: "auto" }),
+        conversationId: CONV_ID,
+        announceRejections: true,
       },
     );
 
@@ -115,7 +149,7 @@ describe("announceDeployOutcome", () => {
       await expect(
         announceDeployOutcome(
           { publisher },
-          { result: liveRegisterResult(), conversationId: CONV_ID },
+          { result: liveRegisterResult(), conversationId: CONV_ID, announceRejections: true },
         ),
       ).resolves.toBeUndefined();
 
