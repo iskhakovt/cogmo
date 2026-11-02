@@ -143,8 +143,9 @@ export const skills = pgTable(
 
 /**
  * Append-only deploy history. One row per `register` attempt that produces a
- * classified result. `prior_git_sha` is null on first deploy and used by
- * `rollback` to find the previous live SHA. The per-state columns follow
+ * classified result. `prior_git_sha` is the live version the deploy replaces
+ * (a version with a `live` or `rolled_back` row), null when none was live;
+ * the deploy notification shows it. The per-state columns follow
  * `status` (design/skills.md → Deploy lifecycle, per-state data):
  * `resolved_at` is set iff the row is terminal
  * (`chk_skill_deploys_resolved_at_iff_terminal`), and `approved_by` — the

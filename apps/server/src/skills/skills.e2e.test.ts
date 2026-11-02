@@ -230,7 +230,15 @@ describe("skills e2e (production Docker image)", { timeout: 120_000 }, () => {
     }
     expect(registered).toEqual({
       code: 0,
-      output: { name: ECHO_SKILL, riskTier: expect.any(String), gitSha: sha, status: "live" },
+      output: {
+        name: ECHO_SKILL,
+        riskTier: expect.any(String),
+        gitSha: sha,
+        status: "live",
+        skillId: expect.any(String),
+        deployId: expect.any(String),
+        facts: expect.any(Object),
+      },
     });
 
     const ran = await runCogmo(["skills", "run", ECHO_SKILL, JSON.stringify({ x: 7 })]);

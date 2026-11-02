@@ -2,7 +2,7 @@ import { err, ok } from "neverthrow";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PLAN_CALLBACK_REGEX } from "../../../agent/coding/plan-keyboard.js";
 import { PIPELINE_GATE_CALLBACK_REGEX } from "../../../agent/pipeline/gate-keyboard.js";
-import { SKILLS_APPROVAL_CALLBACK_REGEX } from "../../../skills/skills-keyboard.js";
+import { SKILLS_DEPLOY_CALLBACK_REGEX } from "../../../skills/skills-keyboard.js";
 import { mockAttachmentStore, mockInngest, mockTransport } from "../../../test/factories.js";
 import { handlers, resetGrammyMock } from "../../../test/telegram/grammy-mock.js";
 import { createAdapter } from "../../../test/telegram/harness.js";
@@ -16,7 +16,7 @@ describe("registerCallbackQueries", () => {
   });
 
   // Inline-keyboard callbackQuery handlers are wired with one regex per
-  // keyboard (plan / pipeline gate / skills approval). The pure handler logic
+  // keyboard (plan / pipeline gate / skill deploy). The pure handler logic
   // lives in commands/keyboard-callbacks.ts and is tested there; this block exercises the
   // adapter-side wiring — does the registered handler dispatch to the right
   // transport call, edit the original message, send the toast, and (where
@@ -26,6 +26,7 @@ describe("registerCallbackQueries", () => {
     // Pinned UUIDs for callback data — must match the regex shape.
     const TASK_ID = "00000000-0000-0000-0000-000000000001";
     const PENDING_ID = "00000000-0000-0000-0000-000000000002";
+    const SKILL_ID = "00000000-0000-0000-0000-000000000003";
 
     function makeCallbackCtx(data: string, fromId = 111) {
       return {
@@ -87,7 +88,7 @@ describe("registerCallbackQueries", () => {
       const { transport } = await createAdapter();
       const ctx = makeCallbackCtx(`skill:${PENDING_ID}:approve`);
 
-      const handler = handlers.get(`callbackQuery:${SKILLS_APPROVAL_CALLBACK_REGEX.source}`);
+      const handler = handlers.get(`callbackQuery:${SKILLS_DEPLOY_CALLBACK_REGEX.source}`);
       await handler(ctx);
 
       expect(transport.skills.approveDeploy).toHaveBeenCalledWith(PENDING_ID, "111", "555");
@@ -97,11 +98,30 @@ describe("registerCallbackQueries", () => {
       expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({ text: "Approved" });
     });
 
+    it("skill deploy: a rejected tap answers with a toast and leaves the keyboard", async () => {
+      const { transport } = await createAdapter({
+        skills: {
+          ...mockTransport().skills,
+          approveDeploy: vi.fn().mockResolvedValue(err({ code: "identity_rejected" })),
+        },
+      });
+      const ctx = makeCallbackCtx(`skill:${PENDING_ID}:approve`);
+
+      const handler = handlers.get(`callbackQuery:${SKILLS_DEPLOY_CALLBACK_REGEX.source}`);
+      await handler(ctx);
+
+      expect(transport.skills.approveDeploy).toHaveBeenCalled();
+      expect(ctx.editMessageText).not.toHaveBeenCalled();
+      expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({
+        text: "You're not authorized on this bot.",
+      });
+    });
+
     it("skill approval: a tap with no chat is answered, not dispatched", async () => {
       const { transport } = await createAdapter();
       const { chat: _chat, ...ctx } = makeCallbackCtx(`skill:${PENDING_ID}:approve`);
 
-      const handler = handlers.get(`callbackQuery:${SKILLS_APPROVAL_CALLBACK_REGEX.source}`);
+      const handler = handlers.get(`callbackQuery:${SKILLS_DEPLOY_CALLBACK_REGEX.source}`);
       await handler(ctx);
 
       expect(transport.skills.approveDeploy).not.toHaveBeenCalled();
@@ -112,11 +132,26 @@ describe("registerCallbackQueries", () => {
       const { transport } = await createAdapter();
       const ctx = makeCallbackCtx(`skill:${PENDING_ID}:deny`);
 
-      const handler = handlers.get(`callbackQuery:${SKILLS_APPROVAL_CALLBACK_REGEX.source}`);
+      const handler = handlers.get(`callbackQuery:${SKILLS_DEPLOY_CALLBACK_REGEX.source}`);
       await handler(ctx);
 
       expect(transport.skills.denyDeploy).toHaveBeenCalledWith(PENDING_ID, "111");
       expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({ text: "Denied" });
+    });
+
+    it("skill deploy: disable → skills.disableById with the skill id, edit names the skill", async () => {
+      const { transport } = await createAdapter();
+      const ctx = makeCallbackCtx(`skill:${SKILL_ID}:disable`);
+
+      const handler = handlers.get(`callbackQuery:${SKILLS_DEPLOY_CALLBACK_REGEX.source}`);
+      await handler(ctx);
+
+      expect(transport.skills.disableById).toHaveBeenCalledWith(SKILL_ID, "111");
+      expect(ctx.editMessageText).toHaveBeenCalledWith(
+        "🚫 Skill echo disabled. /enable echo re-enables it.",
+        { reply_markup: { inline_keyboard: [] } },
+      );
+      expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({ text: "Disabled" });
     });
 
     it("pipeline gate: approve → pipelines.resolveGate with the token, edit clears keyboard, answers toast", async () => {

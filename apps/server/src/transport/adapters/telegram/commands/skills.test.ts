@@ -15,6 +15,7 @@ describe("handleSkills", () => {
               riskTier: "auto",
               disabled: false,
               gitSha: "1234567abcdef",
+              pendingDeploy: null,
             },
             {
               name: "beta",
@@ -22,6 +23,7 @@ describe("handleSkills", () => {
               riskTier: "approve",
               disabled: true,
               gitSha: "fedcba9012345",
+              pendingDeploy: null,
             },
           ]),
         ),
@@ -30,8 +32,84 @@ describe("handleSkills", () => {
     const ctx = mkCtx();
     await handleSkills(transport, ctx);
     const reply = (ctx.reply.mock.calls[0]?.[0] ?? "") as string;
-    expect(reply).toContain("alpha [wasm/auto] @ 1234567");
-    expect(reply).toContain("beta [container/approve] @ fedcba9 (disabled)");
+    expect(reply).toBe(
+      "Skills:\nalpha [wasm/auto] @ 1234567\nbeta [container/approve] @ fedcba9 (disabled)",
+    );
+  });
+
+  it("shows a pending deploy's shas and full id on its skill's line", async () => {
+    const id = "01960000-0000-7000-8000-000000000001";
+    const transport = transportWith({
+      skills: {
+        list: vi.fn().mockResolvedValue(
+          ok([
+            {
+              name: "gamma",
+              tier: "wasm",
+              riskTier: "approve",
+              disabled: true,
+              gitSha: "abc1234ffff",
+              pendingDeploy: { id, gitSha: "def5678eeee", priorGitSha: "abc1234ffff" },
+            },
+          ]),
+        ),
+      },
+    });
+    const ctx = mkCtx();
+    await handleSkills(transport, ctx);
+    expect(ctx.reply).toHaveBeenCalledWith(
+      `Skills:\ngamma [wasm/approve] @ abc1234 (disabled) — pending approval abc1234 → def5678, id ${id}`,
+    );
+  });
+
+  it("marks a pending first deploy, which replaces no live version", async () => {
+    const id = "01960000-0000-7000-8000-000000000002";
+    const transport = transportWith({
+      skills: {
+        list: vi.fn().mockResolvedValue(
+          ok([
+            {
+              name: "delta",
+              tier: "wasm",
+              riskTier: "approve",
+              disabled: true,
+              gitSha: "def5678eeee",
+              pendingDeploy: { id, gitSha: "def5678eeee", priorGitSha: null },
+            },
+          ]),
+        ),
+      },
+    });
+    const ctx = mkCtx();
+    await handleSkills(transport, ctx);
+    expect(ctx.reply).toHaveBeenCalledWith(
+      `Skills:\ndelta [wasm/approve] @ def5678 (disabled) — pending approval def5678 (first deploy), id ${id}`,
+    );
+  });
+
+  it("splits a long inventory into several replies, each with whole lines", async () => {
+    const skills = Array.from({ length: 60 }, (_, i) => ({
+      name: `skill-${String(i).padStart(2, "0")}`,
+      tier: "wasm" as const,
+      riskTier: "approve" as const,
+      disabled: true,
+      gitSha: "def5678eeee",
+      pendingDeploy: {
+        id: `01960000-0000-7000-8000-0000000000${String(i).padStart(2, "0")}`,
+        gitSha: "def5678eeee",
+        priorGitSha: null,
+      },
+    }));
+    const transport = transportWith({ skills: { list: vi.fn().mockResolvedValue(ok(skills)) } });
+    const ctx = mkCtx();
+    await handleSkills(transport, ctx);
+    const replies = ctx.reply.mock.calls.map((call) => String(call[0]));
+    expect(replies.length).toBeGreaterThan(1);
+    expect(replies[0]?.startsWith("Skills:\nskill-00 ")).toBe(true);
+    for (const reply of replies) expect(reply.length).toBeLessThanOrEqual(4096);
+    const lines = replies.join("\n").split("\n");
+    expect(lines).toHaveLength(61);
+    expect(lines.at(-1)?.startsWith("skill-59 ")).toBe(true);
   });
 
   it("nudges the user when there are no skills", async () => {

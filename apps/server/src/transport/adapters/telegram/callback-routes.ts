@@ -1,4 +1,4 @@
-/** Inline-keyboard taps: the boundary prompt, `/sessions`, and the plan, pipeline-gate and skills-approval keyboards. */
+/** Inline-keyboard taps: the boundary prompt, `/sessions`, and the plan, pipeline-gate and skill deploy keyboards. */
 
 import type { Bot } from "grammy";
 import { PLAN_CALLBACK_REGEX, parsePlanCallback } from "../../../agent/coding/plan-keyboard.js";
@@ -8,14 +8,14 @@ import {
 } from "../../../agent/pipeline/gate-keyboard.js";
 import { logger } from "../../../logger.js";
 import {
-  parseSkillsApprovalCallback,
-  SKILLS_APPROVAL_CALLBACK_REGEX,
+  parseSkillsDeployCallback,
+  SKILLS_DEPLOY_CALLBACK_REGEX,
 } from "../../../skills/skills-keyboard.js";
 import type { Transport } from "../../transport.js";
 import {
   handlePipelineGateCallback,
   handlePlanCallback,
-  handleSkillsApprovalCallback,
+  handleSkillsDeployCallback,
 } from "./commands/keyboard-callbacks.js";
 import { toCmdCtx } from "./commands/reply.js";
 import { handleResumeCallback } from "./commands/sessions.js";
@@ -73,7 +73,7 @@ export function registerCallbackQueries(bot: Bot, transport: Transport): void {
     });
 
     // Drop the keyboard so the buttons can't be tapped twice. Same pattern
-    // as the plan / pipeline-gate / skills-approval callback handlers.
+    // as the plan / pipeline-gate / skill deploy callback handlers.
     await editTappedMessage(
       () => ctx.editMessageReplyMarkup({ reply_markup: clearedKeyboard() }),
       "clear boundary keyboard",
@@ -139,31 +139,34 @@ export function registerCallbackQueries(bot: Bot, transport: Transport): void {
     await ctx.answerCallbackQuery({ text: outcome.toast });
   });
 
-  // Skills approval keyboard: Approve / Deny — callback_data =
-  // "skill:<pendingId>:<approve|deny>"
-  bot.callbackQuery(SKILLS_APPROVAL_CALLBACK_REGEX, async (ctx) => {
+  // Skill deploy keyboards: Approve / Deny on a pending deploy, Disable on a
+  // live one — callback_data = "skill:<pendingId>:<approve|deny>" or
+  // "skill:<skillId>:disable"
+  bot.callbackQuery(SKILLS_DEPLOY_CALLBACK_REGEX, async (ctx) => {
     const data = ctx.callbackQuery?.data;
     const fromId = ctx.from?.id;
     if (!data || fromId === undefined) return;
-    const parsed = parseSkillsApprovalCallback(data);
+    const parsed = parseSkillsDeployCallback(data);
     if (!parsed) return;
     const chatId = ctx.chat?.id;
     if (chatId === undefined) {
       // No chat, no conversation to act from; answer so the button stops spinning.
-      await ctx.answerCallbackQuery({ text: "Open this approval in its chat." });
+      await ctx.answerCallbackQuery({ text: "Open this message in its chat." });
       return;
     }
 
-    const outcome = await handleSkillsApprovalCallback(
+    const outcome = await handleSkillsDeployCallback(
       transport,
       parsed,
       String(fromId),
       String(chatId),
     );
-    await editTappedMessage(
-      () => ctx.editMessageText(outcome.editText, { reply_markup: clearedKeyboard() }),
-      "edit skills approval message",
-    );
+    if (outcome.clearKeyboard) {
+      await editTappedMessage(
+        () => ctx.editMessageText(outcome.editText, { reply_markup: clearedKeyboard() }),
+        "edit skill deploy message",
+      );
+    }
     await ctx.answerCallbackQuery({ text: outcome.toast });
   });
 }

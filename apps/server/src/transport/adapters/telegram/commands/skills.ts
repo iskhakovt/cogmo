@@ -1,6 +1,7 @@
 /** `/skills`, `/disable`, `/enable`: the skill library. */
 
 import type { Transport } from "../../../transport.js";
+import { packTelegramMessages } from "../message-limit.js";
 import { errorMessage, type TelegramCommandContext } from "./reply.js";
 
 const DISABLE_USAGE = "Usage: /disable <name>";
@@ -9,7 +10,9 @@ const ENABLE_USAGE = "Usage: /enable <name>";
 /**
  * `/skills` — list all skills (enabled + disabled), sorted by name. The
  * disabled marker is the whole point: an operator who deregistered a
- * skill needs to see it here to remember the name before `/enable`.
+ * skill needs to see it here to remember the name before `/enable`. A
+ * deploy awaiting approval shows on its skill's line with its full id,
+ * which the owner pastes into `cogmo skills approve <id>`.
  */
 export async function handleSkills(
   transport: Transport,
@@ -31,9 +34,20 @@ export async function handleSkills(
   // for readability; the full sha is rarely useful at the chat surface.
   const lines = res.value.map((s) => {
     const marker = s.disabled ? " (disabled)" : "";
-    return `${s.name} [${s.tier}/${s.riskTier}] @ ${s.gitSha.slice(0, 7)}${marker}`;
+    // A first deploy replaces no live version, so there is no sha to show beside the pending one.
+    const pending =
+      s.pendingDeploy === null
+        ? ""
+        : s.pendingDeploy.priorGitSha === null
+          ? ` — pending approval ${s.pendingDeploy.gitSha.slice(0, 7)} (first deploy), id ${s.pendingDeploy.id}`
+          : ` — pending approval ${s.pendingDeploy.priorGitSha.slice(0, 7)} → ${s.pendingDeploy.gitSha.slice(0, 7)}, id ${s.pendingDeploy.id}`;
+    return `${s.name} [${s.tier}/${s.riskTier}] @ ${s.gitSha.slice(0, 7)}${marker}${pending}`;
   });
-  await ctx.reply(`Skills:\n${lines.join("\n")}`);
+  // One message when it fits; otherwise split between skills, so a pending
+  // deploy id is never cut.
+  for (const part of packTelegramMessages(["Skills:", ...lines])) {
+    await ctx.reply(part);
+  }
 }
 
 /**

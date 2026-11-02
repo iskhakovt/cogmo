@@ -2,7 +2,8 @@
  * Closes the chat -> delegate -> register -> invoke loop on the cogmo-skills
  * bare repo. Subscribes to `coding/task/pr-opened`; for tasks whose target
  * is the well-known skills repo, fetches the PR's head branch from origin
- * into the local bare repo and calls `runner.register({ branch })`.
+ * into the local bare repo, calls `runner.register({ branch })`, and
+ * announces the outcome in the task's conversation.
  *
  * Fetch target is the PR head branch (`cogmo/<idShort>`), not the
  * `cogmo/run/<task-id>` run-branch — the run-branch is cleaned up on the
@@ -17,11 +18,13 @@
 
 import type { Inngest } from "inngest";
 import type { Transactor } from "../../db/index.js";
+import type { EventPublisher } from "../../inngest/durable.js";
 import { codingTaskPrOpened } from "../../inngest/events.js";
 import { logger } from "../../logger.js";
 import { runGit, withGitAskpass } from "../../secrets/git-askpass.js";
 import { describeResolveIdentityError, resolveGitHubIdentity } from "../../secrets/github.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
+import { announceDeployOutcome } from "../../skills/deploy/announce-outcome.js";
 import { SKILLS_CODING_REPO_NAME } from "../../skills/repo.js";
 import type { RegisterResult, SkillDeployOrigin, SkillRunner } from "../../skills/runner.js";
 import type { AgentStore } from "../store/index.js";
@@ -45,6 +48,8 @@ export interface AutoRegisterSkillDeps {
   agentStore: Pick<AgentStore, "getConversation">;
   secretsStore: SecretsStore;
   skillRunner: SkillRunner;
+  /** Emits the register's `skills/deploy/outcome` into the task's conversation. */
+  publisher: EventPublisher;
   /**
    * Bare repo path for the skills library. Production passes
    * `env.COGMO_SKILLS_PATH`; tests inject a tmpdir.
@@ -103,10 +108,11 @@ export async function autoRegisterSkill(
       identity: identityResult.value,
       branch: task.worktreeAssignment.branch,
       origin,
+      conversationId: task.conversationId,
     };
   });
   if (snapshot.kind === "skipped") return snapshot;
-  const { repo, identity, branch, origin } = snapshot;
+  const { repo, identity, branch, origin, conversationId } = snapshot;
   // Refuse anything outside the orchestrator's per-task namespace —
   // `git fetch +<branch>:<branch>` against `main` would clobber the bare repo's main.
   if (!branch.startsWith("cogmo/") || branch === "cogmo/" || branch.includes("..")) {
@@ -134,6 +140,15 @@ export async function autoRegisterSkill(
     },
     "auto-register fired",
   );
+  // A task with no conversation (an automated trigger) has nowhere to post
+  // the outcome; `/skills` lists the deploy. A rejection is announced too:
+  // no model relays it on this path.
+  if (conversationId !== null) {
+    await announceDeployOutcome(
+      { publisher: deps.publisher },
+      { result, conversationId, announceRejections: true },
+    );
+  }
   return { kind: "registered", branch, result };
 }
 

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { SKILL_RISK_REASONS } from "./risk-reasons.js";
 
 /**
  * Effects a skill may declare in its `SKILL.md` frontmatter. Drives the risk
@@ -239,6 +240,27 @@ export const ClassifierLogSchema = z.object({
   declared_secrets: z.array(z.string().min(1)),
   declared_dependencies: z.array(SkillDependencySchema).default([]),
   validation_errors: z.array(z.string()),
+  /**
+   * Every reason that applies to the tier (design/skills.md → Risk tiers
+   * without a human → Reasons). Empty on rows written before the classifier
+   * recorded them.
+   */
+  reasons: z.array(z.enum(SKILL_RISK_REASONS)).default([]),
+  /**
+   * The manifest's `network.allow`; null without a `network:` block, and on
+   * rows written before the classifier recorded it.
+   */
+  declared_network: z.array(z.string()).nullable().default(null),
+  /**
+   * The enforcement flags the tier was computed against. Absent on rows
+   * written before the classifier recorded them.
+   */
+  capabilities: z
+    .object({
+      tier1Hardened: z.boolean(),
+      reviewPanel: z.boolean(),
+    })
+    .optional(),
 });
 export type ClassifierLog = z.infer<typeof ClassifierLogSchema>;
 

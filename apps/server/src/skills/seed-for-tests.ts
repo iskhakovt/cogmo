@@ -98,6 +98,8 @@ export async function seedSkillForTests(
     declared_secrets: [],
     declared_dependencies: [],
     validation_errors: [],
+    reasons: [],
+    declared_network: null,
   };
   await deps.runInTx((tx) =>
     deps.store.insertDeploy(tx, {

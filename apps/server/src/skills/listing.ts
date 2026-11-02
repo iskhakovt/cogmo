@@ -12,6 +12,11 @@ export interface SkillSummary {
   riskTier: SkillRiskTier;
   disabled: boolean;
   gitSha: string;
+  /**
+   * The skill's deploy awaiting approval, or null when none is pending.
+   * `priorGitSha` is the live version it would replace; null for a first deploy.
+   */
+  pendingDeploy: { id: string; gitSha: string; priorGitSha: string | null } | null;
 }
 
 /**
@@ -46,30 +51,40 @@ export interface ListingDeps {
   sourceCache: SkillSourceCache;
 }
 
-function rowToSummary(r: SkillRow): SkillSummary {
+type PendingDeploy = SkillSummary["pendingDeploy"];
+
+function rowToSummary(r: SkillRow, pendingDeploy: PendingDeploy): SkillSummary {
   return {
     name: r.name,
     tier: r.tier,
     riskTier: r.riskTier,
     disabled: r.disabled,
     gitSha: r.gitSha,
+    pendingDeploy,
   };
 }
 
-/** Enabled skills, by name. */
-export async function listSkills(
-  deps: Pick<ListingDeps, "store" | "runInTx">,
-): Promise<readonly SkillSummary[]> {
-  const rows = await deps.runInTx((tx) => deps.store.listEnabledSkills(tx));
-  return rows.map(rowToSummary);
-}
-
-/** Every skill, disabled ones included, by name. */
+/**
+ * Every skill, disabled ones included, by name, each with its pending deploy.
+ * The skill rows and the pending deploys are read in one transaction, so a
+ * listing never pairs a skill with a deploy from a different snapshot.
+ * Register refuses a new deploy while one is pending; were two ever pending
+ * (a concurrent register), the newest is the one shown.
+ */
 export async function listAllSkills(
   deps: Pick<ListingDeps, "store" | "runInTx">,
 ): Promise<readonly SkillSummary[]> {
-  const rows = await deps.runInTx((tx) => deps.store.listAllSkills(tx));
-  return rows.map(rowToSummary);
+  const { rows, pending } = await deps.runInTx(async (tx) => ({
+    rows: await deps.store.listAllSkills(tx),
+    pending: await deps.store.listPendingDeploys(tx),
+  }));
+  const pendingBySkill = new Map(
+    pending.map((d): [string, PendingDeploy] => [
+      d.skillId,
+      { id: d.id, gitSha: d.gitSha, priorGitSha: d.priorGitSha },
+    ]),
+  );
+  return rows.map((r) => rowToSummary(r, pendingBySkill.get(r.id) ?? null));
 }
 
 /** The enabled skills as LLM tool descriptors, skipping any whose source is unreadable. */

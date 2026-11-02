@@ -105,6 +105,8 @@ export function errorMessage(err: TransportError): string {
       return "Skills runtime is unavailable — bootstrap missing skillRunner wiring.";
     case "skill_not_found":
       return `No skill named "${err.name}". Use /skills to list.`;
+    case "skill_id_not_found":
+      return `Skill ${shortenId(err.skillId)} no longer exists. Use /skills to list.`;
     case "skill_no_live_deploy":
       return `Skill "${err.name}" has no live deploy at its current sha — re-register the source via the agent or \`cogmo skills register\` first.`;
     case "skill_deploy_not_found":

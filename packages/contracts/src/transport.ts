@@ -61,6 +61,7 @@ export type TransportError =
   | { code: "task_already_terminal"; taskId: string; status: string }
   | { code: "skills_disabled" }
   | { code: "skill_not_found"; name: string }
+  | { code: "skill_id_not_found"; skillId: string }
   | { code: "skill_no_live_deploy"; name: string }
   | { code: "skill_deploy_not_found"; pendingId: string }
   | { code: "skill_deploy_not_pending"; pendingId: string; status: string }
@@ -160,6 +161,11 @@ export interface SkillListEntry {
   riskTier: SkillRiskTier;
   disabled: boolean;
   gitSha: string;
+  /**
+   * The skill's deploy awaiting approval, or null when none is pending.
+   * `priorGitSha` is the live version it would replace; null for a first deploy.
+   */
+  pendingDeploy: { id: string; gitSha: string; priorGitSha: string | null } | null;
 }
 
 /**

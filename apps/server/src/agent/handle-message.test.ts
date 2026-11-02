@@ -42,6 +42,7 @@ import {
   scriptedStream,
   turnContextSent,
 } from "../test/factories.js";
+import { liveRegisterResult } from "../test/skills-fixtures.js";
 import type { StreamDeliveryError } from "../transport/delivery-router.js";
 import { createAttachmentReader } from "./attachments/attachment-reader.js";
 import { toolResultClearing } from "./context.js";
@@ -1933,12 +1934,7 @@ describe("createHandleMessage", () => {
     it("registers a skill with the conversation's user and profile as its origin", async () => {
       const skillRunner = mock<SkillRunner>();
       skillRunner.listToolDefs.mockResolvedValue([]);
-      skillRunner.register.mockResolvedValue({
-        name: "echo",
-        riskTier: "notify",
-        status: "live",
-        gitSha: "abc1234",
-      });
+      skillRunner.register.mockResolvedValue(liveRegisterResult());
       const deps = mockDeps({
         agentStore: mockAgentStore({
           getProfile: vi.fn().mockResolvedValue(profileWithAllTools()),

@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CODING_TASK_FAILURE_REASONS } from "../agent/coding/types.js";
 import { MAX_GATE_REMINDERS, MAX_SLUG_LENGTH } from "../agent/pipeline/types.js";
+import { SKILL_RISK_REASONS } from "../skills/risk-reasons.js";
+import { skillRiskTier } from "../skills/store/schema.js";
+import { SKILL_EFFECTS } from "../skills/types.js";
 import {
   buildConversationCooldownClearedEvent,
   calculateElapsedCooldown,
@@ -10,7 +13,7 @@ import {
   pipelineGatePending,
   pipelineStageDue,
   responseReady,
-  skillsDeployApprovalRequested,
+  skillsDeployOutcome,
 } from "./events.js";
 
 describe("inboundArrived", () => {
@@ -145,24 +148,52 @@ describe("coding/task/failed", () => {
   });
 });
 
-describe("skills/deploy/approval-requested", () => {
-  const base = {
-    pendingId: "deploy-1",
-    skillName: "briefing",
-    gitSha: "abc1234",
+describe("skills/deploy/outcome", () => {
+  const deployed = {
     conversationId: "conv-1",
+    skillId: "skill-1",
+    deployId: "deploy-1",
+    skillName: "briefing",
+    riskTier: "notify",
+    reasons: ["tier1_unhardened"],
+    gitSha: "abc1234",
+    priorGitSha: null,
+    description: "A morning briefing.",
+    effects: { declared: ["reads_memory"], detected: [] },
+    hosts: ["api.example.com"],
+    secrets: [{ name: "api_key", bound: true }],
+    dependencies: ["httpx==0.27.0"],
+    schedule: "0 9 * * *",
   };
+  const rejected = {
+    outcome: "rejected",
+    conversationId: "conv-1",
+    skillName: "",
+    gitSha: "abc1234",
+    errors: ["missing_skill_md: SKILL.md not found at branch tip"],
+  };
+  const parse = (data: unknown) => skillsDeployOutcome.schema.safeParse(data).success;
 
-  it("accepts an event queued before the schedule field existed", () => {
-    // Inngest validates event data against the trigger schema before the
-    // handler runs, so a queued event without the field must still parse.
-    expect(skillsDeployApprovalRequested.schema.safeParse(base).success).toBe(true);
+  it("accepts each outcome", () => {
+    expect(parse({ outcome: "live", ...deployed })).toBe(true);
+    expect(parse({ outcome: "pending_approval", ...deployed })).toBe(true);
+    expect(parse({ outcome: "live", ...deployed, schedule: null, priorGitSha: null })).toBe(true);
+    expect(parse(rejected)).toBe(true);
   });
 
-  it("accepts a schedule or null", () => {
-    const parse = (schedule: string | null) =>
-      skillsDeployApprovalRequested.schema.safeParse({ ...base, schedule }).success;
-    expect(parse("0 9 * * *")).toBe(true);
-    expect(parse(null)).toBe(true);
+  it("rejects a mixed outcome", () => {
+    // A rejection carrying a deploy's fields, and a deploy missing its facts.
+    expect(parse({ ...rejected, deployId: "deploy-1", facts: {} })).toBe(false);
+    expect(parse({ ...rejected, outcome: "live" })).toBe(false);
+    expect(parse({ ...deployed, outcome: "rejected", errors: [] })).toBe(false);
+    expect(parse({ outcome: "no_op", ...deployed })).toBe(false);
+  });
+
+  it("names exactly the domain's effects and risk reasons", () => {
+    const live = skillsDeployOutcome.schema.options[0];
+    expect(live.shape.riskTier.options).toEqual([...skillRiskTier.enumValues]);
+    expect(live.shape.reasons.element.options).toEqual([...SKILL_RISK_REASONS]);
+    expect(live.shape.effects.shape.declared.element.options).toEqual([...SKILL_EFFECTS]);
+    expect(live.shape.effects.shape.detected.element.options).toEqual([...SKILL_EFFECTS]);
   });
 });

@@ -16,10 +16,16 @@ export interface SkillListEntry {
   riskTier: SkillRiskTier;
   disabled: boolean;
   gitSha: string;
+  /**
+   * The skill's deploy awaiting approval, or null when none is pending.
+   * `priorGitSha` is the live version it would replace; null for a first deploy.
+   */
+  pendingDeploy: { id: string; gitSha: string; priorGitSha: string | null } | null;
 }
 
 /**
- * Skills-deploy approval surface for the approve-tier inline keyboard.
+ * Skills surface for the deploy message's keyboards (Approve, Deny, Disable)
+ * and the `/skills` commands.
  * Mirrors the `coding` namespace shape: identity-checked, calls into the
  * existing `SkillRunner` RPCs, returns `Result` with skills-specific
  * error codes. Returns `skills_disabled` when the skills module isn't
@@ -67,6 +73,16 @@ export interface SkillsNamespace {
   disable(
     platformUserHandle: string,
     name: string,
+  ): Promise<Result<{ name: string }, TransportError>>;
+  /**
+   * {@link disable} for the skill `skillId`, as a deploy message's Disable
+   * button names it. Returns `skill_id_not_found` when no skill has the id,
+   * and `skill_not_found` naming the skill when it went away before the
+   * deregister.
+   */
+  disableById(
+    skillId: string,
+    tapperPlatformHandle: string,
   ): Promise<Result<{ name: string }, TransportError>>;
   /**
    * Re-enable a previously-disabled skill. Refuses with
@@ -168,6 +184,7 @@ export function createSkills(
           riskTier: r.riskTier,
           disabled: r.disabled,
           gitSha: r.gitSha,
+          pendingDeploy: r.pendingDeploy,
         })),
       );
     },
@@ -177,6 +194,22 @@ export function createSkills(
       if (identityCheck.isErr()) return err(identityCheck.error);
       if (!skillRunner) return err({ code: "skills_disabled" as const });
       const result = await skillRunner.deregister({ name });
+      return match(result)
+        .returnType<Result<{ name: string }, TransportError>>()
+        .with({ kind: "deregistered" }, (r) => ok({ name: r.name }))
+        .with({ kind: "rejected", reason: "not_found" }, (r) =>
+          err({ code: "skill_not_found", name: r.name }),
+        )
+        .exhaustive();
+    },
+
+    async disableById(skillId, tapperPlatformHandle) {
+      const identityCheck = await checkSkillsTapper(tapperPlatformHandle);
+      if (identityCheck.isErr()) return err(identityCheck.error);
+      if (!skillRunner || !skillStore) return err({ code: "skills_disabled" as const });
+      const skill = await runInTx((tx) => skillStore.getSkillById(tx, skillId));
+      if (!skill) return err({ code: "skill_id_not_found" as const, skillId });
+      const result = await skillRunner.deregister({ name: skill.name });
       return match(result)
         .returnType<Result<{ name: string }, TransportError>>()
         .with({ kind: "deregistered" }, (r) => ok({ name: r.name }))
@@ -239,7 +272,7 @@ export function createSkills(
 
   /**
    * Identity check for the rest of the skills admin surface (deny, list,
-   * disable). Skills are deployment-wide, so the check is "is the tapper a
+   * disable, disableById). Skills are deployment-wide, so the check is "is the tapper a
    * known user of this channel". `resolveUser` returns
    * non-null iff the platform handle is allowlisted; that's the same gate
    * the inbound message path already enforces.

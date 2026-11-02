@@ -5,6 +5,7 @@ import { defaultSkillsImage } from "../env.js";
 import { logger } from "../logger.js";
 import type { SandboxClient } from "../sandbox/index.js";
 import type { SecretsStore } from "../secrets/store/index.js";
+import { BUILD_CAPABILITIES } from "./capabilities.js";
 import type { DefaultCtxHandlerOptions } from "./ctx-handler.js";
 import {
   type DeregisterResult,
@@ -27,7 +28,6 @@ import type { SkillInvokeRejection } from "./invoke-rejection.js";
 import {
   type ListingDeps,
   listAllSkills,
-  listSkills,
   listToolDefs,
   type SkillSummary,
   type SkillToolDef,
@@ -109,11 +109,11 @@ export interface SkillRunner {
    */
   enable(opts: { name: string; origin: SkillDeployOrigin }): Promise<EnableResult>;
 
-  list(): Promise<readonly SkillSummary[]>;
   /**
-   * Like {@link list} but includes disabled skills too. Used by operator-
-   * facing surfaces (`/skills` in Telegram) where a previously-disabled
-   * row needs to be visible so the operator can `enable` it back.
+   * Every skill, disabled ones included, each with its pending deploy. The
+   * operator surfaces (`/skills`, `cogmo skills list`) read it: a disabled
+   * row stays visible so the operator can `enable` it back, and a pending
+   * first deploy, whose row is disabled, shows its id for `approve`.
    */
   listAll(): Promise<readonly SkillSummary[]>;
   /**
@@ -271,6 +271,7 @@ export class SkillRunnerImpl implements SkillRunner {
       runInTx: opts.runInTx,
       secretsStore: opts.secretsStore,
       defaultRunAs: opts.defaultRunAs,
+      capabilities: BUILD_CAPABILITIES,
       skillsRepoPath: opts.skillsRepoPath,
       sourceCache,
       // Explicit override wins; otherwise default to a sandbox-backed
@@ -355,10 +356,6 @@ export class SkillRunnerImpl implements SkillRunner {
 
   enable(opts: { name: string; origin: SkillDeployOrigin }): Promise<EnableResult> {
     return enableSkill(this.#deploy, opts);
-  }
-
-  list(): Promise<readonly SkillSummary[]> {
-    return listSkills(this.#listing);
   }
 
   listAll(): Promise<readonly SkillSummary[]> {

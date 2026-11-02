@@ -500,12 +500,12 @@ Each deploy is classified, from the manifest and a static-analysis pass, into a 
 | Tier | Matches when | Action |
 |-|-|-|
 | **Auto** | Everything not matched below: tier `wasm`, no declared or detected effect, no `network:` block, at most two secrets of any kind, every dependency on the allowlist | `register` fast-forwards `main` to the branch tip immediately on classification. Skill is live. No notification. |
-| **Notify** | A dependency on neither list, OR any other declared or detected effect (`reads_memory`, `writes_memory`, `reads_user_data`, `writes_user_data`, `reads_filesystem`), OR a `network:` block without secrets | `register` fast-forwards `main` to the branch tip immediately on classification. No notification is sent today; [Notifications and undo](#notifications-and-undo) specifies one. |
-| **Approve** | First match: validation errors; a dependency on the approve list; an effect in `APPROVE_GATING_EFFECTS` (`deletes_external`, `sends_email`, `sends_message`, `posts_public`, `financial`, `spawns_subprocess`, `writes_filesystem`); tier `container`; **any secret together with a `network:` block**; three or more secrets | `register` leaves `main` untouched; the branch stays as-is. Through `register_skill`, Telegram gets an approval prompt with the name, declared effects, schedule and short sha, and approve/deny buttons; the auto-register path posts nothing. `main` is fast-forwarded only when `approveDeploy` fires. |
+| **Notify** | A dependency on neither list, OR any other declared or detected effect (`reads_memory`, `writes_memory`, `reads_user_data`, `writes_user_data`, `reads_filesystem`), OR a `network:` block without secrets | `register` fast-forwards `main` to the branch tip immediately on classification, and the requester's conversation, when the register has one, gets the deploy notification with Disable ([Notifications and undo](#notifications-and-undo)). |
+| **Approve** | First match: validation errors; a dependency on the approve list; an effect in `APPROVE_GATING_EFFECTS` (`deletes_external`, `sends_email`, `sends_message`, `posts_public`, `financial`, `spawns_subprocess`, `writes_filesystem`); tier `container`; **any secret together with a `network:` block**; three or more secrets | `register` leaves `main` untouched; the branch stays as-is. The requester's conversation, when the register has one, gets the `pending_approval` notification with Approve and Deny ([Notifications and undo](#notifications-and-undo)), from `register_skill` and the coding-task auto-register alike. `main` is fast-forwarded only when `approveDeploy` fires. |
 
 Secrets-plus-network is its own `approve` trigger rather than a count, because the count answers "how broad are this skill's permissions" while the pairing answers "can this skill read a credential and also reach somewhere to send it". `APPROVE_SECRETS_THRESHOLD` stays as the breadth signal for skills with no egress.
 
-**Tier 1 capped at `notify`** `[proposed]` (todo.md → Skills autonomy S1). While `tier1Hardened` is unset, the table returns `notify` where it would return `auto`: an unhardened tier-1 skill holds the server's environment ([Tier-1 boundary](#tier-1-boundary-proposed)), so none deploys without a notification. Tier 1 is the only tier the table promotes to `auto`, so no deploy is `auto` under the cap. Setting `tier1Hardened` lifts it, and `auto` returns only once `reviewPanel` is set too: without a panel, [Risk tiers without a human](#risk-tiers-without-a-human) caps `auto` at `notify`.
+**Tier 1 capped at `notify`** `[confirmed]`. While `tier1Hardened` is unset, the table returns `notify` where it would return `auto`: an unhardened tier-1 skill holds the server's environment ([Tier-1 boundary](#tier-1-boundary-proposed)), so none deploys without a notification (an auto-register for a coding task with no conversation posts nothing: `/skills` lists it). Tier 1 is the only tier the table promotes to `auto`, so no deploy is `auto` under the cap. Setting `tier1Hardened` lifts it, and `auto` returns only once `reviewPanel` is set too: without a panel, [Risk tiers without a human](#risk-tiers-without-a-human) caps `auto` at `notify`.
 
 ### Classifier
 
@@ -516,7 +516,7 @@ The classifier is deterministic and takes:
 - **Execution tier** (WASM vs container).
 - **Static analysis pass** — walks the Python AST for imports + call patterns the manifest didn't declare: imports of `subprocess` / `smtplib` / `stripe` / etc., calls to `os.remove` / `subprocess.run` / `open(..., "w")`, etc. Any undeclared match → `validation_errors` populated and the deploy is rejected; the author (agent or human) must declare the effect to proceed.
 
-Output: one of `auto` / `notify` / `approve`. Recorded in the `skills.risk_tier` column and in the `skill_deploys` audit log.
+Output: one of `auto` / `notify` / `approve`, with every reason that applies ([Risk tiers without a human](#risk-tiers-without-a-human) → Reasons) and the capability flags it read. Recorded in the `skills.risk_tier` column and in the `skill_deploys` audit log (`classifier_log`).
 
 #### Implementation
 
@@ -526,7 +526,7 @@ Detection rules live in `src/skills/ast-rules.ts` as pure data — two tables (`
 
 **Threat model: a drift catcher, not a boundary.** A body can call `getattr(__import__("os"), "system")(...)`, alias a module, or use an SDK no rule covers, and pass. Lint keeps `effects:` tracking what the body visibly does, so an undeclared effect surfaces at register. It is not hardened against an adversarial author and does not make `auto` safe: that rests on the verify gates and the review panel ([Risk tiers without a human](#risk-tiers-without-a-human)), with the tier's isolation and the egress allowlist as the boundaries.
 
-**Failure mode.** A throw from the AST path (parser load failure, walk panic, unexpected node shape) is caught at the `classifier.ts` boundary and falls back to the declaration-only `classifyManifestStub`, whose `classifier_version`, `stub-2-effect-aware` in place of `ast-1`, marks the degradation in the audit log. The stub never returns `auto`, since only the AST path can show a body is read-only. Its `approve` predicates are the AST path's (tier `container`, an approve-gating effect, an approve-list dependency, three or more secrets, any secret with a `network:` block), so it returns `approve` or `notify`, and the deploy completes. A null parse tree takes the declarations-only path instead, which can return `auto`; the planned verify stage's syntax gate rejects such a file before register. `[proposed]` On either path a skill that declares a secret without a binding is refused at register as `risk_rule` `effects_unverifiable`: without detected effects, rule 1's raw-secret exclusions cannot be checked ([Risk tiers without a human](#risk-tiers-without-a-human)).
+**Failure mode.** A throw from the AST path (parser load failure, walk panic, unexpected node shape) is caught at the `classifier.ts` boundary and falls back to the declaration-only `classifyManifestStub`, whose `classifier_version` (`STUB_CLASSIFIER_VERSION` in place of `AST_CLASSIFIER_VERSION`) marks the degradation in the audit log. The stub never returns `auto`, since only the AST path can show a body is read-only. Its `approve` predicates are the AST path's (tier `container`, an approve-gating effect, an approve-list dependency, three or more secrets, any secret with a `network:` block), so it returns `approve` or `notify`, and the deploy completes. A null parse tree takes the declarations-only path instead, which can return `auto`; the planned verify stage's syntax gate rejects such a file before register. `[proposed]` On either path a skill that declares a secret without a binding is refused at register as `risk_rule` `effects_unverifiable`: without detected effects, rule 1's raw-secret exclusions cannot be checked ([Risk tiers without a human](#risk-tiers-without-a-human)).
 
 ### Where the classifier runs
 
@@ -550,15 +550,15 @@ The `register` RPC, in the order its checks run:
 5. **Lockfile**, before the transaction: with dependencies declared, the committed `requirements.lock` must byte-equal a fresh `uv pip compile --generate-hashes --no-header` run in a short-lived sandbox session, destroyed whatever the outcome ([Lockfile](#lockfile)); tier 1 then checks the locked packages against Pyodide (`pyodide-compat.ts`).
 6. **No-op**, in the transaction: a tip equal to `skills.git_sha` returns `no_op` and writes nothing.
 7. **Pending**, in the transaction: a `pending_approval` row for the skill returns `pending_deploy_exists`.
-8. **Writes** by tier, as the [Deploy lifecycle](#deploy-lifecycle-confirmed) table states; a rejection from steps 2–7 persists nothing. For an `approve`-tier deploy through `register_skill`, the Telegram prompt follows the commit. The result returns synchronously.
+8. **Writes** by tier, as the [Deploy lifecycle](#deploy-lifecycle-confirmed) table states; a rejection from steps 2–7 persists nothing. The outcome notification follows the commit ([Notifications and undo](#notifications-and-undo)). The result returns synchronously.
 
-`SkillRunner` (`src/skills/runner.ts`) is the public interface: `register`, `approveDeploy`, `denyDeploy`, `rollback`, `deregister`, `enable`, `list`, `listAll` and `invoke`. Each call that can put a schedule live takes a `SkillDeployOrigin` (`src/skills/deploy/origin.ts`), which decides who the schedule runs as ([Run-as identity](#run-as-identity-confirmed)); `register`'s `signal` cancels the deploy until its transaction starts. The results:
+`SkillRunner` (`src/skills/runner.ts`) is the public interface: `register`, `approveDeploy`, `denyDeploy`, `rollback`, `deregister`, `enable`, `listAll` and `invoke`. Each call that can put a schedule live takes a `SkillDeployOrigin` (`src/skills/deploy/origin.ts`), which decides who the schedule runs as ([Run-as identity](#run-as-identity-confirmed)); `register`'s `signal` cancels the deploy until its transaction starts. The results:
 
 ```typescript
 // Each variant also carries name, riskTier and gitSha.
 type RegisterResult =
-  | { status: "live" }                                              // gitSha: main's new tip
-  | { status: "pending_approval"; pendingId: string; schedule?: string }  // gitSha: branch tip
+  | { status: "live"; skillId: string; deployId: string; facts: DeployFacts }              // gitSha: main's new tip; facts: Notifications and undo
+  | { status: "pending_approval"; skillId: string; deployId: string; facts: DeployFacts }  // gitSha: branch tip; deployId: what approve and deny name
   | { status: "no_op" }
   | { status: "rejected"; errors: readonly string[] };              // nothing written; the [proposed] `blocked` rejection writes its deploy row
 
@@ -581,7 +581,7 @@ type RegisterRejection =
   | { kind: "skill_not_found" } | { kind: "main_moved" }
   // pausing: nothing is wrong with the tip
   | { kind: "concurrent_first_deploy" }   // the first-deploy 23505 race, returned only after register's own single retry also loses
-  | { kind: "pending_deploy_exists"; pendingId: string }   // at the tip: the tip's own deploy, which a draft settles from; elsewhere: the owner resolves it
+  | { kind: "pending_deploy_exists"; deployId: string }   // at the tip: the tip's own deploy, which a draft settles from; elsewhere: the owner resolves it
   | { kind: "registrar_unavailable"; cause: "index" | "sandbox" }
   // ends the draft: the live version moved under it, and no change to the tip can fix that
   | { kind: "base_moved"; liveGitSha: string | null };   // a draft's register only: `skills.git_sha` is not the draft's `base_git_sha`, or, for a create, the name has gone live since; step 2, read before the fast-forward check and re-read in the deploy transaction; the draft ends, spending no round
@@ -659,14 +659,14 @@ Each is a single field — a timestamp, a foreign key — so it keeps its natura
 | a deploy transaction in flight across the migration | its row `pending_approval` or terminal, both legal | the two `ALTER COLUMN … TYPE` steps rewrite `skill_deploys`, and a table rewrite is not MVCC-safe: a REPEATABLE READ transaction whose snapshot predates the rewrite and first reads `skill_deploys` after the migration commits sees it empty — register's pending guard sees no pending row (the duplicate-pending case under "two `register`s of one skill at once" below), approve's pre-read returns `deploy_not_found`, deny reports `not_found`. **Residual**, benign at single-user scale. `skill_runs` is altered in place and is unaffected |
 | a future writer violates a CHECK at runtime (`23514`) | the deploy transaction rolls back before `applyFilesystem`, so `main` and `skills` are untouched | the error surfaces as the throw it is — a bug in the writer, not a value |
 
-Who repeats a deploy: the Inngest auto-register caller runs `register` in one step with `retries: 0`. The `register_skill` tool is `durable: true` inside `handle-message`'s tool step (`retries: 2`); the loop hands it a `ToolCallContext.idempotencyKey`, which the handler drops, and `register` takes no key, so a crash after the commit and before Inngest records the step runs `register` again (failure modes). Every other repeat is an operator's.
+Who repeats a deploy: the Inngest auto-register caller runs `register` in one step with `retries: 0`. The `register_skill` tool is `durable: true` inside `handle-message`'s tool step (`retries: 2`); the loop hands it a `ToolCallContext.idempotencyKey`, which the handler drops, and `register` takes no key, so a crash after the commit and before Inngest records the step runs `register` again (failure modes). The two callers never register one branch: the auto-register deploys a coding task's branch when its PR opens, and the agent's guidance reserves `register_skill` for a branch that reached the repo another way; a second register of a live tip is a `no_op`, of a pending one the `pending_deploy_exists` rejection, which `register_skill` does not announce. Every other repeat is an operator's.
 
 | Failure mode | State left | Why it is safe, or the residual |
 |-|-|-|
 | `deny` of an unknown id, or of a row already `live`, `denied`, `rolled_back` or `superseded` (a second tap, a stale CLI call) | nothing written | the conditional UPDATE matches no row; the caller gets `not_found`, or `not_pending` with the status the row holds |
 | `approve` racing a deny or another approve of the same row (two taps; a tap and the CLI) | one resolution wins and commits; the loser writes nothing | a resolution committed after the loser's snapshot raises `40001` at the loser's first UPDATE, and the transactor retries from a fresh snapshot, as if the winner had committed first: approve's pre-read sees `denied` or `live`, and a losing deny's conditional UPDATE matches zero rows and returns `not_pending`. The guarded UPDATE as the first write is hardening: REPEATABLE READ never reaches its zero-row path, which writes nothing |
 | two `register`s of one skill at once | mixed tiers: an approve-tier winner writes only a `skill_deploys` INSERT; a notify-tier loser's snapshot does not see it, its `skills` UPDATE conflicts with nothing and `main` has not moved, so the skill goes live at the loser's tip while the winner's row stays pending. Two approve-tier registers of an existing skill insert two `pending_approval` rows — nothing conflicts, and no index forbids it. Two first deploys hit `skills.name` UNIQUE with `23505`, which the transactor does not retry, so the loser throws. A register racing an approve or deny may read a stale `pending_deploy_exists` | the stranded pending row blocks register until it is denied; approving it goes live when it carries the tip `main` already holds (the fast-forward check passes) and is `non_fast_forward_at_approve_time` otherwise, the approve-time merge failing its tree guard on the other version of the skill `main` holds; the thrown `23505` is a call the operator repeats; the stale rejection is benign. **Residual** until the advisory-lock audit (todo): only taking the lock before the snapshot closes the mixed-tier case; a partial unique index on `(skill_id) WHERE status = 'pending_approval'`, written through `ON CONFLICT DO UPDATE`, closes only the duplicate pending rows, since the mixed-tier loser inserts a `live` row |
-| `register_skill` run again by Inngest after the commit, before the step result was recorded | live tier: the second run is `no_op`, the tip being `main`. Approve tier: the second run is `pending_deploy_exists`, which the model reads as a rejection; and when the crash fell between the commit and the `skills/deploy/approval-requested` emit, no approval keyboard is posted | the database is consistent either way; the operator approves from the CLI. **Residual**: `register_skill` drops the `ToolCallContext.idempotencyKey` the loop supplies, `register` takes no key, and the emit is not part of any recovery |
+| `register_skill` run again by Inngest after the commit, before the step result was recorded | live tier: the second run is `no_op`, the tip being `main`. Approve tier: the second run is `pending_deploy_exists`, which the model reads as a rejection and `register_skill` does not announce; and when the crash fell between the commit and the `skills/deploy/outcome` emit, no notification is posted | the database is consistent either way; `/skills` names the pending id and the operator approves from the CLI. **Residual**: `register_skill` drops the `ToolCallContext.idempotencyKey` the loop supplies, `register` takes no key, and the emit is not part of any recovery |
 | `main` moves between a deploy's checks and its `update-ref` (another skill's deploy landed) | nothing committed | `advanceMain` throws inside the transaction, which rolls back the row and the projection; the caller gets the rejection named in the transition table and retries |
 | `[proposed]` approve by merge: a crash after the merge commit is written and before `update-ref`, the row's UPDATE written or not | the row `pending_approval` at the reviewed sha; `main` unmoved; the merge commit unreachable | the transaction never committed; the next approve repeats the guard and writes a fresh merge, and git collects the first |
 | `[proposed]` approve by merge: `update-ref` lands, then the commit fails or the process dies | `main` at the merge; the row `pending_approval` and `skills` at the old sha | as for a fast-forward (the `update-ref` row below), the database decides what runs. A repeat finds the reviewed sha an ancestor of `main` and `main`'s `skills/<name>/` equal to it, so the merge is `main` itself: no second commit, and `update-ref` is a no-op. That row's reconciliation and residual hold until then |
@@ -1143,7 +1143,7 @@ Rules, first match wins. They are the one statement of the tiering; every other 
 
 **What the rules assume across skills** `[proposed]`. The rules judge each skill alone. They hold across skills because a tier-2 task under `tier2TaskIsolated`, and a tier-1 task in its single-use child, shares with other skills only what Cogmo gives every skill by design ([Cross-skill leakage](#cross-skill-leakage-in-a-shared-worker)). These are residuals, not closures: the memory bank of the run's user through `ctx.memory`, filtered by the run's profile; the deployment-wide `ctx.files` workspace; the conversation a run's output returns to; scheduled tasks, which a skill reaches only through the agent reading its output; state on external hosts two skills may both reach; and read-only dependency environments, when lockfiles are identical. Anything a skill writes to one of these, any skill or turn with the matching read effect can read.
 
-**Reasons** `[proposed]`. `SKILL_RISK_REASONS` (`src/skills/risk-reasons.ts`) is the one list, and `SkillRiskReason` its element type, for `classifier_log.reasons`, the `blocked` rejection and a `risk_blocked` draft's `state.reasons` alike. A deploy records every reason that applies, not only the first rule's; without `reviewPanel`, today's table ([Tiers](#tiers)) raises the reasons its rows name.
+**Reasons** `[confirmed]`. `SKILL_RISK_REASONS` (`src/skills/risk-reasons.ts`) is the one list, and `SkillRiskReason` its element type, for `classifier_log.reasons` and, `[proposed]`, the `blocked` rejection and a `risk_blocked` draft's `state.reasons` alike. A deploy records every reason that applies, not only the first rule's; without `reviewPanel`, today's table ([Tiers](#tiers)) raises the reasons its rows name, and rules 2–5's reasons wait on the review stage.
 
 | Reason | Rule | Raised when |
 |-|-|-|
@@ -1153,7 +1153,7 @@ Rules, first match wins. They are the one statement of the tiering; every other 
 | `opted_in` | 3, `approve` | an effect or a reason in `skill_approval_classes`; `classifier_log.approvalClasses` names the classes that matched |
 | `first_deploy` | 4 | a first deploy, with no live manifest to compare |
 | `manifest_widened` | 4 | an edit whose manifest widens the live one |
-| `tier1_unhardened` | 4; today's table, the tier-1 cap | tier 1 while `tier1Hardened` is off |
+| `tier1_unhardened` | 4; today's table, the tier-1 cap | tier 1 while `tier1Hardened` is off (today's table: where it would return `auto`) |
 | `tier2_unenforced` | 4 | tier 2 while `tier2EgressEnforced` is off |
 | `tier2_shared_worker` | 4 | tier 2 while `tier2TaskIsolated` is off, unless the skill declares `isolation: recycle` and no dependencies |
 | `acting_effect` | 4 | a write, send, delete, financial or subprocess effect |
@@ -1169,6 +1169,7 @@ Rules, first match wins. They are the one statement of the tiering; every other 
 | `secret_breadth` | today's table, `approve` | three or more secrets |
 | `declared_effect` | today's table, `notify` | any other declared or detected effect |
 | `network_declared` | today's table, `notify` | a `network:` block without secrets |
+| `classifier_fallback` | today's table, the stub's cap | the declaration-only stub, which cannot show a body read-only, returned `notify` where the table said `auto` ([Classifier](#classifier) → Failure mode) |
 
 Rule 1's validation errors are rejections, not reasons, and a `blocked` rejection carries only rule 2's three.
 
@@ -1180,14 +1181,14 @@ A request is a write when `isWriteRequest(method, host, path)` says so: a method
 
 ### Notifications and undo
 
-One use case (`announceDeployOutcome`) serves every register caller and emits `skills/deploy/outcome` with `{ skillId, deployId, outcome, riskTier, reasons, conversationId }`; the transport renders it in the requester's conversation, or the owner's when there is none. The emit follows the deploy's commit, and nothing replays it: a lost `skills/deploy/outcome` loses only the message, a residual, since `/skills` and the activity view list every deploy.
+One use case (`announceDeployOutcome`, `[confirmed]`) serves every register caller (`register_skill`, the coding-task auto-register) and emits `skills/deploy/outcome`: the outcome, the requester's `conversationId`, and for a `live` or `pending_approval` deploy its `skillId`, `deployId`, `riskTier`, `reasons` and the facts the table below shows; for `rejected`, the errors, announced only by the auto-register, since `register_skill`'s rejection reaches the user through the model. A `no_op` and an `auto` deploy emit nothing. The transport renders it in the requester's conversation (`[proposed]`: or the owner's when there is none). The emit follows the deploy's commit, and nothing replays it: a lost `skills/deploy/outcome` loses only the message, a residual, since `/skills` and `cogmo skills list` name every skill and a pending deploy's id for `cogmo skills approve`.
 
 | Outcome | Message | Buttons |
 |-|-|-|
-| `live`, `notify` | `skill X is live` (new, or `abc1234 → def5678`; after an approve-time merge, the reviewed sha beside the deployed one), the description, the reasons, effects (declared and detected), hosts, secrets (bound or raw), dependencies, schedule and run-as, verify and panel verdicts with the round | Disable; Roll back for an edit, a forward commit restoring the skill's directory (Deploy lifecycle); Details |
-| `pending_approval` | the same, and the opted-in class that holds it | Approve, Deny |
-| `blocked` | the same, and the reasons | Override and Abandon, the owner's |
-| `rejected` | the findings, and the round it starts | — |
+| `live`, `notify` | `skill X is live` (new, or `abc1234 → def5678`; `[proposed]` after an approve-time merge, the reviewed sha beside the deployed one), the description, the reasons, effects (declared and detected), hosts, secrets (bound or raw), dependencies, schedule and run-as; `[proposed]` verify and panel verdicts with the round | Disable; `[proposed]` Roll back for an edit, a forward commit restoring the skill's directory (Deploy lifecycle), and Details |
+| `pending_approval` | the same, and `[proposed]` the opted-in class that holds it | Approve, Deny |
+| `blocked` `[proposed]` | the same, and the reasons | Override and Abandon, the owner's |
+| `rejected` | the findings (`[proposed]`: and the round it starts) | — |
 
 `auto` sends nothing at deploy. The `skills-auto-digest` cron sends the owner, once a day and only when there is one, the day's `auto` deploys with their reasons and verdicts; its bus id is the scheduled day, so a retry sends nothing twice. Disable is `/disable X`; Details links to the run view ([Observability](#observability-proposed)).
 
@@ -1391,7 +1392,7 @@ If an auto-applied skill misbehaves:
 
 - **`/disable <skill>`** — channel command disables immediately (sets `skills.disabled = true`; running tasks finish, no new invocations accepted). Idempotent on already-disabled rows.
 - **`/enable <skill>`** — re-activates a previously disabled skill. Refuses with a "no live deploy" message if the skill was never live at its current sha (denied-on-first-deploy guard above).
-- **`/skills`** — operator inventory: lists every registered skill (enabled + disabled, with marker), tier, risk tier, short git sha. Discovery surface for the other two commands.
+- **`/skills`** — operator inventory: lists every registered skill (enabled + disabled, with marker), tier, risk tier, short git sha, and a pending deploy's shas and id for `cogmo skills approve`. Discovery surface for the other two commands.
 - **`/rollback <skill>`** — back to the prior deploy's version (Deploy lifecycle).
 - **Auto-disable** `[proposed]` on defect-class failures ([Notifications and undo](#notifications-and-undo)).
 
@@ -1956,7 +1957,7 @@ skill_deploys (
   id              UUID v7 PK,
   skill_id        UUID NOT NULL REFERENCES skills(id),
   git_sha         TEXT NOT NULL,           -- commit being deployed
-  prior_git_sha   TEXT,                    -- nullable: null for first deploy; used for rollback
+  prior_git_sha   TEXT,                    -- nullable: the live version this deploy replaces (one with a live or rolled_back row); null when none was live; shown by the notification
   risk_tier       skill_risk_tier NOT NULL,
   status          skill_deploy_status NOT NULL,
   approved_by     UUID REFERENCES user_identities(id),  -- nullable: the identity that approved an approve-tier deploy for a user; null for auto/notify-tier and owner-CLI approvals
@@ -2278,7 +2279,7 @@ egress_ca_generations (
 -- http.request rows give way to skill_egress
 ```
 
-`classifier_log` gains `reasons` (`SkillRiskReason[]`, [Risk tiers](#risk-tiers-without-a-human) → Reasons), `approvalClasses` (the `skill_approval_classes` an `opted_in` reason matched), `declared_network` and the capability flags it read, `[proposed]` with the `serve_heartbeats` row `egressListener` came from, so a deploy records why it got its tier. `skill_deploys.approved_by` also holds an Override's owner.
+`classifier_log` carries `reasons` (`SkillRiskReason[]`, [Risk tiers](#risk-tiers-without-a-human) → Reasons), `declared_network` and `capabilities`, the flags it read (`[confirmed]`; rows written before them read `reasons = []`, `declared_network = null` and no `capabilities`), so a deploy records why it got its tier. `[proposed]`: `approvalClasses` (the `skill_approval_classes` an `opted_in` reason matched) and the `serve_heartbeats` row `egressListener` came from. `skill_deploys.approved_by` also holds an Override's owner.
 
 ## At-most-once invocation `[confirmed]`
 
@@ -2363,10 +2364,10 @@ In code the transitions take values — `ExecutedOutcome` (`{ kind: "output", ou
 | Group | Subdirectory / key entrypoints | Responsibility |
 |-|-|-|
 | Public interface | `index.ts`, `runner.ts` | `SkillRunner` contract; `SkillRunnerImpl` wires the source cache, warm pool and use cases below |
-| Deploy pipeline | `deploy/` | One use case per RPC: `register.ts`, `approve.ts`, `deny.ts`, `rollback.ts`, `activation.ts` (enable + deregister); the lockfile check, the remote mirror, and the run-as `origin.ts` they share |
+| Deploy pipeline | `deploy/` | One use case per RPC: `register.ts`, `approve.ts`, `deny.ts`, `rollback.ts`, `activation.ts` (enable + deregister); `announce-outcome.ts`, which emits `skills/deploy/outcome` for every register caller; the lockfile check, the remote mirror, the deploy facts and the run-as `origin.ts` they share |
 | Invocation | `invoke/` | `invoke.ts` (pre-flight, then the recovery-point state machine: `start-run.ts`, `execute-run.ts`, `finish-run.ts`), `runtime.ts` (planning + dispatch to the isolate, pool or one-shot container), `warm-pool.ts` (lazy pool start + shutdown) |
-| Source cache + listing | `source-cache.ts`, `listing.ts` | Parsed manifests with compiled validators keyed by `(name, gitSha)`; `list` / `listAll` / `listToolDefs` |
-| Manifest + classifier | `manifest.ts`, `classifier.ts`, `ast-classifier.ts`, `ast-rules.ts` | `SKILL.md` frontmatter parsing + risk-tier assignment (tree-sitter static analysis) |
+| Source cache + listing | `source-cache.ts`, `listing.ts` | Parsed manifests with compiled validators keyed by `(name, gitSha)`; `listAll` (every skill with its pending deploy) / `listToolDefs` |
+| Manifest + classifier | `manifest.ts`, `classifier.ts`, `ast-classifier.ts`, `ast-rules.ts`, `risk-reasons.ts`, `capabilities.ts` | `SKILL.md` frontmatter parsing + risk-tier assignment (tree-sitter static analysis) with its reasons, against the deployment's enforcement flags |
 | Dependency stack | `deps.ts`, `deps-reaper*.ts`, `pyodide-compat.ts` | Lockfile compile + verify at register, venv populate + activate at invoke, unreachable-venv reaper, tier-1 Pyodide compat check |
 | Workers (tier 2) | `worker-sysbox/` | sysbox container host + in-container supervisor + warm pool |
 | Workers (tier 1) | `worker-wasm/` | Pyodide isolate host + Node Worker entry + WASM-import lint; the worker's Python in `py/` (the `ctx` SDK, the dependency installer), which the entry reads at load and the build copies beside `worker-entry.js` |
@@ -2374,7 +2375,7 @@ In code the transitions take values — `ExecutedOutcome` (`{ kind: "output", ou
 | Cron scheduler | `cron-ticker.ts`, `cron-fire-handler.ts` | Per-minute Inngest tick + per-skill cron invocation |
 | Git plumbing | `git-ops.ts`, `repo.ts` | Bare-repo bootstrap, remote configuration, plumbing wrappers |
 | Remote configuration | `configure-remote*.ts` | Skills-repo remote setup and its prompts, shared by the setup wizard and `cogmo migrate-skills-remote` |
-| Agent surface | `skills-tool.ts`, `skills-service.ts`, `skill-tool-builder.ts`, `skills-keyboard.ts` | Per-turn tool list registration, per-conversation service, Anthropic SDK descriptor build, Telegram approve/deny keyboard |
+| Agent surface | `skills-tool.ts`, `skills-service.ts`, `skill-tool-builder.ts`, `skills-keyboard.ts` | Per-turn tool list registration, per-conversation service, Anthropic SDK descriptor build, the Telegram approve/deny and disable keyboards (the message itself is the Telegram adapter's `skills-deploy-outcome-poster.ts`) |
 | Store | `store/` | DB schema + `SkillStore` interface (`skills`, `skill_deploys`, `skill_runs`, `skill_context_calls` tables) |
 | Drafts `[proposed]` | `draft/` | The draft lifecycle: one use case per transition, the draft functions, the spec card |
 | Review `[proposed]` | `review/` | `SkillReviewer`, its Claude Code and Codex backends, the checklist, the calibration job |

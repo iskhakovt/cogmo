@@ -589,6 +589,7 @@ export function mockTransport(overrides?: Partial<Transport>): Transport {
       denyDeploy: vi.fn().mockResolvedValue(ok({ pendingId: "p-1" })),
       list: vi.fn().mockResolvedValue(ok([])),
       disable: vi.fn().mockResolvedValue(ok({ name: "echo" })),
+      disableById: vi.fn().mockResolvedValue(ok({ name: "echo" })),
       enable: vi.fn().mockResolvedValue(ok({ name: "echo", alreadyEnabled: false })),
     },
     pipelines: {

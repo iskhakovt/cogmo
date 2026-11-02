@@ -5,6 +5,7 @@ import type { StreamEvent } from "../../../llm/types.js";
 import { describeError } from "../../../util/describe-error.js";
 import type { RenderedMessage } from "../../adapter-module.js";
 import type { StreamOpts } from "../../types.js";
+import { TELEGRAM_MAX_MESSAGE_LENGTH } from "./message-limit.js";
 import { renderTelegramHtml } from "./render.js";
 
 /**
@@ -35,8 +36,6 @@ import { renderTelegramHtml } from "./render.js";
  *  - `done` and `failed` are final and ignore every input.
  */
 
-/** Telegram's cap on one message's text. */
-const TELEGRAM_MAX_MESSAGE_LENGTH = 4096;
 /** Minimum time between two previews of the live message. */
 export const EDIT_INTERVAL_MS = 500;
 /** Longest single wait before a retry; a longer `retry_after` fails the handle at once. */

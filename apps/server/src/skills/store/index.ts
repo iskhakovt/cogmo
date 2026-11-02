@@ -1,4 +1,4 @@
-import { and, asc, eq, getTableColumns, isNotNull, lte, sql } from "drizzle-orm";
+import { and, asc, eq, getTableColumns, inArray, isNotNull, lte, sql } from "drizzle-orm";
 import { match } from "ts-pattern";
 import { single } from "../../db/helpers.js";
 import type { Transaction } from "../../db/index.js";
@@ -382,7 +382,8 @@ export interface SkillStore {
    * re-activation: a never-approved-then-denied first deploy leaves the
    * skills row at `disabled=true` with the rejected sha; `/enable foo`
    * without this check would smuggle code past the approval gate.
-   * Rolled-back skills still pass (the prior live row remains).
+   * A rollback target that once had a `live` row passes; one that never
+   * did is refused (design/skills.md → Deploy lifecycle, failure modes).
    */
   hasLiveDeployForSkill(
     tx: Transaction,
@@ -448,6 +449,8 @@ export interface SkillStore {
   getPendingDeploy(tx: Transaction, skillId: string): Promise<SkillDeployRow | undefined>;
   /** Returns the deploy row by id, or null. */
   getDeployById(tx: Transaction, id: string): Promise<SkillDeployRow | undefined>;
+  /** Every deploy awaiting approval, oldest first. Backs the listings' pending column. */
+  listPendingDeploys(tx: Transaction): Promise<readonly SkillDeployRow[]>;
 
   // --- skill_runs ---
   insertRun(tx: Transaction, params: InsertRunParams): Promise<SkillRunRow>;
@@ -579,6 +582,26 @@ export class DrizzleSkillStore implements SkillStore {
     return rows.length > 0;
   }
 
+  /**
+   * Whether the version `(skill_id, git_sha)` was ever current: a `live` row,
+   * or a `rolled_back` one (the owner put that code live). The `prior_git_sha`
+   * a register or rollback records is the current version only when it was.
+   */
+  async #versionWentLive(tx: Transaction, params: { skillId: string; gitSha: string }) {
+    const rows = await tx
+      .select({ id: skillDeploys.id })
+      .from(skillDeploys)
+      .where(
+        and(
+          eq(skillDeploys.skillId, params.skillId),
+          eq(skillDeploys.gitSha, params.gitSha),
+          inArray(skillDeploys.status, ["live", "rolled_back"]),
+        ),
+      )
+      .limit(1);
+    return rows.length > 0;
+  }
+
   async updateSkillSha(tx: Transaction, params: { id: string; gitSha: string }): Promise<void> {
     await tx.update(skills).set({ gitSha: params.gitSha }).where(eq(skills.id, params.id));
   }
@@ -686,7 +709,13 @@ export class DrizzleSkillStore implements SkillStore {
 
     const goesLive = params.riskTier !== "approve";
     const deployStatus: SkillDeployStatus = goesLive ? "live" : "pending_approval";
-    const priorGitSha = existing?.gitSha ?? null;
+    // The live version this deploy replaces. A skills row whose sha never
+    // went live (a denied or pending first deploy) is no prior version.
+    const priorGitSha =
+      existing &&
+      (await this.#versionWentLive(tx, { skillId: existing.id, gitSha: existing.gitSha }))
+        ? existing.gitSha
+        : null;
 
     // Ordering: DB writes FIRST, applyFilesystem LAST. If any DB write
     // fails, the tx rolls back before main moves; if applyFilesystem
@@ -949,7 +978,12 @@ export class DrizzleSkillStore implements SkillStore {
       .values({
         skillId: existing.id,
         gitSha: params.toGitSha,
-        priorGitSha: existing.gitSha,
+        priorGitSha: (await this.#versionWentLive(tx, {
+          skillId: existing.id,
+          gitSha: existing.gitSha,
+        }))
+          ? existing.gitSha
+          : null,
         riskTier: params.classifierLog.risk_tier,
         status: "rolled_back",
         classifierLog: params.classifierLog,
@@ -994,6 +1028,14 @@ export class DrizzleSkillStore implements SkillStore {
   async getDeployById(tx: Transaction, id: string): Promise<SkillDeployRow | undefined> {
     const rows = await tx.select().from(skillDeploys).where(eq(skillDeploys.id, id)).limit(1);
     return rows[0];
+  }
+
+  async listPendingDeploys(tx: Transaction): Promise<readonly SkillDeployRow[]> {
+    return tx
+      .select()
+      .from(skillDeploys)
+      .where(eq(skillDeploys.status, "pending_approval"))
+      .orderBy(asc(skillDeploys.createdAt), asc(skillDeploys.id));
   }
 
   // --- skill_runs ---

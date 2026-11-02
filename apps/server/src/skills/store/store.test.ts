@@ -73,6 +73,7 @@ afterAll(async () => {
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 const SHA_NEW = "fedcba9876543210fedcba9876543210fedcba98";
+const SHA_EDIT = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
 const SHA_THIRD = "1111111111111111111111111111111111111111";
 
 const INPUTS_SCHEMA: SkillInputs = {
@@ -89,6 +90,8 @@ const STUB_LOG: ClassifierLog = {
   declared_secrets: [],
   declared_dependencies: [],
   validation_errors: [],
+  reasons: [],
+  declared_network: null,
 };
 
 function makeSkillParams(overrides: Partial<InsertSkillParams> = {}): InsertSkillParams {
@@ -337,6 +340,37 @@ describe("DrizzleSkillStore", () => {
         resolvedAt,
       };
     }
+
+    it("listPendingDeploys returns every pending row oldest first, and drops a resolved one", async () => {
+      const first = await seedSkill({ name: "first" });
+      const second = await seedSkill({ name: "second" });
+      const firstPending = await tx((trx) =>
+        store.insertDeploy(trx, deployParams(first.id, "pending_approval", null)),
+      );
+      const secondPending = await tx((trx) =>
+        store.insertDeploy(trx, {
+          ...deployParams(second.id, "pending_approval", null),
+          gitSha: SHA_NEW,
+        }),
+      );
+      await tx((trx) => store.insertDeploy(trx, deployParams(first.id, "live", new Date())));
+
+      const pending = await tx((trx) => store.listPendingDeploys(trx));
+      expect(pending.map((d) => [d.id, d.skillId, d.gitSha])).toEqual([
+        [firstPending.id, first.id, SHA],
+        [secondPending.id, second.id, SHA_NEW],
+      ]);
+
+      await tx((trx) => store.denyPendingDeploy(trx, { pendingId: firstPending.id }));
+      const afterDeny = await tx((trx) => store.listPendingDeploys(trx));
+      expect(afterDeny.map((d) => d.id)).toEqual([secondPending.id]);
+    });
+
+    it("listPendingDeploys returns nothing when no deploy is pending", async () => {
+      const skill = await seedSkill();
+      await tx((trx) => store.insertDeploy(trx, deployParams(skill.id, "live", new Date())));
+      expect(await tx((trx) => store.listPendingDeploys(trx))).toEqual([]);
+    });
 
     it("the CHECK refuses a terminal row without resolved_at and a pending row with one", async () => {
       const skill = await seedSkill();
@@ -1384,6 +1418,50 @@ describe("DrizzleSkillStore", () => {
     async function reloadDeploy(id: string) {
       return expectDefined(await tx((trx) => store.getDeployById(trx, id)), "deploy");
     }
+
+    it("records the live version a deploy replaces, and none after a denied first deploy", async () => {
+      const denied = await register({ riskTier: "approve", classifierLog: APPROVE_LOG });
+      assertKind(denied, "pending_approval");
+      await tx((trx) => store.denyPendingDeploy(trx, { pendingId: denied.deploy.id }));
+
+      const first = await register({ branchTipSha: SHA_NEW });
+      assertKind(first, "live");
+      expect(first.deploy.priorGitSha).toBeNull();
+
+      const edit = await register({ branchTipSha: SHA_EDIT });
+      assertKind(edit, "live");
+      expect(edit.deploy.priorGitSha).toBe(SHA_NEW);
+    });
+
+    it("counts a rolled-back version as live when the next deploy names what it replaces", async () => {
+      await register();
+      const edit = await register({ branchTipSha: SHA_NEW });
+      assertKind(edit, "live");
+      const base = executeRegisterParams({});
+      const rolledBack = await tx((trx) =>
+        store.executeRollback(trx, {
+          name: base.name,
+          toGitSha: SHA_EDIT,
+          tier: base.tier,
+          riskTier: base.riskTier,
+          effects: base.effects,
+          schedule: base.schedule,
+          scheduleNextRunAt: base.scheduleNextRunAt,
+          lockfileHash: base.lockfileHash,
+          inputs: base.inputs,
+          outputs: base.outputs,
+          classifierLog: base.classifierLog,
+          runAs: base.runAs,
+          applyFilesystem: noFs,
+        }),
+      );
+      assertKind(rolledBack, "live");
+      expect(rolledBack.deploy.priorGitSha).toBe(SHA_NEW);
+
+      const next = await register({ branchTipSha: SHA });
+      assertKind(next, "live");
+      expect(next.deploy.priorGitSha).toBe(SHA_EDIT);
+    });
 
     it("deny resolves a pending deploy and leaves the skills row alone", async () => {
       const { pendingId, skill } = await pendingUpgrade();

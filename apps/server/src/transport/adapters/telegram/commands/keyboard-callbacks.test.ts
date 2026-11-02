@@ -5,7 +5,7 @@ import { transportWith } from "../../../../test/telegram/command-fixtures.js";
 import {
   handlePipelineGateCallback,
   handlePlanCallback,
-  handleSkillsApprovalCallback,
+  handleSkillsDeployCallback,
 } from "./keyboard-callbacks.js";
 
 describe("handlePlanCallback", () => {
@@ -117,7 +117,7 @@ describe("handlePlanCallback", () => {
   });
 });
 
-describe("handleSkillsApprovalCallback", () => {
+describe("handleSkillsDeployCallback", () => {
   const pendingId = "019d0000-0000-7000-8000-000000000099";
 
   it("Approve dispatches to skills.approveDeploy and reports the live skill name + sha", async () => {
@@ -131,7 +131,7 @@ describe("handleSkillsApprovalCallback", () => {
       },
     });
 
-    const outcome = await handleSkillsApprovalCallback(
+    const outcome = await handleSkillsDeployCallback(
       transport,
       { pendingId, action: "approve" },
       "user-tg-1",
@@ -154,7 +154,7 @@ describe("handleSkillsApprovalCallback", () => {
       },
     });
 
-    const outcome = await handleSkillsApprovalCallback(
+    const outcome = await handleSkillsDeployCallback(
       transport,
       { pendingId, action: "deny" },
       "user-tg-1",
@@ -163,8 +163,9 @@ describe("handleSkillsApprovalCallback", () => {
 
     expect(deny).toHaveBeenCalledWith(pendingId, "user-tg-1");
     expect(outcome.editText).toMatch(/denied/);
-    expect(outcome.editText).toMatch(/no main advance/);
+    expect(outcome.editText).toMatch(/main did not move/);
     expect(outcome.toast).toBe("Denied");
+    expect(outcome.clearKeyboard).toBe(true);
   });
 
   it("identity_rejected from Transport surfaces an unauthorized message", async () => {
@@ -176,15 +177,36 @@ describe("handleSkillsApprovalCallback", () => {
       },
     });
 
-    const outcome = await handleSkillsApprovalCallback(
+    const outcome = await handleSkillsDeployCallback(
       transport,
       { pendingId, action: "approve" },
       "wrong-user",
       "chat-1",
     );
+    expect(outcome.clearKeyboard).toBe(false);
 
     expect(outcome.editText).toMatch(/not authorized/);
     expect(outcome.toast).toMatch(/not authorized/);
+  });
+
+  it("an unwired skills runtime keeps the keyboard: the row is untouched", async () => {
+    const approve = vi.fn().mockResolvedValue(err({ code: "skills_disabled" as const }));
+    const transport = transportWith({
+      skills: {
+        approveDeploy: approve,
+        denyDeploy: vi.fn(),
+      },
+    });
+
+    const outcome = await handleSkillsDeployCallback(
+      transport,
+      { pendingId, action: "approve" },
+      "user-tg-1",
+      "chat-1",
+    );
+
+    expect(outcome.clearKeyboard).toBe(false);
+    expect(outcome.editText).toMatch(/unavailable/);
   });
 
   it("double-tap on already-resolved deploy gets skill_deploy_not_pending", async () => {
@@ -202,12 +224,13 @@ describe("handleSkillsApprovalCallback", () => {
       },
     });
 
-    const outcome = await handleSkillsApprovalCallback(
+    const outcome = await handleSkillsDeployCallback(
       transport,
       { pendingId, action: "approve" },
       "user-tg-1",
       "chat-1",
     );
+    expect(outcome.clearKeyboard).toBe(true);
 
     expect(outcome.editText).toMatch(/can't be acted on/);
     expect(outcome.editText).toMatch(/denied/);
@@ -228,7 +251,7 @@ describe("handleSkillsApprovalCallback", () => {
       },
     });
 
-    const outcome = await handleSkillsApprovalCallback(
+    const outcome = await handleSkillsDeployCallback(
       transport,
       { pendingId, action: "approve" },
       "user-tg-1",
@@ -236,6 +259,46 @@ describe("handleSkillsApprovalCallback", () => {
     );
 
     expect(outcome.editText).toMatch(/non_fast_forward_at_approve_time/);
+    // The deploy stays pending, so Deny and a later Approve still apply.
+    expect(outcome.clearKeyboard).toBe(false);
+  });
+  it("Disable dispatches to skills.disableById with the skill id and names the re-enable command", async () => {
+    const skillId = "019d0000-0000-7000-8000-0000000000ab";
+    const disableById = vi.fn().mockResolvedValue(ok({ name: "echo" }));
+    const transport = transportWith({ skills: { disableById } });
+
+    const outcome = await handleSkillsDeployCallback(
+      transport,
+      { skillId, action: "disable" },
+      "user-tg-1",
+      "chat-1",
+    );
+
+    expect(disableById).toHaveBeenCalledWith(skillId, "user-tg-1");
+    expect(outcome).toEqual({
+      editText: "🚫 Skill echo disabled. /enable echo re-enables it.",
+      toast: "Disabled",
+      clearKeyboard: true,
+    });
+  });
+
+  it("Disable of a skill that is gone surfaces skill_not_found", async () => {
+    const skillId = "019d0000-0000-7000-8000-0000000000ab";
+    const disableById = vi
+      .fn()
+      .mockResolvedValue(err({ code: "skill_not_found" as const, name: skillId }));
+    const transport = transportWith({ skills: { disableById } });
+
+    const outcome = await handleSkillsDeployCallback(
+      transport,
+      { skillId, action: "disable" },
+      "user-tg-1",
+      "chat-1",
+    );
+    expect(outcome.clearKeyboard).toBe(true);
+
+    expect(outcome.editText).toMatch(/No skill named/);
+    expect(outcome.toast).toBe(outcome.editText);
   });
 });
 
