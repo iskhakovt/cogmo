@@ -5,7 +5,12 @@ import type { SkillsCapabilities } from "../capabilities.js";
 import type { LockfileCompiler, LockfileSnapshot } from "../deps.js";
 import type { SkillSourceCache } from "../source-cache.js";
 import type { SkillRunIdentity, SkillStore } from "../store/index.js";
-import type { Tier1Packages, Tier1PackagesError, Tier1Prefetcher } from "../worker-wasm/tier1.js";
+import type {
+  FillBuiltins,
+  Tier1Packages,
+  Tier1PackagesError,
+  Tier1Probe,
+} from "../worker-wasm/tier1.js";
 
 /** What the deploy use cases (register, approve, rollback, enable) share. */
 export interface DeployDeps {
@@ -29,11 +34,13 @@ export interface DeployDeps {
   capabilities: SkillsCapabilities;
   /**
    * Tier 1's host side at register: the probe that load-tests native
-   * built-ins under the boundary's flags, and the resolver that fetches and
-   * publishes a lockfile's packages so the first run pays no download.
+   * built-ins under the boundary's flags, the fill of the cache it loads
+   * from, and the resolver that fetches and publishes a lockfile's packages
+   * so the first run pays no download.
    */
   tier1: {
-    prefetcher: Tier1Prefetcher;
+    probe: Tier1Probe;
+    fillBuiltins: FillBuiltins;
     packageCacheDir: string;
     resolvePackages(
       lockfile: LockfileSnapshot,

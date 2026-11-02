@@ -69,8 +69,8 @@ export async function bootstrapSkillRunner(
     userTimezone: env.USER_TIMEZONE,
     defaultRunAs: { userId: core.user.id, profileId: core.profile.id },
     skillsRepoPath: env.COGMO_SKILLS_PATH,
-    // Pyodide's built-ins, which the host prefetches and tier-1 children load
-    // read-only; the stdlib ships inside the distribution.
+    // Pyodide's built-ins, which the host downloads and verifies and tier-1
+    // children load read-only; the stdlib ships inside the distribution.
     pyodidePackageCacheDir: `${env.COGMO_SKILLS_PATH}/.pyodide-cache`,
     tier1: {
       wheelsRoot: tier1WheelsRoot(),

@@ -1,11 +1,16 @@
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
 import { err, ok, type Result } from "neverthrow";
 import { match } from "ts-pattern";
 import { z } from "zod";
 import { logger } from "../logger.js";
 import { describeError } from "../util/describe-error.js";
-import type { Tier1Prefetcher } from "./worker-wasm/tier1.js";
+import {
+  describeTier1PackagesError,
+  type FillBuiltins,
+  type Tier1Probe,
+} from "./worker-wasm/tier1.js";
 
 const log = logger.child({ component: "skills.pyodide-compat" });
 
@@ -20,6 +25,18 @@ const PyodideLockfileSchema = z.object({
       depends: z.array(z.string()),
     }),
   ),
+});
+
+/**
+ * A Pyodide release: what names its CDN directory and keys the tier-1 wheel
+ * directories. Digits and dots, with a pre-release or dev suffix, so it is a
+ * plain URL and path segment.
+ */
+export const PYODIDE_VERSION_PATTERN = String.raw`[0-9]+(?:\.[0-9]+)*(?:(?:a|b|rc|\.dev)[0-9]+)?`;
+
+/** The `version` of the `package.json` beside `pyodide-lock.json`: the distribution's release. */
+const PyodidePackageJsonSchema = z.object({
+  version: z.string().regex(new RegExp(`^${PYODIDE_VERSION_PATTERN}$`), "not a Pyodide release"),
 });
 
 /** A package Pyodide's distribution ships, keyed by its PEP 503 normalised name. */
@@ -39,14 +56,22 @@ export interface BundledPackage {
   depends: readonly string[];
 }
 
-/** Pyodide's `pyodide-lock.json` could not be read or parsed. */
+/** The installed Pyodide distribution: its release and the packages its lockfile pins. */
+export interface BundledDistribution {
+  /** The release, as Pyodide's own loader names its CDN directory (`v<version>/full/`). */
+  version: string;
+  /** Bundled packages by normalised name. */
+  packages: ReadonlyMap<string, BundledPackage>;
+}
+
+/** Pyodide's `pyodide-lock.json`, or the `package.json` beside it, could not be read or parsed. */
 export interface BundledPackagesUnreadable {
   kind: "bundled_unreadable";
   message: string;
 }
 
-/** Bundled-package map, lazily loaded from pyodide's installed lockfile. */
-let cachedBundled: ReadonlyMap<string, BundledPackage> | null = null;
+/** The installed distribution, lazily loaded from pyodide's lockfile and package.json. */
+let cachedBundled: BundledDistribution | null = null;
 
 /**
  * PyPI-pure-wheel cache keyed by `name==version`. Stores only `true`
@@ -61,35 +86,46 @@ let cachedBundled: ReadonlyMap<string, BundledPackage> | null = null;
 const pypiPureWheelCache = new Map<string, true>();
 
 /**
- * The packages the installed Pyodide distribution bundles, read from its
- * `pyodide-lock.json` (or `lockfilePathOverride`) and cached for the process
- * when read from the installed distribution. Errs when the file is missing or
- * malformed; callers decide whether that blocks them.
+ * The installed Pyodide distribution: the packages its `pyodide-lock.json`
+ * (or `lockfilePathOverride`) bundles, and its release from the
+ * `package.json` beside that file, which is the version Pyodide's loader
+ * builds its CDN URL from (the lockfile carries none). Cached for the process
+ * when read from the installed distribution. Errs when either file is missing
+ * or malformed; callers decide whether that blocks them.
  */
 export async function loadBundledPackages(
   lockfilePathOverride?: string,
-): Promise<Result<ReadonlyMap<string, BundledPackage>, BundledPackagesUnreadable>> {
+): Promise<Result<BundledDistribution, BundledPackagesUnreadable>> {
   if (cachedBundled && !lockfilePathOverride) return ok(cachedBundled);
   let lockPath: string | undefined;
-  let raw: unknown;
+  let rawLock: unknown;
+  let rawPackageJson: unknown;
   try {
     lockPath =
       lockfilePathOverride ?? createRequire(import.meta.url).resolve("pyodide/pyodide-lock.json");
-    raw = JSON.parse(await readFile(lockPath, "utf-8"));
+    rawLock = JSON.parse(await readFile(lockPath, "utf-8"));
+    rawPackageJson = JSON.parse(await readFile(join(dirname(lockPath), "package.json"), "utf-8"));
   } catch (e) {
     return err({
       kind: "bundled_unreadable",
       message: `${lockPath ?? "pyodide/pyodide-lock.json"}: ${describeError(e)}`,
     });
   }
-  const parsed = PyodideLockfileSchema.safeParse(raw);
+  const parsed = PyodideLockfileSchema.safeParse(rawLock);
   if (!parsed.success) {
     return err({
       kind: "bundled_unreadable",
       message: `${lockPath}: not a Pyodide lockfile: ${parsed.error.message}`,
     });
   }
-  const map: ReadonlyMap<string, BundledPackage> = new Map(
+  const release = PyodidePackageJsonSchema.safeParse(rawPackageJson);
+  if (!release.success) {
+    return err({
+      kind: "bundled_unreadable",
+      message: `${join(dirname(lockPath), "package.json")}: no Pyodide release: ${release.error.message}`,
+    });
+  }
+  const packages: ReadonlyMap<string, BundledPackage> = new Map(
     Object.values(parsed.data.packages).map((pkg) => [
       normalizePackageName(pkg.name),
       {
@@ -101,8 +137,9 @@ export async function loadBundledPackages(
       },
     ]),
   );
-  if (!lockfilePathOverride) cachedBundled = map;
-  return ok(map);
+  const distribution: BundledDistribution = { version: release.data.version, packages };
+  if (!lockfilePathOverride) cachedBundled = distribution;
+  return ok(distribution);
 }
 
 /** PEP 503 normalisation — `Foo_Bar.Baz` and `foo-bar-baz` are the same project. */
@@ -202,7 +239,9 @@ export type PyodideCompatIssue =
  * the boundary refuses.
  */
 export interface PyodideBoundaryProbe {
-  prefetcher: Tier1Prefetcher;
+  /** Fills and verifies the package cache the probe loads from. */
+  fillBuiltins: FillBuiltins;
+  probe: Tier1Probe;
   packageCacheDir: string;
   signal?: AbortSignal;
 }
@@ -226,13 +265,13 @@ export interface CheckPyodideCompatOptions {
  * Pyodide-incompatible deps should declare `tier: container` instead.
  *
  * With `opts.probe`, the bundled native packages among the specs are then
- * fetched into the package cache and load-tested under the tier-1 boundary;
- * each one that fails to load is a `native_package_rejected_by_boundary`
- * issue.
+ * fetched into the package cache, checked against Pyodide's pinned sha256s,
+ * and load-tested under the tier-1 boundary; each one that fails to load is a
+ * `native_package_rejected_by_boundary` issue.
  *
- * PyPI failures, an unreadable `pyodide-lock.json` and a prefetch that cannot
- * fill the cache fail open with a warn log: a transient outage shouldn't
- * block register, and the first invocation surfaces the same case.
+ * PyPI failures, an unreadable `pyodide-lock.json` and a cache that cannot be
+ * filled fail open with a warn log: a transient outage shouldn't block
+ * register, and the first invocation surfaces the same case.
  */
 export async function checkPyodideCompat(
   declaredSpecs: ReadonlyArray<string>,
@@ -252,7 +291,7 @@ export async function checkPyodideCompat(
     );
     return ok();
   }
-  const bundled = loaded.value;
+  const bundled = loaded.value.packages;
   const parsedSpecs = declaredSpecs.flatMap((spec) => {
     const m = /^([a-z0-9][a-z0-9._-]*?)==(.+)$/i.exec(spec);
     return m?.[1] && m[2] ? [{ spec, name: m[1], version: m[2] }] : [];
@@ -298,15 +337,15 @@ async function probeNativeBundled(
     packageCacheDir: probe.packageCacheDir,
     ...(probe.signal && { signal: probe.signal }),
   };
-  const prefetched = await probe.prefetcher.prefetchBuiltins(names, cacheOpts);
-  if (prefetched.isErr()) {
+  const filled = await probe.fillBuiltins(names, cacheOpts);
+  if (filled.isErr()) {
     log.warn(
-      { names, reason: prefetched.error },
-      "pyodide-compat: package cache prefetch failed; allowing register without the boundary probe",
+      { names, reason: describeTier1PackagesError(filled.error) },
+      "pyodide-compat: package cache fill failed; allowing register without the boundary probe",
     );
     return [];
   }
-  const probed = await probe.prefetcher.probeBuiltins(names, cacheOpts);
+  const probed = await probe.probe.probeBuiltins(names, cacheOpts);
   if (probed.isOk()) return [];
   return (
     match(probed.error)

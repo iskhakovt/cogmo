@@ -140,7 +140,7 @@ describe("buildSkillToolSpec", () => {
         name: "echo",
         error: {
           kind: "prefetch_failed",
-          message: "staging the prefetch in /var/lib/cogmo/pyodide-cache.tmp.1234: EACCES",
+          message: "staging the download in /var/lib/cogmo/pyodide-cache.tmp.1234: EACCES",
         },
       }),
     );

@@ -18,8 +18,9 @@ import { afterAll, assert, beforeAll, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { expectDefined } from "../../test/assertions.js";
 import type { CtxHandler } from "../dispatcher.js";
+import { loadBundledPackages } from "../pyodide-compat.js";
 import {
-  createTier1Prefetcher,
+  createTier1Probe,
   forkRunChild,
   pyodideDistDir,
   type RunOnWorkerParams,
@@ -27,6 +28,7 @@ import {
   runOnWorker,
 } from "./host.js";
 import { type ChildGroupRecord, ChildGroupRecordSchema } from "./process-groups.js";
+import { fillBuiltinCache } from "./wheel-cache.js";
 
 /**
  * `runOnWorker` end to end: real tier-1 children under the boundary's flags,
@@ -43,16 +45,20 @@ let serverUrl: string;
 /** typing-extensions 4.14.0, older than the 4.15.0 pydantic's bundle carries. */
 let typingExtensionsWheel: { fileName: string; bytes: Uint8Array };
 
-const prefetcher = createTier1Prefetcher({
+const probe = createTier1Probe({
   pyodideDistDir: pyodideDistDir(),
-  childrenDir: join(tmpdir(), "cogmo-tier1-children-prefetch"),
+  childrenDir: join(tmpdir(), "cogmo-tier1-children-probe"),
 });
 
 beforeAll(async () => {
   cacheDir = await mkdtemp(join(tmpdir(), "cogmo-tier1-cache-"));
   childrenDir = await mkdtemp(join(tmpdir(), "cogmo-tier1-children-"));
-  const filled = await prefetcher.prefetchBuiltins(["pydantic"], { packageCacheDir: cacheDir });
-  assert(filled.isOk(), filled.isErr() ? filled.error : "");
+  const bundled = (await loadBundledPackages())._unsafeUnwrap();
+  const filled = await fillBuiltinCache(
+    { fetchImpl: fetch, bundled },
+    { names: ["pydantic"], packageCacheDir: cacheDir },
+  );
+  assert(filled.isOk(), filled.isErr() ? JSON.stringify(filled.error) : "");
   typingExtensionsWheel = await downloadWheel("typing-extensions", "4.14.0");
   server = createServer((_req, res) => res.end("reached"));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -874,33 +880,19 @@ async def run(inputs, ctx):
   });
 });
 
-describe("createTier1Prefetcher", () => {
+describe("createTier1Probe", () => {
   it("probes built-ins that load under the boundary's flags", async () => {
-    const probed = await prefetcher.probeBuiltins(["pydantic"], { packageCacheDir: cacheDir });
+    const probed = await probe.probeBuiltins(["pydantic"], { packageCacheDir: cacheDir });
     expect(probed.isOk()).toBe(true);
   });
 
   it("reports each built-in that fails to load", async () => {
-    const probed = await prefetcher.probeBuiltins(["pydantic", "numpy", "not-a-package"], {
+    const probed = await probe.probeBuiltins(["pydantic", "numpy", "not-a-package"], {
       packageCacheDir: cacheDir,
     });
     assert(probed.isErr());
     assert(probed.error.kind === "rejected");
     expect(probed.error.failures.map((f) => f.name)).toEqual(["numpy", "not-a-package"]);
-  });
-
-  it("fails a prefetch that outlives its signal", async () => {
-    const empty = await mkdtemp(join(tmpdir(), "cogmo-tier1-cache-"));
-    try {
-      const filled = await prefetcher.prefetchBuiltins(["pydantic"], {
-        packageCacheDir: empty,
-        signal: AbortSignal.timeout(50),
-      });
-      assert(filled.isErr());
-      expect(filled.error).toMatch(/aborted|timed out/);
-    } finally {
-      await rm(empty, { recursive: true, force: true });
-    }
   });
 });
 

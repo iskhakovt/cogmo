@@ -9,13 +9,20 @@ import { chmod, mkdir, mkdtemp, readdir, rm, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { InngestTestEngine } from "@inngest/test";
-import { describe, expect, it } from "vitest";
+import { err } from "neverthrow";
+import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Transactor } from "../db/index.js";
 import { inngest } from "../inngest/client.js";
 import type { SandboxCapabilities, SandboxClient } from "../sandbox/index.js";
 import { createSkillDepsReaper } from "./deps-reaper-function.js";
+import { loadBundledPackages } from "./pyodide-compat.js";
 import type { SkillStore } from "./store/index.js";
+
+vi.mock("./pyodide-compat.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./pyodide-compat.js")>();
+  return { ...actual, loadBundledPackages: vi.fn(actual.loadBundledPackages) };
+});
 
 const SCHEDULED_EVENT = {
   name: "inngest/function.invoked",
@@ -124,19 +131,21 @@ describe("createSkillDepsReaper", () => {
     expect(sandbox.create).not.toHaveBeenCalled();
   });
 
-  it("reaps the tier-1 wheel directories with the reachable set when wheelsRoot is set", async () => {
+  it("reaps the tier-1 wheel directories with the reachable set under the installed Pyodide release", async () => {
     const wheelsRoot = await mkdtemp(join(tmpdir(), "deps-reaper-wheels-"));
+    const { version } = (await loadBundledPackages())._unsafeUnwrap();
+    const reachable = `${"a".repeat(64)}-pyodide${version}`;
     try {
-      const reachable = "a".repeat(64);
-      const unreachable = "b".repeat(64);
+      const unreachable = `${"b".repeat(64)}-pyodide${version}`;
+      const previousRelease = `${"a".repeat(64)}-pyodide0.0.1`;
       const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
-      for (const hash of [reachable, unreachable]) {
-        await mkdir(join(wheelsRoot, hash));
-        await chmod(join(wheelsRoot, hash), 0o555);
-        await utimes(join(wheelsRoot, hash), eightDaysAgo, eightDaysAgo);
+      for (const name of [reachable, unreachable, previousRelease]) {
+        await mkdir(join(wheelsRoot, name));
+        await chmod(join(wheelsRoot, name), 0o555);
+        await utimes(join(wheelsRoot, name), eightDaysAgo, eightDaysAgo);
       }
       const store = mock<SkillStore>();
-      store.listReachableLockfileHashes.mockResolvedValue(new Set([reachable]));
+      store.listReachableLockfileHashes.mockResolvedValue(new Set(["a".repeat(64)]));
       const fn = createSkillDepsReaper(
         {
           runInTx,
@@ -156,11 +165,50 @@ describe("createSkillDepsReaper", () => {
 
       expect(result).toEqual({
         venvs: { skipped: true },
-        tier1Wheels: { reapedHashes: [unreachable] },
+        tier1Wheels: { reapedDirs: expect.arrayContaining([unreachable, previousRelease]) },
       });
       expect(await readdir(wheelsRoot)).toEqual([reachable]);
     } finally {
-      await chmod(join(wheelsRoot, "a".repeat(64)), 0o755).catch(() => {});
+      await chmod(join(wheelsRoot, reachable), 0o755).catch(() => {});
+      await rm(wheelsRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("skips the tier-1 wheel reap, removing nothing, when Pyodide's lockfile cannot be read", async () => {
+    const wheelsRoot = await mkdtemp(join(tmpdir(), "deps-reaper-wheels-"));
+    const unreachable = `${"b".repeat(64)}-pyodide314.0.7`;
+    try {
+      const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
+      await mkdir(join(wheelsRoot, unreachable));
+      await utimes(join(wheelsRoot, unreachable), eightDaysAgo, eightDaysAgo);
+      vi.mocked(loadBundledPackages).mockResolvedValueOnce(
+        err({ kind: "bundled_unreadable", message: "pyodide-lock.json: ENOENT" }),
+      );
+      const store = mock<SkillStore>();
+      store.listReachableLockfileHashes.mockResolvedValue(new Set());
+      const fn = createSkillDepsReaper(
+        {
+          runInTx,
+          store,
+          sandbox: undefined,
+          image: "cogmo-skills:test",
+          depsCacheVolumeName: undefined,
+          wheelsRoot,
+        },
+        inngest,
+      );
+
+      const { result } = await new InngestTestEngine({
+        function: fn,
+        events: [SCHEDULED_EVENT],
+      }).execute();
+
+      expect(result).toEqual({
+        venvs: { skipped: true },
+        tier1Wheels: { reapedDirs: [], error: "bundled_unreadable" },
+      });
+      expect(await readdir(wheelsRoot)).toEqual([unreachable]);
+    } finally {
       await rm(wheelsRoot, { recursive: true, force: true });
     }
   });

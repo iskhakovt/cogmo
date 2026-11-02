@@ -19,6 +19,7 @@ import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import { makePopulatedBareRepo } from "../test/skills-bare-repo.js";
 import { offlineTier1 } from "../test/skills-fixtures.js";
 import { channels, userIdentities } from "../transport/store/schema.js";
+import { loadBundledPackages } from "./pyodide-compat.js";
 import { bootstrapSkillsRepo } from "./repo.js";
 import type { SkillRunAs, SkillRunServices } from "./run-as.js";
 import { type SkillActor, type SkillDeployOrigin, SkillRunnerImpl } from "./runner.js";
@@ -679,18 +680,25 @@ outputs:
         return result;
       }
 
-      it("prefetches for the boundary probe into a staging directory beside the cache", async () => {
+      it("fills the boundary probe's cache from Pyodide's CDN on the host, and goes live without the probe when that fails", async () => {
         const { tier1, pyodidePackageCacheDir } = offlineTier1(repo.bare);
         const runner = await makeRunner({ pyodidePackageCacheDir, tier1 });
         // Bundled by Pyodide at this version and native: the probe load-tests it.
         await pushBundledDeps("skill/echo-native", "pydantic-core==2.41.5");
-        await runner.register({ branch: "skill/echo-native", origin: OWNER });
-        const prefetcher = expectDefined(tier1.prefetcher, "prefetcher");
-        expect(prefetcher.prefetchBuiltins).toHaveBeenCalledWith(["pydantic-core"], {
-          packageCacheDir: expect.stringMatching(
-            `^${pyodidePackageCacheDir.replaceAll(".", "\\.")}\\.tmp\\.`,
-          ),
-        });
+        const result = await runner.register({ branch: "skill/echo-native", origin: OWNER });
+        assertStatus(result, "live");
+        const fetchImpl = expectDefined(tier1.fetchImpl, "fetchImpl");
+        const bundled = (await loadBundledPackages())._unsafeUnwrap();
+        const coreFile = expectDefined(
+          bundled.packages.get("pydantic-core"),
+          "pydantic-core",
+        ).fileName;
+        expect(fetchImpl).toHaveBeenCalledWith(
+          `https://cdn.jsdelivr.net/pyodide/v${bundled.version}/full/${coreFile}`,
+          expect.anything(),
+        );
+        // The offline fetch fails the fill, which fails open before any probe child.
+        expect(expectDefined(tier1.probe, "probe").probeBuiltins).not.toHaveBeenCalled();
       });
 
       it("rejects as tier1_dependency_unavailable when a wheel fails its pinned hash", async () => {
@@ -721,7 +729,8 @@ outputs:
         const result = await registerResolvingTo({
           kind: "builtin_integrity",
           fileName: "httpx-0.28.1-py3-none-any.whl",
-          message: "the prefetched file hashes to sha256:aa",
+          message:
+            "the download from https://cdn.jsdelivr.net/pyodide/v314.0.7/full/httpx-0.28.1-py3-none-any.whl hashes to sha256:aa",
         });
         assertStatus(result, "live");
       });

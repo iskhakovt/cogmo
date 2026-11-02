@@ -10,7 +10,7 @@ import type { CtxHandler } from "../dispatcher.js";
 import type { HostMessage } from "../protocol.js";
 import { buildTier1Child } from "./child-bundle.js";
 import {
-  createTier1Prefetcher,
+  createTier1Probe,
   forkRunChild,
   type RunOnWorkerParams,
   type RunOnWorkerResult,
@@ -320,26 +320,17 @@ describe("the child bundle built from source", () => {
     });
   });
 
-  it("fails the prefetch and the probe as values when the build fails", async () => {
-    vi.mocked(buildTier1Child)
-      .mockRejectedValueOnce(new Error("esbuild unavailable"))
-      .mockRejectedValueOnce(new Error("esbuild unavailable"));
+  it("fails the probe as a value when the build fails", async () => {
+    vi.mocked(buildTier1Child).mockRejectedValueOnce(new Error("esbuild unavailable"));
     const cacheDir = await mkdtemp(join(tmpdir(), "cogmo-host-child-cache-"));
     try {
-      const prefetcher = createTier1Prefetcher({
+      const probe = createTier1Probe({
         pyodideDistDir: "/nonexistent/dist",
         childrenDir: "/nonexistent/children",
       });
 
       expect(
-        (
-          await prefetcher.prefetchBuiltins(["micropip"], { packageCacheDir: cacheDir })
-        )._unsafeUnwrapErr(),
-      ).toBe("cannot build the tier-1 child: esbuild unavailable");
-      expect(
-        (
-          await prefetcher.probeBuiltins(["micropip"], { packageCacheDir: cacheDir })
-        )._unsafeUnwrapErr(),
+        (await probe.probeBuiltins(["micropip"], { packageCacheDir: cacheDir }))._unsafeUnwrapErr(),
       ).toEqual({
         kind: "unavailable",
         message: "cannot build the tier-1 child: esbuild unavailable",
@@ -349,8 +340,10 @@ describe("the child bundle built from source", () => {
     }
   });
 
-  it("fails the fork as a value when another user's directory holds the bundle's name", async () => {
-    // A build whose digest names a directory already present and open to others.
+  it("fails the fork as a value when a directory open to others holds the bundle's name", async () => {
+    // A build whose digest names a directory already present and open to
+    // others. The suite has no second user, so the planted directory is this
+    // uid's; `child-bundle.test.ts` covers another owner.
     const content = `// ${randomUUID()}`;
     vi.mocked(buildTier1Child).mockImplementationOnce(async ({ outDir }) => {
       await writeFile(join(outDir, "tier1-child.mjs"), content);

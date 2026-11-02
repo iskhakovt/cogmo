@@ -1,7 +1,7 @@
 import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { assertOwnPrivateDir } from "./child-bundle.js";
 
 describe("assertOwnPrivateDir", () => {
@@ -28,6 +28,23 @@ describe("assertOwnPrivateDir", () => {
       `refusing the tier-1 child bundle at ${dir}: ${dir} has mode 777, not 700`,
     );
   });
+
+  it.skipIf(process.getuid === undefined)(
+    "refuses a private directory another uid owns",
+    async () => {
+      const dir = await mkdtemp(join(root, "bundle-"));
+      const ownUid = process.getuid?.() ?? 0;
+      // The suite has no second user: this process claims another uid instead.
+      const getuid = vi.spyOn(process, "getuid").mockReturnValue(ownUid + 1);
+      try {
+        await expect(assertOwnPrivateDir(dir)).rejects.toThrow(
+          `refusing the tier-1 child bundle at ${dir}: ${dir} is owned by uid ${ownUid}, not this process's`,
+        );
+      } finally {
+        getuid.mockRestore();
+      }
+    },
+  );
 
   it("refuses a link to a private directory", async () => {
     const target = await mkdtemp(join(root, "bundle-"));

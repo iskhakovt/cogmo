@@ -3,6 +3,7 @@ import type { Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
 import type { SandboxClient } from "../sandbox/index.js";
 import { DEPS_REAP_GRACE_DAYS, type ReapSkillVenvsError, reapSkillVenvs } from "./deps-reaper.js";
+import { loadBundledPackages } from "./pyodide-compat.js";
 import type { SkillStore } from "./store/index.js";
 import { reapTier1WheelDirs } from "./worker-wasm/wheel-cache.js";
 
@@ -39,7 +40,8 @@ export interface SkillDepsReaperDeps {
 /**
  * Daily Inngest scheduled function that sweeps unreachable
  * `/skill-venvs/<hash>/` directories, and the host's tier-1 wheel
- * directories when `wheelsRoot` is set. Unreachable = no `skills` row
+ * directories when `wheelsRoot` is set (a reachable hash's directory for a
+ * Pyodide release other than the installed one is unreachable). Unreachable = no `skills` row
  * (enabled or disabled) carries that `lockfile_hash`. A 7-day grace
  * window protects the rollback-then-roll-forward case where a hash
  * temporarily leaves the reachable set; if the rollback sticks past
@@ -104,10 +106,23 @@ export function createSkillDepsReaper(deps: SkillDepsReaperDeps, inngest: Innges
           ? ({ skipped: true } as const)
           : await step.run(
               "reap-tier1-wheels",
-              async (): Promise<{ reapedHashes: string[]; error?: "reap_failed" }> => {
+              async (): Promise<{
+                reapedDirs: string[];
+                error?: "reap_failed" | "bundled_unreadable";
+              }> => {
+                // The installed release decides which directories a child installs from.
+                const bundled = await loadBundledPackages();
+                if (bundled.isErr()) {
+                  log.warn(
+                    { err: bundled.error.message },
+                    "skill-venvs-reaper: Pyodide's lockfile unreadable; skipping the tier-1 wheel reap",
+                  );
+                  return { reapedDirs: [], error: bundled.error.kind };
+                }
                 const r = await reapTier1WheelDirs({
                   wheelsRoot,
                   reachableHashes: new Set(reachable),
+                  pyodideVersion: bundled.value.version,
                   graceDays: DEPS_REAP_GRACE_DAYS,
                 });
                 if (r.isErr()) {
@@ -115,9 +130,9 @@ export function createSkillDepsReaper(deps: SkillDepsReaperDeps, inngest: Innges
                     { err: r.error.message },
                     "skill-venvs-reaper: tier-1 wheel reap failed",
                   );
-                  return { reapedHashes: [], error: r.error.kind };
+                  return { reapedDirs: [], error: r.error.kind };
                 }
-                return { reapedHashes: [...r.value.reapedHashes] };
+                return { reapedDirs: [...r.value.reapedDirs] };
               },
             );
 

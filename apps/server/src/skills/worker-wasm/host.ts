@@ -16,10 +16,10 @@ import { type CtxHandler, Dispatcher } from "../dispatcher.js";
 import type { TaskOutcome, TaskResult } from "../protocol.js";
 import { DEFAULT_WALL_CLOCK_S, timeoutSignal } from "../wall-clock.js";
 import type { StartFailure, WorkerFrame } from "../worker-state.js";
-import { type ChildInit, PrefetchReplySchema, ProbeReplySchema } from "./child-protocol.js";
+import { type ChildInit, ProbeReplySchema } from "./child-protocol.js";
 import { INTERRUPT_MESSAGE } from "./interrupt-message.js";
 import { killChildGroup, recordChildGroup, removeChildGroupRecord } from "./process-groups.js";
-import type { Tier1Packages, Tier1Prefetcher, Tier1ProbeError } from "./tier1.js";
+import type { Tier1Packages, Tier1Probe, Tier1ProbeError } from "./tier1.js";
 import { createIpcTransport, type IpcChannel } from "./transport.js";
 
 /**
@@ -44,9 +44,6 @@ const TERMINATE_GRACE_MS = 1000;
 
 /** Child start + Pyodide boot (~1 s) + built-ins and wheels from local files. */
 const DEFAULT_READY_TIMEOUT_MS = 60_000;
-
-/** Bounds a prefetch: Pyodide's boot and the downloads from its CDN. */
-const PREFETCH_TIMEOUT_MS = 300_000;
 
 /** Bounds a probe: Pyodide's boot and every package's load and import. */
 const PROBE_TIMEOUT_MS = 60_000;
@@ -75,7 +72,7 @@ export interface RunOnWorkerParams {
   wallClockS?: number;
   /** Child init cap (fork, Pyodide boot, package installs). Defaults to 60 s. */
   readyTimeoutMs?: number;
-  /** Pyodide's package cache, which `Tier1Prefetcher.prefetchBuiltins` fills. */
+  /** Pyodide's package cache, which the host fills and verifies (`fillBuiltinCache`). */
   packageCacheDir: string;
   /** What the child installs before `ready`, from local files only. */
   packages: Tier1Packages;
@@ -278,7 +275,7 @@ function fromTaskResult(result: TaskResult): RunOnWorkerResult {
   };
 }
 
-export interface Tier1PrefetcherOptions {
+export interface Tier1ProbeOptions {
   /** {@link pyodideDistDir}. */
   pyodideDistDir: string;
   /** Where each child's process-group record lives while it runs. */
@@ -286,38 +283,13 @@ export interface Tier1PrefetcherOptions {
 }
 
 /**
- * The {@link Tier1Prefetcher} over tier-1 children. A prefetch child runs
- * without the permission flags, so it can reach Pyodide's CDN and write the
- * cache; a probe child runs under the same flags as a task's. Neither runs
- * skill code, and each is time-boxed by its signal and a default.
+ * The {@link Tier1Probe} over tier-1 children. A probe child runs under the
+ * same flags as a task's, reads the package cache the host filled and
+ * verified, runs no skill code, and is time-boxed by its signal and a
+ * default.
  */
-export function createTier1Prefetcher(opts: Tier1PrefetcherOptions): Tier1Prefetcher {
+export function createTier1Probe(opts: Tier1ProbeOptions): Tier1Probe {
   return {
-    async prefetchBuiltins(names, { packageCacheDir, signal }) {
-      const cacheDir = await resolveDir(packageCacheDir, { create: true });
-      if (cacheDir.isErr()) return err(cacheDir.error);
-      const reply = await runUtilityChild(opts, {
-        init: {
-          mode: "prefetch",
-          pyodideDistDir: opts.pyodideDistDir,
-          packageCacheDir: cacheDir.value,
-          // A task child installs its wheel directory with micropip, from the cache.
-          names: R.unique([...names, "micropip"]),
-        },
-        execArgv: [],
-        timeoutMs: PREFETCH_TIMEOUT_MS,
-        signal,
-        schema: PrefetchReplySchema,
-      });
-      return reply.andThen((r) =>
-        match(r)
-          .returnType<Result<void, string>>()
-          .with({ type: "prefetched" }, () => ok(undefined))
-          .with({ type: "fatal" }, ({ error }) => err(`prefetch failed: ${error}`))
-          .exhaustive(),
-      );
-    },
-
     async probeBuiltins(names, { packageCacheDir, signal }) {
       const unavailable = (message: string): Tier1ProbeError => ({ kind: "unavailable", message });
       const entry = await tier1ChildEntry();
@@ -362,7 +334,7 @@ export function createTier1Prefetcher(opts: Tier1PrefetcherOptions): Tier1Prefet
  * or outlives `timeoutMs` or `signal`.
  */
 async function runUtilityChild<T>(
-  opts: Tier1PrefetcherOptions,
+  opts: Tier1ProbeOptions,
   run: {
     init: ChildInit;
     execArgv: readonly string[];

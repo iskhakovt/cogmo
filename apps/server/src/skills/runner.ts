@@ -38,9 +38,14 @@ import type { SkillRunAs } from "./run-as.js";
 import { type RegisterForTestsParams, seedSkillForTests } from "./seed-for-tests.js";
 import { SkillSourceCache } from "./source-cache.js";
 import type { SkillRow, SkillRunIdentity, SkillRunTrigger, SkillStore } from "./store/index.js";
-import { createTier1Prefetcher, pyodideDistDir } from "./worker-wasm/host.js";
-import type { Tier1Packages, Tier1PackagesError, Tier1Prefetcher } from "./worker-wasm/tier1.js";
-import { ensureTier1Packages, stagedPrefetcher } from "./worker-wasm/wheel-cache.js";
+import { createTier1Probe, pyodideDistDir } from "./worker-wasm/host.js";
+import type {
+  FillBuiltins,
+  Tier1Packages,
+  Tier1PackagesError,
+  Tier1Probe,
+} from "./worker-wasm/tier1.js";
+import { ensureTier1Packages, fillBuiltinCache } from "./worker-wasm/wheel-cache.js";
 
 export type {
   DeregisterResult,
@@ -179,8 +184,13 @@ export interface SkillRunnerOptions {
   tier1: {
     wheelsRoot: string;
     childrenDir: string;
-    /** Tests inject a prefetcher that spawns no child. */
-    prefetcher?: Tier1Prefetcher;
+    /** Tests inject a probe that spawns no child. */
+    probe?: Tier1Probe;
+    /**
+     * Tests inject a fetch that reaches no network: what the host downloads
+     * built-ins from Pyodide's CDN and wheels from PyPI with.
+     */
+    fetchImpl?: typeof fetch;
     /** Tests inject a resolver that reaches no network. */
     resolvePackages?: (
       lockfile: LockfileSnapshot,
@@ -284,9 +294,9 @@ export class SkillRunnerImpl implements SkillRunner {
     const packageCacheDir = opts.pyodidePackageCacheDir;
     const tier1 = opts.tier1;
     const distDir = pyodideDistDir();
-    const prefetcher =
-      tier1.prefetcher ??
-      createTier1Prefetcher({ pyodideDistDir: distDir, childrenDir: tier1.childrenDir });
+    const probe =
+      tier1.probe ?? createTier1Probe({ pyodideDistDir: distDir, childrenDir: tier1.childrenDir });
+    const fetchImpl = tier1.fetchImpl ?? fetch;
     const resolvePackages =
       tier1.resolvePackages ??
       (async (
@@ -298,13 +308,17 @@ export class SkillRunnerImpl implements SkillRunner {
           return err({ kind: "bundled_unreadable", message: bundled.error.message });
         }
         return ensureTier1Packages(
-          { prefetcher, fetchImpl: fetch, bundled: bundled.value },
+          { fetchImpl, bundled: bundled.value },
           { lockfile, packageCacheDir, wheelsRoot: tier1.wheelsRoot, ...(signal && { signal }) },
         );
       });
-    // The register's boundary probe loads from the cache its prefetch fills,
-    // so that prefetch is staged and verified as a run's is.
-    const probePrefetcher = stagedPrefetcher({ prefetcher, loadBundled: loadBundledPackages });
+    // The register's boundary probe loads from the cache this fills, staged
+    // and verified as a run's built-ins are.
+    const fillBuiltins: FillBuiltins = async (names, cacheOpts) => {
+      const bundled = await loadBundledPackages();
+      if (bundled.isErr()) return err(bundled.error);
+      return fillBuiltinCache({ fetchImpl, bundled: bundled.value }, { names, ...cacheOpts });
+    };
     const resolveTier1Packages = (
       lockfile: LockfileSnapshot | undefined,
       signal?: AbortSignal,
@@ -323,7 +337,7 @@ export class SkillRunnerImpl implements SkillRunner {
       secretsStore: opts.secretsStore,
       defaultRunAs: opts.defaultRunAs,
       capabilities: BUILD_CAPABILITIES,
-      tier1: { prefetcher: probePrefetcher, packageCacheDir, resolvePackages },
+      tier1: { probe, fillBuiltins, packageCacheDir, resolvePackages },
       skillsRepoPath: opts.skillsRepoPath,
       sourceCache,
       // Explicit override wins; otherwise default to a sandbox-backed

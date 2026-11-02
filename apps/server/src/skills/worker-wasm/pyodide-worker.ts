@@ -17,10 +17,9 @@ import INSTALL_DEPS_PY from "./py/install_deps.py";
  * boundary). It inherits the child's permission flags and runs with an empty
  * `env`. In `run` mode it boots Pyodide under the memory cap with minimal
  * `jsglobals`, loads the skill's packages from local files only, deletes the
- * network APIs, signals `ready` and runs one task. `prefetch` fills the
- * package cache from the network (that child has no permission flags);
- * `probe` loads and imports packages from the cache under the flags. Neither
- * runs skill code.
+ * network APIs, signals `ready` and runs one task. In `probe` mode it loads
+ * and imports packages from the cache under the same flags and runs no skill
+ * code. Neither mode reaches the network: the host fills the cache.
  *
  * The child bundle embeds `py/*.py` as text (`child-bundle.ts`).
  */
@@ -93,7 +92,6 @@ function capWasmMemory(memoryMb: number): void {
 async function bootPyodide(options: {
   pyodideDistDir: string;
   packageCacheDir: string;
-  restricted: boolean;
 }): Promise<PyodideInterface> {
   // By path, not by package name: the bundle lives outside node_modules.
   const pyodideModule: typeof import("pyodide") = await import(
@@ -104,9 +102,7 @@ async function bootPyodide(options: {
     packageCacheDir: options.packageCacheDir,
     // `js` is this object: `setTimeout`/`clearTimeout` for the asyncio loop
     // `ctx` calls await, and nothing else (design/skills.md → layer 3).
-    ...(options.restricted && {
-      jsglobals: Object.freeze(Object.assign(Object.create(null), { setTimeout, clearTimeout })),
-    }),
+    jsglobals: Object.freeze(Object.assign(Object.create(null), { setTimeout, clearTimeout })),
     env: {},
     // A worker thread's stdout and stderr have no descriptor for Pyodide's
     // default writers, and the child's stdout goes nowhere. A skill's output
@@ -126,10 +122,10 @@ function normalizeName(name: string): string {
  * load through `errorCallback` and resolves anyway, so the errors and the
  * loaded set decide: null when every name loaded, the reason otherwise.
  *
- * Under Node, Pyodide checks no integrity: neither the cached file nor its
- * CDN download is compared with the lockfile's sha256, whatever
- * `checkIntegrity` says. The host's check of the package cache before a run
- * child starts (`ensureTier1Packages`) is the one that counts.
+ * Under Node, Pyodide checks no integrity: no cached file is compared with
+ * the lockfile's sha256, whatever `checkIntegrity` says. The host's check of
+ * every file before it enters the package cache (`fillBuiltinCache`) is the
+ * one that counts.
  */
 async function loadPackages(
   py: PyodideInterface,
@@ -152,8 +148,8 @@ async function loadPackages(
 /**
  * Install every wheel in `wheelDir` with micropip, from a read-only mount and
  * without dependency resolution: the host resolved and hash-checked the set
- * (design/skills.md → layer 4). micropip is a Pyodide built-in the prefetch
- * puts in the cache. `py/install_deps.py` checks each installed version
+ * (design/skills.md → layer 4). micropip is a Pyodide built-in the host puts
+ * in the cache. `py/install_deps.py` checks each installed version
  * against its wheel's.
  */
 async function installWheels(py: PyodideInterface, wheelDir: string): Promise<void> {
@@ -291,7 +287,6 @@ async function run(init: Extract<ChildInit, { mode: "run" }>): Promise<void> {
   const py = await bootPyodide({
     pyodideDistDir: init.pyodideDistDir,
     packageCacheDir: init.packageCacheDir,
-    restricted: true,
   });
   py.setInterruptBuffer(new Uint8Array(data.interruptBuffer));
   // Wheels first: a lockfile may pin a dependency Pyodide bundles at another
@@ -316,21 +311,10 @@ async function run(init: Extract<ChildInit, { mode: "run" }>): Promise<void> {
   port.postMessage({ type: "ready" });
 }
 
-async function prefetch(init: Extract<ChildInit, { mode: "prefetch" }>): Promise<void> {
-  const py = await bootPyodide({
-    pyodideDistDir: init.pyodideDistDir,
-    packageCacheDir: init.packageCacheDir,
-    restricted: false,
-  });
-  const failed = await loadPackages(py, init.names);
-  port.postMessage(failed === null ? { type: "prefetched" } : { type: "fatal", error: failed });
-}
-
 async function probe(init: Extract<ChildInit, { mode: "probe" }>): Promise<void> {
   const py = await bootPyodide({
     pyodideDistDir: init.pyodideDistDir,
     packageCacheDir: init.packageCacheDir,
-    restricted: true,
   });
   const failures: { name: string; reason: string }[] = [];
   // One at a time, so each failure names its package.
@@ -359,11 +343,7 @@ async function probeOne(py: PyodideInterface, name: string): Promise<string | nu
 shimProcessBinding();
 const parsedInit = ChildInitSchema.safeParse(data.init);
 const started = parsedInit.success
-  ? match(parsedInit.data)
-      .with({ mode: "run" }, run)
-      .with({ mode: "prefetch" }, prefetch)
-      .with({ mode: "probe" }, probe)
-      .exhaustive()
+  ? match(parsedInit.data).with({ mode: "run" }, run).with({ mode: "probe" }, probe).exhaustive()
   : Promise.reject(new Error(`malformed init: ${parsedInit.error.message}`));
 started.catch((e: unknown) => {
   port.postMessage({ type: "fatal", error: e instanceof Error ? e.message : String(e) });

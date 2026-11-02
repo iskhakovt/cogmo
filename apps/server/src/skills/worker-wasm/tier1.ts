@@ -10,7 +10,7 @@ import { match } from "ts-pattern";
 export interface Tier1Packages {
   /**
    * Pyodide-bundled packages the child loads from the package cache the host
-   * filled (`prefetchBuiltins`), by name.
+   * filled and verified (`fillBuiltinCache`), by name.
    */
   builtins: readonly string[];
   /**
@@ -38,27 +38,17 @@ export type Tier1ProbeError =
   | { kind: "unavailable"; message: string };
 
 /**
- * The two host-side uses of a tier-1 child that run no skill code: filling the
- * package cache from the network, and checking that bundled native packages
- * load under the boundary's flags (EM_JS builds JS from strings at load, which
- * `--disallow-code-generation-from-strings` refuses).
+ * The host-side use of a tier-1 child that runs no skill code: checking that
+ * bundled native packages load under the boundary's flags (EM_JS builds JS
+ * from strings at load, which `--disallow-code-generation-from-strings`
+ * refuses).
  */
-export interface Tier1Prefetcher {
-  /**
-   * Download `names` and their Pyodide dependencies into `packageCacheDir`,
-   * through a child that has the network and no permission flags, so later
-   * children find every file locally. Pyodide checks no integrity under
-   * Node; `fillBuiltinCache` hands it a staging directory and hashes what it
-   * wrote there before anything reaches the cache.
-   */
-  prefetchBuiltins(
-    names: readonly string[],
-    opts: { packageCacheDir: string; signal?: AbortSignal },
-  ): Promise<Result<void, string>>;
+export interface Tier1Probe {
   /**
    * Load and import each of `names` in a child under the boundary's flags,
-   * from an already filled `packageCacheDir`. Errs `rejected` with every
-   * package that failed, or `unavailable` when the probe could not run.
+   * from a `packageCacheDir` already filled and verified (`FillBuiltins`).
+   * Errs `rejected` with every package that failed, or `unavailable` when the
+   * probe could not run.
    */
   probeBuiltins(
     names: readonly string[],
@@ -67,15 +57,26 @@ export interface Tier1Prefetcher {
 }
 
 /**
+ * Make `packageCacheDir` hold `names`, micropip and every bundled package they
+ * depend on, each file hashing to the sha256 Pyodide's lockfile pins
+ * (`fillBuiltinCache` over Pyodide's installed lockfile).
+ */
+export type FillBuiltins = (
+  names: readonly string[],
+  opts: { packageCacheDir: string; signal?: AbortSignal },
+) => Promise<Result<void, Tier1PackagesError>>;
+
+/**
  * Why a lockfile's tier-1 packages could not be provided. The wheel kinds
  * name the package: `wheel_unavailable` and `hash_mismatch` are terminal for
  * the lockfile (PyPI does not serve a pure-Python wheel with a pinned hash),
  * while `network_failed`, `prefetch_failed`, `publish_failed` and
  * `bundled_unreadable` (Pyodide's own lockfile could not be read) may clear
- * on a retry. `builtin_integrity` names a package-cache file that does not
- * hash to the sha256 Pyodide's lockfile pins after a prefetch, or that cannot
- * be checked: a verdict on this deployment's cache or its download, not on the
- * skill's lockfile. The mismatching file is deleted, so a retry fetches it again.
+ * on a retry. `builtin_integrity` names a built-in whose download from Pyodide's
+ * CDN does not hash to the sha256 Pyodide's lockfile pins, or a cached file
+ * that cannot be checked: a verdict on this deployment's cache or its download,
+ * not on the skill's lockfile. Nothing unverified reaches the cache, and a
+ * cached file that fails its check is deleted, so a retry fetches it again.
  */
 export type Tier1PackagesError =
   | { kind: "wheel_unavailable"; spec: string; message: string }
