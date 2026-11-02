@@ -205,8 +205,8 @@ export interface SkillRunnerOptions {
    */
   sandbox?: SandboxClient;
   /**
-   * Container image for container skills. Defaults to `python:3.14-slim`.
-   * Override when shipping a Cogmo-baked image with deps pre-installed.
+   * Image for container-tier skills. Defaults to the cogmo-skills image
+   * (`defaultSkillsImage()`, from `COGMO_SKILLS_IMAGE`).
    */
   containerImage?: string;
   /**
