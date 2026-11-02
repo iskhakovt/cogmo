@@ -1,7 +1,7 @@
 /** `/skills`, `/disable`, `/enable`: the skill library. */
 
 import type { Transport } from "../../../transport.js";
-import { fitTelegramMessage } from "../message-limit.js";
+import { packTelegramMessages } from "../message-limit.js";
 import { errorMessage, type TelegramCommandContext } from "./reply.js";
 
 const DISABLE_USAGE = "Usage: /disable <name>";
@@ -43,7 +43,11 @@ export async function handleSkills(
           : ` — pending approval ${s.pendingDeploy.priorGitSha.slice(0, 7)} → ${s.pendingDeploy.gitSha.slice(0, 7)}, id ${s.pendingDeploy.id}`;
     return `${s.name} [${s.tier}/${s.riskTier}] @ ${s.gitSha.slice(0, 7)}${marker}${pending}`;
   });
-  await ctx.reply(fitTelegramMessage(`Skills:\n${lines.join("\n")}`));
+  // One message when it fits; otherwise split between skills, so a pending
+  // deploy id is never cut.
+  for (const part of packTelegramMessages(["Skills:", ...lines])) {
+    await ctx.reply(part);
+  }
 }
 
 /**

@@ -9,6 +9,27 @@ const ELLIPSIS = "…";
  * database (a deploy outcome, the skills inventory), a shortened message
  * beats a refused send.
  */
+/**
+ * `lines` packed into as few messages as fit under the cap, split only
+ * between lines, so a line (a skill with its pending deploy id) is never cut
+ * in two. A single line over the cap is fitted on its own.
+ */
+export function packTelegramMessages(lines: readonly string[]): string[] {
+  const messages: string[] = [];
+  let current = "";
+  for (const line of lines) {
+    const joined = current === "" ? line : `${current}\n${line}`;
+    if (joined.length <= TELEGRAM_MAX_MESSAGE_LENGTH) {
+      current = joined;
+      continue;
+    }
+    if (current !== "") messages.push(current);
+    current = fitTelegramMessage(line);
+  }
+  if (current !== "") messages.push(current);
+  return messages;
+}
+
 export function fitTelegramMessage(text: string): string {
   if (text.length <= TELEGRAM_MAX_MESSAGE_LENGTH) return text;
   let end = TELEGRAM_MAX_MESSAGE_LENGTH - ELLIPSIS.length;
