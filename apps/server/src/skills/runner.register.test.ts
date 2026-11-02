@@ -763,23 +763,22 @@ outputs:
         "origin",
         "HEAD:refs/heads/skill/echo-pypi",
       ]);
-      const runner = await makeRunner();
       const mainBefore = await getMainSha(repo.bare);
       const controller = new AbortController();
       const reason = new Error("register deadline");
-      const fetch = vi.fn(async () => {
+      // The compatibility check's PyPI lookup is the injected fetch; it aborts
+      // the register from inside the first call.
+      const fetch = vi.fn<typeof globalThis.fetch>(async () => {
         controller.abort(reason);
         return new Response(null, { status: 404 });
       });
-      vi.stubGlobal("fetch", fetch);
+      const runner = await makeRunner({
+        tier1: { ...offlineTier1(repo.bare).tier1, fetchImpl: fetch },
+      });
 
-      try {
-        await expect(
-          runner.register({ branch: "skill/echo-pypi", origin: OWNER, signal: controller.signal }),
-        ).rejects.toBe(reason);
-      } finally {
-        vi.unstubAllGlobals();
-      }
+      await expect(
+        runner.register({ branch: "skill/echo-pypi", origin: OWNER, signal: controller.signal }),
+      ).rejects.toBe(reason);
 
       expect(fetch).toHaveBeenCalled();
       expect(await tx((trx) => store.getSkillByName(trx, "echo"))).toBeUndefined();
