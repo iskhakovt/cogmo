@@ -113,6 +113,45 @@ describe("buildSkillToolSpec", () => {
     );
   });
 
+  it("handler rejects a tier-1 package failure with its kind and package, and no host paths", async () => {
+    const invoke = vi.fn().mockResolvedValue(
+      err({
+        kind: "tier1_packages_unavailable",
+        name: "echo",
+        error: {
+          kind: "hash_mismatch",
+          spec: "idna==3.10",
+          message: "idna-3.10-py3-none-any.whl hashes to sha256:00; the lockfile pins sha256:ff",
+        },
+      }),
+    );
+    const spec = buildSkillToolSpec(ECHO_DEF, makeRunner({ invoke }), TURN);
+
+    const rejection = (await spec.handler({ x: 1 }, TURN_SERVICE))._unsafeUnwrapErr();
+    expect(rejection.message).toBe(
+      "skill 'echo' cannot run: tier-1 packages unavailable: hash_mismatch for idna==3.10",
+    );
+  });
+
+  it("handler rejects a tier-1 failure with no package by its kind alone", async () => {
+    const invoke = vi.fn().mockResolvedValue(
+      err({
+        kind: "tier1_packages_unavailable",
+        name: "echo",
+        error: {
+          kind: "prefetch_failed",
+          message: "staging the prefetch in /var/lib/cogmo/pyodide-cache.tmp.1234: EACCES",
+        },
+      }),
+    );
+    const spec = buildSkillToolSpec(ECHO_DEF, makeRunner({ invoke }), TURN);
+
+    const rejection = (await spec.handler({ x: 1 }, TURN_SERVICE))._unsafeUnwrapErr();
+    expect(rejection.message).toBe(
+      "skill 'echo' cannot run: tier-1 packages unavailable: prefetch_failed",
+    );
+  });
+
   it("handler propagates a thrown runner error", async () => {
     const invoke = vi.fn().mockRejectedValue(new Error("db unreachable"));
     const runner = makeRunner({ invoke });

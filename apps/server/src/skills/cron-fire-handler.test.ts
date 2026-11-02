@@ -7,7 +7,7 @@
  * replay-safety contract on the `dispatch` step.
  */
 
-import { InngestTestEngine } from "@inngest/test";
+import { InngestTestEngine, mockCtx } from "@inngest/test";
 import { err, ok } from "neverthrow";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
@@ -208,7 +208,7 @@ describe("createSkillCronFireHandler", () => {
     expect(result).toMatchObject({ status: "skipped", reason: "sandbox_unavailable" });
   });
 
-  it("skips with reason 'tier1_packages_unavailable' when the host cannot provide a tier-1 skill's packages", async () => {
+  it("throws on a tier-1 package failure before the final attempt, so Inngest's retries fetch them again", async () => {
     const runner = mock<SkillRunner>();
     runner.invoke.mockResolvedValue(
       err({
@@ -219,8 +219,36 @@ describe("createSkillCronFireHandler", () => {
     );
     const fn = createSkillCronFireHandler(deps(runner), inngest);
 
-    const { result } = await new InngestTestEngine({ function: fn, events: [baseEvent] }).execute();
+    const { result, error } = await new InngestTestEngine({
+      function: fn,
+      events: [baseEvent],
+      transformCtx: (ctx) => ({ ...mockCtx(ctx), attempt: 1 }),
+    }).execute();
 
+    expect(result).toBeUndefined();
+    expect((error as { message?: string } | undefined)?.message).toBe(
+      "skill 'morning-brief' cannot run: its tier-1 packages are unavailable (prefetch_failed: cdn down)",
+    );
+  });
+
+  it("skips with reason 'tier1_packages_unavailable' on the final attempt", async () => {
+    const runner = mock<SkillRunner>();
+    runner.invoke.mockResolvedValue(
+      err({
+        kind: "tier1_packages_unavailable",
+        name: "morning-brief",
+        error: { kind: "prefetch_failed", message: "cdn down" },
+      }),
+    );
+    const fn = createSkillCronFireHandler(deps(runner), inngest);
+
+    const { result, error } = await new InngestTestEngine({
+      function: fn,
+      events: [baseEvent],
+      transformCtx: (ctx) => ({ ...mockCtx(ctx), attempt: 2 }),
+    }).execute();
+
+    expect(error).toBeUndefined();
     expect(result).toMatchObject({
       status: "skipped",
       reason: "tier1_packages_unavailable",

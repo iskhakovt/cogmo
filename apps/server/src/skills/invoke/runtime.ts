@@ -13,8 +13,7 @@ import {
   type RunOnWorkerResult,
   runOnWorker,
 } from "../worker-wasm/host.js";
-import type { Tier1Packages } from "../worker-wasm/tier1.js";
-import type { Tier1PackagesError } from "../worker-wasm/wheel-cache.js";
+import type { Tier1Packages, Tier1PackagesError } from "../worker-wasm/tier1.js";
 
 /**
  * Translate a manifest's `resources` block into the partial `ResourceLimits`

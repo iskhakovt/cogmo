@@ -39,12 +39,8 @@ import { type RegisterForTestsParams, seedSkillForTests } from "./seed-for-tests
 import { SkillSourceCache } from "./source-cache.js";
 import type { SkillRow, SkillRunIdentity, SkillRunTrigger, SkillStore } from "./store/index.js";
 import { createTier1Prefetcher, pyodideDistDir } from "./worker-wasm/host.js";
-import type { Tier1Packages, Tier1Prefetcher } from "./worker-wasm/tier1.js";
-import {
-  ensureTier1Packages,
-  stagedPrefetcher,
-  type Tier1PackagesError,
-} from "./worker-wasm/wheel-cache.js";
+import type { Tier1Packages, Tier1PackagesError, Tier1Prefetcher } from "./worker-wasm/tier1.js";
+import { ensureTier1Packages, stagedPrefetcher } from "./worker-wasm/wheel-cache.js";
 
 export type {
   DeregisterResult,

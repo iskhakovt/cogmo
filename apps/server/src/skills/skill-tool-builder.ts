@@ -1,9 +1,11 @@
 import { ok } from "neverthrow";
+import { match, P } from "ts-pattern";
 import { compileToolMatchers } from "../agent/tool-matchers.js";
 import { reject, ToolRegistry, type ToolRejection, type ToolSpec } from "../agent/tools.js";
 import { logger } from "../logger.js";
-import { describeInvokeRejection } from "./invoke-rejection.js";
+import { describeInvokeRejection, type SkillInvokeRejection } from "./invoke-rejection.js";
 import type { SkillRunner, SkillToolDef } from "./runner.js";
+import { summarizeTier1PackagesError } from "./worker-wasm/tier1.js";
 
 const log = logger.child({ component: "skills.tool-builder" });
 
@@ -29,6 +31,25 @@ function inflightRejection(name: string, runId: string): ToolRejection {
       "everything, nothing, or stopped partway. Do not silently re-run it: tell the user what " +
       "was attempted and ask them to check the result before deciding.",
   };
+}
+
+/**
+ * A runner rejection as the model reads it. A tier-1 package failure names
+ * only its kind and package: its detail carries host paths, which the
+ * invocation logs at warn.
+ */
+function toolRejection(name: string, rejection: SkillInvokeRejection): ToolRejection {
+  return match(rejection)
+    .returnType<ToolRejection>()
+    .with({ kind: "inflight" }, ({ runId }) => inflightRejection(name, runId))
+    .with({ kind: "tier1_packages_unavailable" }, ({ error }) => ({
+      message: `skill '${name}' cannot run: tier-1 packages unavailable: ${summarizeTier1PackagesError(error)}`,
+    }))
+    .with(
+      { kind: P.union("not_found", "disabled", "invalid_inputs", "sandbox_unavailable") },
+      (r) => ({ message: describeInvokeRejection(r) }),
+    )
+    .exhaustive();
 }
 
 /** The turn a skill tool is built for: the conversation's user, whom a run acts for. */
@@ -83,11 +104,7 @@ export function buildSkillToolSpec(
         ...(ctx !== undefined && { idempotencyKey: `skill-tool:${ctx.idempotencyKey}` }),
       });
       return invoked
-        .mapErr((rejection) =>
-          rejection.kind === "inflight"
-            ? inflightRejection(def.name, rejection.runId)
-            : { message: describeInvokeRejection(rejection) },
-        )
+        .mapErr((rejection) => toolRejection(def.name, rejection))
         .andThen((run) =>
           run.status === "error"
             ? reject(`skill ${def.name} failed (run ${run.runId}): ${run.error}`)

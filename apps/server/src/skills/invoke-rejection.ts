@@ -1,5 +1,5 @@
 import { match } from "ts-pattern";
-import { describeTier1PackagesError, type Tier1PackagesError } from "./worker-wasm/wheel-cache.js";
+import { describeTier1PackagesError, type Tier1PackagesError } from "./worker-wasm/tier1.js";
 
 /**
  * Why `invoke` declined to run a skill. Nothing executed. Only `inflight`

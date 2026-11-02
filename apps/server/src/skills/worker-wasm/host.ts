@@ -134,7 +134,9 @@ export async function runOnWorker(params: RunOnWorkerParams): Promise<RunOnWorke
  * @public Exported for `host.test.ts`, which forks a child and drops its IPC channel.
  */
 export async function forkRunChild(params: RunOnWorkerParams): Promise<Result<Tier1Child, string>> {
-  const entry = await tier1ChildEntry();
+  const built = await tier1ChildEntry();
+  if (built.isErr()) return err(built.error);
+  const entry = built.value;
   // The child is told the resolved paths it is granted: the permission model
   // compares a path as written, so a granted directory reached through a
   // symlink is refused.
@@ -319,9 +321,10 @@ export function createTier1Prefetcher(opts: Tier1PrefetcherOptions): Tier1Prefet
     async probeBuiltins(names, { packageCacheDir, signal }) {
       const unavailable = (message: string): Tier1ProbeError => ({ kind: "unavailable", message });
       const entry = await tier1ChildEntry();
+      if (entry.isErr()) return err(unavailable(entry.error));
       const grants = await ResultAsync.combine([
         resolveDir(opts.pyodideDistDir, { create: false }),
-        resolveDir(dirname(entry), { create: false }),
+        resolveDir(dirname(entry.value), { create: false }),
         resolveDir(packageCacheDir, { create: false }),
       ]);
       if (grants.isErr()) return err(unavailable(grants.error));
@@ -368,8 +371,10 @@ async function runUtilityChild<T>(
     schema: z.ZodType<T>;
   },
 ): Promise<Result<T, string>> {
+  const entry = await tier1ChildEntry();
+  if (entry.isErr()) return err(entry.error);
   const forked = await forkTier1Child({
-    entry: await tier1ChildEntry(),
+    entry: entry.value,
     execArgv: run.execArgv,
     init: run.init,
     childrenDir: opts.childrenDir,
@@ -509,25 +514,32 @@ async function forkTier1Child(opts: {
   });
 }
 
-let sourceBundle: Promise<string> | undefined;
+let sourceBundle: Promise<Result<string, string>> | undefined;
 
 /**
  * The child entry: beside the bundled host, or bundled from source on first
- * use. A failed build is not kept, so the next spawn builds again.
+ * use. A failed build, or a published bundle this user cannot trust, errs; it
+ * is not kept, so the next spawn builds again.
  */
-function tier1ChildEntry(): Promise<string> {
+function tier1ChildEntry(): Promise<Result<string, string>> {
   if (!import.meta.url.endsWith(".ts")) {
-    return Promise.resolve(fileURLToPath(new URL("./tier1-child.mjs", import.meta.url)));
+    return Promise.resolve(ok(fileURLToPath(new URL("./tier1-child.mjs", import.meta.url))));
   }
-  if (sourceBundle === undefined) {
-    const building = bundleFromSource();
-    sourceBundle = building;
-    // Only forgets the build: every caller awaits `building` and sees its error.
-    building.catch(() => {
-      if (sourceBundle === building) sourceBundle = undefined;
-    });
-  }
-  return sourceBundle;
+  if (sourceBundle !== undefined) return sourceBundle;
+  const building = buildSourceEntry();
+  sourceBundle = building;
+  void building.then((built) => {
+    if (built.isErr() && sourceBundle === building) sourceBundle = undefined;
+  });
+  return building;
+}
+
+/** {@link bundleFromSource}, whose failures (esbuild, the filesystem, `assertOwnPrivateDir`) all leave the child unbuilt. */
+async function buildSourceEntry(): Promise<Result<string, string>> {
+  return ResultAsync.fromPromise(
+    bundleFromSource(),
+    (e) => `cannot build the tier-1 child: ${describeReason(e)}`,
+  );
 }
 
 /**

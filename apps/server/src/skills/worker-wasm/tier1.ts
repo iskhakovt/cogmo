@@ -1,4 +1,5 @@
 import type { Result } from "neverthrow";
+import { match } from "ts-pattern";
 
 /**
  * What a tier-1 child installs before it signals `ready`
@@ -63,4 +64,66 @@ export interface Tier1Prefetcher {
     names: readonly string[],
     opts: { packageCacheDir: string; signal?: AbortSignal },
   ): Promise<Result<void, Tier1ProbeError>>;
+}
+
+/**
+ * Why a lockfile's tier-1 packages could not be provided. The wheel kinds
+ * name the package: `wheel_unavailable` and `hash_mismatch` are terminal for
+ * the lockfile (PyPI does not serve a pure-Python wheel with a pinned hash),
+ * while `network_failed`, `prefetch_failed`, `publish_failed` and
+ * `bundled_unreadable` (Pyodide's own lockfile could not be read) may clear
+ * on a retry. `builtin_integrity` names a package-cache file that does not
+ * hash to the sha256 Pyodide's lockfile pins after a prefetch, or that cannot
+ * be checked: a verdict on this deployment's cache or its download, not on the
+ * skill's lockfile. The mismatching file is deleted, so a retry fetches it again.
+ */
+export type Tier1PackagesError =
+  | { kind: "wheel_unavailable"; spec: string; message: string }
+  | { kind: "hash_mismatch"; spec: string; message: string }
+  | { kind: "network_failed"; spec: string; message: string }
+  | { kind: "prefetch_failed"; message: string }
+  | { kind: "publish_failed"; message: string }
+  | { kind: "bundled_unreadable"; message: string }
+  | { kind: "builtin_integrity"; fileName: string; message: string };
+
+/** One line naming why the lockfile's packages could not be made available. */
+export function describeTier1PackagesError(error: Tier1PackagesError): string {
+  return match(error)
+    .with(
+      { kind: "wheel_unavailable" },
+      { kind: "hash_mismatch" },
+      { kind: "network_failed" },
+      (e) => `${e.kind}: ${e.spec}: ${e.message}`,
+    )
+    .with(
+      { kind: "prefetch_failed" },
+      { kind: "publish_failed" },
+      { kind: "bundled_unreadable" },
+      (e) => `${e.kind}: ${e.message}`,
+    )
+    .with({ kind: "builtin_integrity" }, (e) => `${e.kind}: ${e.fileName}: ${e.message}`)
+    .exhaustive();
+}
+
+/**
+ * The error's kind and, for a wheel, its package spec. Text the model reads:
+ * the messages carry host paths and upstream detail, which only logs and
+ * operator output show.
+ */
+export function summarizeTier1PackagesError(error: Tier1PackagesError): string {
+  return match(error)
+    .with(
+      { kind: "wheel_unavailable" },
+      { kind: "hash_mismatch" },
+      { kind: "network_failed" },
+      (e) => `${e.kind} for ${e.spec}`,
+    )
+    .with(
+      { kind: "prefetch_failed" },
+      { kind: "publish_failed" },
+      { kind: "bundled_unreadable" },
+      { kind: "builtin_integrity" },
+      (e) => e.kind,
+    )
+    .exhaustive();
 }

@@ -5,8 +5,7 @@ import type { SkillsCapabilities } from "../capabilities.js";
 import type { LockfileCompiler, LockfileSnapshot } from "../deps.js";
 import type { SkillSourceCache } from "../source-cache.js";
 import type { SkillRunIdentity, SkillStore } from "../store/index.js";
-import type { Tier1Packages, Tier1Prefetcher } from "../worker-wasm/tier1.js";
-import type { Tier1PackagesError } from "../worker-wasm/wheel-cache.js";
+import type { Tier1Packages, Tier1PackagesError, Tier1Prefetcher } from "../worker-wasm/tier1.js";
 
 /** What the deploy use cases (register, approve, rollback, enable) share. */
 export interface DeployDeps {

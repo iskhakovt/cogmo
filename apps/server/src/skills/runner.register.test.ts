@@ -23,7 +23,7 @@ import { bootstrapSkillsRepo } from "./repo.js";
 import type { SkillRunAs, SkillRunServices } from "./run-as.js";
 import { type SkillActor, type SkillDeployOrigin, SkillRunnerImpl } from "./runner.js";
 import { DrizzleSkillStore, type SkillRunIdentity, type SkillStore } from "./store/index.js";
-import type { Tier1PackagesError } from "./worker-wasm/wheel-cache.js";
+import type { Tier1PackagesError } from "./worker-wasm/tier1.js";
 
 const execFileP = promisify(execFile);
 

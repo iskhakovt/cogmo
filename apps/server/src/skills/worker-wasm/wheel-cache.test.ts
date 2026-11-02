@@ -28,6 +28,12 @@ const statHook = vi.hoisted(() => {
   return hook;
 });
 
+/** Runs before each `rm`, to fail a removal. */
+const rmHook = vi.hoisted(() => {
+  const hook: { before: ((path: string) => Promise<void>) | null } = { before: null };
+  return hook;
+});
+
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
   return {
@@ -35,6 +41,10 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     stat: async (...args: Parameters<typeof actual.stat>) => {
       await statHook.before?.(args[0].toString());
       return actual.stat(...args);
+    },
+    rm: async (...args: Parameters<typeof actual.rm>) => {
+      await rmHook.before?.(args[0].toString());
+      return actual.rm(...args);
     },
   };
 });
@@ -210,6 +220,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   statHook.before = null;
+  rmHook.before = null;
   await makeWritable(root);
   await rm(root, { recursive: true, force: true });
 });
@@ -846,6 +857,32 @@ describe("reapTier1WheelDirs", () => {
 
     expect(result._unsafeUnwrap()).toEqual({ reapedHashes: [alsoOld] });
     expect(await readdir(wheelsRoot)).toEqual([]);
+  });
+
+  it("fails the reap when removing a directory it moved out of its hash fails", async () => {
+    await published(UNREACHABLE_OLD, eightDaysAgo);
+    // A code a concurrent move also raises, from the removal of the moved directory.
+    rmHook.before = async (path) => {
+      if (path.startsWith(join(wheelsRoot, `${UNREACHABLE_OLD}.tmp.`))) {
+        throw Object.assign(new Error(`ENOTEMPTY: directory not empty, rmdir '${path}'`), {
+          code: "ENOTEMPTY",
+        });
+      }
+    };
+
+    const result = await reapTier1WheelDirs({
+      wheelsRoot,
+      reachableHashes: new Set(),
+      graceDays: 7,
+    });
+
+    expect(result._unsafeUnwrapErr()).toEqual({
+      kind: "reap_failed",
+      message: expect.stringContaining("ENOTEMPTY"),
+    });
+    expect(await readdir(wheelsRoot)).toEqual([
+      expect.stringMatching(new RegExp(`^${UNREACHABLE_OLD}\\.tmp\\.`)),
+    ]);
   });
 
   it("sweeps a sealed tmp directory a reap left behind", async () => {

@@ -1,11 +1,23 @@
 import { spawn } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { CtxHandler } from "../dispatcher.js";
 import type { HostMessage } from "../protocol.js";
 import { buildTier1Child } from "./child-bundle.js";
-import { forkRunChild, type RunOnWorkerResult, runOnChild, type Tier1Child } from "./host.js";
+import {
+  createTier1Prefetcher,
+  forkRunChild,
+  type RunOnWorkerParams,
+  type RunOnWorkerResult,
+  runOnChild,
+  runOnWorker,
+  type Tier1Child,
+} from "./host.js";
 import type { IpcChannel } from "./transport.js";
 
 /**
@@ -266,11 +278,12 @@ describe("runOnChild", () => {
 });
 
 describe("the child bundle built from source", () => {
-  it("is built again on the next spawn after a build that failed", async () => {
-    vi.mocked(buildTier1Child)
-      .mockRejectedValueOnce(new Error("esbuild unavailable"))
-      .mockRejectedValueOnce(new Error("esbuild still unavailable"));
-    const params = {
+  afterEach(() => {
+    vi.mocked(buildTier1Child).mockReset();
+  });
+
+  function workerParams(): RunOnWorkerParams {
+    return {
       taskId: "task-1",
       skillName: "skill",
       body: "",
@@ -282,9 +295,77 @@ describe("the child bundle built from source", () => {
       childrenDir: "/nonexistent/children",
       memoryMb: 128,
     };
+  }
 
-    await expect(forkRunChild(params)).rejects.toThrow("esbuild unavailable");
-    await expect(forkRunChild(params)).rejects.toThrow("esbuild still unavailable");
+  it("fails the fork as a value, and is built again on the next spawn", async () => {
+    vi.mocked(buildTier1Child)
+      .mockRejectedValueOnce(new Error("esbuild unavailable"))
+      .mockRejectedValueOnce(new Error("esbuild still unavailable"));
+
+    expect((await forkRunChild(workerParams()))._unsafeUnwrapErr()).toBe(
+      "cannot build the tier-1 child: esbuild unavailable",
+    );
+    expect((await forkRunChild(workerParams()))._unsafeUnwrapErr()).toBe(
+      "cannot build the tier-1 child: esbuild still unavailable",
+    );
     expect(buildTier1Child).toHaveBeenCalledTimes(2);
+  });
+
+  it("fails the task, rather than throwing, when the build fails", async () => {
+    vi.mocked(buildTier1Child).mockRejectedValueOnce(new Error("esbuild unavailable"));
+
+    expect(await runOnWorker(workerParams())).toEqual({
+      ok: false,
+      error: "worker init failed: cannot build the tier-1 child: esbuild unavailable",
+    });
+  });
+
+  it("fails the prefetch and the probe as values when the build fails", async () => {
+    vi.mocked(buildTier1Child)
+      .mockRejectedValueOnce(new Error("esbuild unavailable"))
+      .mockRejectedValueOnce(new Error("esbuild unavailable"));
+    const cacheDir = await mkdtemp(join(tmpdir(), "cogmo-host-child-cache-"));
+    try {
+      const prefetcher = createTier1Prefetcher({
+        pyodideDistDir: "/nonexistent/dist",
+        childrenDir: "/nonexistent/children",
+      });
+
+      expect(
+        (
+          await prefetcher.prefetchBuiltins(["micropip"], { packageCacheDir: cacheDir })
+        )._unsafeUnwrapErr(),
+      ).toBe("cannot build the tier-1 child: esbuild unavailable");
+      expect(
+        (
+          await prefetcher.probeBuiltins(["micropip"], { packageCacheDir: cacheDir })
+        )._unsafeUnwrapErr(),
+      ).toEqual({
+        kind: "unavailable",
+        message: "cannot build the tier-1 child: esbuild unavailable",
+      });
+    } finally {
+      await rm(cacheDir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails the fork as a value when another user's directory holds the bundle's name", async () => {
+    // A build whose digest names a directory already present and open to others.
+    const content = `// ${randomUUID()}`;
+    vi.mocked(buildTier1Child).mockImplementationOnce(async ({ outDir }) => {
+      await writeFile(join(outDir, "tier1-child.mjs"), content);
+    });
+    const digest = createHash("sha256").update("tier1-child.mjs").update(content).digest("hex");
+    const planted = join(await realpath(tmpdir()), `cogmo-tier1-child-${digest.slice(0, 16)}`);
+    await mkdir(planted, { mode: 0o755 });
+    await chmod(planted, 0o755);
+    await writeFile(join(planted, "tier1-child.mjs"), "planted");
+    try {
+      expect((await forkRunChild(workerParams()))._unsafeUnwrapErr()).toBe(
+        `cannot build the tier-1 child: refusing the tier-1 child bundle at ${planted}: ${planted} has mode 755, not 700`,
+      );
+    } finally {
+      await rm(planted, { recursive: true, force: true });
+    }
   });
 });

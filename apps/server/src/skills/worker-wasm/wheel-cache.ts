@@ -4,7 +4,6 @@ import { chmod, mkdir, readdir, rename, rm, stat, writeFile } from "node:fs/prom
 import { basename, dirname, join } from "node:path";
 import { err, ok, Result } from "neverthrow";
 import * as R from "remeda";
-import { match } from "ts-pattern";
 import { z } from "zod";
 import { logger } from "../../logger.js";
 import { describeError } from "../../util/describe-error.js";
@@ -14,7 +13,12 @@ import {
   normalizePackageName,
   PURE_WHEEL_SUFFIXES,
 } from "../pyodide-compat.js";
-import type { Tier1Packages, Tier1Prefetcher } from "./tier1.js";
+import {
+  describeTier1PackagesError,
+  type Tier1Packages,
+  type Tier1PackagesError,
+  type Tier1Prefetcher,
+} from "./tier1.js";
 
 const log = logger.child({ component: "skills.wheel-cache" });
 
@@ -48,26 +52,6 @@ const PypiReleaseFilesSchema = z.object({
     }),
   ),
 });
-
-/**
- * Why a lockfile's tier-1 packages could not be provided. The wheel kinds
- * name the package: `wheel_unavailable` and `hash_mismatch` are terminal for
- * the lockfile (PyPI does not serve a pure-Python wheel with a pinned hash),
- * while `network_failed`, `prefetch_failed`, `publish_failed` and
- * `bundled_unreadable` (Pyodide's own lockfile could not be read) may clear
- * on a retry. `builtin_integrity` names a package-cache file that does not
- * hash to the sha256 Pyodide's lockfile pins after a prefetch, or that cannot
- * be checked: a verdict on this deployment's cache or its download, not on the
- * skill's lockfile. The mismatching file is deleted, so a retry fetches it again.
- */
-export type Tier1PackagesError =
-  | { kind: "wheel_unavailable"; spec: string; message: string }
-  | { kind: "hash_mismatch"; spec: string; message: string }
-  | { kind: "network_failed"; spec: string; message: string }
-  | { kind: "prefetch_failed"; message: string }
-  | { kind: "publish_failed"; message: string }
-  | { kind: "bundled_unreadable"; message: string }
-  | { kind: "builtin_integrity"; fileName: string; message: string };
 
 /** A built-in's cache file that cannot be loaded as is: missing, or deleted for bytes other than the lockfile pins. */
 type UnverifiedBuiltin =
@@ -231,25 +215,6 @@ async function prefetchStaged(
       log.warn({ staging, err: describeError(e) }, "wheel-cache: staging dir cleanup failed");
     });
   }
-}
-
-/** One line naming why the lockfile's packages could not be made available. */
-export function describeTier1PackagesError(error: Tier1PackagesError): string {
-  return match(error)
-    .with(
-      { kind: "wheel_unavailable" },
-      { kind: "hash_mismatch" },
-      { kind: "network_failed" },
-      (e) => `${e.kind}: ${e.spec}: ${e.message}`,
-    )
-    .with(
-      { kind: "prefetch_failed" },
-      { kind: "publish_failed" },
-      { kind: "bundled_unreadable" },
-      (e) => `${e.kind}: ${e.message}`,
-    )
-    .with({ kind: "builtin_integrity" }, (e) => `${e.kind}: ${e.fileName}: ${e.message}`)
-    .exhaustive();
 }
 
 /**
@@ -546,6 +511,24 @@ async function removeSealedDir(dir: string): Promise<void> {
   await rm(dir, { recursive: true, force: true });
 }
 
+/**
+ * Rename `path` to `doomed` if its mtime is before `cutoffMs`. False when it
+ * is newer, or when a concurrent publisher or reap moved it first.
+ */
+async function moveOutIfStale(path: string, doomed: string, cutoffMs: number): Promise<boolean> {
+  try {
+    const { mtimeMs } = await stat(path);
+    if (mtimeMs >= cutoffMs) return false;
+    await rename(path, doomed);
+    return true;
+  } catch (e) {
+    const code = errnoCode(e);
+    if (code === undefined || !CONCURRENT_MOVE_CODES.has(code)) throw e;
+    log.debug({ path, code }, "wheel-cache: wheel dir moved during the reap");
+    return false;
+  }
+}
+
 export interface ReapTier1WheelDirsArgs {
   wheelsRoot: string;
   /** Lockfile hashes of every skill row, enabled or disabled. */
@@ -582,21 +565,15 @@ export async function reapTier1WheelDirs(
     const reapedHashes: string[] = [];
     for (const d of candidates) {
       const path = join(args.wheelsRoot, d.name);
-      try {
-        const { mtimeMs } = await stat(path);
-        if (now - mtimeMs <= graceMs) continue;
-        // Out of its hash first, in one rename, so a reader never finds
-        // `.ready` over a partial set; a crash before the removal leaves a
-        // stale `tmp` directory for the sweep below.
-        const doomed = join(args.wheelsRoot, `${d.name}.tmp.${randomUUID()}`);
-        await rename(path, doomed);
-        await removeSealedDir(doomed);
-        reapedHashes.push(d.name);
-      } catch (e) {
-        const code = errnoCode(e);
-        if (code === undefined || !CONCURRENT_MOVE_CODES.has(code)) throw e;
-        log.debug({ path, code }, "wheel-cache: wheel dir moved during the reap");
-      }
+      // Out of its hash first, in one rename, so a reader never finds
+      // `.ready` over a partial set; a crash before the removal leaves a
+      // stale `tmp` directory for the sweep below.
+      const doomed = join(args.wheelsRoot, `${d.name}.tmp.${randomUUID()}`);
+      const moved = await moveOutIfStale(path, doomed, now - graceMs);
+      if (!moved) continue;
+      // A removal that fails may leave the directory behind, so it fails the reap.
+      await removeSealedDir(doomed);
+      reapedHashes.push(d.name);
     }
     await removeStaleTmpDirs(args.wheelsRoot, isWheelTmpDir, now);
     log.info(

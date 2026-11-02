@@ -9,8 +9,8 @@ import { checkPyodideCompat, formatPyodideCompatIssues } from "../pyodide-compat
 import { readSkillSource, SKILL_BODY_FILE, SKILL_MANIFEST_FILE } from "../skill-source.js";
 import type { ExecuteRegisterResult } from "../store/index.js";
 import type { ClassifierLog, SkillManifest } from "../types.js";
+import { describeTier1PackagesError } from "../worker-wasm/tier1.js";
 import { lintWasmCompat } from "../worker-wasm/wasm-lint.js";
-import { describeTier1PackagesError } from "../worker-wasm/wheel-cache.js";
 import { advanceMain, runDeployTx } from "./advance-main.js";
 import { type DeployDeps, requireRepoPath } from "./deploy-deps.js";
 import { deployFacts } from "./deploy-facts.js";

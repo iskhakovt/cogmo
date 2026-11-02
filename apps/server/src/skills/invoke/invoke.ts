@@ -13,6 +13,7 @@ import {
   schemaIssues,
 } from "../source-cache.js";
 import type { SkillRunTrigger, SkillStore } from "../store/index.js";
+import { describeTier1PackagesError } from "../worker-wasm/tier1.js";
 import { executeRun } from "./execute-run.js";
 import { finishRun } from "./finish-run.js";
 import type { SkillRunResult } from "./run-result.js";
@@ -89,10 +90,12 @@ export async function invokeSkill(
   // no skill code produced or refusing a `started` row as in flight. A key
   // that already has a row is a replay, which recovery settles without a
   // runtime.
-  const prepared = (await hasKeyedRun(deps, idempotencyKey))
-    ? undefined
+  const keyed = await hasKeyedRun(deps, idempotencyKey);
+  const prepared: Result<SkillRuntime | undefined, SkillInvokeRejection> = keyed
+    ? ok(undefined)
     : await prepareRuntime(deps, { name, plan, cached });
-  if (prepared?.isErr()) return err(prepared.error);
+  if (prepared.isErr()) return err(prepared.error);
+  const runtime = prepared.value;
 
   const start = await startRun(deps, {
     skillId: skill.id,
@@ -126,18 +129,17 @@ export async function invokeSkill(
     })
     .with({ kind: "execute" }, async ({ runId, createdAt }) => {
       log.info({ runId, ...logFields }, "invoking skill");
-      // `prepared` is unset here only when the keyed row seen above was gone
-      // by the time this attempt inserted its own. A runtime that fails then
-      // leaves that row `started`, which a keyed retry refuses as in flight.
-      const runtime = prepared ?? (await prepareRuntime(deps, { name, plan, cached }));
-      if (runtime.isErr()) return err(runtime.error);
+      // Set: a keyed row `hasKeyedRun` saw is recovered, never inserted, since nothing deletes `skill_runs` rows.
+      if (runtime === undefined) {
+        throw new Error(`invoke: run ${runId} was inserted under a key that already had a row`);
+      }
       const executed = await executeRun(deps, {
         run: { id: runId, createdAt },
         skill,
         cached,
         inputs: opts.inputs,
         runAs: opts.runAs,
-        runtime: runtime.value,
+        runtime,
       });
       return ok(await finishRun(deps, { runId, skillName: name, cached, executed }));
     })
@@ -159,13 +161,13 @@ async function prepareRuntime(
     .with({ kind: "wasm" }, async () =>
       (await deps.runtime.resolveTier1Packages(cached.lockfile))
         .map((packages): SkillRuntime => ({ kind: "wasm", packages }))
-        .mapErr(
-          (error): SkillInvokeRejection => ({
-            kind: "tier1_packages_unavailable",
-            name,
-            error,
-          }),
-        ),
+        .mapErr((error): SkillInvokeRejection => {
+          log.warn(
+            { skillName: name, error: describeTier1PackagesError(error) },
+            "skill invocation refused: tier-1 packages unavailable",
+          );
+          return { kind: "tier1_packages_unavailable", name, error };
+        }),
     )
     .with({ kind: "pool" }, async ({ sandbox }) =>
       ok({ kind: "pool", pool: await deps.warmPool.ensure(sandbox) }),
