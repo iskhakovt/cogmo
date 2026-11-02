@@ -1,6 +1,7 @@
 import { InngestTestEngine } from "@inngest/test";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { mock } from "vitest-mock-extended";
+import { z } from "zod";
 import { profiles, users } from "../agent/store/schema.js";
 import type { Database, Transactor } from "../db/index.js";
 import { inngest } from "../inngest/client.js";
@@ -248,6 +249,12 @@ describe("runSkillCronTick", () => {
   });
 });
 
+/** The event Inngest triggers a cron function with. */
+const CRON_TICK = { name: "inngest/scheduled.timer", data: { cron: "* * * * *" } };
+
+/** The `_send` argument of a `fan-out` batch; only the dedup ids are read. */
+const FanOutArgsSchema = z.object({ payload: z.array(z.object({ id: z.string() })) });
+
 describe("createSkillCronTicker (Inngest wiring)", () => {
   let sendSpy: ReturnType<typeof spyOnInngestSend>;
   beforeEach(() => {
@@ -268,7 +275,7 @@ describe("createSkillCronTicker (Inngest wiring)", () => {
       inngest,
     );
     expect(fn.opts.id).toBe("skill-cron-ticker");
-    expect(fn.opts.retries).toBe(0);
+    expect(fn.opts.retries).toBe(3);
     expect(fn.opts.concurrency).toEqual({ limit: 1 });
     expect(fn.opts.triggers).toEqual([{ cron: "* * * * *" }]);
   });
@@ -329,7 +336,7 @@ describe("createSkillCronTicker (Inngest wiring)", () => {
 
     await new InngestTestEngine({
       function: fn,
-      events: [{ name: "inngest/function.invoked", data: {} } as never],
+      events: [CRON_TICK],
     }).execute();
 
     expect(sendSpy).toHaveBeenCalledTimes(1);
@@ -344,6 +351,57 @@ describe("createSkillCronTicker (Inngest wiring)", () => {
     for (const event of call.payload) {
       expect(event.id).toBe(`${event.data.skillId}:${event.data.scheduledFor}`);
     }
+  });
+
+  /**
+   * One ticker run as the Inngest server drives it: `lock-and-advance` runs
+   * and is memoized, then each attempt replays it and runs `fan-out`. A
+   * failed `fan-out` is retried while its budget lasts; the server gives
+   * each step `retries + 1` attempts.
+   */
+  async function runTick(fn: ReturnType<typeof createSkillCronTicker>): Promise<void> {
+    const engine = new InngestTestEngine({
+      function: fn,
+      events: [CRON_TICK],
+    });
+    const advanced = await engine.executeStep("lock-and-advance");
+    const attempts = expectDefined(fn.opts.retries, "retries") + 1;
+    let lastError: unknown;
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      // A fresh array per attempt: the engine appends every step it ran to
+      // the one it is given, which would memoize the failed `fan-out`.
+      const steps = [{ id: "lock-and-advance", handler: () => advanced.result }];
+      const { error } = await engine.execute({ steps });
+      if (error === undefined) return;
+      lastError = error;
+    }
+    // Every attempt failed: surface the run's error instead of an empty delivery.
+    throw lastError;
+  }
+
+  it("delivers an advanced row's fire when the fan-out fails once", async () => {
+    // `lock-and-advance` commits the advance before `fan-out` sends, so the
+    // next minute's tick no longer finds the row due: the run's own retry
+    // is the only path that still delivers this fire.
+    const row = await seedScheduled({
+      schedule: "0 8 * * *",
+      scheduleNextRunAt: new Date("2026-06-01T08:00:00Z"),
+    });
+    sendSpy.mockRejectedValueOnce(new Error("event API unreachable"));
+    const tickAt = (iso: string) =>
+      createSkillCronTicker(
+        { runInTx: tx, store, userTimezone: "UTC", now: () => new Date(iso) },
+        inngest,
+      );
+
+    await runTick(tickAt("2026-06-01T09:00:00Z"));
+    await runTick(tickAt("2026-06-01T09:01:00Z"));
+
+    const delivered = sendSpy.mock.calls.flatMap(([arg], i) => {
+      if (sendSpy.mock.settledResults[i]?.type !== "fulfilled") return [];
+      return FanOutArgsSchema.parse(arg).payload.map((event) => event.id);
+    });
+    expect(delivered).toEqual([`${row.id}:2026-06-01T08:00:00.000Z`]);
   });
 
   it("does NOT re-run lock-and-advance when Inngest replays with a cached step result", async () => {
@@ -373,7 +431,7 @@ describe("createSkillCronTicker (Inngest wiring)", () => {
     ];
     await new InngestTestEngine({
       function: fn,
-      events: [{ name: "inngest/function.invoked", data: {} } as never],
+      events: [CRON_TICK],
       steps: [{ id: "lock-and-advance", handler: () => cachedEvents }],
     }).execute();
 
