@@ -73,17 +73,15 @@ function setup(): {
 }
 
 describe("listAllSkills", () => {
-  const list = listAllSkills;
-  const read = "listAllSkills" as const;
   it("attaches each skill's pending deploy and leaves the others null", async () => {
     const { store, runInTx } = setup();
-    store[read].mockResolvedValue([
+    store.listAllSkills.mockResolvedValue([
       skillRow(),
-      skillRow({ id: "skill-2", name: "other", disabled: read === "listAllSkills" }),
+      skillRow({ id: "skill-2", name: "other", disabled: true }),
     ]);
     store.listPendingDeploys.mockResolvedValue([pendingDeploy()]);
 
-    const summaries = await list({ store, runInTx });
+    const summaries = await listAllSkills({ store, runInTx });
 
     expect(summaries).toEqual([
       {
@@ -100,25 +98,25 @@ describe("listAllSkills", () => {
 
   it("reads the skills and the pending deploys in one transaction", async () => {
     const { store, runInTx, txCount } = setup();
-    store[read].mockResolvedValue([skillRow()]);
+    store.listAllSkills.mockResolvedValue([skillRow()]);
     store.listPendingDeploys.mockResolvedValue([]);
 
-    await list({ store, runInTx });
+    await listAllSkills({ store, runInTx });
 
     expect(txCount()).toBe(1);
-    expect(store[read]).toHaveBeenCalledWith(FAKE_TX);
+    expect(store.listAllSkills).toHaveBeenCalledWith(FAKE_TX);
     expect(store.listPendingDeploys).toHaveBeenCalledWith(FAKE_TX);
   });
 
   it("shows the newest of two pending deploys for one skill", async () => {
     const { store, runInTx } = setup();
-    store[read].mockResolvedValue([skillRow()]);
+    store.listAllSkills.mockResolvedValue([skillRow()]);
     store.listPendingDeploys.mockResolvedValue([
       pendingDeploy({ id: "deploy-old", gitSha: "c".repeat(40) }),
       pendingDeploy({ id: "deploy-new" }),
     ]);
 
-    const [summary] = await list({ store, runInTx });
+    const [summary] = await listAllSkills({ store, runInTx });
 
     expect(summary?.pendingDeploy).toEqual({
       id: "deploy-new",
@@ -129,10 +127,10 @@ describe("listAllSkills", () => {
 
   it("ignores a pending deploy whose skill is not in the listing", async () => {
     const { store, runInTx } = setup();
-    store[read].mockResolvedValue([skillRow()]);
+    store.listAllSkills.mockResolvedValue([skillRow()]);
     store.listPendingDeploys.mockResolvedValue([pendingDeploy({ skillId: "skill-elsewhere" })]);
 
-    const summaries = await list({ store, runInTx });
+    const summaries = await listAllSkills({ store, runInTx });
 
     expect(summaries.map((s) => s.pendingDeploy)).toEqual([null]);
   });

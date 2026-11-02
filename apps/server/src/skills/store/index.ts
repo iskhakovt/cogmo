@@ -377,13 +377,12 @@ export interface SkillStore {
    */
   listReachableLockfileHashes(tx: Transaction): Promise<ReadonlySet<string>>;
   /**
-   * True iff the version `(skill_id, git_sha)` went live: a `skill_deploys`
-   * row with `status = 'live'`, or `'rolled_back'` (the owner put that code
-   * live). Used by `enable` to gate re-activation: a never-approved-then-denied
-   * first deploy leaves the skills row at `disabled=true` with the rejected
-   * sha; `/enable foo` without this check would smuggle code past the approval
-   * gate. And by register and rollback for `prior_git_sha`, the live version
-   * a deploy replaces.
+   * True iff at least one `skill_deploys` row exists with the given
+   * `(skill_id, git_sha)` and `status = 'live'`. Used by `enable` to gate
+   * re-activation: a never-approved-then-denied first deploy leaves the
+   * skills row at `disabled=true` with the rejected sha; `/enable foo`
+   * without this check would smuggle code past the approval gate.
+   * Rolled-back skills still pass (the prior live row remains).
    */
   hasLiveDeployForSkill(
     tx: Transaction,
@@ -575,6 +574,26 @@ export class DrizzleSkillStore implements SkillStore {
         and(
           eq(skillDeploys.skillId, params.skillId),
           eq(skillDeploys.gitSha, params.gitSha),
+          eq(skillDeploys.status, "live"),
+        ),
+      )
+      .limit(1);
+    return rows.length > 0;
+  }
+
+  /**
+   * Whether the version `(skill_id, git_sha)` was ever current: a `live` row,
+   * or a `rolled_back` one (the owner put that code live). The `prior_git_sha`
+   * a register or rollback records is the current version only when it was.
+   */
+  async #versionWentLive(tx: Transaction, params: { skillId: string; gitSha: string }) {
+    const rows = await tx
+      .select({ id: skillDeploys.id })
+      .from(skillDeploys)
+      .where(
+        and(
+          eq(skillDeploys.skillId, params.skillId),
+          eq(skillDeploys.gitSha, params.gitSha),
           inArray(skillDeploys.status, ["live", "rolled_back"]),
         ),
       )
@@ -693,7 +712,7 @@ export class DrizzleSkillStore implements SkillStore {
     // went live (a denied or pending first deploy) is no prior version.
     const priorGitSha =
       existing &&
-      (await this.hasLiveDeployForSkill(tx, { skillId: existing.id, gitSha: existing.gitSha }))
+      (await this.#versionWentLive(tx, { skillId: existing.id, gitSha: existing.gitSha }))
         ? existing.gitSha
         : null;
 
@@ -958,7 +977,7 @@ export class DrizzleSkillStore implements SkillStore {
       .values({
         skillId: existing.id,
         gitSha: params.toGitSha,
-        priorGitSha: (await this.hasLiveDeployForSkill(tx, {
+        priorGitSha: (await this.#versionWentLive(tx, {
           skillId: existing.id,
           gitSha: existing.gitSha,
         }))

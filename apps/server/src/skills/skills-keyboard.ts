@@ -45,7 +45,7 @@ export function buildSkillsLiveKeyboard(skillId: string): SkillsInlineKeyboardMa
 }
 
 /** `id` is the pending deploy's id for approve and deny, the skill's for disable. */
-export function encodeSkillsDeployCallback(id: string, action: SkillsDeployAction): string {
+function encodeSkillsDeployCallback(id: string, action: SkillsDeployAction): string {
   // Telegram limit: callback_data ≤ 64 bytes. `skill:` (6) + UUID (36) + `:` (1)
   // + longest action `disable` (7) = 50 bytes. Comfortable headroom.
   return `${PREFIX}${SEP}${id}${SEP}${action}`;

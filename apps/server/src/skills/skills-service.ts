@@ -11,9 +11,10 @@ import type { SkillRunIdentity } from "./store/index.js";
  * exposes only the authoring-loop step: register a freshly-pushed feature
  * branch, with the turn's conversation as the deploy's origin.
  *
- * Every register is announced in the turn's conversation
+ * Every deploy is announced in the turn's conversation
  * (`announceDeployOutcome`): a channel posts what went live with a Disable
- * button, a pending deploy with Approve / Deny, or the rejection's errors.
+ * button, or a pending deploy with Approve / Deny. A rejection is not: the
+ * model relays it to the user.
  */
 export interface SkillsService {
   register(opts: { branch: string }): Promise<RegisterResult>;

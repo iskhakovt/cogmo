@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CODING_TASK_FAILURE_REASONS } from "../agent/coding/types.js";
 import { MAX_GATE_REMINDERS, MAX_SLUG_LENGTH } from "../agent/pipeline/types.js";
 import { SKILL_RISK_REASONS } from "../skills/risk-reasons.js";
+import { skillRiskTier } from "../skills/store/schema.js";
 import { SKILL_EFFECTS } from "../skills/types.js";
 import {
   buildConversationCooldownClearedEvent,
@@ -189,6 +190,7 @@ describe("skills/deploy/outcome", () => {
 
   it("names exactly the domain's effects and risk reasons", () => {
     const live = skillsDeployOutcome.schema.options[0];
+    expect(live.shape.riskTier.options).toEqual([...skillRiskTier.enumValues]);
     expect(live.shape.reasons.element.options).toEqual([...SKILL_RISK_REASONS]);
     expect(live.shape.effects.shape.declared.element.options).toEqual([...SKILL_EFFECTS]);
   });
