@@ -492,7 +492,7 @@ samples 10% of root traces while keeping child spans consistent.
 
 ## Updating
 
-Back up the database, then pull the new tag and restart `serve` on it. `serve` applies pending migrations at boot under an advisory lock, so no separate migration step is needed. Migrations are forward-only.
+Back up the database, then pull the new tag and restart `serve` on it. `serve` applies pending migrations at boot under an advisory lock, so no separate migration step is needed. Migrations are forward-only. Stop the old `serve` before starting the new one: once the skills egress proxy ships, a second `serve` waits for the proxy lock at its skills stage and does not answer `/health` until the first has exited (design/skills.md → Egress proxy → Proxy holder).
 
 ```bash
 docker pull ghcr.io/iskhakovt/cogmo:<new-version>
