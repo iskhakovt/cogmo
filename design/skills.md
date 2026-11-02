@@ -1355,7 +1355,7 @@ Skills are invoked via Inngest events:
 | Trigger | Source | Handling |
 |-|-|-|
 | **Manual (agent tool)** | LLM calls the skill's own tool (one tool per skill — see below) | The tool handler calls `runner.invoke` inside its durable tool step → dispatcher → worker → result returned to the LLM |
-| **Cron** | Inngest cron, one per scheduled skill | Dispatcher → worker. Result handled by skill itself (posts to channel, writes memory, etc.) |
+| **Cron** | The single one-minute ticker (`skill-cron-ticker`), which locks due `skills` rows, advances them and fans out one `skills/cron.fire` per row | Dispatcher → worker. Result handled by skill itself (posts to channel, writes memory, etc.) |
 | **Event-driven** (future) | Inngest event subscription | Same path as cron |
 
 Manual invocations are synchronous from the LLM's perspective — tool result returned before the next turn. Cron invocations are fire-and-forget; skill output is whatever side effects the skill itself emits.
