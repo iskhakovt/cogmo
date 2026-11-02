@@ -89,6 +89,8 @@ const STUB_LOG: ClassifierLog = {
   declared_secrets: [],
   declared_dependencies: [],
   validation_errors: [],
+  reasons: [],
+  declared_network: null,
 };
 
 function makeSkillParams(overrides: Partial<InsertSkillParams> = {}): InsertSkillParams {

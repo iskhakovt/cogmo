@@ -45,6 +45,7 @@ import {
   IMPORT_RULES,
   REJECT_ON_UNDECLARED,
 } from "./ast-rules.js";
+import type { SkillsCapabilities } from "./capabilities.js";
 import type { ClassifierLog, SkillEffect, SkillManifest } from "./types.js";
 
 export const AST_CLASSIFIER_VERSION = "ast-1";
@@ -396,6 +397,7 @@ function highestDepCategory(deps: ReadonlyArray<string>): "none" | "notify" | "a
 export async function classifyWithAst(
   manifest: SkillManifest,
   body: string,
+  capabilities: SkillsCapabilities,
 ): Promise<ClassifierLog> {
   const parser = await getParser();
   const tree = parser.parse(body);
@@ -407,7 +409,7 @@ export async function classifyWithAst(
       { bodyLength: body.length },
       "tree-sitter returned null tree; classifying as no-detect",
     );
-    return classifyFromDeclarationsOnly(manifest);
+    return classifyFromDeclarationsOnly(manifest, capabilities);
   }
 
   // `tree.delete()` releases the WASM-heap allocation backing the
@@ -456,6 +458,9 @@ export async function classifyWithAst(
     declared_secrets: declaredSecrets,
     declared_dependencies: manifest.dependencies,
     validation_errors,
+    reasons: [],
+    declared_network: manifest.network?.allow ?? null,
+    capabilities,
   };
 }
 
@@ -465,7 +470,10 @@ export async function classifyWithAst(
  * fallback path — that's `classifier.ts`'s catch block calling the
  * stub. This is a defensive degenerate case.
  */
-function classifyFromDeclarationsOnly(manifest: SkillManifest): ClassifierLog {
+function classifyFromDeclarationsOnly(
+  manifest: SkillManifest,
+  capabilities: SkillsCapabilities,
+): ClassifierLog {
   const declaredSecrets = manifest.secrets.map((s) => (typeof s === "string" ? s : s.name));
   const risk_tier = computeRiskTier({
     declared: manifest.effects,
@@ -484,5 +492,8 @@ function classifyFromDeclarationsOnly(manifest: SkillManifest): ClassifierLog {
     declared_secrets: declaredSecrets,
     declared_dependencies: manifest.dependencies,
     validation_errors: [],
+    reasons: [],
+    declared_network: manifest.network?.allow ?? null,
+    capabilities,
   };
 }

@@ -12,6 +12,8 @@ export interface SkillSummary {
   riskTier: SkillRiskTier;
   disabled: boolean;
   gitSha: string;
+  /** The skill's deploy awaiting approval, or null when none is pending. */
+  pendingDeploy: { id: string; gitSha: string } | null;
 }
 
 /**
@@ -53,6 +55,7 @@ function rowToSummary(r: SkillRow): SkillSummary {
     riskTier: r.riskTier,
     disabled: r.disabled,
     gitSha: r.gitSha,
+    pendingDeploy: null,
   };
 }
 

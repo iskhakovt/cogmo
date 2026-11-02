@@ -30,6 +30,8 @@ function classifierLog(effects: SkillEffects): ClassifierLog {
     declared_secrets: [],
     declared_dependencies: [],
     validation_errors: [],
+    reasons: [],
+    declared_network: null,
   };
 }
 

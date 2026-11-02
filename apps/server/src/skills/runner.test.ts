@@ -691,6 +691,8 @@ inputs:
           declared_secrets: [],
           declared_dependencies: [],
           validation_errors: [],
+          reasons: [],
+          declared_network: null,
         },
         resolvedAt: new Date(),
       }),

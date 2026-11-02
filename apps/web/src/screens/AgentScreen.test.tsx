@@ -59,6 +59,7 @@ function makeSkill(overrides: Partial<SkillListEntry> = {}): SkillListEntry {
     riskTier: "auto",
     disabled: false,
     gitSha: "abcdef1234567890",
+    pendingDeploy: null,
     ...overrides,
   };
 }

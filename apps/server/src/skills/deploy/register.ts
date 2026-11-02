@@ -191,7 +191,7 @@ async function prepareRegister(
     }
   }
 
-  const classifierLog = await classifyManifest(manifest, body);
+  const classifierLog = await classifyManifest(manifest, body, deps.capabilities);
   if (classifierLog.validation_errors.length > 0) {
     // Undeclared dangerous effects → reject the deploy outright with
     // the per-effect labels surfaced to the user. Don't even insert

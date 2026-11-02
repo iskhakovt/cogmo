@@ -14,6 +14,7 @@
 
 import { describe, expect, it } from "vitest";
 import { __resetParserForTests, classifyWithAst } from "./ast-classifier.js";
+import { BUILD_CAPABILITIES } from "./capabilities.js";
 import type { SkillManifest } from "./types.js";
 
 function manifestWith(overrides: Partial<SkillManifest> = {}): SkillManifest {
@@ -39,6 +40,7 @@ describe("classifyWithAst — empty / harmless body", () => {
 async def run(inputs, ctx):
     return {"ok": True}
 `,
+      BUILD_CAPABILITIES,
     );
     expect(log.risk_tier).toBe("auto");
     expect(log.detected_effects).toEqual([]);
@@ -53,6 +55,7 @@ async def run(inputs, ctx):
     memories = await ctx.memory.recall("anything")
     return {"count": len(memories["memories"])}
 `,
+      BUILD_CAPABILITIES,
     );
     expect(log.risk_tier).toBe("notify");
     expect(log.detected_effects).toEqual([]);
@@ -69,6 +72,7 @@ async def run(inputs, ctx):
     msg = "I would never call subprocess.run() or os.system() on you."
     return {"msg": msg}
 `,
+      BUILD_CAPABILITIES,
     );
     expect(log.risk_tier).toBe("auto");
     expect(log.detected_effects).toEqual([]);
@@ -83,6 +87,7 @@ async def run(inputs, ctx):
     # os.remove() would delete a file; we don't.
     return {"ok": True}
 `,
+      BUILD_CAPABILITIES,
     );
     expect(log.risk_tier).toBe("auto");
     expect(log.detected_effects).toEqual([]);
@@ -112,6 +117,7 @@ async def run(inputs, ctx):
     ${call}
     return {"ok": True}
 `,
+      BUILD_CAPABILITIES,
     );
     expect(log.detected_effects).toContain("spawns_subprocess");
     expect(log.risk_tier).toBe("approve");
@@ -128,6 +134,7 @@ async def run(inputs, ctx):
     subprocess.run(["echo", "hi"])
     return {"ok": True}
 `,
+      BUILD_CAPABILITIES,
     );
     expect(log.risk_tier).toBe("approve");
     expect(log.detected_effects).toEqual(["spawns_subprocess"]);
@@ -144,6 +151,7 @@ async def run(inputs, ctx):
     open("/tmp/x", "w").write("hi")
     return {"ok": True}
 `,
+      BUILD_CAPABILITIES,
     );
     expect(log.detected_effects).toContain("writes_filesystem");
     expect(log.risk_tier).toBe("approve");
@@ -165,6 +173,7 @@ async def run(inputs, ctx):
     open("/tmp/x", "${mode}")
     return {"ok": True}
 `,
+      BUILD_CAPABILITIES,
     );
     if (shouldDetect) {
       expect(log.detected_effects).toContain("writes_filesystem");
@@ -185,6 +194,7 @@ async def run(inputs, ctx):
     shutil.rmtree("/tmp/c")
     return {"ok": True}
 `,
+      BUILD_CAPABILITIES,
     );
     expect(log.detected_effects).toContain("writes_filesystem");
     expect(log.risk_tier).toBe("approve");
@@ -199,6 +209,7 @@ async def run(inputs, ctx):
     Path("/tmp/x").write_text("hi")
     return {"ok": True}
 `,
+      BUILD_CAPABILITIES,
     );
     expect(log.detected_effects).toContain("writes_filesystem");
   });
@@ -212,6 +223,7 @@ async def run(inputs, ctx):
     os.remove("/tmp/x")
     return {"ok": True}
 `,
+      BUILD_CAPABILITIES,
     );
     expect(log.detected_effects).toContain("writes_filesystem");
     expect(log.validation_errors).toEqual([]);
@@ -227,6 +239,7 @@ import smtplib
 async def run(inputs, ctx):
     return {"ok": True}
 `,
+      BUILD_CAPABILITIES,
     );
     expect(log.detected_effects).toContain("sends_email");
     expect(log.risk_tier).toBe("approve");
@@ -242,6 +255,7 @@ from smtplib import SMTP
 async def run(inputs, ctx):
     return {"ok": True}
 `,
+      BUILD_CAPABILITIES,
     );
     expect(log.detected_effects).toContain("sends_email");
   });
@@ -254,6 +268,7 @@ import json, smtplib as mail, stripe.api_resources
 async def run(inputs, ctx):
     return {"ok": True}
 `,
+      BUILD_CAPABILITIES,
     );
     expect(log.detected_effects.sort()).toEqual(["financial", "sends_email"]);
   });
@@ -266,6 +281,7 @@ import stripe
 async def run(inputs, ctx):
     return {"ok": True}
 `,
+      BUILD_CAPABILITIES,
     );
     expect(log.detected_effects).toContain("financial");
     expect(log.risk_tier).toBe("approve");
@@ -279,6 +295,7 @@ import slack_sdk
 async def run(inputs, ctx):
     return {"ok": True}
 `,
+      BUILD_CAPABILITIES,
     );
     expect(log.detected_effects).toContain("sends_message");
   });
@@ -294,6 +311,7 @@ import subprocess
 async def run(inputs, ctx):
     return {"ok": True}
 `,
+      BUILD_CAPABILITIES,
     );
     expect(log.detected_effects).toContain("spawns_subprocess");
   });
@@ -312,6 +330,7 @@ async def run(inputs, ctx):
     getattr(__import__("os"), "system")("ls")
     return {"ok": True}
 `,
+      BUILD_CAPABILITIES,
     );
     expect(log.detected_effects).not.toContain("spawns_subprocess");
     // Still gets auto because nothing in the rules table matches.
@@ -331,6 +350,7 @@ async def run(inputs, ctx):
     sp.run(["ls"])
     return {"ok": True}
 `,
+      BUILD_CAPABILITIES,
     );
     expect(log.detected_effects).toContain("spawns_subprocess");
   });
@@ -346,6 +366,7 @@ async def run(inputs, ctx):
     smtplib.SMTP("localhost").sendmail("a", "b", "c")
     return {"ok": True}
 `,
+      BUILD_CAPABILITIES,
     );
     expect(log.risk_tier).toBe("approve");
     expect(log.validation_errors).toEqual([]);
@@ -362,6 +383,7 @@ async def run(inputs, ctx):
     subprocess.run(["ls"])
     return {"ok": True}
 `,
+      BUILD_CAPABILITIES,
     );
     expect(log.detected_effects.sort()).toEqual(["sends_email", "spawns_subprocess"]);
     expect(log.validation_errors.length).toBe(2);
@@ -376,6 +398,7 @@ async def run(inputs, ctx):
 async def run(inputs, ctx):
     return {"ok": True}
 `,
+      BUILD_CAPABILITIES,
     );
     expect(log.risk_tier).toBe("approve");
     expect(log.declared_secrets).toEqual(["a", "b", "c"]);
@@ -397,15 +420,24 @@ import smtplib
 async def run(inputs, ctx):
     return {"ok": True}
 `,
+      BUILD_CAPABILITIES,
     );
     expect(log.detected_effects).toContain("sends_email");
   });
 
   it("__resetParserForTests forces a clean re-init", async () => {
     // First call inits the parser; reset; second call re-inits cleanly.
-    await classifyWithAst(manifestWith(), `async def run(inputs, ctx):\n    return {}`);
+    await classifyWithAst(
+      manifestWith(),
+      `async def run(inputs, ctx):\n    return {}`,
+      BUILD_CAPABILITIES,
+    );
     __resetParserForTests();
-    const log = await classifyWithAst(manifestWith(), `async def run(inputs, ctx):\n    return {}`);
+    const log = await classifyWithAst(
+      manifestWith(),
+      `async def run(inputs, ctx):\n    return {}`,
+      BUILD_CAPABILITIES,
+    );
     expect(log.risk_tier).toBe("auto");
   });
 });
@@ -423,6 +455,7 @@ async def run(inputs, ctx):
     const log = await classifyWithAst(
       manifestWith({ network: { allow: ["api.example.com"] } }),
       BODY,
+      BUILD_CAPABILITIES,
     );
     expect(log.risk_tier).toBe("notify");
   });
@@ -437,6 +470,7 @@ async def run(inputs, ctx):
         network: { allow: ["api.example.com"] },
       }),
       BODY,
+      BUILD_CAPABILITIES,
     );
     expect(log.risk_tier).toBe("approve");
   });
@@ -448,6 +482,7 @@ async def run(inputs, ctx):
         network: { allow: ["api.example.com"] },
       }),
       BODY,
+      BUILD_CAPABILITIES,
     );
     expect(log.risk_tier).toBe("approve");
   });
@@ -461,6 +496,7 @@ async def run(inputs, ctx):
 async def run(inputs, ctx):
     return {"ok": True}
 `,
+      BUILD_CAPABILITIES,
     );
     expect(log.risk_tier).toBe("auto");
   });
@@ -472,6 +508,7 @@ async def run(inputs, ctx):
         network: { allow: ["api.example.com"] },
       }),
       BODY,
+      BUILD_CAPABILITIES,
     );
     expect(log.risk_tier).toBe("approve");
   });

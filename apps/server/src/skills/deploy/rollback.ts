@@ -54,7 +54,7 @@ export async function rollbackSkill(
     };
   }
 
-  const classifierLog = await classifyManifest(manifest, body);
+  const classifierLog = await classifyManifest(manifest, body, deps.capabilities);
   if (classifierLog.validation_errors.length > 0) {
     // Same UX-gate semantics as `register`: a target sha whose body
     // declares effects out of sync with the manifest is a foot-gun

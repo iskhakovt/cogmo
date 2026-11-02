@@ -2117,6 +2117,8 @@ effects:
               declared_secrets: [],
               declared_dependencies: [],
               validation_errors: [],
+              reasons: [],
+              declared_network: null,
             },
             applyFilesystem: async () => {
               throw new Error("simulated git update-ref failure");

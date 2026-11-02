@@ -93,6 +93,7 @@ describe("Transport.skills.list", () => {
         riskTier: "auto",
         disabled: false,
         gitSha: "111",
+        pendingDeploy: null,
       } satisfies SkillSummary,
       {
         name: "beta",
@@ -100,6 +101,7 @@ describe("Transport.skills.list", () => {
         riskTier: "approve",
         disabled: true,
         gitSha: "222",
+        pendingDeploy: null,
       } satisfies SkillSummary,
     ]);
     const skills = makeSkills({ runner, store: mock<SkillStore>() });
@@ -107,8 +109,22 @@ describe("Transport.skills.list", () => {
     const result = await skills.list(KNOWN_HANDLE);
     expect(result.isOk()).toBe(true);
     expect(result._unsafeUnwrap()).toEqual([
-      { name: "alpha", tier: "wasm", riskTier: "auto", disabled: false, gitSha: "111" },
-      { name: "beta", tier: "container", riskTier: "approve", disabled: true, gitSha: "222" },
+      {
+        name: "alpha",
+        tier: "wasm",
+        riskTier: "auto",
+        disabled: false,
+        gitSha: "111",
+        pendingDeploy: null,
+      },
+      {
+        name: "beta",
+        tier: "container",
+        riskTier: "approve",
+        disabled: true,
+        gitSha: "222",
+        pendingDeploy: null,
+      },
     ]);
   });
 
@@ -317,6 +333,8 @@ function makeDeployRow(overrides: Partial<SkillDeployRow> = {}): SkillDeployRow 
       declared_secrets: [],
       declared_dependencies: [],
       validation_errors: [],
+      reasons: [],
+      declared_network: null,
     },
     createdAt: new Date("2026-05-01T00:00:00Z"),
     resolvedAt: null,

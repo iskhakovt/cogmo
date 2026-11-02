@@ -160,6 +160,8 @@ export interface SkillListEntry {
   riskTier: SkillRiskTier;
   disabled: boolean;
   gitSha: string;
+  /** The skill's deploy awaiting approval, or null when none is pending. */
+  pendingDeploy: { id: string; gitSha: string } | null;
 }
 
 /**

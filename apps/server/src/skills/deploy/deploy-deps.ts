@@ -1,5 +1,6 @@
 import type { Transactor } from "../../db/index.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
+import type { SkillsCapabilities } from "../capabilities.js";
 import type { LockfileCompiler } from "../deps.js";
 import type { SkillSourceCache } from "../source-cache.js";
 import type { SkillRunIdentity, SkillStore } from "../store/index.js";
@@ -22,6 +23,8 @@ export interface DeployDeps {
    * null when there is none — the all-or-none pair `(schedule, nextRunAt)`.
    */
   scheduleNextRunAt(schedule: string | null): Date | null;
+  /** What this deployment enforces; the classifier reads it for the tier. */
+  capabilities: SkillsCapabilities;
 }
 
 /** The bare repo path, or a configuration error naming the method that needs it. */

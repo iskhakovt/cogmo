@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { __resetParserForTests, __setWasmPathForTests } from "./ast-classifier.js";
+import { BUILD_CAPABILITIES } from "./capabilities.js";
 import {
   AST_CLASSIFIER_VERSION,
   classifyManifest,
@@ -36,12 +37,12 @@ async def run(inputs, ctx):
  */
 describe("classifyManifest (live AST path)", () => {
   it("stamps the AST classifier version when AST runs successfully", async () => {
-    const log = await classifyManifest(makeManifest(), NOOP_BODY);
+    const log = await classifyManifest(makeManifest(), NOOP_BODY, BUILD_CAPABILITIES);
     expect(log.classifier_version).toBe(AST_CLASSIFIER_VERSION);
   });
 
   it("promotes empty-effects + harmless body to auto (the unlock)", async () => {
-    const log = await classifyManifest(makeManifest(), NOOP_BODY);
+    const log = await classifyManifest(makeManifest(), NOOP_BODY, BUILD_CAPABILITIES);
     expect(log.risk_tier).toBe("auto");
   });
 
@@ -49,12 +50,17 @@ describe("classifyManifest (live AST path)", () => {
     const log = await classifyManifest(
       makeManifest({ tier: "wasm", effects: ["reads_memory"] }),
       NOOP_BODY,
+      BUILD_CAPABILITIES,
     );
     expect(log.risk_tier).toBe("notify");
   });
 
   it("container tier still forces approve regardless of body", async () => {
-    const log = await classifyManifest(makeManifest({ tier: "container" }), NOOP_BODY);
+    const log = await classifyManifest(
+      makeManifest({ tier: "container" }),
+      NOOP_BODY,
+      BUILD_CAPABILITIES,
+    );
     expect(log.risk_tier).toBe("approve");
   });
 });
@@ -68,12 +74,12 @@ describe("classifyManifest (live AST path)", () => {
 describe.each([
   {
     label: "AST path",
-    classify: (m: SkillManifest) => classifyManifest(m, NOOP_BODY),
+    classify: (m: SkillManifest) => classifyManifest(m, NOOP_BODY, BUILD_CAPABILITIES),
     nonApproveTier: "auto" as const,
   },
   {
     label: "stub fallback",
-    classify: (m: SkillManifest) => Promise.resolve(classifyManifestStub(m)),
+    classify: (m: SkillManifest) => Promise.resolve(classifyManifestStub(m, BUILD_CAPABILITIES)),
     nonApproveTier: "notify" as const,
   },
 ])("dependencies — $label", ({ classify, nonApproveTier }) => {
@@ -134,13 +140,14 @@ describe.each([
  */
 describe("classifyManifestStub (fallback)", () => {
   it("stamps the stub classifier version", () => {
-    const log = classifyManifestStub(makeManifest());
+    const log = classifyManifestStub(makeManifest(), BUILD_CAPABILITIES);
     expect(log.classifier_version).toBe(STUB_CLASSIFIER_VERSION);
   });
 
   it("defaults harmless wasm-tier skills to notify", () => {
     const log = classifyManifestStub(
       makeManifest({ tier: "wasm", effects: ["reads_memory"], secrets: [] }),
+      BUILD_CAPABILITIES,
     );
     expect(log.risk_tier).toBe("notify");
   });
@@ -154,34 +161,38 @@ describe("classifyManifestStub (fallback)", () => {
     "spawns_subprocess",
     "writes_filesystem",
   ])("promotes %s to approve tier", (effect) => {
-    const log = classifyManifestStub(makeManifest({ effects: [effect] }));
+    const log = classifyManifestStub(makeManifest({ effects: [effect] }), BUILD_CAPABILITIES);
     expect(log.risk_tier).toBe("approve");
   });
 
   it("does NOT promote benign effects (reads_memory, writes_memory) to approve", () => {
     const log = classifyManifestStub(
       makeManifest({ effects: ["reads_memory", "writes_memory", "reads_user_data"] }),
+      BUILD_CAPABILITIES,
     );
     expect(log.risk_tier).toBe("notify");
   });
 
   it("promotes container-tier skills to approve regardless of effects", () => {
-    const log = classifyManifestStub(makeManifest({ tier: "container" }));
+    const log = classifyManifestStub(makeManifest({ tier: "container" }), BUILD_CAPABILITIES);
     expect(log.risk_tier).toBe("approve");
   });
 
   it("promotes 3+ secrets to approve (broad permissions)", () => {
-    const log = classifyManifestStub(makeManifest({ secrets: ["a", "b", "c"] }));
+    const log = classifyManifestStub(
+      makeManifest({ secrets: ["a", "b", "c"] }),
+      BUILD_CAPABILITIES,
+    );
     expect(log.risk_tier).toBe("approve");
   });
 
   it("keeps 2 secrets at notify (under threshold)", () => {
-    const log = classifyManifestStub(makeManifest({ secrets: ["a", "b"] }));
+    const log = classifyManifestStub(makeManifest({ secrets: ["a", "b"] }), BUILD_CAPABILITIES);
     expect(log.risk_tier).toBe("notify");
   });
 
   it("auto tier is unreachable in the stub", () => {
-    const log = classifyManifestStub(makeManifest());
+    const log = classifyManifestStub(makeManifest(), BUILD_CAPABILITIES);
     expect(log.risk_tier).not.toBe("auto");
   });
 
@@ -193,6 +204,7 @@ describe("classifyManifestStub (fallback)", () => {
           { name: "object_form", binding: { destination: "https://x", substitute: "url" } },
         ],
       }),
+      BUILD_CAPABILITIES,
     );
     expect(log.declared_secrets).toEqual(["plain_name", "object_form"]);
   });
@@ -224,6 +236,7 @@ describe("classifyManifest — fallback when AST parser is unloadable", () => {
     const log = await classifyManifest(
       makeManifest({ effects: ["sends_email"] }),
       "async def run(inputs, ctx):\n    return {}\n",
+      BUILD_CAPABILITIES,
     );
     expect(log.classifier_version).toBe(STUB_CLASSIFIER_VERSION);
     expect(log.risk_tier).toBe("approve");
@@ -243,6 +256,7 @@ describe("classifyManifest — fallback when AST parser is unloadable", () => {
     const log = await classifyManifest(
       makeManifest(),
       "async def run(inputs, ctx):\n    return {}\n",
+      BUILD_CAPABILITIES,
     );
     expect(log.classifier_version).toBe(STUB_CLASSIFIER_VERSION);
     expect(log.risk_tier).toBe("notify");
@@ -256,17 +270,21 @@ describe("classifyManifestStub — secrets alongside network", () => {
     // combination the AST path refuses outright.
     const log = classifyManifestStub(
       makeManifest({ secrets: ["api_key"], network: { allow: ["api.example.com"] } }),
+      BUILD_CAPABILITIES,
     );
     expect(log.risk_tier).toBe("approve");
   });
 
   it("leaves a network allowlist with no secrets at notify", () => {
-    const log = classifyManifestStub(makeManifest({ network: { allow: ["api.example.com"] } }));
+    const log = classifyManifestStub(
+      makeManifest({ network: { allow: ["api.example.com"] } }),
+      BUILD_CAPABILITIES,
+    );
     expect(log.risk_tier).toBe("notify");
   });
 
   it("leaves a secret with no network at notify", () => {
-    const log = classifyManifestStub(makeManifest({ secrets: ["api_key"] }));
+    const log = classifyManifestStub(makeManifest({ secrets: ["api_key"] }), BUILD_CAPABILITIES);
     expect(log.risk_tier).toBe("notify");
   });
 });

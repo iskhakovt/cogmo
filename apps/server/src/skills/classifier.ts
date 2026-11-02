@@ -5,6 +5,7 @@ import {
   APPROVE_SECRETS_THRESHOLD,
   categoriseDependency,
 } from "./ast-rules.js";
+import type { SkillsCapabilities } from "./capabilities.js";
 import type { ClassifierLog, SkillManifest } from "./types.js";
 
 /**
@@ -48,15 +49,16 @@ export { AST_CLASSIFIER_VERSION };
 export async function classifyManifest(
   manifest: SkillManifest,
   body: string,
+  capabilities: SkillsCapabilities,
 ): Promise<ClassifierLog> {
   try {
-    return await classifyWithAst(manifest, body);
+    return await classifyWithAst(manifest, body, capabilities);
   } catch (err) {
     log.warn(
       { event: "classifier_fallback", err, skillName: manifest.name },
       "ast classifier threw; falling back to declaration-only stub",
     );
-    return classifyManifestStub(manifest);
+    return classifyManifestStub(manifest, capabilities);
   }
 }
 
@@ -68,7 +70,10 @@ export async function classifyManifest(
  *
  * Exported for tests that want to exercise the fallback explicitly.
  */
-export function classifyManifestStub(manifest: SkillManifest): ClassifierLog {
+export function classifyManifestStub(
+  manifest: SkillManifest,
+  capabilities: SkillsCapabilities,
+): ClassifierLog {
   const declaredSecrets = manifest.secrets.map((s) => (typeof s === "string" ? s : s.name));
 
   const hasApproveEffect = manifest.effects.some((e) => APPROVE_GATING_EFFECTS.has(e));
@@ -98,5 +103,8 @@ export function classifyManifestStub(manifest: SkillManifest): ClassifierLog {
     declared_secrets: declaredSecrets,
     declared_dependencies: manifest.dependencies,
     validation_errors: [],
+    reasons: [],
+    declared_network: manifest.network?.allow ?? null,
+    capabilities,
   };
 }
