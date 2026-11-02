@@ -112,11 +112,15 @@ interface SessionSpec {
    */
   dockerSocket: boolean;
   /**
-   * `[proposed]` (skills S4) `"none"` runs the session with no interface but
-   * loopback; every skills tier-2 session sets it. Absent, the daemon's
-   * default bridge.
+   * `[proposed]` (skills S4) Required, so every caller states it. `"none"`
+   * runs the session with no interface but loopback; `"bridge"` is the
+   * daemon's default bridge. The create refuses an `egressSocket` with
+   * `"bridge"`. From skills S7 the skills session schema (a Zod refinement)
+   * requires an `egressSocket` on every `"none"` session but the deps
+   * reaper's, which runs no skill code and needs no egress
+   * (skills.md → Egress proxy → One path).
    */
-  network?: "none";
+  network: "bridge" | "none";
   /**
    * `[proposed]` (skills S7) A per-session Unix socket the backend creates
    * before the container, whose acceptor pipes each connection to
@@ -125,15 +129,25 @@ interface SessionSpec {
    */
   egressSocket?: { targetPort: number; containerPath: string };
   /**
-   * `[proposed]` (skills S14) `ReadonlyRootfs`, a tmpfs at each path and
-   * `ShmSize` (skills.md → State reset between tasks → Inter-task wipe).
-   * The skills venv cache volume spec gains `readOnly`, set on every
-   * session but a populate session (skills.md → Populate).
+   * `[proposed]` (skills S14) `ReadonlyRootfs`, a tmpfs at each path,
+   * `ShmSize` and `IpcMode: private` (skills.md → State reset between
+   * tasks → Inter-task wipe). `execGroups` is the tmpfs at
+   * `/run/cogmo-exec`, mode 0700, owned by the supervisor uid, where the
+   * backend's exec wrappers record their process groups; it is required,
+   * so no session with a read-only root starts without it.
    */
   readOnlyRoot?: {
-    tmpfs: ReadonlyArray<{ path: string; sizeBytes: number }>;
+    tmpfs: ReadonlyArray<{ path: string; sizeBytes: number; uid: number; mode: number }>;
+    execGroups: { path: "/run/cogmo-exec"; sizeBytes: number; uid: number; mode: 0o700 };
     shmSizeBytes: number;
   };
+  /**
+   * `[proposed]` (skills S14) The skills venv cache volume, mounted at
+   * `/skill-venvs`, in place of `depsCacheVolume`. Absent, no venv volume
+   * is mounted. Only a populate session sets `readOnly: false`
+   * (skills.md → Populate → Populate session).
+   */
+  dependencyCache?: { volume: string; readOnly: boolean };
 }
 
 interface SandboxSession {
