@@ -129,7 +129,7 @@ describe("createSkillDepsReaper", () => {
     expect(sandbox.create).not.toHaveBeenCalled();
   });
 
-  it("reaps the tier-1 wheel directories with the reachable set under the installed Pyodide release", async () => {
+  it("reaps the wasm wheel directories with the reachable set under the installed Pyodide release", async () => {
     const { version } = (await loadBundledPackages())._unsafeUnwrap();
     const wheelsRoot = await mkdtemp(join(tmpdir(), "deps-reaper-wheels-"));
     const reachable = `${"a".repeat(64)}-pyodide${version}`;
@@ -164,7 +164,7 @@ describe("createSkillDepsReaper", () => {
 
       expect(result).toEqual({
         venvs: { skipped: true },
-        tier1Wheels: { reapedDirs: expect.arrayContaining([unreachable, previousRelease]) },
+        wasmWheels: { reapedDirs: expect.arrayContaining([unreachable, previousRelease]) },
       });
       expect(await readdir(wheelsRoot)).toEqual([reachable]);
     } finally {
@@ -202,7 +202,7 @@ describe("createSkillDepsReaper", () => {
 
         expect(error).toBeUndefined();
         expect(result).toMatchObject({
-          tier1Wheels: { reapedDirs: [], error: "bundled_unreadable" },
+          wasmWheels: { reapedDirs: [], error: "bundled_unreadable" },
         });
       } finally {
         await chmod(wheelsRoot, 0o700);
@@ -244,7 +244,7 @@ describe("createSkillDepsReaper", () => {
 
       expect(result).toEqual({
         venvs: { skipped: true },
-        tier1Wheels: { reapedDirs: [], error: "bundled_unreadable" },
+        wasmWheels: { reapedDirs: [], error: "bundled_unreadable" },
       });
       expect(await readdir(wheelsRoot)).toEqual([unreachable]);
     } finally {

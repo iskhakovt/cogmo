@@ -165,7 +165,7 @@ export interface InvokeParams {
 }
 
 /**
- * A tier-2 task's outcome. `rusage` comes from the task process for every
+ * A container task's outcome. `rusage` comes from the task process for every
  * normally-completing run (`runner.py` snapshots `getrusage(RUSAGE_SELF)`
  * just before emitting `task_result`), and is absent for synthesised results
  * — wall-clock kill, task process died, supervisor-hung watchdog, transport

@@ -123,12 +123,12 @@ async function loadModelDeps(): Promise<ModelCliDeps> {
 async function loadSkillsDeps(): Promise<SkillsCliDeps> {
   const { resolveSkillRunAs } = await import("./skills/run-as.js");
   const { bootstrapCore, bootstrapSkillRunner, NO_SANDBOX } = await import("./index.js");
-  // Without the sandbox, tier-2 skill execution throws at call time; tier-1
+  // Without the sandbox, container skill execution throws at call time; wasm
   // skills and every admin subcommand run.
   const core = await bootstrapCore();
-  // A CLI process leaves tier-1 children alone: they may be the serve's.
+  // A CLI process leaves wasm children alone: they may be the serve's.
   const { skillRunner } = await bootstrapSkillRunner(core, NO_SANDBOX, {
-    reapTier1Children: false,
+    reapWasmChildren: false,
   });
   return {
     runner: skillRunner,

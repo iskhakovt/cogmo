@@ -38,14 +38,14 @@ import type { SkillRunAs } from "./run-as.js";
 import { type RegisterForTestsParams, seedSkillForTests } from "./seed-for-tests.js";
 import { SkillSourceCache } from "./source-cache.js";
 import type { SkillRow, SkillRunIdentity, SkillRunTrigger, SkillStore } from "./store/index.js";
-import { createTier1Probe, pyodideDistDir } from "./worker-wasm/host.js";
+import { createWasmProbe, pyodideDistDir } from "./worker-wasm/host.js";
 import type {
   FillBuiltins,
-  Tier1Packages,
-  Tier1PackagesError,
-  Tier1Probe,
-} from "./worker-wasm/tier1.js";
-import { ensureTier1Packages, fillBuiltinCache } from "./worker-wasm/wheel-cache.js";
+  WasmPackages,
+  WasmPackagesError,
+  WasmProbe,
+} from "./worker-wasm/wasm.js";
+import { ensureWasmPackages, fillBuiltinCache } from "./worker-wasm/wheel-cache.js";
 
 export type {
   DeregisterResult,
@@ -59,14 +59,14 @@ export type { SkillSummary, SkillToolDef } from "./listing.js";
 export type { RegisterForTestsParams } from "./seed-for-tests.js";
 
 /**
- * Default tier-2 container image when the constructor doesn't override it.
- * Production wiring always passes `tier2Image:
+ * Default container-tier image when the constructor doesn't override it.
+ * Production wiring always passes `containerImage:
  * env.COGMO_SKILLS_IMAGE`, so this default only matters for tests that
  * construct a runner without an explicit image AND actually invoke a
  * tier-container skill (the integration test does the latter — it overrides).
  * Shares the helper with `env.ts` so the two never drift.
  */
-const DEFAULT_TIER2_IMAGE = defaultSkillsImage();
+const DEFAULT_CONTAINER_IMAGE = defaultSkillsImage();
 
 const log = logger.child({ component: "skills.runner" });
 
@@ -175,17 +175,17 @@ export interface SkillRunnerOptions {
    * `rollback` without it throws a clear error.
    */
   skillsRepoPath?: string;
-  /** Pyodide package cache directory, which the host fills and tier-1 children read. */
+  /** Pyodide package cache directory, which the host fills and wasm children read. */
   pyodidePackageCacheDir: string;
   /**
-   * Tier 1's other host-side directories: the published wheel directories and
-   * the children's process-group records (design/skills.md → Tier-1 boundary).
+   * The wasm tier's other host-side directories: the published wheel directories and
+   * the children's process-group records (design/skills.md → Wasm-tier boundary).
    */
-  tier1: {
+  wasm: {
     wheelsRoot: string;
     childrenDir: string;
     /** Tests inject a probe that spawns no child. */
-    probe?: Tier1Probe;
+    probe?: WasmProbe;
     /**
      * Tests inject a fetch that reaches no network: what the host downloads
      * built-ins from Pyodide's CDN and wheels from PyPI with.
@@ -195,26 +195,26 @@ export interface SkillRunnerOptions {
     resolvePackages?: (
       lockfile: LockfileSnapshot,
       signal?: AbortSignal,
-    ) => Promise<Result<Tier1Packages, Tier1PackagesError>>;
+    ) => Promise<Result<WasmPackages, WasmPackagesError>>;
   };
   /**
-   * Sandbox handle for running tier-2 (sysbox container) skills. Optional —
-   * deployments without `SANDBOX_RUNTIME` set leave it undefined; tier-2
+   * Sandbox handle for running container (sysbox container) skills. Optional —
+   * deployments without `SANDBOX_RUNTIME` set leave it undefined; container
    * skills then fail with a clear `tier_2_unavailable` error at invoke time.
-   * Tier-1 (Pyodide WASM) skills work either way.
+   * Wasm (Pyodide WASM) skills work either way.
    */
   sandbox?: SandboxClient;
   /**
-   * Container image for tier-2 skills. Defaults to `python:3.14-slim`.
+   * Container image for container skills. Defaults to `python:3.14-slim`.
    * Override when shipping a Cogmo-baked image with deps pre-installed.
    */
-  tier2Image?: string;
+  containerImage?: string;
   /**
    * Named Docker volume that holds per-lockfile-hash skill virtualenvs.
-   * Threaded into every tier-2 worker the pool spawns so populated
+   * Threaded into every container worker the pool spawns so populated
    * venvs persist across worker recycle + are shared across the pool.
    * Production wiring sets this from
-   * `env.COGMO_SKILLS_DEPS_VOLUME`. Omit for tests / tier-1-only paths
+   * `env.COGMO_SKILLS_DEPS_VOLUME`. Omit for tests / wasm-only paths
    * that don't need the cache.
    */
   depsCacheVolumeName?: string;
@@ -240,8 +240,8 @@ export interface SkillRunnerOptions {
    * lockfile error.
    *
    * Defaults to a {@link makeSandboxLockfileCompiler} backed by `sandbox`
-   * + `tier2Image` when both are configured. When the deployment has no
-   * tier-2 sandbox (tier-1-only deployments, or test paths that omit
+   * + `containerImage` when both are configured. When the deployment has no
+   * container sandbox (wasm-only deployments, or test paths that omit
    * `sandbox`), the field is undefined and the runner downgrades to
    * "presence + hash only" — lockfile must exist and parse, but the
    * resolver isn't re-run. Set explicitly in tests to swap a stub.
@@ -249,7 +249,7 @@ export interface SkillRunnerOptions {
   lockfileCompiler?: LockfileCompiler;
   /**
    * The network `ctx.http` reaches, passed to every `DefaultCtxHandler`
-   * the runner builds — so it covers both tiers, while a tier-2 skill's
+   * the runner builds — so it covers both tiers, while a container skill's
    * own sockets stay on the real network. Omit in production for real DNS
    * and the global `fetch`. The allowlist and address checks run against
    * whatever this answers.
@@ -272,7 +272,7 @@ export class SkillRunnerImpl implements SkillRunner {
   #warmPool: LazyWarmPool;
 
   private constructor(opts: SkillRunnerOptions) {
-    const tier2Image = opts.tier2Image ?? DEFAULT_TIER2_IMAGE;
+    const containerImage = opts.containerImage ?? DEFAULT_CONTAINER_IMAGE;
     // A shared deps-cache volume only makes sense when the sandbox
     // backend can honour uv's POSIX assumptions (hardlinks, atomic
     // rename, O_RDWR). Backends that advertise `per-sandbox` use
@@ -292,24 +292,24 @@ export class SkillRunnerImpl implements SkillRunner {
     const clock = opts.clock ?? (() => new Date());
     const sourceCache = new SkillSourceCache(opts.skillsRepoPath);
     const packageCacheDir = opts.pyodidePackageCacheDir;
-    const tier1 = opts.tier1;
+    const wasm = opts.wasm;
     const distDir = pyodideDistDir();
     const probe =
-      tier1.probe ?? createTier1Probe({ pyodideDistDir: distDir, childrenDir: tier1.childrenDir });
-    const fetchImpl = tier1.fetchImpl ?? fetch;
+      wasm.probe ?? createWasmProbe({ pyodideDistDir: distDir, childrenDir: wasm.childrenDir });
+    const fetchImpl = wasm.fetchImpl ?? fetch;
     const resolvePackages =
-      tier1.resolvePackages ??
+      wasm.resolvePackages ??
       (async (
         lockfile: LockfileSnapshot,
         signal?: AbortSignal,
-      ): Promise<Result<Tier1Packages, Tier1PackagesError>> => {
+      ): Promise<Result<WasmPackages, WasmPackagesError>> => {
         const bundled = await loadBundledPackages();
         if (bundled.isErr()) {
           return err({ kind: "bundled_unreadable", message: bundled.error.message });
         }
-        return ensureTier1Packages(
+        return ensureWasmPackages(
           { fetchImpl, bundled: bundled.value },
-          { lockfile, packageCacheDir, wheelsRoot: tier1.wheelsRoot, ...(signal && { signal }) },
+          { lockfile, packageCacheDir, wheelsRoot: wasm.wheelsRoot, ...(signal && { signal }) },
         );
       });
     // The register's boundary probe loads from the cache this fills, staged
@@ -319,15 +319,15 @@ export class SkillRunnerImpl implements SkillRunner {
       if (bundled.isErr()) return err(bundled.error);
       return fillBuiltinCache({ fetchImpl, bundled: bundled.value }, { names, ...cacheOpts });
     };
-    const resolveTier1Packages = (
+    const resolveWasmPackages = (
       lockfile: LockfileSnapshot | undefined,
       signal?: AbortSignal,
-    ): Promise<Result<Tier1Packages, Tier1PackagesError>> =>
+    ): Promise<Result<WasmPackages, WasmPackagesError>> =>
       lockfile === undefined
         ? Promise.resolve(ok({ builtins: [], wheelDir: null }))
         : resolvePackages(lockfile, signal);
     this.#warmPool = new LazyWarmPool({
-      image: tier2Image,
+      image: containerImage,
       depsCacheVolumeName,
       sizing: opts.poolOptions,
     });
@@ -337,19 +337,19 @@ export class SkillRunnerImpl implements SkillRunner {
       secretsStore: opts.secretsStore,
       defaultRunAs: opts.defaultRunAs,
       capabilities: BUILD_CAPABILITIES,
-      tier1: { fetchImpl, probe, fillBuiltins, packageCacheDir, resolvePackages },
+      wasm: { fetchImpl, probe, fillBuiltins, packageCacheDir, resolvePackages },
       skillsRepoPath: opts.skillsRepoPath,
       sourceCache,
       // Explicit override wins; otherwise default to a sandbox-backed
-      // compiler when the runtime has both a sandbox and a tier-2 image
-      // (the cogmo-skills image carries `uv`). Tier-1-only deployments
+      // compiler when the runtime has both a sandbox and a container image
+      // (the cogmo-skills image carries `uv`). Wasm-only deployments
       // fall through to undefined → presence + hash check only.
       lockfileCompiler:
         opts.lockfileCompiler ??
         (opts.sandbox
           ? makeSandboxLockfileCompiler({
               sandbox: opts.sandbox,
-              image: tier2Image,
+              image: containerImage,
               ...(depsCacheVolumeName !== undefined && { depsCacheVolumeName }),
             })
           : undefined),
@@ -370,9 +370,9 @@ export class SkillRunnerImpl implements SkillRunner {
       runtime: {
         pyodidePackageCacheDir: packageCacheDir,
         pyodideDistDir: distDir,
-        tier1ChildrenDir: tier1.childrenDir,
-        resolveTier1Packages,
-        tier2Image,
+        wasmChildrenDir: wasm.childrenDir,
+        resolveWasmPackages,
+        containerImage,
         depsCacheVolumeName,
       },
       ctxHttp: opts.ctxHttp,
@@ -380,15 +380,15 @@ export class SkillRunnerImpl implements SkillRunner {
   }
 
   static async create(opts: SkillRunnerOptions): Promise<SkillRunnerImpl> {
-    // Pool init is deferred to first tier-2 invocation — cogmo serve
+    // Pool init is deferred to first container invocation — cogmo serve
     // boots independently of sandbox availability. See `LazyWarmPool`.
     return new SkillRunnerImpl(opts);
   }
 
   /**
    * Dispose the warm pool; `cogmo serve` calls this on exit. Waits for a pool
-   * start in flight and disposes what it produces; afterwards a tier-2 invoke
-   * throws `tier-2 pool requested after shutdown`. Idempotent. Tier-1 workers
+   * start in flight and disposes what it produces; afterwards a container invoke
+   * throws `container pool requested after shutdown`. Idempotent. Wasm workers
    * live for one call and need nothing here.
    */
   shutdown(): Promise<void> {

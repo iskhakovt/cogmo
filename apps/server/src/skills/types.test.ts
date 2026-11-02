@@ -77,7 +77,7 @@ describe("ClassifierLogSchema", () => {
     declared_secrets: [],
     declared_dependencies: [],
     validation_errors: [],
-    reasons: ["tier1_unhardened" as const],
+    reasons: ["wasm_unhardened" as const],
     declared_network: null,
   };
 
@@ -89,7 +89,7 @@ describe("ClassifierLogSchema", () => {
     const log = {
       ...STUB,
       declared_network: ["api.example.com"],
-      capabilities: { tier1Hardened: false, reviewPanel: true, tier1MemoryBounded: false },
+      capabilities: { wasmHardened: false, reviewPanel: true, wasmMemoryBounded: false },
     };
     expect(ClassifierLogSchema.parse(log)).toEqual(log);
   });
@@ -100,6 +100,41 @@ describe("ClassifierLogSchema", () => {
     expect(parsed.reasons).toEqual([]);
     expect(parsed.declared_network).toBeNull();
     expect(parsed.capabilities).toBeUndefined();
+  });
+
+  it("reads a row written under the tier1/tier2 names as the wasm/container names", () => {
+    const legacy = {
+      ...STUB,
+      reasons: ["tier1_unhardened", "tier2_unenforced", "tier2_shared_worker", "first_deploy"],
+      capabilities: { tier1Hardened: true, reviewPanel: false, tier1MemoryBounded: true },
+    };
+    const parsed = ClassifierLogSchema.parse(legacy);
+    expect(parsed.reasons).toEqual([
+      "wasm_unhardened",
+      "container_unenforced",
+      "container_shared_worker",
+      "first_deploy",
+    ]);
+    expect(parsed.capabilities).toEqual({
+      wasmHardened: true,
+      reviewPanel: false,
+      wasmMemoryBounded: true,
+    });
+  });
+
+  it("round-trips a row written under the wasm/container names", () => {
+    const log = {
+      ...STUB,
+      reasons: [
+        "wasm_unhardened" as const,
+        "container_unenforced" as const,
+        "container_shared_worker" as const,
+      ],
+      capabilities: { wasmHardened: true, reviewPanel: false, wasmMemoryBounded: true },
+    };
+    const parsed = ClassifierLogSchema.parse(log);
+    expect(parsed).toEqual(log);
+    expect(ClassifierLogSchema.parse(JSON.parse(JSON.stringify(parsed)))).toEqual(log);
   });
 
   it("rejects a reason outside SKILL_RISK_REASONS", () => {

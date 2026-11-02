@@ -1,7 +1,7 @@
 import { err, ok, type Result } from "neverthrow";
 
 /**
- * Pyodide-compatibility lint for `skill.py`. Tier-1 skills run inside the
+ * Pyodide-compatibility lint for `skill.py`. Wasm skills run inside the
  * WASM sandbox where `subprocess`, `os.fork`, raw sockets, and other
  * OS-affordance APIs are unavailable; importing them produces obscure
  * runtime errors instead of clear deploy-time rejection.
@@ -16,13 +16,13 @@ import { err, ok, type Result } from "neverthrow";
  * chance against runtime indirection. The actual security boundary is the
  * Pyodide WASM sandbox, which doesn't ship those host APIs anyway. The lint
  * exists so a skill author writing `import subprocess` gets a clear "won't
- * work in tier-1" at deploy time instead of a Pyodide ImportError at
+ * work in wasm" at deploy time instead of a Pyodide ImportError at
  * runtime.
  *
  * It also rejects the modules that reach past Python into the host's
  * JavaScript: `js`, `pyodide_js`, `pyodide.ffi`, `pyodide.code`,
- * `pyodide.http` and `micropip`. The tier-1 boundary closes each of them
- * (design/skills.md → Tier-1 boundary, layer 7); the rule tells an honest
+ * `pyodide.http` and `micropip`. The wasm boundary closes each of them
+ * (design/skills.md → Wasm-tier boundary, layer 7); the rule tells an honest
  * author why the import fails and what to use instead.
  */
 
@@ -63,23 +63,23 @@ const RULES: readonly RulePattern[] = [
   {
     name: "subprocess_import",
     pattern: /^[ \t]*(?:import[ \t]+subprocess|from[ \t]+subprocess[ \t]+import)\b/m,
-    reason: "subprocess is not available in tier-1 (WASM); declare tier: container",
+    reason: "subprocess is not available in the wasm tier; declare tier: container",
   },
   {
     name: "os_fork",
     // Suffixes per Python stdlib: execl/execle/execlp/execlpe/execv/execve/execvp/execvpe.
     pattern: /\bos\.(?:fork|exec[lepv]+|spawn[lvp]+|posix_spawn)\b/,
-    reason: "process-spawning APIs are not available in tier-1 (WASM)",
+    reason: "process-spawning APIs are not available in the wasm tier",
   },
   {
     name: "os_system",
     pattern: /\bos\.system\b/,
-    reason: "os.system is not available in tier-1 (WASM)",
+    reason: "os.system is not available in the wasm tier",
   },
   {
     name: "raw_socket",
     pattern: /^[ \t]*(?:import[ \t]+socket|from[ \t]+socket[ \t]+import)\b/m,
-    reason: "raw sockets are not available in tier-1 (WASM); use `await ctx.http.get(url)`",
+    reason: "raw sockets are not available in the wasm tier; use `await ctx.http.get(url)`",
   },
   {
     // The stdlib HTTP clients are the ones a dependency-free skill
@@ -106,64 +106,64 @@ const RULES: readonly RulePattern[] = [
     pattern:
       /^[ \t]*(?:import[ \t]+(?:[\w.]+(?:[ \t]+as[ \t]+[\w.]+)?[ \t]*,[ \t]*)*(?:urllib\.request|http\.client|ftplib|smtplib|telnetlib|poplib|imaplib)\b|from[ \t]+(?:urllib\.request|http\.client|ftplib|smtplib|telnetlib|poplib|imaplib)[ \t]+import\b|from[ \t]+(?:urllib|http)[ \t]+import[ \t]+(?:[\w.]+(?:[ \t]+as[ \t]+[\w.]+)?[ \t]*,[ \t]*)*(?:request|client)\b)/m,
     reason:
-      "stdlib networking has no socket underneath it in tier-1 (WASM); use `await ctx.http.get(url)`, or declare tier: container to use httpx",
+      "stdlib networking has no socket underneath it in the wasm tier; use `await ctx.http.get(url)`, or declare tier: container to use httpx",
   },
   {
     // The third-party HTTP clients sit on sockets exactly as the stdlib
     // ones do, and they are what an author reaches for first. Both
     // authoring prompts tell the model these are rejected at register
-    // time; this rule is what makes that true. Tier 2 declares them as
+    // time; this rule is what makes that true. The container tier declares them as
     // dependencies and runs them for real — the lint only sees wasm.
     name: "third_party_http",
     pattern:
       /^[ \t]*(?:import[ \t]+(?:[\w.]+(?:[ \t]+as[ \t]+[\w.]+)?[ \t]*,[ \t]*)*(?:httpx|requests|urllib3|aiohttp|websockets)\b|from[ \t]+(?:httpx|requests|urllib3|aiohttp|websockets)(?:\.[\w.]+)?[ \t]+import\b)/m,
     reason:
-      "httpx / requests need sockets, which tier-1 (WASM) does not have; use `await ctx.http.get(url)`, or declare tier: container",
+      "httpx / requests need sockets, which the wasm tier does not have; use `await ctx.http.get(url)`, or declare tier: container",
   },
   {
     name: "multiprocessing",
     pattern: /^[ \t]*(?:import[ \t]+multiprocessing|from[ \t]+multiprocessing[ \t]+import)\b/m,
-    reason: "multiprocessing is not available in tier-1 (WASM)",
+    reason: "multiprocessing is not available in the wasm tier",
   },
   {
     name: "ctypes",
     pattern: /^[ \t]*(?:import[ \t]+ctypes|from[ \t]+ctypes[ \t]+import)\b/m,
-    reason: "ctypes is not available in tier-1 (WASM)",
+    reason: "ctypes is not available in the wasm tier",
   },
   {
     name: "js_import",
     pattern: moduleImport("js"),
     reason:
-      "`js` is the host's JavaScript scope, which tier-1 (WASM) closes; use `await ctx.http.get(url)` for the network",
+      "`js` is the host's JavaScript scope, which the wasm tier closes; use `await ctx.http.get(url)` for the network",
   },
   {
     name: "pyodide_js_import",
     pattern: moduleImport("pyodide_js"),
     reason:
-      "`pyodide_js` reaches the Pyodide runtime and its filesystem mounts, which tier-1 (WASM) closes; there is no replacement",
+      "`pyodide_js` reaches the Pyodide runtime and its filesystem mounts, which the wasm tier closes; there is no replacement",
   },
   {
     name: "pyodide_ffi_import",
     pattern: pyodideSubmodule("ffi"),
     reason:
-      "`pyodide.ffi` is JavaScript interop, which tier-1 (WASM) closes; there is no replacement",
+      "`pyodide.ffi` is JavaScript interop, which the wasm tier closes; there is no replacement",
   },
   {
     name: "pyodide_code_import",
     pattern: pyodideSubmodule("code"),
-    reason: "`pyodide.code` runs JavaScript, which tier-1 (WASM) closes; there is no replacement",
+    reason: "`pyodide.code` runs JavaScript, which the wasm tier closes; there is no replacement",
   },
   {
     name: "pyodide_http_import",
     pattern: pyodideSubmodule("http"),
     reason:
-      "`pyodide.http` fetches through the host's JavaScript, which tier-1 (WASM) closes; use `await ctx.http.get(url)`",
+      "`pyodide.http` fetches through the host's JavaScript, which the wasm tier closes; use `await ctx.http.get(url)`",
   },
   {
     name: "micropip_import",
     pattern: moduleImport("micropip"),
     reason:
-      "tier-1 (WASM) installs nothing at runtime; declare the package in SKILL.md `dependencies`",
+      "the wasm tier installs nothing at runtime; declare the package in SKILL.md `dependencies`",
   },
 ];
 
@@ -177,7 +177,7 @@ export interface LintError {
 export type LintResult = Result<void, readonly LintError[]>;
 
 /**
- * Scan the skill body for tier-1-incompatible patterns. Returns `ok` if the
+ * Scan the skill body for wasm-incompatible patterns. Returns `ok` if the
  * code is plausibly Pyodide-safe; `err` lists every rule that fired.
  */
 export function lintWasmCompat(body: string): LintResult {

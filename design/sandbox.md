@@ -1,6 +1,6 @@
 # Sandbox
 
-Sandbox infrastructure. Any Cogmo feature needing isolated execution uses this module. Active consumers: coding-delegation tasks (worktree-bearing, long-lived, see [coding-delegation.md](coding-delegation.md)) and skills tier-2 (worktree-less, ephemeral Python subprocess workers, see [skills.md](skills.md)). Future consumers include untrusted MCP servers and one-off tool sandboxes.
+Sandbox infrastructure. Any Cogmo feature needing isolated execution uses this module. Active consumers: coding-delegation tasks (worktree-bearing, long-lived, see [coding-delegation.md](coding-delegation.md)) and skills container-tier (worktree-less, ephemeral Python subprocess workers, see [skills.md](skills.md)). Future consumers include untrusted MCP servers and one-off tool sandboxes.
 
 ## Purpose `[confirmed]`
 
@@ -13,7 +13,7 @@ Both paths offer:
 
 - **Strong isolation by default** — userns on the local backend (sysbox), VM-class on managed backends.
 - **One abstraction for downstream code** — the orchestrator, coding tool, and skills runner code against `SandboxClient` / `SandboxSession`, not against a specific provider.
-- **Per-consumer images** — coding-delegation runs `cogmo/devbase` (with `claude-code` baked in); skills tier-2 runs `python:3.14-slim` (or a Cogmo-baked successor) by manifest. Image is per-session, not per-backend.
+- **Per-consumer images** — coding-delegation runs `cogmo/devbase` (with `claude-code` baked in); skills container-tier runs `python:3.14-slim` (or a Cogmo-baked successor) by manifest. Image is per-session, not per-backend.
 
 On the local backend, tooling that drives Docker, such as testcontainers and `docker compose`, spawns host-visible siblings through the Cogmo proxy. Until the proxy inserts child rows (Proxy Design → Authorization boundary `[proposed]`), the reaper kills those siblings within a minute. Image builds are not supported there. On managed backends it spawns provider-internal siblings, and the provider's sandbox boundary is the policy boundary.
 
@@ -87,7 +87,7 @@ interface SessionSpec {
   expiresAt: Date;
   /**
    * Working-tree material to materialize at session start. Optional —
-   * coding-delegation supplies it, skills tier-2 omits it because skill
+   * coding-delegation supplies it, skills container-tier omits it because skill
    * workers don't run in a checkout. Backend resolves the field per its
    * `workingTreeTransport` capability (bind-mount on Local-Docker,
    * git-clone on Daytona).
@@ -96,7 +96,7 @@ interface SessionSpec {
   /**
    * Persistent per-task scratch (Local-Docker named volume mounted at the
    * image's home dir). Optional — coding-delegation uses it to persist
-   * the Claude Code CLI's session state across exec calls; skills tier-2
+   * the Claude Code CLI's session state across exec calls; skills container-tier
    * omits it because the `recycle` isolation contract forbids state
    * surviving the task. Daytona ignores this field — managed sandboxes
    * have provider-owned persistence.
@@ -222,7 +222,7 @@ Both default off (no cap). Either settles the exec as `timed_out` at once and te
 
 Why two, not one. The Daytona wedge incident (4-day stuck task, run id `01KRM7A886F293XVTJPVB9CZ91`) was a transient WS hang on `getSessionCommandLogs`: the underlying WebSocket held open silently, the daemon never sent close, and `await handle.wait()` blocked forever. A single total-deadline cap would have caught it, but the cap that fits one workload (e.g. `git checkout` 60s) is wrong for another (`claude -p` streaming for tens of minutes). Splitting into total + idle lets `claude` opt into "stream as long as you want, but never go silent for >N minutes" while keeping `git` calls bounded by their natural wall-clock. This is the same shape e2b ships ([e2b-dev/E2B #1128](https://github.com/e2b-dev/E2B/issues/1128) — streaming calls only honored connect timeout, not read), Modal exposes ([`Sandbox.create(timeout=..., idle_timeout=...)`](https://modal.com/docs/guide/timeouts)), and WebSocket best practice recommends as the "75% rule" — ping at 0.75× the shortest proxy idle. Daytona's own [#2510](https://github.com/daytonaio/daytona/issues/2510) describes the stream-doesn't-close bug; [#2513](https://github.com/daytonaio/daytona/issues/2513) the missing async completion API. Both are upstream limitations the timeout pair routes around.
 
-Per-callsite defaults are owned by the caller, not the backend — see [coding-delegation.md → Per-callsite exec timeouts](coding-delegation.md#per-callsite-exec-timeouts-confirmed). Backends never inject a default; passing nothing means no cap (skills tier-2, and any caller that genuinely wants an unbounded exec).
+Per-callsite defaults are owned by the caller, not the backend — see [coding-delegation.md → Per-callsite exec timeouts](coding-delegation.md#per-callsite-exec-timeouts-confirmed). Backends never inject a default; passing nothing means no cap (skills container-tier, and any caller that genuinely wants an unbounded exec).
 
 ### Exec lifecycle `[confirmed]`
 
@@ -276,7 +276,7 @@ Hard transport differences (how working-tree material moves into the sandbox) li
 | Buffered exec | dockerode | `executeCommand` |
 | Streaming exec | dockerode demux | session-logs WebSocket + `stdbuf` |
 | `resume(state)` | container-id inspect | sandbox-id rehydrate |
-| Worktree-less sessions | yes (skills tier-2) | yes (skills tier-2) |
+| Worktree-less sessions | yes (skills container-tier) | yes (skills container-tier) |
 
 ### Backend selection
 
@@ -385,7 +385,7 @@ The proxy lives in `src/sandbox/proxy/` and runs inside `cogmo serve` `[confirme
 - `POST /containers/create` is denied for `HostConfig.Privileged`, `NetworkMode: "host"`, a host-path `Binds` or `Mounts` bind source, and eight `CapAdd` capabilities (`policy.ts:37-148`). A create that passes has its `Runtime`, `CgroupParent` and the five Cogmo labels overwritten and is forwarded.
 - Everything else is forwarded unchecked, under the raw `req.url` rather than the canonical path that was classified (`proxy/index.ts:270`, `:310`).
 - Exec start, attach, `logs`, `events` and `distribution` are raw-piped from the moment the request line has been replayed, without waiting for the daemon's `101`.
-- Every Local-Docker session gets a socket, skills tier-2 workers included.
+- Every Local-Docker session gets a socket, skills container-tier workers included.
 - A child gets no `containers` row, so the orphan pass kills it within a minute (Container state machine → Failure modes). That includes the children testcontainers or `docker compose` start.
 - The reaper's network and volume updates are unconditional (`reaper.ts:191`, `:213`).
 - `unregisterTask` drops the task's scope before closing its connections (`proxy/index.ts:143`). A request that arrives meanwhile on an open connection gets a 500.
@@ -518,7 +518,7 @@ A create cut off by step 4 leaves either a rowless container, which the orphan p
 
 `TaskScope` carries `resourceLimits` and `ttlExpiresAt`. Depth stays at 1: a child gets no socket, since host-path binds and `VolumesFrom` are denied, so it cannot create containers of its own.
 
-**Which sessions get a socket.** `SessionSpec.dockerSocket: boolean` is required, so every caller states it. Coding delegation sets it to `true`. Skills tier-2 sets it to `false`, so a tier-2 skill's Python cannot reach the daemon. `[proposed]` Every skills session also runs with `network: "none"` and reaches the egress proxy over an `egressSocket` instead of a network ([skills.md → Egress proxy](skills.md#egress-proxy-proposed) → One path); that socket follows the session's lifecycle as this one does ([skills.md → Session socket](skills.md#session-socket)).
+**Which sessions get a socket.** `SessionSpec.dockerSocket: boolean` is required, so every caller states it. Coding delegation sets it to `true`. Skills container-tier sets it to `false`, so a container-tier skill's Python cannot reach the daemon. `[proposed]` Every skills session also runs with `network: "none"` and reaches the egress proxy over an `egressSocket` instead of a network ([skills.md → Egress proxy](skills.md#egress-proxy-proposed) → One path); that socket follows the session's lifecycle as this one does ([skills.md → Session socket](skills.md#session-socket)).
 
 **Residuals.**
 
@@ -542,7 +542,7 @@ A create cut off by step 4 leaves either a rowless container, which the orphan p
   - waits on logs, exec and HTTP;
   - `GET /networks/bridge` for the gateway, and `exposeHostPort`'s connect to `bridge`.
 - Ryuk needs a host-path bind of the socket, which is already denied, and optionally `Privileged`. Cogmo sets `TESTCONTAINERS_RYUK_DISABLED=true` in a coding session's env (`SessionSpec.env`), and the cascade does Ryuk's job.
-- The skills tier-2 runner never opens the socket.
+- The skills container-tier runner never opens the socket.
 - No workflow relies on proxy-created children, which the orphan pass reaps (Enforced today).
 
 **Test plan.** Unit tests in `src/sandbox/proxy/` run on `proxy.test.ts`'s fake daemon socket. Each asserts the status, and for a rejection that nothing reached the daemon.
@@ -894,9 +894,9 @@ tRPC's HTTP client accepts a custom `fetch`, so the Unix-socket case is wired vi
 
 The Daytona backend runs task sandboxes on Daytona's managed cloud (default) or self-hosted Daytona instance. Daytona owns sandbox isolation and lifecycle. Cogmo drives via the [Daytona TypeScript SDK](https://www.daytona.io/docs/typescript-sdk/daytona/).
 
-**Two phases shipped:** Phase 3a (PR #173) lifted skills tier-2 onto Daytona — worktree-less, ephemeral, ephemeral askpass-less. Phase 3b (PRs #183 / #192 / #196) wired coding-delegation through the `git-remote` working-tree transport: orchestrator force-pushes a `cogmo/run/<task-id>` ref, the SDK's `git.clone` rehydrates it inside the sandbox, askpass material is uploaded via `fs.uploadFiles`. Both flows share the same `SandboxClient` interface; consumers branch on `capabilities.workingTreeTransport`.
+**Two phases shipped:** Phase 3a (PR #173) lifted skills container-tier onto Daytona — worktree-less, ephemeral, ephemeral askpass-less. Phase 3b (PRs #183 / #192 / #196) wired coding-delegation through the `git-remote` working-tree transport: orchestrator force-pushes a `cogmo/run/<task-id>` ref, the SDK's `git.clone` rehydrates it inside the sandbox, askpass material is uploaded via `fs.uploadFiles`. Both flows share the same `SandboxClient` interface; consumers branch on `capabilities.workingTreeTransport`.
 
-Production-ready for the coding-delegation `git-remote` flow against a single user's traffic. Skills tier-2 tasks do not run here: their supervisor needs a stdin that streams, which the PTY path buffers until it ends (see [skills.md → Warm pool](skills.md#warm-pool-confirmed)). Subsections that need real-traffic validation before they graduate to fully-trusted status carry their own `[proposed]` markers below — `Streaming exec` and `Keepalive` specifically.
+Production-ready for the coding-delegation `git-remote` flow against a single user's traffic. Skills container-tier tasks do not run here: their supervisor needs a stdin that streams, which the PTY path buffers until it ends (see [skills.md → Warm pool](skills.md#warm-pool-confirmed)). Subsections that need real-traffic validation before they graduate to fully-trusted status carry their own `[proposed]` markers below — `Streaming exec` and `Keepalive` specifically.
 
 ### Authentication & deployment
 
@@ -912,7 +912,7 @@ Daytona's default `autoStopInterval` reaps idle sandboxes after 15 minutes. Codi
 
 ### Working-tree transport — git as transport
 
-Applies only when `SessionSpec.worktree` is set — i.e. coding-delegation tasks. Skills tier-2 sessions omit `worktree` and skip the git ceremony entirely (`create()` → `exec()` → `delete()`).
+Applies only when `SessionSpec.worktree` is set — i.e. coding-delegation tasks. Skills container-tier sessions omit `worktree` and skip the git ceremony entirely (`create()` → `exec()` → `delete()`).
 
 Working-tree material moves between orchestrator and sandbox via an ephemeral branch on the repo's GitHub remote. This matches the published pattern of remote AI-agent-sandbox products that need to push state into a managed VM: Codex Cloud and Devin both clone task state into their sandbox via git, and Daytona ships `sandbox.git.clone()` and `sandbox.git.push()` as first-class SDK methods — signalling the same expected flow. Local-IDE products (Cursor edits a checkout in place; Codespaces clones for the user's IDE) operate on a different axis and aren't precedent for the orchestrator-pushes-state direction.
 
@@ -969,7 +969,7 @@ Fallback if the WS proves flaky on a long task: HTTP-poll the same logs endpoint
 
 ### Custom image
 
-The image declared in `SessionSpec.image` is referenced via Daytona's `Image.base("registry/path:tag")` — no Dockerfile rebuild on Daytona's side. Cogmo-owned images (`cogmo/devbase` for coding-delegation) are published to a registry Daytona can pull from (Docker Hub or GHCR); third-party images (e.g. `python:3.14-slim` for skills tier-2) come straight from their published location.
+The image declared in `SessionSpec.image` is referenced via Daytona's `Image.base("registry/path:tag")` — no Dockerfile rebuild on Daytona's side. Cogmo-owned images (`cogmo/devbase` for coding-delegation) are published to a registry Daytona can pull from (Docker Hub or GHCR); third-party images (e.g. `python:3.14-slim` for skills container-tier) come straight from their published location.
 
 **Initially public-registry only.** The Daytona TS SDK does not expose a private-registry-credential API; private registries are added via the Daytona Dashboard → Registries panel before referencing the image. Cogmo-owned images publish to a public namespace (GHCR public) until that gap closes upstream or a deployer explicitly opts into the dashboard flow.
 
@@ -985,7 +985,7 @@ Daytona's `daytona.create({ image })` lazy-pulls and snapshots the image on firs
 - `ensureImagePresent` memoises one in-flight promise per image. Concurrent callers share the same warm cycle; failures evict the cache so the next call retries fresh. The cache holds the name that's actually `ACTIVE` after `#ensureSnapshotActive` resolves — `create()` always dispatches against a verified-live snapshot.
 - `ensureImagePresent` returns `void` and skips warming for unversioned tags (`:latest`, no tag) — `snapshot.create` rejects `:latest` with `Images with tag ":latest" are not allowed`. In that case `daytona.create()` falls back to the lazy `{ image }` path.
 - `create(spec)` checks whether the image has a successful warm in the in-process map. If yes, dispatches `daytona.create({ snapshot, labels, autoStopInterval, envVars })`. If no, falls back to the lazy `daytona.create({ image, resources, ... })`. `CreateSandboxFromSnapshotParams` has no `resources` field — resources bake into the snapshot at `snapshot.create` time and the snapshot path inherits whatever was baked. The lazy `{ image }` path still receives `spec.resourceLimits` directly.
-- `ensureImagePresent(image, resourceLimits)` forwards `resourceLimits` to `snapshot.create({ name, image, resources })` so the consumer's intent is baked into the snapshot at warm time. Without this, every snapshot-path session would silently inherit Daytona's platform default (1 cpu / 1 GiB RAM / 3 GiB disk) and erase consumer-specific choices — notably skills tier-2's 1 GiB disk floor and coding-delegation's 2 cpu / 2 GiB RAM defaults. Boot pairs each image with its consumer's limits explicitly; the per-task `step.run("ensure-image-present")` passes `spec.resourceLimits` so a task-time first warm bakes the right values too.
+- `ensureImagePresent(image, resourceLimits)` forwards `resourceLimits` to `snapshot.create({ name, image, resources })` so the consumer's intent is baked into the snapshot at warm time. Without this, every snapshot-path session would silently inherit Daytona's platform default (1 cpu / 1 GiB RAM / 3 GiB disk) and erase consumer-specific choices — notably skills container-tier's 1 GiB disk floor and coding-delegation's 2 cpu / 2 GiB RAM defaults. Boot pairs each image with its consumer's limits explicitly; the per-task `step.run("ensure-image-present")` passes `spec.resourceLimits` so a task-time first warm bakes the right values too.
 
 Boot fires `scheduleSandboxImageWarm` (devbase + skills image, each paired with its consumer's resource limits) non-blocking so the orchestrator's `cogmo serve` doesn't wait. The helper retries `ensureImagePresent` per image with 5s → 10s → 20s → 40s → 60s backoff (capped, ~20 attempts ≈ 20 min total) so a transient provider blip doesn't leave the image cold until the first task pays the cold start — the per-task `coding-task-start` Inngest function pins `retries: 0` because plan-mode CLI sessions aren't replay-safe, so the boot path owns the retry. After exhaustion the helper logs and gives up; the coding orchestrator's `step.run("ensure-image-present")` awaits the same memoised promise and triggers a fresh warm cycle on first task arrival (a failed prior warm has evicted the cache).
 
@@ -1012,7 +1012,7 @@ The Daytona backend does not run the Cogmo Docker socket proxy, the systemd cgro
 
 `ResourceLimits.pids` is silently ignored — Daytona's `Resources` shape has only `cpu` / `gpu` / `memory` / `disk` fields, no per-sandbox process-count cap. If pid-cap is load-bearing for a workload (fork-bomb defence inside the sandbox), set up cgroup limits via `process.executeCommand` after `create()` instead.
 
-`ResourceLimits.disk_bytes` is optional and forwarded to Daytona's `disk` field (rounded up to GiB, floored at 1 GiB to honour the platform minimum). Omit to accept Daytona's platform default — currently 3 GiB. Skills tier-2 sets `disk_bytes: 1 GiB` in `DEFAULT_RESOURCE_LIMITS` (the image plus typical scratch fits in <500 MB; the 1 GiB floor is 3× over-provisioned and frees up two thirds of the per-sandbox storage charge versus the platform default). Local-Docker silently ignores `disk_bytes` — runc HostConfig has no native disk quota and the supervisor doesn't set one.
+`ResourceLimits.disk_bytes` is optional and forwarded to Daytona's `disk` field (rounded up to GiB, floored at 1 GiB to honour the platform minimum). Omit to accept Daytona's platform default — currently 3 GiB. Skills container-tier sets `disk_bytes: 1 GiB` in `DEFAULT_RESOURCE_LIMITS` (the image plus typical scratch fits in <500 MB; the 1 GiB floor is 3× over-provisioned and frees up two thirds of the per-sandbox storage charge versus the platform default). Local-Docker silently ignores `disk_bytes` — runc HostConfig has no native disk quota and the supervisor doesn't set one.
 
 ### Crash recovery
 
@@ -1020,7 +1020,7 @@ The Daytona backend does not run the Cogmo Docker socket proxy, the systemd cgro
 
 ### Deferred / Phase 3c
 
-- **Real-Daytona integration test** (gated on `DAYTONA_API_KEY`), mirroring `runner.sysbox.integration.test.ts`. Exercises one full skills tier-2 invocation + one coding-delegation `git-remote` flow against a live Daytona Cloud sandbox so the SDK mocks can't lie about WS demuxing or session-cleanup behaviour.
+- **Real-Daytona integration test** (gated on `DAYTONA_API_KEY`), mirroring `runner.sysbox.integration.test.ts`. Exercises one full skills container-tier invocation + one coding-delegation `git-remote` flow against a live Daytona Cloud sandbox so the SDK mocks can't lie about WS demuxing or session-cleanup behaviour.
 - **Bootstrap-level integration coverage** for the Daytona path through `bootstrap()` — typecheck-only validation today.
 - **Edge-case unit gaps:** `buildShellCommand` with empty `env: {}`, `getSessionCommand` failure post-WS-resolve, concurrent `tryResumeByTaskId` for the same taskId.
 - **Daytona reaper / orphan reconcile.** `reconcileCrashedInstances` is a no-op today (Daytona auto-persists/auto-archives are the provider's job); a Cogmo-side audit pass that lists sandboxes labelled `cogmo.instance != current` and either resumes or deletes them would catch stale state from crashed retries.

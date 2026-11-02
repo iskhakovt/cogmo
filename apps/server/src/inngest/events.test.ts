@@ -155,7 +155,7 @@ describe("skills/deploy/outcome", () => {
     deployId: "deploy-1",
     skillName: "briefing",
     riskTier: "notify",
-    reasons: ["tier1_unhardened"],
+    reasons: ["wasm_unhardened"],
     gitSha: "abc1234",
     priorGitSha: null,
     description: "A morning briefing.",

@@ -1,6 +1,6 @@
 /**
  * Background warm of the sandbox images at boot, so the first coding task or
- * tier-2 skill doesn't pay the snapshot build in its own request budget.
+ * container skill doesn't pay the snapshot build in its own request budget.
  */
 
 import { logger } from "../logger.js";

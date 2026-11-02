@@ -6,7 +6,7 @@ import type { SandboxClient } from "../sandbox/index.js";
 import { DEPS_REAP_GRACE_DAYS, type ReapSkillVenvsError, reapSkillVenvs } from "./deps-reaper.js";
 import type { BundledDistribution, BundledPackagesUnreadable } from "./pyodide-compat.js";
 import type { SkillStore } from "./store/index.js";
-import { reapTier1WheelDirs, sweepTier1WheelTmpDirs } from "./worker-wasm/wheel-cache.js";
+import { reapWasmWheelDirs, sweepWasmWheelTmpDirs } from "./worker-wasm/wheel-cache.js";
 
 const log = logger.child({ component: "skills.deps-reaper-function" });
 
@@ -14,15 +14,15 @@ export interface SkillDepsReaperDeps {
   runInTx: Transactor;
   store: SkillStore;
   /**
-   * Tier-2-capable sandbox. Mounts the same `/skill-venvs` volume the
-   * populator writes to. When undefined (tier-1-only deployments, or
+   * Container-capable sandbox. Mounts the same `/skill-venvs` volume the
+   * populator writes to. When undefined (wasm-only deployments, or
    * `SANDBOX_RUNTIME` unset locally), the function logs + skips.
    */
   sandbox: SandboxClient | undefined;
   /**
    * Skills runtime image. Must carry `sh`, `find`, `grep` and the
    * `cogmo_skills_runtime.abi` module. Mirrors the value the runner passes
-   * to `runOnSysboxContainer` for tier-2 workers, so both share image
+   * to `runOnSysboxContainer` for container workers, so both share image
    * lifecycle and snapshot caches.
    */
   image: string;
@@ -32,8 +32,8 @@ export interface SkillDepsReaperDeps {
    */
   depsCacheVolumeName: string | undefined;
   /**
-   * Host directory holding the tier-1 wheel directories
-   * (`ensureTier1Packages`). Unset where tier 1 publishes none.
+   * Host directory holding the wasm wheel directories
+   * (`ensureWasmPackages`). Unset where the wasm tier publishes none.
    */
   wheelsRoot?: string;
   /**
@@ -45,7 +45,7 @@ export interface SkillDepsReaperDeps {
 
 /**
  * Daily Inngest scheduled function that sweeps unreachable
- * `/skill-venvs/<hash>/` directories, and the host's tier-1 wheel
+ * `/skill-venvs/<hash>/` directories, and the host's wasm wheel
  * directories when `wheelsRoot` is set (a reachable hash's directory for a
  * Pyodide release other than the installed one is unreachable). Unreachable = no `skills` row
  * (enabled or disabled) carries that `lockfile_hash`. A 7-day grace
@@ -107,11 +107,11 @@ export function createSkillDepsReaper(deps: SkillDepsReaperDeps, inngest: Innges
           )
         : ({ skipped: true } as const);
 
-      const tier1Wheels =
+      const wasmWheels =
         wheelsRoot === undefined
           ? ({ skipped: true } as const)
           : await step.run(
-              "reap-tier1-wheels",
+              "reap-wasm-wheels",
               async (): Promise<{
                 reapedDirs: string[];
                 error?: "reap_failed" | "bundled_unreadable";
@@ -121,35 +121,32 @@ export function createSkillDepsReaper(deps: SkillDepsReaperDeps, inngest: Innges
                 if (bundled.isErr()) {
                   log.warn(
                     { err: bundled.error.message },
-                    "skill-venvs-reaper: Pyodide's lockfile unreadable; sweeping only the tier-1 wheel root's stale tmp dirs",
+                    "skill-venvs-reaper: Pyodide's lockfile unreadable; sweeping only the wasm wheel root's stale tmp dirs",
                   );
-                  const swept = await sweepTier1WheelTmpDirs(wheelsRoot);
+                  const swept = await sweepWasmWheelTmpDirs(wheelsRoot);
                   if (swept.isErr()) {
                     log.warn(
                       { err: swept.error.message },
-                      "skill-venvs-reaper: tier-1 wheel tmp sweep failed",
+                      "skill-venvs-reaper: wasm wheel tmp sweep failed",
                     );
                   }
                   return { reapedDirs: [], error: bundled.error.kind };
                 }
-                const r = await reapTier1WheelDirs({
+                const r = await reapWasmWheelDirs({
                   wheelsRoot,
                   reachableHashes: new Set(reachable),
                   pyodideVersion: bundled.value.version,
                   graceDays: DEPS_REAP_GRACE_DAYS,
                 });
                 if (r.isErr()) {
-                  log.warn(
-                    { err: r.error.message },
-                    "skill-venvs-reaper: tier-1 wheel reap failed",
-                  );
+                  log.warn({ err: r.error.message }, "skill-venvs-reaper: wasm wheel reap failed");
                   return { reapedDirs: [], error: r.error.kind };
                 }
                 return { reapedDirs: [...r.value.reapedDirs] };
               },
             );
 
-      return { venvs, tier1Wheels };
+      return { venvs, wasmWheels };
     },
   );
 }

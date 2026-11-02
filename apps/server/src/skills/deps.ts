@@ -447,7 +447,7 @@ export interface EnsureVenvPopulatedOptions {
  * construction.
  *
  * The venv lives on the `/skill-venvs` Docker / Daytona volume shared
- * across every tier-2 worker the pool spawns: a venv populated by one
+ * across every container worker the pool spawns: a venv populated by one
  * worker is reused by every subsequent worker and survives recycle.
  * Cross-worker concurrency on the same `(hash, ABI)` pair is
  * serialised by `.ready` + `mv -T` rename failure; see

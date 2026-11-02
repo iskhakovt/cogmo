@@ -36,7 +36,7 @@ import type { Database, Transactor } from "../db/index.js";
 import type { GitHubIdentity } from "../secrets/github.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
-import { offlineTier1 } from "../test/skills-fixtures.js";
+import { offlineWasm } from "../test/skills-fixtures.js";
 import { bootstrapSkillsRepo, ensureSkillsCodingRepo, SKILLS_CODING_REPO_NAME } from "./repo.js";
 import { SkillRunnerImpl } from "./runner.js";
 import { DrizzleSkillStore } from "./store/index.js";
@@ -65,7 +65,7 @@ afterAll(async () => {
 
 const ECHO_MANIFEST = `---
 name: hn_digest
-description: a tier-1 skill that surfaces Hacker News top stories
+description: a wasm skill that surfaces Hacker News top stories
 tier: wasm
 inputs:
   type: object
@@ -265,7 +265,7 @@ describe("skill authoring bootstrap — boot → fetch → register chain", () =
       // Unscheduled skill: the identity never reaches a row.
       defaultRunAs: { userId: "user-1", profileId: "profile-1" },
       skillsRepoPath: repos.skillsBare,
-      ...offlineTier1(repos.skillsBare),
+      ...offlineWasm(repos.skillsBare),
     });
 
     const registerResult = await runner.register({ branch, origin: { kind: "owner" } });

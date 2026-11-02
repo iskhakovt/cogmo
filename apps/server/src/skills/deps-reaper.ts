@@ -11,7 +11,7 @@ import { DEPENDENCY_EXEC_OPTIONS, PYTHON_ABI_TAG_COMMAND } from "./deps.js";
 const log = logger.child({ component: "skills.deps-reaper" });
 
 /**
- * Days an unreachable dependency directory, a venv or a tier-1 wheel
+ * Days an unreachable dependency directory, a venv or a wasm wheel
  * directory, must sit unmodified, by its mtime, before it is removed.
  */
 export const DEPS_REAP_GRACE_DAYS = 7;
@@ -79,7 +79,7 @@ done
 export interface ReapSkillVenvsOptions {
   sandbox: SandboxClient;
   /**
-   * Same image used by tier-2 workers; carries `sh`, `find`, `grep`, and
+   * Same image used by container workers; carries `sh`, `find`, `grep`, and
    * the `cogmo_skills_runtime.abi` module `PYTHON_ABI_TAG_COMMAND` runs.
    */
   image: string;

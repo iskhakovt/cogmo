@@ -261,7 +261,7 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
 
     // Home volume mounted at /home/vscode — coding-delegation contract:
     // task images run as user `vscode` (devbase inherits this from
-    // mcr.microsoft.com/devcontainers/base:ubuntu-24.04). Skills tier-2
+    // mcr.microsoft.com/devcontainers/base:ubuntu-24.04). The container tier
     // omits the home volume entirely. When custom devcontainer support
     // grows, the mount target needs to become image-declared.
     const mounts: DockerodeMountSettings[] = [];
@@ -273,7 +273,7 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
       });
     }
     if (spec.depsCacheVolume) {
-      // Skills-tier-2 deps cache. Same volume on every worker in the
+      // Container-tier deps cache. Same volume on every worker in the
       // pool, so a venv populated by worker A is visible to worker B.
       // Coding-delegation sessions never set this field.
       mounts.push({

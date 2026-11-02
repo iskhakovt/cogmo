@@ -207,7 +207,7 @@ pnpm lint                 # biome check, whole workspace
 
 ## Python sub-projects
 
-The TypeScript host is the primary stack, but tier-2 skills run inside a python container and the runtime ships with that image as a real `cogmo_skills_runtime` package (`images/skills/`). Convention for any python that lives in the codebase:
+The TypeScript host is the primary stack, but container-tier skills run inside a python container and the runtime ships with that image as a real `cogmo_skills_runtime` package (`images/skills/`). Convention for any python that lives in the codebase:
 
 - **uv** for dep management. `pyproject.toml` + `uv.lock`, `uv sync --locked` in CI and Dockerfiles. uv binary copied out of `ghcr.io/astral-sh/uv:<pinned>` in multi-stage Docker builds — no apt install of uv at runtime.
 - **`.python-version`** holds the Python minor the image runs, as a bare `X.Y`. CI's `uv sync` reads it; the Dockerfile builder copies it and syncs with `UV_PYTHON_DOWNLOADS=0`, so a base image on another minor fails the build, and `version-pins.test.ts` holds the FROM to it.

@@ -13,7 +13,7 @@ import {
   schemaIssues,
 } from "../source-cache.js";
 import type { SkillRunTrigger, SkillStore } from "../store/index.js";
-import { describeTier1PackagesError } from "../worker-wasm/tier1.js";
+import { describeWasmPackagesError } from "../worker-wasm/wasm.js";
 import { executeRun } from "./execute-run.js";
 import { finishRun } from "./finish-run.js";
 import type { SkillRunResult } from "./run-result.js";
@@ -31,7 +31,7 @@ export interface InvokeDeps {
   /** IANA timezone: `ctx.user().timezone`. */
   userTimezone: string;
   sourceCache: SkillSourceCache;
-  /** Tier-2 sandbox; unset leaves container skills unavailable. */
+  /** Container sandbox; unset leaves container skills unavailable. */
   sandbox: SandboxClient | undefined;
   warmPool: LazyWarmPool;
   runtime: RuntimeConfig;
@@ -84,7 +84,7 @@ export async function invokeSkill(
   const trigger: SkillRunTrigger = opts.trigger ?? "manual";
   const { idempotencyKey } = opts;
 
-  // The runtime is prepared before the run row is written: tier-1 packages
+  // The runtime is prepared before the run row is written: wasm packages
   // the host cannot provide, or a warm pool that can't start, leave no row
   // behind, so a keyed retry runs the skill rather than replaying a failure
   // no skill code produced or refusing a `started` row as in flight. A key
@@ -147,7 +147,7 @@ export async function invokeSkill(
 }
 
 /**
- * The runtime a run executes on: the tier-1 packages the lockfile needs,
+ * The runtime a run executes on: the wasm packages the lockfile needs,
  * resolved by the host, or the started warm pool. A lockfile whose packages
  * are unavailable rejects the invocation; a pool that can't start throws.
  */
@@ -159,14 +159,14 @@ async function prepareRuntime(
   return match(plan)
     .returnType<Promise<Result<SkillRuntime, SkillInvokeRejection>>>()
     .with({ kind: "wasm" }, async () =>
-      (await deps.runtime.resolveTier1Packages(cached.lockfile))
+      (await deps.runtime.resolveWasmPackages(cached.lockfile))
         .map((packages): SkillRuntime => ({ kind: "wasm", packages }))
         .mapErr((error): SkillInvokeRejection => {
           log.warn(
-            { skillName: name, error: describeTier1PackagesError(error) },
-            "skill invocation refused: tier-1 packages unavailable",
+            { skillName: name, error: describeWasmPackagesError(error) },
+            "skill invocation refused: wasm packages unavailable",
           );
-          return { kind: "tier1_packages_unavailable", name, error };
+          return { kind: "wasm_packages_unavailable", name, error };
         }),
     )
     .with({ kind: "pool" }, async ({ sandbox }) =>

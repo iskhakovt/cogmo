@@ -45,7 +45,7 @@ export interface HomeVolumeSpec {
 }
 
 /**
- * In-container mount point for the skills-tier-2 deps cache. Sandbox
+ * In-container mount point for the container-tier deps cache. Sandbox
  * backends mount {@link DepsCacheVolumeSpec} here; the skills
  * populator + supervisor read/write here. Single source of truth so
  * the two modules don't drift.
@@ -53,7 +53,7 @@ export interface HomeVolumeSpec {
 export const DEPS_CACHE_VOLUME_TARGET = "/skill-venvs";
 
 /**
- * Process-wide shared cache volume for skills-tier-2 per-lockfile-hash
+ * Process-wide shared cache volume for container-tier per-lockfile-hash
  * virtualenvs. Mounted read-write at {@link DEPS_CACHE_VOLUME_TARGET}
  * inside the container. Lives across worker recycles + shared across
  * the pool's workers — first task populates a given `<hash>/`; every
@@ -89,18 +89,18 @@ export interface SessionSpec {
   expiresAt: Date;
   /**
    * Working tree to materialize. Optional — coding-delegation supplies it,
-   * skills tier-2 omits it because skill workers don't run in a checkout.
+   * the container tier omits it because skill workers don't run in a checkout.
    */
   worktree?: WorktreeSpec;
   /**
    * Persistent per-task scratch. Optional — coding-delegation uses it to
    * persist the Claude Code CLI's session state across exec calls; skills
-   * tier-2 omits it because the `recycle` isolation contract forbids state
+   * container omits it because the `recycle` isolation contract forbids state
    * surviving the task.
    */
   homeVolume?: HomeVolumeSpec;
   /**
-   * Shared persistent venv cache for skills tier-2. Mounted at
+   * Shared persistent venv cache for container skills. Mounted at
    * `/skill-venvs` inside the container. Same volume passed to every
    * worker in the pool, so cross-worker venv reuse works automatically
    * without coordination beyond the populator's `.ready` marker and
@@ -135,7 +135,7 @@ export interface SandboxCapabilities {
   volumes: "docker" | "managed" | "none";
   workingTreeTransport: "bind-mount" | "git-remote";
   /**
-   * Skills tier-2 deps-cache placement.
+   * Container-tier deps-cache placement.
    *
    * `shared-volume` — the backend provides a persistent volume with POSIX
    * semantics (hardlinks, rename(2), O_RDWR on existing files). The skill

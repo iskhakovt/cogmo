@@ -11,7 +11,7 @@ import type { SecretsStore } from "../secrets/store/index.js";
 import { assertStatus, expectDefined } from "../test/assertions.js";
 import { mockFilesService } from "../test/factories.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
-import { offlineTier1 } from "../test/skills-fixtures.js";
+import { offlineWasm } from "../test/skills-fixtures.js";
 import type { SkillRunAs, SkillRunServices } from "./run-as.js";
 import { SkillRunnerImpl, type SkillRunnerOptions } from "./runner.js";
 import { DrizzleSkillStore } from "./store/index.js";
@@ -27,12 +27,12 @@ let db: Database;
 let tx: Transactor;
 let close: () => Promise<void>;
 let store: DrizzleSkillStore;
-let tier1Root: string;
+let wasmRoot: string;
 
 beforeAll(async () => {
   ({ db, tx, close } = await createTestDatabase());
   store = new DrizzleSkillStore();
-  tier1Root = await mkdtemp(join(tmpdir(), "runner-test-tier1-"));
+  wasmRoot = await mkdtemp(join(tmpdir(), "runner-test-wasm-"));
 });
 
 afterEach(async () => {
@@ -41,7 +41,7 @@ afterEach(async () => {
 
 afterAll(async () => {
   await close();
-  await rm(tier1Root, { recursive: true, force: true });
+  await rm(wasmRoot, { recursive: true, force: true });
 });
 
 function makeMockMemory(): SkillRunServices["memory"] {
@@ -83,14 +83,14 @@ async function makeRunner(
     secretsStore: opts.secretsStore ?? makeMockSecrets(),
     userTimezone: "UTC",
     defaultRunAs: DEFAULT_RUN_AS,
-    ...offlineTier1(tier1Root),
+    ...offlineWasm(wasmRoot),
     ...(opts.ctxHttp && { ctxHttp: opts.ctxHttp }),
   });
 }
 
 const ECHO_MANIFEST = `---
 name: echo
-description: a tier-1 skill that echoes one int field
+description: a wasm skill that echoes one int field
 tier: wasm
 inputs:
   type: object
@@ -122,7 +122,7 @@ describe("SkillRunnerImpl", () => {
     expect(list[0]?.riskTier).toBe("auto");
   });
 
-  it("invokes a tier-1 skill end-to-end (Pyodide load)", async () => {
+  it("invokes a wasm skill end-to-end (Pyodide load)", async () => {
     const runner = await makeRunner();
     await runner.__registerForTests({
       name: "echo",
@@ -141,7 +141,7 @@ describe("SkillRunnerImpl", () => {
     expect(run?.output).toEqual({ echo: 8 });
     expect(run?.error).toBeNull();
     expect(run?.finishedAt).toBeInstanceOf(Date);
-    // Tier-1 (Pyodide) leaves rusage unset — the host still records
+    // Wasm (Pyodide) leaves rusage unset — the host still records
     // wall_clock_ms from the timestamps and writes null for peak memory.
     expect(run?.resourceUsage?.wallClockMs).toBeGreaterThanOrEqual(0);
     expect(run?.resourceUsage?.peakMemoryBytes).toBeNull();
@@ -451,9 +451,9 @@ async def run(inputs, ctx):
     expect(run?.output).toBeNull();
     expect(run?.error).toContain("kaboom");
     // Error-path coverage of the no-rusage → null coalesce in
-    // `runner.invoke`. The tier-1 Pyodide worker catches the exception and
+    // `runner.invoke`. The wasm Pyodide worker catches the exception and
     // emits a `task_result` without a `rusage` block, identical in shape
-    // to the tier-2 supervisor-synthesised result (wall-clock kill,
+    // to the container supervisor-synthesised result (wall-clock kill,
     // SIGKILL, watchdog). A regression that swapped `?? null` for `?? 0`
     // would silently corrupt the operator-visible peak-memory column on
     // every failed run.
@@ -526,7 +526,7 @@ async def run(inputs, ctx):
   });
 
   it("rejects tier:container when no sandbox is configured", async () => {
-    // Runner constructed without `sandbox` — tier-2 invocation must fail
+    // Runner constructed without `sandbox` — container invocation must fail
     // fast with a clear error rather than silently no-op or hang.
     const runner = await makeRunner();
     const containerManifest = `---
@@ -550,16 +550,16 @@ inputs:
     });
   });
 
-  it("rejects a tier-1 invoke whose packages are unavailable with no run row, so a keyed retry runs the skill", async () => {
+  it("rejects a wasm invoke whose packages are unavailable with no run row, so a keyed retry runs the skill", async () => {
     const lockfileContents = `idna==3.10 --hash=sha256:${"0".repeat(64)}\n`;
     const resolvePackages = vi
-      .fn<NonNullable<SkillRunnerOptions["tier1"]["resolvePackages"]>>()
+      .fn<NonNullable<SkillRunnerOptions["wasm"]["resolvePackages"]>>()
       .mockResolvedValueOnce(
         err({ kind: "network_failed", spec: "idna==3.10", message: "offline" }),
       )
       .mockResolvedValueOnce(ok({ builtins: [], wheelDir: null }))
       .mockResolvedValue(err({ kind: "prefetch_failed", message: "cdn down" }));
-    const offline = offlineTier1(tier1Root);
+    const offline = offlineWasm(wasmRoot);
     const runner = await SkillRunnerImpl.create({
       store,
       runInTx: tx,
@@ -567,7 +567,7 @@ inputs:
       userTimezone: "UTC",
       defaultRunAs: DEFAULT_RUN_AS,
       ...offline,
-      tier1: { ...offline.tier1, resolvePackages },
+      wasm: { ...offline.wasm, resolvePackages },
     });
     await runner.__registerForTests({
       name: "echo",
@@ -585,7 +585,7 @@ inputs:
     const rejected = await runner.invoke(keyed);
 
     expect(rejected._unsafeUnwrapErr()).toEqual({
-      kind: "tier1_packages_unavailable",
+      kind: "wasm_packages_unavailable",
       name: "echo",
       error: { kind: "network_failed", spec: "idna==3.10", message: "offline" },
     });
@@ -898,7 +898,7 @@ inputs:
       // recovery_point='executed' state with stored output, then call
       // runner.invoke with the same key. The runner should skip the
       // execute branch entirely (no Pyodide spin-up — proved by the
-      // assertion that the run finishes much faster than a cold tier-1
+      // assertion that the run finishes much faster than a cold wasm
       // start would take, plus the output is what we seeded, not what
       // Pyodide would produce with these inputs).
       const runner = await makeRunner();
@@ -1025,26 +1025,26 @@ async def run(inputs, ctx):
   });
 });
 
-// Race + lifecycle invariants for the lazy tier-2 pool. Spies on
+// Race + lifecycle invariants for the lazy container pool. Spies on
 // `SysboxWorkerPool.create` (named import is bound to the module's
 // class object, so the spy propagates to warm-pool.ts's call site
 // without further plumbing) so we can control timing without
 // spinning up real sysbox containers.
-const TIER2_MANIFEST = `---
-name: tier2-test
-description: tier-2 test skill
+const CONTAINER_MANIFEST = `---
+name: container-test
+description: container test skill
 tier: container
 inputs:
   type: object
   properties: {}
 ---
 `;
-const TIER2_BODY = `
+const CONTAINER_BODY = `
 def main(inputs, ctx):
     return {"ok": True}
 `;
 
-describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
+describe("SkillRunnerImpl container pool lifecycle", () => {
   let createSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
@@ -1061,20 +1061,20 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
     } as unknown as SysboxWorkerPool;
   }
 
-  async function makeTier2Runner() {
+  async function makeContainerRunner() {
     const runner = await SkillRunnerImpl.create({
       store,
       runInTx: tx,
       secretsStore: makeMockSecrets(),
       userTimezone: "UTC",
       defaultRunAs: DEFAULT_RUN_AS,
-      ...offlineTier1(tier1Root),
+      ...offlineWasm(wasmRoot),
       sandbox: mock<SandboxClient>(),
     });
     await runner.__registerForTests({
-      name: "tier2-test",
-      manifestSource: TIER2_MANIFEST,
-      body: TIER2_BODY,
+      name: "container-test",
+      manifestSource: CONTAINER_MANIFEST,
+      body: CONTAINER_BODY,
     });
     return runner;
   }
@@ -1083,14 +1083,14 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
     const fakePool = makeFakePool();
     let resolveCreate: (p: SysboxWorkerPool) => void = () => {};
     createSpy.mockImplementation(() => new Promise<SysboxWorkerPool>((r) => (resolveCreate = r)));
-    const runner = await makeTier2Runner();
+    const runner = await makeContainerRunner();
 
     // Three invokes fire before the pool finishes constructing — all
     // three should queue behind one in-flight pool start.
     const pending = [
-      runner.invoke({ name: "tier2-test", inputs: {}, runAs: runAs() }),
-      runner.invoke({ name: "tier2-test", inputs: {}, runAs: runAs() }),
-      runner.invoke({ name: "tier2-test", inputs: {}, runAs: runAs() }),
+      runner.invoke({ name: "container-test", inputs: {}, runAs: runAs() }),
+      runner.invoke({ name: "container-test", inputs: {}, runAs: runAs() }),
+      runner.invoke({ name: "container-test", inputs: {}, runAs: runAs() }),
     ];
     // Drain microtasks so each invoke reaches `LazyWarmPool.ensure`.
     await new Promise<void>((r) => setImmediate(r));
@@ -1112,18 +1112,18 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
     createSpy
       .mockRejectedValueOnce(new Error("daytona unreachable"))
       .mockResolvedValueOnce(fakePool);
-    const runner = await makeTier2Runner();
+    const runner = await makeContainerRunner();
 
     // First invoke throws because pool create rejects.
-    await expect(runner.invoke({ name: "tier2-test", inputs: {}, runAs: runAs() })).rejects.toThrow(
-      /daytona unreachable/,
-    );
+    await expect(
+      runner.invoke({ name: "container-test", inputs: {}, runAs: runAs() }),
+    ).rejects.toThrow(/daytona unreachable/);
 
     // Second invoke triggers a fresh create — pool resolves and the
     // skill runs through normally. Pins the "no permanent poisoning"
     // contract.
     const ok = (
-      await runner.invoke({ name: "tier2-test", inputs: {}, runAs: runAs() })
+      await runner.invoke({ name: "container-test", inputs: {}, runAs: runAs() })
     )._unsafeUnwrap();
     assertStatus(ok, "success");
     expect(createSpy).toHaveBeenCalledTimes(2);
@@ -1135,11 +1135,11 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
     createSpy
       .mockRejectedValueOnce(new Error("daytona unreachable"))
       .mockResolvedValueOnce(fakePool);
-    const runner = await makeTier2Runner();
+    const runner = await makeContainerRunner();
     const keyed = {
-      name: "tier2-test",
+      name: "container-test",
       inputs: {},
-      idempotencyKey: "skill-cron:tier2:retry",
+      idempotencyKey: "skill-cron:container:retry",
       runAs: runAs(),
     };
 
@@ -1153,16 +1153,16 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
 
   it("a finished keyed run replays its cached result without starting a pool", async () => {
     createSpy.mockRejectedValue(new Error("daytona unreachable"));
-    const runner = await makeTier2Runner();
+    const runner = await makeContainerRunner();
     const keyed = {
-      name: "tier2-test",
+      name: "container-test",
       inputs: {},
-      idempotencyKey: "skill-cron:tier2:replay",
+      idempotencyKey: "skill-cron:container:replay",
       runAs: runAs(),
     };
     const skill = expectDefined(
-      await tx((trx) => store.getSkillByName(trx, "tier2-test")),
-      "tier2-test skill",
+      await tx((trx) => store.getSkillByName(trx, "container-test")),
+      "container-test skill",
     );
     const { row } = await tx((trx) =>
       store.startOrRecoverRun(trx, {
@@ -1202,10 +1202,10 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
       workerReusable: false,
     });
     createSpy.mockResolvedValueOnce(fakePool);
-    const runner = await makeTier2Runner();
+    const runner = await makeContainerRunner();
 
     const result = (
-      await runner.invoke({ name: "tier2-test", inputs: {}, runAs: runAs() })
+      await runner.invoke({ name: "container-test", inputs: {}, runAs: runAs() })
     )._unsafeUnwrap();
 
     assertStatus(result, "error");
@@ -1216,14 +1216,14 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
   });
 
   it("invoke after shutdown throws and never calls SysboxWorkerPool.create", async () => {
-    const runner = await makeTier2Runner();
+    const runner = await makeContainerRunner();
     // No pool was ever created. Shutdown still flips `#disposed` so a
-    // post-shutdown tier-2 invoke can't lazy-spawn one.
+    // post-shutdown container invoke can't lazy-spawn one.
     await runner.shutdown();
 
-    await expect(runner.invoke({ name: "tier2-test", inputs: {}, runAs: runAs() })).rejects.toThrow(
-      /pool requested after shutdown/,
-    );
+    await expect(
+      runner.invoke({ name: "container-test", inputs: {}, runAs: runAs() }),
+    ).rejects.toThrow(/pool requested after shutdown/);
     expect(createSpy).not.toHaveBeenCalled();
   });
 
@@ -1248,19 +1248,19 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
       secretsStore: makeMockSecrets(),
       userTimezone: "UTC",
       defaultRunAs: DEFAULT_RUN_AS,
-      ...offlineTier1(tier1Root),
+      ...offlineWasm(wasmRoot),
       sandbox: perSandbox,
       // Operator-configured value flowing in from env — the runner must
       // ignore it because the backend can't honour POSIX semantics.
       depsCacheVolumeName: "cogmo-skills-deps-cache",
     });
     await runner.__registerForTests({
-      name: "tier2-test",
-      manifestSource: TIER2_MANIFEST,
-      body: TIER2_BODY,
+      name: "container-test",
+      manifestSource: CONTAINER_MANIFEST,
+      body: CONTAINER_BODY,
     });
 
-    (await runner.invoke({ name: "tier2-test", inputs: {}, runAs: runAs() }))._unsafeUnwrap();
+    (await runner.invoke({ name: "container-test", inputs: {}, runAs: runAs() }))._unsafeUnwrap();
 
     expect(createSpy).toHaveBeenCalledTimes(1);
     const poolArgs = createSpy.mock.calls[0]?.[0] as { depsCacheVolumeName?: string };
@@ -1288,17 +1288,17 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
       secretsStore: makeMockSecrets(),
       userTimezone: "UTC",
       defaultRunAs: DEFAULT_RUN_AS,
-      ...offlineTier1(tier1Root),
+      ...offlineWasm(wasmRoot),
       sandbox: sharedVolume,
       depsCacheVolumeName: "cogmo-skills-deps-cache",
     });
     await runner.__registerForTests({
-      name: "tier2-test",
-      manifestSource: TIER2_MANIFEST,
-      body: TIER2_BODY,
+      name: "container-test",
+      manifestSource: CONTAINER_MANIFEST,
+      body: CONTAINER_BODY,
     });
 
-    (await runner.invoke({ name: "tier2-test", inputs: {}, runAs: runAs() }))._unsafeUnwrap();
+    (await runner.invoke({ name: "container-test", inputs: {}, runAs: runAs() }))._unsafeUnwrap();
 
     expect(createSpy).toHaveBeenCalledTimes(1);
     const poolArgs = createSpy.mock.calls[0]?.[0] as { depsCacheVolumeName?: string };
@@ -1309,11 +1309,11 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
     const fakePool = makeFakePool();
     let resolveCreate: (p: SysboxWorkerPool) => void = () => {};
     createSpy.mockImplementation(() => new Promise<SysboxWorkerPool>((r) => (resolveCreate = r)));
-    const runner = await makeTier2Runner();
+    const runner = await makeContainerRunner();
 
     // Kick off pool init via an invoke — it will hang on the
     // controlled create promise.
-    const inflight = runner.invoke({ name: "tier2-test", inputs: {}, runAs: runAs() });
+    const inflight = runner.invoke({ name: "container-test", inputs: {}, runAs: runAs() });
     inflight.catch(() => undefined); // suppress unhandled-rejection — we await it explicitly below
     await new Promise<void>((r) => setImmediate(r));
     expect(createSpy).toHaveBeenCalledTimes(1);
@@ -1340,9 +1340,9 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
   it("shutdown during a pool start that fails resolves, and no pool starts after it", async () => {
     const start = Promise.withResolvers<SysboxWorkerPool>();
     createSpy.mockImplementation(() => start.promise);
-    const runner = await makeTier2Runner();
+    const runner = await makeContainerRunner();
 
-    const inflight = runner.invoke({ name: "tier2-test", inputs: {}, runAs: runAs() });
+    const inflight = runner.invoke({ name: "container-test", inputs: {}, runAs: runAs() });
     inflight.catch(() => undefined); // awaited below
     await new Promise<void>((r) => setImmediate(r));
     const shutdown = runner.shutdown();
@@ -1350,9 +1350,9 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
 
     await expect(shutdown).resolves.toBeUndefined();
     await expect(inflight).rejects.toThrow("sandbox unreachable");
-    await expect(runner.invoke({ name: "tier2-test", inputs: {}, runAs: runAs() })).rejects.toThrow(
-      /pool requested after shutdown/,
-    );
+    await expect(
+      runner.invoke({ name: "container-test", inputs: {}, runAs: runAs() }),
+    ).rejects.toThrow(/pool requested after shutdown/);
     expect(createSpy).toHaveBeenCalledTimes(1);
   });
 });

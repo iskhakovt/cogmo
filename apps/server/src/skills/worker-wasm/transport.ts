@@ -6,7 +6,7 @@ import type { WorkerFrame } from "../worker-state.js";
 const log = logger.child({ component: "skills.worker.wasm" });
 
 /**
- * A tier-1 child's IPC channel, as a forked `ChildProcess` exposes it: its
+ * A wasm child's IPC channel, as a forked `ChildProcess` exposes it: its
  * `message`, `error` and `close` events, `send`, and `disconnect`. `close`
  * follows the child's exit once its stdio and channel have drained, so no
  * frame arrives after it.
@@ -18,7 +18,7 @@ export interface IpcChannel extends EventEmitter {
 }
 
 /**
- * A tier-1 child's IPC channel as a transport. The messages fail once the
+ * A wasm child's IPC channel as a transport. The messages fail once the
  * child errors, or once it has exited and its channel closed, so a frame the
  * child sent just before exiting is still read. The child runs one task and
  * is killed after it, so nothing the task started can outlive it: each
@@ -30,7 +30,7 @@ export function createIpcTransport(child: IpcChannel): WorkerTransport {
   // Also keeps late errors after teardown — a send racing the child's exit —
   // from escaping to the process as unhandled.
   child.on("error", (e: Error) => {
-    log.debug({ err: e.message }, "tier-1 child channel error");
+    log.debug({ err: e.message }, "wasm child channel error");
     gone.abort(new Error(`worker crashed: ${e.message}`));
   });
   child.once("close", (code: number | null, signal: NodeJS.Signals | null) =>

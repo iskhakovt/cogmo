@@ -20,7 +20,7 @@ import type { SecretsStore } from "../secrets/store/index.js";
 import { assertStatus } from "../test/assertions.js";
 import { mockFilesService } from "../test/factories.js";
 import { createTestDatabase } from "../test/pglite.js";
-import { offlineTier1 } from "../test/skills-fixtures.js";
+import { offlineWasm } from "../test/skills-fixtures.js";
 import type { SkillRunAs, SkillRunServices } from "./run-as.js";
 import { SkillRunnerImpl } from "./runner.js";
 import { DrizzleSkillStore } from "./store/index.js";
@@ -38,12 +38,12 @@ const RUN_AS: SkillRunAs = {
 const DEFAULT_RUN_AS = { userId: "u-1", profileId: "p-1" };
 
 /**
- * End-to-end tier-2 worker test against a real sysbox container running
+ * End-to-end container worker test against a real sysbox container running
  * `cogmo-skills:test` (loaded into the local Docker daemon by the
  * sysbox-e2e workflow's `bake --load` step before tests run). Validates:
  *
  *   - Image pull on first call (`ensureImagePresent`).
- *   - Container creation without worktree/home (skills tier-2 contract).
+ *   - Container creation without worktree/home (container-tier contract).
  *   - NDJSON-over-stdio RPC against real Python.
  *   - `ctx.now` round-trip (bridge correctness).
  *   - Wall-clock expiry reported as `wall_clock_exceeded`.
@@ -75,11 +75,11 @@ let docker: Docker;
 let proxy: CogmoSocketProxy;
 let sandbox: SandboxClient;
 let instanceId: string;
-let tier1Root: string;
+let wasmRoot: string;
 
 beforeAll(async () => {
   if (!SHOULD_RUN) return;
-  tier1Root = await mkdtemp(join(tmpdir(), "runner-sysbox-tier1-"));
+  wasmRoot = await mkdtemp(join(tmpdir(), "runner-sysbox-wasm-"));
   ({ tx, close } = await createTestDatabase());
   agentStore = new DrizzleSandboxStore();
   skillStore = new DrizzleSkillStore();
@@ -135,7 +135,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (!SHOULD_RUN) return;
-  await rm(tier1Root, { recursive: true, force: true });
+  await rm(wasmRoot, { recursive: true, force: true });
   if (sandbox) await sandbox.shutdown();
   // Belt-and-suspenders cleanup, scoped to this test's instance label so
   // parallel test files (or stray containers from unrelated runs on the
@@ -202,7 +202,7 @@ async def run(inputs, ctx):
 
 const containerManifest = (name: string) => `---
 name: ${name}
-description: a tier-2 sysbox skill
+description: a container sysbox skill
 tier: container
 inputs:
   type: object
@@ -248,7 +248,7 @@ async def run(inputs, ctx):
 `;
 
 const checkPidManifest = `---
-name: tier2-check-pid
+name: container-check-pid
 description: reports whether a pid is alive
 tier: container
 inputs:
@@ -312,7 +312,7 @@ const IDNA_LOCKFILE = `idna==3.10 \\
 
 const depsManifest = (name: string) => `---
 name: ${name}
-description: a tier-2 skill that imports a declared dependency
+description: a container skill that imports a declared dependency
 tier: container
 dependencies:
   - "idna==3.10"
@@ -412,29 +412,29 @@ async def run(inputs, ctx):
     return {"host": socket.gethostname(), "version": md.version("idna")}
 `;
 
-describe.skipIf(!SHOULD_RUN)("SkillRunnerImpl tier-2 (sysbox runtime, GHA only)", () => {
-  it("invokes a tier-2 skill end-to-end against cogmo-skills:test", async () => {
+describe.skipIf(!SHOULD_RUN)("SkillRunnerImpl container (sysbox runtime, GHA only)", () => {
+  it("invokes a container skill end-to-end against cogmo-skills:test", async () => {
     const runner = await SkillRunnerImpl.create({
       runInTx: tx,
       store: skillStore,
       secretsStore: stubSecrets(),
       sandbox,
-      tier2Image: SKILLS_IMAGE,
+      containerImage: SKILLS_IMAGE,
       userTimezone: "UTC",
       defaultRunAs: DEFAULT_RUN_AS,
-      // Every skill here is tier 2.
-      ...offlineTier1(tier1Root),
+      // Every skill here runs on the container tier.
+      ...offlineWasm(wasmRoot),
     });
 
     try {
       await runner.__registerForTests({
-        name: "tier2-now",
-        manifestSource: containerManifest("tier2-now"),
+        name: "container-now",
+        manifestSource: containerManifest("container-now"),
         body: NOW_BODY,
       });
 
       const result = (
-        await runner.invoke({ name: "tier2-now", inputs: { x: 7 }, runAs: RUN_AS })
+        await runner.invoke({ name: "container-now", inputs: { x: 7 }, runAs: RUN_AS })
       )._unsafeUnwrap();
       assertStatus(result, "success");
       expect(result.output).toMatchObject({ echoed: 8 });
@@ -447,22 +447,22 @@ describe.skipIf(!SHOULD_RUN)("SkillRunnerImpl tier-2 (sysbox runtime, GHA only)"
     }
   }, 180_000);
 
-  it("kills a tier-2 container that exceeds wall_clock_s", async () => {
+  it("kills a container skill that exceeds wall_clock_s", async () => {
     const runner = await SkillRunnerImpl.create({
       runInTx: tx,
       store: skillStore,
       secretsStore: stubSecrets(),
       sandbox,
-      tier2Image: SKILLS_IMAGE,
+      containerImage: SKILLS_IMAGE,
       userTimezone: "UTC",
       defaultRunAs: DEFAULT_RUN_AS,
-      // Every skill here is tier 2.
-      ...offlineTier1(tier1Root),
+      // Every skill here runs on the container tier.
+      ...offlineWasm(wasmRoot),
     });
 
     const slowManifest = `---
-name: tier2-sleep
-description: a tier-2 skill that sleeps longer than its wall clock
+name: container-sleep
+description: a container skill that sleeps longer than its wall clock
 tier: container
 inputs:
   type: object
@@ -472,14 +472,14 @@ resources:
 ---
 `;
     await runner.__registerForTests({
-      name: "tier2-sleep",
+      name: "container-sleep",
       manifestSource: slowManifest,
       body: SLEEP_BODY,
     });
 
     const start = Date.now();
     const result = (
-      await runner.invoke({ name: "tier2-sleep", inputs: {}, runAs: RUN_AS })
+      await runner.invoke({ name: "container-sleep", inputs: {}, runAs: RUN_AS })
     )._unsafeUnwrap();
     const elapsedMs = Date.now() - start;
     assertStatus(result, "error");
@@ -497,11 +497,11 @@ resources:
       store: skillStore,
       secretsStore: stubSecrets(),
       sandbox,
-      tier2Image: SKILLS_IMAGE,
+      containerImage: SKILLS_IMAGE,
       userTimezone: "UTC",
       defaultRunAs: DEFAULT_RUN_AS,
-      // Every skill here is tier 2.
-      ...offlineTier1(tier1Root),
+      // Every skill here runs on the container tier.
+      ...offlineWasm(wasmRoot),
       // Default min=1: the runner.create call eagerly spawns one worker
       // before the first invoke, so both invokes run on a warm container.
       // Tighter idle/recycle caps don't matter for a two-task test.
@@ -509,16 +509,16 @@ resources:
 
     try {
       await runner.__registerForTests({
-        name: "tier2-host",
-        manifestSource: containerManifest("tier2-host"),
+        name: "container-host",
+        manifestSource: containerManifest("container-host"),
         body: HOSTNAME_BODY,
       });
 
       const r1 = (
-        await runner.invoke({ name: "tier2-host", inputs: {}, runAs: RUN_AS })
+        await runner.invoke({ name: "container-host", inputs: {}, runAs: RUN_AS })
       )._unsafeUnwrap();
       const r2 = (
-        await runner.invoke({ name: "tier2-host", inputs: {}, runAs: RUN_AS })
+        await runner.invoke({ name: "container-host", inputs: {}, runAs: RUN_AS })
       )._unsafeUnwrap();
       assertStatus(r1, "success");
       assertStatus(r2, "success");
@@ -537,7 +537,7 @@ resources:
     }
   }, 180_000);
 
-  it("invokes a tier-2 skill with declared deps — populator + venv activation end-to-end", async () => {
+  it("invokes a container skill with declared deps — populator + venv activation end-to-end", async () => {
     const depsBody = `
 import importlib.metadata as md
 import idna
@@ -557,23 +557,23 @@ async def run(inputs, ctx):
       store: skillStore,
       secretsStore: stubSecrets(),
       sandbox,
-      tier2Image: SKILLS_IMAGE,
+      containerImage: SKILLS_IMAGE,
       userTimezone: "UTC",
       defaultRunAs: DEFAULT_RUN_AS,
-      // Every skill here is tier 2.
-      ...offlineTier1(tier1Root),
+      // Every skill here runs on the container tier.
+      ...offlineWasm(wasmRoot),
       depsCacheVolumeName,
     });
     try {
       await runner.__registerForTests({
-        name: "tier2-with-deps",
-        manifestSource: depsManifest("tier2-with-deps"),
+        name: "container-with-deps",
+        manifestSource: depsManifest("container-with-deps"),
         body: depsBody,
         lockfileContents: IDNA_LOCKFILE,
       });
 
       const result = (
-        await runner.invoke({ name: "tier2-with-deps", inputs: {}, runAs: RUN_AS })
+        await runner.invoke({ name: "container-with-deps", inputs: {}, runAs: RUN_AS })
       )._unsafeUnwrap();
       assertStatus(result, "success");
       // Pass `result` as the assertion-failure label so a mismatch
@@ -605,24 +605,24 @@ async def run(inputs, ctx):
       store: skillStore,
       secretsStore: stubSecrets(),
       sandbox,
-      tier2Image: SKILLS_IMAGE,
+      containerImage: SKILLS_IMAGE,
       userTimezone: "UTC",
       defaultRunAs: DEFAULT_RUN_AS,
-      // Every skill here is tier 2.
-      ...offlineTier1(tier1Root),
+      // Every skill here runs on the container tier.
+      ...offlineWasm(wasmRoot),
     });
 
     await runner.__registerForTests({
-      name: "tier2-leak",
-      manifestSource: containerManifest("tier2-leak"),
+      name: "container-leak",
+      manifestSource: containerManifest("container-leak"),
       body: STATE_LEAK_BODY,
     });
 
     const r1 = (
-      await runner.invoke({ name: "tier2-leak", inputs: {}, runAs: RUN_AS })
+      await runner.invoke({ name: "container-leak", inputs: {}, runAs: RUN_AS })
     )._unsafeUnwrap();
     const r2 = (
-      await runner.invoke({ name: "tier2-leak", inputs: {}, runAs: RUN_AS })
+      await runner.invoke({ name: "container-leak", inputs: {}, runAs: RUN_AS })
     )._unsafeUnwrap();
     assertStatus(r1, "success");
     assertStatus(r2, "success");
@@ -641,32 +641,32 @@ async def run(inputs, ctx):
       store: skillStore,
       secretsStore: stubSecrets(),
       sandbox,
-      tier2Image: SKILLS_IMAGE,
+      containerImage: SKILLS_IMAGE,
       userTimezone: "UTC",
       defaultRunAs: DEFAULT_RUN_AS,
-      // Every skill here is tier 2.
-      ...offlineTier1(tier1Root),
+      // Every skill here runs on the container tier.
+      ...offlineWasm(wasmRoot),
     });
     try {
       await runner.__registerForTests({
-        name: "tier2-leave-sleeper",
-        manifestSource: containerManifest("tier2-leave-sleeper"),
+        name: "container-leave-sleeper",
+        manifestSource: containerManifest("container-leave-sleeper"),
         body: LEAVE_SLEEPER_BODY,
       });
       await runner.__registerForTests({
-        name: "tier2-check-pid",
+        name: "container-check-pid",
         manifestSource: checkPidManifest,
         body: CHECK_PID_BODY,
       });
 
       const left = (
-        await runner.invoke({ name: "tier2-leave-sleeper", inputs: {}, runAs: RUN_AS })
+        await runner.invoke({ name: "container-leave-sleeper", inputs: {}, runAs: RUN_AS })
       )._unsafeUnwrap();
       assertStatus(left, "success");
       const { host, pid } = left.output as { host: string; pid: number };
       const checked = (
         await runner.invoke({
-          name: "tier2-check-pid",
+          name: "container-check-pid",
           inputs: { pid },
           runAs: RUN_AS,
         })
@@ -685,21 +685,21 @@ async def run(inputs, ctx):
       store: skillStore,
       secretsStore: stubSecrets(),
       sandbox,
-      tier2Image: SKILLS_IMAGE,
+      containerImage: SKILLS_IMAGE,
       userTimezone: "UTC",
       defaultRunAs: DEFAULT_RUN_AS,
-      // Every skill here is tier 2.
-      ...offlineTier1(tier1Root),
+      // Every skill here runs on the container tier.
+      ...offlineWasm(wasmRoot),
     });
     try {
       await runner.__registerForTests({
-        name: "tier2-proc-probe",
-        manifestSource: containerManifest("tier2-proc-probe"),
+        name: "container-proc-probe",
+        manifestSource: containerManifest("container-proc-probe"),
         body: PROC_FD_PROBE_BODY,
       });
 
       const result = (
-        await runner.invoke({ name: "tier2-proc-probe", inputs: {}, runAs: RUN_AS })
+        await runner.invoke({ name: "container-proc-probe", inputs: {}, runAs: RUN_AS })
       )._unsafeUnwrap();
       assertStatus(result, "success");
       expect(result.output).toEqual({ opened: [], control: true });
@@ -714,30 +714,30 @@ async def run(inputs, ctx):
       store: skillStore,
       secretsStore: stubSecrets(),
       sandbox,
-      tier2Image: SKILLS_IMAGE,
+      containerImage: SKILLS_IMAGE,
       userTimezone: "UTC",
       defaultRunAs: DEFAULT_RUN_AS,
-      // Every skill here is tier 2.
-      ...offlineTier1(tier1Root),
+      // Every skill here runs on the container tier.
+      ...offlineWasm(wasmRoot),
     });
     try {
       await runner.__registerForTests({
-        name: "tier2-plant-module",
-        manifestSource: containerManifest("tier2-plant-module"),
+        name: "container-plant-module",
+        manifestSource: containerManifest("container-plant-module"),
         body: PLANT_MODULE_BODY,
       });
       await runner.__registerForTests({
-        name: "tier2-import-csv",
-        manifestSource: containerManifest("tier2-import-csv"),
+        name: "container-import-csv",
+        manifestSource: containerManifest("container-import-csv"),
         body: IMPORT_CSV_BODY,
       });
 
       const planted = (
-        await runner.invoke({ name: "tier2-plant-module", inputs: {}, runAs: RUN_AS })
+        await runner.invoke({ name: "container-plant-module", inputs: {}, runAs: RUN_AS })
       )._unsafeUnwrap();
       assertStatus(planted, "success");
       const imported = (
-        await runner.invoke({ name: "tier2-import-csv", inputs: {}, runAs: RUN_AS })
+        await runner.invoke({ name: "container-import-csv", inputs: {}, runAs: RUN_AS })
       )._unsafeUnwrap();
       assertStatus(imported, "success");
       const { host } = HostSchema.parse(planted.output);
@@ -759,33 +759,33 @@ async def run(inputs, ctx):
       store: skillStore,
       secretsStore: stubSecrets(),
       sandbox,
-      tier2Image: SKILLS_IMAGE,
+      containerImage: SKILLS_IMAGE,
       userTimezone: "UTC",
       defaultRunAs: DEFAULT_RUN_AS,
-      // Every skill here is tier 2.
-      ...offlineTier1(tier1Root),
+      // Every skill here runs on the container tier.
+      ...offlineWasm(wasmRoot),
       depsCacheVolumeName,
     });
     try {
       await runner.__registerForTests({
-        name: "tier2-plant-uv-config",
-        manifestSource: containerManifest("tier2-plant-uv-config"),
+        name: "container-plant-uv-config",
+        manifestSource: containerManifest("container-plant-uv-config"),
         body: PLANT_UV_CONFIG_BODY,
       });
       await runner.__registerForTests({
-        name: "tier2-idna-host",
-        manifestSource: depsManifest("tier2-idna-host"),
+        name: "container-idna-host",
+        manifestSource: depsManifest("container-idna-host"),
         body: IDNA_HOST_BODY,
         lockfileContents: IDNA_LOCKFILE,
       });
 
       const planted = (
-        await runner.invoke({ name: "tier2-plant-uv-config", inputs: {}, runAs: RUN_AS })
+        await runner.invoke({ name: "container-plant-uv-config", inputs: {}, runAs: RUN_AS })
       )._unsafeUnwrap();
       assertStatus(planted, "success");
       // Its venv is populated on the worker the planting task ran on.
       const populated = (
-        await runner.invoke({ name: "tier2-idna-host", inputs: {}, runAs: RUN_AS })
+        await runner.invoke({ name: "container-idna-host", inputs: {}, runAs: RUN_AS })
       )._unsafeUnwrap();
       assertStatus(populated, "success");
       const { host } = HostSchema.parse(planted.output);
@@ -806,32 +806,32 @@ async def run(inputs, ctx):
       store: skillStore,
       secretsStore: stubSecrets(),
       sandbox,
-      tier2Image: SKILLS_IMAGE,
+      containerImage: SKILLS_IMAGE,
       userTimezone: "UTC",
       defaultRunAs: DEFAULT_RUN_AS,
-      // Every skill here is tier 2.
-      ...offlineTier1(tier1Root),
+      // Every skill here runs on the container tier.
+      ...offlineWasm(wasmRoot),
       depsCacheVolumeName,
     });
     try {
       await runner.__registerForTests({
-        name: "tier2-plant-project",
-        manifestSource: containerManifest("tier2-plant-project"),
+        name: "container-plant-project",
+        manifestSource: containerManifest("container-plant-project"),
         body: PLANT_PROJECT_BODY,
       });
       await runner.__registerForTests({
-        name: "tier2-idna-project",
-        manifestSource: depsManifest("tier2-idna-project"),
+        name: "container-idna-project",
+        manifestSource: depsManifest("container-idna-project"),
         body: IDNA_HOST_BODY,
         lockfileContents: IDNA_LOCKFILE,
       });
 
       const planted = (
-        await runner.invoke({ name: "tier2-plant-project", inputs: {}, runAs: RUN_AS })
+        await runner.invoke({ name: "container-plant-project", inputs: {}, runAs: RUN_AS })
       )._unsafeUnwrap();
       assertStatus(planted, "success");
       const populated = (
-        await runner.invoke({ name: "tier2-idna-project", inputs: {}, runAs: RUN_AS })
+        await runner.invoke({ name: "container-idna-project", inputs: {}, runAs: RUN_AS })
       )._unsafeUnwrap();
       assertStatus(populated, "success");
       const { host } = HostSchema.parse(planted.output);
@@ -851,21 +851,21 @@ async def run(inputs, ctx):
       store: skillStore,
       secretsStore: stubSecrets(),
       sandbox,
-      tier2Image: SKILLS_IMAGE,
+      containerImage: SKILLS_IMAGE,
       userTimezone: "UTC",
       defaultRunAs: DEFAULT_RUN_AS,
-      // Every skill here is tier 2.
-      ...offlineTier1(tier1Root),
+      // Every skill here runs on the container tier.
+      ...offlineWasm(wasmRoot),
     });
     try {
       await runner.__registerForTests({
-        name: "tier2-replace-python",
-        manifestSource: containerManifest("tier2-replace-python"),
+        name: "container-replace-python",
+        manifestSource: containerManifest("container-replace-python"),
         body: REPLACE_RUNTIME_PYTHON_BODY,
       });
 
       const result = (
-        await runner.invoke({ name: "tier2-replace-python", inputs: {}, runAs: RUN_AS })
+        await runner.invoke({ name: "container-replace-python", inputs: {}, runAs: RUN_AS })
       )._unsafeUnwrap();
       assertStatus(result, "success");
       expect(result.output).toEqual({ replaced: false });

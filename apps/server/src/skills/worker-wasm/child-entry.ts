@@ -3,7 +3,7 @@ import { match, P } from "ts-pattern";
 import { INTERRUPT_MESSAGE } from "./interrupt-message.js";
 
 /**
- * A tier-1 child's main thread (design/skills.md → Tier-1 boundary, layer 1).
+ * A wasm child's main thread (design/skills.md → Wasm-tier boundary, layer 1).
  * The host forks it under `--permission` and relays frames over IPC; this
  * thread runs no Python. It owns the interrupt buffer it shares with the
  * Pyodide worker thread, so the host's `interrupt` message reaches a worker
@@ -24,7 +24,7 @@ const SIGINT = 2;
 
 const send = process.send?.bind(process);
 if (send === undefined) {
-  process.stderr.write("tier-1 child: started without an IPC channel\n");
+  process.stderr.write("wasm child: started without an IPC channel\n");
   process.exit(EXIT_WORKER_FAILED);
 }
 
@@ -59,11 +59,11 @@ function isInterrupt(message: unknown): boolean {
  * The Pyodide worker. No `execArgv`: an explicit one drops the process's
  * permission grant, and the worker inherits `--permission`, its grants and
  * the process-wide `--disallow-code-generation-from-strings` without one.
- * The bundle emits it beside this file as `tier1-pyodide-worker.mjs`
+ * The bundle emits it beside this file as `wasm-pyodide-worker.mjs`
  * (`child-bundle.ts`).
  */
 function startWorker(init: unknown): Worker {
-  const started = new Worker(new URL("./tier1-pyodide-worker.mjs", import.meta.url), {
+  const started = new Worker(new URL("./wasm-pyodide-worker.mjs", import.meta.url), {
     env: {},
     workerData: { init, interruptBuffer },
   });
@@ -126,7 +126,7 @@ function relay(worker: Worker, message: unknown): void {
  * as the handshake's `fatal`; after it, to stderr, and the host sees the exit.
  */
 function fail(reason: string): void {
-  process.stderr.write(`tier-1 child: ${reason}\n`);
+  process.stderr.write(`wasm child: ${reason}\n`);
   if (ready || send === undefined) {
     process.exit(EXIT_WORKER_FAILED);
   }

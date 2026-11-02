@@ -134,7 +134,7 @@ Keys don't close every route — see `deploy.md` → Securing internal services.
 
 **Already lazy** (verified during the audit):
 - `mcpRegistry.start()` — declared as a no-op; MCP connections happen on first tool call via the connection pool.
-- Skill warm pool (`SysboxWorkerPool.create`) — pool is constructed lazily inside `SkillRunnerImpl` on the first tier-2 invocation, so the eager `min` worker spawn never blocks boot.
+- Skill warm pool (`SysboxWorkerPool.create`) — pool is constructed lazily inside `SkillRunnerImpl` on the first container-tier invocation, so the eager `min` worker spawn never blocks boot.
 - Daytona snapshot warming — Daytona's runner caches the first-pull derived snapshot itself; cold pulls measured at 15–30 s in May 2026 and rare enough to leave on the first-task path. Pre-creating explicit snapshots is an open `[proposed]` lever; see `design/sandbox.md`.
 
 **Principle.** Block on what the first request needs and what a healthy dependency answers in well under a second; a dependency that is down or undecided holds boot for about one probe deadline before boot fails. Defer the rest with a `Promise<void>` that logs on both fulfilment and rejection (structured, includes the subsystem label) and clears any in-flight cache on rejection so the next caller retries instead of inheriting a poisoned state. Never silently swallow a deferred failure — operators read logs to discover state.
@@ -147,7 +147,7 @@ On `SIGTERM` or `SIGINT`, the Inngest connection closes first, waiting for every
 2. **Channel adapters**, concurrently. Telegram confirms the update offset past every update it handled, so none is redelivered on restart.
 3. **Coding progress streams.** Stops the sweep timer ([coding-delegation.md → Progress stream](coding-delegation.md#progress-stream-confirmed)).
 4. **MCP** connection pool.
-5. **Skills pool.** Disposes the tier-2 warm pool, tearing its containers down ([skills.md → Sizing](skills.md#sizing-confirmed)).
+5. **Skills pool.** Disposes the container-tier warm pool, tearing its containers down ([skills.md → Sizing](skills.md#sizing-confirmed)).
 6. **Sandbox.** On local-Docker this closes the socket proxy, which ends every connection a task opened through it, hijacked streams included.
 7. **Instance row.** Sets `cogmo_instances.stopped_at` ([sandbox.md → Data Model](sandbox.md#data-model-confirmed)). Skipped when the skills pool or sandbox step didn't finish: the next boot reaps the containers of instances never marked stopped, so it reaps what they left.
 

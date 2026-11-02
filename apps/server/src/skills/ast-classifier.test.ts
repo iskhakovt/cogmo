@@ -340,7 +340,7 @@ async def run(inputs, ctx):
       BUILD_CAPABILITIES,
     );
     expect(log.detected_effects).not.toContain("spawns_subprocess");
-    // Nothing in the rules table matches, so only the tier-1 cap applies.
+    // Nothing in the rules table matches, so only the wasm cap applies.
     expect(log.risk_tier).toBe("notify");
     expect(log.reasons).toEqual(CAP_REASONS);
   });
@@ -524,7 +524,7 @@ async def run(inputs, ctx):
   });
 });
 
-describe("classifyWithAst — tier-1 cap", () => {
+describe("classifyWithAst — wasm cap", () => {
   const HARMLESS = `
 async def run(inputs, ctx):
     return {"ok": True}
@@ -532,34 +532,34 @@ async def run(inputs, ctx):
 
   it("caps auto at notify with both cap reasons while both flags are off", async () => {
     const log = await classifyWithAst(manifestWith(), HARMLESS, {
-      tier1Hardened: false,
+      wasmHardened: false,
       reviewPanel: false,
-      tier1MemoryBounded: false,
+      wasmMemoryBounded: false,
     });
     expect(log.risk_tier).toBe("notify");
-    expect(log.reasons).toEqual(["tier1_unhardened", "no_review_panel"]);
+    expect(log.reasons).toEqual(["wasm_unhardened", "no_review_panel"]);
     expect(log.capabilities).toEqual({
-      tier1Hardened: false,
+      wasmHardened: false,
       reviewPanel: false,
-      tier1MemoryBounded: false,
+      wasmMemoryBounded: false,
     });
   });
 
-  it("records only tier1_unhardened once a review panel is set", async () => {
+  it("records only wasm_unhardened once a review panel is set", async () => {
     const log = await classifyWithAst(manifestWith(), HARMLESS, {
-      tier1Hardened: false,
+      wasmHardened: false,
       reviewPanel: true,
-      tier1MemoryBounded: false,
+      wasmMemoryBounded: false,
     });
     expect(log.risk_tier).toBe("notify");
-    expect(log.reasons).toEqual(["tier1_unhardened"]);
+    expect(log.reasons).toEqual(["wasm_unhardened"]);
   });
 
-  it("records only no_review_panel once tier 1 is hardened", async () => {
+  it("records only no_review_panel once the wasm tier is hardened", async () => {
     const log = await classifyWithAst(manifestWith(), HARMLESS, {
-      tier1Hardened: true,
+      wasmHardened: true,
       reviewPanel: false,
-      tier1MemoryBounded: false,
+      wasmMemoryBounded: false,
     });
     expect(log.risk_tier).toBe("notify");
     expect(log.reasons).toEqual(["no_review_panel"]);
@@ -567,16 +567,16 @@ async def run(inputs, ctx):
 
   it("returns auto with no reasons when both flags are set", async () => {
     const log = await classifyWithAst(manifestWith(), HARMLESS, {
-      tier1Hardened: true,
+      wasmHardened: true,
       reviewPanel: true,
-      tier1MemoryBounded: false,
+      wasmMemoryBounded: false,
     });
     expect(log.risk_tier).toBe("auto");
     expect(log.reasons).toEqual([]);
     expect(log.capabilities).toEqual({
-      tier1Hardened: true,
+      wasmHardened: true,
       reviewPanel: true,
-      tier1MemoryBounded: false,
+      wasmMemoryBounded: false,
     });
   });
 

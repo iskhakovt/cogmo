@@ -17,7 +17,7 @@ import { DEFAULT_WALL_CLOCK_S } from "./wall-clock.js";
 const log = logger.child({ component: "skills.ctx" });
 
 /**
- * Tier-1 `ctx.*` v1 surface. Six methods cover the slice's end-to-end test
+ * Wasm `ctx.*` v1 surface. Six methods cover the slice's end-to-end test
  * matrix; `attachments`, `llm.complete`, `notify` deferred to P3.2 (each
  * crosses module boundaries the slice does not otherwise touch — see plan).
  */
@@ -487,7 +487,7 @@ export class DefaultCtxHandler implements CtxHandler {
       (this.#manifest.resources?.wall_clock_s ?? DEFAULT_WALL_CLOCK_S[this.#manifest.tier]) * 1000;
     // Sized against the whole budget rather than what is left of it. The
     // accurate elapsed figure needs the moment the task reached a runtime,
-    // and the only timestamps available here precede a tier-2 pool
+    // and the only timestamps available here precede a container pool
     // acquisition that can itself consume most of the budget — counting
     // from one of those makes every request on a cold pool believe it has
     // nothing left. Erring long instead means a request begun late can be
@@ -505,14 +505,14 @@ export class DefaultCtxHandler implements CtxHandler {
   }
 
   /**
-   * Outbound HTTP on behalf of a tier-1 skill.
+   * Outbound HTTP on behalf of a wasm skill.
    *
    * Pyodide has no sockets, so `urllib` / `http.client` cannot work inside
-   * the WASM sandbox at all. Routing through the host is what gives tier 1
+   * the WASM sandbox at all. Routing through the host is what gives the wasm tier
    * a network path, and it puts every request at a point the skill cannot
    * reach around: the destination is matched against the manifest's
    * `network.allow` list here, judged again by resolved address, and
-   * audited. Tier-2 skills also have real sockets, so a tier-2 body can
+   * audited. Container skills also have real sockets, so a container body can
    * still reach the network without passing through this method — what
    * the allowlist bounds absolutely is where a *bound* credential can
    * travel, since substitution happens on this path alone.

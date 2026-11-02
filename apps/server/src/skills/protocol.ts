@@ -2,14 +2,14 @@ import { z } from "zod";
 
 /**
  * Worker JSON-RPC protocol — transport-agnostic message shapes used by the
- * Tier 1 (IPC to a forked child process) and Tier 2 (NDJSON over the
+ * wasm (IPC to a forked child process) and container (NDJSON over the
  * supervisor's stdin/stdout) workers. Tasks and ctx calls correlate by
  * `id`; every ctx message also names the task it belongs to. See
  * `design/skills.md` → Protocol.
  */
 
 /**
- * Tier 2 supervisor protocol version. The supervisor announces it in
+ * Container supervisor protocol version. The supervisor announces it in
  * `supervisor_ready`; the worker refuses a supervisor announcing anything
  * else. Bump with `PROTOCOL_VERSION` in
  * `images/skills/src/cogmo_skills_runtime/supervisor.py` on a protocol
@@ -17,16 +17,16 @@ import { z } from "zod";
  */
 export const SUPERVISOR_PROTOCOL_VERSION = 3;
 
-/** Tier 2 only: the supervisor's first frame, announcing its protocol version. */
+/** Container tier only: the supervisor's first frame, announcing its protocol version. */
 const SupervisorReadySchema = z.object({
   type: z.literal("supervisor_ready"),
   protocolVersion: z.number().int(),
 });
 
-/** Tier 1 only: the Pyodide worker's first frame once it has loaded. */
+/** Wasm tier only: the Pyodide worker's first frame once it has loaded. */
 const WorkerReadySchema = z.object({ type: z.literal("ready") });
 
-/** Tier 1 only: the Pyodide worker's first frame when it failed to load. */
+/** Wasm tier only: the Pyodide worker's first frame when it failed to load. */
 const WorkerFatalSchema = z.object({ type: z.literal("fatal"), error: z.string() });
 
 export const TaskInvokeSchema = z.object({
@@ -36,16 +36,16 @@ export const TaskInvokeSchema = z.object({
   skill: z.string().min(1),
   inputs: z.unknown(),
   /**
-   * Skill source. Tier 1 (Pyodide) reads it through the runner's
+   * Skill source. The wasm tier (Pyodide) reads it through the runner's
    * `__skill_body__` global — pre-baked at exec time, so the field is
-   * accepted but ignored. Tier 2 takes the body from here for every task
+   * accepted but ignored. The container tier takes the body from here for every task
    * because the supervisor is long-lived across tasks and can't pre-bake
    * any one body.
    */
   body: z.string().optional(),
   /**
-   * Per-task isolation hint from the manifest. Tier 1 ignores it (single-
-   * heap WASM). Tier 2 retires the worker after a `recycle` task, and the
+   * Per-task isolation hint from the manifest. The wasm tier ignores it (single-
+   * heap WASM). The container tier retires the worker after a `recycle` task, and the
    * pool replaces it. `subinterpreter` is reserved for a future runtime; it
    * behaves like the default process-per-task isolation.
    */
@@ -53,7 +53,7 @@ export const TaskInvokeSchema = z.object({
   /** Wall-clock cap in seconds, enforced by the task's relay inside the container. */
   wallClockS: z.number().positive().optional(),
   /**
-   * sha256 of `requirements.lock`. When present, the tier-2 task process
+   * sha256 of `requirements.lock`. When present, the container task process
    * activates `/skill-venvs/<lockfileHash>-py<major>.<minor>/` before
    * running the skill — sets `VIRTUAL_ENV`, prepends `<venv>/bin` to
    * PATH, prepends `<venv>/lib/pythonX.Y/site-packages` to `sys.path`.
@@ -73,7 +73,7 @@ export const TaskInvokeSchema = z.object({
    * skill declares dependencies. Absent for skills with empty
    * `dependencies` — the task runs against the stdlib only.
    *
-   * Tier 1 (Pyodide) ignores this field: its child installs the
+   * The wasm tier (Pyodide) ignores this field: its child installs the
    * packages it was forked with, before the handshake.
    */
   // Zod surfaces the failing value via `error.issues[i].input` on
@@ -87,9 +87,9 @@ export const TaskInvokeSchema = z.object({
 export type TaskInvoke = z.infer<typeof TaskInvokeSchema>;
 
 /**
- * Optional rusage block the runtime contributes back to the host. Tier 2's
+ * Optional rusage block the runtime contributes back to the host. The container tier's
  * `runner.py` populates `peakMemoryBytes` from `getrusage(RUSAGE_SELF)`
- * just before emitting `task_result`; tier 1 (Pyodide WASM) leaves it
+ * just before emitting `task_result`; the wasm tier (Pyodide WASM) leaves it
  * unset because `getrusage` is process-wide and would inflate under
  * concurrent workers. Synthesised outcomes — the relay's `task_result`
  * (wall-clock kill, task process died) and the state machine's
@@ -101,7 +101,7 @@ export type TaskInvoke = z.infer<typeof TaskInvokeSchema>;
  * may be absent on the wire) while the storage schema
  * `SkillRunResourceUsageSchema` uses `.nullable()` (field must be
  * present, may be null). `executeRun` (`invoke/execute-run.ts`) bridges the two with
- * `result.rusage?.peakMemoryBytes ?? null` — wire-absence + tier-1 +
+ * `result.rusage?.peakMemoryBytes ?? null` — wire-absence + wasm +
  * synthesised-result all collapse to the same `null` on disk.
  */
 const RuntimeRusageSchema = z.object({
@@ -135,7 +135,7 @@ export const CtxCallSchema = z.object({
   type: z.literal("ctx_call"),
   /**
    * The task that issued the call. Set by the side that knows which task
-   * it is running — the Tier 2 relay, the Tier 1 worker's bridge — never
+   * it is running — the container relay, the wasm worker's bridge — never
    * by skill code. The dispatcher serves a call only for the running task.
    */
   taskId: z.string().min(1),
@@ -148,7 +148,7 @@ export type CtxCall = z.infer<typeof CtxCallSchema>;
 
 const CtxResultOkSchema = z.object({
   type: z.literal("ctx_result"),
-  /** Echoes the call's `taskId`; the Tier 2 relay delivers only its own task's results. */
+  /** Echoes the call's `taskId`; the container relay delivers only its own task's results. */
   taskId: z.string().min(1),
   id: z.string().min(1),
   ok: z.literal(true),
@@ -168,8 +168,8 @@ export type CtxResult = z.infer<typeof CtxResultSchema>;
 
 /**
  * Every process the task started has been killed and reaped; the worker is
- * reusable only after it. The tier-2 supervisor sends it after the task's
- * `task_result`, or in place of one when the task's relay died first. Tier 1
+ * reusable only after it. The container supervisor sends it after the task's
+ * `task_result`, or in place of one when the task's relay died first. The wasm tier
  * never sends it: its IPC transport yields one after each `task_result`.
  */
 export const TaskExitedSchema = z.object({

@@ -13,7 +13,7 @@ import CTX_PY from "./py/ctx.py";
 import INSTALL_DEPS_PY from "./py/install_deps.py";
 
 /**
- * A tier-1 child's Pyodide worker thread (design/skills.md → Tier-1
+ * A wasm child's Pyodide worker thread (design/skills.md → Wasm-tier
  * boundary). It inherits the child's permission flags and runs with an empty
  * `env`. In `run` mode it boots Pyodide under the memory cap with minimal
  * `jsglobals`, loads the skill's packages from local files only, deletes the
@@ -180,7 +180,7 @@ function deleteNetworkGlobals(): void {
 
 /**
  * A ctx call's answer as it reaches Python. `Ctx._call` in `py/ctx.py` returns
- * the value or raises `CtxError(kind, message)`, the class tier 2 raises: a
+ * the value or raises `CtxError(kind, message)`, the class the container tier raises: a
  * plain value crosses into Pyodide intact, where a rejected promise arrives
  * as a `JsException` carrying only the error's name and message.
  */

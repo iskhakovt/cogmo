@@ -17,7 +17,7 @@ import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { hashLockfileContents, type LockfileSnapshot } from "../deps.js";
 import type { BundledDistribution, BundledPackage } from "../pyodide-compat.js";
-import { ensureTier1Packages, reapTier1WheelDirs } from "./wheel-cache.js";
+import { ensureWasmPackages, reapWasmWheelDirs } from "./wheel-cache.js";
 
 /** Runs before each `stat` the module under test makes, to stage a concurrent writer. */
 const statHook = vi.hoisted(() => {
@@ -273,14 +273,14 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-describe("ensureTier1Packages", () => {
+describe("ensureWasmPackages", () => {
   it("downloads the built-ins' closure from Pyodide's CDN and publishes the rest as wheels", async () => {
     const fetchImpl = mixedPypi();
     const lock = lockfile(`idna==3.10 --hash=sha256:${IDNA_SHA}
 pydantic==2.12.5 --hash=sha256:${OTHER_SHA}
 pydantic_core==2.41.5 --hash=sha256:${OTHER_SHA}
 `);
-    const result = await ensureTier1Packages(
+    const result = await ensureWasmPackages(
       { fetchImpl, bundled: BUNDLED },
       { lockfile: lock, packageCacheDir: cacheDir, wheelsRoot },
     );
@@ -304,7 +304,7 @@ pydantic_core==2.41.5 --hash=sha256:${OTHER_SHA}
       pinnedCdn(),
     );
     const lock = lockfile(`typing-extensions==4.14.0 --hash=sha256:${SNIFFIO_SHA}\n`);
-    const result = await ensureTier1Packages(
+    const result = await ensureWasmPackages(
       { fetchImpl, bundled: BUNDLED },
       { lockfile: lock, packageCacheDir: cacheDir, wheelsRoot },
     );
@@ -318,7 +318,7 @@ pydantic_core==2.41.5 --hash=sha256:${OTHER_SHA}
   it("downloads nothing when the cache holds every built-in, micropip and their dependencies", async () => {
     const fetchImpl = fakePypi({}, {}, pinnedCdn());
     const packageCacheDir = await cacheWith(cacheDir, PYDANTIC_CLOSURE);
-    const result = await ensureTier1Packages(
+    const result = await ensureWasmPackages(
       { fetchImpl, bundled: BUNDLED },
       { lockfile: PYDANTIC_LOCK, packageCacheDir, wheelsRoot },
     );
@@ -329,7 +329,7 @@ pydantic_core==2.41.5 --hash=sha256:${OTHER_SHA}
   it("downloads only a built-in's missing transitive dependency", async () => {
     const fetchImpl = fakePypi({}, {}, pinnedCdn());
     const packageCacheDir = await cacheWith(cacheDir, ["pydantic", "pydantic-core", "micropip"]);
-    const result = await ensureTier1Packages(
+    const result = await ensureWasmPackages(
       { fetchImpl, bundled: BUNDLED },
       { lockfile: PYDANTIC_LOCK, packageCacheDir, wheelsRoot },
     );
@@ -344,7 +344,7 @@ pydantic_core==2.41.5 --hash=sha256:${OTHER_SHA}
       "pydantic-core",
       "typing-extensions",
     ]);
-    await ensureTier1Packages(
+    await ensureWasmPackages(
       { fetchImpl, bundled: BUNDLED },
       { lockfile: PYDANTIC_LOCK, packageCacheDir, wheelsRoot },
     );
@@ -363,7 +363,7 @@ pydantic_core==2.41.5 --hash=sha256:${OTHER_SHA}
       presentAtDownload = await exists(truncated);
       return inner(input, init);
     });
-    const result = await ensureTier1Packages(
+    const result = await ensureWasmPackages(
       { fetchImpl, bundled: BUNDLED },
       { lockfile: PYDANTIC_LOCK, packageCacheDir, wheelsRoot },
     );
@@ -379,7 +379,7 @@ pydantic_core==2.41.5 --hash=sha256:${OTHER_SHA}
       if (from.startsWith(`${cacheDir}.tmp.`))
         stagingMode = (await stat(dirname(from))).mode & 0o777;
     };
-    const result = await ensureTier1Packages(
+    const result = await ensureWasmPackages(
       { fetchImpl: fakePypi({}, {}, pinnedCdn()), bundled: BUNDLED },
       { lockfile: PYDANTIC_LOCK, packageCacheDir: cacheDir, wheelsRoot },
     );
@@ -392,7 +392,7 @@ pydantic_core==2.41.5 --hash=sha256:${OTHER_SHA}
   it("errs builtin_integrity naming a download that fails its sha256, and writes nothing", async () => {
     const coreFile = bundledFileName("pydantic-core");
     const tampered = Buffer.from("tampered bytes");
-    const result = await ensureTier1Packages(
+    const result = await ensureWasmPackages(
       {
         fetchImpl: fakePypi({}, {}, { ...pinnedCdn(), [coreFile]: tampered }),
         bundled: BUNDLED,
@@ -412,7 +412,7 @@ pydantic_core==2.41.5 --hash=sha256:${OTHER_SHA}
   it("errs builtin_integrity and keeps the verified cache when one download fails its sha256", async () => {
     const packageCacheDir = await cacheWith(cacheDir, ["pydantic", "pydantic-core", "micropip"]);
     const typingFile = bundledFileName("typing-extensions");
-    const result = await ensureTier1Packages(
+    const result = await ensureWasmPackages(
       {
         fetchImpl: fakePypi({}, {}, { [typingFile]: Buffer.from("tampered bytes") }),
         bundled: BUNDLED,
@@ -431,7 +431,7 @@ pydantic_core==2.41.5 --hash=sha256:${OTHER_SHA}
 
   it("errs prefetch_failed naming the URL when the CDN answers an error status, and writes nothing", async () => {
     const pydanticFile = bundledFileName("pydantic");
-    const result = await ensureTier1Packages(
+    const result = await ensureWasmPackages(
       { fetchImpl: fakePypi({}, {}, { ...pinnedCdn(), [pydanticFile]: 404 }), bundled: BUNDLED },
       { lockfile: PYDANTIC_LOCK, packageCacheDir: cacheDir, wheelsRoot },
     );
@@ -446,7 +446,7 @@ pydantic_core==2.41.5 --hash=sha256:${OTHER_SHA}
     const fetchImpl = vi.fn<typeof fetch>(async () => {
       throw new TypeError("fetch failed");
     });
-    const result = await ensureTier1Packages(
+    const result = await ensureWasmPackages(
       { fetchImpl, bundled: BUNDLED },
       { lockfile: MIXED_LOCK, packageCacheDir: cacheDir, wheelsRoot },
     );
@@ -458,7 +458,7 @@ pydantic_core==2.41.5 --hash=sha256:${OTHER_SHA}
   });
 
   it("errs prefetch_failed when the caller's signal aborts the download", async () => {
-    const result = await ensureTier1Packages(
+    const result = await ensureWasmPackages(
       { fetchImpl: fakePypi({}, {}, pinnedCdn()), bundled: BUNDLED },
       {
         lockfile: PYDANTIC_LOCK,
@@ -486,7 +486,7 @@ pydantic_core==2.41.5 --hash=sha256:${OTHER_SHA}
       return resp;
     });
     const resolve = (fetchImpl: typeof fetch) =>
-      ensureTier1Packages(
+      ensureWasmPackages(
         { fetchImpl, bundled: BUNDLED },
         { lockfile: PYDANTIC_LOCK, packageCacheDir: cacheDir, wheelsRoot },
       );
@@ -509,7 +509,7 @@ pydantic_core==2.41.5 --hash=sha256:${OTHER_SHA}
     await mkdir(fresh);
     const elevenMinutesAgo = new Date(Date.now() - 11 * 60 * 1000);
     await utimes(stale, elevenMinutesAgo, elevenMinutesAgo);
-    await ensureTier1Packages(
+    await ensureWasmPackages(
       { fetchImpl: fakePypi({}, {}, pinnedCdn()), bundled: BUNDLED },
       { lockfile: PYDANTIC_LOCK, packageCacheDir: cacheDir, wheelsRoot },
     );
@@ -523,7 +523,7 @@ pydantic_core==2.41.5 --hash=sha256:${OTHER_SHA}
       const unreadable = join(packageCacheDir, bundledFileName("micropip"));
       await chmod(unreadable, 0o000);
       const fetchImpl = fakePypi({}, {}, pinnedCdn());
-      const result = await ensureTier1Packages(
+      const result = await ensureWasmPackages(
         { fetchImpl, bundled: BUNDLED },
         { lockfile: PYDANTIC_LOCK, packageCacheDir, wheelsRoot },
       );
@@ -539,7 +539,7 @@ pydantic_core==2.41.5 --hash=sha256:${OTHER_SHA}
   it("returns a null wheelDir and touches neither the network nor the wheel root when every package is bundled and cached", async () => {
     const fetchImpl = fakePypi({}, {}, pinnedCdn());
     const packageCacheDir = await cacheWith(cacheDir, PYDANTIC_CLOSURE);
-    const result = await ensureTier1Packages(
+    const result = await ensureWasmPackages(
       { fetchImpl, bundled: BUNDLED },
       { lockfile: PYDANTIC_LOCK, packageCacheDir, wheelsRoot },
     );
@@ -553,7 +553,7 @@ pydantic_core==2.41.5 --hash=sha256:${OTHER_SHA}
     const previous = join(wheelsRoot, wheelKeyAt(lock.hash, "314.0.6"));
     await mkdir(previous, { recursive: true });
     await writeFile(join(previous, ".ready"), "");
-    const result = await ensureTier1Packages(
+    const result = await ensureWasmPackages(
       { fetchImpl: mixedPypi(), bundled: BUNDLED },
       { lockfile: lock, packageCacheDir: cacheDir, wheelsRoot },
     );
@@ -571,7 +571,7 @@ sniffio==1.3.1 \\
     --hash=sha256:${OTHER_SHA} \\
     --hash=sha256:${SNIFFIO_SHA}
 `);
-    const result = await ensureTier1Packages(
+    const result = await ensureWasmPackages(
       { fetchImpl: mixedPypi(), bundled: BUNDLED },
       { lockfile: lock, packageCacheDir: cacheDir, wheelsRoot },
     );
@@ -598,9 +598,9 @@ sniffio==1.3.1 \\
     const lock = lockfile(`idna==3.10 --hash=sha256:${IDNA_SHA}\n`);
     const deps = { fetchImpl: mixedPypi(), bundled: BUNDLED };
     const args = { lockfile: lock, packageCacheDir: cacheDir, wheelsRoot };
-    await ensureTier1Packages(deps, args);
+    await ensureWasmPackages(deps, args);
     vi.mocked(deps.fetchImpl).mockClear();
-    const again = await ensureTier1Packages(deps, args);
+    const again = await ensureWasmPackages(deps, args);
     expect(again._unsafeUnwrap().wheelDir).toBe(join(wheelsRoot, wheelKey(lock.hash)));
     expect(deps.fetchImpl).not.toHaveBeenCalled();
   });
@@ -609,10 +609,10 @@ sniffio==1.3.1 \\
     const lock = lockfile(`idna==3.10 --hash=sha256:${IDNA_SHA}\n`);
     const deps = { fetchImpl: mixedPypi(), bundled: BUNDLED };
     const args = { lockfile: lock, packageCacheDir: cacheDir, wheelsRoot };
-    await ensureTier1Packages(deps, args);
+    await ensureWasmPackages(deps, args);
     const dir = join(wheelsRoot, wheelKey(lock.hash));
     await chmod(dir, 0o755);
-    await ensureTier1Packages(deps, args);
+    await ensureWasmPackages(deps, args);
     expect((await stat(dir)).mode & 0o777).toBe(0o555);
   });
 
@@ -624,7 +624,7 @@ sniffio==1.3.1 \\
       pinnedCdn(),
     );
     const lock = lockfile(`idna==3.10 --hash=sha256:${IDNA_SHA}\n`);
-    const result = await ensureTier1Packages(
+    const result = await ensureWasmPackages(
       { fetchImpl, bundled: BUNDLED },
       { lockfile: lock, packageCacheDir: cacheDir, wheelsRoot },
     );
@@ -633,7 +633,7 @@ sniffio==1.3.1 \\
   });
 
   it("errs wheel_unavailable when no pure wheel carries a pinned hash", async () => {
-    const result = await ensureTier1Packages(
+    const result = await ensureWasmPackages(
       {
         fetchImpl: mixedPypi({ "idna==3.10": [pureWheel("idna", "3.10", OTHER_SHA)] }),
         bundled: BUNDLED,
@@ -652,7 +652,7 @@ sniffio==1.3.1 \\
   });
 
   it("errs wheel_unavailable when the only hashed wheel is native", async () => {
-    const result = await ensureTier1Packages(
+    const result = await ensureWasmPackages(
       {
         fetchImpl: mixedPypi({
           "sniffio==1.3.1": [
@@ -676,7 +676,7 @@ sniffio==1.3.1 \\
   });
 
   it("errs wheel_unavailable for a wheel whose filename is not a plain name", async () => {
-    const result = await ensureTier1Packages(
+    const result = await ensureWasmPackages(
       {
         fetchImpl: mixedPypi({
           "idna==3.10": [
@@ -699,7 +699,7 @@ sniffio==1.3.1 \\
     ["a 404 is wheel_unavailable", 404, "wheel_unavailable"],
     ["a 503 is network_failed", 503, "network_failed"],
   ])("%s", async (_label, status, kind) => {
-    const result = await ensureTier1Packages(
+    const result = await ensureWasmPackages(
       {
         fetchImpl: mixedPypi({ "idna==3.10": status }),
         bundled: BUNDLED,
@@ -719,7 +719,7 @@ sniffio==1.3.1 \\
     });
     // micropip is cached, so the only request is PyPI's.
     const packageCacheDir = await cacheWith(cacheDir, ["micropip"]);
-    const result = await ensureTier1Packages(
+    const result = await ensureWasmPackages(
       { fetchImpl, bundled: BUNDLED },
       {
         lockfile: lockfile(`idna==3.10 --hash=sha256:${IDNA_SHA}\n`),
@@ -747,7 +747,7 @@ sniffio==1.3.1 \\
       }
       return resp;
     });
-    const result = await ensureTier1Packages(
+    const result = await ensureWasmPackages(
       { fetchImpl, bundled: BUNDLED },
       { lockfile: lock, packageCacheDir: cacheDir, wheelsRoot },
     );
@@ -761,7 +761,7 @@ sniffio==1.3.1 \\
     const target = join(wheelsRoot, wheelKey(lock.hash));
     await mkdir(target, { recursive: true });
     await writeFile(join(target, "partial.whl"), "partial");
-    const result = await ensureTier1Packages(
+    const result = await ensureWasmPackages(
       { fetchImpl: mixedPypi(), bundled: BUNDLED },
       { lockfile: lock, packageCacheDir: cacheDir, wheelsRoot },
     );
@@ -777,7 +777,7 @@ sniffio==1.3.1 \\
       if (path === sibling) await rename(sibling, join(wheelsRoot, wheelKey(OTHER_SHA)));
     };
     const lock = lockfile(`idna==3.10 --hash=sha256:${IDNA_SHA}\n`);
-    const result = await ensureTier1Packages(
+    const result = await ensureWasmPackages(
       { fetchImpl: mixedPypi(), bundled: BUNDLED },
       { lockfile: lock, packageCacheDir: cacheDir, wheelsRoot },
     );
@@ -798,7 +798,7 @@ sniffio==1.3.1 \\
       }
     };
     const lock = lockfile(`idna==3.10 --hash=sha256:${IDNA_SHA}\n`);
-    const result = await ensureTier1Packages(
+    const result = await ensureWasmPackages(
       { fetchImpl: mixedPypi(), bundled: BUNDLED },
       { lockfile: lock, packageCacheDir: cacheDir, wheelsRoot },
     );
@@ -813,7 +813,7 @@ sniffio==1.3.1 \\
     const elevenMinutesAgo = new Date(Date.now() - 11 * 60 * 1000);
     await utimes(stale, elevenMinutesAgo, elevenMinutesAgo);
     const lock = lockfile(`idna==3.10 --hash=sha256:${IDNA_SHA}\n`);
-    await ensureTier1Packages(
+    await ensureWasmPackages(
       { fetchImpl: mixedPypi(), bundled: BUNDLED },
       { lockfile: lock, packageCacheDir: cacheDir, wheelsRoot },
     );
@@ -823,7 +823,7 @@ sniffio==1.3.1 \\
   });
 });
 
-describe("reapTier1WheelDirs", () => {
+describe("reapWasmWheelDirs", () => {
   const REACHABLE_HASH = "a".repeat(64);
   const REACHABLE = wheelKey(REACHABLE_HASH);
   const UNREACHABLE_OLD = wheelKey("b".repeat(64));
@@ -863,7 +863,7 @@ describe("reapTier1WheelDirs", () => {
       await chmod(dir, 0o555);
       await utimes(dir, eightDaysAgo, eightDaysAgo);
 
-      const result = await reapTier1WheelDirs(reapArgs([]));
+      const result = await reapWasmWheelDirs(reapArgs([]));
 
       expect(result._unsafeUnwrapErr().kind).toBe("reap_failed");
       const left = await readdir(wheelsRoot);
@@ -883,7 +883,7 @@ describe("reapTier1WheelDirs", () => {
       if (path === moved) await rename(moved, join(wheelsRoot, `${UNREACHABLE_OLD}.tmp.other`));
     };
 
-    const result = await reapTier1WheelDirs(reapArgs([]));
+    const result = await reapWasmWheelDirs(reapArgs([]));
 
     expect(result._unsafeUnwrap()).toEqual({ reapedDirs: [alsoOld] });
     expect(await readdir(wheelsRoot)).toEqual([]);
@@ -900,7 +900,7 @@ describe("reapTier1WheelDirs", () => {
       }
     };
 
-    const result = await reapTier1WheelDirs(reapArgs([]));
+    const result = await reapWasmWheelDirs(reapArgs([]));
 
     expect(result._unsafeUnwrapErr()).toEqual({
       kind: "reap_failed",
@@ -915,7 +915,7 @@ describe("reapTier1WheelDirs", () => {
     const leftover = `${UNREACHABLE_OLD}.tmp.crashed`;
     await published(leftover, eightDaysAgo);
 
-    const result = await reapTier1WheelDirs(reapArgs([]));
+    const result = await reapWasmWheelDirs(reapArgs([]));
 
     expect(result._unsafeUnwrap()).toEqual({ reapedDirs: [] });
     expect(await readdir(wheelsRoot)).toEqual([]);
@@ -931,7 +931,7 @@ describe("reapTier1WheelDirs", () => {
       await utimes(join(wheelsRoot, name), eightDaysAgo, eightDaysAgo);
     }
 
-    const result = await reapTier1WheelDirs(reapArgs([REACHABLE_HASH]));
+    const result = await reapWasmWheelDirs(reapArgs([REACHABLE_HASH]));
 
     expect(result._unsafeUnwrap()).toEqual({ reapedDirs: [UNREACHABLE_OLD] });
     expect((await readdir(wheelsRoot)).sort()).toEqual(
@@ -946,7 +946,7 @@ describe("reapTier1WheelDirs", () => {
     await published(previous, eightDaysAgo);
     await published(previousFresh, new Date());
 
-    const result = await reapTier1WheelDirs(reapArgs([REACHABLE_HASH]));
+    const result = await reapWasmWheelDirs(reapArgs([REACHABLE_HASH]));
 
     expect(result._unsafeUnwrap()).toEqual({ reapedDirs: [previous] });
     expect((await readdir(wheelsRoot)).sort()).toEqual([REACHABLE, previousFresh].sort());
@@ -960,14 +960,14 @@ describe("reapTier1WheelDirs", () => {
     await utimes(stale, eightDaysAgo, eightDaysAgo);
     await mkdir(fresh);
 
-    const result = await reapTier1WheelDirs(reapArgs([]));
+    const result = await reapWasmWheelDirs(reapArgs([]));
 
     expect(result._unsafeUnwrap()).toEqual({ reapedDirs: [] });
     expect(await readdir(wheelsRoot)).toEqual([`${REACHABLE}.tmp.live`]);
   });
 
   it("has nothing to reap when the root does not exist", async () => {
-    const result = await reapTier1WheelDirs({ ...reapArgs([]), wheelsRoot: join(root, "missing") });
+    const result = await reapWasmWheelDirs({ ...reapArgs([]), wheelsRoot: join(root, "missing") });
     expect(result._unsafeUnwrap()).toEqual({ reapedDirs: [] });
   });
 });

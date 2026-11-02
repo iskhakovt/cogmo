@@ -1,10 +1,10 @@
 import { defineConfig, type Options } from "tsup";
-import { buildTier1Child } from "./src/skills/worker-wasm/child-bundle.js";
+import { buildWasmChild } from "./src/skills/worker-wasm/child-bundle.js";
 
 const OUT_DIR = "dist";
 
 /**
- * The build for an output directory. The tier-1 child is bundled into the
+ * The build for an output directory. The wasm child is bundled into the
  * same directory, so a build elsewhere (`--out-dir`, `tsup-config.test.ts`)
  * gets its own copy and leaves `dist/` alone.
  */
@@ -32,11 +32,11 @@ export function tsupOptions(outDir: string): Options {
     noExternal: [/^@cogmo\//],
     // The host imports the child bundler only when it runs from source.
     external: ["esbuild"],
-    // The tier-1 child: `host.ts` forks `./tier1-child.mjs` relative to the
+    // The wasm child: `host.ts` forks `./wasm-child.mjs` relative to the
     // bundle the host is bundled into, so it goes at the output's root. It is
     // its own self-contained esbuild bundle, since under `--permission` it
     // can read nothing from `node_modules` (`child-bundle.ts`).
-    onSuccess: () => buildTier1Child({ sourceDir: "src/skills/worker-wasm", outDir }),
+    onSuccess: () => buildWasmChild({ sourceDir: "src/skills/worker-wasm", outDir }),
   };
 }
 

@@ -3,8 +3,8 @@ import { join } from "node:path";
 import { build } from "esbuild";
 
 /**
- * Bundle the tier-1 child: `child-entry.ts` as `tier1-child.mjs` and
- * `pyodide-worker.ts` as `tier1-pyodide-worker.mjs`, side by side in
+ * Bundle the wasm child: `child-entry.ts` as `wasm-child.mjs` and
+ * `pyodide-worker.ts` as `wasm-pyodide-worker.mjs`, side by side in
  * `outDir`, every dependency inlined and `py/*.py` embedded as text. The
  * child runs under `--permission` with read access to its own directory, the
  * Pyodide distribution (which it loads by path) and its package
@@ -17,11 +17,11 @@ import { build } from "esbuild";
  * host (`tsup.config.ts`), and the host running from source writes it into a
  * temporary directory on its first spawn (`host.ts`).
  */
-export async function buildTier1Child(opts: { sourceDir: string; outDir: string }): Promise<void> {
+export async function buildWasmChild(opts: { sourceDir: string; outDir: string }): Promise<void> {
   await build({
     entryPoints: {
-      "tier1-child": join(opts.sourceDir, "child-entry.ts"),
-      "tier1-pyodide-worker": join(opts.sourceDir, "pyodide-worker.ts"),
+      "wasm-child": join(opts.sourceDir, "child-entry.ts"),
+      "wasm-pyodide-worker": join(opts.sourceDir, "pyodide-worker.ts"),
     },
     outdir: opts.outDir,
     outExtension: { ".js": ".mjs" },
@@ -44,7 +44,7 @@ export async function buildTier1Child(opts: { sourceDir: string; outDir: string 
  */
 export async function assertOwnPrivateDir(dir: string): Promise<void> {
   const refuse = (reason: string) =>
-    new Error(`refusing the tier-1 child bundle at ${dir}: ${reason}`);
+    new Error(`refusing the wasm child bundle at ${dir}: ${reason}`);
   const stats = await lstat(dir);
   if (stats.isSymbolicLink() || !stats.isDirectory()) {
     throw refuse(`${dir} is not a directory of its own`);

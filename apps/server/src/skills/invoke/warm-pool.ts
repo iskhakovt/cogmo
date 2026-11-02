@@ -19,7 +19,7 @@ export type WarmPoolSizing = Partial<
 >;
 
 /**
- * The tier-2 warm pool, created by the first tier-2 invoke rather than at
+ * The container warm pool, created by the first container invoke rather than at
  * boot, so boot doesn't depend on the sandbox. Concurrent first callers share
  * one start; a failed start clears it, so the next invoke retries.
  */
@@ -50,7 +50,7 @@ export class LazyWarmPool {
    */
   async ensure(sandbox: SandboxClient): Promise<SysboxWorkerPool> {
     if (this.#disposed) {
-      throw new Error("SkillRunnerImpl: tier-2 pool requested after shutdown");
+      throw new Error("SkillRunnerImpl: container pool requested after shutdown");
     }
     if (this.#pool) return this.#pool;
     if (this.#poolPromise) return this.#poolPromise;

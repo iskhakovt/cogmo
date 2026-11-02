@@ -1,5 +1,5 @@
 import { match } from "ts-pattern";
-import { describeTier1PackagesError, type Tier1PackagesError } from "./worker-wasm/tier1.js";
+import { describeWasmPackagesError, type WasmPackagesError } from "./worker-wasm/wasm.js";
 
 /**
  * Why `invoke` declined to run a skill. Nothing executed. Only `inflight`
@@ -16,7 +16,7 @@ export type SkillInvokeRejection =
   /** A `tier: container` skill on a deployment with no sandbox configured. */
   | { kind: "sandbox_unavailable"; name: string }
   /** A `tier: wasm` skill whose lockfile's packages the host could not make available. */
-  | { kind: "tier1_packages_unavailable"; name: string; error: Tier1PackagesError }
+  | { kind: "wasm_packages_unavailable"; name: string; error: WasmPackagesError }
   | { kind: "inflight"; name: string; runId: string };
 
 /** One line naming the rejection, for logs and operator-facing output. */
@@ -35,9 +35,9 @@ export function describeInvokeRejection(rejection: SkillInvokeRejection): string
         `skill '${name}' is tier=container but no sandbox is configured (set SANDBOX_RUNTIME)`,
     )
     .with(
-      { kind: "tier1_packages_unavailable" },
+      { kind: "wasm_packages_unavailable" },
       ({ name, error }) =>
-        `skill '${name}' cannot run: its tier-1 packages are unavailable (${describeTier1PackagesError(error)})`,
+        `skill '${name}' cannot run: its wasm packages are unavailable (${describeWasmPackagesError(error)})`,
     )
     .with(
       { kind: "inflight" },

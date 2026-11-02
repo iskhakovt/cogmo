@@ -661,7 +661,7 @@ describe("DrizzleSkillStore", () => {
       expect(reloaded?.resourceUsage).toEqual({ wallClockMs: 123, peakMemoryBytes: 5_242_880 });
     });
 
-    it("transitionToExecuted tolerates peakMemoryBytes=null (tier-1 / timeout paths)", async () => {
+    it("transitionToExecuted tolerates peakMemoryBytes=null (wasm / timeout paths)", async () => {
       const skill = await seedSkill();
       const run = await tx((trx) =>
         store.insertRun(trx, { skillId: skill.id, trigger: "manual", inputs: {} }),

@@ -15,7 +15,7 @@ import {
   PURE_WHEEL_SUFFIXES,
   PYODIDE_VERSION_PATTERN,
 } from "../pyodide-compat.js";
-import type { Tier1Packages, Tier1PackagesError } from "./tier1.js";
+import type { WasmPackages, WasmPackagesError } from "./wasm.js";
 
 const log = logger.child({ component: "skills.wheel-cache" });
 
@@ -53,8 +53,8 @@ const PypiReleaseFilesSchema = z.object({
   ),
 });
 
-/** What the host fetches a lockfile's tier-1 packages with. */
-export interface Tier1PackageSource {
+/** What the host fetches a lockfile's wasm packages with. */
+export interface WasmPackageSource {
   /** Reaches Pyodide's CDN for the built-ins and PyPI for the wheels. */
   fetchImpl: typeof fetch;
   /** The installed Pyodide distribution (`loadBundledPackages`). */
@@ -64,12 +64,12 @@ export interface Tier1PackageSource {
 export interface FillBuiltinCacheArgs {
   /** Bundled packages to provide, by normalised name; micropip is always among them. */
   names: readonly string[];
-  /** Pyodide's package cache, which tier-1 children load from. */
+  /** Pyodide's package cache, which wasm children load from. */
   packageCacheDir: string;
   signal?: AbortSignal;
 }
 
-export interface EnsureTier1PackagesArgs {
+export interface EnsureWasmPackagesArgs {
   lockfile: LockfileSnapshot;
   /** Pyodide's package cache, which `fillBuiltinCache` fills. */
   packageCacheDir: string;
@@ -79,8 +79,8 @@ export interface EnsureTier1PackagesArgs {
 }
 
 /**
- * Provide what a tier-1 child installs for `lockfile` (design/skills.md →
- * Tier-1 boundary, layer 4). A package Pyodide bundles at the locked version
+ * Provide what a wasm child installs for `lockfile` (design/skills.md →
+ * Wasm-tier boundary, layer 4). A package Pyodide bundles at the locked version
  * is a builtin, loaded from `packageCacheDir`; every other package is a
  * pure-Python wheel from PyPI, checked against the lockfile's sha256 and
  * published under `<wheelsRoot>/<lockfile hash>-pyodide<release>/`. The
@@ -96,10 +96,10 @@ export interface EnsureTier1PackagesArgs {
  * rename succeeds once it sees the winner's `.ready`. Nothing in it is a
  * link, since the child's permission model follows links out of the grant.
  */
-export async function ensureTier1Packages(
-  deps: Tier1PackageSource,
-  args: EnsureTier1PackagesArgs,
-): Promise<Result<Tier1Packages, Tier1PackagesError>> {
+export async function ensureWasmPackages(
+  deps: WasmPackageSource,
+  args: EnsureWasmPackagesArgs,
+): Promise<Result<WasmPackages, WasmPackagesError>> {
   const [builtinEntries, wheelEntries] = R.partition(
     parseLockfileEntries(args.lockfile.contents),
     (e) => deps.bundled.packages.get(normalizePackageName(e.name))?.version === e.version,
@@ -138,9 +138,9 @@ export async function ensureTier1Packages(
  * `prefetch_failed`. Either way nothing reaches the cache.
  */
 export async function fillBuiltinCache(
-  deps: Tier1PackageSource,
+  deps: WasmPackageSource,
   args: FillBuiltinCacheArgs,
-): Promise<Result<void, Tier1PackagesError>> {
+): Promise<Result<void, WasmPackagesError>> {
   const closure = bundledClosure(deps.bundled.packages, [...args.names, "micropip"]);
   const unverified = await evictUnverifiedBuiltins(args.packageCacheDir, closure);
   if (unverified.isErr()) return err(unverified.error);
@@ -167,7 +167,7 @@ async function downloadVerifiedBuiltin(
   version: string,
   pkg: BundledPackage,
   signal: AbortSignal | undefined,
-): Promise<Result<{ pkg: BundledPackage; bytes: Buffer }, Tier1PackagesError>> {
+): Promise<Result<{ pkg: BundledPackage; bytes: Buffer }, WasmPackagesError>> {
   const url = pyodideCdnUrl(version, pkg.fileName);
   let bytes: Buffer;
   try {
@@ -194,7 +194,7 @@ async function downloadVerifiedBuiltin(
 async function stageIntoCache(
   cacheDir: string,
   downloads: readonly { pkg: BundledPackage; bytes: Buffer }[],
-): Promise<Result<void, Tier1PackagesError>> {
+): Promise<Result<void, WasmPackagesError>> {
   const stagingPrefix = `${basename(cacheDir)}.tmp.`;
   const staging = `${cacheDir}.tmp.${randomUUID()}`;
   try {
@@ -269,7 +269,7 @@ function bundledClosure(
 async function evictUnverifiedBuiltins(
   packageCacheDir: string,
   packages: readonly BundledPackage[],
-): Promise<Result<readonly BundledPackage[], Tier1PackagesError>> {
+): Promise<Result<readonly BundledPackage[], WasmPackagesError>> {
   const checked = await Promise.all(packages.map((pkg) => evictIfUnverified(packageCacheDir, pkg)));
   return Result.combine(checked).map((states) => states.filter(R.isNonNullish));
 }
@@ -278,7 +278,7 @@ async function evictUnverifiedBuiltins(
 async function evictIfUnverified(
   packageCacheDir: string,
   pkg: BundledPackage,
-): Promise<Result<BundledPackage | null, Tier1PackagesError>> {
+): Promise<Result<BundledPackage | null, WasmPackagesError>> {
   const path = join(packageCacheDir, pkg.fileName);
   try {
     const actual = await sha256OfFile(path);
@@ -328,13 +328,13 @@ function wheelDirName(lockfileHash: string, pyodideVersion: string): string {
 }
 
 async function publishWheelDir(
-  deps: Tier1PackageSource,
-  args: EnsureTier1PackagesArgs,
+  deps: WasmPackageSource,
+  args: EnsureWasmPackagesArgs,
   entries: readonly LockfileEntry[],
-): Promise<Result<string, Tier1PackagesError>> {
+): Promise<Result<string, WasmPackagesError>> {
   const key = wheelDirName(args.lockfile.hash, deps.bundled.version);
   if (!WHEEL_DIR_RE.test(key)) {
-    throw new Error(`ensureTier1Packages: ${key} is not a sha256 hex digest and a Pyodide release`);
+    throw new Error(`ensureWasmPackages: ${key} is not a sha256 hex digest and a Pyodide release`);
   }
   const target = join(args.wheelsRoot, key);
   if (await isReady(target)) {
@@ -407,7 +407,7 @@ async function fetchVerifiedWheel(
   fetchImpl: typeof fetch,
   entry: LockfileEntry,
   signal: AbortSignal | undefined,
-): Promise<Result<{ filename: string; bytes: Buffer }, Tier1PackagesError>> {
+): Promise<Result<{ filename: string; bytes: Buffer }, WasmPackagesError>> {
   const spec = `${entry.name}==${entry.version}`;
   let body: unknown;
   try {
@@ -530,7 +530,7 @@ async function moveOutIfStale(path: string, doomed: string, cutoffMs: number): P
   }
 }
 
-export interface ReapTier1WheelDirsArgs {
+export interface ReapWasmWheelDirsArgs {
   wheelsRoot: string;
   /** Lockfile hashes of every skill row, enabled or disabled. */
   reachableHashes: ReadonlySet<string>;
@@ -544,7 +544,7 @@ export interface ReapTier1WheelDirsArgs {
   graceDays: number;
 }
 
-export interface ReapTier1WheelDirsError {
+export interface ReapWasmWheelDirsError {
   kind: "reap_failed";
   message: string;
 }
@@ -554,9 +554,9 @@ export interface ReapTier1WheelDirsError {
  * cannot tell which release is installed and so cannot judge the published
  * directories: publish leftovers must not pile up behind a metadata failure.
  */
-export async function sweepTier1WheelTmpDirs(
+export async function sweepWasmWheelTmpDirs(
   wheelsRoot: string,
-): Promise<Result<void, ReapTier1WheelDirsError>> {
+): Promise<Result<void, ReapWasmWheelDirsError>> {
   try {
     await removeStaleTmpDirs(wheelsRoot, isWheelTmpDir, Date.now());
     return ok();
@@ -574,9 +574,9 @@ export async function sweepTier1WheelTmpDirs(
  * `<reachable hash>-pyodide<installed release>/` ones are kept; a missing
  * `wheelsRoot` has nothing to reap.
  */
-export async function reapTier1WheelDirs(
-  args: ReapTier1WheelDirsArgs,
-): Promise<Result<{ reapedDirs: readonly string[] }, ReapTier1WheelDirsError>> {
+export async function reapWasmWheelDirs(
+  args: ReapWasmWheelDirsArgs,
+): Promise<Result<{ reapedDirs: readonly string[] }, ReapWasmWheelDirsError>> {
   const now = Date.now();
   const graceMs = args.graceDays * 24 * 60 * 60 * 1000;
   try {
@@ -607,7 +607,7 @@ export async function reapTier1WheelDirs(
     await removeStaleTmpDirs(args.wheelsRoot, isWheelTmpDir, now);
     log.info(
       { reapedCount: reapedDirs.length, reachableCount: reachableDirs.size },
-      "tier-1 wheel reap completed",
+      "wasm wheel reap completed",
     );
     return ok({ reapedDirs });
   } catch (e) {
