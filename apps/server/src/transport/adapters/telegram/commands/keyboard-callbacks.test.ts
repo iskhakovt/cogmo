@@ -189,6 +189,26 @@ describe("handleSkillsDeployCallback", () => {
     expect(outcome.toast).toMatch(/not authorized/);
   });
 
+  it("an unwired skills runtime keeps the keyboard: the row is untouched", async () => {
+    const approve = vi.fn().mockResolvedValue(err({ code: "skills_disabled" as const }));
+    const transport = transportWith({
+      skills: {
+        approveDeploy: approve,
+        denyDeploy: vi.fn(),
+      },
+    });
+
+    const outcome = await handleSkillsDeployCallback(
+      transport,
+      { pendingId, action: "approve" },
+      "user-tg-1",
+      "chat-1",
+    );
+
+    expect(outcome.clearKeyboard).toBe(false);
+    expect(outcome.editText).toMatch(/unavailable/);
+  });
+
   it("double-tap on already-resolved deploy gets skill_deploy_not_pending", async () => {
     const approve = vi.fn().mockResolvedValue(
       err({
@@ -210,6 +230,7 @@ describe("handleSkillsDeployCallback", () => {
       "user-tg-1",
       "chat-1",
     );
+    expect(outcome.clearKeyboard).toBe(true);
 
     expect(outcome.editText).toMatch(/can't be acted on/);
     expect(outcome.editText).toMatch(/denied/);
@@ -274,6 +295,7 @@ describe("handleSkillsDeployCallback", () => {
       "user-tg-1",
       "chat-1",
     );
+    expect(outcome.clearKeyboard).toBe(true);
 
     expect(outcome.editText).toMatch(/No skill named/);
     expect(outcome.toast).toBe(outcome.editText);

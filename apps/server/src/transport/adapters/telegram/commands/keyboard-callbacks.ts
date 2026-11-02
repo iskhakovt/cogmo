@@ -128,7 +128,14 @@ export interface SkillsDeployCallbackOutcome {
   clearKeyboard: boolean;
 }
 
-/** Whether `error` leaves the deploy keyboard's buttons still usable. */
+/**
+ * Whether `error` leaves the deploy keyboard's buttons still usable. The
+ * three codes name every failure that writes nothing: the row stays as it
+ * was, so the same taps still apply. Every other code the skills namespace
+ * returns resolved the row or found it gone. `TransportError` is the
+ * transport-wide union, so the remainder is the other namespaces' codes,
+ * which no skills tap can produce.
+ */
 function keepsSkillsKeyboard(error: TransportError): boolean {
   return match(error)
     .with(
