@@ -116,8 +116,8 @@ interface SessionSpec {
    * runs the session with no interface but loopback; `"bridge"` is the
    * daemon's default bridge. The create refuses an `egressSocket` with
    * `"bridge"`. From skills S7 the skills session schema (a Zod refinement)
-   * requires an `egressSocket` on every `"none"` session but the deps
-   * reaper's, which runs no skill code and needs no egress
+   * requires an `egressSocket` on every `"none"` session whose `purpose`
+   * is not `reap` (the deps reaper runs no skill code and needs no egress)
    * (skills.md → Egress proxy → One path).
    */
   network: "bridge" | "none";
