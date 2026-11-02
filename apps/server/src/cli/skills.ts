@@ -60,7 +60,7 @@ export function skillsCli(io: CliIo, loadDeps: LoadDeps<SkillsCliDeps>) {
       list: command({
         name: "list",
         description:
-          "List every skill, disabled ones included (name, tier, risk, disabled, git_sha, pending_deploy).",
+          "List every skill, disabled ones included (name, tier, risk, disabled, git_sha, pending_deploy, pending_git_sha).",
         args: {},
         handler: async () => listSkills(await loadDeps(), io),
       }),

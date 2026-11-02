@@ -238,6 +238,8 @@ describe("handleSkillsDeployCallback", () => {
     );
 
     expect(outcome.editText).toMatch(/non_fast_forward_at_approve_time/);
+    // The deploy stays pending, so Deny and a later Approve still apply.
+    expect(outcome.clearKeyboard).toBe(false);
   });
   it("Disable dispatches to skills.disableById with the skill id and names the re-enable command", async () => {
     const skillId = "019d0000-0000-7000-8000-0000000000ab";

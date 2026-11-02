@@ -1,8 +1,9 @@
 /** Taps on the plan, pipeline-gate and skill deploy keyboards, as what the adapter writes back. */
 
-import { match } from "ts-pattern";
+import { match, P } from "ts-pattern";
 import type { ParsedSkillsDeployCallback } from "../../../../skills/skills-keyboard.js";
 import type { Transport } from "../../../transport.js";
+import type { TransportError } from "../../transport-error.js";
 import { errorMessage } from "./reply.js";
 
 /**
@@ -119,10 +120,22 @@ export interface SkillsDeployCallbackOutcome {
   editText: string;
   toast: string;
   /**
-   * Whether the keyboard should go. Yes unless the tapper was rejected: a
-   * rejected tap must not take the buttons away from whoever can use them.
+   * Whether the keyboard should go. Yes once the tap resolved the row or found
+   * it gone; no while the row is still actionable: a rejected tapper, an
+   * approve the runner refused (the deploy stays pending, so Deny and a later
+   * Approve still apply) or an unwired skills runtime.
    */
   clearKeyboard: boolean;
+}
+
+/** Whether `error` leaves the deploy keyboard's buttons still usable. */
+function keepsSkillsKeyboard(error: TransportError): boolean {
+  return match(error)
+    .with(
+      { code: P.union("identity_rejected", "skill_deploy_register_failed", "skills_disabled") },
+      () => true,
+    )
+    .otherwise(() => false);
 }
 
 /**
@@ -149,7 +162,7 @@ export async function handleSkillsDeployCallback(
         return {
           editText: errorMessage(res.error),
           toast: errorMessage(res.error),
-          clearKeyboard: res.error.code !== "identity_rejected",
+          clearKeyboard: !keepsSkillsKeyboard(res.error),
         };
       }
       return {
@@ -164,7 +177,7 @@ export async function handleSkillsDeployCallback(
         return {
           editText: errorMessage(res.error),
           toast: errorMessage(res.error),
-          clearKeyboard: res.error.code !== "identity_rejected",
+          clearKeyboard: !keepsSkillsKeyboard(res.error),
         };
       }
       return {
@@ -179,7 +192,7 @@ export async function handleSkillsDeployCallback(
         return {
           editText: errorMessage(res.error),
           toast: errorMessage(res.error),
-          clearKeyboard: res.error.code !== "identity_rejected",
+          clearKeyboard: !keepsSkillsKeyboard(res.error),
         };
       }
       return {
