@@ -1,3 +1,4 @@
+import { match } from "ts-pattern";
 import { describe, expect, it } from "vitest";
 import {
   buildSkillsApprovalKeyboard,
@@ -12,10 +13,11 @@ const SKILL_ID = "019d0000-0000-7000-8000-0000000000ab";
 
 /** The `callback_data` the keyboards put on the button for `action`. */
 function callbackData(id: string, action: SkillsDeployAction): string {
-  const button =
-    action === "disable"
-      ? buildSkillsLiveKeyboard(id).inline_keyboard[0]?.[0]
-      : buildSkillsApprovalKeyboard(id).inline_keyboard[0]?.[action === "approve" ? 0 : 1];
+  const button = match(action)
+    .with("disable", () => buildSkillsLiveKeyboard(id).inline_keyboard[0]?.[0])
+    .with("approve", () => buildSkillsApprovalKeyboard(id).inline_keyboard[0]?.[0])
+    .with("deny", () => buildSkillsApprovalKeyboard(id).inline_keyboard[0]?.[1])
+    .exhaustive();
   if (!button) throw new Error(`no ${action} button`);
   return button.callback_data;
 }

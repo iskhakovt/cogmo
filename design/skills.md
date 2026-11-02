@@ -1391,7 +1391,7 @@ If an auto-applied skill misbehaves:
 
 - **`/disable <skill>`** — channel command disables immediately (sets `skills.disabled = true`; running tasks finish, no new invocations accepted). Idempotent on already-disabled rows.
 - **`/enable <skill>`** — re-activates a previously disabled skill. Refuses with a "no live deploy" message if the skill was never live at its current sha (denied-on-first-deploy guard above).
-- **`/skills`** — operator inventory: lists every registered skill (enabled + disabled, with marker), tier, risk tier, short git sha. Discovery surface for the other two commands.
+- **`/skills`** — operator inventory: lists every registered skill (enabled + disabled, with marker), tier, risk tier, short git sha, and a pending deploy's shas and id for `cogmo skills approve`. Discovery surface for the other two commands.
 - **`/rollback <skill>`** — back to the prior deploy's version (Deploy lifecycle).
 - **Auto-disable** `[proposed]` on defect-class failures ([Notifications and undo](#notifications-and-undo)).
 

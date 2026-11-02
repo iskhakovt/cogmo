@@ -382,7 +382,8 @@ export interface SkillStore {
    * re-activation: a never-approved-then-denied first deploy leaves the
    * skills row at `disabled=true` with the rejected sha; `/enable foo`
    * without this check would smuggle code past the approval gate.
-   * Rolled-back skills still pass (the prior live row remains).
+   * A rollback target that once had a `live` row passes; one that never
+   * did is refused (design/skills.md → Deploy lifecycle, failure modes).
    */
   hasLiveDeployForSkill(
     tx: Transaction,
