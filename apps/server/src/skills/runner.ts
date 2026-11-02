@@ -40,7 +40,12 @@ import { SkillSourceCache } from "./source-cache.js";
 import type { SkillRow, SkillRunIdentity, SkillRunTrigger, SkillStore } from "./store/index.js";
 import { createTier1Prefetcher, pyodideDistDir } from "./worker-wasm/host.js";
 import type { Tier1Packages, Tier1Prefetcher } from "./worker-wasm/tier1.js";
-import { ensureTier1Packages, type Tier1PackagesError } from "./worker-wasm/wheel-cache.js";
+import {
+  describeTier1PackagesError,
+  ensureTier1Packages,
+  fillBuiltinCache,
+  type Tier1PackagesError,
+} from "./worker-wasm/wheel-cache.js";
 
 export type {
   DeregisterResult,
@@ -302,6 +307,20 @@ export class SkillRunnerImpl implements SkillRunner {
           { lockfile, packageCacheDir, wheelsRoot: tier1.wheelsRoot, ...(signal && { signal }) },
         );
       });
+    // The register's boundary probe loads from the cache its prefetch fills,
+    // so that prefetch is staged and verified as a run's is.
+    const probePrefetcher: Tier1Prefetcher = {
+      prefetchBuiltins: async (names, cacheOpts) => {
+        const bundled = await loadBundledPackages();
+        if (bundled.isErr()) return err(bundled.error.message);
+        const filled = await fillBuiltinCache(
+          { prefetcher, bundled: bundled.value },
+          { names, ...cacheOpts },
+        );
+        return filled.mapErr(describeTier1PackagesError);
+      },
+      probeBuiltins: (names, cacheOpts) => prefetcher.probeBuiltins(names, cacheOpts),
+    };
     const resolveTier1Packages = (
       lockfile: LockfileSnapshot | undefined,
       signal?: AbortSignal,
@@ -320,7 +339,7 @@ export class SkillRunnerImpl implements SkillRunner {
       secretsStore: opts.secretsStore,
       defaultRunAs: opts.defaultRunAs,
       capabilities: BUILD_CAPABILITIES,
-      tier1: { prefetcher, packageCacheDir, resolvePackages },
+      tier1: { prefetcher: probePrefetcher, packageCacheDir, resolvePackages },
       skillsRepoPath: opts.skillsRepoPath,
       sourceCache,
       // Explicit override wins; otherwise default to a sandbox-backed

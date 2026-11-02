@@ -5,6 +5,7 @@ import {
   mkdir,
   mkdtemp,
   readdir,
+  readFile,
   rename,
   rm,
   stat,
@@ -93,6 +94,11 @@ async function cacheWith(dir: string, names: readonly string[]): Promise<string>
     await writeFile(join(dir, fileName), bundledBytes(fileName));
   }
   return dir;
+}
+
+/** The prefetch's argument: a staging directory beside `cacheDir`, never the cache itself. */
+function stagedBeside(cacheDir: string) {
+  return { packageCacheDir: expect.stringMatching(`^${cacheDir.replaceAll(".", "\\.")}\\.tmp\\.`) };
 }
 
 async function exists(path: string): Promise<boolean> {
@@ -224,9 +230,10 @@ pydantic_core==2.41.5 --hash=sha256:${OTHER_SHA}
       builtins: ["pydantic", "pydantic-core"],
       wheelDir: join(wheelsRoot, lock.hash),
     });
-    expect(prefetcher.prefetchBuiltins).toHaveBeenCalledWith(["pydantic", "pydantic-core"], {
-      packageCacheDir: cacheDir,
-    });
+    expect(prefetcher.prefetchBuiltins).toHaveBeenCalledWith(
+      ["pydantic", "pydantic-core"],
+      stagedBeside(cacheDir),
+    );
     expect((await readdir(join(wheelsRoot, lock.hash))).sort()).toEqual([
       ".ready",
       "idna-3.10-py3-none-any.whl",
@@ -248,7 +255,7 @@ pydantic_core==2.41.5 --hash=sha256:${OTHER_SHA}
       builtins: [],
       wheelDir: join(wheelsRoot, lock.hash),
     });
-    expect(prefetcher.prefetchBuiltins).toHaveBeenCalledWith([], { packageCacheDir: cacheDir });
+    expect(prefetcher.prefetchBuiltins).toHaveBeenCalledWith([], stagedBeside(cacheDir));
   });
 
   it("skips the prefetch when the cache holds every built-in, micropip and their dependencies", async () => {
@@ -283,7 +290,10 @@ pydantic_core==2.41.5 --hash=sha256:${OTHER_SHA}
       },
     );
     expect(result._unsafeUnwrap()).toEqual({ builtins: ["pydantic"], wheelDir: null });
-    expect(prefetcher.prefetchBuiltins).toHaveBeenCalledWith(["pydantic"], { packageCacheDir });
+    expect(prefetcher.prefetchBuiltins).toHaveBeenCalledWith(
+      ["pydantic"],
+      stagedBeside(packageCacheDir),
+    );
   });
 
   it("deletes a cached file whose sha256 is not the lockfile's, and prefetches it again", async () => {
@@ -312,17 +322,44 @@ pydantic_core==2.41.5 --hash=sha256:${OTHER_SHA}
       },
     );
     expect(result._unsafeUnwrap()).toEqual({ builtins: ["pydantic"], wheelDir: null });
-    expect(prefetcher.prefetchBuiltins).toHaveBeenCalledWith(["pydantic"], { packageCacheDir });
+    expect(prefetcher.prefetchBuiltins).toHaveBeenCalledWith(
+      ["pydantic"],
+      stagedBeside(packageCacheDir),
+    );
     expect(presentAtPrefetch).toBe(false);
   });
 
-  it("errs builtin_integrity naming the file when the prefetch leaves it mismatching, and deletes it", async () => {
+  it("prefetches into a private staging directory and moves the verified files into the cache", async () => {
     const prefetcher = mock<Tier1Prefetcher>();
-    const tampered = join(cacheDir, bundledFileName("pydantic-core"));
+    let stagingMode: number | null = null;
+    prefetcher.prefetchBuiltins.mockImplementation(async (_names, { packageCacheDir }) => {
+      stagingMode = (await stat(packageCacheDir)).mode & 0o777;
+      await cacheWith(packageCacheDir, [...BUNDLED.keys()]);
+      return ok();
+    });
+    const result = await ensureTier1Packages(
+      { prefetcher, fetchImpl: fakePypi({}, {}), bundled: BUNDLED },
+      {
+        lockfile: lockfile(`pydantic==2.12.5 --hash=sha256:${OTHER_SHA}\n`),
+        packageCacheDir: cacheDir,
+        wheelsRoot,
+      },
+    );
+    expect(result._unsafeUnwrap()).toEqual({ builtins: ["pydantic"], wheelDir: null });
+    expect(prefetcher.prefetchBuiltins).toHaveBeenCalledWith(["pydantic"], stagedBeside(cacheDir));
+    expect(stagingMode).toBe(0o700);
+    expect((await readdir(cacheDir)).sort()).toEqual(
+      ["pydantic", "pydantic-core", "typing-extensions", "micropip"].map(bundledFileName).sort(),
+    );
+    expect(await readdir(root)).toEqual(["cache"]);
+  });
+
+  it("errs builtin_integrity naming a staged file that fails its sha256, and moves nothing into the cache", async () => {
+    const prefetcher = mock<Tier1Prefetcher>();
     prefetcher.prefetchBuiltins.mockImplementation(async (_names, { packageCacheDir }) => {
       await cacheWith(packageCacheDir, [...BUNDLED.keys()]);
-      // What a tampered CDN response leaves in the cache.
-      await writeFile(tampered, "tampered bytes");
+      // What a tampered CDN response leaves behind.
+      await writeFile(join(packageCacheDir, bundledFileName("pydantic-core")), "tampered bytes");
       return ok();
     });
     const result = await ensureTier1Packages(
@@ -338,8 +375,97 @@ pydantic_core==2.41.5 --hash=sha256:${OTHER_SHA}
       fileName: bundledFileName("pydantic-core"),
       message: expect.stringContaining(`sha256:${sha256(Buffer.from("tampered bytes"))}`),
     });
-    expect(await exists(tampered)).toBe(false);
+    expect(await readdir(cacheDir)).toEqual([]);
+    expect(await readdir(root)).toEqual(["cache"]);
   });
+
+  it("serves two cold-cache resolutions whose prefetches overlap", async () => {
+    // B's prefetch is mid-write after A's has written everything and before A
+    // checks what it fetched.
+    const coreFile = bundledFileName("pydantic-core");
+    const aWrote = Promise.withResolvers<void>();
+    const bWrotePartial = Promise.withResolvers<void>();
+    const aDone = Promise.withResolvers<void>();
+    // Each resolution's signal tells the stub whose prefetch it is serving.
+    const signalA = new AbortController().signal;
+    const signalB = new AbortController().signal;
+    const prefetcher = mock<Tier1Prefetcher>();
+    prefetcher.prefetchBuiltins.mockImplementation(async (_names, { packageCacheDir, signal }) => {
+      if (signal === signalA) {
+        await cacheWith(packageCacheDir, [...BUNDLED.keys()]);
+        aWrote.resolve();
+        await bWrotePartial.promise;
+        return ok();
+      }
+      await aWrote.promise;
+      await mkdir(packageCacheDir, { recursive: true });
+      await writeFile(join(packageCacheDir, coreFile), bundledBytes(coreFile).subarray(0, 5));
+      bWrotePartial.resolve();
+      await aDone.promise;
+      await cacheWith(packageCacheDir, [...BUNDLED.keys()]);
+      return ok();
+    });
+    const resolve = (signal: AbortSignal) =>
+      ensureTier1Packages(
+        { prefetcher, fetchImpl: fakePypi({}, {}), bundled: BUNDLED },
+        {
+          lockfile: lockfile(`pydantic==2.12.5 --hash=sha256:${OTHER_SHA}\n`),
+          packageCacheDir: cacheDir,
+          wheelsRoot,
+          signal,
+        },
+      );
+    const a = resolve(signalA).finally(() => aDone.resolve());
+    const b = resolve(signalB);
+    const [resultA, resultB] = await Promise.all([a, b]);
+    expect(resultA._unsafeUnwrap()).toEqual({ builtins: ["pydantic"], wheelDir: null });
+    expect(resultB._unsafeUnwrap()).toEqual({ builtins: ["pydantic"], wheelDir: null });
+    expect(prefetcher.prefetchBuiltins).toHaveBeenCalledTimes(2);
+    expect(sha256(await readFile(join(cacheDir, coreFile)))).toBe(sha256(bundledBytes(coreFile)));
+  });
+
+  it("removes staging directories older than ten minutes beside the cache, and keeps fresh ones", async () => {
+    const stale = `${cacheDir}.tmp.dead`;
+    const fresh = `${cacheDir}.tmp.live`;
+    await mkdir(stale, { recursive: true });
+    await writeFile(join(stale, "half.whl"), "");
+    await mkdir(fresh);
+    const elevenMinutesAgo = new Date(Date.now() - 11 * 60 * 1000);
+    await utimes(stale, elevenMinutesAgo, elevenMinutesAgo);
+    await ensureTier1Packages(
+      { prefetcher: okPrefetcher(), fetchImpl: fakePypi({}, {}), bundled: BUNDLED },
+      {
+        lockfile: lockfile(`pydantic==2.12.5 --hash=sha256:${OTHER_SHA}\n`),
+        packageCacheDir: cacheDir,
+        wheelsRoot,
+      },
+    );
+    expect((await readdir(root)).sort()).toEqual(["cache", "cache.tmp.live"]);
+  });
+
+  it.skipIf(process.getuid?.() === 0)(
+    "errs builtin_integrity for a cached file that cannot be read",
+    async () => {
+      const packageCacheDir = await cacheWith(cacheDir, [...BUNDLED.keys()]);
+      const unreadable = join(packageCacheDir, bundledFileName("micropip"));
+      await chmod(unreadable, 0o000);
+      const prefetcher = okPrefetcher();
+      const result = await ensureTier1Packages(
+        { prefetcher, fetchImpl: fakePypi({}, {}), bundled: BUNDLED },
+        {
+          lockfile: lockfile(`pydantic==2.12.5 --hash=sha256:${OTHER_SHA}\n`),
+          packageCacheDir,
+          wheelsRoot,
+        },
+      );
+      expect(result._unsafeUnwrapErr()).toEqual({
+        kind: "builtin_integrity",
+        fileName: bundledFileName("micropip"),
+        message: expect.stringContaining("EACCES"),
+      });
+      expect(prefetcher.prefetchBuiltins).not.toHaveBeenCalled();
+    },
+  );
 
   it("errs prefetch_failed naming the file when the prefetch leaves it absent", async () => {
     const prefetcher = mock<Tier1Prefetcher>();
@@ -373,7 +499,10 @@ pydantic_core==2.41.5 --hash=sha256:${OTHER_SHA}
         wheelsRoot,
       },
     );
-    expect(prefetcher.prefetchBuiltins).toHaveBeenCalledWith(["pydantic"], { packageCacheDir });
+    expect(prefetcher.prefetchBuiltins).toHaveBeenCalledWith(
+      ["pydantic"],
+      stagedBeside(packageCacheDir),
+    );
   });
 
   it("returns a null wheelDir and touches neither PyPI nor the disk when every package is bundled", async () => {

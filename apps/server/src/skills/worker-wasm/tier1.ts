@@ -47,7 +47,8 @@ export interface Tier1Prefetcher {
    * Download `names` and their Pyodide dependencies into `packageCacheDir`,
    * through a child that has the network and no permission flags, so later
    * children find every file locally. Pyodide checks no integrity under
-   * Node; `ensureTier1Packages` hashes what it wrote.
+   * Node; `fillBuiltinCache` hands it a staging directory and hashes what it
+   * wrote there before anything reaches the cache.
    */
   prefetchBuiltins(
     names: readonly string[],

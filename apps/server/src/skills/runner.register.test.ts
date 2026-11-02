@@ -646,15 +646,13 @@ outputs:
     describe("tier-1 packages", () => {
       // Bundled by Pyodide at this version and pure Python: the compatibility
       // check asks neither PyPI nor the probe.
-      const BUNDLED_LOCKFILE = `httpx==0.28.1 \\\n    --hash=sha256:${"0".repeat(64)}\n`;
-
-      async function pushBundledDeps(branch: string): Promise<void> {
-        await writeFile(
-          join(repo.work, "SKILL.md"),
-          ECHO_WITH_DEPS.replace("httpx==0.27.0", "httpx==0.28.1"),
-        );
+      async function pushBundledDeps(branch: string, spec: string): Promise<void> {
+        await writeFile(join(repo.work, "SKILL.md"), ECHO_WITH_DEPS.replace("httpx==0.27.0", spec));
         await writeFile(join(repo.work, "skill.py"), ECHO_BODY);
-        await writeFile(join(repo.work, "requirements.lock"), BUNDLED_LOCKFILE);
+        await writeFile(
+          join(repo.work, "requirements.lock"),
+          `${spec} \\\n    --hash=sha256:${"0".repeat(64)}\n`,
+        );
         await execFileP("git", ["-C", repo.work, "add", "."]);
         await execFileP("git", ["-C", repo.work, "commit", "-m", branch, "--allow-empty"]);
         await execFileP("git", [
@@ -674,11 +672,25 @@ outputs:
           pyodidePackageCacheDir,
           tier1: { ...tier1, resolvePackages },
         });
-        await pushBundledDeps("skill/echo-tier1");
+        await pushBundledDeps("skill/echo-tier1", "httpx==0.28.1");
         const result = await runner.register({ branch: "skill/echo-tier1", origin: OWNER });
         expect(resolvePackages).toHaveBeenCalledTimes(1);
         return result;
       }
+
+      it("prefetches for the boundary probe into a staging directory beside the cache", async () => {
+        const { tier1, pyodidePackageCacheDir } = offlineTier1(repo.bare);
+        const runner = await makeRunner({ pyodidePackageCacheDir, tier1 });
+        // Bundled by Pyodide at this version and native: the probe load-tests it.
+        await pushBundledDeps("skill/echo-native", "pydantic-core==2.41.5");
+        await runner.register({ branch: "skill/echo-native", origin: OWNER });
+        const prefetcher = expectDefined(tier1.prefetcher, "prefetcher");
+        expect(prefetcher.prefetchBuiltins).toHaveBeenCalledWith(["pydantic-core"], {
+          packageCacheDir: expect.stringMatching(
+            `^${pyodidePackageCacheDir.replaceAll(".", "\\.")}\\.tmp\\.`,
+          ),
+        });
+      });
 
       it("rejects as tier1_dependency_unavailable when a wheel fails its pinned hash", async () => {
         const result = await registerResolvingTo({

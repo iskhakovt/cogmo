@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { chmod, mkdir, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { err, ok, Result } from "neverthrow";
 import * as R from "remeda";
 import { match } from "ts-pattern";
@@ -24,7 +24,7 @@ const HASH_DIR_RE = /^[0-9a-f]{64}$/;
 /** An in-flight publish: `<hash>.tmp.<id>`. */
 const TMP_DIR_RE = /^[0-9a-f]{64}\.tmp\./;
 
-/** A `tmp` directory this old belongs to a publish that died. */
+/** A `tmp` directory this old belongs to a publish or prefetch that died. */
 const STALE_TMP_MS = 10 * 60 * 1000;
 
 /** What the sweep meets when a concurrent publisher or sweep moves a candidate first. */
@@ -74,16 +74,27 @@ type UnverifiedBuiltin =
   | { kind: "absent"; pkg: BundledPackage }
   | { kind: "mismatch"; pkg: BundledPackage; actual: string };
 
-export interface EnsureTier1PackagesDeps {
+export interface FillBuiltinCacheDeps {
   prefetcher: Tier1Prefetcher;
-  fetchImpl: typeof fetch;
   /** Pyodide's bundled packages by normalised name (`loadBundledPackages`). */
   bundled: ReadonlyMap<string, BundledPackage>;
 }
 
+export interface FillBuiltinCacheArgs {
+  /** Bundled packages to provide, by normalised name; micropip is always among them. */
+  names: readonly string[];
+  /** Pyodide's package cache, which tier-1 children load from. */
+  packageCacheDir: string;
+  signal?: AbortSignal;
+}
+
+export interface EnsureTier1PackagesDeps extends FillBuiltinCacheDeps {
+  fetchImpl: typeof fetch;
+}
+
 export interface EnsureTier1PackagesArgs {
   lockfile: LockfileSnapshot;
-  /** Pyodide's package cache, which `prefetchBuiltins` fills. */
+  /** Pyodide's package cache, which `fillBuiltinCache` fills. */
   packageCacheDir: string;
   /** Parent of the per-lockfile-hash wheel directories. */
   wheelsRoot: string;
@@ -97,13 +108,7 @@ export interface EnsureTier1PackagesArgs {
  * pure-Python wheel from PyPI, checked against the lockfile's sha256 and
  * published under `<wheelsRoot>/<lockfile hash>/`.
  *
- * The cache must hold the builtins, micropip (which installs the wheels) and
- * every bundled package they depend on, each file hashing to the sha256
- * Pyodide's lockfile pins. Pyodide's Node loader checks no integrity, of a
- * cached file or of its CDN download, so this check is the one a task child's
- * packages pass. A file that fails it is deleted, and a prefetch child fills
- * the cache only when one of those files is missing or deleted, so a warm
- * cache costs no Pyodide boot; what the prefetch wrote is checked again.
+ * The builtins come from `fillBuiltinCache`.
  *
  * The directory is published as the venvs are: written under
  * `<hash>.tmp.<id>`, marked `.ready`, renamed into place, then made
@@ -123,24 +128,84 @@ export async function ensureTier1Packages(
   if (builtins.length === 0 && wheelEntries.length === 0) {
     return ok({ builtins, wheelDir: null });
   }
-  const closure = bundledClosure(deps.bundled, [...builtins, "micropip"]);
-  const unverified = await evictUnverifiedBuiltins(args.packageCacheDir, closure);
-  if (unverified.isErr()) return err(unverified.error);
-  if (unverified.value.length > 0) {
-    const prefetched = await deps.prefetcher.prefetchBuiltins(builtins, {
-      packageCacheDir: args.packageCacheDir,
-      ...(args.signal && { signal: args.signal }),
-    });
-    if (prefetched.isErr()) return err({ kind: "prefetch_failed", message: prefetched.error });
-    const rechecked = await evictUnverifiedBuiltins(args.packageCacheDir, closure);
-    if (rechecked.isErr()) return err(rechecked.error);
-    if (rechecked.value.length > 0) {
-      return err(unverifiedAfterPrefetch(args.packageCacheDir, rechecked.value));
-    }
-  }
+  const filled = await fillBuiltinCache(deps, {
+    names: builtins,
+    packageCacheDir: args.packageCacheDir,
+    ...(args.signal && { signal: args.signal }),
+  });
+  if (filled.isErr()) return err(filled.error);
   if (wheelEntries.length === 0) return ok({ builtins, wheelDir: null });
   const published = await publishWheelDir(deps.fetchImpl, args, wheelEntries);
   return published.map((wheelDir) => ({ builtins, wheelDir }));
+}
+
+/**
+ * Make `packageCacheDir` hold `names`, micropip (which installs the wheels)
+ * and every bundled package they depend on, each file hashing to the sha256
+ * Pyodide's lockfile pins. Pyodide's Node loader checks no integrity, of a
+ * cached file or of its CDN download, so this check is the one a child's
+ * packages pass. A cached file that fails it is deleted.
+ *
+ * When a file is missing or deleted, a prefetch child fetches the closure
+ * into a private staging directory beside the cache
+ * (`<packageCacheDir>.tmp.<id>`, `0o700`); every file there is checked, and
+ * only then is each renamed into the cache. A rename replaces a file whole
+ * and a reader holding the old one keeps it, so concurrent resolutions, in
+ * this process or another, only ever see whole files in the cache. A warm
+ * cache costs no Pyodide boot.
+ */
+export async function fillBuiltinCache(
+  deps: FillBuiltinCacheDeps,
+  args: FillBuiltinCacheArgs,
+): Promise<Result<void, Tier1PackagesError>> {
+  const closure = bundledClosure(deps.bundled, [...args.names, "micropip"]);
+  const unverified = await evictUnverifiedBuiltins(args.packageCacheDir, closure);
+  if (unverified.isErr()) return err(unverified.error);
+  if (unverified.value.length === 0) return ok();
+  return prefetchStaged(deps.prefetcher, args, closure);
+}
+
+async function prefetchStaged(
+  prefetcher: Tier1Prefetcher,
+  args: FillBuiltinCacheArgs,
+  closure: readonly BundledPackage[],
+): Promise<Result<void, Tier1PackagesError>> {
+  const cacheDir = args.packageCacheDir;
+  const stagingPrefix = `${basename(cacheDir)}.tmp.`;
+  const staging = `${cacheDir}.tmp.${randomUUID()}`;
+  try {
+    await mkdir(cacheDir, { recursive: true });
+    await removeStaleTmpDirs(
+      dirname(cacheDir),
+      (name) => name.startsWith(stagingPrefix),
+      Date.now(),
+    ).catch((e: unknown) => {
+      log.warn({ cacheDir, err: describeError(e) }, "wheel-cache: stale staging sweep failed");
+    });
+    await mkdir(staging, { mode: 0o700 });
+    const prefetched = await prefetcher.prefetchBuiltins(args.names, {
+      packageCacheDir: staging,
+      ...(args.signal && { signal: args.signal }),
+    });
+    if (prefetched.isErr()) return err({ kind: "prefetch_failed", message: prefetched.error });
+    const staged = await evictUnverifiedBuiltins(staging, closure);
+    if (staged.isErr()) return err(staged.error);
+    if (staged.value.length > 0) return err(unverifiedAfterPrefetch(staging, staged.value));
+    await Promise.all(
+      closure.map((pkg) => rename(join(staging, pkg.fileName), join(cacheDir, pkg.fileName))),
+    );
+    return ok();
+  } catch (e) {
+    return err({
+      kind: "prefetch_failed",
+      message: `staging the prefetch in ${staging}: ${describeError(e)}`,
+    });
+  } finally {
+    // Empty after the renames; the remains of a failed prefetch otherwise.
+    await rm(staging, { recursive: true, force: true }).catch((e: unknown) => {
+      log.warn({ staging, err: describeError(e) }, "wheel-cache: staging dir cleanup failed");
+    });
+  }
 }
 
 /** One line naming why the lockfile's packages could not be made available. */
@@ -187,8 +252,8 @@ function bundledClosure(
 
 /**
  * Hash each package's file in `packageCacheDir` against the sha256 Pyodide's
- * lockfile pins and delete every file that does not match: a truncated write
- * from a prefetch child killed mid-download, or tampered bytes. Resolves to
+ * lockfile pins and delete every file that does not match: tampered or
+ * damaged bytes, or a prefetch child's unchecked download. Resolves to
  * the packages whose file is absent or was deleted; errs `builtin_integrity`
  * when a file can be neither hashed nor deleted.
  */
@@ -287,7 +352,7 @@ async function publishWheelDir(
   try {
     await mkdir(args.wheelsRoot, { recursive: true });
     // The sweep is housekeeping: what it fails to remove waits for the next one.
-    await removeStaleTmpDirs(args.wheelsRoot, Date.now()).catch((e: unknown) => {
+    await removeStaleTmpDirs(args.wheelsRoot, isWheelTmpDir, Date.now()).catch((e: unknown) => {
       log.warn(
         { wheelsRoot: args.wheelsRoot, err: describeError(e) },
         "wheel-cache: stale tmp sweep failed",
@@ -420,14 +485,23 @@ async function fetchVerifiedWheel(
   return ok({ filename: file.filename, bytes });
 }
 
+function isWheelTmpDir(name: string): boolean {
+  return TMP_DIR_RE.test(name);
+}
+
 /**
- * Remove `<hash>.tmp.<id>` directories older than `STALE_TMP_MS`. A candidate
- * a concurrent publisher renames into place, or a concurrent sweep removes,
- * between the listing and its removal is skipped.
+ * Remove the directories under `root` that `isTmp` names and that are older
+ * than `STALE_TMP_MS`. A candidate a concurrent publisher renames into place,
+ * or a concurrent sweep removes, between the listing and its removal is
+ * skipped.
  */
-async function removeStaleTmpDirs(root: string, now: number): Promise<void> {
+async function removeStaleTmpDirs(
+  root: string,
+  isTmp: (name: string) => boolean,
+  now: number,
+): Promise<void> {
   const dirents = await readdir(root, { withFileTypes: true });
-  const candidates = dirents.filter((d) => d.isDirectory() && TMP_DIR_RE.test(d.name));
+  const candidates = dirents.filter((d) => d.isDirectory() && isTmp(d.name));
   for (const d of candidates) {
     const path = join(root, d.name);
     try {
@@ -493,7 +567,7 @@ export async function reapTier1WheelDirs(
       await removeSealedDir(doomed);
       reapedHashes.push(d.name);
     }
-    await removeStaleTmpDirs(args.wheelsRoot, now);
+    await removeStaleTmpDirs(args.wheelsRoot, isWheelTmpDir, now);
     log.info(
       { reapedCount: reapedHashes.length, reachableCount: args.reachableHashes.size },
       "tier-1 wheel reap completed",
