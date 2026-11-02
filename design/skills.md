@@ -2085,7 +2085,8 @@ skill_approval_classes (
 
 serve_heartbeats (
   id              UUID v7 PK,
-  instance_id     UUID NOT NULL UNIQUE,  -- the serve instance id, minted once per cogmo serve process whatever the sandbox backend;
+  instance_id     UUID NOT NULL UNIQUE,  -- the serve instance id, minted once per process by the core boot stage, whatever the sandbox backend
+                                         -- (local-docker's cogmo_instances row reuses it);
                                          -- no FK: cogmo_instances rows exist only on the local-docker backend
   egress_listener egress_listener_status NOT NULL,   -- transitions in Egress proxy → One path → Listener state
   failure         TEXT,                  -- nullable: the bind or listener error; set iff egress_listener = 'failed' (CHECK)
