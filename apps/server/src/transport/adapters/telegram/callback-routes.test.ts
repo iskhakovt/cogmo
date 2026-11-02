@@ -101,6 +101,7 @@ describe("registerCallbackQueries", () => {
     it("skill deploy: a rejected tap answers with a toast and leaves the keyboard", async () => {
       const { transport } = await createAdapter({
         skills: {
+          ...mockTransport().skills,
           approveDeploy: vi.fn().mockResolvedValue(err({ code: "identity_rejected" })),
         },
       });
