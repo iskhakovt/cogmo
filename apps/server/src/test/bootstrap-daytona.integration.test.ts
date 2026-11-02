@@ -19,10 +19,9 @@
  * What this test does NOT exercise — gap deferred to Phase 3c.6's
  * self-hosted-Daytona conformance suite: the container skill worker pool
  * against a daytona-shape backend (stdin/NDJSON, supervisor lifecycle,
- * worker recycle). Pool init is lazy now, so passing the daytona sandbox
- * through `bootstrap()` no longer triggers a container spawn — the pool is
- * only constructed on first container invocation, which this test doesn't
- * fire.
+ * worker recycle). Pool init is lazy, so passing the daytona sandbox
+ * through `bootstrap()` spawns no container — the pool is only constructed
+ * on the first container invocation, which this test doesn't fire.
  */
 
 import { mkdtempSync, rmSync } from "node:fs";

@@ -78,7 +78,7 @@ export function buildSkillToolSpec(
     name: def.name,
     description: def.description,
     // Durable: a skill run executes arbitrary Python with side effects
-    // (network writes via ctx, Hindsight retains) and, for container, spins up a
+    // (network writes via ctx, Hindsight retains) and, for a container skill, spins up a
     // sandbox. Non-durable it would re-invoke once per remaining step
     // boundary of the turn. The cached value is the JSON-stringified
     // output the model saw — exactly-once execution AND a stable persisted

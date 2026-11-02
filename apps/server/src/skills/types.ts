@@ -226,8 +226,8 @@ export const SkillManifestSchema = z
 export type SkillManifest = z.infer<typeof SkillManifestSchema>;
 
 /**
- * The names older `classifier_log` rows carry for these reasons, each read as
- * the reason it is now.
+ * Names a `classifier_log` row may carry for these reasons, read as the reason
+ * each names.
  */
 const LEGACY_RISK_REASONS: ReadonlyMap<string, SkillRiskReason> = new Map([
   ["tier1_unhardened", "wasm_unhardened"],
@@ -235,8 +235,19 @@ const LEGACY_RISK_REASONS: ReadonlyMap<string, SkillRiskReason> = new Map([
   ["tier2_shared_worker", "container_shared_worker"],
 ]);
 
-/** The capability keys those rows carry, each read as the flag it is now. */
-const LEGACY_CAPABILITY_KEYS: ReadonlyMap<string, string> = new Map([
+/** The enforcement flags the classifier read on a deploy. */
+const ClassifierLogCapabilitiesSchema = z.object({
+  wasmHardened: z.boolean(),
+  reviewPanel: z.boolean(),
+  /** Rows written before the flag was recorded read false. */
+  wasmMemoryBounded: z.boolean().default(false),
+});
+
+/** Capability keys a row may carry, read as the flag each names. */
+const LEGACY_CAPABILITY_KEYS: ReadonlyMap<
+  string,
+  keyof z.infer<typeof ClassifierLogCapabilitiesSchema>
+> = new Map([
   ["tier1Hardened", "wasmHardened"],
   ["tier1MemoryBounded", "wasmMemoryBounded"],
 ]);
@@ -283,17 +294,7 @@ export const ClassifierLogSchema = z.object({
    * written before the classifier recorded them. Legacy keys are read
    * through `LEGACY_CAPABILITY_KEYS`.
    */
-  capabilities: z
-    .preprocess(
-      readLegacyCapabilities,
-      z.object({
-        wasmHardened: z.boolean(),
-        reviewPanel: z.boolean(),
-        /** Rows written before the flag was recorded read false. */
-        wasmMemoryBounded: z.boolean().default(false),
-      }),
-    )
-    .optional(),
+  capabilities: z.preprocess(readLegacyCapabilities, ClassifierLogCapabilitiesSchema).optional(),
 });
 export type ClassifierLog = z.infer<typeof ClassifierLogSchema>;
 

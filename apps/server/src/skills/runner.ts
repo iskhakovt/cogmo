@@ -198,10 +198,10 @@ export interface SkillRunnerOptions {
     ) => Promise<Result<WasmPackages, WasmPackagesError>>;
   };
   /**
-   * Sandbox handle for running container (sysbox container) skills. Optional —
+   * Sandbox handle for running container-tier (sysbox) skills. Optional —
    * deployments without `SANDBOX_RUNTIME` set leave it undefined; container
-   * skills then fail with a clear `tier_2_unavailable` error at invoke time.
-   * Wasm (Pyodide WASM) skills work either way.
+   * skills are then rejected with `sandbox_unavailable` at invoke time.
+   * Wasm-tier (Pyodide) skills work either way.
    */
   sandbox?: SandboxClient;
   /**
