@@ -337,7 +337,7 @@ export class SkillRunnerImpl implements SkillRunner {
       secretsStore: opts.secretsStore,
       defaultRunAs: opts.defaultRunAs,
       capabilities: BUILD_CAPABILITIES,
-      tier1: { probe, fillBuiltins, packageCacheDir, resolvePackages },
+      tier1: { fetchImpl, probe, fillBuiltins, packageCacheDir, resolvePackages },
       skillsRepoPath: opts.skillsRepoPath,
       sourceCache,
       // Explicit override wins; otherwise default to a sandbox-backed

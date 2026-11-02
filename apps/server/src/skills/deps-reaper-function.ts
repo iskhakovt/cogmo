@@ -6,7 +6,7 @@ import type { SandboxClient } from "../sandbox/index.js";
 import { DEPS_REAP_GRACE_DAYS, type ReapSkillVenvsError, reapSkillVenvs } from "./deps-reaper.js";
 import type { BundledDistribution, BundledPackagesUnreadable } from "./pyodide-compat.js";
 import type { SkillStore } from "./store/index.js";
-import { reapTier1WheelDirs } from "./worker-wasm/wheel-cache.js";
+import { reapTier1WheelDirs, sweepTier1WheelTmpDirs } from "./worker-wasm/wheel-cache.js";
 
 const log = logger.child({ component: "skills.deps-reaper-function" });
 
@@ -121,8 +121,15 @@ export function createSkillDepsReaper(deps: SkillDepsReaperDeps, inngest: Innges
                 if (bundled.isErr()) {
                   log.warn(
                     { err: bundled.error.message },
-                    "skill-venvs-reaper: Pyodide's lockfile unreadable; skipping the tier-1 wheel reap",
+                    "skill-venvs-reaper: Pyodide's lockfile unreadable; sweeping only the tier-1 wheel root's stale tmp dirs",
                   );
+                  const swept = await sweepTier1WheelTmpDirs(wheelsRoot);
+                  if (swept.isErr()) {
+                    log.warn(
+                      { err: swept.error.message },
+                      "skill-venvs-reaper: tier-1 wheel tmp sweep failed",
+                    );
+                  }
                   return { reapedDirs: [], error: bundled.error.kind };
                 }
                 const r = await reapTier1WheelDirs({

@@ -557,6 +557,23 @@ export interface ReapTier1WheelDirsError {
  * `<reachable hash>-pyodide<installed release>/` ones are kept; a missing
  * `wheelsRoot` has nothing to reap.
  */
+/**
+ * Remove the wheel root's stale `*.tmp.*` directories alone, for a reaper that
+ * cannot tell which release is installed and so cannot judge the published
+ * directories: publish leftovers must not pile up behind a metadata failure.
+ */
+export async function sweepTier1WheelTmpDirs(
+  wheelsRoot: string,
+): Promise<Result<void, ReapTier1WheelDirsError>> {
+  try {
+    await removeStaleTmpDirs(wheelsRoot, isWheelTmpDir, Date.now());
+    return ok();
+  } catch (e) {
+    if (errnoCode(e) === "ENOENT") return ok();
+    return err({ kind: "reap_failed", message: describeError(e) });
+  }
+}
+
 export async function reapTier1WheelDirs(
   args: ReapTier1WheelDirsArgs,
 ): Promise<Result<{ reapedDirs: readonly string[] }, ReapTier1WheelDirsError>> {

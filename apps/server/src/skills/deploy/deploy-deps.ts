@@ -39,6 +39,8 @@ export interface DeployDeps {
    * so the first run pays no download.
    */
   tier1: {
+    /** What register's PyPI lookups and downloads go through. */
+    fetchImpl: typeof fetch;
     probe: Tier1Probe;
     fillBuiltins: FillBuiltins;
     packageCacheDir: string;

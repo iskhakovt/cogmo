@@ -217,6 +217,7 @@ async function prepareRegister(
 
   if (manifest.tier === "wasm" && lockfile !== null) {
     const compat = await checkPyodideCompat(parseLockfilePackageSpecs(lockfile.contents), {
+      fetchImpl: deps.tier1.fetchImpl,
       probe: {
         probe: deps.tier1.probe,
         fillBuiltins: deps.tier1.fillBuiltins,

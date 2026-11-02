@@ -74,9 +74,10 @@ export type FillBuiltins = (
  * `bundled_unreadable` (Pyodide's own lockfile could not be read) may clear
  * on a retry. `builtin_integrity` names a built-in whose download from Pyodide's
  * CDN does not hash to the sha256 Pyodide's lockfile pins, or a cached file
- * that cannot be checked: a verdict on this deployment's cache or its download,
- * not on the skill's lockfile. Nothing unverified reaches the cache, and a
- * cached file that fails its check is deleted, so a retry fetches it again.
+ * that cannot be checked or deleted: a verdict on this deployment's cache or
+ * its download, not on the skill's lockfile. Nothing unverified reaches the
+ * cache; a cached file that fails its check is deleted and fetched again in
+ * the same call.
  */
 export type Tier1PackagesError =
   | { kind: "wheel_unavailable"; spec: string; message: string }
