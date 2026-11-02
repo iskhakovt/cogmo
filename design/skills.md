@@ -1446,7 +1446,7 @@ run finished pausing at attempt 0 ──▶ attempt 1 inserted retry_owed ──
 
 | Failure mode | State left | Why it is safe, or the residual |
 |-|-|-|
-| The fan-out send fails, or the process dies, after `lock-and-advance` commits | `owed` | the ticker's retries replay the memoized advance and send again (the ticker fix in todo.md, ahead of S12); past them, the next tick re-emits the row |
+| The fan-out send fails, or the process dies, after `lock-and-advance` commits | `owed` | the ticker's retries replay the memoized advance and send again; past them, the next tick re-emits the row |
 | A re-emit of an event the bus already holds | `owed` or later | the bus drops the duplicate id within 24 h; a re-emit the handler receives meets the dispatch guard, which reads the row past `owed` and writes nothing |
 | The handler fails after its retries | `skipped: handler_failed` | its `onFailure`; re-emits stop with the row past `owed` |
 | `onFailure` is lost too, or the handler never receives the event | `owed` for up to an hour past `due_at` | each tick re-emits it, deduplicated by the bus; an hour past `due_at` the tick skips it `expired`, so a fire never runs more than an hour late |
