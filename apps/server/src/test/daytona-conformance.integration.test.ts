@@ -188,7 +188,7 @@ async function makeWrapperClient(
 // the other's sandboxes via the `cogmo.task` label index.
 const WRAPPER_TASK_ID = "wrapper-conf";
 const WRAPPER_IMAGE = "python:3.14-slim";
-// Mirror skills tier-2's `DEFAULT_RESOURCE_LIMITS` so the recorded
+// Mirror the container tier's `DEFAULT_RESOURCE_LIMITS` so the recorded
 // fixture exercises the wrapper at production-typical limits and the
 // snapshot Daytona bakes during record doesn't pay 3 GiB platform
 // default storage. See `src/skills/worker-sysbox/host.ts`.

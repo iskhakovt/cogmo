@@ -5,7 +5,7 @@ import { reject, ToolRegistry, type ToolRejection, type ToolSpec } from "../agen
 import { logger } from "../logger.js";
 import { describeInvokeRejection, type SkillInvokeRejection } from "./invoke-rejection.js";
 import type { SkillRunner, SkillToolDef } from "./runner.js";
-import { summarizeTier1PackagesError } from "./worker-wasm/tier1.js";
+import { summarizeWasmPackagesError } from "./worker-wasm/wasm.js";
 
 const log = logger.child({ component: "skills.tool-builder" });
 
@@ -34,7 +34,7 @@ function inflightRejection(name: string, runId: string): ToolRejection {
 }
 
 /**
- * A runner rejection as the model reads it. A tier-1 package failure names
+ * A runner rejection as the model reads it. A wasm package failure names
  * only its kind and package: its detail carries host paths, which the
  * invocation logs at warn.
  */
@@ -42,8 +42,8 @@ function toolRejection(name: string, rejection: SkillInvokeRejection): ToolRejec
   return match(rejection)
     .returnType<ToolRejection>()
     .with({ kind: "inflight" }, ({ runId }) => inflightRejection(name, runId))
-    .with({ kind: "tier1_packages_unavailable" }, ({ error }) => ({
-      message: `skill '${name}' cannot run: tier-1 packages unavailable: ${summarizeTier1PackagesError(error)}`,
+    .with({ kind: "wasm_packages_unavailable" }, ({ error }) => ({
+      message: `skill '${name}' cannot run: wasm packages unavailable: ${summarizeWasmPackagesError(error)}`,
     }))
     .with(
       { kind: P.union("not_found", "disabled", "invalid_inputs", "sandbox_unavailable") },
@@ -78,7 +78,7 @@ export function buildSkillToolSpec(
     name: def.name,
     description: def.description,
     // Durable: a skill run executes arbitrary Python with side effects
-    // (network writes via ctx, Hindsight retains) and, for tier-2, spins up a
+    // (network writes via ctx, Hindsight retains) and, for a container skill, spins up a
     // sandbox. Non-durable it would re-invoke once per remaining step
     // boundary of the turn. The cached value is the JSON-stringified
     // output the model saw — exactly-once execution AND a stable persisted

@@ -9,7 +9,7 @@ import type { SkillInputs, SkillManifest } from "./types.js";
 export interface SkillLockfileCacheValue {
   /** sha256, matches `skills.lockfile_hash`. */
   hash: string;
-  /** Raw bytes: the sysbox populator feeds them to `uv pip sync` via stdin, and the host resolves tier 1's packages from them. */
+  /** Raw bytes: the sysbox populator feeds them to `uv pip sync` via stdin, and the host resolves the wasm tier's packages from them. */
   contents: string;
 }
 

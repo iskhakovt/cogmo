@@ -10,7 +10,7 @@
  * __import__("os"), "system")(...)`, alias a module under a different
  * name, or use a third-party SDK we don't have a rule for, and bypass
  * detection. The actual security boundaries are sysbox isolation
- * (tier-2), the `effects`-driven secret allowlist (P3.4), and the
+ * (container), the `effects`-driven secret allowlist (P3.4), and the
  * `approve` tier for risky skills. AST lint serves two narrower
  * purposes:
  *
@@ -20,7 +20,7 @@
  *
  *   2. **Tier promoter** — when nothing dangerous is detected AND
  *      nothing dangerous is declared, the table reaches `auto` (no
- *      human tap, ships immediately), capped at `notify` until tier 1
+ *      human tap, ships immediately), capped at `notify` until the wasm tier
  *      is hardened and a review panel is set ({@link computeRiskTier}).
  *
  * Rules live in `ast-rules.ts` as pure data — adding "rule X marks
@@ -378,8 +378,8 @@ function raised<Reason extends SkillRiskReason>(
  * deploy upstream; the tier is stamped `approve` so a recorded rejection
  * never carries `auto`.
  *
- * `auto` is capped at `notify` while tier 1 is unhardened
- * (`tier1_unhardened`) and while no review panel stands in for the owner's
+ * `auto` is capped at `notify` while the wasm tier is unhardened
+ * (`wasm_unhardened`) and while no review panel stands in for the owner's
  * tap (`no_review_panel`); both are recorded when both flags are off.
  */
 export function computeRiskTier(input: RiskTierInput): RiskTierResult {
@@ -413,7 +413,7 @@ export function computeRiskTier(input: RiskTierInput): RiskTierResult {
   return match(tableTier)
     .with("auto", (): RiskTierResult => {
       const capReasons = raised<SkillRiskReason>([
-        ["tier1_unhardened", !input.capabilities.tier1Hardened],
+        ["wasm_unhardened", !input.capabilities.wasmHardened],
         ["no_review_panel", !input.capabilities.reviewPanel],
       ]);
       return capReasons.length > 0

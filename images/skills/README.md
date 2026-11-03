@@ -1,7 +1,7 @@
 # cogmo-skills-runtime
 
 Python runtime that ships inside `ghcr.io/iskhakovt/cogmo-skills:<version>`.
-Owns the supervisor + runner for tier-2 skills — see `design/skills.md`.
+Owns the supervisor + runner for container-tier skills — see `design/skills.md`.
 
 ## Layout
 

@@ -8,8 +8,8 @@
  *      bootstrap depends on something the base image doesn't ship, every
  *      skill invocation in production crashes.
  *
- *   2. Does a tier-1 skill run from the bundled build? `host.ts` forks its
- *      child from `new URL("./tier1-child.mjs", import.meta.url)`, which
+ *   2. Does a wasm skill run from the bundled build? `host.ts` forks its
+ *      child from `new URL("./wasm-child.mjs", import.meta.url)`, which
  *      resolves only if the build emits the child beside the bundle the host
  *      landed in, and the child runs under `--permission` with read access
  *      to its own directory, the Pyodide distribution, the package cache
@@ -64,7 +64,7 @@ const ECHO_SKILL = `e2e-echo-${Date.now()}`;
 
 const ECHO_MANIFEST = `---
 name: ${ECHO_SKILL}
-description: e2e tier-1 echo skill
+description: e2e wasm echo skill
 tier: wasm
 inputs:
   type: object
@@ -213,7 +213,7 @@ describe("skills e2e (production Docker image)", { timeout: 120_000 }, () => {
     expect(meta.size).toBeGreaterThan(0);
   });
 
-  it("a tier-1 skill registered through the shipped CLI runs on a Pyodide worker", async ({
+  it("a wasm skill registered through the shipped CLI runs on a Pyodide worker", async ({
     onTestFinished,
   }) => {
     // Separate processes, as in production: `run` reads the source `register`

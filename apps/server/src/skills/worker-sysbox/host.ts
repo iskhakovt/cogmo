@@ -6,7 +6,7 @@ import { type InvokeResult, SysboxSkillWorker } from "./worker.js";
 const log = logger.child({ component: "skills.worker.sysbox" });
 
 /**
- * Default resource caps for tier-2 skills — overridden by manifest declarations.
+ * Default resource caps for container skills — overridden by manifest declarations.
  *
  * `pids: 1024` is generous enough for ordinary Python workloads (stdlib
  * threading + a couple of `concurrent.futures` pools + a `requests` /

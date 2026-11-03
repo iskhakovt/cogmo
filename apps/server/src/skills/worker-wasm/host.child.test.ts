@@ -8,27 +8,27 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { CtxHandler } from "../dispatcher.js";
 import type { HostMessage } from "../protocol.js";
-import { buildTier1Child } from "./child-bundle.js";
+import { buildWasmChild } from "./child-bundle.js";
 import {
-  createTier1Probe,
+  createWasmProbe,
   forkRunChild,
   type RunOnWorkerParams,
   type RunOnWorkerResult,
   runOnChild,
   runOnWorker,
-  type Tier1Child,
+  type WasmChild,
 } from "./host.js";
 import type { IpcChannel } from "./transport.js";
 
 /**
- * `runOnChild` against a stand-in child: the test plays the tier-1 child on
+ * `runOnChild` against a stand-in child: the test plays the wasm child on
  * the far end of its IPC channel, and errors or exits it at will.
  * `host.test.ts` covers `runOnWorker` end to end against real children.
  */
 
 vi.mock("./child-bundle.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./child-bundle.js")>();
-  return { ...actual, buildTier1Child: vi.fn(actual.buildTier1Child) };
+  return { ...actual, buildWasmChild: vi.fn(actual.buildWasmChild) };
 });
 
 class StandInChannel extends EventEmitter implements IpcChannel {
@@ -50,7 +50,7 @@ class StandInChannel extends EventEmitter implements IpcChannel {
 }
 
 interface StandIn {
-  child: Tier1Child;
+  child: WasmChild;
   ipc: StandInChannel;
   interrupt: ReturnType<typeof vi.fn>;
   kill: ReturnType<typeof vi.fn>;
@@ -279,7 +279,7 @@ describe("runOnChild", () => {
 
 describe("the child bundle built from source", () => {
   afterEach(() => {
-    vi.mocked(buildTier1Child).mockReset();
+    vi.mocked(buildWasmChild).mockReset();
   });
 
   function workerParams(): RunOnWorkerParams {
@@ -298,33 +298,33 @@ describe("the child bundle built from source", () => {
   }
 
   it("fails the fork as a value, and is built again on the next spawn", async () => {
-    vi.mocked(buildTier1Child)
+    vi.mocked(buildWasmChild)
       .mockRejectedValueOnce(new Error("esbuild unavailable"))
       .mockRejectedValueOnce(new Error("esbuild still unavailable"));
 
     expect((await forkRunChild(workerParams()))._unsafeUnwrapErr()).toBe(
-      "cannot build the tier-1 child: esbuild unavailable",
+      "cannot build the wasm child: esbuild unavailable",
     );
     expect((await forkRunChild(workerParams()))._unsafeUnwrapErr()).toBe(
-      "cannot build the tier-1 child: esbuild still unavailable",
+      "cannot build the wasm child: esbuild still unavailable",
     );
-    expect(buildTier1Child).toHaveBeenCalledTimes(2);
+    expect(buildWasmChild).toHaveBeenCalledTimes(2);
   });
 
   it("fails the task, rather than throwing, when the build fails", async () => {
-    vi.mocked(buildTier1Child).mockRejectedValueOnce(new Error("esbuild unavailable"));
+    vi.mocked(buildWasmChild).mockRejectedValueOnce(new Error("esbuild unavailable"));
 
     expect(await runOnWorker(workerParams())).toEqual({
       ok: false,
-      error: "worker init failed: cannot build the tier-1 child: esbuild unavailable",
+      error: "worker init failed: cannot build the wasm child: esbuild unavailable",
     });
   });
 
   it("fails the probe as a value when the build fails", async () => {
-    vi.mocked(buildTier1Child).mockRejectedValueOnce(new Error("esbuild unavailable"));
+    vi.mocked(buildWasmChild).mockRejectedValueOnce(new Error("esbuild unavailable"));
     const cacheDir = await mkdtemp(join(tmpdir(), "cogmo-host-child-cache-"));
     try {
-      const probe = createTier1Probe({
+      const probe = createWasmProbe({
         pyodideDistDir: "/nonexistent/dist",
         childrenDir: "/nonexistent/children",
       });
@@ -333,7 +333,7 @@ describe("the child bundle built from source", () => {
         (await probe.probeBuiltins(["micropip"], { packageCacheDir: cacheDir }))._unsafeUnwrapErr(),
       ).toEqual({
         kind: "unavailable",
-        message: "cannot build the tier-1 child: esbuild unavailable",
+        message: "cannot build the wasm child: esbuild unavailable",
       });
     } finally {
       await rm(cacheDir, { recursive: true, force: true });
@@ -345,17 +345,17 @@ describe("the child bundle built from source", () => {
     // others. The suite has no second user, so the planted directory is this
     // uid's; `child-bundle.test.ts` covers another owner.
     const content = `// ${randomUUID()}`;
-    vi.mocked(buildTier1Child).mockImplementationOnce(async ({ outDir }) => {
-      await writeFile(join(outDir, "tier1-child.mjs"), content);
+    vi.mocked(buildWasmChild).mockImplementationOnce(async ({ outDir }) => {
+      await writeFile(join(outDir, "wasm-child.mjs"), content);
     });
-    const digest = createHash("sha256").update("tier1-child.mjs").update(content).digest("hex");
-    const planted = join(await realpath(tmpdir()), `cogmo-tier1-child-${digest.slice(0, 16)}`);
+    const digest = createHash("sha256").update("wasm-child.mjs").update(content).digest("hex");
+    const planted = join(await realpath(tmpdir()), `cogmo-wasm-child-${digest.slice(0, 16)}`);
     await mkdir(planted, { mode: 0o755 });
     await chmod(planted, 0o755);
-    await writeFile(join(planted, "tier1-child.mjs"), "planted");
+    await writeFile(join(planted, "wasm-child.mjs"), "planted");
     try {
       expect((await forkRunChild(workerParams()))._unsafeUnwrapErr()).toBe(
-        `cannot build the tier-1 child: refusing the tier-1 child bundle at ${planted}: ${planted} has mode 755, not 700`,
+        `cannot build the wasm child: refusing the wasm child bundle at ${planted}: ${planted} has mode 755, not 700`,
       );
     } finally {
       await rm(planted, { recursive: true, force: true });

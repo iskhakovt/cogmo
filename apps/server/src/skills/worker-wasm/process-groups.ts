@@ -7,8 +7,8 @@ import { z } from "zod";
 import { describeError } from "../../util/describe-error.js";
 
 /**
- * Tier-1 children's process groups, recorded so `cogmo serve` can kill the
- * ones a dead Cogmo process left behind (design/skills.md → Tier-1 boundary,
+ * Wasm children's process groups, recorded so `cogmo serve` can kill the
+ * ones a dead Cogmo process left behind (design/skills.md → Wasm-tier boundary,
  * layer 1 → Process-group records). Each child leads its own group; nothing
  * else bounds an orphan without a cgroup.
  *

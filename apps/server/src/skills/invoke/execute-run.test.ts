@@ -39,20 +39,20 @@ function cachedEntry() {
   );
 }
 
-function runtimeConfig(resolve: RuntimeConfig["resolveTier1Packages"]): RuntimeConfig {
+function runtimeConfig(resolve: RuntimeConfig["resolveWasmPackages"]): RuntimeConfig {
   return {
     pyodidePackageCacheDir: "/cache",
     pyodideDistDir: "/dist",
-    tier1ChildrenDir: "/children",
-    resolveTier1Packages: resolve,
-    tier2Image: "image",
+    wasmChildrenDir: "/children",
+    resolveWasmPackages: resolve,
+    containerImage: "image",
     depsCacheVolumeName: undefined,
   };
 }
 
 describe("executeRun", () => {
   const store = mock<SkillStore>();
-  const resolve = vi.fn<RuntimeConfig["resolveTier1Packages"]>();
+  const resolve = vi.fn<RuntimeConfig["resolveWasmPackages"]>();
   const packages = { builtins: ["pydantic"], wheelDir: "/wheels/abc" };
 
   beforeEach(() => {
@@ -83,7 +83,7 @@ describe("executeRun", () => {
     );
   }
 
-  it("runs a tier-1 run with the packages its runtime carries, resolving none itself", async () => {
+  it("runs a wasm run with the packages its runtime carries, resolving none itself", async () => {
     vi.mocked(dispatchToRuntime).mockResolvedValue({ ok: true, output: { echo: 1 } });
 
     const outcome = await execute();

@@ -25,7 +25,7 @@ describe("assertOwnPrivateDir", () => {
     await mkdir(dir);
     await chmod(dir, 0o777);
     await expect(assertOwnPrivateDir(dir)).rejects.toThrow(
-      `refusing the tier-1 child bundle at ${dir}: ${dir} has mode 777, not 700`,
+      `refusing the wasm child bundle at ${dir}: ${dir} has mode 777, not 700`,
     );
   });
 
@@ -38,7 +38,7 @@ describe("assertOwnPrivateDir", () => {
       const getuid = vi.spyOn(process, "getuid").mockReturnValue(ownUid + 1);
       try {
         await expect(assertOwnPrivateDir(dir)).rejects.toThrow(
-          `refusing the tier-1 child bundle at ${dir}: ${dir} is owned by uid ${ownUid}, not this process's`,
+          `refusing the wasm child bundle at ${dir}: ${dir} is owned by uid ${ownUid}, not this process's`,
         );
       } finally {
         getuid.mockRestore();

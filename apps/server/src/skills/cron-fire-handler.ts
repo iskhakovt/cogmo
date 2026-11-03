@@ -42,7 +42,7 @@ type SkipReason =
   | "skill_disabled"
   | "invalid_inputs"
   | "sandbox_unavailable"
-  | "tier1_packages_unavailable"
+  | "wasm_packages_unavailable"
   | "inflight";
 
 type DispatchResult =
@@ -53,14 +53,14 @@ type DispatchResult =
 const CRON_FIRE_RETRIES = 2;
 
 /**
- * Whether a retry of the fire may clear the rejection: tier-1 packages the
+ * Whether a retry of the fire may clear the rejection: wasm packages the
  * host could not fetch, verify or publish are fetched again by the next
  * attempt. A wheel with no pure build or a hash the lockfile does not carry
  * is terminal for the lockfile, and retries can't repair the rest.
  */
 function retriesClear(rejection: SkillInvokeRejection): boolean {
   return match(rejection)
-    .with({ kind: "tier1_packages_unavailable" }, ({ error }) =>
+    .with({ kind: "wasm_packages_unavailable" }, ({ error }) =>
       match(error.kind)
         .with(
           "network_failed",
@@ -92,7 +92,7 @@ function skipReason(rejection: SkillInvokeRejection): SkipReason {
     .with("disabled", () => "skill_disabled")
     .with("invalid_inputs", () => "invalid_inputs")
     .with("sandbox_unavailable", () => "sandbox_unavailable")
-    .with("tier1_packages_unavailable", () => "tier1_packages_unavailable")
+    .with("wasm_packages_unavailable", () => "wasm_packages_unavailable")
     .with("inflight", () => "inflight")
     .exhaustive();
 }

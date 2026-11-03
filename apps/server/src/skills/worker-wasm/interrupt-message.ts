@@ -1,5 +1,5 @@
 /**
- * Host → tier-1 child: stop cooperative Python code (the interrupt buffer's
+ * Host → wasm child: stop cooperative Python code (the interrupt buffer's
  * SIGINT). Its own module, so the child's main thread imports no validation
  * library (`child-entry.ts`).
  */

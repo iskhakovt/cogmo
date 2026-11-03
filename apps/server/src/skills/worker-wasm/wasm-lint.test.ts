@@ -108,7 +108,7 @@ def run(inputs, ctx):
     // Minor false positives are acceptable but a docstring mention shouldn't
     // trigger the pattern (regex anchored to start-of-line for `import`).
     const body = `def run(inputs, ctx):
-    """do not use subprocess in tier-1 skills"""
+    """do not use subprocess in wasm skills"""
     return {}
 `;
     const r = lintWasmCompat(body);
@@ -172,7 +172,7 @@ def run(inputs, ctx):
 
     it("docstring mention of subprocess does not fire", () => {
       const body = `def run(inputs, ctx):
-    """do not call subprocess in tier-1 skills"""
+    """do not call subprocess in wasm skills"""
     return {}
 `;
       expect(lintWasmCompat(body).isOk()).toBe(true);
@@ -255,7 +255,7 @@ def run(inputs, ctx):
       ["from requests.sessions import Session\n"],
       ["from httpx._client import Client\n"],
       ["import requests.sessions\n"],
-    ])("rejects %j, which needs sockets tier 1 lacks", (body) => {
+    ])("rejects %j, which needs sockets the wasm tier lacks", (body) => {
       const r = lintWasmCompat(body);
       expect(r.isErr()).toBe(true);
       if (!r.isErr()) return;

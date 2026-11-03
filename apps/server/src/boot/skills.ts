@@ -23,7 +23,7 @@ import type {
   CoreDeps,
   SandboxDeps,
   SkillRunnerHandle,
-  Tier1ReapHost,
+  WasmReapHost,
 } from "./stages.js";
 
 const log = logger.child({ component: "boot.skills" });
@@ -31,20 +31,20 @@ const log = logger.child({ component: "boot.skills" });
 /** What the process booting the runner owns besides it. */
 interface SkillRunnerOwnership {
   /**
-   * True for `cogmo serve` only: the reap kills the tier-1 children a dead
+   * True for `cogmo serve` only: the reap kills the wasm children a dead
    * Cogmo process left behind, and a CLI process must not touch those of the
-   * serve it runs beside (design/skills.md → Tier-1 boundary, layer 1 →
+   * serve it runs beside (design/skills.md → Wasm-tier boundary, layer 1 →
    * Process-group records).
    */
-  reapTier1Children: boolean;
+  reapWasmChildren: boolean;
 }
 
 /**
  * Used by both `cogmo serve` (where the runner is shared between
  * handle-message's `register_skill` tool and the channel adapters' `/skill`
  * admin commands) and `cogmo skills` (where the CLI drives it directly).
- * Tier-2 (sysbox/Daytona) skill execution requires a non-null `sandbox`;
- * CLIs pass `NO_SANDBOX` and accept that tier-2 invocations throw at call
+ * Container (sysbox/Daytona) skill execution requires a non-null `sandbox`;
+ * CLIs pass `NO_SANDBOX` and accept that container invocations throw at call
  * time.
  */
 export async function bootstrapSkillRunner(
@@ -53,11 +53,11 @@ export async function bootstrapSkillRunner(
   ownership: SkillRunnerOwnership,
   opts: BootstrapOptions = {},
 ): Promise<SkillRunnerHandle> {
-  const tier1ChildrenDir = `${env.COGMO_SKILLS_PATH}/.tier1-children`;
-  if (ownership.reapTier1Children) {
-    await reapTier1ChildGroups(
-      tier1ChildrenDir,
-      opts.tier1ReapHostOverride ?? { platform: process.platform, readBootId },
+  const wasmChildrenDir = `${env.COGMO_SKILLS_PATH}/.wasm-children`;
+  if (ownership.reapWasmChildren) {
+    await reapWasmChildGroups(
+      wasmChildrenDir,
+      opts.wasmReapHostOverride ?? { platform: process.platform, readBootId },
     );
   }
   const skillRunner = await SkillRunnerImpl.create({
@@ -65,17 +65,17 @@ export async function bootstrapSkillRunner(
     runInTx: core.runInTx,
     secretsStore: core.secretsStore,
     ...(sandbox.sandbox && { sandbox: sandbox.sandbox }),
-    tier2Image: env.COGMO_SKILLS_IMAGE,
+    containerImage: env.COGMO_SKILLS_IMAGE,
     depsCacheVolumeName: env.COGMO_SKILLS_DEPS_VOLUME,
     userTimezone: env.USER_TIMEZONE,
     defaultRunAs: { userId: core.user.id, profileId: core.profile.id },
     skillsRepoPath: env.COGMO_SKILLS_PATH,
-    // Pyodide's built-ins, which the host downloads and verifies and tier-1
+    // Pyodide's built-ins, which the host downloads and verifies and wasm
     // children load read-only; the stdlib ships inside the distribution.
     pyodidePackageCacheDir: `${env.COGMO_SKILLS_PATH}/.pyodide-cache`,
-    tier1: {
-      wheelsRoot: tier1WheelsRoot(),
-      childrenDir: tier1ChildrenDir,
+    wasm: {
+      wheelsRoot: wasmWheelsRoot(),
+      childrenDir: wasmChildrenDir,
     },
     poolOptions: {
       min: env.COGMO_SKILLS_POOL_MIN,
@@ -127,7 +127,7 @@ export function createSkillFunctions(
       sandbox: sandbox.sandbox ?? undefined,
       image: env.COGMO_SKILLS_IMAGE,
       depsCacheVolumeName: env.COGMO_SKILLS_DEPS_VOLUME,
-      wheelsRoot: tier1WheelsRoot(),
+      wheelsRoot: wasmWheelsRoot(),
       loadBundled: loadBundledPackages,
     },
     inngest,
@@ -137,23 +137,23 @@ export function createSkillFunctions(
 }
 
 /**
- * Kill the tier-1 children a dead Cogmo process of this boot left behind,
+ * Kill the wasm children a dead Cogmo process of this boot left behind,
  * which nothing else bounds without the per-child cgroup, before the runner
  * serves. The records pin processes by `/proc` entries, so a host without
  * them (anything but Linux), or one whose boot id cannot be read, skips the
  * reap with a log line rather than failing the boot.
  */
-async function reapTier1ChildGroups(childrenDir: string, host: Tier1ReapHost): Promise<void> {
+async function reapWasmChildGroups(childrenDir: string, host: WasmReapHost): Promise<void> {
   if (host.platform !== "linux") {
     log.info(
       { platform: host.platform },
-      "skipping the tier-1 child reap: process-group records need Linux's /proc",
+      "skipping the wasm child reap: process-group records need Linux's /proc",
     );
     return;
   }
   const bootId = await ResultAsync.fromPromise(host.readBootId(), describeError);
   if (bootId.isErr()) {
-    log.warn({ err: bootId.error }, "skipping the tier-1 child reap: the boot id is unreadable");
+    log.warn({ err: bootId.error }, "skipping the wasm child reap: the boot id is unreadable");
     return;
   }
   const reaped = await reapOrphanedChildGroups(childrenDir, {
@@ -167,16 +167,16 @@ async function reapTier1ChildGroups(childrenDir: string, host: Tier1ReapHost): P
     unjudged: reaped.unjudged,
   };
   if (reaped.unjudged.length > 0) {
-    log.warn(summary, "left tier-1 child records whose processes /proc could not show");
+    log.warn(summary, "left wasm child records whose processes /proc could not show");
   }
   if (reaped.killed.length > 0) {
-    log.warn(summary, "killed orphaned tier-1 child process groups at boot");
+    log.warn(summary, "killed orphaned wasm child process groups at boot");
   } else if (reaped.owned.length > 0 || reaped.stale.length > 0) {
-    log.info(summary, "tier-1 child process-group records reaped at boot");
+    log.info(summary, "wasm child process-group records reaped at boot");
   }
 }
 
-/** The hash-verified pure-Python wheels tier-1 children install from. */
-function tier1WheelsRoot(): string {
+/** The hash-verified pure-Python wheels wasm children install from. */
+function wasmWheelsRoot(): string {
   return `${env.COGMO_SKILLS_PATH}/.pyodide-wheels`;
 }

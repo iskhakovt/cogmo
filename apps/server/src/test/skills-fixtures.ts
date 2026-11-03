@@ -1,6 +1,6 @@
 /**
  * `RegisterResult` builders for tests of what consumes a deploy outcome, and
- * the offline tier-1 host side a test's `SkillRunnerImpl` runs with.
+ * the offline wasm host side a test's `SkillRunnerImpl` runs with.
  */
 
 import { join } from "node:path";
@@ -9,7 +9,7 @@ import { vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { DeployFacts } from "../skills/deploy/deploy-facts.js";
 import type { RegisterResult, SkillRunnerOptions } from "../skills/runner.js";
-import type { Tier1Probe } from "../skills/worker-wasm/tier1.js";
+import type { WasmProbe } from "../skills/worker-wasm/wasm.js";
 
 type LiveResult = Extract<RegisterResult, { status: "live" }>;
 type PendingResult = Extract<RegisterResult, { status: "pending_approval" }>;
@@ -59,26 +59,26 @@ export function pendingRegisterResult(overrides: Partial<PendingResult> = {}): P
 }
 
 /**
- * Tier 1 without the network, its directories under `root`: a probe that
+ * The wasm tier without the network, its directories under `root`: a probe that
  * spawns no child and answers ok, a fetch that fails every request (so the
  * register's cache fill fails open and the probe is skipped), and a resolver
- * that fetches nothing. A tier-1 skill with no dependencies still runs in a
+ * that fetches nothing. A wasm skill with no dependencies still runs in a
  * real child; one whose lockfile needs packages gets none, so a test that
  * runs one passes the real resolver instead.
  */
-export function offlineTier1(
+export function offlineWasm(
   root: string,
-): Pick<SkillRunnerOptions, "pyodidePackageCacheDir" | "tier1"> {
-  const probe = mock<Tier1Probe>();
+): Pick<SkillRunnerOptions, "pyodidePackageCacheDir" | "wasm"> {
+  const probe = mock<WasmProbe>();
   probe.probeBuiltins.mockResolvedValue(ok());
   const fetchImpl = vi.fn<typeof fetch>(async () => {
-    throw new TypeError("offline: tier-1 tests reach no network");
+    throw new TypeError("offline: wasm tests reach no network");
   });
   return {
     pyodidePackageCacheDir: join(root, ".pyodide-cache"),
-    tier1: {
+    wasm: {
       wheelsRoot: join(root, ".pyodide-wheels"),
-      childrenDir: join(root, ".tier1-children"),
+      childrenDir: join(root, ".wasm-children"),
       probe,
       fetchImpl,
       resolvePackages: async () => ok({ builtins: [], wheelDir: null }),

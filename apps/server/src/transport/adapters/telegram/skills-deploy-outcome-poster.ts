@@ -16,14 +16,14 @@ type DeployedOutcome = Extract<SkillsDeployOutcomeData, { outcome: "live" | "pen
 /** Each risk reason as the deploy message names it (design/skills.md → Risk tiers without a human → Reasons). */
 const REASON_LABELS: Readonly<Record<SkillRiskReason, string>> = {
   binding_unenforced: "a bound secret this deployment cannot substitute yet",
-  egress_network_missing: "tier-2 network access without the egress proxy",
+  egress_network_missing: "container network access without the egress proxy",
   egress_listener_missing: "network access without the egress listener",
   opted_in: "matches a class you opted in to approving",
   first_deploy: "a first deploy",
   manifest_widened: "widens the live version's manifest",
-  tier1_unhardened: "tier 1 runs without its hardened boundary",
-  tier2_unenforced: "tier 2 egress is not enforced",
-  tier2_shared_worker: "tier 2 shares a worker between tasks",
+  wasm_unhardened: "the wasm tier runs without its hardened boundary",
+  container_unenforced: "container egress is not enforced",
+  container_shared_worker: "the container tier shares a worker between tasks",
   acting_effect: "an acting effect (write, send, delete, financial or subprocess)",
   unlisted_dependency: "a dependency on neither list",
   sensitive_dependency: "a dependency on the approve list",

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { SKILL_RISK_REASONS } from "./risk-reasons.js";
+import { SKILL_RISK_REASONS, type SkillRiskReason } from "./risk-reasons.js";
 
 /**
  * Effects a skill may declare in its `SKILL.md` frontmatter. Drives the risk
@@ -226,6 +226,44 @@ export const SkillManifestSchema = z
 export type SkillManifest = z.infer<typeof SkillManifestSchema>;
 
 /**
+ * Names a `classifier_log` row may carry for these reasons, read as the reason
+ * each names.
+ */
+const LEGACY_RISK_REASONS: ReadonlyMap<string, SkillRiskReason> = new Map([
+  ["tier1_unhardened", "wasm_unhardened"],
+  ["tier2_unenforced", "container_unenforced"],
+  ["tier2_shared_worker", "container_shared_worker"],
+]);
+
+/** The enforcement flags the classifier read on a deploy. */
+const ClassifierLogCapabilitiesSchema = z.object({
+  wasmHardened: z.boolean(),
+  reviewPanel: z.boolean(),
+  /** Rows written before the flag was recorded read false. */
+  wasmMemoryBounded: z.boolean().default(false),
+});
+
+/** Capability keys a row may carry, read as the flag each names. */
+const LEGACY_CAPABILITY_KEYS: ReadonlyMap<
+  string,
+  keyof z.infer<typeof ClassifierLogCapabilitiesSchema>
+> = new Map([
+  ["tier1Hardened", "wasmHardened"],
+  ["tier1MemoryBounded", "wasmMemoryBounded"],
+]);
+
+function readLegacyReason(value: unknown): unknown {
+  return typeof value === "string" ? (LEGACY_RISK_REASONS.get(value) ?? value) : value;
+}
+
+function readLegacyCapabilities(value: unknown): unknown {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, flag]) => [LEGACY_CAPABILITY_KEYS.get(key) ?? key, flag]),
+  );
+}
+
+/**
  * What the classifier records on every deploy. Stored as JSONB on
  * `skill_deploys.classifier_log`; replayed in the audit UI and used by the
  * deploy-pipeline graduation logic. P3.1 stub-`register` writes a constant
@@ -243,9 +281,9 @@ export const ClassifierLogSchema = z.object({
   /**
    * Every reason that applies to the tier (design/skills.md → Risk tiers
    * without a human → Reasons). Empty on rows written before the classifier
-   * recorded them.
+   * recorded them. Legacy names are read through `LEGACY_RISK_REASONS`.
    */
-  reasons: z.array(z.enum(SKILL_RISK_REASONS)).default([]),
+  reasons: z.array(z.preprocess(readLegacyReason, z.enum(SKILL_RISK_REASONS))).default([]),
   /**
    * The manifest's `network.allow`; null without a `network:` block, and on
    * rows written before the classifier recorded it.
@@ -253,16 +291,10 @@ export const ClassifierLogSchema = z.object({
   declared_network: z.array(z.string()).nullable().default(null),
   /**
    * The enforcement flags the tier was computed against. Absent on rows
-   * written before the classifier recorded them.
+   * written before the classifier recorded them. Legacy keys are read
+   * through `LEGACY_CAPABILITY_KEYS`.
    */
-  capabilities: z
-    .object({
-      tier1Hardened: z.boolean(),
-      reviewPanel: z.boolean(),
-      /** Rows written before the flag was recorded read false. */
-      tier1MemoryBounded: z.boolean().default(false),
-    })
-    .optional(),
+  capabilities: z.preprocess(readLegacyCapabilities, ClassifierLogCapabilitiesSchema).optional(),
 });
 export type ClassifierLog = z.infer<typeof ClassifierLogSchema>;
 
@@ -285,11 +317,11 @@ export const SkillInvocationOutputSchema = JsonValueSchema;
  * - `wallClockMs` — `finishedAt - createdAt` for every run, including
  *   timeouts and crashes. Always set.
  * - `peakMemoryBytes` — `resource.getrusage(RUSAGE_SELF).ru_maxrss * 1024`
- *   reported by the tier-2 supervisor's per-task child before it emits
+ *   reported by the container supervisor's per-task child before it emits
  *   `task_result`. Linux `ru_maxrss` is in kilobytes, so we scale to
- *   bytes for consistency. `null` for tier-1 (Pyodide WASM heap is
+ *   bytes for consistency. `null` for wasm (Pyodide WASM heap is
  *   process-wide via `getrusage` — would inflate under concurrent
- *   workers), and `null` for tier-2 runs that didn't complete normally
+ *   workers), and `null` for container runs that didn't complete normally
  *   (wall-clock kill, crash) since the supervisor synthesises the
  *   `task_result` without rusage in those cases.
  *

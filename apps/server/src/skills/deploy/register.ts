@@ -9,7 +9,7 @@ import { checkPyodideCompat, formatPyodideCompatIssues } from "../pyodide-compat
 import { readSkillSource, SKILL_BODY_FILE, SKILL_MANIFEST_FILE } from "../skill-source.js";
 import type { ExecuteRegisterResult } from "../store/index.js";
 import type { ClassifierLog, SkillManifest } from "../types.js";
-import { describeTier1PackagesError } from "../worker-wasm/tier1.js";
+import { describeWasmPackagesError } from "../worker-wasm/wasm.js";
 import { lintWasmCompat } from "../worker-wasm/wasm-lint.js";
 import { advanceMain, runDeployTx } from "./advance-main.js";
 import { type DeployDeps, requireRepoPath } from "./deploy-deps.js";
@@ -180,7 +180,7 @@ async function prepareRegister(
     });
   }
 
-  // Tier-1 bodies get the Pyodide-compatibility scan before anything is
+  // Wasm bodies get the Pyodide-compatibility scan before anything is
   // written. Its whole purpose is turning "imports fine, dies on first
   // invoke" into a rejection here, which only holds if it actually runs
   // on the register path.
@@ -217,11 +217,11 @@ async function prepareRegister(
 
   if (manifest.tier === "wasm" && lockfile !== null) {
     const compat = await checkPyodideCompat(parseLockfilePackageSpecs(lockfile.contents), {
-      fetchImpl: deps.tier1.fetchImpl,
+      fetchImpl: deps.wasm.fetchImpl,
       probe: {
-        probe: deps.tier1.probe,
-        fillBuiltins: deps.tier1.fillBuiltins,
-        packageCacheDir: deps.tier1.packageCacheDir,
+        probe: deps.wasm.probe,
+        fillBuiltins: deps.wasm.fillBuiltins,
+        packageCacheDir: deps.wasm.packageCacheDir,
         ...(signal && { signal }),
       },
     });
@@ -233,7 +233,7 @@ async function prepareRegister(
     // verdict on the lockfile; a network, cache or Pyodide-lockfile failure is
     // not, nor is a built-in whose cached or downloaded file fails Pyodide's
     // pinned sha256, and the run fetches again.
-    const packages = await deps.tier1.resolvePackages(lockfile, signal);
+    const packages = await deps.wasm.resolvePackages(lockfile, signal);
     if (packages.isErr()) {
       const refused = match(packages.error)
         .with({ kind: "hash_mismatch" }, { kind: "wheel_unavailable" }, () => true)
@@ -250,13 +250,13 @@ async function prepareRegister(
         return err(
           rejectedResult(
             branchSha,
-            `tier1_dependency_unavailable: ${describeTier1PackagesError(packages.error)}`,
+            `wasm_dependency_unavailable: ${describeWasmPackagesError(packages.error)}`,
           ),
         );
       }
       log.warn(
-        { skillName: manifest.name, error: describeTier1PackagesError(packages.error) },
-        "tier-1 packages not fetched at register; the first run fetches them",
+        { skillName: manifest.name, error: describeWasmPackagesError(packages.error) },
+        "wasm packages not fetched at register; the first run fetches them",
       );
     }
   }

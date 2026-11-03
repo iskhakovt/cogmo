@@ -16,7 +16,7 @@
         "scripts/*.ts",
         // Compile-time parity guard: exists only to be type-checked.
         "src/test/contracts-parity.ts",
-        // The tier-1 child, bundled by path (src/skills/worker-wasm/child-bundle.ts).
+        // The wasm child, bundled by path (src/skills/worker-wasm/child-bundle.ts).
         "src/skills/worker-wasm/child-entry.ts",
         "src/skills/worker-wasm/pyodide-worker.ts"
       ],

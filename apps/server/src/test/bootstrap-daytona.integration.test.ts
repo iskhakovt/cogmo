@@ -17,12 +17,11 @@
  *     reaper is local-docker-specific).
  *
  * What this test does NOT exercise — gap deferred to Phase 3c.6's
- * self-hosted-Daytona conformance suite: the tier-2 skill worker pool
+ * self-hosted-Daytona conformance suite: the container skill worker pool
  * against a daytona-shape backend (stdin/NDJSON, supervisor lifecycle,
- * worker recycle). Pool init is lazy now, so passing the daytona sandbox
- * through `bootstrap()` no longer triggers a tier-2 spawn — the pool is
- * only constructed on first tier-2 invocation, which this test doesn't
- * fire.
+ * worker recycle). Pool init is lazy, so passing the daytona sandbox
+ * through `bootstrap()` spawns no container — the pool is only constructed
+ * on the first container invocation, which this test doesn't fire.
  */
 
 import { mkdtempSync, rmSync } from "node:fs";
@@ -121,8 +120,8 @@ describe("bootstrap with sandboxClientOverride (FakeDaytonaSandboxClient)", () =
     expect(ids).not.toContain("sandbox-reaper");
   });
 
-  it("does not eagerly create the tier-2 worker pool — sandbox.create() never called at boot", () => {
-    // Pool init is lazy — without a tier-2 invocation, no worker
+  it("does not eagerly create the container worker pool — sandbox.create() never called at boot", () => {
+    // Pool init is lazy — without a container invocation, no worker
     // should have been spawned. Pins the cost-saving contract:
     // cogmo serve on Daytona doesn't burn a billable sandbox at boot.
     expect(fakeSandbox.createCalls).toHaveLength(0);

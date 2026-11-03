@@ -1,10 +1,10 @@
 import { z } from "zod";
 
 /**
- * What a tier-1 child is told to do, sent as its first IPC message: run one
+ * What a wasm child is told to do, sent as its first IPC message: run one
  * skill task, or probe that built-in packages load under the boundary, from
  * the package cache the host filled and verified. The child's main thread hands it to its Pyodide worker
- * thread unread. design/skills.md → Tier-1 boundary.
+ * thread unread. design/skills.md → Wasm-tier boundary.
  */
 export const ChildInitSchema = z.discriminatedUnion("mode", [
   z.object({

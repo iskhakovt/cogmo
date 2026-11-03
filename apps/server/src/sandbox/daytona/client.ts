@@ -191,7 +191,7 @@ const CAPABILITIES: SandboxCapabilities = {
   // Daytona Volumes are mountpoint-s3 FUSE: no hardlinks, no general
   // rename(2), no O_RDWR on existing files. uv's content-addressed
   // cache and the populate script's `mv -T` atomic publish both
-  // require those ops. Skills tier-2 falls back to container-local
+  // require those ops. The container tier falls back to container-local
   // ephemeral `/skill-venvs` instead — the wiring layer (see
   // SkillRunnerImpl + createSkillDepsReaper) gates on this flag and
   // omits SessionSpec.depsCacheVolume.
@@ -235,7 +235,7 @@ interface CreateOptions extends DaytonaSandboxClientOptions {
 /**
  * Daytona-backed sandbox client. Supports two consumer flows:
  *
- *   - Skills tier-2 (Phase 3a): worktree-less, ephemeral. `create()`
+ *   - Skills container tier (Phase 3a): worktree-less, ephemeral. `create()`
  *     omits both `worktree` and `askpass`; the sandbox is just an
  *     isolated process host.
  *   - Coding-delegation (Phase 3b): `WorktreeSpec` with

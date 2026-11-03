@@ -57,7 +57,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   const { skillRunner } = await bootstrapSkillRunner(
     core,
     sandbox,
-    { reapTier1Children: true },
+    { reapWasmChildren: true },
     opts,
   );
   const runtime = await bootstrapRuntime(core, sandbox, skillRunner, opts);

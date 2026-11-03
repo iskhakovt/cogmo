@@ -113,10 +113,10 @@ describe("buildSkillToolSpec", () => {
     );
   });
 
-  it("handler rejects a tier-1 package failure with its kind and package, and no host paths", async () => {
+  it("handler rejects a wasm package failure with its kind and package, and no host paths", async () => {
     const invoke = vi.fn().mockResolvedValue(
       err({
-        kind: "tier1_packages_unavailable",
+        kind: "wasm_packages_unavailable",
         name: "echo",
         error: {
           kind: "hash_mismatch",
@@ -129,14 +129,14 @@ describe("buildSkillToolSpec", () => {
 
     const rejection = (await spec.handler({ x: 1 }, TURN_SERVICE))._unsafeUnwrapErr();
     expect(rejection.message).toBe(
-      "skill 'echo' cannot run: tier-1 packages unavailable: hash_mismatch for idna==3.10",
+      "skill 'echo' cannot run: wasm packages unavailable: hash_mismatch for idna==3.10",
     );
   });
 
-  it("handler rejects a tier-1 failure with no package by its kind alone", async () => {
+  it("handler rejects a wasm failure with no package by its kind alone", async () => {
     const invoke = vi.fn().mockResolvedValue(
       err({
-        kind: "tier1_packages_unavailable",
+        kind: "wasm_packages_unavailable",
         name: "echo",
         error: {
           kind: "prefetch_failed",
@@ -148,7 +148,7 @@ describe("buildSkillToolSpec", () => {
 
     const rejection = (await spec.handler({ x: 1 }, TURN_SERVICE))._unsafeUnwrapErr();
     expect(rejection.message).toBe(
-      "skill 'echo' cannot run: tier-1 packages unavailable: prefetch_failed",
+      "skill 'echo' cannot run: wasm packages unavailable: prefetch_failed",
     );
   });
 

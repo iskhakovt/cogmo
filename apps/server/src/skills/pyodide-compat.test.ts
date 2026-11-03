@@ -12,7 +12,7 @@ import {
   loadBundledPackages,
   pypiHasPureWheel,
 } from "./pyodide-compat.js";
-import type { FillBuiltins, Tier1Probe } from "./worker-wasm/tier1.js";
+import type { FillBuiltins, WasmProbe } from "./worker-wasm/wasm.js";
 
 const fakeLockfile = {
   packages: {
@@ -183,7 +183,7 @@ describe("checkPyodideCompat", () => {
   });
 
   it("fails open when the Pyodide lockfile itself is unreadable (e.g., pyodide not installed)", async () => {
-    // A future tier-2-only deployment could mark `pyodide` optional;
+    // A future container-only deployment could mark `pyodide` optional;
     // `require.resolve` then throws synchronously and the unprotected
     // call would surface as an unfriendly register error. Same
     // fail-open posture as transient PyPI errors -- first-invoke will
@@ -198,7 +198,7 @@ describe("checkPyodideCompat", () => {
   it("fails open on non-404 PyPI HTTP errors (503/429/etc don't block register)", async () => {
     // Distinct from the 404 case above: a transient 5xx must NOT be
     // cached as "no pure wheel" -- the cache would then pin the wrong
-    // answer for the process lifetime and every tier-1 register
+    // answer for the process lifetime and every wasm register
     // referencing this package would fail until restart.
     const fetchMock = fakeFetch({
       "blip==1.0": { ok: false, status: 503 },
@@ -317,7 +317,7 @@ describe("checkPyodideCompat boundary probe", () => {
   /** A boundary probe whose cache fill succeeds unless told otherwise. */
   function boundary() {
     const fillBuiltins = vi.fn<FillBuiltins>(async () => ok());
-    const probe = mock<Tier1Probe>();
+    const probe = mock<WasmProbe>();
     return { fillBuiltins, probe, packageCacheDir: "/cache/pyodide" };
   }
 
@@ -371,7 +371,7 @@ describe("checkPyodideCompat boundary probe", () => {
       },
     ]);
     expect(formatPyodideCompatIssues(result._unsafeUnwrapErr())).toBe(
-      "tier1_incompatible_dependency: regex==2026.3.32 -- its native module cannot load under the tier-1 boundary (JS built from strings); declare tier: container (EvalError: Code generation from strings disallowed)",
+      "wasm_incompatible_dependency: regex==2026.3.32 -- its native module cannot load under the wasm boundary (JS built from strings); declare tier: container (EvalError: Code generation from strings disallowed)",
     );
   });
 

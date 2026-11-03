@@ -37,7 +37,7 @@ def _current_rusage() -> dict[str, int]:
 
 
 class CtxError(Exception):
-    """Typed ctx error surfaced to user code. Mirrors Tier-1 ctx.py."""
+    """Typed ctx error surfaced to user code. Mirrors the wasm tier's ctx.py."""
 
     def __init__(self, kind: str, message: str) -> None:
         super().__init__(f"{kind}: {message}")
@@ -155,9 +155,10 @@ class _Http:
     """Outbound HTTP, performed by the host.
 
     Present in both tiers so a skill does not break when adding a
-    dependency moves it here from tier 1. Tier 2 has real sockets and can
-    use `httpx` instead; going through the host keeps the request in
-    `skill_context_calls` and under the host's destination checks.
+    dependency moves it here from the wasm tier. The container tier has
+    real sockets and can use `httpx` instead; going through the host keeps
+    the request in `skill_context_calls` and under the host's destination
+    checks.
     """
 
     def __init__(self, bridge: _Bridge) -> None:

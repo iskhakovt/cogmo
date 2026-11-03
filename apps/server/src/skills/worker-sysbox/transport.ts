@@ -21,7 +21,7 @@ const parseJson = Result.fromThrowable(
 );
 
 /**
- * NDJSON-over-streams transport for the Tier 2 supervisor: one JSON object
+ * NDJSON-over-streams transport for the container supervisor: one JSON object
  * per line on `stdin`, one per line from `stdout`. The message stream ends
  * when the supervisor closes its output or the host calls `close()`, and
  * fails on a stream error or a buffer overflow.

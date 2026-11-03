@@ -286,7 +286,7 @@ describe("DefaultCtxHandler", () => {
       "refuses a host resolving to %s, which is the deployment's own network",
       async (address, family) => {
         // The host's `fetch` can see Hindsight, Inngest and cloud metadata;
-        // a tier-2 skill in its remote sandbox cannot. Without this the
+        // a container skill in its remote sandbox cannot. Without this the
         // more-isolated tier would reach strictly further.
         const fetchMock = vi.spyOn(globalThis, "fetch");
         try {
@@ -481,8 +481,8 @@ describe("DefaultCtxHandler", () => {
     });
 
     it("sizes a container skill against the container wall clock", async () => {
-      // The two tiers have different defaults; reading tier 1's for a
-      // tier-2 skill clamps a request to well under what the supervisor
+      // The two tiers have different defaults; reading the wasm tier's for a
+      // container skill clamps a request to well under what the supervisor
       // would actually allow it.
       const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
       const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(okResponse("{}"));

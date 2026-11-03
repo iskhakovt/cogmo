@@ -10,7 +10,7 @@
 [project]
 name = "cogmo-skills-runtime"
 version = "0"
-description = "Tier-2 skills runtime — fork-supervisor and one-shot skill runner"
+description = "Container-tier skills runtime — fork-supervisor and one-shot skill runner"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = []

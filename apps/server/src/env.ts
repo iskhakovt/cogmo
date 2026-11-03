@@ -249,22 +249,22 @@ export const env = createEnv({
      * Override with the env var at deploy time to roll back to a specific build.
      */
     COGMO_DEVBASE_IMAGE: z.string().min(1).default(defaultDevbaseImage()),
-    /** Base image for tier-2 (sysbox) skill workers. Same model as devbase. */
+    /** Base image for container (sysbox) skill workers. Same model as devbase. */
     COGMO_SKILLS_IMAGE: z.string().min(1).default(defaultSkillsImage()),
     /**
-     * Always-warm tier-2 worker count. Default `0` — workers exist iff
+     * Always-warm container worker count. Default `0` — workers exist iff
      * there's an active or recently-active task. Lazy pool init means
-     * the pool itself is created on first tier-2 invocation; with
+     * the pool itself is created on first container invocation; with
      * `min=0` no workers spawn until needed and the pool drops back to
      * zero after `COGMO_SKILLS_POOL_IDLE_SHUTDOWN_MS`. Trade-off:
-     * first tier-2 invocation per idle period pays a cold start
+     * first container invocation per idle period pays a cold start
      * (~1-2 s on Local-Docker, ~30 s warm-snapshot or 60-120 s
      * first-build on Daytona). Set `1` for steady-state ~300 ms
      * interactive latency at the cost of one always-running worker.
      */
     COGMO_SKILLS_POOL_MIN: z.coerce.number().int().nonnegative().default(0),
     /**
-     * Idle threshold before warm tier-2 workers above `COGMO_SKILLS_POOL_MIN`
+     * Idle threshold before warm container workers above `COGMO_SKILLS_POOL_MIN`
      * are torn down. Default 30 minutes matches local-docker's free-worker
      * economics. Daytona deployments should set lower (e.g. `300000` =
      * 5 min) to release the billable sandbox sooner. Sweep cadence is
@@ -278,7 +278,7 @@ export const env = createEnv({
     /**
      * Docker named volume (LocalDocker backend) / Daytona Volume
      * (Daytona backend) that holds per-lockfile-hash skill virtualenvs.
-     * Mounted at `/skill-venvs` on every tier-2 worker — a venv
+     * Mounted at `/skill-venvs` on every container worker — a venv
      * populated by one worker is reused by every other worker and
      * survives recycle.
      *

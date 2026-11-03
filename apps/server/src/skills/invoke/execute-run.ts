@@ -63,7 +63,7 @@ export async function executeRun(
   const finishedAt = new Date();
   // `wallClockMs` is always derived from the host-side timestamps;
   // `peakMemoryBytes` rides whatever the runtime contributed via
-  // `result.rusage` (tier-2 populates it from `getrusage`, tier-1 leaves it
+  // `result.rusage` (container populates it from `getrusage`, wasm leaves it
   // unset and we store null).
   const resourceUsage = {
     wallClockMs: Math.max(0, finishedAt.getTime() - run.createdAt.getTime()),

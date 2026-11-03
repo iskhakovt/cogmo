@@ -222,7 +222,7 @@ jobs:
         run: |
           uv run ruff check
           uv run ruff format --check
-      # The tier-1 Pyodide worker's Python; design/tooling.md -> Python sub-projects.
+      # The wasm-tier Pyodide worker's Python; design/tooling.md -> Python sub-projects.
       - name: ruff, Pyodide worker (lint + format)
         run: |
           uv run ruff check ../../apps/server/src/skills/worker-wasm/py

@@ -10,7 +10,7 @@ const execFileP = promisify(execFile);
 
 const MANIFEST = `---
 name: echo
-description: a tier-1 skill that echoes its inputs
+description: a wasm skill that echoes its inputs
 tier: wasm
 inputs:
   type: object

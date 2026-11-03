@@ -29,7 +29,7 @@ import { DrizzleSecretsStore } from "../secrets/store/index.js";
 import { assertStatus, expectOk } from "../test/assertions.js";
 import { mockFilesService } from "../test/factories.js";
 import { fileDatabaseUrl } from "../test/integration-file.js";
-import { offlineTier1 } from "../test/skills-fixtures.js";
+import { offlineWasm } from "../test/skills-fixtures.js";
 import { resolveSkillRunAs, type SkillRunAs } from "./run-as.js";
 import { SkillRunnerImpl } from "./runner.js";
 import { DrizzleSkillStore } from "./store/index.js";
@@ -44,10 +44,10 @@ let secretsStore: DrizzleSecretsStore;
 let tx: ReturnType<typeof transactor>;
 /** A user and profile of this file's own, which every invocation runs as. */
 let runAs: SkillRunAs;
-let tier1Root: string;
+let wasmRoot: string;
 
 beforeAll(async () => {
-  tier1Root = await mkdtemp(join(tmpdir(), "runner-it-tier1-"));
+  wasmRoot = await mkdtemp(join(tmpdir(), "runner-it-wasm-"));
   sql = postgres(fileDatabaseUrl(), { max: 4 });
   db = drizzle(sql, { schema });
   tx = transactor(db);
@@ -85,7 +85,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await sql.end();
-  await rm(tier1Root, { recursive: true, force: true });
+  await rm(wasmRoot, { recursive: true, force: true });
 });
 
 async function makeRunner() {
@@ -97,7 +97,7 @@ async function makeRunner() {
     // No skill here is scheduled, so the identity never reaches a row.
     defaultRunAs: { userId: "it-owner", profileId: "it-profile" },
     // No skill here declares dependencies, so the resolver is never asked.
-    ...offlineTier1(tier1Root),
+    ...offlineWasm(wasmRoot),
   });
 }
 
@@ -121,7 +121,7 @@ inputs:
 `;
 
 describe("SkillRunnerImpl (integration)", { timeout: 60_000 }, () => {
-  it("invokes a tier-1 skill end-to-end against real Postgres + Pyodide", async () => {
+  it("invokes a wasm skill end-to-end against real Postgres + Pyodide", async () => {
     const runner = await makeRunner();
     const name = skillName("echo");
     await runner.__registerForTests({

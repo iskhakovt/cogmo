@@ -35,7 +35,7 @@ const SKILLS_REPO_CONVENTION = [
   "  - dependencies: an array of strict `name==version` strings. Required for any",
   "    third-party import in skill.py. Use `[]` (or omit) when skill.py is stdlib-only.",
   "",
-  "Network access — tier 1 (`tier: wasm`) has no sockets, so `urllib`, `http.client`,",
+  "Network access — the wasm tier (`tier: wasm`) has no sockets, so `urllib`, `http.client`,",
   "`httpx` and `requests` cannot reach anything there and are rejected at register",
   "time. Make requests through the host instead:",
   '    `resp = await ctx.http.get(url)`  ->  {"status": int, "headers": dict, "body": str}',

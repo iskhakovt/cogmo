@@ -20,7 +20,7 @@ import { expectDefined } from "../../test/assertions.js";
 import type { CtxHandler } from "../dispatcher.js";
 import { loadBundledPackages } from "../pyodide-compat.js";
 import {
-  createTier1Probe,
+  createWasmProbe,
   forkRunChild,
   pyodideDistDir,
   type RunOnWorkerParams,
@@ -31,7 +31,7 @@ import { type ChildGroupRecord, ChildGroupRecordSchema } from "./process-groups.
 import { fillBuiltinCache } from "./wheel-cache.js";
 
 /**
- * `runOnWorker` end to end: real tier-1 children under the boundary's flags,
+ * `runOnWorker` end to end: real wasm children under the boundary's flags,
  * each booting Pyodide (~1 s). The child bundle is built once for the file, on
  * the first spawn. `beforeAll` fills a package cache from Pyodide's CDN and
  * downloads one wheel from PyPI, the only steps that need the network; every
@@ -45,14 +45,14 @@ let serverUrl: string;
 /** typing-extensions 4.14.0, older than the 4.15.0 pydantic's bundle carries. */
 let typingExtensionsWheel: { fileName: string; bytes: Uint8Array };
 
-const probe = createTier1Probe({
+const probe = createWasmProbe({
   pyodideDistDir: pyodideDistDir(),
-  childrenDir: join(tmpdir(), "cogmo-tier1-children-probe"),
+  childrenDir: join(tmpdir(), "cogmo-wasm-children-probe"),
 });
 
 beforeAll(async () => {
-  cacheDir = await mkdtemp(join(tmpdir(), "cogmo-tier1-cache-"));
-  childrenDir = await mkdtemp(join(tmpdir(), "cogmo-tier1-children-"));
+  cacheDir = await mkdtemp(join(tmpdir(), "cogmo-wasm-cache-"));
+  childrenDir = await mkdtemp(join(tmpdir(), "cogmo-wasm-children-"));
   const bundled = (await loadBundledPackages())._unsafeUnwrap();
   const filled = await fillBuiltinCache(
     { fetchImpl: fetch, bundled },
@@ -517,7 +517,7 @@ function boundaryRun(
   );
 }
 
-describe("tier-1 boundary", () => {
+describe("wasm boundary", () => {
   it("jsglobals: a skill cannot reach the thread's process or fetch through js", async () => {
     const result = await boundaryRun(`
 async def run(inputs, ctx):
@@ -763,7 +763,7 @@ async def run(inputs, ctx):
   });
 
   it("installs the wheel directory's wheels without the network", async () => {
-    const wheelDir = await mkdtemp(join(tmpdir(), "cogmo-tier1-wheels-"));
+    const wheelDir = await mkdtemp(join(tmpdir(), "cogmo-wasm-wheels-"));
     try {
       const wheel = expectDefined(
         (await readdir(cacheDir)).find((f) => f.startsWith("annotated_types-")),
@@ -790,7 +790,7 @@ async def run(inputs, ctx):
 
 describe("forking a run child", () => {
   it("grants and hands the child resolved paths when the cache and wheel directory are symlinks", async () => {
-    const root = await mkdtemp(join(tmpdir(), "cogmo-tier1-links-"));
+    const root = await mkdtemp(join(tmpdir(), "cogmo-wasm-links-"));
     try {
       const wheelDir = join(root, "wheels");
       await mkdir(wheelDir);
@@ -826,7 +826,7 @@ async def run(inputs, ctx):
   it.skipIf(process.getuid?.() === 0)(
     "kills the child and fails the run when its record cannot be written",
     async () => {
-      const readOnly = await mkdtemp(join(tmpdir(), "cogmo-tier1-children-ro-"));
+      const readOnly = await mkdtemp(join(tmpdir(), "cogmo-wasm-children-ro-"));
       await chmod(readOnly, 0o555);
       try {
         const result = await boundaryRun("async def run(inputs, ctx):\n    return None\n", {
@@ -880,7 +880,7 @@ async def run(inputs, ctx):
   });
 });
 
-describe("createTier1Probe", () => {
+describe("createWasmProbe", () => {
   it("probes built-ins that load under the boundary's flags", async () => {
     const probed = await probe.probeBuiltins(["pydantic"], { packageCacheDir: cacheDir });
     expect(probed.isOk()).toBe(true);
@@ -909,7 +909,7 @@ async function liveRecords(): Promise<ChildGroupRecord[]> {
 describe("wheels and built-ins together", () => {
   it("keeps a lockfile's pin of a built-in's bundled dependency", async () => {
     // pydantic's bundled typing-extensions is 4.15.0; the lockfile pins 4.14.0.
-    const wheelDir = await mkdtemp(join(tmpdir(), "cogmo-tier1-wheels-"));
+    const wheelDir = await mkdtemp(join(tmpdir(), "cogmo-wasm-wheels-"));
     try {
       await writeFile(join(wheelDir, typingExtensionsWheel.fileName), typingExtensionsWheel.bytes);
       const result = await boundaryRun(

@@ -15,9 +15,9 @@ import type { SkillEffect, SkillManifest } from "./types.js";
 const CAP_REASONS: SkillRiskReason[] = ["no_review_panel"];
 
 const ALL_CAPABILITIES: SkillsCapabilities = {
-  tier1Hardened: true,
+  wasmHardened: true,
   reviewPanel: true,
-  tier1MemoryBounded: false,
+  wasmMemoryBounded: false,
 };
 
 function makeManifest(overrides: Partial<SkillManifest> = {}): SkillManifest {
@@ -87,7 +87,7 @@ describe("classifyManifest (live AST path)", () => {
 // `computeRiskTier` over `manifest.dependencies`. One block ensures both
 // paths agree on the approve-list / unknown-dep / PEP 503
 // normalisation contract. Under the build's capabilities both land
-// harmless inputs at `notify`: the AST path through the tier-1 cap, the
+// harmless inputs at `notify`: the AST path through the wasm cap, the
 // stub because it cannot prove a body read-only.
 describe.each([
   {

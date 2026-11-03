@@ -10,7 +10,7 @@ export interface ServeResources {
   /** Stops the sweep of coding progress streams. */
   codingStreams: { close(): void };
   mcpRegistry: { stop(): Promise<void> };
-  /** Disposes the skill runner's tier-2 warm pool, tearing its containers down. */
+  /** Disposes the skill runner's container warm pool, tearing its containers down. */
   skills: { shutdown(): Promise<void> };
   sandbox: { shutdown(): Promise<void> } | null;
   /**

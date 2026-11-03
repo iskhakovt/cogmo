@@ -7,10 +7,10 @@ import { z } from "zod";
 import { logger } from "../logger.js";
 import { describeError } from "../util/describe-error.js";
 import {
-  describeTier1PackagesError,
+  describeWasmPackagesError,
   type FillBuiltins,
-  type Tier1Probe,
-} from "./worker-wasm/tier1.js";
+  type WasmProbe,
+} from "./worker-wasm/wasm.js";
 
 const log = logger.child({ component: "skills.pyodide-compat" });
 
@@ -28,7 +28,7 @@ const PyodideLockfileSchema = z.object({
 });
 
 /**
- * A Pyodide release: what names its CDN directory and keys the tier-1 wheel
+ * A Pyodide release: what names its CDN directory and keys the wasm wheel
  * directories. Digits and dots, with a pre-release or dev suffix, so it is a
  * plain URL and path segment.
  */
@@ -233,15 +233,15 @@ export type PyodideCompatIssue =
     };
 
 /**
- * Load-tests the lockfile's bundled native packages under the tier-1
- * boundary (design/skills.md → Tier-1 boundary, layer 1): Emscripten side
+ * Load-tests the lockfile's bundled native packages under the wasm
+ * boundary (design/skills.md → Wasm-tier boundary, layer 1): Emscripten side
  * modules that define JS with `EM_JS` build it from strings at load, which
  * the boundary refuses.
  */
 export interface PyodideBoundaryProbe {
   /** Fills and verifies the package cache the probe loads from. */
   fillBuiltins: FillBuiltins;
-  probe: Tier1Probe;
+  probe: WasmProbe;
   packageCacheDir: string;
   signal?: AbortSignal;
 }
@@ -266,7 +266,7 @@ export interface CheckPyodideCompatOptions {
  *
  * With `opts.probe`, the bundled native packages among the specs are then
  * fetched into the package cache, checked against Pyodide's pinned sha256s,
- * and load-tested under the tier-1 boundary; each one that fails to load is a
+ * and load-tested under the wasm boundary; each one that fails to load is a
  * `native_package_rejected_by_boundary` issue.
  *
  * PyPI failures, an unreadable `pyodide-lock.json` and a cache that cannot be
@@ -281,7 +281,7 @@ export async function checkPyodideCompat(
   const loaded = await loadBundledPackages(opts.lockfilePath);
   if (loaded.isErr()) {
     // pyodide-lock.json unreadable -- typically `pyodide` not installed
-    // (a future tier-2-only deployment marking it optional) or the file
+    // (a future container-only deployment marking it optional) or the file
     // missing from a non-standard install. Same fail-open posture as
     // PyPI network errors below: register stays unblocked, first
     // WASM-tier invocation surfaces the real issue.
@@ -308,7 +308,7 @@ export async function checkPyodideCompat(
     const pure = await pypiHasPureWheel(name, version, opts);
     if (pure.isErr()) {
       // Fail open: first invoke surfaces the same case, and a brief PyPI
-      // outage shouldn't block tier-1 registers.
+      // outage shouldn't block wasm registers.
       log.warn(
         { spec, reason: pure.error.reason },
         "pyodide-compat: PyPI check failed; allowing register (first-invoke will recheck)",
@@ -340,7 +340,7 @@ async function probeNativeBundled(
   const filled = await probe.fillBuiltins(names, cacheOpts);
   if (filled.isErr()) {
     log.warn(
-      { names, reason: describeTier1PackagesError(filled.error) },
+      { names, reason: describeWasmPackagesError(filled.error) },
       "pyodide-compat: package cache fill failed; allowing register without the boundary probe",
     );
     return [];
@@ -379,17 +379,17 @@ export function formatPyodideCompatIssues(issues: ReadonlyArray<PyodideCompatIss
       .with(
         { reason: "version_mismatch_no_pure_wheel" },
         (v) =>
-          `tier1_incompatible_dependency: ${v.spec} -- Pyodide bundles ${v.bundledVersion} but no pure-Python wheel exists on PyPI for the requested version`,
+          `wasm_incompatible_dependency: ${v.spec} -- Pyodide bundles ${v.bundledVersion} but no pure-Python wheel exists on PyPI for the requested version`,
       )
       .with(
         { reason: "no_pyodide_bundle_and_no_pure_wheel" },
         (v) =>
-          `tier1_incompatible_dependency: ${v.spec} -- not bundled by Pyodide and no pure-Python wheel on PyPI (declare tier: container if a native wheel is required)`,
+          `wasm_incompatible_dependency: ${v.spec} -- not bundled by Pyodide and no pure-Python wheel on PyPI (declare tier: container if a native wheel is required)`,
       )
       .with(
         { reason: "native_package_rejected_by_boundary" },
         (v) =>
-          `tier1_incompatible_dependency: ${v.spec} -- its native module cannot load under the tier-1 boundary (JS built from strings); declare tier: container (${v.message})`,
+          `wasm_incompatible_dependency: ${v.spec} -- its native module cannot load under the wasm boundary (JS built from strings); declare tier: container (${v.message})`,
       )
       .exhaustive(),
   );

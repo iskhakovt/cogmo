@@ -1,4 +1,4 @@
-# The tier-1 `ctx` SDK: the object a skill's `async def run(inputs, ctx)`
+# The wasm `ctx` SDK: the object a skill's `async def run(inputs, ctx)`
 # receives. `pyodide-worker.ts` runs this file in the Pyodide globals the
 # skill body shares, so the body can name `CtxError`, and hands each task
 # the `Ctx` that `_build_ctx(bridge)` returns.
@@ -64,7 +64,7 @@ class _Http:
     """Outbound HTTP, performed by the host.
 
     Pyodide has no sockets, so `urllib` and `http.client` cannot reach the
-    network from inside the sandbox — these methods are the way a tier-1
+    network from inside the sandbox — these methods are the way a wasm
     skill makes a request. Responses come back as a dict with `status`,
     `headers` and `body`; a 4xx or 5xx arrives as a normal return value
     with that status, and only a failure to obtain a response at all

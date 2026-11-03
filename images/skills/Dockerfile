@@ -1,11 +1,11 @@
 # syntax=docker/dockerfile:1
 # check=skip=InvalidDefaultArgInFrom
 #
-# cogmo-skills — base task-container image for tier-2 (sysbox) skills.
+# cogmo-skills — base task-container image for container-tier (sysbox) skills.
 #
 # Built and published as the `skills` target of `/docker-bake.hcl` by
 # .github/workflows/publish.yml at every cogmo release. Tag tracks the
-# cogmo app version. See `design/skills.md` → "Tier 2 — Sysbox container"
+# cogmo app version. See `design/skills.md` → "Container tier — sysbox"
 # for the contract.
 #
 # Two-stage build with uv: builder syncs the locked deps + builds the

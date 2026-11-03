@@ -9,7 +9,7 @@ import { tsupOptions } from "../../tsup.config.js";
 
 /**
  * `tsup.config.ts` against the layout the bundled skills host depends on.
- * `host.ts` forks the tier-1 child from `./tier1-child.mjs` relative to its
+ * `host.ts` forks the wasm child from `./wasm-child.mjs` relative to its
  * own module URL, so the build has to emit the child beside whichever bundle
  * the host lands in, with its Pyodide worker beside it. The child runs under
  * `--permission` with read access to its own directory and the Pyodide
@@ -21,10 +21,10 @@ import { tsupOptions } from "../../tsup.config.js";
  */
 
 /** The specifier `host.ts` resolves against its module URL in the build. */
-const CHILD_SPECIFIER = "./tier1-child.mjs";
+const CHILD_SPECIFIER = "./wasm-child.mjs";
 
 /** The child's files, which `child-bundle.ts` emits side by side. */
-const CHILD_FILES = ["tier1-child.mjs", "tier1-pyodide-worker.mjs"];
+const CHILD_FILES = ["wasm-child.mjs", "wasm-pyodide-worker.mjs"];
 
 /** A full bundle; generous so a loaded runner doesn't fail it on time. */
 const BUILD_TIMEOUT_MS = 120_000;
@@ -68,7 +68,7 @@ function computedImports(source: string): ReadonlyArray<string> {
 const PYODIDE_IMPORT = /^pathToFileURL\(join\(\w+\.pyodideDistDir, "pyodide\.mjs"\)\)\.href\)/;
 
 describe("tsup build", () => {
-  it("emits the tier-1 child beside every bundle that forks it", () => {
+  it("emits the wasm child beside every bundle that forks it", () => {
     const spawners = emittedBundles().filter((f) =>
       readFileSync(f, "utf8").includes(`"${CHILD_SPECIFIER}"`),
     );

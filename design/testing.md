@@ -78,7 +78,7 @@ Full deployment-like stack — cogmo runs from its release image, in connect mod
 |-|-|
 | Migrations | The app container applies migrations on boot. Verify tables queryable. |
 | Smoke | Emit one event via Inngest API -> assert assistant response in DB |
-| Skills | `cogmo skills register`, then `cogmo skills run` in a second process, for a tier-1 skill in the app container -> the bundled host spawns its Pyodide worker |
+| Skills | `cogmo skills register`, then `cogmo skills run` in a second process, for a wasm-tier skill in the app container -> the bundled host spawns its Pyodide worker |
 
 ## Live Tests `[confirmed]`
 
@@ -95,7 +95,7 @@ Real provider APIs, for behaviour a replayed fixture can't show — recorded fix
 
 `src/test/skill-authoring.integration.test.ts` drives chat -> `delegate_coding` -> auto-register -> skill invoke against `DaytonaMock`, llmock and a git remote. It proves that a user asking for a skill in chat gets a tool the agent calls on the next turn.
 
-**Why this tier.** The other tiers stop short of the composed seam. `claude-cli-daytona.integration.test.ts` is manual (`describe.skip`) and covers only `plan`; `daytona-conformance.integration.test.ts` stops at the SDK and wrapper wire surface; `pipeline.integration.test.ts` doesn't exercise coding delegation; `skills.e2e.test.ts` registers and runs a tier-1 skill through the CLI. This suite composes PTY stream parsing, the snapshot lookup, the coding task from plan to PR, auto-register and skill-tool registration.
+**Why this tier.** The other tiers stop short of the composed seam. `claude-cli-daytona.integration.test.ts` is manual (`describe.skip`) and covers only `plan`; `daytona-conformance.integration.test.ts` stops at the SDK and wrapper wire surface; `pipeline.integration.test.ts` doesn't exercise coding delegation; `skills.e2e.test.ts` registers and runs a wasm-tier skill through the CLI. This suite composes PTY stream parsing, the snapshot lookup, the coding task from plan to PR, auto-register and skill-tool registration.
 
 **Scenario.**
 
@@ -103,7 +103,7 @@ Real provider APIs, for behaviour a replayed fixture can't show — recorded fix
 2. The agent calls `delegate_coding` against the auto-registered `skills` repo. The profile's `codingAutoapproveMode` is `on`, so the plan gate clears without a human tap.
 3. The task runs in a Daytona sandbox on `cogmo-devbase:<v>` through `DaytonaMock`: plan and execute drive the in-sandbox `claude` CLI over the production PTY path, then verify, push and PR open. The task ends `pr_open`.
 4. `coding/task/pr-opened` triggers `coding-auto-register-skill`, which fetches the PR head branch into the bare skills repo and registers it. The skill is stdlib-only `tier: wasm`, so register compiles no lockfile.
-5. Turn 2 ("What's bitcoin at?") lists the `btc-spot` tool and calls it; the skill runs in the tier-1 Pyodide worker.
+5. Turn 2 ("What's bitcoin at?") lists the `btc-spot` tool and calls it; the skill runs in the wasm-tier Pyodide worker.
 6. The reply goes out as `adapter/direct/outbound`.
 
 **What's asserted vs what's input noise.** The LLM is input noise; assertions pin the deterministic contract.
@@ -135,7 +135,7 @@ The suite skips unless the Daytona cassette exists or `RECORD=1` runs with `DAYT
 
 - Not a regression test for the `claude` CLI. In replay its output is the cassette, so a change in the CLI shows only when a re-record breaks the orchestrator's contract with it.
 - Not a perf benchmark. No duration threshold.
-- One stdlib-only skill. The deps path is not composed here: `runner.sysbox.integration.test.ts` covers a tier-2 skill populating its venv from a lockfile.
+- One stdlib-only skill. The deps path is not composed here: `runner.sysbox.integration.test.ts` covers a container-tier skill populating its venv from a lockfile.
 
 ## Coverage Patterns `[confirmed]`
 

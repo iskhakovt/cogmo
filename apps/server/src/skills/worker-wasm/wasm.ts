@@ -2,12 +2,12 @@ import type { Result } from "neverthrow";
 import { match } from "ts-pattern";
 
 /**
- * What a tier-1 child installs before it signals `ready`
- * (design/skills.md → Tier-1 boundary, layer 4). Both come from the skill's
+ * What a wasm child installs before it signals `ready`
+ * (design/skills.md → Wasm-tier boundary, layer 4). Both come from the skill's
  * `requirements.lock`; the host resolves and fetches them, the child never
  * reaches the network.
  */
-export interface Tier1Packages {
+export interface WasmPackages {
   /**
    * Pyodide-bundled packages the child loads from the package cache the host
    * filled and verified (`fillBuiltinCache`), by name.
@@ -21,8 +21,8 @@ export interface Tier1Packages {
   wheelDir: string | null;
 }
 
-/** A Pyodide-bundled package that does not load under the tier-1 boundary. */
-export interface Tier1ProbeFailure {
+/** A Pyodide-bundled package that does not load under the wasm boundary. */
+export interface WasmProbeFailure {
   name: string;
   reason: string;
 }
@@ -33,17 +33,17 @@ export interface Tier1ProbeFailure {
  * run to its end (the child crashed or timed out), which says nothing about
  * the packages.
  */
-export type Tier1ProbeError =
-  | { kind: "rejected"; failures: readonly Tier1ProbeFailure[] }
+export type WasmProbeError =
+  | { kind: "rejected"; failures: readonly WasmProbeFailure[] }
   | { kind: "unavailable"; message: string };
 
 /**
- * The host-side use of a tier-1 child that runs no skill code: checking that
+ * The host-side use of a wasm child that runs no skill code: checking that
  * bundled native packages load under the boundary's flags (EM_JS builds JS
  * from strings at load, which `--disallow-code-generation-from-strings`
  * refuses).
  */
-export interface Tier1Probe {
+export interface WasmProbe {
   /**
    * Load and import each of `names` in a child under the boundary's flags,
    * from a `packageCacheDir` already filled and verified (`FillBuiltins`).
@@ -53,7 +53,7 @@ export interface Tier1Probe {
   probeBuiltins(
     names: readonly string[],
     opts: { packageCacheDir: string; signal?: AbortSignal },
-  ): Promise<Result<void, Tier1ProbeError>>;
+  ): Promise<Result<void, WasmProbeError>>;
 }
 
 /**
@@ -64,10 +64,10 @@ export interface Tier1Probe {
 export type FillBuiltins = (
   names: readonly string[],
   opts: { packageCacheDir: string; signal?: AbortSignal },
-) => Promise<Result<void, Tier1PackagesError>>;
+) => Promise<Result<void, WasmPackagesError>>;
 
 /**
- * Why a lockfile's tier-1 packages could not be provided. The wheel kinds
+ * Why a lockfile's wasm packages could not be provided. The wheel kinds
  * name the package: `wheel_unavailable` and `hash_mismatch` are terminal for
  * the lockfile (PyPI does not serve a pure-Python wheel with a pinned hash),
  * while `network_failed`, `prefetch_failed`, `publish_failed` and
@@ -79,7 +79,7 @@ export type FillBuiltins = (
  * cache; a cached file that fails its check is deleted and fetched again in
  * the same call.
  */
-export type Tier1PackagesError =
+export type WasmPackagesError =
   | { kind: "wheel_unavailable"; spec: string; message: string }
   | { kind: "hash_mismatch"; spec: string; message: string }
   | { kind: "network_failed"; spec: string; message: string }
@@ -89,7 +89,7 @@ export type Tier1PackagesError =
   | { kind: "builtin_integrity"; fileName: string; message: string };
 
 /** One line naming why the lockfile's packages could not be made available. */
-export function describeTier1PackagesError(error: Tier1PackagesError): string {
+export function describeWasmPackagesError(error: WasmPackagesError): string {
   return match(error)
     .with(
       { kind: "wheel_unavailable" },
@@ -112,7 +112,7 @@ export function describeTier1PackagesError(error: Tier1PackagesError): string {
  * the messages carry host paths and upstream detail, which only logs and
  * operator output show.
  */
-export function summarizeTier1PackagesError(error: Tier1PackagesError): string {
+export function summarizeWasmPackagesError(error: WasmPackagesError): string {
   return match(error)
     .with(
       { kind: "wheel_unavailable" },

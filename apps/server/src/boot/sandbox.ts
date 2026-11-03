@@ -179,7 +179,7 @@ export async function bootstrapSandbox(
     });
     scheduleReconcileCrashedInstances(sandbox, sandboxInstanceId);
     // Fire-and-forget snapshot prewarm so the first coding-delegation /
-    // skills tier-2 task doesn't pay the multi-minute Daytona
+    // container skill task doesn't pay the multi-minute Daytona
     // snapshot-build latency in its own request budget. Concurrent
     // task arrivals share the in-flight promise via
     // `ensureImagePresent`'s memoisation. Failures evict the cache so

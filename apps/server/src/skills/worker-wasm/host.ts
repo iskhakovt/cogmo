@@ -19,11 +19,11 @@ import type { StartFailure, WorkerFrame } from "../worker-state.js";
 import { type ChildInit, ProbeReplySchema } from "./child-protocol.js";
 import { INTERRUPT_MESSAGE } from "./interrupt-message.js";
 import { killChildGroup, recordChildGroup, removeChildGroupRecord } from "./process-groups.js";
-import type { Tier1Packages, Tier1Probe, Tier1ProbeError } from "./tier1.js";
 import { createIpcTransport, type IpcChannel } from "./transport.js";
+import type { WasmPackages, WasmProbe, WasmProbeError } from "./wasm.js";
 
 /**
- * The tier-1 host (design/skills.md → Tier-1 boundary). Each task runs in a
+ * The wasm host (design/skills.md → Wasm-tier boundary). Each task runs in a
  * child process forked under the permission model with an empty environment;
  * its main thread relays IPC to a Pyodide worker thread capped in memory,
  * with minimal `jsglobals` and no network APIs. The child leads its own
@@ -31,7 +31,7 @@ import { createIpcTransport, type IpcChannel } from "./transport.js";
  *
  * The child is plain JavaScript in both modes, since it can resolve nothing
  * outside its grants and tsx cannot run under `--permission`. The build emits
- * `dist/tier1-child.mjs` and `dist/tier1-pyodide-worker.mjs` beside the
+ * `dist/wasm-child.mjs` and `dist/wasm-pyodide-worker.mjs` beside the
  * bundled host (`tsup.config.ts`). From source (dev, tests), the host bundles
  * the same two files with esbuild into a temporary directory on its first
  * spawn (`child-bundle.ts`).
@@ -49,14 +49,14 @@ const DEFAULT_READY_TIMEOUT_MS = 60_000;
 const PROBE_TIMEOUT_MS = 60_000;
 
 /** WebAssembly memory a task gets when its manifest declares no `resources.memory_mb`. */
-export const DEFAULT_TIER1_MEMORY_MB = 128;
+export const DEFAULT_WASM_MEMORY_MB = 128;
 
 /** The `pyodide` package directory, by its real path: the permission model grants real paths. */
 const PYODIDE_DIST_DIR = realpathSync(
   dirname(createRequire(import.meta.url).resolve("pyodide/package.json")),
 );
 
-/** The real path of the Pyodide distribution every tier-1 child loads. */
+/** The real path of the Pyodide distribution every wasm child loads. */
 export function pyodideDistDir(): string {
   return PYODIDE_DIST_DIR;
 }
@@ -75,7 +75,7 @@ export interface RunOnWorkerParams {
   /** Pyodide's package cache, which the host fills and verifies (`fillBuiltinCache`). */
   packageCacheDir: string;
   /** What the child installs before `ready`, from local files only. */
-  packages: Tier1Packages;
+  packages: WasmPackages;
   /** {@link pyodideDistDir}. */
   pyodideDistDir: string;
   /** Where the child's process-group record lives while it runs. */
@@ -86,13 +86,13 @@ export interface RunOnWorkerParams {
 }
 
 /**
- * A tier-1 task's outcome. The child sends no `rusage`: nothing measures
+ * A wasm task's outcome. The child sends no `rusage`: nothing measures
  * the WebAssembly heap's peak today.
  */
 export type RunOnWorkerResult = TaskOutcome;
 
-/** A forked tier-1 child, as `runOnChild` drives it. */
-export interface Tier1Child {
+/** A forked wasm child, as `runOnChild` drives it. */
+export interface WasmChild {
   ipc: IpcChannel;
   /** Ask the child to raise `KeyboardInterrupt` in the running Python. */
   interrupt(): void;
@@ -109,7 +109,7 @@ type TaskParams = Pick<
 >;
 
 /**
- * Fork a tier-1 child for one task, drive it through a `Dispatcher` under the
+ * Fork a wasm child for one task, drive it through a `Dispatcher` under the
  * wall clock, and kill it. At the wall clock the host asks the child to
  * interrupt the running Python; at the end of the grace window, or as soon
  * as the task settles, it kills the child's group, which a loop with no
@@ -130,8 +130,8 @@ export async function runOnWorker(params: RunOnWorkerParams): Promise<RunOnWorke
  *
  * @public Exported for `host.test.ts`, which forks a child and drops its IPC channel.
  */
-export async function forkRunChild(params: RunOnWorkerParams): Promise<Result<Tier1Child, string>> {
-  const built = await tier1ChildEntry();
+export async function forkRunChild(params: RunOnWorkerParams): Promise<Result<WasmChild, string>> {
+  const built = await wasmChildEntry();
   if (built.isErr()) return err(built.error);
   const entry = built.value;
   // The child is told the resolved paths it is granted: the permission model
@@ -147,7 +147,7 @@ export async function forkRunChild(params: RunOnWorkerParams): Promise<Result<Ti
   ]);
   if (resolved.isErr()) return err(resolved.error);
   const [distDir, entryDir, packageCacheDir, wheelDir] = resolved.value;
-  return forkTier1Child({
+  return forkWasmChild({
     entry,
     execArgv: boundaryExecArgv([
       distDir,
@@ -175,10 +175,7 @@ export async function forkRunChild(params: RunOnWorkerParams): Promise<Result<Ti
  *
  * @public Exported for `host.child.test.ts`, which drives it with a stand-in child.
  */
-export async function runOnChild(
-  child: Tier1Child,
-  params: TaskParams,
-): Promise<RunOnWorkerResult> {
+export async function runOnChild(child: WasmChild, params: TaskParams): Promise<RunOnWorkerResult> {
   const readyTimeoutMs = params.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS;
   try {
     const opened = await Dispatcher.open({
@@ -203,7 +200,7 @@ export async function runOnChild(
 async function runTask(
   dispatcher: Dispatcher,
   params: TaskParams,
-  child: Tier1Child,
+  child: WasmChild,
 ): Promise<RunOnWorkerResult> {
   const wallClockS = params.wallClockS ?? DEFAULT_WALL_CLOCK_S.wasm;
   const finished = new AbortController();
@@ -218,7 +215,7 @@ async function runTask(
       () => {
         log.warn(
           { taskId: params.taskId, skillName: params.skillName, wallClockS },
-          "wall-clock exceeded — interrupting tier-1 child",
+          "wall-clock exceeded — interrupting wasm child",
         );
         child.interrupt();
       },
@@ -275,7 +272,7 @@ function fromTaskResult(result: TaskResult): RunOnWorkerResult {
   };
 }
 
-export interface Tier1ProbeOptions {
+export interface WasmProbeOptions {
   /** {@link pyodideDistDir}. */
   pyodideDistDir: string;
   /** Where each child's process-group record lives while it runs. */
@@ -283,16 +280,16 @@ export interface Tier1ProbeOptions {
 }
 
 /**
- * The {@link Tier1Probe} over tier-1 children. A probe child runs under the
+ * The {@link WasmProbe} over wasm children. A probe child runs under the
  * same flags as a task's, reads the package cache the host filled and
  * verified, runs no skill code, and is time-boxed by its signal and a
  * default.
  */
-export function createTier1Probe(opts: Tier1ProbeOptions): Tier1Probe {
+export function createWasmProbe(opts: WasmProbeOptions): WasmProbe {
   return {
     async probeBuiltins(names, { packageCacheDir, signal }) {
-      const unavailable = (message: string): Tier1ProbeError => ({ kind: "unavailable", message });
-      const entry = await tier1ChildEntry();
+      const unavailable = (message: string): WasmProbeError => ({ kind: "unavailable", message });
+      const entry = await wasmChildEntry();
       if (entry.isErr()) return err(unavailable(entry.error));
       const grants = await ResultAsync.combine([
         resolveDir(opts.pyodideDistDir, { create: false }),
@@ -317,7 +314,7 @@ export function createTier1Probe(opts: Tier1ProbeOptions): Tier1Probe {
         .mapErr((reason) => unavailable(`probe failed: ${reason}`))
         .andThen((r) =>
           match(r)
-            .returnType<Result<void, Tier1ProbeError>>()
+            .returnType<Result<void, WasmProbeError>>()
             .with({ type: "probed" }, ({ failures }) =>
               failures.length === 0 ? ok(undefined) : err({ kind: "rejected", failures }),
             )
@@ -334,7 +331,7 @@ export function createTier1Probe(opts: Tier1ProbeOptions): Tier1Probe {
  * or outlives `timeoutMs` or `signal`.
  */
 async function runUtilityChild<T>(
-  opts: Tier1ProbeOptions,
+  opts: WasmProbeOptions,
   run: {
     init: ChildInit;
     execArgv: readonly string[];
@@ -343,9 +340,9 @@ async function runUtilityChild<T>(
     schema: z.ZodType<T>;
   },
 ): Promise<Result<T, string>> {
-  const entry = await tier1ChildEntry();
+  const entry = await wasmChildEntry();
   if (entry.isErr()) return err(entry.error);
-  const forked = await forkTier1Child({
+  const forked = await forkWasmChild({
     entry: entry.value,
     execArgv: run.execArgv,
     init: run.init,
@@ -429,17 +426,17 @@ function resolveDir(dir: string, opts: { create: boolean }): ResultAsync<string,
 }
 
 /**
- * Fork a tier-1 child, leading its own process group with only the IPC
+ * Fork a wasm child, leading its own process group with only the IPC
  * channel and stderr inherited, record the group before anything else, and
  * send it `init`. A child whose group cannot be recorded is killed: a reap
  * could not find it.
  */
-async function forkTier1Child(opts: {
+async function forkWasmChild(opts: {
   entry: string;
   execArgv: readonly string[];
   init: ChildInit;
   childrenDir: string;
-}): Promise<Result<Tier1Child, string>> {
+}): Promise<Result<WasmChild, string>> {
   const childrenDir = await ResultAsync.fromPromise(
     mkdir(opts.childrenDir, { recursive: true }),
     (e) => `cannot create ${opts.childrenDir}: ${describeReason(e)}`,
@@ -456,12 +453,12 @@ async function forkTier1Child(opts: {
     serialization: "json",
   });
   // A send racing the child's exit errors here as well as in the transport.
-  child.on("error", (e) => log.debug({ err: e.message }, "tier-1 child error"));
+  child.on("error", (e) => log.debug({ err: e.message }, "wasm child error"));
   const exit = new Promise<void>((resolve) => child.once("exit", () => resolve()));
   const pid = child.pid;
   if (pid === undefined) {
     const [e] = await once(child, "error");
-    return err(`cannot fork the tier-1 child: ${describeReason(e)}`);
+    return err(`cannot fork the wasm child: ${describeReason(e)}`);
   }
   // Alive until its exit is reaped, so its pid still names its group.
   const kill = (): void => {
@@ -493,9 +490,9 @@ let sourceBundle: Promise<Result<string, string>> | undefined;
  * use. A failed build, or a published bundle this user cannot trust, errs; it
  * is not kept, so the next spawn builds again.
  */
-function tier1ChildEntry(): Promise<Result<string, string>> {
+function wasmChildEntry(): Promise<Result<string, string>> {
   if (!import.meta.url.endsWith(".ts")) {
-    return Promise.resolve(ok(fileURLToPath(new URL("./tier1-child.mjs", import.meta.url))));
+    return Promise.resolve(ok(fileURLToPath(new URL("./wasm-child.mjs", import.meta.url))));
   }
   if (sourceBundle !== undefined) return sourceBundle;
   const building = buildSourceEntry();
@@ -510,7 +507,7 @@ function tier1ChildEntry(): Promise<Result<string, string>> {
 async function buildSourceEntry(): Promise<Result<string, string>> {
   return ResultAsync.fromPromise(
     bundleFromSource(),
-    (e) => `cannot build the tier-1 child: ${describeReason(e)}`,
+    (e) => `cannot build the wasm child: ${describeReason(e)}`,
   );
 }
 
@@ -523,11 +520,11 @@ async function buildSourceEntry(): Promise<Result<string, string>> {
  * create a name in the shared temporary directory first.
  */
 async function bundleFromSource(): Promise<string> {
-  const { buildTier1Child, assertOwnPrivateDir } = await import("./child-bundle.js");
+  const { buildWasmChild, assertOwnPrivateDir } = await import("./child-bundle.js");
   const root = await realpath(tmpdir());
-  const buildDir = await mkdtemp(join(root, "cogmo-tier1-build-"));
+  const buildDir = await mkdtemp(join(root, "cogmo-wasm-build-"));
   try {
-    await buildTier1Child({
+    await buildWasmChild({
       sourceDir: fileURLToPath(new URL(".", import.meta.url)),
       outDir: buildDir,
     });
@@ -542,7 +539,7 @@ async function bundleFromSource(): Promise<string> {
     (hash, [file, content]) => hash.update(file).update(content),
     createHash("sha256"),
   ).digest("hex");
-  const outDir = join(root, `cogmo-tier1-child-${digest.slice(0, 16)}`);
+  const outDir = join(root, `cogmo-wasm-child-${digest.slice(0, 16)}`);
   try {
     await rename(buildDir, outDir);
   } catch (e) {
@@ -551,5 +548,5 @@ async function bundleFromSource(): Promise<string> {
     await rm(buildDir, { recursive: true, force: true });
     await assertOwnPrivateDir(outDir);
   }
-  return join(outDir, "tier1-child.mjs");
+  return join(outDir, "wasm-child.mjs");
 }

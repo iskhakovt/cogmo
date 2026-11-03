@@ -17,14 +17,14 @@ import { assertStatus, expectDefined } from "../test/assertions.js";
 import { mockFilesService } from "../test/factories.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import { makePopulatedBareRepo } from "../test/skills-bare-repo.js";
-import { offlineTier1 } from "../test/skills-fixtures.js";
+import { offlineWasm } from "../test/skills-fixtures.js";
 import { channels, userIdentities } from "../transport/store/schema.js";
 import { loadBundledPackages } from "./pyodide-compat.js";
 import { bootstrapSkillsRepo } from "./repo.js";
 import type { SkillRunAs, SkillRunServices } from "./run-as.js";
 import { type SkillActor, type SkillDeployOrigin, SkillRunnerImpl } from "./runner.js";
 import { DrizzleSkillStore, type SkillRunIdentity, type SkillStore } from "./store/index.js";
-import type { Tier1PackagesError } from "./worker-wasm/tier1.js";
+import type { WasmPackagesError } from "./worker-wasm/wasm.js";
 
 const execFileP = promisify(execFile);
 
@@ -66,7 +66,7 @@ function makeMockSecrets(): SecretsStore {
 
 const ECHO_MANIFEST = `---
 name: echo
-description: a tier-1 skill that echoes one int field
+description: a wasm skill that echoes one int field
 tier: wasm
 inputs:
   type: object
@@ -94,7 +94,7 @@ async def run(inputs, ctx):
 
 const ECHO_WITH_DEPS = `---
 name: echo
-description: a tier-1 skill that echoes one int field
+description: a wasm skill that echoes one int field
 tier: wasm
 inputs:
   type: object
@@ -215,7 +215,7 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
       skillsRepoPath: repo.bare,
       // The fixtures' lockfiles carry placeholder hashes, so register must
       // neither fetch wheels nor spawn a probe child.
-      ...offlineTier1(repo.bare),
+      ...offlineWasm(repo.bare),
       ...overrides,
     });
   }
@@ -252,7 +252,7 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
     expect(result.skillId).toBe(skill?.id);
     expect(deploy?.skillId).toBe(skill?.id);
     expect(result.facts).toEqual({
-      description: "a tier-1 skill that echoes one int field",
+      description: "a wasm skill that echoes one int field",
       effects: { declared: [], detected: [] },
       hosts: [],
       secrets: [],
@@ -645,7 +645,7 @@ outputs:
       expect(skill?.lockfileHash).toMatch(/^[0-9a-f]{64}$/);
     });
 
-    describe("tier-1 packages", () => {
+    describe("wasm packages", () => {
       // Bundled by Pyodide at this version and pure Python: the compatibility
       // check asks neither PyPI nor the probe.
       async function pushBundledDeps(branch: string, spec: string): Promise<void> {
@@ -667,27 +667,27 @@ outputs:
         ]);
       }
 
-      async function registerResolvingTo(error: Tier1PackagesError) {
+      async function registerResolvingTo(error: WasmPackagesError) {
         const resolvePackages = vi.fn(async () => err(error));
-        const { tier1, pyodidePackageCacheDir } = offlineTier1(repo.bare);
+        const { wasm, pyodidePackageCacheDir } = offlineWasm(repo.bare);
         const runner = await makeRunner({
           pyodidePackageCacheDir,
-          tier1: { ...tier1, resolvePackages },
+          wasm: { ...wasm, resolvePackages },
         });
-        await pushBundledDeps("skill/echo-tier1", "httpx==0.28.1");
-        const result = await runner.register({ branch: "skill/echo-tier1", origin: OWNER });
+        await pushBundledDeps("skill/echo-wasm", "httpx==0.28.1");
+        const result = await runner.register({ branch: "skill/echo-wasm", origin: OWNER });
         expect(resolvePackages).toHaveBeenCalledTimes(1);
         return result;
       }
 
       it("fills the boundary probe's cache from Pyodide's CDN on the host, and goes live without the probe when that fails", async () => {
-        const { tier1, pyodidePackageCacheDir } = offlineTier1(repo.bare);
-        const runner = await makeRunner({ pyodidePackageCacheDir, tier1 });
+        const { wasm, pyodidePackageCacheDir } = offlineWasm(repo.bare);
+        const runner = await makeRunner({ pyodidePackageCacheDir, wasm });
         // Bundled by Pyodide at this version and native: the probe load-tests it.
         await pushBundledDeps("skill/echo-native", "pydantic-core==2.41.5");
         const result = await runner.register({ branch: "skill/echo-native", origin: OWNER });
         assertStatus(result, "live");
-        const fetchImpl = expectDefined(tier1.fetchImpl, "fetchImpl");
+        const fetchImpl = expectDefined(wasm.fetchImpl, "fetchImpl");
         const bundled = (await loadBundledPackages())._unsafeUnwrap();
         const coreFile = expectDefined(
           bundled.packages.get("pydantic-core"),
@@ -698,10 +698,10 @@ outputs:
           expect.anything(),
         );
         // The offline fetch fails the fill, which fails open before any probe child.
-        expect(expectDefined(tier1.probe, "probe").probeBuiltins).not.toHaveBeenCalled();
+        expect(expectDefined(wasm.probe, "probe").probeBuiltins).not.toHaveBeenCalled();
       });
 
-      it("rejects as tier1_dependency_unavailable when a wheel fails its pinned hash", async () => {
+      it("rejects as wasm_dependency_unavailable when a wheel fails its pinned hash", async () => {
         const result = await registerResolvingTo({
           kind: "hash_mismatch",
           spec: "idna==3.10",
@@ -709,7 +709,7 @@ outputs:
         });
         assertStatus(result, "rejected");
         expect(result.errors).toEqual([
-          expect.stringMatching(/^tier1_dependency_unavailable: hash_mismatch: idna==3\.10: /),
+          expect.stringMatching(/^wasm_dependency_unavailable: hash_mismatch: idna==3\.10: /),
         ]);
         expect(await getMainSha(repo.bare)).toBeNull();
       });
@@ -773,7 +773,7 @@ outputs:
         return new Response(null, { status: 404 });
       });
       const runner = await makeRunner({
-        tier1: { ...offlineTier1(repo.bare).tier1, fetchImpl: fetch },
+        wasm: { ...offlineWasm(repo.bare).wasm, fetchImpl: fetch },
       });
 
       await expect(
@@ -925,7 +925,7 @@ outputs:
         expect(compiler.compile).not.toHaveBeenCalled();
       });
 
-      it("skips compile when no compiler is configured (tier-1-only deployment)", async () => {
+      it("skips compile when no compiler is configured (wasm-only deployment)", async () => {
         const lockfile = "httpx==0.27.0 --hash=sha256:0\n";
         // No compiler — default constructor wires one only when `sandbox`
         // is configured, and this test harness never sets `sandbox`, so
@@ -1023,7 +1023,7 @@ outputs:
     await runner.register({ branch: "skill/echo", origin: OWNER });
 
     const updatedManifest = ECHO_MANIFEST.replace(
-      "a tier-1 skill that echoes one int field",
+      "a wasm skill that echoes one int field",
       "v2 now adds two instead",
     );
     await pushFeatureBranch({
@@ -1051,7 +1051,7 @@ outputs:
       await runner.register({ branch: "skill/echo-v1", origin: OWNER });
 
       const updatedManifest = ECHO_MANIFEST.replace(
-        "a tier-1 skill that echoes one int field",
+        "a wasm skill that echoes one int field",
         "v2 description",
       );
       await pushFeatureBranch({
@@ -1068,7 +1068,7 @@ outputs:
       expect(result.gitSha).toBe(v1);
       // The facts are the restored version's, replacing v2.
       expect(result.facts).toMatchObject({
-        description: "a tier-1 skill that echoes one int field",
+        description: "a wasm skill that echoes one int field",
         priorGitSha: v2,
       });
       const deploy = await tx((trx) => store.getDeployById(trx, result.deployId));
@@ -1128,7 +1128,7 @@ outputs:
 
       // v2 — same lockfile bytes, only manifest description changes.
       const v2Manifest = ECHO_WITH_DEPS.replace(
-        "a tier-1 skill that echoes one int field",
+        "a wasm skill that echoes one int field",
         "v2 description that is reasonably long",
       );
       await writeFile(join(repo.work, "SKILL.md"), v2Manifest);
@@ -1921,8 +1921,8 @@ async def run(inputs, ctx):
     });
   });
 
-  describe("safety: wasm lint rejects bodies tier 1 cannot run", () => {
-    it("rejects a tier-1 body importing a stdlib networking module", async () => {
+  describe("safety: wasm lint rejects bodies the wasm tier cannot run", () => {
+    it("rejects a wasm body importing a stdlib networking module", async () => {
       const runner = await makeRunner();
       // Pyodide has no sockets, so this body would fail on first invoke
       // whatever the classifier made of it. The lint runs ahead of the
@@ -1948,7 +1948,7 @@ async def run(inputs, ctx):
       expect(await tx((trx) => store.getSkillByName(trx, "echo"))).toBeUndefined();
     });
 
-    it("rejects a tier-1 body importing subprocess", async () => {
+    it("rejects a wasm body importing subprocess", async () => {
       const runner = await makeRunner();
       const subprocessBody = `
 import subprocess
@@ -2316,7 +2316,7 @@ effects:
           userTimezone: "UTC",
           defaultRunAs: DEFAULT_RUN_AS,
           skillsRepoPath: repoWithRemote.bare,
-          ...offlineTier1(repoWithRemote.bare),
+          ...offlineWasm(repoWithRemote.bare),
         });
 
         const sha = await pushFeatureBranch({
@@ -2453,7 +2453,7 @@ effects:
           userTimezone: "UTC",
           defaultRunAs: DEFAULT_RUN_AS,
           skillsRepoPath: repoWithRemote.bare,
-          ...offlineTier1(repoWithRemote.bare),
+          ...offlineWasm(repoWithRemote.bare),
         });
         const sha = await pushFeatureBranch({
           work: repoWithRemote.work,
@@ -2552,7 +2552,7 @@ effects:
         await runner.register({ branch: "skill/echo-v1", origin: OWNER });
         // v2 → register again, advances further.
         const updatedManifest = ECHO_MANIFEST.replace(
-          "a tier-1 skill that echoes one int field",
+          "a wasm skill that echoes one int field",
           "v2 description",
         );
         const v2 = await pushFeatureBranch({
@@ -2610,7 +2610,7 @@ effects:
           work: repoWithRemote.work,
           branch: "skill/echo-v2",
           manifest: ECHO_MANIFEST.replace(
-            "a tier-1 skill that echoes one int field",
+            "a wasm skill that echoes one int field",
             "v2 description",
           ),
           body: ECHO_BODY,
@@ -2623,7 +2623,7 @@ effects:
         const divergent = await pushFeatureBranch({
           work: repoWithRemote.work,
           branch: "rogue",
-          manifest: ECHO_MANIFEST.replace("a tier-1 skill that echoes one int field", "divergent"),
+          manifest: ECHO_MANIFEST.replace("a wasm skill that echoes one int field", "divergent"),
           body: ECHO_BODY,
         });
         await execFileP("git", [
@@ -2671,7 +2671,7 @@ effects:
         userTimezone: "UTC",
         defaultRunAs: DEFAULT_RUN_AS,
         skillsRepoPath,
-        ...offlineTier1(skillsRepoPath),
+        ...offlineWasm(skillsRepoPath),
       });
     }
   });

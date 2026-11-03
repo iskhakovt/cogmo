@@ -19,7 +19,7 @@ const skillsPath = vi.hoisted(() => {
   return path;
 });
 
-const childrenDir = join(skillsPath, ".tier1-children");
+const childrenDir = join(skillsPath, ".wasm-children");
 
 async function startTimeOf(pid: number): Promise<string> {
   const startTime = parseStartTime(await readFile(`/proc/${pid}/stat`, "utf8"));
@@ -55,18 +55,18 @@ describe("bootstrapSkillRunner", () => {
     await rm(skillsPath, { recursive: true, force: true });
   });
 
-  it("leaves tier-1 children and their records alone for a CLI process", async () => {
-    await bootstrapSkillRunner(mock<CoreDeps>(), NO_SANDBOX, { reapTier1Children: false });
+  it("leaves wasm children and their records alone for a CLI process", async () => {
+    await bootstrapSkillRunner(mock<CoreDeps>(), NO_SANDBOX, { reapWasmChildren: false });
 
     expect(orphan.exitCode).toBeNull();
     expect(orphan.signalCode).toBeNull();
     expect(await readdir(childrenDir)).toEqual([`${pid}.json`]);
   });
 
-  it("kills a dead owner's tier-1 children before the serve's runner exists", async () => {
+  it("kills a dead owner's wasm children before the serve's runner exists", async () => {
     const exited = once(orphan, "exit");
 
-    await bootstrapSkillRunner(mock<CoreDeps>(), NO_SANDBOX, { reapTier1Children: true });
+    await bootstrapSkillRunner(mock<CoreDeps>(), NO_SANDBOX, { reapWasmChildren: true });
 
     expect(await exited).toEqual([null, "SIGKILL"]);
     expect(await readdir(childrenDir)).toEqual([]);
@@ -78,8 +78,8 @@ describe("bootstrapSkillRunner", () => {
     await bootstrapSkillRunner(
       mock<CoreDeps>(),
       NO_SANDBOX,
-      { reapTier1Children: true },
-      { tier1ReapHostOverride: { platform: "darwin", readBootId: bootId } },
+      { reapWasmChildren: true },
+      { wasmReapHostOverride: { platform: "darwin", readBootId: bootId } },
     );
 
     expect(bootId).not.toHaveBeenCalled();
@@ -96,9 +96,9 @@ describe("bootstrapSkillRunner", () => {
     await bootstrapSkillRunner(
       mock<CoreDeps>(),
       NO_SANDBOX,
-      { reapTier1Children: true },
+      { reapWasmChildren: true },
       {
-        tier1ReapHostOverride: {
+        wasmReapHostOverride: {
           platform: "linux",
           readBootId: () => Promise.reject(unreadable),
         },

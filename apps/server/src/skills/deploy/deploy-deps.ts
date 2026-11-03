@@ -7,10 +7,10 @@ import type { SkillSourceCache } from "../source-cache.js";
 import type { SkillRunIdentity, SkillStore } from "../store/index.js";
 import type {
   FillBuiltins,
-  Tier1Packages,
-  Tier1PackagesError,
-  Tier1Probe,
-} from "../worker-wasm/tier1.js";
+  WasmPackages,
+  WasmPackagesError,
+  WasmProbe,
+} from "../worker-wasm/wasm.js";
 
 /** What the deploy use cases (register, approve, rollback, enable) share. */
 export interface DeployDeps {
@@ -33,21 +33,21 @@ export interface DeployDeps {
   /** What this deployment enforces; the classifier reads it for the tier. */
   capabilities: SkillsCapabilities;
   /**
-   * Tier 1's host side at register: the probe that load-tests native
+   * The wasm tier's host side at register: the probe that load-tests native
    * built-ins under the boundary's flags, the fill of the cache it loads
    * from, and the resolver that fetches and publishes a lockfile's packages
    * so the first run pays no download.
    */
-  tier1: {
+  wasm: {
     /** What register's PyPI lookups and downloads go through. */
     fetchImpl: typeof fetch;
-    probe: Tier1Probe;
+    probe: WasmProbe;
     fillBuiltins: FillBuiltins;
     packageCacheDir: string;
     resolvePackages(
       lockfile: LockfileSnapshot,
       signal?: AbortSignal,
-    ): Promise<Result<Tier1Packages, Tier1PackagesError>>;
+    ): Promise<Result<WasmPackages, WasmPackagesError>>;
   };
 }
 
