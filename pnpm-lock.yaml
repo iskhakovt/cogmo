@@ -126,8 +126,8 @@ importers:
         specifier: 0.15.0
         version: 0.15.0(supports-color@7.2.0)
       croner:
-        specifier: ^10.0.1
-        version: 10.0.1
+        specifier: ^11.0.0
+        version: 11.0.0
       dockerode:
         specifier: 5.0.1
         version: 5.0.1(supports-color@7.2.0)
@@ -4816,8 +4816,8 @@ packages:
     resolution: {integrity: sha512-piICUB6ei4IlTv1+653yq5+KoqfBYmj9bw6LqXoOneTMDXk5nM1qt12mFW1caG3LlJXEKW1Bp0WggEmIfQB34g==}
     engines: {node: '>= 14'}
 
-  croner@10.0.1:
-    resolution: {integrity: sha512-ixNtAJndqh173VQ4KodSdJEI6nuioBWI0V1ITNKhZZsO0pEMoDxz539T4FTTbSZ/xIOSuDnzxLVRqBVSvPNE2g==}
+  croner@11.0.0:
+    resolution: {integrity: sha512-T17ADjdttrVToyzLpLq9Xb9xzcMwpQ/M3Qs9szhh0MVNTbv6NWQ9OFYa2qlzPYXFMn+uoDlnW1IpIv6cAvFtyA==}
     engines: {node: '>=18.0'}
 
   cross-fetch@4.1.0:
@@ -11252,7 +11252,7 @@ snapshots:
       crc-32: 1.2.2
       readable-stream: 4.7.0
 
-  croner@10.0.1: {}
+  croner@11.0.0: {}
 
   cross-fetch@4.1.0:
     dependencies:
