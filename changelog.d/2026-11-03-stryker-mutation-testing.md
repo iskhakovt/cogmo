@@ -1,0 +1,1 @@
+`pnpm test:mutation` is a manual StrykerJS run over the backend's `unit` project, for security and state-machine modules. It defaults to the Docker proxy's create policy and the secrets store; `--mutate <path>` picks others.
