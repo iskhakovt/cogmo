@@ -7,6 +7,8 @@ test-results/
 # failure screenshots, attachments, blob reports. JUnit and coverage are
 # pointed at the two entries above by vitest.config.ts and CI.
 .vitest/
+.stryker-tmp/
+apps/server/reports/
 .env
 .dev/
 *.tfvars
